@@ -1,0 +1,5 @@
+intel-graphics-compiler (0.1.0~git20190307-1) UNRELEASED; urgency=medium
+
+  * Initial release (Closes: #923945)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 04 Feb 2019 11:15:41 +0200

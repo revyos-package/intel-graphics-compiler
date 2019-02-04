@@ -1,0 +1,50 @@
+Source: intel-graphics-compiler
+Section: libs
+Priority: optional
+Maintainer: Timo Aaltonen <tjaalton@debian.org>
+Build-Depends: debhelper (>= 11),
+ bison,
+ clang-8,
+ cmake,
+ flex,
+ llvm-8,
+ libopencl-clang-dev,
+Standards-Version: 4.3.0
+Homepage: https://github.com/intel/intel-graphics-compiler
+Vcs-Browser: https://salsa.debian.org/debian/intel-graphics-compiler
+Vcs-Git: https://salsa.debian.org/debian/intel-graphics-compiler.git
+
+Package: intel-igc-core
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Intel graphics compiler for OpenCL -- core libs
+ The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
+ for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+
+Package: intel-igc-media
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Intel graphics compiler for OpenCL -- media tools
+ The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
+ for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+ .
+ This package includes tools for the media driver.
+
+Package: intel-igc-opencl
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Intel graphics compiler for OpenCL -- OpenCL library
+ The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
+ for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+ .
+ This package includes the library for OpenCL.
+
+Package: intel-igc-opencl-devel
+Architecture: amd64
+Section: libdevel
+Depends: ${misc:Depends},
+Description: intel graphics compiler for OpenCL -- development headers
+ The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
+ for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+ .
+ This package includes headers for development.
