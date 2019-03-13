@@ -9,6 +9,7 @@ override_dh_auto_configure:
 	dh_auto_configure -- \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DIGC_PREFERRED_LLVM_VERSION=8.0.0 \
+		-DCOMMON_CLANG_LIBRARY_NAME=common_clang \
 		-Wno-dev
 
 override_dh_install:

@@ -8,7 +8,7 @@ Build-Depends: debhelper (>= 11),
  cmake,
  flex,
  llvm-8-dev,
- libopencl-clang-dev,
+ libcommon-clang-dev,
  python,
 Standards-Version: 4.3.0
 Homepage: https://github.com/intel/intel-graphics-compiler
