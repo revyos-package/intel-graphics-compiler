@@ -161,16 +161,12 @@ void MergeURBWrites::FillWriteList(BasicBlock &BB)
     for(auto iit = BB.begin(); iit != BB.end(); ++iit, ++instCounter)
     {
         auto intrinsic = dyn_cast<GenIntrinsicInst>(iit);
-        // if we have URBRead instructions in the same basic block, Merge the exisiting URB Write Instructions
-        // and clear the writeList. This way we can start merging instructions after the read
         if (intrinsic == nullptr) continue;
 
         GenISAIntrinsic::ID IID = intrinsic->getIntrinsicID();
-        if ((IID == GenISAIntrinsic::GenISA_URBRead) ||
-            (IID == GenISAIntrinsic::GenISA_HSURBPatchHeaderRead) ||
+        if ((IID == GenISAIntrinsic::GenISA_HSURBPatchHeaderRead) ||
             (IID == GenISAIntrinsic::GenISA_DCL_HSOutputCntrlPtInputVec) ||
             (IID == GenISAIntrinsic::GenISA_DCL_HSPatchConstInputVec) ||
-            (IID == GenISAIntrinsic::GenISA_DCL_HSinputVec) ||
             (IID == GenISAIntrinsic::GenISA_threadgroupbarrier))
         {
             MergeInstructions();
@@ -199,11 +195,11 @@ void MergeURBWrites::FillWriteList(BasicBlock &BB)
         const unsigned int offset = int_cast<unsigned int>(pOffset->getZExtValue());
         // if we reach outside of the vector, grow it (filling with nullptr)
         if (offset >= m_writeList.size())
-        {            
+        {
             m_writeList.resize(offset+1);
         }
         auto elem = m_writeList[offset];
-        // we encountered an instruction writing at the same offset, 
+        // we encountered an instruction writing at the same offset,
         // most likely we write RTAI, VAI or PSIZE to vertex header
         // or we overwrite the old value
         if (elem.GetInst() != nullptr)
@@ -211,16 +207,16 @@ void MergeURBWrites::FillWriteList(BasicBlock &BB)
             auto oldMask = GetChannelMask(m_writeList[offset].GetInst());
             auto newMask = GetChannelMask(intrinsic);
             // assume the write lengths are <=4
-            // if we have writes to the same channel, we retain the later one, 
+            // if we have writes to the same channel, we retain the later one,
             // discarding the earlier one
             if (oldMask <= 0x0F && newMask <= 0x0F)
             {
                 // get difference oldMask-newMask to determine if we need to take any old operands
-                auto takeFromOlderMask = oldMask & (~newMask);  
+                auto takeFromOlderMask = oldMask & (~newMask);
                 // update the mask stored in operand #1 of the second instruction
                 auto mergedMask = oldMask | newMask;
                 auto mergedMaskValue = llvm::ConstantInt::get(
-                    llvm::Type::getInt32Ty(BB.getContext()), 
+                    llvm::Type::getInt32Ty(BB.getContext()),
                     mergedMask);
                 intrinsic->setOperand(1, mergedMaskValue);
                 // move data operands from the older instruction to the newer one
@@ -228,9 +224,9 @@ void MergeURBWrites::FillWriteList(BasicBlock &BB)
                 while (takeFromOlderMask != 0 )
                 {
                     if (takeFromOlderMask & 1)
-                    {                        
+                    {
                         intrinsic->setOperand(
-                            opIndex+2, 
+                            opIndex+2,
                             m_writeList[offset].GetInst()->getOperand(opIndex+2));
                     }
                     ++opIndex;

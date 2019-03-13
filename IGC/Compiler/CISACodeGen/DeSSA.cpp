@@ -140,8 +140,9 @@ void DeSSA::dump() const {
   print(ods());
 }
 
-bool DeSSA::runOnFunction(Function &MF) {
-
+bool DeSSA::runOnFunction(Function &MF)
+{
+  CurrColor = 0;
   MetaDataUtils *pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
   if (pMdUtils->findFunctionsInfoItem(&MF) == pMdUtils->end_FunctionsInfo())
   {
@@ -299,7 +300,7 @@ bool DeSSA::runOnFunction(Function &MF) {
   // Perform a depth-first traversal of the dominator tree, splitting
   // interferences amongst PHI-congruence classes.
   if (!RegNodeMap.empty()) {
-      DenseMap<Value*, Value*> CurrentDominatingParent;
+      DenseMap<int, Value*> CurrentDominatingParent;
       DenseMap<Value*, Value*> ImmediateDominatingParent;
       // first, go through the function arguments
       SplitInterferencesForArgument(CurrentDominatingParent, ImmediateDominatingParent);
@@ -310,15 +311,17 @@ bool DeSSA::runOnFunction(Function &MF) {
               CurrentDominatingParent,
               ImmediateDominatingParent);
       }
-      SplitInterferencesForAlignment(CurrentDominatingParent);
   }
+
+  // Handle values that have specific alignment requirement.
+  SplitInterferencesForAlignment();
   return false;
 }
 
 void DeSSA::MapAddReg(MapVector<Value*, Node*> &Map, Value *Val, e_alignment Align) {
   if (Map.count(Val))
     return;
-  Map[Val] = new (Allocator) Node(Val, Align);
+  Map[Val] = new (Allocator) Node(Val, ++CurrColor, Align);
 }
 
 DeSSA::Node*
@@ -348,6 +351,19 @@ Value* DeSSA::getRegRoot(Value* Val, e_alignment *pAlign) const {
   if (pAlign)
     *pAlign = TheLeader->alignment;
   return TheLeader->value;
+}
+
+int DeSSA::getRootColor(Value* V)
+{
+    auto RI = RegNodeMap.find(V);
+    if (RI == RegNodeMap.end())
+        return 0;
+    Node *TheNode = RI->second;
+    if (TheNode->parent.getInt() &
+        (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag))
+        return 0;
+    Node *TheLeader = TheNode->getLeader();
+    return TheLeader->color;
 }
 
 void DeSSA::MapUnionRegs(MapVector<Value*, Node*> &Map, Value* Val1, Value* Val2) {
@@ -464,7 +480,7 @@ bool DeSSA::isPHIIsolated(Instruction *PHI) const {
 void
 DeSSA::SplitInterferencesForBasicBlock(
     BasicBlock *MBB,
-    DenseMap<Value*, Value*> &CurrentDominatingParent,
+    DenseMap<int, Value*> &CurrentDominatingParent,
     DenseMap<Value*, Value*> &ImmediateDominatingParent) {
   // Sort defs by their order in the original basic block, as the code below
   // assumes that it is processing definitions in dominance order.
@@ -478,8 +494,8 @@ DeSSA::SplitInterferencesForBasicBlock(
 
     // If the virtual register being defined is not used in any PHI or has
     // already been isolated, then there are no more interferences to check.
-    Value* RootV = getRegRoot(DefMI);
-    if (!RootV)
+    int RootC = getRootColor(DefMI);
+    if (!RootC)
       continue;
 
     // The input to this pass sometimes is not in SSA form in every basic
@@ -488,7 +504,7 @@ DeSSA::SplitInterferencesForBasicBlock(
     // handle it here by tracking defining machine instructions rather than
     // virtual registers. For now, we just handle the situation conservatively
     // in a way that will possibly lead to false interferences.
-    Value* NewParent = CurrentDominatingParent[RootV];
+    Value* NewParent = CurrentDominatingParent[RootC];
     if (NewParent == DefMI)
       continue;
 
@@ -522,12 +538,12 @@ DeSSA::SplitInterferencesForBasicBlock(
       // could be improved by using a heuristic that decides which of the two
       // registers to isolate.
       isolateReg(DefMI);
-      CurrentDominatingParent[RootV] = NewParent;
+      CurrentDominatingParent[RootC] = NewParent;
     } else {
       // If there is no interference, update ImmediateDominatingParent and set
       // the CurrentDominatingParent for this color to the current register.
       ImmediateDominatingParent[DefMI] = NewParent;
-      CurrentDominatingParent[RootV] = DefMI;
+      CurrentDominatingParent[RootC] = DefMI;
     }
   }
 
@@ -574,7 +590,7 @@ DeSSA::SplitInterferencesForBasicBlock(
       }
 
       // check live-out interference
-      Value *RootV = getRegRoot(PHI);
+      int RootC = getRootColor(PHI);
 #if 0
       for (unsigned i = 0; !RootV && i < PHI->getNumOperands(); i++) {
         Value* SrcVal = PHI->getOperand(i);
@@ -586,12 +602,12 @@ DeSSA::SplitInterferencesForBasicBlock(
         }
       }
 #endif
-      if (!RootV)
+      if (!RootC)
         continue;
 
       // Pop registers from the stack represented by ImmediateDominatingParent
       // until we find a parent that dominates the current instruction.
-      Value *NewParent = CurrentDominatingParent[RootV];
+      Value *NewParent = CurrentDominatingParent[RootC];
       while (NewParent) {
         if (getRegRoot(NewParent)) {
           if (isa<Argument>(NewParent)) {
@@ -602,7 +618,7 @@ DeSSA::SplitInterferencesForBasicBlock(
         }
         NewParent = ImmediateDominatingParent[NewParent];
       }
-      CurrentDominatingParent[RootV] = NewParent;
+      CurrentDominatingParent[RootC] = NewParent;
 
       // If there is an interference with a register, always isolate the
       // register rather than the PHI. It is also possible to isolate the
@@ -617,7 +633,7 @@ DeSSA::SplitInterferencesForBasicBlock(
 
 void
 DeSSA::SplitInterferencesForArgument(
-    DenseMap<Value*, Value*> &CurrentDominatingParent,
+    DenseMap<int, Value*> &CurrentDominatingParent,
     DenseMap<Value*, Value*> &ImmediateDominatingParent) {
   // No two arguments can be in the same congruent class
   for (auto BBI = PHISrcArgs.begin(),
@@ -625,65 +641,77 @@ DeSSA::SplitInterferencesForArgument(
     Value *AV = *BBI;
     // If the virtual register being defined is not used in any PHI or has
     // already been isolated, then there are no more interferences to check.
-    Value* RootV = getRegRoot(AV);
-    if (!RootV)
+    int RootC = getRootColor(AV);
+    if (!RootC)
       continue;
-    Value* NewParent = CurrentDominatingParent[RootV];
+    Value* NewParent = CurrentDominatingParent[RootC];
     if (NewParent) {
       isolateReg(AV);
     } else {
-      CurrentDominatingParent[RootV] = AV;
+      CurrentDominatingParent[RootC] = AV;
     }
   }
 }
 
-void
-DeSSA::SplitInterferencesForAlignment(
-    DenseMap<Value*, Value*> &CurrentDominatingParent) {
-  for (auto I = CurrentDominatingParent.begin(),
-            E = CurrentDominatingParent.end(); I != E; ++I) {
-    auto RI = RegNodeMap.find(I->first);
-    if (RI == RegNodeMap.end())
-      continue;
+void DeSSA::SplitInterferencesForAlignment()
+{
+    for (auto I = RegNodeMap.begin(), E = RegNodeMap.end(); I != E; ++I)
+    {
+        // Find a root Node
+        Node *rootNode = I->second;
+        if (rootNode->parent.getPointer() != rootNode) {
+            continue;
+        }
 
-    e_alignment Align = EALIGN_AUTO;
-    // Find the most restrictive alignment, i.e. GRF aligned ones.
-    Node *TheNode = RI->second;
-    Node *LI = TheNode;
-    do {
-      // Skip isolated reg.
-      if (LI->parent.getInt() & Node::kRegisterIsolatedFlag) {
-        LI = LI->next;
-        continue;
-      }
+        e_alignment Align = EALIGN_AUTO;
+        // Find the most restrictive alignment, i.e. GRF aligned ones.
+        Node *N = rootNode;
+        Node *Curr;
+        do {
+            Curr = N;
+            N = Curr->next;
 
-      if (LI->alignment == EALIGN_GRF) {
-        Align = EALIGN_GRF;
-        break;
-      }
+            // Skip isolated reg.
+            if (Curr->parent.getInt() &
+                (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag)) {
+                continue;
+            }
 
-      LI = LI->next;
-    } while (LI != TheNode);
+            if (Curr->alignment == EALIGN_GRF) {
+                Align = EALIGN_GRF;
+                break;
+            }
+        } while (N != rootNode);
 
-    // Isolate mismatching alignment.
-    LI = TheNode;
-    do {
-      // Skip isolated reg.
-      if (LI->parent.getInt() & Node::kRegisterIsolatedFlag) {
-        LI = LI->next;
-        continue;
-      }
+        if (Align != EALIGN_GRF)
+            continue;
 
-      if (Align == EALIGN_GRF &&
-          (LI->alignment != EALIGN_AUTO && LI->alignment != EALIGN_GRF)) {
-        isolateReg(LI->value);
-      }
-      LI = LI->next;
-    } while (LI != TheNode);
+        // Isolate any mis-aligned value.
+        // Start with Curr node as it cannot be isolated
+        // (rootNode could be isolated), therefore, it remains
+        // in the linked list and can be used to test stop looping.
+        Node* Head = Curr;
+        N = Head;
+        do {
+            Curr = N;
+            N = N->next;
 
-    // Update root's alignment.
-    TheNode->alignment = Align;
-  }
+            // Skip isolated reg.
+            if (Curr->parent.getInt() &
+                (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag)) {
+                continue;
+            }
+
+            if (Curr->alignment != EALIGN_AUTO && Curr->alignment != EALIGN_GRF)
+            {
+                assert(Curr != Head && "Head Node cannot be isolated, something wrong!");
+                isolateReg(Curr->value);
+            }
+        } while (N != Head);
+
+        // Update root's alignment.
+        Head->getLeader()->alignment = Align;
+    }
 }
 
 Value*
