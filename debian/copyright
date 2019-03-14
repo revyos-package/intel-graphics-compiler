@@ -6,6 +6,10 @@ Files: *
 Copyright: 2017-2018 Intel
 License: MIT
 
+Files: third_party/opencl_headers
+Copyright: 2008-2015 The Khronos Group Inc.
+License: MIT
+
 Files: debian/*
 Copyright: 2019 Timo Aaltonen <tjaalton@debian.org>
 License: MIT
