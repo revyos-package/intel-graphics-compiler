@@ -13,8 +13,11 @@ override_dh_auto_configure:
 		-Wno-dev
 
 override_dh_install:
-	rm -r debian/tmp/usr/include/igc/SPIRV/SPIRV-Tools
+	rm -f debian/tmp/usr/lib/libcommon_clang.so
 	dh_install
+
+override_dh_missing:
+	dh_missing --fail-missing
 
 override_dh_clean:
 	dh_clean
