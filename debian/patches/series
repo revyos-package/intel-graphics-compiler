@@ -1,1 +1,3 @@
 dont-use-date-for-iga-version-string.diff
+use-gnuinstalldirs.diff
+add-soname.diff

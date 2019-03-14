@@ -15,15 +15,27 @@ Homepage: https://github.com/intel/intel-graphics-compiler
 Vcs-Browser: https://salsa.debian.org/debian/intel-graphics-compiler
 Vcs-Git: https://salsa.debian.org/debian/intel-graphics-compiler.git
 
-Package: intel-igc-core
+Package: libigc1
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Intel graphics compiler for OpenCL -- core libs
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+ .
+ This package includes the core libraries.
 
-Package: intel-igc-media
+Package: libigc-dev
 Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Intel graphics compiler for OpenCL -- core libs
+ The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
+ for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
+ .
+ This package includes files for development.
+
+Package: libigc-tools
+Architecture: amd64
+Section: video
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Intel graphics compiler for OpenCL -- media tools
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
@@ -31,7 +43,7 @@ Description: Intel graphics compiler for OpenCL -- media tools
  .
  This package includes tools for the media driver.
 
-Package: intel-igc-opencl
+Package: libigdfcl1
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Intel graphics compiler for OpenCL -- OpenCL library
@@ -40,12 +52,12 @@ Description: Intel graphics compiler for OpenCL -- OpenCL library
  .
  This package includes the library for OpenCL.
 
-Package: intel-igc-opencl-devel
+Package: libigdfcl-dev
 Architecture: amd64
 Section: libdevel
 Depends: ${misc:Depends},
-Description: intel graphics compiler for OpenCL -- development headers
+Description: Intel graphics compiler for OpenCL -- development files
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
  .
- This package includes headers for development.
+ This package includes files for development.
