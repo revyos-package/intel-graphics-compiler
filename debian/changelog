@@ -1,4 +1,4 @@
-intel-graphics-compiler (0.1.0~git20190312-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (0.1.0~git20190327-1) UNRELEASED; urgency=medium
 
   * Initial release (Closes: #923945)
 
