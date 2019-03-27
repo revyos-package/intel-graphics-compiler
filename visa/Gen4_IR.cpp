@@ -79,6 +79,7 @@ G4_InstOptInfo InstOptInfo[] =
     {InstOpt_EOT, "EOT"},
     {InstOpt_AccWrCtrl, "AccWrEn"},
     {InstOpt_Compacted, "Compacted"},
+    {InstOpt_NoCompact, "NoCompact" },
     {InstOpt_NoSrcDepSet, "NoSrcDepSet"},
     {InstOpt_NoPreempt, "NoPreempt"},
     {InstOpt_END, "END"}
@@ -510,7 +511,7 @@ G4_INST::G4_INST(const IR_Builder& irb,
     G4_Operand* s0,
     G4_Operand* s1,
     unsigned int opt) :
-    op(o), dst(d), predicate(prd), mod(m), option(opt), 
+    op(o), dst(d), predicate(prd), mod(m), option(opt),
     local_id(0),
     srcCISAoff(-1),
     sat(s),
@@ -553,7 +554,7 @@ G4_INST::G4_INST(const IR_Builder& irb,
     G4_Operand* s1,
     G4_Operand* s2,
     unsigned int opt) :
-    op(o), dst(d), predicate(prd), mod(m), option(opt), 
+    op(o), dst(d), predicate(prd), mod(m), option(opt),
     local_id(0),
     srcCISAoff(-1),
     sat(s),
@@ -827,6 +828,7 @@ G4_Type G4_INST::getExecType2() const
 uint16_t G4_INST::getMaskOffset()
 {
     unsigned maskOption = (this->getOption() & InstOpt_QuarterMasks);
+
     switch(maskOption)
     {
     case InstOpt_NoOpt:
@@ -1951,7 +1953,7 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
 
     // FIXME: to add specific checks for other instructions.
     G4_opcode useInst_op = useInst->opcode();
-    
+
     if (useInst_op == G4_madm ||
         (useInst->isMath() && (useInst->asMathInst()->getMathCtrl() == MATH_INVM || useInst->asMathInst()->getMathCtrl() == MATH_RSQRTM)))
     {
@@ -5271,32 +5273,25 @@ bool GlobalRA::areAllDefsNoMask(G4_Declare* dcl)
 {
     bool retval = true;
     auto maskUsed = getMask(dcl);
-    if (maskUsed != NULL)
+    if (maskUsed != NULL &&
+        getAugmentationMask(dcl) != AugmentationMasks::NonDefault)
     {
-        if (maskUsed == (unsigned char*)allDefsNoMask)
+        auto byteSize = dcl->getByteSize();
+        for (unsigned int i = 0; i < byteSize; i++)
         {
-            retval = true;
-        }
-        else if (maskUsed == (unsigned char*)allDefsNotNoMask)
-        {
-            retval = false;
-        }
-        else
-        {
-            auto byteSize = dcl->getByteSize();
-            for (unsigned int i = 0; i < byteSize; i++)
+            if (maskUsed[i] != NOMASK_BYTE)
             {
-                if (maskUsed[i] != NOMASK_BYTE)
-                {
-                    retval = false;
-                    break;
-                }
+                retval = false;
+                break;
             }
         }
     }
     else
     {
-        retval = false;
+        if (getAugmentationMask(dcl) == AugmentationMasks::NonDefault)
+            retval = true;
+        else
+            retval = false;
     }
     return retval;
 }
@@ -7658,7 +7653,7 @@ bool G4_INST::canSrcBeAcc(int srcId) const
     // dst must be GRF-aligned
     if ((getDst()->getLinearizedStart() % GENX_GRF_REG_SIZ) != 0)
     {
-        return false;
+            return false;
     }
 
     // check that src0 and dst have the same type/alignment
@@ -7674,7 +7669,8 @@ bool G4_INST::canSrcBeAcc(int srcId) const
         return false;
     }
 
-    if (opcode() == G4_mad && srcId == 0)
+    if (opcode() == G4_mad && srcId == 0 &&
+    	 !builder.canMadHaveSrc0Acc())
     {
         // mac's implicit acc gets its region from dst, so we have to check src and
         // dst have the same type

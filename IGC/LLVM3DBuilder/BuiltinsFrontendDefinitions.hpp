@@ -4358,6 +4358,18 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_countbits(
 }
 
 template<bool preserveNames, typename T, typename Inserter>
+inline llvm::Value*
+LLVM3DBuilder<preserveNames, T, Inserter>::create_waveInverseBallot(
+    llvm::Value* src)
+{
+    llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
+    llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
+        module,
+        llvm::GenISAIntrinsic::GenISA_WaveInverseBallot);
+    return this->CreateCall(pFunc, src);
+}
+
+template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveBallot(llvm::Value* src)
 {
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
@@ -4390,14 +4402,63 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveAll(ll
 }
 
 template<bool preserveNames, typename T, typename Inserter>
-inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefix(llvm::Value* src, llvm::Value* type, bool inclusive)
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefix(
+    llvm::Value* src, llvm::Value* type, bool inclusive, llvm::Value *Mask)
 {
+    // If a nullptr is passed in for 'Mask' (as is the default), just include
+    // all lanes.
+    Mask = Mask ? Mask : this->getInt1(true);
+
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_WavePrefix,
         src->getType());
-    return this->CreateCall3(pFunc, src, type, this->getInt1(inclusive));
+    return this->CreateCall4(pFunc, src, type, this->getInt1(inclusive), Mask);
+}
+
+template<bool preserveNames, typename T, typename Inserter>
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMatch(
+    llvm::Instruction *inst,
+    llvm::Value       *src)
+{
+
+    // Note that we will stay in the loop above as long as there is at least
+    // one active lane remaining.
+
+    // We will split the basic blocks twice.  The first will create a
+    // pre-header for the loop code.  The second will separate the WaveMatch
+    // from code after it so it can be broken down into a sequence of
+    // instructions and then branch to the remaining code when done.
+
+    auto *PreHeader = inst->getParent();
+    auto *BodyBlock = PreHeader->splitBasicBlock(inst, "wavematch-body");
+    auto *EndBlock = BodyBlock->splitBasicBlock(
+        inst->getNextNode(), "wavematch-end");
+
+    this->SetInsertPoint(inst);
+
+    // Now generate the code for a single iteration of the code
+    auto *FirstValue = this->readFirstLane(src);
+    llvm::Value *CmpRes = nullptr;
+    if (src->getType()->isFloatingPointTy())
+        CmpRes = this->CreateFCmpOEQ(FirstValue, src);
+    else
+        CmpRes = this->CreateICmpEQ(FirstValue, src);
+
+    auto *Mask = this->create_waveBallot(CmpRes);
+
+    // Replace the current terminator to either exit the loop
+    // or branch back for another iteration.
+    auto *Br = BodyBlock->getTerminator();
+    this->SetInsertPoint(Br);
+    this->CreateCondBr(CmpRes, EndBlock, BodyBlock);
+    Br->eraseFromParent();
+
+    // Now, gather up the output struct outside of the loop
+    this->SetInsertPoint(&*EndBlock->getFirstInsertionPt());
+
+    return Mask;
 }
 
 template<bool preserveNames, typename T, typename Inserter>

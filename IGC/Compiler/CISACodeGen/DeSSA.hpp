@@ -200,6 +200,10 @@ class DeSSA : public llvm::FunctionPass {
     /// Isolate a PHI.
     void isolatePHI(llvm::Instruction*);
 
+    // Split node from its existing congurent class, and
+    // node itself becomes a new single-value congruent class
+    void splitNode(Node* ND);
+
     /// Traverses a basic block, splitting any interferences found between
     /// registers in the same congruence class. It takes two DenseMaps as
     /// arguments that it also updates: CurrentDominatingParent, which maps
@@ -227,6 +231,7 @@ class DeSSA : public llvm::FunctionPass {
     llvm::LoopInfo *LI;
     CodeGenPatternMatch *CG;
     const llvm::DataLayout *DL;
+    CodeGenContext* CTX;
 
     llvm::BumpPtrAllocator Allocator;
     // Color (label) assigned to each congruent class
@@ -246,7 +251,7 @@ public:
 
     // Maps a color to a pair of a llvm::Instruction* and a virtual register, which
     // is the operand of that PHI corresponding to the current basic block.
-    llvm::DenseMap<llvm::Value*, std::pair<llvm::Instruction*, llvm::Value*> > CurrentPHIForColor;
+    llvm::DenseMap<int, std::pair<llvm::Instruction*, llvm::Value*> > CurrentPHIForColor;
 
     // Implement reuse for InsertElement only
     // Hierarchical coalescing:

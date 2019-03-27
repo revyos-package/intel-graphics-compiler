@@ -21,12 +21,11 @@ add_subdirectory(MemManager)
 add_subdirectory(Models)
 add_subdirectory(Timer)
 
-# Set up windows mobile build flags to use dynamic multi-threaded runtime (/MD)
-# Set up windows(other) build flags to use static multi-threaded runtime (/MT)
-#
-# This mimicks vISA/MDF configurations
-
-win_static_runtime()
+if (LINK_AS_STATIC_LIB)
+  win_static_runtime()
+else (LINK_AS_STATIC_LIB)
+  win_dynamic_runtime()
+endif (LINK_AS_STATIC_LIB)
 
 # Mimick IGC/MDF warnings within IGA library on our side to ensure we don't
 # break the build.
@@ -328,6 +327,10 @@ if(ANDROID AND MEDIA_IGA)
   target_link_libraries(IGA_ENC_LIB c++_static)
 endif(ANDROID AND MEDIA_IGA)
 # target_link_libraries(IGA PRIVATE GEDLibrary)
+
+  set_target_properties(IGA_DLL PROPERTIES
+                        VERSION "${IGC_API_MAJOR_VERSION}.${IGC_API_MINOR_VERSION}.${IGC_API_PATCH_VERSION}"
+                        SOVERSION "${IGC_API_MAJOR_VERSION}")
 
   if(UNIX)
     INSTALL(TARGETS IGA_DLL

@@ -209,6 +209,80 @@ int VISAKernelImpl::compileTillOptimize()
     return optimizer.optimization();
 }
 
+void VISAKernelImpl::expandIndirectCallWithRegTarget()
+{
+    // check every fcall
+    for (BB_LIST_ITER it = m_kernel->fg.BBs.begin();
+        it != m_kernel->fg.BBs.end();
+        it++)
+    {
+        G4_BB* bb = (*it);
+        // At this point G4_pseudo_fcall may be converted to G4_call,
+        // check all call
+        if (bb->back()->isFCall() || bb->back()->isCall())
+        {
+            G4_INST* fcall = bb->back();
+            if (fcall->getSrc(0)->isGreg()) {
+                // at this point the call function src0 has the target_address
+                // and the call dst is the reserved register for ret, we can use
+                // the subregister after 2 as add's dst
+                // r1.0-r1.7 is reserved in GlobalRA::setABIForStackCallFunctionCalls
+                //
+                // expand call
+                // From:
+                //       call r1.0 call_target
+                // To:
+                //       add  r1.2  -IP   call_target
+                //       add  r1.2  r1.2  32
+                //       call r1.0  r1.2
+
+                // calculate the reserved register's num from fcall's dst register
+                assert(fcall->getDst()->isGreg());
+                uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
+                // hardcoded add's dst subregister to 2
+                G4_Declare* add_dst_decl =
+                    m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
+
+                // create the first add instruction
+                G4_INST* add_inst = m_builder->createInternalInst(
+                    nullptr, G4_add, nullptr, false, 1,
+                    m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+                    m_builder->createSrcRegRegion(
+                        Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
+                        m_builder->getRegionScalar(), Type_UD),
+                    fcall->getSrc(0), InstOpt_WriteEnable);
+
+                // create the second add to add the ip to 32, to get the call's ip
+                G4_INST* add_inst2 = m_builder->createInternalInst(
+                    nullptr, G4_add, nullptr, false, 1,
+                    m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+                    m_builder->Create_Src_Opnd_From_Dcl(
+                        add_dst_decl, m_builder->getRegionScalar()),
+                    m_builder->createImm(32, add_inst->getSrc(0)->getType()),
+                    InstOpt_WriteEnable);
+
+                // Set no compated to make sure the ip calculation is correct
+                add_inst->setNoCompacted();
+                add_inst2->setNoCompacted();
+
+                // then update fcall's src0 to add's dst
+                fcall->setSrc(m_builder->Create_Src_Opnd_From_Dcl(
+                    add_inst->getDst()->getTopDcl(), m_builder->getRegionScalar()), 0);
+
+                // then insert the add right before the call
+                INST_LIST_ITER insert_point = bb->end();
+                --insert_point;
+                bb->getInstList().insert(insert_point, add_inst);
+                bb->getInstList().insert(insert_point, add_inst2);
+
+                // Set the CISAOff to be the same as call
+                add_inst->setCISAOff(fcall->getCISAOff());
+                add_inst2->setCISAOff(fcall->getCISAOff());
+            }
+        }
+    }
+}
+
 void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
 {
     void* binary = NULL;
@@ -221,6 +295,21 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         // to the kernel before UUID mov.
         uint64_t kernelID = m_kernel->fg.insertDummyUUIDMov();
         m_kernel->setKernelID(kernelID);
+    }
+
+    if (m_kernel->hasIndirectCall())
+    {
+        // If the indirect call has regiser src0, the register must be a
+        // ip-based address of the call target. Insert a add before call to
+        // calculate the relative offset from call to the target
+        expandIndirectCallWithRegTarget();
+    }
+
+    // remove SW fences at this point
+    // ToDo: remove all intrinsics?
+    for (auto bb : m_kernel->fg.BBs)
+    {
+        bb->removeIntrinsics(Intrinsic::MemFence);
     }
 
 
@@ -430,7 +519,7 @@ int VISAKernelImpl::InitializeKernel(const char *kernel_name)
 {
 
     int status = CM_SUCCESS;
-    m_num_pred_vars = Get_CISA_PreDefined_Var_Count(m_major_version, m_minor_version);
+    m_num_pred_vars = Get_CISA_PreDefined_Var_Count();
     setName(kernel_name);
     if( IS_GEN_BOTH_PATH && m_isKernel)
     {
@@ -481,7 +570,7 @@ int VISAKernelImpl::CISABuildPreDefinedDecls()
     for( unsigned int i = 0; i < m_num_pred_vars; i++ )
     {
 
-        auto predefId = mapExternalToInternalPreDefVar(i, m_major_version, m_minor_version);
+        auto predefId = mapExternalToInternalPreDefVar(i);
         CISA_GEN_VAR* decl = (CISA_GEN_VAR *)m_mem.alloc(sizeof(CISA_GEN_VAR));
         decl->type = GENERAL_VAR;
         decl->index = m_var_info_count++;
@@ -519,7 +608,7 @@ int VISAKernelImpl::CISABuildPreDefinedDecls()
     }
 
     //SLM T0/Global Vars
-    for(int i = 0; i < (int) Get_CISA_PreDefined_Surf_Count(m_major_version, m_minor_version); i++)
+    for(int i = 0; i < (int) Get_CISA_PreDefined_Surf_Count(); i++)
     {
         //string_pool_lookup_and_insert(name, SURFACE_VAR, ISA_TYPE_ADDR);
         VISA_SurfaceVar* decl = (VISA_SurfaceVar *)m_mem.alloc(sizeof(CISA_GEN_VAR));
@@ -725,9 +814,9 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
                 info->dcl->setAliasDeclare(aliasDcl->dcl, aliasOffset);
 
                 // check if parent declare is one of the predefined
-                if (parentDecl->index < Get_CISA_PreDefined_Var_Count(m_major_version, m_minor_version))
+                if (parentDecl->index < Get_CISA_PreDefined_Var_Count())
                 {
-                    m_builder->preDefVars.setHasPredefined(mapExternalToInternalPreDefVar(parentDecl->index, m_major_version, m_minor_version), true);
+                    m_builder->preDefVars.setHasPredefined(mapExternalToInternalPreDefVar(parentDecl->index), true);
                 }
             }
         }
@@ -1861,7 +1950,7 @@ int VISAKernelImpl::CreateVISASrcOperand(VISA_VectorOpnd *& cisa_opnd, VISA_GenV
     cisa_opnd = (VISA_VectorOpnd *)getOpndFromPool();
     if(IS_GEN_BOTH_PATH)
     {
-        if( cisa_decl->index < Get_CISA_PreDefined_Var_Count(m_major_version, m_minor_version) )
+        if( cisa_decl->index < Get_CISA_PreDefined_Var_Count() )
         {
             cisa_opnd->g4opnd = CommonISABuildPreDefinedSrc(cisa_decl->index, vStride, width, hStride, rowOffset, colOffset, mod);
         }
@@ -2082,7 +2171,7 @@ int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&cisa_opnd, CISA_GEN
         {
             // pre-defined surface
             if( opndClass == STATE_OPND_SURFACE &&
-                decl->index < Get_CISA_PreDefined_Surf_Count( m_major_version, m_minor_version ) )
+                decl->index < Get_CISA_PreDefined_Surf_Count() )
             {
                 int64_t immVal = Get_PreDefined_Surf_Index(decl->index);
 				if (immVal == PREDEF_SURF_252)
@@ -2299,7 +2388,7 @@ int VISAKernelImpl::CreateStateInstUseFastPath(VISA_StateOpndHandle *&cisa_opnd,
     case SURFACE_VAR:
     {
         uint16_t surf_id = (uint16_t)decl->index;
-        if (surf_id >= Get_CISA_PreDefined_Surf_Count(m_major_version, m_minor_version))
+        if (surf_id >= Get_CISA_PreDefined_Surf_Count())
         {
             cisa_opnd->g4opnd = m_builder->createSrcRegRegion(Mod_src_undef, Direct, dcl->getRegVar(), 0, 0,
                 m_builder->getRegionScalar(), Type_UD);
@@ -7657,11 +7746,11 @@ void VISAKernelImpl::finalizeKernel()
     DEBUG_PRINT_SIZE("size after samplers: ", SIZE_VALUE);
 
     /*****SURFACES******/
-    unsigned int adjSurfaceCount = m_surface_count - Get_CISA_PreDefined_Surf_Count(m_major_version, m_minor_version);
+    unsigned int adjSurfaceCount = m_surface_count - Get_CISA_PreDefined_Surf_Count();
     m_cisa_kernel.surface_count = (uint8_t) adjSurfaceCount;
     m_cisa_kernel.surfaces = (state_info_t * ) m_mem.alloc(sizeof(state_info_t) * adjSurfaceCount);
 
-    for(unsigned int i = 0, j = Get_CISA_PreDefined_Surf_Count(m_major_version, m_minor_version); i < adjSurfaceCount; i++, j++)
+    for(unsigned int i = 0, j = Get_CISA_PreDefined_Surf_Count(); i < adjSurfaceCount; i++, j++)
     {
         state_info_t * temp = &m_surface_info_list.at(j)->stateVar;
         m_cisa_kernel.surfaces[i] = *temp;
@@ -7973,6 +8062,34 @@ int VISAKernelImpl::GetGenReloc(BasicRelocEntry*& relocs, unsigned int& numReloc
     return CM_SUCCESS;
 }
 
+int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize, unsigned int &numEntries)
+{
+    G4_Kernel::RelocationTableTy& reloc_table = m_kernel->getRelocationTable();
+    numEntries = reloc_table.size();
+    byteSize = sizeof(IGC::GenRelocEntry) * numEntries;
+
+    if (reloc_table.empty())
+        return CM_SUCCESS;
+
+    // allocate the buffer for relocation table
+    buffer = allocCodeBlock(byteSize);
+
+    if (buffer == NULL || buffer == nullptr)
+        return CM_FAILURE;
+
+    IGC::GenRelocEntry* buffer_p = (IGC::GenRelocEntry*)buffer;
+    for (auto reloc : reloc_table)
+    {
+        buffer_p->r_type = reloc.getType();
+        buffer_p->r_offset = (uint32_t)reloc.getInst()->getGenOffset();
+        assert(reloc.getSymbolName().size() <= IGC::MAX_SYMBOL_NAME_LENGTH);
+        std::strcpy(buffer_p->r_symbol, reloc.getSymbolName().c_str());
+        ++buffer_p;
+    }
+
+    return CM_SUCCESS;
+}
+
 int VISAKernelImpl::GetGenxDebugInfo(void *&buffer, unsigned int &size, void*& mapGenISAOffsetToVISAIndex, unsigned int& mapNumElems)
 {
     unsigned int i = 0;
@@ -8114,7 +8231,7 @@ G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(int index, uint16_t vStr
 {
     RegionDesc *rd = m_builder->createRegionDesc( vStride, width, hStride );
     G4_Operand* tmpsrc = NULL;
-    PreDefinedVarsInternal internalIndex = mapExternalToInternalPreDefVar(index, m_major_version, m_minor_version);
+    PreDefinedVarsInternal internalIndex = mapExternalToInternalPreDefVar(index);
     switch (internalIndex)
     {
     case PreDefinedVarsInternal::X:
@@ -8484,6 +8601,14 @@ int VISAKernelImpl::getDeclarationID(VISA_LabelVar *decl)
 int VISAKernelImpl::getDeclarationID(VISA_FileVar *decl)
 {
     return decl->index;
+}
+
+int64_t VISAKernelImpl::getGenOffset()
+{
+    assert(m_kernel->fg.BBs.begin() != m_kernel->fg.BBs.end());
+    assert((*m_kernel->fg.BBs.begin())->begin() != (*m_kernel->fg.BBs.begin())->end());
+    // the offset of the first gen inst in this kernel/function
+    return (*(*m_kernel->fg.BBs.begin())->begin())->getGenOffset();
 }
 
 void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions)

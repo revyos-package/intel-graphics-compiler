@@ -29,6 +29,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <fstream>
 #include <tuple>
 #include "DebugInfo.h"
+#include "common.h"
 
 using namespace std;
 using namespace vISA;
@@ -49,9 +50,6 @@ using namespace vISA;
 extern unsigned int getStackCallRegSize(bool reserveStackCallRegs);
 extern void getForbiddenGRFs(vector<unsigned int>& regNum, const Options *opt, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned reservedRegNum);
 extern void getCallerSaveGRF(vector<unsigned int>& regNum, G4_Kernel* kernel);
-
-const char* allDefsNoMask = "ALL DEFS NO MASK";
-const char* allDefsNotNoMask = "ALL DEFS NOT NO MASK";
 
 LocalRA::LocalRA(G4_Kernel& k, bool& h, BankConflictPass& b, GlobalRA& g) :
     kernel(k), builder(*k.fg.builder), highInternalConflict(h),
@@ -158,7 +156,7 @@ void LocalRA::evenAlign()
 #endif
             gra.updateAlignment(G4_GRF, Even);
         }
-        gra.updateSubRegAlignment(G4_GRF, Sixteen_Word);
+        gra.updateSubRegAlignment(G4_GRF, SUB_ALIGNMENT_GRFALIGN);
         // Since we are piggy backing on mask field of G4_Declare,
         // we need to make sure we reset it before going further.
         resetMasks();
@@ -820,7 +818,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
             }
 
             // Why?
-            G4_SubReg_Align subAlign = builder.GRFAlign() ? Sixteen_Word : dcl->getSubRegAlign();
+            G4_SubReg_Align subAlign = builder.GRFAlign() ? SUB_ALIGNMENT_GRFALIGN : dcl->getSubRegAlign();
 
             if (assignFromFront)
             {
@@ -1180,14 +1178,10 @@ void LocalRA::markReferencesInOpnd(G4_Operand* opnd, bool isEOT, INST_LIST_ITER 
             {
                 if (opnd->getInst()->isWriteEnableInst() == false)
                 {
-                    gra.setMask(topdcl, (unsigned char*)allDefsNotNoMask);
                 }
                 else
                 {
-                    if (gra.getMask(topdcl) == NULL)
-                    {
-                        gra.setMask(topdcl, (unsigned char*)allDefsNoMask);
-                    }
+                    gra.setAugmentationMask(topdcl, AugmentationMasks::NonDefault);
                 }
             }
         }
@@ -1694,9 +1688,9 @@ void LocalRA::countLocalLiveIntervals(std::vector<LocalLiveRange*>& liveInterval
         }
         else
         {
-            if (dcl->getNumElems() > 1 && size > 16 && size <= 32)
+            if (dcl->getNumElems() > 1 && size > (getGRFSize() / 2u) && size <= (unsigned int)getGRFSize())
                 numOneGRF++;
-            else if (dcl->getNumElems() > 1 && size <= 16)
+            else if (dcl->getNumElems() > 1 && size <= (getGRFSize() / 2u))
                 numHalfGRF++;
             else if (dcl->getNumElems() == 1)
                 numScalars++;
@@ -1849,6 +1843,7 @@ void PhyRegsLocalRA::setGRFBusy(int which)
 {
     MUST_BE_TRUE(isGRFAvailable(which), "Invalid register");
     regBusyVector[which] = 0xffff;
+
     if (twoBanksRA)
     {
         if (which < SECOND_HALF_BANK_START_GRF)
@@ -1890,7 +1885,7 @@ void PhyRegsLocalRA::setWordBusy(int whichgrf, int word)
         }
     }
 
-    regBusyVector[whichgrf] |= (0x1 << word);
+    regBusyVector[whichgrf] |= (WORD_BUSY << word);
 }
 
 void PhyRegsLocalRA::setWordBusy(int whichgrf, int word, int howmany)
@@ -1953,7 +1948,7 @@ void PhyRegsLocalRA::setWordNotBusy(int whichgrf, int word, int instID)
             }
         }
     }
-    int mask = ~(1 << word);
+    uint32_t mask = ~(1 << word);
     regBusyVector[whichgrf] &= mask;
     if (instID)
     {
@@ -2265,7 +2260,7 @@ void PhyRegsLocalRA::markPhyRegs(G4_Declare* topdcl)
 bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int &regnum, int &subregnum, int size)
 {
     bool found = false;
-    if (subalign == Sixteen_Word)
+    if (subalign == SUB_ALIGNMENT_GRFALIGN)
     {
         if (isWordBusy(regIdx, 0, size) == false)
         {
@@ -2273,7 +2268,7 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             found = true;
         }
     }
-    else if (subalign == Eight_Word)
+    else if (subalign == SUB_ALIGNMENT_HALFGRFALIGN)
     {
         if (isWordBusy(regIdx, 0, size) == false)
         {
@@ -2286,7 +2281,8 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             found = true;
         }
     }
-    else if (subalign == Four_Word)
+    else if (subalign == Eight_Word || 
+                subalign == Four_Word)
     {
         for (int j = 0; j < (NUM_WORDS_PER_GRF - size + 1) && found == false; j += 4)
         {

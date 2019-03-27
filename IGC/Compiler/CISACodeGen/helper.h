@@ -40,6 +40,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/ADT/SmallSet.h>
+#include <llvm/ADT/DenseSet.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
@@ -55,7 +56,7 @@ typedef unsigned int uint;
 #define SIZE_WORD   2
 #define SIZE_DWORD  4
 #define SIZE_OWORD 16
-#define SIZE_GRF   32
+#define SIZE_GRF   (IGC::getGRFSize())
 
 enum ADDRESS_SPACE : unsigned int;
 
@@ -233,11 +234,11 @@ inline bool DoesRTWriteSrc0AlphaBelongToHomogeneousPart(
     return !rtWrite->hasMask() && RTWriteHasSource0Alpha(rtWrite, md);
 }
 
-inline bool LoadUsedByConstExtractOnly(
-    llvm::LoadInst* ld,
+inline bool VectorUsedByConstExtractOnly(
+    llvm::Value* val,
     llvm::SmallVector< llvm::SmallVector<llvm::ExtractElementInst*, 1>, 4>& extracts)
 {
-    for (auto UI = ld->user_begin(), UE = ld->user_end(); UI != UE; ++UI)
+    for (auto UI = val->user_begin(), UE = val->user_end(); UI != UE; ++UI)
     {
         llvm::ExtractElementInst* ei =
             llvm::dyn_cast<llvm::ExtractElementInst>(*UI);
@@ -258,6 +259,13 @@ inline bool LoadUsedByConstExtractOnly(
         }
     }
     return true;
+}
+
+inline bool LoadUsedByConstExtractOnly(
+    llvm::LoadInst* ld,
+    llvm::SmallVector< llvm::SmallVector<llvm::ExtractElementInst*, 1>, 4>& extracts)
+{
+    return VectorUsedByConstExtractOnly(ld, extracts);
 }
 
 
@@ -324,6 +332,8 @@ inline float GetThreadOccupancyPerSubslice(SIMDMode simdMode, unsigned threadGro
 // Global can now be any pointer type that uses addrspace
 void appendToUsed(llvm::Module &M, llvm::ArrayRef<llvm::GlobalValue *> Values);
 
+bool safeScheduleUp(llvm::BasicBlock *BB, llvm::Value *V, llvm::Instruction *&InsertPos, llvm::DenseSet<llvm::Instruction *> Scheduled);
+
 inline unsigned GetHwThreadsPerWG(const IGC::CPlatform& platform)
 {
     unsigned hwThreadPerWorkgroup = platform.getMaxNumberThreadPerSubslice();
@@ -352,5 +362,7 @@ inline SIMDMode getLeastSIMDAllowed(unsigned int threadGroupSize, unsigned int h
             return SIMDMode::SIMD32;
         }
 }
+
+unsigned int getGRFSize();
 
 } // namespace IGC

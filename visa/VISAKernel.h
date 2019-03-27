@@ -665,6 +665,8 @@ public:
     CM_BUILDER_API int GetErrorMessage(const char *&errorMsg);
     CM_BUILDER_API virtual int GetGenxDebugInfo(void *&buffer, unsigned int &size, void*&, unsigned int&);
     CM_BUILDER_API int GetGenReloc(BasicRelocEntry*& relocs, unsigned int& numRelocs);
+    /// GetGenRelocEntryBuffer -- allocate and return a buffer of all GenRelocEntry that are created by vISA
+    CM_BUILDER_API int GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize, unsigned int &numEntries);
     CM_BUILDER_API int GetGTPinBuffer(void*& buffer, unsigned int& size);
     CM_BUILDER_API int SetGTPinInit(void* buffer);
     CM_BUILDER_API int GetFreeGRFInfo(void*& buffer, unsigned int& size);
@@ -694,6 +696,9 @@ public:
 
     ///Gets declaration id VISA_FileVar
     CM_BUILDER_API int getDeclarationID(VISA_FileVar *decl);
+
+    ///Gets gen binary offset
+    CM_BUILDER_API int64_t getGenOffset();
 
     /********** MISC APIs END *************************/
     int CreateVISAPredicateSrcOperand(VISA_VectorOpnd *& opnd, VISA_PredVar *decl, unsigned int size);
@@ -884,6 +889,14 @@ private:
     int predefinedVarRegAssignment();
     int calculateTotalInputSize();
     int compileTillOptimize();
+    // expandIndirectCallWithRegTarget:
+    // The indirect call with src0 is a register, the register must be a
+    // ip-based address of the call target. We need to insert the add before call to
+    // calculate the relative offset from call to the target
+    // ** Note that the ret IP r1.0 is reserved by convention at
+    // GlobalRA::setABIForStackCallFunctionCalls, the entire r1.0 is reserved, while
+    // for call dst it'll use only r1.0-r1.1, so here we take r1.2 as add's dst
+    void expandIndirectCallWithRegTarget();
     void getHeightWidth(G4_Type type, unsigned int numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize);
     CisaFramework::CisaInst* AppendVISASvmGeneralScatterInst(VISA_PredOpnd* pred,
         Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size execSize, unsigned char blockSize,

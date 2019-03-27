@@ -39,6 +39,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/shaderOverride.hpp"
 #include "common/CompilerStatsUtils.hpp"
 #include "inc/common/sku_wa.h"
+#include "inc/common/RelocationInfo.h"
 #include <iStdLib/utility.h>
 
 #if !defined(_WIN32)
@@ -58,6 +59,13 @@ using namespace llvm;
 
 namespace IGC
 {
+
+unsigned int getGRFSize()
+{
+    unsigned int byteSize = 32;
+
+    return byteSize;
+}
 
 Common_ISA_Exec_Size getExecSize(SIMDMode width)
 {
@@ -3415,6 +3423,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     vbuilder = nullptr;
     TARGET_PLATFORM VISAPlatform = GetVISAPlatform(&(context->platform));
 
+
     bool KernelDebugEnable = false;
     bool ForceNonCoherentStatelessBti = false;
     auto gtpin_init = context->gtpin_init;
@@ -3507,7 +3516,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     {
         vbuilder->SetOption(vISA_DumpCompilerStats, true);
     }
- 
+
     if (context->type == ShaderType::OPENCL_SHADER && context->m_floatDenormMode32 == FLOAT_DENORM_RETAIN &&
         context->m_floatDenormMode64 == FLOAT_DENORM_RETAIN)
     {
@@ -4206,6 +4215,75 @@ bool CEncoder::AvoidRetryOnSmallSpill() const
         context->m_retryManager.IsFirstTry();
 }
 
+void CEncoder::CreateFunctionSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
+{
+    buffer = nullptr;
+    bufferSize = 0;
+    tableEntries = 0;
+
+    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
+    {
+        Module* pModule = m_program->GetContext()->getModule();
+        std::vector<Function*> funcsToExport;
+        for (auto &F : pModule->getFunctionList())
+        {
+            // Find all functions in the module we need to export as symbols
+            if (F.hasFnAttribute("AsFunctionPointer"))
+            {
+                if (!F.isDeclaration() || F.getNumUses() > 0)
+                    funcsToExport.push_back(&F);
+            }
+        }
+
+        if (funcsToExport.empty())
+            return;
+
+        // Allocate buffer to store symbol table entries
+        tableEntries = funcsToExport.size();
+        bufferSize = sizeof(IGC::GenSymEntry) * tableEntries;
+        buffer = (void*) malloc(bufferSize);
+        assert(buffer && "Function Symbol Table not allocated");
+        IGC::GenSymEntry* entry_ptr = (IGC::GenSymEntry*) buffer;
+
+        for (auto pFunc : funcsToExport)
+        {
+            assert(pFunc->getName().size() <= IGC::MAX_SYMBOL_NAME_LENGTH);
+            strcpy(entry_ptr->s_name, pFunc->getName().str().c_str());
+
+            if (pFunc->isDeclaration())
+            {
+                // If the function is only declared, set as undefined type
+                entry_ptr->s_type = IGC::GenSymType::S_UNDEF;
+                entry_ptr->s_offset = 0;
+            }
+            else
+            {
+                auto Iter = stackFuncMap.find(pFunc);
+                assert(Iter != stackFuncMap.end() && "vISA function not found");
+
+                // Query vISA for the function's byte offset within the compiled module
+                VISAFunction* visaFunc = Iter->second;
+                entry_ptr->s_type = IGC::GenSymType::S_FUNC;
+                entry_ptr->s_offset = (uint32_t) visaFunc->getGenOffset();
+            }
+            entry_ptr++;
+        }
+    }
+}
+void CEncoder::CreateFunctionRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
+{
+    buffer = nullptr;
+    bufferSize = 0;
+    tableEntries = 0;
+
+    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
+    {
+        // vISA will directly return the buffer with GenRelocEntry layout
+        V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
+        assert(sizeof(IGC::GenRelocEntry) * tableEntries == bufferSize);
+    }
+}
+
 void CEncoder::Compile()
 {
     COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
@@ -4441,6 +4519,13 @@ void CEncoder::Compile()
     pOutput->m_InstructionCount = jitInfo->numAsmCount;
 
     vMainKernel->GetGTPinBuffer(pOutput->m_gtpinBuffer, pOutput->m_gtpinBufferSize);
+
+    CreateFunctionSymbolTable(pOutput->m_funcSymbolTable,
+                              pOutput->m_funcSymbolTableSize,
+                              pOutput->m_funcSymbolTableEntries);
+    CreateFunctionRelocationTable(pOutput->m_funcRelocationTable,
+                                  pOutput->m_funcRelocationTableSize,
+                                  pOutput->m_funcRelocationTableEntries);
 
     if (jitInfo->isSpill == true)
     {
@@ -4791,7 +4876,8 @@ void CEncoder::Gather4ScaledNd(CVariable *dst,
         ISA_GATHER4_SCALED,
         predOpnd,
         GetAluEMask(dst),
-        visaExecSize(m_encoderState.m_simdSize),
+        visaExecSize(offset->IsUniform() ? lanesToSIMDMode(offset->GetNumberElement()) :
+            m_encoderState.m_simdSize),
         ConvertChannelMaskToVisaType(BIT(nd) - 1),
         surfaceOpnd,
         globalOffsetOpnd,
@@ -4803,14 +4889,26 @@ void CEncoder::Gather4Scaled(CVariable *dst,
                        const ResourceDescriptor& resource,
                        CVariable *offset) {
     unsigned nd = dst->GetSize();
-    switch (m_encoderState.m_simdSize) {
-    default: assert(false && "Unknown SIMD size!"); return;
-    case SIMDMode::SIMD8:
-        nd = nd / (SIZE_GRF * 1);
-        break;
-    case SIMDMode::SIMD16:
-        nd = nd / (SIZE_GRF * 2);
-        break;
+    if (dst->IsUniform())
+    {
+        if (nd > SIZE_GRF)
+        {
+            assert(false && "Unknown DstSize!");
+            return;
+        }
+        nd = 1;
+    }
+    else
+    {
+        switch (m_encoderState.m_simdSize) {
+        default: assert(false && "Unknown SIMD size!"); return;
+        case SIMDMode::SIMD8:
+            nd = nd / (SIZE_GRF * 1);
+            break;
+        case SIMDMode::SIMD16:
+            nd = nd / (SIZE_GRF * 2);
+            break;
+        }
     }
     Gather4ScaledNd(dst, resource, offset, nd);
 }
@@ -4819,14 +4917,26 @@ void CEncoder::Scatter4Scaled(CVariable *src,
                         const ResourceDescriptor& resource,
                         CVariable *offset) {
     unsigned nd = src->GetSize();
-    switch (m_encoderState.m_simdSize) {
-    default: assert(false && "Unknown SIMD size!"); return;
-    case SIMDMode::SIMD8:
-        nd = nd / (SIZE_GRF * 1);
-        break;
-    case SIMDMode::SIMD16:
-        nd = nd / (SIZE_GRF * 2);
-        break;
+    if (src->IsUniform())
+    {
+        if (nd > SIZE_GRF)
+        {
+            assert(false && "Unknown SrcSize!");
+            return;
+        }
+        nd = 1;
+    }
+    else
+    {
+        switch (m_encoderState.m_simdSize) {
+        default: assert(false && "Unknown SIMD size!"); return;
+        case SIMDMode::SIMD8:
+            nd = nd / (SIZE_GRF * 1);
+            break;
+        case SIMDMode::SIMD16:
+            nd = nd / (SIZE_GRF * 2);
+            break;
+        }
     }
 
     VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
@@ -4842,7 +4952,8 @@ void CEncoder::Scatter4Scaled(CVariable *src,
         ISA_SCATTER4_SCALED,
         predOpnd,
         GetAluEMask(src),
-        visaExecSize(m_encoderState.m_simdSize),
+        visaExecSize(offset->IsUniform() ? lanesToSIMDMode(offset->GetNumberElement()) :
+            m_encoderState.m_simdSize),
         ConvertChannelMaskToVisaType(BIT(nd) - 1),
         surfaceOpnd,
         globalOffsetOpnd,
@@ -5324,7 +5435,5 @@ void CEncoder::Lifetime(VISAVarLifetime StartOrEnd, CVariable* dst)
     VISA_VectorOpnd* srcOpnd = GetSourceOperand(dst, noMod);
     V(vKernel->AppendVISALifetime(StartOrEnd, srcOpnd));
 }
-
-
 
 }

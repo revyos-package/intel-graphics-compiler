@@ -102,6 +102,12 @@ namespace IGC
         unsigned int    m_InstructionCount;
         void*           m_gtpinBuffer;              // Will be populated by VISA only when special switch is passed by gtpin
         unsigned int    m_gtpinBufferSize;
+        void*           m_funcSymbolTable;
+        unsigned int    m_funcSymbolTableSize;
+        unsigned int    m_funcSymbolTableEntries;
+        void*           m_funcRelocationTable;
+        unsigned int    m_funcRelocationTableSize;
+        unsigned int    m_funcRelocationTableEntries;
 
         void Destroy()
         {
@@ -1037,7 +1043,14 @@ namespace IGC
 
     void OptimizeIR(CodeGenContext* ctx);
     void UnifyIROGL(CodeGenContext* ctx);
-    void ConstantFolder(char* bitcode, uint bitcodeSize, void* CBptr[15], uint* pNewCB);
+
+    /**
+     * Fold derived constants.  Load CB data from CBptr with index & offset,
+     * calculate the new data based on LLVM bitcode and store results to pNewCB.
+     * Then driver will push pNewCB to thread payload.
+     */
+    void FoldDerivedConstant(char* bitcode, uint bitcodeSize, void* CBptr[15],
+        std::function<void (uint[4], uint, uint, bool)> getResInfoCB, uint* pNewCB);
 
     // Apply link optimization to shader programs.
     void LinkOptIR(CodeGenContext* ctxs[], bool usesStreamOutput);

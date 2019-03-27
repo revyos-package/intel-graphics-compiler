@@ -321,7 +321,7 @@ public:
         llvm::Value* srcAddressR,
         llvm::Value* src0,
         llvm::Value* src1);
-    
+
     llvm::Value* Create_StatelessAtomic(
         llvm::Value* ptr,
         llvm::Value* data,
@@ -369,8 +369,8 @@ public:
 
     llvm::Value* Create_SyncThreadGroup();
     llvm::Value* Create_MemoryFence(
-        bool commit, 
-        bool flushRWDataCache, 
+        bool commit,
+        bool flushRWDataCache,
         bool flushConstantCache,
         bool flushTextureCache,
         bool flushInstructionCache,
@@ -543,7 +543,7 @@ public:
         llvm::Value* int32_sampler,
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
-        llvm::Value* int32_offsetW, 
+        llvm::Value* int32_offsetW,
         bool feedback_enabled = false,
         llvm::Type* returnType = nullptr);
 
@@ -753,7 +753,7 @@ public:
 
     llvm::Value* CreateSetStream(llvm::Value* StreamId, llvm::Value* emitCount);
     llvm::Value* CreateEndPrimitive(llvm::Value* emitCount);
-    
+
     llvm::Value* CreateControlPointId();
     llvm::Value* CreatePrimitiveID();
     llvm::Value* CreateInstanceID();
@@ -766,9 +766,13 @@ public:
     llvm::Value* create_runtime(llvm::Value* offset);
     llvm::Value* create_countbits(llvm::Value* src);
     llvm::Value* create_waveBallot(llvm::Value* src);
+    llvm::Value* create_waveInverseBallot(llvm::Value* src);
     llvm::Value* create_waveshuffleIndex(llvm::Value* src, llvm::Value* index);
     llvm::Value* create_waveAll(llvm::Value* src, llvm::Value* type);
-    llvm::Value* create_wavePrefix(llvm::Value* src, llvm::Value* type, bool inclusive = false);
+    llvm::Value* create_wavePrefix(
+        llvm::Value* src, llvm::Value* type, bool inclusive,
+        llvm::Value *Mask = nullptr);
+    llvm::Value* create_waveMatch(llvm::Instruction *inst, llvm::Value *src);
     llvm::Value* create_quadPrefix(llvm::Value* src, llvm::Value* type, bool inclusive = false);
     llvm::Value* get32BitLaneID();
     llvm::Value* getSimdSize();

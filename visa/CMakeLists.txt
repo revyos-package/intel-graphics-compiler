@@ -34,6 +34,10 @@ set(LINK_DLL_IGA 1)
 endif(IGC_BUILD)
 
 
+# Set up build flags to use dynamic multi-threaded runtime (/MD) or
+# to use static multi-threaded runtime (/MT)
+option(LINK_AS_STATIC_LIB "link with /MT or /MD" ON)
+
 
 ################################################################################
 # IGA Related
@@ -72,10 +76,6 @@ if (IGC_BUILD)
   endif(MSVC)
 
 endif (IGC_BUILD)
-
-# Common library used by the shared libraries in this file (a sub directory of this directory hence
-# invoked from here)
-add_subdirectory(LocalScheduler)
 
 if(BS_USE_OSDM_BUILD_SYSTEM)
   include(${BUILD_SYS_INC}/utils.cmake)
@@ -129,10 +129,6 @@ BISON_TARGET(CISAParser CISA.y ${CMAKE_CURRENT_BINARY_DIR}/CISA.tab.c COMPILE_FL
 FLEX_TARGET(CISAScanner CISA.l ${CMAKE_CURRENT_BINARY_DIR}/lex.CISA.c COMPILE_FLAGS "-PCISA ${WIN_FLEX_FLAG}")
 ADD_FLEX_BISON_DEPENDENCY(CISAScanner CISAParser)
 
-# Set up windows mobile build flags to use dynamic multi-threaded runtime (/MD)
-# Set up windows(other) build flags to use static multi-threaded runtime (/MT)
-
-
 # Set up include paths used by all the libraries in this file
 # There is a windows specific include path for GNUTools support that is inside the repository. The
 # equivalent support is already included for Linux and Android so is not required for those platforms
@@ -141,7 +137,11 @@ if (WIN32)
   set(Jitter_inc_dirs ${Jitter_inc_dirs} ${GNUTOOLS_DIR}/include)
 endif (WIN32)
 
-win_static_runtime()
+if (LINK_AS_STATIC_LIB)
+  win_static_runtime()
+else (LINK_AS_STATIC_LIB)
+  win_dynamic_runtime()
+endif (LINK_AS_STATIC_LIB)
 
 # Some Android specific paths primarily to enable support for STL
 if(ANDROID AND MEDIA_IGA)
@@ -158,6 +158,19 @@ include_directories(${Jitter_inc_dirs})
 # Tell cmake to generate code to compile the flex and bison generated source as c++ rather than c
 # (due to the fact that they are .c files rather than .cpp)
 set_source_files_properties( CISA.tab.c lex.CISA.c PROPERTIES LANGUAGE CXX )
+
+  set(LocalScheduler_SOURCES
+    LocalScheduler/Dependencies_G4IR.cpp
+    LocalScheduler/G4_Sched.cpp
+    LocalScheduler/LatencyTable.cpp
+    LocalScheduler/LocalScheduler_G4IR.cpp
+    )
+
+  set(LocalScheduler_HEADERS
+    LocalScheduler/Dependencies_G4IR.h
+    LocalScheduler/LatencyTable.h
+    LocalScheduler/LocalScheduler_G4IR.h
+    )
 
 # Set up some common source files used in all the projects so they only need to be defined once
 set(GenX_Common_Sources_External
@@ -196,6 +209,7 @@ set(GenX_Common_Sources_External
   SpillCleanup.cpp
   Rematerialization.cpp
   RPE.cpp
+  ${LocalScheduler_SOURCES}
 )
 
 set(GenX_Common_Sources
@@ -275,6 +289,7 @@ set(GenX_Common_Headers
   Metadata.h
   RPE.h
   include/gtpin_IGC_interface.h
+  ${LocalScheduler_HEADERS}
 )
 set(GenX_CISA_dis_Common_Headers
   common.h
@@ -340,7 +355,7 @@ if (UNIX OR WIN32)
   source_group("Utility Files" FILES ${GenX_IR_EXE_UTILITY} )
   source_group("Header Files" FILES ${GenX_IR_EXE_HEADERS} )
   source_group("Lex Yacc Files" FILES ${GenX_IR_EXE_lex_yacc} )
-  target_link_libraries(GenX_IR_Exe LocalScheduler IGA_SLIB IGA_ENC_LIB)
+  target_link_libraries(GenX_IR_Exe IGA_SLIB IGA_ENC_LIB)
   if (ANDROID AND MEDIA_IGA)
      target_link_libraries(GenX_IR_Exe c++_static)
   endif(ANDROID AND MEDIA_IGA)
@@ -405,7 +420,7 @@ endif (NOT IGC_BUILD)
 # ###############################################################
 # GenX_IR (dll)
 # ###############################################################
-link_directories(${libGenX_IR_BINARY_DIR}/LocalScheduler)
+
 set(GenX_IR_DLL_SOURCES
   ${GenX_Common_Sources}
   ${GenX_CISA_dis_Common_Sources}
@@ -449,10 +464,10 @@ if (IGC_BUILD)
     )
   set_target_properties( GenX_IR PROPERTIES OUTPUT_NAME "igfxcmjit${TARGET_MODIFIER}")
   if(WIN32)
-    target_link_libraries(GenX_IR LocalScheduler ${GCC_SECURE_LINK_FLAGS} IGA_ENC_LIB IGA_SLIB)
+    target_link_libraries(GenX_IR ${GCC_SECURE_LINK_FLAGS} IGA_ENC_LIB IGA_SLIB)
     add_dependencies(GenX_IR IGA_DLL)
   else()
-    target_link_libraries(GenX_IR LocalScheduler ${GCC_SECURE_LINK_FLAGS} IGA_ENC_LIB IGA_SLIB)
+    target_link_libraries(GenX_IR ${GCC_SECURE_LINK_FLAGS} IGA_ENC_LIB IGA_SLIB)
     add_dependencies(GenX_IR IGA_DLL)
   endif(WIN32)
 endif (IGC_BUILD)
