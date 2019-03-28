@@ -1,6 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: intel-graphics-compiler
 Source: https://github.com/intel/intel-graphics-compiler
+Files-Excluded: IGC/AdaptorOCL/SPIRV/SPIRV-Tools
 
 Files: *
 Copyright: 2017-2018 Intel
