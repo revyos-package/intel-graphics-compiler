@@ -74,7 +74,7 @@ PhyRegUsage::PhyRegUsage(PhyRegUsageParms& p) :
     }
     else if (regFile == G4_FLAG)
     {
-        auto numFlags = getNumFlagRegisters();
+        auto numFlags = builder.getNumFlagRegisters();
         for (unsigned i = 0; i < numFlags; i++)
             availableFlags[i] = true;
     }
@@ -204,7 +204,7 @@ void PhyRegUsage::freeRegs(LiveRange* varBasis)
     {
         MUST_BE_TRUE(varBasis->getPhyReg()->isFlag(), ERROR_UNKNOWN);
         freeContiguous(availableFlags, varBasis->getPhyRegOff(),
-            numAllocUnit(decl->getNumElems(), decl->getElemType()), getNumFlagRegisters());
+            numAllocUnit(decl->getNumElems(), decl->getElemType()), builder.getNumFlagRegisters());
     }
     else // not yet handled
         MUST_BE_TRUE(false, ERROR_UNKNOWN);
@@ -1191,17 +1191,10 @@ bool PhyRegUsage::assignRegs(bool  highInternalConflict,
         // if the number of reg needed is more than 1, then we go ahead
         //
         unsigned regNeeded = numAllocUnit(decl->getNumElems(), decl->getElemType());
-        if (findContiguousAddrFlag(availableFlags, forbidden, subAlign, regNeeded, getNumFlagRegisters(), startFLAGReg, i))
+        if (findContiguousAddrFlag(availableFlags, forbidden, subAlign, regNeeded, builder.getNumFlagRegisters(), startFLAGReg, i))
         {
             // subregoffset should consider the declare data type
-            if (i >= 2)
-            {
-                varBasis->setPhyReg(regPool.getF1Reg(), i - 2);
-            }
-            else
-            {
-                varBasis->setPhyReg(regPool.getF0Reg(), i);
-            }
+            varBasis->setPhyReg(regPool.getFlagAreg(i / 2), i & 1);
             return true;
         }
         return false;
@@ -1222,11 +1215,11 @@ unsigned LiveRange::getForbiddenVectorSize()
     {
     case G4_GRF:
     case G4_INPUT:
-        return gra.kernel.getOptions()->getuInt32Option(vISA_TotalGRFNum);
+        return gra.kernel.getNumRegTotal();
     case G4_ADDRESS:
         return getNumAddrRegisters();
     case G4_FLAG:
-        return getNumFlagRegisters();
+        return gra.builder.getNumFlagRegisters();
     default:
         assert(false && "illegal reg file");
         return 0;
@@ -1259,24 +1252,24 @@ unsigned int getStackCallRegSize(bool reserveStackCallRegs)
     }
 }
 
-void getForbiddenGRFs(vector<unsigned int>& regNum, const Options *opt, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned rerservedRegNum)
+void getForbiddenGRFs(vector<unsigned int>& regNum, G4_Kernel &kernel, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned rerservedRegNum)
 {
     // Push forbidden register numbers to vector regNum
     //
     // r0 - Forbidden when platform is not 3d
     // rMax, rMax-1, rMax-2 - Forbidden in presence of stack call sites
-    unsigned totalGRFNum = opt->getuInt32Option(vISA_TotalGRFNum);
+    unsigned totalGRFNum = kernel.getNumRegTotal();
 
-    if (opt->getTarget() != VISA_3D ||
-        opt->getOption(vISA_enablePreemption) ||
-		reserveSpillSize > 0 ||
+    if (kernel.getOptions()->getTarget() != VISA_3D ||
+        kernel.getOption(vISA_enablePreemption) ||
+        reserveSpillSize > 0 ||
         stackCallRegSize > 0 ||
-        opt->getOption(vISA_ReserveR0))
+        kernel.getOption(vISA_ReserveR0))
     {
         regNum.push_back(0);
     }
 
-    if (opt->getOption(vISA_enablePreemption))
+    if (kernel.getOption(vISA_enablePreemption))
     {
         // r1 is reserved for SIP kernel
         regNum.push_back(1);
@@ -1342,7 +1335,7 @@ void LiveRange::allocForbidden(Mem_Manager& mem, bool reserveStackCallRegs, unsi
     {
         vector<unsigned int> forbiddenGRFs;
         unsigned int stackCallRegSize = getStackCallRegSize(reserveStackCallRegs);
-        getForbiddenGRFs(forbiddenGRFs, gra.kernel.getOptions(), stackCallRegSize, reserveSpillSize, rerservedRegNum);
+        getForbiddenGRFs(forbiddenGRFs, gra.kernel, stackCallRegSize, reserveSpillSize, rerservedRegNum);
 
         for (unsigned int i = 0; i < forbiddenGRFs.size(); i++)
         {
@@ -1449,6 +1442,6 @@ PhyRegUsageParms::PhyRegUsageParms(GlobalRA& g, LiveRange* l[], G4_RegFileKind r
     weakEdgeUsage = weakEdges;
     maxGRFCanBeUsed = m;
     rFile = r;
-    totalGRF = gra.kernel.getOptions()->getuInt32Option(vISA_TotalGRFNum);
+    totalGRF = gra.kernel.getNumRegTotal();
     lrs = l;
 }

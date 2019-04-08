@@ -239,10 +239,7 @@ public:
         // HS HW barriers work correctly since ICL platform.
         return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE);
     }
-    bool applyTEFactorsPadding() const
-    {
-        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE;
-    }
+
     bool enableVertexReorderingPhase2() const
     {
         return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE);
@@ -256,6 +253,12 @@ public:
     bool SupportCPS() const
     {
         return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE);
+    }
+    bool supportsThreadCombining() const
+    {
+        return !(!m_WaTable.WaEnablePooledEuFor2x6 &&
+            m_platformInfo.eProductFamily == IGFX_BROXTON &&
+            m_GTSystemInfo.SubSliceCount == 2);
     }
     bool supportsSIMD16TypedRW() const
     {

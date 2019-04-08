@@ -32,11 +32,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "CompilerStats.h"
 
+#define MAX_ERROR_MSG_LEN            511
 #define vISA_NUMBER_OF_OPNDS_IN_POOL 47
 
 //forward declaration
 namespace vISA
 {
+class G4_Declare;
+class G4_Inst;
 class G4_Kernel;
 class IR_Builder;
 class DebugInfoFormat;
@@ -383,12 +386,6 @@ public:
     CM_BUILDER_API int AppendVISACFSwitchJMPInst(VISA_VectorOpnd *index, unsigned char labelCount, VISA_LabelOpnd **labels);
 
     CM_BUILDER_API int AppendVISASurfAccessDwordAtomicInst(
-        VISAAtomicOps subOp, bool is16Bit, Common_VISA_EMask_Ctrl emask,
-        Common_ISA_Exec_Size executionSize, VISA_StateOpndHandle *surface,
-        VISA_VectorOpnd *globalOffset, VISA_RawOpnd *elementOffset,
-        VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst);
-
-    CM_BUILDER_API int AppendVISASurfAccessDwordAtomicInst(
         VISA_PredOpnd *pred, VISAAtomicOps subOpc, bool is16Bit,
         Common_VISA_EMask_Ctrl eMask, Common_ISA_Exec_Size execSize,
         VISA_StateOpndHandle *surface, VISA_RawOpnd *offsets,
@@ -396,9 +393,6 @@ public:
 
     CM_BUILDER_API int AppendVISASurfAccessGatherScatterInst(ISA_Opcode opcode, Common_VISA_EMask_Ctrl emask, GATHER_SCATTER_ELEMENT_SIZE elementSize,
         Common_ISA_Exec_Size executionSize, VISA_StateOpndHandle *surface, VISA_VectorOpnd *globalOffset, VISA_RawOpnd *elementOffset, VISA_RawOpnd *srcDst);
-
-    CM_BUILDER_API int AppendVISASurfAccessGather4Scatter4Inst(ISA_Opcode opcode, VISAChannelMask chMask, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize,
-        VISA_StateOpndHandle *surface, VISA_VectorOpnd *globalOffset, VISA_RawOpnd *elementOffset, VISA_RawOpnd *srcDst);
 
     CM_BUILDER_API int AppendVISASurfAccessGather4Scatter4TypedInst(ISA_Opcode opcode,
         VISA_PredOpnd *pred,
@@ -474,9 +468,6 @@ public:
         VISA_VectorOpnd          *address,
         VISA_RawOpnd             *offsets,
         VISA_RawOpnd             *src);
-
-    CM_BUILDER_API int AppendVISASurfAccessTransposeLoadInst(VISA_StateOpndHandle *surface, unsigned char blockWidth, unsigned char blockHeight,
-        VISA_VectorOpnd *xOffset, VISA_VectorOpnd *yOffset, VISA_RawOpnd *dst);
 
     CM_BUILDER_API int AppendVISASILoad(VISA_StateOpndHandle *surface, VISAChannelMask channel, bool isSIMD16,
         VISA_RawOpnd *uOffset, VISA_RawOpnd *vOffset, VISA_RawOpnd *rOffset, VISA_RawOpnd *dst);
@@ -896,7 +887,13 @@ private:
     // ** Note that the ret IP r1.0 is reserved by convention at
     // GlobalRA::setABIForStackCallFunctionCalls, the entire r1.0 is reserved, while
     // for call dst it'll use only r1.0-r1.1, so here we take r1.2 as add's dst
+    typedef std::vector<vISA::G4_INST*> InstListType;
     void expandIndirectCallWithRegTarget();
+    // create the instructions to calculate the jump target offset, return the G4_decl for the
+    // jump target register
+    vISA::G4_Declare* createInstsForCallTargetOffset(InstListType& insts, vISA::G4_INST* fcall);
+    void createInstsForRetIP(InstListType& insts, vISA::G4_INST* fcall);
+
     void getHeightWidth(G4_Type type, unsigned int numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize);
     CisaFramework::CisaInst* AppendVISASvmGeneralScatterInst(VISA_PredOpnd* pred,
         Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size execSize, unsigned char blockSize,

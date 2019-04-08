@@ -27,20 +27,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "Common_ISA.h"
 #include "Mem_Manager.h"
-#include "cm_portability.h"
+#include "VISADefines.h"
 
 #define ALLOC_ASSERT(X)      \
     if (X == NULL) return 1; \
 
 const char * implictKindStrings[IMPLICIT_INPUT_COUNT] = { "EXPLICIT", "LOCAL_SIZE", "GROUP_COUNT", "LOCAL_ID" };
-
-uint8_t Transpose_Read_Block_size[4] =
-{
-    1,
-    2,
-    4,
-    8
-};
 
 const char* Rel_op_str[ISA_CMP_UNDEF + 1] =
 {

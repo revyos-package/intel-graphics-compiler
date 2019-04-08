@@ -53,7 +53,7 @@ private:
     void LowerIntrinsicInputOutput(llvm::Function &F);
 
     unsigned int GetDomainType();
-    bool IsTEFactorsPaddingAllowed(llvm::BasicBlock * bb);
+    bool IsTEFactorsPaddingAllowed(llvm::BasicBlock * bb, unsigned int tessShaderDomain);
 
     llvm::GenIntrinsicInst* AddURBWriteControlPointOutputs(
         Value* mask,
@@ -130,6 +130,7 @@ void HullShaderLowering::LowerIntrinsicInputOutput(Function& F)
     IRBuilder<> builder(F.getContext());
 
     IGC::CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    unsigned int tessShaderDomain = GetDomainType();
 
     for(auto BI = F.begin(), BE = F.end(); BI != BE; BI++)
     {
@@ -245,14 +246,14 @@ void HullShaderLowering::LowerIntrinsicInputOutput(Function& F)
                     (IID == GenISAIntrinsic::GenISA_InnerScalarTessFactors))
                 {
                     // Apply URB padding for TE factors.
-                    if (IGC_IS_FLAG_ENABLED(EnableTEFactorsPadding) && ctx->platform.applyTEFactorsPadding())
+                    if (IGC_IS_FLAG_ENABLED(EnableTEFactorsPadding))
                     {
                         if (!checkedForTEFactorsPadding)
                         {
                             checkedForTEFactorsPadding = true;
 
                             BasicBlock* bb = dyn_cast<BasicBlock>(BI);
-                            if (IsTEFactorsPaddingAllowed(bb))
+                            if (IsTEFactorsPaddingAllowed(bb, tessShaderDomain))
                             {
                                 Value* undef = llvm::UndefValue::get(Type::getFloatTy(F.getContext()));
                                 Value* data[8] = { undef,undef,undef,undef,undef,undef,undef,undef };
@@ -288,8 +289,6 @@ void HullShaderLowering::LowerIntrinsicInputOutput(Function& F)
                     //------------------------------------------------------------------------------------
                     //| 			        |  					        | 	             |                |
                     //------------------------------------------------------------------------------------
-
-                    unsigned int tessShaderDomain = GetDomainType();
 
                     // offset into URB is 1 for outerScalarTessFactors and
                     // 1 if its triangle domain and inner scalar tessellation factor
@@ -393,9 +392,10 @@ unsigned int HullShaderLowering::GetDomainType()
     return tessShaderDomain;
 }
 
-bool HullShaderLowering::IsTEFactorsPaddingAllowed(llvm::BasicBlock * bb)
+bool HullShaderLowering::IsTEFactorsPaddingAllowed(llvm::BasicBlock * bb, unsigned int tessShaderDomain)
 {
-    bool paddingAllowed = false;
+    unsigned int outerTessellationFactorsMask = 0;
+    unsigned int innerTessellationFactorsMask = 0;
     for (auto II = bb->begin(), IE = bb->end(); II != IE; II++)
     {
         if (GenIntrinsicInst* inst = dyn_cast<GenIntrinsicInst>(II))
@@ -406,15 +406,37 @@ bool HullShaderLowering::IsTEFactorsPaddingAllowed(llvm::BasicBlock * bb)
             {
                 if (llvm::isa<ConstantInt>(inst->getOperand(0)))
                 {
-                    // Padding can be applied in case basic block contains at least one TE factor intrinsic
-                    // indexed with immediate value. Such intrinsic will be converted to URBWrite instruction
-                    // with both immediate offset and immediate mask and later on will be merged with padding
-                    // URBWrite instruction
-                    paddingAllowed = true;
-                    break;
+                    unsigned int factor = int_cast<unsigned int>(llvm::cast<ConstantInt>(inst->getOperand(0))->getZExtValue());
+                    if (IID == GenISAIntrinsic::GenISA_OuterScalarTessFactors)
+                    {
+                        outerTessellationFactorsMask |= (1 << factor);
+                    }
+                    else
+                    {
+                        innerTessellationFactorsMask |= (1 << factor);
+                    }
                 }
             }
         }
+    }
+
+    bool paddingAllowed = false;
+    // Allow padding only in case current basic block writes complete set of tessellation factors
+    // defined for given domain.
+    if (tessShaderDomain == USC::TESSELLATOR_DOMAIN_TRI)
+    {
+        // For triangle domain there are three outer tessellation factors and one inner tessellation factor.
+        if ((outerTessellationFactorsMask == 0x7) && (innerTessellationFactorsMask == 0x1)) paddingAllowed = true;
+    }
+    else if (tessShaderDomain == USC::TESSELLATOR_DOMAIN_QUAD)
+    {
+        // For quad domain there are four outer tessellation factors and two inner tessellation factors.
+        if ((outerTessellationFactorsMask == 0xF) && (innerTessellationFactorsMask == 0x3)) paddingAllowed = true;
+    }
+    else if (tessShaderDomain == USC::TESSELLATOR_DOMAIN_ISOLINE)
+    {
+        // For isoline domain there are two outer tessellation factors and no inner tessellation factors.
+        if ((outerTessellationFactorsMask == 0x3) && (innerTessellationFactorsMask == 0x0)) paddingAllowed = true;
     }
     return paddingAllowed;
 }
@@ -424,9 +446,9 @@ llvm::GenIntrinsicInst* HullShaderLowering::AddURBWriteControlPointOutputs(Value
     llvm::IRBuilder<> builder(m_module->getContext());
     builder.SetInsertPoint(prev);
 
-    // Now calculate the correct offset. This would be 
+    // Now calculate the correct offset. This would be
     // CPID * maxAttrIndex + maxPatchConstantOutputs + patchHeaderSize + attributeOffset
-    // Step1: mulRes = CPID * maxAttrIndex 
+    // Step1: mulRes = CPID * maxAttrIndex
     llvm::GlobalVariable* pGlobal = m_module->getGlobalVariable("MaxNumOfOutputSignatureEntries");
     uint32_t m_pMaxOutputSignatureCount = int_cast<uint32_t>(llvm::cast<llvm::ConstantInt>(pGlobal->getInitializer())->getZExtValue());
     llvm::Value* controlPtId = prev->getOperand(5);
@@ -446,13 +468,13 @@ llvm::GenIntrinsicInst* HullShaderLowering::AddURBWriteControlPointOutputs(Value
         {
             m_pMulRes = builder.getInt32(outputControlPointid * QuadEltUnit(m_pMaxOutputSignatureCount).Count());
         }
-        else 
+        else
         {
             m_pMulRes = builder.CreateMul(controlPtId, builder.getInt32(QuadEltUnit(m_pMaxOutputSignatureCount).Count()));
         }
     }
 
-    // Step2: m_pAddedPatchConstantOutput = maxPatchConstantOutputs + patchHeaderSize + attributeOffset 
+    // Step2: m_pAddedPatchConstantOutput = maxPatchConstantOutputs + patchHeaderSize + attributeOffset
     pGlobal = m_module->getGlobalVariable("MaxNumOfPatchConstantSignatureEntries");
     const uint32_t m_pMaxPatchConstantSignatureDeclarations = int_cast<uint32_t>(llvm::cast<llvm::ConstantInt>(pGlobal->getInitializer())->getZExtValue());
     const uint numPatchConstantsPadded = iSTD::Align(m_pMaxPatchConstantSignatureDeclarations, 2);

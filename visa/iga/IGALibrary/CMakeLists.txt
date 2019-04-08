@@ -2,7 +2,7 @@
 ##############################################
 # IGA dynamic and static library generation
 
-set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD 14)
 
 # add GED libraries and includes
 if (CMAKE_SIZEOF_VOID_P EQUAL 4)
@@ -239,7 +239,6 @@ endif()
 # DISABLE_ENCODER_EXCEPTIONS: Disabling exceptions for encoder only project.
 # So it can be used in vISA BE, which is used in IGC. (IGC doesn't permit C++
 # exceptions to be used
-#
 # Alex: seems like this is the way to do it so it works in various
 # linux, android builds.
 target_compile_definitions(IGA_ENC_LIB PUBLIC DISABLE_ENCODER_EXCEPTIONS)
@@ -328,16 +327,21 @@ if(ANDROID AND MEDIA_IGA)
 endif(ANDROID AND MEDIA_IGA)
 # target_link_libraries(IGA PRIVATE GEDLibrary)
 
-  set_target_properties(IGA_DLL PROPERTIES
-                        VERSION "${IGC_API_MAJOR_VERSION}.${IGC_API_MINOR_VERSION}.${IGC_API_PATCH_VERSION}"
-                        SOVERSION "${IGC_API_MAJOR_VERSION}")
-
+  if(IGC_BUILD)
+    set_target_properties(IGA_DLL PROPERTIES
+                          VERSION "${IGC_API_MAJOR_VERSION}.${IGC_API_MINOR_VERSION}.${IGC_API_PATCH_VERSION}"
+                          SOVERSION "${IGC_API_MAJOR_VERSION}")
+  endif()
+ 
   if(UNIX)
+    if (CMAKE_INSTALL_FULL_LIBDIR)
+        set(IGA_LIB_PATH ${CMAKE_INSTALL_FULL_LIBDIR})
+    else()
+        set(IGA_LIB_PATH ${CMAKE_INSTALL_PREFIX}/lib)
+    endif()
     INSTALL(TARGETS IGA_DLL
-        RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/.   COMPONENT igc-core
-        LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib COMPONENT igc-core
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/.   COMPONENT igc-core
-    )
+        LIBRARY DESTINATION ${IGA_LIB_PATH} COMPONENT igc-core)
+    unset(IGA_LIB_PATH)
   elseif(WIN32)
     install(TARGETS IGA_DLL RUNTIME
             DESTINATION Release/lh64              CONFIGURATIONS Release)

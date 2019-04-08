@@ -329,7 +329,12 @@
         return getOption(vISA_WAWSubregHazardAvoidance);
     }
 
-    bool doNotRewriteRegion() const
+    bool newTernaryStride() const
+    {
+        return false;
+    }
+
+    bool doNotRewriteContiguousRegion() const
     {
         return false;
     }
@@ -460,6 +465,12 @@
     bool useMultiThreadLatency() const
     {
         return getOptions()->getOption(vISA_useMultiThreadedLatencies);
+    }
+
+    // each flag register is 16-bit
+    uint32_t getNumFlagRegisters(void) 
+    { 
+        return 4;
     }
 
     // end HW capabilities

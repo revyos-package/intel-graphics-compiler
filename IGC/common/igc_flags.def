@@ -48,10 +48,11 @@ DECLARE_IGC_REGKEY(DWORD,UnifiedSendCycle,              0,     "Using unified se
 DECLARE_IGC_REGKEY(DWORD,DisableMixMode,                0,     "Disables mix mode in vISA BE.")
 DECLARE_IGC_REGKEY(DWORD,DisableHFMath,                 0,     "Disables HF math instructions.")
 DECLARE_IGC_REGKEY(debugString, VISAOptions,            0,     "Options to vISA. Space-separated options.")
-DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve regsiter number for spill cost testing.")
 DECLARE_IGC_REGKEY(DWORD,disableIGASyntax,              false, "Disables GEN isa text output using IGA and new syntax.")
 DECLARE_IGC_REGKEY(DWORD,disableCompaction,             false, "Disables compaction.")
 DECLARE_IGC_REGKEY(DWORD,TotalGRFNum,                   0,     "Total GRF used for register allocation.")
+DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve regsiter number for spill cost testing.")
+DECLARE_IGC_REGKEY(DWORD, GRFNumToUse,                  0,     "Set the number of general registers to use (64 to totalGRFNum)")
 DECLARE_IGC_REGKEY(bool, ExpandPlane,                   0,     "Enable pln to mad macro expansion.")
 DECLARE_IGC_REGKEY(bool, EnableBCR,                     false,  "Enable bank conflict reduction.")
 DECLARE_IGC_REGKEY(bool, GlobalSendVarSplit, false, "Enable global send variable splitting when we are about to spill")
@@ -67,7 +68,8 @@ DECLARE_IGC_REGKEY(DWORD, LoopSinkMinSave,              5,  "If loop sink can ha
 DECLARE_IGC_REGKEY(DWORD, LoopSinkThresholdDelta,       50,  "Do loop sink If the estimated register pressure is higher than this + #avaialble registers")
 DECLARE_IGC_REGKEY(bool, DisableCodeHoisting,           false, "Setting this to 1/true adds a compiler switch to disable code-hoisting")
 DECLARE_IGC_REGKEY(bool, DisableDeSSA,                  false, "Setting this to 1/true adds a compiler switch to disable optimized De-SSA")
-DECLARE_IGC_REGKEY(bool, EnableDeSSAWA,                 true,  "[tmp]Keep some piece of code to avoid perf regression")
+DECLARE_IGC_REGKEY(bool, EnableDeSSAWA,                 false,  "[tmp]Keep some piece of code to avoid perf regression")
+DECLARE_IGC_REGKEY(DWORD, EnableDeSSAAlias,             0, "[tmp]Enable adding alias feature to DeSSA (using PrefCCMap, not InsEltMap")
 DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing,      false, "Setting this to 1/true adds a compiler switch to disable payload coalescing optimization for all types")
 DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing_RT,   false, "Setting this to 1/true adds a compiler switch to disable payload coalescing optimization for RT only")
 DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing_Sample, false, "Setting this to 1/true adds a compiler switch to disable payload coalescing optimization for Samplers only")
@@ -143,8 +145,6 @@ DECLARE_IGC_REGKEY(bool, EnableLogicalAndToBranch, true,
     "Enable convert logical AND to conditional branch")
 DECLARE_IGC_REGKEY(bool, DisableMovingInstanceIDIndexOfVS,  false,   "Disable moving index of InstanceID in VS to last location.")
 DECLARE_IGC_REGKEY(bool, EnableSplitUnalignedVector,    true,    "Enable Splitting of unaligned vectors for loads and stores")
-DECLARE_IGC_REGKEY(bool, DisablePHIDstCopy,             true,    "[tmp]Generate phi moves on src-side of phi only.")
-
 
 DECLARE_IGC_GROUP("Shader debugging")
 DECLARE_IGC_REGKEY(bool, ShaderDebugHashCodeInKernel,   false, "Append hash code to the binary")
@@ -323,6 +323,8 @@ DECLARE_IGC_REGKEY(int, ByPassAllocaSizeHeuristic,   0,  "Force some Alloca to p
 DECLARE_IGC_REGKEY(DWORD, MemOptWindowSize,   150,  "Change the size of the window in which we allow load/stores to be coalesced. We keep it limited in order to avoid creating long liveranges. Default value is 150")
 DECLARE_IGC_REGKEY(bool, ForceNoFP64bRegioning, false, "force regioning rules for FP and 64b FPU instructions")
 DECLARE_IGC_REGKEY(bool, EnableOneStepElf, true, "Enable generation of direct elf mapping src->Gen ISA")
+DECLARE_IGC_REGKEY(bool, EmitDebugRanges, false, "Emit .debug_ranges section when instructions in a block are non-consecutive")
+DECLARE_IGC_REGKEY(bool, EmitDebugLoc, false, "Enable generation of .debug_loc section")
 
 DECLARE_IGC_GROUP("Generating precompiled headers")
 DECLARE_IGC_REGKEY(bool, ApplyConservativeRastWAHeader, true,

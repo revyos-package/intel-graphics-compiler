@@ -229,7 +229,6 @@ G4_opcode Get_G4_Opcode_From_Common_ISA_Opcode( ISA_Opcode opcode )
         case ISA_MEDIA_ST:
         case ISA_GATHER:
         case ISA_SCATTER:
-        case ISA_SCATTER_ATOMIC:
         case ISA_OWORD_LD_UNALIGNED:
         case ISA_SAMPLE:
         case ISA_SAMPLE_UNORM:
@@ -369,8 +368,10 @@ G4_SubReg_Align Get_G4_SubRegAlign_From_Size( uint16_t size )
         // identifying.
     case 16:
         return Eight_Word;
-    default:
+    case 32:
         return Sixteen_Word;
+    default:
+        return SUB_ALIGNMENT_GRFALIGN;
     }
 }
 

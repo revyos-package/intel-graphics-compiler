@@ -64,38 +64,20 @@ namespace TC
     { TB_DATA_FORMAT_ELF,       TB_DATA_FORMAT_LLVM_ARCHIVE }
   };
 
+#ifdef _WIN32
+#ifdef COMMON_CLANG_LIB_FULL_NAME
   struct CCModuleStruct {
     typedef decltype(Compile) *PFcnCCCompile;
 
-    void* pModule           = nullptr;
-    PFcnCCCompile pCompile  = nullptr;
-    const char *pModuleName = nullptr;
-#ifndef _WIN32
-    // Due to clash of names between CPU OCL common clang and GPU common clang
-    // we rename the libcommon_clang.so. While the change is not introduced
-    // to Neo, try to load from new location and if it fails load the old name.
-    // TODO: remove this and related code when Neo switches.
-    const char *pModuleOldName = nullptr;
-#endif
+    void* pModule = nullptr;
+    PFcnCCCompile pCompile = nullptr;
 
-    CCModuleStruct()
-    {
-#ifdef _WIN32
-      // Both Win32 and Win64
-#ifdef _WIN64
-      // Win64 only
-      pModuleName = "common_clang64.dll";
-#else
-      // Win32 only
-      pModuleName = "common_clang32.dll";
-#endif
-#else
-      pModuleOldName = "libcommon_clang.so";
-      pModuleName    = "libopencl_clang.so";
-#endif
-    }
+    const char *pModuleName = COMMON_CLANG_LIB_FULL_NAME;
   };
-
+#else
+#   error "Common clang name not defined"
+#endif
+#endif
 
   /***************************************************************************\
 
@@ -110,7 +92,9 @@ namespace TC
   {
     TB_DATA_FORMAT m_InputFormat;
     TB_DATA_FORMAT m_OutputFormat;
+#ifdef _WIN32
     CCModuleStruct m_CCModule;
+#endif
 
     
   public:

@@ -126,28 +126,21 @@ int VISAKernelImpl::calculateTotalInputSize()
 int VISAKernelImpl::compileFastPath()
 {
     int status = CM_SUCCESS;
-
-    if(getIsKernel())
+    if (getIsKernel())
     {
         status = calculateTotalInputSize();
     }
 
-    if(status != CM_SUCCESS)
+    if (status != CM_SUCCESS)
     {
         return status;
     }
 
-    G4_Kernel& kernel = *m_kernel;
     IR_Builder& builder = *m_builder;
-
     builder.predefinedVarRegAssignment((uint8_t)m_inputSize);
     builder.expandPredefinedVars();
     builder.resizePredefinedStackVars();
-
-    kernel.setNumRegTotal(builder.getOptions()->getuInt32Option(vISA_TotalGRFNum));
-
     status = compileTillOptimize();
-
     return status;
 }
 
@@ -189,8 +182,8 @@ static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
     case ALIGN_DWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Even_Word); break;//dword aligned;
     case ALIGN_QWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Four_Word); break;//8 byte aligned;
     case ALIGN_OWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Eight_Word); break;//oword aligned;
-    case ALIGN_GRF: dcl->setAlign(Either); dcl->setSubRegAlign(Sixteen_Word); break;//grf aligned;
-    case ALIGN_2_GRF: dcl->setAlign(Even); dcl->setSubRegAlign(Sixteen_Word); break; //2 grf aligned;
+    case ALIGN_GRF: dcl->setAlign(Either); dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN); break;//grf aligned;
+    case ALIGN_2_GRF: dcl->setAlign(Even); dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN); break; //2 grf aligned;
     default: assert(false && "Incorrect vISA alignment"); break;
     }
 }
@@ -207,6 +200,110 @@ int VISAKernelImpl::compileTillOptimize()
     Optimizer optimizer(*m_kernelMem, *m_builder, *m_kernel, m_kernel->fg);
 
     return optimizer.optimization();
+}
+
+G4_Declare* VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, G4_INST* fcall)
+{
+    // create instruction sequence:
+    //       add  r1.2  -IP   call_target
+    //       add  r1.2  r1.2  32
+
+    // calculate the reserved register's num from fcall's dst register
+    assert(fcall->getDst()->isGreg());
+    uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
+    // hardcoded add's dst subregister to 2
+    G4_Declare* add_dst_decl =
+        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
+
+    // create the first add instruction
+    G4_INST* add_inst = m_builder->createInternalInst(
+        nullptr, G4_add, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+        m_builder->createSrcRegRegion(
+            Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
+            m_builder->getRegionScalar(), Type_UD),
+        fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
+
+    // create the second add to add the ip to 32, to get the call's ip
+    G4_INST* add_inst2 = m_builder->createInternalInst(
+        nullptr, G4_add, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+        m_builder->Create_Src_Opnd_From_Dcl(
+            add_dst_decl, m_builder->getRegionScalar()),
+        m_builder->createImm(32, add_inst->getSrc(0)->getType()),
+        InstOpt_WriteEnable | InstOpt_NoCompact);
+
+    insts.push_back(add_inst);
+    insts.push_back(add_inst2);
+
+    return add_dst_decl;
+}
+
+void VISAKernelImpl::createInstsForRetIP(InstListType& insts, G4_INST* fcall)
+{
+    // SKL workaround for indirect call
+    // create instruction sequence:
+    //       mov  f0.0   0
+    //       mov  r1.1   0
+    //       cmp  f0.0   r1.1  0
+    //       mov  r1.1   f0.0        // save the exec mask to r1.1
+    //       add  r1.0   IP   64     // save the return IP to r1.0
+    //
+    // This piece of code must be inserted before add instructions
+    // created in createInstsForCallTargetOffset and the jmpi:
+    //      add  r1.2  -IP   call_target
+    //      add  r1.2  r1.2  32
+    //      jmpi r1.2
+    //
+    // so that the return IP in r1.0 will be correct. r1.0 is the
+    // IP of the instruction right after jmpi
+
+    // mov  f0.0   0
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_mov, nullptr, false, 1,
+        m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
+        m_builder->createImm(0, Type_UD), nullptr, InstOpt_WriteEnable));
+
+    // calculate the reserved register's num from fcall's dst register (shoud be r1)
+    assert(fcall->getDst()->isGreg());
+    uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
+    G4_Declare* r1_1_decl =
+        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 1);
+
+    // mov  r1.1   0
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_mov, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
+        m_builder->createImm(0, Type_UD),
+        nullptr, InstOpt_WriteEnable));
+
+    // cmp  f0.0   r1.1  0
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_cmp, nullptr, false, m_kernel->getSimdSize(),
+        m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
+        m_builder->Create_Src_Opnd_From_Dcl(r1_1_decl, m_builder->getRegionScalar()),
+        m_builder->createImm(0, Type_UD), InstOpt_NoOpt));
+
+    // mov  r1.1   f0.0
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_mov, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
+        m_builder->createSrcRegRegion(
+            Mod_src_undef, Direct, m_phyRegPool->getF0Reg(), 0, 0,
+            m_builder->getRegionScalar(), Type_UD),
+        nullptr, InstOpt_WriteEnable));
+
+    // add  r1.0   IP   64
+    G4_Declare* r1_0_decl =
+        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_add, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(r1_0_decl, 1),
+        m_builder->createSrcRegRegion(
+            Mod_src_undef, Direct, m_phyRegPool->getIpReg(), 0, 0,
+            m_builder->getRegionScalar(), Type_UD),
+        m_builder->createImm(64, Type_UD),
+        InstOpt_WriteEnable | InstOpt_NoCompact));
 }
 
 void VISAKernelImpl::expandIndirectCallWithRegTarget()
@@ -236,48 +333,55 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
                 //       add  r1.2  r1.2  32
                 //       call r1.0  r1.2
 
-                // calculate the reserved register's num from fcall's dst register
-                assert(fcall->getDst()->isGreg());
-                uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
-                // hardcoded add's dst subregister to 2
-                G4_Declare* add_dst_decl =
-                    m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
+                // For SKL workaround, expand call
+                // From:
+                //       call r1.0 call_target
+                // To:
+                //       mov  f0.0   0
+                //       mov  r1.1   0
+                //       cmp  f0.0   r1.1  0
+                //       mov  r1.1   f0.0
+                //       add  r1.0   IP   64
+                //       add  r1.2   -IP    call_target
+                //       add  r1.2   r1.2   32
+                //       jmpi r1.2
 
-                // create the first add instruction
-                G4_INST* add_inst = m_builder->createInternalInst(
-                    nullptr, G4_add, nullptr, false, 1,
-                    m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
-                    m_builder->createSrcRegRegion(
-                        Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
-                        m_builder->getRegionScalar(), Type_UD),
-                    fcall->getSrc(0), InstOpt_WriteEnable);
+                InstListType expanded_insts;
 
-                // create the second add to add the ip to 32, to get the call's ip
-                G4_INST* add_inst2 = m_builder->createInternalInst(
-                    nullptr, G4_add, nullptr, false, 1,
-                    m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
-                    m_builder->Create_Src_Opnd_From_Dcl(
-                        add_dst_decl, m_builder->getRegionScalar()),
-                    m_builder->createImm(32, add_inst->getSrc(0)->getType()),
-                    InstOpt_WriteEnable);
+                // create instructions to store return ip and exec mask, for SKL WA
+                if (getGenxPlatform() == GENX_SKL) {
+                    createInstsForRetIP(expanded_insts, fcall);
+                }
 
-                // Set no compated to make sure the ip calculation is correct
-                add_inst->setNoCompacted();
-                add_inst2->setNoCompacted();
+                // create instructions to calculate jump target offset
+                G4_Declare* jmp_target_decl = createInstsForCallTargetOffset(expanded_insts, fcall);
 
-                // then update fcall's src0 to add's dst
-                fcall->setSrc(m_builder->Create_Src_Opnd_From_Dcl(
-                    add_inst->getDst()->getTopDcl(), m_builder->getRegionScalar()), 0);
+                // update jump target (call's src0)
+                G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
+                    jmp_target_decl, m_builder->getRegionScalar());
+                fcall->setSrc(jump_target, 0);
+                fcall->setNoCompacted();
 
-                // then insert the add right before the call
+                if (getGenxPlatform() == GENX_SKL) {
+                    // create jmpi
+                    G4_INST* jmpi = m_builder->createInternalInst(
+                        nullptr, G4_jmpi, nullptr, false, 1, nullptr, fcall->getSrc(0),
+                        nullptr, InstOpt_WriteEnable | InstOpt_NoCompact);
+                    // jmpi's src must be signed int
+                    jmpi->getSrc(0)->asSrcRegRegion()->setType(Type_D);
+
+                    // remove call and insert jmpi to instlist
+                    bb->getInstList().erase(--bb->end());
+                    bb->getInstList().push_back(jmpi);
+                }
+
+                // then insert the expaneded instructions right before the call
                 INST_LIST_ITER insert_point = bb->end();
                 --insert_point;
-                bb->getInstList().insert(insert_point, add_inst);
-                bb->getInstList().insert(insert_point, add_inst2);
-
-                // Set the CISAOff to be the same as call
-                add_inst->setCISAOff(fcall->getCISAOff());
-                add_inst2->setCISAOff(fcall->getCISAOff());
+                for (auto inst_to_add : expanded_insts) {
+                    bb->getInstList().insert(insert_point, inst_to_add);
+                    inst_to_add->setCISAOff(fcall->getCISAOff());
+                }
             }
         }
     }
@@ -468,11 +572,11 @@ int VISAKernelImpl::InitializeFastPath()
     m_globalMem = new vISA::Mem_Manager(4096);
 
     void *frpPnt = m_mem.alloc(sizeof(PhyRegPool));
-    m_phyRegPool = new(frpPnt)PhyRegPool(*m_globalMem, getOptions()->getuInt32Option(vISA_TotalGRFNum));
 
-    m_kernel = new (m_mem)
-        G4_Kernel(m_instListNodeAllocator, *m_kernelMem, m_options, m_major_version, m_minor_version);
+    m_kernel = new (m_mem) G4_Kernel(m_instListNodeAllocator, *m_kernelMem, m_options, m_major_version, m_minor_version);
     m_kernel->setName(m_name.c_str());
+    m_phyRegPool = new (frpPnt) PhyRegPool(*m_globalMem, m_kernel->getNumRegTotal());
+
     if (getOptions()->getOption(vISA_GenerateDebugInfo))
     {
         m_kernel->getKernelDebugInfo()->setVISAKernel(this);
@@ -822,7 +926,7 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
         }
 
         // force subalign to be GRF if total size is larger than or equal to GRF
-        if (info->dcl->getSubRegAlign() != Sixteen_Word)
+        if (info->dcl->getSubRegAlign() != SUB_ALIGNMENT_GRFALIGN)
         {
             setDeclAlignment(info->dcl, varAlign);
         }
@@ -3546,74 +3650,6 @@ int VISAKernelImpl::AppendVISACFSwitchJMPInst(VISA_VectorOpnd *index, unsigned c
     return status;
 }
 
-int VISAKernelImpl::AppendVISASurfAccessDwordAtomicInst(
-    VISAAtomicOps subOp, bool is16Bit, Common_VISA_EMask_Ctrl emask,
-    Common_ISA_Exec_Size executionSize, VISA_StateOpndHandle *surface,
-    VISA_VectorOpnd *globalOffset, VISA_RawOpnd *elementOffset,
-    VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst)
-{
-    AppendVISAInstCommon();
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-        startTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    int status = CM_SUCCESS;
-
-    if(IS_GEN_BOTH_PATH)
-    {
-        CreateGenRawSrcOperand(elementOffset);
-        CreateGenRawSrcOperand(src0);
-        CreateGenRawSrcOperand(src1);
-        CreateGenRawDstOperand(dst);
-        status = m_builder->translateVISADwordAtomicInst(
-            subOp, is16Bit, emask, executionSize, surface->g4opnd,
-            globalOffset->g4opnd, elementOffset->g4opnd->asSrcRegRegion(),
-            src0->g4opnd->asSrcRegRegion(), src1->g4opnd->asSrcRegRegion(),
-            dst->g4opnd->asDstRegRegion());
-    }
-    if(IS_VISA_BOTH_PATH)
-    {
-        VISA_INST_Desc *inst_desc = NULL;
-        VISA_opnd *opnd[8];
-        int num_pred_desc_operands = 0;
-        ISA_Opcode opcode = ISA_SCATTER_ATOMIC;
-        inst_desc = &CISA_INST_table[opcode];
-        GET_NUM_PRED_DESC_OPNDS(num_pred_desc_operands, inst_desc );
-        int num_operands = 0;
-        int numElements = 0;
-
-        uint8_t OpAnd16BitTag = uint8_t(subOp) | uint8_t((is16Bit ? 1 : 0) << 5);
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, OpAnd16BitTag));
-
-        if(executionSize == EXEC_SIZE_16 )
-        {
-            numElements = 1;
-        }else
-        {
-            numElements = 0;
-        }
-
-        numElements += emask << 4;
-        //element Number
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, numElements));
-        ADD_OPND(num_operands, opnd, surface);
-        ADD_OPND(num_operands, opnd, globalOffset);
-        ADD_OPND(num_operands, opnd, elementOffset);
-        ADD_OPND(num_operands, opnd, src0);
-        ADD_OPND(num_operands, opnd, src1);
-        ADD_OPND(num_operands, opnd, dst);
-
-        CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
-
-        CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
-        inst->createCisaInstruction(opcode,EXEC_SIZE_1,0,0,opnd,num_operands,inst_desc);
-        addInstructionToEnd(inst);
-    }
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-    stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    return status;
-}
-
 int VISAKernelImpl::AppendVISASurfAccessDwordAtomicInst(VISA_PredOpnd           *pred,
                                                         VISAAtomicOps      subOpc,
                                                         bool                    is16Bit,
@@ -3758,84 +3794,6 @@ int VISAKernelImpl::AppendVISASurfAccessGatherScatterInst(ISA_Opcode opcode, Com
         ADD_OPND(num_operands, opnd, elementOffset);
 
         //dst/src
-        ADD_OPND(num_operands, opnd, srcDst);
-
-        CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
-
-        CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
-
-        inst->createCisaInstruction(opcode, EXEC_SIZE_1, 0 , 0 ,opnd, num_operands, inst_desc);
-        addInstructionToEnd(inst);
-    }
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-    stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    return status;
-}
-
-int VISAKernelImpl::AppendVISASurfAccessGather4Scatter4Inst(ISA_Opcode opcode, VISAChannelMask _chMask, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize,
-                                                            VISA_StateOpndHandle *surface, VISA_VectorOpnd *globalOffset, VISA_RawOpnd *elementOffset, VISA_RawOpnd *srcDst)
-{
-    AppendVISAInstCommon();
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-        startTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    int status = CM_SUCCESS;
-    ChannelMask chMask = ChannelMask::createFromAPI(_chMask);
-
-    if(IS_GEN_BOTH_PATH)
-    {
-        CreateGenRawSrcOperand(elementOffset);
-        auto offset = elementOffset->g4opnd->asSrcRegRegion();
-        if(opcode == ISA_GATHER4)
-        {
-            CreateGenRawDstOperand(srcDst); // gather4: srcDst is dst
-            status = m_builder->translateVISAGather4Inst(emask, false, chMask, executionSize,
-                surface->g4opnd, globalOffset->g4opnd, offset, srcDst->g4opnd->asDstRegRegion());
-        }else
-        {
-            CreateGenRawSrcOperand(srcDst); // scatter4: srcDst is src
-            status = m_builder->translateVISAScatter4Inst(emask, chMask, executionSize,
-                surface->g4opnd, globalOffset->g4opnd, offset, srcDst->g4opnd->asSrcRegRegion());
-        }
-    }
-    if(IS_VISA_BOTH_PATH)
-    {
-        VISA_INST_Desc *inst_desc = NULL;
-        VISA_opnd *opnd[8];
-        int num_pred_desc_operands = 0;
-        inst_desc = &CISA_INST_table[opcode];
-        GET_NUM_PRED_DESC_OPNDS(num_pred_desc_operands, inst_desc );
-        int num_operands = 0;
-        int val = 0;
-
-        //channel
-        // for scatter4/gather4, a channel mask of zero means on, and 1 means off
-        // So we need to flip the bits here.
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, chMask.getBinary(opcode)));
-
-        //modifiers
-        if(opcode == ISA_GATHER4)
-        {
-            ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, 0));
-        }
-
-        //number of elemetns
-        if(executionSize == EXEC_SIZE_16)
-            val = 1;
-        else if(executionSize == EXEC_SIZE_8)
-            val = 0;
-        else
-        {
-            CmAssert( 0 );
-            return CM_FAILURE;
-        }
-
-        val += emask << 4;
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, val));
-        ADD_OPND(num_operands, opnd, surface);
-        ADD_OPND(num_operands, opnd, globalOffset);
-        ADD_OPND(num_operands, opnd, elementOffset);
         ADD_OPND(num_operands, opnd, srcDst);
 
         CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
@@ -4578,55 +4536,6 @@ int VISAKernelImpl::AppendVISASurfAccessOwordLoadStoreInst(ISA_Opcode opcode, Co
         ADD_OPND(num_operands, opnd, surface);
         ADD_OPND(num_operands, opnd, offset);
         ADD_OPND(num_operands, opnd, srcDst);
-
-        CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
-
-        CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
-        inst->createCisaInstruction(opcode,EXEC_SIZE_1,0,0,opnd,num_operands,inst_desc);
-        addInstructionToEnd(inst);
-    }
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-    stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    return status;
-}
-
-int VISAKernelImpl::AppendVISASurfAccessTransposeLoadInst(VISA_StateOpndHandle *surface, unsigned char blockWidth, unsigned char blockHeight,
-                                                          VISA_VectorOpnd *xOffset, VISA_VectorOpnd *yOffset, VISA_RawOpnd *dst)
-{
-    AppendVISAInstCommon();
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-        startTimer(TIMER_VISA_BUILDER_APPEND_INST);
-#endif
-    int status = CM_SUCCESS;
-
-    if(IS_GEN_BOTH_PATH)
-    {
-        CreateGenRawDstOperand(dst);
-        status = m_builder->translateTransposeVISALoadInst(surface->g4opnd, blockWidth, blockHeight, xOffset->g4opnd, yOffset->g4opnd, dst->g4opnd->asDstRegRegion());
-    }
-    if(IS_VISA_BOTH_PATH)
-    {
-        VISA_INST_Desc *inst_desc = NULL;
-        VISA_opnd *opnd[6];
-        ISA_Opcode opcode = ISA_TRANSPOSE_LD;
-        inst_desc = &CISA_INST_table[opcode];
-        int num_operands = 0;
-        int num_pred_desc_operands = 0;
-        GET_NUM_PRED_DESC_OPNDS(num_pred_desc_operands, inst_desc );
-
-        //surface
-        ADD_OPND(num_operands, opnd, surface);
-
-        //blockWidth
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, blockWidth));
-
-        //blockHeight
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, blockHeight));
-
-        ADD_OPND(num_operands, opnd, xOffset);
-        ADD_OPND(num_operands, opnd, yOffset);
-        ADD_OPND(num_operands, opnd, dst);
 
         CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
 
@@ -8066,7 +7975,7 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
 {
     G4_Kernel::RelocationTableTy& reloc_table = m_kernel->getRelocationTable();
     numEntries = reloc_table.size();
-    byteSize = sizeof(IGC::GenRelocEntry) * numEntries;
+    byteSize = sizeof(GenRelocEntry) * numEntries;
 
     if (reloc_table.empty())
         return CM_SUCCESS;
@@ -8077,13 +7986,13 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
     if (buffer == NULL || buffer == nullptr)
         return CM_FAILURE;
 
-    IGC::GenRelocEntry* buffer_p = (IGC::GenRelocEntry*)buffer;
+    GenRelocEntry* buffer_p = (GenRelocEntry*)buffer;
     for (auto reloc : reloc_table)
     {
         buffer_p->r_type = reloc.getType();
         buffer_p->r_offset = (uint32_t)reloc.getInst()->getGenOffset();
-        assert(reloc.getSymbolName().size() <= IGC::MAX_SYMBOL_NAME_LENGTH);
-        std::strcpy(buffer_p->r_symbol, reloc.getSymbolName().c_str());
+        assert(reloc.getSymbolName().size() <= MAX_SYMBOL_NAME_LENGTH);
+        strcpy_s(buffer_p->r_symbol, MAX_SYMBOL_NAME_LENGTH, reloc.getSymbolName().c_str());
         ++buffer_p;
     }
 
@@ -8694,7 +8603,7 @@ void VISAKernelImpl::computeAllRelocs(unsigned int& numRelocs, BasicRelocEntry*&
             numRelocs = 0;
             return;
         }
-        for (unsigned int idx = 0; idx < relocs.size(); idx++)
+        for (unsigned int idx = 0; idx < numRelocs; idx++)
         {
             output[idx].relocOffset = relocs[idx].relocOffset;
             output[idx].info = relocs[idx].info;

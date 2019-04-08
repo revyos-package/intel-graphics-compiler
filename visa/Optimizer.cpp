@@ -57,11 +57,8 @@ void Optimizer::LVN()
     Mem_Manager mem(1024);
     PointsToAnalysis p(kernel.Declares, kernel.fg.getNumBB());
     p.doPointsToAnalysis(kernel.fg);
-    for(BB_LIST_ITER bb_it = kernel.fg.BBs.begin();
-        bb_it != kernel.fg.BBs.end();
-        bb_it++)
+    for (auto bb : kernel.fg.BBs)
     {
-        G4_BB* bb = (*bb_it);
         ::LVN lvn(fg, bb, mem, *fg.builder, p);
 
         lvn.doLVN();
@@ -113,23 +110,23 @@ static int getSrcSubReg( G4_Operand *src )
     return srcSubReg;
 }
 
-static void mergeBitVec( unsigned bitVec[2], G4_Operand* opnd,
+static void mergeBitVec( uint64_t bitVec[2], G4_Operand* opnd,
                         unsigned left_bound, unsigned right_bound )
 {
-    unsigned opndBitVecL = opnd->getBitVecL(), opndBitVecH = opnd->getBitVecH();
+    uint64_t opndBitVecL = opnd->getBitVecL(), opndBitVecH = opnd->getBitVecH();
     unsigned left_bound2 = opnd->getLeftBound(), right_bound2 = opnd->getRightBound();
     if( right_bound < left_bound2 || right_bound2 < left_bound ){
         return;
     }
     short dist = left_bound2 - left_bound;
     if( dist > 0 ){
-        if( dist >= 32 ){
-            unsigned lbit = opndBitVecL << (dist - 32);
+        if( dist >= (short)getGRFSize() ){
+            uint64_t lbit = opndBitVecL << (dist - getGRFSize());
             opndBitVecH |= lbit;
             opndBitVecL = 0;
         }
         else{
-            unsigned lbit = opndBitVecL >> (32 - dist);
+            uint64_t lbit = opndBitVecL >> (getGRFSize() - dist);
             opndBitVecH <<= dist;
             opndBitVecH |= lbit;
             opndBitVecL <<= dist;
@@ -190,10 +187,9 @@ void Optimizer::insertFallThroughJump()
 //
 void Optimizer::chkRegBoundary()
 {
-    for (BB_LIST_ITER it = fg.BBs.begin(); it != fg.BBs.end();it++)
+    for (auto bb : fg.BBs)
     {
-        G4_BB* bb = *it;
-        for (INST_LIST_ITER i = bb->begin(); i != bb->end(); i++)
+        for (INST_LIST_ITER i = bb->begin(), end = bb->end(); i != end; i++)
         {
             G4_INST *inst = *i;
             if (!chkOpndBoundary(inst, inst->getDst())) {
@@ -259,12 +255,8 @@ void Optimizer::countBankConflicts()
     unsigned int numLocals = 0, numGlobals = 0;
     bool isSKLPlus = ( getGenxPlatform() >= GENX_SKL ? true : false );
 
-    for(BB_LIST_ITER bb_it = kernel.fg.BBs.begin();
-        bb_it != kernel.fg.BBs.end();
-        bb_it++)
+    for (auto curBB : kernel.fg.BBs)
     {
-        G4_BB* curBB = (*bb_it);
-
         for(INST_LIST_ITER inst_it = curBB->begin();
             inst_it != curBB->end();
             inst_it++)
@@ -1124,7 +1116,6 @@ int Optimizer::optimization()
 
     // perform register allocation
     runPass(PI_regAlloc);
-
     if (RAFail)
     {
         return CM_SPILL;
@@ -1884,9 +1875,10 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
     }
 
     G4_Operand *src = inst->getSrc(0);
+
     unsigned srcLB = src->getLeftBound();
     unsigned srcRB = src->getRightBound();
-    unsigned bitVec[2] = {0, 0};
+    uint64_t bitVec[2] = {0, 0};
 
     // Now check each definition of src(0)
     for (auto I = inst->def_begin(), E = inst->def_end(); I != E; ++I)
@@ -1938,6 +1930,7 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
 
         // Check if this def-touched region is covered by the source region.
         mergeBitVec(bitVec, I->first->getDst(), srcLB, srcRB);
+
         if ((bitVec[0] & (~src->getBitVecL())) ||
             (bitVec[1] & (~src->getBitVecH())))
         {
@@ -2342,12 +2335,12 @@ void Optimizer::doSimplification(G4_INST *inst)
                     Op1->isImm() && Op1->getType() == Type_UV) {
                     // Immeidates in 'uv' ensures each element is a
                     // byte-offset within half-GRF.
-                    G4_SubReg_Align SubAlign = Sixteen_Word;
+                    G4_SubReg_Align SubAlign = SUB_ALIGNMENT_GRFALIGN;
                     if (SrcSizeInBytes <= G4_GRF_REG_NBYTES/2u)
-                        SubAlign = Eight_Word;
+                        SubAlign = (G4_SubReg_Align)(NUM_WORDS_PER_GRF/2);
                     inst->setOpcode(G4_movi);
                     if (Dcl->getAlign() == Either &&
-                        Dcl->getSubRegAlign() != Sixteen_Word) {
+                        Dcl->getSubRegAlign() != SUB_ALIGNMENT_GRFALIGN) {
                         Dcl->setSubRegAlign(SubAlign);
                     }
                     RegionDesc *rd = builder.createRegionDesc(8, 8, 1);
@@ -3172,10 +3165,8 @@ void Optimizer::cselPeepHoleOpt()
         return;
     }
     BB_LIST_ITER ib, bend(fg.BBs.end());
-    G4_Operand *cmpDst = NULL;
     G4_SrcRegRegion *cmpSrc0 = NULL;
     G4_Operand *cmpSrc1 = NULL;
-    G4_Predicate *predCmp = NULL;
     for(ib = fg.BBs.begin(); ib != bend; ++ib)
     {
         G4_BB* bb = (*ib);
@@ -3199,18 +3190,16 @@ void Optimizer::cselPeepHoleOpt()
             ++nextIter;
             G4_INST *inst = *ii;
             G4_opcode op = inst->opcode();
-            cmpDst = inst->getDst();
-            bool nullDst = inst->hasNULLDst();
-            predCmp = inst->getPredicate();
+            bool hasGRFDst = inst->getDst() && !inst->hasNULLDst();
             /*
             csel doesn't have the same symantics for destination
             as cmp instruction
             */
-            if((op != G4_cmp)           ||
-                (cmpDst && !nullDst)    ||
-                predCmp != NULL         ||
-                inst->isDead())
+            if (op != G4_cmp || hasGRFDst || inst->getPredicate() ||
+                inst->isDead() || !inst->getSrc(0)->isSrcRegRegion())
+            {
                 continue;
+            }
 
             cmpSrc0 = inst->getSrc(0)->asSrcRegRegion();
             cmpSrc1 = inst->getSrc(1);
@@ -4085,7 +4074,7 @@ bool Optimizer::foldPseudoNot(G4_BB* bb, INST_LIST_ITER& iter)
     // unfortunately, def-use chain is not always properly maintained, so we have to skip opt
     // even if we can't find a use
     bool canFold = notInst->use_size() > 0;
-    for (auto uses = notInst->use_begin(); uses != notInst->use_end(); ++uses)
+    for (auto uses = notInst->use_begin(), end = notInst->use_end(); uses != end; ++uses)
     {
         auto&& use = *uses;
         G4_INST* useInst = use.first;
@@ -4114,7 +4103,7 @@ bool Optimizer::foldPseudoNot(G4_BB* bb, INST_LIST_ITER& iter)
             assert(notInst->getExecSize() == 16);
             origUse->setSubRegOff(1);
         }
-        for (auto uses = notInst->use_begin(); uses != notInst->use_end(); ++uses)
+        for (auto uses = notInst->use_begin(), uend = notInst->use_end(); uses != uend; ++uses)
         {
             auto use = *uses;
             G4_INST* useInst = use.first;
@@ -5539,8 +5528,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         {
             return false;
         }
-        USE_EDGE_LIST_ITER iter;
-        for( iter = inst->use_begin(); iter != inst->use_end(); ++iter )
+        
+        for(USE_EDGE_LIST_ITER iter = inst->use_begin(), iend = inst->use_end(); iter != iend; ++iter )
         {
             if ((*iter).first->isSend())
             {
@@ -7399,7 +7388,7 @@ public:
     }
 
     NSDS(const Options *options, G4_BB *bb) {
-        int totalGRFNum = options->getuInt32Option(vISA_TotalGRFNum);
+        int totalGRFNum = bb->getKernel().getNumRegTotal();
         int TOTAL_BUCKETS = 0;
         GRF_BUCKET = TOTAL_BUCKETS;
         TOTAL_BUCKETS += totalGRFNum;
@@ -7676,7 +7665,7 @@ public:
 
     void Optimizer::countGRFUsage()
     {
-        unsigned int maxGRFNum = builder.getOptions()->getuInt32Option(vISA_TotalGRFNum);
+        unsigned int maxGRFNum = kernel.getNumRegTotal();
         int count = 0;
         bool *GRFUse = (bool *) builder.mem.alloc(sizeof(bool) * maxGRFNum);
         for (unsigned int i = 0; i < maxGRFNum; ++i)
@@ -7958,9 +7947,11 @@ public:
         }
 
         //Initializaing Flag register
+        int num32BitFlags = builder.getNumFlagRegisters() / 2;
+        for (int i = 0; i < num32BitFlags; ++i)
         {
             G4_Declare* tmpFlagDcl = builder.createTempFlag(2);
-            tmpFlagDcl->getRegVar()->setPhyReg(builder.phyregpool.getF0Reg(), 0);
+            tmpFlagDcl->getRegVar()->setPhyReg(builder.phyregpool.getFlagAreg(i), 0);
             G4_DstRegRegion *tempPredVar = builder.createDstRegRegion(Direct, tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_INST *predInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1,
                 tempPredVar, builder.createImm(0, Type_UW), NULL,
@@ -7968,29 +7959,6 @@ public:
             bb = kernel.fg.getEntryBB();
             bb->insert(iter, predInst);
         }
-
-        {
-            G4_Declare* tmpFlagDcl = builder.createTempFlag(2);
-            tmpFlagDcl->getRegVar()->setPhyReg(builder.phyregpool.getF1Reg(), 0);
-            G4_DstRegRegion *tempPredVar = builder.createDstRegRegion(Direct, tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
-            G4_INST *predInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1,
-                tempPredVar, builder.createImm(0, Type_UW), NULL,
-                InstOpt_WriteEnable, 0, 0, 0);
-            bb = kernel.fg.getEntryBB();
-            bb->insert(iter, predInst);
-        }
-
-        {
-            G4_Declare* tmpAddrDcl = builder.createDeclareNoLookup("initAddr_temp", G4_ADDRESS, 8, 1, Type_UW);
-            tmpAddrDcl->getRegVar()->setPhyReg(builder.phyregpool.getAddrReg(), 0);
-            G4_DstRegRegion *tempAddrVar = builder.createDstRegRegion(Direct, tmpAddrDcl->getRegVar(), 0, 0, 1, Type_UW);
-            G4_INST *addrInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 8,
-                tempAddrVar, builder.createImm(0, Type_UW), NULL,
-                InstOpt_WriteEnable, 0, 0, 0);
-            bb = kernel.fg.getEntryBB();
-            bb->insert(iter, addrInst);
-        }
-
     }
 
     void Optimizer::loadThreadPayload()
@@ -10461,8 +10429,8 @@ void Optimizer::splitVariables()
             if (Iter == DclMap.end())
             {
                 unsigned NElts = Dcl->getTotalElems();
-                auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, Sixteen_Word, "Lo");
-                auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, Sixteen_Word, "Hi");
+                auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN, "Lo");
+                auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN, "Hi");
                 DclMap[Dcl] = new DclMapInfo(DclLow, DclHi);
             }
             bool IsLow = LBound == LoLBound;
@@ -10642,9 +10610,9 @@ void Optimizer::split4GRFVars()
         G4_Type Ty = splitDcl->getElemType();
         unsigned NElts = splitDcl->getTotalElems();
         std::string varName(splitDcl->getName());
-        auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, Sixteen_Word, 
+        auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN, 
             (varName + "Lo").c_str(), false);
-        auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, Sixteen_Word,
+        auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN,
             (varName + "Hi").c_str(), false);
         DclMap[splitDcl] = new DclMapInfo(DclLow, DclHi);
         //std::cerr << "split " << splitDcl->getName() << " into (" <<

@@ -27,7 +27,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/PixelShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
-#include "Compiler/MetaDataApi/IGCMetaDataDefs.h"
 #include "common/allocator.h"
 #include "common/Types.hpp"
 #include "common/Stats.hpp"
@@ -39,7 +38,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/shaderOverride.hpp"
 #include "common/CompilerStatsUtils.hpp"
 #include "inc/common/sku_wa.h"
-#include "inc/common/RelocationInfo.h"
 #include <iStdLib/utility.h>
 
 #if !defined(_WIN32)
@@ -608,11 +606,12 @@ void CEncoder::SetDstModifier(const DstModifier& modifier)
     }
 }
 
-void CEncoder::SetSrcRegion(uint srcNum, uint vStride, uint width, uint hStride)
+void CEncoder::SetSrcRegion(uint srcNum, uint vStride, uint width, uint hStride, e_instance instance)
 {
     m_encoderState.m_srcOperand[srcNum].region[0] = int_cast<uint8_t>(vStride);
     m_encoderState.m_srcOperand[srcNum].region[1] = int_cast<uint8_t>(width);
     m_encoderState.m_srcOperand[srcNum].region[2] = int_cast<uint8_t>(hStride);
+    m_encoderState.m_srcOperand[srcNum].instance = instance;
     m_encoderState.m_srcOperand[srcNum].specialRegion = true;
 }
 
@@ -730,7 +729,7 @@ VISA_VectorOpnd* CEncoder::GetSourceOperand(CVariable* var, const SModifier& mod
             GetRowAndColOffset(var, mod.subVar, mod.subReg, rowOffset, colOffset);
             V(vKernel->CreateVISASrcOperand(
                 operand,
-                GetVISAVariable(var),
+                GetVISAVariable(var, mod.instance),
                 ConvertModifierToVisaType(mod.mod),
                 vStride,
                 width,
@@ -1016,6 +1015,7 @@ bool CEncoder::NeedSplitting(CVariable *var, const SModifier &mod,
             }
             assert(false && "Unhandled special source region on QWORD type!");
         }
+
         numParts = std::max(numParts, 2U);
         return true;
     }
@@ -1671,7 +1671,7 @@ void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
     if (H1->GetType() != ISA_TYPE_UD && H1->GetType() != ISA_TYPE_UV) H1 = m_program->BitCast(H1, ISA_TYPE_UD);
 
     Common_ISA_Exec_Size ExecSize = GetAluExecSize(Lo);
-    assert(ExecSize == EXEC_SIZE_16 || ExecSize == EXEC_SIZE_8 ||
+    assert(ExecSize == EXEC_SIZE_32 || ExecSize == EXEC_SIZE_16 || ExecSize == EXEC_SIZE_8 ||
            ExecSize == EXEC_SIZE_4 || ExecSize == EXEC_SIZE_2 ||
            ExecSize == EXEC_SIZE_1);
 
@@ -1758,7 +1758,7 @@ void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
     assert(m_encoderState.m_dstOperand.mod == EMOD_NONE && "subPair doesn't support saturate");
 
     Common_ISA_Exec_Size ExecSize = GetAluExecSize(Lo);
-    assert(ExecSize == EXEC_SIZE_16 || ExecSize == EXEC_SIZE_8 || ExecSize == EXEC_SIZE_1);
+    assert(ExecSize == EXEC_SIZE_32 || ExecSize == EXEC_SIZE_16 || ExecSize == EXEC_SIZE_8 || ExecSize == EXEC_SIZE_1);
 
     if (Hi == nullptr) {
         // When Hi part is ignored, reduce 64-bit subtraction into 32-bit.
@@ -2949,54 +2949,6 @@ void CEncoder::ScatterGather(ISA_Opcode opcode, CVariable* srcdst, CVariable* bu
         dstVar));
 }
 
-void CEncoder::ScatterGather4(ISA_Opcode opcode, CVariable* srcdst, CVariable* bufId, CVariable* offset, CVariable* gOffset, e_predefSurface surface)
-{
-    VISA_VectorOpnd* globalOffsetOpnd = nullptr;
-    if(gOffset)
-    {
-        globalOffsetOpnd = GetUniformSource(gOffset);
-    }
-    else
-    {
-        int value = 0;
-        V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &value ,ISA_TYPE_UD));
-    }
-    VISA_RawOpnd* elementOffset = GetRawSource(offset);
-    VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(surface, bufId);
-
-    VISA_RawOpnd* dstVar;
-    Common_VISA_EMask_Ctrl visaMask;
-    if(opcode == ISA_GATHER4)
-    {
-        dstVar = GetRawDestination(srcdst);
-        visaMask = GetAluEMask(srcdst);
-    }
-    else
-    {
-        dstVar = GetRawSource(srcdst);
-        visaMask = ConvertMaskToVisaType(m_encoderState.m_mask, m_encoderState.m_noMask);
-    }
-    uint nd = srcdst->GetSize();
-    if (m_encoderState.m_simdSize == SIMDMode::SIMD8)
-        nd = nd / SIZE_GRF;
-    else if (m_encoderState.m_simdSize == SIMDMode::SIMD16)
-        nd = nd / (SIZE_GRF * 2);
-    else
-        assert(0);
-
-    uint mask = BIT(nd)-1;
-
-    V(vKernel->AppendVISASurfAccessGather4Scatter4Inst(
-        opcode,
-        ConvertChannelMaskToVisaType(mask),
-        visaMask,
-        getExecSize(m_encoderState.m_simdSize),
-        surfOpnd,
-        globalOffsetOpnd,
-        elementOffset,
-        dstVar));
-}
-
 void CEncoder::GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
 {
     ISA_Opcode visaOpcode = ConvertOpcode[opcode];
@@ -3770,6 +3722,10 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     {
         vbuilder->SetOption(vISA_ReservedGRFNum, IGC_GET_FLAG_VALUE(ReservedRegisterNum));
     }
+    if (IGC_GET_FLAG_VALUE(GRFNumToUse) > 0)
+    {
+        vbuilder->SetOption(vISA_GRFNumToUse, IGC_GET_FLAG_VALUE(GRFNumToUse));
+    }
 
     vbuilder->SetOption(vISA_TotalGRFNum, context->getNumGRFPerThread());
 
@@ -4070,6 +4026,25 @@ VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var)
     return var->visaGenVariable[0];
 }
 
+VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var, e_instance instance)
+{
+    VISA_GenVar* result = GetVISAVariable(var);
+
+    if (instance != EINSTANCE_UNSPECIFIED &&
+        var->GetNumberInstance() == 2)
+    {
+        if (instance == EINSTANCE_FIRST_HALF)
+        {
+            result = var->visaGenVariable[0];
+        }
+        else
+        {
+            result = var->visaGenVariable[1];
+        }
+    }
+    return result;
+}
+
 void CEncoder::GetVISAPredefinedVar(CVariable* pVar, PreDefined_Vars var)
 {
     vKernel->GetPredefinedVar(pVar->visaGenVariable[0], var);
@@ -4240,20 +4215,20 @@ void CEncoder::CreateFunctionSymbolTable(void*& buffer, unsigned& bufferSize, un
 
         // Allocate buffer to store symbol table entries
         tableEntries = funcsToExport.size();
-        bufferSize = sizeof(IGC::GenSymEntry) * tableEntries;
+        bufferSize = sizeof(vISA::GenSymEntry) * tableEntries;
         buffer = (void*) malloc(bufferSize);
         assert(buffer && "Function Symbol Table not allocated");
-        IGC::GenSymEntry* entry_ptr = (IGC::GenSymEntry*) buffer;
+        vISA::GenSymEntry* entry_ptr = (vISA::GenSymEntry*) buffer;
 
         for (auto pFunc : funcsToExport)
         {
-            assert(pFunc->getName().size() <= IGC::MAX_SYMBOL_NAME_LENGTH);
-            strcpy(entry_ptr->s_name, pFunc->getName().str().c_str());
+            assert(pFunc->getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
+            strcpy_s(entry_ptr->s_name, vISA::MAX_SYMBOL_NAME_LENGTH, pFunc->getName().str().c_str());
 
             if (pFunc->isDeclaration())
             {
                 // If the function is only declared, set as undefined type
-                entry_ptr->s_type = IGC::GenSymType::S_UNDEF;
+                entry_ptr->s_type = vISA::GenSymType::S_UNDEF;
                 entry_ptr->s_offset = 0;
             }
             else
@@ -4263,7 +4238,7 @@ void CEncoder::CreateFunctionSymbolTable(void*& buffer, unsigned& bufferSize, un
 
                 // Query vISA for the function's byte offset within the compiled module
                 VISAFunction* visaFunc = Iter->second;
-                entry_ptr->s_type = IGC::GenSymType::S_FUNC;
+                entry_ptr->s_type = vISA::GenSymType::S_FUNC;
                 entry_ptr->s_offset = (uint32_t) visaFunc->getGenOffset();
             }
             entry_ptr++;
@@ -4280,7 +4255,7 @@ void CEncoder::CreateFunctionRelocationTable(void*& buffer, unsigned& bufferSize
     {
         // vISA will directly return the buffer with GenRelocEntry layout
         V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
-        assert(sizeof(IGC::GenRelocEntry) * tableEntries == bufferSize);
+        assert(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
     }
 }
 
@@ -4566,7 +4541,11 @@ void CEncoder::Copy(CVariable* dst, CVariable* src)
 void CEncoder::BoolToInt(CVariable* dst, CVariable* src)
 {
     assert(src->GetType() == ISA_TYPE_BOOL);
-    assert((dst->GetType() == ISA_TYPE_UD) || (dst->GetType() == ISA_TYPE_D));
+
+    VISA_Type dstType = dst->GetType();
+    assert((dstType == ISA_TYPE_UD) || (dstType == ISA_TYPE_D) ||
+           (dstType == ISA_TYPE_UB) ||(dstType == ISA_TYPE_B) ||
+           (dstType == ISA_TYPE_UW) || (dstType == ISA_TYPE_W));
 
     // undef value are not copied
     if(!src->IsUndef() || IGC_IS_FLAG_ENABLED(InitializeUndefValueEnable)) {

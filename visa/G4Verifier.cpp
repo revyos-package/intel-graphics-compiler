@@ -232,10 +232,13 @@ void G4Verifier::verifySend(G4_INST* inst)
                 }
                 return src->getLinearizedStart() >= EOTStart;
             };
-            MUST_BE_TRUE(checkEOTSrc(src0), "src0 for EOT send is not in r112-r127");
-            if (src1 != nullptr)
+            if (kernel.getNumRegTotal() >= 128)
             {
-                MUST_BE_TRUE(checkEOTSrc(src1), "src1 for EOT sends is not in r112-r127");
+                MUST_BE_TRUE(checkEOTSrc(src0), "src0 for EOT send is not in r112-r127");
+                if (src1 != nullptr)
+                {
+                    MUST_BE_TRUE(checkEOTSrc(src1), "src1 for EOT sends is not in r112-r127");
+                }
             }
         }
 
@@ -738,8 +741,8 @@ void verifyLifetimeConsistency(G4_BB* bb)
     // in BB
     bool unassignedFound = false;
 
-    for (INST_LIST_ITER it = bb->begin();
-        it != bb->end();
+    for (INST_LIST_ITER it = bb->begin(), end = bb->end();
+        it != end;
         it++)
     {
         G4_INST* curInst = (*it);
@@ -782,8 +785,8 @@ void verifyLifetimeConsistency(G4_BB* bb)
         // First populate all pseudo_kills and lifetime.end instructions
         // in BB's inst list. Later run second loop to check whether
         // lifetime rules are flouted.
-        for (INST_LIST_ITER it = bb->begin();
-            it != bb->end();
+        for (INST_LIST_ITER it = bb->begin(), end = bb->end();
+            it != end;
             it++, instId++)
         {
             G4_INST* curInst = (*it);
@@ -804,8 +807,8 @@ void verifyLifetimeConsistency(G4_BB* bb)
         }
 
         instId = 0;
-        for (INST_LIST_ITER it = bb->begin();
-            it != bb->end();
+        for (INST_LIST_ITER it = bb->begin(), end = bb->end();
+            it != end;
             it++, instId++)
         {
             G4_INST* curInst = (*it);

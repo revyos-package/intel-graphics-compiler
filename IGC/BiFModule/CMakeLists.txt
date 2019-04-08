@@ -33,21 +33,12 @@
 
 # In new Clang versions VME types are built-in. Keep this flag until all OS's update Clang version to 8
 if(NOT DEFINED VME_TYPES_DEFINED)
-  set(VME_TYPES_DEFINED FALSE)
-  if(CMAKE_SYSTEM_NAME STREQUAL Linux)
-    set(VME_TYPES_DEFINED TRUE)
-  endif()
-endif()
-
-set(CLANG_EXE_VERSION_GE_7 FALSE)
-if(CMAKE_SYSTEM_NAME STREQUAL Linux)
-  set(CLANG_EXE_VERSION_GE_7 TRUE)
+  set(VME_TYPES_DEFINED TRUE)
 endif()
 
 set(CCLANG_BUILD_INTREE_LLVM FALSE)
 if(EXISTS ${LLVM_SOURCE_DIR}/projects/opencl-clang)
   set(CCLANG_BUILD_INTREE_LLVM TRUE)
-  set(VME_TYPES_DEFINED TRUE)
   set(CLANG_SOURCE_DIR ${LLVM_SOURCE_DIR}/tools/clang)
 endif()
 
@@ -131,22 +122,6 @@ endif()
 
   get_property(_clang7zLocation TARGET CLANG_7Z PROPERTY IMPORTED_LOCATION_RELEASE)  
   
-  if(NOT DEFINED COMMON_CLANG_LIBRARY_NAME AND
-    EXISTS ${_clang7zLocation}
-  )
-    if(WIN32)
-      set(COMMON_CLANG_LIBRARY_NAME common_clang${_cpuSuffix})
-    else()
-       set(COMMON_CLANG_LIBRARY_NAME common_clang)
-    endif()
-  endif()
-
-  if(WIN32)
-    set(COMMON_CLANG_LIB_FULL_NAME "${COMMON_CLANG_LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  else()
-    set(COMMON_CLANG_LIB_FULL_NAME "lib${COMMON_CLANG_LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  endif()
-  
 if(NOT ${CCLANG_BUILD_INTREE_LLVM})
   # Add step to preform the extraction
   add_custom_command(
@@ -169,11 +144,12 @@ endif()
   set(CL_OPTIONS "")
 
   add_custom_target(GetClang)
-  add_library(common_clang_dll UNKNOWN IMPORTED GLOBAL)
+  add_library(common_clang_dll SHARED IMPORTED GLOBAL)
 
   if(EXISTS ${_clang7zLocation} AND NOT ${CCLANG_BUILD_INTREE_LLVM})
     # Use precompiled common clang bundle.
     message(STATUS "Use precompiled common clang from ${_clang7zLocation}")
+    set(SYSTEM_COMMON_CLANG OFF)
 
     add_dependencies(GetClang UnzipClang)
 
@@ -186,38 +162,15 @@ endif()
     set(IGC_CCLANG_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/clang_build)
     if(${CCLANG_BUILD_INTREE_LLVM})
       message("Common clang build-in-tree")
-      set(CCLANG_INSTALL_ARTIFACTS_DIR ${IGC_TARGET__TOOLS_CLANG_DIR})
-
-      if(NOT CCLANG_OCL_HEADERS_DIR)
-        if (EXISTS "${IGC_BUILD__GFX_DEV_SRC_DIR}/third_party/opencl_headers")
-          set(CCLANG_OCL_HEADERS_DIR "${IGC_BUILD__GFX_DEV_SRC_DIR}/third_party/opencl_headers")
-        else()
-          get_filename_component(CCLANG_OCL_HEADERS_DIR "${IGC_BUILD__GFX_DEV_SRC_DIR}/../opencl_headers" ABSOLUTE)
-        endif()
-      endif(NOT CCLANG_OCL_HEADERS_DIR)
-
-      set(clang_filename "clang${CMAKE_EXECUTABLE_SUFFIX}")
-      add_custom_command(
-       OUTPUT "${IGC_TARGET__TOOLS_CLANG_DIR}/${clang_filename}"
-       COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clang>" "${IGC_TARGET__TOOLS_CLANG_DIR}/${clang_filename}"
-       DEPENDS clang
-       )
-
-      add_custom_command(
-        OUTPUT "${IGC_TARGET__TOOLS_CLANG_DIR}/${COMMON_CLANG_LIB_FULL_NAME}"
-        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${COMMON_CLANG_LIBRARY_NAME}>" "${IGC_TARGET__TOOLS_CLANG_DIR}/${COMMON_CLANG_LIB_FULL_NAME}"
-        DEPENDS ${COMMON_CLANG_LIBRARY_NAME}
-        )
-
-      set(cclang_header_filename "opencl-c.h")
-      add_custom_command(
-        OUTPUT "${IGC_TARGET__TOOLS_CLANG_DIR}/${cclang_header_filename}"
-        COMMAND ${CMAKE_COMMAND} -E copy "${CLANG_SOURCE_DIR}/lib/Headers/${cclang_header_filename}" "${IGC_TARGET__TOOLS_CLANG_DIR}/${cclang_header_filename}"
-        DEPENDS cl_headers
-        )
+      set(SYSTEM_COMMON_CLANG OFF)
 
       add_custom_target(copy_cclang_files ALL
-       DEPENDS ${IGC_TARGET__TOOLS_CLANG_DIR}/${clang_filename} ${IGC_TARGET__TOOLS_CLANG_DIR}/${COMMON_CLANG_LIB_FULL_NAME} ${IGC_TARGET__TOOLS_CLANG_DIR}/${cclang_header_filename}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${IGC_TARGET__TOOLS_CLANG_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CLANG_SOURCE_DIR}/lib/Headers/opencl-c.h" "${IGC_TARGET__TOOLS_CLANG_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clang>" "${IGC_TARGET__TOOLS_CLANG_DIR}/clang${CMAKE_EXECUTABLE_SUFFIX}"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_LINKER_FILE:${COMMON_CLANG_LIBRARY_NAME}>" "${IGC_TARGET__TOOLS_CLANG_DIR}/"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_SONAME_FILE:${COMMON_CLANG_LIBRARY_NAME}>" "${IGC_TARGET__TOOLS_CLANG_DIR}/"
+        DEPENDS clang cl_headers ${COMMON_CLANG_LIBRARY_NAME}
       )
 
       add_dependencies(GetClang copy_cclang_files)
@@ -252,9 +205,9 @@ endif()
   endif()
   add_dependencies(common_clang_dll GetClang)
 
-  if(UNIX)
-    install(FILES $<TARGET_FILE:common_clang_dll> DESTINATION ${IGC_INSTALL_TIME_ROOT_DIR}/lib COMPONENT igc-opencl)
-  endif(UNIX)
+  if(UNIX AND NOT SYSTEM_COMMON_CLANG)
+    install(FILES $<TARGET_SONAME_FILE:common_clang_dll> DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl)
+  endif()
 
 # End Clang section
 
@@ -971,9 +924,6 @@ set(FLAG "")
 if(${VME_TYPES_DEFINED})
     list(APPEND FLAG "__VME_TYPES_DEFINED__")
 endif(${VME_TYPES_DEFINED})
-if(${CLANG_EXE_VERSION_GE_7})
-    list(APPEND FLAG "__CLANG7__")
-endif()
 
 igc_bif_find_cl_files(IGC_BUILD__BIF_OCL_COMMON_DEPENDS ${IGC_BUILD__BIF_OCL_COMMON_INC_DIRS} "${IGC_OPTION__BIF_SRC_OCL_DIR}/Implementation")
 

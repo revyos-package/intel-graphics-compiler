@@ -28,7 +28,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CISACodeGen/DeSSA.hpp"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
-#include "Compiler/MetaDataApi/IGCMetaDataDefs.h"
 #include "common/igc_regkeys.hpp"
 
 #include "common/LLVMWarningsPush.hpp"
@@ -3475,6 +3474,7 @@ bool CodeGenPatternMatch::GetRegionModifier(SSource& sourceMod, llvm::Value*& so
                     sourceMod.region[0] = 0;
                     sourceMod.region[1] = 1;
                     sourceMod.region[2] = 0;
+                    sourceMod.instance = EINSTANCE_FIRST_HALF;
                     source = intrin->getOperand(0);
                     found = true;
                     BitcastSearch(sourceMod, source, true);

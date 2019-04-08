@@ -24,11 +24,46 @@ namespace IGC
 
     enum FunctionTypeMD
     {
-        UnknownFunction,
         KernelFunction,
         CallableShader,
         UserFunction,
         NumberOfFunctionType,
+    };
+
+
+    enum ResourceTypeEnum
+    {
+        OtherResourceType,
+        UAVResourceType,
+        SRVResourceType,
+        SamplerResourceType,
+        BindlessUAVResourceType,
+        BindlessSamplerResourceType,
+        DefaultResourceType,
+    };
+
+    enum ResourceExtensionTypeEnum
+    {
+        NonExtensionType,
+
+        // VME
+        MediaResourceType,
+        MediaResourceBlockType,
+        MediaSamplerType,
+
+        // VA
+        MediaSamplerTypeConvolve,
+        MediaSamplerTypeErode,
+        MediaSamplerTypeDilate,
+        MediaSamplerTypeMinMaxFilter,
+        MediaSamplerTypeMinMax,
+        MediaSamplerTypeCentroid,
+        MediaSamplerTypeBoolCentroid,
+        MediaSamplerTypeBoolSum,
+        MediaSamplerTypeLbp,
+        MediaSamplerTypeFloodFill,
+        MediaSamplerTypeCorrelation,
+        DefaultResourceExtensionType,
     };
 
 	struct ArgDependencyInfoMD
@@ -108,7 +143,7 @@ namespace IGC
         std::vector<LocalOffsetMD> localOffsets;
         WorkGroupWalkOrderMD workGroupWalkOrder;
         std::vector<FuncArgMD> funcArgs;
-        FunctionTypeMD functionType = UnknownFunction;
+        FunctionTypeMD functionType = KernelFunction;
         ResourceAllocMD resAllocMD;
         std::vector<unsigned> maxByteOffsets;
         bool IsInitializer = false;
@@ -122,15 +157,12 @@ namespace IGC
         int privateMemoryPerWI = 0;
         bool globalIDPresent = false;
 
-
         std::vector<int32_t> m_OpenCLArgAddressSpaces;
         std::vector<std::string> m_OpenCLArgAccessQualifiers;
         std::vector<std::string> m_OpenCLArgTypes;
         std::vector<std::string> m_OpenCLArgBaseTypes;
         std::vector<std::string> m_OpenCLArgTypeQualifiers;
         std::vector<std::string> m_OpenCLArgNames;
-
-
     };
 
     // isCloned member is added to mark whether a function is clone
@@ -313,4 +345,5 @@ namespace IGC
     };
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
     void deserialize(IGC::ModuleMetaData &deserializedMD, const llvm::Module* module);
+
 }

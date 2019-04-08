@@ -105,7 +105,6 @@ void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatc
     m_dispatchSize = simdSize;
     globalSymbolMapping.clear();
     symbolMapping.clear();
-    phiMapping.clear();
     rootMapping.clear();
     ccTupleMapping.clear();
     ConstantPool.clear();
@@ -1801,7 +1800,6 @@ void CShader::BeginFunction(llvm::Function *F)
 {
     // TODO: merge InitEncoder with this function.
     symbolMapping.clear();
-    phiMapping.clear();
     rootMapping.clear();
     ccTupleMapping.clear();
     ConstantPool.clear();
@@ -2283,6 +2281,24 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
         return it->second;
     }
 
+    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias) && m_deSSA->isAlias(value))
+    {
+        // Generate CVariable alias.
+        // Value and its aliasee must be of the same size.
+        Value* Aliasee = m_deSSA->getAliasee(value);
+        CVariable *Base = GetSymbol(Aliasee);
+        if (Aliasee == value) {
+            return Base;
+        }
+        Type *Ty = value->getType();
+        VectorType* VTy = dyn_cast<VectorType>(Ty);
+        Type *BTy = VTy ? VTy->getElementType() : Ty;
+        VISA_Type visaTy = GetType(BTy);
+        CVariable* AliasVar = GetNewAlias(Base, visaTy, 0, Base->GetNumberElement());
+        symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, AliasVar));
+        return AliasVar;
+    }
+
     if (IGC_IS_FLAG_ENABLED(EnableVariableAlias))
     {
         if (m_VRA->m_ValueAliasMap.count(value))
@@ -2492,35 +2508,6 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
     {
         rootMapping.insert(std::pair<llvm::Value*, CVariable*>(rootValue, var));
     }
-    return var;
-}
-
-CVariable* CShader::GetPhiTemp(llvm::PHINode* node)
-{
-    if (IGC_IS_FLAG_ENABLED(DisablePHIDstCopy))
-    {
-        return GetSymbol(node);
-    }
-
-    CVariable* var = NULL;
-    auto it = phiMapping.find(node);
-    // find the mapping, return
-    if( it != phiMapping.end() )
-    {
-        return it->second;
-    }
-    // 1) simple de-ssa, always return a new temp
-    // 2) Or, phi is isolated, return a new temp
-    if (!m_deSSA || m_deSSA->isPHIIsolated(node))
-    {
-        var = GetNewVector(node);
-    }
-    else
-    {
-        // return the mapping of the dest-value
-        var = GetSymbol(node);
-    }
-    phiMapping.insert(std::pair<llvm::PHINode*,CVariable*>(node, var));
     return var;
 }
 

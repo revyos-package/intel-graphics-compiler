@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 
 #include "common/debug/Dump.hpp"
+#include "common/secure_mem.h"
 #include "Compiler/GenUpdateCB.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "GenISAIntrinsics/GenIntrinsics.h"
@@ -68,8 +69,8 @@ static bool isResInfo(GenIntrinsicInst* inst, unsigned &texId, unsigned &lod, bo
         Value* texOp = inst->getOperand(0);
         BufferType bufType;
         unsigned as = texOp->getType()->getPointerAddressSpace();
-        unsigned bufIdx;
-        bool directIndexing;
+        unsigned bufIdx = 0; //default
+        bool directIndexing = false; //default
 
         bufType = DecodeAS4GFXResource(as, directIndexing, bufIdx);
         if (!directIndexing || bufType != RESOURCE || bufType != UAV)
@@ -646,7 +647,7 @@ namespace IGC
         struct ResInfoResult {
             unsigned info[4];
             ResInfoResult() { info[0] = info[1] = info[2] = info[3] = 0; }
-            ResInfoResult(unsigned res[4]) { memcpy(info, res, sizeof(info)); }
+            ResInfoResult(unsigned res[4]) { memcpy_s(info, sizeof(info), res, sizeof(info)); }
         };
         DenseMap<Value*, uint> CalculatedValue;
         DenseMap<Value*, ResInfoResult> resInfo;

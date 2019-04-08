@@ -132,7 +132,7 @@ ADD_FLEX_BISON_DEPENDENCY(CISAScanner CISAParser)
 # Set up include paths used by all the libraries in this file
 # There is a windows specific include path for GNUTools support that is inside the repository. The
 # equivalent support is already included for Linux and Android so is not required for those platforms
-set(Jitter_inc_dirs ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include ../../compiler/include)
+set(Jitter_inc_dirs ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if (WIN32)
   set(Jitter_inc_dirs ${Jitter_inc_dirs} ${GNUTOOLS_DIR}/include)
 endif (WIN32)
@@ -259,7 +259,7 @@ set(GenX_Common_Headers
   IGfxHwEuIsaCNL.h
   BuildCISAIR.h
   BuildIR.h
-  cm_portability.h
+  include/VISADefines.h
   Common_GEN.h
   DebugInfo.h
   FlowGraph.h
@@ -275,7 +275,7 @@ set(GenX_Common_Headers
   Optimizer.h
   PhyRegUsage.h
   RegAlloc.h
-  RT_Jitter_Interface.h
+  include/RT_Jitter_Interface.h
   SpillCode.h
   SpillManagerGMRF.h
   include/visa_igc_common_header.h
@@ -376,7 +376,7 @@ if (UNIX OR WIN32)
   endif()
   
   if(UNIX)
-    install(TARGETS GenX_IR_Exe DESTINATION ${IGC_INSTALL_TIME_ROOT_DIR}/bin COMPONENT igc-media)
+    install(TARGETS GenX_IR_Exe RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT igc-media)
   endif(UNIX)
 
   # Copy executable

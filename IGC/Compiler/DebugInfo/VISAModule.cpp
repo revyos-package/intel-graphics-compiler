@@ -494,12 +494,12 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
                     // Found write image
                     switch (argAlloc->type)
                     {
-                    case IGC::IGCMD::UAVResourceType:
+                    case UAVResourceType:
                         // Found write image
                         index = m_pShader->m_pBtiLayout->GetUavIndex(index);
                         assert(index < TEXTURE_REGISTER_NUM && "Bad texture index");
                         return VISAVariableLocation(TEXTURE_REGISTER_BEGIN + index);
-                    case IGC::IGCMD::SRVResourceType:
+                    case SRVResourceType:
                         // Found read image
                         index = m_pShader->m_pBtiLayout->GetTextureIndex(index);
                         assert(index < TEXTURE_REGISTER_NUM && "Bad texture index");
@@ -776,8 +776,9 @@ std::vector<std::pair<unsigned int, unsigned int>> VISAModule::getGenISARange(co
         // Iterate to next BB if required.
         if (start->getNextNode())
             return start->getNextNode();
-        else
+        else if(start->getParent()->getNextNode())
             return &(start->getParent()->getNextNode()->front());
+        return (const llvm::Instruction*)nullptr;
     };
 
     while (1)

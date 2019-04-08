@@ -46,7 +46,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/CodeGenPublicEnums.h"
 #include "Compiler/CISACodeGen/Platform.hpp"
-#include "Compiler/MetaDataApi/IGCMetaDataDefs.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/MDFrameWork.h"
 #include "common/Types.hpp"
@@ -187,9 +186,9 @@ bool isA64Ptr(llvm::PointerType *PT, CodeGenContext* pContext);
 
 /// Return true if F is an entry function of a kernel or a shader.
 ///    A entry function must have an entry in FunctionInfoMetaData
-///       with type EntryFunctionType;
+///       with type KernelFunction;
 ///    A non-entry function may have an entry, if so, that entry in
-///       FunctionInfoMetaData must have type OtherFunctionType.
+///       FunctionInfoMetaData must have type UserFunction.
 inline bool isEntryFunc(const IGCMD::MetaDataUtils *pM, const llvm::Function *CF)
 {
 	llvm::Function *F = const_cast<llvm::Function*>(CF);
@@ -199,7 +198,7 @@ inline bool isEntryFunc(const IGCMD::MetaDataUtils *pM, const llvm::Function *CF
 
 	IGCMD::FunctionInfoMetaDataHandle Info = pM->getFunctionsInfoItem(F);
 	assert(Info->isTypeHasValue() && "FunctionInfoMetaData missing type!");
-	return Info->getType() == IGCMD::FunctionTypeEnum::EntryFunctionType;
+	return Info->getType() == FunctionTypeMD::KernelFunction;
 }
 
 // Return a unique entry function.
@@ -285,7 +284,7 @@ inline bool isInstPrecede(
     assert(inst->getParent() == pos->getParent());
     if (inst == pos)
     {
-        return true;
+        return false;
     }
 
     auto II = inst->getParent()->begin();
@@ -347,20 +346,23 @@ inline unsigned GetHwThreadsPerWG(const IGC::CPlatform& platform)
 
 inline SIMDMode getLeastSIMDAllowed(unsigned int threadGroupSize, unsigned int hwThreadPerWorkgroup)
 {
+    if (hwThreadPerWorkgroup == 0)
+    {
+        hwThreadPerWorkgroup = 42; //On GT1 HW, there are 7 threads/EU and 6 EU/subslice, 42 is the minimum threads/workgroup any HW can support 
+    }
     if ((threadGroupSize <= hwThreadPerWorkgroup * 8) &&
         threadGroupSize <= 512)
     {
         return SIMDMode::SIMD8;
     }
+    else if (threadGroupSize <= hwThreadPerWorkgroup * 16)
+    {
+        return SIMDMode::SIMD16;
+    }
     else
-        if (threadGroupSize <= hwThreadPerWorkgroup * 16)
-        {
-            return SIMDMode::SIMD16;
-        }
-        else
-        {
-            return SIMDMode::SIMD32;
-        }
+    {
+        return SIMDMode::SIMD32;
+    }
 }
 
 unsigned int getGRFSize();

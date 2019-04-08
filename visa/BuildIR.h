@@ -294,7 +294,7 @@ public:
         {
             if (nElems * nRows * G4_Type_Table[ty].byteSize >= G4_GRF_REG_NBYTES)
             {
-                dcl->setSubRegAlign(Sixteen_Word);
+                dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN);
             }
             else
             {
@@ -756,13 +756,13 @@ public:
                 }
                 case PreDefinedVarsInternal::ARG:
                 {
-                    dcl = createDeclareNoLookup(name, G4_INPUT, 8, 32, Type_UD);
+                    dcl = createDeclareNoLookup(name, G4_INPUT, NUM_DWORDS_PER_GRF, 32, Type_UD);
                     dcl->getRegVar()->setPhyReg(phyregpool.getGreg(28), 0);
                     break;
                 }
                 case PreDefinedVarsInternal::RET:
                 {
-                    dcl = createDeclareNoLookup(name, G4_GRF, 8, 12, Type_UD);
+                    dcl = createDeclareNoLookup(name, G4_GRF, NUM_DWORDS_PER_GRF, 12, Type_UD);
                     dcl->getRegVar()->setPhyReg(phyregpool.getGreg(16), 0);
                     dcl->setLiveOut();
                     break;
@@ -821,7 +821,7 @@ public:
 
         if (m_options->getOption(vISA_enablePreemption))
         {
-            G4_Declare *R0CopyDcl = createTempVar(8, Type_UD, Either, Sixteen_Word);
+            G4_Declare *R0CopyDcl = createTempVar(8, Type_UD, Either, SUB_ALIGNMENT_GRFALIGN);
             builtinR0 = R0CopyDcl;
         }
 
@@ -845,7 +845,7 @@ public:
         builtinT252 = createDeclareNoLookup(vISAPreDefSurf[PREDEFINED_SURFACE_T252].name, G4_GRF, 1, 1, Type_UD);
         builtinBindlessSampler = createDeclareNoLookup("B_S", G4_GRF, 1, 1, Type_UD);
 
-        builtinSamplerHeader = createDeclareNoLookup("samplerHeader", G4_GRF, 8, 1, Type_UD);
+        builtinSamplerHeader = createDeclareNoLookup("samplerHeader", G4_GRF, NUM_DWORDS_PER_GRF, 1, Type_UD);
 
         builtinSLMSpillAddr = nullptr;
         builtinImmVector4 = nullptr;
@@ -1990,18 +1990,6 @@ public:
                         G4_SrcRegRegion* eltOffOpnd,
                         G4_SrcRegRegion* srcOpnd );
 
-    int translateVISADwordAtomicInst(
-                        VISAAtomicOps op,
-                        bool is16Bit,
-                        Common_VISA_EMask_Ctrl emask,
-                        Common_ISA_Exec_Size executionSize,
-                        G4_Operand* surface,
-                        G4_Operand* gOffOpnd,
-                        G4_SrcRegRegion* eltOffOpnd,
-                        G4_SrcRegRegion* src0Opnd,
-                        G4_SrcRegRegion* src1Opnd,
-                        G4_DstRegRegion* dstOpnd);
-
     int translateVISADwordAtomicInst(VISAAtomicOps subOpc,
                                      bool is16Bit,
                                      G4_Predicate *pred,
@@ -2027,14 +2015,6 @@ public:
         G4_SrcRegRegion *src0,
         G4_SrcRegRegion *src1,
         G4_DstRegRegion *dst);
-
-    int translateTransposeVISALoadInst(
-                        G4_Operand* surface,
-                        unsigned blockWidth,
-                        unsigned blockHeight,
-                        G4_Operand* xOffOpnd,
-                        G4_Operand* yOffOpnd,
-                        G4_DstRegRegion* dstOpnd );
 
     int translateVISAGather4TypedInst(G4_Predicate           *pred,
                                       Common_VISA_EMask_Ctrl emask,

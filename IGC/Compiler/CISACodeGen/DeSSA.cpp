@@ -112,27 +112,40 @@ DeSSA::DeSSA() : FunctionPass( ID )
 void DeSSA::print(raw_ostream &OS, const Module* ) const
 {
     Banner(OS, "Phi-Var Isolations");
+    DenseMap<Node*, int> LeaderVisited;
     for (auto I = RegNodeMap.begin(),
         E = RegNodeMap.end(); I != E; ++I) {
-        Value *VL = I->first;
-        Value *RootV = getRegRoot(VL);
-        if (RootV) {
-            VL->print(IGC::Debug::ods());
-            OS << " : ";
-            RootV->print(IGC::Debug::ods());
+        Node* N = I->second;
+        // We don't want to change behavior of DeSSA by invoking
+        // dumping/printing functions. Thus, don't use getLeader()
+        // as it has side-effect (doing path halving).
+        Node* Leader = N->parent;
+        while (Leader != Leader->parent) {
+            Leader = Leader->parent;
         }
-        else {
+        if (LeaderVisited.count(Leader)) {
+            continue;
+        }
+        LeaderVisited[Leader] = 1;
+        Value *VL;
+        if (isIsolated(N)) {
+            VL = N->value;
             OS << "Var isolated : ";
             VL->print(IGC::Debug::ods());
-        }
-        PHINode *PHI = dyn_cast<PHINode>(VL);
-        if (PHI) {
-            if (isPHIIsolated(PHI)) {
-                OS << "\nPHI isolated : ";
+            OS << "\n";
+        } else {
+            OS << "Leader : ";
+            Leader->value->print(IGC::Debug::ods());
+            OS << "\n";
+            N = Leader->next;
+            while (N != Leader) {
+                VL = N->value;
+                OS << "    ";
                 VL->print(IGC::Debug::ods());
+                OS << "\n";
+                N = N->next;
             }
         }
-        OS << "\n";
     }
 }
 
@@ -161,6 +174,44 @@ bool DeSSA::runOnFunction(Function &MF)
   // used indirectly in DeSSA::GetPhiTemp().
   // If we cannot maintain this assertion, then we should do
   //   m_program->SetUniformHelper(WIA);
+
+  if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias))
+  {
+      //
+      // The DeSSA/Coalescing procedure:
+      //   1. Follow Dominance tree to set up alias map. While setting up alias map,
+      //      update liveness for aliasee so that alasee's liveness is the sum of
+      //      all its aliasers.
+      //
+      //      By traversing dominance tree depth-first (DF), it is guaranteed that
+      //      the aliasee will be handled before its aliasers. For example, let
+      //      alias(v0, v1) denote that v0 is an alias to v1. DF dominance-tree
+      //      traversal may not handle aliasing in the following order:
+      //              alias(v0, v1)
+      //              alias(v1, v2)
+      //      rather, it must be in the order
+      //              alias(v1, v2)
+      //              alias(v0, v1)
+      //      By doing DF dominance-tree traversal, this kind of aliasing chain will
+      //      be handled nicely.
+      //   2. Set up InsEltMap, which coalesces vector values used
+      //      in the InsertElement instruction.
+      //   3. Make sure DeSSA node only use the root value of aliases (that is,
+      //      only aliasee may have DeSSA node).
+      //      Given alias(v0, aliasee),
+      //        if aliasee is in the InsEltMap, uses its InsEltRoot
+      //        otherwise, use aliasee
+      //
+      //  Note that the algorithem forces coalescing of aliasing inst
+      //  and InsertElement inst before PHI-coalescing, which means
+      //  it favors coaslescing of those aliasing inst and InsertElement
+      //  inst.
+
+      for (df_iterator<DomTreeNode*> DI = df_begin(DT->getRootNode()),
+          DE = df_end(DT->getRootNode()); DI != DE; ++DI) {
+          CoalesceAliasInstForBasicBlock(DI->getBlock());
+      }
+  }
 
   for (df_iterator<DomTreeNode*> DI = df_begin(DT->getRootNode()),
       DE = df_end(DT->getRootNode()); DI != DE; ++DI) {
@@ -243,7 +294,12 @@ bool DeSSA::runOnFunction(Function &MF)
       }
 
       e_alignment DefAlign = GetPreferredAlignment(PHI, WIA, CTX);
-      assert(PHI == getInsEltRoot(PHI));
+      if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias)) {
+          assert(PHI == getAliasee(PHI));
+      }
+      else {
+          assert(PHI == getInsEltRoot(PHI));
+      }
       addReg(PHI, DefAlign);
       PHISrcDefs[&(*I)].push_back(PHI);
 
@@ -260,9 +316,14 @@ bool DeSSA::runOnFunction(Function &MF)
             PHILoopPreHeaderSrcs.count(OrigSrcVal) > 0 &&
             PHILoopPreHeaderSrcs[OrigSrcVal] >= PHI_SRC_USE_THRESHOLD);
         // add src to the union
+        Value *SrcVal;
+        if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias)) {
+            SrcVal = getAliasee(OrigSrcVal);
+        }
+        else {
+            SrcVal = getInsEltRoot(OrigSrcVal);
+        }
         e_alignment SrcAlign = GetPreferredAlignment(OrigSrcVal, WIA, CTX);
-        Value *SrcVal = getInsEltRoot(OrigSrcVal);
-
         Instruction *DefMI = dyn_cast<Instruction>(SrcVal);
         if (DefMI) {
           if (CG->SIMDConstExpr(DefMI)) {
@@ -288,7 +349,7 @@ bool DeSSA::runOnFunction(Function &MF)
       // isolate complex type that IGC does not handle
       if (PHI->getType()->isStructTy() ||
           PHI->getType()->isArrayTy()) {
-        isolatePHI(PHI);
+        isolateReg(PHI);
       }
     }
   }
@@ -318,24 +379,24 @@ bool DeSSA::runOnFunction(Function &MF)
   return false;
 }
 
-void DeSSA::MapAddReg(MapVector<Value*, Node*> &Map, Value *Val, e_alignment Align) {
-  if (Map.count(Val))
+void DeSSA::addReg(Value *Val, e_alignment Align) {
+  if (RegNodeMap.count(Val))
     return;
-  Map[Val] = new (Allocator) Node(Val, ++CurrColor, Align);
+  RegNodeMap[Val] = new (Allocator) Node(Val, ++CurrColor, Align);
 }
 
 // Using Path Halving in union-find
 DeSSA::Node*
 DeSSA::Node::getLeader() {
   Node *N = this;
-  Node *Parent = parent.getPointer();
-  Node *Grandparent = Parent->parent.getPointer();
+  Node *Parent = parent;
+  Node *Grandparent = Parent->parent;
 
   while (Parent != Grandparent) {
-    N->parent.setPointer(Grandparent);
+    N->parent = Grandparent;
     N = Grandparent;
-    Parent = N->parent.getPointer();
-    Grandparent = Parent->parent.getPointer();
+    Parent = N->parent;
+    Grandparent = Parent->parent;
   }
 
   return Parent;
@@ -344,10 +405,10 @@ DeSSA::Node::getLeader() {
 Value* DeSSA::getRegRoot(Value* Val, e_alignment *pAlign) const {
   auto RI = RegNodeMap.find(Val);
   if (RI == RegNodeMap.end())
-    return 0;
+    return nullptr;
   Node *TheNode = RI->second;
-  if (TheNode->parent.getInt() & Node::kRegisterIsolatedFlag)
-    return 0x0;
+  if (isIsolated(TheNode))
+    return nullptr;
   Node *TheLeader = TheNode->getLeader();
   if (pAlign)
     *pAlign = TheLeader->alignment;
@@ -360,85 +421,86 @@ int DeSSA::getRootColor(Value* V)
     if (RI == RegNodeMap.end())
         return 0;
     Node *TheNode = RI->second;
-    if (TheNode->parent.getInt() &
-        (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag))
+    if (isIsolated(TheNode))
         return 0;
     Node *TheLeader = TheNode->getLeader();
     return TheLeader->color;
 }
 
-void DeSSA::MapUnionRegs(MapVector<Value*, Node*> &Map, Value* Val1, Value* Val2) {
-  Node *Node1 = Map[Val1]->getLeader();
-  Node *Node2 = Map[Val2]->getLeader();
-  Node *NewLeader = 0;
-  Node *Leadee = 0;
+void DeSSA::unionRegs(Node* Nd1, Node* Nd2)
+{
+    Node* N1 = Nd1->getLeader();
+    Node* N2 = Nd2->getLeader();
+    Node *NewLeader = nullptr;
+    Node *Leadee = nullptr;
 
-  if (Node1->rank > Node2->rank) {
-    NewLeader = Node1->getLeader();
-    Leadee = Node2;
-    Node2->parent.setPointer(NewLeader);
-  } else if (Node1->rank < Node2->rank) {
-    NewLeader = Node2->getLeader();
-    Leadee = Node1;
-    Node1->parent.setPointer(NewLeader);
-  } else if (Node1 != Node2) {
-    NewLeader = Node1->getLeader();
-    Leadee = Node2;
-    Node2->parent.setPointer(NewLeader);
-    Node1->rank++;
-  }
+    if (N1 == N2)
+        return;
 
-  if (NewLeader) {
-    assert(Leadee && "Leadee is expected when a new leader is present!");
-	// As of 6/2018, this links will be actually used.
-	// Link the circular list of Leadee right before NewLeader
-	Node *Leadee_next = Leadee->next;
-	Node *NewLeader_prev = NewLeader->prev;
-    Leadee->next = NewLeader;
-	NewLeader->prev = Leadee;
-	NewLeader_prev->next = Leadee_next;
-	Leadee_next->prev = NewLeader_prev;
-  }
+    if (N1->rank > N2->rank) {
+        NewLeader = N1;
+        Leadee = N2;
+    }
+    else if (N1->rank < N2->rank) {
+        NewLeader = N2;
+        Leadee = N1;
+    }
+    else {
+        NewLeader = N1;
+        Leadee = N2;
+        NewLeader->rank++;
+    }
+
+    assert(NewLeader && Leadee &&
+        "ICE: both leader and leadee shall not be null!");
+    Leadee->parent = NewLeader;
+
+    // Link the circular list of Leadee right before NewLeader
+    Node *Leadee_prev = Leadee->prev;
+    Node *NewLeader_prev = NewLeader->prev;
+    NewLeader_prev->next = Leadee;
+    Leadee->prev = NewLeader_prev;
+    Leadee_prev->next = NewLeader;
+    NewLeader->prev = Leadee_prev;
 }
 
 void DeSSA::isolateReg(Value* Val) {
-  Node *Node = RegNodeMap[Val];
-  splitNode(Node);
-  Node->parent.setInt(Node->parent.getInt() | Node::kRegisterIsolatedFlag);
+  Node *ND = RegNodeMap[Val];
+
+  // Make sure that if Val is in preferred CC map, all nodes
+  // of the same preferred CC should be all isolated as well.
+  Value* PrefRootV = getPrefCCRoot(Val);
+  if (PrefRootV) {
+      SmallVector<Node*, 4> PrefNodes;
+      Node *N = ND;
+      while (N->next != ND) {
+          N = N->next;
+          Value* prefV = getPrefCCRoot(N->value);
+          if (prefV == PrefRootV) {
+              PrefNodes.push_back(N);
+          }
+      }
+
+      splitNode(ND);
+      for (int i = 0, sz = (int)PrefNodes.size(); i < sz; ++i)
+      {
+          Node* N = PrefNodes[i];
+          splitNode(N);
+          unionRegs(ND, N);
+      }
+  }
+  else {
+      splitNode(ND);
+  }
 }
 
-Value* DeSSA::getOrigRoot(Instruction *PHI) const {
-    assert(dyn_cast<PHINode>(PHI));
-    auto RI = RegNodeMap.find(PHI);
-    assert(RI != RegNodeMap.end());
-    Node *DestNode = RI->second;
-    return DestNode->getLeader()->value;
-}
-
-Value* DeSSA::getPHIRoot(Instruction *PHI) const {
-  assert(dyn_cast<PHINode>(PHI));
-  auto RI = RegNodeMap.find(PHI);
-  assert (RI != RegNodeMap.end());
+bool DeSSA::isIsolated(Value *V) const {
+  auto RI = RegNodeMap.find(V);
+  if (RI == RegNodeMap.end()) {
+      return true;
+  }
   Node *DestNode = RI->second;
-  if (DestNode->parent.getInt() & Node::kPHIIsolatedFlag)
-    return 0x0;
-  if (DestNode->parent.getInt() & Node::kRegisterIsolatedFlag)
-    return 0x0;
-  return DestNode->getLeader()->value;
-}
-
-void DeSSA::isolatePHI(Instruction *PHI) {
-  assert(isa<PHINode>(PHI));
-  Node *Node = RegNodeMap[PHI];
-  splitNode(Node);
-  Node->parent.setInt(Node->parent.getInt() | Node::kPHIIsolatedFlag);
-}
-
-bool DeSSA::isPHIIsolated(Instruction *PHI) const {
-  auto RI = RegNodeMap.find(PHI);
-  assert (RI != RegNodeMap.end());
-  Node *DestNode = RI->second;
-  return ((DestNode->parent.getInt() & Node::kPHIIsolatedFlag) > 0 ? true : false);
+  return isIsolated(DestNode);
 }
 
 // Split node ND from its existing congurent class, and the
@@ -459,7 +521,7 @@ void DeSSA::splitNode(Node* ND)
     P->next = N;
 
     // ND : a new single-value congruent class
-    ND->parent.setPointer(ND);
+    ND->parent = ND;
     ND->next = ND;
     ND->prev = ND;
     ND->rank = 0;
@@ -483,11 +545,11 @@ void DeSSA::splitNode(Node* ND)
     // always to set "Leader' as the new leader, so that all nodes
     // within a same congruent class remains in the same rooted tree.
     N = Leader->next;
-    Leader->parent.setPointer(Leader);
+    Leader->parent = Leader;
     Leader->rank = (Leader == N) ? 0 : 1;
     while (N != Leader)
     {
-        N->parent.setPointer(Leader);
+        N->parent = Leader;
         N->rank = 0;
         N = N->next;
     }
@@ -617,7 +679,6 @@ DeSSA::SplitInterferencesForBasicBlock(
         break;
       }
 
-      // skip phi-isolated
       int RootC = getRootColor(PHI);
       // check live-out interference
       if (IGC_IS_FLAG_ENABLED(EnableDeSSAWA) && !RootC)
@@ -628,6 +689,12 @@ DeSSA::SplitInterferencesForBasicBlock(
               for (unsigned i = 0; !RootC && i < PHI->getNumOperands(); i++) {
                   Value* SrcVal = PHI->getOperand(i);
                   if (!isa<Constant>(SrcVal)) {
+                      if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias)) {
+                          SrcVal = getAliasee(SrcVal);
+                      }
+                      else {
+                          SrcVal = getInsEltRoot(SrcVal);
+                      }
                       RootC = getRootColor(SrcVal);
                   }
               }
@@ -644,16 +711,19 @@ DeSSA::SplitInterferencesForBasicBlock(
       }
       assert(PredIndex < PHI->getNumOperands());
       Value* PredValue = PHI->getOperand(PredIndex);
-      PredValue = getInsEltRoot(PredValue);
-      // check potential cyclic phi-move dependency
-      //Value *OrigRootV = getOrigRoot(PHI);
+      if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias)) {
+          PredValue = getAliasee(PredValue);
+      }
+      else {
+          PredValue = getInsEltRoot(PredValue);
+      }
       std::pair<Instruction*, Value*> &CurrentPHI = CurrentPHIForColor[RootC];
       // If two PHIs have the same operand from every shared predecessor, then
       // they don't actually interfere. Otherwise, isolate the current PHI. This
       // could possibly be improved, e.g. we could isolate the PHI with the
       // fewest operands.
       if (CurrentPHI.first && CurrentPHI.second != PredValue) {
-        isolatePHI(PHI);
+        isolateReg(PHI);
         continue;
       }
       else {
@@ -729,7 +799,7 @@ void DeSSA::SplitInterferencesForAlignment()
     {
         // Find a root Node
         Node *rootNode = I->second;
-        if (rootNode->parent.getPointer() != rootNode) {
+        if (rootNode->parent != rootNode) {
             continue;
         }
 
@@ -740,13 +810,6 @@ void DeSSA::SplitInterferencesForAlignment()
         do {
             Curr = N;
             N = Curr->next;
-
-            // Skip isolated reg.
-            if (Curr->parent.getInt() &
-                (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag)) {
-                continue;
-            }
-
             if (Curr->alignment == EALIGN_GRF) {
                 Align = EALIGN_GRF;
                 break;
@@ -765,13 +828,6 @@ void DeSSA::SplitInterferencesForAlignment()
         do {
             Curr = N;
             N = N->next;
-
-            // Skip isolated reg.
-            if (Curr->parent.getInt() &
-                (Node::kRegisterIsolatedFlag | Node::kPHIIsolatedFlag)) {
-                continue;
-            }
-
             if (Curr->alignment != EALIGN_AUTO && Curr->alignment != EALIGN_GRF)
             {
                 assert(Curr != Head && "Head Node cannot be isolated, something wrong!");
@@ -796,6 +852,53 @@ DeSSA::getInsEltRoot(Value* Val) const
 void
 DeSSA::CoalesceInsertElementsForBasicBlock(BasicBlock *Blk)
 {
+    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias))
+    {
+        for (BasicBlock::iterator BBI = Blk->begin(), BBE = Blk->end();
+            BBI != BBE; ++BBI) {
+            Instruction *Inst = &(*BBI);
+
+            if (!CG->NeedInstruction(*Inst)) {
+                continue;
+            }
+            // Only Aliasee needs to be handled.
+            if (!isAliasee(Inst)) {
+                continue;
+            }
+
+            // Set up preferred CC for InsertElement.
+            //
+            // Not sure if we really need preferred CC for insElt.
+            // Since the existing code keeps them together, here keep
+            // them in the preferred CC.
+            if (isa<InsertElementInst>(Inst))
+            {
+                Value *origSrcV = Inst->getOperand(0);
+                Value *SrcV = getAliasee(origSrcV);
+                Value *DstV = getAliasee(Inst);
+                if (SrcV != DstV &&
+                    (isa<Instruction>(SrcV) || isa<Argument>(SrcV)))
+                {
+                    if (!interfere(SrcV, DstV) &&
+                        (WIA->whichDepend(SrcV) == WIA->whichDepend(DstV)))
+                    {
+                        PrefCCMapAddValue(DstV);
+                        PrefCCMapAddValue(SrcV);
+                        PrefCCMap[DstV] = PrefCCMap[SrcV];
+
+                        // union them
+                        e_alignment InstAlign = GetPreferredAlignment(Inst, WIA, CTX);
+                        addReg(Inst, InstAlign);
+                        e_alignment SrcVAlign = GetPreferredAlignment(SrcV, WIA, CTX);
+                        addReg(SrcV, SrcVAlign);
+                        unionRegs(DstV, SrcV);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     for (BasicBlock::iterator BBI = Blk->begin(), BBE = Blk->end();
         BBI != BBE; ++BBI) {
         Instruction *Inst = &(*BBI);
@@ -804,6 +907,7 @@ DeSSA::CoalesceInsertElementsForBasicBlock(BasicBlock *Blk)
         {
             continue;
         }
+
         // extend the liveness of InsertElement due to union
         for (unsigned i = 0; i < Inst->getNumOperands(); ++i) {
             Value *SrcV = Inst->getOperand(i);
@@ -814,6 +918,7 @@ DeSSA::CoalesceInsertElementsForBasicBlock(BasicBlock *Blk)
                 }
             }
         }
+
         if (!isa<InsertElementInst>(Inst)) {
             continue;
         }
@@ -880,25 +985,173 @@ void DeSSA::getAllValuesInCongruentClass(
 	// a sequence of insertElement is in congruent class. The RootValue
 	// has its liveness modified to cover all InsertElements that are
 	// grouped together.
-	Value* rootV = getInsEltRoot(V);
-    ValsInCC.push_back(rootV);
-	auto RI = RegNodeMap.find(rootV);
+    Value* RootV = V;
+    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias))
+    {
+        RootV = getAliasee(RootV);
+    }
+    else {
+        RootV = getInsEltRoot(RootV);
+    }
+    ValsInCC.push_back(RootV);
+	auto RI = RegNodeMap.find(RootV);
 	if (RI != RegNodeMap.end()) {
 		Node* First = RI->second;
-		Node* N = First->next;
-		do {
-			if (N->parent.getInt() &
-				(Node::kPHIIsolatedFlag | Node::kRegisterIsolatedFlag)) {
-                N = N->next;
-				continue;
-			}
-			if (rootV != N->value) {
-				// No duplicate Value in ValsInCC
-				ValsInCC.push_back(N->value);
-			}
-			N = N->next;
-		} while (N != First);
+		for (Node* N = First->next; N != First; N = N->next)
+        {
+            ValsInCC.push_back(N->value);
+		}
 	}
 	return;
 }
 
+void DeSSA::CoalesceAliasInstForBasicBlock(BasicBlock *Blk)
+{
+    for (BasicBlock::iterator BBI = Blk->begin(), BBE = Blk->end();
+        BBI != BBE; ++BBI) {
+        Instruction *I = &(*BBI);
+
+        // Now, better to think of code as a sequence Codegen Patterns,
+        // not a sequence of llvm instructions.
+        if (!CG->NeedInstruction(*I)) {
+            continue;
+        }
+
+        if (InsertElementInst* IEI = dyn_cast<InsertElementInst>(I))
+        {
+            if (isa<UndefValue>(I->getOperand(0)))
+            {
+                SmallVector<Value*, 16> AllIEIs;
+                int nelts = checkInsertElementAlias(IEI, AllIEIs);
+                if (nelts > 0)
+                {
+                    //  This will generate the following alias:
+                    //     alias(V0, Vn)
+                    //     alias(V1, Vn)
+                    //     alias(V2, Vn)
+                    //     ......
+                    //     alias(Vn, Vn)  <-- Vn is the root!
+                    Value* aliasee = AllIEIs[0];
+                    for (int i = 0; i < nelts; ++i) {
+                        Value* V = AllIEIs[i];
+                        AliasMap[V] = aliasee;
+
+                        // union liveness info
+                        LV->mergeUseFrom(aliasee, V);
+                    }
+                }
+            }
+        }
+        else if (CastInst* CastI = dyn_cast<CastInst>(I))
+        {
+            if (IGC_GET_FLAG_VALUE(EnableDeSSAAlias) > 1)
+            {
+                Value* D = I;
+                Value* S = I->getOperand(0);
+                if (!isa<Constant>(S) &&
+                    WIA->whichDepend(D) == WIA->whichDepend(S) &&
+                    isNoOpInst(CastI, CTX))
+                {
+                    AddAlias(S);
+                    AliasMap[D] = AliasMap[S];
+
+                    // union liveness info
+                    LV->mergeUseFrom(S, D);
+                }
+            }
+        }
+    }
+}
+
+int DeSSA::checkInsertElementAlias(
+    InsertElementInst* IEI, SmallVector<Value*, 16>& AllIEIs)
+{
+    assert(isa<UndefValue>(IEI->getOperand(0)) &&
+           "ICE: need to pass first IEI as the argument");
+
+    // Find the the alias pattern:
+    //     V0 = IEI UndefValue, S0, 0
+    //     V1 = IEI V0,         S1, 1
+    //     V2 = IEI V1,         S2, 2
+    //     ......
+    //     Vn = IEI Vn_1,       Sn_1, n
+    // All Vi (i=0,n_1, except i=n) has a single-use.
+    //
+    // If found, return the vector size (non zero);
+    // otherwise, return 0.
+    VectorType* VTy = cast<VectorType>(IEI->getType());
+    int nelts = (int)VTy->getNumElements();
+    AllIEIs.resize(nelts, nullptr);
+    InsertElementInst* Inst = IEI;
+    WIBaseClass::WIDependancy Dep = WIA->whichDepend(Inst);
+    while (Inst)
+    {
+        // Check if Inst has constant index, stop if not.
+        ConstantInt* CI = dyn_cast<ConstantInt>(Inst->getOperand(2));
+        if (!CI) {
+            return 0;
+        }
+        int ix = (int)CI->getZExtValue();
+        AllIEIs[ix] = Inst;
+        if (!Inst->hasOneUse() || Dep != WIA->whichDepend(Inst)) {
+            break;
+        }
+        Inst = dyn_cast<InsertElementInst>(Inst->user_back());
+    }
+
+    // Make sure all elements are present
+    for (int i = 0; i < nelts; ++i) {
+        if (AllIEIs[i] == 0)
+            return 0;
+    }
+    return nelts;
+}
+
+Value* DeSSA::getAliasee(Value* V) const
+{
+    auto AI = AliasMap.find(V);
+    if (AI == AliasMap.end())
+        return V;
+    return AI->second;
+}
+
+bool DeSSA::isAlias(Value* V) const
+{
+    auto AI = AliasMap.find(V);
+    return AI != AliasMap.end();
+}
+
+// The following paper explains an approach to check if two
+// congruent classes interfere using a linear approach.
+//
+//    Boissinot, et al. Revisiting Out-of-SSA Translation for Correctness,
+//    Code Quality and Efficiency,
+//      In Proceedings of the 7th annual IEEE/ACM International Symposium
+//      on Code Generation and Optimization (Seattle, Washington,
+//      March 22 - 25, 2009). CGO '09. IEEE, Washington, DC, 114-125.
+//
+// Here, we simply use a naive pair-wise comparison.
+//
+// TODO: check if using linear approach described in the paper is
+//   necessary;  To do so, it needs to get PN (preorder number of BB)
+//   and sort congruent classes before doing interference checking.
+bool DeSSA::interfere(llvm::Value* V0, llvm::Value* V1)
+{
+    SmallVector<Value*, 8> allCC0;
+    SmallVector<Value*, 8> allCC1;
+    getAllValuesInCongruentClass(V0, allCC0);
+    getAllValuesInCongruentClass(V1, allCC1);
+
+    for (int i0 = 0, sz0 = (int)allCC0.size(); i0 < sz0; ++i0)
+    {
+        Value* val0 = allCC0[i0];
+        for (int i1 = 0, sz1 = (int)allCC1.size(); i1 < sz1; ++i1)
+        {
+            Value* val1 = allCC1[i1];
+            if (LV->hasInterference(val0, val1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
