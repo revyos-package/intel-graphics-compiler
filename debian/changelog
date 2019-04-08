@@ -1,5 +1,5 @@
-intel-graphics-compiler (1.0.0-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.0-1) experimental; urgency=medium
 
   * Initial release (Closes: #923945)
 
- -- Timo Aaltonen <tjaalton@debian.org>  Mon, 04 Feb 2019 11:15:41 +0200
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 08 Apr 2019 23:56:15 +0300
