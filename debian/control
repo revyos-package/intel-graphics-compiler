@@ -34,11 +34,11 @@ Architecture: amd64
 Depends:
  libigc1 (= ${binary:Version}),
  ${misc:Depends},
-Description: Intel graphics compiler for OpenCL -- core libs
+Description: Intel graphics compiler for OpenCL -- core development files
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
  .
- This package includes files for development.
+ This package includes files for IGC core development.
 
 Package: libigc-tools
 Architecture: amd64
@@ -69,8 +69,8 @@ Section: libdevel
 Depends:
  libigdfcl1 (= ${binary:Version}),
  ${misc:Depends},
-Description: Intel graphics compiler for OpenCL -- development files
+Description: Intel graphics compiler for OpenCL -- OpenCL development files
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
  .
- This package includes files for development.
+ This package includes files for IGC OpenCL development.
