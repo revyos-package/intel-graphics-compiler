@@ -7,7 +7,7 @@ Files: *
 Copyright: 2017-2018 Intel
 License: MIT
 
-Files: third_party/opencl_headers
+Files: third_party/opencl_headers/CL/*
 Copyright: 2008-2015 The Khronos Group Inc.
 License: MIT
 
