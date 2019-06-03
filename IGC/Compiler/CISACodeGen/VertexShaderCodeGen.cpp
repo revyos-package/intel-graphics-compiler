@@ -68,21 +68,27 @@ void CVertexShader::AllocatePayload()
 
     //R0 is always allocated as a predefined variable. Increase offset for R0
     assert(m_R0);
-    offset += SIZE_GRF;
+    offset += getGRFSize();
 
     assert(m_R1);
     AllocateInput(m_R1,offset);
-    offset += SIZE_GRF;
+    offset += getGRFSize();
 
-    assert(offset % SIZE_GRF == 0);
-    ProgramOutput()->m_startReg = offset / SIZE_GRF;
+    assert(offset % getGRFSize() == 0);
+    ProgramOutput()->m_startReg = offset / getGRFSize();
 
     // allocate space for NOS constants and pushed constants
     AllocateConstants3DShader(offset);
 
-    assert(offset % SIZE_GRF == 0);
+    assert(offset % getGRFSize() == 0);
+
     // TODO: handle packed vertex attribute even if we pull
-    bool packedInput = m_Platform->hasPackedVertexAttr() && !isInputsPulled;
+    bool packedInput = m_Platform->hasPackedVertexAttr() &&
+                       !isInputsPulled
+        ;
+
+    m_ElementComponentPackingEnabled = packedInput;
+
     if(!packedInput)
     {
         for(uint i = 0; i < MAX_VSHADER_INPUT_REGISTERS_PACKAGEABLE; i++)
@@ -102,7 +108,7 @@ void CVertexShader::AllocatePayload()
         }
         if(m_ElementComponentEnableMask[i / 4] & BIT(i % 4))
         {
-            offset += SIZE_GRF;
+            offset += getGRFSize();
         }
     }
 }
@@ -116,7 +122,7 @@ void CVertexShader::PackVFInput(unsigned int index, unsigned int& offset)
         {
             // enable the full element and push the offset to consider the elements skipped
             m_ElementComponentEnableMask[index / 4] = 0xF; 
-            offset += (index % 4)* SIZE_GRF;
+            offset += (index % 4)* getGRFSize();
         }
     }
     else
@@ -127,7 +133,8 @@ void CVertexShader::PackVFInput(unsigned int index, unsigned int& offset)
 
 CVertexShader::CVertexShader(llvm::Function *pFunc, CShaderProgram* pProgram) :
     CShader(pFunc, pProgram),
-    m_R1(nullptr)
+    m_R1(nullptr),
+    m_ElementComponentPackingEnabled(false)
 {
     for (int i = 0; i < MAX_VSHADER_INPUT_REGISTERS_PACKAGEABLE ; ++i )
     {
@@ -150,7 +157,6 @@ void CVertexShader::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     assert(entry && entry->getParent());
     const bool isPositionOnlyShader = (entry->getParent()->getModuleFlag("IGC::PositionOnlyVertexShader") != nullptr);
 
-    ProgramOutput()->m_scratchSpaceUsedByShader = m_ScratchSpaceSize;
     pKernelProgram->simd8 = *ProgramOutput();
     pKernelProgram->MaxNumInputRegister              = GetMaxNumInputRegister();
     pKernelProgram->VertexURBEntryReadLength         = GetVertexURBEntryReadLength();
@@ -166,8 +172,8 @@ void CVertexShader::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     pKernelProgram->vertexIdLocation                 = m_properties.m_VID;
     pKernelProgram->hasInstanceID                    = m_properties.m_HasInstanceID;
     pKernelProgram->instanceIdLocation               = m_properties.m_IID;
-	pKernelProgram->vertexFetchSGVExtendedParameters = m_properties.m_VertexFetchSGVExtendedParameters;
-    pKernelProgram->NOSBufferSize                    = m_NOSBufferSize / SIZE_GRF; // in 256 bits
+    pKernelProgram->vertexFetchSGVExtendedParameters = m_properties.m_VertexFetchSGVExtendedParameters;
+    pKernelProgram->NOSBufferSize                    = m_NOSBufferSize / getGRFSize(); // in 256 bits
     pKernelProgram->DeclaresVPAIndex                 = m_properties.m_hasVPAI;
     pKernelProgram->DeclaresRTAIndex                 = m_properties.m_hasRTAI;
     pKernelProgram->HasClipCullAsOutput              = m_properties.m_hasClipDistance;
@@ -183,6 +189,8 @@ void CVertexShader::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     pKernelProgram->bindingTableEntryCount  = this->GetMaxUsedBindingTableEntryCount();
     pKernelProgram->BindingTableEntryBitmap = this->GetBindingTableEntryBitmap();
 
+    pKernelProgram->enableElementComponentPacking = m_ElementComponentPackingEnabled;
+
     for (int i = 0; i < MAX_VSHADER_INPUT_REGISTERS_PACKAGEABLE ; ++i )
     {
         pKernelProgram->ElementComponentDeliverMask[i]   = m_ElementComponentEnableMask[i];
@@ -190,7 +198,7 @@ void CVertexShader::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     
     // Implement workaround code. We cannot have all component enable masks equal to zero
     // so we need to enable one dummy component.
-	//WaVFComponentPackingRequiresEnabledComponent is made default behavior
+    //WaVFComponentPackingRequiresEnabledComponent is made default behavior
     //3DSTATE_VF_COMPONENT_PACKING: At least one component of a "valid"
     //Vertex Element must be enabled.
     bool anyComponentEnabled = false;
@@ -227,29 +235,6 @@ CVariable* CVertexShader::GetURBInputHandle(CVariable* pVertexIndex)
 QuadEltUnit CVertexShader::GetFinalGlobalOffet(QuadEltUnit globalOffset) 
 { 
     return globalOffset; 
-}
-
-QuadEltUnit CVertexShader::GetURBOffset(ShaderOutputType outputType, uint attrIdx)
-{
-    switch(outputType)
-    {
-    case SHADER_OUTPUT_TYPE_POSITION:
-        return QuadEltUnit(1);
-    case SHADER_OUTPUT_TYPE_CLIPDISTANCE_LO:
-        return QuadEltUnit(2);
-    case  SHADER_OUTPUT_TYPE_CLIPDISTANCE_HI:
-        return QuadEltUnit(3);
-    case SHADER_OUTPUT_TYPE_DEFAULT:
-        return QuadEltUnit(attrIdx) + OctEltUnit(m_properties.m_hasClipDistance ? 2 : 1);
-    case SHADER_OUTPUT_TYPE_POINTWIDTH:
-    case SHADER_OUTPUT_TYPE_RENDER_TARGET_ARRAY_INDEX:
-    case SHADER_OUTPUT_TYPE_VIEWPORT_ARRAY_INDEX:
-        return QuadEltUnit(0) ;
-    default:
-        assert(!"unknown VS output type");
-        break;
-    }
-    return QuadEltUnit(0);
 }
 
 /// Returns VS URB allocation size.

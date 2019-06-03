@@ -338,7 +338,7 @@ class IR_Builder {
 
 public:
 
-    char* curFile;
+    const char* curFile;
     unsigned int curLine;
     int curCISAOffset;
 
@@ -408,8 +408,6 @@ public:
 
     bool isKernel;
     int cunit;
-    reloc_symtab* varRelocTable;
-    reloc_symtab* funcRelocTable;
     const std::vector <char*>* resolvedCalleeNames;
 
     // pre-defined declare that binds to R0 (the entire GRF)
@@ -509,6 +507,7 @@ public:
     bool hasNullReturnSampler = false;
 
     int perThreadInputSize = 0;
+    bool hasPerThreadProlog = false;
 
 public:
     PreDefinedVars preDefVars;
@@ -609,6 +608,8 @@ public:
 
     uint32_t getPerThreadInputSize() const { return perThreadInputSize; }
     void setPerThreadInputSize(uint32_t val) { perThreadInputSize = val; }
+    bool getHasPerThreadProlog() const { return hasPerThreadProlog; }
+    void setHasPerThreadProlog() { hasPerThreadProlog = true; }
 
     bool isOpndAligned( G4_Operand *opnd, unsigned short &offset, int align_byte );
 
@@ -627,10 +628,6 @@ public:
     int getCUnitId() { return cunit; }
     void setIsKernel( bool value ) { isKernel = value; }
     bool getIsKernel() { return isKernel; }
-    void setVarRelocTable( reloc_symtab* tab ) { varRelocTable = tab; }
-    reloc_symtab* getVarRelocTable() { return varRelocTable; }
-    void setFuncRelocTable( reloc_symtab* tab ) { funcRelocTable = tab; }
-    reloc_symtab* getFuncRelocTable() { return funcRelocTable; }
     void setResolvedCalleeNames(std::vector<char*>* nameList) { resolvedCalleeNames = nameList; }
     const std::vector<char*>* getResolvedCalleeNames() { return resolvedCalleeNames; }
     void predefinedVarRegAssignment(uint8_t inputSize);
@@ -657,7 +654,7 @@ public:
 
     PVISA_WA_TABLE getPWaTable() { return m_pWaTable; }
 
-    char* getNameString(Mem_Manager& mem, size_t size, const char* format, ...)
+    const char* getNameString(Mem_Manager& mem, size_t size, const char* format, ...)
     {
 #ifdef _DEBUG
         char* name = (char*) mem.alloc(size);
@@ -861,7 +858,7 @@ public:
         Mem_Manager &m, Options *options, bool isFESP64Bits,
         FINALIZER_INFO *jitInfo = NULL, PVISA_WA_TABLE pWaTable = NULL)
         : curFile(NULL), curLine(0), curCISAOffset(-1), func_id(-1), metaData(jitInfo),
-        isKernel(false), cunit(0), varRelocTable(NULL), funcRelocTable(NULL), resolvedCalleeNames(NULL),
+        isKernel(false), cunit(0), resolvedCalleeNames(NULL),
         usesSampler(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
         CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
         use64BitFEStackVars(isFESP64Bits), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
@@ -1000,7 +997,8 @@ public:
     // create a new temp GRF with the specified type/size and undefined regions
     G4_Declare* createTempVar(unsigned int numElements, G4_Type type, G4_Align align, G4_SubReg_Align subAlign, const char* prefix = "TV", bool appendIdToName = true )
     {
-        char* name = appendIdToName ? getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++) :
+        const char* name = appendIdToName ?
+            getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++) :
             getNameString(mem, 20, "%s", prefix);
 
         unsigned short dcl_width = 0, dcl_height = 1;
@@ -1030,7 +1028,7 @@ public:
     // create a new temp GRF as the home location of a spilled addr/flag dcl
     G4_Declare* createAddrFlagSpillLoc(G4_Declare* dcl)
     {
-        char* name = getNameString(mem, 16, "SP_LOC_%d", numAddrFlagSpillLoc++);
+        const char* name = getNameString(mem, 16, "SP_LOC_%d", numAddrFlagSpillLoc++);
         G4_Declare* spillLoc = createDeclareNoLookup(name,
             G4_GRF,
             dcl->getNumElems(),
@@ -1093,7 +1091,7 @@ public:
     /* numberOfFlags MEANS NUMBER OF WORDS (e.g., 1 means 16-bit), not number of bits or number of data elements in operands. */
     G4_Declare* createTempFlag(unsigned short numberOfFlags, const char* prefix = "TEMP_FLAG_" )
     {
-        char* name = getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++);
+        const char* name = getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++);
 
         G4_Declare* dcl = createDeclareNoLookup(name, G4_FLAG, numberOfFlags, 1, Type_UW);
 
@@ -1197,7 +1195,14 @@ public:
         bool isWrite,
         G4_Operand *bti = nullptr,
         G4_Operand *sti = nullptr);
-
+    G4_SendMsgDescriptor* createSendMsgDesc(
+        SFID sfid,
+        uint32_t desc,
+        uint32_t extDesc,
+        int src1Len,
+        bool isRead,
+        bool isWrite,
+        G4_Operand *bti);
     G4_SendMsgDescriptor* createSendMsgDesc(
         unsigned funcCtrl,
         unsigned regs2rcv,
@@ -1396,10 +1401,10 @@ public:
     // Create immediate operand without looking up hash table. This operand
     // is a relocatable immediate type.
     //
-    G4_Reloc_Imm* createRelocImm(SuperRelocEntry& reloc, G4_Type ty)
+    G4_Reloc_Imm* createRelocImm(G4_Type ty)
     {
         G4_Reloc_Imm* newImm;
-        newImm = new (mem)G4_Reloc_Imm(reloc, ty);
+        newImm = new (mem)G4_Reloc_Imm(ty);
         return newImm;
     }
 
@@ -1513,7 +1518,7 @@ public:
         unsigned char size, G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1,
         unsigned int option, int lineno, int CISAoff,
-        char* srcFilename);
+        const char* srcFilename);
 
     G4_INST* createInst(G4_Predicate* prd, G4_opcode op,
         G4_CondMod* mod, bool sat,
@@ -1561,12 +1566,12 @@ public:
         unsigned char size, G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
         unsigned int option, int lineno, int CISAoff,
-        char* srcFilename);
+        const char* srcFilename);
 
     G4_INST* createInternalCFInst(G4_Predicate* prd, G4_opcode op,
         unsigned char size, G4_Label* jip, G4_Label* uip,
         unsigned int option, int lineno = 0, int CISAoff = -1,
-        char* srcFilename = NULL);
+        const char* srcFilename = NULL);
 
 
     G4_InstSend* createSendInst(G4_Predicate* prd, G4_opcode op,
@@ -1583,7 +1588,7 @@ public:
         G4_SendMsgDescriptor *msgDesc,
         int lineno = 0,
         int CISAoff = -1,
-        char* srcFilename = NULL);
+        const char* srcFilename = NULL);
 
     G4_InstSend* createSplitSendInst(G4_Predicate* prd, G4_opcode op,
         unsigned char size, G4_DstRegRegion* dst,
@@ -1602,7 +1607,7 @@ public:
         G4_Operand* src3,
         int lineno = 0,
         int CISAoff = -1,
-        char* srcFilename = NULL);
+        const char* srcFilename = NULL);
 
     G4_INST* createMathInst(G4_Predicate* prd, bool sat,
                             unsigned char size, G4_DstRegRegion* dst,
@@ -1613,7 +1618,7 @@ public:
         unsigned char size, G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1, G4_MathOp mathOp,
         unsigned int option, int lineno = 0, int CISAoff = -1,
-        char* srcFilename = NULL);
+        const char* srcFilename = NULL);
 
     G4_INST* createIntrinsicInst(G4_Predicate* prd, Intrinsic intrinId,
         unsigned char size, G4_DstRegRegion* dst,
@@ -1624,7 +1629,7 @@ public:
         unsigned char size, G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
         unsigned int option, int lineno = 0, int CISAoff = -1,
-        char* srcFilename = NULL);
+        const char* srcFilename = NULL);
 
     G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
     void resizePredefinedStackVars();
@@ -1656,6 +1661,7 @@ public:
         G4_SendMsgDescriptor *msgDesc,
         unsigned option,
         bool is_sendc);
+
 
     G4_InstSend *Create_SplitSend_Inst_For_RTWrite(G4_Predicate *pred,
         G4_DstRegRegion *dst,
@@ -2429,7 +2435,7 @@ public:
         //gets next power of 2 size
         return Round_Up_Pow2(ioWidth / dcl->getElemSize()) * dcl->getElemSize();
     }
-    void fixSendDstType(G4_DstRegRegion* dst, uint8_t execSize );
+    void fixSendDstType(G4_DstRegRegion* dst, uint8_t execSize);
 
     struct payloadSource {
         G4_SrcRegRegion *opnd;
@@ -2461,8 +2467,6 @@ public:
                         payloadSource sources[], unsigned len);
 
 #define FIX_OWORD_SEND_EXEC_SIZE(BLOCK_SIZE)(((BLOCK_SIZE) > 2)? 16: (BLOCK_SIZE*4))
-
-    char * createNameSpace(uint8_t size){ return (char*)mem.alloc(size); }
 
     // return either 253 or 255 for A64 messages, depending on whether we want I/A coherency or not
     uint8_t getA64BTI() const { return m_options->getOption(vISA_noncoherentStateless) ? 0xFD : 0xFF; }

@@ -42,6 +42,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPush.hpp"
 
+#include "llvmWrapper/IR/Module.h"
 #include "llvmWrapper/IR/Argument.h"
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/IR/Attributes.h"
@@ -163,11 +164,11 @@ namespace //Anonymous
         /// Return function metadata if function is kernel
         IGC::FunctionMetaData* getKernelMetadata(const llvm::Function* func)
         {
-			if (isEntryFunc(_pMdUtils, func))
-			{
+            if (isEntryFunc(_pMdUtils, func))
+            {
                 if (modMD->FuncMD.find(const_cast<llvm::Function*>(func)) != modMD->FuncMD.end())
                     return &modMD->FuncMD[const_cast<llvm::Function*>(func)];
-			}
+            }
             return nullptr;
         }
 
@@ -731,7 +732,7 @@ namespace //Anonymous
 
         /// Return parent function for a call
         llvm::Function* getCallerFunc() const { return _callerFunc; }
-        llvm::Module* getModule() const { return getCallerFunc()->getParent(); }
+        IGCLLVM::Module* getModule() const { return (IGCLLVM::Module*)getCallerFunc()->getParent(); }
         llvm::LLVMContext& getContext() const { return _call.getContext(); }
 
         // Device exec arguments
@@ -2308,7 +2309,7 @@ namespace //Anonymous
                 // note: byValArgs is filled in sorted manner
                 if ((byValI != byValE) && (argNum == *byValI))
                 {
-					IGCLLVM::ArgumentAddAttr(arg, IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::ByVal);                    
+                    IGCLLVM::ArgumentAddAttr(arg, IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::ByVal);                    
                     ++byValI;
                 }
             }

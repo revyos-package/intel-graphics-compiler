@@ -49,13 +49,14 @@ namespace IGC {
 
 struct SSubVector
 {
-	// Denote a sub-vector of BaseVector starting at StartElementOffset.
+    // Denote a sub-vector of BaseVector starting at StartElementOffset.
     //
     // It is used as an aliasee in the pair <Value, SSubVector>, thus the
     // size of the sub-vector is the size of Value (aliaser) of this pair.
     // (If needed, add the number of elements in SSubVector.)
-	llvm::Value* BaseVector;
-	short  StartElementOffset;
+    llvm::Value* Val;           // Either scalar or sub-vector
+    llvm::Value* BaseVector;
+    short  StartElementOffset;  // in the unit of BaseVector's element type
 };
 
 //  Represent a Vector's element at index = EltIx.
@@ -87,7 +88,7 @@ struct SVecElement {
 /// (2) RPE(x) >= Threshold for any use x of UInst.
 ///
 class VariableReuseAnalysis : public llvm::FunctionPass,
-	                          public llvm::InstVisitor<VariableReuseAnalysis>
+                              public llvm::InstVisitor<VariableReuseAnalysis>
 {
 public:
   static char ID;
@@ -108,10 +109,10 @@ public:
     // AU.addRequired<RegisterEstimator>();
     AU.setPreservesAll();
     AU.addRequired<llvm::DominatorTreeWrapperPass>();
-	AU.addRequired<WIAnalysis>();
-	AU.addRequired<LiveVarsAnalysis>();
-	AU.addRequired<CodeGenPatternMatch>();
-	AU.addRequired<DeSSA>();
+    AU.addRequired<WIAnalysis>();
+    AU.addRequired<LiveVarsAnalysis>();
+    AU.addRequired<CodeGenPatternMatch>();
+    AU.addRequired<DeSSA>();
     AU.addRequired<CoalescingEngine>();
     AU.addRequired<BlockCoalescing>();
     AU.addRequired<CodeGenContextWrapper>();
@@ -214,7 +215,7 @@ private:
     m_SimdSize = 0;
     m_IsFunctionPressureLow = Status::Undef;
     m_IsBlockPressureLow = Status::Undef;
-	m_ValueAliasMap.clear();
+    m_ValueAliasMap.clear();
     m_AliasRootMap.clear();
     m_HasBecomeNoopInsts.clear();
   }

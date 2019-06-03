@@ -370,13 +370,13 @@ int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, Common_ISA_Exec_S
             inst->setOptionOn(InstOpt_AccWrCtrl);
 
             //mov dst acc
-			G4_SrcRegRegion *accSrcOpnd = createSrcRegRegion(Mod_src_undef,
-				Direct,
-				phyregpool.getAcc0Reg(),
-				0,
-				0,
+            G4_SrcRegRegion *accSrcOpnd = createSrcRegRegion(Mod_src_undef,
+                Direct,
+                phyregpool.getAcc0Reg(),
+                0,
+                0,
                 getRegionStride1(),
-				dstOpnd->getType());
+                dstOpnd->getType());
 
             createInst(
                 NULL,
@@ -468,17 +468,9 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
     }
     else
     {
-        ASSERT_USER(instExecSize == 8, "simd2 and simd16 support will be added later");
-        element_size = 8;
-        if (hasSIMD8DFMadm())
-        {
-            exsize = 8;
-            loopCount = 1;
-        }
-        else
-        {
-            loopCount = 2;
-        }
+        element_size = instExecSize;
+        exsize = std::min((int) instExecSize, getFP64MadmExecSize());
+        loopCount = instExecSize / exsize;
     }
 
     bool noDstMove = exsize == 8 && !saturate && !predOpnd && isOpndAligned(dstOpnd, 32) &&
@@ -510,7 +502,7 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
     G4_Declare *t0  = getImmDcl(dbl_constant_0, element_size);
     G4_Declare *t1  = getImmDcl(dbl_constant_1, element_size);
 
-	inst = createPseudoKills({ t6, t7, t8, t9, t10, t11, t12, t13, tmpFlag });
+    inst = createPseudoKills({ t6, t7, t8, t9, t10, t11, t12, t13, tmpFlag });
 
     G4_SrcRegRegion tsrc0(Mod_src_undef, Direct, t0->getRegVar(), 0, 0, srcRegionDesc, Type_DF );
     G4_SrcRegRegion tsrc1(Mod_src_undef, Direct, t1->getRegVar(), 0, 0, srcRegionDesc, Type_DF );
@@ -874,16 +866,16 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
     G4_Imm *flt_constant_0 = createImm(float(0.0));
     G4_Imm *flt_constant_1 = createImm(float(1.0));
     G4_Align reg_align = Either;
-    if ( instExecSize == 1 || instExecSize == 8 )
+    if ( instExecSize <= 8 )
     {
         element_size = 8;
         loopCount = 1;
     }
-    else if ( instExecSize == 16 )
+    else
     {
-        element_size = 16;
-        instOpt = Get_Gen4_Emask(emask, 16);
-        loopCount = 2;
+        element_size = instExecSize;
+        instOpt = Get_Gen4_Emask(emask, instExecSize);
+        loopCount = instExecSize / 8;
     }
 
     // pred and conModifier
@@ -906,7 +898,7 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
     G4_Declare *t2 = getImmDcl(flt_constant_0, 8);
     G4_Declare *t5 = getImmDcl(flt_constant_1, 8);
 
-	inst = createPseudoKills({ t1, t4, t6, t8, t9, t10, t11, tmpFlag });
+    inst = createPseudoKills({ t1, t4, t6, t8, t9, t10, t11, tmpFlag });
 
     // those are for drcp
     G4_SrcRegRegion valueOneScalarReg(Mod_src_undef, Direct, t2->getRegVar(), 0, 0, getRegionScalar(), Type_F );
@@ -1174,16 +1166,16 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
     G4_Imm *flt_constant_0 = createImm(float(0.0));
     G4_Imm *flt_constant_05 = createImm(float(0.5));
     G4_Align reg_align = Either;
-    if ( instExecSize == 1 || instExecSize == 8 )
+    if (instExecSize <= 8)
     {
         element_size = 8;
         loopCount = 1;
     }
-    else if ( instExecSize == 16 )
+    else
     {
-        element_size = 16;
-        instOpt = Get_Gen4_Emask(emask, 16);
-        loopCount = 2;
+        element_size = instExecSize;
+        instOpt = Get_Gen4_Emask(emask, instExecSize);
+        loopCount = instExecSize / 8;
     }
 
     // pred and conModifier
@@ -1204,7 +1196,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
     G4_Declare* t0 = getImmDcl(flt_constant_0, 8);
     G4_Declare *t8 = getImmDcl(flt_constant_05, 8);
 
-	inst = createPseudoKills ({ t6, t7, t9, t10, t11, tmpFlag });
+    inst = createPseudoKills ({ t6, t7, t9, t10, t11, tmpFlag });
 
     G4_SrcRegRegion* src0RR = operandToDirectSrcRegRegion(*this, src0Opnd, element_size);
 
@@ -1213,7 +1205,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
         // expand src0 to vector src
         G4_DstRegRegion *t6_dst_src0_opnd = Create_Dst_Opnd_From_Dcl(t6, 1);
         inst = createInst(NULL, G4_mov, NULL, false, element_size, t6_dst_src0_opnd, src0RR,
-	        NULL, instOpt, line_no); // mov (element_size) t6, src0RR {Q1/H1}
+            NULL, instOpt, line_no); // mov (element_size) t6, src0RR {Q1/H1}
 
         src0RR = Create_Src_Opnd_From_Dcl(t6, getRegionStride1());
     }
@@ -1477,17 +1469,9 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
     }
     else
     {
-        ASSERT_USER(instExecSize == 8, "simd2 and simd16 support will be added later");
-        element_size = 8;
-        if (hasSIMD8DFMadm())
-        {
-            exsize = 8;
-            loopCount = 1;
-        }
-        else
-        {
-            loopCount = 2;
-        }
+        element_size = instExecSize;
+        exsize = std::min((int)instExecSize, getFP64MadmExecSize());
+        loopCount = instExecSize / exsize;
     }
 
     bool noDstMove = exsize == 8 && !saturate && !predOpnd && isOpndAligned(dstOpnd, 32) &&
@@ -1510,7 +1494,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
     G4_Declare *t10 = createTempVarWithNoSpill(element_size, Type_DF, reg_align, Any);
     G4_Declare *t11 = createTempVarWithNoSpill(element_size, Type_DF, reg_align, Any);
 
-	inst = createPseudoKills({t6, t7, t8, t9, t10, t11, flagReg });
+    inst = createPseudoKills({t6, t7, t8, t9, t10, t11, flagReg });
 
     G4_SrcRegRegion* src0RR = operandToDirectSrcRegRegion(*this, src0Opnd, element_size);
 
@@ -2308,23 +2292,7 @@ int IR_Builder::translateVISACFFCallInst(Common_ISA_Exec_Size execsize, Common_V
 
     uint32_t calleeIndex = 0xFF;
 
-    // When reading a CISA file, relocation table is present. But when
-    // invoked via builder API, assume relocation is already done by
-    // caller. So resolved index = symbolic index.
-    if( getFuncRelocTable() != NULL )
-    {
-        // Resolve calleeIndex
-        for(int i = 0; i < getFuncRelocTable()->num_syms; i++) {
-            if(getFuncRelocTable()->reloc_syms[i].symbolic_index == functionID) {
-                calleeIndex = getFuncRelocTable()->reloc_syms[i].resolved_index;
-                break;
-            }
-        }
-    }
-    else
-    {
-        calleeIndex = functionID;
-    }
+    calleeIndex = functionID;
 
     m_fcallInfo[fcall] = new (mem) G4_FCALL(argSize, returnSize);
 
@@ -2399,8 +2367,7 @@ int IR_Builder::translateVISACFSymbolInst(const std::string& symbolName, G4_DstR
 #endif
 
     // symbolic imm representing function's address
-    SuperRelocEntry reloc;
-    auto funcAddr = createRelocImm(reloc, Type_UQ);
+    auto funcAddr = createRelocImm(Type_UD);
     auto movInst = createInst(nullptr, G4_mov, nullptr, false, 1, dst, funcAddr, nullptr, InstOpt_WriteEnable);
 
     RelocationEntry relocEntry = RelocationEntry::createSymbolAddrReloc(movInst, 0, symbolName);
@@ -2654,13 +2621,13 @@ int IR_Builder::translateVISAOwordLoadInst(
     surface = lowerSurface255To253(surface, *this);
 
     unsigned num_oword = Get_Common_ISA_Oword_Num( size );
-	bool unaligned = (opcode == ISA_OWORD_LD_UNALIGNED);
+    bool unaligned = (opcode == ISA_OWORD_LD_UNALIGNED);
 
     // create dcl for VX
     G4_Declare *dcl = Create_MRF_Dcl( GENX_DATAPORT_IO_SZ, Type_UD );
 
     if (IsStatelessSurface(surface))
-	{
+    {
         // Build stateless surface message header.
         BuildStatelessSurfaceMessageHeader(this, dcl);
     }
@@ -2827,8 +2794,8 @@ int IR_Builder::translateVISAOwordStoreInst(
 
     // Set bit 12-8 for the message descriptor
     funcCtrl = setOwordForDesc(funcCtrl, num_oword, IsSLMSurface(surface));
-
-    if (useSends())
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (forceSplitSend || useSends())
     {
         G4_Declare *headerDcl = Create_MRF_Dcl(GENX_DATAPORT_IO_SZ, Type_UD);
 
@@ -2839,7 +2806,7 @@ int IR_Builder::translateVISAOwordStoreInst(
         }
 
         /* mov (1)     VX(0,2)<1>,   P  */
-        Create_MOV_Inst( headerDcl, 0, 2, 1, NULL, NULL, offOpnd, true );
+        Create_MOV_Inst( headerDcl, 0, 2, 1, nullptr, nullptr, offOpnd, true );
 
         unsigned msgDesc = funcCtrl;
         unsigned extMsgLength = (num_oword - 1) / 2 + 1;
@@ -2855,30 +2822,8 @@ int IR_Builder::translateVISAOwordStoreInst(
 
         G4_SrcRegRegion* src0 = Create_Src_Opnd_From_Dcl(headerDcl, getRegionStride1());
         G4_DstRegRegion* dst = createNullDst( sendSize > 8 ? Type_UW: Type_UD );
-        G4_Operand* msgOpnd = NULL;
-        if (surface->isImm())
-        {
-            msgDesc += (unsigned) surface->asImm()->getInt();
-            msgOpnd = createImm(msgDesc, Type_UD);
-        }
-        else
-        {
-            G4_DstRegRegion *addrDst = Create_Dst_Opnd_From_Dcl( builtinA0, 1 );
-            //add (1) a0.0:ud bti:ud desc:ud {NoMask}
-            createInst(
-                NULL,
-                G4_add,
-                NULL,
-                false,
-                1,
-                addrDst,
-                surface,
-                createImm( msgDesc, Type_UD ),
-                InstOpt_WriteEnable,
-                0 );
-            msgOpnd = Create_Src_Opnd_From_Dcl( builtinA0, getRegionScalar());
-        }
-        createSplitSendInst( NULL, G4_sends, sendSize, dst, src0, srcOpnd, msgOpnd, InstOpt_WriteEnable, desc, NULL, 0);
+
+        Create_SplitSend_Inst(nullptr, dst, src0, srcOpnd, sendSize, desc, InstOpt_WriteEnable, false);
     }
     else
     {
@@ -3208,11 +3153,11 @@ int IR_Builder::translateVISAMediaStoreInst(
         return desc;
     };
 
-    //TODO: Use higher level API for split send
-    if (useSends())
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (forceSplitSend || useSends())
     {
         // use split send
-        G4_Declare *headerDcl = Create_MRF_Dcl(8, Type_UD);
+        G4_Declare *headerDcl = Create_MRF_Dcl(GENX_DATAPORT_IO_SZ, Type_UD);
         Create_MOVR0_Inst( headerDcl, 0, 0, true );
         /* mov (1)      VX(0,2)<1>,    CONST[R,C]  */
         uint32_t temp = (blockHeight - 1) << 16 | (blockWidth - 1);
@@ -3240,32 +3185,7 @@ int IR_Builder::translateVISAMediaStoreInst(
         G4_SendMsgDescriptor* desc = createSendMsgDesc( msgDesc, 0, 1, SFID::DP_DC1,
             false, extMsgLength, extFuncCtrl, false, true, surface);
 
-        G4_Operand* msgOpnd = NULL;
-        if (surface->isImm())
-        {
-            msgDesc += (unsigned) surface->asImm()->getInt();
-            msgOpnd = createImm(msgDesc, Type_UD);
-        }
-        else
-        {
-            G4_DstRegRegion *addrDst = Create_Dst_Opnd_From_Dcl( builtinA0, 1 );
-            //add (1) a0.0:ud bti:ud desc:ud
-            // create source for bti
-            createInst(
-                NULL,
-                G4_add,
-                NULL,
-                false,
-                1,
-                addrDst,
-                surface,
-                createImm( msgDesc, Type_UD ),
-                InstOpt_WriteEnable,
-                0 );
-            msgOpnd = Create_Src_Opnd_From_Dcl( builtinA0, getRegionScalar());
-        }
-
-        createSplitSendInst( NULL, G4_sends, 8, dstOpnd, headerOpnd, srcOpnd, msgOpnd, InstOpt_WriteEnable, desc, NULL, 0);
+        Create_SplitSend_Inst(nullptr, dstOpnd, headerOpnd, srcOpnd, 8, desc, InstOpt_WriteEnable, false);
     }
     else
     {
@@ -4515,8 +4435,8 @@ int IR_Builder::translateVISAGather4TypedInst(G4_Predicate           *pred,
     msgDesc |= MDC_SG3_SG8L << 12;
     sfId = SFID::DP_DC1;
 
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend) {
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dstOpnd,
             msgs[0], sizes[0],
@@ -4617,8 +4537,8 @@ int IR_Builder::translateVISAScatter4TypedInst(G4_Predicate           *pred,
 
     G4_DstRegRegion* dstOpnd = createNullDst(Type_UD);
 
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend) {
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dstOpnd,
             msgs[0], sizes[0],
@@ -4665,10 +4585,10 @@ int IR_Builder::translateVISATypedAtomicInst(
 {
 
     Common_ISA_Exec_Size instExecSize = execSize;
-	MUST_BE_TRUE(execSize == EXEC_SIZE_1 ||
-		         execSize == EXEC_SIZE_2 ||
-				 execSize == EXEC_SIZE_4 ||
-				 execSize == EXEC_SIZE_8, "send exec size must be 1, 2, 4 or 8 for typed atomic messages");
+    MUST_BE_TRUE(execSize == EXEC_SIZE_1 ||
+                 execSize == EXEC_SIZE_2 ||
+                 execSize == EXEC_SIZE_4 ||
+                 execSize == EXEC_SIZE_8, "send exec size must be 1, 2, 4 or 8 for typed atomic messages");
 
     unsigned op = Get_Atomic_Op(atomicOp);
 
@@ -4793,28 +4713,28 @@ void IR_Builder::applySideBandOffset(G4_Operand* sideBand, G4_SendMsgDescriptor*
 {
 #define SIDEBAND_OFFSET_IN_EXDESC 12
 
-	if (sideBand->isImm())
-	{
-		// mov (1) a0.0 sideband << 0xC
-		uint32_t sidebandInDesc = (uint32_t)(sideBand->asImm()->getImm() << SIDEBAND_OFFSET_IN_EXDESC);
-		G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
-		createInst(nullptr, G4_mov, nullptr, false, 1, dst,
-			createImm(sidebandInDesc, Type_UD), nullptr, InstOpt_WriteEnable);
-	}
-	else
-	{
-		MUST_BE_TRUE(sideBand->isSrcRegRegion(), "sideband offset should be a srcRegRegion");
-		// shl (1) a0.0 sideband 0xC
-		G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
-		createInst(nullptr, G4_shl, nullptr, false, 1, dst, sideBand,
-			createImm(SIDEBAND_OFFSET_IN_EXDESC, Type_UW), InstOpt_WriteEnable);
-	}
+    if (sideBand->isImm())
+    {
+        // mov (1) a0.0 sideband << 0xC
+        uint32_t sidebandInDesc = (uint32_t)(sideBand->asImm()->getImm() << SIDEBAND_OFFSET_IN_EXDESC);
+        G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
+        createInst(nullptr, G4_mov, nullptr, false, 1, dst,
+            createImm(sidebandInDesc, Type_UD), nullptr, InstOpt_WriteEnable);
+    }
+    else
+    {
+        MUST_BE_TRUE(sideBand->isSrcRegRegion(), "sideband offset should be a srcRegRegion");
+        // shl (1) a0.0 sideband 0xC
+        G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
+        createInst(nullptr, G4_shl, nullptr, false, 1, dst, sideBand,
+            createImm(SIDEBAND_OFFSET_IN_EXDESC, Type_UW), InstOpt_WriteEnable);
+    }
 
-	// add (1) a0.0 a0.0 MD
-	G4_DstRegRegion* a0Dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
-	G4_SrcRegRegion* a0Src = Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar());
-	createInst(nullptr, G4_add, nullptr, false, 1, a0Dst, a0Src,
-		createImm(sendMsgDesc->getExtendedDesc(), Type_UD), InstOpt_WriteEnable);
+    // add (1) a0.0 a0.0 MD
+    G4_DstRegRegion* a0Dst = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
+    G4_SrcRegRegion* a0Src = Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar());
+    createInst(nullptr, G4_add, nullptr, false, 1, a0Dst, a0Src,
+        createImm(sendMsgDesc->getExtendedDesc(), Type_UD), InstOpt_WriteEnable);
 }
 
 static void
@@ -4845,72 +4765,72 @@ BuildMH2_A32(IR_Builder *IRB, G4_Declare *header,
 }
 
 int IR_Builder::translateVISASLMUntypedScaledInst(
-	bool isRead,
-	G4_Predicate *pred,
-	Common_ISA_Exec_Size   execSize,
-	Common_VISA_EMask_Ctrl eMask,
-	ChannelMask            chMask,
-	uint16_t               scale,
-	G4_Operand             *sideBand,
-	G4_SrcRegRegion        *offsets,
-	G4_Operand			   *srcOrDst)
+    bool isRead,
+    G4_Predicate *pred,
+    Common_ISA_Exec_Size   execSize,
+    Common_VISA_EMask_Ctrl eMask,
+    ChannelMask            chMask,
+    uint16_t               scale,
+    G4_Operand             *sideBand,
+    G4_SrcRegRegion        *offsets,
+    G4_Operand               *srcOrDst)
 {
-	unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-	unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
+    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
 
-	payloadSource sources[2]; // Maximal 2 sources, offset + source
-	unsigned len = 0;
+    payloadSource sources[2]; // Maximal 2 sources, offset + source
+    unsigned len = 0;
 
-	sources[len].opnd = offsets;
-	sources[len].execSize = exSize;
-	sources[len].instOpt = instOpt;
-	++len;
-	if (!isRead)
-	{
-		sources[len].opnd = srcOrDst->asSrcRegRegion();
-		sources[len].execSize = exSize * chMask.getNumEnabledChannels();
-		sources[len].instOpt = instOpt;
-		++len;
-	}
+    sources[len].opnd = offsets;
+    sources[len].execSize = exSize;
+    sources[len].instOpt = instOpt;
+    ++len;
+    if (!isRead)
+    {
+        sources[len].opnd = srcOrDst->asSrcRegRegion();
+        sources[len].execSize = exSize * chMask.getNumEnabledChannels();
+        sources[len].instOpt = instOpt;
+        ++len;
+    }
 
-	G4_SrcRegRegion *msgs[2] = { 0, 0 };
-	unsigned sizes[2] = { 0, 0 };
-	preparePayload(msgs, sizes, exSize, true, sources, len);
+    G4_SrcRegRegion *msgs[2] = { 0, 0 };
+    unsigned sizes[2] = { 0, 0 };
+    preparePayload(msgs, sizes, exSize, true, sources, len);
 
-	SFID sfid = SFID::DP_DC2;
+    SFID sfid = SFID::DP_DC2;
 
-	unsigned MD = 0;
-	// Leave sidebind scale offset 0 as it is not used now.
-	MD |= (isRead ? DC2_UNTYPED_SURFACE_READ : DC2_UNTYPED_SURFACE_WRITE) << 14;
-	MD |= (execSize == EXEC_SIZE_8 ? MDC_SM3_SIMD8 : MDC_SM3_SIMD16) << 12;
-	MD |= chMask.getHWEncoding() << 8;
-	// SLM encodes scale pitch in MD.
-	MD |= 1 << 7;
-	MD |= scale & 0x7F;
+    unsigned MD = 0;
+    // Leave sidebind scale offset 0 as it is not used now.
+    MD |= (isRead ? DC2_UNTYPED_SURFACE_READ : DC2_UNTYPED_SURFACE_WRITE) << 14;
+    MD |= (execSize == EXEC_SIZE_8 ? MDC_SM3_SIMD8 : MDC_SM3_SIMD16) << 12;
+    MD |= chMask.getHWEncoding() << 8;
+    // SLM encodes scale pitch in MD.
+    MD |= 1 << 7;
+    MD |= scale & 0x7F;
 
-	G4_DstRegRegion *dst = isRead ? srcOrDst->asDstRegRegion() : createNullDst(Type_UD);
-	unsigned resLen = isRead ? (exSize / GENX_DATAPORT_IO_SZ) *
-		chMask.getNumEnabledChannels() : 0;
+    G4_DstRegRegion *dst = isRead ? srcOrDst->asDstRegRegion() : createNullDst(Type_UD);
+    unsigned resLen = isRead ? (exSize / GENX_DATAPORT_IO_SZ) *
+        chMask.getNumEnabledChannels() : 0;
 
-	uint32_t exFuncCtrl = 0;
-	G4_SendMsgDescriptor *sendMsgDesc = createSendMsgDesc(MD, resLen, sizes[0], sfid,
-		false, sizes[1], (uint16_t)exFuncCtrl, isRead, !isRead);
+    uint32_t exFuncCtrl = 0;
+    G4_SendMsgDescriptor *sendMsgDesc = createSendMsgDesc(MD, resLen, sizes[0], sfid,
+        false, sizes[1], (uint16_t)exFuncCtrl, isRead, !isRead);
 
-	applySideBandOffset(sideBand, sendMsgDesc);
+    applySideBandOffset(sideBand, sendMsgDesc);
 
-	createSplitSendInst(
-		pred,
-		G4_sends,
-		(uint8_t) exSize,
-		dst,
-		msgs[0],
-		msgs[1],
-		createImm(sendMsgDesc->getDesc(), Type_UD),
-		instOpt,
-		sendMsgDesc,
-		Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
+    createSplitSendInst(
+        pred,
+        G4_sends,
+        (uint8_t) exSize,
+        dst,
+        msgs[0],
+        msgs[1],
+        createImm(sendMsgDesc->getDesc(), Type_UD),
+        instOpt,
+        sendMsgDesc,
+        Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
 
-	return CM_SUCCESS;
+    return CM_SUCCESS;
 }
 
 int IR_Builder::translateVISAGather4ScaledInst(G4_Predicate           *pred,
@@ -5017,8 +4937,8 @@ int IR_Builder::translateGather4Inst(G4_Predicate           *pred,
     unsigned resLen = (exSize / GENX_DATAPORT_IO_SZ) *
                       chMask.getNumEnabledChannels();
 
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend) {
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dst,
             msgs[0], sizes[0],
@@ -5125,7 +5045,7 @@ int IR_Builder::translateScatter4Inst(G4_Predicate           *pred,
     MD |= chMask.getHWEncoding() << 8;
 
     G4_DstRegRegion *dst = createNullDst(Type_UD);
-	bool forceSplitSend = ForceSplitSend(*this, surface);
+    bool forceSplitSend = ForceSplitSend(*this, surface);
     if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dst,
@@ -5215,72 +5135,72 @@ int IR_Builder::translateVISAScatterScaledInst(G4_Predicate              *pred,
 // in this case
 //
 int IR_Builder::translateVISASLMByteScaledInst(bool isRead,
-	G4_Predicate *pred,
-	Common_ISA_Exec_Size execSize,
-	Common_VISA_EMask_Ctrl eMask,
-	Common_ISA_SVM_Block_Type blockSize,
-	Common_ISA_SVM_Block_Num numBlocks,
-	uint8_t scale,
-	G4_Operand *sideBand,
-	G4_SrcRegRegion *offsets,
-	G4_Operand *srcOrDst)
+    G4_Predicate *pred,
+    Common_ISA_Exec_Size execSize,
+    Common_VISA_EMask_Ctrl eMask,
+    Common_ISA_SVM_Block_Type blockSize,
+    Common_ISA_SVM_Block_Num numBlocks,
+    uint8_t scale,
+    G4_Operand *sideBand,
+    G4_SrcRegRegion *offsets,
+    G4_Operand *srcOrDst)
 {
 
-	unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-	unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
-	unsigned numBatch = GetNumBatch(blockSize, numBlocks);
+    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
+    unsigned numBatch = GetNumBatch(blockSize, numBlocks);
 
-	uint16_t exFuncCtrl = 0;
-	payloadSource sources[3];
-	unsigned len = 0;
+    uint16_t exFuncCtrl = 0;
+    payloadSource sources[3];
+    unsigned len = 0;
 
-	sources[len].opnd = offsets;
-	sources[len].execSize = exSize;
-	sources[len].instOpt = instOpt;
-	++len;
-	if (!isRead)
-	{
-		sources[len].opnd = srcOrDst->asSrcRegRegion();
-		sources[len].execSize = exSize * numBatch;
-		sources[len].instOpt = instOpt;
-		++len;
-	}
+    sources[len].opnd = offsets;
+    sources[len].execSize = exSize;
+    sources[len].instOpt = instOpt;
+    ++len;
+    if (!isRead)
+    {
+        sources[len].opnd = srcOrDst->asSrcRegRegion();
+        sources[len].execSize = exSize * numBatch;
+        sources[len].instOpt = instOpt;
+        ++len;
+    }
 
-	G4_SrcRegRegion *msgs[2] = { 0, 0 };
-	unsigned sizes[2] = { 0, 0 };
-	preparePayload(msgs, sizes, exSize, true, sources, len);
+    G4_SrcRegRegion *msgs[2] = { 0, 0 };
+    unsigned sizes[2] = { 0, 0 };
+    preparePayload(msgs, sizes, exSize, true, sources, len);
 
-	SFID sfid = SFID::DP_DC2;
+    SFID sfid = SFID::DP_DC2;
 
-	unsigned MD = 0;
-	// Leave sidebind scale offset 0 as it is not used now.
-	MD |= (isRead ? DC2_BYTE_SCATTERED_READ : DC2_BYTE_SCATTERED_WRITE) << 14;
-	MD |= numBlocks << 10;
-	MD |= (execSize == EXEC_SIZE_8 ? MDC_SM2_SIMD8 : MDC_SM2_SIMD16) << 8;
-	MD |= 1 << 7;
-	MD |= scale & 0x7F;
+    unsigned MD = 0;
+    // Leave sidebind scale offset 0 as it is not used now.
+    MD |= (isRead ? DC2_BYTE_SCATTERED_READ : DC2_BYTE_SCATTERED_WRITE) << 14;
+    MD |= numBlocks << 10;
+    MD |= (execSize == EXEC_SIZE_8 ? MDC_SM2_SIMD8 : MDC_SM2_SIMD16) << 8;
+    MD |= 1 << 7;
+    MD |= scale & 0x7F;
 
-	G4_DstRegRegion *dst = isRead ? srcOrDst->asDstRegRegion() : createNullDst(Type_UD);
-	unsigned resLen = isRead ? (exSize / GENX_DATAPORT_IO_SZ) * numBatch : 0;
+    G4_DstRegRegion *dst = isRead ? srcOrDst->asDstRegRegion() : createNullDst(Type_UD);
+    unsigned resLen = isRead ? (exSize / GENX_DATAPORT_IO_SZ) * numBatch : 0;
 
-	G4_SendMsgDescriptor *sendMsgDesc = createSendMsgDesc(MD, resLen, sizes[0], sfid,
-		false, sizes[1], exFuncCtrl, isRead, !isRead);
+    G4_SendMsgDescriptor *sendMsgDesc = createSendMsgDesc(MD, resLen, sizes[0], sfid,
+        false, sizes[1], exFuncCtrl, isRead, !isRead);
 
-	applySideBandOffset(sideBand, sendMsgDesc);
+    applySideBandOffset(sideBand, sendMsgDesc);
 
-	createSplitSendInst(
-		pred,
-		G4_sends,
-		(uint8_t)exSize,
-		dst,
-		msgs[0],
-		msgs[1],
-		createImm(sendMsgDesc->getDesc(), Type_UD),
-		instOpt,
-		sendMsgDesc,
-		Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
+    createSplitSendInst(
+        pred,
+        G4_sends,
+        (uint8_t)exSize,
+        dst,
+        msgs[0],
+        msgs[1],
+        createImm(sendMsgDesc->getDesc(), Type_UD),
+        instOpt,
+        sendMsgDesc,
+        Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
 
-	return CM_SUCCESS;
+    return CM_SUCCESS;
 }
 
 static void
@@ -5387,7 +5307,7 @@ int IR_Builder::translateByteGatherInst(G4_Predicate *pred,
     MD |= (execSize == EXEC_SIZE_8 ? MDC_SM2_SIMD8 : MDC_SM2_SIMD16) << 8;
 
     unsigned resLen = (exSize / GENX_DATAPORT_IO_SZ) * numBatch;
-	bool forceSplitSend = ForceSplitSend(*this, surface);
+    bool forceSplitSend = ForceSplitSend(*this, surface);
     if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dst,
@@ -5508,8 +5428,8 @@ int IR_Builder::translateByteScatterInst(G4_Predicate *pred,
     MD |= (execSize == EXEC_SIZE_8 ? MDC_SM2_SIMD8 : MDC_SM2_SIMD16) << 8;
 
     G4_DstRegRegion *dst = createNullDst(Type_UD);
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend) {
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend) {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         Create_Send_Inst_For_CISA(pred, dst,
             msgs[0], sizes[0],
@@ -5750,9 +5670,9 @@ int IR_Builder::translateVISAVmeImeInst(
     // since ref0 is converted from UW to UD, move it as 1 UD
     Create_MOV_Send_Src_Inst( dcl, 0, 0, 1, ref0Opnd, InstOpt_WriteEnable );
 
-	Create_MOV_Send_Src_Inst(dcl, 0, 1, 1, ref1Opnd, InstOpt_WriteEnable);
+    Create_MOV_Send_Src_Inst(dcl, 0, 1, 1, ref1Opnd, InstOpt_WriteEnable);
 
-	Create_MOV_Send_Src_Inst(dcl, 3, 0, 8, costCenterOpnd, InstOpt_WriteEnable);
+    Create_MOV_Send_Src_Inst(dcl, 3, 0, 8, costCenterOpnd, InstOpt_WriteEnable);
 
     // send's operands preparation
     // create a currDst for VX
@@ -6130,20 +6050,20 @@ int IR_Builder::translateVISARawSendsInst(G4_Predicate *predOpnd, Common_ISA_Exe
         exDescVal = (unsigned)ex->asImm()->getInt();
     }
 
-	// bit [6:10] store the extended message length, and when it's >= 16 we have to use indirect
-	uint32_t extLength = (exDescVal >> 6) & 0x1F;
+    // bit [6:10] store the extended message length, and when it's >= 16 we have to use indirect
+    uint32_t extLength = (exDescVal >> 6) & 0x1F;
     if (ex->isSrcRegRegion() || extLength >= 16)
     {
         // mov (1) a0.2<1>:ud src<0;1,0>:ud {NoMask} ;
-		// to hold the dynamic ext msg descriptor
+        // to hold the dynamic ext msg descriptor
         G4_DstRegRegion* exDescDst = Create_Dst_Opnd_From_Dcl(getBuiltinA0Dot2(), 1);
         createInst( NULL, G4_mov, NULL, false, 1, exDescDst, ex, NULL, InstOpt_WriteEnable, 0 );
         temp_exdesc_src = Create_Src_Opnd_From_Dcl(getBuiltinA0Dot2(), getRegionScalar());
 
-		if (exDescVal == 0)
-		{
-			exDescVal = G4_SendMsgDescriptor::createExtDesc(intToSFID(ffid), false, numSrc1);
-		}
+        if (exDescVal == 0)
+        {
+            exDescVal = G4_SendMsgDescriptor::createExtDesc(intToSFID(ffid), false, numSrc1);
+        }
     }
 
     uint32_t descVal = 0;
@@ -6263,25 +6183,25 @@ int IR_Builder::translateVISASamplerVAGenericInst(
 
     Create_MOVR0_Inst(dcl, 0, 0, true);
     Create_MOV_Inst(dcl, 0, 2, 1, NULL, NULL, createImm(msg_header, Type_UD), true); /// mov msg_header
-	if (hasBindlessSampler())
-	{
-		// clear M0.3 bit 0 (sampler state base address select)
-		// and (1) M0.3<1>:ud M0.3<0;1,0>:ud 0xFFFFFFFE:ud
-		G4_SrcRegRegion* src0 = createSrcRegRegion(Mod_src_undef, Direct, dcl->getRegVar(), 0, 3,
-			getRegionScalar(), Type_UD);
-		G4_Imm* src1 = createImm(0xFFFFFFFE, Type_UD);
-		G4_DstRegRegion* dst = createDstRegRegion(Direct, dcl->getRegVar(), 0, 3, 1, Type_UD);
-		(void) createInst(nullptr, G4_and, nullptr, false, 1, dst, src0, src1, InstOpt_WriteEnable);
-	}
+    if (hasBindlessSampler())
+    {
+        // clear M0.3 bit 0 (sampler state base address select)
+        // and (1) M0.3<1>:ud M0.3<0;1,0>:ud 0xFFFFFFFE:ud
+        G4_SrcRegRegion* src0 = createSrcRegRegion(Mod_src_undef, Direct, dcl->getRegVar(), 0, 3,
+            getRegionScalar(), Type_UD);
+        G4_Imm* src1 = createImm(0xFFFFFFFE, Type_UD);
+        G4_DstRegRegion* dst = createDstRegRegion(Direct, dcl->getRegVar(), 0, 3, 1, Type_UD);
+        (void) createInst(nullptr, G4_and, nullptr, false, 1, dst, src0, src1, InstOpt_WriteEnable);
+    }
     Create_MOV_Inst   (dcl1, 0, 0, 8, NULL, NULL, createImm(0, Type_UD), true); /// zero out
     Create_MOV_Inst   (dclF, 0, 2, 1, NULL, NULL, uOffOpnd, true); /// mov u opnd
     Create_MOV_Inst   (dclF, 0, 3, 1, NULL, NULL, vOffOpnd, true); /// mov v opnd
     Create_ADD_Inst   (dcl1, 0, 7, 1, NULL, NULL, mediaPayld_var, mediaPayld_imm, InstOpt_WriteEnable); /// store payload bits
-	G4_SrcRegRegion* src = createSrcRegRegion(Mod_src_undef, Direct, dcl1->getRegVar(), 0, 7,
-		getRegionScalar(), Type_UD);
+    G4_SrcRegRegion* src = createSrcRegRegion(Mod_src_undef, Direct, dcl1->getRegVar(), 0, 7,
+        getRegionScalar(), Type_UD);
 
-	Create_ADD_Inst(dcl1, 0, 7, 1, NULL, NULL, src,
-		Create_Src_Opnd_From_Dcl(builtinHWTID, getRegionScalar()), InstOpt_WriteEnable);
+    Create_ADD_Inst(dcl1, 0, 7, 1, NULL, NULL, src,
+        Create_Src_Opnd_From_Dcl(builtinHWTID, getRegionScalar()), InstOpt_WriteEnable);
     // later phases need FFTID
     preDefVars.setHasPredefined(PreDefinedVarsInternal::HW_TID, true);
     /// M1.0: [DevBDW+] Function = Centroid/BoolCentroid v/h direction size.
@@ -6296,7 +6216,7 @@ int IR_Builder::translateVISASamplerVAGenericInst(
             h_sz_shl_opnd = createSrcRegRegion(Mod_src_undef, Direct, dcl1->getRegVar(), 0, 0, getRegionScalar(), Type_UD);
             G4_DstRegRegion* temp_dst = createDstRegRegion(Direct, dcl1->getRegVar(), 0, 0, 1, Type_UD);
             createInst(NULL, G4_shl, NULL, false, 1, temp_dst, hSizeOpnd,
-				createImm(4, Type_UD), InstOpt_WriteEnable);
+                createImm(4, Type_UD), InstOpt_WriteEnable);
         }
         Create_ADD_Inst(dcl1, 0, 0, 1, NULL, NULL, vSizeOpnd, h_sz_shl_opnd, InstOpt_WriteEnable);
     }
@@ -6439,14 +6359,14 @@ int IR_Builder::translateVISAAvsInst(
         cmask += cntrl<<18;
         Create_MOV_Inst( dcl, 0, 2, 1, NULL, NULL, createImm( cmask, Type_UD ), true );
 
-        G4_Declare *dcl1 = Create_MRF_Dcl( 8, Type_F );
+        G4_Declare *dcl1 = Create_MRF_Dcl( GENX_DATAPORT_IO_SZ, Type_F );
         dcl1->setAliasDeclare(dcl, GENX_MRF_REG_SIZ);
 
         /*
         Keeping destination type as UD, otherwise w-->f conversion happens,
         which affects the results.
         */
-        G4_Declare *dcl1_ud = Create_MRF_Dcl( 8, Type_UD );
+        G4_Declare *dcl1_ud = Create_MRF_Dcl( GENX_DATAPORT_IO_SZ, Type_UD );
         dcl1_ud->setAliasDeclare(dcl, GENX_MRF_REG_SIZ);
 
         // mov  (1)     VA(0,0)<1>,  v2d
@@ -6619,12 +6539,12 @@ int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
                                  (src0Opnd->asSrcRegRegion()->isScalar())))
         {
             dstOpnd->setType(exsize == 32 ? Type_UD: Type_UW);
-			if (emask == vISA_EMASK_M5_NM)
-			{
-				// write to f0.1/f1.1 instead
-				MUST_BE_TRUE(dstOpnd->getTopDcl()->getNumberFlagElements() == 32, "Dst must have 32 flag elements");
-				dstOpnd->setSubRegOff(1);
-			}
+            if (emask == vISA_EMASK_M5_NM)
+            {
+                // write to f0.1/f1.1 instead
+                MUST_BE_TRUE(dstOpnd->getTopDcl()->getNumberFlagElements() == 32, "Dst must have 32 flag elements");
+                dstOpnd->setSubRegOff(1);
+            }
             createInst(
                 predOpnd,
                 G4_mov,
@@ -6913,9 +6833,9 @@ int IR_Builder::translateVISAVaSklPlusGeneralInst(
     else
         dcl = Create_MRF_Dcl( 2 * GENX_SAMPLER_IO_SZ , Type_UD );
 
-    G4_Declare *dcl_payload_UD = Create_MRF_Dcl( 8                      , Type_UD );
-    G4_Declare *dcl_payload_F = Create_MRF_Dcl( 8                      , Type_F  );
-    G4_Declare *dcl_payload_UW = Create_MRF_Dcl( 16                      , Type_UW  );
+    G4_Declare *dcl_payload_UD = Create_MRF_Dcl(  GENX_DATAPORT_IO_SZ                      , Type_UD );
+    G4_Declare *dcl_payload_F = Create_MRF_Dcl(  GENX_DATAPORT_IO_SZ                      , Type_F  );
+    G4_Declare *dcl_payload_UW = Create_MRF_Dcl(  GENX_DATAPORT_IO_SZ * 2                      , Type_UW  );
 
     dcl_payload_UD->setAliasDeclare ( dcl,  GENX_MRF_REG_SIZ );
     dcl_payload_F->setAliasDeclare ( dcl, GENX_MRF_REG_SIZ );
@@ -7327,7 +7247,7 @@ int IR_Builder::translateVISASamplerNormInst(
     unsigned cmask = channel.getHWEncoding() << 12;
     Create_MOV_Inst( dcl, 0, 2, 1, NULL, NULL, createImm( cmask, Type_UD ) );
 
-    G4_Declare *dcl1 = Create_MRF_Dcl( 8, Type_F );
+    G4_Declare *dcl1 = Create_MRF_Dcl(  GENX_DATAPORT_IO_SZ, Type_F );
     dcl1->setAliasDeclare(dcl, GENX_MRF_REG_SIZ);
 
     // mov  (1)     VX(1,4)<1>,  deltaU
@@ -8019,7 +7939,7 @@ int IR_Builder::translateVISARTWrite3DInst(
         movInst->setOptionOn(InstOpt_WriteEnable);
 
         payloadRegRgn = createDstRegRegion(Direct, msg->getRegVar(), 1, 0, 1, Type_UD);
-		r1HeaderOpnd->setType(Type_UD);
+        r1HeaderOpnd->setType(Type_UD);
         movInst = createInst(NULL, G4_mov, NULL, false, 8, payloadRegRgn, r1HeaderOpnd, NULL, 0, 0);
         movInst->setOptionOn(InstOpt_WriteEnable);
 
@@ -8057,47 +7977,47 @@ int IR_Builder::translateVISARTWrite3DInst(
             G4_DstRegRegion* dstPixelMaskRgn = createDstRegRegion(
                 Direct, msg->getRegVar(), 1, 14, 1, Type_UW);
 
-			// setPixelMaskRgn when WA ce0 is needed
-			auto setPixelMaskRgn = [=](G4_InstOption Option) -> void
-			{
-				G4_Declare* flagDecl = createTempFlag(2, "WAce0");
-				G4_RegVar* flagVar = flagDecl->getRegVar();
-				G4_DstRegRegion* flag = createDstRegRegion(
-					Direct, flagVar, 0,
-					Option == InstOpt_M16 ? 1 : 0,
-					1, Type_UW);
+            // setPixelMaskRgn when WA ce0 is needed
+            auto setPixelMaskRgn = [=](G4_InstOption Option) -> void
+            {
+                G4_Declare* flagDecl = createTempFlag(2, "WAce0");
+                G4_RegVar* flagVar = flagDecl->getRegVar();
+                G4_DstRegRegion* flag = createDstRegRegion(
+                    Direct, flagVar, 0,
+                    Option == InstOpt_M16 ? 1 : 0,
+                    1, Type_UW);
 
-				// (1) (W) mov (1|M0) WAce0.[0|1]:uw, 0
-				//         M0 : WAce0.0; M16 : WAce0.1
-				// (2)     cmp (16|[M0|M16]) (eq)WAce0.0 r0:uw r0:uw
-				// (3) (W) mov(1|M0) dstPixelMaskRgn:uw  WAce0.[0|1]:uw
-				//         M0 : WAce0.0; M16 : WAce0.1
-				createInst(NULL, G4_mov, NULL, false, 1, flag,
-					createImm(0, Type_UW), NULL, InstOpt_WriteEnable);
+                // (1) (W) mov (1|M0) WAce0.[0|1]:uw, 0
+                //         M0 : WAce0.0; M16 : WAce0.1
+                // (2)     cmp (16|[M0|M16]) (eq)WAce0.0 r0:uw r0:uw
+                // (3) (W) mov(1|M0) dstPixelMaskRgn:uw  WAce0.[0|1]:uw
+                //         M0 : WAce0.0; M16 : WAce0.1
+                createInst(NULL, G4_mov, NULL, false, 1, flag,
+                    createImm(0, Type_UW), NULL, InstOpt_WriteEnable);
 
-				G4_SrcRegRegion *r0_0 = createSrcRegRegion(
-					Mod_src_undef, Direct,
-					getRealR0()->getRegVar(), 0, 0,
-					getRegionStride1(), Type_UW);
-				G4_SrcRegRegion *r0_1 = createSrcRegRegion(
-					Mod_src_undef, Direct,
-					getRealR0()->getRegVar(), 0, 0,
-					getRegionStride1(), Type_UW);
-				G4_DstRegRegion *nullDst = createNullDst(Type_UW);
-				G4_CondMod* flagCM = createCondMod(Mod_e, flagVar, 0);
-				createInst(NULL, G4_cmp, flagCM, false, 16, nullDst,
-					r0_0, r0_1, Option);
+                G4_SrcRegRegion *r0_0 = createSrcRegRegion(
+                    Mod_src_undef, Direct,
+                    getRealR0()->getRegVar(), 0, 0,
+                    getRegionStride1(), Type_UW);
+                G4_SrcRegRegion *r0_1 = createSrcRegRegion(
+                    Mod_src_undef, Direct,
+                    getRealR0()->getRegVar(), 0, 0,
+                    getRegionStride1(), Type_UW);
+                G4_DstRegRegion *nullDst = createNullDst(Type_UW);
+                G4_CondMod* flagCM = createCondMod(Mod_e, flagVar, 0);
+                createInst(NULL, G4_cmp, flagCM, false, 16, nullDst,
+                    r0_0, r0_1, Option);
 
-				G4_SrcRegRegion *flagSrc = createSrcRegRegion(
-					Mod_src_undef, Direct,
-					flagVar, 0,
-					Option == InstOpt_M16 ? 1 : 0,
-					getRegionScalar(), Type_UW);
+                G4_SrcRegRegion *flagSrc = createSrcRegRegion(
+                    Mod_src_undef, Direct,
+                    flagVar, 0,
+                    Option == InstOpt_M16 ? 1 : 0,
+                    getRegionScalar(), Type_UW);
 
-				// move to dstPixelMaskRgn
-				createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
-					flagSrc, NULL, InstOpt_WriteEnable);
-			};
+                // move to dstPixelMaskRgn
+                createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
+                    flagSrc, NULL, InstOpt_WriteEnable);
+            };
 
             G4_SrcRegRegion *pixelMask = NULL;
             if (emask == vISA_EMASK_M5_NM || emask == vISA_EMASK_M5)
@@ -8124,21 +8044,21 @@ int IR_Builder::translateVISARTWrite3DInst(
                 }
                 else
                 {
-					if (VISA_WA_CHECK(getPWaTable(), Wa_1406950495))
-					{
-						setPixelMaskRgn(InstOpt_M16);
-					}
-					else
-					{
-						G4_SrcRegRegion *ce0 = createSrcRegRegion(
-							Mod_src_undef, Direct,
-							phyregpool.getMask0Reg(), 0, 0,
-							getRegionScalar(), Type_UD);
+                    if (VISA_WA_CHECK(getPWaTable(), Wa_1406950495))
+                    {
+                        setPixelMaskRgn(InstOpt_M16);
+                    }
+                    else
+                    {
+                        G4_SrcRegRegion *ce0 = createSrcRegRegion(
+                            Mod_src_undef, Direct,
+                            phyregpool.getMask0Reg(), 0, 0,
+                            getRegionScalar(), Type_UD);
 
-						// shr .14<1>:uw ce0:ud 16:uw
-						createInst(NULL, G4_shr, NULL, false, 1, dstPixelMaskRgn,
-							ce0, createImm(16, Type_UW), InstOpt_WriteEnable);
-					}
+                        // shr .14<1>:uw ce0:ud 16:uw
+                        createInst(NULL, G4_shr, NULL, false, 1, dstPixelMaskRgn,
+                            ce0, createImm(16, Type_UW), InstOpt_WriteEnable);
+                    }
                 }
             }
             else
@@ -8149,27 +8069,27 @@ int IR_Builder::translateVISARTWrite3DInst(
                         pred->getBase()->asRegVar(), 0, 0,
                         getRegionScalar(), Type_UW);
 
-					//clearing lower 15 bits
-					createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
-						pixelMask, NULL, InstOpt_WriteEnable);
+                    //clearing lower 15 bits
+                    createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
+                        pixelMask, NULL, InstOpt_WriteEnable);
                 }
-				else
-				{
-					if (VISA_WA_CHECK(getPWaTable(), Wa_1406950495))
-					{
-						setPixelMaskRgn(InstOpt_M0);
-					}
-					else
-					{
-						G4_SrcRegRegion *ce0 = createSrcRegRegion(
-							Mod_src_undef, Direct,
-							phyregpool.getMask0Reg(), 0, 0,
-							getRegionScalar(), Type_UD);
+                else
+                {
+                    if (VISA_WA_CHECK(getPWaTable(), Wa_1406950495))
+                    {
+                        setPixelMaskRgn(InstOpt_M0);
+                    }
+                    else
+                    {
+                        G4_SrcRegRegion *ce0 = createSrcRegRegion(
+                            Mod_src_undef, Direct,
+                            phyregpool.getMask0Reg(), 0, 0,
+                            getRegionScalar(), Type_UD);
 
-						// mov .14<1>:uw ce0:ud.  clearing lower 15 bits
-						createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
-							ce0, NULL, InstOpt_WriteEnable);
-					}
+                        // mov .14<1>:uw ce0:ud.  clearing lower 15 bits
+                        createInst(NULL, G4_mov, NULL, false, 1, dstPixelMaskRgn,
+                            ce0, NULL, InstOpt_WriteEnable);
+                    }
                 }
             }
 
@@ -8434,23 +8354,29 @@ int IR_Builder::translateVISARTWrite3DInst(
         {
             if (!isRTIdxNonzero && !cntrls.s0aPresent)
             {
-                // direct imm is a-ok
+                // direct imm is a-ok for ext desc
                 msgDesc = createSendMsgDesc(fc, 0, numRows, SFID::DP_WRITE, false, 0,
                         0, false, true, surface);
             }
             else
             {
-                // we must use a0 for extended msg desc in this case as bit[11:15] is forced to 0 when it's imm
+
                 assert(rtIndex->isImm() && "RTIndex must be imm at this point");
                 uint8_t RTIndex = (uint8_t)rtIndex->asImm()->getImm() & 0x7;
                 uint32_t desc = G4_SendMsgDescriptor::createDesc(fc, false, numRows, 0);
                 uint32_t extDesc = G4_SendMsgDescriptor::createMRTExtDesc(cntrls.s0aPresent, RTIndex,
                     false, 0);
-                // mov (1) a0.2:ud extDesc
-                G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(getBuiltinA0Dot2(), 1);
-                createInst(nullptr, G4_mov, nullptr, false, 1, dst, createImm(extDesc, Type_UD), nullptr, InstOpt_WriteEnable);
                 msgDesc = createSendMsgDesc(desc, extDesc, false, true, surface);
-                indirectExDesc = true;
+
+                if (!canEncodeFullExtDesc())
+                {
+                    // we must use a0 for extended msg desc in this case as there aren't enough bits to encode
+                    // the full ext desc
+                    // mov (1) a0.2:ud extDesc
+                    G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(getBuiltinA0Dot2(), 1);
+                    createInst(nullptr, G4_mov, nullptr, false, 1, dst, createImm(extDesc, Type_UD), nullptr, InstOpt_WriteEnable);
+                    indirectExDesc = true;
+                }
             }
         }
 
@@ -9007,13 +8933,13 @@ static int splitSampleInst(VISASampler3DSubOpCode actualop,
 
 void IR_Builder::doSamplerHeaderMove(G4_Declare* headerDcl, G4_Operand* sampler)
 {
-	if (isBindlessSampler(sampler))
-	{
+    if (isBindlessSampler(sampler))
+    {
         // sampler index in msg desc will be 0, manipulate the sampler offset instead
         // mov (1) M0.3<1>:ud sampler<0;1,0>:ud the driver will send the handle with bit 0 already set
         G4_DstRegRegion* dst = createDstRegRegion(Direct, headerDcl->getRegVar(), 0, 3, 1, Type_UD);
         createInst(nullptr, G4_mov, nullptr, false, 1, dst, sampler, nullptr, InstOpt_WriteEnable);
-	}
+    }
 }
 
 //
@@ -9048,7 +8974,7 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler)
     }
     else
     {
-        dcl = Create_MRF_Dcl(8, Type_UD);
+        dcl = Create_MRF_Dcl(GENX_DATAPORT_IO_SZ, Type_UD);
         dcl->setCapableOfReuse();
         Create_MOVR0_Inst(dcl, 0, 0, true);
         if (hasBindlessSampler() && !isBindlessSampler)
@@ -9064,6 +8990,13 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler)
     return dcl;
 }
 
+// get the number of GRFs occupied by a sampler message's operand
+static uint32_t getNumGRF(bool isFP16, int execSize)
+{
+    int numBytes = (isFP16 ? 2 : 4) * execSize;
+    return (numBytes + getGRFSize() - 1) / getGRFSize();
+}
+
 uint32_t IR_Builder::getSamplerResponseLength(int numChannels, bool isFP16, int execSize,
     bool pixelNullMask, bool nullDst)
 {
@@ -9072,7 +9005,7 @@ uint32_t IR_Builder::getSamplerResponseLength(int numChannels, bool isFP16, int 
         hasNullReturnSampler = true;
         return 0;
     }
-    uint32_t responseLength = (isFP16 || execSize == 8) ? numChannels : numChannels * 2;
+    uint32_t responseLength = numChannels * getNumGRF(isFP16, execSize);
 
     if (pixelNullMask)
     {
@@ -9126,16 +9059,8 @@ int IR_Builder::translateVISASampler3DInst(
     const bool FP16Input = params[0]->getType() == Type_HF;
 
     bool useHeader = false;
-    unsigned int numRows = 0;
 
-    if (FP16Input)
-    {
-        numRows = numParms;
-    }
-    else
-    {
-        numRows = numParms * (execSize == 8 ? 1 : 2);
-    }
+    unsigned int numRows = numParms * getNumGRF(FP16Input, execSize);
 
     VISAChannelMask channels = chMask.getAPI();
     // For SKL+ channel mask R, RG, RGB, and RGBA may be derived from response length
@@ -9182,7 +9107,7 @@ int IR_Builder::translateVISASampler3DInst(
 
     // Collect payload sources.
     unsigned len = numParms + (header ? 1 : 0);
-	std::vector<payloadSource> sources(len);
+    std::vector<payloadSource> sources(len);
     unsigned i = 0;
     // Collect header if present.
     if (header) {
@@ -9220,8 +9145,8 @@ int IR_Builder::translateVISASampler3DInst(
     uint32_t desc = G4_SendMsgDescriptor::createDesc(fc, useHeader, sizes[0], responseLength);
 
     G4_InstSend* sendInst = nullptr;
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend)
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend)
     {
         ASSERT_USER(sizes[1] == 0, "Expect the 2nd part of the payload has zero size!");
         uint32_t extDesc = G4_SendMsgDescriptor::createExtDesc(SFID::SAMPLER);
@@ -9270,7 +9195,7 @@ int IR_Builder::translateVISALoad3DInst(
     const bool halfReturn = G4_Type_Table[dst->getType()].byteSize == 2;
     const bool halfInput = G4_Type_Table[opndArray[0]->getType()].byteSize == 2;
 
-    unsigned int numRows = numParms * ((halfInput || execSize == 8) ? 1 : 2);
+    unsigned int numRows = numParms * getNumGRF(halfInput, execSize);
 
     VISAChannelMask channels = channelMask.getAPI();
     // For SKL+ channel mask R, RG, RGB, and RGBA may be derived from response length
@@ -9313,7 +9238,7 @@ int IR_Builder::translateVISALoad3DInst(
 
     // Collect payload sources.
     unsigned len = numParms + (header ? 1 : 0);
-	std::vector<payloadSource> sources(len);
+    std::vector<payloadSource> sources(len);
     unsigned i = 0;
     // Collect header if present.
     if (header) {
@@ -9343,8 +9268,8 @@ int IR_Builder::translateVISALoad3DInst(
     uint32_t responseLength = getSamplerResponseLength(numChannels, halfReturn, execSize,
         hasPixelNullMask() && pixelNullMask, dst->isNullReg());
 
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend)
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend)
     {
         Create_Send_Inst_For_CISA(pred_opnd, dst,
             msgs[0], sizes[0],
@@ -9391,16 +9316,7 @@ int IR_Builder::translateVISAGather3dInst(
     const bool FP16Return = G4_Type_Table[dst->getType()].byteSize == 2;
     const bool FP16Input = opndArray[0]->getType() == Type_HF;
 
-    unsigned int numRows = 0;
-
-    if (FP16Input)
-    {
-        numRows = numOpnds;
-    }
-    else
-    {
-        numRows = numOpnds * (execSize == 8 ? 1 : 2);
-    }
+    unsigned int numRows = numOpnds * getNumGRF(FP16Input, execSize);
 
     bool nonZeroAoffImmi = !(aoffimmi->isImm() && aoffimmi->asImm()->getInt() == 0);
     bool needHeaderForChannels = channelMask.getSingleChannel() != VISA_3D_GATHER4_CHANNEL_R;
@@ -9442,7 +9358,7 @@ int IR_Builder::translateVISAGather3dInst(
 
     // Collect payload sources.
     unsigned len = numOpnds + (header ? 1 : 0);
-	std::vector<payloadSource> sources(len);
+    std::vector<payloadSource> sources(len);
     unsigned i = 0;
     // Collect header if present.
     if (header) {
@@ -9471,8 +9387,8 @@ int IR_Builder::translateVISAGather3dInst(
     uint32_t responseLength = getSamplerResponseLength(4, FP16Return, execSize,
         hasPixelNullMask() && pixelNullMask, dst->isNullReg());
 
-	bool forceSplitSend = ForceSplitSend(*this, surface);
-	if (msgs[1] == 0 && !forceSplitSend)
+    bool forceSplitSend = ForceSplitSend(*this, surface);
+    if (msgs[1] == 0 && !forceSplitSend)
     {
         Create_Send_Inst_For_CISA(pred, dst, msgs[0], sizes[0],
             responseLength,
@@ -9715,8 +9631,8 @@ int IR_Builder::translateVISASVMScatterReadInst(
     unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
     unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
     unsigned int instOpt = Get_Gen4_Emask(eMask, instExSize);
-    uint32_t messageLength = 2 * (exSize / 8);
-    uint32_t responseLength = 0;
+    uint32_t messageLength = (8 * exSize) / getGRFSize();
+    uint32_t numDWperLane = 0;
 
     // ToDo: remove this as it should be done in HWConformity
     if (instExSize < 8 && VISA_WA_CHECK(getPWaTable(), WaDisableSendSrcDstOverlap))
@@ -9738,18 +9654,18 @@ int IR_Builder::translateVISASVMScatterReadInst(
     switch (blockSize)
     {
     case SVM_BLOCK_TYPE_BYTE:
-        responseLength = (numBlocks == SVM_BLOCK_NUM_8) ? 2 : 1;
+        numDWperLane = (numBlocks == SVM_BLOCK_NUM_8) ? 2 : 1;
         break;
     case SVM_BLOCK_TYPE_DWORD:
-        responseLength = Get_Common_ISA_SVM_Block_Num(numBlocks);
+        numDWperLane = Get_Common_ISA_SVM_Block_Num(numBlocks);
         break;
     case SVM_BLOCK_TYPE_QWORD:
-        responseLength = Get_Common_ISA_SVM_Block_Num(numBlocks) * 2;
+        numDWperLane = Get_Common_ISA_SVM_Block_Num(numBlocks) * 2;
         break;
     default:
         MUST_BE_TRUE(false, "Illegal SVM block type");
     }
-    responseLength *= (exSize / 8);
+    uint32_t responseLength = (numDWperLane * 4 * exSize) / getGRFSize();
 
     unsigned desc = 0;
     desc |= getA64BTI();
@@ -10344,7 +10260,7 @@ static void Copy_Source_To_Payload(IR_Builder *IRB, unsigned batchExSize,
                                    G4_SrcRegRegion *source, unsigned execSize,
                                    uint32_t eMask) {
     ASSERT_USER(batchExSize == 1 || batchExSize == 2 || batchExSize == 4 ||
-				batchExSize == 8 || batchExSize == 16 || batchExSize == 32,
+                batchExSize == 8 || batchExSize == 16 || batchExSize == 32,
                 "Invalid execution size for message payload copy!");
 
 
@@ -10535,14 +10451,14 @@ void IR_Builder::fixSendDstType(G4_DstRegRegion* dst, uint8_t execSize)
 {
     MUST_BE_TRUE( dst->getRegAccess() == Direct, "Send dst must be a direct operand");
 
-	MUST_BE_TRUE(dst->getSubRegOff() == 0, "dst may not have a non-zero subreg offset");
+    MUST_BE_TRUE(dst->getSubRegOff() == 0, "dst may not have a non-zero subreg offset");
 
-	// normally we should create a new alias for dst's declare, but since it's a send
-	// type mismatch between operand and decl should not matter
-	if (execSize == 16 && dst->getType() != Type_W && dst->getType() != Type_UW)
-	{
-		dst->setType(Type_W);
-	}
+    // normally we should create a new alias for dst's declare, but since it's a send
+    // type mismatch between operand and decl should not matter
+    if (execSize == 16 && dst->getType() != Type_W && dst->getType() != Type_UW)
+    {
+        dst->setType(Type_W);
+    }
 
     if (dst->getType() == Type_HF)
     {
@@ -10591,32 +10507,32 @@ void IR_Builder::predefinedVarRegAssignment(uint8_t inputSize)
 void IR_Builder::expandPredefinedVars()
 {
 
-	// Use FFTID from msg header
-	// and (1) hw_tid, r0.5, 0x3ff
-	//
-	// 9:0     FFTID. This ID is assigned by TS and is a unique identifier for the thread in
-	// comparison to other concurrent root threads. It is used to free up resources used
-	// by the thread upon thread completion.
-	//
-	// [Pre-DevBDW]: Format = U8. Bits 9:8 are Reserved, MBZ.
-	//
-	// For BDW format is U9
-	// For SKL format is U10
-	//
+    // Use FFTID from msg header
+    // and (1) hw_tid, r0.5, 0x3ff
+    //
+    // 9:0     FFTID. This ID is assigned by TS and is a unique identifier for the thread in
+    // comparison to other concurrent root threads. It is used to free up resources used
+    // by the thread upon thread completion.
+    //
+    // [Pre-DevBDW]: Format = U8. Bits 9:8 are Reserved, MBZ.
+    //
+    // For BDW format is U9
+    // For SKL format is U10
+    //
 
     // first non-label instruction
     auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
 
     if (preDefVars.isHasPredefined(PreDefinedVarsInternal::HW_TID))
-	{
-		G4_SrcRegRegion* src = createSrcRegRegion(Mod_src_undef, Direct, realR0->getRegVar(),
-			0, 5, getRegionScalar(), Type_UD);
-		G4_Imm* mask1 = this->createImm(0x3ff, Type_UD);
-		G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinHWTID, 1);
+    {
+        G4_SrcRegRegion* src = createSrcRegRegion(Mod_src_undef, Direct, realR0->getRegVar(),
+            0, 5, getRegionScalar(), Type_UD);
+        G4_Imm* mask1 = this->createImm(0x3ff, Type_UD);
+        G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinHWTID, 1);
         G4_INST* inst = this->createInternalInst(NULL, G4_and, NULL, false, 1, dst, src, mask1,
             InstOpt_WriteEnable, 0, UNMAPPABLE_VISA_INDEX, NULL);
-		instList.insert(iter, inst);
-	}
+        instList.insert(iter, inst);
+    }
 
     if (preDefVars.isHasPredefined(PreDefinedVarsInternal::X))
     {

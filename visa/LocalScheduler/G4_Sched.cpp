@@ -525,7 +525,7 @@ bool preRA_Scheduler::run()
     RegisterPressure rp(kernel, mem, rpe);
     bool Changed = false;
 
-    for (auto bb : kernel.fg.BBs) {
+    for (auto bb : kernel.fg) {
         if (bb->size() < SMALL_BLOCK_SIZE || bb->size() > LARGE_BLOCK_SIZE) {
             SCHED_DUMP(std::cerr << "Skip block with instructions "
                 << bb->size() << "\n");
@@ -1432,18 +1432,18 @@ bool LatencyQueue::compare(preNode* N1, preNode* N2)
 }
 
 // Find the edge with smallest ID.
-static G4_INST* minElt(const std::vector<preEdge>& Elts)
+static preNode* minElt(const std::vector<preEdge>& Elts)
 {
     assert(!Elts.empty());
     if (Elts.size() == 1)
-        return Elts.front().getNode()->getInst();
+        return Elts.front().getNode();
     auto Cmp = [](const preEdge& E1, const preEdge& E2) {
         G4_INST* Inst1 = E1.getNode()->getInst();
         G4_INST* Inst2 = E2.getNode()->getInst();
         return Inst1 && Inst2 && Inst1->getLocalId() < Inst2->getLocalId();
     };
     auto E = std::min_element(Elts.begin(), Elts.end(), Cmp);
-    return E->getNode()->getInst();
+    return E->getNode();
 }
 
 // Given an instruction stream [p1 p2 A1 A2 A4 A3]
@@ -1461,8 +1461,10 @@ void BB_Scheduler::relocatePseudoKills()
     for (auto N : ddd.getNodes()) {
         G4_INST* Inst = N->getInst();
         if (Inst && Inst->isPseudoKill()) {
-            G4_INST* Pos = minElt(N->Succs);
-            LocMap[Pos].push_back(Inst);
+            preNode* Pos = minElt(N->Succs);
+            while (Pos->getInst()->isPseudoKill())
+                Pos = minElt(Pos->Succs);
+            LocMap[Pos->getInst()].push_back(Inst);
         }
     }
 
@@ -1649,7 +1651,11 @@ void preDDD::buildGraph()
 
 static bool isPhyicallyAllocatedRegVar(G4_Operand* opnd)
 {
-    if (opnd && opnd->getBase() && opnd->getBase()->isRegVar())
+    assert(opnd);
+    G4_AccRegSel Acc = opnd->getAccRegSel();
+    if (Acc != G4_AccRegSel::ACC_UNDEFINED && Acc != G4_AccRegSel::NOACC)
+        return true;
+    if (opnd->getBase() && opnd->getBase()->isRegVar())
         return opnd->getBase()->asRegVar()->getPhyReg() != nullptr;
     return false;
 }

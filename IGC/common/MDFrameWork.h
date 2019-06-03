@@ -66,10 +66,10 @@ namespace IGC
         DefaultResourceExtensionType,
     };
 
-	struct ArgDependencyInfoMD
-	{
-		int argDependency = 0;
-	};
+    struct ArgDependencyInfoMD
+    {
+        int argDependency = 0;
+    };
 
     struct ArgAllocMD
     {
@@ -198,6 +198,8 @@ namespace IGC
         bool replaceGlobalOffsetsByZero                 = false;
         unsigned forcePixelShaderSIMDMode               = 0;
         bool pixelShaderDoNotAbortOnSpill               = false;
+        bool UniformWGS                                 = false;
+        bool disableVertexComponentPacking              = false;
     };
 
     struct ComputeShaderInfo
@@ -231,31 +233,31 @@ namespace IGC
     };
 
 
-	struct SInputDesc
-	{
-		unsigned int index = 0;
-		int argIndex = 0;
-		int interpolationMode = 0;
-	};
+    struct SInputDesc
+    {
+        unsigned int index = 0;
+        int argIndex = 0;
+        int interpolationMode = 0;
+    };
 
-	// SimplePushInfo holding the argument number in map so that we can retrieve relavent Argument as a value pointer from Function
-	struct SimplePushInfo
-	{
-		unsigned int cbIdx = 0;
-		unsigned int offset = 0;
-		unsigned int size = 0;
+    // SimplePushInfo holding the argument number in map so that we can retrieve relavent Argument as a value pointer from Function
+    struct SimplePushInfo
+    {
+        unsigned int cbIdx = 0;
+        unsigned int offset = 0;
+        unsigned int size = 0;
         bool isStateless = false;
-		std::map<unsigned int, int> simplePushLoads;
-	};
+        std::map<unsigned int, int> simplePushLoads;
+    };
 
-	struct ConstantAddress
-	{
-		unsigned int bufId = 0;
-		unsigned int eltId = 0;
-        int size = 0;
-	};
+    struct ConstantAddress
+    {
+        unsigned int bufId = 0;
+        unsigned int eltId = 0;
+        unsigned int size = 0;
+    };
 
-	bool operator < (const ConstantAddress &a, const ConstantAddress &b);
+    bool operator < (const ConstantAddress &a, const ConstantAddress &b);
 
     struct StatelessPushInfo
     {
@@ -264,7 +266,7 @@ namespace IGC
     };
 
     // simplePushInfoArr needs to be initialized to a vector of size g_c_maxNumberOfBufferPushed, which we are doing in module MD initialization done in code gen context
-	// All the pushinfo below is mapping to an argument number (int) so that we can retrieve relevant Argument as a value pointer from Function
+    // All the pushinfo below is mapping to an argument number (int) so that we can retrieve relevant Argument as a value pointer from Function
     struct PushInfo
     {
         std::vector<StatelessPushInfo> pushableAddresses;
@@ -273,33 +275,33 @@ namespace IGC
         unsigned int inlineConstantBufferSlot = INVALID_CONSTANT_BUFFER_INVALID_ADDR; // slot of the inlined constant buffer
         unsigned int inlineConstantBufferOffset = INVALID_CONSTANT_BUFFER_INVALID_ADDR;    // offset of the inlined constant buffer
 
-		std::map<ConstantAddress, int> constants;
-		std::map<unsigned int, SInputDesc> inputs;
-		std::map<unsigned int, int> constantReg;
-		std::array<SimplePushInfo, g_c_maxNumberOfBufferPushed> simplePushInfoArr;
-		unsigned int simplePushBufferUsed = 0;
+        std::map<ConstantAddress, int> constants;
+        std::map<unsigned int, SInputDesc> inputs;
+        std::map<unsigned int, int> constantReg;
+        std::array<SimplePushInfo, g_c_maxNumberOfBufferPushed> simplePushInfoArr;
+        unsigned int simplePushBufferUsed = 0;
 
-		std::vector<ArgDependencyInfoMD> pushAnalysisWIInfos;
+        std::vector<ArgDependencyInfoMD> pushAnalysisWIInfos;
     };
 
     struct InlineProgramScopeBuffer
-	{
-		int alignment;
-		std::vector<unsigned char> Buffer;
-	};
+    {
+        int alignment;
+        std::vector<unsigned char> Buffer;
+    };
 
-	struct ImmConstantInfo
-	{
-		std::vector<char> data;
-	};
+    struct ImmConstantInfo
+    {
+        std::vector<char> data;
+    };
 
-	struct PointerProgramBinaryInfo
-	{
-		int PointerBufferIndex;
-		int PointerOffset;
-		int PointeeAddressSpace;
-		int PointeeBufferIndex;
-	};
+    struct PointerProgramBinaryInfo
+    {
+        int PointerBufferIndex;
+        int PointerOffset;
+        int PointeeAddressSpace;
+        int PointeeBufferIndex;
+    };
 
     struct ShaderData
     {
@@ -323,6 +325,7 @@ namespace IGC
         VertexShaderInfo vsInfo;
         PixelShaderInfo psInfo;
         ComputeShaderInfo csInfo;
+        bool useStatelessPvtMem = false;
         std::map<ConstantAddress, uint32_t>   inlineDynConstants;
         std::map<uint32_t, uint32_t>          inlineDynTextures;
         ImmConstantInfo immConstant;

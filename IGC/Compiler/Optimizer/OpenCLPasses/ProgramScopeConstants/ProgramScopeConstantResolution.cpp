@@ -49,6 +49,7 @@ using namespace IGC::IGCMD;
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(ProgramScopeConstantResolution, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_END(ProgramScopeConstantResolution, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char ProgramScopeConstantResolution::ID = 0;
@@ -133,6 +134,12 @@ bool ProgramScopeConstantResolution::runOnModule(Module &M)
         Constant* initializer = pGlobalVar->getInitializer();
         assert(initializer && "Constant must be initialized");
         if( !initializer )
+        {
+            continue;
+        }
+
+        // If global variables are relocated it doesnt require implicit args
+        if (IGC_IS_FLAG_ENABLED(EnableGlobalRelocation))
         {
             continue;
         }

@@ -100,6 +100,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Legalizer/TypeLegalizerPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/ClampLoopUnroll/ClampLoopUnroll.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/Image3dToImage2darray/Image3dToImage2darray.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/RewriteLocalSize/RewriteLocalSize.hpp"
 #include "Compiler/MetaDataApi/PurgeMetaDataUtils.hpp"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/SPIRMetaDataTranslation.h"
@@ -205,36 +206,43 @@ static void CommonOCLBasedPasses(
             "-v512:512:512-v1024:1024:1024-n8:16:32";
     }
     pContext->getModule()->setDataLayout(dataLayout);
-	BuiltinGenericModule->setDataLayout(dataLayout);
-	if( BuiltinSizeModule )
-	{
-	    BuiltinSizeModule->setDataLayout(dataLayout);
-	}
-		
+    BuiltinGenericModule->setDataLayout(dataLayout);
+    if( BuiltinSizeModule )
+    {
+        BuiltinSizeModule->setDataLayout(dataLayout);
+    }
+        
     MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
     
     //extracting OCL version major before SPIRMetadataTranslation pass deletes its metadata node
     const SPIRMD::SpirMetaDataUtils spirMDUtils(&(*pContext->getModule()));
     int OCLMajor = getOCLMajorVersion(spirMDUtils);
+
+    CompOptions &CompilerOpts = pContext->getModuleMetaData()->compOpt;
     
     // check OpenCL build options
-    assert((pContext->type == ShaderType::OPENCL_SHADER) && "Trying to use OCL common passes on non-OCL context");
-    bool shouldForceCR = static_cast<OpenCLProgramContext*>(pContext)->m_Options.CorrectlyRoundedSqrt;
+    bool shouldForceCR = pContext->m_Options.CorrectlyRoundedSqrt;
 
-    pContext->getModuleMetaData()->compOpt.replaceGlobalOffsetsByZero =
-        static_cast<OpenCLProgramContext*>(pContext)->m_InternalOptions.replaceGlobalOffsetsByZero;
+    CompilerOpts.replaceGlobalOffsetsByZero =
+        pContext->m_InternalOptions.replaceGlobalOffsetsByZero;
 
-    pContext->getModuleMetaData()->compOpt.SubgroupIndependentForwardProgressRequired =
-        (static_cast<OpenCLProgramContext*>(pContext)->m_Options.NoSubgroupIFP == false);
+    CompilerOpts.SubgroupIndependentForwardProgressRequired =
+        (pContext->m_Options.NoSubgroupIFP == false);
 
-    pContext->getModuleMetaData()->compOpt.GreaterThan2GBBufferRequired =
-        !static_cast<OpenCLProgramContext*>(pContext)->m_InternalOptions.Use32BitPtrArith;
+    if (OCLMajor >= 2)
+    {
+        CompilerOpts.UniformWGS =
+            pContext->m_Options.UniformWGS;
+    }
 
-    pContext->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired =
-        static_cast<OpenCLProgramContext*>(pContext)->m_InternalOptions.IntelGreaterThan4GBBufferRequired;
+    CompilerOpts.GreaterThan2GBBufferRequired =
+        !pContext->m_InternalOptions.Use32BitPtrArith;
 
-    pContext->getModuleMetaData()->compOpt.HasBufferOffsetArg =
-        static_cast<OpenCLProgramContext*>(pContext)->m_InternalOptions.IntelHasBufferOffsetArg;
+    CompilerOpts.GreaterThan4GBBufferRequired =
+        pContext->m_InternalOptions.IntelGreaterThan4GBBufferRequired;
+
+    CompilerOpts.HasBufferOffsetArg =
+        pContext->m_InternalOptions.IntelHasBufferOffsetArg;
 
     // right now we don't support any standard function in the code gen
     // maybe we want to support some at some point to take advantage of LLVM optimizations
@@ -277,15 +285,15 @@ static void CommonOCLBasedPasses(
         mpm.add(createBIFTransformsPass());
     }
 
-    if(static_cast<OpenCLProgramContext*>(pContext)->m_InternalOptions.KernelDebugEnable)
+    if(pContext->m_InternalOptions.KernelDebugEnable)
     {
         IF_DEBUG_INFO(mpm.add(new ImplicitGlobalId());)
     }
 
-	if (IGC_IS_FLAG_ENABLED(EnableCodeAssumption))
-	{
-		mpm.add(new CodeAssumption());
-	}
+    if (IGC_IS_FLAG_ENABLED(EnableCodeAssumption))
+    {
+        mpm.add(new CodeAssumption());
+    }
 
     mpm.add(new PreBIImportAnalysis());
     mpm.add(createBuiltInImportPass(std::move(BuiltinGenericModule), std::move(BuiltinSizeModule)));
@@ -297,17 +305,14 @@ static void CommonOCLBasedPasses(
     // OCL has built-ins so it always need to run inlining
     {
         mpm.add(createProcessFuncAttributesPass());
-        if((pContext->m_instrTypes.hasSubroutines) || (pContext->type == ShaderType::OPENCL_SHADER))
+        if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
         {
-            if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
-            {
-                int Threshold = IGC_GET_FLAG_VALUE(OCLInlineThreshold);
-                mpm.add(createFunctionInliningPass(Threshold));
-            }
-            else
-            {
-                mpm.add(createAlwaysInlinerLegacyPass());
-            }
+            int Threshold = IGC_GET_FLAG_VALUE(OCLInlineThreshold);
+            mpm.add(createFunctionInliningPass(Threshold));
+        }
+        else
+        {
+            mpm.add(createAlwaysInlinerLegacyPass());
         }
         // The inliner sometimes fails to delete unused functions, this cleans up the remaining mess.
         mpm.add(createGlobalDCEPass());
@@ -342,6 +347,8 @@ static void CommonOCLBasedPasses(
         mpm.add(new BreakConstantExpr());
     }
 
+    if (CompilerOpts.UniformWGS)
+        mpm.add(new RewriteLocalSize());
 
     mpm.add(CreateFoldKnownWorkGroupSizes());
 
@@ -430,7 +437,7 @@ static void CommonOCLBasedPasses(
     mpm.add(new SetFastMathFlags());
     mpm.add(new FixResourcePtr());
 
-    bool isOptDisabled = pContext->getModuleMetaData()->compOpt.OptDisable;
+    bool isOptDisabled = CompilerOpts.OptDisable;
     if(isOptDisabled)
     {
         // Run additional predefined constant resolving when optimization is

@@ -24,6 +24,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#include "Compiler/Optimizer/OpenCLPasses/WIFuncs/WIFuncsAnalysis.hpp"
 #include "FoldKnownWorkGroupSizes.h"
 #include "../IGCPassSupport.h"
 #include "../CodeGenPublic.h"
@@ -72,7 +73,6 @@ bool FoldKnownWorkGroupSizes::runOnFunction(Function &F)
 void FoldKnownWorkGroupSizes::visitCallInst(llvm::CallInst &I)
 {
     Function* function = I.getParent()->getParent();
-    //Value* callingInst = ;
     Module* module = function->getParent();
     Function* calledFunction = I.getCalledFunction();
     if (calledFunction == nullptr)
@@ -83,20 +83,21 @@ void FoldKnownWorkGroupSizes::visitCallInst(llvm::CallInst &I)
     CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
 
 
-    if (funcName.equals("__builtin_IB_get_global_offset") && ctx->getModuleMetaData()->compOpt.replaceGlobalOffsetsByZero)
+    if (funcName.equals(WIFuncsAnalysis::GET_GLOBAL_OFFSET) &&
+        ctx->getModuleMetaData()->compOpt.replaceGlobalOffsetsByZero)
     {
         if (calledFunction->getReturnType() == Type::getInt32Ty(module->getContext()))
         {
             ConstantInt* IntZero = ConstantInt::get(Type::getInt32Ty(module->getContext()), 0);
             I.replaceAllUsesWith(IntZero);
+            // TODO: erase when patch token is not required
+            //I.eraseFromParent();
             m_changed = true;
         }
-        return;
     }
-    else if (funcName.equals("__builtin_IB_get_enqueued_local_size"))
+    else if (funcName.equals(WIFuncsAnalysis::GET_ENQUEUED_LOCAL_SIZE))
     {
-        
-        auto itr = ctx->getMetaDataUtils()->findFunctionsInfoItem(I.getParent()->getParent());
+        auto itr = ctx->getMetaDataUtils()->findFunctionsInfoItem(I.getFunction());
 
         //Check function exists in the metadata
         if (itr == ctx->getMetaDataUtils()->end_FunctionsInfo())
@@ -107,43 +108,24 @@ void FoldKnownWorkGroupSizes::visitCallInst(llvm::CallInst &I)
         //Check threadGroup has value
         if (!tgMD->hasValue())
             return;        
-        
-        unsigned int dimension = (unsigned int)static_cast<ConstantInt*>(I.getArgOperand(0))->getZExtValue();
-        ConstantInt *valueToReplaceWith = nullptr;
-        if (dimension == 0)
-        {
-            if (tgMD->isXDimHasValue())
-            {
-                valueToReplaceWith = ConstantInt::get(Type::getInt32Ty(module->getContext()), tgMD->getXDim());
-                I.replaceAllUsesWith(valueToReplaceWith);
-                m_changed = true;
 
-            }
-        }
-        else if (dimension == 1)
-        {
-            if (tgMD->isYDimHasValue())
-            {
-                valueToReplaceWith = ConstantInt::get(Type::getInt32Ty(module->getContext()), tgMD->getYDim());
-                I.replaceAllUsesWith(valueToReplaceWith);
-                m_changed = true;
+        IRBuilder<> IRB(&I);
 
-            }
-        } 
-        else if (dimension == 2)
+        uint32_t Dims[] =
         {
-            if (tgMD->isZDimHasValue())
-            {
-                valueToReplaceWith = ConstantInt::get(Type::getInt32Ty(module->getContext()), tgMD->getZDim());
-                I.replaceAllUsesWith(valueToReplaceWith);
-                m_changed = true;
-            }
-        }
-        else
-        {
-            assert("Invalid thread group dimension");
-        }
-        return;
+            (uint32_t)tgMD->getXDim(),
+            (uint32_t)tgMD->getYDim(),
+            (uint32_t)tgMD->getZDim(),
+        };
+        auto *CV = ConstantDataVector::get(I.getContext(), Dims);
+
+        auto *Dim = I.getArgOperand(0);
+        auto *EE = IRB.CreateExtractElement(CV, Dim, "enqueuedLocalSize");
+
+        I.replaceAllUsesWith(EE);
+        // TODO: erase when patch token is not required
+        //I.eraseFromParent();
+        m_changed = true;
     }
 }
 

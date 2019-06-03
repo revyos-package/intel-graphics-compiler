@@ -1802,8 +1802,8 @@ inline llvm::CallInst* LLVM3DBuilder<preserveNames, T, Inserter>::Create_ldms(
 
     llvm::Value * packed_tex_params[] = {
         int32_sampleIdx,
-		mcs_ch0,
-		mcs_ch1,
+        mcs_ch0,
+        mcs_ch1,
         int32_srcIdxU,
         int32_srcIdxV,
         int32_srcIdxR,
@@ -2661,19 +2661,19 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::CreateGen9PlusIma
             break;
         }
     }
-	if (m_Platform->hasSupportforTenBitFloatConversion())
-	{
-		// Values returned by Typed Surface Read on 10_10_10_2 
-		// floating point (6E4) format surfaces do not need additional software conversion to
-		// floats if hardware natively supports it
-		switch (surfaceFormat)
-		{
-		case IGC::SURFACE_FORMAT::SURFACE_FORMAT_R10G10B10A2_UNORM:
-			return pLdUAVTypedResult;
-		default:
-			break;
-		}		
-	}
+    if (m_Platform->hasSupportforTenBitFloatConversion())
+    {
+        // Values returned by Typed Surface Read on 10_10_10_2 
+        // floating point (6E4) format surfaces do not need additional software conversion to
+        // floats if hardware natively supports it
+        switch (surfaceFormat)
+        {
+        case IGC::SURFACE_FORMAT::SURFACE_FORMAT_R10G10B10A2_UNORM:
+            return pLdUAVTypedResult;
+        default:
+            break;
+        }        
+    }
 
     llvm::Value* pFormatConvertedLLVMLdUAVTypedResult = pLdUAVTypedResult;
     switch (surfaceFormat)
@@ -3495,7 +3495,8 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_indirectSt
         module,
         llvm::GenISAIntrinsic::GenISA_storerawvector_indexed,
         types);
-    return this->CreateCall3(pFunc, srcBuffer, offset, data);
+    llvm::Value* alignment = this->getInt32(data->getType()->getScalarSizeInBits() / 8);
+    return this->CreateCall4(pFunc, srcBuffer, offset, data, alignment);
 }
 
 template<bool preserveNames, typename T, typename Inserter>

@@ -68,6 +68,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/LEB128.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/MC/MCDwarf.h"
+
 #include "common/LLVMWarningsPop.hpp"
 
 
@@ -162,6 +164,7 @@ DwarfDebug::DwarfDebug(StreamEmitter *A, VISAModule *M) :
     DwarfDebugRangeSectionSym = nullptr;
     DwarfDebugLocSectionSym = nullptr;
     TextSectionSym = nullptr;
+    DwarfFrameSectionSym = nullptr;
 
     FunctionBeginSym = FunctionEndSym = nullptr;;
     ModuleBeginSym = ModuleEndSym = nullptr;;
@@ -259,27 +262,27 @@ DIE *DwarfDebug::updateSubprogramScopeDIE(CompileUnit *SPCU, DISubprogram* SP)
 
                 // Add arguments.
                 DISubroutineType* SPTy = SP->getType();
-				if (SPTy)
-				{
-					DITypeRefArray Args = SPTy->getTypeArray();
-					uint16_t SPTag = (uint16_t)SPTy->getTag();
-					if (SPTag == dwarf::DW_TAG_subroutine_type)
-					{
-						for (unsigned i = 1, N = Args.size(); i < N; ++i)
-						{
-							DIE *Arg = SPCU->createAndAddDIE(dwarf::DW_TAG_formal_parameter, *SPDie);
-							DIType* ATy = cast<DIType>(Args[i]);
-							SPCU->addType(Arg, ATy);
-							if (ATy->isArtificial())
-								SPCU->addFlag(Arg, dwarf::DW_AT_artificial);
-							if (ATy->isObjectPointer())
-								SPCU->addDIEEntry(SPDie, dwarf::DW_AT_object_pointer, Arg);
-						}
-					}
-					DIE *SPDeclDie = SPDie;
-					SPDie = SPCU->createAndAddDIE(dwarf::DW_TAG_subprogram, *SPCU->getCUDie());
-					SPCU->addDIEEntry(SPDie, dwarf::DW_AT_specification, SPDeclDie);
-				}
+                if (SPTy)
+                {
+                    DITypeRefArray Args = SPTy->getTypeArray();
+                    uint16_t SPTag = (uint16_t)SPTy->getTag();
+                    if (SPTag == dwarf::DW_TAG_subroutine_type)
+                    {
+                        for (unsigned i = 1, N = Args.size(); i < N; ++i)
+                        {
+                            DIE *Arg = SPCU->createAndAddDIE(dwarf::DW_TAG_formal_parameter, *SPDie);
+                            DIType* ATy = cast<DIType>(Args[i]);
+                            SPCU->addType(Arg, ATy);
+                            if (ATy->isArtificial())
+                                SPCU->addFlag(Arg, dwarf::DW_AT_artificial);
+                            if (ATy->isObjectPointer())
+                                SPCU->addDIEEntry(SPDie, dwarf::DW_AT_object_pointer, Arg);
+                        }
+                    }
+                    DIE *SPDeclDie = SPDie;
+                    SPDie = SPCU->createAndAddDIE(dwarf::DW_TAG_subprogram, *SPCU->getCUDie());
+                    SPCU->addDIEEntry(SPDie, dwarf::DW_AT_specification, SPDeclDie);
+                }
             }
         }
     }
@@ -523,7 +526,7 @@ DIE *DwarfDebug::constructInlinedScopeDIE(CompileUnit *TheCU, LexicalScope *Scop
             GenISADebugRangeSymbols.push_back(0);
         }
 
-	    return ScopeDIE;
+        return ScopeDIE;
     }
 }
 
@@ -857,7 +860,7 @@ void DwarfDebug::beginModule()
             constructSubprogramDIE(CU, DISP);
         }
 
-		auto EnumTypes = CUNode->getEnumTypes();
+        auto EnumTypes = CUNode->getEnumTypes();
         for (unsigned i = 0, e = EnumTypes.size(); i != e; ++i)
         {
             CU->getOrCreateTypeDIE(EnumTypes[i]);
@@ -921,7 +924,7 @@ void DwarfDebug::collectDeadVariables()
 #if LLVM_VERSION_MAJOR == 4 
             DILocalVariableArray Variables = SP->getVariables();
 #elif LLVM_VERSION_MAJOR >= 7
-			auto Variables = SP->getRetainedNodes();
+            auto Variables = SP->getRetainedNodes();
 #endif
             if (Variables.size() == 0)
                 continue;
@@ -1072,6 +1075,9 @@ void DwarfDebug::endModule()
 
     // Emit info into a debug macinfo section.
     emitDebugMacInfo();
+
+    // Emit frame information for subroutines
+    emitDebugFrame();
 
     // clean up.
     SPMap.clear();
@@ -1282,7 +1288,8 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
             else
             {
                 // Emit location to debug_loc
-                RegVar->setDotDebugLocOffset(offset);
+                if(RegVar->getDotDebugLocOffset() == ~0U)
+                    RegVar->setDotDebugLocOffset(offset);
             }
 
             for (auto range : GenISARange)
@@ -1343,7 +1350,7 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
                             {
                                 unsigned int subReg = varInfo.getGRF().subRegNum;
                                 auto offsetInBits = subReg * 8;
-                                auto sizeInBits = (SIZE_GRF * 8) - offsetInBits;
+                                auto sizeInBits = (m_pModule->m_pShader->getGRFSize() * 8) - offsetInBits;
                                 offsetLEB128Size = encodeULEB128(offsetInBits, bufLEB128);
                                 sizeLEB128Size = encodeULEB128(sizeInBits, bufLEB128);
 
@@ -1392,13 +1399,13 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
                             {
                                 unsigned int subReg = varInfo.getGRF().subRegNum;
                                 auto offsetInBits = subReg * 8;
-                                auto sizeInBits = (SIZE_GRF*8) - offsetInBits;
+                                auto sizeInBits = (m_pModule->m_pShader->getGRFSize()*8) - offsetInBits;
 
                                 write(dotLoc.loc, (uint8_t)llvm::dwarf::DW_OP_bit_piece);
-                                encodeULEB128(offsetInBits, bufLEB128);
-                                write(dotLoc.loc, (unsigned char*)bufLEB128, offsetLEB128Size);
-                                encodeULEB128(sizeInBits, bufLEB128);
+                                sizeLEB128Size = encodeULEB128(sizeInBits, bufLEB128);
                                 write(dotLoc.loc, (unsigned char*)bufLEB128, sizeLEB128Size);
+                                offsetLEB128Size = encodeULEB128(offsetInBits, bufLEB128);
+                                write(dotLoc.loc, (unsigned char*)bufLEB128, offsetLEB128Size);
                             }
                         }
                         else if (varInfo.isSpill())
@@ -1418,9 +1425,9 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
                 offset += dotLoc.loc.size();
                 TempDotDebugLocEntries.push_back(dotLoc);
             }
-            TempDotDebugLocEntries.push_back(DotDebugLocEntry());
-            offset += pointerSize * 2;
         }
+        TempDotDebugLocEntries.push_back(DotDebugLocEntry());
+        offset += pointerSize * 2;
         
 #if 0
             // Simplify ranges that are fully coalesced.
@@ -1477,9 +1484,9 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
     // Collect info for variables that were optimized out.
     LexicalScope *FnScope = LScopes.getCurrentFunctionScope();
 #if LLVM_VERSION_MAJOR == 4 
-	DILocalVariableArray Variables = cast<DISubprogram>(FnScope->getScopeNode())->getVariables();
+    DILocalVariableArray Variables = cast<DISubprogram>(FnScope->getScopeNode())->getVariables();
 #elif LLVM_VERSION_MAJOR >= 7
-	auto Variables = cast<DISubprogram>(FnScope->getScopeNode())->getRetainedNodes();
+    auto Variables = cast<DISubprogram>(FnScope->getScopeNode())->getRetainedNodes();
 #endif
     
     for (unsigned i = 0, e = Variables.size(); i != e; ++i)
@@ -1892,9 +1899,9 @@ void DwarfDebug::endFunction(const Function *MF)
         {
             // Collect info for variables that were optimized out.
 #if LLVM_VERSION_MAJOR == 4 
-			DILocalVariableArray Variables = SP->getVariables();
+            DILocalVariableArray Variables = SP->getVariables();
 #elif LLVM_VERSION_MAJOR >= 7
-			auto Variables = SP->getRetainedNodes();
+            auto Variables = SP->getRetainedNodes();
 #endif
             
             for (unsigned i = 0, e = Variables.size(); i != e; ++i)
@@ -2082,6 +2089,8 @@ void DwarfDebug::emitSectionLabels()
     DwarfInfoSectionSym = emitSectionSym(Asm, Asm->GetDwarfInfoSection(), "section_info");
     DwarfAbbrevSectionSym = emitSectionSym(Asm, Asm->GetDwarfAbbrevSection(), "section_abbrev");
 
+    DwarfFrameSectionSym = emitSectionSym(Asm, Asm->GetDwarfFrameSection(), "dwarf_frame");
+
     if (const MCSection *MacroInfo = Asm->GetDwarfMacroInfoSection())
     {
         emitSectionSym(Asm, MacroInfo);
@@ -2097,6 +2106,7 @@ void DwarfDebug::emitSectionLabels()
     DwarfDebugLocSectionSym = emitSectionSym(Asm, Asm->GetDwarfLocSection(), "section_debug_loc");
 
     TextSectionSym = emitSectionSym(Asm, Asm->GetTextSection(), "text_begin");
+
     emitSectionSym(Asm, Asm->GetDataSection());
 }
 
@@ -2438,6 +2448,169 @@ void DwarfDebug::emitDebugMacInfo()
     }
 }
 
+void DwarfDebug::writeCIE()
+{
+    std::vector<uint8_t> data;
+
+    // Emit CIE
+    auto ptrSize = Asm->GetPointerSize();
+    uint8_t lenSize = ptrSize;
+    if (ptrSize == 8)
+        lenSize = 12;
+
+    // Write CIE_id
+    // Only 1 CIE is emitted
+    if (ptrSize == 8)
+    {
+        uint64_t id = 0xffffffff;
+        write(data, id);
+    }
+    else
+    {
+        uint32_t id = 0xffffffff;
+        write(data, id);
+    }
+
+    // version - ubyte
+    write(data, (uint8_t)4);
+
+    // augmentation - UTF8 string
+    write(data, (uint8_t)0);
+
+    // address size - ubyte
+    write(data, (uint8_t)ptrSize);
+
+    // segment size - ubyte
+    write(data, (uint8_t)0);
+
+    // code alignment factor - uleb128
+    write(data, (uint8_t)1);
+
+    // data alignment factor - sleb128
+    write(data, (uint8_t)1);
+
+    // return address register - uleb128
+    // set machine return register to 128 which is physically
+    // absent. later CFA instructions map this to a valid GRF.
+    auto uleblen = getULEB128Size(returnReg);
+    uint8_t* buf = (uint8_t*)malloc(uleblen * sizeof(uint8_t));
+    encodeULEB128(returnReg, buf);
+    write(data, buf, uleblen);
+    free(buf);
+
+    // initial instructions (array of ubyte)
+    while ((lenSize + data.size()) % ptrSize != 0)
+        // Insert DW_CFA_nop
+        write(data, (uint8_t)llvm::dwarf::DW_CFA_nop);
+
+    // Emit length with marker 0xffffffff for 8-byte ptr
+    if (ptrSize == 8)
+        Asm->EmitInt32(0xffffffff);
+    Asm->EmitIntValue(data.size(), ptrSize);
+
+    for (auto& byte : data)
+        Asm->EmitInt8(byte);
+}
+
+void DwarfDebug::writeFDE(DbgDecoder::SubroutineInfo& sub)
+{
+    std::vector<uint8_t> data;
+
+    // Emit CIE
+    auto ptrSize = Asm->GetPointerSize();
+    uint8_t lenSize = 4;
+    if (ptrSize == 8)
+        lenSize = 12;
+
+    // CIE_ptr (4/8 bytes)
+    write(data, ptrSize == 4 ? (uint32_t)0 : (uint64_t)0);
+
+    // initial location
+    auto co = m_pModule->getCompileUnit();    
+    auto getGenISAOffset = [co](unsigned int VISAIndex)
+    {
+        uint64_t genOffset = 0;
+
+        for (auto& item : co->CISAIndexMap)
+        {
+            if (item.first >= VISAIndex)
+            {
+                genOffset = item.second;
+                break;
+            }
+        }
+
+        return genOffset;
+    };
+    auto genOffStart = getGenISAOffset(sub.startVISAIndex);
+    auto genOffEnd = getGenISAOffset(sub.endVISAIndex);
+    auto& retvarLR = sub.retval;
+    assert(retvarLR.size() > 0 && retvarLR[0].var.physicalType == DbgDecoder::VarAlloc::PhysicalVarType::PhyTypeGRF &&
+        "expecting GRF for return");
+
+    // assume ret var is live throughout sub-routine and it is contained
+    // in same GRF.
+    uint32_t linearAddr = (retvarLR.front().var.mapping.r.regNum*m_pModule->m_pShader->getGRFSize()) +
+        retvarLR.front().var.mapping.r.subRegNum;
+
+    // initial location
+    write(data, ptrSize==4 ? (uint32_t)genOffStart : genOffStart);
+
+    // address range
+    write(data, ptrSize == 4 ? (uint32_t)(genOffEnd -genOffStart) : 
+        (genOffEnd - genOffStart));
+
+    // instruction - ubyte
+    write(data, (uint8_t)llvm::dwarf::DW_CFA_register);
+
+    // return reg operand
+    auto uleblen = getULEB128Size(returnReg);
+    uint8_t* buf = (uint8_t*)malloc(uleblen * sizeof(uint8_t));
+    encodeULEB128(returnReg, buf);
+    write(data, buf, uleblen);
+    free(buf);
+
+    // actual reg holding retval
+    uleblen = getULEB128Size(linearAddr);
+    buf = (uint8_t*)malloc(uleblen * sizeof(uint8_t));
+    encodeULEB128(linearAddr, buf);
+    write(data, buf, uleblen);
+    free(buf);
+
+    // initial instructions (array of ubyte)
+    while ((lenSize + data.size()) % ptrSize != 0)
+        // Insert DW_CFA_nop
+        write(data, (uint8_t)llvm::dwarf::DW_CFA_nop);
+
+    // Emit length with marker 0xffffffff for 8-byte ptr
+    if (ptrSize == 8)
+        Asm->EmitInt32(0xffffffff);
+    Asm->EmitIntValue(data.size(), ptrSize);
+
+    for (auto& byte : data)
+        Asm->EmitInt8(byte);
+}
+
+// Emit debug_frame section to allow stack traversal
+void DwarfDebug::emitDebugFrame()
+{
+    auto subs = m_pModule->getSubroutines();
+    if (subs->size() == 0)
+        return;
+
+    Asm->SwitchSection(Asm->GetDwarfFrameSection());
+
+    // All subs share CIE.
+    // Each sub has its unique FDE.
+    writeCIE();
+
+    for (auto& sub : *subs)
+    {
+        // write unique FDE
+        writeFDE(sub);
+    }
+}
+
 void DwarfDebug::gatherDISubprogramNodes()
 {
     // Discover all DISubprogram nodes in program and store them
@@ -2467,13 +2640,13 @@ void DwarfDebug::gatherDISubprogramNodes()
                 {
                     auto scope = debugLoc.getScope();
                     if (scope &&
-                        dyn_cast_or_null<llvm::DISubprogram>(scope))
+                        dyn_cast_or_null<llvm::DILocalScope>(scope))
                     {
-                        auto DISP = dyn_cast_or_null<llvm::DISubprogram>(scope);
+                        auto DISP = cast<llvm::DILocalScope>(scope)->getSubprogram();
                         addUniqueDISP(DISP);
                         DISPToFunction.insert(std::make_pair(DISP, &F));
                     }
-
+                    
                     if (debugLoc.getInlinedAt())
                         debugLoc = debugLoc.getInlinedAt();
                     else
@@ -2492,15 +2665,12 @@ bool VISAModule::getVarInfo(std::string prefix, unsigned int vreg, DbgDecoder::V
     if (VirToPhyMap.size() == 0)
     {
         // populate map one time
-        for (auto& co : dd->getDecodedDbg()->compiledObjs)
+        auto co = getCompileUnit();
+        if (co)
         {
-            if (co.kernelName.compare(m_pEntryFunc->getName().str()) == 0)
+            for (auto& v : co->Vars)
             {
-                for (auto& v : co.Vars)
-                {
-                    VirToPhyMap.insert(std::make_pair(v.name, v));
-                }
-                break;
+                VirToPhyMap.insert(std::make_pair(v.name, v));
             }
         }
     }
@@ -2511,4 +2681,28 @@ bool VISAModule::getVarInfo(std::string prefix, unsigned int vreg, DbgDecoder::V
 
     var = (*it).second;
     return true;
+}
+
+std::vector<DbgDecoder::SubroutineInfo>* VISAModule::getSubroutines() const
+{
+    std::vector<DbgDecoder::SubroutineInfo> subs;
+    auto co = getCompileUnit();
+    if(co)
+        return &co->subs;
+    return nullptr;
+}
+
+DbgDecoder::DbgInfoFormat* VISAModule::getCompileUnit() const
+{
+    for (auto& co : dd->getDecodedDbg()->compiledObjs)
+    {
+        // TODO: Fix this for stack call use
+        if (dd->getDecodedDbg()->compiledObjs.size() == 1 ||
+            co.kernelName.compare(m_pEntryFunc->getName().str()) == 0)
+        {
+            return &co;
+        }
+    }
+
+    return nullptr;
 }

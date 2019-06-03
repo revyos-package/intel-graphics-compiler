@@ -28,7 +28,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
 #include <llvm/IR/InstVisitor.h>
-#include <llvm/ADT/DenseSet.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/CISACodeGen/CISACodeGen.h"
 
@@ -57,17 +56,12 @@ namespace IGC
             AU.setPreservesCFG();
         }
 
-        virtual bool    runOnFunction(llvm::Function &F) override;
+        bool            runOnFunction(llvm::Function &F) override;
         void            visitInstruction(llvm::Instruction &I);
 
     private:
         void PromoteSamplerTextureToDirectAS(llvm::GenIntrinsicInst *&pIntr, llvm::Value* resourcePtr);
         void PromoteBufferToDirectAS(llvm::Instruction* inst, llvm::Value* resourcePtr);
-
-        void GetAccessInstToSrcPointerMap(llvm::Instruction* inst, llvm::Value* resourcePtr);
-        void PromoteStatelessToBindlessBuffers(llvm::Function& F);
-
-        std::unordered_map<llvm::Value*, llvm::Value*> m_AccessToSrcPtrMap;
 
         CodeGenContext* m_pCodeGenContext;
         IGCMD::MetaDataUtils*  m_pMdUtils;

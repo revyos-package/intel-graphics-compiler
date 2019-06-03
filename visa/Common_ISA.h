@@ -373,7 +373,7 @@ typedef struct {
     {
        return kind >> 3;
     }
-    std::string getImplicitKindString()
+    std::string getImplicitKindString() const
     {
         uint32_t kind = getImplicitKind();
         std::string kindString = ".implicit_";
@@ -526,6 +526,55 @@ typedef struct {
     bool*                 surface_attrs;
 } kernel_format_t;
 typedef kernel_format_t function_format_t;
+
+class print_format_provider_t {
+public:
+    virtual uint32_t getNameIndex() const = 0;
+    virtual unsigned char getReturnType() const = 0;
+
+    virtual const char* getString(uint32_t str_id) const = 0;
+    virtual uint32_t getStringCount() const = 0;
+
+    virtual const label_info_t* getLabel(uint16_t label_id) const = 0;
+    virtual unsigned short getLabelCount() const = 0;
+
+    virtual const var_info_t* getPredefVar(unsigned var_id) const = 0;
+    virtual const var_info_t* getVar(unsigned var_id) const = 0;
+    virtual uint32_t getVarCount() const = 0;
+
+    virtual const attribute_info_t* getAttr(unsigned id) const = 0;
+    virtual unsigned getAttrCount() const = 0;
+
+    virtual const addr_info_t* getAddr(unsigned id) const = 0;
+    virtual unsigned short getAddrCount() const = 0;
+
+    virtual const pred_info_t* getPred(unsigned id) const = 0;
+    virtual unsigned short getPredCount() const = 0;
+
+    virtual const state_info_t* getPredefSurface(unsigned id) const = 0;
+    virtual const state_info_t* getSurface(unsigned id) const = 0;
+    virtual unsigned char getSurfaceCount() const = 0;
+
+    virtual const state_info_t* getSampler(unsigned id) const = 0;
+    virtual unsigned char getSamplerCount() const = 0;
+
+    virtual const state_info_t* getVME(unsigned id) const = 0;
+    virtual unsigned char getVMECount() const = 0;
+
+    virtual const input_info_t* getInput(unsigned id) const = 0;
+    virtual uint32_t getInputCount() const = 0;
+
+};
+
+struct print_decl_index_t {
+    unsigned var_index = 0;
+    unsigned addr_index = 0;
+    unsigned pred_index = 0;
+    unsigned sampler_index = 0;
+    unsigned surface_index = 0;
+    unsigned vme_index = 0;
+    unsigned input_index = 0;
+};
 
 typedef struct {
     unsigned char tag;
@@ -789,8 +838,8 @@ typedef struct
 } CISA_PreDefined_Var_Info;
 
 namespace vISA
-{ 
-    enum class SFID 
+{
+    enum class SFID
     {
         NULL_SFID  =  0,
         SAMPLER    =  2,
@@ -824,19 +873,19 @@ typedef enum
     PREDEF_SURF_1 = 1,
     PREDEF_SURF_2 = 2,
     PREDEF_SURF_3 = 3,
-	PREDEF_SURF_1_OLD = 243,
-	PREDEF_SURF_2_OLD = 244,
-	PREDEF_SURF_3_OLD = 245,
-	PREDEF_SURF_252 = 252, // bindless surfaces
+    PREDEF_SURF_1_OLD = 243,
+    PREDEF_SURF_2_OLD = 244,
+    PREDEF_SURF_3_OLD = 245,
+    PREDEF_SURF_252 = 252, // bindless surfaces
     PREDEF_SURF_253 = 253,  // this is only used internally and should not be set by the user
     PREDEF_SURF_255 = 255
 } PREDEFINED_SURF;
 
 typedef struct
 {
-	int vISAId;  // their id in vISA binary (0-5)
-	PREDEFINED_SURF genId;
-	const char* name;  // name in vISA asm
+    int vISAId;  // their id in vISA binary (0-5)
+    PREDEFINED_SURF genId;
+    const char* name;  // name in vISA asm
 } vISAPreDefinedSurface;
 
 extern vISAPreDefinedSurface vISAPreDefSurf[COMMON_ISA_NUM_PREDEFINED_SURF_VER_3_1];
@@ -1059,7 +1108,7 @@ struct VISA3DSamplerOp
     // Bit 0-4: subOpcode
     // Bit 5  : pixelNullMask
     // Bit 6  : cpsEnable
-    // Bit 7  : non-uniform sampler 
+    // Bit 7  : non-uniform sampler
     static VISA3DSamplerOp extractSamplerOp(uint8_t val)
     {
         VISA3DSamplerOp op;

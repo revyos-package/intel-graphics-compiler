@@ -51,11 +51,9 @@ extern unsigned int getStackCallRegSize(bool reserveStackCallRegs);
 extern void getForbiddenGRFs(vector<unsigned int>& regNum, G4_Kernel& kernel, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned reservedRegNum);
 extern void getCallerSaveGRF(vector<unsigned int>& regNum, G4_Kernel* kernel);
 
-LocalRA::LocalRA(G4_Kernel& k, bool& h, BankConflictPass& b, GlobalRA& g) :
-    kernel(k), builder(*k.fg.builder), highInternalConflict(h),
-    mem(k.fg.builder->mem), bc(b), gra(g)
+LocalRA::LocalRA(BankConflictPass& b, GlobalRA& g) :
+    kernel(g.kernel), builder(g.builder), mem(g.builder.mem), bc(b), gra(g)
 {
-
 }
 
 G4_Align LocalRA::getBankAlignForUniqueAssign(G4_Declare *dcl)
@@ -90,11 +88,12 @@ G4_Align LocalRA::getBankAlignForUniqueAssign(G4_Declare *dcl)
     return Either;
 }
 
+
 // returns true if kernel contains a back edge
 // call/return edge may also be considered as a back edge depending on layout.
 bool LocalRA::hasBackEdge()
 {
-    for (auto curBB : kernel.fg.BBs)
+    for (auto curBB : kernel.fg)
     {
 
         MUST_BE_TRUE(curBB->size() > 0 || curBB->Succs.size() > 1,
@@ -145,7 +144,7 @@ void LocalRA::getRowInfo(int size, int& nrows, int& lastRowSize)
 
 void LocalRA::evenAlign()
 {
-    if (kernel.getOptions()->getTarget() == VISA_3D && kernel.fg.BBs.size() > 2)
+    if (kernel.getOptions()->getTarget() == VISA_3D && kernel.fg.size() > 2)
     {
         if (kernel.getSimdSize() >= 16)
         {
@@ -237,7 +236,7 @@ void LocalRA::preLocalRAAnalysis()
             // and it is unable to assign registers even with spilling.
 #define USABLE_GRFS_WITH_DEBUG_INFO 80
             int maxSendReg = 0;
-            for (auto bb : kernel.fg.BBs)
+            for (auto bb : kernel.fg)
             {
                 for (auto inst : *bb)
                 {
@@ -340,7 +339,7 @@ void LocalRA::trivialAssignRA(bool& needGlobalRA, bool threeSourceCandidate)
 }
 
 // Entry point to local RA
-bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool doSplitLLR)
+bool LocalRA::localRAPass(bool doRoundRobin, bool doSplitLLR)
 {
     bool needGlobalRA = true;
     PhyRegsLocalRA localPregs = *pregs;
@@ -352,8 +351,7 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool 
     printLocalRACandidates();
 #endif
 
-    if (kernel.fg.funcInfoTable.empty() &&
-        !hasBackEdge())
+    if (kernel.fg.funcInfoTable.empty() && !hasBackEdge())
     {
         calculateInputIntervals();
     }
@@ -363,29 +361,12 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool 
 #endif
 
     int totalGRFNum = kernel.getNumRegTotal();
-    for (auto curBB : kernel.fg.BBs)
+    for (BB_LIST_ITER bb_it = kernel.fg.begin(); bb_it != kernel.fg.end(); ++bb_it)
     {
-        PhyRegsManager pregManager(localPregs, doBankConflictReduction);
+        PhyRegsManager pregManager(localPregs, doBCR);
         std::vector<LocalLiveRange*> liveIntervals;
-
+        G4_BB* curBB = (*bb_it);
         PhyRegSummary* summary = new (mem)PhyRegSummary(totalGRFNum);
-
-#ifdef FOR_DEBUG
-        // c:\> set BBEX = "1;2;3;4;5;6;7;" // skip local ra for basic blocks 1-7
-        char* envvar = getenv("BBEX");
-        char id[10];
-        id[0] = ';';
-        char* s = (char*)&id;
-        s++;
-        itoa(curBB->getId(), s, 10);
-        strcat(s, ";");
-
-        if (envvar && strstr(envvar, (const char*)&id) != NULL)
-        {
-            cout << "Skipping local RA for bb id " << curBB->getId() << std::endl;
-            continue;
-        }
-#endif
 
         calculateLiveIntervals(curBB, liveIntervals);
 
@@ -395,7 +376,7 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool 
 
         LinearScan ra(gra, liveIntervals, inputIntervals, pregManager,
                       localPregs, mem, summary, numRegLRA, globalLRSize,
-                      doRoundRobin, doBankConflictReduction,
+                      doRoundRobin, doBCR,
                       highInternalConflict, doSplitLLR, kernel.getSimdSize());
         ra.run(curBB, builder, LLRUseMap);
 
@@ -442,7 +423,7 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool 
             twoBanksAssign = highInternalConflict;
         }
 
-        needGlobalRA = assignUniqueRegisters(doBankConflictReduction, twoBanksAssign);
+        needGlobalRA = assignUniqueRegisters(doBCR, twoBanksAssign);
     }
 
     if (needGlobalRA && doRoundRobin)
@@ -461,12 +442,14 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doBankConflictReduction, bool 
     return needGlobalRA;
 }
 
-bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
+bool LocalRA::localRA()
 {
     if (builder.getOption(vISA_RATrace))
     {
         std::cout << "--local RA--\n";
     }
+
+    bool doRoundRobin = builder.getOption(vISA_LocalRARoundRobin);
 
     int numGRF = kernel.getNumRegTotal();
     PhyRegsLocalRA phyRegs(numGRF);
@@ -477,7 +460,7 @@ bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
     bool needGlobalRA = true;
 
     doSplitLLR = (builder.getOption(vISA_SpiltLLR) &&
-        kernel.fg.BBs.size() == 1 &&
+        kernel.fg.size() == 1 &&
         kernel.getOptions()->getTarget() == VISA_3D);
 
     preLocalRAAnalysis();
@@ -486,7 +469,7 @@ bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
 
     if (builder.getOption(vISA_LocalBankConflictReduction) && builder.hasBankCollision())
     {
-        reduceBCInRR = bc.setupBankConflictsForKernel(kernel, doRoundRobin, reduceBCInTAandFF, numRegLRA, highInternalConflict);
+        reduceBCInRR = bc.setupBankConflictsForKernel(doRoundRobin, reduceBCInTAandFF, numRegLRA, highInternalConflict);
     }
 
     if (!kernel.fg.getHasStackCalls() && !kernel.fg.getIsStackCallFunc())
@@ -503,10 +486,9 @@ bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
         doRoundRobin = countLiveIntervals();
     }
 
-    if ((!doRoundRobin && reduceBCInTAandFF) ||
-        (doRoundRobin && reduceBCInRR))  //To avoid the scheduling issue for send
+    if ((!doRoundRobin && reduceBCInTAandFF) || (doRoundRobin && reduceBCInRR))  //To avoid the scheduling issue for send
     {
-        doBankConflict = true;
+        doBCR = true;
     }
 
     // Local RA passes:
@@ -517,9 +499,9 @@ bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
     {
         if (builder.getOption(vISA_RATrace))
         {
-            std::cout << "\t--round-robin " << (doBankConflict ? "BCR " : "") << "RA\n";
+            std::cout << "\t--round-robin " << (doBCR ? "BCR " : "") << "RA\n";
         }
-        needGlobalRA = localRAPass(true, doBankConflict, false);
+        needGlobalRA = localRAPass(true, false);
         if (needGlobalRA == true)
         {
             doRoundRobin = false;
@@ -530,36 +512,22 @@ bool LocalRA::localRA(bool& doRoundRobin, bool& doBankConflict)
     {
         if (builder.getOption(vISA_RATrace))
         {
-            std::cout << "\t--first-fit " << (doBankConflict ? "BCR " : "") << "RA\n";
+            std::cout << "\t--first-fit " << (doBCR ? "BCR " : "") << "RA\n";
         }
         globalLRSize = 0;
         evenAlign();
-        needGlobalRA = localRAPass(false, doBankConflict, doSplitLLR);
+        needGlobalRA = localRAPass(false, doSplitLLR);
     }
 
     if (needGlobalRA == false)
     {
         if (doRoundRobin)
         {
-            if (doBankConflict)
-            {
-                kernel.setRAType(RA_Type::LOCAL_ROUND_ROBIN_BC_RA);
-            }
-            else
-            {
-                kernel.setRAType(RA_Type::LOCAL_ROUND_ROBIN_RA);
-            }
+            kernel.setRAType(doBCR ? RA_Type::LOCAL_ROUND_ROBIN_BC_RA : RA_Type::LOCAL_ROUND_ROBIN_RA);
         }
         else
         {
-            if (doBankConflict)
-            {
-                kernel.setRAType(RA_Type::LOCAL_FIRST_FIT_BC_RA);
-            }
-            else
-            {
-                kernel.setRAType(RA_Type::LOCAL_FIRST_FIT_RA);
-            }
+            kernel.setRAType(doBCR ? RA_Type::LOCAL_FIRST_FIT_BC_RA : RA_Type::LOCAL_FIRST_FIT_RA);
         }
     }
 
@@ -583,17 +551,15 @@ void LocalRA::resetMasks()
 
 void LocalRA::blockOutputPhyRegs()
 {
-    for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin(), end = kernel.Declares.end();
-        dcl_it != end;
-        dcl_it++)
+    for (auto dcl : kernel.Declares)
     {
-        if ((*dcl_it)->isOutput() &&
-            (*dcl_it)->isInput())
+        if (dcl->isOutput() &&
+            dcl->isInput())
         {
             // The live-range may never be referenced in the CFG so we need
             // this special pass to block physical registers corresponding
             // to those declares. This may be true for FC.
-            pregs->markPhyRegs(*dcl_it);
+            pregs->markPhyRegs(dcl);
         }
     }
 }
@@ -642,8 +608,8 @@ void LocalRA::removeUnrequiredLifetimeOps()
     // pseudo_kills/lifetime.end instructions. Remove
     // instructions that have no other useful instruction.
 
-    for (BB_LIST_ITER bb_it = kernel.fg.BBs.begin();
-        bb_it != kernel.fg.BBs.end();
+    for (BB_LIST_ITER bb_it = kernel.fg.begin();
+        bb_it != kernel.fg.end();
         bb_it++)
     {
         G4_BB* bb = (*bb_it);
@@ -747,8 +713,8 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
                 if (kernel.getOption(vISA_GenerateDebugInfo))
                 {
                     uint32_t start = 0, end = 0;
-                    for (auto rit = kernel.fg.BBs.rbegin(), rend = kernel.fg.BBs.rend();
-                        rit != rend;
+                    for (auto rit = kernel.fg.rbegin();
+                        rit != kernel.fg.rend();
                         rit++)
                     {
                         G4_BB* bb = (*rit);
@@ -759,7 +725,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
                             break;
                         }
                     }
-                    updateDebugInfo(kernel, dcl, start, end, kernel.fg.mem);
+                    updateDebugInfo(kernel, dcl, start, end);
                 }
             }
             else
@@ -776,7 +742,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
         // in all basic blocks.
         PhyRegsManager phyRegMgr(*pregs, twoBanksRA);
 
-        for (auto bb : kernel.fg.BBs)
+        for (auto bb : kernel.fg)
         {
             PhyRegSummary* summary = kernel.fg.getBBLRASummary(bb);
             if (summary != NULL)
@@ -887,8 +853,8 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
             if (kernel.getOption(vISA_GenerateDebugInfo))
             {
                 uint32_t start = 0, end = 0;
-                for (auto rit = kernel.fg.BBs.rbegin(), rend = kernel.fg.BBs.rend();
-                    rit != rend;
+                for (auto rit = kernel.fg.rbegin();
+                    rit != kernel.fg.rend();
                     rit++)
                 {
                     G4_BB* bb = (*rit);
@@ -902,7 +868,16 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
 
                 for (auto dcl : unallocatedRanges)
                 {
-                    updateDebugInfo(kernel, dcl, start, end, kernel.fg.mem);
+                    updateDebugInfo(kernel, dcl, start);
+                }
+
+                // unallocatedRanges doesnt contain input dcls
+                for (auto dcl : kernel.Declares)
+                {
+                    if (dcl->isInput())
+                    {
+                        updateDebugInfo(kernel, dcl, start);
+                    }
                 }
             }
         }
@@ -934,7 +909,7 @@ void GlobalRA::removeUnreferencedDcls()
         }
     }
 
-    auto isUnrefDcl = [this](G4_Declare* dcl) 
+    auto isUnrefDcl = [this](G4_Declare* dcl)
     {
         return (dcl->getRegFile() == G4_GRF || dcl->getRegFile() == G4_INPUT) &&
             getNumRefs(dcl) == 0 &&
@@ -951,12 +926,8 @@ void GlobalRA::removeUnreferencedDcls()
 bool LocalRA::unassignedRangeFound()
 {
     bool unassignedRangeFound = false;
-    for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin(), end = kernel.Declares.end();
-        dcl_it != end;
-        dcl_it++)
+    for (auto dcl : kernel.Declares)
     {
-        G4_Declare* dcl = (*dcl_it);
-
         if (dcl->getAliasDeclare() == NULL &&
             dcl->getRegFile() == G4_GRF &&
             dcl->getRegVar()->isPhyRegAssigned() == false)
@@ -986,11 +957,9 @@ void LocalRA::localRAOptReport()
 {
     unsigned int totalRanges = 0, localRanges = 0;
 
-    for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin(), end = kernel.Declares.end();
-        dcl_it != end;
-        dcl_it++)
+    for (auto dcl : kernel.Declares)
     {
-        auto dcl_it_lr = gra.getLocalLR(*dcl_it);
+        auto dcl_it_lr = gra.getLocalLR(dcl);
         if (dcl_it_lr &&
             dcl_it_lr->isLiveRangeLocal() &&
             dcl_it_lr->isGRFRegAssigned())
@@ -998,9 +967,9 @@ void LocalRA::localRAOptReport()
             localRanges++;
         }
 
-        if (((*dcl_it)->getRegFile() == G4_GRF ||
-            (*dcl_it)->getRegFile() == G4_INPUT) &&
-            (*dcl_it)->getAliasDeclare() == NULL)
+        if ((dcl->getRegFile() == G4_GRF ||
+            dcl->getRegFile() == G4_INPUT) &&
+            dcl->getAliasDeclare() == NULL)
         {
             totalRanges++;
         }
@@ -1109,23 +1078,19 @@ void LocalRA::undoLocalRAAssignments(bool clearInterval)
     kernel.fg.clearBBLRASummaries();
 }
 
-LocalLiveRange* GlobalRA::GetOrCreateLocalLiveRange(G4_Declare* topdcl, Mem_Manager& mem)
+LocalLiveRange* GlobalRA::GetOrCreateLocalLiveRange(G4_Declare* topdcl)
 {
-    LocalLiveRange* lr;
+    LocalLiveRange* lr = getLocalLR(topdcl);
 
     // Check topdcl of operand and setup a new live range if required
-    if (getLocalLR(topdcl) == NULL)
+    if (!lr)
     {
-        setLocalLR(topdcl, new (mem)LocalLiveRange(builder));
-        getLocalLR(topdcl)->setTopDcl(topdcl);
+        lr = new (builder.mem) LocalLiveRange(builder);
+        setLocalLR(topdcl, lr);
     }
 
-    lr = getLocalLR(topdcl);
-
     MUST_BE_TRUE(lr != NULL, "Local LR could not be created");
-
     return lr;
-
 }
 
 void LocalRA::markReferencesInOpnd(G4_Operand* opnd, bool isEOT, INST_LIST_ITER inst_it,
@@ -1142,7 +1107,7 @@ void LocalRA::markReferencesInOpnd(G4_Operand* opnd, bool isEOT, INST_LIST_ITER 
         {
             // Handle GRF here
             MUST_BE_TRUE(topdcl->getAliasDeclare() == NULL, "Not topdcl");
-            LocalLiveRange* lr = gra.GetOrCreateLocalLiveRange(topdcl, mem);
+            LocalLiveRange* lr = gra.GetOrCreateLocalLiveRange(topdcl);
             lr->recordRef(curBB);
 
             if (doSplitLLR &&
@@ -1203,7 +1168,7 @@ void LocalRA::markReferencesInOpnd(G4_Operand* opnd, bool isEOT, INST_LIST_ITER 
 
         MUST_BE_TRUE(topdcl != NULL, "Top dcl was null for addr exp opnd");
 
-        LocalLiveRange* lr = gra.GetOrCreateLocalLiveRange(topdcl, mem);
+        LocalLiveRange* lr = gra.GetOrCreateLocalLiveRange(topdcl);
         lr->recordRef(curBB);
         lr->markIndirectRef();
 
@@ -1248,7 +1213,7 @@ void LocalRA::markReferencesInInst(INST_LIST_ITER inst_it)
 void LocalRA::setLexicalID()
 {
     unsigned int id = 0;
-    for (auto bb : kernel.fg.BBs)
+    for (auto bb : kernel.fg)
     {
         for (INST_LIST_ITER inst_it = bb->begin(), iend = bb->end();
             inst_it != iend;
@@ -1264,14 +1229,13 @@ void LocalRA::markReferences(unsigned int& numRowsEOT,
     bool& lifetimeOpFound)
 {
     unsigned int id = 0;
-
     // Iterate over all BBs
-    for (auto curBB : kernel.fg.BBs)
-    {       
+    for (BB_LIST_ITER bb_it = kernel.fg.begin(), bb_end = kernel.fg.end(); bb_it != bb_end; ++bb_it)
+    {
+        curBB = (*bb_it);
+
         // Iterate over all insts
-        for (INST_LIST_ITER inst_it = curBB->begin(), iend = curBB->end();
-            inst_it != iend;
-            ++inst_it)
+        for (INST_LIST_ITER inst_it = curBB->begin(), inst_end = curBB->end(); inst_it != inst_end; ++inst_it)
         {
             G4_INST* curInst = (*inst_it);
 
@@ -1312,14 +1276,14 @@ void LocalRA::calculateInputIntervals()
     std::vector<uint32_t> inputRegLastRef;
     inputRegLastRef.resize(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
 
-    for (BB_LIST_RITER bb_it = kernel.fg.BBs.rbegin(), rend = kernel.fg.BBs.rend();
-        bb_it != rend;
+    for (BB_LIST_RITER bb_it = kernel.fg.rbegin();
+        bb_it != kernel.fg.rend();
         bb_it++)
     {
         G4_BB* bb = (*bb_it);
 
-        for (INST_LIST_RITER inst_it = bb->rbegin(), irend = bb->rend();
-            inst_it != irend;
+        for (INST_LIST_RITER inst_it = bb->rbegin();
+            inst_it != bb->rend();
             inst_it++)
         {
             G4_INST* curInst = (*inst_it);
@@ -1368,6 +1332,10 @@ void LocalRA::calculateInputIntervals()
                                 {
                                     inputRegLastRef[idx] = curInstId;
                                     inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId));
+                                    if (kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
+                                    {
+                                        updateDebugInfo(kernel, topdcl, 0, curInst->getCISAOff());
+                                    }
                                 }
                             }
                         }
@@ -1418,6 +1386,10 @@ void LocalRA::calculateInputIntervals()
                                     {
                                         inputRegLastRef[idx] = curInstId;
                                         inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId));
+                                        if (kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
+                                        {
+                                            updateDebugInfo(kernel, topdcl, 0, curInst->getCISAOff());
+                                        }
                                     }
                                 }
                             }
@@ -1483,8 +1455,8 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
     int idx = 0;
     bool brk = false;
 
-    for (INST_LIST_ITER inst_it = bb->begin(), end = bb->end();
-        inst_it != end && !brk;
+    for (INST_LIST_ITER inst_it = bb->begin();
+        inst_it != bb->end() && !brk;
         inst_it++, idx += 2)
     {
         G4_INST* curInst = (*inst_it);
@@ -1730,14 +1702,13 @@ bool LocalRA::countLiveIntervals()
             (curDclLR = gra.getLocalLR(curDcl)) &&
             curDclLR->isGRFRegAssigned() == false)
         {
-            G4_Declare* dcl = curDcl;
             if (curDclLR->isLiveRangeGlobal())
             {
-                globalRows += dcl->getNumRows();
+                globalRows += curDcl->getNumRows();
             }
             else if (curDclLR->isLiveRangeLocal())
             {
-                localRows += dcl->getNumRows();
+                localRows += curDcl->getNumRows();
             }
         }
     }
@@ -1840,7 +1811,10 @@ unsigned int LocalLiveRange::getSizeInWords()
 void PhyRegsLocalRA::setGRFBusy(int which)
 {
     MUST_BE_TRUE(isGRFAvailable(which), "Invalid register");
-    regBusyVector[which] = 0xffff;
+
+    // all 1 word mask based on register size
+    uint64_t wordMask = (1ULL << (getGRFSize() / 2)) - 1;
+    regBusyVector[which] = (uint32_t) wordMask;
 
     if (twoBanksRA)
     {
@@ -2279,7 +2253,7 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             found = true;
         }
     }
-    else if (subalign == Eight_Word || 
+    else if (subalign == Eight_Word ||
                 subalign == Four_Word)
     {
         for (int j = 0; j < (NUM_WORDS_PER_GRF - size + 1) && found == false; j += 4)
@@ -2839,12 +2813,12 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     G4_INST* last_use_inst = (*lastUseIt);
 
                                     G4_Declare* splitDcl = NULL;
-                                    char* splitDclName = builder.getNameString(builder.mem, 16, "split_%s", oldDcl->getName());
+                                    const char* splitDclName = builder.getNameString(builder.mem, 16, "split_%s", oldDcl->getName());
                                     splitDcl = builder.createDeclareNoLookup(splitDclName, G4_GRF, oldDcl->getNumElems(), oldDcl->getNumRows(), oldDcl->getElemType());
                                     splitDcl->setAlign(oldDcl->getAlign());
                                     splitDcl->setSubRegAlign(oldDcl->getSubRegAlign());
 
-                                    LocalLiveRange* splitLR = gra.GetOrCreateLocalLiveRange(splitDcl, builder.mem);
+                                    LocalLiveRange* splitLR = gra.GetOrCreateLocalLiveRange(splitDcl);
                                     splitLR->markSplit();
 
                                     INST_LIST_ITER iter = lastUseIt;
@@ -2876,13 +2850,13 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                         bb->insert(iter, splitInst2);
                                     }
 
-                                    char* newDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldDcl->getName());
+                                    const char* newDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldDcl->getName());
                                     newDcl = builder.createDeclareNoLookup(newDclName, G4_GRF, oldDcl->getNumElems(), oldDcl->getNumRows(), oldDcl->getElemType());
                                     newDcl->setAlign(oldDcl->getAlign());
                                     newDcl->setSubRegAlign(oldDcl->getSubRegAlign());
 
                                     unsigned int oldRefs = gra.getNumRefs(oldDcl);
-                                    LocalLiveRange* newLR = gra.GetOrCreateLocalLiveRange(newDcl, builder.mem);
+                                    LocalLiveRange* newLR = gra.GetOrCreateLocalLiveRange(newDcl);
 
                                     iter = useIt;
 
@@ -2917,7 +2891,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     G4_Declare *aliasOldSrcDcl = oldSrcDcl->getAliasDeclare();
                                     if (aliasOldSrcDcl != NULL)
                                     {
-                                        char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
+                                        const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
                                         newSrcDcl->setAlign(oldSrcDcl->getAlign());
                                         newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
@@ -2932,7 +2906,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     while (aliasOldSrcDcl && aliasOldSrcDcl != oldDcl)
                                     {
                                         oldSrcDcl = aliasOldSrcDcl;
-                                        char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
+                                        const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
                                         newSrcDcl->setAlign(oldSrcDcl->getAlign());
                                         newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
@@ -2952,7 +2926,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     G4_Declare *aliasOldSrcDcl = oldSrcDcl->getAliasDeclare();
                                     if (aliasOldSrcDcl != NULL)
                                     {
-                                        char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
+                                        const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
                                         newSrcDcl->setAlign(oldSrcDcl->getAlign());
                                         newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
@@ -2967,7 +2941,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     while (aliasOldSrcDcl && aliasOldSrcDcl != oldDcl)
                                     {
                                         oldSrcDcl = aliasOldSrcDcl;
-                                        char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
+                                        const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
                                         newSrcDcl->setAlign(oldSrcDcl->getAlign());
                                         newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());

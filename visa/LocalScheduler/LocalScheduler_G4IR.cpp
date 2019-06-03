@@ -41,11 +41,11 @@ using namespace vISA;
 void LocalScheduler::localScheduling()
 {
     DEBUG_VERBOSE("[Scheduling]: Starting...");
-    BB_LIST_ITER ib(fg.BBs.begin()), bend(fg.BBs.end());
+    BB_LIST_ITER ib(fg.begin()), bend(fg.end());
     MUST_BE_TRUE(ib != bend, ERROR_SCHEDULER);
 
-    CM_BB_INFO* bbInfo = (CM_BB_INFO *)mem.alloc(fg.BBs.size() * sizeof(CM_BB_INFO));
-    memset(bbInfo, 0, fg.BBs.size() * sizeof(CM_BB_INFO));
+    CM_BB_INFO* bbInfo = (CM_BB_INFO *)mem.alloc(fg.size() * sizeof(CM_BB_INFO));
+    memset(bbInfo, 0, fg.size() * sizeof(CM_BB_INFO));
     int i = 0;
 
     const Options *m_options = fg.builder->getOptions();
@@ -403,12 +403,17 @@ void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
             int baseBucket = GRF_BUCKET;
             int endingBucket = baseBucket + opnd->getLinearizedEnd() / divisor;
             MUST_BE_TRUE(endingBucket >= startingBucket, "Ending bucket less than starting bucket");
+            Mask mask = getMaskForOp(opnd, opnd_num, inst->getExecSize());
             int numBuckets = endingBucket - startingBucket + 1;
             for (int j = startingBucket;
                 j < (startingBucket + numBuckets); j++) {
-                Mask mask = getMaskForOp(opnd, opnd_num, inst->getExecSize());
                 BDvec.push_back(BucketDescr(j, mask, opnd_num));
             }
+            // If this operand is a non-trivial special ACC operand, add
+            // it to the other ARF bucket for tacking extra dependencies.
+            G4_AccRegSel Acc = opnd->getAccRegSel();
+            if (Acc != G4_AccRegSel::ACC_UNDEFINED && Acc != G4_AccRegSel::NOACC)
+                BDvec.push_back(BucketDescr(OTHER_ARF_BUCKET, mask, opnd_num));
         } else {
             Mask mask = getMaskForOp(opnd, opnd_num, inst->getExecSize());
             BDvec.push_back(BucketDescr(startingBucket, mask, opnd_num));
@@ -721,7 +726,7 @@ static DepType getDepForOpnd(Gen4_Operand_Number cur,
 // testing dependencies the DAG, we only need to look at buckets
 // that current inst may fall into. This saves us from checking
 // dependencies with all insts in live set. After analyzing
-// dependencies and creating necessary edges, current inst 
+// dependencies and creating necessary edges, current inst
 // is inserted in all buckets it touches.
 DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
     : mem(m)
@@ -979,7 +984,7 @@ void DDD::moveDeps(Node *fromNode, Node *toNode)
 // firstNode->...->secondNode
 // That would result in a dependence cycle after pairing.
 // Note that firstNode->secondNode is ok if there are no instructions in between
-static bool canAvoidDepCycles(Node *firstNode, Node *secondNode, bool isFirstLevel) 
+static bool canAvoidDepCycles(Node *firstNode, Node *secondNode, bool isFirstLevel)
 {
     // assumption is firstNode is close to secondNode so this will be fast
     // and we don't need to cache intermediate nodes
@@ -1012,7 +1017,7 @@ static bool canAvoidDepCycles(Node *firstNode, Node *secondNode, bool isFirstLev
 static bool isTypedWritePart(G4_INST* inst, int partN) {
     return inst->isSend()
         && inst->getExecSize() == 8
-        && inst->getMsgDesc()->getMessageType() == DC1_TYPED_SURFACE_WRITE
+        && inst->getMsgDesc()->isHdcTypedSurfaceWrite()
         && inst->getMaskOffset() == partN * 8;
 };
 
@@ -1039,7 +1044,7 @@ static bool isLeadingURBWrite(G4_INST* inst)
         DescData desc;
         desc.value = inst->getMsgDesc()->getDesc();
         // ToDo: add support for per-slot offset and channel mask later if necessary
-        if (desc.layout.opcode == URB_SIMD8_WRITE && !desc.layout.perSlotPresent && 
+        if (desc.layout.opcode == URB_SIMD8_WRITE && !desc.layout.perSlotPresent &&
             !desc.layout.maskPresent && desc.layout.offset % 4 == 0)
         {
             return true;
@@ -1117,13 +1122,13 @@ void DDD::pairTypedWriteOrURBWriteNodes(G4_BB *bb) {
         else if (leadingURB)
         {
             if (inst->isSend() && inst->getMsgDesc()->getFuncId() == SFID::URB)
-            { 
+            {
                 if (canFuseURB(inst, (*leadingURB->getInstructions()).front()))
                 {
                     instrPairs.emplace_back(DDD::instrPair_t(leadingURB, node));
                     leadingURB = nullptr;
                 }
-                else 
+                else
                 {
                     leadingURB = isLeadingURBWrite(inst) ? node : nullptr;
                 }
@@ -1131,7 +1136,7 @@ void DDD::pairTypedWriteOrURBWriteNodes(G4_BB *bb) {
             else
             {
                 // stop if this instruction depends on leadingURB
-                // it's a conservative way to avoid cycles in the DAG when 
+                // it's a conservative way to avoid cycles in the DAG when
                 // fusing two URB sends (e.g., second URB's payload share register with first)
                 Node *leadingURBNode = leadingURB;
                 Node *curNode = node;
@@ -1164,7 +1169,7 @@ void DDD::pairTypedWriteOrURBWriteNodes(G4_BB *bb) {
             // B. We add the second instruction to the first node.
             assert(firstNode->getInstructions()->size() == 1);
             firstNode->addPairInstr(*secondNode->getInstructions()->begin());
-            if (!kernel->fg.builder->getOption(vISA_NoAtomicSend) && 
+            if (!kernel->fg.builder->getOption(vISA_NoAtomicSend) &&
                 firstInstr->isSend() && firstInstr->getMsgDesc()->getFuncId() == SFID::URB)
             {
                 firstInstr->setOptionOn(InstOpt_Atomic);
@@ -1435,7 +1440,7 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
         dumpNodes(schedule->getBB());
     }
 
-    // All nodes in root set have no dependency 
+    // All nodes in root set have no dependency
     // so they can be immediately scheduled,
     // and hence are added to readyList.
     std::priority_queue<Node *, std::vector<Node *>, criticalCmp> readyList;
@@ -1555,7 +1560,7 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
                     if (scheduled != extScheduled
                         && scheduled->writesToSubreg() == lastReg
                         && (readyList.empty() || attempts >= WAW_SUBREG_ATTEMPTS)) {
-                        // Re-insert the scheduled node into the readyList 
+                        // Re-insert the scheduled node into the readyList
                         readyList.push(scheduled);
                         // Get the highest priority node
                         scheduled = readyList.top();
@@ -1630,7 +1635,7 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
 // no dependencies, second instruction need not wait
 // for completion of execution of first instruction.
 // So modeled latency is lower and equal to latency
-// of first instruction (which is initialized to either 
+// of first instruction (which is initialized to either
 // 1 or 2 depending on compression attribute).
 uint32_t DDD::getEdgeLatency_old(Node *node, DepType depT)
 {
@@ -1675,7 +1680,7 @@ uint32_t DDD::getEdgeLatency_old(Node *node, DepType depT)
 
 uint32_t DDD::getEdgeLatency(Node *node, DepType depT) {
     uint32_t latency = getEdgeLatency_old(node, depT);
-    if (useMTLatencies) 
+    if (useMTLatencies)
     {
         float scale = float(HWthreadsPerEU) / getBuilder()->getCoIssueUints();
         latency = int(latency / scale);
@@ -1698,7 +1703,7 @@ Node::Node(uint32_t id, G4_INST* inst, Edge_Allocator& depEdgeAllocator,
 
 void LocalScheduler::EmitNode(Node *node) {
     for (G4_INST *inst : *node->getInstructions()) {
-        if (inst->isSend()) 
+        if (inst->isSend())
         {
             inst->asSendInst()->emit_send(cerr);
         } else {

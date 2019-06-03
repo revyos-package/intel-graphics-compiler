@@ -181,9 +181,10 @@ DECLARE_OPCODE(GenISA_RTDualBlendSource,            GenISAIntrinsic,      llvm_d
 DECLARE_OPCODE(GenISA_simdLaneId,                   GenISAIntrinsic,      llvm_simdLaneId,            false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_simdSize,                     GenISAIntrinsic,      llvm_simdSize,              false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_simdShuffleDown,              GenISAIntrinsic,      llvm_simdShuffleDown,       false,  false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_simdBlockRead,                GenISAIntrinsic,      llvm_simdBlockRead,         false, false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_simdBlockReadBindless,        GenISAIntrinsic,      llvm_simdBlockReadBindless, false, false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_simdBlockRead,                GenISAIntrinsic,      llvm_simdBlockRead,         false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_simdBlockReadBindless,        GenISAIntrinsic,      llvm_simdBlockReadBindless, false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_simdBlockWrite,               GenISAIntrinsic,      llvm_simdBlockWrite,        false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_simdBlockWriteBindless,       GenISAIntrinsic,      llvm_simdBlockWriteBindless,false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_simdMediaBlockRead,           GenISAIntrinsic,      llvm_simdMediaBlockRead,    false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_simdMediaBlockWrite,          GenISAIntrinsic,      llvm_simdMediaBlockWrite,   false,  false,  false,  false, false,  false, false  )
 
@@ -204,15 +205,15 @@ DECLARE_OPCODE(GenISA_uavSerializeAll,  GenISAIntrinsic,     llvm_uavSerializeAl
 
 // Message Phases manipulation
 DECLARE_OPCODE(GenISA_createMessagePhases,      GenISAIntrinsic,      llvm_createMessagePhases, false,  false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_setMessagePhaseX,         GenISAIntrinsic,      llvm_setMessagePhaseX,  	false,  false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_setMessagePhaseXV,        GenISAIntrinsic,      llvm_setMessagePhaseXV,  	false,  false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_getMessagePhaseX,         GenISAIntrinsic,      llvm_getMessagePhaseX,  	false,  false,  false,  false, false,  false, false  )
-DECLARE_OPCODE(GenISA_getMessagePhaseXV,        GenISAIntrinsic,      llvm_getMessagePhaseXV,  	false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_setMessagePhaseX,         GenISAIntrinsic,      llvm_setMessagePhaseX,      false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_setMessagePhaseXV,        GenISAIntrinsic,      llvm_setMessagePhaseXV,      false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_getMessagePhaseX,         GenISAIntrinsic,      llvm_getMessagePhaseX,      false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_getMessagePhaseXV,        GenISAIntrinsic,      llvm_getMessagePhaseXV,      false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_getMessagePhase,          GenISAIntrinsic,      llvm_getMessagePhase,     false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_setMessagePhase,          GenISAIntrinsic,      llvm_setMessagePhase,     false,  false,  false,  false, false,  false, false  )
 
 // VME intrinsics
-DECLARE_OPCODE(GenISA_vmeSendIME,               GenISAIntrinsic,      llvm_vmeSendIME,        	false,  false,  false,  false, false,  false, false  )
+DECLARE_OPCODE(GenISA_vmeSendIME,               GenISAIntrinsic,      llvm_vmeSendIME,            false,  false,  false,  false, false,  false, false  )
 DECLARE_OPCODE(GenISA_vmeSendFBR,               GenISAIntrinsic,      llvm_vmeSendFBR,          false,  false,  false,  false, false,  false, false  )
 
 // Correctly rounded intrinsics

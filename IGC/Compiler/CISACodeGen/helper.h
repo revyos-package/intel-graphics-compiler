@@ -55,7 +55,6 @@ typedef unsigned int uint;
 #define SIZE_WORD   2
 #define SIZE_DWORD  4
 #define SIZE_OWORD 16
-#define SIZE_GRF   (IGC::getGRFSize())
 
 enum ADDRESS_SPACE : unsigned int;
 
@@ -131,6 +130,7 @@ bool IsReadOnlyLoadDirectCB(llvm::Instruction *pLLVMInst, uint& cbId, llvm::Valu
 
 int findSampleInstructionTextureIdx(llvm::Instruction* inst);
 llvm::Value* getTextureIndexArgBasedOnOpcode(llvm::Instruction* inst);
+llvm::Value* GetBufferOperand(llvm::Instruction* inst);
 
 llvm::LoadInst* cloneLoad(llvm::LoadInst *Orig, llvm::Value *Ptr);
 llvm::StoreInst* cloneStore(llvm::StoreInst *Orig, llvm::Value *Val, llvm::Value *Ptr);
@@ -139,6 +139,7 @@ llvm::Value* CreateLoadRawIntrinsic(llvm::LoadInst *inst, llvm::Instruction* buf
 llvm::Value* CreateStoreRawIntrinsic(llvm::StoreInst *inst, llvm::Instruction* bufPtr, llvm::Value* offsetVal);
 
 void getTextureAndSamplerOperands(llvm::GenIntrinsicInst *pIntr, llvm::Value*& pTextureValue, llvm::Value*& pSamplerValue);
+void ChangePtrTypeInIntrinsic(llvm::GenIntrinsicInst *&pIntr, llvm::Value* oldPtr, llvm::Value* newPtr, bool isExtendedForBindlessPromotion);
 void ChangePtrTypeInIntrinsic(llvm::GenIntrinsicInst *&pIntr, llvm::Value* oldPtr, llvm::Value* newPtr);
 
 llvm::Value* TracePointerSource(llvm::Value* resourcePtr);
@@ -191,14 +192,14 @@ bool isA64Ptr(llvm::PointerType *PT, CodeGenContext* pContext);
 ///       FunctionInfoMetaData must have type UserFunction.
 inline bool isEntryFunc(const IGCMD::MetaDataUtils *pM, const llvm::Function *CF)
 {
-	llvm::Function *F = const_cast<llvm::Function*>(CF);
-	if (F == nullptr || F->empty() ||
-		pM->findFunctionsInfoItem(F) == pM->end_FunctionsInfo())
-		return false;
+    llvm::Function *F = const_cast<llvm::Function*>(CF);
+    if (F == nullptr || F->empty() ||
+        pM->findFunctionsInfoItem(F) == pM->end_FunctionsInfo())
+        return false;
 
-	IGCMD::FunctionInfoMetaDataHandle Info = pM->getFunctionsInfoItem(F);
-	assert(Info->isTypeHasValue() && "FunctionInfoMetaData missing type!");
-	return Info->getType() == FunctionTypeMD::KernelFunction;
+    IGCMD::FunctionInfoMetaDataHandle Info = pM->getFunctionsInfoItem(F);
+    assert(Info->isTypeHasValue() && "FunctionInfoMetaData missing type!");
+    return Info->getType() == FunctionTypeMD::KernelFunction;
 }
 
 // Return a unique entry function.
@@ -284,7 +285,7 @@ inline bool isInstPrecede(
     assert(inst->getParent() == pos->getParent());
     if (inst == pos)
     {
-        return false;
+        return true;
     }
 
     auto II = inst->getParent()->begin();
@@ -300,10 +301,10 @@ bool isNoOpInst(llvm::Instruction* I, CodeGenContext* Ctx);
 // CxtI is the instruction at which V is checked whether
 // it is positive or not. 
 bool valueIsPositive(
-	llvm::Value* V,
-	const llvm::DataLayout *DL,
-	llvm::AssumptionCache *AC = nullptr,
-	llvm::Instruction *CxtI = nullptr);
+    llvm::Value* V,
+    const llvm::DataLayout *DL,
+    llvm::AssumptionCache *AC = nullptr,
+    llvm::Instruction *CxtI = nullptr);
 
 inline float GetThreadOccupancyPerSubslice(SIMDMode simdMode, unsigned threadGroupSize, unsigned hwThreadPerSubslice, unsigned slmSize, unsigned slmSizePerSubSlice)
 {
@@ -364,7 +365,5 @@ inline SIMDMode getLeastSIMDAllowed(unsigned int threadGroupSize, unsigned int h
         return SIMDMode::SIMD32;
     }
 }
-
-unsigned int getGRFSize();
 
 } // namespace IGC

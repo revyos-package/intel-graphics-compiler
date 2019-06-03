@@ -30,7 +30,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "visa_wa.h"
 
-
 namespace IGC
 {
 class CShader;
@@ -131,6 +130,8 @@ class CEncoder
 {
 public:
     void InitEncoder( bool canAbortOnSpill, bool hasStackCall);
+    void InitBuildParams(llvm::SmallVector<const char*, 10> &params);
+    void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall);
     SEncoderState CopyEncoderState();
     void SetEncoderState(SEncoderState &newState);
 
@@ -344,6 +345,7 @@ public:
     void Wait();
 
     VISAKernel* GetVISAKernel() { return vKernel; }
+    VISABuilder* GetVISABuilder() { return vbuilder; }
     void Init();
     void Push();
 
@@ -394,7 +396,10 @@ public:
 
     void DestroyVISABuilder();
 
-    void AddFunctionSymbol(llvm::Function* F, CVariable* fvar);
+    void AddVISASymbol(std::string& symName, CVariable* cvar);
+
+    std::string GetVariableName(CVariable* var);
+    std::string GetDumpFileName(std::string extension);
 
 private:
     // helper functions
@@ -483,8 +488,28 @@ private:
     // save compile time by avoiding retry if the amount of spill is (very) small
     bool AvoidRetryOnSmallSpill() const;
 
-    void CreateFunctionSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
-    void CreateFunctionRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+    void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+    void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+
+    uint32_t getGRFSize() const;
+
+    bool needsSplitting(Common_ISA_Exec_Size ExecSize) const
+    {
+        return ExecSize == EXEC_SIZE_16;
+    }
+
+    unsigned GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
+            Common_ISA_Exec_Size toExecSize,
+            unsigned thePart, CVariable *var) const;
+    
+    std::tuple<CVariable*, uint32_t> splitRawOperand(CVariable* var, bool isFirstHalf, Common_VISA_EMask_Ctrl execMask);
+
+    uint32_t getNumChannels(CVariable* var) const;
+
+    void SaveOption(vISAOptions option, bool val);
+    void SaveOption(vISAOptions option, uint32_t val);
+    void SaveOption(vISAOptions option, const char* val);
+    void SetBuilderOptions(VISABuilder* pbuilder);
 
 protected:
     // encoder states
@@ -494,6 +519,22 @@ protected:
 
     VISA_WA_TABLE m_WaTable;
 
+    enum OpType
+    {
+        ET_BOOL,
+        ET_INT32,
+        ET_CSTR
+    };
+    struct OptionValue
+    {
+        OpType type;
+        bool vBool;
+        uint32_t vInt32;
+        const char* vCstr;
+    };
+    // List of vISA user options
+    std::vector<std::pair<vISAOptions, OptionValue>> m_visaUserOptions;
+
     // Typically IGC just use ones vKernel for every vISA::compile call,
     // in those cases, vKernel and vMainKernel should be the same.
     // Only when using stack-call, vKernel pointer changes every time
@@ -502,8 +543,10 @@ protected:
     VISAKernel*   vKernel;
     VISAKernel*   vMainKernel;
     VISABuilder* vbuilder;
+    VISABuilder* vAsmTextBuilder;
 
     bool m_enableVISAdump;
+    bool m_hasInlineAsm;
     std::vector<VISA_LabelOpnd*> labelMap;
 
     /// Per kernel label counter

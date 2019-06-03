@@ -36,18 +36,18 @@ using namespace vISA;
 
 namespace vISA
 {
-	class SendFusion
-	{
-	private:
+    class SendFusion
+    {
+    private:
         enum {
             // Control if one pair of two sends should be considered for
             // fusion. If their distance (#instructions) is greater than
             // SEND_FUSION_MAX_SPAN, it will not be fused.
             SEND_FUSION_MAX_SPAN = 40,
 
-			// Control how many instructions except send itself need to
-			// be moved in order to move two sends together for fusion.
-			SEND_FUSION_MAX_INST_TOBEMOVED = 4
+            // Control how many instructions except send itself need to
+            // be moved in order to move two sends together for fusion.
+            SEND_FUSION_MAX_INST_TOBEMOVED = 4
         };
 
         FlowGraph* CFG;
@@ -66,26 +66,26 @@ namespace vISA
         // Flag var used within each BB (1 Type_UW).
         G4_INST* FlagDefPerBB;
 
-		// InstToBeSinked[]/InstToBeHoisted[] keeps all instructions
-		// that would be moved in order to keep two sends together
-		// for fusion. Note that the 1st entry is the send instruction
-		// to be moved (so the size has +1).
-		int numToBeSinked;
-		int numToBeHoisted;
-		G4_INST* InstToBeSinked [SEND_FUSION_MAX_INST_TOBEMOVED+1];
-		G4_INST* InstToBeHoisted[SEND_FUSION_MAX_INST_TOBEMOVED+1];
+        // InstToBeSinked[]/InstToBeHoisted[] keeps all instructions
+        // that would be moved in order to keep two sends together
+        // for fusion. Note that the 1st entry is the send instruction
+        // to be moved (so the size has +1).
+        int numToBeSinked;
+        int numToBeHoisted;
+        G4_INST* InstToBeSinked [SEND_FUSION_MAX_INST_TOBEMOVED+1];
+        G4_INST* InstToBeHoisted[SEND_FUSION_MAX_INST_TOBEMOVED+1];
 
-		//
-		// For Both doSink() and doHoist(), all instructions to be moved
-		// are within range (StartIT, EndIT), not including StartIT and EndIT.
-		// All iterators (StartIT, EndIT, InsertBeforePos) remain valid.
-		// 
-		// Note that those iterators are for instructions in CurrBB.
-		void doSink(INST_LIST_ITER StartIT, INST_LIST_ITER EndIT,
-			        INST_LIST_ITER InsertBeforePos);
-		void doHoist(INST_LIST_ITER StartIT, INST_LIST_ITER EndIT,
-			         INST_LIST_ITER InsertBeforePos);
-		
+        //
+        // For Both doSink() and doHoist(), all instructions to be moved
+        // are within range (StartIT, EndIT), not including StartIT and EndIT.
+        // All iterators (StartIT, EndIT, InsertBeforePos) remain valid.
+        //
+        // Note that those iterators are for instructions in CurrBB.
+        void doSink(INST_LIST_ITER StartIT, INST_LIST_ITER EndIT,
+                    INST_LIST_ITER InsertBeforePos);
+        void doHoist(INST_LIST_ITER StartIT, INST_LIST_ITER EndIT,
+                     INST_LIST_ITER InsertBeforePos);
+
 
         // If this optimization does any change to the code, set it to true.
         bool changed;
@@ -132,7 +132,7 @@ namespace vISA
         void simplifyMsg(INST_LIST_ITER SendIter);
         bool isAtomicCandidate(G4_SendMsgDescriptor* msgDesc);
 
-		bool WAce0Read;
+        bool WAce0Read;
 
 
     public:
@@ -143,14 +143,14 @@ namespace vISA
               CurrBB(nullptr),
               DMaskUD(nullptr),
               FlagDefPerBB(nullptr),
-			  WAce0Read(false)
+              WAce0Read(false)
         {
-			WAce0Read = VISA_WA_CHECK(Builder->getPWaTable(), Wa_1406950495) ;
+            WAce0Read = VISA_WA_CHECK(Builder->getPWaTable(), Wa_1406950495) ;
             initDMaskModInfo();
         }
 
         bool run(G4_BB* BB);
-	};
+    };
 }
 
 // Return the Function Control that is the original except SIMD Mode
@@ -160,7 +160,7 @@ uint32_t SendFusion::getFuncCtrlWithSimd16(G4_SendMsgDescriptor* Desc)
 
     uint32_t FC = Desc->getFuncCtrl();
     auto funcID = Desc->getFuncId();
-    uint32_t msgType = Desc->getMessageType();
+    uint32_t msgType = Desc->getHdcMessageType();
     bool unsupported = false;
     if (funcID == SFID::DP_DC)
     {
@@ -234,7 +234,7 @@ bool SendFusion::isAtomicCandidate(G4_SendMsgDescriptor* msgDesc)
     }
 
     // Right now, the following atomic messages are DW per simd-lane.
-    uint16_t msgType = msgDesc->getMessageType();
+    uint16_t msgType = msgDesc->getHdcMessageType();
     bool intAtomic = true; // true: int; false : float
     switch (msgType) {
     default:
@@ -247,7 +247,7 @@ bool SendFusion::isAtomicCandidate(G4_SendMsgDescriptor* msgDesc)
     }
 
     // Had right atomic type, now check AtomicOp
-    uint16_t atomicOp = msgDesc->getAtomicOp();
+    uint16_t atomicOp = msgDesc->getHdcAtomicOp();
     if (intAtomic)
     {
         switch (atomicOp)
@@ -346,18 +346,18 @@ bool SendFusion::simplifyAndCheckCandidate(INST_LIST_ITER Iter)
         return false;
     }
 
-	// If exec_size=1|2|4, make sure that it is noMask and its
-	// data payload/response is 1 GRF.
-	uint16_t msgLen = msgDesc->MessageLength();
-	uint16_t rspLen = msgDesc->ResponseLength();
-	uint16_t extMsgLen = msgDesc->extMessageLength();
-	if (I->getExecSize() < 8 &&
-		!(I->isWriteEnableInst() &&
-		  ((msgDesc->isDataPortWrite() && (msgLen + extMsgLen) == 2) ||
-		   (msgDesc->isDataPortRead() && msgLen == 1 && rspLen == 1))))
-	{
-		return false;
-	}
+    // If exec_size=1|2|4, make sure that it is noMask and its
+    // data payload/response is 1 GRF.
+    uint16_t msgLen = msgDesc->MessageLength();
+    uint16_t rspLen = msgDesc->ResponseLength();
+    uint16_t extMsgLen = msgDesc->extMessageLength();
+    if (I->getExecSize() < 8 &&
+        !(I->isWriteEnableInst() &&
+          ((msgDesc->isDataPortWrite() && (msgLen + extMsgLen) == 2) ||
+           (msgDesc->isDataPortRead() && msgLen == 1 && rspLen == 1))))
+    {
+        return false;
+    }
 
     // For write messages:
     //   unless we can prove there are no aliases of two sends's address payload,
@@ -422,7 +422,7 @@ bool SendFusion::simplifyAndCheckCandidate(INST_LIST_ITER Iter)
     G4_DstRegRegion* dst = I->getDst();
     G4_SrcRegRegion* src0 = I->getSrc(0)->asSrcRegRegion();
     G4_SrcRegRegion* src1 = I->isSplitSend() ? I->getSrc(1)->asSrcRegRegion() : nullptr;
-    if ((dst && dst->isIndirect()) || 
+    if ((dst && dst->isIndirect()) ||
         (src0 && src0->isIndirect()) ||
         (src1 && src1->isIndirect()))
     {
@@ -445,11 +445,11 @@ bool SendFusion::simplifyAndCheckCandidate(INST_LIST_ITER Iter)
         return true;
     }
 
+    // only enable this on a subset of the HDC messages
     auto funcID = msgDesc->getFuncId();
-    uint32_t msgType = msgDesc->getMessageType();
-    if (funcID == SFID::DP_DC)
-    {
-        switch(msgType)
+    switch (funcID) {
+    case SFID::DP_DC:
+        switch(msgDesc->getHdcMessageType())
         {
         case DC_DWORD_SCATTERED_READ:
         case DC_DWORD_SCATTERED_WRITE:
@@ -457,19 +457,17 @@ bool SendFusion::simplifyAndCheckCandidate(INST_LIST_ITER Iter)
         case DC_BYTE_SCATTERED_WRITE:
             return true;
         }
-    }
-    else if (funcID == SFID::DP_DC1)
-    {
-        switch (msgType)
+        break;
+    case SFID::DP_DC1:
+        switch(msgDesc->getHdcMessageType())
         {
         case DC1_UNTYPED_SURFACE_READ:
         case DC1_UNTYPED_SURFACE_WRITE:
             return true;
         }
-    }
-    else if (funcID == SFID::DP_DC2)
-    {
-        switch (msgType)
+        break;
+    case SFID::DP_DC2:
+        switch(msgDesc->getHdcMessageType())
         {
         case DC2_BYTE_SCATTERED_READ:
         case DC2_BYTE_SCATTERED_WRITE:
@@ -477,8 +475,11 @@ bool SendFusion::simplifyAndCheckCandidate(INST_LIST_ITER Iter)
         case DC2_UNTYPED_SURFACE_WRITE:
             return true;
         }
+        break;
+    default:
+        break;
     }
-    
+
     return false;
 }
 
@@ -607,7 +608,7 @@ void SendFusion::simplifyMsg(INST_LIST_ITER SendIter)
         }
         else
         {
-            CurrBB->remove(movI); 
+            CurrBB->remove(movI);
         }
     }
 
@@ -631,14 +632,14 @@ bool SendFusion::canFusion(INST_LIST_ITER IT0, INST_LIST_ITER IT1)
         G4_SrcRegRegion* s0 = I0->getSrc(0)->asSrcRegRegion();
         G4_SrcRegRegion* s1 = I1->getSrc(0)->asSrcRegRegion();
         if (s0->compareOperand(s1) != Rel_disjoint)
-        { 
+        {
             return false;
         }
     }
 
     // Here two descriptors should be constant, and we fuse
     // the two sends only if their descriptors are identical.
-    // 
+    //
     // To be able to fuse two sends, the following conditions
     // must be met :
     //
@@ -692,12 +693,12 @@ bool SendFusion::canFusion(INST_LIST_ITER IT0, INST_LIST_ITER IT1)
 bool SendFusion::canMoveOver(
     INST_LIST_ITER StartIT, INST_LIST_ITER EndIT, bool isForward)
 {
-	if (isForward) {
-		numToBeSinked = 0;
-	}
-	else {
-		numToBeHoisted = 0;
-	}
+    if (isForward) {
+        numToBeSinked = 0;
+    }
+    else {
+        numToBeHoisted = 0;
+    }
 
     G4_INST* Inst_first = *StartIT;
     G4_INST* Inst_last = *EndIT;
@@ -715,65 +716,65 @@ bool SendFusion::canMoveOver(
 
     bool movable = true;
     G4_INST* moveInst = (isForward ? Inst_first : Inst_last);
-	G4_INST* destSend = (isForward ? Inst_last  : Inst_first);
+    G4_INST* destSend = (isForward ? Inst_last  : Inst_first);
     INST_LIST_ITER II = (isForward ? StartIT : EndIT);
     INST_LIST_ITER IE = (isForward ? EndIT : StartIT);
 
-	// Note that the send instruction is the 1st entry.
-	int numToBeMoved = 1;
-	G4_INST** toBeMoved = isForward ? InstToBeSinked : InstToBeHoisted;
-	toBeMoved[0] = moveInst;
+    // Note that the send instruction is the 1st entry.
+    int numToBeMoved = 1;
+    G4_INST** toBeMoved = isForward ? InstToBeSinked : InstToBeHoisted;
+    toBeMoved[0] = moveInst;
 
     for (isForward ? ++II : --II;
          II != IE;
          isForward ? ++II : --II)
     {
        G4_INST* tmp = *II;
-	   for (int i = 0; i < numToBeMoved; ++i)
-	   {
+       for (int i = 0; i < numToBeMoved; ++i)
+       {
            // Here check if instToBeMoved and tmp
            // are dependent upon each other no matter
            // if instToBEMoved appears before or after
            // tmp in the BB.
-		   G4_INST *instToBeMoved = toBeMoved[i];
-		   if (instToBeMoved->isWARdep(tmp) ||
-			   instToBeMoved->isWAWdep(tmp) ||
-			   instToBeMoved->isRAWdep(tmp))
-		   {
-			   movable = false;
-		   }
+           G4_INST *instToBeMoved = toBeMoved[i];
+           if (instToBeMoved->isWARdep(tmp) ||
+               instToBeMoved->isWAWdep(tmp) ||
+               instToBeMoved->isRAWdep(tmp))
+           {
+               movable = false;
+           }
 
-		   if (!movable)
-		   {
-			   if (numToBeMoved <= SEND_FUSION_MAX_INST_TOBEMOVED &&
-				   !tmp->isWARdep(destSend) &&
-				   !tmp->isWAWdep(destSend) &&
-				   !tmp->isRAWdep(destSend))
-			   {
-				   movable = true;
-				   toBeMoved[numToBeMoved] = tmp;
-				   ++numToBeMoved;
-			   }
-			   break;
-		   }
-	   }
-	   if (!movable)
-	   {
-		   break;
-	   }
+           if (!movable)
+           {
+               if (numToBeMoved <= SEND_FUSION_MAX_INST_TOBEMOVED &&
+                   !tmp->isWARdep(destSend) &&
+                   !tmp->isWAWdep(destSend) &&
+                   !tmp->isRAWdep(destSend))
+               {
+                   movable = true;
+                   toBeMoved[numToBeMoved] = tmp;
+                   ++numToBeMoved;
+               }
+               break;
+           }
+       }
+       if (!movable)
+       {
+           break;
+       }
     }
 
-	if (movable)
-	{
-		if (isForward)
-		{
-			numToBeSinked = numToBeMoved;
-		}
-		else
-		{
-			numToBeHoisted = numToBeMoved;
-		}
-	}
+    if (movable)
+    {
+        if (isForward)
+        {
+            numToBeSinked = numToBeMoved;
+        }
+        else
+        {
+            numToBeHoisted = numToBeMoved;
+        }
+    }
     return movable;
 }
 
@@ -782,39 +783,39 @@ bool SendFusion::canMoveOver(
 // Note that StartIT, EndIT, and InsertBeforePos remain valid after
 // invoking this function.
 void SendFusion::doSink(
-	INST_LIST_ITER StartIT, INST_LIST_ITER EndIT, INST_LIST_ITER InsertBeforePos)
+    INST_LIST_ITER StartIT, INST_LIST_ITER EndIT, INST_LIST_ITER InsertBeforePos)
 {
-	if (numToBeSinked > 1)
-	{
-		int j = 1;
-		G4_INST *Inst = InstToBeSinked[j];
-		for (INST_LIST_ITER IT = StartIT; IT != EndIT; )
-		{
-			G4_INST *tmp = *IT;
-			if (tmp == Inst) {
-				INST_LIST_ITER tmpIT = IT;
-				++IT;
-				CurrBB->erase(tmpIT);
+    if (numToBeSinked > 1)
+    {
+        int j = 1;
+        G4_INST *Inst = InstToBeSinked[j];
+        for (INST_LIST_ITER IT = StartIT; IT != EndIT; )
+        {
+            G4_INST *tmp = *IT;
+            if (tmp == Inst) {
+                INST_LIST_ITER tmpIT = IT;
+                ++IT;
+                CurrBB->erase(tmpIT);
 
-				++j;
-				if (j == numToBeSinked)
-				{
-					break;
-				}
-				Inst = InstToBeSinked[j];
-			}
-			else {
-				++IT;
-			}
-		}
-		assert(j == numToBeSinked &&
-			"Internal Error(SendFusion) : Instructions not in the list!");
+                ++j;
+                if (j == numToBeSinked)
+                {
+                    break;
+                }
+                Inst = InstToBeSinked[j];
+            }
+            else {
+                ++IT;
+            }
+        }
+        assert(j == numToBeSinked &&
+            "Internal Error(SendFusion) : Instructions not in the list!");
 
-		for (int i = 1; i < numToBeSinked; ++i)
-		{
-			CurrBB->insert(InsertBeforePos, InstToBeSinked[i]);
-		}
-	}
+        for (int i = 1; i < numToBeSinked; ++i)
+        {
+            CurrBB->insert(InsertBeforePos, InstToBeSinked[i]);
+        }
+    }
 }
 
 // InstToBeHoisted[numToBeHosted-1 : 1] has instructions to be hoisted
@@ -825,39 +826,39 @@ void SendFusion::doSink(
 // Note that StartIT, EndIT, and InsertBeforePos remain valid after
 // invoking this function.
 void SendFusion::doHoist(
-	INST_LIST_ITER StartIT, INST_LIST_ITER EndIT, INST_LIST_ITER InsertBeforePos)
+    INST_LIST_ITER StartIT, INST_LIST_ITER EndIT, INST_LIST_ITER InsertBeforePos)
 {
     if (numToBeHoisted > 1)
-	{
-		int j = numToBeHoisted-1;
-		G4_INST *Inst = InstToBeHoisted[j];
-		for (INST_LIST_ITER IT = StartIT; IT != EndIT; )
-		{
-			G4_INST *tmp = *IT;
-			if (tmp == Inst) {
-				INST_LIST_ITER tmpIT = IT;
-				++IT;
-				CurrBB->erase(tmpIT);
+    {
+        int j = numToBeHoisted-1;
+        G4_INST *Inst = InstToBeHoisted[j];
+        for (INST_LIST_ITER IT = StartIT; IT != EndIT; )
+        {
+            G4_INST *tmp = *IT;
+            if (tmp == Inst) {
+                INST_LIST_ITER tmpIT = IT;
+                ++IT;
+                CurrBB->erase(tmpIT);
 
-				--j;
-				if (j == 0)
-				{
-					break;
-				}
-				Inst = InstToBeHoisted[j];
-			}
-			else {
-				++IT;
-			}
-		}
-		assert(j == 0 &&
-			"Internal Error(SendFusion) : Instructions not in the list!");
+                --j;
+                if (j == 0)
+                {
+                    break;
+                }
+                Inst = InstToBeHoisted[j];
+            }
+            else {
+                ++IT;
+            }
+        }
+        assert(j == 0 &&
+            "Internal Error(SendFusion) : Instructions not in the list!");
 
-		for (int i = numToBeHoisted - 1; i > 0; --i)
-		{
-			CurrBB->insert(InsertBeforePos, InstToBeHoisted[i]);
-		}
-	}
+        for (int i = numToBeHoisted - 1; i > 0; --i)
+        {
+            CurrBB->insert(InsertBeforePos, InstToBeHoisted[i]);
+        }
+    }
 }
 
 // Packing payload:
@@ -884,7 +885,7 @@ void SendFusion::packPayload(
     G4_BB* bb, INST_LIST_ITER InsertBeforePos)
 {
     // Both Send0 and Send1 have the same MsgDesc.
-	unsigned char ExecSize = Send0->getExecSize();
+    unsigned char ExecSize = Send0->getExecSize();
     G4_SendMsgDescriptor* origDesc = Send0->getMsgDesc();
     int option = Send0->getOption();
 
@@ -893,20 +894,20 @@ void SendFusion::packPayload(
     RegionDesc* stride1 = Builder->getRegionStride1();
 
     // Sanity check for exec_size =1|2|4
-	if (ExecSize < 8)
-	{
-		assert((origDesc->isDataPortWrite() ||
-			    (msgLen == 1 && origDesc->ResponseLength() == 1)) &&
-			"Internal Error (SendFusion): unexpected read message!");
-		assert((origDesc->isDataPortRead() || (msgLen + extMsgLen == 2)) &&
-			"Internal Error (SendFusion): unexpected write message!");
-	}
-	
+    if (ExecSize < 8)
+    {
+        assert((origDesc->isDataPortWrite() ||
+                (msgLen == 1 && origDesc->ResponseLength() == 1)) &&
+            "Internal Error (SendFusion): unexpected read message!");
+        assert((origDesc->isDataPortRead() || (msgLen + extMsgLen == 2)) &&
+            "Internal Error (SendFusion): unexpected write message!");
+    }
+
     // Using a loop of count == 2 for handing both Msg & extMsg payload.
-	// 
-	// Note that the following works for exec_size=1|2|4|8. It is designed
-	// to handle exec_size=8. It also works for exec_size=1|2|4 with minor
-	// changes.
+    //
+    // Note that the following works for exec_size=1|2|4|8. It is designed
+    // to handle exec_size=8. It also works for exec_size=1|2|4 with minor
+    // changes.
     int16_t numMov[2] = {msgLen, extMsgLen};
 
     for (int i=0; i < 2; ++i)
@@ -941,9 +942,9 @@ void SendFusion::packPayload(
                 Mod_src_undef, Direct, Var1, Off1 + i, 0, stride1, Ty);
             D = Builder->createDstRegRegion(
                 Direct, Dst,
-				(ExecSize == 8 ? (2 * i + 1) : 2 * i),
-				(ExecSize == 8 ? 0 : ExecSize),
-				1, Ty);
+                (ExecSize == 8 ? (2 * i + 1) : 2 * i),
+                (ExecSize == 8 ? 0 : ExecSize),
+                1, Ty);
             G4_INST* Inst1 = Builder->createInternalInst(
                 NULL, G4_mov, NULL, false, ExecSize, D, S, nullptr, option);
             bb->insert(InsertBeforePos, Inst1);
@@ -981,17 +982,17 @@ void SendFusion::unpackPayload(
     assert(G4_Type_Table[Ty].byteSize == 4 && "Unexpected Type!");
 
     // Use the original option for mov instructions
-	unsigned char ExecSize = Send0->getExecSize();
+    unsigned char ExecSize = Send0->getExecSize();
     int option = Send0->getOption();
     int32_t nMov = Send0->getMsgDesc()->ResponseLength();
 
-	// Make sure the response len = 1 for exec_size = 1|2|4
-	//
-	// Note that the code is designed for exec_size=8. It also
-	// works for exec_size=1|2|4 with minor change (keep in mind
-	// that nMov = 1 for exec_size=1|2|4)
-	assert((ExecSize == 8 || nMov == 1) &&
-		   "Internal Error(SendFusion) : unexpected message response length!");
+    // Make sure the response len = 1 for exec_size = 1|2|4
+    //
+    // Note that the code is designed for exec_size=8. It also
+    // works for exec_size=1|2|4 with minor change (keep in mind
+    // that nMov = 1 for exec_size=1|2|4)
+    assert((ExecSize == 8 || nMov == 1) &&
+           "Internal Error(SendFusion) : unexpected message response length!");
 
     G4_VarBase* Payload = FusedSend->getDst()->getBase();
     G4_VarBase* Dst0 = getVarBase(Send0->getDst()->getBase(), Ty);
@@ -1020,12 +1021,12 @@ void SendFusion::unpackPayload(
 
     // Copy to Dst1
     for (int i = 0; i < nMov; ++i)
-    { 
+    {
         S = Builder->createSrcRegRegion(
             Mod_src_undef, Direct, Payload,
-			(ExecSize == 8 ? 2*i + 1 : 2*i),
-			(ExecSize == 8) ? 0 : ExecSize,
-			stride1, Ty);
+            (ExecSize == 8 ? 2*i + 1 : 2*i),
+            (ExecSize == 8) ? 0 : ExecSize,
+            stride1, Ty);
         D = Builder->createDstRegRegion(Direct, Dst1, Off1 + i, 0, 1, Ty);
         G4_INST* Inst1 = Builder->createInternalInst(
             NULL, G4_mov, NULL, false, ExecSize, D, S, nullptr, option);
@@ -1039,7 +1040,7 @@ void SendFusion::unpackPayload(
 
 void SendFusion::initDMaskModInfo()
 {
-    for (BB_LIST_ITER BI = CFG->BBs.begin(), BE = CFG->BBs.end(); BI != BE; ++BI)
+    for (BB_LIST_ITER BI = CFG->begin(), BE = CFG->end(); BI != BE; ++BI)
     {
         G4_BB* BB = *BI;
         for (INST_LIST_ITER II = BB->begin(), IE = BB->end(); II != IE; ++II)
@@ -1121,66 +1122,66 @@ void SendFusion::createFlagPerBB(G4_BB* bb, INST_LIST_ITER InsertBeforePos)
 
 
     G4_Declare* tmpDecl = Builder->createTempVar(1, Type_UD, Either, Any, "Flag");
-	G4_INST* Inst0;
-	if (WAce0Read)
-	{
-		// (W) mov (1|M0) WAce0:uw, 0
-		// cmp (16|M0) (eq)WAce0 r0:uw r0:uw
-		// (W) mov(1|M0) tmpDst1  WAce0:uw
-		G4_Declare* flagDecl = Builder->createTempFlag(1, "WAce0");
-		G4_RegVar* flagVar = flagDecl->getRegVar();
-		G4_DstRegRegion* flag = Builder->createDstRegRegion(
-			Direct, flagVar, 0, 0, 1, Type_UW);
+    G4_INST* Inst0;
+    if (WAce0Read)
+    {
+        // (W) mov (1|M0) WAce0:uw, 0
+        // cmp (16|M0) (eq)WAce0 r0:uw r0:uw
+        // (W) mov(1|M0) tmpDst1  WAce0:uw
+        G4_Declare* flagDecl = Builder->createTempFlag(1, "WAce0");
+        G4_RegVar* flagVar = flagDecl->getRegVar();
+        G4_DstRegRegion* flag = Builder->createDstRegRegion(
+            Direct, flagVar, 0, 0, 1, Type_UW);
 
-		// (W) mov (1|M0) WAce0:uw, 0
-		// cmp (16|M5) (eq)WAce0 r0:uw r0:uw
-		// (W) mov(1|M0) dstPixelMaskRgn:uw  WAce0:uw
-		G4_INST* I0 = Builder->createInternalInst(NULL, G4_mov, NULL, false, 1, flag,
-			Builder->createImm(0, Type_UW), NULL, InstOpt_WriteEnable);
-		bb->insert(InsertBeforePos, I0);
+        // (W) mov (1|M0) WAce0:uw, 0
+        // cmp (16|M5) (eq)WAce0 r0:uw r0:uw
+        // (W) mov(1|M0) dstPixelMaskRgn:uw  WAce0:uw
+        G4_INST* I0 = Builder->createInternalInst(NULL, G4_mov, NULL, false, 1, flag,
+            Builder->createImm(0, Type_UW), NULL, InstOpt_WriteEnable);
+        bb->insert(InsertBeforePos, I0);
 
-		G4_SrcRegRegion *r0_0 = Builder->createSrcRegRegion(
-			Mod_src_undef, Direct,
-			Builder->getRealR0()->getRegVar(), 0, 0,
-			Builder->getRegionStride1(), Type_UW);
-		G4_SrcRegRegion *r0_1 = Builder->createSrcRegRegion(
-			Mod_src_undef, Direct,
-			Builder->getRealR0()->getRegVar(), 0, 0,
-			Builder->getRegionStride1(), Type_UW);
-		G4_CondMod* flagCM = Builder->createCondMod(Mod_e, flagVar, 0);
-		G4_DstRegRegion *nullDst = Builder->createNullDst(Type_UW);
-		// Hard-coded simd8 here!
-		G4_INST* I1 = Builder->createInternalInst(NULL, G4_cmp, flagCM, false, 8,
-			nullDst, r0_0, r0_1, InstOpt_M0);
-		bb->insert(InsertBeforePos, I1);
+        G4_SrcRegRegion *r0_0 = Builder->createSrcRegRegion(
+            Mod_src_undef, Direct,
+            Builder->getRealR0()->getRegVar(), 0, 0,
+            Builder->getRegionStride1(), Type_UW);
+        G4_SrcRegRegion *r0_1 = Builder->createSrcRegRegion(
+            Mod_src_undef, Direct,
+            Builder->getRealR0()->getRegVar(), 0, 0,
+            Builder->getRegionStride1(), Type_UW);
+        G4_CondMod* flagCM = Builder->createCondMod(Mod_e, flagVar, 0);
+        G4_DstRegRegion *nullDst = Builder->createNullDst(Type_UW);
+        // Hard-coded simd8 here!
+        G4_INST* I1 = Builder->createInternalInst(NULL, G4_cmp, flagCM, false, 8,
+            nullDst, r0_0, r0_1, InstOpt_M0);
+        bb->insert(InsertBeforePos, I1);
 
-		G4_SrcRegRegion *flagSrc = Builder->createSrcRegRegion(
-			Mod_src_undef, Direct,
-			flagVar, 0, 0,
-			Builder->getRegionScalar(), Type_UW);
-		G4_DstRegRegion* tmpDst1 = Builder->createDstRegRegion(
-			Direct, tmpDecl->getRegVar(), 0, 0, 1, Type_UW);
-		Inst0 = Builder->createInternalInst(NULL, G4_mov, NULL, false, 1, tmpDst1,
-			flagSrc, NULL, InstOpt_WriteEnable);
-		bb->insert(InsertBeforePos, Inst0);
+        G4_SrcRegRegion *flagSrc = Builder->createSrcRegRegion(
+            Mod_src_undef, Direct,
+            flagVar, 0, 0,
+            Builder->getRegionScalar(), Type_UW);
+        G4_DstRegRegion* tmpDst1 = Builder->createDstRegRegion(
+            Direct, tmpDecl->getRegVar(), 0, 0, 1, Type_UW);
+        Inst0 = Builder->createInternalInst(NULL, G4_mov, NULL, false, 1, tmpDst1,
+            flagSrc, NULL, InstOpt_WriteEnable);
+        bb->insert(InsertBeforePos, Inst0);
 
-		// update DefUse
-		I1->addDefUse(Inst0, Opnd_src0);
-		I0->addDefUse(Inst0, Opnd_src0);
-	}
-	else
-	{
-		// (W) and (|M0) tmp<1>:ud ce0.0<0;1,0>:ud DMaskUD:ud
-		G4_SrcRegRegion *ce0Src = Builder->createSrcRegRegion(
-			Mod_src_undef, Direct, Builder->phyregpool.getMask0Reg(), 0, 0, scalar, Type_UD);
-		G4_SrcRegRegion *dmaskSrc = Builder->createSrcRegRegion(
-			Mod_src_undef, Direct, DMaskUD, 0, 0, scalar, Type_UD);
-		G4_DstRegRegion* tmpDst = Builder->createDstRegRegion(
-			Direct, tmpDecl->getRegVar(), 0, 0, 1, Type_UD);
-		Inst0 = Builder->createInternalInst(
-			NULL, G4_and, NULL, false, 1, tmpDst, ce0Src, dmaskSrc, InstOpt_WriteEnable);
-		bb->insert(InsertBeforePos, Inst0);
-	}
+        // update DefUse
+        I1->addDefUse(Inst0, Opnd_src0);
+        I0->addDefUse(Inst0, Opnd_src0);
+    }
+    else
+    {
+        // (W) and (|M0) tmp<1>:ud ce0.0<0;1,0>:ud DMaskUD:ud
+        G4_SrcRegRegion *ce0Src = Builder->createSrcRegRegion(
+            Mod_src_undef, Direct, Builder->phyregpool.getMask0Reg(), 0, 0, scalar, Type_UD);
+        G4_SrcRegRegion *dmaskSrc = Builder->createSrcRegRegion(
+            Mod_src_undef, Direct, DMaskUD, 0, 0, scalar, Type_UD);
+        G4_DstRegRegion* tmpDst = Builder->createDstRegRegion(
+            Direct, tmpDecl->getRegVar(), 0, 0, 1, Type_UD);
+        Inst0 = Builder->createInternalInst(
+            NULL, G4_and, NULL, false, 1, tmpDst, ce0Src, dmaskSrc, InstOpt_WriteEnable);
+        bb->insert(InsertBeforePos, Inst0);
+    }
 
     //  Duplicate 8-bit mask to the next 8 bits
     //  (W) mov (2|M0) tmp:ub tmp.0<0;1,0>:ub
@@ -1225,7 +1226,7 @@ void SendFusion::doFusion(
     //    It generates the following:
     //      (1) Setting flag register
     //            (Need to do Sr0.2 & ce0.0 to get real channel mask)
-    //         (1.1) Dispatch mask 
+    //         (1.1) Dispatch mask
     //              (W) mov (1|M0) r10.0<1>:ud sr0.2.0<0;1,0>:ud
     //         (1.2)
     //              (W) and (1|M0) r11.0<1>:ud ce0.0<0;1,0>:ud r10.0<0;1,0>:ud
@@ -1248,17 +1249,17 @@ void SendFusion::doFusion(
 
     G4_INST* I0 = *IT0;
     G4_INST* I1 = *IT1;
-	INST_LIST_ITER InsertBeforePos = IsSink ? IT1 : IT0;
+    INST_LIST_ITER InsertBeforePos = IsSink ? IT1 : IT0;
 
     // Use I0 as both I0 and I1 have the same properties
     G4_SendMsgDescriptor* desc = I0->getMsgDesc();
-	unsigned char ExecSize = I0->getExecSize();
+    unsigned char ExecSize = I0->getExecSize();
     bool isWrtEnable = I0->isWriteEnableInst();
     bool isSplitSend = I0->isSplitSend();
 
     if (!isWrtEnable)
     {
-		// No need to read DMask if WAceRead is true
+        // No need to read DMask if WAceRead is true
         if (!WAce0Read && DMaskUD == nullptr)
         {
             // First time, let's save dispatch mask in the entry BB and
@@ -1289,10 +1290,10 @@ void SendFusion::doFusion(
     uint32_t extMsgLen = desc->extMessageLength();
 
     // Message header : all candidates have no header (for now).
-	//
-	// Also for the message type that we handle, if execSize is 1|2|4,
-	//     write:  msgLen+extMsgLen = 2; and
-	//     read:   msgLen = 1 && rspLen = 1
+    //
+    // Also for the message type that we handle, if execSize is 1|2|4,
+    //     write:  msgLen+extMsgLen = 2; and
+    //     read:   msgLen = 1 && rspLen = 1
     uint32_t newMsgLen = (ExecSize < 8 ? msgLen : 2*msgLen);
     uint32_t newRspLen = (ExecSize < 8 ? rspLen : 2*rspLen);
     uint32_t newExtMsgLen = (ExecSize < 8 ? extMsgLen : 2*extMsgLen);
@@ -1321,44 +1322,44 @@ void SendFusion::doFusion(
         Dst = Builder->createNullDst(Type_UD);
     }
 
-    
+
     // No need to set bti here as we handle the case in which bti is imm only.
     // For that imm bti, the descriptor has already contained bti. Thus, we can
     // safely set bti to nullptr here.
     //G4_Operand* bti = (desc->getBti() ? Builder->duplicateOperand(desc->getBti()) : nullptr);
     G4_Operand* bti = nullptr;
     uint32_t newFC = (ExecSize < 8 ? desc->getFuncCtrl()
-		                           : getFuncCtrlWithSimd16(desc));
+                                   : getFuncCtrlWithSimd16(desc));
 
-	// In general, we have the following 
-	//       send0       <-- IT0
-	//        <O0>       <-- other instruction (no dep with send0/send1)
-	//       <DepInst>   <-- ToBeSinked/ToBeHoisted
-	//        <O1>       <-- other instruction (no dep with send0/send1)
-	//       send1       <-- IT1
-	//  which is translated into:
-	//
-	//    sink:    InsertBeforePos = IT1 (send1)
-	//           <O0>
-	//           <O1>
-	//           <packing>         <-- packPayload()
-	//           new_send
-	//           <unpacking>       <-- unpackPayload()
-	//           <DepInst>         <-- doSink()
-	//
-	//   hoist:  InsertBeforePos = IT0 (send0)
-	//           <DepInst>         <-- doHoist()
-	//           <packing>         <-- packPayload()
-	//           new_send
-	//           <unpacking>       <-- unpackPayload()
-	//           <O0>
-	//           <O1>
+    // In general, we have the following
+    //       send0       <-- IT0
+    //        <O0>       <-- other instruction (no dep with send0/send1)
+    //       <DepInst>   <-- ToBeSinked/ToBeHoisted
+    //        <O1>       <-- other instruction (no dep with send0/send1)
+    //       send1       <-- IT1
+    //  which is translated into:
+    //
+    //    sink:    InsertBeforePos = IT1 (send1)
+    //           <O0>
+    //           <O1>
+    //           <packing>         <-- packPayload()
+    //           new_send
+    //           <unpacking>       <-- unpackPayload()
+    //           <DepInst>         <-- doSink()
+    //
+    //   hoist:  InsertBeforePos = IT0 (send0)
+    //           <DepInst>         <-- doHoist()
+    //           <packing>         <-- packPayload()
+    //           new_send
+    //           <unpacking>       <-- unpackPayload()
+    //           <O0>
+    //           <O1>
 
     // Special case of two reads whose payloads can be concatenated using split send.
     if (!isSplitSend && ExecSize == 8 && rspLen > 0 && (msgLen == 1))
     {
         G4_SendMsgDescriptor* newDesc = Builder->createSendMsgDesc(
-            newFC, newRspLen, msgLen, 
+            newFC, newRspLen, msgLen,
             desc->getFuncId(),
             false,
             msgLen,
@@ -1376,11 +1377,11 @@ void SendFusion::doFusion(
             Builder->createImm(newDesc->getDesc(), Type_UD),
             InstOpt_WriteEnable, newDesc, nullptr, 0);
 
-		if (!IsSink)
-		{   // move depInst first if doing hoisting
-			doHoist(IT0, IT1, InsertBeforePos);
-		}
-		CurrBB->insert(InsertBeforePos, sendInst);
+        if (!IsSink)
+        {   // move depInst first if doing hoisting
+            doHoist(IT0, IT1, InsertBeforePos);
+        }
+        CurrBB->insert(InsertBeforePos, sendInst);
 
         // Update DefUse
         if (Pred)
@@ -1393,10 +1394,10 @@ void SendFusion::doFusion(
         // Unpack the result
         unpackPayload(sendInst, I0, I1, CurrBB, InsertBeforePos);
 
-		if (IsSink) {
-			// sink dep instructions
-			doSink(IT0, IT1, InsertBeforePos);
-		}
+        if (IsSink) {
+            // sink dep instructions
+            doSink(IT0, IT1, InsertBeforePos);
+        }
 
         // Delete I0 and I1 and updating defuse info
         I0->removeAllUses();
@@ -1453,13 +1454,13 @@ void SendFusion::doFusion(
             newDesc);
     }
 
-	if (!IsSink) {
-		// Hoisting dep instructions first
-		doHoist(IT0, IT1, InsertBeforePos);
-	}
+    if (!IsSink) {
+        // Hoisting dep instructions first
+        doHoist(IT0, IT1, InsertBeforePos);
+    }
 
     // For messages we handle here, payloads are packing/unpacking
-	// in an interleaving way.
+    // in an interleaving way.
     packPayload(sendInst, I0, I1, CurrBB, InsertBeforePos);
 
     // Update DefUse
@@ -1475,10 +1476,10 @@ void SendFusion::doFusion(
         unpackPayload(sendInst, I0, I1, CurrBB, InsertBeforePos);
     }
 
-	if (IsSink) {
-		// Sink dep instructions
-		doSink(IT0, IT1, InsertBeforePos);
-	}
+    if (IsSink) {
+        // Sink dep instructions
+        doSink(IT0, IT1, InsertBeforePos);
+    }
 
     // Delete I0 and I1 and updating defUse info
     I0->removeAllUses();
@@ -1555,21 +1556,21 @@ bool SendFusion::run(G4_BB* BB)
             II0 = II1;
             continue;
         }
-  
+
         // At this point, inst0 and inst1 are the pair that can be fused.
         // Now, check if they can be moved to the same position.
         bool sinkable = canSink(II0, II1);
-		bool hoistable = false;
-		if (!sinkable || numToBeSinked > 1)
-		{
-			hoistable = canHoist(II0, II1);
-			if (sinkable && hoistable && numToBeHoisted < numToBeSinked)
-			{   // Hoisting as it moves less instructions
-				sinkable = false;
-			}
-		}
+        bool hoistable = false;
+        if (!sinkable || numToBeSinked > 1)
+        {
+            hoistable = canHoist(II0, II1);
+            if (sinkable && hoistable && numToBeHoisted < numToBeSinked)
+            {   // Hoisting as it moves less instructions
+                sinkable = false;
+            }
+        }
         if (!sinkable && !hoistable)
-		{   // Neither sinkable nor hoistable, looking for next candidates.
+        {   // Neither sinkable nor hoistable, looking for next candidates.
             II0 = II1;
             continue;
         }
@@ -1598,21 +1599,21 @@ bool SendFusion::run(G4_BB* BB)
 //
 bool vISA::doSendFusion(FlowGraph* aCFG, Mem_Manager* aMMgr)
 {
-	// If split send isn't supported, simply skip send fusion
-	if (!aCFG->builder->useSends())
-	{
-		return false;
-	}
+    // If split send isn't supported, simply skip send fusion
+    if (!aCFG->builder->useSends())
+    {
+        return false;
+    }
 
-	SendFusion sendFusion(aCFG, aMMgr);
+    SendFusion sendFusion(aCFG, aMMgr);
 
     bool change = false;
-    for (BB_LIST_ITER BI = aCFG->BBs.begin(), BE = aCFG->BBs.end(); BI != BE; ++BI)
+    for (BB_LIST_ITER BI = aCFG->begin(), BE = aCFG->end(); BI != BE; ++BI)
     {
         G4_BB* BB = *BI;
-	    if (sendFusion.run(BB)) {
+        if (sendFusion.run(BB)) {
             change = true;
         }
     }
-	return change;
+    return change;
 }

@@ -1,13 +1,5 @@
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
 
-set(ver ${LLVM_VERSION_MAJOR})
-if(LLVM_VERSION_MAJOR VERSION_GREATER 7)
-  # We can reuse llvm8 specific files building against llvm>=8 till
-  # incompatibility will be identified and we will create another llvmX to
-  # customization handle that.
-  set(ver 8)
-endif()
-
 set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/AddImplicitArgs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/customApi.cpp"
@@ -24,10 +16,11 @@ set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/spp_g8.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_g8.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/gtpin_igc_ocl.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/util/BinaryStream.cpp"
 
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${ver}/Upgrader.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${ver}/BitcodeReader.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/BitcodeReader.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/UnifyIROCL.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.cpp"
   )
@@ -50,13 +43,6 @@ if(IGC_BUILD__SPIRV_ENABLED)
     )
 endif(IGC_BUILD__SPIRV_ENABLED)
 
-
-if(LLVM_ON_WIN32)
-  set(IGC_BUILD__SRC_Win__DriverInterface
-
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.cpp"
-    )
-endif()
 
 set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/customApi.hpp"
@@ -90,8 +76,9 @@ set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_types.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/spp_g8.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/gtpin_igc_ocl.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/util/BinaryStream.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${ver}/Upgrader.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.h"
 
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/ErrorCode.h"
@@ -104,12 +91,6 @@ set(IGC_BUILD__HDR__DriverInterface
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/usc_gen9.h"
   )
 
-
-if(LLVM_ON_WIN32)
-  set(IGC_BUILD__HDR_Win__DriverInterface       
-      "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.h"
-    )
-endif()
 
   list(APPEND IGC_BUILD__SRC__DriverInterface
               "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/ocl_igc_interface/impl/igc_features_and_workarounds_impl.cpp"
@@ -136,14 +117,12 @@ endif()
 set(IGC_BUILD__SRC__IGC_DriverInterface__igc_dll
     ${IGC_BUILD__SRC__DriverInterface}
     ${IGC_BUILD__SRC_OGL__DriverInterface}
-    ${IGC_BUILD__SRC_Win__DriverInterface}
     PARENT_SCOPE
   )
 
 set(IGC_BUILD__HDR__IGC_DriverInterface__igc_dll
     ${IGC_BUILD__HDR__DriverInterface}
     ${IGC_BUILD__HDR_OGL__DriverInterface}
-    ${IGC_BUILD__HDR_Win__DriverInterface}
     PARENT_SCOPE
   )
 

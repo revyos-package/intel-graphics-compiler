@@ -36,6 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Timer.h"
 #include "FlowGraph.h"
 #include "BuildIR.h"
+#include "BuildCISAIR.h"
 #include "Optimizer.h"
 #include "BinaryEncoding.h"
 #include "BinaryEncodingCNL.h"
@@ -43,6 +44,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "DebugInfo.h"
 #include "iga/IGALibrary/IR/Instruction.hpp"
 #include "BinaryEncodingIGA.h"
+#include "IsaDisassembly.h"
 
 #if defined( _DEBUG ) && ( defined( _WIN32 ) || defined( _WIN64 ) )
 #include <windows.h>
@@ -146,9 +148,9 @@ int VISAKernelImpl::compileFastPath()
 
 void replaceFCOpcodes(IR_Builder& builder)
 {
-    BB_LIST_ITER bbEnd = builder.kernel.fg.BBs.end();
+    BB_LIST_ITER bbEnd = builder.kernel.fg.end();
 
-    for(BB_LIST_ITER bb_it = builder.kernel.fg.BBs.begin();
+    for(BB_LIST_ITER bb_it = builder.kernel.fg.begin();
         bb_it != bbEnd;
         bb_it++)
     {
@@ -202,11 +204,11 @@ int VISAKernelImpl::compileTillOptimize()
     return optimizer.optimization();
 }
 
-G4_Declare* VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, G4_INST* fcall)
+void VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, G4_INST* fcall)
 {
     // create instruction sequence:
     //       add  r1.2  -IP   call_target
-    //       add  r1.2  r1.2  32
+    //       add  r1.2  r1.2  -32
 
     // calculate the reserved register's num from fcall's dst register
     assert(fcall->getDst()->isGreg());
@@ -224,39 +226,31 @@ G4_Declare* VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, 
             m_builder->getRegionScalar(), Type_UD),
         fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
 
-    // create the second add to add the ip to 32, to get the call's ip
+    // create the second add to add the -ip to -32, to get the call's ip
+    // call offset is relative to pre-increment IP
     G4_INST* add_inst2 = m_builder->createInternalInst(
         nullptr, G4_add, nullptr, false, 1,
         m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
         m_builder->Create_Src_Opnd_From_Dcl(
             add_dst_decl, m_builder->getRegionScalar()),
-        m_builder->createImm(32, add_inst->getSrc(0)->getType()),
+        m_builder->createImm(-32, Type_D),
         InstOpt_WriteEnable | InstOpt_NoCompact);
 
     insts.push_back(add_inst);
     insts.push_back(add_inst2);
 
-    return add_dst_decl;
+    // update call target to add's dst(call's src0)
+    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
+        add_dst_decl, m_builder->getRegionScalar());
+    fcall->setSrc(jump_target, 0);
+    fcall->setNoCompacted();
 }
 
-void VISAKernelImpl::createInstsForRetIP(InstListType& insts, G4_INST* fcall)
+void VISAKernelImpl::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
 {
     // SKL workaround for indirect call
-    // create instruction sequence:
-    //       mov  f0.0   0
-    //       mov  r1.1   0
-    //       cmp  f0.0   r1.1  0
-    //       mov  r1.1   f0.0        // save the exec mask to r1.1
-    //       add  r1.0   IP   64     // save the return IP to r1.0
-    //
-    // This piece of code must be inserted before add instructions
-    // created in createInstsForCallTargetOffset and the jmpi:
-    //      add  r1.2  -IP   call_target
-    //      add  r1.2  r1.2  32
-    //      jmpi r1.2
-    //
-    // so that the return IP in r1.0 will be correct. r1.0 is the
-    // IP of the instruction right after jmpi
+    // r1.0 is the return IP (the instruction right after jmpi)
+    // r1.1 it the return mask
 
     // mov  f0.0   0
     insts.push_back(m_builder->createInternalInst(
@@ -304,13 +298,43 @@ void VISAKernelImpl::createInstsForRetIP(InstListType& insts, G4_INST* fcall)
             m_builder->getRegionScalar(), Type_UD),
         m_builder->createImm(64, Type_UD),
         InstOpt_WriteEnable | InstOpt_NoCompact));
+
+    // add  r1.2 - IP   call_target
+    G4_Declare* r1_2_decl =
+        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_add, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(r1_2_decl, 1),
+        m_builder->createSrcRegRegion(
+            Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
+            m_builder->getRegionScalar(), Type_UD),
+        fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact));
+
+    // add  r1.2  r1.2  -48
+    // jmpi offset is relative to post-increment IP on SKL
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_add, nullptr, false, 1,
+        m_builder->Create_Dst_Opnd_From_Dcl(r1_2_decl, 1),
+        m_builder->Create_Src_Opnd_From_Dcl(
+            r1_2_decl, m_builder->getRegionScalar()),
+        m_builder->createImm(-48, Type_D),
+        InstOpt_WriteEnable | InstOpt_NoCompact));
+
+    // jmpi r1.2
+    // update jump target (src0) to add's dst
+    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
+        r1_2_decl, m_builder->getRegionScalar());
+    jump_target->setType(Type_D);
+    insts.push_back(m_builder->createInternalInst(
+        nullptr, G4_jmpi, nullptr, false, 1, nullptr, jump_target,
+        nullptr, InstOpt_WriteEnable | InstOpt_NoCompact));
 }
 
 void VISAKernelImpl::expandIndirectCallWithRegTarget()
 {
     // check every fcall
-    for (BB_LIST_ITER it = m_kernel->fg.BBs.begin();
-        it != m_kernel->fg.BBs.end();
+    for (BB_LIST_ITER it = m_kernel->fg.begin();
+        it != m_kernel->fg.end();
         it++)
     {
         G4_BB* bb = (*it);
@@ -330,7 +354,7 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
                 //       call r1.0 call_target
                 // To:
                 //       add  r1.2  -IP   call_target
-                //       add  r1.2  r1.2  32
+                //       add  r1.2  r1.2  -32
                 //       call r1.0  r1.2
 
                 // For SKL workaround, expand call
@@ -339,41 +363,18 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
                 // To:
                 //       mov  f0.0   0
                 //       mov  r1.1   0
-                //       cmp  f0.0   r1.1  0
+                //       cmp  f0.0   r1.1   0
                 //       mov  r1.1   f0.0
-                //       add  r1.0   IP   64
+                //       add  r1.0   IP     64
                 //       add  r1.2   -IP    call_target
-                //       add  r1.2   r1.2   32
+                //       add  r1.2   r1.2   -48
                 //       jmpi r1.2
 
                 InstListType expanded_insts;
-
-                // create instructions to store return ip and exec mask, for SKL WA
-                if (getGenxPlatform() == GENX_SKL) {
-                    createInstsForRetIP(expanded_insts, fcall);
-                }
-
-                // create instructions to calculate jump target offset
-                G4_Declare* jmp_target_decl = createInstsForCallTargetOffset(expanded_insts, fcall);
-
-                // update jump target (call's src0)
-                G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
-                    jmp_target_decl, m_builder->getRegionScalar());
-                fcall->setSrc(jump_target, 0);
-                fcall->setNoCompacted();
-
-                if (getGenxPlatform() == GENX_SKL) {
-                    // create jmpi
-                    G4_INST* jmpi = m_builder->createInternalInst(
-                        nullptr, G4_jmpi, nullptr, false, 1, nullptr, fcall->getSrc(0),
-                        nullptr, InstOpt_WriteEnable | InstOpt_NoCompact);
-                    // jmpi's src must be signed int
-                    jmpi->getSrc(0)->asSrcRegRegion()->setType(Type_D);
-
-                    // remove call and insert jmpi to instlist
-                    bb->getInstList().erase(--bb->end());
-                    bb->getInstList().push_back(jmpi);
-                }
+                if (getGenxPlatform() == GENX_SKL)
+                    createInstForJmpiSequence(expanded_insts, fcall);
+                else
+                    createInstsForCallTargetOffset(expanded_insts, fcall);
 
                 // then insert the expaneded instructions right before the call
                 INST_LIST_ITER insert_point = bb->end();
@@ -382,6 +383,9 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
                     bb->getInstList().insert(insert_point, inst_to_add);
                     inst_to_add->setCISAOff(fcall->getCISAOff());
                 }
+                // remove call from the instlist for SKL WA
+                if (getGenxPlatform() == GENX_SKL)
+                    bb->getInstList().erase(--bb->end());
             }
         }
     }
@@ -411,7 +415,7 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
 
     // remove SW fences at this point
     // ToDo: remove all intrinsics?
-    for (auto bb : m_kernel->fg.BBs)
+    for (auto bb : m_kernel->fg)
     {
         bb->removeIntrinsics(Intrinsic::MemFence);
     }
@@ -423,7 +427,7 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
     {
         auto getFirstNonLabelInst = [this]()
         {
-            for (auto bb : m_kernel->fg.BBs)
+            for (auto bb : m_kernel->fg)
             {
                 for (auto inst : *bb)
                 {
@@ -505,7 +509,7 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
 
         pBinaryEncoding->computeBinaryOffsets();
 
-        for (auto bb : m_kernel->fg.BBs)
+        for (auto bb : m_kernel->fg)
         {
             for (auto inst : *bb)
             {
@@ -610,12 +614,7 @@ int VISAKernelImpl::InitializeFastPath()
     m_builder->num_general_dcl = this->m_num_pred_vars;
     m_builder->getcompilerStats().Link(m_compilerStats);
     initCompilerStats();
-    /*
-    I don't think this is necessary. Through loader metadata will be maintained on it's side
-    through regular vISA builder pass the links will be created explicitly
-    m_builder.setVarRelocTable(&commonISAHeader.kernels[kernelId].variable_reloc_symtab);
-    m_builder.setFuncRelocTable(&commonISAHeader.kernels[kernelId].function_reloc_symtab);
-    */
+
     return CM_SUCCESS;
 }
 
@@ -703,8 +702,8 @@ int VISAKernelImpl::CISABuildPreDefinedDecls()
                 decl->genVar.name_index = addStringPool(varName);
                 if (m_options->getOption(vISA_isParseMode))
                 {
-                    setNameIndexMap(std::string(name), decl);
-                    setNameIndexMap(varName, decl);
+                    setNameIndexMap(std::string(name), decl, true);
+                    setNameIndexMap(varName, decl, true);
                 }
             }
         }
@@ -724,52 +723,52 @@ int VISAKernelImpl::CISABuildPreDefinedDecls()
         decl->stateVar.name_index = -1;
         if(IS_VISA_BOTH_PATH)
         {
-			const char* name = vISAPreDefSurf[i].name;
+            const char* name = vISAPreDefSurf[i].name;
             decl->stateVar.name_index = addStringPool(std::string(name));
-            setNameIndexMap(std::string(name), decl);
+            setNameIndexMap(std::string(name), decl, true);
         }
         if (IS_GEN_BOTH_PATH)
         {
-			if (i == PREDEFINED_SURFACE_T252)
-			{
-				decl->stateVar.dcl = m_builder->getBuiltinT252();
-			}
-			else
-			{
-				decl->stateVar.dcl = m_builder->createDeclareNoLookup(
-					"",
-					G4_GRF,
-					1,
-					1,
-					Type_UD);
-			}
+            if (i == PREDEFINED_SURFACE_T252)
+            {
+                decl->stateVar.dcl = m_builder->getBuiltinT252();
+            }
+            else
+            {
+                decl->stateVar.dcl = m_builder->createDeclareNoLookup(
+                    "",
+                    G4_GRF,
+                    1,
+                    1,
+                    Type_UD);
+            }
         }
         addSurface(decl);
     }
 
-	createBindlessSampler();
+    createBindlessSampler();
 
     return CM_SUCCESS;
 }
 
 void VISAKernelImpl::createBindlessSampler()
 {
-	m_bindlessSampler = (VISA_SamplerVar *)m_mem.alloc(sizeof(CISA_GEN_VAR));
-	m_bindlessSampler->type = SAMPLER_VAR;
-	m_bindlessSampler->index = 31;
-	m_bindlessSampler->stateVar.attributes = NULL;
-	m_bindlessSampler->stateVar.attribute_count = 0;
+    m_bindlessSampler = (VISA_SamplerVar *)m_mem.alloc(sizeof(CISA_GEN_VAR));
+    m_bindlessSampler->type = SAMPLER_VAR;
+    m_bindlessSampler->index = 31;
+    m_bindlessSampler->stateVar.attributes = NULL;
+    m_bindlessSampler->stateVar.attribute_count = 0;
 
-	if (IS_VISA_BOTH_PATH)
-	{
-		const char* name = BINDLESS_SAMPLER_NAME;
-		m_bindlessSampler->stateVar.name_index = addStringPool(std::string(name));
-		setNameIndexMap(std::string(name), m_bindlessSampler);
-	}
-	if (IS_GEN_BOTH_PATH)
-	{
-		m_bindlessSampler->stateVar.dcl = m_builder->getBuiltinBindlessSampler();
-	}
+    if (IS_VISA_BOTH_PATH)
+    {
+        const char* name = BINDLESS_SAMPLER_NAME;
+        m_bindlessSampler->stateVar.name_index = addStringPool(std::string(name));
+        setNameIndexMap(std::string(name), m_bindlessSampler, true);
+    }
+    if (IS_GEN_BOTH_PATH)
+    {
+        m_bindlessSampler->stateVar.dcl = m_builder->getBuiltinBindlessSampler();
+    }
 }
 
 void VISAKernelImpl::setDefaultVariableName(Common_ISA_Var_Class Ty, const char *&varName)
@@ -810,6 +809,42 @@ void VISAKernelImpl::setDefaultVariableName(Common_ISA_Var_Class Ty, const char 
     default:
         break;
     }
+}
+
+std::string VISAKernelImpl::getVarName(VISA_GenVar* decl)
+{
+    int index = getDeclarationID(decl);
+    stringstream ss;
+    ss << "V" << index;
+    return ss.str();
+}
+std::string VISAKernelImpl::getVarName(VISA_PredVar* decl)
+{
+    int index = getDeclarationID(decl) + COMMON_ISA_NUM_PREDEFINED_PRED;
+    stringstream ss;
+    ss << "P" << index;
+    return ss.str();
+}
+std::string VISAKernelImpl::getVarName(VISA_AddrVar* decl)
+{
+    int index = getDeclarationID(decl);
+    stringstream ss;
+    ss << "A" << index;
+    return ss.str();
+}
+std::string VISAKernelImpl::getVarName(VISA_SurfaceVar* decl)
+{
+    int index = getDeclarationID(decl);
+    stringstream ss;
+    ss << "T" << index;
+    return ss.str();
+}
+std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl)
+{
+    int index = getDeclarationID(decl);
+    stringstream ss;
+    ss << "S" << index;
+    return ss.str();
 }
 
 int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
@@ -932,12 +967,24 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
         }
         info->name_index = -1;
     }
-    if (IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo))
+
+    if (IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo) || IsAsmWriterMode())
     {
         info->name_index = addStringPool(std::string(varName));
         addVarInfoToList(decl);
-    }
 
+        // Write asm variable decl to stream
+        if (IsAsmWriterMode())
+        {
+            unsigned funcId = 0;
+            if (!this->getIsKernel())
+            {
+                this->GetFunctionId(funcId);
+            }
+            VISAKernel_format_provider fmt(this);
+            m_CISABuilder->m_ssIsaAsm << printVariableDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.var_index++, getIsKernel(), funcId, getOptions()) << endl;
+        }
+    }
     decl->index = m_var_info_count++;
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
@@ -955,9 +1002,9 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
     ////memset(decl, 0, sizeof(VISA_AddrVar));
     decl->type = ADDRESS_VAR;
 
-    if(m_options->getOption(vISA_isParseMode) && !this->setNameIndexMap(std::string(varName), decl))
+    if (m_options->getOption(vISA_isParseMode) && !this->setNameIndexMap(std::string(varName), decl))
     {
-        CmAssert( 0 );
+        CmAssert(0);
         return CM_FAILURE;
     }
 
@@ -965,14 +1012,14 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
     setDefaultVariableName(decl->type, varName);
 
     decl->index = m_addr_info_count++;
-    if(IS_GEN_BOTH_PATH)
+    if (IS_GEN_BOTH_PATH)
     {
         addr->dcl = m_builder->createDeclareNoLookup(
             createStringCopy(varName, m_mem),
             G4_ADDRESS,
             (uint16_t)numberElements,
             1,
-            Type_UW );
+            Type_UW);
         addr->name_index = -1;
     }
 
@@ -980,10 +1027,16 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
     addr->attribute_count = 0;
     addr->attributes = NULL;
 
-    if (IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo))
+    if (IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo) || IsAsmWriterMode())
     {
         addr->name_index = this->addStringPool(std::string(varName));
         this->addAddrToList(decl);
+
+        if (IsAsmWriterMode())
+        {
+            VISAKernel_format_provider fmt(this);
+            m_CISABuilder->m_ssIsaAsm << printAddressDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.addr_index++) << endl;
+        }
     }
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
@@ -1003,11 +1056,11 @@ int VISAKernelImpl::CreateVISAPredVar(VISA_PredVar *& decl, const char* varName,
     ////memset(decl, 0, sizeof(VISA_PredVar));
     decl->type = PREDICATE_VAR;
 
-    MUST_BE_TRUE( numberElements <= MAX_VISA_PRED_SIZE, "number of flags must be <= 32");
+    MUST_BE_TRUE(numberElements <= MAX_VISA_PRED_SIZE, "number of flags must be <= 32");
 
-    if(m_options->getOption(vISA_isParseMode) && !this->setNameIndexMap(std::string(varName), decl))
+    if (m_options->getOption(vISA_isParseMode) && !this->setNameIndexMap(std::string(varName), decl))
     {
-        CmAssert( 0 );
+        CmAssert(0);
         return CM_FAILURE;
     }
     setDefaultVariableName(decl->type, varName);
@@ -1016,12 +1069,12 @@ int VISAKernelImpl::CreateVISAPredVar(VISA_PredVar *& decl, const char* varName,
 
     decl->index = COMMON_ISA_NUM_PREDEFINED_PRED + this->m_pred_info_count++;
     pred->attribute_count = 0;
-    if(IS_GEN_BOTH_PATH)
+    if (IS_GEN_BOTH_PATH)
     {
         pred->dcl = m_builder->createFlag(numberElements, createStringCopy(varName, m_mem));
         pred->name_index = -1;
     }
-    if(IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo))
+    if (IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo) || IsAsmWriterMode())
     {
         pred->name_index = addStringPool(std::string(varName));
         this->addPredToList(decl);
@@ -1029,6 +1082,12 @@ int VISAKernelImpl::CreateVISAPredVar(VISA_PredVar *& decl, const char* varName,
     pred->num_elements = numberElements;
     pred->attribute_count = 0;
     pred->attributes = NULL;
+
+    if (IsAsmWriterMode())
+    {
+        VISAKernel_format_provider fmt(this);
+        m_CISABuilder->m_ssIsaAsm << printPredicateDecl(&fmt, m_printDeclIndex.pred_index++) << endl;
+    }
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_CREATE_VAR);
@@ -1080,17 +1139,32 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
         return CM_FAILURE;
     }
 
-    if(IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo))
+    if(IS_VISA_BOTH_PATH || m_options->getOption(vISA_GenerateDebugInfo) || IsAsmWriterMode())
     {
         state->name_index = addStringPool(std::string(varName));
         switch( type )
         {
         case SAMPLER_VAR:
+        {
             addSampler(decl);
+            if (IsAsmWriterMode())
+            {
+                VISAKernel_format_provider fmt(this);
+                m_CISABuilder->m_ssIsaAsm << printSamplerDecl(&fmt, m_printDeclIndex.sampler_index++) << endl;
+            }
             break;
+        }
         case SURFACE_VAR:
+        {
             addSurface(decl);
+            if (IsAsmWriterMode())
+            {
+                VISAKernel_format_provider fmt(this);
+                unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
+                m_CISABuilder->m_ssIsaAsm << printSurfaceDecl(&fmt, m_printDeclIndex.surface_index++, numPreDefinedSurfs) << endl;
+            }
             break;
+        }
         default:
             CmAssert(0);
             return CM_FAILURE;
@@ -1162,8 +1236,8 @@ int VISAKernelImpl::CreateVISALabelVar(VISA_LabelOpnd *& opnd, const char* name,
         if(kind == LABEL_SUBROUTINE)
         {
             ((G4_Label*)opnd->g4opnd)->setFuncLabel(true);
-		}
-		else
+        }
+        else
         {
             ((G4_Label*)opnd->g4opnd)->setFuncLabel(false);
 
@@ -1616,7 +1690,7 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
         //used in asm generation
         m_builder->addInputArg(input);
     }
-    if (IS_VISA_BOTH_PATH)
+    if (IS_VISA_BOTH_PATH || IsAsmWriterMode())
     {
 
         if((input->kind & 0x3) == INPUT_UNKNOWN) {
@@ -1627,8 +1701,16 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
             m_input_info_list.push_back(input);
             m_input_count++;
             this->m_input_info_size += Get_Size_Input_Info(input);
+
+            if (IsAsmWriterMode())
+            {
+                // Print input var
+                VISAKernel_format_provider fmt(this);
+                m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << endl;
+            }
         }
     }
+
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUIDLER_CREATE_VAR);
 #endif
@@ -2126,59 +2208,6 @@ int VISAKernelImpl::CreateVISADstOperand(VISA_VectorOpnd *&cisa_opnd, VISA_GenVa
     return CM_SUCCESS;
 }
 
-int VISAKernelImpl::CreateRelocVISAImmediate(VISA_VectorOpnd *&cisa_opnd, const void *value, VISA_Type isaType, SuperRelocEntry& reloc)
-{
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-    startTimer(TIMER_VISA_BUILDER_CREATE_OPND);
-#endif
-    cisa_opnd = (VISA_VectorOpnd *)getOpndFromPool();
-    if (IS_GEN_BOTH_PATH)
-    {
-        if (isaType == ISA_TYPE_Q || isaType == ISA_TYPE_UQ) {
-            cisa_opnd->g4opnd = m_builder->createRelocImm(reloc, Type_UQ);
-        }
-        else if (isaType == ISA_TYPE_D || isaType == ISA_TYPE_UD)
-        {
-            cisa_opnd->g4opnd = m_builder->createRelocImm(reloc, Type_UD);
-        }
-        else
-        {
-            MUST_BE_TRUE(false, "Unable to create relocatable immediate operand with type.");
-        }
-    }
-    if (IS_VISA_BOTH_PATH)
-    {
-        //memset(cisa_opnd, 0, sizeof(VISA_opnd));
-
-        cisa_opnd->opnd_type = CISA_OPND_VECTOR;
-        cisa_opnd->tag = OPERAND_IMMEDIATE;
-        cisa_opnd->_opnd.v_opnd.tag = OPERAND_IMMEDIATE;
-        cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd.type = isaType;
-
-        int size = CISATypeTable[isaType].typeSize;
-
-        if (size == 0)
-        {
-            CmAssert(0);
-            return CM_FAILURE;
-        }
-        if (isaType == ISA_TYPE_Q || isaType == ISA_TYPE_UQ)
-        {
-            cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val.lval = *((uint64_t*)value);
-        }
-        else
-        {
-            int64_t tmpValue = typecastVals(value, isaType);
-            cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val.lval = tmpValue;
-        }
-        cisa_opnd->size = (uint16_t)Get_Size_Vector_Operand(&cisa_opnd->_opnd.v_opnd);
-    }
-#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
-    stopTimer(TIMER_VISA_BUILDER_CREATE_OPND);
-#endif
-    return CM_SUCCESS;
-}
-
 int VISAKernelImpl::CreateVISAImmediate(VISA_VectorOpnd *&cisa_opnd, const void *value, VISA_Type isaType)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
@@ -2278,19 +2307,19 @@ int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&cisa_opnd, CISA_GEN
                 decl->index < Get_CISA_PreDefined_Surf_Count() )
             {
                 int64_t immVal = Get_PreDefined_Surf_Index(decl->index);
-				if (immVal == PREDEF_SURF_252)
-				{
-					// we have to keep it as a variable
-					cisa_opnd->g4opnd = m_builder->Create_Src_Opnd_From_Dcl(m_builder->getBuiltinT252(), m_builder->getRegionScalar());
-				}
-				else
-				{
-					if (m_options->getOption(vISA_noncoherentStateless) && immVal == PREDEF_SURF_255)
-					{
-						immVal = PREDEF_SURF_253;
-					}
-					cisa_opnd->g4opnd = m_builder->createImm(immVal, Type_UD);
-				}
+                if (immVal == PREDEF_SURF_252)
+                {
+                    // we have to keep it as a variable
+                    cisa_opnd->g4opnd = m_builder->Create_Src_Opnd_From_Dcl(m_builder->getBuiltinT252(), m_builder->getRegionScalar());
+                }
+                else
+                {
+                    if (m_options->getOption(vISA_noncoherentStateless) && immVal == PREDEF_SURF_255)
+                    {
+                        immVal = PREDEF_SURF_253;
+                    }
+                    cisa_opnd->g4opnd = m_builder->createImm(immVal, Type_UD);
+                }
             }
             else
             {
@@ -2639,9 +2668,9 @@ int VISAKernelImpl::GetPredefinedSurface(VISA_SurfaceVar *&predDcl, PreDefined_S
 
 int VISAKernelImpl::GetBindlessSampler(VISA_SamplerVar *&samplerDcl)
 {
-	int status = CM_SUCCESS;
-	samplerDcl = m_bindlessSampler;
-	return status;
+    int status = CM_SUCCESS;
+    samplerDcl = m_bindlessSampler;
+    return status;
 }
 /************* OPERANDS CREATION END   ******************/
 
@@ -4840,8 +4869,9 @@ int VISAKernelImpl::AppendVISAMiscFileInst(const char *fileName)
     if(IS_GEN_BOTH_PATH)
     {
         size_t fileLen = strlen(fileName) + 1;
-        m_builder->curFile = (char*)m_mem.alloc(fileLen);
-        strcpy_s(m_builder->curFile, fileLen, fileName);
+        char *newFile = (char*)m_mem.alloc(fileLen);
+        m_builder->curFile = newFile;
+        strcpy_s(newFile, fileLen, fileName);
     }
     if(IS_VISA_BOTH_PATH)
     {
@@ -5577,7 +5607,7 @@ int VISAKernelImpl::AppendVISA3dInfo(VISASampler3DSubOpCode subOpcode, Common_VI
         //subOP
         ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, subOpcode));
         //channel
-		ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, channels.getBinary(opcode)));
+        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, channels.getBinary(opcode)));
 
         ADD_OPND(num_operands, opnd, surface);
         if(subOpcode == VISA_3D_RESINFO)
@@ -5590,7 +5620,7 @@ int VISAKernelImpl::AppendVISA3dInfo(VISASampler3DSubOpCode subOpcode, Common_VI
         }
         ADD_OPND(num_operands, opnd, dst);
 
-		CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
+        CHECK_NUM_OPNDS(inst_desc, num_operands, num_pred_desc_operands);
 
         CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
 
@@ -7359,11 +7389,11 @@ int VISAKernelImpl::AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOp
     {
         if(var->g4opnd->isGreg())
         {
-			properties |= (OPERAND_GENERAL << 4);
+            properties |= (OPERAND_GENERAL << 4);
         }
         else if(var->g4opnd->isAddress())
         {
-			properties |= (OPERAND_ADDRESS << 4);
+            properties |= (OPERAND_ADDRESS << 4);
         }
         else if(var->g4opnd->isFlag())
         {
@@ -7391,17 +7421,17 @@ int VISAKernelImpl::AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOp
         opnd[1] = (VISA_opnd*)m_mem.alloc(sizeof(VISA_opnd));
         if(var->_opnd.v_opnd.tag == OPERAND_GENERAL)
         {
-			opnd[0]->_opnd.other_opnd |= (OPERAND_GENERAL << 4);
+            opnd[0]->_opnd.other_opnd |= (OPERAND_GENERAL << 4);
             opnd[1]->_opnd.other_opnd = var->_opnd.v_opnd.opnd_val.gen_opnd.index;
         }
         else if(var->_opnd.v_opnd.tag == OPERAND_ADDRESS)
         {
-			opnd[0]->_opnd.other_opnd |= (OPERAND_ADDRESS << 4);
+            opnd[0]->_opnd.other_opnd |= (OPERAND_ADDRESS << 4);
             opnd[1]->_opnd.other_opnd = var->_opnd.v_opnd.opnd_val.addr_opnd.index;
         }
         else if(var->_opnd.v_opnd.tag == OPERAND_PREDICATE)
         {
-			opnd[0]->_opnd.other_opnd |= (OPERAND_PREDICATE << 4);
+            opnd[0]->_opnd.other_opnd |= (OPERAND_PREDICATE << 4);
             opnd[1]->_opnd.other_opnd = var->_opnd.v_opnd.opnd_val.pred_opnd.index;
         }
         opnd[1]->opnd_type = CISA_OPND_OTHER;
@@ -7464,7 +7494,13 @@ void VISAKernelImpl::addInstructionToEnd(CisaInst * inst)
     cisaInst->id = this->getvIsaInstCount();
     this->m_instruction_size += inst->getSize();
     DEBUG_PRINT_SIZE_INSTRUCTION("size after instruction added: ", inst->m_inst_desc->opcode, SIZE_VALUE_INST);
-    return;
+
+    if (IsAsmWriterMode())
+    {
+        // Print instructions
+        VISAKernel_format_provider fmt(this);
+        m_CISABuilder->m_ssIsaAsm << printInstruction(&fmt, inst->getCISAInst(), getOptions()) << endl;
+    }
 }
 
 int VISAKernelImpl::addLabel(label_info_t * lbl, char * label_name)
@@ -7545,6 +7581,7 @@ void VISAKernelImpl::finalizeKernel()
         VISATarget target = m_options->getTarget();
         AddKernelAttribute("Target", 1, &target);
     }
+
     patchLabels();
     m_cisa_kernel.string_count = (uint32_t)m_string_pool.size();
     m_cisa_kernel.strings = (const char **) m_mem.alloc(m_cisa_kernel.string_count * sizeof(char *));
@@ -7791,43 +7828,63 @@ unsigned int VISAKernelImpl::getLabelIdFromFunctionName(std::string name)
     }
 }
 
-unsigned int VISAKernelImpl::getIndexFromName(const std::string &name)
-{
-    std::map<std::string, CISA_GEN_VAR *>::iterator it;
-    it = m_var_name_to_index_map.find(name);
-    if(m_var_name_to_index_map.end() == it)
-    {
-        return CISA_INVALID_VAR_ID;
-    }else
-    {
-        return it->second->index;
-    }
-}
-
 CISA_GEN_VAR * VISAKernelImpl::getDeclFromName(const std::string &name)
 {
-    std::map<std::string, CISA_GEN_VAR *>::iterator it;
-    it = m_var_name_to_index_map.find(name);
-    if(m_var_name_to_index_map.end() == it)
-    {
-        return NULL;
-    }else
+    // First search in the unique var map
+    auto it = m_UniqueNamedVarMap.find(name);
+    if (it != m_UniqueNamedVarMap.end())
     {
         return it->second;
     }
+
+    // Search each scope level until var is found, starting from the back
+    for (auto scope_it = m_GenNamedVarMap.rbegin(); scope_it != m_GenNamedVarMap.rend(); scope_it++)
+    {
+        auto it = scope_it->find(name);
+        if (it != scope_it->end())
+        {
+            return it->second;
+        }
+    }
+    return NULL;
 }
 
 bool VISAKernelImpl::setNameIndexMap(const std::string &name, CISA_GEN_VAR * genDecl, bool unique)
 {
-    bool succeeded = true;
-
-    //make sure mapping doesn't already exist
-    if (unique && getIndexFromName(name) != CISA_INVALID_VAR_ID )
+    MUST_BE_TRUE(!m_GenNamedVarMap.empty(), "decl map is empty!");
+    if (!unique)
     {
-        return false;
+        // make sure mapping doesn't already exist in the current scope
+        if (m_GenNamedVarMap.back().find(name) != m_GenNamedVarMap.back().end())
+            return false;
+
+        // also cannot be redefinition of a unique var
+        if (m_UniqueNamedVarMap.find(name) != m_UniqueNamedVarMap.end())
+            return false;
+
+        // Add var to the current scope
+        m_GenNamedVarMap.back()[name] = genDecl;
     }
-    m_var_name_to_index_map[name] = genDecl;
-    return succeeded;
+    else
+    {
+        // we cannot create a unique var that redefines any previously created var in any scope
+        if (getDeclFromName(name) != NULL)
+            return false;
+
+        // unique vars are stored in a separate map
+        m_UniqueNamedVarMap[name] = genDecl;
+    }
+    return true;
+}
+
+void VISAKernelImpl::pushIndexMapScopeLevel()
+{
+    m_GenNamedVarMap.push_back(GenDeclNameToVarMap());
+}
+void VISAKernelImpl::popIndexMapScopeLevel()
+{
+    MUST_BE_TRUE(m_GenNamedVarMap.size() > 1, "Cannot pop base scope level!");
+    m_GenNamedVarMap.pop_back();
 }
 
 unsigned int VISAKernelImpl::getIndexFromLabelName(const std::string &name)
@@ -7965,12 +8022,6 @@ int VISAKernelImpl::GetGenxBinary(void *&buffer, int &size)
     return CM_SUCCESS;
 }
 
-int VISAKernelImpl::GetGenReloc(BasicRelocEntry*& relocs, unsigned int& numRelocs)
-{
-    computeAllRelocs(numRelocs, relocs);
-    return CM_SUCCESS;
-}
-
 int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize, unsigned int &numEntries)
 {
     G4_Kernel::RelocationTableTy& reloc_table = m_kernel->getRelocationTable();
@@ -7989,8 +8040,18 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
     GenRelocEntry* buffer_p = (GenRelocEntry*)buffer;
     for (auto reloc : reloc_table)
     {
+        auto inst = reloc.getInst();
+        assert(inst->isMov());
+        assert(inst->isCompactedInst() == false);
+        auto src0 = inst->getSrc(0);
+        assert(src0->isRelocImm() && ((src0->getType() == Type_UD) || (src0->getType() == Type_UQ)));
+
         buffer_p->r_type = reloc.getType();
-        buffer_p->r_offset = (uint32_t)reloc.getInst()->getGenOffset();
+        // hard-coded for now
+        uint32_t immOffset = getTypeSize(src0->getType()) == 8 ? 8 : 12;
+        buffer_p->r_offset = static_cast<uint32_t>(inst->getGenOffset()) + immOffset;
+        assert((buffer_p->r_offset > inst->getGenOffset()) && (buffer_p->r_offset < inst->getGenOffset() + BYTES_PER_INST));
+
         assert(reloc.getSymbolName().size() <= MAX_SYMBOL_NAME_LENGTH);
         strcpy_s(buffer_p->r_symbol, MAX_SYMBOL_NAME_LENGTH, reloc.getSymbolName().c_str());
         ++buffer_p;
@@ -8178,7 +8239,7 @@ G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(int index, uint16_t vStr
     case PreDefinedVarsInternal::FE_SP:
     case PreDefinedVarsInternal::FE_FP:
     case PreDefinedVarsInternal::HW_TID:
-	case PreDefinedVarsInternal::DBG:
+    case PreDefinedVarsInternal::DBG:
     case PreDefinedVarsInternal::COLOR:
         {
         G4_Type type = Get_G4_Type_From_Common_ISA_Type(getPredefinedVarType(internalIndex));
@@ -8228,45 +8289,6 @@ void VISAKernelImpl::setName(const char* n)
     if(m_kernel != NULL)
     {
         this->m_kernel->setName(m_name.c_str());
-    }
-}
-
-void VISAKernelImpl::setupRelocTable()
-{
-    IR_Builder* builder = getIRBuilder();
-
-    if( getRelocTablePresent() &&
-        builder != NULL)
-    {
-        unsigned int numVarRelocs = getVarRelocSize();
-        reloc_symtab* varSymTab = (reloc_symtab*)alloc( sizeof(reloc_symtab) );
-        varSymTab->num_syms = (uint16_t)numVarRelocs;
-        varSymTab->reloc_syms = (reloc_sym*)alloc(numVarRelocs * sizeof(reloc_sym) );
-
-        for( unsigned int i = 0; i < numVarRelocs; i++ )
-        {
-            unsigned int symIdx, resIdx;
-            getVarRelocEntry(i, symIdx, resIdx);
-            varSymTab->reloc_syms[i].symbolic_index = (uint16_t)symIdx;
-            varSymTab->reloc_syms[i].resolved_index = (uint16_t)resIdx;
-        }
-
-        builder->setVarRelocTable(varSymTab);
-
-        unsigned int numFuncRelocs = getFuncRelocSize();
-        reloc_symtab* funcSymTab = (reloc_symtab*)alloc( sizeof(reloc_symtab) );
-        funcSymTab->num_syms = (uint16_t)numFuncRelocs;
-        funcSymTab->reloc_syms = (reloc_sym*)alloc(numFuncRelocs * sizeof(reloc_sym) );
-
-        for( unsigned int i = 0; i < numFuncRelocs; i++ )
-        {
-            unsigned int symIdx, resIdx;
-            getFuncRelocEntry(i, symIdx, resIdx);
-            funcSymTab->reloc_syms[i].symbolic_index = (uint16_t)symIdx;
-            funcSymTab->reloc_syms[i].resolved_index = (uint16_t)resIdx;
-        }
-
-        builder->setFuncRelocTable(funcSymTab);
     }
 }
 
@@ -8354,8 +8376,8 @@ void VISAKernelImpl::computeFCInfo(BinaryEncodingBase* binEncodingInstance)
 
     // First populate FCInstMap map that holds all pseudo_fc_call/ret
     // instructions in the kernel.
-    BB_LIST_ITER bb_end = kernel->fg.BBs.end();
-    for(BB_LIST_ITER bb_it = kernel->fg.BBs.begin();
+    BB_LIST_ITER bb_end = kernel->fg.end();
+    for(BB_LIST_ITER bb_it = kernel->fg.begin();
         bb_it != bb_end;
         bb_it++)
     {
@@ -8428,8 +8450,8 @@ void VISAKernelImpl::computeFCInfo() {
 
     // First populate FCInstMap map that holds all pseudo_fc_call/ret
     // instructions in the kernel.
-    BB_LIST_ITER bb_end = kernel->fg.BBs.end();
-    for (BB_LIST_ITER bb_it = kernel->fg.BBs.begin();
+    BB_LIST_ITER bb_end = kernel->fg.end();
+    for (BB_LIST_ITER bb_it = kernel->fg.begin();
         bb_it != bb_end;
         bb_it++) {
         G4_BB* bb = (*bb_it);
@@ -8512,12 +8534,38 @@ int VISAKernelImpl::getDeclarationID(VISA_FileVar *decl)
     return decl->index;
 }
 
-int64_t VISAKernelImpl::getGenOffset()
+int64_t VISAKernelImpl::getGenOffset() const
 {
-    assert(m_kernel->fg.BBs.begin() != m_kernel->fg.BBs.end());
-    assert((*m_kernel->fg.BBs.begin())->begin() != (*m_kernel->fg.BBs.begin())->end());
+    assert(false == m_kernel->fg.empty());
+    auto &entryBB = *(*m_kernel->fg.begin());
+
     // the offset of the first gen inst in this kernel/function
-    return (*(*m_kernel->fg.BBs.begin())->begin())->getGenOffset();
+    assert(false == entryBB.empty());
+    auto inst = entryBB.begin();
+    while((UNDEFINED_GEN_OFFSET == (*inst)->getGenOffset()) && (entryBB.end() != inst)){
+        assert((*inst)->isLabel());
+        ++inst;
+    }
+    assert(inst != entryBB.end());
+
+    auto entryPointOffset = (*inst)->getGenOffset();
+    return entryPointOffset;
+}
+
+int64_t VISAKernelImpl::getGenSize() const
+{
+    assert(false == m_kernel->fg.empty());
+    auto &lastBB = *(*m_kernel->fg.rbegin());
+
+    // the offset of the last gen inst in this kernel/function
+    assert(false == lastBB.empty());
+    auto inst = lastBB.rbegin();
+    assert(UNDEFINED_GEN_OFFSET != (*inst)->getGenOffset()); // expecting terminator
+
+    auto size = (*inst)->getGenOffset();
+    size += (*inst)->isCompactedInst() ? (BYTES_PER_INST / 2) : BYTES_PER_INST;
+    size -= this->getGenOffset();
+    return size;
 }
 
 void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions)
@@ -8568,86 +8616,7 @@ void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functio
 #endif
 }
 
-void VISAKernelImpl::computeAllRelocs(unsigned int& numRelocs, BasicRelocEntry*& output)
-{
-    vector<BasicRelocEntry> relocs;
-
-    for (auto bbs : getKernel()->fg.BBs)
-    {
-        for (auto insts : *bbs)
-        {
-            for (auto i = 0; i < insts->getNumSrc(); i++)
-            {
-                auto opnd = insts->getSrc(i);
-
-                if (opnd &&
-                    opnd->isRelocImm())
-                {
-                    BasicRelocEntry newReloc;
-                    G4_Reloc_Imm* relocImmOpnd = (G4_Reloc_Imm*)opnd;
-                    newReloc.relocOffset = (uint64_t)relocImmOpnd->getRelocInfo().nativeOffset;
-                    newReloc.info = relocImmOpnd->getRelocInfo().input.info;
-                    newReloc.addend = relocImmOpnd->getRelocInfo().input.addend;
-                    relocs.push_back(newReloc);
-                }
-            }
-        }
-    }
-
-    numRelocs = (uint32_t) relocs.size();
-    if (numRelocs > 0)
-    {
-        output = (BasicRelocEntry*)allocCodeBlock(sizeof(BasicRelocEntry) * numRelocs);
-        if (!output)
-        {
-            numRelocs = 0;
-            return;
-        }
-        for (unsigned int idx = 0; idx < numRelocs; idx++)
-        {
-            output[idx].relocOffset = relocs[idx].relocOffset;
-            output[idx].info = relocs[idx].info;
-            output[idx].addend = relocs[idx].addend;
-            idx++;
-        }
-    }
-}
-
-void VISAKernelImpl::emitAllRelocs(unsigned int numRelocs, BasicRelocEntry* relocs)
-{
-    if (numRelocs == 0 || relocs == nullptr)
-        return;
-
-    FILE* fp;
-    const char* buf = nullptr;
-    getOptions()->getOption(vISA_RelocFilename, buf);
-
-    std::string fname;
-    if (buf != nullptr)
-    {
-        fname = std::string(buf);
-    }
-
-    fname += getName();
-    fname += "_out";
-
-    fp = fopen(fname.c_str(), "wb");
-    fwrite(relocs, sizeof(BasicRelocEntry), numRelocs, fp);
-    fclose(fp);
-}
-
 extern "C" void freeBlock(void* ptr);
-
-void VISAKernelImpl::computeAndEmitGenRelocs()
-{
-    unsigned int numRelocs;
-    BasicRelocEntry* relocs = nullptr;
-
-    computeAllRelocs(numRelocs, relocs);
-    emitAllRelocs(numRelocs, relocs);
-
-    freeBlock(relocs);
-}
 
 bool VISAKernelImpl::getIntKernelAttributeValue(const char* attrName, int& value)
 {

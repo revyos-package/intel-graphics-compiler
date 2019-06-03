@@ -78,28 +78,12 @@ EncoderBase::EncoderBase(
 {
 }
 
-void EncoderBase::encodeKernelPreProcess(const Kernel &k)
+void EncoderBase::encodeKernelPreProcess(Kernel &k)
 {
-    if (m_opts.noCompactFirstEightInst) {
-        // set the first 8 instructions to NOCOMPACT
-        // The first 8 instructions must be in the same block when this option is enabled
-        if (!k.getBlockList().empty()) {
-            Block* first_blk = *k.getBlockList().begin();
-            size_t counter = 0;
-            for (auto inst : first_blk->getInstList()) {
-                inst->addInstOpt(InstOpt::NOCOMPACT);
-                counter++;
-                if (counter > 7)
-                    break;
-            }
-            IGA_ASSERT(counter == 8, "noCompactFirstEightInst: Less than 8 instructions in the first block");
-        }
-    }
-
     doEncodeKernelPreProcess(k);
 }
 
-void EncoderBase::doEncodeKernelPreProcess(const Kernel &k)
+void EncoderBase::doEncodeKernelPreProcess(Kernel &k)
 {
 }
 
@@ -124,7 +108,7 @@ size_t EncoderBase::getNumInstructionsEncoded() const
 }
 
 void EncoderBase::encodeKernel(
-    const Kernel &k,
+    Kernel &k,
     MemManager &mem,
     void *&bits,
     uint32_t &bitsLen)
@@ -149,6 +133,7 @@ void EncoderBase::encodeKernel(
             fatalAt(0, "failed to allocate memory for kernel binary");
             return;
         }
+
         for (auto blk : k.getBlockList()) {
             START_ENCODER_TIMER()
             encodeBlock(blk);
@@ -329,17 +314,10 @@ void EncoderBase::encodeInstruction(Instruction& inst)
 
     GED_ENCODE(MaskCtrl, IGAToGEDTranslation::lowerEmask(inst.getMaskCtrl()));
 
-    // GED_ExecutionDataType
+    // Predicate
     const Predication &pred = inst.getPredication();
-    RegRef flagReg = inst.getFlagReg();
-    if (flagReg != REGREF_INVALID) {
-        GED_ENCODE(FlagRegNum, static_cast<uint32_t>(inst.getFlagReg().regNum));
-        GED_ENCODE(FlagSubRegNum, inst.getFlagReg().subRegNum);
-    }
-
     if (os.supportsPredication()) {
         GED_ENCODE(PredCtrl, IGAToGEDTranslation::lowerPredCtrl(pred.function));
-        GED_ENCODE(PredInv, pred.inverse ? GED_PRED_INV_Invert : GED_PRED_INV_Normal);
     } else {
         GED_ENCODE(PredCtrl, GED_PRED_CTRL_Normal);
     }
@@ -350,6 +328,18 @@ void EncoderBase::encodeInstruction(Instruction& inst)
         {
             GED_ENCODE(CondModifier, IGAToGEDTranslation::lowerCondModifier(inst.getFlagModifier()));
         }
+    }
+
+    bool hasFlagRegField = true;
+
+    if (os.supportsPredication() && hasFlagRegField)
+        GED_ENCODE(PredInv, pred.inverse ? GED_PRED_INV_Invert : GED_PRED_INV_Normal);
+
+    // GED_ExecutionDataType
+    RegRef flagReg = inst.getFlagReg();
+    if (hasFlagRegField && (flagReg != REGREF_INVALID)) {
+        GED_ENCODE(FlagRegNum, static_cast<uint32_t>(inst.getFlagReg().regNum));
+        GED_ENCODE(FlagSubRegNum, inst.getFlagReg().subRegNum);
     }
 
     // set AccWrEn where supported
@@ -428,9 +418,8 @@ void EncoderBase::encodeTernaryDestinationAlign1(
         GED_ENCODE(DstMathMacroExt, IGAToGEDTranslation::lowerMathMacroReg(dst.getMathMacroExt()));
         // GED_ENCODE(DstHorzStride, 1);
     } else {
-        uint32_t subRegNum = SubRegToBytesOffset(
-            dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType());
-        GED_ENCODE(DstSubRegNum, subRegNum);
+        encodeDstSubRegNum(subRegNumToBinNum(
+            dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()), true);
         bool hasDstRgnHz = true;
         if (hasDstRgnHz) {
             GED_ENCODE(DstHorzStride, static_cast<int>(dst.getRegion().getHz()));
@@ -495,9 +484,9 @@ void EncoderBase::encodeTernarySourceAlign1(
             encodeSrcRegionHorz<S>(Region::Horz::HZ_1);
 
         } else {
-            uint32_t subRegNum = SubRegToBytesOffset(
+            auto subReg = subRegNumToBinNum(
                 src.getDirRegRef().subRegNum, src.getDirRegName(), src.getType());
-            encodeSrcSubRegNum<S>(subRegNum);
+            encodeSrcSubRegNum<S>(subReg, true);
         }
         break;
     }
@@ -721,6 +710,8 @@ void EncoderBase::encodeBranchingInstructionSimplified(const Instruction& inst)
     if (src0IsLabel) {
         GED_ENCODE(Src0RegFile, GED_REG_FILE_IMM);
     } else {
+        if (inst.getSource(0).getKind() == Operand::Kind::INDIRECT)
+            error("Branch instructions do not support indirect register mode");
         encodeBranchSource(inst, inst.getSource(0));
     }
 
@@ -841,11 +832,11 @@ void EncoderBase::encodeBranchDestination(
     GED_ENCODE(DstRegFile,
         IGAToGEDTranslation::lowerRegFile(dst.getDirRegName()));
     encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
-    GED_ENCODE(DstSubRegNum,
-        SubRegToBytesOffset(
-            dst.getDirRegRef().subRegNum,
-            dst.getDirRegName(),
-            dst.getType()));
+    encodeDstSubRegNum(subRegNumToBinNum(
+                         dst.getDirRegRef().subRegNum,
+                         dst.getDirRegName(),
+                         dst.getType()),
+                       true);
 }
 
 void EncoderBase::encodeBasicDestination(
@@ -911,12 +902,14 @@ void EncoderBase::encodeBasicDestination(
                 encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
                 GED_ENCODE(DstChanEn, GED_DST_CHAN_EN_xyzw);
             }
-            GED_ENCODE(DstSubRegNum,
-                SubRegToBytesOffset(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()));
+            encodeDstSubRegNum(
+                subRegNumToBinNum(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()),
+                inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
         } else { // Align1
             encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
-            GED_ENCODE(DstSubRegNum,
-                SubRegToBytesOffset(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()));
+            encodeDstSubRegNum(
+                subRegNumToBinNum(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()),
+                inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
         }
         break;
     case Operand::Kind::MACRO:
@@ -971,9 +964,9 @@ void EncoderBase::encodeBranchSource(
 {
     encodeSrcRegFile<SourceIndex::SRC0>(IGAToGEDTranslation::lowerRegFile(src.getDirRegName()));
     encodeSrcReg<SourceIndex::SRC0>(src.getDirRegName(),src.getDirRegRef().regNum);
-    uint32_t subRegBits = SubRegToBytesOffset(
+    auto subReg = subRegNumToBinNum(
         src.getDirRegRef().subRegNum, src.getDirRegName(), Type::D);
-    encodeSrcSubRegNum<SourceIndex::SRC0>(subRegBits);
+    encodeSrcSubRegNum<SourceIndex::SRC0>(subReg, true);
 }
 
 template <SourceIndex S>
@@ -1016,9 +1009,10 @@ void EncoderBase::encodeBasicSource(
                 encodeSrcReg<S>(RegName::ARF_MME, 0);
             } else {
                 encodeSrcReg<S>(src.getDirRegName(), src.getDirRegRef().regNum);
-                uint32_t subRegBits = SubRegToBytesOffset(
+                auto subReg = subRegNumToBinNum(
                     src.getDirRegRef().subRegNum, src.getDirRegName(), src.getType());
-                encodeSrcSubRegNum<S>(subRegBits);
+                encodeSrcSubRegNum<S>(subReg,
+                    inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
             }
         } else { // (src.getKind() == Operand::Kind::MACRO)
             encodeSrcReg<S>(RegName::GRF_R,src.getDirRegRef().regNum);
@@ -1216,8 +1210,8 @@ void EncoderBase::encodeSendSource0(const Operand& src)
     else if( src.getKind() ==  Operand::Kind::INDIRECT )
     {
         GED_ENCODE(Src0DataType, IGAToGEDTranslation::lowerDataType(t));
-        GED_ENCODE(Src0AddrImm, src.getIndImmAddr());
         GED_ENCODE(Src0AddrSubRegNum, src.getIndAddrReg().subRegNum);
+        GED_ENCODE(Src0AddrImm, src.getIndImmAddr());
     }
 }
 
@@ -1276,8 +1270,8 @@ void EncoderBase::encodeSendsDestination(const Operand& dst)
 
     GED_ENCODE(DstRegNum, dst.getDirRegRef().regNum);
     //TODO: set correct regType
-    GED_ENCODE(DstSubRegNum,
-        SubRegToBytesOffset(dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType()));
+    encodeDstSubRegNum(
+        subRegNumToBinNum(dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType()), true);
 }
 
 template <SourceIndex S>
@@ -1366,9 +1360,9 @@ void EncoderBase::encodeTernarySourceAlign16(const Instruction& inst)
         }
         uint32_t regNum = reg.regNum;
         encodeSrcReg<S>(RegName::GRF_R,regNum);
-        uint32_t subRegNum =
-            SubRegToBytesOffset(subRegNumber, src.getDirRegName(), src.getType());
-        encodeSrcSubRegNum<S>(subRegNum);
+        auto subReg =
+            subRegNumToBinNum(subRegNumber, src.getDirRegName(), src.getType());
+        encodeSrcSubRegNum<S>(subReg, true);
     } else {
         // implicit operand accumulator
         // e.g. madm (4) ... -r14.acc3
@@ -1446,9 +1440,8 @@ void EncoderBase::encodeTernaryDestinationAlign16(const Instruction& inst)
             }
         }
         GED_ENCODE(DstChanEn, chanEn);
-        uint32_t subRegNum = SubRegToBytesOffset(
-            reg.subRegNum, dst.getDirRegName(), dst.getType());
-        GED_ENCODE(DstSubRegNum, subRegNum);
+        encodeDstSubRegNum(subRegNumToBinNum(
+            reg.subRegNum, dst.getDirRegName(), dst.getType()), true);
     }
 }
 
@@ -1568,6 +1561,16 @@ void EncoderBase::encodeOptionsThreadControl(const Instruction& inst)
     }
 }
 
+// Translate from subRegNum to num represented in binary encoding
+std::pair<bool, uint32_t> EncoderBase::subRegNumToBinNum(int subRegNum, RegName regName, Type type)
+{
+    return std::make_pair(true, SubRegToBytesOffset(subRegNum, regName, type));
+}
+
+void EncoderBase::encodeDstSubRegNum(std::pair<bool, uint32_t> subReg, bool isTernaryOrBranch)
+{
+    GED_ENCODE(DstSubRegNum, subReg.second);
+}
 
 void EncoderBase::encodeOptions(const Instruction& inst)
 {

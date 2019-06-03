@@ -499,12 +499,12 @@ std::string COpenCLKernel::getSubGroupSizeString(SubGroupSizeMetaDataHandle& sub
 }
 std::string COpenCLKernel::getWorkgroupWalkOrderString(const IGC::WorkGroupWalkOrderMD& workgroupWalkOrder)
 {
-	std::string subTypeString = "intel_reqd_workgroup_walk_order(";
-	subTypeString += utostr(workgroupWalkOrder.dim0) + ",";
-	subTypeString += utostr(workgroupWalkOrder.dim1) + ",";
-	subTypeString += utostr(workgroupWalkOrder.dim2) + ",";
-	subTypeString += ")";
-	return subTypeString;
+    std::string subTypeString = "intel_reqd_workgroup_walk_order(";
+    subTypeString += utostr(workgroupWalkOrder.dim0) + ",";
+    subTypeString += utostr(workgroupWalkOrder.dim1) + ",";
+    subTypeString += utostr(workgroupWalkOrder.dim2) + ",";
+    subTypeString += ")";
+    return subTypeString;
 }
 std::string COpenCLKernel::getVecTypeHintString(VectorTypeHintMetaDataHandle& vecTypeHintInfo)
 {
@@ -720,16 +720,16 @@ void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition
     
             iOpenCL::PointerArgumentAnnotation *ptrAnnotation = new iOpenCL::PointerArgumentAnnotation();
 
-			if (argAlloc->type == ResourceTypeEnum::BindlessUAVResourceType)
-			{
-				ptrAnnotation->IsStateless = false;
-				ptrAnnotation->IsBindlessAccess = true;
-			}
-			else
-			{
-				ptrAnnotation->IsStateless = true;
-				ptrAnnotation->IsBindlessAccess = false;
-			}
+            if (argAlloc->type == ResourceTypeEnum::BindlessUAVResourceType)
+            {
+                ptrAnnotation->IsStateless = false;
+                ptrAnnotation->IsBindlessAccess = true;
+            }
+            else
+            {
+                ptrAnnotation->IsStateless = true;
+                ptrAnnotation->IsBindlessAccess = false;
+            }
 
             ptrAnnotation->AddressSpace         = addressSpace;
             ptrAnnotation->AnnotationSize       = sizeof(ptrAnnotation);
@@ -1048,8 +1048,8 @@ void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition
 
             imageInput->AccessedByFloatCoords = kernelArg->getImgAccessedFloatCoords();
             imageInput->AccessedByIntCoords   = kernelArg->getImgAccessedIntCoords();
-			imageInput->IsBindlessAccess = kernelArg->needsAllocation();
-			imageInput->PayloadPosition = payloadPosition;
+            imageInput->IsBindlessAccess = kernelArg->needsAllocation();
+            imageInput->PayloadPosition = payloadPosition;
 
             switch (resInfo.Type)
             {
@@ -1120,9 +1120,9 @@ void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition
             samplerArg->SamplerTableIndex                   = resInfo.Index;
             samplerArg->LocationIndex                       = kernelArg->getLocationIndex();
             samplerArg->LocationCount                       = kernelArg->getLocationCount();
-			samplerArg->IsBindlessAccess					= kernelArg->needsAllocation();
+            samplerArg->IsBindlessAccess                    = kernelArg->needsAllocation();
             samplerArg->IsEmulationArgument                 = kernelArg->isEmulationArgument();
-			samplerArg->PayloadPosition = payloadPosition;
+            samplerArg->PayloadPosition = payloadPosition;
 
             m_kernelInfo.m_samplerArgument.push_back(samplerArg);
         }
@@ -1475,12 +1475,16 @@ void COpenCLKernel::AllocatePayload()
         // Local IDs are non-uniform and may have two instances in SIMD32 mode
         int numAllocInstances = arg.getArgType() == KernelArg::ArgType::IMPLICIT_LOCAL_IDS ? m_numberInstance : 1;
 
+        auto allocSize = arg.getAllocateSize();
+
         if (!IsUnusedArg && !isRuntimeValue)
         {
             if (arg.needsAllocation())
             {
                 // Align on the desired alignment for this argument
-                offset = iSTD::Align(offset, arg.getAlignment());
+                auto alignment = arg.getAlignment();
+
+                offset = iSTD::Align(offset, alignment);
 
                 // Arguments larger than a GRF must be at least GRF-aligned.
                 // Arguments smaller than a GRF may not cross GRF boundaries.
@@ -1489,11 +1493,11 @@ void COpenCLKernel::AllocatePayload()
                 // Note that this is done AFTER we align on the base alignment,
                 // because of edge cases where aligning on the base alignment
                 // is what causes the "overflow".
-                unsigned int startGRF = offset / SIZE_GRF;
-                unsigned int endGRF = (offset + arg.getAllocateSize() - 1) / SIZE_GRF;
+                unsigned int startGRF = offset / getGRFSize();
+                unsigned int endGRF = (offset + allocSize - 1) / getGRFSize();
                 if (startGRF != endGRF)
                 {
-                    offset = iSTD::Align(offset, SIZE_GRF);
+                    offset = iSTD::Align(offset, getGRFSize());
                 }
 
                 // And now actually tell vISA we need this space.
@@ -1504,7 +1508,7 @@ void COpenCLKernel::AllocatePayload()
                     CVariable* var = GetSymbol(const_cast<Argument*>(A));
                     for (int i = 0; i < numAllocInstances; ++i)
                     {
-                        AllocateInput(var, offset + (arg.getAllocateSize() * i), i);
+                        AllocateInput(var, offset + (allocSize * i), i);
                     }
                 }
                 // or else we would just need to increase an offset
@@ -1518,7 +1522,7 @@ void COpenCLKernel::AllocatePayload()
             {
                 for (int i = 0; i < numAllocInstances; ++i)
                 {
-                    offset += arg.getAllocateSize();
+                    offset += allocSize;
                 }
             }
         }
@@ -1536,7 +1540,7 @@ void COpenCLKernel::AllocatePayload()
     {    
         if (loadThreadPayload)
         {
-            uint perThreadInputSize = SIZE_GRF * 3 * m_numberInstance;
+            uint perThreadInputSize = SIZE_WORD * 3 * (m_dispatchSize == SIMDMode::SIMD32 ? 32 : 16);
             encoder.GetVISAKernel()->AddKernelAttribute("perThreadInputSize", sizeof(uint16_t), &perThreadInputSize);
         }
     }
@@ -1544,7 +1548,7 @@ void COpenCLKernel::AllocatePayload()
     m_kernelInfo.m_threadPayload.OffsetToSkipPerThreadDataLoad = 0;
     m_kernelInfo.m_threadPayload.PassInlineData = false;
     
-    m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, SIZE_GRF);
+    m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, getGRFSize());
 
     CreateInlineSamplerAnnotations();
 
@@ -1597,8 +1601,8 @@ void COpenCLKernel::FillKernel()
     m_kernelInfo.m_executionEnivronment.PerThreadSpillFillSize = ProgramOutput()->m_scratchSpaceUsedBySpills;
     m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace = ProgramOutput()->m_scratchSpaceUsedByShader;
     m_kernelInfo.m_executionEnivronment.PerThreadScratchUseGtpin = ProgramOutput()->m_scratchSpaceUsedByGtpin;
-    m_kernelInfo.m_kernelProgram.NOSBufferSize = m_NOSBufferSize / SIZE_GRF; // in 256 bits
-    m_kernelInfo.m_kernelProgram.ConstantBufferLength = m_ConstantBufferLength / SIZE_GRF; // in 256 bits
+    m_kernelInfo.m_kernelProgram.NOSBufferSize = m_NOSBufferSize / getGRFSize(); // in 256 bits
+    m_kernelInfo.m_kernelProgram.ConstantBufferLength = m_ConstantBufferLength / getGRFSize(); // in 256 bits
     m_kernelInfo.m_kernelProgram.MaxNumberOfThreads = m_Platform->getMaxGPGPUShaderThreads();
 
     m_kernelInfo.m_executionEnivronment.SumFixedTGSMSizes = getSumFixedTGSMSizes(entry);
@@ -1666,6 +1670,7 @@ void COpenCLKernel::FillKernel()
     }
 
     m_kernelInfo.m_executionEnivronment.HasGlobalAtomics = GetHasGlobalAtomics();
+    m_kernelInfo.m_threadPayload.OffsetToSkipPerThreadDataLoad = ProgramOutput()->m_offsetToSkipPerThreadDataLoad;
 
 }
 
@@ -1771,7 +1776,7 @@ unsigned int COpenCLKernel::getBTI(SOpenCLKernelInfo::SResourceInfo& resInfo)
 void CollectProgramInfo(OpenCLProgramContext* ctx)
 {    
     MetaDataUtils mdUtils(ctx->getModule());
-	ModuleMetaData *modMD = ctx->getModuleMetaData();
+    ModuleMetaData *modMD = ctx->getModuleMetaData();
 
     if (!modMD->inlineConstantBuffers.empty())
     {
@@ -1806,7 +1811,7 @@ void CollectProgramInfo(OpenCLProgramContext* ctx)
         ctx->m_programInfo.m_initGlobalAnnotation.push_back(std::move(initGlobal));
     }
 
-	{
+    {
         auto &FuncMap = ctx->getModuleMetaData()->FuncMD;
         for (auto i : FuncMap)
         {
@@ -1832,10 +1837,10 @@ void CollectProgramInfo(OpenCLProgramContext* ctx)
          iter++)
     {
         std::unique_ptr<iOpenCL::GlobalPointerAnnotation> initGlobalPointer(new iOpenCL::GlobalPointerAnnotation());
-		initGlobalPointer->PointeeAddressSpace = iter->PointeeAddressSpace;
-		initGlobalPointer->PointeeBufferIndex  = iter->PointeeBufferIndex;
-		initGlobalPointer->PointerBufferIndex  = iter->PointerBufferIndex; 
-		initGlobalPointer->PointerOffset       = iter->PointerOffset;
+        initGlobalPointer->PointeeAddressSpace = iter->PointeeAddressSpace;
+        initGlobalPointer->PointeeBufferIndex  = iter->PointeeBufferIndex;
+        initGlobalPointer->PointerBufferIndex  = iter->PointerBufferIndex; 
+        initGlobalPointer->PointerOffset       = iter->PointerOffset;
         ctx->m_programInfo.m_initGlobalPointerAnnotation.push_back(std::move(initGlobalPointer));
     }
 
@@ -1844,10 +1849,10 @@ void CollectProgramInfo(OpenCLProgramContext* ctx)
          iter++)
     {
         std::unique_ptr<iOpenCL::ConstantPointerAnnotation> initConstantPointer(new iOpenCL::ConstantPointerAnnotation());
-		initConstantPointer->PointeeAddressSpace = iter->PointeeAddressSpace;
-		initConstantPointer->PointeeBufferIndex  = iter->PointeeBufferIndex;
-		initConstantPointer->PointerBufferIndex  = iter->PointerBufferIndex;
-		initConstantPointer->PointerOffset       = iter->PointerOffset;
+        initConstantPointer->PointeeAddressSpace = iter->PointeeAddressSpace;
+        initConstantPointer->PointeeBufferIndex  = iter->PointeeBufferIndex;
+        initConstantPointer->PointerBufferIndex  = iter->PointerBufferIndex;
+        initConstantPointer->PointerOffset       = iter->PointerOffset;
 
         ctx->m_programInfo.m_initConstantPointerAnnotation.push_back(std::move(initConstantPointer));
     }
@@ -1930,7 +1935,7 @@ void CodeGen(OpenCLProgramContext* ctx)
     MetaDataUtils *pMdUtils = ctx->getMetaDataUtils();
 
     //Clear spill parameters of retry manager in the very begining of code gen
-	ctx->m_retryManager.ClearSpillParams();
+    ctx->m_retryManager.ClearSpillParams();
 
     CShaderProgram::KernelShaderMap shaders;
     CodeGen(ctx, shaders);
@@ -2029,6 +2034,9 @@ bool COpenCLKernel::hasReadWriteImage(llvm::Function &F)
 
 bool COpenCLKernel::CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Function &F)
 {
+
+
+
     //If forced SIMD Mode (by driver or regkey), then:
     // 1. Compile only that SIMD mode and nothing else
     // 2. Compile that SIMD mode even if it is not profitable, i.e. even if compileThisSIMD() returns false for it.
@@ -2084,6 +2092,7 @@ SIMDStatus COpenCLKernel::checkSIMDCompileConds(SIMDMode simdMode, EmitPass &EP,
             return SIMDStatus::SIMD_FUNC_FAIL;
     }
 
+    //ToDo: change?
     // Scratch space allocated per-thread needs to be less than 2 MB.
     if (m_ScratchSpaceSize > pCtx->m_DriverInfo.maxPerThreadScratchSpace())
     {

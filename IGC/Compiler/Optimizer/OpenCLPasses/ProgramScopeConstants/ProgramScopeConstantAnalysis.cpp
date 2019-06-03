@@ -74,6 +74,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
     for(Module::global_iterator I = M.global_begin(), E = M.global_end(); I != E; ++I)
     {
         GlobalVariable* globalVar = &(*I);
+        bool useGlobalRelocation = IGC_IS_FLAG_ENABLED(EnableGlobalRelocation) && (globalVar->hasExternalLinkage() || globalVar->hasCommonLinkage());
         
         PointerType* ptrType = cast<PointerType>(globalVar->getType());
         assert(ptrType && "The type of a global variable must be a pointer type");
@@ -111,7 +112,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
         }
 
         // If this variable isn't used, don't add it to the buffer.
-        if (globalVar->use_empty())
+        if (globalVar->use_empty() && !useGlobalRelocation)
         {
             continue;
         }
@@ -147,7 +148,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
     }
 
     MetaDataUtils *mdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
-	ModuleMetaData *modMd = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+    ModuleMetaData *modMd = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
 
     if (inlineConstantBuffer.size() > 0)
     {
@@ -167,13 +168,17 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
         // constant is used in the kernel; for example, a global buffer
         // may contain pointers that in turn point into the constant
         // address space).
-        for (auto &pFunc : M) 
+        // Don't need implicit args for global relocation
+        if (IGC_IS_FLAG_DISABLED(EnableGlobalRelocation))
         {
-            if (pFunc.isDeclaration()) continue;
-            
-            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-            implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
-            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            for (auto &pFunc : M)
+            {
+                if (pFunc.isDeclaration()) continue;
+
+                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+                implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
+                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            }
         }
 
         mdUtils->save(C);
@@ -190,13 +195,17 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
         ilpsb.alignment = globalBufferAlignment;
         modMd->inlineGlobalBuffers.push_back(ilpsb);
 
-        for (auto &pFunc : M) 
+        // Don't need implicit args for global relocation
+        if (IGC_IS_FLAG_DISABLED(EnableGlobalRelocation))
         {
-            if (pFunc.isDeclaration()) continue;
-            
-            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-            implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
-            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            for (auto &pFunc : M)
+            {
+                if (pFunc.isDeclaration()) continue;
+
+                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+                implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
+                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            }
         }
 
         mdUtils->save(C);
@@ -214,21 +223,21 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module &M)
 
             if (info.AddressSpaceWherePointerResides == ADDRESS_SPACE_GLOBAL)
             {
-				PointerProgramBinaryInfo ppbi;
-				ppbi.PointerBufferIndex = 0;
-				ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
-				ppbi.PointeeBufferIndex = 0;
-				ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
-				modMd->GlobalPointerProgramBinaryInfos.push_back(ppbi);
+                PointerProgramBinaryInfo ppbi;
+                ppbi.PointerBufferIndex = 0;
+                ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
+                ppbi.PointeeBufferIndex = 0;
+                ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
+                modMd->GlobalPointerProgramBinaryInfos.push_back(ppbi);
             }
             else if (info.AddressSpaceWherePointerResides == ADDRESS_SPACE_CONSTANT)
             {
-				PointerProgramBinaryInfo ppbi;
-				ppbi.PointerBufferIndex = 0;
-				ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
-				ppbi.PointeeBufferIndex = 0;
-				ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
-				modMd->ConstantPointerProgramBinaryInfos.push_back(ppbi);
+                PointerProgramBinaryInfo ppbi;
+                ppbi.PointerBufferIndex = 0;
+                ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
+                ppbi.PointeeBufferIndex = 0;
+                ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
+                modMd->ConstantPointerProgramBinaryInfos.push_back(ppbi);
             }
             else
             {

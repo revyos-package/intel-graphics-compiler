@@ -89,21 +89,21 @@ public:
     virtual void ParseShaderSpecificOpcode(llvm::Instruction* inst) {}
     virtual void AllocatePayload() {}
     virtual void AddPrologue() {}
-    void PreAnalysisPass();
+    virtual void PreAnalysisPass();
     virtual void ExtractGlobalVariables() {}
     void         EmitEOTURBWrite();
     void         EOTRenderTarget();
     virtual void AddEpilogue(llvm::ReturnInst* ret);
 
-    virtual CVariable* GetURBOutputHandle() 
-    { 
-        assert(!"Should be overridden in a derived class!"); 
+    virtual CVariable* GetURBOutputHandle()
+    {
+        assert(!"Should be overridden in a derived class!");
         return nullptr;
     }
-    virtual CVariable* GetURBInputHandle(CVariable* pVertexIndex) 
-    { 
-        assert(!"Should be overridden in a derived class!"); 
-        return nullptr; 
+    virtual CVariable* GetURBInputHandle(CVariable* pVertexIndex)
+    {
+        assert(!"Should be overridden in a derived class!");
+        return nullptr;
     }
     virtual QuadEltUnit GetFinalGlobalOffet(QuadEltUnit globalOffset) { return QuadEltUnit(0); }
     virtual bool hasReadWriteImage(llvm::Function &F) { return false; }
@@ -120,12 +120,19 @@ public:
     CVariable*  GetNewVector(llvm::Value* val, e_alignment preferredAlign = EALIGN_AUTO);
     CVariable*  GetNewAlias(CVariable* var, VISA_Type type, uint16_t offset, uint16_t numElements);
     CVariable*  GetNewAlias(CVariable* var, VISA_Type type, uint16_t offset, uint16_t numElements, bool uniform);
+
+    // If BaseVar's type matches V's, return BaseVar; otherwise, create an new
+    // alias CVariable to BaseVar. The newly-created alias CVariable's size
+    // should be the same as BaseVar's size (used for creating alias for values
+    // in the same DeSSA's congruent class).
+    CVariable*  createAliasIfNeeded(llvm::Value* V, CVariable* BaseVar);
     // Allow to create an alias of a variable handpicking a slice to be able to do cross lane in SIMD32
     CVariable*  GetVarHalf(CVariable* var, unsigned int half);
-    
+
     void        CopyVariable(CVariable* dst, CVariable* src, uint dstSubVar = 0, uint srcSubVar = 0);
     void        PackAndCopyVariable(CVariable* dst, CVariable* src, uint subVar = 0);
     bool        IsValueUsed(llvm::Value* value);
+    CVariable*    GetGlobalCVar(llvm::Value* value);
     uint        GetNbElementAndMask(llvm::Value* value, uint32_t &mask);
     void        CreatePayload(uint regCount, uint idxOffset, CVariable*& payload, llvm::Instruction* inst, uint paramOffset, uint8_t hfFactor);
     uint        GetNbVectorElementAndMask(llvm::Value* value, uint32_t &mask);
@@ -164,11 +171,12 @@ public:
     virtual CVariable* GetGlobalMapping(llvm::Value* c);
     CVariable*  BitCast(CVariable* var, VISA_Type newType);
     void        ResolveAlias(CVariable* var);
-	void        CacheArgumentsList();
+    void        CacheArgumentsList();
     void        MapPushedInputs();
     void        CreateGatherMap();
     void        CreateConstantBufferOutput(SKernelProgram *pKernelProgram);
-    void        CreateFuncSymbolToRegisterMap(llvm::Function* pFunc);
+    void        CreateFunctionSymbol(llvm::Function* pFunc);
+    void        CreateGlobalSymbol(llvm::GlobalVariable* pGlobal);
 
     void        CreateImplicitArgs();
     uint        GetBlockId(llvm::BasicBlock* block);
@@ -178,7 +186,7 @@ public:
     void        SetDeSSAHelper(DeSSA* deSSA) { m_deSSA = deSSA; }
     void        SetCoalescingEngineHelper(CoalescingEngine* ce) { m_coalescingEngine = ce; }
     void        SetCodeGenHelper(CodeGenPatternMatch* CG) { m_CG = CG; }
-	void        SetPushInfoHelper(PushInfo* PI) { pushInfo = *PI; }
+    void        SetPushInfoHelper(PushInfo* PI) { pushInfo = *PI; }
     void        SetDominatorTreeHelper(llvm::DominatorTree* DT) { m_DT = DT; }
     void        SetDataLayout(const llvm::DataLayout* DL) { m_DL = DL; }
     void        SetFunctionGroupAnalysis(GenXFunctionGroupAnalysis *FGA) { m_FGA = FGA; }
@@ -199,7 +207,7 @@ public:
 
     void        SampleHeader(CVariable* payload, uint offset, uint writeMask, uint rti);
 
-    bool        GetHasBarrier() const { return m_HasBarrier; } 
+    bool        GetHasBarrier() const { return m_HasBarrier; }
     void        SetHasBarrier() { m_HasBarrier = true; }
 
     void        GetSimdOffsetBase(CVariable*& pVar);
@@ -220,9 +228,9 @@ public:
     bool HasBecomeNoop(llvm::Instruction *inst);
 
     // If V is not in any congruent class, not aliased to any other
-    // variables,  not payload-coalesced, it is a simple variable
-    // and this function returns true.
-    bool IsSimpleVariable(llvm::Value* V);
+    // variables, not payload-coalesced, then this function returns
+    // true.
+    bool IsCoalesced(llvm::Value* V);
 
     bool VMECoalescePattern(llvm::GenIntrinsicInst*);
 
@@ -235,7 +243,7 @@ public:
     const CBTILayout* m_pBtiLayout;
     const CPlatform*  m_Platform;
     const CDriverInfo* m_DriverInfo;
-    
+
     ModuleMetaData* m_ModuleMetadata;
 
     /// Dispatch size is the number of logical threads running in one hardware thread
@@ -244,7 +252,7 @@ public:
     ShaderDispatchMode m_ShaderDispatchMode;
     SIMDMode m_SIMDSize;
     uint8_t m_numberInstance;
-	PushInfo pushInfo;
+    PushInfo pushInfo;
     bool isInputsPulled; //true if any input is pulled, false otherwise
     bool isMessageTargetDataCacheDataPort;
     uint m_sendStallCycle;
@@ -252,7 +260,7 @@ public:
     unsigned m_spillSize = 0;
     float m_spillCost = 0;          // num weighted spill inst / total inst
 
-	std::vector<llvm::Value*> m_argListCache;
+    std::vector<llvm::Value*> m_argListCache;
 
     /// The size in byte used by igc (non-spill space). And this
     /// is the value passed to VISA so that VISA's spill, if any,
@@ -265,7 +273,7 @@ public:
     static const DWORD cBTEntriesPerCacheLine = 32;
     // Max BTI value that can increase binding table count.
     // SampleEngine:    Binding Table Index is set to 252 specifies the bindless surface offset.
-    // DataPort:        The special entry 255 is used to reference Stateless A32 or A64 address model, 
+    // DataPort:        The special entry 255 is used to reference Stateless A32 or A64 address model,
     //                  and the special entry 254 is used to reference the SLM address model.
     //                  The special entry 252 is used to reference bindless resource operation.
     static const DWORD MAX_BINDING_TABLE_INDEX = 251;
@@ -287,12 +295,15 @@ public:
 
     /// Initialize per function status.
     void BeginFunction(llvm::Function *F);
-    /// This method is used to create the vISA variable for function F's formal return value 
+    /// This method is used to create the vISA variable for function F's formal return value
     CVariable* getOrCreateReturnSymbol(llvm::Function *F);
-    /// This method is used to create the vISA variable for function F's formal argument 
-    CVariable* getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStackCall = false);
+    /// This method is used to create the vISA variable for function F's formal argument
+    CVariable* getOrCreateArgumentSymbol(
+        llvm::Argument *Arg,
+        bool ArgInCallee, // true if Arg isn't in current func
+        bool useStackCall = false);
     CVariable* getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, unsigned argIdx);
-    VISA_Type GetType(llvm::Type* type);       
+    VISA_Type GetType(llvm::Type* type);
 
     /// Evaluate constant expression and return the result immediate value.
     uint64_t GetConstantExpr(llvm::ConstantExpr *C);
@@ -342,7 +353,7 @@ public:
     std::vector<std::pair<unsigned int, unsigned int>> m_VISAIndexToGenISAOff;
     void addCVarsForVectorBC(llvm::BitCastInst* BCI, llvm::SmallVector<CVariable*, 8> CVars)
     {
-        assert (m_VectorBCItoCVars.find(BCI) == std::end(m_VectorBCItoCVars) && 
+        assert (m_VectorBCItoCVars.find(BCI) == std::end(m_VectorBCItoCVars) &&
             "a variable already exists for this vector bitcast");
         m_VectorBCItoCVars.try_emplace(BCI, CVars);
     }
@@ -366,6 +377,11 @@ public:
     void SetHasGlobalAtomics() { m_HasGlobalAtomics = true; }
     bool GetHasGlobalAtomics() const { return m_HasGlobalAtomics; }
     calignmentSize as;
+
+    uint32_t getGRFSize() const { return m_Platform->getGRFSize(); }
+
+
+    e_alignment getGRFAlignment() const { return CVariable::getAlignment(getGRFSize()); }
 
 private:
     // Return DefInst's CVariable if it could be reused for UseInst, and return
@@ -444,7 +460,7 @@ protected:
     uint m_statelessCBPushedSize;
     uint m_NOSBufferSize;
 
-    /// holds max number of inputs that can be pushed for this shader unit 
+    /// holds max number of inputs that can be pushed for this shader unit
     static const uint32_t m_pMaxNumOfPushedInputs;
 
     bool m_HasBarrier;
@@ -456,7 +472,7 @@ protected:
     // Holds binding table entries bitmap.
     uint32_t m_BindingTableUsedEntriesBitmap;
 
-    // for each vector BCI whose uses are all extractElt with imm offset, 
+    // for each vector BCI whose uses are all extractElt with imm offset,
     // we store the CVariables for each index
     llvm::DenseMap<llvm::Instruction*, llvm::SmallVector<CVariable*, 8>> m_VectorBCItoCVars;
 
@@ -528,7 +544,7 @@ struct SInstContext
     }
 };
 
-static const SInstContext g_InitContext = 
+static const SInstContext g_InitContext =
 {
     NULL,
     EMOD_NONE,
@@ -537,7 +553,7 @@ static const SInstContext g_InitContext =
 
 void unify_opt_PreProcess( CodeGenContext* pContext );
 // Forward declaration
-struct PSSignature; 
+struct PSSignature;
 void CodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders, PSSignature* pSignature = nullptr);
 void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap &shaders);
 }

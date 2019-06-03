@@ -36,8 +36,6 @@ typedef enum
     LIFETIME_END = 1
 } VISAVarLifetime;
 
-struct BasicRelocEntry;
-
 class VISAKernel
 {
 public:
@@ -132,8 +130,8 @@ public:
     /// GetPredefinedSurface - return a handle to a predefined surface (e.g., SLM surface)
     CM_BUILDER_API virtual int GetPredefinedSurface(VISA_SurfaceVar *&surfDcl, PreDefined_Surface surfaceName) = 0;
 
-	/// GetBindlessSampler - return the pre-defined bindless sampler index
-	CM_BUILDER_API virtual int GetBindlessSampler(VISA_SamplerVar *&samplerDcl) = 0;
+    /// GetBindlessSampler - return the pre-defined bindless sampler index
+    CM_BUILDER_API virtual int GetBindlessSampler(VISA_SamplerVar *&samplerDcl) = 0;
     /********** CREATE VARIALBE APIS END ******************/
 
     /********** CREATE OPERAND APIS START ******************/
@@ -746,10 +744,6 @@ public:
     /// freeBlock API. numEntries determines entries populated in VISAMap.
     CM_BUILDER_API virtual int GetGenxDebugInfo(void *&buffer, unsigned int &size, void*& VISAMap, unsigned int& numEntries) = 0;
 
-    /// GetGenRelocInfo -- returns relocation information entries so caller
-    /// can patch required immediate offsets at indicated offsets.
-    CM_BUILDER_API virtual int GetGenReloc(BasicRelocEntry *&buffer, unsigned int &size) = 0;
-
     /// GetGenRelocEntryBuffer -- allocate and return a buffer of all GenRelocEntry that are created by vISA
     CM_BUILDER_API virtual int GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize, unsigned int &numEntries) = 0;
 
@@ -791,6 +785,14 @@ public:
 
     ///Gets visa instruction counter value
     CM_BUILDER_API virtual unsigned getvIsaInstCount() = 0;
+
+    //Gets the VISA string format for the variable
+    CM_BUILDER_API virtual std::string getVarName(VISA_GenVar* decl) = 0;
+    CM_BUILDER_API virtual std::string getVarName(VISA_PredVar* decl) = 0;
+    CM_BUILDER_API virtual std::string getVarName(VISA_AddrVar* decl) = 0;
+    CM_BUILDER_API virtual std::string getVarName(VISA_SurfaceVar* decl) = 0;
+    CM_BUILDER_API virtual std::string getVarName(VISA_SamplerVar* decl) = 0;
+
 };
 
 class VISAFunction : public VISAKernel
@@ -809,7 +811,10 @@ public:
     CM_BUILDER_API virtual int GetFunctionId(unsigned int& id) = 0;
 
     /// getGenOffset -- Get gen binary offset of this function
-    CM_BUILDER_API virtual int64_t getGenOffset() = 0;
+    CM_BUILDER_API virtual int64_t getGenOffset() const = 0;
+
+    /// getGenOffset -- Get gen binary size of this function
+    CM_BUILDER_API virtual int64_t getGenSize() const = 0;
 };
 
 typedef enum
@@ -835,5 +840,12 @@ public:
     CM_BUILDER_API virtual void SetOption(vISAOptions option, bool val) = 0;
     CM_BUILDER_API virtual void SetOption(vISAOptions option, uint32_t val) = 0;
     CM_BUILDER_API virtual void SetOption(vISAOptions option, const char *val) = 0;
+
+    // For inline asm code generation
+    CM_BUILDER_API virtual int ParseVISAText(const std::string& visaHeader, const std::string& visaText, const std::string& visaTextFile) = 0;
+    CM_BUILDER_API virtual int WriteVISAHeader() = 0;
+    CM_BUILDER_API virtual std::stringstream& GetAsmTextStream() = 0;
+    CM_BUILDER_API virtual std::stringstream& GetAsmTextHeaderStream() = 0;
+    CM_BUILDER_API virtual VISAKernel* GetVISAKernel() = 0;
 };
 #endif

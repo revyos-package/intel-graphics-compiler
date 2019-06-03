@@ -36,84 +36,68 @@ class CisaBinary;
 class VISAKernelImpl;
 class VISAFunction;
 
-#ifndef DLL_MODE
 extern FILE *CISAin;
 extern FILE *CISAout;
 extern int CISAdebug;
-#endif
 
 #include "VISABuilderAPIDefinition.h"
 #include "visa_wa.h"
 
-//#define TIME_vISA_LOADING
-//#define TIME_IR_CONSTRUCTION
 class Options;
-
-class NativeRelocs
-{
-public:
-    void *operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); }
-    void addEntry(uint64_t offset, uint64_t info, int64_t addend, unsigned int nativeOffset);
-    unsigned int getNativeOffset(unsigned int cisaOffset);
-    bool isOffsetReloc(uint64_t offset, SuperRelocEntry& info);
-
-    unsigned getNumEntries() { return (uint32_t) entries.size(); }
-    SuperRelocEntry getEntry(unsigned int idx)
-    {
-        return entries[idx];
-    }
-private:
-    std::vector<SuperRelocEntry> entries;
-};
 
 class CISA_IR_Builder : public VISABuilder
 {
 public:
 
-	CISA_IR_Builder(CM_VISA_BUILDER_OPTION buildOption, int majorVersion, int minorVersion, PVISA_WA_TABLE pWaTable) : m_mem(4096)
+    CISA_IR_Builder(CM_VISA_BUILDER_OPTION buildOption, int majorVersion, int minorVersion, PVISA_WA_TABLE pWaTable) : m_mem(4096)
     {
+        memset(&m_header, 0, sizeof(m_header));
+
         mBuildOption = buildOption;
         m_executionSatarted = false;
         m_kernel_count = 0;
         m_function_count = 0;
-        m_majorVersion = majorVersion;
-        m_minorVersion = minorVersion;
+
+        m_header.major_version = majorVersion;
+        m_header.minor_version = minorVersion;
+        m_header.magic_number = COMMON_ISA_MAGIC_NUM;
+
         m_cisaBinary = new (m_mem) CisaFramework::CisaBinary(&m_options);
         m_currentKernel = NULL;
         m_pWaTable = pWaTable;
-        nativeRelocs = NULL;
     }
 
-	virtual ~CISA_IR_Builder();
+    virtual ~CISA_IR_Builder();
 
     #ifndef DLL_MODE
-	//
-	// routines for initializing and ending CISA parser
-	//
-	// to make the tool quit when there is incorrect input file
-	bool openCISAParsingFile(const char* fileName, char* mode)
-	{
-		if( (CISAin = fopen(fileName, mode)) == NULL)
-		{
-			fprintf(stderr,"Cannot open file %s\n", fileName);
-			return false;
-		}
-		return true;
-	}
+    //
+    // routines for initializing and ending CISA parser
+    //
+    // to make the tool quit when there is incorrect input file
+    bool openCISAParsingFile(const char* fileName, char* mode)
+    {
+        if( (CISAin = fopen(fileName, mode)) == NULL)
+        {
+            fprintf(stderr,"Cannot open file %s\n", fileName);
+            return false;
+        }
+        return true;
+    }
 
-    void closeCISAParsingFile() {fclose(CISAin);}
+    void closeCISAParsingFile() { fclose(CISAin); }
 
     #endif
+
     /**************START VISA BUILDER API*****************************/
 
     static int CreateBuilder(CISA_IR_Builder *&builder,
-		vISABuilderMode mode,
-		CM_VISA_BUILDER_OPTION buildOption,
-		TARGET_PLATFORM platform,
-		int numArgs,
-		const char* flags[],
-		PVISA_WA_TABLE pWaTable,
-		bool initializeWA = false);
+        vISABuilderMode mode,
+        CM_VISA_BUILDER_OPTION buildOption,
+        TARGET_PLATFORM platform,
+        int numArgs,
+        const char* flags[],
+        PVISA_WA_TABLE pWaTable,
+        bool initializeWA = false);
     static int DestroyBuilder(CISA_IR_Builder *builder);
     CM_BUILDER_API virtual int AddKernel(VISAKernel *& kernel, const char* kernelName);
     CM_BUILDER_API virtual int AddFunction(VISAFunction *& function, const char* functionName);
@@ -125,57 +109,65 @@ public:
     CM_BUILDER_API void SetOption(vISAOptions option, uint32_t val) { m_options.setOption(option, val); }
     CM_BUILDER_API void SetOption(vISAOptions option, const char *val) { m_options.setOption(option, val); }
 
+    // Used for inline asm code generation
+    CM_BUILDER_API virtual int ParseVISAText(const std::string& visaHeader, const std::string& visaText, const std::string& visaTextFile);
+    CM_BUILDER_API virtual int WriteVISAHeader();
+    CM_BUILDER_API std::stringstream& GetAsmTextStream() { return m_ssIsaAsm; }
+    CM_BUILDER_API std::stringstream& GetAsmTextHeaderStream() { return m_ssIsaAsmHeader; }
+    CM_BUILDER_API virtual VISAKernel* GetVISAKernel();
+
     /**************END VISA BUILDER API*************************/
 
     string_pool_entry** branch_targets;
+    common_isa_header m_header;
 
     VISAKernelImpl *m_kernel;
     CisaFramework::CisaBinary *m_cisaBinary;
     VISAKernelImpl * get_kernel() { return m_kernel; }
 
-	void CISA_IR_setVersion(unsigned char major_ver, unsigned char minor_ver)
-	{
-		m_majorVersion = major_ver;
-		m_minorVersion = minor_ver;
-	}
+    void CISA_IR_setVersion(unsigned char major_ver, unsigned char minor_ver)
+    {
+        m_header.major_version = major_ver;
+        m_header.minor_version = minor_ver;
+    }
 
     Common_ISA_Input_Class get_input_class(Common_ISA_Var_Class var_class);
 
     //CISA Build Functions
     bool CISA_IR_initialization(char *kernel_name, int line_no);
     bool CISA_general_variable_decl(char * var_name,
-											unsigned int var_elemts_num,
-											VISA_Type data_type,
-											VISA_Align var_align,
-											char * var_alias_name,
-											int var_alias_offset,
-											int line_no,
+                                            unsigned int var_elemts_num,
+                                            VISA_Type data_type,
+                                            VISA_Align var_align,
+                                            char * var_alias_name,
+                                            int var_alias_offset,
+                                            int line_no,
                                             vISA::G4_Declare *dcl);
     bool CISA_general_variable_decl(char * var_name,
-											unsigned int var_elemts_num,
-											VISA_Type data_type,
-											VISA_Align var_align,
-											char * var_alias_name,
-											int var_alias_offset,
+                                            unsigned int var_elemts_num,
+                                            VISA_Type data_type,
+                                            VISA_Align var_align,
+                                            char * var_alias_name,
+                                            int var_alias_offset,
                                             attr_gen_struct scope,
-											int line_no);
+                                            int line_no);
     bool CISA_file_variable_decl(char * var_name,
-											unsigned int var_elemts_num,
-											VISA_Type data_type,
-											VISA_Align var_align,
-											int line_no,
+                                            unsigned int var_elemts_num,
+                                            VISA_Type data_type,
+                                            VISA_Align var_align,
+                                            int line_no,
                                             vISA::G4_Declare *dcl);
     bool CISA_file_variable_decl(char * var_name,
-											unsigned int var_elemts_num,
-											VISA_Type data_type,
-											VISA_Align var_align,
-											int line_no);
+                                            unsigned int var_elemts_num,
+                                            VISA_Type data_type,
+                                            VISA_Align var_align,
+                                            int line_no);
     bool CISA_addr_variable_decl(char *var_name, unsigned int var_elements, VISA_Type data_type, attr_gen_struct scope, int line_no);
 
     bool CISA_predicate_variable_decl(char *var_name,
                                             unsigned int var_elements,
                                             attr_gen_struct reg,
-										    int line_no);
+                                            int line_no);
     bool CISA_create_func_decl(char * name,
                                 int resolved_index,
                                 int line_no);
@@ -192,111 +184,111 @@ public:
 
     //bool CISA_attr_directive(char* input_name, attribute_info_t* attr);
     bool CISA_attr_directive(char* input_name, char* input_var, int line_no);
-    bool CISA_attr_directiveNum(char* input_name, unsigned char input_var, int line_no);
+    bool CISA_attr_directiveNum(char* input_name, uint32_t input_var, int line_no);
 
     bool CISA_create_label(char * label_name, int line_no);
     bool CISA_function_directive(char* func_name);
 
 
     bool CISA_create_arith_instruction(VISA_opnd * cisa_pred,
-											   ISA_Opcode opcode,
-											   bool  sat,
+                                               ISA_Opcode opcode,
+                                               bool  sat,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
+                                               unsigned exec_size,
                                                VISA_opnd * dst_cisa,
                                                VISA_opnd * src0_cisa,
                                                VISA_opnd * src1_cisa,
                                                VISA_opnd * src2_cisa,
-											   int line_no);
+                                               int line_no);
     bool CISA_create_arith_instruction2(VISA_opnd * cisa_pred,
-											   ISA_Opcode opcode,
+                                               ISA_Opcode opcode,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
+                                               unsigned exec_size,
                                                VISA_opnd * dst_cisa,
                                                VISA_opnd * src0_cisa,
                                                VISA_opnd * src1_cisa,
                                                VISA_opnd * src2_cisa,
-											   int line_no);
+                                               int line_no);
 
     bool CISA_create_mov_instruction(VISA_opnd *pred,
-											   ISA_Opcode opcode,
-											   Common_VISA_EMask_Ctrl emask,
-    										   unsigned exec_size,
- 											   bool  sat,
-											   VISA_opnd *dst,
-											   VISA_opnd *src0,
-											   int line_no);
+                                               ISA_Opcode opcode,
+                                               Common_VISA_EMask_Ctrl emask,
+                                               unsigned exec_size,
+                                                bool  sat,
+                                               VISA_opnd *dst,
+                                               VISA_opnd *src0,
+                                               int line_no);
 
     bool CISA_create_mov_instruction(VISA_opnd *dst,
-											   char *src0,
-											   int line_no);
+                                               char *src0,
+                                               int line_no);
 
     bool CISA_create_movs_instruction(Common_VISA_EMask_Ctrl emask,
                                              ISA_Opcode opcode,
-	                                         unsigned exec_size,
-										     VISA_opnd *dst,
+                                             unsigned exec_size,
+                                             VISA_opnd *dst,
                                              VISA_opnd *src0,
                                              int line_no);
 
     bool CISA_create_movs_instruction(Common_VISA_EMask_Ctrl emask,
-	                                         unsigned exec_size,
-										     Common_ISA_State_Opnd dstType,
+                                             unsigned exec_size,
+                                             Common_ISA_State_Opnd dstType,
                                              vISA::G4_Declare* dstDcl,
                                              vISA::G4_Operand* src,
                                              unsigned char offsetDst);
 
 
     bool CISA_create_branch_instruction(VISA_opnd *pred,
-												ISA_Opcode opcode,
+                                                ISA_Opcode opcode,
                                                 Common_VISA_EMask_Ctrl emask,
-											    unsigned exec_size,
-										        char *target_label,
+                                                unsigned exec_size,
+                                                char *target_label,
                                                 int line_no);
 
 
     bool CISA_create_cmp_instruction(Common_ISA_Cond_Mod sub_op,
                                              ISA_Opcode opcode,
                                              Common_VISA_EMask_Ctrl emask,
-											 unsigned exec_size,
-											 char *name,
-											 VISA_opnd *src0,
-											 VISA_opnd *src1,
+                                             unsigned exec_size,
+                                             char *name,
+                                             VISA_opnd *src0,
+                                             VISA_opnd *src1,
                                              int line_no);
 
-       bool CISA_create_cmp_instruction(Common_ISA_Cond_Mod sub_op,
+    bool CISA_create_cmp_instruction(Common_ISA_Cond_Mod sub_op,
                                              ISA_Opcode opcode,
                                              Common_VISA_EMask_Ctrl emask,
-											 unsigned exec_size,
-											 VISA_opnd *dst,
-											 VISA_opnd *src0,
-											 VISA_opnd *src1,
+                                             unsigned exec_size,
+                                             VISA_opnd *dst,
+                                             VISA_opnd *src0,
+                                             VISA_opnd *src1,
                                              int line_no);
 
     bool CISA_create_media_instruction(ISA_Opcode opcode,
-											   MEDIA_LD_mod media_mod,
-											   int row_off,
-											   int elem_off,
-											   unsigned int plane_ID,
-											   char * surface_name,
-											   VISA_opnd *src0,
-											   VISA_opnd *src1,
-											   VISA_opnd *raw_dst,
+                                               MEDIA_LD_mod media_mod,
+                                               int row_off,
+                                               int elem_off,
+                                               unsigned int plane_ID,
+                                               char * surface_name,
+                                               VISA_opnd *src0,
+                                               VISA_opnd *src1,
+                                               VISA_opnd *raw_dst,
                                                int line_no);
 
 
     bool CISA_Create_Ret(VISA_opnd *pred_opnd,
                                  ISA_Opcode opcode,
                                  Common_VISA_EMask_Ctrl emask,
-								 unsigned int exec_size,
+                                 unsigned int exec_size,
                                  int line_no);
 
     bool CISA_create_oword_instruction(ISA_Opcode opcode,
-											   bool media_mod,
-											   unsigned int size,
-											   char *surface_name,
-											   VISA_opnd *src0,
-											   VISA_opnd *raw_dst_src,
-											   int line_no);
+                                               bool media_mod,
+                                               unsigned int size,
+                                               char *surface_name,
+                                               VISA_opnd *src0,
+                                               VISA_opnd *raw_dst_src,
+                                               int line_no);
 
     bool CISA_create_svm_block_instruction(SVMSubOpcode subopcode,
                                            unsigned     owords,
@@ -346,57 +338,57 @@ public:
 
     bool CISA_create_address_instruction(ISA_Opcode opcode,
                                                 Common_VISA_EMask_Ctrl emask,
-    										     unsigned exec_size,
-											     VISA_opnd *dst,
-											     VISA_opnd *src0,
-											     VISA_opnd *src1,
+                                                 unsigned exec_size,
+                                                 VISA_opnd *dst,
+                                                 VISA_opnd *src0,
+                                                 VISA_opnd *src1,
                                                  int line_no);
 
 
     bool CISA_create_logic_instruction(VISA_opnd *pred,
-											   ISA_Opcode opcode,
+                                               ISA_Opcode opcode,
                                                bool sat,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
-											   VISA_opnd *dst,
-											   VISA_opnd *src0,
-											   VISA_opnd *src1,
+                                               unsigned exec_size,
+                                               VISA_opnd *dst,
+                                               VISA_opnd *src0,
+                                               VISA_opnd *src1,
                                                VISA_opnd *src2,
                                                VISA_opnd *src3,
                                                int line_no);
 
     bool CISA_create_logic_instruction(ISA_Opcode opcode,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
-											   char *dst,
-											   char *src0,
-											   char *src1,
+                                               unsigned exec_size,
+                                               char *dst,
+                                               char *src0,
+                                               char *src1,
                                                int line_no);
 
     bool CISA_create_math_instruction(VISA_opnd *pred,
-											   ISA_Opcode opcode,
-											   bool  sat,
+                                               ISA_Opcode opcode,
+                                               bool  sat,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
-											   VISA_opnd *dst,
-											   VISA_opnd *src0,
-											   VISA_opnd *src1,
+                                               unsigned exec_size,
+                                               VISA_opnd *dst,
+                                               VISA_opnd *src0,
+                                               VISA_opnd *src1,
                                                int line_no);
 
     bool CISA_create_setp_instruction(ISA_Opcode opcode,
                                               Common_VISA_EMask_Ctrl emask,
-    										  unsigned exec_size,
-											  char *dst,
-											  VISA_opnd *src0,
+                                              unsigned exec_size,
+                                              char *dst,
+                                              VISA_opnd *src0,
                                               int line_no);
 
     bool CISA_create_sel_instruction(ISA_Opcode opcode,
                                               bool sat,
                                               VISA_opnd *pred,
                                               Common_VISA_EMask_Ctrl emask,
-    										  unsigned exec_size,
-											  VISA_opnd *dst,
-											  VISA_opnd *src0,
+                                              unsigned exec_size,
+                                              VISA_opnd *dst,
+                                              VISA_opnd *src0,
                                               VISA_opnd *src1,
                                               int line_no);
 
@@ -405,28 +397,28 @@ public:
                                               bool sat,
                                               VISA_opnd *pred,
                                               Common_VISA_EMask_Ctrl emask,
-    										  unsigned exec_size,
-											  VISA_opnd *dst,
-											  VISA_opnd *src0,
+                                              unsigned exec_size,
+                                              VISA_opnd *dst,
+                                              VISA_opnd *src0,
                                               VISA_opnd *src1,
                                               int line_no);
 
     bool CISA_create_scatter_instruction(ISA_Opcode opcode,
-											     int elemNum,
+                                                 int elemNum,
                                                  Common_VISA_EMask_Ctrl emask,
-    											 unsigned elt_size,
+                                                 unsigned elt_size,
                                                  bool modifier,
-											     char *surface_name,
-											     VISA_opnd *global_offset, //global_offset
-											     VISA_opnd *element_offset, //element_offset
-											     VISA_opnd *raw_dst_src, //dst/src
-											     int line_no);
+                                                 char *surface_name,
+                                                 VISA_opnd *global_offset, //global_offset
+                                                 VISA_opnd *element_offset, //element_offset
+                                                 VISA_opnd *raw_dst_src, //dst/src
+                                                 int line_no);
 
     bool CISA_create_scatter4_typed_instruction(ISA_Opcode opcode,
                                                         VISA_opnd *pred,
                                                         ChannelMask ch_mask,
                                                         Common_VISA_EMask_Ctrl emask,
-    										            unsigned execSize,
+                                                        unsigned execSize,
                                                         char* surfaceName,
                                                         VISA_opnd *uOffset,
                                                         VISA_opnd *vOffset,
@@ -462,12 +454,12 @@ public:
     bool CISA_create_sbarrier_instruction(bool isSignal);
 
     bool CISA_create_invtri_inst(VISA_opnd *pred,
-											   ISA_Opcode opcode,
-											   bool  sat,
+                                               ISA_Opcode opcode,
+                                               bool  sat,
                                                Common_VISA_EMask_Ctrl emask,
-											   unsigned exec_size,
-											   VISA_opnd *dst,
-											   VISA_opnd *src0,
+                                               unsigned exec_size,
+                                               VISA_opnd *dst,
+                                               VISA_opnd *src0,
                                                int line_no);
 
     bool CISA_create_dword_atomic_instruction(VISA_opnd *pred,
@@ -498,9 +490,9 @@ public:
         int lineNo);
 
     bool CISA_create_SIMD_CF_instruction(VISA_opnd *pred,
-												   ISA_Opcode opcode,
+                                                   ISA_Opcode opcode,
                                                    Common_VISA_EMask_Ctrl emask,
-											       unsigned exec_size,
+                                                   unsigned exec_size,
                                                    int line_no);
 
     bool CISA_create_urb_write_3d_instruction(VISA_opnd* pred,
@@ -575,15 +567,15 @@ public:
         int line_no);
 
     bool CISA_create_sample_instruction (ISA_Opcode opcode,
-	                                             ChannelMask channel,
-												 int simd_mode,
-												 char* sampler_name,
-												 char* surface_name,
-											     VISA_opnd *u_opnd,
-											     VISA_opnd *v_opnd,
-											     VISA_opnd *r_opnd,
-											     VISA_opnd *dst,
-											     int line_no);
+                                                 ChannelMask channel,
+                                                 int simd_mode,
+                                                 char* sampler_name,
+                                                 char* surface_name,
+                                                 VISA_opnd *u_opnd,
+                                                 VISA_opnd *v_opnd,
+                                                 VISA_opnd *r_opnd,
+                                                 VISA_opnd *dst,
+                                                 int line_no);
 
     bool CISA_create_avs_instruction(ChannelMask channel,
                                      char* surface_name,
@@ -605,32 +597,32 @@ public:
     bool CISA_create_sampleunorm_instruction (ISA_Opcode opcode,
                                                       ChannelMask channel,
                                                       CHANNEL_OUTPUT_FORMAT out,
-												      char* sampler_dcl,
-													  char* surface_dcl,
-											          VISA_opnd *src0,
-											          VISA_opnd *src1,
-											          VISA_opnd *src2,
-											          VISA_opnd *src3,
-											          VISA_opnd *dst,
-											          int line_no);
+                                                      char* sampler_dcl,
+                                                      char* surface_dcl,
+                                                      VISA_opnd *src0,
+                                                      VISA_opnd *src1,
+                                                      VISA_opnd *src2,
+                                                      VISA_opnd *src3,
+                                                      VISA_opnd *dst,
+                                                      int line_no);
 
     bool CISA_create_vme_ime_instruction (ISA_Opcode opcode,
                                               unsigned char stream_mode,
                                               unsigned char searchCtrl,
                                               VISA_opnd *input_opnd,
                                               VISA_opnd *ime_input_opnd,
-											  char* surface_name,
-											  VISA_opnd *ref0_opnd,
-											  VISA_opnd *ref1_opnd,
-											  VISA_opnd *costCenter_opnd,
-											  VISA_opnd *dst_opnd,
+                                              char* surface_name,
+                                              VISA_opnd *ref0_opnd,
+                                              VISA_opnd *ref1_opnd,
+                                              VISA_opnd *costCenter_opnd,
+                                              VISA_opnd *dst_opnd,
                                               int line_no);
 
     bool CISA_create_vme_sic_instruction (ISA_Opcode opcode,
                                               VISA_opnd *input_opnd,
                                               VISA_opnd *sic_input_opnd,
-											  char* surface_name,
-											  VISA_opnd *dst,
+                                              char* surface_name,
+                                              VISA_opnd *dst,
                                               int line_no);
 
     bool CISA_create_vme_fbr_instruction (ISA_Opcode opcode,
@@ -640,7 +632,7 @@ public:
                                               VISA_opnd* fbrMbMode,
                                               VISA_opnd* fbrSubMbShape,
                                               VISA_opnd* fbrSubPredMode,
-											  VISA_opnd *dst,
+                                              VISA_opnd *dst,
                                               int line_no);
 
     bool CISA_create_switch_instruction(ISA_Opcode opcode,
@@ -652,12 +644,12 @@ public:
 
 
     bool CISA_create_fcall_instruction(VISA_opnd *pred_opnd,
-												ISA_Opcode opcode,
+                                                ISA_Opcode opcode,
                                                 Common_VISA_EMask_Ctrl emask,
-											    unsigned exec_size,
+                                                unsigned exec_size,
                                                 unsigned func_id,
                                                 unsigned arg_size,
-										        unsigned return_size,
+                                                unsigned return_size,
                                                 int line_no);
 
     bool CISA_create_ifcall_instruction(VISA_opnd *pred_opnd,
@@ -673,7 +665,7 @@ public:
     bool CISA_create_raw_send_instruction(ISA_Opcode opcode,
                                             unsigned char modifier,
                                             Common_VISA_EMask_Ctrl emask,
-										    unsigned exec_size,
+                                            unsigned exec_size,
                                             VISA_opnd *pred,
                                             unsigned int exMsgDesc,
                                             unsigned char srcSize,
@@ -685,7 +677,7 @@ public:
     bool CISA_create_raw_sends_instruction(ISA_Opcode opcode,
                                             unsigned char modifier,
                                             Common_VISA_EMask_Ctrl emask,
-										    unsigned exec_size,
+                                            unsigned exec_size,
                                             VISA_opnd *pred,
                                             VISA_opnd *exMsgDesc,
                                             unsigned char ffid,
@@ -717,10 +709,10 @@ public:
     VISA_opnd * CISA_create_gen_src_operand(char* var_name, short v_stride, short width, short h_stride,
         unsigned char row_offset, unsigned char col_offset, VISA_Modifier mod, int line_no);
     VISA_opnd * CISA_dst_general_operand(char * var_name,
-				    unsigned char roff,
-				    unsigned char sroff,
-					unsigned short hstride,
-					int line_no);
+                    unsigned char roff,
+                    unsigned char sroff,
+                    unsigned short hstride,
+                    int line_no);
     VISA_opnd * CISA_create_immed(uint64_t value, VISA_Type type, int line_no);
     VISA_opnd * CISA_create_float_immed(double value, VISA_Type type, int line_no);
     CISA_GEN_VAR * CISA_find_decl(char * var_name);
@@ -730,7 +722,7 @@ public:
                                                       unsigned char col_offset, unsigned short immedOffset,
                                                       unsigned short vertical_stride, unsigned short width,
                                                       unsigned short horizontal_stride, VISA_Type type);
-	VISA_opnd * CISA_create_indirect_dst(CISA_GEN_VAR * cisa_decl,VISA_Modifier mod, unsigned short row_offset,
+    VISA_opnd * CISA_create_indirect_dst(CISA_GEN_VAR * cisa_decl,VISA_Modifier mod, unsigned short row_offset,
                                                       unsigned char col_offset, unsigned short immedOffset,
                                                       unsigned short horizontal_stride, VISA_Type type);
     VISA_opnd * CISA_create_state_operand(char * var_name, unsigned char offset, int line_no, bool isDst);
@@ -738,13 +730,16 @@ public:
     VISA_opnd * CISA_create_RAW_NULL_operand(int line_no);
     VISA_opnd * CISA_create_RAW_operand(char * var_name, unsigned short offset, int line_no);
 
+    void CISA_push_decl_scope();
+    void CISA_pop_decl_scope();
+
     unsigned short get_hash_key(const char* str);
     string_pool_entry** new_string_pool();
     string_pool_entry * string_pool_lookup(string_pool_entry **spool, const char *str);
     bool string_pool_lookup_and_insert(string_pool_entry **spool,
-											   char *str,
-											   Common_ISA_Var_Class type,
-											   VISA_Type data_type);
+                                               char *str,
+                                               Common_ISA_Var_Class type,
+                                               VISA_Type data_type);
 
     VISAKernelImpl* getCurrentKernel() const { return m_currentKernel; }
     std::list<VISAKernelImpl*>& getKernels() { return m_kernels; }
@@ -754,17 +749,8 @@ public:
     void setTestName(std::string name) { testName = name; }
 
     Options m_options;
-
-    void setupNativeRelocs(unsigned int, const BasicRelocEntry*);
-    NativeRelocs* getNativeRelocs(bool createIfNULL = true)
-    {
-        if (!nativeRelocs &&
-            createIfNULL)
-        {
-            nativeRelocs = new (m_mem)NativeRelocs();
-        }
-        return nativeRelocs;
-    }
+    std::stringstream m_ssIsaAsm;
+    std::stringstream m_ssIsaAsmHeader;
 
     void setGtpinInit(void* buf) { gtpin_init = buf; }
     void* getGtpinInit() { return gtpin_init; }
@@ -776,10 +762,8 @@ private:
     CM_VISA_BUILDER_OPTION mBuildOption;
     bool m_executionSatarted;
 
-	unsigned int m_kernel_count;
+    unsigned int m_kernel_count;
     unsigned int m_function_count;
-    int m_majorVersion;
-    int m_minorVersion;
 
     std::list<VISAKernelImpl *> m_kernels;
     //keeps track of functions for stitching purposes, after compilation.
@@ -798,9 +782,8 @@ private:
 
     PVISA_WA_TABLE m_pWaTable;
 
-    NativeRelocs* nativeRelocs;
-
     void* gtpin_init = nullptr;
 };
 extern _THREAD CISA_IR_Builder * pCisaBuilder;
+
 #endif

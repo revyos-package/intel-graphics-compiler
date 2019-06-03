@@ -132,12 +132,12 @@ public:
 
     virtual ~CisaInst() { }
 
-    CISA_INST       m_cisa_instruction;
-    VISA_INST_Desc* m_inst_desc;
+    CISA_INST             m_cisa_instruction;
+    const VISA_INST_Desc* m_inst_desc;
 
-    int createCisaInstruction(ISA_Opcode opcode, unsigned char exec_size, unsigned char modifier, unsigned short pred, VISA_opnd **opnd, int numOpnds, VISA_INST_Desc* inst_desc);
+    int createCisaInstruction(ISA_Opcode opcode, unsigned char exec_size, unsigned char modifier, unsigned short pred, VISA_opnd **opnd, int numOpnds, const VISA_INST_Desc* inst_desc);
 
-    int getSize(){return m_size;}
+    int getSize() const {return m_size;}
 
     void setLabelInfo(const std::string& label_name, bool is_func, bool needPatch)
     {
@@ -156,7 +156,7 @@ public:
     std::string getLabelName   () const { return m_label_name;       }
 
     CISA_INST*      getCISAInst     () { return &m_cisa_instruction; }
-    VISA_INST_Desc* getCISAInstDesc () { return m_inst_desc;         }
+    const VISA_INST_Desc* getCISAInstDesc () const { return m_inst_desc;}
 
     VISA_opnd * getOperand(unsigned index) const
     {
@@ -258,7 +258,6 @@ public:
     void initKernel( int kernelIndex, VISAKernelImpl * kernel );
     int finalizeCisaBinary();
     int finalizeCisaFileScopeVars();
-    void finalizeRelocationTables();
     int dumpToFile(std::string binFileName);
     int setFileScopeVar(VISA_FileVar * info);
 
@@ -320,7 +319,7 @@ private:
 
     std::string m_filename;
     mutable unsigned m_instId;
-	Options *m_options;
+    Options *m_options;
 };
 
 }

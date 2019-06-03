@@ -248,7 +248,7 @@ static void readExecSizeNG(unsigned& bytePos, const char* buf, Common_ISA_Exec_S
 
     mask = transformMask(container, maskVal);
 
-    size = (Common_ISA_Exec_Size )((execSize       ) & 0xF);
+    size = (Common_ISA_Exec_Size )((execSize) & 0xF);
 }
 
 template <typename T> T readPrimitiveOperandNG(unsigned& bytePos, const char* buf)
@@ -407,7 +407,8 @@ static VISA_VectorOpnd* readVectorOperandNG(unsigned& bytePos, const char* buf, 
                 G4_Type gType = Get_G4_Type_From_Common_ISA_Type(vType);
                 unsigned int offset  = colOffset * G4_Type_Table[gType].byteSize + rowOffset * G4_GRF_REG_NBYTES;
                 kernelBuilderImpl->CreateVISAAddressOfOperand(opnd, decl, offset);
-            }else
+            }
+            else
             {
                 kernelBuilderImpl->CreateVISASrcOperand(opnd, decl, mod, v_stride, width, h_stride, rowOffset, colOffset);
             }
@@ -489,14 +490,6 @@ static VISA_VectorOpnd* readVectorOperandNG(unsigned& bytePos, const char* buf, 
 
             VISA_VectorOpnd* opnd = NULL;
 
-            bool isRelocType = false;
-            SuperRelocEntry reloc;
-            if (container.builder->getNativeRelocs(false) &&
-                container.builder->getNativeRelocs(false)->isOffsetReloc((uint64_t)bytePos, reloc))
-            {
-                isRelocType = true;
-            }
-
             if (immedType == ISA_TYPE_DF)
             {
                 double val = 0;
@@ -507,29 +500,14 @@ static VISA_VectorOpnd* readVectorOperandNG(unsigned& bytePos, const char* buf, 
             {
                 uint64_t val = 0;
                 READ_CISA_FIELD(val, uint64_t, bytePos, buf);
-
-                if (!isRelocType)
-                {
-                    kernelBuilderImpl->CreateVISAImmediate(opnd, &val, immedType);
-                }
-                else
-                {
-                    kernelBuilderImpl->CreateRelocVISAImmediate(opnd, &val, immedType, reloc);
-                }
+                kernelBuilderImpl->CreateVISAImmediate(opnd, &val, immedType);
             }
             else /// Immediate operands are at least 4 bytes.
             {
                 unsigned val = 0;
                 READ_CISA_FIELD(val, unsigned, bytePos, buf);
+                kernelBuilderImpl->CreateVISAImmediate(opnd, &val, immedType);
 
-                if (!isRelocType)
-                {
-                    kernelBuilderImpl->CreateVISAImmediate(opnd, &val, immedType);
-                }
-                else
-                {
-                    kernelBuilderImpl->CreateRelocVISAImmediate(opnd, &val, immedType, reloc);
-                }
             }
 
             return opnd;
@@ -725,14 +703,14 @@ static void readInstructionCommonNG(unsigned& bytePos, const char* buf, ISA_Opco
                     kernelBuilder->AppendVISADataMovementInst(opcode, pred, saturate, emask, esize, dst, src0, src1);
                 break;
             case ISA_Inst_Arith:
-				if (opcode == ISA_ADDC || opcode == ISA_SUBB)
-				{
-					kernelBuilder->AppendVISAArithmeticInst(opcode, pred, emask, esize, dst, src0, src1, src2);
-				}
-				else
-				{
-					kernelBuilder->AppendVISAArithmeticInst(opcode, pred, saturate, emask, esize, dst, src0, src1, src2);
-				}
+                if (opcode == ISA_ADDC || opcode == ISA_SUBB)
+                {
+                    kernelBuilder->AppendVISAArithmeticInst(opcode, pred, emask, esize, dst, src0, src1, src2);
+                }
+                else
+                {
+                    kernelBuilder->AppendVISAArithmeticInst(opcode, pred, saturate, emask, esize, dst, src0, src1, src2);
+                }
                 break;
             case ISA_Inst_Logic:
                     kernelBuilder->AppendVISALogicOrShiftInst(opcode, pred, saturate, emask, esize, dst, src0, src1, src2, src3);
@@ -1432,22 +1410,22 @@ static void readInstructionMisc(unsigned& bytePos, const char* buf, ISA_Opcode o
             VISA_AddrVar* decl;
             decl = container.addressVarDecls[varId];
 
-			if(lifetime == LIFETIME_START)
-			{
-				kernelBuilder->CreateVISAAddressDstOperand(opnd, decl, 0);
-			}
-			else
-			{
-				kernelBuilder->CreateVISAAddressSrcOperand(opnd, decl, 0, 1);
-			}
+            if(lifetime == LIFETIME_START)
+            {
+                kernelBuilder->CreateVISAAddressDstOperand(opnd, decl, 0);
+            }
+            else
+            {
+                kernelBuilder->CreateVISAAddressSrcOperand(opnd, decl, 0, 1);
+            }
         }
         else if(opndClass == OPERAND_PREDICATE)
         {
             VISA_PredVar* decl;
 
             decl = container.predicateVarDecls[varId];
-			VISA_PredOpnd* predOpnd;
-			kernelBuilder->CreateVISAPredicateOperand(predOpnd, decl, PredState_NO_INVERSE, PRED_CTRL_NON);
+            VISA_PredOpnd* predOpnd;
+            kernelBuilder->CreateVISAPredicateOperand(predOpnd, decl, PredState_NO_INVERSE, PRED_CTRL_NON);
             opnd = (VISA_VectorOpnd*)predOpnd;
         }
 
@@ -1791,7 +1769,7 @@ static void readInstructionSampler(unsigned& bytePos, const char* buf, ISA_Opcod
             Common_ISA_Exec_Size  esize = EXEC_SIZE_ILLEGAL;
             readExecSizeNG(bytePos, buf, esize, emask, container);
             uint8_t channelMask = 0xF;
-			channelMask = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
+            channelMask = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
             uint8_t surface = readPrimitiveOperandNG<uint8_t> (bytePos, buf);
 
             VISA_RawOpnd* lod = subOpcode == VISA_3D_RESINFO ? readRawOperandNG(bytePos, buf, container) : NULL;
@@ -1960,20 +1938,20 @@ static void readInstructionSampler(unsigned& bytePos, const char* buf, ISA_Opcod
                 {
                     uint8_t sampler = readPrimitiveOperandNG<uint8_t> (bytePos, buf);
                     kernelBuilderImpl->CreateVISAStateOperandHandle(stateOpnds[numStateOpnds++], container.samplerVarDecls[sampler]);
-                }else if(opndDesc->opnd_type == OPND_SURFACE)
-                {
+                } else if(opndDesc->opnd_type == OPND_SURFACE) {
                     uint8_t surface = readPrimitiveOperandNG<uint8_t> (bytePos, buf);
                     kernelBuilderImpl->CreateVISAStateOperandHandle(stateOpnds[numStateOpnds++], container.surfaceVarDecls[surface]);
-                }else if((opndDesc->opnd_type & OPND_SRC_GEN) == OPND_SRC_GEN)
+                } else if((opndDesc->opnd_type & OPND_SRC_GEN) == OPND_SRC_GEN)
                 {
                     vOpnds[numVSrcs++] = readVectorOperandNG(bytePos, buf, container, false);
-                }else if(opndDesc->opnd_type == OPND_RAW_SRC)
+                } else if(opndDesc->opnd_type == OPND_RAW_SRC)
                 {
                     rawSrcs[numRawSrcs++] = readRawOperandNG(bytePos, buf, container);
-                }else if(opndDesc->opnd_type == OPND_RAW_DST)
+                } else if(opndDesc->opnd_type == OPND_RAW_DST)
                 {
                     dst = readRawOperandNG(bytePos, buf, container);
-                }else if(opndDesc->opnd_type == OPND_OTHER)
+                }
+                else if(opndDesc->opnd_type == OPND_OTHER)
                 {
                     //in theory this is not necessary since all of them will be UB
                     //but to demonstrate usage model
@@ -1991,8 +1969,7 @@ static void readInstructionSampler(unsigned& bytePos, const char* buf, ISA_Opcod
                         ASSERT_USER(false, "Invalid misc opnd data type");
                     return;
                     }
-                }else
-                {
+                } else {
                     ASSERT_USER(false, "Invalid opnd type");
                     return;
                 }
@@ -2090,6 +2067,7 @@ static void readInstructionSampler(unsigned& bytePos, const char* buf, ISA_Opcod
     }
 }
 
+
 extern void readInstructionNG(unsigned& bytePos, const char* buf, RoutineContainer& container, unsigned instID)
 {
     ISA_Opcode opcode = (ISA_Opcode)readPrimitiveOperandNG<uint8_t>(bytePos, buf);
@@ -2099,18 +2077,18 @@ extern void readInstructionNG(unsigned& bytePos, const char* buf, RoutineContain
 
     switch(ISA_Inst_Table[opcode].type)
     {
-    case ISA_Inst_Mov       :
-    case ISA_Inst_Sync      :
-    case ISA_Inst_Arith     :
-    case ISA_Inst_Logic     :
-    case ISA_Inst_Address   :
-    case ISA_Inst_Compare   :
-    case ISA_Inst_SIMD_Flow : readInstructionCommonNG    (bytePos, buf, (ISA_Opcode)opcode, container); break;
-    case ISA_Inst_Data_Port : readInstructionDataportNG  (bytePos, buf, (ISA_Opcode)opcode, container); break;
-    case ISA_Inst_Flow      : readInstructionControlFlow (bytePos, buf, (ISA_Opcode)opcode, container); break;
-    case ISA_Inst_Misc      : readInstructionMisc        (bytePos, buf, (ISA_Opcode)opcode, container); break;
-    case ISA_Inst_SVM       : readInstructionSVM         (bytePos, buf, (ISA_Opcode)opcode, container); break;
-    case ISA_Inst_Sampler   : readInstructionSampler     (bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_Mov:
+    case ISA_Inst_Sync:
+    case ISA_Inst_Arith:
+    case ISA_Inst_Logic:
+    case ISA_Inst_Address:
+    case ISA_Inst_Compare:
+    case ISA_Inst_SIMD_Flow: readInstructionCommonNG   (bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_Data_Port: readInstructionDataportNG (bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_Flow:      readInstructionControlFlow(bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_Misc:      readInstructionMisc       (bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_SVM:       readInstructionSVM        (bytePos, buf, (ISA_Opcode)opcode, container); break;
+    case ISA_Inst_Sampler:   readInstructionSampler    (bytePos, buf, (ISA_Opcode)opcode, container); break;
     default:
         {
             stringstream sstr;
@@ -2276,22 +2254,7 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
             uint32_t aliasIndex  = header.variables[declID].alias_index;
             uint16_t aliasOffset = header.variables[declID].alias_offset;
 
-            // Resolve access to global var based on symbol table
-            if( ((VISAKernelImpl*)container.kernelBuilder)->getRelocTablePresent() )
-            {
-                for( unsigned int i = 0; i < ((VISAKernelImpl*)container.kernelBuilder)->getVarRelocSize(); i++ )
-                {
-                    unsigned int symIdx, resIdx;
-                    ((VISAKernelImpl*)container.kernelBuilder)->getVarRelocEntry(i, symIdx, resIdx);
-
-                    if( symIdx == aliasIndex )
-                    {
-                        aliasIndex = (uint16_t)resIdx;
-                        break;
-                    }
-                }
-            }
-            // else assume resolved index = sumbolic index
+            // else assume resolved index = symbolic index
             // This happens when builder API is used instead of reading from CISA file.
             // The assumption here is that when builder API is used, variable and function
             // resolution is done by caller of builder API already.
@@ -2443,7 +2406,7 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         container.samplerVarDecls[i] = decl;
     }
 
-	kernelBuilderImpl->GetBindlessSampler(container.samplerVarDecls[BINDLESS_SAMPLER_ID]);
+    kernelBuilderImpl->GetBindlessSampler(container.samplerVarDecls[BINDLESS_SAMPLER_ID]);
 
     // read surface variables
     READ_CISA_FIELD(header.surface_count, uint8_t, bytePos, buf);
@@ -2634,10 +2597,10 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
 
 
 
-	// we have to set the CISA builder version to the binary version,
-	// or some instructions that behave differently based on vISA version (e.g., unaligned oword read)
-	// would not work correctly
-	builder->CISA_IR_setVersion(isaHeader.major_version, isaHeader.minor_version);
+    // we have to set the CISA builder version to the binary version,
+    // or some instructions that behave differently based on vISA version (e.g., unaligned oword read)
+    // would not work correctly
+    builder->CISA_IR_setVersion(isaHeader.major_version, isaHeader.minor_version);
 
     unsigned fileVarsCount = 0;
     VISA_FileVar** fileVarDecls = NULL;
@@ -2655,7 +2618,7 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
         fileVarDecls[i] = fileVar;
     }
 
-    if (kernelName != NULL)
+    if (kernelName)
     {
         int kernelIndex = -1;
         for (unsigned i = 0; i < isaHeader.num_kernels; i++)
@@ -2684,20 +2647,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
 
         builder->AddKernel(container.kernelBuilder, isaHeader.kernels[kernelIndex].name);
 
-        for (int i = 0; i < isaHeader.kernels[kernelIndex].variable_reloc_symtab.num_syms; i++)
-        {
-            reloc_sym& varRelocSym = isaHeader.kernels[kernelIndex].variable_reloc_symtab.reloc_syms[i];
-            ((VISAKernelImpl*)container.kernelBuilder)->addVarRelocEntry(varRelocSym.symbolic_index, varRelocSym.resolved_index);
-        }
-
-        for (int i = 0; i < isaHeader.kernels[kernelIndex].function_reloc_symtab.num_syms; i++)
-        {
-            reloc_sym& funcRelocSym = isaHeader.kernels[kernelIndex].function_reloc_symtab.reloc_syms[i];
-            ((VISAKernelImpl*)container.kernelBuilder)->addFuncRelocEntry(funcRelocSym.symbolic_index, funcRelocSym.resolved_index);
-        }
-
-        ((VISAKernelImpl*)container.kernelBuilder)->setupRelocTable();
-
         VISAKernelImpl* kernelImpl = (VISAKernelImpl*)container.kernelBuilder;
         kernelImpl->setIsKernel(true);
         kernels.push_back(container.kernelBuilder);
@@ -2712,21 +2661,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
             builder->AddFunction(funcPtr, isaHeader.functions[i].name);
 
             container.kernelBuilder = (VISAKernel*)funcPtr;
-
-            for (int m = 0; m < isaHeader.functions[i].variable_reloc_symtab.num_syms; m++)
-            {
-                reloc_sym& varRelocSym = isaHeader.functions[i].variable_reloc_symtab.reloc_syms[m];
-                ((VISAKernelImpl*)container.kernelBuilder)->addVarRelocEntry(varRelocSym.symbolic_index, varRelocSym.resolved_index);
-            }
-
-            for (int m = 0; m < isaHeader.functions[i].function_reloc_symtab.num_syms; m++)
-            {
-                reloc_sym& funcRelocSym = isaHeader.functions[i].function_reloc_symtab.reloc_syms[m];
-                ((VISAKernelImpl*)container.kernelBuilder)->addFuncRelocEntry(funcRelocSym.symbolic_index, funcRelocSym.resolved_index);
-            }
-
-            // Setup relocation table in IR_Builder if one exists
-            ((VISAKernelImpl*)container.kernelBuilder)->setupRelocTable();
 
             ((VISAKernelImpl*)container.kernelBuilder)->setIsKernel(false);
             kernels.push_back(container.kernelBuilder);
@@ -2750,21 +2684,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
 
             builder->AddKernel(container.kernelBuilder, isaHeader.kernels[k].name);
 
-            for (int i = 0; i < isaHeader.kernels[k].variable_reloc_symtab.num_syms; i++)
-            {
-                reloc_sym& varRelocSym = isaHeader.kernels[k].variable_reloc_symtab.reloc_syms[i];
-                ((VISAKernelImpl*)container.kernelBuilder)->addVarRelocEntry(varRelocSym.symbolic_index, varRelocSym.resolved_index);
-            }
-
-            for (int i = 0; i < isaHeader.kernels[k].function_reloc_symtab.num_syms; i++)
-            {
-                reloc_sym& funcRelocSym = isaHeader.kernels[k].function_reloc_symtab.reloc_syms[i];
-                ((VISAKernelImpl*)container.kernelBuilder)->addFuncRelocEntry(funcRelocSym.symbolic_index, funcRelocSym.resolved_index);
-            }
-
-            // Setup relocation table in IR_Builder if one exists
-            ((VISAKernelImpl*)container.kernelBuilder)->setupRelocTable();
-
             ((VISAKernelImpl*)container.kernelBuilder)->setIsKernel(true);
             kernels.push_back(container.kernelBuilder);
 
@@ -2787,21 +2706,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
                 builder->AddFunction(funcPtr, isaHeader.functions[i].name);
 
                 container.kernelBuilder = (VISAKernel*)funcPtr;
-
-                for( int m = 0; m < isaHeader.functions[i].variable_reloc_symtab.num_syms; m++ )
-                {
-                    reloc_sym& varRelocSym = isaHeader.functions[i].variable_reloc_symtab.reloc_syms[m];
-                    ((VISAKernelImpl*)container.kernelBuilder)->addVarRelocEntry( varRelocSym.symbolic_index, varRelocSym.resolved_index );
-                }
-
-                for( int m = 0; m < isaHeader.functions[i].function_reloc_symtab.num_syms; m++ )
-                {
-                    reloc_sym& funcRelocSym = isaHeader.functions[i].function_reloc_symtab.reloc_syms[m];
-                    ((VISAKernelImpl*)container.kernelBuilder)->addFuncRelocEntry( funcRelocSym.symbolic_index, funcRelocSym.resolved_index );
-                }
-
-                // Setup relocation table in IR_Builder if one exists
-                ((VISAKernelImpl*) container.kernelBuilder)->setupRelocTable();
 
                 ((VISAKernelImpl*)container.kernelBuilder)->setIsKernel(false);
                 kernels.push_back(container.kernelBuilder);

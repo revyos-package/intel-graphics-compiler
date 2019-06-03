@@ -75,18 +75,18 @@ _THREAD bool g_prettyPrint       = true ; /// Line up the comments.
 _THREAD bool g_ignorelocs        = false; /// Ignore printing LOCs.
 _THREAD bool g_noinstid          = false; /// Ignore printing instruction id comments.
 
-extern const char* printAsmName(const kernel_format_t* header)
+extern const char* printAsmName(const print_format_provider_t* header)
 {
-    for (unsigned i = 0; i < header->attribute_count; i++)
+    for (unsigned i = 0; i < header->getAttrCount(); i++)
     {
-        if (!strcmp(header->strings[header->attributes[i].nameIndex], "AsmName"))
-            return header->attributes[i].value.stringVal;
+        if (!strcmp(header->getString(header->getAttr(i)->nameIndex), "AsmName"))
+            return header->getAttr(i)->value.stringVal;
     }
 
     return "";
 }
 
-static const char* getVarName(int id, const kernel_format_t& header)
+const char* getGenVarName(int id, const print_format_provider_t& header)
 {
     int numPredefined = Get_CISA_PreDefined_Var_Count();
     if (id < numPredefined)
@@ -95,38 +95,17 @@ static const char* getVarName(int id, const kernel_format_t& header)
     }
     else
     {
-        MUST_BE_TRUE((id - numPredefined) < (int) header.variable_count, "invalid vISA general variable id");
-        return header.strings[header.variables[id - numPredefined].name_index];
+        MUST_BE_TRUE((id - numPredefined) < (int) header.getVarCount(), "invalid vISA general variable id");
+        return header.getString(header.getVar(id - numPredefined)->name_index);
     }
 }
 
-
-unsigned int getRelocatedGlobalVarIndex(const common_isa_header& isaHeader, unsigned declID, bool isKernel, unsigned int funcId)
-{
-    // declID is a symbolic index in to file scope variable table. Refer to relocation
-    // table and return resolved index.
-    reloc_symtab& var_sym_tab = (isKernel == true) ?
-        isaHeader.kernels[0].variable_reloc_symtab :
-    isaHeader.functions[funcId].variable_reloc_symtab;
-
-    for( unsigned int i = 0; i < var_sym_tab.num_syms; i++ )
-    {
-        reloc_sym& sym = var_sym_tab.reloc_syms[i];
-
-        if( sym.symbolic_index == declID )
-        {
-            return sym.resolved_index;
-        }
-    }
-
-    return 0;
-}
-
-string printGlobalDeclName(const common_isa_header& isaHeader, const kernel_format_t* header, unsigned declID, bool isKernel, unsigned int funcId, Options *options)
+string printGlobalDeclName(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, unsigned declID, bool isKernel, unsigned int funcId, Options *options)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
-    unsigned int resolvedDclID = getRelocatedGlobalVarIndex(isaHeader, declID, isKernel, funcId);
+    unsigned int resolvedDclID = declID;
     if (options->getOption(vISA_DumpIsaVarNames) && resolvedDclID < isaHeader.num_filescope_variables &&
         isaHeader.filescope_variables && isaHeader.filescope_variables[resolvedDclID].name)
     {
@@ -141,21 +120,22 @@ string printGlobalDeclName(const common_isa_header& isaHeader, const kernel_form
 
 static string printSurfaceName(uint32_t declID)
 {
-	stringstream sstr;
-	unsigned numPreDefinedSurf = Get_CISA_PreDefined_Surf_Count();
-	if (declID < numPreDefinedSurf)
-	{
-		sstr << vISAPreDefSurf[declID].name;
-	}
-	else
-	{
-		sstr << "T" << declID;
-	}
+    stringstream sstr;
+    unsigned numPreDefinedSurf = Get_CISA_PreDefined_Surf_Count();
+    if (declID < numPreDefinedSurf)
+    {
+        sstr << vISAPreDefSurf[declID].name;
+    }
+    else
+    {
+        sstr << "T" << declID;
+    }
 
-	return sstr.str();
+    return sstr.str();
 }
 
-string printVariableDeclName(const kernel_format_t* header, unsigned declID, Options *options, Common_ISA_State_Opnd_Class operand_prefix_kind = NOT_A_STATE_OPND)
+string printVariableDeclName(const print_format_provider_t* header,
+    unsigned declID, Options *options, Common_ISA_State_Opnd_Class operand_prefix_kind = NOT_A_STATE_OPND)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
@@ -163,7 +143,7 @@ string printVariableDeclName(const kernel_format_t* header, unsigned declID, Opt
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     if (options->getOption(vISA_DumpIsaVarNames))
     {
-        sstr << getVarName(declID, *header);
+        sstr << getGenVarName(declID, *header);
     }
     else
     {
@@ -185,8 +165,8 @@ string printVariableDeclName(const kernel_format_t* header, unsigned declID, Opt
                     else
                     {
                         declID -= numPreDefinedVars;
-                        var_info_t *var = &(header->variables[declID]);
-                        string name = header->strings[var->name_index];
+                        const var_info_t *var = header->getVar(declID);
+                        string name = header->getString(var->name_index);
                         //sstr << "V" << declID << ":";
                         sstr << name;
                     }
@@ -200,7 +180,7 @@ string printVariableDeclName(const kernel_format_t* header, unsigned declID, Opt
                     }
                     else
                     {
-                        G4_Declare* aliasDcl = header->variables[declID - numPreDefinedVars].dcl;
+                        G4_Declare* aliasDcl = header->getVar(declID - numPreDefinedVars)->dcl;
                         unsigned int aliasOff = 0;
                         std::string type;
                         type = std::string(G4_Type_Table[aliasDcl->getElemType()].str);
@@ -213,9 +193,9 @@ string printVariableDeclName(const kernel_format_t* header, unsigned declID, Opt
 
                         // aliasDcl is top most dcl with aliasOff
                         // Lets find out declID of aliasDcl
-                        for(unsigned int i = 0; i < header->variable_count; i++)
+                        for(unsigned int i = 0; i < header->getVarCount(); i++)
                         {
-                            if(header->variables[i].dcl == aliasDcl)
+                            if(header->getVar(i)->dcl == aliasDcl)
                             {
                                 declID = i + numPreDefinedVars;
                                 break;
@@ -278,7 +258,7 @@ static string printRegion(uint16_t region)
     return sstr.str();
 }
 
-string printVectorOperand(const kernel_format_t* header,
+string printVectorOperand(const print_format_provider_t* header,
     const vector_opnd& opnd, Options *opt, bool showRegion)
 {
     stringstream sstr;
@@ -296,7 +276,8 @@ string printVectorOperand(const kernel_format_t* header,
     {
         case OPERAND_GENERAL:
         {
-            sstr << Common_ISA_Get_Modifier_Name(modifier) << printVariableDeclName(header, opnd.getOperandIndex(), opt, NOT_A_STATE_OPND);
+            sstr << Common_ISA_Get_Modifier_Name(modifier)
+                << printVariableDeclName(header, opnd.getOperandIndex(), opt, NOT_A_STATE_OPND);
 
             if ((!g_shortRegionPrint)                      ||
                 (!(opnd.opnd_val.gen_opnd.row_offset == 0 &&
@@ -370,7 +351,8 @@ string printVectorOperand(const kernel_format_t* header,
     return sstr.str();
 }
 
-string printRawOperand(const kernel_format_t* header, const raw_opnd& opnd, Options *opt)
+string printRawOperand(const print_format_provider_t* header,
+    const raw_opnd& opnd, Options *opt)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
@@ -378,7 +360,8 @@ string printRawOperand(const kernel_format_t* header, const raw_opnd& opnd, Opti
     return sstr.str();
 }
 
-static string printOperand(const kernel_format_t* header, const CISA_INST* inst, unsigned i, Options *opt)
+static string printOperand(const print_format_provider_t* header,
+    const CISA_INST* inst, unsigned i, Options *opt)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     MUST_BE_TRUE(inst  , "Argument Exception: argument inst   is NULL.");
@@ -386,15 +369,15 @@ static string printOperand(const kernel_format_t* header, const CISA_INST* inst,
     stringstream sstr;
     switch (getOperandType(inst, i))
     {
-        case CISA_OPND_OTHER  : sstr << (getPrimitiveOperand<unsigned>             (inst, i)); break;
-        case CISA_OPND_VECTOR : sstr << printVectorOperand(header, getVectorOperand(inst, i), opt, true); break;
-        case CISA_OPND_RAW    : sstr << printRawOperand   (header, getRawOperand   (inst, i), opt); break;
-        default               : MUST_BE_TRUE(false, "Invalid operand type.");
+        case CISA_OPND_OTHER:  sstr << (getPrimitiveOperand<unsigned>             (inst, i)); break;
+        case CISA_OPND_VECTOR: sstr << printVectorOperand(header, getVectorOperand(inst, i), opt, true); break;
+        case CISA_OPND_RAW:    sstr << printRawOperand   (header, getRawOperand   (inst, i), opt); break;
+        default:               MUST_BE_TRUE(false, "Invalid operand type.");
     }
     return sstr.str();
 }
 
-static string printAttribute(const attribute_info_t* attr, const kernel_format_t* kernel, bool isKernelAttr = false)
+string printAttribute(const attribute_info_t* attr, const print_format_provider_t* kernel, bool isKernelAttr)
 {
     stringstream sstr;
     sstr <<"";
@@ -403,7 +386,7 @@ static string printAttribute(const attribute_info_t* attr, const kernel_format_t
         return sstr.str();
     }
 
-    sstr << "." << (isKernelAttr ? "kernel_" : "") << "attr " << kernel->strings[attr->nameIndex] << "=";
+    sstr << "." << (isKernelAttr ? "kernel_" : "") << "attr " << kernel->getString(attr->nameIndex) << "=";
 
     if (attr->isInt)
         sstr << attr->value.intVal;
@@ -415,12 +398,12 @@ static string printAttribute(const attribute_info_t* attr, const kernel_format_t
     return sstr.str();
 }
 
-extern string printPredicateDecl(const kernel_format_t* header, unsigned declID)
+extern string printPredicateDecl(const print_format_provider_t* header, unsigned declID)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
 
-    pred_info_t* pred = &header->predicates[declID];
+    const pred_info_t* pred = header->getPred(declID);
     sstr << ".decl P"
          << declID + COMMON_ISA_NUM_PREDEFINED_PRED
          << " "
@@ -435,12 +418,13 @@ extern string printPredicateDecl(const kernel_format_t* header, unsigned declID)
     return sstr.str();
 }
 
-extern string printAddressDecl(const common_isa_header& isaHeader, const kernel_format_t* header, unsigned declID)
+extern string printAddressDecl(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, unsigned declID)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
 
-    addr_info_t* addr = &header->addresses[declID];
+    const addr_info_t* addr = header->getAddr(declID);
     sstr << ".decl A"
          << declID
          << " "
@@ -455,13 +439,99 @@ extern string printAddressDecl(const common_isa_header& isaHeader, const kernel_
     return sstr.str();
 }
 
-// declID is in the range of [0..#user-var], pre-defnied are not included
-extern string printVariableDecl(const common_isa_header& isaHeader, const kernel_format_t* header, unsigned declID, bool isKernel, unsigned int funcId, Options *options)
+extern string printSamplerDecl(const print_format_provider_t* header, unsigned declID)
+{
+    MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
+    stringstream sstr;
+    const state_info_t* info = header->getSampler(declID);
+
+    sstr << ".decl S" << declID << " v_type=S";
+    sstr << " num_elts=" << info->num_elements;
+    sstr << " v_name=" << header->getString(info->name_index);
+    for (unsigned j = 0; j < info->attribute_count; j++)
+    {
+        sstr << " " << printAttribute(&info->attributes[j], header);
+    }
+    return sstr.str();
+}
+
+extern string printSurfaceDecl(const print_format_provider_t* header, unsigned declID, unsigned numPredefinedSurfaces)
+{
+    MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
+    stringstream sstr;
+    const state_info_t* info = header->getSurface(declID);
+
+    sstr << ".decl T" << declID + numPredefinedSurfaces << " v_type=T";
+    sstr << " num_elts=" << info->num_elements;
+    sstr << " v_name=" << header->getString(info->name_index);
+    for (unsigned j = 0; j < info->attribute_count; j++)
+    {
+        sstr << " " << printAttribute(&info->attributes[j], header);
+    }
+    return sstr.str();
+}
+
+extern string printVMEDecl(const print_format_provider_t* header, unsigned declID)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     stringstream sstr;
 
-    var_info_t *var = &(header->variables[declID]);
+    sstr << ".decl VME" << declID << " v_type=VME";
+    const state_info_t* info = header->getVME(declID);
+    sstr << " num_elts=" << info->num_elements;
+    sstr << " v_name=" << header->getString(info->name_index);
+    for (unsigned j = 0; j < info->attribute_count; j++)
+    {
+        sstr << " " << printAttribute(&info->attributes[j], header);
+    }
+    return sstr.str();
+}
+
+extern string printFuncInput(const print_format_provider_t* header, unsigned declID, bool isKernel, Options* options)
+{
+    MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
+    stringstream sstr;
+
+    const input_info_t* input = header->getInput(declID);
+    if (!isKernel)
+    {
+        sstr << ".parameter " /* function */;
+    }
+    else if (!input->getImplicitKind())
+    {
+        sstr << ".input " /* kernel */;
+    }
+    else
+    {
+        sstr << input->getImplicitKindString() << " ";
+    }
+
+    if (options->getOption(vISA_DumpIsaVarNames) && INPUT_GENERAL == input->getInputClass())
+    {
+        sstr << getGenVarName(input->index, *header);
+    }
+    else
+    {
+        const char* Input_Class_String[] = { "V", "S", "T" };
+        sstr << Input_Class_String[input->getInputClass()] << input->index;
+    }
+
+    if (isKernel)
+        sstr << " offset=" << input->offset;
+
+    sstr << " size=" << input->size;
+
+    return sstr.str();
+}
+
+// declID is in the range of [0..#user-var], pre-defnied are not included
+extern string printVariableDecl(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, unsigned declID, bool isKernel, unsigned int funcId, Options *options)
+{
+    MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
+    stringstream sstr;
+
+    const var_info_t *var = header->getVar(declID);
     VISA_Type  isa_type = (VISA_Type)  ((var->bit_properties     ) & 0xF);
     VISA_Align align    = (VISA_Align) ((var->bit_properties >> 4) & 0x7);
 
@@ -479,7 +549,7 @@ extern string printVariableDecl(const common_isa_header& isaHeader, const kernel
         sstr << " alias=<";
         if (options->getOption(vISA_DumpIsaVarNames))
         {
-            sstr << (var->alias_scope_specifier ? printGlobalDeclName(isaHeader, header, var->alias_index, isKernel, funcId, options) : 
+            sstr << (var->alias_scope_specifier ? printGlobalDeclName(isaHeader, header, var->alias_index, isKernel, funcId, options) :
                 printVariableDeclName(header, var->alias_index, options));
         }
         else
@@ -535,7 +605,7 @@ string printExecutionSize(uint8_t opcode, uint8_t execSize, uint8_t subOp = 0)
 {
     stringstream sstr;
 
-    if(hasExecSize((ISA_Opcode)opcode, subOp))
+    if (hasExecSize((ISA_Opcode)opcode, subOp))
     {
         sstr << "(";
         uint8_t emsk = ((execSize >> 0x4) & 0xF);
@@ -623,7 +693,8 @@ static void printAtomicSubOpc(stringstream &sstr, uint8_t value)
     }
 }
 
-static string printInstructionSVM(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionSVM(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     unsigned i = 0;
     stringstream sstr;
@@ -701,7 +772,8 @@ static string printInstructionSVM(const kernel_format_t* header, const CISA_INST
     return sstr.str();
 }
 
-static string printInstructionCommon(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionCommon(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -748,7 +820,7 @@ static string printInstructionCommon(const kernel_format_t* header, const CISA_I
         if (opcode == ISA_GOTO)
         {
             uint16_t label_id = getPrimitiveOperand<uint16_t>(inst, i++);
-            sstr << " " << header->strings[header->labels[label_id].name_index];
+            sstr << " " << header->getString(header->getLabel(label_id)->name_index);
         }
 
         for (; i < Count; i++)
@@ -772,7 +844,7 @@ static string printInstructionCommon(const kernel_format_t* header, const CISA_I
                     {
                         uint32_t numPredefined = Get_CISA_PreDefined_Var_Count();
                         VISA_Type type = opnd_index < numPredefined ? getPredefinedVarType(mapExternalToInternalPreDefVar(opnd_index)) :
-                            header->variables[opnd_index - numPredefined].getType();
+                            header->getVar(opnd_index - numPredefined)->getType();
                         int offset = curOpnd.opnd_val.gen_opnd.col_offset *
                                      CISATypeTable[type].typeSize +
                                      curOpnd.opnd_val.gen_opnd.row_offset * G4_GRF_REG_NBYTES;
@@ -841,7 +913,8 @@ static string printInstructionCommon(const kernel_format_t* header, const CISA_I
     return sstr.str();
 }
 
-static string printInstructionControlFlow(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionControlFlow(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned i = 0;
@@ -861,7 +934,7 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
                  stringstream uniqueSuffixSstr; uniqueSuffixSstr << '_' << label_id;
                  string       uniqueSuffixStr = uniqueSuffixSstr.str();
 
-                 string labelName(header->strings[header->labels[label_id].name_index]);
+                 string labelName(header->getString(header->getLabel(label_id)->name_index));
 
                  sstr << ".function " << labelName << uniqueSuffixStr
                       << "\n\n"       << labelName << uniqueSuffixStr;
@@ -869,7 +942,7 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
             }
             case ISA_LABEL:
             {
-                 sstr << header->strings[header->labels[label_id].name_index];
+                 sstr << header->getString(header->getLabel(label_id)->name_index);
                  break;
             }
             default:
@@ -901,8 +974,8 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
                 }
                 else
                 {
-                    sstr << " " << header->strings[header->labels[label_id].name_index];
-                    if (header->labels[label_id].kind == LABEL_SUBROUTINE) sstr << "_" << label_id;
+                    sstr << " " << header->getString(header->getLabel(label_id)->name_index);
+                    if (header->getLabel(label_id)->kind == LABEL_SUBROUTINE) sstr << "_" << label_id;
                 }
 
                 if (opcode == ISA_FCALL)
@@ -928,7 +1001,7 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
             case ISA_FADDR:
             {
                 /// symbol name in string
-                sstr << header->strings[getPrimitiveOperand<uint16_t>(inst, i++)];
+                sstr << header->getString(getPrimitiveOperand<uint16_t>(inst, i++));
                 /// dst
                 sstr << printOperand(header, inst, i++, opt);
                 break;
@@ -944,7 +1017,7 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
                 {
                     if (!first) { sstr << ", "; }
                     label_id = getPrimitiveOperand<uint16_t>(inst, i);
-                    sstr << header->strings[header->labels[label_id].name_index];
+                    sstr << header->getString(header->getLabel(label_id)->name_index);
                     if (first) { first = false; }
                 }
                 sstr << ")";
@@ -958,7 +1031,8 @@ static string printInstructionControlFlow(const kernel_format_t* header, const C
     return sstr.str();
 }
 
-static string printInstructionMisc(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionMisc(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned i = 0;
@@ -975,7 +1049,7 @@ static string printInstructionMisc(const kernel_format_t* header, const CISA_INS
         case ISA_FILE:
         {
             uint32_t filename_index = getPrimitiveOperand<uint32_t>(inst, i++);
-            sstr << "FILE " << header->strings[filename_index];
+            sstr << "FILE " << header->getString(filename_index);
             break;
         }
         case ISA_LOC:
@@ -1275,7 +1349,8 @@ getSubOpcodeByte(const CISA_INST* inst, unsigned i)
     return VISA3DSamplerOp::extractSamplerOp(val);
 }
 
-static string printInstructionSampler(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionSampler(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     stringstream sstr;
 
@@ -1342,7 +1417,7 @@ static string printInstructionSampler(const kernel_format_t* header, const CISA_
         case ISA_3D_SAMPLE:
         {
             // [(P)] SAMPLE_3d[.pixel_null_mask][.cps][.divS].<channels> (exec_size)
-	        //   [(u_aoffimmi, v_aoffimii, r_aoffimmi)] <sampler> <surface>
+            //   [(u_aoffimmi, v_aoffimii, r_aoffimmi)] <sampler> <surface>
             //   <dst> <u> <v> <r> <ai>
             auto subop = getSubOpcodeByte(inst, i++);
 
@@ -1491,14 +1566,14 @@ static string printInstructionSampler(const kernel_format_t* header, const CISA_
         {
             VISASampler3DSubOpCode subop = (VISASampler3DSubOpCode)getPrimitiveOperand<uint8_t>(inst, i++);
             sstr << SAMPLE_OP_3D_NAME[subop];
-			sstr << " " << printExecutionSize(inst->opcode, inst->execsize) << " ";
+            sstr << " " << printExecutionSize(inst->opcode, inst->execsize) << " ";
 
             if (subop == VISA_3D_RESINFO)
             {
-				// channelMask
-				uint8_t channels = getPrimitiveOperand<uint8_t>(inst, i++);
-				ChannelMask chMask = ChannelMask::createFromBinary(ISA_3D_INFO, channels);
-				sstr << chMask.getString();
+                // channelMask
+                uint8_t channels = getPrimitiveOperand<uint8_t>(inst, i++);
+                ChannelMask chMask = ChannelMask::createFromBinary(ISA_3D_INFO, channels);
+                sstr << chMask.getString();
             }
             // surface
             sstr << " T" << printOperand(header, inst, i++, opt);
@@ -2011,20 +2086,21 @@ static string printInstructionSampler(const kernel_format_t* header, const CISA_
 
 static string printSurfaceIndex(uint8_t surface)
 {
-	stringstream sstr;
+    stringstream sstr;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
     if (surface < numPreDefinedSurfs)
     {
-		sstr << " " << vISAPreDefSurf[surface].name;
+        sstr << " " << vISAPreDefSurf[surface].name;
     }
-	else
-	{
-		sstr << " " << "T" << (unsigned)surface;
-	}
-	return sstr.str();
+    else
+    {
+        sstr << " " << "T" << (unsigned)surface;
+    }
+    return sstr.str();
 }
 
-static string printInstructionDataport(const kernel_format_t* header, const CISA_INST* inst, Options *opt)
+static string printInstructionDataport(const print_format_provider_t* header,
+    const CISA_INST* inst, Options *opt)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned i = 0;
@@ -2365,7 +2441,9 @@ static string printInstructionDataport(const kernel_format_t* header, const CISA
     return sstr.str();
 }
 
-extern string printKernelHeader(const common_isa_header& isaHeader, const kernel_format_t* header, bool isKernel, int funcionId, Options *options)
+
+extern string printKernelHeader(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, bool isKernel, int funcionId, Options *options)
 {
     stringstream sstr;
 
@@ -2374,7 +2452,7 @@ extern string printKernelHeader(const common_isa_header& isaHeader, const kernel
 
     sstr << ".version " << (unsigned)(major_version) << "." << (unsigned)(minor_version) << endl;
 
-    std::string name = header->strings[header->name_index];
+    std::string name = header->getString(header->getNameIndex());
     std::replace_if(name.begin(), name.end(), [] (char c) { return c == '.'; } , ' ');
 
     sstr << (!isKernel ? ".global_function " : ".kernel ") << name << endl;
@@ -2425,113 +2503,86 @@ extern string printKernelHeader(const common_isa_header& isaHeader, const kernel
             sstr << " align=" << Common_ISA_Get_Align_Name(align_bits);
     }
 
-
-    // emit var decls
-    //.decl  V<#> name=<name> type=<type> num_elts=<num_elements> [align=<align>] [alias=(<alias_index>,<alias_offset>)]
-    for (unsigned i = 0; i < header->variable_count; i++)
+    // In asm text mode, declarations are printed at variable creation time, we dont need to print them here
+    if (!options->getOption(vISA_IsaAssembly))
     {
-        sstr << endl << printVariableDecl(isaHeader, header, i, isKernel, funcionId, options);
-    }
-
-    for (unsigned i = 0; i < header->address_count; i++)
-    {
-        sstr << endl << printAddressDecl(isaHeader, header, i);
-    }
-
-    for (unsigned i = 0; i < header->predicate_count; i++)
-    {
-        // P0 is reserved; starting from P1 if there is predicate decl
-        sstr << endl << printPredicateDecl(header, i);
-    }
-
-    // sampler
-    for (unsigned i = 0; i < header->sampler_count; i++)
-    {
-        sstr << endl << ".decl S" << i << " v_type=S";
-        state_info_t* sampler = &header->samplers[i];
-        sstr << " num_elts=" << sampler->num_elements;
-        sstr << " v_name=" << header->strings[sampler->name_index];
-        for (unsigned j = 0; j < sampler->attribute_count; j++)
+        // For debug purposes only
+        // Print the predefined variables as comments
+        sstr << endl << "/// VISA Predefined Variables";
+        for (unsigned i = 0; i < Get_CISA_PreDefined_Var_Count(); i++)
         {
-            sstr << " " << printAttribute(&sampler->attributes[j], header);
+            const var_info_t* predefVar = header->getPredefVar(i);
+            if (predefVar->name_index != -1)
+            {
+                sstr << endl << "// .decl V" << i
+                    << " v_type=G"
+                    << " v_name=" << header->getString(predefVar->name_index);
+            }
         }
-    }
-
-    unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
-    for (unsigned i = 0; i < header->surface_count; i++)
-    {
-        sstr << endl << ".decl T" << i+numPreDefinedSurfs << " v_type=T";
-        state_info_t* surface = &header->surfaces[i];
-        sstr << " num_elts=" << surface->num_elements;
-        sstr << " v_name=" << header->strings[surface->name_index];
-        for (unsigned j = 0; j < surface->attribute_count; j++)
+        for (unsigned i = 0; i < Get_CISA_PreDefined_Surf_Count(); i++)
         {
-            sstr << " " << printAttribute(&surface->attributes[j], header);
+            const state_info_t* predefSurface = header->getPredefSurface(i);
+            if (predefSurface->name_index != -1)
+            {
+                sstr << endl << "// .decl T" << i
+                    << " v_type=T"
+                    << " v_name=" << header->getString(predefSurface->name_index);
+            }
         }
-    }
-
-    for (unsigned i = 0; i < header->vme_count; i++)
-    {
         sstr << endl;
-        sstr << ".decl VME" << i;
-        sstr << " v_type=VME";
-        state_info_t* vme = &header->vmes[i];
-        sstr << " num_elts=" << vme->num_elements;
-        sstr << " v_name=" << header->strings[vme->name_index];
-        for (unsigned j = 0; j < vme->attribute_count; j++)
-        {
-            sstr << " " << printAttribute(&vme->attributes[j], header);
-        }
-    }
 
-    /// .inputs to kernel
-    for (unsigned i = 0; i < header->input_count; i++)
-    {
-        input_info_t* input = &header->inputs[i];
-
-        //sstr << endl << (!isKernel ? ".parameter " /* function */  : ".input " /* kernel */);
-
-        if (!isKernel)
+        // emit var decls
+        //.decl  V<#> name=<name> type=<type> num_elts=<num_elements> [align=<align>] [alias=(<alias_index>,<alias_offset>)]
+        for (unsigned i = 0; i < header->getVarCount(); i++)
         {
-            sstr << endl << ".parameter " /* function */;
+            sstr << endl << printVariableDecl(isaHeader, header, i, isKernel, funcionId, options);
         }
-        else if (!input->getImplicitKind())
+        // address decls
+        for (unsigned i = 0; i < header->getAddrCount(); i++)
         {
-            sstr << endl << ".input " /* kernel */;
+            sstr << endl << printAddressDecl(isaHeader, header, i);
         }
-        else
+        // pred decls
+        for (unsigned i = 0; i < header->getPredCount(); i++)
         {
-            sstr << endl << input->getImplicitKindString() << " ";
+            // P0 is reserved; starting from P1 if there is predicate decl
+            sstr << endl << printPredicateDecl(header, i);
         }
-
-        if (options->getOption(vISA_DumpIsaVarNames) && INPUT_GENERAL == input->getInputClass())
+        // sampler
+        for (unsigned i = 0; i < header->getSamplerCount(); i++)
         {
-            sstr << getVarName(input->index, *header);
+            sstr << endl << printSamplerDecl(header, i);
         }
-        else
+        // surface
+        unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
+        for (unsigned i = 0; i < header->getSurfaceCount(); i++)
         {
-            const char* Input_Class_String[] = { "V", "S", "T" };
-            sstr << Input_Class_String[input->getInputClass()] << input->index;
+            sstr << endl << printSurfaceDecl(header, i, numPreDefinedSurfs);
         }
-
-        if (isKernel)
-            sstr << " offset=" << input->offset;
-
-        sstr << " size=" << input->size;
+        // VME
+        for (unsigned i = 0; i < header->getVMECount(); i++)
+        {
+            sstr << endl << printVMEDecl(header, i);
+        }
+        // inputs to kernel
+        for (unsigned i = 0; i < header->getInputCount(); i++)
+        {
+            sstr << endl << printFuncInput(header, i, isKernel, options);
+        }
     }
 
     /// .return directive for functions
     if (!isKernel)
     {
-        VISA_Type isa_type = (VISA_Type)(header->return_type & 0xF);
+        VISA_Type isa_type = (VISA_Type)(header->getReturnType() & 0xF);
         sstr << endl << ".return " << CISATypeTable[isa_type].typeName;
     }
 
     bool isTargetSet = false;
-    for (unsigned i = 0; i < header->attribute_count; i++)
+    for (unsigned i = 0; i < header->getAttrCount(); i++)
     {
-        sstr << endl << printAttribute(&header->attributes[i], header, true);
-        if(strcmp(header->strings[header->attributes[i].nameIndex], "Target") == 0)
+        sstr << endl << printAttribute(header->getAttr(i), header, true);
+        if(strcmp(header->getString(header->getAttr(i)->nameIndex), "Target") == 0)
         {
             isTargetSet = true;
         }
@@ -2560,7 +2611,8 @@ extern string printKernelHeader(const common_isa_header& isaHeader, const kernel
     return sstr.str();
 }
 
-extern string printInstruction(const kernel_format_t* header, const CISA_INST* instruction, Options *opt)
+extern string printInstruction(const print_format_provider_t* header,
+    const CISA_INST* instruction, Options *opt)
 {
     stringstream sstr;
 
@@ -2619,7 +2671,8 @@ extern string printInstruction(const kernel_format_t* header, const CISA_INST* i
     return sstr.str();
 }
 
-static string printRoutine(const common_isa_header& isaHeader, const kernel_format_t* header, list<CISA_INST*>& instructions, bool isKernel, int funcionId, Options *options)
+static string printRoutine(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, list<CISA_INST*>& instructions, bool isKernel, int funcionId, Options *options)
 {
     stringstream sstr;
     sstr << printKernelHeader(isaHeader, header, isKernel, funcionId, options);
@@ -2638,12 +2691,13 @@ static string printRoutine(const common_isa_header& isaHeader, const kernel_form
     return sstr.str();
 }
 
-extern string printKernel(const common_isa_header& isaHeader, const kernel_format_t* header, list<CISA_INST*>& instructions, Options *opt)
+extern string printKernel(const common_isa_header& isaHeader,
+    const print_format_provider_t* header, list<CISA_INST*>& instructions, Options *opt)
 {
     return printRoutine(isaHeader, header, instructions, true, 0, opt);
 }
 
-extern string printFunction(const common_isa_header& isaHeader, const function_format_t* header, list<CISA_INST*>& instructions, int funcionId, Options *opt)
+extern string printFunction(const common_isa_header& isaHeader, const print_format_provider_t* header, list<CISA_INST*>& instructions, int funcionId, Options *opt)
 {
     return printRoutine(isaHeader, header, instructions, false, funcionId, opt);
 }

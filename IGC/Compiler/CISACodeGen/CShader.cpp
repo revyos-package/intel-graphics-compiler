@@ -41,6 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/HullShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/DomainShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
+#include "DebugInfo.hpp"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/secure_mem.h"
 
@@ -71,7 +72,6 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     m_BindingTableEntryCount = 0;
     m_BindingTableUsedEntriesBitmap = 0;
     memset(&m_simdProgram, 0, sizeof(m_simdProgram));
-
     // [OCL] preAnalysis()/ParseShaderSpecificOpcode() must
     // set this to ture if there is any stateless access.
     m_HasGlobalStatelessMemoryAccess = false;
@@ -129,6 +129,7 @@ void CShader::PreAnalysisPass()
                 // Round up to GENX_GRF_REG_SIZ-byte aligned.
                 m_ScratchSpaceSize =
                     ((GENX_GRF_REG_SIZ + m_ScratchSpaceSize - 1) / GENX_GRF_REG_SIZ) * GENX_GRF_REG_SIZ;
+
             }
         }
     }
@@ -226,10 +227,10 @@ void CShader::AddEpilogue(llvm::ReturnInst* ret)
 CVariable* CShader::CreateSP(bool ptr64bits)
 {
     // create argument-value register, limited to 12 GRF
-    m_ARGV = GetNewVariable(SIZE_GRF * 3, ISA_TYPE_D, EALIGN_GRF, false, 1);
+    m_ARGV = GetNewVariable(getGRFSize() * 3, ISA_TYPE_D, getGRFAlignment(), false, 1);
     encoder.GetVISAPredefinedVar(m_ARGV, PREDEFINED_ARG);
     // create return-value register, limited to 4 GRF
-    m_RETV = GetNewVariable(SIZE_GRF, ISA_TYPE_D, EALIGN_GRF, false, 1);
+    m_RETV = GetNewVariable(getGRFSize(), ISA_TYPE_D, getGRFAlignment(), false, 1);
     encoder.GetVISAPredefinedVar(m_RETV, PREDEFINED_RET);
     // create stack-pointer register
     if (ptr64bits) {
@@ -318,21 +319,71 @@ void CShader::RestoreSP()
 void CShader::CreateImplicitArgs()
 {
     m_numBlocks = entry->size();
-    m_R0 = GetNewVariable(SIZE_GRF >> 2, ISA_TYPE_D, EALIGN_GRF, false, 1);
+    m_R0 = GetNewVariable(getGRFSize() >> 2, ISA_TYPE_D, EALIGN_GRF, false, 1);
     encoder.GetVISAPredefinedVar(m_R0, PREDEFINED_R0);
 
     // create variables for implicit args
     ImplicitArgs implicitArgs(*entry, m_pMdUtils);
     unsigned numImplicitArgs = implicitArgs.size();
 
-	// Push Args are only for entry function
-	unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-	unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) ? numPushArgsEntry : 0);
+    // Push Args are only for entry function
+    unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
+    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) ? numPushArgsEntry : 0);
     unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
+
+    // Create symbol for every arguments [5/2019]
+    //   (Previously, symbols are created only for implicit args.)
+    //   Since vISA requires input var (argument) to be root symbol (CVariable)
+    //   and GetSymbol() does not guarantee this due to coalescing of argument
+    //   values and others. Here, we handle arguments specially by creating
+    //   a CVariable symbol for each argument, and use this newly-created symbol
+    //   as the root symbol for its congruent class if any. This should always
+    //   work as it does not matter which value in a coalesced set is going to
+    //   be a root symbol.
+    //
+    //   Once a root symbol is created, the root value of its conguent class
+    //   needs to have as its symbol an alias to this root symbol.
+
+    // Update SymbolMapping for argument value.
+    auto updateArgSymbolMapping = [&](Value* Arg, CVariable* CVarArg) {
+        symbolMapping.insert(std::make_pair(Arg, CVarArg));
+        Value *Node = m_deSSA ? m_deSSA->getRootValue(Arg) : nullptr;
+        if (Node)
+        {
+            // This key is temperary. It will be deleted once the
+            // change has been fully tested (probbaly in a month or so).
+            if (IGC_IS_FLAG_ENABLED(EnableDeSSAMemberRootValue))
+            {
+                // If Arg isn't root, must setup symbolMapping for root.
+                if (Node != Arg) {
+                    // 'Node' should not have a symbol entry at this moment.
+                    assert(symbolMapping.count(Node) == 0 &&
+                        "Root symbol of arg should not be set at this point!");
+                    CVariable* aV = CVarArg;
+                    if (IGC_GET_FLAG_VALUE(EnableDeSSAAlias) >= 2)
+                    {
+                        aV = createAliasIfNeeded(Node, CVarArg);
+                    }
+                    symbolMapping[Node] = aV;
+                }
+            }
+            else
+            {
+                rootMapping[Node] = CVarArg;
+            }
+        }
+    };
 
     llvm::Function::arg_iterator arg = entry->arg_begin();
     for (unsigned i = 0; i < numFuncArgs; ++i, ++arg)
-        ;
+    {
+        Value* ArgVal = arg;
+        if (ArgVal->use_empty())
+            continue;
+        e_alignment algn = GetPreferredAlignment(ArgVal, m_WI, m_ctx);
+        CVariable* ArgCVar = GetNewVector(ArgVal, algn);
+        updateArgSymbolMapping(ArgVal, ArgCVar);
+    }
 
     for (unsigned i = 0; i < numImplicitArgs; ++i, ++arg) {
         ImplicitArg implictArg = implicitArgs[i];
@@ -344,14 +395,14 @@ void CShader::CreateImplicitArgs()
             implictArg.getAlignType(*m_DL),
             isUniform,
             isUniform ? 1 : m_numberInstance);
-
+   
         if (implictArg.getArgType() == ImplicitArg::R0) {
             encoder.GetVISAPredefinedVar(var, PREDEFINED_R0);
         }
 
         // This is a per function symbol mapping, that is, only available for a
         // llvm function which will be cleared for each run of EmitVISAPass.
-        symbolMapping.insert(std::make_pair(&(*arg), var));
+        updateArgSymbolMapping(arg, var);
 
         // Kernel's implicit arguments's symbols will be available for the
         // whole kernel CodeGen. With this, there is no need to pass implicit
@@ -359,6 +410,16 @@ void CShader::CreateImplicitArgs()
         // presence of subroutines.
         assert(!globalSymbolMapping.count(&(*arg)) && "should not exist already");
         globalSymbolMapping.insert(std::make_pair(&(*arg), var));
+    }
+
+    for (unsigned i = 0; i < numPushArgs; ++i, ++arg)
+    {
+        Value* ArgVal = arg;
+        if (ArgVal->use_empty())
+            continue;
+        e_alignment algn = GetPreferredAlignment(ArgVal, m_WI, m_ctx);
+        CVariable* ArgCVar = GetNewVector(ArgVal, algn);
+        updateArgSymbolMapping(ArgVal, ArgCVar);
     }
 }
 
@@ -422,7 +483,7 @@ void CShader::AllocateConstants(uint& offset)
         m_ConstantBufferLength += var->GetSize();
     }
 
-    m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, SIZE_GRF);
+    m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, getGRFSize());
     offset += m_ConstantBufferLength;
 }
 
@@ -450,7 +511,7 @@ void CShader::AllocateNOSConstants(uint& offset)
         maxConstantPushed = std::max(maxConstantPushed, I->first + 1);
     }
     maxConstantPushed = iSTD::Max(maxConstantPushed, static_cast<uint>(m_ModuleMetadata->MinNOSPushConstantSize));
-    m_NOSBufferSize = iSTD::Align(maxConstantPushed * SIZE_DWORD, SIZE_GRF);
+    m_NOSBufferSize = iSTD::Align(maxConstantPushed * SIZE_DWORD, getGRFSize());
     offset += m_NOSBufferSize;
 }
 
@@ -461,9 +522,9 @@ void CShader::CreateGatherMap()
     gatherMap.reserve(pushInfo.constants.size());
     for(auto I = pushInfo.constants.begin(), E = pushInfo.constants.end();I!=E;I++)
     {
-		unsigned int address = (I->first.bufId * 256 * 4) + (I->first.eltId);
-		unsigned int cstOffset = address / 4;
-		unsigned int cstChannel = address % 4;
+        unsigned int address = (I->first.bufId * 256 * 4) + (I->first.eltId);
+        unsigned int cstOffset = address / 4;
+        unsigned int cstChannel = address % 4;
         if(cstOffset!=index)
         {
             USC::SConstantGatherEntry entry;
@@ -503,7 +564,7 @@ void  CShader::CreateConstantBufferOutput(SKernelProgram *pKernelProgram)
                                               sizeof(USC::SConstantGatherEntry),
                  &gatherMap[0],
                  gatherMap.size() * sizeof(USC::SConstantGatherEntry));
-        pKernelProgram->ConstantBufferLength = m_ConstantBufferLength / SIZE_GRF; // in number of GRF bits
+        pKernelProgram->ConstantBufferLength = m_ConstantBufferLength / getGRFSize(); // in number of GRF bits
     }
 
     if (m_cbSlot != -1)
@@ -530,19 +591,28 @@ void  CShader::CreateConstantBufferOutput(SKernelProgram *pKernelProgram)
     }
 }
 
-void CShader::CreateFuncSymbolToRegisterMap(llvm::Function* pFunc)
+void CShader::CreateFunctionSymbol(llvm::Function* pFunc)
 {
     // Functions with uses in this module requires relocation
     CVariable* funcAddr = GetSymbol(pFunc);
-    encoder.AddFunctionSymbol(pFunc, funcAddr);
+    std::string funcName = pFunc->getName().str();
+    encoder.AddVISASymbol(funcName, funcAddr);
+    encoder.Push();
+}
+
+void CShader::CreateGlobalSymbol(llvm::GlobalVariable* pGlobal)
+{
+    CVariable* globalAddr = GetSymbol(pGlobal);
+    std::string globalName = pGlobal->getName().str();
+    encoder.AddVISASymbol(globalName, globalAddr);
     encoder.Push();
 }
 
 void CShader::CacheArgumentsList()
 {
-	m_argListCache.clear();
-	for (auto arg = entry->arg_begin(); arg != entry->arg_end(); ++arg)
-		m_argListCache.push_back(&(*arg));
+    m_argListCache.clear();
+    for (auto arg = entry->arg_begin(); arg != entry->arg_end(); ++arg)
+        m_argListCache.push_back(&(*arg));
 }
 
 void CShader::MapPushedInputs()
@@ -571,7 +641,7 @@ CVariable* CShader::GetNULL()
 {
     if (!m_NULL)
     {
-        m_NULL = new (Allocator)CVariable(2, true, ISA_TYPE_D, EVARTYPE_GENERAL, EALIGN_GRF, false, 1);
+        m_NULL = new (Allocator)CVariable(2, true, ISA_TYPE_D, EVARTYPE_GENERAL, EALIGN_DWORD, false, 1);
         encoder.GetVISAPredefinedVar(m_NULL, PREDEFINED_NULL);
     }
     return m_NULL;
@@ -581,7 +651,7 @@ CVariable* CShader::GetTSC()
 {
     if(!m_TSC)
     {
-        m_TSC = new (Allocator) CVariable(2, true, ISA_TYPE_D, EVARTYPE_GENERAL, EALIGN_GRF, false, 1);
+        m_TSC = new (Allocator) CVariable(2, true, ISA_TYPE_D, EVARTYPE_GENERAL, EALIGN_DWORD, false, 1);
         encoder.GetVISAPredefinedVar(m_TSC, PREDEFINED_TSC);
     }
     return m_TSC;
@@ -591,7 +661,7 @@ CVariable* CShader::GetSR0()
 {
     if(!m_SR0)
     {
-        m_SR0 = GetNewVariable(4, ISA_TYPE_UD, EALIGN_GRF, true);
+        m_SR0 = GetNewVariable(4, ISA_TYPE_UD, EALIGN_DWORD, true);
         encoder.GetVISAPredefinedVar(m_SR0, PREDEFINED_SR0);
     }
     return m_SR0;
@@ -601,7 +671,7 @@ CVariable* CShader::GetCR0()
 {
     if (!m_CR0)
     {
-        m_CR0 = GetNewVariable(3, ISA_TYPE_UD, EALIGN_GRF, true);
+        m_CR0 = GetNewVariable(3, ISA_TYPE_UD, EALIGN_DWORD, true);
         encoder.GetVISAPredefinedVar(m_CR0, PREDEFINED_CR0);
     }
     return m_CR0;
@@ -611,7 +681,7 @@ CVariable* CShader::GetCE0()
 {
     if(!m_CE0)
     {
-        m_CE0 = GetNewVariable(1, ISA_TYPE_UD, EALIGN_GRF, true);
+        m_CE0 = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true);
         encoder.GetVISAPredefinedVar(m_CE0, PREDEFINED_CE0);
     }
     return m_CE0;
@@ -621,7 +691,7 @@ CVariable* CShader::GetDBG()
 {
     if (!m_DBG)
     {
-        m_DBG = GetNewVariable(2, ISA_TYPE_D, EALIGN_GRF, true);
+        m_DBG = GetNewVariable(2, ISA_TYPE_D, EALIGN_DWORD, true);
         encoder.GetVISAPredefinedVar(m_DBG, PREDEFINED_DBG);
     }
     return m_DBG;
@@ -675,6 +745,14 @@ bool CShader::IsValueUsed(llvm::Value* value)
         return true;
     }
     return false;
+}
+
+CVariable* CShader::GetGlobalCVar(llvm::Value* value)
+{
+    auto it = globalSymbolMapping.find(value);
+    if (it != globalSymbolMapping.end())
+        return it->second;
+    return nullptr;
 }
 
 CVariable* CShader::BitCast( CVariable* var, VISA_Type newType )
@@ -741,7 +819,7 @@ CVariable*  CShader::GetNewVariable(const CVariable* from)
 
 CVariable* CShader::GetNewAddressVariable(uint16_t nbElement, VISA_Type type, bool isUniform, bool isVectorUniform)
 {
-    CVariable* var = new (Allocator) CVariable(nbElement, isUniform, type, EVARTYPE_ADDRESS, EALIGN_GRF, isVectorUniform, 1);
+    CVariable* var = new (Allocator) CVariable(nbElement, isUniform, type, EVARTYPE_ADDRESS, EALIGN_DWORD, isVectorUniform, 1);
     encoder.CreateVISAVar(var);
     return var;
 }
@@ -763,7 +841,9 @@ uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
     mask = 0;
     // we don't process vector bigger than 31 elements as the mask has only 32bits
     // If we want to support longer vectors we need to extend the mask size
-    if(nbElement > 31)
+    // 
+    // If val has been coalesced, don't prune it.
+    if(IsCoalesced(val) || nbElement > 31)
     {
         return nbElement;
     }
@@ -1037,7 +1117,7 @@ CShader::CreatePayload(uint regCount, uint idxOffset, CVariable*& payload,
 {
     for(uint i = 0; i < regCount ; ++i)
     {
-        uint subVarIdx = ((numLanes(m_SIMDSize) / (SIZE_GRF >> 2)) >> hfFactor) * i + idxOffset;
+        uint subVarIdx = ((numLanes(m_SIMDSize) / (getGRFSize() >> 2)) >> hfFactor) * i + idxOffset;
         CopyVariable(payload, GetSymbol(inst->getOperand(i + paramOffset)), subVarIdx);
     }
 }
@@ -1799,7 +1879,12 @@ CVariable* CShader::LazyCreateCCTupleBackingVariable(
 void CShader::BeginFunction(llvm::Function *F)
 {
     // TODO: merge InitEncoder with this function.
-    symbolMapping.clear();
+
+    // Dont clear symolMapping when debug info is enabled
+    // since this map is used to query location information
+    // after VISA compilation.
+    if (!DebugInfoData::hasDebugInfo(this))
+        symbolMapping.clear();
     rootMapping.clear();
     ccTupleMapping.clear();
     ConstantPool.clear();
@@ -1821,16 +1906,31 @@ void CShader::BeginFunction(llvm::Function *F)
         if (!Arg.use_empty())
         {
             // the treatment of argument is more complex for subroutine and simpler for stack-call function
-            CVariable *Var = getOrCreateArgumentSymbol(&Arg, useStackCall);
+            CVariable *Var = getOrCreateArgumentSymbol(&Arg, false, useStackCall);
             symbolMapping[&Arg] = Var;
 
-            if (llvm::Value *Node = m_deSSA->getRootValue(&Arg))
+            if (Value *Node = m_deSSA->getRootValue(&Arg))
             {
-                rootMapping[Node] = Var;
+                if (IGC_IS_FLAG_ENABLED(EnableDeSSAMemberRootValue))
+                {
+                    if (Node != (Value*)&Arg &&
+                        symbolMapping.count(Node) == 0)
+                    {
+                        CVariable* aV = Var;
+                        if (IGC_GET_FLAG_VALUE(EnableDeSSAAlias) >= 2)
+                        {
+                            aV = createAliasIfNeeded(Node, Var);
+                        }
+                        symbolMapping[Node] = aV;
+                    }
+                }
+                else
+                {
+                    rootMapping[Node] = Var;
+                }
             }
         }
     }
-
 }
 
 /// This method is used to create the vISA variable for function F's formal return value
@@ -1854,14 +1954,17 @@ CVariable *CShader::getOrCreateReturnSymbol(llvm::Function *F)
     {
         nElts *= (uint16_t)retType->getVectorNumElements();
     }
-    e_alignment align = EALIGN_GRF;
+    e_alignment align = getGRFAlignment();
     CVariable *var = GetNewVariable(nElts, type, align, /*uniform*/false, m_numberInstance);
     globalSymbolMapping.insert(std::make_pair(F, var));
     return var;
 }
 
 /// This method is used to create the vISA variable for function F's formal argument
-CVariable* CShader::getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStackCall)
+CVariable* CShader::getOrCreateArgumentSymbol(
+    Argument *Arg,
+    bool ArgInCallee,
+    bool useStackCall)
 {
     llvm::DenseMap<llvm::Value*, CVariable*> *pSymMap = &globalSymbolMapping;
     auto it = pSymMap->find(Arg);
@@ -1875,8 +1978,8 @@ CVariable* CShader::getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStack
     Function *F = Arg->getParent();
     ImplicitArgs implicitArgs(*F, m_pMdUtils);
     unsigned numImplicitArgs = implicitArgs.size();
-	unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-	unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) ? numPushArgsEntry : 0);
+    unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
+    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) ? numPushArgsEntry : 0);
     unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(F) - numImplicitArgs - numPushArgs;
 
     CVariable* var = nullptr;
@@ -1907,18 +2010,18 @@ CVariable* CShader::getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStack
                    ArgType == ImplicitArg::ArgType::PRINTF_BUFFER ) )
             {
                 Function &K = *m_FGA->getSubGroupMap(F);
-				ImplicitArgs IAs(K, m_pMdUtils);
-				uint32_t nIAs = (uint32_t)IAs.size();
+                ImplicitArgs IAs(K, m_pMdUtils);
+                uint32_t nIAs = (uint32_t)IAs.size();
                 uint32_t iArgIx = IAs.getArgIndex(ArgType);
-				uint32_t argIx = (uint32_t)IGCLLVM::GetFuncArgSize(K) - nIAs + iArgIx;
-				if (isEntryFunc(m_pMdUtils, &K)) {
-					argIx = argIx - numPushArgsEntry;
-				}
-				Function::arg_iterator arg = K.arg_begin();
-				for (uint32_t j = 0; j < argIx; ++j, ++arg);
-				Argument* kerArg = &(*arg);
+                uint32_t argIx = (uint32_t)IGCLLVM::GetFuncArgSize(K) - nIAs + iArgIx;
+                if (isEntryFunc(m_pMdUtils, &K)) {
+                    argIx = argIx - numPushArgsEntry;
+                }
+                Function::arg_iterator arg = K.arg_begin();
+                for (uint32_t j = 0; j < argIx; ++j, ++arg);
+                Argument* kerArg = &(*arg);
 
-				// Pre-condition: all kernel arguments have been created already.
+                // Pre-condition: all kernel arguments have been created already.
                 assert(pSymMap->count(kerArg));
                 return (*pSymMap)[kerArg];
             }
@@ -1926,9 +2029,9 @@ CVariable* CShader::getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStack
             {
                 bool isUniform = implictArg.getDependency() == WIAnalysis::UNIFORM;
                 var = GetNewVariable((uint16_t)implictArg.getNumberElements(),
-                                     implictArg.getVISAType(*m_DL),
-                                     implictArg.getAlignType(*m_DL), isUniform,
-                                     isUniform ? 1 : m_numberInstance);
+                    implictArg.getVISAType(*m_DL),
+                    implictArg.getAlignType(*m_DL), isUniform,
+                    isUniform ? 1 : m_numberInstance);
             }
             break;
         }
@@ -1937,20 +2040,26 @@ CVariable* CShader::getOrCreateArgumentSymbol(llvm::Argument *Arg, bool useStack
     // This is not implicit.
     if (var == nullptr)
     {
+        // GetPreferredAlignment treats all arguments as kernel ones, which have
+        // predefined alignments; but this is not true for subroutines.
+        // Conservatively use GRF aligned.
+        e_alignment align = getGRFAlignment();
+
+        bool isUniform = false;
+        if (!ArgInCallee) {
+            // Arg is for the current function and m_WI is available
+            isUniform = (m_WI->whichDepend(&*Arg) == WIAnalysis::UNIFORM);
+        }
+
         VISA_Type type = GetType(Arg->getType());
         uint16_t nElts = numLanes(m_SIMDSize);
         if (Arg->getType()->isVectorTy())
         {
             assert(Arg->getType()->getVectorElementType()->isIntegerTy() ||
-                   Arg->getType()->getVectorElementType()->isFloatingPointTy());
+                Arg->getType()->getVectorElementType()->isFloatingPointTy());
             nElts *= (uint16_t)Arg->getType()->getVectorNumElements();
         }
-
-        // GetPreferredAlignment treats all arguments as kernel ones, which have
-        // predefined alignments; but this is not true for subroutines.
-        // Conservatively use GRF aligned.
-        e_alignment align = EALIGN_GRF;
-        var = GetNewVariable(nElts, type, align, /*isUniform*/ false, m_numberInstance);
+        var = GetNewVariable(nElts, type, align, isUniform, m_numberInstance);
     }
     pSymMap->insert(std::make_pair(Arg, var));
     return var;
@@ -1976,19 +2085,18 @@ CVariable* CShader::getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, u
     unsigned numExplicitArgs = cInst->getNumArgOperands() - numImplicitArgs;
     if (argIdx < numExplicitArgs)
     {
+        // GetPreferredAlignment treats all arguments as kernel ones, which have
+        // predefined alignments; but this is not true for subroutines.
+        // Conservatively use GRF aligned.
+        e_alignment align = getGRFAlignment();
         VISA_Type type = GetType(Arg->getType());
         uint16_t nElts = numLanes(m_SIMDSize);
         if (Arg->getType()->isVectorTy())
         {
             assert(Arg->getType()->getVectorElementType()->isIntegerTy() ||
-                   Arg->getType()->getVectorElementType()->isFloatingPointTy());
+                Arg->getType()->getVectorElementType()->isFloatingPointTy());
             nElts *= (uint16_t)Arg->getType()->getVectorNumElements();
         }
-
-        // GetPreferredAlignment treats all arguments as kernel ones, which have
-        // predefined alignments; but this is not true for subroutines.
-        // Conservatively use GRF aligned.
-        e_alignment align = EALIGN_GRF;
         var = GetNewVariable(nElts, type, align, /*isUniform*/ false, m_numberInstance);
     }
     else
@@ -2009,9 +2117,10 @@ CVariable* CShader::getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, u
                 {
                     bool isUniform = implictArg.getDependency() == WIAnalysis::UNIFORM;
                     var = GetNewVariable((uint16_t)implictArg.getNumberElements(),
-                                         implictArg.getVISAType(*m_DL),
-                                         implictArg.getAlignType(*m_DL), isUniform,
-                                         isUniform ? 1 : m_numberInstance);
+                        implictArg.getVISAType(*m_DL),
+                        implictArg.getAlignType(*m_DL), isUniform,
+                        isUniform ? 1 : m_numberInstance);
+
                     break;
                 }
             }
@@ -2133,7 +2242,7 @@ CVariable *CShader::GetSymbolFromSource(Instruction *UseInst,
             if (!DefInst || GetIsUniform(DefInst))
                 continue;
 
-            if (!IsSimpleVariable(DefInst))
+            if (IsCoalesced(DefInst))
             {
                 continue;
             }
@@ -2154,7 +2263,7 @@ CVariable *CShader::GetSymbolFromSource(Instruction *UseInst,
         if (!DefInst)
             return nullptr;
 
-        if (!IsSimpleVariable(DefInst))
+        if (!IsCoalesced(DefInst))
         {
             return nullptr;
         }
@@ -2227,20 +2336,27 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
 
     if (Constant *C = llvm::dyn_cast<llvm::Constant>(value))
     {
-        // Function Pointer
-        if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
-            isa<GlobalValue>(value) &&
-            value->getType()->isPointerTy() &&
-            value->getType()->getPointerElementType()->isFunctionTy())
+        if (isa<GlobalValue>(value))
         {
-            auto it = symbolMapping.find(value);
-            if( it != symbolMapping.end() )
+            // Function Pointer
+            bool isFunction = IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
+                value->getType()->isPointerTy() &&
+                value->getType()->getPointerElementType()->isFunctionTy();
+            // Global Relocation
+            bool isGlobalVar = IGC_IS_FLAG_ENABLED(EnableGlobalRelocation) &&
+                isa<GlobalVariable>(value);
+
+            if (isFunction || isGlobalVar)
             {
-                return it->second;
+                auto it = symbolMapping.find(value);
+                if (it != symbolMapping.end())
+                {
+                    return it->second;
+                }
+                var = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1);
+                symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
+                return var;
             }
-            var = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1);
-            symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
-            return var;
         }
 
         if (fromConstantPool) {
@@ -2281,20 +2397,18 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
         return it->second;
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias) && m_deSSA->isAlias(value))
+    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias) &&
+        m_deSSA && value != m_deSSA->getNodeValue(value))
     {
         // Generate CVariable alias.
         // Value and its aliasee must be of the same size.
-        Value* Aliasee = m_deSSA->getAliasee(value);
-        CVariable *Base = GetSymbol(Aliasee);
-        if (Aliasee == value) {
-            return Base;
-        }
-        Type *Ty = value->getType();
-        VectorType* VTy = dyn_cast<VectorType>(Ty);
-        Type *BTy = VTy ? VTy->getElementType() : Ty;
-        VISA_Type visaTy = GetType(BTy);
-        CVariable* AliasVar = GetNewAlias(Base, visaTy, 0, Base->GetNumberElement());
+        Value* nodeVal = m_deSSA->getNodeValue(value);
+        assert(nodeVal != value && "ICE: value must be aliaser!");
+
+        // For non node value, get symbol for node value first.
+        // Then, get an alias to that node value.
+        CVariable *Base = GetSymbol(nodeVal);
+        CVariable *AliasVar = createAliasIfNeeded(value, Base);
         symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, AliasVar));
         return AliasVar;
     }
@@ -2467,21 +2581,47 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
     // belong to a congruent class
     if (rootValue)
     {
-        it = rootMapping.find(rootValue);
-        // mapping exists, return
-        if (it != rootMapping.end())
+        if (IGC_IS_FLAG_ENABLED(EnableDeSSAMemberRootValue))
         {
-            var = it->second;
-            symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
-            /*
+            it = symbolMapping.find(rootValue);
+            if (it != symbolMapping.end())
+            {
+                var = it->second;
+                CVariable* aV = var;
+                if (IGC_GET_FLAG_VALUE(EnableDeSSAAlias) >= 2)
+                {
+                    aV = createAliasIfNeeded(value, var);
+                }
+                symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, aV));
+                /*
                 *  When we don't scalarize vectors, vector may come from phi/insert-element
                 *  We cannot adjust extract-mask
                 */
-            if (value->getType()->isVectorTy())
-            {
-                extractMasks.erase(value);
+                if (value->getType()->isVectorTy())
+                {
+                    extractMasks.erase(value);
+                }
+                return aV;
             }
-            return var;
+        }
+        else
+        {
+            it = rootMapping.find(rootValue);
+            // mapping exists, return
+            if (it != rootMapping.end())
+            {
+                var = it->second;
+                symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
+                /*
+                 *  When we don't scalarize vectors, vector may come from phi/insert-element
+                 *  We cannot adjust extract-mask
+                 */
+                if (value->getType()->isVectorTy())
+                {
+                    extractMasks.erase(value);
+                }
+                return var;
+            }
         }
     }
 
@@ -2506,7 +2646,19 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
     symbolMapping.insert(std::pair<llvm::Value*,CVariable*>(value, var));
     if (rootValue)
     {
-        rootMapping.insert(std::pair<llvm::Value*, CVariable*>(rootValue, var));
+        if (IGC_IS_FLAG_ENABLED(EnableDeSSAMemberRootValue))
+        {
+            CVariable* aV = var;
+            if (IGC_GET_FLAG_VALUE(EnableDeSSAAlias) >= 2)
+            {
+                aV = createAliasIfNeeded(rootValue, var);
+            }
+            symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(rootValue, aV));
+        }
+        else
+        {
+            rootMapping.insert(std::pair<llvm::Value*, CVariable*>(rootValue, var));
+        }
     }
     return var;
 }
@@ -2528,18 +2680,9 @@ bool CShader::CanTreatAsAlias(llvm::ExtractElementInst *inst)
         return false;
     }
 
-    if (m_deSSA)
+    if (IsCoalesced(inst) || IsCoalesced(vecSrc))
     {
-        if (m_deSSA->getRootValue(inst))
-        {
-            return false;
-        }
-
-        if (m_deSSA->getRootValue(vecSrc))
-        {
-            return false;
-        }
-
+        return false;
     }
 
     for (auto I = vecSrc->user_begin(), E = vecSrc->user_end(); I != E; ++I)
@@ -2646,14 +2789,14 @@ bool CShader::HasBecomeNoop(Instruction *inst) {
     return m_VRA->m_HasBecomeNoopInsts.count(inst);
 }
 
-bool CShader::IsSimpleVariable(Value* V) {
+bool CShader::IsCoalesced(Value* V) {
     if ((m_VRA && m_VRA->isAliasedValue(V)) ||
         (m_deSSA && m_deSSA->getRootValue(V)) ||
         (m_coalescingEngine && m_coalescingEngine->GetValueCCTupleMapping(V)))
     {
-        return false;
+        return true;
     }
-    return true;
+    return false;
 }
 
 #define SET_INTRINSICS()                              \
@@ -2680,14 +2823,14 @@ bool CShader::VMECoalescePattern(GenIntrinsicInst *genInst)
     if (!IsSetMessageIntrinsic(genInst))
         return false;
 
-    if (m_deSSA && m_deSSA->getRootValue(genInst))
+    if (IsCoalesced(genInst))
     {
         return false;
     }
 
     if (GenIntrinsicInst *argInst = dyn_cast<GenIntrinsicInst>(genInst->getOperand(0)))
     {
-        if (m_deSSA && m_deSSA->getRootValue(argInst))
+        if (IsCoalesced(argInst))
         {
             return false;
         }
@@ -2842,6 +2985,33 @@ CVariable* CShader::GetNewAlias(CVariable* var, VISA_Type type, uint16_t offset,
     return alias;
 }
 
+// createAliasIfNeeded() returns the Var that is either BaseVar or
+// its alias of the same size.
+//
+// If BaseVar's type matches V's, return BaseVar; otherwise, create an
+// new alias CVariable to BaseVar. The new CVariable has V's size, which
+// should not be larger than BaseVar's.
+//
+// Note that V's type is either vector or scalar.
+CVariable*  CShader::createAliasIfNeeded(Value* V, CVariable* BaseVar)
+{
+    Type *Ty = V->getType();
+    VectorType* VTy = dyn_cast<VectorType>(Ty);
+    Type *BTy = VTy ? VTy->getElementType() : Ty;
+    VISA_Type visaTy = GetType(BTy);
+    if (visaTy == BaseVar->GetType())
+    {
+        return BaseVar;
+    }
+
+    uint16_t visaTy_sz = CEncoder::GetCISADataTypeSize(visaTy);
+    uint16_t nbe = BaseVar->GetSize() / visaTy_sz;
+    assert((BaseVar->GetSize() % visaTy_sz) == 0 &&
+           "V's Var should be the same size as BaseVar!");
+    CVariable* NewAliasVar = GetNewAlias(BaseVar, visaTy, 0, nbe);
+    return NewAliasVar;
+}
+
 /// GetNewAlias
 CVariable* CShader::GetNewAlias(CVariable* var, VISA_Type type, uint16_t offset, uint16_t numElements, bool uniform)
 {
@@ -2983,7 +3153,6 @@ void CShader::PackAndCopyVariable(
     encoder.Copy(rawDst, src);
     encoder.Push();
 }
-
 
 CShader* CShaderProgram::GetShader(SIMDMode simd, ShaderDispatchMode mode)
 {

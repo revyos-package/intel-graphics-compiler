@@ -63,7 +63,7 @@ endif()
 # Increment IGC_API_MAJOR_VERSION if there is ABI Change.
 set(IGC_API_MAJOR_VERSION 1)
 set(IGC_API_MINOR_VERSION 0)
-set(IGC_API_PATCH_VERSION 0)
+set(IGC_API_PATCH_VERSION 6)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
@@ -2648,6 +2648,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
       "${_compilerFlagName}"
       ALL_PATTERN_NOINHERIT ""
       SET
+        DebugInfoProgramDatabase
         OptimizeSize
         RtMultiThreadedStatic
     )
@@ -2656,7 +2657,6 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
       "${_compilerFlagName}"
       PATTERN "${IGC_BUILD__DEBUG_PATTERN}"
       SET
-        DebugInfoProgramDatabase
         OptimizeDisabled
         RtMultiThreadedStaticDebug
         UnreferencedVariable
@@ -2676,12 +2676,11 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
       "${_compilerFlagName}"
       PATTERN "${IGC_BUILD__RELINT_PATTERN}"
       SET
-        DebugInfoProgramDatabase
         OptimizeSpeed
         ControlFlowGuard
     )
-	
-	
+
+    
   # Adding needed settings specific to MSVC.
   if(MSVC)
   # Adding needed settings specific to GCC.
@@ -2741,22 +2740,22 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
     )
     if(_igc_compiler_is_gnu)
       igc_config_flag_apply_settings(
-	  CompilerOptions
-	  "${_compilerFlagName}"
-	  ALL_PATTERN ""
-	  SET_RAW
-	    -funswitch-loops
-	    -Wno-maybe-uninitialized
-	)
+      CompilerOptions
+      "${_compilerFlagName}"
+      ALL_PATTERN ""
+      SET_RAW
+        -funswitch-loops
+        -Wno-maybe-uninitialized
+    )
     endif()
     if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
       igc_config_flag_apply_settings(
-	  CompilerOptions
-	  "${_compilerFlagName}"
-	  ALL_PATTERN ""
-	  SET_RAW
+      CompilerOptions
+      "${_compilerFlagName}"
+      ALL_PATTERN ""
+      SET_RAW
             -finline-functions
-	)
+    )
     endif()
 
   elseif(_igc_compiler_is_gnu_or_clang)
@@ -2806,24 +2805,24 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -fstack-protector
       )
       if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
-	igc_config_flag_apply_settings(
-	    CompilerOptions
-	    "${_compilerFlagName}"
-	    ALL_PATTERN ""
-	    SET_RAW
-	      -finline-functions
-	  )
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          -finline-functions
+      )
       endif()
       if(NOT _igc_compiler_is_clang)
-	igc_config_flag_apply_settings(
-	    CompilerOptions
-	    "${_compilerFlagName}"
-	    ALL_PATTERN ""
-	    SET_RAW
-	      -funswitch-loops
-	      -Wno-maybe-uninitialized
-	      -lrt
-	  )
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          -funswitch-loops
+          -Wno-maybe-uninitialized
+          -lrt
+      )
       endif()
   elseif(_igc_compiler_is_clang)
     igc_config_flag_apply_settings(
@@ -2842,13 +2841,13 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
         -msse4.2
       )
       if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
-	igc_config_flag_apply_settings(
-	    CompilerOptions
-	    "${_compilerFlagName}"
-	    ALL_PATTERN ""
-	    SET_RAW
-	      -finline-functions
-	  )
+    igc_config_flag_apply_settings(
+        CompilerOptions
+        "${_compilerFlagName}"
+        ALL_PATTERN ""
+        SET_RAW
+          -finline-functions
+      )
       endif()
   endif()
 endforeach()
@@ -2859,7 +2858,7 @@ if( ANDROID OR _igc_compiler_is_gnu_or_clang)
       CMAKE_SHARED_LINKER_FLAGS
       ALL_PATTERN ""
       SET_RAW
-	-Wl,--no-undefined
+    -Wl,--no-undefined
     )
 endif()
 
@@ -3067,7 +3066,6 @@ endif()
 # +  i386=1                   if bits:32
 # +  _X86_=1                  if bits:32
 # +  _AMD64_                  if bits:64
-# +  AMD64                    if bits:64
 # + ENABLE_REGISTRY_READ      if cfg:Debug or cfg:ReleaseInternal
 
 set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
@@ -3113,7 +3111,6 @@ set(IGC_BUID__VISA_COMPILE_DEFINITIONS
   if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
         _AMD64_
-        AMD64
       )
   elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
     set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
@@ -3225,52 +3222,6 @@ endif()
 
 # ==================================== LLVM package ====================================================
 
-# Start with preparing lists of libraries to link. Correct list will be selected
-# depending on the source of package (build from sources vs system library).
-
-# Use dynamic libraries when linking with system libraries.
-set(IGC_BUILD__LLVM_DYNAMIC_LIBS_TO_LINK "LLVM")
-if(UNIX)
-  # Include dynamic linker for POSIX systems
-  list(APPEND IGC_BUILD__LLVM_DYNAMIC_LIBS_TO_LINK "dl")
-endif()
-
-# Link targets/dependencies (in required link order).
-# NOTE: Since the libraries are grouped in the same link group (in GCC/CLANG),
-#       there is no longer need to order in most dependant first manner.
-set(IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK
-    "LLVMipo"
-    "LLVMIRReader"
-    "LLVMBitWriter"
-    "LLVMAsmParser"
-    "LLVMBitReader"
-    "LLVMLinker"
-    "LLVMCodeGen"
-    "LLVMScalarOpts"
-    "LLVMTransformUtils"
-    "LLVMAnalysis"
-    "LLVMTarget"
-    "LLVMObjCARCOpts"
-    "LLVMVectorize"
-    "LLVMInstrumentation"
-    "LLVMObject"
-    "LLVMMCParser"
-    "LLVMProfileData"
-    "LLVMMC"
-    "LLVMCore"
-    "LLVMSupport"
-    "LLVMDemangle"
-    )
-	
-
-if(LLVM_VERSION_MAJOR EQUAL 8)
-set(IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK
-	"${IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK}"
-	"LLVMInstCombine"
-	)
-endif()
-	
-
 if(TARGET LLVMCore)
     # LLVM targets have been already defined.
     if(LLVM_USE_PREBUILT)
@@ -3281,9 +3232,6 @@ if(TARGET LLVMCore)
     endif()
 
     message(STATUS "[IGC] Using LLVM includes from: ${LLVM_INCLUDE_DIRS}")
-
-    # Link with static libraries if we are builing the sources: 
-    set(IGC_BUILD__LLVM_LIBS_TO_LINK ${IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK})
 else()
 
     message(STATUS "[IGC] LLVM targets are not defined. Searching for LLVM.")
@@ -3308,24 +3256,11 @@ else()
           # Place LLVM build directory inside IGC build directory
           add_subdirectory(${IGC_LLVM_HOME_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llvm/build)
       endif()
-
-      # Link with static libraries if we are builing the sources: 
-      set(IGC_BUILD__LLVM_LIBS_TO_LINK ${IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK})
     else()
         find_package(LLVM ${IGC_PREFERRED_LLVM_VERSION})  
         if(LLVM_FOUND)
           message(STATUS "[IGC] Using system LLVM ${LLVM_PACKAGE_VERSION}")
           set(IGC_BUILD__USING_SYSTEM_LLVM TRUE)
-          # Check if found package has dynamic library and select them if possible.
-          llvm_map_components_to_libnames(llvm_libs all)       
-          list(FIND llvm_libs "LLVM" DYN_LIB_INDEX)
-          if(${DYN_LIB_INDEX} GREATER -1)
-            message(STATUS "[IGC] Using dynamic LLVM.")
-            set(IGC_BUILD__LLVM_LIBS_TO_LINK ${IGC_BUILD__LLVM_DYNAMIC_LIBS_TO_LINK})
-          else()
-            message(STATUS "[IGC] Using static LLVM.")
-            set(IGC_BUILD__LLVM_LIBS_TO_LINK ${IGC_BUILD__LLVM_STATIC_LIBS_TO_LINK})
-          endif()
        else()
           message(FATAL_ERROR "[IGC] Unknown location of LLVM component. Couldn't find neither LLVM package in the system nor LLVM source files.")
        endif()
@@ -3352,6 +3287,50 @@ else()
     set(COMMON_CLANG_LIB_FULL_NAME "lib${COMMON_CLANG_LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}")
 endif()
 
+if(LLVM_LINK_LLVM_DYLIB)
+    # LLVM was built and configured in a way that tools (in our case IGC) should be linked
+    # against single LLVM dynamic library.
+    message(STATUS "[IGC] Link against LLVM dylib")
+    set(IGC_BUILD__LLVM_LIBS_TO_LINK "LLVM")
+else()
+    # LLVM was built into multiple libraries (static or shared).
+    message(STATUS "[IGC] Link against LLVM static or shared component libs")
+
+    # Link targets/dependencies (in required link order).
+    # NOTE: Since the libraries are grouped in the same link group (in GCC/CLANG),
+    #       there is no longer need to order in most dependant first manner.
+    set(IGC_BUILD__LLVM_LIBS_TO_LINK
+        "LLVMipo"
+        "LLVMIRReader"
+        "LLVMBitWriter"
+        "LLVMBinaryFormat"
+        "LLVMAsmParser"
+        "LLVMBitReader"
+        "LLVMLinker"
+        "LLVMCodeGen"
+        "LLVMScalarOpts"
+        "LLVMTransformUtils"
+        "LLVMAnalysis"
+        "LLVMTarget"
+        "LLVMObjCARCOpts"
+        "LLVMVectorize"
+        "LLVMInstrumentation"
+        "LLVMObject"
+        "LLVMMCParser"
+        "LLVMProfileData"
+        "LLVMMC"
+        "LLVMCore"
+        "LLVMSupport"
+        "LLVMDemangle"
+        )
+
+    if(LLVM_VERSION_MAJOR EQUAL 8)
+        list(APPEND IGC_BUILD__LLVM_LIBS_TO_LINK
+          "LLVMInstCombine"
+          )
+    endif()
+
+endif()
 
 # ==================================== WrapperLLVM package =============================================
 
@@ -3514,7 +3493,7 @@ set(IGC_BUILD__HDR__IGC__igc_common
 set(IGC_BUILD__HDR__IGC__igc_dll
     ${IGC_BUILD__HDR__IGC__igc_common}
     ${IGC_BUILD__HDR__IGC_DriverInterface__igc_dll}
-	${IGC_WrapperLLVM_HDR}
+    ${IGC_WrapperLLVM_HDR}
   )
   
 #FCL
@@ -3759,6 +3738,7 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
   else()
     target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
         ${_targetLinkLine}
+        ${CMAKE_DL_LIBS}
       )
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ${_libBuildSuffix}}" PROPERTY LINK_INTERFACE_LIBRARIES "")
@@ -3811,7 +3791,7 @@ endforeach()
 
 list(REMOVE_ITEM _targetLinkLine
     IGC_BUILD__LLVM_LIBS_TO_LINK
-	)
+    )
 
 if(_targetIsStatic)
     # Link line for projects that use IGC as static library (allows to resolve multi-circular dependencies between libraries).
@@ -3828,6 +3808,7 @@ if(_targetIsStatic)
     target_link_libraries("${IGC_BUILD__PROJ__fcl_dll}"
         ${_targetLinkLine}
         ${COMMON_CLANG}
+        ${CMAKE_DL_LIBS}
       )
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY LINK_INTERFACE_LIBRARIES "")
@@ -3902,6 +3883,10 @@ endif()
 # cpack to create deb package
 ########################################################################
 
+set(IGC_PC_PACKAGE_RELEASE "")
+if(DEFINED IGC_PACKAGE_RELEASE)
+  set(IGC_PC_PACKAGE_RELEASE "-${IGC_PACKAGE_RELEASE}")
+endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc.opencl.h.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc-opencl.pc.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc @ONLY)
 
@@ -3987,6 +3972,7 @@ if(UNIX)
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
   set(CPACK_RPM_PACKAGE_RELOCATABLE TRUE)
   set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
+
   if(DEFINED IGC_PACKAGE_RELEASE)
       set(CPACK_DEBIAN_PACKAGE_RELEASE ${IGC_PACKAGE_RELEASE})
       set(CPACK_RPM_PACKAGE_RELEASE ${IGC_PACKAGE_RELEASE})

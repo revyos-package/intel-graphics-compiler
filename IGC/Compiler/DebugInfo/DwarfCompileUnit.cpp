@@ -1280,9 +1280,9 @@ void CompileUnit::constructSubrangeDIE(DIE &Buffer, DISubrange* SR, DIE *IndexTy
     int64_t DefaultLowerBound = getDefaultLowerBound();
     int64_t Count = SR->getCount()
 #if LLVM_VERSION_MAJOR >= 7
-		.dyn_cast<ConstantInt*>()->getSExtValue()
+        .dyn_cast<ConstantInt*>()->getSExtValue()
 #endif
-		;
+        ;
 
     if (DefaultLowerBound == -1 || LowerBound != DefaultLowerBound)
     {
@@ -1641,34 +1641,52 @@ void CompileUnit::buildSampler(DbgVariable& var, DIE* die, VISAVariableLocation*
 
 void CompileUnit::buildSLM(DbgVariable& var, DIE* die, VISAVariableLocation* loc)
 {
-    DbgDecoder::VarInfo varInfo;
-    auto regNum = loc->GetRegister();
-    m_pModule->getVarInfo("V", regNum, varInfo);
+    if (loc->IsRegister())
+    {
+        DbgDecoder::VarInfo varInfo;
+        auto regNum = loc->GetRegister();
+        m_pModule->getVarInfo("V", regNum, varInfo);
 
-    Address addr;
-    addr.Set(Address::Space::eLocal, 0, 0);
+        Address addr;
+        addr.Set(Address::Space::eLocal, 0, 0);
 
-    static const uint32_t local_memory_space_mask = 0xffff;
+        static const uint32_t local_memory_space_mask = 0xffff;
 
-    DIEBlock *Block = new (DIEValueAllocator)DIEBlock();
-    addRegisterOffset(Block, varInfo.getGRF().regNum, 0);
-    
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_deref_size);
-    addUInt(Block, dwarf::DW_FORM_data1, 4);
+        DIEBlock *Block = new (DIEValueAllocator)DIEBlock();
+        addRegisterOffset(Block, varInfo.getGRF().regNum, 0);
 
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const2u);
-    addUInt(Block, dwarf::DW_FORM_data2, 0xffff);
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_deref_size);
+        addUInt(Block, dwarf::DW_FORM_data1, 4);
 
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_and);
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const2u);
+        addUInt(Block, dwarf::DW_FORM_data2, 0xffff);
 
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
-    addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_and);
 
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
-    
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_stack_value);
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
+        addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
 
-    addBlock(die, dwarf::DW_AT_location, Block);
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
+
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_stack_value);
+
+        addBlock(die, dwarf::DW_AT_location, Block);
+    }
+    else
+    {
+        // Immediate offset in to SLM
+        auto offset = loc->GetOffset();
+
+        Address addr;
+        addr.Set(Address::Space::eLocal, 0, offset);
+
+        DIEBlock *Block = new (DIEValueAllocator)DIEBlock();
+        addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
+        
+        addUInt(Block, dwarf::DW_FORM_data8, addr.GetAddress());
+
+        addBlock(die, dwarf::DW_AT_location, Block);
+    }
 }
 
 void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation* loc)
@@ -1684,14 +1702,9 @@ void CompileUnit::buildGeneral(DbgVariable& var, DIE* die, VISAVariableLocation*
 
         if (varInfo.getGRF().subRegNum != 0)
         {
-            enum
-            {
-                REG_SIZE_BITS = 256
-            };
-
             unsigned int subReg = varInfo.getGRF().subRegNum;
             auto offsetInBits = subReg * 8;
-            auto sizeInBits = REG_SIZE_BITS - offsetInBits;
+            auto sizeInBits = (m_pModule->m_pShader->getGRFSize()*8) - offsetInBits;
 
             addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bit_piece);
             addUInt(Block, dwarf::DW_FORM_data1, sizeInBits);

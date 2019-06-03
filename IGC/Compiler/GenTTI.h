@@ -60,7 +60,7 @@ namespace llvm
 
          void *getAdjustedAnalysisPointer(const void *ID);
 
-		 void getUnrollingPreferences(Loop *L,
+         void getUnrollingPreferences(Loop *L,
 #if LLVM_VERSION_MAJOR >= 7
          ScalarEvolution &SE, 
 #endif
@@ -69,7 +69,11 @@ namespace llvm
          bool isProfitableToHoist(Instruction *I);
 
          using BaseT::getCallCost;
-         unsigned getCallCost(const Function *F, ArrayRef<const Value *> Args);
+         unsigned getCallCost(const Function *F, ArrayRef<const Value *> Args
+#if LLVM_VERSION_MAJOR >= 9
+         , const User *U
+#endif
+         );
     };
 
 }

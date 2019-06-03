@@ -346,6 +346,12 @@ void CustomSafeOptPass::visitCallInst(CallInst &C)
             break;
         }
 
+        case GenISAIntrinsic::GenISA_ldptr:
+        {
+            visitLdptr(inst);
+            break;
+        }
+
         default:
             break;
         }
@@ -734,6 +740,100 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator &I)
     }
 }
 
+void IGC::CustomSafeOptPass::visitLdptr(llvm::CallInst* inst)
+{
+    if (!IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTextures) &&
+        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers) &&
+        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
+    {
+        return;
+    }
+
+    // change
+    // % 10 = call fast <4 x float> @llvm.genx.GenISA.ldptr.v4f32.p196608v4f32(i32 %_s1.i, i32 %_s14.i, i32 0, i32 0, <4 x float> addrspace(196608)* null, i32 0, i32 0, i32 0), !dbg !123
+    // to
+    // % 10 = call fast <4 x float> @llvm.genx.GenISA.typedread.p196608v4f32(<4 x float> addrspace(196608)* null, i32 %_s1.i, i32 %_s14.i, i32 0, i32 0), !dbg !123
+    // when the index comes directly from threadid
+
+    Constant *src1 = dyn_cast<Constant>(inst->getOperand(1));
+    Constant *src2 = dyn_cast<Constant>(inst->getOperand(2));
+    Constant *src3 = dyn_cast<Constant>(inst->getOperand(3));
+
+    // src2 and src3 has to be zero
+    if (!src2 || !src3 || !src2->isZeroValue() || !src3->isZeroValue())
+    {
+        return;
+    }
+
+    // if only doing the opt on buffers, make sure src1 is zero too
+    if (!IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTextures) &&
+        IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers) &&
+        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
+    {
+        if (!src1 || !src1->isZeroValue())
+            return;
+    }
+
+    // for UseHDCTypedReadForAllNonTemporalTextures, check if the ld uses threadid for index
+    if (IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
+    {
+        Instruction* AddInst0 = dyn_cast<Instruction>(inst->getOperand(0));
+        Instruction* AddInst1 = dyn_cast<Instruction>(inst->getOperand(1));
+        if (!AddInst0 || !AddInst1 ||
+            AddInst0->getOpcode() != Instruction::Add ||
+            AddInst1->getOpcode() != Instruction::Add)
+        {
+            return;
+        }
+
+        Instruction* ShlInst0 = dyn_cast<Instruction>(AddInst0->getOperand(0));
+        Instruction* ShlInst1 = dyn_cast<Instruction>(AddInst1->getOperand(0));
+        if (!ShlInst0 || !ShlInst1 ||
+            ShlInst0->getOpcode() != Instruction::Shl ||
+            ShlInst1->getOpcode() != Instruction::Shl)
+        {
+            return;
+        }
+
+        BitCastInst* bitcastInst0 = dyn_cast<BitCastInst>(ShlInst0->getOperand(0));
+        BitCastInst* bitcastInst1 = dyn_cast<BitCastInst>(ShlInst1->getOperand(0));
+        if (!bitcastInst0 || !bitcastInst1)
+        {
+            return;
+        }
+
+        GenIntrinsicInst *CI0 = dyn_cast<GenIntrinsicInst>(bitcastInst0->getOperand(0));
+        GenIntrinsicInst *CI1 = dyn_cast<GenIntrinsicInst>(bitcastInst1->getOperand(0));
+        if (!CI0 || !CI1 ||
+            CI0->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_SystemValue ||
+            CI1->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_SystemValue)
+        {
+            return;
+        }
+    }
+
+    // do the transformation
+    llvm::IRBuilder<> builder(inst);
+    Module *M = inst->getParent()->getParent()->getParent();
+
+    Function* pLdIntrinsic = llvm::GenISAIntrinsic::getDeclaration(
+        M,
+        GenISAIntrinsic::GenISA_typedread,
+        inst->getOperand(4)->getType());
+
+    SmallVector<Value*, 5> ld_FunctionArgList(5);
+    ld_FunctionArgList[0] = inst->getOperand(4);
+    ld_FunctionArgList[1] = builder.CreateAdd(inst->getOperand(0), inst->getOperand(5));
+    ld_FunctionArgList[2] = builder.CreateAdd(inst->getOperand(1), inst->getOperand(6));
+    ld_FunctionArgList[3] = builder.CreateAdd(inst->getOperand(3), inst->getOperand(7));
+    ld_FunctionArgList[4] = inst->getOperand(2);  // lod=zero
+
+    llvm::CallInst* pNewCallInst = builder.CreateCall(
+        pLdIntrinsic, ld_FunctionArgList);
+
+    inst->replaceAllUsesWith(pNewCallInst);
+}
+
 void IGC::CustomSafeOptPass::visitSampleBptr(llvm::SampleIntrinsic* sampleInst)
 {
     // sampleB with bias_value==0 -> sample
@@ -909,7 +1009,7 @@ void GenSpecificPattern::matchReverse(BinaryOperator &I)
 {
     using namespace llvm::PatternMatch;
     assert(I.getType()->isIntegerTy());
-    Value *nextOrShl, *nextOrShr;
+    Value *nextOrShl = nullptr, *nextOrShr = nullptr;
     uint64_t currentShiftShl = 0, currentShiftShr = 0;
     uint64_t currentMaskShl = 0, currentMaskShr = 0;
     auto patternBfrevFirst =
@@ -1042,13 +1142,13 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator &I)
         %22 = shl i32 %14, 2
         %23 = add i32 %22, 19
         */
-        Value *AndOp1, *EltOp1;
+        Value *AndOp1 = nullptr, *EltOp1 = nullptr;
         auto pattern1 = m_Or(
             m_And(m_Value(AndOp1), m_SpecificInt(0xFFFFFFFF)),
             m_Shl(m_Value(EltOp1), m_SpecificInt(32)));
 
     #if LLVM_VERSION_MAJOR >= 7
-        Value *AndOp2, *EltOp2, *VecOp;
+        Value *AndOp2 = nullptr, *EltOp2 = nullptr, *VecOp = nullptr;
         auto pattern2 = m_Or(
             m_And(m_Value(AndOp2), m_SpecificInt(0xFFFFFFFF)),
             m_BitCast(m_InsertElement(m_Value(VecOp),m_Value(EltOp2),m_SpecificInt(1))));
@@ -1180,18 +1280,135 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator &I)
 
 void GenSpecificPattern::visitCmpInst(CmpInst &I)
 {
-    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    if (pCtx->m_DriverInfo.IgnoreNan())
+    using namespace llvm::PatternMatch;
+    CmpInst::Predicate Pred = CmpInst::Predicate::BAD_ICMP_PREDICATE;
+    Value* Val1 = nullptr;
+    uint64_t const_int1 = 0, const_int2 = 0;
+    auto cmp_pattern = m_Cmp(Pred,
+        m_And(m_Value(Val1), m_ConstantInt(const_int1)), m_ConstantInt(const_int2));
+
+    if (match(&I, cmp_pattern) &&
+        (const_int1 << 32) == 0 &&
+        (const_int2 << 32) == 0 &&
+        Val1->getType()->isIntegerTy(64))
     {
-        if (I.getPredicate() == CmpInst::FCMP_ORD)
+        llvm::IRBuilder<> builder(&I);
+        VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
+        Value* BC = builder.CreateBitCast(Val1, vec2);
+        Value* EE = builder.CreateExtractElement(BC, builder.getInt32(1));
+        Value* AI = builder.CreateAnd(EE, builder.getInt32(const_int1 >> 32));
+        Value* new_Val = builder.CreateICmp(Pred, AI, builder.getInt32(const_int2 >> 32));
+        I.replaceAllUsesWith(new_Val);
+        I.eraseFromParent();
+    }
+    else 
+    {
+        CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+        if (pCtx->m_DriverInfo.IgnoreNan())
         {
-            I.replaceAllUsesWith(ConstantInt::getTrue(I.getType()));
+            if (I.getPredicate() == CmpInst::FCMP_ORD)
+            {
+                I.replaceAllUsesWith(ConstantInt::getTrue(I.getType()));
+            }
         }
     }
 }
 
 void GenSpecificPattern::visitSelectInst(SelectInst &I)
 {
+    /*
+    from
+        %7 = fcmp olt float %5, %6
+        %8 = select i1 %7, float 1.000000e+00, float 0.000000e+00
+        %9 = bitcast float %8 to i32
+        %10 = icmp eq i32 %9, 0
+        %.01 = select i1 %10, float %4, float %11
+        br i1 %10, label %endif, label %then
+    to
+        %7 = fcmp olt float %5, %6
+        %.01 = select i1 %7, float %11, float %4
+        br i1 %7, label %then, label %endif
+    */
+    {
+        bool swapNodesFromSel = false;
+        bool isSelWithConstants = false;
+        ConstantFP *Cfp1 = dyn_cast<ConstantFP>(I.getOperand(1));
+        ConstantFP *Cfp2 = dyn_cast<ConstantFP>(I.getOperand(2));
+        if (Cfp1 && Cfp1->getValueAPF().isFiniteNonZero() &&
+            Cfp2 && Cfp2->isZero())
+        {
+            isSelWithConstants = true;
+        }
+        if (Cfp1 && Cfp1->isZero() &&
+            Cfp2 && Cfp2->getValueAPF().isFiniteNonZero())
+        {
+            isSelWithConstants = true;
+            swapNodesFromSel = true;
+        }
+        if (isSelWithConstants &&
+            dyn_cast<FCmpInst>(I.getOperand(0)))
+        {
+            for (auto bitCastI : I.users())
+            {
+                if (BitCastInst* bitcastInst = dyn_cast<BitCastInst>(bitCastI))
+                {
+                    for (auto cmpI : bitcastInst->users())
+                    {
+                        ICmpInst* iCmpInst = dyn_cast<ICmpInst>(cmpI);
+                        if (iCmpInst &&
+                            iCmpInst->isEquality())
+                        {
+                            ConstantInt *icmpC = dyn_cast<ConstantInt>(iCmpInst->getOperand(1));
+                            if (!icmpC || !icmpC->isZero())
+                            {
+                                continue;
+                            }
+
+                            bool swapNodes = swapNodesFromSel;
+                            if (iCmpInst->getPredicate() == CmpInst::Predicate::ICMP_EQ)
+                            {
+                                swapNodes = (swapNodes != true);
+                            }
+
+                            SmallVector<Instruction*, 4> matchedBrSelInsts;
+                            for (auto brOrSelI : iCmpInst->users())
+                            {
+                                BranchInst* brInst = dyn_cast<BranchInst>(brOrSelI);
+                                if (brInst &&
+                                    brInst->isConditional())
+                                {
+                                    //match
+                                    matchedBrSelInsts.push_back(brInst);
+                                    if (swapNodes)
+                                    {
+                                        brInst->swapSuccessors();
+                                    }
+                                }
+
+                                if (SelectInst* selInst = dyn_cast<SelectInst>(brOrSelI))
+                                {
+                                    //match
+                                    matchedBrSelInsts.push_back(selInst);
+                                    if (swapNodes)
+                                    {
+                                        Value* selTrue = selInst->getTrueValue();
+                                        Value* selFalse = selInst->getFalseValue();
+                                        selInst->setTrueValue(selFalse);
+                                        selInst->setFalseValue(selTrue);
+                                        selInst->swapProfMetadata();
+                                    }
+                                }
+                            }
+                            for (Instruction* inst : matchedBrSelInsts)
+                            {
+                                inst->setOperand(0, I.getOperand(0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     /*
     from
         %res_s42 = icmp eq i32 %src1_s41, 0
@@ -1500,18 +1717,34 @@ void GenSpecificPattern::visitIntToPtr(llvm::IntToPtrInst& I)
     }
 }
 
-void GenSpecificPattern::visitTruncInst(llvm::TruncInst &I) 
+void GenSpecificPattern::visitTruncInst(llvm::TruncInst &I)
 {
+    /*
+    from
+    %22 = lshr i64 %a, 52
+    %23 = trunc i64  %22 to i32
+    to
+    %22 = extractelement <2 x i32> %a, 1
+    %23 = lshr i32 %22, 20 //52-32
+    */
+
     using namespace llvm::PatternMatch;
-    Value *LHS;
-    if (match(&I, m_Trunc(m_LShr(m_Value(LHS), m_SpecificInt(32)))) &&
+    Value *LHS = nullptr;
+    ConstantInt *CI;
+    if (match(&I, m_Trunc(m_LShr(m_Value(LHS), m_ConstantInt(CI)))) &&
         I.getType()->isIntegerTy(32) &&
-        LHS->getType()->isIntegerTy(64))
+        LHS->getType()->isIntegerTy(64) &&
+        CI->getZExtValue() >= 32)
     {
+        auto new_shift_size = (unsigned)CI->getZExtValue() - 32;
         llvm::IRBuilder<> builder(&I);
         VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
         Value* new_Val = builder.CreateBitCast(LHS, vec2);
         new_Val = builder.CreateExtractElement(new_Val, builder.getInt32(1));
+        if (new_shift_size > 0)
+        {
+            new_Val = builder.CreateLShr(new_Val, builder.getInt32(new_shift_size));
+        }
         I.replaceAllUsesWith(new_Val);
         I.eraseFromParent();
     }
@@ -2225,47 +2458,47 @@ bool IGCConstProp::runOnFunction(Function &F)
             // Replace all of the uses of a variable with uses of the constant.
             I->replaceAllUsesWith(C);
 
-			if ( 0 /* isa<ConstantPointerNull>(C)*/) // disable optimization generating invalid IR until it gets re-written
-			{
-				// if we are changing function calls/ genisa intrinsics, then we need 
-				// to fix the function declarations to account for the change in pointer address type
-				for (Value::user_iterator UI = C->user_begin(), UE = C->user_end();
-					UI != UE; ++UI)
-				{
-					if (GenIntrinsicInst *genIntr = dyn_cast<GenIntrinsicInst>(*UI))
-					{
+            if ( 0 /* isa<ConstantPointerNull>(C)*/) // disable optimization generating invalid IR until it gets re-written
+            {
+                // if we are changing function calls/ genisa intrinsics, then we need 
+                // to fix the function declarations to account for the change in pointer address type
+                for (Value::user_iterator UI = C->user_begin(), UE = C->user_end();
+                    UI != UE; ++UI)
+                {
+                    if (GenIntrinsicInst *genIntr = dyn_cast<GenIntrinsicInst>(*UI))
+                    {
                                     GenISAIntrinsic::ID ID = genIntr->getIntrinsicID();
-						if (ID == GenISAIntrinsic::GenISA_storerawvector_indexed)
-						{
-							llvm::Type* tys[2];
-							tys[0] = genIntr->getOperand(0)->getType();
-							tys[1] = genIntr->getOperand(2)->getType();
-							GenISAIntrinsic::getDeclaration(F.getParent(),
-								llvm::GenISAIntrinsic::GenISA_storerawvector_indexed,
-								tys);
-						}
-						else if (ID == GenISAIntrinsic::GenISA_storeraw_indexed)
-						{
+                        if (ID == GenISAIntrinsic::GenISA_storerawvector_indexed)
+                        {
+                            llvm::Type* tys[2];
+                            tys[0] = genIntr->getOperand(0)->getType();
+                            tys[1] = genIntr->getOperand(2)->getType();
+                            GenISAIntrinsic::getDeclaration(F.getParent(),
+                                llvm::GenISAIntrinsic::GenISA_storerawvector_indexed,
+                                tys);
+                        }
+                        else if (ID == GenISAIntrinsic::GenISA_storeraw_indexed)
+                        {
                             llvm::Type* types[2] = {
                                 genIntr->getOperand(0)->getType(),
                                 genIntr->getOperand(1)->getType() };
 
-							GenISAIntrinsic::getDeclaration(F.getParent(),
-								llvm::GenISAIntrinsic::GenISA_storeraw_indexed,
+                            GenISAIntrinsic::getDeclaration(F.getParent(),
+                                llvm::GenISAIntrinsic::GenISA_storeraw_indexed,
                                 types);
-						}
-						else if (ID == GenISAIntrinsic::GenISA_ldrawvector_indexed || ID == GenISAIntrinsic::GenISA_ldraw_indexed)
-						{
-							llvm::Type* tys[2];
-							tys[0] = genIntr->getType();
-							tys[1] = genIntr->getOperand(0)->getType();
-							GenISAIntrinsic::getDeclaration(F.getParent(),
-								ID,
-								tys);
-						}
-					}
-				}
-			}
+                        }
+                        else if (ID == GenISAIntrinsic::GenISA_ldrawvector_indexed || ID == GenISAIntrinsic::GenISA_ldraw_indexed)
+                        {
+                            llvm::Type* tys[2];
+                            tys[0] = genIntr->getType();
+                            tys[1] = genIntr->getOperand(0)->getType();
+                            GenISAIntrinsic::getDeclaration(F.getParent(),
+                                ID,
+                                tys);
+                        }
+                    }
+                }
+            }
 
             // Remove the dead instruction.
             I->eraseFromParent();
@@ -2277,8 +2510,8 @@ bool IGCConstProp::runOnFunction(Function &F)
             continue;
         }
 
-		if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I))
-		{
+        if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I))
+        {
             if (m_enableSimplifyGEP && simplifyGEP(GEP))
             {
                 Changed = true;
@@ -2291,24 +2524,24 @@ bool IGCConstProp::runOnFunction(Function &F)
 
 namespace {
 
-	class IGCIndirectICBPropagaion : public FunctionPass
-	{
-	public:
-		static char ID;
-		IGCIndirectICBPropagaion() : FunctionPass(ID)
-		{
-			initializeIGCIndirectICBPropagaionPass(*PassRegistry::getPassRegistry());
-		}
-		virtual llvm::StringRef getPassName() const { return "Indirect ICB Propagaion"; }
-		virtual bool runOnFunction(Function &F);
-		virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const
-		{
-			AU.setPreservesCFG();
-			AU.addRequired<CodeGenContextWrapper>();
-		}
+    class IGCIndirectICBPropagaion : public FunctionPass
+    {
+    public:
+        static char ID;
+        IGCIndirectICBPropagaion() : FunctionPass(ID)
+        {
+            initializeIGCIndirectICBPropagaionPass(*PassRegistry::getPassRegistry());
+        }
+        virtual llvm::StringRef getPassName() const { return "Indirect ICB Propagaion"; }
+        virtual bool runOnFunction(Function &F);
+        virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const
+        {
+            AU.setPreservesCFG();
+            AU.addRequired<CodeGenContextWrapper>();
+        }
     private:
         bool isICBOffseted(llvm::LoadInst* inst, uint offset);
-	};
+    };
 
 } // namespace
 
@@ -2419,7 +2652,7 @@ bool IGCIndirectICBPropagaion::runOnFunction(Function &F)
         }
     }
 
-	return false;
+    return false;
 }
 
 bool IGCIndirectICBPropagaion::isICBOffseted(llvm::LoadInst* inst, uint offset) {
@@ -2444,6 +2677,200 @@ IGC_INITIALIZE_PASS_BEGIN(IGCIndirectICBPropagaion, "IGCIndirectICBPropagaion",
     "IGCIndirectICBPropagaion", false, false)
 IGC_INITIALIZE_PASS_END(IGCIndirectICBPropagaion, "IGCIndirectICBPropagaion",
     "IGCIndirectICBPropagaion", false, false)
+
+namespace {
+    class NanHandling : public FunctionPass, public llvm::InstVisitor<NanHandling>
+    {
+    public:
+        static char ID;
+        NanHandling() : FunctionPass(ID)
+        {
+            initializeNanHandlingPass(*PassRegistry::getPassRegistry());
+        }
+
+        void getAnalysisUsage(llvm::AnalysisUsage& AU) const
+        {
+            AU.setPreservesCFG();
+            AU.addRequired<LoopInfoWrapperPass>();
+        }
+
+        virtual llvm::StringRef getPassName() const { return "NAN handling"; }
+        virtual bool runOnFunction(llvm::Function &F);
+        void visitBranchInst(llvm::BranchInst &I);
+        void loopNanCases(Function &F);
+
+    private:
+        int longestPathInstCount(llvm::BasicBlock *BB, int &depth);
+        void swapBranch(llvm::Instruction *inst, llvm::BranchInst &BI);
+        SmallVector<llvm::BranchInst*, 10> visitedInst;
+    };
+} // namespace
+
+char NanHandling::ID = 0;
+FunctionPass *IGC::createNanHandlingPass() { return new NanHandling(); }
+
+bool NanHandling::runOnFunction(Function &F)
+{
+    loopNanCases(F);
+    visit(F);
+    return true;
+}
+
+void NanHandling::loopNanCases(Function &F)
+{
+    // take care of loop cases
+    visitedInst.clear();
+    llvm::LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    if (LI && !LI->empty())
+    {
+        FastMathFlags FMF;
+        FMF.clear();
+        for (LoopInfo::iterator I = LI->begin(), E = LI->end(); I != E; ++I)
+        {
+            Loop *loop = *I;
+            BranchInst* br = cast<BranchInst>(loop->getLoopLatch()->getTerminator());
+            BasicBlock* header = loop->getHeader();
+            if (br && br->isConditional() && header)
+            {
+                visitedInst.push_back(br);
+                if (FCmpInst *brCmpInst = dyn_cast<FCmpInst>(br->getCondition()))
+                {
+                    FPMathOperator *FPO = dyn_cast<FPMathOperator>(brCmpInst);
+                    if (!FPO || !FPO->isFast())
+                    {
+                        continue;
+                    }
+                    if (br->getSuccessor(1) == header)
+                    {
+                        swapBranch(brCmpInst, *br);
+                    }
+                }
+                else if (BinaryOperator *andOrInst = dyn_cast<BinaryOperator>(br->getCondition()))
+                {
+                    if (andOrInst->getOpcode() != BinaryOperator::And &&
+                        andOrInst->getOpcode() != BinaryOperator::Or)
+                    {
+                        continue;
+                    }
+                    FCmpInst *brCmpInst0 = dyn_cast<FCmpInst>(andOrInst->getOperand(0));
+                    FCmpInst *brCmpInst1 = dyn_cast<FCmpInst>(andOrInst->getOperand(1));
+                    if (!brCmpInst0 || !brCmpInst1)
+                    {
+                        continue;
+                    }
+                    if (br->getSuccessor(1) == header)
+                    {
+                        brCmpInst0->copyFastMathFlags(FMF);
+                        brCmpInst1->copyFastMathFlags(FMF);
+                    }
+                }
+            }
+        }
+    }
+}
+
+int NanHandling::longestPathInstCount(llvm::BasicBlock *BB, int &depth)
+{
+#define MAX_SEARCH_DEPTH 10
+
+    depth++;
+    if (!BB || depth>MAX_SEARCH_DEPTH)
+        return 0;
+
+    int sumSuccInstCount = 0;
+    for (succ_iterator SI = succ_begin(BB), E = succ_end(BB); SI != E; ++SI)
+    {
+        sumSuccInstCount += longestPathInstCount(*SI, depth);
+    }
+    return (int)(BB->getInstList().size()) + sumSuccInstCount;
+}
+
+void NanHandling::swapBranch(llvm::Instruction *inst, llvm::BranchInst &BI)
+{
+    if (FCmpInst *brCondition = dyn_cast<FCmpInst>(inst))
+    {
+        if (inst->hasOneUse())
+        {
+            brCondition->setPredicate(FCmpInst::getInversePredicate(brCondition->getPredicate()));
+            BI.swapSuccessors();
+        }
+    }
+    else
+    {
+        // inst not expected
+        assert(0);
+    }
+}
+
+void NanHandling::visitBranchInst(llvm::BranchInst &I)
+{
+    if (!I.isConditional())
+        return;
+
+    // if this branch is part of a loop, it is taken care of already in loopNanCases
+    for (auto iter = visitedInst.begin(); iter != visitedInst.end(); iter++)
+    {
+        if (&I == *iter)
+            return;
+    }
+
+    FCmpInst *brCmpInst = dyn_cast<FCmpInst>(I.getCondition());
+    FCmpInst *src0 = nullptr;
+    FCmpInst *src1 = nullptr;
+
+    // if the branching is based on a cmp instruction
+    if (brCmpInst)
+    {
+        FPMathOperator *FPO = dyn_cast<FPMathOperator>(brCmpInst);
+        if (!FPO || !FPO->isFast())
+            return;
+
+        if (!brCmpInst->hasOneUse())
+            return;
+    }
+    // if the branching is based on a and/or from multiple conditions.
+    else if (BinaryOperator *andOrInst = dyn_cast<BinaryOperator>(I.getCondition()))
+    {
+        if (andOrInst->getOpcode() != BinaryOperator::And && andOrInst->getOpcode() != BinaryOperator::Or)
+            return;
+
+        src0 = dyn_cast<FCmpInst>(andOrInst->getOperand(0));
+        src1 = dyn_cast<FCmpInst>(andOrInst->getOperand(1));
+
+        if (!src0 || !src1)
+            return;
+    }
+    else
+    {
+        return;
+    }
+
+    // Calculate the maximum instruction count when going down one branch.
+    // Make the false case (including NaN) goes to the shorter path.
+    int depth = 0;
+    int trueBranchSize = longestPathInstCount(I.getSuccessor(0), depth);
+    depth = 0;
+    int falseBranchSize = longestPathInstCount(I.getSuccessor(1), depth);
+
+    if (falseBranchSize - trueBranchSize > (int)(IGC_GET_FLAG_VALUE(SetBranchSwapThreshold)))
+    {
+        if (brCmpInst)
+        {
+            // swap the condition and the successor blocks
+            swapBranch(brCmpInst, I);
+        }
+        else
+        {
+            FastMathFlags FMF;
+            FMF.clear();
+            src0->copyFastMathFlags(FMF);
+            src1->copyFastMathFlags(FMF);
+        }
+        return;
+    }
+}
+IGC_INITIALIZE_PASS_BEGIN(NanHandling, "NanHandling", "NanHandling", false, false)
+IGC_INITIALIZE_PASS_END(NanHandling, "NanHandling", "NanHandling", false, false)
 
 namespace {
 
@@ -2799,100 +3226,100 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst *SI)
         return false;
     }
 
-	// Dest will be the block that the control flow from the switch merges to.
-	// Currently, there are two options:
-	// 1. The Dest block is the default block from the switch
-	// 2. The Dest block is jumped to by all of the switch cases (and the default)
-	BasicBlock *Dest = nullptr;
-	{
-		const auto *CaseSucc = 
+    // Dest will be the block that the control flow from the switch merges to.
+    // Currently, there are two options:
+    // 1. The Dest block is the default block from the switch
+    // 2. The Dest block is jumped to by all of the switch cases (and the default)
+    BasicBlock *Dest = nullptr;
+    {
+        const auto *CaseSucc = 
 #if LLVM_VERSION_MAJOR == 4
-			SI->case_begin().getCaseSuccessor();
+            SI->case_begin().getCaseSuccessor();
 #elif LLVM_VERSION_MAJOR >= 7
             SI->case_begin()->getCaseSuccessor();
 #endif
-		auto *BI = dyn_cast<BranchInst>(CaseSucc->getTerminator());
+        auto *BI = dyn_cast<BranchInst>(CaseSucc->getTerminator());
 
-		if (BI == nullptr)
-			return false;
+        if (BI == nullptr)
+            return false;
 
-		if (BI->isConditional())
-			return false;
+        if (BI->isConditional())
+            return false;
 
-		// We know the first case jumps to this block.  Now let's
-		// see below whether all the cases jump to this same block.
-		Dest = BI->getSuccessor(0);
-	}
+        // We know the first case jumps to this block.  Now let's
+        // see below whether all the cases jump to this same block.
+        Dest = BI->getSuccessor(0);
+    }
 
-	// Does BB unconditionally branch to MergeBlock?
-	auto branchPattern = [](const BasicBlock *BB, const BasicBlock *MergeBlock)
-	{
-		auto *br = dyn_cast<BranchInst>(BB->getTerminator());
+    // Does BB unconditionally branch to MergeBlock?
+    auto branchPattern = [](const BasicBlock *BB, const BasicBlock *MergeBlock)
+    {
+        auto *br = dyn_cast<BranchInst>(BB->getTerminator());
 
-		if (br == nullptr)
-			return false;
+        if (br == nullptr)
+            return false;
 
-		if (br->isConditional())
-			return false;
+        if (br->isConditional())
+            return false;
 
-		if (br->getSuccessor(0) != MergeBlock)
-			return false;
+        if (br->getSuccessor(0) != MergeBlock)
+            return false;
 
-		return true;
-	};
+        return true;
+    };
 
-	// We can speculatively execute a basic block if it
-	// is small, unconditionally branches to Dest, and doesn't
-	// have high latency or unsafe to speculate instructions.
-	auto canSpeculateBlock = [&](BasicBlock *BB)
-	{
-		if (BB->size() > maxCaseInsts)
-			return false;
+    // We can speculatively execute a basic block if it
+    // is small, unconditionally branches to Dest, and doesn't
+    // have high latency or unsafe to speculate instructions.
+    auto canSpeculateBlock = [&](BasicBlock *BB)
+    {
+        if (BB->size() > maxCaseInsts)
+            return false;
 
-		if (!branchPattern(BB, Dest))
-			return false;
+        if (!branchPattern(BB, Dest))
+            return false;
 
-		for (auto &I : *BB)
-		{
-			auto *inst = &I;
+        for (auto &I : *BB)
+        {
+            auto *inst = &I;
 
-			if (isa<BranchInst>(inst))
-				continue;
+            if (isa<BranchInst>(inst))
+                continue;
 
-			// if there is any high-latency instruction in the switch,
-			// don't flatten it
-			if (isSampleInstruction(inst)  ||
-				isGather4Instruction(inst) ||
-				isInfoInstruction(inst)    ||
-				isLdInstruction(inst)      ||
-				// If the instruction can't be speculated (e.g., phi node),
-				// punt.
-				!isSafeToSpeculativelyExecute(inst))
-			{
-				return false;
-			}
-		}
+            // if there is any high-latency instruction in the switch,
+            // don't flatten it
+            if (isSampleInstruction(inst)  ||
+                isGather4Instruction(inst) ||
+                isInfoInstruction(inst)    ||
+                isLdInstruction(inst)      ||
+                // If the instruction can't be speculated (e.g., phi node),
+                // punt.
+                !isSafeToSpeculativelyExecute(inst))
+            {
+                return false;
+            }
+        }
 
-		return true;
-	};
+        return true;
+    };
 
-	for (auto &I : SI->cases())
-	{
-		BasicBlock *CaseDest = I.getCaseSuccessor();
+    for (auto &I : SI->cases())
+    {
+        BasicBlock *CaseDest = I.getCaseSuccessor();
 
-		if (!canSpeculateBlock(CaseDest))
-			return false;
-	}
+        if (!canSpeculateBlock(CaseDest))
+            return false;
+    }
 
-	// Is the default case of the switch the block
-	// where all other cases meet?
-	const bool DefaultMergeBlock = (Dest == Default);
+    // Is the default case of the switch the block
+    // where all other cases meet?
+    const bool DefaultMergeBlock = (Dest == Default);
 
-	// If we merge to the default block, there is no block
-	// we jump to beforehand so there is nothing to
-	// speculate.
-	if (!DefaultMergeBlock && !canSpeculateBlock(Default))
-		return false;
+    // If we merge to the default block, there is no block
+    // we jump to beforehand so there is nothing to
+    // speculate.
+    if (!DefaultMergeBlock && !canSpeculateBlock(Default))
+        return false;
 
     // Get all PHI nodes that needs to be replaced
     SmallVector<PHINode*, 4> PhiNodes;
@@ -2912,30 +3339,30 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst *SI)
     if (PhiNodes.empty())
         return false;
 
-	// Move all instructions except the last (i.e., the branch)
-	// from BB to the InsertPoint.
-	auto splice = [](BasicBlock *BB, Instruction *InsertPoint)
-	{
-		Instruction* preIter = nullptr;
-		for (auto &iter : *BB)
-		{
-			if (preIter)
-			{
-				preIter->moveBefore(InsertPoint);
-			}
-			preIter = cast<Instruction>(&iter);
-		}
-	};
+    // Move all instructions except the last (i.e., the branch)
+    // from BB to the InsertPoint.
+    auto splice = [](BasicBlock *BB, Instruction *InsertPoint)
+    {
+        Instruction* preIter = nullptr;
+        for (auto &iter : *BB)
+        {
+            if (preIter)
+            {
+                preIter->moveBefore(InsertPoint);
+            }
+            preIter = cast<Instruction>(&iter);
+        }
+    };
 
     // move default block out
-	if (!DefaultMergeBlock)
-		splice(Default, SI);
+    if (!DefaultMergeBlock)
+        splice(Default, SI);
 
     // move case blocks out
-	for (auto &I : SI->cases())
+    for (auto &I : SI->cases())
     {
         BasicBlock *CaseDest = I.getCaseSuccessor();
-		splice(CaseDest, SI);
+        splice(CaseDest, SI);
     }
 
     // replaces PHI with select

@@ -109,7 +109,7 @@ public:
         for (unsigned int j = 0; j < GVs.size(); j++)
         {
             IGCLLVM::DIBuilder Builder(M);
-			llvm::DIGlobalVariable* GV = GVs[j]->getVariable();
+            llvm::DIGlobalVariable* GV = GVs[j]->getVariable();
             llvm::DIScope* scopeToUse = GV->getScope();
             llvm::DILocation* locToUse = llvm::DebugLoc::get(GV->getLine(), 0, scopeToUse);
             if (llvm::isa<llvm::DICompileUnit>(GV->getScope()))
@@ -134,9 +134,9 @@ public:
                 );
 
                 if (isIndirect)
-                    return Builder.insertDeclare(pNewVal, llvm::cast<llvm::DILocalVariable>(Var), nullptr, locToUse, pEntryPoint);
+                    return Builder.insertDeclare(pNewVal, llvm::cast<llvm::DILocalVariable>(Var), Builder.createExpression(), locToUse, pEntryPoint);
 
-                return Builder.insertDbgValueIntrinsic(pNewVal, 0, llvm::cast<llvm::DILocalVariable>(Var), nullptr, locToUse, pEntryPoint);
+                return Builder.insertDbgValueIntrinsic(pNewVal, 0, llvm::cast<llvm::DILocalVariable>(Var), Builder.createExpression(), locToUse, pEntryPoint);
         }
         return nullptr;
    }

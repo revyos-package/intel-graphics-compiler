@@ -4,11 +4,10 @@
 // entry point for binary encoding of a IGA IR kernel
 class KernelEncoder
 {
-    void* buf = nullptr;
-    uint32_t binarySize = 0;
-    iga::Kernel* kernel = nullptr;
-    bool autoCompact = false;
-    bool nocompactFirstEightInst = false;
+    void* m_buf = nullptr;
+    uint32_t m_binarySize = 0;
+    iga::Kernel* m_kernel = nullptr;
+    bool m_autoCompact = false;
 
 public:
     // @param compact: auto compact instructions if applicable
@@ -16,15 +15,14 @@ public:
     //     The first eight instructions must be in the same bb
     //     This can be set simulataneously with compact. The first 8 instructions will not be cmopacted
     //     even if it is compactable
-    KernelEncoder(iga::Kernel* k, bool compact, bool noCompactFirstEightInst = false)
-        : kernel(k)
-        , autoCompact(compact)
-        , nocompactFirstEightInst(noCompactFirstEightInst)
+    KernelEncoder(iga::Kernel* k, bool compact)
+        : m_kernel(k)
+        , m_autoCompact(compact)
     { }
 
     iga_status_t encode();
-    void* getBinary() const { return buf; }
-    uint32_t getBinarySize() const { return binarySize; }
+    void* getBinary() const { return m_buf; }
+    uint32_t getBinarySize() const { return m_binarySize; }
 
     // patchImmValue - Decode the first instruction start from binary, and patch the imm field to given val
     // input type - the type of given immediate value

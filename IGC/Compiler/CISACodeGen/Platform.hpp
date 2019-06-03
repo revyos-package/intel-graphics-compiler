@@ -28,6 +28,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/compiler_caps.h"
 #include "Compiler/igc_workaround.h"
 #include "common/igc_regkeys.hpp"
+#include "common/Types.hpp"
 
 namespace IGC
 {
@@ -187,10 +188,10 @@ public:
     }
 
     bool supportsDrawParametersSGVs() const
-	{
-		// Gen10+, 3DSTATE_VF_SGVS_2
-		return m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE;
-	}
+    {
+        // Gen10+, 3DSTATE_VF_SGVS_2
+        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE;
+    }
 
     bool hasPSDBottleneck() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE; }
 
@@ -327,6 +328,24 @@ public:
     {
         return IGC_IS_FLAG_ENABLED(EnableOCLScratchPrivateMemory);
     }
+
+    uint32_t getGRFSize() const
+    {
+        return 32;
+    }
+
+    // If true then screen space coordinates for upper-left vertex of a triangle
+    // being rasterized are delivered together with source depth or W deltas.
+    bool hasStartCoordinatesDeliveredWithDeltas() const
+    {
+        return false;
+    }
+
+    uint32_t maxPerThreadScratchSpace() const
+    {
+        return 0x200000;
+    }
+
     // ***** Below go accessor methods for testing WA data from WA_TABLE *****
 
     bool WaDoNotPushConstantsForAllPulledGSTopologies() const
@@ -390,7 +409,7 @@ public:
     bool WaConservativeRasterization() const
     {
         return (m_WaTable.WaConservativeRasterization != 0 &&
-			IGC_IS_FLAG_ENABLED(ApplyConservativeRastWAHeader));
+            IGC_IS_FLAG_ENABLED(ApplyConservativeRastWAHeader));
     }
 
     bool WaReturnZeroforRTReadOutsidePrimitive() const

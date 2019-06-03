@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/InlineAsm.h>
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/IGCPassSupport.h"
@@ -52,11 +53,11 @@ struct PSSignature;
 
 class EmitPass : public llvm::FunctionPass
 {
-public: 
+public:
     EmitPass(CShaderProgram::KernelShaderMap &shaders, SIMDMode mode, bool canAbortOnSpill, ShaderDispatchMode shaderMode, PSSignature* pSignature = nullptr);
 
     virtual ~EmitPass();
-    
+
     virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override
     {
         AU.addRequired<llvm::DominatorTreeWrapperPass>();
@@ -100,11 +101,11 @@ public:
 
     template<int N>
     void Alu(e_opcode opCode, const SSource sources[N], const DstModifier& modifier);
-    
+
     void BinaryUnary(llvm::Instruction* inst, const  SSource source[2], const DstModifier& modifier);
-    void CmpBoolOp(llvm::BinaryOperator* inst, 
-        llvm::CmpInst::Predicate predicate, 
-        const  SSource source[2], 
+    void CmpBoolOp(llvm::BinaryOperator* inst,
+        llvm::CmpInst::Predicate predicate,
+        const  SSource source[2],
         const SSource& bitSource,
         const DstModifier&  modifier);
     void emitAluConditionMod(Pattern* aluPattern, llvm::Instruction* alu, llvm::CmpInst* cmp);
@@ -126,7 +127,8 @@ public:
     void EmitSubPair(llvm::GenIntrinsicInst *GII, const SSource Sources[4], const DstModifier &DstMod);
     void EmitMulPair(llvm::GenIntrinsicInst *GII, const SSource Sources[4], const DstModifier &DstMod);
     void EmitPtrToPair(llvm::GenIntrinsicInst *GII, const SSource Sources[1], const DstModifier &DstMod);
-    
+    void EmitInlineAsm(llvm::CallInst* inst);
+
     void emitPairToPtr(llvm::GenIntrinsicInst *GII);
 
     void emitMulAdd16(llvm::Instruction* I, const SSource source[2], const DstModifier &dstMod);
@@ -142,13 +144,13 @@ public:
     void emitOutput(llvm::GenIntrinsicInst* inst);
     void emitGS_SGV(llvm::SGVIntrinsic* inst);
     void emitSampleOffset(llvm::GenIntrinsicInst* inst);
-    
+
     // TODO: unify the functions below and clean up
-    void emitStore(llvm::StoreInst* inst); 
+    void emitStore(llvm::StoreInst* inst);
     void emitStore3D(llvm::StoreInst* inst, llvm::Value *elemIdxV = nullptr);
     void emitStore3DInner(llvm::Value *pllValToStore, llvm::Value *pllDstPtr, llvm::Value *pllElmIdx);
 
-    void emitLoad(llvm::LoadInst* inst);        // single load, no pattern 
+    void emitLoad(llvm::LoadInst* inst);        // single load, no pattern
     void emitLoad3DInner(llvm::LdRawIntrinsic *inst, ResourceDescriptor& resource, llvm::Value *elemIdxV);
 
     // when resource is dynamically indexed, load/store must use special intrinsics
@@ -162,7 +164,7 @@ public:
     // Emit lifetime start right before inst V. If ForAllInstance is true, emit lifestart
     // for both instances; otherwise, just the current instance set in the calling context.
     void emitLifetimeStart(CVariable* Var, llvm::BasicBlock* BB, llvm::Instruction* I, bool ForAllInstance);
- 
+
     // set the predicate with current active channels
     void emitPredicateFromChannelIP(CVariable* dst, CVariable* alias = NULL);
 
@@ -214,6 +216,7 @@ public:
     void emitMediaBlockRectangleRead(llvm::Instruction* inst);
     void emitURBWrite(llvm::GenIntrinsicInst* inst);
     void emitURBRead(llvm::GenIntrinsicInst* inst);
+    void emitURBReadOutput(QuadEltUnit globalOffset, CVariable* pPerSlotOffsetVar, CVariable* pDest);
     void emitSampleInstruction(llvm::SampleIntrinsic* inst);
     void emitLdInstruction(llvm::Instruction* inst);
     void emitInfoInstruction(llvm::InfoIntrinsic* inst);
@@ -298,10 +301,11 @@ public:
     void emitBranch(llvm::BranchInst* br, const SSource& cond, e_predMode predMode);
     void emitDiscardBranch(llvm::BranchInst* br, const SSource& cond);
     void emitAluNoModifier(llvm::GenIntrinsicInst* inst);
-    
+
     void emitSGV(llvm::SGVIntrinsic* inst);
     void emitPSSGV(llvm::GenIntrinsicInst* inst);
     void emitCSSGV(llvm::GenIntrinsicInst* inst);
+    void getPixelPosition(CVariable* destination, const uint component);
     void emitPixelPosition(llvm::GenIntrinsicInst* inst);
     void emitPhaseOutput(llvm::GenIntrinsicInst* inst);
     void emitPhaseInput(llvm::GenIntrinsicInst* inst);
@@ -371,7 +375,7 @@ public:
     // Those three "vector" version shall be combined with
     // non-vector version.
     bool isUniformStoreOCL(llvm::StoreInst *SI);
-    void emitVectorBitCast(llvm::BitCastInst *BCI); 
+    void emitVectorBitCast(llvm::BitCastInst *BCI);
     void emitVectorLoad(llvm::LoadInst *LI, llvm::Value* offset);
     void emitVectorStore(llvm::StoreInst *SI);
     void emitGenISACopy(llvm::GenIntrinsicInst *GenCopyInst);
@@ -439,7 +443,7 @@ public:
         CVariable*& flag,
         uint& label);
     void ResourceLoop(bool needLoop, CVariable* flag, uint label);
-    
+
     void ForceDMask(bool createJmpForDiscard = true);
     void ResetVMask(bool createJmpForDiscard = true);
     void setPredicateForDiscard();
@@ -479,7 +483,7 @@ public:
     ModuleMetaData* m_moduleMD;
 
     bool m_canAbortOnSpill;
-    
+
     CEncoder::RoundingMode m_roundingMode;
     PSSignature* m_pSignature;
 
@@ -499,6 +503,9 @@ private:
         llvm::BasicBlock *otherBB, llvm::BasicBlock *phiMovBB, llvm::BasicBlock* phiBB);
     bool isCandidateIfStmt(
         llvm::BasicBlock *ifBB, llvm::BasicBlock* &otherBB, llvm::BasicBlock* &emptyBB);
+
+    // Used to check for the constraint types with the actual llvmIR params for inlineASM instructions
+    bool validateInlineAsmConstraints(llvm::CallInst* inst);
 
     void emitGetMessagePhaseType(llvm::GenIntrinsicInst* inst, VISA_Type type, uint32_t width);
     void emitSetMessagePhaseType(llvm::GenIntrinsicInst* inst, VISA_Type type);
@@ -550,6 +557,8 @@ private:
     bool ignoreRoundingMode(llvm::Instruction* inst) const;
 
     CVariable *UnpackOrBroadcastIfUniform(CVariable *pVar);
+
+    int getGRFSize() const { return m_currShader->getGRFSize(); }
 };
 
 } // namespace IGC

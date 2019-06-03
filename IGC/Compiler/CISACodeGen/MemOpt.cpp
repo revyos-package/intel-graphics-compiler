@@ -667,7 +667,7 @@ bool MemOpt::mergeLoad(LoadInst *LeadingLoad,
       MaxElts = profitVec[k++];
     }
 
-    if (NumElts == 3 && LeadingLoadScalarType->isIntegerTy(16)) {
+    if (NumElts == 3 && (LeadingLoadScalarType->isIntegerTy(16) || LeadingLoadScalarType->isHalfTy())) {
       return false;
     }
 
@@ -1196,13 +1196,13 @@ public:
 class OrOperator : public ConcreteOperator<BinaryOperator, Instruction::Or> 
 {
 #if LLVM_VERSION_MAJOR >= 7
-	~OrOperator() = delete;
+    ~OrOperator() = delete;
 #endif
 };
 class BitCastOperator : public ConcreteOperator<Operator, Instruction::BitCast> 
 {
 #if LLVM_VERSION_MAJOR >= 7
-	~BitCastOperator() = delete;
+    ~BitCastOperator() = delete;
 #endif
 };
 
@@ -1433,7 +1433,7 @@ class IntToPtrOperator :
     public ConcreteOperator<Operator, Instruction::IntToPtr> 
 {
 #if LLVM_VERSION_MAJOR >= 7
-	~IntToPtrOperator() = delete;
+    ~IntToPtrOperator() = delete;
 #endif
 };
 

@@ -46,6 +46,7 @@ namespace IGC {
 class CEncoder;
 class CVariable;
 class CodeGenContextWrapper;
+class DeSSA;
 
 
 class CoalescingEngine : public llvm::FunctionPass, public llvm::InstVisitor<CoalescingEngine>
@@ -57,15 +58,7 @@ public:
     static char ID; // Pass identification, replacement for typeid
     CoalescingEngine();
 
-    virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override {
-        AU.setPreservesAll();
-        AU.addRequired<llvm::DominatorTreeWrapperPass>();
-        AU.addRequired<WIAnalysis>();
-        AU.addRequired<LiveVarsAnalysis>();
-        AU.addRequired<CodeGenPatternMatch>();
-        AU.addRequired<MetaDataUtilsWrapper>();
-        AU.addRequired<CodeGenContextWrapper>();
-    }
+    virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override;
 
     virtual void releaseMemory() override {
         Allocator.Reset();
@@ -126,12 +119,13 @@ public:
 
     //
     CVariable* PrepareExplicitPayload(
-        CShader* outProgram, 
-        CEncoder* encoder, 
+        CShader* outProgram,
+        CEncoder* encoder,
         SIMDMode simdMode,
         const llvm::DataLayout* pDL,
         llvm::Instruction* inst,
         int& payloadOffset);
+
 
     void visitCastInst(llvm::CastInst &I);
     void visitBinaryOperator(llvm::BinaryOperator &I);
@@ -153,7 +147,7 @@ public:
             kRegisterIsolatedFlag = 1,
             kPHIIsolatedFlag = 2
         };
-        ElementNode(llvm::Value *_value) : 
+        ElementNode(llvm::Value *_value) :
             value(_value), rank(0)
         { parent.setPointer(this); }
 
@@ -179,7 +173,7 @@ public:
             rootInst( nullptr )
         {
         }
-        
+
         int leftBound;
         int rightBound;
 
@@ -226,7 +220,7 @@ public:
 
         inline void InitializeIndexWithCCRoot(int index, ElementNode* elNode)
         {
-//			assert( OffsetToCCMap.count(index) == 0 );
+//            assert( OffsetToCCMap.count(index) == 0 );
             OffsetToCCMap[index] = elNode;
 
             ResizeBounds(index);
@@ -324,7 +318,7 @@ public:
     ///
     bool IsPayloadCovered(
         llvm::Instruction* inst,
-        CCTuple* ccTuple, 
+        CCTuple* ccTuple,
         const uint numOperands,
         const int payloadToCCTupleRelativeOffset);
 
@@ -357,9 +351,12 @@ public:
     //FIXME: this might not be the most effective way if called multiple times
     bool IsolationFilter(llvm::Value* val ) const
     {
+        if (isCoalescedByDeSSA(val)) {
+            return true;
+        }
         if (llvm::dyn_cast<llvm::PHINode>(val)){
             return true;
-        } 
+        }
         else if (llvm::dyn_cast<llvm::ExtractElementInst>(val)) {
             return true;
         }
@@ -370,7 +367,7 @@ public:
                     return true;
                 }
             }
-        } 
+        }
 
         return false;
     }
@@ -415,7 +412,7 @@ public:
 
     //Return true if it is ok to continue, false if interference is detected
     bool EvictOrStop(
-        CCTuple* ccTuple, 
+        CCTuple* ccTuple,
         const int index,
         llvm::Instruction * tupleGeneratingInstruction,
         bool const forceEviction,
@@ -494,9 +491,9 @@ public:
                 // we have added the another condition because the domination-test
                 // does not work between two phi-node. See the following comments
                 // from the DT::dominates:
-                // " It is not possible to determine dominance between two PHI nodes 
+                // " It is not possible to determine dominance between two PHI nodes
                 //   based on their ordering
-                //  if (isa<PHINode>(A) && isa<PHINode>(B)) 
+                //  if (isa<PHINode>(A) && isa<PHINode>(B))
                 //    return false;"
                 if (llvm::isa<llvm::Argument>(NewParent)) {
                     break;
@@ -504,7 +501,7 @@ public:
                     break;
                 } /* else if (cast<llvm::Instruction>(NewParent)->getParent() == MBB &&
                     isa<PHINode>(DefMI) && isa<PHINode>(NewParent)) {
-                        break; 
+                        break;
                 } */
             }
             NewParent = ImmediateDominatingParent[NewParent];
@@ -513,23 +510,23 @@ public:
         return NewParent;
     }
 
-    //Here we test the interference between the 
+    //Here we test the interference between the
     //Algorithm:
     //Starting from the currentDominatingParent, walk the congruence class
     //dominance tree upward, until an element that dominates the currentInstruction
     //is found.
-    //Since this method could be called on the non-dominance traversal (e.g. 
+    //Since this method could be called on the non-dominance traversal (e.g.
     //currentInstruction dominates some elements in the tree)
     // Say we have a dominance tree that is already constructed (lifetime goes
     // downwards):
     // CC dominance tree
     //    v67
-    //    ^ 
+    //    ^
     //    |
     //   v121 (dominating)
     //    ^
     //    |    -----   v181
-    //    |     
+    //    |
     //   v190 <- (dominated)
     //
     // Want to check the interference with v181, which dominates v190, but is dominated
@@ -537,8 +534,8 @@ public:
     // out that v121 is dominator of v181 and (say) it is not interfering with v181, thus
     // leading to conclusion that there is no interference between v181 and CC dominance tree.
 
-    inline void SymmetricInterferenceTest( 
-        llvm::Value* RootV, 
+    inline void SymmetricInterferenceTest(
+        llvm::Value* RootV,
         llvm::Instruction* currentInstruction,
         llvm::Value* &dominating, //in-out
         llvm::Value* &dominated )
@@ -556,11 +553,11 @@ public:
                     dominating = NewParent;
                     break;
                 }
-                else if (DT->dominates(llvm::cast<llvm::Instruction>(NewParent), currentInstruction)) 
+                else if (DT->dominates(llvm::cast<llvm::Instruction>(NewParent), currentInstruction))
                 {
                     dominating = NewParent;
                     break;
-                } 
+                }
                 dominated = NewParent;
             }
             NewParent = ImmediateDominatingParent[NewParent];
@@ -622,7 +619,7 @@ public:
     class GatherWeightElementFunctor: public ElementFunctor
     {
     public:
-        GatherWeightElementFunctor() : 
+        GatherWeightElementFunctor() :
             nAlignedAnchors(0),
             nInsertionSlotRequired(0),
             nNeedsDisplacement(0)
@@ -668,7 +665,7 @@ public:
         ///Visits a value in a tuple that interferes with some (non-isolated)
         ///element in a CC class that occupies the same slot.
         virtual bool visitInterfering(
-            llvm::Value* val, 
+            llvm::Value* val,
             const bool evictFullCongruenceClass)
         {
             nNeedsDisplacement++;
@@ -718,10 +715,10 @@ public:
 
     public:
         ProcessInterferencesElementFunctor(
-            bool forceEviction, 
-            llvm::Instruction* inst, 
-            const int offsetDiff, 
-            CCTuple* ccTuple, 
+            bool forceEviction,
+            llvm::Instruction* inst,
+            const int offsetDiff,
+            CCTuple* ccTuple,
             CoalescingEngine* CE) :
             m_forceEviction( forceEviction ),
             m_interferes( false ),
@@ -757,38 +754,38 @@ public:
         virtual bool visitCopy()
         {
             return m_CE->EvictOrStop(
-                m_ccTuple, 
-                m_index + m_offsetDiff, 
-                m_tupleInst, 
-                m_forceEviction, 
+                m_ccTuple,
+                m_index + m_offsetDiff,
+                m_tupleInst,
+                m_forceEviction,
                 m_interferes );
         }
         virtual bool visitConstant()
         {
             return m_CE->EvictOrStop(
-                m_ccTuple, 
-                m_index + m_offsetDiff, 
-                m_tupleInst , 
-                m_forceEviction, 
+                m_ccTuple,
+                m_index + m_offsetDiff,
+                m_tupleInst ,
+                m_forceEviction,
                 m_interferes );
         }
         virtual bool visitIsolated()
         {
             return m_CE->EvictOrStop(
-                m_ccTuple, 
-                m_index + m_offsetDiff, 
-                m_tupleInst , 
-                m_forceEviction, 
+                m_ccTuple,
+                m_index + m_offsetDiff,
+                m_tupleInst ,
+                m_forceEviction,
                 m_interferes );
         }
 
         virtual bool visitArgument()
         {
             return m_CE->EvictOrStop(
-                m_ccTuple, 
-                m_index + m_offsetDiff, 
-                m_tupleInst , 
-                m_forceEviction, 
+                m_ccTuple,
+                m_index + m_offsetDiff,
+                m_tupleInst ,
+                m_forceEviction,
                 m_interferes );
         }
 
@@ -805,9 +802,9 @@ public:
                 if( m_CE->DetermineWeight(val) < 2 ) {
 
                     m_CE->PrepareInsertionSlot(
-                        m_ccTuple, 
-                        m_index + m_offsetDiff, 
-                        m_tupleInst, 
+                        m_ccTuple,
+                        m_index + m_offsetDiff,
+                        m_tupleInst,
                         false //evictFullCongruenceClass
                         );
 
@@ -816,9 +813,9 @@ public:
                 else
                 {
                     m_CE->PrepareInsertionSlot(
-                        m_ccTuple, 
-                        m_index + m_offsetDiff, 
-                        m_tupleInst, 
+                        m_ccTuple,
+                        m_index + m_offsetDiff,
+                        m_tupleInst,
                         true //evictFullCongruenceClass
                         );
 
@@ -842,7 +839,7 @@ public:
         }
     };
 
-    void ProcessElements( 
+    void ProcessElements(
         const uint numOperands,
         llvm::Instruction *tupleInst,
         const int offsetDiff,
@@ -960,6 +957,7 @@ private:
     llvm::DominatorTree *DT;
     LiveVars *LV;
     WIAnalysis *WIA;
+    DeSSA *m_DeSSA;
     CodeGenPatternMatch *CG;
     llvm::DenseMap<llvm::Value*, ElementNode*> ValueNodeMap;
     llvm::DenseMap<ElementNode*, CCTuple*> NodeCCTupleMap;
@@ -1015,6 +1013,8 @@ private:
 
         LiveVars *LV;
     };
+
+    bool isCoalescedByDeSSA(llvm::Value *V) const;
 };
 
 } //namespace IGC

@@ -87,8 +87,8 @@ Imported_Intrinsics = \
     "GenISA_typedwrite": ["void",["anyptr","int","int","int","int","float","float","float","float"],"None"],
     "GenISA_ldraw_indexed": ["any:float",["anyptr","int", "int"],"ReadArgMem"],
     "GenISA_ldrawvector_indexed": ["anyvector",["anyptr","int", "int"],"ReadArgMem"],
-    "GenISA_storeraw_indexed": ["void",["anyptr","int","any:float"],"None"],
-    "GenISA_storerawvector_indexed": ["void",["anyptr","int","anyvector"],"None"],
+    "GenISA_storeraw_indexed": ["void",["anyptr","int","any:float", "int"],"None"],
+    "GenISA_storerawvector_indexed": ["void",["anyptr","int","anyvector", "int"],"None"],
     "GenISA_intatomicraw": ["anyint",["anyptr","int",0,"int"],"ReadWriteArgMem"],
     "GenISA_floatatomicraw": ["anyfloat",["anyptr","int",0,"int"],"ReadWriteArgMem"],
     "GenISA_intatomicrawA64": ["anyint",["anyptr","anyptr",0,"int"],"ReadWriteArgMem"],
@@ -195,6 +195,7 @@ Imported_Intrinsics = \
     "GenISA_simdBlockRead": ["anyvector",["anyptr"],"ReadMem"],
     "GenISA_simdBlockReadBindless": ["anyvector",["anyptr", "int"],"ReadMem"],
     "GenISA_simdBlockWrite": ["void",["anyptr","anyvector"],"None"],
+    "GenISA_simdBlockWriteBindless": ["void",["anyptr","anyvector", "int"],"None"],
     "GenISA_MediaBlockRead": ["anyint",["int","int","int","int","int","int"],"None"],
     "GenISA_MediaBlockWrite": ["void",["int","int","int","int","int","int","anyint"],"None"],
     "GenISA_MediaBlockRectangleRead": ["void",["int","int","int","int","int","int","int"],"None"],
@@ -256,8 +257,12 @@ Imported_Intrinsics = \
                                  "int","bool","bool","bool","bool","int"],"None"],
     "GenISA_RTWrite": ["void",["anyfloat","float","bool",0,0,0,0,"float","float","int","int","bool",
                        "bool","bool","bool","int"],"None"],
+    # (owordOffset, mask, x1, y1, z1, w1, x2, y2, z2, w2)
     "GenISA_URBWrite": ["void",["int","int","float","float","float","float","float","float","float","float"],"None"],
+    # (index, owordOffset)->float8
     "GenISA_URBRead": ["float8",["int","int"],"NoMem"],
+    # In-place data read using URB Write Handle. (owordOffset)->float8
+    "GenISA_URBReadOutput": ["float8",["int"],"NoMem"],
     "GenISA_SetDebugReg": ["int",["int"],"None"],
     "GenISA_add_pair": [["int","int"],["int","int","int","int"],"NoMem"],
     "GenISA_sub_pair": [["int","int"],["int","int","int","int"],"NoMem"],

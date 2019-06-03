@@ -70,9 +70,61 @@ mem(m), kernel(k), fileName(fname), m_kernelBuffer(nullptr), m_kernelBufferSize(
     IGAKernel = new iga::Kernel(*platformModel);
 }
 
+iga::InstOptSet BinaryEncodingIGA::getIGAInstOptSet(G4_INST* inst) const
+{
+    iga::InstOptSet options;
+
+    if (inst->isAccWrCtrlInst() && kernel.fg.builder->encodeAccWrEn())
+    {
+        options.add(iga::InstOpt::ACCWREN);
+    }
+    if (inst->isAtomicInst())
+    {
+        options.add(iga::InstOpt::ATOMIC);
+    }
+    if (inst->isBreakPointInst())
+    {
+        options.add(iga::InstOpt::BREAKPOINT);
+    }
+    if (inst->isNoDDChkInst())
+    {
+        options.add(iga::InstOpt::NODDCHK);
+    }
+    if (inst->isNoDDClrInst())
+    {
+        options.add(iga::InstOpt::NODDCLR);
+    }
+    if (inst->isNoPreemptInst())
+    {
+        options.add(iga::InstOpt::NOPREEMPT);
+    }
+    if (inst->isYieldInst())
+    {
+        options.add(iga::InstOpt::SWITCH);
+    }
+    if (inst->isSend())
+    {
+        if (inst->isEOT())
+        {
+            options.add(iga::InstOpt::EOT);
+        }
+        if (inst->isNoSrcDepSet())
+        {
+            options.add(iga::InstOpt::NOSRCDEPSET);
+        }
+    }
+    if (inst->isNoCompactedInst())
+    {
+        options.add(iga::InstOpt::NOCOMPACT);
+    }
+
+    return options;
+}
+
+
 void BinaryEncodingIGA::FixInst()
 {
-    for (auto bb : kernel.fg.BBs)
+    for (auto bb : kernel.fg)
     {
         for (auto iter = bb->begin(); iter != bb->end();)
         {
@@ -209,7 +261,7 @@ iga::Op BinaryEncodingIGA::getIGAOp(G4_opcode op, G4_INST *inst) const
         {
             igaOp = iga::Op::WAIT;
         }
-    	break;
+        break;
     case G4_send:
         {
             igaOp = iga::Op::SEND;
@@ -405,9 +457,9 @@ void BinaryEncodingIGA::DoAll()
     FixInst();
     Block* currBB = nullptr;
 
-    auto isFirstInstLabel = [](BB_LIST& bbList)
+    auto isFirstInstLabel = [this]()
     {
-        for (auto bb : bbList)
+        for (auto bb : kernel.fg)
         {
             for (auto inst : *bb)
             {
@@ -417,7 +469,31 @@ void BinaryEncodingIGA::DoAll()
         return false;
     };
 
-    if (!isFirstInstLabel(kernel.fg.BBs))
+    // Make the size of the first BB is multiple of 4 instructions, and do not compact
+    // any instructions in it, so that the size of the first BB is multiple of 64 bytes
+    if (kernel.fg.builder->getHasPerThreadProlog())
+    {
+        G4_BB* first_bb = *kernel.fg.begin();
+        size_t num_inst = first_bb->getInstList().size();
+        assert(num_inst != 0 && "ThreadProlog must not be empty");
+        // label instructions don't count. Only the first instruction could be a label
+        if (first_bb->getInstList().front()->isLabel())
+            --num_inst;
+
+        if (num_inst % 4 != 0) {
+            size_t num_nop = 4 - (num_inst % 4);
+            for (size_t i = 0; i < num_nop; ++i)
+                first_bb->getInstList().push_back(
+                    kernel.fg.builder->createInternalInst(
+                        nullptr, G4_nop, nullptr, false, 1, nullptr, nullptr, nullptr, InstOpt_NoCompact));
+        }
+        // set all instruction to be NoCompact
+        for (auto inst : *first_bb) {
+            inst->setOptions(inst->getOption() | InstOpt_NoCompact);
+        }
+    }
+
+    if (!isFirstInstLabel())
     {
         // create a new BB if kernel does not start with label
         currBB = IGAKernel->createBlock();
@@ -426,7 +502,7 @@ void BinaryEncodingIGA::DoAll()
 
     std::list<std::pair<Instruction*, G4_INST*>> encodedInsts;
     iga::Block *bbNew = nullptr;
-    for (auto bb : this->kernel.fg.BBs)
+    for (auto bb : this->kernel.fg)
     {
         for (auto inst : *bb)
         {
@@ -548,13 +624,13 @@ void BinaryEncodingIGA::DoAll()
                 if (igaInst->isMacro())
                 {
                     RegRef regRef = getIGARegRef(dst);
-					Region::Horz hstride = getIGAHorz(dst->getHorzStride());
+                    Region::Horz hstride = getIGAHorz(dst->getHorzStride());
                     igaInst->setMacroDestination(
                         dstModifier,
                         getIGARegName(dst),
                         regRef,
                         getIGAImplAcc(dst->getAccRegSel()),
-						hstride,
+                        hstride,
                         type);
                 }
                 else if (dst->getRegAccess() == Direct)
@@ -656,7 +732,7 @@ void BinaryEncodingIGA::DoAll()
                                 getIGARegName(srcRegion),
                                 regRef,
                                 getIGAImplAcc(accRegSel),
-								region,
+                                region,
                                 type);
                         }
                         else if (srcRegion->getRegAccess() == Direct)
@@ -745,10 +821,7 @@ void BinaryEncodingIGA::DoAll()
         autoCompact = false;
     }
 
-
-	bool dontCompactProlog = kernel.fg.builder->needsToLoadLocalID();
-
-    KernelEncoder encoder(IGAKernel, autoCompact, dontCompactProlog);
+    KernelEncoder encoder(IGAKernel, autoCompact);
     encoder.encode();
 
     stopTimer(TIMER_IGA_ENCODER);
@@ -760,6 +833,15 @@ void BinaryEncodingIGA::DoAll()
     for (auto&& inst : encodedInsts)
     {
         inst.second->setGenOffset(inst.first->getPC());
+    }
+    if (kernel.fg.builder->getHasPerThreadProlog())
+    {
+        // per thread data load is in the first BB
+        assert(kernel.fg.getNumBB() > 1 && "expect at least one prolog BB");
+        auto secondBB = *(std::next(kernel.fg.begin()));
+        auto iter = std::find_if(secondBB->begin(), secondBB->end(), [](G4_INST* inst) { return !inst->isLabel();});
+        assert(iter != secondBB->end() && "execpt at least one non-label inst in second BB");
+        kernel.fg.builder->getJitInfo()->offsetToSkipPerThreadDataLoad = (uint32_t)(*iter)->getGenOffset();
     }
 }
 

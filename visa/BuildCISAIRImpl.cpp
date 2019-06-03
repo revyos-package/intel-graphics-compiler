@@ -44,6 +44,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "BinaryCISAEmission.h"
 #include "Timer.h"
 #include "BinaryEncoding.h"
+#include "IsaDisassembly.h"
 
 #include "Gen4_IR.hpp"
 #include "FlowGraph.h"
@@ -73,124 +74,119 @@ CISA_IR_Builder::~CISA_IR_Builder()
         // don't call delete since vISAKernelImpl is allocated in memory pool
         kernel->~VISAKernelImpl();
     }
-
-    if (nativeRelocs)
-    {
-        nativeRelocs->~NativeRelocs();
-    }
 }
 
 void CISA_IR_Builder::InitVisaWaTable(TARGET_PLATFORM platform, Stepping step)
 {
 
-	if ((platform == GENX_SKL && (step == Step_A || step == Step_B)) ||
-		(platform == GENX_BXT && step == Step_A))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaHeaderRequiredOnSimd16Sample16bit);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaHeaderRequiredOnSimd16Sample16bit);
-	}
+    if ((platform == GENX_SKL && (step == Step_A || step == Step_B)) ||
+        (platform == GENX_BXT && step == Step_A))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaHeaderRequiredOnSimd16Sample16bit);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaHeaderRequiredOnSimd16Sample16bit);
+    }
 
-	if ((platform == GENX_SKL) && (step == Step_A))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaSendsSrc1SizeLimitWhenEOT);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaSendsSrc1SizeLimitWhenEOT);
-	}
+    if ((platform == GENX_SKL) && (step == Step_A))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaSendsSrc1SizeLimitWhenEOT);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaSendsSrc1SizeLimitWhenEOT);
+    }
 
-	if ((platform == GENX_SKL && (step == Step_A || step == Step_B)) ||
-		(platform == GENX_BXT && step == Step_A))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaDisallow64BitImmMov);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaDisallow64BitImmMov);
-	}
+    if ((platform == GENX_SKL && (step == Step_A || step == Step_B)) ||
+        (platform == GENX_BXT && step == Step_A))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaDisallow64BitImmMov);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaDisallow64BitImmMov);
+    }
 
-	if (platform == GENX_BDW && step == Step_A)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaByteDstAlignRelaxedRule);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaByteDstAlignRelaxedRule);
-	}
+    if (platform == GENX_BDW && step == Step_A)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaByteDstAlignRelaxedRule);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaByteDstAlignRelaxedRule);
+    }
 
-	if (platform == GENX_SKL && step == Step_A)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaSIMD16SIMD32CallDstAlign);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaSIMD16SIMD32CallDstAlign);
-	}
+    if (platform == GENX_SKL && step == Step_A)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaSIMD16SIMD32CallDstAlign);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaSIMD16SIMD32CallDstAlign);
+    }
 
-	if (platform == GENX_BDW || platform == GENX_CHV ||
-		platform == GENX_BXT || platform == GENX_SKL)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaThreadSwitchAfterCall);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaThreadSwitchAfterCall);
-	}
+    if (platform == GENX_BDW || platform == GENX_CHV ||
+        platform == GENX_BXT || platform == GENX_SKL)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaThreadSwitchAfterCall);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaThreadSwitchAfterCall);
+    }
 
-	if ((platform == GENX_SKL && step < Step_E) ||
-		(platform == GENX_BXT && step <= Step_B))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaSrc1ImmHfNotAllowed);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaSrc1ImmHfNotAllowed);
-	}
+    if ((platform == GENX_SKL && step < Step_E) ||
+        (platform == GENX_BXT && step <= Step_B))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaSrc1ImmHfNotAllowed);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaSrc1ImmHfNotAllowed);
+    }
 
-	if (platform == GENX_SKL && step == Step_A)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaDstSubRegNumNotAllowedWithLowPrecPacked);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaDstSubRegNumNotAllowedWithLowPrecPacked);
-	}
+    if (platform == GENX_SKL && step == Step_A)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaDstSubRegNumNotAllowedWithLowPrecPacked);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaDstSubRegNumNotAllowedWithLowPrecPacked);
+    }
 
-	if ((platform == GENX_SKL && step < Step_C))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModeLog);
-		VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModeFdiv);
-		VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModePow);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModeLog);
-		VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModeFdiv);
-		VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModePow);
-	}
+    if ((platform == GENX_SKL && step < Step_C))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModeLog);
+        VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModeFdiv);
+        VISA_WA_ENABLE(m_pWaTable, WaDisableMixedModePow);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModeLog);
+        VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModeFdiv);
+        VISA_WA_DISABLE(m_pWaTable, WaDisableMixedModePow);
+    }
 
 
-	if ((platform == GENX_SKL && step < Step_C) ||
-		platform == GENX_CHV)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaFloatMixedModeSelNotAllowedWithPackedDestination);
-	}
-	else
-	{
-		VISA_WA_DISABLE(m_pWaTable, WaFloatMixedModeSelNotAllowedWithPackedDestination);
-	}
+    if ((platform == GENX_SKL && step < Step_C) ||
+        platform == GENX_CHV)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaFloatMixedModeSelNotAllowedWithPackedDestination);
+    }
+    else
+    {
+        VISA_WA_DISABLE(m_pWaTable, WaFloatMixedModeSelNotAllowedWithPackedDestination);
+    }
 
-	// always disable in offline mode
-	VISA_WA_DISABLE(m_pWaTable, WADisableWriteCommitForPageFault);
+    // always disable in offline mode
+    VISA_WA_DISABLE(m_pWaTable, WADisableWriteCommitForPageFault);
 
-	if ((platform == GENX_SKL && step < Step_D) ||
-		(platform == GENX_BXT && step == Step_A))
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaDisableSIMD16On3SrcInstr);
-	}
+    if ((platform == GENX_SKL && step < Step_D) ||
+        (platform == GENX_BXT && step == Step_A))
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaDisableSIMD16On3SrcInstr);
+    }
 
     if (platform == GENX_SKL && (step == Step_C || step == Step_D))
     {
@@ -201,15 +197,15 @@ void CISA_IR_Builder::InitVisaWaTable(TARGET_PLATFORM platform, Stepping step)
         VISA_WA_DISABLE(m_pWaTable, WaSendSEnableIndirectMsgDesc);
     }
 
-	if (platform == GENX_SKL || platform == GENX_BXT)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaClearArfDependenciesBeforeEot);
-	}
+    if (platform == GENX_SKL || platform == GENX_BXT)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaClearArfDependenciesBeforeEot);
+    }
 
-	if (platform == GENX_SKL && step == Step_A)
-	{
-		VISA_WA_ENABLE(m_pWaTable, WaDisableSendsSrc0DstOverlap);
-	}
+    if (platform == GENX_SKL && step == Step_A)
+    {
+        VISA_WA_ENABLE(m_pWaTable, WaDisableSendsSrc0DstOverlap);
+    }
 
     if (platform >= GENX_SKL)
     {
@@ -267,64 +263,66 @@ void CISA_IR_Builder::InitVisaWaTable(TARGET_PLATFORM platform, Stepping step)
 // note that this will break if we have more than one builder active,
 // since we rely on the pCisaBuilder to point to the current builder
 int CISA_IR_Builder::CreateBuilder(
-	CISA_IR_Builder *&builder,
-	vISABuilderMode mode,
-	CM_VISA_BUILDER_OPTION buildOption,
-	TARGET_PLATFORM platform,
-	int numArgs,
-	const char* flags[],
-	PVISA_WA_TABLE pWaTable,
-	bool initWA)
+    CISA_IR_Builder *&builder,
+    vISABuilderMode mode,
+    CM_VISA_BUILDER_OPTION buildOption,
+    TARGET_PLATFORM platform,
+    int numArgs,
+    const char* flags[],
+    PVISA_WA_TABLE pWaTable,
+    bool initWA)
 {
 
-	initTimer();
+    initTimer();
 
-	if (builder != NULL)
-	{
-		CmAssert(0);
-		return CM_FAILURE;
-	}
+    if (builder != NULL)
+    {
+        CmAssert(0);
+        return CM_FAILURE;
+    }
 
     startTimer(TIMER_TOTAL);
     startTimer(TIMER_BUILDER);  // builder time ends with we call compile (i.e., it covers the IR construction time)
     //this must be called before any other API.
     SetVisaPlatform(platform);
 
-	// initialize stepping to none in case it's not passed in
-	InitStepping();
+    // initialize stepping to none in case it's not passed in
+    InitStepping();
 
-	builder = new CISA_IR_Builder(buildOption, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER, pWaTable);
-	pCisaBuilder = builder;
+    builder = new CISA_IR_Builder(buildOption, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER, pWaTable);
+    pCisaBuilder = builder;
 
-	if (!builder->m_options.parseOptions(numArgs, flags))
-	{
-		delete builder;
-		CmAssert(0);
-		return CM_FAILURE;
-	}
+    if (!builder->m_options.parseOptions(numArgs, flags))
+    {
+        delete builder;
+        CmAssert(0);
+        return CM_FAILURE;
+    }
 
-    builder->m_options.setTarget((mode == vISA_3D) ? VISA_3D : VISA_CM);
+    auto targetMode = (mode == vISA_3D || mode == vISA_3DWRITER) ? VISA_3D : VISA_CM;
+    builder->m_options.setTarget(targetMode);
     builder->m_options.setOptionInternally(vISA_isParseMode, (mode == vISA_PARSER));
+    builder->m_options.setOptionInternally(vISA_IsaAssembly, (mode == vISA_3DWRITER));
 
-	if (mode == vISA_PARSER)
-	{
-		builder->m_options.setOptionInternally(vISA_GeneratevISABInary, true);
-		/*
-			In parser mode we always want to dump out vISA
-			I don't feel like modifying FE, and dealing with FE/BE missmatch issues.
-		*/
-		builder->m_options.setOptionInternally(vISA_DumpvISA, true);
-		/*
-			Dumping out .asm and .dat files for BOTH mod. Since they are used in
-			simulation mode. Again can be pased by FE, but don't want to deal
-			with FE/BE miss match issues.
-		*/
-		if (buildOption != CM_CISA_BUILDER_CISA)
-		{
-			builder->m_options.setOptionInternally(vISA_outputToFile, true);
-			builder->m_options.setOptionInternally(vISA_GenerateBinary, true);
-		}
-	}
+    if (mode == vISA_PARSER)
+    {
+        builder->m_options.setOptionInternally(vISA_GeneratevISABInary, true);
+        /*
+            In parser mode we always want to dump out vISA
+            I don't feel like modifying FE, and dealing with FE/BE missmatch issues.
+        */
+        builder->m_options.setOptionInternally(vISA_DumpvISA, true);
+        /*
+            Dumping out .asm and .dat files for BOTH mod. Since they are used in
+            simulation mode. Again can be pased by FE, but don't want to deal
+            with FE/BE miss match issues.
+        */
+        if (buildOption != CM_CISA_BUILDER_CISA)
+        {
+            builder->m_options.setOptionInternally(vISA_outputToFile, true);
+            builder->m_options.setOptionInternally(vISA_GenerateBinary, true);
+        }
+    }
 
     // emit location info always for these cases
     if (mode == vISABuilderMode::vISA_MEDIA && builder->m_options.getOption(vISA_outputToFile))
@@ -332,12 +330,12 @@ int CISA_IR_Builder::CreateBuilder(
         builder->m_options.setOptionInternally(vISA_EmitLocation, true);
     }
 
-	// we must wait till after the options are processed,
-	// so that stepping is set and init will work properly
-	if (initWA)
-	{
-		builder->InitVisaWaTable(platform, GetStepping());
-	}
+    // we must wait till after the options are processed,
+    // so that stepping is set and init will work properly
+    if (initWA)
+    {
+        builder->InitVisaWaTable(platform, GetStepping());
+    }
 
     return CM_SUCCESS;
 }
@@ -363,6 +361,11 @@ bool CISA_IR_Builder::CISA_IR_initialization(char *kernel_name,
     return true;
 }
 
+VISAKernel* CISA_IR_Builder::GetVISAKernel()
+{
+    return static_cast<VISAKernel*>(m_kernel);
+}
+
 int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
 {
 
@@ -373,13 +376,13 @@ int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
     }
     m_executionSatarted = true;
 
-    VISAKernelImpl * kerneltemp = new (m_mem) VISAKernelImpl(mBuildOption, &m_options);
+    VISAKernelImpl * kerneltemp = new (m_mem) VISAKernelImpl(this, mBuildOption, &m_options);
     kernel = static_cast<VISAKernel *>(kerneltemp);
     m_kernel = kerneltemp;
     //m_kernel->setName(kernelName);
     m_kernel->setIsKernel(true);
     m_kernels.push_back(kerneltemp);
-    m_kernel->setVersion((unsigned char)this->m_majorVersion, (unsigned char)this->m_minorVersion);
+    m_kernel->setVersion((unsigned char)this->m_header.major_version, (unsigned char)this->m_header.minor_version);
     m_kernel->setPWaTable(m_pWaTable);
     m_kernel->InitializeKernel(kernelName);
     m_kernel->SetGTPinInit(getGtpinInit());
@@ -443,7 +446,7 @@ void saveFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
     // the IR can be reused for another kernel rather than
     // recompiling.
     // kernel points to a stackcall function.
-    for (auto curBB : kernel->fg.BBs)
+    for (auto curBB : kernel->fg)
     {
         if( curBB->size() > 0 && curBB->isEndWithFCall() )
         {
@@ -474,8 +477,8 @@ void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
     // functions are not interspersed.
     savedFCallStatesIter start = savedFCallState.begin(), end = savedFCallState.end();
 
-    for( BB_LIST_ITER bb_it = kernel->fg.BBs.begin();
-        bb_it != kernel->fg.BBs.end();
+    for( BB_LIST_ITER bb_it = kernel->fg.begin();
+        bb_it != kernel->fg.end();
         bb_it++ )
     {
         G4_BB* curBB = (*bb_it);
@@ -628,18 +631,13 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
         G4_Kernel* callee = Get_Resolved_Compilation_Unit(header, compilation_units, calleeId);
         propagateCalleeInfo(kernel, callee);
         kernel->addCallee(calleeId, callee);
-
-        for (auto bb : callee->fg.BBs)
-        {
-            kernel->fg.BBs.push_back(bb);
-            kernel->fg.incrementNumBBs();
-        }
+        kernel->fg.append(callee->fg);
     }
 
     kernel->fg.reassignBlockIDs();
 
     // Change fcall/fret to call/ret and setup caller/callee edges
-    for (G4_BB* cur : kernel->fg.BBs)
+    for (G4_BB* cur : kernel->fg)
     {
         if( cur->size() > 0 && cur->isEndWithFCall() )
         {
@@ -680,7 +678,7 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
     }
 
     // Change fret to ret
-    for (G4_BB* cur : kernel->fg.BBs)
+    for (G4_BB* cur : kernel->fg)
     {
         if( cur->size() > 0 && cur->isEndWithFRet() )
         {
@@ -704,6 +702,90 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
 }
 
 
+int CISA_IR_Builder::WriteVISAHeader()
+{
+    if (m_options.getOption(vISA_IsaAssembly))
+    {
+        unsigned funcId = 0;
+        if (!m_kernel->getIsKernel())
+        {
+            m_kernel->GetFunctionId(funcId);
+        }
+
+        VISAKernel_format_provider fmt(m_kernel);
+        m_ssIsaAsmHeader << printKernelHeader(this->m_header, &fmt, m_kernel->getIsKernel(), funcId, &this->m_options) << endl;
+        return CM_SUCCESS;
+    }
+    return CM_FAILURE;
+}
+
+typedef struct yy_buffer_state * YY_BUFFER_STATE;
+extern int CISAparse();
+extern YY_BUFFER_STATE CISA_scan_string(const char* yy_str);
+extern void CISA_delete_buffer(YY_BUFFER_STATE buf);
+
+int CISA_IR_Builder::ParseVISAText(const std::string& visaHeader, const std::string& visaText, const std::string& visaTextFile)
+{
+#if defined(__linux__) || defined(_WIN64) || defined(_WIN32)
+    // Direct output of parser to null
+#if defined(_WIN64) || defined(_WIN32)
+    CISAout = fopen("nul", "w");
+#else
+    CISAout = fopen("/dev/null", "w");
+#endif
+
+    // Dump the visa text
+    if (m_options.getOption(vISA_GenerateISAASM) && !visaTextFile.empty())
+    {
+        FILE* dumpFile = fopen(visaTextFile.c_str(), "wb+");
+        if (dumpFile)
+        {
+            // Write the header
+            if (std::fputs(visaHeader.c_str(), dumpFile) == EOF)
+            {
+                assert(0 && "Failed to write visa text to file");
+                return CM_FAILURE;
+            }
+            // Write the declarations and instructions
+            if (std::fputs(visaText.c_str(), dumpFile) == EOF)
+            {
+                assert(0 && "Failed to write visa text to file");
+                return CM_FAILURE;
+            }
+            fclose(dumpFile);
+        }
+    }
+
+    // Parse the header string
+    YY_BUFFER_STATE headerBuf = CISA_scan_string(visaHeader.c_str());
+    if (CISAparse() != 0)
+    {
+        assert(0 && "Parsing header message failed");
+        return CM_FAILURE;
+    }
+    CISA_delete_buffer(headerBuf);
+
+    // Parse the visa body
+    YY_BUFFER_STATE visaBuf = CISA_scan_string(visaText.c_str());
+    if (CISAparse() != 0)
+    {
+        assert(0 && "Parsing visa text failed");
+        return CM_FAILURE;
+    }
+    CISA_delete_buffer(visaBuf);
+
+    if (CISAout)
+    {
+        fclose(CISAout);
+    }
+
+    return CM_SUCCESS;
+#else
+    assert(0 && "Asm parsing not supported on this platform");
+    return CM_FAILURE;
+#endif
+}
+
 // default size of the kernel mem manager in bytes
 #define KERNEL_MEM_SIZE    (4*1024*1024)
 int CISA_IR_Builder::Compile( const char* nameInput)
@@ -716,6 +798,11 @@ int CISA_IR_Builder::Compile( const char* nameInput)
 
     if (IS_VISA_BOTH_PATH)
     {
+        if (m_options.getOption(vISA_IsaAssembly))
+        {
+            assert(0 && "Should not be calling Compile() in asm text writter mode!");
+            return CM_FAILURE;
+        }
 
         std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
         std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
@@ -726,8 +813,8 @@ int CISA_IR_Builder::Compile( const char* nameInput)
             m_options.setOptionInternally(vISA_NumGenBinariesWillBePatched, (uint32_t) 1);
         }
         m_cisaBinary->initCisaBinary(m_kernel_count, m_function_count);
-        m_cisaBinary->setMajorVersion((unsigned char)this->m_majorVersion);
-        m_cisaBinary->setMinorVersion((unsigned char)this->m_minorVersion);
+        m_cisaBinary->setMajorVersion((unsigned char)this->m_header.major_version);
+        m_cisaBinary->setMinorVersion((unsigned char)this->m_header.minor_version);
         m_cisaBinary->setMagicNumber(COMMON_ISA_MAGIC_NUM);
 
         int status = CM_SUCCESS;
@@ -746,9 +833,7 @@ int CISA_IR_Builder::Compile( const char* nameInput)
         }
 
         // We call the verifier and dumper directly.
-        if (!m_options.getOption(vISA_IsaAssembly) &&
-            (m_options.getOption(vISA_GenerateISAASM) ||
-             !m_options.getOption(vISA_NoVerifyvISA)))
+        if (m_options.getOption(vISA_GenerateISAASM) || !m_options.getOption(vISA_NoVerifyvISA))
         {
             m_cisaBinary->isaDumpVerify(m_kernels, &m_options);
         }
@@ -799,7 +884,6 @@ int CISA_IR_Builder::Compile( const char* nameInput)
 
             compilationUnits.push_back(kernel->getKernel());
 
-            kernel->setupRelocTable();
             kernel->getIRBuilder()->setIsKernel(kernel->getIsKernel());
             kernel->getIRBuilder()->setCUnitId(i);
             if( kernel->getIsKernel() == false )
@@ -826,10 +910,10 @@ int CISA_IR_Builder::Compile( const char* nameInput)
             m_currentKernel = kernel;
 
             int status =  kernel->compileFastPath();
-			if (status != CM_SUCCESS)
-			{
+            if (status != CM_SUCCESS)
+            {
                 stopTimer(TIMER_TOTAL);
-				return status;
+                return status;
             }
         }
 
@@ -886,16 +970,6 @@ int CISA_IR_Builder::Compile( const char* nameInput)
                 kernel->computeAndEmitDebugInfo(functions);
             }
 
-#ifndef DLL_MODE
-            if (m_options.getOptionCstr(vISA_RelocFilename))
-            {
-                // Emit gen reloc information to a file only in offline invocation.
-                // In DLL mode return reloc information of the kernel being
-                // compiled.
-                kernel->computeAndEmitGenRelocs();
-            }
-#endif
-
             restoreFCallState( kernel->getKernel(), savedFCallState );
 
 
@@ -904,41 +978,41 @@ int CISA_IR_Builder::Compile( const char* nameInput)
 
     }
 
-	if (IS_VISA_BOTH_PATH && m_options.getOption(vISA_DumpvISA))
-	{
-		unsigned int numGenBinariesWillBePatched = m_options.getuInt32Option(vISA_NumGenBinariesWillBePatched);
+    if (IS_VISA_BOTH_PATH && m_options.getOption(vISA_DumpvISA))
+    {
+        unsigned int numGenBinariesWillBePatched = m_options.getuInt32Option(vISA_NumGenBinariesWillBePatched);
 
-		if (numGenBinariesWillBePatched)
-		{
-			std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
-			std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
+        if (numGenBinariesWillBePatched)
+        {
+            std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
+            std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
 
-			int kernelCount = 0;
-			int functionCount = 0;
+            int kernelCount = 0;
+            int functionCount = 0;
 
-			//only patch for Both path; vISA path doesn't need this.
-			for (int i = 0; iter != end; iter++, i++)
-			{
-				VISAKernelImpl * kTemp = *iter;
-				void * genxBuffer = NULL;
-				unsigned int genxBufferSize = 0;
-				if (kTemp->getIsKernel())
-				{
-					genxBuffer = kTemp->getGenxBinaryBuffer();
-					genxBufferSize = kTemp->getGenxBinarySize();
-					m_cisaBinary->patchKernel(kernelCount, genxBufferSize, genxBuffer, getGenxPlatformEncoding());
-					kernelCount++;
-				}
-				else
-				{
-					m_cisaBinary->patchFunction(functionCount);
-					functionCount++;
-				}
-			}
-		}
+            //only patch for Both path; vISA path doesn't need this.
+            for (int i = 0; iter != end; iter++, i++)
+            {
+                VISAKernelImpl * kTemp = *iter;
+                void * genxBuffer = NULL;
+                unsigned int genxBufferSize = 0;
+                if (kTemp->getIsKernel())
+                {
+                    genxBuffer = kTemp->getGenxBinaryBuffer();
+                    genxBufferSize = kTemp->getGenxBinarySize();
+                    m_cisaBinary->patchKernel(kernelCount, genxBufferSize, genxBuffer, getGenxPlatformEncoding());
+                    kernelCount++;
+                }
+                else
+                {
+                    m_cisaBinary->patchFunction(functionCount);
+                    functionCount++;
+                }
+            }
+        }
 
-		status = m_cisaBinary->dumpToFile(name);
-	}
+        status = m_cisaBinary->dumpToFile(name);
+    }
 
     stopTimer(TIMER_TOTAL); // have to record total time before dump the timer
     if (m_options.getOption(vISA_dumpTimer))
@@ -1066,55 +1140,6 @@ bool CISA_IR_Builder::CISA_file_variable_decl(char * var_name,
     return true;
 }
 
-void CISA_IR_Builder::setupNativeRelocs(unsigned int numRelocs, const BasicRelocEntry* relocs)
-{
-    for (unsigned int i = 0; i < numRelocs; i++)
-    {
-        getNativeRelocs()->addEntry(relocs[i].relocOffset, relocs[i].info, relocs[i].addend, 0);
-    }
-}
-
-void NativeRelocs::addEntry(uint64_t offset, uint64_t info, int64_t addend, unsigned int nativeOffset)
-{
-    SuperRelocEntry entry;
-    entry.input.relocOffset = offset;
-    entry.input.info = info;
-    entry.input.addend = addend;
-    entry.nativeOffset = nativeOffset;
-    entries.push_back(entry);
-}
-
-bool NativeRelocs::isOffsetReloc(uint64_t offset, SuperRelocEntry& info)
-{
-    for (auto it : entries)
-    {
-        if (it.input.relocOffset == offset)
-        {
-            info = it;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-unsigned int NativeRelocs::getNativeOffset(unsigned int cisaOffset)
-{
-    for (auto it : entries)
-    {
-        if (it.input.relocOffset == cisaOffset)
-        {
-            return it.nativeOffset;
-        }
-    }
-
-#define INVALID_GEN_OFFSET (0xffffffff)
-
-    return INVALID_GEN_OFFSET;
-}
-
-// skip all vISA parser functions in DLL mode
-#ifndef DLL_MODE
 bool CISA_IR_Builder::CISA_addr_variable_decl(char *var_name, unsigned int var_elements, VISA_Type data_type, attr_gen_struct scope, int line_no)
 {
 
@@ -1258,7 +1283,7 @@ bool CISA_IR_Builder::CISA_attr_directive(char* input_name, char* input_var, int
     return true;
 }
 
-bool CISA_IR_Builder::CISA_attr_directiveNum(char* input_name, unsigned char input_var, int line_no)
+bool CISA_IR_Builder::CISA_attr_directiveNum(char* input_name, uint32_t input_var, int line_no)
 {
     /*
     attribute_info_t* attr = (attribute_info_t*)m_mem.alloc(sizeof(attribute_info_t));
@@ -1270,7 +1295,7 @@ bool CISA_IR_Builder::CISA_attr_directiveNum(char* input_name, unsigned char inp
     m_kernel->addAttribute(input_name, attr);
     */
 
-    m_kernel->AddKernelAttribute(input_name, sizeof(unsigned char), &input_var);
+    m_kernel->AddKernelAttribute(input_name, sizeof(uint32_t), &input_var);
     return true;
 }
 
@@ -2904,6 +2929,15 @@ VISA_opnd * CISA_IR_Builder::CISA_create_RAW_operand(char * var_name, unsigned s
     return (VISA_opnd *)cisa_opnd; //delay the decision of src or dst until translate stage
 }
 
+void CISA_IR_Builder::CISA_push_decl_scope()
+{
+    m_kernel->pushIndexMapScopeLevel();
+}
+void CISA_IR_Builder::CISA_pop_decl_scope()
+{
+    m_kernel->popIndexMapScopeLevel();
+}
+
 unsigned short CISA_IR_Builder::get_hash_key(const char* str)
 {
     const char *str_pt = str;
@@ -3015,5 +3049,3 @@ bool CISA_IR_Builder::CISA_create_func_decl(char * name,
     return true;
 }
 
-
-#endif // !defined(DLL_MODE)

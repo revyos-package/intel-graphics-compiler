@@ -914,7 +914,7 @@ ANode *ANode::getChildANode(ANode *parent)
 void CFGStructurizer::preProcess()
 {
     bool CFGChanged = false;
-    for (BB_LIST_ITER BI = CFG->BBs.begin(), BE = CFG->BBs.end();
+    for (BB_LIST_ITER BI = CFG->begin(), BE = CFG->end();
         BI != BE; ++BI)
     {
         G4_BB *B = *BI;
@@ -984,7 +984,7 @@ void CFGStructurizer::preProcess()
         B->Preds.push_front(newBB);
 
         // insert it into BBs
-        CFG->BBs.insert(BI, newBB);
+        CFG->insert(BI, newBB);
         G4_BB *phyPred = B->getPhysicalPred();
         assert(phyPred && "B should have physical pred!");
         phyPred->setPhysicalSucc(newBB);
@@ -1020,7 +1020,7 @@ void CFGStructurizer::init()
     // so can all backward gotos).
     preProcess();
 
-    BBs = &(CFG->BBs);
+    BBs = &(CFG->getBBList());
     numOfBBs = CFG->getNumBB();
     numOfANodes = 0;
     kernelExecSize = (uint8_t)CFG->getKernel()->getSimdSize();
@@ -1041,7 +1041,7 @@ void CFGStructurizer::init()
     // callee and callee's return to call's succ). For structurizing purpose, those
     // edges should not be considered. Here ANodeBB will have those edges ignored.
     uint32_t i = 0;
-    for (BB_LIST_ITER II = CFG->BBs.begin(), IE = CFG->BBs.end(); II != IE; ++II, ++i)
+    for (BB_LIST_ITER II = CFG->begin(), IE = CFG->end(); II != IE; ++II, ++i)
     {
         G4_BB *bb = *II;
         uint32_t id = bb->getId();
@@ -3643,10 +3643,7 @@ bool CFGStructurizer::convertPST(ANode *node, G4_BB *nextJoinBB)
 
 void CFGStructurizer::run()
 {
-    BB_LIST *BBs = &(CFG->BBs);
-    BB_LIST_ITER BI = BBs->begin();
-
-    constructPST(BI, BBs->end());
+    constructPST(CFG->begin(), CFG->end());
 
     if (topANodes.size() == 0)
     {

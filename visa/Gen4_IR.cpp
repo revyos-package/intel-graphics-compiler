@@ -233,9 +233,11 @@ short Operand_Type_Rank( G4_Type type )
     return type_rank;
 }
 
-G4_SendMsgDescriptor::G4_SendMsgDescriptor( uint32_t fCtrl, uint32_t regs2rcv,
+G4_SendMsgDescriptor::G4_SendMsgDescriptor(
+    uint32_t fCtrl, uint32_t regs2rcv,
     uint32_t regs2snd, uint32_t fID, bool isEot, uint16_t extMsgLen,
-    uint32_t extFCtrl, bool isRead, bool isWrite, G4_Operand *bti, G4_Operand *sti,
+    uint32_t extFCtrl, bool isRead, bool isWrite,
+    G4_Operand *bti, G4_Operand *sti,
     IR_Builder& builder)
 {
     // All unnamed bits should be passed with those control bits.
@@ -252,6 +254,10 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor( uint32_t fCtrl, uint32_t regs2rcv,
     extDesc.layout.extMsgLength = extMsgLen;
     extDesc.layout.extFuncCtrl = extFCtrl;
 
+    src1Len = extMsgLen; // [10:6]
+    eotAfterMessage = isEot; // [5]
+    sfid = intToSFID(fID);
+
     readMsg = isRead;
     writeMsg = isWrite;
 
@@ -264,7 +270,7 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor( uint32_t fCtrl, uint32_t regs2rcv,
     }
     if (m_sti && m_sti->isImm())
     {
-        setSamplerTableIdx((unsigned)m_sti->asImm()->getInt());
+        desc.value |= (((unsigned)m_sti->asImm()->getInt()) << 8); // [11:8]
     }
 
     uint32_t totalMaxLength = builder.getMaxSendMessageLength();
@@ -277,15 +283,19 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor( uint32_t fCtrl, uint32_t regs2rcv,
     }
 }
 
-G4_SendMsgDescriptor::G4_SendMsgDescriptor(uint32_t desc, uint32_t extDesc,
-                                           bool isRead,
-                                           bool isWrite,
-                                           G4_Operand *bti,
-                                           G4_Operand *sti)
-                                           : readMsg(isRead), writeMsg(isWrite), m_sti(sti), m_bti(bti)
+G4_SendMsgDescriptor::G4_SendMsgDescriptor(
+    uint32_t desc, uint32_t extDesc,
+    bool isRead,
+    bool isWrite,
+    G4_Operand *bti,
+    G4_Operand *sti)
+    : readMsg(isRead), writeMsg(isWrite), m_sti(sti), m_bti(bti)
 {
     this->desc.value = desc;
     this->extDesc.value = extDesc;
+    src1Len = (extDesc >> 6) & 0x1F; // [10:6]
+    eotAfterMessage = this->extDesc.layout.eot; // [5]
+    sfid = intToSFID(extDesc & 0xF); // [3:0]
 
     if (bti && bti->isImm())
     {
@@ -293,140 +303,102 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(uint32_t desc, uint32_t extDesc,
     }
     if (sti && sti->isImm())
     {
-        setSamplerTableIdx((unsigned)sti->asImm()->getInt());
+        this->desc.value |= (((unsigned)m_sti->asImm()->getInt()) << 8); // [11:8]
     }
 }
 
-const char* G4_SendMsgDescriptor::getDescType()
+G4_SendMsgDescriptor::G4_SendMsgDescriptor(
+    SFID _sfid,
+    uint32_t _desc,
+    uint32_t _extDesc,
+    int _src1Len,
+    bool isRead,
+    bool isWrite,
+    G4_Operand *bti)
+    : readMsg(isRead), writeMsg(isWrite), m_sti(nullptr), m_bti(bti), sfid(_sfid)
 {
-    // Return plain text string of type of msg, ie "oword read", "oword write",
-    // "media rd", etc.
-    G4_SendMsgDescriptor* msgDesc = this;
-    unsigned int bits, category;
+    desc.value = _desc;
+    extDesc.value = _extDesc;
+    src1Len = _src1Len;
+    eotAfterMessage = false;
+}
 
-	bits = getMessageType();
+uint32_t G4_SendMsgDescriptor::getHdcMessageType() const
+{
+    MUST_BE_TRUE(isHDC(),"not an HDC message");
+    return (desc.value >> 14) & 0x1F;
+}
 
-    switch (msgDesc->getFuncId())
+void G4_SendMsgDescriptor::setEOT() {
+    eotAfterMessage = true;
+
+
+    extDesc.layout.eot = true;
+}
+
+static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType)
+{
+    if (funcID != SFID::DP_DC1)
+        return false;
+
+    if (msgType == DC1_UNTYPED_ATOMIC || msgType == DC1_A64_ATOMIC)
     {
-    case SFID::SAMPLER: return "sampler"; break;
-    case SFID::GATEWAY: return "gateway"; break;
-    case SFID::DP_DC2:
-        switch (bits)
-        {
-        case DC2_UNTYPED_SURFACE_READ:
-            return "scaled untyped surface read";
-        case DC2_A64_SCATTERED_READ:
-            return "scaled A64 scatter read";
-        case DC2_A64_UNTYPED_SURFACE_READ:
-            return "scaled A64 untyped surface read";
-        case DC2_BYTE_SCATTERED_READ:
-            return "scaled byte scattered read";
-        case DC2_UNTYPED_SURFACE_WRITE:
-            return "scaled untyped surface write";
-        case DC2_A64_UNTYPED_SURFACE_WRITE:
-            return "scaled A64 untyped surface write";
-        case DC2_A64_SCATTERED_WRITE:
-            return "scaled A64 scattered write";
-        case DC2_BYTE_SCATTERED_WRITE:
-            return "scaled byte scattede write";
-        default:
-            return "unrecognized message";
-        }
-    case SFID::DP_WRITE:
-        switch (bits)
-        {
-        case 0xc: return "render target write"; break;
-        case 0xd: return "render target read"; break;
-        default: return "reserved encoding used!";
-        }
-        break;
-    case SFID::URB: return "urb"; break;
-    case SFID::SPAWNER: return "thread spawner"; break;
-    case SFID::VME: return "vme"; break;
-    case SFID::DP_CC:
-        switch (bits)
-        {
-        case 0x0: return "oword block read"; break;
-        case 0x1: return "unaligned oword block read"; break;
-        case 0x2: return "oword dual block read"; break;
-        case 0x3: return "dword scattered read"; break;
-        default: return "reserved encoding used!";
-            break;
-        }
-    case SFID::DP_DC:
-        category = (msgDesc->getFuncCtrl() >> 18) & 0x1;
-        if (category == 0)
-        {
-            // legacy data port
-            bool hword = (msgDesc->getFuncCtrl() >> 13) & 0x1;
-            switch (bits)
-            {
-            case 0x0: return hword ? "hword block read" : "oword block read";
-            case 0x1: return hword ? "hword aligned block read" : "unaligned oword block read";
-            case 0x2: return "oword dual block read";
-            case 0x3: return "dword scattered read";
-            case 0x4: return "byte scattered read";
-            case 0x7: return "memory fence";
-            case 0x8: return hword ? "hword block write" : "oword block write";
-            case 0x9: return "hword aligned block write";
-            case 0xa: return "oword dual block write";
-            case 0xb: return "dword scattered write";
-            case 0xc: return "byte scattered write";
-            default: return "reserved encoding used!";
-            }
-        }
-        else
-        {
-            // scratch
-            bits = (msgDesc->getFuncCtrl() >> 17) & 0x1;
-
-            if (bits == 0)
-                return "scratch read";
-            else
-                return "scratch write";
-        }
-        break;
-    case SFID::DP_PI: return "dp_pi"; break;
-    case SFID::DP_DC1:
-        switch (bits)
-        {
-        case 0x0: return "transpose read"; break;
-        case 0x1: return "untyped surface read"; break;
-        case 0x2: return "untyped atomic operation"; break;
-        case 0x3: return "untyped atomic operation simd4x2"; break;
-        case 0x4: return "media block read"; break;
-        case 0x5: return "typed surface read"; break;
-        case 0x6: return "typed atomic operation"; break;
-        case 0x7: return "typed atomic operation simd4x2"; break;
-        case 0x8: return "untyped atomic float add"; break;
-        case 0x9: return "untyped surface write"; break;
-        case 0xa: return "media block write (non-iecp)"; break;
-        case 0xb: return "atomic counter operation"; break;
-        case 0xc: return "atomic counter operation simd4x2"; break;
-        case 0xd: return "typed surface write"; break;
-        case 0x10: return "a64 scattered read"; break;
-        case 0x11: return "a64 untyped surface read"; break;
-        case 0x12: return "a64 untyped atomic operation"; break;
-        case 0x13: return "a64 untyped atomic operation simd4x2"; break;
-        case 0x14: return "a64 block read"; break;
-        case 0x15: return "a64 block write"; break;
-        case 0x18: return "a64 untyped atomic float add"; break;
-        case 0x19: return "a64 untyped surface write"; break;
-        case 0x1a: return "a64 scattered write"; break;
-        default: return "reserved encoding used!";
-        }
-        break;
-    case SFID::CRE: return "cre"; break;
-    default: return "--";
+        return true;
     }
-    return NULL;
+    if (getGenxPlatform() >= GENX_SKL)
+    {
+        if (msgType == DC1_TYPED_ATOMIC)
+            return true;
+    }
+    return false;
+}
+
+static bool isHdcFloatAtomicMessage(SFID funcID, uint16_t msgType)
+{
+    if (funcID != SFID::DP_DC1)
+        return false;
+
+    if (getGenxPlatform() >= GENX_SKL)
+    {
+        if (msgType == DC1_UNTYPED_FLOAT_ATOMIC ||
+            msgType == DC1_A64_UNTYPED_FLOAT_ATOMIC)
+            return true;
+    }
+    return false;
+}
+
+bool G4_SendMsgDescriptor::isAtomicMessage() const
+{
+
+    auto funcID = getFuncId();
+    if (!isHDC())
+        return false; // guard getMessageType() on SFID without a message type
+    uint16_t msgType = getHdcMessageType();
+    return isHdcIntAtomicMessage(funcID,msgType) ||
+        isHdcFloatAtomicMessage(funcID,msgType);
+}
+
+uint16_t G4_SendMsgDescriptor::getHdcAtomicOp() const
+{
+    MUST_BE_TRUE(isHDC(),"must be HDC message");
+    MUST_BE_TRUE(isAtomicMessage(), "getting atomicOp from non-atomic message!");
+    uint32_t funcCtrl = getFuncCtrl();
+    if (isHdcIntAtomicMessage(getFuncId(), getHdcMessageType()))
+    {
+        // bits: 11:8
+        return (uint16_t)((funcCtrl >> 8) & 0xF);
+    }
+
+    // must be float Atomic
+    // bits: 10:8
+    return (int16_t)((funcCtrl >> 8) & 0x7);
 }
 
 bool G4_SendMsgDescriptor::isSLMMessage() const
 {
     if (getFuncId() == SFID::DP_DC2)
     {
-        uint32_t msgType = getMessageType();
+        uint32_t msgType = getHdcMessageType();
         if ((msgType == DC2_UNTYPED_SURFACE_WRITE || msgType == DC2_BYTE_SCATTERED_WRITE) &&
             (getFuncCtrl() & 0x80))
         {
@@ -438,7 +410,7 @@ bool G4_SendMsgDescriptor::isSLMMessage() const
         getFuncId() == SFID::DP_DC1 ||
         getFuncId() == SFID::DP_DC)
     {
-        if ((getDesc() & 0xFF) == 0xFE)
+        if ((getDesc() & 0xFF) == SLMIndex)
         {
             return true;
         }
@@ -452,11 +424,151 @@ bool G4_SendMsgDescriptor::isSLMMessage() const
     return false;
 }
 
+bool G4_SendMsgDescriptor::isBarrierMsg() const
+{
+    auto funcID = getFuncId();
+    uint32_t funcCtrl = getFuncCtrl();
+    return funcID == SFID::GATEWAY && (funcCtrl & 0xFF) == 0x4;
+}
+
+bool G4_SendMsgDescriptor::isFence() const
+{
+
+    SFID sfid = getFuncId();
+    unsigned FC = getFuncCtrl();
+
+    // Memory Fence
+    if (sfid == SFID::DP_DC && ((FC >> 14) & 0x1F) == DC_MEMORY_FENCE)
+    {
+        return true;
+    }
+
+    // Sampler cache flush
+    if (sfid == SFID::SAMPLER && ((FC >> 12) & 0x1F) == 0x1F)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+bool G4_SendMsgDescriptor::isHeaderPresent() const {
+
+    return desc.layout.headerPresent == 1;
+}
+
+void G4_SendMsgDescriptor::setHeaderPresent(bool val)
+{
+    desc.layout.headerPresent = val;
+}
+
+void G4_SendMsgDescriptor::setBindingTableIdx(unsigned idx)
+{
+    desc.value |= idx;
+}
+
+bool G4_SendMsgDescriptor::is16BitInput() const
+{
+    return desc.layout.simdMode2 == 1;
+}
+
+bool G4_SendMsgDescriptor::is16BitReturn() const
+{
+    return desc.layout.returnFormat == 1;
+}
+
+static int getNumEnabledChannels(uint32_t chDisableBits)
+{
+    switch(chDisableBits)
+    {
+    case 0x7:
+    case 0xB:
+    case 0xD:
+    case 0xE: return 1;
+    case 0x3:
+    case 0x5:
+    case 0x6:
+    case 0x9:
+    case 0xA:
+    case 0xC: return 2;
+    case 0x1:
+    case 0x2:
+    case 0x4:
+    case 0x8: return 3;
+    case 0x0: return 4;
+    case 0xF: return 0;
+    default: MUST_BE_TRUE(false, "Illegal Channel Mask Number");
+    }
+    return 0;
+}
+
+unsigned int G4_SendMsgDescriptor::getEnabledChannelNum() const
+{
+    // TODO: should further scope this to typed/untyped
+    MUST_BE_TRUE(isHDC(), "message does not have field ChannelEnable");
+    uint32_t funcCtrl = getFuncCtrl();
+    return getNumEnabledChannels((funcCtrl >> MSG_BLOCK_SIZE_OFFSET) & 0xF);
+}
+
+unsigned int G4_SendMsgDescriptor::getBlockNum() const
+{
+    MUST_BE_TRUE(isHDC(), "not an HDC message");
+
+    uint32_t funcCtrl = getFuncCtrl();
+
+    funcCtrl =  ( funcCtrl >> MSG_BLOCK_NUMBER_OFFSET ) & 0x3;
+    switch(funcCtrl)
+    {
+        case SVM_BLOCK_NUM_1: return 1;
+        case SVM_BLOCK_NUM_2: return 2;
+        case SVM_BLOCK_NUM_4: return 4;
+        case SVM_BLOCK_NUM_8: return 8;
+        default: MUST_BE_TRUE(false, "Illegal SVM block number (should be 1, 2, 4, or 8).");
+    }
+
+    return 0;
+}
+
+unsigned int G4_SendMsgDescriptor::getBlockSize() const
+{
+    MUST_BE_TRUE(isHDC(), "not an HDC message");
+
+    uint32_t funcCtrl = getFuncCtrl();
+
+    funcCtrl =  ( funcCtrl >> MSG_BLOCK_SIZE_OFFSET ) & 0x3;
+    switch (funcCtrl)
+    {
+        case SVM_BLOCK_TYPE_BYTE: return 1;
+        case SVM_BLOCK_TYPE_DWORD: return 4;
+        case SVM_BLOCK_TYPE_QWORD: return 8;
+        default: MUST_BE_TRUE(false, "Illegal SVM block size (should be 1, 4, or 8).");
+    }
+    return 0;
+}
+
+bool G4_SendMsgDescriptor::isOwordLoad() const
+{
+    if (!isHDC()) {
+        return false;
+    }
+    uint32_t funcCtrl = getFuncCtrl();
+    auto funcID = getFuncId();
+    uint16_t msgType = (funcCtrl >> IVB_MSG_TYPE_OFFSET) & 0xF;
+    //SFID = data cache, bit 14-17= 0 or 1
+    return funcID == SFID::DP_DC && ( msgType == 0 || msgType == 1);
+}
+
+bool G4_SendMsgDescriptor::isHdcTypedSurfaceWrite() const
+{
+    return isHDC() &&
+        getHdcMessageType() == DC1_TYPED_SURFACE_WRITE;
+}
+
 bool G4_SendMsgDescriptor::isReadOnlyMessage(uint32_t msgDesc,
                                              uint32_t extDesc)
 {
-    SFID funcID = G4_SendMsgDescriptor::getFuncId(extDesc);
-    unsigned subFuncID = G4_SendMsgDescriptor::getMessageType(msgDesc);
+    SFID funcID = intToSFID(extDesc & 0xF);
+    unsigned subFuncID = (msgDesc >> 14) & 0x1F;
 
     switch (funcID) {
     default:
@@ -500,6 +612,122 @@ bool G4_SendMsgDescriptor::isReadOnlyMessage(uint32_t msgDesc,
     // Unknown.
     return false;
 }
+
+const char* G4_SendMsgDescriptor::getDescType() const
+{
+    // Return plain text string of type of msg, ie "oword read", "oword write",
+    // "media rd", etc.
+    const G4_SendMsgDescriptor* msgDesc = this;
+    unsigned int category;
+
+    switch (msgDesc->getFuncId())
+    {
+    case SFID::SAMPLER: return "sampler";
+    case SFID::GATEWAY: return "gateway";
+    case SFID::DP_DC2:
+        switch (getHdcMessageType())
+        {
+        case DC2_UNTYPED_SURFACE_READ: return "scaled untyped surface read";
+        case DC2_A64_SCATTERED_READ: return "scaled A64 scatter read";
+        case DC2_A64_UNTYPED_SURFACE_READ: return "scaled A64 untyped surface read";
+        case DC2_BYTE_SCATTERED_READ: return "scaled byte scattered read";
+        case DC2_UNTYPED_SURFACE_WRITE: return "scaled untyped surface write";
+        case DC2_A64_UNTYPED_SURFACE_WRITE: return "scaled A64 untyped surface write";
+        case DC2_A64_SCATTERED_WRITE: return "scaled A64 scattered write";
+        case DC2_BYTE_SCATTERED_WRITE: return "scaled byte scattede write";
+        default: return "unrecognized DC2 message";
+        }
+    case SFID::DP_WRITE:
+        switch ((getFuncCtrl() >> 14) & 0x1F)
+        {
+        case 0xc: return "render target write";
+        case 0xd: return "render target read";
+        default: return "unrecognized RT message";
+        }
+        break;
+    case SFID::URB: return "urb";
+    case SFID::SPAWNER: return "thread spawner";
+    case SFID::VME: return "vme";
+    case SFID::DP_CC:
+        switch (getHdcMessageType())
+        {
+        case 0x0: return "oword block read";
+        case 0x1: return "unaligned oword block read";
+        case 0x2: return "oword dual block read";
+        case 0x3: return "dword scattered read";
+        default: return "unrecognized DCC message";
+        }
+    case SFID::DP_DC:
+        category = (msgDesc->getFuncCtrl() >> 18) & 0x1;
+        if (category == 0)
+        {
+            // legacy data port
+            bool hword = (msgDesc->getFuncCtrl() >> 13) & 0x1;
+            switch (getHdcMessageType())
+            {
+            case 0x0: return hword ? "hword block read" : "oword block read";
+            case 0x1: return hword ? "hword aligned block read" : "unaligned oword block read";
+            case 0x2: return "oword dual block read";
+            case 0x3: return "dword scattered read";
+            case 0x4: return "byte scattered read";
+            case 0x7: return "memory fence";
+            case 0x8: return hword ? "hword block write" : "oword block write";
+            case 0x9: return "hword aligned block write";
+            case 0xa: return "oword dual block write";
+            case 0xb: return "dword scattered write";
+            case 0xc: return "byte scattered write";
+            default: return "unrecognized DC0 message";
+            }
+        }
+        else
+        {
+            // scratch
+            int bits = (msgDesc->getFuncCtrl() >> 17) & 0x1;
+
+            if (bits == 0)
+                return "scratch read";
+            else
+                return "scratch write";
+        }
+        break;
+    case SFID::DP_PI: return "dp_pi";
+    case SFID::DP_DC1:
+        switch (getHdcMessageType())
+        {
+        case 0x0: return "transpose read";
+        case 0x1: return "untyped surface read";
+        case 0x2: return "untyped atomic operation";
+        case 0x3: return "untyped atomic operation simd4x2";
+        case 0x4: return "media block read";
+        case 0x5: return "typed surface read";
+        case 0x6: return "typed atomic operation";
+        case 0x7: return "typed atomic operation simd4x2";
+        case 0x8: return "untyped atomic float add";
+        case 0x9: return "untyped surface write";
+        case 0xa: return "media block write (non-iecp)";
+        case 0xb: return "atomic counter operation";
+        case 0xc: return "atomic counter operation simd4x2";
+        case 0xd: return "typed surface write";
+        case 0x10: return "a64 gathering read";
+        case 0x11: return "a64 untyped surface read";
+        case 0x12: return "a64 untyped atomic operation";
+        case 0x13: return "a64 untyped atomic operation simd4x2";
+        case 0x14: return "a64 block read";
+        case 0x15: return "a64 block write";
+        case 0x18: return "a64 untyped atomic float add";
+        case 0x19: return "a64 untyped surface write";
+        case 0x1a: return "a64 scattered write";
+        default: return "unrecognized DC1 message";
+        }
+        break;
+    case SFID::CRE: return "cre";
+    default: return "--";
+    }
+    return NULL;
+}
+
+
+
 
 G4_INST::G4_INST(const IR_Builder& irb,
     G4_Predicate* prd,
@@ -825,7 +1053,7 @@ G4_Type G4_INST::getExecType2() const
     return execType;
 }
 
-uint16_t G4_INST::getMaskOffset()
+uint16_t G4_INST::getMaskOffset() const
 {
     unsigned maskOption = (this->getOption() & InstOpt_QuarterMasks);
 
@@ -902,6 +1130,26 @@ void G4_INST::removeDefUse( Gen4_Operand_Number opndNum )
         }
     }
 }
+
+const G4_Operand* G4_INST::getOperand(Gen4_Operand_Number opnd_num) const
+{
+    switch(opnd_num){
+    case Opnd_dst: return (G4_Operand*) dst;
+    case Opnd_src0: return srcs[0];
+    case Opnd_src1: return srcs[1];
+    case Opnd_src2: return srcs[2];
+    case Opnd_src3: return srcs[3];
+    case Opnd_pred: return (G4_Operand*)predicate;
+    case Opnd_condMod: return (G4_Operand*)mod;
+    case Opnd_implAccSrc: return implAccSrc;
+    case Opnd_implAccDst: return (G4_Operand*) implAccDst;
+    default:
+        MUST_BE_TRUE( 0, "Operand number is out of range." );
+        break;
+    }
+    return NULL;
+}
+
 
 USE_EDGE_LIST_ITER G4_INST::eraseUse(USE_EDGE_LIST_ITER iter)
 {
@@ -1350,14 +1598,14 @@ void G4_INST::fixMACSrc2DefUse()
 // -- no saturation or src modifiers
 // -- same dst and src type
 // -- no conditional modifier (predicate is ok)
-bool G4_INST::isRawMov()
+bool G4_INST::isRawMov() const
 {
     return op == G4_mov && !sat && dst->getType() == srcs[0]->getType() &&
         getCondMod() == NULL &&
         (srcs[0]->isImm() ||
         (srcs[0]->isSrcRegRegion() && srcs[0]->asSrcRegRegion()->getModifier() == Mod_src_undef));
 }
-bool G4_INST::hasACCSrc()
+bool G4_INST::hasACCSrc() const
 {
     if( implAccSrc ||
         ( srcs[0] && srcs[0]->isSrcRegRegion() && srcs[0]->asSrcRegRegion()->isAccReg() ) )
@@ -1368,7 +1616,7 @@ bool G4_INST::hasACCSrc()
 }
 
 // check if acc is possibly used by this instruction
-bool G4_INST::hasACCOpnd()
+bool G4_INST::hasACCOpnd() const
 {
     return ( isAccWrCtrlInst() ||
         implAccSrc ||
@@ -1408,8 +1656,8 @@ G4_Type G4_INST::getOpExecType( int& extypesize )
     return extype;
 }
 
-static G4_INST::MovType getMovType(G4_INST* Inst, G4_Type dstTy, G4_Type srcTy,
-                                   G4_SrcModifier srcMod)
+static G4_INST::MovType getMovType(
+    const G4_INST* Inst, G4_Type dstTy, G4_Type srcTy, G4_SrcModifier srcMod)
 {
     // COPY when dst & src types are the same.
     if (dstTy == srcTy)
@@ -1508,7 +1756,7 @@ static G4_INST::MovType getMovType(G4_INST* Inst, G4_Type dstTy, G4_Type srcTy,
 }
 
 // check if this instruction can be propagated
-G4_INST::MovType G4_INST::canPropagate()
+G4_INST::MovType G4_INST::canPropagate() const
 {
     G4_Declare* topDcl = NULL;
 
@@ -1670,37 +1918,45 @@ bool G4_INST::isLegalType(G4_Type type, Gen4_Operand_Number opndNum) const
         return type == Type_B || type == Type_UB;
     case G4_subb:
         return type == Type_UD;
+    case G4_mov:
+        // Avoid mov r7.0<1>:hf  0x76543210:v
+        if (IS_VINTTYPE(type) &&
+            (IS_FTYPE(dst->getType()) || IS_HFTYPE(dst->getType())))
+        {
+            return false;
+        }
+        return true;
     }
 }
 
 // returns true if inst supports only F type for both src and dst
 bool G4_INST::isFloatOnly() const
 {
-	switch (op)
-	{
-	default:
-		return false;
-	case G4_dp2:
-	case G4_dp3:
-	case G4_dp4:
-	case G4_dph:
-	case G4_frc:
-	case G4_line:
-	case G4_lrp:
-	case G4_pln:
-	case G4_rndd:
-	case G4_rnde:
-	case G4_rndu:
-	case G4_rndz:
-		return true;
-	}
+    switch (op)
+    {
+    default:
+        return false;
+    case G4_dp2:
+    case G4_dp3:
+    case G4_dp4:
+    case G4_dph:
+    case G4_frc:
+    case G4_line:
+    case G4_lrp:
+    case G4_pln:
+    case G4_rndd:
+    case G4_rnde:
+    case G4_rndu:
+    case G4_rndz:
+        return true;
+    }
 }
 
 /// isSignSensitive() - Check whether this instruction is sign sensitive on the
 /// specified source operand.
 bool G4_INST::isSignSensitive(Gen4_Operand_Number opndNum) const
 {
-    G4_Operand *use = getOperand(opndNum);
+    const G4_Operand *use = getOperand(opndNum);
     G4_Type useType = use->getType();
     G4_Type dstType = dst->getType();
 
@@ -1731,9 +1987,10 @@ bool G4_INST::isSignSensitive(Gen4_Operand_Number opndNum) const
     return false;
 }
 
-G4_Type G4_INST::getPropType(Gen4_Operand_Number opndNum, MovType MT, G4_INST *mov)
+G4_Type G4_INST::getPropType(
+    Gen4_Operand_Number opndNum, MovType MT, const G4_INST *mov) const
 {
-    G4_Operand *use = getOperand(opndNum);
+    const G4_Operand *use = getOperand(opndNum);
     G4_Type useType = use->getType();
     G4_Type srcType = mov->getSrc(0)->getType();
 
@@ -1922,12 +2179,9 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         return false;
     }
 
-    auto isFloatPseudoMAD = [](G4_INST *inst) {
-        if (inst->opcode() != G4_pseudo_mad)
-            return false;
-        if (IS_TYPE_FLOAT_ALL(inst->getDst()->getType()))
-            return true;
-        return false;
+    auto isFloatPseudoMAD = [](G4_INST *inst)
+    {
+        return inst->opcode() == G4_pseudo_mad && IS_TYPE_FLOAT_ALL(inst->getDst()->getType());
     };
 
     //     mov (16|M0) r47.0 1:w
@@ -1948,8 +2202,7 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         {
             return false;
         }
-    } else if (src->isSrcRegRegion() &&
-               src->asSrcRegRegion()->getRegAccess() != Direct &&
+    } else if (indirectSrc &&
                (isFloatPseudoMAD(useInst) || useInst->opcode() == G4_math))
     {
         return false;
@@ -1958,24 +2211,21 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     // FIXME: to add specific checks for other instructions.
     G4_opcode useInst_op = useInst->opcode();
 
-    if (useInst_op == G4_madm ||
-        (useInst->isMath() && (useInst->asMathInst()->getMathCtrl() == MATH_INVM || useInst->asMathInst()->getMathCtrl() == MATH_RSQRTM)))
+    if (useInst_op == G4_madm || (useInst->isMath() && useInst->asMathInst()->isIEEEMath()))
     {
+        // do not propagate if useInst uses mme registers
         return false;
     }
     if ((useInst_op == G4_line && opndNum == Opnd_src0) ||
-        ((useInst_op == G4_if || useInst_op == G4_while) && !src->isImm() && IS_BTYPE(srcType)) ||
-        (hasModifier && G4_Inst_Table[useInst_op].instType == InstTypeLogic) ||
-        (indirectSrc && (useInst->opcode() == G4_math || useInst->isComprInst())))
+        (hasModifier && G4_Inst_Table[useInst_op].instType == InstTypeLogic))
     {
-        // TODO: Revisit to simplify checking or remove invalid checking.
         return false;
     }
 
     bool isVxHSrc = indirectSrc && src->asSrcRegRegion()->getRegion()->isRegionWH();
-
-    if (isVxHSrc && useInst->getExecSize() != execSize)
+    if (isVxHSrc && (useInst->getExecSize() != execSize || execSize >= 8))
     {
+        // copy propagating VxH region may result in address spills later so it's usually a net loss
         return false;
     }
 
@@ -2006,12 +2256,12 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         return false;
     }
 
-	if (MT == Copy &&
-		hasModifier &&
-		dstType != useType)
-	{
-		return false;
-	}
+    if (MT == Copy &&
+        hasModifier &&
+        dstType != useType)
+    {
+        return false;
+    }
 
     // Check 'dst' of MOV and 'use' are the same variable. Otherwise, it's not
     // legal to be propagated.
@@ -2039,6 +2289,7 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     // such as add, cmp, and mul, when types of all source operands could be
     // consistent.
     if (!(useInst->isRawMov() && dstType == useType) &&
+        !(MT == Copy && propType == useType) &&
         ((IS_FTYPE(dstType) && (IS_TYPE_INT(propType) || IS_VINTTYPE(propType))) ||
          (IS_TYPE_INT(dstType) && (IS_FTYPE(propType) || IS_VFTYPE(propType)))))
     {
@@ -2161,30 +2412,30 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         return false;
     }
 
-	if (src->isImm() && use->asSrcRegRegion()->getModifier() != Mod_src_undef)
-	{
-		//FIXME: do we need to worry about signal bit in NaN being dropped?
-		if (IS_TYPE_INT(srcType))
-		{
-			// we can't represent -(INT_MIN) or abs(INT_MIN)
-			int64_t value = src->asImm()->getImm();
-			switch (propType)
-			{
-			case Type_Q:
-			case Type_UQ:
-				return value != LLONG_MIN;
-			default:
-				return value != INT_MIN;
-			}
-		}
-	}
+    if (src->isImm() && use->asSrcRegRegion()->getModifier() != Mod_src_undef)
+    {
+        //FIXME: do we need to worry about signal bit in NaN being dropped?
+        if (IS_TYPE_INT(srcType))
+        {
+            // we can't represent -(INT_MIN) or abs(INT_MIN)
+            int64_t value = src->asImm()->getImm();
+            switch (propType)
+            {
+            case Type_Q:
+            case Type_UQ:
+                return value != LLONG_MIN;
+            default:
+                return value != INT_MIN;
+            }
+        }
+    }
 
     return true;
 }
 
 // check if this inst can be hoisted
 // assume only MOV inst is checked
-bool G4_INST::canHoist(bool simdBB, const Options *opt)
+bool G4_INST::canHoist(bool simdBB, const Options *opt) const
 {
     if (dst == NULL)
     {
@@ -2246,7 +2497,7 @@ bool G4_INST::canHoist(bool simdBB, const Options *opt)
 }
 
 // check if this instruction can be hoisted to defInst
-bool G4_INST::canHoistTo( G4_INST *defInst, bool simdBB)
+bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
 {
 
     bool indirect_dst = (dst->getRegAccess() != Direct);
@@ -2330,22 +2581,22 @@ bool G4_INST::canHoistTo( G4_INST *defInst, bool simdBB)
         return false;
     }
 
-	if( !rawMovInst && (defInst->getSrc(0) &&
+    if( !rawMovInst && (defInst->getSrc(0) &&
         (IS_DFTYPE(defInst->getSrc(0)->getType()) || IS_FTYPE(defInst->getSrc(0)->getType()))) &&
         (IS_SIGNED_INT(defDstType) || IS_UNSIGNED_INT(defDstType)) )
-	{
-		// Sequence that should not be optimized:
-		// mov V1:d    V2:df
-		// mov V3:uw    V1:d
-		//
-		// This is *NOT* a candidate for:
-		// mov V3:uw    V2:df
-		//
+    {
+        // Sequence that should not be optimized:
+        // mov V1:d    V2:df
+        // mov V3:uw    V1:d
+        //
+        // This is *NOT* a candidate for:
+        // mov V3:uw    V2:df
+        //
         // In general, df/f->int performs saturation and unless value of
         // df/f is known, the result of mov may differ based on type
         // of dst.
-		return false;
-	}
+        return false;
+    }
 
     // no def hoisting for sends for now
     if (defInst->isSend())
@@ -2653,7 +2904,7 @@ bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs
     return true;
 }
 
-bool G4_INST::hasNULLDst()
+bool G4_INST::hasNULLDst() const
 {
     if( dst && dst->isNullReg() )
     {
@@ -3006,7 +3257,7 @@ bool G4_INST::isAccDstInst() const
     return false;
 }
 
-bool G4_INST::isArithAddr()
+bool G4_INST::isArithAddr() const
 {
     if (srcs[1] != NULL)
         return isArithmetic() && srcs[1]->isAddrExp();
@@ -3014,7 +3265,7 @@ bool G4_INST::isArithAddr()
         return false;
 }
 
-bool G4_INST::isMovAddr()
+bool G4_INST::isMovAddr() const
 {
     if (srcs[0] != NULL)
         return isMov() && srcs[0]->isAddrExp();
@@ -3025,7 +3276,7 @@ bool G4_INST::isMovAddr()
 // Check if the operands of send instruction obey the symbolic register rule
 // ToDo: this is obsolete and should be removed
 //
-bool G4_INST::isValidSymbolOperand(bool &dst_valid, bool *srcs_valid)
+bool G4_INST::isValidSymbolOperand(bool &dst_valid, bool *srcs_valid) const
 {
     MUST_BE_TRUE(srcs_valid, ERROR_INTERNAL_ARGUMENT);
 
@@ -3054,7 +3305,15 @@ bool G4_INST::isValidSymbolOperand(bool &dst_valid, bool *srcs_valid)
     return obeyRule;
 }
 
-bool G4_INST::isOptBarrier()
+const G4_VarBase* G4_INST::getCondModBase() const
+{
+    if (!getCondMod())
+        return nullptr;
+
+    return getCondMod()->getBase();
+}
+
+bool G4_INST::isOptBarrier() const
 {
     if (op == G4_join)
     {
@@ -3108,12 +3367,11 @@ bool G4_InstSend::isDirectSplittableSend()
 
     unsigned short elemSize = dst->getElemSize();
     SFID funcID = msgDesc->getFuncId();
-    unsigned subFuncID = msgDesc->getMessageType();
 
     switch (funcID)
     {
     case SFID::DP_DC1:
-        switch (subFuncID)
+        switch (msgDesc->getHdcMessageType())
         {
         case DC1_A64_SCATTERED_READ:   //emask need be vertically cut.
            return false;
@@ -3122,7 +3380,7 @@ bool G4_InstSend::isDirectSplittableSend()
         case DC1_UNTYPED_SURFACE_READ:   //VISA gather 4
         case DC1_TYPED_SURFACE_READ:   //Gather 4 typed
             if (elemSize * execSize > G4_GRF_REG_NBYTES &&
-            	elemSize * execSize % G4_GRF_REG_NBYTES == 0)
+                elemSize * execSize % G4_GRF_REG_NBYTES == 0)
             {
                 return true;
             }
@@ -3134,12 +3392,12 @@ bool G4_InstSend::isDirectSplittableSend()
         default: return false;
         }
     case SFID::DP_DC2:
-        switch (subFuncID)
+        switch (msgDesc->getHdcMessageType())
         {
         case DC2_UNTYPED_SURFACE_READ:   //gather 4 scaled :  emask can be reused if the per-channel data is larger than 1 GRF
         case DC2_A64_UNTYPED_SURFACE_READ: //SVM gather 4 scaled
             if (elemSize * execSize > G4_GRF_REG_NBYTES &&
-            	elemSize * execSize % G4_GRF_REG_NBYTES == 0)
+                elemSize * execSize % G4_GRF_REG_NBYTES == 0)
             {
                 return true;
             }
@@ -3154,7 +3412,7 @@ bool G4_InstSend::isDirectSplittableSend()
         default: return false;
         }
     case SFID::DP_DC:
-        switch (subFuncID)
+        switch (msgDesc->getHdcMessageType())
         {
         case DC_DWORD_SCATTERED_READ:   //dword scattered read: emask need be vertically cut according to splitting
         case DC_BYTE_SCATTERED_READ:       //byte scattered read
@@ -3177,7 +3435,7 @@ bool G4_InstSend::isDirectSplittableSend()
 //
 void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_srcs)
 {
-    G4_InstSend* sendInst = this;
+    const G4_InstSend* sendInst = this;
 
     if (sendInst->predicate)
     {
@@ -3224,13 +3482,13 @@ void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_
     }
 
     // emit exDesc if srcs[3] is not null.  It should always be a0.2 unless it was constant folded
-	if (isSplitSend() && srcs[3])
-	{
-		sendInst->srcs[3]->emit(output, false);
-		output << ' ';
-	}
-	else
-	{
+    if (isSplitSend() && srcs[3])
+    {
+        sendInst->srcs[3]->emit(output, false);
+        output << ' ';
+    }
+    else
+    {
         std::ios::fmtflags outFlags(output.flags());
         output.flags(std::ios_base::hex | std::ios_base::showbase);
         output << sendInst->getMsgDesc()->getExtendedDesc();
@@ -3244,32 +3502,6 @@ void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_
     sendInst->srcs[msgDescId]->emit(output, false);
 
     sendInst->emit_options(output);
-}
-
-void G4_InstSend::emit_send_desc(std::ostream& output)
-{
-    G4_INST* sendInst = this;
-
-    // Emit a text description of the descriptor if it is available
-     G4_SendMsgDescriptor* msgDesc = sendInst->getMsgDesc();
-     output << " // ";
-
-     if (msgDesc->getDescType() != NULL)
-     {
-         output << msgDesc->getDescType();
-     }
-
-     output << ", resLen=" << msgDesc->ResponseLength();
-     output << ", msgLen=" << msgDesc->MessageLength();
-     if (isSplitSend())
-     {
-         output << ", extMsgLen=" << msgDesc->extMessageLength();
-     }
-
-     if (msgDesc->isBarrierMsg())
-     {
-         output << ", barrier";
-     }
 }
 
 void G4_InstSend::emit_send(std::ostream& output, bool dotStyle)
@@ -3300,13 +3532,39 @@ void G4_InstSend::emit_send(std::ostream& output, bool dotStyle)
         emit_send(output, false, NULL);
 }
 
+void G4_InstSend::emit_send_desc(std::ostream& output)
+{
+    const G4_INST* sendInst = this;
+
+    // Emit a text description of the descriptor if it is available
+     G4_SendMsgDescriptor* msgDesc = sendInst->getMsgDesc();
+     output << " // ";
+
+     if (msgDesc->getDescType() != NULL)
+     {
+         output << msgDesc->getDescType();
+     }
+
+     output << ", resLen=" << msgDesc->ResponseLength();
+     output << ", msgLen=" << msgDesc->MessageLength();
+     if (isSplitSend())
+     {
+         output << ", extMsgLen=" << msgDesc->extMessageLength();
+     }
+
+     if (msgDesc->isBarrierMsg())
+     {
+         output << ", barrier";
+     }
+}
+
 //
 // Add symbolic register support, emit instruction based on the situation of operands
 //
 void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs)
 {
 
-    if ( op==G4_nop )
+    if (op==G4_nop)
     {
         output << G4_Inst_Table[op].str;
         return;
@@ -3397,6 +3655,7 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
             output << ' ';
         }
         this->emit_options(output);
+        output << "//" << srcCISAoff;
         //
         // emit src2 of pln as comments
         //
@@ -3455,18 +3714,13 @@ std::ostream& operator<<(std::ostream& os, G4_INST& inst)
 }
 
 void
-G4_INST::emit_options(std::ostream& output)
+G4_INST::emit_options(std::ostream& output) const
 {
     unsigned int tmpOption = this->option;
 
     if( isEOT() )
     {
         tmpOption |= InstOpt_EOT;
-    }
-
-    // must set AccWrCtrl explicitly in GT+
-    if( isAccWrCtrlInst() || (isFlowControl() && asCFInst()->isBackward()) ) {
-        tmpOption |= InstOpt_AccWrCtrl;
     }
 
     //emit mask option
@@ -3562,10 +3816,10 @@ void G4_INST::emitDefUse(std::ostream& output)
 
 bool G4_INST::isMixedMode() const
 {
-	if (mayExceedTwoGRF() || !getDst())
-	{
-		return false;
-	}
+    if (mayExceedTwoGRF() || !getDst())
+    {
+        return false;
+    }
     for (int i = 0; i < G4_Inst_Table[opcode()].n_srcs; ++i)
     {
         G4_Operand *tOpnd = getSrc(i);
@@ -3642,7 +3896,6 @@ G4_SrcRegRegion::G4_SrcRegRegion(G4_SrcRegRegion &rgn)
 
     bitVec[0] = rgn.bitVec[0];
     bitVec[1] = rgn.bitVec[1];
-    bitVec[2] = rgn.bitVec[2];
 
     top_dcl = rgn.top_dcl;
     left_bound = rgn.left_bound;
@@ -4198,8 +4451,8 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
     // do not emit region for macro madm
     if (desc && !base->isNullReg() && !base->isNReg() && !isAccRegValid())// rgn == NULL, the default region is used
     {
-		bool align1ternary = getGenxPlatform() >= GENX_CNL && inst != NULL && inst->getNumSrc() == 3 &&
-			!inst->isSend() && inst->isAligned1Inst();
+        bool align1ternary = getGenxPlatform() >= GENX_CNL && inst != NULL && inst->getNumSrc() == 3 &&
+            !inst->isSend() && inst->isAligned1Inst();
 
         // RegionV is invalid for SRC operands
         if(desc->isRegionWH())
@@ -4216,14 +4469,14 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
         }
         else
         {
-			if (align1ternary)
-			{
-				// format is <V;H> with W derived from V and H
-				output << "<" << desc->vertStride << ";" << desc->horzStride << ">";
-			}
+            if (align1ternary)
+            {
+                // format is <V;H> with W derived from V and H
+                output << "<" << desc->vertStride << ";" << desc->horzStride << ">";
+            }
             else if (!isWithSwizzle())
             {
-				// do not print region for align16 sources
+                // do not print region for align16 sources
                 output << "<" << desc->vertStride << ";" << desc->width << "," << desc->horzStride << ">";
             }
         }
@@ -4247,10 +4500,10 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
             output <<".acc"<< (getAccRegSel()+2);
         }
     }
-	else if (*swizzle)
-	{
-		output << "." << swizzle;
-	}
+    else if (*swizzle)
+    {
+        output << "." << swizzle;
+    }
 
     if (Type_UNDEF != type)
     {
@@ -4269,7 +4522,7 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
 
 //
 
-bool G4_SrcRegRegion::isScalar()
+bool G4_SrcRegRegion::isScalar() const
 
 {
 
@@ -4289,7 +4542,7 @@ bool G4_SrcRegRegion::isScalar()
 //
 // This function is used to check if the src operand obey the rule of symbolic register. We need this function to check the operand before we emit an instruction
 //
-bool G4_SrcRegRegion::obeySymbolRegRule()
+bool G4_SrcRegRegion::obeySymbolRegRule() const
 {
     if (!base->isRegVar())          // only for reg var
         return false;
@@ -4356,7 +4609,6 @@ G4_DstRegRegion::G4_DstRegRegion(G4_DstRegRegion &rgn)
     right_bound = rgn.right_bound;
     bitVec[0] = rgn.bitVec[0];
     bitVec[1] = rgn.bitVec[1];
-    bitVec[2] = rgn.bitVec[2];
     byteOffset = rgn.byteOffset;
     rightBoundSet = rgn.rightBoundSet;
 }
@@ -4386,20 +4638,20 @@ void G4_DstRegRegion::computeLeftBound()
     if (base && base->isFlag())
     {
         if( base->isRegVar() )
-		{
-			if (base->asRegVar()->getPhyReg())
-			{
-				left_bound = base->asRegVar()->getPhyRegOff() * 16;   // the bound of flag register is in unit of BIT
-				left_bound += subRegOff * 16;
+        {
+            if (base->asRegVar()->getPhyReg())
+            {
+                left_bound = base->asRegVar()->getPhyRegOff() * 16;   // the bound of flag register is in unit of BIT
+                left_bound += subRegOff * 16;
                 left_bound += base->asRegVar()->getPhyReg()->asAreg()->getFlagNum() * 32;
-			}
-			else
-			{
-				left_bound = subRegOff * 16;
-			}
+            }
+            else
+            {
+                left_bound = subRegOff * 16;
+            }
         }
-		else
-		{
+        else
+        {
             left_bound = subRegOff * 16;
             left_bound += base->asAreg()->getFlagNum() * 32;
         }
@@ -4409,9 +4661,9 @@ void G4_DstRegRegion::computeLeftBound()
     else if ( base != NULL && base->isAccReg())
     {
         left_bound = subRegOff * G4_Type_Table[type].byteSize;
-        if( base->asAreg()->getArchRegType() == AREG_ACC1 || regOff == 1 )
+        if (base->asAreg()->getArchRegType() == AREG_ACC1 || regOff == 1)
         {
-            left_bound += 32;  // TODO: size of ACC is assumed to be 32 BYTEs.
+            left_bound += getGRFSize();
         }
         byteOffset = left_bound;
     } else if( top_dcl ){
@@ -4471,22 +4723,18 @@ void G4_DstRegRegion::setDstBitVec( uint8_t exec_size )
     unsigned short s_size = horzStride * type_size;
 
     // General cases.
-    unsigned short bit_seq = G4_Type_Table[type].footprint;
+    uint64_t bit_seq = G4_Type_Table[type].footprint;
     for (uint8_t i = 0; i < exec_size; ++i)
     {
         int eltOffset = i * s_size;
-        if (eltOffset >= getGRFSize())
+        // no element can cross 64-byte boundary
+        if (eltOffset >= 64)
         {
-            footprint1 |= ((uint64_t)bit_seq) << (eltOffset - getGRFSize());
+            footprint1 |= bit_seq << (eltOffset - 64);
         }
-        else if (eltOffset + G4_Type_Table[type].byteSize < getGRFSize())
+        else 
         {
-            footprint0 |= ((uint64_t)bit_seq) << eltOffset;
-        }
-        else
-        {
-            footprint0 |= ((uint64_t)bit_seq) << eltOffset;  // 4 + 31  -->   1 BIT MASKED
-            footprint1 |= ((uint64_t)bit_seq) >> (getGRFSize() - eltOffset);   // 32 - 31 = 1, keep 3
+            footprint0 |= bit_seq << eltOffset;
         }
     }
 
@@ -4503,14 +4751,14 @@ unsigned G4_DstRegRegion::computeRightBound( uint8_t exec_size )
 
     if( base->isFlag() ){
         unsigned int totalBits = 0;
-		if (G4_Inst_Table[inst->opcode()].instType != InstTypePseudoLogic)
-		{
-			// mov (1) f0.1<1>:uw ...
-			// subreg is 1 if it's a 32 bit flag and we want to set the upper 16 bits
-			left_bound = subRegOff * 16;
-			totalBits = G4_Type_Table[type].bitSize;
-		}
-		else
+        if (G4_Inst_Table[inst->opcode()].instType != InstTypePseudoLogic)
+        {
+            // mov (1) f0.1<1>:uw ...
+            // subreg is 1 if it's a 32 bit flag and we want to set the upper 16 bits
+            left_bound = subRegOff * 16;
+            totalBits = G4_Type_Table[type].bitSize;
+        }
+        else
         {
             /*
                 we need to set leftBound for pseudo intruction
@@ -4676,114 +4924,60 @@ static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operan
         }
         else
         {
-            // First consider if any operand is from a send.
-            uint64_t myBitVecS = regRegion->getBitVecS();
-            uint64_t opndBitVecS = opnd->getBitVecS();
-            if (opndBitVecS > 0 || myBitVecS > 0)
+            // First consider if any operand is > two GRFs. If so we just compare the bound
+            // as such operands are assumed to touch every element within the bound.
+            bool meExceedTwoGRF = (myRightBound - myLeftBound) > 2u * getGRFSize();
+            bool opndExceedTwoGRF = (right_bound2 - left_bound2) > 2u * getGRFSize();
+            if (meExceedTwoGRF || opndExceedTwoGRF)
             {
-                if (myBitVecS > 0 && opndBitVecS == 0)
+                if (left_bound2 >= myLeftBound && right_bound2 <= myRightBound)
                 {
-                    // The first convers >= 3 grfs, and the second is within 2 grfs.
-                    if (left_bound2 >= myLeftBound && right_bound2 <= myRightBound)
-                    {
-                         return Rel_gt;
-                    }
-                    return Rel_interfere;
+                    return Rel_gt;
                 }
-                else if (myBitVecS == 0 && opndBitVecS > 0)
+                else if (myLeftBound >= left_bound2 && myRightBound <= right_bound2)
                 {
-                    // The first is within 2 grfs, and the second convers >= 3 grfs.
-                    if (myLeftBound >= left_bound2 && myRightBound <= right_bound2)
-                    {
-                        return Rel_lt;
-                    }
-                    return Rel_interfere;
+                    return Rel_lt;
                 }
-                else
-                {
-                    // myBitVecS > 0 and opndBitVecS > 0
-                    if (left_bound2 >= myLeftBound && right_bound2 <= myRightBound)
-                    {
-                         return Rel_gt;
-                    }
-                    if (myLeftBound >= left_bound2 && myRightBound <= right_bound2)
-                    {
-                        return Rel_lt;
-                    }
-                    return Rel_interfere;
-                }
+                return Rel_interfere;
             }
 
-            // Now both operands are within two GRFs, comparing their L/H vectors.
-            int dist = left_bound2 - myLeftBound;
-            uint64_t new_bitVecL = myBitVecL, new_bitVecH = myBitVecH;
-            if (dist > 0 && dist < (2 * GENX_GRF_REG_SIZ))
+            // Now both operands are within two GRFs, compare their footprint to get precise relations
+            int maskSize = 2 * getGRFSize();
+            if (myDcl)
             {
-                if (dist >= GENX_GRF_REG_SIZ)
-                {
-                    uint64_t lbit = new_bitVecH >> (dist - GENX_GRF_REG_SIZ);
-                    new_bitVecL = lbit;
-                    new_bitVecH = 0;
-                }
-                else
-                {
-                    new_bitVecL >>= dist;
-                    uint64_t lbit = new_bitVecH << (GENX_GRF_REG_SIZ - dist);
-                    new_bitVecL |= lbit;
-                    new_bitVecH >>= dist;
-                }
+                maskSize = myDcl->getRegVar()->isFlag() ? myDcl->getNumberFlagElements()
+                    : myDcl->getByteSize();
             }
-            else if (dist < 0 && dist > (-2 * GENX_GRF_REG_SIZ))
-            {
-                dist = abs(dist);
-                if (dist >= GENX_GRF_REG_SIZ)
-                {
-                    uint64_t lbit = opndBitVecH >> (dist - GENX_GRF_REG_SIZ);
-                    opndBitVecL = lbit;
-                    opndBitVecH = 0;
-                }
-                else
-                {
-                    opndBitVecL >>= dist;
-                    uint64_t lbit = opndBitVecH << (GENX_GRF_REG_SIZ - dist);
-                    opndBitVecL |= lbit;
-                    opndBitVecH >>= dist;
-                }
-            }
-            uint64_t commonL = new_bitVecL & opndBitVecL, commonH = new_bitVecH & opndBitVecH;
+            BitSet myBitSet(maskSize, false);
+            BitSet otherBitSet(maskSize, false);
+            regRegion->updateFootPrint(myBitSet, true);
+            opnd->updateFootPrint(otherBitSet, true);
 
-            if (myLeftBound <= left_bound2 &&
-                myRightBound >= right_bound2 &&
-                commonL == opndBitVecL &&
-                commonH == opndBitVecH)
-            {
-                return Rel_gt;
-            }
-            else if (myLeftBound >= left_bound2 &&
-                myRightBound <= right_bound2 &&
-                commonL == new_bitVecL &&
-                commonH == new_bitVecH)
-            {
-                return Rel_lt;
-            }
-            else if (dist < (2*GENX_GRF_REG_SIZ) && dist > (-2 * GENX_GRF_REG_SIZ) && commonL == 0 && commonH == 0)
+            BitSet tmp = myBitSet;
+            myBitSet &= otherBitSet;
+            if (myBitSet.isEmpty())
             {
                 return Rel_disjoint;
             }
-            else
+
+            myBitSet = tmp;
+            myBitSet -= otherBitSet;
+            if (myBitSet.isEmpty())
             {
-                return Rel_interfere;
+                return Rel_lt;
             }
+            otherBitSet -= tmp;
+            return otherBitSet.isEmpty() ? Rel_gt : Rel_interfere;
         }
     }
 }
 
-G4_CmpRelation G4_DstRegRegion::compareOperand( G4_Operand *opnd)
+G4_CmpRelation G4_DstRegRegion::compareOperand(G4_Operand *opnd)
 {
     return compareRegRegionToOperand(this, opnd);
 }
 
-bool G4_DstRegRegion::isNativeType()
+bool G4_DstRegRegion::isNativeType() const
 {
     G4_Type type = getType();
 
@@ -4795,7 +4989,7 @@ bool G4_DstRegRegion::isNativeType()
     }
 }
 
-bool G4_DstRegRegion::isNativePackedRowRegion()
+bool G4_DstRegRegion::isNativePackedRowRegion() const
 {
     if (isNativeType()) {
         return horzStride  == 1;
@@ -4805,7 +4999,7 @@ bool G4_DstRegRegion::isNativePackedRowRegion()
     }
 }
 
-bool G4_DstRegRegion::isNativePackedRegion()
+bool G4_DstRegRegion::isNativePackedRegion() const
 {
     return isNativePackedRowRegion();
 }
@@ -4895,7 +5089,7 @@ bool G4_DstRegRegion::evenlySplitCrossGRF( uint8_t execSize )
  * if the first level dcl is not aligned to GRF or sub register offset of this opnd is not multiple GRFs, including 0,
  * return true.
  */
-bool G4_DstRegRegion::checkGRFAlign()
+bool G4_DstRegRegion::checkGRFAlign() const
 {
 
     bool GRF_aligned = false;
@@ -5165,7 +5359,7 @@ void G4_DstRegRegion::emit(std::ostream& output, bool symbolreg)
 //
 // This function is used to check if the src operand obey the rule of symbolic register. We need this function to check the operand before we emit an instruction
 //
-bool G4_DstRegRegion::obeySymbolRegRule()
+bool G4_DstRegRegion::obeySymbolRegRule() const
 {
     if (!base->isRegVar())          // only for reg var
         return false;
@@ -5215,7 +5409,7 @@ void G4_DstRegRegion::emitRegVarOff(std::ostream& output, bool symbolreg)
 //
 // return true if prd and this are the same inst predicate
 //
-bool G4_Predicate::samePredicate(G4_Predicate& prd)
+bool G4_Predicate::samePredicate(const G4_Predicate& prd) const
 {
     return getBase() == prd.getBase() &&
            state == prd.state &&
@@ -5225,7 +5419,7 @@ bool G4_Predicate::samePredicate(G4_Predicate& prd)
 //
 // return true if mod and this are the same condition modifier
 //
-bool G4_CondMod::sameCondMod(G4_CondMod& m)
+bool G4_CondMod::sameCondMod(const G4_CondMod& m) const
 {
     return getBase() == m.getBase() &&
            mod == m.mod &&
@@ -5480,7 +5674,7 @@ G4_Declare::emit(std::ostream &output, bool isDumpDot,  bool isSymbolReg)
         {
             output << " alias=" << AliasDCL->getName() << "+" << getAliasOffset();
         }
-		output << " align=" << getSubRegAlign() << " words";
+        output << " align=" << getSubRegAlign() << " words";
         if (regVar->isPhyRegAssigned())
         {
             G4_VarBase* phyreg = regVar->getPhyReg();
@@ -5658,11 +5852,11 @@ unsigned G4_Predicate::computeRightBound( uint8_t exec_size )
     bitVec[0] = 0;
     bitVec[1] = 0;
 
-	uint16_t group_size = (uint16_t)getPredCtrlGroupSize();
-	uint16_t totalBits = (exec_size > group_size) ? exec_size : group_size;
+    uint16_t group_size = (uint16_t)getPredCtrlGroupSize();
+    uint16_t totalBits = (exec_size > group_size) ? exec_size : group_size;
 
-	if (inst)
-		left_bound = inst->getMaskOffset();
+    if (inst)
+        left_bound = inst->getMaskOffset();
 
     right_bound = left_bound + totalBits - 1;
 
@@ -5742,8 +5936,8 @@ void G4_Predicate::splitPred( )
 
     bitVec[0] = ((uint32_t)getBitVecL()) >> shiftLen;
 }
-void
-G4_CondMod::emit(std::ostream& output, bool symbolreg)
+
+void G4_CondMod::emit(std::ostream& output, bool symbolreg)
 {
     output << '.' << CondModStr[mod];
     output << '.';
@@ -5886,7 +6080,7 @@ G4_CmpRelation G4_Imm::compareOperand(G4_Operand *opnd)
 }
 
 void
-G4_Imm::emit(std::ostream& output, bool symbolreg )
+G4_Imm::emit(std::ostream& output, bool symbolreg)
 {
 
     //
@@ -5932,25 +6126,25 @@ void
 // emit number, automatically select the format according to its original format
 G4_Imm::emitAutoFmt(std::ostream& output)
 {
-	if (Type_F == type)
-	{
-		output << imm.fp32;
-	}
-	else if (Type_DF == type)
+    if (Type_F == type)
+    {
+        output << imm.fp32;
+    }
+    else if (Type_DF == type)
     {
        output << imm.fp;
     }
-	else if (Type_W == type || Type_B == type)
+    else if (Type_W == type || Type_B == type)
     {
-		output << (short)imm.num;
+        output << (short)imm.num;
     }
-	else if (Type_D == type)
+    else if (Type_D == type)
     {
-		output << imm.num;
+        output << imm.num;
     }
-	else //unsigned value
+    else //unsigned value
     {
-		output << (unsigned int)imm.num;
+        output << (unsigned int)imm.num;
     }
 
     if (Type_UNDEF != type)
@@ -6058,7 +6252,7 @@ void G4_SrcRegRegion::computeLeftBound()
             if(base->asRegVar()->getPhyReg())
             {
                 left_bound = base->asRegVar()->getPhyRegOff() * 16;   // the bound of flag register is in unit of BIT
-				left_bound += subRegOff * 16;
+                left_bound += subRegOff * 16;
                 left_bound += base->asRegVar()->getPhyReg()->asAreg()->getFlagNum() * 32;
             }
             else
@@ -6132,7 +6326,7 @@ void G4_SrcRegRegion::computeLeftBound()
 
 void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
 {
-    unsigned short bit_seq = G4_Type_Table[type].footprint;
+    uint64_t bit_seq = G4_Type_Table[type].footprint;
     unsigned short typeSize = (unsigned short)G4_Type_Table[type].byteSize;
 
     uint64_t footPrint0 = 0;
@@ -6145,24 +6339,14 @@ void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
     }
     else if (desc->isContiguous(exec_size))
     {
+        // fast path
         int totalBytes = exec_size * typeSize;
-        MUST_BE_TRUE(totalBytes <= 2 * getGRFSize(), "total bits exceeds 2 GRFs");
-        if (totalBytes == getGRFSize() * 2)
-        {
-            footPrint0 = ULLONG_MAX;
-            footPrint1 = ULLONG_MAX;
-        }
-        else
-        {
-            if (totalBytes <= getGRFSize())
-            {
-                footPrint0 = (1ULL << totalBytes) - 1;
-            }
-            else
-            {
-                footPrint0 = ULLONG_MAX;
-                footPrint1 = (1ULL << (totalBytes - getGRFSize())) - 1;
-            }
+        MUST_BE_TRUE(totalBytes <= 2 * getGRFSize(), "total bytes exceed 2 GRFs");
+
+        footPrint0 = totalBytes < 64 ? (1ULL << totalBytes) - 1 : ULLONG_MAX;
+        if (totalBytes > 64)
+        {       
+            footPrint1 = totalBytes == 128 ? ULLONG_MAX : (1ULL << (totalBytes - 64)) - 1;
         }
     }
     else
@@ -6172,19 +6356,14 @@ void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
             for (int j = 0; j < desc->width; ++j)
             {
                 int eltOffset = i * desc->vertStride * typeSize + j * desc->horzStride * typeSize;
-
-                if (eltOffset >= getGRFSize())
+                // no element can cross 64-byte boundary
+                if (eltOffset >= 64)
                 {
-                    footPrint1 |= ((uint64_t)bit_seq) << (eltOffset - getGRFSize());
-                }
-                else if (eltOffset + G4_Type_Table[type].byteSize < getGRFSize())
-                {
-                    footPrint0 |= ((uint64_t)bit_seq) << eltOffset;
+                    footPrint1 |= bit_seq << (eltOffset - 64);
                 }
                 else
                 {
-                    footPrint0 |= ((uint64_t)bit_seq) << eltOffset;
-                    footPrint1 |= ((uint64_t)bit_seq) >> (getGRFSize() - eltOffset);
+                    footPrint0 |= bit_seq << eltOffset;
                 }
             }
         }
@@ -6192,8 +6371,6 @@ void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
 
     bitVec[0] = footPrint0;
     bitVec[1] = footPrint1;
-
-    return;
 }
 
 unsigned G4_SrcRegRegion::computeRightBound( uint8_t exec_size )
@@ -6210,7 +6387,7 @@ unsigned G4_SrcRegRegion::computeRightBound( uint8_t exec_size )
         unsigned int totalBits = 0;
         if(G4_Inst_Table[inst->opcode()].instType != InstTypePseudoLogic)
         {
-			// mov (1) ... fx.1<0;1,0>:uw
+            // mov (1) ... fx.1<0;1,0>:uw
             left_bound = subRegOff * 16;
             totalBits = base->asRegVar()->getDeclare()->getNumberFlagElements() < G4_Type_Table[type].bitSize ?
                         base->asRegVar()->getDeclare()->getNumberFlagElements() : G4_Type_Table[type].bitSize;
@@ -6234,8 +6411,8 @@ unsigned G4_SrcRegRegion::computeRightBound( uint8_t exec_size )
 
         bitVec[0] = totalBits == 32 ? 0xFFFFFFFF : (1 << totalBits) - 1;
     }
-	else
-	{
+    else
+    {
         if (acc == Direct)
         {
             setSrcBitVec(exec_size);
@@ -6290,7 +6467,7 @@ G4_CmpRelation G4_SrcRegRegion::compareOperand( G4_Operand *opnd)
     return compareRegRegionToOperand(this, opnd);
 }
 
-bool G4_SrcRegRegion::isNativeType()
+bool G4_SrcRegRegion::isNativeType() const
 {
     G4_Type type = getType();
 
@@ -6302,7 +6479,7 @@ bool G4_SrcRegRegion::isNativeType()
     }
 }
 
-bool G4_SrcRegRegion::isNativePackedRowRegion()
+bool G4_SrcRegRegion::isNativePackedRowRegion() const
 {
     if (isNativeType())
     {
@@ -6314,7 +6491,7 @@ bool G4_SrcRegRegion::isNativePackedRowRegion()
     return false;
 }
 
-bool G4_SrcRegRegion::isNativePackedRegion()
+bool G4_SrcRegRegion::isNativePackedRegion() const
 {
     return isNativePackedRowRegion() && desc->vertStride == desc->width;
 }
@@ -6526,7 +6703,7 @@ bool G4_SrcRegRegion::isNativePackedSrcRegion()
             ( desc->vertStride == desc->width );
 }
 
-void RegionDesc::emit(std::ostream& output)
+void RegionDesc::emit(std::ostream& output) const
 {
     if (isRegionV())
     {
@@ -6560,7 +6737,7 @@ void G4_Label::emit(std::ostream& output, bool symbolreg)
     }
 }
 
-unsigned G4_RegVar::getByteAddr()
+unsigned G4_RegVar::getByteAddr() const
 {
     MUST_BE_TRUE(reg.phyReg != NULL, ERROR_UNKNOWN);
     if (reg.phyReg->isGreg())
@@ -6626,6 +6803,76 @@ void G4_INST::computeLeftBoundForImplAcc(G4_Operand* opnd)
     }
 }
 
+//
+// Normalize an operand's bitvec footprint based on its left bound
+// and update the given bitset.
+// If isSet is true, we set all bits that are covered by this operand.
+// If isSet os false, we clear all bits that are covered by this operand.
+//
+void G4_Operand::updateFootPrint(BitSet& footprint, bool isSet)
+{
+    unsigned N = NUM_BITS_PER_ELT;
+    unsigned lb = getLeftBound();
+    unsigned rb = getRightBound();
+    const bool doFastPath = true; // for debugging
+        
+    if (doFastPath && lb % N == 0 && (rb + 1) % N == 0)
+    {
+        // lb is 32-byte aligned, set one dword at a time
+        unsigned idx = lb / N;
+        unsigned endIdx = rb / N;
+        // get the precise footprint for the first two GRF
+        for (int i = 0; i < 2 && idx <= endIdx; ++i, ++idx)
+        {
+            uint64_t bits = getBitVecL();
+            uint32_t bitVal = (uint32_t)(i % 2 ? bits >> N : bits);
+            if (isSet)
+            {
+                footprint.setElt(idx, bitVal);
+            }
+            else
+            {
+                footprint.resetElt(idx, bitVal);
+            }
+        }
+
+        // beyond the first two GRF we assume every byte is touched
+        while (idx <= endIdx)
+        {
+            if (isSet)
+            {
+                footprint.setElt(idx, 0xFFFFFFFF);
+            }
+            else
+            {
+                footprint.resetElt(idx, 0xFFFFFFFF);
+            }
+            idx++;
+        }
+    }
+    else
+    {
+        // handle unaligned case
+        uint64_t mask0 = getBitVecL();
+        unsigned j = lb;
+        for (unsigned i = 0; i < 64 && j <= rb; ++i, ++j)
+        {
+            if (mask0 & (1ULL << i))
+                footprint.set(j, isSet);
+        }
+        while (j++ <= rb)
+            footprint.set(j, isSet);
+    }
+}
+
+// update bit vector for this operand based on it size
+// We assume all bytes are touched
+void G4_Operand::setBitVecFromSize(uint32_t NBytes)
+{
+    bitVec[0] = NBytes < 64 ? (1ULL << NBytes) - 1 : ULLONG_MAX;
+    bitVec[1] = 0;
+}
+
 // Left and right bound for every operand is based off
 // top most dcl.
 // For flag register as dst/src/pred/cond mod, each bit of
@@ -6641,34 +6888,34 @@ void G4_INST::computeRightBound(G4_Operand* opnd)
 {
     associateOpndWithInst(opnd, this);
 
-	if( opnd != NULL &&
+    if( opnd != NULL &&
         opnd->isImm() == false &&
         opnd->isNullReg() == false )
     {
-		bool done = false;
+        bool done = false;
 
-		if( done == false && op == G4_pln && opnd == srcs[1] )
-		{
-			opnd->computeRightBound( execSize > 8 ? execSize : execSize * 2 );
+        if( done == false && op == G4_pln && opnd == srcs[1] )
+        {
+            opnd->computeRightBound( execSize > 8 ? execSize : execSize * 2 );
             if( execSize > 8 )
             {
-				opnd->setRightBound( opnd->right_bound * 2 - opnd->getLeftBound() + 1 );
+                opnd->setRightBound( opnd->right_bound * 2 - opnd->getLeftBound() + 1 );
             }
 
-			done = true;
-		}
-		else if( done == false && (op == G4_pseudo_kill || isPseudoUse()) )
-		{
-			// pseudo kills/use write/read entire variable
-			G4_Declare* topdcl = opnd->getBase()->asRegVar()->getDeclare()->getRootDeclare();
-			opnd->setRightBound(topdcl->getByteSize() - 1);
+            done = true;
+        }
+        else if( done == false && (op == G4_pseudo_kill || isPseudoUse()) )
+        {
+            // pseudo kills/use write/read entire variable
+            G4_Declare* topdcl = opnd->getBase()->asRegVar()->getDeclare()->getRootDeclare();
+            opnd->setRightBound(topdcl->getByteSize() - 1);
 
-			done = true;
-		}
+            done = true;
+        }
 
-		if( done == false )
-		{
-			opnd->computeRightBound( execSize );
+        if( done == false )
+        {
+            opnd->computeRightBound( execSize );
 
             if( getMaskOffset() > 0 &&
                 ((opnd == getImplAccSrc()) ||
@@ -6712,9 +6959,9 @@ void G4_INST::computeRightBound(G4_Operand* opnd)
                 }
             }
 
-			done = true;
-		}
-	}
+            done = true;
+        }
+    }
 }
 
 void G4_InstSend::computeRightBound(G4_Operand* opnd)
@@ -6740,28 +6987,7 @@ void G4_InstSend::computeRightBound(G4_Operand* opnd)
                 LB + numReg * G4_GRF_REG_NBYTES) - 1;
 
             unsigned NBytes = RB - LB + 1;
-            if (NBytes <= 32)
-            {
-                uint32_t Mask = uint32_t(-1) >> (32 - NBytes);
-                opnd->setBitVecL(Mask);
-            }
-            else if (NBytes <= 64)
-            {
-                opnd->setBitVecL(0xFFFFFFFF);
-                uint32_t Mask = uint32_t(-1) >> (64 - NBytes);
-                opnd->setBitVecH(Mask);
-            }
-            else
-            {
-                // NBytes > 64
-                opnd->setBitVecL(0xFFFFFFFF);
-                opnd->setBitVecH(0xFFFFFFFF);
-
-                // GRF level tracking, up to 32 + 2 GRFs.
-                unsigned NGrfs = (NBytes - 64 + 31) / 32;
-                uint32_t Mask = uint32_t(-1) >> (32 - NGrfs);
-                opnd->setBitVecS(Mask);
-            }
+            opnd->setBitVecFromSize(NBytes);
             opnd->setRightBound(RB);
         };
 
@@ -6859,7 +7085,7 @@ void G4_INST::setPredicate(G4_Predicate* p)
         predicate->setInst(NULL);
     }
 
-	predicate = p;
+    predicate = p;
 
     associateOpndWithInst(p, this);
     computeRightBound(p);
@@ -7005,24 +7231,24 @@ bool G4_INST::canSupportCondMod() const
         return false;
     }
 
-	if (op == G4_mul)
-	{
-		// can't support conditional modifiers if source is DW and dst is not QW
-		bool dwordSrc = false;
+    if (op == G4_mul)
+    {
+        // can't support conditional modifiers if source is DW and dst is not QW
+        bool dwordSrc = false;
         for (int i = 0, numSrc = getNumSrc(); i < numSrc; ++i)
-		{
-			if (IS_DTYPE(getSrc(i)->getType()))
-			{
-				dwordSrc = true;
-				break;
-			}
-		}
-		if (dwordSrc && !IS_QTYPE(getDst()->getType()))
-		{
-			return false;
-		}
-		return true;
-	}
+        {
+            if (IS_DTYPE(getSrc(i)->getType()))
+            {
+                dwordSrc = true;
+                break;
+            }
+        }
+        if (dwordSrc && !IS_QTYPE(getDst()->getType()))
+        {
+            return false;
+        }
+        return true;
+    }
     else if (op == G4_pseudo_mad)
     {
         // no cond mod for D * W
@@ -7036,36 +7262,36 @@ bool G4_INST::canSupportCondMod() const
     }
 
 
-	return ((op == G4_add) ||
+    return ((op == G4_add) ||
         (op == G4_and) ||
-		(op == G4_addc) ||
-		(op == G4_asr) ||
-		(op == G4_avg) ||
-		(op == G4_dp2) ||
-		(op == G4_dp3) ||
-		(op == G4_dp4) ||
-		(op == G4_dph) ||
-		(op == G4_dp4a) ||
-		(op == G4_line) ||
-		(op == G4_lrp) ||
-		(op == G4_lzd) ||
-		(op == G4_mac) ||
-		(op == G4_mach) ||
-		(op == G4_mad) ||
-		(op == G4_mov) ||
-		(op == G4_mul) ||
+        (op == G4_addc) ||
+        (op == G4_asr) ||
+        (op == G4_avg) ||
+        (op == G4_dp2) ||
+        (op == G4_dp3) ||
+        (op == G4_dp4) ||
+        (op == G4_dph) ||
+        (op == G4_dp4a) ||
+        (op == G4_line) ||
+        (op == G4_lrp) ||
+        (op == G4_lzd) ||
+        (op == G4_mac) ||
+        (op == G4_mach) ||
+        (op == G4_mad) ||
+        (op == G4_mov) ||
+        (op == G4_mul) ||
         (op == G4_not) ||
         (op == G4_or) ||
-		(op == G4_pln) ||
+        (op == G4_pln) ||
         (op == G4_rndd) ||
         (op == G4_rnde) ||
         (op == G4_rndu) ||
         (op == G4_rndz) ||
-		(op == G4_sad2) ||
-		(op == G4_sada2) ||
-		(op == G4_shl) ||
-		(op == G4_shr) ||
-		(op == G4_subb) ||
+        (op == G4_sad2) ||
+        (op == G4_sada2) ||
+        (op == G4_shl) ||
+        (op == G4_shr) ||
+        (op == G4_subb) ||
         (op == G4_xor));
 }
 
@@ -7531,10 +7757,10 @@ bool G4_INST::canDstBeAcc() const
         }
         break;
     case Type_DF:
-    	 if (!builder.getOption(vISA_accSubDF))
-    	 {
-    	     return false;
-    	 }
+         if (!builder.getOption(vISA_accSubDF))
+         {
+             return false;
+         }
         if (getExecSize() != 8 && getExecSize() != 4)
         {
             return false;
@@ -7650,10 +7876,10 @@ bool G4_INST::canSrcBeAcc(int srcId) const
         }
         break;
     case Type_DF:
-    	 if (!builder.getOption(vISA_accSubDF))
-    	 {
-    	     return false;
-    	 }
+         if (!builder.getOption(vISA_accSubDF))
+         {
+             return false;
+         }
 
         if (getExecSize() != 8 && getExecSize() != 4)
         {
@@ -7683,11 +7909,11 @@ bool G4_INST::canSrcBeAcc(int srcId) const
 
     // check that src0 and dst have the same type/alignment
     auto dstEltSize = getDst()->getHorzStride() * G4_Type_Table[getDst()->getType()].byteSize;
-    if (dstEltSize > G4_Type_Table[src->getType()].byteSize)
+    if (dstEltSize > getTypeSize(src->getType()))
     {
         return false;
     }
-    else if (getDst()->getType() == Type_HF && src->getType() == Type_F &&
+    else if (isLowPrecisionFloatTy(getDst()->getType()) && src->getType() == Type_F &&
         dstEltSize == 2)
     {
         // no acc for mix mode inst with packed HF dst
@@ -7695,7 +7921,7 @@ bool G4_INST::canSrcBeAcc(int srcId) const
     }
 
     if (opcode() == G4_mad && srcId == 0 &&
-    	 !builder.canMadHaveSrc0Acc())
+         !builder.canMadHaveSrc0Acc())
     {
         // mac's implicit acc gets its region from dst, so we have to check src and
         // dst have the same type
@@ -7810,6 +8036,102 @@ G4_INST* G4_InstIntrinsic::cloneInst()
 
     return nonConstBuilder->createInternalIntrinsicInst(prd, getIntrinsicId(), getExecSize(), dst,
         src0, src1, src2, option, getLineNo(), getCISAOff(), getSrcFilename());
+}
+
+bool RegionDesc::isLegal(unsigned vs, unsigned w, unsigned hs)
+{
+    auto isPositiveAndLegal = [](unsigned val, unsigned high) {
+        if (val == UNDEFINED_SHORT)
+            return true;
+        if (val > high || val == 0)
+            return false;
+        return ((val - 1) & val) == 0;
+    };
+    return isPositiveAndLegal(w, 16) &&
+            (vs == 0 || isPositiveAndLegal(vs, 32)) &&
+            (hs == 0 || isPositiveAndLegal(hs, 16));
+}
+
+RegionDesc::RegionDescKind RegionDesc::getRegionDescKind(
+    uint16_t size, uint16_t vstride,
+    uint16_t width, uint16_t hstride)
+{
+    // Skip special cases.
+    if (vstride == UNDEFINED_SHORT || width == UNDEFINED_SHORT ||
+        hstride == UNDEFINED_SHORT)
+        return RK_Other;
+
+    // <0;1,0>
+    if (size == 1 || (vstride == 0 && hstride == 0) ||
+        (vstride == 0 && width == 1))
+        return RK_Stride0;
+
+    // <1;1,0>
+    if ((vstride == 1 && width == 1) || (size <= width && hstride == 1) ||
+        (vstride == width && hstride == 1))
+        return RK_Stride1;
+
+    // <N;1,0>
+    uint16_t stride = 0;
+    if (vstride == width * hstride || width == size)
+    {
+        stride = hstride;
+    }
+    else if (width == 1 && hstride == 0 )
+    {
+        stride = vstride;
+    }
+
+    return (stride == 2) ? RK_Stride2 : (stride == 4) ? RK_Stride4
+                                                      : RK_Other;
+}
+
+bool RegionDesc::isContiguous(unsigned ExSize) const
+{
+    if (vertStride == 1 && width == 1)
+        return true;
+    if (vertStride == width && horzStride == 1)
+        return true;
+
+    return (ExSize == 1) ||
+            (ExSize <= (unsigned)width && horzStride == 1);
+}
+bool RegionDesc::isSingleNonUnitStride(uint32_t execSize, uint16_t& stride) const
+{
+    if (isScalar() || isContiguous(execSize))
+    {
+        return false;
+    }
+
+    if (vertStride == width * horzStride || width == execSize)
+    {
+        stride = horzStride;
+        return true;
+    }
+
+    if (horzStride == 0 && width == 1)
+    {
+        stride = vertStride;
+        return true;
+    }
+
+    return false;
+}
+
+bool RegionDesc::isSingleStride(uint32_t execSize, uint16_t &stride) const
+{
+    if (isScalar())
+    {
+        stride = 0;
+        return true;
+    }
+    if (isContiguous(execSize))
+    {
+        stride = 1;
+        return true;
+    }
+
+    return isSingleNonUnitStride(execSize, stride);
 }
 
 G4_INST* G4_InstMath::cloneInst()

@@ -425,14 +425,14 @@
         return true;
     }
 
-    bool supportFloatRegioning() const
+    bool supportFloatOr64bRegioning() const
     {
         return true;
     }
 
-    bool hasSIMD8DFMadm() const
+    int getFP64MadmExecSize() const
     {
-        return false;
+        return 4;
     }
 
     bool balanceIntFloatMoves() const
@@ -472,5 +472,31 @@
     { 
         return 4;
     }
+
+    bool encodeAccWrEn() const
+    {
+        return true;
+    }
+
+    SFID getEOTSFID() const
+    {
+        return SFID::SPAWNER;
+    }
+
+    uint32_t getNativeExecSize() const
+    {
+        return 8;
+    }
+
+    bool noScalarByteToFloat() const
+    {
+        return false;
+    }
+
+    bool canEncodeFullExtDesc() const
+    {
+        return false;
+    }
+
 
     // end HW capabilities

@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //===----------------------------------------------------------------------===//
 
 #include "Compiler/CISACodeGen/CoalescingEngine.hpp"
+#include "Compiler/CISACodeGen/DeSSA.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/PatternMatchPass.hpp"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
@@ -66,6 +67,7 @@ IGC_INITIALIZE_PASS_DEPENDENCY( WIAnalysis )
 IGC_INITIALIZE_PASS_DEPENDENCY( LiveVarsAnalysis )
 IGC_INITIALIZE_PASS_DEPENDENCY( CodeGenPatternMatch )
 IGC_INITIALIZE_PASS_DEPENDENCY( DominatorTreeWrapperPass )
+IGC_INITIALIZE_PASS_DEPENDENCY( DeSSA )
 IGC_INITIALIZE_PASS_DEPENDENCY( MetaDataUtilsWrapper )
 IGC_INITIALIZE_PASS_END( CoalescingEngine, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS )
 
@@ -75,6 +77,18 @@ namespace IGC
 CoalescingEngine::CoalescingEngine() : FunctionPass( ID )
 {
     initializeCoalescingEnginePass( *PassRegistry::getPassRegistry() );
+}
+
+void CoalescingEngine::getAnalysisUsage(llvm::AnalysisUsage& AU) const
+{
+    AU.setPreservesAll();
+    AU.addRequired<llvm::DominatorTreeWrapperPass>();
+    AU.addRequired<WIAnalysis>();
+    AU.addRequired<LiveVarsAnalysis>();
+    AU.addRequired<CodeGenPatternMatch>();
+    AU.addRequired<DeSSA>();
+    AU.addRequired<MetaDataUtilsWrapper>();
+    AU.addRequired<CodeGenContextWrapper>();
 }
 
 void CoalescingEngine::CCTuple::print(raw_ostream &OS, const Module*) const
@@ -138,6 +152,12 @@ bool CoalescingEngine::runOnFunction(Function &MF) {
     WIA = &getAnalysis<WIAnalysis>();
     CG = &getAnalysis<CodeGenPatternMatch>();
     LV = &getAnalysis<LiveVarsAnalysis>().getLiveVars();
+    if (IGC_IS_FLAG_DISABLED(DisableDeSSA)) {
+        m_DeSSA = &getAnalysis<DeSSA>();
+    }
+    else {
+        m_DeSSA = nullptr;
+    }
 
     for (Function::iterator I = MF.begin(), E = MF.end();
         I != E; ++I) {
@@ -159,7 +179,7 @@ void CoalescingEngine::IncrementalCoalesce(BasicBlock* MBB)
     std::sort(DefInstrs.begin(), DefInstrs.end(), MIIndexCompare(LV));
 
     for (std::vector<Instruction*>::const_iterator BBI = DefInstrs.begin(),
-        BBE = DefInstrs.end(); BBI != BBE; ++BBI) 
+        BBE = DefInstrs.end(); BBI != BBE; ++BBI)
     {
             Instruction *DefMI = *BBI;
 
@@ -185,7 +205,7 @@ void CoalescingEngine::IncrementalCoalesce(BasicBlock* MBB)
                     {
                         ProcessTuple( DefMI );
                     }
-                }                
+                }
 
                 if (isSampleInstruction(DefMI) && !IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_Sample))
                 {
@@ -281,7 +301,7 @@ void CoalescingEngine::ProcessTuple(Instruction *tupleGeneratingInstruction)
         //If it belongs to CCTuple, it has an unique offset in that CCTuple.
         //Three cases are considered:
         //1) No value have CCtuple assigned -> create new CCTuple and assign offsets.
-        //	a) if platform supports split-send, then some (arbitrary) split point should be determined
+        //    a) if platform supports split-send, then some (arbitrary) split point should be determined
         //2) At least one value belongs to a CCtuple (we say it is 'anchored' (constrained) to that tuple)
         //   and all values belong to the same CCtuple
         //3) More than one value belong to a tuple, and they belong to different (>1) tuples: NOT implemented
@@ -302,7 +322,7 @@ void CoalescingEngine::ProcessTuple(Instruction *tupleGeneratingInstruction)
                 // They 'anchor' the new tuple, so pick the element that anchors the tuple and
                 // determine its offset.
 
-                //E.g. : 
+                //E.g. :
                 // ..     v1 (0) v2 (1) CCtuple
                 // v0 (0) v1 (1) v2 (2) (this payload)
                 // v1 will have: thisTupleStartOffset = 1, rootTupleStartOffset = 0
@@ -641,13 +661,13 @@ void CoalescingEngine::CreateTuple(
             ccTuple->InitializeIndexWithCCRoot(i, RootNode);
             CurrentDominatingParent[RootV] = RootV;
             ImmediateDominatingParent[RootV] = NULL;
-        } 
-        else 
+        }
+        else
         {
             //This must have been a value that is copied to payload multiple times.
             //OR: The new CCtuple has been isolated, and this is the element that
             //belongs to other tuple.
-            //Since this value belongs to another tuple, we should not increase the 
+            //Since this value belongs to another tuple, we should not increase the
             //current tuple's size, no?
             //ccTuple->ResizeBounds(i);
         }
@@ -703,7 +723,7 @@ void CoalescingEngine::DetermineAnchor(
     }//for
 }
 
-/// Prepares the slot for moves (e.g. induced by const, isolated, uniform to vector) 
+/// Prepares the slot for moves (e.g. induced by const, isolated, uniform to vector)
 /// into payload by evicting any value that is currently occupying this slot.
 /// Assumption is that heuristic has determined it is profitable to do so.
 /// input: bool evictFullCongruenceClass - tells whether the full congruence class
@@ -743,7 +763,7 @@ void CoalescingEngine::PrepareInsertionSlot(
     }
 }
 
-bool CoalescingEngine::IsInsertionSlotAvailable( 
+bool CoalescingEngine::IsInsertionSlotAvailable(
     CCTuple* ccTuple,
     const int index,
     Instruction *tupleGeneratingInstruction,
@@ -766,14 +786,14 @@ bool CoalescingEngine::IsInsertionSlotAvailable(
 
     if( nodeToCheck == NULL ) {
         //tuple   :  X       CC1   CC2
-        //payload :  <slot>   v1		v2
+        //payload :  <slot>   v1        v2
         //Means: Tuple has no live interval (X) that is live at the point the payload is
         //defined. It means, that a given 'register slot' can be used to issue a 'mov'
         //with an immediate (or isolated) value.
     } else {
         //tuple   :  CC0       CC1   CC2
-        // ....		  | <- lifetime	
-        //payload :  <slot>    v1		v2
+        // ....       | <- lifetime
+        //payload :  <slot>    v1       v2
         // .....      | <- lifetime
         //Here we need to check whether the value in CC is live
         //and intersects with the desired <slot> .
@@ -799,7 +819,7 @@ bool CoalescingEngine::IsInsertionSlotAvailable(
 /// specific events (whether given payload elements is const/isolated/copied etc.)
 /// It is meant to be used as a template method in various context where different
 /// functors could be passed, but the walking mechanism is the same.
-void CoalescingEngine::ProcessElements( const uint numOperands, 
+void CoalescingEngine::ProcessElements( const uint numOperands,
                                        Instruction *tupleInst,
                                        const int offsetDiff,
                                        CCTuple* ccTuple,
@@ -811,28 +831,28 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
         functor->SetIndex(i);
         Value* val = GetPayloadElementToValueMapping(tupleInst,i);
         if( touchedValuesSet.count(val) ){
-            if ( functor->visitCopy() ) 
-                continue; 
-            else 
+            if ( functor->visitCopy() )
+                continue;
+            else
                 break;
         } else {
             touchedValuesSet.insert(val);
         }
         //Case 1: Constant
         if( llvm::isa<llvm::Constant>( val ) ){
-            if ( functor->visitConstant() ) 
-                continue; 
-            else 
+            if ( functor->visitConstant() )
+                continue;
+            else
                 break;
-        } 
+        }
         else //Case 2: Variable
         {
-            if ( IsValIsolated( val ) || !getRegRoot(val) ) 
+            if ( IsValIsolated( val ) || !getRegRoot(val) )
             {
                 //If value is isolated, a copy <slot> will be necessary.
-                if ( functor->visitIsolated() ) 
-                    continue; 
-                else 
+                if ( functor->visitIsolated() )
+                    continue;
+                else
                     break;
             }
 
@@ -844,12 +864,12 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
             if( ccRootNode == Node ){
                 //No interference, since it is the same value. We have got a reuse of the same value in
                 //different tuple.
-                if ( functor->visitAnchored() ) 
-                    continue; 
-                else 
+                if ( functor->visitAnchored() )
+                    continue;
+                else
                     break;
-            } 
-            else 
+            }
+            else
             {
                 assert( llvm::isa<llvm::Instruction>(val) );
                 //Here comes the meat, and the most interesting case:
@@ -869,11 +889,11 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
                     //
                     //!   (value)
                     //
-                    //    CC dominance tree:  
+                    //    CC dominance tree:
                     //!   v67 <- (dominated)
-                    //    ^ 
-                    //    |     
-                    //!   v190 
+                    //    ^
+                    //    |
+                    //!   v190
                     //
                     //!   (tupleInst)
                     // Value has no dominator inside CC class, but dominates elements in CC class
@@ -882,30 +902,30 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
                     {
                         //assert( LV->isLiveAt(val, tupleInst) );
                         //Interference check: value is live at dominated
-                        if ( functor->visitInterfering(val, false) ) 
-                            continue; 
-                        else 
+                        if ( functor->visitInterfering(val, false) )
+                            continue;
+                        else
                             break;
-                    } 
+                    }
                     else if( dominating != nullptr && dominated != nullptr )
                     {
                         //Case 2):
                         // CC dominance tree
                         //!  v67
-                        //    ^ 
+                        //    ^
                         //    |
                         //!  v121 (dominating)
                         //    ^
                         //!   |  <-----(value)
-                        //    |     
+                        //    |
                         //!  v190 <- (dominated)
                         //TODO: it would be possible to 'fit' v181 between v121 and v190 in some
                         //      cases, but this would require redesign of the 'dominance forest' logic
                         //      (regarding current dominating and immediate dominator handling)
                         //      For now, just assume there is an interference.
-                        if ( functor->visitInterfering(val, false) ) 
-                            continue; 
-                        else 
+                        if ( functor->visitInterfering(val, false) )
+                            continue;
+                        else
                             break;
                     }
                     else if( dominating != nullptr && dominated == nullptr )
@@ -914,7 +934,7 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
                         // CC dominance tree
                         //!  v121
                         //    ^
-                        //    |    
+                        //    |
                         //!  v190 <- (dominating)
                         //    |
                         //!   |    ----- (value)
@@ -922,9 +942,9 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
                         //    | (dominated == null)
                         if( LV->isLiveAt(dominating, dyn_cast<llvm::Instruction>(val)) )
                         {
-                            if ( functor->visitInterfering(val, false) ) 
-                                continue; 
-                            else 
+                            if ( functor->visitInterfering(val, false) )
+                                continue;
+                            else
                                 break;
                         }
                     }
@@ -937,11 +957,11 @@ void CoalescingEngine::ProcessElements( const uint numOperands,
                     }
                 }
                 else
-                {   
+                {
                     //ccRootNode == NULL -> congruence class not occupied yet
-                    if ( functor->visitPackedNonInterfering(val) ) 
-                        continue; 
-                    else 
+                    if ( functor->visitPackedNonInterfering(val) )
+                        continue;
+                    else
                         break;
                 }
             } //if( ccRootNode == Node )
@@ -965,8 +985,8 @@ bool CoalescingEngine::InterferenceCheck(
     SmallPtrSet<Value*, 8> touchedValuesSet;
     GatherWeightElementFunctor gatherFunctor;
     ProcessElements(numOperands, tupleInst, offsetDiff, ccTuple, &gatherFunctor );
-    bool forceEviction = 
-        ( gatherFunctor.GetNumInsertionSlotsRequired() + gatherFunctor.GetNumNeedsDisplacement() <= 
+    bool forceEviction =
+        ( gatherFunctor.GetNumInsertionSlotsRequired() + gatherFunctor.GetNumNeedsDisplacement() <=
           gatherFunctor.GetNumAlignedAnchors() );
 
 
@@ -977,7 +997,7 @@ bool CoalescingEngine::InterferenceCheck(
     return interferencesFunctor->IsInterfering();
 }
 
-/// Given an instruction and numOperands (corresponding to the number of coalesce-partaking 
+/// Given an instruction and numOperands (corresponding to the number of coalesce-partaking
 /// payload elements), return whether any 'value' that is an argument of an intrinsic
 /// takes part in the coalescing CC tuple. If yes, return non-zero value that is
 /// the representative tuple for this coalescing.
@@ -1091,8 +1111,8 @@ bool CoalescingEngine::IsPayloadCovered(
 /// Uses the tuple information provided by coalescing engine in order
 /// to generate optimized sequence of 'movs' for preparing a payload.
 CVariable* CoalescingEngine::PrepareExplicitPayload(
-    CShader* outProgram, 
-    CEncoder* encoder, 
+    CShader* outProgram,
+    CEncoder* encoder,
     SIMDMode simdMode,
     const DataLayout* pDL,
     llvm::Instruction* inst,
@@ -1160,8 +1180,8 @@ CVariable* CoalescingEngine::PrepareExplicitPayload(
             if(  IsValConstOrIsolated( val ) ){
                 encoder->Copy(payload, dataElement);
                 encoder->Push();
-            } 
-            else 
+            }
+            else
             {
                 if(  CoalescingEngine::CCTuple* thisCCTuple = GetValueCCTupleMapping(val) )
                 {
@@ -1172,8 +1192,8 @@ CVariable* CoalescingEngine::PrepareExplicitPayload(
                         payloadOffsetInBytes = payloadToCCTupleRelativeOffset *
                             GetSingleElementWidth(simdMode, pDL, val);
                     }
-                } 
-                else 
+                }
+                else
                 {
                     //this one actually encompasses the case for !getRegRoot(val)
                     encoder->Copy(payload, dataElement);
@@ -1182,8 +1202,8 @@ CVariable* CoalescingEngine::PrepareExplicitPayload(
             }//if constant
         }//for
 
-    } 
-    else 
+    }
+    else
     {
         payload = outProgram->GetNewVariable(numOperands*numLanes(simdMode), ISA_TYPE_F, EALIGN_GRF);
 
@@ -1259,6 +1279,14 @@ void CoalescingEngine::unionRegs(Value* Val1, Value* Val2) {
         Node2->parent.setPointer(Node1->getLeader());
         Node1->rank++;
     }
+}
+
+// For now, return true if V is dessa-aliased/InsEltMap-ed/phi-coalesced.
+bool CoalescingEngine::isCoalescedByDeSSA(Value* V) const
+{
+    if (m_DeSSA && m_DeSSA->getRootValue(V))
+        return true;
+    return false;
 }
 
 void CoalescingEngine::ProcessBlock(llvm::BasicBlock* bb)
@@ -1365,7 +1393,7 @@ void CoalescingEngine::visitCallInst(llvm::CallInst &I)
             break;
         case Intrinsic::exp2:
             break;
-   
+
         default:
             break;
         }

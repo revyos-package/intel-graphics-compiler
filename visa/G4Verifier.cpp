@@ -67,8 +67,9 @@ G4Verifier::G4Verifier(G4_Kernel &k, VerifyControl ctrl, Optimizer::PassIndex in
 void G4Verifier::verify()
 {
     // For each instruction do verification.
-    for (auto bb : kernel.fg.BBs)
+    for (auto BBI = kernel.fg.cbegin(), BBE = kernel.fg.cend(); BBI != BBE; ++BBI)
     {
+       auto bb = *BBI;
        for (auto I = bb->begin(), E = bb->end(); I != E; ++I)
        {
            G4_INST *inst = *I;
@@ -115,18 +116,18 @@ static bool checkDefUse(G4_INST* defInst, G4_Operand *use)
     if (!use)
         return false;
 
-	G4_Operand *dst = defInst->getOperand(Opnd_dst);
-	G4_Operand *condMod = defInst->getOperand(Opnd_condMod);
+    G4_Operand *dst = defInst->getOperand(Opnd_dst);
+    G4_Operand *condMod = defInst->getOperand(Opnd_condMod);
 
-	if (use->isAccReg())
-	{
-		// use is acc
-		// ToDo: we should check if acc is re-defined in between as well
-		if (defInst->getImplAccDst() != NULL || dst->isAccReg())
-		{
-			return true;
-		}
-	}
+    if (use->isAccReg())
+    {
+        // use is acc
+        // ToDo: we should check if acc is re-defined in between as well
+        if (defInst->getImplAccDst() != NULL || dst->isAccReg())
+        {
+            return true;
+        }
+    }
 
     if (dst && Rel_disjoint != use->compareOperand(dst))
         return true;
@@ -165,7 +166,7 @@ bool G4Verifier::verifyDefUseChain(G4_INST *inst)
         // UD.first[dst/condMod] defines inst[UD.second]
         //
         G4_Operand *use = inst->getOperand(UD.second);
-		if (!checkDefUse(UD.first, use))
+        if (!checkDefUse(UD.first, use))
         {
             isValid = false;
             printDefUse(UD.first, inst, UD.second);
@@ -293,13 +294,6 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
         // conditional modifier for sel is a don't care, so we can skip verification
         return;
     }
-
-#if 0
-    if (kernel.fg.builder->no64bitType())
-    {
-        MUST_BE_TRUE(G4_Type_Table[opnd->getType()].byteSize != 8, "platform does not support 64-bit type");
-    }
-#endif
 
     // FIXME: If isImm() condition is removed then some assertions are hit.
     // This means somewhere in Jitter operand sharing is happening for
@@ -684,15 +678,15 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 (opnd->isDstRegRegion() && inst->getExecSize() > 2);
             bool isAssigned = opnd->isRegRegion() && opnd->getBase()->isRegVar() &&
                 opnd->getBase()->asRegVar()->isPhyRegAssigned();
-			// allow replicated DF source opnd with <2;2,0> region
-			bool isReplicated = (opnd->getType() == Type_DF) &&
-				opnd->isSrcRegRegion() &&
-			    (opnd->asSrcRegRegion()->getRegion()->width == 2) &&
-			    (opnd->asSrcRegRegion()->getRegion()->horzStride == 0) &&
-				(opnd->asSrcRegRegion()->getRegion()->vertStride == 2);
+            // allow replicated DF source opnd with <2;2,0> region
+            bool isReplicated = (opnd->getType() == Type_DF) &&
+                opnd->isSrcRegRegion() &&
+                (opnd->asSrcRegRegion()->getRegion()->width == 2) &&
+                (opnd->asSrcRegRegion()->getRegion()->horzStride == 0) &&
+                (opnd->asSrcRegRegion()->getRegion()->vertStride == 2);
             if (threeSrcAlign16 && nonScalar && isAssigned &&
                 opnd->getLinearizedStart() % 16 != 0 &&
-				!isReplicated)
+                !isReplicated)
             {
                 MUST_BE_TRUE(false, "dp2/dp3/dp4/dph and non-scalar 3src op must be align16!");
             }

@@ -304,6 +304,19 @@ void EstimateFunctionSize::checkSubroutine() {
       EnableSubroutine = false;
   }
 
+  if (IGC_IS_FLAG_ENABLED(EnableOCLNoInlineAttr) &&
+      pContext->type == ShaderType::OPENCL_SHADER)
+  {
+      for (Function& F : *M)
+      {
+          if (F.hasFnAttribute(llvm::Attribute::NoInline) &&
+              !F.hasFnAttribute(llvm::Attribute::Builtin)) {
+              EnableSubroutine = true;
+              break;
+          }
+      }
+  }
+
   if (EnableSubroutine) {
     // Disable retry manager when subroutine is enabled.
     pContext->m_retryManager.Disable();

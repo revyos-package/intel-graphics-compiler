@@ -88,18 +88,11 @@ namespace IGC
                 AllocateInput(setup[i], offset + subRegOffset);
             }
         }
-        if (m_ZDelta || m_WDelta)
+        if (m_ZWDelta)
         {
             unsigned int offset = GetDispatchSignature().ZWDelta;
-            if (m_ZDelta)
-            {
-                AllocateInput(m_ZDelta, offset);
-            }
-            if (m_WDelta)
-            {
-                AllocateInput(m_WDelta, offset + SIZE_OWORD);
-            }
-        }
+            AllocateInput(m_ZWDelta, offset);
+         }
         if (m_SampleOffsetX || m_SampleOffsetY)
         {
             unsigned int offset = GetDispatchSignature().pixelOffset;
@@ -129,13 +122,13 @@ namespace IGC
         uint offset = 0;
         //R0 is always allocated as a predefined variable. Increase offset for R0
         assert(m_R0);
-        offset += SIZE_GRF;
+        offset += getGRFSize();
 
         assert(m_R1);
         for (uint i = 0; i < m_R1->GetNumberInstance(); i++)
         {
             AllocateInput(m_R1, offset, i);
-            offset += SIZE_GRF;
+            offset += getGRFSize();
         }
 
         for (uint i = 0; i < m_numberInstance; i++)
@@ -210,23 +203,16 @@ namespace IGC
                 {
                     AllocateInput(m_pCPSRequestedSizeY, offset + SIZE_OWORD, i);
                 }
-                offset += SIZE_GRF;
+                offset += getGRFSize();
             }
-            if (m_ZDelta || m_WDelta)
+            if (m_ZWDelta)
             {
-                if (m_ZDelta)
-                {
-                    AllocateInput(m_ZDelta, offset, i);
-                }
-                if (m_WDelta)
-                {
-                    AllocateInput(m_WDelta, offset + SIZE_OWORD, i);
-                }
+                AllocateInput(m_ZWDelta, offset, i);
                 if (m_Signature)
                 {
                     GetDispatchSignature().ZWDelta = offset;
                 }
-                offset += SIZE_GRF;
+                offset += getGRFSize();
             }
             if (m_SampleOffsetX || m_SampleOffsetY)
             {
@@ -242,18 +228,19 @@ namespace IGC
                 {
                     GetDispatchSignature().pixelOffset = offset;
                 }
-                offset += SIZE_GRF;
+                offset += getGRFSize();
             }
         }
 
-        assert(offset%SIZE_GRF == 0);
+        assert(offset%getGRFSize() == 0);
         // need to return the starting grf for constant to client
-        ProgramOutput()->m_startReg = offset / SIZE_GRF;
+        ProgramOutput()->m_startReg = offset / getGRFSize();
 
         // allocate space for NOS constants and pushed constants
         AllocateConstants3DShader(offset);
 
-        assert(offset%SIZE_GRF == 0);
+
+        assert(offset%getGRFSize() == 0);
         unsigned int payloadEnd = offset;
         //Allocate size for values coming from VS
         for (uint i = 0; i < setup.size(); i++)
@@ -278,7 +265,7 @@ namespace IGC
                 offset += 4 * SIZE_DWORD;
             }
         }
-        
+
         offset = payloadEnd;
         // create output registers for coarse phase
         calignmentSize as;
@@ -428,7 +415,8 @@ namespace IGC
         }
         return baryReg;
     }
-    
+
+
     CVariable* CPixelShader::GetInputDelta(uint index, bool loweredInput)
     {
         CVariable* inputVar = setup[index];
@@ -482,25 +470,18 @@ namespace IGC
         return inputVar;
     }
 
-    CVariable* CPixelShader::GetZDelta()
+    CVariable* CPixelShader::GetZWDelta()
     {
-        if (!m_ZDelta)
+        if (!m_ZWDelta)
         {
-            m_ZDelta =
-                GetNewVariable(4, ISA_TYPE_F, EALIGN_OWORD, false, m_numberInstance);
+            uint numLanes = 8; // single GRF
+
+            m_ZWDelta =
+                GetNewVariable(numLanes, ISA_TYPE_F, EALIGN_GRF, false, m_numberInstance);
         }
-        return m_ZDelta;
+        return m_ZWDelta;
     }
 
-    CVariable* CPixelShader::GetWDelta()
-    {
-        if (!m_WDelta)
-        {
-            m_WDelta =
-                GetNewVariable(4, ISA_TYPE_F, EALIGN_OWORD, false, m_numberInstance);
-        }
-        return m_WDelta;
-    }
 
     CVariable* CPixelShader::GetPositionZ()
     {
@@ -664,8 +645,7 @@ namespace IGC
         m_PixelPhaseCounter = nullptr;
         m_SampleOffsetX = nullptr;
         m_SampleOffsetY = nullptr;
-        m_ZDelta = nullptr;
-        m_WDelta = nullptr;
+        m_ZWDelta = nullptr;
         m_hasEOT = false;
         m_NeedPSSync = false;
         m_CoarseoMask = nullptr;
@@ -691,7 +671,7 @@ namespace IGC
         if (simd32Shader)
         {
             unsigned kernelSize = simd32Shader->m_simdProgram.m_programSize;
-            bool forceSIMD32 = 
+            bool forceSIMD32 =
                 (this->GetContext()->getCompilerOption().forcePixelShaderSIMDMode &
                     FLAG_PS_SIMD_MODE_FORCE_SIMD32) != 0;
 
@@ -724,14 +704,14 @@ namespace IGC
     void CPixelShader::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
     {
         const PixelShaderInfo &psInfo = GetContext()->getModuleMetaData()->psInfo;
-        
+
         pKernelProgram->blendToFillEnabled = psInfo.blendToFillEnabled;
         pKernelProgram->forceEarlyZ = psInfo.forceEarlyZ;
 
         pKernelProgram->isCoarsePS = m_phase == PSPHASE_COARSE;
         pKernelProgram->hasCoarsePixelSize = m_HasCoarseSize;
         pKernelProgram->hasSampleOffset = m_SampleOffsetX || m_SampleOffsetY;
-        pKernelProgram->hasZWDelta = m_ZDelta || m_WDelta;
+        pKernelProgram->hasZWDelta = m_ZWDelta;
         pKernelProgram->ConstantBufferLoaded = m_constantBufferLoaded;
         pKernelProgram->hasControlFlow = m_numBlocks > 1 ? true : false;
         pKernelProgram->MaxNumberOfThreads = m_Platform->getMaxPixelShaderThreads();
@@ -747,10 +727,10 @@ namespace IGC
         pKernelProgram->outputDepth = m_HasoDepth;
         pKernelProgram->oMask = m_HasoMask;
         pKernelProgram->outputStencil = m_HasoStencil;
-		pKernelProgram->sampleCmpToDiscardOptimizationPossible = GetContext()->m_instrTypes.sampleCmpToDiscardOptimizationPossible;
-		pKernelProgram->sampleCmpToDiscardOptimizationSlot = GetContext()->m_instrTypes.sampleCmpToDiscardOptimizationSlot;
+        pKernelProgram->sampleCmpToDiscardOptimizationPossible = GetContext()->m_instrTypes.sampleCmpToDiscardOptimizationPossible;
+        pKernelProgram->sampleCmpToDiscardOptimizationSlot = GetContext()->m_instrTypes.sampleCmpToDiscardOptimizationSlot;
         pKernelProgram->needPSSync = m_NeedPSSync;
-		pKernelProgram->hasInputCoverageMask = m_HasInputCoverageMask;
+        pKernelProgram->hasInputCoverageMask = m_HasInputCoverageMask;
         pKernelProgram->hasPullBary = m_HasPullBary;
         pKernelProgram->isPerSample = IsPerSample();
         if (NamedMDNode* primIdNod = entry->getParent()->getNamedMetadata("PrimIdLocation"))
@@ -766,7 +746,7 @@ namespace IGC
         pKernelProgram->renderTargetMask = m_RenderTargetMask;
         pKernelProgram->constantInterpolationEnableMask = m_ConstantInterpolationMask;
         pKernelProgram->hasEvalSampler = m_HasEvalSampler;
-        pKernelProgram->NOSBufferSize = m_NOSBufferSize / SIZE_GRF; // in 256 bits
+        pKernelProgram->NOSBufferSize = m_NOSBufferSize / getGRFSize(); // in 256 bits
         pKernelProgram->isMessageTargetDataCacheDataPort = isMessageTargetDataCacheDataPort;
 
         CreateGatherMap();
@@ -811,7 +791,7 @@ namespace IGC
     void CPixelShader::PreCompile()
     {
         CreateImplicitArgs();
-        m_R1 = GetNewVariable((SIZE_GRF >> 2), ISA_TYPE_D, EALIGN_GRF, false, m_numberInstance);
+        m_R1 = GetNewVariable((getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF, false, m_numberInstance);
         CodeGenContext *ctx = GetContext();
 
         // make sure the return block is properly set
@@ -819,7 +799,7 @@ namespace IGC
         {
             m_HasDiscard = true;
         }
-        m_VectorMask = m_CG->NeedVMask();
+
         setup.resize(4 * g_c_Max_PS_attributes, nullptr);
         if(LowerPSInput())
         {
@@ -946,8 +926,8 @@ namespace IGC
         }
         uint messageDescriptor = PIPullPixelPayload(
             m_SIMDSize == SIMDMode::SIMD8 ? EU_PI_MESSAGE_SIMD8 : EU_PI_MESSAGE_SIMD16,
-            m_PixelPhasePayload->GetSize() / SIZE_GRF,
-            payload->GetSize() / SIZE_GRF,
+            m_PixelPhasePayload->GetSize() / getGRFSize(),
+            payload->GetSize() / getGRFSize(),
             false,
             false,
             false,
@@ -993,9 +973,9 @@ namespace IGC
         if (m_phase == PSPHASE_PIXEL)
         {
             uint responseLength = 2;
-            m_PixelPhasePayload = GetNewVariable(responseLength*(SIZE_GRF >> 2), ISA_TYPE_D, EALIGN_GRF);
+            m_PixelPhasePayload = GetNewVariable(responseLength*(getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF);
             m_PixelPhaseCounter = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_UW, 0, 1);
-            m_CoarseParentIndex = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_UW, SIZE_GRF, numLanes(m_SIMDSize));
+            m_CoarseParentIndex = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_UW, getGRFSize(), numLanes(m_SIMDSize));
             m_R1 = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_D, 0, 8);
             encoder.SetNoMask();
             encoder.SetSimdSize(SIMDMode::SIMD1);
@@ -1009,6 +989,12 @@ namespace IGC
         {
             emitPSInputLowering();
         }
+    }
+
+    void CPixelShader::PreAnalysisPass()
+    {
+        m_VectorMask = m_CG->NeedVMask();
+        CShader::PreAnalysisPass();
     }
 
     void CPixelShader::AddEpilogue(llvm::ReturnInst* ret)
@@ -1094,7 +1080,7 @@ namespace IGC
     bool CPixelShader::CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Function &F)
     {
         CodeGenContext* ctx = GetContext();
-        bool forceSIMD32 = 
+        bool forceSIMD32 =
             (ctx->getCompilerOption().forcePixelShaderSIMDMode &
                 FLAG_PS_SIMD_MODE_FORCE_SIMD32) != 0;
         bool forceSIMD16 =
@@ -1139,7 +1125,7 @@ namespace IGC
             }
 
             CShader* simd16Program = m_parent->GetShader(SIMDMode::SIMD16);
-            if ((simd16Program == nullptr || 
+            if ((simd16Program == nullptr ||
                 simd16Program->ProgramOutput()->m_programBin == 0 ||
                 simd16Program->ProgramOutput()->m_scratchSpaceUsedBySpills > 0))
             {
@@ -1157,7 +1143,7 @@ namespace IGC
             {
                 return false;
             }
-            
+
             if(iSTD::BitCount(m_RenderTargetMask) > 1)
             {
                 // don't compile SIMD32 for MRT as we may trash the render cache
@@ -1204,6 +1190,8 @@ namespace IGC
             cps.m_scratchSpaceUsedBySpills + ps.m_scratchSpaceUsedBySpills;
         linked.m_scratchSpaceUsedByGtpin =
             cps.m_scratchSpaceUsedByGtpin + ps.m_scratchSpaceUsedByGtpin;
+        linked.m_scratchSpaceUsedByStateless =
+            cps.m_scratchSpaceUsedByStateless + ps.m_scratchSpaceUsedByStateless;
         linked.m_programSize = iSTD::Align(linked.m_unpaddedProgramSize, 64);
         linked.m_programBin = IGC::aligned_malloc(linked.m_programSize, 16);
         // Copy coarse phase
@@ -1310,7 +1298,7 @@ namespace IGC
             // Single PS
             CodeGen(ctx, shaders);
             // Assuming single shader information in metadata
-			Function *pFunc = getUniqueEntryFunc(pMdUtils);
+            Function *pFunc = getUniqueEntryFunc(pMdUtils);
             // gather data to send back to the driver
             shaders[pFunc]->FillProgram(&ctx->programOutput);
             COMPILER_SHADER_STATS_PRINT(shaders[pFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");
@@ -1360,15 +1348,10 @@ namespace IGC
                     else if (IID == GenISAIntrinsic::GenISA_DCL_SystemValue)
                     {
                         SGVUsage usage = (SGVUsage)llvm::cast<llvm::ConstantInt>(intr->getOperand(0))->getZExtValue();
-                        if (usage == POSITION_Z)
+                        if (usage == POSITION_Z || usage == POSITION_W)
                         {
-                            CVariable* offset = GetZDelta();
-                            encoder.MarkAsOutput(offset);
-                        }
-                        if (usage == POSITION_W)
-                        {
-                            CVariable* offset = GetWDelta();
-                            encoder.MarkAsOutput(offset);
+                            CVariable* deltas = GetZWDelta();
+                            encoder.MarkAsOutput(deltas);
                         }
                     }
                 }
@@ -1403,7 +1386,7 @@ namespace IGC
 
     bool CPixelShader::LowerPSInput()
     {
-        return (m_SIMDSize == SIMDMode::SIMD16 || !m_Platform->supportMixMode());        
+        return (m_SIMDSize == SIMDMode::SIMD16 || !m_Platform->supportMixMode());
     }
 
     void CPixelShader::emitPSInputLowering()

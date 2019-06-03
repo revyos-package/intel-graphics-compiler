@@ -522,7 +522,7 @@ void KernelDebugInfo::computeMissingVISAIds()
 {
     unsigned int maxCISAId = 0;
 
-    for (auto bb : getKernel().fg.BBs)
+    for (auto bb : getKernel().fg)
     {
         for (auto inst : *bb)
         {
@@ -536,7 +536,7 @@ void KernelDebugInfo::computeMissingVISAIds()
 
     std::vector<bool> seenVISAIds(maxCISAId+1, false);
 
-    for (auto bb : getKernel().fg.BBs)
+    for (auto bb : getKernel().fg)
     {
         for (auto inst : *bb)
         {
@@ -574,7 +574,7 @@ void KernelDebugInfo::generateGenISAToVISAIndex()
     // This is used to emit debug_ranges section in IGC.
     // Inserting entries per Gen ISA offset guarantees
     // all instructions will be present in the vector.
-    for (auto bb : kernel->fg.BBs)
+    for (auto bb : kernel->fg)
     {
         for (auto inst : *bb)
         {
@@ -627,7 +627,7 @@ void KernelDebugInfo::generateByteOffsetMapping(std::list<G4_BB*>& stackCallEntr
     unsigned int maxVISAIndex = 0;
     uint64_t maxGenIsaOffset = 0;
     // Now traverse CFG, create pair of CISA byte offset, gen binary offset and push to vector
-    for (BB_LIST_ITER bb_it = kernel->fg.BBs.begin(), bbEnd = kernel->fg.BBs.end(); bb_it != bbEnd; bb_it++)
+    for (BB_LIST_ITER bb_it = kernel->fg.begin(), bbEnd = kernel->fg.end(); bb_it != bbEnd; bb_it++)
     {
         G4_BB* bb = (*bb_it);
 
@@ -1064,9 +1064,9 @@ void emitDataSubroutines(VISAKernelImpl* visaKernel, T& t)
 
     G4_BB* stopAt = nullptr;
     // Detect number of sub-routines
-    for (auto bb : kernel->fg.BBs)
+    for (auto bb : kernel->fg)
     {
-        if (bb != kernel->fg.BBs.front() &&
+        if (bb != kernel->fg.getEntryBB() &&
             bb->size() > 0 &&
             bb->front()->isLabel() &&
             bb->front()->getLabel()->isFuncLabel())
@@ -1074,8 +1074,12 @@ void emitDataSubroutines(VISAKernelImpl* visaKernel, T& t)
             // This is required for kernels because callees are
             // stitched together in its flowgraph and BBs of
             // callees shouldnt be analyzed here.
-            stopAt = bb;
-            break;
+            // TODO: This is not correct and should be fixed for
+            // stack call. Callee sub-routines have to be
+            // recursively traversed. Code layout doesnt guarantee
+            // if a sub-routine is part of current compilation unit.
+            //stopAt = bb;
+            //break;
         }
 
         if (bb->isEndWithCall() &&
@@ -1087,7 +1091,7 @@ void emitDataSubroutines(VISAKernelImpl* visaKernel, T& t)
 
     emitDataUInt16((uint16_t) uniqueSubs.size(), t);
 
-    for (auto bb : kernel->fg.BBs)
+    for (auto bb : kernel->fg)
     {
         G4_INST* firstInst = nullptr;
         G4_INST* lastInst = nullptr;
@@ -1298,7 +1302,7 @@ void emitDataCallerSave(VISAKernelImpl* visaKernel, T& t)
 
     uint16_t numCallerSaveEntries = 0;
     // Compute total caller save entries to emit
-    for (auto bbs : kernel->fg.BBs)
+    for (auto bbs : kernel->fg)
     {
         if (kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
         {
@@ -1335,7 +1339,7 @@ void emitDataCallerSave(VISAKernelImpl* visaKernel, T& t)
 
     if (numCallerSaveEntries > 0)
     {
-        for (auto bbs : kernel->fg.BBs)
+        for (auto bbs : kernel->fg)
         {
             if (kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
             {
@@ -1668,8 +1672,8 @@ void KernelDebugInfo::updateRelocOffset()
     // in binary buffer.
 
     bool done = false;
-    BB_LIST_ITER bbItEnd = getKernel().fg.BBs.end();
-    for(auto bbIt = getKernel().fg.BBs.begin();
+    BB_LIST_ITER bbItEnd = getKernel().fg.end();
+    for(auto bbIt = getKernel().fg.begin();
         bbIt != bbItEnd && done == false;
         bbIt++)
     {
@@ -1708,7 +1712,7 @@ void emitDebugInfo(VISAKernelImpl* kernel, std::list<VISAKernelImpl*>& functions
         }
     }
 #ifdef DEBUG_VERBOSE_ON
-	addCallFrameInfo(kernel);
+    addCallFrameInfo(kernel);
 
     for (auto& funcIt : functions)
     {
@@ -1733,8 +1737,8 @@ void resetGenOffsets(G4_Kernel& kernel)
 {
     // Iterate over all instructions in kernel and set gen
     // offset of BinInst instance to 0.
-    auto bbItEnd = kernel.fg.BBs.end();
-    for(auto bbIt = kernel.fg.BBs.begin();
+    auto bbItEnd = kernel.fg.end();
+    for(auto bbIt = kernel.fg.begin();
         bbIt != bbItEnd;
         bbIt++)
     {
@@ -1909,7 +1913,7 @@ void updateDebugInfo(G4_Kernel& kernel, std::vector<std::tuple<G4_Declare*, G4_I
     }
 }
 
-void updateDebugInfo(G4_Kernel& kernel, G4_Declare* dcl, uint32_t start, uint32_t end, Mem_Manager& mem)
+void updateDebugInfo(G4_Kernel& kernel, G4_Declare* dcl, uint32_t start, uint32_t end)
 {
     auto lrInfo = kernel.getKernelDebugInfo()->getLiveIntervalInfo(dcl);
     if (start != UNMAPPABLE_VISA_INDEX &&
@@ -1963,7 +1967,7 @@ void KernelDebugInfo::updateCallStackLiveIntervals()
         auto fretVarLI = getKernel().getKernelDebugInfo()->getLiveIntervalInfo(fretVar);
         fretVarLI->clearLiveIntervals();
 
-        for (auto bbs : getKernel().fg.BBs)
+        for (auto bbs : getKernel().fg)
         {
             for (auto insts : *bbs)
             {
@@ -2357,7 +2361,7 @@ void emitSubRoutineInfo(VISAKernelImpl* visaKernel)
 {
     auto kernel = visaKernel->getKernel();
 
-    for (auto bb : kernel->fg.BBs)
+    for (auto bb : kernel->fg)
     {
         G4_INST* firstInst = nullptr;
         G4_INST* lastInst = nullptr;
@@ -2460,7 +2464,7 @@ void emitCallerSaveInfo(VISAKernelImpl* visaKernel)
 {
     auto kernel = visaKernel->getKernel();
 
-    for (auto bbs : kernel->fg.BBs)
+    for (auto bbs : kernel->fg)
     {
         if (kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
         {
@@ -2516,7 +2520,7 @@ void dumpCFG(VISAKernelImpl* visaKernel)
     auto reloc_offset = 0;
     bool done = false;
 
-    for (auto bbs : kernel->fg.BBs)
+    for (auto bbs : kernel->fg)
     {
         for (auto insts : *bbs)
         {
@@ -2550,7 +2554,7 @@ void addCallFrameInfo(VISAKernelImpl* kernel)
     }
     std::cerr << "\n";
 
-	emitSubRoutineInfo(kernel);
+    emitSubRoutineInfo(kernel);
 
     emitBEFP(kernel);
 

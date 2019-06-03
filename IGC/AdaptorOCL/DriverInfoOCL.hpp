@@ -42,7 +42,7 @@ namespace TC
 
         bool NeedCheckContractionAllowed() const override { return true; }
 
-        bool NeedPreCompiledLibFuncs() const override { return true; }
+        bool NeedI64BitDivRem() const override { return true; }
 
         bool HasMemoryIntrinsics() const override { return true; }
 
@@ -64,6 +64,9 @@ namespace TC
         bool Enable64BitEmu() const override { return true; }
 
         bool NeedIEEESPDiv() const override { return true; }
+
+        // Not needed as OCL doesn't go through emitStore3DInner
+        bool splitUnalignedVectors() const override { return false; }
     };
 
     // In case some cpas are specific to NEO

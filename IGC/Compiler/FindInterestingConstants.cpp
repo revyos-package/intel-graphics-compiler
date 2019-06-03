@@ -97,7 +97,7 @@ void FindInterestingConstants::FoldsToConstPropagate(llvm::Instruction* I)
 
         if (Instruction* useInst = dyn_cast<Instruction>(*UI))
         {
-            if (useInst->getParent() == I->getParent())	// TBD Do we need this
+            if (useInst->getParent() == I->getParent())    // TBD Do we need this
             {
                 if (FoldsToConst(I, useInst, propagate))
                 {
@@ -251,7 +251,7 @@ void FindInterestingConstants::addInterestingConstant(CodeGenContext* ctx, unsig
     // For constant buffer accesses of size <= 32bit.
     if (size_in_bytes <= 4)
     {
-        USC::ConstantAddrValue cl;
+        SConstantAddrValue cl;
         cl.ca.bufId = bufId;
         cl.ca.eltId = eltId;
         cl.ca.size = size_in_bytes;

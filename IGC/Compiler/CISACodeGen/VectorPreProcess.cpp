@@ -41,7 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 using namespace llvm;
 using namespace IGC;
 
-// 
+//
 // Description of VectorPreProcess Pass
 //   The purpose is both to legalize vector types and to reduce register
 //   presure. Once this pass is done, there is no 3-element vector whose
@@ -53,7 +53,7 @@ using namespace IGC;
 //    are either multiple of DW, vector3, or their size is less than
 //    4 bytes (see details in code).  Vector3 will be specially
 //    handled later.
-//    For example,  
+//    For example,
 //        <16xi64> ---> four <4xi64>
 //        <15xi32> ---> <8xi32>, <7xi32>
 //        <13xi32> ---> <8xi32>, <5xi32>
@@ -62,7 +62,7 @@ using namespace IGC;
 //        <39xi8>  ---> <32xi8>, <4xi8>, <3xi8>
 //    Note that splitting keeps the vector element's type without
 //    changing it.
-//        
+//
 // 2. Special processing of 3-element vectors
 //    If (vector element's size < 4 bytes)
 //    {
@@ -91,11 +91,11 @@ using namespace IGC;
 //
 namespace
 {
-    // AbstractLoadInst and AbstractStoreInst abstract away the differences 
+    // AbstractLoadInst and AbstractStoreInst abstract away the differences
     // between ldraw and Load and between storeraw and Store.
     // Note on usage: The Value* passed as the ptr paramter to the Create method
-    // should be either the result of the getPointerOperand() method or the 
-    // CreateConstScalarGEP() method. Do not attempt to do arithmetic 
+    // should be either the result of the getPointerOperand() method or the
+    // CreateConstScalarGEP() method. Do not attempt to do arithmetic
     // (or pointer arithmetic) on these values.
     class AbstractLoadInst
     {
@@ -223,7 +223,7 @@ namespace
         }
         unsigned int getAlignment() const
         {
-            return isa<StoreInst>(m_inst) ? getStore()->getAlignment() : getStoreRaw()->getArgOperand(2)->getType()->getPrimitiveSizeInBits() / 8;
+            return isa<StoreInst>(m_inst) ? getStore()->getAlignment() : (unsigned int)llvm::cast<ConstantInt>(getStoreRaw()->getArgOperand(3))->getZExtValue();
         }
         void setAlignment(unsigned int alignment)
         {
@@ -337,14 +337,19 @@ namespace
           , m_C(nullptr)
           , m_WorkList()
           , m_Temps()
+          , m_CGCtx(nullptr)
         {
             initializeVectorPreProcessPass(*PassRegistry::getPassRegistry());
         }
 
-        virtual bool runOnFunction(Function &F);
-        virtual void getAnalysisUsage(AnalysisUsage &AU) const
+        StringRef getPassName() const override { return "VectorPreProcess"; }
+        bool runOnFunction(Function &F) override;
+        void getAnalysisUsage(AnalysisUsage &AU) const override
         {
             AU.setPreservesCFG();
+            AU.addRequired<CodeGenContextWrapper>();
+            AU.addRequired<MetaDataUtilsWrapper>();
+            AU.addRequired<PostDominatorTreeWrapperPass>();
         }
 
     private:
@@ -360,9 +365,9 @@ namespace
         bool isValueUsedOnlyByEEI(Value *V, ExtractElementInst** EEInsts);
 
         // Split load/store that cannot be re-layout or is too big.
-        bool splitLoadStore(Instruction *Inst, V2SMap& vecToSubVec);
-        bool splitLoad(AbstractLoadInst& LI, V2SMap& vecToSubVec);
-        bool splitStore(AbstractStoreInst& SI, V2SMap& vecToSubVec);
+        bool splitLoadStore(Instruction *Inst, V2SMap& vecToSubVec, WIAnalysisRunner &WI);
+        bool splitLoad(AbstractLoadInst& LI, V2SMap& vecToSubVec, WIAnalysisRunner &WI);
+        bool splitStore(AbstractStoreInst& SI, V2SMap& vecToSubVec, WIAnalysisRunner &WI);
         bool splitVector3LoadStore(Instruction *Inst);
         // Simplify load/store instructions if possible. Return itself if no
         // simplification is performed.
@@ -381,6 +386,7 @@ namespace
         InstWorkVector m_WorkList;
         ValVector m_Temps;
         InstWorkVector m_Vector3List; // used for keep all 3-element vectors.
+        IGC::CodeGenContext* m_CGCtx;
     };
 }
 
@@ -390,6 +396,9 @@ namespace
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(VectorPreProcess, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(PostDominatorTreeWrapperPass)
 IGC_INITIALIZE_PASS_END(VectorPreProcess, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char VectorPreProcess::ID = 0;
@@ -430,8 +439,8 @@ bool VectorPreProcess::isValueUsedOnlyByEEI(Value *V, ExtractElementInst **EEIns
          UI != UE; ++UI )
     {
         ExtractElementInst *EEI = dyn_cast<ExtractElementInst>(*UI);
-        if( !EEI || 
-            (EEI->getOperand(0) != V) || 
+        if( !EEI ||
+            (EEI->getOperand(0) != V) ||
             !isa<ConstantInt>(EEI->getOperand(1)) )
         {
             return false;
@@ -451,7 +460,7 @@ bool VectorPreProcess::isValueUsedOnlyByEEI(Value *V, ExtractElementInst **EEIns
 
 // SVals[0:NumElements] has all scalar elements of vector VI. This function
 // tries to replace all uses of VI with SVals[...] if possible, If not
-// possible, re-generate the vector from SVals at the BB of VI.  
+// possible, re-generate the vector from SVals at the BB of VI.
 //
 // This function also erase VI.
 void VectorPreProcess::replaceAllVectorUsesWithScalars(Instruction *VI, ValVector& SVals)
@@ -557,7 +566,7 @@ void VectorPreProcess::createSplitVectorTypes(
         ++j;
     }
 
-    // Sub-vectors are 
+    // Sub-vectors are
     //   1. ebytes >=4, the remaing is a single sub-vector; or
     //   2. ebytes < 4, the remaining is splitted into
     //        one sub-vector of multiple 4xebytes, and
@@ -587,7 +596,8 @@ void VectorPreProcess::createSplitVectorTypes(
     Len = j;
  }
 
-bool VectorPreProcess::splitStore(AbstractStoreInst& ASI, V2SMap& vecToSubVec)
+bool VectorPreProcess::splitStore(
+    AbstractStoreInst& ASI, V2SMap& vecToSubVec, WIAnalysisRunner &WI)
 {
     Instruction *SI = ASI.getInst();
     Value *StoredVal = ASI.getValueOperand();
@@ -611,7 +621,12 @@ bool VectorPreProcess::splitStore(AbstractStoreInst& ASI, V2SMap& vecToSubVec)
         {
             ASI.setAlignment(std::max(getKnownAlignment(ASI.getPointerOperand(), *m_DL), alignment));
         }
-        const uint32_t splitSize = ASI.getAlignment() < 4 ? 4 : (isStoreInst ? VP_SPLIT_SIZE : VP_RAW_SPLIT_SIZE);
+        bool needsDWordSplit =
+            (!isStoreInst ||
+             m_CGCtx->m_DriverInfo.splitUnalignedVectors() ||
+             !WI.isUniform(ASI.getInst()))
+            && ASI.getAlignment() < 4;
+        const uint32_t splitSize = needsDWordSplit ? 4 : (isStoreInst ? VP_SPLIT_SIZE : VP_RAW_SPLIT_SIZE);
         createSplitVectorTypes(ETy, nelts, splitSize, tys, tycnts, len);
     }
     else
@@ -694,7 +709,7 @@ bool VectorPreProcess::splitStore(AbstractStoreInst& ASI, V2SMap& vecToSubVec)
     bool IsVolatile = ASI.getIsVolatile();
     uint32_t eOffset = 0;
     uint32_t EBytes = int_cast<unsigned int>(m_DL->getTypeAllocSize(ETy));
-    
+
     for (uint32_t i = 0, subIdx = 0; i < len; ++i)
     {
         VectorType *VTy1 = dyn_cast<VectorType>(tys[i]);
@@ -736,7 +751,8 @@ bool VectorPreProcess::splitStore(AbstractStoreInst& ASI, V2SMap& vecToSubVec)
     return true;
 }
 
-bool VectorPreProcess::splitLoad(AbstractLoadInst& ALI, V2SMap& vecToSubVec)
+bool VectorPreProcess::splitLoad(
+    AbstractLoadInst& ALI, V2SMap& vecToSubVec, WIAnalysisRunner &WI)
 {
     Instruction* LI = ALI.getInst();
     bool isLdRaw = isa<LdRawIntrinsic>(LI);
@@ -757,7 +773,9 @@ bool VectorPreProcess::splitLoad(AbstractLoadInst& ALI, V2SMap& vecToSubVec)
         {
             ALI.setAlignment(std::max(getKnownAlignment(ALI.getPointerOperand(), *m_DL), alignment));
         }
-        splitSize = ALI.getAlignment() < 4 ? 4 : (isLdRaw ? VP_RAW_SPLIT_SIZE : VP_SPLIT_SIZE);
+
+        if ((isLdRaw || !WI.isUniform(ALI.getInst())) && ALI.getAlignment() < 4)
+            splitSize = 4;
     }
 
     createSplitVectorTypes(ETy, nelts, splitSize, tys, tycnts, len);
@@ -836,7 +854,8 @@ bool VectorPreProcess::splitLoad(AbstractLoadInst& ALI, V2SMap& vecToSubVec)
     return true;
 }
 
-bool VectorPreProcess::splitLoadStore(Instruction *Inst, V2SMap& vecToSubVec)
+bool VectorPreProcess::splitLoadStore(
+    Instruction *Inst, V2SMap& vecToSubVec, WIAnalysisRunner &WI)
 {
     Optional<AbstractLoadInst> ALI = AbstractLoadInst::get(Inst);
     Optional<AbstractStoreInst> ASI = AbstractStoreInst::get(Inst);
@@ -875,12 +894,12 @@ bool VectorPreProcess::splitLoadStore(Instruction *Inst, V2SMap& vecToSubVec)
 
     if (aALI)
     {
-        splitLoad(aALI.getValue(), vecToSubVec);
+        splitLoad(aALI.getValue(), vecToSubVec, WI);
     }
 
     if (ASI)
     {
-        splitStore(ASI.getValue(), vecToSubVec);
+        splitStore(ASI.getValue(), vecToSubVec, WI);
     }
     return true;
 }
@@ -947,7 +966,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction *Inst)
                 Elt2 = ALI->Create(eTy, offsetAddr, newAlign, ALI->getIsVolatile());
             }
 
-            // A little optimization here 
+            // A little optimization here
             ExtractElementInst *EEInsts[3];
             for (int i = 0; i < 3; ++i)
             {
@@ -982,7 +1001,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction *Inst)
             ALI->getInst()->eraseFromParent();
         }
         else
-        {   
+        {
             Value *Ptr = ASI->getPointerOperand();
             // Split 3-element into 2-element + 1 scalar
             Type *newVTy = VectorType::get(eTy, 2);
@@ -1088,7 +1107,7 @@ void VectorPreProcess::getOrGenScalarValues(
         for (uint32_t i = 0; i < nelts; ++i)
         {
             scalars[i] = udv;
-        }       
+        }
     }
     else if (ConstantVector* CV = dyn_cast<ConstantVector>(VecVal))
     {
@@ -1148,7 +1167,7 @@ void VectorPreProcess::getOrGenScalarValues(
             // VecVal is an argument or constant
             inst_b = F.begin()->getFirstInsertionPt();
         }
-        
+
         IRBuilder<> Builder(&(*inst_b));
         for (uint32_t i = 0; i < nelts; ++i)
         {
@@ -1365,6 +1384,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
     bool changed = false;
     m_DL = &F.getParent()->getDataLayout();
     m_C  = &F.getContext();
+    m_CGCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
 
     for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I)
     {
@@ -1392,11 +1412,11 @@ bool VectorPreProcess::runOnFunction(Function& F)
     if (Simplified)
     {
         changed = true;
-		auto new_end = std::remove_if(m_WorkList.begin(), m_WorkList.end(),
+        auto new_end = std::remove_if(m_WorkList.begin(), m_WorkList.end(),
                        [](Value *V) -> bool {
-			return !V || (!isAbstractStoreInst(V) && !isAbstractLoadInst(V));
+            return !V || (!isAbstractStoreInst(V) && !isAbstractLoadInst(V));
         });
-		m_WorkList.erase(new_end, m_WorkList.end());
+        m_WorkList.erase(new_end, m_WorkList.end());
     }
 
     // Split vectors
@@ -1407,11 +1427,25 @@ bool VectorPreProcess::runOnFunction(Function& F)
         // m_Temps is used to keep loads that needs post-processing.
         m_Temps.clear();
 
-        for (uint32_t i = 0; i < m_WorkList.size(); ++i)
         {
-            if (splitLoadStore(m_WorkList[i], vecToSubVec))
+            auto *MDUtils =
+                getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+            auto *PDT =
+                &getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
+            auto *ModMD =
+                getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+
+            TranslationTable TT;
+            TT.run(F);
+            WIAnalysisRunner WI(&F, PDT, MDUtils, m_CGCtx, ModMD, &TT);
+            WI.run();
+
+            for (uint32_t i = 0; i < m_WorkList.size(); ++i)
             {
-                changed = true;
+                if (splitLoadStore(m_WorkList[i], vecToSubVec, WI))
+                {
+                    changed = true;
+                }
             }
         }
 

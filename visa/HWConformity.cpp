@@ -487,8 +487,9 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB *bb)
 
     if (inst->asMathInst()->getMathCtrl() == MATH_INVM || inst->asMathInst()->getMathCtrl() == MATH_RSQRTM)
     {
-        if (IS_DFTYPE(inst->getDst()->getType()) && inst->getExecSize() == 8)
+        if (IS_DFTYPE(inst->getDst()->getType()) && ((uint32_t) (inst->getExecSize() * 2)) > builder.getNativeExecSize())
         {
+            // need to scale exec size by two since it's 64b type
             evenlySplitInst(it, bb);
             return true;
         }
@@ -499,7 +500,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB *bb)
     bool isIntDivide = inst->asMathInst()->isMathIntDiv();
     bool hasSameOffset = hasSameSubregOffset(inst);
 
-    // check if the source needs a move and if so the new move type 
+    // check if the source needs a move and if so the new move type
     auto needsMove = [this, inst, isIntDivide, hasSameOffset](int srcID, G4_Type& newType)
     {
         assert((srcID == 0 || srcID == 1) && "math can have at most two sources");
@@ -507,7 +508,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB *bb)
         newType = src->getType();
         if (isIntDivide)
         {
-            G4_Type divType = IS_UNSIGNED_INT(inst->getSrc(0)->getType()) && IS_UNSIGNED_INT(inst->getSrc(1)->getType()) ? 
+            G4_Type divType = IS_UNSIGNED_INT(inst->getSrc(0)->getType()) && IS_UNSIGNED_INT(inst->getSrc(1)->getType()) ?
                 Type_UD : Type_D;
             if (newType != divType)
             {
@@ -537,7 +538,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB *bb)
             RegionDesc *rd = srcRegion->getRegion();
             if (srcRegion->getModifier() != Mod_src_undef && isIntDivide)
             {
-                // no source modifer for int divide 
+                // no source modifer for int divide
                 return true;
             }
             else if (srcRegion->getRegAccess() != Direct)
@@ -590,7 +591,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB *bb)
             }
             else
             {
-                inst->setSrc(insertMovBefore(it, 1, src1->isImm() ? getNonVectorType(src1_type) : src1_type, bb), 1);  
+                inst->setSrc(insertMovBefore(it, 1, src1->isImm() ? getNonVectorType(src1_type) : src1_type, bb), 1);
             }
             src1 = inst->getSrc(1);
         }
@@ -1265,9 +1266,6 @@ void HWConformity::fix3SrcInst(INST_LIST_ITER iter, G4_BB* bb)
 
     if (inst->getExecSize() == 16)
     {
-        /*
-            According to Krishna, Narsim WA only applies if intruction is not contained in one GRF
-        */
         bool wa3rc = (VISA_WA_CHECK(builder.getPWaTable(), WaDisableSIMD16On3SrcInstr)  &&
                         !(inst->getExecType() == Type_HF                                &&
                           inst->getOperand(Opnd_src1)->isSrcRegRegion()                 &&
@@ -1382,7 +1380,7 @@ static bool canReplaceMovSrcType(IR_Builder& builder, G4_INST* inst, uint32_t ex
     G4_Declare* newDcl = builder.createTempVar(numElt, dst->getType(), Either, Any);
     newDcl->setAliasDeclare(src0->getBase()->asRegVar()->getDeclare(), 0);
     RegionDesc* region = src0->isScalar() ? builder.getRegionScalar() :
-        builder.createRegionDesc((uint16_t)inst->getExecSize() * typeSizeRatio,
+        builder.createRegionDesc((uint16_t)inst->getExecSize(), (uint16_t)inst->getExecSize() * typeSizeRatio,
         inst->getExecSize(),
         (uint16_t)typeSizeRatio);
     G4_SrcRegRegion* newSrc = builder.createSrcRegRegion(
@@ -1418,10 +1416,14 @@ bool HWConformity::fixMov(INST_LIST_ITER i, G4_BB* bb)
 
     G4_Type dstType = inst->getDst()->getType();
     G4_Type srcType = inst->getSrc(0)->getType();
+    auto src = inst->getSrc(0);
 
-    if (IS_BTYPE(dstType) && (IS_DFTYPE(srcType) || IS_QTYPE(srcType)))
+    bool scalarByteToFloat = builder.noScalarByteToFloat() && IS_BTYPE(srcType) &&
+        IS_FTYPE(dstType) && src->isSrcRegRegion() && src->asSrcRegRegion()->isScalar();
+    bool dstByteSrc64b = IS_BTYPE(dstType) && (IS_DFTYPE(srcType) || IS_QTYPE(srcType));
+
+    if (scalarByteToFloat || dstByteSrc64b)
     {
-        // mov B Q/DF
         inst->setDest(insertMovAfter(i, inst->getDst(), Type_W, bb));
         return true;
     }
@@ -1464,6 +1466,7 @@ bool HWConformity::fixRotate(INST_LIST_ITER i, G4_BB* bb)
 
     MUST_BE_TRUE(IS_WTYPE(dst->getType()) || IS_DTYPE(dst->getType()), "dst type must be *W or *D");
     MUST_BE_TRUE(IS_WTYPE(src->getType()) || IS_DTYPE(src->getType()), "src type must be *W or *D");
+
     if (G4_Type_Table[dst->getType()].byteSize != G4_Type_Table[src->getType()].byteSize)
     {
         // keep exec type same and change dst to be same type as src
@@ -1622,7 +1625,7 @@ bool HWConformity::fixDstAlignment( INST_LIST_ITER i, G4_BB* bb, G4_Type extype,
          {
              return false;
          }
-        
+
          if (inst->opcode() == G4_mov)
          {
              bool intHFConversion = false;
@@ -1640,7 +1643,7 @@ bool HWConformity::fixDstAlignment( INST_LIST_ITER i, G4_BB* bb, G4_Type extype,
              {
                  return insertMOV;
              }
-         }     
+         }
 
          if( !VISA_WA_CHECK(builder.getPWaTable(), WaByteDstAlignRelaxedRule) )
          {
@@ -1811,7 +1814,7 @@ bool HWConformity::fixIndirectOpnd( INST_LIST_ITER i, G4_BB *bb )
     return spill_dst;
 }
 
-// If an accumulator is a source operand, its register region must match that of the 
+// If an accumulator is a source operand, its register region must match that of the
 // destination register (which means GRF-aligned since we always GRF-align Acc)
 // also check for restrictions on explicit acc dst
 bool HWConformity::fixAcc(INST_LIST_ITER iter, G4_BB* bb)
@@ -1846,7 +1849,7 @@ bool HWConformity::fixAcc(INST_LIST_ITER iter, G4_BB* bb)
         }
     }
 
-    if (useAcc && 
+    if (useAcc &&
         dst &&
         dst->getBase() &&
         dst->getBase()->isRegVar())
@@ -1919,7 +1922,7 @@ void HWConformity::generateMacl(INST_LIST_ITER it, G4_BB* bb)
     MUST_BE_TRUE(mulInst->opcode() == G4_mul, "expect mul instruction");
     if (mulInst->getExecSize() == 16)
     {
-        auto startIter = it; 
+        auto startIter = it;
         bool isFirstInst = startIter == bb->begin();
         if (!isFirstInst)
         {
@@ -1931,8 +1934,8 @@ void HWConformity::generateMacl(INST_LIST_ITER it, G4_BB* bb)
             ++startIter;
         }
         // startIter now points to first mul created by split
-        auto endIter = it; 
-        ++endIter;  
+        auto endIter = it;
+        ++endIter;
         // endIter points to the first inst after the original mul
         for (auto iter = startIter; iter != endIter;)
         {
@@ -2107,7 +2110,7 @@ bool HWConformity::fixMULInst( INST_LIST_ITER &i, G4_BB *bb )
     if (builder.hasMacl() && !IS_QTYPE(dst->getType()) &&
         (builder.noDwDstForDwordMul() || inst->getExecSize() > 1))
     {
-        // use macl for D = D x D. We use macl when possible 
+        // use macl for D = D x D. We use macl when possible
         // except on scalar inst on platforms that support native DMul
         generateMacl(i, bb);
         return true;
@@ -2312,7 +2315,7 @@ bool HWConformity::fixMULInst( INST_LIST_ITER &i, G4_BB *bb )
 
             next_inst->setOptionOn(InstOpt_AccWrCtrl);
 
-            if (exec_size == 16)
+            if (exec_size > builder.getNativeExecSize())
             {
                 splitDWMULInst(i, last_iter, bb);
             }
@@ -2387,7 +2390,7 @@ bool HWConformity::fixMULInst( INST_LIST_ITER &i, G4_BB *bb )
         vs = wd;
     }
     rd = builder.createRegionDesc(vs, wd, hs);
-    G4_SrcRegRegion *acc_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct, 
+    G4_SrcRegRegion *acc_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct,
         builder.phyregpool.getAcc0Reg(), 0, 0, rd, tmp_type);
 
     newInst->setImplAccSrc(acc_src_opnd);
@@ -2516,7 +2519,7 @@ bool HWConformity::fixMULInst( INST_LIST_ITER &i, G4_BB *bb )
         iter++;
     }
 
-    if (exec_size == 16)
+    if (exec_size > builder.getNativeExecSize())
     {
         splitDWMULInst(i, last_iter, bb);
     }
@@ -2548,7 +2551,8 @@ void HWConformity::fixMULHInst( INST_LIST_ITER &i, G4_BB *bb )
     }
 
     bool useMulQDD = false;
-    if (exec_size <= 8 && !builder.no64bitRegioning())
+    if (exec_size <= builder.getNativeExecSize() && !builder.no64bitRegioning() &&
+        builder.supportFloatOr64bRegioning())
     {
         useMulQDD = true;
         if (!IS_DTYPE(src0->getType()) || !IS_DTYPE(src1->getType()))
@@ -2632,7 +2636,7 @@ void HWConformity::fixMULHInst( INST_LIST_ITER &i, G4_BB *bb )
         return;
     }
 
-    if (!builder.supportSrcModforMul() && 
+    if (!builder.supportSrcModforMul() &&
        (IS_DTYPE(src0->getType()) || IS_DTYPE(src1->getType())) &&
        ((getTypeSize(src0->getType()) < 4) || (getTypeSize(src1->getType()) < 4)))
     {
@@ -2642,7 +2646,7 @@ void HWConformity::fixMULHInst( INST_LIST_ITER &i, G4_BB *bb )
 
     if (src1->isSrcRegRegion() && src1->asSrcRegRegion()->getModifier() != Mod_src_undef)
     {
-        // src1 does not support modifiers 
+        // src1 does not support modifiers
         checkSrcMod(i, bb, 1);
         src1 = inst->getSrc(1);
     }
@@ -2676,7 +2680,7 @@ void HWConformity::fixMULHInst( INST_LIST_ITER &i, G4_BB *bb )
     }
     inst->setOpcode( G4_mach );
 
-    if (src1->isImm() && src0->getType() != src1->getType()) 
+    if (src1->isImm() && src0->getType() != src1->getType())
     {
         G4_Imm *oldImm = src1->asImm();
         // Ensure src1 has the same type as src0.
@@ -2705,10 +2709,9 @@ void HWConformity::fixMULHInst( INST_LIST_ITER &i, G4_BB *bb )
 
     inst->setOptionOn(InstOpt_AccWrCtrl);
 
-    if (exec_size == 16)
+    if (exec_size > builder.getNativeExecSize())
     {
-        INST_LIST_ITER start_iter = i;
-        start_iter--;
+        auto start_iter = std::prev(i);
         splitDWMULInst( start_iter, end_iter, bb );
         i = end_iter;
     }
@@ -2791,9 +2794,6 @@ void HWConformity::copyDwordsIndirect(G4_Declare* dst,
     MUST_BE_TRUE(G4_Type_Table[dst->getElemType()].byteSize >= 4 &&
         G4_Type_Table[src->getType()].byteSize >= 4, "dst and src must have dword or qword type");
 
-    MUST_BE_TRUE(numDwords == 1 || numDwords == 2 || numDwords == 4 ||
-        numDwords == 8 || numDwords == 16, "invalid number of dwords to copy");
-
     MUST_BE_TRUE(src->getRegAccess() == IndirGRF, "source must be indirect GRF");
 
     G4_Declare* newDst = dst;
@@ -2808,6 +2808,7 @@ void HWConformity::copyDwordsIndirect(G4_Declare* dst,
     G4_SrcRegRegion* newSrc = builder.duplicateOperand(src);
     MUST_BE_TRUE(G4_Type_Table[newSrc->getType()].byteSize == 8, "only support 64-bit type source so far");
     newSrc->setType(Type_UD);
+    newSrc->setModifier(Mod_src_undef);
     if (newSrc->getRegion()->isRegionWH())
     {
         MUST_BE_TRUE(newSrc->getRegion()->width == 1, "only handle <1,0> region for now");
@@ -3426,7 +3427,7 @@ bool HWConformity::isGoodAlign1TernarySrc(G4_INST* inst, int srcPos, bool canBeI
     if (src->isImm())
     {
         // either src0 or src2 can be 16b imm, but not both
-        // permanent WA: simd16 inst can't have src0 imm. 
+        // permanent WA: simd16 inst can't have src0 imm.
         // Instead of splitting, we just add a move
 
         if (canBeImm && (srcPos == 0 || srcPos == 2) && G4_Type_Table[src->getType()].byteSize <= 2)
@@ -3464,7 +3465,7 @@ bool HWConformity::isGoodAlign1TernarySrc(G4_INST* inst, int srcPos, bool canBeI
                 }
                 if (!builder.encodeUnitStrideTernary())
                 {
-                    // we have to make sure width is not being used to cross GRF, as <1;1,0> 
+                    // we have to make sure width is not being used to cross GRF, as <1;1,0>
                     // is not a legal region for align1 ternary source (vs 1 not supported)
                     // mad doesn't support <1;1,0>, the width is at least 2
                     int minAlignment = G4_Type_Table[src->getType()].byteSize * 2;
@@ -3622,7 +3623,7 @@ bool HWConformity::isGoodAlign16Src(G4_INST* inst, int srcPos)
                 return false;
             }
 
-            if (opnd_type == Type_HF && getGenxPlatform() == GENX_BDW) 
+            if (opnd_type == Type_HF && getGenxPlatform() == GENX_BDW)
             {
                 return false;
             }
@@ -3935,11 +3936,11 @@ bool HWConformity::generateFPMad(G4_BB* bb, INST_LIST_ITER iter)
             if (isGoodMadType(type))
             {
                 G4_Operand* src = inst->getSrc(k);
-				bool isReplicated = (type == Type_DF) &&
-					src->isSrcRegRegion() &&
-					(src->asSrcRegRegion()->getRegion()->width == 2) &&
-					(src->asSrcRegRegion()->getRegion()->horzStride == 0) &&
-					(src->asSrcRegRegion()->getRegion()->vertStride == 2);
+                bool isReplicated = (type == Type_DF) &&
+                    src->isSrcRegRegion() &&
+                    (src->asSrcRegRegion()->getRegion()->width == 2) &&
+                    (src->asSrcRegRegion()->getRegion()->horzStride == 0) &&
+                    (src->asSrcRegRegion()->getRegion()->vertStride == 2);
                 if ((type == Type_DF ||
                      (type == Type_HF && getGenxPlatform() == GENX_BDW)) &&
                     execSize > 1 &&
@@ -3951,8 +3952,8 @@ bool HWConformity::generateFPMad(G4_BB* bb, INST_LIST_ITER iter)
                     auto align = type == Type_HF ? SUB_ALIGNMENT_GRFALIGN : Eight_Word;
                     broadcast(bb, iter, k, align);
                 }
-				// No need to insert mov for replicated DF src with <2;2,0> region,
-				// which can be encoded as "xyxy" or "zwzw" swizzle based on offfset
+                // No need to insert mov for replicated DF src with <2;2,0> region,
+                // which can be encoded as "xyxy" or "zwzw" swizzle based on offfset
                 else if (!isReplicated)
                 {
                     inst->setSrc(insertMovBefore(iter, k, type, bb), k);
@@ -3983,9 +3984,8 @@ bool HWConformity::generateFPMad(G4_BB* bb, INST_LIST_ITER iter)
 // ASSUMPTION:
 //    This phase must be called at the end of all other optimizations
 //    phases and just prior to testing for ACC spilling.
-void HWConformity::fixMADInst( BB_LIST_ITER it )
+void HWConformity::fixMADInst( G4_BB* bb )
 {
-    G4_BB* bb = *it;
     INST_LIST expand_list;
     // trace the MAD instrcutions that may be converted into MAC later
     std::vector<G4_INST*> madList;
@@ -4109,14 +4109,14 @@ void HWConformity::fixMADInst( BB_LIST_ITER it )
                 generate_genx_mac = false;
             }
 
-            
+
             if( madList.size() > 0 && mad_src2_def_inst != madList.back())
             {
                 // terminate the last mad list as this mad has a different definition
                 int32_t lastMadId = madList.back()->getLocalId();
                 bool macGenerated = convertMAD2MAC( i, madList, bb );
                 madList.clear();
-                if (generate_genx_mac && macGenerated && 
+                if (generate_genx_mac && macGenerated &&
                     mad_src2_def_inst->getLocalId() < lastMadId)
                 {
                     // mad's definition is before the last use of acc
@@ -4274,7 +4274,7 @@ struct AccInterval
         inst->dump();
         if (assignedAcc != -1)
         {
-            std::cerr << "\tAssigned to Acc" << assignedAcc << "\n"; 
+            std::cerr << "\tAssigned to Acc" << assignedAcc << "\n";
         }
         std::cerr << "\n";
     }
@@ -4308,7 +4308,7 @@ static bool isAccCandidate(G4_INST* inst, G4_Kernel& kernel, int& lastUse, bool&
         if (useInst->getNumSrc() == 3)
         {
 
-            if (!kernel.fg.builder->relaxedACCRestrictions() && 
+            if (!kernel.fg.builder->relaxedACCRestrictions() &&
                 std::find(threeSrcUses.begin(), threeSrcUses.end(), useInst) != threeSrcUses.end())
             {
                 // don't allow acc to appear twice in a 3-src inst
@@ -4470,7 +4470,7 @@ static bool replaceDstWithAcc(G4_INST* inst, int accNum, IR_Builder& builder)
             {
                 if (useInst->getSrc(0)->isAccReg() || useInst->getSrc(1)->isAccReg())
                 {
-                    
+
                     return false;
                 }
             }
@@ -4485,7 +4485,7 @@ static bool replaceDstWithAcc(G4_INST* inst, int accNum, IR_Builder& builder)
 
     // at this point acc substitution must succeed
 
-    G4_Areg* accReg = useAcc1 ? builder.phyregpool.getAcc1Reg() : builder.phyregpool.getAcc0Reg(); 
+    G4_Areg* accReg = useAcc1 ? builder.phyregpool.getAcc1Reg() : builder.phyregpool.getAcc0Reg();
     G4_DstRegRegion* accDst = builder.createDstRegRegion(Direct, accReg,
         (short)accNum, 0, 1, dst->getType());
     accDst->setAccRegSel(inst->getDst()->getAccRegSel());
@@ -4546,7 +4546,7 @@ static bool replaceDstWithAcc(G4_INST* inst, int accNum, IR_Builder& builder)
         }
     }
 
-	return true;
+    return true;
 }
 
 static uint32_t getNumACC(IR_Builder& builder)
@@ -4559,7 +4559,7 @@ static uint32_t getNumACC(IR_Builder& builder)
 
     if (builder.kernel.getNumRegTotal() == 256)
     {
-        numAcc *= 2;   
+        numAcc *= 2;
     }
     return numAcc;
 }
@@ -4828,7 +4828,7 @@ void HWConformity::accSubstitution(G4_BB* bb)
         if (inst->defAcc())
         {
             // skip ahead till its single use
-            // we should only have single def/use acc at this point, so any use would 
+            // we should only have single def/use acc at this point, so any use would
             // kill the def
             auto iter = instIter;
             auto useIter = std::find_if(++iter, instEnd, [](G4_INST* inst) { return inst->useAcc(); });
@@ -4836,7 +4836,7 @@ void HWConformity::accSubstitution(G4_BB* bb)
             {
                 return;
             }
-            instIter = --useIter; // start at the use inst next time 
+            instIter = --useIter; // start at the use inst next time
             continue;
         }
 
@@ -4848,7 +4848,7 @@ void HWConformity::accSubstitution(G4_BB* bb)
         }
 
         // don't attempt acc sub if def and last use are too far apart
-        // this is a crude way to avoid a long running life range from blocking 
+        // this is a crude way to avoid a long running life range from blocking
         // other acc sub opportunities
         const int accWindow = 25;
         if (lastUseId == 0 || lastUseId - inst->getLocalId() > accWindow)
@@ -4924,7 +4924,7 @@ bool HWConformity::findHoistLocation(
                 canMov = false;
                 break;
             }
- 
+
             if (inst->isRAWdep(curInst) ||
                 inst->isWAWdep(curInst) ||
                 inst->isWARdep(curInst))
@@ -5004,7 +5004,7 @@ bool HWConformity::convertMAD2MAC( INST_LIST_ITER iter, std::vector<G4_INST*> &m
         lastMad->getDst()->setType( IS_SIGNED_INT( lastMad->getDst()->getType() ) ? Type_W : Type_UW );
     }
     else if( dwDst && twoGRFDst &&
-        lastMad->hasOneUse() && 
+        lastMad->hasOneUse() &&
         !kernel.fg.globalOpndHT.isOpndGlobal(lastMad->getDst()) )
     {
         // last mad has single use, see if we can replace the def-use pair with acc
@@ -5087,7 +5087,7 @@ bool HWConformity::convertMAD2MAC( INST_LIST_ITER iter, std::vector<G4_INST*> &m
         uint32_t accTypeSize = getTypeSize(accType);
         // mac dst region has to match that of acc, which is always GRF-aligned
         // we also cannot have acc dst hstride > 4
-        if (!builder.isOpndAligned(curInst->getDst(), GENX_GRF_REG_SIZ) || 
+        if (!builder.isOpndAligned(curInst->getDst(), GENX_GRF_REG_SIZ) ||
             (curInst->getDst()->getExecTypeSize() / accTypeSize) > 4)
         {
             // ToDo: store the iter in madInst?
@@ -5130,7 +5130,7 @@ bool HWConformity::convertMAD2MAC( INST_LIST_ITER iter, std::vector<G4_INST*> &m
         {
             convertMAD2MulAdd(madIter, bb);
         }
-    }   
+    }
     return false;
 }
 
@@ -5233,7 +5233,7 @@ void HWConformity::convertMAD2MulAdd( INST_LIST_ITER iter, G4_BB *bb )
     inst->setOpcode(G4_mul);
     inst->setSrc(nullptr, 2);
 
-    G4_Declare* mulDefDcl = builder.createTempVar(inst->getExecSize(), mulOpDstType, 
+    G4_Declare* mulDefDcl = builder.createTempVar(inst->getExecSize(), mulOpDstType,
         G4_Align::Either, subAlign);
 
     G4_DstRegRegion* mulOpDst = builder.Create_Dst_Opnd_From_Dcl(mulDefDcl, 1);
@@ -5290,9 +5290,8 @@ void HWConformity::convertMAD2MulAdd( INST_LIST_ITER iter, G4_BB *bb )
 // def-use chains for def, src0 and src1), so that more opportunites may be
 // exposed for later sada2 instructions
 
-void HWConformity::fixSADA2Inst( BB_LIST_ITER it )
+void HWConformity::fixSADA2Inst(G4_BB* bb)
 {
-    G4_BB* bb = *it;
 
     INST_LIST_ITER i = bb->begin();
     while (i != bb->end())
@@ -5406,12 +5405,10 @@ void HWConformity::fixSADA2Inst( BB_LIST_ITER it )
 
             // make sure there are no instructions between the sada2's new location
             // and the src2-defining instruction that updates acc
-            for( INST_LIST_ITER iter = newSada2Iter; *iter != src2Dst; --iter )
+            for (auto iter = newSada2Iter; *iter != src2Dst; --iter)
             {
                 G4_INST* aInst = *iter;
-                if( aInst->isAccDstInst() || aInst->isAccWrCtrlInst() ||
-                    ( aInst->opcode() == G4_mulh &&
-                    IS_DTYPE(aInst->getSrc(0)->getType()) && IS_DTYPE(aInst->getSrc(1)->getType()) ) )
+                if (aInst->hasACCOpnd())
                 {
                     canDoSada2 = false;
                     break;
@@ -5555,9 +5552,8 @@ void HWConformity::fixSADA2Inst( BB_LIST_ITER it )
     }
 }
 
-void HWConformity::fixSendInst(BB_LIST_ITER it)
+void HWConformity::fixSendInst(G4_BB* bb)
 {
-    G4_BB* bb = *it;
 
     for (INST_LIST_ITER i = bb->begin(), end = bb->end(); i != end; i++)
     {
@@ -5571,15 +5567,15 @@ void HWConformity::fixSendInst(BB_LIST_ITER it)
         if (inst->getExecSize() < 8)
         {
             // A64 messages require a minimum msg len of two for address (src0), which is inconsistent
-            // with our input IR as it allows <2 GRF address variables (e.g., simd1 A64 scatter r/w). 
-            // To avoid this causing overlap between send dst/src0/src1 (it is known to cause HW hang), 
+            // with our input IR as it allows <2 GRF address variables (e.g., simd1 A64 scatter r/w).
+            // To avoid this causing overlap between send dst/src0/src1 (it is known to cause HW hang),
             // we have to ensure they are all 2GRF-aligned
             G4_Declare* src0Dcl = inst->getSrc(0)->getTopDcl();
             // ToDo: check if dst/src1 may also exhibit such size mismatch
             bool sizeMismatch = inst->getMsgDesc()->MessageLength() == 2 &&
                 (src0Dcl && src0Dcl->getRootDeclare()->getByteSize() < 2u * GENX_GRF_REG_SIZ);
             auto doEvenAlign = [](G4_Declare* dcl)
-            {               
+            {
                 if (dcl)
                 {
                     dcl = dcl->getRootDeclare();
@@ -5588,7 +5584,7 @@ void HWConformity::fixSendInst(BB_LIST_ITER it)
                     {
                         dcl->setAlign(G4_Align::Even);
                     }
-                }  
+                }
             };
             if (sizeMismatch)
             {
@@ -5613,7 +5609,7 @@ void HWConformity::fixSendInst(BB_LIST_ITER it)
         G4_Operand *src0 = inst->getSrc(0);
         G4_Declare *src0TopDcl = src0->getTopDcl();
 
-        // if src0 and src1 are hard-wired GRF, check that 
+        // if src0 and src1 are hard-wired GRF, check that
         // they satisfy EOT and preemption restrictions
         auto needsTempSrc = [this](G4_INST* inst, G4_Declare* dcl)
         {
@@ -5735,7 +5731,7 @@ void HWConformity::fixSendInst(BB_LIST_ITER it)
                         copyRegs(copyDst, 0, inst->getSrc(1)->getBase()->asRegVar()->getDeclare(),
                             inst->getSrc(1)->asSrcRegRegion()->getRegOff() * 32, src1Size, bb, i);
                         inst->setSrc(builder.Create_Src_Opnd_From_Dcl(copyDst, builder.getRegionStride1()), 1);
-                    }     
+                    }
                 }
                 else
                 {
@@ -5771,9 +5767,8 @@ void HWConformity::fixSelCsel(INST_LIST_ITER it, G4_BB* bb)
     }
 }
 
-void HWConformity::conformBB( BB_LIST_ITER it)
+void HWConformity::conformBB(G4_BB* bb)
 {
-    G4_BB *bb = *it;
     INST_LIST_ITER i = bb->begin(), iEnd = bb->end();
     INST_LIST_ITER next_iter = i;
     for ( ; i != iEnd; i = next_iter )
@@ -5804,7 +5799,7 @@ void HWConformity::conformBB( BB_LIST_ITER it)
 
         fixSelCsel(i, bb);
 
-        if (inst->getExecSize() == 16)
+        if (inst->getExecSize() > builder.getNativeExecSize())
         {
             if (inst->opcode() == G4_math               &&
                 inst->getDst()->getType() == Type_HF    &&
@@ -5841,7 +5836,7 @@ void HWConformity::conformBB( BB_LIST_ITER it)
 
         if( inst->opcode() == G4_mul )
         {
-            if( fixMULInst( i, bb ) )
+            if(fixMULInst( i, bb ) )
             {
                 // inserted mach and mov
                 // check the newly added insts later ( MUL, MACH, MOV )
@@ -5924,7 +5919,8 @@ void HWConformity::conformBB( BB_LIST_ITER it)
                 inst->getExecSize() == 1    &&
                 dst_elsize < extypesize     &&
                 !IS_VTYPE(extype)           &&
-                !inst->isMixedMode())
+                !inst->isMixedMode()        &&
+                !inst->isSend())
             {
                 fixDstHstride( i, extypesize );
             }
@@ -6025,7 +6021,7 @@ bool HWConformity::fixAddcSubb(G4_BB* bb)
                 continue;
             }
 
-            if (inst->getExecSize() == 16)
+            if (inst->getExecSize() > builder.getNativeExecSize())
             {
                 evenlySplitInst(iter, bb);
                 evenlySplitInst(movIter, bb);
@@ -6066,17 +6062,18 @@ void HWConformity::chkHWConformity()
 {
     fixDataLayout();
 
-    for (BB_LIST_ITER it = kernel.fg.BBs.begin(), end = kernel.fg.BBs.end(); it != end; it++)
+    for (auto bb : kernel.fg)
     {
+        fixIntToHFMove(bb);
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
-        fixAddcSubb(*it);
+        fixAddcSubb(bb);
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
 
-        fixMADInst( it );
+        fixMADInst( bb );
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
@@ -6084,46 +6081,46 @@ void HWConformity::chkHWConformity()
         // fix source operand first to avoid redundant MOVs if this fix is done after
         // reducing execution size.
         // used by 3d. Mainly to fix sel with two imm sources
-        fixOpndTypeAlign( *it );
+        fixOpndTypeAlign( bb );
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
 
-        if (builder.getOption(vISA_accSubstitution) && 
+        if (builder.getOption(vISA_accSubstitution) &&
             !builder.getOption(vISA_doAccSubAfterSchedule))
         {
-            accSubstitution(*it);
+            accSubstitution(bb);
         }
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
 
-        fixInstExecSize( it );
+        fixInstExecSize( bb );
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
 
-        fixMixedHFInst( it );
+        fixMixedHFInst( bb );
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
-        fixSADA2Inst( it );
-
-#ifdef _DEBUG
-        verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
-#endif
-
-        fixSendInst( it );
+        fixSADA2Inst( bb );
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
 
-        conformBB(it);
+        fixSendInst( bb );
+
+#ifdef _DEBUG
+        verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
+#endif
+
+        conformBB(bb);
 
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
@@ -6769,7 +6766,7 @@ void HWConformity::fixDataLayout( )
 {
     bool changeDataLayout = false;
 
-    for (auto &bb : kernel.fg.BBs)
+    for (auto &bb : kernel.fg)
     {
         for (auto &inst : *bb)
         {
@@ -6818,7 +6815,7 @@ void HWConformity::fixDataLayout( )
             }
         }
 
-        for (auto &bb : kernel.fg.BBs)
+        for (auto &bb : kernel.fg)
         {
             for (auto &inst : *bb)
             {
@@ -6913,7 +6910,7 @@ static void expandPlaneMacro(IR_Builder& builder, INST_LIST_ITER it, G4_BB* bb, 
     }
 
     G4_Declare* tmpVal = builder.hasNFType() ? nullptr : builder.createTempVar(8, Type_F, Either, Any);
-    G4_DstRegRegion* accDst = builder.hasNFType() ? 
+    G4_DstRegRegion* accDst = builder.hasNFType() ?
         builder.createDstRegRegion(Direct, builder.phyregpool.getAcc0Reg(), 0, 0, 1, Type_NF) :
         builder.Create_Dst_Opnd_From_Dcl(tmpVal, 1);
     G4_INST* madInst = builder.createInternalInst(nullptr, G4_mad, nullptr, false, 8, accDst,
@@ -7316,9 +7313,8 @@ void HWConformity::helperGenerateTempDst(
         [DevCHV, DevSKL, DevBXT]: No simd16 in mixed mode when destination is f32. Instruction Execution size must be no more than 8.
 
 */
-void HWConformity::fixMixedHFInst( BB_LIST_ITER it )
+void HWConformity::fixMixedHFInst(G4_BB* bb)
 {
-    G4_BB* bb = *it;
     for (auto instIter = bb->begin(); instIter != bb->end(); ++instIter)
     {
         G4_INST *inst = *instIter;
@@ -7362,7 +7358,7 @@ void HWConformity::fixMixedHFInst( BB_LIST_ITER it )
 
         // The execution size must be no more than 8 when half-floats are used in source or destination operand.
         // ToDO: move this to fixmathinst
-        if (inst->getExecSize() == 16)
+        if (inst->getExecSize() > builder.getNativeExecSize())
         {
             if (inst->opcode() == G4_math &&
                 inst->getDst()->getType() == Type_HF &&
@@ -7402,7 +7398,7 @@ void HWConformity::fixMixedHFInst( BB_LIST_ITER it )
         {
             // no SIMD16 mix mode instruction
             dst = inst->getDst();
-            bool isDstPackedHForF = 
+            bool isDstPackedHForF =
                 (dst->getType() == builder.getMixModeType() && dst->getHorzStride() == 1) ||
                 dst->getType() == Type_F;
             if (inst->getExecSize() > 8 && isDstPackedHForF)
@@ -7441,7 +7437,7 @@ void HWConformity::fixMixedHFInst( BB_LIST_ITER it )
 }
 
 // Fix for packed half types on BDW.
-// Conversions from F to packed HF are not supported on this platform, 
+// Conversions from F to packed HF are not supported on this platform,
 // only unpacked HF is supported on destination.
 // When we encounter an instruction with HF type on destination with <1> stride
 // and float on source, add an additional mov that handles unpacking.
@@ -7464,7 +7460,7 @@ void HWConformity::fixSrc2(INST_LIST_ITER it, G4_BB* bb, bool swapSrc0and2)
     if (builder.noSrc2Regioning())
     {
         auto src = inst->getSrc(srcPos);
-        // we have to make sure src2 and dst are aligned 
+        // we have to make sure src2 and dst are aligned
         // Promote src2's type to f if mix mode is supported.
         // e.g.,
         // mad (4) r10.0<1>:f src0 src1 r12.0<1>:hf  --> f
@@ -7476,9 +7472,13 @@ void HWConformity::fixSrc2(INST_LIST_ITER it, G4_BB* bb, bool swapSrc0and2)
         unsigned short dstEltSz = inst->getDst()->getExecTypeSize();
         if (dstEltSz >= 4)
         {
-            if (IS_TYPE_INT(srcTy))
+            if (IS_SIGNED_INT(srcTy))
             {
                 srcTy = Type_D;
+            }
+            else if (IS_UNSIGNED_INT(srcTy))
+            {
+                srcTy = Type_UD;
             }
             else if (builder.hasMixMode() && builder.getMixModeType() == srcTy)
             {
@@ -7500,9 +7500,9 @@ void HWConformity::fixVxHFloat64b(INST_LIST_ITER it, G4_BB* bb)
 {
     // at this point VxH region should only be on src0
     G4_INST* inst = *it;
-    G4_SrcRegRegion* src0 = inst->getSrc(0) && inst->getSrc(0)->isSrcRegRegion() ? 
+    G4_SrcRegRegion* src0 = inst->getSrc(0) && inst->getSrc(0)->isSrcRegRegion() ?
         inst->getSrc(0)->asSrcRegRegion() : nullptr;
-    
+
     if (src0 && src0->getRegAccess() == IndirGRF && src0->getRegion()->isRegionWH())
     {
         auto type = src0->getType();
@@ -7541,5 +7541,27 @@ void HWConformity::fixVxHFloat64b(INST_LIST_ITER it, G4_BB* bb)
             inst->setSrc(tmpSrcOpnd, 0);
         }
     }
+}
+
+bool HWConformity::fixIntToHFMove(G4_BB* bb)
+{
+    // int to HF move requires dst to have stride 2, which would result in 
+    // an illegal SIMD32 inst. So we split in this case
+    // we put it in a separate pass so that the split instructions may be legalized later
+    bool changed = false;
+    for (auto I = bb->begin(), E = bb->end(); I != E; ++I)
+    { 
+        auto inst = *I;
+        if (inst->opcode() == G4_mov && inst->getDst()->getType() == Type_HF &&
+            IS_INT(inst->getSrc(0)->getType()))
+        {
+            if (inst->getExecSize() * 2 * 2 > getGRFSize() * 2)
+            {
+                evenlySplitInst(I, bb);
+                changed = true;
+            }
+        }
+    }
+    return changed;
 }
 

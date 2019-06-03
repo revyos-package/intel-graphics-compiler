@@ -86,7 +86,10 @@ public:
     
     /// We can safely ignore Nan
     virtual bool IgnoreNan() const { return false; }
-    
+
+    // Allow branch swapping for better Nan perf
+    virtual bool BranchSwapping() const { return false; }
+
     /// Allow propagation up-converstion of half if it can generate better code
     virtual bool AllowUnsafeHalf() const { return true; }
 
@@ -102,6 +105,8 @@ public:
     /// Supports precise math
     virtual bool SupportsPreciseMath() const { return false; }
 
+    virtual bool NeedCountSROA() const { return false; }
+    
     /// Can we always contract mul and add
     virtual bool NeedCheckContractionAllowed() const { return false; }
 
@@ -109,7 +114,7 @@ public:
     virtual bool HasDoubleLoadStore() const { return false; }
 
     /// Needs emulation of 64bits instructions
-    virtual bool NeedPreCompiledLibFuncs() const { return false; }
+    virtual bool NeedI64BitDivRem() const { return false; }
 
     /// Must support FP64
     virtual bool NeedFP64() const { return false; }
@@ -227,6 +232,8 @@ public:
     /// WA to make sure scratch writes are globally observed before EOT
     virtual bool clearScratchWriteBeforeEOT() const { return false; }
 
+    /// Should unaligned vectors be split before processing in EmitVISA
+    virtual bool splitUnalignedVectors() const { return true; }
 };
 
 }//namespace IGC

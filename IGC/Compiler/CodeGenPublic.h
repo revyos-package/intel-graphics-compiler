@@ -93,7 +93,8 @@ namespace IGC
         unsigned int    m_unpaddedProgramSize;      //<! program size without padding used for binary linking
         unsigned int    m_startReg;                 //<! Which GRF to start with
         unsigned int    m_scratchSpaceUsedBySpills; //<! amount of scratch space needed for shader spilling
-        unsigned int    m_scratchSpaceUsedByShader; //<! amount of scratch space needed by shader
+        unsigned int    m_scratchSpaceUsedByShader; //<! amount of scratch space needed by shader if allocated in scratchspace
+        unsigned int    m_scratchSpaceUsedByStateless; //<! amount of scratch space needed by shader if allocated in stateless surface
         unsigned int    m_scratchSpaceUsedByGtpin; //<! amount of scratch space used by gtpin
         void*           m_debugDataVISA;            //<! VISA debug data (source -> VISA)
         unsigned int    m_debugDataVISASize;        //<! Number of bytes of VISA debug data
@@ -108,7 +109,11 @@ namespace IGC
         void*           m_funcRelocationTable;
         unsigned int    m_funcRelocationTableSize;
         unsigned int    m_funcRelocationTableEntries;
-
+        unsigned int    m_offsetToSkipPerThreadDataLoad = 0;
+        //true means we separate pvtmem and spillfill. pvtmem could go into stateless.
+        //false means all of them are together
+        bool            m_separatePvtSpill = false;
+    
         void Destroy()
         {
             if (m_programBin)
@@ -125,10 +130,50 @@ namespace IGC
             }
         }
         
+        void setSeparatePvtSpill(bool setSeparatePvtSpillT)
+        {
+            m_separatePvtSpill = setSeparatePvtSpillT;
+        }
+
         unsigned int getScratchSpaceUsage() const
         {
-            return m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByShader + m_scratchSpaceUsedByGtpin;
+            return m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin + (m_separatePvtSpill ? 0 : m_scratchSpaceUsedByShader);
         }
+
+        unsigned int getScratchPrivateUsage() const
+        {
+            return (m_separatePvtSpill ? m_scratchSpaceUsedByShader : 0);
+        }
+
+        void setScratchPrivateUsage(unsigned int scratchPrivateUsage, unsigned int scratchSpaceSizeLimit)
+        {
+            if (m_separatePvtSpill && scratchPrivateUsage > scratchSpaceSizeLimit)
+            {
+                m_scratchSpaceUsedByStateless = scratchPrivateUsage;
+            }
+            else
+            {
+                m_scratchSpaceUsedByShader = scratchPrivateUsage;
+            }
+        }
+
+        unsigned int getStatelessPrivateUsage() const
+        {
+            return (m_separatePvtSpill ? m_scratchSpaceUsedByStateless : 0);
+        }
+    };
+    
+    enum InstrStatTypes
+    {
+        SROA_PROMOTED,
+        TOTAL_TYPES
+    };
+    enum InstrStatStage
+    {
+        BEGIN,
+        END,
+        EXCEED_THRESHOLD,
+        TOTAL_STAGE
     };
 
     struct SInstrTypes
@@ -142,6 +187,8 @@ namespace IGC
         bool hasLoadStore;
         bool hasCall;
         bool hasIndirectCall;
+        bool hasInlineAsm;
+        bool hasInlineAsmPointerAccess;
         bool hasIndirectBranch;
         bool hasFunctionAddressTaken;
         bool hasSel;
@@ -160,23 +207,29 @@ namespace IGC
         bool hasDiscard;
         bool mayHaveIndirectOperands;  //<! true if code may have indirect operands like r5[a0].
         bool hasUniformAssumptions;
-		unsigned int numSample;
-		unsigned int numBB;
-		unsigned int numLoopInsts;
+        unsigned int numSample;
+        unsigned int numBB;
+        unsigned int numLoopInsts;
         unsigned int numOfLoop;
         unsigned int numInsts;    //<! measured after optimization, used as a compiler heuristic
-		bool sampleCmpToDiscardOptimizationPossible;
-		unsigned int sampleCmpToDiscardOptimizationSlot;
+        bool sampleCmpToDiscardOptimizationPossible;
+        unsigned int sampleCmpToDiscardOptimizationSlot;
     };
 
-	struct SSimplePushInfo
-	{
+    struct SSimplePushInfo
+    {
         uint m_cbIdx = 0;
-		uint m_offset = 0;
-		uint m_size = 0;
+        uint m_offset = 0;
+        uint m_size = 0;
         bool isStateless = false;
-	};
+    };
 
+    struct SConstantAddrValue
+    {
+        ConstantAddress ca;
+        bool anyValue;
+        uint32_t value;
+    };
 
     struct SKernelProgram
     {
@@ -204,11 +257,10 @@ namespace IGC
         uint        m_ConstantBufferUsageMask;
         uint        m_ConstantBufferReplaceSize;
 
-		SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
+        SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
         // Interesting constants for dynamic constant folding
-        std::vector<USC::ConstantAddrValue> m_pInterestingConstants;
-
+        std::vector<SConstantAddrValue> m_pInterestingConstants;
     };
 
     struct SPixelShaderKernelProgram : SKernelProgram
@@ -253,20 +305,20 @@ namespace IGC
         bool forceEarlyZ;
         bool hasEvalSampler;
 
-		bool sampleCmpToDiscardOptimizationPossible;
+        bool sampleCmpToDiscardOptimizationPossible;
 
         bool needPSSync;
     };
 
-	/// Gen10+, corresponds to 3DSTATE_VF_SGVS_2 as described below
-	struct SVertexFetchSGVExtendedParameters
-	{
-		struct
-		{
-			bool enabled = false;      //<! XPn Enable = XPn Source Select = (*)
-			unsigned int location = 0; //<! Linear offset of the 32bit component in VUE
-		} extendedParameters[3] = {};  //<! Order of elements: VF_XP0, VF_XP1, VF_XP2
-	};
+    /// Gen10+, corresponds to 3DSTATE_VF_SGVS_2 as described below
+    struct SVertexFetchSGVExtendedParameters
+    {
+        struct
+        {
+            bool enabled = false;      //<! XPn Enable = XPn Source Select = (*)
+            unsigned int location = 0; //<! Linear offset of the 32bit component in VUE
+        } extendedParameters[3] = {};  //<! Order of elements: VF_XP0, VF_XP1, VF_XP2
+    };
 
     struct SVertexShaderKernelProgram : SKernelProgram
     {
@@ -282,6 +334,8 @@ namespace IGC
         OctEltUnit SBEURBReadOffset;
         OctEltUnit URBAllocationSize;
         QuadEltUnit MaxNumInputRegister;
+        
+        bool enableElementComponentPacking;
         /// corresponds to 3DSTATE_VF_COMPONENT_PACKING
         unsigned char ElementComponentDeliverMask[32];
         /// vertex ID information
@@ -290,10 +344,10 @@ namespace IGC
         /// instance ID information
         bool         hasInstanceID;
         unsigned int instanceIdLocation;
-		bool         singleInstanceVertexShader;
-		/// corresponds to 3DSTATE_VF_SGVS_2
-		SVertexFetchSGVExtendedParameters vertexFetchSGVExtendedParameters;
-		//RTAI and VPAI
+        bool         singleInstanceVertexShader;
+        /// corresponds to 3DSTATE_VF_SGVS_2
+        SVertexFetchSGVExtendedParameters vertexFetchSGVExtendedParameters;
+        //RTAI and VPAI
         bool         DeclaresRTAIndex;
         bool         DeclaresVPAIndex;
 
@@ -510,6 +564,7 @@ namespace IGC
         unsigned int GetImmediateConstantBufferOffset() const;
         unsigned int GetDrawIndirectBufferIndex() const;
         const USC::SShaderStageBTLayout* GetBtLayout() const { return m_pLayout; };
+        const std::vector<unsigned char>& GetColorBufferMappingTable() const { return m_ColorBufferMappings; }
 
         CBTILayout(const USC::SShaderStageBTLayout* pLayout) : m_pLayout(pLayout)
         {}
@@ -645,6 +700,10 @@ namespace IGC
         Float_DenormMode    m_floatDenormMode64 = FLOAT_DENORM_FLUSH_TO_ZERO;
 
         SInstrTypes m_instrTypes;
+
+        /////  used for instruction statistic before/after pass
+        int instrStat[TOTAL_TYPES][TOTAL_STAGE];
+
         /// Module level flag. This flag is false either there is an indirect call
         /// in the module or the kernel sizes are small even with complete inlining.
         bool m_enableSubroutine = false;
@@ -708,6 +767,14 @@ namespace IGC
             }
 
             m_indexableTempSize.resize(64);
+
+            for (uint i = 0; i < TOTAL_TYPES; i++)
+            {
+                for (uint j = 0; j < TOTAL_STAGE; j++)
+                {
+                    instrStat[i][j] = 0;
+                }
+            }
         }
 
         CodeGenContext(CodeGenContext&) = delete;
@@ -950,10 +1017,10 @@ namespace IGC
                 {
                     IntelEnablePreRAScheduling = false;
                 }
-				if (strstr(options, "-cl-intel-use-bindless-buffers"))
-				{
-					PromoteStatelessToBindless = true;
-				}
+                if (strstr(options, "-cl-intel-use-bindless-buffers"))
+                {
+                    PromoteStatelessToBindless = true;
+                }
             }
 
 
@@ -967,7 +1034,7 @@ namespace IGC
             bool IntelHasBufferOffsetArg;
             bool replaceGlobalOffsetsByZero = false;
             bool IntelEnablePreRAScheduling = true;
-			bool PromoteStatelessToBindless = false;
+            bool PromoteStatelessToBindless = false;
 
         };
 
@@ -976,7 +1043,8 @@ namespace IGC
         public:
             Options(const TC::STB_TranslateInputArgs* pInputArgs) :
                 CorrectlyRoundedSqrt(false),
-                NoSubgroupIFP(false)
+                NoSubgroupIFP(false),
+                UniformWGS(false)
             {
                 if (pInputArgs == nullptr)
                     return;
@@ -995,10 +1063,18 @@ namespace IGC
                     NoSubgroupIFP = true;
                 }
 
+                if (strstr(options, "-cl-uniform-work-group-size"))
+                {
+                    // Note that this is only available for -cl-std >= 2.0.
+                    // This will be checked before we place this into the
+                    // the module metadata.
+                    UniformWGS = true;
+                }
             }
 
             bool CorrectlyRoundedSqrt;
             bool NoSubgroupIFP;
+            bool UniformWGS;
         };
 
         // output: shader information
@@ -1010,10 +1086,10 @@ namespace IGC
         float m_ProfilingTimerResolution;
         bool m_ShouldUseNonCoherentStatelessBTI;
 
-		OpenCLProgramContext(
-			const COCLBTILayout& btiLayout,
-			const CPlatform& platform,
-			const TC::STB_TranslateInputArgs* pInputArgs,
+        OpenCLProgramContext(
+            const COCLBTILayout& btiLayout,
+            const CPlatform& platform,
+            const TC::STB_TranslateInputArgs* pInputArgs,
             const CDriverInfo& driverInfo,
             LLVMContextWrapper* llvmContext = nullptr,
             bool shouldUseNonCoherentStatelessBTI = false,
@@ -1023,7 +1099,7 @@ namespace IGC
             m_InternalOptions(pInputArgs),
             m_Options(pInputArgs),
             isSpirV(false),
-			m_ShouldUseNonCoherentStatelessBTI(shouldUseNonCoherentStatelessBTI)
+            m_ShouldUseNonCoherentStatelessBTI(shouldUseNonCoherentStatelessBTI)
         {
         }
         bool isSPIRV() const;

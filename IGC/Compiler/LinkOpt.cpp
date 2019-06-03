@@ -25,7 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 ///===========================================================================
-/// This file contains types, enumerations, classes and other declarations 
+/// This file contains types, enumerations, classes and other declarations
 /// used by IGC link optimization.
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/CISACodeGen/helper.h"
@@ -161,7 +161,8 @@ void ShaderIOAnalysis::addInputDecl(llvm::GenIntrinsicInst* inst)
 void ShaderIOAnalysis::addDSCtrlPtInputDecl(llvm::GenIntrinsicInst* inst)
 {
     assert(m_shaderType == ShaderType::DOMAIN_SHADER);
-    if (isa<ConstantInt>(inst->getOperand(DSCTRLPTINPUT_CPID_ARG)))
+    if (isa<ConstantInt>(inst->getOperand(DSCTRLPTINPUT_CPID_ARG)) &&
+        isa<ConstantInt>(inst->getOperand(DSCTRLPTINPUT_ATTR_ARG)))
     {
         uint ctrlIdx = getImmValueU32(inst->getOperand(DSCTRLPTINPUT_CPID_ARG));
         uint elemIdx = getImmValueU32(inst->getOperand(DSCTRLPTINPUT_ATTR_ARG));
@@ -261,7 +262,7 @@ void ShaderIOAnalysis::addOutputDecl(GenIntrinsicInst* inst)
         otype == SHADER_OUTPUT_TYPE_CLIPDISTANCE_HI ||
         otype == SHADER_OUTPUT_TYPE_VIEWPORT_ARRAY_INDEX ||
         otype == SHADER_OUTPUT_TYPE_RENDER_TARGET_ARRAY_INDEX ||
-		otype == SHADER_OUTPUT_TYPE_POINTWIDTH)
+        otype == SHADER_OUTPUT_TYPE_POINTWIDTH)
     {
         switch (m_shaderType)
         {
@@ -325,18 +326,31 @@ void ShaderIOAnalysis::addGSInputDecl(GenIntrinsicInst* inst)
 void ShaderIOAnalysis::addHSCtrlPtOutputDecl(GenIntrinsicInst* inst)
 {
     assert(m_shaderType == ShaderType::HULL_SHADER);
-
-    uint attrIdx = getImmValueU32(inst->getOperand(OUTPUTTESSCTRLPT_ATTR_ARG));
-    uint cpIdx = 0;
-    getContext()->addHSCtrlPtOutput(inst, attrIdx, cpIdx);
+    if (isa<ConstantInt>(inst->getOperand(OUTPUTTESSCTRLPT_ATTR_ARG)))
+    {
+        uint attrIdx = getImmValueU32(inst->getOperand(OUTPUTTESSCTRLPT_ATTR_ARG));
+        uint cpIdx = 0;
+        getContext()->addHSCtrlPtOutput(inst, attrIdx, cpIdx);
+    }
+    else
+    {
+        getContext()->m_abortLTO = true;
+    }
 }
 
 // <4 x float> = HSOutputCntrlPtInputVec(i32 vertex, i32 attr)
 void ShaderIOAnalysis::addHSOutputInputDecl(GenIntrinsicInst* inst)
 {
     assert(m_shaderType == ShaderType::HULL_SHADER);
-    uint attrIdx = getImmValueU32(inst->getOperand(1));
-    getContext()->addHSOutputInput(inst, attrIdx);
+    if (isa<ConstantInt>(inst->getOperand(HSOUTPUTCTRLPTINPUT_ATTR_ARG)))
+    {
+        uint attrIdx = getImmValueU32(inst->getOperand(HSOUTPUTCTRLPTINPUT_ATTR_ARG));
+        getContext()->addHSOutputInput(inst, attrIdx);
+    }
+    else
+    {
+        getContext()->m_abortLTO = true;
+    }
 }
 
 void ShaderIOAnalysis::onGenIntrinsic(GenIntrinsicInst* inst)
@@ -588,7 +602,7 @@ static void compactPsInputs(
             {
                 // check and handle constant interpolate attrs
                 bool isConstInterpInput = false;
-                
+
                 for (auto inst : iv)
                 {
                     if (isConstInterpolationInput(inst))
@@ -607,7 +621,7 @@ static void compactPsInputs(
                     isConstInterpInput = true;
                     updateInterpMode = true;
                 }
-                
+
                 if (isConstInterpInput)
                 {
                     psIdxMap[i] = nPsIn++;
@@ -676,7 +690,7 @@ static bool compactVsDsOutput(
 
     // init all output attrs to undef
     // move output intrinsics to close to each other, for f64, we may see
-    // non-contiguous output index 
+    // non-contiguous output index
     Value* undef = UndefValue::get(Type::getFloatTy(*vsdsCtx->getLLVMContext()));
     for (unsigned i = 0; i < outInsts.size(); i++)
     {
@@ -706,7 +720,7 @@ static bool compactVsDsOutput(
             maxIndex = std::max(newIdx, maxIndex);
             if (newIdx / 4 >= nNewOut)
             {
-                // output attr is promoted to const interpolation, this may 
+                // output attr is promoted to const interpolation, this may
                 // case the increasing of PS input attrs, so we need to create
                 // new output intrinsics in GS
                 newOut.resize(newIdx / 4 + 1);
@@ -726,7 +740,7 @@ static bool compactVsDsOutput(
                 }
                 nNewOut = newIdx / 4 + 1;
             }
-            
+
             for (unsigned j = 0; j < newOut[newIdx / 4].size(); j++)
             {
                 newOut[newIdx / 4][j]->setOperand(newIdx % 4, outVals[i][j]);
@@ -735,7 +749,7 @@ static bool compactVsDsOutput(
         }
     }
 
-    // If the size of attribute is aligned on a cache line we force the beginning of the 
+    // If the size of attribute is aligned on a cache line we force the beginning of the
     // attributes to be aligned on 64B to reduce the number of cachelines accessed by SBE
     if(iSTD::Align(maxIndex + 1, 8) % 16 == 0)
     {
@@ -1093,7 +1107,7 @@ static void linkOptVovToVov(LinkOptContext* linkCtx,
 }
 
 bool runPasses( CodeGenContext* ctx, ...)
-{   
+{
     llvm::legacy::PassManager mpm;
     va_list ap;
     Pass* p;

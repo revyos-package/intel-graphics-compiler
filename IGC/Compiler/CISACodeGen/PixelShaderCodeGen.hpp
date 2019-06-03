@@ -56,11 +56,10 @@ public:
     CVariable*  GetBaryRegLowered(e_interpolation mode);
     CVariable*  GetInputDelta(uint index, bool loweredInput = false);
     CVariable*  GetInputDeltaLowered(uint index);
-    CVariable*  GetZDelta();
-    CVariable*  GetWDelta();
+    CVariable*  GetZWDelta();
     CVariable*  GetPositionZ();
     CVariable*  GetPositionW();
-	CVariable*  GetPositionXYOffset();
+    CVariable*  GetPositionXYOffset();
     CVariable*  GetSampleOffsetX();
     CVariable*  GetSampleOffsetY();
     CVariable*  GetInputCoverageMask();
@@ -73,13 +72,14 @@ public:
     CVariable*  GetDiscardPixelMask() { return m_KillPixelMask; }
     void SetDiscardPixelMask(CVariable* mask) { m_KillPixelMask = mask; }
 
-    virtual void InitEncoder(SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE);
-    virtual void PreCompile();
-    virtual void AllocatePayload();
-    virtual void AddPrologue();
-    virtual void AddEpilogue(llvm::ReturnInst* ret);
-    virtual bool CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Function &F);
-    virtual void ExtractGlobalVariables();
+    void InitEncoder(SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE) override;
+    void PreCompile() override;
+    void AllocatePayload() override;
+    void AddPrologue() override;
+    void PreAnalysisPass() override;
+    void AddEpilogue(llvm::ReturnInst* ret) override;
+    bool CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Function &F) override;
+    void ExtractGlobalVariables() override;
 
     void        AllocatePSPayload();
     void        AllocatePixelPhasePayload();
@@ -87,7 +87,7 @@ public:
     void        FillProgram(SPixelShaderKernelProgram* pKernelProgram);
     void        AddRenderTarget(uint index);
     void        DeclareSGV(uint usage);
-    void        ParseShaderSpecificOpcode(llvm::Instruction* inst);
+    void        ParseShaderSpecificOpcode(llvm::Instruction* inst) override;
     void        PullPixelPhasePayload();
 
     void        AddCoarseOutput(CVariable* var, unsigned int index);
@@ -106,6 +106,7 @@ public:
     bool        IsPerSample() { return m_isPerSample || m_PerspectiveSample || m_NoPerspectiveSample; }
 
     bool        HasDiscard() { return m_HasDiscard; }
+    bool        NeedVMask() { return m_VectorMask; }
     void        MarkConstantInterpolation(unsigned int index);
 
     // check whether it's the last render target write
@@ -142,9 +143,8 @@ protected:
     CVariable* m_KillPixelMask;
     CVariable* m_pPositionZPixel;
     CVariable* m_pPositionWPixel;
-	CVariable* m_pPositionXYOffset;
-    CVariable* m_ZDelta;
-    CVariable* m_WDelta;
+    CVariable* m_pPositionXYOffset;
+    CVariable* m_ZWDelta;
     CVariable* m_pInputCoverageMask;
     CVariable* m_pCPSRequestedSizeX;
     CVariable* m_pCPSRequestedSizeY;
@@ -167,7 +167,7 @@ protected:
 
     bool       m_HasDiscard;
 
-    // Multi phase shader properties 
+    // Multi phase shader properties
     PixelShaderPhaseType m_phase;
     bool       m_IsLastPhase;
     uint       m_pixelPhaseLabel;

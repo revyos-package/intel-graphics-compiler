@@ -212,6 +212,7 @@ enum SPIRAddressSpace {
   SPIRAS_Local,
   SPIRAS_Generic,
   SPIRAS_Count,
+  SPIRAS_Input,
 };
 
 enum OCLMemFenceKind {
@@ -243,6 +244,7 @@ SPIRVMap<SPIRAddressSpace, SPIRVStorageClassKind>::init() {
   add(SPIRAS_Constant, StorageClassUniformConstant);
   add(SPIRAS_Local, StorageClassWorkgroupLocal);
   add(SPIRAS_Generic, StorageClassGeneric);
+  add(SPIRAS_Input, StorageClassInput);
 }
 typedef SPIRVMap<SPIRAddressSpace, SPIRVStorageClassKind> SPIRSPIRVAddrSpaceMap;
 
@@ -840,7 +842,7 @@ void getFunctionTypeParameterTypes(llvm::FunctionType* FT,
     std::vector<Type*>& ArgTys);
 Function *getOrCreateFunction(Module *M, Type *RetTy,
     ArrayRef<Type *> ArgTypes, StringRef Name, bool Mangle = false,
-	IGCLLVM::AttributeSet *Attrs = nullptr, bool takeName = true);
+    IGCLLVM::AttributeSet *Attrs = nullptr, bool takeName = true);
 std::vector<Value *> getArguments(CallInst* CI);
 
 void decorateSPIRVBuiltin(std::string &S);

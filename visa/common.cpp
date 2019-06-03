@@ -151,16 +151,31 @@ unsigned char getGRFSize()
 // Note that encoding is not linearized.
 int getGenxPlatformEncoding()
 {
-    static const int Encoding[] = {3, 4, 5, 6, 7, 8, 10, 12, 11, 13};
-    TARGET_PLATFORM platform = getGenxPlatform();
-    if (platform != GENX_NONE && platform != ALL)
-        return Encoding[platform];
-    return -1;
+    switch (getGenxPlatform())
+    {
+    case GENX_BDW:
+        return 3;
+    case GENX_CHV:
+        return 4;
+    case GENX_SKL:
+        return 5;
+    case GENX_BXT:
+        return 6;
+    case GENX_CNL:
+        return 7;
+    case GENX_ICL:
+        return 8;
+    case GENX_ICLLP:
+        return 10;
+    default:
+        assert(false && "unsupported platform");
+        return -1;
+    }
 }
 
 void InitStepping()
 {
-	stepping = Step_none;
+    stepping = Step_none;
 }
 
 int SetStepping( const char * str ) {
@@ -232,6 +247,6 @@ G4_Type_Info G4_Type_Table[Type_UNDEF+1] = {
     {Type_UQ, 64, 8, 0xFF, "uq"},
     {Type_HF, 16, 2, 0x3, "hf"},
     {Type_NF, 64, 8, 0xFF, "nf"},
-	{Type_UNDEF, 0, 0, 0x0, "none"}
+    {Type_UNDEF, 0, 0, 0x0, "none"}
 };
 

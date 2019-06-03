@@ -73,18 +73,18 @@ private:
     G4_BB*   exitBB;    // the exit node
     unsigned callCount; // the number of call sites
 
-	std::vector<G4_BB*>  BBList;      // the list of BBs
-	std::list<FuncInfo *>  callees; // the list of callees
-	unsigned scopeID;               // the function scope ID
+    std::vector<G4_BB*>  BBList;      // the list of BBs
+    std::list<FuncInfo *>  callees; // the list of callees
+    unsigned scopeID;               // the function scope ID
 
-	bool visited;
-	unsigned preID;
-	unsigned postID;
+    bool visited;
+    unsigned preID;
+    unsigned postID;
 
 public:
 
     FuncInfo(unsigned p_id, G4_BB* p_initBB, G4_BB* p_exitBB)
-		: id(p_id), initBB(p_initBB), exitBB(p_exitBB), callCount(1), scopeID(0), visited(false), preID(0), postID(0)
+        : id(p_id), initBB(p_initBB), exitBB(p_exitBB), callCount(1), scopeID(0), visited(false), preID(0), postID(0)
     {
     }
 
@@ -131,65 +131,65 @@ public:
         exitBB = p_exitBB;
     }
 
-	void addCallee(FuncInfo *fn)
-	{
-		callees.push_back(fn);
-	}
+    void addCallee(FuncInfo *fn)
+    {
+        callees.push_back(fn);
+    }
 
-	std::list<FuncInfo *>&  getCallees()
-	{
-		return callees;
-	}
+    std::list<FuncInfo *>&  getCallees()
+    {
+        return callees;
+    }
 
-	void addBB(G4_BB* bb)
-	{
-		BBList.push_back(bb);
-	}
+    void addBB(G4_BB* bb)
+    {
+        BBList.push_back(bb);
+    }
 
-	std::vector<G4_BB*>&  getBBList()
-	{
-		return BBList;
-	}
+    std::vector<G4_BB*>&  getBBList()
+    {
+        return BBList;
+    }
 
-	unsigned getScopeID()
-	{
-		return scopeID;
-	}
+    unsigned getScopeID()
+    {
+        return scopeID;
+    }
 
-	void setScopeID(unsigned id)
-	{
-		scopeID = id;
-	}
+    void setScopeID(unsigned id)
+    {
+        scopeID = id;
+    }
 
-	bool getVisited()
-	{
-		return visited;
-	}
+    bool getVisited()
+    {
+        return visited;
+    }
 
-	void setVisited()
-	{
-		visited = true;
-	}
+    void setVisited()
+    {
+        visited = true;
+    }
 
-	unsigned getPreID()
-	{
-		return preID;
-	}
+    unsigned getPreID()
+    {
+        return preID;
+    }
 
-	void setPreID(unsigned id)
-	{
-		preID = id;
-	}
+    void setPreID(unsigned id)
+    {
+        preID = id;
+    }
 
-	unsigned getPostID()
-	{
-		return postID;
-	}
+    unsigned getPostID()
+    {
+        return postID;
+    }
 
-	void setPostID(unsigned id)
-	{
-		postID = id;
-	}
+    void setPostID(unsigned id)
+    {
+        postID = id;
+    }
 
     void dump() const;
 };
@@ -284,14 +284,6 @@ class G4_BB
     // if the block is under simd flow control
     bool inSimdFlow;
 
-    //list of all the basic blocks in the function
-    //of which this is the first basic block.
-    //the list may contain blocks that are disconnected
-    //from CFG
-    std::map<int, G4_BB*> BBlist;
-    G4_BB * start_block;
-
-
     // the physical pred/succ for this block (i.e., the pred/succ for this block in the BB list)
     // Note that some transformations may rearrange BB layout, so for safety it's best to recompute
     // this
@@ -377,7 +369,7 @@ public:
         traversal(0), idom(NULL), beforeCall(NULL),
         afterCall(NULL), calleeInfo(NULL), BBType(G4_BB_NONE_TYPE),
         inNaturalLoop(false), loopNestLevel(0), scopeID(0), inSimdFlow(false),
-        start_block(NULL), physicalPred(NULL), physicalSucc(NULL), parent(fg),
+        physicalPred(NULL), physicalSucc(NULL), parent(fg),
         instList(alloc), hasSendInBB(false)
     {
     }
@@ -389,14 +381,6 @@ public:
 
     FlowGraph& getParent() const { return *parent; }
     G4_Kernel& getKernel() const;
-    void    addToBBList(int key, G4_BB* b){BBlist[key] = b;}
-    void    clearBBList(){BBlist.clear();}
-    bool    existsInBBList(int key){ return BBlist.find(key) != BBlist.end();}
-    std::map<int, G4_BB*>::iterator getBBListStart(){return BBlist.begin();}
-    std::map<int, G4_BB*>::iterator getBBListEnd(){return BBlist.end();}
-    void removeBlockFromBBList(int key) { BBlist.erase(key); }
-    void setStartBlock(G4_BB * b) {start_block = b;}
-    G4_BB * getStartBlock() {return start_block;}
 
     bool     isLastInstEOT();    // to check if the last instruction in list is EOT
     G4_opcode    getLastOpcode() const;
@@ -650,6 +634,7 @@ typedef std::pair<BB_LIST_ITER, BB_LIST_ITER> GRAPH_CUT_BOUNDS;
 
 namespace vISA
 {
+
 class G4_Kernel; // forward declaration
 class FlowGraph
 {
@@ -657,7 +642,18 @@ class FlowGraph
 
 private:
 
-    G4_BB* entryBB;                             // entry block
+    // This list maintains the ordering of the basic blocks (i.e., asm and binary emission will output
+    // the blocks in list oder.
+    // Important: Due to the nature of SIMD CF, it is unsafe to change the order of basic blocks
+    // Once the list is populated in constructFlowGraph(), the only changes allowed are
+    // 1. insertion of new exit BBs due to handleExit/handleReturn/handleFRet.  The exit BB
+    //    must be the last BB for the kernel/subroutine/function it belongs to
+    // 2. deletion of unreachable blocks
+    // 3. merging of blocks that only contain one label with its (single) successor
+    // If you need to change the block ordering for any reason, create another data structure instead of
+    // modifying this one
+    BB_LIST BBs;
+
     unsigned traversalNum;                      // used for flow graph traversals
     unsigned numBBId;                            // number of basic blocks
     bool     reducible;                            // reducibility of the graph
@@ -682,6 +678,10 @@ private:
     // stores all endift inst that have labels associated with it
     std::unordered_map<G4_INST*, G4_Label*> endifWithLabels;
 
+    // label to subroutine BB's map. This is used to add edges between subroutine caller/callee
+    // ToDo: We should use FuncInfo instead, but at the time it was needed FuncInfo was not constructed yet..
+    std::unordered_map<G4_Label*, std::vector<G4_BB*>> subroutines;
+
 public:
     typedef std::pair<G4_BB*, G4_BB*> Edge;
     typedef std::set<G4_BB*> Blocks;
@@ -689,18 +689,6 @@ public:
 
     Mem_Manager& mem;                            // mem mananger for creating BBs & starting IP table
     INST_LIST_NODE_ALLOCATOR& instListAlloc;     // a reference to dedicated mem allocator for holding instruction list nodes
-
-    // This list maintains the ordering of the basic blocks (i.e., asm and binary emission will output
-    // the blocks in list oder.
-    // Important: Due to the nature of SIMD CF, it is unsafe to change the order of basic blocks
-    // Once the list is populated in constructFlowGraph(), the only changes allowed are
-    // 1. insertion of new exit BBs due to handleExit/handleReturn/handleFRet.  The exit BB
-    //    must be the last BB for the kernel/subroutine/function it belongs to
-    // 2. deletion of unreachable blocks
-    // 3. merging of blocks that only contain one label with its (single) successor
-    // If you need to change the block ordering for any reason, create another data structure instead of
-    // modifying this one
-    BB_LIST BBs;
 
     std::list<Edge> backEdges;                  // list of all backedges (tail->head)
     Loop naturalLoops;
@@ -749,6 +737,44 @@ public:
     } BCStats;
 
 public:
+
+    // forwarding functions to the BBs list
+    BB_LIST_ITER begin() { return BBs.begin(); }
+    BB_LIST_ITER end() { return BBs.end(); }
+    BB_LIST::reverse_iterator rbegin() { return BBs.rbegin(); }
+    BB_LIST::reverse_iterator rend() { return BBs.rend(); }
+    BB_LIST::const_iterator cbegin() const { return BBs.cbegin(); }
+    BB_LIST::const_iterator cend() const { return BBs.cend(); }
+    BB_LIST::const_reverse_iterator crbegin() { return BBs.crbegin(); }
+    BB_LIST::const_reverse_iterator crend() { return BBs.crend(); }
+    
+    size_t size() { return BBs.size(); }
+    bool empty() const { return BBs.empty(); }
+    G4_BB* back() const {return BBs.back(); }
+    // ToDo: remove these and instead operata on BBs within CFG class only
+    BB_LIST_ITER insert(BB_LIST_ITER iter, G4_BB* bb) { return BBs.insert(iter, bb); }
+    BB_LIST& getBBList() { return BBs; }
+
+    // add BB to be the first BB 
+    void addPrologBB(G4_BB* BB)
+    {
+        G4_BB* oldEntry = getEntryBB();
+        BBs.push_front(BB);
+        addPredSuccEdges(BB, oldEntry);
+    }
+
+    // append another CFG's BBs to this CFG.
+    // note that we don't add additional CFG edges as its purpose is just to 
+    // stitch the two binaries togather
+    void append(const FlowGraph& otherFG)
+    {
+        for (auto I = otherFG.cbegin(), E = otherFG.cend(); I != E; ++I)
+        {
+            auto bb = *I;
+            BBs.push_back(bb);
+            incrementNumBBs();
+        }
+    }
 
     G4_BB* getLabelBB(Label_BB_Map& map, const char* label);
     G4_BB* beginBB(Label_BB_Map& map, G4_INST* first);
@@ -815,8 +841,7 @@ public:
     // Merge multiple returns into one, prepare for spill code insertion
     //
     void mergeReturn(Label_BB_Map& map, FuncInfoHashTable& funcInfoTable);
-    void searchReturn(G4_BB* bb, G4_BB* returnAddr, BB_LIST & retBBList);
-    G4_BB* mergeSubRoutineReturn(G4_BB* bb, G4_BB* returnAddr, BB_LIST & retBBList);
+    G4_BB* mergeSubRoutineReturn(G4_Label* subroutine);
     void decoupleReturnBlock(G4_BB*);
     void decoupleInitBlock(G4_BB*, FuncInfoHashTable& funcInfoTable);
     void decoupleExitBlock(G4_BB*);
@@ -852,17 +877,18 @@ public:
     }
 
     void handleReturn(std::map<std::string, G4_BB*>& map, FuncInfoHashTable& funcInfoTable);
-    void linkReturnAddr(std::map<std::string, G4_BB*>& map, G4_BB* bb, G4_BB* returnAddr);
+    void linkReturnAddr(G4_BB* bb, G4_BB* returnAddr);
 
     void handleExit(G4_BB* lastKernelBB);
     void handleWait();
 
     void preprocess(INST_LIST& instlist);
 
-    FlowGraph(INST_LIST_NODE_ALLOCATOR& alloc, G4_Kernel* kernel, Mem_Manager& m) : entryBB(NULL), traversalNum(0), numBBId(0), reducible(true),
+    FlowGraph(INST_LIST_NODE_ALLOCATOR& alloc, G4_Kernel* kernel, Mem_Manager& m) : 
+      traversalNum(0), numBBId(0), reducible(true),
       doIPA(false), hasStackCalls(false), isStackCallFunc(false), autoLabelId(0),
       pKernel(kernel), mem(m), instListAlloc(alloc),
-      builder(NULL), globalOpndHT(m), framePtrDcl(NULL), stackPtrDcl(NULL),
+      builder(NULL), kernelInfo(NULL), globalOpndHT(m), framePtrDcl(NULL), stackPtrDcl(NULL),
       scratchRegDcl(NULL), pseudoVCEDcl(NULL) {}
 
     ~FlowGraph();
@@ -913,7 +939,7 @@ public:
         }
     }
 
-    G4_INST* createNewLabelInst(G4_Label* label, int lineNo, int CISAOff);
+    G4_INST* createNewLabelInst(G4_Label* label, int lineNo = 0, int CISAOff = -1);
 
     G4_BB* createNewBB(bool insertInFG = true);
     int64_t insertDummyUUIDMov();
@@ -961,8 +987,7 @@ public:
     void resetLocalDataFlowData();
 
     unsigned getNumBB() const      {return numBBId;}
-    G4_BB* getEntryBB()        {return entryBB;}
-    void setEntryBB(G4_BB *entry) {entryBB = entry;}
+    G4_BB* getEntryBB()        {return BBs.front();}
 
     void doFilescopeVarLayout(IR_Builder& builder, DECLARE_LIST& declares, unsigned& fileScopeFrameOffset);
     void addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool);
@@ -1006,7 +1031,7 @@ public:
 
     void markRPOTraversal();
 
-	void DFSTraverse(G4_BB* bb, unsigned &preId, unsigned &postId, FuncInfo* fn);
+    void DFSTraverse(G4_BB* bb, unsigned &preId, unsigned &postId, FuncInfo* fn);
 
     void findBackEdges();
 
@@ -1167,7 +1192,10 @@ public:
     // return igc_info_t format buffer. caller casts it to igc_info_t.
     void* getGTPinInfoBuffer(unsigned int &bufferSize);
 
-    void setScratchNextFree(unsigned int next) { nextScratchFree = next; }
+    void setScratchNextFree(unsigned int next)
+    { 
+        nextScratchFree = ((next + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES) * G4_GRF_REG_NBYTES;
+    }
     uint8_t getNumBytesScratchUse()
     {
         if (gtpin_init)
@@ -1628,7 +1656,7 @@ public:
     G4_BB* getCommonImmDom(std::unordered_set<G4_BB*>&);
 
 private:
-    const G4_Kernel& kernel;
+    G4_Kernel& kernel;
     G4_BB* exitBB = nullptr;
     std::vector<std::unordered_set<G4_BB*>> postDoms;
     std::vector<std::vector<G4_BB*>> immPostDoms;

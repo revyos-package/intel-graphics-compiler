@@ -34,12 +34,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 vISAPreDefinedSurface vISAPreDefSurf[COMMON_ISA_NUM_PREDEFINED_SURF_VER_3_1] =
 {
-	{ 0, PREDEF_SURF_0, "T0" },
-	{ 1, PREDEF_SURF_1, "T1" },
-	{ 2, PREDEF_SURF_2, "T2" },
-	{ 3, PREDEF_SURF_3, "TSS" },
-	{ 4, PREDEF_SURF_252, "T252" },
-	{ 5, PREDEF_SURF_255, "T255" },
+    { 0, PREDEF_SURF_0, "T0" },
+    { 1, PREDEF_SURF_1, "T1" },
+    { 2, PREDEF_SURF_2, "T2" },
+    { 3, PREDEF_SURF_3, "TSS" },
+    { 4, PREDEF_SURF_252, "T252" },
+    { 5, PREDEF_SURF_255, "T255" },
 };
 
 
@@ -473,9 +473,9 @@ bool hasExecSize(ISA_Opcode op, uint8_t subOp)
         case ISA_Inst_Sampler:
         case ISA_Inst_Misc:
             if( op == ISA_RAW_SEND || op == ISA_RAW_SENDS || op == ISA_3D_SAMPLE ||
-				op == ISA_3D_LOAD || op == ISA_3D_GATHER4 || op == ISA_3D_URB_WRITE ||
-				op == ISA_3D_INFO)
-			{
+                op == ISA_3D_LOAD || op == ISA_3D_GATHER4 || op == ISA_3D_URB_WRITE ||
+                op == ISA_3D_INFO)
+            {
                 return true;
             }
             else
@@ -882,8 +882,12 @@ unsigned int Get_Gen4_Emask( Common_VISA_EMask_Ctrl cisa_emask, int exec_size )
         {
         case vISA_EMASK_M1:
             return InstOpt_NoOpt;
+        case vISA_EMASK_M5:
+            return InstOpt_M16;
         case vISA_EMASK_M1_NM:
             return InstOpt_WriteEnable;
+        case vISA_EMASK_M5_NM:
+            return InstOpt_M16 | InstOpt_WriteEnable;
         default:
             ASSERT_USER(false, "Invalid emask for SIMD32 inst");
             return InstOpt_NoOpt;
@@ -1201,8 +1205,8 @@ function_info {
     ub name[name_len];
     ud offset;
     ud size;
-reloc_symtab variable_reloc_symtab;
-reloc_symtab function_reloc_symtab;
+    uw num_syms_variable; // MBZ
+    uw num_syms_function; // MBZ
 }
 */
 //for cisa 3.0
@@ -1212,21 +1216,7 @@ unsigned long getSizeFunctionInfo(kernel_info_t * kernel_info)
         kernel_info->name_len + sizeof(kernel_info->offset) + sizeof(kernel_info->size);
 
     size += sizeof(kernel_info->variable_reloc_symtab.num_syms);
-
-    for(int i = 0; i < kernel_info->variable_reloc_symtab.num_syms; i++)
-    {
-        size += sizeof(kernel_info->variable_reloc_symtab.reloc_syms[i].resolved_index);
-        size += sizeof(kernel_info->variable_reloc_symtab.reloc_syms[i].symbolic_index);
-    }
-
     size += sizeof(kernel_info->function_reloc_symtab.num_syms);
-
-    for(int i = 0; i < kernel_info->function_reloc_symtab.num_syms; i++)
-    {
-        size += sizeof(kernel_info->function_reloc_symtab.reloc_syms[i].resolved_index);
-        size += sizeof(kernel_info->function_reloc_symtab.reloc_syms[i].symbolic_index);
-    }
-
 
     return size;
 }
@@ -1237,8 +1227,8 @@ unsigned long getSizeFunctionInfo(kernel_info_t * kernel_info)
     ud offset;
     ud size;
     ud input_offset;
-reloc_symtab variable_reloc_symtab;
-reloc_symtab function_reloc_symtab;
+    uw num_syms_variable; // MBZ
+    uw num_syms_function; // MBZ
     ub num_gen_binaries;
     gen_binary_info gen_binaries[num_gen_binaries];
 }
@@ -1250,20 +1240,7 @@ unsigned long get_Size_Kernel_Info(kernel_info_t * kernel_info, int major_versio
         + sizeof(kernel_info->input_offset);
 
     size += sizeof(kernel_info->variable_reloc_symtab.num_syms);
-
-    for (int i = 0; i < kernel_info->variable_reloc_symtab.num_syms; i++)
-    {
-        size += sizeof(kernel_info->variable_reloc_symtab.reloc_syms[i].resolved_index);
-        size += sizeof(kernel_info->variable_reloc_symtab.reloc_syms[i].symbolic_index);
-    }
-
     size += sizeof(kernel_info->function_reloc_symtab.num_syms);
-
-    for (int i = 0; i < kernel_info->function_reloc_symtab.num_syms; i++)
-    {
-        size += sizeof(kernel_info->function_reloc_symtab.reloc_syms[i].resolved_index);
-        size += sizeof(kernel_info->function_reloc_symtab.reloc_syms[i].symbolic_index);
-    }
 
     size += sizeof(kernel_info->num_gen_binaries);
 
@@ -1300,17 +1277,17 @@ unsigned long get_Size_Isa_Header( common_isa_header * m_header, int major_versi
         size += get_Size_Kernel_Info(&m_header->kernels[i], major_version, minor_version);
     }
     /*
-       common_isa_header {
+    common_isa_header {
     ud magic_number;
     ub major_version;
     ub minor_version;
     uw num_kernels;
     kernel_info kernels[num_kernels];
     uw num_variables;
-file_scope_var_info variables[num_variables];
-    uw num_ functions;
+    file_scope_var_info variables[num_variables];
+    uw num_functions;
     function_info functions[num_functions];
-}
+    }
 
     */
 
@@ -1433,7 +1410,7 @@ VISA_Modifier Get_Common_ISA_SrcMod_From_G4_Mod(G4_SrcModifier mod )
 }
 
 
-VISA_Type getVectorOperandType(const common_isa_header& isaHeader, const kernel_format_t* header, const vector_opnd& opnd)
+VISA_Type getVectorOperandType(const common_isa_header& isaHeader, const print_format_provider_t* header, const vector_opnd& opnd)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     switch (opnd.getOperandClass())
@@ -1446,7 +1423,7 @@ VISA_Type getVectorOperandType(const common_isa_header& isaHeader, const kernel_
             }
             else
             {
-                const var_info_t& var = header->variables[opnd.getOperandIndex()-numPreDefinedVars];
+                const var_info_t& var = *header->getVar(opnd.getOperandIndex()-numPreDefinedVars);
                 return var.getType();
             }
         case OPERAND_ADDRESS:
@@ -1537,23 +1514,23 @@ int64_t typecastVals(const void *value, VISA_Type isaType)
 // convert binary vISA surface id to GEN surface index
 int Get_PreDefined_Surf_Index(int index)
 {
-	if (getGenxPlatform() < GENX_SKL)
-	{
-		switch (index)
-		{
-		case 1:
-			return PREDEF_SURF_1_OLD;
-		case 2:
-			return PREDEF_SURF_2_OLD;
-		case 3:
-			return PREDEF_SURF_3_OLD;
-		default:
-			;
-			// fallthrough
-		}
-	}
+    if (getGenxPlatform() < GENX_SKL)
+    {
+        switch (index)
+        {
+        case 1:
+            return PREDEF_SURF_1_OLD;
+        case 2:
+            return PREDEF_SURF_2_OLD;
+        case 3:
+            return PREDEF_SURF_3_OLD;
+        default:
+            ;
+            // fallthrough
+        }
+    }
 
-	return vISAPreDefSurf[index].genId;
+    return vISAPreDefSurf[index].genId;
 
 }
 
@@ -1575,7 +1552,7 @@ const char* createStringCopy(const char* name, vISA::Mem_Manager &m_mem)
 
 std::string sanitizeString(std::string& str)
 {
-    auto isReservedChar = [](char c) 
+    auto isReservedChar = [](char c)
     {
 #ifdef _WIN32
         return c == '<' || c == '>' || c == '\"' || c == '/' ||
