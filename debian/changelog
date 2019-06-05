@@ -2,6 +2,7 @@ intel-graphics-compiler (1.0.6-1) UNRELEASED; urgency=medium
 
   * control: Fix descriptions.
   * copyright: Use a wildcard for opencl_headers.
+  * use-packaged-spirv-tools.diff: Droped, obsolete.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Sat, 13 Apr 2019 09:37:50 +0300
 
