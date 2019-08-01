@@ -910,9 +910,14 @@ public:
   static const SPIRVWord FixedWordCount = 4;
 
   SPIRVLoopMerge(SPIRVId TheMergeBlock, SPIRVId TheContinueTarget,
-    SPIRVWord TheLoopControl, SPIRVBasicBlock *BB)
-    : SPIRVInstruction(FixedWordCount, OC, BB), MergeBlock(TheMergeBlock),
-    ContinueTarget(TheContinueTarget), LoopControl(TheLoopControl) {
+    SPIRVWord TheLoopControl,
+    std::vector<SPIRVWord> TheLoopControlParameters,
+    SPIRVBasicBlock *BB)
+    : SPIRVInstruction(FixedWordCount + TheLoopControlParameters.size(), OC,
+      BB),
+    MergeBlock(TheMergeBlock), ContinueTarget(TheContinueTarget),
+    LoopControl(TheLoopControl),
+    LoopControlParameters(TheLoopControlParameters) {
     validate();
     assert(BB && "Invalid BB");
   }
@@ -927,12 +932,22 @@ public:
   SPIRVId getMergeBlock() { return MergeBlock; }
   SPIRVId getContinueTarget() { return ContinueTarget; }
   SPIRVWord getLoopControl() { return LoopControl; }
-  _SPIRV_DEF_DEC3(MergeBlock, ContinueTarget, LoopControl)
+  std::vector<SPIRVWord> getLoopControlParameters() {
+    return LoopControlParameters;
+  }
+
+    void setWordCount(SPIRVWord TheWordCount) override {
+    SPIRVEntry::setWordCount(TheWordCount);
+    LoopControlParameters.resize(TheWordCount - FixedWordCount);
+  }
+  _SPIRV_DEF_DEC4(MergeBlock, ContinueTarget, LoopControl,
+                  LoopControlParameters)
 
 protected:
   SPIRVId MergeBlock;
   SPIRVId ContinueTarget;
   SPIRVWord LoopControl;
+  std::vector<SPIRVWord> LoopControlParameters;
 };
 
 class SPIRVSwitch: public SPIRVInstruction {
@@ -1084,6 +1099,30 @@ typedef SPIRVAccessChainGeneric<OpInBoundsPtrAccessChain, 5>
 template<Op OC, SPIRVWord FixedWordCount>
 class SPIRVFunctionCallGeneric: public SPIRVInstruction {
 public:
+  SPIRVFunctionCallGeneric(SPIRVType *TheType, SPIRVId TheId,
+    const std::vector<SPIRVWord> &TheArgs,
+    SPIRVBasicBlock *BB)
+    : SPIRVInstruction(TheArgs.size() + FixedWordCount, OC, TheType, TheId,
+      BB),
+    Args(TheArgs) {
+    SPIRVFunctionCallGeneric::validate();
+    assert(BB && "Invalid BB");
+  }
+  SPIRVFunctionCallGeneric(SPIRVType *TheType, SPIRVId TheId,
+    const std::vector<SPIRVValue *> &TheArgs,
+    SPIRVBasicBlock *BB)
+    : SPIRVInstruction(TheArgs.size() + FixedWordCount, OC, TheType, TheId,
+      BB) {
+    Args = getIds(TheArgs);
+    SPIRVFunctionCallGeneric::validate();
+    assert(BB && "Invalid BB");
+  }
+
+  SPIRVFunctionCallGeneric(SPIRVModule *BM, SPIRVWord ResId, SPIRVType *TheType,
+    const std::vector<SPIRVWord> &TheArgs)
+    : SPIRVInstruction(TheArgs.size() + FixedWordCount, OC, TheType, ResId,
+      BM),
+    Args(TheArgs) {}
   SPIRVFunctionCallGeneric():SPIRVInstruction(OC) {}
   const std::vector<SPIRVWord> &getArguments() {
     return Args;
@@ -1121,6 +1160,7 @@ public:
 protected:
   SPIRVId FunctionId;
 };
+
 
 class SPIRVExtInst: public SPIRVFunctionCallGeneric<OpExtInst, 5> {
 public:

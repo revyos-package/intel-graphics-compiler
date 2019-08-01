@@ -40,8 +40,6 @@ public:
     /// Fills in the kernel program structure with data determined during compilation.
     void        FillProgram(SHullShaderKernelProgram* pKernelProgram);
     void        PreCompile();
-    void        EmitPatchConstantInput(llvm::Instruction* pInst, QuadEltUnit& attributeOffset, CVariable*& pPerSlotOffsetVar);
-    void        EmitOutputControlPointInput(llvm::Instruction* pInst, QuadEltUnit& attributeOffset, CVariable*& pPerSlotOffsetVar);
     void        ParseShaderSpecificOpcode(llvm::Instruction* inst);
     void        AddPrologue();
 
@@ -56,14 +54,11 @@ public:
     CVariable* GetR1();
     CVariable* GetR2();
     virtual CVariable* GetURBInputHandle(CVariable* pVertexIndex);
-    virtual QuadEltUnit GetFinalGlobalOffet(QuadEltUnit globalOffset);
     virtual uint32_t GetMaxNumOfPushedInputs() const;
 
     void EmitPatchConstantHeader(
         CVariable* var[],
         bool EOT );
-
-    QuadEltUnit GetPatchConstantOutputSize() const;
 
     OctEltUnit GetURBAllocationSize() const;
     OctEltUnit GetPatchConstantURBSize() const;

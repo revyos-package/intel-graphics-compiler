@@ -85,6 +85,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/AddressSpaceAliasAnalysis/AddressSpaceAliasAnalysis.h"
 #include "Compiler/Optimizer/OpenCLPasses/UndefinedReferences/UndefinedReferencesPass.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStatefull/StatelessToStatefull.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/DisableLoopUnrollOnRetry/DisableLoopUnrollOnRetry.hpp"
 #include "Compiler/Optimizer/MCSOptimization.hpp"
 #include "Compiler/Optimizer/RectListOptimizationPass.hpp"
 #include "Compiler/Optimizer/GatingSimilarSamples.hpp"
@@ -111,6 +112,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/FindInterestingConstants.h"
 #include "Compiler/DynamicTextureFolding.h"
+#include "Compiler/SampleMultiversioning.hpp"
 #include "Compiler/ThreadCombining.hpp"
 #include "Compiler/InitializePasses.h"
 #include "Compiler/Optimizer/Scalarizer.h"
@@ -363,8 +365,7 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
 
         int LoopUnrollThreshold = ctx.m_DriverInfo.GetLoopUnrollThreshold();
 
-        if (LoopUnrollThreshold > 0 && ctx.m_retryManager.AllowUnroll() &&
-            (ctx.m_tempCount < 64))
+        if (LoopUnrollThreshold > 0 && (ctx.m_tempCount < 64))
         {
             mpm.add(IGCLLVM::createLoopUnrollPass(2, LoopUnrollThreshold, -1, 1));
         }
@@ -447,6 +448,11 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
             mpm.add(createCFGSimplificationPass());
         }
         mpm.add(createPromoteMemoryToRegisterPass());
+    }
+    else
+    {
+        if(IGC_IS_FLAG_ENABLED(AllowMem2Reg))
+            mpm.add(createPromoteMemoryToRegisterPass());
     }
     if(ctx.m_instrTypes.hasLoop)
     {
@@ -639,6 +645,7 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
 
     case ShaderType::HULL_SHADER:
         mpm.add(createHullShaderLoweringPass());
+        mpm.add(new GenSpecificPattern());
         break;
 
     case ShaderType::DOMAIN_SHADER:
@@ -1273,9 +1280,13 @@ void OptimizeIR(CodeGenContext* pContext)
 
                 mpm.add(CreateHoistFMulInLoopPass());
 
+                if (!pContext->m_retryManager.IsFirstTry()) 
+                {
+                    mpm.add(new DisableLoopUnrollOnRetry());
+                }
+
                 if(IGC_IS_FLAG_ENABLED(EnableCustomLoopVersioning) &&
-                    pContext->type == ShaderType::PIXEL_SHADER &&
-                    pContext->m_retryManager.AllowUnroll())
+                    pContext->type == ShaderType::PIXEL_SHADER)
                 {
                     // custom loop versioning relies on LCSSA form
                     mpm.add(new CustomLoopVersioning());
@@ -1295,7 +1306,7 @@ void OptimizeIR(CodeGenContext* pContext)
                     LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
                 }
 
-                if(LoopUnrollThreshold > 0 && pContext->m_retryManager.AllowUnroll() && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                if(LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
                 {
                     mpm.add(IGCLLVM::createLoopUnrollPass());
                 }
@@ -1310,9 +1321,7 @@ void OptimizeIR(CodeGenContext* pContext)
                 }
 
                 // Second unrolling with the same threshold.
-                if(LoopUnrollThreshold > 0 &&
-                    pContext->m_retryManager.AllowUnroll() &&
-                    !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                if(LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
                 {
                     mpm.add(IGCLLVM::createLoopUnrollPass());
                 }
@@ -1377,6 +1386,9 @@ void OptimizeIR(CodeGenContext* pContext)
             mpm.add(llvm::createEarlyCSEPass());
             if(pContext->m_instrTypes.hasNonPrimitiveAlloca)
             {
+                // run custom safe opts to potentially get rid of indirect
+                // addressing of private arrays, see visitLoadInst
+                mpm.add(new CustomSafeOptPass());
                 mpm.add(createSROAPass());
             }
 
@@ -1492,6 +1504,11 @@ void OptimizeIR(CodeGenContext* pContext)
         if (pContext->m_instrTypes.hasLoop)
         {
             mpm.add(createDeadPHINodeEliminationPass());
+        }
+
+        if (IGC_IS_FLAG_ENABLED(SampleMultiversioning))
+        {
+            mpm.add(new SampleMultiversioning(pContext));
         }
         mpm.run(*pContext->getModule());
     }

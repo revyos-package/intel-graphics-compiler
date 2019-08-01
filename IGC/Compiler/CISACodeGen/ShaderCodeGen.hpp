@@ -86,6 +86,7 @@ public:
     void        Destroy();
     virtual void InitEncoder(SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE);
     virtual void PreCompile() {}
+    virtual void PreCompileFunction(llvm::Function &F) {}
     virtual void ParseShaderSpecificOpcode(llvm::Instruction* inst) {}
     virtual void AllocatePayload() {}
     virtual void AddPrologue() {}
@@ -105,7 +106,6 @@ public:
         assert(!"Should be overridden in a derived class!");
         return nullptr;
     }
-    virtual QuadEltUnit GetFinalGlobalOffet(QuadEltUnit globalOffset) { return QuadEltUnit(0); }
     virtual bool hasReadWriteImage(llvm::Function &F) { return false; }
     virtual bool CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Function &F) { return true; }
     CVariable*  LazyCreateCCTupleBackingVariable(
@@ -179,6 +179,7 @@ public:
     void        CreateGlobalSymbol(llvm::GlobalVariable* pGlobal);
 
     void        CreateImplicitArgs();
+    void        CreateAliasVars();
     uint        GetBlockId(llvm::BasicBlock* block);
     uint        GetNumSBlocks() { return m_numBlocks; }
 

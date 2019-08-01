@@ -395,7 +395,7 @@ void CShader::CreateImplicitArgs()
             implictArg.getAlignType(*m_DL),
             isUniform,
             isUniform ? 1 : m_numberInstance);
-   
+
         if (implictArg.getArgType() == ImplicitArg::R0) {
             encoder.GetVISAPredefinedVar(var, PREDEFINED_R0);
         }
@@ -420,6 +420,72 @@ void CShader::CreateImplicitArgs()
         e_alignment algn = GetPreferredAlignment(ArgVal, m_WI, m_ctx);
         CVariable* ArgCVar = GetNewVector(ArgVal, algn);
         updateArgSymbolMapping(ArgVal, ArgCVar);
+    }
+
+    CreateAliasVars();
+}
+
+// For sub-vector aliasing, pre-allocating cvariables for those
+// valeus that have sub-vector aliasing before emit instructions.
+// (The sub-vector aliasing is done in VariableReuseAnalysis.)
+void CShader::CreateAliasVars()
+{
+    // Create CVariables for vector aliasing (This is more
+    // efficient than doing it on-fly inside getSymbol()).
+    if (IGC_IS_FLAG_ENABLED(VATemp) &&
+        !m_VRA->m_aliasMap.empty())
+    {
+        // For each vector alias root, generate cvariable
+        // for it and all its component sub-vector
+        for (auto& II : m_VRA->m_aliasMap)
+        {
+            SSubVecDesc* SV = II.second;
+            Value* rootVal = SV->BaseVector;
+            if (SV->Aliaser != rootVal)
+                continue;
+            CVariable* rootCVar = GetSymbol(rootVal);
+
+            // Generate all vector aliasers and their
+            // dessa root if any.
+            for (int i = 0, sz = (int)SV->Aliasers.size(); i < sz; ++i)
+            {
+                SSubVecDesc* aSV = SV->Aliasers[i];
+                Value* V = aSV->Aliaser;
+                // Create alias cvariable for Aliaser and its dessa root if any
+                Value* Vals[2] = { V, nullptr };
+                if (m_deSSA) {
+                    Value* dessaRootVal = m_deSSA->getRootValue(V);
+                    if (dessaRootVal && dessaRootVal != V)
+                        Vals[1] = dessaRootVal;
+                }
+                int startIx = aSV->StartElementOffset;
+
+                for (int i = 0; i < 2; ++i)
+                {
+                    V = Vals[i];
+                    if (!V)
+                        continue;
+
+                    Type *Ty = V->getType();
+                    VectorType* VTy = dyn_cast<VectorType>(Ty);
+                    Type *BTy = VTy ? VTy->getElementType() : Ty;
+                    int nelts = (VTy ? (int)VTy->getNumElements() : 1);
+
+                    VISA_Type visaTy = GetType(BTy);
+                    int typeBytes = (int)CEncoder::GetCISADataTypeSize(visaTy);
+                    int offsetInBytes = typeBytes * startIx;
+                    int nbelts = nelts;
+                    if (!rootCVar->IsUniform())
+                    {
+                        int width = (int)numLanes(m_SIMDSize);
+                        offsetInBytes *= width;
+                        nbelts *= width;
+                    }
+                    CVariable* Var = GetNewAlias(rootCVar, visaTy, offsetInBytes, nbelts);
+                    symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(V, Var));
+                }
+            }
+        }
     }
 }
 
@@ -841,7 +907,7 @@ uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
     mask = 0;
     // we don't process vector bigger than 31 elements as the mask has only 32bits
     // If we want to support longer vectors we need to extend the mask size
-    // 
+    //
     // If val has been coalesced, don't prune it.
     if(IsCoalesced(val) || nbElement > 31)
     {
@@ -982,9 +1048,8 @@ uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
             GenISAIntrinsic::ID IID = inst->getIntrinsicID();
             if (isLdInstruction(inst) ||
                 IID == GenISAIntrinsic::GenISA_URBRead ||
+                IID == GenISAIntrinsic::GenISA_URBReadOutput ||
                 IID == GenISAIntrinsic::GenISA_DCL_ShaderInputVec ||
-                IID == GenISAIntrinsic::GenISA_DCL_HSPatchConstInputVec ||
-                IID == GenISAIntrinsic::GenISA_DCL_HSOutputCntrlPtInputVec ||
                 IID == GenISAIntrinsic::GenISA_DCL_HSinputVec)
             {
                 // prune without write-mask
@@ -1482,7 +1547,7 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
             {
                 GetEncoder().SetDstSubReg(k);
             }
-            else 
+            else
             {
                 auto input_size = eTy->getScalarSizeInBits() / 8;
                 Var = GetNewAlias(Var, Var->GetType(), k * input_size * numLanes(m_SIMDSize),0);
@@ -1931,6 +1996,9 @@ void CShader::BeginFunction(llvm::Function *F)
             }
         }
     }
+
+    CreateAliasVars();
+    PreCompileFunction(*F);
 }
 
 /// This method is used to create the vISA variable for function F's formal return value
@@ -2067,7 +2135,6 @@ CVariable* CShader::getOrCreateArgumentSymbol(
 
 CVariable* CShader::getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, unsigned argIdx)
 {
-    assert(cInst->getCalledFunction() == nullptr);
     assert(argIdx < cInst->getNumArgOperands());
 
     CVariable* var = nullptr;
@@ -2413,12 +2480,13 @@ CVariable* CShader::GetSymbol(llvm::Value *value, bool fromConstantPool)
         return AliasVar;
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableVariableAlias))
+    if (IGC_IS_FLAG_ENABLED(EnableVariableAlias) &&
+        IGC_GET_FLAG_VALUE(VATemp) == 0)
     {
         if (m_VRA->m_ValueAliasMap.count(value))
         {
             // Generate alias
-            SSubVector& SV = m_VRA->m_ValueAliasMap[value];
+            SSubVecDesc& SV = m_VRA->m_ValueAliasMap[value];
             Value* BaseVec = SV.BaseVector;
             int startIx = SV.StartElementOffset;
 

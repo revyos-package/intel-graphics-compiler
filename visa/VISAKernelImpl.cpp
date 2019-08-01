@@ -811,35 +811,35 @@ void VISAKernelImpl::setDefaultVariableName(Common_ISA_Var_Class Ty, const char 
     }
 }
 
-std::string VISAKernelImpl::getVarName(VISA_GenVar* decl)
+std::string VISAKernelImpl::getVarName(VISA_GenVar* decl) const
 {
     int index = getDeclarationID(decl);
     stringstream ss;
     ss << "V" << index;
     return ss.str();
 }
-std::string VISAKernelImpl::getVarName(VISA_PredVar* decl)
+std::string VISAKernelImpl::getVarName(VISA_PredVar* decl) const
 {
     int index = getDeclarationID(decl) + COMMON_ISA_NUM_PREDEFINED_PRED;
     stringstream ss;
     ss << "P" << index;
     return ss.str();
 }
-std::string VISAKernelImpl::getVarName(VISA_AddrVar* decl)
+std::string VISAKernelImpl::getVarName(VISA_AddrVar* decl) const
 {
     int index = getDeclarationID(decl);
     stringstream ss;
     ss << "A" << index;
     return ss.str();
 }
-std::string VISAKernelImpl::getVarName(VISA_SurfaceVar* decl)
+std::string VISAKernelImpl::getVarName(VISA_SurfaceVar* decl) const
 {
     int index = getDeclarationID(decl);
     stringstream ss;
     ss << "T" << index;
     return ss.str();
 }
-std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl)
+std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl) const
 {
     int index = getDeclarationID(decl);
     stringstream ss;
@@ -1310,7 +1310,8 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
     if set through NG path it stores wrong name .isa file
     so in CMRT in simulation mode it fails to look up the name
     */
-    if( strcmp( attrName, "AsmName" ) == 0 )
+    if(strcmp(attrName, "AsmName") == 0 ||
+        strcmp(attrName, "OutputAsmPath") == 0)
     {
         if (m_options->getOption(VISA_AsmFileNameUser))
         {
@@ -1318,16 +1319,16 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             m_options->getOption(VISA_AsmFileName, asmName);
             if (asmName != nullptr)
             {
-                m_asmName = std::string(asmName);
+                m_asmName = asmName;
             }
             else
             {
-                m_asmName = std::string("");
+                m_asmName = "";
             }
         }
         else
         {
-            std::string str((char *)valueBuffer);
+            std::string str((const char *)valueBuffer);
             if (m_options->getOption(vISA_dumpToCurrentDir))
             {
                 auto found = str.find_last_of(DIR_SEPARATOR);
@@ -1356,7 +1357,8 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
         !strcmp(attrName, "ArgSize") ||
         !strcmp(attrName, "RetValSize") ||
         !strcmp(attrName, "FESPSize") ||
-        !strcmp(attrName, "perThreadInputSize"));
+        !strcmp(attrName, "perThreadInputSize") ||
+        !strcmp(attrName, "Extern"));
 
     if (attr->isInt)
     {
@@ -1425,6 +1427,10 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
     {
         m_builder->getFCPatchInfo()->setIsEntryKernel(true);
         m_options->setOption(vISA_loadThreadPayload, true);
+    }
+    else if (strcmp(attrName, "Extern") == 0)
+    {
+        m_builder->setIsExtern((bool)(attr->value.intVal != 0));
     }
     else if (strcmp(attrName, "RetValSize") == 0)
     {
@@ -2010,12 +2016,13 @@ int VISAKernelImpl::CreateVISAPredicateSrcOperand(VISA_VectorOpnd *& opnd, VISA_
 #endif
     int status = CM_SUCCESS;
 
+    assert(decl->type == PREDICATE_VAR && "expect a predicate variable");
+
     opnd = (VISA_VectorOpnd *)getOpndFromPool();
 
     if(IS_GEN_BOTH_PATH)
     {
         G4_Declare *dcl = decl->predVar.dcl;
-        //ASSERT_USER( (size <= dcl->getNumElems()), " Execsize is larger than predicate variable size." );
         RegionDesc *rd;
 
         G4_Type type = Type_UW;
@@ -7450,6 +7457,7 @@ int VISAKernelImpl::AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOp
 }
 
 
+
 int VISAKernelImpl::patchLastInst(VISA_LabelOpnd *label)
 {
     if(label->_opnd.other_opnd == CISA_INVALID_VAR_ID)
@@ -8091,13 +8099,13 @@ int VISAKernelImpl::GetCompilerStats(CompilerStats &compilerStats)
     return CM_SUCCESS;
 }
 
-int VISAKernelImpl::GetErrorMessage(const char *&errorMsg)
+int VISAKernelImpl::GetErrorMessage(const char *&errorMsg) const
 {
     errorMsg = this->errorMessage;
     return CM_SUCCESS;
 }
 
-int VISAKernelImpl::GetFunctionId(unsigned int& id)
+int VISAKernelImpl::GetFunctionId(unsigned int& id) const
 {
     id = m_functionId;
     return CM_SUCCESS;
@@ -8487,49 +8495,49 @@ void VISAKernelImpl::computeFCInfo() {
 
 
 ///Gets declaration id GenVar
-int VISAKernelImpl::getDeclarationID(VISA_GenVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_GenVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_AddrVar
-int VISAKernelImpl::getDeclarationID(VISA_AddrVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_AddrVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_PredVar
-int VISAKernelImpl::getDeclarationID(VISA_PredVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_PredVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_SamplerVar
-int VISAKernelImpl::getDeclarationID(VISA_SamplerVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_SamplerVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_SurfaceVar
-int VISAKernelImpl::getDeclarationID(VISA_SurfaceVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_SurfaceVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_VMEVar
-int VISAKernelImpl::getDeclarationID(VISA_VMEVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_VMEVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_LabelVar
-int VISAKernelImpl::getDeclarationID(VISA_LabelVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_LabelVar *decl) const
 {
     return decl->index;
 }
 
 ///Gets declaration id VISA_FileVar
-int VISAKernelImpl::getDeclarationID(VISA_FileVar *decl)
+int VISAKernelImpl::getDeclarationID(VISA_FileVar *decl) const
 {
     return decl->index;
 }
@@ -8604,7 +8612,7 @@ void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functio
 #ifndef DLL_MODE
     if (getOptions()->getOption(vISA_outputToFile))
     {
-        std::string asmNameStr = this->getAsmName();
+        std::string asmNameStr = this->getOutputAsmPath();
         std::string debugFileNameStr = asmNameStr + ".dbg";
         emitDebugInfo(this, functions, debugFileNameStr);
     }

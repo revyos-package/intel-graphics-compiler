@@ -88,13 +88,19 @@ const char* endSymbol = ".end";
 bool DbgVariable::isBlockByrefVariable() const {
     assert(Var && "Invalid complex DbgVariable!");
     return Var->getType()
+#if LLVM_VERSION_MAJOR <= 8
         .resolve()
+#endif
         ->isBlockByrefStruct();
 }
 
 DIType* DbgVariable::getType() const
 {
-    DIType *Ty = Var->getType().resolve();
+    DIType *Ty = Var->getType()
+#if LLVM_VERSION_MAJOR <= 8
+        .resolve()
+#endif
+      ;
     // FIXME: isBlockByrefVariable should be reformulated in terms of complex
     // addresses instead.
     if (Ty->isBlockByrefStruct()) {
@@ -1323,6 +1329,7 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
                             write(dotLoc.loc, (unsigned char*)&constValue, lebSize);
                         }
                     }
+                    RegVar->getDecorations().append("u ");
                 }
                 else if (Loc.IsRegister())
                 {
@@ -1420,6 +1427,10 @@ void DwarfDebug::collectVariableInfo(const Function *MF, SmallPtrSet<const MDNod
                             op = llvm::dwarf::DW_OP_deref;
                             write(dotLoc.loc, (uint8_t)op);
                         }
+                        if (Loc.IsVectorized())
+                            RegVar->getDecorations().append("v ");
+                        else
+                            RegVar->getDecorations().append("u ");
                     }
                 }
                 offset += dotLoc.loc.size();

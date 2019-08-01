@@ -464,11 +464,13 @@ void EncoderBase::encodeTernarySourceAlign1(
         // ternary align1 puts SpcAcc into subreg, so regions may be set
         // in all cases
         auto rgn = src.getRegion();
-        if (S < SourceIndex::SRC2) { // src0 and src1 only has <w;h>
-            encodeTernarySrcRegionVert(S, rgn.getVt());
+        if (!inst.isMacro()) {
+            if (S < SourceIndex::SRC2) { // src0 and src1 only has <w;h>
+                encodeTernarySrcRegionVert(S, rgn.getVt());
+            }
+            // all sources have a hz stride
+            encodeSrcRegionHorz<S>(rgn.getHz());
         }
-        // all sources have a hz stride
-        encodeSrcRegionHorz<S>(rgn.getHz());
 
         // register and subregister
         encodeSrcReg<S>(src.getDirRegName(), src.getDirRegRef().regNum);
@@ -758,6 +760,8 @@ void EncoderBase::encodeSendInstruction(const Instruction& inst)
         if (m_model.supportsUnifiedSend()) {
             extMsgDesc.imm = extMsgDesc.imm & ~(1 << 5); // strip out EOT
         }
+
+
         GED_ENCODE(ExMsgDesc, extMsgDesc.imm);
     } else {  // ExDesc.IsReg == true
         if (!supportsExDescReg) {

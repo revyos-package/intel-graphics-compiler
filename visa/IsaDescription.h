@@ -23,14 +23,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+#pragma once
+
+#include <stdint.h>
 
 ///
 /// ISA Description
 ///
-
-#pragma once
-
-#include "common.h"
 
 #define TYPE_INTEGER ISA_TYPE_UW|ISA_TYPE_W|ISA_TYPE_UB|ISA_TYPE_B|ISA_TYPE_D|ISA_TYPE_UD|ISA_TYPE_Q|ISA_TYPE_UQ
 #define TYPE_FLOAT   ISA_TYPE_DF|ISA_TYPE_F
@@ -205,7 +204,7 @@ struct ISA_Inst_Info
     uint8_t       n_dsts;
 };
 
-#define MAX_OPNDS_PER_INST 20
+#define MAX_OPNDS_PER_INST 24
 
 typedef struct OpndDesc
 {

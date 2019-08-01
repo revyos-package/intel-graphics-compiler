@@ -51,7 +51,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/ADT/StringMap.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvmWrapper/IR/DebugInfoMetadata.h"
 #include "common/LLVMWarningsPop.hpp"
 
 #include "Compiler/DebugInfo/VISAModule.hpp"
@@ -147,6 +147,7 @@ namespace IGC
         unsigned DotDebugLocOffset;        // Offset in DotDebugLocEntries.
         DbgVariable *AbsVar = nullptr;     // Corresponding Abstract variable, if any.
         const llvm::Instruction *m_pDbgInst; // DBG_VALUE instruction of the variable.
+        std::string decorations;
 
     public:
         // AbsVar may be NULL.
@@ -213,15 +214,25 @@ namespace IGC
 #endif
         llvm::DIType* getType() const;
 
+        std::string& getDecorations()
+        {
+            return decorations;
+        }
+
     private:
+#if LLVM_VERSION_MAJOR <= 8
         /// resolve - Look in the DwarfDebug map for the MDNode that
         /// corresponds to the reference.
         /// Find the MDNode for the given reference.
         template <typename T> T *resolve(llvm::TypedDINodeRef<T> Ref) const {
           return Ref.resolve();
         }
+#else
+        template <typename T> inline T *resolve(T* Ref) const {
+          return Ref;
+        }
+#endif
     };
-
 
     /// \brief Helper used to pair up a symbol and its DWARF compile unit.
     struct SymbolCU
@@ -567,11 +578,17 @@ namespace IGC
         unsigned getDwarfVersion() const { return DwarfVersion; }
 
         /// Find the MDNode for the given reference.
-        template <typename T> T* resolve(llvm::TypedDINodeRef<T> Ref) const
+#if LLVM_VERSION_MAJOR <= 8
+        template <typename T> T *resolve(llvm::TypedDINodeRef<T> Ref) const
         {
-            return Ref.resolve();
+          return Ref.resolve();
         }
-
+#else
+        template <typename T> inline T *resolve(T* Ref) const
+        {
+          return Ref;
+        }
+#endif
         /// \brief Returns the entry into the start of the pool.
         llvm::MCSymbol *getStringPoolSym();
 

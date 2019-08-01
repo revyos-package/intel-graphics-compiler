@@ -100,7 +100,7 @@ bool AddImplicitArgs::runOnModule(Module &M)
         // If enabling indirect call, only R0, PayloadHeader and PrivateBase are allowed!
         if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
         {
-            if (pFunc->hasFnAttribute("AsFunctionPointer"))
+            if (pFunc->hasFnAttribute("ExternalLinkedFn"))
             {
                 if (implicitArgs.size() != 3 ||
                 !implicitArgs.isImplicitArgExist(ImplicitArg::ArgType::R0) ||
@@ -509,7 +509,7 @@ void AddImplicitArgs::FixIndirectCalls(Module& M)
                     bool externalCall = calledFunc &&
                     calledFunc->isDeclaration() &&
                     (calledFunc->getLinkage() == GlobalValue::ExternalLinkage) &&
-                    calledFunc->hasFnAttribute("AsFunctionPointer");
+                    calledFunc->hasFnAttribute("ExternalLinkedFn");
 
                     // Only handled indirect calls and external function calls
                     if (calledFunc && !externalCall) continue;
@@ -598,17 +598,20 @@ bool BuiltinCallGraphAnalysis::runOnModule(Module &M)
         return false;
     }
 
+    CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
-    if (IGC_IS_FLAG_DISABLED(EnableRecursionOpenCL) && hasRecursion(CG))
+    if (IGC_IS_FLAG_DISABLED(EnableRecursionOpenCL) &&
+        !ctx->m_DriverInfo.AllowRecursion() &&
+        hasRecursion(CG))
     {
-        getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->EmitError(" undefined reference to `jmp()' ");
+        assert(0 && "Recursion detected!");
+        ctx->EmitError(" undefined reference to `jmp()' ");
         return false;
     }
 
     //Return if any error
-    CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     if (!(ctx->oclErrorMessage.empty()))
     {
         return false;
@@ -642,7 +645,8 @@ void BuiltinCallGraphAnalysis::traveseCallGraphSCC(const std::vector<CallGraphNo
         }
         if (argData == nullptr)
         {
-            argData = new ImplicitArgmentDetail;
+            argDetails.push_back(make_unique<ImplicitArgmentDetail>());
+            argData = argDetails[argDetails.size() - 1].get();
         }
 
         // calculate args from sub-routine.

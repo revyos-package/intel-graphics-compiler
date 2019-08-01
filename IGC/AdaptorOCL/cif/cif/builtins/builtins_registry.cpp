@@ -24,7 +24,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-
 #include "cif/builtins/builtins_registry.h"
 
 #include "cif/export/cif_main_impl.h"

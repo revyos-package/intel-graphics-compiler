@@ -56,6 +56,9 @@ class KernelView
 
     // The status from kv_create
     iga_status_t    m_disasm_status;
+
+    // The platform this kernel view platform corresponds to
+    iga_gen_t       m_gen;
 public:
     // Constructs a kernel view.
     //
@@ -69,6 +72,7 @@ public:
         size_t decodeLogLen = 0)
         : m_kv(nullptr)
         , m_disasm_status(IGA_SUCCESS)
+        , m_gen(platf)
     {
         m_kv = kv_create(
             platf,
@@ -242,7 +246,6 @@ public:
         );
     }
 
-
     // This function returns the default label name if custom labeler is not used.
     size_t getDefaultLabelName(
         int32_t pc,
@@ -314,7 +317,7 @@ public:
     // Returns opcode of the instruction
     //
     // N.B.: the opcode is not the same as the 7-bit value encoded in the
-    // actual encoding, but maps to the enumeration value of the underlying
+    // actual encoding, but maps to the enumeration value of the underlyings
     // iga::Op.
     iga::Op getOpcode(int32_t pc) const {
         return static_cast<iga::Op>(kv_get_opcode(m_kv, pc));

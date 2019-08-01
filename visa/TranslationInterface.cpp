@@ -39,6 +39,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Timer.h"
 
 #include <cmath>  // std::ceil
+#include <utility>
 
 using namespace vISA;
 #define MESSAGE_SPECIFIC_CONTROL 8
@@ -97,6 +98,18 @@ static uint32_t createSamplerMsgDesc(
     }
 
     return fc;
+}
+
+static const G4_Declare *getDeclare(const G4_Operand *opnd) {
+    const G4_Declare *dcl = opnd->getBase()->asRegVar()->getDeclare();
+
+    while (const G4_Declare *parentDcl = dcl->getAliasDeclare())
+        dcl = parentDcl;
+
+    return dcl;
+}
+static G4_Declare *getDeclare(G4_Operand *opnd) {
+    return const_cast<G4_Declare *>(getDeclare((const G4_Operand *)opnd));
 }
 
 // IsSLMSurface - Check whether the given surface is SLM surface.
@@ -502,7 +515,7 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
     G4_Declare *t0  = getImmDcl(dbl_constant_0, element_size);
     G4_Declare *t1  = getImmDcl(dbl_constant_1, element_size);
 
-    inst = createPseudoKills({ t6, t7, t8, t9, t10, t11, t12, t13, tmpFlag });
+    inst = createPseudoKills({ t6, t7, t8, t9, t10, t11, t12, t13, tmpFlag }, PseudoKillType::Src);
 
     G4_SrcRegRegion tsrc0(Mod_src_undef, Direct, t0->getRegVar(), 0, 0, srcRegionDesc, Type_DF );
     G4_SrcRegRegion tsrc1(Mod_src_undef, Direct, t1->getRegVar(), 0, 0, srcRegionDesc, Type_DF );
@@ -700,16 +713,10 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
         G4_CondMod *condModOverflow = createCondMod(Mod_o, tmpFlag->getRegVar(), 0);
         inst->setCondMod(condModOverflow);
 
-        bool generateIf = true;
-
-        if (generateIf)
         {
             // if
             G4_Predicate *predicateFlagReg = createPredicate(PredState_Minus, tmpFlag->getRegVar(), 0, predCtrlValue);
             inst = createIf(predicateFlagReg, exsize, instOpt);
-        }
-        {
-
 
             // madm (4) r9.acc3 r0.noacc r6.noacc r8.acc2 {Align16, N1/N2}
             G4_SrcRegRegion *t0SrcOpnd = createSrcRegRegion(tsrc0);
@@ -802,24 +809,23 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
             t12SrcOpnd1->setAccRegSel(ACC2);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, t8DstOpnd2, t9SrcOpnd1x1,
                 t11SrcOpnd1, t12SrcOpnd1, madmInstOpt, line_no);
-        }
 
-        if (generateIf && !hasDefaultRoundDenorm)
-        {
-            // else (8) {Q1/Q2}
-            inst = createElse(exsize, instOpt);
+            if (!hasDefaultRoundDenorm)
+            {
+                // else (8) {Q1/Q2}
+                inst = createElse(exsize, instOpt);
 
-            // restore cr0.0 {NoMask}
-            G4_DstRegRegion *cr0DstRegOpndForRestoreElseInst = createDstRegRegion(regDstCR0);
-            auto tmpSrcOpndForCR0OnElse = Create_Src_Opnd_From_Dcl(regCR0, getRegionScalar());
-            inst = createInst(NULL, G4_mov, NULL, false, 1, cr0DstRegOpndForRestoreElseInst, tmpSrcOpndForCR0OnElse,
-                NULL, InstOpt_WriteEnable, line_no);
-        }
+                // restore cr0.0 {NoMask}
+                G4_DstRegRegion *cr0DstRegOpndForRestoreElseInst = createDstRegRegion(regDstCR0);
+                auto tmpSrcOpndForCR0OnElse = Create_Src_Opnd_From_Dcl(regCR0, getRegionScalar());
+                inst = createInst(NULL, G4_mov, NULL, false, 1, cr0DstRegOpndForRestoreElseInst, tmpSrcOpndForCR0OnElse,
+                    NULL, InstOpt_WriteEnable, line_no);
+            }
 
-        if (generateIf)
-        {
-            // endif (8) {Q1/Q2}
-            inst = createEndif(exsize, instOpt);
+            {
+                // endif (8) {Q1/Q2}
+                inst = createEndif(exsize, instOpt);
+            }
         }
     }; //for loop
 
@@ -898,7 +904,7 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
     G4_Declare *t2 = getImmDcl(flt_constant_0, 8);
     G4_Declare *t5 = getImmDcl(flt_constant_1, 8);
 
-    inst = createPseudoKills({ t1, t4, t6, t8, t9, t10, t11, tmpFlag });
+    inst = createPseudoKills({ t1, t4, t6, t8, t9, t10, t11, tmpFlag }, PseudoKillType::Src);
 
     // those are for drcp
     G4_SrcRegRegion valueOneScalarReg(Mod_src_undef, Direct, t2->getRegVar(), 0, 0, getRegionScalar(), Type_F );
@@ -1179,7 +1185,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
     }
 
     // pred and conModifier
-    G4_Declare *tmpFlag = createTempFlag(1);
+    G4_Declare *tmpFlag = createTempFlag(instExecSize == 32 ? 2 : 1);
     G4_Predicate_Control predCtrlValue = PRED_DEFAULT;
 
     // temp registers
@@ -1196,7 +1202,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
     G4_Declare* t0 = getImmDcl(flt_constant_0, 8);
     G4_Declare *t8 = getImmDcl(flt_constant_05, 8);
 
-    inst = createPseudoKills ({ t6, t7, t9, t10, t11, tmpFlag });
+    inst = createPseudoKills ({ t6, t7, t9, t10, t11, tmpFlag }, PseudoKillType::Src);
 
     G4_SrcRegRegion* src0RR = operandToDirectSrcRegRegion(*this, src0Opnd, element_size);
 
@@ -1480,7 +1486,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
 
     // pred and conModifier
-    G4_Declare *flagReg = createTempFlag(1);
+    G4_Declare *flagReg = createTempFlag(instExecSize == 32 ? 2 : 1);
     G4_Predicate_Control predCtrlValue = PRED_DEFAULT;
 
     // temp registers
@@ -1494,7 +1500,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
     G4_Declare *t10 = createTempVarWithNoSpill(element_size, Type_DF, reg_align, Any);
     G4_Declare *t11 = createTempVarWithNoSpill(element_size, Type_DF, reg_align, Any);
 
-    inst = createPseudoKills({t6, t7, t8, t9, t10, t11, flagReg });
+    inst = createPseudoKills({t6, t7, t8, t9, t10, t11, flagReg }, PseudoKillType::Src);
 
     G4_SrcRegRegion* src0RR = operandToDirectSrcRegRegion(*this, src0Opnd, element_size);
 
@@ -1600,23 +1606,17 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
         inst = createMathInst(NULL, false, exsize, dst0, src0, src1, MATH_RSQRTM, madmInstOpt, line_no);
         inst->setCondMod(condModOverflow);
 
-        bool generateIf = true;
-
-        if (generateIf)
         {
             // if
             G4_Predicate *predicateFlagReg = createPredicate(PredState_Minus, flagReg->getRegVar(), 0, predCtrlValue);
             inst = createIf(predicateFlagReg, exsize, instOpt);
-        }
 
-        {
             // madm (4) r9.acc3 r0.noacc r2(r8).noacc r7.acc2 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst9); dst0->setAccRegSel(ACC3);
             src0 = createSrcRegRegion(csrc0); src0->setAccRegSel(NOACC);
             src1 = createSrcRegRegion(csrc2); src1->setAccRegSel(NOACC);
             src2 = createSrcRegRegion(tsrc7); src2->setAccRegSel(ACC2);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
-
 
             // madm (4) r11.acc4 r0.noacc r6.noacc r7.acc2 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst11); dst0->setAccRegSel(ACC4);
@@ -1632,7 +1632,6 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             src1->setAccRegSel(NOACC);
             src2 = createSrcRegRegion(tsrc7); src2->setAccRegSel(ACC2);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
-
 
             // madm (4) r10.acc5 r2(r8).noacc -r11.acc4 r9.acc3 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst10); dst0->setAccRegSel(ACC5);
@@ -1650,14 +1649,12 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             neg_src1->setAccRegSel(src1->getAccRegSel());
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, neg_src1, src2, madmInstOpt, line_no);
 
-
             // madm (4) r8.acc6 r1.noacc r2(r8).noacc r1.noacc {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst8); dst0->setAccRegSel(ACC6);
             src0 = createSrcRegRegion(csrc1); src0->setAccRegSel(NOACC);
             src1 = createSrcRegRegion(csrc2); src1->setAccRegSel(NOACC);
             src2 = createSrcRegRegion(csrc1); src2->setAccRegSel(NOACC);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
-
 
             // madm (4) r8.acc7 r1.noacc r8.acc6 r10.acc5 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst8); dst0->setAccRegSel(ACC7);
@@ -1666,14 +1663,12 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             src2 = createSrcRegRegion(tsrc10); src2->setAccRegSel(ACC5);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
 
-
             // madm (4) r7.acc8 r0.noacc r10.acc5 r11.acc4 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst7); dst0->setAccRegSel(ACC8);
             src0 = createSrcRegRegion(csrc0); src0->setAccRegSel(NOACC);
             src1 = createSrcRegRegion(tsrc10); src1->setAccRegSel(ACC5);
             src2 = createSrcRegRegion(tsrc11); src2->setAccRegSel(ACC4);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
-
 
             // madm (4) r10.acc9 r0.noacc r10.acc5 r9.acc3 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst10); dst0->setAccRegSel(ACC9);
@@ -1682,7 +1677,6 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             src2 = createSrcRegRegion(tsrc9); src2->setAccRegSel(ACC3);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
 
-
             // madm (4) r7.acc8 r11.acc4 r8.acc7 r7.acc8 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst7); dst0->setAccRegSel(ACC8);
             src0 = createSrcRegRegion(tsrc11); src0->setAccRegSel(ACC4);
@@ -1690,14 +1684,12 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             src2 = createSrcRegRegion(tsrc7); src2->setAccRegSel(ACC8);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
 
-
             // madm (4) r8.acc7 r9.acc3 r8.acc7 r10.acc9 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst8); dst0->setAccRegSel(ACC7);
             src0 = createSrcRegRegion(tsrc9); src0->setAccRegSel(ACC3);
             src1 = createSrcRegRegion(tsrc8); src1->setAccRegSel(ACC7);
             src2 = createSrcRegRegion(tsrc10); src2->setAccRegSel(ACC9);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
-
 
             // madm (4) r9.acc3 r6.noacc -r7.acc8 r7.acc8 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst9); dst0->setAccRegSel(ACC3);
@@ -1739,23 +1731,17 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(ISA_Opcode opcode, Common_
             src2 = createSrcRegRegion(tsrc8); src2->setAccRegSel(ACC7);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
 
-        }
+            if (!hasDefaultRoundDenorm)
+            {
+                // else (8) {Q1/Q2}
+                inst = createElse(exsize, instOpt);
 
-
-        if (generateIf && !hasDefaultRoundDenorm)
-        {
-            // else (8) {Q1/Q2}
-            inst = createElse(exsize, instOpt);
-
-            // restore cr0.0 {NoMask}
-            dst0 = createDstRegRegion(regDstCR0);
-            src0 = Create_Src_Opnd_From_Dcl(tmpRegCR0, getRegionScalar());
-            // mov (1) cr0.0<0;1,0>:ud r108.0<1>:ud {NoMask}
-            inst = createInst(NULL, G4_mov, NULL, false, 1, dst0, src0, NULL, InstOpt_WriteEnable, line_no);
-        }
-
-        if (generateIf)
-        {
+                // restore cr0.0 {NoMask}
+                dst0 = createDstRegRegion(regDstCR0);
+                src0 = Create_Src_Opnd_From_Dcl(tmpRegCR0, getRegionScalar());
+                // mov (1) cr0.0<0;1,0>:ud r108.0<1>:ud {NoMask}
+                inst = createInst(NULL, G4_mov, NULL, false, 1, dst0, src0, NULL, InstOpt_WriteEnable, line_no);
+            }
             // endif (8) {Q1/Q2}
             inst = createEndif(exsize, instOpt);
         }
@@ -1791,13 +1777,6 @@ G4_INST* IR_Builder::createFenceInstruction( uint8_t flushParam, bool commitEnab
 {
 #define L1_FLUSH_MASK 0x40
 
-    const int SWFenceMask = 0x80;
-    bool SWFenceOnly = (flushParam & SWFenceMask) != 0;
-    if (SWFenceOnly)
-    {
-        return createIntrinsicInst(nullptr, Intrinsic::MemFence, 1, nullptr, nullptr, nullptr, nullptr,
-            InstOpt_NoOpt);
-    }
 
     int flushBits = (flushParam >> 1) & 0xF;
     bool L1Flush = (flushParam & L1_FLUSH_MASK) != 0 &&
@@ -1863,6 +1842,8 @@ int IR_Builder::translateVISAWaitInst(G4_Operand* mask)
 
 void IR_Builder::generateBarrierSend()
 {
+
+
     int exdesc = SFIDtoInt(SFID::GATEWAY);
     // 1 message length, 0 response length, no header, no ack
     int desc = (0x1 << 25) + 0x4;
@@ -1981,8 +1962,22 @@ int IR_Builder::translateVISASyncInst(ISA_Opcode opcode, unsigned int mask)
     case ISA_FENCE:
         {
 #define GLOBAL_MASK 0x20
+            union fenceParam
+            {
+                VISAFenceMask mask;
+                uint8_t data;
+            };
+
+            fenceParam fenceMask;
+            fenceMask.data = mask & 0xFF;
             bool globalFence = (mask & GLOBAL_MASK) == 0;
-            if (VISA_WA_CHECK(m_pWaTable, WADisableWriteCommitForPageFault))
+
+            if (fenceMask.mask.SWFence)
+            {
+                createIntrinsicInst(nullptr, Intrinsic::MemFence, 1, nullptr, nullptr, nullptr, nullptr,
+                    InstOpt_NoOpt);
+            }
+            else if (VISA_WA_CHECK(m_pWaTable, WADisableWriteCommitForPageFault))
             {
                 // write commit does not work under page fault
                 // so we generate a fence without commit, followed by a read surface info to BTI 0
@@ -2219,6 +2214,8 @@ int IR_Builder::translateVISACFCallInst(Common_ISA_Exec_Size execsize, Common_VI
         execSize = 2;
     }
 
+    unsigned int instOpt = 0;
+    instOpt |= Get_Gen4_Emask(emask, execSize);
     createInst(
         predOpnd,
         callOpToUse,
@@ -2228,7 +2225,7 @@ int IR_Builder::translateVISACFCallInst(Common_ISA_Exec_Size execsize, Common_VI
         dstOpndToUse,
         srcLabel,
         NULL,
-        0,
+        instOpt,
         0);
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -2366,8 +2363,8 @@ int IR_Builder::translateVISACFSymbolInst(const std::string& symbolName, G4_DstR
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    // symbolic imm representing function's address
-    auto funcAddr = createRelocImm(Type_UD);
+    // symbolic imm representing symbol's address
+    auto funcAddr = createRelocImm(Type_UQ);
     auto movInst = createInst(nullptr, G4_mov, nullptr, false, 1, dst, funcAddr, nullptr, InstOpt_WriteEnable);
 
     RelocationEntry relocEntry = RelocationEntry::createSymbolAddrReloc(movInst, 0, symbolName);
@@ -7352,7 +7349,7 @@ int IR_Builder::translateVISASampleInfoInst(
 
     if (!useFakeHeader || forceSplitSend || preEmption)
     {
-        msg = getSamplerHeader(false);
+        msg = getSamplerHeader(false /*isBindlessSampler*/, false /*samperIndexGE16*/);
 
         unsigned int secondDword = chMask.getHWEncoding() << 12;
 
@@ -7455,7 +7452,7 @@ int IR_Builder::translateVISAResInfoInst(
             --numRows;
         }
         unsigned int numElts = numRows * GENX_GRF_REG_SIZ/G4_Type_Table[Type_F].byteSize;
-        msg = getSamplerHeader(false);
+        msg = getSamplerHeader(false /*isBindlessSampler*/, false /*samperIndexGE16*/);
         payloadUD = Create_MRF_Dcl(numElts, Type_UD);
     }
     else
@@ -8426,6 +8423,20 @@ int IR_Builder::translateVISARTWrite3DInst(
 
 }
 
+
+// Bit 15 of aoffimmi is set in messages with sampler index >= 16.
+static bool IsSamplerIndexGE16(G4_Operand* aoffimmi)
+{
+    bool ret = false;
+    if (aoffimmi && aoffimmi->isImm())
+    {
+        const uint16_t aoffimmiVal = (uint16_t)aoffimmi->asImm()->getInt();
+        ret = (aoffimmiVal & 0x8000) != 0;
+    }
+    return ret;
+}
+
+
 // return the contents of M0.2 for sampler messages.  It must be an immediate value
 static uint32_t createSampleHeader0Dot2(VISASampler3DSubOpCode op,
                                         bool pixelNullMask,
@@ -8523,7 +8534,7 @@ static G4_Operand* createSampleHeader(IR_Builder* builder, G4_Declare* header, V
         // Use bit 15 of aoffimmi to tell VISA the sample index could be greater
         // than 15.  In this case, we need to use msg header, and setup M0.3
         // to point to next 16 sampler state.
-        if (aoffimmiVal & 0x8000)
+        if (IsSamplerIndexGE16(aoffimmi))
         {
             retSampler = builder->emitSampleIndexGE16(sampler, header);
         }
@@ -8576,6 +8587,22 @@ static void setUniformSampler(G4_InstSend* sendInst, bool uniformSampler)
 Need to split sample_d and sample_dc in to two simd8 sends since HW doesn't support it.
 Also need to split any sample instruciton that has more then 5 parameters. Since there is a limit on msg length.
 */
+static unsigned TmpSmplDstID = 0;
+const char* getNameString(Mem_Manager& mem, size_t size, const char* format, ...)
+    {
+#ifdef _DEBUG
+        char* name = (char*) mem.alloc(size);
+        va_list args;
+        va_start(args, format);
+        std::vsnprintf(name, size, format, args);
+        va_end(args);
+        return name;
+#else
+        const char* name = "";
+        return const_cast<char*>(name);
+#endif
+}
+
 static int splitSampleInst(VISASampler3DSubOpCode actualop,
                            bool pixelNullMask,
                            bool cpsEnable,
@@ -8592,6 +8619,7 @@ static int splitSampleInst(VISASampler3DSubOpCode actualop,
                            IR_Builder *builder,
                            unsigned int numParms,
                            G4_SrcRegRegion ** params,
+                           Mem_Manager&        mem,
                            bool uniformSampler = true)
 {
     int status = CM_SUCCESS;
@@ -8633,7 +8661,9 @@ static int splitSampleInst(VISASampler3DSubOpCode actualop,
             ++tmpDstRows;
         }
 
-        tempDstDcl = builder->createDeclareNoLookup("TmpSmplDst",
+        const char *name = getNameString(mem, 20, "%s%d", "TmpSmplDst_", TmpSmplDstID++);
+
+        tempDstDcl = builder->createDeclareNoLookup(name,
             originalDstDcl->getRegFile(),
             originalDstDcl->getNumElems(),
             (uint16_t)tmpDstRows,
@@ -8727,7 +8757,9 @@ static int splitSampleInst(VISASampler3DSubOpCode actualop,
     G4_Declare* tempDstDcl2 = nullptr;
     if(!dst->isNullReg())
     {
-        tempDstDcl2 = builder->createDeclareNoLookup("TmpSmplDst2",
+        const char *name = getNameString(mem, 20, "%s%d", "TmpSmplDst2_", TmpSmplDstID++);
+
+        tempDstDcl2 = builder->createDeclareNoLookup(name,
             originalDstDcl->getRegFile(),
             originalDstDcl->getNumElems(),
             (uint16_t)tmpDstRows,
@@ -8946,15 +8978,16 @@ void IR_Builder::doSamplerHeaderMove(G4_Declare* headerDcl, G4_Operand* sampler)
 // generate the r0 move for the sampler message header, and return the dcl
 // for CNL+, also set SSP to dynamic if message is not bindless
 //
-G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler)
+G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler, bool samplerIndexGE16)
 {
     G4_Declare* dcl = nullptr;
+
     if (m_options->getOption(vISA_cacheSamplerHeader) && !isBindlessSampler)
     {
         dcl = builtinSamplerHeader;
-        if (!usesSampler)
+        if (!builtinSamplerHeaderInitialized)
         {
-            usesSampler = true;
+            builtinSamplerHeaderInitialized = true;
             if (hasBindlessSampler())
             {
                 // make sure we set bit 0 of M0.3:ud to be 0
@@ -8970,6 +9003,17 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler)
                 Create_Src_Opnd_From_Dcl(builtinR0, getRegionStride1()),
                 nullptr, InstOpt_WriteEnable);
             instList.push_front(r0Move);
+        }
+        if (samplerIndexGE16)
+        {
+            // When sampler index is greater or equal 16 then the
+            // createSamplerHeader() message overwrites the sampler states
+            // pointer in the header -> cannot use the cached value in this
+            // case.
+            dcl = Create_MRF_Dcl(GENX_DATAPORT_IO_SZ, Type_UD);
+            dcl->setCapableOfReuse();
+            G4_SrcRegRegion* src = createSrcRegRegion(Mod_src_undef, Direct, builtinSamplerHeader->getRegVar(), 0, 0, getRegionStride1(), Type_UD);
+            Create_MOV_Inst(dcl, 0, 0, 8, NULL, NULL, src);
         }
     }
     else
@@ -9090,7 +9134,7 @@ int IR_Builder::translateVISASampler3DInst(
 
         return splitSampleInst(actualop, pixelNullMask, cpsEnable, pred, chMask,
                                numChannels, aoffimmi, sampler, surface, dst,
-                               emask, useHeader, numRows, this, numParms, params, uniformSampler);
+                               emask, useHeader, numRows, this, numParms, params, mem, uniformSampler);
     }
 
     bool useSplitSend = useSends();
@@ -9100,7 +9144,8 @@ int IR_Builder::translateVISASampler3DInst(
 
     if( useHeader )
     {
-        G4_Declare *dcl = getSamplerHeader(isBindlessSampler(sampler));
+        const bool samplerIndexGE16 = IsSamplerIndexGE16(aoffimmi);
+        G4_Declare *dcl = getSamplerHeader(isBindlessSampler(sampler), samplerIndexGE16);
         samplerIdx = createSampleHeader(this, dcl, actualop, pixelNullMask, aoffimmi, chMask, sampler);
         header = Create_Src_Opnd_From_Dcl(dcl, getRegionStride1());
     }
@@ -9223,7 +9268,7 @@ int IR_Builder::translateVISALoad3DInst(
         return splitSampleInst(actualop, pixelNullMask, /*cpsEnable*/false,
                                pred_opnd, channelMask, numChannels, aoffimmi,
                                NULL, surface, dst, em, useHeader, numRows,
-                               this, numParms, opndArray);
+                               this, numParms, opndArray, mem);
     }
 
     bool useSplitSend = useSends();
@@ -9231,7 +9276,7 @@ int IR_Builder::translateVISALoad3DInst(
     G4_SrcRegRegion *header = 0;
     if (useHeader)
     {
-        G4_Declare *dcl = getSamplerHeader(false);
+        G4_Declare *dcl = getSamplerHeader(false /*isBindlessSampler*/, false /*samperIndexGE16*/);
         (void) createSampleHeader(this, dcl, actualop, pixelNullMask, aoffimmi, channelMask, nullptr);
         header = Create_Src_Opnd_From_Dcl(dcl, getRegionStride1());
     }
@@ -9341,7 +9386,7 @@ int IR_Builder::translateVISAGather3dInst(
         return splitSampleInst(actualop, pixelNullMask, /*cpsEnable*/false,
                                pred, channelMask, 4, aoffimmi, sampler,
                                surface, dst, em, useHeader, numRows, this,
-                               numOpnds, opndArray);
+                               numOpnds, opndArray, mem);
     }
 
     bool useSplitSend = useSends();
@@ -9351,7 +9396,8 @@ int IR_Builder::translateVISAGather3dInst(
 
     if (useHeader)
     {
-        G4_Declare *dcl = getSamplerHeader(isBindlessSampler(sampler));
+        const bool samplerIndexGE16 = IsSamplerIndexGE16(aoffimmi);
+        G4_Declare *dcl = getSamplerHeader(isBindlessSampler(sampler), samplerIndexGE16);
         samplerIdx = createSampleHeader(this, dcl, actualop, pixelNullMask, aoffimmi, channelMask, sampler);
         header = Create_Src_Opnd_From_Dcl(dcl, getRegionStride1());
     }
@@ -10127,8 +10173,8 @@ int IR_Builder::translateVISALifetimeInst(uint8_t properties, G4_Operand* var)
     if((properties & 0x1) == LIFETIME_START)
     {
         G4_DstRegRegion* varDstRgn = createDstRegRegion(Direct, var->getBase(), 0, 0, 1, Type_UD);
-
-        createInst(NULL, G4_pseudo_kill, NULL, false, 1, varDstRgn, NULL, NULL, 0, 0);
+        createIntrinsicInst(nullptr, Intrinsic::PseudoKill, 1, varDstRgn, createImm((unsigned int)PseudoKillType::Src),
+            nullptr, nullptr, InstOpt_WriteEnable);
     }
     else
     {
@@ -10145,14 +10191,6 @@ int IR_Builder::translateVISALifetimeInst(uint8_t properties, G4_Operand* var)
     return CM_SUCCESS;
 }
 
-static G4_Declare *getDeclare(G4_SrcRegRegion *src) {
-    G4_Declare *dcl = src->getBase()->asRegVar()->getDeclare();
-
-    while (G4_Declare *parentDcl = dcl->getAliasDeclare())
-        dcl = parentDcl;
-
-    return dcl;
-}
 
 /// getSplitEMask() calculates the new mask after splitting from the current
 /// execution mask at the given execution size.
@@ -10289,7 +10327,7 @@ void IR_Builder::preparePayload(G4_SrcRegRegion *msgs[2],
                                 unsigned batchExSize,
                                 bool splitSendEnabled,
                                 payloadSource srcs[], unsigned len) {
-    G4_Declare *dcls[2] = {0, 0};
+    const G4_Declare *dcls[2] = {0, 0};
     unsigned msgSizes[2] = {0, 0};
     unsigned current = 0;
     unsigned offset = 0;
@@ -10306,7 +10344,7 @@ void IR_Builder::preparePayload(G4_SrcRegRegion *msgs[2],
             break;
         }
 
-        G4_Declare *srcDcl = getDeclare(srcReg);
+        const G4_Declare *srcDcl = getDeclare(srcReg);
         ASSERT_USER(srcDcl, "Declaration is missing!");
 
         unsigned regionSize = srcs[i].execSize *
@@ -10419,24 +10457,188 @@ void IR_Builder::preparePayload(G4_SrcRegRegion *msgs[2],
     sizes[i] = msgSizes[current] / GENX_MRF_REG_SIZ;
 }
 
+G4_SrcRegRegion *IR_Builder::coalescePayload(
+    unsigned sourceAlignment,
+    unsigned payloadAlignment,
+    std::initializer_list<G4_SrcRegRegion *> srcs)
+{
+    MUST_BE_TRUE(sourceAlignment != 0 && payloadAlignment != 0,
+        "alignment mustn't be 0");
+    MUST_BE_TRUE(payloadAlignment % 4 == 0, // we could relax this with smarter code below
+        "result alignment must be multiple of 4");
+    MUST_BE_TRUE(srcs.size() > 0,"empty initializer list");
+
+    // First check for trivial cases.  If all are null, then we can
+    // return null.  This is the case for operations like load's src1 and
+    // atomics with no argument (e.g. atomic increment).
+    //
+    // If the first src is the only non-null register and it's alignment fits
+    // then we can just return that register and call it a day.  This is the
+    // common case for things like stores or atomics with a single
+    // data parameter (e.g. atomic add).
+    bool allNull = true;
+    bool onlySrc0NonNull = true;
+    int ix = 0;
+    for (G4_SrcRegRegion *src : srcs) {
+        allNull &= src->isNullReg();
+        onlySrc0NonNull &= ix++ == 0 || src->isNullReg();
+    }
+    G4_SrcRegRegion *src0 = *srcs.begin();
+    if (allNull) {
+        return src0;
+    } else if (onlySrc0NonNull) {
+        const G4_Declare *src0Dcl = getDeclare(src0);
+        MUST_BE_TRUE(src0Dcl, "declaration missing");
+        unsigned src0Size = src0Dcl->getTotalElems()*src0Dcl->getElemSize();
+        if (src0Size % sourceAlignment == 0 &&
+            src0Size % payloadAlignment == 0)
+        {
+            return src0;
+        }
+    }
+
+    // Otherwise, we have to do some copying
+    auto alignTo = [] (size_t a, size_t n) {
+        return (n + a - 1) - ((n + a -1)%a);
+    };
+
+    // precompute the necessary region size
+    // bool allConsecutive = true;
+    // G4_SrcRegRegion *lastNonNullSrc = nullptr;
+    size_t totalRegionSize = 0;
+    for (G4_SrcRegRegion *src : srcs) {
+        if (src && !src->isNullReg()) {
+            const G4_Declare *srcDcl = getDeclare(src);
+            MUST_BE_TRUE(srcDcl, "declaration missing");
+            // if (lastNonNullSrc) {
+            //     allConsecutive &=
+            //         checkIfRegionsAreConsecutive(
+            //             lastNonNullSrc, src, srcDcl->getTotalElems());
+            // }
+            size_t regionSize = srcDcl->getTotalElems()*srcDcl->getElemSize();
+            size_t alignedRegionSize = alignTo(sourceAlignment, regionSize);
+            totalRegionSize += alignedRegionSize;
+            // allConsecutive &= regionSize == alignedRegionSize; // no padding
+            // lastNonNullSrc = srcs[i];
+        }
+    }
+    // allConsecutive &= totalRegionSize % payloadAlignment == 0; // no padding
+    // if (allConsecutive) {
+    //    return ???;
+    // }
+    totalRegionSize = alignTo(payloadAlignment, totalRegionSize);
+
+    G4_Declare *payloadDeclUB = Create_MRF_Dcl(totalRegionSize, Type_UB);
+    G4_Declare *payloadDeclUD = Create_MRF_Dcl(totalRegionSize/4, Type_UD);
+    payloadDeclUD->setAliasDeclare(payloadDeclUB,0);
+
+    RegionDesc *rd110 = createRegionDesc(1, 1, 0);
+    unsigned row = 0, offset = 0;
+    for (G4_SrcRegRegion *src : srcs) {
+        if (src && !src->isNullReg()) {
+            G4_Declare *srcDcl = getDeclare(src);
+            size_t regionSize = srcDcl->getTotalElems()*srcDcl->getElemSize();
+            size_t regionSizeAligned = alignTo(sourceAlignment, regionSize);
+            auto copyRegion =
+              [&] (G4_Type type, unsigned typeSize) {
+                  unsigned totalElemsToCopy = regionSize/typeSize;
+                  unsigned MAX_SIMD = 32;
+                  for (unsigned i = 0; i < totalElemsToCopy/MAX_SIMD; i++) {
+                      // full registers to copy
+                      unsigned int instOpt =
+                          Get_Gen4_Emask(vISA_EMASK_M1_NM, MAX_SIMD);
+                      G4_DstRegRegion *dstRegion =
+                          createDstRegRegion(
+                              Direct,
+                              payloadDeclUD->getRegVar(),
+                              row, offset/typeSize,
+                              1, type);
+                      G4_SrcRegRegion *srcRegion =
+                          createSrcRegRegion(
+                              Mod_src_undef, Direct,
+                              srcDcl->getRegVar(), 0, 0,
+                              rd110,
+                              type);
+                      createInst(
+                          nullptr, G4_mov, nullptr, false, MAX_SIMD,
+                          dstRegion, srcRegion, nullptr, nullptr, instOpt, 0);
+                  }
+
+                  // copy the tail (not a multiple of MAX_SIMD)
+                  unsigned tailElements = totalElemsToCopy % MAX_SIMD;
+                  while (tailElements > 0) {
+                      unsigned execSize = 16;
+                      G4_Type copyType = type;
+                      if (tailElements % 16 == 0) {
+                          execSize = 16;
+                      } else if (tailElements % 8 == 0) {
+                          execSize = 8;
+                      } else if (tailElements % 4 == 0 && typeSize == 1) {
+                          copyType = Type_UD;
+                          execSize = 1;
+                      } else if (tailElements % 2 == 0) {
+                          copyType = typeSize == 4 ? Type_UQ : Type_UW;
+                          execSize = 1;
+                      } else if (tailElements % 1 == 0) {
+                          execSize = 1;
+                      }
+
+                      unsigned int instOpt =
+                          Get_Gen4_Emask(vISA_EMASK_M1_NM, execSize);
+                      G4_DstRegRegion *dstRegion =
+                          createDstRegRegion(
+                              Direct,
+                              payloadDeclUD->getRegVar(),
+                              row, offset/typeSize,
+                              1, copyType);
+                      G4_SrcRegRegion *srcRegion =
+                          createSrcRegRegion(
+                              Mod_src_undef, Direct,
+                              srcDcl->getRegVar(), 0, 0,
+                              rd110,
+                              copyType);
+                      createInst(
+                          nullptr, G4_mov, nullptr, false, MAX_SIMD,
+                          dstRegion, srcRegion, nullptr, nullptr, instOpt, 0);
+
+                      tailElements -= execSize;
+                  }
+            };
+
+            if (offset == 0 && regionSize % 4 == 0) {
+                // do a more efficient UD copy
+              copyRegion(Type_UD, 4);
+            } else {
+                // do a less efficient UB copy
+              copyRegion(Type_UB, 1);
+            }
+
+            // advance the payload offset
+            offset += regionSizeAligned;
+            if (offset / COMMON_ISA_GRF_REG_SIZE > 0) {
+                row += offset / COMMON_ISA_GRF_REG_SIZE;
+                offset %= COMMON_ISA_GRF_REG_SIZE;
+            }
+        }
+    }
+
+    return Create_Src_Opnd_From_Dcl(payloadDeclUB,getRegionStride1());
+}
+
+
 G4_Operand* IR_Builder::duplicateOpndImpl( G4_Operand* opnd )
 {
-    if( !opnd || opnd->isImm() )
+    if( !opnd || opnd->isImm())
         return opnd;
-    if( opnd->isSrcRegRegion() )
-    {
-        return createSrcRegRegion( *(opnd->asSrcRegRegion()) );
-    }else if( opnd->isDstRegRegion() )
-    {
-        return createDstRegRegion( *(opnd->asDstRegRegion()) );
-    }else if( opnd->isPredicate() )
-    {
-        return createPredicate( *(opnd->asPredicate()) );
-    }else if( opnd->isCondMod() )
-    {
-        return createCondMod( *(opnd->asCondMod()) );
-    }else
-    {
+    if(opnd->isSrcRegRegion()) {
+        return createSrcRegRegion(*(opnd->asSrcRegRegion()));
+    } else if(opnd->isDstRegRegion()) {
+        return createDstRegRegion(*(opnd->asDstRegRegion()));
+    } else if(opnd->isPredicate()) {
+        return createPredicate(*(opnd->asPredicate()));
+    } else if(opnd->isCondMod()) {
+        return createCondMod(*(opnd->asCondMod()));
+    } else {
         return opnd;
     }
 }

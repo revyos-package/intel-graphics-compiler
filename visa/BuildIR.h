@@ -410,6 +410,8 @@ public:
     int cunit;
     const std::vector <char*>* resolvedCalleeNames;
 
+    bool isExternFunc = false;
+
     // pre-defined declare that binds to R0 (the entire GRF)
     // when pre-emption is enabled, builtinR0 is replaced by a temp,
     // and a move is inserted at kernel entry
@@ -437,7 +439,10 @@ public:
     G4_Declare* builtinSLMSpillAddr;
 
 
-    bool usesSampler;
+    // Indicates that sampler header cache (builtinSamplerHeader) is correctly
+    // initialized with r0 contents.
+    // Used only when vISA_cacheSamplerHeader option is set.
+    bool builtinSamplerHeaderInitialized;
 
     // function call related declares
     G4_Declare* be_sp;
@@ -636,6 +641,8 @@ public:
     unsigned short getArgSize() { return arg_size; }
     void setRetVarSize( unsigned short size ) { return_var_size = size; }
     unsigned short getRetVarSize() { return return_var_size; }
+    bool getIsExtern() { return isExternFunc; }
+    void setIsExtern(bool val) { isExternFunc = val; }
     FCPatchingInfo* getFCPatchInfo()
     {
         // Create new instance of FC patching class if one is not
@@ -859,7 +866,7 @@ public:
         FINALIZER_INFO *jitInfo = NULL, PVISA_WA_TABLE pWaTable = NULL)
         : curFile(NULL), curLine(0), curCISAOffset(-1), func_id(-1), metaData(jitInfo),
         isKernel(false), cunit(0), resolvedCalleeNames(NULL),
-        usesSampler(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
+        builtinSamplerHeaderInitialized(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
         CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
         use64BitFEStackVars(isFESP64Bits), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
         instList(alloc), kernel(k), immPool(*this)
@@ -1068,22 +1075,22 @@ public:
         return dcl;
     }
 
-    G4_INST* createPseudoKills(std::initializer_list<G4_Declare*> dcls)
+    G4_INST* createPseudoKills(std::initializer_list<G4_Declare*> dcls, PseudoKillType ty)
     {
         G4_INST* inst = nullptr;
         for (auto dcl : dcls)
         {
-            inst = createPseudoKill(dcl);
+            inst = createPseudoKill(dcl, ty);
         }
 
         return inst;
     }
 
-    G4_INST* createPseudoKill(G4_Declare* dcl)
+    G4_INST* createPseudoKill(G4_Declare* dcl, PseudoKillType ty)
     {
         auto dstRgn = createDstRegRegion(Direct, dcl->getRegVar(), 0, 0, 1, Type_UD);
-        G4_INST* inst = createInst(nullptr, G4_pseudo_kill, nullptr, false, 1,
-            dstRgn, nullptr, nullptr, InstOpt_WriteEnable);
+        G4_INST* inst = createIntrinsicInst(nullptr, Intrinsic::PseudoKill, 1,
+            dstRgn, createImm((unsigned int)ty, Type_UD), nullptr, nullptr, InstOpt_WriteEnable);
 
         return inst;
     }
@@ -2466,6 +2473,44 @@ public:
                         unsigned batchExSize, bool splitSendEnabled,
                         payloadSource sources[], unsigned len);
 
+    // Coalesce multiple payloads into a single region.  Pads each region with
+    // an optional alignment argument (e.g. a GRF size).  The source region
+    // sizes are determined by source dimension, so use an alias if you are
+    // using a subregion.  All copies are made under no mask semantics using
+    // the maximal SIMD width for the current device.
+    //
+    // A second alignment option allows a caller to align the full payload
+    // to some total.
+    //
+    // If all parameters are nullptr or the null register, we return the null
+    // register.
+    //
+    // Some examples:
+    //
+    // 1. coalescePayloads(GRF_SIZE,GRF_SIZE,...);
+    //    Coalesces each source into a single region.  Each source is padded
+    //    out to a full GRF, and the sum total result is also padded out to
+    //    a full GRF.
+    //
+    // 2. coalescePayloads(1,GRF_SIZE,...);
+    //    Coalesces each source into a single region packing each source
+    //    together, but padding the result.  E.g. one could copy a QW and then
+    //    a DW and pad the result out to a GRF.
+    //
+    G4_SrcRegRegion *coalescePayload(
+        unsigned alignSourcesTo,
+        unsigned alignPayloadTo,
+        std::initializer_list<G4_SrcRegRegion *> srcs);
+
+    // struct PayloadElem {
+    //     enum PayloadKind {REG,IMM};
+    //     union {
+    //       G4_SrcRegRegion *reg;
+    //       G4_Imm *imm;
+    //     }
+    //     size_t alignTo;
+    // };
+
 #define FIX_OWORD_SEND_EXEC_SIZE(BLOCK_SIZE)(((BLOCK_SIZE) > 2)? 16: (BLOCK_SIZE*4))
 
     // return either 253 or 255 for A64 messages, depending on whether we want I/A coherency or not
@@ -2524,7 +2569,7 @@ private:
 
     void applySideBandOffset(G4_Operand* sideBand, G4_SendMsgDescriptor* sendMsgDesc);
 
-    G4_Declare* getSamplerHeader(bool isBindlessSampler);
+    G4_Declare* getSamplerHeader(bool isBindlessSampler, bool samplerIndexGE16);
 
     void buildTypedSurfaceAddressPayload(G4_SrcRegRegion* u, G4_SrcRegRegion* v, G4_SrcRegRegion* r, G4_SrcRegRegion* lod,
         uint32_t exSize, uint32_t instOpt, payloadSource sources[], uint32_t& len);

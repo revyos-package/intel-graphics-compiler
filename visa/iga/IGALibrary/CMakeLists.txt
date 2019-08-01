@@ -60,9 +60,7 @@ if(IGC_BUILD)
 endif(IGC_BUILD)
 
 if (MSVC)
-  # /GS- is a subset of sdl-
-  # "$<$<CONFIG:Release>:/GL>" - causes IGS windows release build failure. Need to look in to why later.
-  add_compile_options(/sdl- $<$<CONFIG:Release>:/Ox> /Gy)
+  add_compile_options($<$<CONFIG:Release>:/Ox> /Gy)
 endif (MSVC)
 
 ##############################################################################
@@ -102,6 +100,7 @@ set(IGA_Backend_GED
 # purposly exclude iga.cpp since it must be compiled differently for .lib/.a and .so/.dll
 set(IGA_SOURCES
   ${IGA_API_Headers}
+  ${IGA_API_Source}
   ${IGA_Backend}
   ${IGA_Backend_GED}
   ${IGA_Backend_Native}
@@ -206,6 +205,7 @@ endif()
 # since exceptions must be disabled.
 ##############################################################################
 set(IGA_SOURCES_ENCODER_ONLY
+  ${IGA_API_Source}
   ${IGA_API_EncoderInterface}
   ${IGA_Backend}
   ${IGA_Backend_GED_EncoderOnly}
@@ -342,7 +342,7 @@ endif(ANDROID AND MEDIA_IGA)
     INSTALL(TARGETS IGA_DLL
         LIBRARY DESTINATION ${IGA_LIB_PATH} COMPONENT igc-core)
     unset(IGA_LIB_PATH)
-  elseif(WIN32)
+  elseif(MSVC)
     install(TARGETS IGA_DLL RUNTIME
             DESTINATION Release/lh64              CONFIGURATIONS Release)
     install(TARGETS IGA_DLL RUNTIME

@@ -138,12 +138,13 @@ public:
     void SetKernelStackPointer64();
     void SetStackFunctionArgSize(uint size);  // size in GRFs
     void SetStackFunctionRetSize(uint size);  // size in GRFs
+    void SetExternFunctionFlag();
 
     void GetVISAPredefinedVar(CVariable* pVar, PreDefined_Vars var);
     void CreateVISAVar(CVariable* var);
     void DeclareInput(CVariable* var, uint offset, uint instance);
     void MarkAsOutput(CVariable* var);
-    void Compile();
+    void Compile(bool hasSymbolTable = false);
     CEncoder();
     ~CEncoder();
     void SetProgram(CShader* program);
@@ -223,7 +224,7 @@ public:
     void BoolToInt(CVariable* dst, CVariable* src) ;
     void Copy(CVariable* dst, CVariable* src);
     void SubroutineCall(CVariable *flag, llvm::Function *F);
-    void SubroutineRet(CVariable *flag);
+    void SubroutineRet(CVariable *flag, llvm::Function *F);
     void StackCall(CVariable *flag, llvm::Function *F, unsigned char argSize, unsigned char retSize);
     void IndirectStackCall(CVariable* flag, CVariable* funcPtr, unsigned char argSize, unsigned char retSize);
     void StackRet(CVariable *flag);
@@ -501,7 +502,7 @@ private:
     unsigned GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
             Common_ISA_Exec_Size toExecSize,
             unsigned thePart, CVariable *var) const;
-    
+
     std::tuple<CVariable*, uint32_t> splitRawOperand(CVariable* var, bool isFirstHalf, Common_VISA_EMask_Ctrl execMask);
 
     uint32_t getNumChannels(CVariable* var) const;

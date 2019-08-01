@@ -810,6 +810,7 @@ namespace vISA
         void labelBBs();
         void populateBBLexId();
         bool interfereBetween(G4_Declare*, G4_Declare*);
+        void verifyAlign(G4_Declare* dcl);
 
     public:
         void verify();
@@ -847,7 +848,7 @@ namespace vISA
         void updateDefSet(std::set<G4_Declare*>& defs, G4_Declare* referencedDcl);
         void detectUndefinedUses(LivenessAnalysis& liveAnalysis, G4_Kernel& kernel);
         void markBlockLocalVar(G4_RegVar* var, unsigned bbId);
-        void markBlockLocalVars(bool doLocalRA);
+        void markBlockLocalVars();
         void computePhyReg();
         void fixAlignment();
 
@@ -1018,6 +1019,15 @@ namespace vISA
             auto dclid = dcl->getDeclId();
             resize(dclid);
             vars[dclid].localLR = nullptr;
+        }
+
+        void clearStaleLiveRanges()
+        {
+            for (auto dcl : kernel.Declares)
+            {
+                setBBId(dcl, UINT_MAX);
+                resetLocalLR(dcl);
+            }
         }
 
         void recordRef(G4_Declare* dcl)
@@ -1219,7 +1229,7 @@ namespace vISA
             vars[dclid].subOff = offset;
         }
 
-        G4_Align getBankAlign(G4_Declare*);
+        BankAlign getBankAlign(G4_Declare*);
         bool areAllDefsNoMask(G4_Declare*);
         void removeUnreferencedDcls();
         LocalLiveRange* GetOrCreateLocalLiveRange(G4_Declare* topdcl);
@@ -1247,7 +1257,7 @@ namespace vISA
         bool isReRAPass();
         void updateSubRegAlignment(unsigned char regFile, G4_SubReg_Align subAlign);
         void updateAlignment(unsigned char regFile, G4_Align align);
-        void getBankAlignment(LiveRange* lr, G4_Align &align);
+        void getBankAlignment(LiveRange* lr, BankAlign &align);
         void printLiveIntervals();
         void reportUndefinedUses(LivenessAnalysis& liveAnalysis, G4_BB* bb, G4_INST* inst, G4_Declare* referencedDcl, std::set<G4_Declare*>& defs, std::ofstream& optreport, Gen4_Operand_Number opndNum);
         void detectNeverDefinedUses();
@@ -1265,7 +1275,7 @@ namespace vISA
         void addCalleeSavePseudoCode();
         void addStoreRestoreForFP();
         void setABIForStackCallFunctionCalls();
-        void markGraphBlockLocalVars(bool doLocalRA);
+        void markGraphBlockLocalVars();
         void verifyRA(LivenessAnalysis & liveAnalysis);
         void resetGlobalRAStates();
 

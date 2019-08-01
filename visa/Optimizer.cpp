@@ -914,7 +914,6 @@ void Optimizer::reRAPostSchedule()
         {
             dcl->prepareForRealloc(&kernel);
         }
-        dcl->getRegVar()->forceAlign(G4_Align::Either);
     }
 
     kernel.fg.clearBBLRASummaries();
@@ -1135,6 +1134,8 @@ int Optimizer::optimization()
     //
     runPass(PI_chkRegBoundary);
 
+    runPass(PI_changeMoveType);
+
     runPass(PI_localSchedule);
 
     runPass(PI_accSubPostSchedule);
@@ -1164,8 +1165,6 @@ int Optimizer::optimization()
     runPass(PI_HWWorkaround);
 
     runPass(PI_normalizeRegion);
-
-    runPass(PI_changeMoveType);
 
     runPass(PI_countGRFUsage);
 
@@ -2924,7 +2923,9 @@ void Optimizer::newLocalCopyPropagation()
                 // replace use with def
                 if (src->isImm())
                 {
-                    G4_Imm* newImm = builder.createImm(src->asImm()->getImm(),
+                    auto newImmVal = G4_Imm::typecastVals(src->asImm()->getImm(),
+                        propType);
+                    G4_Imm* newImm = builder.createImm(newImmVal,
                         propType);
                     G4_SrcModifier modifier = use->asSrcRegRegion()->getModifier();
                     if (modifier != Mod_src_undef)
@@ -6341,6 +6342,7 @@ G4_SrcRegRegion* IR_Builder::createSubSrcOperand( G4_SrcRegRegion* src, uint16_t
         }
         rd = size == 1 ? getRegionScalar() :
             createRegionDesc(size == newWd ? newWd * hs : newVs, newWd, hs);
+        rd = getNormalizedRegion(size, rd);
     }
 
     if( src->getRegAccess() != Direct )
@@ -10681,6 +10683,8 @@ void Optimizer::changeMoveType()
             movInst->getSrc(0)->asSrcRegRegion()->setType(newTy);
         }
     };
+
+
 
 
     for (auto bb : fg)

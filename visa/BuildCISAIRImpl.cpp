@@ -578,12 +578,11 @@ static void propagateCalleeInfo(G4_Kernel* kernel, G4_Kernel* callee)
 
 // After compiling each compilation unit this function is invoked which stitches together callers
 // with their callees. It modifies pseudo_fcall/fret in to call/ret opcodes.
-void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& compilation_units )
+void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& compilation_units)
 {
     list <int> callee_index;
     G4_Kernel* kernel = NULL;
 
-    bool hasIndirectCall = false;
     for (auto cur : compilation_units)
     {
         if (cur->fg.builder->getIsKernel())
@@ -591,30 +590,14 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
             ASSERT_USER( kernel == NULL, "Multiple kernel objects found when stitching together");
             kernel = cur;
         }
-
-        if (cur->hasIndirectCall())
+        else if (cur->getIsExternFunc())
         {
-            hasIndirectCall = true;
+            callee_index.push_back(cur->fg.builder->getFuncId());
         }
     }
 
-    ASSERT_USER( kernel != NULL, "Valid kernel not found when stitching compiled units");
-
-    if (hasIndirectCall)
-    {
-        // we have to include every function
-        for (auto&& cu : compilation_units)
-        {
-            if (!cu->fg.builder->getIsKernel())
-            {
-                callee_index.push_back(cu->fg.builder->getFuncId());
-            }
-        }
-    }
-    else
-    {
-        Enumerate_Callees(header, kernel, compilation_units, callee_index);
-    }
+    ASSERT_USER(kernel != NULL, "Valid kernel not found when stitching compiled units");
+    Enumerate_Callees(header, kernel, compilation_units, callee_index);
 
     callee_index.sort();
     callee_index.unique();
@@ -895,6 +878,10 @@ int CISA_IR_Builder::Compile( const char* nameInput)
                 if (kernel->getIRBuilder()->getRetVarSize() < kernel->getKernelFormat()->return_value_size)
                 {
                     kernel->getIRBuilder()->setRetVarSize(kernel->getKernelFormat()->return_value_size);
+                }
+                if (kernel->getIRBuilder()->getIsExtern())
+                {
+                    kernel->getKernel()->setIsExternFunc();
                 }
                 kernel->getIRBuilder()->setFuncId(k);
 
@@ -1233,17 +1220,25 @@ bool CISA_IR_Builder::CISA_input_directive(char* var_name, short offset, unsigne
     status = m_kernel->CreateVISAInputVar((VISA_GenVar *)temp,offset,size);
     if(status != CM_SUCCESS)
     {
-        std::cerr<<"Failed to create input Var. Line: "<<line_no<<std::endl;
+        std::cerr << "Failed to create input Var. Line: " <<line_no << "\n";
         return false;
     }
     return true;
 }
 
-bool CISA_IR_Builder::CISA_attr_directive(char* input_name, char* input_var, int line_no)
+bool CISA_IR_Builder::CISA_attr_directive(
+    const char* input_name, const char* input_var, int line_no)
 {
 
-    if(strcmp(input_name, "AsmName" ) == 0)
+    if (strcmp(input_name, "AsmName") == 0 ||
+        strcmp(input_name, "OutputAsmPath") == 0)
     {
+        if (strcmp(input_name, "AsmName") == 0) {
+            std::cerr << "WARNING: AsmName deprecated "
+                "(replace with OutputAsmPath)\n";
+        }
+        input_name = "OutputAsmPath"; // normalize to new name
+
         char asmFileName[MAX_OPTION_STR_LENGTH];
 
         strncpy_s(asmFileName, MAX_OPTION_STR_LENGTH, input_var, MAX_OPTION_STR_LENGTH-1);
@@ -1255,46 +1250,39 @@ bool CISA_IR_Builder::CISA_attr_directive(char* input_name, char* input_var, int
         m_options.setOptionInternally(VISA_AsmFileName, asmFileName);
     }
 
-    if(strcmp(input_name, "Target" ) == 0){
+    if (strcmp(input_name, "Target") == 0) {
         unsigned char visa_target;
-        if(strcmp(input_var, "cm" ) == 0)
-        {
+        MUST_BE_TRUE(input_var,
+            ".kernel_attr Target=.. must be \"cm\", \"3d\", or \"cs\"");
+        if (strcmp(input_var, "cm") == 0) {
             visa_target = VISA_CM;
         }
-        else if(strcmp(input_var, "3d" ) == 0)
+        else if (strcmp(input_var, "3d") == 0)
         {
             visa_target = VISA_3D;
         }
-        else if(strcmp(input_var, "cs" ) == 0)
+        else if (strcmp(input_var, "cs") == 0)
         {
             visa_target = VISA_CS;
         }
         else
         {
-            MUST_BE_TRUE1(false, line_no, "Invalid kernel target attribute.");
+            MUST_BE_TRUE1(false, line_no, "invalid kernel target attribute");
         }
         m_kernel->AddKernelAttribute(input_name, 1, &visa_target);
     }
     else
     {
-        m_kernel->AddKernelAttribute(input_name, input_var == nullptr ? 0 : (int)strlen(input_var), input_var);
+        m_kernel->AddKernelAttribute(input_name,
+          input_var == nullptr ? 0 : (int)strlen(input_var), input_var);
     }
 
     return true;
 }
 
-bool CISA_IR_Builder::CISA_attr_directiveNum(char* input_name, uint32_t input_var, int line_no)
+bool CISA_IR_Builder::CISA_attr_directiveNum(
+    const char* input_name, uint32_t input_var, int line_no)
 {
-    /*
-    attribute_info_t* attr = (attribute_info_t*)m_mem.alloc(sizeof(attribute_info_t));
-
-    attr->value.stringVal = (char *)m_mem.alloc(sizeof(char));
-    *attr->value.stringVal = input_var;
-    attr->size = sizeof(unsigned char);
-
-    m_kernel->addAttribute(input_name, attr);
-    */
-
     m_kernel->AddKernelAttribute(input_name, sizeof(uint32_t), &input_var);
     return true;
 }
@@ -2924,7 +2912,9 @@ VISA_opnd * CISA_IR_Builder::CISA_create_RAW_NULL_operand(int line_no)
 VISA_opnd * CISA_IR_Builder::CISA_create_RAW_operand(char * var_name, unsigned short offset, int line_no)
 {
     VISA_RawOpnd *cisa_opnd = NULL;
-    int status = m_kernel->CreateVISARawOperand(cisa_opnd, (VISA_GenVar *)m_kernel->getDeclFromName(var_name), offset);
+    auto *decl = (VISA_GenVar *)m_kernel->getDeclFromName(var_name);
+    MUST_BE_TRUE(decl,"undeclared virtual register");
+    int status = m_kernel->CreateVISARawOperand(cisa_opnd, decl, offset);
     MUST_BE_TRUE1(status == CM_SUCCESS, line_no, "Was not able to create RAW operand.");
     return (VISA_opnd *)cisa_opnd; //delay the decision of src or dst until translate stage
 }

@@ -261,6 +261,7 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     readMsg = isRead;
     writeMsg = isWrite;
 
+
     m_bti = bti;
     m_sti = sti;
 
@@ -284,18 +285,19 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
 }
 
 G4_SendMsgDescriptor::G4_SendMsgDescriptor(
-    uint32_t desc, uint32_t extDesc,
+    uint32_t descBits, uint32_t extDescBits,
     bool isRead,
     bool isWrite,
     G4_Operand *bti,
     G4_Operand *sti)
     : readMsg(isRead), writeMsg(isWrite), m_sti(sti), m_bti(bti)
 {
-    this->desc.value = desc;
-    this->extDesc.value = extDesc;
-    src1Len = (extDesc >> 6) & 0x1F; // [10:6]
-    eotAfterMessage = this->extDesc.layout.eot; // [5]
-    sfid = intToSFID(extDesc & 0xF); // [3:0]
+    desc.value = descBits;
+    extDesc.value = extDescBits;
+// SEE the note above about clearing ExDesc[10:6]
+    src1Len = (extDescBits >> 6) & 0x1F; // [10:6]
+    eotAfterMessage = extDesc.layout.eot; // [5]
+    sfid = intToSFID(extDescBits & 0xF); // [3:0]
 
     if (bti && bti->isImm())
     {
@@ -303,7 +305,7 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     }
     if (sti && sti->isImm())
     {
-        this->desc.value |= (((unsigned)m_sti->asImm()->getInt()) << 8); // [11:8]
+        desc.value |= (((unsigned)m_sti->asImm()->getInt()) << 8); // [11:8]
     }
 }
 
@@ -1605,6 +1607,7 @@ bool G4_INST::isRawMov() const
         (srcs[0]->isImm() ||
         (srcs[0]->isSrcRegRegion() && srcs[0]->asSrcRegRegion()->getModifier() == Mod_src_undef));
 }
+
 bool G4_INST::hasACCSrc() const
 {
     if( implAccSrc ||
@@ -2448,18 +2451,18 @@ bool G4_INST::canHoist(bool simdBB, const Options *opt) const
 
     G4_Operand *src = srcs[0];
     // check attributes of src and number of defs
-    bool archRegSrc = ( src->isFlag() || src->isAreg() || src->isAddress() );
-    bool indirectSrc = ( src->getTopDcl() && src->getTopDcl()->getAddressed() ) || src->getRegAccess() != Direct;
-    bool noMultiDefOpt = ( ( defInstList.size() > 1 ) &&
-        ( predicate || ( dst->getRegAccess() != Direct ) || simdBB ) );
-    if( src->isImm() ||
+    bool archRegSrc = (src->isFlag() || src->isAreg() || src->isAddress());
+    bool indirectSrc = (src->getTopDcl() && src->getTopDcl()->getAddressed()) || src->getRegAccess() != Direct;
+    bool noMultiDefOpt = ((defInstList.size() > 1) &&
+        (predicate || (dst->getRegAccess() != Direct) || simdBB));
+    if (src->isImm() ||
         archRegSrc ||
         indirectSrc ||
-        ( src->asSrcRegRegion()->getModifier() != Mod_src_undef ) ||
-        ( defInstList.size() == 0 ) ||
-        noMultiDefOpt )
+        (src->asSrcRegRegion()->getModifier() != Mod_src_undef) ||
+        (defInstList.size() == 0) ||
+        noMultiDefOpt)
     {
-            return false;
+        return false;
     }
 
     // check type
@@ -2552,6 +2555,12 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
                 return false;
             }
         }
+    }
+
+    if (dst->isAddress() && defInst->getNumSrc() == 3)
+    {
+        // no A0 dst for ternary instructions
+        return false;
     }
 
     // compare boudaries and bitset
@@ -4326,7 +4335,7 @@ void printRegVarOff(std::ostream&  output,
                         //transform ArfSubRegNum to unit of thisOpSize
                         if (thisOpSize != declOpSize)
                         {
-                            if (opnd->getInst()->opcode() != G4_pseudo_kill)
+                            if (!opnd->getInst()->isPseudoKill())
                             {
                                 MUST_BE_TRUE((ArfSubRegNum * declOpSize) % thisOpSize == 0,
                                     ERROR_DATA_RANGE("ARF sub-register number"));
@@ -4732,7 +4741,7 @@ void G4_DstRegRegion::setDstBitVec( uint8_t exec_size )
         {
             footprint1 |= bit_seq << (eltOffset - 64);
         }
-        else 
+        else
         {
             footprint0 |= bit_seq << eltOffset;
         }
@@ -5500,7 +5509,7 @@ G4_Align G4_Declare::getAlign() const
     return regVar->getAlignment();
 }
 
-G4_Align GlobalRA::getBankAlign(G4_Declare* dcl)
+BankAlign GlobalRA::getBankAlign(G4_Declare* dcl)
 {
     IR_Builder* builder = kernel.fg.builder;
     switch (getBankConflict(dcl))
@@ -5509,28 +5518,28 @@ G4_Align GlobalRA::getBankAlign(G4_Declare* dcl)
     case BANK_CONFLICT_SECOND_HALF_EVEN:
         if (builder->oneGRFBankDivision())
         {
-            return Even;
+            return BankAlign::Even;
         }
         else
         {
-            return Even2GRF;
+            return BankAlign::Even2GRF;
         }
         break;
     case BANK_CONFLICT_FIRST_HALF_ODD:
     case BANK_CONFLICT_SECOND_HALF_ODD:
         if (builder->oneGRFBankDivision())
         {
-            return Odd;
+            return BankAlign::Odd;
         }
         else
         {
-            return Odd2GRF;
+            return BankAlign::Odd2GRF;
         }
         break;
     default: break;
     }
 
-    return Either;
+    return BankAlign::Either;
 }
 
 
@@ -5544,8 +5553,8 @@ G4_SubReg_Align G4_Declare::getSubRegAlign() const
     return regVar->getSubRegAlignment();
 }
 
-void
-G4_Declare::emit(std::ostream &output, bool isDumpDot,  bool isSymbolReg)
+void G4_Declare::emit(
+    std::ostream &output, bool isDumpDot,  bool isSymbolReg) const
 {
 
     //
@@ -6153,6 +6162,53 @@ G4_Imm::emitAutoFmt(std::ostream& output)
     }
 }
 
+int64_t G4_Imm::typecastVals(int64_t value, G4_Type type)
+{
+    int64_t retVal = 0;
+    switch (type)
+    {
+    case Type_UD:
+    case Type_UV:
+    case Type_VF:
+    {
+        retVal = (int64_t)((unsigned int)value);
+        break;
+    }
+    case Type_D:
+    case Type_V:
+    {
+        retVal = (int64_t)((int)value);
+        break;
+    }
+    case Type_UW:
+    {
+        retVal = (int64_t)((uint16_t)value);
+        break;
+    }
+    case Type_W:
+    {
+        retVal = (int64_t)((int16_t)value);
+        break;
+    }
+    case Type_UB:
+    {
+        retVal = (int64_t)((uint8_t)value);
+        break;
+    }
+    case Type_B:
+    {
+        retVal = (int64_t)((int8_t)value);
+        break;
+    }
+    default:
+    {
+        // Dont do float conversions
+        retVal = value;
+    }
+    }
+    return retVal;
+}
+
 G4_RegVar *
 G4_RegVarTransient::getNonTransientBaseRegVar ()
 {
@@ -6345,7 +6401,7 @@ void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
 
         footPrint0 = totalBytes < 64 ? (1ULL << totalBytes) - 1 : ULLONG_MAX;
         if (totalBytes > 64)
-        {       
+        {
             footPrint1 = totalBytes == 128 ? ULLONG_MAX : (1ULL << (totalBytes - 64)) - 1;
         }
     }
@@ -6815,7 +6871,7 @@ void G4_Operand::updateFootPrint(BitSet& footprint, bool isSet)
     unsigned lb = getLeftBound();
     unsigned rb = getRightBound();
     const bool doFastPath = true; // for debugging
-        
+
     if (doFastPath && lb % N == 0 && (rb + 1) % N == 0)
     {
         // lb is 32-byte aligned, set one dword at a time
@@ -6904,7 +6960,7 @@ void G4_INST::computeRightBound(G4_Operand* opnd)
 
             done = true;
         }
-        else if( done == false && (op == G4_pseudo_kill || isPseudoUse()) )
+        else if( done == false && (isPseudoKill() || isPseudoUse()) )
         {
             // pseudo kills/use write/read entire variable
             G4_Declare* topdcl = opnd->getBase()->asRegVar()->getDeclare()->getRootDeclare();
@@ -7757,7 +7813,7 @@ bool G4_INST::canDstBeAcc() const
         }
         break;
     case Type_DF:
-         if (!builder.getOption(vISA_accSubDF))
+         if (!builder.useAccForDF())
          {
              return false;
          }
@@ -7820,7 +7876,7 @@ bool G4_INST::canDstBeAcc() const
         // we can't use acc if plane will be expanded
         return builder.doPlane();
     case G4_madm:
-        return builder.getOption(vISA_accSubMadm);
+        return builder.useAccForMadm();
     case G4_mad:
     case G4_csel:
         return builder.canMadHaveAcc();
@@ -7876,7 +7932,7 @@ bool G4_INST::canSrcBeAcc(int srcId) const
         }
         break;
     case Type_DF:
-         if (!builder.getOption(vISA_accSubDF))
+         if (!builder.useAccForDF())
          {
              return false;
          }
@@ -7958,7 +8014,7 @@ bool G4_INST::canSrcBeAcc(int srcId) const
     case G4_mov:
         return builder.relaxedACCRestrictions() || !getDst()->isAccReg();
     case G4_madm:
-        return builder.getOption(vISA_accSubMadm);
+        return builder.useAccForMadm();
     case G4_mad:
         // no int acc if it's used as mul operand
         return builder.canMadHaveAcc() &&

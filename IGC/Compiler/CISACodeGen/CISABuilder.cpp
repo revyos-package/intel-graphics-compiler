@@ -206,7 +206,7 @@ visaBlockNum(unsigned numElems) {
 
 // split a SIMD16 variable into two SIMD8 while satisfying vISA's raw operand alignment
 // return a tuple representing the vISA raw operand (var + offset) after split
-std::tuple<CVariable*, uint32_t> CEncoder::splitRawOperand(CVariable* var, bool isFirstHalf, 
+std::tuple<CVariable*, uint32_t> CEncoder::splitRawOperand(CVariable* var, bool isFirstHalf,
     Common_VISA_EMask_Ctrl execMask)
 {
 
@@ -256,7 +256,7 @@ CEncoder::GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
 
     unsigned elemSize = var->GetElemSize();
 
-    switch (elemSize) 
+    switch (elemSize)
     {
     case 4:
         return thePart * getGRFSize() * 1;
@@ -328,6 +328,11 @@ void CEncoder::SubroutineCall(CVariable* flag, llvm::Function *F)
     // control flow instructions cannot be broken down into lower SIMD
     Common_VISA_EMask_Ctrl emask = m_encoderState.m_noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
     Common_ISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
+    if (F->hasFnAttribute("KMPLOCK"))
+    {
+        emask = vISA_EMASK_M1_NM;
+        execSize = EXEC_SIZE_1;
+    }
     V(vKernel->AppendVISACFCallInst(predOpnd, emask, execSize, visaLabel));
 }
 
@@ -355,13 +360,18 @@ void CEncoder::IndirectStackCall(CVariable* flag, CVariable* funcPtr, unsigned c
     V(vKernel->AppendVISACFIndirectFuncCallInst(predOpnd, emask, execSize, funcAddrOpnd, argSize, retSize));
 }
 
-void CEncoder::SubroutineRet(CVariable* flag)
+void CEncoder::SubroutineRet(CVariable* flag, llvm::Function *F)
 {
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     // control flow instructions cannot be broken down into lower SIMD
     Common_VISA_EMask_Ctrl emask = m_encoderState.m_noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
     Common_ISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
+    if (F->hasFnAttribute("KMPLOCK"))
+    {
+        emask = vISA_EMASK_M1_NM;
+        execSize = EXEC_SIZE_1;
+    }
     V(vKernel->AppendVISACFRetInst(predOpnd, emask, execSize));
 }
 
@@ -1038,7 +1048,7 @@ bool CEncoder::NeedSplitting(CVariable *var, const SModifier &mod,
         return false;
     // If the data type has more than 4 bytes, i.e. 32 bits, it already crosses
     // 2+ GRFs by itself. There's no need to check further.
-    if (elemSize > 4) 
+    if (elemSize > 4)
     {
         assert(elemSize == 8 && "Only QWORD is supported so far!");
         assert((isSource || !mod.specialRegion) &&
@@ -2029,7 +2039,7 @@ void CEncoder::URBWrite(
             V(vKernel->CreateVISAImmediate(immSrc, &immChannelMask, ISA_TYPE_UW));
 
             V(vKernel->AppendVISADataMovementInst(
-                ISA_MOV, nullptr, false, vISA_EMASK_M1,
+                ISA_MOV, nullptr, false, emask,
                 EXEC_SIZE_8, movDst, immSrc));
             V(vKernel->CreateVISARawOperand(channelMask, GetVISAVariable(tmpDst), 0));
         }
@@ -3513,13 +3523,12 @@ void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> &params)
     if (IGC_IS_FLAG_ENABLED(ShaderDebugHashCodeInKernel))
     {
         QWORD AssemblyHash = { 0 };
-        char Low[20], High[20];
         AssemblyHash = context->hash.getAsmHash();
         params.push_back("-hashmovs");
-        sprintf_s(Low, sizeof(Low), "%d", (DWORD)AssemblyHash);
-        params.push_back(Low);
-        sprintf_s(High, sizeof(High), "%d", (DWORD)(AssemblyHash >> 32));
-        params.push_back(High);
+        std::string Low = std::to_string((DWORD)AssemblyHash);
+        std::string High = std::to_string((DWORD)(AssemblyHash >> 32));
+        params.push_back(_strdup(Low.c_str()));
+        params.push_back(_strdup(High.c_str()));
     }
 }
 void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall)
@@ -3658,14 +3667,6 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
             // 2 means #spill/fill is roughly 1% of #inst
             // ToDo: tune the threshold
             SaveOption(vISA_AbortOnSpillThreshold, 2u);
-        }
-    }
-
-    if (context->m_retryManager.GetLastSpillSize() > 0)
-    {
-        if (context->m_retryManager.GetLastSpillSize() > g_cScratchSpaceMsglimit)
-        {
-            SaveOption(vISA_UseScratchMsgForSpills, false);
         }
     }
 
@@ -3880,15 +3881,6 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
         {
             SaveOption(vISA_numGeneralAcc, numAcc);
         }
-
-        if (IGC_IS_FLAG_ENABLED(EnableAccSubDF))
-        {
-            SaveOption(vISA_accSubDF, true);
-        }
-        if (IGC_IS_FLAG_ENABLED(EnableAccSubMadm))
-        {
-            SaveOption(vISA_accSubMadm, true);
-        }
     }
     else
     {
@@ -3916,7 +3908,7 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
     }
 
     // Enable SendFusion for SIMD8
-    // TODO: Re-enable SendFusion when VMask is enabled. The hardware should support this, but 
+    // TODO: Re-enable SendFusion when VMask is enabled. The hardware should support this, but
     //  more investigation needs to be done on whether simply replacing sr0.2 with sr0.3 is enough.
     if (IGC_IS_FLAG_ENABLED(EnableSendFusion) &&
         !(context->type == ShaderType::PIXEL_SHADER && static_cast<CPixelShader*>(m_program)->NeedVMask()) &&
@@ -4045,12 +4037,12 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
         }
 
         std::string asmName = GetDumpFileName("asm");
-        V(vKernel->AddKernelAttribute("AsmName", asmName.length(), asmName.c_str()));
+        V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
     }
     else
     {
         V(vbuilder->AddKernel(vKernel, "kernel"));
-        V(vKernel->AddKernelAttribute("AsmName", std::strlen("0.asm") , "0.asm"));
+        V(vKernel->AddKernelAttribute("OutputAsmPath", std::strlen("0.asm") , "0.asm"));
     }
 
     vMainKernel = vKernel;
@@ -4098,6 +4090,13 @@ void CEncoder::SetStackFunctionRetSize(uint size)
 {
     assert(vKernel);
     V(vKernel->AddKernelAttribute("RetValSize", sizeof(size), &size));
+}
+
+void CEncoder::SetExternFunctionFlag()
+{
+    assert(vKernel);
+    int flag = 1;
+    V(vKernel->AddKernelAttribute("Extern", sizeof(flag), &flag));
 }
 
 SEncoderState CEncoder::CopyEncoderState()
@@ -4326,7 +4325,7 @@ void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& 
         for (auto &F : pModule->getFunctionList())
         {
             // Find all functions in the module we need to export as symbols
-            if (F.hasFnAttribute("AsFunctionPointer"))
+            if (F.hasFnAttribute("ExternalLinkedFn"))
             {
                 if (!F.isDeclaration() || F.getNumUses() > 0)
                     funcsToExport.push_back(&F);
@@ -4361,6 +4360,7 @@ void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& 
                     // If the function is only declared, set as undefined type
                     entry_ptr->s_type = vISA::GenSymType::S_UNDEF;
                     entry_ptr->s_offset = 0;
+                    entry_ptr->s_size = 0;
                 }
                 else
                 {
@@ -4411,7 +4411,7 @@ void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsign
     }
 }
 
-void CEncoder::Compile()
+void CEncoder::Compile(bool hasSymbolTable)
 {
     COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
 
@@ -4658,9 +4658,12 @@ void CEncoder::Compile()
 
     pMainKernel->GetGTPinBuffer(pOutput->m_gtpinBuffer, pOutput->m_gtpinBufferSize);
 
-    CreateSymbolTable(pOutput->m_funcSymbolTable,
-                      pOutput->m_funcSymbolTableSize,
-                      pOutput->m_funcSymbolTableEntries);
+    if (hasSymbolTable)
+    {
+        CreateSymbolTable(pOutput->m_funcSymbolTable,
+            pOutput->m_funcSymbolTableSize,
+            pOutput->m_funcSymbolTableEntries);
+    }
     CreateRelocationTable(pOutput->m_funcRelocationTable,
                           pOutput->m_funcRelocationTableSize,
                           pOutput->m_funcRelocationTableEntries);
@@ -4670,7 +4673,7 @@ void CEncoder::Compile()
         pOutput->m_scratchSpaceUsedBySpills = jitInfo->spillMemUsed;
     }
 
-    pOutput->setScratchPrivateUsage(m_program->m_ScratchSpaceSize, m_program->m_Platform->maxPerThreadScratchSpace());
+    pOutput->setScratchSpaceUsedByShader(m_program->m_ScratchSpaceSize);
 
     pOutput->m_scratchSpaceUsedByGtpin = jitInfo->numBytesScratchGtpin;
 
@@ -5302,7 +5305,7 @@ void CEncoder::AtomicRawA64(AtomicOp atomic_op,
         Common_ISA_Exec_Size fromExecSize = visaExecSize(m_encoderState.m_simdSize);
         Common_ISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, 2);
 
-        for (unsigned thePart = 0; thePart != 2; ++thePart) 
+        for (unsigned thePart = 0; thePart != 2; ++thePart)
         {
             CVariable* rawOpndVar = nullptr;
             uint32_t rawOpndOffset = 0;
@@ -5333,9 +5336,9 @@ void CEncoder::AtomicRawA64(AtomicOp atomic_op,
                                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
                                                toExecSize, atomicOpcode, bitwidth,
                                                addressOpnd, src0Opnd, src1Opnd, dstOpnd));
-            
+
             if (needsTmpDst)
-            { 
+            {
                 SModifier mod;
                 mod.init();
                 mod.subReg = 8;

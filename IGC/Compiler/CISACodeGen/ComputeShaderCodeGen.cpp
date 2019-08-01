@@ -122,7 +122,7 @@ void CComputeShader::ParseShaderSpecificOpcode(llvm::Instruction* inst)
         default:
             break;
         }
-    }    
+    }
 }
 
 void CComputeShader::CreateThreadPayloadData(void* & pThreadPayload, uint& threadPayloadSize)
@@ -144,7 +144,7 @@ void CComputeShader::CreateThreadPayloadData(void* & pThreadPayload, uint& threa
 
     unsigned threadPayloadEntries = threadPayloadSize / sizeof(ThreadPayloadEntry);
 
-    ThreadPayloadEntry* pThreadPayloadMem = 
+    ThreadPayloadEntry* pThreadPayloadMem =
         (ThreadPayloadEntry*)IGC::aligned_malloc(threadPayloadEntries* sizeof(ThreadPayloadEntry), 16);
     std::fill(pThreadPayloadMem, pThreadPayloadMem + threadPayloadEntries, 0);
 
@@ -158,7 +158,7 @@ void CComputeShader::CreateThreadPayloadData(void* & pThreadPayload, uint& threa
     uint currThreadY = 0;
     uint currThreadZ = 0;
 
-    // Current heuristic is trivial, if there are more typed access than untyped access we walk in tile 
+    // Current heuristic is trivial, if there are more typed access than untyped access we walk in tile
     // otherwise we walk linearly
     bool isDominatedByTypedMessage = m_numberOfTypedAccess >= m_numberOfUntypedAccess;
 
@@ -183,8 +183,8 @@ void CComputeShader::CreateThreadPayloadData(void* & pThreadPayload, uint& threa
                 lane++;
             }
 
-            if(isDominatedByTypedMessage && 
-                m_threadGroupSize_Y % 4 == 0 && 
+            if(isDominatedByTypedMessage &&
+                m_threadGroupSize_Y % 4 == 0 &&
                 IGC_IS_FLAG_ENABLED(UseTiledCSThreadOrder))
             {
                 const unsigned int tileSizeY = 4;
@@ -281,7 +281,7 @@ CVariable* CComputeShader::CreateThreadIDinGroup(uint channelNum)
     return nullptr;
 }
 
-// The register payload layout for a compute shaders is 
+// The register payload layout for a compute shaders is
 // the following:
 //-------------------------------------------------------------------------
 //| GRF Register | Example | Description                                  |
@@ -316,12 +316,12 @@ void CComputeShader::AllocatePayload()
     // R0 is used as a Predefined variable so that vISA doesn't free it later. In CS, we expect the
     // thread group id's in R0.
     assert(GetR0());
-    
+
     // We use predefined variables so offset has to be added for R0.
     offset += getGRFSize();
-   
+
     bool bZeroIDs = !GetNumberOfId();
-    // for indirect threads data payload hardware doesn't allow empty per thread buffer 
+    // for indirect threads data payload hardware doesn't allow empty per thread buffer
     // so we allocate a dummy thread id in case no IDs are used
     if (bZeroIDs)
     {
@@ -360,6 +360,7 @@ void CComputeShader::AllocatePayload()
     AllocateNOSConstants(offset);
 }
 
+
 uint CComputeShader::GetNumberOfId()
 {
     uint numberIdPushed = 0;
@@ -368,7 +369,7 @@ uint CComputeShader::GetNumberOfId()
     {
         ++numberIdPushed;
     }
-    
+
     if (m_pThread_ID_in_Group_Y)
     {
         ++numberIdPushed;
@@ -457,7 +458,7 @@ void CComputeShader::FillProgram(SComputeShaderKernelProgram* pKernelProgram)
 {
     CreateGatherMap();
     CreateConstantBufferOutput(pKernelProgram);
-    
+
     pKernelProgram->ConstantBufferLoaded           = m_constantBufferLoaded;
     pKernelProgram->hasControlFlow                 = m_numBlocks > 1 ? true : false;
 
@@ -468,13 +469,13 @@ void CComputeShader::FillProgram(SComputeShaderKernelProgram* pKernelProgram)
     pKernelProgram->CurbeReadLength = GetNumberOfId() * (numLanes(m_dispatchSize) / numLanes(SIMDMode::SIMD8));
 
     pKernelProgram->PhysicalThreadsInGroup = static_cast<int>(
-        std::ceil((static_cast<float>(m_threadGroupSize) / 
+        std::ceil((static_cast<float>(m_threadGroupSize) /
                    static_cast<float>((numLanes(m_dispatchSize))))));
-    
+
     pKernelProgram->BarrierUsed = this->GetHasBarrier();
 
     pKernelProgram->RoundingMode = USC::GFX3DSTATE_ROUNDING_MODE_ROUND_TO_NEAREST_EVEN;
-        
+
     pKernelProgram->BarrierReturnGRFOffset = 0;
 
     pKernelProgram->GtwBypass = 1;

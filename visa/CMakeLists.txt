@@ -111,6 +111,11 @@ ADD_FLEX_BISON_DEPENDENCY(CISAScanner CISAParser)
 
 add_custom_target(CISAScanner_target DEPENDS ${FLEX_CISAScanner_OUTPUTS})
 
+if (MSVC)
+  #set up standard defines from the common WDK path.
+  bs_set_wdk(CISAScanner_target)
+endif()
+
 # Set up include paths used by all the libraries in this file
 # There is a windows specific include path for GNUTools support that is inside the repository. The
 # equivalent support is already included for Linux so is not required for those platforms
@@ -415,6 +420,11 @@ endif()
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     set(GenX_IR_definitions ${GenX_IR_definitions} WIN64)
 endif()
+
+ if (MSVC)
+   #set up standard defines from the common WDK path.
+   bs_set_wdk(GenX_IR)
+ endif()
 
 if(NOT WIN32)
   set_target_properties( GenX_IR PROPERTIES PREFIX "")

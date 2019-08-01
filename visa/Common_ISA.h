@@ -52,7 +52,7 @@ class G4_Declare;
 #define COMMON_ISA_MAX_ADDRESS_SIZE     16
 #define COMMON_ISA_MAX_SURFACE_SIZE     128
 #define COMMON_ISA_MAX_SAMPLER_SIZE     128
-#define COMMON_ISA_MAX_VARIABLE_SIZE    4096
+#define COMMON_ISA_MAX_VARIABLE_SIZE    8192
 #define COMMON_ISA_MAX_NUM_SURFACES     256
 #define COMMON_ISA_MAX_NUM_SAMPLERS     32
 #define COMMON_ISA_MAX_NUM_INPUTS       256
@@ -1096,6 +1096,18 @@ public:
   bool operator==(Encoding other) const {
     return Value == other;
   }
+};
+
+struct VISAFenceMask
+{
+    uint8_t commitEnable : 1;
+    uint8_t flushICache : 1;
+    uint8_t flushSCache : 1;
+    uint8_t flushCCache : 1;
+    uint8_t flushRWCache : 1;
+    uint8_t isGlobal : 1;
+    uint8_t flushL1Cache : 1;
+    uint8_t SWFence: 1;
 };
 
 struct VISA3DSamplerOp

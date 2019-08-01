@@ -24,7 +24,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-
 #pragma once
 
 #include <algorithm>
@@ -39,7 +38,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace CIF {
 
-constexpr Version_t CifFrameworkVersion = 1;
+constexpr Version_t CifFrameworkVersion = 2;
 
 namespace RAII {
 template <typename T> 
@@ -312,6 +311,14 @@ struct InterfacesList {
 
   /// Calls Callable::Call with all contained interfaces (sequentially, one at a time) as template parameters.
   /// Arguments will be forwarded as regular function parameters to Callable::Call.
+  template <typename Callable, typename RetType, typename DefaultValueT>
+  static RetType forwardToOne(InterfaceId_t requestedInterfaceId, DefaultValueT &&defaultValue) {
+    return forwardToOneImpl<0, RetType, Callable, DefaultValueT, InterfacePack<SupportedInterfaces...>>(
+        requestedInterfaceId, std::forward<DefaultValueT>(defaultValue));
+  }
+
+  /// Calls Callable::Call with all contained interfaces (sequentially, one at a time) as template parameters.
+  /// Arguments will be forwarded as regular function parameters to Callable::Call.
   template <typename Callable, typename... Args>
   static void forwardToAll(Args &&... args) {
     forwardToAllImpl<0, Callable, InterfacePack<SupportedInterfaces...>, Args...>(std::forward<Args>(args)...);
@@ -321,7 +328,7 @@ struct InterfacesList {
   /// Could do sizeof...(SupportedInterfaces) instead, but GCC 4.8 has a bug
   static constexpr uint32_t GetNumInterfaces() {
 #if defined _WIN32
-    return sizeof...(SupportedInterfaces);
+      return sizeof...(SupportedInterfaces);
 #else
     return GetNumInterfacesImpl<SupportedInterfaces...>();
 #endif

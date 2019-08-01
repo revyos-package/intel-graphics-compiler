@@ -1794,143 +1794,10 @@ void Interference::buildInterferenceForDst(G4_BB* bb, BitSet& live, G4_INST* ins
         {
             lrs[id]->setRefCount(lrs[id]->getRefCount() + refCount);  // update reference count
 
-            if (inst->getEvenlySplitInst() && !lrs[id]->getIsSplittedDcl())
+            buildInterferenceWithLive(live, id);
+            if (lrs[id]->getIsSplittedDcl())
             {
-                std::list<G4_INST*>::reverse_iterator succ = i;
-                succ--;
-                G4_INST* nextInst = (*succ);
-                G4_DstRegRegion* nextDst = nextInst->getDst();
-
-                bool needUpdate = false;
-
-                // Perform addtional sanity checks to make sure
-                // - no temp instruction is inserted between the splitted instructions due to other HW conformity fix
-                // - no new live range is introduced by (future) value numbering optimization
-
-                if (inst->opcode() != nextInst->opcode() ||
-                    inst->getExecSize() != inst->getExecSize())
-                {
-                    needUpdate = true;
-                }
-
-                if (needUpdate == false &&
-                    nextDst != NULL &&
-                    nextDst->getBase()->isRegAllocPartaker() &&
-                    (dst->getBase()->asRegVar()->getId() !=
-                        nextDst->getBase()->asRegVar()->getId()))
-                {
-                    needUpdate = true;
-                }
-
-                if (needUpdate == false)
-                {
-                    for (unsigned j = 0; j < G4_MAX_SRCS; j++)
-                    {
-                        G4_Operand* src = inst->getSrc(j);
-                        G4_Operand* nextSrc = nextInst->getSrc(j);
-                        if (src != NULL &&
-                            src->isSrcRegRegion() &&
-                            src->asSrcRegRegion()->getBase()->isRegAllocPartaker() &&
-                            nextSrc != NULL &&
-                            nextSrc->isSrcRegRegion() &&
-                            nextSrc->asSrcRegRegion()->getBase()->isRegAllocPartaker() &&
-                            (src->asSrcRegRegion()->getBase()->asRegVar()->getId() !=
-                                nextSrc->asSrcRegRegion()->getBase()->asRegVar()->getId()))
-                        {
-                            needUpdate = true;
-                        }
-                    }
-                }
-
-                if (needUpdate)
-                {
-                    buildInterferenceWithLive(live, id);
-
-                    if (lrs[id]->getIsSplittedDcl())
-                    {
-                        buildInterferenceWithSubDcl(id, (G4_Operand *)dst, live, false, true);
-                    }
-                }
-                else
-                {
-                    if (!(builder.getOption(vISA_LocalRA) && !gra.isReRAPass()))
-                    {
-                        G4_Declare* decl = dst->getBase()->asRegVar()->getDeclare()->getRootDeclare();
-                        decl->setAlign(Even);
-                    }
-
-                    for (unsigned j = 0; j < G4_MAX_SRCS; j++)
-                    {
-                        G4_Operand* src = inst->getSrc(j);
-                        G4_Operand* nextSrc = nextInst->getSrc(j);
-                        unsigned int srcRightBound = 0;
-                        unsigned int nextSrcLeftBound = 0;
-
-                        if (src != NULL &&
-                            src->isSrcRegRegion() &&
-                            src->asSrcRegRegion()->getBase()->isRegAllocPartaker() &&
-                            nextSrc != NULL &&
-                            nextSrc->isSrcRegRegion() &&
-                            nextSrc->asSrcRegRegion()->getBase()->isRegAllocPartaker())
-                        {
-                            bool interferenceSet = false;
-
-                            if (dst->getBase()->isRegAllocPartaker() &&
-                                nextDst != NULL &&
-                                nextDst->getBase()->isRegAllocPartaker())
-                            {
-                                unsigned int dstRightBound = 0;
-                                unsigned int nextDstLeftBound = 0;
-
-                                dstRightBound = dst->getRightBound();
-                                nextDstLeftBound = nextDst->getLeftBound();
-
-                                if (dstRightBound / GENX_GRF_REG_SIZ == nextDstLeftBound / GENX_GRF_REG_SIZ)
-                                {
-                                    interferenceSet = true;
-                                    if (!varSplitCheckBeforeIntf(dst->getBase()->asRegVar()->getId(),
-                                        src->asSrcRegRegion()->getBase()->asRegVar()->getId()))
-                                    {
-                                        checkAndSetIntf(dst->getBase()->asRegVar()->getId(),
-                                            src->asSrcRegRegion()->getBase()->asRegVar()->getId());
-                                    }
-
-                                }
-                            }
-
-                            if (interferenceSet == false)
-                            {
-                                srcRightBound = src->getRightBound();
-                                nextSrcLeftBound = nextSrc->getLeftBound();
-
-                                if (srcRightBound / GENX_GRF_REG_SIZ == nextSrcLeftBound / GENX_GRF_REG_SIZ)
-                                {
-                                    if (!varSplitCheckBeforeIntf(dst->getBase()->asRegVar()->getId(),
-                                        src->asSrcRegRegion()->getBase()->asRegVar()->getId()))
-                                    {
-                                        checkAndSetIntf(dst->getBase()->asRegVar()->getId(),
-                                            src->asSrcRegRegion()->getBase()->asRegVar()->getId());
-                                    }
-                                }
-                            }
-
-
-                            if (!(builder.getOption(vISA_LocalRA) && !gra.isReRAPass()))
-                            {
-                                G4_Declare* decl = src->asSrcRegRegion()->getBase()->asRegVar()->getDeclare()->getRootDeclare();
-                                decl->setAlign(Even);
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                buildInterferenceWithLive(live, id);
-                if (lrs[id]->getIsSplittedDcl())
-                {
-                    buildInterferenceWithSubDcl(id, (G4_Operand *)dst, live, false, true);
-                }
+                buildInterferenceWithSubDcl(id, (G4_Operand *)dst, live, false, true);
             }
         }
 
@@ -2418,7 +2285,7 @@ void GlobalRA::updateAlignment(unsigned char regFile, G4_Align align)
                 topdclAugMask != AugmentationMasks::NonDefault &&
                 topdclAugMask != AugmentationMasks::Default64Bit)
             {
-                if (topdcl->getElemSize() >= 4 &&
+                if ((topdcl->getElemSize() >= 4 || topdclAugMask == AugmentationMasks::Default32Bit) &&
                     topdcl->getByteSize() >= GENX_GRF_REG_SIZ &&
                     !(kernel.fg.builder->getOption(vISA_enablePreemption) &&
                         dcl == kernel.fg.builder->getBuiltinR0()))
@@ -2433,7 +2300,7 @@ void GlobalRA::updateAlignment(unsigned char regFile, G4_Align align)
     }
 }
 
-void GlobalRA::getBankAlignment(LiveRange* lr, G4_Align &align)
+void GlobalRA::getBankAlignment(LiveRange* lr, BankAlign &align)
 {
     G4_Declare *dcl = lr->getDcl();
     if (kernel.getSimdSize() < 16)
@@ -2456,13 +2323,11 @@ void GlobalRA::getBankAlignment(LiveRange* lr, G4_Align &align)
                 if (topdclBC == BANK_CONFLICT_SECOND_HALF_EVEN ||
                     topdclBC == BANK_CONFLICT_SECOND_HALF_ODD)
                 {
-                    align = Odd;
-                    return;
+                    align = BankAlign::Odd;
                 }
             }
         }
     }
-    return;
 }
 
 Augmentation::Augmentation(G4_Kernel& k, Interference& i, LivenessAnalysis& l, LiveRange* ranges[], GlobalRA& g) :
@@ -2602,6 +2467,7 @@ bool Augmentation::updateDstMaskForScatter(G4_INST* inst, unsigned char* mask)
         default: return false;
         }
         break;
+
     default: return false;
     }
 
@@ -3114,6 +2980,18 @@ void Augmentation::markNonDefaultDstRgn(G4_INST* inst, G4_Operand* opnd)
                 {
                     return;
                 }
+
+                G4_SendMsgDescriptor *msgDesc = inst->getMsgDesc();
+                unsigned char execSize = inst->getExecSize();
+                SFID funcID = msgDesc->getFuncId();
+                if (funcID == SFID::SAMPLER &&
+                    !inst->isEOT() &&
+                    execSize != kernel.getSimdSize())
+                {
+                    gra.setAugmentationMask(dcl, AugmentationMasks::NonDefault);
+                    return;
+                }
+
                 updateDstMask(inst, false);
                 if (isDefaultMaskDcl(dcl, kernel.getSimdSize(), AugmentationMasks::Default16Bit))
                 {
@@ -3252,6 +3130,26 @@ bool Augmentation::markNonDefaultMaskDef()
             }
 
             prevAugMask = gra.getAugmentationMask(dcl);
+        }
+
+        if (liveAnalysis.livenessClass(G4_GRF) &&
+            gra.getAugmentationMask(dcl) == AugmentationMasks::Default32Bit &&
+            kernel.getSimdSize() > NUM_DWORDS_PER_GRF)
+        {
+            auto dclLR = gra.getLocalLR(dcl);
+            if (dclLR)
+            {
+                int s;
+                auto phyReg = dclLR->getPhyReg(s);
+                if (phyReg && phyReg->asGreg()->getRegNum() % 2 != 0)
+                {
+                    // If LRA assignment is not 2GRF aligned for SIMD16 then
+                    // mark it as non-default. GRA candidates cannot fully
+                    // overlap with such ranges. Partial overlap is illegal.
+                    gra.setAugmentationMask(dcl, AugmentationMasks::NonDefault);
+                    nonDefaultMaskDefFound = true;
+                }
+            }
         }
     }
 
@@ -3938,7 +3836,7 @@ void Augmentation::buildLiveIntervals()
 
 #ifdef DEBUG_VERBOSE_ON
     // Print calculated live-ranges
-    printLiveIntervals();
+    gra.printLiveIntervals();
 #endif
 }
 
@@ -4307,7 +4205,7 @@ void Augmentation::buildSIMDIntfDcl(G4_Declare* newDcl, bool isCall)
                 // only for 64-bit bit types since others can be
                 // handled using Even align.
                 gra.getAugmentationMask(defaultDcl) == AugmentationMasks::Default64Bit &&
-                gra.getAugmentationMask(newDcl) == AugmentationMasks::Default64Bit)
+                newDclAugMask == AugmentationMasks::Default64Bit)
             {
                 if (defaultDcl->getRegVar()->isPhyRegAssigned() &&
                     newDcl->getRegVar()->isPhyRegAssigned())
@@ -5549,21 +5447,21 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
 
             if (!failed_alloc)
             {
+                BankAlign align = lrVar->getAlignment() == Even ? BankAlign::Even : BankAlign::Either;
                 if (allocFromBanks)
                 {
-                    G4_Align align = lrVar->getAlignment();
+                    
                     if (!isHybrid && oneGRFBankDivision)
                     {
                         gra.getBankAlignment(lr, align);
                     }
-
                     failed_alloc |= !regUsage.assignGRFRegsFromBanks(lr, align, lr->getForbidden(),
                         heuristic, oneGRFBankDivision);
                 }
                 else
                 {
                     failed_alloc |= !regUsage.assignRegs(highInternalConflict, lr, lr->getForbidden(),
-                        lrVar->getAlignment(), lrVar->getSubRegAlignment(), heuristic, lr->getSpillCost());
+                        align, lrVar->getSubRegAlignment(), heuristic, lr->getSpillCost());
                 }
             }
 
@@ -5662,27 +5560,15 @@ bool GlobalRA::isUnalignedRegion(
     unsigned regionDisp = getRegionDisp(region);
     unsigned regionByteSize = getRegionByteSize(region, execSize);
 
-    if (kernel.getOptions()->getOption(vISA_UseScratchMsgForSpills))
+    if (regionDisp%G4_GRF_REG_NBYTES == 0 && regionByteSize%G4_GRF_REG_NBYTES == 0)
     {
-        if (regionDisp%G4_GRF_REG_NBYTES == 0 && regionByteSize%G4_GRF_REG_NBYTES == 0)
-            return
+        return
             regionByteSize / G4_GRF_REG_NBYTES != 1 &&
             regionByteSize / G4_GRF_REG_NBYTES != 2 &&
             regionByteSize / G4_GRF_REG_NBYTES != 4;
-        else
-            return true;
     }
-    else
-    {
-        if (owordAligned(regionDisp) && owordAligned(regionByteSize))
-            return
-            regionByteSize / OWORD_BYTE_SIZE != 1 &&
-            regionByteSize / OWORD_BYTE_SIZE != 2 &&
-            regionByteSize / OWORD_BYTE_SIZE != 4;
-        else
-            return true;
+    return true;
 
-    }
 }
 
 bool GlobalRA::shouldPreloadDst(
@@ -5719,7 +5605,7 @@ void GlobalRA::determineSpillRegSize(unsigned& spillRegSize, unsigned& indrSpill
             G4_INST* curInst = (*inst_it);
             uint8_t execSize = curInst->getExecSize();
 
-            if (curInst->opcode() == G4_pseudo_kill ||
+            if (curInst->isPseudoKill() ||
                 curInst->opcode() == G4_pseudo_lifetime_end ||
                 curInst->opcode() == G4_pseudo_fcall ||
                 curInst->opcode() == G4_pseudo_fret)
@@ -8213,7 +8099,7 @@ void VarSplit::globalSplit(IR_Builder& builder, G4_Kernel &kernel)
             G4_INST* inst = (*it);
             G4_DstRegRegion* dst = inst->getDst();
 
-            if (inst->opcode() == G4_pseudo_lifetime_end || inst->opcode() == G4_pseudo_kill)
+            if (inst->opcode() == G4_pseudo_lifetime_end || inst->isPseudoKill())
             {
                 continue;
             }
@@ -8251,7 +8137,7 @@ void VarSplit::globalSplit(IR_Builder& builder, G4_Kernel &kernel)
 
             G4_INST* inst = (*it);
 
-            if (inst->opcode() == G4_pseudo_lifetime_end || inst->opcode() == G4_pseudo_kill)
+            if (inst->opcode() == G4_pseudo_lifetime_end || inst->isPseudoKill())
             {
                 continue;
             }
@@ -8406,7 +8292,7 @@ void VarSplit::localSplit(IR_Builder& builder,
         G4_INST* i = (*rit);
         G4_DstRegRegion* dst = i->getDst();
 
-        if (i->opcode() == G4_pseudo_lifetime_end || i->opcode() == G4_pseudo_kill)
+        if (i->opcode() == G4_pseudo_lifetime_end || i->isPseudoKill())
         {
             continue;
         }
@@ -8640,7 +8526,7 @@ void GlobalRA::addrRegAlloc()
         // choose reg vars whose reg file kind is ARF
         //
         LivenessAnalysis liveAnalysis(*this, G4_ADDRESS);
-        liveAnalysis.computeLiveness(iterationNo == 0);
+        liveAnalysis.computeLiveness();
 
         //
         // if no reg var needs to reg allocated, then skip reg allocation
@@ -8720,7 +8606,7 @@ void GlobalRA::flagRegAlloc()
         // choose reg vars whose reg file kind is FLAG
         //
         LivenessAnalysis liveAnalysis(*this, G4_FLAG);
-        liveAnalysis.computeLiveness(iterationNo == 0);
+        liveAnalysis.computeLiveness();
 
         //
         // if no reg var needs to reg allocated, then skip reg allocation
@@ -8903,7 +8789,7 @@ bool GlobalRA::hybridRA(bool doBankConflictReduction, bool highInternalConflict,
     insertPhyRegDecls();
 
     LivenessAnalysis liveAnalysis(*this, G4_GRF | G4_INPUT);
-    liveAnalysis.computeLiveness(true);
+    liveAnalysis.computeLiveness();
 
     if (liveAnalysis.getNumSelectedVar() > 0)
     {
@@ -9047,9 +8933,7 @@ int GlobalRA::coloringRegAlloc()
     std::vector<SpillManagerGMRF::EDGE> prevIntfEdges;
 
     int globalScratchOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
-    bool useScratchMsgForSpill = builder.getOption(vISA_UseScratchMsgForSpills) &&
-        globalScratchOffset < SCRATCH_MSG_LIMIT * 0.6 && !hasStackCall;
-
+    bool useScratchMsgForSpill = globalScratchOffset < SCRATCH_MSG_LIMIT * 0.6 && !hasStackCall;
     bool enableSpillSpaceCompression = builder.getOption(vISA_SpillSpaceCompression);
 
     uint32_t nextSpillOffset = 0;
@@ -9079,7 +8963,7 @@ int GlobalRA::coloringRegAlloc()
         }
 
         //Identify the local variables to speedup following analysis
-        markGraphBlockLocalVars(false);
+        markGraphBlockLocalVars();
 
         //Do variable splitting in each iteration
         if (builder.getOption(vISA_LocalDeclareSplitInGlobalRA))
@@ -9128,7 +9012,7 @@ int GlobalRA::coloringRegAlloc()
         }
 
         LivenessAnalysis liveAnalysis(*this, G4_GRF | G4_INPUT);
-        liveAnalysis.computeLiveness(iterationNo == 0);
+        liveAnalysis.computeLiveness();
         if (builder.getOption(vISA_dumpLiveness))
         {
             liveAnalysis.dump();
@@ -9268,7 +9152,6 @@ int GlobalRA::coloringRegAlloc()
                 if (iterationNo == 0 &&
                     enableSpillSpaceCompression &&
                     kernel.getOptions()->getTarget() == VISA_3D &&
-                    !builder.canDoSLMSpill() &&
                     !hasStackCall)
                 {
                     unsigned int spillSize = 0;
@@ -10430,7 +10313,7 @@ void FlagSpillCleanup::flagSpillFillClean(G4_BB* bb,
     CLEAN_NUM_PROFILE* clean_num_profile)
 {
     G4_INST* inst = (*inst_it);
-    if (inst->opcode() == G4_pseudo_kill)
+    if (inst->isPseudoKill())
     {
         return;
     }
@@ -10929,6 +10812,30 @@ void GlobalRA::fixAlignment()
     }
 }
 
+void VerifyAugmentation::verifyAlign(G4_Declare* dcl)
+{
+    // Verify that dcl with Default32Bit align mask are 2GRF aligned
+    auto it = masks.find(dcl);
+    if (it == masks.end())
+        return;
+
+    auto augData = (*it);
+    auto dclMask = std::get<1>((*it).second);
+
+    if (dclMask == AugmentationMasks::Default32Bit)
+    {
+        auto assignment = dcl->getRegVar()->getPhyReg();
+        if (assignment && assignment->isGreg())
+        {
+            auto phyRegNum = assignment->asGreg()->getRegNum();
+            if (phyRegNum % 2 != 0)
+            {
+                printf("Dcl %s is Default32Bit but assignment is not Even aligned\n", dcl->getName());
+            }
+        }
+    }
+}
+
 void VerifyAugmentation::dump(const char* dclName)
 {
     std::string dclStr = dclName;
@@ -11175,6 +11082,28 @@ void VerifyAugmentation::verify()
         auto& tup = masks[dcl];
         unsigned int startIdx = std::get<2>(tup)->getLexicalId();
         auto dclMask = std::get<1>(tup);
+
+        auto getMaskStr = [](AugmentationMasks m)
+        {
+            std::string str = "Undetermined";
+            if (m == AugmentationMasks::Default16Bit)
+                str = "Default16Bit";
+            else if (m == AugmentationMasks::Default32Bit)
+                str = "Default32Bit";
+            else if (m == AugmentationMasks::Default64Bit)
+                str = "Default64Bit";
+            else if (m == AugmentationMasks::NonDefault)
+                str = "NonDefault";
+            else if (m == AugmentationMasks::DefaultPredicateMask)
+                str = "DefaultPredicateMask";
+            str.append("\n");
+
+            return str;
+        };
+        
+        std::cerr << dcl->getName() << " - " << getMaskStr(dclMask);
+        
+        verifyAlign(dcl);
 
         for (auto it = active.begin(); it != active.end();)
         {

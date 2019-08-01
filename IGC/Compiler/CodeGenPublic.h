@@ -65,6 +65,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/MDFrameWork.h"
 
 #include "CompilerStats.h"
+#include <unordered_set>
 
 /************************************************************************
 This file contains the interface structure and functions to communicate
@@ -93,8 +94,7 @@ namespace IGC
         unsigned int    m_unpaddedProgramSize;      //<! program size without padding used for binary linking
         unsigned int    m_startReg;                 //<! Which GRF to start with
         unsigned int    m_scratchSpaceUsedBySpills; //<! amount of scratch space needed for shader spilling
-        unsigned int    m_scratchSpaceUsedByShader; //<! amount of scratch space needed by shader if allocated in scratchspace
-        unsigned int    m_scratchSpaceUsedByStateless; //<! amount of scratch space needed by shader if allocated in stateless surface
+        unsigned int    m_scratchSpaceUsedByShader; //<! amount of scratch space needed by shader
         unsigned int    m_scratchSpaceUsedByGtpin; //<! amount of scratch space used by gtpin
         void*           m_debugDataVISA;            //<! VISA debug data (source -> VISA)
         unsigned int    m_debugDataVISASize;        //<! Number of bytes of VISA debug data
@@ -113,6 +113,8 @@ namespace IGC
         //true means we separate pvtmem and spillfill. pvtmem could go into stateless.
         //false means all of them are together
         bool            m_separatePvtSpill = false;
+        bool            m_roundPower2KBytes = false;
+        unsigned int m_scratchSpaceSizeLimit = 0;
     
         void Destroy()
         {
@@ -130,39 +132,51 @@ namespace IGC
             }
         }
         
-        void setSeparatePvtSpill(bool setSeparatePvtSpillT)
+        void init(bool setSeparatePvtSpillT, bool roundPower2KBytes, unsigned int scratchSpaceSizeLimitT)
         {
             m_separatePvtSpill = setSeparatePvtSpillT;
+            m_roundPower2KBytes = roundPower2KBytes;
+            m_scratchSpaceSizeLimit = scratchSpaceSizeLimitT;
         }
 
-        unsigned int getScratchSpaceUsage() const
+        //InSlot0
+        //Todo: rename later
+        unsigned int getScratchSpaceUsageInSlot0() const
         {
-            return m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin + (m_separatePvtSpill ? 0 : m_scratchSpaceUsedByShader);
+            return roundSize(m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin + (m_separatePvtSpill ? 0 : m_scratchSpaceUsedByShader));
         }
 
-        unsigned int getScratchPrivateUsage() const
+        unsigned int getScratchSpaceUsageInSlot1() const
         {
-            return (m_separatePvtSpill ? m_scratchSpaceUsedByShader : 0);
+            return roundSize((m_separatePvtSpill && m_scratchSpaceUsedByShader <= m_scratchSpaceSizeLimit) ? m_scratchSpaceUsedByShader : 0);
         }
 
-        void setScratchPrivateUsage(unsigned int scratchPrivateUsage, unsigned int scratchSpaceSizeLimit)
+        unsigned int getScratchSpaceUsageInStateless() const
         {
-            if (m_separatePvtSpill && scratchPrivateUsage > scratchSpaceSizeLimit)
-            {
-                m_scratchSpaceUsedByStateless = scratchPrivateUsage;
-            }
-            else
-            {
-                m_scratchSpaceUsedByShader = scratchPrivateUsage;
-            }
+            return roundSize(((m_separatePvtSpill && m_scratchSpaceUsedByShader > m_scratchSpaceSizeLimit) ? m_scratchSpaceUsedByShader : 0));
         }
 
-        unsigned int getStatelessPrivateUsage() const
+        void setScratchSpaceUsedByShader(unsigned int scratchSpaceUsedByShader)
         {
-            return (m_separatePvtSpill ? m_scratchSpaceUsedByStateless : 0);
+            m_scratchSpaceUsedByShader = scratchSpaceUsedByShader;
         }
+private:
+    unsigned int roundSize(unsigned int size) const
+    {
+        if (m_roundPower2KBytes)
+        {
+            size = roundPower2KBbyte(size);
+        }
+        return size;
+    }
+
+    unsigned int roundPower2KBbyte(unsigned int size) const
+    {
+        return (size ? iSTD::RoundPower2(iSTD::Max(int_cast<DWORD>(size), static_cast<DWORD>(sizeof(KILOBYTE)))) : 0);
+    }
+
     };
-    
+
     enum InstrStatTypes
     {
         SROA_PROMOTED,
@@ -317,7 +331,7 @@ namespace IGC
         {
             bool enabled = false;      //<! XPn Enable = XPn Source Select = (*)
             unsigned int location = 0; //<! Linear offset of the 32bit component in VUE
-        } extendedParameters[3] = {};  //<! Order of elements: VF_XP0, VF_XP1, VF_XP2
+        } extendedParameters[3] = {};  //<! Order of elements: XP0, XP1, XP2
     };
 
     struct SVertexShaderKernelProgram : SKernelProgram
@@ -334,7 +348,7 @@ namespace IGC
         OctEltUnit SBEURBReadOffset;
         OctEltUnit URBAllocationSize;
         QuadEltUnit MaxNumInputRegister;
-        
+
         bool enableElementComponentPacking;
         /// corresponds to 3DSTATE_VF_COMPONENT_PACKING
         unsigned char ElementComponentDeliverMask[32];
@@ -605,7 +619,6 @@ namespace IGC
         ~RetryManager();
 
         bool AdvanceState();
-        bool AllowUnroll();
         bool AllowLICM();
         bool AllowPromotePrivateMemory();
         bool AllowPreRAScheduler();
@@ -694,6 +707,8 @@ namespace IGC
         /// output: driver instrumentation
         TimeStats       *m_compilerTimeStats = nullptr;
         ShaderStats     *m_sumShaderStats = nullptr;
+        /// output: list of buffer IDs which are promoted to direct AS
+        std::unordered_set<unsigned> m_buffersPromotedToDirectAS;
         // float 16, float32 and float64 denorm mode
         Float_DenormMode    m_floatDenormMode16 = FLOAT_DENORM_FLUSH_TO_ZERO;
         Float_DenormMode    m_floatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
@@ -802,7 +817,7 @@ namespace IGC
         virtual void resetOnRetry();
         virtual uint32_t getNumGRFPerThread() const;
         bool isPOSH() const;
-        
+
         CompilerStats& Stats()
         {
             return m_Stats;
@@ -1085,6 +1100,7 @@ namespace IGC
         bool isSpirV;
         float m_ProfilingTimerResolution;
         bool m_ShouldUseNonCoherentStatelessBTI;
+        uint32_t m_numUAVs = 0;
 
         OpenCLProgramContext(
             const COCLBTILayout& btiLayout,

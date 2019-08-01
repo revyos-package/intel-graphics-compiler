@@ -215,8 +215,9 @@ public:
     void emitMediaBlockIO(const llvm::GenIntrinsicInst* inst, bool isRead);
     void emitMediaBlockRectangleRead(llvm::Instruction* inst);
     void emitURBWrite(llvm::GenIntrinsicInst* inst);
+    void emitURBReadCommon(llvm::GenIntrinsicInst* inst, const QuadEltUnit globalOffset,
+        llvm::Value* const perSlotOffset);
     void emitURBRead(llvm::GenIntrinsicInst* inst);
-    void emitURBReadOutput(QuadEltUnit globalOffset, CVariable* pPerSlotOffsetVar, CVariable* pDest);
     void emitSampleInstruction(llvm::SampleIntrinsic* inst);
     void emitLdInstruction(llvm::Instruction* inst);
     void emitInfoInstruction(llvm::InfoIntrinsic* inst);
@@ -238,7 +239,7 @@ public:
 
     void emitScalarAtomics(
         llvm::Instruction* pInst,
-        const ResourceDescriptor& resource,
+        ResourceDescriptor& resource,
         AtomicOp atomic_op,
         CVariable* pDstAddr,
         CVariable* pSrc,
@@ -322,8 +323,6 @@ public:
     void emitGradientXFine(const SSource& source, const DstModifier& modifier);
     void emitGradientYFine(const SSource& source, const DstModifier& modifier);
 
-    void emitHSPatchConstantInput(llvm::Instruction* pInst);
-    void emitHSOutputControlPtInput(llvm::Instruction* pInst);
     void emitHSTessFactors(llvm::Instruction* pInst);
     void emitHSSGV(llvm::GenIntrinsicInst* inst);
     void emitf32tof16_rtz(llvm::GenIntrinsicInst* inst);
@@ -403,7 +402,8 @@ public:
 
     //helper function
     void SplitSIMD(llvm::Instruction* inst, uint numSources, uint headerSize, CVariable* payload, SIMDMode mode, uint half);
-    void JoinSIMD(CVariable* tempdst[], uint responseLength);
+    template<size_t N>
+    void JoinSIMD(CVariable* (&tempdst)[N], uint responseLength);
     CVariable* BroadcastIfUniform(CVariable* pVar);
     uint DecideInstanceAndSlice(llvm::BasicBlock &blk, SDAG& sdag, bool &slicing);
     inline bool isUndefOrConstInt0(llvm::Value* val)
