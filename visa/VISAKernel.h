@@ -58,7 +58,7 @@ class VISAKernelImpl : public VISAFunction
 
 public:
     VISAKernelImpl(CISA_IR_Builder* cisaBuilder, CM_VISA_BUILDER_OPTION buildOption, Options *option)
-        : m_CISABuilder(cisaBuilder), m_mem(4096), m_options(option)
+        : m_mem(4096), m_CISABuilder(cisaBuilder), m_options(option)
     {
         //CisaBinary* module = NULL;
         mBuildOption = buildOption;
@@ -71,7 +71,6 @@ public:
         m_sampler_count = 0;
         m_surface_count = 0;
         m_input_count = 0;
-        m_vme_count = 0;
         m_attribute_count = 0;
         m_label_count = 0;
 
@@ -93,7 +92,6 @@ public:
         m_num_pred_vars = 0;
         m_surface_info_size = 0;
         m_sampler_info_size = 0;
-        m_vme_info_size = 0;
         m_isKernel = false;
 
         memset(&m_cisa_kernel, 0, sizeof(kernel_format_t));
@@ -119,7 +117,6 @@ public:
         predicateNameCount = COMMON_ISA_NUM_PREDEFINED_PRED;
         surfaceNameCount = COMMON_ISA_NUM_PREDEFINED_SURF_VER_3_1;
         samplerNameCount = 0;
-        vmeNameCount = 0;
         mTargetAttributeSet = false;
 
         m_functionId = 0;
@@ -175,8 +172,6 @@ public:
 
     void addSampler(CISA_GEN_VAR * state);
 
-    void addVme(CISA_GEN_VAR * state);
-
     void addSurface(CISA_GEN_VAR * state);
 
     void addAttribute(const char *input_name, attribute_info_t *attr_temp);
@@ -191,7 +186,6 @@ public:
     VISA_LabelOpnd * getLabelOperandFromFunctionName(std::string name);
     unsigned int getLabelIdFromFunctionName(std::string name);
 
-    void setGenxBinaryBuffer(char * buffer, unsigned long size);
     void setGenxDebugInfoBuffer(char * buffer, unsigned long size);
     VISA_opnd* CreateOtherOpndHelper(int num_pred_desc_operands, int num_operands, VISA_INST_Desc *inst_desc, unsigned int value, bool hasSubOpcode = false, uint8_t subOpcode = 0);
     VISA_opnd* CreateOtherOpnd(unsigned int value, VISA_Type opndType);
@@ -219,8 +213,6 @@ public:
     void addPendingLabelNames(std::string name) { m_pending_label_names.push_back(name); }
     void setIsKernel(bool isKernel) { m_isKernel = isKernel; };
     bool getIsKernel() const { return m_isKernel; }
-    void setReturnType(VISA_Type type) { m_return_type = type; }
-    VISA_Type getReturnType(){ return m_return_type; }
     unsigned long getCodeOffset(){ return m_cisa_kernel.entry; }
 
     CISA_GEN_VAR * getDeclFromName(const std::string &name);
@@ -241,9 +233,6 @@ public:
     /***************** START EXPOSED APIS *************************/
     CM_BUILDER_API int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
         VISA_Align varAlign, VISA_GenVar *parentDecl = NULL, int aliasOffset = 0);
-
-    CM_BUILDER_API int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
-        VISA_Align varAlign, VISA_FileVar *parentDecl, int aliasOffset);
 
     CM_BUILDER_API int CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName, unsigned int numberElements);
 
@@ -272,8 +261,6 @@ public:
     CM_BUILDER_API int CreateVISAInputVar(VISA_SamplerVar *decl, unsigned short offset, unsigned short size);
 
     CM_BUILDER_API int CreateVISAInputVar(VISA_SurfaceVar *decl, unsigned short offset, unsigned short size);
-
-    CM_BUILDER_API int CreateVISAInputVar(VISA_VMEVar *decl, unsigned short offset, unsigned short size);
 
     CM_BUILDER_API int CreateVISAAddressSrcOperand(VISA_VectorOpnd *&opnd, VISA_AddrVar *decl, unsigned int offset, unsigned int width);
 
@@ -308,14 +295,9 @@ public:
 
     CM_BUILDER_API int CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_SamplerVar *decl, uint8_t size, unsigned char offset, bool useAsDst);
 
-    CM_BUILDER_API int CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_VMEVar *decl, unsigned char offset, bool useAsDst);
-
-
     CM_BUILDER_API int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_SurfaceVar *decl);
 
     CM_BUILDER_API int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_SamplerVar *decl);
-
-    CM_BUILDER_API int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_VMEVar *decl);
 
     CM_BUILDER_API int CreateVISARawOperand(VISA_RawOpnd *& opnd, VISA_GenVar *decl, unsigned short offset);
 
@@ -380,7 +362,8 @@ public:
 
     CM_BUILDER_API int AppendVISACFRetInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize);
 
-    CM_BUILDER_API int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize, unsigned short functionID, unsigned char argSize, unsigned char returnSize);
+    CM_BUILDER_API int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, 
+        Common_ISA_Exec_Size executionSize, std::string funcName, unsigned char argSize, unsigned char returnSize);
 
     CM_BUILDER_API int AppendVISACFIndirectFuncCallInst(VISA_PredOpnd *pred,
         Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize,
@@ -493,6 +476,8 @@ public:
     CM_BUILDER_API int AppendVISAMiscFileInst(const char *fileName);
 
     CM_BUILDER_API int AppendVISAMiscLOC(unsigned int lineNumber);
+
+    CM_BUILDER_API int AppendVISADebugLinePlaceholder();
 
     CM_BUILDER_API int AppendVISAMiscRawSend(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize, unsigned char modifiers,
         unsigned int exMsgDesc, unsigned char srcSize, unsigned char dstSize, VISA_VectorOpnd *desc,
@@ -685,14 +670,8 @@ public:
     ///Gets declaration id VISA_SurfaceVar
     CM_BUILDER_API int getDeclarationID(VISA_SurfaceVar *decl) const;
 
-    ///Gets declaration id VISA_VMEVar
-    CM_BUILDER_API int getDeclarationID(VISA_VMEVar *decl) const;
-
     ///Gets declaration id VISA_LabelVar
     CM_BUILDER_API int getDeclarationID(VISA_LabelVar *decl) const;
-
-    ///Gets declaration id VISA_FileVar
-    CM_BUILDER_API int getDeclarationID(VISA_FileVar *decl) const;
 
     ///Gets gen binary offset
     CM_BUILDER_API int64_t getGenOffset() const;
@@ -771,9 +750,7 @@ public:
     void setInputSize(uint8_t size);
     void setReturnSize(unsigned int size);
 
-    void addFileScopeVar(VISA_FileVar* filescopeVar, unsigned int index);
-
-    bool getIsGenBothPath() {
+   bool getIsGenBothPath() {
         return (mBuildOption == CM_CISA_BUILDER_GEN ||
             mBuildOption == CM_CISA_BUILDER_BOTH);
     }
@@ -854,19 +831,6 @@ public:
         return (*it);
     }
 
-    unsigned int getVmeVarCount() const
-    {
-        return (uint32_t)m_vme_info_list.size();
-    }
-
-    CISA_GEN_VAR* getVmeVar(unsigned int index)
-    {
-        auto it = m_vme_info_list.begin();
-        std::advance(it, index);
-
-        return (*it);
-    }
-
     Options * getOptions() { return m_options; }
 
     bool IsAsmWriterMode() const { return m_options->getOption(vISA_IsaAssembly); }
@@ -934,7 +898,6 @@ private:
     unsigned int m_instruction_size; //done
     unsigned int m_surface_info_size;
     unsigned int m_sampler_info_size;
-    unsigned int m_vme_info_size;
 
     unsigned long m_genx_binary_size;
     char * m_genx_binary_buffer;
@@ -957,7 +920,6 @@ private:
     CisaFramework::CisaInst * m_lastInst;
     bool m_isKernel;
     unsigned int m_resolvedIndex;
-    VISA_Type m_return_type;
 
     vISA::Mem_Manager m_mem;
     std::string m_name;
@@ -988,9 +950,6 @@ private:
 
     std::map<unsigned int, unsigned int> m_declID_to_PredefinedSurfaceID_map;
 
-    unsigned int m_vme_count;
-    std::vector<CISA_GEN_VAR*> m_vme_info_list;
-
     unsigned int m_input_count;
     std::vector<input_info_t *> m_input_info_list;
     //std::map<unsigned int, unsigned int> m_declID_to_inputID_map;
@@ -1015,9 +974,6 @@ private:
     std::map<std::string, VISA_LabelOpnd *> m_label_name_to_index_map;
     std::map<std::string, VISA_LabelOpnd *> m_funcName_to_labelID_map;
 
-    //used for fast path filescope vars
-    //used to make srue the decl is created only once.
-    std::map<unsigned int, vISA::G4_Declare *> fileScopeMap;
     char errorMessage[MAX_ERROR_MSG_LEN];
 
     CM_VISA_BUILDER_OPTION mBuildOption;
@@ -1041,7 +997,6 @@ private:
     unsigned int predicateNameCount;
     unsigned int surfaceNameCount;
     unsigned int samplerNameCount;
-    unsigned int vmeNameCount;
 
     int m_vISAInstCount;
     print_decl_index_t m_printDeclIndex;
@@ -1070,10 +1025,6 @@ public:
     uint32_t getNameIndex() const
     {
         return m_kernel->m_cisa_kernel.name_index;
-    }
-    unsigned char getReturnType() const
-    {
-        return m_kernel->m_return_type;
     }
     const char* getString(uint32_t str_id) const
     {
@@ -1157,15 +1108,6 @@ public:
     unsigned char getSamplerCount() const
     {
         return m_kernel->m_sampler_count;
-    }
-    const state_info_t* getVME(unsigned id) const
-    {
-        assert(id < m_kernel->m_vme_info_list.size());
-        return &m_kernel->m_vme_info_list[id]->stateVar;
-    }
-    unsigned char getVMECount() const
-    {
-        return m_kernel->m_vme_count;
     }
     const input_info_t* getInput(unsigned id) const
     {

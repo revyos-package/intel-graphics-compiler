@@ -73,7 +73,6 @@ BankAlign LocalRA::getBankAlignForUniqueAssign(G4_Declare *dcl)
     }
 }
 
-
 // returns true if kernel contains a back edge
 // call/return edge may also be considered as a back edge depending on layout.
 bool LocalRA::hasBackEdge()
@@ -138,9 +137,9 @@ void LocalRA::evenAlign()
 #ifdef DEBUG_VERBOSE_ON
             DEBUG_VERBOSE("Updating alignment to Even for GRF candidates" << std::endl);
 #endif
-            gra.updateAlignment(G4_GRF, Even);
+            gra.evenAlign();
         }
-        gra.updateSubRegAlignment(G4_GRF, SUB_ALIGNMENT_GRFALIGN);
+        gra.updateSubRegAlignment(GRFALIGN);
         // Since we are piggy backing on mask field of G4_Declare,
         // we need to make sure we reset it before going further.
         resetMasks();
@@ -349,11 +348,11 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doSplitLLR)
 #endif
 
     int totalGRFNum = kernel.getNumRegTotal();
-    for (BB_LIST_ITER bb_it = kernel.fg.begin(); bb_it != kernel.fg.end(); ++bb_it)
+    for (auto curBB : kernel.fg)
     {
         PhyRegsManager pregManager(localPregs, doBCR);
         std::vector<LocalLiveRange*> liveIntervals;
-        G4_BB* curBB = (*bb_it);
+
         PhyRegSummary* summary = new (mem)PhyRegSummary(totalGRFNum);
 
         calculateLiveIntervals(curBB, liveIntervals);
@@ -519,6 +518,8 @@ bool LocalRA::localRA()
         }
     }
 
+    setLexicalID(true);
+
     return !needGlobalRA;
 }
 
@@ -526,13 +527,8 @@ void LocalRA::resetMasks()
 {
     auto& dcls = kernel.Declares;
 
-    auto end_it = dcls.end();
-    for (auto it = dcls.begin();
-        it != end_it;
-        it++)
+    for (auto dcl : dcls)
     {
-        auto dcl = (*it);
-
         gra.setMask(dcl, nullptr);
     }
 }
@@ -630,6 +626,32 @@ void LocalRA::findRegisterCandiateWithAlignForward(int &i, BankAlign align, bool
             i++;
         }
     }
+}
+
+unsigned int LocalRA::get_bundle(unsigned int baseReg, int offset)
+{
+    return (((baseReg + offset) % 64) / 4);
+}
+
+int LocalRA::findBundleConflictFreeRegister(int curReg,
+                                            int endReg,
+                                            unsigned short occupiedBundles,
+                                            BankAlign align,
+                                            bool evenAlign)
+{
+    int i = curReg;
+    while (occupiedBundles & (1 << get_bundle(i, 0)))
+    {
+        i++;
+        findRegisterCandiateWithAlignForward(i, align, evenAlign);
+        if (i > endReg) //Out of bound, drop the bundle conflict considration
+        {
+            i = curReg;
+            break;
+        }
+    }
+
+    return i;
 }
 
 void LocalRA::findRegisterCandiateWithAlignBackward(int &i, BankAlign align, bool evenAlign)
@@ -755,7 +777,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
             int subregNum = 0;
             int sizeInWords = dcl->getWordSize();
             int nrows = 0;
-            BankAlign align = dcl->getAlign() == Even ? BankAlign::Even : BankAlign::Either;
+            BankAlign align = gra.isEvenAligned(dcl) ? BankAlign::Even : BankAlign::Either;
             BankAlign bankAlign = BankAlign::Either;
 
             if (twoBanksRA &&
@@ -774,22 +796,12 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
             }
 
             // Why?
-            G4_SubReg_Align subAlign = builder.GRFAlign() ? SUB_ALIGNMENT_GRFALIGN : dcl->getSubRegAlign();
+            G4_SubReg_Align subAlign = builder.GRFAlign() ? GRFALIGN : gra.getSubRegAlign(dcl);
 
             if (assignFromFront)
             {
-                unsigned short occupiedBundles = 0;
-                for (size_t i = 0; i < gra.getBundleConflictDclSize(dcl); i++)
-                {
-                    int offset = 0;
-                    G4_Declare *bDcl = gra.getBundleConflictDcl(dcl, i, offset);
-                    if (bDcl->getRegVar()->isPhyRegAssigned())
-                    {
-                        unsigned int reg = bDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum();
-                        unsigned int bundle = GET_BUNDLE(reg, offset);
-                        occupiedBundles |= (unsigned short)1 << bundle;
-                    }
-                }
+                unsigned short occupiedBundles = gra.getOccupiedBundle(dcl);
+
                 nrows = phyRegMgr.findFreeRegs(sizeInWords, (bankAlign != BankAlign::Either) ? bankAlign : align, 
                     subAlign, regNum, subregNum, 0, numRegLRA - 1, occupiedBundles, 0, false);
             }
@@ -838,7 +850,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
         {
             if (kernel.getOption(vISA_GenerateDebugInfo))
             {
-                uint32_t start = 0, end = 0;
+                uint32_t start = 0;
                 for (auto rit = kernel.fg.rbegin();
                     rit != kernel.fg.rend();
                     rit++)
@@ -847,7 +859,6 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
 
                     if (bb->size() > 0)
                     {
-                        end = bb->back()->getCISAOff();
                         break;
                     }
                 }
@@ -929,7 +940,7 @@ bool LocalRA::unassignedRangeFound()
 // Update numRegsUsed to max physical register used based on summary
 void LocalRA::updateRegUsage(PhyRegSummary* summary, unsigned int& numRegsUsed)
 {
-    for (uint32_t i = 0; i < summary->getNumGRF(); i++)
+    for (uint32_t i = 0, numGRF = summary->getNumGRF(); i < numGRF; i++)
     {
         if (numRegsUsed < i && summary->isGRFBusy(i) == true)
         {
@@ -1185,7 +1196,7 @@ void LocalRA::markReferencesInInst(INST_LIST_ITER inst_it)
     }
 
     // Scan srcs
-    for (int i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
+    for (int i = 0, nSrcs = G4_Inst_Table[inst->opcode()].n_srcs; i < nSrcs; i++)
     {
         G4_Operand* src = inst->getSrc(i);
 
@@ -1196,17 +1207,22 @@ void LocalRA::markReferencesInInst(INST_LIST_ITER inst_it)
     }
 }
 
-void LocalRA::setLexicalID()
+void LocalRA::setLexicalID(bool includePseudo)
 {
     unsigned int id = 0;
     for (auto bb : kernel.fg)
     {
-        for (INST_LIST_ITER inst_it = bb->begin(), iend = bb->end();
-            inst_it != iend;
-            inst_it++)
+        for (auto curInst : *bb)
         {
-            G4_INST* curInst = (*inst_it);
-            curInst->setLexicalId(id++);
+            if ((!includePseudo) && (curInst->isPseudoKill() ||
+                curInst->opcode() == G4_pseudo_lifetime_end))
+            {
+                curInst->setLexicalId(id);
+            }
+            else
+            {
+                curInst->setLexicalId(id++);
+            }
         }
     }
 }
@@ -1216,24 +1232,24 @@ void LocalRA::markReferences(unsigned int& numRowsEOT,
 {
     unsigned int id = 0;
     // Iterate over all BBs
-    for (BB_LIST_ITER bb_it = kernel.fg.begin(), bb_end = kernel.fg.end(); bb_it != bb_end; ++bb_it)
+    for (auto _curBB : kernel.fg)
     {
-        curBB = (*bb_it);
-
+        curBB = _curBB;
         // Iterate over all insts
         for (INST_LIST_ITER inst_it = curBB->begin(), inst_end = curBB->end(); inst_it != inst_end; ++inst_it)
         {
             G4_INST* curInst = (*inst_it);
 
-            // set lexical ID
-            curInst->setLexicalId(id++);
-
             if (curInst->isPseudoKill() ||
                 curInst->opcode() == G4_pseudo_lifetime_end)
             {
+                curInst->setLexicalId(id);
                 lifetimeOpFound = true;
                 continue;
             }
+
+            // set lexical ID
+            curInst->setLexicalId(id++);
 
             if (curInst->isEOT() && kernel.fg.builder->hasEOTGRFBinding())
             {
@@ -1256,20 +1272,19 @@ void LocalRA::markReferences(unsigned int& numRowsEOT,
 // there may be overlap between two different input variables.
 void LocalRA::calculateInputIntervals()
 {
-    setLexicalID();
+    setLexicalID(false);
 
     int numGRF = kernel.getNumRegTotal();
-    std::vector<uint32_t> inputRegLastRef;
-    inputRegLastRef.resize(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
+    std::vector<uint32_t> inputRegLastRef(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
 
-    for (BB_LIST_RITER bb_it = kernel.fg.rbegin();
-        bb_it != kernel.fg.rend();
+    for (BB_LIST_RITER bb_it = kernel.fg.rbegin(), bb_rend = kernel.fg.rend();
+        bb_it != bb_rend;
         bb_it++)
     {
         G4_BB* bb = (*bb_it);
 
-        for (INST_LIST_RITER inst_it = bb->rbegin();
-            inst_it != bb->rend();
+        for (INST_LIST_RITER inst_it = bb->rbegin(), inst_rend = bb->rend();
+            inst_it != inst_rend;
             inst_it++)
         {
             G4_INST* curInst = (*inst_it);
@@ -1330,7 +1345,7 @@ void LocalRA::calculateInputIntervals()
             }
 
             // Scan src operands
-            for (int i = 0; i < G4_Inst_Table[curInst->opcode()].n_srcs; i++)
+            for (int i = 0, nSrcs = G4_Inst_Table[curInst->opcode()].n_srcs; i < nSrcs; i++)
             {
                 G4_Operand* src = curInst->getSrc(i);
 
@@ -1441,8 +1456,8 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
     int idx = 0;
     bool brk = false;
 
-    for (INST_LIST_ITER inst_it = bb->begin();
-        inst_it != bb->end() && !brk;
+    for (INST_LIST_ITER inst_it = bb->begin(), bbend = bb->end();
+        inst_it != bbend && !brk;
         inst_it++, idx += 2)
     {
         G4_INST* curInst = (*inst_it);
@@ -1456,7 +1471,7 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
         }
 
         // Scan srcs
-        for (int i = 0; i < G4_Inst_Table[curInst->opcode()].n_srcs; i++)
+        for (int i = 0, nSrcs = G4_Inst_Table[curInst->opcode()].n_srcs; i < nSrcs; i++)
         {
             G4_Operand* src = curInst->getSrc(i);
 
@@ -1730,7 +1745,7 @@ void LocalLiveRange::recordRef(G4_BB* bb)
 bool LocalLiveRange::isLiveRangeLocal()
 {
     if (isIndirectAccess == false && numRefsInFG == 1 &&
-        eot == false && topdcl->getHasFileScope() == false &&
+        eot == false &&
         !builder.isPreDefArg(topdcl) && !builder.isPreDefRet(topdcl) &&
         topdcl->isOutput() == false)
     {
@@ -1742,7 +1757,7 @@ bool LocalLiveRange::isLiveRangeLocal()
 
 bool LocalLiveRange::isLiveRangeGlobal()
 {
-    if (isIndirectAccess == true || (numRefsInFG > 1 && eot == false) || topdcl->getHasFileScope() == true ||
+    if (isIndirectAccess == true || (numRefsInFG > 1 && eot == false) ||
         topdcl->isOutput() == true)
     {
         return true;
@@ -1953,12 +1968,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
     }
 
     LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-
-    while (occupiedBundles & (1 << GET_BUNDLE(i, 0)))
-    {
-        i++;
-        LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-    }
+    i = LocalRA::findBundleConflictFreeRegister(i, endReg, occupiedBundles, align, multiSteps);
 
     startReg = i;
     while (i <= endReg + nrows - 1)
@@ -1974,11 +1984,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
             foundItem = 0;
             i++;
             LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-            while (occupiedBundles & (1 << GET_BUNDLE(i, 0)))
-            {
-                i++;
-                LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-            }
+            i = LocalRA::findBundleConflictFreeRegister(i, endReg, occupiedBundles, align, multiSteps);
             startReg = i;
             continue;
         }
@@ -2005,11 +2011,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
                     foundItem = 0;
                     i++;
                     LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-                    while (occupiedBundles & (1 << GET_BUNDLE(i, 0)))
-                    {
-                        i++;
-                        LocalRA::findRegisterCandiateWithAlignForward(i, align, multiSteps);
-                    }
+                    i = LocalRA::findBundleConflictFreeRegister(i, endReg, occupiedBundles, align, multiSteps);
                     startReg = i;
                     continue;
                 }
@@ -2211,7 +2213,7 @@ void PhyRegsLocalRA::markPhyRegs(G4_Declare* topdcl)
 bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int &regnum, int &subregnum, int size)
 {
     bool found = false;
-    if (subalign == SUB_ALIGNMENT_GRFALIGN)
+    if (subalign == GRFALIGN)
     {
         if (isWordBusy(regIdx, 0, size) == false)
         {
@@ -2219,7 +2221,7 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             found = true;
         }
     }
-    else if (subalign == SUB_ALIGNMENT_HALFGRFALIGN)
+    else if (subalign == HALFGRFALIGN)
     {
         if (isWordBusy(regIdx, 0, size) == false)
         {
@@ -2232,8 +2234,7 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             found = true;
         }
     }
-    else if (subalign == Eight_Word ||
-                subalign == Four_Word)
+    else if (subalign == Eight_Word || subalign == Four_Word)
     {
         for (int j = 0; j < (NUM_WORDS_PER_GRF - size + 1) && found == false; j += 4)
         {
@@ -2266,7 +2267,8 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             }
         }
     }
-    else {
+    else 
+    {
         ASSERT_USER(false, "Dont know how to allocate this sub-alignment");
     }
 
@@ -2628,21 +2630,8 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
     int nrows = 0;
     int size = lr->getSizeInWords();
     G4_Declare *dcl = lr->getTopDcl();
-    G4_Align align = dcl->getRegVar()->getAlignment();
-    G4_SubReg_Align subalign = dcl->getRegVar()->getSubRegAlignment();
-    unsigned short occupiedBundles = 0;
-
-    for (size_t i = 0; i < gra.getBundleConflictDclSize(dcl); i++)
-    {
-        int offset = 0;
-        G4_Declare *bDcl = gra.getBundleConflictDcl(dcl, i, offset);
-        if (bDcl->getRegVar()->isPhyRegAssigned())
-        {
-            unsigned int reg = bDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum();
-            unsigned int bundle = GET_BUNDLE(reg, offset);
-            occupiedBundles |= (unsigned short)1 << bundle;
-        }
-    }
+    G4_SubReg_Align subalign = gra.getSubRegAlign(dcl);
+    unsigned short occupiedBundles = gra.getOccupiedBundle(dcl);
 
     localRABound = numRegLRA - globalLRSize - 1;  //-1, localRABound will be counted in findFreeRegs()
 
@@ -2655,7 +2644,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
     if (bankAlign == BankAlign::Either)
     {
         // FIXME: ISTM the existing code is wrong, we should always honor even alignment
-        bankAlign = align == Even ? BankAlign::Even : BankAlign::Either;
+        bankAlign = gra.isEvenAligned(dcl) ? BankAlign::Even : BankAlign::Either;
     }
 
     if (useRoundRobin)
@@ -2799,8 +2788,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     G4_Declare* splitDcl = NULL;
                                     const char* splitDclName = builder.getNameString(builder.mem, 16, "split_%s", oldDcl->getName());
                                     splitDcl = builder.createDeclareNoLookup(splitDclName, G4_GRF, oldDcl->getNumElems(), oldDcl->getNumRows(), oldDcl->getElemType());
-                                    splitDcl->setAlign(oldDcl->getAlign());
-                                    splitDcl->setSubRegAlign(oldDcl->getSubRegAlign());
+                                    splitDcl->copyAlign(oldDcl);
 
                                     LocalLiveRange* splitLR = gra.GetOrCreateLocalLiveRange(splitDcl);
                                     splitLR->markSplit();
@@ -2836,8 +2824,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
 
                                     const char* newDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldDcl->getName());
                                     newDcl = builder.createDeclareNoLookup(newDclName, G4_GRF, oldDcl->getNumElems(), oldDcl->getNumRows(), oldDcl->getElemType());
-                                    newDcl->setAlign(oldDcl->getAlign());
-                                    newDcl->setSubRegAlign(oldDcl->getSubRegAlign());
+                                    newDcl->copyAlign(oldDcl);
 
                                     unsigned int oldRefs = gra.getNumRefs(oldDcl);
                                     LocalLiveRange* newLR = gra.GetOrCreateLocalLiveRange(newDcl);
@@ -2877,8 +2864,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     {
                                         const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
-                                        newSrcDcl->setAlign(oldSrcDcl->getAlign());
-                                        newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
+                                        newSrcDcl->copyAlign(oldSrcDcl);
                                         newSrcDcl->setAliasDeclare(aliasOldSrcDcl, oldSrcDcl->getAliasOffset());
                                     }
                                     G4_SrcRegRegion* newSrc = builder.Create_Src_Opnd_From_Dcl(newSrcDcl, oldSrc->getRegion());
@@ -2892,8 +2878,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                         oldSrcDcl = aliasOldSrcDcl;
                                         const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
-                                        newSrcDcl->setAlign(oldSrcDcl->getAlign());
-                                        newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
+                                        newSrcDcl->copyAlign(oldSrcDcl);
                                         aliasOldSrcDcl = oldSrcDcl->getAliasDeclare();
                                         MUST_BE_TRUE(aliasOldSrcDcl != NULL, "Invalid alias decl");
                                         newSrcDcl->setAliasDeclare(aliasOldSrcDcl, oldSrcDcl->getAliasOffset());
@@ -2912,8 +2897,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     {
                                         const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
-                                        newSrcDcl->setAlign(oldSrcDcl->getAlign());
-                                        newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
+                                        newSrcDcl->copyAlign(oldSrcDcl);
                                         newSrcDcl->setAliasDeclare(aliasOldSrcDcl, oldSrcDcl->getAliasOffset());
                                     }
                                     G4_SrcRegRegion* newSrc = builder.Create_Src_Opnd_From_Dcl(newSrcDcl, oldSrc->getRegion());
@@ -2927,8 +2911,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                         oldSrcDcl = aliasOldSrcDcl;
                                         const char* newSrcDclName = builder.getNameString(builder.mem, 16, "copy_%s", oldSrcDcl->getName());
                                         newSrcDcl = builder.createDeclareNoLookup(newSrcDclName, G4_GRF, oldSrcDcl->getNumElems(), oldSrcDcl->getNumRows(), oldSrcDcl->getElemType());
-                                        newSrcDcl->setAlign(oldSrcDcl->getAlign());
-                                        newSrcDcl->setSubRegAlign(oldSrcDcl->getSubRegAlign());
+                                        newSrcDcl->copyAlign(oldSrcDcl);
                                         aliasOldSrcDcl = oldSrcDcl->getAliasDeclare();
                                         MUST_BE_TRUE(aliasOldSrcDcl != NULL, "Invalid alias decl");
                                         newSrcDcl->setAliasDeclare(aliasOldSrcDcl, oldSrcDcl->getAliasOffset());
@@ -2975,8 +2958,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
     int bank1AvailableRegNum = pregManager.getAvaialableRegs()->getBank1AvailableRegNum();
     int bank2AvailableRegNum = pregManager.getAvaialableRegs()->getBank2AvailableRegNum();
     int size = lr->getSizeInWords();
-    BankAlign align = lr->getTopDcl()->getRegVar()->getAlignment() == Even ? BankAlign::Even : BankAlign::Either;
-    G4_SubReg_Align subalign = lr->getTopDcl()->getRegVar()->getSubRegAlignment();
+    BankAlign align = gra.isEvenAligned(lr->getTopDcl()) ? BankAlign::Even : BankAlign::Either;
+    G4_SubReg_Align subalign = gra.getSubRegAlign(lr->getTopDcl());
     unsigned int instID;
     lr->getFirstRef(instID);
     auto lrBC = gra.getBankConflict(lr->getTopDcl());
@@ -3148,7 +3131,7 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
         if (!nrows)
         {   //Try without window, no even/odd alignment for bank, but still low and high(keep in same bank)
             nrows = pregManager.findFreeRegs(size,
-                lr->getTopDcl()->getRegVar()->getAlignment() == Even ? BankAlign::Even : BankAlign::Either,
+                gra.isEvenAligned(lr->getTopDcl()) ? BankAlign::Even : BankAlign::Either,
                 subalign,
                 regnum,
                 subregnum,
@@ -3174,7 +3157,7 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
             }
 
             nrows = pregManager.findFreeRegs(size,
-                lr->getTopDcl()->getRegVar()->getAlignment() == Even ? BankAlign::Even : BankAlign::Either,
+                gra.isEvenAligned(lr->getTopDcl()) ? BankAlign::Even : BankAlign::Either,
                 subalign,
                 regnum,
                 subregnum,

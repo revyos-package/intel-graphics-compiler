@@ -165,21 +165,21 @@ G4_Operand* IR_Builder::emitSampleIndexGE16(
     G4_Operand* samplerIdx;
 
     G4_Declare* t0
-        = createTempVar(1, Type_UD, Either, Any);
+        = createTempVar(1, Type_UD, Any);
     G4_DstRegRegion* t0Dst
         = Create_Dst_Opnd_From_Dcl(t0, 1);
     G4_SrcRegRegion* t0Src
         = Create_Src_Opnd_From_Dcl(t0, getRegionScalar());
 
     G4_Declare* baseAdj
-        = createTempVar(1, Type_UD, Either, Any);
+        = createTempVar(1, Type_UD, Any);
     G4_DstRegRegion* baseAdjDst
         = Create_Dst_Opnd_From_Dcl(baseAdj, 1);
     G4_SrcRegRegion* baseAdjSrc
         = Create_Src_Opnd_From_Dcl(baseAdj, getRegionScalar());
 
     G4_Declare* idxLow
-        = createTempVar(1, Type_UD, Either, Any);
+        = createTempVar(1, Type_UD, Any);
     G4_DstRegRegion* idxLowDst
         = Create_Dst_Opnd_From_Dcl(idxLow, 1);
     G4_SrcRegRegion* idxLowSrc
@@ -313,22 +313,19 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 
 G4_INST* IR_Builder::createIf(G4_Predicate* prd, uint8_t size, uint32_t option)
 {
-    auto inst = createInternalCFInst(prd, G4_if, size, nullptr, nullptr, option);
-    instList.push_back(inst);
+    auto inst = createCFInst(prd, G4_if, size, nullptr, nullptr, option);
     return inst;
 }
 
 G4_INST* IR_Builder::createElse(uint8_t size, uint32_t option)
 {
-    auto inst = createInternalCFInst(nullptr, G4_else, size, nullptr, nullptr, option);
-    instList.push_back(inst);
+    auto inst = createCFInst(nullptr, G4_else, size, nullptr, nullptr, option);
     return inst;
 }
 
 G4_INST* IR_Builder::createEndif(uint8_t size, uint32_t option)
 {
-    auto inst = createInternalCFInst(nullptr, G4_endif, size, nullptr, nullptr, option);
-    instList.push_back(inst);
+    auto inst = createCFInst(nullptr, G4_endif, size, nullptr, nullptr, option);
     return inst;
 }
 
@@ -344,15 +341,44 @@ G4_INST* IR_Builder::createInternalCFInst(
     const char* srcFilename)
 {
     MUST_BE_TRUE(G4_Inst_Table[op].instType == InstTypeFlow,
-                 "IR_Builder::createInternalCFInst must be used with InstTypeFlow instruction class");
+        "IR_Builder::createInternalCFInst must be used with InstTypeFlow instruction class");
 
-    G4_InstCF* ii = new (mem)G4_InstCF(*this, prd, op, size, jip, uip, option);
+    auto ii = createCFInst(prd, op, size, jip, uip, option, lineno, false);
 
     ii->setCISAOff(CISAoff);
 
     if (m_options->getOption(vISA_EmitLocation))
     {
         ii->setLocation(new (mem) MDLocation(lineno, srcFilename));
+    }
+
+    return ii;
+}
+
+G4_INST* IR_Builder::createCFInst(
+    G4_Predicate* prd,
+    G4_opcode op,
+    unsigned char size,
+    G4_Label* jip,
+    G4_Label* uip,
+    unsigned int option,
+    int lineno,
+    bool addToInstList)
+{
+    MUST_BE_TRUE(G4_Inst_Table[op].instType == InstTypeFlow,
+        "IR_Builder::createCFInst must be used with InstTypeFlow instruction class");
+
+    G4_InstCF* ii = new (mem)G4_InstCF(*this, prd, op, size, jip, uip, option);
+
+    if (addToInstList)
+    {
+        ii->setCISAOff(curCISAOffset);
+
+        if (m_options->getOption(vISA_EmitLocation))
+        {
+            ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+        }
+        instList.push_back(ii);
     }
 
     instAllocList.push_back(ii);
@@ -647,7 +673,14 @@ G4_INST* IR_Builder::createIntrinsicInst(G4_Predicate* prd, Intrinsic intrinId,
     G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
     unsigned int option, int lineno, bool addToInstList)
 {
-    G4_INST* i = new (mem) G4_InstIntrinsic(*this, prd, intrinId, size, dst, src0, src1, src2, option);
+    G4_INST* i = nullptr;
+
+    if(intrinId == Intrinsic::Spill)
+        i = new (mem) G4_SpillIntrinsic(*this, prd, intrinId, size, dst, src0, src1, src2, option);
+    else if(intrinId == Intrinsic::Fill)
+        i = new (mem) G4_FillIntrinsic(*this, prd, intrinId, size, dst, src0, src1, src2, option);
+    else
+        i = new (mem) G4_InstIntrinsic(*this, prd, intrinId, size, dst, src0, src1, src2, option);
 
     if (addToInstList)
     {
@@ -821,7 +854,7 @@ G4_InstSend *IR_Builder::Create_Send_Inst_For_CISA(G4_Predicate *pred,
 
         if (needSamplerMove)
         {
-            G4_Declare *dcl1 = createTempVar(1, Type_UD, Either, Any );
+            G4_Declare *dcl1 = createTempVar(1, Type_UD, Any );
             G4_DstRegRegion* tmp_dst_opnd = Create_Dst_Opnd_From_Dcl(dcl1, 1);
 
             createInst(
@@ -982,7 +1015,7 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst(G4_Predicate *pred,
 
     if (needsSamplerMove)
     {
-        G4_Declare *dcl1 = createTempVar(1, Type_UD, Either, Any);
+        G4_Declare *dcl1 = createTempVar(1, Type_UD, Any);
 
         if (doAlignBindlessSampler)
         {
@@ -1556,20 +1589,21 @@ bool IR_Builder::isOpndAligned( G4_Operand *opnd, unsigned short &offset, int al
         // Only alignment of the top dcl can be changed.
         if (dcl && dcl->getRegFile() == G4_GRF)
         {
-            if( dcl->getSubRegAlign() == Any ||
-                ( ( dcl->getSubRegAlign() * 2 ) < align_byte && align_byte % ( dcl->getSubRegAlign() * 2 ) == 0 ) )
+            if (dcl->getSubRegAlign() == Any ||
+                ((dcl->getSubRegAlign() * 2) < align_byte && align_byte % (dcl->getSubRegAlign() * 2) == 0))
             {
-                    dcl->setSubRegAlign( G4_SubReg_Align(align_byte/2) );
+                dcl->setSubRegAlign(G4_SubReg_Align(align_byte / 2));
             }
             else if( ( dcl->getSubRegAlign() * 2 ) < align_byte || ( dcl->getSubRegAlign() * 2 ) % align_byte != 0 )
             {
                     isAligned = false;
             }
-        } else if (opnd->getKind() == G4_Operand::dstRegRegion &&
-                   // Only care about GRF or half-GRF alignment.
-                   (align_byte == G4_GRF_REG_NBYTES ||
-                    align_byte == G4_GRF_REG_NBYTES/2) &&
-                   dcl && dcl->getRegFile() == G4_ADDRESS) {
+        }
+        else if (opnd->getKind() == G4_Operand::dstRegRegion &&
+            // Only care about GRF or half-GRF alignment.
+            (align_byte == G4_GRF_REG_NBYTES || align_byte == G4_GRF_REG_NBYTES / 2) &&
+            dcl && dcl->getRegFile() == G4_ADDRESS)
+        {
 
             // Get the single definition of the specified operand from the use
             // inst.
@@ -1643,7 +1677,7 @@ bool IR_Builder::isOpndAligned( G4_Operand *opnd, unsigned short &offset, int al
                         // component wise and may need to consider checking
                         // the accumulated result.
                         if ((AliasOffset % align_byte) != 0 ||
-                            (Dcl && Dcl->getSubRegAlign() != SUB_ALIGNMENT_GRFALIGN &&
+                            (Dcl && Dcl->getSubRegAlign() != GRFALIGN &&
                              Dcl->getSubRegAlign() != Sixteen_Word &&
                              Dcl->getSubRegAlign() != Eight_Word) ||
                             AE->getOffset() % align_byte != 0) {
@@ -1659,6 +1693,15 @@ bool IR_Builder::isOpndAligned( G4_Operand *opnd, unsigned short &offset, int al
                             isAligned = false;
                     }
                 }
+            }
+        }
+        else if (dcl && dcl->getRegFile() == G4_FLAG)
+        {
+            // need to make flag even-word aligned if it's used in a setp with dword source
+            // ToDo: should we fix input to use 16-bit value instead
+            if (align_byte == 4)
+            {
+                dcl->setSubRegAlign(Even_Word);
             }
         }
         break;
@@ -1692,9 +1735,9 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
     //
     const int numThreadPerSS = 56;
     const int numThreadPerEU = 7;
-    G4_Declare* SSID = createTempVar(1, Type_UW, Either, Four_Word); // SSID may also be used as mad dst
-    G4_Declare* EUID = createTempVar(1, Type_UW, Either, Any);
-    G4_Declare* TID = createTempVar(1, Type_UW, Either, Any);
+    G4_Declare* SSID = createTempVar(1, Type_UW, Four_Word); // SSID may also be used as mad dst
+    G4_Declare* EUID = createTempVar(1, Type_UW, Any);
+    G4_Declare* TID = createTempVar(1, Type_UW, Any);
 
     auto getSr0Bits = [this, &instBuffer](G4_Declare* result, uint32_t width, uint32_t offset)
     {
@@ -1728,7 +1771,7 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
         }
         else
         {
-            G4_Declare* tempDcl = createTempVar(1, Type_UW, Either, Any);
+            G4_Declare* tempDcl = createTempVar(1, Type_UW, Any);
             G4_DstRegRegion* tmpDst = Create_Dst_Opnd_From_Dcl(tempDcl, 1);
             G4_SrcRegRegion* tmpSrc = Create_Src_Opnd_From_Dcl(tempDcl, getRegionScalar());
             instBuffer.push_back(createInternalInst(nullptr, G4_mul, nullptr, false, 1, tmpDst, src1, src2, InstOpt_WriteEnable));
@@ -1784,7 +1827,7 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
     }
 
     // perThreadSLMStart is a UD as it can exceed 64K
-    G4_Declare* perThreadSLMStart = createTempVar(1, Type_UD, Either, Any);
+    G4_Declare* perThreadSLMStart = createTempVar(1, Type_UD, Any);
     G4_SrcRegRegion* mulSrc0 = Create_Src_Opnd_From_Dcl(SSID, getRegionScalar());
     G4_Imm* mulSrc1 = createImm(perThreadSLMSize, Type_UW);
     G4_DstRegRegion* mulDst = Create_Dst_Opnd_From_Dcl(perThreadSLMStart, 1);

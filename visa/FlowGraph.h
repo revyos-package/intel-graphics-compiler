@@ -368,9 +368,9 @@ public:
         id(i), preId(0), rpostId(0),
         traversal(0), idom(NULL), beforeCall(NULL),
         afterCall(NULL), calleeInfo(NULL), BBType(G4_BB_NONE_TYPE),
-        inNaturalLoop(false), loopNestLevel(0), scopeID(0), inSimdFlow(false),
-        physicalPred(NULL), physicalSucc(NULL), parent(fg),
-        instList(alloc), hasSendInBB(false)
+        inNaturalLoop(false), hasSendInBB(false), loopNestLevel(0), scopeID(0),
+        inSimdFlow(false), physicalPred(NULL), physicalSucc(NULL), parent(fg),
+        instList(alloc)
     {
     }
 
@@ -487,6 +487,8 @@ public:
     {
         instList.remove_if([=](G4_INST* inst) { return inst->isIntrinsic() && inst->asIntrinsicInst()->getIntrinsicId() == intrinId;});
     }
+
+    void addSamplerFlushBeforeEOT();
 };
 }
 
@@ -712,18 +714,17 @@ public:
     std::vector<G4_Declare*> pseudoA0DclList;
     std::vector<G4_Declare*> pseudoFlagDclList;
 
-    unsigned                    callerSaveAreaOffset;
-    unsigned                    calleeSaveAreaOffset;
-    unsigned                    fileScopeSaveAreaSize;
-    unsigned                    paramOverflowAreaOffset;
-    unsigned                    paramOverflowAreaSize;
+    unsigned                    callerSaveAreaOffset = 0;
+    unsigned                    calleeSaveAreaOffset = 0;
+    unsigned                    paramOverflowAreaOffset = 0;
+    unsigned                    paramOverflowAreaSize = 0;
 
     // Bank conflict statistics.
     struct BankConflictStatistics
     {
-        unsigned NumOfGoodInsts;
-        unsigned NumOfBadInsts;
-        unsigned NumOfOKInsts;
+        unsigned NumOfGoodInsts = 0;
+        unsigned NumOfBadInsts = 0;
+        unsigned NumOfOKInsts = 0;
 
         void addGood() { ++NumOfGoodInsts; }
         void addBad() { ++NumOfBadInsts; }
@@ -888,8 +889,8 @@ public:
       traversalNum(0), numBBId(0), reducible(true),
       doIPA(false), hasStackCalls(false), isStackCallFunc(false), autoLabelId(0),
       pKernel(kernel), mem(m), instListAlloc(alloc),
-      builder(NULL), kernelInfo(NULL), globalOpndHT(m), framePtrDcl(NULL), stackPtrDcl(NULL),
-      scratchRegDcl(NULL), pseudoVCEDcl(NULL) {}
+      kernelInfo(NULL), builder(NULL), globalOpndHT(m), framePtrDcl(NULL),
+      stackPtrDcl(NULL), scratchRegDcl(NULL), pseudoVCEDcl(NULL) {}
 
     ~FlowGraph();
 
@@ -989,7 +990,6 @@ public:
     unsigned getNumBB() const      {return numBBId;}
     G4_BB* getEntryBB()        {return BBs.front();}
 
-    void doFilescopeVarLayout(IR_Builder& builder, DECLARE_LIST& declares, unsigned& fileScopeFrameOffset);
     void addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool);
     void addSaveRestorePseudoDeclares(IR_Builder& builder);
     void markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable &FuncInfoMap);
@@ -1094,12 +1094,21 @@ public:
         }
     }
 
+    bool endWithGotoInLastBB() const
+    {
+        if (BBs.empty())
+        {
+            return false;
+        }
+        G4_BB* lastBB = back();
+        return lastBB->isEndWithGoto();
+    }
+
 private:
     //
     // Flow group traversal routines
     //
     void AssignDFSBasedIds(G4_BB* bb, unsigned &preId, unsigned &postId, std::list<G4_BB*>& rpoBBList);
-    void trackCutReferenceFilescopeVars(BB_LIST& graphCutBBs, DECLARE_LIST& refVars, unsigned numDcls);
     // Use normalized region descriptors for each source operand if possible.
     void normalizeRegionDescriptors();
     G4_BB *findLabelBB(char *label, int &label_offset);
@@ -1226,12 +1235,12 @@ class RelocationEntry
     std::string symName;       // the symbol name that it's address to be resolved
 
     RelocationEntry(G4_INST* i, int pos, RelocationType type, const std::string& symbolName) :
-        inst(i), opndPos(pos), relocType(type), symName(symbolName) {}
+        inst(i), opndPos(pos), relocType(type), symName(symbolName){}
 
 public:
-    static RelocationEntry createSymbolAddrReloc(G4_INST* inst, int opndPos, const std::string& symbolName)
+    static RelocationEntry createSymbolAddrReloc(G4_INST* inst, int opndPos, const std::string& symbolName, RelocationType type)
     {
-        RelocationEntry entry(inst, opndPos, RelocationType::R_SYM_ADDR, symbolName);
+        RelocationEntry entry(inst, opndPos, type, symbolName);
         return entry;
     }
 
@@ -1251,6 +1260,10 @@ public:
         {
             case RelocationType::R_SYM_ADDR:
                 return "R_SYM_ADDR";
+            case RelocationType::R_SYM_ADDR_32:
+                return "R_SYM_ADDR_32";
+            case RelocationType::R_SYM_ADDR_32_HI:
+                return "R_SYM_ADDR_32_HI";
             default:
                 assert(false && "unhandled relocation type");
                 return "";
@@ -1264,7 +1277,12 @@ public:
 
     const std::string& getSymbolName() const
     {
-        assert(relocType == RelocationType::R_SYM_ADDR && "invalid relocation type");
+        bool isValidRelocType =
+            relocType == RelocationType::R_SYM_ADDR ||
+            relocType == RelocationType::R_SYM_ADDR_32 ||
+            relocType == RelocationType::R_SYM_ADDR_32_HI;
+
+        assert(isValidRelocType && "invalid relocation type");
         return symName;
     }
 
@@ -1318,13 +1336,6 @@ private:
     // stores all relocations to be performed after binary encoding
     RelocationTableTy relocationTable;
 
-
-    // id -> function map for all functions (transitively) called by this kernel
-    // this differs from the "callees" in IR_Builder as the one in builder only contain
-    // functions directly called by this kernel
-    // this is populated for kernel only
-    std::unordered_map<uint32_t, G4_Kernel*> allCallees;
-
 public:
     FlowGraph fg;
     DECLARE_LIST           Declares;
@@ -1334,12 +1345,12 @@ public:
 
     G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
               Mem_Manager &m, Options *options, unsigned char major, unsigned char minor)
-              : m_options(options), RAType(RA_Type::UNKNOWN_RA), fg(alloc, this, m),
-              major_version(major), minor_version(minor), asmInstCount(0), kernelID(0),
-              tokenInstructionCount(0), tokenReuseCount(0), AWTokenReuseCount(0),
-              ARTokenReuseCount(0), AATokenReuseCount(0), mathInstCount(0), syncInstCount(0),mathReuseCount(0),
-              ARSyncInstCount(0), AWSyncInstCount(0),
-              bank_good_num(0), bank_ok_num(0), bank_bad_num(0)
+              : m_options(options), RAType(RA_Type::UNKNOWN_RA),
+              asmInstCount(0), kernelID(0), tokenInstructionCount(0), tokenReuseCount(0),
+              AWTokenReuseCount(0), ARTokenReuseCount(0), AATokenReuseCount(0),
+              mathInstCount(0), syncInstCount(0),mathReuseCount(0),
+              ARSyncInstCount(0), AWSyncInstCount(0), bank_good_num(0), bank_ok_num(0),
+              bank_bad_num(0), fg(alloc, this, m), major_version(major), minor_version(minor)
     {
         ASSERT_USER(
             major < COMMON_ISA_MAJOR_VER ||
@@ -1529,19 +1540,6 @@ public:
     }
 
     void doRelocation(void* binary, uint32_t binarySize);
-
-    void addCallee(uint32_t funcId, G4_Kernel* function) { allCallees.emplace(funcId, function); }
-
-    G4_Kernel* getCallee(uint32_t funcId) const
-    {
-        auto iter = allCallees.find(funcId);
-        if (iter != allCallees.end())
-        {
-            return iter->second;
-        }
-        return nullptr;
-    }
-
 
     G4_INST* getFirstNonLabelInst() const;
 

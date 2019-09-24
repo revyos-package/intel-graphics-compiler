@@ -27,12 +27,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef _VISA_IGC_COMMON_HEADER_H_
 #define _VISA_IGC_COMMON_HEADER_H_
 
+
 typedef enum
 {
     vISA_3D,
-    vISA_3DWRITER,
     vISA_MEDIA,
-    vISA_PARSER
+    vISA_PARSER,
+    vISA_ASM_WRITER,    /* Builder mode for writing inline visa asm stream */
+    vISA_ASM_READER     /* Builder mode for reading inline visa asm stream */
 } vISABuilderMode;
 
 typedef enum

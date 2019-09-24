@@ -52,13 +52,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 class KernelView
 {
     // handle to the IGA-internal KV object; may be nullptr upon error
-    kv_t           *m_kv;
+    kv_t           *m_kv = nullptr;
 
     // The status from kv_create
-    iga_status_t    m_disasm_status;
+    iga_status_t    m_disasm_status = IGA_SUCCESS;
 
     // The platform this kernel view platform corresponds to
-    iga_gen_t       m_gen;
+    iga_gen_t       m_gen = IGA_GEN_INVALID;
 public:
     // Constructs a kernel view.
     //
@@ -298,10 +298,19 @@ public:
     //   KV_NON_SEND_INSTRUCTION if called on a non-send instruction
      kv_status_t getMessageSFID(int32_t pc, iga::SFID &sfid) const;
 
-    // Returns message, extended message, and response lengths in units of registers.
-    // The count of lengths successfully set is returned.
+    // Returns message, extended message, and response lengths in units of
+    // registers.  The count of length variables successfully set is returned.
+    //
+    //   - mLen (message length) is usually addresses to load or store to
+    //   - emLen (extended message length) is usually data being stored
+    //   - rLen (response length) is usually data being loaded
+    //
     // If any of the parameters is NULL, it returns 0.
     // Invalid lengths are set to KV_INVALID_LEN.
+    // Reasons for failures:
+    //  - the instruction is not a send instruction
+    //  - a register descriptor is used by the send instruction.
+    //  - the given PC does not refer to an instruction.
     uint32_t getMessageLen(
         int32_t pc, uint32_t* mLen, uint32_t* emLen, uint32_t* rLen) const
     {

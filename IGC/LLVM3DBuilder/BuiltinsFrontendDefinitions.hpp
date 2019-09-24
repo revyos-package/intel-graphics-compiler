@@ -25,7 +25,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "common/debug/DebugMacros.hpp" // VALUE_NAME() definition.
-#include "Compiler/WaveIntrinsicWAPass.h"
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/AsmParser/Parser.h"
@@ -847,6 +846,13 @@ llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::Create_SyncThreadGroup()
 }
 
 template<bool preserveNames, typename T, typename Inserter>
+llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::Create_FlushSampler()
+{
+    llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
+    return this->CreateCall(llvm::GenISAIntrinsic::getDeclaration(module, llvm::GenISAIntrinsic::GenISA_flushsampler));
+}
+
+template<bool preserveNames, typename T, typename Inserter>
 llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::Create_MemoryFence(
     bool commit,
     bool flushRWDataCache,
@@ -883,7 +889,7 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::Create_SamplePos(
     llvm::Value* int32_resourceIdx,
     llvm::Value* int32_samplerIdx)
 {
-    llvm::Value* sampleInfo = sampleInfo = this->Create_SampleInfo(int32_resourceIdx);
+    llvm::Value* sampleInfo = this->Create_SampleInfo(int32_resourceIdx);
 
 
     llvm::Value* int32_texX = this->CreateExtractElement(sampleInfo, m_int0);
@@ -2637,6 +2643,7 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::CreateGen9PlusIma
 {
     assert(m_Platform->GetPlatformFamily() >= IGFX_GEN9_CORE);
 
+
     if (m_Platform->hasHDCSupportForTypedReadsUnormSnormToFloatConversion())
     {
         // Starting with CNL, values returned by Typed Surface Read on several
@@ -2660,19 +2667,6 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::CreateGen9PlusIma
         default:
             break;
         }
-    }
-    if (m_Platform->hasSupportforTenBitFloatConversion())
-    {
-        // Values returned by Typed Surface Read on 10_10_10_2 
-        // floating point (6E4) format surfaces do not need additional software conversion to
-        // floats if hardware natively supports it
-        switch (surfaceFormat)
-        {
-        case IGC::SURFACE_FORMAT::SURFACE_FORMAT_R10G10B10A2_UNORM:
-            return pLdUAVTypedResult;
-        default:
-            break;
-        }        
     }
 
     llvm::Value* pFormatConvertedLLVMLdUAVTypedResult = pLdUAVTypedResult;
@@ -4416,6 +4410,36 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefix
         src->getType());
     return this->CreateCall4(pFunc, src, type, this->getInt1(inclusive), Mask);
 }
+
+    // We currently use the combination of 'convergent' and 
+    // 'inaccessiblememonly' to prevent code motion of
+    // wave intrinsics.  Removing 'readnone' from a callsite
+    // is not sufficient to stop LICM from looking back up to the
+    // function definition for the attribute.  We can short circuit that
+    // by creating an operand bundle.  The name "nohoist" is not
+    // significant; anything will do.
+inline llvm::CallInst* setUnsafeToHoistAttr(llvm::CallInst *CI)
+    {
+        CI->setConvergent();
+#if LLVM_VERSION_MAJOR >= 7
+        CI->setOnlyAccessesInaccessibleMemory();
+        CI->removeAttribute(llvm::AttributeList::FunctionIndex, llvm::Attribute::ReadNone);
+#else
+        CI->addAttribute(
+            llvm::AttributeSet::FunctionIndex, llvm::Attribute::InaccessibleMemOnly);
+        CI->removeAttribute(llvm::AttributeSet::FunctionIndex, llvm::Attribute::ReadNone);
+#endif
+        llvm::OperandBundleDef OpDef("nohoist", llvm::None);
+
+        // An operand bundle cannot be appended onto a call after creation.
+        // clone the instruction but add our operandbundle on as well.
+        llvm::SmallVector<llvm::OperandBundleDef, 1> OpBundles;
+        CI->getOperandBundlesAsDefs(OpBundles);
+        OpBundles.push_back(OpDef);
+        llvm::CallInst *NewCall = llvm::CallInst::Create(CI, OpBundles, CI);
+        CI->replaceAllUsesWith(NewCall);
+        return NewCall;
+    }
 
 template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value*

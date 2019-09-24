@@ -173,7 +173,8 @@ extern "C" int iga_main(int argc, const char **argv)
             } else if (inp == "ICL" || inp == "CNLH" || inp == "11") {
                 p = IGA_GEN11;
             } else {
-                err("invalid platform option");
+                err("invalid platform option "
+                    "(use option -h=p to list platforms)");
             }
             baseOpts.platform = p;
         });
@@ -298,7 +299,7 @@ extern "C" int iga_main(int argc, const char **argv)
         " This is a best effort and not all messages or platforms are "
             "supported.\n"
         "\n"
-        "SFIDS are: DC0, DC1, DC2, DCRO, GTWY, RC, URB"
+        "SFIDS are: DC0, DC1, DC2, DCRO, GTWY, RC, SMPL, TS, URB"
         "\n"
         "\n"
         "EXAMPLES:\n"

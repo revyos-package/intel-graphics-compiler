@@ -123,7 +123,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <iStdLib/utility.h>
 
 #include "Compiler/DebugInfo/VISADebugEmitter.hpp"
+#include "Compiler/CISACodeGen/DebugInfo.hpp"
 
+#include <string>
 #include <algorithm>
 
 
@@ -188,30 +190,28 @@ static void CommonOCLBasedPasses(
 
     // override the data layout to match Gen HW
     int pointerSize = getPointerSize(*pContext->getModule());
-    StringRef dataLayout;
-    if(pointerSize == 4)
+    std::string layoutstr;
+    if (pointerSize == 4)
     {
-        dataLayout = "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32"\
-            "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"\
-            "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"\
-            "-v128:128:128-v192:256:256-v256:256:256"\
-            "-v512:512:512-v1024:1024:1024-n8:16:32";
+        layoutstr = "e-p:32:32:32";
     }
-    else
-    {
-        dataLayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32"\
-            "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"\
-            "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"\
-            "-v128:128:128-v192:256:256-v256:256:256"\
-            "-v512:512:512-v1024:1024:1024-n8:16:32";
+    else {
+        layoutstr = "e-p:64:64:64";
     }
+    layoutstr += "-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"\
+        "-f32:32:32-f64:64:64-v16:16:16-v24:32:32"\
+        "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"\
+        "-v128:128:128-v192:256:256-v256:256:256"\
+        "-v512:512:512-v1024:1024:1024-n8:16:32";
+
+    StringRef dataLayout = layoutstr;
     pContext->getModule()->setDataLayout(dataLayout);
     BuiltinGenericModule->setDataLayout(dataLayout);
     if( BuiltinSizeModule )
     {
         BuiltinSizeModule->setDataLayout(dataLayout);
     }
-        
+
     MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
     
     //extracting OCL version major before SPIRMetadataTranslation pass deletes its metadata node
@@ -243,6 +243,13 @@ static void CommonOCLBasedPasses(
 
     CompilerOpts.HasBufferOffsetArg =
         pContext->m_InternalOptions.IntelHasBufferOffsetArg;
+
+    CompilerOpts.PreferBindlessImages =
+        pContext->m_InternalOptions.PreferBindlessImages;
+
+    if (CompilerOpts.PreferBindlessImages) {
+        pContext->getModuleMetaData()->UseBindlessImage = true;
+    }
 
     // right now we don't support any standard function in the code gen
     // maybe we want to support some at some point to take advantage of LLVM optimizations
@@ -302,6 +309,13 @@ static void CommonOCLBasedPasses(
     // Estimate maximal function size in the module and disable subroutine if not profitable.
     mpm.add(createEstimateFunctionSizePass());
 
+    if (IGC_GET_FLAG_VALUE(AllowMem2Reg))
+    {
+        mpm.add(createPromoteMemoryToRegisterPass());
+    }
+
+    mpm.add(new CatchAllLineNumber());
+
     // OCL has built-ins so it always need to run inlining
     {
         mpm.add(createProcessFuncAttributesPass());
@@ -321,6 +335,7 @@ static void CommonOCLBasedPasses(
         {
             mpm.add(createProcessBuiltinMetaDataPass());
         }
+        mpm.add(new PurgeMetaDataUtils());
     }
 
     // OpenCL WI + image function resolution
@@ -349,6 +364,9 @@ static void CommonOCLBasedPasses(
 
     if (CompilerOpts.UniformWGS)
         mpm.add(new RewriteLocalSize());
+
+    mpm.add(createSROAPass());
+    mpm.add(new BreakConstantExpr());
 
     mpm.add(CreateFoldKnownWorkGroupSizes());
 

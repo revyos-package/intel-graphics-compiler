@@ -304,7 +304,6 @@ int64_t FlowGraph::insertDummyUUIDMov()
 bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
 {
     G4_INST* inst = *it;
-    G4_INST* prev = NULL;
     //
     // process if-endif or if-else-endif
     //
@@ -405,7 +404,6 @@ bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
                 MUST_BE_TRUE(false, "ERROR: Can not find endif for if!");
                 return false;
             }
-            prev = inst;
             it++;
         }   // while
     }
@@ -692,10 +690,10 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                         //
                         addPredSuccEdges(curr_BB, next_BB);
                     }
-                    else if (i->getPredicate() != NULL) // pred means conditional branch
+                    else if (i->getPredicate())
                     {
                         // add fall through edge
-                        addPredSuccEdges(curr_BB, next_BB);
+                        addUniquePredSuccEdges(curr_BB, next_BB);
                     }
                 }    // if (i->opcode()
                 else if (i->opcode() == G4_if || i->opcode() == G4_while ||
@@ -745,7 +743,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                     //
                     // pred means conditional branch
                     //
-                    if (i->getPredicate() != NULL) // need to add fall through edge
+                    if (i->getPredicate() != NULL)
                     {
                         // add fall through edge
                         addPredSuccEdges(curr_BB, next_BB);
@@ -755,7 +753,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                 {
                     // does nothing for unconditional return;
                     // later phase will link the return and the return address
-                    if (i->getPredicate() != NULL) // need to add fall through edge
+                    if (i->getPredicate() != NULL)
                     {
                         // add fall through edge
                         addPredSuccEdges(curr_BB, next_BB);
@@ -767,7 +765,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                 }
                 else if (i->opcode() == G4_pseudo_fret || i->opcode() == G4_pseudo_fc_ret)
                 {
-                    if (i->getPredicate() != NULL)
+                    if (i->getPredicate())
                     {
                         // need to add fall through edge
                         addPredSuccEdges(curr_BB, next_BB);
@@ -779,10 +777,11 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                     hasSIMDCF = true;
                     addPredSuccEdges(curr_BB, getLabelBB(labelMap, i->asCFInst()->getUipLabelStr()));
 
-                    if (i->getPredicate() != NULL)
+                    if (i->getPredicate())
                     {
-                        // fall through
-                        addPredSuccEdges(curr_BB, next_BB);
+                        // fall through, but check if goto target is same as fall-thru
+                        // FIXME: replace all addPredSuccEdges with addUniquePredSuccEdges?
+                        addUniquePredSuccEdges(curr_BB, next_BB);
                     }
                 }
                 else
@@ -893,7 +892,10 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
     setPhysicalPredSucc();
     if (hasGoto)
     {
-        if (builder->getOption(vISA_EnableStructurizer))
+        // Structurizer requires that the last BB has no goto (ie, the
+        // last BB is either a return or an exit).
+        if (builder->getOption(vISA_EnableStructurizer) &&
+            !endWithGotoInLastBB())
         {
             if (builder->getOption(vISA_DumpDotAll))
             {
@@ -1039,6 +1041,29 @@ void FlowGraph::handleWait()
     }
 }
 
+// Add a sampler cache flush with null return before the EOT send
+// bb must end with an EOT send
+void G4_BB::addSamplerFlushBeforeEOT()
+{
+    assert(this->isLastInstEOT() && "last instruction must be EOT");
+    auto builder = parent->builder;
+    int samplerFlushOpcode = 0x1F;
+    int samplerFlushFC = (SamplerSIMDMode::SIMD32 << 17) +
+        (samplerFlushOpcode << 12);
+    int desc = G4_SendMsgDescriptor::createDesc(samplerFlushFC, true,
+        1, 0);
+    G4_SrcRegRegion* sendMsgOpnd = builder->Create_Src_Opnd_From_Dcl(
+        builder->getBuiltinR0(),
+        builder->getRegionStride1());
+    auto msgDesc = builder->createSendMsgDesc(desc, SFIDtoInt(SFID::SAMPLER), true, true);
+    G4_INST* samplerFlushInst = builder->createSendInst(nullptr, G4_send,
+        8, builder->createNullDst(Type_UD), sendMsgOpnd,
+        builder->createImm(desc, Type_UD),
+        0, msgDesc, 0);
+    auto iter = std::prev(this->end());
+    this->insert(iter, samplerFlushInst);
+}
+
 //
 // Each g4_pseudo_exit instruction will be translated into one of the following:
 // -- a unconditional simd1 ret: translated into a EOT send (may be optionally merged with
@@ -1105,25 +1130,7 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
                             needsEOTSend = false;
                             if (builder->getHasNullReturnSampler())
                             {
-                                // insert a sampler cache flush with null return
-                                // no need for this in other paths since they can never
-                                // generate sampler with null return
-                                int samplerFlushOpcode = 0x1F;
-                                int samplerFlushFC = (SamplerSIMDMode::SIMD32 << 17) +
-                                    (samplerFlushOpcode << 12);
-                                int desc = G4_SendMsgDescriptor::createDesc(samplerFlushFC, true,
-                                    1, 0);
-                                G4_SrcRegRegion* sendMsgOpnd = builder->Create_Src_Opnd_From_Dcl(
-                                    builder->getBuiltinR0(),
-                                    builder->getRegionStride1());
-                                auto msgDesc = builder->createSendMsgDesc(desc, SFIDtoInt(SFID::SAMPLER), true, true);
-                                G4_INST* samplerFlushInst = builder->createSendInst(nullptr, G4_send,
-                                    8, builder->createNullDst(Type_UD), sendMsgOpnd,
-                                    builder->createImm(desc, Type_UD),
-                                    0, msgDesc, 0);
-                                auto iter = bb->end();
-                                --iter;
-                                bb->insert(iter, samplerFlushInst);
+                                bb->addSamplerFlushBeforeEOT();
                             }
                         }
                     }
@@ -1932,13 +1939,11 @@ void FlowGraph::removeRedundantLabels()
 
             // check if the label is a function label
             unsigned int numNonCallerPreds = 0;
-            BB_LIST_ITER lt = bb->Preds.begin();
-            BB_LIST_ITER ltEnd = bb->Preds.end();
             bool isFuncLabel = true;
             G4_BB* pred_bb = NULL;
-            for (; lt != ltEnd; ++lt)
+            for (auto pred : bb->Preds)
             {
-                if (!((*lt)->isEndWithCall()))
+                if (!pred->isEndWithCall())
                 {
                     if (numNonCallerPreds > 0)
                     {
@@ -1946,11 +1951,11 @@ void FlowGraph::removeRedundantLabels()
                         break;
                     }
                     numNonCallerPreds++;
-                    pred_bb = (*lt);
+                    pred_bb = pred;
                 }
                 else
                 {
-                    G4_INST *i = (*lt)->back();
+                    G4_INST *i = pred->back();
                     if (i->getSrc(0)->isLabel())
                     {
                         if (i->getSrc(0) != removedBlockInst->getLabel())
@@ -1961,7 +1966,7 @@ void FlowGraph::removeRedundantLabels()
                                 break;
                             }
                             numNonCallerPreds++;
-                            pred_bb = (*lt);
+                            pred_bb = pred;
                         }
                     }
                 }
@@ -1983,18 +1988,11 @@ void FlowGraph::removeRedundantLabels()
             G4_Label *succ_label = bb->Succs.front()->front()->getLabel();
 
             // check if the last inst of pred is a control flow inst
-            lt = bb->Preds.begin();
-            for (; lt != bb->Preds.end(); ++lt)
+            for (auto pred : bb->Preds)
             {
-                BB_LIST_ITER jt = (*lt)->Succs.begin();
+                auto jt = std::find(pred->Succs.begin(), pred->Succs.end(), bb);
 
-                for (; jt != (*lt)->Succs.end(); ++jt)
-                {
-                    if ((*jt) == bb) {
-                        break;
-                    }
-                }
-                G4_INST *i = (*lt)->back();
+                G4_INST *i = pred->back();
                 // replace label in instructions
                 if (i->isFlowControl())
                 {
@@ -2003,8 +2001,8 @@ void FlowGraph::removeRedundantLabels()
                         // due to the switchjmp we may have multiple jmpi
                         // at the end of a block.
                         bool foundMatchingJmp = false;
-                        for (INST_LIST::iterator iter = --(*lt)->end();
-                            iter != (*lt)->begin(); --iter)
+                        for (INST_LIST::iterator iter = --pred->end();
+                            iter != pred->begin(); --iter)
                         {
                             i = *iter;
                             if (i->opcode() == G4_jmpi)
@@ -2090,8 +2088,8 @@ void FlowGraph::removeRedundantLabels()
                     }
                 }
 
-                (*lt)->Succs.insert(jt, bb->Succs.front());
-                (*lt)->Succs.erase(jt);
+                pred->Succs.insert(jt, bb->Succs.front());
+                pred->Succs.erase(jt);
 
                 // [Bug1915]: In rare case the precessor may have more than one Succ edge pointing
                 // to the same BB, due to empty block being eliminated.  For example, with
@@ -2108,16 +2106,16 @@ void FlowGraph::removeRedundantLabels()
                 // elsewhere there may be assumptions that if a BB ends with a jump it must have
                 // two successors
                 {
-                    BB_LIST_ITER succs = (*lt)->Succs.begin();
-                    BB_LIST_ITER end = (*lt)->Succs.end();
+                    BB_LIST_ITER succs = pred->Succs.begin();
+                    BB_LIST_ITER end = pred->Succs.end();
                     while (succs != end)
                     {
                         BB_LIST_ITER iter = succs;
                         ++succs;
                         if ((*iter) == bb)
                         {
-                            (*lt)->Succs.insert(iter, bb->Succs.front());
-                            (*lt)->Succs.erase(iter);
+                            pred->Succs.insert(iter, bb->Succs.front());
+                            pred->Succs.erase(iter);
                         }
                     }
                 }
@@ -3094,108 +3092,6 @@ void FlowGraph::addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool)
     }
 }
 
-static inline void trackVarReferenceFilescopeVars(G4_RegVar* var, DECLARE_LIST& refVars, BitSet& visited)
-{
-    G4_Declare* dcl = var->getDeclare();
-    if (visited.isSet(dcl->getDeclId()) == false)
-    {
-        visited.set(dcl->getDeclId(), true);
-        G4_Declare* aliasDcl = dcl->getAliasDeclare();
-        if (aliasDcl && aliasDcl->getAliasDeclare() == NULL && aliasDcl->getHasFileScope())
-        {
-            refVars.push_back(dcl);
-        }
-        else if (aliasDcl)
-        {
-            trackVarReferenceFilescopeVars(aliasDcl->getRegVar(), refVars, visited);
-        }
-    }
-}
-
-static void trackOpndReferenceFilescopeVars(G4_Operand* opnd, DECLARE_LIST& refVars, BitSet& visited)
-{
-    if (opnd != NULL)
-    {
-        if (opnd->isSrcRegRegion())
-        {
-            G4_VarBase* base = opnd->asSrcRegRegion()->getBase();
-            if (base->isRegVar() && base->asRegVar()->getDeclare())
-            {
-                trackVarReferenceFilescopeVars(base->asRegVar(), refVars, visited);
-            }
-        }
-        else if (opnd->isDstRegRegion())
-        {
-            G4_VarBase* base = opnd->asDstRegRegion()->getBase();
-            if (base->isRegVar() && base->asRegVar()->getDeclare())
-            {
-                trackVarReferenceFilescopeVars(base->asRegVar(), refVars, visited);
-            }
-        }
-        else if (opnd->isAddrExp())
-        {
-            trackVarReferenceFilescopeVars(((G4_AddrExp*)opnd)->getRegVar(), refVars, visited);
-        }
-    }
-}
-
-void FlowGraph::trackCutReferenceFilescopeVars(BB_LIST& graphCutBBs, DECLARE_LIST& refVars, unsigned numDcls)
-{
-    BitSet visited(numDcls, false);
-
-    for (BB_LIST_ITER bt = graphCutBBs.begin(), btEnd = graphCutBBs.end(); bt != btEnd; ++bt)
-    {
-        for (INST_LIST_ITER it = (*bt)->begin(), itEnd = (*bt)->end(); it != itEnd; ++it)
-        {
-            for (unsigned j = 0; j < G4_MAX_SRCS; j++)
-            {
-                trackOpndReferenceFilescopeVars((*it)->getSrc(j), refVars, visited);
-            }
-            trackOpndReferenceFilescopeVars((*it)->getDst(), refVars, visited);
-        }
-    }
-}
-
-//
-// Perform the layout for filescoped variables in the GENX_MAIN frame.
-// Also create unique versions of filescoped variabled per function.
-//
-void FlowGraph::doFilescopeVarLayout(IR_Builder& builder, DECLARE_LIST& declares,
-    unsigned& fileScopeAreaSize)
-{
-    // Assign OWORD aligned frame offsets for all file scope variables.
-
-    DECLARE_LIST fileScopeDclRoots;
-    DECLARE_LIST filescopeVars;
-    unsigned owordSize = 8 * sizeof(short);
-    // fileScopeAreaSize is in units of oword
-    fileScopeAreaSize = 0;
-
-#define ROUND(x,y)  ((x) + ((y - x % y) % y))
-
-    for (DECLARE_LIST_ITER di = declares.begin(), diEnd = declares.end(); di != diEnd; ++di)
-    {
-        if ((*di)->getHasFileScope())
-        {
-            if ((*di)->getAliasDeclare() == NULL)
-            {
-                unsigned int spillMemOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
-                (*di)->getRegVar()->setDisp(
-                    fileScopeAreaSize * owordSize + spillMemOffset);
-                unsigned size = (*di)->getElemSize() * (*di)->getNumElems() * (*di)->getNumRows();
-                size += (owordSize - size % owordSize) % owordSize;
-                fileScopeAreaSize += size / owordSize;
-                fileScopeDclRoots.push_back(*di);
-            }
-        }
-        //(*di)->setId(numDcls++);
-    }
-
-    // Round the filescope area size to GRF size so that the spill area
-    // starts on a GRF boundary.
-    fileScopeAreaSize = ROUND(fileScopeAreaSize, 2);
-}
-
 //
 // Insert pseudo dcls to represent the caller-save and callee-save registers.
 // This is only required when there is more than one graph cut due to the presence
@@ -3356,7 +3252,7 @@ void G4_Kernel::dumpPassInternal(const char* appendix)
     }
 
     std::string fname(fileName);
-    fname = sanitizeString(fname);
+    fname = sanitizePathString(fname);
 
     fstream ofile(fname, ios::out);
     if (!ofile)
@@ -3424,7 +3320,7 @@ void G4_Kernel::dumpDotFileInternal(const char* appendix)
     }
 
     std::string fname(fileName);
-    fname = sanitizeString(fname);
+    fname = sanitizePathString(fname);
 
     fstream ofile(fname, ios::out);
     if (!ofile)
@@ -3732,7 +3628,6 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
 #define ERROR_STRING_MAX_LENGTH 1024*16
         char* errBuf = new char[ERROR_STRING_MAX_LENGTH];
 
-
         KernelView kView(getIGAPlatform(), binary, binarySize,
                          errBuf, ERROR_STRING_MAX_LENGTH);
         dissasemblyFailed = !kView.decodeSucceeded();
@@ -3972,6 +3867,11 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     sendInst->setCISAOff(movInst->getCISAOff());
     sendInst->setLocation(movInst->getLocation());
     instList.push_back(sendInst);
+
+    if (builder->getHasNullReturnSampler())
+    {
+        addSamplerFlushBeforeEOT();
+    }
 }
 
 void G4_BB::emitInstructionInfo(std::ostream& output, INST_LIST_ITER &it)
@@ -4444,10 +4344,6 @@ bool GlobalOpndHashTable::isOpndGlobal(G4_Operand *opnd)
     {
         // Conservatively assume that all address taken
         // virtual registers are global
-        return true;
-    }
-    else if (dcl->getHasFileScope() == true)
-    {
         return true;
     }
     else
@@ -5533,8 +5429,16 @@ void RelocationEntry::dump() const
     {
         case RelocationType::R_NONE:
             std::cerr << "R_NONE: symbol name = " << symName;
+            break;
         case RelocationType::R_SYM_ADDR:
             std::cerr << "R_SYM_ADDR: symbol name = " << symName;
+            break;
+        case RelocationType::R_SYM_ADDR_32:
+            std::cerr << "R_SYM_ADDR_32: symbol name = " << symName;
+            break;
+        case RelocationType::R_SYM_ADDR_32_HI:
+            std::cerr << "R_SYM_ADDR_32_HI: symbol name = " << symName;
+            break;
     }
     std::cerr << "\n";
 }

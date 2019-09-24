@@ -110,6 +110,7 @@ Imported_Intrinsics = \
     "GenISA_threadgroupbarrier_wait": ["void",[],"Convergent"],
     "GenISA_wavebarrier": ["void",[],"Convergent"],
     "GenISA_memoryfence": ["void",["bool","bool","bool","bool","bool","bool","bool"],"Convergent"],
+    "GenISA_typedmemoryfence": ["void",["bool"],"Convergent"],
     "GenISA_flushsampler": ["void",[],"None"],
     "GenISA_globalSync": ["void",[],"Convergent"],
     "GenISA_uavSerializeOnResID": ["void",["int"],"None"],
@@ -140,9 +141,10 @@ Imported_Intrinsics = \
     "GenISA_RuntimeValue": ["any:float",["int"],"NoMem"],
     "GenISA_GetBufferPtr": ["anyptr",["int","int"],"NoMem"],
     "GenISA_DCL_inputVec": ["anyfloat",["int","int"],"NoMem"],
+    # (dwordAttributeOrSetupIndex, e_interpolation_PSOnly)->anyvector
     "GenISA_DCL_ShaderInputVec": ["anyvector",["int","int"],"NoMem"],
     "GenISA_DCL_GSinputVec": ["float4",["int","int"],"NoMem"],
-    "GenISA_DCL_SystemValue": ["anyfloat",["int"],"NoMem"],
+    "GenISA_DCL_SystemValue": ["any:float",["int"],"NoMem"],
     "GenISA_SampleOffsetX": ["float",["int"],"NoMem"],
     "GenISA_SampleOffsetY": ["float",["int"],"NoMem"],
     "GenISA_PixelPositionX": ["short",[],"NoMem"],
@@ -187,7 +189,7 @@ Imported_Intrinsics = \
     "GenISA_DCL_HSinputVec": ["float4",["int","int"],"NoMem"],
     # (owordVertexIndex, owordAttributeIndex)->float4
     "GenISA_DCL_HSOutputCntrlPtInputVec": ["float4",["int","int"],"ReadMem"],
-    "GenISA_HSURBPatchHeaderRead": ["float8",[],"NoMem"],
+    "GenISA_HSURBPatchHeaderRead": ["float8",[],"ReadMem"],
     "GenISA_RenderTargetRead": ["float4",["int"],"ReadMem"],
     "GenISA_RenderTargetReadSampleFreq": ["float4",["int","int"],"ReadMem"],
     "GenISA_patchInstanceId": ["int",[],"NoMem"],
@@ -288,10 +290,13 @@ Imported_Intrinsics = \
     "GenISA_InitDiscardMask": ["bool",[],"None"],
     "GenISA_UpdateDiscardMask": ["bool",["bool","bool"],"None"],
     "GenISA_GetPixelMask": ["bool",["bool"],"None"],
+    # Check whether invocation is a helper invocation.
+    "GenISA_IsHelperInvocation": ["bool",["void"],"Convergent,InaccessibleMemOnly"],
     "GenISA_Copy": ["anyvector",[0],"None"],
     "GenISA_dp4a_ss": ["int",["int","int","int"],"NoMem"],
     "GenISA_dp4a_uu": ["int",["int","int","int"],"NoMem"],
     "GenISA_dp4a_su": ["int",["int","int","int"],"NoMem"],
     "GenISA_dp4a_us": ["int",["int","int","int"],"NoMem"],
-    "GenISA_is_uniform": ["bool",["any"],"NoMem"]
+    "GenISA_is_uniform": ["bool",["any"],"NoMem"],
+    "GenISA_CatchAllDebugLine": ["void", [], "None"]
 }

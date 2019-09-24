@@ -43,15 +43,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/PreCompiledFuncLibrary.cpp"
 
 // No Support to double emulation.
-const unsigned char igcbuiltin_emu_dp_add_sub[] = {0};
-const unsigned char igcbuiltin_emu_dp_fma_mul[] = {0};
-const unsigned char igcbuiltin_emu_dp_cmp[] = {0};
-const unsigned char igcbuiltin_emu_dp_conv_i32[] = {0};
-const unsigned char igcbuiltin_emu_dp_conv_sp[] = {0};
-const unsigned char igcbuiltin_emu_dp_div[] = {0};
-const unsigned char igcbuiltin_emu_dp_sqrt[] = {0};
+const unsigned char igcbuiltin_emu_dp_add_sub[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_fma_mul[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_cmp[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_conv_i32[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_conv_sp[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_div[] = { 0 };
+const unsigned char igcbuiltin_emu_dp_sqrt[] = { 0 };
 // No Support to IEEE compliant emulation
-const unsigned char igcbuiltin_emu_sp_div[] = {0};
+const unsigned char igcbuiltin_emu_sp_div[] = { 0 };
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMUtils.h"
@@ -63,7 +63,7 @@ using namespace llvm;
 using namespace IGC;
 using namespace IGC::IGCMD;
 
-    // Register pass to igc-opt
+// Register pass to igc-opt
 #define PASS_FLAG "igc-precompiled-import"
 #define PASS_DESCRIPTION "PreCompiledFuncImport"
 #define PASS_CFG_ONLY false
@@ -76,11 +76,11 @@ IGC_INITIALIZE_PASS_END(PreCompiledFuncImport, PASS_FLAG, PASS_DESCRIPTION, PASS
 char PreCompiledFuncImport::ID = 0;
 
 PreCompiledFuncImport::PreCompiledFuncImport(
-    CodeGenContext *CGCtx, uint32_t TheEmuKind) :
+    CodeGenContext* CGCtx, uint32_t TheEmuKind) :
     ModulePass(ID),
-    m_emuKind(TheEmuKind),
-    m_pCtx (CGCtx),
-    m_enableSubroutineCallForEmulation(false)
+    m_pCtx(CGCtx),
+    m_enableSubroutineCallForEmulation(false),
+    m_emuKind(TheEmuKind)
 {
     initializePreCompiledFuncImportPass(*PassRegistry::getPassRegistry());
 
@@ -184,15 +184,15 @@ bool PreCompiledFuncImport::preProcessDouble()
 {
     CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     bool hasNoNaN = pCtx->getModuleMetaData()->compOpt.FiniteMathOnly;
-    SmallVector<Instruction *, 8> toBeDeleted;
+    SmallVector<Instruction*, 8> toBeDeleted;
     for (auto II = m_pModule->begin(), IE = m_pModule->end(); II != IE; ++II)
     {
-        Function *Func = &(*II);
+        Function* Func = &(*II);
         for (inst_iterator i = inst_begin(Func), e = inst_end(Func);
              i != e; ++i)
         {
             Instruction* Inst = &*i;
-            if (TruncInst *TI = dyn_cast<TruncInst>(Inst))
+            if (TruncInst * TI = dyn_cast<TruncInst>(Inst))
             {
                 Value* oprd = TI->getOperand(0);
                 Type* dstTy = TI->getType();
@@ -208,7 +208,7 @@ bool PreCompiledFuncImport::preProcessDouble()
                     toBeDeleted.push_back(TI);
                 }
             }          
-            else if (UIToFPInst *UFI = dyn_cast<UIToFPInst>(Inst))
+            else if (UIToFPInst * UFI = dyn_cast<UIToFPInst>(Inst))
             {
                 Value* oprd = UFI->getOperand(0);
                 Type* dstTy = UFI->getType();
@@ -223,7 +223,7 @@ bool PreCompiledFuncImport::preProcessDouble()
                     toBeDeleted.push_back(UFI);
                 }
             }
-            else if (SIToFPInst *SFI = dyn_cast<SIToFPInst>(Inst))
+            else if (SIToFPInst * SFI = dyn_cast<SIToFPInst>(Inst))
             {
                 Value* oprd = SFI->getOperand(0);
                 Type* dstTy = SFI->getType();
@@ -238,11 +238,11 @@ bool PreCompiledFuncImport::preProcessDouble()
                     toBeDeleted.push_back(SFI);
                 }
             }
-            else if (CallInst *CallI = dyn_cast<CallInst>(Inst))
+            else if (CallInst * CallI = dyn_cast<CallInst>(Inst))
             {
-                Type * resTy = CallI->getType();
-                IntrinsicInst *II = dyn_cast<IntrinsicInst>(CallI);
-                GenIntrinsicInst *GII = dyn_cast<GenIntrinsicInst>(CallI);
+                Type* resTy = CallI->getType();
+                IntrinsicInst* II = dyn_cast<IntrinsicInst>(CallI);
+                GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(CallI);
                 if (resTy->isDoubleTy() &&
                     ((II && (II->getIntrinsicID() == Intrinsic::maxnum ||
                              II->getIntrinsicID() == Intrinsic::minnum))))
@@ -323,7 +323,7 @@ bool PreCompiledFuncImport::preProcessDouble()
         }  
     }
 
-    for(int i=0, e = (int)toBeDeleted.size(); i < e; ++i)
+    for (int i = 0, e = (int)toBeDeleted.size(); i < e; ++i)
     {
         Instruction* Inst = toBeDeleted[i];
         Inst->eraseFromParent();
@@ -332,14 +332,8 @@ bool PreCompiledFuncImport::preProcessDouble()
     return (toBeDeleted.size() > 0);
 }
 
-inline bool isPrecompiledEmulationFunction(Function* func)
-{
-    return func->getName().contains("precompiled_s32divrem") ||
-    func->getName().contains("precompiled_u32divrem") ||
-    func->getName().contains("__igcbuiltin_sp_div");
-}
 
-bool PreCompiledFuncImport::runOnModule(Module &M)
+bool PreCompiledFuncImport::runOnModule(Module& M)
 {
     // sanity check
     if (m_emuKind == 0) {
@@ -352,7 +346,7 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
     m_pModule = &M;
     m_changed = false;
 
-    for (int i=0; i < NUM_LIBMODS; ++i) {
+    for (int i = 0; i < NUM_LIBMODS; ++i) {
         m_libModuleToBeImported[i] = false;
         m_libModuleAlreadyImported[i] = false;
     }
@@ -360,7 +354,7 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
     SmallSet<Function*, 32> origFunctions;
     for (auto II = M.begin(), IE = M.end(); II != IE; ++II)
     {
-        Function *Func = &(*II);
+        Function* Func = &(*II);
         if (Func->isDeclaration()) {
             continue;
         }
@@ -434,8 +428,11 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
     NewFuncWithIA.clear();
 
 
+    unsigned totalNumberOfInlinedInst = 0;
+
     // Post processing, set those imported functions as internal linkage
-    // and alwaysinline.
+    // and alwaysinline. Also count how many instructions would be added
+    // to the shader if inlining occurred.
     for (auto II = M.begin(), IE = M.end(); II != IE; )
     {
         Function* Func = &(*II);
@@ -461,11 +458,51 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
             Func->removeFnAttr(llvm::Attribute::NoInline);
             Func->removeFnAttr(llvm::Attribute::AlwaysInline);
 
-            // Inline all conv functions. And for others, inline
-            // only those that have less than 4 uses. If ForceSubroutine
-            // is set, do not inline any of them.
+            // Don't want to subroutine functions that are called only once
+            if (Func->getNumUses() == 1)
+            {
+                // Add AlwaysInline attribute to force inlining all calls.
+                Func->addFnAttr(llvm::Attribute::AlwaysInline);
+
+                continue;
+            }
+
+            // Count number of instructions in the function
+            unsigned NumInst = 0;
+            for (BasicBlock& BB : Func->getBasicBlockList()) {
+                NumInst += BB.getInstList().size();
+            }
+
+            // Don't want to subroutine small functions
+            if (NumInst <= 5)
+            {
+                // Add AlwaysInline attribute to force inlining all calls.
+                Func->addFnAttr(llvm::Attribute::AlwaysInline);
+
+                continue;
+            }
+
+            totalNumberOfInlinedInst += NumInst * Func->getNumUses();
+        }
+    }
+
+    for (auto II = M.begin(), IE = M.end(); II != IE; )
+    {
+        Function* Func = &(*II);
+        ++II;
+        if (!Func || Func->isDeclaration())
+        {
+            continue;
+        }
+
+        if (!origFunctions.count(Func) && !Func->hasFnAttribute(llvm::Attribute::AlwaysInline))
+        {
+            // Use subroutine if ForceSubroutineForEmulation is set or
+            // use subroutines if total number of instructions added when
+            // all emulated functions are inlined exceed InlinedEmulationThreshold.
             if (m_enableSubroutineCallForEmulation &&
-                (IGC_IS_FLAG_ENABLED(ForceSubroutineForEmulation) || shouldWeSubroutine(Func)))
+                (IGC_IS_FLAG_ENABLED(ForceSubroutineForEmulation) ||
+                    totalNumberOfInlinedInst > (unsigned)IGC_GET_FLAG_VALUE(InlinedEmulationThreshold)))
             {
                 Func->addFnAttr(llvm::Attribute::NoInline);
 
@@ -498,7 +535,7 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
 
         // free FuncsImpArgs
         for (auto I : FuncsImpArgs) {
-            ImplicitArgs *IA = I.second;
+            ImplicitArgs* IA = I.second;
             delete IA;
         }
         FuncsImpArgs.clear();
@@ -517,7 +554,7 @@ bool PreCompiledFuncImport::runOnModule(Module &M)
     return m_changed;
 }
 
-void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator &I)
+void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator& I)
 {
     if (I.getOperand(0)->getType()->isIntOrIntVectorTy())
     {
@@ -574,7 +611,7 @@ void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator &I)
 
 
 //64 bit emulation for divide 
-void PreCompiledFuncImport::processDivide(BinaryOperator &inst, EmulatedFunctions function)
+void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunctions function)
 {
     unsigned int numElements = 1;
     unsigned int elementIndex = 0;
@@ -641,7 +678,7 @@ void PreCompiledFuncImport::processDivide(BinaryOperator &inst, EmulatedFunction
     args[0] = inst.getOperand(0);
     args[1] = inst.getOperand(1);
 
-    CallInst *funcCall = CallInst::Create(func, args, inst.getName(), &inst);
+    CallInst* funcCall = CallInst::Create(func, args, inst.getName(), &inst);
     funcCall->setDebugLoc(inst.getDebugLoc());
 
     inst.replaceAllUsesWith(funcCall);
@@ -651,7 +688,7 @@ void PreCompiledFuncImport::processDivide(BinaryOperator &inst, EmulatedFunction
     m_changed = true;
 }
 
-void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst &inst)
+void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst& inst)
 {
     if ((isI64DivRem() || isDPEmu()) &&
         inst.getDestTy()->isHalfTy() && inst.getSrcTy()->isDoubleTy())
@@ -694,18 +731,18 @@ void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst &inst)
 
     if (isDPEmu() && inst.getDestTy()->isFloatTy() && inst.getSrcTy()->isDoubleTy())
     {
-        Function *newFunc = getOrCreateFunction(FUNCTION_DP_TO_SP);
+        Function* newFunc = getOrCreateFunction(FUNCTION_DP_TO_SP);
         Value* args[5];
 
         Type* intTy = Type::getInt32Ty(m_pModule->getContext());
-        Function *CurrFunc = inst.getParent()->getParent();
+        Function* CurrFunc = inst.getParent()->getParent();
         args[0] = inst.getOperand(0);
         args[1] = ConstantInt::get(intTy, 0);  // RN
         args[2] = ConstantInt::get(intTy, 1);  // flush to zero
         args[3] = args[2];                     // flush denorm
         args[4] = createFlagValue(CurrFunc);   // ignored
 
-        CallInst *funcCall = CallInst::Create(newFunc, args, inst.getName(), &inst);
+        CallInst* funcCall = CallInst::Create(newFunc, args, inst.getName(), &inst);
         funcCall->setDebugLoc(inst.getDebugLoc());
 
         inst.replaceAllUsesWith(funcCall);
@@ -721,11 +758,11 @@ void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst &inst)
 //   double (double, double, int, int, int, int*);
 void PreCompiledFuncImport::processFPBinaryOperator(Instruction& I, FunctionIDs FID)
 {
-    Function *newFunc = getOrCreateFunction(FID);
+    Function* newFunc = getOrCreateFunction(FID);
     Value* args[6];
 
     Type* intTy = Type::getInt32Ty(m_pModule->getContext());
-    Function *CurrFunc = I.getParent()->getParent();
+    Function* CurrFunc = I.getParent()->getParent();
     args[0] = I.getOperand(0);
     args[1] = I.getOperand(1);
     args[2] = ConstantInt::get(intTy, 0);  // RN
@@ -733,7 +770,7 @@ void PreCompiledFuncImport::processFPBinaryOperator(Instruction& I, FunctionIDs 
     args[4] = args[3];                     // flush denorm
     args[5] = createFlagValue(CurrFunc);   // FP flag, ignored
 
-    CallInst *funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
+    CallInst* funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
     funcCall->setDebugLoc(I.getDebugLoc());
 
     I.replaceAllUsesWith(funcCall);
@@ -902,13 +939,13 @@ Function* PreCompiledFuncImport::getOrCreateFunction(FunctionIDs FID)
 }
 
 // Alloca an int and return address Value to that.
-Value* PreCompiledFuncImport::createFlagValue(Function *F)
+Value* PreCompiledFuncImport::createFlagValue(Function* F)
 {
     LLVMContext& Ctx = F->getContext();
-    BasicBlock *EntryBB = &(F->getEntryBlock());
+    BasicBlock* EntryBB = &(F->getEntryBlock());
     Instruction* insert_before = &(*EntryBB->getFirstInsertionPt());
-    Type *intTy = Type::getInt32Ty(Ctx);
-    Value *flagPtrValue = new AllocaInst(intTy, 0, "DPEmuFlag", insert_before);
+    Type* intTy = Type::getInt32Ty(Ctx);
+    Value* flagPtrValue = new AllocaInst(intTy, 0, "DPEmuFlag", insert_before);
     return flagPtrValue;
 }
 
@@ -917,13 +954,13 @@ void PreCompiledFuncImport::visitFPExtInst(llvm::FPExtInst& I)
     if (isDPEmu() && I.getDestTy()->isDoubleTy() &&
         (I.getSrcTy()->isFloatTy() || I.getSrcTy()->isHalfTy()))
     {
-        Function *newFunc = getOrCreateFunction(FUNCTION_SP_TO_DP);
+        Function* newFunc = getOrCreateFunction(FUNCTION_SP_TO_DP);
         Type* intTy = Type::getInt32Ty(m_pModule->getContext());
-        Function *CurrFunc = I.getParent()->getParent();
+        Function* CurrFunc = I.getParent()->getParent();
         Value* args[3];
         if (I.getSrcTy()->isHalfTy())
         {
-            Instruction *newI = new FPExtInst(
+            Instruction* newI = new FPExtInst(
                 I.getOperand(0),
                 Type::getFloatTy(m_pModule->getContext()),
                 "DPEmufp16tofp32",
@@ -937,7 +974,7 @@ void PreCompiledFuncImport::visitFPExtInst(llvm::FPExtInst& I)
         }
         args[1] = ConstantInt::get(intTy, 1);  // flush denorm
         args[2] = createFlagValue(CurrFunc);   // FP flags, ignored
-        CallInst *funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
+        CallInst* funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
         funcCall->setDebugLoc(I.getDebugLoc());
 
         I.replaceAllUsesWith(funcCall);
@@ -1008,8 +1045,8 @@ void PreCompiledFuncImport::visitCastInst(llvm::CastInst& I)
         return;
     }
 
-    Function *newFunc = getOrCreateFunction(FID);
-    Function *CurrFunc = I.getParent()->getParent();
+    Function* newFunc = getOrCreateFunction(FID);
+    Function* CurrFunc = I.getParent()->getParent();
     SmallVector<Value*, 4> args;
     args.push_back(oprd0);
     if (opc == Instruction::FPToSI || opc == Instruction::FPToUI)
@@ -1051,32 +1088,32 @@ uint32_t PreCompiledFuncImport::getFCmpMask(CmpInst::Predicate Pred)
 
     uint32_t mask = 0;
     switch (Pred) {
-    case CmpInst::FCMP_OEQ :
-    case CmpInst::FCMP_UEQ :
+    case CmpInst::FCMP_OEQ:
+    case CmpInst::FCMP_UEQ:
         mask = SETMASKBIT(DP_EMU_CMP_EQ);
         break;
-    case CmpInst::FCMP_OLT :
-    case CmpInst::FCMP_ULT :
+    case CmpInst::FCMP_OLT:
+    case CmpInst::FCMP_ULT:
         mask = SETMASKBIT(DP_EMU_CMP_LT);
         break;
 
-    case CmpInst::FCMP_OLE :
-    case CmpInst::FCMP_ULE :
+    case CmpInst::FCMP_OLE:
+    case CmpInst::FCMP_ULE:
         mask = (SETMASKBIT(DP_EMU_CMP_EQ) | SETMASKBIT(DP_EMU_CMP_LT));
         break;
 
-    case CmpInst::FCMP_OGT :
-    case CmpInst::FCMP_UGT :
+    case CmpInst::FCMP_OGT:
+    case CmpInst::FCMP_UGT:
         mask = SETMASKBIT(DP_EMU_CMP_GT);
         break;
 
-    case CmpInst::FCMP_OGE :
-    case CmpInst::FCMP_UGE :
+    case CmpInst::FCMP_OGE:
+    case CmpInst::FCMP_UGE:
         mask = (SETMASKBIT(DP_EMU_CMP_EQ) | SETMASKBIT(DP_EMU_CMP_GT));
         break;
 
-    case CmpInst::FCMP_ONE :
-    case CmpInst::FCMP_UNE :
+    case CmpInst::FCMP_ONE:
+    case CmpInst::FCMP_UNE:
         mask = (SETMASKBIT(DP_EMU_CMP_LT) | SETMASKBIT(DP_EMU_CMP_GT));
         break;
 
@@ -1085,7 +1122,7 @@ uint32_t PreCompiledFuncImport::getFCmpMask(CmpInst::Predicate Pred)
             SETMASKBIT(DP_EMU_CMP_LT));
         break;
 
-    case CmpInst::FCMP_UNO :
+    case CmpInst::FCMP_UNO:
         //  All Unordered is set later.
         break;
 
@@ -1121,14 +1158,14 @@ void PreCompiledFuncImport::visitFCmpInst(FCmpInst& I)
         return;
     }
 
-    Function *newFunc = getOrCreateFunction(FUNCTION_DP_CMP);
+    Function* newFunc = getOrCreateFunction(FUNCTION_DP_CMP);
     Type* intTy = Type::getInt32Ty(m_pModule->getContext());
     Value* args[3];
     args[0] = I.getOperand(0);
     args[1] = I.getOperand(1);
     args[2] = ConstantInt::get(intTy, 1);  // flush denorm.
 
-    CallInst *funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
+    CallInst* funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
     funcCall->setDebugLoc(I.getDebugLoc());
 
     //
@@ -1217,14 +1254,14 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
         }
     }
 
-    Type * resTy = I.getType();
+    Type* resTy = I.getType();
     Type* intTy = Type::getInt32Ty(m_pModule->getContext());
-    IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I);
-    GenIntrinsicInst *GII = dyn_cast<GenIntrinsicInst>(&I);
+    IntrinsicInst* II = dyn_cast<IntrinsicInst>(&I);
+    GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(&I);
     if (isSPDiv() && resTy->isFloatTy() &&
         GII && GII->getIntrinsicID() == GenISAIntrinsic::GenISA_IEEE_Divide)
     {
-        Function *newFunc = getOrCreateFunction(FUNCTION_SP_DIV);
+        Function* newFunc = getOrCreateFunction(FUNCTION_SP_DIV);
         Value* args[4];
         args[0] = I.getOperand(0);
         args[1] = I.getOperand(1);
@@ -1252,8 +1289,8 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
     if (resTy->isDoubleTy() &&
         (II && II->getIntrinsicID() == Intrinsic::sqrt))
     {
-        Function *newFunc = getOrCreateFunction(FUNCTION_DP_SQRT);
-        Function *CurrFunc = I.getParent()->getParent();
+        Function* newFunc = getOrCreateFunction(FUNCTION_DP_SQRT);
+        Function* CurrFunc = I.getParent()->getParent();
         Value* args[5];
         args[0] = I.getOperand(0);
         args[1] = ConstantInt::get(intTy, 0); // RN
@@ -1274,8 +1311,8 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
     // llvm.fma.f64
     if (resTy->isDoubleTy() && II && II->getIntrinsicID() == Intrinsic::fma)
     {
-        Function *newFunc = getOrCreateFunction(FUNCTION_DP_FMA);
-        Function *CurrFunc = I.getParent()->getParent();
+        Function* newFunc = getOrCreateFunction(FUNCTION_DP_FMA);
+        Function* CurrFunc = I.getParent()->getParent();
         Value* args[7];
         args[0] = I.getOperand(0);
         args[1] = I.getOperand(1);
@@ -1325,7 +1362,7 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
     return;
 }
 
-bool PreCompiledFuncImport::isDPConvFunc(Function *F) const
+bool PreCompiledFuncImport::isDPConvFunc(Function* F) const
 {
     StringRef FN = F->getName();
     for (int i = 0; i < NUM_FUNCTION_IDS; ++i) {
@@ -1350,20 +1387,20 @@ bool PreCompiledFuncImport::isDPConvFunc(Function *F) const
     return false;
 }
 
-bool PreCompiledFuncImport::usePrivateMemory(Function *F)
+bool PreCompiledFuncImport::usePrivateMemory(Function* F)
 {
     // Assume alloca is in entry BB
-    BasicBlock *entryBB = &F->getEntryBlock();
+    BasicBlock* entryBB = &F->getEntryBlock();
     for (auto II = entryBB->begin(), IE = entryBB->end(); II != IE; ++II)
     {
-        Instruction *I = &*II;
+        Instruction* I = &*II;
         if (isa<AllocaInst>(I))
             return true;
     }
     return false;
 }
 
-void PreCompiledFuncImport::addMDFuncEntryForEmulationFunc(Function *F)
+void PreCompiledFuncImport::addMDFuncEntryForEmulationFunc(Function* F)
 {
     FunctionInfoMetaDataHandle FH = FunctionInfoMetaDataHandle(FunctionInfoMetaData::get());
     FH->setType(FunctionTypeMD::UserFunction);
@@ -1394,7 +1431,7 @@ FunctionType* PreCompiledFuncImport::getNewFuncType(
 {
     // Add all explicit parameters
     FunctionType* pFuncType = pFunc->getFunctionType();
-    std::vector<Type *> newParamTypes(pFuncType->param_begin(), pFuncType->param_end());
+    std::vector<Type*> newParamTypes(pFuncType->param_begin(), pFuncType->param_end());
 
     // Add implicit arguments parameter types
     for (unsigned int i = 0; i < pImplicitArgs->size(); ++i)
@@ -1416,7 +1453,7 @@ void PreCompiledFuncImport::createFuncWithIA()
     {
         Function* pFunc = FuncNeedIA[i];
         ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
-        FunctionType *pNewFTy = getNewFuncType(pFunc, &implicitArgs);
+        FunctionType* pNewFTy = getNewFuncType(pFunc, &implicitArgs);
         Function* pNewFunc = Function::Create(pNewFTy, pFunc->getLinkage());
         pNewFunc->copyAttributesFrom(pFunc);
         pNewFunc->setSubprogram(pFunc->getSubprogram());
@@ -1471,13 +1508,13 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
     for (auto U = old_func->user_begin(), UE = old_func->user_end(); U != UE; ++U)
     {
         std::vector<Value*> new_args;
-        CallInst *cInst = dyn_cast<CallInst>(*U);
+        CallInst* cInst = dyn_cast<CallInst>(*U);
         if (!cInst)
         {
             m_pCtx->EmitError(" undefined reference to `jmp()' ");
             return;
         }
-        Function *parent_func = cInst->getParent()->getParent();
+        Function* parent_func = cInst->getParent()->getParent();
         size_t numArgOperands = cInst->getNumArgOperands();
 
         // let's prepare argument list on new call function
@@ -1494,13 +1531,13 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
         }
 
         // implicit arguments
-        ImplicitArgs *parentIA = getImplicitArgs(parent_func);
+        ImplicitArgs* parentIA = getImplicitArgs(parent_func);
         int cImpCount = 0;
         while (new_arg_iter != new_arg_end)
         {
             ArgInfoMetaDataHandle argInfo = newFH->getImplicitArgInfoListItem(cImpCount);
             ImplicitArg::ArgType argId = (ImplicitArg::ArgType)argInfo->getArgId();
-            Argument *iArgVal = parentIA->getArgInFunc(*parent_func, argId);
+            Argument* iArgVal = parentIA->getArgInFunc(*parent_func, argId);
 
             new_args.push_back(iArgVal);
             ++new_arg_iter;
@@ -1508,7 +1545,7 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
         }
 
         // insert new call instruction before old one
-        CallInst *inst;
+        CallInst* inst;
         if (new_func->getReturnType()->isVoidTy())
         {
             inst = CallInst::Create(new_func, new_args, "", cInst);
@@ -1536,40 +1573,14 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
     old_func->eraseFromParent();
 }
 
-ImplicitArgs* PreCompiledFuncImport::getImplicitArgs(Function *F)
+ImplicitArgs* PreCompiledFuncImport::getImplicitArgs(Function* F)
 {
     if (FuncsImpArgs.count(F) == 0)
     {
-        ImplicitArgs *IA = new ImplicitArgs(*F, m_pMdUtils);
+        ImplicitArgs* IA = new ImplicitArgs(*F, m_pMdUtils);
         FuncsImpArgs[F] = IA;
     }
     return FuncsImpArgs[F];
-}
-
-// Use subroutines if total number of instructions added when inlined
-// exceed the SubroutineInlinerThreshold
-bool PreCompiledFuncImport::shouldWeSubroutine(Function* F)
-{
-    // If there is only one use we should just inline
-    if (F->getNumUses() == 1)
-        return false;
-
-    unsigned NumInstrs = 0;
-    for (BasicBlock &BB : F->getBasicBlockList())
-        NumInstrs += (unsigned)std::distance(BB.begin(), BB.end());
-
-    // Don't want to use subroutines for small functions
-    if (NumInstrs <= 5)
-        return false;
-
-    unsigned totalNumberOfInst = NumInstrs * F->getNumUses();
-
-    if (totalNumberOfInst > 150000)
-    {
-        return true;
-    }
-
-    return false;
 }
 
 void PreCompiledFuncImport::checkAndSetEnableSubroutine()
@@ -1602,10 +1613,10 @@ void PreCompiledFuncImport::checkAndSetEnableSubroutine()
     Module* M = m_pCtx->getModule();
     for (auto FI = M->begin(), FE = M->end(); FI != FE; ++FI)
     {
-        Function *F = &*FI;
+        Function* F = &*FI;
         for (auto II = inst_begin(F), IE = inst_end(F); II != IE; ++II)
         {
-            Instruction *I = &*II;
+            Instruction* I = &*II;
             switch (I->getOpcode()) {
             default:
                 break;
@@ -1637,8 +1648,8 @@ void PreCompiledFuncImport::checkAndSetEnableSubroutine()
                 break;
             }
 
-            GenIntrinsicInst *GII = dyn_cast<GenIntrinsicInst>(I);
-            IntrinsicInst *IInst = dyn_cast<IntrinsicInst>(I);
+            GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(I);
+            IntrinsicInst* IInst = dyn_cast<IntrinsicInst>(I);
             // Handle intrinsic calls
             if (DPEmu && I->getType()->isDoubleTy() &&
                 IInst && IInst->getIntrinsicID() == Intrinsic::sqrt)

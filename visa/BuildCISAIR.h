@@ -102,8 +102,6 @@ public:
     CM_BUILDER_API virtual int AddKernel(VISAKernel *& kernel, const char* kernelName);
     CM_BUILDER_API virtual int AddFunction(VISAFunction *& function, const char* functionName);
     CM_BUILDER_API virtual int Compile(const char * isaFileNameint);
-    CM_BUILDER_API virtual int CreateVISAFileVar(VISA_FileVar *& decl, char *name, unsigned int numElements, VISA_Type dataType,
-                                            VISA_Align varAlign);
 
     CM_BUILDER_API void SetOption(vISAOptions option, bool val) { m_options.setOption(option, val); }
     CM_BUILDER_API void SetOption(vISAOptions option, uint32_t val) { m_options.setOption(option, val); }
@@ -111,6 +109,7 @@ public:
 
     // Used for inline asm code generation
     CM_BUILDER_API virtual int ParseVISAText(const std::string& visaHeader, const std::string& visaText, const std::string& visaTextFile);
+    CM_BUILDER_API virtual int ParseVISAText(const std::string& visaFile);
     CM_BUILDER_API virtual int WriteVISAHeader();
     CM_BUILDER_API std::stringstream& GetAsmTextStream() { return m_ssIsaAsm; }
     CM_BUILDER_API std::stringstream& GetAsmTextHeaderStream() { return m_ssIsaAsmHeader; }
@@ -141,42 +140,19 @@ public:
                                             VISA_Align var_align,
                                             char * var_alias_name,
                                             int var_alias_offset,
-                                            int line_no,
-                                            vISA::G4_Declare *dcl);
-    bool CISA_general_variable_decl(char * var_name,
-                                            unsigned int var_elemts_num,
-                                            VISA_Type data_type,
-                                            VISA_Align var_align,
-                                            char * var_alias_name,
-                                            int var_alias_offset,
                                             attr_gen_struct scope,
                                             int line_no);
-    bool CISA_file_variable_decl(char * var_name,
-                                            unsigned int var_elemts_num,
-                                            VISA_Type data_type,
-                                            VISA_Align var_align,
-                                            int line_no,
-                                            vISA::G4_Declare *dcl);
-    bool CISA_file_variable_decl(char * var_name,
-                                            unsigned int var_elemts_num,
-                                            VISA_Type data_type,
-                                            VISA_Align var_align,
-                                            int line_no);
+
     bool CISA_addr_variable_decl(char *var_name, unsigned int var_elements, VISA_Type data_type, attr_gen_struct scope, int line_no);
 
     bool CISA_predicate_variable_decl(char *var_name,
                                             unsigned int var_elements,
                                             attr_gen_struct reg,
                                             int line_no);
-    bool CISA_create_func_decl(char * name,
-                                int resolved_index,
-                                int line_no);
 
     bool CISA_sampler_variable_decl(char *var_name, int num_elts, char* name, int line_no);
 
     bool CISA_surface_variable_decl(char *var_name, int num_elts, char* name, attr_gen_struct attr, int line_no);
-
-    bool CISA_vme_variable_decl(char *var_name, int num_elts, char* name, int line_no);
 
     bool CISA_input_directive(char* var_name, short offset, unsigned short size, int line_no);
 
@@ -644,13 +620,13 @@ public:
 
 
     bool CISA_create_fcall_instruction(VISA_opnd *pred_opnd,
-                                                ISA_Opcode opcode,
-                                                Common_VISA_EMask_Ctrl emask,
-                                                unsigned exec_size,
-                                                unsigned func_id,
-                                                unsigned arg_size,
-                                                unsigned return_size,
-                                                int line_no);
+        ISA_Opcode opcode,
+        Common_VISA_EMask_Ctrl emask,
+        unsigned exec_size,
+        const char* funcName,
+        unsigned arg_size,
+        unsigned return_size,
+        int line_no);
 
     bool CISA_create_ifcall_instruction(VISA_opnd *pred_opnd,
         Common_VISA_EMask_Ctrl emask,
@@ -768,10 +744,6 @@ private:
     std::list<VISAKernelImpl *> m_kernels;
     //keeps track of functions for stitching purposes, after compilation.
     std::vector<VISAFunction *> m_functionsVector;
-
-    std::map<std::string, CISA_GEN_VAR *> m_file_var_name_to_decl_map;
-    CISA_GEN_VAR * getFileVarDeclFromName(const std::string &name);
-    bool setFileVarNameDeclMap(const std::string &name, CISA_GEN_VAR * genDecl);
 
     // the current kernel being compiled.  It is updated in the ::compile() function
     VISAKernelImpl* m_currentKernel;

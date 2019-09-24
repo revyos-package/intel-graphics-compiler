@@ -545,153 +545,8 @@ namespace vISA
         unsigned int numColor = 0;
 
 #define GRAPH_COLOR_MEM_SIZE 16*1024
-
-        // This function returns the weight of interference edge lr1--lr2,
-        // which is used for computing the degree of lr1.
-        //
-        // When there is no alignment restriction, we should use the normal weight,
-        // which is lr1_nreg + lr2_nreg - 1.
-        //
-        // Otherewise, we need to take into account additional space that may be
-        // required because of the alignment restriction. For example,
-        // if lr1 has even alignment and lr2 has no alignment restriction,
-        // we need to consider the following cases that would require the
-        // maximal available GRF space for successful allocation:
-        // 1) lr1's size is odd, lr2's size is odd and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg + 1)
-        // 2) lr1's size is odd, lr2's size is even and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg)
-        // 3) lr1's size is even, lr2's size is odd and lr2's start position is odd,
-        //    the total space required would be (lr1_nreg + lr2_nreg)
-        // 4) lr1's size is even, lr2's size is even and lr2's start position is odd,
-        //    the total space required would be (lr1_nreg + lr2_nreg + 1)
-        // The above logic can be simplified to the following formula:
-        //    lr1_nreg + lr2_nreg + 1 - ((lr1_nreg + lr2_nreg) % 2)
-        //
-        // If both lr1 and lr2 have even alignment restriction,
-        // we need to consider the following cases that would require the
-        // maximal available GRF space for successful allocation:
-        // 1) lr1's size is odd, lr2's size is odd and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg + 1)
-        // 2) lr1's size is odd, lr2's size is even and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg)
-        // 3) lr1's size is even, lr2's size is odd and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg)
-        // 4) lr1's size is even, lr2's size is even and lr2's start position is even,
-        //    the total space required would be (lr1_nreg + lr2_nreg - 1)
-        // The above logic can be simplified to the following formula:
-        //    lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2)
-        //
-        unsigned edgeWeightGRF(LiveRange* lr1, LiveRange* lr2)
-        {
-            G4_Align lr1_align = lr1->getVar()->getAlignment();
-            G4_Align lr2_align = lr2->getVar()->getAlignment();
-            unsigned lr1_nreg = lr1->getNumRegNeeded();
-            unsigned lr2_nreg = lr2->getNumRegNeeded();
-
-            MUST_BE_TRUE(lr1_align == Either ||
-                lr1_align == Even ||
-                lr2_align == Either ||
-                lr2_align == Even, "Found unsupported GRF alignment in register allocation!");
-
-            if (lr1_align == Either)
-            {
-                return  lr1_nreg + lr2_nreg - 1;
-            }
-            else if (lr2_align == Either)
-            {
-                unsigned sum = lr1_nreg + lr2_nreg;
-                return sum + 1 - ((sum) % 2);
-            }
-            else if (lr2_align == Even)
-            {
-                return lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2);
-            }
-            else
-            {
-                MUST_BE_TRUE(false, "Found unsupported alignment in register allocation!");
-                return 0;
-            }
-        }
-
-        unsigned edgeWeightARF(LiveRange* lr1, LiveRange* lr2)
-        {
-            if (lr1->getRegKind() == G4_FLAG)
-            {
-                G4_SubReg_Align lr1_align = lr1->getVar()->getSubRegAlignment();
-                G4_SubReg_Align lr2_align = lr2->getVar()->getSubRegAlignment();
-                unsigned lr1_nreg = lr1->getNumRegNeeded();
-                unsigned lr2_nreg = lr2->getNumRegNeeded();
-
-                if (lr1_align == Any)
-                {
-                    return  lr1_nreg + lr2_nreg - 1;
-                }
-                else if (lr1_align == Even_Word && lr2_align == Any)
-                {
-                    return lr1_nreg + lr2_nreg + 1 - ((lr1_nreg + lr2_nreg) % 2);
-                }
-                else if (lr1_align == Even_Word && lr2_align == Even_Word)
-                {
-                    if (lr1_nreg % 2 == 0 && lr2_nreg % 2 == 0)
-                    {
-                        return lr1_nreg + lr2_nreg - 2;
-                    }
-                    else
-                    {
-                        return lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2);
-                    }
-                }
-                else
-                {
-                    MUST_BE_TRUE(false, "Found unsupported subRegAlignment in flag register allocation!");
-                    return 0;
-                }
-            }
-            else if (lr1->getRegKind() == G4_ADDRESS)
-            {
-                G4_SubReg_Align lr1_align = lr1->getVar()->getSubRegAlignment();
-                G4_SubReg_Align lr2_align = lr2->getVar()->getSubRegAlignment();
-                unsigned lr1_nreg = lr1->getNumRegNeeded();
-                unsigned lr2_nreg = lr2->getNumRegNeeded();
-
-                if (lr1_align == Any)
-                {
-                    return  lr1_nreg + lr2_nreg - 1;
-                }
-                else if (lr1_align == Four_Word && lr2_align == Any)
-                {
-                    return lr1_nreg + lr2_nreg + 3 - (lr1_nreg + lr2_nreg) % 4;
-                }
-                else if (lr1_align == Four_Word && lr2_align == Four_Word)
-                {
-                    return lr1_nreg + lr2_nreg - 1 + (4 - lr1_nreg % 4) % 4 + (4 - lr2_nreg % 4) % 4;
-                }
-                else if (lr1_align == Eight_Word && lr2_align == Any)
-                {
-                    return lr1_nreg + lr2_nreg + 7 - (lr1_nreg + lr2_nreg) % 8;
-                }
-                else if (lr1_align == Eight_Word && lr2_align == Four_Word)
-                {
-                    if (((8 - lr1_nreg % 8) % 8) >= 4)
-                        return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 - 4;
-                    return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
-                        (4 - lr2_nreg % 4) % 4;
-                }
-                else if (lr1_align == Eight_Word && lr2_align == Eight_Word)
-                {
-                    return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
-                        (8 - lr2_nreg % 8) % 8;
-                }
-                else
-                {
-                    MUST_BE_TRUE(false, "Found unsupported subRegAlignment in address register allocation!");
-                    return 0;
-                }
-            }
-            MUST_BE_TRUE(false, "Found unsupported ARF reg type in register allocation!");
-            return 0;
-        }
+        unsigned edgeWeightGRF(LiveRange* lr1, LiveRange* lr2);
+        unsigned edgeWeightARF(LiveRange* lr1, LiveRange* lr2);
 
         void computeDegreeForGRF();
         void computeDegreeForARF();
@@ -734,7 +589,6 @@ namespace vISA
         void addSaveRestoreCode(unsigned);
         void addCallerSaveRestoreCode();
         void addCalleeSaveRestoreCode();
-        void addFileScopeSaveRestoreCode();
         void addGenxMainStackSetupCode();
         void addCalleeStackSetupCode();
         void saveRegs(
@@ -751,8 +605,6 @@ namespace vISA
             unsigned frameOffset, G4_BB* bb, INST_LIST_ITER insertIt);
         void OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs);
         void OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs, std::vector<bool>& retRegs);
-        void saveFileScopeVar(G4_RegVar* filescopeVar, G4_BB* bb, INST_LIST_ITER insertIt);
-        void restoreFileScopeVar(G4_RegVar* filescopeVar, G4_BB* bb, INST_LIST_ITER insertIt);
         void dumpRegisterPressure();
         GlobalRA & getGRA() { return gra; }
         G4_SrcRegRegion* getScratchSurface() const;
@@ -776,6 +628,8 @@ namespace vISA
         unsigned int subOff = 0;
         std::vector<G4_Declare*> bundleConflictDcls;
         std::vector<int> bundleConflictoffsets;
+        G4_SubReg_Align subAlign = G4_SubReg_Align::Any;
+        bool isEvenAlign = false;
     };
 
     class VerifyAugmentation
@@ -851,6 +705,9 @@ namespace vISA
         void markBlockLocalVars();
         void computePhyReg();
         void fixAlignment();
+        void expandSpillIntrinsic(G4_BB*);
+        void expandFillIntrinsic(G4_BB*);
+        void expandSpillFillIntrinsics();
 
         RAVarInfo defaultValues;
         std::vector<RAVarInfo> vars;
@@ -914,11 +771,13 @@ namespace vISA
             if (VISA_WA_CHECK(builder.getPWaTable(), WaSIMD16SIMD32CallDstAlign))
             {
                 dcl->setSubRegAlign(Sixteen_Word);
+                setSubRegAlign(dcl, Sixteen_Word);
             }
             else
             {
                 // call destination must still be QWord aligned
                 dcl->setSubRegAlign(Four_Word);
+                setSubRegAlign(dcl, Four_Word);
             }
 
             retDecls[retLoc] = dcl;
@@ -1184,6 +1043,40 @@ namespace vISA
             return (unsigned)(vars[dclid].bundleConflictDcls.size());
         }
 
+        unsigned int get_bundle(unsigned int baseReg, int offset)
+        {
+            return (((baseReg + offset) % 64) / 4);
+        }
+
+        unsigned short getOccupiedBundle(G4_Declare* dcl)
+        {
+            unsigned short occupiedBundles = 0;
+            unsigned bundleNum = 0;
+
+
+            for (size_t i = 0, dclConflictSize = getBundleConflictDclSize(dcl); i < dclConflictSize; i++)
+            {
+                int offset = 0;
+                G4_Declare* bDcl = getBundleConflictDcl(dcl, i, offset);
+                if (bDcl->getRegVar()->isPhyRegAssigned())
+                {
+                    unsigned int reg = bDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum();
+                    unsigned int bundle = get_bundle(reg, offset);
+                    if (!(occupiedBundles & ((unsigned short)1 << bundle)))
+                    {
+                        bundleNum++;
+                    }
+                    occupiedBundles |= (unsigned short)1 << bundle;
+                }
+            }
+            if (bundleNum > 12)
+            {
+                occupiedBundles = 0;
+            }
+
+            return occupiedBundles;
+        }
+
         void addSubDcl(G4_Declare *dcl, G4_Declare* subDcl)
         {
             auto dclid = dcl->getDeclId();
@@ -1229,6 +1122,58 @@ namespace vISA
             vars[dclid].subOff = offset;
         }
 
+        G4_SubReg_Align getSubRegAlign(G4_Declare* dcl)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            return vars[dclid].subAlign;
+        }
+
+        void setSubRegAlign(G4_Declare* dcl, G4_SubReg_Align subAlg)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+
+            auto& subAlign = vars[dclid].subAlign;
+            // sub reg alignment can only be more restricted than prior setting
+            MUST_BE_TRUE(subAlign == Any || subAlign == subAlg || subAlign % 2 == 0,
+                ERROR_UNKNOWN);
+            if (subAlign > subAlg)
+            {
+                MUST_BE_TRUE(subAlign % subAlg == 0, "Sub reg alignment conflict");
+                // do nothing; keep the original alignment (more restricted)
+            }
+            else
+            {
+                MUST_BE_TRUE(subAlg % subAlign == 0, "Sub reg alignment conflict");
+                subAlign = subAlg;
+            }
+        }
+
+        bool hasAlignSetup(G4_Declare* dcl)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            if (vars[dclid].subAlign == defaultValues.subAlign &&
+                dcl->getSubRegAlign() != defaultValues.subAlign)
+                return false;
+            return true;
+        }
+
+        bool isEvenAligned(G4_Declare* dcl)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            return vars[dclid].isEvenAlign;
+        }
+
+        void setEvenAligned(G4_Declare* dcl, bool e)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            vars[dclid].isEvenAlign = e;
+        }
+
         BankAlign getBankAlign(G4_Declare*);
         bool areAllDefsNoMask(G4_Declare*);
         void removeUnreferencedDcls();
@@ -1255,8 +1200,8 @@ namespace vISA
         void reportSpillInfo(LivenessAnalysis& liveness, GraphColor& coloring);
         static uint32_t getRefCount(int loopNestLevel);
         bool isReRAPass();
-        void updateSubRegAlignment(unsigned char regFile, G4_SubReg_Align subAlign);
-        void updateAlignment(unsigned char regFile, G4_Align align);
+        void updateSubRegAlignment(G4_SubReg_Align subAlign);
+        void evenAlign();
         void getBankAlignment(LiveRange* lr, BankAlign &align);
         void printLiveIntervals();
         void reportUndefinedUses(LivenessAnalysis& liveAnalysis, G4_BB* bb, G4_INST* inst, G4_Declare* referencedDcl, std::set<G4_Declare*>& defs, std::ofstream& optreport, Gen4_Operand_Number opndNum);
@@ -1280,6 +1225,41 @@ namespace vISA
         void resetGlobalRAStates();
 
         void insertPhyRegDecls();
+
+        void copyMissingAlignment()
+        {
+            // Insert alignment for vars created in RA
+            for (auto dcl : kernel.Declares)
+            {
+                if (dcl->getAliasDeclare())
+                    continue;
+
+                if (!hasAlignSetup(dcl))
+                {
+                    // Var may be temp created in RA
+                    setSubRegAlign(dcl, dcl->getSubRegAlign());
+                    setEvenAligned(dcl, dcl->isEvenAlign());
+                }
+            }
+        }
+
+        void copyAlignment(G4_Declare* dst, G4_Declare* src)
+        {
+            setEvenAligned(dst, isEvenAligned(src));
+            setSubRegAlign(dst, getSubRegAlign(src));
+        }
+
+        void copyAlignment()
+        {
+            for (auto dcl : kernel.Declares)
+            {
+                if (dcl->getAliasDeclare())
+                    continue;
+
+                setSubRegAlign(dcl, dcl->getSubRegAlign());
+                setEvenAligned(dcl, dcl->isEvenAlign());
+            }
+        }
     };
 
     inline G4_Declare* Interference::getGRFDclForHRA(int GRFNum) const
@@ -1361,21 +1341,21 @@ namespace vISA
         unsigned int   rightOff;        //right offset in the scratch space
         unsigned int   useCount;
 
-        bool     isSpill;
-        bool     isBlockLocal;
-        bool     directKill;
+        bool     isSpill = false;
+        bool     isBlockLocal = false;
+        bool     directKill = false;
 
-        bool     regKilled;
-        bool     regPartialKilled;
-        bool     regOverKilled;
-        bool     inRangePartialKilled;
-        bool     regInUse;
+        bool     regKilled = false;
+        bool     regPartialKilled = false;
+        bool     regOverKilled = false;
+        bool     inRangePartialKilled = false;
+        bool     regInUse = false;
 
-        bool     fillInUse;
-        bool     removeable;
-        bool     instKilled;
-        bool     evicted;
-        bool     scratchDefined;
+        bool     fillInUse = false;
+        bool     removeable = false;
+        bool     instKilled = false;
+        bool     evicted = false;
+        bool     scratchDefined = false;
 
         unsigned int   maskFlag;
 

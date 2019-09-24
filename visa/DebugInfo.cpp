@@ -667,8 +667,8 @@ void KernelDebugInfo::generateByteOffsetMapping(std::list<G4_BB*>& stackCallEntr
             if (inst->getGenOffset() != UNDEFINED_GEN_OFFSET)
             {
                 int cisaByteIndex = inst->getCISAOff();
-                maxGenIsaOffset = std::max(maxGenIsaOffset, (uint64_t)inst->getGenOffset()) +
-                    (inst->isCompactedInst() ? 8 : 16);
+                maxGenIsaOffset = (uint64_t)inst->getGenOffset() + 
+                                    (inst->isCompactedInst() ? 8 : 16);
                 if(cisaByteIndex == -1)
                 {
                     continue;
@@ -749,8 +749,7 @@ void KernelDebugInfo::emitRegisterMapping()
                 }
                 spillOffset += dcl->getRegVar()->getDisp();
                 varMap->physicalType = VARMAP_PREG_FILE_MEMORY;
-                if (dcl->getHasFileScope() ||
-                    getKernel().fg.getHasStackCalls() == false)
+                if (getKernel().fg.getHasStackCalls() == false)
                 {
                     varMap->Mapping.Memory.isAbs = 1;
                 }
@@ -912,11 +911,6 @@ unsigned int populateMapDclName(VISAKernelImpl* kernel, std::map<G4_Declare*, st
         dclList.push_back(kernel->getSamplerVar((unsigned int)ctr));
     }
 
-    for(uint32_t ctr = 0; ctr < kernel->getVmeVarCount(); ctr++)
-    {
-        dclList.push_back(kernel->getVmeVar((unsigned int)ctr));
-    }
-
     auto start = dclList.begin();
     auto end = dclList.end();
 
@@ -1033,8 +1027,7 @@ void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInf
         if (physicalType == VARMAP_PREG_FILE_MEMORY)
         {
             unsigned int memOffset = (unsigned int)varsMap[i]->Mapping.Memory.memoryOffset;
-            if (varsMap[i]->dcl->getHasFileScope() ||
-                visaKernel->getKernel()->fg.getHasStackCalls() == false)
+            if (visaKernel->getKernel()->fg.getHasStackCalls() == false)
             {
                 memOffset |= 0x80000000;
             }
@@ -2120,12 +2113,29 @@ bool KernelDebugInfo::isFcallWithSaveRestore(G4_INST* inst)
     return retval;
 }
 
+bool KernelDebugInfo::isFCallInst(G4_INST* inst)
+{
+    if (!inst)
+        return false;
+
+    if (callerSaveRestore.find(inst) == callerSaveRestore.end())
+        return false;
+    return true;
+}
+
+void KernelDebugInfo::setFCallInst(G4_INST* fcall)
+{
+    SaveRestore sr;
+    callerSaveRestore.insert(std::make_pair(fcall, sr));
+}
+
 // Compute extra instructions in insts over oldInsts list and
 // return a new list.
 INST_LIST KernelDebugInfo::getDeltaInstructions(G4_BB* bb)
 {
     INST_LIST deltaInsts;
-    std::copy(bb->begin(), bb->end(), deltaInsts.begin());
+    for (auto instIt = bb->begin(); instIt != bb->end(); instIt++)
+        deltaInsts.push_back(*instIt);
 
     for (auto oldInstsIt : oldInsts)
     {
@@ -2316,9 +2326,8 @@ void SaveRestoreInfo::update(G4_INST* inst, int32_t memOffset, uint32_t regWithM
             MUST_BE_TRUE(regWithMemOffset == srcreg, "Send src not initialized with offset");
 
             auto responselen = inst->getMsgDesc()->ResponseLength();
-            int32_t startoff, endoff;
+            int32_t startoff;
             startoff = memOffset * G4_GRF_REG_NBYTES / 2;
-            endoff = startoff + (responselen * G4_GRF_REG_NBYTES);
 
             for (auto reg = dstreg; reg < (responselen + dstreg); reg++)
             {

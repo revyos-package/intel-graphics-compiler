@@ -68,13 +68,11 @@ using namespace std;
 struct RoutineContainer
 {
     RoutineContainer():
-        fileVarDecls(NULL),
         generalVarDecls(NULL),   generalVarsCount(0),
         addressVarDecls(NULL),   addressVarsCount(0),
         predicateVarDecls(NULL), predicateVarsCount(0),
         samplerVarDecls(NULL),   samplerVarsCount(0),
         surfaceVarDecls(NULL),   surfaceVarsCount(0),
-        vmeVarDecls(NULL),       vmeVarsCount(0),
         labelVarDecls(NULL),     labelVarsCount(0),
         inputVarDecls(NULL),     inputVarsCount(0),
         majorVersion(0),
@@ -84,20 +82,18 @@ struct RoutineContainer
     {
         stringPool.clear();
     }
-    VISA_FileVar**         fileVarDecls; unsigned      fileVarsCount;
     VISA_GenVar**       generalVarDecls; unsigned   generalVarsCount;
     VISA_AddrVar**      addressVarDecls; unsigned   addressVarsCount;
     VISA_PredVar**    predicateVarDecls; unsigned predicateVarsCount;
     VISA_SamplerVar**   samplerVarDecls; unsigned   samplerVarsCount;
     VISA_SurfaceVar**   surfaceVarDecls; unsigned   surfaceVarsCount;
-    VISA_VMEVar**           vmeVarDecls; unsigned       vmeVarsCount;
     VISA_LabelOpnd**      labelVarDecls; unsigned     labelVarsCount;
     CISA_GEN_VAR**        inputVarDecls; unsigned     inputVarsCount;
 
     vector<string> stringPool;
 
-    CISA_IR_Builder* builder;
-    VISAKernel*      kernelBuilder;
+    CISA_IR_Builder* builder = nullptr;
+    VISAKernel*      kernelBuilder = nullptr;
     uint8_t majorVersion;
     uint8_t minorVersion;
 
@@ -172,7 +168,8 @@ inline void readVarBytes(uint8_t major, uint8_t minor, T& dst, uint32_t& bytePos
     }
 }
 
-CM_INLINE static Common_VISA_EMask_Ctrl transformMask( RoutineContainer& container, uint8_t maskVal)
+CM_INLINE static Common_VISA_EMask_Ctrl transformMask(
+    RoutineContainer& container, uint8_t maskVal)
 {
     Common_VISA_EMask_Ctrl mask = vISA_EMASK_M1;
     if (container.majorVersion == 3 && container.minorVersion == 0)
@@ -554,15 +551,9 @@ static VISA_VectorOpnd* readVectorOperandNG(unsigned& bytePos, const char* buf, 
                     }
                     break;
                 }
-            case STATE_OPND_VME:
-                {
-                    VISA_VMEVar* decl = container.vmeVarDecls[index];
-                    kernelBuilderImpl->CreateVISAStateOperand(opnd, decl, offset, isDst);
-                    break;
-                }
             default:
                 {
-                    MUST_BE_TRUE(false, "Invalid state operand class: only surface, vme, and sampler are supported.");
+                    MUST_BE_TRUE(false, "Invalid state operand class: only surface and sampler are supported.");
                     break;
                 }
             }
@@ -1141,7 +1132,7 @@ static void readInstructionControlFlow(unsigned& bytePos, const char* buf, ISA_O
             {
                 uint8_t argSize = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
                 uint8_t retSize = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
-                kernelBuilder->AppendVISACFFunctionCallInst(pred, emask, esize, labelId, argSize, retSize);
+                kernelBuilder->AppendVISACFFunctionCallInst(pred, emask, esize, container.stringPool[labelId], argSize, retSize);
                 return;
             }
 
@@ -1277,11 +1268,8 @@ static void readInstructionMisc(unsigned& bytePos, const char* buf, ISA_Opcode o
         }
     case ISA_VME_FBR:
         {
-            unsigned uniInputSize;
-
-            uniInputSize = 4;
-            VISA_RawOpnd*    UNIInput       = readRawOperandNG(bytePos, buf, container); //, uniInputSize * 32);
-            VISA_RawOpnd*    FBRInput       = readRawOperandNG(bytePos, buf, container); //, 128);
+            VISA_RawOpnd*    UNIInput       = readRawOperandNG(bytePos, buf, container);
+            VISA_RawOpnd*    FBRInput       = readRawOperandNG(bytePos, buf, container);
             uint8_t          surface        = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
             VISA_VectorOpnd* FBRMbMode      = readVectorOperandNG(bytePos, buf, container,false);
             VISA_VectorOpnd* FBRSubMbShape  = readVectorOperandNG(bytePos, buf, container,false);
@@ -1298,22 +1286,9 @@ static void readInstructionMisc(unsigned& bytePos, const char* buf, ISA_Opcode o
             uint8_t       streamMode = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
             uint8_t       searchCtrl = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
 
-            unsigned uniInputSize;
-            uint8_t imeInputSize;
+            VISA_RawOpnd* UNIInput   = readRawOperandNG(bytePos, buf, container);
 
-            uniInputSize = 4;
-
-            VISA_RawOpnd* UNIInput   = readRawOperandNG(bytePos, buf, container); //, uniInputSize*32);
-
-            if((COMMON_ISA_VME_STREAM_MODE) streamMode != VME_STREAM_IN &&
-                (COMMON_ISA_VME_STREAM_MODE) streamMode != VME_STREAM_IN_OUT) {
-                    imeInputSize = 64;
-            } else if((COMMON_ISA_VME_SEARCH_CTRL) searchCtrl == VME_SEARCH_DUAL_REF_DUAL_REC) {
-                imeInputSize = 192;
-            } else {
-                imeInputSize = 128;
-            }
-            VISA_RawOpnd* IMEInput   = readRawOperandNG(bytePos, buf, container); //, imeInputSize);
+            VISA_RawOpnd* IMEInput   = readRawOperandNG(bytePos, buf, container);
 
             uint8_t       surface    = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
             VISA_RawOpnd* ref0       = readRawOperandNG(bytePos, buf, container); //, 2);
@@ -1328,11 +1303,7 @@ static void readInstructionMisc(unsigned& bytePos, const char* buf, ISA_Opcode o
         }
     case ISA_VME_SIC:
         {
-            unsigned uniInputSize;
-
-            uniInputSize = 4;
-
-            VISA_RawOpnd* UNIInput = readRawOperandNG(bytePos, buf, container); //, uniInputSize * 32);
+            VISA_RawOpnd* UNIInput = readRawOperandNG(bytePos, buf, container);
             VISA_RawOpnd* SICInput = readRawOperandNG(bytePos, buf, container); //, 128); //SICInput
             uint8_t       surface  = readPrimitiveOperandNG<uint8_t>(bytePos, buf);
             VISA_RawOpnd* output   = readRawOperandNG(bytePos, buf, container);
@@ -2068,7 +2039,8 @@ static void readInstructionSampler(unsigned& bytePos, const char* buf, ISA_Opcod
 }
 
 
-extern void readInstructionNG(unsigned& bytePos, const char* buf, RoutineContainer& container, unsigned instID)
+void readInstructionNG(
+    unsigned& bytePos, const char* buf, RoutineContainer& container, unsigned instID)
 {
     ISA_Opcode opcode = (ISA_Opcode)readPrimitiveOperandNG<uint8_t>(bytePos, buf);
     MUST_BE_TRUE(opcode < ISA_NUM_OPCODE, "Illegal or unimplemented CISA opcode.");
@@ -2224,7 +2196,8 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         uint8_t aliasScopeSpecifier = header.variables[declID].alias_scope_specifier;
         int status = CM_SUCCESS;
 
-        if (aliasScopeSpecifier == 0)
+        assert(aliasScopeSpecifier == 0 && "file scope variables are no longer supported");
+
         {
             VISA_GenVar* parentDecl = NULL;
             uint16_t aliasOffset = 0;
@@ -2243,23 +2216,6 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
                 aliasOffset = header.variables[declID].alias_offset;
             }
 
-            status = kernelBuilderImpl->CreateVISAGenVar(
-                decl, header.strings[var->name_index], var->num_elements, varType,
-                varAlign, parentDecl, aliasOffset);
-            ASSERT_USER(CM_SUCCESS == status,
-                "Failed to add VISA general variable.");
-        }
-        else
-        {
-            uint32_t aliasIndex  = header.variables[declID].alias_index;
-            uint16_t aliasOffset = header.variables[declID].alias_offset;
-
-            // else assume resolved index = symbolic index
-            // This happens when builder API is used instead of reading from CISA file.
-            // The assumption here is that when builder API is used, variable and function
-            // resolution is done by caller of builder API already.
-
-            VISA_FileVar* parentDecl = container.fileVarDecls[aliasIndex];
             status = kernelBuilderImpl->CreateVISAGenVar(
                 decl, header.strings[var->name_index], var->num_elements, varType,
                 varAlign, parentDecl, aliasOffset);
@@ -2461,12 +2417,10 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         container.surfaceVarDecls[i] = decl;
     }
 
-    // read VME variables
-    READ_CISA_FIELD(header.vme_count, uint8_t, bytePos, buf);
-    header.vmes = (state_info_t*)mem.alloc( sizeof(state_info_t) * header.vme_count);
-    container.vmeVarDecls = (VISA_VMEVar**)mem.alloc(sizeof(VISA_VMEVar*) * (header.vme_count));
-    container.vmeVarsCount = header.vme_count;
-    assert(container.vmeVarsCount == 0 && "VME variable is no longer supported");
+    int vmeCount = 0;
+    READ_CISA_FIELD(vmeCount, uint8_t, bytePos, buf);
+    assert(vmeCount == 0 && "VME variable is no longer supported");
+    header.vme_count = 0;
 
     // read input variables
     if (isKernel)
@@ -2602,22 +2556,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
     // would not work correctly
     builder->CISA_IR_setVersion(isaHeader.major_version, isaHeader.minor_version);
 
-    unsigned fileVarsCount = 0;
-    VISA_FileVar** fileVarDecls = NULL;
-
-    fileVarsCount = isaHeader.num_filescope_variables;
-    fileVarDecls = (VISA_FileVar**)mem.alloc(sizeof(VISA_FileVar*)* isaHeader.num_filescope_variables);
-    for (unsigned i = 0; i < isaHeader.num_filescope_variables; i++)
-    {
-        filescope_var_info_t* filescope_variable = &isaHeader.filescope_variables[i];
-        VISA_Type   type = (VISA_Type)((filescope_variable->bit_properties) & 0xF);
-        VISA_Align  align = (VISA_Align)((filescope_variable->bit_properties >> 4) & 0x7);
-
-        VISA_FileVar* fileVar = NULL;
-        builder->CreateVISAFileVar(fileVar, (char*)filescope_variable->name, filescope_variable->num_elements, type, align);
-        fileVarDecls[i] = fileVar;
-    }
-
     if (kernelName)
     {
         int kernelIndex = -1;
@@ -2639,8 +2577,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
 
         RoutineContainer container;
         container.builder = builder;
-        container.fileVarDecls = fileVarDecls;
-        container.fileVarsCount = fileVarsCount;
         container.kernelBuilder = NULL;
         container.majorVersion = isaHeader.major_version;
         container.minorVersion = isaHeader.minor_version;
@@ -2676,8 +2612,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
 
             RoutineContainer container;
             container.builder = builder;
-            container.fileVarDecls = fileVarDecls;
-            container.fileVarsCount = fileVarsCount;
             container.kernelBuilder = NULL;
             container.majorVersion = isaHeader.major_version;
             container.minorVersion = isaHeader.minor_version;
@@ -2695,8 +2629,6 @@ extern bool readIsaBinaryNG(const char* buf, CISA_IR_Builder* builder, vector<VI
                 RoutineContainer container;
 
                 container.builder = builder;
-                container.fileVarDecls = fileVarDecls;
-                container.fileVarsCount = fileVarsCount;
                 container.majorVersion = isaHeader.major_version;
                 container.minorVersion = isaHeader.minor_version;
 

@@ -99,9 +99,10 @@ static Region macroDefaultSourceRegion(
 
 DecoderBase::DecoderBase(const Model &model, ErrorHandler &errHandler) :
     GEDBitProcessor(model,errHandler),
-    m_kernel(nullptr),
     m_gedModel(IGAToGEDTranslation::lowerPlatform(model.platform)),
-    m_opSpec(nullptr)
+    m_kernel(nullptr),
+    m_opSpec(nullptr),
+    m_binary(nullptr)
 {
     IGA_ASSERT(m_gedModel != GED_MODEL_INVALID, "invalid GED model");
 }
@@ -162,10 +163,11 @@ Kernel *DecoderBase::decodeKernel(
     } else {
         auto blockStarts = Block::inferBlocks(
             errorHandler(),
-            binarySize,
             kernel->getMemManager(),
             insts);
+        int id = 1;
         for (auto bitr : blockStarts) {
+            bitr.second->setID(id++);
             kernel->appendBlock(bitr.second);
         }
     }
@@ -481,11 +483,9 @@ void DecoderBase::decodeBasicDestinationAlign16(Instruction *inst)
         break;
     }
     case GED_ADDR_MODE_Indirect: {
-        uint32_t hStride = 1;
         GED_DECODE_RAW(GED_DST_CHAN_EN, chEn, DstChanEn);
         if (chEn == GED_DST_CHAN_EN_xyzw) {
             warning("converting unary/binary Align16 dst to equivalent Align1");
-            hStride = 1;
         } else {
             fatal("unsupported Align16 Dst.ChEn (only .xyzw supported)");
         }
@@ -493,7 +493,7 @@ void DecoderBase::decodeBasicDestinationAlign16(Instruction *inst)
         GED_DECODE_RAW(int32_t, addrImm, DstAddrImm);
 
         GED_DECODE_RAW(uint32_t, subRegNum, DstAddrSubRegNum);
-        RegRef a0 = {0, (uint8_t)subRegNum};
+        RegRef a0 = RegRef(0, (uint8_t)subRegNum);
         inst->setInidirectDestination(
             dstMod, a0, (uint16_t)addrImm, Region::Horz::HZ_1, type);
         break;
@@ -623,7 +623,7 @@ void DecoderBase::decodeTernaryDestinationAlign16(Instruction *inst)
     GED_DECODE_RAW(GED_DST_CHAN_EN, chEn, DstChanEn);
 
     RegName regName = RegName::INVALID;
-    RegRef regRef{0,0};
+    RegRef regRef;
     decodeReg(-1, regFile, regNumBits, regName, regRef);
 
     if (inst->isMacro()) {
@@ -767,7 +767,7 @@ void DecoderBase::decodeTernarySourceAlign16(Instruction *inst)
 
     if (isMacro) {
         MathMacroExt MathMacroReg = decodeSrcMathMacroReg<S>();
-        RegRef rr = {(uint8_t)regNum, 0};
+        RegRef rr = RegRef((uint8_t)regNum, 0);
         Region macroDftSrcRgn = macroDefaultSourceRegion(
             (int)S, inst->getOpSpec(), m_model.platform, inst->getExecSize());
         inst->setMacroSource(
@@ -781,10 +781,7 @@ void DecoderBase::decodeTernarySourceAlign16(Instruction *inst)
     } else {
         int subReg = type == Type::INVALID ?
             0 : binNumToSubRegNum(decodeSrcSubRegNum<S>(), RegName::GRF_R, type);
-        RegRef reg = {
-            (uint8_t)regNum,
-            (uint8_t)subReg
-        };
+        RegRef reg = RegRef((uint8_t)regNum, (uint8_t)subReg);
         Region rgn;
         if (decodeSrcRepCtrl<S>() == GED_REP_CTRL_NoRep) {
             GED_SWIZZLE swizzle[4];
@@ -928,7 +925,7 @@ void DecoderBase::decodeTernarySourceAlign1(Instruction *inst)
             if (m_model.supportsAlign16ImplicitAcc()) {
                 fatal("src%d: macro instructions must be Align16 for this platform.", (int)S);
             }
-            RegRef regRef{0,0};
+            RegRef regRef;
             RegName regName = decodeSourceReg<S>(regRef);
             Region macroDftSrcRgn = macroDefaultSourceRegion(
                 (int)S, inst->getOpSpec(), m_model.platform, inst->getExecSize());
@@ -1774,8 +1771,8 @@ bool DecoderBase::isChanSelPacked()
     uint32_t chanSel = decodeSrcChanSel<S>();
     GED_SWIZZLE swizzle[4];
     decodeChSelToSwizzle(chanSel, swizzle);
-    return swizzle[0] != GED_SWIZZLE_x && swizzle[1] && GED_SWIZZLE_y &&
-           swizzle[2] != GED_SWIZZLE_z && swizzle[3] && GED_SWIZZLE_w;
+    return swizzle[0] != GED_SWIZZLE_x && swizzle[1] != GED_SWIZZLE_y &&
+           swizzle[2] != GED_SWIZZLE_z && swizzle[3] != GED_SWIZZLE_w;
 }
 
 void DecoderBase::decodeThreadOptions(Instruction *inst, GED_THREAD_CTRL trdCntrl)
@@ -1867,8 +1864,8 @@ void DecoderBase::decodeOptions(Instruction *inst)
 
     if (GED_WORKAROUND(
         /* really need to get GED to support ThrCtrl on GEN7-8 send's */
-            !os.isSendOrSendsFamily() && os.supportsThreadCtrl() ||
-            os.isSendOrSendsFamily() && m_model.platform >= Platform::GEN9))
+            (!os.isSendOrSendsFamily() && os.supportsThreadCtrl()) ||
+            (os.isSendOrSendsFamily() && m_model.platform >= Platform::GEN9)))
     {
         GED_THREAD_CTRL trdCntrl = GED_THREAD_CTRL_Normal;
         GED_DECODE_RAW_TO(ThreadCtrl, trdCntrl);

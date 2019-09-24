@@ -51,7 +51,7 @@ private:
     KernelViewImpl& operator =(const KernelViewImpl &k) { return *this; }
 public:
     const iga::Model                       &m_model;
-    iga::Kernel                            *m_kernel;
+    iga::Kernel                            *m_kernel = nullptr;
     iga::ErrorHandler                       m_errHandler;
     std::map<uint32_t,iga::Instruction*>    m_instsByPc;
     std::map<uint32_t, Block*>              m_blockToPcMap;
@@ -62,7 +62,6 @@ public:
         size_t bytesLength
     )
         : m_model(*iga::Model::LookupModel(platf))
-        , m_kernel(nullptr)
 
     {
         iga::Decoder decoder(*Model::LookupModel(platf), m_errHandler);
@@ -453,11 +452,13 @@ kv_status_t kv_get_message_sfid(const kv_t *kv, int32_t pc, int32_t *sfid_enum)
         return kv_status_t::KV_NON_SEND_INSTRUCTION;
     }
 
+    Platform p = ((KernelViewImpl*)kv)->m_model.platform;
     auto exDesc = inst->getExtMsgDescriptor();
-    if (exDesc.type != SendDescArg::IMM)
+    bool isTrue = false;
+
+    if (exDesc.type != SendDescArg::IMM && isTrue)
         return kv_status_t::KV_DESCRIPTOR_INDIRECT;
 
-    Platform p = ((KernelViewImpl *)kv)->m_model.platform;
     SFID sfid = getSFID(p, inst->getOpSpec(), exDesc.imm, 0);
     *sfid_enum = static_cast<int32_t>(sfid);
 
@@ -470,24 +471,36 @@ kv_status_t kv_get_message_sfid(const kv_t *kv, int32_t pc, int32_t *sfid_enum)
 uint32_t kv_get_message_len(
     const kv_t *kv, int32_t pc, uint32_t* mLen, uint32_t* emLen, uint32_t* rLen)
 {
-    if (!mLen || !emLen || !rLen)
+    if (!kv || !mLen || !emLen || !rLen)
         return 0;
 
     const Instruction *inst = getInstruction(kv, pc);
-    if (!inst) {
+    if (!inst)
         return 0;
-    }
+    else if (!inst->getOpSpec().isSendOrSendsFamily())
+        return 0;
 
     auto exDesc = inst->getExtMsgDescriptor();
     auto desc = inst->getMsgDescriptor();
 
-    // TODO: do I check for immediates?
-    //if (exDesc.type != SendDescArg::IMM || desc.type != SendDescArg::IMM)
-    //    return 0;
+    uint32_t numSet = 0;
+    if (desc.type == SendDescArg::IMM) {
+        *rLen = (desc.imm >> 20) & 0x1F; // Desc[24:20]
+        *mLen = (desc.imm >> 25) & 0x1F; // Desc[29:25]
+        numSet += 2;
+    } else {
+        *rLen = KV_INVALID_LEN;
+        *mLen = KV_INVALID_LEN;
+    }
 
-    Platform p = ((KernelViewImpl *)kv)->m_model.platform;
+    if (exDesc.type == SendDescArg::IMM) {
+        *emLen = (exDesc.imm >> 6) & 0x3F; // ExDesc[10:6]
+        numSet++;
+    } else {
+        *emLen = KV_INVALID_LEN;
+    }
 
-    return getMessageLengths(p, inst->getOpSpec(), exDesc.imm, desc.imm, mLen, emLen, rLen);
+    return numSet;
 }
 
 uint32_t kv_get_execution_size(const kv_t *kv, int32_t pc)
@@ -727,7 +740,7 @@ int32_t kv_is_source_vector(const kv_t *kv, int32_t pc, uint32_t sourceNumber)
     }
 
     auto src = inst->getSource((uint8_t)sourceNumber);
-    if (src.getKind() != Operand::Kind::DIRECT ||
+    if (src.getKind() != Operand::Kind::DIRECT &&
         src.getKind() != Operand::Kind::INDIRECT)
     {
         return -1;
@@ -805,7 +818,7 @@ int32_t kv_get_source_region(const kv_t *kv, int32_t pc, uint32_t src_op, uint32
     }
     const Operand &src = inst->getSource(src_op);
     if(!(src.getKind() == Operand::Kind::DIRECT || src.getKind() == Operand::Kind::INDIRECT) ||
-        !(src.getDirRegName() == RegName::GRF_R)
+        !(src.getDirRegName() == RegName::GRF_R || src.getDirRegName() == RegName::ARF_SR)
         )
     {
         *vt = SrcRgnVt;

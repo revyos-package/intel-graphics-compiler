@@ -479,6 +479,51 @@ bool G4_SendMsgDescriptor::is16BitReturn() const
     return desc.layout.returnFormat == 1;
 }
 
+bool G4_SendMsgDescriptor::isA64Message() const
+{
+    if (!isHDC()) {
+        return false;
+    }
+
+    uint32_t msgType = getHdcMessageType();
+    auto funcID = getFuncId();
+    switch (funcID) {
+    case SFID::DP_DC1:
+    {
+        switch(msgType) {
+        default:
+            break;
+        case DC1_A64_SCATTERED_READ:
+        case DC1_A64_UNTYPED_SURFACE_READ:
+        case DC1_A64_ATOMIC:
+        case DC1_A64_BLOCK_READ :
+        case DC1_A64_BLOCK_WRITE:
+        case DC1_A64_UNTYPED_SURFACE_WRITE:
+        case DC1_A64_SCATTERED_WRITE:
+        case DC1_A64_UNTYPED_FLOAT_ATOMIC:
+            return true;
+        }
+        break;
+    }
+    case SFID::DP_DC2 :
+    {
+        switch (msgType) {
+        default:
+            break;
+        case DC2_A64_SCATTERED_READ:
+        case DC2_A64_UNTYPED_SURFACE_READ:
+        case DC2_A64_UNTYPED_SURFACE_WRITE:
+        case DC2_A64_SCATTERED_WRITE:
+            return true;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return false;
+}
+
 static int getNumEnabledChannels(uint32_t chDisableBits)
 {
     switch(chDisableBits)
@@ -578,7 +623,7 @@ bool G4_SendMsgDescriptor::isReadOnlyMessage(uint32_t msgDesc,
     case SFID::DP_DC:
         switch (subFuncID) {
         case DC_OWORD_BLOCK_READ:
-        case DC_UNALIGNED_OWORD_BLOCK_READ:
+        case DC_ALIGNED_OWORD_BLOCK_READ:
         case DC_DWORD_SCATTERED_READ:
         case DC_BYTE_SCATTERED_READ:
             return true;
@@ -742,15 +787,15 @@ G4_INST::G4_INST(const IR_Builder& irb,
     G4_Operand* s1,
     unsigned int opt) :
     op(o), dst(d), predicate(prd), mod(m), option(opt),
+    useInstList(irb.getAllocator()),
+    defInstList(irb.getAllocator()),
     local_id(0),
     srcCISAoff(-1),
+    location(NULL),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
     bin(nullptr),
-    useInstList(irb.getAllocator()),
-    defInstList(irb.getAllocator()),
-    location(NULL),
     builder(irb)
 {
     srcs[0] = s0;
@@ -785,15 +830,15 @@ G4_INST::G4_INST(const IR_Builder& irb,
     G4_Operand* s2,
     unsigned int opt) :
     op(o), dst(d), predicate(prd), mod(m), option(opt),
+    useInstList(irb.getAllocator()),
+    defInstList(irb.getAllocator()),
     local_id(0),
     srcCISAoff(-1),
+    location(NULL),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
     bin(nullptr),
-    useInstList(irb.getAllocator()),
-    defInstList(irb.getAllocator()),
-    location(NULL),
     builder(irb)
 {
     srcs[0] = s0;
@@ -856,7 +901,7 @@ G4_InstSend::G4_InstSend(
 
 void G4_INST::setOpcode(G4_opcode opcd)
 {
-    MUST_BE_TRUE(opcd <= G4_NUM_OPCODE &&
+    MUST_BE_TRUE(opcd < G4_NUM_OPCODE &&
         (G4_Inst_Table[op].instType == G4_Inst_Table[opcd].instType ||
         G4_Inst_Table[opcd].instType == InstTypeMov ||
         (
@@ -1352,7 +1397,7 @@ void G4_INST::trimDefInstList()
             }
             else if( (*iter).first->getDst() )
             {
-                if( (*iter).first->hasNULLDst() && (*iter).first->hasNULLDst() )
+                if ((*iter).first->hasNULLDst())
                 {
                     rel = Rel_disjoint;
                 }
@@ -1777,7 +1822,7 @@ G4_INST::MovType G4_INST::canPropagate() const
         || useInstList.size() == 0
         // Do not eliminate stack call return value passing instructions.
         // Do not eliminate vars marked with Output attribute
-        || (topDcl && (topDcl->getHasFileScope() || topDcl->isOutput())))
+        || (topDcl && topDcl->isOutput()))
     {
         return SuperMov;
     }
@@ -2443,10 +2488,6 @@ bool G4_INST::canHoist(bool simdBB, const Options *opt) const
     if (dst == NULL)
     {
         return false;
-    }
-    if ( getDst()->getTopDcl() && getDst()->getTopDcl()->getHasFileScope() )
-    {
-            return false;
     }
 
     G4_Operand *src = srcs[0];
@@ -3426,7 +3467,7 @@ bool G4_InstSend::isDirectSplittableSend()
         case DC_DWORD_SCATTERED_READ:   //dword scattered read: emask need be vertically cut according to splitting
         case DC_BYTE_SCATTERED_READ:       //byte scattered read
             return false;
-        case DC_UNALIGNED_OWORD_BLOCK_READ: //Nomask
+        case DC_ALIGNED_OWORD_BLOCK_READ: //Nomask
         case DC_OWORD_BLOCK_READ:
             return true;
         default: return false;
@@ -4494,7 +4535,7 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
     if (isAccRegValid())
     {
         // no vertical stride for 3-source instruction
-        if (inst->getNumSrc() != 3)
+        if (inst->getNumSrc() != 3 && desc)
         {
             output << "<" << desc->vertStride << ">";
         }
@@ -4820,7 +4861,7 @@ unsigned G4_DstRegRegion::computeRightBound( uint8_t exec_size )
 /// should have (nearly) identical code for compareOperand
 static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operand* opnd)
 {
-    assert(regRegion->isSrcRegRegion() || regRegion->isDstRegRegion() && "expect either src or dst regRegion");
+    assert((regRegion->isSrcRegRegion() || regRegion->isDstRegRegion()) && "expect either src or dst regRegion");
     bool legal_opnd = opnd->isSrcRegRegion() || opnd->isDstRegRegion() || opnd->isPredicate() || opnd->isCondMod();
     G4_VarBase* myBase = regRegion->getBase();
     G4_VarBase *opndBase = opnd->getBase();
@@ -5131,7 +5172,7 @@ bool G4_DstRegRegion::checkGRFAlign() const
                     return false;
                 }
 
-                if( aliasdcl->getSubRegAlign() >= SUB_ALIGNMENT_GRFALIGN ||
+                if( aliasdcl->getSubRegAlign() >= GRFALIGN ||
                     aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= G4_GRF_REG_NBYTES ){
                         return true;
                 }
@@ -5194,7 +5235,7 @@ static bool regionHasFixedSubreg(G4_Operand* opnd, uint32_t& offset)
     G4_Declare *rootDcl = base->asRegVar()->getDeclare()->getRootDeclare(subregByte);
     subregByte += subRegOff * G4_Type_Table[opnd->getType()].byteSize;
 
-    if (rootDcl->getSubRegAlign() < SUB_ALIGNMENT_GRFALIGN)
+    if (rootDcl->getSubRegAlign() < GRFALIGN)
     {
         return false;
     }
@@ -5499,14 +5540,9 @@ bool GlobalRA::areAllDefsNoMask(G4_Declare* dcl)
     return retval;
 }
 
-void G4_Declare::setAlign(G4_Align al)
+void G4_Declare::setEvenAlign()
 {
-    regVar->setAlignment(al);
-}
-
-G4_Align G4_Declare::getAlign() const
-{
-    return regVar->getAlignment();
+    regVar->setEvenAlign();
 }
 
 BankAlign GlobalRA::getBankAlign(G4_Declare* dcl)
@@ -5548,9 +5584,23 @@ void G4_Declare::setSubRegAlign(G4_SubReg_Align subAl)
     regVar->setSubRegAlignment(subAl);
 }
 
+bool G4_Declare::isEvenAlign() const
+{
+    return regVar->isEvenAlign();
+}
+
 G4_SubReg_Align G4_Declare::getSubRegAlign() const
 {
     return regVar->getSubRegAlignment();
+}
+
+void G4_Declare::copyAlign(G4_Declare* dcl)
+{
+    if (dcl->isEvenAlign())
+    {
+        setEvenAlign();
+    }
+    regVar->setSubRegAlignment(dcl->getSubRegAlign());
 }
 
 void G4_Declare::emit(
@@ -6510,7 +6560,7 @@ unsigned G4_SrcRegRegion::computeRightBound( uint8_t exec_size )
             }
             for( uint16_t i = 0; i < numAddrSubReg; i++ )
             {
-                bitVec[0] |= 0x3 << ( i * 2 );
+                bitVec[0] |= ((uint64_t) 0x3) << ( i * 2 );
             }
             right_bound = left_bound + G4_Type_Table[ADDR_REG_TYPE].byteSize * numAddrSubReg - 1;
         }
@@ -6722,7 +6772,7 @@ bool G4_SrcRegRegion::checkGRFAlign(){
                     return false;
                 }
 
-                if( aliasdcl->getSubRegAlign() >= SUB_ALIGNMENT_GRFALIGN ||
+                if( aliasdcl->getSubRegAlign() >= GRFALIGN ||
                     aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= G4_GRF_REG_NBYTES ){
                         return true;
                 }
@@ -6798,7 +6848,7 @@ unsigned G4_RegVar::getByteAddr() const
     MUST_BE_TRUE(reg.phyReg != NULL, ERROR_UNKNOWN);
     if (reg.phyReg->isGreg())
     {
-        return reg.phyReg->asGreg()->getRegNum() * 32 +
+        return reg.phyReg->asGreg()->getRegNum() * GENX_GRF_REG_SIZ +
             reg.subRegOff * (G4_Type_Table[decl->getElemType()].byteSize);
     }
 
@@ -7542,7 +7592,6 @@ void LiveIntervalInfo::addLiveInterval(uint32_t start, uint32_t end)
     else
     {
         bool done = false, firstcheck = false;
-        std::pair<uint32_t, uint32_t>* prev = nullptr;
         // Check if a new live-interval can be pushed independently of others
         for (auto lr_it = liveIntervals.begin();
             lr_it != liveIntervals.end();
@@ -7565,7 +7614,6 @@ void LiveIntervalInfo::addLiveInterval(uint32_t start, uint32_t end)
             if (lr.second < start)
             {
                 firstcheck = true;
-                prev = &lr;
             }
 
             if (lr.first <= start && lr.second >= end)
@@ -7761,6 +7809,52 @@ bool G4_INST::mayExpandToAccMacro() const
            (opcode() == G4_pln && !builder.doPlane());
 }
 
+bool G4_INST::canExecSizeBeAcc(Gen4_Operand_Number opndNum) const
+{
+    switch (dst->getType())
+    {
+    case Type_W:
+    case Type_UW:
+    case Type_HF:
+        if (getExecSize() != (builder.getNativeExecSize() * 2))
+        {
+            return false;
+        }
+        break;
+    case Type_F:
+        if (getExecSize() != (builder.getNativeExecSize() * 2) && getExecSize() != builder.getNativeExecSize())
+        {
+            return false;
+        }
+        break;
+    case Type_DF:
+        if (!builder.useAccForDF())
+        {
+            return false;
+        }
+        if (getExecSize() != builder.getNativeExecSize() && getExecSize() != (builder.getNativeExecSize() / 2))
+        {
+            return false;
+        }
+        break;
+    case Type_D:
+    case Type_UD:
+        if (getExecSize() != builder.getNativeExecSize())
+        {
+            return false;
+        }
+        if (opndNum != Opnd_dst && isSignSensitive(opndNum))
+        {
+            return false;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    return true;
+}
+
 // returns true if dst may be replaced by an explicit acc
 // in addition to opcode-specific checks, we require
 // -- dst must be GRF
@@ -7796,40 +7890,8 @@ bool G4_INST::canDstBeAcc() const
         }
     }
 
-    switch (dst->getType())
+    if (!canExecSizeBeAcc(Opnd_dst))
     {
-    case Type_W:
-    case Type_UW:
-    case Type_HF:
-        if (getExecSize() != 16)
-        {
-            return false;
-        }
-        break;
-    case Type_F:
-        if (getExecSize() != 16 && getExecSize() != 8)
-        {
-            return false;
-        }
-        break;
-    case Type_DF:
-         if (!builder.useAccForDF())
-         {
-             return false;
-         }
-        if (getExecSize() != 8 && getExecSize() != 4)
-        {
-            return false;
-        }
-        break;
-    case Type_D:
-    case Type_UD:
-        if (getExecSize() != 8)
-        {
-            return false;
-        }
-        break;
-    default:
         return false;
     }
 
@@ -7891,8 +7953,9 @@ bool G4_INST::canDstBeAcc() const
 // in addition to opcode-specific checks, we require
 // -- contiguous regions
 // -- simd8 for D/UD, simd8/16 for F, simd16 for HF/W, other types not allowed
-bool G4_INST::canSrcBeAcc(int srcId) const
+bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
 {
+    int srcId = opndNum == Opnd_src0 ? 0 : 1;
     assert((srcId == 0 || srcId == 1) && "must be either src0 or src1");
     if (getSrc(srcId) == nullptr || !getSrc(srcId)->isSrcRegRegion())
     {
@@ -7915,45 +7978,8 @@ bool G4_INST::canSrcBeAcc(int srcId) const
         return false;
     }
 
-    switch (src->getType())
+    if (!canExecSizeBeAcc(opndNum))
     {
-    case Type_W:
-    case Type_UW:
-    case Type_HF:
-        if (getExecSize() != 16)
-        {
-            return false;
-        }
-        break;
-    case Type_F:
-        if (getExecSize() != 16 && getExecSize() != 8)
-        {
-            return false;
-        }
-        break;
-    case Type_DF:
-         if (!builder.useAccForDF())
-         {
-             return false;
-         }
-
-        if (getExecSize() != 8 && getExecSize() != 4)
-        {
-            return false;
-        }
-        break;
-    case Type_D:
-    case Type_UD:
-        if (getExecSize() != 8)
-        {
-            return false;
-        }
-        if (isSignSensitive(srcId == 0 ? Opnd_src0 : Opnd_src1))
-        {
-            return false;
-        }
-        break;
-    default:
         return false;
     }
 

@@ -72,6 +72,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/LowerGEPForPrivMem.hpp"
 #include "Compiler/CISACodeGen/POSH_RemoveNonPositionOutput.h"
 #include "Compiler/CISACodeGen/RegisterEstimator.hpp"
+#include "Compiler/CISACodeGen/ComputeShaderLowering.hpp"
 
 #include "Compiler/CISACodeGen/SLMConstProp.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/GenericAddressResolution/GenericAddressDynamicResolution.hpp"
@@ -104,7 +105,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/LegalizationPass.hpp"
 #include "Compiler/LowPrecisionOptPass.hpp"
 #include "Compiler/WorkaroundAnalysisPass.h"
-#include "Compiler/WaveIntrinsicWAPass.h"
 
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
@@ -183,15 +183,15 @@ using namespace IGC::Debug;
 
 namespace IGC
 {
-const int LOOP_ROTATION_HEADER_INST_THRESHOLD = 32;
-const int LOOP_NUM_THRESHOLD  = 2000;
-const int LOOP_INST_THRESHOLD = 65000;
-const int INST_THRESHOLD = 80000;
+    const int LOOP_ROTATION_HEADER_INST_THRESHOLD = 32;
+    const int LOOP_NUM_THRESHOLD = 2000;
+    const int LOOP_INST_THRESHOLD = 65000;
+    const int INST_THRESHOLD = 80000;
 
-inline void AddURBWriteRelatedPass(CodeGenContext &ctx, IGCPassManager& mpm)
-{
+    inline void AddURBWriteRelatedPass(CodeGenContext& ctx, IGCPassManager& mpm)
+    {
     // 3D MergeURBWrite pass
-    switch(ctx.type)
+        switch (ctx.type)
     {
     case ShaderType::GEOMETRY_SHADER:
     case ShaderType::VERTEX_SHADER:
@@ -214,10 +214,10 @@ inline void AddURBWriteRelatedPass(CodeGenContext &ctx, IGCPassManager& mpm)
     default:
         break;
     }
-}
+    }
 
-inline void AddAnalysisPasses(CodeGenContext &ctx, IGCPassManager& mpm)
-{
+    inline void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
+    {
     bool isOptDisabled = ctx.getModuleMetaData()->compOpt.OptDisable;
     TODO("remove the following once all IGC passes are registered to PassRegistery in their constructor")
     initializeLoopInfoWrapperPassPass(*PassRegistry::getPassRegistry());
@@ -278,7 +278,7 @@ inline void AddAnalysisPasses(CodeGenContext &ctx, IGCPassManager& mpm)
     // need this before WIAnalysis:
     // insert phi to prevent changing of WIAnalysis result by later code-motion
     mpm.add(llvm::createLCSSAPass());
-    if( !isOptDisabled )
+        if (!isOptDisabled)
     {
         // If you want to clean up the dead-code after push optimization
         // and IOCoalescing
@@ -293,10 +293,10 @@ inline void AddAnalysisPasses(CodeGenContext &ctx, IGCPassManager& mpm)
     }
 
     mpm.add(new Layout());
-}
+    }
 
-static void UpdateInstTypeHint(CodeGenContext& ctx)
-{
+    static void UpdateInstTypeHint(CodeGenContext& ctx)
+    {
     // WA: save original values as preRA heuristic is based on those
     // we need to fix the preRA pass heuristic or get rid of preRA pass altogether
     unsigned int numBB = ctx.m_instrTypes.numBB;
@@ -309,17 +309,17 @@ static void UpdateInstTypeHint(CodeGenContext& ctx)
     ctx.m_instrTypes.numSample = numSample;
     ctx.m_instrTypes.numInsts = numInsts;
     ctx.m_instrTypes.hasLoadStore = true;
-}
+    }
 
-// forward declaration.
-llvm::ModulePass *createPruneUnusedArgumentsPass();
+    // forward declaration.
+    llvm::ModulePass* createPruneUnusedArgumentsPass();
 
-inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
-{
+    inline void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm)
+    {
     // update type of instructions to know what passes are needed.
     UpdateInstTypeHint(ctx);
 
-    MetaDataUtils *pMdUtils = ctx.getMetaDataUtils();
+        MetaDataUtils* pMdUtils = ctx.getMetaDataUtils();
     bool isOptDisabled = ctx.getModuleMetaData()->compOpt.OptDisable;
     bool fastCompile = ctx.getModuleMetaData()->compOpt.FastCompilation;
 
@@ -451,10 +451,10 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
     }
     else
     {
-        if(IGC_IS_FLAG_ENABLED(AllowMem2Reg))
+            if (IGC_IS_FLAG_ENABLED(AllowMem2Reg))
             mpm.add(createPromoteMemoryToRegisterPass());
     }
-    if(ctx.m_instrTypes.hasLoop)
+        if (ctx.m_instrTypes.hasLoop)
     {
         // need to run loop simplify to canonicalize loop and merge latches
         mpm.add(createLoopCanonicalization());
@@ -546,7 +546,7 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
         mpm.add(createDeadCodeEliminationPass());
     }
 
-    if(IGC_IS_FLAG_ENABLED(ForceHalfPromotion) || (!ctx.platform.supportFP16() && IGC_IS_FLAG_ENABLED(EnableHalfPromotion)))
+        if (IGC_IS_FLAG_ENABLED(ForceHalfPromotion) || (!ctx.platform.supportFP16() && IGC_IS_FLAG_ENABLED(EnableHalfPromotion)))
     {
         mpm.add(new HalfPromotion());
         mpm.add(createGVNPass());
@@ -651,26 +651,29 @@ inline void AddLegalizationPasses(CodeGenContext &ctx, IGCPassManager& mpm)
     case ShaderType::DOMAIN_SHADER:
         mpm.add(createDomainShaderLoweringPass());
         break;
+    case ShaderType::COMPUTE_SHADER:
+        mpm.add(CreateComputeShaderLowering());
+        break;
     default:
         break;
     }
 
     mpm.add(new WAFMinFMax());
-}
+    }
 
-inline void AddCodeGenPasses(CodeGenContext &ctx, CShaderProgram::KernelShaderMap &shaders, IGCPassManager& Passes, SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE, PSSignature* pSignature = nullptr)
-{
+    inline void AddCodeGenPasses(CodeGenContext& ctx, CShaderProgram::KernelShaderMap& shaders, IGCPassManager& Passes, SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE, PSSignature* pSignature = nullptr)
+    {
     // Generate CISA
     Passes.add(new EmitPass(shaders, simdMode, canAbortOnSpill, shaderMode, pSignature));
-}
+    }
 
-template<typename ContextType>
-void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap &shaders);
+    template<typename ContextType>
+    void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap& shaders);
 
-template<>
-void CodeGen(DomainShaderContext *ctx, CShaderProgram::KernelShaderMap &shaders)
-{
-    COMPILER_TIME_START( ctx, TIME_CodeGen );
+    template<>
+    void CodeGen(DomainShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders)
+    {
+        COMPILER_TIME_START(ctx, TIME_CodeGen);
 
     IGCPassManager Passes(ctx, "CG");
 
@@ -688,15 +691,15 @@ void CodeGen(DomainShaderContext *ctx, CShaderProgram::KernelShaderMap &shaders)
     Passes.run(*(ctx->getModule()));
     DumpLLVMIR(ctx, "codegen");
 
-    COMPILER_TIME_END( ctx, TIME_CodeGen );
-}
+        COMPILER_TIME_END(ctx, TIME_CodeGen);
+    }
 
-void PSCodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders, PSSignature* pSignature = nullptr)
-{
+    void PSCodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders, PSSignature* pSignature = nullptr)
+    {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
 
     IGCPassManager PassMgr(ctx, "CG");
-    const PixelShaderInfo &psInfo = ctx->getModuleMetaData()->psInfo;
+        const PixelShaderInfo& psInfo = ctx->getModuleMetaData()->psInfo;
 
     AddLegalizationPasses(*ctx, PassMgr);
 
@@ -764,11 +767,11 @@ void PSCodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders
     DumpLLVMIR(ctx, "codegen");
 
     COMPILER_TIME_END(ctx, TIME_CodeGen);
-}
+    }
 
-template<>
-void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders)
-{
+    template<>
+    void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders)
+    {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
 
     bool setEarlyExit16Stat = false;
@@ -787,7 +790,7 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, false);
     }
-    else if(((IGC_IS_FLAG_ENABLED(ForceCSSIMD16)) && simdModeAllowed <= SIMDMode::SIMD16) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 16 ||
+        else if (((IGC_IS_FLAG_ENABLED(ForceCSSIMD16)) && simdModeAllowed <= SIMDMode::SIMD16) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 16 ||
         waveSize == 16)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, false);
@@ -889,12 +892,12 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders
     DumpLLVMIR(ctx, "codegen");
 
     COMPILER_TIME_END(ctx, TIME_CodeGen);
-}
+    }
 
-template<typename ContextType>
-void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap &shaders)
-{
-    COMPILER_TIME_START( ctx, TIME_CodeGen );
+    template<typename ContextType>
+    void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap& shaders)
+    {
+        COMPILER_TIME_START(ctx, TIME_CodeGen);
 
     IGCPassManager PassMgr(ctx, "CG");
 
@@ -907,14 +910,14 @@ void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap &shaders)
     PassMgr.run(*(ctx->getModule()));
     DumpLLVMIR(ctx, "codegen");
 
-    COMPILER_TIME_END( ctx, TIME_CodeGen );
-    MEM_SNAPSHOT( IGC::SMS_AFTER_CODEGEN );
-}
+        COMPILER_TIME_END(ctx, TIME_CodeGen);
+        MEM_SNAPSHOT(IGC::SMS_AFTER_CODEGEN);
+    }
 
 
-template<>
-void CodeGen(OpenCLProgramContext *ctx, CShaderProgram::KernelShaderMap &kernels)
-{
+    template<>
+    void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap& kernels)
+    {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
 
     IGCPassManager Passes(ctx, "CG");
@@ -959,33 +962,34 @@ void CodeGen(OpenCLProgramContext *ctx, CShaderProgram::KernelShaderMap &kernels
         }
     }
     Passes.add(new DebugInfoPass(kernels));
+
     Passes.run(*(ctx->getModule()));
     COMPILER_TIME_END(ctx, TIME_CodeGen);
     DumpLLVMIR(ctx, "codegen");
-}
+    }
 
-void destroyShaderMap(CShaderProgram::KernelShaderMap &shaders)
-{
+    void destroyShaderMap(CShaderProgram::KernelShaderMap& shaders)
+    {
     for (auto i : shaders)
     {
-        CShaderProgram *shader = i.second;
+            CShaderProgram* shader = i.second;
         COMPILER_SHADER_STATS_PRINT(shader->m_shaderStats, shader->GetContext()->type, shader->GetContext()->hash, "");
         COMPILER_SHADER_STATS_SUM(shader->GetContext()->m_sumShaderStats, shader->m_shaderStats, shader->GetContext()->type);
         COMPILER_SHADER_STATS_DEL(shader->m_shaderStats);
         delete shader;
     }
-}
+    }
 
-template<typename ContextType>
-void FillProgram(ContextType *ctx, CShaderProgram *shaderProgram)
-{
+    template<typename ContextType>
+    void FillProgram(ContextType* ctx, CShaderProgram* shaderProgram)
+    {
     shaderProgram->FillProgram(&ctx->programOutput);
-}
+    }
 
 
-template<typename ContextType>
-void CodeGenCommon(ContextType* ctx)
-{
+    template<typename ContextType>
+    void CodeGenCommon(ContextType* ctx)
+    {
     CShaderProgram::KernelShaderMap shaders;
 
 
@@ -996,7 +1000,7 @@ void CodeGenCommon(ContextType* ctx)
     DIPass.run(*(ctx->getModule()));
 
     // gather data to send back to the driver
-    for(auto &kv : shaders)
+        for (auto& kv : shaders)
     {
         CShaderProgram* shaderProgram = kv.second;
         FillProgram(ctx, shaderProgram);
@@ -1004,52 +1008,51 @@ void CodeGenCommon(ContextType* ctx)
 
 
     destroyShaderMap(shaders);
-}
+    }
 
-void CodeGen(ComputeShaderContext* ctx)
-{
+    void CodeGen(ComputeShaderContext* ctx)
+    {
     CodeGenCommon(ctx);
-}
-void CodeGen(DomainShaderContext* ctx)
-{
+    }
+    void CodeGen(DomainShaderContext* ctx)
+    {
     CodeGenCommon(ctx);
-}
-void CodeGen(HullShaderContext* ctx)
-{
+    }
+    void CodeGen(HullShaderContext* ctx)
+    {
     CodeGenCommon(ctx);
-}
-void CodeGen(VertexShaderContext* ctx)
-{
+    }
+    void CodeGen(VertexShaderContext* ctx)
+    {
     CodeGenCommon(ctx);
-}
-void CodeGen(GeometryShaderContext* ctx)
-{
+    }
+    void CodeGen(GeometryShaderContext* ctx)
+    {
     CodeGenCommon(ctx);
-}
+    }
 
-void CodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap &shaders, PSSignature* pSignature)
-{
+    void CodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders, PSSignature* pSignature)
+    {
 
     PSCodeGen(ctx, shaders, pSignature);
 
-}
+    }
 
-void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap &shaders)
-{
+    void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap& shaders)
+    {
     CodeGen<OpenCLProgramContext>(ctx, shaders);
-}
+    }
 
-void unify_opt_PreProcess(CodeGenContext* pContext)
-{
+    void unify_opt_PreProcess(CodeGenContext* pContext)
+    {
     TODO("hasBuiltin should be calculated based on module");
-    if(IGC_IS_FLAG_ENABLED(DisableLLVMGenericOptimizations))
+        if (IGC_IS_FLAG_ENABLED(DisableLLVMGenericOptimizations))
     {
         pContext->getModuleMetaData()->compOpt.OptDisable = true;
     }
 
     IGCPassManager mpm(pContext, "OPTPre");
     mpm.add(new CheckInstrTypes(&(pContext->m_instrTypes)));
-    mpm.add(createWaveIntrinsicWAPass());
 
     if (pContext->isPOSH())
     {
@@ -1071,16 +1074,16 @@ void unify_opt_PreProcess(CodeGenContext* pContext)
     pContext->m_instrTypes.hasLoadStore    = true;
 
     pContext->m_instrTypes.CorrelatedValuePropagationEnable =
-        ( pContext->m_instrTypes.hasMultipleBB &&
-          ( pContext->m_instrTypes.hasSel ||
+            (pContext->m_instrTypes.hasMultipleBB &&
+            (pContext->m_instrTypes.hasSel ||
             pContext->m_instrTypes.hasCmp ||
             pContext->m_instrTypes.hasSwitch ||
-            pContext->m_instrTypes.hasLoadStore ) );
+                pContext->m_instrTypes.hasLoadStore));
 
-}
+    }
 
-bool extensiveShader(CodeGenContext* pContext)
-{
+    bool extensiveShader(CodeGenContext* pContext)
+    {
     return (pContext->type == ShaderType::OPENCL_SHADER &&
         pContext->m_instrTypes.numInsts > INST_THRESHOLD &&
         pContext->m_instrTypes.numLoopInsts > LOOP_INST_THRESHOLD &&
@@ -1088,19 +1091,19 @@ bool extensiveShader(CodeGenContext* pContext)
         pContext->m_instrTypes.numBB == 0 &&
         pContext->m_instrTypes.numSample == 0 &&
         pContext->m_instrTypes.hasSubroutines);
-}
+    }
 
-// All functions are marked with AlwaysInline attribute. Remove them for
-// non-kernels, but keep for kernels when subroutine is enabled.
-//
-// When we do not run optimizations, we still need to run always inline
-// pass, otherwise codegen will fail.
-static void purgeInlineAttribute(CodeGenContext *pContext, bool NoOpt)
-{
+    // All functions are marked with AlwaysInline attribute. Remove them for
+    // non-kernels, but keep for kernels when subroutine is enabled.
+    //
+    // When we do not run optimizations, we still need to run always inline
+    // pass, otherwise codegen will fail.
+    static void purgeInlineAttribute(CodeGenContext* pContext, bool NoOpt)
+    {
     if (pContext->m_enableSubroutine)
     {
-        MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
-        for (auto &F : pContext->getModule()->getFunctionList())
+            MetaDataUtils* pMdUtils = pContext->getMetaDataUtils();
+            for (auto& F : pContext->getModule()->getFunctionList())
         {
             if (!isEntryFunc(pMdUtils, &F))
             {
@@ -1112,7 +1115,7 @@ static void purgeInlineAttribute(CodeGenContext *pContext, bool NoOpt)
     // We still inline all functions if there is no optimization phase
     if (NoOpt)
     {
-        MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
+            MetaDataUtils* pMdUtils = pContext->getMetaDataUtils();
         IGCPassManager mpm(pContext, "OPTPost");
         mpm.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
         mpm.add(new CodeGenContextWrapper(pContext));
@@ -1124,14 +1127,14 @@ static void purgeInlineAttribute(CodeGenContext *pContext, bool NoOpt)
         }
         mpm.run(*pContext->getModule());
     }
-}
+    }
 
-void OptimizeIR(CodeGenContext* pContext)
-{
-    MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
+    void OptimizeIR(CodeGenContext* pContext)
+    {
+        MetaDataUtils* pMdUtils = pContext->getMetaDataUtils();
     bool NoOpt = pContext->getModuleMetaData()->compOpt.OptDisable;
     pContext->m_highPsRegisterPressure = (pContext->type == ShaderType::PIXEL_SHADER &&
-                                          ((pContext->m_inputCount + pContext->m_ConstantBufferCount/8 + pContext->m_tempCount) > 60));
+            ((pContext->m_inputCount + pContext->m_ConstantBufferCount / 8 + pContext->m_tempCount) > 60));
 
     // Remove inline attribute if subroutine is enabled.
     purgeInlineAttribute(pContext, NoOpt);
@@ -1143,10 +1146,11 @@ void OptimizeIR(CodeGenContext* pContext)
     IGCPassManager mpm(pContext, "OPT");
 
 #if defined( _DEBUG )
-    llvm::verifyModule(*pContext->getModule());
+    if (!pContext->m_hasLegacyDebugInfo)
+        llvm::verifyModule(*pContext->getModule());
 #endif
 
-    COMPILER_TIME_START( pContext, TIME_OptimizationPasses );
+        COMPILER_TIME_START(pContext, TIME_OptimizationPasses);
     {
         unify_opt_PreProcess(pContext);
         /// Keeps track of the Dump objects so that we can free them after the pass manager has been run
@@ -1161,7 +1165,7 @@ void OptimizeIR(CodeGenContext* pContext)
         mpm.add(new CodeGenContextWrapper(pContext));
         DummyPass* dummypass = new DummyPass();
         mpm.add(dummypass);
-        TargetIRAnalysis GenTTgetIIRAnalysis([&](const Function &F) {
+            TargetIRAnalysis GenTTgetIIRAnalysis([&](const Function& F) {
             GenIntrinsicsTTIImpl GTTI(pContext, dummypass);
             return TargetTransformInfo(GTTI);
         });
@@ -1189,7 +1193,7 @@ void OptimizeIR(CodeGenContext* pContext)
 
         //enable this only when Pooled EU is not supported
         if (IGC_IS_FLAG_ENABLED(EnableThreadCombiningOpt) &&
-            (pContext->type == ShaderType::COMPUTE_SHADER)&&
+                (pContext->type == ShaderType::COMPUTE_SHADER) &&
             !pContext->platform.supportPooledEU() &&
             pContext->platform.supportsThreadCombining())
         {
@@ -1220,7 +1224,7 @@ void OptimizeIR(CodeGenContext* pContext)
         mpm.add(createAddressSpaceAAWrapperPass());
         mpm.add(createExternalAAWrapperPass(&addAddressSpaceAAResult));
 
-        if( pContext->m_instrTypes.hasLoadStore )
+            if (pContext->m_instrTypes.hasLoadStore)
         {
             mpm.add(llvm::createDeadStoreEliminationPass());
             mpm.add(createMarkReadOnlyLoadPass());
@@ -1238,7 +1242,7 @@ void OptimizeIR(CodeGenContext* pContext)
         mpm.add(new IGCConstProp(!pContext->m_DriverInfo.SupportsPreciseMath()));
 
         mpm.add(new CustomSafeOptPass());
-        if(!pContext->m_DriverInfo.WADisableCustomPass())
+            if (!pContext->m_DriverInfo.WADisableCustomPass())
         {
             mpm.add(new CustomUnsafeOptPass());
         }
@@ -1249,6 +1253,7 @@ void OptimizeIR(CodeGenContext* pContext)
         }
 
         mpm.add(createIGCInstructionCombiningPass());
+        mpm.add(new FCmpPaternMatch());
         mpm.add(llvm::createDeadCodeEliminationPass());       // this should be done both before/after constant propagation
 
         if (pContext->m_instrTypes.hasGenericAddressSpacePointers &&
@@ -1259,10 +1264,10 @@ void OptimizeIR(CodeGenContext* pContext)
             mpm.add(createSROAPass());
         }
 
-        if(pContext->m_instrTypes.hasMultipleBB)
+            if (pContext->m_instrTypes.hasMultipleBB)
         {
             // disable loop unroll for excessive large shaders
-            if(pContext->m_instrTypes.hasLoop)
+                if (pContext->m_instrTypes.hasLoop)
             {
                 mpm.add(createLoopDeadCodeEliminationPass());
                 mpm.add(createLoopCanonicalization());
@@ -1272,7 +1277,7 @@ void OptimizeIR(CodeGenContext* pContext)
                 mpm.add(llvm::createLCSSAPass());
                 mpm.add(llvm::createLoopSimplifyPass());
 
-                if(pContext->m_retryManager.AllowLICM() && IGC_IS_FLAG_ENABLED(allowLICM))
+                    if (pContext->m_retryManager.AllowLICM() && IGC_IS_FLAG_ENABLED(allowLICM))
                 {
                     mpm.add(llvm::createLICMPass());
                     mpm.add(llvm::createLICMPass());
@@ -1285,7 +1290,7 @@ void OptimizeIR(CodeGenContext* pContext)
                     mpm.add(new DisableLoopUnrollOnRetry());
                 }
 
-                if(IGC_IS_FLAG_ENABLED(EnableCustomLoopVersioning) &&
+                    if (IGC_IS_FLAG_ENABLED(EnableCustomLoopVersioning) &&
                     pContext->type == ShaderType::PIXEL_SHADER)
                 {
                     // custom loop versioning relies on LCSSA form
@@ -1293,7 +1298,7 @@ void OptimizeIR(CodeGenContext* pContext)
                 }
 
                 mpm.add(createIGCInstructionCombiningPass());
-                if(IGC_IS_FLAG_ENABLED(EnableAdvCodeMotion) &&
+                    if (IGC_IS_FLAG_ENABLED(EnableAdvCodeMotion) &&
                     pContext->type == ShaderType::OPENCL_SHADER &&
                     !pContext->m_instrTypes.hasSwitch)
                     mpm.add(createAdvCodeMotionPass(IGC_GET_FLAG_VALUE(AdvCodeMotionControl)));
@@ -1301,12 +1306,12 @@ void OptimizeIR(CodeGenContext* pContext)
                 int LoopUnrollThreshold = pContext->m_DriverInfo.GetLoopUnrollThreshold();
 
                 // override the LoopUnrollThreshold if the registry key is set
-                if(IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold) != 0)
+                    if (IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold) != 0)
                 {
                     LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
                 }
 
-                if(LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                    if (LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
                 {
                     mpm.add(IGCLLVM::createLoopUnrollPass());
                 }
@@ -1315,20 +1320,20 @@ void OptimizeIR(CodeGenContext* pContext)
                 // LoopUnroll and LICM.
                 mpm.add(createBarrierNoopPass());
 
-                if(pContext->m_retryManager.AllowLICM() && IGC_IS_FLAG_ENABLED(allowLICM))
+                    if (pContext->m_retryManager.AllowLICM() && IGC_IS_FLAG_ENABLED(allowLICM))
                 {
                     mpm.add(llvm::createLICMPass());
                 }
 
                 // Second unrolling with the same threshold.
-                if(LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                    if (LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
                 {
                     mpm.add(IGCLLVM::createLoopUnrollPass());
                 }
 
-                if(!extensiveShader(pContext) && pContext->m_instrTypes.hasNonPrimitiveAlloca)
+                    if (!extensiveShader(pContext) && pContext->m_instrTypes.hasNonPrimitiveAlloca)
                 {
-                    if(pContext->m_DriverInfo.NeedCountSROA())
+                        if (pContext->m_DriverInfo.NeedCountSROA())
                     {
                         mpm.add(new InstrStatitic(pContext, SROA_PROMOTED, InstrStatStage::BEGIN, 300));
                         mpm.add(createSROAPass());
@@ -1347,12 +1352,12 @@ void OptimizeIR(CodeGenContext* pContext)
             //
             // Do not apply reordering on VS as CustomUnsafeOptPass does.
             //
-            if(IGC_IS_FLAG_ENABLED(EnableReasso) && (pContext->type != ShaderType::VERTEX_SHADER))
+                if (IGC_IS_FLAG_ENABLED(EnableReasso) && (pContext->type != ShaderType::VERTEX_SHADER))
             {
                 mpm.add(createReassociatePass());
             }
 
-            if(IGC_IS_FLAG_ENABLED(EnableGVN))
+                if (IGC_IS_FLAG_ENABLED(EnableGVN))
             {
                 mpm.add(llvm::createGVNPass());
             }
@@ -1368,14 +1373,14 @@ void OptimizeIR(CodeGenContext* pContext)
             mpm.add(new BreakConstantExpr());
             mpm.add(new IGCConstProp(!pContext->m_DriverInfo.SupportsPreciseMath(), IGC_IS_FLAG_ENABLED(EnableSimplifyGEP)));
 
-            if(IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
+                if (IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
             {
                 mpm.add(createIGCIndirectICBPropagaionPass());
             }
 
             mpm.add(new GenUpdateCB());
 
-            if(!pContext->m_instrTypes.hasAtomics && !extensiveShader(pContext))
+                if (!pContext->m_instrTypes.hasAtomics && !extensiveShader(pContext))
             {
                 // jump threading currently causes the atomic_flag test from c11 conformance to fail.  Right now,
                 // only do jump threading if we don't have atomics as using atomics as locks seems to be the most common
@@ -1384,7 +1389,7 @@ void OptimizeIR(CodeGenContext* pContext)
             }
             mpm.add(llvm::createCFGSimplificationPass());
             mpm.add(llvm::createEarlyCSEPass());
-            if(pContext->m_instrTypes.hasNonPrimitiveAlloca)
+                if (pContext->m_instrTypes.hasNonPrimitiveAlloca)
             {
                 // run custom safe opts to potentially get rid of indirect
                 // addressing of private arrays, see visitLoadInst
@@ -1395,7 +1400,7 @@ void OptimizeIR(CodeGenContext* pContext)
             // Use CFGSimplification to do clean-up. Needs to be invoked before lowerSwitch.
             mpm.add(llvm::createCFGSimplificationPass());
 
-            if(IGC_IS_FLAG_DISABLED(DisableFlattenSmallSwitch))
+                if (IGC_IS_FLAG_DISABLED(DisableFlattenSmallSwitch))
             {
                 mpm.add(createFlattenSmallSwitchPass());
             }
@@ -1414,7 +1419,7 @@ void OptimizeIR(CodeGenContext* pContext)
             {
                 mpm.add(CreateEarlyOutPatternsPass());
             }
-            if(pContext->type == ShaderType::PIXEL_SHADER)
+                if (pContext->type == ShaderType::PIXEL_SHADER)
             {
                 // insert early output in case sampleC returns 0
                 mpm.add(new CodeSinking(true));
@@ -1422,23 +1427,23 @@ void OptimizeIR(CodeGenContext* pContext)
                 mpm.add(createBlendToDiscardPass());
             }
             mpm.add(new CustomSafeOptPass());
-            if(!pContext->m_DriverInfo.WADisableCustomPass())
+                if (!pContext->m_DriverInfo.WADisableCustomPass())
             {
                 mpm.add(new CustomUnsafeOptPass());
             }
         }
         else
         {
-            if(IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
+                if (IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
             {
                 mpm.add(createIGCIndirectICBPropagaionPass());
             }
 
-            if(pContext->type == ShaderType::PIXEL_SHADER || pContext->type == ShaderType::COMPUTE_SHADER)
+                if (pContext->type == ShaderType::PIXEL_SHADER || pContext->type == ShaderType::COMPUTE_SHADER)
             {
                 mpm.add(CreateEarlyOutPatternsPass());
             }
-            if(pContext->type == ShaderType::PIXEL_SHADER)
+                if (pContext->type == ShaderType::PIXEL_SHADER)
             {
                 mpm.add(createBlendToDiscardPass());
             }
@@ -1472,6 +1477,9 @@ void OptimizeIR(CodeGenContext* pContext)
                 mpm.add(createSROAPass());
             }
         }
+#if LLVM_VERSION_MAJOR >= 7
+        mpm.add(new TrivialLocalMemoryOpsElimination());
+#endif
         mpm.add(createGenSimplificationPass());
 
         if (pContext->m_instrTypes.hasLoadStore)
@@ -1485,7 +1493,7 @@ void OptimizeIR(CodeGenContext* pContext)
 
         mpm.add(CreateMCSOptimization());
 
-        if(pContext->type == ShaderType::GEOMETRY_SHADER)
+            if (pContext->type == ShaderType::GEOMETRY_SHADER)
             mpm.add(createRectListOptimizationPass());
 
         mpm.add(CreateGatingSimilarSamples());
@@ -1506,17 +1514,17 @@ void OptimizeIR(CodeGenContext* pContext)
             mpm.add(createDeadPHINodeEliminationPass());
         }
 
-        if (IGC_IS_FLAG_ENABLED(SampleMultiversioning))
+        if (IGC_IS_FLAG_ENABLED(SampleMultiversioning) || pContext->m_enableSampleMultiversioning)
         {
             mpm.add(new SampleMultiversioning(pContext));
         }
         mpm.run(*pContext->getModule());
     }
-    COMPILER_TIME_END( pContext, TIME_OptimizationPasses );
+        COMPILER_TIME_END(pContext, TIME_OptimizationPasses);
 
     //pContext->shaderEntry->viewCFG();
     DumpLLVMIR(pContext, "optimized");
-    MEM_SNAPSHOT( IGC::SMS_AFTER_OPTIMIZER );
-}
+        MEM_SNAPSHOT(IGC::SMS_AFTER_OPTIMIZER);
+    }
 
 }  // namespace IGC

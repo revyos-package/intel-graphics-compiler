@@ -378,7 +378,7 @@ iga_status_t iga::DiffFieldsFromPCs(
                 ss << which << ": extra padding at end of kernel";
             }
             const iga::MInst *mi = (const iga::MInst *)&bits[pc];
-            if (mi->isCompact() && bitsLen - pc < 8 ||
+            if ((mi->isCompact() && bitsLen - pc < 8) ||
                 bitsLen - pc < 16)
             {
                 std::stringstream ss;
@@ -671,11 +671,11 @@ static bool listInstructionCompaction(
                         auto closeVal = iga::getBits(closeMapping, bitOff, mf->length);
                         if (missedVal != closeVal) {
                             os << Color::RED << Intensity::BRIGHT;
-                            fmtBinary(os, closeVal, mf->length);
+                            fmtBinaryDigits(os, closeVal, mf->length);
                             os << Reset::RESET;
                             missingFields.push_back(mf);
                         } else {
-                            fmtBinary(os, closeVal, mf->length);
+                            fmtBinaryDigits(os, closeVal, mf->length);
                         }
                     }
                     os << ": ";

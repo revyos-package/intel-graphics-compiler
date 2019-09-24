@@ -33,8 +33,9 @@ using namespace IGC::IGCMD;
 using namespace std;
 
 char DebugInfoPass::ID = 0;
+char CatchAllLineNumber::ID = 0;
 
-DebugInfoPass::DebugInfoPass(CShaderProgram::KernelShaderMap &k) :
+DebugInfoPass::DebugInfoPass(CShaderProgram::KernelShaderMap& k) :
     ModulePass(ID),
     kernels(k)
 {
@@ -90,7 +91,7 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         // Look for the right CShaderProgram instance
         m_currShader = currShader;
 
-        MetaDataUtils *pMdUtils = m_currShader->GetMetaDataUtils();
+        MetaDataUtils* pMdUtils = m_currShader->GetMetaDataUtils();
         if (!isEntryFunc(pMdUtils, m_currShader->entry))
             continue;
 
@@ -110,9 +111,27 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         m_pDebugEmitter = m_currShader->diData->m_pDebugEmitter;
         std::vector<std::pair<unsigned int, std::pair<llvm::Function*, IGC::VISAModule*>>> sortedVISAModules;
 
+        // Sort modules in order of their placement in binary
+        DbgDecoder decodedDbg(m_currShader->ProgramOutput()->m_debugDataGenISA);
+        auto getLastGenOff = [&decodedDbg](IGC::VISAModule* v)
+        {
+            unsigned int genOff = 0;
+
+            for (auto& item : decodedDbg.compiledObjs)
+            {
+                auto& name = item.kernelName;
+                auto firstInst = (v->GetInstInfoMap()->begin())->first;
+                auto funcName = firstInst->getParent()->getParent()->getName();
+                if (funcName.compare(name) == 0)
+                    genOff = item.CISAIndexMap.back().second;
+            }
+
+            return genOff;
+        };
+
         for (auto& m : m_currShader->diData->m_VISAModules)
         {
-            auto lastVISAId = m.second->GetCurrentVISAId();
+            auto lastVISAId = getLastGenOff(m.second);
             sortedVISAModules.push_back(std::make_pair(lastVISAId, std::make_pair(m.first, m.second)));
         }
 
@@ -158,8 +177,8 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
 void DebugInfoPass::EmitDebugInfo(bool finalize)
 {
     unsigned int dbgSize = 0;
-    void *dbgInfo = nullptr;
-    void *buffer = nullptr;
+    void* dbgInfo = nullptr;
+    void* buffer = nullptr;
 
     IF_DEBUG_INFO_IF(m_pDebugEmitter, m_pDebugEmitter->Finalize(buffer, dbgSize, finalize);)
 
@@ -208,12 +227,12 @@ void DebugInfoData::markOutput(llvm::Function& F, CShader* m_currShader)
 
 void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
 {
-    const Value * pVal = nullptr;
-    if (const DbgDeclareInst *pDbgAddrInst = dyn_cast<DbgDeclareInst>(pInst))
+    const Value* pVal = nullptr;
+    if (const DbgDeclareInst * pDbgAddrInst = dyn_cast<DbgDeclareInst>(pInst))
     {
         pVal = pDbgAddrInst->getAddress();
     }
-    else if (const DbgValueInst *pDbgValInst = dyn_cast<DbgValueInst>(pInst))
+    else if (const DbgValueInst * pDbgValInst = dyn_cast<DbgValueInst>(pInst))
     {
         pVal = pDbgValInst->getValue();
     }
@@ -228,7 +247,7 @@ void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
         return;
     }
 
-    if (const Constant *pConstVal = dyn_cast<Constant>(pVal))
+    if (dyn_cast<Constant>(pVal))
     {
         if (!isa<GlobalVariable>(pVal) && !isa<ConstantExpr>(pVal))
         {
@@ -236,7 +255,7 @@ void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
         }
     }
 
-    Value *pValue = const_cast<Value*>(pVal);
+    Value* pValue = const_cast<Value*>(pVal);
     if (isa<GlobalVariable>(pValue))
     {
         return;
@@ -246,7 +265,7 @@ void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
         return;
     }
 
-    CVariable *pVar = m_pShader->GetSymbol(pValue);
+    CVariable* pVar = m_pShader->GetSymbol(pValue);
     if (pVar->GetVarType() == EVARTYPE_GENERAL)
     {
         // We want to attach "Output" attribute to all src variables
@@ -259,4 +278,40 @@ void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
             (void)m_outputVals.insert(pVar);
         }
     }
+}
+
+CatchAllLineNumber::CatchAllLineNumber() :
+    FunctionPass(ID)
+{
+    initializeMetaDataUtilsWrapperPass(*PassRegistry::getPassRegistry());
+}
+
+CatchAllLineNumber::~CatchAllLineNumber()
+{
+}
+
+bool CatchAllLineNumber::runOnFunction(llvm::Function& F)
+{
+    // Insert placeholder intrinsic instruction in each kernel.
+    if (!F.getSubprogram() || F.isDeclaration())
+        return false;
+
+    if (F.getCallingConv() != llvm::CallingConv::SPIR_KERNEL)
+        return false;
+
+    llvm::IRBuilder<> Builder(F.getParent()->getContext());
+    DIBuilder di(*F.getParent());
+    Function* lineNumPlaceholder = GenISAIntrinsic::getDeclaration(F.getParent(), GenISAIntrinsic::ID::GenISA_CatchAllDebugLine);
+    auto intCall = Builder.CreateCall(lineNumPlaceholder);
+
+    auto line = F.getSubprogram()->getLine();
+    auto scope = F.getSubprogram();
+
+    auto dbg = DILocation::get(F.getParent()->getContext(), line, 0, scope);
+
+    intCall->setDebugLoc(dbg);
+
+    intCall->insertBefore(&*F.getEntryBlock().getFirstInsertionPt());
+
+    return true;
 }

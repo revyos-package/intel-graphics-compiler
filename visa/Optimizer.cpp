@@ -39,6 +39,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SendFusion.h"
 #include "Common_BinaryEncoding.h"
 #include <tuple>
+#include "DebugInfo.h"
 
 using namespace std;
 using namespace vISA;
@@ -599,6 +600,7 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(loadThreadPayload,       vISA_loadThreadPayload,       TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertFenceBeforeEOT,    vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertScratchReadBeforeEOT, vISA_clearScratchWritesBeforeEOT, TIMER_MISC_OPTS);
+    INITIALIZE_PASS(mapOrphans,              vISA_EnableAlways,            TIMER_MISC_OPTS);
 
     // Verify all passes are initialized.
 #ifdef _DEBUG
@@ -694,8 +696,7 @@ void computeGlobalFreeGRFs(G4_Kernel& kernel)
 {
     auto gtpin = kernel.getGTPinData();
     gtpin->clearFreeGlobalRegs();
-    std::vector<bool> freeGRFs;
-    freeGRFs.resize(kernel.getNumRegTotal() * G4_GRF_REG_NBYTES, true);
+    std::vector<bool> freeGRFs(kernel.getNumRegTotal() * G4_GRF_REG_NBYTES, true);
     unsigned int start = 0, end = 0;
 
     // Mark r0 as busy. Done explicitly because move from r0 is inserted
@@ -760,9 +761,9 @@ void computeGlobalFreeGRFs(G4_Kernel& kernel)
 
 typedef struct Assignment
 {
-    G4_Declare* dcl;
+    G4_Declare* dcl = nullptr;
     AssignedReg reg;
-    unsigned int GRFBaseOffset;
+    unsigned int GRFBaseOffset = 0;
 } Assignment;
 
 void storeGRFAssignments(DECLARE_LIST& declares, std::vector<Assignment>& assignments)
@@ -1193,6 +1194,8 @@ int Optimizer::optimization()
 
     // Insert a dummy compact instruction if requested for SKL+
     runPass(PI_insertDummyCompactInst);
+
+    runPass(PI_mapOrphans);
 
     return CM_SUCCESS;
 }
@@ -2279,7 +2282,8 @@ void Optimizer::doSimplification(G4_INST *inst)
         unsigned SrcSizeInBytes = inst->getExecSize() *
                 getTypeSize(inst->getSrc(0)->getType());
         if (SrcSizeInBytes == G4_GRF_REG_NBYTES/2 ||
-            SrcSizeInBytes == G4_GRF_REG_NBYTES) {
+            SrcSizeInBytes == G4_GRF_REG_NBYTES) 
+        {
             G4_INST *LEA = getSingleDefInst(inst, Opnd_src0);
             if (LEA && LEA->opcode() == G4_add &&
                 LEA->getExecSize() == inst->getExecSize()) {
@@ -2296,15 +2300,15 @@ void Optimizer::doSimplification(G4_INST *inst)
                     Op1->isImm() && Op1->getType() == Type_UV) {
                     // Immeidates in 'uv' ensures each element is a
                     // byte-offset within half-GRF.
-                    G4_SubReg_Align SubAlign = SUB_ALIGNMENT_GRFALIGN;
+                    G4_SubReg_Align SubAlign = GRFALIGN;
                     if (SrcSizeInBytes <= G4_GRF_REG_NBYTES/2u)
                         SubAlign = (G4_SubReg_Align)(NUM_WORDS_PER_GRF/2);
                     inst->setOpcode(G4_movi);
-                    if (Dcl->getAlign() == Either &&
-                        Dcl->getSubRegAlign() != SUB_ALIGNMENT_GRFALIGN) {
+                    if (!Dcl->isEvenAlign() && Dcl->getSubRegAlign() != GRFALIGN) 
+                    {
                         Dcl->setSubRegAlign(SubAlign);
                     }
-                    RegionDesc *rd = builder.createRegionDesc(8, 8, 1);
+                    RegionDesc *rd = builder.getRegionStride1();
                     inst->getSrc(0)->asSrcRegRegion()->setRegion(rd);
                     // Set subreg alignment for the address variable.
                     Dcl =
@@ -2755,7 +2759,7 @@ static bool propagateType(IR_Builder &Builder, G4_BB *BB, G4_INST *Mov, G4_INST:
         return false;
     // Create a new destination of MOV of the propagation type.
     unsigned NumElt = Mov->getExecSize();
-    auto NewDcl = Builder.createTempVar(NumElt, PT, Either, Any);
+    auto NewDcl = Builder.createTempVar(NumElt, PT, Any);
     auto NewDst = Builder.Create_Dst_Opnd_From_Dcl(NewDcl, Dst->getHorzStride());
     Mov->setDest(NewDst);
     // Propagate type
@@ -3027,7 +3031,7 @@ void Optimizer::newLocalCopyPropagation()
                         }
                         else
                         {
-                            G4_Declare* newDcl = builder.createTempVar(numElt, inst->getDst()->getType(), Either, Any);
+                            G4_Declare* newDcl = builder.createTempVar(numElt, inst->getDst()->getType(), Any);
                             newDcl->setAliasDeclare(src0->getBase()->asRegVar()->getDeclare(), 0);
 
                             new_src_opnd =
@@ -3493,7 +3497,7 @@ static void expandPseudoLogic(IR_Builder& builder,
             if (Opnd)
             {
                 auto src = Opnd->asSrcRegRegion();
-                auto newDcl = builder.createTempVar(tmpSize, Type_UW, Either, Any);
+                auto newDcl = builder.createTempVar(tmpSize, Type_UW, Any);
                 auto newDst = builder.createDstRegRegion(Direct, newDcl->getRegVar(), 0, 0, 1, Type_UW);
                 auto newPred = builder.createPredicate(PredState_Plus, src->getBase(), src->getSubRegOff());
                 auto newSel = builder.createInternalInst(newPred, G4_sel, nullptr, false, tmpSize, newDst,
@@ -3872,7 +3876,7 @@ bool Optimizer::foldCmpSel(G4_BB *BB, G4_INST *selInst, INST_LIST_ITER &selInst_
                 break;
             }
             cmpInst = (*DI).first;
-            if (cmpInst->opcode() != G4_cmp)
+            if (cmpInst && cmpInst->opcode() != G4_cmp)
             {
                 cmpInst = nullptr;
                 break;
@@ -6730,19 +6734,23 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                 G4_INST *inst = *ii;
 
                 G4_InstSend* sendInst = inst->asSendInst();
-                if (sendInst && sendInst->isFence() && sendInst->getMsgDesc()->ResponseLength() > 0)
+                if (sendInst && sendInst->isFence())
                 {
-                    // commit is enabled for the fence, need to generate a move after to make sure the fence is complete
-                    // mov (8) r1.0<1>:ud r1.0<8;8,1>:ud {NoMask}
-                    INST_LIST_ITER nextIter = ii;
-                    nextIter++;
-                    G4_DstRegRegion* dst = inst->getDst();
-                    G4_Declare* fenceDcl = dst->getBase()->asRegVar()->getDeclare();
-                    G4_DstRegRegion* movDst = builder.createDstRegRegion(
-                        Direct, builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
-                    G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(fenceDcl, builder.createRegionDesc(8,8,1));
-                    G4_INST* movInst = builder.createInternalInst( NULL, G4_mov, NULL, false, 8, movDst, movSrc, NULL, InstOpt_WriteEnable);
-                    bb->insert(nextIter, movInst);
+                    // ToDo: replace with fence.wait intrinsic so we could hide fence latency by scheduling them apart
+                    if (sendInst->getMsgDesc()->ResponseLength() > 0)
+                    {
+                        // commit is enabled for the fence, need to generate a move after to make sure the fence is complete
+                        // mov (8) r1.0<1>:ud r1.0<8;8,1>:ud {NoMask}
+                        INST_LIST_ITER nextIter = ii;
+                        nextIter++;
+                        G4_DstRegRegion* dst = inst->getDst();
+                        G4_Declare* fenceDcl = dst->getBase()->asRegVar()->getDeclare();
+                        G4_DstRegRegion* movDst = builder.createDstRegRegion(
+                            Direct, builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
+                        G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(fenceDcl, builder.createRegionDesc(8, 8, 1));
+                        G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 8, movDst, movSrc, NULL, InstOpt_WriteEnable);
+                        bb->insert(nextIter, movInst);
+                    }
                 }
 
 
@@ -7382,7 +7390,7 @@ public:
 
     void verify(G4_BB *bb, G4_INST *fromInstr, G4_INST *toInstr) {
         NSDS::BucketDescrBox FromInstrBuckets;
-        getBucketDescrs(fromInstr, FromInstrBuckets);
+        (void) getBucketDescrs(fromInstr, FromInstrBuckets);
 
         bool foundFrom = false;
         for (auto instr : *bb) {
@@ -7399,7 +7407,7 @@ public:
 
 
             NSDS::BucketDescrBox InstrInstrBuckets;
-            getBucketDescrs(instr, InstrInstrBuckets);
+            (void) getBucketDescrs(instr, InstrInstrBuckets);
             assert(!InstrInstrBuckets.hasIndirW);
             for (const BucketDescr &BD : InstrInstrBuckets.BDVec) {
                 if (BD.type & WRITE) {
@@ -7459,19 +7467,19 @@ public:
     // Each instruction is wrapped in an IstrDescr object which keeps track of
     // the bucket status: that is whether they are covered or not by succeeding
     // instructions that read those registers.
-    //
-    //    InstrDescr
-    //    +--------+ +--------+
-    //    | sendA  | | sendB  |
-    //    |r0,r1,r2| |r2,r3,r4|  bucketStatusR,W
-    //    | T, F, T| | F, F, F| (covered flag T/F)
-    //    +--------+ +--------+
-    //      /  |  \  /   |   \
-    // +----+----+----+----+----+....+----+----+----+...
-    // | r0 | r1 | r2 | r3 | r4 |    |r128| p0 | p1 |
-    // +----+----+----+----+----+....+----+----+----+...
-    // Bucket                                           bucketVec
-    //
+    /*
+          InstrDescr
+          +--------+ +--------+
+          | sendA  | | sendB  |
+          |r0,r1,r2| |r2,r3,r4|  bucketStatusR,W
+          | T, F, T| | F, F, F| (covered flag T/F)
+          +--------+ +--------+
+            /  |  \  /   |   \
+       +----+----+----+----+----+....+----+----+----+...
+       | r0 | r1 | r2 | r3 | r4 |    |r128| p0 | p1 |
+       +----+----+----+----+----+....+----+----+----+...
+       Bucket                                           bucketVec
+    */
     // For each register read we check the bucket tha that corresponds to it.
     // We iterate over all the sends connected to it and mark that bucket
     // as covered. If the send instruction has all its buckets covered,
@@ -7508,7 +7516,7 @@ public:
                 instr->setLocalId(0); // We are storing the IDs in it
 
                 NSDS::BucketDescrBox instrBuckets;
-                nsds.getBucketDescrs(instr, instrBuckets);
+                (void) nsds.getBucketDescrs(instr, instrBuckets);
 
                 // Cover any registers that the current instruction reads
                 // To be safe, predicated instrs can kill but cannot cover.
@@ -7705,7 +7713,6 @@ public:
         static const unsigned SCRATCH_MSG_DESC_CATEGORY = 18;
         static const unsigned SCRATCH_MSG_DESC_OPERATION_MODE = 17;
         static const unsigned SCRATCH_MSG_DESC_CHANNEL_MODE = 16;
-        static const unsigned SCRATCH_MSG_INVALIDATE_AFTER_READ = 15;
         static const unsigned SCRATCH_MSG_DESC_BLOCK_SIZE = 12;
 
         // write 8 GRFs at a time
@@ -7939,6 +7946,7 @@ public:
     }
 
     // some platform/shaders require a memory fence before the end of thread
+    // ToDo: add fence only when the writes can reach EOT without a fence in between
     void Optimizer::insertFenceBeforeEOT()
     {
         if (!builder.needFenceBeforeEOT() || !builder.getOption(vISA_clearHDCWritesBeforeEOT))
@@ -7947,6 +7955,7 @@ public:
         }
 
         bool hasUAVWrites = false;
+        bool hasSLMWrites = false;
         for (auto bb : kernel.fg)
         {
             for (auto inst : *bb)
@@ -7956,18 +7965,28 @@ public:
                     auto msgDesc = inst->asSendInst()->getMsgDesc();
                     if (msgDesc->isDataPortWrite() && msgDesc->isHDC())
                     {
-                        hasUAVWrites = true;
-                        break;
+                        if (msgDesc->isSLMMessage())
+                        {
+                            hasSLMWrites = true;
+                        }
+                        else
+                        {
+                            hasUAVWrites = true;
+                        }
                     }
                 }
+                if (hasUAVWrites && hasSLMWrites)
+                {
+                    break;
+                }
             }
-            if (hasUAVWrites)
+            if (hasUAVWrites && hasSLMWrites)
             {
                 break;
             }
         }
 
-        if (!hasUAVWrites)
+        if (!hasUAVWrites && !hasSLMWrites)
         {
             return;
         }
@@ -7977,9 +7996,50 @@ public:
             if (bb->isLastInstEOT())
             {
                 auto iter = std::prev(bb->end());
-                auto fenceInst = builder.createFenceInstruction(0, true, true, false);
-                bb->insert(iter, fenceInst);
+                if (hasUAVWrites)
+                {
+                    auto fenceInst = builder.createFenceInstruction(0, true, true, false);
+                    bb->insert(iter, fenceInst);
+                }
+                if (hasSLMWrites)
+                {
+                    auto fenceInst = builder.createFenceInstruction(0, true, false, false);
+                    bb->insert(iter, fenceInst);
+                }
                 builder.instList.clear();
+            }
+        }
+    }
+
+    void Optimizer::mapOrphans()
+    {
+        auto catchAllCISAOff = UNMAPPABLE_VISA_INDEX;
+        for (auto bb : kernel.fg)
+        {
+            for (auto instIt = bb->begin(); instIt != bb->end();)
+            {
+                auto inst = (*instIt);
+                if (inst->opcode() == G4_opcode::G4_DebugInfoPlaceholder)
+                {
+                    catchAllCISAOff = catchAllCISAOff == UNMAPPABLE_VISA_INDEX ? inst->getCISAOff() : catchAllCISAOff;
+                    instIt = bb->erase(instIt);
+                    continue;
+                }
+                instIt++;
+            }
+        }
+
+        if (catchAllCISAOff == UNMAPPABLE_VISA_INDEX)
+            return;
+
+        for (auto bb : kernel.fg)
+        {
+            for (auto inst : bb->getInstList())
+            {
+                if (inst->getCISAOff() == UNMAPPABLE_VISA_INDEX)
+                {
+                    inst->setCISAOff(catchAllCISAOff);
+                }
             }
         }
     }
@@ -8258,8 +8318,14 @@ public:
                 G4_Operand *src = inst->getSrc(0);
                 G4_DstRegRegion *dst = inst->getDst();
 
-                G4_Declare *srcDcl = src->isRegRegion() ? GetTopDclFromRegRegion(src) : NULL;
+                G4_Declare *srcDcl = src->isRegRegion() ? GetTopDclFromRegRegion(src) : nullptr;
                 G4_Declare *dstDcl = GetTopDclFromRegRegion(dst);
+
+                if (!srcDcl || !dstDcl)
+                {
+                    ++ii;
+                    continue;
+                }
 
                 // If this move is between two different register files, then
                 // do not do register renaming.
@@ -8479,7 +8545,7 @@ struct BUNDLE_INFO
     OPND_PATTERN dstPattern;
     OPND_PATTERN srcPattern[MAX_NUM_SRC];
 
-    BUNDLE_INFO(G4_BB* instBB, INST_LIST_ITER& instPos, int limit) : bb(instBB), sizeLimit(limit)
+    BUNDLE_INFO(G4_BB* instBB, INST_LIST_ITER& instPos, int limit) : sizeLimit(limit), bb(instBB)
     {
 
         inst[0] = *instPos;
@@ -8698,7 +8764,7 @@ bool BUNDLE_INFO::doMerge(IR_Builder& builder,
         }
         else
         {
-            newDcl = builder.createTempVar(execSize, dstType, Either, Eight_Word, "Merged");
+            newDcl = builder.createTempVar(execSize, dstType, Eight_Word, "Merged");
         }
         for (int i = 0; i < size; ++i)
         {
@@ -8735,7 +8801,7 @@ bool BUNDLE_INFO::doMerge(IR_Builder& builder,
             }
             else
             {
-                newDcl = builder.createTempVar(execSize, srcType, Either, Eight_Word, "Merged");
+                newDcl = builder.createTempVar(execSize, srcType, Eight_Word, "Merged");
             }
             for (int j = 0; j < size; ++j)
             {
@@ -10286,7 +10352,7 @@ private:
 
         // Create such an alias if it does not exist yet.
         unsigned NElts = RootDcl->getByteSize() / G4_Type_Table[Ty].byteSize;
-        auto Alias = Builder.createTempVar(NElts, Ty, Either, Any,
+        auto Alias = Builder.createTempVar(NElts, Ty, Any,
             (std::string(RootDcl->getName()) + "_" + G4_Type_Table[Ty].str).c_str(), false);
         Alias->setAliasDeclare(RootDcl, 0);
         Aliases.push_back(Alias);
@@ -10416,8 +10482,8 @@ void Optimizer::splitVariables()
             if (Iter == DclMap.end())
             {
                 unsigned NElts = Dcl->getTotalElems();
-                auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN, "Lo");
-                auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN, "Hi");
+                auto DclLow = builder.createTempVar(NElts / 2, Ty, GRFALIGN, "Lo");
+                auto DclHi = builder.createTempVar(NElts / 2, Ty, GRFALIGN, "Hi");
                 DclMap[Dcl] = new DclMapInfo(DclLow, DclHi);
             }
             bool IsLow = LBound == LoLBound;
@@ -10597,9 +10663,9 @@ void Optimizer::split4GRFVars()
         G4_Type Ty = splitDcl->getElemType();
         unsigned NElts = splitDcl->getTotalElems();
         std::string varName(splitDcl->getName());
-        auto DclLow = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN,
+        auto DclLow = builder.createTempVar(NElts / 2, Ty, GRFALIGN,
             (varName + "Lo").c_str(), false);
-        auto DclHi = builder.createTempVar(NElts / 2, Ty, Either, SUB_ALIGNMENT_GRFALIGN,
+        auto DclHi = builder.createTempVar(NElts / 2, Ty, GRFALIGN,
             (varName + "Hi").c_str(), false);
         DclMap[splitDcl] = new DclMapInfo(DclLow, DclHi);
         //std::cerr << "split " << splitDcl->getName() << " into (" <<
@@ -10611,7 +10677,6 @@ void Optimizer::split4GRFVars()
     {
         for (auto inst : *bb)
         {
-            bool changed = false;
             auto dst = inst->getDst();
             if (dst && dst->getTopDcl())
             {
@@ -10624,7 +10689,6 @@ void Optimizer::split4GRFVars()
                         dst->getRegOff() - (isLow ? 0 : 2), dst->getSubRegOff(),
                         dst->getHorzStride(), dst->getType(), dst->getAccRegSel());
                     inst->setDest(NewDst);
-                    changed = true;
                 }
             }
 
@@ -10644,7 +10708,6 @@ void Optimizer::split4GRFVars()
                             NewSrcDcl->getRegVar(), srcRegion->getRegOff() - (isLow ? 0 : 2),
                             srcRegion->getSubRegOff(), srcRegion->getRegion(), src->getType(), src->getAccRegSel());
                         inst->setSrc(NewSrc, i);
-                        changed = true;
                     }
                 }
             }
@@ -10848,7 +10911,7 @@ namespace {
         G4_Type dataType;
 
         BucketDescr(int BI, G4_Type DT, RW RWT, AccessMask AM, bool IsARF)
-            : bucketIdx(BI), dataType(DT), type(RWT), mask(AM), isARF(IsARF)
+            : bucketIdx(BI), type(RWT), mask(AM), isARF(IsARF), dataType(DT)
         {
             assert(dataType != Type_UNDEF && "Bad data type ?");
         }
@@ -11161,7 +11224,7 @@ void Optimizer::NoDD(void) {
                 continue;
             }
             BucketDescrWrapper currBDW;
-            getBucketDescrsForInst(currInstr, currBDW);
+            (void) getBucketDescrsForInst(currInstr, currBDW);
 
             // Try to insert NoDD in MAX_LOOK_BACK previous intructions
             bool succ = false;
@@ -11284,7 +11347,7 @@ static G4_INST* emitRetiringMov(IR_Builder& builder, G4_BB* BB, G4_INST* SI,
     G4_Operand* Src0 = SI->getSrc(0);
 
     unsigned RegNum = Src0->getLinearizedStart() / GENX_GRF_REG_SIZ;
-    G4_Declare* Dcl = builder.createTempVar(16, Type_F, Either, Any);
+    G4_Declare* Dcl = builder.createTempVar(16, Type_F, Any);
     Dcl->setGRFBaseOffset(RegNum * G4_GRF_REG_NBYTES);
     Dcl->getRegVar()->setPhyReg(builder.phyregpool.getGreg(RegNum), 0);
 

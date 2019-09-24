@@ -299,10 +299,10 @@ int CISA_IR_Builder::CreateBuilder(
         return CM_FAILURE;
     }
 
-    auto targetMode = (mode == vISA_3D || mode == vISA_3DWRITER) ? VISA_3D : VISA_CM;
+    auto targetMode = (mode == vISA_3D || mode == vISA_ASM_WRITER || mode == vISA_ASM_READER) ? VISA_3D : VISA_CM;
     builder->m_options.setTarget(targetMode);
-    builder->m_options.setOptionInternally(vISA_isParseMode, (mode == vISA_PARSER));
-    builder->m_options.setOptionInternally(vISA_IsaAssembly, (mode == vISA_3DWRITER));
+    builder->m_options.setOptionInternally(vISA_isParseMode, (mode == vISA_PARSER || mode == vISA_ASM_READER));
+    builder->m_options.setOptionInternally(vISA_IsaAssembly, (mode == vISA_ASM_WRITER));
 
     if (mode == vISA_PARSER)
     {
@@ -387,19 +387,6 @@ int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
     m_kernel->InitializeKernel(kernelName);
     m_kernel->SetGTPinInit(getGtpinInit());
     this->m_kernel_count++;
-
-    if(IS_GEN_BOTH_PATH)
-    {
-        // Append all globals in CISA_IR_Builder instance to new kernel
-        unsigned int numFileScopeVars = this->m_cisaBinary->getNumFileVars();
-
-        for( unsigned int i = 0; i < numFileScopeVars; i++ )
-        {
-            VISA_FileVar* fileScopeVar = this->m_cisaBinary->getFileVar(i);
-
-            kerneltemp->addFileScopeVar(fileScopeVar, i);
-        }
-    }
 
     return CM_SUCCESS;
 }
@@ -538,82 +525,17 @@ void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
     }
 }
 
-
-G4_Kernel* Get_Resolved_Compilation_Unit( common_isa_header header, std::list<G4_Kernel*> compilation_units, int idx )
+// Stitch the Gen binary for all functions in this vISA program with the given kernel
+// It modifies pseudo_fcall/fret in to call/ret opcodes.
+// ToDo: may consider stitching only functions that may be called by this kernel
+static void Stitch_Compiled_Units(G4_Kernel* kernel, std::map<std::string, G4_Kernel*>& compilation_units)
 {
-    for( std::list<G4_Kernel*>::iterator k = compilation_units.begin(), c_end = compilation_units.end();
-        k != c_end; k++ )
+
+    // Append flowgraph of all callees to kernel. For now just assume all functions in the modules
+    // may be called
+    for (auto&& iter : compilation_units)
     {
-        if( (*k)->fg.builder->getCUnitId() == (header.num_kernels + idx) && (*k)->fg.builder->getIsKernel() == false )
-        {
-            return (*k);
-        }
-    }
-
-    return NULL;
-}
-
-void Enumerate_Callees( common_isa_header header, G4_Kernel* kernel, std::list<G4_Kernel*> compilation_units, std::list<int>& callees )
-{
-    for (int cur : kernel->fg.builder->callees)
-    {
-        if (std::find(callees.begin(), callees.end(), cur) == callees.end())
-        {
-            callees.push_back( cur );
-            G4_Kernel* k = Get_Resolved_Compilation_Unit( header, compilation_units, cur );
-            Enumerate_Callees( header, k, compilation_units, callees );
-        }
-    }
-}
-
-// propagate callee JIT info to the kernel
-// add more fields as necessary
-static void propagateCalleeInfo(G4_Kernel* kernel, G4_Kernel* callee)
-{
-    if (callee->fg.builder->getJitInfo()->usesBarrier)
-    {
-        kernel->fg.builder->getJitInfo()->usesBarrier = true;
-    }
-}
-
-// After compiling each compilation unit this function is invoked which stitches together callers
-// with their callees. It modifies pseudo_fcall/fret in to call/ret opcodes.
-void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& compilation_units)
-{
-    list <int> callee_index;
-    G4_Kernel* kernel = NULL;
-
-    for (auto cur : compilation_units)
-    {
-        if (cur->fg.builder->getIsKernel())
-        {
-            ASSERT_USER( kernel == NULL, "Multiple kernel objects found when stitching together");
-            kernel = cur;
-        }
-        else if (cur->getIsExternFunc())
-        {
-            callee_index.push_back(cur->fg.builder->getFuncId());
-        }
-    }
-
-    ASSERT_USER(kernel != NULL, "Valid kernel not found when stitching compiled units");
-    Enumerate_Callees(header, kernel, compilation_units, callee_index);
-
-    callee_index.sort();
-    callee_index.unique();
-
-#ifdef _DEBUG
-    for( list<int>::iterator it = callee_index.begin(); it != callee_index.end(); ++it ) {
-        DEBUG_VERBOSE( *it << " (" << header.functions[*it].name << "), " );
-    }
-#endif
-
-    // Append flowgraph of all callees to kernel
-    for (auto calleeId : callee_index)
-    {
-        G4_Kernel* callee = Get_Resolved_Compilation_Unit(header, compilation_units, calleeId);
-        propagateCalleeInfo(kernel, callee);
-        kernel->addCallee(calleeId, callee);
+        G4_Kernel* callee = iter.second;
         kernel->fg.append(callee->fg);
     }
 
@@ -622,14 +544,22 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
     // Change fcall/fret to call/ret and setup caller/callee edges
     for (G4_BB* cur : kernel->fg)
     {
-        if( cur->size() > 0 && cur->isEndWithFCall() )
+        if (cur->size() > 0 && cur->isEndWithFCall())
         {
             // Setup successor/predecessor
             G4_INST* fcall = cur->back();
+            if (kernel->getOption(vISA_GenerateDebugInfo))
+            {
+                kernel->getKernelDebugInfo()->setFCallInst(fcall);
+            }
+
             if (!fcall->asCFInst()->isIndirectCall())
             {
-                int calleeIndex = fcall->asCFInst()->getCalleeIndex();
-                G4_Kernel* callee = Get_Resolved_Compilation_Unit(header, compilation_units, calleeIndex);
+                std::string funcName = fcall->asCFInst()->getCallee();
+
+                auto iter = compilation_units.find(funcName);
+                assert(iter != compilation_units.end() && "can't find function with given name");
+                G4_Kernel* callee = iter->second;
                 G4_BB* retBlock = cur->Succs.front();
                 ASSERT_USER(cur->Succs.size() == 1, "fcall basic block cannot have more than 1 successor");
                 ASSERT_USER(retBlock->Preds.size() == 1, "block after fcall cannot have more than 1 predecessor");
@@ -673,13 +603,12 @@ void Stitch_Compiled_Units( common_isa_header header, std::list<G4_Kernel*>& com
     }
 
     // Append declarations and color attributes from all callees to kernel
-    for (auto it = callee_index.begin(), ciEnd = callee_index.end(); it != ciEnd; ++it)
+    for (auto iter : compilation_units)
     {
-        G4_Kernel* callee = Get_Resolved_Compilation_Unit( header, compilation_units, (*it) );
-
+        G4_Kernel* callee = iter.second;
         for (auto curDcl : callee->Declares)
         {
-            kernel->Declares.push_back( curDcl );
+            kernel->Declares.push_back(curDcl);
         }
     }
 }
@@ -740,28 +669,69 @@ int CISA_IR_Builder::ParseVISAText(const std::string& visaHeader, const std::str
     }
 
     // Parse the header string
-    YY_BUFFER_STATE headerBuf = CISA_scan_string(visaHeader.c_str());
-    if (CISAparse() != 0)
+    if (!visaHeader.empty())
     {
-        assert(0 && "Parsing header message failed");
-        return CM_FAILURE;
+        YY_BUFFER_STATE headerBuf = CISA_scan_string(visaHeader.c_str());
+        if (CISAparse() != 0)
+        {
+            assert(0 && "Parsing header message failed");
+            return CM_FAILURE;
+        }
+        CISA_delete_buffer(headerBuf);
     }
-    CISA_delete_buffer(headerBuf);
 
     // Parse the visa body
-    YY_BUFFER_STATE visaBuf = CISA_scan_string(visaText.c_str());
-    if (CISAparse() != 0)
+    if (!visaText.empty())
     {
-        assert(0 && "Parsing visa text failed");
-        return CM_FAILURE;
+        YY_BUFFER_STATE visaBuf = CISA_scan_string(visaText.c_str());
+        if (CISAparse() != 0)
+        {
+            assert(0 && "Parsing visa text failed");
+            return CM_FAILURE;
+        }
+        CISA_delete_buffer(visaBuf);
     }
-    CISA_delete_buffer(visaBuf);
 
     if (CISAout)
     {
         fclose(CISAout);
     }
 
+    return CM_SUCCESS;
+#else
+    assert(0 && "Asm parsing not supported on this platform");
+    return CM_FAILURE;
+#endif
+}
+
+// Parses inline asm file from ShaderOverride
+int CISA_IR_Builder::ParseVISAText(const std::string& visaFile)
+{
+#if defined(__linux__) || defined(_WIN64) || defined(_WIN32)
+    // Direct output of parser to null
+#if defined(_WIN64) || defined(_WIN32)
+    CISAout = fopen("nul", "w");
+#else
+    CISAout = fopen("/dev/null", "w");
+#endif
+    CISAin = fopen(visaFile.c_str(), "r");
+    if (!CISAin)
+    {
+        assert(0 && "Failed to open file");
+        return CM_FAILURE;
+    }
+
+    if (CISAparse() != 0)
+    {
+        assert(0 && "Parsing visa text failed");
+        return CM_FAILURE;
+    }
+    fclose(CISAin);
+
+    if (CISAout)
+    {
+        fclose(CISAout);
+    }
     return CM_SUCCESS;
 #else
     assert(0 && "Asm parsing not supported on this platform");
@@ -858,15 +828,11 @@ int CISA_IR_Builder::Compile( const char* nameInput)
 
         int i;
         unsigned int k = 0;
-        std::list<G4_Kernel*> compilationUnits;
         std::list<VISAKernelImpl*> kernels;
         std::list<VISAKernelImpl*> functions;
         for( iter = m_kernels.begin(), i = 0; iter != end; iter++, i++ )
         {
             VISAKernelImpl* kernel = (*iter);
-
-            compilationUnits.push_back(kernel->getKernel());
-
             kernel->getIRBuilder()->setIsKernel(kernel->getIsKernel());
             kernel->getIRBuilder()->setCUnitId(i);
             if( kernel->getIsKernel() == false )
@@ -924,30 +890,27 @@ int CISA_IR_Builder::Compile( const char* nameInput)
             saveFCallState( function->getKernel(), savedFCallState );
         }
 
-        for( std::list<VISAKernelImpl*>::iterator kernel_it = kernels.begin();
-            kernel_it != kernels.end();
-            kernel_it++ )
+        std::map<std::string, G4_Kernel*> allFunctions;
+
+        for (auto func_it = functions.begin(); func_it != functions.end(); func_it++)
+        {
+            G4_Kernel* func = (*func_it)->getKernel();
+            allFunctions[std::string(func->getName())] = func;
+            if (m_options.getOption(vISA_GenerateDebugInfo))
+            {
+                func->getKernelDebugInfo()->resetRelocOffset();
+                resetGenOffsets(*func);
+            }
+        }
+
+        for (auto kernel_it = kernels.begin(); kernel_it != kernels.end(); kernel_it++ )
         {
             VISAKernelImpl* kernel = (*kernel_it);
-
             m_currentKernel = kernel;
-            compilationUnits.clear();
-            compilationUnits.push_back( kernel->getKernel() );
-            for( std::list<VISAKernelImpl*>::iterator func_it = functions.begin();
-                func_it != functions.end();
-                func_it++ )
-            {
-                compilationUnits.push_back( (*func_it)->getKernel() );
-                if(m_options.getOption(vISA_GenerateDebugInfo))
-                {
-                    (*func_it)->getKernel()->getKernelDebugInfo()->resetRelocOffset();
-                    resetGenOffsets(*(*func_it)->getKernel());
-                }
-            }
 
             unsigned int genxBufferSize = 0;
 
-            Stitch_Compiled_Units(pseudoHeader, compilationUnits);
+            Stitch_Compiled_Units(kernel->getKernel(), allFunctions);
 
             void* genxBuffer = kernel->compilePostOptimize(genxBufferSize);
             kernel->setGenxBinaryBuffer(genxBuffer, genxBufferSize);
@@ -1012,33 +975,6 @@ int CISA_IR_Builder::Compile( const char* nameInput)
     return status;
 }
 
-CISA_GEN_VAR * CISA_IR_Builder::getFileVarDeclFromName(const std::string &name)
-{
-    std::map<std::string, CISA_GEN_VAR *>::iterator it;
-    it = m_file_var_name_to_decl_map.find(name);
-    if(m_file_var_name_to_decl_map.end() == it)
-    {
-        return NULL;
-    }else
-    {
-        return it->second;
-    }
-}
-
-bool CISA_IR_Builder::setFileVarNameDeclMap(const std::string &name, CISA_GEN_VAR * genDecl)
-{
-    bool succeeded = true;
-
-    //make sure mapping doesn't already exist
-    if( getFileVarDeclFromName(name) != NULL )
-    {
-        return false;
-    }
-    m_file_var_name_to_decl_map[name] = genDecl;
-    return succeeded;
-}
-
-
 bool CISA_IR_Builder::CISA_general_variable_decl(char * var_name,
                                                  unsigned int var_elemts_num,
                                                  VISA_Type data_type,
@@ -1052,14 +988,9 @@ bool CISA_IR_Builder::CISA_general_variable_decl(char * var_name,
 
     VISA_GenVar *parentDecl = NULL;
 
-    if( var_alias_name != NULL && strcmp(var_alias_name, "") != 0 )
+    if (var_alias_name && strcmp(var_alias_name, "") != 0)
     {
         parentDecl = (VISA_GenVar *)m_kernel->getDeclFromName(var_alias_name);
-
-        if( parentDecl == NULL )
-        {
-            parentDecl = (VISA_GenVar *)this->getFileVarDeclFromName(var_alias_name);
-        }
     }
 
     m_kernel->CreateVISAGenVar(genVar, var_name, var_elemts_num, data_type, var_align, parentDecl, var_alias_offset);
@@ -1069,61 +1000,6 @@ bool CISA_IR_Builder::CISA_general_variable_decl(char * var_name,
         m_kernel->AddAttributeToVar(genVar, scope.name, 1, &scope.value);
     }
 
-    return true;
-}
-
-int CISA_IR_Builder::CreateVISAFileVar(VISA_FileVar *& decl, char *varName, unsigned int numberElements, VISA_Type dataType,
-                                       VISA_Align varAlign)
-{
-    decl = (VISA_FileVar*)m_mem.alloc(sizeof(VISA_FileVar));
-
-    decl->type = FILESCOPE_VAR;
-    filescope_var_info_t *file_info = &decl->fileVar;
-
-    size_t len = strlen(varName);
-    file_info->bit_properties = dataType;
-    file_info->linkage = 2;
-    file_info->bit_properties += varAlign << 4;
-    file_info->bit_properties += STORAGE_REG << 7;
-    file_info->num_elements = (unsigned short)numberElements;
-    file_info->attribute_count = 0;
-    file_info->attributes = NULL;
-    file_info->name = (unsigned char *)m_mem.alloc(len + 1);
-    file_info->name_len = (unsigned short) len;
-    memcpy_s(file_info->name, len + 1, varName, file_info->name_len+1);
-    file_info->scratch = NULL;
-
-    decl->index = this->m_cisaBinary->setFileScopeVar(decl);
-
-    if( IS_GEN_BOTH_PATH )
-    {
-        // Append file var to all kernel/function objects in CISA_IR_Builder
-        for( std::list<VISAKernelImpl*>::iterator it = m_kernels.begin(), kend = m_kernels.end();
-            it != kend;
-            it++ )
-        {
-            VISAKernelImpl* kernel = (*it);
-
-            kernel->addFileScopeVar(decl, decl->index - 1);
-        }
-    }
-
-    return CM_SUCCESS;
-}
-
-bool CISA_IR_Builder::CISA_file_variable_decl(char * var_name,
-                                              unsigned int var_num_elements,
-                                              VISA_Type data_type,
-                                              VISA_Align var_align,
-                                              int line_no)
-{
-    VISA_FileVar * decl;
-    if(getFileVarDeclFromName(var_name) != NULL)
-    {
-        return true;
-    }
-    this->CreateVISAFileVar(decl, var_name, var_num_elements, data_type, var_align);
-    this->setFileVarNameDeclMap(std::string(var_name), (CISA_GEN_VAR*) decl);
     return true;
 }
 
@@ -1230,8 +1106,9 @@ bool CISA_IR_Builder::CISA_attr_directive(
     const char* input_name, const char* input_var, int line_no)
 {
 
-    if (strcmp(input_name, "AsmName") == 0 ||
-        strcmp(input_name, "OutputAsmPath") == 0)
+    if (!m_options.getOption(VISA_AsmFileNameUser) &&
+        (strcmp(input_name, "AsmName") == 0 ||
+         strcmp(input_name, "OutputAsmPath") == 0))
     {
         if (strcmp(input_name, "AsmName") == 0) {
             std::cerr << "WARNING: AsmName deprecated "
@@ -1289,9 +1166,7 @@ bool CISA_IR_Builder::CISA_attr_directiveNum(
 
 bool CISA_IR_Builder::CISA_create_label(char *label_name, int line_no)
 {
-    VISA_INST_Desc *inst_desc = NULL;
     VISA_LabelOpnd *opnd[1] = {NULL};
-    inst_desc = &CISA_INST_table[ISA_LABEL];
 
     //when we print out ./function from isa we also print out label.
     //if we don't skip it during re-parsing then we will have duplicate labels
@@ -1312,10 +1187,7 @@ bool CISA_IR_Builder::CISA_create_label(char *label_name, int line_no)
 
 bool CISA_IR_Builder::CISA_function_directive(char* func_name)
 {
-
-    VISA_INST_Desc *inst_desc = NULL;
     VISA_LabelOpnd *opnd[1] = {NULL};
-    inst_desc = &CISA_INST_table[ISA_SUBROUTINE];
     opnd[0] = m_kernel->getLabelOperandFromFunctionName(std::string(func_name));
     if (opnd[0] == NULL)
     {
@@ -1407,9 +1279,7 @@ bool CISA_IR_Builder::CISA_create_branch_instruction(VISA_opnd *pred,
                                                      char *target_label,
                                                      int line_no)
 {
-    VISA_INST_Desc *inst_desc = NULL;
     VISA_LabelOpnd * opnd[1];
-    inst_desc = &CISA_INST_table[opcode];
     int i = 0;
 
     switch(opcode)
@@ -2128,7 +1998,7 @@ bool CISA_IR_Builder::CISA_create_avs_instruction(ChannelMask channel,
     VISA_StateOpndHandle * surface = NULL;
     m_kernel->CreateVISAStateOperandHandle(surface, surfaceVar);
 
-    VISA_VMEVar *samplerVar = (VISA_VMEVar *)m_kernel->getDeclFromName(sampler_name);
+    VISA_SamplerVar *samplerVar = (VISA_SamplerVar *) m_kernel->getDeclFromName(sampler_name);
     MUST_BE_TRUE1(samplerVar != NULL, line_no, "Sampler was not found");
 
     VISA_StateOpndHandle *sampler = NULL;
@@ -2423,8 +2293,9 @@ bool CISA_IR_Builder::CISA_create_sample_instruction (ISA_Opcode opcode,
 
     int status = CM_SUCCESS;
 
-    if (opcode == ISA_SAMPLE) {
-        VISA_VMEVar* samplerVar = (VISA_VMEVar*)m_kernel->getDeclFromName(sampler_name);
+    if (opcode == ISA_SAMPLE)
+    {
+        VISA_SamplerVar* samplerVar = (VISA_SamplerVar*) m_kernel->getDeclFromName(sampler_name);
         MUST_BE_TRUE1(samplerVar != NULL, line_no, "Sampler was not found");
 
         VISA_StateOpndHandle* sampler = NULL;
@@ -2464,7 +2335,7 @@ bool CISA_IR_Builder::CISA_create_sampleunorm_instruction (ISA_Opcode opcode,
     VISA_StateOpndHandle * surface = NULL;
     m_kernel->CreateVISAStateOperandHandle(surface, surfaceVar);
 
-    VISA_VMEVar *samplerVar = (VISA_VMEVar *)m_kernel->getDeclFromName(sampler_name);
+    VISA_SamplerVar *samplerVar = (VISA_SamplerVar *)m_kernel->getDeclFromName(sampler_name);
     MUST_BE_TRUE1(samplerVar != NULL, line_no, "Sampler was not found");
 
     VISA_StateOpndHandle *sampler = NULL;
@@ -2592,13 +2463,13 @@ bool CISA_IR_Builder::CISA_create_fcall_instruction(VISA_opnd *pred_opnd,
                                                     ISA_Opcode opcode,
                                                     Common_VISA_EMask_Ctrl emask,
                                                     unsigned exec_size,
-                                                    unsigned func_id,
+                                                    const char* funcName,
                                                     unsigned arg_size,
                                                     unsigned return_size,
                                                     int line_no) //last index
 {
     Common_ISA_Exec_Size executionSize = Get_Common_ISA_Exec_Size_From_Raw_Size(exec_size);
-    m_kernel->AppendVISACFFunctionCallInst((VISA_PredOpnd *)pred_opnd,emask, executionSize, (unsigned short)func_id, (unsigned char)arg_size, (unsigned char)return_size);
+    m_kernel->AppendVISACFFunctionCallInst((VISA_PredOpnd *)pred_opnd,emask, executionSize, std::string(funcName), (unsigned char)arg_size, (unsigned char)return_size);
     return true;
 }
 
@@ -2719,7 +2590,9 @@ VISA_opnd * CISA_IR_Builder::CISA_create_gen_src_operand(char* var_name, short v
 {
     VISA_VectorOpnd *cisa_opnd = NULL;
     int status = CM_SUCCESS;
-    status = m_kernel->CreateVISASrcOperand(cisa_opnd, (VISA_GenVar*)m_kernel->getDeclFromName(std::string(var_name)), mod, v_stride, width, h_stride, row_offset, col_offset);
+    auto *decl =  (VISA_GenVar*)m_kernel->getDeclFromName(var_name);
+    MUST_BE_TRUE(decl, "undeclared variable");
+    status = m_kernel->CreateVISASrcOperand(cisa_opnd, decl, mod, v_stride, width, h_stride, row_offset, col_offset);
     MUST_BE_TRUE1(status == CM_SUCCESS, line_no, "Failed to create cisa src operand." );
     return (VISA_opnd *)cisa_opnd;
 }
@@ -2729,13 +2602,15 @@ VISA_opnd * CISA_IR_Builder::CISA_dst_general_operand(char * var_name,
                                                       unsigned char sroff,
                                                       unsigned short hstride, int line_no)
 {
-
     VISA_VectorOpnd *cisa_opnd = NULL;
     int status = CM_SUCCESS;
-    status = m_kernel->CreateVISADstOperand(cisa_opnd, (VISA_GenVar *)m_kernel->getDeclFromName(std::string(var_name)), hstride, roff, sroff);
+    auto *decl = (VISA_GenVar *)m_kernel->getDeclFromName(var_name);
+    MUST_BE_TRUE(decl, "undeclared variable");
+    status = m_kernel->CreateVISADstOperand(cisa_opnd, decl, hstride, roff, sroff);
     MUST_BE_TRUE1(status == CM_SUCCESS, line_no, "Failed to create cisa dst operand.");
     return (VISA_opnd *)cisa_opnd;
 }
+
 VISA_opnd * CISA_IR_Builder::CISA_create_immed(uint64_t value, VISA_Type type, int line_no)
 {
     VISA_VectorOpnd *cisa_opnd = NULL;
@@ -3026,16 +2901,5 @@ void CISA_IR_Builder::CISA_post_file_parse()
     }
     */
     return;
-}
-
-bool CISA_IR_Builder::CISA_create_func_decl(char * name,
-                                            int resolved_index,
-                                            int line_no)
-{
-    /*
-    Need to create name to resolved index,and resolved index to name mapping for later use.
-    For example in fcall.
-    */
-    return true;
 }
 

@@ -24,15 +24,45 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 #pragma once
+#include "Compiler/CodeGenContextWrapper.hpp"
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
+#include <llvm/IR/InstVisitor.h>
+#include <llvm/ADT/DenseSet.h>
 #include "common/LLVMWarningsPop.hpp"
-#include "GenISAIntrinsics/GenIntrinsics.h"
 
 namespace IGC
 {
-    llvm::ModulePass* createWaveIntrinsicWAPass();
-    bool unsafeToHoist(const llvm::CallInst *CI);
-    llvm::CallInst* setUnsafeToHoistAttr(llvm::CallInst *CI);
-}
+    /// @brief  This pass finds out the dependency of Round inst on Mad output. skip mad conversion if the following inst is round
+    class MadRoundDepAnalysis : public llvm::FunctionPass, public llvm::InstVisitor<MadRoundDepAnalysis>
+    {
+    public:
+        /// @brief  Pass identification.
+        static char ID;
+
+        MadRoundDepAnalysis();
+
+        ~MadRoundDepAnalysis() {}
+
+        void visitIntrinsicInst(llvm::IntrinsicInst &I);
+
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "CheckMadIfUsedInRound";
+        }
+
+        virtual bool runOnFunction(llvm::Function &F) override;
+
+        virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override
+        {
+            AU.setPreservesAll();
+            AU.addRequired<CodeGenContextWrapper>();
+        }
+        bool RoundingDependsOnInst(llvm::Instruction* inst);
+
+    private:
+        llvm::DenseSet<llvm::Instruction*> m_RoundingDep;
+    };
+
+} // namespace IGC

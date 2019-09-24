@@ -94,7 +94,7 @@ class G4_Declare;
 #define  COMMON_ISA_GRF_REG_SIZE (getGRFSize()) /// # of bytes in a CISA GRF register
 
 #define COMMON_ISA_MAX_ADDRREG_WIDTH   8
-#define COMMON_ISA_MAX_FILENAME_LENGTH   255
+#define COMMON_ISA_MAX_FILENAME_LENGTH   1023
 
 #define COMMON_ISA_MAX_KERNEL_NAME_LEN  255
 #define COMMON_ISA_MAX_ADDRESS_OFFSET   4096
@@ -131,7 +131,6 @@ typedef enum {
     SURFACE_VAR,
     LABEL_VAR,
     ATTR_VAR,
-    FILESCOPE_VAR,
     NUM_VAR_CLASS
 } Common_ISA_Var_Class;
 
@@ -175,7 +174,6 @@ typedef enum {
     PARAMETER_KIND_RAW      = 0x1,
     PARAMETER_KIND_SAMPLER  = 0x2,
     PARAMETER_KIND_SURFACE  = 0x3,
-    PARAMETER_KIND_VME      = 0x4,
     NUM_PARAMETER_KIND
 } Common_ISA_Function_Parameters_Kind;
 
@@ -234,11 +232,8 @@ typedef enum {
     S_OPND_ERROR = 0x0,
     S_OPND_SAMPLER = 0x1,
     S_OPND_SURFACE = 0x2,
-    S_OPND_VME = 0x3,
-    S_OPND_NUM = 0x4
+    S_OPND_NUM = 0x3
 } Common_ISA_State_Opnd;
-
-extern const char* special_opnd_type_str[S_OPND_NUM];
 
 extern const char* pred_ctrl_str[9];
 
@@ -248,7 +243,6 @@ typedef enum {
     NOT_A_STATE_OPND   = -1,
     STATE_OPND_SURFACE =  0,
     STATE_OPND_SAMPLER,
-    STATE_OPND_VME,
     STATE_OPND_NUM
 } Common_ISA_State_Opnd_Class;
 
@@ -418,7 +412,6 @@ typedef struct {
 typedef struct {
     unsigned char linkage;
     unsigned char name_len;
-    //char* name;
     char name[COMMON_ISA_MAX_FILENAME_LENGTH];
     unsigned int offset;
     unsigned int size;
@@ -437,31 +430,9 @@ typedef struct {
     //   for cisa binary emmission
     char * cisa_binary_buffer;
     char * genx_binary_buffer;
-    //   for cisa linker
-    union {
-        void* scratch;
-        int   scratch_int;
-    };
-    //   for calling convention
-    bool           stack_call;
-    unsigned short num_callers;
 } compiled_unit_info_t;
 typedef compiled_unit_info_t kernel_info_t;
 typedef compiled_unit_info_t function_info_t;
-
-typedef struct {
-    unsigned char linkage;
-    unsigned short name_len;
-    unsigned char* name;
-    unsigned char bit_properties;
-    unsigned short num_elements;
-    unsigned char attribute_count;
-    attribute_info_t* attributes;
-    // Auxillary data
-    //   for cisa linker
-    void* scratch;
-    vISA::G4_Declare* dcl;
-} filescope_var_info_t;
 
 /*
  *  Format of the common ISA kernel binary.
@@ -475,14 +446,7 @@ typedef struct {
     unsigned char         minor_version;
     unsigned short        num_kernels;
     kernel_info_t*        kernels;
-    unsigned short        num_extern_variables;
-    unsigned short        num_global_variables;
-    unsigned short        num_static_variables;
     unsigned short        num_filescope_variables;
-    filescope_var_info_t* filescope_variables;
-    unsigned short        num_extern_functions;
-    unsigned short        num_global_functions;
-    unsigned short        num_static_functions;
     unsigned short        num_functions;
     function_info_t*      functions;
 } common_isa_header;
@@ -491,9 +455,6 @@ typedef struct {
     uint32_t        string_count;
     const char**          strings;
     uint32_t        name_index;
-    unsigned short        num_filescope_variables;
-    filescope_var_info_t* filescope_variables;
-    vISA::G4_Declare**          filescope_var_decls;
     uint32_t        variable_count;
     var_info_t*           variables;
     unsigned short        address_count;
@@ -506,8 +467,7 @@ typedef struct {
     state_info_t*         samplers;
     unsigned char         surface_count;
     state_info_t*         surfaces;
-    unsigned char         vme_count;
-    state_info_t*         vmes;
+    unsigned char         vme_count; // deprecated and MBZ
     uint32_t              input_count;
     input_info_t*         inputs;
     unsigned char         return_type;
@@ -517,12 +477,6 @@ typedef struct {
     unsigned char         return_value_size;
     unsigned short        attribute_count;
     attribute_info_t*     attributes;
-    unsigned char         input_sampler_count;
-    unsigned char         input_surface_count;
-    unsigned char         input_vme_count;
-    vISA::G4_Declare**          sampler_dcls;
-    vISA::G4_Declare**          surface_dcls;
-    vISA::G4_Declare**          vme_dcls;
     bool*                 surface_attrs;
 } kernel_format_t;
 typedef kernel_format_t function_format_t;
@@ -530,7 +484,6 @@ typedef kernel_format_t function_format_t;
 class print_format_provider_t {
 public:
     virtual uint32_t getNameIndex() const = 0;
-    virtual unsigned char getReturnType() const = 0;
 
     virtual const char* getString(uint32_t str_id) const = 0;
     virtual uint32_t getStringCount() const = 0;
@@ -558,9 +511,6 @@ public:
     virtual const state_info_t* getSampler(unsigned id) const = 0;
     virtual unsigned char getSamplerCount() const = 0;
 
-    virtual const state_info_t* getVME(unsigned id) const = 0;
-    virtual unsigned char getVMECount() const = 0;
-
     virtual const input_info_t* getInput(unsigned id) const = 0;
     virtual uint32_t getInputCount() const = 0;
 
@@ -572,7 +522,6 @@ struct print_decl_index_t {
     unsigned pred_index = 0;
     unsigned sampler_index = 0;
     unsigned surface_index = 0;
-    unsigned vme_index = 0;
     unsigned input_index = 0;
 };
 
@@ -697,7 +646,6 @@ typedef struct _CISA_GEN_VAR
         pred_info_t predVar;
         state_info_t stateVar;
         label_info_t labelVar;
-        filescope_var_info_t fileVar;
     };
 } CISA_GEN_VAR;
 
@@ -706,9 +654,7 @@ typedef struct _VISA_AddrVar    : CISA_GEN_VAR { } VISA_AddrVar;
 typedef struct _VISA_PredVar    : CISA_GEN_VAR { } VISA_PredVar;
 typedef struct _VISA_SamplerVar : CISA_GEN_VAR { } VISA_SamplerVar;
 typedef struct _VISA_SurfaceVar : CISA_GEN_VAR { } VISA_SurfaceVar;
-typedef struct _VISA_VMEVar     : CISA_GEN_VAR { } VISA_VMEVar;
 typedef struct _VISA_LabelVar   : CISA_GEN_VAR { } VISA_LabelVar;
-typedef struct _VISA_FileVar    : CISA_GEN_VAR { } VISA_FileVar;
 
 
 typedef struct _CISA_opnd
@@ -747,7 +693,7 @@ typedef struct _CISA_INST
     dst = *((type *) &buf[byte_pos]); \
     byte_pos += sizeof(type);
 
-#define STRING_LEN  512
+#define STRING_LEN  1024
 
 struct Common_ISA_Attribute{
     char* name;

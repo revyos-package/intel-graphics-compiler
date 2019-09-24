@@ -23,7 +23,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-
 #pragma once
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
@@ -31,5 +30,5 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace IGC
 {
-llvm::Pass* createMeshShaderPrimitiveIndicesPacking();
+    llvm::FunctionPass* CreateComputeShaderLowering();
 }

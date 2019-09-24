@@ -73,8 +73,8 @@ EncoderBase::EncoderBase(
     const EncoderOpts &opts)
     : GEDBitProcessor(model, errHandler)
     , m_opts(opts)
-    , m_mem(nullptr)
     , m_numberInstructionsEncoded(0)
+    , m_mem(nullptr)
 {
 }
 
@@ -177,7 +177,7 @@ void EncoderBase::encodeBlock(Block *blk)
         bool mustNotCompact =
             inst->hasInstOpt(InstOpt::NOCOMPACT);
         int32_t iLen = 16;
-        if ((mustCompact || !mustNotCompact && m_opts.autoCompact)) {
+        if (mustCompact || (!mustNotCompact && m_opts.autoCompact)) {
             // try compact first
             status = GED_EncodeIns(&m_gedInst, GED_INS_TYPE_COMPACT, m_instBuf + currentPc());
             if (status == GED_RETURN_VALUE_SUCCESS) {
@@ -366,7 +366,7 @@ void EncoderBase::encodeInstruction(Instruction& inst)
         encodeOptions(inst);
 
         // setup for back patching on branching ops
-        if (os.isBranching()) {
+        if (os.isBranching() || os.op == Op::MOV) {
             bool src0IsLabel = inst.getSource(0).isImm();
             bool src1IsLabel = inst.getSourceCount() > 1 && inst.getSource(1).isImm();
             if (src0IsLabel || src1IsLabel) {
@@ -1041,8 +1041,14 @@ void EncoderBase::encodeBasicSource(
         encodeImmVal(src.getImmediateValue(), src.getType());
         break;
     default:
-         fatal("src%d: unsupported source operand kind (malformed IR)", (int)S);
-         return;
+        // support mov Label
+        if (inst.getOp() == Op::MOV && S == 0 &&
+            src.getKind() == Operand::Kind::LABEL) {
+            GED_ENCODE(Src0RegFile, GED_REG_FILE_IMM);
+        } else {
+            fatal("src%d: unsupported source operand kind (malformed IR)", (int)S);
+            return;
+        }
         break;
     }
 
@@ -1652,8 +1658,8 @@ void EncoderBase::patchJumpOffsets()
     {
         const Instruction *inst = jp.inst;
         IGA_ASSERT(
-            inst->getOpSpec().isBranching(),
-            "patching non-control flow instruction");
+            inst->getOpSpec().isBranching() || inst->getOp() == Op::MOV,
+            "patching non-control-flow/non-mov instruction");
 
         // on some platforms jmpi os post-increment
         uint32_t jmpiExtraOffset = 0;
@@ -1669,8 +1675,10 @@ void EncoderBase::patchJumpOffsets()
             // skip registers
         }
 
-        uint32_t encodePC = // calla is an absolute offset
-            inst->getOp() == Op::CALLA ? 0 : getEncodedPC(inst);
+        // calla and mov is an absolute offset
+        uint32_t encodePC =
+            (inst->getOpSpec().isJipAbsolute()) || (inst->getOp() == Op::MOV) ?
+            0 : getEncodedPC(inst);
 
         uint32_t jumpPC = 0;
         const Block *jipBlk = inst->getJIP();
@@ -1688,7 +1696,16 @@ void EncoderBase::patchJumpOffsets()
         int32_t jip = jumpPC - encodePC - jmpiExtraOffset;
         // JIP and UIP are in QWORDS for most ops on PreBDW
         int32_t pcUnscale = arePcsInQWords(inst->getOpSpec()) ? 8 : 1;
-        GED_ENCODE_TO(JIP, jip/pcUnscale, &jp.gedInst);
+
+        if (inst->isBranching())
+            GED_ENCODE_TO(JIP, jip / pcUnscale, &jp.gedInst);
+        else {
+            // encode mov label
+            GED_DATA_TYPE src0_ty = IGAToGEDTranslation::lowerDataType(inst->getSource(0).getType());
+            GED_ENCODE_TO(Src0DataType, src0_ty, &jp.gedInst);
+            GED_ENCODE_TO(Imm, typeConvesionHelper(
+                inst->getSource(0).getImmediateValue(), inst->getSource(0).getType()), &jp.gedInst);
+        }
 
         if (inst->getSourceCount() == 2 &&
             (inst->getOp() != Op::BRC || inst->getSource(1).isImm()))

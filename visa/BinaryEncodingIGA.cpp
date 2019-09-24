@@ -777,7 +777,6 @@ void BinaryEncodingIGA::DoAll()
             igaInst->addInstOpts(getIGAInstOptSet(inst));
 
 
-
 #if _DEBUG
             igaInst->validate();
 #endif
@@ -842,10 +841,10 @@ void BinaryEncodingIGA::DoAll()
     }
 }
 
+
 SendDescArg BinaryEncodingIGA::getIGASendDescArg(G4_INST* sendInst) const
 {
     SendDescArg desc;
-    desc.init();
     assert(sendInst->isSend() && "expect send inst");
     G4_Operand* msgDesc = sendInst->isSplitSend() ? sendInst->getSrc(2) : sendInst->getSrc(1);
     if (msgDesc->isImm())
@@ -867,7 +866,7 @@ SendDescArg BinaryEncodingIGA::getIGASendDescArg(G4_INST* sendInst) const
 
 iga::SendDescArg BinaryEncodingIGA::getIGASendExDescArg(G4_INST* sendInst) const
 {
-    iga::SendDescArg exDescArg{ };
+    iga::SendDescArg exDescArg;
 
     assert(sendInst->isSend() && "expect send inst");
     if (sendInst->isSplitSend())

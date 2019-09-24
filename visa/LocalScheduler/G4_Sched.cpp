@@ -59,13 +59,13 @@ public:
         : Inst(Inst)
         , ID(ID)
     {
-        setBarrier();
+        Barrier = checkBarrier(Inst);
     }
 
     // A special node without attaching to an instruction.
     preNode()
     {
-        setBarrier();
+        Barrier = checkBarrier(Inst);
     }
 
     ~preNode();
@@ -73,7 +73,21 @@ public:
     void* operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
 
     DepType getBarrier() const { return Barrier; }
-    void setBarrier();
+    static DepType checkBarrier(G4_INST* Inst);
+    static bool isBarrier(G4_INST* Inst) {
+      switch (checkBarrier(Inst)) {
+      case DepType::DEP_LABEL:
+      case DepType::CONTROL_FLOW_BARRIER:
+      case DepType::INDIRECT_ADDR_BARRIER:
+      case DepType::MSG_BARRIER:
+      case DepType::OPT_BARRIER:
+      case DepType::SEND_BARRIER:
+        return true;
+      default:
+        break;
+      }
+      return false;
+    }
 
     vISA::G4_INST* getInst() const { return Inst; }
     unsigned getID() const { return ID; }
@@ -279,9 +293,9 @@ struct RegisterPressure
     Mem_Manager& mem;
 
     RegisterPressure(G4_Kernel& kernel, Mem_Manager& mem, RPE* rpe)
-        : kernel(kernel)
+        : rpe(rpe)
+        , kernel(kernel)
         , mem(mem)
-        , rpe(rpe)
     {
         // Initialize rpe if not available.
         if (rpe == nullptr) {
@@ -1155,13 +1169,13 @@ static void mergeSegments(const std::vector<unsigned>& RPtrace,
     assert(n >= 2);
 
     // Starts with a local minimum.
-    //
-    //  C        /\
-    //          /  \
-    //  A \    /    \
-    //  D  \  /      \
-    //  B   \/
-    //
+    /*
+        C        /\
+                /  \
+        A \    /    \
+        D  \  /      \
+        B   \/
+    */
     if (Min[0] < Max[0]) {
         unsigned Hi = RPtrace[0];
         unsigned Lo = RPtrace[Min[0]];
@@ -1191,16 +1205,15 @@ static void mergeSegments(const std::vector<unsigned>& RPtrace,
     }
 
     // Starts with local maximum.
-    //
-    //
-    //  D             /\
-    //               /  \
-    //  B     /\    /    \
-    //       /  \  /      \
-    //  C   /    \/
-    //     /
-    //  A /
-    //
+    /*
+        D             /\
+                     /  \
+        B     /\    /    \
+             /  \  /      \
+        C   /    \/
+           /
+        A /
+    */
     unsigned Hi = RPtrace[Max[0]];
     unsigned Lo = RPtrace[Min[0]];
     for (unsigned i = 1; i < n; ++i) {
@@ -1456,20 +1469,36 @@ void BB_Scheduler::relocatePseudoKills()
     // Reset local id after scheduling and build the location map.
     // Multiple pseudo-kills may be placed before a single instruction.
     std::unordered_map<G4_INST*, std::vector<G4_INST *>> LocMap;
+    std::vector<G4_INST *> KillsWithoutUse;
     int i = 0;
     for (auto Inst : schedule) { Inst->setLocalId(i++); }
+
+    G4_INST *LastBarrier = nullptr;
     for (auto N : ddd.getNodes()) {
         G4_INST* Inst = N->getInst();
+        // All dangling pseudo-kills shall be placed before a barrier.
+        if (preNode::isBarrier(Inst)) {
+            if (LastBarrier && !KillsWithoutUse.empty()) {
+                LocMap[LastBarrier].swap(KillsWithoutUse);
+                assert(KillsWithoutUse.empty());
+            }
+            LastBarrier = Inst;
+        }
+
         if (Inst && Inst->isPseudoKill()) {
-            preNode* Pos = minElt(N->Succs);
-            while (Pos->getInst()->isPseudoKill())
+            preNode *Pos = minElt(N->Succs);
+            while (Pos->getInst() && Pos->getInst()->isPseudoKill())
                 Pos = minElt(Pos->Succs);
-            LocMap[Pos->getInst()].push_back(Inst);
+
+            if (Pos->getInst() == nullptr)
+                KillsWithoutUse.push_back(Inst);
+            else
+                LocMap[Pos->getInst()].push_back(Inst);
         }
     }
 
-    // Do nothing if there is no pseudo-kills.
-    if (LocMap.empty())
+    // Do nothing if there is no pseudo-kill.
+    if (LocMap.empty() && KillsWithoutUse.empty())
         return;
 
     // Do relocation.
@@ -1484,6 +1513,12 @@ void BB_Scheduler::relocatePseudoKills()
             relocated.insert(relocated.end(), I->second.begin(), I->second.end());
         relocated.push_back(Inst);
     }
+
+    // Put remaining dangling pseudo-kills at the end of the block.
+    if (!KillsWithoutUse.empty())
+        relocated.insert(relocated.end(), KillsWithoutUse.begin(),
+                         KillsWithoutUse.end());
+
     std::swap(schedule, relocated);
 }
 
@@ -1563,10 +1598,10 @@ bool BB_Scheduler::commitIfBeneficial(unsigned& MaxRPE, bool IsTopDown)
 // Implementation of preNode.
 preNode::~preNode() {}
 
-void preNode::setBarrier()
+DepType preNode::checkBarrier(G4_INST* Inst)
 {
     // Check if there is an indirect operand in this instruction.
-    auto hasIndirectOpnd = [=](G4_INST* Inst) {
+    auto hasIndirectOpnd = [=]() {
         G4_DstRegRegion* dst = Inst->getDst();
         if (dst && dst->isIndirect())
             return true;
@@ -1580,15 +1615,17 @@ void preNode::setBarrier()
     };
 
     if (Inst == nullptr)
-        Barrier = DepType::OPT_BARRIER;
+        return DepType::OPT_BARRIER;
     else if (Inst->isLabel())
-        Barrier = DepType::DEP_LABEL;
-    else if (hasIndirectOpnd(Inst))
-        Barrier = DepType::INDIRECT_ADDR_BARRIER;
+        return DepType::DEP_LABEL;
+    else if (hasIndirectOpnd())
+        return DepType::INDIRECT_ADDR_BARRIER;
     else if (Inst->isSend() && Inst->asSendInst()->isFence())
-        Barrier = DepType::OPT_BARRIER;
+        return DepType::OPT_BARRIER;
+    else if (Inst->opcode() == G4_madm)
+        return DepType::OPT_BARRIER;
     else
-        Barrier = CheckBarrier(Inst);
+        return CheckBarrier(Inst);
 }
 
 void preNode::print(ostream& os) const

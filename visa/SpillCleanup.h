@@ -39,6 +39,7 @@ namespace vISA
         G4_Kernel& kernel;
         LivenessAnalysis& liveness;
         GraphColor& graphColor;
+        GlobalRA& gra;
         SpillManagerGMRF& spill;
         unsigned int iterNo;
         // Store declares spilled by sends like sampler
@@ -80,7 +81,7 @@ namespace vISA
         INST_LIST_ITER analyzeSpillCoalescing(std::list<INST_LIST_ITER>&, INST_LIST_ITER, INST_LIST_ITER, G4_BB*);
         void removeWARFills(std::list<INST_LIST_ITER>&, std::list<INST_LIST_ITER>&);
         void coalesceFills(std::list<INST_LIST_ITER>&, unsigned int, unsigned int, G4_BB*, int);
-        G4_DstRegRegion* generateCoalescedFill(unsigned int, unsigned int, unsigned int, G4_SendMsgDescriptor*, int, G4_Align);
+        G4_DstRegRegion* generateCoalescedFill(unsigned int, unsigned int, unsigned int, G4_SendMsgDescriptor*, int, bool);
         G4_SrcRegRegion* generateCoalescedSpill(unsigned int, unsigned int, G4_SendMsgDescriptor*, bool,
             G4_InstOption, int, G4_Declare*, unsigned int);
         void copyToOldFills(G4_DstRegRegion*, std::list<std::pair<G4_DstRegRegion*, std::pair<unsigned int, unsigned int>>>,
@@ -102,8 +103,8 @@ namespace vISA
 
     public:
         CoalesceSpillFills(G4_Kernel& k, LivenessAnalysis& l, GraphColor& g,
-            SpillManagerGMRF& s, unsigned int iterationNo, RPE& r) :
-            kernel(k), liveness(l), graphColor(g), spill(s), rpe(r)
+            SpillManagerGMRF& s, unsigned int iterationNo, RPE& r, GlobalRA& gr) :
+            kernel(k), liveness(l), graphColor(g), gra(gr), spill(s), rpe(r)
         {
             unsigned int numGRFs = k.getNumRegTotal();
             auto scale = [=](unsigned threshold) -> unsigned {

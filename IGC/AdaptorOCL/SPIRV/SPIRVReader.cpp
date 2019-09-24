@@ -104,7 +104,7 @@ isOpenCLKernel(SPIRVFunction *BF) {
    return BF->getModule()->isEntryPoint(ExecutionModelKernel, BF->getId());
 }
 
-static void
+__unused static void
 dumpLLVM(Module *M, const std::string &FName) {
   std::error_code EC;
   raw_fd_ostream FS(FName, EC, sys::fs::F_None);
@@ -959,7 +959,7 @@ public:
       auto scope = createScope(inst->getDIScope());
       auto iat = getInlinedAtFromScope(inst->getDIScope());
       if (!scope)
-          nullptr;
+          return nullptr;
       auto dbgValueInst = Builder.insertDbgValueIntrinsic(localVar, 0,
           createLocalVar(BM->get<SPIRVExtInst>(dbgValue.getVar())),
           createExpression(BM->get<SPIRVExtInst>(dbgValue.getExpression())),
@@ -1577,7 +1577,7 @@ SPIRVToLLVM::transType(SPIRVType *T) {
         T->getArrayLength()));
   case OpTypePointer:
     return mapType(T, PointerType::get(transType(T->getPointerElementType()),
-        SPIRSPIRVAddrSpaceMap::rmap(T->getPointerStorageClass())));
+      SPIRSPIRVAddrSpaceMap::rmap(T->getPointerStorageClass())));
   case OpTypeVector:
     return mapType(T, VectorType::get(transType(T->getVectorComponentType()),
         T->getVectorComponentCount()));
@@ -1680,8 +1680,19 @@ SPIRVToLLVM::transTypeToOCLTypeName(SPIRVType *T, bool IsSigned) {
     break;
   case OpTypeArray:
     return "array";
-  case OpTypePointer:
-    return transTypeToOCLTypeName(T->getPointerElementType()) + "*";
+  case OpTypePointer: {
+    SPIRVType* ET = T->getPointerElementType();
+    if (isa<OpTypeFunction>(ET)) {
+      SPIRVTypeFunction* TF = static_cast<SPIRVTypeFunction*>(ET);
+      std::string name = transTypeToOCLTypeName(TF->getReturnType());
+      name += " (*)(";
+      for (unsigned I = 0, E = TF->getNumParameters(); I < E; ++I)
+        name += transTypeToOCLTypeName(TF->getParameterType(I)) + ',';
+      name.back() = ')'; // replace the last comma with a closing brace.
+      return name;
+    }
+    return transTypeToOCLTypeName(ET) + "*";
+  }
   case OpTypeVector:
     return transTypeToOCLTypeName(T->getVectorComponentType()) +
         T->getVectorComponentCount();
@@ -1943,14 +1954,6 @@ SPIRVToLLVM::postProcessOCL() {
       postProcessFunctionsWithAggregateArguments(aggrFunc);
 
   return true;
-}
-
-static Value* StripAddrspaceCast(Value *pVal)
-{
-    while (Operator::getOpcode(pVal) == Instruction::AddrSpaceCast)
-        pVal = cast<Operator>(pVal)->getOperand(0);
-
-    return pVal;
 }
 
 bool
@@ -2498,7 +2501,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       if (auto LM = static_cast<SPIRVLoopMerge *>(Prev))
         setLLVMLoopMetadata(LM, BI);
 
-      return mapValue(BV, BI);
+    return mapValue(BV, BI);
     }
     break;
 
@@ -2517,7 +2520,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       if (auto LM = static_cast<SPIRVLoopMerge *>(Prev))
         setLLVMLoopMetadata(LM, BC);
 
-      return mapValue(BV, BC);
+    return mapValue(BV, BC);
     }
     break;
 
@@ -2831,6 +2834,25 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     }
     break;
 
+  case OpFunctionPointerCallINTEL: {
+    SPIRVFunctionPointerCallINTEL *BC =
+      static_cast<SPIRVFunctionPointerCallINTEL*>(BV);
+    auto Call = CallInst::Create(transValue(BC->getCalledValue(), F, BB),
+      transValue(BC->getArgumentValues(), F, BB),
+      BC->getName(), BB);
+    // Assuming we are calling a regular device function
+    Call->setCallingConv(CallingConv::SPIR_FUNC);
+    // Don't set attributes, because at translation time we don't know which
+    // function exactly we are calling.
+    return mapValue(BV, Call);
+    }
+  case OpFunctionPointerINTEL: {
+    SPIRVFunctionPointerINTEL *BC =
+      static_cast<SPIRVFunctionPointerINTEL *>(BV);
+    SPIRVFunction* F = BC->getFunction();
+    BV->setName(F->getName());
+    return mapValue(BV, transFunction(F));
+    }
 
   case OpExtInst:
     return mapValue(BV, transOCLBuiltinFromExtInst(
@@ -3022,6 +3044,8 @@ SPIRVToLLVM::transFunction(SPIRVFunction *BF) {
   Function *F = dyn_cast<Function>(mapValue(BF, Function::Create(FT, Linkage,
       BF->getName(), M)));
   mapFunction(BF, F);
+  if (BF->hasDecorate(DecorationReferencedIndirectlyINTEL))
+    F->addFnAttr("referenced-indirectly");
   if (!F->isIntrinsic()) {
     F->setCallingConv(IsKernel ? CallingConv::SPIR_KERNEL :
         CallingConv::SPIR_FUNC);
@@ -3665,12 +3689,12 @@ SPIRVToLLVM::transKernelMetadata()
         auto &funcInfo = MD.FuncMD[F];
 
         // Generate metadata for initializer
-        if (auto EM = BF->getExecutionMode(ExecutionModeInitializer)) {
+        if (BF->getExecutionMode(ExecutionModeInitializer)) {
             funcInfo.IsInitializer = true;
         }
 
         // Generate metadata for finalizer
-        if (auto EM = BF->getExecutionMode(ExecutionModeFinalizer)) {
+        if (BF->getExecutionMode(ExecutionModeFinalizer)) {
             funcInfo.IsFinalizer = true;
         }
 
@@ -3949,7 +3973,7 @@ SPIRVToLLVM::transCompilerOption() {
   return true;
 }
 
-static void dumpSPIRVBC(const char* fname, const char* data, unsigned int size)
+__unused static void dumpSPIRVBC(const char* fname, const char* data, unsigned int size)
 {
     FILE* fp;
     fp = fopen(fname, "wb");

@@ -87,7 +87,7 @@ string raw_opnd::toString() const
     return sstr.str();
 }
 
-extern void writeReport(const char* filename, ERROR_LIST, KERROR_LIST)
+void writeReport(const char* filename, ERROR_LIST, KERROR_LIST)
 {
     if (kerror_list.size() > 0 || error_list.size() > 0)
     {
@@ -137,7 +137,11 @@ static int getDstIndex(const CISA_INST* inst)
 }
 
 // diagDumpInstructionOperandDecls() is used to generate the error report
-static string diagDumpInstructionOperandDecls(const common_isa_header& isaHeader, const print_format_provider_t* header, const CISA_INST* inst, Options *options)
+static string diagDumpInstructionOperandDecls(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    Options *options)
 {
     stringstream sstr;
 
@@ -185,7 +189,12 @@ static string diagDumpInstructionOperandDecls(const common_isa_header& isaHeader
     return sstr.str();
 }
 
-static string createIsaError(const common_isa_header& isaHeader, const print_format_provider_t* header, string msg, Options *opt, const CISA_INST* inst = NULL)
+static string createIsaError(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    string msg,
+    Options *opt,
+    const CISA_INST* inst = NULL)
 {
     stringstream sstr;
     if (!inst)
@@ -207,7 +216,12 @@ static string createIsaError(const common_isa_header& isaHeader, const print_for
     return sstr.str();
 }
 
-static void verifyPredicateDecl(const common_isa_header& isaHeader, const print_format_provider_t* header, unsigned declID, ERROR_LIST, Options *options)
+static void verifyPredicateDecl(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    unsigned declID,
+    ERROR_LIST,
+    Options *options)
 {
     string declError = string(" Error in predicate variable decl: ") + printPredicateDecl(header, declID);
 
@@ -250,7 +264,12 @@ static void verifyAddressDecl(const common_isa_header& isaHeader, const print_fo
     #endif
 }
 
-static void verifyVariableDecl(const common_isa_header& isaHeader, const print_format_provider_t* header, unsigned declID, ERROR_LIST, Options *options)
+static void verifyVariableDecl(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    unsigned declID,
+    ERROR_LIST,
+    Options *options)
 {
     string declError = string(" Error in CISA variable decl: ") + printVariableDecl(isaHeader, header, declID, true, 0, options);
 
@@ -347,12 +366,6 @@ static void verifyVariableDecl(const common_isa_header& isaHeader, const print_f
                   header->getVarCount() + numPreDefinedVars - 1,
                   var->alias_index, declError.c_str());
 
-    if( var->alias_scope_specifier == 1 && var->alias_index >= isaHeader.num_filescope_variables )
-    {
-        REPORT_HEADER(options,false,
-            "V%d's alias index points to a non-existent filescope variable.", declID);
-    }
-
     /// INFO: Got rid of this verification check a long time ago.
     ///       Checking for unused variables is not that important
     ///       and it made it a lot simpler for refactoring to just
@@ -363,15 +376,18 @@ static void verifyVariableDecl(const common_isa_header& isaHeader, const print_f
 }
 
 // get the start byte offset from the top level declare
-static unsigned int getStartByteOffset(const print_format_provider_t* header, const var_info_t* var, unsigned int numPredefinedVars)
+static unsigned int getStartByteOffset(
+    const print_format_provider_t* header,
+    const var_info_t* var,
+    unsigned int numPredefinedVars)
 {
     unsigned int offset = 0;
     while (var->alias_index != 0)
     {
         offset += var->alias_offset;
-        if (var->alias_scope_specifier != 0 || var->alias_index <= numPredefinedVars)
+        if (var->alias_index <= numPredefinedVars)
         {
-            // global and predefined variables don't have aliases, so we can stop
+            // predefined variables don't have aliases, so we can stop
             break;
         }
         else
@@ -382,7 +398,13 @@ static unsigned int getStartByteOffset(const print_format_provider_t* header, co
     return offset;
 }
 
-static void verifyRegion(const common_isa_header& isaHeader, const print_format_provider_t* header, const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
+static void verifyRegion(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     /// Dataport instructions must be verified separately
@@ -618,13 +640,14 @@ static bool isDWordType(VISA_Type type)
 
 // verify if this raw operand has the correct type as determined by typeFunc (false means illegal type)
 // Many vISA messages require the raw operand to have certain types
-static void verifyRawOperandType(const common_isa_header& isaHeader,
-                                 const print_format_provider_t* header,
-                                 const CISA_INST* inst,
-                                 const raw_opnd& opnd,
-                                 bool (*typeFunc)(VISA_Type),
-                                 ERROR_LIST,
-                                 Options *options)
+static void verifyRawOperandType(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    const raw_opnd& opnd,
+    bool (*typeFunc)(VISA_Type),
+    ERROR_LIST,
+    Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     uint32_t variable_count    = header->getVarCount();
@@ -640,7 +663,8 @@ static void verifyRawOperandType(const common_isa_header& isaHeader,
     }
 }
 
-static VISA_Type getRawOperandType(const common_isa_header& isaHeader,
+static VISA_Type getRawOperandType(
+    const common_isa_header& isaHeader,
     const print_format_provider_t* header,
     const CISA_INST* inst,
     const raw_opnd& opnd)
@@ -660,8 +684,10 @@ static VISA_Type getRawOperandType(const common_isa_header& isaHeader,
     return ISA_TYPE_NUM;
 }
 
-static void verifyRawOperand(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
+static void verifyRawOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
     uint32_t variable_count    = header->getVarCount();
@@ -728,7 +754,8 @@ static void verifyRawOperand(const common_isa_header& isaHeader,
     }
 }
 
-static bool isReadWritePreDefinedVar(const common_isa_header& isaHeader, uint32_t index, uint32_t byteOffset)
+static bool isReadWritePreDefinedVar(
+    const common_isa_header& isaHeader, uint32_t index, uint32_t byteOffset)
 {
     PreDefinedVarsInternal internalIndex = mapExternalToInternalPreDefVar(index);
     if (internalIndex == PreDefinedVarsInternal::ARG ||   internalIndex == PreDefinedVarsInternal::RET || internalIndex == PreDefinedVarsInternal::FE_SP ||
@@ -753,8 +780,13 @@ static bool isReadWritePreDefinedVar(const common_isa_header& isaHeader, uint32_
     }
 }
 
-static void verifyVectorOperand(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
+static void verifyVectorOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
 
@@ -848,8 +880,13 @@ static void verifyVectorOperand(const common_isa_header& isaHeader,
     // ToDo: add bounds check for pre-defined variables
 }
 
-static void verifyOperand(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, unsigned i, ERROR_LIST, Options *options)
+static void verifyOperand(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    unsigned i,
+    ERROR_LIST,
+    Options *options)
 {
     MUST_BE_TRUE(header, "Argument Exception: argument header is NULL.");
     MUST_BE_TRUE(inst  , "Argument Exception: argument inst   is NULL.");
@@ -863,13 +900,20 @@ static void verifyOperand(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionSVM(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST)
+static void verifyInstructionSVM(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST)
 {
 }
 
-static void verifyInstructionMove(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionMove(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -981,8 +1025,12 @@ static void verifyInstructionMove(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionSync(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionSync(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     switch (opcode)
@@ -996,8 +1044,12 @@ static void verifyInstructionSync(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionControlFlow(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionControlFlow(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1042,8 +1094,12 @@ static void verifyInstructionControlFlow(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionMisc(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionMisc(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     unsigned i = 0;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
@@ -1218,10 +1274,11 @@ static void verifyInstructionMisc(const common_isa_header& isaHeader,
 /// Returns true if this vector operand is an integer immediate constant and
 /// its value fits into an expected type. Returns false, otherwise.
 ///
-static bool checkImmediateIntegerOpnd(const common_isa_header& isaHeader,
-                                      const print_format_provider_t* header,
-                                      const vector_opnd& opnd,
-                                      VISA_Type expected_type)
+static bool checkImmediateIntegerOpnd(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const vector_opnd& opnd,
+    VISA_Type expected_type)
 {
     MUST_BE_TRUE(IsIntType(expected_type), "integer type expected");
 
@@ -1306,8 +1363,12 @@ static bool checkImmediateIntegerOpnd(const common_isa_header& isaHeader,
     return false;
 }
 
-static void verifyInstructionArith(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionArith(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1498,7 +1559,7 @@ static void verifyInstructionArith(const common_isa_header& isaHeader,
                       "mul/div does not support Q/UQ types for src%d", i);
                   break;
             case ISA_DIVM:
-                  REPORT_INSTRUCTION(options,srcType == ISA_TYPE_F || ISA_TYPE_DF,
+                  REPORT_INSTRUCTION(options,srcType == ISA_TYPE_F || srcType == ISA_TYPE_DF,
                       "ieee div does not support types for src%d, other than F/DF", i);
                   break;
             case ISA_SQRTM:
@@ -1538,8 +1599,12 @@ static void verifyInstructionArith(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionLogic(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionLogic(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -1614,8 +1679,12 @@ static void verifyInstructionLogic(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionCompare(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionCompare(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ///     opnd0              opnd1  opnd2 opnd3
     /// cmp.rel_op (exec_size) dst    src1  src2
@@ -1647,8 +1716,12 @@ static void verifyInstructionCompare(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionAddress(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionAddress(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     ASSERT_USER(ISA_ADDR_ADD == opcode, "Illegal opcode for address instruction.");
@@ -2426,8 +2499,12 @@ static void verifyInstructionSampler(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyInstructionSIMDFlow(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionSIMDFlow(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     switch (opcode)
@@ -2458,8 +2535,12 @@ static bool isFType(VISA_Type T)
     return ISA_TYPE_F == T;
 }
 
-static void verifyInstructionDataport(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+static void verifyInstructionDataport(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
     unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
@@ -2765,7 +2846,12 @@ static void verifyInstructionDataport(const common_isa_header& isaHeader,
     }
 }
 
-static void verifyKernelAttributes(const common_isa_header& isaHeader, const print_format_provider_t* header, ERROR_LIST, Options* options)
+
+static void verifyKernelAttributes(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    ERROR_LIST,
+    Options* options)
 {
     /// Verify SLMSize, if present, shows up only once
     unsigned int numSLMSize = 0;
@@ -2779,10 +2865,12 @@ static void verifyKernelAttributes(const common_isa_header& isaHeader, const pri
         }
     }
 
-    REPORT_HEADER(options, numSLMSize <= 1, "More than 1 kernel attribute defined SLMSize");
+    REPORT_HEADER(options, numSLMSize <= 1,
+        "More than 1 kernel attribute defined SLMSize");
+
 }
 
-extern void verifyKernelHeader(const common_isa_header& isaHeader,
+void verifyKernelHeader(const common_isa_header& isaHeader,
     const print_format_provider_t* header, ERROR_LIST, Options *options)
 {
     /// Verify variable decls.
@@ -2829,13 +2917,6 @@ extern void verifyKernelHeader(const common_isa_header& isaHeader,
             "T%d's name index(%d) is not valid", i, header->getSurface(i)->name_index);
         REPORT_HEADER(options,header->getSurface(i)->num_elements <= COMMON_ISA_MAX_SURFACE_SIZE,
             "T%d's number of elements(%d) is not valid", i, header->getSurface(i)->num_elements);
-    }
-
-    /// Verify vme.
-    for (unsigned i = 0; i < header->getVMECount(); i++)
-    {
-        REPORT_HEADER(options,header->getVME(i)->name_index < header->getStringCount(), "Vme's name index(%d) is not valid", header->getVME(i)->name_index);
-        REPORT_HEADER(options,header->getVME(i)->num_elements == 1, "Vme%d's number of elements must be one", i);
     }
 
     // Verify inputs.
@@ -2905,8 +2986,12 @@ extern void verifyKernelHeader(const common_isa_header& isaHeader,
     verifyKernelAttributes(isaHeader, header, error_list, options);
 }
 
-extern void verifyInstruction(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, const CISA_INST* inst, ERROR_LIST, Options *options)
+void verifyInstruction(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    const CISA_INST* inst,
+    ERROR_LIST,
+    Options *options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
@@ -2959,8 +3044,13 @@ extern void verifyInstruction(const common_isa_header& isaHeader,
     }
 }
 
-extern void verifyRoutine(const common_isa_header& isaHeader,
-    const print_format_provider_t* header, list<CISA_INST*>& instructions, ERROR_LIST, KERROR_LIST, Options *options)
+void verifyRoutine(
+    const common_isa_header& isaHeader,
+    const print_format_provider_t* header,
+    list<CISA_INST*>& instructions,
+    ERROR_LIST,
+    KERROR_LIST,
+    Options *options)
 {
     verifyKernelHeader(isaHeader, header, kerror_list, options);
 

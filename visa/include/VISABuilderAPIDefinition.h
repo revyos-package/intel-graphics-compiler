@@ -54,12 +54,6 @@ public:
     CM_BUILDER_API virtual int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
                                         VISA_Align varAlign, VISA_GenVar *parentDecl = NULL, int aliasOffset = 0) = 0;
 
-    /// CreateVISAGenVar - create an instance of vISA general variable and return it via decl.
-    /// This is the same as the previous function, except that it is used to declare an alias to a
-    /// file-scope variable
-    CM_BUILDER_API virtual int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
-                                        VISA_Align varAlign, VISA_FileVar *parentDecl, int aliasOffset) = 0;
-
     /// CreateVISAAddrVar - create an instance of vISA address variable and return it via decl.
     /// an address variablbe must have type UW
     /// numberelements must be [1, 16]
@@ -121,8 +115,6 @@ public:
     /// offset is the zero-based byte offset of the input
     /// size is in number of bytes for this variable. It must match the size of the variable
     CM_BUILDER_API virtual int CreateVISAInputVar(VISA_SurfaceVar *decl, unsigned short offset, unsigned short size) = 0;
-
-    CM_BUILDER_API virtual int CreateVISAInputVar(VISA_VMEVar *decl, unsigned short offset, unsigned short size) = 0;
 
     /// GetPredefinedVar - return a handle to a predefined general variable (e.g., r0)
     CM_BUILDER_API virtual int GetPredefinedVar(VISA_GenVar *&predDcl, PreDefined_Vars varName) = 0;
@@ -211,13 +203,9 @@ public:
 
     CM_BUILDER_API virtual int CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_SamplerVar *decl, uint8_t size, unsigned char offset, bool useAsDst) = 0;
 
-    CM_BUILDER_API virtual int CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_VMEVar *decl, unsigned char offset, bool useAsDst) = 0;
-
     CM_BUILDER_API virtual int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_SurfaceVar *decl) = 0;
 
     CM_BUILDER_API virtual int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_SamplerVar *decl) = 0;
-
-    CM_BUILDER_API virtual int CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_VMEVar *decl) = 0;
 
     /// CreateVISARawOperand -- create a vISA raw operand (V_N + offset) from a general variable
     /// offset is in number of bytes
@@ -331,7 +319,8 @@ public:
     /// [pred] fcall (emask, execSize) function
     /// argSize must be [0, sizeof(Arg)]
     /// returnSize must be [0, sizeof(RetVal)]
-    CM_BUILDER_API virtual int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize, unsigned short functionID, unsigned char argSize, unsigned char returnSize) = 0;
+    CM_BUILDER_API virtual int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, 
+        Common_ISA_Exec_Size executionSize, std::string funcName, unsigned char argSize, unsigned char returnSize) = 0;
 
     /// AppendVISACFIndirectFuncCallInst -- append an indirect function call to this kernel
     /// [pred] fcall (emask, execSize) funcAddr
@@ -507,6 +496,8 @@ public:
     CM_BUILDER_API virtual int AppendVISAMiscFileInst(const char *fileName) = 0;
 
     CM_BUILDER_API virtual int AppendVISAMiscLOC(unsigned int lineNumber) = 0;
+
+    CM_BUILDER_API virtual int AppendVISADebugLinePlaceholder() = 0;
 
     /// AppendVISAMiscRawSend -- create a GEN send instruction
     /// [pred] send/sendc (esize) <dst> <src> <exMsgDesc> <desc> {emask}
@@ -774,14 +765,8 @@ public:
     ///Gets declaration id VISA_SurfaceVar
     CM_BUILDER_API virtual int getDeclarationID(VISA_SurfaceVar *decl) const = 0;
 
-    ///Gets declaration id VISA_VMEVar
-    CM_BUILDER_API virtual int getDeclarationID(VISA_VMEVar *decl) const = 0;
-
     ///Gets declaration id VISA_LabelVar
     CM_BUILDER_API virtual int getDeclarationID(VISA_LabelVar *decl) const = 0;
-
-    ///Gets declaration id VISA_FileVar
-    CM_BUILDER_API virtual int getDeclarationID(VISA_FileVar *decl) const = 0;
 
     ///Gets visa instruction counter value
     CM_BUILDER_API virtual unsigned getvIsaInstCount() const = 0;
@@ -830,12 +815,6 @@ public:
     CM_BUILDER_API virtual int AddKernel(VISAKernel *& kernel, const char* kernelName) = 0;
     CM_BUILDER_API virtual int AddFunction(VISAFunction *& function, const char* functionName) = 0;
     CM_BUILDER_API virtual int Compile(const char * isaFileNameint) = 0;
-    /// This function enables creation of internal low level IR bypassing creation of vISA IR.
-    /// It MUST be enabled before AddKernel or AddFunction.
-    /// Through this PATH no persistant vISA is created. All operands live ranges end at the Append*Inst API call.
-    /// When Compile function is invoked only valid option is: CM_CISA_BUILDER_GEN
-    CM_BUILDER_API virtual int CreateVISAFileVar(VISA_FileVar *& decl, char *name, unsigned int numElements, VISA_Type dataType,
-                                            VISA_Align varAlign) = 0;
 
     CM_BUILDER_API virtual void SetOption(vISAOptions option, bool val) = 0;
     CM_BUILDER_API virtual void SetOption(vISAOptions option, uint32_t val) = 0;
@@ -843,6 +822,7 @@ public:
 
     // For inline asm code generation
     CM_BUILDER_API virtual int ParseVISAText(const std::string& visaHeader, const std::string& visaText, const std::string& visaTextFile) = 0;
+    CM_BUILDER_API virtual int ParseVISAText(const std::string& visaFile) = 0;
     CM_BUILDER_API virtual int WriteVISAHeader() = 0;
     CM_BUILDER_API virtual std::stringstream& GetAsmTextStream() = 0;
     CM_BUILDER_API virtual std::stringstream& GetAsmTextHeaderStream() = 0;

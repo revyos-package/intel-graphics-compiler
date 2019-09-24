@@ -59,25 +59,24 @@ using namespace llvm;
 
 namespace IGC
 {
-
-Common_ISA_Exec_Size getExecSize(SIMDMode width)
-{
-    switch(width)
+    Common_ISA_Exec_Size getExecSize(SIMDMode width)
     {
-    case SIMDMode::SIMD1   : return EXEC_SIZE_1;
-    case SIMDMode::SIMD4   : return EXEC_SIZE_4;
-    case SIMDMode::SIMD8   : return EXEC_SIZE_8;
-    case SIMDMode::SIMD16  : return EXEC_SIZE_16;
-    case SIMDMode::SIMD32  : return EXEC_SIZE_32;
-    case SIMDMode::UNKNOWN :
-    default                : assert(0 && "unreachable"); break;
+        switch (width)
+        {
+        case SIMDMode::SIMD1: return EXEC_SIZE_1;
+        case SIMDMode::SIMD4: return EXEC_SIZE_4;
+        case SIMDMode::SIMD8: return EXEC_SIZE_8;
+        case SIMDMode::SIMD16: return EXEC_SIZE_16;
+        case SIMDMode::SIMD32: return EXEC_SIZE_32;
+        case SIMDMode::UNKNOWN:
+        default: assert(0 && "unreachable"); break;
     }
     return EXEC_SIZE_ILLEGAL;
-}
+    }
 
-VISAAtomicOps convertAtomicOpEnumToVisa(AtomicOp op)
-{
-    switch(op)
+    VISAAtomicOps convertAtomicOpEnumToVisa(AtomicOp op)
+    {
+        switch (op)
     {
     case EATOMIC_AND:
     case EATOMIC_AND64:
@@ -138,36 +137,36 @@ VISAAtomicOps convertAtomicOpEnumToVisa(AtomicOp op)
     }
 
     return ATOMIC_AND;
-}
+    }
 
-inline Common_ISA_Exec_Size visaExecSize(SIMDMode width)
-{
-    switch(width)
+    inline Common_ISA_Exec_Size visaExecSize(SIMDMode width)
     {
-    case SIMDMode::SIMD1   : return EXEC_SIZE_1;
-    case SIMDMode::SIMD2   : return EXEC_SIZE_2;
-    case SIMDMode::SIMD4   : return EXEC_SIZE_4;
-    case SIMDMode::SIMD8   : return EXEC_SIZE_8;
-    case SIMDMode::SIMD16  : return EXEC_SIZE_16;
-    case SIMDMode::SIMD32  : return EXEC_SIZE_32;
-    case SIMDMode::UNKNOWN :
-    default                : assert(0 && "unreachable"); break;
+        switch (width)
+        {
+        case SIMDMode::SIMD1: return EXEC_SIZE_1;
+        case SIMDMode::SIMD2: return EXEC_SIZE_2;
+        case SIMDMode::SIMD4: return EXEC_SIZE_4;
+        case SIMDMode::SIMD8: return EXEC_SIZE_8;
+        case SIMDMode::SIMD16: return EXEC_SIZE_16;
+        case SIMDMode::SIMD32: return EXEC_SIZE_32;
+        case SIMDMode::UNKNOWN:
+        default: assert(0 && "unreachable"); break;
     }
     return EXEC_SIZE_ILLEGAL;
-}
+    }
 
-inline GATHER_SCATTER_ELEMENT_SIZE visaElementSize(unsigned int m_elt_size)
-{
+    inline GATHER_SCATTER_ELEMENT_SIZE visaElementSize(unsigned int m_elt_size)
+    {
     GATHER_SCATTER_ELEMENT_SIZE elementSize = GATHER_SCATTER_BYTE_UNDEF;
-    if(m_elt_size == 1)
+        if (m_elt_size == 1)
     {
         elementSize = GATHER_SCATTER_BYTE;
     }
-    else if( m_elt_size == 2)
+        else if (m_elt_size == 2)
     {
         elementSize = GATHER_SCATTER_WORD;
     }
-    else if(m_elt_size == 4)
+        else if (m_elt_size == 4)
     {
         elementSize = GATHER_SCATTER_DWORD;
     }
@@ -176,10 +175,10 @@ inline GATHER_SCATTER_ELEMENT_SIZE visaElementSize(unsigned int m_elt_size)
         assert(0 && "unreachable");
     }
     return elementSize;
-}
+    }
 
-static inline Common_ISA_SVM_Block_Type
-visaBlockType(unsigned elemSize) {
+    static inline Common_ISA_SVM_Block_Type
+        visaBlockType(unsigned elemSize) {
     switch (elemSize) {
     case 8:  return SVM_BLOCK_TYPE_BYTE;
     case 32: return SVM_BLOCK_TYPE_DWORD;
@@ -188,10 +187,10 @@ visaBlockType(unsigned elemSize) {
 
     assert(false && "Unknown block/element size. Expect 8-/32-/64-bit only!");
     return static_cast<Common_ISA_SVM_Block_Type>(~0U);
-}
+    }
 
-static inline Common_ISA_SVM_Block_Num
-visaBlockNum(unsigned numElems) {
+    static inline Common_ISA_SVM_Block_Num
+        visaBlockNum(unsigned numElems) {
     switch (numElems) {
     case 1: return SVM_BLOCK_NUM_1;
     case 2: return SVM_BLOCK_NUM_2;
@@ -202,13 +201,74 @@ visaBlockNum(unsigned numElems) {
     assert(false &&
            "Unknown number of blocks/elements. Expect 1, 2, 4, or 8 only!");
     return static_cast<Common_ISA_SVM_Block_Num>(~0U);
-}
+    }
 
-// split a SIMD16 variable into two SIMD8 while satisfying vISA's raw operand alignment
-// return a tuple representing the vISA raw operand (var + offset) after split
-std::tuple<CVariable*, uint32_t> CEncoder::splitRawOperand(CVariable* var, bool isFirstHalf,
+    constexpr unsigned visaNumLanes(Common_ISA_Exec_Size execSize)
+    {
+        unsigned lanes = 0;
+        switch (execSize)
+        {
+        case EXEC_SIZE_1:  lanes = 1; break;
+        case EXEC_SIZE_2:  lanes = 2; break;
+        case EXEC_SIZE_4:  lanes = 4; break;
+        case EXEC_SIZE_8:  lanes = 8; break;
+        case EXEC_SIZE_16: lanes = 16; break;
+        case EXEC_SIZE_32: lanes = 32; break;
+        default: assert(false);
+        }
+        return lanes;
+    }
+
+    // Take certain attributes of either src or dst instruction operand and return the size
+    // of the associated grf region, accessed during instruction's execution, in bytes.
+    // If aligned==true, the size includes length of data block starting at the beginning of grf
+    // and ending at the subReg; this is useful to check if the region crosses 2 grf boundary.
+    // If special region attribute is not set, the regioning is <1; 1, 0> for src and <1> for dst.
+    // Note that the assertions may hit in certain cases, which should be handled separately,
+    // like uniform vars with operand with special region set.
+    constexpr unsigned GrfRegionSize(Common_ISA_Exec_Size execSize, unsigned elementSize,
+        const SModifier& mod, bool isSource, bool aligned = true)
+    {
+        constexpr unsigned grfSize = 32; // in bytes
+        // If subReg is big enough to cross grf boundary, adjust it.
+        const unsigned base = (mod.subReg * elementSize) % grfSize;
+        unsigned lastInRegion = aligned ? base : 0;
+        if (isSource)
+        {
+            // Formula based on algorithm provided in the spec (see Region Parameters)
+            const unsigned vstride = mod.specialRegion ? mod.region[0] : 1;
+            const unsigned width = mod.specialRegion ? mod.region[1] : 1;
+            const unsigned hstride = mod.specialRegion ? mod.region[2] : 0;
+            assert(width != 0);
+            const unsigned height = visaNumLanes(execSize) / width;
+            assert(height != 0);
+            lastInRegion += (height - 1) * vstride * elementSize +
+                (width - 1) * hstride * elementSize;
+        }
+        else
+        {
+            const unsigned hstride = mod.specialRegion ? mod.region[2] : 1;
+            lastInRegion += (visaNumLanes(execSize) - 1) * hstride * elementSize;
+        }
+        return lastInRegion + elementSize;
+    };
+    // Compile-time ULTs for GrfRegionSize()
+    static_assert(GrfRegionSize(EXEC_SIZE_16, 4, SModifier{}, false) == 64 &&
+        GrfRegionSize(EXEC_SIZE_16, 4, SModifier{ 16, {}, {0,0,2}, {}, {}, true }, false) == 124 &&
+        GrfRegionSize(EXEC_SIZE_16, 4, SModifier{ 15, {}, {0,0,2}, {}, {}, true }, false) == 124 + 7*4 &&
+        GrfRegionSize(EXEC_SIZE_8, 8, SModifier{ 1, {}, {0,0,2}, {}, {}, true }, false) == 128,
+        "GrfRegionSize compile-time test failed - dst.");
+    static_assert(GrfRegionSize(EXEC_SIZE_16, 4, SModifier{}, true) == 64 &&
+        GrfRegionSize(EXEC_SIZE_16, 4, SModifier{ {}, {}, {4,4,0}, {}, {}, true }, true) == 52 &&
+        GrfRegionSize(EXEC_SIZE_8, 8, SModifier{ 8, {}, {2,1,0}, {}, {}, true }, true) == 120 &&
+        GrfRegionSize(EXEC_SIZE_8, 8, SModifier{ 10, {}, {2,1,0}, {}, {}, true }, true) == 120 + 2*8,
+        "GrfRegionSize compile-time test failed - src.");
+
+    // split a SIMD16 variable into two SIMD8 while satisfying vISA's raw operand alignment
+    // return a tuple representing the vISA raw operand (var + offset) after split
+    std::tuple<CVariable*, uint32_t> CEncoder::splitRawOperand(CVariable* var, bool isFirstHalf,
     Common_VISA_EMask_Ctrl execMask)
-{
+    {
 
     if (!var || var->IsUniform() || isFirstHalf)
     {
@@ -238,13 +298,13 @@ std::tuple<CVariable*, uint32_t> CEncoder::splitRawOperand(CVariable* var, bool 
 
         return std::make_tuple(tmpVar, 0);
     }
-}
+    }
 
-unsigned
-CEncoder::GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
+    unsigned
+        CEncoder::GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
     Common_ISA_Exec_Size toExecSize,
-    unsigned thePart, CVariable *var) const
-{
+            unsigned thePart, CVariable* var) const
+    {
     if (!var || var->IsUniform())
         return 0;
 
@@ -266,29 +326,29 @@ CEncoder::GetRawOpndSplitOffset(Common_ISA_Exec_Size fromExecSize,
 
     assert(false && "Unknown data type to split!");
     return ~0U;
-}
+    }
 
-size_t URBChannelMask::size() const
-{
+    size_t URBChannelMask::size() const
+    {
     return m_bitmask == 0 ? 0 : iSTD::bsr(m_bitmask) + 1;
-}
+    }
 
-unsigned int URBChannelMask::asVISAMask() const
-{
+    unsigned int URBChannelMask::asVISAMask() const
+    {
     // if all bits in the mask are set we need to return 0xFF which means 'no channel mask'
     // if all bits are set -> adding one creates a power of two, so x and x+1 has no common bits.
     if (((m_bitmask + 1) & m_bitmask) == 0)
     {
-        return (uint32_t) -1;
+            return (uint32_t)-1;
     }
     else
     {
-        return (uint16_t) m_bitmask;
+            return (uint16_t)m_bitmask;
     }
-}
+    }
 
-void CEncoder::Init()
-{
+    void CEncoder::Init()
+    {
     m_encoderState.m_srcOperand[0].init();
     m_encoderState.m_srcOperand[1].init();
     m_encoderState.m_srcOperand[2].init();
@@ -299,29 +359,29 @@ void CEncoder::Init()
     m_encoderState.m_noMask = false;
     m_encoderState.m_simdSize = m_program->m_SIMDSize;
     m_encoderState.m_uniformSIMDSize = SIMDMode::SIMD1;
-}
+    }
 
-CEncoder::CEncoder()
-{
+    CEncoder::CEncoder()
+    {
     m_program = nullptr;
     vbuilder = nullptr;
     vAsmTextBuilder = nullptr;
-}
+    }
 
-CEncoder::~CEncoder()
-{
-}
+    CEncoder::~CEncoder()
+    {
+    }
 
-uint32_t CEncoder::getGRFSize() const { return m_program->getGRFSize(); }
+    uint32_t CEncoder::getGRFSize() const { return m_program->getGRFSize(); }
 
-void CEncoder::SetProgram(CShader* program)
-{
+    void CEncoder::SetProgram(CShader* program)
+    {
     m_program = program;
     Init();
-}
+    }
 
-void CEncoder::SubroutineCall(CVariable* flag, llvm::Function *F)
-{
+    void CEncoder::SubroutineCall(CVariable* flag, llvm::Function* F)
+    {
     VISA_LabelOpnd* visaLabel = GetFuncLabel(F);
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -334,23 +394,21 @@ void CEncoder::SubroutineCall(CVariable* flag, llvm::Function *F)
         execSize = EXEC_SIZE_1;
     }
     V(vKernel->AppendVISACFCallInst(predOpnd, emask, execSize, visaLabel));
-}
+    }
 
-void CEncoder::StackCall(CVariable* flag, llvm::Function *F, unsigned char argSize, unsigned char retSize)
-{
-    VISAFunction* visaFunc = GetStackFunction(F);
+    void CEncoder::StackCall(CVariable* flag, llvm::Function* F, unsigned char argSize, unsigned char retSize)
+    {
+
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     // control flow instructions cannot be broken down into lower SIMD
     Common_VISA_EMask_Ctrl emask = m_encoderState.m_noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
     Common_ISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
-    unsigned int funcId = 0;
-    V(visaFunc->GetFunctionId(funcId));
-    V(vKernel->AppendVISACFFunctionCallInst(predOpnd, emask, execSize, (unsigned short)funcId, argSize, retSize));
-}
+    V(vKernel->AppendVISACFFunctionCallInst(predOpnd, emask, execSize, F->getName().data(), argSize, retSize));
+    }
 
-void CEncoder::IndirectStackCall(CVariable* flag, CVariable* funcPtr, unsigned char argSize, unsigned char retSize)
-{
+    void CEncoder::IndirectStackCall(CVariable* flag, CVariable* funcPtr, unsigned char argSize, unsigned char retSize)
+    {
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     // control flow instructions cannot be broken down into lower SIMD
@@ -358,10 +416,10 @@ void CEncoder::IndirectStackCall(CVariable* flag, CVariable* funcPtr, unsigned c
     Common_ISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
     VISA_VectorOpnd* funcAddrOpnd = GetSourceOperandNoModifier(funcPtr);
     V(vKernel->AppendVISACFIndirectFuncCallInst(predOpnd, emask, execSize, funcAddrOpnd, argSize, retSize));
-}
+    }
 
-void CEncoder::SubroutineRet(CVariable* flag, llvm::Function *F)
-{
+    void CEncoder::SubroutineRet(CVariable* flag, llvm::Function* F)
+    {
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     // control flow instructions cannot be broken down into lower SIMD
@@ -373,20 +431,20 @@ void CEncoder::SubroutineRet(CVariable* flag, llvm::Function *F)
         execSize = EXEC_SIZE_1;
     }
     V(vKernel->AppendVISACFRetInst(predOpnd, emask, execSize));
-}
+    }
 
-void CEncoder::StackRet(CVariable* flag)
-{
+    void CEncoder::StackRet(CVariable* flag)
+    {
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     // control flow instructions cannot be broken down into lower SIMD
     Common_VISA_EMask_Ctrl emask = m_encoderState.m_noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
     Common_ISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
     V(vKernel->AppendVISACFFunctionRetInst(predOpnd, emask, execSize));
-}
+    }
 
-void CEncoder::Jump(CVariable* flag, uint label)
-{
+    void CEncoder::Jump(CVariable* flag, uint label)
+    {
     VISA_LabelOpnd* visaLabel = GetLabel(label);
     m_encoderState.m_flag.var = flag;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -398,22 +456,22 @@ void CEncoder::Jump(CVariable* flag, uint label)
         execSize = EXEC_SIZE_1;
     }
     V(vKernel->AppendVISACFSIMDInst(ISA_GOTO, predOpnd, emask, execSize, visaLabel));
-}
+    }
 
-void CEncoder::Label(uint label)
-{
+    void CEncoder::Label(uint label)
+    {
     VISA_LabelOpnd* visaLabel = GetLabel(label);
     V(vKernel->AppendVISACFLabelInst(visaLabel));
-}
+    }
 
-uint CEncoder::GetNewLabelID()
-{
+    uint CEncoder::GetNewLabelID()
+    {
     uint id = labelMap.size();
     labelMap.push_back(nullptr);
     return (id);
-}
+    }
 
-void CEncoder::DwordAtomicRaw(
+    void CEncoder::DwordAtomicRaw(
     AtomicOp atomic_op,
     const ResourceDescriptor& resource,
     CVariable* dst,
@@ -421,10 +479,10 @@ void CEncoder::DwordAtomicRaw(
     CVariable* src0,
     CVariable* src1,
     bool is16Bit)
-{
+    {
     assert(m_encoderState.m_flag.var == nullptr && "predicate not supported");
     VISA_StateOpndHandle* pSurfStateOpndHandle = GetVISASurfaceOpnd(resource);
-    VISA_PredOpnd *predOpnd = GetFlagOperand(m_encoderState.m_flag);
+        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     VISA_RawOpnd* pDst = GetRawDestination(dst);
     VISA_RawOpnd* pElemOffset = GetRawSource(elem_offset);
     VISA_RawOpnd* pSrc0 = GetRawSource(src0);
@@ -456,14 +514,14 @@ void CEncoder::DwordAtomicRaw(
         pSrc0,
         pSrc1,
         pDst));
-}
+    }
 
-void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* src1)
-{
+    void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* src1)
+    {
     Common_ISA_Cond_Mod subOp = ConvertCondModToVisaType(p);
 
     bool flagDst = 0;
-    if( dst->GetType() == ISA_TYPE_BOOL )
+        if (dst->GetType() == ISA_TYPE_BOOL)
     {
         flagDst = true;
     }
@@ -497,7 +555,7 @@ void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* sr
             SModifier newSrc1Mod = SplitVariable(fromExecSize, toExecSize, thePart, src1, m_encoderState.m_srcOperand[1], true);
             VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, newSrc0Mod);
             VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, newSrc1Mod);
-            if( flagDst )
+                if (flagDst)
             {
                 V(vKernel->AppendVISAComparisonInst(subOp,
                     SplitEMask(fromExecSize, toExecSize, thePart, execMask),
@@ -516,11 +574,12 @@ void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* sr
                     srcOpnd0, srcOpnd1));
             }
         }
-    } else {
+        }
+        else {
         VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
         VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
 
-        if( flagDst )
+            if (flagDst)
         {
             V(vKernel->AppendVISAComparisonInst(
                 subOp,
@@ -541,10 +600,10 @@ void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* sr
                 opnd1));
         }
     }
-}
+    }
 
-void CEncoder::Select(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1)
-{
+    void CEncoder::Select(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1)
+    {
     m_encoderState.m_flag.var = flag;
 
     unsigned numParts = 0;
@@ -569,7 +628,8 @@ void CEncoder::Select(CVariable* flag, CVariable* dst, CVariable* src0, CVariabl
                 toExecSize,
                 dstOpnd, srcOpnd0, srcOpnd1));
         }
-    } else {
+        }
+        else {
         VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
         VISA_VectorOpnd* src0Opnd = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
         VISA_VectorOpnd* src1Opnd = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
@@ -585,90 +645,97 @@ void CEncoder::Select(CVariable* flag, CVariable* dst, CVariable* src0, CVariabl
             src0Opnd,
             src1Opnd));
     }
-}
+    }
 
-void CEncoder::SetDstSubVar(uint subVar)
-{
-    m_encoderState.m_dstOperand.subVar = int_cast<uint8_t>(subVar);
-}
-
-void CEncoder::SetDstSubReg(uint subReg)
-{
-    m_encoderState.m_dstOperand.subReg = int_cast<uint16_t>(subReg);
-}
-
-void CEncoder::SetSrcSubVar(uint srcNum, uint subVar)
-{
-    assert(srcNum<4);
-    m_encoderState.m_srcOperand[srcNum].subVar = int_cast<uint8_t>(subVar);
-}
-
-void CEncoder::SetSrcSubReg(uint srcNum, uint subReg)
-{
-    assert(srcNum<4);
-    m_encoderState.m_srcOperand[srcNum].subReg = int_cast<uint16_t>(subReg);
-}
-
-void CEncoder::SetDstModifier(e_modifier mod)
-{
-    assert(mod==EMOD_SAT || mod==EMOD_NONE);
-    m_encoderState.m_dstOperand.mod = mod;
-}
-
-void CEncoder::SetSrcModifier(uint srcNum, e_modifier mod)
-{
-    assert(mod!=EMOD_SAT);
-    assert(srcNum<3);
-    m_encoderState.m_srcOperand[srcNum].mod = mod;
-}
-
-void CEncoder::SetPredicate(CVariable* flag)
-{
-    assert(flag==NULL || flag->GetVarType()==EVARTYPE_PREDICATE);
+    void CEncoder::PredAdd(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1)
+    {
     m_encoderState.m_flag.var = flag;
-}
 
-void CEncoder::SetInversePredicate(bool inv)
-{
+    Arithmetic(ISA_ADD, dst, src0, src1);
+    }
+
+    void CEncoder::SetDstSubVar(uint subVar)
+    {
+    m_encoderState.m_dstOperand.subVar = int_cast<uint8_t>(subVar);
+    }
+
+    void CEncoder::SetDstSubReg(uint subReg)
+    {
+    m_encoderState.m_dstOperand.subReg = int_cast<uint16_t>(subReg);
+    }
+
+    void CEncoder::SetSrcSubVar(uint srcNum, uint subVar)
+    {
+        assert(srcNum < 4);
+    m_encoderState.m_srcOperand[srcNum].subVar = int_cast<uint8_t>(subVar);
+    }
+
+    void CEncoder::SetSrcSubReg(uint srcNum, uint subReg)
+    {
+        assert(srcNum < 4);
+    m_encoderState.m_srcOperand[srcNum].subReg = int_cast<uint16_t>(subReg);
+    }
+
+    void CEncoder::SetDstModifier(e_modifier mod)
+    {
+        assert(mod == EMOD_SAT || mod == EMOD_NONE);
+    m_encoderState.m_dstOperand.mod = mod;
+    }
+
+    void CEncoder::SetSrcModifier(uint srcNum, e_modifier mod)
+    {
+        assert(mod != EMOD_SAT);
+        assert(srcNum < 3);
+    m_encoderState.m_srcOperand[srcNum].mod = mod;
+    }
+
+    void CEncoder::SetPredicate(CVariable* flag)
+    {
+        assert(flag == NULL || flag->GetVarType() == EVARTYPE_PREDICATE);
+    m_encoderState.m_flag.var = flag;
+    }
+
+    void CEncoder::SetInversePredicate(bool inv)
+    {
     m_encoderState.m_flag.invertFlag = inv;
-}
+    }
 
-void CEncoder::SetPredicateMode(e_predMode mode)
-{
+    void CEncoder::SetPredicateMode(e_predMode mode)
+    {
     m_encoderState.m_flag.mode = mode;
-}
+    }
 
-void CEncoder::SetDstModifier(const DstModifier& modifier)
-{
-    if(modifier.sat)
+    void CEncoder::SetDstModifier(const DstModifier& modifier)
+    {
+        if (modifier.sat)
     {
         SetDstModifier(EMOD_SAT);
     }
-    if(modifier.flag)
+        if (modifier.flag)
     {
         SetPredicate(m_program->GetSymbol(modifier.flag->value));
         SetInversePredicate(modifier.invertFlag);
     }
-}
+    }
 
-void CEncoder::SetSrcRegion(uint srcNum, uint vStride, uint width, uint hStride, e_instance instance)
-{
+    void CEncoder::SetSrcRegion(uint srcNum, uint vStride, uint width, uint hStride, e_instance instance)
+    {
     m_encoderState.m_srcOperand[srcNum].region[0] = int_cast<uint8_t>(vStride);
     m_encoderState.m_srcOperand[srcNum].region[1] = int_cast<uint8_t>(width);
     m_encoderState.m_srcOperand[srcNum].region[2] = int_cast<uint8_t>(hStride);
     m_encoderState.m_srcOperand[srcNum].instance = instance;
     m_encoderState.m_srcOperand[srcNum].specialRegion = true;
-}
+    }
 
-void CEncoder::SetDstRegion(uint hStride)
-{
+    void CEncoder::SetDstRegion(uint hStride)
+    {
     m_encoderState.m_dstOperand.region[2] = int_cast<uint8_t>(hStride);
     m_encoderState.m_dstOperand.specialRegion = (hStride != 1);
-}
+    }
 
-uint64_t GetSignBit(VISA_Type type)
-{
-    switch(type)
+    uint64_t GetSignBit(VISA_Type type)
+    {
+        switch (type)
     {
     case ISA_TYPE_Q:
     case ISA_TYPE_DF:
@@ -686,83 +753,83 @@ uint64_t GetSignBit(VISA_Type type)
         break;
     }
     return 63;
-}
+    }
 
-bool IsFloat(VISA_Type type)
-{
+    bool IsFloat(VISA_Type type)
+    {
     return type == ISA_TYPE_DF || type == ISA_TYPE_F || type == ISA_TYPE_HF;
-}
+    }
 
-uint64_t CalculateImmediateValue(CVariable* var, e_modifier mod)
-{
+    uint64_t CalculateImmediateValue(CVariable* var, e_modifier mod)
+    {
     uint64_t immediate = var->GetImmediateValue();
     assert(mod == EMOD_ABS || mod == EMOD_NEG || mod == EMOD_NEGABS || mod == EMOD_NONE);
     // handle modifiers for immediates.
     // Change the sign bit for floats and do logic operations for integers
-    if(IsFloat(var->GetType()))
+        if (IsFloat(var->GetType()))
     {
-        if(mod == EMOD_ABS)
+            if (mod == EMOD_ABS)
         {
-            immediate &= ~((uint64_t)(1)<<GetSignBit(var->GetType()));
+                immediate &= ~((uint64_t)(1) << GetSignBit(var->GetType()));
         }
-        else if(mod == EMOD_NEG)
+            else if (mod == EMOD_NEG)
         {
-            immediate ^= (uint64_t)(1)<<GetSignBit(var->GetType());
+                immediate ^= (uint64_t)(1) << GetSignBit(var->GetType());
         }
-        else if(mod == EMOD_NEGABS)
+            else if (mod == EMOD_NEGABS)
         {
-             immediate |= ((uint64_t)(1)<<GetSignBit(var->GetType()));
+                immediate |= ((uint64_t)(1) << GetSignBit(var->GetType()));
         }
     }
     else
     {
-        if(mod == EMOD_ABS || mod == EMOD_NEGABS)
+            if (mod == EMOD_ABS || mod == EMOD_NEGABS)
         {
             uint64_t mask = (immediate >> GetSignBit(var->GetType())) & (uint64_t)0x01;
             immediate = (immediate + mask) ^ mask;
         }
-        if(mod == EMOD_NEG || mod == EMOD_NEGABS)
+            if (mod == EMOD_NEG || mod == EMOD_NEGABS)
         {
             immediate = ~immediate + 1;
         }
     }
     return immediate;
-}
+    }
 
-VISA_VectorOpnd* CEncoder::GetSourceOperandNoModifier(CVariable* var)
-{
+    VISA_VectorOpnd* CEncoder::GetSourceOperandNoModifier(CVariable* var)
+    {
     SModifier nullMod;
     nullMod.init();
     return GetSourceOperand(var, nullMod);
-}
+    }
 
-VISA_VectorOpnd* CEncoder::GetSourceOperand(CVariable* var, const SModifier& mod)
-{
-    if(var == nullptr)
+    VISA_VectorOpnd* CEncoder::GetSourceOperand(CVariable* var, const SModifier& mod)
     {
+        if (var == nullptr)
+        {
         return nullptr;
     }
     VISA_VectorOpnd* operand = nullptr;
-    if(var->IsImmediate())
+        if (var->IsImmediate())
     {
         uint64_t immediate = CalculateImmediateValue(var, mod.mod);
         V(vKernel->CreateVISAImmediate(operand, &immediate, var->GetType()));
     }
     else
     {
-        if(var->GetVarType() == EVARTYPE_GENERAL)
+            if (var->GetVarType() == EVARTYPE_GENERAL)
         {
             unsigned short vStride = 1;
             unsigned short width   = 1;
             unsigned short hStride = 0;
 
-            if(mod.specialRegion)
+                if (mod.specialRegion)
             {
                 vStride = int_cast<unsigned short>(mod.region[0]);
                 width   = int_cast<unsigned short>(mod.region[1]);
                 hStride = int_cast<unsigned short>(mod.region[2]);
             }
-            else if(var->IsUniform())
+                else if (var->IsUniform())
             {
                 //Scalar regioning
                 vStride = 0;
@@ -792,7 +859,7 @@ VISA_VectorOpnd* CEncoder::GetSourceOperand(CVariable* var, const SModifier& mod
                 unsigned short hStride = 1;
 
                 //if vector is also uniform
-                if(var->IsVectorUniform())
+                    if (var->IsVectorUniform())
                 {
                     vStride = 0;
                     width   = 1;
@@ -826,19 +893,19 @@ VISA_VectorOpnd* CEncoder::GetSourceOperand(CVariable* var, const SModifier& mod
         }
     }
     return operand;
-}
+    }
 
-VISA_VectorOpnd* CEncoder::GetDestinationOperand(CVariable* var, const SModifier& mod)
-{
+    VISA_VectorOpnd* CEncoder::GetDestinationOperand(CVariable* var, const SModifier& mod)
+    {
     VISA_VectorOpnd* operand = NULL;
     //Create Dst operand
-    if(var->GetVarType() == EVARTYPE_GENERAL)
+        if (var->GetVarType() == EVARTYPE_GENERAL)
     {
         unsigned short hStride  = 1;
         unsigned char rowOffset = 0;
         unsigned char colOffset = 0;
         GetRowAndColOffset(var, mod.subVar, mod.subReg, rowOffset, colOffset);
-        if(mod.specialRegion)
+            if (mod.specialRegion)
         {
             hStride = (unsigned short)mod.region[2];
         }
@@ -872,12 +939,12 @@ VISA_VectorOpnd* CEncoder::GetDestinationOperand(CVariable* var, const SModifier
             var->GetType()));
     }
     return operand;
-}
+    }
 
-VISA_PredOpnd* CEncoder::GetFlagOperand(const SFlag& flag)
-{
-    if(flag.var == nullptr)
+    VISA_PredOpnd* CEncoder::GetFlagOperand(const SFlag& flag)
     {
+        if (flag.var == nullptr)
+        {
         return nullptr;
     }
     VISA_PredOpnd* operand = nullptr;
@@ -898,10 +965,10 @@ VISA_PredOpnd* CEncoder::GetFlagOperand(const SFlag& flag)
         predState,
         predCtrl));
     return operand;
-}
+    }
 
-Common_ISA_Exec_Size CEncoder::GetAluExecSize(CVariable* dst) const
-{
+    Common_ISA_Exec_Size CEncoder::GetAluExecSize(CVariable* dst) const
+    {
     SIMDMode simdSize = m_encoderState.m_simdSize;
 
     if (dst && dst->GetVarType() == EVARTYPE_ADDRESS)
@@ -927,10 +994,10 @@ Common_ISA_Exec_Size CEncoder::GetAluExecSize(CVariable* dst) const
     }
 
     return visaExecSize(simdSize);
-}
+    }
 
-Common_VISA_EMask_Ctrl CEncoder::GetAluEMask(CVariable* dst)
-{
+    Common_VISA_EMask_Ctrl CEncoder::GetAluEMask(CVariable* dst)
+    {
     e_mask mask = m_encoderState.m_mask;
     bool noMask = m_encoderState.m_noMask;
     if (dst)
@@ -956,15 +1023,15 @@ Common_VISA_EMask_Ctrl CEncoder::GetAluEMask(CVariable* dst)
     }
 
     return ConvertMaskToVisaType(mask, noMask);
-}
+    }
 
-bool CEncoder::IsSat()
-{
-    return (m_encoderState.m_dstOperand.mod == EMOD_SAT)? true: false;
-}
+    bool CEncoder::IsSat()
+    {
+        return (m_encoderState.m_dstOperand.mod == EMOD_SAT) ? true : false;
+    }
 
-void CEncoder::MinMax(CISA_MIN_MAX_SUB_OPCODE subopcode, CVariable* dst, CVariable* src0, CVariable* src1)
-{
+    void CEncoder::MinMax(CISA_MIN_MAX_SUB_OPCODE subopcode, CVariable* dst, CVariable* src0, CVariable* src1)
+    {
     assert(m_encoderState.m_flag.var == nullptr && "min/max doesn't support predication");
 
     unsigned numParts = 0;
@@ -988,7 +1055,8 @@ void CEncoder::MinMax(CISA_MIN_MAX_SUB_OPCODE subopcode, CVariable* dst, CVariab
                 toExecSize,
                 dstOpnd, srcOpnd0, srcOpnd1));
         }
-    } else {
+        }
+        else {
         VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
         VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
         VISA_VectorOpnd* dstopnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
@@ -1002,50 +1070,68 @@ void CEncoder::MinMax(CISA_MIN_MAX_SUB_OPCODE subopcode, CVariable* dst, CVariab
             opnd0,
             opnd1));
     }
-}
+    }
 
-// NeedSplitting - Check whether a variable needs splitting due to the
-// violation of the hardware rule of no more than 2 GRFs should be accessed.
-// So far, only the following cases are covered
-// - SIMD16
-//      note that SIMD32 is supported differently.
-// - data types of 4+ bytes or 32+ bits
-// - for source, we only handle limited regions.
-//
-// numParts - return the total parts to be split, e.g. if the region spans 4
-// GRFs, it needs splitting into 2 parts at least.
-bool CEncoder::NeedSplitting(CVariable *var, const SModifier &mod,
-                             unsigned &numParts,
-                             bool isSource) const {
+    // NeedSplitting - Check whether a variable needs splitting due to the
+    // violation of the hardware rule of no more than 2 GRFs should be accessed.
+    // So far, only the following cases are covered
+    // - SIMD16
+    //      note that SIMD32 is supported differently.
+    // - data types of 4+ bytes or 32+ bits
+    // - for source, we only handle limited regions.
+    //
+    // numParts - return the total parts to be split, e.g. if the region spans 4
+    // GRFs, it needs splitting into 2 parts at least.
+    bool CEncoder::NeedSplitting(CVariable* var, const SModifier& mod,
+        unsigned& numParts, bool isSource) const
+    {
     // If nothing is specified, don't split.
     if (!var)
+        {
         return false;
+        }
+
     // Only handle SIMD16 now! We assume all data movements in SIMD8 will honor
     // the region rules.
     Common_ISA_Exec_Size simdSize = GetAluExecSize(var);
-    switch (simdSize) {
-    default:
-        return false;
+        const unsigned elemSize = var->GetElemSize();
+
+        switch (simdSize)
+        {
     case EXEC_SIZE_16:
         break;
-    // NOTE that SIMD32 will be supported differently based on the current
-    // implementation!
+        default:
+        {
+            // Checks for some rare cases that are not handled by the splitter, but should be detected and reported.
+            // Example: mov (8|M0)    r4.0<1>:q     r31.0<2;1,0>:q
+            constexpr unsigned maxBlockSize = 64; // size of 2 GRFs in bytes
+            // For uniform variables (which implies simdSize==1) the emitter may set regions with width>1.
+            // As it may happen in various places, we detect it here.
+            assert(var->IsUniform() || GrfRegionSize(simdSize, elemSize, mod, isSource) <= maxBlockSize);
+            return false;
     }
+        }
 
     // Only general variables need splitting so far.
     if (var->GetVarType() != EVARTYPE_GENERAL)
+        {
         return false;
+        }
 
     // Only varying variable need splitting so far.
     // NOTE: uniform variable is assumed to take less than 2 GRF+.
     if (var->IsUniform())
+        {
         return false;
+        }
 
-    unsigned elemSize = var->GetElemSize();
     // We assume there is no 2 GRF crossing when element size is smaller than
     // 4 bytes (or 32 bits), e.g. 16-bit WORD.
     if (elemSize < 4)
+        {
         return false;
+        }
+
     // If the data type has more than 4 bytes, i.e. 32 bits, it already crosses
     // 2+ GRFs by itself. There's no need to check further.
     if (elemSize > 4)
@@ -1054,8 +1140,10 @@ bool CEncoder::NeedSplitting(CVariable *var, const SModifier &mod,
         assert((isSource || !mod.specialRegion) &&
                "It's expected that there's no special region associated with "
                "QWORD type destination!");
-        if (isSource && mod.specialRegion) {
-            if (mod.region[1] == 1 && mod.region[0] == 0) {
+            if (isSource && mod.specialRegion)
+            {
+                if (mod.region[1] == 1 && mod.region[0] == 0)
+                {
                 // src region is <0;1,x>, can't cross 2 GRF.  No need to split.
                 return false;
             }
@@ -1064,37 +1152,51 @@ bool CEncoder::NeedSplitting(CVariable *var, const SModifier &mod,
 
         numParts = std::max(numParts, 2U);
         return true;
+
     }
 
 
     // For 32-bit data types, without special region, they won't cross 2+ GRFs.
     if (!mod.specialRegion)
+        {
         return false;
+        }
 
     // Check regioning.
-    if (isSource) {
+        if (isSource)
+        {
         // FIXME: Need better support for region with non-1 width.
         if (mod.region[1] != 1)
+            {
             return false;
+            }
+
         if (mod.region[0] < 2)
+            {
             return false;
+            }
+
         // For src with width set to 1, region with > 1 vstride needs
         // splitting.
         numParts = std::max(numParts, unsigned(mod.region[0]));
         return true;
     }
-    if (mod.region[2] < 2)
-        return false;
-    numParts = std::max(numParts, unsigned(mod.region[2]));
-    // For dst, region with > 1 hstride needs splitting.
-    return true;
-}
 
-// SplitVariable - Split the variable to prevent accessing 2+ GRFs.
-SModifier CEncoder::SplitVariable(Common_ISA_Exec_Size fromExecSize,
+    if (mod.region[2] < 2)
+        {
+        return false;
+        }
+
+        // For dst, region with > 1 hstride needs splitting.
+    numParts = std::max(numParts, unsigned(mod.region[2]));
+    return true;
+    }
+
+    // SplitVariable - Split the variable to prevent accessing 2+ GRFs.
+    SModifier CEncoder::SplitVariable(Common_ISA_Exec_Size fromExecSize,
                                   Common_ISA_Exec_Size toExecSize,
                                   unsigned thePart,
-                                  CVariable *var, const SModifier &mod,
+        CVariable* var, const SModifier& mod,
                                   bool isSource) const {
     // Splitting uniform or source scalar variables is unnecessary!
     bool isAddrVar = var && var->GetVarType() == EVARTYPE_ADDRESS;
@@ -1150,7 +1252,8 @@ SModifier CEncoder::SplitVariable(Common_ISA_Exec_Size fromExecSize,
         assert(mod.region[1] == 1 &&
                "Don't know how to split region with non-1 width!");
         theStride = mod.region[0];
-    } else {
+        }
+        else {
         theStride = mod.region[2];
     }
 
@@ -1171,10 +1274,10 @@ SModifier CEncoder::SplitVariable(Common_ISA_Exec_Size fromExecSize,
     }
 
     return newMod;
-}
+    }
 
-Common_ISA_Exec_Size
-CEncoder::SplitExecSize(Common_ISA_Exec_Size fromExecSize, unsigned numParts) const {
+    Common_ISA_Exec_Size
+        CEncoder::SplitExecSize(Common_ISA_Exec_Size fromExecSize, unsigned numParts) const {
     assert(numParts == 2 && "Only know splitting SIMD16 into SIMD8!");
 
     switch (fromExecSize) {
@@ -1187,10 +1290,10 @@ CEncoder::SplitExecSize(Common_ISA_Exec_Size fromExecSize, unsigned numParts) co
     }
     assert(false && "Unknown execution size to be split!");
     return static_cast<Common_ISA_Exec_Size>(~0);
-}
+    }
 
-Common_VISA_EMask_Ctrl
-CEncoder::SplitEMask(Common_ISA_Exec_Size fromExecSize,
+    Common_VISA_EMask_Ctrl
+        CEncoder::SplitEMask(Common_ISA_Exec_Size fromExecSize,
                      Common_ISA_Exec_Size toExecSize,
                      unsigned thePart, Common_VISA_EMask_Ctrl execMask) const {
     assert(((fromExecSize == EXEC_SIZE_16 && toExecSize == EXEC_SIZE_8) || (fromExecSize == EXEC_SIZE_32 && toExecSize == EXEC_SIZE_16)) &&
@@ -1244,18 +1347,21 @@ CEncoder::SplitEMask(Common_ISA_Exec_Size fromExecSize,
     }
     assert(false && "Unknown execution mask to be split into low part!");
     return static_cast<Common_VISA_EMask_Ctrl>(~0);
-}
+    }
 
-// Splitting SIMD16 Message Data Payload (MDP at offset = MDPOfst) for A64
-// scatter/untyped write messages to two SIMD8 MDPs (V0 and V1).
-void CEncoder::SplitMDP16To8(CVariable* MDP, uint32_t MDPOfst, uint32_t NumBlks, CVariable* V0, CVariable* V1)
-{
+    // Splitting SIMD16 Message Data Payload (MDP at offset = MDPOfst) for A64
+    // scatter/untyped write messages to two SIMD8 MDPs (V0 and V1).
+    void CEncoder::SplitPayloadToLowerSIMD(CVariable* MDP, uint32_t MDPOfst, uint32_t NumBlks, CVariable* V0, CVariable* V1, uint32_t fromSize)
+    {
     VISA_GenVar* GV = GetVISAVariable(MDP);
     VISA_GenVar* v0GV = GetVISAVariable(V0);
     VISA_GenVar* v1GV = GetVISAVariable(V1);
-    VISA_VectorOpnd *movDst0, *movDst1, *srcOpnd;
-    const Common_ISA_Exec_Size fromESize = EXEC_SIZE_16;
-    const Common_ISA_Exec_Size toESize = EXEC_SIZE_8;
+        VISA_VectorOpnd* movDst0 = nullptr;
+        VISA_VectorOpnd* movDst1 = nullptr;
+        VISA_VectorOpnd* srcOpnd = nullptr;
+        const uint32_t toSize = fromSize / 2;
+        const Common_ISA_Exec_Size fromESize = getExecSize(lanesToSIMDMode(fromSize));
+        const Common_ISA_Exec_Size toESize = getExecSize(lanesToSIMDMode(toSize));
     const uint32_t eltBytes = MDP->GetElemSize();
     assert(eltBytes == V0->GetElemSize() && eltBytes == V1->GetElemSize() &&
         "Element size should be the same among SIMD16 MDP and SIMD8 MDP!");
@@ -1271,8 +1377,8 @@ void CEncoder::SplitMDP16To8(CVariable* MDP, uint32_t MDPOfst, uint32_t NumBlks,
             uint32_t MDPStart = MDPOfst / eltBytes;
             for (uint32_t i = 0; i < NumBlks; ++i)
             {
-                uint32_t dstOfst = i * 8;
-                uint32_t srcOfst = i * 16 + MDPStart;
+                    uint32_t dstOfst = i * toSize;
+                    uint32_t srcOfst = i * fromSize + MDPStart;
                 V(vKernel->CreateVISADstOperand(movDst0, v0GV, 1, dstOfst / GRFElts, dstOfst % GRFElts));
                 V(vKernel->CreateVISADstOperand(movDst1, v1GV, 1, dstOfst / GRFElts, dstOfst % GRFElts));
 
@@ -1284,7 +1390,7 @@ void CEncoder::SplitMDP16To8(CVariable* MDP, uint32_t MDPOfst, uint32_t NumBlks,
                     SplitEMask(fromESize, toESize, 0, execNM),
                     toESize, movDst0, srcOpnd));
 
-                srcOfst += 8;
+                    srcOfst += toSize;
                 V(vKernel->CreateVISASrcOperand(srcOpnd, GV, MODIFIER_NONE,
                     1, 1, 0, srcOfst / GRFElts, srcOfst % GRFElts));
 
@@ -1295,17 +1401,20 @@ void CEncoder::SplitMDP16To8(CVariable* MDP, uint32_t MDPOfst, uint32_t NumBlks,
             }
         }
     }
-}
+    }
 
-// Merge two SIMD8 MDP (V0 and V1) into a single SIMD16 MDP (MDP at offset = MDPOfst)
-void CEncoder::MergeMDP8To16(CVariable* V0, CVariable* V1, uint32_t NumBlks, CVariable* MDP, uint32_t MDPOfst)
-{
+    // Merge two SIMD8 MDP (V0 and V1) into a single SIMD16 MDP (MDP at offset = MDPOfst)
+    void CEncoder::MergePayloadToHigherSIMD(CVariable* V0, CVariable* V1, uint32_t NumBlks, CVariable* MDP, uint32_t MDPOfst, uint32_t toSize)
+    {
     VISA_GenVar* GV = GetVISAVariable(MDP);
     VISA_GenVar* v0GV = GetVISAVariable(V0);
     VISA_GenVar* v1GV = GetVISAVariable(V1);
-    VISA_VectorOpnd *movDst, *movSrc0, *movSrc1;
-    const Common_ISA_Exec_Size fromESize = EXEC_SIZE_16;
-    const Common_ISA_Exec_Size toESize = EXEC_SIZE_8;
+        VISA_VectorOpnd* movDst = nullptr;
+        VISA_VectorOpnd* movSrc0 = nullptr;
+        VISA_VectorOpnd* movSrc1 = nullptr;
+        const uint32_t fromSize = toSize / 2;
+        const Common_ISA_Exec_Size fromESize = getExecSize(lanesToSIMDMode(toSize));
+        const Common_ISA_Exec_Size toESize = getExecSize(lanesToSIMDMode(fromSize));
     const uint32_t eltBytes = MDP->GetElemSize();
     assert(eltBytes == V0->GetElemSize() && eltBytes == V1->GetElemSize() &&
            "Element size should be the same among SIMD16 MDP and SIMD8 MDP!");
@@ -1321,8 +1430,8 @@ void CEncoder::MergeMDP8To16(CVariable* V0, CVariable* V1, uint32_t NumBlks, CVa
             uint32_t MDPStart = MDPOfst / eltBytes;
             for (uint32_t i = 0; i < NumBlks; ++i)
             {
-                uint32_t dstOfst = i * 16 + MDPStart;
-                uint32_t srcOfst = i * 8;
+                    uint32_t dstOfst = i * toSize + MDPStart;
+                    uint32_t srcOfst = i * fromSize;
                 V(vKernel->CreateVISADstOperand(movDst, GV, 1, dstOfst / GRFElts, dstOfst % GRFElts));
                 V(vKernel->CreateVISASrcOperand(movSrc0, v0GV, MODIFIER_NONE,
                     1, 1, 0, srcOfst / GRFElts, srcOfst % GRFElts));
@@ -1334,7 +1443,7 @@ void CEncoder::MergeMDP8To16(CVariable* V0, CVariable* V1, uint32_t NumBlks, CVa
                     SplitEMask(fromESize, toESize, 0, execNM),
                     toESize, movDst, movSrc0));
 
-                dstOfst += 8;
+                    dstOfst += fromSize;
                 V(vKernel->CreateVISADstOperand(movDst, GV, 1, dstOfst / GRFElts, dstOfst % GRFElts));
                 V(vKernel->AppendVISADataMovementInst(
                     ISA_MOV, nullptr, false,
@@ -1343,17 +1452,19 @@ void CEncoder::MergeMDP8To16(CVariable* V0, CVariable* V1, uint32_t NumBlks, CVa
             }
         }
     }
-}
+    }
 
-static SModifier
-EmulateVariable(CVariable *Var, SModifier Mod, bool IsHiPart, bool IsSource) {
+    static SModifier
+        EmulateVariable(CVariable* Var, SModifier Mod, bool IsHiPart, bool IsSource) {
     if (Mod.specialRegion) {
         if (IsSource) {
             Mod.region[0] *= 2;
             Mod.region[2] *= 2;
-        } else
+            }
+            else
             Mod.region[2] *= 2;
-    } else {
+        }
+        else {
         if (IsSource) {
             if (!Var->IsUniform()) {
                 Mod.region[0] = 2;
@@ -1361,7 +1472,8 @@ EmulateVariable(CVariable *Var, SModifier Mod, bool IsHiPart, bool IsSource) {
                 Mod.region[2] = 0;
                 Mod.specialRegion = true;
             }
-        } else {
+            }
+            else {
             Mod.region[2] = 2;
             Mod.specialRegion = true;
         }
@@ -1370,12 +1482,12 @@ EmulateVariable(CVariable *Var, SModifier Mod, bool IsHiPart, bool IsSource) {
     if (IsHiPart)
         Mod.subReg += 1;
     return Mod;
-}
+    }
 
-void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
-{
-    if(opcode == ISA_SETP)
+    void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
     {
+        if (opcode == ISA_SETP)
+        {
         assert(dst->GetVarType() == EVARTYPE_PREDICATE);
         V(vKernel->AppendVISASetP(
             GetAluEMask(dst),
@@ -1383,7 +1495,7 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
             dst->visaPredVariable,
             GetSourceOperand(src, m_encoderState.m_srcOperand[0])));
     }
-    else if(opcode == ISA_MOV && src->GetVarType() == EVARTYPE_PREDICATE)
+        else if (opcode == ISA_MOV && src->GetVarType() == EVARTYPE_PREDICATE)
     {
         V(vKernel->AppendVISAPredicateMove(
             GetDestinationOperand(dst, m_encoderState.m_dstOperand),
@@ -1416,10 +1528,10 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
             }
         }
 
-        CVariable *dstAlias = nullptr;
-        CVariable *srcAlias = nullptr;
-        VISA_VectorOpnd *srcImmLo = nullptr;
-        VISA_VectorOpnd *srcImmHi = nullptr;
+            CVariable* dstAlias = nullptr;
+            CVariable* srcAlias = nullptr;
+            VISA_VectorOpnd* srcImmLo = nullptr;
+            VISA_VectorOpnd* srcImmHi = nullptr;
         if (Need64BitEmu) {
             if (Is64BitDst)
                 dstAlias = m_program->GetNewAlias(dst, ISA_TYPE_UD, 0, 0);
@@ -1431,7 +1543,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                 unsigned ImmHi = Imm >> 32;
                 V(vKernel->CreateVISAImmediate(srcImmLo, &ImmLo, ISA_TYPE_UD));
                 V(vKernel->CreateVISAImmediate(srcImmHi, &ImmHi, ISA_TYPE_UD));
-            } else {
+                }
+                else {
                 if (Is64BitSrc)
                     srcAlias = m_program->GetNewAlias(src, ISA_TYPE_UD, 0, 0);
                 else
@@ -1471,7 +1584,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                             SplitEMask(fromExecSize, toExecSize, thePart, execMask),
                             toExecSize,
                             dstOpnd, srcOpnd));
-                    } else if (Is64BitSrc) {
+                        }
+                        else if (Is64BitSrc) {
                         assert(!Is64BitDst && "Expect non 64-bit dst!");
                         // Generate data movement on Lo part only.
                         SModifier LoSrcMod = EmulateVariable(src, newSrcMod, false, true);
@@ -1482,7 +1596,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                             SplitEMask(fromExecSize, toExecSize, thePart, execMask),
                             toExecSize,
                             dstOpnd, srcOpnd));
-                    } else {
+                        }
+                        else {
                         assert(Is64BitDst && !Is64BitSrc && "Expect non 64-bit src and 64-bit dst!");
                         // Generate data movement on Lo part.
                         SModifier LoDstMod = EmulateVariable(dst, newDstMod, false, false);
@@ -1505,7 +1620,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                             toExecSize,
                             dstOpnd, srcOpnd));
                     }
-                } else {
+                    }
+                    else {
                     VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
                     VISA_VectorOpnd* srcOpnd = GetSourceOperand(src, newSrcMod);
                     VISA_PredOpnd* predOpnd  = GetFlagOperand(m_encoderState.m_flag);
@@ -1515,7 +1631,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                         dstOpnd, srcOpnd));
                 }
             }
-        } else {
+            }
+            else {
             if (Need64BitEmu) {
                 if (Is64BitSrc && Is64BitDst) {
                     // Generate data movement on Lo part.
@@ -1538,7 +1655,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                         GetAluEMask(dst),
                         GetAluExecSize(dst),
                         dstOpnd, srcOpnd));
-                } else if (Is64BitSrc) {
+                    }
+                    else if (Is64BitSrc) {
                     assert(!Is64BitDst && "Expect non 64-bit dst!");
                     // Generate data movement on Lo part only.
                     SModifier LoSrcMod = EmulateVariable(src, m_encoderState.m_srcOperand[0], false, true);
@@ -1549,7 +1667,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                         GetAluEMask(dst),
                         GetAluExecSize(dst),
                         dstOpnd, srcOpnd));
-                } else {
+                    }
+                    else {
                     assert(Is64BitDst && !Is64BitSrc && "Expect non 64-bit src and 64-bit dst!");
                     // Generate data movement on Lo part.
                     SModifier LoDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, false, false);
@@ -1572,7 +1691,8 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
                         GetAluExecSize(dst),
                         dstOpnd, srcOpnd));
                 }
-            } else {
+                }
+                else {
                 VISA_VectorOpnd* srcOpnd = GetSourceOperand(src, m_encoderState.m_srcOperand[0]);
                 VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
                 VISA_PredOpnd* predOpnd  = GetFlagOperand(m_encoderState.m_flag);
@@ -1587,22 +1707,22 @@ void CEncoder::DataMov(ISA_Opcode opcode, CVariable* dst, CVariable* src)
             }
         }
     }
-}
+    }
 
-void CEncoder::LogicOp(
+    void CEncoder::LogicOp(
     ISA_Opcode opcode,
     CVariable* dst,
     CVariable* src0,
     CVariable* src1,
     CVariable* src2,
     CVariable* src3)
-{
-    if(dst->GetVarType() == EVARTYPE_PREDICATE ||
+    {
+        if (dst->GetVarType() == EVARTYPE_PREDICATE ||
         src0->GetVarType() == EVARTYPE_PREDICATE ||
         (src1 != nullptr && src1->GetVarType() == EVARTYPE_PREDICATE))
     {
         VISA_PredVar* src1Dcl = NULL;
-        if(src1 != NULL)
+            if (src1 != NULL)
             src1Dcl = src1->visaPredVariable;
 
         // Try to use NOT instruction for predicate, we won't have phi on
@@ -1623,7 +1743,7 @@ void CEncoder::LogicOp(
         unsigned numParts = 0;
         if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
             NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
-            NeedSplitting(src1, m_encoderState. m_srcOperand[1], numParts, true) ||
+                NeedSplitting(src1, m_encoderState.m_srcOperand[1], numParts, true) ||
             NeedSplitting(src2, m_encoderState.m_srcOperand[2], numParts, true) ||
             NeedSplitting(src3, m_encoderState.m_srcOperand[3], numParts, true)) {
 
@@ -1648,7 +1768,8 @@ void CEncoder::LogicOp(
                     toExecSize,
                     dstOpnd, srcOpnd0, srcOpnd1, srcOpnd2, srcOpnd3));
             }
-        } else {
+            }
+            else {
             VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
             VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
             VISA_VectorOpnd* srcOpnd2 = GetSourceOperand(src2, m_encoderState.m_srcOperand[2]);
@@ -1669,10 +1790,10 @@ void CEncoder::LogicOp(
                 srcOpnd3));
         }
     }
-}
+    }
 
-void CEncoder::Arithmetic(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CVariable*src1, CVariable* src2)
-{
+    void CEncoder::Arithmetic(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
+    {
     unsigned numParts = 0;
     if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
         NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
@@ -1698,7 +1819,8 @@ void CEncoder::Arithmetic(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CV
                 toExecSize,
                 dstOpnd, srcOpnd0, srcOpnd1, srcOpnd2));
         }
-    } else {
+        }
+        else {
         VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
         VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
         VISA_VectorOpnd* srcOpnd2 = GetSourceOperand(src2, m_encoderState.m_srcOperand[2]);
@@ -1715,10 +1837,10 @@ void CEncoder::Arithmetic(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CV
             srcOpnd1,
             srcOpnd2));
     }
-}
+    }
 
 
-void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H0, CVariable *L1, CVariable *H1) {
+    void CEncoder::AddPair(CVariable* Lo, CVariable* Hi, CVariable* L0, CVariable* H0, CVariable* L1, CVariable* H1) {
     assert(m_encoderState.m_dstOperand.mod == EMOD_NONE && "addPair doesn't support saturate");
 
     if (Hi == nullptr) {
@@ -1754,25 +1876,25 @@ void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
         Common_ISA_Exec_Size FromExecSize = GetAluExecSize(Lo);
         Common_ISA_Exec_Size ToExecSize = SplitExecSize(FromExecSize, NumParts);
 
-        VISA_PredOpnd *Pred  = GetFlagOperand(m_encoderState.m_flag);
+            VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
         for (unsigned ThePart = 0; ThePart != NumParts; ++ThePart) {
             SModifier NewDstMod = SplitVariable(FromExecSize, ToExecSize, ThePart, Lo, m_encoderState.m_dstOperand);
             SModifier NewS0LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L0, m_encoderState.m_srcOperand[0], true);
             SModifier NewS0HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H0, m_encoderState.m_srcOperand[1], true);
             SModifier NewS1LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L1, m_encoderState.m_srcOperand[2], true);
             SModifier NewS1HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H1, m_encoderState.m_srcOperand[3], true);
-            VISA_VectorOpnd *S0L = GetSourceOperand(L0, NewS0LMod);
-            VISA_VectorOpnd *S0H = GetSourceOperand(H0, NewS0HMod);
-            VISA_VectorOpnd *S1L = GetSourceOperand(L1, NewS1LMod);
-            VISA_VectorOpnd *S1H = GetSourceOperand(H1, NewS1HMod);
-            VISA_VectorOpnd *L = GetDestinationOperand(Lo, NewDstMod);
-            VISA_VectorOpnd *H = GetDestinationOperand(Hi, NewDstMod);
-            VISA_VectorOpnd *HIn = GetSourceOperand(Hi, NewDstMod);
+                VISA_VectorOpnd* S0L = GetSourceOperand(L0, NewS0LMod);
+                VISA_VectorOpnd* S0H = GetSourceOperand(H0, NewS0HMod);
+                VISA_VectorOpnd* S1L = GetSourceOperand(L1, NewS1LMod);
+                VISA_VectorOpnd* S1H = GetSourceOperand(H1, NewS1HMod);
+                VISA_VectorOpnd* L = GetDestinationOperand(Lo, NewDstMod);
+                VISA_VectorOpnd* H = GetDestinationOperand(Hi, NewDstMod);
+                VISA_VectorOpnd* HIn = GetSourceOperand(Hi, NewDstMod);
 
             unsigned NumElems = 8;
-            CVariable *Carry = m_program->GetNewVariable((uint16_t)NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
-            VISA_VectorOpnd *AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
-            VISA_VectorOpnd *AccIn = GetSourceOperand(Carry, m_encoderState.m_dstOperand);
+                CVariable* Carry = m_program->GetNewVariable((uint16_t)NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
+                VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
+                VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, m_encoderState.m_dstOperand);
 
             Common_VISA_EMask_Ctrl EMask = SplitEMask(FromExecSize, ToExecSize, ThePart, ExecMask);
             V(vKernel->AppendVISAArithmeticInst(
@@ -1786,20 +1908,21 @@ void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
                 ISA_ADD, Pred, false, EMask, ToExecSize,
                 H, AccIn, HIn));
         }
-    } else {
-        VISA_VectorOpnd *S0L = GetSourceOperand(L0, m_encoderState.m_srcOperand[0]);
-        VISA_VectorOpnd *S0H = GetSourceOperand(H0, m_encoderState.m_srcOperand[1]);
-        VISA_VectorOpnd *S1L = GetSourceOperand(L1, m_encoderState.m_srcOperand[2]);
-        VISA_VectorOpnd *S1H = GetSourceOperand(H1, m_encoderState.m_srcOperand[3]);
-        VISA_VectorOpnd *L = GetDestinationOperand(Lo, m_encoderState.m_dstOperand);
-        VISA_VectorOpnd *H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
-        VISA_PredOpnd *Pred  = GetFlagOperand(m_encoderState.m_flag);
+        }
+        else {
+            VISA_VectorOpnd* S0L = GetSourceOperand(L0, m_encoderState.m_srcOperand[0]);
+            VISA_VectorOpnd* S0H = GetSourceOperand(H0, m_encoderState.m_srcOperand[1]);
+            VISA_VectorOpnd* S1L = GetSourceOperand(L1, m_encoderState.m_srcOperand[2]);
+            VISA_VectorOpnd* S1H = GetSourceOperand(H1, m_encoderState.m_srcOperand[3]);
+            VISA_VectorOpnd* L = GetDestinationOperand(Lo, m_encoderState.m_dstOperand);
+            VISA_VectorOpnd* H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
+            VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
 
         unsigned short NumElems = (ExecSize == EXEC_SIZE_1) ? 1 :
                             (ExecSize == EXEC_SIZE_2) ? 2 :
                             (ExecSize == EXEC_SIZE_4) ? 4 : 8;
-        CVariable *Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
-        VISA_VectorOpnd *AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
+            CVariable* Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
+            VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
 
         SModifier MidMod = m_encoderState.m_dstOperand;
         if (Lo->IsUniform() && NumElems != 1) {
@@ -1808,8 +1931,8 @@ void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
             MidMod.region[2] = 0;
             MidMod.specialRegion = true;
         }
-        VISA_VectorOpnd *HIn = GetSourceOperand(Hi, MidMod);
-        VISA_VectorOpnd *AccIn = GetSourceOperand(Carry, MidMod);
+            VISA_VectorOpnd* HIn = GetSourceOperand(Hi, MidMod);
+            VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, MidMod);
 
         Common_VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
         V(vKernel->AppendVISAArithmeticInst(
@@ -1823,9 +1946,9 @@ void CEncoder::AddPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
             ISA_ADD, Pred, false, ExecMask, ExecSize,
             H, AccIn, HIn));
     }
-}
+    }
 
-void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H0, CVariable *L1, CVariable *H1) {
+    void CEncoder::SubPair(CVariable* Lo, CVariable* Hi, CVariable* L0, CVariable* H0, CVariable* L1, CVariable* H1) {
     assert(m_encoderState.m_dstOperand.mod == EMOD_NONE && "subPair doesn't support saturate");
 
     Common_ISA_Exec_Size ExecSize = GetAluExecSize(Lo);
@@ -1864,29 +1987,29 @@ void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
         SModifier S1HMod = m_encoderState.m_srcOperand[1];
         assert(S1HMod.mod == EMOD_NONE);
         S1HMod.mod = EMOD_NEG;
-        VISA_PredOpnd *Pred  = GetFlagOperand(m_encoderState.m_flag);
+            VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
         for (unsigned ThePart = 0; ThePart != NumParts; ++ThePart) {
             SModifier NewDstMod = SplitVariable(FromExecSize, ToExecSize, ThePart, Lo, m_encoderState.m_dstOperand);
             SModifier NewS0LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L0, m_encoderState.m_srcOperand[0], true);
             SModifier NewS0HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H0, m_encoderState.m_srcOperand[1], true);
             SModifier NewS1LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L1, m_encoderState.m_srcOperand[2], true);
             SModifier NewS1HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H1, S1HMod, true);
-            VISA_VectorOpnd *S0L = GetSourceOperand(L0, NewS0LMod);
-            VISA_VectorOpnd *S0H = GetSourceOperand(H0, NewS0HMod);
-            VISA_VectorOpnd *S1L = GetSourceOperand(L1, NewS1LMod);
-            VISA_VectorOpnd *S1H = GetSourceOperand(H1, NewS1HMod);
-            VISA_VectorOpnd *L = GetDestinationOperand(Lo, NewDstMod);
-            VISA_VectorOpnd *H = GetDestinationOperand(Hi, NewDstMod);
-            VISA_VectorOpnd *HIn = GetSourceOperand(Hi, NewDstMod);
+                VISA_VectorOpnd* S0L = GetSourceOperand(L0, NewS0LMod);
+                VISA_VectorOpnd* S0H = GetSourceOperand(H0, NewS0HMod);
+                VISA_VectorOpnd* S1L = GetSourceOperand(L1, NewS1LMod);
+                VISA_VectorOpnd* S1H = GetSourceOperand(H1, NewS1HMod);
+                VISA_VectorOpnd* L = GetDestinationOperand(Lo, NewDstMod);
+                VISA_VectorOpnd* H = GetDestinationOperand(Hi, NewDstMod);
+                VISA_VectorOpnd* HIn = GetSourceOperand(Hi, NewDstMod);
 
             unsigned short NumElems = 8;
-            CVariable *Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
-            VISA_VectorOpnd *AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
+                CVariable* Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
+                VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
             // Negative `Acc0`
             SModifier AccMod = m_encoderState.m_dstOperand;
             assert(AccMod.mod == EMOD_NONE);
             AccMod.mod = EMOD_NEG;
-            VISA_VectorOpnd *AccIn = GetSourceOperand(Carry, AccMod);
+                VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, AccMod);
 
             Common_VISA_EMask_Ctrl EMask = SplitEMask(FromExecSize, ToExecSize, ThePart, ExecMask);
             V(vKernel->AppendVISAArithmeticInst(
@@ -1900,22 +2023,23 @@ void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
                 ISA_ADD, Pred, false, EMask, ToExecSize,
                 H, AccIn, HIn));
         }
-    } else {
-        VISA_VectorOpnd *S0L = GetSourceOperand(L0, m_encoderState.m_srcOperand[0]);
-        VISA_VectorOpnd *S0H = GetSourceOperand(H0, m_encoderState.m_srcOperand[1]);
-        VISA_VectorOpnd *S1L = GetSourceOperand(L1, m_encoderState.m_srcOperand[2]);
+        }
+        else {
+            VISA_VectorOpnd* S0L = GetSourceOperand(L0, m_encoderState.m_srcOperand[0]);
+            VISA_VectorOpnd* S0H = GetSourceOperand(H0, m_encoderState.m_srcOperand[1]);
+            VISA_VectorOpnd* S1L = GetSourceOperand(L1, m_encoderState.m_srcOperand[2]);
         // Negative `S0H`
         SModifier S1HMod = m_encoderState.m_srcOperand[1];
         assert(S1HMod.mod == EMOD_NONE);
         S1HMod.mod = EMOD_NEG;
-        VISA_VectorOpnd *S1H = GetSourceOperand(H1, S1HMod);
-        VISA_VectorOpnd *L = GetDestinationOperand(Lo, m_encoderState.m_dstOperand);
-        VISA_VectorOpnd *H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
-        VISA_PredOpnd *Pred  = GetFlagOperand(m_encoderState.m_flag);
+            VISA_VectorOpnd* S1H = GetSourceOperand(H1, S1HMod);
+            VISA_VectorOpnd* L = GetDestinationOperand(Lo, m_encoderState.m_dstOperand);
+            VISA_VectorOpnd* H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
+            VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
 
         unsigned short NumElems = (ExecSize == 1) ? 1 : 8;
-        CVariable *Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
-        VISA_VectorOpnd *AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
+            CVariable* Carry = m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform());
+            VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
 
         SModifier MidMod = m_encoderState.m_dstOperand;
         if (Lo->IsUniform() && NumElems != 1) {
@@ -1924,12 +2048,12 @@ void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
             MidMod.region[2] = 0;
             MidMod.specialRegion = true;
         }
-        VISA_VectorOpnd *HIn = GetSourceOperand(Hi, MidMod);
+            VISA_VectorOpnd* HIn = GetSourceOperand(Hi, MidMod);
         // Negative `Acc0`
         SModifier AccMod = MidMod;
         assert(AccMod.mod == EMOD_NONE);
         AccMod.mod = EMOD_NEG;
-        VISA_VectorOpnd *AccIn = GetSourceOperand(Carry, AccMod);
+            VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, AccMod);
 
         Common_VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
         V(vKernel->AppendVISAArithmeticInst(
@@ -1943,10 +2067,10 @@ void CEncoder::SubPair(CVariable *Lo, CVariable *Hi, CVariable *L0, CVariable *H
             ISA_ADD, Pred, false, ExecMask, ExecSize,
             H, AccIn, HIn));
     }
-}
+    }
 
-void CEncoder::CarryBorrowArith(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CVariable*src1)
-{
+    void CEncoder::CarryBorrowArith(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1)
+    {
     VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
     VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
     VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
@@ -1980,15 +2104,15 @@ void CEncoder::CarryBorrowArith(ISA_Opcode opcode, CVariable* dst, CVariable* sr
         carryBorrowOpnd,
         srcOpnd0,
         srcOpnd1));
-}
+    }
 
-void CEncoder::URBWrite(
+    void CEncoder::URBWrite(
     CVariable* src,
     const int payloadElementOffset,
     CVariable* offset,
     CVariable* urbHandle,
-    CVariable* mask )
-{
+        CVariable* mask)
+    {
     Common_VISA_EMask_Ctrl emask = ConvertMaskToVisaType(m_encoderState.m_mask, m_encoderState.m_noMask);
     Common_ISA_Exec_Size execSize = visaExecSize(m_encoderState.m_simdSize);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -2013,7 +2137,7 @@ void CEncoder::URBWrite(
     // 1. Channel Mask is immediate value with 0xFF, so not needed to send
     // 2. Channel Mask is immediate value other than 0xFF, so needed to send, but as immediate value
     // 3. Channel Mask is not immediate value, so needed to send, but as not immediate value
-    VISA_RawOpnd *channelMask = nullptr;
+        VISA_RawOpnd* channelMask = nullptr;
     unsigned char payloadSize = 0;
     if (!mask->IsImmediate())
     {
@@ -2047,7 +2171,7 @@ void CEncoder::URBWrite(
         payloadSize = int_cast<unsigned char>(immMask.size());
     }
 
-    VISA_RawOpnd *vertexData = GetRawSource(src, payloadElementOffset);
+        VISA_RawOpnd* vertexData = GetRawSource(src, payloadElementOffset);
 
     V(vKernel->AppendVISA3dURBWrite(
         predOpnd,
@@ -2059,15 +2183,15 @@ void CEncoder::URBWrite(
         urbhandle,
         perSlotOffset,
         vertexData));
-}
+    }
 
-VISA_RawOpnd* CEncoder::GetRawSource(CVariable* var, uint offset)
-{
-    VISA_RawOpnd *srcOpnd = nullptr;
-    if(var)
+    VISA_RawOpnd* CEncoder::GetRawSource(CVariable* var, uint offset)
     {
-        if(var->IsImmediate())
+        VISA_RawOpnd* srcOpnd = nullptr;
+        if (var)
         {
+            if (var->IsImmediate())
+            {
             VISA_VectorOpnd* vecOpnd = nullptr;
             uint immediate = int_cast<uint>(var->GetImmediateValue());
             V(vKernel->CreateVISAImmediate(vecOpnd, &immediate, ISA_TYPE_UD));
@@ -2086,37 +2210,37 @@ VISA_RawOpnd* CEncoder::GetRawSource(CVariable* var, uint offset)
         V(vKernel->CreateVISANullRawOperand(srcOpnd, false));
     }
     return srcOpnd;
-}
+    }
 
-VISA_RawOpnd* CEncoder::GetRawDestination(CVariable* var, unsigned offset)
-{
-    VISA_RawOpnd *dstOpnd = nullptr;
-    if(var)
+    VISA_RawOpnd* CEncoder::GetRawDestination(CVariable* var, unsigned offset)
     {
+        VISA_RawOpnd* dstOpnd = nullptr;
+        if (var)
+        {
         V(vKernel->CreateVISARawOperand(
             dstOpnd, GetVISAVariable(var),
-            m_encoderState.m_dstOperand.subVar*getGRFSize() + offset + var->GetAliasOffset()));
+                m_encoderState.m_dstOperand.subVar * getGRFSize() + offset + var->GetAliasOffset()));
     }
     else
     {
          V(vKernel->CreateVISANullRawOperand(dstOpnd, true));
     }
     return dstOpnd;
-}
+    }
 
-void CEncoder::Send(CVariable* dst, CVariable* src, uint exDesc, CVariable* messDescriptor, bool isSendc)
-{
-    if(dst && dst->IsUniform())
+    void CEncoder::Send(CVariable* dst, CVariable* src, uint exDesc, CVariable* messDescriptor, bool isSendc)
+    {
+        if (dst && dst->IsUniform())
     {
         m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
     }
     unsigned char sendc = isSendc ? 1 : 0;
-    unsigned char srcSize = src->GetSize()/getGRFSize();
-    unsigned char dstSize = dst ? dst->GetSize()/getGRFSize() : 0;
+        unsigned char srcSize = src->GetSize() / getGRFSize();
+        unsigned char dstSize = dst ? dst->GetSize() / getGRFSize() : 0;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *srcOpnd0    = GetRawSource(src);
-    VISA_RawOpnd *dstOpnd     = GetRawDestination(dst);
-    VISA_VectorOpnd *desc = GetUniformSource(messDescriptor);
+        VISA_RawOpnd* srcOpnd0 = GetRawSource(src);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
+        VISA_VectorOpnd* desc = GetUniformSource(messDescriptor);
 
     V(vKernel->AppendVISAMiscRawSend(
         predOpnd,
@@ -2129,34 +2253,34 @@ void CEncoder::Send(CVariable* dst, CVariable* src, uint exDesc, CVariable* mess
         desc,
         srcOpnd0,
         dstOpnd));
-}
+    }
 
-void CEncoder::Send(CVariable* dst, CVariable* src, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc)
-{
-    Sends(dst, src, nullptr, ffid, exDesc, messDescriptor, isSendc);
-}
-
-void CEncoder::Sends(CVariable* dst, CVariable* src0, CVariable* src1, uint ffid, CVariable* exDesc, CVariable* messDescriptor,  bool isSendc)
-{
-    if(exDesc->IsImmediate() && src1 == nullptr)
+    void CEncoder::Send(CVariable* dst, CVariable* src, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc)
     {
+    Sends(dst, src, nullptr, ffid, exDesc, messDescriptor, isSendc);
+    }
+
+    void CEncoder::Sends(CVariable* dst, CVariable* src0, CVariable* src1, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc)
+    {
+        if (exDesc->IsImmediate() && src1 == nullptr)
+        {
         Send(dst, src0, (uint)exDesc->GetImmediateValue(), messDescriptor, isSendc);
         return;
     }
-    if(dst && dst->IsUniform())
+        if (dst && dst->IsUniform())
     {
         m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
     }
     unsigned char sendc = isSendc ? 1 : 0;
-    unsigned char src0Size = src0->GetSize()/getGRFSize();
+        unsigned char src0Size = src0->GetSize() / getGRFSize();
     unsigned char src1Size = src1 ? src1->GetSize() / getGRFSize() : 0;
-    unsigned char dstSize = dst ? dst->GetSize()/getGRFSize() : 0;
+        unsigned char dstSize = dst ? dst->GetSize() / getGRFSize() : 0;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *srcOpnd0 = GetRawSource(src0);
-    VISA_RawOpnd *srcOpnd1 = GetRawSource(src1);
-    VISA_RawOpnd *dstOpnd     = GetRawDestination(dst);
-    VISA_VectorOpnd *exMessDesc = GetUniformSource(exDesc);
-    VISA_VectorOpnd *desc = GetUniformSource(messDescriptor);
+        VISA_RawOpnd* srcOpnd0 = GetRawSource(src0);
+        VISA_RawOpnd* srcOpnd1 = GetRawSource(src1);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
+        VISA_VectorOpnd* exMessDesc = GetUniformSource(exDesc);
+        VISA_VectorOpnd* desc = GetUniformSource(messDescriptor);
 
     V(vKernel->AppendVISAMiscRawSends(
         predOpnd,
@@ -2172,20 +2296,20 @@ void CEncoder::Sends(CVariable* dst, CVariable* src0, CVariable* src1, uint ffid
         srcOpnd0,
         srcOpnd1,
         dstOpnd));
-}
+    }
 
-VISA_StateOpndHandle* CEncoder::GetBTIOperand(uint bindingTableIndex)
-{
+    VISA_StateOpndHandle* CEncoder::GetBTIOperand(uint bindingTableIndex)
+    {
     IGC::e_predefSurface predDefSurface = ESURFACE_NORMAL;
-    if(bindingTableIndex == 255)
+        if (bindingTableIndex == 255)
         predDefSurface = ESURFACE_STATELESS;
-    else if(bindingTableIndex == 254)
+        else if (bindingTableIndex == 254)
         predDefSurface = ESURFACE_SLM;
     CVariable tempImm(bindingTableIndex, ISA_TYPE_UD);
-    return GetVISASurfaceOpnd(predDefSurface, &tempImm );
-}
+        return GetVISASurfaceOpnd(predDefSurface, &tempImm);
+    }
 
-void CEncoder::RenderTargetWrite(CVariable* var[],
+    void CEncoder::RenderTargetWrite(CVariable* var[],
                                  bool isUndefined[],
                                  bool lastRenderTarget,
                                  bool perSample,
@@ -2196,11 +2320,11 @@ void CEncoder::RenderTargetWrite(CVariable* var[],
                                  CVariable* source0Alpha,
                                  CVariable* oMask,
                                  CVariable* depth,
-                                 CVariable *stencil,
-                                 CVariable *CPSCounter,
-                                 CVariable *sampleIndex,
-                                 CVariable *r1Reg)
-{
+        CVariable* stencil,
+        CVariable* CPSCounter,
+        CVariable* sampleIndex,
+        CVariable* r1Reg)
+    {
     Common_VISA_EMask_Ctrl emask = ConvertMaskToVisaType(m_encoderState.m_mask, m_encoderState.m_noMask);
     Common_ISA_Exec_Size execSize = visaExecSize(m_encoderState.m_simdSize);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -2215,55 +2339,60 @@ void CEncoder::RenderTargetWrite(CVariable* var[],
     cntrls.isHeaderMaskfromCe0 = headerMaskFromCe0;
     assert(!(predOpnd != nullptr && cntrls.isHeaderMaskfromCe0));
 
-    if(source0Alpha)
+        if (source0Alpha)
     {
         cntrls.s0aPresent = true;
         srcOpnd[numMsgSpecificOpnds++] = GetRawSource(source0Alpha);
-    }else
+        }
+        else
         cntrls.s0aPresent = false;
 
-    if(oMask)
+        if (oMask)
     {
         cntrls.oMPresent = true;
         srcOpnd[numMsgSpecificOpnds++] = GetRawSource(oMask);
-    }else
+        }
+        else
         cntrls.oMPresent = false;
 
-    for(int i = 0; i < 4; i++)
+        for (int i = 0; i < 4; i++)
     {
-        if(isUndefined[i])
+            if (isUndefined[i])
         {
             V(vKernel->CreateVISANullRawOperand(srcOpnd[numMsgSpecificOpnds++], false));
-        }else
+            }
+            else
         {
             srcOpnd[numMsgSpecificOpnds++] = GetRawSource(var[i]);
         }
     }
 
-    if(depth)
+        if (depth)
     {
         cntrls.zPresent = true;
         srcOpnd[numMsgSpecificOpnds++] = GetRawSource(depth);
-    }else
+        }
+        else
         cntrls.zPresent = false;
 
-    if(stencil)
+        if (stencil)
     {
         cntrls.isStencil = true;
         srcOpnd[numMsgSpecificOpnds++] = GetRawSource(stencil);
-    }else
+        }
+        else
         cntrls.isStencil = false;
 
     cntrls.isSampleIndex = false;
-    VISA_VectorOpnd *sampleIndexOpnd = NULL;
+        VISA_VectorOpnd* sampleIndexOpnd = NULL;
     if (sampleIndex)
     {
         sampleIndexOpnd = GetSourceOperandNoModifier(sampleIndex);
         cntrls.isSampleIndex = true;
     }
-    VISA_VectorOpnd *cpsCounterOpnd = GetSourceOperandNoModifier(CPSCounter);
+        VISA_VectorOpnd* cpsCounterOpnd = GetSourceOperandNoModifier(CPSCounter);
 
-    VISA_VectorOpnd *RTIndexOpnd = nullptr;
+        VISA_VectorOpnd* RTIndexOpnd = nullptr;
     cntrls.RTIndexPresent = false;
     // if RTIndex is 0, then no need to prepare the header for send
     if (!RTIndex->IsImmediate() || RTIndex->GetImmediateValue() != 0)
@@ -2277,10 +2406,10 @@ void CEncoder::RenderTargetWrite(CVariable* var[],
 
     //r1Reg should always be populated
     //vISA will decide whether to use it or not.
-    VISA_RawOpnd *r1RegOpnd = GetRawSource(r1Reg);
+        VISA_RawOpnd* r1RegOpnd = GetRawSource(r1Reg);
 
 
-    if(CPSCounter)
+        if (CPSCounter)
     {
         V(vKernel->AppendVISA3dRTWriteCPS(
             predOpnd,
@@ -2309,12 +2438,12 @@ void CEncoder::RenderTargetWrite(CVariable* var[],
             numMsgSpecificOpnds,
             srcOpnd));
     }
-}
+    }
 
-VISA_StateOpndHandle* CEncoder::GetSamplerOperand(
+    VISA_StateOpndHandle* CEncoder::GetSamplerOperand(
     const SamplerDescriptor& sampler,
     bool& isIdxLT16)
-{
+    {
     //Sampler index
     VISA_VectorOpnd* dstOpnd = nullptr;
     VISA_SamplerVar* samplerVar = nullptr;
@@ -2338,7 +2467,7 @@ VISA_StateOpndHandle* CEncoder::GetSamplerOperand(
         else
         {
             // for dynamic index, avoid generate additional code for APIs only supporting 16 samplers
-            if(m_program->GetContext()->m_DriverInfo.SupportMoreThan16Samplers())
+                if (m_program->GetContext()->m_DriverInfo.SupportMoreThan16Samplers())
             {
                 isIdxLT16 = false;
             }
@@ -2374,17 +2503,17 @@ VISA_StateOpndHandle* CEncoder::GetSamplerOperand(
     VISA_StateOpndHandle* samplerOpnd = nullptr;
     V(vKernel->CreateVISAStateOperandHandle(samplerOpnd, samplerVar));
     return samplerOpnd;
-}
+    }
 
-VISA_StateOpndHandle* CEncoder::GetSamplerOperand(CVariable* samplerIndex)
-{
+    VISA_StateOpndHandle* CEncoder::GetSamplerOperand(CVariable* samplerIndex)
+    {
     SamplerDescriptor sampler;
     bool isIdxLT16;
     sampler.m_sampler = samplerIndex;
     return GetSamplerOperand(sampler, isIdxLT16);
-}
+    }
 
-void CEncoder::Sample(
+    void CEncoder::Sample(
     EOPCODE subOpcode,
     uint writeMask,
     CVariable* offset,
@@ -2392,20 +2521,20 @@ void CEncoder::Sample(
     const SamplerDescriptor& sampler,
     uint numSources,
     CVariable* dst,
-    SmallVector<CVariable*, 4>& payload,
+        SmallVector<CVariable*, 4> & payload,
     bool zeroLOD,
     bool cpsEnable,
     bool feedbackEnable,
     bool nonUniformState)
-{
+    {
     int numMsgSpecificOpnds = numSources;
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     bool isIdxLT16;
     VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler, isIdxLT16);
     VISA_StateOpndHandle* btiOpnd = GetVISASurfaceOpnd(resource);
     VISA_RawOpnd* dstVar = GetRawDestination(dst);
-    VISA_RawOpnd * opndArray[11];
-    for(int i = 0; i< numMsgSpecificOpnds; i++)
+        VISA_RawOpnd* opndArray[11];
+        for (int i = 0; i < numMsgSpecificOpnds; i++)
     {
         opndArray[i] = GetRawSource(payload[i]);
     }
@@ -2414,7 +2543,7 @@ void CEncoder::Sample(
     // Use bit 15 of aoffimmi to tell VISA the sample index could be greater
     // than 15.  In this case, we need to use msg header, and setup M0.3
     // to point to next 16 sampler state.
-    if(!isIdxLT16)
+        if (!isIdxLT16)
     {
         uint16_t aoffimmiVal = (uint16_t)offset->GetImmediateValue() | BIT(15);
         V(vKernel->CreateVISAImmediate(aoffimmi, &aoffimmiVal, ISA_TYPE_UW));
@@ -2435,25 +2564,25 @@ void CEncoder::Sample(
         dstVar,
         numSources,
         opndArray));
-}
+    }
 
-void CEncoder::Load(
+    void CEncoder::Load(
     EOPCODE subOpcode,
     uint writeMask,
     CVariable* offset,
     const ResourceDescriptor& resource,
     uint numSources,
     CVariable* dst,
-    SmallVector<CVariable*, 4>& payload,
+        SmallVector<CVariable*, 4> & payload,
     bool zeroLOD,
     bool feedbackEnable)
-{
+    {
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
     VISA_RawOpnd* dstVar = GetRawDestination(dst);
 
-    VISA_RawOpnd * opndArray[11];
-    for(unsigned int i = 0; i <numSources; i++)
+        VISA_RawOpnd* opndArray[11];
+        for (unsigned int i = 0; i < numSources; i++)
     {
         opndArray[i] = GetRawSource(payload[i]);
     }
@@ -2472,10 +2601,10 @@ void CEncoder::Load(
         dstVar,
         numSources,
         opndArray));
-}
+    }
 
-void CEncoder::Info(EOPCODE subOpcode, uint writeMask, const ResourceDescriptor& resource, CVariable* lod, CVariable* dst)
-{
+    void CEncoder::Info(EOPCODE subOpcode, uint writeMask, const ResourceDescriptor& resource, CVariable* lod, CVariable* dst)
+    {
     VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
     VISA_RawOpnd* dstVar = GetRawDestination(dst);
     VISA_RawOpnd* lodVar = GetRawSource(lod);
@@ -2488,26 +2617,26 @@ void CEncoder::Info(EOPCODE subOpcode, uint writeMask, const ResourceDescriptor&
         surfOpnd,
         lodVar,
         dstVar));
-}
+    }
 
-void CEncoder::Gather4Inst(
+    void CEncoder::Gather4Inst(
     EOPCODE subOpcode,
     CVariable* offset,
     const ResourceDescriptor& resource,
     const SamplerDescriptor& sampler,
     uint numSources,
     CVariable* dst,
-    SmallVector<CVariable*, 4>& payload,
+        SmallVector<CVariable*, 4> & payload,
     uint channel,
     bool feedbackEnable)
-{
+    {
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     bool isIdxLT16;
     VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler, isIdxLT16);
     VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
     VISA_RawOpnd* dstVar = GetRawDestination(dst);
-    VISA_RawOpnd * opndArray[11];
-    for(unsigned int i = 0; i < numSources; i++)
+        VISA_RawOpnd* opndArray[11];
+        for (unsigned int i = 0; i < numSources; i++)
     {
         opndArray[i] = GetRawSource(payload[i]);
     }
@@ -2532,12 +2661,12 @@ void CEncoder::Gather4Inst(
         dstVar,
         numSources,
         opndArray));
-}
+    }
 
-void CEncoder::AddrAdd(CVariable* dst, CVariable* src0, CVariable* src1)
-{
-    if(dst->IsUniform())
+    void CEncoder::AddrAdd(CVariable* dst, CVariable* src0, CVariable* src1)
     {
+        if (dst->IsUniform())
+        {
         m_encoderState.m_simdSize = SIMDMode::SIMD1;
         m_encoderState.m_noMask = true;
     }
@@ -2553,10 +2682,10 @@ void CEncoder::AddrAdd(CVariable* dst, CVariable* src0, CVariable* src1)
         pVectorOpnd,
         pSrc0Addr,
         pSrc1Opnd));
-}
+    }
 
-void CEncoder::Barrier(e_barrierKind BarrierKind)
-{
+    void CEncoder::Barrier(e_barrierKind BarrierKind)
+    {
     if (BarrierKind == EBARRIER_SIGNAL) {
         // signal only
         V(vKernel->AppendVISASplitBarrierInst(true));
@@ -2568,9 +2697,9 @@ void CEncoder::Barrier(e_barrierKind BarrierKind)
         return;
     }
     V(vKernel->AppendVISASyncInst(ISA_BARRIER));
-}
+    }
 
-void CEncoder::Fence(bool CommitEnable,
+    void CEncoder::Fence(bool CommitEnable,
     bool L3_Flush_RW_Data,
     bool L3_Flush_Constant_Data,
     bool L3_Flush_Texture_Data,
@@ -2578,39 +2707,39 @@ void CEncoder::Fence(bool CommitEnable,
     bool Global_Mem_Fence,
     bool L1_Flush_Constant_Data,
     bool SWFence) // if true no ISA is emitted and the instruction is a pure code barrier
-{
+    {
     // Only a single bit set here is a valid configuration
-    assert( L3_Flush_Instructions +
+        assert(L3_Flush_Instructions +
         L3_Flush_Texture_Data +
         L3_Flush_Constant_Data +
-        L3_Flush_RW_Data <= 1 );
+            L3_Flush_RW_Data <= 1);
 
-    uint fenceFlags =  ( L3_Flush_Instructions << 1 ) |
-        ( L3_Flush_Texture_Data << 2 ) |
-        ( L3_Flush_Constant_Data << 3 ) |
-        ( L3_Flush_RW_Data << 4 ) |
-        ( (!Global_Mem_Fence) << 5 ) | // bit 5: 1 -- local, 0 -- global
-        ( L1_Flush_Constant_Data << 6 ) |
-        ( SWFence << 7 ) |
-        ( CommitEnable << 0 );
+        uint fenceFlags = (L3_Flush_Instructions << 1) |
+            (L3_Flush_Texture_Data << 2) |
+            (L3_Flush_Constant_Data << 3) |
+            (L3_Flush_RW_Data << 4) |
+            ((!Global_Mem_Fence) << 5) | // bit 5: 1 -- local, 0 -- global
+            (L1_Flush_Constant_Data << 6) |
+            (SWFence << 7) |
+            (CommitEnable << 0);
 
     V(vKernel->AppendVISASyncInst(ISA_FENCE, int_cast<unsigned char>(fenceFlags)));
-}
+    }
 
-void CEncoder::FlushSamplerCache()
-{
+    void CEncoder::FlushSamplerCache()
+    {
     V(vKernel->AppendVISASyncInst(ISA_SAMPLR_CACHE_FLUSH));
-}
+    }
 
-void CEncoder::EndOfThread()
-{
+    void CEncoder::EOT()
+    {
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     V(vKernel->AppendVISACFRetInst(predOpnd, vISA_EMASK_M1, EXEC_SIZE_1));
-}
+    }
 
-void CEncoder::SetFloatDenormMode(VISAKernel* vKernel, Float_DenormMode mode16,
+    void CEncoder::SetFloatDenormMode(VISAKernel* vKernel, Float_DenormMode mode16,
                                   Float_DenormMode mode32, Float_DenormMode mode64)
-{
+    {
     VISA_VectorOpnd* src0_Opnd = nullptr;
     VISA_VectorOpnd* src1_Opnd = nullptr;
     VISA_VectorOpnd* dst_Opnd = nullptr;
@@ -2623,7 +2752,7 @@ void CEncoder::SetFloatDenormMode(VISAKernel* vKernel, Float_DenormMode mode16,
     if (mode64 == FLOAT_DENORM_RETAIN)
         imm_data |= 0x40;
     // If we are in the default mode no need to set the CR
-    if(imm_data != 0)
+        if (imm_data != 0)
     {
         V(vKernel->GetPredefinedVar(cr0_var, PREDEFINED_CR0));
         V(vKernel->CreateVISASrcOperand(src0_Opnd, cr0_var, MODIFIER_NONE, 0, 1, 0, 0, 0));
@@ -2639,16 +2768,16 @@ void CEncoder::SetFloatDenormMode(VISAKernel* vKernel, Float_DenormMode mode16,
             src0_Opnd,
             src1_Opnd));
     }
-}
+    }
 
-void CEncoder::SetVectorMask(bool VMask)
-{
+    void CEncoder::SetVectorMask(bool VMask)
+    {
     VISA_VectorOpnd* src0_Opnd = nullptr;
     VISA_VectorOpnd* src1_Opnd = nullptr;
     VISA_VectorOpnd* dst_Opnd = nullptr;
     VISA_GenVar* cr0_var;
     uint bitmaskImm = 1 << 3;
-    if(!VMask)
+        if (!VMask)
     {
         bitmaskImm = ~bitmaskImm;
     }
@@ -2665,10 +2794,10 @@ void CEncoder::SetVectorMask(bool VMask)
         dst_Opnd,
         src0_Opnd,
         src1_Opnd));
-}
+    }
 
-void CEncoder::SetFloatRoundingMode(RoundingMode actualMode, RoundingMode newMode)
-{
+    void CEncoder::SetFloatRoundingMode(RoundingMode actualMode, RoundingMode newMode)
+    {
     if (actualMode != newMode)
     {
         VISA_VectorOpnd* src0_Opnd = nullptr;
@@ -2690,18 +2819,18 @@ void CEncoder::SetFloatRoundingMode(RoundingMode actualMode, RoundingMode newMod
             src0_Opnd,
             src1_Opnd));
     }
-}
+    }
 
-void CEncoder::SetFloatRoundingModeDefault(RoundingMode actualMode)
-{
+    void CEncoder::SetFloatRoundingModeDefault(RoundingMode actualMode)
+    {
     const RoundingMode defaultRoundingMode = getEncoderRoundingMode(static_cast<Float_RoundingMode>(
         m_program->GetContext()->getModuleMetaData()->compOpt.FloatRoundingMode));
 
     SetFloatRoundingMode(actualMode, defaultRoundingMode);
-}
+    }
 
-CEncoder::RoundingMode CEncoder::getEncoderRoundingMode(Float_RoundingMode FP_RM)
-{
+    CEncoder::RoundingMode CEncoder::getEncoderRoundingMode(Float_RoundingMode FP_RM)
+    {
     switch (FP_RM) {
     default:
         break;
@@ -2713,37 +2842,37 @@ CEncoder::RoundingMode CEncoder::getEncoderRoundingMode(Float_RoundingMode FP_RM
         return RoundingMode::RoundToZero;
     }
     return RoundToNearestEven;
-}
+    }
 
-VISA_LabelOpnd* CEncoder::GetLabel(uint label)
-{
-    VISA_LabelOpnd *visaLabel = labelMap[label];
-    if(visaLabel == nullptr)
+    VISA_LabelOpnd* CEncoder::GetLabel(uint label)
     {
+        VISA_LabelOpnd* visaLabel = labelMap[label];
+        if (visaLabel == nullptr)
+        {
         VISA_Label_Kind kind = LABEL_BLOCK;
-        char labelname[128]="";
+            char labelname[128] = "";
         sprintf_s(labelname, sizeof(labelname), "label%d", labelCounter++);
         V(vKernel->CreateVISALabelVar(visaLabel, labelname, kind));
         labelMap[label] = visaLabel;
     }
     return visaLabel;
-}
+    }
 
-VISAFunction* CEncoder::GetStackFunction(llvm::Function *F)
-{
+    VISAFunction* CEncoder::GetStackFunction(llvm::Function* F)
+    {
     auto Iter = stackFuncMap.find(F);
     if (Iter != stackFuncMap.end())
     {
         return Iter->second;
     }
-    VISAFunction *visaFunc = nullptr;
+        VISAFunction* visaFunc = nullptr;
     V(vbuilder->AddFunction(visaFunc, F->getName().data()));
     stackFuncMap[F] = visaFunc;
     return visaFunc;
-}
+    }
 
-VISA_LabelOpnd* CEncoder::GetFuncLabel(llvm::Function *F)
-{
+    VISA_LabelOpnd* CEncoder::GetFuncLabel(llvm::Function* F)
+    {
     auto Iter = funcLabelMap.find(F);
     if (Iter != funcLabelMap.end())
     {
@@ -2751,26 +2880,26 @@ VISA_LabelOpnd* CEncoder::GetFuncLabel(llvm::Function *F)
     }
 
     // Create a new function label.
-    VISA_LabelOpnd *visaLabel = nullptr;
+        VISA_LabelOpnd* visaLabel = nullptr;
     V(vKernel->CreateVISALabelVar(visaLabel, F->getName().data(), LABEL_SUBROUTINE));
     funcLabelMap[F] = visaLabel;
 
     return visaLabel;
-}
+    }
 
-void CEncoder::Push()
-{
+    void CEncoder::Push()
+    {
     Init();
-}
+    }
 
-VISA_VectorOpnd* CEncoder::GetUniformSource(CVariable* var)
-{
+    VISA_VectorOpnd* CEncoder::GetUniformSource(CVariable* var)
+    {
     VISA_VectorOpnd* srcOperand = nullptr;
-    if(var == nullptr)
+        if (var == nullptr)
     {
         return nullptr;
     }
-    if(var->IsImmediate())
+        if (var->IsImmediate())
     {
         // TODO: need support for 64 bits immediate
         uint immediate = int_cast<uint>(var->GetImmediateValue());
@@ -2784,14 +2913,14 @@ VISA_VectorOpnd* CEncoder::GetUniformSource(CVariable* var)
         V(vKernel->CreateVISASrcOperand(srcOperand, GetVISAVariable(var), MODIFIER_NONE, 0, 1, 0, rowOffset, colOffset));
     }
     return srcOperand;
-}
+    }
 
-TARGET_PLATFORM GetVISAPlatform(const CPlatform* platform)
-{
-    switch(platform->GetPlatformFamily())
+    TARGET_PLATFORM GetVISAPlatform(const CPlatform* platform)
     {
+        switch (platform->GetPlatformFamily())
+        {
     case IGFX_GEN8_CORE:
-        if (platform->getPlatformInfo().eProductFamily == IGFX_CHERRYVIEW )
+            if (platform->getPlatformInfo().eProductFamily == IGFX_CHERRYVIEW)
         {
             return GENX_CHV;
         }
@@ -2828,67 +2957,67 @@ TARGET_PLATFORM GetVISAPlatform(const CPlatform* platform)
         break;
     }
     return GENX_SKL;
-}
+    }
 
-void CEncoder::OWLoad( CVariable* dst, const ResourceDescriptor& resource, CVariable* src0, bool owordAligned, uint bytesToBeRead, uint dstOffset )
-{
+    void CEncoder::OWLoad(CVariable* dst, const ResourceDescriptor& resource, CVariable* src0, bool owordAligned, uint bytesToBeRead, uint dstOffset)
+    {
     VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
-    VISA_VectorOpnd* offset = GetUniformSource( src0 );
-    VISA_RawOpnd* dstVar = GetRawDestination( dst, dstOffset );
-    uint size = ( bytesToBeRead / SIZE_OWORD );
+        VISA_VectorOpnd* offset = GetUniformSource(src0);
+        VISA_RawOpnd* dstVar = GetRawDestination(dst, dstOffset);
+        uint size = (bytesToBeRead / SIZE_OWORD);
 
-    V( vKernel->AppendVISASurfAccessOwordLoadStoreInst(
+        V(vKernel->AppendVISASurfAccessOwordLoadStoreInst(
         owordAligned ? ISA_OWORD_LD : ISA_OWORD_LD_UNALIGNED,
         vISA_EMASK_M1_NM,  // OWord load is always nomask
         surfOpnd,
-        ConvertSizeToVisaType( size ),
+            ConvertSizeToVisaType(size),
         offset,
-        dstVar ) );
-}
+            dstVar));
+    }
 
-void CEncoder::OWStore( CVariable* data, e_predefSurface surfaceType, CVariable* bufId, CVariable* src0, uint bytesToBeRead, uint srcOffset )
-{
-    VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd( surfaceType, bufId );
-    VISA_VectorOpnd* offset  = GetUniformSource( src0 );
-    VISA_RawOpnd*    dataVar = GetRawSource( data, srcOffset );
-    uint size = ( bytesToBeRead / SIZE_OWORD );
+    void CEncoder::OWStore(CVariable* data, e_predefSurface surfaceType, CVariable* bufId, CVariable* src0, uint bytesToBeRead, uint srcOffset)
+    {
+        VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(surfaceType, bufId);
+        VISA_VectorOpnd* offset = GetUniformSource(src0);
+        VISA_RawOpnd* dataVar = GetRawSource(data, srcOffset);
+        uint size = (bytesToBeRead / SIZE_OWORD);
 
-    V( vKernel->AppendVISASurfAccessOwordLoadStoreInst(
+        V(vKernel->AppendVISASurfAccessOwordLoadStoreInst(
         ISA_OWORD_ST,
         vISA_EMASK_M1_NM,
         surfOpnd,
-        ConvertSizeToVisaType( size ),
+            ConvertSizeToVisaType(size),
         offset,
-        dataVar ) );
-}
+            dataVar));
+    }
 
-void CEncoder::OWStoreA64( CVariable* data, CVariable* src0, uint bytesToBeRead, uint srcOffset )
-{
-    VISA_VectorOpnd* offset  = GetUniformSource( src0 );
-    VISA_RawOpnd*    dataVar = GetRawDestination( data, srcOffset );
-    uint size                = ( bytesToBeRead / SIZE_OWORD );
+    void CEncoder::OWStoreA64(CVariable* data, CVariable* src0, uint bytesToBeRead, uint srcOffset)
+    {
+        VISA_VectorOpnd* offset = GetUniformSource(src0);
+        VISA_RawOpnd* dataVar = GetRawDestination(data, srcOffset);
+        uint size = (bytesToBeRead / SIZE_OWORD);
 
-    V( vKernel->AppendVISASvmBlockStoreInst(
-        ConvertSizeToVisaType( size ),
+        V(vKernel->AppendVISASvmBlockStoreInst(
+            ConvertSizeToVisaType(size),
         true,   // always unaligned for now
         offset,
-        dataVar ) );
-}
+            dataVar));
+    }
 
-void CEncoder::OWLoadA64( CVariable* dst, CVariable* src0, uint bytesToBeRead, uint dstOffset )
-{
-    VISA_VectorOpnd* offset = GetUniformSource( src0 );
-    VISA_RawOpnd* dstVar    = GetRawDestination( dst, dstOffset );
-    uint size               = ( bytesToBeRead / SIZE_OWORD );
+    void CEncoder::OWLoadA64(CVariable* dst, CVariable* src0, uint bytesToBeRead, uint dstOffset)
+    {
+        VISA_VectorOpnd* offset = GetUniformSource(src0);
+        VISA_RawOpnd* dstVar = GetRawDestination(dst, dstOffset);
+        uint size = (bytesToBeRead / SIZE_OWORD);
 
-    V( vKernel->AppendVISASvmBlockLoadInst(
-        ConvertSizeToVisaType( size ),
+        V(vKernel->AppendVISASvmBlockLoadInst(
+            ConvertSizeToVisaType(size),
         true,   // always unaligned for now
         offset,
-        dstVar ) );
-}
+            dstVar));
+    }
 
-void CEncoder::MediaBlockMessage(
+    void CEncoder::MediaBlockMessage(
     ISA_Opcode subOpcode,
     CVariable* dst,
     e_predefSurface surfaceType,
@@ -2898,25 +3027,25 @@ void CEncoder::MediaBlockMessage(
     uint modifier,
     unsigned char blockWidth,
     unsigned char blockHeight,
-    uint plane )
-{
-    VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd( surfaceType, bufId );
-    VISA_VectorOpnd* xVar  = GetUniformSource( xOffset );
-    VISA_VectorOpnd* yVar  = GetUniformSource( yOffset );
+        uint plane)
+    {
+        VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(surfaceType, bufId);
+        VISA_VectorOpnd* xVar = GetUniformSource(xOffset);
+        VISA_VectorOpnd* yVar = GetUniformSource(yOffset);
     VISA_RawOpnd* tempVar  = nullptr;
-    if ( subOpcode == ISA_MEDIA_LD )
+        if (subOpcode == ISA_MEDIA_LD)
     {
-        tempVar = GetRawDestination( dst );
+            tempVar = GetRawDestination(dst);
     }
-    else if ( subOpcode == ISA_MEDIA_ST )
+        else if (subOpcode == ISA_MEDIA_ST)
     {
-        tempVar = GetRawSource( dst );
+            tempVar = GetRawSource(dst);
     }
 
-    MEDIA_LD_mod  modi     = ( MEDIA_LD_mod )modifier;
-    CISA_PLANE_ID planeVar = ( CISA_PLANE_ID )plane;
+        MEDIA_LD_mod  modi = (MEDIA_LD_mod)modifier;
+        CISA_PLANE_ID planeVar = (CISA_PLANE_ID)plane;
 
-    V( vKernel->AppendVISASurfAccessMediaLoadStoreInst(
+        V(vKernel->AppendVISASurfAccessMediaLoadStoreInst(
         subOpcode,
         modi,
         surfOpnd,
@@ -2925,10 +3054,10 @@ void CEncoder::MediaBlockMessage(
         xVar,
         yVar,
         tempVar,
-        planeVar ) );
-}
+            planeVar));
+    }
 
-void CEncoder::TypedReadWrite(
+    void CEncoder::TypedReadWrite(
     ISA_Opcode opcode,
     const ResourceDescriptor& resource,
     CVariable* pU,
@@ -2937,7 +3066,7 @@ void CEncoder::TypedReadWrite(
     CVariable* pLOD,
     CVariable* pSrcDst,
     uint writeMask)
-{
+    {
     // only SIMD 8 reads & writes are supported.
     VISAChannelMask channelMask = CHANNEL_MASK_RGBA;//for typed write leaving this as before
     if (writeMask != 0)
@@ -2947,10 +3076,10 @@ void CEncoder::TypedReadWrite(
     VISA_StateOpndHandle* pSurfStateOpndHandle = GetVISASurfaceOpnd(resource);
 
     // TODO unify the way we calculate offset for raw sources, maybe we shouldn't use offset at all
-    VISA_RawOpnd* pUOffset = GetRawSource(pU, m_encoderState.m_srcOperand[0].subVar*getGRFSize());
-    VISA_RawOpnd* pVOffset = GetRawSource(pV, m_encoderState.m_srcOperand[1].subVar*getGRFSize());
-    VISA_RawOpnd* pROffset = GetRawSource(pR, m_encoderState.m_srcOperand[2].subVar*getGRFSize());
-    VISA_RawOpnd* pLODOffset = GetRawSource(pLOD, m_encoderState.m_srcOperand[3].subVar*getGRFSize());
+        VISA_RawOpnd* pUOffset = GetRawSource(pU, m_encoderState.m_srcOperand[0].subVar * getGRFSize());
+        VISA_RawOpnd* pVOffset = GetRawSource(pV, m_encoderState.m_srcOperand[1].subVar * getGRFSize());
+        VISA_RawOpnd* pROffset = GetRawSource(pR, m_encoderState.m_srcOperand[2].subVar * getGRFSize());
+        VISA_RawOpnd* pLODOffset = GetRawSource(pLOD, m_encoderState.m_srcOperand[3].subVar * getGRFSize());
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     assert(m_encoderState.m_dstOperand.subVar == 0);
 
@@ -2979,27 +3108,27 @@ void CEncoder::TypedReadWrite(
         pROffset,
         pLODOffset,
         pDstVar));
-}
+    }
 
-void CEncoder::ScatterGather(ISA_Opcode opcode, CVariable* srcdst, CVariable* bufId, CVariable* offset, CVariable* gOffset, e_predefSurface surface, int elementSize)
-{
+    void CEncoder::ScatterGather(ISA_Opcode opcode, CVariable* srcdst, CVariable* bufId, CVariable* offset, CVariable* gOffset, e_predefSurface surface, int elementSize)
+    {
     VISA_VectorOpnd* globalOffsetOpnd = nullptr;
     VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(surface, bufId);
-    if(gOffset)
+        if (gOffset)
     {
         globalOffsetOpnd = GetUniformSource(gOffset);
     }
     else
     {
         int value = 0;
-        V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &value ,ISA_TYPE_UD));
+            V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &value, ISA_TYPE_UD));
     }
     VISA_RawOpnd* elementOffset = GetRawSource(offset);
 
     VISA_RawOpnd* dstVar = NULL;
 
     Common_VISA_EMask_Ctrl mask;
-    if(opcode == ISA_GATHER)
+        if (opcode == ISA_GATHER)
     {
         dstVar = GetRawDestination(srcdst);
         mask = GetAluEMask(srcdst);
@@ -3019,12 +3148,12 @@ void CEncoder::ScatterGather(ISA_Opcode opcode, CVariable* srcdst, CVariable* bu
         globalOffsetOpnd,
         elementOffset,
         dstVar));
-}
+    }
 
-void CEncoder::GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
-{
+    void CEncoder::GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
+    {
     ISA_Opcode visaOpcode = ConvertOpcode[opcode];
-    switch(visaOpcode)
+        switch (visaOpcode)
     {
     case ISA_MOV:
     case ISA_MOVS:
@@ -3052,20 +3181,20 @@ void CEncoder::GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVar
         Arithmetic(visaOpcode, dst, src0, src1, src2);
         break;
     }
-}
+    }
 
-VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(const ResourceDescriptor& resource)
-{
+    VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(const ResourceDescriptor& resource)
+    {
     return GetVISASurfaceOpnd(resource.m_surfaceType, resource.m_resource);
-}
+    }
 
-VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(e_predefSurface surfaceType, CVariable* bti)
-{
+    VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(e_predefSurface surfaceType, CVariable* bti)
+    {
     VISA_StateOpndHandle* surfOpnd = nullptr;
-    if(surfaceType == ESURFACE_NORMAL || surfaceType == ESURFACE_BINDLESS)
+        if (surfaceType == ESURFACE_NORMAL || surfaceType == ESURFACE_BINDLESS)
     {
         VISA_SurfaceVar* surfacevar = nullptr;
-        if(surfaceType == ESURFACE_BINDLESS)
+            if (surfaceType == ESURFACE_BINDLESS)
         {
             V(vKernel->GetPredefinedSurface(surfacevar, PREDEFINED_SURFACE_T252));
         }
@@ -3108,14 +3237,14 @@ VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(e_predefSurface surfaceType, 
         V(vKernel->CreateVISAStateOperandHandle(surfOpnd, surfacevar));
     }
     return surfOpnd;
-}
+    }
 
-Common_VISA_EMask_Ctrl CEncoder::ConvertMaskToVisaType(e_mask mask, bool noMask)
-{
-    switch(mask)
+    Common_VISA_EMask_Ctrl CEncoder::ConvertMaskToVisaType(e_mask mask, bool noMask)
+    {
+        switch (mask)
     {
     case EMASK_Q1:
-        if(m_encoderState.m_secondHalf)
+            if (m_encoderState.m_secondHalf)
         {
             return noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
         }
@@ -3124,7 +3253,7 @@ Common_VISA_EMask_Ctrl CEncoder::ConvertMaskToVisaType(e_mask mask, bool noMask)
             return noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
         }
     case EMASK_Q2:
-        if(m_encoderState.m_secondHalf)
+            if (m_encoderState.m_secondHalf)
         {
             return noMask ? vISA_EMASK_M7_NM : vISA_EMASK_M7;
         }
@@ -3141,15 +3270,15 @@ Common_VISA_EMask_Ctrl CEncoder::ConvertMaskToVisaType(e_mask mask, bool noMask)
     case EMASK_H2:
         return noMask ? vISA_EMASK_M5_NM : vISA_EMASK_M5;
     default:
-        assert( 0 && "unreachable" );
+            assert(0 && "unreachable");
         return vISA_EMASK_M1_NM;
     }
-}
+    }
 
-VISA_Modifier ConvertModifierToVisaType(e_modifier modifier)
-{
-    switch(modifier)
+    VISA_Modifier ConvertModifierToVisaType(e_modifier modifier)
     {
+        switch (modifier)
+        {
     case EMOD_NONE:
         return MODIFIER_NONE;
     case EMOD_SAT:
@@ -3163,14 +3292,14 @@ VISA_Modifier ConvertModifierToVisaType(e_modifier modifier)
     case EMOD_NOT:
         return MODIFIER_NOT;
     default:
-        assert( 0 && "unreachable" );
+            assert(0 && "unreachable");
         return MODIFIER_NONE;
     }
-}
+    }
 
-Common_ISA_Cond_Mod ConvertCondModToVisaType(e_predicate condMod)
-{
-    switch(condMod)
+    Common_ISA_Cond_Mod ConvertCondModToVisaType(e_predicate condMod)
+    {
+        switch (condMod)
     {
     case EPREDICATE_EQ:
         return ISA_CMP_E;
@@ -3185,14 +3314,14 @@ Common_ISA_Cond_Mod ConvertCondModToVisaType(e_predicate condMod)
     case EPREDICATE_LE:
         return ISA_CMP_LE;
     default:
-        assert( 0 && "unreachable" );
+            assert(0 && "unreachable");
         return ISA_CMP_UNDEF;
     }
-}
+    }
 
-Common_ISA_Oword_Num  ConvertSizeToVisaType(uint size)
-{
-    switch(size)
+    Common_ISA_Oword_Num  ConvertSizeToVisaType(uint size)
+    {
+        switch (size)
     {
     case 1:
         return OWORD_NUM_1;
@@ -3205,13 +3334,13 @@ Common_ISA_Oword_Num  ConvertSizeToVisaType(uint size)
     case 16:
         return OWORD_NUM_16;
     default:
-        assert( 0 && "unreachable" );
+            assert(0 && "unreachable");
         return OWORD_NUM_ILLEGAL;
     }
-}
+    }
 
-VISAChannelMask ConvertChannelMaskToVisaType(uint mask)
-{
+    VISAChannelMask ConvertChannelMaskToVisaType(uint mask)
+    {
     switch (mask & 0xf)
     {
     case 1:   return CHANNEL_MASK_R;
@@ -3235,10 +3364,10 @@ VISAChannelMask ConvertChannelMaskToVisaType(uint mask)
             return CHANNEL_MASK_NOMASK;
         }
     }
-}
+    }
 
-uint CEncoder::GetCISADataTypeSize(VISA_Type type)
-{
+    uint CEncoder::GetCISADataTypeSize(VISA_Type type)
+    {
     switch (type)
     {
     case ISA_TYPE_UD:
@@ -3277,10 +3406,10 @@ uint CEncoder::GetCISADataTypeSize(VISA_Type type)
     }
 
     return 0;
-}
+    }
 
-e_alignment CEncoder::GetCISADataTypeAlignment(VISA_Type type)
-{
+    e_alignment CEncoder::GetCISADataTypeAlignment(VISA_Type type)
+    {
     switch (type)
     {
     case ISA_TYPE_UD:
@@ -3319,11 +3448,11 @@ e_alignment CEncoder::GetCISADataTypeAlignment(VISA_Type type)
     }
 
     return EALIGN_BYTE;
-}
+    }
 
-VISASampler3DSubOpCode CEncoder::ConvertSubOpcode(EOPCODE subOpcode, bool zeroLOD)
-{
-    switch(subOpcode)
+    VISASampler3DSubOpCode CEncoder::ConvertSubOpcode(EOPCODE subOpcode, bool zeroLOD)
+    {
+        switch (subOpcode)
     {
     case llvm_sampleptr:
         return VISA_3D_SAMPLE;
@@ -3336,9 +3465,9 @@ VISASampler3DSubOpCode CEncoder::ConvertSubOpcode(EOPCODE subOpcode, bool zeroLO
     case llvm_sample_dcptr:
         return VISA_3D_SAMPLE_D_C;
     case llvm_sample_lptr:
-        return zeroLOD? VISA_3D_SAMPLE_LZ : VISA_3D_SAMPLE_L;
+            return zeroLOD ? VISA_3D_SAMPLE_LZ : VISA_3D_SAMPLE_L;
     case llvm_sample_lcptr:
-        return zeroLOD? VISA_3D_SAMPLE_C_LZ : VISA_3D_SAMPLE_L_C;
+            return zeroLOD ? VISA_3D_SAMPLE_C_LZ : VISA_3D_SAMPLE_L_C;
     case llvm_sample_bcptr:
         return VISA_3D_SAMPLE_B_C;
     case llvm_ld_ptr:
@@ -3368,10 +3497,10 @@ VISASampler3DSubOpCode CEncoder::ConvertSubOpcode(EOPCODE subOpcode, bool zeroLO
         assert(0 && "wrong sampler subopcode");
         return VISA_3D_SAMPLE;
     }
-}
+    }
 
-bool CEncoder::IsIntegerType(VISA_Type type)
-{
+    bool CEncoder::IsIntegerType(VISA_Type type)
+    {
     return (type == ISA_TYPE_B  ||
             type == ISA_TYPE_UB ||
             type == ISA_TYPE_W  ||
@@ -3381,19 +3510,19 @@ bool CEncoder::IsIntegerType(VISA_Type type)
             type == ISA_TYPE_Q  ||
             type == ISA_TYPE_UQ ||
             0);
-}
+    }
 
-bool CEncoder::IsFloatType(VISA_Type type)
-{
+    bool CEncoder::IsFloatType(VISA_Type type)
+    {
     return (type == ISA_TYPE_F ||
             type == ISA_TYPE_DF ||
             0);
-}
+    }
 
-VISASourceSingleChannel ConvertSingleSourceChannel(uint srcChannel)
-{
-    switch(srcChannel)
+    VISASourceSingleChannel ConvertSingleSourceChannel(uint srcChannel)
     {
+        switch (srcChannel)
+        {
     case 0:
         return VISA_3D_GATHER4_CHANNEL_R;
     case 1:
@@ -3405,57 +3534,57 @@ VISASourceSingleChannel ConvertSingleSourceChannel(uint srcChannel)
     }
     assert(0 && "Wrong channel");
     return VISA_3D_GATHER4_CHANNEL_R;
-}
+    }
 
-void CEncoder::BeginSubroutine(llvm::Function *F)
-{
+    void CEncoder::BeginSubroutine(llvm::Function* F)
+    {
     labelMap.clear();
     labelMap.resize(F->size(), nullptr);
     V(vKernel->AppendVISACFLabelInst(GetFuncLabel(F)));
-}
+    }
 
-void CEncoder::BeginStackFunction(llvm::Function *F)
-{
+    void CEncoder::BeginStackFunction(llvm::Function* F)
+    {
     labelMap.clear();
     labelMap.resize(F->size(), nullptr);
     // At this place, the vISA object is changed!
     vKernel = GetStackFunction(F);
-    VISA_LabelOpnd *visaLabel = nullptr;
+        VISA_LabelOpnd* visaLabel = nullptr;
     V(vKernel->CreateVISALabelVar(visaLabel, F->getName().data(), LABEL_SUBROUTINE));
     V(vKernel->AppendVISACFLabelInst(visaLabel));
-}
+    }
 
-void CEncoder::AddVISASymbol(std::string& symName, CVariable* cvar)
-{
+    void CEncoder::AddVISASymbol(std::string& symName, CVariable* cvar)
+    {
     SModifier mod;
     mod.init();
     VISA_VectorOpnd* visaSymAddr = GetDestinationOperand(cvar, mod);
     V(vKernel->AppendVISACFSymbolInst(symName, visaSymAddr));
-}
+    }
 
-void CEncoder::SaveOption(vISAOptions option, bool val)
-{
+    void CEncoder::SaveOption(vISAOptions option, bool val)
+    {
     OptionValue entry;
     entry.type = OpType::ET_BOOL;
     entry.vBool = val;
     m_visaUserOptions.push_back(std::make_pair(option, entry));
-}
-void CEncoder::SaveOption(vISAOptions option, uint32_t val)
-{
+    }
+    void CEncoder::SaveOption(vISAOptions option, uint32_t val)
+    {
     OptionValue entry;
     entry.type = OpType::ET_INT32;
     entry.vInt32 = val;
     m_visaUserOptions.push_back(std::make_pair(option, entry));
-}
-void CEncoder::SaveOption(vISAOptions option, const char* val)
-{
+    }
+    void CEncoder::SaveOption(vISAOptions option, const char* val)
+    {
     OptionValue entry;
     entry.type = OpType::ET_CSTR;
     entry.vCstr = val;
     m_visaUserOptions.push_back(std::make_pair(option, entry));
-}
-void CEncoder::SetBuilderOptions(VISABuilder* pbuilder)
-{
+    }
+    void CEncoder::SetBuilderOptions(VISABuilder* pbuilder)
+    {
     for (auto OP : m_visaUserOptions)
     {
         switch (OP.second.type)
@@ -3474,10 +3603,10 @@ void CEncoder::SetBuilderOptions(VISABuilder* pbuilder)
             break;
         }
     }
-}
+    }
 
-void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> &params)
-{
+    void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> & params)
+    {
     CodeGenContext* context = m_program->GetContext();
     bool isOptDisabled = context->getModuleMetaData()->compOpt.OptDisable;
 
@@ -3495,7 +3624,7 @@ void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> &params)
     if (IGC_IS_FLAG_ENABLED(VISAOptions))
     {
         std::vector<std::string> VISA_Opts;
-        const char *DELIMITERS = " \t\n\v\f\r,"; // isspace(c), and comma for igcstandalone
+            const char* DELIMITERS = " \t\n\v\f\r,"; // isspace(c), and comma for igcstandalone
         std::string line(IGC_GET_REGKEYSTRING(VISAOptions));
         std::size_t pos = 0;
         std::size_t found;
@@ -3508,7 +3637,7 @@ void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> &params)
         }
         if (pos < line.length())
             VISA_Opts.push_back(line.substr(pos));
-        for (auto &opt : VISA_Opts) {
+            for (auto& opt : VISA_Opts) {
             // note that the memory should be freed once
             // params has been read, but since this is only for
             // debugging, do not bother freeing memory.
@@ -3530,9 +3659,9 @@ void CEncoder::InitBuildParams(llvm::SmallVector<const char*, 10> &params)
         params.push_back(_strdup(Low.c_str()));
         params.push_back(_strdup(High.c_str()));
     }
-}
-void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall)
-{
+    }
+    void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall)
+    {
     CodeGenContext* context = m_program->GetContext();
     bool KernelDebugEnable = false;
     bool ForceNonCoherentStatelessBti = false;
@@ -3666,12 +3795,16 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
         {
             // 2 means #spill/fill is roughly 1% of #inst
             // ToDo: tune the threshold
-            SaveOption(vISA_AbortOnSpillThreshold, 2u);
+                if (m_program->m_dispatchSize == SIMDMode::SIMD8)
+                    SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
+
+                else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
+                    SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD16_SpillThreshold) * 2);
         }
     }
 
     if ((context->type == ShaderType::OPENCL_SHADER || context->type == ShaderType::COMPUTE_SHADER) &&
-        VISAPlatform >= GENX_SKL && IGC_IS_FLAG_ENABLED(EnablePreemption) && !hasStackCall)
+            VISAPlatform >= GENX_SKL && IGC_IS_FLAG_ENABLED(EnablePreemption) && !hasStackCall)
     {
         SaveOption(vISA_enablePreemption, true);
     }
@@ -3944,10 +4077,10 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
     {
         SaveOption(vISA_alignBindlessSampler, true);
     }
-}
+    }
 
-void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
-{
+    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall)
+    {
     m_aliasesMap.clear();
     m_encoderState.m_SubSpanDestination = false;
     CodeGenContext* context = m_program->GetContext();
@@ -3956,7 +4089,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     labelMap.clear();
     labelMap.resize(m_program->entry->size(), nullptr);
     labelCounter = 0;
-    m_hasInlineAsm = IGC_IS_FLAG_ENABLED(EnableInlineAsmSupport) && context->m_instrTypes.hasInlineAsm;
+    m_hasInlineAsm = context->m_DriverInfo.SupportInlineAssembly() && context->m_instrTypes.hasInlineAsm;
 
     vbuilder = nullptr;
     vAsmTextBuilder = nullptr;
@@ -3972,7 +4105,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     }
 
     bool enableVISADump = IGC_IS_FLAG_ENABLED(EnableVISASlowpath) || IGC_IS_FLAG_ENABLED(ShaderDumpEnable);
-    auto builderMode = m_hasInlineAsm ? vISA_3DWRITER : vISA_3D;
+    auto builderMode = m_hasInlineAsm ? vISA_ASM_WRITER : vISA_3D;
     auto builderOpt = (enableVISADump || m_hasInlineAsm) ? CM_CISA_BUILDER_BOTH : CM_CISA_BUILDER_GEN;
     V(CreateVISABuilder(vbuilder, builderMode, builderOpt, VISAPlatform, params.size(), params.data(), &m_WaTable));
 
@@ -3983,7 +4116,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
 
     vKernel = nullptr;
 
-    const char* kernelName = m_program->entry->getName().data();
+    std::string kernelName = m_program->entry->getName();
     if (context->m_instrTypes.hasDebugInfo)
     {
         // This metadata node is added by TransformBlocks pass for device side
@@ -4012,38 +4145,34 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
                     auto second = dyn_cast_or_null<MDString>(mdOpnd->getOperand(0));
                     if (second)
                     {
-                        kernelName = second->getString().data();
+                        kernelName = second->getString();
                     }
                 }
             }
         }
     }
 
+    std::string asmName;
     if (m_enableVISAdump || context->m_instrTypes.hasDebugInfo)
     {
         // vISA does not support string of length >= 255. Truncate if this exceeds
         // the limit. Note that vISA may append an extension, so relax it to a
         // random number 240 here.
         const int MAX_VISA_STRING_LENGTH = 240;
-        if (m_program->entry->getName().size() >= MAX_VISA_STRING_LENGTH)
+        if (kernelName.size() >= MAX_VISA_STRING_LENGTH)
         {
-            std::string shortName = m_program->entry->getName();
-            shortName.resize(MAX_VISA_STRING_LENGTH);
-            V(vbuilder->AddKernel(vKernel, shortName.c_str()));
+            kernelName.resize(MAX_VISA_STRING_LENGTH);
         }
-        else
-        {
-            V(vbuilder->AddKernel(vKernel, kernelName));
-        }
-
-        std::string asmName = GetDumpFileName("asm");
-        V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
+        asmName = GetDumpFileName("asm");
     }
     else
     {
-        V(vbuilder->AddKernel(vKernel, "kernel"));
-        V(vKernel->AddKernelAttribute("OutputAsmPath", std::strlen("0.asm") , "0.asm"));
+        kernelName = "kernel";
+        asmName = "kernel.asm";
     }
+
+    V(vbuilder->AddKernel(vKernel, kernelName.c_str()));
+    V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
 
     vMainKernel = vKernel;
 
@@ -4054,7 +4183,7 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
     }
 
     // Right now only 1 main function in the kernel
-    VISA_LabelOpnd *functionLabel = nullptr;
+        VISA_LabelOpnd* functionLabel = nullptr;
     V(vKernel->CreateVISALabelVar(functionLabel, "main", LABEL_SUBROUTINE));
     V(vKernel->AppendVISACFLabelInst(functionLabel));
 
@@ -4071,48 +4200,48 @@ void CEncoder::InitEncoder( bool canAbortOnSpill, bool hasStackCall )
         getEncoderRoundingMode(FLOAT_ROUND_TO_NEAREST_EVEN),
         getEncoderRoundingMode(static_cast<Float_RoundingMode>(
             context->getModuleMetaData()->compOpt.FloatRoundingMode)));
-}
+    }
 
-void CEncoder::SetKernelStackPointer64()
-{
+    void CEncoder::SetKernelStackPointer64()
+    {
     assert(vKernel);
     int spSize = 64;
     V(vKernel->AddKernelAttribute("FESPSize", sizeof(spSize), &spSize));
-}
+    }
 
-void CEncoder::SetStackFunctionArgSize(uint size)
-{
+    void CEncoder::SetStackFunctionArgSize(uint size)
+    {
     assert(vKernel);
     V(vKernel->AddKernelAttribute("ArgSize", sizeof(size), &size));
-}
+    }
 
-void CEncoder::SetStackFunctionRetSize(uint size)
-{
+    void CEncoder::SetStackFunctionRetSize(uint size)
+    {
     assert(vKernel);
     V(vKernel->AddKernelAttribute("RetValSize", sizeof(size), &size));
-}
+    }
 
-void CEncoder::SetExternFunctionFlag()
-{
+    void CEncoder::SetExternFunctionFlag()
+    {
     assert(vKernel);
     int flag = 1;
     V(vKernel->AddKernelAttribute("Extern", sizeof(flag), &flag));
-}
+    }
 
-SEncoderState CEncoder::CopyEncoderState()
-{
+    SEncoderState CEncoder::CopyEncoderState()
+    {
     return m_encoderState;
-}
+    }
 
-void CEncoder::SetEncoderState(SEncoderState &newState)
-{
+    void CEncoder::SetEncoderState(SEncoderState& newState)
+    {
     m_encoderState = newState;
-}
+    }
 
-static inline VISA_Align GetVISAAlign(CVariable* var)
-{
+    static inline VISA_Align GetVISAAlign(CVariable* var)
+    {
     VISA_Align align;
-    switch(var->GetAlign())
+        switch (var->GetAlign())
     {
     case EALIGN_BYTE: align = ALIGN_BYTE;
         break;
@@ -4133,22 +4262,22 @@ static inline VISA_Align GetVISAAlign(CVariable* var)
         assert(0);
     }
     return align;
-}
+    }
 
-VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var)
-{
-    if(m_encoderState.m_secondHalf)
+    VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var)
     {
-        if(var->GetNumberInstance() == 2)
+        if (m_encoderState.m_secondHalf)
+        {
+            if (var->GetNumberInstance() == 2)
         {
             return var->visaGenVariable[1];
         }
     }
     return var->visaGenVariable[0];
-}
+    }
 
-VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var, e_instance instance)
-{
+    VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var, e_instance instance)
+    {
     VISA_GenVar* result = GetVISAVariable(var);
 
     if (instance != EINSTANCE_UNSPECIFIED &&
@@ -4164,10 +4293,10 @@ VISA_GenVar* CEncoder::GetVISAVariable(CVariable* var, e_instance instance)
         }
     }
     return result;
-}
+    }
 
-void CEncoder::GetVISAPredefinedVar(CVariable* pVar, PreDefined_Vars var)
-{
+    void CEncoder::GetVISAPredefinedVar(CVariable* pVar, PreDefined_Vars var)
+    {
     vKernel->GetPredefinedVar(pVar->visaGenVariable[0], var);
     switch (var) {
     case PREDEFINED_TSC:
@@ -4195,17 +4324,17 @@ void CEncoder::GetVISAPredefinedVar(CVariable* pVar, PreDefined_Vars var)
         pVar->GetAliasOffset());
 
     pVar->visaGenVariable[0] = pAliasGenVar;
-}
+    }
 
-void CEncoder::CreateVISAVar(CVariable* var)
-{
-    if(var->GetAlias()!=NULL)
+    void CEncoder::CreateVISAVar(CVariable* var)
     {
+        if (var->GetAlias() != NULL)
+        {
         var->ResolveAlias();
         // In case the alias is an exact copy or just a sub variable just re-use the variable
-        if(var->GetAlias()->GetType() == var->GetType())
+            if (var->GetAlias()->GetType() == var->GetType())
         {
-            for(uint i = 0; i<var->GetNumberInstance();i++)
+                for (uint i = 0; i < var->GetNumberInstance(); i++)
             {
                 var->visaGenVariable[i] = var->GetAlias()->visaGenVariable[i];
             }
@@ -4214,9 +4343,9 @@ void CEncoder::CreateVISAVar(CVariable* var)
         {
             SAlias alias(var->GetAlias(), var->GetType());
             auto aliasPair = m_aliasesMap.insert(std::pair<SAlias, CVariable*>(alias, var));
-            if(aliasPair.second == false)
+                if (aliasPair.second == false)
             {
-                for(uint i = 0; i < var->GetNumberInstance(); i++)
+                    for (uint i = 0; i < var->GetNumberInstance(); i++)
                 {
                     var->visaGenVariable[i] = aliasPair.first->second->visaGenVariable[i];
                 }
@@ -4224,7 +4353,7 @@ void CEncoder::CreateVISAVar(CVariable* var)
             else
             {
                 assert(var->GetType() != ISA_TYPE_BOOL && "boolean cannot have alias");
-                for(uint i = 0; i < var->GetNumberInstance(); i++)
+                    for (uint i = 0; i < var->GetNumberInstance(); i++)
                 {
                     // Since we no longer use the built-in alias offset mechanism,
                     // we have to create the aliases to be of at least the size of the
@@ -4255,12 +4384,12 @@ void CEncoder::CreateVISAVar(CVariable* var)
     else
     {
         uint num_elts = var->GetNumberElement();
-        if( var->GetVarType() == EVARTYPE_GENERAL )
+            if (var->GetVarType() == EVARTYPE_GENERAL)
         {
             var->visaGenVariable[0] = nullptr;
             var->visaGenVariable[1] = nullptr;
             assert(var->GetType() != ISA_TYPE_BOOL && "boolean cannot be general var");
-            for(uint i = 0; i<var->GetNumberInstance();i++)
+                for (uint i = 0; i < var->GetNumberInstance(); i++)
             {
                 V(vKernel->CreateVISAGenVar(
                     var->visaGenVariable[i],
@@ -4270,9 +4399,9 @@ void CEncoder::CreateVISAVar(CVariable* var)
                     GetVISAAlign(var)));
             }
         }
-        else if(var->GetVarType() == EVARTYPE_PREDICATE)
+            else if (var->GetVarType() == EVARTYPE_PREDICATE)
         {
-            unsigned short nb = int_cast<unsigned short>(num_elts)*var->GetNumberInstance();
+                unsigned short nb = int_cast<unsigned short>(num_elts) * var->GetNumberInstance();
             V(vKernel->CreateVISAPredVar(
                 var->visaPredVariable,
                 "",
@@ -4285,47 +4414,48 @@ void CEncoder::CreateVISAVar(CVariable* var)
             V(vKernel->CreateVISAAddrVar(var->visaAddrVariable, "", nb));
         }
     }
-}
+    }
 
-void CEncoder::DeclareInput(CVariable* var, uint offset, uint instance)
-{
+    void CEncoder::DeclareInput(CVariable* var, uint offset, uint instance)
+    {
     V(vKernel->CreateVISAInputVar(
         var->visaGenVariable[instance],
         int_cast<unsigned short>(offset),
         int_cast<unsigned short>(var->GetSize())));
-}
+    }
 
-void CEncoder::MarkAsOutput(CVariable* var)
-{
-    for(unsigned int i = 0; i < var->GetNumberInstance(); i++)
+    void CEncoder::MarkAsOutput(CVariable* var)
     {
+        for (unsigned int i = 0; i < var->GetNumberInstance(); i++)
+        {
         V(vKernel->AddAttributeToVar(var->visaGenVariable[i], "Output", 0, nullptr));
     }
-}
+    }
 
-bool CEncoder::AvoidRetryOnSmallSpill() const
-{
+    bool CEncoder::AvoidRetryOnSmallSpill() const
+    {
     CodeGenContext* context = m_program->GetContext();
     return context->type == ShaderType::PIXEL_SHADER &&
         m_program->m_dispatchSize == SIMDMode::SIMD8 &&
         context->m_retryManager.IsFirstTry();
-}
+    }
 
-void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
-{
+    void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
+    {
     buffer = nullptr;
     bufferSize = 0;
     tableEntries = 0;
     Module* pModule = m_program->GetContext()->getModule();
     ModuleMetaData* modMD = m_program->GetContext()->getModuleMetaData();
+
     std::vector<Function*> funcsToExport;
 
     if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
     {
-        for (auto &F : pModule->getFunctionList())
+            for (auto& F : pModule->getFunctionList())
         {
             // Find all functions in the module we need to export as symbols
-            if (F.hasFnAttribute("ExternalLinkedFn"))
+            if (F.hasFnAttribute("IndirectlyCalled"))
             {
                 if (!F.isDeclaration() || F.getNumUses() > 0)
                     funcsToExport.push_back(&F);
@@ -4343,7 +4473,7 @@ void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& 
     {
         // Allocate buffer to store symbol table entries
         bufferSize = sizeof(vISA::GenSymEntry) * tableEntries;
-        buffer = (void*) malloc(bufferSize);
+            buffer = (void*)malloc(bufferSize);
         assert(buffer && "Symbol Table not allocated");
         vISA::GenSymEntry* entry_ptr = (vISA::GenSymEntry*) buffer;
 
@@ -4355,7 +4485,8 @@ void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& 
                 assert(pFunc->getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
                 strcpy_s(entry_ptr->s_name, vISA::MAX_SYMBOL_NAME_LENGTH, pFunc->getName().str().c_str());
 
-                if (pFunc->isDeclaration())
+                bool isTrue = false;
+                if (pFunc->isDeclaration() || isTrue)
                 {
                     // If the function is only declared, set as undefined type
                     entry_ptr->s_type = vISA::GenSymType::S_UNDEF;
@@ -4396,9 +4527,9 @@ void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& 
             }
         }
     }
-}
-void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
-{
+    }
+    void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
+    {
     buffer = nullptr;
     bufferSize = 0;
     tableEntries = 0;
@@ -4409,26 +4540,26 @@ void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsign
         V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
         assert(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
     }
-}
+    }
 
-void CEncoder::Compile(bool hasSymbolTable)
-{
+    void CEncoder::Compile(bool hasSymbolTable)
+    {
     COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
 
     CodeGenContext* context = m_program->GetContext();
     SProgramOutput* pOutput = m_program->ProgramOutput();
 
-    if( m_program->m_dispatchSize == SIMDMode::SIMD8 )
+        if (m_program->m_dispatchSize == SIMDMode::SIMD8)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_CISACreateDestroy_SIMD8 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_CISACreateDestroy_SIMD8);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD16 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_CISACreateDestroy_SIMD16 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_CISACreateDestroy_SIMD16);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD32 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD32)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_CISACreateDestroy_SIMD32 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_CISACreateDestroy_SIMD32);
     }
 
     COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISAEmitPass);
@@ -4438,25 +4569,55 @@ void CEncoder::Compile(bool hasSymbolTable)
     int vIsaCompile = 0;
     VISAKernel* pMainKernel = nullptr;
 
+    // ShaderOverride for .visaasm files
+    std::string visaAsmOverrideFile = "";
+    bool visaAsmOverride = false;
+    if (IGC_IS_FLAG_ENABLED(ShaderOverride))
+    {
+        Debug::DumpName name = IGC::Debug::GetDumpNameObj(m_program, "visaasm");
+        visaAsmOverrideFile = name.overridePath();
+        // Check if the override file can be opened
+        FILE* tempFile = fopen(visaAsmOverrideFile.c_str(), "r");
+        if (tempFile)
+        {
+            visaAsmOverride = true;
+            fclose(tempFile);
+        }
+    }
+
     // Compile generated VISA text string for inlineAsm
-    if (m_hasInlineAsm)
+    if (m_hasInlineAsm || visaAsmOverride)
     {
         // Finalize the text builder by writing the header
-        V(vbuilder->WriteVISAHeader());
+        if (m_hasInlineAsm)
+            V(vbuilder->WriteVISAHeader());
 
         llvm::SmallVector<const char*, 10> params;
         InitBuildParams(params);
 
         // Create a new builder for parsing the visaasm
         TARGET_PLATFORM VISAPlatform = GetVISAPlatform(&(context->platform));
-        auto builderMode = m_enableVISAdump ? CM_CISA_BUILDER_BOTH : CM_CISA_BUILDER_GEN;
-        V(CreateVISABuilder(vAsmTextBuilder, vISA_PARSER, builderMode, VISAPlatform, params.size(), params.data(), &m_WaTable));
+        V(CreateVISABuilder(vAsmTextBuilder, vISA_ASM_READER, CM_CISA_BUILDER_BOTH, VISAPlatform, params.size(), params.data(), &m_WaTable));
         // Use the same build options as before
         SetBuilderOptions(vAsmTextBuilder);
 
         // Parse the generated VISA text
-        std::string parseTextFile = m_enableVISAdump ? GetDumpFileName("inlineasm") : "";
-        V(vAsmTextBuilder->ParseVISAText(vbuilder->GetAsmTextHeaderStream().str(), vbuilder->GetAsmTextStream().str(), parseTextFile));
+        if (visaAsmOverride)
+        {
+            // Manually set the asm file path instead of using the path provided in the override shader file
+            std::string asmName = GetDumpFileName("");
+            asmName.pop_back();
+            vAsmTextBuilder->SetOption(VISA_AsmFileNameUser, true);
+            vAsmTextBuilder->SetOption(VISA_AsmFileName, asmName.c_str());
+            V(vAsmTextBuilder->ParseVISAText(visaAsmOverrideFile));
+            asmName = asmName + ".visaasm";
+            appendToShaderOverrideLogFile(asmName, "OVERRIDEN: ");
+        }
+        else
+        {
+            std::string parseTextFile = m_enableVISAdump ? GetDumpFileName("inline.visaasm") : "";
+            V(vAsmTextBuilder->ParseVISAText(vbuilder->GetAsmTextHeaderStream().str(), vbuilder->GetAsmTextStream().str(), parseTextFile));
+        }
 
         pMainKernel = vAsmTextBuilder->GetVISAKernel();
         vIsaCompile = vAsmTextBuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
@@ -4468,9 +4629,9 @@ void CEncoder::Compile(bool hasSymbolTable)
         vIsaCompile = vbuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
     }
 
-    FINALIZER_INFO *jitInfo;
+        FINALIZER_INFO* jitInfo;
     pMainKernel->GetJitInfo(jitInfo);
-    if(jitInfo->isSpill)
+        if (jitInfo->isSpill)
     {
         context->m_retryManager.SetSpillSize(jitInfo->numGRFSpillFill);
         m_program->m_spillSize = jitInfo->numGRFSpillFill;
@@ -4496,15 +4657,15 @@ void CEncoder::Compile(bool hasSymbolTable)
         CompilerStatsUtils::RecordCodeGenCompilerStats(context, m_program->m_dispatchSize, CompilerStats, jitInfo);
     }
 
-    if( vIsaCompile == -1 )
+        if (vIsaCompile == -1)
     {
         assert(0 && "CM failure in vbuilder->Compile()");
     }
-    else if( vIsaCompile == -2 )
+        else if (vIsaCompile == -2)
     {
         assert(0 && "CM user error in vbuilder->Compile()");
     }
-    else if( vIsaCompile == -3 ) // CM early terminates on spill
+        else if (vIsaCompile == -3) // CM early terminates on spill
     {
 #if (GET_SHADER_STATS)
         if (m_program->m_dispatchSize == SIMDMode::SIMD16)
@@ -4521,17 +4682,17 @@ void CEncoder::Compile(bool hasSymbolTable)
 
     COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
 
-    if(m_program->m_dispatchSize == SIMDMode::SIMD8 )
+        if (m_program->m_dispatchSize == SIMDMode::SIMD8)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_vISACompile_SIMD8 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_vISACompile_SIMD8);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD16 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_vISACompile_SIMD16 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_vISACompile_SIMD16);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD32 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD32)
     {
-        MEM_SNAPSHOT( IGC::SMS_AFTER_vISACompile_SIMD32 );
+            MEM_SNAPSHOT(IGC::SMS_AFTER_vISACompile_SIMD32);
     }
 
     if (m_program->m_dispatchSize == SIMDMode::SIMD16)
@@ -4553,17 +4714,17 @@ void CEncoder::Compile(bool hasSymbolTable)
     }
 
 #if (GET_SHADER_STATS && !PRINT_DETAIL_SHADER_STATS)
-    if( m_program->m_dispatchSize == SIMDMode::SIMD8 )
+        if (m_program->m_dispatchSize == SIMDMode::SIMD8)
     {
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT, jitInfo->numAsmCount);
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL8, (int)jitInfo->isSpill);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD16 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
     {
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT_SIMD16, jitInfo->numAsmCount);
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL16, (int)jitInfo->isSpill);
     }
-    else if( m_program->m_dispatchSize == SIMDMode::SIMD32 )
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD32)
     {
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT_SIMD32, jitInfo->numAsmCount);
         COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL32, (int)jitInfo->isSpill);
@@ -4591,15 +4752,15 @@ void CEncoder::Compile(bool hasSymbolTable)
 
     }
 
-    assert(genxbin!=nullptr);
+        assert(genxbin != nullptr);
     size = binSize;
 
     // the kernel has to be padded to have a size aligned on 64 bytes
-    size_t padding = iSTD::GetAlignmentOffset( size, 64);//m_program->m_Platform->getKernelPointerAlignSize() );
-    void *kernel = IGC::aligned_malloc(size + padding, 16 /* sizeof(DQWORD) */);
+        size_t padding = iSTD::GetAlignmentOffset(size, 64);//m_program->m_Platform->getKernelPointerAlignSize() );
+        void* kernel = IGC::aligned_malloc(size + padding, 16 /* sizeof(DQWORD) */);
     memcpy_s(kernel, size + padding, genxbin, binSize);
     // pad out the rest with 0s
-    memset( static_cast<char*>(kernel)+size, 0, padding );
+        memset(static_cast<char*>(kernel) + size, 0, padding);
 
     if (binOverride)
     {
@@ -4610,7 +4771,7 @@ void CEncoder::Compile(bool hasSymbolTable)
         freeBlock(genxbin);
     }
 
-    void *dbgInfo = nullptr;
+        void* dbgInfo = nullptr;
     unsigned int dbgSize = 0;
     if (context->m_instrTypes.hasDebugInfo)
     {
@@ -4637,10 +4798,10 @@ void CEncoder::Compile(bool hasSymbolTable)
 
         if (numElems > 0 && VISAMap)
         {
-            for (unsigned int i = 0; i < numElems*2; i+=2)
+                for (unsigned int i = 0; i < numElems * 2; i += 2)
             {
                 auto GenISAOffset = ((unsigned int*)VISAMap)[i];
-                auto VISAIndex = ((unsigned int*)VISAMap)[i+1];
+                    auto VISAIndex = ((unsigned int*)VISAMap)[i + 1];
                 m_program->m_VISAIndexToGenISAOff.push_back(std::make_pair(VISAIndex, GenISAOffset));
             }
 
@@ -4680,10 +4841,10 @@ void CEncoder::Compile(bool hasSymbolTable)
     pOutput->m_offsetToSkipPerThreadDataLoad = jitInfo->offsetToSkipPerThreadDataLoad;
 
     COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISAEmitPass);
-}
+    }
 
-void CEncoder::DestroyVISABuilder()
-{
+    void CEncoder::DestroyVISABuilder()
+    {
     if (vAsmTextBuilder != nullptr)
     {
         V(::DestroyVISABuilder(vAsmTextBuilder));
@@ -4691,44 +4852,44 @@ void CEncoder::DestroyVISABuilder()
     }
     V(::DestroyVISABuilder(vbuilder));
     vbuilder = nullptr;
-}
+    }
 
-void CEncoder::Copy(CVariable* dst, CVariable* src)
-{
+    void CEncoder::Copy(CVariable* dst, CVariable* src)
+    {
     // undef value are not copied
-    if(!src->IsUndef() || IGC_IS_FLAG_ENABLED(InitializeUndefValueEnable))
+        if (!src->IsUndef() || IGC_IS_FLAG_ENABLED(InitializeUndefValueEnable))
     {
         CVariable* rawDst = dst;
         assert(GetCISADataTypeSize(src->GetType()) == GetCISADataTypeSize(dst->GetType()));
         bool isVecImm = src->IsImmediate() && (src->GetType() == ISA_TYPE_UV ||
                                                src->GetType() == ISA_TYPE_V ||
                                                src->GetType() == ISA_TYPE_VF);
-        if(src->GetType() != dst->GetType() && !isVecImm)
+            if (src->GetType() != dst->GetType() && !isVecImm)
         {
             rawDst = m_program->BitCast(dst, src->GetType());
         }
         DataMov(ISA_MOV, rawDst, src);
     }
-}
+    }
 
-void CEncoder::BoolToInt(CVariable* dst, CVariable* src)
-{
+    void CEncoder::BoolToInt(CVariable* dst, CVariable* src)
+    {
     assert(src->GetType() == ISA_TYPE_BOOL);
 
     VISA_Type dstType = dst->GetType();
     assert((dstType == ISA_TYPE_UD) || (dstType == ISA_TYPE_D) ||
-           (dstType == ISA_TYPE_UB) ||(dstType == ISA_TYPE_B) ||
+            (dstType == ISA_TYPE_UB) || (dstType == ISA_TYPE_B) ||
            (dstType == ISA_TYPE_UW) || (dstType == ISA_TYPE_W));
 
     // undef value are not copied
-    if(!src->IsUndef() || IGC_IS_FLAG_ENABLED(InitializeUndefValueEnable)) {
+        if (!src->IsUndef() || IGC_IS_FLAG_ENABLED(InitializeUndefValueEnable)) {
         // Casting 'dst' to BOOL is unnecessary.
         DataMov(ISA_MOV, dst, src);
     }
-}
+    }
 
-void CEncoder::GatherA64(CVariable *dst,
-                         CVariable *offset,
+    void CEncoder::GatherA64(CVariable* dst,
+        CVariable* offset,
                          unsigned elemSize,
                          unsigned numElems) {
     assert((elemSize == 8 || elemSize == 32 || elemSize == 64) &&
@@ -4738,8 +4899,8 @@ void CEncoder::GatherA64(CVariable *dst,
            "Only 1/2/4/8 elements are supported!");
 
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *dstOpnd = GetRawDestination(dst);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
 
     SIMDMode thisSM = offset->IsUniform() ? lanesToSIMDMode(offset->GetNumberElement()) : m_encoderState.m_simdSize;
     if (m_program->m_Platform->GetPlatformFamily() == IGFX_GEN8_CORE && thisSM == SIMDMode::SIMD16)
@@ -4769,8 +4930,8 @@ void CEncoder::GatherA64(CVariable *dst,
         {
             // Do two SIMD8 gather and then merge (pack) the two simd8 results
             // to form the single simd16 payload.
-            CVariable* V0, *V1;
-            uint16_t newNumElems = (uint16_t) 8 * numElems;
+                CVariable* V0, * V1;
+                uint16_t newNumElems = (uint16_t)8 * numElems;
             V0 = m_program->GetNewVariable(newNumElems,
                                            dst->GetType(),
                                            dst->GetAlign(),
@@ -4795,7 +4956,7 @@ void CEncoder::GatherA64(CVariable *dst,
             }
 
             uint32_t dstOfstBytes = dst->GetAliasOffset() + m_encoderState.m_dstOperand.subVar * getGRFSize();
-            MergeMDP8To16(V0, V1, numElems, dst, dstOfstBytes);
+                MergePayloadToHigherSIMD(V0, V1, numElems, dst, dstOfstBytes, 16);
         }
         return;
     }
@@ -4805,10 +4966,10 @@ void CEncoder::GatherA64(CVariable *dst,
                                        visaBlockType(elemSize),
                                        visaBlockNum(numElems),
                                        addressOpnd, dstOpnd));
-}
+    }
 
-void CEncoder::ScatterA64(CVariable *src,
-                          CVariable *offset,
+    void CEncoder::ScatterA64(CVariable* src,
+        CVariable* offset,
                           unsigned elemSize,
                           unsigned numElems) {
     assert((elemSize == 8 || elemSize == 32 || elemSize == 64) &&
@@ -4818,11 +4979,11 @@ void CEncoder::ScatterA64(CVariable *src,
            "Only 1/2/4/8 elements are supported!");
 
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *srcOpnd = GetRawSource(src);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* srcOpnd = GetRawSource(src);
 
     SIMDMode thisSM = offset->IsUniform() ? lanesToSIMDMode(offset->GetNumberElement()) : m_encoderState.m_simdSize;
-    if( m_program->m_Platform->GetPlatformFamily() == IGFX_GEN8_CORE && thisSM == SIMDMode::SIMD16 )
+        if (m_program->m_Platform->GetPlatformFamily() == IGFX_GEN8_CORE && thisSM == SIMDMode::SIMD16)
     {
         // BDW A64 scatter does not support SIMD16, split it into 2 SIMD8
         Common_VISA_EMask_Ctrl execMask = GetAluEMask(offset);
@@ -4848,8 +5009,8 @@ void CEncoder::ScatterA64(CVariable *src,
         {
             // Unpacking the original simd16 data payload to form the two simd8
             // data payload by splitting the original simd16 data payload.
-            CVariable *V0, *V1;
-            uint16_t newNumElems = (uint16_t) 8 * numElems;
+                CVariable* V0, * V1;
+                uint16_t newNumElems = (uint16_t)8 * numElems;
             V0 = m_program->GetNewVariable(newNumElems,
                                            src->GetType(),
                                            src->GetAlign(),
@@ -4860,7 +5021,7 @@ void CEncoder::ScatterA64(CVariable *src,
                                            src->IsUniform());
             // Starting offset is calculated from AliasOffset only (subVar not used).
             uint32_t srcOfstBytes = src->GetAliasOffset();
-            SplitMDP16To8(src, srcOfstBytes, numElems, V0, V1);
+                SplitPayloadToLowerSIMD(src, srcOfstBytes, numElems, V0, V1, 16);
 
             for (unsigned p = 0; p < 2; ++p)
             {
@@ -4884,11 +5045,11 @@ void CEncoder::ScatterA64(CVariable *src,
                                         visaBlockType(elemSize),
                                         visaBlockNum(numElems),
                                         addressOpnd, srcOpnd));
-}
+    }
 
-void CEncoder::ByteGather(CVariable *dst,
+    void CEncoder::ByteGather(CVariable* dst,
                           const ResourceDescriptor& resource,
-                          CVariable *offset,
+        CVariable* offset,
                           unsigned elemSize,
                           unsigned numElems) {
     assert(elemSize == 8 && "Only BYTE element is supported!");
@@ -4896,7 +5057,7 @@ void CEncoder::ByteGather(CVariable *dst,
            "Only 1/2/4 elements are supported!");
 
     // Extend the offset to 64bits and use the A64 gather message if needed
-    if((resource.m_surfaceType == ESURFACE_STATELESS) &&
+        if ((resource.m_surfaceType == ESURFACE_STATELESS) &&
         (m_program->m_DriverInfo->NeedWAToTransformA32MessagesToA64()) &&
         (m_program->m_Platform->getWATable().WaNoA32ByteScatteredStatelessMessages != 0))
     {
@@ -4909,9 +5070,9 @@ void CEncoder::ByteGather(CVariable *dst,
             offset->IsUniform(),
             offset->GetNumberInstance());
 
-        CVariable *offset32UD = m_program->BitCast(offset, ISA_TYPE_UD);
+            CVariable* offset32UD = m_program->BitCast(offset, ISA_TYPE_UD);
 
-        if(offset->IsUniform())
+            if (offset->IsUniform())
         {
             uint elements = offset->GetNumberElement();
             SetUniformSIMDSize(lanesToSIMDMode(elements));
@@ -4930,10 +5091,10 @@ void CEncoder::ByteGather(CVariable *dst,
 
     VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *dstOpnd = GetRawDestination(dst);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -4946,11 +5107,11 @@ void CEncoder::ByteGather(CVariable *dst,
                                                      surfaceOpnd,
                                                      globalOffsetOpnd,
                                                      addressOpnd, dstOpnd));
-}
+    }
 
-void CEncoder::ByteScatter(CVariable *src,
+    void CEncoder::ByteScatter(CVariable* src,
                            const ResourceDescriptor& resource,
-                           CVariable *offset,
+        CVariable* offset,
                            unsigned elemSize,
                            unsigned numElems) {
     assert(elemSize == 8 && "Only BYTE element is supported!");
@@ -4958,7 +5119,7 @@ void CEncoder::ByteScatter(CVariable *src,
            "Only 1/2/4 elements are supported!");
 
     // Extend the offset to 64bits and use the A64 gather message if needed
-    if((resource.m_surfaceType == ESURFACE_STATELESS) &&
+        if ((resource.m_surfaceType == ESURFACE_STATELESS) &&
        (m_program->m_DriverInfo->NeedWAToTransformA32MessagesToA64()) &&
        (m_program->m_Platform->getWATable().WaNoA32ByteScatteredStatelessMessages != 0))
     {
@@ -4971,9 +5132,9 @@ void CEncoder::ByteScatter(CVariable *src,
             offset->IsUniform(),
             offset->GetNumberInstance());
 
-        CVariable *offset32UD = m_program->BitCast(offset, ISA_TYPE_UD);
+            CVariable* offset32UD = m_program->BitCast(offset, ISA_TYPE_UD);
 
-        if(offset->IsUniform())
+            if (offset->IsUniform())
         {
             uint elements = offset->GetNumberElement();
             SetUniformSIMDSize(lanesToSIMDMode(elements));
@@ -4992,10 +5153,10 @@ void CEncoder::ByteScatter(CVariable *src,
 
     VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *srcOpnd = GetRawSource(src);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* srcOpnd = GetRawSource(src);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -5008,19 +5169,19 @@ void CEncoder::ByteScatter(CVariable *src,
                                                      surfaceOpnd,
                                                      globalOffsetOpnd,
                                                      addressOpnd, srcOpnd));
-}
+    }
 
-void CEncoder::Gather4ScaledNd(CVariable *dst,
+    void CEncoder::Gather4ScaledNd(CVariable* dst,
     const ResourceDescriptor& resource,
-    CVariable *offset,
-    unsigned nd ) {
+        CVariable* offset,
+        unsigned nd) {
 
     VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *dstOpnd = GetRawDestination(dst);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -5034,10 +5195,10 @@ void CEncoder::Gather4ScaledNd(CVariable *dst,
         surfaceOpnd,
         globalOffsetOpnd,
         addressOpnd, dstOpnd));
-}
+    }
 
-uint32_t CEncoder::getNumChannels(CVariable* var) const
-{
+    uint32_t CEncoder::getNumChannels(CVariable* var) const
+    {
     unsigned nd = var->GetSize();
     if (var->IsUniform())
     {
@@ -5062,27 +5223,27 @@ uint32_t CEncoder::getNumChannels(CVariable* var) const
         }
     }
     return 1;
-}
+    }
 
-void CEncoder::Gather4Scaled(CVariable *dst,
+    void CEncoder::Gather4Scaled(CVariable* dst,
                        const ResourceDescriptor& resource,
-                       CVariable *offset)
-{
+        CVariable* offset)
+    {
     unsigned nd = getNumChannels(dst);
     Gather4ScaledNd(dst, resource, offset, nd);
-}
+    }
 
-void CEncoder::Scatter4Scaled(CVariable *src,
+    void CEncoder::Scatter4Scaled(CVariable* src,
                         const ResourceDescriptor& resource,
-                        CVariable *offset) {
+        CVariable* offset) {
     unsigned nd = getNumChannels(src);
 
     VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *srcOpnd = GetRawSource(src);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* srcOpnd = GetRawSource(src);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -5096,9 +5257,9 @@ void CEncoder::Scatter4Scaled(CVariable *src,
         surfaceOpnd,
         globalOffsetOpnd,
         addressOpnd, srcOpnd));
-}
+    }
 
-void CEncoder::Gather4A64(CVariable *dst, CVariable *offset) {
+    void CEncoder::Gather4A64(CVariable* dst, CVariable* offset) {
     assert(dst->GetElemSize() == 4 && "Gather4 must have 4-byte element");
 
     uint32_t dstOfstBytes = m_encoderState.m_dstOperand.subVar * getGRFSize() + dst->GetAliasOffset();
@@ -5117,10 +5278,10 @@ void CEncoder::Gather4A64(CVariable *dst, CVariable *offset) {
     }
 
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *dstOpnd = GetRawDestination(dst);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -5152,8 +5313,8 @@ void CEncoder::Gather4A64(CVariable *dst, CVariable *offset) {
         {
             // Packing the two SIMD8 data payload to form the SIMD16 data payload
             // by merging the two simd8 data payload.
-            CVariable* V0, *V1;
-            uint16_t newNumElems = (uint16_t) 8 * nd;
+                CVariable* V0, * V1;
+                uint16_t newNumElems = (uint16_t)8 * nd;
             V0 = m_program->GetNewVariable(newNumElems,
                                            dst->GetType(),
                                            dst->GetAlign(),
@@ -5177,7 +5338,7 @@ void CEncoder::Gather4A64(CVariable *dst, CVariable *offset) {
                     addressOpnd, dstOpnd));
             }
 
-            MergeMDP8To16(V0, V1, nd, dst, dstOfstBytes);
+                MergePayloadToHigherSIMD(V0, V1, nd, dst, dstOfstBytes, 16);
         }
         return;
     }
@@ -5189,9 +5350,9 @@ void CEncoder::Gather4A64(CVariable *dst, CVariable *offset) {
         ConvertChannelMaskToVisaType(BIT(nd) - 1),
         globalOffsetOpnd,
         addressOpnd, dstOpnd));
-}
+    }
 
-void CEncoder::Scatter4A64(CVariable *src, CVariable *offset) {
+    void CEncoder::Scatter4A64(CVariable* src, CVariable* offset) {
     assert(src->GetElemSize() == 4 && "scatter4 must have 4-byte element");
 
     uint32_t srcOfstBytes = src->GetAliasOffset();
@@ -5210,10 +5371,10 @@ void CEncoder::Scatter4A64(CVariable *src, CVariable *offset) {
     }
 
     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *srcOpnd = GetRawSource(src);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* srcOpnd = GetRawSource(src);
 
-    VISA_VectorOpnd *globalOffsetOpnd = 0;
+        VISA_VectorOpnd* globalOffsetOpnd = 0;
     int val = 0;
     V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
@@ -5245,8 +5406,8 @@ void CEncoder::Scatter4A64(CVariable *src, CVariable *offset) {
         {
             // Unpacking is needed from the original SIMD16 data payload to form
             // two SIMD8 data payload by spliting the original simd16 data payload.
-            CVariable *V0, *V1;
-            uint16_t newNumElems = (uint16_t) 8 * nd;
+                CVariable* V0, * V1;
+                uint16_t newNumElems = (uint16_t)8 * nd;
             V0 = m_program->GetNewVariable(newNumElems,
                                            src->GetType(),
                                            src->GetAlign(),
@@ -5256,7 +5417,7 @@ void CEncoder::Scatter4A64(CVariable *src, CVariable *offset) {
                                            src->GetAlign(),
                                            src->IsUniform());
 
-            SplitMDP16To8(src, srcOfstBytes, nd, V0, V1);
+                SplitPayloadToLowerSIMD(src, srcOfstBytes, nd, V0, V1, 16);
 
             for (unsigned p = 0; p < 2; ++p)
             {
@@ -5282,15 +5443,15 @@ void CEncoder::Scatter4A64(CVariable *src, CVariable *offset) {
         ConvertChannelMaskToVisaType(BIT(nd) - 1),
         globalOffsetOpnd,
         addressOpnd, srcOpnd));
-}
+    }
 
-void CEncoder::AtomicRawA64(AtomicOp atomic_op,
+    void CEncoder::AtomicRawA64(AtomicOp atomic_op,
                             CVariable* dst,
                             CVariable* offset,
                             CVariable* src0,
                             CVariable* src1,
                             unsigned short bitwidth)
-{
+    {
     // For cmpxchg, we have to change the order of arguments.
     if (atomic_op == EATOMIC_CMPXCHG) {
         std::swap(src0, src1);
@@ -5312,14 +5473,14 @@ void CEncoder::AtomicRawA64(AtomicOp atomic_op,
             bool isFirstHalf = thePart == 0;
 
             std::tie(rawOpndVar, rawOpndOffset) = splitRawOperand(offset, isFirstHalf, execMask);
-            VISA_RawOpnd *addressOpnd = GetRawSource(rawOpndVar, rawOpndOffset);
+                VISA_RawOpnd* addressOpnd = GetRawSource(rawOpndVar, rawOpndOffset);
             std::tie(rawOpndVar, rawOpndOffset) = splitRawOperand(src0, isFirstHalf, execMask);
-            VISA_RawOpnd *src0Opnd = GetRawSource(rawOpndVar, rawOpndOffset);
+                VISA_RawOpnd* src0Opnd = GetRawSource(rawOpndVar, rawOpndOffset);
             std::tie(rawOpndVar, rawOpndOffset) = splitRawOperand(src1, isFirstHalf, execMask);
-            VISA_RawOpnd *src1Opnd = GetRawSource(rawOpndVar, rawOpndOffset);
+                VISA_RawOpnd* src1Opnd = GetRawSource(rawOpndVar, rawOpndOffset);
 
             // dst needs special handling since its move has to come after the send
-            VISA_RawOpnd *dstOpnd = nullptr;
+                VISA_RawOpnd* dstOpnd = nullptr;
             bool needsTmpDst = !isFirstHalf && dst && (dst->GetElemSize() * 8) % getGRFSize() != 0;
             if (!needsTmpDst)
             {
@@ -5357,10 +5518,10 @@ void CEncoder::AtomicRawA64(AtomicOp atomic_op,
         return;
     }
 
-    VISA_RawOpnd *addressOpnd = GetRawSource(offset);
-    VISA_RawOpnd *src0Opnd = GetRawSource(src0);
-    VISA_RawOpnd *src1Opnd = GetRawSource(src1);
-    VISA_RawOpnd *dstOpnd  = GetRawDestination(dst);
+        VISA_RawOpnd* addressOpnd = GetRawSource(offset);
+        VISA_RawOpnd* src0Opnd = GetRawSource(src0);
+        VISA_RawOpnd* src1Opnd = GetRawSource(src1);
+        VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
 
     V(vKernel->AppendVISASvmAtomicInst(GetFlagOperand(m_encoderState.m_flag),
                                        ConvertMaskToVisaType(m_encoderState.m_mask, m_encoderState.m_noMask),
@@ -5371,14 +5532,14 @@ void CEncoder::AtomicRawA64(AtomicOp atomic_op,
                                        src0Opnd,
                                        src1Opnd,
                                        dstOpnd));
-}
+    }
 
-void CEncoder::Wait()
-{
+    void CEncoder::Wait()
+    {
     V(vKernel->AppendVISAWaitInst(nullptr));
-}
+    }
 
-void CEncoder::SendVmeIme(CVariable* bindingTableIndex,
+    void CEncoder::SendVmeIme(CVariable* bindingTableIndex,
                             unsigned char streamMode,
                             unsigned char searchControlMode,
                             CVariable* uniInputVar,
@@ -5396,49 +5557,49 @@ void CEncoder::SendVmeIme(CVariable* bindingTableIndex,
     VISA_RawOpnd* costCenter = GetRawSource(costCenterVar);
     VISA_RawOpnd* output = GetRawDestination(outputVar);
     V(vKernel->AppendVISAMiscVME_IME(surface, streamMode, searchControlMode, uniInput, imeInput, ref0, ref1, costCenter, output));
-}
+    }
 
-void CEncoder::SendVmeFbr(CVariable* bindingTableIndex,
+    void CEncoder::SendVmeFbr(CVariable* bindingTableIndex,
                             CVariable* uniInputVar,
                             CVariable* fbrInputVar,
                             CVariable* FBRMbModeVar,
                             CVariable* FBRSubMbShapeVar,
                             CVariable* FBRSubPredModeVar,
                             CVariable* outputVar) {
-    VISA_StateOpndHandle *surface = GetVISASurfaceOpnd(ESURFACE_NORMAL, bindingTableIndex);
-    VISA_RawOpnd *UNIInput = GetRawSource(uniInputVar);
-    VISA_RawOpnd *FBRInput = GetRawSource(fbrInputVar);
+        VISA_StateOpndHandle* surface = GetVISASurfaceOpnd(ESURFACE_NORMAL, bindingTableIndex);
+        VISA_RawOpnd* UNIInput = GetRawSource(uniInputVar);
+        VISA_RawOpnd* FBRInput = GetRawSource(fbrInputVar);
     VISA_VectorOpnd* FBRMbMode = GetSourceOperand(FBRMbModeVar, m_encoderState.m_srcOperand[0]);
-    VISA_VectorOpnd *FBRSubMbShape = GetSourceOperand(FBRSubMbShapeVar, m_encoderState.m_srcOperand[1]);
-    VISA_VectorOpnd *FBRSubPredMode = GetSourceOperand(FBRSubPredModeVar, m_encoderState.m_srcOperand[2]);
-    VISA_RawOpnd *output = GetRawDestination(outputVar);
+        VISA_VectorOpnd* FBRSubMbShape = GetSourceOperand(FBRSubMbShapeVar, m_encoderState.m_srcOperand[1]);
+        VISA_VectorOpnd* FBRSubPredMode = GetSourceOperand(FBRSubPredModeVar, m_encoderState.m_srcOperand[2]);
+        VISA_RawOpnd* output = GetRawDestination(outputVar);
 
     V(vKernel->AppendVISAMiscVME_FBR(surface, UNIInput, FBRInput, FBRMbMode, FBRSubMbShape, FBRSubPredMode, output));
-}
+    }
 
-void CEncoder::SendVmeSic(
+    void CEncoder::SendVmeSic(
     CVariable* bindingTableIndex,
     CVariable* uniInputVar,
     CVariable* sicInputVar,
-    CVariable* outputVar )
-{
-    VISA_StateOpndHandle *surface = GetVISASurfaceOpnd(ESURFACE_NORMAL, bindingTableIndex);
-    VISA_RawOpnd *UNIInput = GetRawSource(uniInputVar);
-    VISA_RawOpnd *SICInput = GetRawSource(sicInputVar);
-    VISA_RawOpnd *output = GetRawDestination(outputVar);
+        CVariable* outputVar)
+    {
+        VISA_StateOpndHandle* surface = GetVISASurfaceOpnd(ESURFACE_NORMAL, bindingTableIndex);
+        VISA_RawOpnd* UNIInput = GetRawSource(uniInputVar);
+        VISA_RawOpnd* SICInput = GetRawSource(sicInputVar);
+        VISA_RawOpnd* output = GetRawDestination(outputVar);
 
     V(vKernel->AppendVISAMiscVME_SIC(surface, UNIInput, SICInput, output));
-}
+    }
 
-void CEncoder::SendVideoAnalytic(
+    void CEncoder::SendVideoAnalytic(
     llvm::GenIntrinsicInst* inst,
     CVariable* vaResult,
     CVariable* coords,
     CVariable* size,
     CVariable* srcImg,
-    CVariable* sampler )
-{
-    VISA_RawOpnd *vaOutput = GetRawDestination( vaResult );
+        CVariable* sampler)
+    {
+        VISA_RawOpnd* vaOutput = GetRawDestination(vaResult);
 
     SModifier mod0 = m_encoderState.m_srcOperand[0];
     SModifier mod1 = m_encoderState.m_srcOperand[1];
@@ -5450,7 +5611,7 @@ void CEncoder::SendVideoAnalytic(
     mod0.subReg = 0;
     mod0.subVar = 0;
 
-    if( coords->IsUniform() )
+        if (coords->IsUniform())
     {
         mod1.subReg = 1;
         mod1.subVar = 0;
@@ -5461,10 +5622,10 @@ void CEncoder::SendVideoAnalytic(
         mod1.subVar = 2;
     }
 
-    VISA_VectorOpnd *uOffset = GetSourceOperand( coords, mod0 );
-    VISA_VectorOpnd *vOffset = GetSourceOperand( coords, mod1 );
+        VISA_VectorOpnd* uOffset = GetSourceOperand(coords, mod0);
+        VISA_VectorOpnd* vOffset = GetSourceOperand(coords, mod1);
 
-    if( size && size->IsUniform() )
+        if (size && size->IsUniform())
     {
         mod1.subReg = 1;
         mod1.subVar = 0;
@@ -5475,8 +5636,8 @@ void CEncoder::SendVideoAnalytic(
         mod1.subVar = 2;
     }
 
-    VISA_VectorOpnd *wSize = ( size ? GetSourceOperand( size, mod0 ) : NULL );
-    VISA_VectorOpnd *hSize = ( size ? GetSourceOperand( size, mod1 ) : NULL );
+        VISA_VectorOpnd* wSize = (size ? GetSourceOperand(size, mod0) : NULL);
+        VISA_VectorOpnd* hSize = (size ? GetSourceOperand(size, mod1) : NULL);
 
     // So far we support only one VA function per kernel, and other sample
     // messages are not supported when there is VA function within the kernel.
@@ -5484,29 +5645,29 @@ void CEncoder::SendVideoAnalytic(
     DWORD btiIndex = 0;
     DWORD mmfMode = 0;
 
-    VISA_StateOpndHandle *surfaceOpnd = GetBTIOperand( btiIndex );
-    VISA_StateOpndHandle* samplerHnd = GetSamplerOperand( sampler );
+        VISA_StateOpndHandle* surfaceOpnd = GetBTIOperand(btiIndex);
+        VISA_StateOpndHandle* samplerHnd = GetSamplerOperand(sampler);
     VISA_VectorOpnd* mmModeOpnd = NULL;
 
     EDMode erodeDilateMode = CM_DILATE;
     EDExecMode execMode = CM_ED_64x4;
     bool isBigKernel = true;
 
-    if( m_program->m_Platform->GetPlatformFamily() == IGFX_GEN8_CORE )
+        if (m_program->m_Platform->GetPlatformFamily() == IGFX_GEN8_CORE)
     {
         isBigKernel = false;
     }
 
-    switch( inst->getIntrinsicID() )
+        switch (inst->getIntrinsicID())
     {
     case GenISAIntrinsic::GenISA_vaErode:
         erodeDilateMode = CM_ERODE;
     case GenISAIntrinsic::GenISA_vaDilate:
-        V( vKernel->AppendVISAVAErodeDilate( erodeDilateMode, samplerHnd, surfaceOpnd, uOffset, vOffset, execMode, vaOutput ) );
+            V(vKernel->AppendVISAVAErodeDilate(erodeDilateMode, samplerHnd, surfaceOpnd, uOffset, vOffset, execMode, vaOutput));
         break;
     case GenISAIntrinsic::GenISA_vaMinMaxFilter:
-        V( vKernel->CreateVISAImmediate( mmModeOpnd, &mmfMode, ISA_TYPE_UD ) );
-        V( vKernel->AppendVISAVAMinMaxFilter( samplerHnd, surfaceOpnd, uOffset, vOffset, CM_16_FULL, CM_MMF_16x4, mmModeOpnd, vaOutput ) );
+            V(vKernel->CreateVISAImmediate(mmModeOpnd, &mmfMode, ISA_TYPE_UD));
+            V(vKernel->AppendVISAVAMinMaxFilter(samplerHnd, surfaceOpnd, uOffset, vOffset, CM_16_FULL, CM_MMF_16x4, mmModeOpnd, vaOutput));
         break;
     case GenISAIntrinsic::GenISA_vaConvolveGRF_16x1:
         V(vKernel->AppendVISAVAConvolve(samplerHnd, surfaceOpnd, uOffset, vOffset, CM_CONV_16x1, isBigKernel, vaOutput));
@@ -5516,24 +5677,24 @@ void CEncoder::SendVideoAnalytic(
         V(vKernel->AppendVISAVAConvolve(samplerHnd, surfaceOpnd, uOffset, vOffset, CM_CONV_16x4, isBigKernel, vaOutput));
         break;
     case GenISAIntrinsic::GenISA_vaMinMax:
-        V( vKernel->CreateVISAImmediate( mmModeOpnd, &mmfMode, ISA_TYPE_UD ) );
-        V( vKernel->AppendVISAVAMinMax( surfaceOpnd, uOffset, vOffset, mmModeOpnd, vaOutput ) );
+            V(vKernel->CreateVISAImmediate(mmModeOpnd, &mmfMode, ISA_TYPE_UD));
+            V(vKernel->AppendVISAVAMinMax(surfaceOpnd, uOffset, vOffset, mmModeOpnd, vaOutput));
         break;
     case GenISAIntrinsic::GenISA_vaCentroid:
-        V( vKernel->AppendVISAVACentroid( surfaceOpnd, uOffset, vOffset, wSize, vaOutput ) );
+            V(vKernel->AppendVISAVACentroid(surfaceOpnd, uOffset, vOffset, wSize, vaOutput));
         break;
     case GenISAIntrinsic::GenISA_vaBoolCentroid:
     case GenISAIntrinsic::GenISA_vaBoolSum:
-        V( vKernel->AppendVISAVABooleanCentroid( surfaceOpnd, uOffset, vOffset, wSize, hSize, vaOutput ) );
+            V(vKernel->AppendVISAVABooleanCentroid(surfaceOpnd, uOffset, vOffset, wSize, hSize, vaOutput));
         break;
     default:
-        assert( 0 && "Trying to emit unrecognized video analytic instruction (listed above)" );
+            assert(0 && "Trying to emit unrecognized video analytic instruction (listed above)");
         break;
     };
-}
+    }
 
-void CEncoder::SetVISAWaTable(WA_TABLE const& waTable)
-{
+    void CEncoder::SetVISAWaTable(WA_TABLE const& waTable)
+    {
     //Copy from driver WA table to VISA WA table
 
     m_WaTable.WaHeaderRequiredOnSimd16Sample16bit = waTable.WaHeaderRequiredOnSimd16Sample16bit;
@@ -5556,7 +5717,7 @@ void CEncoder::SetVISAWaTable(WA_TABLE const& waTable)
 
     if (m_program->GetShaderType() != ShaderType::PIXEL_SHADER &&
         m_program->GetShaderType() != ShaderType::COMPUTE_SHADER &&
-        m_program->GetShaderType() != ShaderType::OPENCL_SHADER )
+            m_program->GetShaderType() != ShaderType::OPENCL_SHADER)
     {
         m_WaTable.WaClearTDRRegBeforeEOTForNonPS = waTable.WaClearTDRRegBeforeEOTForNonPS;
     }
@@ -5588,39 +5749,44 @@ void CEncoder::SetVISAWaTable(WA_TABLE const& waTable)
     m_WaTable.Wa_1406306137 = waTable.Wa_1406306137;
     m_WaTable.Wa_2201674230 = waTable.Wa_2201674230;
     m_WaTable.Wa_1406950495 = waTable.Wa_1406950495;
-}
+    }
 
-void CEncoder::GetRowAndColOffset(CVariable* var, unsigned int subVar, unsigned int subReg, unsigned char& rowOff, unsigned char& colOff)
-{
+    void CEncoder::GetRowAndColOffset(CVariable* var, unsigned int subVar, unsigned int subReg, unsigned char& rowOff, unsigned char& colOff)
+    {
     unsigned int varTypeSize = GetCISADataTypeSize(var->GetType());
     unsigned int offset = var->GetAliasOffset() + subVar * getGRFSize() + subReg * varTypeSize;
-    assert((offset%getGRFSize()) % varTypeSize == 0 && "offset has to be aligned on element size");
+        assert((offset % getGRFSize()) % varTypeSize == 0 && "offset has to be aligned on element size");
     rowOff = int_cast<unsigned char>(offset / getGRFSize());
     assert(varTypeSize != 0);
-    colOff = int_cast<unsigned char>((offset%getGRFSize()) / varTypeSize);
-}
+        colOff = int_cast<unsigned char>((offset % getGRFSize()) / varTypeSize);
+    }
 
-void CEncoder::Loc(unsigned int line)
-{
+    void CEncoder::Loc(unsigned int line)
+    {
     V(vKernel->AppendVISAMiscLOC(line));
-}
+    }
 
-void CEncoder::File(std::string& s)
-{
+    void CEncoder::File(std::string& s)
+    {
     V(vKernel->AppendVISAMiscFileInst(s.c_str()));
-}
+    }
 
-void CEncoder::Lifetime(VISAVarLifetime StartOrEnd, CVariable* dst)
-{
+    void CEncoder::Lifetime(VISAVarLifetime StartOrEnd, CVariable* dst)
+    {
     SModifier noMod; // Default is no mod.
     noMod.init();
     VISA_VectorOpnd* srcOpnd = GetSourceOperand(dst, noMod);
     V(vKernel->AppendVISALifetime(StartOrEnd, srcOpnd));
-}
+    }
+
+    void CEncoder::DebugLinePlaceholder()
+    {
+    V(vKernel->AppendVISADebugLinePlaceholder());
+    }
 
 
-std::string CEncoder::GetVariableName(CVariable* var)
-{
+    std::string CEncoder::GetVariableName(CVariable* var)
+    {
     if (var->IsImmediate())
     {
         std::stringstream temp;
@@ -5643,10 +5809,10 @@ std::string CEncoder::GetVariableName(CVariable* var)
         assert(false && "Unknown var type");
         return "";
     }
-}
+    }
 
-std::string CEncoder::GetDumpFileName(std::string extension)
-{
+    std::string CEncoder::GetDumpFileName(std::string extension)
+    {
     std::string filename = IGC::Debug::GetDumpName(m_program, extension.c_str());
     std::replace_if(filename.begin(), filename.end(),
         [](const char& c) {return c == '>' || c == '<'; }, '_');
@@ -5659,7 +5825,7 @@ std::string CEncoder::GetDumpFileName(std::string extension)
         filename.resize(MAX_VISA_STRING_LENGTH);
     }
     return filename;
-}
+    }
 
 
 }

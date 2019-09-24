@@ -3313,7 +3313,7 @@ void CFGStructurizer::convertIf(ANodeHG *node, G4_BB *nextJoinBB)
         G4_INST *thenGoto = newThenLastBB->back();
         G4_INST* elseInst = CFG->builder->createInternalCFInst(
             NULL, G4_else, execSize, endifLabel, endifLabel, InstOpt_NoOpt,
-            thenGoto->getLineNo(), thenGoto->getCISAOff(), thenGoto->getSrcFilename());
+            ifInst->getLineNo(), ifInst->getCISAOff(), ifInst->getSrcFilename());
         if (thenGoto->opcode() == G4_goto)
         {
             newThenLastBB->pop_back();
@@ -3490,7 +3490,7 @@ void CFGStructurizer::convertGoto(ANodeBB *node, G4_BB *nextJoinBB)
     G4_BB *exitbb = node->getExitBB();
     ANodeHG *innermostWhile = getInnerMostWhile(node);
     ANodeKind kind = ANKIND_GOTOJOIN;
-    MUST_BE_TRUE(innermostWhile || !innermostWhile && !node->getHasBreak(),
+    MUST_BE_TRUE(innermostWhile || (!innermostWhile && !node->getHasBreak()),
                  "Break isn't inside a while");
     if (innermostWhile && node->getHasBreak() &&
         innermostWhile->getKind() == ANKIND_SCF)

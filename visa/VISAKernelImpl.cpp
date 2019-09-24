@@ -59,11 +59,7 @@ using namespace vISA;
 #define IS_GEN_PATH  (mBuildOption == CM_CISA_BUILDER_GEN)
 #define IS_BOTH_PATH (mBuildOption == CM_CISA_BUILDER_BOTH)
 #define IS_GEN_BOTH_PATH  (mBuildOption == CM_CISA_BUILDER_GEN || mBuildOption ==  CM_CISA_BUILDER_BOTH)
-#ifdef IS_RELEASE_DLL
-#define IS_VISA_BOTH_PATH 0
-#else
 #define IS_VISA_BOTH_PATH (mBuildOption == CM_CISA_BUILDER_CISA || mBuildOption ==  CM_CISA_BUILDER_BOTH)
-#endif
 
 
 static CM_INLINE void PACK_EXEC_SIZE( unsigned int &size, Common_VISA_EMask_Ctrl eMask )
@@ -180,12 +176,12 @@ static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
     switch (align)
     {
     case ALIGN_BYTE: //no alignment;
-    case ALIGN_WORD: dcl->setAlign(Either); dcl->setSubRegAlign(Any); break; //word aligned;
-    case ALIGN_DWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Even_Word); break;//dword aligned;
-    case ALIGN_QWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Four_Word); break;//8 byte aligned;
-    case ALIGN_OWORD: dcl->setAlign(Either); dcl->setSubRegAlign(Eight_Word); break;//oword aligned;
-    case ALIGN_GRF: dcl->setAlign(Either); dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN); break;//grf aligned;
-    case ALIGN_2_GRF: dcl->setAlign(Even); dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN); break; //2 grf aligned;
+    case ALIGN_WORD: dcl->setSubRegAlign(Any); break; //word aligned;
+    case ALIGN_DWORD: dcl->setSubRegAlign(Even_Word); break;//dword aligned;
+    case ALIGN_QWORD: dcl->setSubRegAlign(Four_Word); break;//8 byte aligned;
+    case ALIGN_OWORD: dcl->setSubRegAlign(Eight_Word); break;//oword aligned;
+    case ALIGN_GRF: dcl->setSubRegAlign(GRFALIGN); break; //grf aligned;
+    case ALIGN_2_GRF: dcl->setSubRegAlign(GRFALIGN); dcl->setEvenAlign(); break; //2 grf aligned;
     default: assert(false && "Incorrect vISA alignment"); break;
     }
 }
@@ -252,40 +248,54 @@ void VISAKernelImpl::createInstForJmpiSequence(InstListType& insts, G4_INST* fca
     // r1.0 is the return IP (the instruction right after jmpi)
     // r1.1 it the return mask
 
-    // mov  f0.0   0
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_mov, nullptr, false, 1,
-        m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
-        m_builder->createImm(0, Type_UD), nullptr, InstOpt_WriteEnable));
-
     // calculate the reserved register's num from fcall's dst register (shoud be r1)
     assert(fcall->getDst()->isGreg());
     uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
     G4_Declare* r1_1_decl =
         m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 1);
 
-    // mov  r1.1   0
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_mov, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
-        m_builder->createImm(0, Type_UD),
-        nullptr, InstOpt_WriteEnable));
+    if (fcall->getPredicate() != nullptr) {
+        // skip the calculation of global mask if the given call has make already
+        // In case we overwrite the mask set by IGC for non-uniform call handling
 
-    // cmp  f0.0   r1.1  0
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_cmp, nullptr, false, m_kernel->getSimdSize(),
-        m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
-        m_builder->Create_Src_Opnd_From_Dcl(r1_1_decl, m_builder->getRegionScalar()),
-        m_builder->createImm(0, Type_UD), InstOpt_NoOpt));
+        // mov r1.1 fcall_pred
+        insts.push_back(m_builder->createInternalInst(
+            nullptr, G4_mov, nullptr, false, 1,
+            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
+            m_builder->Create_Src_Opnd_From_Dcl(
+                fcall->getPredicate()->getTopDcl(), m_builder->getRegionScalar()),
+            nullptr, InstOpt_WriteEnable));
 
-    // mov  r1.1   f0.0
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_mov, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
-        m_builder->createSrcRegRegion(
-            Mod_src_undef, Direct, m_phyRegPool->getF0Reg(), 0, 0,
-            m_builder->getRegionScalar(), Type_UD),
-        nullptr, InstOpt_WriteEnable));
+    } else {
+        // mov  f0.0   0
+        insts.push_back(m_builder->createInternalInst(
+            nullptr, G4_mov, nullptr, false, 1,
+            m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
+            m_builder->createImm(0, Type_UD), nullptr, InstOpt_WriteEnable));
+
+        // mov  r1.1   0
+        insts.push_back(m_builder->createInternalInst(
+            nullptr, G4_mov, nullptr, false, 1,
+            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
+            m_builder->createImm(0, Type_UD),
+            nullptr, InstOpt_WriteEnable));
+
+        // cmp  f0.0   r1.1  0
+        insts.push_back(m_builder->createInternalInst(
+            nullptr, G4_cmp, nullptr, false, 1,
+            m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
+            m_builder->Create_Src_Opnd_From_Dcl(r1_1_decl, m_builder->getRegionScalar()),
+            m_builder->createImm(0, Type_UD), InstOpt_NoOpt));
+
+        // mov  r1.1   f0.0
+        insts.push_back(m_builder->createInternalInst(
+            nullptr, G4_mov, nullptr, false, 1,
+            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
+            m_builder->createSrcRegRegion(
+                Mod_src_undef, Direct, m_phyRegPool->getF0Reg(), 0, 0,
+                m_builder->getRegionScalar(), Type_UD),
+            nullptr, InstOpt_WriteEnable));
+    }
 
     // add  r1.0   IP   64
     G4_Declare* r1_0_decl =
@@ -343,7 +353,7 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
         if (bb->back()->isFCall() || bb->back()->isCall())
         {
             G4_INST* fcall = bb->back();
-            if (fcall->getSrc(0)->isGreg()) {
+            if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0()) {
                 // at this point the call function src0 has the target_address
                 // and the call dst is the reserved register for ret, we can use
                 // the subregister after 2 as add's dst
@@ -780,7 +790,7 @@ void VISAKernelImpl::setDefaultVariableName(Common_ISA_Var_Class Ty, const char 
 #ifndef _DEBUG
     // In a debug build, always set a default name. Otherwise, only set default
     // if emitting visaasm files.
-    if (!m_options->getOption(vISA_GenerateISAASM))
+    if (!m_options->getOption(vISA_GenerateISAASM) && !m_options->getOption(vISA_IsaAssembly))
         return;
 #endif
     char* buf = (char*)m_mem.alloc(256);
@@ -848,12 +858,6 @@ std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl) const
 }
 
 int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
-                                     VISA_Align varAlign, VISA_FileVar *parentDecl, int aliasOffset)
-{
-    return this->CreateVISAGenVar(decl, varName, numberElements, dataType, varAlign, (VISA_GenVar *)parentDecl, aliasOffset);
-}
-
-int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
                                      VISA_Align varAlign, VISA_GenVar *parentDecl, int aliasOffset)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
@@ -880,21 +884,10 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
     info->alias_index = 0;
     info->alias_scope_specifier = 0;
 
-    info->alias_scope_specifier = 0;
-
-    if(parentDecl != NULL)
+    if (parentDecl)
     {
-        if(parentDecl->type == FILESCOPE_VAR)
-        {
-            info->alias_offset = (uint16_t)aliasOffset;
-            info->alias_index = parentDecl->index;
-            info->alias_scope_specifier = 1;
-        }else
-        {
-            info->alias_offset = (uint16_t)aliasOffset;
-            info->alias_index = parentDecl->index;
-        }
-
+        info->alias_offset = (uint16_t)aliasOffset;
+        info->alias_index = parentDecl->index;
     }
 
     info->attribute_count = 0;
@@ -914,54 +907,20 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
             dclHeight,
             type);
 
-        if (parentDecl != NULL)
+        if (parentDecl)
         {
-            var_info_t *aliasDcl = NULL;
-            if(parentDecl->type == FILESCOPE_VAR)
+            var_info_t *aliasDcl = &parentDecl->genVar;
+            info->dcl->setAliasDeclare(aliasDcl->dcl, aliasOffset);
+
+            // check if parent declare is one of the predefined
+            if (parentDecl->index < Get_CISA_PreDefined_Var_Count())
             {
-                std::map<unsigned int, G4_Declare *>::iterator itFileScope = fileScopeMap.find(parentDecl->index);
-                G4_Declare *dcl = NULL;
-                if( itFileScope != fileScopeMap.end() )
-                {
-                    dcl = itFileScope->second;
-                }
-                else
-                {
-                    // create a declare for this filescope variable
-                    filescope_var_info_t curVar = parentDecl->fileVar;
-                    VISA_Type varType = (VISA_Type) (curVar.bit_properties & 0xf);
-                    G4_Type typeFS = Get_G4_Type_From_Common_ISA_Type(varType);
-
-                    unsigned short dclWidthFS = 1, dclHeightFS = 1;
-                    int totalByteSizeFS = 0;
-                    getHeightWidth(typeFS, curVar.num_elements, dclWidthFS, dclHeightFS, totalByteSizeFS);
-
-                    dcl = m_builder->createDeclareNoLookup((const char *)curVar.name, G4_GRF, dclWidthFS, dclHeightFS, typeFS);
-                    dcl->setHasFileScope();
-
-                    VISA_Align align_bits= (VISA_Align) ((curVar.bit_properties >> 4) & 0x7);
-                    setDeclAlignment(dcl, align_bits);
-
-                    fileScopeMap[parentDecl->index] = dcl;
-                }
-
-                info->dcl->setAliasDeclare(dcl, aliasOffset);
-            }
-            else
-            {
-                aliasDcl = &parentDecl->genVar;
-                info->dcl->setAliasDeclare(aliasDcl->dcl, aliasOffset);
-
-                // check if parent declare is one of the predefined
-                if (parentDecl->index < Get_CISA_PreDefined_Var_Count())
-                {
-                    m_builder->preDefVars.setHasPredefined(mapExternalToInternalPreDefVar(parentDecl->index), true);
-                }
+                m_builder->preDefVars.setHasPredefined(mapExternalToInternalPreDefVar(parentDecl->index), true);
             }
         }
 
         // force subalign to be GRF if total size is larger than or equal to GRF
-        if (info->dcl->getSubRegAlign() != SUB_ALIGNMENT_GRFALIGN)
+        if (info->dcl->getSubRegAlign() != GRFALIGN)
         {
             setDeclAlignment(info->dcl, varAlign);
         }
@@ -1337,7 +1296,7 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
                     str = str.substr(found + 1);
                 }
             }
-            m_asmName = sanitizeString(str);
+            m_asmName = sanitizePathString(str);
 
             size_t found = m_asmName.find(".asm");
             if (found != std::string::npos)
@@ -1493,17 +1452,17 @@ int VISAKernelImpl::AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* var
                 if (strcmp(varName, "Input") == 0 ||
                     strcmp(varName, "Input_Output") == 0)
                 {
-                    decl->genVar.dcl->setLiveIn();
+                    decl->genVar.dcl->getRootDeclare()->setLiveIn();
 
                 }
                 if (strcmp(varName, "Output") == 0 ||
                     strcmp(varName, "Input_Output") == 0)
                 {
-                    decl->genVar.dcl->setLiveOut();
+                    decl->genVar.dcl->getRootDeclare()->setLiveOut();
                 }
                 if (strcmp(varName, "NoWidening") == 0)
                 {
-                    decl->genVar.dcl->setDoNotWiden();
+                    decl->genVar.dcl->getRootDeclare()->setDoNotWiden();
                 }
             }
             break;
@@ -1547,12 +1506,6 @@ int VISAKernelImpl::AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* var
             this->m_label_info_size += Get_Size_Attribute_Info(attr);
             break;
         }
-    case FILESCOPE_VAR:
-        {
-            decl->fileVar.attribute_count++;
-            decl->fileVar.attributes = attr;
-            break;
-        }
     default:
         CmAssert(0);
         return CM_FAILURE;
@@ -1592,12 +1545,6 @@ void VISAKernelImpl::addSampler(CISA_GEN_VAR * state)
 {
     m_sampler_info_list.push_back(state);
     this->m_sampler_info_size += Get_Size_State_Info(&state->stateVar);
-}
-
-void VISAKernelImpl::addVme(CISA_GEN_VAR * state)
-{
-    m_vme_info_list.push_back(state);
-    this->m_vme_info_size += Get_Size_State_Info(&state->stateVar);
 }
 
 void VISAKernelImpl::addSurface(CISA_GEN_VAR * state)
@@ -1739,11 +1686,6 @@ int VISAKernelImpl::CreateVISAInputVar(VISA_SamplerVar *decl, unsigned short off
 }
 
 int VISAKernelImpl::CreateVISAInputVar(VISA_SurfaceVar *decl, unsigned short offset, unsigned short size)
-{
-    return this->CreateVISAInputVar((CISA_GEN_VAR *)decl, offset, size, INPUT_EXPLICIT);
-}
-
-int VISAKernelImpl::CreateVISAInputVar(VISA_VMEVar *decl, unsigned short offset, unsigned short size)
 {
     return this->CreateVISAInputVar((CISA_GEN_VAR *)decl, offset, size, INPUT_EXPLICIT);
 }
@@ -1890,10 +1832,6 @@ int VISAKernelImpl::CreateVISAAddressOfOperandGeneric(VISA_VectorOpnd *&cisa_opn
                 else if ( decl->type == SURFACE_VAR )
                 {
                     cisa_opnd->_opnd.v_opnd.opnd_val.state_opnd.opnd_class = STATE_OPND_SURFACE;
-                }
-                else
-                {
-                    cisa_opnd->_opnd.v_opnd.opnd_val.state_opnd.opnd_class = STATE_OPND_VME;
                 }
                 break;
             }
@@ -2391,11 +2329,6 @@ int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_SamplerV
     return this->CreateVISAStateOperand(opnd, (CISA_GEN_VAR*)decl, STATE_OPND_SAMPLER, size, offset, useAsDst);
 }
 
-int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&opnd, VISA_VMEVar *decl, unsigned char offset, bool useAsDst)
-{
-    return this->CreateVISAStateOperand(opnd, (CISA_GEN_VAR*)decl, STATE_OPND_VME, 1, offset, useAsDst);
-}
-
 //size should be 8 since it's a vISA spec.
 //size was added because VME doesn't adhere to our spec.
 int VISAKernelImpl::CreateVISARawOperand(VISA_RawOpnd *& cisa_opnd, VISA_GenVar *decl, unsigned short offset)
@@ -2592,21 +2525,6 @@ int VISAKernelImpl::CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VI
     if(IS_VISA_BOTH_PATH && status == CM_SUCCESS)
     {
         status =  CreateStateInstUse(opnd, decl->index);
-    }
-    return status;
-}
-
-int VISAKernelImpl::CreateVISAStateOperandHandle(VISA_StateOpndHandle *&opnd, VISA_VMEVar *decl)
-{
-    int status = CM_SUCCESS;
-    opnd = (VISA_StateOpndHandle *)getOpndFromPool();
-    if(IS_GEN_BOTH_PATH)
-    {
-        status = CreateStateInstUseFastPath(opnd, (CISA_GEN_VAR *)decl);
-    }
-    if(IS_VISA_BOTH_PATH && status == CM_SUCCESS)
-    {
-        status = CreateStateInstUse(opnd, decl->index);
     }
     return status;
 }
@@ -3437,7 +3355,7 @@ int VISAKernelImpl::AppendVISACFLabelInst(VISA_LabelOpnd *label)
 }
 
 int VISAKernelImpl::AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask,
-                                                 Common_ISA_Exec_Size executionSize, unsigned short functionID,
+                                                 Common_ISA_Exec_Size executionSize, std::string funcName,
                                                  unsigned char argSize, unsigned char returnSize)
 {
     AppendVISAInstCommon();
@@ -3448,7 +3366,7 @@ int VISAKernelImpl::AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VIS
     if(IS_GEN_BOTH_PATH)
     {
         G4_Predicate * g4Pred = (pred != NULL)? pred->g4opnd->asPredicate() : NULL;
-        status = m_builder->translateVISACFFCallInst(executionSize, emask, g4Pred, functionID, argSize, returnSize);
+        status = m_builder->translateVISACFFCallInst(executionSize, emask, g4Pred, funcName, argSize, returnSize);
     }
     if(IS_VISA_BOTH_PATH)
     {
@@ -3458,9 +3376,12 @@ int VISAKernelImpl::AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VIS
         ISA_Opcode opcode = ISA_FCALL;
         inst_desc = &CISA_INST_table[opcode];
         GET_NUM_PRED_DESC_OPNDS(num_pred_desc_operands, inst_desc );
+
+        // create an entry in string pool with the given function name
+        uint32_t funcId = addStringPool(funcName);
         int num_operands = 0;
 
-        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, functionID));
+        ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, funcId));
 
         ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, argSize));
 
@@ -4328,7 +4249,7 @@ int VISAKernelImpl::AppendVISASvmScatterInst(VISA_PredOpnd *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
 #endif
-    return CM_SUCCESS;
+    return status;
 }
 
 int VISAKernelImpl::AppendVISASvmAtomicInst(VISA_PredOpnd *pred,
@@ -4398,7 +4319,7 @@ int VISAKernelImpl::AppendVISASvmAtomicInst(VISA_PredOpnd *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
 #endif
-    return CM_SUCCESS;
+    return status;
 }
 
 CisaFramework::CisaInst *
@@ -4904,6 +4825,24 @@ int VISAKernelImpl::AppendVISAMiscFileInst(const char *fileName)
     return status;
 }
 
+int VISAKernelImpl::AppendVISADebugLinePlaceholder()
+{
+    //AppendVISAInstCommon();
+#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
+    startTimer(TIMER_VISA_BUILDER_APPEND_INST);
+#endif
+    int status = CM_SUCCESS;
+
+    if (IS_GEN_BOTH_PATH)
+    {
+        m_builder->generateDebugInfoPlaceholder();
+    }
+#if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
+    stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
+#endif
+    return status;
+}
+
 int VISAKernelImpl::AppendVISAMiscLOC(unsigned int lineNumber)
 {
     AppendVISAInstCommon();
@@ -5348,7 +5287,7 @@ int VISAKernelImpl::AppendVISAMEAVS(VISA_StateOpndHandle *surface,  VISA_StateOp
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
 #endif
-    return CM_SUCCESS;
+    return status;
 }
 /************* END APPEND APIS ************************/
 int VISAKernelImpl::AppendVISA3dSamplerMsgGeneric(ISA_Opcode opcode,
@@ -5933,7 +5872,7 @@ int VISAKernelImpl::AppendVISA3dTypedAtomic(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_APPEND_INST);
 #endif
-    return CM_SUCCESS;
+    return status;
 }
 
 int VISAKernelImpl::AppendVISAVABooleanCentroid(VISA_StateOpndHandle *surface, VISA_VectorOpnd * uOffset,
@@ -7717,19 +7656,9 @@ void VISAKernelImpl::finalizeKernel()
     DEBUG_PRINT_SIZE("size after surfaces: ", SIZE_VALUE);
 
     /*****VMES********/
-    m_cisa_kernel.vme_count = (uint8_t)this->m_vme_count;
-    m_cisa_kernel.vmes = (state_info_t * ) m_mem.alloc(sizeof(state_info_t) * this->m_vme_count);
-
-    std::vector<CISA_GEN_VAR *>::iterator  it_vme_info = m_vme_info_list.begin();
-    for(unsigned int i = 0; i < m_vme_count; i++, it_vme_info++)
-    {
-        MUST_BE_TRUE( it_vme_info != m_vme_info_list.end(),  "Count of vme declarations does not correspond with number of items." );
-        state_info_t * temp = &(*it_vme_info)->stateVar;
-        m_cisa_kernel.vmes[i] = *temp;
-    }
-
+    // VME variables are removed
+    m_cisa_kernel.vme_count = 0;
     m_kernel_data_size += sizeof(m_cisa_kernel.vme_count);
-    m_kernel_data_size += m_vme_info_size;
 
     DEBUG_PRINT_SIZE("size after VMEs: ", SIZE_VALUE);
 
@@ -8042,7 +7971,7 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
     // allocate the buffer for relocation table
     buffer = allocCodeBlock(byteSize);
 
-    if (buffer == NULL || buffer == nullptr)
+    if (buffer == nullptr)
         return CM_FAILURE;
 
     GenRelocEntry* buffer_p = (GenRelocEntry*)buffer;
@@ -8181,7 +8110,7 @@ VISA_opnd* VISAKernelImpl::CreateOtherOpndHelper(int num_pred_desc_operands, int
     }
     else
     {
-        //Accounts for all the operands added so far to instruction, minus predefined ones: execSize, pred, subOpcode
+        //Accounts for all the operands added so far to instruction, minus predefined ones: execSize, pred, op
         dataType = (VISA_Type)inst_desc->getSubInstDesc(subOpcode).opnd_desc[num_operands - (inst_desc->opnd_num - num_pred_desc_operands) ].data_type;
     }
     temp->_opnd.other_opnd = value;
@@ -8194,14 +8123,17 @@ VISA_opnd* VISAKernelImpl::CreateOtherOpndHelper(int num_pred_desc_operands, int
 
 VISA_opnd* VISAKernelImpl::getOpndFromPool()
 {
+    VISA_opnd *newOp = nullptr;
     if (IS_VISA_BOTH_PATH)
     {
-        return (VISA_opnd *)m_mem.alloc(sizeof(VISA_opnd));
+        newOp = (VISA_opnd *)m_mem.alloc(sizeof(VISA_opnd));
     }
     else
     {
-        return &m_fastPathOpndPool[(m_opndCounter++) % vISA_NUMBER_OF_OPNDS_IN_POOL];
+        newOp = &m_fastPathOpndPool[(m_opndCounter++) % vISA_NUMBER_OF_OPNDS_IN_POOL];
     }
+    memset(newOp, 0, sizeof(*newOp));
+    return newOp;
 }
 
 G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(int index, uint16_t vStride, uint16_t width,
@@ -8320,28 +8252,6 @@ int VISAKernelImpl::SetFunctionReturnSize(unsigned int size)
 {
     setReturnSize(size);
     return CM_SUCCESS;
-}
-
-void VISAKernelImpl::addFileScopeVar(VISA_FileVar* filescopeVar, unsigned int index)
-{
-    // To be invoked only via fast path
-
-    // Create G4_Declare in kernel
-    filescope_var_info_t curVar = filescopeVar->fileVar;
-    VISA_Type varType = (VISA_Type) (curVar.bit_properties & 0xf);
-    G4_Type typeFS = Get_G4_Type_From_Common_ISA_Type(varType);
-
-    unsigned short dclWidthFS = 1, dclHeightFS = 1;
-    int totalByteSizeFS = 0;
-    getHeightWidth(typeFS, curVar.num_elements, dclWidthFS, dclHeightFS, totalByteSizeFS);
-
-    G4_Declare* dcl = getIRBuilder()->createDeclareNoLookup((const char *)curVar.name, G4_GRF, dclWidthFS, dclHeightFS, typeFS);
-    dcl->setHasFileScope();
-
-    VISA_Align align_bits= (VISA_Align) ((curVar.bit_properties >> 4) & 0x7);
-    setDeclAlignment(dcl, align_bits);
-
-    fileScopeMap[index] = dcl;
 }
 
 // common tasks for AppendVISAInst* functions
@@ -8524,20 +8434,8 @@ int VISAKernelImpl::getDeclarationID(VISA_SurfaceVar *decl) const
     return decl->index;
 }
 
-///Gets declaration id VISA_VMEVar
-int VISAKernelImpl::getDeclarationID(VISA_VMEVar *decl) const
-{
-    return decl->index;
-}
-
 ///Gets declaration id VISA_LabelVar
 int VISAKernelImpl::getDeclarationID(VISA_LabelVar *decl) const
-{
-    return decl->index;
-}
-
-///Gets declaration id VISA_FileVar
-int VISAKernelImpl::getDeclarationID(VISA_FileVar *decl) const
 {
     return decl->index;
 }

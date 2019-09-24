@@ -675,7 +675,10 @@ namespace vISA
                     if (!areAllDefsInBB(extMsgOpnd->asSrcRegRegion()->getTopDcl(), uniqueDefBB, uniqueDefInst->getLexicalId()))
                         return false;
 
-                    if (!uniqueDefInst->getMsgDesc()->isHeaderPresent())
+                    bool samplerHeaderNotUsed = uniqueDefInst->getSrc(0)->asSrcRegRegion()->getTopDcl() != kernel.fg.builder->getBuiltinSamplerHeader();
+
+                    if (!uniqueDefInst->getMsgDesc()->isHeaderPresent() ||
+                        samplerHeaderNotUsed)
                     {
                         len += uniqueDefInst->getMsgDesc()->MessageLength();
 
@@ -686,6 +689,39 @@ namespace vISA
                         if (liveness.isLiveAtExit(bb, msgOpnd->getTopDcl()->getRegVar()->getId()) ||
                             getLastUseLexId(msgOpnd->getTopDcl()) >= srcLexId)
                             len -= uniqueDefInst->getMsgDesc()->MessageLength();
+                    }
+
+                    if (samplerHeaderNotUsed)
+                    {
+                        // Ensure header creation instructions are used only by sampler
+                        auto msgOpndTopDcl = uniqueDefInst->getSrc(0)->asSrcRegRegion()->getTopDcl();
+                        auto topDclOpsIt = operations.find(msgOpndTopDcl);
+                        if (topDclOpsIt == operations.end())
+                            return false;
+
+                        if ((*topDclOpsIt).second.numUses > 1)
+                            return false;
+
+                        for (auto& def : (*topDclOpsIt).second.def)
+                        {
+                            for (unsigned int i = 0; i != G4_MAX_SRCS; i++)
+                            {
+                                auto src = def.first->getSrc(i);
+                                if (!src)
+                                    continue;
+
+                                if (src->isImm())
+                                    continue;
+
+                                if (src->isSrcRegRegion() && 
+                                    (src->asSrcRegRegion()->getTopDcl() == kernel.fg.builder->getBuiltinSamplerHeader() ||
+                                        src->asSrcRegRegion()->getTopDcl() == kernel.fg.builder->getBuiltinR0()))
+                                    continue;
+
+                                // Using some other var in payload src requires extra checks to remat, so skip it
+                                return false;
+                            }
+                        }
                     }
 
                     if (liveness.isLiveAtExit(bb, extMsgOpnd->getTopDcl()->getRegVar()->getId()) ||
@@ -808,8 +844,9 @@ namespace vISA
         {
             unsigned int diffBound = dst->getRightBound() - (dst->getRegOff() * G4_GRF_REG_NBYTES);
             unsigned numElems = (diffBound + 1) / G4_Type_Table[dst->getType()].byteSize;
-            auto newTemp = kernel.fg.builder->createTempVar(numElems, dst->getType(), dst->getTopDcl()->getAlign(),
-                dst->getTopDcl()->getSubRegAlign(), "REMAT_");
+            auto newTemp = kernel.fg.builder->createTempVar(numElems, dst->getType(), Any, "REMAT_");
+            newTemp->copyAlign(dst->getTopDcl());
+            gra.copyAlignment(newTemp, dst->getTopDcl());
             G4_DstRegRegion* newDst = kernel.fg.builder->createDstRegRegion(Direct, newTemp->getRegVar(), 0,
                 (dst->getLeftBound() % G4_GRF_REG_NBYTES) / G4_Type_Table[dst->getType()].byteSize,
                 dst->getHorzStride(), dst->getType());
@@ -829,10 +866,11 @@ namespace vISA
         }
         else
         {
-            if (dstInst->getMsgDesc()->isHeaderPresent())
+            G4_Operand* src0 = nullptr;
+            // Look up samplerHeader(0,2) definition
+            auto sampleHeaderTopDcl = uniqueDef->first->getSrc(0)->asSrcRegRegion()->getTopDcl();
+            if (sampleHeaderTopDcl == kernel.fg.builder->getBuiltinSamplerHeader())
             {
-                // Look up samplerHeader(0,2) definition
-                auto sampleHeaderTopDcl = uniqueDef->first->getSrc(0)->asSrcRegRegion()->getTopDcl();
                 samplerHeader = sampleHeaderTopDcl;
                 if (!samplerHeaderMapPopulated)
                 {
@@ -849,13 +887,47 @@ namespace vISA
                 auto samplerDefIt = samplerHeaderMap.find(uniqueDef->first);
                 auto prevHeaderMov = (*samplerDefIt).second;
 
+                src0 = dstInst->getSrc(0);
+
                 // Duplicate sampler header setup instruction
                 auto dupOp = prevHeaderMov->cloneInst();
                 newInst.push_back(dupOp);
             }
+            else
+            {
+                // Handle sampler when src0 is not builtin sampler header
+                auto src0Rgn = uniqueDef->first->getSrc(0)->asSrcRegRegion();
+                auto src0TopDcl = src0Rgn->getTopDcl();
+                auto ops = operations.find(src0TopDcl);
+                MUST_BE_TRUE(ops != operations.end(), "Didnt find record in map");
+                MUST_BE_TRUE((*ops).second.numUses == 1, "Expecting src0 to be used only in sampler");
+
+                auto newSrc0Dcl = kernel.fg.builder->createTempVar(src0TopDcl->getNumElems(),
+                    src0TopDcl->getElemType(), gra.getSubRegAlign(src0TopDcl));
+
+                // Clone all defining instructions for sampler's msg header
+                for (unsigned int i = 0; i != (*ops).second.def.size(); i++)
+                {
+                    auto& headerDefInst = (*ops).second.def[i].first;
+
+                    auto dupOp = headerDefInst->cloneInst();
+                    auto headerDefDst = headerDefInst->getDst();
+                    dupOp->setDest(kernel.fg.builder->createDstRegRegion(headerDefDst->getRegAccess(),
+                        newSrc0Dcl->getRegVar(), headerDefDst->getRegOff(), headerDefDst->getSubRegOff(),
+                        headerDefDst->getHorzStride(), headerDefDst->getType()));
+                    newInst.push_back(dupOp);
+                }
+
+                auto rd = kernel.fg.builder->createRegionDesc(src0Rgn->getRegion()->vertStride,
+                    src0Rgn->getRegion()->width, src0Rgn->getRegion()->horzStride);
+
+                src0 = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
+                    newSrc0Dcl->getRegVar(), src0Rgn->getRegOff(), src0Rgn->getSubRegOff(),
+                    rd, src0Rgn->getType());
+            }
 
             auto samplerDst = kernel.fg.builder->createTempVar(dst->getTopDcl()->getTotalElems(), dst->getTopDcl()->getElemType(),
-                dst->getTopDcl()->getAlign(), dst->getTopDcl()->getSubRegAlign(), "REMAT_SAMPLER_");
+                gra.getSubRegAlign(dst->getTopDcl()), "REMAT_SAMPLER_");
             auto samplerDstRgn = kernel.fg.builder->createDstRegRegion(Direct, samplerDst->getRegVar(), 0,
                 0, 1, samplerDst->getElemType());
 
@@ -865,7 +937,7 @@ namespace vISA
                 kernel.fg.builder->duplicateOperand(dstMsgDesc->getSti()));
 
             auto dupOp = kernel.fg.builder->createSplitSendInst(nullptr, dstInst->opcode(), dstInst->getExecSize(), samplerDstRgn,
-                kernel.fg.builder->duplicateOperand(dstInst->getSrc(0))->asSrcRegRegion(),
+                kernel.fg.builder->duplicateOperand(src0)->asSrcRegRegion(),
                 kernel.fg.builder->duplicateOperand(dstInst->getSrc(1))->asSrcRegRegion(),
                 kernel.fg.builder->duplicateOperand(dstInst->asSendInst()->getMsgDescOperand()), dstInst->getOption(),
                 newMsgDesc, kernel.fg.builder->duplicateOperand(dstInst->getSrc(3)), dstInst->getLineNo());
@@ -903,7 +975,6 @@ namespace vISA
         // even then nullptr is returned.
 
         Reference* uniqueDef = nullptr;
-        bool fullDef = false;
 
         unsigned int lb = src->getLeftBound(), rb = src->getRightBound();
         for (auto&& r : refs.def)
@@ -922,14 +993,12 @@ namespace vISA
                 else
                 {
                     uniqueDef = &r;
-                    fullDef = true;
                 }
             }
             else if ((curlb <= lb && currb >= lb) ||
                 (curlb <= rb && currb >= lb))
             {
                 // Partial overlap
-                fullDef = false;
                 uniqueDef = nullptr;
                 break;
             }

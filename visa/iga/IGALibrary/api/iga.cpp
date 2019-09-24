@@ -332,12 +332,14 @@ public:
                 delete kernel;
                 return IGA_UNSUPPORTED_PLATFORM;
             }
+            assert(kernel != nullptr);
             iga::ged::Encode(m_model, eopts, errHandler, *kernel, *bits, bitsLen);
         } else {
             if (!iga::native::IsEncodeSupported(m_model, eopts)) {
                 delete kernel;
                 return IGA_UNSUPPORTED_PLATFORM;
             }
+            assert(kernel != nullptr);
             iga::native::Encode(
                 m_model,
                 eopts,
@@ -855,9 +857,10 @@ iga_status_t iga_diagnostic_get_offset(
 }
 
 // static const uint32_t IGA_DIAGNOSTIC_BINARY_MASK = 0x80000000;
-// #define IGA_DIAGNOSTIC_IS_BINARY(D) \
-//    ((D)->column & IGA_DIAGNOSTIC_BINARY_MASK)
-// for now we use line == col == 0 to mean binary
+/*  #define IGA_DIAGNOSTIC_IS_BINARY(D) \
+    ((D)->column & IGA_DIAGNOSTIC_BINARY_MASK)
+ for now we use line == col == 0 to mean binary
+*/
 #define IGA_DIAGNOSTIC_IS_BINARY(D) \
     ((D)->column == 0 && (D)->line == 0)
 

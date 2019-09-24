@@ -173,6 +173,9 @@ class IR_Builder;
 class LocalLiveRange;
 class G4_Kernel;
 class G4_VarBase;
+
+class G4_SpillIntrinsic;
+class G4_FillIntrinsic;
 }
 void associateOpndWithInst(vISA::G4_Operand*, vISA::G4_INST*);
 
@@ -468,6 +471,7 @@ public:
 
     bool is16BitInput() const;
     bool is16BitReturn() const;
+    bool isA64Message() const;
 
     const G4_Operand *getBti() const {return m_bti;}
           G4_Operand *getBti()       {return m_bti;}
@@ -606,6 +610,10 @@ public:
     bool supportsNullDst() const;
 
     bool isPseudoKill() const;
+    bool isSpillIntrinsic() const;
+    G4_SpillIntrinsic* asSpillIntrinsic() const;
+    bool isFillIntrinsic() const;
+    G4_FillIntrinsic* asFillIntrinsic() const;
     bool isLifeTimeEnd() const { return op == G4_pseudo_lifetime_end; }
     bool isMov() const { return G4_Inst_Table[op].instType == InstTypeMov; }
     bool isLogic() const { return G4_Inst_Table[op].instType == InstTypeLogic; }
@@ -1041,8 +1049,9 @@ public:
         return op == G4_mulh;
     }
 
+    bool canExecSizeBeAcc(Gen4_Operand_Number opndNum) const;
     bool canDstBeAcc() const;
-    bool canSrcBeAcc(int srcId) const;
+    bool canSrcBeAcc(Gen4_Operand_Number opndNum) const;
 
 private:
     bool detectComprInst() const;
@@ -1119,7 +1128,7 @@ class G4_InstCF : public G4_INST
     bool isBackwardBr;
 
     // for FCALL only
-    uint32_t            calleeIndex;
+    std::string         calleeName = "";
     G4_RegVar*          assocPseudoVCA;
     G4_RegVar*          assocPseudoA0Save;
     G4_RegVar*          assocPseudoFlagSave;
@@ -1137,7 +1146,7 @@ public:
         G4_Label* uipLabel,
         uint32_t instOpt) :
         G4_INST(builder, prd, op, nullptr, false, size, nullptr, nullptr, nullptr, instOpt),
-        jip(jipLabel), uip(uipLabel), isBackwardBr(false), calleeIndex(unknownCallee),
+        jip(jipLabel), uip(uipLabel), isBackwardBr(false),
         assocPseudoVCA(nullptr), assocPseudoA0Save(nullptr), assocPseudoFlagSave(nullptr)
     {
 
@@ -1155,7 +1164,7 @@ public:
         G4_Operand* s0,
         unsigned int opt) :
         G4_INST(builder, prd, o, m, sat, size, d, s0, nullptr, opt),
-        jip(NULL), uip(NULL), isBackwardBr(false), calleeIndex(unknownCallee),
+        jip(NULL), uip(NULL), isBackwardBr(false),
         assocPseudoVCA(nullptr), assocPseudoA0Save(nullptr), assocPseudoFlagSave(nullptr)
     {
     }
@@ -1191,20 +1200,20 @@ public:
 
     bool isUniformGoto(unsigned KernelSimdSize) const;
 
-    void setCalleeIndex(uint32_t index)
+    void setCallee(const std::string& funcName)
     {
         MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        calleeIndex = index;
+        calleeName = funcName;
     }
-    uint32_t getCalleeIndex() const
+    std::string getCallee() const
     {
         MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        return calleeIndex;
+        return calleeName;
     }
 
     bool isIndirectCall() const
     {
-        return op == G4_pseudo_fcall && getCalleeIndex() == G4_InstCF::unknownCallee;
+        return op == G4_pseudo_fcall && calleeName == "";
     }
 
     // for direct call, this is null till after the compilation units are stitched together
@@ -1372,6 +1381,8 @@ enum class Intrinsic
     Use,
     MemFence,
     PseudoKill,
+    Spill,
+    Fill,
     NumIntrinsics
 };
 
@@ -1599,7 +1610,6 @@ class G4_Declare
     uint16_t spillFlag : 1;    // Indicate this declare gets spill reg
     uint16_t addressed : 1;     // whether this declare is address-taken
 
-    uint16_t hasFileScope : 1;     // has a file scope (relevant for CISA 3.0+)
     uint16_t doNotSpill : 1;    // indicates that this declare should never be spilled
 
     uint16_t liveIn : 1;   // indicate if this varaible has "Input" or "Input_Output" attribute
@@ -1650,9 +1660,9 @@ public:
                uint32_t numElems,
                G4_Type        ty,
                std::vector<G4_Declare*>& dcllist) :
-      name(n), regFile(k), numElements(numElems), elemType(ty), addressed(false),
-      hasFileScope(false), isSplittedDcl(false), isPartialDcl(false),
-      offsetFromBase(-1), liveIn(false), liveOut(false), noWidening(false), refInSend(false)
+      name(n), regFile(k), elemType(ty), addressed(false), liveIn(false),
+      liveOut(false), noWidening(false), isSplittedDcl(false), isPartialDcl(false),
+      refInSend(false), numElements(numElems), offsetFromBase(-1)
     {
         //
         // set the rest values to default uninitialized values
@@ -1776,10 +1786,13 @@ public:
         // Following executed only if G4_Declare doesnt have an alias
         return spillFlag;
     }
-    void        setAlign(G4_Align al);
-    G4_Align    getAlign() const;
-    void        setSubRegAlign(G4_SubReg_Align subAl);
+   
+    bool isEvenAlign() const; 
     G4_SubReg_Align getSubRegAlign() const;
+    void        setEvenAlign();
+    void        setSubRegAlign(G4_SubReg_Align subAl);
+
+    void copyAlign(G4_Declare* dcl);
 
     unsigned getByteAlignment() const
     {
@@ -1790,12 +1803,10 @@ public:
     }
 
     void setRegFile(G4_RegFileKind rfile) { regFile = rfile; }
-    void setHasFileScope() {hasFileScope = true;}
 
     bool useGRF() const { return (regFile & (G4_GRF | G4_INPUT)) != 0; }
     bool isInput() const { return liveIn || ((regFile & G4_INPUT) != 0); }
     bool isOutput() const { return liveOut; }
-    bool getHasFileScope() const {return hasFileScope || (getAliasDeclare() && getAliasDeclare()->getHasFileScope());}
 
     //
     // retrieving functions
@@ -2559,6 +2570,8 @@ namespace vISA
 {
     class G4_RegVar : public G4_VarBase
     {
+        friend class G4_Declare;
+
     public:
         enum RegVarType
         {
@@ -2578,15 +2591,15 @@ namespace vISA
         G4_Declare* decl;    // corresponding declare
         AssignedReg reg;    // assigned physical register; set after reg alloc
         unsigned    disp;   // displacement offset in spill memory
-        G4_Align   align;
         G4_SubReg_Align subAlign;    // To support sub register alignment
+        bool evenAlignment = false; // Align this regVar to even GRFs regardless of its size
 
     public:
 
         // To support sub register alignment
         G4_RegVar(G4_Declare* d, RegVarType t) :
-            G4_VarBase(VK_regVar), id(UNDEFINED_VAL), decl(d), disp(UINT_MAX), align(Either), subAlign(Any),
-            type(t)
+            G4_VarBase(VK_regVar), id(UNDEFINED_VAL), type(t), decl(d),
+            disp(UINT_MAX), subAlign(Any)
         {
         }
         void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
@@ -2646,25 +2659,21 @@ namespace vISA
 
         G4_RegVar * getNonTransientBaseRegVar();
 
-        G4_Align getAlignment() const { return align; }
-        void setAlignment(G4_Align a)
-        {
-            if (!isPhyRegAssigned())
-            {
-                // stick to one alignment decision, either even or odd
-                //MUST_BE_TRUE(align == Either || align == a, ERROR_UNKNOWN);
-                align = a;
-            }
-        }
-        // To support sub register alignment
-        G4_SubReg_Align getSubRegAlignment() { return subAlign; }
-
-        void setSubRegAlignment(G4_SubReg_Align subAlg);
         void emit(std::ostream& output, bool symbolreg = false) override;
 
         unsigned short ExRegNum(bool &valid) override { return reg.phyReg->ExRegNum(valid); }
         unsigned short ExSubRegNum(bool &valid) override { valid = true; return (unsigned short)reg.subRegOff; }
         unsigned short ExIndRegNum(bool &valid) override { return reg.phyReg->ExIndRegNum(valid); }
+
+    protected:
+        bool isEvenAlign() const { return evenAlignment; }
+        void setEvenAlign() { evenAlignment = true; }
+        G4_SubReg_Align getSubRegAlignment()
+        {
+            return subAlign;
+        }
+
+        void setSubRegAlignment(G4_SubReg_Align subAlg);
     };
 
     class G4_RegVarTransient : public G4_RegVar
@@ -2685,8 +2694,8 @@ namespace vISA
     public:
         G4_RegVarTransient(G4_Declare* d, G4_RegVar* base, G4_Operand* reprRegion,
             unsigned eSize, TransientType t) :
-            G4_RegVar(d, Transient), baseRegVar(base), execSize(eSize), type(t),
-            repRegion(reprRegion)
+            G4_RegVar(d, Transient), baseRegVar(base), repRegion(reprRegion),
+            execSize(eSize), type(t)
         {
         }
 
@@ -3753,6 +3762,28 @@ inline bool G4_INST::isPseudoKill() const
     return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::PseudoKill;
 }
 
+inline bool G4_INST::isSpillIntrinsic() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::Spill;
+}
+
+inline G4_SpillIntrinsic* G4_INST::asSpillIntrinsic() const
+{
+    MUST_BE_TRUE(isSpillIntrinsic(), "not a spill intrinsic");
+    return const_cast<G4_SpillIntrinsic*>(reinterpret_cast<const G4_SpillIntrinsic*>(this));
+}
+
+inline bool G4_INST::isFillIntrinsic() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::Fill;
+}
+
+inline G4_FillIntrinsic* G4_INST::asFillIntrinsic() const
+{
+    MUST_BE_TRUE(isFillIntrinsic(), "not a fill intrinsic");
+    return const_cast<G4_FillIntrinsic*>(reinterpret_cast<const G4_FillIntrinsic*>(this));
+}
+
 inline const char* G4_INST::getLabelStr() const
 {
     MUST_BE_TRUE(srcs[0] != NULL && srcs[0]->isLabel(), ERROR_UNKNOWN);
@@ -3786,6 +3817,74 @@ inline const char* G4_InstCF::getUipLabelStr() const
     MUST_BE_TRUE(uip != NULL && uip->isLabel(), ERROR_UNKNOWN);
     return uip->asLabel()->getLabel();
 }
+
+class G4_SpillIntrinsic : public G4_InstIntrinsic
+{
+public:
+    G4_SpillIntrinsic(
+        const IR_Builder& builder,
+        G4_Predicate* prd,
+        Intrinsic intrinId,
+        uint8_t size,
+        G4_DstRegRegion* d,
+        G4_Operand* s0,
+        G4_Operand* s1,
+        G4_Operand* s2,
+        unsigned int opt) :
+        G4_InstIntrinsic(builder, prd, intrinId, size, d, s0, s1, s2, opt)
+    {
+
+    }
+
+    bool isOffBP() const { return getFP() != nullptr; }
+
+    uint32_t getNumRows() const { return numRows; }
+    uint32_t getOffset() const { return offset; }
+    G4_Declare* getFP() const { return fp; }
+
+    void setNumRows(uint32_t r) { numRows = r; }
+    void setOffset(uint32_t o) { offset = o; }
+    void setFP(G4_Declare* f) { fp = f; }
+
+private:
+    G4_Declare* fp = nullptr;
+    uint32_t numRows = 0;
+    uint32_t offset = 0;
+};
+
+class G4_FillIntrinsic : public G4_InstIntrinsic
+{
+public:
+    G4_FillIntrinsic(
+        const IR_Builder& builder,
+        G4_Predicate* prd,
+        Intrinsic intrinId,
+        uint8_t size,
+        G4_DstRegRegion* d,
+        G4_Operand* s0,
+        G4_Operand* s1,
+        G4_Operand* s2,
+        unsigned int opt) :
+        G4_InstIntrinsic(builder, prd, intrinId, size, d, s0, s1, s2, opt)
+    {
+
+    }
+
+    bool isOffBP() const { return getFP() != nullptr; }
+
+    uint32_t getNumRows() const { return numRows; }
+    uint32_t getOffset() const { return offset; }
+    G4_Declare* getFP() const { return fp; }
+
+    void setNumRows(uint32_t r) { numRows = r; }
+    void setOffset(uint32_t o) { offset = o; }
+    void setFP(G4_Declare* f) { fp = f; }
+
+private:
+    G4_Declare* fp = nullptr;
+    uint32_t numRows = 0;
+    uint32_t offset = 0;
+};
 
 } // namespace vISA
 

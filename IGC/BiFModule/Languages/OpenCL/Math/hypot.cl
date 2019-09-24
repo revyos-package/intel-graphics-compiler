@@ -49,6 +49,7 @@ GENERATE_VECTOR_FUNCTIONS_2ARGS_VV_LOOP( hypot, double, double, double )
 
 half OVERLOADABLE hypot( half x, half y )
 {
+    // __builtin_spirv_OpenCL_hypot_f16_f16 is not precise enough, so we use f32
     return __builtin_spirv_OpenCL_hypot_f16_f16( x, y );
 }
 

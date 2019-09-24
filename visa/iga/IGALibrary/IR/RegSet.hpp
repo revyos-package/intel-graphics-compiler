@@ -57,8 +57,9 @@ namespace iga
     // NOTE: I have to replicate all the constants as scalars (not struct elements)
     // because the compiler refuses to accept that they are constant. :(
     //
-    // #define REGSET_NEXTSTART(REG) \
-        //  ALIGN_UP_TO(32,((REG).startOffset + (REG).numRegisters * (REG).bytesPerRegister))
+    /* #define REGSET_NEXTSTART(REG) \
+          ALIGN_UP_TO(32,((REG).startOffset + (REG).numRegisters * (REG).bytesPerRegister))
+    */
 #define RS_CREATE_SET(REGSYM,REGSYN,REGS,BPR,START) \
 const static size_t RS_ ## REGSYM ##_REGS = (REGS), RS_ ## REGSYM ## _BPR = (BPR), RS_ ## REGSYM ## _START = (START); \
 const static RegSetInfo RS_ ## REGSYM = {RegName::REGSYM, REGSYN, REGS, BPR, START, (RS_ ## REGSYM ## _REGS)*(RS_ ## REGSYM ## _BPR)}
@@ -96,7 +97,7 @@ const static RegSetInfo RS_ ## REGSYM = {RegName::REGSYM, REGSYN, REGS, BPR, STA
     static size_t relativeAddressOf(
         const RegSetInfo &rsi, RegRef rr, size_t tySzBits)
     {
-        return rsi.bytesPerRegister*rr.regNum + rr.subRegNum*tySzBits/8;
+        return static_cast<size_t>(rsi.bytesPerRegister) * rr.regNum + rr.subRegNum * tySzBits / 8;
     }
 
     // A register set represent all the storage in the register files
@@ -125,7 +126,7 @@ const static RegSetInfo RS_ ## REGSYM = {RegName::REGSYM, REGSYN, REGS, BPR, STA
         }
         bool add(const RegSetInfo &rs, size_t off, size_t len);
         bool addFullReg(const RegSetInfo &rs, int reg) {
-            return add(rs, rs.bytesPerRegister*reg, rs.bytesPerRegister);
+            return add(rs, static_cast<size_t>(rs.bytesPerRegister) * reg, rs.bytesPerRegister);
         }
         bool setDstRegion(
             RegName rn,

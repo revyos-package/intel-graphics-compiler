@@ -39,9 +39,9 @@ namespace iga
         RegRef         reg;
     };
     struct DirRegOpInfo {
-        RegName   regName; // e.g. "r" or "acc"
+        RegName   regName = RegName::INVALID; // e.g. "r" or "acc"
         RegRef    regRef;  // 13
-        Type      type;
+        Type      type = Type::INVALID;
     };
 
     class DecoderBase : public GEDBitProcessor
@@ -278,11 +278,16 @@ namespace iga
             dri.regName = decodeSourceReg<S>(dri.regRef);
 
             Type scalingType = Type::INVALID;
+            // FIXME: not sure what "hasImplicitScalingType" for, this cause the in-consistent
+            // between encoder and decoder. Still using it to keep it the same as before...
             if (!hasImplicitScalingType(scalingType, dri)) {
                 scalingType = dri.type = decodeSrcType<S>();
             }
+
             if (scalingType == Type::INVALID) {
-                scalingType = m_opSpec->isBranching() ? Type::D : Type::UB;
+                scalingType = Type::UB;
+                if (m_opSpec->isBranching())
+                    scalingType = Type::D;
             }
 
             dri.regRef.subRegNum = binNumToSubRegNum(

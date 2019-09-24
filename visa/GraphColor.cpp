@@ -102,9 +102,9 @@ static const unsigned IN_LOOP_REFERENCE_COUNT_FACTOR = 4;
 
 
 Interference::Interference(LivenessAnalysis* l, LiveRange**& lr, unsigned n, unsigned ns, unsigned nm,
-    GlobalRA& g) : maxId(n),
-    splitStartId(ns), splitNum(nm), builder(*g.kernel.fg.builder),
-    gra(g), kernel(g.kernel), lrs(lr), liveAnalysis(l)
+    GlobalRA& g) : gra(g), kernel(g.kernel), lrs(lr),
+    builder(*g.kernel.fg.builder), maxId(n), splitStartId(ns), splitNum(nm),
+    liveAnalysis(l)
 {
 }
 
@@ -674,7 +674,6 @@ void BankConflictPass::setupBankForSrc0(G4_INST* inst, G4_INST* prevInst)
 void BankConflictPass::setupBankConflictsforTwoGRFs(G4_INST* inst)
 {
     BankConflict srcBC[3];
-    unsigned int regNum[3];
     unsigned int refNum[3];
     unsigned int offset[3];
     G4_Declare * dcls[3];
@@ -699,7 +698,6 @@ void BankConflictPass::setupBankConflictsforTwoGRFs(G4_INST* inst)
         dcls[i] = GetTopDclFromRegRegion(src);
         opndDcls[i] = src->getBase()->asRegVar()->getDeclare();
 
-        regNum[i] = dcls[i]->getNumRows();
         refNum[i] = gra.getNumRefs(dcls[i]);
         offset[i] = (opndDcls[i]->getOffsetFromBase() + src->getLeftBound()) / G4_GRF_REG_NBYTES;
         srcBC[i] = gra.getBankConflict(dcls[i]);
@@ -859,8 +857,8 @@ void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
     {
         if (!gra.kernel.fg.builder->lowHighBundle())
         {
-            for (std::list<G4_INST*>::iterator i = bb->begin();
-                i != bb->end();
+            for (std::list<G4_INST*>::iterator i = bb->begin(), iend = bb->end();
+                i != iend;
                 i++)
             {
                 G4_INST* inst = (*i);
@@ -1576,7 +1574,7 @@ void Interference::addCalleeSaveBias(BitSet& live)
 {
     for (unsigned i = 0; i < maxId; i++)
     {
-        if (live.isSet(i) && !lrs[i]->getDcl()->getHasFileScope())
+        if (live.isSet(i))
         {
             lrs[i]->setCallerSaveBias(false);
             lrs[i]->setCalleeSaveBias(true);
@@ -1691,7 +1689,7 @@ void Interference::markInterferenceForSend(G4_BB* bb,
                         }
                         else
                         {
-                            for (int j = dstPreg; j < dstPreg + dstNumRows; j++)
+                            for (int j = dstPreg, sum = dstPreg + dstNumRows; j < sum; j++)
                             {
                                 int k = getGRFDclForHRA(j)->getRegVar()->getId();
                                 if (!varSplitCheckBeforeIntf(k, srcId))
@@ -1720,7 +1718,7 @@ void Interference::markInterferenceForSend(G4_BB* bb,
 
                             reg = preg->asGreg()->getRegNum();
 
-                            for (int j = reg; j < reg + numrows; j++)
+                            for (int j = reg, sum = reg + numrows; j < sum; j++)
                             {
                                 int k = getGRFDclForHRA(j)->getRegVar()->getId();
                                 if (!varSplitCheckBeforeIntf(dstId, k))
@@ -2093,37 +2091,6 @@ void Interference::computeInterference()
         buildInterferenceWithinBB((*it), live);
     }
 
-    if (kernel.fg.getHasStackCalls() == true)
-    {
-        // Mark interference among all file scope variables.
-        // Consider a function having only uses of all file scope
-        // variables. When marking intf, we insert all uses in to
-        // live set and mark intf with every def. Since all file
-        // scope vars will be present in live-set and no def of
-        // any file scope variable is present in this function,
-        // intf among them will not get modeled thus making them
-        // non-interfering. This is incorrect.
-        for (auto var1_it = liveAnalysis->fileScopeVars.begin(), end = liveAnalysis->fileScopeVars.end();
-            var1_it != end;
-            var1_it++)
-        {
-            G4_RegVar* var1 = (*var1_it);
-            for (auto var2_it = var1_it, end2 = liveAnalysis->fileScopeVars.end();
-                var2_it != end2;
-                var2_it++)
-            {
-                G4_RegVar* var2 = (*var2_it);
-                if (var1 != var2)
-                {
-                    if (!varSplitCheckBeforeIntf(var1->getId(), var2->getId()))
-                    {
-                        checkAndSetIntf(var1->getId(), var2->getId());
-                    }
-                }
-            }
-        }
-    }
-
     if (kernel.getOptions()->getTarget() != VISA_3D ||
         kernel.fg.builder->getOption(vISA_enablePreemption) ||
         kernel.fg.getHasStackCalls() ||
@@ -2242,23 +2209,20 @@ void Interference::generateSparseIntfGraph()
 // This function will update sub-reg data only for non-NoMask vars and
 // leave others unchanged, ie their value will be as per HW conformity
 // or earlier phase.
-void GlobalRA::updateSubRegAlignment(unsigned char regFile, G4_SubReg_Align subAlign)
+void GlobalRA::updateSubRegAlignment(G4_SubReg_Align subAlign)
 {
     // Update alignment of all GRF declares to sub-align
     for (auto dcl : kernel.Declares)
     {
-        if (dcl->getRegFile() & regFile && !dcl->getIsPartialDcl())
+        if (dcl->getRegFile() & G4_GRF && !dcl->getIsPartialDcl())
         {
             G4_Declare* topdcl = dcl->getRootDeclare();
 
-            if (regFile == G4_FLAG)
-            {
-                dcl->setSubRegAlign(subAlign);
-            }
-            else if (!areAllDefsNoMask(topdcl) &&
+            if (!areAllDefsNoMask(topdcl) &&
                 getAugmentationMask(topdcl) != AugmentationMasks::NonDefault)
             {
                 dcl->setSubRegAlign(subAlign);
+                setSubRegAlign(dcl, subAlign);
             }
         }
     }
@@ -2271,12 +2235,12 @@ void GlobalRA::updateSubRegAlignment(unsigned char regFile, G4_SubReg_Align subA
 // be Even aligned. Others will be Either aligned. There is no need
 // to store old value of align because HW has no restriction on
 // even/odd alignment that HW conformity computes.
-void GlobalRA::updateAlignment(unsigned char regFile, G4_Align align)
+void GlobalRA::evenAlign()
 {
     // Update alignment of all GRF declares to align
     for (auto dcl : kernel.Declares)
     {
-        if (dcl->getRegFile() & regFile)
+        if (dcl->getRegFile() & G4_GRF)
         {
             G4_Declare* topdcl = dcl->getRootDeclare();
             auto topdclAugMask = getAugmentationMask(topdcl);
@@ -2290,11 +2254,8 @@ void GlobalRA::updateAlignment(unsigned char regFile, G4_Align align)
                     !(kernel.fg.builder->getOption(vISA_enablePreemption) &&
                         dcl == kernel.fg.builder->getBuiltinR0()))
                 {
-                    dcl->getRegVar()->setAlignment(align);
+                    setEvenAligned(dcl, true);
                 }
-            }
-            else
-            {
             }
         }
     }
@@ -2331,7 +2292,7 @@ void GlobalRA::getBankAlignment(LiveRange* lr, BankAlign &align)
 }
 
 Augmentation::Augmentation(G4_Kernel& k, Interference& i, LivenessAnalysis& l, LiveRange* ranges[], GlobalRA& g) :
-    intf(i), kernel(k), gra(g), liveAnalysis(l), fcallRetMap(g.fcallRetMap), m(kernel.fg.mem)
+    kernel(k), intf(i), gra(g), liveAnalysis(l), fcallRetMap(g.fcallRetMap), m(kernel.fg.mem)
 {
     lrs = ranges;
 }
@@ -2467,6 +2428,37 @@ bool Augmentation::updateDstMaskForScatter(G4_INST* inst, unsigned char* mask)
         default: return false;
         }
         break;
+
+    case SFID::SAMPLER:
+    {
+        unsigned int respLength = msgDesc->ResponseLength();
+        unsigned char curEMBit = (unsigned char)inst->getMaskOffset();
+        elemSize = msgDesc->is16BitReturn() ? 2 : 4;
+        unsigned int warpNum = respLength * G4_GRF_REG_NBYTES / (execSize * elemSize);
+        if (inst->isWriteEnableInst())
+        {
+            curEMBit = NOMASK_BYTE;
+        }
+        for (unsigned int i = 0; i < warpNum; i++)
+        {
+            for (unsigned int j = 0; j < execSize; j++)
+            {
+                for (unsigned int k = 0; k < elemSize; k++)
+                {
+                    mask[(i * execSize + j)*elemSize + k] = curEMBit;
+                }
+                if (curEMBit != NOMASK_BYTE)
+                {
+                    curEMBit++;
+                    ASSERT_USER(curEMBit <= 32, "Illegal mask channel");
+                }
+            }
+            curEMBit = (unsigned char)inst->getMaskOffset();
+        }
+        return true;
+    }
+        
+    break;
 
     default: return false;
     }
@@ -2978,17 +2970,6 @@ void Augmentation::markNonDefaultDstRgn(G4_INST* inst, G4_Operand* opnd)
             {
                 if (gra.getAugmentationMask(dcl) == AugmentationMasks::NonDefault)
                 {
-                    return;
-                }
-
-                G4_SendMsgDescriptor *msgDesc = inst->getMsgDesc();
-                unsigned char execSize = inst->getExecSize();
-                SFID funcID = msgDesc->getFuncId();
-                if (funcID == SFID::SAMPLER &&
-                    !inst->isEOT() &&
-                    execSize != kernel.getSimdSize())
-                {
-                    gra.setAugmentationMask(dcl, AugmentationMasks::NonDefault);
                     return;
                 }
 
@@ -4297,7 +4278,6 @@ void Augmentation::buildInterferenceIncompatibleMask()
 {
     // Create 2 active lists - 1 for holding active live-intervals
     // with non-default mask and other for default mask
-    unsigned int oldStartIdx = 0;
 
     for (auto dcl_it = sortedIntervals.begin(), end = sortedIntervals.end();
         dcl_it != end;
@@ -4369,8 +4349,6 @@ void Augmentation::buildInterferenceIncompatibleMask()
                 " to default list" << std::endl);
 #endif
         }
-
-        oldStartIdx = startIdx;
     }
 }
 
@@ -4382,18 +4360,6 @@ void Augmentation::augmentIntfGraph()
             kernel.fg.size() > 2))
         {
             return;
-        }
-    }
-
-    if (liveAnalysis.livenessClass(G4_FLAG))
-    {
-        if (kernel.getSimdSize() == 32)
-        {
-
-#ifdef DEBUG_VERBOSE_ON
-            DEBUG_VERBOSE("Kernel size is SIMD32 so updating all Flags to be 32-bit aligned" << std::endl);
-#endif
-            gra.updateSubRegAlignment(G4_FLAG, Even_Word);
         }
     }
 
@@ -4443,9 +4409,9 @@ void Augmentation::augmentIntfGraph()
 #ifdef DEBUG_VERBOSE_ON
                 DEBUG_VERBOSE("Kernel size is SIMD" << kernel.getSimdSize() << " so updating all GRFs to be 2GRF aligned" << std::endl);
 #endif
-                gra.updateAlignment(G4_GRF, Even);
+                gra.evenAlign();
             }
-            gra.updateSubRegAlignment(G4_GRF, SUB_ALIGNMENT_GRFALIGN);
+            gra.updateSubRegAlignment(GRFALIGN);
         }
 
         // Clear information calculated in this iteration of RA so
@@ -4514,7 +4480,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB* bb)
                 // If it is available, and we still see a def that means there was no
                 // corresponding use. In such cases mark the physical register as
                 // busy, so interference building can take place correctly.
-                for (int j = reg; j < reg + numrows; j++)
+                for (int j = reg, sum = reg + numrows; j < sum; j++)
                 {
                     int k = getGRFDclForHRA(j)->getRegVar()->getId();
 
@@ -4537,7 +4503,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB* bb)
                     if (localLR->getSizeInWords() % NUM_WORDS_PER_GRF != 0)
                         numrows--;
 
-                    for (int j = reg; j < reg + numrows; j++)
+                    for (int j = reg, sum = reg + numrows; j < sum; j++)
                     {
                         cur.set(j, true);
 #ifdef DEBUG_VERBOSE_ON
@@ -4613,7 +4579,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB* bb)
 
                     reg = preg->asGreg()->getRegNum();
 
-                    for (int j = reg; j < reg + numrows; j++)
+                    for (int j = reg, sum = reg + numrows; j < sum; j++)
                     {
                         int k = getGRFDclForHRA(j)->getRegVar()->getId();
 
@@ -4751,11 +4717,11 @@ void Interference::dumpInterference() const
 }
 
 GraphColor::GraphColor(LivenessAnalysis& live, unsigned totalGRF, bool hybrid, bool forceSpill_) :
-    gra(live.gra), isHybrid(hybrid), totalGRFRegCount(totalGRF), numVar(live.getNumSelectedVar()), numSplitStartID(live.getNumSplitStartID()), numSplitVar(live.getNumSplitVar()),
+    gra(live.gra), totalGRFRegCount(totalGRF), numVar(live.getNumSelectedVar()), numSplitStartID(live.getNumSplitStartID()), numSplitVar(live.getNumSplitVar()),
     intf(&live, lrs, live.getNumSelectedVar(), live.getNumSplitStartID(), live.getNumSplitVar(), gra), regPool(gra.regPool),
-    builder(gra.builder), lrs(NULL),
+    builder(gra.builder), lrs(NULL), isHybrid(hybrid),
     forceSpill(forceSpill_), mem(GRAPH_COLOR_MEM_SIZE),
-    liveAnalysis(live), kernel(gra.kernel)
+    kernel(gra.kernel), liveAnalysis(live)
 {
     oddTotalDegree = 1;
     evenTotalDegree = 1;
@@ -5447,7 +5413,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
 
             if (!failed_alloc)
             {
-                BankAlign align = lrVar->getAlignment() == Even ? BankAlign::Even : BankAlign::Either;
+                BankAlign align = gra.isEvenAligned(lrVar->getDeclare()) ? BankAlign::Even : BankAlign::Either;
                 if (allocFromBanks)
                 {
                     
@@ -5461,7 +5427,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 else
                 {
                     failed_alloc |= !regUsage.assignRegs(highInternalConflict, lr, lr->getForbidden(),
-                        align, lrVar->getSubRegAlignment(), heuristic, lr->getSpillCost());
+                        align, gra.getSubRegAlign(lrVar->getDeclare()), heuristic, lr->getSpillCost());
                 }
             }
 
@@ -5768,6 +5734,9 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
         totalGRFRegCount -= reserveSpillSize;
     }
 
+    // Copy over alignment for vars inserted by RA
+    gra.copyMissingAlignment();
+
     //
     // create an array of live ranges.
     //
@@ -5832,36 +5801,28 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
     {
         G4_Declare* dcl = lrs[i]->getDcl();
 
-        if (dcl->getSubRegAlign() == Any &&
-            !dcl->getIsPartialDcl())
+        if (gra.getSubRegAlign(dcl) == Any && !dcl->getIsPartialDcl())
         {
             //
             // multi-row, subreg alignment = 16 words
             //
             if (dcl->getNumRows() > 1)
             {
-                lrs[i]->getVar()->setSubRegAlignment(SUB_ALIGNMENT_GRFALIGN);
+                gra.setSubRegAlign(lrs[i]->getVar()->getDeclare(), GRFALIGN);
             }
             //
             // single-row
             //
-            else
+            else if (gra.getSubRegAlign(lrs[i]->getVar()->getDeclare()) == Any)
             {
-                if (lrs[i]->getVar()->getSubRegAlignment() == Any)
+                //
+                // set up Odd word or Even word sub reg alignment
+                //
+                unsigned nbytes = dcl->getNumElems()* G4_Type_Table[dcl->getElemType()].byteSize;
+                unsigned nwords = nbytes / G4_WSIZE + nbytes % G4_WSIZE;
+                if (nwords >= 2 && lrs[i]->getRegKind() == G4_GRF)
                 {
-                    //
-                    // set up Odd word or Even word sub reg alignment
-                    //
-                    unsigned nbytes = dcl->getNumElems()* G4_Type_Table[dcl->getElemType()].byteSize;
-                    unsigned nwords = nbytes / G4_WSIZE + nbytes%G4_WSIZE;
-                    if (nwords >= 2 && lrs[i]->getRegKind() == G4_GRF)
-                    {
-                        lrs[i]->getVar()->setSubRegAlignment(Even_Word);
-                    }
-                    else
-                    {
-                        lrs[i]->getVar()->setSubRegAlignment(Any);
-                    }
+                    gra.setSubRegAlign(lrs[i]->getVar()->getDeclare(), Even_Word);
                 }
             }
         }
@@ -6237,7 +6198,7 @@ void GraphColor::saveRegs(
             0, 0, builder.rgnpool.createRegion(8, 8, 1), Type_UD);
         unsigned messageLength = owordSize / 2;
         G4_Declare *msgDcl = builder.createTempVar(messageLength * GENX_DATAPORT_IO_SZ,
-            Type_UD, Either, SUB_ALIGNMENT_GRFALIGN, StackCallStr);
+            Type_UD, GRFALIGN, StackCallStr);
         msgDcl->getRegVar()->setPhyReg(regPool.getGreg(startReg), 0);
         auto sendSrc2 = builder.createSrcRegRegion(Mod_src_undef, Direct, msgDcl->getRegVar(), 0, 0,
             builder.rgnpool.createRegion(8, 8, 1), Type_UD);
@@ -6362,7 +6323,7 @@ void GraphColor::restoreRegs(
 
             unsigned responseLength = ROUND(owordSize, 2) / 2;
             G4_Declare *dstDcl = builder.createTempVar(responseLength * GENX_DATAPORT_IO_SZ,
-                Type_UD, Either, SUB_ALIGNMENT_GRFALIGN, GraphColor::StackCallStr);
+                Type_UD, GRFALIGN, GraphColor::StackCallStr);
             dstDcl->getRegVar()->setPhyReg(regPool.getGreg(startReg), 0);
             G4_DstRegRegion* postDst = builder.createDstRegRegion(Direct, dstDcl->getRegVar(), 0, 0, 1, (execSize > 8) ? Type_UW : Type_UD);
             G4_SrcRegRegion* payload = builder.Create_Src_Opnd_From_Dcl(scratchRegDcl, builder.getRegionStride1());
@@ -6539,59 +6500,6 @@ void GraphColor::OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs, std::v
 }
 
 //
-// Generate the save code for the i/p filescope var.
-//
-void GraphColor::saveFileScopeVar(G4_RegVar* filescopeVar, G4_BB* bb, INST_LIST_ITER insertIt)
-{
-    unsigned owordSize = 8 * sizeof(short);
-    G4_Declare* scratchRegDcl = builder.kernel.fg.scratchRegDcl;
-
-    unsigned startReg = filescopeVar->getPhyReg()->asGreg()->getRegNum();
-    unsigned frameOwordPos = filescopeVar->getDisp() / owordSize;
-    unsigned size =
-        filescopeVar->getDeclare()->getNumRows() * filescopeVar->getDeclare()->getNumElems() *
-        filescopeVar->getDeclare()->getElemSize();
-
-    if (size < G4_GRF_REG_NBYTES)
-    {
-        // always do full-GRF save
-        saveRegs(startReg, 2, scratchRegDcl, NULL, frameOwordPos, bb, insertIt);
-    }
-    else
-    {
-        MUST_BE_TRUE(size % owordSize == 0, ERROR_REGALLOC);
-        saveRegs(startReg, (size / owordSize), scratchRegDcl, NULL, frameOwordPos, bb, insertIt);
-    }
-}
-
-//
-// Generate the restore code for the i/p filescope var.
-//
-void GraphColor::restoreFileScopeVar(G4_RegVar* filescopeVar, G4_BB* bb, INST_LIST_ITER insertIt)
-{
-    unsigned owordSize = 8 * sizeof(short);
-    G4_Declare* scratchRegDcl = builder.kernel.fg.scratchRegDcl;
-
-    unsigned startReg = filescopeVar->getPhyReg()->asGreg()->getRegNum();
-    unsigned frameOwordPos = filescopeVar->getDisp() / owordSize;
-    unsigned size =
-        filescopeVar->getDeclare()->getNumRows() * filescopeVar->getDeclare()->getNumElems() *
-        filescopeVar->getDeclare()->getElemSize();
-
-    if (size < G4_GRF_REG_NBYTES)
-    {
-        // always restore full-GRF
-        restoreRegs(startReg, 2, scratchRegDcl, NULL, frameOwordPos, bb, insertIt);
-    }
-    else
-    {
-        MUST_BE_TRUE(size % owordSize == 0, ERROR_REGALLOC);
-        restoreRegs(startReg, (size / owordSize), scratchRegDcl, NULL, frameOwordPos, bb, insertIt);
-    }
-}
-
-
-//
 // Add caller save/restore code before/after each stack call.
 //
 void GraphColor::addCallerSaveRestoreCode()
@@ -6621,8 +6529,7 @@ void GraphColor::addCallerSaveRestoreCode()
                     kernel.fg.isPseudoVCEDcl(lrs[i]->getDcl()) != true &&
                     intf.interfereBetween(pseudoVCAId, i) == true)
                 {
-                    if (!lrs[i]->getDcl()->getHasFileScope() &&
-                        !builder.isPreDefArg(lrs[i]->getDcl()))
+                    if (!builder.isPreDefArg(lrs[i]->getDcl()))
                     {
                         // NOTE: Spilled live ranges should not be caller-save.
                         MUST_BE_TRUE(lrs[i]->getPhyReg()->isGreg(), ERROR_REGALLOC);
@@ -6656,8 +6563,8 @@ void GraphColor::addCallerSaveRestoreCode()
             OptimizeActiveRegsFootprint(callerSaveRegs, retRegs);
 
             unsigned callerSaveRegsWritten = 0;
-            for (std::vector<bool>::iterator vit = callerSaveRegs.begin();
-                vit != callerSaveRegs.end();
+            for (std::vector<bool>::iterator vit = callerSaveRegs.begin(), vitend = callerSaveRegs.end();
+                vit != vitend;
                 vit++)
                 callerSaveRegsWritten += ((*vit) ? 1 : 0);
 
@@ -6762,9 +6669,7 @@ void GraphColor::addCalleeSaveRestoreCode()
 
     // Determine the callee-save registers.
 
-    std::vector<bool> calleeSaveRegs;
-    calleeSaveRegs.reserve(numCalleeSaveRegs);
-    calleeSaveRegs.resize(numCalleeSaveRegs, false);
+    std::vector<bool> calleeSaveRegs(numCalleeSaveRegs, false);
     unsigned calleeSaveRegCount = 0;
 
     unsigned pseudoVCEId = builder.kernel.fg.pseudoVCEDcl->getRegVar()->getId();
@@ -6796,8 +6701,8 @@ void GraphColor::addCalleeSaveRestoreCode()
 
     OptimizeActiveRegsFootprint(calleeSaveRegs);
     unsigned calleeSaveRegsWritten = 0;
-    for (std::vector<bool>::iterator vit = calleeSaveRegs.begin();
-        vit != calleeSaveRegs.end();
+    for (std::vector<bool>::iterator vit = calleeSaveRegs.begin(), vitend = calleeSaveRegs.end();
+        vit != vitend;
         vit++)
         calleeSaveRegsWritten += ((*vit) ? 1 : 0);
 
@@ -6875,128 +6780,6 @@ void GraphColor::addCalleeSaveRestoreCode()
 }
 
 //
-// Add filescope vars save/restore code before/after each stack call and also restore/save
-// code at stack call function entry/exit blocks.
-//
-// TODO: Skip inserting save/restore for a subset of global var not referenced by a function
-//
-void GraphColor::addFileScopeSaveRestoreCode()
-{
-    //
-    // Save/restore at each call site
-    //
-    for (BB_LIST_ITER it = builder.kernel.fg.begin(); it != builder.kernel.fg.end(); ++it)
-    {
-        if ((*it)->isEndWithFCall())
-        {
-            //
-            // Determine the filescope var registers per call site.
-            //
-            for (auto fileScopeVar : liveAnalysis.fileScopeVars)
-            {
-                if (fileScopeVar->getPhyReg() == NULL)
-                {
-                    continue;
-                }
-                MUST_BE_TRUE(fileScopeVar->getPhyReg()->isGreg(), ERROR_REGALLOC);
-
-                // Insert filescope save code just before caller_save op
-                INST_LIST_ITER insertSaveIt = (*it)->begin();
-                for (; (*insertSaveIt)->opcode() != G4_pseudo_caller_save; insertSaveIt++)
-                    ; // empty body
-                MUST_BE_TRUE((*insertSaveIt)->opcode() == G4_pseudo_caller_save, "caller_save opcode not found before fcall");
-                if ((*it)->size() == 2)
-                    insertSaveIt = (*it)->begin();
-
-                if (builder.kernel.getOption(vISA_GenerateDebugInfo))
-                {
-                    builder.kernel.getKernelDebugInfo()->clearOldInstList();
-                    builder.kernel.getKernelDebugInfo()->setOldInstList((*it));
-                }
-
-                saveFileScopeVar(fileScopeVar, (*it), insertSaveIt);
-
-                if (builder.kernel.getOption(vISA_GenerateDebugInfo))
-                {
-                    auto deltaInstList = builder.kernel.getKernelDebugInfo()->getDeltaInstructions((*it));
-                    auto fcallInst = (*it)->back();
-                    for (auto it : deltaInstList)
-                    {
-                        builder.kernel.getKernelDebugInfo()->addCallerSaveInst(fcallInst, it);
-                    }
-                }
-
-                ASSERT_USER((*it)->Succs.size() == 1, "fcall basic block cannot have more than 1 successor");
-                G4_BB* afterFCallBB = (*it)->Succs.front();
-                INST_LIST_ITER insertRestIt = afterFCallBB->begin();
-                for (; (*insertRestIt)->opcode() != G4_pseudo_caller_restore; ++insertRestIt)
-                    ; // empty body
-                MUST_BE_TRUE((*insertRestIt)->opcode() == G4_pseudo_caller_restore, "caller_restore opcode not found before fcall");
-                if (afterFCallBB->size() == 1)
-                    insertRestIt = afterFCallBB->end();
-                else
-                    ++insertRestIt;
-
-                if (builder.kernel.getOption(vISA_GenerateDebugInfo))
-                {
-                    builder.kernel.getKernelDebugInfo()->clearOldInstList();
-                    builder.kernel.getKernelDebugInfo()->setOldInstList
-                    (afterFCallBB);
-                }
-
-                restoreFileScopeVar(
-                    fileScopeVar, afterFCallBB, insertRestIt);
-
-                if (builder.kernel.getOption(vISA_GenerateDebugInfo))
-                {
-                    auto deltaInstList = builder.kernel.getKernelDebugInfo()->getDeltaInstructions
-                    (afterFCallBB);
-                    auto fcallInst = (*it)->back();
-                    for (auto it : deltaInstList)
-                    {
-                        builder.kernel.getKernelDebugInfo()->addCallerSaveInst(fcallInst, it);
-                    }
-                }
-            }
-        }
-    }
-    //
-    // Save/restore at each stack call function entry/exit.
-    //
-    if (builder.getIsKernel() == false)
-    {
-
-        for (auto fileScopeVar : liveAnalysis.fileScopeVars)
-        {
-            if (fileScopeVar->getPhyReg() == NULL)
-            {
-                continue;
-            }
-            MUST_BE_TRUE(fileScopeVar->getPhyReg()->isGreg(), ERROR_REGALLOC);
-
-            if (liveAnalysis.isLiveAtExit(builder.kernel.fg.getEntryBB(), fileScopeVar->getId()))
-            {
-                // Load globals at funcion entry only if atleast one path does not kill it
-                INST_LIST_ITER insertRestIt = builder.kernel.fg.getEntryBB()->end();
-                for (--insertRestIt; (*insertRestIt)->opcode() != G4_pseudo_callee_save;
-                    --insertRestIt);
-                if (builder.kernel.fg.getEntryBB()->back()->opcode() == G4_pseudo_callee_save)
-                    insertRestIt = builder.kernel.fg.getEntryBB()->end();
-                else
-                    ++insertRestIt;
-                restoreFileScopeVar(fileScopeVar, builder.kernel.fg.getEntryBB(), insertRestIt);
-            }
-            INST_LIST_ITER insertSaveIt = builder.kernel.fg.getUniqueReturnBlock()->end();
-            for (--insertSaveIt; (*insertSaveIt)->opcode() != G4_pseudo_callee_restore; --insertSaveIt);
-            if (builder.kernel.fg.getUniqueReturnBlock()->front()->opcode() == G4_pseudo_callee_restore)
-                insertSaveIt = builder.kernel.fg.getUniqueReturnBlock()->begin();
-            saveFileScopeVar(fileScopeVar, builder.kernel.fg.getUniqueReturnBlock(), insertSaveIt);
-        }
-    }
-    builder.instList.clear();
-}
-
-//
 // Add code to setup the stack frame in callee.
 //
 void GraphColor::addGenxMainStackSetupCode()
@@ -7042,8 +6825,6 @@ void GraphColor::addGenxMainStackSetupCode()
     {
         std::ofstream optreport;
         getOptReportStream(optreport, m_options);
-        optreport << std::endl << "Global variables size: " << builder.kernel.fg.fileScopeSaveAreaSize * 16
-            << " bytes" << std::endl;
         optreport << "Total frame size: " << frameSize * 16 << " bytes" << std::endl;
         closeOptReportStream(optreport);
     }
@@ -7287,7 +7068,7 @@ void GraphColor::addFlagSaveRestoreCode()
 }
 
 //
-// Add GRF caller/callee/filescope save/restore code for stack calls.
+// Add GRF caller/callee save/restore code for stack calls.
 //
 void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
 {
@@ -7298,12 +7079,11 @@ void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
         gtpin->markInsts();
     }
 
-    addFileScopeSaveRestoreCode();
     if (builder.getIsKernel() == true)
     {
         unsigned int spillMemOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
         builder.kernel.fg.callerSaveAreaOffset =
-            (spillMemOffset / 16) + builder.kernel.fg.fileScopeSaveAreaSize + localSpillAreaOwordSize;
+            (spillMemOffset / 16) + localSpillAreaOwordSize;
     }
     else
     {
@@ -7418,7 +7198,7 @@ void GlobalRA::addCalleeSavePseudoCode()
 //
 void GlobalRA::addStoreRestoreForFP()
 {
-    G4_Declare* prevFP = builder.createTempVar(1, Type_UD, Either, Any);
+    G4_Declare* prevFP = builder.createTempVar(1, Type_UD, Any);
     oldFPDcl = prevFP;
     G4_DstRegRegion* oldFPDst = builder.createDstRegRegion(Direct, prevFP->getRegVar(), 0, 0, 1, Type_UD);
     RegionDesc* rd = builder.getRegionScalar();
@@ -7924,7 +7704,7 @@ void VarSplit::createSubDcls(G4_Kernel& kernel, G4_Declare* oldDcl, std::vector<
     }
 
     int splitVarSize = kernel.getSimdSize() == 8 ? 1 : 2;
-    for (unsigned int i = 0; i < oldDcl->getByteSize() / G4_GRF_REG_NBYTES; i += splitVarSize)
+    for (unsigned int i = 0, bSizePerGRFSize = (oldDcl->getByteSize() / G4_GRF_REG_NBYTES); i < bSizePerGRFSize; i += splitVarSize)
     {
         G4_Declare* splitDcl = NULL;
         unsigned leftBound = i * G4_GRF_REG_NBYTES;
@@ -7937,8 +7717,8 @@ void VarSplit::createSubDcls(G4_Kernel& kernel, G4_Declare* oldDcl, std::vector<
         const char* splitDclName = kernel.fg.builder->getNameString(kernel.fg.builder->mem, 16, "split_%d_%s", i, oldDcl->getName());
         splitDcl = kernel.fg.builder->createDeclareNoLookup(splitDclName, G4_GRF, dclWidth, dclHeight, oldDcl->getElemType());
         gra.setSubOffset(splitDcl, leftBound);
-        splitDcl->setAlign(oldDcl->getAlign());
-        splitDcl->setSubRegAlign(oldDcl->getSubRegAlign());
+        splitDcl->copyAlign(oldDcl);
+        gra.copyAlignment(splitDcl, oldDcl);
         unsigned nElementSize = (rightBound - leftBound + 1) / oldDcl->getElemSize();
         if ((rightBound - leftBound + 1) % oldDcl->getElemSize())
         {
@@ -7995,8 +7775,9 @@ void VarSplit::insertMovesFromTemp(G4_Kernel& kernel, G4_Declare* oldDcl, int in
         getHeightWidth(oldSrc->getType(), (srcOpnd->getRightBound() - srcOpnd->getLeftBound() + 1) / oldSrc->getElemSize(), dclWidth, dclHeight, dclTotalSize);
         const char* newDclName = kernel.fg.builder->getNameString(kernel.fg.builder->mem, 16, "copy_%d_%s", index, oldDcl->getName());
         G4_Declare * newDcl = kernel.fg.builder->createDeclareNoLookup(newDclName, G4_GRF, dclWidth, dclHeight, oldSrc->getType());
-        newDcl->setAlign(oldDcl->getAlign());
-        newDcl->setSubRegAlign(oldDcl->getSubRegAlign());
+        newDcl->copyAlign(oldDcl);
+        gra.copyAlignment(newDcl, oldDcl);
+
         unsigned newLeftBound = 0;
 
         for (size_t i = 0, size = splitDclList.size(); i < size; i++)
@@ -8407,7 +8188,7 @@ void VarSplit::localSplit(IR_Builder& builder,
 
         G4_Declare * topDcl = (*it).first->getDeclare();
         bool aligned = true;
-        for (VAR_RANGE_LIST_ITER vt = (*it).second.list.begin(); vt != (*it).second.list.end(); vt++)
+        for (VAR_RANGE_LIST_ITER vt = (*it).second.list.begin(), vtEnd = (*it).second.list.end(); vt != vtEnd; vt++)
         {
             unsigned leftBound = (*vt)->leftBound;
             unsigned rightBound = (*vt)->rightBound;
@@ -8822,6 +8603,8 @@ bool GlobalRA::hybridRA(bool doBankConflictReduction, bool highInternalConflict,
                 kernel.Declares.resize(numOrigDcl);
                 lra.undoLocalRAAssignments(false);
             }
+            // Restore alignment in case LRA modified it
+            copyAlignment();
             return false;
         }
         coloring.confirmRegisterAssignments();
@@ -8907,6 +8690,7 @@ int GlobalRA::coloringRegAlloc()
     if (builder.getOption(vISA_LocalRA) && !isReRAPass() && canDoLRA(kernel))
     {
         startTimer(TIMER_LOCAL_RA);
+        copyMissingAlignment();
         BankConflictPass bc(*this);
         LocalRA lra(bc, *this);
         bool success = lra.localRA();
@@ -8933,7 +8717,7 @@ int GlobalRA::coloringRegAlloc()
     std::vector<SpillManagerGMRF::EDGE> prevIntfEdges;
 
     int globalScratchOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
-    bool useScratchMsgForSpill = globalScratchOffset < SCRATCH_MSG_LIMIT * 0.6 && !hasStackCall;
+    bool useScratchMsgForSpill = globalScratchOffset < (int) (SCRATCH_MSG_LIMIT * 0.6) && !hasStackCall;
     bool enableSpillSpaceCompression = builder.getOption(vISA_SpillSpaceCompression);
 
     uint32_t nextSpillOffset = 0;
@@ -9065,7 +8849,7 @@ int GlobalRA::coloringRegAlloc()
                     {
                         std::cout << "\t--rematerialize\n";
                     }
-                    Rematerialization remat(kernel, liveAnalysis, coloring, rpe);
+                    Rematerialization remat(kernel, liveAnalysis, coloring, rpe, *this);
                     remat.run();
                     rematDone = true;
 
@@ -9160,7 +8944,7 @@ int GlobalRA::coloringRegAlloc()
                     {
                         spillSize += lr->getDcl()->getByteSize();
                     }
-                    if (spillSize * 1.5 < (SCRATCH_MSG_LIMIT - globalScratchOffset))
+                    if ((int)(spillSize * 1.5) < (SCRATCH_MSG_LIMIT - globalScratchOffset))
                     {
                         enableSpillSpaceCompression = false;
                     }
@@ -9212,7 +8996,7 @@ int GlobalRA::coloringRegAlloc()
                     builder.getOption(vISA_FastSpill) || builder.getOption(vISA_Debug);
                 if (!reserveSpillReg && !disableSpillCoalecse && builder.useSends())
                 {
-                    CoalesceSpillFills c(kernel, liveAnalysis, coloring, spillGMRF, iterationNo, rpe);
+                    CoalesceSpillFills c(kernel, liveAnalysis, coloring, spillGMRF, iterationNo, rpe, *this);
                     c.run();
                 }
 
@@ -9237,6 +9021,8 @@ int GlobalRA::coloringRegAlloc()
                     unsigned localSpillAreaOwordSize = ROUND(scratchOffset, 16) / 16;
                     coloring.addSaveRestoreCode(localSpillAreaOwordSize);
                 }
+
+                //expandSpillFillIntrinsics();
 
                 if (builder.getOption(vISA_OptReport))
                 {
@@ -9364,8 +9150,8 @@ int GlobalRA::coloringRegAlloc()
     inst->opcode() == G4_mov &&  \
     (inst->getDst() && inst->getSrc(0)) && \
     (inst->getDst()->getTopDcl() && inst->getSrc(0)->getTopDcl()) && \
-    (inst->getDst()->getTopDcl()->getRegFile() == G4_FLAG && inst->getSrc(0)->getTopDcl()->getRegFile() == G4_GRF || \
-    inst->getDst()->getTopDcl()->getRegFile() == G4_GRF && inst->getSrc(0)->getTopDcl()->getRegFile() == G4_FLAG) \
+    ((inst->getDst()->getTopDcl()->getRegFile() == G4_FLAG && inst->getSrc(0)->getTopDcl()->getRegFile() == G4_GRF) || \
+    (inst->getDst()->getTopDcl()->getRegFile() == G4_GRF && inst->getSrc(0)->getTopDcl()->getRegFile() == G4_FLAG)) \
     )
 
 #define IS_SPILL_KILL_CANDIDATE(preScratchAccess) \
@@ -10567,8 +10353,7 @@ void FlagSpillCleanup::spillFillCodeCleanFlag(IR_Builder&        builder,
 void GlobalRA::insertPhyRegDecls()
 {
     int numGRF = kernel.getNumRegTotal();
-    std::vector<bool> grfUsed;
-    grfUsed.resize(numGRF, false);
+    std::vector<bool> grfUsed(numGRF, false);
     GRFDclsForHRA.resize(numGRF);
 
     for (auto curBB : kernel.fg)
@@ -10702,10 +10487,39 @@ void GraphColor::dumpRegisterPressure()
     }
 }
 
-// FIXME: is any of this necessary? If they are they should be moved to HWConformity, is the concern
-// that new variables created by lvn/spill/remat may not honor alignment requirements?
 void GlobalRA::fixAlignment()
 {
+    // Copy over alignment from G4_RegVar to GlobalRA instance
+    // Rest of RA shouldnt have to read/modify alignment of G4_RegVar
+    copyAlignment();
+
+    if (kernel.getSimdSize() == 32)
+    {
+        // we have to force all flags to be 32-bit aligned even if they are < 32-bit,
+        // due to potential emask usage.
+        // ToDo: may be better to simply allocate them as 32-bit?
+        for (auto dcl : kernel.Declares)
+        {
+            if (dcl->getRegFile() & G4_FLAG)
+            {
+                setSubRegAlign(dcl, G4_SubReg_Align::Even_Word);
+            }
+        }
+    }
+
+    if (getGenxPlatform() == GENX_BDW)
+    {
+        // BDW requires even_word alignment for scalar HF variables
+        for (auto dcl : kernel.Declares)
+        {
+            if (dcl->getElemType() == Type_HF && dcl->getSubRegAlign() == Any)
+            {
+                setSubRegAlign(dcl, Even_Word);
+            }
+        }
+    }
+
+    // ToDo: remove these as it should be done by HWConformity
     for (auto BB : kernel.fg)
     {
         for (auto inst : *BB)
@@ -10714,97 +10528,20 @@ void GlobalRA::fixAlignment()
             if (dst && dst->getTopDcl())
             {
                 G4_RegVar* var = dst->getBase()->asRegVar();
-                // dst register on sendin must be whole register aligned.
-                // NOTE THAT: The assumption is that the previous pass will set only SUB_ALIGNMENT_HALFGRFALIGN or whole GRF align
-                if (inst->isSend() && dst->getRegAccess() == Direct) {
-                    if (!var->isPhyRegAssigned() &&
-                        (var->getDeclare()->getSubRegAlign() == Any ||
-                         var->getDeclare()->getSubRegAlign() == Even_Word ||
-                         var->getDeclare()->getSubRegAlign() == SUB_ALIGNMENT_HALFGRFALIGN))
+                if (inst->isSend() && dst->getRegAccess() == Direct) 
+                {
+                    if (!var->isPhyRegAssigned())
                     {
-                        var->setSubRegAlignment(SUB_ALIGNMENT_GRFALIGN);
+                        setSubRegAlign(dst->getTopDcl(), GRFALIGN);
                     }
                 }
 
-                //
-                // dst register compr inst must be even aligned
-                // ARF should set subreg-alignment
-                //
-                // Check the subreg alignment requirement
-                // Imm Vector Instruction --> Eight_Word
-                // DWORD Type Dst ARF --> Even_Word
-                //
                 if (!var->isPhyRegAssigned() && var->getDeclare()->getNumRows() <= 1
                     && dst->getRegAccess() == Direct && var->getDeclare()->getSubRegAlign() == Any)
                 {
                     if (inst->isAccSrcInst())
                     {
-                        if (var->getDeclare()->getRegFile() != G4_ADDRESS)
-                            var->setSubRegAlignment(SUB_ALIGNMENT_GRFALIGN);
-                        else
-                            var->setSubRegAlignment(SUB_ALIGNMENT_HALFGRFALIGN);
-                    }
-                    else if (var->getSubRegAlignment() != SUB_ALIGNMENT_GRFALIGN)
-                    {
-                        if (inst->opcode() == G4_movi)  //FIXME: restriction for movi, what about 64 bytes GRF
-                        {
-                            G4_Type dstType = dst->getType();
-                            switch (G4_Type_Table[dstType].byteSize)
-                            {
-                            case 2:
-                                MUST_BE_TRUE1(dst->getSubRegOff() <= 8, inst->getLineNo(),
-                                    ERROR_DATA_RANGE("sub-register offset"));
-                                var->setSubRegAlignment((G4_SubReg_Align)(Eight_Word + dst->getSubRegOff()));
-                                break;
-                            case 4:
-                                MUST_BE_TRUE1(dst->getSubRegOff() <= 4, inst->getLineNo(),
-                                    ERROR_DATA_RANGE("sub-register offset"));
-                                var->setSubRegAlignment((G4_SubReg_Align)(Eight_Word + dst->getSubRegOff() * 2));
-                                break;
-                            case 1:
-                                MUST_BE_TRUE1(dst->getSubRegOff() == 0 || dst->getSubRegOff() == 16, inst->getLineNo(),
-                                    ERROR_DATA_RANGE("sub-register offset"));
-                                var->setSubRegAlignment(Eight_Word);
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            for (unsigned j = 0; j < G4_MAX_SRCS; j++)
-                            {
-                                G4_Operand* src = inst->getSrc(j);
-                                if (src == NULL) continue;
-
-                                if (src->isImm())
-                                {
-                                    G4_Type srcImmType = src->asImm()->getType();
-                                    if (IS_VINTTYPE(srcImmType))
-                                    {
-                                        var->setSubRegAlignment((G4_SubReg_Align)(Eight_Word + dst->getSubRegOff()));
-                                        break;
-                                    }
-                                    else if (IS_VFTYPE(srcImmType))
-                                    {
-                                        var->setSubRegAlignment((G4_SubReg_Align)(Eight_Word + dst->getSubRegOff() * 2));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        G4_SubReg_Align dstSubAlign = var->getSubRegAlignment();
-                        if (dstSubAlign == Any)
-                        {
-                            for (unsigned j = 0; j < G4_MAX_SRCS; j++)
-                            {
-                                G4_Operand* src = inst->getSrc(j);
-                                if (src && G4_Type_Table[src->getType()].byteSize == G4_DSIZE)
-                                {
-                                    var->setSubRegAlignment(Even_Word);
-                                    break;
-                                }
-                            }
-                        }
+                        setSubRegAlign(dst->getTopDcl(), var->getDeclare()->getRegFile() != G4_ADDRESS ? GRFALIGN : Eight_Word);
                     }
                 }
             }
@@ -10819,7 +10556,6 @@ void VerifyAugmentation::verifyAlign(G4_Declare* dcl)
     if (it == masks.end())
         return;
 
-    auto augData = (*it);
     auto dclMask = std::get<1>((*it).second);
 
     if (dclMask == AugmentationMasks::Default32Bit)
@@ -11046,33 +10782,6 @@ void VerifyAugmentation::verify()
                 return true;
             }
         }
-        return false;
-    };
-
-    auto overlap = [](LiveRange* p1, LiveRange* p2)
-    {
-        if (!p1 || !p2)
-            return false;
-
-        auto grf1 = p1->getPhyReg();
-        auto grf2 = p2->getPhyReg();
-
-        if (!grf1 || !grf2)
-            return false;
-
-        if (!grf1->isGreg() || !grf2->isGreg())
-            return false;
-
-        unsigned startp1 = grf1->asGreg()->getRegNum() * G4_GRF_REG_NBYTES + (p1->getPhyRegOff() * p1->getDcl()->getElemSize());
-        unsigned int startp2 = grf2->asGreg()->getRegNum() * G4_GRF_REG_NBYTES + (p2->getPhyRegOff()*p2->getDcl()->getElemSize());
-        unsigned int endp1 = startp1 + p1->getVar()->getDeclare()->getByteSize();
-        unsigned int endp2 = startp2 + p2->getVar()->getDeclare()->getByteSize();
-
-        if (startp1 > startp2 && startp1 < endp2)
-            return true;
-        if (startp2 > startp1 && startp2 < endp1)
-            return true;
-
         return false;
     };
 
@@ -11544,7 +11253,7 @@ void GlobalRA::assignLocForReturnAddr()
     // a data structure for doing a quick map[id] ---> block
     //
     G4_BB**  BBs = (G4_BB**)builder.mem.alloc(fg.getNumBB() * sizeof(G4_BB*));
-    for (BB_LIST_ITER it = fg.begin(); it != fg.end(); it++)
+    for (BB_LIST_ITER it = fg.begin(), bbEnd = fg.end(); it != bbEnd; it++)
     {
         unsigned i = (*it)->getId();
         retLoc[i] = UNDEFINED_VAL;
@@ -11556,7 +11265,7 @@ void GlobalRA::assignLocForReturnAddr()
     //
     std::list<G4_BB *> caller;                                          // just to accelerate the algorithm later
 
-    for (unsigned i = 0; i < fg.getNumBB(); i++)
+    for (unsigned i = 0, bbNum = fg.getNumBB(); i < bbNum; i++)
     {
         G4_BB* bb = BBs[i];
         if (bb->isEndWithCall() == false)
@@ -11622,7 +11331,7 @@ void GlobalRA::assignLocForReturnAddr()
         // Sub2, code sharing is detected, we need to this phase to make sure that Sub1 and Sub3 use the
         // same location.
         //
-        for (unsigned i = 0; i < fg.getNumBB(); i++)
+        for (unsigned i = 0, bbNum = fg.getNumBB(); i < bbNum; i++)
         {
             G4_BB* bb = BBs[i];
             if (getSubRetLoc(bb) != UNDEFINED_VAL)
@@ -11704,7 +11413,7 @@ void GlobalRA::assignLocForReturnAddr()
             //
             //  Assign ret loc for subroutines firstly, and then check if it is wrong (due to circle in call graph).
             //
-            for (unsigned i = 0; i < fg.getNumBB(); i++)
+            for (unsigned i = 0, bbNum = fg.getNumBB(); i < bbNum; i++)
             {
                 //
                 // reset the return BB's retLoc
@@ -11856,4 +11565,146 @@ void  GlobalRA::insertRestoreAddr(G4_BB* bb)
 
         last->setExecSize(2);
     }
+}
+
+// This function returns the weight of interference edge lr1--lr2,
+// which is used for computing the degree of lr1.
+//
+// When there is no alignment restriction, we should use the normal weight,
+// which is lr1_nreg + lr2_nreg - 1.
+//
+// Otherewise, we need to take into account additional space that may be
+// required because of the alignment restriction. For example,
+// if lr1 has even alignment and lr2 has no alignment restriction,
+// we need to consider the following cases that would require the
+// maximal available GRF space for successful allocation:
+// 1) lr1's size is odd, lr2's size is odd and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg + 1)
+// 2) lr1's size is odd, lr2's size is even and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg)
+// 3) lr1's size is even, lr2's size is odd and lr2's start position is odd,
+//    the total space required would be (lr1_nreg + lr2_nreg)
+// 4) lr1's size is even, lr2's size is even and lr2's start position is odd,
+//    the total space required would be (lr1_nreg + lr2_nreg + 1)
+// The above logic can be simplified to the following formula:
+//    lr1_nreg + lr2_nreg + 1 - ((lr1_nreg + lr2_nreg) % 2)
+//
+// If both lr1 and lr2 have even alignment restriction,
+// we need to consider the following cases that would require the
+// maximal available GRF space for successful allocation:
+// 1) lr1's size is odd, lr2's size is odd and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg + 1)
+// 2) lr1's size is odd, lr2's size is even and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg)
+// 3) lr1's size is even, lr2's size is odd and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg)
+// 4) lr1's size is even, lr2's size is even and lr2's start position is even,
+//    the total space required would be (lr1_nreg + lr2_nreg - 1)
+// The above logic can be simplified to the following formula:
+//    lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2)
+//
+unsigned GraphColor::edgeWeightGRF(LiveRange* lr1, LiveRange* lr2)
+{
+    bool lr1EvenAlign = gra.isEvenAligned(lr1->getVar()->getDeclare());
+    bool lr2EvenAlign = gra.isEvenAligned(lr2->getVar()->getDeclare());
+    unsigned lr1_nreg = lr1->getNumRegNeeded();
+    unsigned lr2_nreg = lr2->getNumRegNeeded();
+
+    if (!lr1EvenAlign)
+    {
+        return  lr1_nreg + lr2_nreg - 1;
+    }
+    else if (!lr2EvenAlign)
+    {
+        unsigned sum = lr1_nreg + lr2_nreg;
+        return sum + 1 - ((sum) % 2);
+    }
+    else if (lr2EvenAlign)
+    {
+        return lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2);
+    }
+    else
+    {
+        assert(false && "should be unreachable");
+        return 0;
+    }
+}
+
+unsigned GraphColor::edgeWeightARF(LiveRange* lr1, LiveRange* lr2)
+{
+    if (lr1->getRegKind() == G4_FLAG)
+    {
+        G4_SubReg_Align lr1_align = gra.getSubRegAlign(lr1->getVar()->getDeclare());
+        G4_SubReg_Align lr2_align = gra.getSubRegAlign(lr2->getVar()->getDeclare());
+        unsigned lr1_nreg = lr1->getNumRegNeeded();
+        unsigned lr2_nreg = lr2->getNumRegNeeded();
+
+        if (lr1_align == Any)
+        {
+            return  lr1_nreg + lr2_nreg - 1;
+        }
+        else if (lr1_align == Even_Word && lr2_align == Any)
+        {
+            return lr1_nreg + lr2_nreg + 1 - ((lr1_nreg + lr2_nreg) % 2);
+        }
+        else if (lr1_align == Even_Word && lr2_align == Even_Word)
+        {
+            if (lr1_nreg % 2 == 0 && lr2_nreg % 2 == 0)
+            {
+                return lr1_nreg + lr2_nreg - 2;
+            }
+            else
+            {
+                return lr1_nreg + lr2_nreg - 1 + (lr1_nreg % 2) + (lr2_nreg % 2);
+            }
+        }
+        else
+        {
+            MUST_BE_TRUE(false, "Found unsupported subRegAlignment in flag register allocation!");
+            return 0;
+        }
+    }
+    else if (lr1->getRegKind() == G4_ADDRESS)
+    {
+        G4_SubReg_Align lr1_align = gra.getSubRegAlign(lr1->getVar()->getDeclare());
+        G4_SubReg_Align lr2_align = gra.getSubRegAlign(lr2->getVar()->getDeclare());
+        unsigned lr1_nreg = lr1->getNumRegNeeded();
+        unsigned lr2_nreg = lr2->getNumRegNeeded();
+
+        if (lr1_align == Any)
+        {
+            return  lr1_nreg + lr2_nreg - 1;
+        }
+        else if (lr1_align == Four_Word && lr2_align == Any)
+        {
+            return lr1_nreg + lr2_nreg + 3 - (lr1_nreg + lr2_nreg) % 4;
+        }
+        else if (lr1_align == Four_Word && lr2_align == Four_Word)
+        {
+            return lr1_nreg + lr2_nreg - 1 + (4 - lr1_nreg % 4) % 4 + (4 - lr2_nreg % 4) % 4;
+        }
+        else if (lr1_align == Eight_Word && lr2_align == Any)
+        {
+            return lr1_nreg + lr2_nreg + 7 - (lr1_nreg + lr2_nreg) % 8;
+        }
+        else if (lr1_align == Eight_Word && lr2_align == Four_Word)
+        {
+            if (((8 - lr1_nreg % 8) % 8) >= 4)
+                return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 - 4;
+            return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
+                (4 - lr2_nreg % 4) % 4;
+        }
+        else if (lr1_align == Eight_Word && lr2_align == Eight_Word)
+        {
+            return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
+                (8 - lr2_nreg % 8) % 8;
+        }
+        else
+        {
+            MUST_BE_TRUE(false, "Found unsupported subRegAlignment in address register allocation!");
+            return 0;
+        }
+    }
+    MUST_BE_TRUE(false, "Found unsupported ARF reg type in register allocation!");
+    return 0;
 }

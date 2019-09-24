@@ -33,7 +33,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Models/Models.hpp"
 
 #include <map>
-#include <set>
+#include <sstream>
+#include <string>
+#include <tuple>
 #include <vector>
 
 namespace iga
@@ -56,41 +58,43 @@ namespace iga
 struct OperandInfo
 {
     Loc                      loc;
-    Operand::Kind            kind;
+    Operand::Kind            kind = Operand::Kind::INVALID;
 
-    union // operand register/immediate value info
+    union // optional modifier (e.g. -r12, ~r12, (abs) (sat))
     {
-        struct // a register (direct or indirect)
-        {
-            union // optional modifier (e.g. -r12, ~r12, (abs) (sat))
-            {
-                SrcModifier  regOpSrcMod;
-                DstModifier  regOpDstMod;
-            };
-            struct // the actual register (GRF for Operand::Kind::INDIRECT)
-            {
-                RegName        regOpName;    // e.g. r#, a#, null, ...
-                Region         regOpRgn;     // e.g. <1>, <8;8,1>
-                MathMacroExt   regOpMathMacroExtReg; // e.g. math macro spc acc
-            };
-            union // direct vs. indirect
-            {
-                RegRef       regOpReg; // direct operands
-                struct // indirect operands
-                {
-                    RegRef   regOpIndReg; // a0.4
-                    int16_t  regOpIndOff; // e.g. "16" in "r[a0.4,16]"
-                };
-            };
-        };
-        struct // immediate operand
-        {
-            ImmVal           immValue;
-            Block           *immBlock;
-        };
+        SrcModifier  regOpSrcMod = SrcModifier::NONE;
+        DstModifier  regOpDstMod;
     };
-    std::string              immLabel; // implies a constructor for this class
-    Type                     type;
+    RegName        regOpName = RegName::INVALID;    // e.g. r#, a#, null, ...
+    Region         regOpRgn = Region::INVALID;     // e.g. <1>, <8;8,1>
+    MathMacroExt   regOpMathMacroExtReg = MathMacroExt::INVALID; // e.g. math macro spc acc
+
+    // direct/indirect register info
+    RegRef   regOpReg; // direct operands
+
+    // indirect register offset
+    int16_t  regOpIndOff = 0; // e.g. "16" in "r[a0.4,16]"
+
+    // imm field
+    ImmVal   immValue;
+
+    std::string              immLabel;
+    Type                     type = Type::INVALID;
+
+    OperandInfo()
+    {
+        kind = Operand::Kind::INVALID;
+        regOpSrcMod = SrcModifier::NONE;
+        regOpName = RegName::INVALID;
+        regOpRgn = Region::INVALID;
+        regOpMathMacroExtReg = MathMacroExt::INVALID;
+        regOpReg = REGREF_ZERO_ZERO;
+        regOpIndOff = 0;
+        immValue.u64 = 0;
+        immValue.kind = ImmVal::UNDEF;
+        immLabel.clear();
+        type = Type::INVALID;
+    }
 
     void reset()
     {
@@ -99,20 +103,14 @@ struct OperandInfo
         regOpName = RegName::INVALID;
         regOpRgn = Region::INVALID;
         regOpMathMacroExtReg = MathMacroExt::INVALID;
-        regOpIndReg = REGREF_ZERO_ZERO;
+        regOpReg = REGREF_ZERO_ZERO;
         regOpIndOff = 0;
-        immBlock = nullptr;
         immValue.u64 = 0;
         immValue.kind = ImmVal::UNDEF;
         immLabel.clear();
         type = Type::INVALID;
     }
 };
-
-
-typedef std::map<std::string,Block*> BlockMap;
-typedef std::vector<Block*>          BlockArr;
-typedef std::set<const Block*>       BlockSet;
 
 
 // Larger constructs, such as blocks, instructions, and whatnot
@@ -131,21 +129,21 @@ class InstBuilder {
     // per-instruction state
     Loc                         m_loc;
     Predication                 m_predication;
-    const OpSpec               *m_opSpec;
-    BranchCntrl                 m_brnchCtrl;
+    const OpSpec               *m_opSpec = nullptr;
+    BranchCntrl                 m_brnchCtrl = BranchCntrl::OFF;
 
     RegRef                      m_flagReg; // shared by predication / condition modifier
 
-    ExecSize                    m_execSize;
-    ChannelOffset               m_chOff;
-    MaskCtrl                    m_maskCtrl;
+    ExecSize                    m_execSize = ExecSize::INVALID;
+    ChannelOffset               m_chOff    = ChannelOffset::M0;
+    MaskCtrl                    m_maskCtrl = MaskCtrl::NOMASK;
 
-    FlagModifier                m_flagModifier;
+    FlagModifier                m_flagModifier = FlagModifier::NONE;
+    DstModifier                 m_dstModifier  = DstModifier::NONE;
 
-    DstModifier                 m_dstModifier;
     OperandInfo                 m_dst;
     OperandInfo                 m_srcs[3];
-    int                         m_nSrcs;
+    int                         m_nSrcs = 0;
 
     SendDescArg                 m_exDesc;
     SendDescArg                 m_desc;
@@ -153,17 +151,31 @@ class InstBuilder {
 
     std::string                 m_comment;
 
-    Block                      *m_currBlock;
+    ////////////////////////////////////////////////////////////////////
+    // During parse, we add all instructions to one list, record label
+    // locations and unresolved operands.  At the end of the parse,
+    // we'll resolve everything to numeric form and then split things into
+    // blocks at the end (if desired)
+    //
+    // one full linear list of instructions,
+    InstList                    m_insts;
+    //
+    // labels defined (block starts)
+    // (start-loc,start-pc,end-loc,end-pc
+    using LabelInfo=std::tuple<Loc,uint32_t>;
+    std::map<std::string,LabelInfo>  m_labelMap;
+    LabelInfo                       *m_currBlock = nullptr;
+    // unresolved operand labels
+    struct UnresolvedLabel {
+        Loc             loc;
+        std::string     symbol;
+        Operand        &operand;
+        Instruction    &inst;
+    };
+    std::vector<UnresolvedLabel>     m_unresolvedLabels;
 
-    BlockMap                    m_blocks;
-    std::map<Block*,Loc>        m_blocksRefed;
-    BlockSet                    m_blocksDefd; // all defined
-    BlockArr                    m_blockDefinitionOrder; // same as above, but in def order
-    std::map<Block*,Loc>        m_blocksNumericTargets;
-
-    uint32_t                    m_pc; // current PC
-    uint32_t                    m_nextId; // next instruction id
-
+    uint32_t                    m_pc = 0; // current PC
+    uint32_t                    m_nextId = 0; // next instruction id
 
 
 
@@ -198,80 +210,15 @@ class InstBuilder {
         m_comment.clear();
     }
 
-    Block *lookupBlock(const std::string &label) {
-        Block *b;
-        auto itr = m_blocks.find(label);
-        if (itr == m_blocks.end()) {
-            b = m_kernel->createBlock();
-            m_blocks[label] = b;
-        } else {
-            b = itr->second;
-        }
-        return b;
-    }
-    Block *lookupBlockNumeric(const Loc &loc, int64_t absPc) {
-        std::stringstream ss;
-        ss << "." << absPc;
-        Block *b = lookupBlock(ss.str());
-        if (m_blocksNumericTargets.find(b) == m_blocksNumericTargets.end()) {
-            // this constitutes a "definition"
-            m_blocksNumericTargets[b] = loc;
-            b->setPC((int32_t)absPc);
-            m_blocksDefd.insert(b);
-        }
-        return b;
-    }
-
-    // splits block b at location x
-    // x must be within b
-    // => if x extends past the end of the block, it's an error
-    // => if x doesn't land on an instruction boundary, it's an error
-    void splitBlock(const Loc &xReferrerLoc, Block *x, Block *b) {
-        InstList &xis = x->getInstList();
-        IGA_ASSERT(xis.empty(), "numeric target should be an empty block");
-
-        InstList &bis = b->getInstList();
-        int32_t pc = b->getPC();
-
-        for (auto bisIter = bis.begin(); bisIter != bis.end(); ++bisIter) {
-            if (x->getPC() == pc) {
-                // found the split location
-                // copy the tail
-                xis.insert(xis.begin(), bisIter, bis.end());
-                // erase the old tail
-                bis.erase(bisIter, bis.end());
-                // Now we have block b followed by x
-                // set the source location for this block to be the
-                // same location as the first instruction, if there is one
-                if (xis.size() > 0) {
-                    x->setLoc(xis.front()->getLoc());
-                }
-                return;
-            } else if (x->getPC() < pc) {
-                // we passed over it (doesn't land on an instruction boundary)
-                m_errorHandler.reportError(xReferrerLoc,
-                    "numeric label targets the middle of an instruction");
-                return;
-            } else {
-                // else, step to the next instruction
-                pc += (*bisIter)->hasInstOpt(InstOpt::COMPACTED) ? 8 : 16;
-            }
-        } // for block instructions
-        if (x->getPC() > pc) {
-            // out of bounds (past end of kernel)
-            m_errorHandler.reportError(xReferrerLoc,
-                "numeric label targets past the end of the kernel");
-        } // else: targets end of program exactly
-    }
-
 public:
     InstBuilder(Kernel *kernel, ErrorHandler &e)
         : m_model(kernel->getModel())
         , m_errorHandler(e)
         , m_kernel(kernel)
-        , m_currBlock(nullptr)
     {
     }
+
+    InstList &getInsts() {return m_insts;}
 
     ErrorHandler &errorHandler() {return m_errorHandler;}
 
@@ -283,134 +230,45 @@ public:
     }
 
 
-    // Called at the end of the program
     void ProgramEnd() {
-        // Ensure all label references were defined
-        // 1.a. Append the block to the kernel
-        // 1.b. Create an efficient lookup for those blocks defined
-        //      now done incrementally by m_blocksDefd
-        // 2. Iterate all references to blocks
-        //    Ensure that each was defined
-        for (auto itr = m_blocksRefed.begin();
-            itr != m_blocksRefed.end();
-            itr++)
-        {
-            Block *b = itr->first;
-            bool notNumericLabel = m_blocksNumericTargets.find(b) == m_blocksNumericTargets.end();
-            if (notNumericLabel && m_blocksDefd.find(b) == m_blocksDefd.end()) {
-                // not a numeric label and never defined
-                m_errorHandler.reportError(itr->second, "undefined label");
-            }
-        }
-
-        // now we have to insert all the numeric targets in block definition
-        // order and possibly split other blocks into multiple pieces
-        // E.g.
-        // L0:
-        //     nop
-        //     add ... {Compacted}  // need label ".16" here
-        //     (f0) while -8
-        //     jmpi  16
-        // L1:                      // need label ".56" here for jmpi
-        //     nop
-        //
-        // The while -8 induces a new block at offset 16
-        // This expands the CFG into
-        //
-        // L0:
-        //     nop
-        // .16:
-        //     add ... {Compacted}  // need label ".16" here
-        //     (f0) while -8
-        //     jmpi  16
-        // .56:
-        // L1:
-        //     nop
-        // Note, we could reuse L1, but that would entail searching for all
-        // instructions that target .56 and replacing their operands.  This
-        // is sloppier, but get's the job done.
-        //
-        // Don't try and assemble with numeric labels....
-        for (auto itr = m_blocksNumericTargets.begin();
-            itr != m_blocksNumericTargets.end();
-            itr++)
-        {
-            Block *x = itr->first;
-            if (x->getPC() < 0) {
-                m_errorHandler.reportError(itr->second,
-                    "points to before beginning of kernel listing");
-                continue;
-            }
-
-            // walk through the blocks and find the insertion point for x
-            // invariant: x->getPC() < b->getPC()
-            //   base case: from above
-            //   inductive case: from below (see the 'continue' path)
-            for (size_t i = 0; i < m_blockDefinitionOrder.size(); i++) {
-                Block *b = m_blockDefinitionOrder[i];
-                if (x->getPC() == b->getPC()) {
-                    // can insert this block just above current block
-                    // without any splitting needed
-                    m_blockDefinitionOrder.insert(
-                        m_blockDefinitionOrder.begin() + i, x);
-                } else { // x->getPC() > b->getPC()
-                    if (i < m_blockDefinitionOrder.size() - 1) {
-                        // not at the end, look at successor
-                        Block *c = m_blockDefinitionOrder[i + 1];
-                        if (x->getPC() >= c->getPC()) {
-                            // need to iterate to next block
-                            continue;
-                        }
-                        // split block b
-                        splitBlock(itr->second, x, b);
-                    } else {
-                        // this is the last block
-                        // better be within this block or it's out of bounds
-                        splitBlock(itr->second, x, b);
-                    }
-                    // insert the block *after* b (since it splits b)
-                    m_blockDefinitionOrder.insert(
-                        m_blockDefinitionOrder.begin() + i + 1, x);
+        for (const UnresolvedLabel &u : m_unresolvedLabels) {
+            auto itr = m_labelMap.find(u.symbol);
+            if (itr == m_labelMap.end()) {
+                m_errorHandler.reportError(u.loc, "undefined label");
+            } else {
+                const LabelInfo &li = itr->second;
+                int32_t val = (int32_t)std::get<1>(li);
+                if (!u.inst.getOpSpec().isJipAbsolute()) {
+                    val -= u.inst.getPC();
                 }
-                break; // on to the next numeric label
+                u.operand.setLabelSource(val, u.operand.getType());
             }
         }
-
-        // after this mess is done we can insert all the blocks in
-        // their natural offset order
-        for (auto b : m_blockDefinitionOrder) {
-            m_kernel->appendBlock(b);
-        }
+        // at this point m_instList has instructions with all labels in
+        // numeric form
     }
 
 
-    void BlockStart(const Loc &lblLoc, const std::string &label) {
-        auto itr = m_blocks.find(label);
-        if (itr != m_blocks.end()) {
-            // This label does not correspond to a block yet
-            // (It might be a forward reference though)
-            const Block *b = itr->second;
-            if (m_blocksDefd.find(b) != m_blocksDefd.end()) {
-                std::stringstream ss;
-                ss << "redefinition of label (previously defined on line " <<
-                    b->getLoc().line << ")";
-                m_errorHandler.reportError(lblLoc, ss.str());
-            }
+    void BlockStart(const Loc &loc, const std::string &label) {
+        auto itr = m_labelMap.find(label);
+        if (itr != m_labelMap.end()) {
+            std::stringstream err;
+            err << "label redefinition " << label << " (defined "
+                << "on line " << std::get<0>(itr->second).line << ")";
+            m_errorHandler.reportError(loc, err.str());
+        } else {
+            m_labelMap[label] = LabelInfo(loc,m_pc);
+            m_currBlock = &m_labelMap[label];
         }
-        m_currBlock = lookupBlock(label);
-        m_currBlock->setLoc(lblLoc);
-        m_currBlock->setPC(m_pc);
-
-        m_blocksDefd.insert(m_currBlock);
-        m_blockDefinitionOrder.push_back(m_currBlock);
     }
 
 
     void BlockEnd(uint32_t extent) {
-        Loc newLoc = m_currBlock->getLoc();
-        newLoc.extent = extent;
-        m_currBlock->setLoc(newLoc);
-        m_currBlock = nullptr;
+        if (m_currBlock) {
+            // could be null if error in BlockStart
+            std::get<0>(*m_currBlock).extent = extent;
+            m_currBlock = nullptr;
+        }
     }
 
 
@@ -483,7 +341,7 @@ public:
                     m_flagModifier);
         }
         inst->setLoc(m_loc);
-        m_currBlock->appendInstruction(inst);
+        m_insts.emplace_back(inst);
 
         if (m_opSpec->supportsDestination()) {
             if (m_dst.kind == Operand::Kind::DIRECT) {
@@ -504,7 +362,7 @@ public:
             } else { // Operand::Kind::INDIRECT
                 inst->setInidirectDestination(
                     m_dstModifier,
-                    m_dst.regOpIndReg,
+                    m_dst.regOpReg,
                     m_dst.regOpIndOff,
                     m_dst.regOpRgn.getHz(),
                     m_dst.type);
@@ -536,12 +394,26 @@ public:
                 inst->setInidirectSource(
                     opIx,
                     src.regOpSrcMod,
-                    src.regOpIndReg,
+                    src.regOpReg,
                     src.regOpIndOff,
                     src.regOpRgn,
                     src.type);
             } else if (src.kind == Operand::Kind::LABEL) {
-                inst->setLabelSource(opIx, src.immBlock, src.type);
+                if (src.immLabel.empty()) {
+                    // numeric label was used
+                    inst->setLabelSource(opIx, src.immValue.s32, src.type);
+                } else {
+                    // label (unresolved)
+                    //
+                    // we'll backpatch later, but set it for the type
+                    inst->setLabelSource(opIx, 0, src.type);
+                    UnresolvedLabel u {
+                        src.loc,
+                        src.immLabel,
+                        inst->getSource(opIx),
+                        *inst};
+                    m_unresolvedLabels.push_back(u);
+                }
             } else if (src.kind == Operand::Kind::IMMEDIATE) {
                 inst->setImmediateSource(opIx, src.immValue, src.type);
             } else {
@@ -554,8 +426,15 @@ public:
         if (!m_comment.empty()) {
             inst->setComment(m_comment);
         }
+
         m_pc += inst->hasInstOpt(InstOpt::COMPACTED) ? 8 : 16;
+
+        // after any branching instruction or EOT, split the basic block
+        if (inst->isBranching() || inst->hasInstOpt(InstOpt::EOT)) {
+            BlockEnd(m_pc);
+        }
     }
+
 
     void InstPredication(
         const Loc &loc,
@@ -575,9 +454,11 @@ public:
 
 
     // The absense of this implies branch control is either off or not
-    // present (e.g. HSW or an instruction without that feature).
+    // present (e.g. HSW or an instruction without that option).
     //
-    // E.g.   if.b   (16) 12 16
+    // E.g.   if.b   (16)   64    80        // YES
+    // E.g.   if     (16)   64    80        // NO
+    //        while ...                     // NO
     void InstBrCtl(BranchCntrl bc) {
         m_brnchCtrl = bc;
     }
@@ -634,7 +515,8 @@ public:
         Region::Horz rgnHorz,
         Type ty)
     {
-        RegRef rr{(uint8_t)reg,0};
+        RegRef rr;
+        rr.regNum = (uint8_t)reg;
         InstDstOpRegDirect(loc,rn,rr,rgnHorz,ty);
     }
     void InstDstOpRegDirect(
@@ -669,7 +551,8 @@ public:
 
         m_dst.regOpDstMod = m_dstModifier;
         m_dst.regOpName = rnm;
-        m_dst.regOpReg = {(uint8_t)regNum, 0};
+        m_dst.regOpReg = RegRef(static_cast<uint8_t>(regNum), 0);
+        m_dst.regOpReg.regNum = (uint8_t)regNum;
         m_dst.regOpRgn.setDstHz(rgnH);
         m_dst.regOpMathMacroExtReg = mme;
         m_dst.type = ty;
@@ -699,7 +582,7 @@ public:
 
         m_dst.regOpDstMod = m_dstModifier;
         m_dst.regOpName = RegName::GRF_R;
-        m_dst.regOpIndReg = addrReg;
+        m_dst.regOpReg = addrReg;
         m_dst.regOpIndOff = (uint16_t)addrOff;
         m_dst.regOpRgn.setDstHz(rgnHorz);
         m_dst.type = ty;
@@ -725,7 +608,8 @@ public:
         Region rgn, // region parameters
         Type ty)
     {
-        RegRef rr{(uint8_t)reg,0};
+        RegRef rr;
+        rr.regNum = (uint8_t)reg;
         InstSrcOpRegDirect(srcOpIx, loc, SrcModifier::NONE, rnm, rr, rgn, ty);
     }
     void InstSrcOpRegDirect(
@@ -766,7 +650,8 @@ public:
         src.kind = Operand::Kind::MACRO;
         src.regOpSrcMod = srcMod;
         src.regOpName = rnm;
-        src.regOpReg = {(uint8_t)regNum, 0};
+        src.regOpReg.regNum = (uint8_t)regNum;
+        src.regOpReg.subRegNum = 0;
         src.regOpRgn = rgn;
         src.regOpMathMacroExtReg = MathMacroExt;
         src.type = ty;
@@ -790,7 +675,7 @@ public:
         src.kind = Operand::Kind::INDIRECT;
         src.regOpSrcMod = srcMod;
         src.regOpName = RegName::GRF_R;
-        src.regOpIndReg = addrReg;
+        src.regOpReg = addrReg;
         src.regOpIndOff = (uint16_t)addrOff;
         src.regOpRgn = rgn;
         src.type = ty;
@@ -830,10 +715,8 @@ public:
         OperandInfo src = m_srcs[srcOpIx]; // copy init values
         src.loc = loc;
         src.kind = Operand::Kind::LABEL;
-        src.immBlock = lookupBlock(sym);
+        src.immLabel = sym;
         src.type = type;
-
-        m_blocksRefed[src.immBlock] = loc;
 
         InstSrcOp(srcOpIx, src);
     }
@@ -843,11 +726,22 @@ public:
     void InstSrcOpImmLabelRelative(
       int srcOpIx,
       const Loc &loc,
-      int64_t relPc, // the actual PC relative to program start
+      int64_t relPc,
       Type type)
     {
-        InstSrcOpImmLabelAbsolute(srcOpIx, loc, relPc + (int64_t)m_pc, type);
+        // NOTE: even though jmpi is relative post-increment, remember
+        // that IGA keeps the offsets normalized as pre-increment and in
+        // bytes for uniformity (HSW had some QWord labels)
+        OperandInfo src = m_srcs[srcOpIx]; // copy init values
+        src.loc = loc;
+        src.kind = Operand::Kind::LABEL;
+        src.immValue = relPc;
+        src.type = type;
+
+        InstSrcOp(srcOpIx, src);
     }
+
+
     // calla directly calls this, everything else goes through relative
     // (see above)
     void InstSrcOpImmLabelAbsolute(
@@ -859,12 +753,10 @@ public:
         OperandInfo src = m_srcs[srcOpIx]; // copy init values
         src.loc = loc;
         src.kind = Operand::Kind::LABEL;
-        src.immBlock = lookupBlockNumeric(loc, (int64_t)absPc);
+        src.immValue = absPc;
         src.type = type;
 
         InstSrcOp(srcOpIx, src);
-
-        m_blocksRefed[src.immBlock] = loc;
     }
 
 

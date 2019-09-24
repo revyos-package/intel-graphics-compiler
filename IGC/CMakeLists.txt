@@ -23,7 +23,7 @@
 
 
 #======================= end_copyright_notice ==================================
-
+ 
 
 # CMake settings:
 #  - IGC_OPTION__LIBRARY_NAME
@@ -35,7 +35,6 @@
 #  - IGC_OPTION__INCLUDE_IGC_COMPILER_TOOLS
 #  - IGC_OPTION__OUTPUT_DIR
 #  - IGC_OPTION__USCLAUNCHER_TOOL for ILAdapter
-
 
 cmake_minimum_required(VERSION 2.8.12 FATAL_ERROR)
 if (${CMAKE_VERSION} VERSION_GREATER "3.0")
@@ -63,11 +62,10 @@ endif()
 # Increment IGC_API_MAJOR_VERSION if there is ABI Change.
 set(IGC_API_MAJOR_VERSION 1)
 set(IGC_API_MINOR_VERSION 0)
-set(IGC_API_PATCH_VERSION 9)
+set(IGC_API_PATCH_VERSION 11)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
-
 
 # ======================================================================================================
 # ================================================ UTILS ===============================================
@@ -104,7 +102,6 @@ function(igc_flag_remove_re flagsVarName)
   endif()
 endfunction(igc_flag_remove_re)
 
-
 # Adds flags to variable. If flag is in variable it is omitted.
 #
 # @param flagsVarName      Name of variable with flags. The variable will be updated.
@@ -122,7 +119,6 @@ function(igc_flag_add_once flagsVarName)
 
   set("${flagsVarName}" "${_updatedFlags}" PARENT_SCOPE)
 endfunction(igc_flag_add_once)
-
 
 # Removes flags from variable which match specified flag.
 #
@@ -155,7 +151,6 @@ function(igc_target_flag_property_add_once targetName propertyName)
   igc_flag_add_once(_flags "${ARGN}") # [WA#2] To handle ; correctly some lists must be put in string form.
   set_property(TARGET "${targetName}" PROPERTY "${propertyName}" "${_flags}")
 endfunction()
-
 
 # Adds flags to flag property of target (if they are not added already).
 #
@@ -240,7 +235,6 @@ macro(  win_dynamic_runtime )
     endforeach()
   endif()
 endmacro( win_dynamic_runtime)
-
 
 # Registers setting and relations on flag options which are usually connected to compiler / linker options.
 #
@@ -766,7 +760,6 @@ function(igc_config_flag_apply_settings settingsDomainName flagsVarBaseName patt
   else()
     message(FATAL_ERROR "Pattern type \"${patternType}\" is invalid. Supported patter types/keywords:\nPATTERN, NEG_PATTERN, ALL_PATTERN, ALL_PATTERN_NOINHERIT")
   endif()
-
 
   set(_matchedAllConfigs YES)
   set(_selectedConfigs)
@@ -2001,7 +1994,7 @@ if(NOT GFX_DEVELOPMENT_DIR)
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-  find_program(PYTHON_EXECUTABLE NAMES python.exe PATHS "${BS_DIR_MIGRATION_BINARIES}/build-tools/python2-win32" NO_DEFAULT_PATH)
+  find_program(PYTHON_EXECUTABLE NAMES python.exe PATHS "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/python2-win32" NO_DEFAULT_PATH)
 else()
   find_program(PYTHON_EXECUTABLE NAMES "python2" "python")
 endif()
@@ -2220,7 +2213,7 @@ set(IGC_BUILD__TOOLS_IST_DIR        "${IGC_BUILD__GFX_DEV_TOOLS_DIR}/IST")
 set(IGC_BUILD__TOOLS_USCLAUNCHER_DIR "${GFX_DEVELOPMENT_DIR}/Test/usc/src")
 
 
-set(IGC_BUILD__TOOLS_7ZIP_WIN_DIR   "${BS_DIR_MIGRATION_BINARIES}/build-tools/7zip-win64")
+set(IGC_BUILD__TOOLS_7ZIP_WIN_DIR   "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/7zip-win64")
 set(IGC_BUILD__TOOLS_PAX_APP_DIR    "/usr")
 set(IGC_BUILD__TOOLS_7Z_LINUX_DIR "${IGC_BUILD__GFX_DEV_TOOLS_DIR}/Linux/tools/7z9.2/bin")
 
@@ -3273,7 +3266,7 @@ endif()
 
 if(WIN32)
     igc_arch_get_cpu(_cpuSuffix)
-    set(COMMON_CLANG_LIBRARY_NAME common_clang${_cpuSuffix})
+    set(COMMON_CLANG_LIBRARY_NAME ${COMMON_CLANG_LIBRARY_NAME}${_cpuSuffix})
     set(COMMON_CLANG_LIB_FULL_NAME "${COMMON_CLANG_LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
     message(STATUS "OpenCL Clang library name to load: ${COMMON_CLANG_LIB_FULL_NAME}")
@@ -3423,11 +3416,11 @@ endif()
 
 if(IGC_BUILD__SPIRV-Tools)
     message(STATUS "============================ SPIRV-Tools project ============================")
-    set(IGC_BUILD__SPIRV-Headers_DIR "${BS_DIR_MIGRATION_BINARIES}/build-tools/SPIRV-Headers")
-    set(IGC_BUILD__SPIRV-Tools_DIR "${BS_DIR_MIGRATION_BINARIES}/build-tools/SPIRV-Tools")
+    set(IGC_BUILD__SPIRV-Headers_DIR "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/SPIRV-Headers")
+    set(IGC_BUILD__SPIRV-Tools_DIR "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/SPIRV-Tools")
     set(IGC_BUILD__SPIRV-Headers_OUTPUT_DIR "${IGC_BUILD__TOOLS_OUTPUT_DIR}/SPIRV-Headers")
     set(IGC_BUILD__SPIRV-Tools_OUTPUT_DIR "${IGC_BUILD__TOOLS_OUTPUT_DIR}/SPIRV-Tools")
-    set(PYTHON_EXECUTABLE "${BS_DIR_MIGRATION_BINARIES}/build-tools/python3-win64/python.exe")
+    set(PYTHON_EXECUTABLE "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/python3-win64/python.exe")
     set(SPIRV-Headers_SOURCE_DIR "${IGC_BUILD__SPIRV-Headers_DIR}")
     option(SKIP_SPIRV_TOOLS_INSTALL "Skip SPIRV-Tools installation" ON)
     option(SPIRV_SKIP_TESTS "Skip building SPIRV-Tools tests along with the library" ON)
@@ -3842,7 +3835,7 @@ if(_targetIsStatic)
       )
   else()
     if (UNIX)
-        set(COMMON_CLANG $<TARGET_SONAME_FILE:opencl-clang-lib>)
+        set(COMMON_CLANG opencl-clang-lib)
     else()
         set(COMMON_CLANG "")
     endif()
@@ -3940,6 +3933,8 @@ if(UNIX)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/cif DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig COMPONENT igc-opencl-devel)
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
+  install(FILES ${IGC_BUILD__VISA_DIR}/include/RelocationInfo.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/visa COMPONENT igc-opencl-devel)
+  install(DIRECTORY ${IGC_BUILD__VISA_DIR}/iga/IGALibrary/api/ DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/iga COMPONENT igc-opencl-devel FILES_MATCHING PATTERN "*.h")
 elseif (WIN32)
   install(TARGETS ${IGC_BUILD__PROJ__igc_dll}
           RUNTIME DESTINATION Release/lh64          CONFIGURATIONS Release)
@@ -4050,6 +4045,5 @@ if(UNIX)
   set(CPACK_COMPONENTS_ALL igc-core igc-media igc-opencl igc-opencl-devel)
 
   include (CPack)
-
 endif(UNIX)
 

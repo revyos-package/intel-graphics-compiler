@@ -59,7 +59,6 @@ extern int CISAlineno;
 char * switch_label_array[32];
 std::vector<VISA_opnd*> RTWriteOperands;
 VISA_opnd *opndRTWriteArray[32];
-int num_switch_labels;
 int num_parameters;
 
 VISA_RawOpnd* rawOperandArray[16];
@@ -266,11 +265,9 @@ VISA_RawOpnd* rawOperandArray[16];
 %token DIRECTIVE_KERNEL_ATTR /* .kernel_attr */
 %token DIRECTIVE_INPUT      /* .input */
 %token DIRECTIVE_PARAMETER  /* .parameter */
-%token DIRECTIVE_RETURN     /* .return */
 %token DIRECTIVE_LOC        /* .loc */
 %token DIRECTIVE_FUNC       /* .function */
 %token DIRECTIVE_GLOBAL_FUNC       /* .global_function */
-%token DIRECTIVE_RESOLVED_INDEX /* .resolvedIndex */
 %token ABS                  /* .abs */
 %token SAT                  /* .sat */
 %token PIXEL_NULL_MASK      /* .pixel_null_mask */
@@ -340,8 +337,6 @@ VISA_RawOpnd* rawOperandArray[16];
 %token <string> SIZE
 %token <string> FLAG_REG_NAME
 %token <string> SURF_USE_NAME
-%token <string> DOT_FUNCTION /* .function */
-%token <string> DOT_KERNEL  /* .kernel */
 %token <string> F_CLASS
 %token <string> G_CLASS
 %token <string> P_CLASS
@@ -411,6 +406,7 @@ VISA_RawOpnd* rawOperandArray[16];
 %token <opcode> VME_FBR_OP
 %token <opcode> BRANCH_OP
 %token <opcode> IFCALL
+%token <opcode> FCALL
 %token <opcode> FADDR
 %token <opcode> SWITCHJMP_OP
 %token <opcode> SIMDCF_OP
@@ -452,6 +448,7 @@ VISA_RawOpnd* rawOperandArray[16];
 %type <number> ImmAddrOffset
 %type <number> AbstractNum
 %type <number> Exp
+// %type <number> Exp32
 %type <number> ElemNum
 %type <number> OFFSET_NUM
 %type <number> SIZE_NUM
@@ -535,13 +532,11 @@ CISAStmt : /* empty */
        | CISAStmt ScopeOp                 TrailingComment STMT_DELIM
        | CISAStmt DirectiveKernel         TrailingComment STMT_DELIM
        | CISAStmt DirectiveGlobalFunction TrailingComment STMT_DELIM
-       | CISAStmt DirectiveResolvedIndex  TrailingComment STMT_DELIM
        | CISAStmt DirectiveVersion        TrailingComment STMT_DELIM
        | CISAStmt DirectiveDecl           TrailingComment STMT_DELIM
        | CISAStmt DirectiveInput          TrailingComment STMT_DELIM
        | CISAStmt DirectiveImplicitInput  TrailingComment STMT_DELIM
        | CISAStmt DirectiveParameter      TrailingComment STMT_DELIM
-       | CISAStmt DirectiveReturn         TrailingComment STMT_DELIM
        | CISAStmt DirectiveFunc           TrailingComment STMT_DELIM
        | CISAStmt DirectiveAttr           TrailingComment STMT_DELIM
        | CISAStmt CISAInst                TrailingComment STMT_DELIM
@@ -570,37 +565,18 @@ StrLitOrVar : STRING_LITERAL | VAR
 /* --------------------------------------------------------------------- */
 
 /* ----- .kernel ------ */
-DirectiveKernel : DOT_KERNEL StrLitOrVar
+DirectiveKernel : DIRECTIVE_KERNEL StrLitOrVar
               {
-                  num_switch_labels = 0;
-                  //TODO remove later
-                  //pBuilder->setIsKernel(true);
-                  //pBuilder->CISA_IR_initialization($1, CISAlineno);
-
-                  //pCisaBuilder->setIsKernel();
                   VISAKernel *cisa_kernel = NULL;
                   pCisaBuilder->AddKernel(cisa_kernel, $2);
-
-                  //pCisaBuilder->CISA_IR_initialization($1, CISAlineno);
               };
 
 
 /* ----- .global_function ------ */
 DirectiveGlobalFunction : DIRECTIVE_GLOBAL_FUNC StrLitOrVar
               {
-                  num_switch_labels = 0;
-                  //pBuilder->setIsKernel(false);
-                  //pBuilder->CISA_IR_initialization($2, CISAlineno);
-                  //pCisaBuilder->CISA_IR_initialization($2, CISAlineno);
                   VISAFunction *cisa_kernel = NULL;
                   pCisaBuilder->AddFunction(cisa_kernel, $2);
-              };
-
-/* ----- .resolvedIndex ------ */
-DirectiveResolvedIndex : DIRECTIVE_RESOLVED_INDEX NUMBER
-              {
-                  //pCisaBuilder->CISA_IR_resolvedIndex((unsigned int)$2);
-                  printf("Is this still necessary?");
               };
 
  V_NAME :
@@ -615,28 +591,17 @@ DirectiveVersion : DIRECTIVE_VERSION NUMBER DOT NUMBER
    }
 
 /* ----- .decl ----- */
-DirectiveDecl : DeclFileScopeVariable
-                | DeclVariable
+DirectiveDecl : DeclVariable
                 | DeclAddress
                 | DeclPredicate
                 | DeclSampler
                 | DeclSurface
                 | DeclFunctions
 
-DeclFunctions: FUNC_DIRECTIVE_DECL STRING_LITERAL NUMBER
+DeclFunctions: FUNC_DIRECTIVE_DECL STRING_LITERAL
     {
-        pCisaBuilder->CISA_create_func_decl($2, (int)$3, CISAlineno);
+        // do nothing as it's informational only
     }
-DeclFileScopeVariable: DIRECTIVE_DECL VAR F_CLASS DECL_DATA_TYPE NUM_ELTS NUMBER AlignType GEN_ATTR
-               {
-                   attr_gen_struct temp_struct;
-                   temp_struct.value = $8.value;
-                   temp_struct.name = $8.name;
-                   temp_struct.string_val = $8.string_val;
-                   temp_struct.isInt = $8.isInt;
-                   temp_struct.attr_set = $8.attr_set;
-                   pCisaBuilder->CISA_file_variable_decl($2, (unsigned int)$6, $4, $7, CISAlineno);
-               };
 
                //     1       2      3          4          5       6       7          8          9
 DeclVariable: DIRECTIVE_DECL VAR G_CLASS DECL_DATA_TYPE NUM_ELTS NUMBER AlignType AliasInfo GEN_ATTR
@@ -677,12 +642,6 @@ DeclPredicate: DIRECTIVE_DECL VAR P_CLASS NUM_ELTS NUMBER GEN_ATTR
                //     1      2     3       4       5       6         7
 DeclSampler: DIRECTIVE_DECL VAR S_CLASS NUM_ELTS NUMBER  V_NAME GEN_ATTR
                {
-                   attr_gen_struct temp_struct;
-                   temp_struct.value = $7.value;
-                   temp_struct.name = $7.name;
-                   temp_struct.string_val = $7.string_val;
-                   temp_struct.isInt = $7.isInt;
-                   temp_struct.attr_set = $7.attr_set;
                    pCisaBuilder->CISA_sampler_variable_decl($2, (int)$5, $6, CISAlineno);
                };
 
@@ -702,12 +661,6 @@ DeclSurface: DIRECTIVE_DECL VAR T_CLASS NUM_ELTS NUMBER  V_NAME GEN_ATTR
                //     1          2       3        4        5
 DirectiveInput: DIRECTIVE_INPUT VAR OFFSET_NUM SIZE_NUM GEN_ATTR
                {
-                   attr_gen_struct temp_struct;
-                   temp_struct.value = $5.value;
-                   temp_struct.name = $5.name;
-                   temp_struct.string_val = $5.string_val;
-                   temp_struct.isInt = $5.isInt;
-                   temp_struct.attr_set = $5.attr_set;
                    pCisaBuilder->CISA_input_directive($2, (short)$3, (unsigned short)$4, CISAlineno);
                };
 
@@ -715,12 +668,6 @@ DirectiveInput: DIRECTIVE_INPUT VAR OFFSET_NUM SIZE_NUM GEN_ATTR
                //              1        2       3        4        5
 DirectiveImplicitInput: IMPLICIT_INPUT VAR OFFSET_NUM SIZE_NUM GEN_ATTR
                {
-                   attr_gen_struct temp_struct;
-                   temp_struct.value = $5.value;
-                   temp_struct.name = $5.name;
-                   temp_struct.string_val = $5.string_val;
-                   temp_struct.isInt = $5.isInt;
-                   temp_struct.attr_set = $5.attr_set;
                    pCisaBuilder->CISA_implicit_input_directive($1, $2, (short)$3, (unsigned short)$4, CISAlineno);
                };
 
@@ -728,19 +675,8 @@ DirectiveImplicitInput: IMPLICIT_INPUT VAR OFFSET_NUM SIZE_NUM GEN_ATTR
                //            1           2       3        4
 DirectiveParameter: DIRECTIVE_PARAMETER VAR  SIZE_NUM GEN_ATTR
                {
-                   attr_gen_struct temp_struct;
-                   temp_struct.value = $4.value;
-                   temp_struct.name = $4.name;
-                   temp_struct.string_val = $4.string_val;
-                   temp_struct.isInt = $4.isInt;
-                   temp_struct.attr_set = $4.attr_set;
                    pCisaBuilder->CISA_input_directive($2, 0, (unsigned short)$3, CISAlineno);
                };
-/* ----- .return    ------ */
-DirectiveReturn: DIRECTIVE_RETURN RETURN_TYPE
-                {
-                    //pBuilder->CISA_return_directive($2, CISAlineno);
-                }
 /* ----- .attribute ------ */
                //     1               2     3         4
 DirectiveAttr: DIRECTIVE_KERNEL_ATTR VAR EQUALS STRING_LITERAL {
@@ -1279,21 +1215,16 @@ BranchInstruction : Predicate BRANCH_OP ExecSize TargetLabel
          };
          | Predicate BRANCH_OP ExecSize
          {
-                //as of visa 1.0 also for fret
              pCisaBuilder->CISA_Create_Ret($1.cisa_gen_opnd, $2, $3.emask, $3.exec_size, CISAlineno);
          };
          | SWITCHJMP_OP ExecSize VecSrcOperand_G_I_IMM LPAREN SwitchLabels RPAREN
          {
             pCisaBuilder->CISA_create_switch_instruction($1, $2.exec_size, $3.cisa_gen_opnd, (int)$5, switch_label_array, CISAlineno);
-            num_switch_labels = 0;
          }
-         //  1          2         3       4     5         6                     7
-         |Predicate BRANCH_OP ExecSize NUMBER NUMBER NUMBER
+         //  1          2         3       4        5         6
+         | Predicate  FCALL   ExecSize SymbolName NUMBER NUMBER
          {
-            //Common_ISA_Function_Parameters_t temp;
-           // memcpy(&temp, &$7, sizeof(Common_ISA_Function_Parameters_t));
-            //int num_parameters = 1;
-            pCisaBuilder->CISA_create_fcall_instruction($1.cisa_gen_opnd, $2, $3.emask, $3.exec_size, (unsigned)$4, (unsigned)$5, (unsigned)$6, CISAlineno);
+            pCisaBuilder->CISA_create_fcall_instruction($1.cisa_gen_opnd, $2, $3.emask, $3.exec_size, $4, (unsigned)$5, (unsigned)$6, CISAlineno);
          }
          // 1           2       3       4                   5       6
          | Predicate IFCALL ExecSize VecSrcOperand_G_I_IMM NUMBER NUMBER
@@ -1922,16 +1853,16 @@ ExecSize :   /* empty */
          | LPAREN NUMBER RPAREN
            {
                TRACE("\n** Execution Size ");
-               MUST_HOLD(($2 == 0 || $2 == 1 || $2 == 2 || $2 == 4 || $2 == 8 || $2 == 16 || $2 == 32),
-                         "execution size must be 0, 1, 2, 4, 8, 16, or 32");
+               MUST_HOLD(($2 == 1 || $2 == 2 || $2 == 4 || $2 == 8 || $2 == 16 || $2 == 32),
+                         "execution size must be 1, 2, 4, 8, 16, or 32");
                $$.emask = vISA_EMASK_M1;
                $$.exec_size = (int)$2;
            };
          | LPAREN EMASK COMMA NUMBER RPAREN
            {
                TRACE("\n** Execution Size ");
-               MUST_HOLD(($4 == 0 || $4 == 1 || $4 == 2 || $4 == 4 || $4 == 8 || $4 == 16 || $4 == 32),
-                         "execution size must be 0, 1, 2, 4, 8, 16, or 32");
+               MUST_HOLD(($4 == 1 || $4 == 2 || $4 == 4 || $4 == 8 || $4 == 16 || $4 == 32),
+                         "execution size must be 1, 2, 4, 8, 16, or 32");
                $$.emask = $2;
                $$.exec_size = (int)$4;
            };
@@ -1950,11 +1881,22 @@ Imm : Exp DataType
 #endif
       };
 
-Exp : AbstractNum          { $$ = $1; }
-    | Exp PLUS  Exp        { $$ = $1 + $3; }
-    | Exp MINUS Exp        { $$ = $1 - $3; }
-    | Exp TIMES Exp        { $$ = $1 * $3; }
-    | Exp SLASH Exp          { $$ = $1 / $3; }
+// Exp32: Exp {
+//        if ((int64_t)((int32_t)$1) != $1) {
+//            yyerror("immediate value overflows 32b");
+//        }
+//        $$ = $1;
+//     }
+
+Exp : AbstractNum   { $$ = $1; }
+    | Exp PLUS  Exp { $$ = $1 + $3; }
+    | Exp MINUS Exp { $$ = $1 - $3; }
+    | Exp TIMES Exp { $$ = $1 * $3; }
+    | Exp SLASH Exp {
+            if ($3 == 0)
+                yyerror("division by 0");
+            $$ = $1 / $3;
+        }
     | MINUS Exp %prec NEG  { $$ = -$2; }
     | LPAREN Exp RPAREN    { $$ = $2; };
 

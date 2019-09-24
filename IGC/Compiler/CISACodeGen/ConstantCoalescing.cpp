@@ -62,13 +62,13 @@ ConstantCoalescing::ConstantCoalescing() : FunctionPass(ID)
     initializeConstantCoalescingPass(*PassRegistry::getPassRegistry());
 }
 
-bool ConstantCoalescing::runOnFunction(Function &func)
+bool ConstantCoalescing::runOnFunction(Function& func)
 {
     CodeGenContextWrapper* pCtxWrapper = &getAnalysis<CodeGenContextWrapper>();
     m_TT = &getAnalysis<TranslationTable>();
 
     m_ctx = pCtxWrapper->getCodeGenContext();
-    IGCMD::MetaDataUtils *pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    IGCMD::MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     if (pMdUtils->findFunctionsInfoItem(&func) != pMdUtils->end_FunctionsInfo())
     {
         ProcessFunction(&func);
@@ -76,7 +76,7 @@ bool ConstantCoalescing::runOnFunction(Function &func)
     return true;
 }
 
-void ConstantCoalescing::ProcessFunction( Function* function )
+void ConstantCoalescing::ProcessFunction(Function* function)
 {
     curFunc = function;
     irBuilder = new IRBuilderWrapper(function->getContext(), m_TT);
@@ -85,20 +85,20 @@ void ConstantCoalescing::ProcessFunction( Function* function )
 
     // clean up unnecessary lcssa-phi
     for (Function::iterator I = function->begin(), E = function->end();
-         I != E; ++I)
+        I != E; ++I)
     {
         if (I->getSinglePredecessor())
         {
             for (BasicBlock::iterator BBI = I->begin(), BBE = I->end(); BBI != BBE; )
             {
-                Instruction *PHI = &(*BBI++);
+                Instruction* PHI = &(*BBI++);
                 if (!isa<PHINode>(PHI))
                 {
                     break;
                 }
                 assert(PHI->getNumOperands() <= 1);
-                Value *src = PHI->getOperand(0);
-                if(wiAns->whichDepend(src) == wiAns->whichDepend(PHI))
+                Value* src = PHI->getOperand(0);
+                if (wiAns->whichDepend(src) == wiAns->whichDepend(PHI))
                 {
                     PHI->replaceAllUsesWith(src);
                     PHI->eraseFromParent();
@@ -108,68 +108,68 @@ void ConstantCoalescing::ProcessFunction( Function* function )
     }
 
     // get the dominator-tree to traverse
-    DominatorTree &dom_tree = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+    DominatorTree& dom_tree = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
     // separate the loads into 3 streams to speed up process
     std::vector<BufChunk*> dircb_owloads;
     std::vector<BufChunk*> indcb_owloads;
     std::vector<BufChunk*> indcb_gathers;
-    for( df_iterator<DomTreeNode*> dom_it = df_begin( dom_tree.getRootNode() ),
-         dom_end = df_end( dom_tree.getRootNode() ); dom_it != dom_end; ++dom_it )
+    for (df_iterator<DomTreeNode*> dom_it = df_begin(dom_tree.getRootNode()),
+        dom_end = df_end(dom_tree.getRootNode()); dom_it != dom_end; ++dom_it)
     {
-        BasicBlock *cur_blk = dom_it->getBlock();
+        BasicBlock* cur_blk = dom_it->getBlock();
         // pop out all the chunks that do not dominate this block
-        while( !dircb_owloads.empty() )
+        while (!dircb_owloads.empty())
         {
-            BufChunk *top_chunk = dircb_owloads.back();
-            BasicBlock *top_blk = top_chunk->chunkIO->getParent();
-            if( dom_tree.dominates( top_blk, cur_blk ) )
+            BufChunk* top_chunk = dircb_owloads.back();
+            BasicBlock* top_blk = top_chunk->chunkIO->getParent();
+            if (dom_tree.dominates(top_blk, cur_blk))
                 break;
             dircb_owloads.pop_back();
             delete top_chunk;
         }
-        while( !indcb_owloads.empty() )
+        while (!indcb_owloads.empty())
         {
-            BufChunk *top_chunk = indcb_owloads.back();
-            BasicBlock *top_blk = top_chunk->chunkIO->getParent();
-            if( dom_tree.dominates( top_blk, cur_blk ) )
+            BufChunk* top_chunk = indcb_owloads.back();
+            BasicBlock* top_blk = top_chunk->chunkIO->getParent();
+            if (dom_tree.dominates(top_blk, cur_blk))
                 break;
             //ChangePTRtoOWordBased(top_chunk);
             indcb_owloads.pop_back();
             delete top_chunk;
         }
-        while( !indcb_gathers.empty() )
+        while (!indcb_gathers.empty())
         {
-            BufChunk *top_chunk = indcb_gathers.back();
-            BasicBlock *top_blk = top_chunk->chunkIO->getParent();
-            if( dom_tree.dominates( top_blk, cur_blk ) )
+            BufChunk* top_chunk = indcb_gathers.back();
+            BasicBlock* top_blk = top_chunk->chunkIO->getParent();
+            if (dom_tree.dominates(top_blk, cur_blk))
                 break;
             indcb_gathers.pop_back();
             delete top_chunk;
         }
         // scan and rewrite cb-load in this block
-        ProcessBlock( cur_blk, dircb_owloads, indcb_owloads, indcb_gathers );
+        ProcessBlock(cur_blk, dircb_owloads, indcb_owloads, indcb_gathers);
         CleanupExtract(cur_blk);
         VectorizePrep(cur_blk);
     }
 
     // clean up
-    while( !dircb_owloads.empty() )
+    while (!dircb_owloads.empty())
     {
-        BufChunk *top_chunk = dircb_owloads.back();
+        BufChunk* top_chunk = dircb_owloads.back();
         dircb_owloads.pop_back();
         delete top_chunk;
     }
-    while( !indcb_owloads.empty() )
+    while (!indcb_owloads.empty())
     {
-        BufChunk *top_chunk = indcb_owloads.back();
+        BufChunk* top_chunk = indcb_owloads.back();
         indcb_owloads.pop_back();
         //ChangePTRtoOWordBased(top_chunk);
         delete top_chunk;
     }
-    while( !indcb_gathers.empty() )
+    while (!indcb_gathers.empty())
     {
-        BufChunk *top_chunk = indcb_gathers.back();
+        BufChunk* top_chunk = indcb_gathers.back();
         indcb_gathers.pop_back();
         delete top_chunk;
     }
@@ -178,7 +178,7 @@ void ConstantCoalescing::ProcessFunction( Function* function )
     irBuilder = nullptr;
 }
 
-static void checkInsertExtractMatch(InsertElementInst* insertInst, Value* base, SmallVector<bool, 4>& mask)
+static void checkInsertExtractMatch(InsertElementInst* insertInst, Value* base, SmallVector<bool, 4> & mask)
 {
     auto vectorBase = insertInst->getOperand(0);
     auto extractElt = dyn_cast<ExtractElementInst>(insertInst->getOperand(1));
@@ -290,7 +290,7 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
     uint32_t srcNElts = 0;
     for (auto I = bb->rbegin(), IEnd = bb->rend(); I != IEnd; ++I)
     {
-        if (LoadInst *load = dyn_cast<LoadInst>(&(*I)))
+        if (LoadInst * load = dyn_cast<LoadInst>(&(*I)))
         {
             if (load->getType()->isVectorTy() && (wiAns->whichDepend(load) == WIAnalysis::UNIFORM))
             {
@@ -299,10 +299,10 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
 
                 for (auto iter = load->user_begin(); iter != load->user_end(); iter++)
                 {
-                    ExtractElementInst *extractElt = dyn_cast<ExtractElementInst>(*iter);
+                    ExtractElementInst* extractElt = dyn_cast<ExtractElementInst>(*iter);
                     if (extractElt && extractElt->getParent() == bb)
                     {
-                        if (ConstantInt *C = dyn_cast<ConstantInt>(extractElt->getOperand(1)))
+                        if (ConstantInt * C = dyn_cast<ConstantInt>(extractElt->getOperand(1)))
                         {
                             extractElementMap[C->getZExtValue()] = extractElt;
                         }
@@ -311,7 +311,7 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
 
                 for (int ie = srcNElts - 1; ie >= 0; ie--)
                 {
-                    if (Instruction *extEle = extractElementMap[ie])
+                    if (Instruction * extEle = extractElementMap[ie])
                     {
                         if (extEle->hasOneUse() && safeToMoveInstUp(extEle, load))
                         {
@@ -370,50 +370,50 @@ bool ConstantCoalescing::safeToMoveInstUp(Instruction* inst, Instruction* newLoc
 #define MAX_VECTOR_INPUT 4  // 4 element
 
 void ConstantCoalescing::ProcessBlock(
-    BasicBlock *blk,
-    std::vector<BufChunk*> &dircb_owloads,
-    std::vector<BufChunk*> &indcb_owloads,
-    std::vector<BufChunk*> &indcb_gathers)
+    BasicBlock * blk,
+    std::vector<BufChunk*> & dircb_owloads,
+    std::vector<BufChunk*> & indcb_owloads,
+    std::vector<BufChunk*> & indcb_gathers)
 {
     // get work-item analysis, need to update uniformness information
-    for( BasicBlock::iterator BBI = blk->begin(), BBE = blk->end();
-         BBI != BBE; ++BBI )
+    for (BasicBlock::iterator BBI = blk->begin(), BBE = blk->end();
+        BBI != BBE; ++BBI)
     {
 
         // skip dead instructions
-        if(BBI->use_empty())
+        if (BBI->use_empty())
         {
             continue;
         }
         // bindless case
-        if(LdRawIntrinsic* ldRaw = dyn_cast<LdRawIntrinsic>(BBI))
+        if (LdRawIntrinsic * ldRaw = dyn_cast<LdRawIntrinsic>(BBI))
         {
             bool directIdx = false;
             unsigned int bufId = 0;
             BufferType bufType = DecodeAS4GFXResource(
                 ldRaw->getResourceValue()->getType()->getPointerAddressSpace(), directIdx, bufId);
-            if(bufType != BINDLESS_READONLY)
+            if (bufType != BINDLESS_READONLY)
             {
                 continue;
             }
-            ConstantInt *offsetValue = dyn_cast<ConstantInt>(ldRaw->getOffsetValue());
-            if(offsetValue)
+            ConstantInt* offsetValue = dyn_cast<ConstantInt>(ldRaw->getOffsetValue());
+            if (offsetValue)
             {   // direct access
                 uint offsetInBytes = (uint)offsetValue->getZExtValue();
-                if((int32_t)offsetInBytes >= 0)
+                if ((int32_t)offsetInBytes >= 0)
                 {
-                    if(wiAns->whichDepend(ldRaw) == WIAnalysis::UNIFORM)
+                    if (wiAns->whichDepend(ldRaw) == WIAnalysis::UNIFORM)
                     {
                         uint maxEltPlus = 1;
-                        if(ldRaw->getType()->isVectorTy())
+                        if (ldRaw->getType()->isVectorTy())
                         {
                             // \todo, another parameter to tune
-                            if(ldRaw->getType()->getVectorNumElements() > MAX_VECTOR_INPUT)
+                            if (ldRaw->getType()->getVectorNumElements() > MAX_VECTOR_INPUT)
                                 continue;
                             maxEltPlus = CheckVectorElementUses(ldRaw);
                             // maxEltPlus == 0, means that vector may be used with index or as-vector,
                             // skip it for now
-                            if(maxEltPlus == 0)
+                            if (maxEltPlus == 0)
                                 continue;
                         }
                         MergeUniformLoad(ldRaw, ldRaw->getResourceValue(), 0, nullptr, offsetInBytes, maxEltPlus, dircb_owloads);
@@ -422,14 +422,14 @@ void ConstantCoalescing::ProcessBlock(
             }
             continue;
         }
-        LoadInst *inst = dyn_cast<LoadInst>(BBI);
+        LoadInst* inst = dyn_cast<LoadInst>(BBI);
         // skip load on struct or array type
         if (!inst || inst->getType()->isAggregateType())
         {
             continue;
         }
-        Type *loadType = inst->getType();
-        Type *elemType = loadType->getScalarType();
+        Type* loadType = inst->getType();
+        Type* elemType = loadType->getScalarType();
         // right now, only work on load with dword element-type
         if (elemType->getPrimitiveSizeInBits() != SIZE_DWORD * 8)
         {
@@ -481,34 +481,34 @@ void ConstantCoalescing::ProcessBlock(
 
 
         uint bufId = 0;
-        Value *elt_ptrv = nullptr;
+        Value* elt_ptrv = nullptr;
         // \todo, handle dynamic buffer-indexing if necessary
         BufferType bufType = BUFFER_TYPE_UNKNOWN;
         bool is_cbload = IsReadOnlyLoadDirectCB(inst, bufId, elt_ptrv, bufType);
-        if( is_cbload )
+        if (is_cbload)
         {
             uint addrSpace = inst->getPointerAddressSpace();
             uint maxEltPlus = 1;
-            if(loadType->isVectorTy())
+            if (loadType->isVectorTy())
             {
                 // \todo, another parameter to tune
-                if(loadType->getVectorNumElements() > MAX_VECTOR_INPUT)
+                if (loadType->getVectorNumElements() > MAX_VECTOR_INPUT)
                     continue;
                 maxEltPlus = CheckVectorElementUses(inst);
                 // maxEltPlus == 0, means that vector may be used with index or as-vector,
                 // skip it for now
-                if(maxEltPlus == 0)
+                if (maxEltPlus == 0)
                     continue;
             }
             if (isa<ConstantPointerNull>(elt_ptrv))
             {
-                MergeUniformLoad( inst, nullptr, addrSpace, nullptr, 0, maxEltPlus, dircb_owloads );
+                MergeUniformLoad(inst, nullptr, addrSpace, nullptr, 0, maxEltPlus, dircb_owloads);
             }
             else if (isa<IntToPtrInst>(elt_ptrv))
             {
-                Value *elt_idxv = cast<Instruction>(elt_ptrv)->getOperand(0);
-                ConstantInt *offsetConstant = dyn_cast<ConstantInt>( elt_idxv );
-                if(offsetConstant)
+                Value* elt_idxv = cast<Instruction>(elt_ptrv)->getOperand(0);
+                ConstantInt* offsetConstant = dyn_cast<ConstantInt>(elt_idxv);
+                if (offsetConstant)
                 {   // direct access
                     uint offsetInBytes = (uint)offsetConstant->getZExtValue();
                     // TODO: Disabling constant coalescing when we see that the offset to the constant buffer is negtive
@@ -536,12 +536,9 @@ void ConstantCoalescing::ProcessBlock(
                             MergeScatterLoad(inst, nullptr, bufid, elt_idxv, eltid, 1, indcb_gathers);
 #else
                             if (UsesTypedConstantBuffer(m_ctx) &&
-                                bufType == CONSTANT_BUFFER &&
-                                ((offsetInBytes % 4) == 0) &&
-                                !inst->getType()->isVectorTy())
+                                bufType == CONSTANT_BUFFER)
                             {
-                                uint eltid = offsetInBytes >> 2;
-                                ScatterToSampler(inst, nullptr, addrSpace, elt_idxv, eltid, indcb_gathers);
+                                ScatterToSampler(inst, nullptr, addrSpace, elt_idxv, offsetInBytes, indcb_gathers);
                             }
 #endif
                         }
@@ -553,7 +550,7 @@ void ConstantCoalescing::ProcessBlock(
 }
 
 /// check if two access have the same buffer-base
-bool ConstantCoalescing::CompareBufferBase(Value *bufIdxV1, uint addrSpace1, Value *bufIdxV2, uint addrSpace2)
+bool ConstantCoalescing::CompareBufferBase(Value* bufIdxV1, uint addrSpace1, Value* bufIdxV2, uint addrSpace2)
 {
     if (bufIdxV1 == bufIdxV2)
     {
@@ -571,11 +568,11 @@ bool ConstantCoalescing::CompareBufferBase(Value *bufIdxV1, uint addrSpace1, Val
     return false;
 }
 
-void ConstantCoalescing::MergeScatterLoad( Instruction *load,
-                                Value *bufIdxV, uint addrSpace,
-                                Value *eltIdxV, uint offsetInBytes,
-                                uint maxEltPlus,
-                                std::vector<BufChunk*> &chunk_vec )
+void ConstantCoalescing::MergeScatterLoad(Instruction* load,
+    Value* bufIdxV, uint addrSpace,
+    Value* eltIdxV, uint offsetInBytes,
+    uint maxEltPlus,
+    std::vector<BufChunk*>& chunk_vec)
 {
     const uint scalarSizeInBytes = load->getType()->getScalarSizeInBits() / 8;
     const uint alignment = GetAlignment(load);
@@ -588,12 +585,12 @@ void ConstantCoalescing::MergeScatterLoad( Instruction *load,
     // 2 i16s/halfs into a single non-aligned DWORD.
     const bool isDwordAligned = ((offsetInBytes % 4) == 0 && (eltIdxV == nullptr || alignment >= 4));
 
-    BufChunk *cov_chunk = nullptr;
-    for( std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
-         rie = chunk_vec.rend(); rit != rie; ++rit )
+    BufChunk* cov_chunk = nullptr;
+    for (std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
+        rie = chunk_vec.rend(); rit != rie; ++rit)
     {
-        BufChunk *cur_chunk = *rit;
-        if (CompareBufferBase(cur_chunk->bufIdxV , cur_chunk->addrSpace, bufIdxV, addrSpace) &&
+        BufChunk* cur_chunk = *rit;
+        if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace) &&
             cur_chunk->baseIdxV == eltIdxV &&
             cur_chunk->chunkIO->getType()->getScalarType() == load->getType()->getScalarType())
         {
@@ -611,7 +608,7 @@ void ConstantCoalescing::MergeScatterLoad( Instruction *load,
         }
     }
 
-    if( !cov_chunk )
+    if (!cov_chunk)
     {
         if (isDwordAligned)
         {
@@ -633,11 +630,11 @@ void ConstantCoalescing::MergeScatterLoad( Instruction *load,
             chunk_vec.push_back(cov_chunk);
         }
     }
-    else if( !cov_chunk->chunkIO->getType()->isVectorTy() )
+    else if (!cov_chunk->chunkIO->getType()->isVectorTy())
     {
         // combine the initial scalar loads with this incoming load (which can be a vector-load),
         // then add extracts
-        CombineTwoLoads( cov_chunk, load, eltid, maxEltPlus );
+        CombineTwoLoads(cov_chunk, load, eltid, maxEltPlus);
     }
     else if (load->getType()->isVectorTy())
     {
@@ -661,46 +658,46 @@ void ConstantCoalescing::MergeScatterLoad( Instruction *load,
     }
     else
     {
-        Instruction *splitter = nullptr;
+        Instruction* splitter = nullptr;
         uint start_adj = 0;
         uint size_adj = 0;
-        if( eltid < cov_chunk->chunkStart )
+        if (eltid < cov_chunk->chunkStart)
         {
             start_adj = cov_chunk->chunkStart - eltid;
             size_adj = start_adj;
         }
-        else if( eltid >= cov_chunk->chunkStart + cov_chunk->chunkSize )
+        else if (eltid >= cov_chunk->chunkStart + cov_chunk->chunkSize)
         {
             size_adj = eltid - cov_chunk->chunkStart - cov_chunk->chunkSize + 1;
         }
 
-        if( start_adj == 0 && size_adj == 0 )
+        if (start_adj == 0 && size_adj == 0)
         {
-            splitter = FindOrAddChunkExtract( cov_chunk, eltid );
+            splitter = FindOrAddChunkExtract(cov_chunk, eltid);
         }
-        else if( start_adj > 0 )
+        else if (start_adj > 0)
         {
-            splitter = AdjustChunkAddExtract( cov_chunk, start_adj, size_adj, eltid );
+            splitter = AdjustChunkAddExtract(cov_chunk, start_adj, size_adj, eltid);
         }
-        else if( size_adj > 0 )
+        else if (size_adj > 0)
         {
-            splitter = EnlargeChunkAddExtract( cov_chunk, size_adj, eltid );
+            splitter = EnlargeChunkAddExtract(cov_chunk, size_adj, eltid);
         }
-        wiAns->incUpdateDepend( splitter, WIAnalysis::RANDOM );
-        load->replaceAllUsesWith( splitter );
+        wiAns->incUpdateDepend(splitter, WIAnalysis::RANDOM);
+        load->replaceAllUsesWith(splitter);
     }
 
 }
 
-Value *ConstantCoalescing::FormChunkAddress(BufChunk *chunk)
+Value* ConstantCoalescing::FormChunkAddress(BufChunk* chunk)
 {
     assert(chunk->bufIdxV);
     WIAnalysis::WIDependancy uniformness = wiAns->whichDepend(chunk->bufIdxV);
-    Value *eac = chunk->baseIdxV;
+    Value* eac = chunk->baseIdxV;
     if (chunk->chunkStart && chunk->baseIdxV)
     {
         assert(chunk->baseIdxV->getType()->isIntegerTy());
-        Value *cv_start = ConstantInt::get(chunk->baseIdxV->getType(), chunk->chunkStart * chunk->elementSize);
+        Value* cv_start = ConstantInt::get(chunk->baseIdxV->getType(), chunk->chunkStart * chunk->elementSize);
         eac = irBuilder->CreateAdd(chunk->baseIdxV, cv_start);
         wiAns->incUpdateDepend(eac, wiAns->whichDepend(chunk->baseIdxV));
         if (wiAns->whichDepend(chunk->baseIdxV) != WIAnalysis::UNIFORM)
@@ -708,10 +705,10 @@ Value *ConstantCoalescing::FormChunkAddress(BufChunk *chunk)
             uniformness = WIAnalysis::RANDOM;
         }
     }
-    Value *bufsrc = chunk->bufIdxV;
+    Value* bufsrc = chunk->bufIdxV;
     if (chunk->bufIdxV->getType()->isPointerTy())
     {
-        Type *ptrIntTy = dataLayout->getIntPtrType(cast<PointerType>(chunk->bufIdxV->getType()));
+        Type* ptrIntTy = dataLayout->getIntPtrType(cast<PointerType>(chunk->bufIdxV->getType()));
         bufsrc = irBuilder->CreatePtrToInt(chunk->bufIdxV, ptrIntTy);
         wiAns->incUpdateDepend(bufsrc, wiAns->whichDepend(chunk->bufIdxV));
     }
@@ -744,41 +741,41 @@ Value *ConstantCoalescing::FormChunkAddress(BufChunk *chunk)
     return eac;
 }
 
-void ConstantCoalescing::CombineTwoLoads( BufChunk *cov_chunk, Instruction *load, uint eltid, uint numelt )
+void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load, uint eltid, uint numelt)
 {
     uint eltid0 = cov_chunk->chunkStart;
     uint lb = std::min(eltid0, eltid);
     uint ub = std::max(eltid0, eltid + numelt - 1);
     cov_chunk->chunkStart = lb;
-    cov_chunk->chunkSize = ub - lb  + 1;
-    Instruction *load0 = cov_chunk->chunkIO;
+    cov_chunk->chunkSize = ub - lb + 1;
+    Instruction* load0 = cov_chunk->chunkIO;
     // remove redundant load
     if (cov_chunk->chunkSize <= 1)
     {
         load->replaceAllUsesWith(load0);
         return;
     }
-    Type *vty = VectorType::get( cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize );
+    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
     irBuilder->SetInsertPoint(load0);
-    if(isa<LoadInst>(cov_chunk->chunkIO))
+    if (isa<LoadInst>(cov_chunk->chunkIO))
     {
-        Value *addr_ptr = cov_chunk->chunkIO->getOperand(0);
+        Value* addr_ptr = cov_chunk->chunkIO->getOperand(0);
         unsigned addrSpace = (cast<PointerType>(addr_ptr->getType()))->getAddressSpace();
-        if(addrSpace == ADDRESS_SPACE_CONSTANT)
+        if (addrSpace == ADDRESS_SPACE_CONSTANT)
         {
             // no GEP, OCL path
             assert(isa<IntToPtrInst>(addr_ptr));
-            Value *eac = cast<Instruction>(addr_ptr)->getOperand(0);
+            Value* eac = cast<Instruction>(addr_ptr)->getOperand(0);
             // non-uniform, address must be non-uniform
             assert(isa<Instruction>(eac));
             // modify the address calculation if the chunk-start is changed
-            if(eltid0 != cov_chunk->chunkStart)
+            if (eltid0 != cov_chunk->chunkStart)
             {
                 eac = FormChunkAddress(cov_chunk);
             }
             // new IntToPtr and new load
             // cannot use irbuilder to create IntToPtr. It may create ConstantExpr instead of instruction
-            Value *ptrcast = IntToPtrInst::Create(Instruction::IntToPtr, eac, PointerType::get(vty, addrSpace), "twoScalar", load0);
+            Value* ptrcast = IntToPtrInst::Create(Instruction::IntToPtr, eac, PointerType::get(vty, addrSpace), "twoScalar", load0);
             m_TT->RegisterNewValueAndAssignID(ptrcast);
             wiAns->incUpdateDepend(ptrcast, WIAnalysis::RANDOM);
             cov_chunk->chunkIO = irBuilder->CreateLoad(ptrcast, false);
@@ -793,16 +790,16 @@ void ConstantCoalescing::CombineTwoLoads( BufChunk *cov_chunk, Instruction *load
             cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(4);  // \todo, more precise
             wiAns->incUpdateDepend(cov_chunk->chunkIO, WIAnalysis::RANDOM);
             // modify the address calculation if the chunk-start is changed
-            if(eltid0 != cov_chunk->chunkStart)
+            if (eltid0 != cov_chunk->chunkStart)
             {
                 assert(cov_chunk->baseIdxV);
                 // src0 is the buffer base pointer, src1 is the address calculation
-                Value *eac = cast<Instruction>(addr_ptr)->getOperand(0);
+                Value* eac = cast<Instruction>(addr_ptr)->getOperand(0);
                 assert(isa<Instruction>(eac));
-                if(cast<Instruction>(eac)->getOpcode() == Instruction::Add ||
+                if (cast<Instruction>(eac)->getOpcode() == Instruction::Add ||
                     cast<Instruction>(eac)->getOpcode() == Instruction::Or)
                 {
-                    Value *cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart * cov_chunk->elementSize);
+                    Value* cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart * cov_chunk->elementSize);
                     cast<Instruction>(eac)->setOperand(1, cv_start);
                 }
             }
@@ -815,10 +812,10 @@ void ConstantCoalescing::CombineTwoLoads( BufChunk *cov_chunk, Instruction *load
     }
 
     // add two splitters
-    Instruction *splitter;
-    splitter = AddChunkExtract( cov_chunk->chunkIO, eltid0 - cov_chunk->chunkStart );
-    load0->replaceAllUsesWith( splitter );
-    wiAns->incUpdateDepend( splitter, WIAnalysis::RANDOM );
+    Instruction* splitter;
+    splitter = AddChunkExtract(cov_chunk->chunkIO, eltid0 - cov_chunk->chunkStart);
+    load0->replaceAllUsesWith(splitter);
+    wiAns->incUpdateDepend(splitter, WIAnalysis::RANDOM);
     if (!load->getType()->isVectorTy())
     {
         splitter = AddChunkExtract(cov_chunk->chunkIO, eltid - cov_chunk->chunkStart);
@@ -867,11 +864,11 @@ void ConstantCoalescing::SetAlignment(Instruction* load, uint alignment)
 
 }
 
-void ConstantCoalescing::MergeUniformLoad( Instruction *load,
-                                Value *bufIdxV, uint addrSpace,
-                                Value *eltIdxV, uint offsetInBytes,
-                                uint maxEltPlus,
-                                std::vector<BufChunk*> &chunk_vec)
+void ConstantCoalescing::MergeUniformLoad(Instruction* load,
+    Value* bufIdxV, uint addrSpace,
+    Value* eltIdxV, uint offsetInBytes,
+    uint maxEltPlus,
+    std::vector<BufChunk*>& chunk_vec)
 {
     const uint scalarSizeInBytes = load->getType()->getScalarSizeInBits() / 8;
     const uint alignment = GetAlignment(load);
@@ -891,18 +888,18 @@ void ConstantCoalescing::MergeUniformLoad( Instruction *load,
     // 2 i16s/halfs into a single non-aligned DWORD.
     const bool isDwordAligned = ((offsetInBytes % 4) == 0 && (eltIdxV == nullptr || alignment >= 4));
 
-    BufChunk *cov_chunk = nullptr;
-    for( std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
-         rie = chunk_vec.rend(); rit != rie; ++rit )
+    BufChunk* cov_chunk = nullptr;
+    for (std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
+        rie = chunk_vec.rend(); rit != rie; ++rit)
     {
-        BufChunk *cur_chunk = *rit;
+        BufChunk* cur_chunk = *rit;
         if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace) &&
             cur_chunk->baseIdxV == eltIdxV &&
-            cur_chunk->chunkIO->getType()->getScalarType() == load->getType()->getScalarType() )
+            cur_chunk->chunkIO->getType()->getScalarType() == load->getType()->getScalarType())
         {
             uint lb = std::min(eltid, cur_chunk->chunkStart);
             uint ub = std::max(eltid + maxEltPlus, cur_chunk->chunkStart + cur_chunk->chunkSize);
-            if(((ub - lb) * scalarSizeInBytes) <= MAX_OWLOAD_SIZE &&
+            if (((ub - lb) * scalarSizeInBytes) <= MAX_OWLOAD_SIZE &&
                 (ub - lb) <= MAX_VECTOR_NUM_ELEMENTS &&
                 (isDwordAligned || eltid >= cur_chunk->chunkStart))
             {
@@ -911,7 +908,7 @@ void ConstantCoalescing::MergeUniformLoad( Instruction *load,
             }
         }
     }
-    if( !cov_chunk )
+    if (!cov_chunk)
     {
         if (isDwordAligned)
         {
@@ -949,80 +946,80 @@ void ConstantCoalescing::MergeUniformLoad( Instruction *load,
     }
     else
     {
-        Instruction *splitter = nullptr;
+        Instruction* splitter = nullptr;
         uint start_adj = 0;
         uint size_adj = 0;
-        if( eltid < cov_chunk->chunkStart )
+        if (eltid < cov_chunk->chunkStart)
         {
             start_adj = cov_chunk->chunkStart - eltid;
             size_adj = start_adj;
         }
-        else if( eltid >= cov_chunk->chunkStart + cov_chunk->chunkSize )
+        else if (eltid >= cov_chunk->chunkStart + cov_chunk->chunkSize)
         {
             size_adj = iSTD::RoundPower2((DWORD)(eltid + 1 - cov_chunk->chunkStart)) - cov_chunk->chunkSize;
         }
         // Gen only has 1, 2, 4 or 8 oword loads round up
         size_adj = iSTD::RoundPower2((DWORD)(size_adj + cov_chunk->chunkSize)) - cov_chunk->chunkSize;
 
-        if( start_adj == 0 && size_adj == 0 )
+        if (start_adj == 0 && size_adj == 0)
         {
-            splitter = FindOrAddChunkExtract( cov_chunk, eltid );
+            splitter = FindOrAddChunkExtract(cov_chunk, eltid);
         }
-        else if( start_adj > 0 )
+        else if (start_adj > 0)
         {
-            splitter = AdjustChunkAddExtract( cov_chunk, start_adj, size_adj, eltid );
+            splitter = AdjustChunkAddExtract(cov_chunk, start_adj, size_adj, eltid);
         }
-        else if( size_adj > 0 )
+        else if (size_adj > 0)
         {
-            splitter = EnlargeChunkAddExtract( cov_chunk, size_adj, eltid );
+            splitter = EnlargeChunkAddExtract(cov_chunk, size_adj, eltid);
         }
         load->replaceAllUsesWith(splitter);
         wiAns->incUpdateDepend(splitter, WIAnalysis::UNIFORM);
     }
 }
 
-Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
+Value* ConstantCoalescing::SimpleBaseOffset(Value* elt_idxv, uint& offset)
 {
     // in case expression comes from a smaller type arithmetic
-    if(ZExtInst* reducedOffset = dyn_cast<ZExtInst>(elt_idxv))
+    if (ZExtInst * reducedOffset = dyn_cast<ZExtInst>(elt_idxv))
     {
         elt_idxv = reducedOffset->getOperand(0);
     }
-    if(SExtInst* reducedOffset = dyn_cast<SExtInst>(elt_idxv))
+    if (SExtInst * reducedOffset = dyn_cast<SExtInst>(elt_idxv))
     {
         elt_idxv = reducedOffset->getOperand(0);
     }
     Instruction* expr = dyn_cast<Instruction>(elt_idxv);
-    if( !expr )
+    if (!expr)
     {
         offset = 0;
         return elt_idxv;
     }
     assert(!isa<IntToPtrInst>(expr));
-    if( !expr->getType()->isIntegerTy() )
+    if (!expr->getType()->isIntegerTy())
     {
         offset = 0;
         return elt_idxv;
     }
-    if( expr->getOpcode() == Instruction::Add )
+    if (expr->getOpcode() == Instruction::Add)
     {
-        Value *src0 = expr->getOperand(0);
-        Value *src1 = expr->getOperand(1);
-        if( isa<ConstantInt>(src1) )
+        Value* src0 = expr->getOperand(0);
+        Value* src1 = expr->getOperand(1);
+        if (isa<ConstantInt>(src1))
         {
             offset = (uint)cast<ConstantInt>(src1)->getZExtValue();
             return src0;
         }
-        else if( isa<ConstantInt>(src0) )
+        else if (isa<ConstantInt>(src0))
         {
             offset = (uint)cast<ConstantInt>(src0)->getZExtValue();
             return src1;
         }
     }
-    else if( expr->getOpcode() == Instruction::Or )
+    else if (expr->getOpcode() == Instruction::Or)
     {
-        Value *src0 = expr->getOperand(0);
-        Value *src1 = expr->getOperand(1);
+        Value* src0 = expr->getOperand(0);
+        Value* src1 = expr->getOperand(1);
         Instruction* or_inst0 = dyn_cast<Instruction>(src0);
         ConstantInt* or_csrc1 = dyn_cast<ConstantInt>(src1);
         if (or_inst0 && or_csrc1)
@@ -1034,14 +1031,22 @@ Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
 
             offset = or_offset;
 
-            // Example of pattern handled below:
-            //  %27 = shl i32 %26, 4
-            //  %168 = add i32 %27, 32
-            //  %fromGBP33 = inttoptr i32 %168 to float addrspace(65538)*
-            //  %ldrawidx34 = load float, float addrspace(65538)* %fromGBP33, align 16
-            //  %173 = or i32 %168, 4
-            //  %fromGBP35 = inttoptr i32 %173 to float addrspace(65538)*
-            //  %ldrawidx36 = load float, float addrspace(65538)* %fromGBP35, align 4
+            // Examples of patterns handled below:
+            // - shl/add/or
+            //      %27 = shl i32 %26, 4
+            //      %168 = add i32 %27, 32
+            //      %fromGBP33 = inttoptr i32 %168 to float addrspace(65538)*
+            //      %ldrawidx34 = load float, float addrspace(65538)* %fromGBP33, align 16
+            //      %173 = or i32 %168, 4
+            //      %fromGBP35 = inttoptr i32 %173 to float addrspace(65538)*
+            //      %ldrawidx36 = load float, float addrspace(65538)* %fromGBP35, align 4
+            //
+            // - mul/shl/or
+            //        %6 = mul i32 %4, 76
+            //        %7 = shl i32 %6, 4
+            //        %11 = or i32 %7, 8
+            //        %12 = inttoptr i32 %11 to <2 x i32> addrspace(65536)*
+            //
             if (inst0_op == Instruction::Add &&
                 isa<Instruction>(inst0->getOperand(0)) &&
                 isa<ConstantInt>(inst0->getOperand(1)))
@@ -1061,7 +1066,7 @@ Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
                 inst0_op == Instruction::Mul)
             {
                 Value* ptr_adj = inst0->getOperand(1);
-                if (ConstantInt* adj_val = cast<ConstantInt>(ptr_adj))
+                if (ConstantInt * adj_val = cast<ConstantInt>(ptr_adj))
                 {
                     uint imm = (uint)adj_val->getZExtValue();
                     if ((inst0_op == Instruction::And && or_offset < int_cast<unsigned int>(1 << iSTD::bsf(imm))) ||
@@ -1074,11 +1079,11 @@ Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
             else if (inst0_op == Instruction::Shl)
             {
                 Value* ptr_adj = inst0->getOperand(1);
-                if (ConstantInt* adj_val = dyn_cast<ConstantInt>(ptr_adj))
+                if (ConstantInt * adj_val = dyn_cast<ConstantInt>(ptr_adj))
                 {
                     uint imm = (uint)adj_val->getZExtValue();
                     uint shl_base = 1;
-                    if (Instruction* shl_inst0 = dyn_cast<Instruction>(inst0->getOperand(0)))
+                    if (Instruction * shl_inst0 = dyn_cast<Instruction>(inst0->getOperand(0)))
                     {
                         uint shl_inst0_op = shl_inst0->getOpcode();
                         if (shl_inst0_op == Instruction::And && isa<ConstantInt>(shl_inst0->getOperand(1)))
@@ -1086,6 +1091,12 @@ Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
                             ConstantInt* and_mask_val = cast<ConstantInt>(shl_inst0->getOperand(1));
                             uint and_mask = (uint)and_mask_val->getZExtValue();
                             shl_base = (1 << iSTD::bsf(and_mask));
+                        }
+                        else if (shl_inst0_op == Instruction::Mul && isa<ConstantInt>(shl_inst0->getOperand(1)))
+                        {
+                            ConstantInt* mul_multiplier_val = cast<ConstantInt>(shl_inst0->getOperand(1));
+                            uint mul_multiplier = (uint)mul_multiplier_val->getZExtValue();
+                            shl_base = (1 << iSTD::bsf(mul_multiplier));
                         }
                     }
 
@@ -1101,16 +1112,16 @@ Value *ConstantCoalescing::SimpleBaseOffset( Value *elt_idxv, uint &offset )
     return elt_idxv;
 }
 
-bool ConstantCoalescing::DecomposePtrExp(Value *ptr_val, Value*& buf_idxv, Value*& elt_idxv, uint &offset)
+bool ConstantCoalescing::DecomposePtrExp(Value* ptr_val, Value*& buf_idxv, Value*& elt_idxv, uint& offset)
 {
     buf_idxv = ptr_val;
     elt_idxv = nullptr;
     offset = 0;
 
-    if (IntToPtrInst *i2p = dyn_cast<IntToPtrInst>(ptr_val))
+    if (IntToPtrInst * i2p = dyn_cast<IntToPtrInst>(ptr_val))
     {
         // get the int-type address computation
-        Instruction *expr = dyn_cast<Instruction>(i2p->getOperand(0));
+        Instruction* expr = dyn_cast<Instruction>(i2p->getOperand(0));
         if (!expr || !expr->getType()->isIntegerTy())
         {
             return false;
@@ -1125,12 +1136,12 @@ bool ConstantCoalescing::DecomposePtrExp(Value *ptr_val, Value*& buf_idxv, Value
         }
         if (expr->getOpcode() == Instruction::Add)
         {
-            Value *src0 = expr->getOperand(0);
-            Value *src1 = expr->getOperand(1);
+            Value* src0 = expr->getOperand(0);
+            Value* src1 = expr->getOperand(1);
             if (isa<PtrToIntInst>(src0))
             {
                 buf_idxv = src0;
-                ConstantInt *elt_idx = dyn_cast<ConstantInt>(src1);
+                ConstantInt* elt_idx = dyn_cast<ConstantInt>(src1);
                 if (elt_idx)
                 {   // direct access
                     offset = (uint)elt_idx->getZExtValue();
@@ -1145,7 +1156,7 @@ bool ConstantCoalescing::DecomposePtrExp(Value *ptr_val, Value*& buf_idxv, Value
             else if (isa<PtrToIntInst>(src1))
             {
                 buf_idxv = src1;
-                ConstantInt *elt_idx = dyn_cast<ConstantInt>(src0);
+                ConstantInt* elt_idx = dyn_cast<ConstantInt>(src0);
                 if (elt_idx)
                 {   // direct access
                     offset = (uint)elt_idx->getZExtValue();
@@ -1157,14 +1168,14 @@ bool ConstantCoalescing::DecomposePtrExp(Value *ptr_val, Value*& buf_idxv, Value
                 }
                 return true;
             }
-            else if (ConstantInt *elt_idx = dyn_cast<ConstantInt>(src1))
+            else if (ConstantInt * elt_idx = dyn_cast<ConstantInt>(src1))
             {
                 offset = (uint)elt_idx->getZExtValue();
                 elt_idxv = nullptr;
                 buf_idxv = src0;
                 return true;
             }
-            else if (ConstantInt *elt_idx = dyn_cast<ConstantInt>(src0))
+            else if (ConstantInt * elt_idx = dyn_cast<ConstantInt>(src0))
             {
                 offset = (uint)elt_idx->getZExtValue();
                 elt_idxv = nullptr;
@@ -1178,14 +1189,14 @@ bool ConstantCoalescing::DecomposePtrExp(Value *ptr_val, Value*& buf_idxv, Value
 }
 
 /// look at all the uses of a vector load. If they are all extract-elements,
-uint ConstantCoalescing::CheckVectorElementUses(Instruction *load)
+uint ConstantCoalescing::CheckVectorElementUses(Instruction* load)
 {
     uint maxEltPlus = 0;
     for (auto I = load->user_begin(), E = load->user_end(); (I != E); ++I)
     {
-        if (llvm::ExtractElementInst* extract = llvm::dyn_cast<llvm::ExtractElementInst>(*I))
+        if (llvm::ExtractElementInst * extract = llvm::dyn_cast<llvm::ExtractElementInst>(*I))
         {
-            if (llvm::ConstantInt* index = llvm::dyn_cast<ConstantInt>(extract->getIndexOperand()))
+            if (llvm::ConstantInt * index = llvm::dyn_cast<ConstantInt>(extract->getIndexOperand()))
             {
                 uint cv = static_cast<uint>(index->getZExtValue());
                 if (cv + 1 > maxEltPlus)
@@ -1204,21 +1215,21 @@ uint ConstantCoalescing::CheckVectorElementUses(Instruction *load)
     return maxEltPlus;
 }
 
-Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *chunk, uint eltid, uint alignment)
+Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* chunk, uint eltid, uint alignment)
 {
     irBuilder->SetInsertPoint(seedi);
-    if(LoadInst *load = dyn_cast<LoadInst>(seedi))
+    if (LoadInst * load = dyn_cast<LoadInst>(seedi))
     {
         LoadInst* chunkLoad;
-        Value *cb_ptr = load->getPointerOperand();
+        Value* cb_ptr = load->getPointerOperand();
 
-        Value *eac;
+        Value* eac;
         // ocl case: no gep
-        if(load->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT ||
-           load->getPointerAddressSpace() == ADDRESS_SPACE_GLOBAL)
+        if (load->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT ||
+            load->getPointerAddressSpace() == ADDRESS_SPACE_GLOBAL)
         {
             eac = cb_ptr;
-            if(eltid == chunk->chunkStart && isa<IntToPtrInst>(eac))
+            if (eltid == chunk->chunkStart && isa<IntToPtrInst>(eac))
                 eac = dyn_cast<IntToPtrInst>(eac)->getOperand(0);
             else
                 eac = FormChunkAddress(chunk);
@@ -1227,9 +1238,9 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
         {
             // gfx case
             eac = ConstantInt::get(irBuilder->getInt32Ty(), chunk->chunkStart * chunk->elementSize);
-            if(chunk->baseIdxV)
+            if (chunk->baseIdxV)
             {
-                if(chunk->chunkStart)
+                if (chunk->chunkStart)
                 {
                     eac = irBuilder->CreateAdd(chunk->baseIdxV, eac);
                     wiAns->incUpdateDepend(eac, WIAnalysis::UNIFORM);
@@ -1240,11 +1251,11 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
                 }
             }
         }
-        Type *vty = VectorType::get(load->getType()->getScalarType(), chunk->chunkSize);
+        Type* vty = VectorType::get(load->getType()->getScalarType(), chunk->chunkSize);
         unsigned addrSpace = (cast<PointerType>(cb_ptr->getType()))->getAddressSpace();
         PointerType* pty = PointerType::get(vty, addrSpace);
         // cannot use irbuilder to create IntToPtr. It may create ConstantExpr instead of instruction
-        Instruction *ptr = IntToPtrInst::Create(Instruction::IntToPtr, eac, pty, "chunkPtr", seedi);
+        Instruction* ptr = IntToPtrInst::Create(Instruction::IntToPtr, eac, pty, "chunkPtr", seedi);
         m_TT->RegisterNewValueAndAssignID(ptr);
         // Update debug location
         ptr->setDebugLoc(irBuilder->getCurrentDebugLocation());
@@ -1258,9 +1269,9 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
         // bindless case
         LdRawIntrinsic* ldRaw = cast<LdRawIntrinsic>(seedi);
         Value* eac = irBuilder->getInt32(chunk->chunkStart * chunk->elementSize);
-        if(chunk->baseIdxV)
+        if (chunk->baseIdxV)
         {
-            if(chunk->chunkStart)
+            if (chunk->chunkStart)
             {
                 eac = irBuilder->CreateAdd(chunk->baseIdxV, eac);
                 wiAns->incUpdateDepend(eac, WIAnalysis::UNIFORM);
@@ -1270,7 +1281,7 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
                 eac = chunk->baseIdxV;
             }
         }
-        Type *vty = VectorType::get(ldRaw->getType()->getScalarType(), chunk->chunkSize);
+        Type* vty = VectorType::get(ldRaw->getType()->getScalarType(), chunk->chunkSize);
         Type* types[] =
         {
             vty,
@@ -1291,9 +1302,9 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
 
     wiAns->incUpdateDepend(chunk->chunkIO, WIAnalysis::UNIFORM);
 
-    if(!seedi->getType()->isVectorTy())
+    if (!seedi->getType()->isVectorTy())
     {
-        Instruction *splitter = AddChunkExtract(chunk->chunkIO, eltid - chunk->chunkStart);
+        Instruction* splitter = AddChunkExtract(chunk->chunkIO, eltid - chunk->chunkStart);
         seedi->replaceAllUsesWith(splitter);
         wiAns->incUpdateDepend(splitter, WIAnalysis::UNIFORM);
     }
@@ -1304,29 +1315,29 @@ Instruction *ConstantCoalescing::CreateChunkLoad(Instruction *seedi, BufChunk *c
     return chunk->chunkIO;
 }
 
-Instruction *ConstantCoalescing::AddChunkExtract( Instruction *load, uint eltid )
+Instruction* ConstantCoalescing::AddChunkExtract(Instruction* load, uint eltid)
 {
-    irBuilder->SetInsertPoint( load->getNextNode() );
-    Value* cv_eltid = ConstantInt::get( irBuilder->getInt32Ty(), eltid );
-    Value* extract = irBuilder->CreateExtractElement( load, cv_eltid );
+    irBuilder->SetInsertPoint(load->getNextNode());
+    Value* cv_eltid = ConstantInt::get(irBuilder->getInt32Ty(), eltid);
+    Value* extract = irBuilder->CreateExtractElement(load, cv_eltid);
     wiAns->incUpdateDepend(extract, wiAns->whichDepend(load));
-    return cast<Instruction>( extract );
+    return cast<Instruction>(extract);
 }
 
-Instruction *ConstantCoalescing::FindOrAddChunkExtract( BufChunk *cov_chunk, uint eltid )
+Instruction* ConstantCoalescing::FindOrAddChunkExtract(BufChunk* cov_chunk, uint eltid)
 {
-    Instruction *splitter = nullptr;
+    Instruction* splitter = nullptr;
     // look for the splitter in existing uses
     Value::user_iterator use_it = cov_chunk->chunkIO->user_begin();
-    Value::user_iterator use_e  = cov_chunk->chunkIO->user_end();
-    for( ; use_it != use_e; ++use_it )
+    Value::user_iterator use_e = cov_chunk->chunkIO->user_end();
+    for (; use_it != use_e; ++use_it)
     {
-        Instruction *usei = dyn_cast<Instruction>(*use_it);
-        assert( usei && isa<ExtractElementInst>(usei) );
-        ConstantInt *e_idx = dyn_cast<ConstantInt>( usei->getOperand(1) );
-        assert( e_idx );
+        Instruction* usei = dyn_cast<Instruction>(*use_it);
+        assert(usei && isa<ExtractElementInst>(usei));
+        ConstantInt* e_idx = dyn_cast<ConstantInt>(usei->getOperand(1));
+        assert(e_idx);
         uint val = (uint)e_idx->getZExtValue();
-        if( val == eltid - cov_chunk->chunkStart )
+        if (val == eltid - cov_chunk->chunkStart)
         {
             splitter = usei;
             // move the extract element to make sure it dominates the new use
@@ -1335,70 +1346,70 @@ Instruction *ConstantCoalescing::FindOrAddChunkExtract( BufChunk *cov_chunk, uin
         }
     }
     // if a splitter does not exist, add a new splitter
-    if( !splitter )
+    if (!splitter)
     {
-        splitter = AddChunkExtract( cov_chunk->chunkIO, eltid - cov_chunk->chunkStart );
+        splitter = AddChunkExtract(cov_chunk->chunkIO, eltid - cov_chunk->chunkStart);
     }
     return splitter;
 }
 
-void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint size_adj)
+void ConstantCoalescing::AdjustChunk(BufChunk* cov_chunk, uint start_adj, uint size_adj)
 {
     cov_chunk->chunkSize += size_adj;
     cov_chunk->chunkStart -= start_adj;
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
-    Type *vty = VectorType::get( cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize );
-    cov_chunk->chunkIO->mutateType( vty );
+    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
+    cov_chunk->chunkIO->mutateType(vty);
     // change the dest ptr-type on bitcast
-    if(isa<LoadInst>(cov_chunk->chunkIO))
+    if (isa<LoadInst>(cov_chunk->chunkIO))
     {
-        Value *addr_ptr = cov_chunk->chunkIO->getOperand(0);
+        Value* addr_ptr = cov_chunk->chunkIO->getOperand(0);
         unsigned addrSpace = (cast<PointerType>(addr_ptr->getType()))->getAddressSpace();
-        if(addrSpace == ADDRESS_SPACE_CONSTANT || addrSpace == ADDRESS_SPACE_GLOBAL)
+        if (addrSpace == ADDRESS_SPACE_CONSTANT || addrSpace == ADDRESS_SPACE_GLOBAL)
         {
             // ocl path
             assert(isa<IntToPtrInst>(addr_ptr));
             irBuilder->SetInsertPoint(dyn_cast<Instruction>(addr_ptr));
             addr_ptr->mutateType(PointerType::get(vty, addrSpace));
-            Value *eac = cast<Instruction>(addr_ptr)->getOperand(0);
-            Instruction *expr = dyn_cast<Instruction>(eac);
+            Value* eac = cast<Instruction>(addr_ptr)->getOperand(0);
+            Instruction* expr = dyn_cast<Instruction>(eac);
             bool foundOffset = false;
-            if(expr && expr->getOpcode() == Instruction::Add && expr->hasOneUse())
+            if (expr && expr->getOpcode() == Instruction::Add && expr->hasOneUse())
             {
                 uint srcIdx = 2;
-                if(expr->getOperand(0) == cov_chunk->bufIdxV)
+                if (expr->getOperand(0) == cov_chunk->bufIdxV)
                     srcIdx = 1;
-                else if(expr->getOperand(1) == cov_chunk->bufIdxV)
+                else if (expr->getOperand(1) == cov_chunk->bufIdxV)
                     srcIdx = 0;
-                if(srcIdx == 0 || srcIdx == 1)
+                if (srcIdx == 0 || srcIdx == 1)
                 {
-                    if(isa<ConstantInt>(expr->getOperand(srcIdx)))
+                    if (isa<ConstantInt>(expr->getOperand(srcIdx)))
                     {
-                        Value *cv_start = ConstantInt::get(expr->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
+                        Value* cv_start = ConstantInt::get(expr->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
                         expr->setOperand(srcIdx, cv_start);
                         foundOffset = true;
                     }
                     else
                     {
-                        Instruction *expr2 = dyn_cast<Instruction>(expr->getOperand(srcIdx));
-                        if(expr2 && expr2->hasOneUse())
+                        Instruction* expr2 = dyn_cast<Instruction>(expr->getOperand(srcIdx));
+                        if (expr2 && expr2->hasOneUse())
                         {
                             if (isa<ZExtInst>(expr2) && isa<BinaryOperator>(expr2->getOperand(0)))
                                 expr2 = cast<Instruction>(expr2->getOperand(0));
                             assert(isa<BinaryOperator>(expr2));
 
-                            if(expr2->getOperand(0) == cov_chunk->baseIdxV &&
+                            if (expr2->getOperand(0) == cov_chunk->baseIdxV &&
                                 isa<ConstantInt>(expr2->getOperand(1)))
                             {
-                                Value *cv_start = ConstantInt::get(expr2->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
+                                Value* cv_start = ConstantInt::get(expr2->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
                                 expr2->setOperand(1, cv_start);
                                 foundOffset = true;
                             }
-                            else if(expr2->getOperand(1) == cov_chunk->baseIdxV &&
+                            else if (expr2->getOperand(1) == cov_chunk->baseIdxV &&
                                 isa<ConstantInt>(expr2->getOperand(0)))
                             {
-                                Value *cv_start = ConstantInt::get(expr->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
+                                Value* cv_start = ConstantInt::get(expr->getType(), cov_chunk->chunkStart * cov_chunk->elementSize);
                                 expr2->setOperand(0, cv_start);
                                 foundOffset = true;
                             }
@@ -1406,7 +1417,7 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
                     }
                 }
             }
-            if(!foundOffset)
+            if (!foundOffset)
             {
                 // if we cannot modify the offset, create a new chain of address calculation
                 eac = FormChunkAddress(cov_chunk);
@@ -1418,19 +1429,19 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
             // gfx path
             assert(isa<IntToPtrInst>(addr_ptr));
             addr_ptr->mutateType(PointerType::get(vty, addrSpace));
-            if(cov_chunk->baseIdxV == nullptr)
+            if (cov_chunk->baseIdxV == nullptr)
             {
-                Value *cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart  * cov_chunk->elementSize);
+                Value* cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart * cov_chunk->elementSize);
                 cast<Instruction>(addr_ptr)->setOperand(0, cv_start);
             }
             else
             {
-                Value *op = cast<Instruction>(addr_ptr)->getOperand(0);
+                Value* op = cast<Instruction>(addr_ptr)->getOperand(0);
                 assert(isa<Instruction>(op));
                 Instruction* eac = cast<Instruction>(op);
                 assert(eac->getOpcode() == Instruction::Add ||
                     eac->getOpcode() == Instruction::Or);
-                ConstantInt *cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart  * cov_chunk->elementSize);
+                ConstantInt* cv_start = ConstantInt::get(irBuilder->getInt32Ty(), cov_chunk->chunkStart * cov_chunk->elementSize);
                 if (cv_start->isZero())
                 {
                     cast<Instruction>(addr_ptr)->setOperand(0, eac->getOperand(0));
@@ -1457,18 +1468,18 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
             types);
         ldRaw->setCalledFunction(ldRawFn);
         ldRaw->mutateType(vty);
-        if(cov_chunk->baseIdxV == nullptr)
+        if (cov_chunk->baseIdxV == nullptr)
         {
-            Value *cv_start = irBuilder->getInt32(cov_chunk->chunkStart  * cov_chunk->elementSize);
+            Value* cv_start = irBuilder->getInt32(cov_chunk->chunkStart * cov_chunk->elementSize);
             ldRaw->setOffsetValue(cv_start);
         }
         else
         {
-            Value *eac = ldRaw->getOffsetValue();
+            Value* eac = ldRaw->getOffsetValue();
             assert(isa<Instruction>(eac));
             assert(cast<Instruction>(eac)->getOpcode() == Instruction::Add ||
                 cast<Instruction>(eac)->getOpcode() == Instruction::Or);
-            Value *cv_start = irBuilder->getInt32(cov_chunk->chunkStart  * cov_chunk->elementSize);
+            Value* cv_start = irBuilder->getInt32(cov_chunk->chunkStart * cov_chunk->elementSize);
             cast<Instruction>(eac)->setOperand(1, cv_start);
         }
     }
@@ -1477,11 +1488,11 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
     // adjust all the splitters
     Value::user_iterator use_it = cov_chunk->chunkIO->user_begin();
     Value::user_iterator use_e = cov_chunk->chunkIO->user_end();
-    for(; use_it != use_e; ++use_it)
+    for (; use_it != use_e; ++use_it)
     {
-        if(ExtractElementInst *usei = dyn_cast<ExtractElementInst>(*use_it))
+        if (ExtractElementInst * usei = dyn_cast<ExtractElementInst>(*use_it))
         {
-            if(llvm::ConstantInt *e_idx = llvm::dyn_cast<llvm::ConstantInt>(usei->getOperand(1)))
+            if (llvm::ConstantInt * e_idx = llvm::dyn_cast<llvm::ConstantInt>(usei->getOperand(1)))
             {
                 uint val = (uint)e_idx->getZExtValue();
                 val += start_adj;
@@ -1493,12 +1504,12 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
         }
         use_set.push_back(llvm::cast<Instruction>(*use_it));
     }
-    if(use_set.size() > 0)
+    if (use_set.size() > 0)
     {
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for(unsigned i = 0; i < originalType->getVectorNumElements(); i++)
+        for (unsigned i = 0; i < originalType->getVectorNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1506,20 +1517,20 @@ void ConstantCoalescing::AdjustChunk( BufChunk *cov_chunk, uint start_adj, uint 
             vec = irBuilder->CreateInsertElement(vec, channel, irBuilder->getInt32(i));
             wiAns->incUpdateDepend(vec, loadDep);
         }
-        for(auto it : use_set)
+        for (auto it : use_set)
         {
             it->replaceUsesOfWith(cov_chunk->chunkIO, vec);
         }
     }
 }
 
-Instruction *ConstantCoalescing::AdjustChunkAddExtract(BufChunk *cov_chunk, uint start_adj, uint size_adj, uint eltid)
+Instruction* ConstantCoalescing::AdjustChunkAddExtract(BufChunk* cov_chunk, uint start_adj, uint size_adj, uint eltid)
 {
     AdjustChunk(cov_chunk, start_adj, size_adj);
     return AddChunkExtract(cov_chunk->chunkIO, eltid - cov_chunk->chunkStart);
 }
 
-void ConstantCoalescing::MoveExtracts(BufChunk *cov_chunk, Instruction *load, uint start_adj)
+void ConstantCoalescing::MoveExtracts(BufChunk* cov_chunk, Instruction* load, uint start_adj)
 {
     // modify the extract-elements from the load, and move it to the chunk
     Value::user_iterator use_it = load->user_begin();
@@ -1528,23 +1539,23 @@ void ConstantCoalescing::MoveExtracts(BufChunk *cov_chunk, Instruction *load, ui
     std::vector<Instruction*> use_set;
     for (; use_it != use_e; ++use_it)
     {
-        Instruction *usei = cast<Instruction>(*use_it);
-        if(!isa<ExtractElementInst>(usei) || !isa<ConstantInt>(usei->getOperand(1)))
+        Instruction* usei = cast<Instruction>(*use_it);
+        if (!isa<ExtractElementInst>(usei) || !isa<ConstantInt>(usei->getOperand(1)))
         {
             noneDirectExtract = true;
             break;
         }
         use_set.push_back(usei);
     }
-    if(noneDirectExtract == false)
+    if (noneDirectExtract == false)
     {
         uint num_uses = use_set.size();
-        for(uint i = 0; i < num_uses; ++i)
+        for (uint i = 0; i < num_uses; ++i)
         {
-            Instruction *usei = use_set[i];
-            if(start_adj)
+            Instruction* usei = use_set[i];
+            if (start_adj)
             {
-                llvm::ConstantInt *e_idx = cast<ConstantInt>(usei->getOperand(1));
+                llvm::ConstantInt* e_idx = cast<ConstantInt>(usei->getOperand(1));
                 uint val = (uint)e_idx->getZExtValue();
                 val += start_adj;
                 // update the index source
@@ -1556,13 +1567,13 @@ void ConstantCoalescing::MoveExtracts(BufChunk *cov_chunk, Instruction *load, ui
     }
     else
     {
-        if(start_adj || cov_chunk->chunkIO->getType() != load->getType())
+        if (start_adj || cov_chunk->chunkIO->getType() != load->getType())
         {
             WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(load);
             irBuilder->SetInsertPoint(load->getNextNode());
             Type* vecType = load->getType();
             Value* vec = UndefValue::get(vecType);
-            for(unsigned i = 0; i < vecType->getVectorNumElements(); i++)
+            for (unsigned i = 0; i < vecType->getVectorNumElements(); i++)
             {
                 Value* channel = irBuilder->CreateExtractElement(
                     cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1579,19 +1590,19 @@ void ConstantCoalescing::MoveExtracts(BufChunk *cov_chunk, Instruction *load, ui
     }
 }
 
-void ConstantCoalescing::EnlargeChunk(BufChunk *cov_chunk, uint size_adj)
+void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
 {
     cov_chunk->chunkSize += size_adj;
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
-    Type *vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
+    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
     cov_chunk->chunkIO->mutateType(vty);
-    if(isa<LoadInst>(cov_chunk->chunkIO))
+    if (isa<LoadInst>(cov_chunk->chunkIO))
     {
         // change the dest ptr-type on bitcast
-        Value *addr_ptr = cov_chunk->chunkIO->getOperand(0);
+        Value* addr_ptr = cov_chunk->chunkIO->getOperand(0);
         unsigned addrSpace = (cast<PointerType>(addr_ptr->getType()))->getAddressSpace();
-        if(isa<BitCastInst>(addr_ptr) || isa<IntToPtrInst>(addr_ptr))
+        if (isa<BitCastInst>(addr_ptr) || isa<IntToPtrInst>(addr_ptr))
         {
             addr_ptr->mutateType(PointerType::get(vty, addrSpace));
         }
@@ -1614,19 +1625,19 @@ void ConstantCoalescing::EnlargeChunk(BufChunk *cov_chunk, uint size_adj)
     Value::user_iterator use_it = cov_chunk->chunkIO->user_begin();
     Value::user_iterator use_e = cov_chunk->chunkIO->user_end();
     SmallVector<Instruction*, 4> use_set;
-    for(; use_it != use_e; ++use_it)
+    for (; use_it != use_e; ++use_it)
     {
-        if(!isa<ExtractElementInst>(*use_it))
+        if (!isa<ExtractElementInst>(*use_it))
         {
             use_set.push_back(cast<Instruction>(*use_it));
         }
     }
-    if(use_set.size() > 0)
+    if (use_set.size() > 0)
     {
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for(unsigned i = 0; i < originalType->getVectorNumElements(); i++)
+        for (unsigned i = 0; i < originalType->getVectorNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i));
@@ -1634,18 +1645,18 @@ void ConstantCoalescing::EnlargeChunk(BufChunk *cov_chunk, uint size_adj)
             vec = irBuilder->CreateInsertElement(vec, channel, irBuilder->getInt32(i));
             wiAns->incUpdateDepend(vec, loadDep);
         }
-        for(auto it : use_set)
+        for (auto it : use_set)
         {
             it->replaceUsesOfWith(cov_chunk->chunkIO, vec);
         }
     }
 }
 
-Instruction *ConstantCoalescing::EnlargeChunkAddExtract( BufChunk *cov_chunk, uint size_adj, uint eltid )
+Instruction* ConstantCoalescing::EnlargeChunkAddExtract(BufChunk* cov_chunk, uint size_adj, uint eltid)
 {
     EnlargeChunk(cov_chunk, size_adj);
     // add a new splitter
-    return AddChunkExtract( cov_chunk->chunkIO, eltid - cov_chunk->chunkStart );
+    return AddChunkExtract(cov_chunk->chunkIO, eltid - cov_chunk->chunkStart);
 }
 
 
@@ -1655,9 +1666,9 @@ bool ConstantCoalescing::IsSamplerAlignedAddress(Value* addr) const
     Instruction* inst = dyn_cast<Instruction>(addr);
     if (inst &&
         (inst->getOpcode() == Instruction::Shl ||
-         inst->getOpcode() == Instruction::Mul ||
-         inst->getOpcode() == Instruction::And ||
-         inst->getOpcode() == Instruction::Add))
+            inst->getOpcode() == Instruction::Mul ||
+            inst->getOpcode() == Instruction::And ||
+            inst->getOpcode() == Instruction::Add))
     {
         ConstantInt* src1ConstVal = dyn_cast<ConstantInt>(inst->getOperand(1));
         unsigned int constant = src1ConstVal ? int_cast<unsigned int>(src1ConstVal->getZExtValue()) : 0;
@@ -1683,7 +1694,8 @@ bool ConstantCoalescing::IsSamplerAlignedAddress(Value* addr) const
                 return true;
             }
         }
-        else if (inst->getOpcode() == Instruction::Add)
+        else if (inst->getOpcode() == Instruction::Add ||
+            inst->getOpcode() == Instruction::Or)
         {
             if (IsSamplerAlignedAddress(inst->getOperand(0)) &&
                 IsSamplerAlignedAddress(inst->getOperand(1)))
@@ -1692,7 +1704,7 @@ bool ConstantCoalescing::IsSamplerAlignedAddress(Value* addr) const
             }
         }
     }
-    else if (ConstantInt* constant = dyn_cast<ConstantInt>(addr))
+    else if (ConstantInt * constant = dyn_cast<ConstantInt>(addr))
     {
         if ((int_cast<uint>(constant->getZExtValue()) % 16) == 0)
         {
@@ -1714,8 +1726,8 @@ Value* ConstantCoalescing::GetSamplerAlignedAddress(Value* addr)
 
     if (inst &&
         (inst->getOpcode() == Instruction::Shl ||
-         inst->getOpcode() == Instruction::Mul ||
-         inst->getOpcode() == Instruction::And) &&
+            inst->getOpcode() == Instruction::Mul ||
+            inst->getOpcode() == Instruction::And) &&
         isa<ConstantInt>(inst->getOperand(1)))
     {
         irBuilder->SetInsertPoint(inst);
@@ -1759,17 +1771,24 @@ Value* ConstantCoalescing::GetSamplerAlignedAddress(Value* addr)
         }
     }
     else if (inst &&
-             inst->getOpcode() == Instruction::Add)
+        (inst->getOpcode() == Instruction::Add ||
+            inst->getOpcode() == Instruction::Or))
     {
         Value* a = GetSamplerAlignedAddress(inst->getOperand(0));
         Value* b = GetSamplerAlignedAddress(inst->getOperand(1));
 
         irBuilder->SetInsertPoint(inst);
-
-        elementIndex = irBuilder->CreateAdd(a, b);
+        if (inst->getOpcode() == Instruction::Add)
+        {
+            elementIndex = irBuilder->CreateAdd(a, b);
+        }
+        else
+        {
+            elementIndex = irBuilder->CreateOr(a, b);
+        }
         wiAns->incUpdateDepend(elementIndex, WIAnalysis::RANDOM);
     }
-    else if (ConstantInt* constant = dyn_cast<ConstantInt>(addr))
+    else if (ConstantInt * constant = dyn_cast<ConstantInt>(addr))
     {
         uint offset = int_cast<uint>(constant->getZExtValue());
         assert((offset % 16) == 0);
@@ -1780,94 +1799,129 @@ Value* ConstantCoalescing::GetSamplerAlignedAddress(Value* addr)
     return elementIndex;
 }
 
-/// replace non-uniform scatter load with sampler load messages
-void ConstantCoalescing::ScatterToSampler( Instruction *load,
-                                      Value *bufIdxV, uint addrSpace,
-                                      Value *eltIdxV, uint eltid,
-                                      std::vector<BufChunk*> &chunk_vec )
+
+/// Replace non-uniform scatter load with sampler load messages.
+void ConstantCoalescing::ScatterToSampler(
+    Instruction* load,
+    Value* bufIdxV,
+    uint   addrSpace,
+    Value* baseAddressInBytes, // base address calculated by SimpleBaseOffset()
+    uint   offsetInBytes, // offset from baseAddressInBytes
+    std::vector<BufChunk*>& chunk_vec)
 {
-    Instruction* ishl = dyn_cast<Instruction>(eltIdxV);
-    if( ishl != nullptr && IsSamplerAlignedAddress(ishl))
+    constexpr uint samplerElementSizeInBytes = sizeof(uint32_t);
+    constexpr uint samplerLoadSizeInDwords = 4;
+    constexpr uint samplerLoadSizeInBytes = samplerLoadSizeInDwords * samplerElementSizeInBytes;
+    const uint loadSizeInBytes = load->getType()->getPrimitiveSizeInBits() / 8;
+
+    assert(!load->getType()->isVectorTy() || load->getType()->getVectorNumElements() <= 4);
+
+    const bool useByteAddress = m_ctx->m_DriverInfo.UsesTypedConstantBuffersWithByteAddress();
+
+    // Code below doesn't support crossing 4 DWORD boundary i.e. mapping a
+    // single input load to multiple sampler loads.
+    const bool canBeLoadedUsingSampler =
+        (((offsetInBytes % samplerLoadSizeInBytes) + loadSizeInBytes) <= samplerLoadSizeInBytes);
+
+    Instruction* baseInBytes = dyn_cast<Instruction>(baseAddressInBytes);
+    if (baseInBytes &&
+        IsSamplerAlignedAddress(baseAddressInBytes) &&
+        canBeLoadedUsingSampler)
     {
-        irBuilder->SetInsertPoint( ishl );
+        irBuilder->SetInsertPoint(baseInBytes);
 
-        Value* elementIndex = GetSamplerAlignedAddress(ishl);
+        WIAnalysis::WIDependancy baseInBytesDep = wiAns->whichDepend(baseInBytes);
 
-        WIAnalysis::WIDependancy ishlDep = wiAns->whichDepend(ishl);
-        // it is possible that ishl is uniform, yet load is non-uniform due to the use location of load
-        if (elementIndex != ishl->getOperand(0))
+        // Data address for sampler load, either in OWORDs or in bytes
+        Value* chunkBaseAddress = baseInBytes;
+        if (!useByteAddress)
         {
-            Value* newVal = irBuilder->CreateShl(elementIndex, ConstantInt::get(elementIndex->getType(), 4));
-            wiAns->incUpdateDepend(newVal, ishlDep);
-            ishl->replaceAllUsesWith(newVal);
-        }
-        else if (wiAns->whichDepend(elementIndex) != ishlDep)
-        {
-            // quick fix for a special case: elementIndex is uniform and ishl is not uniform.
-            // If we use ishl-src0 (elementIndx) directly at cf-join point by this transform,
-            // we can change the uniformness of elementIndex
-            elementIndex = irBuilder->CreateShl(elementIndex, ConstantInt::get(elementIndex->getType(), 0));
-            wiAns->incUpdateDepend(elementIndex, ishlDep);
-            Value* newVal = irBuilder->CreateShl(elementIndex, ConstantInt::get(elementIndex->getType(), 4));
-            wiAns->incUpdateDepend(newVal, ishlDep);
-            ishl->replaceAllUsesWith(newVal);
-        }
-        BufChunk *cov_chunk = nullptr;
-        for( std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
-            rie = chunk_vec.rend(); rit != rie; ++rit )
-        {
-            BufChunk *cur_chunk = *rit;
-            if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace) &&
-                cur_chunk->baseIdxV == elementIndex &&
-                cur_chunk->chunkIO->getType()->getScalarSizeInBits() == load->getType()->getScalarSizeInBits())
+            // base address is in OWORDs
+            Value* baseAddressInOwords = GetSamplerAlignedAddress(baseInBytes);
+            assert(baseAddressInOwords);
+
+            // it is possible that baseInBytes is uniform, yet load is non-uniform due to the use location of load
+            if (baseAddressInOwords != baseInBytes->getOperand(0))
             {
-               if(eltid>= cur_chunk->chunkStart && eltid<cur_chunk->chunkStart + cur_chunk->chunkSize)
-               {
-                   cov_chunk = cur_chunk;
-                   break;
-               }
+                Value* newVal = irBuilder->CreateShl(baseAddressInOwords, ConstantInt::get(baseAddressInOwords->getType(), 4));
+                wiAns->incUpdateDepend(newVal, baseInBytesDep);
+                baseInBytes->replaceAllUsesWith(newVal);
+            }
+            else if (wiAns->whichDepend(baseAddressInOwords) != baseInBytesDep)
+            {
+                // quick fix for a special case: baseAddressInOwords is uniform and baseInBytes is not uniform.
+                // If we use baseInBytes-src0 (elementIndx) directly at cf-join point by this transform,
+                // we can change the uniformness of baseAddressInOwords
+                baseAddressInOwords = irBuilder->CreateShl(baseAddressInOwords, ConstantInt::get(baseAddressInOwords->getType(), 0));
+                wiAns->incUpdateDepend(baseAddressInOwords, baseInBytesDep);
+                Value* newVal = irBuilder->CreateShl(baseAddressInOwords, ConstantInt::get(baseAddressInOwords->getType(), 4));
+                wiAns->incUpdateDepend(newVal, baseInBytesDep);
+                baseInBytes->replaceAllUsesWith(newVal);
+            }
+
+            chunkBaseAddress = baseAddressInOwords;
+        }
+        BufChunk* cov_chunk = nullptr;
+        for (std::vector<BufChunk*>::reverse_iterator rit = chunk_vec.rbegin(),
+            rie = chunk_vec.rend(); rit != rie; ++rit)
+        {
+            BufChunk* cur_chunk = *rit;
+            // Look for an existing sampler load covering data range of the input load.
+            if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace) &&
+                cur_chunk->baseIdxV == chunkBaseAddress)
+            {
+                const uint chunkStartInBytes = cur_chunk->chunkStart * cur_chunk->elementSize;
+                const uint chunkEndInBytes = (cur_chunk->chunkStart + cur_chunk->chunkSize) * cur_chunk->elementSize;
+                if (offsetInBytes >= chunkStartInBytes &&
+                    (offsetInBytes + loadSizeInBytes) <= chunkEndInBytes)
+                {
+                    cov_chunk = cur_chunk;
+                    break;
+                }
             }
         }
-        irBuilder->SetInsertPoint( load );
+        irBuilder->SetInsertPoint(load);
         Instruction* ld = nullptr;
-        if( !cov_chunk )
+        if (!cov_chunk)
         {
             cov_chunk = new BufChunk();
             cov_chunk->bufIdxV = bufIdxV;
             cov_chunk->addrSpace = addrSpace;
-            cov_chunk->baseIdxV = elementIndex;
-            cov_chunk->chunkStart = iSTD::RoundDown(eltid,4);
-            cov_chunk->chunkSize = 4;
-            if(eltid>=4)
+            cov_chunk->baseIdxV = chunkBaseAddress;
+            cov_chunk->elementSize = samplerElementSizeInBytes; // 4 bytes
+            cov_chunk->chunkStart = iSTD::RoundDown((offsetInBytes / samplerElementSizeInBytes), samplerLoadSizeInDwords); // in DWORDS aligned to OWORDs
+            cov_chunk->chunkSize = samplerLoadSizeInDwords; // in DWORDs
+
+            Value* dataAddress = chunkBaseAddress;
+            if (offsetInBytes >= samplerLoadSizeInBytes)
             {
-                elementIndex = irBuilder->CreateAdd(elementIndex, ConstantInt::get(elementIndex->getType(), (eltid/4)));
-                wiAns->incUpdateDepend( elementIndex, WIAnalysis::RANDOM );
+                const uint32_t chunkOffset = (useByteAddress) ?
+                    (cov_chunk->chunkStart * cov_chunk->elementSize) : // in bytes
+                    (offsetInBytes / samplerLoadSizeInBytes); //in OWORDs
+                dataAddress = irBuilder->CreateAdd(dataAddress, ConstantInt::get(dataAddress->getType(), chunkOffset));
+                wiAns->incUpdateDepend(dataAddress, WIAnalysis::RANDOM);
             }
-            if (elementIndex->getType()->getIntegerBitWidth() >= 32)
+            if (dataAddress->getType()->getIntegerBitWidth() >= 32 && !useByteAddress)
             {
-                elementIndex = irBuilder->CreateAnd(elementIndex, ConstantInt::get(elementIndex->getType(), 0x0FFFFFFF));
-                wiAns->incUpdateDepend(elementIndex, WIAnalysis::RANDOM);
+                dataAddress = irBuilder->CreateAnd(dataAddress, ConstantInt::get(dataAddress->getType(), 0x0FFFFFFF));
+                wiAns->incUpdateDepend(dataAddress, WIAnalysis::RANDOM);
             }
-            elementIndex = irBuilder->CreateZExtOrTrunc(elementIndex, irBuilder->getInt32Ty());
-            wiAns->incUpdateDepend(elementIndex, WIAnalysis::RANDOM);
-            ld = CreateSamplerLoad(elementIndex, addrSpace);
+            if (dataAddress->getType() != irBuilder->getInt32Ty())
+            {
+                dataAddress = irBuilder->CreateZExtOrTrunc(dataAddress, irBuilder->getInt32Ty());
+                wiAns->incUpdateDepend(dataAddress, WIAnalysis::RANDOM);
+            }
+
+            ld = CreateSamplerLoad(dataAddress, addrSpace);
             cov_chunk->chunkIO = ld;
-            chunk_vec.push_back( cov_chunk );
+            chunk_vec.push_back(cov_chunk);
         }
         else
         {
             ld = cov_chunk->chunkIO;
         }
 
-        Instruction *splitter =
-            cast<Instruction>(irBuilder->CreateExtractElement(ld, irBuilder->getInt32(eltid%4)));
-        wiAns->incUpdateDepend( splitter, WIAnalysis::RANDOM );
-        if(splitter->getType() != load->getType()->getScalarType())
-        {
-            splitter = cast<Instruction>(irBuilder->CreateBitCast(splitter, load->getType()->getScalarType()));
-            wiAns->incUpdateDepend( splitter, WIAnalysis::RANDOM );
-        }
-        load->replaceAllUsesWith( splitter );
+        ReplaceLoadWithSamplerLoad(load, ld, (offsetInBytes % samplerLoadSizeInBytes));
     }
 }
 
@@ -1891,16 +1945,142 @@ Instruction* ConstantCoalescing::CreateSamplerLoad(Value* index, uint addrSpace)
         irBuilder->getInt32(0),
     };
     Instruction* ld = irBuilder->CreateCall(l, attr);
-    wiAns->incUpdateDepend( ld, WIAnalysis::RANDOM );
+    wiAns->incUpdateDepend(ld, WIAnalysis::RANDOM);
     return ld;
+}
+
+/// Extract data from sampler load, repack data if needed and replace the load instruction.
+void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
+    Instruction* loadToReplace, ///< input scattered load to replace
+    Instruction* ldData, ///< corresponding sampler load result
+    uint offsetInBytes) ///< offset in bytes from the start of the sampler load to the beginning of the data to extract
+{
+    Type* const srcTy = ldData->getType();
+    Type* const dstTy = loadToReplace->getType();
+    assert(srcTy->isVectorTy() && srcTy->getVectorElementType()->isFloatTy());
+
+    const uint dstSizeInBytes = dstTy->getPrimitiveSizeInBits() / 8;
+
+    irBuilder->SetInsertPoint(loadToReplace);
+
+    Value* result = nullptr;
+    if (srcTy == dstTy)
+    {
+        // result is vector of 4 floats
+        assert(offsetInBytes == 0);
+        result = ldData;
+    }
+    else if (srcTy->getPrimitiveSizeInBits() == dstTy->getPrimitiveSizeInBits())
+    {
+        // result is a vector of one of the following:
+        // - 2 64-bit values
+        // - 4 32-bit integer values
+        assert(offsetInBytes == 0);
+        result = irBuilder->CreateBitCast(ldData, dstTy);
+        wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+    }
+    else if ((dstSizeInBytes % 4) == 0 && (offsetInBytes % 4) == 0)
+    {
+        // result is one of the following:
+        // - 64-bit scalar
+        // - vector of 2 or 3 32-bit integer values
+        // - dword aligned vector of 2 or 4 16-bit values
+        // - dword aligned vector of 4 8-bit values
+
+        // create a new vector with 2 or 3 components from sampler load data and
+        // bitcast to the destination type
+        const uint numElem = (dstSizeInBytes + 3) / 4;
+        const uint firstElem = offsetInBytes / 4;
+        result = UndefValue::get(VectorType::get(srcTy->getVectorElementType(), numElem));
+        for (uint i = 0; i < numElem; ++i)
+        {
+            Value* element = (irBuilder->CreateExtractElement(ldData, irBuilder->getInt32(firstElem + i)));
+            wiAns->incUpdateDepend(element, WIAnalysis::RANDOM);
+            if (numElem == 1)
+            {
+                result = element;
+            }
+            else
+            {
+                result = irBuilder->CreateInsertElement(result, element, irBuilder->getInt32(i));
+                wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            }
+        }
+        if (dstTy != result->getType())
+        {
+            result = irBuilder->CreateBitCast(result, dstTy);
+            wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+        }
+    }
+    else
+    {
+        const uint numElem = (dstSizeInBytes + 3) / 4;
+        const uint firstElem = offsetInBytes / 4;
+
+        // extract up to 4 DWORDs of sampler data
+        SmallVector<Value*, 4> srcData;
+        for (uint i = 0; i < numElem; ++i)
+        {
+            Value* element = irBuilder->CreateExtractElement(ldData, irBuilder->getInt32(firstElem + i));
+            wiAns->incUpdateDepend(element, WIAnalysis::RANDOM);
+            srcData.push_back(element);
+        }
+
+        // Extracts a single element of destination data type.
+        auto ExtractFromSamplerData = [this, &offsetInBytes, &srcData](
+            Type* dstTy,
+            uint i)->Value *
+        {
+            assert(dstTy->isIntegerTy() || dstTy->isFloatingPointTy());
+            assert(dstTy->getPrimitiveSizeInBits() < 64);
+            const uint offsetInBits = ((offsetInBytes % 4) * 8) + (dstTy->getPrimitiveSizeInBits() * i);
+
+            assert(offsetInBits + dstTy->getPrimitiveSizeInBits() <= 32);
+            Value* result = irBuilder->CreateBitCast(srcData[offsetInBits / 32], irBuilder->getInt32Ty());
+            wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            if (offsetInBits > 0)
+            {
+                result = irBuilder->CreateLShr(result, irBuilder->getInt32(offsetInBits % 32));
+                wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            }
+            if (dstTy->getScalarSizeInBits() < 32)
+            {
+                result = irBuilder->CreateZExtOrTrunc(result, IntegerType::get(dstTy->getContext(), dstTy->getPrimitiveSizeInBits()));
+                wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            }
+            if (result->getType() != dstTy)
+            {
+                result = irBuilder->CreateBitCast(result, dstTy);
+                wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            }
+            return result;
+        };
+
+        if (dstTy->isVectorTy())
+        {
+            result = UndefValue::get(dstTy);
+            for (uint i = 0; i < dstTy->getVectorNumElements(); i++)
+            {
+                Value* tmpData = ExtractFromSamplerData(dstTy->getVectorElementType(), i);
+                result = irBuilder->CreateInsertElement(result, tmpData, irBuilder->getInt32(i));
+                wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
+            }
+        }
+        else
+        {
+            result = ExtractFromSamplerData(dstTy, 0);
+        }
+    }
+
+    loadToReplace->replaceAllUsesWith(result);
 }
 
 
 /// change GEP to oword-based for oword-aligned load in order to avoid SHL
-void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk *chunk)
+void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk* chunk)
 {
     assert(chunk && chunk->chunkIO);
-    LoadInst *load = dyn_cast<LoadInst>(chunk->chunkIO);
+    LoadInst* load = dyn_cast<LoadInst>(chunk->chunkIO);
     assert(load);
     // has to be a 3d-load for now.
     // Argument pointer coming from OCL may not be oword-aligned
@@ -1915,7 +2095,7 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk *chunk)
     {
         return;
     }
-    Instruction *ishl = dyn_cast<Instruction>(chunk->baseIdxV);
+    Instruction* ishl = dyn_cast<Instruction>(chunk->baseIdxV);
     if (!ishl ||
         ishl->getOpcode() != Instruction::Shl ||
         !isa<ConstantInt>(ishl->getOperand(1)))
@@ -1929,7 +2109,7 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk *chunk)
     }
     Value* owordIndex = ishl->getOperand(0);
     // want the exact pattern
-    Value *ptrV = load->getPointerOperand();
+    Value* ptrV = load->getPointerOperand();
     if (!(isa<IntToPtrInst>(ptrV) && ptrV->hasOneUse()))
     {
         return;
@@ -1937,16 +2117,16 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk *chunk)
     // do different add, owordIndex + chunkStart/4;
     if (chunk->chunkStart != 0)
     {
-        Instruction *pInsert = dyn_cast<Instruction>(cast<IntToPtrInst>(ptrV)->getOperand(0));
+        Instruction* pInsert = dyn_cast<Instruction>(cast<IntToPtrInst>(ptrV)->getOperand(0));
         if (!pInsert)
         {
             pInsert = cast<IntToPtrInst>(ptrV);
         }
         irBuilder->SetInsertPoint(pInsert);
-        owordIndex = irBuilder->CreateAdd(owordIndex, ConstantInt::get(irBuilder->getInt32Ty(), chunk->chunkStart/4));
+        owordIndex = irBuilder->CreateAdd(owordIndex, ConstantInt::get(irBuilder->getInt32Ty(), chunk->chunkStart / 4));
         wiAns->incUpdateDepend(owordIndex, WIAnalysis::UNIFORM);
     }
-    Type *vty = VectorType::get(load->getType()->getScalarType(), 4);
+    Type* vty = VectorType::get(load->getType()->getScalarType(), 4);
     Function* l = GenISAIntrinsic::getDeclaration(curFunc->getParent(),
         llvm::GenISAIntrinsic::GenISA_OWordPtr,
         PointerType::get(vty, addrSpace));
@@ -1961,4 +2141,4 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk *chunk)
     load->setAlignment(16);
 }
 
-char IGC::ConstantCoalescing::ID=0;
+char IGC::ConstantCoalescing::ID = 0;

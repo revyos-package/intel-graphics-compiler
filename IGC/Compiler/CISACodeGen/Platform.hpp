@@ -33,22 +33,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 namespace IGC
 {
 
-class CPlatform
-{
+    class CPlatform
+    {
     PLATFORM m_platformInfo;
     SCompilerHwCaps m_caps;
     WA_TABLE m_WaTable;
     SKU_FEATURE_TABLE m_SkuTable;
     GT_SYSTEM_INFO      m_GTSystemInfo;
 
-public:
+    public:
     CPlatform(PLATFORM platform) {
         m_platformInfo = platform;
         m_GTSystemInfo = { 0 };
     }
     CPlatform() {}
 
-    WA_TABLE const& getWATable() const { return m_WaTable;}
+        WA_TABLE const& getWATable() const { return m_WaTable; }
     SKU_FEATURE_TABLE const& getSkuTable() const { return m_SkuTable; }
 
     bool hasPackedVertexAttr() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE; }
@@ -73,9 +73,12 @@ public:
     bool hasOldLdOrder() const { return m_platformInfo.eRenderCoreFamily <= IGFX_GEN8_CORE; }
     bool supportSampleAndLd_lz() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE; }
     bool supportSamplerToRT() const {
-        return (m_platformInfo.eProductFamily == IGFX_CHERRYVIEW) || (m_platformInfo.eRenderCoreFamily == IGFX_GEN9_CORE); }
-    bool supportFP16() const { return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE) ||
-                                      ((m_platformInfo.eRenderCoreFamily == IGFX_GEN8_CORE) && (m_platformInfo.eProductFamily == IGFX_CHERRYVIEW)); }
+            return (m_platformInfo.eProductFamily == IGFX_CHERRYVIEW) || (m_platformInfo.eRenderCoreFamily == IGFX_GEN9_CORE);
+        }
+        bool supportFP16() const {
+            return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE) ||
+                ((m_platformInfo.eRenderCoreFamily == IGFX_GEN8_CORE) && (m_platformInfo.eProductFamily == IGFX_CHERRYVIEW));
+        }
     bool supportFP16Rounding() const { return false; }
     bool supportSamplerFp16Input() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE; }
     bool supportPooledEU() const { return m_SkuTable.FtrPooledEuEnabled != 0; }
@@ -90,15 +93,17 @@ public:
 
     bool SupportSurfaceInfoMessage() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE; }
     bool SupportHDCUnormFormats() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE; }
-    bool localMemFenceSupress() const { return m_platformInfo.eRenderCoreFamily <= IGFX_GEN9_CORE ||
-        IGC_IS_FLAG_ENABLED(DisbleLocalFences); }
+        bool localMemFenceSupress() const {
+            return m_platformInfo.eRenderCoreFamily <= IGFX_GEN9_CORE ||
+                IGC_IS_FLAG_ENABLED(DisbleLocalFences);
+        }
     bool psSimd32SkipStallHeuristic() const { return m_caps.KernelHwCaps.EUThreadsPerEU == 6; }
     bool enablePSsimd32() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE; }
     bool supportDisableMidThreadPreemptionSwitch() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE; }
 
     bool needSWStencil() const
     {
-        return (m_platformInfo.eRenderCoreFamily == IGFX_GEN9_CORE && IGC_IS_FLAG_ENABLED(EnableSoftwareStencil) );
+            return (m_platformInfo.eRenderCoreFamily == IGFX_GEN9_CORE && IGC_IS_FLAG_ENABLED(EnableSoftwareStencil));
     }
     bool supportMSAARateInPayload() const
     {
@@ -133,18 +138,24 @@ public:
         m_GTSystemInfo.CsrSizeInMb = gtSystemInfo.CsrSizeInMb;
     }
 
-    void SetGTSystemInfo(const GT_SYSTEM_INFO &gtSystemInfo) {
+        void SetGTSystemInfo(const GT_SYSTEM_INFO& gtSystemInfo) {
         m_GTSystemInfo = gtSystemInfo;
     }
 
     GT_SYSTEM_INFO GetGTSystemInfo() const { return m_GTSystemInfo; }
 
-    unsigned int getMaxPixelShaderThreads() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE ?
-        m_caps.PixelShaderThreadsWindowerRange - 1 : m_caps.PixelShaderThreadsWindowerRange - 2; }
-    bool supportGPGPUMidThreadPreemption() const { return m_SkuTable.FtrGpGpuMidThreadLevelPreempt != 0; }
+        unsigned int getMaxPixelShaderThreads() const {
+            return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE ?
+                m_caps.PixelShaderThreadsWindowerRange - 1 : m_caps.PixelShaderThreadsWindowerRange - 2;
+        }
+    bool supportGPGPUMidThreadPreemption() const {
+        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE &&
+            m_platformInfo.eRenderCoreFamily <= IGFX_GEN11LP_CORE;
+    }
     bool supportFtrWddm2Svm() const { return m_SkuTable.FtrWddm2Svm != 0; }
     bool supportStructuredAsRaw() const {
-        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE; }
+            return m_platformInfo.eRenderCoreFamily >= IGFX_GEN9_CORE;
+        }
     bool supportSamplerCacheResinfo() const { return m_platformInfo.eRenderCoreFamily == IGFX_GEN8_CORE; }
 
     unsigned int getMaxVertexShaderThreads(const bool isPositionOnlyShader) const
@@ -161,7 +172,7 @@ public:
     unsigned int getMaxNumberThreadPerSubslice() const
     {
         //total number of threads per subslice
-        if(m_caps.KernelHwCaps.SubSliceCount != 0)
+            if (m_caps.KernelHwCaps.SubSliceCount != 0)
             return m_caps.KernelHwCaps.ThreadCount / m_caps.KernelHwCaps.SubSliceCount;
         return 0;
     }
@@ -249,7 +260,8 @@ public:
     unsigned int GetLogBindlessSamplerSize() const
     {
         // On Gen10+ bindless sampler are 16Bytes instead of 32bytes before
-        return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE) ? 4 : 5;
+        GFXCORE_FAMILY familyCheck = IGC_IS_FLAG_ENABLED(Use16ByteBindlessSampler) ? IGFX_GEN9_CORE : IGFX_GEN10_CORE;
+        return (m_platformInfo.eRenderCoreFamily >= familyCheck) ? 4 : 5;
     }
     bool SupportCPS() const
     {
@@ -346,6 +358,11 @@ public:
         return 0x200000;
     }
 
+    bool supportByteALUOperation() const
+    {
+        return true;
+    }
+
     // ***** Below go accessor methods for testing WA data from WA_TABLE *****
 
     bool WaDoNotPushConstantsForAllPulledGSTopologies() const
@@ -371,7 +388,7 @@ public:
 
     bool WaDisableEuBypass() const
     {
-        return ( m_WaTable.WaDisableEuBypassOnSimd16Float32 != 0 );
+            return (m_WaTable.WaDisableEuBypassOnSimd16Float32 != 0);
     }
 
     bool WaDisableDSDualPatchMode() const
@@ -443,7 +460,7 @@ public:
 
     }
 
-    const SCompilerHwCaps& GetCaps(){return m_caps;}
-};
+        const SCompilerHwCaps& GetCaps() { return m_caps; }
+    };
 
 }//namespace IGC

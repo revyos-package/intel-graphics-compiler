@@ -284,7 +284,6 @@ public:
             regVar = NULL;
         }
         dcl->setRegVar(regVar);
-        dcl->setAlign( Either );
 
         if (regFile == G4_ADDRESS)
         {
@@ -294,7 +293,7 @@ public:
         {
             if (nElems * nRows * G4_Type_Table[ty].byteSize >= G4_GRF_REG_NBYTES)
             {
-                dcl->setSubRegAlign(SUB_ALIGNMENT_GRFALIGN);
+                dcl->setSubRegAlign(GRFALIGN);
             }
             else
             {
@@ -363,7 +362,7 @@ private:
         IR_Builder& builder;
 
 public:
-        GlobalImmPool(IR_Builder& b) :builder(b) {}
+        GlobalImmPool(IR_Builder& b) : builder(b), immArray(), dclArray() {}
 
         G4_Declare* addImmVal(G4_Imm* imm, int numElt)
         {
@@ -380,7 +379,7 @@ public:
                 return nullptr;
             }
             immArray[curSize] = val;
-            dclArray[curSize] = builder.createTempVar(numElt, imm->getType(), Either, Any);
+            dclArray[curSize] = builder.createTempVar(numElt, imm->getType(), Any);
             return dclArray[curSize++];
         }
 
@@ -408,7 +407,6 @@ public:
 
     bool isKernel;
     int cunit;
-    const std::vector <char*>* resolvedCalleeNames;
 
     bool isExternFunc = false;
 
@@ -542,7 +540,9 @@ public:
     unsigned int getInputCount();
     input_info_t *getRetIPArg();
 
-    std::list <int> callees;
+    // all vISA functions directly called by this kernel
+    // this will be resolved later in Stitch_Compiler_Unit
+    std::set<std::string> funcCallees;
 
     const USE_DEF_ALLOCATOR& getAllocator() const { return useDefAllocator; }
 
@@ -633,8 +633,6 @@ public:
     int getCUnitId() { return cunit; }
     void setIsKernel( bool value ) { isKernel = value; }
     bool getIsKernel() { return isKernel; }
-    void setResolvedCalleeNames(std::vector<char*>* nameList) { resolvedCalleeNames = nameList; }
-    const std::vector<char*>* getResolvedCalleeNames() { return resolvedCalleeNames; }
     void predefinedVarRegAssignment(uint8_t inputSize);
     void expandPredefinedVars();
     void setArgSize( unsigned short size ) { arg_size = size; }
@@ -692,6 +690,7 @@ public:
         }
     }
 
+    // If this is true (detected in TranslateInterface.cpp), we need a sampler flush before EOT
     bool getHasNullReturnSampler() const { return hasNullReturnSampler; }
 
     /*
@@ -707,7 +706,7 @@ public:
             {
                 // work item id variables are handled uniformly
                 G4_Type ty = Get_G4_Type_From_Common_ISA_Type(getPredefinedVarType((PreDefinedVarsInternal)i));
-                dcl = createPreVar(getPredefinedVarID((PreDefinedVarsInternal)i), 1, ty, Either, Any);
+                dcl = createPreVar(getPredefinedVarID((PreDefinedVarsInternal)i), 1, ty);
             }
             else
             {
@@ -720,7 +719,7 @@ public:
                     break;
                 case PreDefinedVarsInternal::TSC:
                 {
-                    G4_Declare* tscDcl = createPreVar(i, 5, Type_UD, Either, Any);
+                    G4_Declare* tscDcl = createPreVar(i, 5, Type_UD);
                     tscDcl->getRegVar()->setPhyReg(phyregpool.getTm0Reg(), 0);
                     dcl = tscDcl;
                     break;
@@ -732,28 +731,28 @@ public:
                 }
                 case PreDefinedVarsInternal::SR0:
                 {
-                    G4_Declare* sr0Dcl = createPreVar(i, 4, Type_UD, Either, Any);
+                    G4_Declare* sr0Dcl = createPreVar(i, 4, Type_UD);
                     sr0Dcl->getRegVar()->setPhyReg(phyregpool.getSr0Reg(), 0);
                     dcl = sr0Dcl;
                     break;
                 }
                 case PreDefinedVarsInternal::CR0:
                 {
-                    G4_Declare* cr0Dcl = createPreVar(i, 3, Type_UD, Either, Any);
+                    G4_Declare* cr0Dcl = createPreVar(i, 3, Type_UD);
                     cr0Dcl->getRegVar()->setPhyReg(phyregpool.getCr0Reg(), 0);
                     dcl = cr0Dcl;
                     break;
                 }
                 case PreDefinedVarsInternal::CE0:
                 {
-                    G4_Declare* ce0Dcl = createPreVar(i, 1, Type_UD, Either, Any);
+                    G4_Declare* ce0Dcl = createPreVar(i, 1, Type_UD);
                     ce0Dcl->getRegVar()->setPhyReg(phyregpool.getMask0Reg(), 0);
                     dcl = ce0Dcl;
                     break;
                 }
                 case PreDefinedVarsInternal::DBG:
                 {
-                    G4_Declare* dbgDcl = createPreVar(i, 2, Type_UD, Either, Any);
+                    G4_Declare* dbgDcl = createPreVar(i, 2, Type_UD);
                     dbgDcl->getRegVar()->setPhyReg(phyregpool.getDbgReg(), 0);
                     dcl = dbgDcl;
                     break;
@@ -825,9 +824,10 @@ public:
 
         if (m_options->getOption(vISA_enablePreemption))
         {
-            G4_Declare *R0CopyDcl = createTempVar(8, Type_UD, Either, SUB_ALIGNMENT_GRFALIGN);
+            G4_Declare *R0CopyDcl = createTempVar(8, Type_UD, GRFALIGN);
             builtinR0 = R0CopyDcl;
         }
+
 
         builtinA0 = createDeclareNoLookup(
             "BuiltinA0",
@@ -864,12 +864,12 @@ public:
     IR_Builder(INST_LIST_NODE_ALLOCATOR &alloc, PhyRegPool &pregs, G4_Kernel &k,
         Mem_Manager &m, Options *options, bool isFESP64Bits,
         FINALIZER_INFO *jitInfo = NULL, PVISA_WA_TABLE pWaTable = NULL)
-        : curFile(NULL), curLine(0), curCISAOffset(-1), func_id(-1), metaData(jitInfo),
-        isKernel(false), cunit(0), resolvedCalleeNames(NULL),
+        : curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), func_id(-1), metaData(jitInfo),
+        isKernel(false), cunit(0),
         builtinSamplerHeaderInitialized(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
         CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
         use64BitFEStackVars(isFESP64Bits), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
-        instList(alloc), kernel(k), immPool(*this)
+        instList(alloc), kernel(k)
     {
         num_general_dcl = 0;
         num_temp_dcl = 0;
@@ -984,6 +984,11 @@ public:
         return builtinBindlessSampler;
     }
 
+    G4_Declare* getBuiltinSamplerHeader() const
+    {
+        return builtinSamplerHeader;
+    }
+
     bool isBindlessSampler(G4_Operand* sampler) const
     {
         return sampler->isSrcRegRegion() && sampler->getTopDcl() == getBuiltinBindlessSampler();
@@ -1002,7 +1007,7 @@ public:
     CompilerStats &getcompilerStats() {return compilerStats;}
 
     // create a new temp GRF with the specified type/size and undefined regions
-    G4_Declare* createTempVar(unsigned int numElements, G4_Type type, G4_Align align, G4_SubReg_Align subAlign, const char* prefix = "TV", bool appendIdToName = true )
+    G4_Declare* createTempVar(unsigned int numElements, G4_Type type, G4_SubReg_Align subAlign, const char* prefix = "TV", bool appendIdToName = true )
     {
         const char* name = appendIdToName ?
             getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++) :
@@ -1027,7 +1032,6 @@ public:
         }
 
         G4_Declare* dcl = createDeclareNoLookup(name, G4_GRF, dcl_width, dcl_height, type);
-        dcl->setAlign( align );
         dcl->setSubRegAlign( subAlign );
         return dcl;
     }
@@ -1050,9 +1054,9 @@ public:
     // like the above, but also mark the variable as don't spill
     // this is used for temp variables in macro sequences where spilling woul not help
     // FIXME: can we somehow merge this with G4_RegVarTmp/G4_RegVarTransient?
-    G4_Declare* createTempVarWithNoSpill(unsigned int numElements, G4_Type type, G4_Align align, G4_SubReg_Align subAlign, const char* prefix = "TV")
+    G4_Declare* createTempVarWithNoSpill(unsigned int numElements, G4_Type type, G4_SubReg_Align subAlign, const char* prefix = "TV")
     {
-        G4_Declare* dcl = createTempVar(numElements, type, align, subAlign, prefix);
+        G4_Declare* dcl = createTempVar(numElements, type, subAlign, prefix);
         dcl->setDoNotSpill();
         return dcl;
     }
@@ -1067,7 +1071,7 @@ public:
     //
     G4_Declare* createHardwiredDeclare(uint32_t numElements, G4_Type type, uint32_t regNum, uint32_t regOff)
     {
-        G4_Declare* dcl = createTempVar(numElements, type, Either, Any);
+        G4_Declare* dcl = createTempVar(numElements, type, Any);
         unsigned int linearizedStart = (regNum * G4_GRF_REG_NBYTES) + (regOff * getTypeSize(type));
         // since it's called post RA (specifically post computePReg) we have to manually set the GRF's byte offset
         dcl->setGRFBaseOffset(linearizedStart);
@@ -1095,6 +1099,34 @@ public:
         return inst;
     }
 
+    G4_INST* createSpill(G4_SrcRegRegion* payload, uint16_t numRows, uint32_t offset, G4_Declare* fp, G4_InstOption option,
+        unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    {
+        auto builtInR0 = getBuiltinR0();
+        auto rd = getRegionStride1();
+        auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
+        G4_INST* spill = createInternalIntrinsicInst(nullptr, Intrinsic::Spill, 1, createNullDst(G4_Type::Type_UD), 
+            srcRgnr0, payload, nullptr, option, lineno, CISAoff, srcFilename);
+        spill->asSpillIntrinsic()->setFP(fp);
+        spill->asSpillIntrinsic()->setOffset(offset);
+        spill->asSpillIntrinsic()->setNumRows(numRows);
+        return spill;
+    }
+
+    G4_INST* createFill(G4_DstRegRegion* dstData, uint16_t numRows, uint32_t offset, G4_Declare* fp , G4_InstOption option,
+        unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    {
+        auto builtInR0 = getBuiltinR0();
+        auto rd = getRegionStride1();
+        auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
+        G4_INST* fill = createInternalIntrinsicInst(nullptr, Intrinsic::Fill, 1, dstData,
+            srcRgnr0, nullptr, nullptr, option, lineno, CISAoff, srcFilename);
+        fill->asFillIntrinsic()->setFP(fp);
+        fill->asFillIntrinsic()->setOffset(offset);
+        fill->asFillIntrinsic()->setNumRows(numRows);
+        return fill;
+    }
+
     /* numberOfFlags MEANS NUMBER OF WORDS (e.g., 1 means 16-bit), not number of bits or number of data elements in operands. */
     G4_Declare* createTempFlag(unsigned short numberOfFlags, const char* prefix = "TEMP_FLAG_" )
     {
@@ -1115,7 +1147,7 @@ public:
         return dcl;
     }
 
-    G4_Declare* createPreVar(PreDefinedVarsInternal preDefVar_index, unsigned short numElements, G4_Type type, G4_Align align, G4_SubReg_Align subAlign)
+    G4_Declare* createPreVar(PreDefinedVarsInternal preDefVar_index, unsigned short numElements, G4_Type type)
     {
         MUST_BE_TRUE(preDefVar_index < PreDefinedVarsInternal::VAR_LAST, "illegal predefined var index");
         unsigned short dcl_width = 0, dcl_height = 1;
@@ -1136,15 +1168,9 @@ public:
             }
         }
 
-        if( subAlign == Any )
-        {
-            // subAlign has to be type size at the minimum
-            subAlign = Get_G4_SubRegAlign_From_Type( type );
-        }
-
         G4_Declare* dcl = createPreVarDeclareNoLookup(preDefVar_index, dcl_width, dcl_height, type);
-        dcl->setAlign( align );
-        dcl->setSubRegAlign( subAlign );
+        // subAlign has to be type size at the minimum
+        dcl->setSubRegAlign(Get_G4_SubRegAlign_From_Type(type));
         return dcl;
     }
 
@@ -1437,7 +1463,7 @@ public:
         {
             lab += std::string("_") + kernel.getName();
 #if _DEBUG
-            lab = sanitizeString(lab);
+            lab = sanitizeLabelString(lab);
 #endif
         }
         auto labStr = lab.c_str();
@@ -1575,6 +1601,15 @@ public:
         unsigned int option, int lineno, int CISAoff,
         const char* srcFilename);
 
+    G4_INST* createCFInst(
+        G4_Predicate* prd,
+        G4_opcode op,
+        unsigned char size,
+        G4_Label* jip,
+        G4_Label* uip,
+        unsigned int option,
+        int lineno = 0,
+        bool addToInstList= true);
     G4_INST* createInternalCFInst(G4_Predicate* prd, G4_opcode op,
         unsigned char size, G4_Label* jip, G4_Label* uip,
         unsigned int option, int lineno = 0, int CISAoff = -1,
@@ -1908,7 +1943,7 @@ public:
     int translateVISACFFCallInst(Common_ISA_Exec_Size execsize,
                         Common_VISA_EMask_Ctrl emask,
                         G4_Predicate *predOpnd,
-                        uint16_t functionID,
+                        std::string funcName,
                         uint8_t argSize,
                         uint8_t returnSize);
 
@@ -2539,6 +2574,8 @@ public:
 
     void materializeGlobalImm(G4_BB* entryBB);
 
+    int generateDebugInfoPlaceholder();
+
 #include "HWCapsOpen.inc"
 
 private:
@@ -2577,6 +2614,23 @@ private:
     uint32_t setOwordForDesc(uint32_t desc, int numOword, bool isSLM = false) const;
 
     G4_Declare* getImmDcl(G4_Imm* val, int numElt);
+
+    int splitSampleInst(VISASampler3DSubOpCode actualop,
+        bool pixelNullMask,
+        bool cpsEnable,
+        G4_Predicate* pred,
+        ChannelMask srcChannel,
+        int numChannels,
+        G4_Operand *aoffimmi,
+        G4_Operand *sampler,
+        G4_Operand *surface,
+        G4_DstRegRegion* dst,
+        Common_VISA_EMask_Ctrl emask,
+        bool useHeader,
+        unsigned numRows, // msg length for each simd8
+        unsigned int numParms,
+        G4_SrcRegRegion ** params,
+        bool uniformSampler = true);
 
 };
 }

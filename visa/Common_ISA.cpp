@@ -134,14 +134,6 @@ const char* vme_search_ctrl_str[4] =
     "111"
 };
 
-const char* special_opnd_type_str[S_OPND_NUM] =
-{
-    "00",
-    "01",
-    "10",
-    "11"
-};
-
 const char* pred_ctrl_str[9] =
 {
     "",
@@ -441,97 +433,12 @@ int processCommonISAHeader(
             READ_FIELD_FROM_BUF(cisaHdr.kernels[i].gen_binaries[j].binary_size, uint32_t);
         }
 
-
-        cisaHdr.kernels[i].scratch = NULL;
         cisaHdr.kernels[i].cisa_binary_buffer = NULL;
         cisaHdr.kernels[i].genx_binary_buffer = NULL;
-        cisaHdr.kernels[i].stack_call = false;
-        cisaHdr.kernels[i].num_callers = 0;
     }
 
     READ_FIELD_FROM_BUF(cisaHdr.num_filescope_variables, uint16_t);
-
-    cisaHdr.num_extern_variables = cisaHdr.num_static_variables = cisaHdr.num_global_variables = 0;
-
-    if (cisaHdr.num_filescope_variables > 0) {
-        cisaHdr.filescope_variables =
-            (filescope_var_info_t *)mem->alloc(
-            sizeof(filescope_var_info_t)*
-            cisaHdr.num_filescope_variables);
-        ALLOC_ASSERT(cisaHdr.filescope_variables);
-    }
-    else {
-        cisaHdr.filescope_variables = NULL;
-    }
-
-    for (int i = 0; i < cisaHdr.num_filescope_variables; i++) {
-        READ_FIELD_FROM_BUF(cisaHdr.filescope_variables[i].linkage, uint8_t);
-        if (cisaHdr.filescope_variables[i].linkage == CISA_LINKAGE_EXTERN)
-            cisaHdr.num_extern_variables++;
-        else if (cisaHdr.filescope_variables[i].linkage == CISA_LINKAGE_STATIC)
-            cisaHdr.num_static_variables++;
-        else
-            cisaHdr.num_global_variables++;
-
-        READ_FIELD_FROM_BUF(
-            cisaHdr.filescope_variables[i].name_len, uint16_t);
-
-        if (cisaHdr.filescope_variables[i].name_len) {
-            cisaHdr.filescope_variables[i].name =
-                (uint8_t*)mem->alloc(
-                (cisaHdr.filescope_variables[i].name_len + 1) *
-                sizeof(char));
-            ALLOC_ASSERT(cisaHdr.filescope_variables[i].name);
-        }
-        else {
-            cisaHdr.filescope_variables[i].name = NULL;
-        }
-
-        memcpy_s(
-            cisaHdr.filescope_variables[i].name, cisaHdr.filescope_variables[i].name_len + 1, &buf[byte_pos],
-            cisaHdr.filescope_variables[i].name_len * sizeof(uint8_t));
-        cisaHdr.filescope_variables[i].name[
-            cisaHdr.filescope_variables[i].name_len] = '\0';
-            byte_pos += cisaHdr.filescope_variables[i].name_len;
-            READ_FIELD_FROM_BUF(
-                cisaHdr.filescope_variables[i].bit_properties, uint8_t);
-            READ_FIELD_FROM_BUF(
-                cisaHdr.filescope_variables[i].num_elements, uint16_t);
-            READ_FIELD_FROM_BUF(
-                cisaHdr.filescope_variables[i].attribute_count,
-                uint8_t);
-
-            if (cisaHdr.filescope_variables[i].attribute_count) {
-                cisaHdr.filescope_variables[i].attributes =
-                    (attribute_info_t *)mem->alloc
-                    (sizeof(attribute_info_t)*
-                    cisaHdr.filescope_variables[i].attribute_count);
-                ALLOC_ASSERT(cisaHdr.filescope_variables[i].attributes);
-            }
-            else {
-                cisaHdr.filescope_variables[i].attributes = NULL;
-            }
-
-            // FIXME: this is wrong and needs to be fixed to call
-            //        IR_Builder's code
-
-            for (int j = 0;
-                j < cisaHdr.filescope_variables[i].attribute_count;
-                j++) {
-                READ_FIELD_FROM_BUF(
-                    cisaHdr.filescope_variables[i].attributes[j].nameIndex,
-                    unsigned short);
-                READ_FIELD_FROM_BUF(
-                    cisaHdr.filescope_variables[i].attributes[j].size,
-                    unsigned char);
-                cisaHdr.filescope_variables[i].attributes[j].value.stringVal =
-                    (char*)mem->alloc
-                    (sizeof(char)*
-                    cisaHdr.filescope_variables[i].attributes[j].size);
-            }
-
-            cisaHdr.filescope_variables[i].scratch = NULL;
-    }
+    assert(cisaHdr.num_filescope_variables == 0 && "file scope variables are no longer supported");
 
     READ_FIELD_FROM_BUF(cisaHdr.num_functions, uint16_t);
 
@@ -545,16 +452,9 @@ int processCommonISAHeader(
         cisaHdr.functions = NULL;
     }
 
-    cisaHdr.num_extern_functions = cisaHdr.num_static_functions = cisaHdr.num_global_functions = 0;
-
     for (int i = 0; i < cisaHdr.num_functions; i++) {
+        // field is deprecated 
         READ_FIELD_FROM_BUF(cisaHdr.functions[i].linkage, uint8_t);
-        if (cisaHdr.functions[i].linkage == CISA_LINKAGE_EXTERN)
-            cisaHdr.num_extern_functions++;
-        else if (cisaHdr.functions[i].linkage == CISA_LINKAGE_STATIC)
-            cisaHdr.num_static_functions++;
-        else
-            cisaHdr.num_global_functions++;
 
         READ_FIELD_FROM_BUF(cisaHdr.functions[i].name_len, uint8_t);
         memcpy_s(
@@ -578,11 +478,8 @@ int processCommonISAHeader(
             assert(cisaHdr.functions[i].function_reloc_symtab.num_syms == 0 && "function relocation not supported");
             cisaHdr.functions[i].function_reloc_symtab.reloc_syms = nullptr;
 
-            cisaHdr.functions[i].scratch = NULL;
             cisaHdr.functions[i].cisa_binary_buffer = NULL;
             cisaHdr.functions[i].genx_binary_buffer = NULL;
-            cisaHdr.functions[i].stack_call = false;
-            cisaHdr.functions[i].num_callers = 0;
     }
 
     return 0;

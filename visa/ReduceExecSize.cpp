@@ -76,13 +76,11 @@ void HWConformity::fixOpndTypeAlign( G4_BB* bb )
     {
         G4_INST *inst = *i;
         G4_opcode opcode = inst->opcode();
-        bool instIsChanged = false;
         if (opcode == G4_nop || opcode == G4_label || inst->isSend()) {
             next_iter++;
         } else if (fixInstOpndTypeAlign(i, bb)) {
             next_iter = i;
             next_iter++;
-            instIsChanged = true;
         } else {
             next_iter++;
         }
@@ -1036,7 +1034,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
     G4_Declare *maskDcl = NULL;
     if (instPred || isSIMDCFInst)
     {
-        maskDcl = builder.createTempVar(instExSize, Type_UW, Either, Eight_Word);
+        maskDcl = builder.createTempVar(instExSize, Type_UW, Eight_Word);
         G4_DstRegRegion * tmpMaskOpnd = builder.createDstRegRegion(Direct, maskDcl->getRegVar(), 0, 0, 1, Type_UW);
 
         G4_INST* firstMov = builder.createInternalInst(NULL, G4_mov, NULL, false, instExSize,
@@ -1565,7 +1563,7 @@ void HWConformity::moveSrcToGRF( INST_LIST_ITER it, uint32_t srcNum, uint16_t nu
         inst->setSrc( newSrc, srcNum );
     }
 
-    G4_Declare* dcl = builder.createTempVar( dclSize, src->getType(), Either, SUB_ALIGNMENT_GRFALIGN );
+    G4_Declare* dcl = builder.createTempVar( dclSize, src->getType(), GRFALIGN );
     G4_DstRegRegion *dstRegion = builder.createDstRegRegion(
                         Direct,
                         dcl->getRegVar(),
@@ -1612,11 +1610,10 @@ void HWConformity::saveDst( INST_LIST_ITER& it, uint8_t stride, G4_BB *bb )
     G4_Type dstType = dst->getType();
     uint16_t dstWidthBytes = execSize * G4_Type_Table[dstType].byteSize * stride;
 
-    G4_SubReg_Align subAlign;
-    G4_Align align = getDclAlignment( dstWidthBytes, inst, execSize == 1, subAlign );
+    G4_SubReg_Align subAlign = getDclAlignment( dstWidthBytes, inst, execSize == 1);
 
     uint32_t numElt = execSize == 1 ? 1 : execSize * stride;
-    G4_Declare* dcl = builder.createTempVar( numElt, dstType, align, subAlign );
+    G4_Declare* dcl = builder.createTempVar( numElt, dstType, subAlign );
 
     uint16_t hs = dst->getHorzStride();
     RegionDesc *region = builder.createRegionDesc( hs * execSize, execSize, hs );
@@ -1682,11 +1679,10 @@ void HWConformity::insertMovAfter( INST_LIST_ITER& it, uint16_t stride, G4_BB* b
     uint16_t opExecWidthBytes = execSize * G4_Type_Table[execType].byteSize;
     uint16_t dstWidthBytes = execSize * G4_Type_Table[dstType].byteSize * stride;
 
-    G4_SubReg_Align subAlign;
-    G4_Align align = getDclAlignment( opExecWidthBytes > dstWidthBytes ? opExecWidthBytes : dstWidthBytes,
-        inst, execSize == 1, subAlign );
+    G4_SubReg_Align subAlign = getDclAlignment( opExecWidthBytes > dstWidthBytes ? opExecWidthBytes : dstWidthBytes,
+        inst, execSize == 1);
 
-    G4_Declare* dcl = builder.createTempVar( execSize * stride, dstType, align, subAlign );
+    G4_Declare* dcl = builder.createTempVar( execSize * stride, dstType, subAlign );
 
     RegionDesc* region = builder.createRegionDesc(stride, 1, 0 );
     G4_SrcRegRegion *srcRegion = builder.Create_Src_Opnd_From_Dcl( dcl, region);

@@ -36,22 +36,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <map>
 namespace IGC
 {
-// Attributes for each __builtin_IB_atomic function.
-//
-//              bufType
-//                 |
-//       not used  V   op
-//       |-------|---|---|
-//    0 x 0 0 0 0 0 0 0 0 
-//
-typedef unsigned int OCLAtomicAttrs;
+    // Attributes for each __builtin_IB_atomic function.
+    //
+    //              bufType
+    //                 |
+    //       not used  V   op
+    //       |-------|---|---|
+    //    0 x 0 0 0 0 0 0 0 0 
+    //
+    typedef unsigned int OCLAtomicAttrs;
 
-// A pass that walks over call instructions and replaces all __builtin_IB_atomic calls
-// with corresponding GenISA intrinsics.
-//
-class ResolveOCLAtomics : public llvm::ModulePass, public llvm::InstVisitor<ResolveOCLAtomics>
-{
-public:
+    // A pass that walks over call instructions and replaces all __builtin_IB_atomic calls
+    // with corresponding GenISA intrinsics.
+    //
+    class ResolveOCLAtomics : public llvm::ModulePass, public llvm::InstVisitor<ResolveOCLAtomics>
+    {
+    public:
     // Pass identification, replacement for typeid
     static char ID;
 
@@ -68,16 +68,16 @@ public:
     }
 
     // Entry point of the pass.
-    virtual bool runOnModule(llvm::Module &M) override;
+        virtual bool runOnModule(llvm::Module& M) override;
 
     // Call instructions visitor.
-    void visitCallInst(llvm::CallInst &callInst);
+        void visitCallInst(llvm::CallInst& callInst);
 
     static const unsigned int ATTR_BUFFER_TYPE_SHIFT = 8;
 
-protected:
-    llvm::Module      *m_pModule;
-    llvm::IntegerType *m_Int32Ty;
+    protected:
+        llvm::Module* m_pModule;
+        llvm::IntegerType* m_Int32Ty;
     bool               m_64bitPointer;
  
     // A map that keeps attributes for each "__builtin_IB_atomic_*" function name.
@@ -108,15 +108,22 @@ protected:
     /// @param    callInst  call to "__builtin_IB_atomic_*" function.
     /// @param    op        atomic operation.
     /// @param    bufType   buffer type.
-    void           processOCLAtomic(llvm::CallInst &callInst, AtomicOp op, BufferType bufType);
+        void           processOCLAtomic(llvm::CallInst& callInst, AtomicOp op, BufferType bufType);
 
     /// @brief  Generates a call to "GenISA_GetBufferPtr" intrinsic.
     /// @param    callInst   call instruction to "__builtin_IB_atomic_*" built-in function.
     /// @param    bufType    corresponding buffer type.
     /// @returns  call instruction to generated GenISA_GetBufferPtr.
-    llvm::CallInst*     genGetBufferPtr(llvm::CallInst &callInst, BufferType bufType);
+        llvm::CallInst* genGetBufferPtr(llvm::CallInst& callInst, BufferType bufType);
+
+    /// @brief  Replace the "__builtin_IB_get_local_lock" call with a pointer to a local memory variable.
+    /// @param    callInst  call to "__builtin_IB_get_local_lock*" function.
+    void           processGetLocalLock(llvm::CallInst& callInst);
+
+    /// @brief  Stores the value of local value used for spinlock for i64 local atomics emulation.
+    llvm::GlobalVariable* m_localLock = nullptr;
 
     /// @brief  Indicates if the pass changed the processed function
-    bool m_changed;
-};
+    bool m_changed = false;
+    };
 }

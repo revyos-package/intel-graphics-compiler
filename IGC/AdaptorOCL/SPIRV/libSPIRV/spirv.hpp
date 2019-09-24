@@ -402,6 +402,7 @@ enum Decoration {
     DecorationMaxByteOffset = 45,
     DecorationNoSignedWrap = 4469,
     DecorationNoUnsignedWrap = 4470,
+    DecorationReferencedIndirectlyINTEL = 5602,
 };
 
 enum BuiltIn {
@@ -594,6 +595,8 @@ enum Capability {
     CapabilitySubgroupBufferBlockIOINTEL = 5569,
     CapabilitySubgroupImageBlockIOINTEL = 5570,
     CapabilitySubgroupImageMediaBlockIOINTEL = 5579,
+    CapabilityFunctionPointersINTEL = 5603,
+    CapabilityIndirectReferencesINTEL = 5604,
     CapabilitySubgroupAvcMotionEstimationINTEL = 5696,
     CapabilitySubgroupAvcMotionEstimationIntraINTEL = 5697,
     CapabilitySubgroupAvcMotionEstimationChromaINTEL = 5698,

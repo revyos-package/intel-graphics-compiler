@@ -97,19 +97,37 @@ bool AddImplicitArgs::runOnModule(Module &M)
 
         ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
 
-        // If enabling indirect call, only R0, PayloadHeader and PrivateBase are allowed!
+        // Check for allowed implicit args used by indirectly called funcs
         if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
         {
-            if (pFunc->hasFnAttribute("ExternalLinkedFn"))
+            if (pFunc->hasFnAttribute("IndirectlyCalled"))
             {
-                if (implicitArgs.size() != 3 ||
-                !implicitArgs.isImplicitArgExist(ImplicitArg::ArgType::R0) ||
-                !implicitArgs.isImplicitArgExist(ImplicitArg::ArgType::PAYLOAD_HEADER) ||
-                !implicitArgs.isImplicitArgExist(ImplicitArg::ArgType::PRIVATE_BASE))
+                bool success = true;
+                unsigned numArgs = 3;
+                // Must have R0, payload_header, and private_base
+                if (!implicitArgs.isImplicitArgExist(ImplicitArg::R0) ||
+                    !implicitArgs.isImplicitArgExist(ImplicitArg::PAYLOAD_HEADER) ||
+                    !implicitArgs.isImplicitArgExist(ImplicitArg::PRIVATE_BASE))
                 {
-                    assert(0 && "Implicit Arg not supported for indirect calls!");
-                    continue;
+                    success = false;
                 }
+                // Check for GAS usage
+                if (success && ctx->m_instrTypes.hasGenericAddressSpacePointers)
+                {
+                    numArgs += 3;
+                    if (!implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS) ||
+                        !implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE) ||
+                        !implicitArgs.isImplicitArgExist(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE))
+                    {
+                        success = false;
+                    }
+                }
+                if (success && implicitArgs.size() != numArgs)
+                {
+                    success = false;
+                }
+                ctx->m_numIndirectImplicitArgs = numArgs;
+                assert(success && "Unhandled implicit args for indirect function calls");
             }
         }
 
@@ -265,7 +283,6 @@ void AddImplicitArgs::updateNewFuncArgs(llvm::Function* pFunc, llvm::Function* p
             std::string str0;
             llvm::raw_string_ostream s(str0);
             currArg->getType()->print(s);
-            StringRef argTypeName = s.str();
 
             BasicBlock &entry = pNewFunc->getEntryBlock();
             newArg = new llvm::BitCastInst(&(*currArg), (*I).getType(), "", &entry.front());
@@ -407,7 +424,6 @@ void AddImplicitArgs::replaceAllUsesWithNewOCLBuiltinFunction(CodeGenContext* ct
                 std::string str0;
                 llvm::raw_string_ostream s(str0);
                 arg->getType()->print(s);
-                StringRef argTypeName = s.str();
 
                 arg = new llvm::BitCastInst(arg, new_arg_iter->getType(), "", cInst);
             }
@@ -495,6 +511,7 @@ void AddImplicitArgs::replaceAllUsesWithNewOCLBuiltinFunction(CodeGenContext* ct
 void AddImplicitArgs::FixIndirectCalls(Module& M)
 {
     // Handle indirect call instructions by inserting implicit args
+    CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     std::vector<Instruction*> list_delete;
     for (auto &F : M)
     {
@@ -504,15 +521,12 @@ void AddImplicitArgs::FixIndirectCalls(Module& M)
             {
                 if (CallInst* call = dyn_cast<CallInst>(&II))
                 {
+                    if (call->isInlineAsm()) continue;
+
                     Function* calledFunc = call->getCalledFunction();
 
-                    bool externalCall = calledFunc &&
-                    calledFunc->isDeclaration() &&
-                    (calledFunc->getLinkage() == GlobalValue::ExternalLinkage) &&
-                    calledFunc->hasFnAttribute("ExternalLinkedFn");
-
-                    // Only handled indirect calls and external function calls
-                    if (calledFunc && !externalCall) continue;
+                    bool isIndirectCall = !calledFunc || calledFunc->hasFnAttribute("IndirectlyCalled");
+                    if (!isIndirectCall) continue;
 
                     SmallVector<Value*, 8> args;
                     SmallVector<Type*, 8> argTys;
@@ -523,16 +537,26 @@ void AddImplicitArgs::FixIndirectCalls(Module& M)
 
                     Function* pFunc = call->getParent()->getParent();
                     ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
-                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::ArgType::R0));
-                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::ArgType::PAYLOAD_HEADER));
-                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::ArgType::PRIVATE_BASE));
+
+                    // Always insert params for R0, PAYLOAD_HEADER, and PRIVATE_BASE
+                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::R0));
+                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::PAYLOAD_HEADER));
+                    args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::PRIVATE_BASE));
+
+                    if (ctx->m_instrTypes.hasGenericAddressSpacePointers)
+                    {
+                        // Support for GAS usage
+                        args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS));
+                        args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE));
+                        args.push_back(implicitArgs.getImplicitArg(*pFunc, ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE));
+                    }
 
                     for (auto arg : args) argTys.push_back(arg->getType());
 
                     IRBuilder<> builder(call);
                     Value* funcPtr = call->getCalledValue();
                     PointerType* funcTy = PointerType::get(FunctionType::get(call->getType(), argTys, false), 0);
-                    funcPtr = builder.CreateBitCast(funcPtr, funcTy);
+                    funcPtr = builder.CreatePointerBitCastOrAddrSpaceCast(funcPtr, funcTy);
                     Value* newCall = builder.CreateCall(funcPtr, args);
 
                     call->replaceAllUsesWith(newCall);

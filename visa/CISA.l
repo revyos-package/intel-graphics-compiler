@@ -52,22 +52,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #else
 #define TRACE(str)
 #endif
-VISA_Type               str2type(const char *str, int str_len);
-Common_ISA_Cond_Mod     str2cond(const char *str);
-VISAAtomicOps           str2atomic_opcode(const char *op_str);
-ISA_Opcode              str2opcode(const char* op_str);
-VISASampler3DSubOpCode  str2SampleOpcode(const char* str);
-int64_t                 hexToint(const char *hex_str, int str_len);
-MEDIA_LD_mod            mediaMode(const char* str);
-OutputFormatControl     avs_control(const char* str);
-AVSExecMode             avsExecMode(const char* str);
-unsigned char           FENCEOptions(const char *str);
-COMMON_ISA_VME_OP_MODE  VMEType(const char *str);
-Common_VISA_EMask_Ctrl  Get_CISA_Emask(const char* str);
-CHANNEL_OUTPUT_FORMAT   Get_Channel_Output(const char* str);
-static void             appendStringLiteralChar(char c, char *buf, size_t *len);
-
-static int pendingBracket;
+static VISA_Type               str2type(const char *str, int str_len);
+static Common_ISA_Cond_Mod     str2cond(const char *str);
+static VISAAtomicOps           str2atomic_opcode(const char *op_str);
+static ISA_Opcode              str2opcode(const char* op_str);
+static VISASampler3DSubOpCode  str2SampleOpcode(const char* str);
+static int64_t                 hexToInt(const char *hex_str, int str_len);
+static MEDIA_LD_mod            mediaMode(const char* str);
+static OutputFormatControl     avs_control(const char* str);
+static AVSExecMode             avsExecMode(const char* str);
+static unsigned char           FENCEOptions(const char *str);
+static COMMON_ISA_VME_OP_MODE  VMEType(const char *str);
+static Common_VISA_EMask_Ctrl  Get_CISA_Emask(const char* str);
+static CHANNEL_OUTPUT_FORMAT   Get_Channel_Output(const char* str);
+static void                    appendStringLiteralChar(char c, char *buf, size_t *len);
 
 #ifdef _MSC_VER
 #include <io.h>
@@ -190,13 +188,10 @@ static int pendingBracket;
 ".kernel_attr"      {TRACE("\n** KERNEL ATTR "); return DIRECTIVE_KERNEL_ATTR;}
 ".input"            {TRACE("\n** INPUT "); return DIRECTIVE_INPUT;}
 ".parameter"        {TRACE("\n** PARAMETER "); return DIRECTIVE_PARAMETER;}
-".return"           {TRACE("\n** RETURN "); return DIRECTIVE_RETURN;}
 ".loc"              {TRACE("\n** LOC "); return DIRECTIVE_LOC;}
 ".function"         {TRACE("\n** FUNCTION "); return DIRECTIVE_FUNC;}
 ".global_function"  {TRACE("\n** GLOBAL FUNCTION "); return DIRECTIVE_GLOBAL_FUNC;}
-".resolvedIndex"    {TRACE("\n** RESOLVED INDEX "); return DIRECTIVE_RESOLVED_INDEX;}
-".kernel"           {TRACE("\n** KERNEL NAME DIRECTIVE "); return DOT_KERNEL;}
-".function"         {TRACE("\n** FUNCTION NAME DIRECTIVE ");return DOT_FUNCTION;}
+".kernel"           {TRACE("\n** KERNEL NAME DIRECTIVE "); return DIRECTIVE_KERNEL;}
 
 "."implicit[a-zA-Z0-9_\-$@?]* {
         TRACE("\n**  IMPLICIT_INPUT ");
@@ -353,6 +348,7 @@ oword_ld|oword_st|oword_ld_unaligned {
         return OWORD_OP;
     }
 
+
 media_ld|media_st {
         TRACE("\n** media INST ");
         CISAlval.opcode = str2opcode(yytext);
@@ -487,6 +483,12 @@ jmp|call|ret|fret|fcall|goto {
         return BRANCH_OP;
     }
 
+fcall {
+  TRACE("\n** direct call INST ");
+        CISAlval.opcode = ISA_FCALL;
+        return FCALL;
+}
+
 ifcall {
         TRACE("\n** indirect call INST ");
         CISAlval.opcode = ISA_IFCALL;
@@ -615,7 +617,7 @@ lifetime"."end {
 
 0x[[:xdigit:]]+ {
         TRACE("\n** HEX NUMBER ");
-        CISAlval.number = hexToint(yytext+2, yyleng-2);
+        CISAlval.number = hexToInt(yytext+2, yyleng-2);
         return HEX_NUMBER;
     }
 
@@ -675,7 +677,7 @@ CM_AVS_(4|8|16)x(4|8) {
         return DOUBLEFLOAT;
     }
 
-qSLMSize[ ]*=[ ]* {TRACE("\n** File name of assembly "); CISAlval.string = "SLMSize"; return SLM_SIZE;}
+qSLMSize[ ]*=[ ]* {TRACE("\n** SLM Size "); CISAlval.string = "SLMSize"; return SLM_SIZE;}
 
 qFlagRegNum[ ]*=[ ]* {TRACE("\n** Flag regisetr number "); CISAlval.string = "FlagRegNum"; return FLAG_REG_NAME;}
 
@@ -906,7 +908,7 @@ V0 {
 int yywrap() { return 1;}
 
 // convert "ud", "w" to Type_UD Type_W
-VISA_Type str2type(const char *str, int str_len)
+static VISA_Type str2type(const char *str, int str_len)
 {
     // find the starting of the type string
     int i;
@@ -939,7 +941,7 @@ VISA_Type str2type(const char *str, int str_len)
 
 
 // convert "z" to Mod_z
-Common_ISA_Cond_Mod str2cond(const char *str)
+static Common_ISA_Cond_Mod str2cond(const char *str)
 {
     for (int i = 0; i < ISA_CMP_UNDEF; i++)
         if (strcmp(Rel_op_str[i], str) == 0)
@@ -950,7 +952,7 @@ Common_ISA_Cond_Mod str2cond(const char *str)
     return ISA_CMP_UNDEF;
 }
 
-unsigned digit_num(char d)
+static unsigned hexCharToDigit(char d)
 {
     if (d >= '0' && d <= '9')
         return d - '0';
@@ -965,7 +967,7 @@ unsigned digit_num(char d)
 }
 
 // convert hex string to int
-int64_t hexToint(const char *hex_str, int str_len)
+static int64_t hexToInt(const char *hex_str, int str_len)
 {
     if (str_len > 16) { // make sure is within 32 bits
         YY_FATAL_ERROR("Hex number larger than 8 digits");
@@ -975,13 +977,13 @@ int64_t hexToint(const char *hex_str, int str_len)
 
     // starting from the last digit
     for (int i = 0; i < str_len; i++)
-        result += (uint64_t)digit_num(*(hex_str+str_len-1-i)) << (i*4);
+        result += (uint64_t)hexCharToDigit(*(hex_str+str_len-1-i)) << (i*4);
 
-    return (int64_t) result;
+    return (int64_t)result;
 }
 
 // convert str to its corresponding opcode
-ISA_Opcode str2opcode(const char* op_str)
+static ISA_Opcode str2opcode(const char *op_str)
 {
     for (int i = 0; i < ISA_NUM_OPCODE; i++)
         if (strcmp(ISA_Inst_Table[i].str, op_str) == 0)
@@ -992,7 +994,7 @@ ISA_Opcode str2opcode(const char* op_str)
     return ISA_RESERVED_0;
 }
 
-VISASampler3DSubOpCode str2SampleOpcode(const char* str)
+static VISASampler3DSubOpCode str2SampleOpcode(const char *str)
 {
     for (int i = 0; i < ISA_NUM_OPCODE; i++)
         if (strcmp(SAMPLE_OP_3D_NAME[i], str) == 0)
@@ -1003,7 +1005,7 @@ VISASampler3DSubOpCode str2SampleOpcode(const char* str)
     return VISA_3D_TOTAL_NUM_OPS;
 }
 
-VISAAtomicOps str2atomic_opcode(const char *op_str)
+static VISAAtomicOps str2atomic_opcode(const char *op_str)
 {
     for (unsigned i = 0; i < ATOMIC_UNDEF; ++i)
         if (strcmp(CISAAtomicOpNames[i], op_str) == 0)
@@ -1015,7 +1017,7 @@ VISAAtomicOps str2atomic_opcode(const char *op_str)
 }
 
 // convert str to its corresponding media load mode
-MEDIA_LD_mod mediaMode(const char* str)
+static MEDIA_LD_mod mediaMode(const char *str)
 {
     for (int i = 0; i < MEDIA_LD_Mod_NUM; i++)
         if (!strcmp(media_ld_mod_str[i], str))
@@ -1027,7 +1029,7 @@ MEDIA_LD_mod mediaMode(const char* str)
 }
 
 // convert str to its corresponding avs output format control
-OutputFormatControl avs_control(const char* str)
+static OutputFormatControl avs_control(const char* str)
 {
     for (int i = 0; i < 4; i++)
         if (!strcmp(avs_control_str[i], str))
@@ -1038,7 +1040,7 @@ OutputFormatControl avs_control(const char* str)
     return CM_16_FULL;
 }
 
-AVSExecMode avsExecMode(const char* str)
+static AVSExecMode avsExecMode(const char* str)
 {
     for (int i = 0; i < 3; i++)
         if (!strcmp(avs_exec_mode[i], str))
@@ -1049,7 +1051,7 @@ AVSExecMode avsExecMode(const char* str)
     return CM_AVS_16x4;
 }
 
-unsigned char FENCEOptions(const char *str)
+static unsigned char FENCEOptions(const char *str)
 {
     int count = strlen(str);
     unsigned char result=0;
@@ -1093,7 +1095,7 @@ unsigned char FENCEOptions(const char *str)
     return result;
 }
 
-COMMON_ISA_VME_OP_MODE VMEType(const char* str)
+static COMMON_ISA_VME_OP_MODE VMEType(const char* str)
 {
     for (int i = 0; i < VME_OP_MODE_NUM; i++)
         if (!strcmp(vme_op_mode_str[i], str))
@@ -1104,7 +1106,7 @@ COMMON_ISA_VME_OP_MODE VMEType(const char* str)
     return VME_OP_MODE_NUM;
 }
 
-Common_VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
+static Common_VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
 {
     if(strcmp(str, "NoMask") == 0)
         return vISA_EMASK_M1_NM;
@@ -1121,35 +1123,7 @@ Common_VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
     return vISA_EMASK_M1;
 }
 
-char *get_kernel_name(const char *str, int str_len)
-{
-    const char *ptr_1 = str + 7;
-    const char *ptr_2 = str + str_len - 1;
-    char *kernel_name;
-    int length;
-
-    while (*ptr_1 == ' ' ||
-           *ptr_1 == '\t')
-        ptr_1 ++;
-
-    while (*ptr_2 == ' ' ||
-           *ptr_2 == '\t')
-        ptr_2 --;
-
-    length = ptr_2 - ptr_1 + 1;
-    if (length > 0) {
-        kernel_name = (char *)malloc((length + 1) * sizeof(char));
-        strncpy(kernel_name, ptr_1, length);
-        kernel_name[length] = '\0';
-        return kernel_name;
-    }
-
-    YY_FATAL_ERROR("Wrong kernel name");
-
-    return NULL;
-};
-
-CHANNEL_OUTPUT_FORMAT Get_Channel_Output(const char* str)
+static CHANNEL_OUTPUT_FORMAT Get_Channel_Output(const char* str)
 {
     for (int i = 0; i < CHANNEL_OUTPUT_NUM; i++)
     {
