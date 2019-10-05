@@ -163,6 +163,7 @@ namespace iga
 
         void setMsgDesc(const SendDescArg &msg) { m_desc = msg; }
         void setExtMsgDesc(const SendDescArg &msg) { m_exDesc = msg; }
+        void setSWSB(SWSB swsb) { m_depInfo = swsb; }
         void addInstOpt(const InstOpt &opt) { m_instOpts.add(opt); }
         void addInstOpts(const InstOptSet &opts) { m_instOpts.add(opts); }
 
@@ -224,7 +225,13 @@ namespace iga
         const Block       *getJIP() const { return m_srcs[0].getTargetBlock(); }
         const Block       *getUIP() const { return m_srcs[1].getTargetBlock(); }
         const std::string  &getComment() const { return m_comment; }
+        SWSB             getSWSB() const { return m_depInfo; }
         bool             isBranching() const { return getOpSpec().isBranching(); }
+
+        bool             isMovWithLabel() const
+        {
+            return (getOp() == Op::MOV && getSource(0).getKind() == Operand::Kind::LABEL);
+        }
 
         void             validate() const; // asserts on malformed IR
         std::string      str(Platform pltfm) const; // returns syntax of this instruction
@@ -240,15 +247,15 @@ namespace iga
         ChannelOffset    m_chOff;
         Operand          m_dst;
         Operand          m_srcs[3];
-        union
-        {
-            FlagModifier        m_flagModifier; // conditional-modifier function
-            BranchCntrl         m_brnch;        // for certain branching instructions
-        };
+
+        FlagModifier     m_flagModifier; // conditional-modifier function
+        BranchCntrl      m_brnch;        // for certain branching instructions
+
         SendDescArg  m_exDesc;
         SendDescArg  m_desc;
 
         InstOptSet       m_instOpts; // miscellaneous instruction attributes
+        SWSB             m_depInfo;
 
         int              m_instId; // unique id for this instruction (unique in the kernel)
 

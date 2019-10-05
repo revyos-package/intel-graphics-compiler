@@ -388,8 +388,7 @@ void Optimizer::insertDummyCompactInst()
     auto src = builder.createSrcRegRegion(Mod_src_undef, Direct,
         dcl->getRegVar(), 0, 0, builder.getRegionScalar(), Type_F);
     auto dst = builder.createDstRegRegion(Direct, dcl->getRegVar(), 0, 0, 1, Type_F);
-    G4_INST *movInst = builder.createInternalInst(nullptr, G4_mov, nullptr, false,
-        1, dst, src, nullptr, InstOpt_WriteEnable);
+    G4_INST *movInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
 
     auto bb = fg.getEntryBB();
     for (auto it = bb->begin(), ie = bb->end(); it != ie; ++it)
@@ -597,6 +596,7 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(dce,                     vISA_EnableDCE,               TIMER_OPTIMIZER);
     INITIALIZE_PASS(reassociateConst,        vISA_reassociate,             TIMER_OPTIMIZER);
     INITIALIZE_PASS(split4GRFVars,           vISA_split4GRFVar,            TIMER_OPTIMIZER);
+    INITIALIZE_PASS(addFFIDProlog,           vISA_addFFIDProlog,           TIMER_MISC_OPTS);
     INITIALIZE_PASS(loadThreadPayload,       vISA_loadThreadPayload,       TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertFenceBeforeEOT,    vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertScratchReadBeforeEOT, vISA_clearScratchWritesBeforeEOT, TIMER_MISC_OPTS);
@@ -1191,6 +1191,8 @@ int Optimizer::optimization()
     runPass(PI_initializePayload);
 
     runPass(PI_loadThreadPayload);
+
+    runPass(PI_addFFIDProlog);
 
     // Insert a dummy compact instruction if requested for SKL+
     runPass(PI_insertDummyCompactInst);
@@ -2282,7 +2284,7 @@ void Optimizer::doSimplification(G4_INST *inst)
         unsigned SrcSizeInBytes = inst->getExecSize() *
                 getTypeSize(inst->getSrc(0)->getType());
         if (SrcSizeInBytes == G4_GRF_REG_NBYTES/2 ||
-            SrcSizeInBytes == G4_GRF_REG_NBYTES) 
+            SrcSizeInBytes == G4_GRF_REG_NBYTES)
         {
             G4_INST *LEA = getSingleDefInst(inst, Opnd_src0);
             if (LEA && LEA->opcode() == G4_add &&
@@ -2304,7 +2306,7 @@ void Optimizer::doSimplification(G4_INST *inst)
                     if (SrcSizeInBytes <= G4_GRF_REG_NBYTES/2u)
                         SubAlign = (G4_SubReg_Align)(NUM_WORDS_PER_GRF/2);
                     inst->setOpcode(G4_movi);
-                    if (!Dcl->isEvenAlign() && Dcl->getSubRegAlign() != GRFALIGN) 
+                    if (!Dcl->isEvenAlign() && Dcl->getSubRegAlign() != GRFALIGN)
                     {
                         Dcl->setSubRegAlign(SubAlign);
                     }
@@ -3702,6 +3704,13 @@ bool Optimizer::foldCmpToCondMod(G4_BB* bb, INST_LIST_ITER& iter)
 
     auto cmpIter = std::find(iter, bb->end(), cmpInst);
 
+    // check if cmp instruction is close enough
+    constexpr int DISTANCE = 60;
+    if (std::distance(iter, cmpIter) > DISTANCE)
+    {
+        return false;
+    }
+
     auto isSupportedCondMod = [](G4_CondModifier mod)
     {
         return mod == Mod_g || mod == Mod_ge || mod == Mod_l || mod == Mod_le ||
@@ -4732,20 +4741,13 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         G4_Declare *srcDcl = source_send->getSrc(0)->getBase()->asRegVar()->getDeclare();
         G4_SrcRegRegion* newSrcOpnd = builder.Create_Src_Opnd_From_Dcl(srcDcl, builder.getRegionStride1());
 
-        G4_INST* mov_mrf = builder.createInternalInst(
-            NULL,
-            G4_mov,
-            NULL,
-            false,
+        G4_INST* mov_mrf = builder.createMov(
             m->getExecSize(),
-            builder.duplicateOperand( m->getDst() ),
-            newSrcOpnd, //builder.duplicateOperand( source->send->getSrc(0) ),
-            NULL,
-            m->getOption(), // to fix the SIMD control flow
-            inst->getLineNo(),
-            inst->getCISAOff(),
-            inst->getSrcFilename() );
-        bb->insert( pos, mov_mrf );
+            builder.duplicateOperand(m->getDst()),
+            newSrcOpnd,
+            m->getOption(),
+            false);
+        bb->insert(pos, mov_mrf);
 
         // maintain def-use.
         //
@@ -6144,7 +6146,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         // mov (1) null<1>:ud r0.0<0;1,0>:ud {Switch}
         G4_DstRegRegion* movDst = builder.createNullDst(Type_UD);
         G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionScalar());
-        G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1, movDst, movSrc, NULL, InstOpt_WriteEnable);
+        G4_INST* movInst = builder.createMov(1, movDst, movSrc, InstOpt_WriteEnable, false);
         movInst->setOptionOn(InstOpt_Switch);
         bb->insert(instIter, movInst);
     }
@@ -6290,7 +6292,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                             Direct, builder.phyregpool.getF0Reg(), 0, 0,
                             builder.getRegionScalar(), Type_UD);
                         G4_DstRegRegion* nullDst = builder.createNullDst(Type_UD);
-                        G4_INST* inst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1, nullDst, flagSrc, NULL, InstOpt_WriteEnable);
+                        G4_INST* inst = builder.createMov(1, nullDst, flagSrc, InstOpt_WriteEnable, false);
                         bb->insert(instIter, inst);
                     }
                     if (unusedFlag[1])
@@ -6299,7 +6301,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                             Direct, builder.phyregpool.getF1Reg(), 0, 0,
                             builder.getRegionScalar(), Type_UD);
                         G4_DstRegRegion* nullDst = builder.createNullDst(Type_UD);
-                        G4_INST* inst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1, nullDst, flagSrc, NULL, InstOpt_WriteEnable);
+                        G4_INST* inst = builder.createMov(1, nullDst, flagSrc, InstOpt_WriteEnable, false);
                         bb->insert(instIter, inst);
                     }
                 }
@@ -6332,6 +6334,108 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         }
     }
 
+
+/*
+ *  Three sources only
+ */
+bool Optimizer::hasGen12LPBundleConflict(G4_INST *inst)
+{
+    int regs[3] = {-1};
+    int bundles[3] = {-1};
+
+    //Three source only
+    if (inst->getNumSrc() != 3 || inst->isSend())
+    {
+        return false;
+    }
+
+    //SIMD16
+    if(inst->getExecSize() < 16)
+    {
+        return false;
+    }
+
+    //Source 0 is scalar
+    G4_Operand* srcOpnd = inst->getSrc(0);
+    if (!srcOpnd || !srcOpnd->isSrcRegRegion() || !srcOpnd->asSrcRegRegion()->isScalar())
+    {
+        return false;
+    }
+
+    for (unsigned i = 1; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
+    {
+        srcOpnd = inst->getSrc(i);
+        if (srcOpnd)
+        {
+            if (srcOpnd->isSrcRegRegion() &&
+                srcOpnd->asSrcRegRegion()->getBase() &&
+                srcOpnd->asSrcRegRegion()->getBase()->isRegVar())
+            {
+                G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
+                if (baseVar->isGreg()) {
+                    uint32_t byteAddress = srcOpnd->getLinearizedStart();
+                    regs[i] = byteAddress / GENX_GRF_REG_SIZ;
+                    bundles[i] =  (regs[i] % 16) /2;
+                }
+            }
+        }
+    }
+
+    if (bundles[1] == bundles[2] && bundles[1] != -1)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+
+void Optimizer::swapSrc1(G4_INST *inst)
+{
+    G4_Operand* src1Opnd = inst->getSrc(1);
+
+    if (inst->getExecSize() < 2)
+    {
+        return;
+    }
+
+    if (!src1Opnd ||
+         !src1Opnd->isSrcRegRegion()  ||
+        !src1Opnd->asSrcRegRegion()->isScalar())
+    {
+        return;
+    }
+
+    if (inst->isMixedMode())
+    {
+        return;
+    }
+
+    G4_Operand* src02Opnd = nullptr;
+
+    if (inst->opcode() == G4_mad)
+    {
+        src02Opnd = inst->getSrc(2);
+        if (src1Opnd->getType() == src02Opnd->getType())
+        {
+            inst->setSrc(src1Opnd, 2);
+            inst->setSrc(src02Opnd, 1);
+        }
+    }
+
+    if (inst->opcode() == G4_add ||
+        inst->opcode() == G4_mul)
+    {
+        src02Opnd = inst->getSrc(0);
+        if (src1Opnd->getType() == src02Opnd->getType())
+        {
+            inst->setSrc(src1Opnd, 0);
+            inst->setSrc(src02Opnd, 1);
+        }
+    }
+
+    return;
+}
 
 G4_SrcRegRegion* IR_Builder::createSubSrcOperand( G4_SrcRegRegion* src, uint16_t start, uint8_t size, uint16_t newVs, uint16_t newWd)
 {
@@ -6409,6 +6513,10 @@ G4_SrcRegRegion* IR_Builder::createSubSrcOperand( G4_SrcRegRegion* src, uint16_t
             case Type_HF:
             {
                 // can be one of acc0.8, acc1.0, acc1.8
+                if (src->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
+                {
+                    start += 16;
+                }
                 G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
                 return createSrcRegRegion(src->getModifier(), Direct, accReg, 0, start % 16, src->getRegion(), srcType);
 
@@ -6487,6 +6595,10 @@ G4_DstRegRegion* IR_Builder::createSubDstOperand(G4_DstRegRegion* dst, uint16_t 
             case Type_HF:
             {
                 // can be one of acc0.8, acc1.0, acc1.8
+                if (dst->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
+                {
+                    start += 16;
+                }
                 G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
                 return createDstRegRegion(
                     Direct, accReg, 0, start % 16, hs, dstType);
@@ -6748,11 +6860,26 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                         G4_DstRegRegion* movDst = builder.createDstRegRegion(
                             Direct, builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
                         G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(fenceDcl, builder.createRegionDesc(8, 8, 1));
-                        G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 8, movDst, movSrc, NULL, InstOpt_WriteEnable);
+                        G4_INST* movInst = builder.createMov(8, movDst, movSrc, InstOpt_WriteEnable, false);
                         bb->insert(nextIter, movInst);
                     }
                 }
 
+                if(getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), Wa_1606931601) )
+                {
+                    INST_LIST_ITER nextIter = ii;
+                    if (hasGen12LPBundleConflict(inst))
+                    {
+                        nextIter++;
+                        evenlySplitInst(ii, bb);
+                        ii = nextIter;
+                        continue;
+                    }
+                }
+                if(getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), WaSwapForSrc1Replicate) )
+                {
+                    swapSrc1(inst);
+                }
 
                 if (inst->isCall() || inst->isFCall())
                 {
@@ -6861,8 +6988,7 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                     G4_DstRegRegion* tdrDst = builder.createDstRegRegion(Direct, builder.phyregpool.getTDRReg(),
                         0, 0, 1, Type_UW);
                     G4_Imm* src = builder.createImm(0, Type_UW);
-                    G4_INST* movInst = builder.createInternalInst(nullptr, G4_mov, nullptr, false,
-                        8, tdrDst, src, nullptr, InstOpt_WriteEnable | InstOpt_Switch);
+                    G4_INST* movInst = builder.createMov(8, tdrDst, src, InstOpt_WriteEnable | InstOpt_Switch, false);
                     bb->insert(ii, movInst);
                 }
 
@@ -6873,8 +6999,8 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                     // mov (1) n0.0 0x0 {Switch}
                     G4_DstRegRegion* n0Dst = builder.createDstRegRegion(Direct,
                         builder.phyregpool.getN0Reg(), 0, 0, 1, Type_UD);
-                    auto movInst = builder.createInternalInst(nullptr, G4_mov, nullptr, false, 1, n0Dst,
-                        builder.createImm(0, Type_UD), nullptr, InstOpt_WriteEnable | InstOpt_Switch);
+                    auto movInst = builder.createMov(1, n0Dst,
+                        builder.createImm(0, Type_UD), InstOpt_WriteEnable | InstOpt_Switch, false);
                     bb->insert(ii, movInst);
                 }
 
@@ -6892,6 +7018,19 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
         {
             clearSendDependencies();
         }
+
+        if (builder.needResetA0forVxHA0())
+        {
+            // reset a0 to 0 at the beginning of a shader. TGL WA
+            resetA0();
+        }
+
+        if (builder.getOption(vISA_setA0toTdrForSendc))
+        {
+            // set A0 to tdr0 before sendc/sendsc. TGL WA
+            setA0toTdrForSendc();
+        }
+
     }
 
 class NSDS {
@@ -7736,7 +7875,7 @@ public:
             msgDescImm |= i;
 
             G4_SendMsgDescriptor* desc = kernel.fg.builder->createSendMsgDesc(
-                msgDescImm, 0, 1, funcID, false, msgSize, extFuncCtrl, false, true);
+                msgDescImm, 0, 1, funcID, false, msgSize, extFuncCtrl, SendAccess::WRITE_ONLY);
             RegionDesc* region = kernel.fg.builder->getRegionStride1();
             G4_SrcRegRegion* headerOpnd = kernel.fg.builder->Create_Src_Opnd_From_Dcl(kernel.fg.builder->getBuiltinR0(), region);
             G4_Declare* tempDcl = builder.createHardwiredDeclare(msgSize * 8, Type_UD, i, 0);
@@ -7808,15 +7947,7 @@ public:
         if (needSwitch)
             options |= InstOpt_Switch;
         G4_INST *movInst =
-            builder.createInternalInst(NULL,
-            G4_mov,
-            NULL,
-            false,
-            8,
-            R0CopyOpnd,
-            R0Opnd,
-            NULL,
-            options);
+            builder.createMov(8, R0CopyOpnd, R0Opnd, options, false);
 
         BB_LIST_ITER ib = kernel.fg.begin();
         G4_INST *inst = NULL;
@@ -7887,7 +8018,7 @@ public:
             G4_Declare* tempDcl = builder.createHardwiredDeclare(16, Type_UD, reg_init, 0);
             G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, tempDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_Imm * src0 = builder.createImm(0, Type_UD);
-            G4_INST* initInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 16, dst, src0, NULL, InstOpt_WriteEnable);
+            G4_INST* initInst = builder.createMov(16, dst, src0, InstOpt_WriteEnable, false);
             bb->insert(iter, initInst);
         }
 
@@ -7897,7 +8028,7 @@ public:
             G4_Declare* tempDcl = builder.createHardwiredDeclare(8, Type_UD, 128 - (num_reg_init % 2), 0);
             G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, tempDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_Imm * src0 = builder.createImm(0, Type_UD);
-            G4_INST* spIncInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 8, dst, src0, NULL, InstOpt_WriteEnable);
+            G4_INST* spIncInst = builder.createMov(8, dst, src0, InstOpt_WriteEnable, false);
             G4_BB* bb = kernel.fg.getEntryBB();
             bb->insert(iter, spIncInst);
         }
@@ -7917,7 +8048,7 @@ public:
                 G4_Declare* tempDclSrc = builder.createHardwiredDeclare(1, Type_UD, 126, 0);
                 G4_SrcRegRegion *src0 = builder.createSrcRegRegion(Mod_src_undef, Direct, tempDclSrc->getRegVar(), 0, 0, builder.getRegionScalar(), Type_UB);
 
-                G4_INST* initInst = builder.createInternalInst(NULL, G4_mov, NULL, false, (uint8_t)exec_size, dst, src0, NULL, InstOpt_WriteEnable);
+                G4_INST* initInst = builder.createMov((uint8_t)exec_size, dst, src0, InstOpt_WriteEnable, false);
                 bb->insert(iter, initInst);
             }
             //caluclates bytes that remain to be initialized
@@ -7933,11 +8064,140 @@ public:
             G4_Declare* tmpFlagDcl = builder.createTempFlag(2);
             tmpFlagDcl->getRegVar()->setPhyReg(builder.phyregpool.getFlagAreg(i), 0);
             G4_DstRegRegion *tempPredVar = builder.createDstRegRegion(Direct, tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
-            G4_INST *predInst = builder.createInternalInst(NULL, G4_mov, NULL, false, 1,
-                tempPredVar, builder.createImm(0, Type_UW), NULL,
-                InstOpt_WriteEnable, 0, 0, 0);
+            G4_INST *predInst = builder.createMov(1, tempPredVar, builder.createImm(0, Type_UW), InstOpt_WriteEnable, false);
             bb = kernel.fg.getEntryBB();
             bb->insert(iter, predInst);
+        }
+    }
+
+    // create prolog to set sr0 to FFID. TGL WA.
+    // Do only when there is cr0 write inside the kernel
+    void Optimizer::addFFIDProlog()
+    {
+        if (!builder.getIsKernel())
+            return;
+
+        FFID ffid = static_cast<FFID>(builder.getOptions()->getuInt32Option(vISA_setFFID));
+        // return if FFID is not given
+        if (ffid == FFID_INVALID)
+            return;
+
+        // return if there is no cr0 write
+        bool has_cr0_dst = false;
+        for (auto bb : kernel.fg)
+        {
+            for (G4_INST* inst : *bb)
+            {
+                if (inst->getDst() != nullptr &&
+                    inst->getDst()->asDstRegRegion()->getBase()->isCrReg())
+                {
+                    has_cr0_dst = true;
+                    break;
+                }
+            }
+            if (has_cr0_dst)
+                break;
+        }
+        if (!has_cr0_dst)
+            return;
+
+        // get r127.0 decl
+        G4_Declare* rtail =
+            builder.createHardwiredDeclare(8, Type_UD, kernel.getNumRegTotal() - 1, 0);
+
+        // (W) and (1|M0)  r127.0 <1>:ud   sr0.0 <0;1,0>:ud  0xF0FFFFFF:ud
+        auto createAnd = [this, &rtail]()
+        {
+            auto src0 = builder.createSrcRegRegion(
+                Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(), 0, 0,
+                builder.getRegionScalar(), Type_UD);
+            auto src1 = builder.createImm(0xF0FFFFFF, Type_UD);
+            auto dst = builder.createDstRegRegion(Direct, rtail->getRegVar(), 0, 0, 1, Type_UD);
+
+            return builder.createInternalInst(nullptr, G4_and, nullptr, false, 1,
+                dst, src0, src1, InstOpt_WriteEnable);
+        };
+
+        // (W) or  (1|M0)  sr0.0<1>:ud   127.0<0;1,0>:ud    imm:ud
+        auto createOr = [this, &rtail](uint32_t imm)
+        {
+            auto src0 = builder.createSrcRegRegion(
+                Mod_src_undef, Direct, rtail->getRegVar(), 0, 0,
+                builder.getRegionScalar(), Type_UD);
+            auto src1 = builder.createImm(imm, Type_UD);
+            auto dst = builder.createDstRegRegion(Direct,
+                builder.phyregpool.getSr0Reg(), 0, 0, 1, Type_UD);
+
+            return builder.createInternalInst(nullptr, G4_or, nullptr, false, 1,
+                dst, src0, src1, InstOpt_WriteEnable);
+        };
+
+        // (W) jmpi (1|M0) label
+        auto createJmpi = [this](G4_Label* label)
+        {
+            return builder.createInternalInst(nullptr, G4_jmpi, nullptr, false, 1,
+                nullptr, label, nullptr, InstOpt_WriteEnable);
+        };
+
+        auto createLabelInst = [this](G4_Label* label)
+        {
+            return kernel.fg.createNewLabelInst(label);
+        };
+
+        // for compute shader, create two entris
+        if (ffid == FFID_GP || ffid == FFID_GP1)
+        {
+            // Entry0: Set sr0 to FFID_GP (0x7)
+            //     (W) and (1|M0)  r127.0 <1>:ud   sr0.0 <0;1,0>:ud   0xF0FFFFFF:ud
+            //     (W) or  (1|M0)  sr0.0<1>:ud     127.0<0;1,0>:ud    0x07000000:ud
+            //     jmpi ffid_prolog_end
+            // Entry1: Set sr0 to FFID_GP1 (0x8)
+            //     (W) and (1|M0)  r127.0 <1>:ud   sr0.0 <0;1,0>:ud   0xF0FFFFFF:ud
+            //     (W) or  (1|M0)  sr0.0<1>:ud     127.0<0;1,0>:ud    0x08000000:ud
+            //     ffid_prolog_end:
+
+            // Put the entry0 block into a new BB, so that we can make it 64-bit
+            // aligned in BinaryEncodingIGA
+            G4_BB* entry_0_bb = kernel.fg.createNewBB();
+            entry_0_bb->push_back(createAnd());
+            entry_0_bb->push_back(createOr(0x07000000));
+
+            // get jmp target label. If the next bb has no label, create one and insert it
+            // at the beginning
+            G4_Label* jmp_label = nullptr;
+            assert(kernel.fg.begin() != kernel.fg.end());
+            G4_BB* next_bb = *kernel.fg.begin();
+            if (next_bb->front()->isLabel())
+            {
+                jmp_label = next_bb->front()->getSrc(0)->asLabel();
+            }
+            else
+            {
+                std::string label_name("ffid_prolog_end");
+                jmp_label = builder.createLabel(label_name, LABEL_BLOCK);
+                next_bb->insert(next_bb->begin(), createLabelInst(jmp_label));
+            }
+            entry_0_bb->push_back(createJmpi(jmp_label));
+
+            // Put the rest in another BB
+            G4_BB* entry_1_bb = kernel.fg.createNewBB();
+            entry_1_bb->push_back(createAnd());
+            entry_1_bb->push_back(createOr(0x08000000));
+
+            // add these two BB to be the first two in the shader
+            kernel.fg.addPrologBB(entry_1_bb);
+            kernel.fg.addPrologBB(entry_0_bb);
+            builder.setHasComputeFFIDProlog();
+        }
+        else
+        {
+            // for other shaders, set the FFID
+            //     (W) and (1|M0)  r127.0 <1>:ud   sr0.0 <0;1,0>:ud   0xF0FFFFFF:ud
+            //     (W) or  (1|M0)  sr0.0<1>:ud     127.0<0;1,0>:ud    (FFID << 24):ud
+            G4_BB* bb = kernel.fg.createNewBB();
+            bb->push_back(createAnd());
+            bb->push_back(createOr(ffid << 24));
+            kernel.fg.addPrologBB(bb);
         }
     }
 
@@ -8080,8 +8340,6 @@ public:
         desc.layout.resLen = 1;
         desc.layout.msgLen = 1;
 
-        uint32_t extDesc = G4_SendMsgDescriptor::createExtDesc(SFID::DP_DC);
-
         for (auto bb : kernel.fg)
         {
             if (bb->isLastInstEOT())
@@ -8092,7 +8350,7 @@ public:
                     // an HDC fence is more efficient in this case
                     // fence with commit enable
                     int fenceDesc = G4_SendMsgDescriptor::createDesc((0x7 << 14) | (1 << 13), true, 1, 1);
-                    auto msgDesc = builder.createSendMsgDesc(fenceDesc, extDesc, true, true);
+                    auto msgDesc = builder.createSyncMsgDesc(SFID::DP_DC, fenceDesc);
                     auto src = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionStride1());
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(builder.getBuiltinR0(), 1);
                     G4_INST* inst = builder.createSendInst(nullptr, G4_send, 8, dst, src,
@@ -8102,7 +8360,7 @@ public:
                 else
                 {
                     // insert a dumy scratch read
-                    auto msgDesc = builder.createSendMsgDesc(desc.value, extDesc, true, false);
+                    auto msgDesc = builder.createReadMsgDesc(SFID::DP_DC, desc.value);
                     auto src = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionStride1());
                     // We can use any dst that does not conflcit with EOT src, which must be between r112-r127
                     auto dstDcl = builder.createHardwiredDeclare(8, Type_UD, 1, 0);
@@ -8113,6 +8371,65 @@ public:
                 }
 
                 builder.instList.clear();
+            }
+        }
+    }
+
+    // Reset A0 to 0 at the beginning of the shader if the shader use VxH a0
+    void Optimizer::resetA0()
+    {
+        // check all instructions to see if VxH a0 src is used
+        // only reset A0 when it's used
+        bool hasA0 = false;
+        for (auto bb : kernel.fg)
+        {
+            for (auto inst : *bb)
+            {
+                // VxH must be in src0
+                if (inst->getSrc(0) != nullptr &&
+                    inst->getSrc(0)->isSrcRegRegion() &&
+                    inst->getSrc(0)->asSrcRegRegion()->getBase()->isA0() &&
+                    inst->getSrc(0)->asSrcRegRegion()->getRegion()->isRegionWH())
+                {
+                    hasA0 = true;
+                    break;
+                }
+            }
+            if (hasA0)
+                break;
+        }
+
+        if (!hasA0)
+            return;
+
+        // insert "mov (16) a0.0:uw 0x0:uw" at the beginning of the shader
+        if (kernel.fg.begin() != kernel.fg.end()) {
+            G4_BB* bb = *kernel.fg.begin();
+            bb->insert(bb->begin(),
+                builder.createMov(16, builder.createDstRegRegion(Direct,
+                    builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
+                    builder.createImm(0, Type_UW), InstOpt_WriteEnable, false));
+        }
+    }
+
+    // Set a0 to tdr0 before snedc/sendsc
+    void Optimizer::setA0toTdrForSendc()
+    {
+        // check for the last inst of each BB, if it's sendc/sendsc, insert
+        // "(W) mov(8) a0.0:uw tdr0.0:uw" right before it
+        for (G4_BB* bb : kernel.fg)
+        {
+            if (bb->empty())
+                continue;
+            if (bb->back()->opcode() == G4_opcode::G4_sendc ||
+                bb->back()->opcode() == G4_opcode::G4_sendsc)
+            {
+                // "(W) mov(8) a0.0:uw tdr0.0:uw"
+                bb->insert(--bb->end(), builder.createMov(8,
+                    builder.createDstRegRegion(Direct, builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
+                    builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getTDRReg(), 0,
+                                               0, builder.getRegionScalar(), Type_UW),
+                    InstOpt_WriteEnable, false));
             }
         }
     }
@@ -11356,9 +11673,7 @@ static G4_INST* emitRetiringMov(IR_Builder& builder, G4_BB* BB, G4_INST* SI,
     G4_SrcRegRegion* MovSrc = builder.createSrcRegRegion(
         Mod_src_undef, Direct, Dcl->getRegVar(), 0, 0,
         builder.getRegionStride1(), Type_F);
-    G4_INST* MovInst = builder.createInternalInst(
-        nullptr, G4_mov, nullptr, false, 8, MovDst, MovSrc, nullptr,
-        InstOpt_M0 | InstOpt_WriteEnable);
+    G4_INST* MovInst = builder.createMov(8, MovDst, MovSrc, InstOpt_M0 | InstOpt_WriteEnable, false);
     BB->insert(InsertBefore, MovInst);
     return MovInst;
 }

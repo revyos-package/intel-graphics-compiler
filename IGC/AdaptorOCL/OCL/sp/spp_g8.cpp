@@ -31,6 +31,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../../../common/Types.hpp"
 #include "../../../common/shaderOverride.hpp"
 #include "../../../Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
+#include "cmc.h"
 
 #include <iomanip>
 #include <fstream>
@@ -40,37 +41,29 @@ namespace iOpenCL
 
 extern RETVAL g_cInitRetValue;
 
-CGen8OpenCLProgram::CGen8OpenCLProgram(PLATFORM platform, IGC::OpenCLProgramContext &context) :
-    m_StateProcessor( platform, context ),
-    m_Platform( platform ),
-    m_pContext( &context )
+CGen8OpenCLProgramBase::CGen8OpenCLProgramBase(PLATFORM platform)
+    : m_Platform(platform)
+    , m_StateProcessor(platform)
 {
-    m_ProgramScopePatchStream = new Util::BinaryStream();
+    m_ProgramScopePatchStream = new Util::BinaryStream;
 }
 
-CGen8OpenCLProgram::~CGen8OpenCLProgram()
+CGen8OpenCLProgramBase::~CGen8OpenCLProgramBase()
 {
     delete m_ProgramScopePatchStream;
-
     for (auto data : m_KernelBinaries)
     {
         delete data.kernelBinary;
         delete data.kernelDebugData;
     }
 
-    for (auto p : m_ShaderProgramList)
-    {
-        delete p;
-    }
-    m_ShaderProgramList.clear();
-
     delete m_pSystemThreadKernelOutput;
     m_pSystemThreadKernelOutput = nullptr;
 }
 
-RETVAL CGen8OpenCLProgram::GetProgramBinary(
+RETVAL CGen8OpenCLProgramBase::GetProgramBinary(
     Util::BinaryStream& programBinary,
-    unsigned int pointerSizeInBytes )
+    unsigned pointerSizeInBytes )
 {
     RETVAL retValue = g_cInitRetValue;
 
@@ -103,7 +96,28 @@ RETVAL CGen8OpenCLProgram::GetProgramBinary(
     return retValue;
 }
 
-RETVAL CGen8OpenCLProgram::GetProgramDebugData(Util::BinaryStream& programDebugData)
+void CGen8OpenCLProgramBase::CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& annotations)
+{
+    m_StateProcessor.CreateProgramScopePatchStream(annotations, *m_ProgramScopePatchStream);
+}
+
+CGen8OpenCLProgram::CGen8OpenCLProgram(PLATFORM platform, IGC::OpenCLProgramContext& context)
+    : CGen8OpenCLProgramBase(platform)
+    , m_pContext(&context)
+{
+    m_StateProcessor.m_Context = &context;
+}
+
+CGen8OpenCLProgram::~CGen8OpenCLProgram()
+{
+    for (auto p : m_ShaderProgramList)
+    {
+        delete p;
+    }
+    m_ShaderProgramList.clear();
+}
+
+RETVAL CGen8OpenCLProgramBase::GetProgramDebugData(Util::BinaryStream& programDebugData)
 {
     RETVAL retValue = g_cInitRetValue;
 
@@ -291,9 +305,38 @@ void CGen8OpenCLProgram::CreateKernelBinaries()
     }
 }
 
-void CGen8OpenCLProgram::CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& annotations)
+// Implementation of CGen8CMProgram.
+CGen8CMProgram::CGen8CMProgram(PLATFORM platform)
+    : CGen8OpenCLProgramBase(platform)
+    , m_programInfo(new IGC::SOpenCLProgramInfo)
 {
-    m_StateProcessor.CreateProgramScopePatchStream(annotations, *m_ProgramScopePatchStream);
 }
 
+CGen8CMProgram::~CGen8CMProgram()
+{
+    for (auto kernel : m_kernels)
+      delete kernel;
 }
+
+void CGen8CMProgram::CreateKernelBinaries()
+{
+    for (auto kernel : m_kernels) {
+        // Create the kernel binary streams.
+        KernelData data;
+        data.kernelBinary = new Util::BinaryStream;
+
+        m_StateProcessor.CreateKernelBinary(
+            (const char*)kernel->m_prog.m_programBin,
+            kernel->m_prog.m_programSize,
+            kernel->m_kernelInfo,
+            *m_programInfo,
+            kernel->m_btiLayout,
+            *(data.kernelBinary),
+            m_pSystemThreadKernelOutput,
+            kernel->m_prog.m_unpaddedProgramSize);
+
+        m_KernelBinaries.push_back(data);
+    }
+}
+
+} // namespace iOpenCL

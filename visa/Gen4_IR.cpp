@@ -82,6 +82,7 @@ G4_InstOptInfo InstOptInfo[] =
     {InstOpt_NoCompact, "NoCompact" },
     {InstOpt_NoSrcDepSet, "NoSrcDepSet"},
     {InstOpt_NoPreempt, "NoPreempt"},
+    {InstOpt_Serialize, "Serialize"},
     {InstOpt_END, "END"}
 };
 
@@ -236,7 +237,7 @@ short Operand_Type_Rank( G4_Type type )
 G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     uint32_t fCtrl, uint32_t regs2rcv,
     uint32_t regs2snd, uint32_t fID, bool isEot, uint16_t extMsgLen,
-    uint32_t extFCtrl, bool isRead, bool isWrite,
+    uint32_t extFCtrl, SendAccess access,
     G4_Operand *bti, G4_Operand *sti,
     IR_Builder& builder)
 {
@@ -258,8 +259,8 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     eotAfterMessage = isEot; // [5]
     sfid = intToSFID(fID);
 
-    readMsg = isRead;
-    writeMsg = isWrite;
+    accessType = access;
+    funcCtrlValid = true;
 
 
     m_bti = bti;
@@ -286,15 +287,13 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
 
 G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     uint32_t descBits, uint32_t extDescBits,
-    bool isRead,
-    bool isWrite,
+    SendAccess access,
     G4_Operand *bti,
     G4_Operand *sti)
-    : readMsg(isRead), writeMsg(isWrite), m_sti(sti), m_bti(bti)
+    : accessType(access), m_sti(sti), m_bti(bti), funcCtrlValid(true)
 {
     desc.value = descBits;
     extDesc.value = extDescBits;
-// SEE the note above about clearing ExDesc[10:6]
     src1Len = (extDescBits >> 6) & 0x1F; // [10:6]
     eotAfterMessage = extDesc.layout.eot; // [5]
     sfid = intToSFID(extDescBits & 0xF); // [3:0]
@@ -314,10 +313,10 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     uint32_t _desc,
     uint32_t _extDesc,
     int _src1Len,
-    bool isRead,
-    bool isWrite,
-    G4_Operand *bti)
-    : readMsg(isRead), writeMsg(isWrite), m_sti(nullptr), m_bti(bti), sfid(_sfid)
+    SendAccess access,
+    G4_Operand *bti,
+    bool isValidFuncCtrl)
+    : accessType(access), m_sti(nullptr), m_bti(bti), sfid(_sfid), funcCtrlValid(isValidFuncCtrl)
 {
     desc.value = _desc;
     extDesc.value = _extDesc;
@@ -2499,7 +2498,7 @@ bool G4_INST::canHoist(bool simdBB, const Options *opt) const
     if (src->isImm() ||
         archRegSrc ||
         indirectSrc ||
-        (src->asSrcRegRegion()->getModifier() != Mod_src_undef) ||
+        (src->isSrcRegRegion() && src->asSrcRegRegion()->getModifier() != Mod_src_undef) ||
         (defInstList.size() == 0) ||
         noMultiDefOpt)
     {
@@ -2557,13 +2556,13 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
     G4_Type dstType = dst->getType(), srcType = srcs[0]->getType();
     bool rawMovInst = isRawMov();
     bool cantHoistMAD = (defInst->opcode() == G4_pseudo_mad && !(IS_TYPE_FLOAT_ALL(dstType) && IS_TYPE_FLOAT_ALL(defDstType)));
-    if (
-        ( defInst->useInstList.size() != 1 ) ||
-        ( defInst->opcode() == G4_sad2 ) ||
-        ( defInst->opcode() == G4_sada2 ) ||
+    if ((defInst->useInstList.size() != 1) ||
+        (defInst->opcode() == G4_sad2) ||
+        (defInst->opcode() == G4_sada2) ||
         (defInst->opcode() == G4_cbit && dstType != defDstType) ||
-        (( cantHoistMAD || (defInst->opcode() == G4_math)) &&
-        ( indirect_dst || ( dstType != defDstType && !rawMovInst ) ) ) )
+        (defInst->opcode() == G4_dp4a && dstType != defDstType) ||
+        ((cantHoistMAD || (defInst->opcode() == G4_math)) &&
+         (indirect_dst || (dstType != defDstType && !rawMovInst))))
     {
         return false;
     }
@@ -3659,7 +3658,19 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
             output << ' ';
         }
 
-        for (unsigned i = 0; i < G4_Inst_Table[op].n_srcs; i++)
+        auto getNumSrcOpnds = [this]()
+        {
+            G4_opcode op = this->opcode();
+            unsigned int numOpnds = G4_Inst_Table[op].n_srcs;
+
+            if (op == G4_opcode::G4_intrinsic)
+                numOpnds = G4_Intrinsics[(int)this->asIntrinsicInst()->getIntrinsicId()].numSrc;
+
+            return numOpnds;
+        };
+
+        auto numSrcOpnds = getNumSrcOpnds();
+        for (unsigned i = 0; i < numSrcOpnds; i++)
         {
             if (srcs[i])
             {
@@ -7018,6 +7029,16 @@ void G4_INST::computeRightBound(G4_Operand* opnd)
 
             done = true;
         }
+        else if (done == false && isFillIntrinsic())
+        {
+            asFillIntrinsic()->computeRightBound(opnd);
+            done = true;
+        }
+        else if (done == false && isSpillIntrinsic())
+        {
+            asSpillIntrinsic()->computeRightBound(opnd);
+            done = true;
+        }
 
         if( done == false )
         {
@@ -7111,6 +7132,7 @@ void G4_InstSend::computeRightBound(G4_Operand* opnd)
 
             if (msgDesc->isScratchRW() == false &&
                 msgDesc->isOwordLoad() &&
+                msgDesc->isValidFuncCtrl() &&
                 (msgDesc->getFuncCtrl() & 0x700) == 0)
             {
                 //1 oword read

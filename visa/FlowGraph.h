@@ -436,6 +436,8 @@ public:
     void emitInstructionInfo(std::ostream& output, INST_LIST_ITER &it);
     void emitBankConflict(std::ostream& output, G4_INST *inst);
 
+    uint32_t emitBankConflictGen12lp(std::ostream & os_output, G4_INST * inst, int * suppressRegs, int * lastRegs, int & sameConflictTimes, int & twoSrcConflicts, int & simd16RS);
+    uint32_t countReadModifyWrite(std::ostream& os_output, G4_INST *inst);
     void emitDepInfo(std::ostream& output, G4_INST *inst, int offset);
 
     bool isEndWithCall() const { return getLastOpcode() == G4_call; }
@@ -708,11 +710,17 @@ public:
     G4_Declare *            framePtrDcl;
     G4_Declare *            stackPtrDcl;
     G4_Declare *            scratchRegDcl;
-    // ToDo: change to set if we have a lot of stack call sites
-    std::vector<G4_Declare *> pseudoVCADclList;
     G4_Declare *            pseudoVCEDcl;
-    std::vector<G4_Declare*> pseudoA0DclList;
-    std::vector<G4_Declare*> pseudoFlagDclList;
+
+    // pseudo declares used by RA to model the save/restore variables at each call site
+    struct PseudoDcls
+    {
+        G4_Declare* VCA;
+        G4_Declare* A0;
+        G4_Declare* Flag;
+    };
+
+    std::unordered_map<G4_InstCF*, struct PseudoDcls> fcallToPseudoDclMap;
 
     unsigned                    callerSaveAreaOffset = 0;
     unsigned                    calleeSaveAreaOffset = 0;
@@ -737,6 +745,30 @@ public:
         }
     } BCStats;
 
+    struct Gen12BankConflictStatistics
+    {
+        unsigned simd8 = 0;    //The number of simd8 instructions, one simd16 is treated as two simd8 if it's not HF
+        unsigned BCNum = 0;  //The number of band conflict.
+        int sameBankConflicts = 0;
+        int simd16ReadSuppression = 0;
+        int twoSrcBC = 0;
+
+        void clear()
+        {
+            simd8 = 0;
+            BCNum = 0;
+            sameBankConflicts = 0;
+            simd16ReadSuppression = 0;
+            twoSrcBC = 0;
+        }
+        void addBC(unsigned num) { BCNum += num; }
+        void addSameBankBC(unsigned num) { sameBankConflicts += num; }
+        void addSimd16RSBC(unsigned num) { simd16ReadSuppression += num; }
+        void add2SrcBC(unsigned num) { twoSrcBC += num; }
+        void addSIMD8() { ++simd8; }
+
+    } G12BCStats;
+    unsigned numRMWs = 0;    // counting the number of read-modify-write
 public:
 
     // forwarding functions to the BBs list
@@ -816,18 +848,39 @@ public:
     G4_Declare*& getStackPtrDcl()                   {return stackPtrDcl;}
     G4_Declare*& getScratchRegDcl()                 {return scratchRegDcl;}
 
+    bool isPseudoVCEDcl(G4_Declare* dcl) const { return dcl == pseudoVCEDcl; }
     bool isPseudoVCADcl(G4_Declare* dcl) const
     {
-        return std::find(pseudoVCADclList.begin(), pseudoVCADclList.end(), dcl) != std::end(pseudoVCADclList);
+        for (auto iter : fcallToPseudoDclMap)
+        {
+            if (iter.second.VCA == dcl)
+            {
+                return true;
+            }
+        }
+        return false;
     }
-    bool isPseudoVCEDcl(G4_Declare* dcl) const { return dcl == pseudoVCEDcl; }
     bool isPseudoA0Dcl(G4_Declare* dcl) const
     {
-        return std::find(pseudoA0DclList.begin(), pseudoA0DclList.end(), dcl) != std::end(pseudoA0DclList);
+        for (auto iter : fcallToPseudoDclMap)
+        {
+            if (iter.second.A0 == dcl)
+            {
+                return true;
+            }
+        }
+        return false;
     }
     bool isPseudoFlagDcl(G4_Declare* dcl) const
     {
-        return std::find(pseudoFlagDclList.begin(), pseudoFlagDclList.end(), dcl) != std::end(pseudoFlagDclList);
+        for (auto iter : fcallToPseudoDclMap)
+        {
+            if (iter.second.Flag == dcl)
+            {
+                return true;
+            }
+        }
+        return false;
     }
     bool isPseudoDcl(G4_Declare* dcl) const
     {
@@ -835,7 +888,18 @@ public:
         {
             return false;
         }
-        return isPseudoVCADcl(dcl) || isPseudoVCEDcl(dcl) || isPseudoA0Dcl(dcl) || isPseudoFlagDcl(dcl);
+        if (isPseudoVCEDcl(dcl))
+        {
+            return true;
+        }
+        for (auto iter : fcallToPseudoDclMap)
+        {
+            if (iter.second.A0 == dcl || iter.second.Flag == dcl || iter.second.VCA == dcl)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     //
@@ -1297,6 +1361,7 @@ class G4_Kernel
     const char* name;
     unsigned numRegTotal;
     unsigned int simdSize;
+    bool channelSliced = true;
     bool hasAddrTaken;
     Options *m_options;
 
@@ -1440,8 +1505,11 @@ public:
 
     Options *getOptions(){ return m_options; }
     bool getOption(vISAOptions opt) const { return m_options->getOption(opt); }
+    void computeChannelSlicing();
     void calculateSimdSize();
     unsigned int getSimdSize() { return simdSize; }
+    bool getChannelSlicing() { return channelSliced; }
+    unsigned int getSimdSizeWithSlicing() { return channelSliced ? simdSize/2 : simdSize; }
 
     void setHasAddrTaken(bool val) { hasAddrTaken = val; }
     bool getHasAddrTaken() { return hasAddrTaken;  }

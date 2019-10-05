@@ -1,6 +1,6 @@
 /*===================== begin_copyright_notice ==================================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (c) 2019 Intel Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the
@@ -21,14 +21,35 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 ======================= end_copyright_notice ==================================*/
+#include "wa_def.h"
 
-#pragma once
+#define TGL_REV_ID_A0   SI_REV_ID(0,0)
+#define TGL_REV_ID_B0   SI_REV_ID(3,3)
 
-namespace llvm
+//******************* Main Wa Initializer for Device Id ********************
+// Initialize COMMON/DESKTOP/MOBILE WA using PLATFORM_STEP_APPLICABLE() macro.
+
+void InitTglLpSwWaTable(PWA_TABLE pWaTable, PSKU_FEATURE_TABLE pSkuTable, PWA_INIT_PARAM pWaParam)
 {
-    class FunctionPass;
+    int StepId_TGL = (int)pWaParam->usRevId;
+#ifdef __KCH
+    // compilation issue with UTF: KCHASSERT(NULL != pWaParam);
+#endif
+
+    //=================================================================================================================
+    //
+    //              TGL SW WA for all platforms
+    //
+    //=================================================================================================================
+
+    //TODO: Add WA as needed
+
 }
 
-llvm::FunctionPass *createAddCopyIntrinsicPass();
+#ifdef __KCH
+void InitTgllpHASWaTable(PHW_DEVICE_EXTENSION pKchContext, PWA_TABLE pWaTable, PSKU_FEATURE_TABLE pSkuTable, PWA_INIT_PARAM pWaParam)
+{
+    //TODO: Add WA as needed
+}
+#endif // __KCH

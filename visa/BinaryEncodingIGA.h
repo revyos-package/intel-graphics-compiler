@@ -55,6 +55,7 @@ public:
         delete IGAKernel;
     }
 
+    void SetSWSB(G4_INST * inst, iga::SWSB & sw);
 
     void DoAll();
     void FixInst();
@@ -167,6 +168,7 @@ public:
     /// getIGAInternalPlatform - a helper function to transform visa platform to iga platform
     static iga::Platform getIGAInternalPlatform(TARGET_PLATFORM genxPlatform);
 
+    static iga::SWSB_ENCODE_MODE getIGASWSBEncodeMode(const IR_Builder& builder);
 
 private:
 

@@ -3,7 +3,7 @@
 
 /*===================== begin_copyright_notice ==================================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (c) 2017-2019 Intel Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the
@@ -288,11 +288,19 @@ void InitLkfSwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
-void InitJslHwWaTable(
+void InitEhlHwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
-void InitJslSwWaTable(
+void InitEhlSwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitTglLpHwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitTglLpSwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
@@ -366,12 +374,16 @@ void InitLkfHASWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
-void InitJslHASWaTable(
+void InitEhlHASWaTable(
         PHW_DEVICE_EXTENSION                pKchContext,
         PWA_TABLE                           pWaTable,
         PSKU_FEATURE_TABLE                  pSkuTable,
         PWA_INIT_PARAM                      pWaParam);
+void InitTgllpHASWaTable(
+        PHW_DEVICE_EXTENSION            pKchContext,
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
 #endif // #if defined(__KCH)
 
 #endif // #ifndef __WA_DEF_H__
-

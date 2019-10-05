@@ -120,7 +120,6 @@ namespace IGC
                 CASE(TIME_STATS_SUM);
                 CASE(TIME_STATS_PER_SHADER);
                 CASE(TIME_STATS_COARSE);
-                CASE(TIME_STATS_DASHBOARD);
                 CASE(MEM_STATS);
                 CASE(MEM_STATS_DETAIL);
                 CASE(SHADER_QUALITY_METRICS);
@@ -181,7 +180,7 @@ namespace IGC
 #if defined(IGC_DEBUG_VARIABLES)
             switch(flag)
             {
-#define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description) \
+#define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
             case OptionFlag::OPTION_##regkeyName: \
             strcpy(g_RegKeyList.regkeyName.m_string, s);   \
             break;                                
@@ -198,7 +197,7 @@ namespace IGC
 #if defined(IGC_DEBUG_VARIABLES)
             switch(flag)
             {
-#define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description) \
+#define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
             case OptionFlag::OPTION_##regkeyName: \
                 g_RegKeyList.regkeyName.m_Value = value;   \
             break;                                

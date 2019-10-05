@@ -80,6 +80,12 @@ namespace IGC
         case IGFX_LAKEFIELD:
             InitLkfHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             break;
+        case IGFX_TIGERLAKE_LP:
+            InitTglLpHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            break;
+        case IGFX_ELKHARTLAKE:
+            InitEhlHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            break;
         default:
             assert(false);
             break;

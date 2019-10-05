@@ -131,7 +131,7 @@ void ResolveOCLAtomics::visitCallInst(CallInst& callInst)
         processGetLocalLock(callInst);
     }
 
-    if( funcName.startswith("__builtin_IB_atomic") )
+    if (funcName.startswith("__builtin_IB_atomic"))
     {
         assert(m_AtomicDescMap.count(funcName) && "Unexpected IGC atomic function name.");
         processOCLAtomic(callInst, getAtomicOp(funcName), getBufType(funcName));
@@ -269,7 +269,7 @@ CallInst* ResolveOCLAtomics::genGetBufferPtr(CallInst& callInst, BufferType bufT
     llvm::SmallVector<Value*, 2> getBufferPtrArgs;
     getBufferPtrArgs.push_back(bufIndexVal);
     getBufferPtrArgs.push_back(bufTypeVal);
-    
+
     return CallInst::Create(getBufferPtr, getBufferPtrArgs, callInst.getName(), &callInst);
 }
 

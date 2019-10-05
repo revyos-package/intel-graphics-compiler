@@ -12,7 +12,6 @@ set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/ProcessFuncAttributes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/TypesLegalizationPass.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/IRUpgrader/UpgraderResourceAccess.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/AddCopyIntrinsic.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/LoadBuffer.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/Patch/patch_parser.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/Platform/cmd_media_caps_g8.cpp"
@@ -25,6 +24,7 @@ set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/BitcodeReader.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/UnifyIROCL.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/cmc.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.cpp"
   )
 
@@ -53,7 +53,6 @@ set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/SurfaceFormats.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/ShaderTypesEnum.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/IRUpgrader/IRUpgrader.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/AddCopyIntrinsic.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/KernelAnnotations.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/CommandStream/SamplerTypes.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/CommandStream/SurfaceTypes.h"
@@ -84,6 +83,8 @@ set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/util/BinaryStream.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/cmc.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/igcmc.h"
 
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/ErrorCode.h"
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/SurfaceFormats.h"

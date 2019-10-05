@@ -1111,6 +1111,11 @@ namespace IGC
         }
         if (simdMode == SIMDMode::SIMD16 && EP.m_ShaderMode == ShaderDispatchMode::NOT_APPLICABLE)
         {
+            if (IGC_IS_FLAG_ENABLED(ForcePSBestSIMD))
+            {
+                return true;
+            }
+
             if (forceSIMD16)
             {
                 return true;
@@ -1294,6 +1299,17 @@ namespace IGC
                 delete shaders[phaseFunc];
             }
             linkCPS(outputs, ctx->programOutput, numStage);
+            // Kernels allocated in CISABuilder.cpp (Compile())
+            // are freed in CompilerOutputOGL.hpp (DeleteShaderCompilerOutputOGL())
+            // in case of CPS multistage PS they are separated.
+            // Need to free original kernels here as DeleteShaderCompilerOutputOGL()
+            // will clear new allocations for separated phases in this case.
+            for (unsigned int i = 0; i < numStage; i++)
+            {
+                outputs[i].simd8.Destroy();
+                outputs[i].simd16.Destroy();
+                outputs[i].simd32.Destroy();
+            }
         }
         else
         {

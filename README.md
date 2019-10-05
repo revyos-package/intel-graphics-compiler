@@ -1,5 +1,7 @@
 # Intel® Graphics Compiler for OpenCL™
 
+Linux (Ubuntu): [![Linux Build Status](https://travis-ci.com/intel/intel-graphics-compiler.svg?branch=master)](https://travis-ci.com/intel/intel-graphics-compiler)
+
 ## Introduction
 
 The Intel® Graphics Compiler for OpenCL™ is an LLVM based compiler for
@@ -19,10 +21,9 @@ https://opensource.org/licenses/MIT
 
 ## Dependencies
 
-* LLVM Source -  https://github.com/llvm-mirror/llvm
-* Clang Source - https://github.com/llvm-mirror/clang
+* LLVM Project -  https://github.com/llvm/llvm-project
 * OpenCL Clang - https://github.com/intel/opencl-clang
-* SPIRV-LLVM Translator - https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git
+* SPIRV-LLVM Translator - https://github.com/KhronosGroup/SPIRV-LLVM-Translator
 
 ## Supported Linux versions
 
@@ -33,6 +34,10 @@ IGC is supported on the following 64 bit Linux operating systems:
 ## Building
 
 * [Ubuntu](https://github.com/intel/intel-graphics-compiler/blob/master/documentation/build_ubuntu.md)
+
+## Configuration flags
+
+* [Configuration flags for Linux Release](https://github.com/intel/intel-graphics-compiler/blob/master/documentation/configuration_flags.md)
 
 ## Supported Platforms
 

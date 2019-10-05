@@ -482,7 +482,7 @@ namespace IGC
     {
     assert(m_encoderState.m_flag.var == nullptr && "predicate not supported");
     VISA_StateOpndHandle* pSurfStateOpndHandle = GetVISASurfaceOpnd(resource);
-        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
     VISA_RawOpnd* pDst = GetRawDestination(dst);
     VISA_RawOpnd* pElemOffset = GetRawSource(elem_offset);
     VISA_RawOpnd* pSrc0 = GetRawSource(src0);
@@ -2944,13 +2944,21 @@ namespace IGC
     case IGFX_GEN11_CORE:
         if (platform->getPlatformInfo().eProductFamily == IGFX_ICELAKE_LP ||
             platform->getPlatformInfo().eProductFamily == IGFX_LAKEFIELD
-           )
+         || platform->getPlatformInfo().eProductFamily == IGFX_ELKHARTLAKE
+            )
         {
             return GENX_ICLLP;
         }
         else
         {
             return GENX_ICL;
+        }
+    case IGFX_GEN12_CORE:
+    case IGFX_GEN12LP_CORE:
+        if (platform->getPlatformInfo().eProductFamily == IGFX_TIGERLAKE_LP
+        )
+        {
+            return GENX_TGLLP;
         }
     default:
         assert(0 && "unsupported platform");
@@ -3670,6 +3678,12 @@ namespace IGC
         auto ClContext = static_cast<OpenCLProgramContext*>(context);
         KernelDebugEnable = ClContext->m_InternalOptions.KernelDebugEnable;
         ForceNonCoherentStatelessBti = ClContext->m_ShouldUseNonCoherentStatelessBTI;
+
+        if (ClContext->m_InternalOptions.DoReRA &&
+            !ClContext->gtpin_init)
+        {
+            SaveOption(vISA_ReRAPostSchedule, true);
+        }
     }
 
     bool EnableBarrierInstCounterBits = false;
@@ -4004,6 +4018,64 @@ namespace IGC
         SaveOption(vISA_IGAEncoder, false);
     }
 
+    if (IGC_IS_FLAG_ENABLED(SetA0toTdrForSendc))
+    {
+        SaveOption(vISA_setA0toTdrForSendc, true);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(EnableIGASWSB))
+    {
+        SaveOption(vISA_EnableIGASWSB, true);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(EnableSWSB))
+    {
+        SaveOption(vISA_SoftwareScoreBoard, true);
+        SaveOption(vISA_IGAEncoder, true);
+
+        if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB) ||
+            IGC_IS_FLAG_ENABLED(EnableSWSBInstStall) ||
+            IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
+        {
+            if (IGC_IS_FLAG_ENABLED(EnableSWSBInstStall))
+            {
+                SaveOption(vISA_SoftwareScoreBoard, true);
+                SaveOption(vISA_SWSBInstStall, IGC_GET_FLAG_VALUE(EnableSWSBInstStall));
+                SaveOption(vISA_SWSBInstStallEnd, IGC_GET_FLAG_VALUE(EnableSWSBInstStallEnd));
+            }
+
+            if (IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
+            {
+                SaveOption(vISA_SoftwareScoreBoard, true);
+                SaveOption(vISA_SWSBTokenBarrier, IGC_GET_FLAG_VALUE(EnableSWSBTokenBarrier));
+            }
+
+            if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB))
+            {
+                SaveOption(vISA_forceDebugSWSB, true);
+                SaveOption(vISA_SoftwareScoreBoard, false);
+                SaveOption(vISA_SWSBInstStall, (uint32_t)0);
+                SaveOption(vISA_SWSBTokenBarrier, (uint32_t)0);
+            }
+            SaveOption(vISA_Compaction, false);
+        }
+    }
+
+    if (IGC_IS_FLAG_ENABLED(DisableSWSB))
+    {
+        SaveOption(vISA_SoftwareScoreBoard, false);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(EnableGroupScheduleForBC))
+    {
+        SaveOption(vISA_EnableGroupScheduleForBC, true);
+    }
+
+
+    if (IGC_GET_FLAG_VALUE(SWSBTokenNum) != 0)
+    {
+        SaveOption(vISA_SWSBTokenNum, IGC_GET_FLAG_VALUE(SWSBTokenNum));
+    }
 
     if (IGC_IS_FLAG_ENABLED(EnableAccSub))
     {
@@ -4104,6 +4176,7 @@ namespace IGC
         InitBuildParams(params);
     }
 
+    COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISACompile);
     bool enableVISADump = IGC_IS_FLAG_ENABLED(EnableVISASlowpath) || IGC_IS_FLAG_ENABLED(ShaderDumpEnable);
     auto builderMode = m_hasInlineAsm ? vISA_ASM_WRITER : vISA_3D;
     auto builderOpt = (enableVISADump || m_hasInlineAsm) ? CM_CISA_BUILDER_BOTH : CM_CISA_BUILDER_GEN;
@@ -4464,7 +4537,7 @@ namespace IGC
         tableEntries += funcsToExport.size();
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableGlobalRelocation))
+        if (modMD->compOpt.EnableGlobalRelocation)
     {
         tableEntries += modMD->inlineProgramScopeOffsets.size();
     }
@@ -4508,7 +4581,7 @@ namespace IGC
             }
         }
 
-        if (IGC_IS_FLAG_ENABLED(EnableGlobalRelocation))
+            if (modMD->compOpt.EnableGlobalRelocation)
         {
             // Export global symbols
             for (auto global : modMD->inlineProgramScopeOffsets)
@@ -4533,8 +4606,9 @@ namespace IGC
     buffer = nullptr;
     bufferSize = 0;
     tableEntries = 0;
+        ModuleMetaData* modMD = m_program->GetContext()->getModuleMetaData();
 
-    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) || IGC_IS_FLAG_ENABLED(EnableGlobalRelocation))
+        if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) || modMD->compOpt.EnableGlobalRelocation)
     {
         // vISA will directly return the buffer with GenRelocEntry layout
         V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
@@ -4544,8 +4618,6 @@ namespace IGC
 
     void CEncoder::Compile(bool hasSymbolTable)
     {
-    COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
-
     CodeGenContext* context = m_program->GetContext();
     SProgramOutput* pOutput = m_program->ProgramOutput();
 
@@ -4561,10 +4633,6 @@ namespace IGC
     {
             MEM_SNAPSHOT(IGC::SMS_AFTER_CISACreateDestroy_SIMD32);
     }
-
-    COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISAEmitPass);
-
-    COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISACompile);
 
     int vIsaCompile = 0;
     VISAKernel* pMainKernel = nullptr;
@@ -4679,8 +4747,6 @@ namespace IGC
 #endif
         return;
     }
-
-    COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISAEmitPass);
 
         if (m_program->m_dispatchSize == SIMDMode::SIMD8)
     {
@@ -4839,8 +4905,6 @@ namespace IGC
     pOutput->m_scratchSpaceUsedByGtpin = jitInfo->numBytesScratchGtpin;
 
     pOutput->m_offsetToSkipPerThreadDataLoad = jitInfo->offsetToSkipPerThreadDataLoad;
-
-    COMPILER_TIME_END(m_program->GetContext(), TIME_CG_vISAEmitPass);
     }
 
     void CEncoder::DestroyVISABuilder()

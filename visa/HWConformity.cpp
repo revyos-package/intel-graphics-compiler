@@ -251,9 +251,7 @@ void HWConformity::broadcast(
          0,
          1,
          type);
-     G4_INST* newInst = builder.createInternalInst( NULL, G4_mov, NULL, false,
-         execSize, dst, src, NULL, instMask,
-         inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename() );
+     G4_INST* newInst = builder.createMov(execSize, dst, src, instMask, false);
 
      bb->insert(it, newInst);
 
@@ -290,9 +288,7 @@ G4_SrcRegRegion* HWConformity::insertCopyBefore(INST_LIST_ITER it, uint32_t srcN
     origSrc->setModifier(Mod_src_undef);
     G4_DstRegRegion* dst = builder.Create_Dst_Opnd_From_Dcl(dcl, 1);
 
-    G4_INST* movInst = builder.createInternalInst(nullptr, G4_mov, nullptr, false,
-        newExecSize, dst, origSrc, nullptr, InstOpt_WriteEnable,
-        inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
+    G4_INST* movInst = builder.createMov(newExecSize, dst, origSrc, InstOpt_WriteEnable, false);
 
     bb->insert(it, movInst);
     G4_SrcRegRegion* newSrc = builder.createSrcRegRegion(modifier, Direct, dcl->getRegVar(),
@@ -385,9 +381,7 @@ G4_Operand* HWConformity::insertMovBefore(
 
     G4_Declare* dcl = builder.createTempVar( newExecSize == 1 ? 1 : newExecSize * scale, type, subAlign );
     G4_DstRegRegion *dstRegion = builder.Create_Dst_Opnd_From_Dcl(dcl, scale);
-    G4_INST* newInst = builder.createInternalInst(nullptr, G4_mov, nullptr, false,
-        newExecSize, dstRegion, builder.duplicateOperand(src), nullptr, newInstEMask,
-        inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename() );
+    G4_INST* newInst = builder.createMov(newExecSize, dstRegion, builder.duplicateOperand(src), newInstEMask, false);
     bb->insert( it, newInst );
     inst->transferDef( newInst, Gen4_Operand_Number(srcNum + 1), Opnd_src0 );
     newInst->addDefUse(inst, Gen4_Operand_Number(srcNum + 1));
@@ -941,9 +935,7 @@ bool HWConformity::fixLine(INST_LIST_ITER it, G4_BB *bb)
             new_src0_opnd = builder.Create_Src_Opnd_From_Dcl(src0_dcl, rd);
             new_dst_opnd = builder.Create_Dst_Opnd_From_Dcl(src0_dcl, 1);
 
-            G4_INST* newInst = builder.createInternalInst(NULL, G4_mov, NULL, false,
-                mov_size, new_dst_opnd, src0, NULL, InstOpt_NoOpt, inst->getLineNo(),
-                inst->getCISAOff(), inst->getSrcFilename());
+            G4_INST* newInst = builder.createMov(mov_size, new_dst_opnd, src0, InstOpt_NoOpt, false);
             if (bb->isInSimdFlow())
             {
                 newInst->setOptions((newInst->getOption() & ~InstOpt_Masks) | InstOpt_WriteEnable);
@@ -2410,10 +2402,9 @@ bool HWConformity::fixMULInst( INST_LIST_ITER &i, G4_BB *bb )
         // "If an accumulator is an explicit source operand, its register region must match that of the destination register"
 
         G4_Declare* low32BitDcl = builder.createTempVar(exec_size, Type_D, Any);
-        G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, exec_size,
+        G4_INST* movInst = builder.createMov(exec_size,
             builder.Create_Dst_Opnd_From_Dcl(low32BitDcl, 1),
-            builder.createSrcRegRegion(*acc_src_opnd), NULL, inst_opt,
-            inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
+            builder.createSrcRegRegion(*acc_src_opnd), inst_opt, false);
         bb->insert(iter, movInst);
 
         G4_DstRegRegion* origDst = dst;
@@ -2760,8 +2751,7 @@ void HWConformity::copyDwords(G4_Declare* dst,
         dstOffset / GENX_GRF_REG_SIZ,
         (dstOffset % GENX_GRF_REG_SIZ) / G4_Type_Table[Type_UD].byteSize, 1, Type_UD);
 
-    G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, (uint8_t) numDwords, dstOpnd, srcOpnd,
-        NULL, InstOpt_WriteEnable);
+    G4_INST* movInst = builder.createMov((uint8_t) numDwords, dstOpnd, srcOpnd, InstOpt_WriteEnable, false);
 
     INST_LIST_ITER movPos = bb->insert(iter, movInst);
 
@@ -2818,8 +2808,7 @@ void HWConformity::copyDwordsIndirect(G4_Declare* dst,
 
     G4_DstRegRegion* dstOpnd = builder.createDstRegRegion(Direct, newDst->getRegVar(), 0, 0, 1, Type_UD);
 
-    G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false, (uint8_t)numDwords, dstOpnd, newSrc,
-        NULL, InstOpt_WriteEnable);
+    G4_INST* movInst = builder.createMov((uint8_t) numDwords, dstOpnd, newSrc, InstOpt_WriteEnable, false);
 
     bb->insert(iter, movInst);
 }
@@ -2882,7 +2871,8 @@ void HWConformity::fix64bInst( INST_LIST_ITER iter, G4_BB* bb )
     for (int i = 0, size = G4_Inst_Table[inst->opcode()].n_srcs; !uses64BitType && i < size; i++)
     {
         G4_Operand* src = inst->getSrc(i);
-        if (src != NULL && G4_Type_Table[src->getType()].byteSize == 8)
+
+        if (src && G4_Type_Table[src->getType()].byteSize == 8)
         {
             uses64BitType = true;
         }
@@ -2897,12 +2887,42 @@ void HWConformity::fix64bInst( INST_LIST_ITER iter, G4_BB* bb )
 
     if (uses64BitType)
     {
-#if 0
-//#ifdef DEBUG_VERBOSE_ON
-        std::cout << "CHV 64b fix for:\n";
-        inst->emit(std::cout);
-        std::cout << "\n";
-#endif
+
+        if (builder.no64bitType() && inst->opcode() == G4_mov)
+        {
+            // while input should not have any ALU inst with 64b type, we may still end up
+            // with 64b moves generated when preparing send payload (e.g., 64b atomics,
+            // A64 messages). We fix such moves here by breaking them into 2 32b moves
+            // For now only handle copy moves.
+            auto dst = inst->getDst();
+            auto src0 = inst->getSrc(0);
+            assert(getTypeSize(dst->getType()) == 8 &&
+                getTypeSize(src0->getType()) == 8 && "must be copy moves");
+            assert(src0->isSrcRegRegion() &&
+                (src0->asSrcRegRegion()->isScalar() ||
+                    src0->asSrcRegRegion()->getRegion()->isContiguous(inst->getExecSize())) &&
+                "expect src0 to be scalar or contiguous");
+            auto src0RR = src0->asSrcRegRegion();
+            assert(inst->isRawMov() && dst->getHorzStride() == 1 && "expect only copy moves");
+
+            // 1st half
+            auto newDst = builder.createDstRegRegion(Direct, dst->getBase(), dst->getRegOff(), dst->getSubRegOff() * 2,
+                2, Type_UD);
+            auto newSrc = builder.createSrcRegRegion(Mod_src_undef, Direct, src0RR->getBase(), src0RR->getRegOff(),
+                src0RR->getSubRegOff() * 2, src0RR->isScalar() ? builder.getRegionScalar() : builder.getRegionStride2(), Type_UD);
+            auto newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
+            bb->insert(iter, newInst);
+
+            // second half
+            newDst = builder.createDstRegRegion(Direct, dst->getBase(), dst->getRegOff(), dst->getSubRegOff() * 2 + 1,
+                2, Type_UD);
+            newSrc = builder.createSrcRegRegion(Mod_src_undef, Direct, src0RR->getBase(), src0RR->getRegOff(),
+                src0RR->getSubRegOff() * 2 + 1, src0RR->isScalar() ? builder.getRegionScalar() : builder.getRegionStride2(), Type_UD);
+            newInst = builder.createMov(inst->getExecSize(), newDst, newSrc, inst->getOption(), false);
+            *iter = newInst;
+            return;
+        }
+
         int numSrc = G4_Inst_Table[inst->opcode()].n_srcs;
 
         // handle indirect sources first
@@ -2992,8 +3012,7 @@ void HWConformity::fix64bInst( INST_LIST_ITER iter, G4_BB* bb )
                     G4_Declare* tmp = builder.createTempVar(exSize * multFactor,
                         tmpType, GRFALIGN);
                     G4_DstRegRegion* tmpDst = builder.Create_Dst_Opnd_From_Dcl(tmp, multFactor);
-                    G4_INST* movInst = builder.createInternalInst(NULL, G4_mov, NULL, false,
-                        inst->getExecSize(), tmpDst, src, NULL, inst->getOption());
+                    G4_INST* movInst = builder.createMov(inst->getExecSize(), tmpDst, src, inst->getOption(), false);
                     bb->insert(iter, movInst);
                     uint16_t width = exSize;
                     if (width * 8 > GENX_GRF_REG_SIZ)
@@ -5615,9 +5634,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
                 G4_SrcRegRegion *src = builder.createSrcRegRegion(Mod_src_undef, Direct, base, baseOff + idx, baseSubOff + 0, region, type);
                 G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, dcl->getRegVar(), idx, 0, 1, type);
 
-                G4_INST* newInst = builder.createInternalInst(NULL, G4_mov, NULL, false,
-                    8, dst, src, NULL, InstOpt_WriteEnable,
-                    inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
+                G4_INST* newInst = builder.createMov(8, dst, src, InstOpt_WriteEnable, false);
 
                 bb->insert(i, newInst);
                 inst->transferDef(newInst, Opnd_src0, Opnd_src0);
@@ -5655,9 +5672,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
                     G4_SrcRegRegion *src = builder.createSrcRegRegion(Mod_src_undef, Direct, base, baseOff + idx, baseSubOff + 0, region, type);
                     G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, dcl->getRegVar(), idx, 0, 1, type);
 
-                    G4_INST* newInst = builder.createInternalInst(NULL, G4_mov, NULL, false,
-                        8, dst, src, NULL, InstOpt_WriteEnable,
-                        inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
+                    G4_INST* newInst = builder.createMov(8, dst, src, InstOpt_WriteEnable, false);
 
                     bb->insert(i, newInst);
                     inst->transferDef(newInst, Opnd_src1, Opnd_src1);
@@ -7007,8 +7022,7 @@ bool HWConformity::fixPlaneInst(INST_LIST_ITER it, G4_BB* bb)
                 rd,
                 Type_F);
 
-            G4_INST* newInst = builder.createInternalInst(NULL, G4_mov,
-                NULL, false, 4, dstRgn, srcRgn, NULL, 0);
+            G4_INST* newInst = builder.createMov(4, dstRgn, srcRgn, InstOpt_NoOpt, false);
 
             bb->insert(it, newInst);
 
@@ -7065,8 +7079,7 @@ bool HWConformity::fixPlaneInst(INST_LIST_ITER it, G4_BB* bb)
                     rd,
                     Type_F);
 
-                G4_INST* newInst = builder.createInternalInst(NULL, G4_mov,
-                    NULL, false, 16, dstRgn, srcRgn, NULL, 0);
+                G4_INST* newInst = builder.createMov(16, dstRgn, srcRgn, InstOpt_NoOpt, false);
 
                 bb->insert(it, newInst);
 
@@ -7139,16 +7152,12 @@ void HWConformity::fixImm64 ( INST_LIST_ITER i,
             dcl->setAliasDeclare(defDcl, 0);
 
             G4_DstRegRegion *dstRegion = builder.Create_Dst_Opnd_From_Dcl(dcl, 1);
-            G4_INST* lowMovInst = builder.createInternalInst(NULL, G4_mov, NULL, false,
-                1, dstRegion, lowImm, NULL, InstOpt_WriteEnable,
-                inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename() );
+            G4_INST* lowMovInst = builder.createMov(1, dstRegion, lowImm, InstOpt_WriteEnable, false);
 
             bb->insert(i, lowMovInst);
 
             G4_DstRegRegion *dstRegionNext = builder.Create_Dst_Opnd_From_Dcl(dcl, 1);
-            G4_INST *highMovInst = builder.createInternalInst( NULL, G4_mov, NULL, false,
-                1, dstRegionNext, highImm, NULL, InstOpt_WriteEnable,
-                inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename() );
+            G4_INST *highMovInst = builder.createMov(1, dstRegionNext, highImm, InstOpt_WriteEnable, false);
             dstRegionNext->setSubRegOff(1);
             bb->insert(i, highMovInst);
 

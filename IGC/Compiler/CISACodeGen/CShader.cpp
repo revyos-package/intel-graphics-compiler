@@ -2390,7 +2390,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
                 value->getType()->isPointerTy() &&
                 value->getType()->getPointerElementType()->isFunctionTy();
             // Global Relocation
-            bool isGlobalVar = IGC_IS_FLAG_ENABLED(EnableGlobalRelocation) &&
+            bool isGlobalVar = m_ctx->getModuleMetaData()->compOpt.EnableGlobalRelocation &&
                 isa<GlobalVariable>(value);
 
             if (isFunction || isGlobalVar)
@@ -2458,39 +2458,6 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
         CVariable* AliasVar = createAliasIfNeeded(value, Base);
         symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, AliasVar));
         return AliasVar;
-    }
-
-    if (IGC_IS_FLAG_ENABLED(EnableVariableAlias) &&
-        IGC_GET_FLAG_VALUE(VATemp) == 0)
-    {
-        if (m_VRA->m_ValueAliasMap.count(value))
-        {
-            // Generate alias
-            SSubVecDesc& SV = m_VRA->m_ValueAliasMap[value];
-            Value* BaseVec = SV.BaseVector;
-            int startIx = SV.StartElementOffset;
-
-            CVariable* Base = GetSymbol(BaseVec);
-
-            Type* Ty = value->getType();
-            VectorType* VTy = dyn_cast<VectorType>(Ty);
-            Type* BTy = VTy ? VTy->getElementType() : Ty;
-            int nelts = (VTy ? (int)VTy->getNumElements() : 1);
-
-            VISA_Type visaTy = GetType(BTy);
-            int typeBytes = (int)CEncoder::GetCISADataTypeSize(visaTy);
-            int offsetInBytes = typeBytes * startIx;
-            int nbelts = nelts;
-            if (!Base->IsUniform())
-            {
-                int width = (int)numLanes(m_SIMDSize);
-                offsetInBytes *= width;
-                nbelts *= width;
-            }
-            CVariable* AliasVar = GetNewAlias(Base, visaTy, offsetInBytes, nbelts);
-            symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, AliasVar));
-            return AliasVar;
-        }
     }
 
     if (!isa<InsertElementInst>(value) && value->hasOneUse()) {

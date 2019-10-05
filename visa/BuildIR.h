@@ -511,6 +511,8 @@ public:
 
     int perThreadInputSize = 0;
     bool hasPerThreadProlog = false;
+    // Have inserted two entires prolog for setting FFID for compute shaders
+    bool hasComputeFFIDProlog = false;
 
 public:
     PreDefinedVars preDefVars;
@@ -615,6 +617,9 @@ public:
     void setPerThreadInputSize(uint32_t val) { perThreadInputSize = val; }
     bool getHasPerThreadProlog() const { return hasPerThreadProlog; }
     void setHasPerThreadProlog() { hasPerThreadProlog = true; }
+
+    bool getHasComputeFFIDProlog() const { return hasComputeFFIDProlog; }
+    void setHasComputeFFIDProlog() { hasComputeFFIDProlog = true; }
 
     bool isOpndAligned( G4_Operand *opnd, unsigned short &offset, int align_byte );
 
@@ -1099,28 +1104,59 @@ public:
         return inst;
     }
 
-    G4_INST* createSpill(G4_SrcRegRegion* payload, uint16_t numRows, uint32_t offset, G4_Declare* fp, G4_InstOption option,
-        unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    G4_INST* createSpill(G4_DstRegRegion* dst, G4_SrcRegRegion* header, G4_SrcRegRegion* payload, unsigned int execSize,
+        uint16_t numRows, uint32_t offset, G4_Declare* fp, G4_InstOption option, unsigned int lineno = 0, int CISAoff = -1,
+        const char* srcFilename = nullptr)
     {
-        auto builtInR0 = getBuiltinR0();
-        auto rd = getRegionStride1();
-        auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
-        G4_INST* spill = createInternalIntrinsicInst(nullptr, Intrinsic::Spill, 1, createNullDst(G4_Type::Type_UD), 
-            srcRgnr0, payload, nullptr, option, lineno, CISAoff, srcFilename);
+        G4_INST* spill = createIntrinsicInst(nullptr, Intrinsic::Spill, execSize, dst,
+            header, payload, nullptr, option, lineno);
+        spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
+        spill->asSpillIntrinsic()->setCISAOff(CISAoff);
         spill->asSpillIntrinsic()->setFP(fp);
         spill->asSpillIntrinsic()->setOffset(offset);
         spill->asSpillIntrinsic()->setNumRows(numRows);
         return spill;
     }
 
-    G4_INST* createFill(G4_DstRegRegion* dstData, uint16_t numRows, uint32_t offset, G4_Declare* fp , G4_InstOption option,
+    G4_INST* createSpill(G4_DstRegRegion* dst, G4_SrcRegRegion* payload, unsigned int execSize, uint16_t numRows, uint32_t offset,
+        G4_Declare* fp, G4_InstOption option, unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    {
+        auto builtInR0 = getBuiltinR0();
+        auto rd = getRegionStride1();
+        auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
+        G4_INST* spill = createIntrinsicInst(nullptr, Intrinsic::Spill, execSize, dst,
+            srcRgnr0, payload, nullptr, option, lineno);
+        spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
+        spill->asSpillIntrinsic()->setCISAOff(CISAoff);
+        spill->asSpillIntrinsic()->setFP(fp);
+        spill->asSpillIntrinsic()->setOffset(offset);
+        spill->asSpillIntrinsic()->setNumRows(numRows);
+        return spill;
+    }
+
+    G4_INST* createFill(G4_SrcRegRegion* header, G4_DstRegRegion* dstData, unsigned int execSize, uint16_t numRows, uint32_t offset,
+        G4_Declare* fp, G4_InstOption option, unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    {
+        G4_INST* fill = createIntrinsicInst(nullptr, Intrinsic::Fill, execSize, dstData,
+            header, nullptr, nullptr, option, lineno);
+        fill->asFillIntrinsic()->setSrcFilename(srcFilename);
+        fill->asFillIntrinsic()->setCISAOff(CISAoff);
+        fill->asFillIntrinsic()->setFP(fp);
+        fill->asFillIntrinsic()->setOffset(offset);
+        fill->asFillIntrinsic()->setNumRows(numRows);
+        return fill;
+    }
+
+    G4_INST* createFill(G4_DstRegRegion* dstData, unsigned int execSize, uint16_t numRows, uint32_t offset, G4_Declare* fp , G4_InstOption option,
         unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
     {
         auto builtInR0 = getBuiltinR0();
         auto rd = getRegionStride1();
         auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
-        G4_INST* fill = createInternalIntrinsicInst(nullptr, Intrinsic::Fill, 1, dstData,
-            srcRgnr0, nullptr, nullptr, option, lineno, CISAoff, srcFilename);
+        G4_INST* fill = createIntrinsicInst(nullptr, Intrinsic::Fill, execSize, dstData,
+            srcRgnr0, nullptr, nullptr, option, lineno);
+        fill->asFillIntrinsic()->setSrcFilename(srcFilename);
+        fill->asFillIntrinsic()->setCISAOff(CISAoff);
         fill->asFillIntrinsic()->setFP(fp);
         fill->asFillIntrinsic()->setOffset(offset);
         fill->asFillIntrinsic()->setNumRows(numRows);
@@ -1222,20 +1258,45 @@ public:
     RegionDesc *getRegionStride2() { return &CanonicalRegionStride2; }
     RegionDesc *getRegionStride4() { return &CanonicalRegionStride4; }
 
-    G4_SendMsgDescriptor* createSendMsgDesc(uint32_t desc,
+    // ToDo: get rid of this version and use the message type specific ones below instead,
+    // so we can avoid having to explicitly create extDesc bits
+    G4_SendMsgDescriptor* createGeneralMsgDesc(uint32_t desc,
         uint32_t extDesc,
-        bool isRead,
-        bool isWrite,
-        G4_Operand *bti = nullptr,
-        G4_Operand *sti = nullptr);
+        SendAccess access,
+        G4_Operand* bti = nullptr,
+        G4_Operand* sti = nullptr);
+
+    G4_SendMsgDescriptor* createReadMsgDesc(
+        SFID sfid,
+        uint32_t desc,
+        G4_Operand* bti = nullptr);
+
+    G4_SendMsgDescriptor* createWriteMsgDesc(
+        SFID sfid,
+        uint32_t desc,
+        int src1Len,
+        G4_Operand* bti = nullptr);
+
+    G4_SendMsgDescriptor* createSyncMsgDesc(
+        SFID sfid,
+        uint32_t desc);
+
+    G4_SendMsgDescriptor* createSampleMsgDesc(
+        uint32_t desc,
+        bool cps,
+        int src1Len,
+        G4_Operand* bti,
+        G4_Operand* sti);
+
     G4_SendMsgDescriptor* createSendMsgDesc(
         SFID sfid,
         uint32_t desc,
         uint32_t extDesc,
         int src1Len,
-        bool isRead,
-        bool isWrite,
-        G4_Operand *bti);
+        SendAccess access,
+        G4_Operand *bti,
+        bool isValidFuncCtrl = true);
+
     G4_SendMsgDescriptor* createSendMsgDesc(
         unsigned funcCtrl,
         unsigned regs2rcv,
@@ -1244,8 +1305,7 @@ public:
         bool eot,
         unsigned extMsgLength,
         uint16_t extFuncCtrl,
-        bool isRead,
-        bool isWrite,
+        SendAccess access,
         G4_Operand *bti = nullptr,
         G4_Operand *sti = nullptr);
 
@@ -1673,6 +1733,9 @@ public:
         unsigned int option, int lineno = 0, int CISAoff = -1,
         const char* srcFilename = NULL);
 
+    G4_INST* createMov(uint8_t execSize, G4_DstRegRegion* dst,
+        G4_Operand* src0, uint32_t option, bool appendToInstList);
+
     G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
     void resizePredefinedStackVars();
 
@@ -1725,8 +1788,7 @@ public:
                         SFID tf_id,
                         bool eot,
                         bool head_present,
-                        bool isRead,
-                        bool isWrite,
+                        SendAccess access,
                         G4_Operand *bti,
                         G4_Operand *sti,
                         unsigned int option,
@@ -1740,8 +1802,7 @@ public:
         unsigned fc, unsigned exFuncCtrl,
         SFID tf_id, bool eot,
         bool head_present,
-        bool isRead,
-        bool isWrite,
+        SendAccess access,
         G4_Operand *bti, G4_Operand *sti,
         unsigned option,
         bool is_sendc);

@@ -66,14 +66,19 @@ set(IGC_BUILD__SRC__Compiler
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/iicl_lp_sw_wa.c"
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/ilkf_hw_wa.c"
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/ilkf_sw_wa.c"
-    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/ijsl_hw_wa.c"
-    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/ijsl_sw_wa.c"
+    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/itgl_lp_hw_wa.c"
+    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/itgl_lp_sw_wa.c"
     ${IGC_BUILD__SRC__Compiler_CISACodeGen}
     ${IGC_BUILD__SRC__Compiler_DebugInfo}
     ${IGC_BUILD__SRC__Compiler_Legalizer}
     ${IGC_BUILD__SRC__Compiler_MetaDataApi}
     ${IGC_BUILD__SRC__Compiler_Optimizer}
   )
+
+list(APPEND IGC_BUILD__SRC__Compiler 
+        "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/iehl_hw_wa.c"
+        "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/iehl_sw_wa.c")
+
 if(NOT ANDROID)
   set(IGC_BUILD__SRC_Win_Lin_Dar__Compiler
       "${CMAKE_CURRENT_SOURCE_DIR}/VerificationPass.cpp"

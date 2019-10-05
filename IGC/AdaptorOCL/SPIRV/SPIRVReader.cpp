@@ -104,7 +104,7 @@ isOpenCLKernel(SPIRVFunction *BF) {
    return BF->getModule()->isEntryPoint(ExecutionModelKernel, BF->getId());
 }
 
-__unused static void
+__attr_unused static void
 dumpLLVM(Module *M, const std::string &FName) {
   std::error_code EC;
   raw_fd_ostream FS(FName, EC, sys::fs::F_None);
@@ -1552,7 +1552,7 @@ SPIRVToLLVM::transLinkageType(const SPIRVValue* V) {
         // Tentative definition
         return GlobalValue::CommonLinkage;
     }
-    return GlobalValue::LinkOnceODRLinkage;
+    return GlobalValue::ExternalLinkage;
   }
 }
 
@@ -2882,12 +2882,6 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     }
     break;
 
-  case OpBitCount:{
-    auto BI = static_cast<SPIRVInstruction *>(BV);
-    Type* RetTy = transType(BI->getType());
-    auto NewCI = CallInst::Create(F, "__builtin_spirv_OpBitCount_i8", BB);
-    return mapValue(BV, ZExtInst::CreateIntegerCast(NewCI, RetTy, 0, "", BB));
-  }
   case OpSizeOf:
   {
       auto BI = static_cast<SPIRVSizeOf*>(BV);
@@ -3973,7 +3967,7 @@ SPIRVToLLVM::transCompilerOption() {
   return true;
 }
 
-__unused static void dumpSPIRVBC(const char* fname, const char* data, unsigned int size)
+__attr_unused static void dumpSPIRVBC(const char* fname, const char* data, unsigned int size)
 {
     FILE* fp;
     fp = fopen(fname, "wb");

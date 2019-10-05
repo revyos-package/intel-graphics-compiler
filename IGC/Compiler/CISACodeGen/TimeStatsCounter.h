@@ -23,46 +23,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
-#include "Compiler/CodeGenContextWrapper.hpp"
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
-#include <llvm/IR/InstVisitor.h>
-#include <llvm/ADT/DenseSet.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Compiler/CodeGenPublic.h"
+#include "common/Stats.hpp"
 
-namespace IGC
-{
-    /// @brief  This pass finds out the dependency of Round inst on Mad output. skip mad conversion if the following inst is round
-    class MadRoundDepAnalysis : public llvm::FunctionPass, public llvm::InstVisitor<MadRoundDepAnalysis>
+namespace IGC {
+    enum TimeStatsCounterMode
     {
-    public:
-        /// @brief  Pass identification.
-        static char ID;
-
-        MadRoundDepAnalysis();
-
-        ~MadRoundDepAnalysis() {}
-
-        void visitIntrinsicInst(llvm::IntrinsicInst &I);
-
-        virtual llvm::StringRef getPassName() const override
-        {
-            return "CheckMadIfUsedInRound";
-        }
-
-        virtual bool runOnFunction(llvm::Function &F) override;
-
-        virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const override
-        {
-            AU.setPreservesAll();
-            AU.addRequired<CodeGenContextWrapper>();
-        }
-        bool RoundingDependsOnInst(llvm::Instruction* inst);
-
-    private:
-        llvm::DenseSet<llvm::Instruction*> m_RoundingDep;
+        STATS_COUNTER_START,
+        STATS_COUNTER_END
     };
 
-} // namespace IGC
+    llvm::FunctionPass* createTimeStatsCounterPass(CodeGenContext* _ctx, COMPILE_TIME_INTERVALS _type, TimeStatsCounterMode _mode);
+    void initializeTimeStatsCounterPass(llvm::PassRegistry&);
+} // End namespace IGC

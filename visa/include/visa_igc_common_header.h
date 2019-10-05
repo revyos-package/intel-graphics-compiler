@@ -466,6 +466,7 @@ typedef enum {
     GENX_CNL,
     GENX_ICL,
     GENX_ICLLP,
+    GENX_TGLLP,
     ALL
 } TARGET_PLATFORM;
 
@@ -623,5 +624,22 @@ typedef struct _vISA_RT_CONTROLS
     unsigned isHeaderMaskfromCe0 : 1;
 } vISA_RT_CONTROLS;
 
+
+// FixedFunctionID: these are hardware FFID values
+enum FFID
+{
+    FFID_NULL = 0x0,
+    FFID_VSR  = 0x3,
+    FFID_HS   = 0x4,
+    FFID_DS   = 0x5,
+    FFID_TS   = 0x6,
+    FFID_GP   = 0x7,
+    FFID_GP1  = 0x8,
+    FFID_VS   = 0x9,
+    FFID_GS   = 0xC,
+    FFID_PS   = 0xF,
+
+    FFID_INVALID = 0xFF
+};
 
 #endif

@@ -201,7 +201,9 @@ class Optimizer
     void dce();
 
     void accSubPostSchedule();
-    
+
+    bool hasGen12LPBundleConflict(G4_INST *inst);
+    void swapSrc1(G4_INST * inst);
 
 private:
     /* below member functions are used for message header opt */
@@ -242,8 +244,11 @@ private:
     void clearARFDependencies();
     void clearSendDependencies();
     void loadThreadPayload();
+    void addFFIDProlog();
     void insertFenceBeforeEOT();
     void insertScratchReadBeforeEOT();
+    void resetA0();
+    void setA0toTdrForSendc();
 
     void insertHashMovs();
     void insertDummyCompactInst();
@@ -333,6 +338,7 @@ public:
         PI_reassociateConst,
         PI_split4GRFVars,
         PI_loadThreadPayload,
+        PI_addFFIDProlog,
         PI_insertFenceBeforeEOT,
         PI_insertScratchReadBeforeEOT,
         PI_mapOrphans,

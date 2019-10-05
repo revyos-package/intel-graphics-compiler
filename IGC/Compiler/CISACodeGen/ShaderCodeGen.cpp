@@ -64,6 +64,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/ResolvePredefinedConstant.h"
 #include "Compiler/CISACodeGen/Simd32Profitability.hpp"
 #include "Compiler/CISACodeGen/SimplifyConstant.h"
+#include "Compiler/CISACodeGen/TimeStatsCounter.h"
 #include "Compiler/CISACodeGen/TypeDemote.h"
 #include "Compiler/CISACodeGen/UniformAssumptions.hpp"
 #include "Compiler/Optimizer/LinkMultiRateShaders.hpp"
@@ -90,6 +91,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/MCSOptimization.hpp"
 #include "Compiler/Optimizer/RectListOptimizationPass.hpp"
 #include "Compiler/Optimizer/GatingSimilarSamples.hpp"
+#include "Compiler/Optimizer/IndirectCallOptimization.hpp"
 #include "Compiler/MetaDataApi/PurgeMetaDataUtils.hpp"
 
 #include "Compiler/HandleLoadStoreInstructions.hpp"
@@ -218,9 +220,13 @@ namespace IGC
 
     inline void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
     {
+        COMPILER_TIME_START(&ctx, TIME_CG_Add_Analysis_Passes);
+
     bool isOptDisabled = ctx.getModuleMetaData()->compOpt.OptDisable;
     TODO("remove the following once all IGC passes are registered to PassRegistery in their constructor")
     initializeLoopInfoWrapperPassPass(*PassRegistry::getPassRegistry());
+
+    mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Analysis, STATS_COUNTER_START));
 
     // transform pull constants and inputs into push constants and inputs
     mpm.add(new PushAnalysis());
@@ -293,6 +299,10 @@ namespace IGC
     }
 
     mpm.add(new Layout());
+
+    mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Analysis, STATS_COUNTER_END));
+
+    COMPILER_TIME_END(&ctx, TIME_CG_Add_Analysis_Passes);
     }
 
     static void UpdateInstTypeHint(CodeGenContext& ctx)
@@ -316,6 +326,10 @@ namespace IGC
 
     inline void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm)
     {
+        COMPILER_TIME_START(&ctx, TIME_CG_Add_Legalization_Passes);
+
+        mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Legalization, STATS_COUNTER_START));
+
     // update type of instructions to know what passes are needed.
     UpdateInstTypeHint(ctx);
 
@@ -659,12 +673,18 @@ namespace IGC
     }
 
     mpm.add(new WAFMinFMax());
+
+    mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Legalization, STATS_COUNTER_END));
+
+    COMPILER_TIME_END(&ctx, TIME_CG_Add_Legalization_Passes);
     }
 
     inline void AddCodeGenPasses(CodeGenContext& ctx, CShaderProgram::KernelShaderMap& shaders, IGCPassManager& Passes, SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode = ShaderDispatchMode::NOT_APPLICABLE, PSSignature* pSignature = nullptr)
     {
-    // Generate CISA
-    Passes.add(new EmitPass(shaders, simdMode, canAbortOnSpill, shaderMode, pSignature));
+        // Generate CISA
+        COMPILER_TIME_START(&ctx, TIME_CG_Add_CodeGen_Passes);
+        Passes.add(new EmitPass(shaders, simdMode, canAbortOnSpill, shaderMode, pSignature));
+        COMPILER_TIME_END(&ctx, TIME_CG_Add_CodeGen_Passes);
     }
 
     template<typename ContextType>
@@ -674,6 +694,7 @@ namespace IGC
     void CodeGen(DomainShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders)
     {
         COMPILER_TIME_START(ctx, TIME_CodeGen);
+        COMPILER_TIME_START(ctx, TIME_CG_Add_Passes);
 
     IGCPassManager Passes(ctx, "CG");
 
@@ -688,15 +709,31 @@ namespace IGC
         AddCodeGenPasses(*ctx, shaders, Passes, SIMDMode::SIMD8, false, ShaderDispatchMode::DUAL_PATCH);
     }
 
+    COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+
     Passes.run(*(ctx->getModule()));
     DumpLLVMIR(ctx, "codegen");
 
         COMPILER_TIME_END(ctx, TIME_CodeGen);
     }
 
+    // check based on performance measures.
+    inline bool SimdEarlyCheck(CodeGenContext* ctx)
+    {
+        if (ctx->m_sampler < 11 || ctx->m_inputCount < 16 || ctx->m_tempCount < 40 || ctx->m_dxbcCount < 280 || ctx->m_ConstantBufferCount < 500)
+        {
+            if (ctx->m_tempCount < 90 && ctx->m_ConstantBufferCount < 10000)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void PSCodeGen(PixelShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders, PSSignature* pSignature = nullptr)
     {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
+    COMPILER_TIME_START(ctx, TIME_CG_Add_Passes);
 
     IGCPassManager PassMgr(ctx, "CG");
         const PixelShaderInfo& psInfo = ctx->getModuleMetaData()->psInfo;
@@ -711,29 +748,40 @@ namespace IGC
     bool earlyExit =
         ctx->getCompilerOption().pixelShaderDoNotAbortOnSpill ? false : true;
 
-
-    if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD8)
+    if (IGC_IS_FLAG_ENABLED(ForcePSBestSIMD))
     {
-        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, false, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        if (SimdEarlyCheck(ctx))
+        {
+            AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, true, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        }
+        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(ctx), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
     }
-
-    if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD16)
+    else
     {
-        // if we forceSIMD16 or SIMD16_SIMD32 compilation modes then SIMD16 must compile and cannot abort on spill
-        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16,
-            (earlyExit &&
-            (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD8)), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
-        useRegKeySimd = true;
-    }
 
-    if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD32)
-    {
-        // if we forceSIMD32 compilation mode then SIMD32 must compile and cannot abort on spill
-        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, (earlyExit && (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD16)), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
-        useRegKeySimd = true;
-    }
+        if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD8)
+        {
+            AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, false, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+            useRegKeySimd = true;
+        }
 
+        if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD16)
+        {
+            // if we forceSIMD16 or SIMD16_SIMD32 compilation modes then SIMD16 must compile and cannot abort on spill
+            AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16,
+                (earlyExit &&
+                (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD8)), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+            useRegKeySimd = true;
+        }
+
+        if (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD32)
+        {
+            // if we forceSIMD32 compilation mode then SIMD32 must compile and cannot abort on spill
+            AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, (earlyExit && (pixelShaderSIMDMode & FLAG_PS_SIMD_MODE_FORCE_SIMD16)), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+            useRegKeySimd = true;
+        }
+    }
 
     if (!useRegKeySimd)
     {
@@ -744,12 +792,9 @@ namespace IGC
             enableSimd32 = true;
         }
         // heuristic based on performance measures.
-        else if (ctx->m_sampler < 11 || ctx->m_inputCount < 16 || ctx->m_tempCount < 40 || ctx->m_dxbcCount < 280 || ctx->m_ConstantBufferCount < 500)
+        else if (SimdEarlyCheck(ctx))
         {
-            if (ctx->m_tempCount < 90 && ctx->m_ConstantBufferCount < 10000)
-            {
-                enableSimd32 = true;
-            }
+            enableSimd32 = true;
         }
 
         // for versioned loop, in general SIMD16 with spill has better perf
@@ -762,8 +807,12 @@ namespace IGC
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, earlyExit, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         }
     }
+
     PassMgr.add(new DebugInfoPass(shaders));
+    COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+
     PassMgr.run(*(ctx->getModule()));
+
     DumpLLVMIR(ctx, "codegen");
 
     COMPILER_TIME_END(ctx, TIME_CodeGen);
@@ -773,6 +822,7 @@ namespace IGC
     void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders)
     {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
+    COMPILER_TIME_START(ctx, TIME_CG_Add_Passes);
 
     bool setEarlyExit16Stat = false;
 
@@ -795,7 +845,9 @@ namespace IGC
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, false);
     }
-    else if (IGC_IS_FLAG_ENABLED(ForceCSLeastSIMD))
+    // csInfo.forcedSIMDSize == 8 means force least SIMD. 
+    // If the SIMD8 is not allowed, it will return higher SIMD
+    else if (IGC_IS_FLAG_ENABLED(ForceCSLeastSIMD) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 8)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, simdModeAllowed, false);
     }
@@ -884,6 +936,9 @@ namespace IGC
             assert(false && "Unexpected SIMD mode");
         }
     }
+
+    COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+
     PassMgr.run(*(ctx->getModule()));
 
     if (setEarlyExit16Stat)
@@ -898,17 +953,20 @@ namespace IGC
     void CodeGen(ContextType* ctx, CShaderProgram::KernelShaderMap& shaders)
     {
         COMPILER_TIME_START(ctx, TIME_CodeGen);
+        COMPILER_TIME_START(ctx, TIME_CG_Add_Passes);
 
-    IGCPassManager PassMgr(ctx, "CG");
+        IGCPassManager PassMgr(ctx, "CG");
 
-    AddLegalizationPasses(*ctx, PassMgr);
+        AddLegalizationPasses(*ctx, PassMgr);
 
-    AddAnalysisPasses(*ctx, PassMgr);
+        AddAnalysisPasses(*ctx, PassMgr);
 
-    AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, false);
+        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, false);
 
-    PassMgr.run(*(ctx->getModule()));
-    DumpLLVMIR(ctx, "codegen");
+        COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+
+        PassMgr.run(*(ctx->getModule()));
+        DumpLLVMIR(ctx, "codegen");
 
         COMPILER_TIME_END(ctx, TIME_CodeGen);
         MEM_SNAPSHOT(IGC::SMS_AFTER_CODEGEN);
@@ -919,6 +977,7 @@ namespace IGC
     void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap& kernels)
     {
     COMPILER_TIME_START(ctx, TIME_CodeGen);
+    COMPILER_TIME_START(ctx, TIME_CG_Add_Passes);
 
     IGCPassManager Passes(ctx, "CG");
 
@@ -962,6 +1021,7 @@ namespace IGC
         }
     }
     Passes.add(new DebugInfoPass(kernels));
+    COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
 
     Passes.run(*(ctx->getModule()));
     COMPILER_TIME_END(ctx, TIME_CodeGen);
@@ -1346,6 +1406,13 @@ namespace IGC
                 }
             }
 
+            if (pContext->m_enableFunctionPointer &&
+                IGC_IS_FLAG_ENABLED(EnableIndirectCallOptimization) &&
+                IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INDIRECTCALL)
+            {
+                mpm.add(new IndirectCallOptimization());
+                mpm.add(createAlwaysInlinerLegacyPass());
+            }
 
             // Note: call reassociation pass before IGCConstProp(EnableSimplifyGEP) to preserve the
             // the expr evaluation order that IGCConstProp creates.

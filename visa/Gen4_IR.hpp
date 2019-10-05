@@ -229,6 +229,13 @@ typedef std::list<USE_DEF_NODE, USE_DEF_ALLOCATOR >::iterator DEF_EDGE_LIST_ITER
 
 namespace vISA
 {
+
+    enum class SendAccess
+    {
+        READ_ONLY,
+        WRITE_ONLY,
+        READ_WRITE
+    };
 class G4_SendMsgDescriptor
 {
 private:
@@ -275,11 +282,10 @@ private:
         ExtendedMsgDescLayout layout;
     } extDesc;
 
-    /// Whether is a dataport read message.
-    bool readMsg;
+    SendAccess accessType;
 
-    /// Whether is a dataport write message.
-    bool writeMsg;
+    /// Whether funcCtrl is valid
+    bool funcCtrlValid;
 
     G4_Operand *m_sti;
     G4_Operand *m_bti;
@@ -293,15 +299,12 @@ public:
 
     G4_SendMsgDescriptor(uint32_t fCtrl, uint32_t regs2rcv, uint32_t regs2snd,
         uint32_t fID, bool isEot, uint16_t extMsgLength, uint32_t extFCtrl,
-        bool isRead, bool isWrite, G4_Operand *bti, G4_Operand *sti, IR_Builder& builder);
+        SendAccess access, G4_Operand *bti, G4_Operand *sti, IR_Builder& builder);
 
     /// Construct a object with descriptor and extended descriptor values.
-    /// used in IR_Builder::createSendMsgDesc(uint32_t desc, uint32_t extDesc, bool isRead, bool isWrite)
-    G4_SendMsgDescriptor(uint32_t desc, uint32_t extDesc,
-                        bool isRead,
-                        bool isWrite,
-                        G4_Operand *bti,
-                        G4_Operand *sti);
+    /// used in IR_Builder::createSendMsgDesc(uint32_t desc, uint32_t extDesc, SendAccess access)
+    G4_SendMsgDescriptor(uint32_t desc, uint32_t extDesc, SendAccess access,
+        G4_Operand* bti, G4_Operand* sti);
 
     /// Preferred constructor takes an explicit SFID and src1 length
     G4_SendMsgDescriptor(
@@ -309,9 +312,9 @@ public:
         uint32_t desc,
         uint32_t extDesc,
         int src1Len,
-        bool isRead,
-        bool isWrite,
-        G4_Operand *bti);
+        SendAccess access,
+        G4_Operand *bti,
+        bool isValidFuncCtrl);
 
     void *operator new(size_t sz, Mem_Manager &m) { return m.alloc(sz); }
 
@@ -378,8 +381,10 @@ public:
     uint16_t extMessageLength() const { return (uint16_t)src1Len; }
 
     bool isCPSEnabled() const {return extDesc.layout.cps != 0;}
-    bool isDataPortRead() const { return readMsg; }
-    bool isDataPortWrite() const { return writeMsg; }
+    bool isDataPortRead() const { return accessType != SendAccess::WRITE_ONLY; }
+    bool isDataPortWrite() const { return accessType != SendAccess::READ_ONLY; }
+    SendAccess getAccess() const { return accessType; }
+    bool isValidFuncCtrl() const { return funcCtrlValid;  }
     bool isSampler() const {return getFuncId() == SFID::SAMPLER;}
     bool isHDC() const
     {
@@ -561,6 +566,87 @@ protected:
 
     const IR_Builder& builder;  // link to builder to access the various compilation options
 
+public:
+    enum SWSBTokenType {
+        TOKEN_NONE,
+        AFTER_READ,
+        AFTER_WRITE,
+        READ_ALL,
+        WRITE_ALL
+    };
+
+
+protected:
+    int ALUID = -1;
+    unsigned char depDistance = 0;
+    unsigned short SBToken = -1;
+    bool operandTypeIndicated = true;
+
+    struct DepToken {
+        unsigned short token;
+        SWSBTokenType type;
+    };
+    std::vector <DepToken> depTokens;
+
+public:
+    void setDistance(unsigned char dep_distance) {depDistance = dep_distance;}
+    void setOperandTypeIndicated(bool indicated) { operandTypeIndicated = indicated; }
+    void setToken(unsigned short token) {SBToken = token;}
+
+    void setDepToken(unsigned short token, SWSBTokenType type)
+    {
+        for (size_t i = 0, size = depTokens.size(); i < size; i++)
+        {
+            DepToken &depToken = depTokens[i];
+            if (depToken.token == token)
+            {
+                if (depToken.type == AFTER_WRITE)
+                {
+                    return;
+                }
+                if (type == AFTER_WRITE)
+                {
+                    depToken.type = type;
+                }
+                return;
+            }
+        }
+
+        struct DepToken dt;
+        dt.token = token;
+        dt.type = type;
+        depTokens.push_back(dt);
+    }
+    void eraseDepToken(unsigned i)
+    {
+        depTokens.erase(depTokens.begin() + i);
+    }
+
+    bool isOperandTypeIndicated() {return operandTypeIndicated;}
+    unsigned char getDistance() { return depDistance; }
+    unsigned short getToken() { return SBToken; }
+
+    size_t getDepTokenNum() { return depTokens.size(); }
+    unsigned short getDepToken(unsigned int i, SWSBTokenType &type) const
+    {
+        type = depTokens[i].type;
+        return depTokens[i].token;
+    }
+
+    bool distanceHonourInstruction() const
+    {
+        if (isSend() || op == G4_nop || isWait() || isMath())
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool tokenHonourInstruction() const { return isSend() || isMath(); }
+
+    void setALUID(int i) { ALUID = i; }
+    int getALUID() const { return ALUID; }
+
 
 public:
     G4_INST(const IR_Builder& builder,
@@ -659,6 +745,10 @@ public:
     bool isPartialWrite() const
     {
         return (predicate != NULL && op != G4_sel) || op == G4_smov;
+    }
+    bool isSWSBSync() const
+    {
+        return op == G4_sync_nop || op == G4_sync_allrd || op == G4_sync_allwr;
     }
 
     bool isPseudoLogic() const
@@ -1129,9 +1219,6 @@ class G4_InstCF : public G4_INST
 
     // for FCALL only
     std::string         calleeName = "";
-    G4_RegVar*          assocPseudoVCA;
-    G4_RegVar*          assocPseudoA0Save;
-    G4_RegVar*          assocPseudoFlagSave;
 
 public:
 
@@ -1146,8 +1233,7 @@ public:
         G4_Label* uipLabel,
         uint32_t instOpt) :
         G4_INST(builder, prd, op, nullptr, false, size, nullptr, nullptr, nullptr, instOpt),
-        jip(jipLabel), uip(uipLabel), isBackwardBr(false),
-        assocPseudoVCA(nullptr), assocPseudoA0Save(nullptr), assocPseudoFlagSave(nullptr)
+        jip(jipLabel), uip(uipLabel), isBackwardBr(false)
     {
 
     }
@@ -1164,8 +1250,7 @@ public:
         G4_Operand* s0,
         unsigned int opt) :
         G4_INST(builder, prd, o, m, sat, size, d, s0, nullptr, opt),
-        jip(NULL), uip(NULL), isBackwardBr(false),
-        assocPseudoVCA(nullptr), assocPseudoA0Save(nullptr), assocPseudoFlagSave(nullptr)
+        jip(NULL), uip(NULL), isBackwardBr(false)
     {
     }
 
@@ -1228,37 +1313,6 @@ public:
         {
             return nullptr;
         }
-    }
-
-    void setAssocPseudoVCA(G4_RegVar* var)
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        assocPseudoVCA = var;
-    }
-    G4_RegVar* getAssocPseudoVCA() const
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        return assocPseudoVCA;
-    }
-    void setAssocPseudoA0Save(G4_RegVar* var)
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        assocPseudoA0Save = var;
-    }
-    G4_RegVar* getAssocPseudoA0Save() const
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        return assocPseudoA0Save;
-    }
-    void setAssocPseudoFlagSave(G4_RegVar* var)
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        assocPseudoFlagSave = var;
-    }
-    G4_RegVar* getAssocPseudoFlagSave() const
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        return assocPseudoFlagSave;
     }
 };
 
@@ -1354,6 +1408,11 @@ public:
     void emit_send(std::ostream& output, bool dotStyle = false);
     void emit_send_desc(std::ostream& output);
 
+    void setSerialize()
+    {
+        option = option | InstOpt_Serialize;
+    }
+    bool isSerializedInst() const { return (option & InstOpt_Serialize) ? true : false; }
 
 };
 
@@ -1418,7 +1477,9 @@ static const IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] =
     {Intrinsic::Wait,       "wait",         0,      0,      Phase::Optimizer,       { 0, 0, 0, false, false } },
     {Intrinsic::Use,        "use",          0,      1,      Phase::Scheduler,       { 0, 0, 0, false, false } },
     {Intrinsic::MemFence,   "mem_fence",    0,      0,      Phase::BinaryEncoding,  { 0, 0, 0, false, false } },
-    {Intrinsic::PseudoKill, "pseudo_kill",  1,      1,      Phase::RA,              { 0, 0, 0, false, false} }
+    {Intrinsic::PseudoKill, "pseudo_kill",  1,      1,      Phase::RA,              { 0, 0, 0, false, false} },
+    {Intrinsic::Spill,      "spill",        1,      2,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::Fill,       "fill",         1,      1,      Phase::RA,              { 0, 0, 0, false, false } }
 };
 
 namespace vISA
@@ -1943,6 +2004,8 @@ class G4_Operand
 {
     friend class G4_INST;
     friend class G4_InstSend;
+    friend class G4_FillIntrinsic;
+    friend class G4_SpillIntrinsic;
 
 public:
     enum Kind {
@@ -3818,6 +3881,22 @@ inline const char* G4_InstCF::getUipLabelStr() const
     return uip->asLabel()->getLabel();
 }
 
+static void computeSpillFillOperandBound(G4_Operand* opnd, unsigned int LB, int numReg)
+{
+    if (numReg == 0)
+    {
+        return;
+    }
+
+    // read/write in units of GRF.
+    unsigned RB = std::min(opnd->getTopDcl()->getByteSize(),
+        LB + numReg * G4_GRF_REG_NBYTES) - 1;
+
+    unsigned NBytes = RB - LB + 1;
+    opnd->setBitVecFromSize(NBytes);
+    opnd->setRightBound(RB);
+}
+
 class G4_SpillIntrinsic : public G4_InstIntrinsic
 {
 public:
@@ -3836,6 +3915,8 @@ public:
 
     }
 
+    const static unsigned int InvalidOffset = 0xffffffff;
+
     bool isOffBP() const { return getFP() != nullptr; }
 
     uint32_t getNumRows() const { return numRows; }
@@ -3846,10 +3927,26 @@ public:
     void setOffset(uint32_t o) { offset = o; }
     void setFP(G4_Declare* f) { fp = f; }
 
+    bool isOffsetValid() { return offset != InvalidOffset; }
+
+    void computeRightBound(G4_Operand* opnd)
+    {
+        uint16_t numReg = 0;
+        if (opnd == getSrc(1))
+        {
+            numReg = asSpillIntrinsic()->getNumRows();
+        }
+        else if (opnd->isSrcRegRegion() && opnd == getSrc(0))
+        {
+            numReg = 1;
+        }
+        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg);
+    }
+
 private:
     G4_Declare* fp = nullptr;
     uint32_t numRows = 0;
-    uint32_t offset = 0;
+    uint32_t offset = InvalidOffset;
 };
 
 class G4_FillIntrinsic : public G4_InstIntrinsic
@@ -3870,6 +3967,8 @@ public:
 
     }
 
+    const static unsigned int InvalidOffset = 0xffffffff;
+
     bool isOffBP() const { return getFP() != nullptr; }
 
     uint32_t getNumRows() const { return numRows; }
@@ -3880,10 +3979,27 @@ public:
     void setOffset(uint32_t o) { offset = o; }
     void setFP(G4_Declare* f) { fp = f; }
 
+    bool isOffsetValid() { return offset != InvalidOffset; }
+
+    void computeRightBound(G4_Operand* opnd)
+    {
+        uint16_t numReg = 0;
+        if (opnd == getDst())
+        {
+            numReg = asFillIntrinsic()->getNumRows();
+        }
+        else if (opnd->isSrcRegRegion() &&
+            (opnd == getSrc(0) || opnd == getSrc(1)))
+        {
+            numReg = 1;
+        }
+        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg);
+    }
+
 private:
     G4_Declare* fp = nullptr;
     uint32_t numRows = 0;
-    uint32_t offset = 0;
+    uint32_t offset = InvalidOffset;
 };
 
 } // namespace vISA

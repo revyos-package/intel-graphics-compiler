@@ -340,18 +340,46 @@ bool EmitPass::runOnFunction(llvm::Function& F)
     CreateKernelShaderMap(ctx, pMdUtils, F);
 
     m_FGA = getAnalysisIfAvailable<GenXFunctionGroupAnalysis>();
+
+    if (IGC_IS_FLAG_ENABLED(ForcePSBestSIMD) && m_SimdMode == SIMDMode::SIMD8)
+    {
+        /* Don't do SIMD8 if SIMD16 has no spill */
+        auto Iter = m_shaders.find(&F);
+        if (Iter == m_shaders.end())
+        {
+            return false;
+        }
+
+        CShader * simd16Program = Iter->second->GetShader(SIMDMode::SIMD16);
+        if (simd16Program &&
+            simd16Program->ProgramOutput()->m_programBin != 0 &&
+            simd16Program->ProgramOutput()->m_scratchSpaceUsedBySpills == 0)
+            return false;
+    }
+
     if (!setCurrentShader(&F))
     {
         return false;
     }
 
-    // If max work group size is set, we need to compile for all requested SIMD modes.
-    // Otherwise, only compile simd8 for subroutines
-    if (ctx->getModuleMetaData()->csInfo.maxWorkGroupSize == 0 &&
-        m_FGA && !m_FGA->getGroup(&F)->isSingle() &&
-        m_SimdMode != SIMDMode::SIMD8)
+    // If uses subroutines, we can only compile a single SIMD mode
+    if (m_FGA && !m_FGA->getGroup(&F)->isSingle())
     {
-        return false;
+        // If max work group size is set, we need to compile the least allowed SIMD
+        if (ctx->m_DriverInfo.sendMultipleSIMDModes() &&
+            ctx->getModuleMetaData()->csInfo.maxWorkGroupSize != 0)
+        {
+            const SIMDMode leastSIMDMode = getLeastSIMDAllowed(ctx->getModuleMetaData()->csInfo.maxWorkGroupSize, GetHwThreadsPerWG(ctx->platform));
+            if (leastSIMDMode != m_SimdMode)
+            {
+                return false;
+            }
+        }
+        // Otherwise, only compile simd8 for subroutines
+        else if (m_SimdMode != SIMDMode::SIMD8)
+        {
+            return false;
+        }
     }
 
     bool isCloned = false;
@@ -364,9 +392,6 @@ bool EmitPass::runOnFunction(llvm::Function& F)
             isCloned = true;
         }
     }
-
-    COMPILER_TIME_START(m_currShader->GetContext(), TIME_CG_vISAEmitPass);
-    COMPILER_TIME_START(m_currShader->GetContext(), TIME_vISAEmitInit);
 
     m_DL = &F.getParent()->getDataLayout();
     m_pattern = &getAnalysis<CodeGenPatternMatch>();
@@ -442,6 +467,7 @@ bool EmitPass::runOnFunction(llvm::Function& F)
 
     if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
     {
+        SmallSet<Function*, 8> funcAddrSymbols;
         Module* pModule = F.getParent();
         for (auto& FI : pModule->getFunctionList())
         {
@@ -456,15 +482,21 @@ bool EmitPass::runOnFunction(llvm::Function& F)
                     {
                         if (inst->getParent()->getParent() == &F)
                         {
-                            m_currShader->CreateFunctionSymbol(&FI);
+                            funcAddrSymbols.insert(&FI);
                         }
                     }
                 }
             }
         }
+        for (auto pFunc : funcAddrSymbols)
+        {
+            m_currShader->CreateFunctionSymbol(pFunc);
+        }
     }
-    if (IGC_IS_FLAG_ENABLED(EnableGlobalRelocation))
+
+    if (m_moduleMD->compOpt.EnableGlobalRelocation)
     {
+        SmallSet<GlobalVariable*, 8> globalAddrSymbols;
         Module* pModule = F.getParent();
         for (auto gi = pModule->global_begin(), ge = pModule->global_end(); gi != ge; gi++)
         {
@@ -481,12 +513,16 @@ bool EmitPass::runOnFunction(llvm::Function& F)
                         {
                             if (inst->getParent()->getParent() == &F)
                             {
-                                m_currShader->CreateGlobalSymbol(pGlobal);
+                                globalAddrSymbols.insert(pGlobal);
                             }
                         }
                     }
                 }
             }
+        }
+        for (auto pGlobal : globalAddrSymbols)
+        {
+            m_currShader->CreateGlobalSymbol(pGlobal);
         }
     }
 
@@ -511,9 +547,6 @@ bool EmitPass::runOnFunction(llvm::Function& F)
 
     // We only invoke EndEncodingMark() to update last VISA id.
     IF_DEBUG_INFO_IF(m_pDebugEmitter, m_pDebugEmitter->EndEncodingMark();)
-
-        COMPILER_TIME_END(m_currShader->GetContext(), TIME_vISAEmitInit);
-    COMPILER_TIME_START(m_currShader->GetContext(), TIME_vISAEmitLoop);
 
     phiMovToBB.clear();
     unsigned int lineNo = 0;
@@ -679,9 +712,6 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         delete llvmtoVISADump;
     }
 
-    COMPILER_TIME_END(m_currShader->GetContext(), TIME_vISAEmitLoop);
-    COMPILER_TIME_START(m_currShader->GetContext(), TIME_vISAEmitPayloadInputs);
-
     if (!m_FGA || m_FGA->isGroupHead(&F))
     {
         // Cache the arguments list into a vector for faster access
@@ -691,10 +721,6 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         // Allocate the thread payload
         m_currShader->AllocatePayload();
     }
-
-    COMPILER_TIME_END(m_currShader->GetContext(), TIME_vISAEmitPayloadInputs);
-
-    COMPILER_TIME_END(m_currShader->GetContext(), TIME_CG_vISAEmitPass);
 
     IF_DEBUG_INFO_IF(m_currShader->diData, m_currShader->diData->markOutput(F, m_currShader);)
         IF_DEBUG_INFO_IF(m_currShader->diData, m_currShader->diData->addVISAModule(&F, m_pDebugEmitter->GetVISAModule());)
@@ -706,8 +732,8 @@ bool EmitPass::runOnFunction(llvm::Function& F)
     {
         destroyVISABuilder = true;
         // We only need one symbol table per module. If there are multiple kernels, only create a symbol
-        // table for the default one set by FGA
-        bool compileWithSymbolTable = !m_FGA || (m_FGA->getGroup(&F)->getHead() == m_FGA->getDefaultKernel());
+        // table for the one with indirectly called functions attached.
+        bool compileWithSymbolTable = !m_FGA || (m_FGA->getGroup(&F)->hasIndirectFuncs());
         m_encoder->Compile(compileWithSymbolTable);
         // if we are doing stack-call, do the following:
         // - Hard-code a large scratch-space for visa
@@ -1124,8 +1150,7 @@ void EmitPass::InitConstant(llvm::BasicBlock* BB)
 
 void EmitPass::emitLifetimeStartAtEndOfBB(BasicBlock* BB)
 {
-    if (IGC_IS_FLAG_DISABLED(EnableVATemp) &&
-        IGC_GET_FLAG_VALUE(VATemp) == 0) {
+    if (IGC_GET_FLAG_VALUE(VATemp) == 0) {
         return;
     }
 
@@ -3270,11 +3295,11 @@ void EmitPass::PredAdd(const SSource& pred, bool invert, const SSource sources[2
 
     // base condition
     SetSourceModifiers(0, sources[0]);
-    SetSourceModifiers(1, sources[1]);
     m_encoder->Copy(m_destination, src0);
     m_encoder->Push();
 
     // predicate add
+    SetSourceModifiers(1, sources[1]);
     m_encoder->SetDstModifier(modifier);
     m_encoder->SetPredicateMode(modifier.predMode);
     m_encoder->SetInversePredicate(invert);
@@ -6812,6 +6837,19 @@ void EmitPass::emitCSSGV(GenIntrinsicInst* inst)
     }
 }
 
+// Store Coarse Pixel (Actual) size in the destination variable
+void EmitPass::getCoarsePixelSize(CVariable* destination, const uint component)
+{
+    assert(component < 2);
+
+    CPixelShader* const psProgram = static_cast<CPixelShader*>(m_currShader);
+    CVariable* const coarsePixelSize = m_currShader->BitCast(psProgram->GetR1(), ISA_TYPE_UB);
+    m_encoder->SetSrcRegion(0, 0, 1, 0);
+    m_encoder->SetSrcSubReg(0, (component == 0) ? 0 : 1);
+    m_encoder->Cast(destination, coarsePixelSize);
+    m_encoder->Push();
+}
+
 void EmitPass::emitPSSGV(GenIntrinsicInst* inst)
 {
     CPixelShader* psProgram = static_cast<CPixelShader*>(m_currShader);
@@ -6841,6 +6879,22 @@ void EmitPass::emitPSSGV(GenIntrinsicInst* inst)
                     m_currShader->GetNewVariable(numLanes(m_currShader->m_SIMDSize), ISA_TYPE_F, EALIGN_GRF);
                 m_encoder->Cast(floatPixelPosition, uintPixelPosition);
                 m_encoder->Push();
+
+                // Pixel location is center in all APIs that use CPS.
+                {
+                    CVariable* pixelCenter = m_currShader->ImmToVariable(0x3f000000, ISA_TYPE_F); // 0.5f
+                    if (psProgram->GetPhase() == PSPHASE_COARSE)
+                    {
+                        CVariable* const coarsePixelSize = m_currShader->GetNewVariable(
+                            numLanes(m_currShader->m_SIMDSize), ISA_TYPE_F, EALIGN_GRF);
+                        getCoarsePixelSize(coarsePixelSize, component);
+                        m_encoder->Mul(coarsePixelSize, coarsePixelSize, pixelCenter);
+                        m_encoder->Push();
+                        pixelCenter = coarsePixelSize;
+                    }
+                    m_encoder->Add(floatPixelPosition, floatPixelPosition, pixelCenter);
+                    m_encoder->Push();
+                }
 
                 CVariable* floatPixelPositionDelta = floatPixelPosition; //reuse the same variable for the final delta
 
@@ -7028,11 +7082,7 @@ void EmitPass::emitPSSGV(GenIntrinsicInst* inst)
     case ACTUAL_COARSE_SIZE_X:
     case ACTUAL_COARSE_SIZE_Y:
     {
-        CVariable* CPSize = m_currShader->BitCast(psProgram->GetR1(), ISA_TYPE_UB);
-        m_encoder->SetSrcRegion(0, 0, 1, 0);
-        m_encoder->SetSrcSubReg(0, usage == ACTUAL_COARSE_SIZE_X ? 0 : 1);
-        m_encoder->Cast(m_destination, CPSize);
-        m_encoder->Push();
+        getCoarsePixelSize(m_destination, (usage == ACTUAL_COARSE_SIZE_X ? 0 : 1));
     }
     break;
     case REQUESTED_COARSE_SIZE_X:
@@ -7644,6 +7694,9 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_WaveAll:
         emitWaveAll(inst);
         break;
+    case GenISAIntrinsic::GenISA_WaveClustered:
+        emitWaveClustered(inst);
+        break;
     case GenISAIntrinsic::GenISA_InitDiscardMask:
         emitInitDiscardMask(inst);
         break;
@@ -7659,10 +7712,6 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_dp4a_us:
         emitDP4A(inst);
         break;
-    case GenISAIntrinsic::GenISA_Copy:
-    {
-        emitGenISACopy(inst);
-    }
     case GenISAIntrinsic::GenISA_evaluateSampler:
         // nothing to do
         break;
@@ -7673,6 +7722,9 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_fma_rtz:
     case GenISAIntrinsic::GenISA_add_rtz:
         emitFPOrtz(inst);
+        break;
+    case GenISAIntrinsic::GenISA_CatchAllDebugLine:
+        emitDebugPlaceholder(inst);
         break;
     default:
         // we assume that some of gen-intrinsic should always be pattern-matched away,
@@ -7945,13 +7997,14 @@ CVariable* EmitPass::Add(CVariable* Src0, CVariable* Src1, const CVariable* DstP
 // Insert lifetime start right before instruction I if it is a candidate.
 void EmitPass::emitLifetimeStart(CVariable* Var, BasicBlock* BB, Instruction* I, bool ForAllInstance)
 {
-    if ((IGC_IS_FLAG_DISABLED(EnableVATemp) &&
-        IGC_GET_FLAG_VALUE(VATemp) == 0) ||
-        Var == nullptr) {
+    if (IGC_GET_FLAG_VALUE(VATemp) == 0 || Var == nullptr) {
         return;
     }
 
+    // m_LifetimeAt1stDefOfBB uses dessa root of aliasee as its key
     Value* ARV = m_VRA->getAliasRootValue(I);
+    ARV = m_VRA->getRootValue(ARV);
+
     auto II = m_VRA->m_LifetimeAt1stDefOfBB.find(ARV);
     if (II != m_VRA->m_LifetimeAt1stDefOfBB.end())
     {
@@ -8944,7 +8997,8 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
         {
             // If the call is not uniform, we have to make a uniform call per lane
             // First get the execution mask for active lanes
-            CVariable* eMask = GetExecutionMask();
+            CVariable* eMaskVec = nullptr;
+            CVariable* eMask = GetExecutionMask(eMaskVec);
             // Create a label for the loop
             uint label = m_encoder->GetNewLabelID();
             m_encoder->Label(label);
@@ -8964,18 +9018,14 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
             m_encoder->Push();
 
             // Unset the bits in execution mask for lanes that were called
-            CVariable* tempMask = m_currShader->GetNewVariable(1, eMask->GetType(), EALIGN_DWORD, true);
-            m_encoder->SetNoMask();
-            m_encoder->Cast(tempMask, flag);
+            m_encoder->Xor(eMaskVec, eMaskVec, flag);
             m_encoder->Push();
-            m_encoder->Xor(eMask, eMask, tempMask);
+            m_encoder->SetNoMask();
+            m_encoder->Cast(eMask, eMaskVec);
             m_encoder->Push();
 
-            // Loop back for remaining func addresses as long as there are bits in the eMask still set
-            CVariable* needLoop = m_currShader->GetNewVariable(1, ISA_TYPE_BOOL, EALIGN_BYTE, true);
-            m_encoder->Cmp(EPREDICATE_NE, needLoop, eMask, m_currShader->ImmToVariable(0, eMask->GetType()));
-            m_encoder->Push();
-            m_encoder->Jump(needLoop, label);
+            // Loop while there are bits still left in the mask
+            m_encoder->Jump(eMaskVec, label);
             m_encoder->Push();
         }
     }
@@ -9972,7 +10022,7 @@ CVariable* EmitPass::BroadcastIfUniform(CVariable* pVar)
     return pVar;
 }
 
-CVariable* EmitPass::GetExecutionMask()
+CVariable* EmitPass::GetExecutionMask(CVariable*& vecMaskVar)
 {
     bool isSecondHalf = m_encoder->IsSecondHalf();
     bool isSubSpanDst = m_encoder->IsSubSpanDestination();
@@ -9992,6 +10042,7 @@ CVariable* EmitPass::GetExecutionMask()
     }
     m_encoder->SetSecondHalf(isSecondHalf);
     m_encoder->SetSubSpanDestination(isSubSpanDst);
+    vecMaskVar = flag;
 
     VISA_Type maskType = m_currShader->m_dispatchSize > SIMDMode::SIMD16 ? ISA_TYPE_UD : ISA_TYPE_UW;
     CVariable* eMask = m_currShader->GetNewVariable(1, maskType, EALIGN_DWORD, true);
@@ -9999,6 +10050,12 @@ CVariable* EmitPass::GetExecutionMask()
     m_encoder->Cast(eMask, flag);
     m_encoder->Push();
     return eMask;
+}
+
+CVariable* EmitPass::GetExecutionMask()
+{
+    CVariable* vecMask = nullptr;
+    return GetExecutionMask(vecMask);
 }
 
 /// UniformCopy - Copy a non-uniform source into a uniform variable by copying
@@ -10330,6 +10387,9 @@ CVariable* EmitPass::ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue
             dst->GetType() == type && dst->GetAlign() == IGC::EALIGN_GRF && !dst->IsUniform());
     }
 
+    const bool savedSecondHalf = m_encoder->IsSecondHalf();
+    m_encoder->SetSecondHalf(secondHalf);
+
     // Set the GRF to <identity> with no mask. This will set all the registers to <identity>
     CVariable* pIdentityValue = m_currShader->ImmToVariable(identityValue, type);
     m_encoder->SetNoMask();
@@ -10337,8 +10397,6 @@ CVariable* EmitPass::ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue
     m_encoder->Push();
 
     // Now copy the src with a mask so the disabled lanes still keep their <identity>
-    const bool savedSecondHalf = m_encoder->IsSecondHalf();
-    m_encoder->SetSecondHalf(secondHalf);
     if (negate)
     {
         m_encoder->SetSrcModifier(0, EMOD_NEG);
@@ -10349,13 +10407,14 @@ CVariable* EmitPass::ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue
     }
     m_encoder->Copy(dst, src);
     m_encoder->Push();
+    
     m_encoder->SetSecondHalf(savedSecondHalf);
 
     return dst;
 }
 
-// Reduce all helper: dst_lane{k} = src_lane{simd + k} OP src_lane{k}, k = 0..(simd-1)
-CVariable* EmitPass::ReduceHelper(e_opcode op, VISA_Type type, SIMDMode simd, CVariable* src)
+// Reduction all reduce helper: dst_lane{k} = src_lane{simd + k} OP src_lane{k}, k = 0..(simd-1)
+CVariable* EmitPass::ReductionReduceHelper(e_opcode op, VISA_Type type, SIMDMode simd, CVariable* src)
 {
     const bool isInt64Mul = (op == EOPCODE_MUL && CEncoder::IsIntegerType(type) &&
         CEncoder::GetCISADataTypeSize(type) == 8);
@@ -10380,7 +10439,6 @@ CVariable* EmitPass::ReduceHelper(e_opcode op, VISA_Type type, SIMDMode simd, CV
     }
     else
     {
-
         m_encoder->SetNoMask();
         m_encoder->SetSimdSize(simd);
         m_encoder->SetSrcSubReg(1, numLanes(simd));
@@ -10390,7 +10448,223 @@ CVariable* EmitPass::ReduceHelper(e_opcode op, VISA_Type type, SIMDMode simd, CV
     return temp;
 }
 
-// do reduction
+// Reduction all expand helper: dst_lane{0..(simd-1)} = src_lane{0} OP src_lane{1}
+void EmitPass::ReductionExpandHelper(e_opcode op, VISA_Type type, CVariable* src, CVariable* dst)
+{
+    const bool isInt64Mul = (op == EOPCODE_MUL && CEncoder::IsIntegerType(type) &&
+        CEncoder::GetCISADataTypeSize(type) == 8);
+
+    if (isInt64Mul)
+    {
+        CVariable* tmpMulSrc[2] = {};
+        tmpMulSrc[0] = m_currShader->GetNewAlias(src, type, 0, 1, true);
+        tmpMulSrc[1] = m_currShader->GetNewAlias(src, type, sizeof(QWORD), 1, true);
+        Mul64(dst, tmpMulSrc, m_currShader->m_SIMDSize, false /*noMask*/);
+    }
+    else
+    {
+        m_encoder->SetSrcSubReg(1, 1);
+        m_encoder->SetSrcRegion(0, 0, 1, 0);
+        m_encoder->SetSrcRegion(1, 0, 1, 0);
+        m_encoder->GenericAlu(op, dst, src, src);
+        m_encoder->Push();
+    }
+}
+
+// Reduction clustered: rearrange src
+void EmitPass::ReductionClusteredSrcHelper(CVariable* (&pSrc)[2], CVariable* src, uint16_t numLanes,
+    VISA_Type type, uint numInst, bool secondHalf)
+{
+    const bool is64bitType = type == ISA_TYPE_Q || type == ISA_TYPE_UQ || type == ISA_TYPE_DF;
+    const auto alignment = is64bitType ? IGC::EALIGN_QWORD : IGC::EALIGN_DWORD;
+
+    // Rearrange src
+    pSrc[0] = m_currShader->GetNewVariable(
+        numLanes, // simd size after reduction
+        type,
+        alignment,
+        false);
+    pSrc[1] = m_currShader->GetNewVariable(pSrc[0]);
+    m_encoder->SetSecondHalf(secondHalf);
+    for (uint i = 0; i < numInst; ++i)
+    {
+        const e_mask mask = secondHalf ? (i == 1 ? EMASK_Q4 : EMASK_Q3) :
+            (i == 1 ? EMASK_Q2 : EMASK_Q1);
+
+        for (uint j = 0; j < 2; ++j)
+        {
+            m_encoder->SetSimdSize(lanesToSIMDMode(numLanes / numInst));
+            m_encoder->SetNoMask();
+            m_encoder->SetMask(mask);
+            m_encoder->SetSrcRegion(0, 2, 1, 0);
+            m_encoder->SetSrcSubReg(0, j);
+            m_encoder->SetSrcSubVar(0, 2 * i);
+            m_encoder->SetDstSubVar(i);
+            m_encoder->Copy(pSrc[j], src);
+            m_encoder->Push();
+        }
+    }
+    m_encoder->SetSecondHalf(false);
+    assert(pSrc[0] && pSrc[1]);
+}
+
+// Reduction clustered reduce helper: dst_lane{k} = src_lane{2k} OP src_lane{2k+1}, k = 0..(simd-1)
+// For certain opcodes src must be rearranged, to move operation's arguments to the same subreg of different regs.
+// Notes:
+// * simd is SIMD mode after reduction
+// * second half setting is not preserved by this function
+// * src and dst may be the same variable
+CVariable* EmitPass::ReductionClusteredReduceHelper(e_opcode op, VISA_Type type, SIMDMode simd, bool secondHalf,
+    CVariable* src, CVariable* dst)
+{
+    const bool is64bitType = type == ISA_TYPE_Q || type == ISA_TYPE_UQ || type == ISA_TYPE_DF;
+    const bool isInt64Mul = (op == EOPCODE_MUL && CEncoder::IsIntegerType(type) &&
+        CEncoder::GetCISADataTypeSize(type) == 8);
+    // For SIMD16 (before reduction) and 64-bit type, when 2 grf boundary is crossed
+    const uint numInst = is64bitType && simd == SIMDMode::SIMD8 ? 2 : 1;
+
+    assert(simd == SIMDMode::SIMD2 || simd == SIMDMode::SIMD4 || simd == SIMDMode::SIMD8);
+
+    bool isRearrangementRequired = isInt64Mul;
+    if (isRearrangementRequired)
+    {
+        // Rearrange src
+        CVariable* pSrc[2] = {};
+        ReductionClusteredSrcHelper(pSrc, src, numLanes(simd), type, numInst, secondHalf);
+
+        // Perform reduction with op
+        m_encoder->SetSecondHalf(secondHalf);
+        if (isInt64Mul)
+        {
+            Mul64(dst, pSrc, simd, true /*noMask*/);
+        }
+        else
+        {
+            m_encoder->SetSimdSize(simd);
+            m_encoder->SetNoMask();
+            m_encoder->GenericAlu(op, dst, pSrc[0], pSrc[1]);
+            m_encoder->Push();
+        }
+        m_encoder->SetSecondHalf(false);
+    }
+    else
+    {
+        m_encoder->SetSecondHalf(secondHalf);
+        for (uint i = 0; i < numInst; ++i)
+        {
+            m_encoder->SetSimdSize(lanesToSIMDMode(numLanes(simd) / numInst));
+            m_encoder->SetNoMask();
+            const e_mask mask = secondHalf ? (i == 1 ? EMASK_Q4 : EMASK_Q3) :
+                (i == 1 ? EMASK_Q2 : EMASK_Q1);
+            m_encoder->SetMask(mask);
+            m_encoder->SetSrcRegion(0, 2, 1, 0);
+            m_encoder->SetSrcSubVar(0, 2 * i);
+            m_encoder->SetSrcSubReg(0, 0);
+            m_encoder->SetSrcRegion(1, 2, 1, 0);
+            m_encoder->SetSrcSubVar(1, 2 * i);
+            m_encoder->SetSrcSubReg(1, 1);
+            m_encoder->SetDstSubVar(i);
+            m_encoder->GenericAlu(op, dst, src, src);
+            m_encoder->Push();
+        }
+        m_encoder->SetSecondHalf(false);
+    }
+
+    return dst;
+}
+
+// Final reduction and expansion clustered expand helper: for each cluster reduce one pair of values to one value,
+// and broadcast it to the whole cluster.
+// For certain opcodes the src must be rearranged, to keep operation's arguments in the same subreg of different regs.
+// Notes:
+// * simd is shader's SIMD size (i.e. <= SIMD16)
+// * second half setting is not preserved by this function
+// * src and dst may be the same variable
+void EmitPass::ReductionClusteredExpandHelper(e_opcode op, VISA_Type type, SIMDMode simd, const uint clusterSize,
+    bool secondHalf, CVariable* src, CVariable* dst)
+{
+    const bool is64bitType = type == ISA_TYPE_Q || type == ISA_TYPE_UQ || type == ISA_TYPE_DF;
+    const bool isInt64Mul = (op == EOPCODE_MUL && CEncoder::IsIntegerType(type) &&
+        CEncoder::GetCISADataTypeSize(type) == 8);
+    // Final reduction and expansion for SIMD16 and 64-bit type, when 2 grf boundary may be crossed
+    const uint numInst = is64bitType && simd == SIMDMode::SIMD16 ? 2 : 1;
+    assert(clusterSize == 2 || clusterSize == 4 || clusterSize == 8 || (clusterSize == 16 && !is64bitType));
+
+    bool isRearrangementRequired = isInt64Mul;
+    if (isRearrangementRequired)
+    {
+        // Rearrange src
+        CVariable* pSrc[2] = {};
+        // For src the grf boundary may be crossed for smallest cluster only.
+        const uint srcNumInst = clusterSize == 2 ? numInst : 1;
+        ReductionClusteredSrcHelper(pSrc, src, numLanes(simd) / clusterSize, type, srcNumInst, secondHalf);
+
+        // Perform reduction with op
+        CVariable* tempDst = m_currShader->GetNewVariable(dst);
+        m_encoder->SetSecondHalf(secondHalf);
+        const SIMDMode tmpSimd = lanesToSIMDMode(numLanes(simd) / clusterSize);
+        if (isInt64Mul)
+        {
+            Mul64(tempDst, pSrc, tmpSimd, true /*noMask*/);
+        }
+        else
+        {
+            m_encoder->SetSimdSize(tmpSimd);
+            m_encoder->SetNoMask();
+            m_encoder->GenericAlu(op, tempDst, pSrc[0], pSrc[1]);
+            m_encoder->Push();
+        }
+        m_encoder->SetSecondHalf(false);
+
+        // Broadcast to clusters
+        m_encoder->SetSecondHalf(secondHalf);
+        for (uint i = numInst; i-- != 0;)
+        {
+            const uint step = 8 / clusterSize; // 64-bit in SIMD16: distance between src halves, in QW units
+            const uint srcSubVar = i * (step / 4);
+            const uint srcSubReg = i * (step % 4);
+            const e_mask mask = secondHalf ? (i == 1 ? EMASK_Q4 : EMASK_Q3) :
+                (i == 1 ? EMASK_Q2 : EMASK_Q1);
+
+            m_encoder->SetSimdSize(lanesToSIMDMode(numLanes(simd) / numInst));
+            m_encoder->SetMask(mask);
+            m_encoder->SetSrcRegion(0, 1, clusterSize, 0);
+            m_encoder->SetSrcSubReg(0, srcSubReg);
+            m_encoder->SetSrcSubVar(0, srcSubVar);
+            m_encoder->SetDstSubVar(2 * i);
+            m_encoder->Copy(dst, tempDst);
+            m_encoder->Push();
+        }
+        m_encoder->SetSecondHalf(false);
+    }
+    else
+    {
+        m_encoder->SetSecondHalf(secondHalf);
+        for (uint i = numInst; i-- > 0;)
+        {
+            const uint srcSubVar = i * (4 / clusterSize);
+            const uint srcSubReg = i * (clusterSize == 8 ? 2 : 0);
+
+            m_encoder->SetSimdSize(lanesToSIMDMode(numLanes(simd) / numInst));
+            m_encoder->SetNoMask();
+            const e_mask mask = secondHalf ? (i == 1 ? EMASK_Q4 : EMASK_Q3) :
+                (i == 1 ? EMASK_Q2 : EMASK_Q1);
+            m_encoder->SetMask(mask);
+            m_encoder->SetSrcRegion(0, 2, clusterSize, 0);
+            m_encoder->SetSrcSubReg(0, srcSubReg);
+            m_encoder->SetSrcSubVar(0, srcSubVar);
+            m_encoder->SetSrcRegion(1, 2, clusterSize, 0);
+            m_encoder->SetSrcSubReg(1, srcSubReg + 1);
+            m_encoder->SetSrcSubVar(1, srcSubVar);
+            m_encoder->SetDstSubVar(2 * i);
+            m_encoder->GenericAlu(op, dst, src, src);
+            m_encoder->Push();
+        }
+        m_encoder->SetSecondHalf(false);
+    }
+}
+
+// do reduction and accumulate all the activate channels, return a uniform
 void EmitPass::emitReductionAll(
     e_opcode op, uint64_t identityValue, VISA_Type type, bool negate, CVariable* src, CVariable* dst)
 {
@@ -10402,6 +10676,7 @@ void EmitPass::emitReductionAll(
     if (m_currShader->m_dispatchSize == SIMDMode::SIMD32)
     {
         CVariable* srcH2 = ScanReducePrepareSrc(type, identityValue, negate, true /*secondHalf*/, src, nullptr /*dst*/);
+
         temp = m_currShader->GetNewVariable(
             numLanes(SIMDMode::SIMD16),
             type,
@@ -10422,27 +10697,143 @@ void EmitPass::emitReductionAll(
     }
     if (m_currShader->m_dispatchSize >= SIMDMode::SIMD16)
     {
-        temp = ReduceHelper(op, type, SIMDMode::SIMD8, temp);
+        temp = ReductionReduceHelper(op, type, SIMDMode::SIMD8, temp);
     }
-    temp = ReduceHelper(op, type, SIMDMode::SIMD4, temp);
-    temp = ReduceHelper(op, type, SIMDMode::SIMD2, temp);
+    temp = ReductionReduceHelper(op, type, SIMDMode::SIMD4, temp);
+    temp = ReductionReduceHelper(op, type, SIMDMode::SIMD2, temp);
+    ReductionExpandHelper(op, type, temp, dst);
+}
 
-    if (isInt64Mul)
+// for all the active channels within each cluster do reduction and accumulate, return a non-uniform
+void EmitPass::emitReductionClustered(const e_opcode op, const uint64_t identityValue, const VISA_Type type,
+    const bool negate, const unsigned int clusterSize, CVariable* const src, CVariable* const dst)
+{
+    const bool is64bitType = type == ISA_TYPE_Q || type == ISA_TYPE_UQ || type == ISA_TYPE_DF;
+    const bool isInt64Mul = (op == EOPCODE_MUL && CEncoder::IsIntegerType(type) &&
+        CEncoder::GetCISADataTypeSize(type) == 8);
+
+    assert(iSTD::BitCount(clusterSize) == 1 && "Cluster size must be a power of two.");
+    assert(!is64bitType || CEncoder::GetCISADataTypeSize(type) == 8 && "Unsupported 64-bit type.");
+    assert(!is64bitType || !m_currShader->m_Platform->hasNo64BitInst() && "64-bit emulation is not supported.");
+
+    const auto dispatchSize = static_cast<decltype(clusterSize)>(
+        numLanes(m_currShader->m_dispatchSize));
+    const bool isSimd32 = m_currShader->m_dispatchSize == SIMDMode::SIMD32;
+    const bool useReduceAll = clusterSize >= dispatchSize;
+
+    if(clusterSize == 1)
     {
-        CVariable* tmpMulSrc[2] = {};
-        tmpMulSrc[0] = m_currShader->GetNewAlias(temp, type, 0, 1, true);
-        tmpMulSrc[1] = m_currShader->GetNewAlias(temp, type, sizeof(QWORD), 1, true);
-        Mul64(dst, tmpMulSrc, m_currShader->m_SIMDSize, false /*noMask*/);
+        assert(0 && "Simple copy. For performance reasons handle it somehow at earlier stage.");
+        for (uint half = 0; half < uint(isSimd32 ? 2 : 1); ++half)
+        {
+            const bool secondHalf = half > 0;
+            m_encoder->SetSecondHalf(secondHalf);
+            if (negate)
+            {
+                m_encoder->SetSrcModifier(0, EMOD_NEG);
+            }
+            m_encoder->Copy(dst, src);
+            m_encoder->Push();
+            m_encoder->SetSecondHalf(false);
+        }
+    }
+    else if (useReduceAll)
+    {
+        // TODO: consider if it is possible to detect and handle this case in frontends
+        // and emit GenISA_WaveAll there, to enable optimizations specific to the ReduceAll intrinsic.
+        emitReductionAll(op, identityValue, type, negate, src, dst);
     }
     else
     {
-        m_encoder->SetSrcSubReg(1, 1);
-        m_encoder->SetSrcRegion(0, 0, 1, 0);
-        m_encoder->SetSrcRegion(1, 0, 1, 0);
-        m_encoder->GenericAlu(op, dst, temp, temp);
-        m_encoder->Push();
+        for (uint half = 0; half < uint(isSimd32 ? 2 : 1); ++half)
+        {
+            const bool secondHalf = half > 0;
+
+            if (m_currShader->m_dispatchSize == SIMDMode::SIMD32 && clusterSize == 16 && is64bitType)
+            {
+                CVariable* temp = ScanReducePrepareSrc(type, identityValue, negate, secondHalf, src, nullptr);
+                // Two halves, for each half src and dst cross 2 grf boundary - "ReduceAll" approach.
+                m_encoder->SetSecondHalf(secondHalf);
+                temp = ReductionReduceHelper(op, type, SIMDMode::SIMD8, temp);
+                temp = ReductionReduceHelper(op, type, SIMDMode::SIMD4, temp);
+                temp = ReductionReduceHelper(op, type, SIMDMode::SIMD2, temp);
+                ReductionExpandHelper(op, type, temp, dst);
+                m_encoder->SetSecondHalf(false);
+            }
+            else
+            {
+                // For certain types it is more beneficial (e.g. due to HW restrictions) to perform clustered
+                // operations on values converted to another type.
+                VISA_Type tmpType = type;
+                CVariable* tmpSrc = src;
+                CVariable* tmpDst = dst;
+                uint64_t tmpIdentityValue = identityValue;
+                if (type == VISA_Type::ISA_TYPE_B || type == VISA_Type::ISA_TYPE_UB)
+                {
+                    const bool isSigned = type == VISA_Type::ISA_TYPE_B;
+                    tmpType = isSigned ? VISA_Type::ISA_TYPE_W : VISA_Type::ISA_TYPE_UW;
+                    tmpSrc = m_currShader->GetNewVariable(
+                        src->GetNumberElement(),
+                        tmpType,
+                        IGC::EALIGN_DWORD,
+                        false);
+                    m_encoder->SetSecondHalf(secondHalf);
+                    m_encoder->Cast(tmpSrc, src);
+                    m_encoder->Push();
+                    m_encoder->SetSecondHalf(false);
+                    tmpDst = m_currShader->GetNewVariable(
+                        dst->GetNumberElement(),
+                        tmpType,
+                        IGC::EALIGN_DWORD,
+                        false);
+                    switch (op)
+                    {
+                    case EOPCODE_MAX:
+                        tmpIdentityValue = isSigned ? std::numeric_limits<int16_t>::min() :
+                            std::numeric_limits<uint16_t>::min();
+                        break;
+                    case EOPCODE_MIN:
+                        tmpIdentityValue = isSigned ? std::numeric_limits<int16_t>::max() :
+                            std::numeric_limits<uint16_t>::max();
+                        break;
+                    case EOPCODE_AND:
+                        tmpIdentityValue = 0xFFFF;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                CVariable* temp = ScanReducePrepareSrc(tmpType, tmpIdentityValue, negate, secondHalf, tmpSrc, nullptr);
+
+                SIMDMode simd = secondHalf ? SIMDMode::SIMD16 : m_currShader->m_SIMDSize;
+
+                // Reduce with op: SIMDN -> SIMD2; that is, N/2 value pairs -> 1 value pair
+                for (uint32_t reducedClusterSize = clusterSize;
+                    reducedClusterSize > 2; reducedClusterSize /= 2)
+                {
+                    simd = (simd == SIMDMode::SIMD16) ? SIMDMode::SIMD8 :
+                        (simd == SIMDMode::SIMD8) ? SIMDMode::SIMD4 :
+                        (simd == SIMDMode::SIMD4) ? SIMDMode::SIMD2 : SIMDMode::SIMD1;
+
+                    ReductionClusteredReduceHelper(op, tmpType, simd, secondHalf, temp, temp);
+                }
+
+                ReductionClusteredExpandHelper(op, tmpType, m_currShader->m_SIMDSize, clusterSize, secondHalf, temp, tmpDst);
+
+                if (type == VISA_Type::ISA_TYPE_B || type == VISA_Type::ISA_TYPE_UB)
+                {
+                    m_encoder->SetSecondHalf(secondHalf);
+                    m_encoder->Cast(dst, tmpDst);
+                    m_encoder->Push();
+                    m_encoder->SetSecondHalf(false);
+                }
+            }
+        }
     }
 }
+
+// do prefix op across all activate channels
 void EmitPass::emitPreOrPostFixOp(
     e_opcode op, uint64_t identityValue, VISA_Type type, bool negateSrc,
     CVariable* pSrc, CVariable* pSrcsArr[2], CVariable* Flag,
@@ -10469,6 +10860,7 @@ void EmitPass::emitPreOrPostFixOp(
     {
         CVariable* pSrcCopy = ScanReducePrepareSrc(type, identityValue, negateSrc, i == 1 /*secondHalf*/,
             pSrc, nullptr /*dst*/, Flag);
+
         m_encoder->SetSecondHalf(i == 1);
 
         // For case where we need the prefix shift the source by 1 lane
@@ -10827,7 +11219,6 @@ void EmitPass::emitPreOrPostFixOpScalar(
     }
     // reset second half state
     m_encoder->SetSecondHalf(false);
-
 }
 
 /*
@@ -11107,7 +11498,8 @@ void EmitPass::emitAtomicRaw(llvm::GenIntrinsicInst* pInsn)
 
 
     // atomic_inc and atomic_dec don't have both src0 and src1.
-    if (atomic_op != EATOMIC_INC && atomic_op != EATOMIC_DEC)
+    if (atomic_op != EATOMIC_INC && atomic_op != EATOMIC_DEC &&
+        atomic_op != EATOMIC_INC64 && atomic_op != EATOMIC_DEC64)
     {
         pSrc0 = GetSymbol(pllSrc0);
     }
@@ -15166,13 +15558,26 @@ void EmitPass::emitScan(
 void EmitPass::emitWaveAll(llvm::GenIntrinsicInst* inst)
 {
     CVariable* src = GetSymbol(inst->getOperand(0));
-    WaveOps op = static_cast<WaveOps>(cast<llvm::ConstantInt>(inst->getOperand(1))->getZExtValue());
+    const WaveOps op = static_cast<WaveOps>(cast<llvm::ConstantInt>(inst->getOperand(1))->getZExtValue());
     VISA_Type type;
     e_opcode opCode;
     uint64_t identity = 0;
     GetReductionOp(op, inst->getOperand(0)->getType(), identity, opCode, type);
     CVariable* dst = m_destination;
     emitReductionAll(opCode, identity, type, false, src, dst);
+}
+
+void EmitPass::emitWaveClustered(llvm::GenIntrinsicInst* inst)
+{
+    CVariable* src = GetSymbol(inst->getOperand(0));
+    const WaveOps op = static_cast<WaveOps>(cast<llvm::ConstantInt>(inst->getOperand(1))->getZExtValue());
+    const unsigned int clusterSize = int_cast<uint32_t>(cast<llvm::ConstantInt>(inst->getOperand(2))->getZExtValue());
+    VISA_Type type;
+    e_opcode opCode;
+    uint64_t identity = 0;
+    GetReductionOp(op, inst->getOperand(0)->getType(), identity, opCode, type);
+    CVariable *dst = m_destination;
+    emitReductionClustered(opCode, identity, type, false, clusterSize, src, dst);
 }
 
 void EmitPass::emitDP4A(GenIntrinsicInst* GII) {

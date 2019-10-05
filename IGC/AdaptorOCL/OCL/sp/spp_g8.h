@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
+#include <memory>
 #include "../util/BinaryStream.h"
 #include "usc.h"
 #include "sp_g8.h"
@@ -34,6 +35,14 @@ namespace IGC
 {
     class OpenCLProgramContext;
     class CShaderProgram;
+    class COCLBTILayout;
+    struct SOpenCLProgramInfo;
+    struct SProgramOutput;
+};
+
+namespace cmc
+{
+    class CMKernel;
 };
 
 namespace iOpenCL
@@ -45,36 +54,62 @@ struct KernelData
     Util::BinaryStream* kernelDebugData = nullptr;
 };
 
-class CGen8OpenCLProgram : DisallowCopy
+// This is the base class to create an OpenCL ELF binary with patch tokens.
+// It owns BinaryStreams allocated.
+class CGen8OpenCLProgramBase : DisallowCopy {
+public:
+    explicit CGen8OpenCLProgramBase(PLATFORM platform);
+    virtual ~CGen8OpenCLProgramBase();
+
+    RETVAL GetProgramBinary(Util::BinaryStream& programBinary,
+        unsigned pointerSizeInBytes);
+
+    RETVAL GetProgramDebugData(Util::BinaryStream& programDebugData);
+
+    void CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& programInfo);
+
+    // Used to store per-kernel binary streams and kernelInfo
+    std::vector<KernelData> m_KernelBinaries;
+
+    USC::SSystemThreadKernelOutput* m_pSystemThreadKernelOutput = nullptr;
+
+    PLATFORM getPlatform() const { return m_Platform; }
+
+protected:
+    PLATFORM m_Platform;
+    CGen8OpenCLStateProcessor m_StateProcessor;
+    Util::BinaryStream* m_ProgramScopePatchStream = nullptr;
+};
+
+class CGen8OpenCLProgram : public CGen8OpenCLProgramBase
 {
 public:
     CGen8OpenCLProgram(PLATFORM platform, IGC::OpenCLProgramContext &context);
 
     ~CGen8OpenCLProgram();
 
-    RETVAL GetProgramBinary(
-        Util::BinaryStream& programBinary,
-        unsigned int pointerSizeInBytes );
-
-    RETVAL GetProgramDebugData(Util::BinaryStream& programDebugData);
-
     void CreateKernelBinaries();
-
-    void CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& programInfo);
 
     // Used to track the kernel info from CodeGen
     std::vector<IGC::CShaderProgram*> m_ShaderProgramList;
-    USC::SSystemThreadKernelOutput* m_pSystemThreadKernelOutput = nullptr;
-
-    // Used to store per-kernel binary streams and kernelInfo
-    std::vector<KernelData> m_KernelBinaries;
 
 private:
-    CGen8OpenCLStateProcessor m_StateProcessor;
-    Util::BinaryStream* m_ProgramScopePatchStream;
-    PLATFORM  m_Platform;
-    IGC::OpenCLProgramContext* m_pContext;
+    IGC::OpenCLProgramContext* m_pContext = nullptr;
 };
 
+class CGen8CMProgram : public CGen8OpenCLProgramBase {
+public:
+    explicit CGen8CMProgram(PLATFORM platform);
+    ~CGen8CMProgram();
 
+    // Produce the final ELF binary with the given CM kernels
+    // in OpenCL format.
+    void CreateKernelBinaries();
+
+    // CM kernel list.
+    std::vector<cmc::CMKernel*> m_kernels;
+
+    // Data structure to create patch token based binaries.
+    std::unique_ptr<IGC::SOpenCLProgramInfo> m_programInfo;
+};
 }

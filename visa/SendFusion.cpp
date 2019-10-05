@@ -570,12 +570,12 @@ void SendFusion::simplifyMsg(INST_LIST_ITER SendIter)
 
     // Need to re-create descriptor for this send
     G4_SendMsgDescriptor* newDesc = Builder->createSendMsgDesc(
+        desc->getFuncId(),
         descImm,
         desc->getExtendedDesc(),
-        desc->isDataPortRead(),
-        desc->isDataPortWrite(),
-        desc->getBti(),
-        desc->getSti()); // should be nullptr
+        desc->extMessageLength(),
+        desc->getAccess(),
+        desc->getBti());
     Send->setMsgDesc(newDesc);
 
     // If addI or movI is dead, remove them.
@@ -1474,8 +1474,7 @@ void SendFusion::doFusion(
             false,
             msgLen,
             desc->getExtFuncCtrl(),
-            desc->isDataPortRead(),
-            desc->isDataPortWrite(),
+            desc->getAccess(),
             bti);
 
         G4_SrcRegRegion* s0 = I0->getOperand(Opnd_src0)->asSrcRegRegion();
@@ -1525,8 +1524,7 @@ void SendFusion::doFusion(
         false,
         newExtMsgLen,
         desc->getExtFuncCtrl(),
-        desc->isDataPortRead(),
-        desc->isDataPortWrite(),
+        desc->getAccess(),
         bti);
 
     // First, create fused send.
