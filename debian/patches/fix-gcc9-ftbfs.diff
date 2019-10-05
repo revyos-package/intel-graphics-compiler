@@ -1,0 +1,23 @@
+commit 028414b376d12d7d6fbb4939bca2a31a02b6a18f
+Author: Wesierski, Lukasz <lukasz.wesierski@intel.com>
+Date:   Wed Oct 2 05:32:05 2019 -0700
+
+    Fix for compiling IGC using gcc-9 and g++-9 in version 9.1.0
+    
+    Fixes #112
+    
+    Change-Id: I98b665685ee35507afc59b8b45d661e50d7fceda
+
+diff --git a/3d/common/iStdLib/File.h b/3d/common/iStdLib/File.h
+index fa17a395..53efb152 100644
+--- a/3d/common/iStdLib/File.h
++++ b/3d/common/iStdLib/File.h
+@@ -630,7 +630,7 @@ inline int CreateAppOutputDir(
+     {
+         unsigned int length = (unsigned int)strlen(path);
+         length = (bufSize-1 < length) ? bufSize-1 : length;
+-        strncpy(pathBuf, path, length);
++        memcpy(pathBuf, path, length);
+         pathBuf[length] = 0;
+     } else {
+         pathBuf[0] = '\0';

@@ -6,10 +6,10 @@ Uploaders:
  Timo Aaltonen <tjaalton@debian.org>
 Build-Depends: debhelper (>= 11),
  bison,
- clang-8,
+ clang-9,
  cmake,
  flex,
- llvm-8-dev,
+ llvm-9-dev,
  libopencl-clang-dev,
  python,
  spirv-tools,
