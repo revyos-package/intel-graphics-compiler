@@ -20,6 +20,7 @@ override_dh_missing:
 override_dh_clean:
 	dh_clean
 	rm -f IGC/GenISAIntrinsics/Intrinsic_definitions.pyc
+	rm -rf IGC/GenISAIntrinsics/__pycache__/
 
 gentarball:
 	tar --transform 's,^,$(DEB_SOURCE)-$(DEB_VERSION_UPSTREAM)/,' \

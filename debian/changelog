@@ -4,6 +4,7 @@ intel-graphics-compiler (1.0.2652-1) UNRELEASED; urgency=medium
   * Build with llvm9.
   * fix-opencl-clang-soname.diff: Dropped, upstream.
   * fix-gcc9-ftbfs.diff: Fix build with gcc9.
+  * rules: Update clean target.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 24 Sep 2019 12:19:25 +0300
 
