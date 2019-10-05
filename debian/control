@@ -10,7 +10,7 @@ Build-Depends: debhelper (>= 11),
  cmake,
  flex,
  llvm-9-dev,
- libopencl-clang-dev,
+ libopencl-clang-dev (>= 9.0.0),
  python,
  spirv-tools,
 Standards-Version: 4.3.0
