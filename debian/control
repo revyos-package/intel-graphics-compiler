@@ -11,7 +11,7 @@ Build-Depends: debhelper (>= 11),
  flex,
  llvm-9-dev,
  libopencl-clang-dev (>= 9.0.0),
- python,
+ python3,
  spirv-tools,
 Standards-Version: 4.3.0
 Homepage: https://github.com/intel/intel-graphics-compiler
