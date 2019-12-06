@@ -1,4 +1,4 @@
-intel-graphics-compiler (1.0.2652-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.2990-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * Build with llvm9.
