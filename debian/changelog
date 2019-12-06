@@ -3,7 +3,6 @@ intel-graphics-compiler (1.0.2990-1) UNRELEASED; urgency=medium
   * New upstream release.
   * Build with llvm9.
   * fix-opencl-clang-soname.diff: Dropped, upstream.
-  * fix-gcc9-ftbfs.diff: Fix build with gcc9.
   * rules: Update clean target.
   * control: Bump build-dep on libopencl-clang-dev.
   * control: Migrate to python3.
