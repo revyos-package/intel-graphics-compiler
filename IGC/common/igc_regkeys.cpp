@@ -32,6 +32,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 #include "common/SysUtils.hpp"
 #include "3d/common/iStdLib/File.h"
+#include "secure_mem.h"
+#include "secure_string.h"
 
 #include <string>
 #include <cassert>
@@ -76,7 +78,7 @@ static bool ReadIGCEnv(
             }
 
             // Just return the string
-            strncpy( (char*)pValue, envVal, size );
+            strncpy_s( (char*)pValue, size, envVal, size );
 
             return true;
         }
@@ -104,19 +106,19 @@ static bool ReadIGCRegistry(
     HKEY uscKey;
 
     success = RegOpenKeyExA(
-        HKEY_LOCAL_MACHINE, 
+        HKEY_LOCAL_MACHINE,
         IGC_REGISTRY_KEY,
-        0, 
-        KEY_READ, 
+        0,
+        KEY_READ,
         &uscKey );
 
     if( ERROR_SUCCESS == success )
     {
-        DWORD dwSize = size;   
+        DWORD dwSize = size;
         success = RegQueryValueExA(
-            uscKey, 
+            uscKey,
             pName,
-            NULL, 
+            NULL,
             NULL,
             (LPBYTE)pValue,
             &dwSize );
@@ -166,14 +168,14 @@ static const char* ConvertType(const char* flagType)
         ConvertType(#dataType),                                                                               \
         "HKLM\\" IGC_REGISTRY_KEY,                                                              \
         "",                                                                                     \
-        descriptionText);     
+        descriptionText);
 #define DECLARE_IGC_GROUP( groupName ) \
     if(!firstGroup)                    \
     {                                  \
         fprintf(fp, "  </Group>\n");   \
     }                                  \
     firstGroup = false;                \
-    fprintf(fp, "  <Group name=\"%s\">\n", groupName); 
+    fprintf(fp, "  <Group name=\"%s\">\n", groupName);
 void DumpIGCRegistryKeyDefinitions()
 {
 #ifdef _WIN32
@@ -194,7 +196,7 @@ void DumpIGCRegistryKeyDefinitions()
     // Generate the XML
     fprintf(fp, "<RegistryKeys>\n");
 #include "igc_regkeys.def"
-    fprintf(fp, "  </Group>\n");   
+    fprintf(fp, "  </Group>\n");
     fprintf(fp, "</RegistryKeys>\n");
 
     fclose(fp);
@@ -232,7 +234,7 @@ static void ParseCStringVector(std::vector<char *> &OutputVector,
 
         // Everything from 0 to Pos is the next word to copy.
         char *NewStr = (char*)malloc(Pos + 1);
-        memcpy(NewStr, WorkStr.data(), Pos);
+        memcpy_s(NewStr, Pos + 1, WorkStr.data(), Pos);
         NewStr[Pos] = 0;
         OutputVector.push_back(NewStr);
 
@@ -295,7 +297,7 @@ static void setRegkeyFromOption(
         if(!vstring.empty())
         {
             char* s = (char*)pRegkeyVar;
-            strcpy(s, vstring.c_str());
+            strcpy_s(s, vstring.size(), vstring.c_str());
             isKeySet = true;
         }
     }
@@ -342,7 +344,7 @@ static void ParseHashRange(std::string line, std::vector<HashRange>& ranges)
         range.end = std::stoull(end, nullptr, 16);
         ranges.push_back(range);
     }
-    
+
 }
 
 static void declareIGCKey(std::string& line, const char* dataType, const char* regkeyName, std::vector<HashRange>& hashes, SRegKeyVariableMetaData* regKey)
@@ -352,7 +354,7 @@ static void declareIGCKey(std::string& line, const char* dataType, const char* r
     setRegkeyFromOption(line, dataType, regkeyName, &value, isSet);
     if (isSet)
     {
-        memcpy(regKey->m_string, value, sizeof(value));
+        memcpy_s(regKey->m_string, sizeof(value), value, sizeof(value));
         regKey->hashes = hashes;
     }
 }
@@ -408,7 +410,7 @@ static void LoadFromRegKeyOrEnvVar()
 
         if (isSet)
         {
-            memcpy(pRegKeyVariable[i].m_string, value, sizeof(value));
+            memcpy_s(pRegKeyVariable[i].m_string, sizeof(value), value, sizeof(value));
         }
     }
 }
@@ -475,6 +477,7 @@ void LoadRegistryKeys( void )
             IGC_SET_FLAG_VALUE(DisableFlagOpt, true);
             IGC_SET_FLAG_VALUE(DisableScalarAtomics, true);
         }
+
 
         if(IGC_IS_FLAG_ENABLED(ShaderDumpEnableAll))
         {

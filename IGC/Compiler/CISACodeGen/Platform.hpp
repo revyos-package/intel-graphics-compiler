@@ -291,14 +291,17 @@ namespace IGC
     //all the platforms which do not support 64 bit operations (int64 and double)
     bool hasNo64BitInst() const {
         return m_platformInfo.eProductFamily == IGFX_ICELAKE_LP ||
-               m_platformInfo.eProductFamily == IGFX_LAKEFIELD ||
-               m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE;
+            m_platformInfo.eProductFamily == IGFX_LAKEFIELD ||
+            m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE ||
+            m_platformInfo.eProductFamily == IGFX_JASPERLAKE ||
+            m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP;
     }
 
     //all the platforms which have correctly rounded macros (INVM, RSQRTM, MADM)
     bool hasCorrectlyRoundedMacros() const {
         return m_platformInfo.eProductFamily != IGFX_ICELAKE_LP &&
-            m_platformInfo.eProductFamily != IGFX_LAKEFIELD;
+            m_platformInfo.eProductFamily != IGFX_LAKEFIELD &&
+            m_platformInfo.eProductFamily != IGFX_TIGERLAKE_LP;
     }
 
     //all the platforms which do not support 64 bit operations and
@@ -311,7 +314,9 @@ namespace IGC
             m_platformInfo.eProductFamily == IGFX_BROXTON ||
             m_platformInfo.eProductFamily == IGFX_ICELAKE_LP ||
             m_platformInfo.eProductFamily == IGFX_LAKEFIELD ||
-            m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE);
+            m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE ||
+            m_platformInfo.eProductFamily == IGFX_JASPERLAKE ||
+            m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP);
     }
 
     //all the platforms which do not support 64 bit float operations
@@ -319,7 +324,9 @@ namespace IGC
         return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN7_CORE &&
             m_platformInfo.eProductFamily != IGFX_ICELAKE_LP &&
             m_platformInfo.eProductFamily != IGFX_LAKEFIELD &&
-            m_platformInfo.eProductFamily != IGFX_ELKHARTLAKE);
+            m_platformInfo.eProductFamily != IGFX_ELKHARTLAKE &&
+            m_platformInfo.eProductFamily != IGFX_JASPERLAKE &&
+            m_platformInfo.eProductFamily != IGFX_TIGERLAKE_LP);
     }
     bool has8DWA64ScatteredMessage() const { return true; }
     bool useOnlyEightPatchDispatchHS() const { return false; }
@@ -366,6 +373,10 @@ namespace IGC
         return true;
     }
 
+    bool NeedsHDCFenceBeforeEOTInPixelShader() const
+    {
+        return false;
+    }
     // ***** Below go accessor methods for testing WA data from WA_TABLE *****
 
     bool WaDoNotPushConstantsForAllPulledGSTopologies() const
@@ -447,6 +458,11 @@ namespace IGC
         return m_WaTable.Wa_1805992985 != 0;
     }
 
+    bool WaOverwriteFFID() const
+    {
+        return m_WaTable.Wa_1409460247 != 0;
+    }
+
     bool alignBindlessSampler() const
     {
         return IGC_IS_FLAG_ENABLED(Use16ByteBindlessSampler) &&
@@ -461,6 +477,11 @@ namespace IGC
             (m_SkuTable.FtrWddm2Svm != 0 || m_platformInfo.eRenderCoreFamily == IGFX_GEN10_CORE ||
                 m_platformInfo.eRenderCoreFamily == IGFX_GEN11_CORE);
 
+    }
+
+    bool WaInsertHDCFenceBeforeEOTWhenSparseAliasedResources() const
+    {
+        return IGFX_GEN11_CORE >= m_platformInfo.eRenderCoreFamily;
     }
 
         const SCompilerHwCaps& GetCaps() { return m_caps; }

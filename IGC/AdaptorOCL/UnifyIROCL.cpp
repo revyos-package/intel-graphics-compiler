@@ -212,13 +212,13 @@ static void CommonOCLBasedPasses(
     }
 
     MetaDataUtils *pMdUtils = pContext->getMetaDataUtils();
-    
+
     //extracting OCL version major before SPIRMetadataTranslation pass deletes its metadata node
     const SPIRMD::SpirMetaDataUtils spirMDUtils(&(*pContext->getModule()));
     int OCLMajor = getOCLMajorVersion(spirMDUtils);
 
     CompOptions &CompilerOpts = pContext->getModuleMetaData()->compOpt;
-    
+
     // check OpenCL build options
     bool shouldForceCR = pContext->m_Options.CorrectlyRoundedSqrt;
 
@@ -249,9 +249,6 @@ static void CommonOCLBasedPasses(
     if (CompilerOpts.PreferBindlessImages) {
         pContext->getModuleMetaData()->UseBindlessImage = true;
     }
-
-    CompilerOpts.EnableGlobalRelocation =
-        pContext->m_InternalOptions.EnableGlobalRelocation;
 
     // right now we don't support any standard function in the code gen
     // maybe we want to support some at some point to take advantage of LLVM optimizations
@@ -345,9 +342,9 @@ static void CommonOCLBasedPasses(
     // OCLTODO : do another DCE that will get rid of unused WI func calls before this?
     // We can save passing of unused implicit args from the runtime
 
-    // Adding Mem2Reg pass in order to help ImageFuncsAnalysis to identify the image arguments 
+    // Adding Mem2Reg pass in order to help ImageFuncsAnalysis to identify the image arguments
     // that the image functions operate on
-    // Clang output is: alloca --> store image func arg into allocated address --> 
+    // Clang output is: alloca --> store image func arg into allocated address -->
     //                  load image arg from stored address --> call func on loaded image
     // After Mem2Reg: call func on image func arg
 
@@ -371,6 +368,10 @@ static void CommonOCLBasedPasses(
     mpm.add(new BreakConstantExpr());
 
     mpm.add(CreateFoldKnownWorkGroupSizes());
+
+    // 64-bit atomics have to be resolved before AddImplicitArgs pass as it uses
+    // local ids for spin lock initialization
+    mpm.add(new ResolveOCLAtomics());
 
     // Run the AlignmentAnalysis pass before the passes which add implicit arguments, to ensure we do not lose load/store alignment information.
     // For example, ProgramScopeConstantResolution will relocate the buffer's base to an i8* typed pointer.

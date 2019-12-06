@@ -257,10 +257,6 @@ void CISA_IR_Builder::InitVisaWaTable(TARGET_PLATFORM platform, Stepping step)
             break;
         case GENX_TGLLP:
             VISA_WA_ENABLE(m_pWaTable, Wa_1406950495);
-            if (step == Step_A)
-            {
-                VISA_WA_ENABLE(m_pWaTable, Wa_1606931601);
-            }
             break;
         default:
             break;
@@ -373,6 +369,22 @@ VISAKernel* CISA_IR_Builder::GetVISAKernel()
     return static_cast<VISAKernel*>(m_kernel);
 }
 
+int CISA_IR_Builder::ClearAsmTextStreams()
+{
+    if (m_options.getOption(vISA_IsaAssembly))
+    {
+        m_ssIsaAsmHeader.str(std::string());
+        m_ssIsaAsmHeader.clear();
+        m_ssIsaAsm.str(std::string());
+        m_ssIsaAsm.clear();
+
+        return CM_SUCCESS;
+    }
+
+    assert(0 && "Should clear streams only in asm text writer mode!");
+    return CM_FAILURE;
+}
+
 int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
 {
 
@@ -394,6 +406,11 @@ int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
     m_kernel->InitializeKernel(kernelName);
     m_kernel->SetGTPinInit(getGtpinInit());
     this->m_kernel_count++;
+
+    if (m_options.getOption(vISA_IsaAssembly))
+    {
+        ClearAsmTextStreams();
+    }
 
     return CM_SUCCESS;
 }
@@ -420,19 +437,22 @@ int CISA_IR_Builder::AddFunction(VISAFunction *& function, const char* functionN
 // default size of the physical reg pool mem manager in bytes
 #define PHY_REG_MEM_SIZE   (16*1024)
 
-typedef struct fcallState
+struct FCallState
 {
     G4_INST* fcallInst;
     G4_Operand* opnd0;
     G4_Operand* opnd1;
     G4_BB* retBlock;
     unsigned int execSize;
-} fcallState;
+};
 
-typedef std::vector<std::pair<G4_Kernel*, fcallState>> savedFCallStates;
-typedef savedFCallStates::iterator savedFCallStatesIter;
+struct SavedFCallStates
+{
+    std::vector<std::pair<G4_Kernel*, FCallState>> states;
+    std::vector<G4_BB*> retbbs;
+};
 
-void saveFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
+void saveFCallState(G4_Kernel* kernel, SavedFCallStates& savedFCallState)
 {
     // Iterate over all BBs in kernel.
     // For each fcall seen, store its opnd0, opnd1, retBlock.
@@ -440,6 +460,7 @@ void saveFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
     // the IR can be reused for another kernel rather than
     // recompiling.
     // kernel points to a stackcall function.
+    std::set<G4_BB*> calledFrets;
     for (auto curBB : kernel->fg)
     {
         if( curBB->size() > 0 && curBB->isEndWithFCall() )
@@ -447,7 +468,7 @@ void saveFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
             // Save state for this fcall
             G4_INST* fcallInst = curBB->back();
 
-            fcallState currFCallState;
+            FCallState currFCallState;
 
             currFCallState.fcallInst = fcallInst;
             currFCallState.opnd0 = fcallInst->getSrc(0);
@@ -455,12 +476,17 @@ void saveFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
             currFCallState.retBlock = curBB->Succs.front();
             currFCallState.execSize = fcallInst->getExecSize();
 
-            savedFCallState.push_back( std::make_pair( kernel, currFCallState ) );
+            savedFCallState.states.push_back( std::make_pair( kernel, currFCallState ) );
+            calledFrets.insert(currFCallState.retBlock);
+        }
+        if (curBB->size() > 0 && curBB->isEndWithFRet() && !calledFrets.count(curBB))
+        {
+            savedFCallState.retbbs.push_back(curBB);
         }
     }
 }
 
-void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
+void restoreFCallState(G4_Kernel* kernel, SavedFCallStates savedFCallState)
 {
     // Iterate over all BBs in kernel and fix all fcalls converted
     // to calls by reconverting them to fcall. This is required
@@ -469,7 +495,7 @@ void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
     // start, end iterators denote boundaries in vector that correspond
     // to current kernel. This assumes that entries for different
     // functions are not interspersed.
-    savedFCallStatesIter start = savedFCallState.begin(), end = savedFCallState.end();
+    auto start = savedFCallState.states.begin(), end = savedFCallState.states.end();
 
     for( BB_LIST_ITER bb_it = kernel->fg.begin();
         bb_it != kernel->fg.end();
@@ -481,7 +507,7 @@ void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
             curBB->back()->isCall() )
         {
             // Check whether this call is a convert from fcall
-            for( savedFCallStatesIter state_it = start;
+            for( auto state_it = start;
                 state_it != end;
                 state_it++ )
             {
@@ -524,6 +550,15 @@ void restoreFCallState(G4_Kernel* kernel, savedFCallStates& savedFCallState)
         }
     }
 
+    for (G4_BB* retBB : savedFCallState.retbbs)
+    {
+        G4_INST* retToReplace = retBB->back();
+
+        retToReplace->setOpcode(G4_pseudo_fret);
+        retToReplace->setDest(NULL);
+
+    }
+
     // Remove all in-edges to stack call function. These may have been added
     // to connect earlier kernels with the function.
     while( kernel->fg.getEntryBB()->Preds.size() > 0 )
@@ -562,7 +597,7 @@ static void Stitch_Compiled_Units(G4_Kernel* kernel, std::map<std::string, G4_Ke
 
             if (!fcall->asCFInst()->isIndirectCall())
             {
-                std::string funcName = fcall->asCFInst()->getCallee();
+                std::string funcName = fcall->getSrc(0)->asLabel()->getLabel();
 
                 auto iter = compilation_units.find(funcName);
                 assert(iter != compilation_units.end() && "can't find function with given name");
@@ -882,7 +917,7 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
             }
         }
 
-        savedFCallStates savedFCallState;
+        SavedFCallStates savedFCallState;
 
         for(std::list<VISAKernelImpl*>::iterator kernel_it = kernels.begin(), kend = kernels.end();
             kernel_it != kend;
@@ -2558,6 +2593,7 @@ bool CISA_IR_Builder::CISA_create_lifetime_inst(unsigned char startOrEnd,
 
 bool CISA_IR_Builder::CISA_create_raw_sends_instruction(ISA_Opcode opcode,
                                                        unsigned char modifier,
+                                                       bool hasEOT,
                                                        Common_VISA_EMask_Ctrl emask,
                                                        unsigned exec_size,
                                                        VISA_opnd *pred_opnd,
@@ -2574,7 +2610,7 @@ bool CISA_IR_Builder::CISA_create_raw_sends_instruction(ISA_Opcode opcode,
 {
     Common_ISA_Exec_Size executionSize = Get_Common_ISA_Exec_Size_From_Raw_Size(exec_size);
     m_kernel->AppendVISAMiscRawSends((VISA_PredOpnd *) pred_opnd, emask, executionSize, modifier, ffid, (VISA_VectorOpnd *)exMsgDesc, src0Size, src1Size, dstSize,
-        (VISA_VectorOpnd *)Desc, (VISA_RawOpnd *)Src0, (VISA_RawOpnd *)Src1, (VISA_RawOpnd *)Dst);
+        (VISA_VectorOpnd *)Desc, (VISA_RawOpnd *)Src0, (VISA_RawOpnd *)Src1, (VISA_RawOpnd *)Dst, hasEOT);
     return true;
 }
 /*

@@ -23,15 +23,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-
 #pragma once
 
-namespace llvm
+#include "Compiler/IGCPassSupport.h"
+#include "IGC/common/Types.hpp"
+
+#include <llvm/Pass.h>
+
+
+namespace llvm {class FunctionPass;}
+namespace IGC
 {
-    class Pass;
-}
-
-
-/// This pass promote global variable to stack allocation (Alloca)
-/// After all the functions are inlined 
-llvm::Pass* createGlobalToLocalPass();
+  llvm::FunctionPass* createIntDivConstantReductionPass();
+} // namespace IGC

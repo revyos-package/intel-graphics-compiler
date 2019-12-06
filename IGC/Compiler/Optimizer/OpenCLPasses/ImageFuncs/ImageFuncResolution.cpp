@@ -123,6 +123,22 @@ void ImageFuncResolution::visitCallInst(CallInst& CI)
     {
         imageRes = getSamplerSnapWARequired(CI);
     }
+    else if (funcName.equals(ImageFuncsAnalysis::GET_FLAT_IMAGE_BASEOFFSET))
+    {
+        imageRes = getImplicitImageArg(CI, ImplicitArg::FLAT_IMAGE_BASEOFFSET);
+    }
+    else if (funcName.equals(ImageFuncsAnalysis::GET_FLAT_IMAGE_HEIGHT))
+    {
+        imageRes = getImplicitImageArg(CI, ImplicitArg::FLAT_IMAGE_HEIGHT);
+    }
+    else if (funcName.equals(ImageFuncsAnalysis::GET_FLAT_IMAGE_WIDTH))
+    {
+        imageRes = getImplicitImageArg(CI, ImplicitArg::FLAT_IMAGE_WIDTH);
+    }
+    else if (funcName.equals(ImageFuncsAnalysis::GET_FLAT_IMAGE_PITCH))
+    {
+        imageRes = getImplicitImageArg(CI, ImplicitArg::FLAT_IMAGE_PITCH);
+    }
     else
     {
         // Non image function, do nothing
@@ -228,7 +244,7 @@ Value* ImageFuncResolution::getSamplerNormalizedCoords(CallInst& CI)
     Value* sampler = CImagesBI::CImagesUtils::traceImageOrSamplerArgument(&CI, 0, pMdUtils, modMD);
     if (sampler == nullptr)
     {
-        // TODO: For now disable WA if unable to trace sampler argument. 
+        // TODO: For now disable WA if unable to trace sampler argument.
         // Will need to rework WA to add support for indirect sampler case.
         return ConstantInt::get(CI.getType(), 0);
     }
@@ -270,7 +286,7 @@ Value* ImageFuncResolution::getSamplerSnapWARequired(CallInst& CI)
     Value* sampler = CImagesBI::CImagesUtils::traceImageOrSamplerArgument(&CI, 0, pMdUtils, modMD);
     if (sampler == nullptr)
     {
-        // TODO: For now disable WA if unable to trace sampler argument. 
+        // TODO: For now disable WA if unable to trace sampler argument.
         // Will need to rework WA to add support for indirect sampler case.
         return ConstantInt::get(CI.getType(), 0);
     }

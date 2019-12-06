@@ -301,7 +301,7 @@ static bool materialized_use_empty(const Value* v)
 void BIImport::WriteElfHeaderToMap(DenseMap<StringRef, int>& Map, char* pData, size_t dataSize)
 {
     //Data from pData is layed out as follows.....
-    //First two bytes are the string size 
+    //First two bytes are the string size
     //Next byte is the start of the function name
     //Last two bytes are the index of function in the elf file
 
@@ -844,6 +844,8 @@ char PreBIImportAnalysis::ID = 0;
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_GLOBAL_OFFSET = "_Z17get_global_offsetj";
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_LOCAL_ID = "_Z12get_local_idj";
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_GROUP_ID = "_Z12get_group_idj";
+const llvm::StringRef PreBIImportAnalysis::OCL_GET_SUBGROUP_ID_SPIRV = "__builtin_spirv_BuiltInSubgroupId";
+const llvm::StringRef PreBIImportAnalysis::OCL_GET_SUBGROUP_ID = "get_sub_group_id";
 
 PreBIImportAnalysis::PreBIImportAnalysis() : ModulePass(ID)
 {
@@ -860,7 +862,9 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
         StringRef funcName = pFunc->getName();
         if (funcName == OCL_GET_GLOBAL_OFFSET ||
             funcName == OCL_GET_LOCAL_ID ||
-            funcName == OCL_GET_GROUP_ID)
+            funcName == OCL_GET_GROUP_ID ||
+            funcName == OCL_GET_SUBGROUP_ID_SPIRV ||
+            funcName == OCL_GET_SUBGROUP_ID)
         {
             MetaDataUtils* pMdUtil = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
             ModuleMetaData* modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
@@ -903,7 +907,7 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                 {
                     if (visited.find(f) == visited.end())
                     {
-                        // this function is not visited before, 
+                        // this function is not visited before,
                         // insert it into queue
                         functQueue.push(f);
                     }
@@ -931,6 +935,13 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                         //groupIDPresent info will be added to new framework here
                         //and extracted from new framework later
                         modMD->FuncMD[f].groupIDPresent = true;
+                    }
+                    else if (funcName == OCL_GET_SUBGROUP_ID_SPIRV ||
+                             funcName == OCL_GET_SUBGROUP_ID)
+                    {
+                        modMD->FuncMD[f].workGroupWalkOrder.dim0 = 0;
+                        modMD->FuncMD[f].workGroupWalkOrder.dim1 = 1;
+                        modMD->FuncMD[f].workGroupWalkOrder.dim2 = 2;
                     }
                 }
             }

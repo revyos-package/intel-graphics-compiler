@@ -65,6 +65,9 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     m_shaderStats = nullptr;
     m_constantBufferMask = 0;
     m_constantBufferLoaded = 0;
+    m_uavLoaded = 0;
+    m_shaderResourceLoaded = 0;
+    m_renderTargetLoaded = 0;
     isInputsPulled = false;
     m_cbSlot = -1;
     m_statelessCBPushedSize = 0;
@@ -206,7 +209,8 @@ void CShader::EOTRenderTarget()
         msgControl,
         m_pBtiLayout->GetNullSurfaceIdx());
 
-    this->SetBindingTableEntryCountAndBitmap(true, m_pBtiLayout->GetNullSurfaceIdx());
+    // we don't want to update the usage mask for null surface, so set the buffer type to be unknown.
+    this->SetBindingTableEntryCountAndBitmap(true, BUFFER_TYPE_UNKNOWN, 0, m_pBtiLayout->GetNullSurfaceIdx());
 
     constexpr uint nullRenderTargetBit = BIT(20);
     constexpr uint exDesc = EU_MESSAGE_TARGET_DATA_PORT_WRITE | cMessageExtendedDescriptorEOTBit | nullRenderTargetBit;
@@ -247,7 +251,7 @@ CVariable* CShader::CreateSP(bool ptr64bits)
 }
 
 /// initial stack-pointer at the beginning of the kernel
-void CShader::InitKernelStack(bool ptr64bits)
+void CShader::InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize, bool ptr64bits)
 {
     CreateSP(ptr64bits);
     ImplicitArgs implicitArgs(*entry, m_pMdUtils);
@@ -293,9 +297,9 @@ void CShader::InitKernelStack(bool ptr64bits)
 
     // modify private-memory size to a large setting
     m_ModuleMetadata->FuncMD[entry].privateMemoryPerWI = 8192;
-    CVariable* pBase = GetSymbol(kerArg);
-    encoder.Add(m_SP, pBase, pTemp);
-    encoder.Push();
+
+    stackBase = GetSymbol(kerArg);
+    stackAllocSize = pTemp;
 }
 
 /// save stack-pointer when entering a stack-call function
@@ -1780,40 +1784,83 @@ static bool IsRawAtomicIntrinsic(llvm::Value* V) {
 static e_alignment GetPreferredAlignmentOnUse(llvm::Value* V, WIAnalysis* WIA,
     CodeGenContext* pContext)
 {
-    // If uniform variables are once used by uniform loads, stores, or atomic
-    // ops, they need being GRF aligned.
-    for (auto UI = V->user_begin(), UE = V->user_end(); UI != UE; ++UI) {
-        if (LoadInst * ST = dyn_cast<LoadInst>(*UI)) {
-            Value* Ptr = ST->getPointerOperand();
-            if (WIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
-                if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pContext))
-                    return EALIGN_2GRF;
-                return EALIGN_GRF;
-            }
-        }
-        if (StoreInst * ST = dyn_cast<StoreInst>(*UI)) {
-            Value* Ptr = ST->getPointerOperand();
-            if (WIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
-                if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pContext))
-                    return EALIGN_2GRF;
-                return EALIGN_GRF;
-            }
-        }
-
-        // Last, check Gen intrinsic.
-        GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(*UI);
-        if (!GII) {
-            continue;
-        }
-
-        if (IsRawAtomicIntrinsic(GII)) {
-            Value* Ptr = GII->getArgOperand(1);
-            if (WIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
-                if (PointerType * PtrTy = dyn_cast<PointerType>(Ptr->getType())) {
-                    if (IGC::isA64Ptr(PtrTy, pContext))
+    auto getAlign = [](Value* aV, WIAnalysis* aWIA, CodeGenContext* pCtx) -> e_alignment
+    {
+        // Once uniform variables are used by uniform loads, stores, or atomic
+        // ops, they need being GRF aligned, except that for block read/write
+        // or vector load/store with > 1 elements.  The block read/write's address
+        // is just a field in its header payload so no need to grf-aligned; Vector
+        // load/store with > 1 elements needs to create a new cvar anyway to hold
+        // scatter load/store address [see detail in vector load/store].
+        for (auto UI = aV->user_begin(), UE = aV->user_end(); UI != UE; ++UI) {
+            if (LoadInst* LI = dyn_cast<LoadInst>(*UI)) {
+                Value* Ptr = LI->getPointerOperand();
+                // If Ptr is uniform and loads a scalar, need [2]grf-alignment.
+                VectorType* vTy = dyn_cast<VectorType>(LI->getType());
+                if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM &&
+                    !(vTy && vTy->getNumElements() > 1)) {
+                    if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pCtx))
                         return EALIGN_2GRF;
+                    return EALIGN_GRF;
                 }
-                return EALIGN_GRF;
+            }
+            if (StoreInst* ST = dyn_cast<StoreInst>(*UI)) {
+                Value* Ptr = ST->getPointerOperand();
+                VectorType* vTy = dyn_cast<VectorType>(ST->getValueOperand()->getType());
+                // If Ptr is uniform and stores a scalar, need [2]grf-alignment.
+                if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM &&
+                    !(vTy && vTy->getNumElements() > 1)) {
+                    if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pCtx))
+                        return EALIGN_2GRF;
+                    return EALIGN_GRF;
+                }
+            }
+
+            // Last, check Gen intrinsic.
+            GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(*UI);
+            if (!GII) {
+                continue;
+            }
+
+            if (IsRawAtomicIntrinsic(GII)) {
+                Value* Ptr = GII->getArgOperand(1);
+                if (aWIA->whichDepend(Ptr) == WIAnalysis::UNIFORM) {
+                    if (PointerType* PtrTy = dyn_cast<PointerType>(Ptr->getType())) {
+                        if (IGC::isA64Ptr(PtrTy, pCtx))
+                            return EALIGN_2GRF;
+                    }
+                    return EALIGN_GRF;
+                }
+            }
+        }
+        return EALIGN_AUTO;
+    };
+
+    e_alignment algn = getAlign(V, WIA, pContext);
+    if (algn != EALIGN_AUTO) {
+        return algn;
+    }
+
+    if (IGC_IS_FLAG_ENABLED(EnableDeSSAAlias))
+    {
+        // Check if this V is used as load/store's address via
+        // inttoptr that is actually noop (aliased by dessa already).
+        //    x = ...
+        //    y = inttoptr x
+        //    load/store y
+        // To make sure not to increase register pressure, only do it if y
+        // is the sole use of x!
+        if (V->hasOneUse())
+        {
+            // todo: use deSSA->isNoopAliaser() to check if it has become an alias
+            User* U = V->user_back();
+            IntToPtrInst* IPtr = dyn_cast<IntToPtrInst>(U);
+            if (IPtr && isNoOpInst(IPtr, pContext))
+            {
+                algn = getAlign(IPtr, WIA, pContext);
+                if (algn != EALIGN_AUTO) {
+                    return algn;
+                }
             }
         }
     }
@@ -2390,8 +2437,9 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
                 value->getType()->isPointerTy() &&
                 value->getType()->getPointerElementType()->isFunctionTy();
             // Global Relocation
-            bool isGlobalVar = m_ctx->getModuleMetaData()->compOpt.EnableGlobalRelocation &&
-                isa<GlobalVariable>(value);
+            bool isGlobalVar = IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
+                isa<GlobalVariable>(value) &&
+                m_ModuleMetadata->inlineProgramScopeOffsets.count(cast<GlobalVariable>(value)) > 0;
 
             if (isFunction || isGlobalVar)
             {
@@ -3093,11 +3141,6 @@ void CShader::SampleHeader(CVariable* payload, uint offset, uint writeMask, uint
     //encoder.or(immoffset, immoffset, temp);
     encoder.Copy(payload, temp);
     encoder.Push();
-}
-
-void CShader::ConstantBufferAccesed(uint index)
-{
-    m_constantBufferLoaded |= BIT(index);
 }
 
 // Helper function to copy raw register

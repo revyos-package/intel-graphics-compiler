@@ -92,6 +92,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/RectListOptimizationPass.hpp"
 #include "Compiler/Optimizer/GatingSimilarSamples.hpp"
 #include "Compiler/Optimizer/IndirectCallOptimization.hpp"
+#include "Compiler/Optimizer/IntDivConstantReduction.hpp"
 #include "Compiler/MetaDataApi/PurgeMetaDataUtils.hpp"
 
 #include "Compiler/HandleLoadStoreInstructions.hpp"
@@ -402,6 +403,12 @@ namespace IGC
         mpm.add(new ProgramScopeConstantResolution());
     }
 
+    if (IGC_IS_FLAG_ENABLED(EnableConstIntDivReduction)) {
+        // reduce division/remainder with a constant divisors/moduli to
+        // more efficient sequences of multiplies, shifts, and adds
+        mpm.add(createIntDivConstantReductionPass());
+    }
+
     bool needDPEmu = (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
         (ctx.m_DriverInfo.NeedFP64() && !ctx.platform.supportFP64()));
     uint32_t theEmuKind = (needDPEmu ? EmuKind::EMU_DP : 0);
@@ -430,8 +437,13 @@ namespace IGC
 
     mpm.add(new ReplaceUnsupportedIntrinsics());
 
-    // Promotes indirect resource access to direct
-    mpm.add(new PromoteResourceToDirectAS());
+    if (IGC_IS_FLAG_DISABLED(DisablePromoteToDirectAS))
+    {
+        // Promotes indirect resource access to direct
+        mpm.add(new BreakConstantExpr());
+        mpm.add(new PromoteResourceToDirectAS());
+    }
+
     if (ctx.m_instrTypes.hasReadOnlyArray)
     {
         mpm.add(createDeadCodeEliminationPass());
@@ -748,12 +760,18 @@ namespace IGC
     bool earlyExit =
         ctx->getCompilerOption().pixelShaderDoNotAbortOnSpill ? false : true;
 
-    if (IGC_IS_FLAG_ENABLED(ForcePSBestSIMD))
+    if (IsStage1BestPerf(ctx->m_CgFlag, ctx->m_StagingCtx))
     {
-        if (SimdEarlyCheck(ctx))
+        // don't retry SIMD16 for ForcePSBestSIMD
+        if( SimdEarlyCheck( ctx ) && ( !ctx->m_retryManager.IsLastTry( ctx ) ) )
         {
             AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, true, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         }
+        AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(ctx), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
+        useRegKeySimd = true;
+    }
+    else if (IsStage1FastCompile(ctx->m_CgFlag, ctx->m_StagingCtx))
+    {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(ctx), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
     }
@@ -840,12 +858,12 @@ namespace IGC
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, false);
     }
-        else if (((IGC_IS_FLAG_ENABLED(ForceCSSIMD16)) && simdModeAllowed <= SIMDMode::SIMD16) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 16 ||
+    else if (((IGC_IS_FLAG_ENABLED(ForceCSSIMD16) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 16) && simdModeAllowed <= SIMDMode::SIMD16) ||
         waveSize == 16)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, false);
     }
-    // csInfo.forcedSIMDSize == 8 means force least SIMD. 
+    // csInfo.forcedSIMDSize == 8 means force least SIMD.
     // If the SIMD8 is not allowed, it will return higher SIMD
     else if (IGC_IS_FLAG_ENABLED(ForceCSLeastSIMD) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 8)
     {
@@ -1345,7 +1363,7 @@ namespace IGC
 
                 mpm.add(CreateHoistFMulInLoopPass());
 
-                if (!pContext->m_retryManager.IsFirstTry()) 
+                if (!pContext->m_retryManager.IsFirstTry())
                 {
                     mpm.add(new DisableLoopUnrollOnRetry());
                 }
@@ -1570,7 +1588,7 @@ namespace IGC
             mpm.add(new PurgeMetaDataUtils());
         }
 
-        if (!IGC_IS_FLAG_ENABLED(DisableDynamicConstantFolding))
+        if (!IGC_IS_FLAG_ENABLED(DisableDynamicConstantFolding) && pContext->getModuleMetaData()->inlineDynConstants.empty())
         {
             mpm.add(new FindInterestingConstants());
         }

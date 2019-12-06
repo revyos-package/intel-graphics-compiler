@@ -301,12 +301,19 @@ const char* cmc::getPlatformStr(PLATFORM platform)
 static void generatePatchTokens(const cmc_kernel_info *info, CMKernel& kernel)
 {
     // This is the starting constant thread payload
-    unsigned constantPayloadStart = info->GRFByteSize * 4; // r0-r3 are reserved.
+    // r0-r3 are reserved for SIMD8 dispatch.
+    unsigned constantPayloadStart = info->GRFByteSize * 4;
+    // r0-r1 are reserved for SIMD1 dispatch
+    if (info->CompiledSIMDSize == 1)
+        constantPayloadStart = info->GRFByteSize * 2;
+
     unsigned payloadPos = constantPayloadStart;
 
-    // Allocate GLOBAL_WORK_OFFSET and LOCAL_WORK_SIZE
-    kernel.createImplicitArgumentsAnnotation(0);
-    payloadPos += info->GRFByteSize;
+    // Allocate GLOBAL_WORK_OFFSET and LOCAL_WORK_SIZE, SIMD8 dispatch only.
+    if (info->CompiledSIMDSize == 8) {
+        kernel.createImplicitArgumentsAnnotation(0);
+        payloadPos += info->GRFByteSize;
+    }
 
     // Now all arguments from cmc. We keep track of the maximal offset.
     int32_t maxArgEnd = payloadPos;
@@ -314,7 +321,9 @@ static void generatePatchTokens(const cmc_kernel_info *info, CMKernel& kernel)
     // Setup argument to BTI mapping.
     kernel.m_kernelInfo.m_argIndexMap.clear();
 
-    for (auto &AI : info->arg_descs) {
+    for (unsigned i = 0; i < info->num_args; ++i) {
+        assert(info->arg_descs);
+        cmc_arg_info& AI = info->arg_descs[i];
         if (AI.offset > 0)
             maxArgEnd = std::max(AI.offset + AI.sizeInBytes, maxArgEnd);
         bool isWriteable = AI.access != cmc_access_kind::read_only;
@@ -323,7 +332,7 @@ static void generatePatchTokens(const cmc_kernel_info *info, CMKernel& kernel)
         default:
             break;
         case cmc_arg_kind::General:
-            kernel.createConstArgumentAnnotation(AI.index, AI.offset - constantPayloadStart, AI.sizeInBytes);
+            kernel.createConstArgumentAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart);
             break;
         case cmc_arg_kind::LocalSize:
             kernel.createSizeAnnotation(AI.offset - constantPayloadStart, iOpenCL::DATA_PARAMETER_ENQUEUED_LOCAL_WORK_SIZE);
@@ -337,7 +346,8 @@ static void generatePatchTokens(const cmc_kernel_info *info, CMKernel& kernel)
             kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             break;
         case cmc_arg_kind::SVM:
-            kernel.createPointerGlobalAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart, -1);
+            kernel.createPointerGlobalAnnotation(AI.index, AI.sizeInBytes, AI.offset - constantPayloadStart, AI.BTI);
+            kernel.m_kernelInfo.m_argIndexMap[AI.index] = AI.BTI;
             break;
         case cmc_arg_kind::Sampler:
             kernel.createSamplerAnnotation(AI.index);
@@ -374,7 +384,9 @@ static void populateKernelInfo(const cmc_kernel_info* info,
     auto& kInfo = kernel.m_kernelInfo;
     kInfo.m_kernelName = info->name;
     // Fixed SIMD8.
-    kInfo.m_executionEnivronment.CompiledSIMDSize = 8;
+    kInfo.m_executionEnivronment.CompiledSIMDSize = info->CompiledSIMDSize;
+    // SLM size in bytes, align to 1KB.
+    kInfo.m_executionEnivronment.SumFixedTGSMSizes = iSTD::Align(info->SLMSize, 1024);
     kInfo.m_executionEnivronment.HasBarriers = info->HasBarriers;
     kInfo.m_executionEnivronment.HasReadWriteImages = info->HasReadWriteImages;
     kInfo.m_executionEnivronment.SubgroupIndependentForwardProgressRequired = true;
@@ -408,12 +420,13 @@ static void populateKernelInfo(const cmc_kernel_info* info,
     int numUAVs = 0;
     int numResources = 0;
 
-    auto isStatefulResource = [](cmc_arg_kind kind) {
+    auto isResource = [](cmc_arg_kind kind) {
         switch (kind) {
         case cmc_arg_kind::Buffer:
         case cmc_arg_kind::Image1d:
         case cmc_arg_kind::Image2d:
         case cmc_arg_kind::Image3d:
+        case cmc_arg_kind::SVM:
             return true;
         default:
             break;
@@ -421,9 +434,11 @@ static void populateKernelInfo(const cmc_kernel_info* info,
         return false;
     };
 
-    for (auto &AI : info->arg_descs) {
-        if (isStatefulResource(AI.kind)) {
-            if (AI.kind == cmc_arg_kind::Buffer)
+    for (unsigned i = 0; i < info->num_args; ++i) {
+        assert(info->arg_descs);
+        cmc_arg_info& AI = info->arg_descs[i];
+        if (isResource(AI.kind)) {
+            if (AI.kind == cmc_arg_kind::Buffer || AI.kind == cmc_arg_kind::SVM)
                 numUAVs++;
             else if (AI.access == cmc_access_kind::write_only ||
                      AI.access == cmc_access_kind::read_write)
@@ -440,25 +455,24 @@ static void populateKernelInfo(const cmc_kernel_info* info,
     generatePatchTokens(info, kernel);
 }
 
-int cmc::vISACompile(cmc_compile_info* output, iOpenCL::CGen8CMProgram& CMProgram)
+int cmc::vISACompile(cmc_compile_info* output, iOpenCL::CGen8CMProgram& CMProgram,
+                     std::vector<const char*> &opts)
 {
     int status = 0;
     const char* platformStr = getPlatformStr(CMProgram.getPlatform());
 
     // JIT compile kernels in vISA
-    for (cmc_kernel_info* info : output->kernel_info) {
+    assert(output->kernel_info && "null kernel info");
+    for (unsigned i = 0; i < output->num_kernels; ++i) {
+        cmc_kernel_info* info = output->kernel_info + i;
         void* genBinary = nullptr;
         unsigned genBinarySize = 0;
         FINALIZER_INFO JITInfo;
-        // TODO: take commond line options.
-        const char* args[] = {
-            "-noschedule",
-            "-nopresched"
-        };
-        int numArgs = sizeof(args)/sizeof(args[0]);
-        status = JITCompile(info->name.c_str(), output->binary, (unsigned)output->binary_size, genBinary,
-            genBinarySize, platformStr, output->visa_major_version,
-            output->visa_minor_version, numArgs, args, nullptr, &JITInfo);
+        status = JITCompile(
+            info->name, output->binary, (unsigned)output->binary_size,
+            genBinary, genBinarySize, platformStr, output->visa_major_version,
+            output->visa_minor_version, (unsigned)opts.size(), opts.data(),
+            nullptr, &JITInfo);
         if (status != 0)
             return status;
 

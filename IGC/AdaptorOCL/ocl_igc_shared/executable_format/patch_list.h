@@ -33,8 +33,7 @@ Abstract:   Contains common patch structure definitions
 
 namespace iOpenCL
 {
-
-const uint32_t CURRENT_ICBE_VERSION = 1060;
+const uint32_t CURRENT_ICBE_VERSION = 1063;
 
 const uint32_t MAGIC_CL = 0x494E5443;      // 'I', 'N', 'T', 'C'
 const uint32_t INVALID_INDEX = 0xFFFFFFFF;
@@ -151,12 +150,13 @@ enum PATCH_TOKEN
     PATCH_TOKEN_PROGRAM_SYMBOL_TABLE,                             // 53  @SPatchFunctionTableInfo@
     PATCH_TOKEN_PROGRAM_RELOCATION_TABLE,                         // 54  @SPatchFunctionTableInfo@
     PATCH_TOKEN_MEDIA_VFE_STATE_SLOT1,                            // 55  @SPatchMediaVFEState of slot1@
+    PATCH_TOKEN_ALLOCATE_SYNC_BUFFER,                             // 56  @SPatchAllocateSyncBuffer@
 
     NUM_PATCH_TOKENS
 };
 
 // Update CURRENT_ICBE_VERSION when modifying the patch list
-static_assert( NUM_PATCH_TOKENS == 56, "NUM_PATCH_TOKENS has invalid value");
+static_assert( NUM_PATCH_TOKENS == 57, "NUM_PATCH_TOKENS has invalid value");
 
 /*****************************************************************************\
 ENUM: IMAGE_MEMORY_OBJECT_TYPE
@@ -260,11 +260,15 @@ enum DATA_PARAMETER_TOKEN
     DATA_PARAMETER_STAGE_IN_GRID_SIZE,                              // 41
     DATA_PARAMETER_BUFFER_OFFSET,                                   // 42
     DATA_PARAMETER_BUFFER_STATEFUL,                                 // 43
+    DATA_PARAMETER_FLAT_IMAGE_BASEOFFSET,                           // 44
+    DATA_PARAMETER_FLAT_IMAGE_WIDTH,                                // 45
+    DATA_PARAMETER_FLAT_IMAGE_HEIGHT,                               // 46
+    DATA_PARAMETER_FLAT_IMAGE_PITCH,                                // 47
     NUM_DATA_PARAMETER_TOKENS
 };
 
 // Update CURRENT_ICBE_VERSION when modifying the patch list
-static_assert( NUM_DATA_PARAMETER_TOKENS == 44, "NUM_DATA_PARAMETER_TOKENS has invalid value");
+static_assert(NUM_DATA_PARAMETER_TOKENS == 48, "NUM_DATA_PARAMETER_TOKENS has invalid value");
 
 /*****************************************************************************\
 ENUM: CONSTANT_BUFFER_TYPE

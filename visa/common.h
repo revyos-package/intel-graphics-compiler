@@ -32,15 +32,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "VISADefines.h"
 
-// FIXME: the following _s functions are copied from secure_mem.h and secure_string.h,
-// because I don't have access the gfxdev files in CMRT environment. They should be removed
-// when CMRT is checked into the driver.
 #ifndef _WIN32
-#include <cstring>
 #include <errno.h>
-
-using std::memcpy;
-using std::strncpy;
+#include "common/secure_string.h"
 
 typedef int errno_t;
 static errno_t memcpy_s(void* dst, size_t numberOfElements, const void* src, size_t count)
@@ -51,28 +45,12 @@ static errno_t memcpy_s(void* dst, size_t numberOfElements, const void* src, siz
     if (numberOfElements < count) {
         return ERANGE;
     }
-    memcpy(dst, src, count);
-    return 0;
-}
 
-static inline int
-strcpy_s(char* strDestination, size_t numberOfElements, const char* strSource)
-{
-    strncpy(strDestination, strSource, numberOfElements);
-    strDestination[numberOfElements - 1] = '\0';
-    return 0;
-}
-
-static inline int
-strncpy_s(char* strDestination, size_t numberOfElements, const char* strSource, size_t count)
-{
-    if (numberOfElements - 1 > count) {
-        strncpy(strDestination, strSource, count);
-        strDestination[count] = '\0';
-    } else {
-        strncpy(strDestination, strSource, numberOfElements - 1);
-        strDestination[numberOfElements - 1] = '\0';
+    for (auto c = 0; c != count; c++)
+    {
+        *(((char*)dst) + c) = *(((char*)src) + c);
     }
+
     return 0;
 }
 #endif
@@ -138,7 +116,7 @@ extern std::stringstream errorMsgs;
 
 #define COUT_ERROR      std::cout
 
-#if defined(_DEBUG) && !defined(DLL_MODE) 
+#if defined(_DEBUG) && !defined(DLL_MODE)
 
 //#define DEBUG_VERBOSE_ON
 
@@ -167,7 +145,7 @@ extern std::stringstream errorMsgs;
 
 #endif  // #ifdef _DEBUG
 
-#if !defined(DLL_MODE) 
+#if !defined(DLL_MODE)
 //important messages that we should relay to the user
 //(things like if RA is spilling, etc.)
 // this is only enabled in offline vISA executable
@@ -186,14 +164,14 @@ extern std::stringstream errorMsgs;
     errorMsgs << "Error in Common ISA file:" << errormsg << std::endl; \
     assert(false); \
 }    \
-}   
+}
 
 #define ASSERT_USER_LOC(x, errormsg, line, file ) { if (!(x))   \
 {           \
     errorMsgs << "Error in Common ISA file(" << file << ":" << line << "): " << errormsg << std::endl; \
     assert(false); \
 }    \
-}   
+}
 
 
 #define MUST_BE_TRUE2(x, errormsg, inst)  { if (!(x))   \
@@ -203,21 +181,21 @@ extern std::stringstream errorMsgs;
                                         std::cerr << std::endl; \
                                         assert(false); \
                                     }    \
-                                  }   
+                                  }
 
 #define MUST_BE_TRUE(x,errormsg)  { if (!(x))   \
                                     {           \
                                     std::cerr << __FILE__ << ":" << __LINE__ << " " << errormsg << std::endl; \
                                     assert(false); \
                                     }    \
-                                  }   
+                                  }
 
 #define MUST_BE_TRUE1(x, lineno, errormsg)  {   if (!(x))   \
                                     {           \
                                         std::cerr << "(Source Line "<<lineno<<") " << errormsg << std::endl;  \
                                         assert(false);  \
                                     }    \
-                                  }     
+                                  }
 #else
 #define ASSERT_USER(x, errormsg)
 #define ASSERT_USER_LOC(x, errormsg, line, file )
@@ -287,12 +265,10 @@ extern "C" const char * GetSteppingString( void );
 #define ERROR_INVALID_VISA_NAME( x )     "ERROR: Invalid name " << x << "!"
 #define ERROR_SYNTAX( x )                       "ERROR: Syntax error -- " << x << "!"
 #define ERROR_DATA_RANGE( x )           "ERROR: Out of boundary or invalid data value in " << x << "!"
-#define ERROR_INVALID_G4INST            "ERROR: Invalid Gen4 instruction!"
 // end of Error Message
 
 #define G4_GRF_REG_SIZE    (getGRFSize() / 2u)
 #define G4_GRF_REG_NBYTES  getGRFSize()
-#define GENX_MRF_REG_SIZ   getGRFSize()
 #define GENX_GRF_REG_SIZ   getGRFSize()
 #define NUM_WORDS_PER_GRF  (getGRFSize() / 2)
 #define NUM_DWORDS_PER_GRF (getGRFSize() / 4u)

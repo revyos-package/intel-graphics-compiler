@@ -2231,28 +2231,28 @@ namespace IGC
     void CEncoder::Send(CVariable* dst, CVariable* src, uint exDesc, CVariable* messDescriptor, bool isSendc)
     {
         if (dst && dst->IsUniform())
-    {
-        m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
-    }
-    unsigned char sendc = isSendc ? 1 : 0;
+        {
+            m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
+        }
+        unsigned char sendc = isSendc ? 1 : 0;
         unsigned char srcSize = src->GetSize() / getGRFSize();
         unsigned char dstSize = dst ? dst->GetSize() / getGRFSize() : 0;
-    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         VISA_RawOpnd* srcOpnd0 = GetRawSource(src);
         VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
         VISA_VectorOpnd* desc = GetUniformSource(messDescriptor);
 
-    V(vKernel->AppendVISAMiscRawSend(
-        predOpnd,
-        GetAluEMask(dst),
-        visaExecSize(m_encoderState.m_simdSize),
-        sendc,
-        exDesc,
-        srcSize,
-        dstSize,
-        desc,
-        srcOpnd0,
-        dstOpnd));
+        V(vKernel->AppendVISAMiscRawSend(
+            predOpnd,
+            GetAluEMask(dst),
+            visaExecSize(m_encoderState.m_simdSize),
+            sendc,
+            exDesc,
+            srcSize,
+            dstSize,
+            desc,
+            srcOpnd0,
+            dstOpnd));
     }
 
     void CEncoder::Send(CVariable* dst, CVariable* src, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc)
@@ -2260,42 +2260,43 @@ namespace IGC
     Sends(dst, src, nullptr, ffid, exDesc, messDescriptor, isSendc);
     }
 
-    void CEncoder::Sends(CVariable* dst, CVariable* src0, CVariable* src1, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc)
+    void CEncoder::Sends(CVariable* dst, CVariable* src0, CVariable* src1, uint ffid, CVariable* exDesc, CVariable* messDescriptor, bool isSendc, bool hasEOT)
     {
         if (exDesc->IsImmediate() && src1 == nullptr)
         {
-        Send(dst, src0, (uint)exDesc->GetImmediateValue(), messDescriptor, isSendc);
-        return;
-    }
+            Send(dst, src0, (uint)exDesc->GetImmediateValue(), messDescriptor, isSendc);
+            return;
+        }
         if (dst && dst->IsUniform())
-    {
-        m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
-    }
-    unsigned char sendc = isSendc ? 1 : 0;
+        {
+            m_encoderState.m_simdSize = m_encoderState.m_uniformSIMDSize;
+        }
+        unsigned char sendc = isSendc ? 1 : 0;
         unsigned char src0Size = src0->GetSize() / getGRFSize();
-    unsigned char src1Size = src1 ? src1->GetSize() / getGRFSize() : 0;
+        unsigned char src1Size = src1 ? src1->GetSize() / getGRFSize() : 0;
         unsigned char dstSize = dst ? dst->GetSize() / getGRFSize() : 0;
-    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         VISA_RawOpnd* srcOpnd0 = GetRawSource(src0);
         VISA_RawOpnd* srcOpnd1 = GetRawSource(src1);
         VISA_RawOpnd* dstOpnd = GetRawDestination(dst);
         VISA_VectorOpnd* exMessDesc = GetUniformSource(exDesc);
         VISA_VectorOpnd* desc = GetUniformSource(messDescriptor);
 
-    V(vKernel->AppendVISAMiscRawSends(
-        predOpnd,
-        GetAluEMask(dst),
-        visaExecSize(m_encoderState.m_simdSize),
-        sendc,
-        ffid,
-        exMessDesc,
-        src0Size,
-        src1Size, // right now only one source
-        dstSize,
-        desc,
-        srcOpnd0,
-        srcOpnd1,
-        dstOpnd));
+        V(vKernel->AppendVISAMiscRawSends(
+            predOpnd,
+            GetAluEMask(dst),
+            visaExecSize(m_encoderState.m_simdSize),
+            sendc,
+            ffid,
+            exMessDesc,
+            src0Size,
+            src1Size, // right now only one source
+            dstSize,
+            desc,
+            srcOpnd0,
+            srcOpnd1,
+            dstOpnd,
+            hasEOT));
     }
 
     VISA_StateOpndHandle* CEncoder::GetBTIOperand(uint bindingTableIndex)
@@ -2737,37 +2738,58 @@ namespace IGC
     V(vKernel->AppendVISACFRetInst(predOpnd, vISA_EMASK_M1, EXEC_SIZE_1));
     }
 
-    void CEncoder::SetFloatDenormMode(VISAKernel* vKernel, Float_DenormMode mode16,
-                                  Float_DenormMode mode32, Float_DenormMode mode64)
+    // Init Control register for denorm modes, rounding modes, etc.
+    void CEncoder::initCR(VISAKernel* vKernel)
     {
-    VISA_VectorOpnd* src0_Opnd = nullptr;
-    VISA_VectorOpnd* src1_Opnd = nullptr;
-    VISA_VectorOpnd* dst_Opnd = nullptr;
-    VISA_GenVar* cr0_var = nullptr;
-    uint imm_data = 0;
-    if (mode16 == FLOAT_DENORM_RETAIN)
-        imm_data |= 0x400;
-    if (mode32 == FLOAT_DENORM_RETAIN)
-        imm_data |= 0x80;
-    if (mode64 == FLOAT_DENORM_RETAIN)
-        imm_data |= 0x40;
-    // If we are in the default mode no need to set the CR
+        // Those bits must be zero'ed on entry to kernel/shader.
+        // (If not, this function needs to be changed accordingly.)
+        VISA_VectorOpnd* src0_Opnd = nullptr;
+        VISA_VectorOpnd* src1_Opnd = nullptr;
+        VISA_VectorOpnd* dst_Opnd = nullptr;
+        VISA_GenVar* cr0_var = nullptr;
+        uint imm_data = 0;
+
+        CodeGenContext* pCtx = m_program->GetContext();
+        if (pCtx->m_floatDenormMode16 == FLOAT_DENORM_RETAIN)
+            imm_data |= 0x400;
+        if (pCtx->m_floatDenormMode32 == FLOAT_DENORM_RETAIN)
+            imm_data |= 0x80;
+        if (pCtx->m_floatDenormMode64 == FLOAT_DENORM_RETAIN)
+            imm_data |= 0x40;
+
+        uint RM_bits = 0;
+        ERoundingMode RM_FPCvtInt = static_cast<ERoundingMode>(pCtx->getModuleMetaData()->compOpt.FloatCvtIntRoundingMode);
+        ERoundingMode RM_FP = static_cast<ERoundingMode>(pCtx->getModuleMetaData()->compOpt.FloatRoundingMode);
+        if (RM_FPCvtInt == ERoundingMode::ROUND_TO_ZERO) {
+            // No need to set FPCvtInt, just need to set FP RM.
+            RM_bits = getEncoderRoundingMode_FP(RM_FP);
+        }
+        else if (RM_FPCvtInt == RM_FP) {
+            // Setting FPCvtInt will set both FPCvtInt and FP
+            RM_bits = getEncoderRoundingMode_FPCvtInt(RM_FPCvtInt);
+        }
+        else {
+            assert(false && "Unsupport combination of default rounding mode (FP and FPCvtInt)!");
+        }
+        imm_data |= RM_bits;
+
+        // If we are in the default mode no need to set the CR
         if (imm_data != 0)
-    {
-        V(vKernel->GetPredefinedVar(cr0_var, PREDEFINED_CR0));
-        V(vKernel->CreateVISASrcOperand(src0_Opnd, cr0_var, MODIFIER_NONE, 0, 1, 0, 0, 0));
-        V(vKernel->CreateVISAImmediate(src1_Opnd, &imm_data, ISA_TYPE_UD));
-        V(vKernel->CreateVISADstOperand(dst_Opnd, cr0_var, 1, 0, 0));
-        V(vKernel->AppendVISAArithmeticInst(
-            ISA_OR,
-            nullptr,
-            false,
-            vISA_EMASK_M1_NM,
-            EXEC_SIZE_1,
-            dst_Opnd,
-            src0_Opnd,
-            src1_Opnd));
-    }
+        {
+            V(vKernel->GetPredefinedVar(cr0_var, PREDEFINED_CR0));
+            V(vKernel->CreateVISASrcOperand(src0_Opnd, cr0_var, MODIFIER_NONE, 0, 1, 0, 0, 0));
+            V(vKernel->CreateVISAImmediate(src1_Opnd, &imm_data, ISA_TYPE_UD));
+            V(vKernel->CreateVISADstOperand(dst_Opnd, cr0_var, 1, 0, 0));
+            V(vKernel->AppendVISAArithmeticInst(
+                ISA_OR,
+                nullptr,
+                false,
+                vISA_EMASK_M1_NM,
+                EXEC_SIZE_1,
+                dst_Opnd,
+                src0_Opnd,
+                src1_Opnd));
+        }
     }
 
     void CEncoder::SetVectorMask(bool VMask)
@@ -2796,15 +2818,39 @@ namespace IGC
         src1_Opnd));
     }
 
-    void CEncoder::SetFloatRoundingMode(RoundingMode actualMode, RoundingMode newMode)
+    void CEncoder::SetRoundingMode_FP(ERoundingMode actualRM, ERoundingMode newRM)
     {
-    if (actualMode != newMode)
+        assert(newRM != ERoundingMode::ROUND_TO_ANY && "Invalid rounding mode");
+        if (actualRM != newRM)
+        {
+            RMEncoding actualRM_en = getEncoderRoundingMode_FP(actualRM);
+            RMEncoding newRM_en = getEncoderRoundingMode_FP(newRM);
+            SetRoundingMode(actualRM_en, newRM_en);
+        }
+    }
+
+    void CEncoder::SetRoundingMode_FPCvtInt(ERoundingMode actualRM, ERoundingMode newRM)
     {
+        assert(newRM != ERoundingMode::ROUND_TO_ANY && "Invalid rounding mode");
+        if (actualRM != newRM)
+        {
+            RMEncoding actualRM_en = getEncoderRoundingMode_FPCvtInt(actualRM);
+            RMEncoding newRM_en = getEncoderRoundingMode_FPCvtInt(newRM);
+            SetRoundingMode(actualRM_en, newRM_en);
+        }
+    }
+
+    // Set rounding mode based on given encoding.
+    void CEncoder::SetRoundingMode(RMEncoding actualRM, RMEncoding newRM)
+    {
+        assert(actualRM != newRM &&
+               "Only setting RM if the new RM is different from the current RM!");
+
         VISA_VectorOpnd* src0_Opnd = nullptr;
         VISA_VectorOpnd* src1_Opnd = nullptr;
         VISA_VectorOpnd* dst_Opnd = nullptr;
         VISA_GenVar* cr0_var;
-        uint roundingMode = actualMode ^ newMode;
+        uint roundingMode = actualRM ^ newRM;
         V(vKernel->GetPredefinedVar(cr0_var, PREDEFINED_CR0));
         V(vKernel->CreateVISASrcOperand(src0_Opnd, cr0_var, MODIFIER_NONE, 0, 1, 0, 0, 0));
         V(vKernel->CreateVISAImmediate(src1_Opnd, &roundingMode, ISA_TYPE_UD));
@@ -2819,29 +2865,35 @@ namespace IGC
             src0_Opnd,
             src1_Opnd));
     }
-    }
 
-    void CEncoder::SetFloatRoundingModeDefault(RoundingMode actualMode)
+    CEncoder::RMEncoding CEncoder::getEncoderRoundingMode_FP(ERoundingMode FP_RM)
     {
-    const RoundingMode defaultRoundingMode = getEncoderRoundingMode(static_cast<Float_RoundingMode>(
-        m_program->GetContext()->getModuleMetaData()->compOpt.FloatRoundingMode));
-
-    SetFloatRoundingMode(actualMode, defaultRoundingMode);
+        switch (FP_RM) {
+        default:
+            break;
+        case ROUND_TO_POSITIVE:
+            return RMEncoding::RoundToPositive;
+        case ROUND_TO_NEGATIVE:
+            return RMEncoding::RoundToNegative;
+        case ROUND_TO_ZERO:
+            return RMEncoding::RoundToZero;
+        }
+        return RMEncoding::RoundToNearestEven;
     }
 
-    CEncoder::RoundingMode CEncoder::getEncoderRoundingMode(Float_RoundingMode FP_RM)
+    CEncoder::RMEncoding CEncoder::getEncoderRoundingMode_FPCvtInt(ERoundingMode FCvtI_RM)
     {
-    switch (FP_RM) {
-    default:
-        break;
-    case FLOAT_ROUND_TO_POSITIVE:
-        return RoundingMode::RoundToPositive;
-    case FLOAT_ROUND_TO_NEGATIVE:
-        return RoundingMode::RoundToNegative;
-    case FLOAT_ROUND_TO_ZERO:
-        return RoundingMode::RoundToZero;
-    }
-    return RoundToNearestEven;
+        switch (FCvtI_RM) {
+        default:
+            break;
+        case ROUND_TO_NEAREST_EVEN:
+            return RMEncoding::RoundToNearestEven_int;
+        case ROUND_TO_POSITIVE:
+            return RMEncoding::RoundToPositive_int;
+        case ROUND_TO_NEGATIVE:
+            return RMEncoding::RoundToNegative_int;
+        }
+        return RMEncoding::RoundToZero_int;
     }
 
     VISA_LabelOpnd* CEncoder::GetLabel(uint label)
@@ -2944,6 +2996,7 @@ namespace IGC
     case IGFX_GEN11_CORE:
         if (platform->getPlatformInfo().eProductFamily == IGFX_ICELAKE_LP ||
             platform->getPlatformInfo().eProductFamily == IGFX_LAKEFIELD
+         || platform->getPlatformInfo().eProductFamily == IGFX_JASPERLAKE
          || platform->getPlatformInfo().eProductFamily == IGFX_ELKHARTLAKE
             )
         {
@@ -3666,6 +3719,20 @@ namespace IGC
         std::string High = std::to_string((DWORD)(AssemblyHash >> 32));
         params.push_back(_strdup(Low.c_str()));
         params.push_back(_strdup(High.c_str()));
+
+        QWORD NosHash = { 0 };
+        NosHash = context->hash.getNosHash();
+        QWORD PsoHash = { 0 };
+        PsoHash = context->hash.getPsoHash();
+        QWORD hashToUse = NosHash != 0 ? NosHash : PsoHash;
+        if (hashToUse)
+        {
+            params.push_back("-hashmovs1");
+            std::string Low = std::to_string((DWORD)hashToUse);
+            std::string High = std::to_string((DWORD)(hashToUse >> 32));
+            params.push_back(_strdup(Low.c_str()));
+            params.push_back(_strdup(High.c_str()));
+        }
     }
     }
     void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall)
@@ -3710,6 +3777,21 @@ namespace IGC
         SaveOption(vISA_DumpCompilerStats, true);
     }
 
+    if (IGC_IS_FLAG_ENABLED(ForceFFIDOverwrite) && m_program->m_Platform->WaOverwriteFFID())
+    {
+        unsigned int ffid[unsigned(ShaderType::END)] = {
+            0,
+            context->isPOSH() ? FFID_VSR : FFID_VS,
+            FFID_HS,
+            FFID_DS,
+            FFID_GS,
+            FFID_PS,
+            FFID_GP,
+            FFID_GP
+        };
+        SaveOption(vISA_setFFID, ffid[unsigned(context->type)]);
+    }
+
     if (context->type == ShaderType::OPENCL_SHADER && context->m_floatDenormMode32 == FLOAT_DENORM_RETAIN &&
         context->m_floatDenormMode64 == FLOAT_DENORM_RETAIN)
     {
@@ -3730,7 +3812,13 @@ namespace IGC
         SaveOption(vISA_clearScratchWritesBeforeEOT, true);
     }
 
-    if (context->type == ShaderType::PIXEL_SHADER)
+    bool clearHDCWritesBeforeEOT = m_program->m_DriverInfo->UsesSparseAliasedResidency() &&
+        context->platform.WaInsertHDCFenceBeforeEOTWhenSparseAliasedResources();
+    clearHDCWritesBeforeEOT |= context->type == ShaderType::PIXEL_SHADER &&
+        context->platform.NeedsHDCFenceBeforeEOTInPixelShader();
+    clearHDCWritesBeforeEOT |= IGC_IS_FLAG_ENABLED(ForceMemoryFenceBeforeEOT);
+
+    if (clearHDCWritesBeforeEOT)
     {
         SaveOption(vISA_clearHDCWritesBeforeEOT, true);
     }
@@ -3788,6 +3876,11 @@ namespace IGC
     else
     {
         SaveOption(vISA_preRA_Schedule, false);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(ReplaceIndirectCallWithJmpi))
+    {
+        SaveOption(vISA_replaceIndirectCallWithJmpi, true);
     }
 
     if (IGC_IS_FLAG_ENABLED(FastSpill))
@@ -3854,7 +3947,7 @@ namespace IGC
     }
 
     if (IGC_IS_FLAG_DISABLED(EnableVISAStructurizer) ||
-        m_program->m_Platform->getWATable().Wa_1407528679 != 0)
+        (IGC_IS_FLAG_ENABLED(EnableSCFWA) && m_program->m_Platform->getWATable().Wa_1407528679 != 0))
     {
         SaveOption(vISA_EnableStructurizer, false);
     }
@@ -3918,7 +4011,8 @@ namespace IGC
     {
         SaveOption(vISA_dumpNewSyntax, false);
     }
-    if (IGC_IS_FLAG_ENABLED(disableCompaction))
+    if (IGC_IS_FLAG_ENABLED(disableCompaction)
+        )
     {
         SaveOption(vISA_Compaction, false);
     }
@@ -3964,6 +4058,8 @@ namespace IGC
     }
 
     SaveOption(vISA_TotalGRFNum, context->getNumGRFPerThread());
+
+
 
     if (IGC_IS_FLAG_ENABLED(SystemThreadEnable))
     {
@@ -4028,42 +4124,26 @@ namespace IGC
         SaveOption(vISA_EnableIGASWSB, true);
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableSWSB))
+    if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB) ||
+        IGC_IS_FLAG_ENABLED(EnableSWSBInstStall) ||
+        IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
     {
-        SaveOption(vISA_SoftwareScoreBoard, true);
-        SaveOption(vISA_IGAEncoder, true);
-
-        if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB) ||
-            IGC_IS_FLAG_ENABLED(EnableSWSBInstStall) ||
-            IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
+        if (IGC_IS_FLAG_ENABLED(EnableSWSBInstStall))
         {
-            if (IGC_IS_FLAG_ENABLED(EnableSWSBInstStall))
-            {
-                SaveOption(vISA_SoftwareScoreBoard, true);
-                SaveOption(vISA_SWSBInstStall, IGC_GET_FLAG_VALUE(EnableSWSBInstStall));
-                SaveOption(vISA_SWSBInstStallEnd, IGC_GET_FLAG_VALUE(EnableSWSBInstStallEnd));
-            }
-
-            if (IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
-            {
-                SaveOption(vISA_SoftwareScoreBoard, true);
-                SaveOption(vISA_SWSBTokenBarrier, IGC_GET_FLAG_VALUE(EnableSWSBTokenBarrier));
-            }
-
-            if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB))
-            {
-                SaveOption(vISA_forceDebugSWSB, true);
-                SaveOption(vISA_SoftwareScoreBoard, false);
-                SaveOption(vISA_SWSBInstStall, (uint32_t)0);
-                SaveOption(vISA_SWSBTokenBarrier, (uint32_t)0);
-            }
-            SaveOption(vISA_Compaction, false);
+            SaveOption(vISA_SWSBInstStall, IGC_GET_FLAG_VALUE(EnableSWSBInstStall));
+            SaveOption(vISA_SWSBInstStallEnd, IGC_GET_FLAG_VALUE(EnableSWSBInstStallEnd));
         }
-    }
 
-    if (IGC_IS_FLAG_ENABLED(DisableSWSB))
-    {
-        SaveOption(vISA_SoftwareScoreBoard, false);
+        if (IGC_IS_FLAG_ENABLED(EnableSWSBTokenBarrier))
+        {
+            SaveOption(vISA_SWSBTokenBarrier, IGC_GET_FLAG_VALUE(EnableSWSBTokenBarrier));
+        }
+
+        if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB))
+        {
+            SaveOption(vISA_forceDebugSWSB, true);
+        }
+        SaveOption(vISA_Compaction, false);
     }
 
     if (IGC_IS_FLAG_ENABLED(EnableGroupScheduleForBC))
@@ -4149,130 +4229,128 @@ namespace IGC
     {
         SaveOption(vISA_alignBindlessSampler, true);
     }
+
+    if (m_program->m_Platform->getWATable().Wa_14010017096 != 0)
+    {
+        SaveOption(vISA_clearAccBeforeEOT, true);
+    }
     }
 
     void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall)
     {
-    m_aliasesMap.clear();
-    m_encoderState.m_SubSpanDestination = false;
-    CodeGenContext* context = m_program->GetContext();
-    m_encoderState.m_secondHalf = false;
-    m_enableVISAdump = false;
-    labelMap.clear();
-    labelMap.resize(m_program->entry->size(), nullptr);
-    labelCounter = 0;
-    m_hasInlineAsm = context->m_DriverInfo.SupportInlineAssembly() && context->m_instrTypes.hasInlineAsm;
+        m_aliasesMap.clear();
+        m_encoderState.m_SubSpanDestination = false;
+        CodeGenContext* context = m_program->GetContext();
+        m_encoderState.m_secondHalf = false;
+        m_enableVISAdump = false;
+        labelMap.clear();
+        labelMap.resize(m_program->entry->size(), nullptr);
+        labelCounter = 0;
+        m_hasInlineAsm = context->m_DriverInfo.SupportInlineAssembly() && context->m_instrTypes.hasInlineAsm;
 
-    vbuilder = nullptr;
-    vAsmTextBuilder = nullptr;
-    TARGET_PLATFORM VISAPlatform = GetVISAPlatform(&(context->platform));
+        vbuilder = nullptr;
+        vAsmTextBuilder = nullptr;
+        TARGET_PLATFORM VISAPlatform = GetVISAPlatform(&(context->platform));
 
-    SetVISAWaTable(m_program->m_Platform->getWATable());
+        SetVISAWaTable(m_program->m_Platform->getWATable());
 
-    llvm::SmallVector<const char*, 10> params;
-    if (!m_hasInlineAsm)
-    {
-        // Asm text writer mode doesnt need dump params
-        InitBuildParams(params);
-    }
-
-    COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISACompile);
-    bool enableVISADump = IGC_IS_FLAG_ENABLED(EnableVISASlowpath) || IGC_IS_FLAG_ENABLED(ShaderDumpEnable);
-    auto builderMode = m_hasInlineAsm ? vISA_ASM_WRITER : vISA_3D;
-    auto builderOpt = (enableVISADump || m_hasInlineAsm) ? CM_CISA_BUILDER_BOTH : CM_CISA_BUILDER_GEN;
-    V(CreateVISABuilder(vbuilder, builderMode, builderOpt, VISAPlatform, params.size(), params.data(), &m_WaTable));
-
-    InitVISABuilderOptions(VISAPlatform, canAbortOnSpill, hasStackCall);
-
-    // Pass all build options to builder
-    SetBuilderOptions(vbuilder);
-
-    vKernel = nullptr;
-
-    std::string kernelName = m_program->entry->getName();
-    if (context->m_instrTypes.hasDebugInfo)
-    {
-        // This metadata node is added by TransformBlocks pass for device side
-        // enqueue feature of OCL2.0+.
-        // The problem is that for device side enqueue, kernel name used in
-        // IGC differs the one used to create JIT kernel. This leads to different
-        // kernel names in .elf file and .dbg file. So dbgmerge tool cannot
-        // merge the two together. With this metadata node we create a mapping
-        // between the two names and when debug info is enabled, make JIT use
-        // same name as IGC.
-        // Names earlier -
-        // ParentKernel_dispatch_0 in dbg and
-        // __ParentKernel_block_invoke in elf
-        // when kernel name is ParentKernel
-        //
-        auto md = m_program->entry->getParent()->getNamedMetadata("igc.device.enqueue");
-        if (md)
+        llvm::SmallVector<const char*, 10> params;
+        if (!m_hasInlineAsm)
         {
-            for (unsigned int i = 0; i < md->getNumOperands(); i++)
+            // Asm text writer mode doesnt need dump params
+            InitBuildParams(params);
+        }
+
+        COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISACompile);
+        bool enableVISADump = IGC_IS_FLAG_ENABLED(EnableVISASlowpath) || IGC_IS_FLAG_ENABLED(ShaderDumpEnable);
+        auto builderMode = m_hasInlineAsm ? vISA_ASM_WRITER : vISA_3D;
+        auto builderOpt = (enableVISADump || m_hasInlineAsm) ? CM_CISA_BUILDER_BOTH : CM_CISA_BUILDER_GEN;
+        V(CreateVISABuilder(vbuilder, builderMode, builderOpt, VISAPlatform, params.size(), params.data(), &m_WaTable));
+
+        InitVISABuilderOptions(VISAPlatform, canAbortOnSpill, hasStackCall);
+
+        // Pass all build options to builder
+        SetBuilderOptions(vbuilder);
+
+        vKernel = nullptr;
+
+        std::string kernelName = m_program->entry->getName();
+        if (context->m_instrTypes.hasDebugInfo)
+        {
+            // This metadata node is added by TransformBlocks pass for device side
+            // enqueue feature of OCL2.0+.
+            // The problem is that for device side enqueue, kernel name used in
+            // IGC differs the one used to create JIT kernel. This leads to different
+            // kernel names in .elf file and .dbg file. So dbgmerge tool cannot
+            // merge the two together. With this metadata node we create a mapping
+            // between the two names and when debug info is enabled, make JIT use
+            // same name as IGC.
+            // Names earlier -
+            // ParentKernel_dispatch_0 in dbg and
+            // __ParentKernel_block_invoke in elf
+            // when kernel name is ParentKernel
+            //
+            auto md = m_program->entry->getParent()->getNamedMetadata("igc.device.enqueue");
+            if (md)
             {
-                auto mdOpnd = md->getOperand(i);
-                auto first = dyn_cast_or_null<MDString>(mdOpnd->getOperand(1));
-                if (first &&
-                    first->getString().equals(kernelName))
+                for (unsigned int i = 0; i < md->getNumOperands(); i++)
                 {
-                    auto second = dyn_cast_or_null<MDString>(mdOpnd->getOperand(0));
-                    if (second)
+                    auto mdOpnd = md->getOperand(i);
+                    auto first = dyn_cast_or_null<MDString>(mdOpnd->getOperand(1));
+                    if (first &&
+                        first->getString().equals(kernelName))
                     {
-                        kernelName = second->getString();
+                        auto second = dyn_cast_or_null<MDString>(mdOpnd->getOperand(0));
+                        if (second)
+                        {
+                            kernelName = second->getString();
+                        }
                     }
                 }
             }
         }
-    }
 
-    std::string asmName;
-    if (m_enableVISAdump || context->m_instrTypes.hasDebugInfo)
-    {
-        // vISA does not support string of length >= 255. Truncate if this exceeds
-        // the limit. Note that vISA may append an extension, so relax it to a
-        // random number 240 here.
-        const int MAX_VISA_STRING_LENGTH = 240;
-        if (kernelName.size() >= MAX_VISA_STRING_LENGTH)
+        std::string asmName;
+        if (m_enableVISAdump || context->m_instrTypes.hasDebugInfo)
         {
-            kernelName.resize(MAX_VISA_STRING_LENGTH);
+            // vISA does not support string of length >= 255. Truncate if this exceeds
+            // the limit. Note that vISA may append an extension, so relax it to a
+            // random number 240 here.
+            const int MAX_VISA_STRING_LENGTH = 240;
+            if (kernelName.size() >= MAX_VISA_STRING_LENGTH)
+            {
+                kernelName.resize(MAX_VISA_STRING_LENGTH);
+            }
+            asmName = GetDumpFileName("asm");
         }
-        asmName = GetDumpFileName("asm");
-    }
-    else
-    {
-        kernelName = "kernel";
-        asmName = "kernel.asm";
-    }
+        else
+        {
+            kernelName = "kernel";
+            asmName = "kernel.asm";
+        }
 
-    V(vbuilder->AddKernel(vKernel, kernelName.c_str()));
-    V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
+        V(vbuilder->AddKernel(vKernel, kernelName.c_str()));
+        V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
 
-    vMainKernel = vKernel;
+        vMainKernel = vKernel;
 
-    auto gtpin_init = context->gtpin_init;
-    if (gtpin_init)
-    {
-        vKernel->SetGTPinInit(gtpin_init);
-    }
+        auto gtpin_init = context->gtpin_init;
+        if (gtpin_init)
+        {
+            vKernel->SetGTPinInit(gtpin_init);
+        }
 
-    // Right now only 1 main function in the kernel
+        // Right now only 1 main function in the kernel
         VISA_LabelOpnd* functionLabel = nullptr;
-    V(vKernel->CreateVISALabelVar(functionLabel, "main", LABEL_SUBROUTINE));
-    V(vKernel->AppendVISACFLabelInst(functionLabel));
+        V(vKernel->CreateVISALabelVar(functionLabel, "main", LABEL_SUBROUTINE));
+        V(vKernel->AppendVISACFLabelInst(functionLabel));
 
-    V(vKernel->CreateVISASurfaceVar(dummySurface, "", 1));
+        V(vKernel->CreateVISASurfaceVar(dummySurface, "", 1));
 
-    V(vKernel->CreateVISASamplerVar(samplervar, "", 1));
+        V(vKernel->CreateVISASamplerVar(samplervar, "", 1));
 
-    CEncoder::SetFloatDenormMode(vKernel, context->m_floatDenormMode16,
-                                          context->m_floatDenormMode32,
-                                          context->m_floatDenormMode64);
-
-    // The instruction is generated only if mode != FLOAT_ROUND_TO_NEAREST_EVEN
-    CEncoder::SetFloatRoundingMode(
-        getEncoderRoundingMode(FLOAT_ROUND_TO_NEAREST_EVEN),
-        getEncoderRoundingMode(static_cast<Float_RoundingMode>(
-            context->getModuleMetaData()->compOpt.FloatRoundingMode)));
+        // Set float denorm modes and rounding modes as default
+        initCR(vKernel);
     }
 
     void CEncoder::SetKernelStackPointer64()
@@ -4515,105 +4593,107 @@ namespace IGC
 
     void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
     {
-    buffer = nullptr;
-    bufferSize = 0;
-    tableEntries = 0;
-    Module* pModule = m_program->GetContext()->getModule();
-    ModuleMetaData* modMD = m_program->GetContext()->getModuleMetaData();
+        buffer = nullptr;
+        bufferSize = 0;
+        tableEntries = 0;
 
-    std::vector<Function*> funcsToExport;
+        Module* pModule = m_program->GetContext()->getModule();
+        ModuleMetaData* modMD = m_program->GetContext()->getModuleMetaData();
 
-    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
-    {
-            for (auto& F : pModule->getFunctionList())
+        std::vector<vISA::GenSymEntry> symbolTable;
+
+        for (auto& F : pModule->getFunctionList())
         {
             // Find all functions in the module we need to export as symbols
-            if (F.hasFnAttribute("IndirectlyCalled"))
+            if (F.hasFnAttribute("IndirectlyCalled") && (!F.isDeclaration() || F.getNumUses() > 0))
             {
-                if (!F.isDeclaration() || F.getNumUses() > 0)
-                    funcsToExport.push_back(&F);
-            }
-        }
-        tableEntries += funcsToExport.size();
-    }
-
-        if (modMD->compOpt.EnableGlobalRelocation)
-    {
-        tableEntries += modMD->inlineProgramScopeOffsets.size();
-    }
-
-    if (tableEntries > 0)
-    {
-        // Allocate buffer to store symbol table entries
-        bufferSize = sizeof(vISA::GenSymEntry) * tableEntries;
-            buffer = (void*)malloc(bufferSize);
-        assert(buffer && "Symbol Table not allocated");
-        vISA::GenSymEntry* entry_ptr = (vISA::GenSymEntry*) buffer;
-
-        if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
-        {
-            // Export function symbols
-            for (auto pFunc : funcsToExport)
-            {
-                assert(pFunc->getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
-                strcpy_s(entry_ptr->s_name, vISA::MAX_SYMBOL_NAME_LENGTH, pFunc->getName().str().c_str());
+                vISA::GenSymEntry fEntry;
+                assert(F.getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
+                strcpy_s(fEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, F.getName().str().c_str());
 
                 bool isTrue = false;
-                if (pFunc->isDeclaration() || isTrue)
+                if (F.isDeclaration() || isTrue)
                 {
                     // If the function is only declared, set as undefined type
-                    entry_ptr->s_type = vISA::GenSymType::S_UNDEF;
-                    entry_ptr->s_offset = 0;
-                    entry_ptr->s_size = 0;
+                    fEntry.s_type = vISA::GenSymType::S_UNDEF;
+                    fEntry.s_offset = 0;
+                    fEntry.s_size = 0;
                 }
                 else
                 {
-                    auto Iter = stackFuncMap.find(pFunc);
+                    auto Iter = stackFuncMap.find(&F);
                     assert(Iter != stackFuncMap.end() && "vISA function not found");
 
                     // Query vISA for the function's byte offset within the compiled module
                     VISAFunction* visaFunc = Iter->second;
-                    entry_ptr->s_type = vISA::GenSymType::S_FUNC;
-                    entry_ptr->s_offset = (uint32_t)visaFunc->getGenOffset();
-                    entry_ptr->s_size = (uint32_t)visaFunc->getGenSize();
+                    fEntry.s_type = vISA::GenSymType::S_FUNC;
+                    fEntry.s_offset = (uint32_t)visaFunc->getGenOffset();
+                    fEntry.s_size = (uint32_t)visaFunc->getGenSize();
                 }
-                entry_ptr++;
+                symbolTable.push_back(fEntry);
             }
         }
 
-            if (modMD->compOpt.EnableGlobalRelocation)
+        // Export global symbols
+        for (auto global : modMD->inlineProgramScopeOffsets)
         {
-            // Export global symbols
-            for (auto global : modMD->inlineProgramScopeOffsets)
+            GlobalVariable* pGlobal = global.first;
+            bool needRelocation = false;
+            for (auto ui = pGlobal->user_begin(), ue = pGlobal->user_end(); ui != ue; ui++)
             {
-                StringRef name = global.first->getName();
-                unsigned addrSpace = global.first->getType()->getAddressSpace();
-
+                // Check if need relocation
+                Instruction* inst = dyn_cast<Instruction>(*ui);
+                if (inst && inst->getParent()->getParent()->hasFnAttribute("EnableGlobalRelocation"))
+                {
+                    needRelocation = true;
+                    break;
+                }
+            }
+            if (needRelocation)
+            {
+                StringRef name = pGlobal->getName();
+                unsigned addrSpace = pGlobal->getType()->getAddressSpace();
                 assert(name.size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
-                assert(addrSpace == ADDRESS_SPACE_GLOBAL || addrSpace == ADDRESS_SPACE_CONSTANT);
 
-                strcpy_s(entry_ptr->s_name, vISA::MAX_SYMBOL_NAME_LENGTH, name.str().c_str());
-                entry_ptr->s_type = (addrSpace == ADDRESS_SPACE_GLOBAL) ? vISA::GenSymType::S_GLOBAL_VAR : vISA::GenSymType::S_GLOBAL_VAR_CONST;
-                entry_ptr->s_offset = static_cast<uint32_t>(global.second);
-                entry_ptr->s_size = int_cast<uint32_t>(pModule->getDataLayout().getTypeAllocSize(global.first->getType()->getPointerElementType()));
-                entry_ptr++;
+                vISA::GenSymEntry sEntry;
+                strcpy_s(sEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, name.str().c_str());
+                MDNode* md = pGlobal->getMetadata("ConstSampler");
+                if (md)
+                {
+                    // Constant Sampler: s_offset contains the sampler ID
+                    sEntry.s_type = vISA::GenSymType::S_CONST_SAMPLER;
+                    sEntry.s_size = 0;
+                    sEntry.s_offset = static_cast<uint32_t>(global.second);
+                }
+                else
+                {
+                    sEntry.s_type = (addrSpace == ADDRESS_SPACE_GLOBAL) ? vISA::GenSymType::S_GLOBAL_VAR : vISA::GenSymType::S_GLOBAL_VAR_CONST;
+                    sEntry.s_size = int_cast<uint32_t>(pModule->getDataLayout().getTypeAllocSize(pGlobal->getType()->getPointerElementType()));
+                    sEntry.s_offset = static_cast<uint32_t>(global.second);
+                }
+                symbolTable.push_back(sEntry);
             }
         }
+
+        if (!symbolTable.empty())
+        {
+            tableEntries = symbolTable.size();
+            bufferSize = tableEntries * sizeof(vISA::GenSymEntry);
+            buffer = (void*)malloc(bufferSize);
+            assert(buffer && "Symbol table cannot be allocated");
+            memcpy_s(buffer, bufferSize, symbolTable.data(), bufferSize);
+        }
     }
-    }
+
     void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
     {
-    buffer = nullptr;
-    bufferSize = 0;
-    tableEntries = 0;
-        ModuleMetaData* modMD = m_program->GetContext()->getModuleMetaData();
+        buffer = nullptr;
+        bufferSize = 0;
+        tableEntries = 0;
 
-        if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) || modMD->compOpt.EnableGlobalRelocation)
-    {
         // vISA will directly return the buffer with GenRelocEntry layout
         V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
         assert(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
-    }
     }
 
     void CEncoder::Compile(bool hasSymbolTable)
@@ -4736,7 +4816,11 @@ namespace IGC
         else if (vIsaCompile == -3) // CM early terminates on spill
     {
 #if (GET_SHADER_STATS)
-        if (m_program->m_dispatchSize == SIMDMode::SIMD16)
+        if( m_program->m_dispatchSize == SIMDMode::SIMD8 )
+        {
+            COMPILER_SHADER_STATS_SET( m_program->m_shaderStats, STATS_ISA_EARLYEXIT8, 1 );
+        }
+        else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
         {
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_EARLYEXIT16, 1);
         }
@@ -4882,18 +4966,22 @@ namespace IGC
     pOutput->m_debugDataGenISA = dbgInfo;
     pOutput->m_debugDataGenISASize = dbgSize;
     pOutput->m_InstructionCount = jitInfo->numAsmCount;
+    pOutput->m_BasicBlockCount = jitInfo->BBNum;
 
     pMainKernel->GetGTPinBuffer(pOutput->m_gtpinBuffer, pOutput->m_gtpinBufferSize);
 
-    if (hasSymbolTable)
+    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
     {
-        CreateSymbolTable(pOutput->m_funcSymbolTable,
-            pOutput->m_funcSymbolTableSize,
-            pOutput->m_funcSymbolTableEntries);
+        if (hasSymbolTable)
+        {
+            CreateSymbolTable(pOutput->m_funcSymbolTable,
+                pOutput->m_funcSymbolTableSize,
+                pOutput->m_funcSymbolTableEntries);
+        }
+        CreateRelocationTable(pOutput->m_funcRelocationTable,
+            pOutput->m_funcRelocationTableSize,
+            pOutput->m_funcRelocationTableEntries);
     }
-    CreateRelocationTable(pOutput->m_funcRelocationTable,
-                          pOutput->m_funcRelocationTableSize,
-                          pOutput->m_funcRelocationTableEntries);
 
     if (jitInfo->isSpill == true)
     {
@@ -4905,6 +4993,8 @@ namespace IGC
     pOutput->m_scratchSpaceUsedByGtpin = jitInfo->numBytesScratchGtpin;
 
     pOutput->m_offsetToSkipPerThreadDataLoad = jitInfo->offsetToSkipPerThreadDataLoad;
+
+    pOutput->m_offsetToSkipSetFFIDGP = jitInfo->offsetToSkipSetFFIDGP;
     }
 
     void CEncoder::DestroyVISABuilder()
@@ -4954,8 +5044,8 @@ namespace IGC
 
     void CEncoder::GatherA64(CVariable* dst,
         CVariable* offset,
-                         unsigned elemSize,
-                         unsigned numElems) {
+        unsigned elemSize,
+        unsigned numElems) {
     assert((elemSize == 8 || elemSize == 32 || elemSize == 64) &&
            "Only B/DW/QW-sized elements are supported!");
     assert((numElems == 1 || numElems == 2 || numElems == 4 ||

@@ -93,10 +93,11 @@ G4_Label* OperandHashTable::createLabel(const char* lab)
 //
 // create the region <vstride; width, hstride> if not yet created
 //
-RegionDesc* RegionPool::createRegion(uint16_t vstride, uint16_t width, uint16_t hstride)
+const RegionDesc* RegionPool::createRegion(
+    uint16_t vstride, uint16_t width, uint16_t hstride)
 {
 
-    for (unsigned i = 0, size = (unsigned) rgnlist.size(); i < size; i++)
+    for (unsigned i = 0, size = (unsigned)rgnlist.size(); i < size; i++)
     {
         RegionDesc* region = rgnlist[i];
         if (region->vertStride == vstride &&
@@ -725,7 +726,8 @@ G4_INST* IR_Builder::createInternalMathInst(G4_Predicate* prd,
     return ii;
 }
 
-G4_INST* IR_Builder::createIntrinsicInst(G4_Predicate* prd, Intrinsic intrinId,
+G4_INST* IR_Builder::createIntrinsicInst(
+    G4_Predicate* prd, Intrinsic intrinId,
     uint8_t size, G4_DstRegRegion* dst,
     G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
     unsigned int option, int lineno, bool addToInstList)
@@ -1177,12 +1179,12 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst_For_RTWrite(G4_Predicate *pred,
         option, msgDesc, extDescOpnd);
 }
 
-// create a dcl for MRF, size in UD is given
-G4_Declare* IR_Builder::Create_MRF_Dcl( unsigned num_elt, G4_Type type )
+// create a declare for send payload
+G4_Declare* IR_Builder::createSendPayloadDcl( unsigned num_elt, G4_Type type )
 {
     const char* name = getNameString(mem, 16, "M%u", ++num_general_dcl);
-    unsigned short numRow = ( num_elt * G4_Type_Table[type].byteSize - 1 ) / GENX_MRF_REG_SIZ + 1;
-    unsigned short numElt = ( numRow == 1 ) ? num_elt : (GENX_MRF_REG_SIZ/G4_Type_Table[type].byteSize);
+    unsigned short numRow = ( num_elt * G4_Type_Table[type].byteSize - 1 ) / GENX_GRF_REG_SIZ + 1;
+    unsigned short numElt = ( numRow == 1 ) ? num_elt : (GENX_GRF_REG_SIZ/G4_Type_Table[type].byteSize);
     G4_Declare *dcl = createDeclareNoLookup(
         name,
         G4_GRF,
@@ -1191,7 +1193,7 @@ G4_Declare* IR_Builder::Create_MRF_Dcl( unsigned num_elt, G4_Type type )
         type);
     return dcl;
 }
-// create mov(8) mrf, r0
+
 void IR_Builder::Create_MOVR0_Inst( G4_Declare* dcl, short regOff, short subregOff, bool use_nomask )
 {
     G4_DstRegRegion dst1(
@@ -1206,17 +1208,12 @@ void IR_Builder::Create_MOVR0_Inst( G4_Declare* dcl, short regOff, short subregO
     // create r0 src
     G4_SrcRegRegion* r0_src_opnd = Create_Src_Opnd_From_Dcl(builtinR0, getRegionStride1());
     // create inst
-    createInst(
-        NULL,
-        G4_mov,
-        NULL,
-        false,
+    createMov(
         GENX_DATAPORT_IO_SZ,
         dst1_opnd,
         r0_src_opnd,
-        NULL,
         ( use_nomask ? InstOpt_WriteEnable : 0 ),
-        0 );
+        true );
 }
 
 void IR_Builder::Create_ADD_Inst(G4_Declare* dcl, short regOff, short subregOff, uint8_t execsize,
@@ -1278,8 +1275,8 @@ void IR_Builder::Create_MOV_Inst(
         0 );
 }
 
-// create multiple MOV inst for send src --> MRF if there are more than 64 byte data in src.
-// dcl: decl for MRF
+// send payload preparation.
+// dcl: decl for send payload
 // num_dword: number of DW to send
 // src_opnd: send src, its size may be several GRFs
 void IR_Builder::Create_MOV_Send_Src_Inst(
@@ -1299,7 +1296,7 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
     G4_DstRegRegion* dst = NULL;
     //G4_SrcRegRegion* src = NULL;
     G4_Operand* src = NULL;
-    RegionDesc *rd = NULL;
+    const RegionDesc *rd = NULL;
     G4_Declare *dst_dcl = dcl;
     short src_regoff = 0, src_subregoff = 0;
     bool non_ud_scalar = false;
@@ -1308,7 +1305,7 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
     if( scalar_src && src_opnd->getType() != Type_UD ){
         // change the type of dst dcl to src type
         remained_dword = num_dword * ( G4_Type_Table[Type_UD].byteSize/G4_Type_Table[src_opnd->getType()].byteSize );
-        dst_dcl = Create_MRF_Dcl(remained_dword, src_opnd->getType());
+        dst_dcl = createSendPayloadDcl(remained_dword, src_opnd->getType());
         dst_dcl->setAliasDeclare( dcl, regoff * G4_GRF_REG_NBYTES + subregoff * G4_Type_Table[Type_UD].byteSize );
         dst_regoff = 0;
         dst_subregoff = 0;
@@ -1348,7 +1345,6 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
         {
             if( remained_dword >= 32 )
             {
-                // mov(16) mrf src
                 execsize = 32;
             }
             else if( remained_dword >= 16 )
@@ -1374,7 +1370,6 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
         {
             if( remained_dword >= 16 )
             {
-                // mov(16) mrf src
                 execsize = 16;
             }
             else if( remained_dword >= 8 )
@@ -1422,44 +1417,39 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
                 dst_dcl->getElemType());
         }
 
-        // create inst
-        createInst(
-            NULL,
-            G4_mov,
-            NULL,
-            false,
+        createMov(
             execsize,
             dst,
             src,
-            NULL,
             option,
-            0 );
+            true );
 
         // update offset in decl
-        if( remained_dword >= execsize ){
+        if (remained_dword >= execsize) {
             remained_dword -= execsize;
-            if( execsize * dst_dcl->getElemSize() == 2 * G4_GRF_REG_NBYTES ){
-                // mov(16) mrf src
+            if (execsize * dst_dcl->getElemSize() == 2 * G4_GRF_REG_NBYTES) {
                 dst_regoff += 2;
-                if( !scalar_src ){
+                if (!scalar_src) {
                     src_regoff += 2;
                 }
-            }else if( execsize * dst_dcl->getElemSize() == G4_GRF_REG_NBYTES ){
+            }
+            else if (execsize * dst_dcl->getElemSize() == G4_GRF_REG_NBYTES) {
                 dst_regoff += 1;
-                if( !scalar_src ){
+                if (!scalar_src) {
                     src_regoff += 1;
                 }
-            }else{
+            }
+            else {
                 dst_subregoff += execsize;
-                if( dst_subregoff > (G4_GRF_REG_NBYTES/dst_dcl->getElemSize()) ){
+                if (dst_subregoff > (G4_GRF_REG_NBYTES / dst_dcl->getElemSize())) {
                     dst_regoff++;
-                    dst_subregoff -= G4_GRF_REG_NBYTES/dst_dcl->getElemSize();
+                    dst_subregoff -= G4_GRF_REG_NBYTES / dst_dcl->getElemSize();
                 }
-                if( !scalar_src ){
+                if (!scalar_src) {
                     src_subregoff += execsize;
-                    if( src_subregoff > (short)(G4_GRF_REG_NBYTES/G4_Type_Table[Type_UD].byteSize) ){
+                    if (src_subregoff > (short)(G4_GRF_REG_NBYTES / G4_Type_Table[Type_UD].byteSize)) {
                         src_regoff++;
-                        src_subregoff -= G4_GRF_REG_NBYTES/G4_Type_Table[Type_UD].byteSize;
+                        src_subregoff -= G4_GRF_REG_NBYTES / G4_Type_Table[Type_UD].byteSize;
                     }
                 }
             }
@@ -1477,7 +1467,8 @@ G4_DstRegRegion* IR_Builder::Create_Dst_Opnd_From_Dcl( G4_Declare* dcl, unsigned
         dcl->getElemType());
 }
 // create an opnd without regpoff and subregoff
-G4_SrcRegRegion* IR_Builder::Create_Src_Opnd_From_Dcl( G4_Declare* dcl, RegionDesc* rd )
+G4_SrcRegRegion* IR_Builder::Create_Src_Opnd_From_Dcl(
+    G4_Declare* dcl, const RegionDesc* rd)
 {
     return createSrcRegRegion(
         Mod_src_undef,
@@ -1489,7 +1480,7 @@ G4_SrcRegRegion* IR_Builder::Create_Src_Opnd_From_Dcl( G4_Declare* dcl, RegionDe
         dcl->getElemType());
 }
 
-G4_DstRegRegion* IR_Builder::createNullDst( G4_Type dstType )
+G4_DstRegRegion* IR_Builder::createNullDst(G4_Type dstType)
 {
     return createDstRegRegion( Direct,
         phyregpool.getNullReg(),
@@ -1895,10 +1886,10 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
     // (W) add (16) SLMSpillAddr:ud perThreadSLMStart<0;1,0>:ud immVec<8;8,1>:uw
     G4_Imm* vec = createImm(0x76543210, Type_UV);
     G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);
-    instBuffer.push_back(createInternalInst(nullptr, G4_mov, nullptr, false, 8, dst, vec, nullptr, InstOpt_WriteEnable));
+    instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
     vec = createImm(0xFEDCBA98, Type_UV);
     dst = createDstRegRegion(Direct, builtinImmVector4->getRegVar(), 0, 8, 1, Type_UW);
-    instBuffer.push_back(createInternalInst(nullptr, G4_mov, nullptr, false, 8, dst, vec, nullptr, InstOpt_WriteEnable));
+    instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
     G4_SrcRegRegion* mulSrc = Create_Src_Opnd_From_Dcl(builtinImmVector4, getRegionStride1());
     dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);
     instBuffer.push_back(createInst(nullptr, G4_mul, nullptr, false, 16, dst, mulSrc, createImm(4, Type_UW), InstOpt_WriteEnable));
@@ -1910,3 +1901,66 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
     }
     entryBB->insert(insertIter, instBuffer.begin(), instBuffer.end());
 }
+
+G4_Predicate_Control IR_Builder::vISAPredicateToG4Predicate(VISA_PREDICATE_CONTROL control, int size)
+{
+    switch (control)
+    {
+    case PRED_CTRL_NON:
+        return PRED_DEFAULT;
+    case PRED_CTRL_ANY:
+    {
+        if (!predCtrlHasWidth())
+        {
+            return PRED_ANY_WHOLE;
+        }
+        switch (size)
+        {
+        case 1:
+            return PRED_DEFAULT;
+        case 2:
+            return PRED_ANY2H;
+        case 4:
+            return PRED_ANY4H;
+        case 8:
+            return PRED_ANY8H;
+        case 16:
+            return PRED_ANY16H;
+        case 32:
+            return PRED_ANY32H;
+        default:
+            MUST_BE_TRUE(0, "Invalid predicate control group size.");
+            return PRED_DEFAULT;
+        }
+    }
+    case PRED_CTRL_ALL:
+    {
+        if (!predCtrlHasWidth())
+        {
+            return PRED_ALL_WHOLE;
+        }
+        switch (size)
+        {
+        case 1:
+            return PRED_DEFAULT;
+        case 2:
+            return PRED_ALL2H;
+        case 4:
+            return PRED_ALL4H;
+        case 8:
+            return PRED_ALL8H;
+        case 16:
+            return PRED_ALL16H;
+        case 32:
+            return PRED_ALL32H;
+        default:
+            MUST_BE_TRUE(0, "Invalid predicate control group size.");
+            return PRED_DEFAULT;
+        }
+    }
+    default:
+        MUST_BE_TRUE(0, "Invalid predicate control.");
+        return PRED_DEFAULT;
+    }
+}
+

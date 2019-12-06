@@ -72,9 +72,6 @@ private:
     iga::Instruction *encodeSplitSendInstruction(G4_INST *inst);
 
     std::map<G4_Label*, iga::Block*> labelToBlockMap;
-    iga::Op getIGAOpFromSFIDForSend(G4_opcode op, G4_INST *inst) const;
-    iga::Op getIGAOp(G4_opcode op, G4_INST *inst) const;
-
 
     iga::ExecSize getIGAExecSize(int execSize) const
     {
@@ -170,6 +167,7 @@ public:
 
     static iga::SWSB_ENCODE_MODE getIGASWSBEncodeMode(const IR_Builder& builder);
 
+    static iga::Op getIGAOp(G4_opcode op, const G4_INST* inst, iga::Platform iga_platform);
 private:
 
     iga::PredCtrl getIGAPredCtrl(G4_Predicate_Control g4PredCntrl) const
@@ -274,7 +272,7 @@ private:
     iga::Region getIGARegion(G4_SrcRegRegion* srcRegion, int srcPos) const
     {
         iga::Region igaRegion;
-        RegionDesc* region = srcRegion->getRegion();
+        const RegionDesc* region = srcRegion->getRegion();
         if ((srcRegion->getInst()->getNumSrc() == 3 && !srcRegion->getInst()->isSend()))
         {
             // special handling for 3src instructions
@@ -448,8 +446,9 @@ private:
         }
     }
 
+    static iga::Op getIGAOpFromSFIDForSend(G4_opcode op, const G4_INST* inst);
 
-    iga::Op getIGAMathOp(G4_INST *inst) const
+    static iga::Op getIGAMathOp(const G4_INST *inst)
     {
 
         G4_MathOp mathControlValue = inst->asMathInst()->getMathCtrl();

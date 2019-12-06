@@ -93,7 +93,7 @@ G4_InstOptInfo InstOptInfo[] =
     { G4_##op, name, nsrc, ndst, type, plat, \
       attr },
 
-G4_Inst_Info G4_Inst_Table[] = {
+const G4_Inst_Info G4_Inst_Table[] = {
 #include "G4Instruction.def"
 };
 
@@ -262,7 +262,6 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     accessType = access;
     funcCtrlValid = true;
 
-
     m_bti = bti;
     m_sti = sti;
 
@@ -351,6 +350,14 @@ static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType)
         if (msgType == DC1_TYPED_ATOMIC)
             return true;
     }
+    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::GEN12)
+    {
+        if (msgType == DC1_TYPED_HALF_INTEGER_ATOMIC ||
+            msgType == DC1_TYPED_HALF_COUNTER_ATOMIC ||
+            msgType == DC1_UNTYPED_HALF_INTEGER_ATOMIC ||
+            msgType == DC1_A64_UNTYPED_HALF_INTEGER_ATOMIC)
+            return true;
+    }
     return false;
 }
 
@@ -363,6 +370,12 @@ static bool isHdcFloatAtomicMessage(SFID funcID, uint16_t msgType)
     {
         if (msgType == DC1_UNTYPED_FLOAT_ATOMIC ||
             msgType == DC1_A64_UNTYPED_FLOAT_ATOMIC)
+            return true;
+    }
+    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::GEN12)
+    {
+        if (msgType == DC1_UNTYPED_HALF_FLOAT_ATOMIC ||
+            msgType == DC1_A64_UNTYPED_HALF_FLOAT_ATOMIC)
             return true;
     }
     return false;
@@ -500,6 +513,8 @@ bool G4_SendMsgDescriptor::isA64Message() const
         case DC1_A64_UNTYPED_SURFACE_WRITE:
         case DC1_A64_SCATTERED_WRITE:
         case DC1_A64_UNTYPED_FLOAT_ATOMIC:
+        case DC1_A64_UNTYPED_HALF_INTEGER_ATOMIC:
+        case DC1_A64_UNTYPED_HALF_FLOAT_ATOMIC:
             return true;
         }
         break;
@@ -1469,7 +1484,7 @@ namespace {
     // but the content it is pointing to.
     struct def_less
     {
-        bool operator()(DEF_EDGE_LIST_ITER a, DEF_EDGE_LIST_ITER b)
+        bool operator()(DEF_EDGE_LIST_ITER a, DEF_EDGE_LIST_ITER b) const
         {
             if (a->first < b->first)
             {
@@ -2150,6 +2165,7 @@ static bool isLegalImmType(G4_Type type)
 // 4. byte src to if/while instructions
 // 5. src with modifier to logic inst on BDW
 // 6. When useinst is lifetime.end
+// 7. use inst does not have dst
 bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovType MT, bool inSimdFlow)
 {
     G4_Operand *src = srcs[0];
@@ -2176,6 +2192,10 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         return false;
     }
 
+    // skip the instruction has no dst. e.g. G4_pseudo_fcall
+    if (useInst->getDst() == nullptr)
+        return false;
+
     if (isMixedMode())
     {
         // FIXME: what's this for?
@@ -2196,6 +2216,15 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
         {
             return false;
         }
+    }
+    else if (srcType != useType && useInst->opcode() == G4_mulh)
+    {
+        // don't propagate widening ops into a mul/mach
+        //   mov  T:d  SRC:w
+        //   ...
+        //   mach ... T:d ...
+        // mach requires 32b types only
+        return false;
     }
 
 
@@ -2353,7 +2382,8 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     unsigned srcElSize = G4_Type_Table[propType].byteSize;
     unsigned useElSize = G4_Type_Table[useType].byteSize;
 
-    RegionDesc *rd = !src->isSrcRegRegion() ? NULL : src->asSrcRegRegion()->getRegion();
+    const RegionDesc *rd =
+        src->isSrcRegRegion() ? src->asSrcRegRegion()->getRegion() : nullptr;
     unsigned char new_exec_size = useInst->getExecSize();
     if (useElSize != dstElSize &&
         (!src->isSrcRegRegion()
@@ -2375,7 +2405,8 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     // Check repeat region
     bool sameDefUseELSize = (dstElSize == useElSize);
     bool sameExecSize = (execSize == new_exec_size);
-    RegionDesc *useRd = use->isSrcRegRegion() ? use->asSrcRegRegion()->getRegion() : nullptr;
+    const RegionDesc *useRd =
+        use->isSrcRegRegion() ? use->asSrcRegRegion()->getRegion() : nullptr;
     bool repeatUseRegion = useRd && useRd->isRepeatRegion(new_exec_size);
     bool scalarUse = useRd && useRd->isScalar();
     bool repeatSrcRegion = (rd && rd->isRepeatRegion(execSize));
@@ -2723,7 +2754,7 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
 
     uint16_t dstHS = dst->getHorzStride();
     uint16_t srcHS = 0;
-    RegionDesc *srcRd = srcs[0]->asSrcRegRegion()->getRegion();
+    const RegionDesc *srcRd = srcs[0]->asSrcRegRegion()->getRegion();
     if (!srcRd->isSingleStride(execSize, srcHS))
     {
         return false;
@@ -2805,7 +2836,7 @@ bool G4_INST::isCommutative() const
 // 5. acc src can not use modifier in LOGIC inst
 
 // There are many cases that use simd16 Float, split these instructions enables more opportimizations.
-bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs, bool allow3Src, bool allowTypeDemotion, bool insertMov )
+bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs, bool allowTypeDemotion, bool insertMov )
 {
     hs = 0;
 
@@ -2818,9 +2849,7 @@ bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs
     }
 
     // opcode related checks (why is this necessary? shouldn't inst always be pseudo_mad???)
-    if (op == G4_math || op == G4_shl ||
-        (!allow3Src && G4_Inst_Table[op].n_srcs > 2 ) ||
-        (predicate && op != G4_sel))
+    if (op == G4_math || op == G4_shl || (predicate && op != G4_sel))
     {
         return false;
     }
@@ -2857,7 +2886,7 @@ bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs
 
     if (useInst->isSend() ||
         useOp == G4_math || useOp == G4_mac || useOp == G4_mach || useOp == G4_sada2 ||
-        G4_Inst_Table[useOp].n_srcs > 2 ||
+        useInst->getNumSrc() > 2 ||
         (G4_Inst_Table[useOp].instType == InstTypeLogic && use->getModifier() != Mod_src_undef))
     {
         return false;
@@ -2891,7 +2920,7 @@ bool G4_INST::canUseACCOpt( bool handleComprInst, bool checkRegion, uint16_t &hs
     {
         // recompute exec type
         useExecType = Type_W;
-        for (unsigned i = 0; i < G4_Inst_Table[useInst->opcode()].n_srcs; i++)
+        for (int i = 0; i < useInst->getNumSrc(); i++)
         {
             if( useInst->getSrc(i) == use )
             {
@@ -3246,7 +3275,7 @@ G4_INST::isComprInvariantSrcRegion(G4_SrcRegRegion* src, int srcPos)
          return true;
     }
 
-    RegionDesc* region = src->getRegion();
+    const RegionDesc* region = src->getRegion();
 
     if (opcode() == G4_line && srcPos == 0)
     {
@@ -3391,9 +3420,9 @@ bool G4_INST::isOptBarrier() const
         }
     }
 
-    for (int i = 0; i < G4_Inst_Table[op].n_srcs; i++)
+    for (int i = 0; i < getNumSrc(); i++)
     {
-        if (srcs[i] != NULL)
+        if (srcs[i])
         {
             if (srcs[i]->isAreg())
             {
@@ -3658,19 +3687,8 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
             output << ' ';
         }
 
-        auto getNumSrcOpnds = [this]()
-        {
-            G4_opcode op = this->opcode();
-            unsigned int numOpnds = G4_Inst_Table[op].n_srcs;
-
-            if (op == G4_opcode::G4_intrinsic)
-                numOpnds = G4_Intrinsics[(int)this->asIntrinsicInst()->getIntrinsicId()].numSrc;
-
-            return numOpnds;
-        };
-
-        auto numSrcOpnds = getNumSrcOpnds();
-        for (unsigned i = 0; i < numSrcOpnds; i++)
+        auto numSrcOpnds = getNumSrc();
+        for (int i = 0; i < numSrcOpnds; i++)
         {
             if (srcs[i])
             {
@@ -3881,7 +3899,7 @@ bool G4_INST::isMixedMode() const
     {
         return false;
     }
-    for (int i = 0; i < G4_Inst_Table[opcode()].n_srcs; ++i)
+    for (int i = 0; i < getNumSrc(); ++i)
     {
         G4_Operand *tOpnd = getSrc(i);
         if(!tOpnd)
@@ -7421,6 +7439,18 @@ bool G4_INST::canSupportCondMod() const
         (op == G4_shr) ||
         (op == G4_subb) ||
         (op == G4_xor));
+}
+
+bool G4_INST::canSupportSrcModifier() const
+{
+    const iga::Model* iga_model = builder.getIGAModel();
+
+    assert(iga_model != nullptr);
+
+    const iga::OpSpec& iga_opspec =
+        iga_model->lookupOpSpec(BinaryEncodingIGA::getIGAOp(op, this, iga_model->platform));
+
+    return iga_opspec.supportsSourceModifiers();
 }
 
 // convert (execsize, offset) into emask option

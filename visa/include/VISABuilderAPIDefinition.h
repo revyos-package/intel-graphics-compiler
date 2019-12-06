@@ -319,7 +319,7 @@ public:
     /// [pred] fcall (emask, execSize) function
     /// argSize must be [0, sizeof(Arg)]
     /// returnSize must be [0, sizeof(RetVal)]
-    CM_BUILDER_API virtual int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, 
+    CM_BUILDER_API virtual int AppendVISACFFunctionCallInst(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask,
         Common_ISA_Exec_Size executionSize, std::string funcName, unsigned char argSize, unsigned char returnSize) = 0;
 
     /// AppendVISACFIndirectFuncCallInst -- append an indirect function call to this kernel
@@ -509,9 +509,10 @@ public:
     /// AppendVISAMiscRawSend -- create a GEN split send instruction
     /// [pred] sends/sendsc (esize) <dst> <src0> <src1> <exMsgDesc> <desc> {emask}
     /// bit 0 of modifiers controls whether it's sends (0) or sendsc (1)
+    //  bit 1 of modifiers has EOT flag for raw sends
     CM_BUILDER_API virtual int AppendVISAMiscRawSends(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize, unsigned char modifiers,
                                        unsigned ffid, VISA_VectorOpnd *exMsgDesc, unsigned char src0Size, unsigned char src1Size, unsigned char dstSize, VISA_VectorOpnd *desc,
-                                      VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst) = 0;
+                                      VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst, bool hasEOT) = 0;
 
     CM_BUILDER_API virtual int AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOpnd *varId) = 0;
 
@@ -778,6 +779,9 @@ public:
     CM_BUILDER_API virtual std::string getVarName(VISA_SurfaceVar* decl) const = 0;
     CM_BUILDER_API virtual std::string getVarName(VISA_SamplerVar* decl) const = 0;
 
+    //Gets the VISA string format for the operand
+    CM_BUILDER_API virtual std::string getVectorOperandName(VISA_VectorOpnd* opnd, bool showRegion) const = 0;
+    CM_BUILDER_API virtual std::string getPredicateOperandName(VISA_PredOpnd* opnd) const = 0;
 };
 
 class VISAFunction : public VISAKernel
@@ -827,5 +831,6 @@ public:
     CM_BUILDER_API virtual std::stringstream& GetAsmTextStream() = 0;
     CM_BUILDER_API virtual std::stringstream& GetAsmTextHeaderStream() = 0;
     CM_BUILDER_API virtual VISAKernel* GetVISAKernel() = 0;
+    CM_BUILDER_API virtual int ClearAsmTextStreams() = 0;
 };
 #endif

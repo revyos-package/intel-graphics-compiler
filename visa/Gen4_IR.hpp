@@ -719,7 +719,6 @@ public:
     {
         return G4_Inst_Table[op].instType == InstTypeVector;
     }
-    bool isMask() const { return G4_Inst_Table[op].instType == InstTypeMask; }
     bool isLabel() const { return op == G4_label; }
     bool isCall() const { return op == G4_call; }
     bool isFCall() const { return op == G4_pseudo_fcall; }
@@ -1087,7 +1086,7 @@ public:
     bool canHoist(bool simdBB, const Options *opt) const;
     bool isCommutative() const;
     bool canUseACCOpt(bool handleComprInst, bool checkRegion,
-        uint16_t &hs, bool allow3Src, bool allowTypeDemotion, bool insertMov = false);
+        uint16_t &hs, bool allowTypeDemotion, bool insertMov = false);
 
     bool hasNULLDst() const;
     bool goodTwoGRFDst(bool& evenSplitDst);
@@ -1119,6 +1118,7 @@ public:
     bool canSupportCondMod() const;
     bool canSwapSource() const;
     bool canSupportSaturate() const;
+    bool canSupportSrcModifier() const;
 
     bool usesFlag() const
     {
@@ -1217,9 +1217,6 @@ class G4_InstCF : public G4_INST
     // Ture if this is a backward branch.
     bool isBackwardBr;
 
-    // for FCALL only
-    std::string         calleeName = "";
-
 public:
 
     static const uint32_t unknownCallee = 0xFFFF;
@@ -1285,21 +1282,7 @@ public:
 
     bool isUniformGoto(unsigned KernelSimdSize) const;
 
-    void setCallee(const std::string& funcName)
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        calleeName = funcName;
-    }
-    std::string getCallee() const
-    {
-        MUST_BE_TRUE(op == G4_pseudo_fcall, "Must be a FCALL");
-        return calleeName;
-    }
-
-    bool isIndirectCall() const
-    {
-        return op == G4_pseudo_fcall && calleeName == "";
-    }
+    bool isIndirectCall() const;
 
     // for direct call, this is null till after the compilation units are stitched together
     // for indirect call, this is src0
@@ -1528,7 +1511,7 @@ public:
     void setTmpFlagStart(int startFlag) { tmpFlagStart = startFlag; }
 };
 }
-// see Gen4 Spec
+
 // RegionWH and RegionV are special for the different modes of source register indirect addressing
 // RegionWH = <width, horzStride>, we set vertStride to UNDEFINED_SHORT
 // RegionV = <horzStride>, we set both vertStride and width to UNDEFINED_SHORT
@@ -1539,7 +1522,10 @@ struct RegionDesc
     const uint16_t width;
     const uint16_t horzStride;
 
-    RegionDesc(uint16_t vs, uint16_t w, uint16_t hs) : vertStride(vs), width(w), horzStride(hs) {}
+    RegionDesc(uint16_t vs, uint16_t w, uint16_t hs) : vertStride(vs), width(w), horzStride(hs)
+    {
+        assert(isLegal() && "illegal region desc");
+    }
     void* operator new(size_t sz, vISA::Mem_Manager& m) {return m.alloc(sz);}
 
     // The legal values for Width are {1, 2, 4, 8, 16}.
@@ -1566,7 +1552,7 @@ struct RegionDesc
     bool isRegionV() const {return vertStride == UNDEFINED_SHORT && width == UNDEFINED_SHORT;}
     bool isScalar() const { return ( vertStride == 0 && horzStride == 0 ) || ( width == 1 && vertStride == 0 ); }        // to support decompression
     bool isRegionSW() const {return vertStride != UNDEFINED_SHORT && width == UNDEFINED_SHORT && horzStride == UNDEFINED_SHORT;}
-    bool isEqual(RegionDesc *r) { return vertStride == r->vertStride && width == r->width && horzStride == r->horzStride; }        // to support re-compression
+    bool isEqual(const RegionDesc *r) const { return vertStride == r->vertStride && width == r->width && horzStride == r->horzStride; }        // to support re-compression
     void emit(std::ostream& output) const;
     bool isPackedRegion() const { return ( ( horzStride == 0 && vertStride <= 1 ) || ( horzStride == 1 && vertStride <= width ) ); }
     bool isFlatRegion() const { return ( isScalar() || vertStride == horzStride * width ); }
@@ -1847,8 +1833,8 @@ public:
         // Following executed only if G4_Declare doesnt have an alias
         return spillFlag;
     }
-   
-    bool isEvenAlign() const; 
+
+    bool isEvenAlign() const;
     G4_SubReg_Align getSubRegAlign() const;
     void        setEvenAlign();
     void        setSubRegAlign(G4_SubReg_Align subAl);
@@ -2841,7 +2827,7 @@ namespace vISA
 
         G4_SrcModifier mod;
         G4_RegAccess   acc;            // direct, indirect GenReg or indirect MsgReg
-        RegionDesc*    desc;
+        const RegionDesc *desc;
         short          regOff;        // base+regOff is the starting register of the region
         short          subRegOff;    // sub reg offset related to the regVar in "base"
         short          immAddrOff;    // imm addr offset
@@ -2851,7 +2837,7 @@ namespace vISA
             G4_VarBase*    b,
             short roff,
             short sroff,
-            RegionDesc*    rd,
+            const RegionDesc* rd,
             G4_Type        ty,
             G4_AccRegSel regSel = ACC_UNDEFINED) :
             G4_Operand(G4_Operand::srcRegRegion, ty, b), mod(m), acc(a), desc(rd),
@@ -2910,7 +2896,6 @@ namespace vISA
         G4_SrcModifier    getModifier() const  { return mod; }
         bool              hasModifier() const  { return mod != Mod_src_undef; }
         const RegionDesc* getRegion() const  { return desc; }
-              RegionDesc* getRegion()        { return desc; }
         G4_RegAccess      getRegAccess() const { return acc; }
         short             getAddrImm()  const { return immAddrOff; }
         unsigned short    getElemSize() const { return (unsigned short)G4_Type_Table[type].byteSize; }
@@ -2981,7 +2966,7 @@ namespace vISA
             }
         }
 
-        void setRegion(RegionDesc* rd, bool isInvariant = false)
+        void setRegion(const RegionDesc* rd, bool isInvariant = false)
         {
             if (!isInvariant && !desc->isEqual(rd))
             {
@@ -3041,11 +3026,7 @@ enum ChannelEnable {
 
 namespace vISA
 {
-//
-// look up Gen4 ISA summary
-// <DstReg><DstRegion><WriteMask><DstType>
-// for both direct and indirect dst regions
-//
+
 class G4_DstRegRegion final : public G4_Operand
 {
     friend class IR_Builder;
@@ -3225,7 +3206,9 @@ typedef enum
     PRED_ALL16H,
     PRED_ALL32H,
     PRED_ANYV,
-    PRED_ALLV
+    PRED_ALLV,
+    PRED_ANY_WHOLE,   // any of the flag-bits
+    PRED_ALL_WHOLE    // all of the flag-bits
 } G4_Predicate_Control;
 
 typedef enum
@@ -3879,6 +3862,11 @@ inline const char* G4_InstCF::getUipLabelStr() const
 {
     MUST_BE_TRUE(uip != NULL && uip->isLabel(), ERROR_UNKNOWN);
     return uip->asLabel()->getLabel();
+}
+
+inline bool G4_InstCF::isIndirectCall() const
+{
+    return op == G4_pseudo_fcall && !getSrc(0)->isLabel();
 }
 
 static void computeSpillFillOperandBound(G4_Operand* opnd, unsigned int LB, int numReg)

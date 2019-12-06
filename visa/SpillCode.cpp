@@ -163,7 +163,7 @@ void SpillManager::genRegMov(G4_BB* bb,
                 Flag registers should always be scalar regions
             */
             G4_Type type = Type_W;
-            RegionDesc* srcRgn = NULL;
+            const RegionDesc* srcRgn = NULL;
             unsigned execSize = i;
             if(src->isFlag() || dst->isFlag())
             {
@@ -209,8 +209,8 @@ void SpillManager::genRegMov(G4_BB* bb,
                 useNoMask = true;
             }
             // mov (nRegs)  a0.aOff<1>  loc(0,locOff)<4;4,1>
-            builder.createInst(NULL,G4_mov,NULL,false,(uint8_t) execSize,d,s,NULL,
-                useNoMask ? InstOpt_WriteEnable : InstOpt_NoOpt);
+            builder.createMov((uint8_t) execSize, d, s,
+                useNoMask ? InstOpt_WriteEnable : InstOpt_NoOpt, true);
 
             sSubRegOff += i;
             dSubRegOff += i;

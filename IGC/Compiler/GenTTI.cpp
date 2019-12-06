@@ -222,6 +222,14 @@ namespace llvm {
                     }
                     return Total - PHIs;
                 };
+                auto countIntegerOperations = [](BasicBlock* BB) {
+                    unsigned Int_Instructions = 0;
+                    for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
+                        if (isa<IntegerType>((&*BI)->getType()))
+                            ++Int_Instructions;
+                    }
+                    return Int_Instructions;
+                };
                 auto hasLoad = [](BasicBlock* BB) {
                     for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI)
                         if (isa<LoadInst>(&*BI))
@@ -243,11 +251,13 @@ namespace llvm {
                 };
                 // For innermost loop, allow certain patterns.
                 unsigned Count = 0;
+                unsigned Int_Count = 0;
                 bool HasCall = false;
                 bool HasStore = false;
                 bool MayHasLoadInHeaderOnly = true;
                 for (auto BI = L->block_begin(), BE = L->block_end(); BI != BE; ++BI) {
                     Count += countNonPHI(*BI);
+                    Int_Count += countIntegerOperations(*BI);
                     HasCall |= hasCall(*BI);
                     HasStore |= hasStore(*BI);
                     if (L->getHeader() != *BI)
@@ -262,6 +272,15 @@ namespace llvm {
                     UP.MaxCount = UP.Count;
                     // The following is only available and required from LLVM 3.7+.
                     UP.AllowExpensiveTripCount = true;
+                }
+                //Controls stack size growth being too big to compile. When we get into SCEV
+                //and start processing the i32 instructions we can get too deep in the call stack
+                //that we cause a stack overflow during compilation.
+                unsigned Total_Potential_Inst = TripCount * Int_Count;
+                if (Total_Potential_Inst > 2700)
+                {
+                    UP.Threshold = 2000;
+                    UP.PartialThreshold = 2000;
                 }
             }
             return;
@@ -295,7 +314,7 @@ namespace llvm {
             ((TripCount != 0 && TripCount <= 40 && instCount < 40) ||
                 hasBlockReadWrite(L->getHeader())) &&
             // FIXME: WA for cases where the compiler is running with a smaller stack size
-            // we run into stack overflow in 
+            // we run into stack overflow in
             !ctx->m_DriverInfo.HasSmallStack())
         {
             return;
@@ -415,7 +434,7 @@ namespace llvm {
             // FIXME: We need to collect the cost following calling graph. However,
             // as LLVM's ininer only support bottom-up inlining currently. That's
             // not a big issue so far.
-            // 
+            //
             // FIXME: We also need to consider the case where sub-routine call is
             // enabled.
             unsigned FuncSize = countTotalInstructions(F, false);

@@ -96,7 +96,7 @@ typedef enum tagEU_OPCODE {
     EU_OPCODE_DPH     = 0x55,
     EU_OPCODE_DP3     = 0x56,
     EU_OPCODE_DP2     = 0x57,
-    EU_OPCODE_DP4A    = 0x58, 
+    EU_OPCODE_DP4A    = 0x58,
     EU_OPCODE_LINE    = 0x59,
     EU_OPCODE_PLN     = 0x5A,
     EU_OPCODE_MAD     = 0x5B,
@@ -5058,7 +5058,7 @@ typedef union tagEU_INSTRUCTION_OPERAND_SEND_MSG {
         DWORD MessageDescriptor_ResponseLength  : BITFIELD_RANGE( 20, 24); //
 
         /*****************************************************************************\
-        This field specifies the number of 256-bit MRF registers starting from &lt;curr_dest&gt; to be sent out on the request message payload. Valid value ranges from 1 to 15. A value of 0 is considered erroneous.
+        This field specifies the number of 256-bit registers starting from &lt;curr_dest&gt; to be sent out on the request message payload. Valid value ranges from 1 to 15. A value of 0 is considered erroneous.
         \*****************************************************************************/
         DWORD MessageDescriptor_MessageLength   : BITFIELD_RANGE( 25, 28); //
         DWORD __CODEGEN_UNIQUE(Overridden)      : BITFIELD_RANGE( 29, 31); // Override

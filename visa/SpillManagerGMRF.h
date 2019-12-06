@@ -58,7 +58,7 @@ struct RegionDesc;
 // Class definitions
 namespace vISA
 {
-class SpillManagerGMRF
+class SpillManagerGRF
 {
 public:
 
@@ -76,7 +76,7 @@ public:
 
     // Methods
 
-    SpillManagerGMRF (
+    SpillManagerGRF (
         GlobalRA&                g,
         unsigned                 spillAreaOffset,
         unsigned                 varIdCount,
@@ -93,7 +93,7 @@ public:
         bool                     useScratchMsg
     );
 
-    ~SpillManagerGMRF () {}
+    ~SpillManagerGRF () {}
 
     bool
     insertSpillFillCode    (
@@ -108,20 +108,20 @@ public:
     unsigned getNumGRFSpill() const { return numGRFSpill; }
     unsigned getNumGRFFill() const { return numGRFFill; }
     unsigned getNumGRFMove() const { return numGRFMove; }
-    // return the next cumulative logical offset. This does not non-spilled stuff like 
+    // return the next cumulative logical offset. This does not non-spilled stuff like
     // private variables placed by IGC (marked by spill_mem_offset)
     // this should only be called after insertSpillFillCode()
     uint32_t getNextOffset() const { return nextSpillOffset_; }
-    // return the cumulative scratch space offset for the next spilled variable. 
+    // return the cumulative scratch space offset for the next spilled variable.
     // This adjusts for scratch space reserved for file scope vars and IGC/GT-pin
-    uint32_t getNextScratchOffset() const 
+    uint32_t getNextScratchOffset() const
     {
         int offset = nextSpillOffset_;
         getSpillOffset(offset);
         return offset;
     }
 
-    // convert zero-based logical offset into the scratch space offset. 
+    // convert zero-based logical offset into the scratch space offset.
     void getSpillOffset(int& logicalOffset) const
     {
         logicalOffset += globalScratchOffset;
@@ -137,7 +137,7 @@ private:
 
     bool handleAddrTakenSpills( G4_Kernel * kernel, PointsToAnalysis& pointsToAnalysis );
     void insertAddrTakenSpillFill( G4_Kernel * kernel, PointsToAnalysis& pointsToAnalysis );
-    void insertAddrTakenSpillAndFillCode( G4_Kernel* kernel, G4_BB* bb, INST_LIST::iterator inst_it, 
+    void insertAddrTakenSpillAndFillCode( G4_Kernel* kernel, G4_BB* bb, INST_LIST::iterator inst_it,
         G4_Operand* opnd, PointsToAnalysis& pointsToAnalysis, bool spill, unsigned int bbid);
     void prunePointsTo( G4_Kernel* kernel, PointsToAnalysis& pointsToAnalysis );
 
@@ -439,7 +439,7 @@ private:
     );
 
     G4_Declare *
-    createMRFFillRangeDeclare (
+    createSendFillRangeDeclare (
         G4_SrcRegRegion * filledRegion,
         G4_INST *         sendInst
     );
@@ -500,20 +500,20 @@ private:
 
     G4_DstRegRegion *
     createMPayloadBlockWriteDstRegion (
-        G4_RegVar *       mrfRange,
+        G4_RegVar *       grfRange,
         unsigned          regOff = 0,
         unsigned          subregOff = 0
     );
 
     G4_DstRegRegion *
     createMHeaderInputDstRegion (
-        G4_RegVar *       mrfRange,
+        G4_RegVar *       grfRange,
         unsigned          subregOff = 0
     );
 
     G4_DstRegRegion *
     createMHeaderBlockOffsetDstRegion (
-        G4_RegVar *          mrfRange
+        G4_RegVar *          grfRange
     );
 
 
@@ -742,7 +742,7 @@ private:
     );
 
     INST_LIST::iterator
-    insertFillMRFRangeCode (
+    insertSendFillRangeCode (
         G4_SrcRegRegion *   filledRegion,
         INST_LIST::iterator filledInstIter,
         G4_BB* bb
@@ -760,8 +760,8 @@ private:
         unsigned size
     ) const;
 
-    SpillManagerGMRF (
-        const SpillManagerGMRF & other
+    SpillManagerGRF (
+        const SpillManagerGRF & other
     );
 
     bool useSplitSend() const;
@@ -846,6 +846,22 @@ private:
     int globalScratchOffset;
 
     bool useScratchMsg_;
+
+    bool headerNeeded()
+    {
+        bool needed = true;
+
+        if (useScratchMsg_ && getGenxPlatform() >= GENX_SKL)
+            needed = false;
+
+        if (builder_->kernel.fg.getHasStackCalls() ||
+            builder_->kernel.fg.getIsStackCallFunc())
+            needed = false;
+
+        return needed;
+    }
+
+    void saveRestoreA0(G4_BB*);
 };
 }
 bool isDisContRegion (

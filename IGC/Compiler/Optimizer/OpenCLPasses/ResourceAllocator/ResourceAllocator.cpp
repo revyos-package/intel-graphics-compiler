@@ -75,7 +75,7 @@ bool ResourceAllocator::runOnModule(Module& M)
 
     // This allocates indices only for the arguments.
     // Indices for inline samplers are allocated in the OCL BI Conveter,
-    // since finding all inline samplers requires going through the 
+    // since finding all inline samplers requires going through the
     // actual calls.
     MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     // FunctionsInfo contains kernels only.
@@ -175,6 +175,7 @@ static AllocationType getAllocationType(KernelArg::ArgType argType, BindlessAllo
     case KernelArg::ArgType::IMPLICIT_GLOBAL_BASE:
     case KernelArg::ArgType::IMPLICIT_PRIVATE_BASE:
     case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
+    case KernelArg::ArgType::IMPLICIT_SYNC_BUFFER:
     case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_EVENT_POOL:
     case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DEFAULT_DEVICE_QUEUE:
         return AllocationType::Other;
@@ -254,7 +255,7 @@ bool ResourceAllocator::runOnFunction(llvm::Function& F)
     CompOptions& CompilerOpts = MMD->compOpt;
 
     // Go over all of the kernel args.
-    // For each kernel arg, if it represents an explicit image or buffer argument, 
+    // For each kernel arg, if it represents an explicit image or buffer argument,
     // add appropriate metadata.
     ArgAllocMD defaultArgAlloc;
     defaultArgAlloc.type = ResourceTypeEnum::OtherResourceType;
@@ -351,7 +352,7 @@ bool ResourceAllocator::runOnFunction(llvm::Function& F)
         // We want the location to be arg.getArgNo() and not i, because
         // this is eventually accessed by the state processor. The SP
         // aware of the KernelArgs array, it only knows each argument's
-        // original arg number. 
+        // original arg number.
         paramAllocations[arg.getAssociatedArgNo()] = argAlloc;
     }
 

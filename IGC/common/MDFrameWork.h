@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Compiler/CodeGenPublicEnums.h"
+
 #include <string>
 #include <map>
 #include <vector>
@@ -157,6 +159,8 @@ namespace IGC
         int privateMemoryPerWI = 0;
         bool globalIDPresent = false;
 
+        std::vector<std::string> UserAnnotations;
+
         std::vector<int32_t> m_OpenCLArgAddressSpaces;
         std::vector<std::string> m_OpenCLArgAccessQualifiers;
         std::vector<std::string> m_OpenCLArgTypes;
@@ -182,7 +186,11 @@ namespace IGC
         bool OptDisable                                 = false;
         bool MadEnable                                  = false;
         bool NoSignedZeros                              = false;
-        unsigned FloatRoundingMode                      = 0; // default mode: IGC::Float_RoundingMode::FLOAT_ROUND_TO_NEAREST_EVEN
+
+        // default rounding modes
+        unsigned FloatRoundingMode                      = IGC::ROUND_TO_NEAREST_EVEN;
+        unsigned FloatCvtIntRoundingMode                = IGC::ROUND_TO_ZERO;
+
         bool UnsafeMathOptimizations                    = false;
         bool FiniteMathOnly                             = false;
         bool FastRelaxedMath                            = false;
@@ -202,7 +210,6 @@ namespace IGC
         bool disableVertexComponentPacking              = false;
         bool PreferBindlessImages                       = false;
         bool disableMathRefactoring                     = false;
-        bool EnableGlobalRelocation                     = false;
     };
 
     struct ComputeShaderInfo
@@ -277,6 +284,7 @@ namespace IGC
 
         unsigned int inlineConstantBufferSlot = INVALID_CONSTANT_BUFFER_INVALID_ADDR; // slot of the inlined constant buffer
         unsigned int inlineConstantBufferOffset = INVALID_CONSTANT_BUFFER_INVALID_ADDR;    // offset of the inlined constant buffer
+        unsigned int inlineConstantBufferGRFOffset = INVALID_CONSTANT_BUFFER_INVALID_ADDR;
 
         std::map<ConstantAddress, int> constants;
         std::map<unsigned int, SInputDesc> inputs;
@@ -329,7 +337,7 @@ namespace IGC
         PixelShaderInfo psInfo;
         ComputeShaderInfo csInfo;
         std::map<ConstantAddress, uint32_t>   inlineDynConstants;
-        std::map<uint32_t, uint32_t>          inlineDynTextures;
+        std::map<uint32_t, std::array<uint32_t, 4>> inlineDynTextures;
         ImmConstantInfo immConstant;
         std::vector<InlineProgramScopeBuffer> inlineConstantBuffers;
         std::vector<InlineProgramScopeBuffer> inlineGlobalBuffers;

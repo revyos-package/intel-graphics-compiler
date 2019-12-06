@@ -518,9 +518,11 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
     Type* pType = pValue->getType();
     if (isDbgDclInst)
     {
-        assert(pType->isPointerTy() && "DBG declare intrinsic must point to an address");
+        if (!pType->isPointerTy()) {
+            assert(0 && "DBG declare intrinsic must point to an address");
+            return VISAVariableLocation();
+        }
         pType = pType->getPointerElementType();
-
     }
 
     bool isInSurface = false;
@@ -623,7 +625,7 @@ void VISAModule::GetConstantData(const Constant* pConstVal, DataVector& rawData)
         rawData.insert(rawData.end(), zeroSize, 0);
     }
     // If this is an sequential type which is not a CDS or zero, have to collect the values
-    // element by element. Note that this is not exclusive with the two cases above, so the 
+    // element by element. Note that this is not exclusive with the two cases above, so the
     // order of ifs is meaningful.
     else if (dyn_cast<CompositeType>(pConstVal->getType()))
     {

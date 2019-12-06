@@ -344,17 +344,25 @@ namespace IGC
                 instList.push_back(baseValue);
             }
 
-            unsigned bufId = 0;
-            IGC::BufferType bufTy = BUFFER_TYPE_UNKNOWN;
-            IGC::BufferAccessType accessTy = BUFFER_ACCESS_TYPE_UNKNOWN;
-            if (GetResourcePointerInfo(baseValue, bufId, bufTy, accessTy))
+            if (GenIntrinsicInst * inst = dyn_cast<GenIntrinsicInst>(baseValue))
             {
-                srcPtr = baseValue;
+                // For bindless pointers
+                if ((inst->getIntrinsicID() == GenISAIntrinsic::GenISA_RuntimeValue) ||
+                    (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_GetBufferPtr))
+                {
+                    srcPtr = baseValue;
+                }
                 break;
             }
             else if (isa<Argument>(baseValue))
             {
                 // For compute, resource comes from the kernel args
+                srcPtr = baseValue;
+                break;
+            }
+            else if (isa<GlobalVariable>(baseValue))
+            {
+                // Can be an inline sampler/constant buffer
                 srcPtr = baseValue;
                 break;
             }
@@ -496,9 +504,10 @@ namespace IGC
         }
     }
 
-    bool GetResourcePointerInfo(Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, BufferAccessType& accessTy)
+    bool GetResourcePointerInfo(Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, BufferAccessType& accessTy, bool& needBufferOffset)
     {
         accessTy = BufferAccessType::ACCESS_READWRITE;
+        needBufferOffset = false;
         if (GenIntrinsicInst * inst = dyn_cast<GenIntrinsicInst>(srcPtr))
         {
             // For bindless pointers with encoded metadata
@@ -509,6 +518,7 @@ namespace IGC
                     auto resIDBundle = inst->getOperandBundle("resID");
                     auto resTyBundle = inst->getOperandBundle("resTy");
                     auto accessTyBundle = inst->getOperandBundle("accessTy");
+                    auto needBufferOffsetBundle = inst->getOperandBundle("needBufferOffset");
                     if (resIDBundle && resTyBundle)
                     {
                         resID = (unsigned)(cast<ConstantInt>(resIDBundle->Inputs.front()))->getZExtValue();
@@ -518,6 +528,10 @@ namespace IGC
                             accessTy = (BufferAccessType)(cast<ConstantInt>(accessTyBundle->Inputs.front()))->getZExtValue();
                         else
                             accessTy = getDefaultAccessType(resTy);
+
+                        if(needBufferOffsetBundle)
+                            needBufferOffset = (bool)(cast<ConstantInt>(needBufferOffsetBundle->Inputs.front()))->getZExtValue();
+
                         return true;
                     }
                 }
@@ -534,6 +548,120 @@ namespace IGC
                     accessTy = getDefaultAccessType(resTy);
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+
+    // Get GRF offset from GenISA_RuntimeValue intrinsic call
+    bool GetGRFOffsetFromRTV(Value* pointerSrc, unsigned& GRFOffset)
+    {
+        if (GenIntrinsicInst * inst = dyn_cast<GenIntrinsicInst>(pointerSrc))
+        {
+            // For bindless pointers with encoded metadata
+            if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_RuntimeValue)
+            {
+                GRFOffset = (unsigned)llvm::cast<llvm::ConstantInt>(inst->getOperand(0))->getZExtValue();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool GetStatelessBufferInfo(Value* pointer, unsigned& bufIdOrGRFOffset,
+            BufferType & bufferTy, Value*& bufferSrcPtr, bool& isDirectBuf)
+    {
+        isDirectBuf = false;
+        // If the buffer info is not encoded in the address space, we can still find it by
+        // tracing the pointer to where it's created.
+        Value * src = IGC::TracePointerSource(pointer);
+        BufferAccessType accType;
+        bool needBufferOffset;  // Unused
+        if (!src)   return false;
+        if (IGC::GetResourcePointerInfo(src, bufIdOrGRFOffset, bufferTy, accType, needBufferOffset))
+        {
+            bufferSrcPtr = src;
+            isDirectBuf = true;
+            return true;
+        }
+        else if (GetGRFOffsetFromRTV(src, bufIdOrGRFOffset))
+        {
+            bufferSrcPtr = src;
+            bufferTy = BUFFER_TYPE_UNKNOWN;
+            return true;
+        }
+        return false;
+    }
+
+    bool EvalConstantAddress(Value* address, unsigned int& offset, const llvm::DataLayout* pDL, Value* ptrSrc)
+    {
+
+        if ((ptrSrc == nullptr && isa<ConstantPointerNull>(address)) ||
+            (ptrSrc == address))
+        {
+            offset = 0;
+            return true;
+        }
+        else if (ConstantExpr * ptrExpr = dyn_cast<ConstantExpr>(address))
+        {
+            if (ptrExpr->getOpcode() == Instruction::IntToPtr)
+            {
+                Value* eltIdxVal = ptrExpr->getOperand(0);
+                ConstantInt* eltIdx = dyn_cast<ConstantInt>(eltIdxVal);
+                if (!eltIdx)
+                    return false;
+                offset = int_cast<unsigned>(eltIdx->getZExtValue());
+                return true;
+            }
+        }
+        else if (Instruction* ptrExpr = dyn_cast<Instruction>(address))
+        {
+            if (ptrExpr->getOpcode() == Instruction::BitCast ||
+                ptrExpr->getOpcode() == Instruction::AddrSpaceCast)
+            {
+                return EvalConstantAddress(ptrExpr->getOperand(0), offset, pDL, ptrSrc);
+            }
+            if (ptrExpr->getOpcode() == Instruction::IntToPtr)
+            {
+                Value * eltIdxVal = ptrExpr->getOperand(0);
+                ConstantInt * eltIdx = dyn_cast<ConstantInt>(eltIdxVal);
+                if (!eltIdx)
+                    return false;
+                offset = int_cast<unsigned>(eltIdx->getZExtValue());
+                return true;
+            }
+            else if (ptrExpr->getOpcode() == Instruction::GetElementPtr)
+            {
+                offset = 0;
+                if (!EvalConstantAddress(ptrExpr->getOperand(0), offset, pDL, ptrSrc))
+                {
+                    return false;
+                }
+                Type * Ty = ptrExpr->getType();
+                gep_type_iterator GTI = gep_type_begin(ptrExpr);
+                for (auto OI = ptrExpr->op_begin() + 1, E = ptrExpr->op_end(); OI != E; ++OI, ++GTI) {
+                    Value * Idx = *OI;
+                    if (StructType * StTy = GTI.getStructTypeOrNull()) {
+                        unsigned Field = int_cast<unsigned>(cast<ConstantInt>(Idx)->getZExtValue());
+                        if (Field) {
+                            offset += int_cast<unsigned int>(pDL->getStructLayout(StTy)->getElementOffset(Field));
+                        }
+                        Ty = StTy->getElementType(Field);
+                    }
+                    else {
+                        Ty = GTI.getIndexedType();
+                        if (const ConstantInt * CI = dyn_cast<ConstantInt>(Idx)) {
+                            offset += int_cast<unsigned int>(
+                            pDL->getTypeAllocSize(Ty) * CI->getSExtValue());
+
+                        }
+                        else
+                        {
+                            return false;
+                        }
+                    }
+                }
+                return true;
             }
         }
         return false;
@@ -1250,6 +1378,15 @@ namespace IGC
         return false;
     }
 
+    uint getImmValueU32(const llvm::Value* value)
+    {
+        const llvm::ConstantInt* cval = llvm::cast<llvm::ConstantInt>(value);
+        assert(cval->getBitWidth() == 32);
+
+        uint ival = int_cast<uint>(cval->getZExtValue());
+        return ival;
+    }
+
     llvm::Value* ExtractElementFromInsertChain(llvm::Value* inst, int pos)
     {
 
@@ -1326,6 +1463,137 @@ namespace IGC
             ((Instruction*)vecValue)->setDebugLoc(insert_before->getDebugLoc());
         }
         return vecValue;
+    }
+
+    llvm::Value* ConvertToFloat(llvm::IRBuilder<>& builder, llvm::Value* val)
+    {
+        llvm::Value* ret = val;
+        llvm::Type* type = val->getType();
+        assert(type->isSingleValueType() && !type->isVectorTy() && "Only scalar data is supported here!");
+        assert(type->getTypeID() == Type::FloatTyID ||
+            type->getTypeID() == Type::HalfTyID ||
+            type->getTypeID() == Type::IntegerTyID ||
+            type->getTypeID() == Type::DoubleTyID);
+
+        unsigned dataSize = type->getScalarSizeInBits();
+        if (16 == dataSize){
+            ret = builder.CreateFPExt(builder.CreateBitCast(val, builder.getHalfTy()), builder.getFloatTy());
+        }else if (32 == dataSize){
+            ret = builder.CreateBitCast(val, builder.getFloatTy());
+        }else if (64 == dataSize){
+            llvm::Type* vecType = llvm::VectorType::get(builder.getFloatTy(), 2);
+            ret = builder.CreateBitCast(val, vecType);
+        }else{
+            llvm_unreachable("Unsupported type in ConvertToFloat of helper.");
+        }
+
+        return ret;
+    }
+
+    void ConvertToFloat(llvm::IRBuilder<>& builder, llvm::SmallVectorImpl<llvm::Value*>& instList)
+    {
+        for (size_t i=0; i<instList.size(); i++)
+        {
+            llvm::Value* val = ConvertToFloat(builder, instList[i]);
+            if (val->getType()->isVectorTy())
+            {
+                instList[i] = builder.CreateExtractElement(val, static_cast<uint64_t>(0));
+                size_t iOld = i;
+                for (unsigned j = 1; j < val->getType()->getVectorNumElements(); j++)
+                {
+                    instList.insert(instList.begin()+ iOld +j, builder.CreateExtractElement(val, j));
+                    i++;
+                }
+            }
+            else
+            {
+                instList[i] = val;
+            }
+        }
+    }
+
+    void ScalarizeAggregateMembers(llvm::IRBuilder<>& builder, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*> & instList)
+    {
+        llvm::Type* type = val->getType();
+        unsigned num = 0;
+        switch (type->getTypeID())
+        {
+        case llvm::Type::FloatTyID:
+        case llvm::Type::HalfTyID:
+        case llvm::Type::IntegerTyID:
+        case llvm::Type::DoubleTyID:
+            instList.push_back(val);
+            break;
+        case llvm::Type::StructTyID:
+            num = type->getStructNumElements();
+            for (unsigned i = 0; i < num; i++)
+            {
+                ScalarizeAggregateMembers(builder, builder.CreateExtractValue(val, i), instList);
+            }
+            break;
+        case llvm::Type::VectorTyID:
+            num = type->getVectorNumElements();
+            for (unsigned i = 0; i < num; i++)
+            {
+                ScalarizeAggregateMembers(builder, builder.CreateExtractElement(val, i), instList);
+            }
+            break;
+        case llvm::Type::ArrayTyID:
+            num = static_cast<uint32_t>(type->getArrayNumElements());
+            for (unsigned i = 0; i < num; i++)
+            {
+                ScalarizeAggregateMembers(builder, builder.CreateExtractValue(val, i), instList);
+            }
+            break;
+        default:
+            llvm_unreachable("Unsupported type in ScalarizeAggregateMembers of helper! Please enhance this function first.");
+            break;
+        }
+    }
+
+    void ScalarizeAggregateMemberAddresses(llvm::IRBuilder<>& builder, llvm::Type* type, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*> & instList, llvm::SmallVector<llvm::Value*, 16> indices)
+    {
+        unsigned num = 0;
+        switch (type->getTypeID())
+        {
+        case llvm::Type::FloatTyID:
+        case llvm::Type::HalfTyID:
+        case llvm::Type::IntegerTyID:
+        case llvm::Type::DoubleTyID:
+            instList.push_back(builder.CreateInBoundsGEP(val, makeArrayRef(indices)));
+            break;
+        case llvm::Type::StructTyID:
+            num = type->getStructNumElements();
+            for (unsigned i = 0; i < num; i++)
+            {
+                indices.push_back(builder.getInt32(i));
+                ScalarizeAggregateMemberAddresses(builder, type->getStructElementType(i), val, instList, indices);
+                indices.pop_back();
+            }
+            break;
+        case llvm::Type::VectorTyID:
+            num = type->getVectorNumElements();
+            for (unsigned i = 0; i < num; i++)
+            {
+                indices.push_back(builder.getInt32(i));
+                ScalarizeAggregateMemberAddresses(builder, type->getVectorElementType(), val, instList, indices);
+                indices.pop_back();
+            }
+            break;
+        case llvm::Type::ArrayTyID:
+            //fix this if one API could support an array with length > 2^32
+            num = static_cast<uint32_t>(type->getArrayNumElements());
+            for (unsigned i = 0; i < num; i++)
+            {
+                indices.push_back(builder.getInt32(i));
+                ScalarizeAggregateMemberAddresses(builder, type->getArrayElementType(), val, instList, indices);
+                indices.pop_back();
+            }
+            break;
+        default:
+            llvm_unreachable("Unsupported type in ScalarizeAggregateMemberAddresses of helper! Please enhance this function first.");
+            break;
+        }
     }
 
     bool IsUnsignedCmp(const llvm::CmpInst::Predicate Pred)

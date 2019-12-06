@@ -242,7 +242,7 @@ bool HWConformity::checkSrcCrossGRF( INST_LIST_ITER& iter, G4_BB* bb )
         {
             G4_SrcRegRegion *src = inst->getSrc(i)->asSrcRegRegion();
             bool widthCrossingGRF = false;
-            RegionDesc* srcRegion = src->getRegion();
+            const RegionDesc* srcRegion = src->getRegion();
             uint16_t vs = srcRegion->vertStride, wd = srcRegion->width, hs = srcRegion->horzStride;
             uint8_t exSize = inst->getExecSize();
             if (src->getRegAccess() == Direct && src->crossGRF())
@@ -294,12 +294,12 @@ bool HWConformity::checkSrcCrossGRF( INST_LIST_ITER& iter, G4_BB* bb )
                     return true;
                 }
             }
-            else if (builder.getOptions()->isTargetCM() && builder.no64bitRegioning() && 
+            else if (builder.getOptions()->isTargetCM() && builder.no64bitRegioning() &&
                 getTypeSize(src->getType()) == 8)
             {
-                // for CM, split non-scalar, non-contiguous source that cross GRF as HW conformity 
+                // for CM, split non-scalar, non-contiguous source that cross GRF as HW conformity
                 // may be not equipped to deal with them later
-                RegionDesc* region = src->getRegion();
+                const RegionDesc* region = src->getRegion();
                 if (!region->isScalar() && !region->isContiguous(inst->getExecSize()) &&
                     src->crossGRF())
                 {
@@ -407,7 +407,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
     bool evenSplitDst;
 
     // separate the checks for BDW to make it more maintainable
-    // For CM use pre-BDW region rules due to HW bugs.  
+    // For CM use pre-BDW region rules due to HW bugs.
     if (!builder.getOptions()->isTargetCM() && (genX == GENX_BDW || genX == GENX_CHV))
     {
         // for BDW we check the following rules:
@@ -432,7 +432,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
             G4_Operand *srcs[3];
             uint8_t eleInFirstGRF[3];
 
-            for( int i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++ )
+            for( int i = 0; i < inst->getNumSrc(); i++ )
             {
                 srcs[i] = inst->getSrc(i);
                 if (srcs[i] && srcs[i]->isSrcRegRegion())
@@ -491,7 +491,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
                                 evenTwoGRFSrc[i] = srcs[i]->asSrcRegRegion()->evenlySplitCrossGRF(
                                     execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i] );
                                 bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF();
-                                RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
+                                const RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
                                 uint16_t stride = 0;
                                 fullTwoGRFSrc[i] = coverTwoGRF && rd->isSingleStride(inst->getExecSize(), stride) && (stride == 1);
 
@@ -552,10 +552,10 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
     {
         // pre-BDW checks
 
-        // Check if the instruction will use int ACC later. if yes, compressed instruction 
+        // Check if the instruction will use int ACC later. if yes, compressed instruction
         // is split into 2 one-GRF instructions.
 
-        bool mayUseIntAcc = op == G4_pseudo_sada2 || 
+        bool mayUseIntAcc = op == G4_pseudo_sada2 ||
         ( op == G4_mul && IS_DTYPE( inst->getSrc(0)->getType() ) && IS_DTYPE( inst->getSrc(1)->getType() ) );
 
         if( crossGRFDst )
@@ -567,7 +567,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
 
         G4_Operand *srcs[3];
         uint8_t eleInFirstGRF[3];
-        for( int i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++ )
+        for (int i = 0; i < inst->getNumSrc(); i++)
         {
             srcs[i] = inst->getSrc(i);
 
@@ -604,7 +604,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
                     evenTwoGRFSrc[i] = srcs[i]->asSrcRegRegion()->evenlySplitCrossGRF(
                         execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i] );
                     bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF();
-                    RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
+                    const RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
                     uint16_t stride = 0;
                     fullTwoGRFSrc[i] = coverTwoGRF && rd->isSingleStride(inst->getExecSize(), stride) && (stride == 1);
 
@@ -743,7 +743,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
         {
             // try to move 2-GRF src into 1GRF tmp to avoid spliting.
             // this is unnecessary in non-SIMDCF/nonPred/nonCondMod cases because we can do compensation.
-            for (uint32_t i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
+            for (int i = 0; i < inst->getNumSrc(); i++)
             {
                 if( twoGRFSrc[i] && !fullTwoGRFSrc[i] )
                 {
@@ -898,10 +898,11 @@ void HWConformity::splitSIMD32Inst( INST_LIST_ITER iter, G4_BB* bb )
     G4_INST *inst = *iter;
     G4_opcode op = inst->opcode();
     G4_Operand *srcs[3] = { nullptr };
+    int numSrc = inst->getNumSrc();
 
     // check dst/src dependency
     checkSrcDstOverlap( iter, bb, false );
-    for( int i = 0; i < G4_Inst_Table[op].n_srcs; i++ )
+    for( int i = 0; i < numSrc; i++ )
     {
         srcs[i] = inst->getSrc(i);
     }
@@ -960,25 +961,25 @@ void HWConformity::splitSIMD32Inst( INST_LIST_ITER iter, G4_BB* bb )
             newInst->setCondMod( newCondMod );
         }
 
-        for( int j = 0; j < G4_Inst_Table[op].n_srcs; j++ )
+        for (int j = 0; j < numSrc; j++)
         {
-            if( srcs[j] )
+            if (srcs[j])
             {
                 // src1 for single source math should be arc reg null.
-                if( srcs[j]->isImm() ||
-                    ( inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg() ) )
+                if (srcs[j]->isImm() ||
+                    (inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg()))
                 {
-                    newInst->setSrc( srcs[j], j );
+                    newInst->setSrc(srcs[j], j);
                 }
-                else if( srcs[j]->asSrcRegRegion()->isScalar() || ( j == 0 && op == G4_line ) )
+                else if (srcs[j]->asSrcRegRegion()->isScalar() || (j == 0 && op == G4_line))
                 {
-                    newInst->setSrc( builder.duplicateOperand(srcs[j]), j );
+                    newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
                 }
                 else
                 {
-                    newInst->setSrc( builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), (uint16_t) i,
+                    newInst->setSrc(builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), (uint16_t)i,
                         currExSize, (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->vertStride),
-                        (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->width) ), j );
+                        (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->width)), j);
                 }
             }
         }
@@ -998,7 +999,7 @@ void HWConformity::splitSIMD32Inst( INST_LIST_ITER iter, G4_BB* bb )
     }
 }
 
-void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt, uint8_t numInFirstMov, 
+void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt, uint8_t numInFirstMov,
     bool rule4_11, bool canSrcCrossGRF)
 {
     G4_INST *inst = *iter;
@@ -1008,7 +1009,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
     // check dst/src dependency
     checkSrcDstOverlap(iter, bb, compOpt);
 
-    int numSrcs = G4_Inst_Table[op].n_srcs;
+    int numSrcs = inst->getNumSrc();
 
     for (int i = 0; i < numSrcs; i++)
     {
@@ -1062,7 +1063,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
             newInst->setDest(builder.duplicateOperand(inst->getDst()));
             newInst->setPredicate(builder.duplicateOperand(inst->getPredicate()));
             newInst->setCondMod(builder.duplicateOperand(inst->getCondMod()));
-            for (int j = 0; j < G4_Inst_Table[op].n_srcs; j++)
+            for (int j = 0; j < inst->getNumSrc(); j++)
             {
                 newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
             }
@@ -1183,43 +1184,43 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
             newInstIter = iter;
         }
 
-        for( int j = 0; j < G4_Inst_Table[op].n_srcs; j++ )
+        for (int j = 0; j < inst->getNumSrc(); j++)
         {
-            if( srcs[j] )
+            if (srcs[j])
             {
                 // src1 for single source math should be arc reg null.
-                if( srcs[j]->isImm() ||
-                    ( inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg() ) )
+                if (srcs[j]->isImm() ||
+                    (inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg()))
                 {
-                    newInst->setSrc( srcs[j], j );
+                    newInst->setSrc(srcs[j], j);
                 }
-                else if( srcs[j]->asSrcRegRegion()->isScalar() || ( j == 0 && op == G4_line ) )
+                else if (srcs[j]->asSrcRegRegion()->isScalar() || (j == 0 && op == G4_line))
                 {
-                    newInst->setSrc( builder.duplicateOperand(srcs[j]), j );
+                    newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
                 }
                 else
                 {
-                    if(srcs[j]->isAddrExp() )
+                    if (srcs[j]->isAddrExp())
                     {
-                        G4_AddrExp * addExp = builder.createAddrExp(srcs[j]->asAddrExp()->getRegVar(), srcs[j]->asAddrExp()->getOffset(),srcs[j]->asAddrExp()->getType());
+                        G4_AddrExp* addExp = builder.createAddrExp(srcs[j]->asAddrExp()->getRegVar(), srcs[j]->asAddrExp()->getOffset(), srcs[j]->asAddrExp()->getType());
                         newInst->setSrc(addExp, j);
                     }
                     else
                     {
                         uint16_t start = i;
-                        newInst->setSrc( builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), start, currExSize, vs[j], wd[j]), j );
+                        newInst->setSrc(builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), start, currExSize, vs[j], wd[j]), j);
                     }
                 }
             }
         }
 
-        if (instExSize == 16    &&
-            currExSize == 8     &&
+        if (instExSize == 16 &&
+            currExSize == 8 &&
             needsMaskOffset)
         {
-            if( instPred )
+            if (instPred)
             {
-                G4_Predicate *tPred = builder.duplicateOperand(instPred);
+                G4_Predicate* tPred = builder.duplicateOperand(instPred);
                 tPred->setInst(newInst);
                 newInst->setPredicate(tPred);
             }
@@ -1235,7 +1236,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
         }
 
         // maintain def-use chain
-        if( newInst == inst )
+        if (newInst == inst)
         {
             newInst->trimDefInstList();
         }
@@ -1247,41 +1248,41 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
 
         // the following code is to keep minimal execution size for some opcode, for example, DP4
         // insert mov if needed
-        if( needMov )
+        if (needMov)
         {
-            for( int j = 0; j < G4_Inst_Table[op].n_srcs; j++ )
+            for (int j = 0; j < inst->getNumSrc(); j++)
             {
-                if( opndExSize[j+1] < currExSize )
+                if (opndExSize[j + 1] < currExSize)
                 {
-                    newInst->setSrc( insertMovBefore( newInstIter, j, srcs[j]->getType(), bb ), j );
+                    newInst->setSrc(insertMovBefore(newInstIter, j, srcs[j]->getType(), bb), j);
                     // reducing exec size for new MOV
                     INST_LIST_ITER newMovIter = newInstIter;
                     newMovIter--;
-                    reduceExecSize( newMovIter, bb );
-                    if( builder.getOption(vISA_OptReport) )
+                    reduceExecSize(newMovIter, bb);
+                    if (builder.getOption(vISA_OptReport))
                     {
-                        (*newMovIter)->emit( std::cout );
+                        (*newMovIter)->emit(std::cout);
                         std::cout << std::endl;
                     }
                 }
             }
         }
-        if( builder.getOption(vISA_OptReport) )
+        if (builder.getOption(vISA_OptReport))
         {
-            newInst->emit( std::cout );
+            newInst->emit(std::cout);
             std::cout << std::endl;
         }
         // dst
-        if( needMov && opndExSize[0] < currExSize )
+        if (needMov && opndExSize[0] < currExSize)
         {
-            ( *newInstIter )->setDest(
-                insertMovAfter( newInstIter, inst->getDst(), inst->getDst()->getType(), bb ) );
+            (*newInstIter)->setDest(
+                insertMovAfter(newInstIter, inst->getDst(), inst->getDst()->getType(), bb));
             INST_LIST_ITER newMovIter = newInstIter;
             newMovIter++;
-            reduceExecSize( newMovIter, bb );
-            if( builder.getOption(vISA_OptReport) )
+            reduceExecSize(newMovIter, bb);
+            if (builder.getOption(vISA_OptReport))
             {
-                (*newMovIter)->emit( std::cout );
+                (*newMovIter)->emit(std::cout);
                 std::cout << std::endl;
             }
         }
@@ -1292,21 +1293,23 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
 
 // evenly split an inst into two instructions with half execution size.
 // this is used to split a simd16 math into two simd8 before other reducing exeuction size actions
-void HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap )
+bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap)
 {
     G4_INST *inst = *iter;
     G4_opcode op = inst->opcode();
     G4_Operand *srcs[3];
     int origMaskOffset = inst->getMaskOffset();
+    bool extraMov = false;
+    const int numSrc = inst->getNumSrc();
 
     // check dst/src dependency
-    if( checkOverlap )
+    if (checkOverlap)
     {
-        checkSrcDstOverlap( iter, bb, false );
+        extraMov = checkSrcDstOverlap(iter, bb, false);
     }
 
-    bool use_arc_reg = false;
-    for( int i = 0; i < G4_Inst_Table[op].n_srcs; i++ )
+    bool useARF = false;
+    for (int i = 0; i < numSrc; i++)
     {
         srcs[i] = inst->getSrc(i);
     }
@@ -1340,13 +1343,14 @@ void HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
     }
 
     G4_DstRegRegion *accDstRegion = NULL;
-    if( inst->getImplAccDst() )
+    if (inst->getImplAccDst())
     {
         accDstRegion = inst->getImplAccDst();
     }
-    if( accSrcRegion || accDstRegion || newPred || newCond )
+
+    if (accSrcRegion || accDstRegion || newPred || newCond)
     {
-        use_arc_reg = true;
+        useARF = true;
     }
 
     for( int i = 0; i < instExSize; i += currExSize )
@@ -1398,35 +1402,36 @@ void HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
             }
         }
 
-        for( int j = 0; j < G4_Inst_Table[op].n_srcs; j++ )
+        for (int j = 0; j < numSrc; j++)
         {
-            if( srcs[j] )
+            if (srcs[j])
             {
                 // src1 for single source math should be arc reg null.
-                if( srcs[j]->isImm() ||
-                    ( inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg() ) )
+                if (srcs[j]->isImm() ||
+                    (inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg()))
                 {
-                    newInst->setSrc( srcs[j], j );
+                    newInst->setSrc(srcs[j], j);
                 }
-                else if( srcs[j]->asSrcRegRegion()->isScalar() || ( j == 0 && op == G4_line ) )
+                else if (srcs[j]->asSrcRegRegion()->isScalar() || (j == 0 && op == G4_line))
                 {
-                    newInst->setSrc( builder.duplicateOperand(srcs[j]), j );
+                    newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
                 }
                 else
                 {
-                    newInst->setSrc( builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), (uint16_t) i,
+                    newInst->setSrc(builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), (uint16_t)i,
                         currExSize, (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->vertStride),
-                        (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->width) ), j );
+                        (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->width)), j);
                 }
             }
         }
 
         // set mask
-        if (!inst->isWriteEnableInst() || use_arc_reg)
+        bool needsMaskOffset = useARF || (bb->isInSimdFlow() && !inst->isWriteEnableInst());
+        if (needsMaskOffset)
         {
             int newMaskOffset = origMaskOffset + (i == 0 ? 0 : currExSize);
-            bool nibOk = G4_Type_Table[inst->getDst()->getType()].byteSize == 8 ||
-                G4_Type_Table[inst->getExecType()].byteSize == 8;
+            bool nibOk = builder.hasNibCtrl() &&
+                (getTypeSize(inst->getDst()->getType()) == 8 || getTypeSize(inst->getExecType()) == 8);
             G4_InstOption newMask = G4_INST::offsetToMask(currExSize, newMaskOffset, nibOk);
             if (newMask == InstOpt_NoOpt)
             {
@@ -1456,6 +1461,8 @@ void HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
             std::cout << std::endl;
         }
     }
+
+    return extraMov;
 }
 
 // this is specifically for math instruction
@@ -1473,24 +1480,24 @@ bool HWConformity::reduceExecSizeForMath( INST_LIST_ITER iter, G4_BB* bb )
 // check overlap between src and dst
 // if overlap exists, insert to MOV to eliminate it
 // how about replicate regions?<0;4,1>
-void HWConformity::checkSrcDstOverlap( INST_LIST_ITER iter, G4_BB* bb, bool compOpt )
+bool HWConformity::checkSrcDstOverlap( INST_LIST_ITER iter, G4_BB* bb, bool compOpt )
 {
     G4_INST *inst = *iter;
-    G4_opcode op = inst->opcode();
     G4_Operand *srcs[3];
+    bool hasOverlap = false;
 
-    for( int i = 0; i < G4_Inst_Table[op].n_srcs; i++ )
+    for (int i = 0; i < inst->getNumSrc(); i++)
     {
         srcs[i] = inst->getSrc(i);
     }
     // check dst/src dependency
     // how about replicate regions?<0;4,1>
-    if( inst->getDst() && !inst->hasNULLDst() )
+    if (inst->getDst() && !inst->hasNULLDst())
     {
-        for( int i = 0; i < G4_Inst_Table[op].n_srcs; i++ )
+        for (int i = 0; i < inst->getNumSrc(); i++)
         {
             bool useTmp = false;
-            if( srcs[i] && ( IS_VINTTYPE( srcs[i]->getType() ) || IS_VFTYPE( srcs[i]->getType() ) ) )
+            if (srcs[i] && (IS_VINTTYPE(srcs[i]->getType()) || IS_VFTYPE(srcs[i]->getType())))
             {
                 useTmp = true;
             }
@@ -1500,23 +1507,28 @@ void HWConformity::checkSrcDstOverlap( INST_LIST_ITER iter, G4_BB* bb, bool comp
                 if (rel != Rel_disjoint)
                 {
                     useTmp = (rel != Rel_eq) || compOpt ||
-                             srcs[i]->asSrcRegRegion()->getRegion()
-                                    ->isRepeatRegion(inst->getExecSize());
+                        srcs[i]->asSrcRegRegion()->getRegion()
+                        ->isRepeatRegion(inst->getExecSize());
                 }
             }
-            if( useTmp )
+            if (useTmp)
             {
                 // insert mov
-                inst->setSrc( insertMovBefore( iter, i, getNonVectorType(srcs[i]->getType()), bb), i );
+                inst->setSrc(insertMovBefore(iter, i, getNonVectorType(srcs[i]->getType()), bb), i);
                 srcs[i] = inst->getSrc(i);
                 // reducing exec size for new MOV
                 INST_LIST_ITER newMovIter = iter;
                 newMovIter--;
                 reduceExecSize( newMovIter, bb );
+                hasOverlap = true;
+
             }
         }
     }
+
+    return hasOverlap;
 }
+
 // move source operand to one or two GRF
 // tmp dst use the same type as source.
 // this MOV does not need further resucing execsize
@@ -1531,7 +1543,7 @@ void HWConformity::moveSrcToGRF( INST_LIST_ITER it, uint32_t srcNum, uint16_t nu
     uint16_t hs = dclSize / execSize;
     uint16_t wd = execSize;
     uint16_t vs = hs * wd;
-    RegionDesc* region = builder.createRegionDesc(vs, wd, hs);
+    const RegionDesc* region = builder.createRegionDesc(vs, wd, hs);
 
     // look up in MOV table to see if there is already inserted MOV for this source.
     G4_INST* def_inst = NULL;
@@ -1614,9 +1626,9 @@ void HWConformity::saveDst( INST_LIST_ITER& it, uint8_t stride, G4_BB *bb )
     G4_Declare* dcl = builder.createTempVar( numElt, dstType, subAlign );
 
     uint16_t hs = dst->getHorzStride();
-    RegionDesc *region = builder.createRegionDesc( hs * execSize, execSize, hs );
+    const RegionDesc *region = builder.createRegionDesc( hs * execSize, execSize, hs );
     G4_SrcRegRegion *srcRegion = builder.createSrcRegRegion(Mod_src_undef, Direct, dst->getBase(), dst->getRegOff(),
-        dst->getSubRegOff(), region, dstType );
+        dst->getSubRegOff(), region, dstType);
 
     G4_DstRegRegion *tmpDstOpnd = builder.Create_Dst_Opnd_From_Dcl( dcl, stride );
 
@@ -1638,7 +1650,7 @@ void HWConformity::restoreDst( INST_LIST_ITER& it, G4_DstRegRegion *origDst, G4_
     uint8_t execSize = inst->getExecSize();
 
     uint16_t hs = dst->getHorzStride();
-    RegionDesc *region = builder.createRegionDesc( hs * execSize, execSize, hs );
+    const RegionDesc *region = builder.createRegionDesc( hs * execSize, execSize, hs );
     G4_SrcRegRegion *srcRegion = builder.createSrcRegRegion(Mod_src_undef, Direct, dst->getBase(), dst->getRegOff(),
         dst->getSubRegOff(), region, dst->getType() );
 
@@ -1678,7 +1690,7 @@ void HWConformity::insertMovAfter( INST_LIST_ITER& it, uint16_t stride, G4_BB* b
 
     G4_Declare* dcl = builder.createTempVar( execSize * stride, dstType, subAlign );
 
-    RegionDesc* region = builder.createRegionDesc(stride, 1, 0 );
+    const RegionDesc* region = builder.createRegionDesc(stride, 1, 0 );
     G4_SrcRegRegion *srcRegion = builder.Create_Src_Opnd_From_Dcl( dcl, region);
     G4_DstRegRegion *tmpDstOpnd = builder.Create_Dst_Opnd_From_Dcl( dcl, stride );
 
@@ -1716,7 +1728,7 @@ void  HWConformity::removeBadSrc( INST_LIST_ITER& iter, G4_BB *bb, bool crossGRF
     G4_Operand *dst = inst->getDst();
     // check source and dst region together
     // get rid of bad two-GRF source
-    for (uint32_t i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
+    for (int i = 0; i < inst->getNumSrc(); i++)
     {
 
         if( badTwoGRFSrc[i] )

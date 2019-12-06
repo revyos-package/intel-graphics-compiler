@@ -78,7 +78,7 @@ AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : FunctionPass(ID)
 }
 
 //
-// This pass "flattens" aggregate (struct and array, non pointer) kernel 
+// This pass "flattens" aggregate (struct and array, non pointer) kernel
 // arguments into multiple implicit basic type arguments.  This pass
 // must be run after function inlining.
 //
@@ -162,7 +162,7 @@ void AggregateArgumentsAnalysis::addImplictArgs(Type* type, uint64_t baseAllocaO
         Type* elementType = seqType->getElementType();
         uint64_t elementSize = m_pDL->getTypeStoreSize(elementType);
 
-        // build the implicit arguments forwards for all elements of the 
+        // build the implicit arguments forwards for all elements of the
         // array.  If this happens to be an array of struct, the elements
         // of the struct will be handled in the recursive step.
         for (unsigned int i = 0; i < numElements; ++i)
@@ -175,6 +175,9 @@ void AggregateArgumentsAnalysis::addImplictArgs(Type* type, uint64_t baseAllocaO
         // ...finally we have found a basic type contained inside
         // the aggregate.  Add it to the list of implicit args.
         unsigned int elementSize = type->getPrimitiveSizeInBits();
+        if (PointerType *PT = dyn_cast<PointerType>(type)) {
+            elementSize = m_pDL->getPointerSize(PT->getAddressSpace()) * 8;
+        }
 
         ImplicitArg::ArgType implicitArgType = ImplicitArg::CONSTANT_REG_DWORD;
 

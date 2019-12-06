@@ -264,10 +264,8 @@ void ThreadCombining::CreateLoopKernel(
     builder.CreateRetVoid();
 }
 
-void ThreadCombining::FindRegistersAliveAcrossBarriers(llvm::Function* m_kernel, llvm::Module& M)
+void ThreadCombining::PreAnalysis(llvm::Function* m_kernel, llvm::Module& M, std::vector<llvm::Instruction*>& barriers)
 {
-    DominatorTreeWrapperPass* DT = &getAnalysis<DominatorTreeWrapperPass>(*m_kernel);
-
     for (auto BI = m_kernel->begin(); BI != m_kernel->end(); ++BI)
     {
         for (auto II = BI->begin(); II != BI->end(); II++)
@@ -279,29 +277,46 @@ void ThreadCombining::FindRegistersAliveAcrossBarriers(llvm::Function* m_kernel,
             }
             if (isBarrier(*inst))
             {
+                barriers.push_back(inst);
+            }
+        }
+    }
+}
+
+void ThreadCombining::FindRegistersAliveAcrossBarriers(llvm::Function* m_kernel, llvm::Module& M)
+{
+    DominatorTreeWrapperPass* DT = &getAnalysis<DominatorTreeWrapperPass>(*m_kernel);
+
+    for (auto BI = m_kernel->begin(); BI != m_kernel->end(); ++BI)
+    {
+        for (auto II = BI->begin(); II != BI->end(); II++)
+        {
+            Instruction* inst = &(*II);
+            if (isBarrier(*inst))
+            {
                 m_barriers.push_back(inst);
                 std::set<llvm::Instruction*> empty;
                 m_LiveRegistersPerBarrier.insert(std::pair<llvm::Instruction*, std::set<llvm::Instruction*>>(inst, empty));
             }
 
-            for (auto barrierInst = m_barriers.begin(); barrierInst != m_barriers.end(); ++barrierInst)
+            for (unsigned int i = 0; i < inst->getNumOperands(); ++i)
             {
-                for (unsigned int i = 0; i < inst->getNumOperands(); ++i)
+                if (Instruction* instToCheck  = dyn_cast<Instruction>(inst->getOperand(i))) // If the last barrier does not dominate the instruction then we need to store and restore
                 {
-                    if (Instruction * I = dyn_cast<Instruction>(inst->getOperand(i))) // If the last barrier does not dominate the instruction then we need to store and restore
+                    for (auto barrierInst = m_barriers.begin(); barrierInst != m_barriers.end(); ++barrierInst)
                     {
-                        if (!DT->getDomTree().dominates(*barrierInst, I))
+                        if (!DT->getDomTree().dominates(*barrierInst, instToCheck))
                         {
                             // Optimization: check if the live register can be moved to the entry block,
                             // this way we skip the store and restore across barriers
                             bool canMoveInstructionToEntryBlock = false;
-                            if (!I->mayReadOrWriteMemory())
+                            if (!instToCheck->mayReadOrWriteMemory())
                             {
                                 canMoveInstructionToEntryBlock = true;
 
-                                for (unsigned int j = 0; j < I->getNumOperands(); j++)
+                                for (unsigned int j = 0; j < instToCheck->getNumOperands(); j++)
                                 {
-                                    if (isa<Instruction>(I->getOperand(j)))
+                                    if (isa<Instruction>(instToCheck->getOperand(j)))
                                     {
                                         canMoveInstructionToEntryBlock = false;
                                         break;
@@ -311,13 +326,25 @@ void ThreadCombining::FindRegistersAliveAcrossBarriers(llvm::Function* m_kernel,
                                 //Move them later in the entry block of new function
                                 if (canMoveInstructionToEntryBlock)
                                 {
-                                    m_instructionsToMove.insert(I);
+                                    m_instructionsToMove.insert(instToCheck);
                                 }
                             }
                             if (!canMoveInstructionToEntryBlock)
                             {
-                                m_LiveRegistersPerBarrier[*barrierInst].insert(I); // Insert the instruction as one that has to be stored and then restored
-                                m_aliveAcrossBarrier.insert(I);
+                                if (instToCheck->getType()->isIntegerTy() && instToCheck->getType()->getIntegerBitWidth() == 1)
+                                {
+                                    llvm::IRBuilder<>  builder(M.getContext());
+                                    builder.SetInsertPoint(instToCheck->getNextNode());
+                                    llvm::Value* I_i8 = builder.CreateZExt(instToCheck, builder.getInt8Ty());
+                                    assert(isa<Instruction>(I_i8));
+                                    instToCheck = cast<Instruction>(I_i8);
+
+                                    builder.SetInsertPoint(inst);
+                                    llvm::Value* I_new = builder.CreateICmpEQ(instToCheck, builder.getInt8(1));
+                                    inst->setOperand(i, I_new);
+                                }
+                                m_LiveRegistersPerBarrier[*barrierInst].insert(instToCheck); // Insert the instruction as one that has to be stored and then restored
+                                m_aliveAcrossBarrier.insert(instToCheck);
                             }
                         }
                     }
@@ -329,20 +356,6 @@ void ThreadCombining::FindRegistersAliveAcrossBarriers(llvm::Function* m_kernel,
 
 bool ThreadCombining::canDoOptimization(Function* m_kernel, llvm::Module& M)
 {
-    PostDominatorTree* PDT = &getAnalysis<PostDominatorTreeWrapperPass>(*m_kernel).getPostDomTree();
-
-    FindRegistersAliveAcrossBarriers(m_kernel, M);
-
-    // Check if any of the barriers are within control flow
-    bool anyBarrierWithinControlFlow = false;
-    for (auto& barrier : m_barriers)
-    {
-        if (!PDT->dominates(barrier->getParent(), &m_kernel->getEntryBlock()))
-        {
-            anyBarrierWithinControlFlow = true;
-        }
-    }
-
     //No optimization if no SLM used - number of dispatchable thread groups is limited by SLM space, only then we have perf issue
     //No optimization if thread group size Z is not equal to 1 - keep for simpler cases
     //No optimization if barrier is within control flow - to keep it simple for now else gets complex
@@ -352,12 +365,32 @@ bool ThreadCombining::canDoOptimization(Function* m_kernel, llvm::Module& M)
 
     if (threadGroupSize_X == 1 ||
         threadGroupSize_Y == 1 ||
-        threadGroupSize_Z != 1 ||
-        (!m_SLMUsed && IGC_IS_FLAG_DISABLED(EnableThreadCombiningWithNoSLM)) ||
+        threadGroupSize_Z != 1)
+    {
+        return false;
+    }
+
+    std::vector<llvm::Instruction*> barriers;
+    PreAnalysis(m_kernel, M, barriers);
+
+    PostDominatorTree* PDT = &getAnalysis<PostDominatorTreeWrapperPass>(*m_kernel).getPostDomTree();
+    // Check if any of the barriers are within control flow
+    bool anyBarrierWithinControlFlow = false;
+    for (auto& barrier : barriers)
+    {
+        if (!PDT->dominates(barrier->getParent(), &m_kernel->getEntryBlock()))
+        {
+            anyBarrierWithinControlFlow = true;
+        }
+    }
+
+    if ((!m_SLMUsed && IGC_IS_FLAG_DISABLED(EnableThreadCombiningWithNoSLM)) ||
         anyBarrierWithinControlFlow)
     {
         return false;
     }
+
+    FindRegistersAliveAcrossBarriers(m_kernel, M);
 
     return true;
 }
@@ -627,6 +660,14 @@ bool ThreadCombining::runOnModule(llvm::Module& M)
             simdMode = SIMDMode::SIMD16;
             minTGSizeHeuristic = 128; // => 8 h/w threads per WG
         }
+    }
+    else if (simdMode == SIMDMode::SIMD16)
+    {
+        minTGSizeHeuristic = 128;
+    }
+    else if (simdMode == SIMDMode::SIMD32)
+    {
+        minTGSizeHeuristic = 256;
     }
 
     float currentThreadOccupancy = csCtx->GetThreadOccupancy(simdMode);

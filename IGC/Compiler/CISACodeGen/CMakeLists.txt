@@ -11,6 +11,7 @@ set(IGC_BUILD__SRC__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/CodeSinking.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CodeHoisting.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CollectGeometryShaderProperties.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ComputeShaderBase.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ComputeShaderCodeGen.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConstantCoalescing.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CShader.cpp"
@@ -86,7 +87,7 @@ set(IGC_BUILD__SRC__CISACodeGen_Common
   )
 
 
-set(IGC_BUILD__SRC__Compiler_CISACodeGen 
+set(IGC_BUILD__SRC__Compiler_CISACodeGen
     ${IGC_BUILD__SRC__CISACodeGen_Common}
     PARENT_SCOPE
     )
@@ -102,6 +103,7 @@ set(IGC_BUILD__HDR__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/CodeSinking.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CodeHoisting.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CollectGeometryShaderProperties.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ComputeShaderBase.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ComputeShaderCodeGen.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConstantCoalescing.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CVariable.hpp"
@@ -176,7 +178,7 @@ set(IGC_BUILD__HDR__CISACodeGen_Common
   )
 
 
-set(IGC_BUILD__HDR__Compiler_CISACodeGen 
+set(IGC_BUILD__HDR__Compiler_CISACodeGen
     ${IGC_BUILD__HDR__CISACodeGen_Common}
     PARENT_SCOPE
     )

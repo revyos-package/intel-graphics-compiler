@@ -201,20 +201,25 @@ int VISAKernelImpl::compileTillOptimize()
     return optimizer.optimization();
 }
 
-void VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, G4_INST* fcall)
+G4_Declare* VISAKernelImpl::createInstsForCallTargetOffset(
+        InstListType& insts, G4_INST* fcall, int64_t adjust_off)
 {
     // create instruction sequence:
-    //       add  r1.2  -IP   call_target
-    //       add  r1.2  r1.2  -32
+    //       add  r2.0  -IP   call_target
+    //       add  r2.0  r2.0  adjust_off
 
-    // calculate the reserved register's num from fcall's dst register
+    // call's dst must be r1.0, which is reserved at
+    // GlobalRA::setABIForStackCallFunctionCalls. It must not be overlapped with
+    // r2.0, that is hardcoded as the new jump target
     assert(fcall->getDst()->isGreg());
-    uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
-    // hardcoded add's dst subregister to 2
+    assert((fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ) != 2);
+
+    // hardcoded add's dst to r2.0
     G4_Declare* add_dst_decl =
-        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
+        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), 2, 0);
 
     // create the first add instruction
+    // add  r2.0  -IP   call_target
     G4_INST* add_inst = m_builder->createInternalInst(
         nullptr, G4_add, nullptr, false, 1,
         m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
@@ -223,82 +228,41 @@ void VISAKernelImpl::createInstsForCallTargetOffset(InstListType& insts, G4_INST
             m_builder->getRegionScalar(), Type_UD),
         fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
 
-    // create the second add to add the -ip to -32, to get the call's ip
-    // call offset is relative to pre-increment IP
+    // create the second add to add the -ip to adjust_off, adjust_off dependes
+    // on how many instructions from the fist add to the jmp instruction, and
+    // if it's post-increment (jmpi) or pre-increment (call)
+    // add  r2.0  r2.0  adjust_off
     G4_INST* add_inst2 = m_builder->createInternalInst(
         nullptr, G4_add, nullptr, false, 1,
         m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
         m_builder->Create_Src_Opnd_From_Dcl(
             add_dst_decl, m_builder->getRegionScalar()),
-        m_builder->createImm(-32, Type_D),
+        m_builder->createImm(adjust_off, Type_D),
         InstOpt_WriteEnable | InstOpt_NoCompact);
 
     insts.push_back(add_inst);
     insts.push_back(add_inst2);
 
-    // update call target to add's dst(call's src0)
-    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
-        add_dst_decl, m_builder->getRegionScalar());
-    fcall->setSrc(jump_target, 0);
-    fcall->setNoCompacted();
+    return add_dst_decl;
 }
 
 void VISAKernelImpl::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
 {
     // SKL workaround for indirect call
     // r1.0 is the return IP (the instruction right after jmpi)
-    // r1.1 it the return mask
+    // r1.1 is the return mask. While we'll replace the ret in calee to jmpi as well,
+    // we do not need to consider the return mask here.
+
+    // Do not allow predicate call on jmpi WA
+    assert(fcall->getPredicate() == nullptr);
 
     // calculate the reserved register's num from fcall's dst register (shoud be r1)
     assert(fcall->getDst()->isGreg());
     uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
-    G4_Declare* r1_1_decl =
-        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 1);
 
-    if (fcall->getPredicate() != nullptr) {
-        // skip the calculation of global mask if the given call has make already
-        // In case we overwrite the mask set by IGC for non-uniform call handling
+    G4_Declare* new_target_decl = createInstsForCallTargetOffset(insts, fcall, -64);
 
-        // mov r1.1 fcall_pred
-        insts.push_back(m_builder->createInternalInst(
-            nullptr, G4_mov, nullptr, false, 1,
-            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
-            m_builder->Create_Src_Opnd_From_Dcl(
-                fcall->getPredicate()->getTopDcl(), m_builder->getRegionScalar()),
-            nullptr, InstOpt_WriteEnable));
-
-    } else {
-        // mov  f0.0   0
-        insts.push_back(m_builder->createInternalInst(
-            nullptr, G4_mov, nullptr, false, 1,
-            m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
-            m_builder->createImm(0, Type_UD), nullptr, InstOpt_WriteEnable));
-
-        // mov  r1.1   0
-        insts.push_back(m_builder->createInternalInst(
-            nullptr, G4_mov, nullptr, false, 1,
-            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
-            m_builder->createImm(0, Type_UD),
-            nullptr, InstOpt_WriteEnable));
-
-        // cmp  f0.0   r1.1  0
-        insts.push_back(m_builder->createInternalInst(
-            nullptr, G4_cmp, nullptr, false, 1,
-            m_builder->createDstRegRegion(Direct, m_phyRegPool->getF0Reg(), 0, 0, 1, Type_UD),
-            m_builder->Create_Src_Opnd_From_Dcl(r1_1_decl, m_builder->getRegionScalar()),
-            m_builder->createImm(0, Type_UD), InstOpt_NoOpt));
-
-        // mov  r1.1   f0.0
-        insts.push_back(m_builder->createInternalInst(
-            nullptr, G4_mov, nullptr, false, 1,
-            m_builder->Create_Dst_Opnd_From_Dcl(r1_1_decl, 1),
-            m_builder->createSrcRegRegion(
-                Mod_src_undef, Direct, m_phyRegPool->getF0Reg(), 0, 0,
-                m_builder->getRegionScalar(), Type_UD),
-            nullptr, InstOpt_WriteEnable));
-    }
-
-    // add  r1.0   IP   64
+    // add  r1.0   IP   32
     G4_Declare* r1_0_decl =
         m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
     insts.push_back(m_builder->createInternalInst(
@@ -307,38 +271,17 @@ void VISAKernelImpl::createInstForJmpiSequence(InstListType& insts, G4_INST* fca
         m_builder->createSrcRegRegion(
             Mod_src_undef, Direct, m_phyRegPool->getIpReg(), 0, 0,
             m_builder->getRegionScalar(), Type_UD),
-        m_builder->createImm(64, Type_UD),
+        m_builder->createImm(32, Type_UD),
         InstOpt_WriteEnable | InstOpt_NoCompact));
 
-    // add  r1.2 - IP   call_target
-    G4_Declare* r1_2_decl =
-        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 2);
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_add, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(r1_2_decl, 1),
-        m_builder->createSrcRegRegion(
-            Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
-            m_builder->getRegionScalar(), Type_UD),
-        fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact));
-
-    // add  r1.2  r1.2  -48
-    // jmpi offset is relative to post-increment IP on SKL
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_add, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(r1_2_decl, 1),
-        m_builder->Create_Src_Opnd_From_Dcl(
-            r1_2_decl, m_builder->getRegionScalar()),
-        m_builder->createImm(-48, Type_D),
-        InstOpt_WriteEnable | InstOpt_NoCompact));
-
-    // jmpi r1.2
+    // jmpi r2.0
     // update jump target (src0) to add's dst
     G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
-        r1_2_decl, m_builder->getRegionScalar());
+        new_target_decl, m_builder->getRegionScalar());
     jump_target->setType(Type_D);
     insts.push_back(m_builder->createInternalInst(
         nullptr, G4_jmpi, nullptr, false, 1, nullptr, jump_target,
-        nullptr, InstOpt_WriteEnable | InstOpt_NoCompact));
+        nullptr, InstOpt_NoCompact));
 }
 
 void VISAKernelImpl::expandIndirectCallWithRegTarget()
@@ -355,38 +298,42 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
         {
             G4_INST* fcall = bb->back();
             if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0()) {
-                // at this point the call function src0 has the target_address
-                // and the call dst is the reserved register for ret, we can use
-                // the subregister after 2 as add's dst
-                // r1.0-r1.7 is reserved in GlobalRA::setABIForStackCallFunctionCalls
+                // at this point the call instruction's src0 has the target_address
+                // and the call dst is the reserved register for ret
+                // All the caller save register should be saved. We usd r2.0 directly
+                // here to calculate the new call's target. We picked r2.0 due to the
+                // HW's limitation that call/calla's src and dst offset (the subreg num)
+                // must be 0.
                 //
                 // expand call
                 // From:
                 //       call r1.0 call_target
                 // To:
-                //       add  r1.2  -IP   call_target
-                //       add  r1.2  r1.2  -32
-                //       call r1.0  r1.2
+                //       add  r2.0  -IP   call_target
+                //       add  r2.0  r2.0  -32
+                //       call r1.0  r2.0
 
                 // For SKL workaround, expand call
                 // From:
                 //       call r1.0 call_target
                 // To:
-                //       mov  f0.0   0
-                //       mov  r1.1   0
-                //       cmp  f0.0   r1.1   0
-                //       mov  r1.1   f0.0
-                //       add  r1.0   IP     64
-                //       add  r1.2   -IP    call_target
-                //       add  r1.2   r1.2   -48
-                //       jmpi r1.2
+                //       add  r2.0   -IP    call_target
+                //       add  r2.0   r2.0   -64
+                //       add  r1.0   IP   32              // set the return IP
+                //       jmpi r2.0
 
                 InstListType expanded_insts;
-                if (getGenxPlatform() == GENX_SKL)
+                if (m_builder->needReplaceIndirectCallWithJmpi()) {
                     createInstForJmpiSequence(expanded_insts, fcall);
-                else
-                    createInstsForCallTargetOffset(expanded_insts, fcall);
-
+                } else {
+                    G4_Declare* jmp_target_decl =
+                        createInstsForCallTargetOffset(expanded_insts, fcall, -32);
+                    // Updated call's target to the new target
+                    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
+                        jmp_target_decl, m_builder->getRegionScalar());
+                    fcall->setSrc(jump_target, 0);
+                    fcall->setNoCompacted();
+                }
                 // then insert the expaneded instructions right before the call
                 INST_LIST_ITER insert_point = bb->end();
                 --insert_point;
@@ -394,8 +341,9 @@ void VISAKernelImpl::expandIndirectCallWithRegTarget()
                     bb->getInstList().insert(insert_point, inst_to_add);
                     inst_to_add->setCISAOff(fcall->getCISAOff());
                 }
-                // remove call from the instlist for SKL WA
-                if (getGenxPlatform() == GENX_SKL)
+
+                // remove call from the instlist for Jmpi WA
+                if (m_builder->needReplaceIndirectCallWithJmpi())
                     bb->getInstList().erase(--bb->end());
             }
         }
@@ -431,10 +379,17 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         bb->removeIntrinsics(Intrinsic::MemFence);
     }
 
-    if (getOptions()->getOption(vISA_SoftwareScoreBoard))
+    if (m_builder->hasSWSB())
     {
-        SWSB swsb(*m_kernel, *m_kernelMem);
-        swsb.SWSBGenerator();
+        if (!getOptions()->getOption(vISA_forceDebugSWSB))
+        {
+            SWSB swsb(*m_kernel, *m_kernelMem);
+            swsb.SWSBGenerator();
+        }
+        else
+        {
+            forceDebugSWSB(m_kernel);
+        }
     }
 
     if (getOptions()->getuInt32Option(vISA_SWSBTokenBarrier) != 0)
@@ -445,11 +400,6 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
     if (getOptions()->getuInt32Option(vISA_SWSBInstStall) != 0)
     {
         singleInstStallSWSB(m_kernel, getOptions()->getuInt32Option(vISA_SWSBInstStall), getOptions()->getuInt32Option(vISA_SWSBInstStallEnd), false);
-    }
-
-    if (getOptions()->getOption(vISA_forceDebugSWSB))
-    {
-        forceDebugSWSB(m_kernel);
     }
 
 
@@ -485,9 +435,7 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
     //
 
     startTimer(TIMER_ENCODE_AND_EMIT);
-    if (m_options->getOption(vISA_IGAEncoder)
-        || m_builder->hasSWSB()
-        )
+    if (m_builder->useIGAEncoder())
     {
 
         // ToDo: add support for debug info/FastComposite
@@ -633,24 +581,7 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         krnlOutput.close();
     }
 
-    if (m_options->getOption(vISA_SoftwareScoreBoard) &&
-        getPlatformGeneration(getGenxPlatform()) < PlatformGen::GEN12)
-    {
-        std::ofstream krnlDepOutput;
-
-        char asmFileName[MAX_OPTION_STR_LENGTH];
-        SNPRINTF( asmFileName, MAX_OPTION_STR_LENGTH, "%s_0x%08x.dep", m_asmName.c_str(), (unsigned int)m_kernel->getKernelID());
-        krnlDepOutput.open( asmFileName );
-        if (!krnlDepOutput)
-        {
-            cerr << "Fail to open " << asmFileName << std::endl;
-        }
-
-        m_kernel->emit_dep(krnlDepOutput);
-        krnlDepOutput.close();
-    }
-
-    if( m_builder->getJitInfo() != NULL )
+    if (m_builder->getJitInfo())
     {
         m_builder->getJitInfo()->numAsmCount = m_kernel->getAsmCount();
     }
@@ -682,10 +613,18 @@ int VISAKernelImpl::InitializeFastPath()
     }
     m_jitInfo = (FINALIZER_INFO*)m_mem.alloc(sizeof(FINALIZER_INFO));
 
-    int value = 32;
-    if (!getIntKernelAttributeValue("FESPSize", value))
+    int feSPSize = 32;
+    if (!getIntKernelAttributeValue("FESPSize", feSPSize))
     {
-        value = 32;
+        feSPSize = 32;
+    }
+    int spillMemOffset = 0;
+    if (getIntKernelAttributeValue("SpillMemOffset", spillMemOffset))
+    {
+        if (spillMemOffset > 0)
+        {
+            getOptions()->setOption(vISA_SpillMemOffset, (uint32_t)spillMemOffset);
+        }
     }
 
     void* addr = m_kernelMem->alloc(sizeof(class IR_Builder));
@@ -694,7 +633,7 @@ int VISAKernelImpl::InitializeFastPath()
         *m_kernel,
         *m_kernelMem,
         m_options,
-        (value == 64),
+        (feSPSize == 64),
         m_jitInfo,
         m_pWaTable
         );
@@ -935,6 +874,18 @@ std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl) const
     stringstream ss;
     ss << "S" << index;
     return ss.str();
+}
+
+std::string VISAKernelImpl::getVectorOperandName(VISA_VectorOpnd* opnd, bool showRegion) const
+{
+    VISAKernel_format_provider fmt(this);
+    return printVectorOperand(&fmt, opnd->_opnd.v_opnd, m_options, showRegion);
+}
+
+std::string VISAKernelImpl::getPredicateOperandName(VISA_PredOpnd* opnd) const
+{
+    VISAKernel_format_provider fmt(this);
+    return printVectorOperand(&fmt, opnd->_opnd.v_opnd, m_options, false);
 }
 
 int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
@@ -1390,7 +1341,7 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
     attr->size  = (uint8_t)size;
     attr->isInt = size != 0 && (!strcmp(attrName, "SLMSize") ||
         !strcmp(attrName, "SurfaceUsage") ||
-        !strcmp(attrName, "StackSize") ||
+        !strcmp(attrName, "SpillMemOffset") ||
         !strcmp(attrName, "Scope") ||
         !strcmp(attrName, "Target") ||
         !strcmp(attrName, "ArgSize") ||
@@ -1795,7 +1746,7 @@ int VISAKernelImpl::CreateVISAAddressOperand(VISA_VectorOpnd *&cisa_opnd, VISA_A
         {
             // FIXME: This does not adhere to the vISA spec, which allows <0;N,1> regions where
             // N is < exec size
-            RegionDesc* rd = width > 1 ? m_builder->getRegionStride1() : m_builder->getRegionScalar();
+            const RegionDesc* rd = width > 1 ? m_builder->getRegionStride1() : m_builder->getRegionScalar();
             cisa_opnd->g4opnd = m_builder->createSrcRegRegion(
                 Mod_src_undef,
                 Direct,
@@ -1955,7 +1906,7 @@ int VISAKernelImpl::CreateVISAIndirectGeneralOperand(VISA_VectorOpnd *& cisa_opn
             if(verticalStride == MAX_UWORD_VALUE)
                 verticalStride = UNDEFINED_SHORT;
 
-            RegionDesc *rd = m_builder->createRegionDesc( verticalStride, width, horizontalStride );
+            const RegionDesc *rd = m_builder->createRegionDesc( verticalStride, width, horizontalStride );
             G4_SrcModifier g4_mod = Get_G4_SrcMod_From_Common_ISA_Mod(mod);
             G4_SrcRegRegion* src = m_builder->createIndirectSrc(
                 g4_mod,
@@ -2038,13 +1989,12 @@ int VISAKernelImpl::CreateVISAPredicateSrcOperand(VISA_VectorOpnd *& opnd, VISA_
 
     opnd = (VISA_VectorOpnd *)getOpndFromPool();
 
-    if(IS_GEN_BOTH_PATH)
+    if (IS_GEN_BOTH_PATH)
     {
         G4_Declare *dcl = decl->predVar.dcl;
-        RegionDesc *rd;
+        const RegionDesc *rd = m_builder->getRegionScalar();
 
         G4_Type type = Type_UW;
-            rd = m_builder->getRegionScalar();
 
         if(size == 32)
             type = Type_UD;
@@ -2058,7 +2008,7 @@ int VISAKernelImpl::CreateVISAPredicateSrcOperand(VISA_VectorOpnd *& opnd, VISA_
             rd,
             type );
     }
-    if(IS_VISA_BOTH_PATH)
+    if (IS_VISA_BOTH_PATH)
     {
         status = CreateVISAPredicateOperandvISA((VISA_PredOpnd *&)opnd, decl, PredState_NO_INVERSE, PRED_CTRL_NON);
     }
@@ -2132,7 +2082,7 @@ int VISAKernelImpl::CreateVISAPredicateOperand(VISA_PredOpnd *& cisa_opnd, VISA_
         //with bool size in bytes was incorrect, now that it's correct it returns "correct"
         //number of elements. Except it thinks each element is a two bytes.
         //we want each element in as a boolean.
-        G4_Predicate_Control predCtrl = vISAPredicateToG4Predicate( (VISA_PREDICATE_CONTROL)cntrl, dcl->getNumberFlagElements());
+        G4_Predicate_Control predCtrl = m_builder->vISAPredicateToG4Predicate(cntrl, dcl->getNumberFlagElements());
 
         cisa_opnd->g4opnd = m_builder->createPredicate(
             (state == PredState_INVERSE) ? PredState_Minus : PredState_Plus,
@@ -2171,7 +2121,7 @@ int VISAKernelImpl::CreateVISASrcOperand(VISA_VectorOpnd *& cisa_opnd, VISA_GenV
             //create reg region
             G4_Declare *dcl = cisa_decl->genVar.dcl;
 
-            RegionDesc *rd = m_builder->createRegionDesc(vStride, width, hStride);
+            const RegionDesc *rd = m_builder->createRegionDesc(vStride, width, hStride);
             G4_SrcModifier g4_mod = Get_G4_SrcMod_From_Common_ISA_Mod(mod);
 
             cisa_opnd->g4opnd = m_builder->createSrcRegRegion(g4_mod, Direct, dcl->getRegVar(), rowOffset, colOffset, rd, dcl->getElemType());
@@ -2450,7 +2400,7 @@ int VISAKernelImpl::CreateGenRawSrcOperand(VISA_RawOpnd *& cisa_opnd)
 
     G4_Declare *dcl = cisa_opnd->decl->genVar.dcl;
 
-    RegionDesc *rd = m_builder->getRegionStride1();
+    const RegionDesc *rd = m_builder->getRegionStride1();
     G4_Type type = dcl->getElemType();
     short row_offset = offset / G4_GRF_REG_NBYTES;
     short col_offset = (offset%G4_GRF_REG_NBYTES) / G4_Type_Table[type].byteSize;
@@ -5031,7 +4981,7 @@ int VISAKernelImpl::AppendVISAMiscRawSend(VISA_PredOpnd *pred, Common_VISA_EMask
 
 int VISAKernelImpl::AppendVISAMiscRawSends(VISA_PredOpnd *pred, Common_VISA_EMask_Ctrl emask, Common_ISA_Exec_Size executionSize, unsigned char modifiers,
                                            unsigned ffid, VISA_VectorOpnd *exMsgDesc, unsigned char src0Size, unsigned char src1Size, unsigned char dstSize, VISA_VectorOpnd *desc,
-                                          VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst)
+                                          VISA_RawOpnd *src0, VISA_RawOpnd *src1, VISA_RawOpnd *dst, bool hasEOT)
 {
     AppendVISAInstCommon();
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
@@ -5048,7 +4998,7 @@ int VISAKernelImpl::AppendVISAMiscRawSends(VISA_PredOpnd *pred, Common_VISA_EMas
         dst->g4opnd->asDstRegRegion()->setType(Type_UD);
 
         status = m_builder->translateVISARawSendsInst(g4Pred, executionSize,
-            emask, modifiers, exMsgDesc->g4opnd, src0Size, src1Size, dstSize, desc->g4opnd, src0->g4opnd, src1->g4opnd, dst->g4opnd->asDstRegRegion(), ffid);
+            emask, modifiers, exMsgDesc->g4opnd, src0Size, src1Size, dstSize, desc->g4opnd, src0->g4opnd, src1->g4opnd, dst->g4opnd->asDstRegRegion(), ffid, hasEOT);
     }
     if(IS_VISA_BOTH_PATH)
     {
@@ -5060,6 +5010,11 @@ int VISAKernelImpl::AppendVISAMiscRawSends(VISA_PredOpnd *pred, Common_VISA_EMas
         int num_operands = 0;
 
         //modifier
+        if (hasEOT)
+        {
+            // bits[1]: EOT flag
+            modifiers |= 0x2;
+        }
         ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, modifiers));
 
         num_pred_desc_operands = 2;
@@ -8216,10 +8171,11 @@ VISA_opnd* VISAKernelImpl::getOpndFromPool()
     return newOp;
 }
 
-G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(int index, uint16_t vStride, uint16_t width,
-                                                        uint16_t hStride, uint8_t rowOffset, uint8_t colOffset, VISA_Modifier modifier)
+G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(
+    int index, uint16_t vStride, uint16_t width,
+    uint16_t hStride, uint8_t rowOffset, uint8_t colOffset, VISA_Modifier modifier)
 {
-    RegionDesc *rd = m_builder->createRegionDesc( vStride, width, hStride );
+    const RegionDesc *rd = m_builder->createRegionDesc( vStride, width, hStride );
     G4_Operand* tmpsrc = NULL;
     PreDefinedVarsInternal internalIndex = mapExternalToInternalPreDefVar(index);
     switch (internalIndex)

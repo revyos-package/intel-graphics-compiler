@@ -1026,9 +1026,9 @@ void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst& I)
     }
 }
 
-#if LLVM_VERSION_MAJOR >= 7 
+#if LLVM_VERSION_MAJOR >= 7
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// This pass removes dead local memory loads and stores. If we remove all such loads and stores, we also 
+// This pass removes dead local memory loads and stores. If we remove all such loads and stores, we also
 // remove all local memory fences together with barriers that follow.
 //
 IGC_INITIALIZE_PASS_BEGIN(TrivialLocalMemoryOpsElimination, "TrivialLocalMemoryOpsElimination", "TrivialLocalMemoryOpsElimination", false, false)
@@ -1163,7 +1163,7 @@ void TrivialLocalMemoryOpsElimination::visitCallInst(CallInst& I)
 {
     // detect only: llvm.genx.GenISA.memoryfence(i1 true, i1 false, i1 false, i1 false, i1 false, i1 false, i1 true)
     // (note: the first and last arguments are true)
-    // and add them with immediately following barriers to m_LocalFencesBariersToRemove  
+    // and add them with immediately following barriers to m_LocalFencesBariersToRemove
     anyCallInstUseLocalMemory(I);
 
     if (isa<GenIntrinsicInst>(I))
@@ -1364,6 +1364,67 @@ void GenSpecificPattern::matchReverse(BinaryOperator& I)
     }
 }
 
+/* Transforms pattern1 or pattern2 to a bitcast,extract,insert,insert,bitcast
+
+    From:
+        %5 = zext i32 %a to i64 <--- optional
+        %6 = shl i64 %5, 32
+        or
+        %6 = and i64 %5, 0xFFFFFFFF00000000
+    To:
+        %BC = bitcast i64 %5 to <2 x i32> <---- not needed when %5 is zext
+        %6 = extractelement <2 x i32> %BC, i32 0/1 <---- not needed when %5 is zext
+        %7 = insertelement <2 x i32> %vec, i32 0, i32 0
+        %8 = insertelement <2 x i32> %vec, %6, i32 1
+        %9 = bitcast <2 x i32> %8 to i64
+ */
+void GenSpecificPattern::createBitcastExtractInsertPattern(BinaryOperator& I, Value* OpLow, Value* OpHi, unsigned extractNum1, unsigned extractNum2)
+{
+    llvm::IRBuilder<> builder(&I);
+    auto vec2 = VectorType::get(builder.getInt32Ty(), 2);
+    Value* vec = UndefValue::get(vec2);
+    Value* elemLow = nullptr;
+    Value* elemHi = nullptr;
+
+    auto zeroextorNot = [&](Value* Op, unsigned num) -> Value *
+    {
+        Value* elem = nullptr;
+        if (auto ZextInst = dyn_cast<ZExtInst>(Op))
+        {
+            if (ZextInst->getDestTy() == builder.getInt64Ty() && ZextInst->getSrcTy() == builder.getInt32Ty())
+            {
+                elem = ZextInst->getOperand(0);
+            }
+        }
+        else if (auto IEIInst = dyn_cast<InsertElementInst>(Op))
+        {
+            auto opType = IEIInst->getType();
+            if (opType->isVectorTy() && opType->getVectorElementType()->isIntegerTy(32) && opType->getVectorNumElements() == 2)
+            {
+                elem = IEIInst->getOperand(1);
+            }
+        }
+        else
+        {
+            Value* BC = builder.CreateBitCast(Op, vec2);
+            elem = builder.CreateExtractElement(BC, builder.getInt32(num));
+        }
+        return elem;
+    };
+
+    elemLow = (OpLow == nullptr) ? builder.getInt32(0) : zeroextorNot(OpLow, extractNum1);
+    elemHi = (OpHi == nullptr) ? builder.getInt32(0) : zeroextorNot(OpHi, extractNum2);
+
+    if (elemHi == nullptr || elemLow == nullptr)
+        return;
+
+    vec = builder.CreateInsertElement(vec, elemLow, builder.getInt32(0));
+    vec = builder.CreateInsertElement(vec, elemHi, builder.getInt32(1));
+    vec = builder.CreateBitCast(vec, builder.getInt64Ty());
+    I.replaceAllUsesWith(vec);
+    I.eraseFromParent();
+}
+
 void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
 {
     if (I.getOpcode() == Instruction::Or)
@@ -1404,31 +1465,15 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         auto pattern1 = m_Or(
             m_And(m_Value(AndOp1), m_SpecificInt(0xFFFFFFFF)),
             m_Shl(m_Value(EltOp1), m_SpecificInt(32)));
-
 #if LLVM_VERSION_MAJOR >= 7
         Value * AndOp2 = nullptr, *EltOp2 = nullptr, *VecOp = nullptr;
         auto pattern2 = m_Or(
             m_And(m_Value(AndOp2), m_SpecificInt(0xFFFFFFFF)),
             m_BitCast(m_InsertElement(m_Value(VecOp), m_Value(EltOp2), m_SpecificInt(1))));
 #endif // LLVM_VERSION_MAJOR >= 7
-        // Transforms pattern1 or pattern2 to a bitcast,extract,insert,insert,bitcast
-        auto transformPattern = [=](BinaryOperator& I, Value* Op1, Value* Op2)
-        {
-            llvm::IRBuilder<> builder(&I);
-            VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
-            Value* vec_undef = UndefValue::get(vec2);
-            Value* BC = builder.CreateBitCast(Op1, vec2);
-            Value* EE = builder.CreateExtractElement(BC, builder.getInt32(0));
-            Value* vec = builder.CreateInsertElement(vec_undef, EE, builder.getInt32(0));
-            vec = builder.CreateInsertElement(vec, Op2, builder.getInt32(1));
-            vec = builder.CreateBitCast(vec, builder.getInt64Ty());
-            I.replaceAllUsesWith(vec);
-            I.eraseFromParent();
-        };
-
         if (match(&I, pattern1) && AndOp1->getType()->isIntegerTy(64))
         {
-            transformPattern(I, AndOp1, EltOp1);
+            createBitcastExtractInsertPattern(I, AndOp1, EltOp1, 0, 1);
         }
 #if LLVM_VERSION_MAJOR >= 7
         else if (match(&I, pattern2) && AndOp2->getType()->isIntegerTy(64))
@@ -1441,13 +1486,13 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
                 vector_type->getElementType()->isIntegerTy(32) &&
                 vector_type->getNumElements() == 2)
             {
-                transformPattern(I, AndOp2, EltOp2);
+                auto InsertOp = cast<BitCastInst>(I.getOperand(1))->getOperand(0);
+                createBitcastExtractInsertPattern(I, AndOp2, InsertOp, 0, 1);
             }
         }
 #endif // LLVM_VERSION_MAJOR >= 7
         else
         {
-
             /*
             from
                 % 22 = shl i32 % 14, 2
@@ -1516,22 +1561,27 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
     }
     else if (I.getOpcode() == Instruction::Shl)
     {
-        auto op0 = dyn_cast<ZExtInst>(I.getOperand(0));
-        auto offset = llvm::dyn_cast<llvm::ConstantInt>(I.getOperand(1));
-        if (op0 &&
-            op0->getType()->isIntegerTy(64) &&
-            op0->getOperand(0)->getType()->isIntegerTy(32) &&
-            offset &&
-            offset->getZExtValue() == 32)
+    /*
+      From:
+          %5 = zext i32 %a to i64 <--- optional
+          %6 = shl i64 %5, 32
+
+      To:
+          %BC = bitcast i64 %5 to <2 x i32> <---- not needed when %5 is zext
+          %6 = extractelement <2 x i32> %BC, i32 0 <---- not needed when %5 is zext
+          %7 = insertelement <2 x i32> %vec, i32 0, i32 0
+          %8 = insertelement <2 x i32> %vec, %6, i32 1
+          %9 = bitcast <2 x i32> %8 to i64
+    */
+
+        using namespace llvm::PatternMatch;
+        Instruction* inst = nullptr;
+
+        auto pattern1 = m_Shl(m_Instruction(inst), m_SpecificInt(32));
+
+        if (match(&I, pattern1) && I.getType()->isIntegerTy(64))
         {
-            llvm::IRBuilder<> builder(&I);
-            auto vec2 = VectorType::get(builder.getInt32Ty(), 2);
-            Value* vec = UndefValue::get(vec2);
-            vec = builder.CreateInsertElement(vec, builder.getInt32(0), builder.getInt32(0));
-            vec = builder.CreateInsertElement(vec, op0->getOperand(0), builder.getInt32(1));
-            vec = builder.CreateBitCast(vec, builder.getInt64Ty());
-            I.replaceAllUsesWith(vec);
-            I.eraseFromParent();
+            createBitcastExtractInsertPattern(I, nullptr, I.getOperand(0), 0, 0);
         }
     }
     else if (I.getOpcode() == Instruction::And)
@@ -1597,6 +1647,20 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         auto fabs_on_int_pattern2 = m_And(m_Instruction(inst), m_SpecificInt(0x7FFFFFFF00000000));
         auto fneg_pattern = m_FNeg(m_Value(src_of_FNeg));
 
+        /*
+        From:
+            %5 = zext i32 %a to i64 <--- optional
+            %6 = and i64 %5, 0xFFFFFFFF00000000 (-4294967296)
+        To:
+            %BC = bitcast i64 %5 to <2 x i32> <---- not needed when %5 is zext
+            %6 = extractelement <2 x i32> %BC, i32 1 <---- not needed when %5 is zext
+            %7 = insertelement <2 x i32> %vec, i32 0, i32 0
+            %8 = insertelement <2 x i32> %vec, %6, i32 1
+            %9 = bitcast <2 x i32> %8 to i64
+        */
+
+        auto pattern1 = m_And(m_Instruction(inst), m_SpecificInt(0xFFFFFFFF00000000));
+
         if (match(&I, fabs_on_int_pattern1))
         {
             Value* src = getValidBitcastSrc(inst);
@@ -1625,8 +1689,10 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
                 I.eraseFromParent();
             }
         }
-
-
+        else if (match(&I, pattern1) && I.getType()->isIntegerTy(64))
+        {
+            createBitcastExtractInsertPattern(I, nullptr, I.getOperand(0), 0, 1);
+        }
     }
 }
 
@@ -2096,107 +2162,81 @@ static Constant* GetConstantValue(Type* type, char* rawData)
     return nullptr;
 }
 
-bool IGCConstProp::EvalConstantAddress(Value* address, unsigned int& offset, Value* ptrSrc)
+Constant* IGCConstProp::ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, LoadInst* inst)
 {
-    if ((ptrSrc == nullptr && isa<ConstantPointerNull>(address)) ||
-        (ptrSrc == address))
-    {
-        offset = 0;
-        return true;
-    }
-    else if (Instruction * ptrExpr = dyn_cast<Instruction>(address))
-    {
-        if (ptrExpr->getOpcode() == Instruction::BitCast ||
-            ptrExpr->getOpcode() == Instruction::AddrSpaceCast)
-        {
-            return EvalConstantAddress(ptrExpr->getOperand(0), offset, ptrSrc);
-        }
-        if (ptrExpr->getOpcode() == Instruction::IntToPtr)
-        {
-            Value* eltIdxVal = ptrExpr->getOperand(0);
-            ConstantInt* eltIdx = dyn_cast<ConstantInt>(eltIdxVal);
-            if (!eltIdx)
-                return false;
-            offset = int_cast<unsigned>(eltIdx->getZExtValue());
-            return true;
-        }
-        else if (ptrExpr->getOpcode() == Instruction::GetElementPtr)
-        {
-            offset = 0;
-            if (!EvalConstantAddress(ptrExpr->getOperand(0), offset, ptrSrc))
-            {
-                return false;
-            }
-            Type* Ty = ptrExpr->getType();
-            gep_type_iterator GTI = gep_type_begin(ptrExpr);
-            for (auto OI = ptrExpr->op_begin() + 1, E = ptrExpr->op_end(); OI != E; ++OI, ++GTI) {
-                Value* Idx = *OI;
-                if (StructType * StTy = GTI.getStructTypeOrNull()) {
-                    unsigned Field = int_cast<unsigned>(cast<ConstantInt>(Idx)->getZExtValue());
-                    if (Field) {
-                        offset += int_cast<unsigned int>(m_TD->getStructLayout(StTy)->getElementOffset(Field));
-                    }
-                    Ty = StTy->getElementType(Field);
-                }
-                else {
-                    Ty = GTI.getIndexedType();
-                    if (const ConstantInt * CI = dyn_cast<ConstantInt>(Idx)) {
-                        offset += int_cast<unsigned int>(
-                            m_TD->getTypeAllocSize(Ty) * CI->getSExtValue());
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                }
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-bool GetStatelessBufferInfo(Value* pointer, unsigned& bufferId,
-    BufferType& bufferTy, Value*& bufferSrcPtr)
-{
-    // If the buffer info is not encoded in the address space, we can still find it by
-    // tracing the pointer to where it's created.
-    Value* src = IGC::TracePointerSource(pointer);
-    BufferAccessType accType;
-    if (src && IGC::GetResourcePointerInfo(src, bufferId, bufferTy, accType))
-    {
-        bufferSrcPtr = src;
-        return true;
-    }
-    return false;
-}
-
-Constant* IGCConstProp::ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, Type* type)
-{
-    ConstantAddress cl;
-    char* pConstVal;
-    cl.bufId = bufId;
-    cl.eltId = eltId;
-    cl.size = size_in_bytes;
+    Type* type = inst->getType();
 
     CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     ModuleMetaData* modMD = ctx->getModuleMetaData();
 
-    auto it = modMD->inlineDynConstants.find(cl);
-    if ((it != modMD->inlineDynConstants.end()) && (it->first.size == cl.size))
+    // Handling for base types (Integer/FloatingPoint)
+    if (!(type->isVectorTy()))
     {
-        // For constant buffer accesses of size <= 32bit.
-        if (size_in_bytes <= 4)
+        ConstantAddress cl;
+        cl.bufId = bufId;
+        cl.eltId = eltId;
+        cl.size = size_in_bytes;
+
+        // Inline the constants for constant buffer accesses of size <= 32bit only.
+        if (size_in_bytes > 4)
+            return nullptr;
+
+        auto it = modMD->inlineDynConstants.find(cl);
+        if (it != modMD->inlineDynConstants.end() && (it->first.size == cl.size))
         {
             // This constant is
             //          found in the Dynamic inline constants list, and
-            //          sizes match (find only looking for bufId and eltId, so need to look for size explicitly)
-            if (!(type->isVectorTy()))
+            //          sizes match (find only looking for bufId and eltId, so need to compare size field explicitly)
+            char* pConstVal;
+            pConstVal = (char*)(&(it->second));
+            return GetConstantValue(type, pConstVal);
+        }
+    }
+    else
+    {
+        Type * srcEltTy = type->getVectorElementType();
+        uint32_t srcNElts = type->getVectorNumElements();
+        uint32_t eltSize_in_bytes = srcEltTy->getPrimitiveSizeInBits() / 8;
+        std::vector<uint32_t> constValVec;
+
+        if (eltSize_in_bytes > 4)
+            return nullptr;
+
+        // First make sure all elements of vector are available in the dynamic inline constants
+        //    If not, we cannot inline the vector
+        for (uint i = 0; i < srcNElts; i++)
+        {
+            ConstantAddress cl;
+            cl.bufId = bufId;
+            cl.eltId = eltId + (i * eltSize_in_bytes);
+            cl.size = eltSize_in_bytes;
+
+            auto it = modMD->inlineDynConstants.find(cl);
+            if (it != modMD->inlineDynConstants.end() && (it->first.size == cl.size))
             {
-                // Handling for base types (Integer/FloatingPoint)
-                pConstVal = (char*)(&(it->second));
-                return GetConstantValue(type, pConstVal);
+                constValVec.push_back(it->second);
             }
+            else
+            {
+                // All elements of the vector has to be available for inlining,
+                //     otherwise we cannot replace the load instruction, hence return nullptr
+                return nullptr;
+            }
+        }
+        if (constValVec.size() == srcNElts)
+        {
+            IRBuilder<> builder(inst);
+            Value * vectorValue = UndefValue::get(inst->getType());
+            for (uint i = 0; i < srcNElts; i++)
+            {
+                char* pConstVal;
+                pConstVal = (char*)(&(constValVec[i]));
+                vectorValue = builder.CreateInsertElement(
+                vectorValue,
+                GetConstantValue(srcEltTy, pConstVal),
+                builder.getInt32(i));
+            }
+            return dyn_cast<Constant>(vectorValue);
         }
     }
     return nullptr;
@@ -2206,7 +2246,8 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
 {
     unsigned as = inst->getPointerAddressSpace();
     bool directBuf = false;
-    unsigned bufId = 0;
+    bool statelessBuf = false;
+    unsigned bufIdOrGRFOffset = 0;
     unsigned int size_in_bytes = 0;
     CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     ModuleMetaData* modMD = ctx->getModuleMetaData();
@@ -2216,24 +2257,38 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
 
     if (as == ADDRESS_SPACE_CONSTANT)
     {
-        if (!GetStatelessBufferInfo(inst->getPointerOperand(), bufId, bufType, pointerSrc))
+        if (!GetStatelessBufferInfo(inst->getPointerOperand(), bufIdOrGRFOffset, bufType, pointerSrc, directBuf))
         {
             return nullptr;
         }
-        directBuf = true;
+        if (!directBuf)
+        {
+            // Make sure constant folding is safe by looking up in pushableAddresses
+            CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+            PushInfo& pushInfo = ctx->getModuleMetaData()->pushInfo;
+
+            for (auto it : pushInfo.pushableAddresses)
+            {
+                if (bufIdOrGRFOffset * 4 == it.addressOffset && it.isStatic)
+                {
+                    statelessBuf = true;
+                    break;
+                }
+            }
+        }
     }
     else
     {
-        bufType = IGC::DecodeAS4GFXResource(as, directBuf, bufId);
+        bufType = IGC::DecodeAS4GFXResource(as, directBuf, bufIdOrGRFOffset);
     }
 
-    if (bufType == CONSTANT_BUFFER &&
-        directBuf && modMD)
+    // If it is statelessBuf, we made sure it is a constant buffer by finding it in pushableAddresses
+    if (modMD && ((directBuf && (bufType == CONSTANT_BUFFER)) || statelessBuf))
     {
         Value* ptrVal = inst->getPointerOperand();
         unsigned eltId = 0;
         size_in_bytes = inst->getType()->getPrimitiveSizeInBits() / 8;
-        if (!EvalConstantAddress(ptrVal, eltId, pointerSrc))
+        if (!EvalConstantAddress(ptrVal, eltId, m_TD, pointerSrc))
         {
             return nullptr;
         }
@@ -2241,7 +2296,8 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
         if (size_in_bytes)
         {
             if (modMD->immConstant.data.size() &&
-                (bufId == modMD->pushInfo.inlineConstantBufferSlot))
+                ((statelessBuf && (bufIdOrGRFOffset == modMD->pushInfo.inlineConstantBufferGRFOffset))||
+                (directBuf && (bufIdOrGRFOffset == modMD->pushInfo.inlineConstantBufferSlot))))
             {
                 char* offset = &(modMD->immConstant.data[0]);
                 if (inst->getType()->isVectorTy())
@@ -2267,7 +2323,7 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
             }
             else if ((!IGC_IS_FLAG_ENABLED(DisableDynamicConstantFolding)) && (modMD->inlineDynConstants.size() > 0))
             {
-                return ReplaceFromDynConstants(bufId, eltId, size_in_bytes, inst->getType());
+                return ReplaceFromDynConstants(bufIdOrGRFOffset, eltId, size_in_bytes, inst);
             }
         }
     }
@@ -2766,7 +2822,7 @@ bool IGCConstProp::runOnFunction(Function& F)
 
             if (0 /* isa<ConstantPointerNull>(C)*/) // disable optimization generating invalid IR until it gets re-written
             {
-                // if we are changing function calls/ genisa intrinsics, then we need 
+                // if we are changing function calls/ genisa intrinsics, then we need
                 // to fix the function declarations to account for the change in pointer address type
                 for (Value::user_iterator UI = C->user_begin(), UE = C->user_end();
                     UI != UE; ++UI)

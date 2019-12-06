@@ -62,6 +62,10 @@ const llvm::StringRef ImageFuncsAnalysis::GET_IMAGE_NUM_SAMPLES = "__builtin_IB_
 const llvm::StringRef ImageFuncsAnalysis::GET_SAMPLER_ADDRESS_MODE = "__builtin_IB_get_address_mode";
 const llvm::StringRef ImageFuncsAnalysis::GET_SAMPLER_NORMALIZED_COORDS = "__builtin_IB_is_normalized_coords";
 const llvm::StringRef ImageFuncsAnalysis::GET_SAMPLER_SNAP_WA_REQUIRED = "__builtin_IB_get_snap_wa_reqd";
+const llvm::StringRef ImageFuncsAnalysis::GET_FLAT_IMAGE_BASEOFFSET = "__builtin_IB_get_flat_image_baseoffset";
+const llvm::StringRef ImageFuncsAnalysis::GET_FLAT_IMAGE_HEIGHT = "__builtin_IB_get_flat_image_height";
+const llvm::StringRef ImageFuncsAnalysis::GET_FLAT_IMAGE_WIDTH = "__builtin_IB_get_flat_image_width";
+const llvm::StringRef ImageFuncsAnalysis::GET_FLAT_IMAGE_PITCH = "__builtin_IB_get_flat_image_pitch";
 
 bool ImageFuncsAnalysis::runOnModule(Module& M) {
     bool changed = false;
@@ -150,13 +154,29 @@ void ImageFuncsAnalysis::visitCallInst(CallInst& CI)
     {
         imageFunc = &m_argMap[ImplicitArg::SAMPLER_SNAP_WA];
     }
+    else if (funcName == GET_FLAT_IMAGE_BASEOFFSET)
+    {
+        imageFunc = &m_argMap[ImplicitArg::FLAT_IMAGE_BASEOFFSET];
+    }
+    else if (funcName == GET_FLAT_IMAGE_HEIGHT)
+    {
+        imageFunc = &m_argMap[ImplicitArg::FLAT_IMAGE_HEIGHT];
+    }
+    else if (funcName == GET_FLAT_IMAGE_WIDTH)
+    {
+        imageFunc = &m_argMap[ImplicitArg::FLAT_IMAGE_WIDTH];
+    }
+    else if (funcName == GET_FLAT_IMAGE_PITCH)
+    {
+        imageFunc = &m_argMap[ImplicitArg::FLAT_IMAGE_PITCH];
+    }
     else
     {
         // Non image function, do nothing
         return;
     }
 
-    // Extract the arg num and add it to the appropriate data structure    
+    // Extract the arg num and add it to the appropriate data structure
     assert(CI.getNumArgOperands() == 1 && "Supported image/sampler functions are expected\
                                            to have only one argument");
 
@@ -164,7 +184,7 @@ void ImageFuncsAnalysis::visitCallInst(CallInst& CI)
     // don't require extra kernel parameters.
     Value* callArg = CImagesBI::CImagesUtils::traceImageOrSamplerArgument(&CI, 0, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils(), getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData());
 
-    // TODO: For now assume that we may not trace a sampler/texture for indirect access. 
+    // TODO: For now assume that we may not trace a sampler/texture for indirect access.
     // In this case we provide no WA support for indirect case and all WAs will return 0.
     // These WAs need to be reworked to support indirect case in the future.
     if (callArg)

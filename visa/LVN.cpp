@@ -36,7 +36,7 @@ using namespace vISA;
 #define DUMMY_HSTRIDE_8_8_0     0xc000
 #define DUMMY_HSTRIDE_16_16_0   0x2000
 
-bool isSpecialRegion(RegionDesc* desc, uint16_t& hstride)
+bool isSpecialRegion(const RegionDesc* desc, uint16_t& hstride)
 {
     bool isSpecial = false;
 
@@ -77,7 +77,7 @@ bool isSpecialRegion(RegionDesc* desc, uint16_t& hstride)
 // disconnected regions are not expected in LVN.
 uint16_t getActualHStride(G4_SrcRegRegion* srcRgn)
 {
-    RegionDesc* desc = srcRgn->getRegion();
+    const RegionDesc* desc = srcRgn->getRegion();
     uint32_t execSize = srcRgn->getInst()->getExecSize();
     uint16_t stride = desc->horzStride;
     bool isSpecialRgn = isSpecialRegion(desc, stride);
@@ -220,7 +220,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
             canReplace = false;
             break;
         }
-        
+
         if (bb->isInSimdFlow())
         {
             auto defCoversUseEmask = defInst->getMaskOffset() <= useInst->getMaskOffset() &&
@@ -238,7 +238,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
         unsigned int use_hs = 0;
         {
             uint16_t stride = 0;
-            RegionDesc *rd = use->asSrcRegRegion()->getRegion();
+            const RegionDesc *rd = use->asSrcRegRegion()->getRegion();
             if (rd->isSingleStride(useInst->getExecSize(), stride))
             {
                 use_hs = stride;
@@ -290,11 +290,9 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
 
         if (negMatch)
         {
-            if (useInst->isSend())
+            if (!useInst->canSupportSrcModifier())
             {
-                // send src opnd doesnt support negate modifier.
-                // So if LVN found a pattern that requires the
-                // modifier then this optimization is invalid.
+                // LVN is invalid if instruction does not support negatve modifier
                 canReplace = false;
                 break;
             }
@@ -322,7 +320,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
             {
                 //
                 // negate's meaning can change based on type
-                // 
+                //
                 canReplace = false;
                 break;
             }
@@ -546,7 +544,7 @@ void LVN::replaceAllUses(G4_INST* defInst, bool negate, UseList& uses, G4_INST* 
             int offset = regOff * GENX_GRF_REG_SIZ + subRegOff * getTypeSize(lvnInst->getDst()->getType()) + offsetFromOrigDst;
             short newRegOff = offset / GENX_GRF_REG_SIZ;
             short newSubRegOff = (offset % GENX_GRF_REG_SIZ) / typeSize;
-           
+
             srcRgn = builder.createSrcRegRegion(srcMod, Direct, lvnInst->getDst()->getBase()->asRegVar(),
                 newRegOff, newSubRegOff, srcToReplace->getRegion(), srcToReplace->getType());
         }
@@ -1880,9 +1878,9 @@ void LVN::doLVN()
             if (lvnItem)
             {
                 // ToDo: can we move this to a separate pass or at least not nested with rest of LVN?
-                // it'll make the code easier to read. 
+                // it'll make the code easier to read.
                 // Also don't we have other passes (cleanMessageHeader, cleanupBindless) doing
-                // essentially the same thing? 
+                // essentially the same thing?
                 bool removeInst = isRedundantMovToSelf(lvnItem, inst);
 
                 if (removeInst)

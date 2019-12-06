@@ -73,9 +73,6 @@ namespace IGC
         m_pBtiLayout = &(ctx->btiLayout);
         m_Platform = &(ctx->platform);
         m_DriverInfo = &(ctx->m_DriverInfo);
-
-        // Prefer to not memset a struct - initializers are safer!
-        memset(&m_kernelInfo.m_kernelProgram, 0, sizeof(SKernelProgram));
     }
 
     COpenCLKernel::~COpenCLKernel()
@@ -192,6 +189,13 @@ namespace IGC
         {
             delete m_kernelInfo.m_printfBufferAnnotation;
             m_kernelInfo.m_printfBufferAnnotation = nullptr;
+        }
+
+        // Sync Buffer Annotation
+        if (m_kernelInfo.m_syncBufferAnnotation != nullptr)
+        {
+            delete m_kernelInfo.m_syncBufferAnnotation;
+            m_kernelInfo.m_syncBufferAnnotation = nullptr;
         }
 
         // StartGASAnnotationAnnotation
@@ -905,6 +909,10 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS:
         case KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED:
         case KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA:
+        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET:
+        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT:
+        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH:
+        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH:
         case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DATA_PARAMETER_OBJECT_ID:
         case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DISPATCHER_SIMD_SIZE:
         case KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET:
@@ -1143,10 +1151,26 @@ namespace IGC
             }
         }
         break;
-
         case KernelArg::ArgType::R1:
             m_kernelInfo.m_threadPayload.UnusedPerThreadConstantPresent = true;
             break;
+
+        case KernelArg::ArgType::IMPLICIT_SYNC_BUFFER:
+        {
+            int argNo = kernelArg->getAssociatedArgNo();
+            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
+            m_kernelInfo.m_argIndexMap[argNo] = getBTI(resInfo);
+
+            iOpenCL::SyncBufferAnnotation* syncBuffer = new iOpenCL::SyncBufferAnnotation();
+
+            syncBuffer->AnnotationSize = sizeof(syncBuffer);
+            syncBuffer->ArgumentNumber = argNo;
+            syncBuffer->PayloadPosition = payloadPosition;
+            syncBuffer->DataSize = kernelArg->getAllocateSize();
+
+            m_kernelInfo.m_syncBufferAnnotation = syncBuffer;
+        }
+        break;
 
         case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
         {
@@ -1409,6 +1433,7 @@ namespace IGC
         m_kernelInfo.m_threadPayload.HasLocalID = false;
         m_kernelInfo.m_threadPayload.UnusedPerThreadConstantPresent = false;
         m_kernelInfo.m_printfBufferAnnotation = nullptr;
+        m_kernelInfo.m_syncBufferAnnotation = nullptr;
         m_kernelInfo.m_threadPayload.HasStageInGridOrigin = false;
         m_kernelInfo.m_threadPayload.HasStageInGridSize = false;
 
@@ -1546,7 +1571,7 @@ namespace IGC
         }
 
         m_kernelInfo.m_threadPayload.OffsetToSkipPerThreadDataLoad = 0;
-        m_kernelInfo.m_threadPayload.PassInlineData = false;
+        m_kernelInfo.m_threadPayload.OffsetToSkipSetFFIDGP = 0;
 
         m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, getGRFSize());
 
@@ -1559,6 +1584,7 @@ namespace IGC
         // Create annotations for printf string.
         CreatePrintfStringAnnotations();
     }
+
 
     unsigned int COpenCLKernel::GetGlobalMappingValue(llvm::Value* c)
     {
@@ -1611,7 +1637,6 @@ namespace IGC
             m_Context->getModuleMetaData()->compOpt.SubgroupIndependentForwardProgressRequired;
         m_kernelInfo.m_executionEnivronment.CompiledForGreaterThan4GBBuffers =
             m_Context->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired;
-
         assert(gatherMap.size() == 0);
         m_kernelInfo.m_kernelProgram.gatherMapSize = 0;
         m_kernelInfo.m_kernelProgram.bindingTableEntryCount = 0;
@@ -1670,6 +1695,7 @@ namespace IGC
 
         m_kernelInfo.m_executionEnivronment.HasGlobalAtomics = GetHasGlobalAtomics();
         m_kernelInfo.m_threadPayload.OffsetToSkipPerThreadDataLoad = ProgramOutput()->m_offsetToSkipPerThreadDataLoad;
+        m_kernelInfo.m_threadPayload.OffsetToSkipSetFFIDGP = ProgramOutput()->m_offsetToSkipSetFFIDGP;
 
     }
 

@@ -483,12 +483,6 @@ jmp|call|ret|fret|fcall|goto {
         return BRANCH_OP;
     }
 
-fcall {
-  TRACE("\n** direct call INST ");
-        CISAlval.opcode = ISA_FCALL;
-        return FCALL;
-}
-
 ifcall {
         TRACE("\n** indirect call INST ");
         CISAlval.opcode = ISA_IFCALL;
@@ -530,11 +524,24 @@ raw_sends {
         return RAW_SENDS_STRING;
     }
 
+raw_sends_eot {
+        TRACE("\n** RAW_SENDS_EOT ");
+        CISAlval.opcode = ISA_RAW_SENDS;
+        return RAW_SENDS_EOT_STRING;
+    }
+
 raw_sendsc {
         TRACE("\n** RAW_SENDSC ");
         CISAlval.opcode = ISA_RAW_SENDS;
         return RAW_SENDSC_STRING;
     }
+
+raw_sendsc_eot {
+        TRACE("\n** RAW_SENDSC_EOT ");
+        CISAlval.opcode = ISA_RAW_SENDS;
+        return RAW_SENDSC_EOT_STRING;
+    }
+
 
 avs {
         TRACE("\n** AVS INST ");
@@ -896,7 +903,7 @@ V0 {
         return FENCE_OPTIONS;
     }
 
-[ \n\t]+"\\"\n {TRACE("\n** Multiple instructions in a line");}   //gen4 define macro use "\n" to allow multiple instr in a line
+[ \n\t]+"\\"\n {TRACE("\n** Multiple instructions in a line");}
 
 '<EOF>' {
         TRACE("\n** End Of File");

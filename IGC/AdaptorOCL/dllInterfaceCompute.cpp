@@ -159,14 +159,14 @@ extern bool ProcessElfInput(
   STB_TranslateOutputArgs &OutputArgs,
   IGC::OpenCLProgramContext &Context,
   PLATFORM &platform, bool isOutputLlvmBinary);
-  
+
 extern bool ParseInput(
   llvm::Module*& pKernelModule,
   const STB_TranslateInputArgs* pInputArgs,
   STB_TranslateOutputArgs* pOutputArgs,
   IGC::OpenCLProgramContext &oclContext,
   TB_DATA_FORMAT inputDataFormatTemp);
-    
+
 bool TranslateBuild(
     const STB_TranslateInputArgs* pInputArgs,
     STB_TranslateOutputArgs* pOutputArgs,
@@ -236,7 +236,7 @@ bool CIGCTranslationBlock::Translate(
 {
   // Create a copy of input arguments that can be modified
     STB_TranslateInputArgs InputArgsCopy = *pInputArgs;
-    
+
     IGC::CPlatform IGCPlatform(m_Platform);
 
     SUscGTSystemInfo gtSystemInfo = { 0 };
@@ -252,7 +252,7 @@ bool CIGCTranslationBlock::Translate(
     gtSystemInfo.TotalHsThreads = m_SysInfo.TotalHsThreads;
     gtSystemInfo.MaxEuPerSubSlice = m_SysInfo.MaxEuPerSubSlice;
     gtSystemInfo.EuCountPerPoolMax = m_SysInfo.EuCountPerPoolMax;
-    
+
     IGC::SetGTSystemInfo(&gtSystemInfo, &IGCPlatform);
     IGC::SetWorkaroundTable(&m_SkuTable, &IGCPlatform);
     IGC::SetCompilerCaps(&m_SkuTable, &IGCPlatform);
@@ -273,7 +273,7 @@ bool CIGCTranslationBlock::Translate(
         // clLinkLibrary(). There are two possible scenarios, link input
         // to form a new library (BC module) or link input to form an
         // executable.
-            
+
         // First, link input modules together
         USC::SShaderStageBTLayout zeroLayout = USC::g_cZeroShaderStageBTLayout;
         IGC::COCLBTILayout oclLayout(&zeroLayout);
@@ -395,7 +395,7 @@ bool ProcessElfInput(
               std::unique_ptr<llvm::MemoryBuffer> pInputBuffer =
                   llvm::MemoryBuffer::getMemBuffer(buf, "", false);
 
-              llvm::Expected<std::unique_ptr<llvm::Module>> errorOrModule = 
+              llvm::Expected<std::unique_ptr<llvm::Module>> errorOrModule =
                     llvm::parseBitcodeFile(pInputBuffer->getMemBufferRef(), *Context.getLLVMContext());
               if (llvm::Error EC = errorOrModule.takeError())
               {
@@ -520,18 +520,18 @@ bool ParseInput(
     // Parse the module we want to compile
     llvm::SMDiagnostic err;
     // For text IR, we don't need the null terminator
-    unsigned int inputSize = pInputArgs->InputSize;
+    size_t inputSize = pInputArgs->InputSize;
 
     if (inputDataFormatTemp == TB_DATA_FORMAT_LLVM_TEXT)
     {
-        inputSize = strlen(pInputArgs->pInput);
+        const char* input_ptr = pInputArgs->pInput; //shortcut
+        inputSize = std::find(input_ptr, input_ptr + inputSize, 0) - input_ptr;
     }
-
     llvm::StringRef strInput = llvm::StringRef(pInputArgs->pInput, inputSize);
 
     // IGC does not handle legacy ocl binary for now (legacy ocl binary
     // is the binary that contains text LLVM IR (2.7 or 3.0).
-    if (inputSize > 1 && !(pInputArgs->pInput[0] == 'B' && pInputArgs->pInput[1] == 'C'))
+    if (strInput.size() > 1 && !(strInput[0] == 'B' && strInput[1] == 'C'))
     {
         bool isLLVM27IR = false, isLLVM30IR = false;
 
@@ -551,7 +551,7 @@ bool ParseInput(
             return false;
         }
     }
-  
+
     // BEGIN HACK
     // Upgrade BC to LLVM 3.5.1+ from LLVM 3.4+
     if (inputDataFormatTemp == TB_DATA_FORMAT_LLVM_BINARY) {
@@ -576,7 +576,7 @@ bool ParseInput(
     else if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V) {
 #if defined(IGC_SPIRV_ENABLED)
         //convert SPIR-V binary to LLVM module
-        std::istringstream IS(strInput);        
+        std::istringstream IS(strInput);
         std::string stringErrMsg;
         llvm::StringRef options;
         if(pInputArgs->OptionsSize > 0){
@@ -598,9 +598,12 @@ bool ParseInput(
     }
     else
     {
-        // the MemoryBuffer becomes owned by the module and does not need to be managed
-        std::unique_ptr<llvm::MemoryBuffer> pMemBuf = llvm::MemoryBuffer::getMemBuffer(strInput, "", false);
-        pKernelModule = llvm::parseIR(pMemBuf->getMemBufferRef(), err, oclContext).release();
+        // NOTE:
+        //  llvm::parseIR routine expects input buffer to be zero-terminated,
+        //  otherwise we trigger an assert during parseAssemblyInto (from MemoryBuffer::init)
+        //  (see llvm/src/lib/Support/MemoryBuffer.cpp).
+        pKernelModule = llvm::parseIR({ std::string(strInput.begin(), strInput.size()), "" },
+                                      err, oclContext).release();
     };
     if (pKernelModule == nullptr)
     {
@@ -612,7 +615,7 @@ bool ParseInput(
         SetErrorMessage("Parsing llvm module failed!", *pOutputArgs);
         return false;
     }
-        
+
     return true;
 }
 
@@ -740,7 +743,7 @@ bool TranslateBuild(
     const STB_TranslateInputArgs* pInputArgs,
     STB_TranslateOutputArgs* pOutputArgs,
     TB_DATA_FORMAT inputDataFormatTemp,
-    const IGC::CPlatform& IGCPlatform, 
+    const IGC::CPlatform& IGCPlatform,
     float profilingTimerResolution)
 {
     if (pInputArgs->pOptions) {
@@ -771,7 +774,7 @@ bool TranslateBuild(
     {
         IGC::Debug::SetDebugFlag(IGC::Debug::DebugFlag::SHADER_QUALITY_METRICS, true);
     }
-    
+
     MEM_USAGERESET;
 
     // Parse the module we want to compile
@@ -835,7 +838,7 @@ bool TranslateBuild(
     }
     CDriverInfoOCLNEO driverInfoOCL;
     IGC::CDriverInfo* driverInfo = &driverInfoOCL;
-    
+
     USC::SShaderStageBTLayout zeroLayout = USC::g_cZeroShaderStageBTLayout;
     IGC::COCLBTILayout oclLayout(&zeroLayout);
     OpenCLProgramContext oclContext(oclLayout, IGCPlatform, pInputArgs, *driverInfo, llvmContext);
@@ -895,7 +898,7 @@ bool TranslateBuild(
         std::unique_ptr<llvm::MemoryBuffer> pGenericBuffer = nullptr;
         std::unique_ptr<llvm::MemoryBuffer> pSizeTBuffer = nullptr;
         {
-            // IGC has two BIF Modules: 
+            // IGC has two BIF Modules:
             //            1. kernel Module (pKernelModule)
             //            2. BIF Modules:
             //                 a) generic Module (BuiltinGenericModule)
@@ -918,12 +921,14 @@ bool TranslateBuild(
             // Load the builtin module -  Generic BC
             // Load the builtin module -  Generic BC
             {
+                COMPILER_TIME_START(&oclContext, TIME_OCL_LazyBiFLoading);
+
                 char Resource[5] = { '-' };
                 _snprintf(Resource, sizeof(Resource), "#%d", OCL_BC);
 
                 pGenericBuffer.reset(llvm::LoadBufferFromResource(Resource, "BC"));
 
-                if (pGenericBuffer == NULL) 
+                if (pGenericBuffer == NULL)
                 {
                     SetErrorMessage("Error loading the Generic builtin resource", *pOutputArgs);
                     return false;
@@ -931,8 +936,8 @@ bool TranslateBuild(
 
                 llvm::Expected<std::unique_ptr<llvm::Module>> ModuleOrErr =
                     getLazyBitcodeModule(pGenericBuffer->getMemBufferRef(), *oclContext.getLLVMContext());
-                
-                if (llvm::Error EC = ModuleOrErr.takeError()) 
+
+                if (llvm::Error EC = ModuleOrErr.takeError())
                 {
                     std::string error_str = "Error lazily loading bitcode for generic builtins,"
                                             "is bitcode the right version and correctly formed?";
@@ -949,6 +954,7 @@ bool TranslateBuild(
                     SetErrorMessage("Error loading the Generic builtin module from buffer", *pOutputArgs);
                     return false;
                 }
+                COMPILER_TIME_END(&oclContext, TIME_OCL_LazyBiFLoading);
             }
 
             // Load the builtin module -  pointer depended
@@ -1030,7 +1036,7 @@ bool TranslateBuild(
 
             // Create a new LLVMContext
             oclContext.initLLVMContextWrapper();
-            
+
             IGC::Debug::RegisterComputeErrHandlers(*oclContext.getLLVMContext());
 
             if (!ParseInput(pKernelModule, pInputArgs, pOutputArgs, *oclContext.getLLVMContext(), inputDataFormatTemp))
@@ -1044,7 +1050,7 @@ bool TranslateBuild(
     // Create the binary streams for each compiled kernel
     oclContext.m_programOutput.CreateKernelBinaries();
 
-    unsigned int pointerSizeInBytes = (PtrSzInBits == 64) ? 8 : 4; 
+    unsigned int pointerSizeInBytes = (PtrSzInBits == 64) ? 8 : 4;
 
     // Prepare and set program binary
     Util::BinaryStream programBinary;
@@ -1079,7 +1085,7 @@ bool TranslateBuild(
 
     const char* driverName =
         GTPIN_DRIVERVERSION_OPEN;
-    // If GT-Pin is enabled, instrument the binary. Finally pOutputArgs will 
+    // If GT-Pin is enabled, instrument the binary. Finally pOutputArgs will
     // be pointing to the instrumented binary with the new size.
     if (GTPIN_IGC_OCL_IsEnabled())
     {
@@ -1142,18 +1148,18 @@ bool CIGCTranslationBlock::Initialize(
             || (format == TB_DATA_FORMAT_NON_COHERENT_DEVICE_BINARY);
     };
 
-    validTBChain |= 
+    validTBChain |=
         (m_DataFormatInput == TB_DATA_FORMAT_ELF) &&
         (m_DataFormatOutput == TB_DATA_FORMAT_LLVM_BINARY);
-        
-    validTBChain |= 
+
+    validTBChain |=
         (m_DataFormatInput == TB_DATA_FORMAT_LLVM_TEXT) &&
         isDeviceBinaryFormat(m_DataFormatOutput);
-    
-    validTBChain |= 
+
+    validTBChain |=
         (m_DataFormatInput == TB_DATA_FORMAT_LLVM_BINARY) &&
         isDeviceBinaryFormat(m_DataFormatOutput);
-    
+
     validTBChain |=
         (m_DataFormatInput == TB_DATA_FORMAT_SPIR_V) &&
         isDeviceBinaryFormat(m_DataFormatOutput);
@@ -1185,7 +1191,7 @@ TRANSLATION_BLOCK_API void Register(
 
     if(pRegisterArgs->pTranslationCodes == NULL)
     {
-        pRegisterArgs->NumTranslationCodes = 
+        pRegisterArgs->NumTranslationCodes =
             sizeof(g_cICBETranslationCodes ) /
             sizeof(g_cICBETranslationCodes[0]);
     }
@@ -1201,7 +1207,7 @@ TRANSLATION_BLOCK_API void Register(
     }
 }
 
-TRANSLATION_BLOCK_API CTranslationBlock* Create( 
+TRANSLATION_BLOCK_API CTranslationBlock* Create(
     STB_CreateArgs* pCreateArgs)
 {
     CIGCTranslationBlock*  pIGCTranslationBlock = nullptr;
@@ -1222,7 +1228,7 @@ TRANSLATION_BLOCK_API void Delete(
     CIGCTranslationBlock::Delete(pIGCTranslationBlock);
 }
 
-// Generate compile options.
+// Generate cmc compile options.
 static std::string getCommandLine(const STB_TranslateInputArgs* pInputArgs,
     TB_DATA_FORMAT inputDataFormatTemp,
     const IGC::CPlatform& IGCPlatform)
@@ -1247,6 +1253,60 @@ static std::string getCommandLine(const STB_TranslateInputArgs* pInputArgs,
     return move(cmd);
 }
 
+// Generate vISA compile options from the input option string
+//
+// -visaopts='-dumpcommonisa,-noschedule'
+//
+static void getvISACompileOpts(const STB_TranslateInputArgs* pInputArgs,
+    std::vector<std::string>& optstrings,
+    std::vector<const char*>& opts)
+{
+    do {
+        llvm::StringRef Opts(pInputArgs->pOptions, pInputArgs->OptionsSize);
+        size_t pos = Opts.find_first_of("-visaopts");
+        if (pos == llvm::StringRef::npos)
+            break;
+
+        size_t beginPos = Opts.find_first_of("'", pos);
+        if (beginPos == llvm::StringRef::npos)
+            break;
+        ++beginPos;
+        size_t endPos = Opts.find_first_of("'", beginPos);
+        if (endPos == llvm::StringRef::npos)
+            break;
+
+        // vISA options are in a form '-dumpcommonisa,-noschedule'
+        llvm::StringRef vISAOpts = Opts.substr(beginPos, endPos - beginPos);
+        const char* delim = ", ";
+
+        // vISA crashes on illegal options.
+        size_t curPos = 0, nextPos = 0;
+        do {
+            nextPos = vISAOpts.find_first_of(delim, curPos);
+            if (nextPos == llvm::StringRef::npos) {
+                // last argument
+                llvm::StringRef O = vISAOpts.substr(curPos);
+                O = O.trim();
+                if (!O.empty())
+                    optstrings.push_back(O);
+                break;
+            } else {
+                llvm::StringRef O = vISAOpts.substr(curPos, nextPos - curPos);
+                O = O.trim();
+                if (!O.empty())
+                    optstrings.push_back(O);
+                curPos = nextPos + 1;
+            }
+        } while (curPos != llvm::StringRef::npos);
+    } while (false /* dummy loop to allow break inside */);
+
+    for (auto& s : optstrings) {
+        // Make sure this s.data() can be used as a c-string.
+        s.push_back('\0');
+        opts.push_back(s.data());
+    }
+}
+
 // When an internal otion "-cmc" is present, compile the input as a CM program.
 static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
     STB_TranslateOutputArgs* pOutputArgs,
@@ -1265,7 +1325,10 @@ static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
     int32_t status = Loader.compileFn(pInputArgs->pInput, pInputArgs->InputSize, cmd.c_str(), &output);
     if (status == 0 && output) {
         iOpenCL::CGen8CMProgram CMProgram(IGCPlatform.getPlatformInfo());
-        cmc::vISACompile(output, CMProgram);
+        std::vector<std::string> optstrings;
+        std::vector<const char*> opts;
+        getvISACompileOpts(pInputArgs, optstrings, opts);
+        cmc::vISACompile(output, CMProgram, opts);
 
         // Prepare and set program binary
         Util::BinaryStream programBinary;

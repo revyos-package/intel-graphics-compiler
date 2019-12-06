@@ -438,6 +438,7 @@ public:
 
     uint32_t emitBankConflictGen12lp(std::ostream & os_output, G4_INST * inst, int * suppressRegs, int * lastRegs, int & sameConflictTimes, int & twoSrcConflicts, int & simd16RS);
     uint32_t countReadModifyWrite(std::ostream& os_output, G4_INST *inst);
+    uint32_t emitBankConflictGen12(std::ostream & os_output, G4_INST * inst, int * suppressRegs, int & sameConflictTimes, int & twoSrcConflicts, int & simd16RS, bool zeroOne, bool isTGLLP);
     void emitDepInfo(std::ostream& output, G4_INST *inst, int offset);
 
     bool isEndWithCall() const { return getLastOpcode() == G4_call; }
@@ -1168,6 +1169,8 @@ public:
         return lastBB->isEndWithGoto();
     }
 
+    void setABIForStackCallFunctionCalls();
+
 private:
     //
     // Flow group traversal routines
@@ -1359,10 +1362,14 @@ public:
 class G4_Kernel
 {
     const char* name;
-    unsigned numRegTotal;
+    unsigned int numRegTotal;
+    unsigned int numThreads;
+    unsigned int numSWSBTokens;
+    unsigned int numAcc;
     unsigned int simdSize;
     bool channelSliced = true;
     bool hasAddrTaken;
+    bool sharedRegisters;
     Options *m_options;
 
     RA_Type RAType;
@@ -1384,6 +1391,12 @@ class G4_Kernel
     uint32_t mathReuseCount;
     uint32_t ARSyncInstCount;
     uint32_t AWSyncInstCount;
+    uint32_t ARSyncAllCount;
+    uint32_t AWSyncAllCount;
+    uint32_t prunedDepEdges;
+    uint32_t prunedGlobalEdgeNum;
+    uint32_t prunedDiffBBEdgeNum;
+    uint32_t prunedDiffBBSameTokenEdgeNum;
 
     uint32_t bank_good_num;
     uint32_t bank_ok_num;
@@ -1414,23 +1427,17 @@ public:
               asmInstCount(0), kernelID(0), tokenInstructionCount(0), tokenReuseCount(0),
               AWTokenReuseCount(0), ARTokenReuseCount(0), AATokenReuseCount(0),
               mathInstCount(0), syncInstCount(0),mathReuseCount(0),
-              ARSyncInstCount(0), AWSyncInstCount(0), bank_good_num(0), bank_ok_num(0),
+              ARSyncInstCount(0), AWSyncInstCount(0), ARSyncAllCount(0), AWSyncAllCount(0),
+              prunedDepEdges(0), prunedGlobalEdgeNum(0), prunedDiffBBEdgeNum(0), prunedDiffBBSameTokenEdgeNum(0),
+              bank_good_num(0), bank_ok_num(0),
               bank_bad_num(0), fg(alloc, this, m), major_version(major), minor_version(minor)
     {
         ASSERT_USER(
             major < COMMON_ISA_MAJOR_VER ||
                 (major == COMMON_ISA_MAJOR_VER && minor <= COMMON_ISA_MINOR_VER),
             "CISA version not supported by this JIT-compiler");
-        unsigned totalGRFs = options->getuInt32Option(vISA_TotalGRFNum);
-        unsigned Val = options->getuInt32Option(vISA_GRFNumToUse);
-        if (Val > 0)
-        {
-            numRegTotal = std::min(Val, totalGRFs);
-        }
-        else
-        {
-            numRegTotal = totalGRFs;
-        }
+
+        setKernelParameters();
 
         name = NULL;
         simdSize = 0;
@@ -1445,8 +1452,6 @@ public:
         {
             gtPinInfo = nullptr;
         }
-
-        callerSaveLastGRF = ((totalGRFs - 8) / 2) - 1;
     }
 
     ~G4_Kernel();
@@ -1457,6 +1462,16 @@ public:
     {
         fg.setBuilder(pBuilder);
     }
+
+    bool hasSharedRegisters() const { return sharedRegisters; }
+
+    void setNumThreads(int nThreads) { numThreads = nThreads; }
+    uint32_t getNumThreads() const { return numThreads; }
+
+    void setNumSWSBTokens(int nSWSBs) { numSWSBTokens = nSWSBs; }
+    uint32_t getNumSWSBTokens() const { return numSWSBTokens; }
+
+    uint32_t getNumAcc() const { return numAcc; }
 
     void setAsmCount(int count) { asmInstCount = count; }
     uint32_t getAsmCount() const { return asmInstCount; }
@@ -1491,6 +1506,24 @@ public:
     void setAWSyncInstCount(int count) {AWSyncInstCount= count; }
     uint32_t getAWSyncInstCount() {return AWSyncInstCount; }
 
+    void setARSyncAllCount(int count) { ARSyncAllCount = count; }
+    uint32_t getARSyncAllCount() { return ARSyncAllCount; }
+
+    void setAWSyncAllCount(int count) { AWSyncAllCount = count; }
+    uint32_t getAWSyncAllCount() { return AWSyncAllCount; }
+
+    void setPrunedEdgeNum(int num) { prunedDepEdges = num; }
+    uint32_t getPrunedEdgeNum() { return prunedDepEdges; }
+
+    void setPrunedGlobalEdgeNum(int num) { prunedGlobalEdgeNum = num; }
+    uint32_t getPrunedGlobalEdgeNum() { return prunedGlobalEdgeNum; }
+
+    void setPrunedDiffBBEdgeNum(int num) { prunedDiffBBEdgeNum = num; }
+    uint32_t getPrunedDiffBBEdgeNum() { return prunedDiffBBEdgeNum; }
+
+    void setPrunedDiffBBSameTokenEdgeNum(int num) { prunedDiffBBSameTokenEdgeNum = num; }
+    uint32_t getPrunedDiffBBSameTokenEdgeNum() { return prunedDiffBBSameTokenEdgeNum; }
+
     void setBankGoodNum(int num) {bank_good_num = num; }
     uint32_t getBankGoodNum() {return bank_good_num; }
 
@@ -1523,6 +1556,7 @@ public:
     void emit_asm(std::ostream& output, bool beforeRegAlloc, void * binary, uint32_t binarySize);
     void emit_dep(std::ostream& output);
 
+    void setKernelParameters(void);
     void evalAddrExp(void);
     void dumpDotFile(const char* appendix);
 

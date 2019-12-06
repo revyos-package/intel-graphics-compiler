@@ -28,10 +28,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CodeGenPublic.h"
 
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/Module.h"
 #include <llvm/Pass.h>
 #include <llvm/IR/InstVisitor.h>
 #include <llvm/ADT/StringRef.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "common/IGCIRBuilder.h"
 
 #include <map>
 namespace IGC
@@ -42,7 +44,7 @@ namespace IGC
     //                 |
     //       not used  V   op
     //       |-------|---|---|
-    //    0 x 0 0 0 0 0 0 0 0 
+    //    0 x 0 0 0 0 0 0 0 0
     //
     typedef unsigned int OCLAtomicAttrs;
 
@@ -76,7 +78,8 @@ namespace IGC
     static const unsigned int ATTR_BUFFER_TYPE_SHIFT = 8;
 
     protected:
-        llvm::Module* m_pModule;
+        IGCLLVM::Module* m_pModule;
+        llvm::IGCIRBuilder<>* m_builder;
         llvm::IntegerType* m_Int32Ty;
         bool               m_64bitPointer;
 
@@ -115,14 +118,28 @@ namespace IGC
         /// @param    bufType    corresponding buffer type.
         /// @returns  call instruction to generated GenISA_GetBufferPtr.
         llvm::CallInst* genGetBufferPtr(llvm::CallInst& callInst, BufferType bufType);
-        
+
         /// @brief  Replace the "__builtin_IB_get_local_lock" call with a pointer to a local memory variable.
         /// @param    callInst  call to "__builtin_IB_get_local_lock*" function.
         void           processGetLocalLock(llvm::CallInst& callInst);
 
+        /// @brief  Recursively search for kernel functions using local lock variable
+        /// @param    value   currently analyzed function
+        void findLockUsers(llvm::Value* V);
+
+        /// @brief  Generates control flow which initializes local lock memory at the beginning of the kernel
+        /// @param    function   kernel function using local lock variable
+        void generateLockInitilization(llvm::Function* F);
+
+        /// @brief  Initializes local lock variable in all related kernel functions
+        void initilizeLocalLock();
+
         /// @brief  Stores the value of local value used for spinlock for i64 local atomics emulation.
         llvm::GlobalVariable* m_localLock = nullptr;
-        
+
+        /// @brief  Stores all the kernel functions using local lock variable
+        std::unordered_set<llvm::Function*> m_localLockUsers;
+
         /// @brief  Indicates if the pass changed the processed function
         bool m_changed = false;
     };

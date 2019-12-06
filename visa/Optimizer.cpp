@@ -158,7 +158,7 @@ void Optimizer::insertFallThroughJump()
 }
 
 //
-// Check if any GRF/MRF is out-of-boundary
+// Check if any GRF is out-of-boundary
 //
 void Optimizer::chkRegBoundary()
 {
@@ -183,8 +183,8 @@ void Optimizer::chkRegBoundary()
 }
 
 //
-// Check if GRF/MRF (if we know the phy reg num) is out-of-boundary
-// If the operand is not GRF/MRF, we return "true" without any check
+// Check if GRF (if we know the phy reg num) is out-of-boundary
+// If the operand is not GRF, we return "true" without any check
 //
 bool Optimizer::chkOpndBoundary(G4_INST *inst, G4_Operand *opnd)
 {
@@ -430,35 +430,32 @@ void Optimizer::insertHashMovs()
                 // We have to insert new instructions after EOT.
                 // Lexically, EOT could even be in the middle
                 // of the program.
-                G4_INST* lo;
-                G4_INST* hi;
-                uint64_t hashVal = builder.getOptions()->getuInt64Option(vISA_HashVal);
-                lo = kernel.fg.builder->createInternalInst(
-                    NULL,
-                    G4_mov,
-                    NULL,
-                    false,
-                    16,
-                    kernel.fg.builder->createNullDst(Type_UD),
-                    kernel.fg.builder->createImm((unsigned int)(hashVal & 0xffffffff), Type_UD),
-                    NULL,
-                    NULL,
-                    InstOpt_WriteEnable);
+                auto insertHashMovInsts = [&](uint64_t hashVal)
+                {
+                    if (hashVal == 0)
+                        return;
 
-                hi = kernel.fg.builder->createInternalInst(
-                    NULL,
-                    G4_mov,
-                    NULL,
-                    false,
-                    16,
-                    kernel.fg.builder->createNullDst(Type_UD),
-                    kernel.fg.builder->createImm((unsigned int)((hashVal >> 32) & 0xffffffff), Type_UD),
-                    NULL,
-                    NULL,
-                    InstOpt_WriteEnable);
+                    G4_INST* lo;
+                    G4_INST* hi;
+                    lo = kernel.fg.builder->createMov(
+                        16,
+                        kernel.fg.builder->createNullDst(Type_UD),
+                        kernel.fg.builder->createImm((unsigned int)(hashVal & 0xffffffff), Type_UD),
+                        InstOpt_WriteEnable, false);
 
-                bb->push_back(lo);
-                bb->push_back(hi);
+                    hi = kernel.fg.builder->createMov(
+                        16,
+                        kernel.fg.builder->createNullDst(Type_UD),
+                        kernel.fg.builder->createImm((unsigned int)((hashVal >> 32) & 0xffffffff), Type_UD),
+                        InstOpt_WriteEnable, false);
+
+                    bb->push_back(lo);
+                    bb->push_back(hi);
+                };
+                uint64_t hashVal1 = builder.getOptions()->getuInt64Option(vISA_HashVal);
+                uint64_t hashVal2 = builder.getOptions()->getuInt64Option(vISA_HashVal1);
+                insertHashMovInsts(hashVal1);
+                insertHashMovInsts(hashVal2);
                 break;
             }
         }
@@ -1129,17 +1126,17 @@ int Optimizer::optimization()
     runPass(PI_FoldAddrImmediate);
 
     //
-    // Check if any GRF/MRF is out-of-boundary
+    // Check if any GRF is out-of-boundary
     // FIXME: Now we can only check part of the out-of-boundary cases. We can not find out-of-boundary errors in:
     // (1). <post_dst>/<curr_dst> in send inst; (2). cross 256-bit bar case in compressed instruction
     //
     runPass(PI_chkRegBoundary);
 
-    runPass(PI_changeMoveType);
-
     runPass(PI_localSchedule);
 
     runPass(PI_accSubPostSchedule);
+
+    runPass(PI_changeMoveType);
 
     // NoDD optimization
     runPass(PI_NoDD);
@@ -1381,7 +1378,7 @@ void Optimizer::reverseOffsetProp(
                     inst->setDest( builder.createDstRegRegion(*newDst) );
                 }
             }
-            for (unsigned i = 0; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
+            for (int i = 0; i < inst->getNumSrc(); i++)
             {
                 inst_src = inst->getSrc(i);
                 if( inst_src && inst_src->isSrcRegRegion() &&
@@ -1462,7 +1459,7 @@ void Optimizer::FoldAddrImmediate()
             {
                 continue;
             }
-            num_srcs = G4_Inst_Table[inst->opcode()].n_srcs;
+            num_srcs = inst->getNumSrc();
             dst = inst->getDst();
             if (dst)
             {
@@ -1943,7 +1940,7 @@ static G4_DstRegRegion *buildNewDstOperand(FlowGraph &fg, G4_INST *inst, G4_INST
             unsigned defDstLB = defDstRegion->getLeftBound();
 
             unsigned srcLB = src->getLeftBound();
-            RegionDesc *srcRegionDesc = src->asSrcRegRegion()->getRegion();
+            const RegionDesc *srcRegionDesc = src->asSrcRegRegion()->getRegion();
             bool contRegion = srcRegionDesc->isContiguous(inst->getExecSize());
 
             uint32_t dist = defDstLB - srcLB, dstDist = 0, tempLen = 0;
@@ -2310,7 +2307,7 @@ void Optimizer::doSimplification(G4_INST *inst)
                     {
                         Dcl->setSubRegAlign(SubAlign);
                     }
-                    RegionDesc *rd = builder.getRegionStride1();
+                    const RegionDesc *rd = builder.getRegionStride1();
                     inst->getSrc(0)->asSrcRegRegion()->setRegion(rd);
                     // Set subreg alignment for the address variable.
                     Dcl =
@@ -2968,15 +2965,16 @@ void Optimizer::newLocalCopyPropagation()
 
                     unsigned use_elsize = G4_Type_Table[use->getType()].byteSize;
                     unsigned dstElSize = G4_Type_Table[inst->getDst()->getType()].byteSize;
-                    RegionDesc *rd = src->asSrcRegRegion()->getRegion();
+                    const RegionDesc *rd = src->asSrcRegRegion()->getRegion();
                     G4_Operand *new_src_opnd = NULL;
                     bool new_src = false;
                     unsigned char scale = 1, newExecSize = useInst->getExecSize();
 
                     // Compute the composed region if exists.
-                    auto getComposedRegion = [=](unsigned dStride, unsigned ex1,
-                                                 RegionDesc *rd1, unsigned ex2,
-                                                 RegionDesc *rd2) -> RegionDesc *
+                    auto getComposedRegion = [=](
+                        unsigned dStride, unsigned ex1,
+                        const RegionDesc *rd1, unsigned ex2,
+                        const RegionDesc *rd2) -> const RegionDesc *
                     {
                         // Easy cases.
                         if (rd1->isScalar())
@@ -3020,7 +3018,7 @@ void Optimizer::newLocalCopyPropagation()
                         unsigned typeSizeRatio = G4_Type_Table[src0->getType()].byteSize / G4_Type_Table[dst->getType()].byteSize;
                         unsigned numElt = src0->isScalar() ? 1 : inst->getExecSize() * typeSizeRatio;
                         // src0 region is guaranteed to be scalar/contiguous due to canPropagate() check earlier
-                        RegionDesc* region = src0->isScalar() ?
+                        const RegionDesc* region = src0->isScalar() ?
                             builder.getRegionScalar() :
                             builder.createRegionDesc(useInst->getExecSize(), (uint16_t)inst->getExecSize()
                             * typeSizeRatio, inst->getExecSize(),
@@ -3070,7 +3068,7 @@ void Optimizer::newLocalCopyPropagation()
                                rd && use->isSrcRegRegion())
                     {
                         unsigned dStride = inst->getDst()->getHorzStride();
-                        RegionDesc *rd2 = use->asSrcRegRegion()->getRegion();
+                        const RegionDesc *rd2 = use->asSrcRegRegion()->getRegion();
                         if (auto compRd = getComposedRegion(dStride, inst->getExecSize(),
                                                             rd, newExecSize, rd2))
                         {
@@ -3512,7 +3510,7 @@ static void expandPseudoLogic(IR_Builder& builder,
                 inst->transferDef(newSel, opNum, Gen4_Operand_Number::Opnd_pred);
                 bb->insert(newIter, newSel);
                 SI = newSel;
-                RegionDesc *rd = (tmpSize == 1) ? builder.getRegionScalar() : builder.getRegionStride1();
+                const RegionDesc *rd = (tmpSize == 1) ? builder.getRegionScalar() : builder.getRegionStride1();
                 return builder.Create_Src_Opnd_From_Dcl(newDcl, rd);
             }
             return Opnd;
@@ -4584,7 +4582,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 curr_inst->setPredicate(builder.duplicateOperand(new_pred));
             }
 
-            for (int k = 0; k < G4_Inst_Table[curr_inst->opcode()].n_srcs; k++)
+            for (int k = 0; k < curr_inst->getNumSrc(); k++)
             {
                 G4_Operand *curr_src = curr_inst->getSrc(k);
                 if (curr_src->isSrcRegRegion() && !(curr_inst->isMath() && k == 1 && curr_src->isNullReg()))
@@ -4638,7 +4636,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 curr_inst->setPredicate(builder.duplicateOperand(new_pred));
             }
 
-            for (int k = 0; k < G4_Inst_Table[curr_inst->opcode()].n_srcs; k++)
+            for (int k = 0; k < curr_inst->getNumSrc(); k++)
             {
                 G4_Operand *curr_src = curr_inst->getSrc(k);
                 if (curr_src->isSrcRegRegion() && !(curr_inst->isMath() && k == 1 && curr_src->isNullReg()))
@@ -4680,7 +4678,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     /***  The beginning of message header optimization  ***/
 
     /*
-    * reuse the previous mrf which can save the redundant definitions.
+    * reuse the previous header which can save the redundant definitions.
     */
     void MSGTable::reusePreviousHeader(G4_INST *dest,
         G4_INST *source,
@@ -4701,13 +4699,13 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     }
 
     /*
-    * insert a mov, from the previous mrf to current mrf
+    * insert a mov, from the previous header to current header
     * this is only required for the instruction,
     * whose payload size >1 so that we can't directly reuse
-    * the previous mrf. keep a copy from the previous mrf,
+    * the previous header. keep a copy from the previous header,
     * so that we only need to update the fields that need to be changed.
     */
-    void MSGTable::insertMovMRFInst(G4_INST *source_send,
+    void MSGTable::insertHeaderMovInst(G4_INST *source_send,
         IR_Builder& builder,
         G4_BB *bb)
     {
@@ -4716,24 +4714,24 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
         switch (first)
         {
-        case MRF_FULL_REGISTER:
+        case HEADER_FULL_REGISTER:
             inst = m;
             pos  = m_it;
             break;
-        case MRF_X:
+        case HEADER_X:
             inst = mDot0;
             pos  = mDot0_it;
             break;
-        case MRF_Y:
+        case HEADER_Y:
             inst = mDot1;
             pos  = mDot1_it;
             break;
-        case MRF_SIZE:
+        case HEADER_SIZE:
             inst = mDot2;
             pos  = mDot2_it;
             break;
         default:
-            MUST_BE_TRUE(false, "did not catch the first MRF def instruction correctly");
+            MUST_BE_TRUE(false, "did not catch the first def instruction correctly");
             return;
         }
 
@@ -4741,18 +4739,18 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         G4_Declare *srcDcl = source_send->getSrc(0)->getBase()->asRegVar()->getDeclare();
         G4_SrcRegRegion* newSrcOpnd = builder.Create_Src_Opnd_From_Dcl(srcDcl, builder.getRegionStride1());
 
-        G4_INST* mov_mrf = builder.createMov(
+        G4_INST* mov = builder.createMov(
             m->getExecSize(),
             builder.duplicateOperand(m->getDst()),
             newSrcOpnd,
             m->getOption(),
             false);
-        bb->insert(pos, mov_mrf);
+        bb->insert(pos, mov);
 
         // maintain def-use.
         //
         // (1) Uses. m is ready to be deleted.
-        m->transferUse(mov_mrf);
+        m->transferUse(mov);
 
         // (2) Defs
         // The defs should be from definitions for source->send's src(0).
@@ -4766,7 +4764,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         // send (8) null<1>:ud V244(0,0)<8;8,1>:ud a0.0<0;1,0>:ud {Align1, NoMask}  <- source_send
         // mov (8) V89(0,0)<1>:d V34_histogram(1,0)<8;8,1>:d {Align1, Q1}
         // mov (8) V246(1,0)<1>:ud V89(0,0)<8;8,1>:ud {Align1, NoMask}
-        // mov (8) V246(0,0)<1>:ud V244(0,0)<8;8,1>:ud {Align1, NoMask} <-- mov_mrf
+        // mov (8) V246(0,0)<1>:ud V244(0,0)<8;8,1>:ud {Align1, NoMask} <-- mov
         // mov (8) V246(0,0)<1>:ud r0.0<8;8,1>:ud {Align1, NoMask}      <-- m
         //
         // There are more than one defs here.
@@ -4775,9 +4773,9 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         //
         // mov (8) V244(1,0)<1>:ud V88(0,0)<8;8,1>:ud {Align1, NoMask}
         //
-        // is a definition of send but not for mov_mrf. We enable checked
+        // is a definition of send but not for mov. We enable checked
         // while copying defs.
-        source_send->copyDef(mov_mrf, Opnd_src0, Opnd_src0, /*checked*/true);
+        source_send->copyDef(mov, Opnd_src0, Opnd_src0, /*checked*/true);
     }
 
     /*
@@ -5306,7 +5304,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     /*
     * compare the two send and their defs
     * determine whether to remove the redundant mov inst
-    * or reuse the previous MRF
+    * or reuse the previous header
     *
     * 1    mov (8) V152(0,0)<1>:ud r0.0<8;8,1>:ud {Align1, NoMask}
     * 2    mov (1) V152(0,2)<1>:ud 0x7000f:ud {Align1, NoMask}
@@ -5411,12 +5409,12 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             return; // don't delete if redunant insts >=THRESHold
         };
 
-        if ( payLoadSize > 1                    &&
-            !(redundancyCount ==3              &&
-            dest->send->getSrc(0)->compareOperand(source->send->getSrc(0))
-            == Rel_eq ) )
+        if (payLoadSize > 1 &&
+            !(redundancyCount == 3 &&
+                dest->send->getSrc(0)->compareOperand(source->send->getSrc(0))
+                == Rel_eq))
         {
-            dest->insertMovMRFInst(source->send, builder, bb);
+            dest->insertHeaderMovInst(source->send, builder, bb);
             replaceOldHeader = true;
         }
 
@@ -5659,7 +5657,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             2,
             builder.getRegionScalar(),
             Type_UD);
-        G4_DstRegRegion *mrf_dst1_opnd = builder.createDstRegRegion(
+        G4_DstRegRegion *dst1_opnd = builder.createDstRegRegion(
             Direct,
             dcl->getRegVar(),
             0,
@@ -5687,7 +5685,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 NULL,
                 false,
                 8,
-                mrf_dst1_opnd,
+                dst1_opnd,
                 r0_src_opnd,
                 g4Imm,
                 InstOpt_WriteEnable,
@@ -5923,8 +5921,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         src->asSrcRegRegion()->getRegOff() == 0             &&
                         src->asSrcRegRegion()->getSubRegOff() == 0 )
                     {
-                        if (item->first == MRF_UNDEF)
-                            item->first = MRF_FULL_REGISTER;
+                        if (item->first == HEADER_UNDEF)
+                            item->first = HEADER_FULL_REGISTER;
                         item->m = inst;
                         item->m_it = ii;
                     }
@@ -5932,8 +5930,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     else if(dst->getSubRegOff() == 0  &&
                         inst->getExecSize() == 1                        )
                     {
-                        if (item->first == MRF_UNDEF)
-                            item->first = MRF_X;
+                        if (item->first == HEADER_UNDEF)
+                            item->first = HEADER_X;
                         item->mDot0 = inst;
                         item->mDot0_it = ii;
                     }
@@ -5941,8 +5939,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     else if(dst->getSubRegOff() == 1  &&
                         inst->getExecSize() == 1                        )
                     {
-                        if (item->first == MRF_UNDEF)
-                            item->first = MRF_Y;
+                        if (item->first == HEADER_UNDEF)
+                            item->first = HEADER_Y;
                         item->mDot1 = inst;
                         item->mDot1_it = ii;
                     }
@@ -5950,8 +5948,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     else if(dst->getSubRegOff() == 2  &&
                         inst->getExecSize() == 1                        )
                     {
-                        if (item->first == MRF_UNDEF)
-                            item->first = MRF_SIZE;
+                        if (item->first == HEADER_UNDEF)
+                            item->first = HEADER_SIZE;
                         item->mDot2 = inst;
                         item->mDot2_it = ii;
                     }
@@ -6012,7 +6010,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             MSGTable *newItem   = (MSGTable *)mem.alloc(sizeof(MSGTable));
             toDelete.push(newItem);
             memset(newItem, 0, sizeof(MSGTable));
-            newItem->first      = MRF_UNDEF;
+            newItem->first      = HEADER_UNDEF;
 
             msgList.push_front(newItem);
             G4_BB* bb = (*ib);
@@ -6049,7 +6047,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         MSGTable * item = (MSGTable *)mem.alloc(sizeof(MSGTable));
                         toDelete.push(item);
                         memset(item, 0, sizeof(MSGTable));
-                        item->first  = MRF_UNDEF;
+                        item->first  = HEADER_UNDEF;
                         msgList.push_front(item);
                     }
                 }
@@ -6166,7 +6164,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         if (inst->opcode() == G4_line || inst->opcode() == G4_pln)
         {
             G4_Operand *src = inst->getSrc(0);
-            RegionDesc *rd = src->isSrcRegRegion() ? src->asSrcRegRegion()->getRegion() : NULL;
+            const RegionDesc *rd = src->isSrcRegRegion() ? src->asSrcRegRegion()->getRegion() : NULL;
             MUST_BE_TRUE( rd != NULL, " Src0 of line inst is not regregion. " );
             if (rd->isScalar())
             {
@@ -6176,7 +6174,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 "Unexpected region for the first line operand." );
 
             // create a new rd for src0
-            RegionDesc *new_rd = builder.getRegionScalar();
+            const RegionDesc *new_rd = builder.getRegionScalar();
             src->asSrcRegRegion()->setRegion( new_rd );
         }
     }
@@ -6316,7 +6314,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     {
         if (inst->isSend() && inst->getSrc(0) != NULL)
         {
-            RegionDesc* newDesc = NULL;
+            const RegionDesc* newDesc = NULL;
             uint8_t execSize = inst->getExecSize();
             if (execSize == 1)
             {
@@ -6335,480 +6333,338 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     }
 
 
-/*
- *  Three sources only
- */
-bool Optimizer::hasGen12LPBundleConflict(G4_INST *inst)
-{
-    int regs[3] = {-1};
-    int bundles[3] = {-1};
-
-    //Three source only
-    if (inst->getNumSrc() != 3 || inst->isSend())
+    /*
+     *  Three sources only
+     */
+    bool Optimizer::hasGen12LPBundleConflict(G4_INST* inst)
     {
-        return false;
-    }
+        int regs[3] = { -1 };
+        int bundles[3] = { -1 };
 
-    //SIMD16
-    if(inst->getExecSize() < 16)
-    {
-        return false;
-    }
-
-    //Source 0 is scalar
-    G4_Operand* srcOpnd = inst->getSrc(0);
-    if (!srcOpnd || !srcOpnd->isSrcRegRegion() || !srcOpnd->asSrcRegRegion()->isScalar())
-    {
-        return false;
-    }
-
-    for (unsigned i = 1; i < G4_Inst_Table[inst->opcode()].n_srcs; i++)
-    {
-        srcOpnd = inst->getSrc(i);
-        if (srcOpnd)
+        //Three source only
+        if (inst->getNumSrc() != 3 || inst->isSend())
         {
-            if (srcOpnd->isSrcRegRegion() &&
-                srcOpnd->asSrcRegRegion()->getBase() &&
-                srcOpnd->asSrcRegRegion()->getBase()->isRegVar())
+            return false;
+        }
+
+        //SIMD16
+        if (inst->getExecSize() < 16)
+        {
+            return false;
+        }
+
+        //Source 0 is scalar
+        G4_Operand* srcOpnd = inst->getSrc(0);
+        if (!srcOpnd || !srcOpnd->isSrcRegRegion() || !srcOpnd->asSrcRegRegion()->isScalar())
+        {
+            return false;
+        }
+
+        for (int i = 1; i < inst->getNumSrc(); i++)
+        {
+            srcOpnd = inst->getSrc(i);
+            if (srcOpnd)
             {
-                G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
-                if (baseVar->isGreg()) {
-                    uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    regs[i] = byteAddress / GENX_GRF_REG_SIZ;
-                    bundles[i] =  (regs[i] % 16) /2;
+                if (srcOpnd->isSrcRegRegion() &&
+                    srcOpnd->asSrcRegRegion()->getBase() &&
+                    srcOpnd->asSrcRegRegion()->getBase()->isRegVar())
+                {
+                    G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
+                    if (baseVar->isGreg()) {
+                        uint32_t byteAddress = srcOpnd->getLinearizedStart();
+                        regs[i] = byteAddress / GENX_GRF_REG_SIZ;
+                        bundles[i] = (regs[i] % 16) / 2;
+                    }
                 }
             }
         }
-    }
 
-    if (bundles[1] == bundles[2] && bundles[1] != -1)
-    {
-        return true;
-    }
-
-    return false;
-}
-
-
-void Optimizer::swapSrc1(G4_INST *inst)
-{
-    G4_Operand* src1Opnd = inst->getSrc(1);
-
-    if (inst->getExecSize() < 2)
-    {
-        return;
-    }
-
-    if (!src1Opnd ||
-         !src1Opnd->isSrcRegRegion()  ||
-        !src1Opnd->asSrcRegRegion()->isScalar())
-    {
-        return;
-    }
-
-    if (inst->isMixedMode())
-    {
-        return;
-    }
-
-    G4_Operand* src02Opnd = nullptr;
-
-    if (inst->opcode() == G4_mad)
-    {
-        src02Opnd = inst->getSrc(2);
-        if (src1Opnd->getType() == src02Opnd->getType())
+        if (bundles[1] == bundles[2] && bundles[1] != -1)
         {
-            inst->setSrc(src1Opnd, 2);
-            inst->setSrc(src02Opnd, 1);
+            return true;
         }
+
+        return false;
     }
 
-    if (inst->opcode() == G4_add ||
-        inst->opcode() == G4_mul)
+
+    void Optimizer::swapSrc1(G4_INST* inst)
     {
-        src02Opnd = inst->getSrc(0);
-        if (src1Opnd->getType() == src02Opnd->getType())
+        G4_Operand* src1Opnd = inst->getSrc(1);
+
+        if (inst->getExecSize() < 2)
         {
-            inst->setSrc(src1Opnd, 0);
-            inst->setSrc(src02Opnd, 1);
+            return;
         }
-    }
 
-    return;
-}
-
-G4_SrcRegRegion* IR_Builder::createSubSrcOperand( G4_SrcRegRegion* src, uint16_t start, uint8_t size, uint16_t newVs, uint16_t newWd)
-{
-    RegionDesc *rd = NULL;
-    uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
-    if (!src->getRegion()->isRegionWH())
-    {
-        // r[a0.0,0]<4;2,1> and size is 4 or 1
-        if (size < newWd)
+        if (!src1Opnd ||
+            !src1Opnd->isSrcRegRegion() ||
+            !src1Opnd->asSrcRegRegion()->isScalar())
         {
-            newWd = size;
+            return;
         }
-        rd = size == 1 ? getRegionScalar() :
-            createRegionDesc(size == newWd ? newWd * hs : newVs, newWd, hs);
-        rd = getNormalizedRegion(size, rd);
-    }
 
-    if( src->getRegAccess() != Direct )
-    {
-        if( src->getRegion()->isRegionWH() )
+        if (inst->isMixedMode())
         {
-            // just handle <1,0>
-            if( start > 0 )
+            return;
+        }
+
+        G4_Operand* src02Opnd = nullptr;
+
+        if (inst->opcode() == G4_mad)
+        {
+            src02Opnd = inst->getSrc(2);
+            if (src1Opnd->getType() == src02Opnd->getType())
             {
-                // just change immediate offset
-                uint16_t subRegOff = src->getSubRegOff() + start;
-                G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
-                    src->getRegOff(), subRegOff, src->getRegion(), src->getType(), src->getAccRegSel());
-                newSrc->setImmAddrOff(src->getAddrImm());
-                return newSrc;
-            }
-            else
-            {
-                G4_SrcRegRegion *newSrc = duplicateOperand(src);
-                return newSrc;
+                inst->setSrc(src1Opnd, 2);
+                inst->setSrc(src02Opnd, 1);
             }
         }
 
-        if( start > 0 )
+        if (inst->opcode() == G4_add ||
+            inst->opcode() == G4_mul)
         {
-            short numRows = start / wd;
-            short numCols = start % wd;
-            short newOff = (numRows * vs + numCols * hs) * G4_Type_Table[src->getType()].byteSize;
-
-            G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
-                src->getRegOff(), src->getSubRegOff(), rd, src->getType(), src->getAccRegSel());
-            newSrc->setImmAddrOff(src->getAddrImm() + newOff);
-            return newSrc;
-
+            src02Opnd = inst->getSrc(0);
+            if (src1Opnd->getType() == src02Opnd->getType())
+            {
+                inst->setSrc(src1Opnd, 0);
+                inst->setSrc(src02Opnd, 1);
+            }
         }
-        else
-        {
-            G4_SrcRegRegion *newSrc = duplicateOperand( src );
-            newSrc->setRegion( rd );
-            return newSrc;
-        }
+
+        return;
     }
 
-    // direct access oprand
-    uint16_t regOff, subRegOff;
-    if( start > 0 )
+    G4_SrcRegRegion* IR_Builder::createSubSrcOperand(
+        G4_SrcRegRegion* src, uint16_t start, uint8_t size, uint16_t newVs, uint16_t newWd)
     {
-        G4_Type srcType = src->getType();
-        uint16_t newEleOff;
+        const RegionDesc* rd = NULL;
         uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
-
-        if (src->isAccReg())
+        if (!src->getRegion()->isRegionWH())
         {
-            switch (srcType)
+            // r[a0.0,0]<4;2,1> and size is 4 or 1
+            if (size < newWd)
             {
-            case Type_F:
-                // must be acc1.0 as result of simd16 -> 8 split
-                assert(size == 8 && "only support simd16->simd8 for now");
-                return createSrcRegRegion(src->getModifier(), Direct, phyregpool.getAcc1Reg(), 0, 0, src->getRegion(), srcType);
-            case Type_HF:
+                newWd = size;
+            }
+            rd = size == 1 ? getRegionScalar() :
+                createRegionDesc(size == newWd ? newWd * hs : newVs, newWd, hs);
+            rd = getNormalizedRegion(size, rd);
+        }
+
+        if (src->getRegAccess() != Direct)
+        {
+            if (src->getRegion()->isRegionWH())
             {
-                // can be one of acc0.8, acc1.0, acc1.8
-                if (src->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
+                // just handle <1,0>
+                if (start > 0)
                 {
-                    start += 16;
-                }
-                G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
-                return createSrcRegRegion(src->getModifier(), Direct, accReg, 0, start % 16, src->getRegion(), srcType);
-
-            }
-            default:
-                // Keep using acc0 for other types.
-                return duplicateOperand(src);
-            }
-        }
-
-        newEleOff = start * hs +
-            (start >= wd && vs != wd * hs ? (start / wd * (vs - wd * hs)) : 0);
-
-        uint16_t newSubRegOff = src->getSubRegOff() + newEleOff;
-        bool crossGRF = newSubRegOff * G4_Type_Table[srcType].byteSize >= G4_GRF_REG_NBYTES;
-        if (crossGRF)
-        {
-            regOff = src->getRegOff() + 1;
-            subRegOff = newSubRegOff - G4_GRF_REG_NBYTES / G4_Type_Table[srcType].byteSize;
-        }
-        else
-        {
-            regOff = src->getRegOff();
-            subRegOff = newSubRegOff;
-        }
-
-        // create a new one
-        return createSrcRegRegion(src->getModifier(), Direct, src->getBase(), regOff, subRegOff, rd,
-            srcType, src->getAccRegSel());
-    }
-    else
-    {
-        G4_SrcRegRegion *newSrc = duplicateOperand( src );
-        newSrc->setRegion( rd );
-        return newSrc;
-    }
-}
-
-G4_DstRegRegion* IR_Builder::createSubDstOperand(G4_DstRegRegion* dst, uint16_t start, uint8_t size)
-{
-    if (dst->getRegAccess() != Direct)
-    {
-        if (start > 0)
-        {
-            // just change immediate offset
-            uint16_t newOff = start * G4_Type_Table[dst->getType()].byteSize * dst->getHorzStride();
-            G4_DstRegRegion* newDst = duplicateOperand(dst);
-            newDst->setImmAddrOff(dst->getAddrImm() + newOff);
-            return newDst;
-        }
-        else
-        {
-            return duplicateOperand(dst);
-        }
-    }
-
-    uint16_t regOff, subRegOff;
-    if (start > 0)
-    {
-        G4_Type dstType = dst->getType();
-        uint16_t hs = dst->getHorzStride();
-        if (dst->isAccReg())
-        {
-            switch (dstType)
-            {
-            case Type_F:
-                // must be acc1.0 as result of simd16 -> 8 split
-                assert(size == 8 && "only support simd16->simd8 for now");
-                return createDstRegRegion(
-                    Direct,
-                    phyregpool.getAcc1Reg(),
-                    0,
-                    0,
-                    hs,
-                    dstType);
-            case Type_HF:
-            {
-                // can be one of acc0.8, acc1.0, acc1.8
-                if (dst->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
-                {
-                    start += 16;
-                }
-                G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
-                return createDstRegRegion(
-                    Direct, accReg, 0, start % 16, hs, dstType);
-            }
-            default:
-
-                // other types do not support acc1, we have to continue to use acc0
-                // whoever doing the split must fix the dependencies later by shuffling instructions
-                // so that acc0 does not get overwritten
-                return createDstRegRegion(*dst);
-            }
-        }
-
-        uint16_t newSubRegOff = dst->getSubRegOff() + start * hs;
-        bool crossGRF = newSubRegOff * G4_Type_Table[dstType].byteSize >= G4_GRF_REG_NBYTES;
-        if (crossGRF)
-        {
-            regOff = dst->getRegOff() + 1;
-            subRegOff = newSubRegOff - G4_GRF_REG_NBYTES / G4_Type_Table[dstType].byteSize;
-        }
-        else
-        {
-            regOff = dst->getRegOff();
-            subRegOff = newSubRegOff;
-        }
-        // create a new one
-        return createDstRegRegion(Direct, dst->getBase(), regOff, subRegOff, hs, dst->getType(),
-            dst->getAccRegSel());
-    }
-    else
-    {
-        G4_DstRegRegion *newDst = duplicateOperand(dst);
-        return newDst;
-    }
-}
-
-G4_INST *IR_Builder::makeSplittingInst(G4_INST *inst, uint8_t ExSize)
-{
-    // Instruction's option is reused. Call sites should reset this field
-    // properly. FIXME: fix all call sites.
-    G4_INST *newInst = NULL;
-    G4_opcode op = inst->opcode();
-    if (inst->isMath())
-    {
-        newInst = createMathInst(NULL, inst->getSaturate(), ExSize,
-            NULL, NULL, NULL, inst->asMathInst()->getMathCtrl(),
-            inst->getOption(), inst->getLineNo());
-        newInst->setCISAOff(inst->getCISAOff());
-        newInst->setSrcFilename(inst->getSrcFilename());
-    }
-    else if (G4_Inst_Table[op].n_srcs < 3)
-    {
-        newInst = createInternalInst(
-            NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
-            inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
-            inst->getSrcFilename());
-    }
-    else
-    {
-        newInst = createInternalInst(
-            NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
-            NULL, inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
-            inst->getSrcFilename());
-    }
-
-    return newInst;
-}
-
-// evenly split an inst into two instructions with half execution size.
-// this is used to split a simd16 mad into two simd8 before other reducing exeuction size actions
-void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
-{
-    G4_INST *inst = *iter;
-    G4_opcode op = inst->opcode();
-    G4_Operand *srcs[3];
-    int origMaskOffset = inst->getMaskOffset();
-
-    bool use_arc_reg = false;
-    for (int i = 0; i < G4_Inst_Table[op].n_srcs; i++)
-    {
-        srcs[i] = inst->getSrc(i);
-    }
-
-    // compute max exeuction size.
-    // boundary is GRF-boundary and HS change, but for Dst, elements should be symetric
-    // if half-GRF boundary is crossed.
-
-    G4_DstRegRegion *dst = inst->getDst();
-    bool nullDst = dst && inst->hasNULLDst();
-    uint8_t instExSize = inst->getExecSize(), currExSize = instExSize >> 1;
-
-    G4_Predicate *newPred = NULL;
-    if (inst->getPredicate())
-    {
-        newPred = inst->getPredicate();
-        newPred->splitPred();
-    }
-
-    G4_CondMod *newCond = NULL;
-    if (inst->getCondMod())
-    {
-        newCond = inst->getCondMod();
-        newCond->splitCondMod();
-    }
-
-    G4_SrcRegRegion *accSrcRegion = NULL;
-    if (inst->getImplAccSrc())
-    {
-        accSrcRegion = inst->getImplAccSrc()->asSrcRegRegion();
-    }
-
-    G4_DstRegRegion *accDstRegion = NULL;
-    if (inst->getImplAccDst())
-    {
-        accDstRegion = inst->getImplAccDst();
-    }
-    if (accSrcRegion || accDstRegion || newPred || newCond)
-    {
-        use_arc_reg = true;
-    }
-
-    for (int i = 0; i < instExSize; i += currExSize)
-    {
-        // create new Oprands.
-        G4_DstRegRegion *newDst;
-        if (!nullDst)
-        {
-            newDst = builder.createSubDstOperand(dst, (uint16_t)i, currExSize);
-        }
-        else
-        {
-            newDst = dst;
-        }
-        // generate new inst
-        G4_INST* newInst;
-        if ((i + currExSize) < instExSize)
-        {
-            newInst = builder.makeSplittingInst(inst, currExSize);
-            newInst->setImplAccDst(builder.duplicateOperand(accDstRegion));
-            newInst->setImplAccSrc(builder.duplicateOperand(accSrcRegion));
-            newInst->setDest(newDst);
-            newInst->setPredicate(builder.duplicateOperand(newPred));
-            newInst->setCondMod(builder.duplicateOperand(newCond));
-            bb->insert(iter, newInst);
-        }
-        else
-        {
-            // reuse the original inst
-            newInst = inst;
-            newInst->setExecSize(currExSize);
-            newInst->setDest(newDst);
-            if (newPred)
-            {
-                inst->setPredicate(builder.duplicateOperand(newPred));
-            }
-            if (newCond)
-            {
-                inst->setCondMod(builder.duplicateOperand(newCond));
-            }
-            if (accSrcRegion)
-            {
-                newInst->setImplAccSrc(builder.createSrcRegRegion(*accSrcRegion));
-            }
-            if (accDstRegion)
-            {
-                newInst->setImplAccDst(builder.createDstRegRegion(*accDstRegion));
-            }
-        }
-
-        for (int j = 0; j < G4_Inst_Table[op].n_srcs; j++)
-        {
-            if (srcs[j])
-            {
-                if (srcs[j]->isImm())
-                {
-                    newInst->setSrc(srcs[j], j);
-                }
-                else if (srcs[j]->asSrcRegRegion()->isScalar() || (j == 0 && op == G4_line))
-                {
-                    newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
+                    // just change immediate offset
+                    uint16_t subRegOff = src->getSubRegOff() + start;
+                    G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
+                        src->getRegOff(), subRegOff, src->getRegion(), src->getType(), src->getAccRegSel());
+                    newSrc->setImmAddrOff(src->getAddrImm());
+                    return newSrc;
                 }
                 else
                 {
-                    newInst->setSrc(builder.createSubSrcOperand(srcs[j]->asSrcRegRegion(), (uint16_t)i,
-                        currExSize, (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->vertStride),
-                        (uint8_t)(srcs[j]->asSrcRegRegion()->getRegion()->width)), j);
+                    G4_SrcRegRegion* newSrc = duplicateOperand(src);
+                    return newSrc;
                 }
             }
-        }
 
-        // set mask
-        if (!inst->isWriteEnableInst() || use_arc_reg)
-        {
-            int newMaskOffset = origMaskOffset + (i == 0 ? 0 : currExSize);
-            bool nibOk = G4_Type_Table[inst->getDst()->getType()].byteSize == 8 ||
-                G4_Type_Table[inst->getExecType()].byteSize == 8;
-            G4_InstOption newMask = G4_INST::offsetToMask(currExSize, newMaskOffset, nibOk);
-            if (newMask == InstOpt_NoOpt)
+            if (start > 0)
             {
-                bool useMask = inst->getPredicate() || inst->getCondMod() || (bb->isInSimdFlow() && !inst->isWriteEnableInst());
-                MUST_BE_TRUE(!useMask, "no legal emask found for the split instruction");
+                short numRows = start / wd;
+                short numCols = start % wd;
+                short newOff = (numRows * vs + numCols * hs) * G4_Type_Table[src->getType()].byteSize;
+
+                G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
+                    src->getRegOff(), src->getSubRegOff(), rd, src->getType(), src->getAccRegSel());
+                newSrc->setImmAddrOff(src->getAddrImm() + newOff);
+                return newSrc;
+
             }
             else
             {
-                newInst->setMaskOption(newMask);
+                G4_SrcRegRegion* newSrc = duplicateOperand(src);
+                newSrc->setRegion(rd);
+                return newSrc;
             }
         }
-    }
-}
 
+        // direct access oprand
+        uint16_t regOff, subRegOff;
+        if (start > 0)
+        {
+            G4_Type srcType = src->getType();
+            uint16_t newEleOff;
+            uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
+
+            if (src->isAccReg())
+            {
+                switch (srcType)
+                {
+                case Type_F:
+                    // must be acc1.0 as result of simd16 -> 8 split
+                    assert(size == 8 && "only support simd16->simd8 for now");
+                    return createSrcRegRegion(src->getModifier(), Direct, phyregpool.getAcc1Reg(), 0, 0, src->getRegion(), srcType);
+                case Type_HF:
+                {
+                    // can be one of acc0.8, acc1.0, acc1.8
+                    if (src->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
+                    {
+                        start += 16;
+                    }
+                    G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
+                    return createSrcRegRegion(src->getModifier(), Direct, accReg, 0, start % 16, src->getRegion(), srcType);
+
+                }
+                default:
+                    // Keep using acc0 for other types.
+                    return duplicateOperand(src);
+                }
+            }
+
+            newEleOff = start * hs +
+                (start >= wd && vs != wd * hs ? (start / wd * (vs - wd * hs)) : 0);
+
+            uint16_t newSubRegOff = src->getSubRegOff() + newEleOff;
+            bool crossGRF = newSubRegOff * G4_Type_Table[srcType].byteSize >= G4_GRF_REG_NBYTES;
+            if (crossGRF)
+            {
+                regOff = src->getRegOff() + 1;
+                subRegOff = newSubRegOff - G4_GRF_REG_NBYTES / G4_Type_Table[srcType].byteSize;
+            }
+            else
+            {
+                regOff = src->getRegOff();
+                subRegOff = newSubRegOff;
+            }
+
+            // create a new one
+            return createSrcRegRegion(src->getModifier(), Direct, src->getBase(), regOff, subRegOff, rd,
+                srcType, src->getAccRegSel());
+        }
+        else
+        {
+            G4_SrcRegRegion* newSrc = duplicateOperand(src);
+            newSrc->setRegion(rd);
+            return newSrc;
+        }
+    }
+
+    G4_DstRegRegion* IR_Builder::createSubDstOperand(G4_DstRegRegion* dst, uint16_t start, uint8_t size)
+    {
+        if (dst->getRegAccess() != Direct)
+        {
+            if (start > 0)
+            {
+                // just change immediate offset
+                uint16_t newOff = start * G4_Type_Table[dst->getType()].byteSize * dst->getHorzStride();
+                G4_DstRegRegion* newDst = duplicateOperand(dst);
+                newDst->setImmAddrOff(dst->getAddrImm() + newOff);
+                return newDst;
+            }
+            else
+            {
+                return duplicateOperand(dst);
+            }
+        }
+
+        uint16_t regOff, subRegOff;
+        if (start > 0)
+        {
+            G4_Type dstType = dst->getType();
+            uint16_t hs = dst->getHorzStride();
+            if (dst->isAccReg())
+            {
+                switch (dstType)
+                {
+                case Type_F:
+                    // must be acc1.0 as result of simd16 -> 8 split
+                    assert(size == 8 && "only support simd16->simd8 for now");
+                    return createDstRegRegion(
+                        Direct,
+                        phyregpool.getAcc1Reg(),
+                        0,
+                        0,
+                        hs,
+                        dstType);
+                case Type_HF:
+                {
+                    // can be one of acc0.8, acc1.0, acc1.8
+                    if (dst->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
+                    {
+                        start += 16;
+                    }
+                    G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
+                    return createDstRegRegion(
+                        Direct, accReg, 0, start % 16, hs, dstType);
+                }
+                default:
+
+                    // other types do not support acc1, we have to continue to use acc0
+                    // whoever doing the split must fix the dependencies later by shuffling instructions
+                    // so that acc0 does not get overwritten
+                    return createDstRegRegion(*dst);
+                }
+            }
+
+            uint16_t newSubRegOff = dst->getSubRegOff() + start * hs;
+            bool crossGRF = newSubRegOff * G4_Type_Table[dstType].byteSize >= G4_GRF_REG_NBYTES;
+            if (crossGRF)
+            {
+                regOff = dst->getRegOff() + 1;
+                subRegOff = newSubRegOff - G4_GRF_REG_NBYTES / G4_Type_Table[dstType].byteSize;
+            }
+            else
+            {
+                regOff = dst->getRegOff();
+                subRegOff = newSubRegOff;
+            }
+            // create a new one
+            return createDstRegRegion(Direct, dst->getBase(), regOff, subRegOff, hs, dst->getType(),
+                dst->getAccRegSel());
+        }
+        else
+        {
+            G4_DstRegRegion* newDst = duplicateOperand(dst);
+            return newDst;
+        }
+    }
+
+    G4_INST* IR_Builder::makeSplittingInst(G4_INST* inst, uint8_t ExSize)
+    {
+        // Instruction's option is reused. Call sites should reset this field
+        // properly. FIXME: fix all call sites.
+        G4_INST* newInst = NULL;
+        G4_opcode op = inst->opcode();
+        if (inst->isMath())
+        {
+            newInst = createMathInst(NULL, inst->getSaturate(), ExSize,
+                NULL, NULL, NULL, inst->asMathInst()->getMathCtrl(),
+                inst->getOption(), inst->getLineNo());
+            newInst->setCISAOff(inst->getCISAOff());
+            newInst->setSrcFilename(inst->getSrcFilename());
+        }
+        else if (inst->getNumSrc() < 3)
+        {
+            newInst = createInternalInst(
+                NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
+                inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
+                inst->getSrcFilename());
+        }
+        else
+        {
+            newInst = createInternalInst(
+                NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
+                NULL, inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
+                inst->getSrcFilename());
+        }
+
+        return newInst;
+    }
 
     /*
     some workaround for HW restrictions.  We apply them here so as not to affect optimizations, RA, and scheduling
@@ -6865,18 +6721,7 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                     }
                 }
 
-                if(getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), Wa_1606931601) )
-                {
-                    INST_LIST_ITER nextIter = ii;
-                    if (hasGen12LPBundleConflict(inst))
-                    {
-                        nextIter++;
-                        evenlySplitInst(ii, bb);
-                        ii = nextIter;
-                        continue;
-                    }
-                }
-                if(getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), WaSwapForSrc1Replicate) )
+                if (getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), WaSwapForSrc1Replicate))
                 {
                     swapSrc1(inst);
                 }
@@ -6992,6 +6837,23 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
                     bb->insert(ii, movInst);
                 }
 
+                if (inst->isEOT() && builder.getOption(vISA_clearAccBeforeEOT))
+                {
+                    // insert "(W) mov(16) acc0.0:f 0x0:f" before EOT
+                    G4_INST* movInst = builder.createMov(16,
+                        builder.createDstRegRegion(Direct, builder.phyregpool.getAcc0Reg(),0, 0, 1, Type_F),
+                        builder.createImm(0, Type_F), InstOpt_WriteEnable, false);
+                    // insert mov before contiguous send, in case that there are instruction combined set on continuous
+                    // two send
+                    INST_LIST_ITER insert_point = ii;
+                    for (; insert_point != bb->begin(); --insert_point)
+                        if (!(*insert_point)->isSend())
+                            break;
+
+                    if (!(*insert_point)->isEOT())
+                        ++insert_point;
+                    bb->insert(insert_point, movInst);
+                }
 
                 if (VISA_WA_CHECK(builder.getPWaTable(), WaResetN0BeforeGatewayMessage) &&
                     inst->isSend() && inst->getMsgDesc()->isBarrierMsg())
@@ -7031,6 +6893,12 @@ void Optimizer::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb)
             setA0toTdrForSendc();
         }
 
+        if (builder.needReplaceIndirectCallWithJmpi() && kernel.getIsExternFunc())
+        {
+            // replace ret in the external functions with jmpi. That we will
+            // also return the call with jmpi in VISAKernelImpl::compilePostOptimize
+            replaceRetWithJmpi();
+        }
     }
 
 class NSDS {
@@ -7876,7 +7744,7 @@ public:
 
             G4_SendMsgDescriptor* desc = kernel.fg.builder->createSendMsgDesc(
                 msgDescImm, 0, 1, funcID, false, msgSize, extFuncCtrl, SendAccess::WRITE_ONLY);
-            RegionDesc* region = kernel.fg.builder->getRegionStride1();
+            const RegionDesc* region = kernel.fg.builder->getRegionStride1();
             G4_SrcRegRegion* headerOpnd = kernel.fg.builder->Create_Src_Opnd_From_Dcl(kernel.fg.builder->getBuiltinR0(), region);
             G4_Declare* tempDcl = builder.createHardwiredDeclare(msgSize * 8, Type_UD, i, 0);
             G4_SrcRegRegion* srcOpnd = kernel.fg.builder->Create_Src_Opnd_From_Dcl(tempDcl, region);
@@ -8082,25 +7950,6 @@ public:
         if (ffid == FFID_INVALID)
             return;
 
-        // return if there is no cr0 write
-        bool has_cr0_dst = false;
-        for (auto bb : kernel.fg)
-        {
-            for (G4_INST* inst : *bb)
-            {
-                if (inst->getDst() != nullptr &&
-                    inst->getDst()->asDstRegRegion()->getBase()->isCrReg())
-                {
-                    has_cr0_dst = true;
-                    break;
-                }
-            }
-            if (has_cr0_dst)
-                break;
-        }
-        if (!has_cr0_dst)
-            return;
-
         // get r127.0 decl
         G4_Declare* rtail =
             builder.createHardwiredDeclare(8, Type_UD, kernel.getNumRegTotal() - 1, 0);
@@ -8209,7 +8058,7 @@ public:
     // ToDo: add fence only when the writes can reach EOT without a fence in between
     void Optimizer::insertFenceBeforeEOT()
     {
-        if (!builder.needFenceBeforeEOT() || !builder.getOption(vISA_clearHDCWritesBeforeEOT))
+        if (!builder.getOption(vISA_clearHDCWritesBeforeEOT))
         {
             return;
         }
@@ -8410,6 +8259,71 @@ public:
                     builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
                     builder.createImm(0, Type_UW), InstOpt_WriteEnable, false));
         }
+    }
+
+    // Replace ret with jmpi, must be single return
+    void Optimizer::replaceRetWithJmpi()
+    {
+        size_t num_ret = 0;
+
+        for (G4_BB* bb : kernel.fg)
+        {
+            if (bb->empty())
+                continue;
+            if (bb->isEndWithFRet())
+            {
+                ++num_ret;
+                G4_INST* ret_inst = bb->back();
+
+                // ret dst's decl
+                G4_Declare* r_1_0 = ret_inst->getSrc(0)->getTopDcl();
+
+                // calculate the jmpi target offset
+                // expand the original ret from:
+                //     ret r1.0
+                // To:
+                //     add   r1.0  -ip   r1.0
+                //     add   r1.0  r1.0  -48
+                //     jmpi  r1.0
+
+                // add   r1.0  -ip   r1.0
+                G4_INST* add0 = builder.createInternalInst(
+                    nullptr, G4_add, nullptr, false, 1,
+                    builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
+                    builder.createSrcRegRegion(
+                        Mod_Minus, Direct, builder.phyregpool.getIpReg(), 0, 0,
+                        builder.getRegionScalar(), Type_UD),
+                    builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
+                    InstOpt_WriteEnable | InstOpt_NoCompact);
+
+                // add   r1.0  r1.0  -48
+                G4_INST* add1 = builder.createInternalInst(
+                    nullptr, G4_add, nullptr, false, 1,
+                    builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
+                    builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
+                    builder.createImm(-48, Type_D), InstOpt_WriteEnable | InstOpt_NoCompact);
+
+                // jmpi r1.0
+                G4_SrcRegRegion* jmpi_target = builder.Create_Src_Opnd_From_Dcl(
+                    r_1_0, builder.getRegionScalar());
+                jmpi_target->setType(Type_D);
+                G4_INST* jmpi = builder.createInternalInst(
+                    nullptr, G4_jmpi, nullptr, false, 1, nullptr, jmpi_target,
+                    nullptr, InstOpt_NoCompact);
+
+                // remove the ret
+                bb->pop_back();
+                // add the ret
+                bb->push_back(add0);
+                bb->push_back(add1);
+                bb->push_back(jmpi);
+            }
+        }
+
+        // there should be exactly one ret in a external function. We did not try
+        // to restore the CallMask. We rely on single return of a function to make
+        // sure the CallMask before and after calling this function is the same.
+        assert(num_ret == 1);
     }
 
     // Set a0 to tdr0 before snedc/sendsc
@@ -8782,8 +8696,7 @@ public:
                     G4_Operand *useSrc = useInst->getSrc(0);
                     unsigned char execSize = useInst->getExecSize();
                     unsigned short dstHS = dst->getHorzStride();
-                    RegionDesc *newSrcRd;
-
+                    const RegionDesc *newSrcRd;
 
                     if( useSrc->asSrcRegRegion()->isScalar() )
                     {
@@ -8794,7 +8707,7 @@ public:
                         unsigned tExecSize = (execSize > 8) ? 8 : execSize;
                         if (RegionDesc::isLegal(tExecSize * dstHS, execSize, dstHS))
                         {
-                            newSrcRd = builder.createRegionDesc( (uint16_t)tExecSize*dstHS, execSize, dstHS );
+                            newSrcRd = builder.createRegionDesc((uint16_t)tExecSize*dstHS, execSize, dstHS);
                         }
                         else
                         {
@@ -8818,7 +8731,7 @@ public:
                     }
 
                     useInst->getSrc(0)->~G4_Operand();
-                    useInst->setSrc( newSrcOpnd, 0 );
+                    useInst->setSrc(newSrcOpnd, 0);
 
                     // Maintain def-use for this change:
                     // - remove this use from defInst
@@ -10482,7 +10395,7 @@ void MadSequenceInfo::processCandidates()
 
         while (true)
         {
-            RegionDesc *rd = builder.getRegionStride1();
+            const RegionDesc *rd = builder.getRegionStride1();
             auto mod = useInst->getOperand(opndNum)->asSrcRegRegion()->getModifier();
             G4_SrcRegRegion *accSrcOpnd = builder.createSrcRegRegion(
                 mod, Direct, builder.phyregpool.getAcc0Reg(), 0, 0, rd, AdjustedType);
@@ -10510,7 +10423,7 @@ void MadSequenceInfo::processCandidates()
         G4_INST *inst = *I;
         ASSERT_USER(isMad(inst), "not a mad");
 
-        RegionDesc *rd = builder.getRegionStride1();
+        const RegionDesc *rd = builder.getRegionStride1();
         G4_SrcRegRegion *accSrcOpnd = builder.createSrcRegRegion(
             Mod_src_undef, Direct, builder.phyregpool.getAcc0Reg(), 0, 0, rd,
             AdjustedType);
@@ -11079,6 +10992,14 @@ void Optimizer::changeMoveType()
             // sat/conditional modifier as well as src modifier
             // ToDo: we should probably change isRawMov() to include mov UD D
             auto src0 = inst->getSrc(0);
+
+            // FIXME: This is a quick WA to bypass RelocImm, so that it won't create a new src0 and
+            // overwrite the original RelocImm
+            // While this optimization should still be able to apply to RelocImm. Once we turn on this optimization
+            // for RelocImm, we should update assert in VISAKernelImpl::GetGenRelocEntryBuffer to allow float type
+            if (src0->isRelocImm())
+                continue;
+
             G4_Type dstTy = inst->getDst()->getType();
             G4_Type src0Ty = src0->getType();
             bool hasNoModifier = !inst->getSaturate() && !inst->getCondMod() &&

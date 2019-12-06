@@ -155,7 +155,7 @@ namespace IGC
         CVariable* GetRETV();
         CVariable* CreateSP(bool ptr64bits);
         /// init stack-pointer at the beginning of the kernel
-        void InitKernelStack(bool ptr64bits);
+        void InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize, bool ptr64bits);
         /// save the stack-pointer when entering a stack-call function
         void SaveSP();
         /// restore the stack-pointer when exiting a stack-call function
@@ -205,7 +205,6 @@ namespace IGC
         void        AllocateConstants3DShader(uint& offset);
         ShaderType  GetShaderType() const { return GetContext()->type; }
         bool        IsValueCoalesced(llvm::Value* v);
-        void        ConstantBufferAccesed(uint index);
 
         void        SampleHeader(CVariable* payload, uint offset, uint writeMask, uint rti);
 
@@ -327,7 +326,7 @@ namespace IGC
             return m_BindingTableUsedEntriesBitmap;
         }
 
-        void SetBindingTableEntryCountAndBitmap(bool directIdx, uint32_t bti = 0)
+        void SetBindingTableEntryCountAndBitmap(bool directIdx, BufferType bufType, uint32_t typeBti, uint32_t bti)
         {
             if (bti <= MAX_BINDING_TABLE_INDEX)
             {
@@ -335,12 +334,46 @@ namespace IGC
                 {
                     m_BindingTableEntryCount = (bti <= m_pBtiLayout->GetBindingTableEntryCount()) ? (std::max(bti, m_BindingTableEntryCount)) : m_BindingTableEntryCount;
                     m_BindingTableUsedEntriesBitmap |= BIT(bti / cBTEntriesPerCacheLine);
+
+                    if (bufType == RESOURCE)
+                    {
+                        m_shaderResourceLoaded |= (uint64_t)1 << typeBti;
+                    }
+                    else if (bufType == CONSTANT_BUFFER)
+                    {
+                        m_constantBufferLoaded |= BIT(typeBti);
+                    }
+                    else if (bufType == UAV)
+                    {
+                        m_uavLoaded |= BIT(typeBti);
+                    }
+                    else if (bufType == RENDER_TARGET)
+                    {
+                        m_renderTargetLoaded |= BIT(typeBti);
+                    }
                 }
                 else
                 {
                     // Indirect addressing, set the maximum BTI.
                     m_BindingTableEntryCount = m_pBtiLayout->GetBindingTableEntryCount();
                     m_BindingTableUsedEntriesBitmap |= BITMASK_RANGE(0, (m_BindingTableEntryCount / cBTEntriesPerCacheLine));
+
+                    if (bufType == RESOURCE)
+                    {
+                        m_shaderResourceLoaded |= QWBITMASK_RANGE(0, m_pBtiLayout->GetTextureIndexSize());
+                    }
+                    else if (bufType == CONSTANT_BUFFER)
+                    {
+                        m_constantBufferLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetConstantBufferIndexSize());
+                    }
+                    else if (bufType == UAV)
+                    {
+                        m_uavLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetUavIndexSize());
+                    }
+                    else if (bufType == RENDER_TARGET)
+                    {
+                        m_renderTargetLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetRenderTargetIndexSize());
+                    }
                 }
             }
         }
@@ -456,9 +489,13 @@ namespace IGC
         uint m_ConstantBufferLength;
         uint m_constantBufferMask;
         uint m_constantBufferLoaded;
+        uint m_uavLoaded;
+        uint64_t m_shaderResourceLoaded;
+        uint m_renderTargetLoaded;
+
         int  m_cbSlot;
         uint m_statelessCBPushedSize;
-        uint m_NOSBufferSize;
+        uint m_NOSBufferSize = 0;
 
         /// holds max number of inputs that can be pushed for this shader unit
         static const uint32_t m_pMaxNumOfPushedInputs;

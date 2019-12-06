@@ -132,7 +132,7 @@ namespace FCL
                 }
 
                 // Just return the string
-                strncpy((char*)pValue, envVal, size);
+                strncpy_s((char*)pValue, size, envVal, size);
 
                 return true;
             }
@@ -851,7 +851,7 @@ namespace TC
   Returns true if CommonClang used on current OS has VME types defined.
 
   \*****************************************************************************/
-  bool AreVMETypesDefined() 
+  bool AreVMETypesDefined()
   {
 #ifdef VME_TYPES_DEFINED
 #if VME_TYPES_DEFINED
@@ -992,7 +992,7 @@ namespace TC
     std::string GetListOfExtensionsFromInternalOptions(const std::string& internalOptions) {
     size_t start_pos = 0, end_pos = 0;
     std::string clextString = "";
-    
+
     while ((start_pos = internalOptions.find("-cl-ext=", end_pos)) != std::string::npos) {
       end_pos = internalOptions.find(" ", start_pos);
       clextString += internalOptions.substr(start_pos, end_pos - start_pos) + " ";
@@ -1035,6 +1035,43 @@ namespace TC
         }
 
         return internalDefines;
+    }
+
+    // The expected extensions input string is in a form:
+    // -cl-ext=-all,+supported_ext_name,+second_supported_ext_name
+    std::string GetCDefinesForExtensions(llvm::StringRef extensions, unsigned int oclStd) {
+
+      std::string extDefines;
+
+      // check for the last occurence of -all, as it invalidates previous occurances.
+      const StringRef clExtPrefix = "-cl-ext=-all,";
+      size_t pos = extensions.rfind(clExtPrefix);
+      if (pos == llvm::StringRef::npos) {
+        // If this string does not exist the input string does not contain valid extension list
+        // or it has all extensions disabled (-all without colon afterwards).
+        return extDefines;
+      }
+
+      extensions = extensions.substr(pos+clExtPrefix.size());
+
+      // string with defines should be similar in size, ",+" will change to "-D".
+      extDefines.reserve(extensions.size());
+
+      llvm::SmallVector<StringRef, 0> v;
+      extensions.split(v, ',');
+
+      for (auto ext : v) {
+        if (ext.consume_front("+")) {
+          if (ext.equals("cl_intel_device_side_avc_motion_estimation")) {
+            // If the user provided -cl-std option we need to add the define only if it's 1.2 and above.
+            // This is because clang will not allow declarations of extension's functions which use avc types otherwise.
+            if (!(oclStd >= 120 || oclStd == 0)) continue;
+          }
+          extDefines.append(" -D").append(ext);
+        }
+      }
+
+      return extDefines;
     }
 
     /*****************************************************************************\
@@ -1218,7 +1255,7 @@ namespace TC
                         // If "spir" does not follow the -x option, we must fail
                         if ((strcmp(pParam, "spir") && strcmp(pParam, "spir64")))
                         {
-                            // Invalid option - break out of the loop and return 
+                            // Invalid option - break out of the loop and return
                             // CL_INVALID_BUILD_OPTIONS
                             retVal = -43;
                             std::string invalidOption(pParam);
@@ -1264,13 +1301,13 @@ namespace TC
                             (strncmp(pParam, "-dump-opt-llvm", 14) == 0) ||
                             (strcmp(pParam, "-cl-no-subgroup-ifp") == 0);
 
-           
-                    
+
+
 
 
                         if (isCommonOption)
                         {
-                            // check to see if they used a space immediately after 
+                            // check to see if they used a space immediately after
                             // the define/include. If they did...
                             if ((strcmp(pParam, "-D") == 0) ||
                                 (strcmp(pParam, "-I") == 0))
@@ -1287,9 +1324,14 @@ namespace TC
                             {
                                 checkBinaryType = true;
                             }
+                            else if (strcmp(pParam, "-cl-intel-num-thread-per-eu") == 0)
+                            {
+                                // Next token is N, so ignore it
+                                ignoreNextToken = true;
+                            }
                         }
                         // Check for Intel OpenCL CPU options
-                        // OCL Kernel Profiler requires "-g" to create debug information for instrumented kernels. 
+                        // OCL Kernel Profiler requires "-g" to create debug information for instrumented kernels.
                         // Without those information OCL Profiler is unable to associate OpenC code with IL instructions.
                         else if ((strcmp(pParam, "-g") == 0) ||
                             (strcmp(pParam, "-profiler") == 0) ||
@@ -1303,7 +1345,7 @@ namespace TC
                         }
                         else
                         {
-                            // Invalid option - break out of the loop and return 
+                            // Invalid option - break out of the loop and return
                             // CL_INVALID_BUILD_OPTIONS
                             retVal = -43;
                             std::string invalidOption(pParam);
@@ -1402,39 +1444,10 @@ namespace TC
 
         optionsEx += " " + extensions;
 
+        unsigned int oclStd = GetOclCVersionFromOptions(pInputArgs->options.data(), nullptr, pInputArgs->oclVersion, exceptString);
         // get additional -D flags from internal options
         optionsEx += " " + GetCDefinesFromInternalOptions(pInternalOptions);
-        
-        if (extensions.find("cl_intel_subgroups_short") != std::string::npos)
-        {
-          optionsEx += " -Dcl_intel_subgroups_short";
-        }
-        if (extensions.find("cl_intel_media_block_io") != std::string::npos)
-        {
-          optionsEx += " -Dcl_intel_media_block_io";
-        }
-        if (extensions.find("cl_intel_device_side_avc_motion_estimation") != std::string::npos)
-        {
-          // If the user provided -cl-std option we need to add the define only if it's 1.2 and above.
-          // This is because clang will not allow declarations of extension's functions which use avc types otherwise.
-          unsigned int oclStd = GetOclCVersionFromOptions(pInputArgs->options.data(), nullptr, pInputArgs->oclVersion, exceptString);
-          if (oclStd >= 120 || oclStd == 0) {
-            optionsEx += " -Dcl_intel_device_side_avc_motion_estimation";
-          }
-        }
-        if (extensions.find("cl_intel_64bit_global_atomics_placeholder") != std::string::npos)
-        {
-          optionsEx += " -Dcl_intel_64bit_global_atomics_placeholder";
-        }
-        if (extensions.find("cl_khr_int64_base_atomics") != std::string::npos)
-        {
-          optionsEx += " -Dcl_khr_int64_base_atomics";
-        }
-        if (extensions.find("cl_khr_int64_extended_atomics") != std::string::npos)
-        {
-          optionsEx += " -Dcl_khr_int64_extended_atomics";
-        }
-
+        optionsEx += " " + GetCDefinesForExtensions(extensions, oclStd);
         optionsEx += " -D__IMAGE_SUPPORT__ -D__ENDIAN_LITTLE__";
 
         IOCLFEBinaryResult *pResultPtr = NULL;
@@ -1456,7 +1469,7 @@ namespace TC
         if (0 != BuildOptionsAreValid(options.c_str(), exceptString)) res = -43;
 
         Utils::FillOutputArgs(pResultPtr, pOutputArgs, exceptString);
-        if (!exceptString.empty()) // str != "" => there was an exception. skip further code and return. 
+        if (!exceptString.empty()) // str != "" => there was an exception. skip further code and return.
         {
             return false;
         }

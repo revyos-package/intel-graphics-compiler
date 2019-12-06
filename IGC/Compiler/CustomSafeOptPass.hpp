@@ -100,7 +100,7 @@ namespace IGC
         bool psHasSideEffect;
     };
 
-#if LLVM_VERSION_MAJOR >= 7 
+#if LLVM_VERSION_MAJOR >= 7
     class TrivialLocalMemoryOpsElimination : public llvm::FunctionPass, public llvm::InstVisitor<TrivialLocalMemoryOpsElimination>
     {
     public:
@@ -167,6 +167,8 @@ namespace IGC
         void visitBitCastInst(llvm::BitCastInst& I);
 
         template <typename MaskType> void matchReverse(llvm::BinaryOperator& I);
+        void createBitcastExtractInsertPattern(llvm::BinaryOperator& I,
+            llvm::Value* Op1, llvm::Value* Op2, unsigned extractNum1, unsigned extractNum2);
     };
 
     class FCmpPaternMatch : public llvm::FunctionPass, public llvm::InstVisitor<FCmpPaternMatch>
@@ -209,19 +211,18 @@ namespace IGC
 
         virtual llvm::StringRef getPassName() const override
         {
-            return "specialized const-prop with shader-const replacement";
+            // specialized const-prop with shader-const replacement
+            return "const-prop with shader-const replacement";
         }
     private:
         llvm::Module* module;
-        llvm::Constant* ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, llvm::Type* type);
+        llvm::Constant* ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, llvm::LoadInst* inst);
         llvm::Constant* replaceShaderConstant(llvm::LoadInst* inst);
         llvm::Constant* ConstantFoldCallInstruction(llvm::CallInst* inst);
         llvm::Constant* ConstantFoldCmpInst(llvm::CmpInst* inst);
         llvm::Constant* ConstantFoldExtractElement(llvm::ExtractElementInst* inst);
         bool simplifyAdd(llvm::BinaryOperator* BO);
         bool simplifyGEP(llvm::GetElementPtrInst* GEP);
-        // try to evaluate the address if it is constant.
-        bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, llvm::Value* ptrSrc = nullptr);
         bool m_enableMathConstProp;
         bool m_enableSimplifyGEP;
         const llvm::DataLayout* m_TD;

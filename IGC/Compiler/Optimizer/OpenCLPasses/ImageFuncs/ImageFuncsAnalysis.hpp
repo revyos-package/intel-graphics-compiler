@@ -36,8 +36,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 namespace IGC
 {
     /// @brief  ImageFuncsAnalysis pass used for analyzing which OpenCL image dimension functions
-    ///         (height, width, depth) are used in the different functions in the module and creating 
-    ///         metadata that represents  the implicit image information needded by each function for 
+    ///         (height, width, depth) are used in the different functions in the module and creating
+    ///         metadata that represents  the implicit image information needded by each function for
     ///         resolving these function calls
 
     class ImageFuncsAnalysis : public llvm::ModulePass, public llvm::InstVisitor<ImageFuncsAnalysis>
@@ -72,8 +72,8 @@ namespace IGC
         virtual bool runOnModule(llvm::Module& M) override;
 
         /// @brief  Function entry point.
-        ///         Finds all OpenCL relevant image dimension function calls in this function, analyzes them 
-        ///          and creates metadata that represents the implicit image information needded by this function 
+        ///         Finds all OpenCL relevant image dimension function calls in this function, analyzes them
+        ///          and creates metadata that represents the implicit image information needded by this function
         ///         for resolving these function calls
         /// @param  F The destination function.
         bool runOnFunction(llvm::Function& F);
@@ -97,6 +97,10 @@ namespace IGC
         static const llvm::StringRef GET_SAMPLER_ADDRESS_MODE;
         static const llvm::StringRef GET_SAMPLER_NORMALIZED_COORDS;
         static const llvm::StringRef GET_SAMPLER_SNAP_WA_REQUIRED;
+        static const llvm::StringRef GET_FLAT_IMAGE_BASEOFFSET;
+        static const llvm::StringRef GET_FLAT_IMAGE_HEIGHT;
+        static const llvm::StringRef GET_FLAT_IMAGE_WIDTH;
+        static const llvm::StringRef GET_FLAT_IMAGE_PITCH;
     private:
 
         /// @brief Maps each implicit argument type to a set. This set contains

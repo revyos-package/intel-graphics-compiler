@@ -77,6 +77,7 @@ namespace IGC
             TIME_STATS_SUM,             //!< Timing of translation, code generation, finalizer, etc
             TIME_STATS_PER_SHADER,      //!< Like TIME_STATS_SUM, but one stat measurement per shader (instead of summed up times)
             TIME_STATS_COARSE,          //!< Only collect/dump coarse level time stats, i.e. skip opt detail timer for now >
+            TIME_STATS_PER_PASS,        //!< Collect Timing of IGC/LLVM passes
             MEM_STATS,                  //!< Measurements related to allocations and deallocations
             MEM_STATS_DETAIL,           //!< dump detail memstats
             SHADER_QUALITY_METRICS,     //!< ISA quality measurements (i.e. count of instructions generated)
@@ -180,7 +181,7 @@ namespace IGC
             return TEnum::END;
         }
 
-        // Handle both bool and int using the same function. For boolean, 
+        // Handle both bool and int using the same function. For boolean,
         // true is converted to int 1 and false is converted to int 0.
         void IGC_DEBUG_API_CALL SetCompilerOption(OptionFlag flag, int value);
         void IGC_DEBUG_API_CALL SetCompilerOption(OptionFlag flag, debugString s);

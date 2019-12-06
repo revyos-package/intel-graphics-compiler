@@ -3,7 +3,7 @@
 
 /*===================== begin_copyright_notice ==================================
 
-Copyright (c) 2017-2019 Intel Corporation
+Copyright (c) 2017 Intel Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a
 copy of this software and associated documentation files (the
@@ -171,7 +171,7 @@ typedef struct _WaInitParam
     PLATFORM_TYPE    ePlatformType;
     PCH_PRODUCT_FAMILY  ePCHProductFamily;
     const GT_SYSTEM_INFO   *pGtSysInfo;           // Required CNL+
-    unsigned char    bWinDoD;  // BOOLEAN	
+    unsigned char    bWinDoD;  // BOOLEAN
 } WA_INIT_PARAM, *PWA_INIT_PARAM;
 
 /********* Common functions to intialize wa table ************\
@@ -296,6 +296,14 @@ void InitEhlSwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
+void InitJslHwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitJslSwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
 void InitTglLpHwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
@@ -375,6 +383,11 @@ void InitLkfHASWaTable(
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
 void InitEhlHASWaTable(
+        PHW_DEVICE_EXTENSION                pKchContext,
+        PWA_TABLE                           pWaTable,
+        PSKU_FEATURE_TABLE                  pSkuTable,
+        PWA_INIT_PARAM                      pWaParam);
+void InitJslHASWaTable(
         PHW_DEVICE_EXTENSION                pKchContext,
         PWA_TABLE                           pWaTable,
         PSKU_FEATURE_TABLE                  pSkuTable,

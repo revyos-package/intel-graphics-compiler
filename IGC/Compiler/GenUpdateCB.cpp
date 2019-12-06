@@ -58,10 +58,8 @@ IGC_INITIALIZE_PASS_END(GenUpdateCB, "GenUpdateCB", "GenUpdateCB", false, false)
 
 static bool isResInfo(GenIntrinsicInst* inst, unsigned& texId, unsigned& lod, bool& isUAV)
 {
-    if (inst)
+    if (inst && inst->getIntrinsicID() == GenISAIntrinsic::GenISA_resinfoptr)
     {
-        assert(inst->getIntrinsicID() == GenISAIntrinsic::GenISA_resinfoptr);
-
         ConstantInt* vlod = dyn_cast<ConstantInt>(inst->getOperand(1));
         if (!vlod)
             return false;
@@ -73,7 +71,7 @@ static bool isResInfo(GenIntrinsicInst* inst, unsigned& texId, unsigned& lod, bo
         bool directIndexing = false; //default
 
         bufType = DecodeAS4GFXResource(as, directIndexing, bufIdx);
-        if (!directIndexing || bufType != RESOURCE || bufType != UAV)
+        if( !directIndexing || ( bufType != RESOURCE && bufType != UAV ) )
             return false;
 
         texId = bufIdx;
@@ -534,7 +532,7 @@ bool GenUpdateCB::runOnFunction(Function& F)
                 const_cast<char*>(bitcodeSS.str().data()),
                 bufferSize);
 
-            // return 
+            // return
             m_ctx->m_ConstantBufferReplaceShaderPatterns = CBPatterns;
             m_ctx->m_ConstantBufferReplaceShaderPatternsSize = bufferSize;
             m_ctx->m_ConstantBufferUsageMask = m_ConstantBufferUsageMask;

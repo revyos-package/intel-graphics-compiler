@@ -55,8 +55,10 @@ namespace vISA
         void setupEvenOddBankConflictsForDecls(G4_Declare * dcl_1, G4_Declare * dcl_2, unsigned int offset1, unsigned int offset2,
             BankConflict &srcBC1, BankConflict &srcBC2);
         void setupBankConflictsOneGRFOld(G4_INST* inst, int &bank1RegNum, int &bank2RegNum, float GRFRatio, unsigned int &internalConflict);
+        bool isOddOffset(unsigned int offset);
 
         void setupBankConflictsforTwoGRFs(G4_INST* inst);
+        void setupBankConflictsforMad(G4_INST* inst);
         void setupBankConflictsForBB(G4_BB* bb, unsigned int &threeSourceInstNum, unsigned int &sendInstNum,
         unsigned int numRegLRA, unsigned int & internalConflict);
         bool hasInternalConflict3Srcs(BankConflict *srcBC);
@@ -501,6 +503,7 @@ namespace vISA
         void markInterferenceForSend(G4_BB* bb, G4_INST* inst, G4_DstRegRegion* dst);
 
         void dumpInterference() const;
+        bool dumpIntf(const char*) const;
         void interferenceVerificationForSplit() const;
 
         void buildInterferenceWithLocalRA(G4_BB* bb);
@@ -741,6 +744,11 @@ namespace vISA
 
         // new temps for each reference of spilled address/flag decls
         std::unordered_set<G4_Declare*> addrFlagSpillDcls;
+
+        void expandFillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
+        void expandSpillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
+        void expandFillStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
+        void expandSpillStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
 
     public:
         G4_Kernel& kernel;
@@ -1230,7 +1238,6 @@ namespace vISA
         void addCallerSavePseudoCode();
         void addCalleeSavePseudoCode();
         void addStoreRestoreForFP();
-        void setABIForStackCallFunctionCalls();
         void markGraphBlockLocalVars();
         void verifyRA(LivenessAnalysis & liveAnalysis);
         void resetGlobalRAStates();
@@ -1297,7 +1304,7 @@ namespace vISA
 
         void localSplit(IR_Builder& builder, G4_BB* bb);
         void globalSplit(IR_Builder& builder, G4_Kernel &kernel);
-        bool canDoGlobalSplit(IR_Builder& builder, G4_Kernel &kernel, uint32_t instNum, uint32_t spillRefCount, uint32_t sendSpillRefCount);
+        bool canDoGlobalSplit(IR_Builder& builder, G4_Kernel &kernel, uint32_t sendSpillRefCount);
 
         VarSplit(GlobalRA& g) : kernel(g.kernel), gra(g)
         {

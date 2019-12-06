@@ -150,7 +150,7 @@ void BinaryEncodingBase::ProduceBinaryBuf(void* &handle)
     }
 }
 
-// 3-src instructions (mad, lrp, bfe, bf2) must be in align16 mode for gen9 and earlier; 
+// 3-src instructions (mad, lrp, bfe, bf2) must be in align16 mode for gen9 and earlier;
 // this implies that all operands must be 16-byte aligned and exec size must be >=4
 // We convert a simd1 3-src instruction into simd4 (or simd2 for DF mad)
 // and control the dst channel through the dst write mask.
@@ -165,7 +165,7 @@ void BinaryEncodingBase::FixAlign16Inst(G4_INST* inst)
     G4_DstRegRegion* dst = inst->getDst();
     dst->setWriteMask(ChannelEnable_XYZW);
 
-    // convert sources to align16    
+    // convert sources to align16
     for (int k = 0, numSrc = inst->getNumSrc(); k < numSrc; k++)
     {
         ASSERT_USER(inst->getSrc(k)->isSrcRegRegion(), "Unexpected src to be converted to ALIGN16!");
@@ -236,7 +236,7 @@ void BinaryEncodingBase::FixAlign16Inst(G4_INST* inst)
         {
             MUST_BE_TRUE(inst->getSrc(i)->isSrcRegRegion(), "source must have a region");
             G4_SrcRegRegion* src = inst->getSrc(i)->asSrcRegRegion();
-            RegionDesc *rd = src->getRegion();
+            const RegionDesc *rd = src->getRegion();
             if (src->isScalar() ||
                 (rd->width == 2 && rd->horzStride == 0 && rd->vertStride == 2))
             {
@@ -260,7 +260,7 @@ void BinaryEncodingBase::FixMathInst(G4_INST* inst)
         if (src && src->isSrcRegRegion())
         {
             G4_SrcRegRegion* srcRegion = src->asSrcRegRegion();
-            RegionDesc* region = srcRegion->getRegion();
+            const RegionDesc* region = srcRegion->getRegion();
             if (inst->getExecSize() > 1 &&
                 region->vertStride == 1 && region->width == 1 && region->horzStride == 0)
             {

@@ -69,7 +69,7 @@ bool IGC::isLegalOCLVersion(int major, int minor)
 }
 
 
-// With Clang 4.0 there was added Function Metadata so in order for us to be able 
+// With Clang 4.0 there was added Function Metadata so in order for us to be able
 // to compile both Clang <= 3.8 and Clang 4.0, the below function had to be added.
 // TODO: Explore using just Function Metadata going forward.
 
@@ -162,8 +162,8 @@ bool SPIRMetaDataTranslation::runOnModule(Module& M)
     for (; ki != ke; ++ki)
     {
         IGCMD::FunctionInfoMetaDataHandle fHandle = IGCMD::FunctionInfoMetaDataHandle(IGCMD::FunctionInfoMetaData::get());
-        IGC::FunctionMetaData funcMD;
         SPIRMD::KernelMetaDataHandle spirKernel = *ki;
+        IGC::FunctionMetaData& funcMD = modMD->FuncMD[spirKernel->getFunction()];
         fHandle->setType(FunctionTypeMD::KernelFunction);
 
         // Handling Thread Group Size
@@ -290,7 +290,6 @@ bool SPIRMetaDataTranslation::runOnModule(Module& M)
         }
 
         pIgcMDUtils->setFunctionsInfoItem(spirKernel->getFunction(), fHandle);
-        modMD->FuncMD[spirKernel->getFunction()] = funcMD;
     }
 
     // Handling Compiler Options

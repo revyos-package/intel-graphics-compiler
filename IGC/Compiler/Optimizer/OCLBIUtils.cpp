@@ -143,7 +143,7 @@ void CImagesBI::prepareColor(Value* Color)
     Value* TmpColor;
     if (Color->getType()->getScalarType() != m_pFloatType)
     {
-        // GenISA_typedwrite intrinsic expect to get the color as float, 
+        // GenISA_typedwrite intrinsic expect to get the color as float,
         // therefore we do bitcast that should disappear in the final code.
         Instruction* tmp = BitCastInst::Create(
             Instruction::BitCast,
@@ -1677,7 +1677,6 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_read_cycle_counter"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_cycleCounter, false);
     m_CommandMap["__builtin_IB_source_value"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_source_value, false);
     m_CommandMap["__builtin_IB_set_dbg_register"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_SetDebugReg, false);
-    m_CommandMap["__builtin_IB_movreg"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_movreg, false);
     m_CommandMap["__builtin_IB_movflag"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_movflag, false);
     m_CommandMap["__builtin_IB_movcr"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_movcr, false);
     m_CommandMap["__builtin_IB_hw_thread_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_hw_thread_id, false);
@@ -1709,6 +1708,9 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_native_powrf"] = CSimpleIntrinMapping::create(Intrinsic::pow);
     m_CommandMap["__builtin_IB_fma"] = CSimpleIntrinMapping::create(Intrinsic::fma);
     m_CommandMap["__builtin_IB_fmah"] = CSimpleIntrinMapping::create(Intrinsic::fma);
+    m_CommandMap["__builtin_IB_bfi"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_bfi, false);
+    m_CommandMap["__builtin_IB_ibfe"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_ibfe, false);
+    m_CommandMap["__builtin_IB_ubfe"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_ubfe, false);
     m_CommandMap["__builtin_IB_bfrev"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_bfrev, false);
     m_CommandMap["__builtin_IB_fmax"] = CSimpleIntrinMapping::create(Intrinsic::maxnum);
     m_CommandMap["__builtin_IB_fmin"] = CSimpleIntrinMapping::create(Intrinsic::minnum);

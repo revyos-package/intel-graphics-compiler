@@ -112,6 +112,8 @@ namespace IGC
 
     BufferType GetBufferType(uint addrSpace);
 
+    uint getImmValueU32(const llvm::Value* value);
+
     void VectorToElement(
         llvm::Value* inst,
         llvm::Value* elem[],
@@ -123,6 +125,13 @@ namespace IGC
         llvm::Type* int32Ty,
         llvm::Instruction* insert_before,
         int vsize = 4);
+
+    llvm::Value* ConvertToFloat(llvm::IRBuilder<>& builder, llvm::Value* val);
+    void ConvertToFloat(llvm::IRBuilder<>& builder, llvm::SmallVectorImpl<llvm::Value*>& instList);
+    //scalarize aggregate into flattened members
+    void ScalarizeAggregateMembers(llvm::IRBuilder<>& builder, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*>& instList);
+    //scalarize aggregate into flattened member addresses
+    void ScalarizeAggregateMemberAddresses(llvm::IRBuilder<>& builder, llvm::Type* type, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*>& instList, llvm::SmallVector<llvm::Value*, 16> indices);
 
     /// return true if pLLVMInst is load from constant-buffer with immediate constant-buffer index
     bool IsLoadFromDirectCB(llvm::Instruction* pLLVMInst, uint& cbId, llvm::Value*& eltPtrVal);
@@ -145,8 +154,12 @@ namespace IGC
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr);
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool fillList, std::vector<llvm::Value*>& instList);
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool fillList, std::vector<llvm::Value*>& instList, llvm::SmallSet<llvm::PHINode*, 8> & visitedPHIs);
-    bool GetResourcePointerInfo(llvm::Value* srcPtr, unsigned& resID,
-        IGC::BufferType& resTy, IGC::BufferAccessType& accessTy);
+    bool GetResourcePointerInfo(llvm::Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, IGC::BufferAccessType& accessTy, bool& needBufferOffset);
+    bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
+    bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
+    // try to evaluate the address if it is constant.
+    bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
+
 
     bool isSampleLoadGather4InfoInstruction(llvm::Instruction* inst);
     bool isSampleInstruction(llvm::Instruction* inst);
@@ -301,7 +314,7 @@ namespace IGC
     bool isNoOpInst(llvm::Instruction* I, CodeGenContext* Ctx);
 
     // CxtI is the instruction at which V is checked whether
-    // it is positive or not. 
+    // it is positive or not.
     bool valueIsPositive(
         llvm::Value* V,
         const llvm::DataLayout* DL,
@@ -351,7 +364,7 @@ namespace IGC
     {
         if (hwThreadPerWorkgroup == 0)
         {
-            hwThreadPerWorkgroup = 42; //On GT1 HW, there are 7 threads/EU and 6 EU/subslice, 42 is the minimum threads/workgroup any HW can support 
+            hwThreadPerWorkgroup = 42; //On GT1 HW, there are 7 threads/EU and 6 EU/subslice, 42 is the minimum threads/workgroup any HW can support
         }
         if ((threadGroupSize <= hwThreadPerWorkgroup * 8) &&
             threadGroupSize <= 512)

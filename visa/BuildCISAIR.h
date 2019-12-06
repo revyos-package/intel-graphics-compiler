@@ -114,6 +114,7 @@ public:
     CM_BUILDER_API std::stringstream& GetAsmTextStream() { return m_ssIsaAsm; }
     CM_BUILDER_API std::stringstream& GetAsmTextHeaderStream() { return m_ssIsaAsmHeader; }
     CM_BUILDER_API virtual VISAKernel* GetVISAKernel();
+    CM_BUILDER_API virtual int ClearAsmTextStreams();
 
     /**************END VISA BUILDER API*************************/
 
@@ -652,6 +653,7 @@ public:
                                             int line_no);
     bool CISA_create_raw_sends_instruction(ISA_Opcode opcode,
                                             unsigned char modifier,
+                                            bool hasEOT,
                                             Common_VISA_EMask_Ctrl emask,
                                             unsigned exec_size,
                                             VISA_opnd *pred,

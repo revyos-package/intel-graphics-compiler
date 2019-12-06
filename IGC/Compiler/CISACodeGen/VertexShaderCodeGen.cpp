@@ -89,7 +89,7 @@ namespace IGC
             // and ElementComponentEnableMask is not full == packing occurs
             // right now only OGL is affected, so there is special disableVertexComponentPacking flag set by GLSL FE
             // if there is double on input to vertex shader
-            && !(m_Platform->getWATable().Wa_1604402567 && m_ModuleMetadata->compOpt.disableVertexComponentPacking)
+            && !m_ModuleMetadata->compOpt.disableVertexComponentPacking
             ;
 
         m_ElementComponentPackingEnabled = packedInput;
@@ -173,6 +173,10 @@ namespace IGC
         pKernelProgram->hasControlFlow = m_numBlocks > 1 ? true : false;
         pKernelProgram->MaxNumberOfThreads = m_Platform->getMaxVertexShaderThreads(isPositionOnlyShader);
         pKernelProgram->ConstantBufferLoaded = m_constantBufferLoaded;
+        pKernelProgram->UavLoaded = m_uavLoaded;
+        pKernelProgram->ShaderResourceLoaded = m_shaderResourceLoaded;
+        pKernelProgram->RenderTargetLoaded = m_renderTargetLoaded;
+
         pKernelProgram->hasVertexID = m_properties.m_HasVertexID;
         pKernelProgram->vertexIdLocation = m_properties.m_VID;
         pKernelProgram->hasInstanceID = m_properties.m_HasInstanceID;

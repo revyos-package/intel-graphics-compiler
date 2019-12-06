@@ -252,7 +252,7 @@ bool Options::parseOptions(int argc, const char* argv[])
         {
             return false;
         }
-        
+
         int status = SetPlatform(platformStr);
         if( status != 0 ){
             std::cout << "unrecognized platform string: "
@@ -281,12 +281,21 @@ bool Options::parseOptions(int argc, const char* argv[])
         m_vISAOptions.setBool(vISA_DisableSpillCoalescing, true);
     }
 
-    #if (defined(_DEBUG) || defined(_INTERNAL))
+    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::GEN12)
+    {
+        if (m_vISAOptions.isArgSetByUser(vISA_forceDebugSWSB))
+        {
+            m_vISAOptions.setUint32(vISA_SWSBInstStall, 0);
+            m_vISAOptions.setUint32(vISA_SWSBTokenBarrier, 0);
+        }
+    }
+
+#if (defined(_DEBUG) || defined(_INTERNAL))
     // Dump all vISA options
     if (m_vISAOptions.getBool(vISA_dumpVISAOptionsAll)) {
         dump();
     }
-    #endif
+#endif
     return true;
 }
 
@@ -415,7 +424,12 @@ uint32_t Options::getuInt32Option(vISAOptions option) const
 
 uint64_t Options::getuInt64Option(vISAOptions option) const
 {
-    return m_vISAOptions.getUint64(vISA_HashVal);
+    if (option == vISAOptions::vISA_HashVal)
+        return m_vISAOptions.getUint64(vISA_HashVal);
+    else if (option == vISAOptions::vISA_HashVal1)
+        return m_vISAOptions.getUint64(vISA_HashVal1);
+
+    return 0;
 }
 
 void Options::setOptionInternally(vISAOptions option, bool val)
@@ -508,7 +522,7 @@ std::stringstream& Options::getArgString()
                               << m_vISAOptions.getUint64(o) << " ";
                     break;
                 case ET_2xINT32:
-                    {    
+                    {
                         uint32_t lo32, hi32;
                         uint64_t val = m_vISAOptions.getUint64(o);
                         lo32 = (uint32_t)val;
@@ -526,7 +540,7 @@ std::stringstream& Options::getArgString()
                     argString << "UNDEFINED ";
                     break;
                 }
-            }                
+            }
         }
     }
     return argString;

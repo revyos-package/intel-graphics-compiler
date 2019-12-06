@@ -63,20 +63,25 @@ IGC_INITIALIZE_PASS_END(WorkaroundAnalysis, PASS_FLAG, PASS_DESCRIPTION, PASS_CF
 
 char WorkaroundAnalysis::ID = 0;
 
+// Returns BTI of the texture when resource is not dynamically indexed and when
+// resource is not bindless.
 int GetSampleCResourceIdx(llvm::CallInst& I)
 {
     int textLocation = -1;
     if (SampleIntrinsic * pSamplerLoadInst = dyn_cast<SampleIntrinsic>(&I))
     {
-        textLocation = pSamplerLoadInst->getSamplerIndex();
+        textLocation = pSamplerLoadInst->getTextureIndex();
         llvm::Value* pArgLocation = pSamplerLoadInst->getOperand(textLocation);
         if (pArgLocation->getType()->isPointerTy())
         {
             uint as = pArgLocation->getType()->getPointerAddressSpace();
             uint bufferIndex;
             bool directIdx;
-            DecodeAS4GFXResource(as, directIdx, bufferIndex);
-            return bufferIndex;
+            const BufferType resourceType = DecodeAS4GFXResource(as, directIdx, bufferIndex);
+            if (resourceType == RESOURCE && directIdx)
+            {
+                return bufferIndex;
+            }
         }
     }
     return textLocation;
@@ -279,6 +284,8 @@ void WorkaroundAnalysis::visitCallInst(llvm::CallInst& I)
             uint bufferIndex = GetSampleCResourceIdx(I);
             if (bufferIndex == -1) break;
 
+            assert(bufferIndex < 256);
+
             if (pCodeGenCtx->type == ShaderType::PIXEL_SHADER)
             {
                 PixelShaderContext* pShaderCtx = static_cast <PixelShaderContext*>(pCodeGenCtx);
@@ -313,7 +320,7 @@ void WorkaroundAnalysis::visitCallInst(llvm::CallInst& I)
         break;
         case llvm::GenISAIntrinsic::GenISA_RenderTargetReadSampleFreq:
         {
-            //Render target read should return 0 when the sample is outside primitive processed. 
+            //Render target read should return 0 when the sample is outside primitive processed.
             //    R0.xyzw = RTRead(RTi, SampleIndex);
             //    R1 = 1<<SamplexIndex
             //    R2 = R1 & InputCoverage

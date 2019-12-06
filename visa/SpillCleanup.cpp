@@ -26,7 +26,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "FlowGraph.h"
 #include "GraphColor.h"
-#include "SpillManagerGMRF.h"
 #include <list>
 #include "SpillCleanup.h"
 
@@ -47,9 +46,12 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
         (short)REGISTER_ROW(row), 0, kernel.fg.builder->getRegionStride1(), Type_UD);
 
     // Create send instruction with payloadSize starting at scratch offset min
+    G4_Declare* fp = nullptr;
+    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
+        fp = kernel.fg.getFramePtrDcl();
     unsigned int option = useNoMask ? InstOpt_WriteEnable : 0;
     auto spillInst = kernel.fg.builder->createSpill(kernel.fg.builder->createNullDst(Type_UW), header, spillSrcPayload, 16, payloadSize,
-        scratchOffset, nullptr, static_cast<G4_InstOption>(option), 0, srcCISAOff);
+        scratchOffset, fp, static_cast<G4_InstOption>(option), 0, srcCISAOff);
 
     if (!useNoMask)
     {
@@ -89,7 +91,11 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
         kernel.fg.builder->getBuiltinR0()->getRegVar(), 0, 0,
         kernel.fg.builder->getRegionStride1(), Type_UD);
 
-    kernel.fg.builder->createFill(header, fillDst, 16, payloadSize, scratchOffset, nullptr,
+    G4_Declare* fp = nullptr;
+    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
+        fp = kernel.fg.getFramePtrDcl();
+
+    kernel.fg.builder->createFill(header, fillDst, 16, payloadSize, scratchOffset, fp,
         InstOpt_WriteEnable, 0, srcCISAOff);
 
 #if 0
@@ -132,8 +138,8 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
             G4_SrcRegRegion* src = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
                 coalescedFillDst->getBase(), (short)REGISTER_ROW(offToUse), 0, kernel.fg.builder->getRegionStride1(), Type_UD);
 
-            G4_INST* copy = kernel.fg.builder->createInternalInst(nullptr, G4_mov, nullptr, false, (unsigned char)simdSize,
-                movDst, src, nullptr, InstOpt_WriteEnable);
+            G4_INST* copy = kernel.fg.builder->createMov((unsigned char)simdSize,
+                movDst, src, InstOpt_WriteEnable, false);
             copy->setCISAOff(srcCISAOff);
 
             bb->insert(f, copy);
@@ -1348,8 +1354,7 @@ void CoalesceSpillFills::fixSendsSrcOverlap()
                             kernel.fg.builder->getRegionStride1(), Type_UD);
                         G4_DstRegRegion* dstRgn = kernel.fg.builder->createDstRegRegion(
                             Direct, copyDcl->getRegVar(), REGISTER_ROW(row), 0, 1, Type_UD);
-                        G4_INST* copyInst = kernel.fg.builder->createInternalInst(nullptr,
-                            G4_mov, nullptr, false, 8, dstRgn, srcRgn, nullptr, InstOpt_WriteEnable);
+                        G4_INST* copyInst = kernel.fg.builder->createMov(8, dstRgn, srcRgn, InstOpt_WriteEnable, false);
                         copyInst->setCISAOff(inst->getCISAOff());
                         bb->insert(instIt, copyInst);
                         elems -= 8;
@@ -1770,8 +1775,8 @@ void CoalesceSpillFills::spillFillCleanup()
                         src1Write->getBase(), REGISTER_ROW(diff) + src1Write->getRegOff(), 0,
                         kernel.fg.builder->getRegionStride1(), Type_UD);
 
-                    G4_INST* mov = kernel.fg.builder->createInternalInst(nullptr, G4_mov, nullptr, false, (unsigned char)execSize,
-                        nDst, nSrc, nullptr, InstOpt_WriteEnable);
+                    G4_INST* mov = kernel.fg.builder->createMov((unsigned char)execSize,
+                        nDst, nSrc, InstOpt_WriteEnable, false);
                     bb->insert(instIt, mov);
                     mov->setCISAOff(inst->getCISAOff());
 
@@ -1875,11 +1880,6 @@ void CoalesceSpillFills::removeRedundantWrites()
             instIt++)
         {
             auto inst = (*instIt);
-
-            if (!inst->isSend())
-            {
-                continue;
-            }
 
             if (inst->isFillIntrinsic() ||
                 inst->isSpillIntrinsic())

@@ -150,7 +150,7 @@
 
     bool hasBankCollision() const
     {
-        return getPlatformGeneration(getGenxPlatform()) <= PlatformGen::GEN11 || getOption(vISA_enableBCR);
+        return getPlatformGeneration(getGenxPlatform()) <= PlatformGen::GEN11 || (getOption(vISA_enableBCR) && !(getGenxPlatform() == GENX_TGLLP && GetStepping() == Step_A));
     }
 
     bool hasSendShootdown() const
@@ -324,8 +324,7 @@
 
     bool fuseTypedWrites() const
     {
-        return getOption(vISA_FuseTypedWrites) ||
-               getPlatformGeneration(getGenxPlatform()) == PlatformGen::GEN11;
+        return getOption(vISA_FuseTypedWrites);
     }
 
     bool hasSIMD16TypedRW() const
@@ -356,12 +355,6 @@
     bool relaxedACCRestrictions2() const
     {
         return getGenxPlatform() >= GENX_TGLLP;
-    }
-
-    // 1 means one SIMD16 float accumulator
-    uint32_t getNumACC() const
-    {
-        return 1;
     }
 
     bool fuseURBMessage() const
@@ -545,5 +538,10 @@
     bool needResetA0forVxHA0() const
     {
         return getGenxPlatform() >= GENX_TGLLP;
+    }
+
+    bool predCtrlHasWidth() const
+    {
+        return true;
     }
     // end HW capabilities

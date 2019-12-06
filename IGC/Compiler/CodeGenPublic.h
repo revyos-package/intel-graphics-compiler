@@ -101,15 +101,17 @@ namespace IGC
         void* m_debugDataGenISA;          //<! GenISA debug data (VISA -> GenISA)
         unsigned int    m_debugDataGenISASize;      //<! Number of bytes of GenISA debug data
         unsigned int    m_InstructionCount;
-        void* m_gtpinBuffer;              // Will be populated by VISA only when special switch is passed by gtpin
-        unsigned int    m_gtpinBufferSize;
-        void* m_funcSymbolTable;
-        unsigned int    m_funcSymbolTableSize;
-        unsigned int    m_funcSymbolTableEntries;
-        void* m_funcRelocationTable;
-        unsigned int    m_funcRelocationTableSize;
-        unsigned int    m_funcRelocationTableEntries;
+        unsigned int    m_BasicBlockCount;
+        void* m_gtpinBuffer = nullptr;              // Will be populated by VISA only when special switch is passed by gtpin
+        unsigned int    m_gtpinBufferSize = 0;
+        void* m_funcSymbolTable = nullptr;
+        unsigned int    m_funcSymbolTableSize = 0;
+        unsigned int    m_funcSymbolTableEntries = 0;
+        void* m_funcRelocationTable = nullptr;
+        unsigned int    m_funcRelocationTableSize = 0;
+        unsigned int    m_funcRelocationTableEntries = 0;
         unsigned int    m_offsetToSkipPerThreadDataLoad = 0;
+        uint32_t        m_offsetToSkipSetFFIDGP = 0;
         //true means we separate pvtmem and spillfill. pvtmem could go into stateless.
         //false means all of them are together
         bool            m_separatePvtSpill = false;
@@ -250,26 +252,30 @@ namespace IGC
         SProgramOutput simd8;
         SProgramOutput simd16;
         SProgramOutput simd32;
-        unsigned int bindingTableEntryCount;
+        unsigned int bindingTableEntryCount = 0;
 
-        char* gatherMap;
-        unsigned int gatherMapSize;
-        unsigned int ConstantBufferLength;
-        unsigned int ConstantBufferMask;
-        unsigned int MaxNumberOfThreads;
-        bool         isMessageTargetDataCacheDataPort;
+        char* gatherMap = nullptr;
+        unsigned int gatherMapSize = 0;
+        unsigned int ConstantBufferLength = 0;
+        unsigned int ConstantBufferMask   = 0;
+        unsigned int MaxNumberOfThreads   = 0;
+        bool         isMessageTargetDataCacheDataPort = false;
 
-        unsigned int NOSBufferSize;
-        unsigned int ConstantBufferLoaded;
-        bool         hasControlFlow;
-        unsigned int bufferSlot;
-        unsigned int statelessCBPushedSize;
+        unsigned int NOSBufferSize = 0;
+        unsigned int ConstantBufferLoaded = 0;
+        unsigned int UavLoaded = 0;
+        uint64_t ShaderResourceLoaded = 0;
+        unsigned int RenderTargetLoaded = 0;
+
+        bool         hasControlFlow = false;
+        unsigned int bufferSlot = 0;
+        unsigned int statelessCBPushedSize = 0;
 
         // GenUpdateCB outputs
-        void* m_ConstantBufferReplaceShaderPatterns;
-        uint        m_ConstantBufferReplaceShaderPatternsSize;
-        uint        m_ConstantBufferUsageMask;
-        uint        m_ConstantBufferReplaceSize;
+        void*       m_ConstantBufferReplaceShaderPatterns = nullptr;
+        uint        m_ConstantBufferReplaceShaderPatternsSize = 0;
+        uint        m_ConstantBufferUsageMask = 0;
+        uint        m_ConstantBufferReplaceSize = 0;
 
         SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
@@ -505,20 +511,10 @@ namespace IGC
             int Index;
         };
 
-        SOpenCLKernelInfo()
-        {
-            m_printfBufferAnnotation = nullptr;
-            m_startGAS = nullptr;
-            m_WindowSizeGAS = nullptr;
-            m_PrivateMemSize = nullptr;
+        SOpenCLKernelInfo() {};
 
-            memset(&m_threadPayload, 0, sizeof(m_threadPayload));
-            memset(&m_executionEnivronment, 0, sizeof(m_executionEnivronment));
-            memset(&m_kernelProgram, 0, sizeof(m_kernelProgram));
-        };
-
-        std::string m_kernelName;
-        QWORD       m_ShaderHashCode;
+        std::string m_kernelName = {};
+        QWORD       m_ShaderHashCode = {};
 
         std::vector<iOpenCL::PointerInputAnnotation*>       m_pointerInput;
         std::vector<iOpenCL::PointerArgumentAnnotation*>    m_pointerArgument;
@@ -531,25 +527,26 @@ namespace IGC
         std::vector<iOpenCL::KernelArgumentInfoAnnotation*> m_kernelArgInfo;
         std::vector<iOpenCL::PrintfStringAnnotation*>       m_printfStringAnnotations;
 
-        iOpenCL::PrintfBufferAnnotation* m_printfBufferAnnotation;
-        iOpenCL::StartGASAnnotation* m_startGAS = NULL;
-        iOpenCL::WindowSizeGASAnnotation* m_WindowSizeGAS = NULL;
-        iOpenCL::PrivateMemSizeAnnotation* m_PrivateMemSize = NULL;
-        std::string                                         m_kernelAttributeInfo;
+        iOpenCL::PrintfBufferAnnotation*   m_printfBufferAnnotation = nullptr;
+        iOpenCL::SyncBufferAnnotation*     m_syncBufferAnnotation   = nullptr;
+        iOpenCL::StartGASAnnotation*       m_startGAS               = nullptr;
+        iOpenCL::WindowSizeGASAnnotation*  m_WindowSizeGAS          = nullptr;
+        iOpenCL::PrivateMemSizeAnnotation* m_PrivateMemSize         = nullptr;
+        std::string                                         m_kernelAttributeInfo = {};
 
         bool                                                m_HasInlineVmeSamplers = false;
 
         // This maps argument numbers to BTI and sampler indices
         // (e.g. kernel argument 3, which is is an image_2d, may be mapped to BTI 6)
-        std::map<DWORD, unsigned int> m_argIndexMap;
+        std::map<DWORD, unsigned int> m_argIndexMap = {};
 
-        iOpenCL::ThreadPayload        m_threadPayload;
+        iOpenCL::ThreadPayload        m_threadPayload = {};
 
-        iOpenCL::ExecutionEnivronment m_executionEnivronment;
+        iOpenCL::ExecutionEnivronment m_executionEnivronment = {};
 
-        iOpenCL::KernelTypeProgramBinaryInfo m_kernelTypeInfo;
+        iOpenCL::KernelTypeProgramBinaryInfo m_kernelTypeInfo = {};
 
-        SKernelProgram                m_kernelProgram;
+        SKernelProgram                m_kernelProgram = {};
     };
 
 
@@ -571,6 +568,10 @@ namespace IGC
         unsigned int GetUavIndex(unsigned int index) const;
         unsigned int GetRenderTargetIndex(unsigned int index) const;
         unsigned int GetConstantBufferIndex(unsigned int index) const;
+        unsigned int GetTextureIndexSize() const { return m_pLayout->maxResourceIdx - m_pLayout->minResourceIdx; }
+        unsigned int GetUavIndexSize() const { return m_pLayout->maxUAVIdx - m_pLayout->minUAVIdx; }
+        unsigned int GetRenderTargetIndexSize() const { return m_pLayout->maxColorBufferIdx - m_pLayout->minColorBufferIdx; }
+        unsigned int GetConstantBufferIndexSize() const { return m_pLayout->maxConstantBufferIdx - m_pLayout->minConstantBufferIdx; }
         unsigned int GetNullSurfaceIdx() const;
         unsigned int GetTGSMIndex() const;
         unsigned int GetScratchSurfaceBindingTableIndex() const;
@@ -708,7 +709,8 @@ namespace IGC
         TimeStats* m_compilerTimeStats = nullptr;
         ShaderStats* m_sumShaderStats = nullptr;
         /// output: list of buffer IDs which are promoted to direct AS
-        std::unordered_set<unsigned> m_buffersPromotedToDirectAS;
+        // Map of promoted buffer ids with their respective buffer offsets if needed. Buffer offset will be -1 if no need of buffer offset
+        std::map<unsigned, int> m_buffersPromotedToDirectAS;
         // float 16, float32 and float64 denorm mode
         Float_DenormMode    m_floatDenormMode16 = FLOAT_DENORM_FLUSH_TO_ZERO;
         Float_DenormMode    m_floatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
@@ -762,6 +764,14 @@ namespace IGC
         bool m_hasLegacyDebugInfo = false;
 
         CompilerStats m_Stats;
+        // Flag for staged compilation
+        CG_FLAG_t m_CgFlag = FLAG_CG_ALL_SIMDS;
+        // Staging context passing from Stage 1 for compile continuation
+        CG_CTX_t* m_StagingCtx = nullptr;
+        // We determine whether generating SIMD32 based on SIMD16's result
+        // For staged compilation, we record if SIMD32 will be generated in Stage1, and
+        // pass it to Stage2.
+        bool m_doSimd32Stage2 = false;
 
     protected:
         // Objects pointed to by these pointers are owned by this class.
@@ -771,6 +781,8 @@ namespace IGC
         /// input: IGC MetaData Utils
         IGC::IGCMD::MetaDataUtils* m_pMdUtils = nullptr;
         IGC::ModuleMetaData* modMD = nullptr;
+
+        virtual void setFlagsPerCtx();
     public:
         CodeGenContext(
             ShaderType          _type,      ///< shader type
@@ -799,6 +811,9 @@ namespace IGC
                     instrStat[i][j] = 0;
                 }
             }
+
+            // Per context flag adjustment
+            setFlagsPerCtx();
         }
 
         CodeGenContext(CodeGenContext&) = delete;
@@ -824,6 +839,7 @@ namespace IGC
         void EmitError(const char* errorstr);
         CompOptions& getCompilerOption();
         virtual void resetOnRetry();
+        virtual uint32_t getNumThreadsPerEU() const;
         virtual uint32_t getNumGRFPerThread() const;
         bool isPOSH() const;
 
@@ -844,9 +860,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::VERTEX_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::VERTEX_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SVertexShaderKernelProgram));
         }
 
     };
@@ -862,9 +878,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::PIXEL_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::PIXEL_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SPixelShaderKernelProgram));
         }
     };
 
@@ -879,9 +895,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::GEOMETRY_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::GEOMETRY_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SGeometryShaderKernelProgram));
         }
     };
 
@@ -918,9 +934,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::COMPUTE_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::COMPUTE_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SComputeShaderKernelProgram));
             isSecondCompile = false;
             m_IsPingPongSecond = false;
             m_slmSize = 0;
@@ -949,9 +965,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::HULL_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::HULL_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SHullShaderKernelProgram));
         }
     };
 
@@ -966,9 +982,9 @@ namespace IGC
             const CDriverInfo& driverInfo,
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* llvmCtxWrapper = nullptr) ///< LLVM context to use, if null a new one will be created
-            : CodeGenContext(ShaderType::DOMAIN_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper)
+            : CodeGenContext(ShaderType::DOMAIN_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
         {
-            memset(&programOutput, 0, sizeof(SDomainShaderKernelProgram));
         }
     };
     class OpenCLProgramContext : public CodeGenContext
@@ -1049,10 +1065,6 @@ namespace IGC
                 {
                     PreferBindlessImages = true;
                 }
-                if (strstr(options, "-cl-intel-enable-global-relocation"))
-                {
-                    EnableGlobalRelocation = true;
-                }
             }
 
 
@@ -1068,7 +1080,6 @@ namespace IGC
             bool IntelEnablePreRAScheduling = true;
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
-            bool EnableGlobalRelocation = false;
 
         };
 
@@ -1141,6 +1152,7 @@ namespace IGC
         void setAsSPIRV();
         float getProfilingTimerResolution();
         uint32_t getNumGRFPerThread() const;
+        uint32_t getNumThreadsPerEU() const;
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;
     };
@@ -1154,7 +1166,6 @@ namespace IGC
     void CodeGen(OpenCLProgramContext* ctx);
 
     void OptimizeIR(CodeGenContext* ctx);
-    void UnifyIROGL(CodeGenContext* ctx);
 
     /**
      * Fold derived constants.  Load CB data from CBptr with index & offset,
@@ -1163,24 +1174,4 @@ namespace IGC
      */
     void FoldDerivedConstant(char* bitcode, uint bitcodeSize, void* CBptr[15],
         std::function<void(uint[4], uint, uint, bool)> getResInfoCB, uint* pNewCB);
-
-    // Apply link optimization to shader programs.
-    void LinkOptIR(CodeGenContext* ctxs[], bool usesStreamOutput);
-
-    class LTOPSAction {
-    public:
-        virtual void operator()(llvm::GenIntrinsicInst* inst) = 0;
-        virtual ~LTOPSAction() { }
-    };
-    typedef std::vector<std::unique_ptr<LTOPSAction> > LTOPSActions;
-
-    // Apply link optimization to shader program, record and return
-    // actions performed on PS.
-    void LinkOptIRGetPSActions(CodeGenContext* ctxs[],
-        bool usesStreamOutput, LTOPSActions& psActions);
-
-    // Replay previous LTO actions on PS, used for PS retry. So we don't need
-    // to go through the whole LTO process again.
-    void LinkOptReplayPSActions(PixelShaderContext* psCtx,
-        const LTOPSActions& psActions);
 } // end IGC namespace

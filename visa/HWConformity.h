@@ -120,10 +120,10 @@ namespace vISA
         void fixInstExecSize(G4_BB* bb);
         bool reduceExecSize(INST_LIST_ITER iter, G4_BB* bb);
         bool reduceExecSizeForMath(INST_LIST_ITER iter, G4_BB* bb);
-        void checkSrcDstOverlap(INST_LIST_ITER iter, G4_BB* bb, bool compOpt);
+        bool checkSrcDstOverlap(INST_LIST_ITER iter, G4_BB* bb, bool compOpt);
         void splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt, uint8_t numInFirstMov, bool rule4_11, bool allowSrcCrossGRF);
         void splitSIMD32Inst(INST_LIST_ITER iter, G4_BB* bb);
-        void evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap = true);
+        bool evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap = true);
         void moveSrcToGRF(INST_LIST_ITER it, uint32_t srcNum, uint16_t numGRF, G4_BB *bb);
         void saveDst(INST_LIST_ITER& it, uint8_t stride, G4_BB *bb);
         void restoreDst(INST_LIST_ITER& it, G4_DstRegRegion *origDst, G4_BB *bb);
@@ -203,6 +203,8 @@ namespace vISA
         void fixSrc2(INST_LIST_ITER it, G4_BB* bb, bool swapSrc0and2);
 
         void fixVxHFloat64b(INST_LIST_ITER it, G4_BB* bb);
+
+        void fixPredCtrl(INST_LIST_ITER it, G4_BB* bb);
 
     public:
         HWConformity(IR_Builder& b, G4_Kernel &k, vISA::Mem_Manager& m) :

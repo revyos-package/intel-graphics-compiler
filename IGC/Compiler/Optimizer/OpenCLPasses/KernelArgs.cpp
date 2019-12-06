@@ -157,7 +157,7 @@ KernelArg::ArgType KernelArg::calcArgType(const Argument* arg, const StringRef t
                 type->getPointerElementType()->isStructTy())
             {
                 // Pass by value structs will show up as private pointer
-                // arguments in the function signiture.  
+                // arguments in the function signiture.
                 return KernelArg::ArgType::STRUCT;
             }
             else
@@ -188,7 +188,7 @@ KernelArg::ArgType KernelArg::calcArgType(const Argument* arg, const StringRef t
         default:
 #if 0
             // Need to disable this assertion for two-phase-inlining, i.e.
-            // kernel arguments will be used for subroutines, which may 
+            // kernel arguments will be used for subroutines, which may
             // have arguments from other address spaces. It is unfortunate
             // that we cannot run ResourceAllocator only on kernels since
             // BuiltinsConverter checks caller's resource allocation info.
@@ -244,6 +244,8 @@ KernelArg::ArgType KernelArg::calcArgType(const ImplicitArg& arg) const
         return KernelArg::ArgType::IMPLICIT_CONSTANT_BASE;
     case ImplicitArg::PRINTF_BUFFER:
         return KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER;
+    case ImplicitArg::SYNC_BUFFER:
+        return KernelArg::ArgType::IMPLICIT_SYNC_BUFFER;
     case ImplicitArg::BUFFER_OFFSET:
         return KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET;
     case ImplicitArg::GLOBAL_BASE:
@@ -303,6 +305,14 @@ KernelArg::ArgType KernelArg::calcArgType(const ImplicitArg& arg) const
         return KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED;
     case ImplicitArg::SAMPLER_SNAP_WA:
         return KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA;
+    case ImplicitArg::FLAT_IMAGE_BASEOFFSET:
+        return KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET;
+    case ImplicitArg::FLAT_IMAGE_HEIGHT:
+        return KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT;
+    case ImplicitArg::FLAT_IMAGE_WIDTH:
+        return KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH;
+    case ImplicitArg::FLAT_IMAGE_PITCH:
+        return KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH;
 
     case ImplicitArg::VME_MB_BLOCK_TYPE:
         return KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE;
@@ -684,6 +694,10 @@ std::map<KernelArg::ArgType, iOpenCL::DATA_PARAMETER_TOKEN> initArgTypeTokenMap(
        { KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS, iOpenCL::DATA_PARAMETER_SAMPLER_ADDRESS_MODE },
        { KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED, iOpenCL::DATA_PARAMETER_SAMPLER_NORMALIZED_COORDS },
        { KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA, iOpenCL::DATA_PARAMETER_SAMPLER_COORDINATE_SNAP_WA_REQUIRED },
+       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_BASEOFFSET },
+       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_HEIGHT },
+       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_WIDTH },
+       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_PITCH },
 
        { KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE, iOpenCL::DATA_PARAMETER_VME_MB_BLOCK_TYPE },
        { KernelArg::ArgType::IMPLICIT_VME_SUBPIXEL_MODE, iOpenCL::DATA_PARAMETER_VME_SUBPIXEL_MODE },
@@ -763,6 +777,7 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_GLOBAL_BASE,
             KernelArg::ArgType::IMPLICIT_PRIVATE_BASE,
             KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER,
+            KernelArg::ArgType::IMPLICIT_SYNC_BUFFER,
             KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET,
             KernelArg::ArgType::IMPLICIT_WORK_DIM,
             KernelArg::ArgType::IMPLICIT_NUM_GROUPS,
@@ -784,6 +799,10 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS,
             KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED,
             KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH,
 
             KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE,
             KernelArg::ArgType::IMPLICIT_VME_SUBPIXEL_MODE,
@@ -873,6 +892,7 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_GLOBAL_BASE,
             KernelArg::ArgType::IMPLICIT_PRIVATE_BASE,
             KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER,
+            KernelArg::ArgType::IMPLICIT_SYNC_BUFFER,
             KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET,
             KernelArg::ArgType::IMPLICIT_WORK_DIM,
             KernelArg::ArgType::IMPLICIT_NUM_GROUPS,
@@ -894,6 +914,10 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS,
             KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED,
             KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH,
+            KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH,
 
             KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE,
             KernelArg::ArgType::IMPLICIT_VME_SUBPIXEL_MODE,
@@ -1134,8 +1158,8 @@ KernelArgs::const_iterator KernelArgs::end()
 void KernelArgs::checkForZeroPerThreadData()
 {
 
-    // On SKL, when we use Indirect thread payload, Spec says: 
-    // if Cross-Thread Constant Data Read Length for Indirect is greater than 0, 
+    // On SKL, when we use Indirect thread payload, Spec says:
+    // if Cross-Thread Constant Data Read Length for Indirect is greater than 0,
     // then Per thread data field must also be greater than 0.
     // In that case we allocate one blank payload grf for Per thread constant.
 

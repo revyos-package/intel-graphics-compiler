@@ -114,6 +114,13 @@ DumpName DumpName::Extension(std::string const& extension) const
     return copy;
 }
 
+DumpName DumpName::StagedInfo(CG_FLAG_t cgFlag) const
+{
+    DumpName copy(*this);
+    copy.m_cgFlag = cgFlag;
+    return copy;
+}
+
 DumpName DumpName::SIMDSize(SIMDMode width) const
 {
     DumpName copy(*this);
@@ -228,13 +235,13 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
     {
 
         if (m_type.hasValue() && IGC_IS_FLAG_ENABLED(EnableShaderNumbering)) {
-            bool increment = shaderHashMap.insert({ m_hash->asmHash.value, shaderNum }).second;
+            bool increment = shaderHashMap.insert({ m_hash->asmHash, shaderNum }).second;
             //Need to serialize access to the shaderNum counter in case different threads need to dump the same shader at once.
             hashMapLock.lock();
             if (increment) shaderNum++;
             hashMapLock.unlock();
             ss << "_"
-               << shaderHashMap[m_hash->asmHash.value]
+               << shaderHashMap[m_hash->asmHash]
                << "_";
         }
 
@@ -242,31 +249,31 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
             << "asm"
             << std::hex
             << std::setfill('0')
-            << std::setw(sizeof(m_hash->asmHash.value) * CHAR_BIT / 4)
-            << m_hash->asmHash.value
+            << std::setw(sizeof(m_hash->asmHash) * CHAR_BIT / 4)
+            << m_hash->asmHash
             << std::dec
             << std::setfill(' ');
 
-        if (m_hash->nosHash.value != 0)
+        if (m_hash->nosHash != 0)
         {
             ss << "_"
                << "nos"
                << std::hex
                << std::setfill('0')
-               << std::setw(sizeof(m_hash->nosHash.value) * CHAR_BIT / 4)
-               << m_hash->nosHash.value
+               << std::setw(sizeof(m_hash->nosHash) * CHAR_BIT / 4)
+               << m_hash->nosHash
                << std::dec
                << std::setfill(' ');
         }
 
-        if (m_hash->psoHash.value != 0)
+        if (m_hash->psoHash != 0)
         {
             ss << "_"
                 << "pso"
                 << std::hex
                 << std::setfill('0')
-                << std::setw(sizeof(m_hash->psoHash.value) * CHAR_BIT / 4)
-                << m_hash->psoHash.value
+                << std::setw(sizeof(m_hash->psoHash) * CHAR_BIT / 4)
+                << m_hash->psoHash
                 << std::dec
                 << std::setfill(' ');
         }
@@ -301,6 +308,28 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
             << numLanes(m_simdWidth.getValue());
         underscore = true;
     }
+    if (m_cgFlag.hasValue() && m_cgFlag.getValue() != FLAG_CG_ALL_SIMDS)
+    {
+        ss << (underscore ? "_" : "");
+        if (m_cgFlag.getValue() == FLAG_CG_STAGE1_FAST_COMPILE)
+        {
+            ss << "FastStage1";
+        }
+        else
+        {
+            assert(m_cgFlag.getValue() == FLAG_CG_STAGE1_BEST_PERF);
+            ss << "BestStage1";
+        }
+
+        underscore = true;
+    }
+    else if (!m_cgFlag.hasValue())
+    {
+        ss << (underscore ? "_" : "");
+        ss << "RestStage2";
+        underscore = true;
+    }
+
     if(m_ShaderMode.hasValue())
     {
         if(m_ShaderMode.getValue() == ShaderDispatchMode::SINGLE_PATCH)
@@ -614,41 +643,19 @@ void PrintDebugMsg(
 #endif
 }
 
-
-AsmHash AsmHashOCL(const UINT* pShaderCode, size_t size)
-{
-    AsmHash hash;
-    hash.value = iSTD::Hash(reinterpret_cast<const DWORD*>(pShaderCode), int_cast<DWORD>(size));
-    return hash;
-}
-
 ShaderHash ShaderHashOCL(const UINT* pShaderCode, size_t size)
 {
     ShaderHash hash;
-    hash.asmHash = AsmHashOCL(pShaderCode, size);
-    hash.nosHash = NosHash();
+    hash.asmHash = iSTD::Hash(reinterpret_cast<const DWORD*>(pShaderCode), int_cast<DWORD>(size));
+    hash.nosHash = 0;
     return hash;
-}
-
-AsmHash AsmHashOGL(QWORD hash)
-{
-    AsmHash asmHash;
-    asmHash.value = hash;
-    return asmHash;
-}
-
-NosHash NosHashOGL(QWORD hash)
-{
-    NosHash nosHash;
-    nosHash.value = hash;
-    return nosHash;
 }
 
 ShaderHash ShaderHashOGL(QWORD glslHash, QWORD nosHash)
 {
     ShaderHash shaderHash;
-    shaderHash.asmHash = AsmHashOGL(glslHash);
-    shaderHash.nosHash = NosHashOGL(nosHash);
+    shaderHash.asmHash = glslHash;
+    shaderHash.nosHash = nosHash;
     return shaderHash;
 }
 
@@ -683,6 +690,10 @@ DumpName GetDumpNameObj(IGC::CShader* pProgram, const char* ext)
     }
     dumpName = dumpName.DispatchMode(pProgram->m_ShaderDispatchMode);
     dumpName = dumpName.SIMDSize(pProgram->m_dispatchSize).Retry(context->m_retryManager.GetRetryId()).Extension(ext);
+    if (!IsStage2RestSIMDs(context->m_StagingCtx))
+    {
+        dumpName = dumpName.StagedInfo(context->m_CgFlag);
+    }
     return dumpName;
 }
 

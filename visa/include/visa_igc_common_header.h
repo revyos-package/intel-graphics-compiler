@@ -64,6 +64,7 @@ typedef enum
 {
     // FIXME: why not expose PREDEF_SURF_0 etc. directly?
     PREDEFINED_SURFACE_SLM = 0,
+    PREDEFINED_SURFACE_STACK = 1,
     PREDEFINED_SURFACE_T252 = 4,
     PREDEFINED_SURFACE_T255 = 5,
     PREDEFINED_SURFACE_LAST = PREDEFINED_SURFACE_T255
@@ -135,7 +136,8 @@ typedef enum {
 typedef enum {
     LABEL_BLOCK = 0x0,
     LABEL_SUBROUTINE = 0x1,
-    LABEL_FC = 0x2
+    LABEL_FC = 0x2,
+    LABEL_FUNCTION = 0x3
 } VISA_Label_Kind;
 
 typedef enum {

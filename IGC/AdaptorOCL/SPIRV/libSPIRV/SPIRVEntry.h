@@ -107,7 +107,7 @@ class SPIRVExtInst;
 #define _SPIRV_IMP_DEC4(Ty,x,y,z,u)                                                      \
     void Ty::decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u;}
 #define _SPIRV_IMP_DEC5(Ty,x,y,z,u,v)                                                    \
-    void Ty::decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v;}           
+    void Ty::decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v;}
 #define _SPIRV_IMP_DEC6(Ty,x,y,z,u,v,w)                                                  \
     void Ty::decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v >> w;}
 #define _SPIRV_IMP_DEC7(Ty,x,y,z,u,v,w,r)                                                \
@@ -238,6 +238,7 @@ public:
   bool hasDecorate(Decoration Kind, size_t Index = 0,
       SPIRVWord *Result=0)const;
   std::set<SPIRVWord> getDecorate(Decoration Kind, size_t Index = 0)const;
+  std::vector<std::string> getDecorationStringLiteral(Decoration Kind) const;
   bool hasId() const { return !(Attrib & SPIRVEA_NOID);}
   bool hasLine() const { return Line != nullptr;}
   bool hasLinkageType() const;

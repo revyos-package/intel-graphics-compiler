@@ -37,6 +37,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/Stats.hpp"
 #include "common/igc_regkeys.hpp"
 #include "common/SysUtils.hpp"
+#include "common/secure_string.h" // strcpy_s()
 
 #if defined(IGC_DEBUG_VARIABLES)
 
@@ -120,6 +121,7 @@ namespace IGC
                 CASE(TIME_STATS_SUM);
                 CASE(TIME_STATS_PER_SHADER);
                 CASE(TIME_STATS_COARSE);
+                CASE(TIME_STATS_PER_PASS);
                 CASE(MEM_STATS);
                 CASE(MEM_STATS_DETAIL);
                 CASE(SHADER_QUALITY_METRICS);
@@ -182,8 +184,8 @@ namespace IGC
             {
 #define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
             case OptionFlag::OPTION_##regkeyName: \
-            strcpy(g_RegKeyList.regkeyName.m_string, s);   \
-            break;                                
+            strcpy_s(g_RegKeyList.regkeyName.m_string, sizeof(debugString), s);   \
+            break;
 #include "common/igc_regkeys.def"
 #undef DECLARE_IGC_REGKEY
             default:
@@ -200,7 +202,7 @@ namespace IGC
 #define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
             case OptionFlag::OPTION_##regkeyName: \
                 g_RegKeyList.regkeyName.m_Value = value;   \
-            break;                                
+            break;
 #include "common/igc_regkeys.def"
 #undef DECLARE_IGC_REGKEY
             default:
@@ -248,7 +250,7 @@ namespace IGC
 
                 if (!strcmp(flagName, name))
                 {
-                    strcpy(pRegKeyVariable[i].m_string, s);
+                    strcpy_s(pRegKeyVariable[i].m_string,sizeof(debugString), s);
                     break;
                 }
             }
@@ -276,7 +278,7 @@ namespace IGC
             //Disable Dump  for OS Applications
             if ( (DebugFlag::VISA_OUTPUT == flag) ||
                  (DebugFlag::VISA_BINARY == flag)  ||
-                 (DebugFlag::VISA_DUMPCOMMONISA == flag) 
+                 (DebugFlag::VISA_DUMPCOMMONISA == flag)
                 )
             {
                 if (GetModuleHandleA("dwm.exe") || GetModuleHandleA("explorer.exe"))
@@ -285,7 +287,7 @@ namespace IGC
                 }
 
             }
-#endif 
+#endif
             assert( 0 <= static_cast<int>(flag) &&
                         static_cast<int>(flag) < static_cast<int>( DebugFlag::END ) &&
                         "range sanity check" );
@@ -327,7 +329,7 @@ namespace IGC
             {
                 return false;
             }
-#endif 
+#endif
             switch (loc)
             {
             case DumpLoc::ODS  : return g_dumpFlags[ static_cast<int>(type) ].dumpODS;
@@ -385,7 +387,7 @@ namespace IGC
 #   if defined(_WIN64) || defined(_WIN32)
             if (!IGC_IS_FLAG_ENABLED(DumpToCurrentDir) && !IGC_IS_FLAG_ENABLED(DumpToCustomDir))
             {
-                bool needMkdir = 
+                bool needMkdir =
                     IGC_IS_FLAG_ENABLED(DumpLLVMIR) ||
                     IGC_IS_FLAG_ENABLED(EnableCosDump) ||
                     IGC_IS_FLAG_ENABLED(EnableVISAOutput) ||
@@ -480,7 +482,7 @@ namespace IGC
             return "";
 #endif
         }
-        
+
         OutputFolderName IGC_DEBUG_API_CALL GetShaderOverridePath()
         {
             if(IGC_IS_FLAG_ENABLED(ShaderOverride))
@@ -590,7 +592,7 @@ namespace IGC
                         true,
                         pidEnabled);
                 }
-                    
+
 
                 g_shaderOutputFolder = path;
             }

@@ -498,6 +498,11 @@ namespace IGC
         return m_ProfilingTimerResolution;
     }
 
+    uint32_t OpenCLProgramContext::getNumThreadsPerEU() const
+    {
+        return 0;
+    }
+
     uint32_t OpenCLProgramContext::getNumGRFPerThread() const
     {
         return CodeGenContext::getNumGRFPerThread();
@@ -650,6 +655,11 @@ namespace IGC
         m_tempCount = 0;
     }
 
+    uint32_t CodeGenContext::getNumThreadsPerEU() const
+    {
+        return 0;
+    }
+
     uint32_t CodeGenContext::getNumGRFPerThread() const
     {
         if (IGC_GET_FLAG_VALUE(TotalGRFNum) != 0)
@@ -665,6 +675,15 @@ namespace IGC
             "IGC::PositionOnlyVertexShader") != nullptr;
     }
 
+    void CodeGenContext::setFlagsPerCtx()
+    {
+        if (m_DriverInfo.DessaAliasLevel() != -1) {
+            if ((int)IGC_GET_FLAG_VALUE(EnableDeSSAAlias) > m_DriverInfo.DessaAliasLevel())
+            {
+                IGC_SET_FLAG_VALUE(EnableDeSSAAlias, m_DriverInfo.DessaAliasLevel());
+            }
+        }
+    }
 
 
 }
