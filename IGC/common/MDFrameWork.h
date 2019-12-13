@@ -24,6 +24,9 @@ namespace IGC
 {
     const unsigned int INVALID_CONSTANT_BUFFER_INVALID_ADDR = 0xFFFFFFFF;
 
+    static const char* NAMED_METADATA_COARSE_PHASE = "coarse_phase";
+    static const char* NAMED_METADATA_PIXEL_PHASE  = "pixel_phase";
+
     enum FunctionTypeMD
     {
         KernelFunction,
@@ -158,6 +161,7 @@ namespace IGC
         bool groupIDPresent = false;
         int privateMemoryPerWI = 0;
         bool globalIDPresent = false;
+        bool isUniqueEntry = false;
 
         std::vector<std::string> UserAnnotations;
 

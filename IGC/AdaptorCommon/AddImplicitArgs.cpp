@@ -414,6 +414,18 @@ void AddImplicitArgs::replaceAllUsesWithNewOCLBuiltinFunction(CodeGenContext* ct
                     Value* fncast = builder.CreateBitCast(new_func, old_func->getType());
                     userInst->replaceUsesOfWith(old_func, fncast);
                     continue;
+                } else if (ConstantExpr *OldExpr = dyn_cast<ConstantExpr>(U)) {
+                    Constant* fncast = ConstantExpr::getBitCast(new_func, old_func->getType());
+                    SmallVector<Constant*, 8> NewOps;
+                    for (auto Op : OldExpr->operand_values()) {
+                        (Op == old_func) ?
+                            NewOps.push_back(fncast) :
+                            NewOps.push_back(cast<Constant>(Op));
+                    }
+                    auto NewExpr = OldExpr->getWithOperands(NewOps);
+                    OldExpr->replaceAllUsesWith(NewExpr);
+                    OldExpr->destroyConstant();
+                    continue;
                 }
             }
         }
@@ -628,12 +640,15 @@ void AddImplicitArgs::FixIndirectCalls(Module& M)
 
                     IRBuilder<> builder(call);
                     Value* funcPtr = call->getCalledValue();
-                    PointerType* funcTy = PointerType::get(FunctionType::get(call->getType(), argTys, false), 0);
+                    unsigned fAS = funcPtr->getType()->getPointerAddressSpace();
+                    PointerType* funcTy = PointerType::get(FunctionType::get(call->getType(), argTys, false), fAS);
                     funcPtr = builder.CreatePointerBitCastOrAddrSpaceCast(funcPtr, funcTy);
                     CallInst* newCall = builder.CreateCall(funcPtr, args);
 
-                    call->replaceAllUsesWith(newCall);
                     newCall->copyMetadata(*call);
+                    newCall->setCallingConv(call->getCallingConv());
+                    newCall->setAttributes(call->getAttributes());
+                    call->replaceAllUsesWith(newCall);
                     list_delete.push_back(call);
                 }
             }

@@ -1499,6 +1499,10 @@ Instruction* ConstantCoalescing::FindOrAddChunkExtract(BufChunk* cov_chunk, uint
         Instruction* usei = dyn_cast<Instruction>(*use_it);
         assert(usei && isa<ExtractElementInst>(usei));
         ConstantInt* e_idx = dyn_cast<ConstantInt>(usei->getOperand(1));
+        if (!e_idx)
+        {
+            continue;
+        }
         assert(e_idx);
         uint val = (uint)e_idx->getZExtValue();
         if (val == eltid - cov_chunk->chunkStart)

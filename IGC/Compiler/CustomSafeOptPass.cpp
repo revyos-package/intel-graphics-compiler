@@ -2269,7 +2269,7 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
 
             for (auto it : pushInfo.pushableAddresses)
             {
-                if (bufIdOrGRFOffset * 4 == it.addressOffset && it.isStatic)
+                if ((bufIdOrGRFOffset * 4 == it.addressOffset) && (IGC_IS_FLAG_ENABLED(DisableStaticCheck) || it.isStatic))
                 {
                     statelessBuf = true;
                     break;
@@ -2343,6 +2343,15 @@ Constant* IGCConstProp::ConstantFoldCallInstruction(CallInst* inst)
         // special case of gen-intrinsic
         switch (igcop)
         {
+        case llvm_gradientXfine:
+        case llvm_gradientYfine:
+        case llvm_gradientX:
+        case llvm_gradientY:
+            if (C0 && C0->getValueAPF().isFinite())
+            {
+                C = ConstantFP::get(type, 0.0f);
+            }
+            break;
         case llvm_sqrt:
             if (C0)
             {

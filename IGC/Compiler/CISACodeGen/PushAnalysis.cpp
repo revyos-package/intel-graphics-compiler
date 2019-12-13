@@ -268,10 +268,10 @@ namespace IGC
         uint runtimeval0 = (uint)llvm::cast<llvm::ConstantInt>(pRuntimeVal->getOperand(0))->getZExtValue();
         PushInfo& pushInfo = m_context->getModuleMetaData()->pushInfo;
 
-        // then check for static root descriptor so that we can do push safely
+        // then check for static flag so that we can do push safely
         for (auto it : pushInfo.pushableAddresses)
         {
-            if (runtimeval0 * 4 == it.addressOffset && it.isStatic)
+            if ((runtimeval0 * 4 == it.addressOffset) && (IGC_IS_FLAG_ENABLED(DisableStaticCheck) || it.isStatic))
             {
                 GRFOffset = runtimeval0;
                 return true;
@@ -617,8 +617,8 @@ namespace IGC
 
         case ShaderType::PIXEL_SHADER:
         {
-            NamedMDNode* coarseNode = m_pFunction->getParent()->getNamedMetadata("coarse_phase");
-            NamedMDNode* pixelNode = m_pFunction->getParent()->getNamedMetadata("pixel_phase");
+            NamedMDNode* coarseNode = m_pFunction->getParent()->getNamedMetadata(NAMED_METADATA_COARSE_PHASE);
+            NamedMDNode* pixelNode = m_pFunction->getParent()->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE);
             if (coarseNode && pixelNode)
             {
                 Function* pixelPhase = llvm::mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));

@@ -114,10 +114,19 @@ DumpName DumpName::Extension(std::string const& extension) const
     return copy;
 }
 
-DumpName DumpName::StagedInfo(CG_FLAG_t cgFlag) const
+DumpName DumpName::StagedInfo(void const* context) const
 {
     DumpName copy(*this);
-    copy.m_cgFlag = cgFlag;
+    IGC::CodeGenContext const* ctx = (IGC::CodeGenContext const*) context;
+    if (!IsStage2RestSIMDs(ctx->m_StagingCtx) &&
+        ctx->m_CgFlag != FLAG_CG_ALL_SIMDS)
+    {
+        copy.m_cgFlag = ctx->m_CgFlag;
+    }
+    else if (IsStage2RestSIMDs(ctx->m_StagingCtx))
+    {
+        copy.m_cgFlag = FLAG_CG_ALL_SIMDS;
+    }
     return copy;
 }
 
@@ -294,20 +303,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
             << m_pass->m_name;
         underscore = true;
     }
-    if (m_retryId.hasValue())
-    {
-        if (m_retryId.getValue())
-        {
-            ss << "_" << m_retryId.getValue();
-        }
-    }
-    if(m_simdWidth.hasValue())
-    {
-        ss << (underscore ? "_" : "")
-            << "simd"
-            << numLanes(m_simdWidth.getValue());
-        underscore = true;
-    }
+
     if (m_cgFlag.hasValue() && m_cgFlag.getValue() != FLAG_CG_ALL_SIMDS)
     {
         ss << (underscore ? "_" : "");
@@ -323,10 +319,25 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
 
         underscore = true;
     }
-    else if (!m_cgFlag.hasValue())
+    else if (m_cgFlag.hasValue())
     {
         ss << (underscore ? "_" : "");
         ss << "RestStage2";
+        underscore = true;
+    }
+
+    if (m_retryId.hasValue())
+    {
+        if (m_retryId.getValue())
+        {
+            ss << "_" << m_retryId.getValue();
+        }
+    }
+    if(m_simdWidth.hasValue())
+    {
+        ss << (underscore ? "_" : "")
+            << "simd"
+            << numLanes(m_simdWidth.getValue());
         underscore = true;
     }
 
@@ -670,7 +681,8 @@ DumpName GetDumpNameObj(IGC::CShader* pProgram, const char* ext)
     DumpName dumpName =
         IGC::Debug::DumpName(IGC::Debug::GetShaderOutputName())
         .Type(context->type)
-        .Hash(context->hash);
+        .Hash(context->hash)
+        .StagedInfo(context);
 
     if(pProgram->entry->getName() != "entry")
     {
@@ -690,10 +702,7 @@ DumpName GetDumpNameObj(IGC::CShader* pProgram, const char* ext)
     }
     dumpName = dumpName.DispatchMode(pProgram->m_ShaderDispatchMode);
     dumpName = dumpName.SIMDSize(pProgram->m_dispatchSize).Retry(context->m_retryManager.GetRetryId()).Extension(ext);
-    if (!IsStage2RestSIMDs(context->m_StagingCtx))
-    {
-        dumpName = dumpName.StagedInfo(context->m_CgFlag);
-    }
+
     return dumpName;
 }
 

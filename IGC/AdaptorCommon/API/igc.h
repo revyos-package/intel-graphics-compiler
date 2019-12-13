@@ -70,8 +70,7 @@ typedef char CG_CTX_STATS_t;
 
 typedef struct {
     CG_CTX_STATS_t  m_stats;              // record what simd has been generated
-    char*           m_genx_binary_buffer; // GenX binary
-    unsigned long   m_genx_binary_size;   // Size of GenX binary
+    void*           m_pixelShaderGen;     // Generated pixel shader output
 } CG_CTX_t;
 
 #define IsRetry(stats)               (stats & (BIT_CG_RETRY))
@@ -105,11 +104,12 @@ typedef enum {
     IGC_IS_FLAG_ENABLED(StagedCompilation) && \
     ((IsStage1FastCompile(flag, prev_ctx_ptr)) || \
      ((IsStage1BestPerf(flag, prev_ctx_ptr)) && \
-      !HasSimdSpill(8, stats))) \
+      ( IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && !HasSimdSpill(8, stats)) || \
+      (!IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && !HasSimd(8, stats)))) \
     )
 
 // Return true when simd MODE has been generated previously
-#define AvoidDupStage2(MODE, flag, prev_ctx_ptr)      (IsStage2RestSIMDs(prev_ctx_ptr) && HasSimd(MODE, prev_ctx_ptr->m_stats))
+#define AvoidDupStage2(MODE, flag, prev_ctx_ptr)      (IsStage2RestSIMDs(prev_ctx_ptr) && HasSimdNoSpill(MODE, prev_ctx_ptr->m_stats))
 
 // Fast CG always returns simd 8
 #define ValidFastModes(flag, prev_ctx_ptr, stats)     (IsStage1FastCompile(flag, prev_ctx_ptr) && HasSimd(8, stats) && !HasSimd(16, stats) && !HasSimd(32, stats))
@@ -118,14 +118,14 @@ typedef enum {
 // ALL_SIMDS CG must have simd 8 in any case
 #define ValidAllSimdsModes(flag, prev_ctx_ptr, stats) (IsAllSIMDs(flag, prev_ctx_ptr) && HasSimd(8, stats))
 
-// Rest Stage2 CG would not generate duplicated simd 32 mode, and
-// simd 8 must be generated either from Stage1 or Stage2
-// When retry happends at simd 8 generation, we may not have simd 16
+// Rest Stage2 CG would not generate duplicated simd 32 or 16 modes, and
+// When simd 8 spills in Stage1 for FAST_COMPILE, we may generate simd again;
+// otherwise it must be generated either from Stage1 or Stage2
 #define ValidStage2Modes(prev_ctx_ptr, stats) ( \
     IsStage2RestSIMDs(prev_ctx_ptr) && \
     (!HasSimd(32, prev_ctx_ptr->m_stats) || !HasSimd(32, stats)) && \
-    (HasSimd(8,  prev_ctx_ptr->m_stats) ^ HasSimd(8,  stats)) && \
-    (IsRetry(prev_ctx_ptr->m_stats) || (HasSimd(16, prev_ctx_ptr->m_stats) ^ HasSimd(16, stats))) \
+    (!HasSimd(16, prev_ctx_ptr->m_stats) || !HasSimd(16, stats)) && \
+    ((HasSimd(8,  prev_ctx_ptr->m_stats) ^ HasSimd(8,  stats)) || HasSimdSpill(8,  prev_ctx_ptr->m_stats)) \
     )
 
 #define ValidGeneratedModes(flag, prev_ctx_ptr, stats) ( \
