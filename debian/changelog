@@ -1,4 +1,4 @@
-intel-graphics-compiler (1.0.3032-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.3032-1) unstable; urgency=medium
 
   * New upstream release.
   * Build with llvm9.
@@ -7,7 +7,7 @@ intel-graphics-compiler (1.0.3032-1) UNRELEASED; urgency=medium
   * control: Bump build-dep on libopencl-clang-dev.
   * control: Migrate to python3.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Tue, 24 Sep 2019 12:19:25 +0300
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 13 Dec 2019 10:37:49 +0200
 
 intel-graphics-compiler (1.0.9-1) unstable; urgency=medium
 
