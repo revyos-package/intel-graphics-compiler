@@ -23,37 +23,43 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+#pragma once
 
-#ifndef IGCLLVM_BITCODE_BITCODEWRITER_H
-#define IGCLLVM_BITCODE_BITCODEWRITER_H
+#include "Compiler/CodeGenContextWrapper.hpp"
 
-#include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvmWrapper/IR/Module.h>
+#include "common/LLVMWarningsPush.hpp"
+#include <llvm/Pass.h>
+#include <llvm/IR/InstVisitor.h>
+#include "common/LLVMWarningsPop.hpp"
 
-namespace IGCLLVM
+namespace IGC
 {
-#if LLVM_VERSION_MAJOR == 4
-    using llvm::WriteBitcodeToFile;
-#elif LLVM_VERSION_MAJOR >= 7
-    inline void WriteBitcodeToFile(const llvm::Module *M, llvm::raw_ostream &Out,
-        bool ShouldPreserveUseListOrder = false,
-        const llvm::ModuleSummaryIndex *Index = nullptr,
-        bool GenerateHash = false,
-        llvm::ModuleHash *ModHash = nullptr)
+    class UnreachableHandling : public llvm::FunctionPass, public llvm::InstVisitor<UnreachableHandling>
     {
-        llvm::WriteBitcodeToFile(*M, Out, ShouldPreserveUseListOrder, Index, GenerateHash);
-    }
-#if LLVM_VERSION_MAJOR > 8
-    inline void WriteBitcodeToFile(const IGCLLVM::Module *M, llvm::raw_ostream &Out,
-        bool ShouldPreserveUseListOrder = false,
-        const llvm::ModuleSummaryIndex *Index = nullptr,
-        bool GenerateHash = false,
-        llvm::ModuleHash *ModHash = nullptr)
-    {
-        IGCLLVM::WriteBitcodeToFile((llvm::Module*)M, Out, ShouldPreserveUseListOrder, Index, GenerateHash);
-    }
-#endif
-#endif
-}
+    public:
+        static char ID;
 
-#endif
+        UnreachableHandling();
+        ~UnreachableHandling() {}
+
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "UnreachableHandling";
+        }
+
+        virtual bool runOnFunction(llvm::Function& F) override;
+
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+        }
+
+        void visitUnreachableInst(llvm::UnreachableInst& I);
+
+    private:
+        bool m_changed = false;
+        std::vector<llvm::UnreachableInst*> m_instsToReplace;
+
+        void replaceUnreachable(llvm::UnreachableInst* I);
+    };
+
+} // namespace IGC

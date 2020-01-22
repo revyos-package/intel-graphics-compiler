@@ -263,15 +263,22 @@ namespace IGC
         GFXCORE_FAMILY familyCheck = IGC_IS_FLAG_ENABLED(Use16ByteBindlessSampler) ? IGFX_GEN9_CORE : IGFX_GEN10_CORE;
         return (m_platformInfo.eRenderCoreFamily >= familyCheck) ? 4 : 5;
     }
+
     bool SupportCPS() const
     {
         return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN10_CORE);
     }
+
     bool supportsThreadCombining() const
     {
         return !(!m_WaTable.WaEnablePooledEuFor2x6 &&
             m_platformInfo.eProductFamily == IGFX_BROXTON &&
             m_GTSystemInfo.SubSliceCount == 2);
+    }
+
+    bool doIntegerMad() const
+    {
+        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE && IGC_IS_FLAG_ENABLED(EnableIntegerMad);
     }
     bool supportsSIMD16TypedRW() const
     {
@@ -478,9 +485,11 @@ namespace IGC
 
     bool WaDisableSendSrcDstOverlap() const
     {
+        // originally implemented due to HW restriction when pagefault was enabled
+        // however there seems to be an issue with overlap regardless
+        // So enabling for all platforms less than or equal to gen11
         return (!IGC_IS_FLAG_ENABLED(DisableSendSrcDstOverlapWA)) &&
-            (m_SkuTable.FtrWddm2Svm != 0 || m_platformInfo.eRenderCoreFamily == IGFX_GEN10_CORE ||
-                m_platformInfo.eRenderCoreFamily == IGFX_GEN11_CORE);
+            (m_SkuTable.FtrWddm2Svm != 0 || m_platformInfo.eRenderCoreFamily <= IGFX_GEN11_CORE);
 
     }
 

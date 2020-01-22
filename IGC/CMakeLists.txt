@@ -2816,14 +2816,16 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
       )
       endif()
       if(NOT _igc_compiler_is_clang)
+        set(flags -funswitch-loops -Wno-maybe-uninitialized)
+        if(NOT ANDROID)
+          list(APPEND flags -lrt)
+        endif()
     igc_config_flag_apply_settings(
         CompilerOptions
         "${_compilerFlagName}"
         ALL_PATTERN ""
         SET_RAW
-          -funswitch-loops
-          -Wno-maybe-uninitialized
-          -lrt
+          ${flags}
       )
       endif()
   elseif(_igc_compiler_is_clang)
@@ -2904,23 +2906,6 @@ if(_igc_compiler_is_gnu_or_clang)
           -fvisibility-inlines-hidden
     )
 endif()
-
-if(ANDROID AND _igc_compiler_is_clang)
-  set(_igc_cxx_standard "-std=gnu++14")
-else()
-  set(_igc_cxx_standard "-std=c++14")
-endif()
-
-if(_igc_compiler_is_gnu_or_clang)
-  igc_config_flag_apply_settings(
-    CompilerOptions
-    CMAKE_CXX_FLAGS
-    ALL_PATTERN ""
-    SET_RAW
-      ${_igc_cxx_standard}
-    )
-endif()
-
 
 # ============================================ Linker options ==========================================
 
@@ -3944,6 +3929,15 @@ if(UNIX)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/cif DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
+
+  install(
+    CODE "file( WRITE ${CMAKE_CURRENT_BINARY_DIR}/tmp/postinst \"/sbin/ldconfig\n\" )"
+    CODE "file( WRITE ${CMAKE_CURRENT_BINARY_DIR}/tmp/postrm \"/sbin/ldconfig\n\" )"
+    CODE "file( COPY ${CMAKE_CURRENT_BINARY_DIR}/tmp/postinst DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )"
+    CODE "file( COPY ${CMAKE_CURRENT_BINARY_DIR}/tmp/postrm DESTINATION ${CMAKE_CURRENT_BINARY_DIR} FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )"
+    COMPONENT igc-core
+  )
+
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig COMPONENT igc-opencl-devel)
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(FILES ${IGC_BUILD__VISA_DIR}/include/RelocationInfo.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/visa COMPONENT igc-opencl-devel)
@@ -4017,6 +4011,7 @@ if(UNIX)
   set(CPACK_PACKAGE_VERSION_PATCH ${IGC_API_PATCH_VERSION})
   set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
   set(CPACK_PACKAGE_INSTALL_DIRECTORY ${IGC_INSTALL_TIME_ROOT_DIR})
+  set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "postinst;postrm")
   set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)")
   set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
   set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
@@ -4051,4 +4046,3 @@ if(UNIX)
 
   include (CPack)
 endif(UNIX)
-

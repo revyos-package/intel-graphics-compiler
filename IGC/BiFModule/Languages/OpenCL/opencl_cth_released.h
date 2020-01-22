@@ -40,12 +40,6 @@ typedef size_t uintptr_t;
   #define cl_khr_byte_addressable_store
 #endif
 
-// All of our devices support cl_khr_3d_image_writes, so #define it
-// if it isn't already #defined.
-#if !defined(cl_khr_3d_image_writes)
-  #define cl_khr_3d_image_writes
-#endif
-
 #ifdef cl_khr_3d_image_writes
 #pragma OPENCL EXTENSION cl_khr_3d_image_writes : enable
 #endif
@@ -962,9 +956,12 @@ __CLFN_DECL_F_VSTOREN_HALF(vstorea_half, double, half)
  * values that are not in the range (0 ... image width -
  * 1, 0 ... image height - 1), respectively, is undefined.
  */
+
+#ifdef cl_khr_3d_image_writes
 void __attribute__((overloadable)) write_imagef(write_only image3d_t image, int4 coord, float4 color);
 void __attribute__((overloadable)) write_imagei(write_only image3d_t image, int4 coord, int4 color);
 void __attribute__((overloadable)) write_imageui(write_only image3d_t image, int4 coord, uint4 color);
+#endif
 #endif
 
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_1_2)
@@ -6361,6 +6358,55 @@ void    __attribute__((overloadable)) intel_sub_group_block_write_ul8(__global u
 #endif // cl_intel_subgroups_long
 
 
+#ifdef cl_intel_subgroup_local_block_io
+
+uint    __attribute__((overloadable)) intel_sub_group_block_read(  const __local uint* p );
+uint2   __attribute__((overloadable)) intel_sub_group_block_read2( const __local uint* p );
+uint4   __attribute__((overloadable)) intel_sub_group_block_read4( const __local uint* p );
+uint8   __attribute__((overloadable)) intel_sub_group_block_read8( const __local uint* p );
+
+void    __attribute__((overloadable)) intel_sub_group_block_write(  __local uint* p, uint data );
+void    __attribute__((overloadable)) intel_sub_group_block_write2( __local uint* p, uint2 data );
+void    __attribute__((overloadable)) intel_sub_group_block_write4( __local uint* p, uint4 data );
+void    __attribute__((overloadable)) intel_sub_group_block_write8( __local uint* p, uint8 data );
+
+ushort    __attribute__((overloadable)) intel_sub_group_block_read_us(  const __local ushort* p );
+ushort2   __attribute__((overloadable)) intel_sub_group_block_read_us2( const __local ushort* p );
+ushort4   __attribute__((overloadable)) intel_sub_group_block_read_us4( const __local ushort* p );
+ushort8   __attribute__((overloadable)) intel_sub_group_block_read_us8( const __local ushort* p );
+
+void    __attribute__((overloadable)) intel_sub_group_block_write_us(  __local ushort* p, ushort  data );
+void    __attribute__((overloadable)) intel_sub_group_block_write_us2( __local ushort* p, ushort2 data );
+void    __attribute__((overloadable)) intel_sub_group_block_write_us4( __local ushort* p, ushort4 data );
+void    __attribute__((overloadable)) intel_sub_group_block_write_us8( __local ushort* p, ushort8 data );
+
+#ifdef cl_intel_subgroups_char
+uchar    __attribute__((overloadable)) intel_sub_group_block_read_uc(  const __local uchar* p);
+uchar2   __attribute__((overloadable)) intel_sub_group_block_read_uc2( const __local uchar* p);
+uchar4   __attribute__((overloadable)) intel_sub_group_block_read_uc4( const __local uchar* p);
+uchar8   __attribute__((overloadable)) intel_sub_group_block_read_uc8( const __local uchar* p);
+uchar16  __attribute__((overloadable)) intel_sub_group_block_read_uc16(const __local uchar* p);
+
+void    __attribute__((overloadable)) intel_sub_group_block_write_uc(  __local uchar* p, uchar  data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_uc2( __local uchar* p, uchar2 data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_uc4( __local uchar* p, uchar4 data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_uc8( __local uchar* p, uchar8 data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_uc16(__local uchar* p, uchar16 data);
+#endif // cl_intel_subgroups_char
+
+#ifdef cl_intel_subgroups_long
+ulong    __attribute__((overloadable)) intel_sub_group_block_read_ul( const __local ulong* p);
+ulong2   __attribute__((overloadable)) intel_sub_group_block_read_ul2(const __local ulong* p);
+ulong4   __attribute__((overloadable)) intel_sub_group_block_read_ul4(const __local ulong* p);
+ulong8   __attribute__((overloadable)) intel_sub_group_block_read_ul8(const __local ulong* p);
+
+void    __attribute__((overloadable)) intel_sub_group_block_write_ul( __local ulong* p, ulong  data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_ul2(__local ulong* p, ulong2 data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_ul4(__local ulong* p, ulong4 data);
+void    __attribute__((overloadable)) intel_sub_group_block_write_ul8(__local ulong* p, ulong8 data);
+#endif // cl_intel_subgroups_long
+
+#endif // cl_intel_subgroup_local_block_io
 
 #ifdef cl_intel_media_block_io
 

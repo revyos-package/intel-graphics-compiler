@@ -117,7 +117,7 @@ int CisaInst::createCisaInstruction(
         if (inst_desc->opnd_desc[i].opnd_type == OPND_EXECSIZE ||
             inst_desc->opnd_desc[i].opnd_type == OPND_PRED)
         {
-            m_size += static_cast<short>(Get_Common_ISA_Type_Size((VISA_Type)inst_desc->opnd_desc[i].data_type));
+            m_size += static_cast<short>(Get_VISA_Type_Size((VISA_Type)inst_desc->opnd_desc[i].data_type));
         }
     }
     if (hasSubOpcode)
@@ -128,7 +128,7 @@ int CisaInst::createCisaInstruction(
             OpndDesc desc = inst_desc->getSubInstDesc(subOpcode).opnd_desc[i];
             if (desc.opnd_type == OPND_EXECSIZE || desc.opnd_type == OPND_PRED)
             {
-                m_size += static_cast<short>(Get_Common_ISA_Type_Size((VISA_Type)desc.data_type));
+                m_size += static_cast<short>(Get_VISA_Type_Size((VISA_Type)desc.data_type));
             }
         }
     }
@@ -138,14 +138,14 @@ int CisaInst::createCisaInstruction(
     {
         if (opnd[i] == NULL)
         {
-            CmAssert(0);
+            assert(0);
             cerr << "ONE OF THE OPERANDS IS NULL!" << endl;
-            return CM_FAILURE;
+            return VISA_FAILURE;
         }
         m_size += opnd[i]->size;
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 void CisaBinary::initKernel( int kernelIndex, VISAKernelImpl * kernel )
@@ -322,7 +322,7 @@ int CisaBinary::finalizeCisaBinary()
         m_total_size += m_header.functions[i].size;
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int CisaBinary::dumpToStream(std::ostream * os)
@@ -340,7 +340,7 @@ int CisaBinary::dumpToStream(std::ostream * os)
         os->write(m_header.functions[i].cisa_binary_buffer, m_header.functions[i].size);
         os->write(m_header.functions[i].genx_binary_buffer, m_header.functions[i].binary_size);
     }
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int CisaBinary::dumpToFile(std::string binFileName)
@@ -352,9 +352,9 @@ int CisaBinary::dumpToFile(std::string binFileName)
     std::ofstream os(binFileName.c_str(), ios::binary|ios::out);
     if (!os)
     {
-        CmAssert(0);
+        assert(0);
         std::cerr<<"Could not open %s"<< binFileName.c_str()<<std::endl;
-        return CM_FAILURE;
+        return VISA_FAILURE;
     }
     int result = dumpToStream(&os);
     os.close();

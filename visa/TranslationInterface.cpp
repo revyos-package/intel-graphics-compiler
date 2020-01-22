@@ -131,7 +131,7 @@ static bool ForceSplitSend(IR_Builder& builder, G4_Operand* surface)
         surface->asSrcRegRegion()->getBase()->asRegVar()->getDeclare() == builder.getBuiltinT252();
 }
 
-static bool IsNoMask(Common_VISA_EMask_Ctrl eMask) {
+static bool IsNoMask(VISA_EMask_Ctrl eMask) {
     switch (eMask) {
     case vISA_EMASK_M1_NM:
     case vISA_EMASK_M2_NM:
@@ -147,7 +147,7 @@ static bool IsNoMask(Common_VISA_EMask_Ctrl eMask) {
     }
 }
 
-static uint32_t buildDescForScatter(uint32_t msgType, Common_ISA_SVM_Block_Num numBlocks, MDC_SM2 simdMode)
+static uint32_t buildDescForScatter(uint32_t msgType, VISA_SVM_Block_Num numBlocks, MDC_SM2 simdMode)
 {
     uint32_t MD = (msgType & 0x1F) << 14;
     MD |= numBlocks << 10;
@@ -158,7 +158,7 @@ static uint32_t buildDescForScatter(uint32_t msgType, Common_ISA_SVM_Block_Num n
 
 // vector scatter messages are either SIMD8/16, so we have to round up
 // the exec size
-static Common_ISA_Exec_Size roundUpExecSize(Common_ISA_Exec_Size execSize)
+static VISA_Exec_Size roundUpExecSize(VISA_Exec_Size execSize)
 {
     if (execSize == EXEC_SIZE_1 || execSize == EXEC_SIZE_2 || execSize == EXEC_SIZE_4)
     {
@@ -176,14 +176,14 @@ static SendAccess getSendAccessType(bool isRead, bool isWrite)
     return isRead ? SendAccess::READ_ONLY : SendAccess::WRITE_ONLY;
 }
 
-int IR_Builder::translateVISAAddrInst(ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-                                      Common_VISA_EMask_Ctrl emask, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
+int IR_Builder::translateVISAAddrInst(ISA_Opcode opcode, VISA_Exec_Size executionSize,
+                                      VISA_EMask_Ctrl emask, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
     unsigned int instOpt = 0;
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     instOpt |= Get_Gen4_Emask(emask, exsize);
 
     if( src1Opnd                &&
@@ -208,7 +208,7 @@ int IR_Builder::translateVISAAddrInst(ISA_Opcode opcode, Common_ISA_Exec_Size ex
     {
         createInst(
             NULL,
-            Get_G4_Opcode_From_Common_ISA_Opcode((ISA_Opcode)opcode),
+            GetGenOpcodeFromVISAOpcode((ISA_Opcode)opcode),
             NULL,
             false,
             exsize,
@@ -221,7 +221,7 @@ int IR_Builder::translateVISAAddrInst(ISA_Opcode opcode, Common_ISA_Exec_Size ex
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 void IR_Builder::expandFdiv(uint8_t exsize, G4_Predicate *predOpnd, bool saturate,
@@ -312,15 +312,15 @@ void IR_Builder::expandPow(uint8_t exsize, G4_Predicate *predOpnd, bool saturate
 }
 
 
-int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-                                            Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
+int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, VISA_Exec_Size executionSize,
+                                            VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
                                             bool saturate, G4_CondMod* condMod, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd, G4_Operand *src2Opnd, G4_DstRegRegion *carryBorrow)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
     unsigned int instOpt = 0;
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     instOpt |= Get_Gen4_Emask(emask, exsize);
 
     if( IsMathInst(opcode) )
@@ -359,7 +359,7 @@ int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, Common_ISA_Exec_S
         // do not check type of sources, float and integer are supported
         createInst(
             predOpnd,
-            Get_G4_Opcode_From_Common_ISA_Opcode(opcode),
+            GetGenOpcodeFromVISAOpcode(opcode),
             condMod,
             saturate,
             exsize,
@@ -374,7 +374,7 @@ int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, Common_ISA_Exec_S
     {
         auto inst = createInst(
             predOpnd,
-            Get_G4_Opcode_From_Common_ISA_Opcode(opcode),
+            GetGenOpcodeFromVISAOpcode(opcode),
             condMod,
             saturate,
             exsize,
@@ -417,7 +417,7 @@ int IR_Builder::translateVISAArithmeticInst(ISA_Opcode opcode, Common_ISA_Exec_S
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 //
@@ -460,8 +460,8 @@ G4_Declare* IR_Builder::getImmDcl(G4_Imm* val, int numElt)
     return dcl;
 };
 
-int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-                                                  Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
+int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, VISA_Exec_Size executionSize,
+                                                  VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
                                                   bool saturate, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -469,7 +469,7 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
 #endif
 
     G4_INST* inst;
-    uint8_t instExecSize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t instExecSize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     uint8_t exsize = 4;
     const RegionDesc *srcRegionDesc = getRegionStride1();
     const RegionDesc *rdAlign16 = getRegionStride1();
@@ -563,7 +563,7 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
     }
 
     // each madm only handles 4 channel double data
-    Common_VISA_EMask_Ctrl currEMask = emask;
+    VISA_EMask_Ctrl currEMask = emask;
     for (uint16_t regIndex = 0; currEMask != vISA_NUM_EMASK && regIndex < loopCount;
         ++regIndex, currEMask = Get_Next_EMask(currEMask, exsize))
     {
@@ -721,10 +721,16 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
         G4_CondMod *condModOverflow = createCondMod(Mod_o, tmpFlag->getRegVar(), 0);
         inst->setCondMod(condModOverflow);
 
+        bool generateIf = true;
+
+        if (generateIf)
         {
             // if
             G4_Predicate *predicateFlagReg = createPredicate(PredState_Minus, tmpFlag->getRegVar(), 0, predCtrlValue);
             inst = createIf(predicateFlagReg, exsize, instOpt);
+        }
+        {
+
 
             // madm (4) r9.acc3 r0.noacc r6.noacc r8.acc2 {Align16, N1/N2}
             G4_SrcRegRegion *t0SrcOpnd = createSrcRegRegion(tsrc0);
@@ -817,23 +823,24 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
             t12SrcOpnd1->setAccRegSel(ACC2);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, t8DstOpnd2, t9SrcOpnd1x1,
                 t11SrcOpnd1, t12SrcOpnd1, madmInstOpt, line_no);
+        }
 
-            if (!hasDefaultRoundDenorm)
-            {
-                // else (8) {Q1/Q2}
-                inst = createElse(exsize, instOpt);
+        if (generateIf && !hasDefaultRoundDenorm)
+        {
+            // else (8) {Q1/Q2}
+            inst = createElse(exsize, instOpt);
 
-                // restore cr0.0 {NoMask}
-                G4_DstRegRegion *cr0DstRegOpndForRestoreElseInst = createDstRegRegion(regDstCR0);
-                auto tmpSrcOpndForCR0OnElse = Create_Src_Opnd_From_Dcl(regCR0, getRegionScalar());
-                inst = createMov(1, cr0DstRegOpndForRestoreElseInst, tmpSrcOpndForCR0OnElse,
-                    InstOpt_WriteEnable, true);
-            }
+            // restore cr0.0 {NoMask}
+            G4_DstRegRegion *cr0DstRegOpndForRestoreElseInst = createDstRegRegion(regDstCR0);
+            auto tmpSrcOpndForCR0OnElse = Create_Src_Opnd_From_Dcl(regCR0, getRegionScalar());
+            inst = createMov(1, cr0DstRegOpndForRestoreElseInst, tmpSrcOpndForCR0OnElse,
+                InstOpt_WriteEnable, true);
+        }
 
-            {
-                // endif (8) {Q1/Q2}
-                inst = createEndif(exsize, instOpt);
-            }
+        if (generateIf)
+        {
+            // endif (8) {Q1/Q2}
+            inst = createEndif(exsize, instOpt);
         }
     }; //for loop
 
@@ -852,11 +859,11 @@ int IR_Builder::translateVISAArithmeticDoubleInst(ISA_Opcode opcode, Common_ISA_
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-                                                  Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
+int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, VISA_Exec_Size executionSize,
+                                                  VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
                                                   bool saturate, G4_CondMod* condMod, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -866,7 +873,7 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
     G4_INST* inst;
     unsigned int instOpt = 0;
     unsigned madmInstOpt = 0;
-    uint8_t instExecSize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t instExecSize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     uint8_t element_size = 8; // element_size is changed according to insstExecSize
     uint8_t exsize = 8; // exsize is a constant and never changed
     unsigned int loopCount = 1;
@@ -953,7 +960,7 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
         getRegionStride1(), t8->getElemType() );
     G4_SrcRegRegion *t8_src_opnd_final = createSrcRegRegion(tsrc8_final);
 
-    Common_VISA_EMask_Ctrl currEMask = emask;
+    VISA_EMask_Ctrl currEMask = emask;
     for (uint16_t regIndex = 0; currEMask != vISA_NUM_EMASK && regIndex < loopCount;
             ++regIndex, currEMask = Get_Next_EMask(currEMask, exsize))
     {
@@ -1153,11 +1160,11 @@ int IR_Builder::translateVISAArithmeticSingleDivideIEEEInst(ISA_Opcode opcode, C
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-                                                  Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
+int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, VISA_Exec_Size executionSize,
+                                                  VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
                                                   bool saturate, G4_CondMod* condMod, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -1167,7 +1174,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
     G4_INST* inst;
     unsigned int instOpt = 0;
     unsigned madmInstOpt = 0;
-    uint8_t instExecSize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t instExecSize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     uint8_t element_size = 8; // element_size is dynamic, changed according to instExecSize
     const uint8_t exsize = 8; // // exsize is a constant and never changed
     unsigned int loopCount = 1;
@@ -1235,7 +1242,7 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
         getRegionStride1(), t7->getElemType() );
     G4_SrcRegRegion *t7_src_opnd_final = createSrcRegRegion(tsrc7_final);
 
-    Common_VISA_EMask_Ctrl currEMask = emask;
+    VISA_EMask_Ctrl currEMask = emask;
     for (uint16_t regIndex = 0; currEMask != vISA_NUM_EMASK && regIndex < loopCount;
             ++regIndex, currEMask = Get_Next_EMask(currEMask, exsize))
     {
@@ -1440,12 +1447,12 @@ int IR_Builder::translateVISAArithmeticSingleSQRTIEEEInst(ISA_Opcode opcode, Com
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
-    ISA_Opcode opcode, Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
+    ISA_Opcode opcode, VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl emask, G4_Predicate *predOpnd,
     bool saturate, G4_CondMod* condMod, G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -1453,7 +1460,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
 #endif
 
     G4_INST* inst;
-    uint8_t instExecSize = (uint8_t)Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t instExecSize = (uint8_t)Get_VISA_Exec_Size(executionSize);
     uint8_t exsize = 4;
 
     const RegionDesc *srcRegionDesc = getRegionStride1();
@@ -1539,7 +1546,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
     G4_SrcRegRegion csrc2(Mod_src_undef, Direct, t2->getRegVar(), 0, 0, srcRegionDesc, Type_DF);
 
     // each madm only handles 4 channel double data
-    Common_VISA_EMask_Ctrl currEMask = emask;
+    VISA_EMask_Ctrl currEMask = emask;
     for (uint16_t regIndex = 0; currEMask != vISA_NUM_EMASK && regIndex < loopCount;
         ++regIndex, currEMask = Get_Next_EMask(currEMask, exsize))
     {
@@ -1611,11 +1618,16 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
         inst = createMathInst(NULL, false, exsize, dst0, src0, src1, MATH_RSQRTM, madmInstOpt, line_no);
         inst->setCondMod(condModOverflow);
 
+        bool generateIf = true;
+
+        if (generateIf)
         {
             // if
             G4_Predicate *predicateFlagReg = createPredicate(PredState_Minus, flagReg->getRegVar(), 0, predCtrlValue);
             inst = createIf(predicateFlagReg, exsize, instOpt);
+        }
 
+        {
             // madm (4) r9.acc3 r0.noacc r2(r8).noacc r7.acc2 {Align16, N1/N2}
             dst0 = createDstRegRegion(tdst9); dst0->setAccRegSel(ACC3);
             src0 = createSrcRegRegion(csrc0); src0->setAccRegSel(NOACC);
@@ -1736,17 +1748,23 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
             src2 = createSrcRegRegion(tsrc8); src2->setAccRegSel(ACC7);
             inst = createInst(NULL, G4_madm, NULL, false, exsize, dst0, src0, src1, src2, madmInstOpt, line_no);
 
-            if (!hasDefaultRoundDenorm)
-            {
-                // else (8) {Q1/Q2}
-                inst = createElse(exsize, instOpt);
+        }
 
-                // restore cr0.0 {NoMask}
-                dst0 = createDstRegRegion(regDstCR0);
-                src0 = Create_Src_Opnd_From_Dcl(tmpRegCR0, getRegionScalar());
-                // mov (1) cr0.0<0;1,0>:ud r108.0<1>:ud {NoMask}
-                inst = createMov(1, dst0, src0, InstOpt_WriteEnable, true);
-            }
+
+        if (generateIf && !hasDefaultRoundDenorm)
+        {
+            // else (8) {Q1/Q2}
+            inst = createElse(exsize, instOpt);
+
+            // restore cr0.0 {NoMask}
+            dst0 = createDstRegRegion(regDstCR0);
+            src0 = Create_Src_Opnd_From_Dcl(tmpRegCR0, getRegionScalar());
+            // mov (1) cr0.0<0;1,0>:ud r108.0<1>:ud {NoMask}
+            inst = createMov(1, dst0, src0, InstOpt_WriteEnable, true);
+        }
+
+        if (generateIf)
+        {
             // endif (8) {Q1/Q2}
             inst = createEndif(exsize, instOpt);
         }
@@ -1766,7 +1784,7 @@ int IR_Builder::translateVISAArithmeticDoubleSQRTInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 // create a fence instruction to the data cache
@@ -1842,7 +1860,7 @@ int IR_Builder::translateVISAWaitInst(G4_Operand* mask)
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 void IR_Builder::generateBarrierSend()
@@ -2012,12 +2030,12 @@ int IR_Builder::translateVISASyncInst(ISA_Opcode opcode, unsigned int mask)
         }
     default:
         RELEASE_MSG( "Unsupported ISA opcode");
-        return CM_FAILURE;
+        return VISA_FAILURE;
     }
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASplitBarrierInst(bool isSignal)
@@ -2037,7 +2055,7 @@ int IR_Builder::translateVISASplitBarrierInst(bool isSignal)
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 static bool needs32BitFlag(uint32_t opt)
@@ -2054,7 +2072,7 @@ static bool needs32BitFlag(uint32_t opt)
     }
 }
 
-int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size execsize, Common_VISA_EMask_Ctrl emask, Common_ISA_Cond_Mod relOp,
+int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, VISA_Exec_Size execsize, VISA_EMask_Ctrl emask, VISA_Cond_Mod relOp,
                                          G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -2062,7 +2080,7 @@ int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size
 #endif
 
     G4_CondMod* condMod = NULL;
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(execsize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(execsize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
     const char *varName = "";
 
@@ -2094,7 +2112,7 @@ int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size
 
     createInst(
         NULL,
-        Get_G4_Opcode_From_Common_ISA_Opcode((ISA_Opcode)opcode),
+        GetGenOpcodeFromVISAOpcode((ISA_Opcode)opcode),
         condMod,
         false,
         exsize,
@@ -2106,17 +2124,17 @@ int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size execsize, Common_VISA_EMask_Ctrl emask, Common_ISA_Cond_Mod relOp,
+int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, VISA_Exec_Size execsize, VISA_EMask_Ctrl emask, VISA_Cond_Mod relOp,
                                          G4_Declare* predDst, G4_Operand *src0Opnd, G4_Operand *src1Opnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(execsize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(execsize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
     /*
         If it's mix mode HF,F, it will be split down the road anyway, so behavior doesn't change.
@@ -2137,7 +2155,7 @@ int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size
 
     createInst(
         NULL,
-        Get_G4_Opcode_From_Common_ISA_Opcode(opcode),
+        GetGenOpcodeFromVISAOpcode(opcode),
         condMod,
         false,
         exsize,
@@ -2149,7 +2167,7 @@ int IR_Builder::translateVISACompareInst(ISA_Opcode opcode, Common_ISA_Exec_Size
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISACFSwitchInst(G4_Operand *indexOpnd, uint8_t numLabels, G4_Label ** labels )
@@ -2183,7 +2201,7 @@ int IR_Builder::translateVISACFSwitchInst(G4_Operand *indexOpnd, uint8_t numLabe
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISACFLabelInst(G4_Label* lab)
@@ -2200,17 +2218,17 @@ int IR_Builder::translateVISACFLabelInst(G4_Label* lab)
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACFCallInst(Common_ISA_Exec_Size execsize, Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd, G4_Label* lab)
+int IR_Builder::translateVISACFCallInst(VISA_Exec_Size execsize, VISA_EMask_Ctrl emask, G4_Predicate *predOpnd, G4_Label* lab)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    G4_opcode callOpToUse = Get_G4_Opcode_From_Common_ISA_Opcode((ISA_Opcode)ISA_CALL);
+    G4_opcode callOpToUse = GetGenOpcodeFromVISAOpcode(ISA_CALL);
     G4_DstRegRegion* dstOpndToUse = NULL;
-    unsigned char execSize = (uint8_t) Get_Common_ISA_Exec_Size(execsize);
+    unsigned char execSize = (uint8_t) Get_VISA_Exec_Size(execsize);
     G4_Label* srcLabel = lab;
 
     if(lab->isFCLabel() == true)
@@ -2243,7 +2261,7 @@ int IR_Builder::translateVISACFCallInst(Common_ISA_Exec_Size execsize, Common_VI
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISACFJumpInst(G4_Predicate *predOpnd, G4_Label* lab)
@@ -2253,7 +2271,7 @@ int IR_Builder::translateVISACFJumpInst(G4_Predicate *predOpnd, G4_Label* lab)
 #endif
     createInst(
         predOpnd,
-        Get_G4_Opcode_From_Common_ISA_Opcode((ISA_Opcode)ISA_JMP),
+        GetGenOpcodeFromVISAOpcode((ISA_Opcode)ISA_JMP),
         NULL,
         false,
         1,
@@ -2265,10 +2283,10 @@ int IR_Builder::translateVISACFJumpInst(G4_Predicate *predOpnd, G4_Label* lab)
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACFFCallInst(Common_ISA_Exec_Size execsize, Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd, std::string funcName, uint8_t argSize, uint8_t returnSize)
+int IR_Builder::translateVISACFFCallInst(VISA_Exec_Size execsize, VISA_EMask_Ctrl emask, G4_Predicate *predOpnd, std::string funcName, uint8_t argSize, uint8_t returnSize)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
@@ -2285,7 +2303,7 @@ int IR_Builder::translateVISACFFCallInst(Common_ISA_Exec_Size execsize, Common_V
         this->setRetVarSize( returnSize );
     }
 
-    uint8_t exsize = (uint8_t)Get_Common_ISA_Exec_Size(execsize);
+    uint8_t exsize = (uint8_t)Get_VISA_Exec_Size(execsize);
 
     auto fcall = createInst(
         predOpnd,
@@ -2305,10 +2323,10 @@ int IR_Builder::translateVISACFFCallInst(Common_ISA_Exec_Size execsize, Common_V
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACFIFCallInst(Common_ISA_Exec_Size execsize, Common_VISA_EMask_Ctrl emask,
+int IR_Builder::translateVISACFIFCallInst(VISA_Exec_Size execsize, VISA_EMask_Ctrl emask,
     G4_Predicate *predOpnd, G4_Operand* funcAddr, uint8_t argSize, uint8_t returnSize)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
@@ -2327,7 +2345,7 @@ int IR_Builder::translateVISACFIFCallInst(Common_ISA_Exec_Size execsize, Common_
         this->setRetVarSize(returnSize);
     }
 
-    uint8_t exsize = (uint8_t)Get_Common_ISA_Exec_Size(execsize);
+    uint8_t exsize = (uint8_t)Get_VISA_Exec_Size(execsize);
 
     auto src0 = funcAddr;
     if (!src0->isSrcRegRegion() ||
@@ -2359,7 +2377,7 @@ int IR_Builder::translateVISACFIFCallInst(Common_ISA_Exec_Size execsize, Common_
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISACFSymbolInst(const std::string& symbolName, G4_DstRegRegion* dst)
@@ -2401,16 +2419,16 @@ int IR_Builder::translateVISACFSymbolInst(const std::string& symbolName, G4_DstR
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACFFretInst(Common_ISA_Exec_Size executionSize, Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd)
+int IR_Builder::translateVISACFFretInst(VISA_Exec_Size executionSize, VISA_EMask_Ctrl emask, G4_Predicate *predOpnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
     unsigned int instOpt = 0;
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     instOpt |= Get_Gen4_Emask(emask, exsize);
 
     kernel.fg.setIsStackCallFunc();
@@ -2429,16 +2447,16 @@ int IR_Builder::translateVISACFFretInst(Common_ISA_Exec_Size executionSize, Comm
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISACFRetInst(Common_ISA_Exec_Size executionSize, Common_VISA_EMask_Ctrl emask, G4_Predicate *predOpnd)
+int IR_Builder::translateVISACFRetInst(VISA_Exec_Size executionSize, VISA_EMask_Ctrl emask, G4_Predicate *predOpnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
     unsigned int instOpt = InstOpt_NoOpt;
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     instOpt |= Get_Gen4_Emask(emask, exsize);
     if(getFCPatchInfo()->getIsCallableKernel() == true)
     {
@@ -2482,7 +2500,7 @@ int IR_Builder::translateVISACFRetInst(Common_ISA_Exec_Size executionSize, Commo
         // subroutine return
         createInst(
             predOpnd,
-            Get_G4_Opcode_From_Common_ISA_Opcode(ISA_RET),
+            GetGenOpcodeFromVISAOpcode(ISA_RET),
             NULL,
             false,
             exsize,
@@ -2495,7 +2513,7 @@ int IR_Builder::translateVISACFRetInst(Common_ISA_Exec_Size executionSize, Commo
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 
@@ -2631,7 +2649,7 @@ int IR_Builder::translateVISAOwordLoadInst(
     ISA_Opcode opcode,
     bool modified,
     G4_Operand* surface,
-    Common_ISA_Oword_Num size,
+    VISA_Oword_Num size,
     G4_Operand* offOpnd,
     G4_DstRegRegion* dstOpnd)
 {
@@ -2641,7 +2659,7 @@ int IR_Builder::translateVISAOwordLoadInst(
 
     surface = lowerSurface255To253(surface, *this);
 
-    unsigned num_oword = Get_Common_ISA_Oword_Num( size );
+    unsigned num_oword = Get_VISA_Oword_Num( size );
     bool unaligned = (opcode == ISA_OWORD_LD_UNALIGNED);
 
     // create dcl for VX
@@ -2759,7 +2777,7 @@ int IR_Builder::translateVISAOwordLoadInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -2796,7 +2814,7 @@ int IR_Builder::translateVISAOwordLoadInst(
 
 int IR_Builder::translateVISAOwordStoreInst(
     G4_Operand* surface,
-    Common_ISA_Oword_Num size,
+    VISA_Oword_Num size,
     G4_Operand* offOpnd,
     G4_SrcRegRegion* srcOpnd )
 {
@@ -2806,7 +2824,7 @@ int IR_Builder::translateVISAOwordStoreInst(
 
     surface = lowerSurface255To253(surface, *this);
 
-    unsigned num_oword = Get_Common_ISA_Oword_Num(size);
+    unsigned num_oword = Get_VISA_Oword_Num(size);
     unsigned obj_size = num_oword * 16; // size of obj in bytes
 
     unsigned funcCtrl = DC_OWORD_BLOCK_WRITE << 14;
@@ -2896,7 +2914,7 @@ int IR_Builder::translateVISAOwordStoreInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3109,7 +3127,7 @@ int IR_Builder::translateVISAMediaLoadInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3258,7 +3276,7 @@ int IR_Builder::translateVISAMediaStoreInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3292,10 +3310,10 @@ int IR_Builder::translateVISAMediaStoreInst(
 *
 */
 int IR_Builder::translateVISAGatherInst(
-    Common_VISA_EMask_Ctrl emask,
+    VISA_EMask_Ctrl emask,
     bool modified,
     GATHER_SCATTER_ELEMENT_SIZE eltSize,
-    Common_ISA_Exec_Size executionSize,
+    VISA_Exec_Size executionSize,
     G4_Operand* surface,
     G4_Operand* gOffOpnd,
     G4_SrcRegRegion* eltOffOpnd,
@@ -3318,7 +3336,7 @@ int IR_Builder::translateVISAGatherInst(
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
     bool headerLess = IsMessageHeaderOptional(this, surface, gOffOpnd);
     // Element size in gather/scatter message. Initially, we assume it's the
@@ -3513,7 +3531,7 @@ int IR_Builder::translateVISAGatherInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3548,9 +3566,9 @@ int IR_Builder::translateVISAGatherInst(
 *
 */
 int IR_Builder::translateVISAScatterInst(
-    Common_VISA_EMask_Ctrl emask,
+    VISA_EMask_Ctrl emask,
     GATHER_SCATTER_ELEMENT_SIZE eltSize,
-    Common_ISA_Exec_Size executionSize,
+    VISA_Exec_Size executionSize,
     G4_Operand* surface,
     G4_Operand* gOffOpnd,
     G4_SrcRegRegion* eltOffOpnd,
@@ -3569,7 +3587,7 @@ int IR_Builder::translateVISAScatterInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
     G4_Predicate *pred = NULL;
     // Element size in gather/scatter message. Initially, we assume it's the same as the request.
@@ -3733,7 +3751,7 @@ int IR_Builder::translateVISAScatterInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3763,10 +3781,10 @@ int IR_Builder::translateVISAScatterInst(
 *
 */
 int IR_Builder::translateVISAGather4Inst(
-    Common_VISA_EMask_Ctrl emask,
+    VISA_EMask_Ctrl emask,
     bool modified,
     ChannelMask chMask,
-    Common_ISA_Exec_Size executionSize,
+    VISA_Exec_Size executionSize,
     G4_Operand* surface,
     G4_Operand* gOffOpnd,
     G4_SrcRegRegion* eltOffOpnd,
@@ -3778,7 +3796,7 @@ int IR_Builder::translateVISAGather4Inst(
 
     surface = lowerSurface255To253(surface, *this);
 
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
     unsigned int num_channel = chMask.getNumEnabledChannels();
 
@@ -3920,7 +3938,7 @@ int IR_Builder::translateVISAGather4Inst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -3952,9 +3970,9 @@ int IR_Builder::translateVISAGather4Inst(
 *
 */
 int IR_Builder::translateVISAScatter4Inst(
-    Common_VISA_EMask_Ctrl emask,
+    VISA_EMask_Ctrl emask,
     ChannelMask chMask,
-    Common_ISA_Exec_Size executionSize,
+    VISA_Exec_Size executionSize,
     G4_Operand* surface,
     G4_Operand* gOffOpnd,
     G4_SrcRegRegion* eltOffOpnd,
@@ -3966,7 +3984,7 @@ int IR_Builder::translateVISAScatter4Inst(
 
     surface = lowerSurface255To253(surface, *this);
 
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
 
     unsigned int num_channel = chMask.getNumEnabledChannels();
@@ -4143,7 +4161,7 @@ int IR_Builder::translateVISAScatter4Inst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 static void
@@ -4168,8 +4186,8 @@ static bool IsFloatAtomicOps(VISAAtomicOps op)
 int IR_Builder::translateVISADwordAtomicInst(VISAAtomicOps atomicOp,
                                              bool is16Bit,
                                              G4_Predicate *pred,
-                                             Common_ISA_Exec_Size execSize,
-                                             Common_VISA_EMask_Ctrl eMask,
+                                             VISA_Exec_Size execSize,
+                                             VISA_EMask_Ctrl eMask,
                                              G4_Operand* surface,
                                              G4_SrcRegRegion* offsets,
                                              G4_SrcRegRegion* src0,
@@ -4185,13 +4203,13 @@ int IR_Builder::translateVISADwordAtomicInst(VISAAtomicOps atomicOp,
 
     surface = lowerSurface255To253(surface, *this);
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
     // always 8 or 16
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
     // can be 1 for scalar atomics
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, instExSize);
     unsigned subOpc = Get_Atomic_Op(atomicOp);
 
@@ -4293,7 +4311,7 @@ int IR_Builder::translateVISADwordAtomicInst(VISAAtomicOps atomicOp,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 static void
@@ -4381,10 +4399,10 @@ void IR_Builder::buildTypedSurfaceAddressPayload(
 // u must not be V0. v and r are allowed to be V0, in which case they will be
 // skipped in payload.
 int IR_Builder::translateVISAGather4TypedInst(G4_Predicate           *pred,
-                                              Common_VISA_EMask_Ctrl emask,
+                                              VISA_EMask_Ctrl emask,
                                               ChannelMask chMask,
                                               G4_Operand *surface,
-                                              Common_ISA_Exec_Size executionSize,
+                                              VISA_Exec_Size executionSize,
                                               G4_SrcRegRegion *uOffsetOpnd,
                                               G4_SrcRegRegion *vOffsetOpnd,
                                               G4_SrcRegRegion *rOffsetOpnd,
@@ -4466,16 +4484,16 @@ int IR_Builder::translateVISAGather4TypedInst(G4_Predicate           *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 // u must not be V0. v and r are allowed to be V0, in which case they will be
 // skipped in payload.
 int IR_Builder::translateVISAScatter4TypedInst(G4_Predicate           *pred,
-                                               Common_VISA_EMask_Ctrl emask,
+                                               VISA_EMask_Ctrl emask,
                                                ChannelMask chMask,
                                                G4_Operand *surface,
-                                               Common_ISA_Exec_Size executionSize,
+                                               VISA_Exec_Size executionSize,
                                                G4_SrcRegRegion *uOffsetOpnd,
                                                G4_SrcRegRegion *vOffsetOpnd,
                                                G4_SrcRegRegion *rOffsetOpnd,
@@ -4569,15 +4587,15 @@ int IR_Builder::translateVISAScatter4TypedInst(G4_Predicate           *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISATypedAtomicInst(
     VISAAtomicOps atomicOp,
     bool is16Bit,
     G4_Predicate           *pred,
-    Common_VISA_EMask_Ctrl emask,
-    Common_ISA_Exec_Size execSize,
+    VISA_EMask_Ctrl emask,
+    VISA_Exec_Size execSize,
     G4_Operand *surface,
     G4_SrcRegRegion *uOffsetOpnd,
     G4_SrcRegRegion *vOffsetOpnd,
@@ -4588,16 +4606,14 @@ int IR_Builder::translateVISATypedAtomicInst(
     G4_DstRegRegion *dst)
 {
 
-    Common_ISA_Exec_Size instExecSize = execSize;
-    MUST_BE_TRUE(execSize == EXEC_SIZE_1 ||
-                 execSize == EXEC_SIZE_2 ||
-                 execSize == EXEC_SIZE_4 ||
-                 execSize == EXEC_SIZE_8, "send exec size must be 1, 2, 4 or 8 for typed atomic messages");
+    VISA_Exec_Size instExecSize = execSize;
+    assert(execSize <= (getNativeExecSize() == 8 ? EXEC_SIZE_8 : EXEC_SIZE_16) &&
+        "send exec size must not exceed the platform's native execution size");
 
     unsigned op = Get_Atomic_Op(atomicOp);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, instExSize);
 
     if (atomicOp == ATOMIC_CMPXCHG)
@@ -4675,7 +4691,7 @@ int IR_Builder::translateVISATypedAtomicInst(
             instOpt, false);
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 static void
@@ -4763,15 +4779,15 @@ BuildMH2_A32(IR_Builder *IRB, G4_Declare *header,
 int IR_Builder::translateVISASLMUntypedScaledInst(
     bool isRead,
     G4_Predicate *pred,
-    Common_ISA_Exec_Size   execSize,
-    Common_VISA_EMask_Ctrl eMask,
+    VISA_Exec_Size   execSize,
+    VISA_EMask_Ctrl eMask,
     ChannelMask            chMask,
     uint16_t               scale,
     G4_Operand             *sideBand,
     G4_SrcRegRegion        *offsets,
     G4_Operand               *srcOrDst)
 {
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
 
     payloadSource sources[2]; // Maximal 2 sources, offset + source
@@ -4826,12 +4842,12 @@ int IR_Builder::translateVISASLMUntypedScaledInst(
         sendMsgDesc,
         Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAGather4ScaledInst(G4_Predicate           *pred,
-                                               Common_ISA_Exec_Size   execSize,
-                                               Common_VISA_EMask_Ctrl eMask,
+                                               VISA_Exec_Size   execSize,
+                                               VISA_EMask_Ctrl eMask,
                                                ChannelMask            chMask,
                                                G4_Operand             *surface,
                                                G4_Operand             *globalOffset,
@@ -4845,8 +4861,8 @@ int IR_Builder::translateVISAGather4ScaledInst(G4_Predicate           *pred,
 }
 
 int IR_Builder::translateVISAScatter4ScaledInst(G4_Predicate           *pred,
-                                                Common_ISA_Exec_Size   execSize,
-                                                Common_VISA_EMask_Ctrl eMask,
+                                                VISA_Exec_Size   execSize,
+                                                VISA_EMask_Ctrl eMask,
                                                 ChannelMask            chMask,
                                                 G4_Operand             *surface,
                                                 G4_Operand             *globalOffset,
@@ -4859,8 +4875,8 @@ int IR_Builder::translateVISAScatter4ScaledInst(G4_Predicate           *pred,
 }
 
 int IR_Builder::translateGather4Inst(G4_Predicate           *pred,
-                                     Common_ISA_Exec_Size   execSize,
-                                     Common_VISA_EMask_Ctrl eMask,
+                                     VISA_Exec_Size   execSize,
+                                     VISA_EMask_Ctrl eMask,
                                      ChannelMask            chMask,
                                      G4_Operand             *surface,
                                      G4_Operand             *globalOffset,
@@ -4875,11 +4891,11 @@ int IR_Builder::translateGather4Inst(G4_Predicate           *pred,
         execSize == EXEC_SIZE_16,
         "Only support SIMD1, SIMD2, SIMD4, SIMD8 or SIMD16!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
 
     bool useSplitSend = useSends();
@@ -4957,12 +4973,12 @@ int IR_Builder::translateGather4Inst(G4_Predicate           *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateScatter4Inst(G4_Predicate           *pred,
-                                      Common_ISA_Exec_Size   execSize,
-                                      Common_VISA_EMask_Ctrl eMask,
+                                      VISA_Exec_Size   execSize,
+                                      VISA_EMask_Ctrl eMask,
                                       ChannelMask            chMask,
                                       G4_Operand             *surface,
                                       G4_Operand             *globalOffset,
@@ -4977,11 +4993,11 @@ int IR_Builder::translateScatter4Inst(G4_Predicate           *pred,
         execSize == EXEC_SIZE_16,
         "Only support SIMD1, SIMD2, SIMD4, SIMD8 or SIMD16!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
 
     bool useSplitSend = useSends();
@@ -5063,13 +5079,13 @@ int IR_Builder::translateScatter4Inst(G4_Predicate           *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /// GetNumBatch() - return the number of batches required to copy the raw
 /// operand to message payload
-static unsigned GetNumBatch(Common_ISA_SVM_Block_Type blockSize,
-                            Common_ISA_SVM_Block_Num  numBlocks) {
+static unsigned GetNumBatch(VISA_SVM_Block_Type blockSize,
+                            VISA_SVM_Block_Num  numBlocks) {
     switch (blockSize) {
     case SVM_BLOCK_TYPE_BYTE:
         switch (numBlocks) {
@@ -5091,9 +5107,9 @@ static unsigned GetNumBatch(Common_ISA_SVM_Block_Type blockSize,
 }
 
 int IR_Builder::translateVISAGatherScaledInst(G4_Predicate              *pred,
-                                              Common_ISA_Exec_Size      execSize,
-                                              Common_VISA_EMask_Ctrl    eMask,
-                                              Common_ISA_SVM_Block_Num  numBlocks,
+                                              VISA_Exec_Size      execSize,
+                                              VISA_EMask_Ctrl    eMask,
+                                              VISA_SVM_Block_Num  numBlocks,
                                               G4_Operand                *surface,
                                               G4_Operand                *globalOffset,
                                               G4_SrcRegRegion           *offsets,
@@ -5106,9 +5122,9 @@ int IR_Builder::translateVISAGatherScaledInst(G4_Predicate              *pred,
 }
 
 int IR_Builder::translateVISAScatterScaledInst(G4_Predicate              *pred,
-                                               Common_ISA_Exec_Size      execSize,
-                                               Common_VISA_EMask_Ctrl    eMask,
-                                               Common_ISA_SVM_Block_Num  numBlocks,
+                                               VISA_Exec_Size      execSize,
+                                               VISA_EMask_Ctrl    eMask,
+                                               VISA_SVM_Block_Num  numBlocks,
                                                G4_Operand                *surface,
                                                G4_Operand                *globalOffset,
                                                G4_SrcRegRegion           *offsets,
@@ -5127,17 +5143,17 @@ int IR_Builder::translateVISAScatterScaledInst(G4_Predicate              *pred,
 //
 int IR_Builder::translateVISASLMByteScaledInst(bool isRead,
     G4_Predicate *pred,
-    Common_ISA_Exec_Size execSize,
-    Common_VISA_EMask_Ctrl eMask,
-    Common_ISA_SVM_Block_Type blockSize,
-    Common_ISA_SVM_Block_Num numBlocks,
+    VISA_Exec_Size execSize,
+    VISA_EMask_Ctrl eMask,
+    VISA_SVM_Block_Type blockSize,
+    VISA_SVM_Block_Num numBlocks,
     uint8_t scale,
     G4_Operand *sideBand,
     G4_SrcRegRegion *offsets,
     G4_Operand *srcOrDst)
 {
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
     unsigned numBatch = GetNumBatch(blockSize, numBlocks);
 
@@ -5191,7 +5207,7 @@ int IR_Builder::translateVISASLMByteScaledInst(bool isRead,
         sendMsgDesc,
         Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar()));
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 static void
@@ -5212,9 +5228,9 @@ BuildMH_A32_GO(IR_Builder *IRB, G4_Declare *header, G4_Operand *globalOffset = 0
 }
 
 int IR_Builder::translateByteGatherInst(G4_Predicate *pred,
-                                        Common_ISA_Exec_Size execSize,
-                                        Common_VISA_EMask_Ctrl eMask,
-                                        Common_ISA_SVM_Block_Num numBlocks,
+                                        VISA_Exec_Size execSize,
+                                        VISA_EMask_Ctrl eMask,
+                                        VISA_SVM_Block_Num numBlocks,
                                         G4_Operand *surface,
                                         G4_Operand *globalOffset,
                                         G4_SrcRegRegion *offsets,
@@ -5232,11 +5248,11 @@ int IR_Builder::translateByteGatherInst(G4_Predicate *pred,
                 numBlocks == SVM_BLOCK_NUM_4,
                 "Byte gather ONLY supports 1, 2, and 4 elements per slot!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, instExSize);
     unsigned numBatch = GetNumBatch(SVM_BLOCK_TYPE_BYTE, numBlocks);
 
@@ -5321,13 +5337,13 @@ int IR_Builder::translateByteGatherInst(G4_Predicate *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateByteScatterInst(G4_Predicate *pred,
-                                         Common_ISA_Exec_Size execSize,
-                                         Common_VISA_EMask_Ctrl eMask,
-                                         Common_ISA_SVM_Block_Num numBlocks,
+                                         VISA_Exec_Size execSize,
+                                         VISA_EMask_Ctrl eMask,
+                                         VISA_SVM_Block_Num numBlocks,
                                          G4_Operand *surface,
                                          G4_Operand *globalOffset,
                                          G4_SrcRegRegion *offsets,
@@ -5345,11 +5361,11 @@ int IR_Builder::translateByteScatterInst(G4_Predicate *pred,
                 numBlocks == SVM_BLOCK_NUM_4,
                 "Byte scatter ONLY supports 1, 2, and 4 elements per slot!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
     unsigned numBatch = GetNumBatch(SVM_BLOCK_TYPE_BYTE, numBlocks);
 
@@ -5438,27 +5454,27 @@ int IR_Builder::translateByteScatterInst(G4_Predicate *pred,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISALogicInst(ISA_Opcode opcode, G4_Predicate *predOpnd, bool saturate, Common_ISA_Exec_Size executionSize,
-                                       Common_VISA_EMask_Ctrl emask, G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
+int IR_Builder::translateVISALogicInst(ISA_Opcode opcode, G4_Predicate *predOpnd, bool saturate, VISA_Exec_Size executionSize,
+                                       VISA_EMask_Ctrl emask, G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
                                        G4_Operand* src2, G4_Operand* src3)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
     G4_Operand *g4Srcs[COMMON_ISA_MAX_NUM_SRC] = {src0, src1, src2, src3};
 
-    G4_opcode g4_op = Get_G4_Opcode_From_Common_ISA_Opcode(opcode);
+    G4_opcode g4_op = GetGenOpcodeFromVISAOpcode(opcode);
     if (dst->getBase() && dst->getBase()->isFlag())
     {
         g4_op = Get_Pseudo_Opcode( opcode );
         if (g4_op == G4_illegal)
         {
-            return CM_FAILURE;
+            return VISA_FAILURE;
         }
     }
 
@@ -5565,7 +5581,7 @@ int IR_Builder::translateVISALogicInst(ISA_Opcode opcode, G4_Predicate *predOpnd
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAVmeImeInst(
@@ -5697,7 +5713,7 @@ int IR_Builder::translateVISAVmeImeInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAVmeSicInst(
@@ -5767,7 +5783,7 @@ int IR_Builder::translateVISAVmeSicInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAVmeFbrInst(
@@ -5878,7 +5894,7 @@ int IR_Builder::translateVISAVmeFbrInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAVmeIdmInst(
@@ -5936,7 +5952,7 @@ int IR_Builder::translateVISAVmeIdmInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 // on legacy platforms EOT bit is encode in bit[5] of the exdesc.
@@ -5946,14 +5962,14 @@ static bool isExDescEOT(uint32_t val)
     return val & 0x20;
 }
 
-int IR_Builder::translateVISARawSendInst(G4_Predicate *predOpnd, Common_ISA_Exec_Size executionSize,
-                                         Common_VISA_EMask_Ctrl emask, uint8_t modifiers, unsigned int exDesc, uint8_t numSrc,
+int IR_Builder::translateVISARawSendInst(G4_Predicate *predOpnd, VISA_Exec_Size executionSize,
+                                         VISA_EMask_Ctrl emask, uint8_t modifiers, unsigned int exDesc, uint8_t numSrc,
                                          uint8_t numDst, G4_Operand* msgDescOpnd, G4_SrcRegRegion* msgOpnd, G4_DstRegRegion* dstOpnd)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
 
     if (msgDescOpnd->isSrcRegRegion())
@@ -5986,9 +6002,7 @@ int IR_Builder::translateVISARawSendInst(G4_Predicate *predOpnd, Common_ISA_Exec
         sendMsgDesc->setEOT();
     }
 
-    // sanity check on srcLen/dstLen
-    MUST_BE_TRUE(sendMsgDesc->MessageLength() <= numSrc, "message length mismatch for raw send");
-    MUST_BE_TRUE(sendMsgDesc->ResponseLength() <= numDst, "response length mismatch for raw send");
+    // sanity check on srcLen/dstLen moved to ISA verifier
 
     createSendInst(
         predOpnd,
@@ -6003,18 +6017,18 @@ int IR_Builder::translateVISARawSendInst(G4_Predicate *predOpnd, Common_ISA_Exec
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISARawSendsInst(G4_Predicate *predOpnd, Common_ISA_Exec_Size executionSize,
-                                         Common_VISA_EMask_Ctrl emask, uint8_t modifiers, G4_Operand* ex, uint8_t numSrc0, uint8_t numSrc1,
+int IR_Builder::translateVISARawSendsInst(G4_Predicate *predOpnd, VISA_Exec_Size executionSize,
+                                         VISA_EMask_Ctrl emask, uint8_t modifiers, G4_Operand* ex, uint8_t numSrc0, uint8_t numSrc1,
                                          uint8_t numDst, G4_Operand* msgDescOpnd, G4_Operand* src0, G4_Operand* src1, G4_DstRegRegion* dstOpnd, unsigned ffid, bool hasEOT)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
 
     if (msgDescOpnd->isSrcRegRegion())
@@ -6092,7 +6106,7 @@ int IR_Builder::translateVISARawSendsInst(G4_Predicate *predOpnd, Common_ISA_Exe
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASamplerVAGenericInst(
@@ -6222,7 +6236,7 @@ int IR_Builder::translateVISASamplerVAGenericInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
@@ -6232,7 +6246,7 @@ int IR_Builder::translateVISASamplerVAGenericInst(
 * sample8x8AVS(matrix<unsigned short, N, 64> &M, samplerType,  channelMask, surfIndex, samplerIndex, u, v, deltaU, deltaV, u2d,
 OutputFormatControl=0, v2d, AVSExecMode, EIFbypass=false);
 *
-* Assuming: N = 4, channelMask=CM_ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
+* Assuming: N = 4, channelMask=ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
 *           then the generated code should look like the following for GT:
 *
 * .declare  VX Base=m ElementSize=4 Type=ud Total=16
@@ -6322,18 +6336,18 @@ int IR_Builder::translateVISAAvsInst(
             output_type = Type_UB;
 
 
-        if (execMode == CM_AVS_16x8)
+        if (execMode == AVS_16x8)
         {
             number_elements_returned = 128;
             numEnabledChannels *= 2;
         }
 
-        if (execMode == CM_AVS_8x4)
+        if (execMode == AVS_8x4)
         {
             number_elements_returned = 32;
         }
 
-        if (execMode == CM_AVS_4x4)
+        if (execMode == AVS_4x4)
         {
             number_elements_returned = 16;
         }
@@ -6459,14 +6473,14 @@ int IR_Builder::translateVISAAvsInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
                                               CISA_MIN_MAX_SUB_OPCODE subOpcode,
                                               G4_Predicate *predOpnd,
-                                              Common_ISA_Exec_Size executionSize,
-                                              Common_VISA_EMask_Ctrl emask,
+                                              VISA_Exec_Size executionSize,
+                                              VISA_EMask_Ctrl emask,
                                               bool saturate,
                                               G4_DstRegRegion *dstOpnd,
                                               G4_Operand *src0Opnd,
@@ -6475,7 +6489,7 @@ int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int inst_opt = Get_Gen4_Emask(emask, exsize);
     G4_CondMod* condMod = NULL;
 
@@ -6569,7 +6583,7 @@ int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
         }
         else
         {
-            return CM_FAILURE;
+            return VISA_FAILURE;
         }
     }
     else
@@ -6592,7 +6606,7 @@ int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
 
         createInst(
             predOpnd,
-            Get_G4_Opcode_From_Common_ISA_Opcode(opcode),
+            GetGenOpcodeFromVISAOpcode(opcode),
             condMod,
             saturate,
             exsize,
@@ -6605,13 +6619,13 @@ int IR_Builder::translateVISADataMovementInst(ISA_Opcode opcode,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
 * Translates Sampler intrinsic.
 *
-* Assuming: N = 4, channelMask=CM_ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
+* Assuming: N = 4, channelMask=ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
 *           then the generated code should look like the following for GT:
 *
 * .declare  VX Base=m ElementSize=4 Type=f Total=72
@@ -6772,7 +6786,7 @@ int IR_Builder::translateVISASamplerInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAVaSklPlusGeneralInst(
@@ -6810,7 +6824,7 @@ int IR_Builder::translateVISAVaSklPlusGeneralInst(
 
     unsigned int reg_to_send = 2;
     //for offsets
-    if((sub_opcode == VA_OP_CODE_1PIXEL_CONVOLVE && mode == CM_CONV_16x1) ||
+    if((sub_opcode == VA_OP_CODE_1PIXEL_CONVOLVE && mode == VA_CONV_16x1) ||
         sub_opcode == ISA_HDC_1PIXELCONV)
     {
         dcl = createSendPayloadDcl( 4 * GENX_SAMPLER_IO_SZ , Type_UD );
@@ -7018,7 +7032,7 @@ int IR_Builder::translateVISAVaSklPlusGeneralInst(
         Create_MOV_Send_Src_Inst( dcl_payload_UD,0,2,5,pixelHMaskOpnd, 0 );
     }
 
-    if( (sub_opcode == VA_OP_CODE_1PIXEL_CONVOLVE  && mode == CM_CONV_16x1) ||
+    if( (sub_opcode == VA_OP_CODE_1PIXEL_CONVOLVE  && mode == VA_CONV_16x1) ||
         originalSubOpcode == ISA_HDC_1PIXELCONV)
     {
         const RegionDesc *rd = getRegionStride1();
@@ -7176,13 +7190,13 @@ int IR_Builder::translateVISAVaSklPlusGeneralInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*
 * Translates Sampler Norm API intrinsic.
 *
-* Assuming: N = 4, channelMask=CM_ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
+* Assuming: N = 4, channelMask=ABGR_ENABLE, surfIndex = 0x21, samplerIndex = 0x4,
 *           then the generated code should look like the following for GT:
 *
 * .declare  VX Base=m ElementSize=4 Type=ud Total=16
@@ -7280,51 +7294,46 @@ int IR_Builder::translateVISASamplerNormInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISASimdInst(ISA_Opcode opcode, G4_Predicate *predOpnd,
-                                      Common_ISA_Exec_Size executionSize, Common_VISA_EMask_Ctrl emask, G4_Label *label)
+int IR_Builder::translateVISAGotoInst(G4_Predicate* predOpnd,
+    VISA_Exec_Size executionSize, VISA_EMask_Ctrl emask, G4_Label* label)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    uint8_t exsize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t exsize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, exsize);
-
-    G4_Operand *src0 = NULL, *src1 = NULL;
-    G4_CondMod *condmod = NULL;
 
     auto cfInst = createInst(
         predOpnd,
-        Get_G4_Opcode_From_Common_ISA_Opcode((ISA_Opcode)opcode),
-        condmod,
+        G4_goto,
+        nullptr,
         false,
         exsize,
-        NULL,
-        src0,
-        src1,
+        nullptr,
+        nullptr,
+        nullptr,
         instOpt,
         0);
 
-    if( opcode == ISA_GOTO )
-    {
-        cfInst->asCFInst()->setUip( label );
-    }
+    cfInst->asCFInst()->setUip(label);
+
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASampleInfoInst(
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl emask,
     ChannelMask chMask,
     G4_Operand* surface,
     G4_DstRegRegion* dst)
 {
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size( executionSize );
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size( executionSize );
     uint32_t instOpt = Get_Gen4_Emask( emask, execSize );
     VISAChannelMask channels = chMask.getAPI();
     bool useFakeHeader = (getGenxPlatform() < GENX_SKL) ? false :
@@ -7404,18 +7413,18 @@ int IR_Builder::translateVISASampleInfoInst(
             execSize, fc, SFID::SAMPLER, false, useHeader, SendAccess::READ_ONLY, surface, NULL, instOpt, false);
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAResInfoInst(
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl emask,
     ChannelMask chMask,
     G4_Operand* surface,
     G4_SrcRegRegion* lod,
     G4_DstRegRegion* dst )
 {
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size( executionSize );
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size( executionSize );
     uint32_t instOpt = Get_Gen4_Emask( emask, execSize );
     //For SKL if channels are continuous don't need header
 
@@ -7534,7 +7543,7 @@ int IR_Builder::translateVISAResInfoInst(
             execSize, fc, SFID::SAMPLER, false, useHeader, SendAccess::READ_ONLY, surface, NULL, instOpt, false );
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 
@@ -7548,8 +7557,8 @@ int IR_Builder::translateVISAResInfoInst(
 
 int IR_Builder::translateVISAURBWrite3DInst(
     G4_Predicate* pred,
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl emask,
     uint8_t numOut,
     uint16_t globalOffset,
     G4_SrcRegRegion* channelMask,
@@ -7557,7 +7566,7 @@ int IR_Builder::translateVISAURBWrite3DInst(
     G4_SrcRegRegion* perSlotOffset,
     G4_SrcRegRegion* vertexData )
 {
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size( executionSize );
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size( executionSize );
     uint32_t instOpt = Get_Gen4_Emask( emask, execSize );
 
     if (numOut == 0)
@@ -7727,7 +7736,7 @@ int IR_Builder::translateVISAURBWrite3DInst(
         Create_Send_Inst_For_CISA( pred, createNullDst( Type_UD ), m, numRows, 0,
             execSize, fc, SFID::URB, false, useHeader, SendAccess::WRITE_ONLY, nullptr, nullptr, instOpt, false );
     }
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /*****************************************************************************\
@@ -7745,8 +7754,8 @@ enum EU_GEN6_DATA_PORT_RENDER_TARGET_WRITE_CONTROL
 
 int IR_Builder::translateVISARTWrite3DInst(
                         G4_Predicate* pred,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         G4_Operand *surface,
                         G4_SrcRegRegion *r1HeaderOpnd,
                         G4_Operand *rtIndex,
@@ -7756,7 +7765,7 @@ int IR_Builder::translateVISARTWrite3DInst(
                         unsigned int numParms,
                         G4_SrcRegRegion ** msgOpnds)
 {
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size( executionSize );
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size( executionSize );
     uint32_t instOpt = Get_Gen4_Emask( emask, execSize );
     bool useHeader = false;
 
@@ -7795,7 +7804,7 @@ int IR_Builder::translateVISARTWrite3DInst(
     if(varOffset != numParms)
     {
         assert( 0 );
-        return CM_FAILURE;
+        return VISA_FAILURE;
     }
 
     bool FP16Data = R->getType() == Type_HF;
@@ -8406,7 +8415,7 @@ int IR_Builder::translateVISARTWrite3DInst(
          Create_Send_Inst_For_CISA( pred, createNullDst( Type_UD ), m, numRows, 0,
             execSize, fc, SFID::DP_WRITE, false, useHeader, SendAccess::WRITE_ONLY, surface, NULL, instOpt, true );
     }
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 
 }
 
@@ -8601,14 +8610,14 @@ int IR_Builder::splitSampleInst(VISASampler3DSubOpCode actualop,
     G4_Operand *sampler,
     G4_Operand *surface,
     G4_DstRegRegion* dst,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_EMask_Ctrl emask,
     bool useHeader,
     unsigned numRows, // msg length for each simd8
     unsigned int numParms,
     G4_SrcRegRegion ** params,
     bool uniformSampler)
 {
-    int status = CM_SUCCESS;
+    int status = VISA_SUCCESS;
     G4_SrcRegRegion *secondHalf[12];
 
     bool isHalfReturn = G4_Type_Table[dst->getType()].byteSize == 2;
@@ -9065,8 +9074,8 @@ int IR_Builder::translateVISASampler3DInst(
     bool cpsEnable,
     bool uniformSampler,
     G4_Predicate* pred,
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl emask,
     ChannelMask chMask,
     G4_Operand *aoffimmi,
     G4_Operand *sampler,
@@ -9079,7 +9088,7 @@ int IR_Builder::translateVISASampler3DInst(
     in vISA      1 means channel will be written, 0 means channel will not be written
     in GEN ISA   0 means channel will be written, 1 means channel will not be written
     */
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size( executionSize );
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size( executionSize );
     uint32_t instOpt = Get_Gen4_Emask( emask, execSize );
 
     // First setup message header and message payload
@@ -9193,15 +9202,15 @@ int IR_Builder::translateVISASampler3DInst(
             execSize, msgDesc, instOpt, false);
     }
     setUniformSampler(sendInst, uniformSampler);
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISALoad3DInst(
     VISASampler3DSubOpCode actualop,
     bool pixelNullMask,
     G4_Predicate *pred_opnd,
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl em,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl em,
     ChannelMask channelMask,
     G4_Operand* aoffimmi,
     G4_Operand* surface,
@@ -9211,7 +9220,7 @@ int IR_Builder::translateVISALoad3DInst(
 {
     bool useHeader = false;
 
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     uint32_t instOpt = Get_Gen4_Emask(em, execSize);
 
     const bool halfReturn = G4_Type_Table[dst->getType()].byteSize == 2;
@@ -9314,15 +9323,15 @@ int IR_Builder::translateVISALoad3DInst(
             instOpt, false);
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISAGather3dInst(
     VISASampler3DSubOpCode actualop,
     bool pixelNullMask,
     G4_Predicate* pred,
-    Common_ISA_Exec_Size executionSize,
-    Common_VISA_EMask_Ctrl em,
+    VISA_Exec_Size executionSize,
+    VISA_EMask_Ctrl em,
     ChannelMask channelMask,
     G4_Operand* aoffimmi,
     G4_Operand* sampler,
@@ -9333,7 +9342,7 @@ int IR_Builder::translateVISAGather3dInst(
 {
     bool useHeader = false;
 
-    uint8_t execSize = (uint8_t) Get_Common_ISA_Exec_Size(executionSize);
+    uint8_t execSize = (uint8_t) Get_VISA_Exec_Size(executionSize);
     uint32_t instOpt = Get_Gen4_Emask(em, execSize);
 
     const bool FP16Return = G4_Type_Table[dst->getType()].byteSize == 2;
@@ -9434,7 +9443,7 @@ int IR_Builder::translateVISAGather3dInst(
             instOpt, false);
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 
@@ -9489,7 +9498,7 @@ static uint32_t getSplitHiEMask(unsigned execSize, uint32_t eMask) {
 /// Bits 10-8:  Block Size, 000 for 1 OWord, 001 for 2 OWords, 010 for 4 OWords, 100 for 8 OWords.
 /// Bits 7-0:   Binding Table Index: Set to 0xFF for stateless memory space used bu A64 SVM Data Port.
 int IR_Builder::translateVISASVMBlockReadInst(
-    Common_ISA_Oword_Num size,
+    VISA_Oword_Num size,
     bool unaligned,
     G4_Operand* address,
     G4_DstRegRegion* dst)
@@ -9498,7 +9507,7 @@ int IR_Builder::translateVISASVMBlockReadInst(
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    unsigned numOword = Get_Common_ISA_Oword_Num(size);
+    unsigned numOword = Get_VISA_Oword_Num(size);
     G4_Declare* dcl = createSendPayloadDcl(GENX_DATAPORT_IO_SZ, Type_UD);
     if (no64bitType())
     {
@@ -9546,11 +9555,11 @@ int IR_Builder::translateVISASVMBlockReadInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASVMBlockWriteInst(
-    Common_ISA_Oword_Num size,
+    VISA_Oword_Num size,
     G4_Operand* address,
     G4_SrcRegRegion* src)
 {
@@ -9558,7 +9567,7 @@ int IR_Builder::translateVISASVMBlockWriteInst(
     startTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
 
-    unsigned numOword = Get_Common_ISA_Oword_Num(size);
+    unsigned numOword = Get_VISA_Oword_Num(size);
     unsigned srcNumGRF = ((numOword - 1) / 2 + 1);
     uint8_t sendExecSize = FIX_OWORD_SEND_EXEC_SIZE(numOword);
 
@@ -9667,15 +9676,15 @@ int IR_Builder::translateVISASVMBlockWriteInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASVMScatterReadInst(
-    Common_ISA_Exec_Size execSize,
-    Common_VISA_EMask_Ctrl eMask,
+    VISA_Exec_Size execSize,
+    VISA_EMask_Ctrl eMask,
     G4_Predicate* pred,
-    Common_ISA_SVM_Block_Type blockSize,
-    Common_ISA_SVM_Block_Num numBlocks,
+    VISA_SVM_Block_Type blockSize,
+    VISA_SVM_Block_Num numBlocks,
     G4_SrcRegRegion* addresses,
     G4_DstRegRegion* dst)
 {
@@ -9688,11 +9697,11 @@ int IR_Builder::translateVISASVMScatterReadInst(
                 execSize == EXEC_SIZE_16,
                 "Only support SIMD1, SIMD2, SIMD4, SIMD8 or SIMD16!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned int instOpt = Get_Gen4_Emask(eMask, instExSize);
     uint32_t messageLength = (8 * exSize) / getGRFSize();
     uint32_t numDWperLane = 0;
@@ -9743,15 +9752,15 @@ int IR_Builder::translateVISASVMScatterReadInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 int IR_Builder::translateVISASVMScatterWriteInst(
-    Common_ISA_Exec_Size execSize,
-    Common_VISA_EMask_Ctrl eMask,
+    VISA_Exec_Size execSize,
+    VISA_EMask_Ctrl eMask,
     G4_Predicate* pred,
-    Common_ISA_SVM_Block_Type blockSize,
-    Common_ISA_SVM_Block_Num numBlocks,
+    VISA_SVM_Block_Type blockSize,
+    VISA_SVM_Block_Num numBlocks,
     G4_SrcRegRegion* addresses,
     G4_SrcRegRegion* src)
 {
@@ -9764,11 +9773,11 @@ int IR_Builder::translateVISASVMScatterWriteInst(
                 execSize == EXEC_SIZE_16,
                 "Only support SIMD1, SIMD2, SIMD4, SIMD8 or SIMD16!");
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned int instOpt = Get_Gen4_Emask(eMask, instExSize);
     bool useSplitSend = useSends();
 
@@ -9834,7 +9843,7 @@ int IR_Builder::translateVISASVMScatterWriteInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 // is16Bit indicates if this is a 16bit atomic op. The input source (if
@@ -9870,8 +9879,8 @@ static void FillSVMAtomicMsgDesc(bool is16Bit, bool isFloatOp, uint32_t &msgDesc
 int IR_Builder::translateVISASVMAtomicInst(
     VISAAtomicOps atomicOp,
     unsigned short bitwidth,
-    Common_ISA_Exec_Size execSize,
-    Common_VISA_EMask_Ctrl emask,
+    VISA_Exec_Size execSize,
+    VISA_EMask_Ctrl emask,
     G4_Predicate* pred,
     G4_SrcRegRegion* addresses,
     G4_SrcRegRegion* src0,
@@ -9885,13 +9894,13 @@ int IR_Builder::translateVISASVMAtomicInst(
 #endif
 
 
-    Common_ISA_Exec_Size instExecSize = execSize;
+    VISA_Exec_Size instExecSize = execSize;
     execSize = roundUpExecSize(execSize);
 
     unsigned op = Get_Atomic_Op(atomicOp);
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
-    unsigned instExSize = Get_Common_ISA_Exec_Size(instExecSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
+    unsigned instExSize = Get_VISA_Exec_Size(instExecSize);
     unsigned int instOpt = Get_Gen4_Emask(emask, instExSize);
 
     if (atomicOp == ATOMIC_CMPXCHG)
@@ -9968,7 +9977,7 @@ int IR_Builder::translateVISASVMAtomicInst(
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 G4_SrcRegRegion* IR_Builder::getSVMOffset(G4_Operand* globalOffset, G4_SrcRegRegion* offsets, uint16_t exSize,
@@ -9990,8 +9999,8 @@ G4_SrcRegRegion* IR_Builder::getSVMOffset(G4_Operand* globalOffset, G4_SrcRegReg
     return Create_Src_Opnd_From_Dcl(dcl, getRegionStride1());
 }
 
-int IR_Builder::translateSVMGather4Inst(Common_ISA_Exec_Size    execSize,
-                                        Common_VISA_EMask_Ctrl  eMask,
+int IR_Builder::translateSVMGather4Inst(VISA_Exec_Size    execSize,
+                                        VISA_EMask_Ctrl  eMask,
                                         ChannelMask             chMask,
                                         G4_Predicate            *pred,
                                         G4_Operand              *globalOffset,
@@ -10005,7 +10014,7 @@ int IR_Builder::translateSVMGather4Inst(Common_ISA_Exec_Size    execSize,
     ASSERT_USER(execSize == EXEC_SIZE_8 || execSize == EXEC_SIZE_16,
                 "Only support SIMD8 or SIMD16!");
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
 
     bool useSplitSend = useSends();
@@ -10067,11 +10076,11 @@ int IR_Builder::translateSVMGather4Inst(Common_ISA_Exec_Size    execSize,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateSVMScatter4Inst(Common_ISA_Exec_Size   execSize,
-                                         Common_VISA_EMask_Ctrl eMask,
+int IR_Builder::translateSVMScatter4Inst(VISA_Exec_Size   execSize,
+                                         VISA_EMask_Ctrl eMask,
                                          ChannelMask            chMask,
                                          G4_Predicate           *pred,
                                          G4_Operand             *globalOffset,
@@ -10085,7 +10094,7 @@ int IR_Builder::translateSVMScatter4Inst(Common_ISA_Exec_Size   execSize,
     ASSERT_USER(execSize == EXEC_SIZE_8 || execSize == EXEC_SIZE_16,
                 "Only support SIMD8 or SIMD16!");
 
-    unsigned exSize = Get_Common_ISA_Exec_Size(execSize);
+    unsigned exSize = Get_VISA_Exec_Size(execSize);
     unsigned instOpt = Get_Gen4_Emask(eMask, exSize);
     bool useSplitSend = useSends();
 
@@ -10149,11 +10158,11 @@ int IR_Builder::translateSVMScatter4Inst(Common_ISA_Exec_Size   execSize,
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_IR_CONSTRUCTION)
     stopTimer(TIMER_VISA_BUILDER_IR_CONSTRUCTION);
 #endif
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
-int IR_Builder::translateVISASVMGather4ScaledInst(Common_ISA_Exec_Size      execSize,
-                                                  Common_VISA_EMask_Ctrl    eMask,
+int IR_Builder::translateVISASVMGather4ScaledInst(VISA_Exec_Size      execSize,
+                                                  VISA_EMask_Ctrl    eMask,
                                                   ChannelMask               chMask,
                                                   G4_Predicate              *pred,
                                                   G4_Operand                *globalOffset,
@@ -10164,8 +10173,8 @@ int IR_Builder::translateVISASVMGather4ScaledInst(Common_ISA_Exec_Size      exec
         globalOffset, offsets, dst);
 }
 
-int IR_Builder::translateVISASVMScatter4ScaledInst(Common_ISA_Exec_Size     execSize,
-                                                   Common_VISA_EMask_Ctrl   eMask,
+int IR_Builder::translateVISASVMScatter4ScaledInst(VISA_Exec_Size     execSize,
+                                                   VISA_EMask_Ctrl   eMask,
                                                    ChannelMask              chMask,
                                                    G4_Predicate             *pred,
                                                    G4_Operand               *globalOffset,
@@ -10199,7 +10208,7 @@ int IR_Builder::translateVISALifetimeInst(uint8_t properties, G4_Operand* var)
     // would prevent loop local variables/sub-rooutine local variables
     // from being live across entire loop/sub-routine.
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /// CopySrcToMsgPayload() performs a single batch of copy source into message
@@ -10650,7 +10659,7 @@ void IR_Builder::predefinedVarRegAssignment(uint8_t inputSize)
             continue;
         }
 
-        G4_Type ty = Get_G4_Type_From_Common_ISA_Type(getPredefinedVarType(i));
+        G4_Type ty = GetGenTypeFromVISAType(getPredefinedVarType(i));
         G4_Declare *dcl = preDefVars.getPreDefinedVar((PreDefinedVarsInternal)i);
         if (!isPredefinedVarInR0((PreDefinedVarsInternal)i))
         {
@@ -10892,6 +10901,6 @@ bool IR_Builder::checkIfRegionsAreConsecutive( G4_SrcRegRegion* first, G4_SrcReg
 
 int IR_Builder::generateDebugInfoPlaceholder()
 {
-    createInst(nullptr, G4_opcode::G4_DebugInfoPlaceholder, nullptr, false, 1, nullptr, nullptr, nullptr, G4_InstOption::InstOpt_WriteEnable);
-    return CM_SUCCESS;
+    debugInfoPlaceholder = curCISAOffset;
+    return VISA_SUCCESS;
 }

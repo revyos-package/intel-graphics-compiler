@@ -6940,40 +6940,37 @@ void GraphColor::addCalleeSaveRestoreCode()
 //
 void GraphColor::addGenxMainStackSetupCode()
 {
+    uint32_t fpInitVal = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
     unsigned frameSize = builder.kernel.fg.paramOverflowAreaOffset + builder.kernel.fg.paramOverflowAreaSize;
     G4_Declare* framePtr = builder.kernel.fg.framePtrDcl;
     G4_Declare* stackPtr = builder.kernel.fg.stackPtrDcl;
 
-    INST_LIST_ITER insertIt = builder.kernel.fg.getEntryBB()->begin();
-    for (; insertIt != builder.kernel.fg.getEntryBB()->end() && (*insertIt)->isLabel();
-        ++insertIt)
-        ; // empty body
+    auto entryBB = builder.kernel.fg.getEntryBB();
+    auto insertIt = std::find_if(entryBB->begin(), entryBB->end(), [](G4_INST* inst) { return !inst->isLabel(); });
     //
-    // FP = 0
+    // FP = spillMemOffset
     //
     {
         G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, framePtr->getRegVar(), 0, 0, 1, Type_UD);
-        G4_Imm * src = builder.createImm(0, Type_UD);
+        G4_Imm * src = builder.createImm(fpInitVal, Type_UD);
         G4_INST* fpInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
-        insertIt = builder.kernel.fg.getEntryBB()->insert(insertIt, fpInst);
+        insertIt = entryBB->insert(insertIt, fpInst);
 
         if (builder.kernel.getOption(vISA_GenerateDebugInfo))
         {
             builder.kernel.getKernelDebugInfo()->setBEFPSetupInst(fpInst);
             builder.kernel.getKernelDebugInfo()->setFrameSize(frameSize * 16);
         }
-
     }
     //
-    // SP = FrameSize (overflow-area offset + overflow-area size)
+    // SP = FP + FrameSize (overflow-area offset + overflow-area size)
     //
     {
         G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, stackPtr->getRegVar(), 0, 0, 1, Type_UD);
-        G4_Imm * src = builder.createImm(frameSize, Type_UD);
+        G4_Imm * src = builder.createImm(fpInitVal + frameSize, Type_UD);
         G4_INST* spIncInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
-        builder.kernel.fg.getEntryBB()->insert(++insertIt, spIncInst);
+        entryBB->insert(++insertIt, spIncInst);
     }
-    builder.instList.clear();
 
     if (m_options->getOption(vISA_OptReport))
     {
@@ -7229,11 +7226,10 @@ void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
         gtpin->markInsts();
     }
 
-    if (builder.getIsKernel() == true)
+    if (builder.getIsKernel())
     {
-        unsigned int spillMemOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
-        builder.kernel.fg.callerSaveAreaOffset =
-            (spillMemOffset / 16) + localSpillAreaOwordSize;
+        // FIXME: why is this only computed for kernel? What about nested calls?
+        builder.kernel.fg.callerSaveAreaOffset = localSpillAreaOwordSize;
     }
     else
     {
@@ -8575,14 +8571,6 @@ void GlobalRA::flagRegAlloc()
                 {
                     CLEAN_NUM_PROFILE clean_num_profile;
 
-#ifdef DEBUG_VERBOSE_ON
-                    for (int i = 0; i < 3; i++)
-                    {
-                        clean_num_profile.spill_clean_num[i] = 0;
-                        clean_num_profile.fill_clean_num[i] = 0;
-                    }
-#endif
-
                     FlagSpillCleanup f(*this);
                     f.spillFillCodeCleanFlag(builder, kernel, &clean_num_profile);
 
@@ -8849,7 +8837,7 @@ int GlobalRA::coloringRegAlloc()
             // either local or hybrid RA succeeds
             assignRegForAliasDcl();
             computePhyReg();
-            return CM_SUCCESS;
+            return VISA_SUCCESS;
         }
     }
 
@@ -8972,7 +8960,7 @@ int GlobalRA::coloringRegAlloc()
                 if (isReRAPass())
                 {
                     // Dont modify program if reRA pass spills
-                    return CM_SPILL;
+                    return VISA_SPILL;
                 }
 
                 bool runRemat = kernel.getOptions()->getTarget() == VISA_CM ? true :
@@ -9071,7 +9059,7 @@ int GlobalRA::coloringRegAlloc()
                     // Early exit when -abortonspill is passed, instead of
                     // spending time inserting spill code and then aborting.
                     stopTimer(TIMER_GRF_GLOBAL_RA);
-                    return CM_SPILL;
+                    return VISA_SPILL;
                 }
 
                 if (iterationNo == 0 &&
@@ -9241,7 +9229,7 @@ int GlobalRA::coloringRegAlloc()
             << "The spilling virtual registers are as follows: "
             << spilledVars.str());
 
-        return CM_SPILL;
+        return VISA_SPILL;
     }
 
     // do not double count the spill mem offset
@@ -9275,7 +9263,7 @@ int GlobalRA::coloringRegAlloc()
         removeSplitDecl();
     }
 
-    return CM_SUCCESS;
+    return VISA_SUCCESS;
 }
 
 /********************************************************************************************************************************************/
@@ -11314,19 +11302,23 @@ bool GlobalRA::isSubRetLocConflict(G4_BB *bb, std::vector<unsigned> &usedLoc, un
         //
         usedLoc[stackTop] = curSubRetLoc;
         unsigned afterCallId = bb->BBAfterCall()->getId();
-        for (std::list<G4_BB*>::iterator it = bb->Succs.begin(), end = bb->Succs.end(); it != end; it++)
+
+        // call can have 1 or 2 successors
+        // If it has 1 then it is sub-entry block, if it has 2
+        // then call has to be predicated. In case of predication,
+        // 1st successor is physically following BB, 2nd is
+        // sub-entry.
+        if (lastInst->getPredicate())
         {
-            if ((*it)->getId() == afterCallId)
-            {
-                if (isSubRetLocConflict(bb->BBAfterCall(), usedLoc, stackTop))
-                    return true;
-            }
-            else
-            {
-                G4_BB* subEntry = (*it);
-                if (isSubRetLocConflict(subEntry, usedLoc, stackTop + 1))
-                    return true;
-            }
+            MUST_BE_TRUE(bb->Succs.size() == 2, "Expecting 2 successor BBs for predicated call");
+            if (isSubRetLocConflict(bb->Succs.back(), usedLoc, stackTop))
+                return true;
+        }
+
+        if (bb->BBAfterCall()->getId() == afterCallId)
+        {
+            if (isSubRetLocConflict(bb->BBAfterCall(), usedLoc, stackTop))
+                return true;
         }
     }
     else
@@ -11609,7 +11601,7 @@ void GlobalRA::assignLocForReturnAddr()
                     if (!bb->empty() && bb->front()->isLabel())
                     {
                         DEBUG_VERBOSE(((G4_Label*)bb->front()->getSrc(0))->getLabel()
-                            << " assigned location " << bb->getSubRetLoc() << std::endl);
+                            << " assigned location " << getSubRetLoc(bb) << std::endl);
                     }
                 }
             }
@@ -11630,18 +11622,13 @@ void GlobalRA::assignLocForReturnAddr()
                 fg.prepareTraversal();
 
                 usedLoc[stackTop] = getSubRetLoc(bb);
-                unsigned afterCallId = bb->BBAfterCall()->getId();
-                for (std::list<G4_BB*>::iterator it = bb->Succs.begin(); it != bb->Succs.end(); it++)
-                {
-                    G4_BB* subEntry = (*it);
-                    if (subEntry->getId() == afterCallId)
-                        continue;
 
-                    if (isSubRetLocConflict(subEntry, usedLoc, stackTop + 1))
-                    {
-                        MUST_BE_TRUE(false,
-                            "ERROR: Fail to assign call-return variables due to cycle in call graph!");
-                    }
+                G4_BB* subEntry = bb->Succs.back();
+
+                if (isSubRetLocConflict(subEntry, usedLoc, stackTop + 1))
+                {
+                    MUST_BE_TRUE(false,
+                        "ERROR: Fail to assign call-return variables due to cycle in call graph!");
                 }
             }
 

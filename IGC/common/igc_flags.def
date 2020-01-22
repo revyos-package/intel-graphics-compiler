@@ -47,6 +47,12 @@ DECLARE_IGC_REGKEY(bool, EnableVISADebug,               false, "Runs VISA in deb
 DECLARE_IGC_REGKEY(DWORD, EnableVISAStructurizer,       1,     "Enable/Disable VISA structurizer. See value defs in igc_flags.hpp.", false)
 DECLARE_IGC_REGKEY(bool, EnableVISAJmpi,                true,  "Enable/Disable VISA generating jmpi (scalar jump).", false)
 DECLARE_IGC_REGKEY(bool, EnableSCFWA,                   true,  "Enable/Disable VISA structrizer WA (temporary for debugging)", false)
+DECLARE_IGC_REGKEY(DWORD, NoMaskToAnyhWA,               0,     "Control replacing NoMask with anyh predicate. Valid value: (two groups) \
+                                                                   valid value:  bit[2]   : how to insert anyh - 0 (simple) | 1 (optim|3. \
+                                                                                 bit[1:0] : which BB to insert - 0(off), 1(divergent BB), \
+                                                                                            2 (nested divergent BB. \
+                                                                                 bit[3] : Use CF's break WA to enable this WA.", false)
+DECLARE_IGC_REGKEY(bool, ForceNoMaskToAnyhWA,           false, "Force replacing NoMask with any predicate", false)
 DECLARE_IGC_REGKEY(DWORD,UnifiedSendCycle,              0,     "Using unified send cycle.", false)
 DECLARE_IGC_REGKEY(DWORD,DisableMixMode,                0,     "Disables mix mode in vISA BE.", false)
 DECLARE_IGC_REGKEY(DWORD,DisableHFMath,                 0,     "Disables HF math instructions.", false)
@@ -101,7 +107,7 @@ DECLARE_IGC_REGKEY(bool, DisableURBWriteMerge,          false, "Setting this to 
 DECLARE_IGC_REGKEY(bool, DisableEmptyBlockRemoval,      false, "Setting this to 1/true adds a compiler switch to disable empty block optimization", false)
 DECLARE_IGC_REGKEY(bool, DisableSIMD32Slicing,          false, "Setting this to 1/true adds a compiler switch to disable emitting SIMD32 VISA code in slices", false)
 DECLARE_IGC_REGKEY(bool, DisableMatchMad,               false, "Setting this to 1/true adds a compiler switch to disable mul+add = mad optimization", false)
-DECLARE_IGC_REGKEY(bool, EnableIntegerMad,              false, "Setting this to 1/true adds a compiler switch to enable integer mul+add = mad optimization", false)
+DECLARE_IGC_REGKEY(bool, EnableIntegerMad,              true,  "Setting this to 1/true adds a compiler switch to enable integer mul+add = mad optimization", false)
 DECLARE_IGC_REGKEY(bool, DisableMatchPredAdd,           false, "Setting this to 1/true adds a compiler switch to disable pred+add = predAdd optimization", false)
 DECLARE_IGC_REGKEY(bool, DisableMatchSimpleAdd,         false, "Setting this to 1/true adds a compiler switch to disable simple cmp+and+add optimization", false)
 DECLARE_IGC_REGKEY(bool, DisableMatchPow,               false, "Setting this to 1/true adds a compiler switch to disable log2/mul/exp2 = pow optimization", false)
@@ -336,6 +342,7 @@ DECLARE_IGC_REGKEY(DWORD, ForcePixelShaderSIMDMode,  0, "Setting it to values de
 DECLARE_IGC_REGKEY(DWORD, StagedCompilationExperiments, 0,  "Experiment with staged compilation when != 0", false)
 DECLARE_IGC_REGKEY(bool, StagedCompilation,             false,  "Enable staged compilation", false)
 DECLARE_IGC_REGKEY(bool, ExtraRetrySIMD16,              false,  "Enable extra simd16 with retry for STAGE1_BEST_PREF", false)
+DECLARE_IGC_REGKEY(bool, SaveRestoreIR,                 false,  "Save/Restore IR for staged compilation to avoid duplicated compilations", false)
 DECLARE_IGC_REGKEY(bool, ForcePSBestSIMD, false,  "Force Pixel shader to return the best SIMD, either SIMD16 or SIMD8. When StagedCompilation is on, this only affects to the first stage", false)
 DECLARE_IGC_REGKEY(bool, SkipTREarlyExitCheck, false, "Skip SIMD16 early exit check in ShaderCodeGen", false)
 DECLARE_IGC_REGKEY(bool, EnableTCSHWBarriers, false,  "Enable TCS pass with HW barriers support. Default TCS pass is TCS pass with multiple continuation functions.", false)

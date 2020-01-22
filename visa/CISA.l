@@ -53,7 +53,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define TRACE(str)
 #endif
 static VISA_Type               str2type(const char *str, int str_len);
-static Common_ISA_Cond_Mod     str2cond(const char *str);
+static VISA_Cond_Mod     str2cond(const char *str);
 static VISAAtomicOps           str2atomic_opcode(const char *op_str);
 static ISA_Opcode              str2opcode(const char* op_str);
 static VISASampler3DSubOpCode  str2SampleOpcode(const char* str);
@@ -63,7 +63,7 @@ static OutputFormatControl     avs_control(const char* str);
 static AVSExecMode             avsExecMode(const char* str);
 static unsigned char           FENCEOptions(const char *str);
 static COMMON_ISA_VME_OP_MODE  VMEType(const char *str);
-static Common_VISA_EMask_Ctrl  Get_CISA_Emask(const char* str);
+static VISA_EMask_Ctrl  Get_CISA_Emask(const char* str);
 static CHANNEL_OUTPUT_FORMAT   Get_Channel_Output(const char* str);
 static void                    appendStringLiteralChar(char c, char *buf, size_t *len);
 
@@ -501,11 +501,6 @@ switchjmp {
         return SWITCHJMP_OP;
     }
 
-if|while|else|do|endif|break|cont  {
-        TRACE("\n** SIMDCF ");
-        CISAlval.opcode = str2opcode(yytext);
-        return SIMDCF_OP;
-    }
 raw_send {
        TRACE("\n** RAW_SEND ");
        CISAlval.opcode = ISA_RAW_SEND;
@@ -634,13 +629,13 @@ lifetime"."end {
         return MEDIA_MODE;
     }
 
-CM_(16|8)_(FULL|DOWN_SAMPLE) {
+AVS_(16|8)_(FULL|DOWN_SAMPLE) {
       TRACE("\n** Output Format Control ");
       CISAlval.cntrl = avs_control(yytext);
       return CNTRL;
     }
 
-CM_AVS_(4|8|16)x(4|8) {
+AVS_(4|8|16)x(4|8) {
       TRACE("\n** AVS Exec Mode ");
       CISAlval.execMode = avsExecMode(yytext);
       return EXECMODE;
@@ -948,11 +943,11 @@ static VISA_Type str2type(const char *str, int str_len)
 
 
 // convert "z" to Mod_z
-static Common_ISA_Cond_Mod str2cond(const char *str)
+static VISA_Cond_Mod str2cond(const char *str)
 {
     for (int i = 0; i < ISA_CMP_UNDEF; i++)
         if (strcmp(Rel_op_str[i], str) == 0)
-            return (Common_ISA_Cond_Mod)i;
+            return (VISA_Cond_Mod)i;
 
     YY_FATAL_ERROR("Invalid Data Type");
 
@@ -1044,7 +1039,7 @@ static OutputFormatControl avs_control(const char* str)
 
     YY_FATAL_ERROR("Invalid AVS Control");
 
-    return CM_16_FULL;
+    return AVS_16_FULL;
 }
 
 static AVSExecMode avsExecMode(const char* str)
@@ -1055,7 +1050,7 @@ static AVSExecMode avsExecMode(const char* str)
 
     YY_FATAL_ERROR("Invalid AVS Exec Mode");
 
-    return CM_AVS_16x4;
+    return AVS_16x4;
 }
 
 static unsigned char FENCEOptions(const char *str)
@@ -1113,7 +1108,7 @@ static COMMON_ISA_VME_OP_MODE VMEType(const char* str)
     return VME_OP_MODE_NUM;
 }
 
-static Common_VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
+static VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
 {
     if(strcmp(str, "NoMask") == 0)
         return vISA_EMASK_M1_NM;
@@ -1121,7 +1116,7 @@ static Common_VISA_EMask_Ctrl Get_CISA_Emask(const char* str)
     {
         if (!strcmp(emask_str[i], str))
         {
-            return (Common_VISA_EMask_Ctrl)i;
+            return (VISA_EMask_Ctrl)i;
         }
     }
 

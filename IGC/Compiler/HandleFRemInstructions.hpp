@@ -23,21 +23,41 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-
-// vim:ts=2:sw=2:et:
-
-#ifndef _CISA_GENNULLPOINTERLOWERING_H_
-#define _CISA_GENNULLPOINTERLOWERING_H_
+#pragma once
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
+#include <llvm/IR/InstVisitor.h>
 #include "common/LLVMWarningsPop.hpp"
 
-#include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 
-namespace IGC {
+namespace IGC
+{
+    // This pass replaces all occurences of frem instructions with proper builtin calls
+    // This is needed, because new SPIRV-LLVM translator outputs frem instructions
+    // which are not fully handled by IGC.
+    class HandleFRemInstructions : public llvm::ModulePass, public llvm::InstVisitor<HandleFRemInstructions>
+    {
+    public:
+        static char ID;
 
-    llvm::FunctionPass* createGenNullPointerLowerPass();
+        HandleFRemInstructions();
 
-} // End namespace IGC
-#endif // _CISA_GENNULLPOINTERLOWERING_H_
+        /// @brief Provides name of pass
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "HandleFremInstructions";
+        }
+
+        /// @brief Main entry point.
+        ///        Find all frem instructions and replace them with proper builtin calls
+        /// @param M The destination module.
+        bool runOnModule(llvm::Module& M) override;
+
+        void visitFRem(llvm::BinaryOperator& I);
+
+    private:
+        llvm::Module* m_module = nullptr;
+        bool m_changed = false;
+    };
+}

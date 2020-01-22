@@ -148,7 +148,7 @@ typedef enum {
     ISA_CMP_L,         /* Less-than */
     ISA_CMP_LE,        /* Less-than-or-equal */
     ISA_CMP_UNDEF
-} Common_ISA_Cond_Mod;
+} VISA_Cond_Mod;
 
 typedef enum {
     MODIFIER_NONE = 0x0,
@@ -172,7 +172,7 @@ typedef enum {
     EXEC_SIZE_16 = 0x4,
     EXEC_SIZE_32 = 0x5,
     EXEC_SIZE_ILLEGAL = 0x6
-} Common_ISA_Exec_Size;
+} VISA_Exec_Size;
 
 // predicate control
 // Currently only support Any and all
@@ -201,7 +201,7 @@ typedef enum {
     vISA_EMASK_M7_NM    = 14,
     vISA_EMASK_M8_NM    = 15,
     vISA_NUM_EMASK      = 16
-} Common_VISA_EMask_Ctrl;
+} VISA_EMask_Ctrl;
 
 typedef enum {
     OWORD_NUM_1 = 0x0,
@@ -210,7 +210,7 @@ typedef enum {
     OWORD_NUM_8 = 0x3,
     OWORD_NUM_16 = 0x4,
     OWORD_NUM_ILLEGAL = 0x5
-} Common_ISA_Oword_Num;
+} VISA_Oword_Num;
 
 // media load inst modifiers
 typedef enum {
@@ -441,8 +441,6 @@ typedef enum {
     CHANNEL_MASK_NUM
 } VISAChannelMask;
 
-typedef VISAChannelMask COMMON_ISA_CHANNEL_MASK;
-
 typedef enum {
     CHANNEL_16_BIT_FULL        = 0,
     CHANNEL_16_BIT_DOWNSAMPLED = 1,
@@ -466,7 +464,6 @@ typedef enum {
     GENX_SKL,
     GENX_BXT,
     GENX_CNL,
-    GENX_ICL,
     GENX_ICLLP,
     GENX_TGLLP,
     ALL
@@ -523,77 +520,77 @@ typedef enum VA_fopcode
 } ISA_VA_Sub_Opcode;
 
 typedef enum _OutputFormatControl_
-{   CM_16_FULL        = 0,
-    CM_16_DOWN_SAMPLE = 1,
-    CM_8_FULL         = 2,
-    CM_8_DOWN_SAMPLE  = 3
+{   AVS_16_FULL        = 0,
+    AVS_16_DOWN_SAMPLE = 1,
+    AVS_8_FULL         = 2,
+    AVS_8_DOWN_SAMPLE  = 3
 } OutputFormatControl;
 
 typedef enum _AVSExecMode_
-{   CM_AVS_16x4 = 0,
-    CM_AVS_8x4  = 1,
-    CM_AVS_16x8 = 2,
-    CM_AVS_4x4  = 3
+{   AVS_16x4 = 0,
+    AVS_8x4  = 1,
+    AVS_16x8 = 2,
+    AVS_4x4  = 3
 } AVSExecMode;
 
 typedef enum _MMFExecMode_
-{   CM_MMF_16x4 = 0,
-    CM_MMF_16x1 = 2,
-    CM_MMF_1x1  = 3
+{   VA_MMF_16x4 = 0,
+    VA_MMF_16x1 = 2,
+    VA_MMF_1x1  = 3
 } MMFExecMode;
 
 typedef enum _MMFEnableMode_
-{   CM_MINMAX_ENABLE = 0,
-    CM_MAX_ENABLE    = 1,
-    CM_MIN_ENABLE    = 2
+{   VA_MINMAX_ENABLE = 0,
+    VA_MAX_ENABLE    = 1,
+    VA_MIN_ENABLE    = 2
 } MMFEnableMode;
 
 typedef enum _CONVExecMode_
-{   CM_CONV_16x4 = 0,
-    CM_CONV_16x1 = 2
+{   VA_CONV_16x4 = 0,
+    VA_CONV_16x1 = 2
 } CONVExecMode;
 
 typedef enum _EDExecMode_
-{   CM_ED_64x4 = 0,
-    CM_ED_32x4 = 1,
-    CM_ED_64x1 = 2,
-    CM_ED_32x1 = 3
+{   VA_ED_64x4 = 0,
+    VA_ED_32x4 = 1,
+    VA_ED_64x1 = 2,
+    VA_ED_32x1 = 3
 } EDExecMode;
 
 typedef enum _EDMode_
-{   CM_ERODE  = 4,
-    CM_DILATE = 5
+{   VA_ERODE  = 4,
+    VA_DILATE = 5
 } EDMode;
 
 typedef enum _LBPCreationMode_
 {
-    CM_3x3_AND_5x5  = 0,
-    CM_3x3          = 1,
-    CM_5x5          = 2
+    VA_3x3_AND_5x5  = 0,
+    VA_3x3          = 1,
+    VA_5x5          = 2
 } LBPCreationMode;
 
-typedef enum _Convovle1DDirection_
+typedef enum _Convolve1DDirection_
 {
-    CM_H_DIRECTION = 0,
-    CM_V_DIRECTION = 1
-} Convovle1DDirection;
+    VA_H_DIRECTION = 0,
+    VA_V_DIRECTION = 1
+} Convolve1DDirection;
 
 typedef enum _CONV1PixelExecMode_
-{   CM_CONV1P_16x4 = 0,
-    CM_CONV1P_16x1 = 2,
-    CM_CONV1P_1x1  = 3
+{   VA_CONV1P_16x4 = 0,
+    VA_CONV1P_16x1 = 2,
+    VA_CONV1P_1x1  = 3
 } CONV1PixelExecMode;
 
 typedef enum _HDCReturnFormat_
 {
-    CM_HDC_CONVOVLE_Y16 = 0,
-    CM_HDC_CONVOLVE_Y8  = 1
+    VA_HDC_CONVOVLE_Y16 = 0,
+    VA_HDC_CONVOLVE_Y8  = 1
 } HDCReturnFormat;
 
 typedef enum _CONVHDCRegionSize_
 {
-    CM_HDC_CONVOLVE_15x15 = 0,
-    CM_HDC_CONVOLVE_31x31 = 1
+    VA_HDC_CONVOLVE_15x15 = 0,
+    VA_HDC_CONVOLVE_31x31 = 1
 } CONVHDCRegionSize;
 
 typedef enum
@@ -602,14 +599,14 @@ typedef enum
     SVM_BLOCK_NUM_2 = 0x1,
     SVM_BLOCK_NUM_4 = 0x2,
     SVM_BLOCK_NUM_8 = 0x3
-} Common_ISA_SVM_Block_Num;
+} VISA_SVM_Block_Num;
 
 typedef enum
 {
     SVM_BLOCK_TYPE_BYTE  = 0x0,
     SVM_BLOCK_TYPE_DWORD = 0x1,
     SVM_BLOCK_TYPE_QWORD = 0x2
-} Common_ISA_SVM_Block_Type;
+} VISA_SVM_Block_Type;
 
 
 typedef struct _vISA_RT_CONTROLS

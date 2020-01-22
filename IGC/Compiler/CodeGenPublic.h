@@ -215,6 +215,7 @@ namespace IGC
         bool hasNonPrimitiveAlloca;
         bool hasReadOnlyArray;
         bool hasBuiltin;
+        bool hasFRem;
         bool psHasSideEffect;     //<! only relevant to pixel shader, has other memory writes besides RTWrite
         bool hasGenericAddressSpacePointers;
         bool hasDebugInfo;        //<! true only if module contains debug info !llvm.dbg.cu
@@ -448,7 +449,6 @@ namespace IGC
 
         USC::GFXMEDIA_GPUWALKER_SIMD        SimdWidth;
 
-        unsigned int                        TgsmTotalByteCount;
         unsigned int                        ThreadGroupSize;
 
         void* ThreadPayloadData;
@@ -762,6 +762,7 @@ namespace IGC
 
         void* gtpin_init = nullptr;
         bool m_hasLegacyDebugInfo = false;
+        bool m_hasEmu64BitInsts = false;
 
         CompilerStats m_Stats;
         // Flag for staged compilation
@@ -772,6 +773,9 @@ namespace IGC
         // For staged compilation, we record if SIMD32 will be generated in Stage1, and
         // pass it to Stage2.
         bool m_doSimd32Stage2 = false;
+        bool m_doSimd16Stage2 = false;
+        std::string m_savedBitcodeString;
+        SInstrTypes m_savedInstrTypes;
 
     protected:
         // Objects pointed to by these pointers are owned by this class.
@@ -841,6 +845,7 @@ namespace IGC
         virtual void resetOnRetry();
         virtual uint32_t getNumThreadsPerEU() const;
         virtual uint32_t getNumGRFPerThread() const;
+        virtual bool forceGlobalMemoryAllocation() const;
         bool isPOSH() const;
 
         CompilerStats& Stats()
@@ -1065,6 +1070,10 @@ namespace IGC
                 {
                     PreferBindlessImages = true;
                 }
+                if (strstr(options, "-cl-intel-force-global-mem-allocation"))
+                {
+                    IntelForceGlobalMemoryAllocation = true;
+                }
             }
 
 
@@ -1080,6 +1089,7 @@ namespace IGC
             bool IntelEnablePreRAScheduling = true;
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
+            bool IntelForceGlobalMemoryAllocation = false;
 
         };
 
@@ -1115,11 +1125,16 @@ namespace IGC
                     // the module metadata.
                     UniformWGS = true;
                 }
+                if (strstr(options, "-cl-take-global-address"))
+                {
+                    EnableTakeGlobalAddress = true;
+                }
             }
 
             bool CorrectlyRoundedSqrt;
             bool NoSubgroupIFP;
             bool UniformWGS;
+            bool EnableTakeGlobalAddress = false;
         };
 
         // output: shader information
@@ -1153,6 +1168,7 @@ namespace IGC
         float getProfilingTimerResolution();
         uint32_t getNumGRFPerThread() const;
         uint32_t getNumThreadsPerEU() const;
+        bool forceGlobalMemoryAllocation() const;
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;
     };
@@ -1165,6 +1181,8 @@ namespace IGC
     void CodeGen(GeometryShaderContext* ctx);
     void CodeGen(OpenCLProgramContext* ctx);
 
+    void SaveIR(CodeGenContext* ctx);
+    void RestoreIR(CodeGenContext* ctx);
     void OptimizeIR(CodeGenContext* ctx);
 
     /**

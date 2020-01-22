@@ -50,7 +50,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/PassTimer.hpp"
 #include "Compiler/CISACodeGen/FixAddrSpaceCast.h"
 #include "Compiler/CISACodeGen/FixupExtractValuePair.h"
-#include "Compiler/CISACodeGen/GenNullPointerLowering.h"
 #include "Compiler/CISACodeGen/GenIRLowering.h"
 #include "Compiler/CISACodeGen/GenSimplification.h"
 #include "Compiler/CISACodeGen/LoopDCE.h"
@@ -102,7 +101,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/GenUpdateCB.h"
 #include "Compiler/PromoteResourceToDirectAS.h"
 #include "Compiler/PromoteStatelessToBindless.h"
-#if defined( _DEBUG )
+#if defined( _DEBUG ) && !defined( ANDROID )
 #include "Compiler/VerificationPass.hpp"
 #endif
 #include "Compiler/LegalizationPass.hpp"
@@ -154,6 +153,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvmWrapper/Transforms/Utils.h>
 #include <llvmWrapper/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvmWrapper/Transforms/Scalar.h>
+#include <llvmWrapper/Bitcode/BitcodeWriter.h>
 
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include "common/LLVMWarningsPop.hpp"
@@ -403,12 +403,6 @@ namespace IGC
         mpm.add(new ProgramScopeConstantResolution());
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableConstIntDivReduction)) {
-        // reduce division/remainder with a constant divisors/moduli to
-        // more efficient sequences of multiplies, shifts, and adds
-        mpm.add(createIntDivConstantReductionPass());
-    }
-
     bool needDPEmu = (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
         (ctx.m_DriverInfo.NeedFP64() && !ctx.platform.supportFP64()));
     uint32_t theEmuKind = (needDPEmu ? EmuKind::EMU_DP : 0);
@@ -427,7 +421,13 @@ namespace IGC
 
         // Using DCE here as AlwaysInliner does not completely remove dead functions.
         // Once AlwaysInliner can delete all of them, this DCE is no longer needed.
-        mpm.add(createDeadCodeEliminationPass());
+        // mpm.add(createDeadCodeEliminationPass());
+        //
+        // DCE doesn't remove dead control flow; ADCE does (currently)
+        // otherwise you'd have to call createCFGSimplificationPass and DCE
+        // iteratively e.g..
+        mpm.add(llvm::createAggressiveDCEPass());
+        // TODO: we probably should be running other passes on the result
 
         if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
         {
@@ -657,6 +657,7 @@ namespace IGC
             mpm.add(createGEPLoweringPass());
         }
         mpm.add(createEmu64OpsPass());
+        ctx.m_hasEmu64BitInsts = true;
     }
 
     mpm.add(IGCLLVM::createInstSimplifyLegacyPass());
@@ -1019,6 +1020,49 @@ namespace IGC
 
     AddAnalysisPasses(*ctx, Passes);
 
+    SIMDMode mode;
+    if (ctx->m_enableFunctionPointer
+        && ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 0)
+    {
+        // In order to support compiling multiple SIMD modes for function pointer calls,
+        // we require a separate pass manager per SIMD mode, due to interdependencies across
+        // function compilations.
+        // Only SIMD16 and SIMD8 are supported.
+        SIMDMode modePass2;
+        bool abortOnSpill, abortOnSpill2;
+        if (ctx->m_DriverInfo.sendMultipleSIMDModes())
+        {
+            mode = SIMDMode::SIMD8;
+            modePass2 = SIMDMode::SIMD16;
+            abortOnSpill = false;
+            abortOnSpill2 = true;
+        }
+        else
+        {
+            mode = SIMDMode::SIMD16;
+            modePass2 = SIMDMode::SIMD8;
+            abortOnSpill = true;
+            abortOnSpill2 = false;
+        }
+        // Run first pass
+        AddCodeGenPasses(*ctx, kernels, Passes, mode, abortOnSpill);
+        COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+        Passes.run(*(ctx->getModule()));
+
+        // Create and run second pass
+        IGCPassManager Passes2(ctx, "CG2");
+        // Add required immutable passes
+        Passes2.add(new MetaDataUtilsWrapper(ctx->getMetaDataUtils(), ctx->getModuleMetaData()));
+        Passes2.add(new CodeGenContextWrapper(ctx));
+        Passes2.add(createGenXFunctionGroupAnalysisPass());
+        AddCodeGenPasses(*ctx, kernels, Passes2, modePass2, abortOnSpill2);
+        Passes2.run(*(ctx->getModule()));
+
+        COMPILER_TIME_END(ctx, TIME_CodeGen);
+        DumpLLVMIR(ctx, "codegen");
+        return;
+    }
+
     if (ctx->m_DriverInfo.sendMultipleSIMDModes())
     {
         unsigned int leastSIMD = 8;
@@ -1223,6 +1267,39 @@ namespace IGC
     }
     }
 
+    void SaveIR(CodeGenContext* pContext)
+    {
+        // For debugging
+        DumpLLVMIR(pContext, "stage1SavedIR");
+        COMPILER_TIME_START(pContext, TIME_OptimizationPasses);
+
+        // Save MetaData
+        serialize(*(pContext->getModuleMetaData()), pContext->getModule());
+        // Serialize LLVM IR and save it to a string
+        llvm::raw_string_ostream OStream(pContext->m_savedBitcodeString);
+        IGCLLVM::WriteBitcodeToFile(pContext->getModule(), OStream, true);
+        OStream.flush();
+
+        // Store the results and pass it to stage 2 if staged compilation happens
+        pContext->m_savedInstrTypes = pContext->m_instrTypes;
+        COMPILER_TIME_END(pContext, TIME_OptimizationPasses);
+    }
+
+    bool UnpackBitcode( const char *bitcode, unsigned int bitcodeSize, CodeGenContext& cisaContext, bool upgradeIR = true);
+
+    void RestoreIR(CodeGenContext* pContext)
+    {
+        COMPILER_TIME_START(pContext, TIME_OptimizationPasses);
+        pContext->m_instrTypes = (*(SInstrTypes *)pContext->m_StagingCtx->m_savedInstrTypes);
+        UnpackBitcode(pContext->m_StagingCtx->m_savedBitcodeString.c_str(),
+            pContext->m_StagingCtx->m_savedBitcodeString.size(), *pContext, false);
+        deserialize(*(pContext->getModuleMetaData()), pContext->getModule());
+
+        // For debugging
+        DumpLLVMIR(pContext, "stage2RestoredIR");
+        COMPILER_TIME_END(pContext, TIME_OptimizationPasses);
+    }
+
     void OptimizeIR(CodeGenContext* pContext)
     {
         MetaDataUtils* pMdUtils = pContext->getMetaDataUtils();
@@ -1265,7 +1342,7 @@ namespace IGC
         });
 
         mpm.add(new TargetTransformInfoWrapperPass(GenTTgetIIRAnalysis));
-#if defined( _DEBUG )
+#if defined( _DEBUG ) && !defined( ANDROID )
         // IGC IR Verification pass checks that we get a correct IR after the Unification.
         mpm.add(new VerificationPass());
 #endif
@@ -1591,6 +1668,12 @@ namespace IGC
         }
 
         mpm.add(llvm::createDeadCodeEliminationPass());
+
+        if (IGC_IS_FLAG_ENABLED(EnableConstIntDivReduction)) {
+            // reduce division/remainder with a constant divisors/moduli to
+            // more efficient sequences of multiplies, shifts, and adds
+            mpm.add(createIntDivConstantReductionPass());
+        }
 
         mpm.add(CreateMCSOptimization());
 

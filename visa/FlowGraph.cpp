@@ -618,6 +618,12 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
             subroutineStartBB.push_back(curr_BB);
         }
 
+        G4_DstRegRegion* dst = i->getDst();
+        if (dst && dst->isAreg() && dst->isSrReg())
+        {
+            setSR0Modified(true);
+        }
+
         //
         // do and endif do not have predicate and jump-to label,so we treated them as non-control instruction
         // the labels around them will decides the beginning of a new BB
@@ -1302,6 +1308,38 @@ void FlowGraph::handleReturn(std::map<std::string, G4_BB*>& labelMap, FuncInfoHa
     }
 }
 
+#ifdef _DEBUG
+void dump(FlowGraph* fg)
+{
+    for (auto bbIt = fg->begin(); bbIt != fg->end(); bbIt++)
+    {
+        auto bb = (*bbIt);
+
+        printf("BB%d\n", bb->getId());
+        printf("Pred: ");
+        for (auto p : bb->Preds)
+        {
+            printf("%d, ", p->getId());
+        }
+        printf("\nSucc: ");
+        for (auto s : bb->Succs)
+        {
+            printf("%d, ", s->getId());
+        }
+        printf("\n");
+
+        if (bb->getInstList().size() > 0 &&
+            bb->front()->isLabel())
+            bb->front()->dump();
+
+        printf("\n...\n");
+        if (bb->getInstList().size() > 0)
+            bb->getInstList().back()->dump();
+
+        printf("\n-----\n");
+    }
+}
+#endif
 
 void FlowGraph::linkReturnAddr(G4_BB* entryBB, G4_BB* returnAddr)
 {
@@ -2694,34 +2732,64 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
     }
 }
 
-typedef std::pair<G4_BB*, int> BlockSizePair;
+struct SJoinInfo {
+    SJoinInfo(G4_BB* B, uint16_t E, bool Nested = false) :
+        BB(B), ExecSize(E), IsNestedJoin(Nested) {}
+    G4_BB* BB;
+    uint16_t ExecSize;
+    // [HW WA] If IsNestedJoin is true, all BBs from the current to this 'BB'
+    // are considered as nested divergent, meaning they could be 00 fused mask
+    // that come out of fused mask 01.
+    bool IsNestedJoin;
+};
 
-static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, int execSize)
+static void addBBToActiveJoinList(std::list<SJoinInfo>& activeJoinBlocks,
+    G4_BB* bb, int execSize, bool backwardGoto = false)
 {
+    // [HW WA] as backward goto never changes fuseMask 01 to 00, it is not
+    // considered as nested divergent. It inherits the nesting divergence
+    // from the next join entry.
+    //
+    // If a joinBB is nested, all active preceding joinBBs must be nested
+
     // add goto target to list of active blocks that need a join
-    std::list<BlockSizePair>::iterator listIter;
+    std::list<SJoinInfo>::iterator listIter;
     for (listIter = activeJoinBlocks.begin(); listIter != activeJoinBlocks.end(); ++listIter)
     {
-        G4_BB* aBB = (*listIter).first;
+        // If activeJoinBlocks isn't empty, this join should be considered as a nested join
+        SJoinInfo& jinfo = (*listIter);
+        G4_BB* aBB = jinfo.BB;
         if (aBB->getId() == bb->getId())
         {
             // block already in list, update exec size if necessary
-            if (execSize > (*listIter).second)
+            if (execSize > jinfo.ExecSize)
             {
-                (*listIter).second = execSize;
+                jinfo.ExecSize = execSize;
+            }
+
+            if (!backwardGoto)
+            {
+                jinfo.IsNestedJoin = true;
             }
             break;
         }
         else if (aBB->getId() > bb->getId())
         {
-            activeJoinBlocks.insert(listIter, BlockSizePair(bb, execSize));
+            bool nested = (backwardGoto ? jinfo.IsNestedJoin : true);
+            activeJoinBlocks.insert(listIter, SJoinInfo(bb, execSize, nested));
             break;
+        }
+
+        if (!backwardGoto)
+        {   // Mark all preceding joinBB as nested.
+            jinfo.IsNestedJoin = true;
         }
     }
 
     if (listIter == activeJoinBlocks.end())
     {
-        activeJoinBlocks.push_back(BlockSizePair(bb, execSize));
+        bool nested = (backwardGoto || activeJoinBlocks.empty()) ? false : true;
+        activeJoinBlocks.push_back(SJoinInfo(bb, execSize, nested));
     }
 }
 
@@ -2850,7 +2918,7 @@ void FlowGraph::setJIPForEndif(G4_INST* endif, G4_INST* target, G4_BB* targetBB)
 void FlowGraph::processGoto(bool HasSIMDCF)
 {
     // list of active blocks where a join needs to be inserted, sorted in lexical order
-    std::list<BlockSizePair> activeJoinBlocks;
+    std::list<SJoinInfo> activeJoinBlocks;
     bool doScalarJmp = !builder->noScalarJmp();
 
     for (BB_LIST_ITER it = BBs.begin(), itEnd = BBs.end(); it != itEnd; ++it)
@@ -2863,18 +2931,18 @@ void FlowGraph::processGoto(bool HasSIMDCF)
 
         if (activeJoinBlocks.size() > 0)
         {
-            if (bb == activeJoinBlocks.front().first)
+            if (bb == activeJoinBlocks.front().BB)
             {
                 // This block is the target of one or more forward goto,
                 // or the fall-thru of a backward goto, needs to insert a join
-                int execSize = activeJoinBlocks.front().second;
+                int execSize = activeJoinBlocks.front().ExecSize;
                 G4_Label* joinJIP = NULL;
 
                 activeJoinBlocks.pop_front();
                 if (activeJoinBlocks.size() > 0)
                 {
                     //set join JIP to the next active join
-                    G4_BB* joinBlock = activeJoinBlocks.front().first;
+                    G4_BB* joinBlock = activeJoinBlocks.front().BB;
                     joinJIP = joinBlock->getLabel();
                 }
 
@@ -2920,7 +2988,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // (i.e., the loop has no breaks but only EOT sends)
                     if (loopExitBB != NULL)
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, loopExitBB, lastInst->getExecSize());
+                        addBBToActiveJoinList(activeJoinBlocks, loopExitBB, lastInst->getExecSize(), true);
                     }
 
                 }
@@ -2936,7 +3004,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // add join to the fall-thru BB
                     if (G4_BB* fallThruBB = predBB->getPhysicalSucc())
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize);
+                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize, true);
                         lastInst->asCFInst()->setJip(fallThruBB->getLabel());
                     }
                 }
@@ -2950,6 +3018,24 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             bb->setInSimdFlow(true);
         }
 
+        // [HW WA] set nested divergent branch.
+        //    1) [conservative] set it if it is divergent, but not necessarily nested, or
+        //    2) Set it if there are at least two active joins or one nested join.
+        if ((builder->getuint32Option(vISA_noMaskToAnyhWA) & 0x3) > 1)
+        {
+            if (activeJoinBlocks.size() > 0 && activeJoinBlocks.front().IsNestedJoin)
+            {
+                setInNestedDivergentBranch(bb);
+            }
+        }
+        else if ((builder->getuint32Option(vISA_noMaskToAnyhWA) & 0x3) > 0)
+        {
+            if (activeJoinBlocks.size() > 0)
+            {
+                setInNestedDivergentBranch(bb);
+            }
+        }
+
         G4_INST* lastInst = bb->back();
         if (lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward())
         {
@@ -2959,7 +3045,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             bool isUniform = lastInst->getExecSize() == 1 || lastInst->getPredicate() == NULL;
 
             if (isUniform && doScalarJmp &&
-                (activeJoinBlocks.size() == 0 || activeJoinBlocks.front().first->getId() > gotoTargetBB->getId()))
+                (activeJoinBlocks.size() == 0 || activeJoinBlocks.front().BB->getId() > gotoTargetBB->getId()))
             {
                 // can convert goto into a scalar jump to UIP, if the jmp will not make us skip any joins
                 // CFG itself does not need to be updated
@@ -2970,7 +3056,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 //set goto JIP to the first active block
                 uint8_t eSize = lastInst->getExecSize() > 1 ? lastInst->getExecSize() : pKernel->getSimdSize();
                 addBBToActiveJoinList(activeJoinBlocks, gotoTargetBB, eSize);
-                G4_BB* joinBlock = activeJoinBlocks.front().first;
+                G4_BB* joinBlock = activeJoinBlocks.front().BB;
                 if (lastInst->getExecSize() == 1)
                 {   // For simd1 goto, convert it to a goto with the right execSize.
                     lastInst->setExecSize(eSize);
@@ -3492,7 +3578,6 @@ static iga_gen_t getIGAPlatform()
     case GENX_CNL:
         platform = IGA_GEN10;
         break;
-    case GENX_ICL:
     case GENX_ICLLP:
         platform = IGA_GEN11;
         break;
@@ -5394,8 +5479,11 @@ void FlowGraph::DFSTraverse(G4_BB* startBB, unsigned &preId, unsigned &postId, F
         if (bb->getBBType() & G4_BB_CALL_TYPE)
         {
             G4_BB* returnBB = bb->BBAfterCall();
-            MUST_BE_TRUE(bb->Succs.front()->getBBType() & G4_BB_INIT_TYPE, ERROR_FLOWGRAPH);
-            MUST_BE_TRUE(bb->Succs.size() == 1, ERROR_FLOWGRAPH);
+            // If call is predicated, first item in Succs is physically consecutive BB and second (or last)
+            // item is sub-routine entry BB.
+            MUST_BE_TRUE(bb->Succs.back()->getBBType() & G4_BB_INIT_TYPE, ERROR_FLOWGRAPH);
+            // bb->Succs size may be 2 if call is predicated.
+            MUST_BE_TRUE(bb->Succs.size() == 1 || bb->Succs.size() == 2, ERROR_FLOWGRAPH);
 
             {
                 bool found = false;
@@ -6166,6 +6254,39 @@ void writeBuffer(std::vector<unsigned char>& buffer, unsigned int& bufferSize, c
     bufferSize += numBytes;
 }
 
+unsigned int getBinOffsetNextBB(G4_Kernel& kernel, G4_BB* bb)
+{
+    // Given bb, return binary offset of first
+    // non-label of lexically following bb.
+    G4_BB* nextBB = nullptr;
+    for (auto it = kernel.fg.begin(); it != kernel.fg.end(); it++)
+    {
+        auto curBB = (*it);
+        if (curBB == bb && it != kernel.fg.end())
+        {
+            it++;
+            nextBB = (*it);
+        }
+    }
+
+    if (!nextBB)
+        return 0;
+
+    auto iter = std::find_if(nextBB->begin(), nextBB->end(), [](G4_INST* inst) { return !inst->isLabel(); });
+    assert(iter != nextBB->end() && "execpt at least one non-label inst in second BB");
+    return (unsigned int)(*iter)->getGenOffset();
+}
+
+unsigned int gtPinData::getCrossThreadNextOff()
+{
+    return getBinOffsetNextBB(kernel, crossThreadPayloadBB);
+}
+
+unsigned int gtPinData::getPerThreadNextOff()
+{
+    return getBinOffsetNextBB(kernel, perThreadPayloadBB);
+}
+
 void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
 {
     gtpin::igc::igc_init_t t;
@@ -6193,6 +6314,9 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
         t.scratch_area_size = gtpin_init->scratch_area_size;
         numTokens++;
     }
+
+    // For payload offsets
+    numTokens++;
 
     writeBuffer(buffer, bufferSize, &t, sizeof(t));
     writeBuffer(buffer, bufferSize, &numTokens, sizeof(uint32_t));
@@ -6228,6 +6352,14 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
 
         writeBuffer(buffer, bufferSize, &scratchSlotData, sizeof(scratchSlotData));
     }
+
+    // Write payload offsets
+    gtpin::igc::igc_token_kernel_start_info_t offsets;
+    offsets.token = gtpin::igc::GTPIN_IGC_TOKEN_KERNEL_START_INFO;
+    offsets.per_thread_prolog_size = getPerThreadNextOff();
+    offsets.cross_thread_prolog_size = getCrossThreadNextOff() - offsets.per_thread_prolog_size;
+    offsets.token_size = sizeof(offsets);
+    writeBuffer(buffer, bufferSize, &offsets, sizeof(offsets));
 
     void* gtpinBuffer = allocCodeBlock(bufferSize);
 

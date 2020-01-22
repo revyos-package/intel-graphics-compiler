@@ -66,27 +66,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define DEBUG_PRINT_SIZE_INSTRUCTION(msg, inst ,value)
 #endif
 
-#ifdef _DEBUG
-#ifndef __GNUC__
-#define CmAssert(expr)    \
-    if(!(expr))           \
-    {                     \
-        __debugbreak();   \
-    }
-#else
-#define CmAssert(expr)    \
-    if(!(expr))           \
-    {                     \
-        __builtin_trap(); \
-    }
-#endif  // __GNUC__
-#define CmDebugMessage(arg) CmPrintMessage arg
-
-#else
-#define CmAssert(expr)
-#define CmDebugMessage(arg)
-#endif // _DEBUG
-
 struct attr_gen_struct {
     char* name;
     bool  isInt;
@@ -167,7 +146,7 @@ public:
     unsigned char        getOpcode       () const { return m_cisa_instruction.opcode;           }
     unsigned char        getModifier     () const { return m_cisa_instruction.modifier;         }
     unsigned             getOperandCount () const { return m_cisa_instruction.opnd_count;       }
-    Common_ISA_Exec_Size getExecSize     () const { return (Common_ISA_Exec_Size)
+    VISA_Exec_Size getExecSize     () const { return (VISA_Exec_Size)
                                                            (m_cisa_instruction.execsize & 0xF); }
 
     void *operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); }

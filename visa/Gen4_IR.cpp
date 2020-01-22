@@ -3309,6 +3309,18 @@ G4_INST::isComprInvariantSrcRegion(G4_SrcRegRegion* src, int srcPos)
     }
 }
 
+bool G4_INST::isPartialWrite() const
+{
+    G4_Predicate* aPred = predicate;
+    if (aPred && aPred->isSameAsNoMask())
+    {
+        // equivalent to NoMask (W) without predicate
+        aPred = nullptr;
+    }
+
+    return (aPred != NULL && op != G4_sel) || op == G4_smov;
+}
+
 bool G4_INST::isAccSrcInst() const
 {
     if (srcs[0] && srcs[0]->isSrcRegRegion() && srcs[0]->asSrcRegRegion()->getBase()->isAccReg())
@@ -3908,12 +3920,16 @@ bool G4_INST::isMixedMode() const
         }
 
         G4_Type srcType = tOpnd->getType();
+        G4_Type dstType = getDst()->getType();
 
-        // FIXME: this includes int <-> HF type conversion, which is probably not the intention of the function..
-        if ((getDst()->getType() == builder.getMixModeType() || srcType == builder.getMixModeType()) &&
-            getDst()->getType() != srcType)
+        if ((dstType == builder.getMixModeType() || srcType == builder.getMixModeType()) &&
+            dstType != srcType)
         {
-            return true;
+            // do not consider int<->float conversion as mixed type
+            if (!IS_TYPE_INT(dstType) && !IS_TYPE_INT(srcType))
+            {
+                return true;
+            }
         }
     }
 
@@ -5906,6 +5922,7 @@ G4_Predicate::G4_Predicate(G4_Predicate &prd)
     bitVec[1] = prd.bitVec[1];
     byteOffset = prd.byteOffset;
     rightBoundSet = prd.rightBoundSet;
+    isPredicateSameAsNoMask = prd.isPredicateSameAsNoMask;
 }
 
 unsigned G4_Predicate::computeRightBound( uint8_t exec_size )
@@ -7291,6 +7308,16 @@ void G4_INST::setImplAccDst(G4_DstRegRegion* opnd)
 
     associateOpndWithInst(opnd, this);
     computeRightBound(opnd);
+}
+
+// get simd lane mask for this instruction. For example,
+//      add  (8|M8) ...
+// will have 0xFF00, which lane 8-15
+unsigned G4_INST::getExecLaneMask() const
+{
+    unsigned maskbits = (1 << getExecSize()) - 1;
+    unsigned chanOffset = getMaskOffset();
+    return (maskbits << chanOffset);
 }
 
 void G4_INST::dump() const

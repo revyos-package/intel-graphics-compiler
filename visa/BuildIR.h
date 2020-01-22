@@ -342,6 +342,9 @@ public:
     unsigned int curLine;
     int curCISAOffset;
 
+    static const int OrphanVISAIndex = 0xffffffff;
+    int debugInfoPlaceholder = OrphanVISAIndex; // used for debug info, catch all VISA offset for orphan instructions
+
 private:
 
     class GlobalImmPool
@@ -539,6 +542,7 @@ public:
 
     const Options* getOptions() const { return m_options; }
     bool getOption(vISAOptions opt) const {return m_options->getOption(opt); }
+    uint32_t getuint32Option(vISAOptions opt) const { return m_options->getuInt32Option(opt); }
     void getOption(vISAOptions opt, const char *&str) const {return m_options->getOption(opt, str); }
     void addInputArg(input_info_t * inpt);
     input_info_t * getInputArg(unsigned int index);
@@ -714,7 +718,7 @@ public:
             if (predefinedVarNeedGRF(i))
             {
                 // work item id variables are handled uniformly
-                G4_Type ty = Get_G4_Type_From_Common_ISA_Type(getPredefinedVarType((PreDefinedVarsInternal)i));
+                G4_Type ty = GetGenTypeFromVISAType(getPredefinedVarType((PreDefinedVarsInternal)i));
                 dcl = createPreVar(getPredefinedVarID((PreDefinedVarsInternal)i), 1, ty);
             }
             else
@@ -806,7 +810,7 @@ public:
                 {
                     // these three are size 1 UW
                     dcl = createDeclareNoLookup(name, G4_GRF, 1, 1,
-                        Get_G4_Type_From_Common_ISA_Type(getPredefinedVarType(i)));
+                        GetGenTypeFromVISAType(getPredefinedVarType(i)));
                     break;
                 }
                 default:
@@ -1926,8 +1930,8 @@ public:
         VISASampler3DSubOpCode actualop,
         bool pixelNullMask,
         G4_Predicate* pred,
-        Common_ISA_Exec_Size exeuctionSize,
-        Common_VISA_EMask_Ctrl em,
+        VISA_Exec_Size exeuctionSize,
+        VISA_EMask_Ctrl em,
         ChannelMask channelMask,
         G4_Operand* aoffimmi,
         G4_Operand* sampler,
@@ -1940,8 +1944,8 @@ public:
         VISASampler3DSubOpCode actualop,
         bool pixelNullMask,
         G4_Predicate *pred,
-        Common_ISA_Exec_Size exeuctionSize,
-        Common_VISA_EMask_Ctrl em,
+        VISA_Exec_Size exeuctionSize,
+        VISA_EMask_Ctrl em,
         ChannelMask channelMask,
         G4_Operand* aoffimmi,
         G4_Operand* surface,
@@ -1951,16 +1955,16 @@ public:
 
     int translateVISAAddrInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_DstRegRegion *dst_opnd,
         G4_Operand *src0_opnd,
         G4_Operand *src1_opnd);
 
     int translateVISAArithmeticInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         bool saturate,
         G4_CondMod* condMod,
@@ -1972,8 +1976,8 @@ public:
 
     int translateVISAArithmeticDoubleInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         bool saturate,
         G4_DstRegRegion *dstOpnd,
@@ -1982,8 +1986,8 @@ public:
 
     int translateVISAArithmeticSingleDivideIEEEInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         bool saturate,
         G4_CondMod* condMod,
@@ -1993,8 +1997,8 @@ public:
 
     int translateVISAArithmeticSingleSQRTIEEEInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         bool saturate,
         G4_CondMod* condMod,
@@ -2003,8 +2007,8 @@ public:
 
     int translateVISAArithmeticDoubleSQRTInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         bool saturate,
         G4_CondMod* condMod,
@@ -2022,18 +2026,18 @@ public:
 
     int translateVISACompareInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
-        Common_ISA_Cond_Mod relOp,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
+        VISA_Cond_Mod relOp,
         G4_Declare* predDst,
         G4_Operand *src0_opnd,
         G4_Operand *src1_opnd);
 
     int translateVISACompareInst(
         ISA_Opcode opcode,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl emask,
-        Common_ISA_Cond_Mod relOp,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
+        VISA_Cond_Mod relOp,
         G4_DstRegRegion *dstOpnd,
         G4_Operand *src0Opnd,
         G4_Operand *src1Opnd);
@@ -2046,8 +2050,8 @@ public:
     int translateVISACFLabelInst(G4_Label* lab);
 
     int translateVISACFCallInst(
-        Common_ISA_Exec_Size execsize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execsize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         G4_Label* lab);
 
@@ -2056,16 +2060,16 @@ public:
         G4_Label* lab);
 
     int translateVISACFFCallInst(
-        Common_ISA_Exec_Size execsize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execsize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         std::string funcName,
         uint8_t argSize,
         uint8_t returnSize);
 
     int translateVISACFIFCallInst(
-        Common_ISA_Exec_Size execsize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execsize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd,
         G4_Operand* funcAddr,
         uint8_t argSize,
@@ -2076,26 +2080,26 @@ public:
         G4_DstRegRegion* dst);
 
     int translateVISACFFretInst(
-        Common_ISA_Exec_Size execsize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execsize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd);
 
     int translateVISACFRetInst(
-        Common_ISA_Exec_Size execsize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execsize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate *predOpnd);
 
     int translateVISAOwordLoadInst(
         ISA_Opcode opcode,
         bool modified,
         G4_Operand* surface,
-        Common_ISA_Oword_Num size,
+        VISA_Oword_Num size,
         G4_Operand* offOpnd,
         G4_DstRegRegion* dstOpnd);
 
     int translateVISAOwordStoreInst(
         G4_Operand* surface,
-        Common_ISA_Oword_Num size,
+        VISA_Oword_Num size,
         G4_Operand* offOpnd,
         G4_SrcRegRegion* srcOpnd);
 
@@ -2120,10 +2124,10 @@ public:
                         G4_SrcRegRegion* srcOpnd );
 
     int translateVISAGatherInst(
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_EMask_Ctrl emask,
                         bool modified,
                         GATHER_SCATTER_ELEMENT_SIZE eltSize,
-                        Common_ISA_Exec_Size executionSize,
+                        VISA_Exec_Size executionSize,
                         G4_Operand* surface,
                         G4_Operand* gOffOpnd,
                         G4_SrcRegRegion* eltOFfOpnd,
@@ -2131,28 +2135,28 @@ public:
                         );
 
     int translateVISAScatterInst(
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_EMask_Ctrl emask,
                         GATHER_SCATTER_ELEMENT_SIZE eltSize,
-                        Common_ISA_Exec_Size executionSize,
+                        VISA_Exec_Size executionSize,
                         G4_Operand* surface,
                         G4_Operand* gOffOpnd,
                         G4_SrcRegRegion* eltOffOpnd,
                         G4_SrcRegRegion* srcOpnd );
 
     int translateVISAGather4Inst(
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_EMask_Ctrl emask,
                         bool modified,
                         ChannelMask chMask,
-                        Common_ISA_Exec_Size executionSize,
+                        VISA_Exec_Size executionSize,
                         G4_Operand* surface,
                         G4_Operand* gOffOpnd,
                         G4_SrcRegRegion* eltOffOpnd,
                         G4_DstRegRegion* dstOpnd );
 
     int translateVISAScatter4Inst(
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_EMask_Ctrl emask,
                         ChannelMask chMask,
-                        Common_ISA_Exec_Size executionSize,
+                        VISA_Exec_Size executionSize,
                         G4_Operand* surface,
                         G4_Operand* gOffOpnd,
                         G4_SrcRegRegion* eltOffOpnd,
@@ -2161,8 +2165,8 @@ public:
     int translateVISADwordAtomicInst(VISAAtomicOps subOpc,
                                      bool is16Bit,
                                      G4_Predicate *pred,
-                                     Common_ISA_Exec_Size execSize,
-                                     Common_VISA_EMask_Ctrl eMask,
+                                     VISA_Exec_Size execSize,
+                                     VISA_EMask_Ctrl eMask,
                                      G4_Operand* surface,
                                      G4_SrcRegRegion* offsets,
                                      G4_SrcRegRegion* src0,
@@ -2173,8 +2177,8 @@ public:
         VISAAtomicOps atomicOp,
         bool is16Bit,
         G4_Predicate           *pred,
-        Common_VISA_EMask_Ctrl emask,
-        Common_ISA_Exec_Size execSize,
+        VISA_EMask_Ctrl emask,
+        VISA_Exec_Size execSize,
         G4_Operand *surface,
         G4_SrcRegRegion *uOffsetOpnd,
         G4_SrcRegRegion *vOffsetOpnd,
@@ -2185,10 +2189,10 @@ public:
         G4_DstRegRegion *dst);
 
     int translateVISAGather4TypedInst(G4_Predicate           *pred,
-                                      Common_VISA_EMask_Ctrl emask,
+                                      VISA_EMask_Ctrl emask,
                                       ChannelMask chMask,
                                       G4_Operand *surfaceOpnd,
-                                      Common_ISA_Exec_Size executionSize,
+                                      VISA_Exec_Size executionSize,
                                       G4_SrcRegRegion *uOffsetOpnd,
                                       G4_SrcRegRegion *vOffsetOpnd,
                                       G4_SrcRegRegion *rOffsetOpnd,
@@ -2196,10 +2200,10 @@ public:
                                       G4_DstRegRegion *dstOpnd);
 
     int translateVISAScatter4TypedInst(G4_Predicate           *pred,
-                                       Common_VISA_EMask_Ctrl emask,
+                                       VISA_EMask_Ctrl emask,
                                        ChannelMask chMask,
                                        G4_Operand *surfaceOpnd,
-                                       Common_ISA_Exec_Size executionSize,
+                                       VISA_Exec_Size executionSize,
                                        G4_SrcRegRegion *uOffsetOpnd,
                                        G4_SrcRegRegion *vOffsetOpnd,
                                        G4_SrcRegRegion *rOffsetOpnd,
@@ -2207,8 +2211,8 @@ public:
                                        G4_SrcRegRegion *srcOpnd);
 
     int translateVISAGather4ScaledInst(G4_Predicate *pred,
-                                       Common_ISA_Exec_Size execSize,
-                                       Common_VISA_EMask_Ctrl eMask,
+                                       VISA_Exec_Size execSize,
+                                       VISA_EMask_Ctrl eMask,
                                        ChannelMask chMask,
                                        G4_Operand *surface,
                                        G4_Operand *globalOffset,
@@ -2216,8 +2220,8 @@ public:
                                        G4_DstRegRegion *dst);
 
     int translateVISAScatter4ScaledInst(G4_Predicate *pred,
-                                        Common_ISA_Exec_Size execSize,
-                                        Common_VISA_EMask_Ctrl eMask,
+                                        VISA_Exec_Size execSize,
+                                        VISA_EMask_Ctrl eMask,
                                         ChannelMask chMask,
                                         G4_Operand *surface,
                                         G4_Operand *globalOffset,
@@ -2225,51 +2229,51 @@ public:
                                         G4_SrcRegRegion *src);
 
     int translateVISAGatherScaledInst(G4_Predicate *pred,
-                                      Common_ISA_Exec_Size execSize,
-                                      Common_VISA_EMask_Ctrl eMask,
-                                      Common_ISA_SVM_Block_Num numBlocks,
+                                      VISA_Exec_Size execSize,
+                                      VISA_EMask_Ctrl eMask,
+                                      VISA_SVM_Block_Num numBlocks,
                                       G4_Operand *surface,
                                       G4_Operand *globalOffset,
                                       G4_SrcRegRegion *offsets,
                                       G4_DstRegRegion *dst);
 
     int translateVISAScatterScaledInst(G4_Predicate *pred,
-                                       Common_ISA_Exec_Size execSize,
-                                       Common_VISA_EMask_Ctrl eMask,
-                                       Common_ISA_SVM_Block_Num numBlocks,
+                                       VISA_Exec_Size execSize,
+                                       VISA_EMask_Ctrl eMask,
+                                       VISA_SVM_Block_Num numBlocks,
                                        G4_Operand *surface,
                                        G4_Operand *globalOffset,
                                        G4_SrcRegRegion *offsets,
                                        G4_SrcRegRegion *src);
 
     int translateByteGatherInst(G4_Predicate *pred,
-                                Common_ISA_Exec_Size execSize,
-                                Common_VISA_EMask_Ctrl eMask,
-                                Common_ISA_SVM_Block_Num numBlocks,
+                                VISA_Exec_Size execSize,
+                                VISA_EMask_Ctrl eMask,
+                                VISA_SVM_Block_Num numBlocks,
                                 G4_Operand *surface,
                                 G4_Operand *globalOffset,
                                 G4_SrcRegRegion *offsets,
                                 G4_DstRegRegion *dst);
     int translateByteScatterInst(G4_Predicate *pred,
-                                 Common_ISA_Exec_Size execSize,
-                                 Common_VISA_EMask_Ctrl eMask,
-                                 Common_ISA_SVM_Block_Num numBlocks,
+                                 VISA_Exec_Size execSize,
+                                 VISA_EMask_Ctrl eMask,
+                                 VISA_SVM_Block_Num numBlocks,
                                  G4_Operand *surface,
                                  G4_Operand *globalOffset,
                                  G4_SrcRegRegion *offsets,
                                  G4_SrcRegRegion *src);
 
     int translateGather4Inst(G4_Predicate *pred,
-                             Common_ISA_Exec_Size execSize,
-                             Common_VISA_EMask_Ctrl eMask,
+                             VISA_Exec_Size execSize,
+                             VISA_EMask_Ctrl eMask,
                              ChannelMask chMask,
                              G4_Operand *surface,
                              G4_Operand *globalOffset,
                              G4_SrcRegRegion *offsets,
                              G4_DstRegRegion *dst);
     int translateScatter4Inst(G4_Predicate *pred,
-                              Common_ISA_Exec_Size execSize,
-                              Common_VISA_EMask_Ctrl eMask,
+                              VISA_Exec_Size execSize,
+                              VISA_EMask_Ctrl eMask,
                               ChannelMask chMask,
                               G4_Operand *surface,
                               G4_Operand *globalOffset,
@@ -2279,8 +2283,8 @@ public:
     int translateVISALogicInst(ISA_Opcode opcode,
                         G4_Predicate *pred_opnd,
                         bool saturate,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         G4_DstRegRegion* dst,
                         G4_Operand* src0,
                         G4_Operand* src1,
@@ -2321,8 +2325,8 @@ public:
 
     int translateVISARawSendInst(
                         G4_Predicate *predOpnd,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         uint8_t modifiers,
                         unsigned int exDesc,
                         uint8_t numSrc,
@@ -2333,8 +2337,8 @@ public:
 
     int translateVISARawSendsInst(
                         G4_Predicate *predOpnd,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         uint8_t modifiers,
                         G4_Operand* exDesc,
                         uint8_t numSrc0,
@@ -2385,8 +2389,8 @@ public:
                         ISA_Opcode opcode,
                         CISA_MIN_MAX_SUB_OPCODE subOpcode,
                         G4_Predicate *pred_opnd,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         bool saturate,
                         G4_DstRegRegion *dst,
                         G4_Operand *src0,
@@ -2453,11 +2457,10 @@ public:
                         G4_Operand* vOffOpnd,
                         G4_DstRegRegion* dst_opnd );
 
-    int translateVISASimdInst(
-                        ISA_Opcode opcode,
+    int translateVISAGotoInst(
                         G4_Predicate *predOpnd,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         G4_Label *label);
 
     int translateVISASampler3DInst(
@@ -2466,8 +2469,8 @@ public:
                         bool cpsEnable,
                         bool uniformSampler,
                         G4_Predicate* pred,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         ChannelMask srcChannel,
                         G4_Operand* aoffimmi,
                         G4_Operand *sampler,
@@ -2477,15 +2480,15 @@ public:
                         G4_SrcRegRegion ** params);
 
     int translateVISASampleInfoInst(
-        Common_ISA_Exec_Size executionSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size executionSize,
+        VISA_EMask_Ctrl emask,
         ChannelMask chMask,
         G4_Operand* surface,
         G4_DstRegRegion* dst);
 
     int translateVISAResInfoInst(
-        Common_ISA_Exec_Size executionSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size executionSize,
+        VISA_EMask_Ctrl emask,
         ChannelMask chMask,
         G4_Operand* surface,
         G4_SrcRegRegion* lod,
@@ -2494,8 +2497,8 @@ public:
 
     int translateVISAURBWrite3DInst(
                         G4_Predicate* pred,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         uint8_t numOut,
                         uint16_t globalOffset,
                         G4_SrcRegRegion* channelMask,
@@ -2505,8 +2508,8 @@ public:
 
     int translateVISARTWrite3DInst(
                         G4_Predicate* pred,
-                        Common_ISA_Exec_Size executionSize,
-                        Common_VISA_EMask_Ctrl emask,
+                        VISA_Exec_Size executionSize,
+                        VISA_EMask_Ctrl emask,
                         G4_Operand *surface,
                         G4_SrcRegRegion *r1HeaderOpnd,
                         G4_Operand *rtIndex,
@@ -2517,71 +2520,71 @@ public:
                         G4_SrcRegRegion ** msgOpnds);
 
     int translateVISASVMBlockReadInst(
-        Common_ISA_Oword_Num numOword,
+        VISA_Oword_Num numOword,
         bool unaligned,
         G4_Operand* address,
         G4_DstRegRegion* dst);
 
     int translateVISASVMBlockWriteInst(
-        Common_ISA_Oword_Num numOword,
+        VISA_Oword_Num numOword,
         G4_Operand* address,
         G4_SrcRegRegion* src);
 
     int translateVISASVMScatterReadInst(
-        Common_ISA_Exec_Size executionSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size executionSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate* pred,
-        Common_ISA_SVM_Block_Type blockSize,
-        Common_ISA_SVM_Block_Num numBlocks,
+        VISA_SVM_Block_Type blockSize,
+        VISA_SVM_Block_Num numBlocks,
         G4_SrcRegRegion* addresses,
         G4_DstRegRegion* dst);
 
     int translateVISASVMScatterWriteInst(
-        Common_ISA_Exec_Size executionSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size executionSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate* pred,
-        Common_ISA_SVM_Block_Type blockSize,
-        Common_ISA_SVM_Block_Num numBlocks,
+        VISA_SVM_Block_Type blockSize,
+        VISA_SVM_Block_Num numBlocks,
         G4_SrcRegRegion* addresses,
         G4_SrcRegRegion* src);
 
     int translateVISASVMAtomicInst(
         VISAAtomicOps op,
         unsigned short bitwidth,
-        Common_ISA_Exec_Size executionSize,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_Exec_Size executionSize,
+        VISA_EMask_Ctrl emask,
         G4_Predicate* pred,
         G4_SrcRegRegion* addresses,
         G4_SrcRegRegion* src0,
         G4_SrcRegRegion* src1,
         G4_DstRegRegion* dst);
 
-    int translateSVMGather4Inst(Common_ISA_Exec_Size      execSize,
-                                Common_VISA_EMask_Ctrl    eMask,
+    int translateSVMGather4Inst(VISA_Exec_Size      execSize,
+                                VISA_EMask_Ctrl    eMask,
                                 ChannelMask               chMask,
                                 G4_Predicate              *pred,
                                 G4_Operand                *address,
                                 G4_SrcRegRegion           *offsets,
                                 G4_DstRegRegion           *dst);
 
-    int translateSVMScatter4Inst(Common_ISA_Exec_Size     execSize,
-                                 Common_VISA_EMask_Ctrl   eMask,
+    int translateSVMScatter4Inst(VISA_Exec_Size     execSize,
+                                 VISA_EMask_Ctrl   eMask,
                                  ChannelMask              chMask,
                                  G4_Predicate             *pred,
                                  G4_Operand               *address,
                                  G4_SrcRegRegion          *offsets,
                                  G4_SrcRegRegion          *src);
 
-    int translateVISASVMGather4ScaledInst(Common_ISA_Exec_Size      execSize,
-                                          Common_VISA_EMask_Ctrl    eMask,
+    int translateVISASVMGather4ScaledInst(VISA_Exec_Size      execSize,
+                                          VISA_EMask_Ctrl    eMask,
                                           ChannelMask               chMask,
                                           G4_Predicate              *pred,
                                           G4_Operand                *address,
                                           G4_SrcRegRegion           *offsets,
                                           G4_DstRegRegion           *dst);
 
-    int translateVISASVMScatter4ScaledInst(Common_ISA_Exec_Size     execSize,
-                                           Common_VISA_EMask_Ctrl   eMask,
+    int translateVISASVMScatter4ScaledInst(VISA_Exec_Size     execSize,
+                                           VISA_EMask_Ctrl   eMask,
                                            ChannelMask              chMask,
                                            G4_Predicate             *pred,
                                            G4_Operand               *address,
@@ -2706,10 +2709,10 @@ private:
     int translateVISASLMByteScaledInst(
         bool isRead,
         G4_Predicate *pred,
-        Common_ISA_Exec_Size execSize,
-        Common_VISA_EMask_Ctrl eMask,
-        Common_ISA_SVM_Block_Type blockSize,
-        Common_ISA_SVM_Block_Num numBlocks,
+        VISA_Exec_Size execSize,
+        VISA_EMask_Ctrl eMask,
+        VISA_SVM_Block_Type blockSize,
+        VISA_SVM_Block_Num numBlocks,
         uint8_t scale,
         G4_Operand *sideBand,
         G4_SrcRegRegion *offsets,
@@ -2718,8 +2721,8 @@ private:
     int translateVISASLMUntypedScaledInst(
         bool isRead,
         G4_Predicate *pred,
-        Common_ISA_Exec_Size   execSize,
-        Common_VISA_EMask_Ctrl eMask,
+        VISA_Exec_Size   execSize,
+        VISA_EMask_Ctrl eMask,
         ChannelMask            chMask,
         uint16_t               scale,
         G4_Operand             *globalOffset,
@@ -2747,7 +2750,7 @@ private:
         G4_Operand *sampler,
         G4_Operand *surface,
         G4_DstRegRegion* dst,
-        Common_VISA_EMask_Ctrl emask,
+        VISA_EMask_Ctrl emask,
         bool useHeader,
         unsigned numRows, // msg length for each simd8
         unsigned int numParms,

@@ -685,10 +685,10 @@ public:
     uint32_t getLexicalId() const { return global_id; }
     void setLexicalId(uint32_t id) { global_id = id; }
     void setPredicate(G4_Predicate* p);
-    G4_Predicate* getPredicate() const {return predicate;}
-    void setSaturate(bool s)              {sat = s;}
-    bool getSaturate() const {return sat;}
-    G4_opcode opcode()  const {return op;}
+    G4_Predicate* getPredicate() const { return predicate; }
+    void setSaturate(bool s) { sat = s; }
+    bool getSaturate() const { return sat; }
+    G4_opcode opcode()  const { return op; }
 
     void setOpcode(G4_opcode opcd);
 
@@ -730,7 +730,7 @@ public:
     bool isSplitSend() const { return op == G4_sends || op == G4_sendsc; }
 
     // ToDo: get rid of these functions which don't make sense for non-sends
-    virtual bool isEOT() const { return false;}
+    virtual bool isEOT() const { return false; }
     virtual G4_SendMsgDescriptor* getMsgDesc() const { return nullptr; }
 
     virtual bool mayExceedTwoGRF() const
@@ -741,10 +741,6 @@ public:
     virtual void computeRightBound(G4_Operand* opnd);
 
     bool isWait() const { return op == G4_wait; }
-    bool isPartialWrite() const
-    {
-        return (predicate != NULL && op != G4_sel) || op == G4_smov;
-    }
     bool isSWSBSync() const
     {
         return op == G4_sync_nop || op == G4_sync_allrd || op == G4_sync_allwr;
@@ -755,6 +751,7 @@ public:
         return op == G4_pseudo_and || op == G4_pseudo_or || op == G4_pseudo_xor || op == G4_pseudo_not;
     }
 
+    bool isPartialWrite() const;
     bool isArithAddr() const;
     bool isMovAddr() const;
     bool isAccSrcInst() const;
@@ -901,6 +898,10 @@ public:
     bool isValidSymbolOperand(bool &dst_valid, bool *srcs_valid) const;
     const char *getLabelStr() const;
 
+    // get simd lane mask for this instruction. For example,
+    //      add  (8|M8) ...
+    // will have 0xFF00, which lane 8-15
+    unsigned getExecLaneMask() const;
     unsigned char  getExecSize() const {return execSize;}
     const G4_CondMod*    getCondMod() const {return mod;}
           G4_CondMod*    getCondMod()       {return mod;}
@@ -949,6 +950,11 @@ public:
     bool hasImplicitAccSrc() const
     {
        return op == G4_mac || op == G4_mach || op == G4_sada2;
+    }
+
+    bool hasImplicitAccDst() const
+    {
+        return op == G4_addc || op == G4_subb;
     }
 
     bool mayExpandToAccMacro() const;
@@ -3218,10 +3224,14 @@ class G4_Predicate final : public G4_Operand
     // for which it's PRED_ALIGN16_X
     G4_Align16_Predicate_Control align16Control;
 
+    // Special predicate : it's equivalent to noMask and used for WA
+    bool isPredicateSameAsNoMask;
+
     G4_Predicate(G4_PredState s, G4_VarBase *flag, unsigned short srOff,
                  G4_Predicate_Control ctrl)
         : G4_Operand(G4_Operand::predicate, flag), state(s), subRegOff(srOff),
-          control(ctrl), align16Control(PRED_ALIGN16_DEFAULT)
+          control(ctrl), align16Control(PRED_ALIGN16_DEFAULT),
+          isPredicateSameAsNoMask(false)
     {
         top_dcl = getBase()->asRegVar()->getDeclare();
         MUST_BE_TRUE(flag->isFlag(), ERROR_INTERNAL_ARGUMENT);
@@ -3257,6 +3267,7 @@ public:
     G4_PredState   getState() const { return state; }
     void   setState(G4_PredState s) { state = s; }
     G4_Predicate_Control    getControl() const { return control; }
+    void setControl(G4_Predicate_Control PredCtrl) { control = PredCtrl; }
     bool samePredicate(const G4_Predicate& prd) const;
     void emit(std::ostream& output, bool symbolreg = false) override;
 
@@ -3266,6 +3277,8 @@ public:
     unsigned computeRightBound(uint8_t exec_size) override;
     G4_CmpRelation compareOperand(G4_Operand *opnd) override;
     void splitPred();
+    void setSameAsNoMask(bool v) { isPredicateSameAsNoMask = v; };
+    bool isSameAsNoMask() const { return isPredicateSameAsNoMask; }
     unsigned getPredCtrlGroupSize() const
     {
         switch (control)

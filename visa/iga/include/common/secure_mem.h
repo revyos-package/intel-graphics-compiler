@@ -23,37 +23,41 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+#pragma once
 
-#ifndef IGCLLVM_BITCODE_BITCODEWRITER_H
-#define IGCLLVM_BITCODE_BITCODEWRITER_H
+#if ((!defined _WIN32) && ( !defined __STDC_LIB_EXT1__ ))
 
-#include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvmWrapper/IR/Module.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
 
-namespace IGCLLVM
+typedef int errno_t;
+inline errno_t memcpy_s( void *dst, size_t numberOfElements, const void *src, size_t count )
 {
-#if LLVM_VERSION_MAJOR == 4
-    using llvm::WriteBitcodeToFile;
-#elif LLVM_VERSION_MAJOR >= 7
-    inline void WriteBitcodeToFile(const llvm::Module *M, llvm::raw_ostream &Out,
-        bool ShouldPreserveUseListOrder = false,
-        const llvm::ModuleSummaryIndex *Index = nullptr,
-        bool GenerateHash = false,
-        llvm::ModuleHash *ModHash = nullptr)
+    if( ( dst == NULL ) || ( src == NULL ) )
     {
-        llvm::WriteBitcodeToFile(*M, Out, ShouldPreserveUseListOrder, Index, GenerateHash);
+        return EINVAL;
     }
-#if LLVM_VERSION_MAJOR > 8
-    inline void WriteBitcodeToFile(const IGCLLVM::Module *M, llvm::raw_ostream &Out,
-        bool ShouldPreserveUseListOrder = false,
-        const llvm::ModuleSummaryIndex *Index = nullptr,
-        bool GenerateHash = false,
-        llvm::ModuleHash *ModHash = nullptr)
+    if( numberOfElements < count )
     {
-        IGCLLVM::WriteBitcodeToFile((llvm::Module*)M, Out, ShouldPreserveUseListOrder, Index, GenerateHash);
+        return ERANGE;
     }
-#endif
-#endif
+    memcpy( dst, src, count );
+    return 0;
+}
+
+inline errno_t fopen_s( FILE** pFile, const char* filename, const char *mode )
+{
+    if( pFile == NULL )
+    {
+        return EINVAL;
+    }
+    *pFile = fopen( filename, mode );
+    if( *pFile == NULL )
+    {
+        return errno;
+    }
+    return 0;
 }
 
 #endif

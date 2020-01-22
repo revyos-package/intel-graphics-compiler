@@ -58,6 +58,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/SimplifyConstant.h"
 #include "Compiler/CISACodeGen/FoldKnownWorkGroupSizes.h"
 
+#include "Compiler/HandleFRemInstructions.hpp"
 #include "Compiler/Optimizer/BuiltInFuncImport.h"
 #include "Compiler/Optimizer/CodeAssumption.hpp"
 #include "Compiler/Optimizer/Scalarizer.h"
@@ -84,6 +85,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/AggregateArguments/AggregateArguments.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/UnreachableHandling/UnreachableHandling.hpp"
 #include "Compiler/Optimizer/OCLBIConverter.h"
 #include "Compiler/Optimizer/OpenCLPasses/SetFastMathFlags/SetFastMathFlags.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/CorrectlyRoundedDivSqrt/CorrectlyRoundedDivSqrt.hpp"
@@ -123,6 +125,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "Compiler/DebugInfo/VISADebugEmitter.hpp"
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
+#include "Compiler/CISACodeGen/TimeStatsCounter.h"
 
 #include <string>
 #include <algorithm>
@@ -250,6 +253,9 @@ static void CommonOCLBasedPasses(
         pContext->getModuleMetaData()->UseBindlessImage = true;
     }
 
+    CompilerOpts.EnableTakeGlobalAddress =
+        pContext->m_Options.EnableTakeGlobalAddress;
+
     // right now we don't support any standard function in the code gen
     // maybe we want to support some at some point to take advantage of LLVM optimizations
     TargetLibraryInfoImpl TLI;
@@ -276,6 +282,8 @@ static void CommonOCLBasedPasses(
 
     mpm.add(new MoveStaticAllocas());
 
+    mpm.add(new UnreachableHandling());
+
     // Skip this pass if OCL version < 2.0
     if (!(OCLMajor < 2))
     {
@@ -301,8 +309,15 @@ static void CommonOCLBasedPasses(
         mpm.add(new CodeAssumption());
     }
 
+    if (pContext->m_instrTypes.hasFRem)
+    {
+        mpm.add(new HandleFRemInstructions());
+    }
+
     mpm.add(new PreBIImportAnalysis());
+    mpm.add(createTimeStatsCounterPass(pContext, TIME_Unify_BuiltinImport, STATS_COUNTER_START));
     mpm.add(createBuiltInImportPass(std::move(BuiltinGenericModule), std::move(BuiltinSizeModule)));
+    mpm.add(createTimeStatsCounterPass(pContext, TIME_Unify_BuiltinImport, STATS_COUNTER_END));
     mpm.add(new UndefinedReferencesPass());
 
     // Estimate maximal function size in the module and disable subroutine if not profitable.

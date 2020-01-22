@@ -450,7 +450,7 @@ static void verifyRegion(
     REPORT_INSTRUCTION(options,width_val, "CISA region has width of 0");
 
     uint8_t exec_sz = 0;
-    switch (((Common_ISA_Exec_Size)(inst->execsize & 0xF)))
+    switch (((VISA_Exec_Size)(inst->execsize & 0xF)))
     {
     case EXEC_SIZE_1:  exec_sz = 1;  break;
     case EXEC_SIZE_2:  exec_sz = 2;  break;
@@ -871,7 +871,7 @@ static void verifyVectorOperand(
             {
                 uint32_t byteOffset = opnd.opnd_val.gen_opnd.row_offset * COMMON_ISA_GRF_REG_SIZE +
                     opnd.opnd_val.gen_opnd.col_offset *
-                    Get_Common_ISA_Type_Size(getPredefinedVarType(mapExternalToInternalPreDefVar(operand_index)));
+                    Get_VISA_Type_Size(getPredefinedVarType(mapExternalToInternalPreDefVar(operand_index)));
                 REPORT_INSTRUCTION(options, isReadWritePreDefinedVar(isaHeader, operand_index, byteOffset), "Not allowed to write to a read only variable");
             }
         }
@@ -937,7 +937,7 @@ static void verifyInstructionMove(
 
              if (OPERAND_PREDICATE == operand_class_src0)
              {
-                 REPORT_INSTRUCTION(options,EXEC_SIZE_1 == ((Common_ISA_Exec_Size)(inst->execsize & 0xF)),
+                 REPORT_INSTRUCTION(options,EXEC_SIZE_1 == ((VISA_Exec_Size)(inst->execsize & 0xF)),
                          "Execution size for a flag copy mov instruction should be 1, as it is a scalar copy.");
                  REPORT_INSTRUCTION(options,dstType == ISA_TYPE_UD || dstType == ISA_TYPE_UW || dstType == ISA_TYPE_UB,
                          "dst operand type for a flag copy mov instruction should be UD/UW/UB.");
@@ -1201,12 +1201,47 @@ static void verifyInstructionMisc(
             uint8_t numDst = getPrimitiveOperand<uint8_t>(inst, i++);
             REPORT_INSTRUCTION(options,numDst <= 16, "Number of message destination GRFs must be between 0 and 16");
 
-            Common_ISA_Operand_Class operand_class_desc = getVectorOperand(inst, i++).getOperandClass();
-            REPORT_INSTRUCTION(options,operand_class_desc == OPERAND_GENERAL  ||
+            const vector_opnd& desc = getVectorOperand(inst, i++);
+            Common_ISA_Operand_Class operand_class_desc = desc.getOperandClass();
+            REPORT_INSTRUCTION(options, operand_class_desc == OPERAND_GENERAL ||
                               operand_class_desc == OPERAND_INDIRECT ||
                               operand_class_desc == OPERAND_IMMEDIATE,
                               "desc operand of CISA RAW_SEND instrution should "
                               "be either a general, indirect, or immediate operand.");
+
+            if (operand_class_desc == OPERAND_IMMEDIATE)
+            {
+                /// Structure describes a send message descriptor. Only expose
+                /// several data fields; others are unnamed.
+                struct MsgDescLayout {
+                    uint32_t funcCtrl : 19;     // Function control (bit 0:18)
+                    uint32_t headerPresent : 1; // Header present (bit 19)
+                    uint32_t rspLength : 5;     // Response length (bit 20:24)
+                    uint32_t msgLength : 4;     // Message length (bit 25:28)
+                    uint32_t simdMode2 : 1;     // 16-bit input (bit 29)
+                    uint32_t returnFormat : 1;  // 16-bit return (bit 30)
+                    uint32_t EOT : 1;           // EOT
+                };
+
+                /// View a message descriptor in two different ways:
+                /// - as a 32-bit unsigned integer
+                /// - as a structure
+                /// This simplifies the implementation of extracting subfields.
+                union DescData {
+                    uint32_t value;
+                    MsgDescLayout layout;
+                }udesc;
+
+                udesc.value = desc.opnd_val.const_opnd._val.ival;
+
+                REPORT_INSTRUCTION(options, numSrc >= udesc.layout.msgLength,
+                                  "message length mismatch for raw send: msgLength (%d) must be not greater than numSrc (%d)",
+                                  udesc.layout.msgLength, numSrc);
+                REPORT_INSTRUCTION(options, numDst >= udesc.layout.rspLength,
+                                  "response length mismatch for raw send: rspLength (%d) must be not greater than numDst (%d)",
+                                  udesc.layout.rspLength, numDst);
+            }
+
 
             /// src: todo
             /// dst: todo
@@ -1249,7 +1284,7 @@ static void verifyInstructionMisc(
 
             REPORT_INSTRUCTION(options,!(numOut < 1 || numOut > 8) , "Valid range for num_out parameter of URB write is [1,8]");
             REPORT_INSTRUCTION(options,globalOff <= 2047, "Valid range for global_offset parameter of URB write is [0,2047]");
-            REPORT_INSTRUCTION(options,((Common_ISA_Exec_Size)(inst->execsize & 0xF)) == EXEC_SIZE_8, "Only execution size of 8 is supported for URB write");
+            REPORT_INSTRUCTION(options,((VISA_Exec_Size)(inst->execsize & 0xF)) == EXEC_SIZE_8, "Only execution size of 8 is supported for URB write");
 
             break;
         }
@@ -1582,6 +1617,17 @@ static void verifyInstructionArith(
         }
     }
 
+    // check for IEEE macros support
+    auto platform = getGenxPlatform();
+    // !hasMadm() check
+    if (platform == GENX_ICLLP || platform == GENX_TGLLP)
+    {
+        bool fOpcodeIEEE = (opcode == ISA_DIVM) || (opcode == ISA_SQRTM);
+        bool dfOpcodeIEEE = fOpcodeIEEE || (opcode == ISA_INV) || (opcode == ISA_DIV) || (opcode == ISA_SQRT);
+        REPORT_INSTRUCTION(options, !(dstType == ISA_TYPE_DF && dfOpcodeIEEE) && !(dstType == ISA_TYPE_F && fOpcodeIEEE),
+            "IEEE instruction %s is not supported on %s platform", ISA_Inst_Table[opcode].str, platformString[platform]);
+    }
+
     // instruction specific checks
     if (opcode == ISA_LRP)
     {
@@ -1877,7 +1923,7 @@ static void verifyInstructionSampler(const common_isa_header& isaHeader,
 
             if (cpsEnable)
             {
-                auto execSize = (Common_ISA_Exec_Size)(inst->execsize & 0xF);
+                auto execSize = (VISA_Exec_Size)(inst->execsize & 0xF);
 
                 REPORT_INSTRUCTION(options,
                                    execSize == EXEC_SIZE_8 || execSize == EXEC_SIZE_16,
@@ -2051,7 +2097,7 @@ static void verifyInstructionSampler(const common_isa_header& isaHeader,
                      if (mmf.getOperandClass() == OPERAND_IMMEDIATE)
                      {
                          unsigned val = mmf.opnd_val.const_opnd._val.ival;
-                         ASSERT_USER(val <= CM_MIN_ENABLE, "MINMAX MMF Mode operand out of range.");
+                         ASSERT_USER(val <= VA_MIN_ENABLE, "MINMAX MMF Mode operand out of range.");
                      }
 
                      /// dst: TODO
@@ -2090,7 +2136,7 @@ static void verifyInstructionSampler(const common_isa_header& isaHeader,
                      if (mmf.getOperandClass() == OPERAND_IMMEDIATE)
                      {
                          unsigned val = mmf.opnd_val.const_opnd._val.ival;
-                         ASSERT_USER(val <= CM_MIN_ENABLE, "MINMAXFILTER MMF Mode operand out of range.");
+                         ASSERT_USER(val <= VA_MIN_ENABLE, "MINMAXFILTER MMF Mode operand out of range.");
                      }
 
                      /// dst
@@ -2650,7 +2696,7 @@ static void verifyInstructionDataport(
              }
 
              surface = getPrimitiveOperand<uint8_t>(inst, i++);
-             if (getGenxPlatform() < GENX_ICL)
+             if (getGenxPlatform() < GENX_ICLLP)
              {
                  REPORT_INSTRUCTION(options, 0 != surface, "Surface T0 (the SLM surface) is not allowed for OWORD_LD*/OWORD_ST");
              }
@@ -3038,7 +3084,7 @@ void verifyInstruction(
 
     if (hasExecSize(opcode))
     {
-        REPORT_INSTRUCTION(options,((Common_ISA_Exec_Size)(inst->execsize & 0xF)) < EXEC_SIZE_ILLEGAL, "CISA instruction uses an illegal execution size.");
+        REPORT_INSTRUCTION(options,((VISA_Exec_Size)(inst->execsize & 0xF)) < EXEC_SIZE_ILLEGAL, "CISA instruction uses an illegal execution size.");
     }
 
     if (hasPredicate(opcode))
