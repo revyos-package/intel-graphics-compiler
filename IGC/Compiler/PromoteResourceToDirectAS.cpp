@@ -205,7 +205,7 @@ void PromoteResourceToDirectAS::PromoteSamplerTextureToDirectAS(GenIntrinsicInst
     Value* arrayIndex = nullptr;
 
     std::vector<Value*> instList;
-    Value* srcPtr = IGC::TracePointerSource(resourcePtr, false, true, instList);
+    Value* srcPtr = IGC::TracePointerSource(resourcePtr, false, false, true, instList);
 
     if (srcPtr)
     {
@@ -431,8 +431,8 @@ bool PatchInstructionAddressSpace(const std::vector<Value*>& instList, Type* dst
         Value* bufferPtr1 = nullptr;
         std::vector<Value*> tempList0, tempList1;
         // Call trace again to get the instructions list for each branch of the select
-        if (IGC::TracePointerSource(selectInst->getOperand(1), true, true, tempList0) &&
-            IGC::TracePointerSource(selectInst->getOperand(2), true, true, tempList1))
+        if (IGC::TracePointerSource(selectInst->getOperand(1), true, false, true, tempList0) &&
+            IGC::TracePointerSource(selectInst->getOperand(2), true, false, true, tempList1))
         {
             assert(selectInst->getOperand(1)->getType()->isPointerTy() && selectInst->getOperand(2)->getType()->isPointerTy());
             Type* srcType0 = selectInst->getOperand(1)->getType()->getPointerElementType();
@@ -461,7 +461,7 @@ bool PatchInstructionAddressSpace(const std::vector<Value*>& instList, Type* dst
             assert(incomingVal->getType()->isPointerTy());
 
             std::vector<Value*> tempList;
-            Value* srcPtr = IGC::TracePointerSource(incomingVal, true, true, tempList);
+            Value* srcPtr = IGC::TracePointerSource(incomingVal, true, false, true, tempList);
 
             // We know srcPtr is trace-able, since it's been traced already, we just need to get the
             // list of instructions we need to patch
@@ -547,7 +547,7 @@ void PromoteResourceToDirectAS::PromoteBufferToDirectAS(Instruction* inst, Value
     }
 
     std::vector<Value*> instructionList;
-    Value* srcPtr = IGC::TracePointerSource(resourcePtr, false, true, instructionList);
+    Value* srcPtr = IGC::TracePointerSource(resourcePtr, false, false, true, instructionList);
 
     if (!srcPtr)
     {
@@ -624,10 +624,13 @@ void PromoteResourceToDirectAS::PromoteBufferToDirectAS(Instruction* inst, Value
             PointerType* ptrType = PointerType::get(pBufferType, directAS);
             pBuffer = builder.CreateIntToPtr(offsetVal, ptrType);
 
-            unsigned alignment = cast<LdRawIntrinsic>(pIntr)->getAlignment();
+            const LdRawIntrinsic* const ldRawIntr = cast<LdRawIntrinsic>(pIntr);
 
             // Promote ldraw back to load
-            pNewBufferAccessInst = builder.CreateAlignedLoad(pBuffer, alignment);
+            pNewBufferAccessInst = builder.CreateAlignedLoad(
+                pBuffer,
+                ldRawIntr->getAlignment(),
+                ldRawIntr->isVolatile());
             break;
         }
         case GenISAIntrinsic::GenISA_storeraw_indexed:
@@ -637,11 +640,15 @@ void PromoteResourceToDirectAS::PromoteBufferToDirectAS(Instruction* inst, Value
             PointerType* ptrType = PointerType::get(pBufferType, directAS);
             pBuffer = builder.CreateIntToPtr(offsetVal, ptrType);
 
-            unsigned alignment = (unsigned)llvm::cast<llvm::ConstantInt>(pIntr->getOperand(3))->getZExtValue();
+            const StoreRawIntrinsic* const storeRawIntr = cast<StoreRawIntrinsic>(pIntr);
 
             // Promote storeraw back to store
             Value* storeVal = pIntr->getOperand(2);
-            pNewBufferAccessInst = builder.CreateAlignedStore(storeVal, pBuffer, alignment);
+            pNewBufferAccessInst = builder.CreateAlignedStore(
+                storeVal,
+                pBuffer,
+                storeRawIntr->getAlignment(),
+                storeRawIntr->isVolatile());
             break;
         }
         default:

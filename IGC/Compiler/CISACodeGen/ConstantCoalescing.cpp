@@ -33,6 +33,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "common/IGCIRBuilder.h"
 
+#include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/Support/Alignment.h"
+#include "common/LLVMWarningsPop.hpp"
+
 #include <list>
 
 /// @brief ConstantCoalescing merges multiple constant loads into one load
@@ -944,7 +948,7 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
             m_TT->RegisterNewValueAndAssignID(ptrcast);
             wiAns->incUpdateDepend(ptrcast, WIAnalysis::RANDOM);
             cov_chunk->chunkIO = irBuilder->CreateLoad(ptrcast, false);
-            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(4); // \todo, more precise
+            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(MaybeAlign(4)); // \todo, more precise
             wiAns->incUpdateDepend(cov_chunk->chunkIO, WIAnalysis::RANDOM);
         }
         else
@@ -952,7 +956,7 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
             assert(isa<IntToPtrInst>(addr_ptr));
             addr_ptr->mutateType(PointerType::get(vty, addrSpace));
             cov_chunk->chunkIO = irBuilder->CreateLoad(addr_ptr, false);
-            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(4);  // \todo, more precise
+            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(MaybeAlign(4));  // \todo, more precise
             wiAns->incUpdateDepend(cov_chunk->chunkIO, WIAnalysis::RANDOM);
             // modify the address calculation if the chunk-start is changed
             if (eltid0 != cov_chunk->chunkStart)
@@ -1019,7 +1023,7 @@ void ConstantCoalescing::SetAlignment(Instruction* load, uint alignment)
 
     if (isa<LoadInst>(load))
     {
-        cast<LoadInst>(load)->setAlignment(alignment);
+        cast<LoadInst>(load)->setAlignment(MaybeAlign(alignment));
     }
     else
     {
@@ -1384,6 +1388,8 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
     irBuilder->SetInsertPoint(seedi);
     if (LoadInst * load = dyn_cast<LoadInst>(seedi))
     {
+        assert(!load->isVolatile()); // no constant buffer volatile loads
+
         LoadInst* chunkLoad;
         Value* cb_ptr = load->getPointerOperand();
 
@@ -1425,13 +1431,14 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
         ptr->setDebugLoc(irBuilder->getCurrentDebugLocation());
         wiAns->incUpdateDepend(ptr, WIAnalysis::UNIFORM);
         chunkLoad = irBuilder->CreateLoad(ptr);
-        chunkLoad->setAlignment(alignment);
+        chunkLoad->setAlignment(MaybeAlign(alignment));
         chunk->chunkIO = chunkLoad;
     }
     else
     {
         // bindless case
         LdRawIntrinsic* ldRaw = cast<LdRawIntrinsic>(seedi);
+        assert(!ldRaw->isVolatile()); // no constant buffer volatile loads
         Value* eac = irBuilder->getInt32(chunk->chunkStart * chunk->elementSize);
         if (chunk->baseIdxV)
         {
@@ -1455,7 +1462,8 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
         {
             ldRaw->getResourceValue(),
             eac,
-            irBuilder->getInt32(alignment)
+            irBuilder->getInt32(alignment),
+            irBuilder->getFalse()
         };
         Function* ldRawFn = GenISAIntrinsic::getDeclaration(
             curFunc->getParent(),
@@ -1980,7 +1988,7 @@ void ConstantCoalescing::ScatterToSampler(
     constexpr uint samplerElementSizeInBytes = sizeof(uint32_t);
     constexpr uint samplerLoadSizeInDwords = 4;
     constexpr uint samplerLoadSizeInBytes = samplerLoadSizeInDwords * samplerElementSizeInBytes;
-    const uint loadSizeInBytes = load->getType()->getPrimitiveSizeInBits() / 8;
+    const uint loadSizeInBytes = (unsigned int)load->getType()->getPrimitiveSizeInBits() / 8;
 
     assert(!load->getType()->isVectorTy() || load->getType()->getVectorNumElements() <= 4);
 
@@ -2127,7 +2135,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
     Type* const dstTy = loadToReplace->getType();
     assert(srcTy->isVectorTy() && srcTy->getVectorElementType()->isFloatTy());
 
-    const uint dstSizeInBytes = dstTy->getPrimitiveSizeInBits() / 8;
+    const uint dstSizeInBytes = (unsigned int)dstTy->getPrimitiveSizeInBits() / 8;
 
     irBuilder->SetInsertPoint(loadToReplace);
 
@@ -2201,7 +2209,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
         {
             assert(dstTy->isIntegerTy() || dstTy->isFloatingPointTy());
             assert(dstTy->getPrimitiveSizeInBits() < 64);
-            const uint offsetInBits = ((offsetInBytes % 4) * 8) + (dstTy->getPrimitiveSizeInBits() * i);
+            const uint offsetInBits = ((offsetInBytes % 4) * 8) + ((unsigned int)dstTy->getPrimitiveSizeInBits() * i);
 
             assert(offsetInBits + dstTy->getPrimitiveSizeInBits() <= 32);
             Value* result = irBuilder->CreateBitCast(srcData[offsetInBits / 32], irBuilder->getInt32Ty());
@@ -2213,7 +2221,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
             }
             if (dstTy->getScalarSizeInBits() < 32)
             {
-                result = irBuilder->CreateZExtOrTrunc(result, IntegerType::get(dstTy->getContext(), dstTy->getPrimitiveSizeInBits()));
+                result = irBuilder->CreateZExtOrTrunc(result, IntegerType::get(dstTy->getContext(), (unsigned int)dstTy->getPrimitiveSizeInBits()));
                 wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
             }
             if (result->getType() != dstTy)
@@ -2306,7 +2314,7 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk* chunk)
     Instruction* owordPtr = irBuilder->CreateCall(l, attr);
     wiAns->incUpdateDepend(owordPtr, WIAnalysis::UNIFORM);
     load->setOperand(0, owordPtr);
-    load->setAlignment(16);
+    load->setAlignment(MaybeAlign(16));
 }
 
 char IGC::ConstantCoalescing::ID = 0;

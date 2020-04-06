@@ -126,6 +126,11 @@ public:
         ++callCount;
     }
 
+    void updateInitBB(G4_BB* p_initBB)
+    {
+        initBB = p_initBB;
+    }
+
     void updateExitBB(G4_BB* p_exitBB)
     {
         exitBB = p_exitBB;
@@ -284,6 +289,12 @@ class G4_BB
     // if the block is under simd flow control
     bool inSimdFlow;
 
+    // If a BB is divergent, this field is set to true. By divergent, it means
+    // that among all active lanes on entry to shader/kernel, not all lanes may
+    // be active in this BB.
+    // Note : this field will be used to replace inSimdFlow.
+    bool divergent;
+
     // the physical pred/succ for this block (i.e., the pred/succ for this block in the BB list)
     // Note that some transformations may rearrange BB layout, so for safety it's best to recompute
     // this
@@ -369,8 +380,8 @@ public:
         traversal(0), idom(NULL), beforeCall(NULL),
         afterCall(NULL), calleeInfo(NULL), BBType(G4_BB_NONE_TYPE),
         inNaturalLoop(false), hasSendInBB(false), loopNestLevel(0), scopeID(0),
-        inSimdFlow(false), physicalPred(NULL), physicalSucc(NULL), parent(fg),
-        instList(alloc)
+        inSimdFlow(false), divergent(false), physicalPred(NULL), physicalSucc(NULL),
+        parent(fg), instList(alloc)
     {
     }
 
@@ -418,7 +429,9 @@ public:
     unsigned char getNestLevel()              {return loopNestLevel;}
     void     resetNestLevel()                 { loopNestLevel = 0; }
     void     setInSimdFlow(bool val)          {inSimdFlow = val;}
-    bool     isInSimdFlow()                   {return inSimdFlow;}
+    bool     isInSimdFlow() const             {return inSimdFlow;}
+    void     setDivergent(bool val) { divergent = val; }
+    bool     isDivergent() const    { return divergent; }
     unsigned getScopeID() { return scopeID; }
     void setScopeID(unsigned id) { scopeID = id; }
 
@@ -479,7 +492,9 @@ public:
     void addEOTSend(G4_INST* lastInst = NULL);
 
     /// Dump instructions into the standard error.
-    void dump(bool printCFG) const;
+    const char* getBBTypeStr() const;
+    void print(std::ostream& OS) const;
+    void dump() const;
     void dumpDefUse() const;
 
     // reset this BB's instruction's local id so they are [0,..#BBInst-1]
@@ -758,6 +773,7 @@ public:
 
     std::unordered_map<G4_InstCF*, struct PseudoDcls> fcallToPseudoDclMap;
 
+    // offset in unit of OW
     unsigned                    callerSaveAreaOffset = 0;
     unsigned                    calleeSaveAreaOffset = 0;
     unsigned                    paramOverflowAreaOffset = 0;
@@ -1108,6 +1124,7 @@ public:
     void addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool);
     void addSaveRestorePseudoDeclares(IR_Builder& builder);
     void markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable &FuncInfoMap);
+    void markDivergentBBs();
 
     // Used for CISA 3.0
     void incrementNumBBs() { numBBId++ ; }
@@ -1221,6 +1238,11 @@ public:
 
     void setABIForStackCallFunctionCalls();
 
+    // This is for TGL WA
+    void findNestedDivergentBBs();
+
+    void print(std::ostream& OS) const;
+    void dump() const;
 private:
     //
     // Flow group traversal routines
@@ -1229,6 +1251,12 @@ private:
     // Use normalized region descriptors for each source operand if possible.
     void normalizeRegionDescriptors();
     G4_BB *findLabelBB(char *label, int &label_offset);
+
+    // Find the BB that has the given label from the range [StartIter, EndIter).
+    G4_BB* findLabelBB(
+        BB_LIST_ITER StartIter,
+        BB_LIST_ITER EndIter,
+        const char* Label);
 };
 
 }
@@ -1414,6 +1442,8 @@ public:
 
     void doRelocation(const G4_Kernel& k, void* binary, uint32_t binarySize);
 
+    uint32_t getTargetOffset(const IR_Builder& builder) const;
+
     void dump() const;
 };
 
@@ -1466,6 +1496,9 @@ class G4_Kernel
     bool m_hasIndirectCall = false;
     bool m_isExternFunction = false;
 
+    // store the actual sourfce line stream for each source file referenced by this kernel.
+    std::map<std::string, std::vector<std::string> > debugSrcLineMap;
+
 public:
     typedef std::vector<RelocationEntry> RelocationTableTy;
 
@@ -1496,9 +1529,9 @@ public:
                 (major == COMMON_ISA_MAJOR_VER && minor <= COMMON_ISA_MINOR_VER),
             "CISA version not supported by this JIT-compiler");
 
-        setKernelParameters();
 
         name = NULL;
+        numThreads = 0;
         simdSize = 0;
         hasAddrTaken = false;
         kernelDbgInfo = nullptr;
@@ -1511,6 +1544,8 @@ public:
         {
             gtPinInfo = nullptr;
         }
+
+        setKernelParameters();
     }
 
     ~G4_Kernel();
@@ -1526,6 +1561,13 @@ public:
 
     void setNumThreads(int nThreads) { numThreads = nThreads; }
     uint32_t getNumThreads() const { return numThreads; }
+
+    void updateKernelByNumThreads(int nThreads)
+    {
+        numThreads = nThreads;
+        m_options->setOption(vISA_TotalGRFNum, (uint32_t)0);
+        setKernelParameters();
+    }
 
     void setNumSWSBTokens(int nSWSBs) { numSWSBTokens = nSWSBs; }
     uint32_t getNumSWSBTokens() const { return numSWSBTokens; }
@@ -1630,7 +1672,10 @@ public:
         return major_version * 100 + minor_version;
     }
 
-    /// Dump this kernel into the standard error.
+    /// Dump this kernel to an ostream
+    void print(std::ostream& OS) const;
+
+    /// Dump this kernel to the standard error, often used in a debuger.
     void dump() const;
 
     void setRAType(RA_Type type) { RAType = type; }
@@ -1703,6 +1748,8 @@ public:
     void doRelocation(void* binary, uint32_t binarySize);
 
     G4_INST* getFirstNonLabelInst() const;
+
+    std::string getDebugSrcLine(const std::string& filename, int lineNo);
 
 };
 

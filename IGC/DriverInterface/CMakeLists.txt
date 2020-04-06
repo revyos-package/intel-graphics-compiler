@@ -1,9 +1,5 @@
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
 
-if(IGC_BUILD__SPIRV-Tools)
-    include_directories("${IGC_BUILD__SPIRV-Tools_DIR}/include")
-endif()
-
 set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/AddImplicitArgs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/customApi.cpp"
@@ -43,15 +39,12 @@ if(IGC_BUILD__SPIRV_ENABLED)
       "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/SPIRV/libSPIRV/SPIRVValue.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/SPIRV/SPIRVReader.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/SPIRV/SPIRVUtil.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/SPIRV/SPIRVException.cpp"
     )
 endif(IGC_BUILD__SPIRV_ENABLED)
 
 
 set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/customApi.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/SurfaceFormats.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/ShaderTypesEnum.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/IRUpgrader/IRUpgrader.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/KernelAnnotations.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/CommandStream/SamplerTypes.h"

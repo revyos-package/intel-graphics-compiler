@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <fstream>
 #include <math.h>
 #include "DebugInfo.h"
+#include "VarSplit.h"
 
 using namespace std;
 using namespace vISA;
@@ -3061,7 +3062,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
             // That function assumes r1.0 is reserved here and r1.2, r1.3 won't be used
             G4_Declare* r1_dst = builder->createDeclareNoLookup(n, G4_GRF, 8, 1, Type_UD);
             r1_dst->getRegVar()->setPhyReg(builder->phyregpool.getGreg(1), 0);
-            G4_DstRegRegion* dstRgn = builder->createDstRegRegion(Direct, r1_dst->getRegVar(), 0, 0, 1, Type_UD);
+            G4_DstRegRegion* dstRgn = builder->createDst(r1_dst->getRegVar(), 0, 0, 1, Type_UD);
             fcall->setDest(dstRgn);
         }
 
@@ -3702,6 +3703,7 @@ static void recordRAStats(IR_Builder& builder,
 #endif // COMPILER_STATS_ENABLE
 }
 
+
 int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 {
     if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
@@ -3755,7 +3757,14 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     PointsToAnalysis pointsToAnalysis(kernel.Declares, kernel.fg.getNumBB());
     pointsToAnalysis.doPointsToAnalysis(kernel.fg);
 
+    // Run explicit variable split pass
+    VarSplitPass splitPass(kernel);
+    if(kernel.getOption(vISA_IntrinsicSplit))
+        splitPass.run();
+
     GlobalRA gra(kernel, regPool, pointsToAnalysis);
+    gra.setVarSplitPass(&splitPass);
+
     //
     // insert pseudo save/restore return address so that reg alloc
     // can assign registers to hold the return addresses
@@ -3795,6 +3804,12 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 
     int status = gra.coloringRegAlloc();
 
+    if (auto jitInfo = builder.getJitInfo())
+    {
+        jitInfo->numBytesScratchGtpin = kernel.getGTPinData()->getNumBytesScratchUse();
+    }
+    splitPass.replaceIntrinsics();
+
     recordRAStats(builder, kernel, status);
     if (status != VISA_SUCCESS)
     {
@@ -3809,7 +3824,6 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 
         gra.verifyRA(liveAnalysis);
     }
-
 
     return status;
 }

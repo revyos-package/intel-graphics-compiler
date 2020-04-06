@@ -83,6 +83,15 @@ namespace IGC
         S3DKernelHardwareCapabilities   KernelHwCaps;
     };
 
+    struct OCLCaps {
+        // minimal value for MaxParameterSize specified by OpenCL spec
+        static const unsigned MINIMAL_MAX_PARAMETER_SIZE = 1024;
+
+        // maximum size (in bytes) of the arguments that can be passed to OCL kernel
+        uint32_t MaxParameterSize = MINIMAL_MAX_PARAMETER_SIZE;
+
+    };
+
     class CPlatform;
 
     void SetCompilerCaps(const SUscSkuFeatureTable* pSkuFeatureTable, CPlatform* platform);

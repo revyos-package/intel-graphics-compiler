@@ -236,7 +236,7 @@ short Operand_Type_Rank( G4_Type type )
 
 G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     uint32_t fCtrl, uint32_t regs2rcv,
-    uint32_t regs2snd, uint32_t fID, bool isEot, uint16_t extMsgLen,
+    uint32_t regs2snd, SFID fID, uint16_t extMsgLen,
     uint32_t extFCtrl, SendAccess access,
     G4_Operand *bti, G4_Operand *sti,
     IR_Builder& builder)
@@ -250,14 +250,13 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     desc.layout.msgLength = regs2snd;
 
     extDesc.value = 0;
-    extDesc.layout.funcID = fID;
-    extDesc.layout.eot = isEot;
+    extDesc.layout.funcID = SFIDtoInt(fID);
     extDesc.layout.extMsgLength = extMsgLen;
     extDesc.layout.extFuncCtrl = extFCtrl;
 
     src1Len = extMsgLen; // [10:6]
-    eotAfterMessage = isEot; // [5]
-    sfid = intToSFID(fID);
+    eotAfterMessage = false; // [5]
+    sfid = fID;
 
     accessType = access;
     funcCtrlValid = true;
@@ -277,11 +276,6 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     uint32_t totalMaxLength = builder.getMaxSendMessageLength();
     MUST_BE_TRUE(extDesc.layout.extMsgLength + desc.layout.msgLength < totalMaxLength,
         "combined message length may not exceed the maximum");
-
-    if (extDesc.layout.extMsgLength + desc.layout.msgLength >= 16)
-    {
-        MUST_BE_TRUE(!isEot, "cm_sends can't set eot if message length is greater than 16");
-    }
 }
 
 G4_SendMsgDescriptor::G4_SendMsgDescriptor(
@@ -623,55 +617,6 @@ bool G4_SendMsgDescriptor::isHdcTypedSurfaceWrite() const
 {
     return isHDC() &&
         getHdcMessageType() == DC1_TYPED_SURFACE_WRITE;
-}
-
-bool G4_SendMsgDescriptor::isReadOnlyMessage(uint32_t msgDesc,
-                                             uint32_t extDesc)
-{
-    SFID funcID = intToSFID(extDesc & 0xF);
-    unsigned subFuncID = (msgDesc >> 14) & 0x1F;
-
-    switch (funcID) {
-    default:
-        break;
-    case SFID::DP_DC:
-        switch (subFuncID) {
-        case DC_OWORD_BLOCK_READ:
-        case DC_ALIGNED_OWORD_BLOCK_READ:
-        case DC_DWORD_SCATTERED_READ:
-        case DC_BYTE_SCATTERED_READ:
-            return true;
-        default:
-            return false;
-        }
-    case SFID::DP_DC1:
-        switch (subFuncID) {
-        case DC1_UNTYPED_SURFACE_READ:
-        case DC1_MEDIA_BLOCK_READ:
-        case DC1_TYPED_SURFACE_READ:
-        case DC1_A64_SCATTERED_READ:
-        case DC1_A64_UNTYPED_SURFACE_READ:
-        case DC1_A64_BLOCK_READ:
-            return true;
-        default:
-            return false;
-        }
-    case SFID::DP_DC2:
-        switch (subFuncID) {
-        case DC2_UNTYPED_SURFACE_READ:
-        case DC2_A64_SCATTERED_READ:
-        case DC2_A64_UNTYPED_SURFACE_READ:
-        case DC2_BYTE_SCATTERED_READ:
-            return true;
-        default:
-            return false;
-        }
-    case SFID::SAMPLER:
-        return true;
-    }
-
-    // Unknown.
-    return false;
 }
 
 const char* G4_SendMsgDescriptor::getDescType() const
@@ -1118,7 +1063,13 @@ uint16_t G4_INST::getMaskOffset() const
 {
     unsigned maskOption = (this->getOption() & InstOpt_QuarterMasks);
 
-    switch(maskOption)
+    if (!builder.hasNibCtrl())
+    {
+        assert(maskOption != InstOpt_M4 && maskOption != InstOpt_M12 && maskOption != InstOpt_M20 &&
+            maskOption != InstOpt_M28 && "nibCtrl is not supported on this platform");
+    }
+
+    switch (maskOption)
     {
     case InstOpt_NoOpt:
         return 0;
@@ -1139,7 +1090,7 @@ uint16_t G4_INST::getMaskOffset() const
     case InstOpt_M28:
         return 28;
     default:
-        MUST_BE_TRUE( 0, "Incorrect instruction execution mask" );
+        MUST_BE_TRUE(0, "Incorrect instruction execution mask");
         return 0;
     }
 }
@@ -1859,6 +1810,12 @@ G4_INST::MovType G4_INST::canPropagate() const
         return SuperMov;
     }
 
+    // Retain side effect of writing to debug register.
+    if (dst->isDbgReg())
+    {
+        return SuperMov;
+    }
+
     G4_Operand *src = srcs[0];
 
     if (src->isRelocImm())
@@ -1866,9 +1823,13 @@ G4_INST::MovType G4_INST::canPropagate() const
         return SuperMov;
     }
 
-    // Do not elminate MOV/COPY from flag registers.
-    if (src->isFlag()) {
-        return SuperMov;
+    // only support flag propagation for simd1 copy moves
+    if (src->isFlag())
+    {
+        if (getExecSize() != 1 || src->getType() != dst->getType())
+        {
+            return SuperMov;
+        }
     }
 
     // Do not propagate through copy of `acc0`, as some later phases (e.g., fixAddc) rely on finding this move
@@ -2195,6 +2156,12 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     // skip the instruction has no dst. e.g. G4_pseudo_fcall
     if (useInst->getDst() == nullptr)
         return false;
+
+    // limit flag copy propagation to opcode known to work for now
+    if (src->isFlag() && (useInst->opcode() != G4_not && useInst->opcode() != G4_and))
+    {
+        return false;
+    }
 
     if (isMixedMode())
     {
@@ -3321,6 +3288,31 @@ bool G4_INST::isPartialWrite() const
     return (aPred != NULL && op != G4_sel) || op == G4_smov;
 }
 
+bool G4_INST::isPartialWriteForSpill(bool inSIMDCF) const
+{
+    if (!getDst() || hasNULLDst())
+    {
+        // inst does not write to GRF
+        return false;
+    }
+
+    if (isPartialWrite())
+    {
+        return true;
+    }
+
+    if (inSIMDCF && !isWriteEnableInst())
+    {
+        if (!(builder.hasMaskForScratchMsg() && getDst()->getElemSize() == 4))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
 bool G4_INST::isAccSrcInst() const
 {
     if (srcs[0] && srcs[0]->isSrcRegRegion() && srcs[0]->asSrcRegRegion()->getBase()->isAccReg())
@@ -3677,6 +3669,14 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         if (isIntrinsic())
         {
             output << "." << asIntrinsicInst()->getName();
+            if (isSpillIntrinsic())
+            {
+                output << "." << asSpillIntrinsic()->getNumRows();
+            }
+            else if (isFillIntrinsic())
+            {
+                output << "." << asFillIntrinsic()->getNumRows();
+            }
         }
 
         if (mod)
@@ -3693,7 +3693,12 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         {// no need to emit size for nop, wait
             output << '(' << static_cast<int>(execSize) << ") ";
         }
-        if (dst)
+
+        if (isSpillIntrinsic())
+        {
+            output << "Scratch[" << asSpillIntrinsic()->getOffset() << "] ";
+        }
+        else if (dst)
         {
             dst->emit(output, symbol_dst);  // emit symbolic/physical register depends on the flag
             output << ' ';
@@ -3714,6 +3719,10 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
                 }
                 output << ' ';
             }
+        }
+        if (isFillIntrinsic())
+        {
+            output << "Scratch[" << asFillIntrinsic()->getOffset() << "] ";
         }
 
         if( isMath() && asMathInst()->getMathCtrl() != MATH_RESERVED )
@@ -7320,14 +7329,18 @@ unsigned G4_INST::getExecLaneMask() const
     return (maskbits << chanOffset);
 }
 
-void G4_INST::dump() const
+void G4_INST::print(std::ostream& OS) const
 {
-
     G4_INST& inst = const_cast<G4_INST&>(*this);
     if (!inst.isLabel())
-        std::cerr << "\t";
-    inst.emit(std::cerr, false, false);
-    std::cerr << "\n";
+        OS << "\t";
+    inst.emit(OS, false, false);
+    OS << "\n";
+}
+
+void G4_INST::dump() const
+{
+    print(std::cerr);
 }
 
 bool G4_INST::canSupportSaturate() const

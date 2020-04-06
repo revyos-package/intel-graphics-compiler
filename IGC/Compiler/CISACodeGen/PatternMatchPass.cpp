@@ -104,6 +104,7 @@ namespace IGC
         ConstantPlacement.clear();
         PairOutputMap.clear();
         UniformBools.clear();
+        StructValueInsertMap.clear();
 
         delete[] m_blocks;
         m_blocks = nullptr;
@@ -1281,6 +1282,40 @@ namespace IGC
 
     void CodeGenPatternMatch::visitBitCastInst(BitCastInst& I)
     {
+        // detect
+        // %66 = insertelement <2 x i32> <i32 0, i32 undef>, i32 %xor19.i, i32 1
+        // %67 = bitcast <2 x i32> % 66 to i64
+        // and replace it with a shl 32
+        struct Shl32Pattern : public Pattern
+        {
+            SSource sources[2];
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                pass->Binary(EOPCODE_SHL, sources, modifier);
+            }
+        };
+
+        if (I.getType()->isIntegerTy(64) && I.getOperand(0)->getType()->isVectorTy() &&
+            I.getOperand(0)->getType()->getVectorElementType()->isIntegerTy(32))
+        {
+            if (auto IEI = dyn_cast<InsertElementInst>(I.getOperand(0)))
+            {
+                auto vec = dyn_cast<ConstantVector>(IEI->getOperand(0));
+                bool isCandidate = vec && vec->getNumOperands() == 2 && IsZero(vec->getOperand(0)) &&
+                    isa<UndefValue>(vec->getOperand(1));
+                auto index = dyn_cast<ConstantInt>(IEI->getOperand(2));
+                isCandidate &= index && index->getZExtValue() == 1;
+                if (isCandidate)
+                {
+                    Shl32Pattern* Pat = new (m_allocator) Shl32Pattern();
+                    Pat->sources[0] = GetSource(IEI->getOperand(1), false, false);
+                    Pat->sources[1] = GetSource(ConstantInt::get(Type::getInt32Ty(I.getContext()), 32), false, false);
+                    AddPattern(Pat);
+                    return;
+                }
+            }
+        }
+
         MatchSingleInstruction(I);
     }
 
@@ -1302,6 +1337,14 @@ namespace IGC
         MatchDbgInstruction(I);
     }
 
+    void CodeGenPatternMatch::visitInsertValueInst(InsertValueInst& I)
+    {
+        if (!MatchCopyToStruct(&I))
+        {
+            assert(0 && "Unknown `insertvalue` instruction!");
+        }
+    }
+
     void CodeGenPatternMatch::visitExtractValueInst(ExtractValueInst& I) {
         bool Match = false;
 
@@ -1313,12 +1356,101 @@ namespace IGC
         }
 
         Match = isExtractFromInlineAsm ||
+            MatchCopyFromStruct(&I) ||
             matchAddPair(&I) ||
             matchSubPair(&I) ||
             matchMulPair(&I) ||
             matchPtrToPair(&I);
 
         assert(Match && "Unknown `extractvalue` instruction!");
+    }
+
+    bool CodeGenPatternMatch::MatchCopyToStruct(InsertValueInst* II)
+    {
+        if (II->getNumIndices() != 1)
+            return false;
+
+        // Find the final insertvalue instruction, this will be
+        // the instruction we map to the VISA struct variable.
+        // Matches the following type of sequence:
+        //  %struct.S = type { i32, i32 }
+        //  % 3 = insertvalue % struct.S undef, i32 % 0, 0
+        //  % 4 = insertvalue % struct.S % 3, i32 % 2, 1   <--- Mapped Instruction
+        InsertValueInst* baseInst = II;
+        while (true)
+        {
+            Value* user = *baseInst->user_begin();
+            if (baseInst->getNumUses() != 1)
+                return false;
+            else if (InsertValueInst* inst = dyn_cast<InsertValueInst>(user))
+                baseInst = inst;
+            else
+                break;
+        }
+        assert(baseInst);
+
+        auto Iter = StructValueInsertMap.find(baseInst);
+        if (Iter != StructValueInsertMap.end())
+        {
+            // Already handled for this set of insertvalue instructions
+            return true;
+        }
+
+        // Find the list of all source values and indices inserted for this struct
+        std::vector<std::pair<SSource, unsigned>> srcList;
+        Value* initValue = baseInst;
+        while (true)
+        {
+            if (InsertValueInst* inst = dyn_cast<InsertValueInst>(initValue))
+            {
+                srcList.push_back(std::make_pair(GetSource(inst->getOperand(1), false, false), *inst->idx_begin()));
+                initValue = inst->getOperand(0);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        Constant* constInit = dyn_cast<Constant>(initValue);
+        StructValueInsertMap[baseInst] = std::make_pair(constInit, srcList);
+
+        struct AddCopyStructPattern : public Pattern {
+            InsertValueInst* inst;
+            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
+                Pass->EmitCopyToStruct(inst, DstMod);
+            }
+        };
+
+        AddCopyStructPattern* Pat = new (m_allocator) AddCopyStructPattern();
+        Pat->inst = baseInst;
+        AddPattern(Pat);
+
+        return true;
+    }
+
+    bool CodeGenPatternMatch::MatchCopyFromStruct(ExtractValueInst* EI)
+    {
+        if (EI->getNumIndices() != 1)
+            return false;
+        if (GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(EI->getOperand(0)))
+            return false;
+
+        struct AddReadStructPattern : public Pattern {
+            Value* value;
+            unsigned idx;
+            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
+                Pass->EmitCopyFromStruct(value, idx, DstMod);
+            }
+        };
+
+        AddReadStructPattern* Pat = new (m_allocator) AddReadStructPattern();
+        Pat->value = EI->getOperand(0);
+        Pat->idx = *EI->idx_begin();
+        AddPattern(Pat);
+
+        MarkAsSource(EI->getOperand(0));
+        return true;
     }
 
     bool CodeGenPatternMatch::matchAddPair(ExtractValueInst* Ex) {
@@ -2019,6 +2151,17 @@ namespace IGC
         // Check integer mad profitability.
         if (found && !isFpMad(I))
         {
+            uint8_t numConstant = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                if (isa<Constant>(sources[i]))
+                    numConstant++;
+
+                // Only one immediate is supported
+                if (numConstant > 1)
+                    return false;
+            }
+
             auto isByteOrWordValue = [](Value* V) -> bool {
                 if (isa<ConstantInt>(V))
                 {
@@ -2046,7 +2189,7 @@ namespace IGC
                 pattern->sources[i] = GetSource(sources[i], src_mod[i], false);
                 if (isa<Constant>(sources[i]) &&
                     (!m_Platform.support16BitImmSrcForMad() ||
-                    (sources[i]->getType()->getTypeID() != llvm::Type::HalfTyID) || i == 1))
+                    (!sources[i]->getType()->isHalfTy() && !sources[i]->getType()->isIntegerTy()) || i == 1))
                 {
                     //CNL+ mad instruction allows 16 bit immediate for src0 and src2
                     AddToConstantPool(I.getParent(), sources[i]);
@@ -2195,7 +2338,7 @@ namespace IGC
             {
                 if (isa<LoadInst>(inst))
                 {
-                    pass->emitVectorLoad(cast<LoadInst>(inst), offset, immOffset);
+                    pass->emitLoad(cast<LoadInst>(inst), offset, immOffset);
                 }
                 else if (isa<StoreInst>(inst))
                 {
@@ -2939,11 +3082,57 @@ namespace IGC
         if (CallInst * callinst = dyn_cast<CallInst>(&I))
         {
             // Mark the function pointer in indirect calls as a source
-            if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) && !callinst->getCalledFunction())
+            if (!callinst->getCalledFunction())
             {
                 MarkAsSource(callinst->getCalledValue());
             }
         }
+        AddPattern(pattern);
+        return true;
+    }
+
+    bool CodeGenPatternMatch::MatchCanonicalizeInstruction(llvm::Instruction& I)
+    {
+        struct CanonicalizeInstPattern : Pattern
+        {
+            CanonicalizeInstPattern(llvm::Instruction* pInst, bool isNeeded) : m_pInst(pInst), m_IsNeeded(isNeeded) {}
+
+            llvm::Instruction* m_pInst;
+            bool m_IsNeeded;
+
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                assert(modifier.sat == false && modifier.flag == nullptr);
+                if (m_IsNeeded)
+                {
+                    pass->emitCanonicalize(m_pInst);
+                }
+            }
+        };
+
+        assert(I.getNumOperands() == 1);
+        bool isNeeded = true;
+
+        // FAdd, FSub, FMul, FDiv instructions flush subnormals to zero.
+        // However, mix mode and math instructions preserve subnormals.
+        // Other instructions also preserve subnormals.
+        if (llvm::BinaryOperator * pBianaryOperator = llvm::dyn_cast<llvm::BinaryOperator>(I.getOperand(0)))
+        {
+            switch (pBianaryOperator->getOpcode())
+            {
+            case llvm::BinaryOperator::BinaryOps::FAdd:
+            case llvm::BinaryOperator::BinaryOps::FMul:
+            case llvm::BinaryOperator::BinaryOps::FSub:
+            case llvm::BinaryOperator::BinaryOps::FDiv:
+                isNeeded = false;
+            default:
+                break;
+            }
+        }
+
+        CanonicalizeInstPattern* pattern = new (m_allocator) CanonicalizeInstPattern(&I, isNeeded);
+        MarkAsSource(I.getOperand(0));
+
         AddPattern(pattern);
         return true;
     }
@@ -3393,12 +3582,11 @@ namespace IGC
         //   2) both operands are instructions.
         Instruction* LHS = dyn_cast<Instruction>(OrInst->getOperand(0));
         Instruction* RHS = dyn_cast<Instruction>(OrInst->getOperand(1));
-        if (!LHS || !RHS ||
-            (typeWidth != 16 && typeWidth != 32))
+        bool typeWidthSupported = typeWidth == 16 || typeWidth == 32;
+
+        if (!LHS || !RHS || !typeWidthSupported)
         {
-            {
-                return false;
-            }
+            return false;
         }
 
         // Make adjustment so that LHS is shl.
@@ -3782,7 +3970,14 @@ namespace IGC
 
     bool CodeGenPatternMatch::MatchWaveShuffleIndex(llvm::GenIntrinsicInst& I)
     {
-        HandleSubspanUse(I.getArgOperand(0));
+        llvm::Value* helperLaneMode = I.getOperand(2);
+        assert(helperLaneMode);
+        if (int_cast<int>(cast<ConstantInt>(helperLaneMode)->getSExtValue()) == 1)
+        {
+            //only if helperLaneMode==1, we enable helper lane under some shuffleindex cases (not for all cases).
+            HandleSubspanUse(I.getArgOperand(0));
+            HandleSubspanUse(&I);
+        }
         return MatchSingleInstruction(I);
     }
 
@@ -3849,9 +4044,9 @@ namespace IGC
                     //Check to make sure we dont end up with an invalid Vertical Stride.
                     //Only 1, 2, 4, 8, 16 are supported.
                     if (shiftFactor <= 4)
-                    {
-                        verticalStride = (int)pow(2, shiftFactor);
-                    }
+                        verticalStride = (1U << shiftFactor);
+                    else
+                        return false;
                 }
             }
         }

@@ -71,9 +71,15 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
+#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, Align, Src, Align, Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag,
                 NoAliasTag);
+#else
+            return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, llvm::Align(Align), Src, llvm::Align(Align), Size,
+                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
+                NoAliasTag);
+#endif
         }
 
         inline llvm::CallInst *CreateMemCpy(llvm::Value *Dst, llvm::Value *Src, llvm::Value *Size, unsigned Align,
@@ -82,13 +88,36 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
+#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, Align, Src, Align, Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag,
                 NoAliasTag);
+#else
+            return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, llvm::Align(Align), Src, llvm::Align(Align), Size,
+                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
+                NoAliasTag);
+#endif
         }
 
         inline llvm::CallInst* CreateMemCpy(llvm::Value* Dst, unsigned DstAlign, llvm::Value* Src, unsigned SrcAlign,
             llvm::Value* Size, bool isVolatile = false, llvm::MDNode* TBAATag = nullptr,
+            llvm::MDNode* TBAAStructTag = nullptr,
+            llvm::MDNode* ScopeTag = nullptr,
+            llvm::MDNode* NoAliasTag = nullptr)
+        {
+#if LLVM_VERSION_MAJOR < 10
+            return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, DstAlign, Src, SrcAlign, Size,
+                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
+                NoAliasTag);
+#else
+            return llvm::IRBuilder<T, Inserter>::CreateMemCpy(Dst, llvm::Align(DstAlign), Src, llvm::Align(SrcAlign), Size,
+                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
+                NoAliasTag);
+#endif
+        }
+
+         inline llvm::CallInst* CreateMemCpy(llvm::Value* Dst, unsigned DstAlign, llvm::Value* Src, unsigned SrcAlign,
+            uint64_t Size, bool isVolatile = false, llvm::MDNode* TBAATag = nullptr,
             llvm::MDNode* TBAAStructTag = nullptr,
             llvm::MDNode* ScopeTag = nullptr,
             llvm::MDNode* NoAliasTag = nullptr)
@@ -98,9 +127,24 @@ namespace IGCLLVM
                 NoAliasTag);
         }
 
+
         inline llvm::AllocaInst *CreateAlloca(llvm::Type *Ty, llvm::Value *ArraySize = nullptr, const llvm::Twine &Name = "", unsigned AddrSpace = 0)
         {
             return llvm::IRBuilder<T, Inserter>::CreateAlloca(Ty, AddrSpace, ArraySize, Name);
+        }
+
+        inline llvm::CallInst *CreateBinaryIntrinsic(llvm::Intrinsic::ID ID, llvm::Value *LHS,
+           llvm::Value *RHS,
+           llvm::Instruction *FMFSource = nullptr,
+           const llvm::Twine &Name = "")
+        {
+#if LLVM_VERSION_MAJOR > 7
+          return llvm::IRBuilder<T, Inserter>::CreateBinaryIntrinsic(
+              ID, LHS, RHS, FMFSource, Name);
+#else
+          return llvm::IRBuilder<T, Inserter>::CreateBinaryIntrinsic(ID, LHS,
+                                                                     RHS, Name);
+#endif
         }
     };
 #endif

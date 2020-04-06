@@ -149,12 +149,11 @@ namespace IGC
     llvm::Value* CreateStoreRawIntrinsic(llvm::StoreInst* inst, llvm::Instruction* bufPtr, llvm::Value* offsetVal);
 
     void getTextureAndSamplerOperands(llvm::GenIntrinsicInst* pIntr, llvm::Value*& pTextureValue, llvm::Value*& pSamplerValue);
-    void ChangePtrTypeInIntrinsic(llvm::GenIntrinsicInst*& pIntr, llvm::Value* oldPtr, llvm::Value* newPtr, bool isExtendedForBindlessPromotion);
     void ChangePtrTypeInIntrinsic(llvm::GenIntrinsicInst*& pIntr, llvm::Value* oldPtr, llvm::Value* newPtr);
 
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr);
-    llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool fillList, std::vector<llvm::Value*>& instList);
-    llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool fillList, std::vector<llvm::Value*>& instList, llvm::SmallSet<llvm::PHINode*, 8> & visitedPHIs);
+    llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList, std::vector<llvm::Value*>& instList);
+    llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList, std::vector<llvm::Value*>& instList, llvm::SmallSet<llvm::PHINode*, 8> & visitedPHIs);
     bool GetResourcePointerInfo(llvm::Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, IGC::BufferAccessType& accessTy, bool& needBufferOffset);
     bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
@@ -233,6 +232,45 @@ namespace IGC
             }
         }
         return false;
+    }
+
+    inline bool isCoarsePhaseFunction(const llvm::Function* CF) {
+        const llvm::Module * M = CF->getParent();
+        if (auto MD = M->getNamedMetadata(NAMED_METADATA_COARSE_PHASE)) {
+            if (MD->getOperand(0) && MD->getOperand(0)->getOperand(0)) {
+                auto Func = llvm::mdconst::dyn_extract<llvm::Function>(
+                    MD->getOperand(0)->getOperand(0));
+                return Func == CF;
+            }
+        }
+        return false;
+    }
+
+    inline bool isPixelPhaseFunction(const llvm::Function* CF) {
+        const llvm::Module* M = CF->getParent();
+        if (auto MD = M->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE)) {
+            if (MD->getOperand(0) && MD->getOperand(0)->getOperand(0)) {
+                auto Func = llvm::mdconst::dyn_extract<llvm::Function>(
+                    MD->getOperand(0)->getOperand(0));
+                return Func == CF;
+            }
+        }
+        return false;
+    }
+
+    inline bool isNonEntryMultirateShader(const llvm::Function* CF) {
+        if (isPixelPhaseFunction(CF))
+        {
+            const llvm::Module* CM = CF->getParent();
+            if (auto MD = CM->getNamedMetadata(NAMED_METADATA_COARSE_PHASE)) {
+                if (MD->getOperand(0) && MD->getOperand(0)->getOperand(0)) {
+                    auto Func = llvm::mdconst::dyn_extract<llvm::Function>(
+                        MD->getOperand(0)->getOperand(0));
+                    return Func != nullptr;
+                }
+            }
+        }
+        return  false;
     }
 
     // Return a unique entry function.
@@ -370,11 +408,10 @@ namespace IGC
 
     inline unsigned GetHwThreadsPerWG(const IGC::CPlatform& platform)
     {
-        unsigned hwThreadPerWorkgroup = platform.getMaxNumberThreadPerSubslice();
-
+        unsigned hwThreadPerWorkgroup = platform.getMaxNumberHWThreadForEachWG();
         if (platform.supportPooledEU())
         {
-            hwThreadPerWorkgroup = platform.getMaxNumberThreadPerWorkgroupPooledMax();
+            hwThreadPerWorkgroup = std::min(platform.getMaxNumberThreadPerWorkgroupPooledMax(), (unsigned)64);
         }
         return hwThreadPerWorkgroup;
     }
@@ -385,8 +422,7 @@ namespace IGC
         {
             hwThreadPerWorkgroup = 42; //On GT1 HW, there are 7 threads/EU and 6 EU/subslice, 42 is the minimum threads/workgroup any HW can support
         }
-        if ((threadGroupSize <= hwThreadPerWorkgroup * 8) &&
-            threadGroupSize <= 512)
+        if (threadGroupSize <= hwThreadPerWorkgroup * 8)
         {
             return SIMDMode::SIMD8;
         }

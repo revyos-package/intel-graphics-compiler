@@ -273,8 +273,8 @@ static void verifyVariableDecl(
 {
     string declError = string(" Error in CISA variable decl: ") + printVariableDecl(isaHeader, header, declID, true, 0, options);
 
-    const var_info_t*      var      = header->getVar(declID);
-    VISA_Align align    = (VISA_Align)((var->bit_properties >> 4) & 0x7);
+    const var_info_t* var = header->getVar(declID);
+    VISA_Align align = var->getAlignment();
 
     unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
 
@@ -334,6 +334,9 @@ static void verifyVariableDecl(
         {
             REPORT_HEADER(options,totalOffset < (currAliasVar->num_elements * (unsigned)CISATypeTable[currAliasVar->getType()].typeSize),
                               "Variable decl's alias offset exceeds the bounds of the aliased variable decl allocation size: %s", declError.c_str());
+            VISA_Align baseAlign = std::max(currAliasVar->getAlignment(), currAliasVar->getTypeAlignment());
+            REPORT_HEADER(options, baseAlign >= var->getTypeAlignment(),
+                "base variable must be at least type-aligned to this variable: %s", declError.c_str());
         }
     }
 
@@ -450,7 +453,7 @@ static void verifyRegion(
     REPORT_INSTRUCTION(options,width_val, "CISA region has width of 0");
 
     uint8_t exec_sz = 0;
-    switch (((VISA_Exec_Size)(inst->execsize & 0xF)))
+    switch (inst->getExecSize())
     {
     case EXEC_SIZE_1:  exec_sz = 1;  break;
     case EXEC_SIZE_2:  exec_sz = 2;  break;
@@ -458,7 +461,7 @@ static void verifyRegion(
     case EXEC_SIZE_8:  exec_sz = 8;  break;
     case EXEC_SIZE_16: exec_sz = 16; break;
     case EXEC_SIZE_32: exec_sz = 32; break;
-    default: REPORT_INSTRUCTION(options,false, "Invalid execution size");
+    default: REPORT_INSTRUCTION(options, false, "Invalid execution size");
     }
 
     if (i == dstIndex)
@@ -904,8 +907,14 @@ static void verifyInstructionSVM(
     const common_isa_header& isaHeader,
     const print_format_provider_t* header,
     const CISA_INST* inst,
-    ERROR_LIST)
+    ERROR_LIST,
+    Options *options)
 {
+    if (hasExecSize((ISA_Opcode)inst->opcode))
+    {
+        REPORT_INSTRUCTION(options, EXEC_SIZE_32 != inst->getExecSize(),
+            "Execution size should not be SIMD32 for SVM messages.");
+    }
 }
 
 static void verifyInstructionMove(
@@ -937,10 +946,10 @@ static void verifyInstructionMove(
 
              if (OPERAND_PREDICATE == operand_class_src0)
              {
-                 REPORT_INSTRUCTION(options,EXEC_SIZE_1 == ((VISA_Exec_Size)(inst->execsize & 0xF)),
+                 REPORT_INSTRUCTION(options,EXEC_SIZE_1 == inst->getExecSize(),
                          "Execution size for a flag copy mov instruction should be 1, as it is a scalar copy.");
-                 REPORT_INSTRUCTION(options,dstType == ISA_TYPE_UD || dstType == ISA_TYPE_UW || dstType == ISA_TYPE_UB,
-                         "dst operand type for a flag copy mov instruction should be UD/UW/UB.");
+                 REPORT_INSTRUCTION(options, IsIntType(dstType) && dstType != ISA_TYPE_Q && dstType != ISA_TYPE_UQ,
+                         "dst operand type for a flag copy mov instruction should be non-64-bit integer.");
                  REPORT_INSTRUCTION(options,CISATypeTable[dstType].typeSize >= CISATypeTable[src0Type].typeSize,
                          "dst operand type for a flag copy mov instruction should be "
                          "greater than or equal to the size of the src0 operand's type size.");
@@ -1284,7 +1293,7 @@ static void verifyInstructionMisc(
 
             REPORT_INSTRUCTION(options,!(numOut < 1 || numOut > 8) , "Valid range for num_out parameter of URB write is [1,8]");
             REPORT_INSTRUCTION(options,globalOff <= 2047, "Valid range for global_offset parameter of URB write is [0,2047]");
-            REPORT_INSTRUCTION(options,((VISA_Exec_Size)(inst->execsize & 0xF)) == EXEC_SIZE_8, "Only execution size of 8 is supported for URB write");
+            REPORT_INSTRUCTION(options, inst->getExecSize() == EXEC_SIZE_8, "Only execution size of 8 is supported for URB write");
 
             break;
         }
@@ -1403,42 +1412,43 @@ static void verifyInstructionArith(
     const print_format_provider_t* header,
     const CISA_INST* inst,
     ERROR_LIST,
-    Options *options)
+    Options* options)
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
     unsigned i = 0;
-    const vector_opnd&          dst = getVectorOperand(inst, i);
+    const vector_opnd& dst = getVectorOperand(inst, i);
     VISA_Type         dstType = getVectorOperandType(isaHeader, header, dst);
     VISA_Modifier dstModifier = dst.getOperandModifier();
+    auto platform = getGenxPlatform();
 
-    REPORT_INSTRUCTION(options,dst.getOperandClass() == OPERAND_GENERAL ||
-                       dst.getOperandClass() == OPERAND_INDIRECT,
-                       "Destination of CISA arithmetic instruction should be general or indirect operand.");
+    REPORT_INSTRUCTION(options, dst.getOperandClass() == OPERAND_GENERAL ||
+        dst.getOperandClass() == OPERAND_INDIRECT,
+        "Destination of CISA arithmetic instruction should be general or indirect operand.");
 
-    REPORT_INSTRUCTION(options,dstModifier == MODIFIER_NONE ||
-                       dstModifier == MODIFIER_SAT,
-                       "Illegal destination modifier for CISA arithmetic instruction.");
+    REPORT_INSTRUCTION(options, dstModifier == MODIFIER_NONE ||
+        dstModifier == MODIFIER_SAT,
+        "Illegal destination modifier for CISA arithmetic instruction.");
 
     // check if sat is allowed for this instruction
     if (dstModifier == MODIFIER_SAT)
     {
         switch (opcode)
         {
-            case ISA_FRC:
-            case ISA_LZD:
-            case ISA_MOD:
-            case ISA_MULH:
-                 REPORT_INSTRUCTION(options,false,
-                                    "%s does not support saturation",
-                                    ISA_Inst_Table[opcode].str);
-                 break;
-            case ISA_DIV:
-                 REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || dstType == ISA_TYPE_HF,
-                     "%s does not support saturation on integer types.",
-                     ISA_Inst_Table[opcode].str);
-            default:
-                 break; // Prevent gcc warning
+        case ISA_FRC:
+        case ISA_LZD:
+        case ISA_MOD:
+        case ISA_MULH:
+            REPORT_INSTRUCTION(options, false,
+                "%s does not support saturation",
+                ISA_Inst_Table[opcode].str);
+            break;
+        case ISA_DIV:
+            REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || dstType == ISA_TYPE_HF,
+                "%s does not support saturation on integer types.",
+                ISA_Inst_Table[opcode].str);
+        default:
+            break; // Prevent gcc warning
         }
     }
 
@@ -1452,86 +1462,87 @@ static void verifyInstructionArith(
         }
     }
 
+
     /// check dst type is supported by the instruction
     switch (opcode)
     {
-        case ISA_COS:
-        case ISA_EXP:
-        case ISA_LOG:
-        case ISA_POW:
-        case ISA_SIN:
-           /// float and half float
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_F || dstType == ISA_TYPE_HF,
-                "%s only supports single and half float type", ISA_Inst_Table[opcode].str);
-            break;
-        case ISA_RNDD:
-        case ISA_RNDU:
-        case ISA_RNDE:
-        case ISA_RNDZ:
-        case ISA_PLANE:
-        case ISA_DP2:
-        case ISA_DP3:
-        case ISA_DP4:
-        case ISA_DPH:
-        case ISA_FRC:
-        case ISA_LRP:
-            /// float only
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_F, "%s only supports single float type", ISA_Inst_Table[opcode].str);
-            break;
-        case ISA_LINE:
-            /// float or int only
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_F || IsIntType(dstType),
-                               "%s only supports integer and single precision float types", ISA_Inst_Table[opcode].str);
-            break;
-        case ISA_AVG:
-        case ISA_MOD:
-            /// int only
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_UD   ||
-                               dstType == ISA_TYPE_D    ||
-                               dstType == ISA_TYPE_UW   ||
-                               dstType == ISA_TYPE_W    ||
-                               dstType == ISA_TYPE_UB   ||
-                               dstType == ISA_TYPE_B,
-                               "%s only supports integer type", ISA_Inst_Table[opcode].str);
-            break;
-        case ISA_LZD:
-            /// UD only
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_UD, "lzd only supports UD type");
-            break;
-        case ISA_MULH:
-        case ISA_DP4A:
-            /// U or UD only
-            REPORT_INSTRUCTION(options, dstType == ISA_TYPE_D || dstType == ISA_TYPE_UD,
-                "%s only support D/UD dst type", ISA_Inst_Table[opcode].str);
-            break;
-        case ISA_SAD2:
-        case ISA_SAD2ADD:
-            /// dst must be w or uw
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_W || dstType == ISA_TYPE_UW, "sad2/sad2add only supports W/UW dst type.");
-            REPORT_INSTRUCTION(options, getPlatformGeneration(getGenxPlatform()) != PlatformGen::GEN12, "sad2/sad2add is not supported on gen12.");
-            break;
-        case ISA_ADDC:
-        case ISA_SUBB:
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_UD, "%s only supports single UD type", ISA_Inst_Table[opcode].str);
-            break;
-        default:
-            REPORT_INSTRUCTION(options,dstType == ISA_TYPE_F || dstType == ISA_TYPE_DF || dstType == ISA_TYPE_HF || IsIntType(dstType), "%s has illegal dst type", ISA_Inst_Table[opcode].str);
+    case ISA_COS:
+    case ISA_EXP:
+    case ISA_LOG:
+    case ISA_POW:
+    case ISA_SIN:
+        /// float and half float
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || dstType == ISA_TYPE_HF,
+            "%s only supports single and half float type", ISA_Inst_Table[opcode].str);
+        break;
+    case ISA_RNDD:
+    case ISA_RNDU:
+    case ISA_RNDE:
+    case ISA_RNDZ:
+    case ISA_PLANE:
+    case ISA_DP2:
+    case ISA_DP3:
+    case ISA_DP4:
+    case ISA_DPH:
+    case ISA_FRC:
+    case ISA_LRP:
+        /// float only
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F, "%s only supports single float type", ISA_Inst_Table[opcode].str);
+        break;
+    case ISA_LINE:
+        /// float or int only
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || IsIntType(dstType),
+            "%s only supports integer and single precision float types", ISA_Inst_Table[opcode].str);
+        break;
+    case ISA_AVG:
+    case ISA_MOD:
+        /// int only
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD ||
+            dstType == ISA_TYPE_D ||
+            dstType == ISA_TYPE_UW ||
+            dstType == ISA_TYPE_W ||
+            dstType == ISA_TYPE_UB ||
+            dstType == ISA_TYPE_B,
+            "%s only supports integer type", ISA_Inst_Table[opcode].str);
+        break;
+    case ISA_LZD:
+        /// UD only
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD, "lzd only supports UD type");
+        break;
+    case ISA_MULH:
+    case ISA_DP4A:
+        /// U or UD only
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_D || dstType == ISA_TYPE_UD,
+            "%s only support D/UD dst type", ISA_Inst_Table[opcode].str);
+        break;
+    case ISA_SAD2:
+    case ISA_SAD2ADD:
+        /// dst must be w or uw
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_W || dstType == ISA_TYPE_UW, "sad2/sad2add only supports W/UW dst type.");
+        REPORT_INSTRUCTION(options, getPlatformGeneration(getGenxPlatform()) != PlatformGen::GEN12, "sad2/sad2add is not supported on gen12.");
+        break;
+    case ISA_ADDC:
+    case ISA_SUBB:
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD, "%s only supports single UD type", ISA_Inst_Table[opcode].str);
+        break;
+    default:
+        REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || dstType == ISA_TYPE_DF || dstType == ISA_TYPE_HF || IsIntType(dstType), "%s has illegal dst type", ISA_Inst_Table[opcode].str);
     }
 
     // verify each source operand
     for (unsigned i = 0; i < ISA_Inst_Table[opcode].n_srcs; i++)
     {
-        const vector_opnd&          src = getVectorOperand(inst, i + ISA_Inst_Table[opcode].n_dsts); /// dst is at index 0, addc/subbb have two destinations
+        const vector_opnd& src = getVectorOperand(inst, i + ISA_Inst_Table[opcode].n_dsts); /// dst is at index 0, addc/subbb have two destinations
         VISA_Type         srcType = getVectorOperandType(isaHeader, header, src);
         VISA_Modifier srcModifier = src.getOperandModifier();
 
-        REPORT_INSTRUCTION(options,srcModifier != MODIFIER_SAT && srcModifier != MODIFIER_NOT,
-                           "unsupported source modifier for arithmetic instruction");
+        REPORT_INSTRUCTION(options, srcModifier != MODIFIER_SAT && srcModifier != MODIFIER_NOT,
+            "unsupported source modifier for arithmetic instruction");
 
-        REPORT_INSTRUCTION(options,src.getOperandClass() == OPERAND_GENERAL ||
-                           src.getOperandClass() == OPERAND_INDIRECT ||
-                           src.getOperandClass() == OPERAND_IMMEDIATE,
-                           "source in arithmetic instruction must be general, indirect, or immediate");
+        REPORT_INSTRUCTION(options, src.getOperandClass() == OPERAND_GENERAL ||
+            src.getOperandClass() == OPERAND_INDIRECT ||
+            src.getOperandClass() == OPERAND_IMMEDIATE,
+            "source in arithmetic instruction must be general, indirect, or immediate");
 
         if (srcType == ISA_TYPE_DF)
         {
@@ -1543,82 +1554,81 @@ static void verifyInstructionArith(
             }
         }
 
-        if (dstType == ISA_TYPE_F  ||
+        if (dstType == ISA_TYPE_F ||
             dstType == ISA_TYPE_DF ||
             dstType == ISA_TYPE_HF ||
             srcType == ISA_TYPE_DF ||
-            srcType == ISA_TYPE_F  ||
+            srcType == ISA_TYPE_F ||
             srcType == ISA_TYPE_HF)
         {
-            REPORT_INSTRUCTION(options,dstType == srcType ||
-                                (dstType == ISA_TYPE_F && srcType == ISA_TYPE_VF) ||
-                                (dstType == ISA_TYPE_F && srcType == ISA_TYPE_HF) ||
-                                (dstType == ISA_TYPE_HF && srcType == ISA_TYPE_F),
-                               "Arithmetic instructions that use single or double precision or half float types "
-                               "must use the same type for all of their operannds: dst(%s) and src%d(%s).",
-                               CISATypeTable[dstType].typeName, i, CISATypeTable[srcType].typeName);
+            REPORT_INSTRUCTION(options, dstType == srcType ||
+                (dstType == ISA_TYPE_F && srcType == ISA_TYPE_VF) ||
+                (dstType == ISA_TYPE_F && srcType == ISA_TYPE_HF) ||
+                (dstType == ISA_TYPE_HF && srcType == ISA_TYPE_F),
+                "Arithmetic instructions that use single or double precision or half float types "
+                "must use the same type for all of their operannds: dst(%s) and src%d(%s).",
+                CISATypeTable[dstType].typeName, i, CISATypeTable[srcType].typeName);
         }
         else
         {
             /// source must have integer type
-            REPORT_INSTRUCTION(options,IsIntType(srcType) ||
-                               (src.getOperandClass() == OPERAND_IMMEDIATE &&
-                               (srcType == ISA_TYPE_V || srcType == ISA_TYPE_UV)),
-                               "immediate src%d has %d type, and it must have integer type", i, srcType);
+            REPORT_INSTRUCTION(options, IsIntType(srcType) ||
+                (src.getOperandClass() == OPERAND_IMMEDIATE &&
+                (srcType == ISA_TYPE_V || srcType == ISA_TYPE_UV)),
+                "immediate src%d has %d type, and it must have integer type", i, srcType);
         }
 
         switch (opcode)
         {
-             case ISA_SAD2:
-             case ISA_SAD2ADD:
-             {
-                  bool is_valid_imm = false;
-                  if (i == 2)
-                  {
-                      is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_W) ||
-                                     checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UW);
-                  }
-                  else
-                  {
-                      is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_B) ||
-                                     checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UB);
-                  }
-                  REPORT_INSTRUCTION(options,is_valid_imm ||
-                                     (i == 2 && (srcType == ISA_TYPE_W || srcType == ISA_TYPE_UW)) ||
-                                     (i <= 1 && (srcType == ISA_TYPE_B || srcType == ISA_TYPE_UB)),
-                                     "sad2/sad2add only supports B/UB types for src0 and src1; W/UW for src2 (sad2add). src%d has invalid type.", i);
-                  break;
-             }
-             case ISA_MUL:
-             case ISA_DIV:
-                  REPORT_INSTRUCTION(options,srcType != ISA_TYPE_Q && srcType != ISA_TYPE_UQ,
-                      "mul/div does not support Q/UQ types for src%d", i);
-                  break;
-            case ISA_DIVM:
-                  REPORT_INSTRUCTION(options,srcType == ISA_TYPE_F || srcType == ISA_TYPE_DF,
-                      "ieee div does not support types for src%d, other than F/DF", i);
-                  break;
-            case ISA_SQRTM:
-                  REPORT_INSTRUCTION(options,srcType == ISA_TYPE_F || srcType == ISA_TYPE_DF,
-                      "ieee sqrt does not support types for src%d, other than F/DF", i);
-                  break;
-            case ISA_ADDC:
-            case ISA_SUBB:
+        case ISA_SAD2:
+        case ISA_SAD2ADD:
+        {
+            bool is_valid_imm = false;
+            if (i == 2)
             {
-                REPORT_INSTRUCTION(options,srcType == ISA_TYPE_UD || srcType == ISA_TYPE_UV,
-                    "%s src0 and src1 only supports single UD type", ISA_Inst_Table[opcode].str);
-                break;
+                is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_W) ||
+                    checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UW);
             }
-            case ISA_DP4A:
-                REPORT_INSTRUCTION(options,srcType == ISA_TYPE_D || srcType == ISA_TYPE_UD, "%s src0 and src1 only supports single UD type", ISA_Inst_Table[opcode].str);
-                break;
-            default:
-                 break; // Prevent gcc warning
+            else
+            {
+                is_valid_imm = checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_B) ||
+                    checkImmediateIntegerOpnd(isaHeader, header, src, ISA_TYPE_UB);
+            }
+            REPORT_INSTRUCTION(options, is_valid_imm ||
+                (i == 2 && (srcType == ISA_TYPE_W || srcType == ISA_TYPE_UW)) ||
+                (i <= 1 && (srcType == ISA_TYPE_B || srcType == ISA_TYPE_UB)),
+                "sad2/sad2add only supports B/UB types for src0 and src1; W/UW for src2 (sad2add). src%d has invalid type.", i);
+            break;
+        }
+        case ISA_MUL:
+        case ISA_DIV:
+            REPORT_INSTRUCTION(options, srcType != ISA_TYPE_Q && srcType != ISA_TYPE_UQ,
+                "mul does not support Q/UQ types for src%d", i);
+            break;
+        case ISA_DIVM:
+            REPORT_INSTRUCTION(options, srcType == ISA_TYPE_F || srcType == ISA_TYPE_DF || srcType == ISA_TYPE_VF,
+                "ieee div does not support types for src%d, other than F/DF/VF", i);
+            break;
+        case ISA_SQRTM:
+            REPORT_INSTRUCTION(options, srcType == ISA_TYPE_F || srcType == ISA_TYPE_DF || srcType == ISA_TYPE_VF,
+                "ieee sqrt does not support types for src%d, other than F/DF/VF", i);
+            break;
+        case ISA_ADDC:
+        case ISA_SUBB:
+        {
+            REPORT_INSTRUCTION(options, srcType == ISA_TYPE_UD || srcType == ISA_TYPE_UV,
+                "%s src0 and src1 only supports single UD type", ISA_Inst_Table[opcode].str);
+            break;
+        }
+        case ISA_DP4A:
+            REPORT_INSTRUCTION(options, srcType == ISA_TYPE_D || srcType == ISA_TYPE_UD, "%s src0 and src1 only supports single UD type", ISA_Inst_Table[opcode].str);
+            break;
+        default:
+            break; // Prevent gcc warning
         }
     }
 
     // check for IEEE macros support
-    auto platform = getGenxPlatform();
     // !hasMadm() check
     if (platform == GENX_ICLLP || platform == GENX_TGLLP)
     {
@@ -1626,21 +1636,21 @@ static void verifyInstructionArith(
         bool dfOpcodeIEEE = fOpcodeIEEE || (opcode == ISA_INV) || (opcode == ISA_DIV) || (opcode == ISA_SQRT);
         REPORT_INSTRUCTION(options, !(dstType == ISA_TYPE_DF && dfOpcodeIEEE) && !(dstType == ISA_TYPE_F && fOpcodeIEEE),
             "IEEE instruction %s is not supported on %s platform", ISA_Inst_Table[opcode].str, platformString[platform]);
-    }
+}
 
     // instruction specific checks
     if (opcode == ISA_LRP)
     {
         // for 3-src instructions, only support general/immediate operands
-        REPORT_INSTRUCTION(options,inst->opnd_count == (ISA_Inst_Table[opcode].n_dsts + ISA_Inst_Table[opcode].n_srcs) &&
-                           getVectorOperand(inst, 0).getOperandClass() == OPERAND_GENERAL                      &&
-                           (getVectorOperand(inst, 1).getOperandClass() == OPERAND_GENERAL ||
-                           getVectorOperand(inst, 1).getOperandClass() == OPERAND_IMMEDIATE)                      &&
-                           (getVectorOperand(inst, 2).getOperandClass() == OPERAND_GENERAL ||
-                           getVectorOperand(inst, 2).getOperandClass() == OPERAND_IMMEDIATE)                      &&
-                           (getVectorOperand(inst, 3).getOperandClass() == OPERAND_GENERAL ||
-                           getVectorOperand(inst, 3).getOperandClass() == OPERAND_IMMEDIATE)                      ,
-                           "lrp only supports general/immediate operands");
+        REPORT_INSTRUCTION(options, inst->opnd_count == (ISA_Inst_Table[opcode].n_dsts + ISA_Inst_Table[opcode].n_srcs) &&
+            getVectorOperand(inst, 0).getOperandClass() == OPERAND_GENERAL &&
+            (getVectorOperand(inst, 1).getOperandClass() == OPERAND_GENERAL ||
+                getVectorOperand(inst, 1).getOperandClass() == OPERAND_IMMEDIATE) &&
+                (getVectorOperand(inst, 2).getOperandClass() == OPERAND_GENERAL ||
+                    getVectorOperand(inst, 2).getOperandClass() == OPERAND_IMMEDIATE) &&
+                    (getVectorOperand(inst, 3).getOperandClass() == OPERAND_GENERAL ||
+                        getVectorOperand(inst, 3).getOperandClass() == OPERAND_IMMEDIATE),
+            "lrp only supports general/immediate operands");
 
         //ToDo: should check for alignment here
     }
@@ -1923,7 +1933,7 @@ static void verifyInstructionSampler(const common_isa_header& isaHeader,
 
             if (cpsEnable)
             {
-                auto execSize = (VISA_Exec_Size)(inst->execsize & 0xF);
+                auto execSize = inst->getExecSize();
 
                 REPORT_INSTRUCTION(options,
                                    execSize == EXEC_SIZE_8 || execSize == EXEC_SIZE_16,
@@ -3084,7 +3094,11 @@ void verifyInstruction(
 
     if (hasExecSize(opcode))
     {
-        REPORT_INSTRUCTION(options,((VISA_Exec_Size)(inst->execsize & 0xF)) < EXEC_SIZE_ILLEGAL, "CISA instruction uses an illegal execution size.");
+        auto execSize = inst->getExecSize();
+        REPORT_INSTRUCTION(options, execSize < EXEC_SIZE_ILLEGAL, "vISA instruction uses an illegal execution size.");
+        // check for illegal combinations of emask and execution size
+        REPORT_INSTRUCTION(options, Get_VISA_Exec_Size(execSize) + getvISAMaskOffset(inst->getExecMask()) <= 32,
+            "vISA instruction has illegal combination of execution size and mask");
     }
 
     if (hasPredicate(opcode))
@@ -3095,7 +3109,7 @@ void verifyInstruction(
 
     switch (ISA_Inst_Table[opcode].type)
     {
-        case ISA_Inst_SVM:       verifyInstructionSVM         (isaHeader, header, inst, error_list); break;
+        case ISA_Inst_SVM:       verifyInstructionSVM         (isaHeader, header, inst, error_list, options); break;
         case ISA_Inst_Mov:       verifyInstructionMove        (isaHeader, header, inst, error_list, options); break;
         case ISA_Inst_Sync:      verifyInstructionSync        (isaHeader, header, inst, error_list, options); break;
         case ISA_Inst_Flow:      verifyInstructionControlFlow (isaHeader, header, inst, error_list, options); break;

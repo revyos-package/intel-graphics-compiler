@@ -280,13 +280,26 @@ void CShader::InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize,
     encoder.SetSrcSubReg(0, 5);
     encoder.And(pHWTID, GetR0(), ImmToVariable(0x1ff, ISA_TYPE_UD));
     encoder.Push();
-    // hard-code per-workitem private-memory size to 8k
-    CVariable* pSize = ImmToVariable(8 * 1024 * numLanes(m_dispatchSize), ISA_TYPE_UD);
+
+    CVariable* pSize = nullptr;
+    if (IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+    {
+        // Experimental: Patch private memory size
+        pSize = GetNewVariable(1, ISA_TYPE_UD, CVariable::getAlignment(getGRFSize()), true);
+        std::string patchName = "INTEL_PATCH_PRIVATE_MEMORY_SIZE";
+        encoder.AddVISASymbol(patchName, pSize);
+    }
+    else
+    {
+        // hard-code per-workitem private-memory size to 8k
+        pSize = ImmToVariable(8 * 1024 * numLanes(m_dispatchSize), ISA_TYPE_UD);
+    }
+
     CVariable* pTemp = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1);
     encoder.Mul(pTemp, pHWTID, pSize);
     encoder.Push();
-    // reserve space for alloca
 
+    // reserve space for alloca
     auto funcMDItr = m_ModuleMetadata->FuncMD.find(entry);
     if (funcMDItr != m_ModuleMetadata->FuncMD.end())
     {
@@ -295,6 +308,9 @@ void CShader::InitKernelStack(CVariable*& stackBase, CVariable*& stackAllocSize,
             unsigned totalAllocaSize = funcMDItr->second.privateMemoryPerWI * numLanes(m_dispatchSize);
             encoder.Add(pTemp, pTemp, ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
             encoder.Push();
+
+            // Set the total alloca size for the entry function
+            encoder.SetFunctionAllocaStackSize(entry, totalAllocaSize);
         }
     }
 
@@ -335,7 +351,7 @@ void CShader::CreateImplicitArgs()
 
     // Push Args are only for entry function
     unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) ? numPushArgsEntry : 0);
+    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) && !isNonEntryMultirateShader(entry) ? numPushArgsEntry : 0);
     unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
 
     // Create symbol for every arguments [5/2019]
@@ -432,7 +448,7 @@ void CShader::CreateAliasVars()
 {
     // Create CVariables for vector aliasing (This is more
     // efficient than doing it on-fly inside getSymbol()).
-    if (IGC_IS_FLAG_ENABLED(VATemp) &&
+    if (GetContext()->getVectorCoalescingControl() > 0 &&
         !m_VRA->m_aliasMap.empty())
     {
         // For each vector alias root, generate cvariable
@@ -1156,6 +1172,15 @@ void CShader::GetSimdOffsetBase(CVariable*& pVar)
         encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
         encoder.Push();
     }
+    else if (m_SIMDSize == SIMDMode::SIMD32)
+    {
+        // (W) add (16) V1(16) V1(0) 16:w
+        encoder.SetSimdSize(SIMDMode::SIMD16);
+        encoder.SetNoMask();
+        encoder.SetDstSubReg(16);
+        encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
+        encoder.Push();
+    }
 }
 
 CVariable* CShader::GetPerLaneOffsetsReg(uint typeSizeInBytes)
@@ -1518,6 +1543,53 @@ auto sizeToSIMDMode = [](uint32_t size)
         return SIMDMode::SIMD1;
     }
 };
+
+CVariable* CShader::GetStructVariable(llvm::Value* value, llvm::Constant* initValue)
+{
+    assert(value->getType()->isStructTy());
+
+    // check if we already created the symbol mapping
+    if (!isa<Constant>(value))
+    {
+        auto it = symbolMapping.find(value);
+        if (it != symbolMapping.end())
+        {
+            return it->second;
+        }
+    }
+
+    StructType* sTy = cast<StructType>(value->getType());
+    auto& DL = entry->getParent()->getDataLayout();
+    const StructLayout* SL = DL.getStructLayout(sTy);
+
+    unsigned structSizeInBytes = (unsigned)SL->getSizeInBytes();
+    // Represent the struct as a vector of BYTES
+    bool isUniform = GetIsUniform(value);
+    unsigned lanes = isUniform ? 1 : numLanes(m_dispatchSize);
+    CVariable* cVar = GetNewVariable(structSizeInBytes * lanes, ISA_TYPE_B, EALIGN_GRF, isUniform);
+
+    // Initialize the struct
+    if (Constant* C = dyn_cast<Constant>(value))
+        initValue = C;
+
+    if (initValue)
+    {
+        for (unsigned i = 0; i < sTy->getNumElements(); i++)
+        {
+            unsigned elementOffset = (unsigned)SL->getElementOffset(i);
+            CVariable* elementSrc = GetSymbol(initValue->getAggregateElement(i));
+            CVariable* elementDst = GetNewAlias(cVar, elementSrc->GetType(), elementOffset * lanes, elementSrc->GetNumberElement() * lanes);
+            GetEncoder().Copy(elementDst, elementSrc);
+            GetEncoder().Push();
+        }
+    }
+
+    if (!isa<Constant>(value))
+    {
+        symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, cVar));
+    }
+    return cVar;
+}
 
 CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 {
@@ -2072,7 +2144,7 @@ CVariable* CShader::getOrCreateArgumentSymbol(
     ImplicitArgs implicitArgs(*F, m_pMdUtils);
     unsigned numImplicitArgs = implicitArgs.size();
     unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) ? numPushArgsEntry : 0);
+    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) && !isNonEntryMultirateShader(F) ? numPushArgsEntry : 0);
     unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(F) - numImplicitArgs - numPushArgs;
 
     CVariable* var = nullptr;
@@ -2107,7 +2179,7 @@ CVariable* CShader::getOrCreateArgumentSymbol(
                 uint32_t nIAs = (uint32_t)IAs.size();
                 uint32_t iArgIx = IAs.getArgIndex(ArgType);
                 uint32_t argIx = (uint32_t)IGCLLVM::GetFuncArgSize(K) - nIAs + iArgIx;
-                if (isEntryFunc(m_pMdUtils, &K)) {
+                if (isEntryFunc(m_pMdUtils, &K) && !isNonEntryMultirateShader(&K)) {
                     argIx = argIx - numPushArgsEntry;
                 }
                 Function::arg_iterator arg = K.arg_begin();
@@ -2157,63 +2229,6 @@ CVariable* CShader::getOrCreateArgumentSymbol(
         }
         var = GetNewVariable(nElts, type, align, isUniform, m_numberInstance);
     }
-    pSymMap->insert(std::make_pair(Arg, var));
-    return var;
-}
-
-CVariable* CShader::getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, unsigned argIdx, unsigned numImplicitArgs)
-{
-    assert(argIdx < cInst->getNumArgOperands());
-
-    CVariable* var = nullptr;
-    Value* Arg = cInst->getArgOperand(argIdx);
-
-    llvm::DenseMap<llvm::Value*, CVariable*>* pSymMap = &globalSymbolMapping;
-    auto it = pSymMap->find(Arg);
-    if (it != pSymMap->end())
-    {
-        return it->second;
-    }
-
-    unsigned numExplicitArgs = cInst->getNumArgOperands() - numImplicitArgs;
-    if (argIdx < numExplicitArgs)
-    {
-        // GetPreferredAlignment treats all arguments as kernel ones, which have
-        // predefined alignments; but this is not true for subroutines.
-        // Conservatively use GRF aligned.
-        e_alignment align = getGRFAlignment();
-        VISA_Type type = GetType(Arg->getType());
-        uint16_t nElts = numLanes(m_SIMDSize);
-        if (Arg->getType()->isVectorTy())
-        {
-            assert(Arg->getType()->getVectorElementType()->isIntegerTy() ||
-                Arg->getType()->getVectorElementType()->isFloatingPointTy());
-            nElts *= (uint16_t)Arg->getType()->getVectorNumElements();
-        }
-        var = GetNewVariable(nElts, type, align, /*isUniform*/ false, m_numberInstance);
-    }
-    else
-    {
-        // Can be mapped to the parent's implicit arg
-        Function* parentFunc = cInst->getParent()->getParent();
-        ImplicitArgs implicitArgs(*parentFunc, m_pMdUtils);
-        for (unsigned i = 0; i < implicitArgs.size(); i++)
-        {
-            ImplicitArg implictArg = implicitArgs[i];
-            auto argType = implictArg.getArgType();
-            Argument* implicitArgInFunc = implicitArgs.getImplicitArg(*parentFunc, argType);
-            if (Arg == implicitArgInFunc)
-            {
-                bool isUniform = implictArg.getDependency() == WIAnalysis::UNIFORM;
-                var = GetNewVariable((uint16_t)implictArg.getNumberElements(),
-                    implictArg.getVISAType(*m_DL),
-                    implictArg.getAlignType(*m_DL), isUniform,
-                    isUniform ? 1 : m_numberInstance);
-                break;
-            }
-        }
-    }
-    assert(var && "Argument not matched!");
     pSymMap->insert(std::make_pair(Arg, var));
     return var;
 }
@@ -2421,17 +2436,21 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
 {
     CVariable* var = nullptr;
 
+    // Symbol mappings for struct types
+    if (value->getType()->isStructTy())
+    {
+        return GetStructVariable(value);
+    }
+
     if (Constant * C = llvm::dyn_cast<llvm::Constant>(value))
     {
         if (isa<GlobalValue>(value))
         {
             // Function Pointer
-            bool isFunction = IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
-                value->getType()->isPointerTy() &&
+            bool isFunction = value->getType()->isPointerTy() &&
                 value->getType()->getPointerElementType()->isFunctionTy();
             // Global Relocation
-            bool isGlobalVar = IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
-                isa<GlobalVariable>(value) &&
+            bool isGlobalVar = isa<GlobalVariable>(value) &&
                 m_ModuleMetadata->inlineProgramScopeOffsets.count(cast<GlobalVariable>(value)) > 0;
 
             if (isFunction || isGlobalVar)

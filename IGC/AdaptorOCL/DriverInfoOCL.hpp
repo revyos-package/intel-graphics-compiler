@@ -69,6 +69,15 @@ namespace TC
         bool splitUnalignedVectors() const override { return false; }
 
         bool supportsStatelessSpacePrivateMemory() const override { return true; }
+
+        bool NeedFP64(PRODUCT_FAMILY productFamily) const override {
+#if defined(__linux__)
+          if (IGC_IS_FLAG_ENABLED(EnableDPEmulation)) {
+              return true;
+          }
+#endif
+            return false;
+        }
     };
 
     // In case some cpas are specific to NEO
@@ -79,7 +88,6 @@ namespace TC
         unsigned getVISAPreRASchedulerCtrl() const override { return 6; }
         bool SupportStatefulToken() const override { return true; }
         bool SupportInlineAssembly() const override { return true; }
-        bool EnableVecAliasing() const override { return true; }
     };
 
 }//namespace TC

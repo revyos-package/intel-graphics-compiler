@@ -135,12 +135,17 @@ namespace IGC
         void emitMulAdd16(llvm::Instruction* I, const SSource source[2], const DstModifier& dstMod);
         void emitCall(llvm::CallInst* inst);
         void emitReturn(llvm::ReturnInst* inst);
+        void EmitCopyToStruct(llvm::InsertValueInst* inst, const DstModifier& DstMod);
+        void EmitCopyFromStruct(llvm::Value* value, unsigned idx, const DstModifier& DstMod);
 
         /// stack-call code-gen functions
         void emitStackCall(llvm::CallInst* inst);
         void emitStackFuncEntry(llvm::Function* F, bool ptr64bits);
         void emitStackFuncExit(llvm::ReturnInst* inst);
         uint stackCallArgumentAlignment(CVariable* argv);
+
+        // emits the visa relocation instructions for function/global symbols
+        void emitSymbolRelocation(llvm::Function& F);
 
         void emitOutput(llvm::GenIntrinsicInst* inst);
         void emitGS_SGV(llvm::SGVIntrinsic* inst);
@@ -211,6 +216,8 @@ namespace IGC
         void emitSimdShuffleDown(llvm::Instruction* inst);
         void emitSimdBlockRead(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
         void emitSimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
+        void emitLegacySimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
+        void emitLegacySimdBlockRead(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
         void emitSimdMediaBlockRead(llvm::Instruction* inst);
         void emitSimdMediaBlockWrite(llvm::Instruction* inst);
         void emitMediaBlockIO(const llvm::GenIntrinsicInst* inst, bool isRead);
@@ -246,7 +253,15 @@ namespace IGC
             CVariable* pDstAddr,
             CVariable* pSrc,
             bool isA64,
-            bool is16Bit);
+            int bitSize);
+
+        void emitScalarAtomicLoad(
+            llvm::Instruction* pInst,
+            ResourceDescriptor& resource,
+            CVariable* pDstAddr,
+            CVariable* pSrc,
+            bool isA64,
+            int bitSize);
 
         /// reduction and prefix/postfix facilities
         CVariable* ScanReducePrepareSrc(VISA_Type type, uint64_t identityValue, bool negate, bool secondHalf,
@@ -336,6 +351,8 @@ namespace IGC
         void emitPSInputCst(llvm::Instruction* inst);
         void emitEvalAttribute(llvm::GenIntrinsicInst* inst);
         void emitInterpolate(llvm::GenIntrinsicInst* inst);
+        void emitInterpolate2(llvm::GenIntrinsicInst* inst);
+        void emitInterpolant(llvm::GenIntrinsicInst* inst);
 
         void emitGradientX(const SSource& source, const DstModifier& modifier);
         void emitGradientY(const SSource& source, const DstModifier& modifier);
@@ -403,6 +420,7 @@ namespace IGC
         void emitAddPairWithImm(CVariable* Dst, CVariable* Src, CVariable* Imm);
 
         void emitSqrt(llvm::Instruction* inst);
+        void emitCanonicalize(llvm::Instruction* inst);
         void emitRsq(llvm::Instruction* inst);
 
         void emitLLVMbswap(llvm::IntrinsicInst* inst);
@@ -457,13 +475,14 @@ namespace IGC
         ResourceDescriptor GetResourceVariable(llvm::Value* resourcePtr);
         SamplerDescriptor GetSamplerVariable(llvm::Value* samplerPtr);
         CVariable* ComputeSampleIntOffset(llvm::Instruction* sample, uint sourceIndex);
-        void emitPlnInterpolation(CVariable* bary, unsigned int delatIndex);
+        void emitPlnInterpolation(CVariable* bary, CVariable* inputvar);
 
         CVariable* GetExecutionMask();
         CVariable* GetExecutionMask(CVariable* &vecMaskVar);
+        CVariable* GetHalfExecutionMask();
         CVariable* GetDispatchMask();
         CVariable* UniformCopy(CVariable* var);
-        CVariable* UniformCopy(CVariable* var, CVariable*& LaneOffset, CVariable* eMask = nullptr);
+        CVariable* UniformCopy(CVariable* var, CVariable*& LaneOffset, CVariable* eMask = nullptr, bool doSub = false);
         // generate loop header to process sample instruction with varying resource/sampler
         bool ResourceLoopHeader(
             ResourceDescriptor& resource,
@@ -500,6 +519,8 @@ namespace IGC
 
         CVariable* GetSrcVariable(const SSource& source, bool fromConstPool = false);
         void SetSourceModifiers(unsigned int sourceIndex, const SSource& source);
+
+        SBasicBlock& getCurrentBlock() const { return m_pattern->m_blocks[m_currentBlock]; }
 
         CodeGenContext* m_pCtx;
         CVariable* m_destination;
@@ -557,6 +578,8 @@ namespace IGC
         //
         ERoundingMode m_roundingMode_FP;
         ERoundingMode m_roundingMode_FPCvtInt;
+
+        uint m_currentBlock = (uint) -1;
 
         // Used to relocate phi-mov to different BB. phiMovToBB is the map from "fromBB"
         // to "toBB" (meaning to move phi-mov from "fromBB" to "toBB"). See MovPhiSources.
@@ -627,6 +650,22 @@ namespace IGC
         void ResetRoundingMode(llvm::Instruction* inst);
         // returns true if the instruction does not care about the rounding mode settings
         bool ignoreRoundingMode(llvm::Instruction* inst) const;
+
+        // A64 load/store with HWA that make sure the offset hi part is the same per LS call
+        // addrUnifrom: if the load/store address is uniform, we can skip A64 WA
+        void emitGatherA64(llvm::Value* loadInst, CVariable* dst, CVariable* offset, unsigned elemSize, unsigned numElems, bool addrUniform);
+        void emitGather4A64(llvm::Value* loadInst, CVariable* dst, CVariable* offset, bool addrUniform);
+        void emitScatterA64(CVariable* val, CVariable* offset, unsigned elementSize, unsigned numElems, bool addrUniform);
+        void emitScatter4A64(CVariable* src, CVariable* offset, bool addrUniform);
+
+        // Helper functions that create loop for above WA
+        void A64LSLoopHead(CVariable* addr, CVariable*& curMask, CVariable*& lsPred, uint& label);
+        void A64LSLoopTail(CVariable* curMask, CVariable* lsPred, uint label);
+
+        // Helper function to check if A64 WA is required
+        bool hasA64WAEnable() const;
+
+        void emitFeedbackEnable();
     };
 
 } // namespace IGC

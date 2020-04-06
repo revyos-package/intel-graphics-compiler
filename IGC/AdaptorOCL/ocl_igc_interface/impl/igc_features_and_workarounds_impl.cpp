@@ -28,6 +28,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "ocl_igc_interface/impl/igc_features_and_workarounds_impl.h"
 
 #include "cif/macros/enable.h"
+#include "Probe.h"
 
 namespace IGC {
 
@@ -66,6 +67,14 @@ DEFINE_GET_SET(IgcFeaturesAndWorkarounds, 1, FtrIoMmuPageFaulting, bool);
 DEFINE_GET_SET(IgcFeaturesAndWorkarounds, 1, FtrWddm2Svm, bool);
 DEFINE_GET_SET(IgcFeaturesAndWorkarounds, 1, FtrPooledEuEnabled, bool);
 DEFINE_GET_SET(IgcFeaturesAndWorkarounds, 1, FtrResourceStreamer, bool);
+
+uint32_t CIF_GET_INTERFACE_CLASS(IgcFeaturesAndWorkarounds, 2)::GetMaxOCLParamSize() const {
+    return CIF_GET_PIMPL()->OCLCaps.MaxParameterSize;
+}
+void CIF_GET_INTERFACE_CLASS(IgcFeaturesAndWorkarounds, 2)::SetMaxOCLParamSize(uint32_t s) {
+    IGC_ASSERT(s >= OCLCaps::MINIMAL_MAX_PARAMETER_SIZE);
+    CIF_GET_PIMPL()->OCLCaps.MaxParameterSize = s;
+}
 
 }
 

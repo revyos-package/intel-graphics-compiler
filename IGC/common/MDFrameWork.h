@@ -190,6 +190,7 @@ namespace IGC
         bool OptDisable                                 = false;
         bool MadEnable                                  = false;
         bool NoSignedZeros                              = false;
+        bool NoNaNs                                     = false;
 
         // default rounding modes
         unsigned FloatRoundingMode                      = IGC::ROUND_TO_NEAREST_EVEN;
@@ -205,6 +206,7 @@ namespace IGC
         bool SubgroupIndependentForwardProgressRequired = true;
         bool GreaterThan2GBBufferRequired               = true;
         bool GreaterThan4GBBufferRequired               = true;
+        bool DisableA64WA                               = false;
         bool PushConstantsEnable                        = true;
         bool HasBufferOffsetArg                         = false;
         bool replaceGlobalOffsetsByZero                 = false;
@@ -215,6 +217,8 @@ namespace IGC
         bool PreferBindlessImages                       = false;
         bool disableMathRefactoring                     = false;
         bool EnableTakeGlobalAddress                    = false;
+        bool IsLibraryCompilation                       = false;
+        bool FastVISACompile                            = false;
     };
 
     struct ComputeShaderInfo
@@ -357,6 +361,7 @@ namespace IGC
         // When true compiler can assume that resources bound to two different
         // bindings do not alias.
         bool statefullResourcesNotAliased = false;
+        bool disableMixMode = false;
 
         unsigned int privateMemoryPerWI = 0;
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};

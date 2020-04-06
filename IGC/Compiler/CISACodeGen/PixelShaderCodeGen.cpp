@@ -52,6 +52,12 @@ namespace IGC
         return m_R1;
     }
 
+    CVariable* CPixelShader::GetCoarseR1()
+    {
+        assert(m_phase == PSPHASE_PIXEL);
+        return m_CoarseR1;
+    }
+
     void CPixelShader::AllocatePayload()
     {
         if (m_phase == PSPHASE_COARSE)
@@ -74,6 +80,8 @@ namespace IGC
 
     void CPixelShader::AllocatePixelPhasePayload()
     {
+        unsigned int r1Offset = GetDispatchSignature().r1;
+        AllocateInput(m_CoarseR1, r1Offset);
         for (uint i = 0; i < setup.size(); i++)
         {
             if (setup[i])
@@ -126,6 +134,10 @@ namespace IGC
         offset += getGRFSize();
 
         assert(m_R1);
+        if (m_Signature)
+        {
+            GetDispatchSignature().r1 = offset;
+        }
         for (uint i = 0; i < m_R1->GetNumberInstance(); i++)
         {
             AllocateInput(m_R1, offset, i);
@@ -651,6 +663,7 @@ namespace IGC
         m_NeedPSSync = false;
         m_CoarseoMask = nullptr;
         m_CoarseMaskInput = nullptr;
+        m_CoarseR1 = nullptr;
 
         m_CoarseOutput.clear();
         m_CoarseInput.clear();
@@ -875,6 +888,7 @@ namespace IGC
             }
             case GenISAIntrinsic::GenISA_PullSampleIndexBarys:
             case GenISAIntrinsic::GenISA_PullSnappedBarys:
+            case GenISAIntrinsic::GenISA_PullCentroidBarys:
                 m_HasPullBary = true;
                 break;
             default:
@@ -980,6 +994,7 @@ namespace IGC
         if (m_phase == PSPHASE_PIXEL)
         {
             uint responseLength = 2;
+            m_CoarseR1 = m_R1;
             m_PixelPhasePayload = GetNewVariable(responseLength * (getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF);
             m_PixelPhaseCounter = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_UW, 0, 1);
             m_CoarseParentIndex = GetNewAlias(m_PixelPhasePayload, ISA_TYPE_UW, getGRFSize(), numLanes(m_SIMDSize));
@@ -1015,7 +1030,6 @@ namespace IGC
                 encoder.Push();
             }
             encoder.SetPredicate(m_KillPixelMask);
-            encoder.SetInversePredicate(true);
             encoder.Copy(m_CoarseoMask, ImmToVariable(0x0, ISA_TYPE_UD));
             encoder.Push();
         }
@@ -1044,13 +1058,13 @@ namespace IGC
         m_CoarseOutput[index] = output;
     }
 
-    CVariable* CPixelShader::GetCoarseInput(unsigned int index)
+    CVariable* CPixelShader::GetCoarseInput(unsigned int index, uint16_t vectorSize, VISA_Type type)
     {
         auto it = m_CoarseInput.find(index);
         CVariable* coarseInput = nullptr;
         if (it == m_CoarseInput.end())
         {
-            coarseInput = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_F, EALIGN_GRF);
+            coarseInput = GetNewVariable(numLanes(m_SIMDSize) * vectorSize, type, EALIGN_GRF);
             m_CoarseInput[index] = coarseInput;
         }
         else
@@ -1123,6 +1137,15 @@ namespace IGC
             // Coarse pixel shader doesn't support SIMD32
             return false;
         }
+
+        if (GetContext()->platform.hasFusedEU() &&
+            simdMode == SIMDMode::SIMD32 &&
+            IsPerSample() && !IsStage1(ctx))
+        {
+            //Fused SIMD32 not enabled when dispatch rate is per sample
+            return false;
+        }
+
         if (simdMode == SIMDMode::SIMD16 && EP.m_ShaderMode == ShaderDispatchMode::NOT_APPLICABLE)
         {
             if (IsStage1BestPerf(ctx->m_CgFlag, ctx->m_StagingCtx))
@@ -1267,18 +1290,25 @@ namespace IGC
     {
         Function* coarsePhase = nullptr;
         Function* pixelPhase = nullptr;
-        NamedMDNode* coarseNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_COARSE_PHASE);
-        NamedMDNode* pixelNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE);
-        if (coarseNode)
+        NamedMDNode* coarseNode = nullptr;
+        NamedMDNode* pixelNode = nullptr;
+        MetaDataUtils* pMdUtils = nullptr;
+        if (!HasSavedIR(ctx))
         {
-            coarsePhase = mdconst::dyn_extract<Function>(coarseNode->getOperand(0)->getOperand(0));
-        }
-        if (pixelNode)
-        {
-            pixelPhase = mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
+            coarseNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_COARSE_PHASE);
+            pixelNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE);
+            if (coarseNode)
+            {
+                coarsePhase = mdconst::dyn_extract<Function>(coarseNode->getOperand(0)->getOperand(0));
+            }
+            if (pixelNode)
+            {
+                pixelPhase = mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
+            }
+            pMdUtils = ctx->getMetaDataUtils();
         }
         CShaderProgram::KernelShaderMap shaders;
-        MetaDataUtils* pMdUtils = ctx->getMetaDataUtils();
+
         if (coarsePhase && pixelPhase)
         {
             //Multi stage PS, need to do separate compiler and link them
@@ -1335,7 +1365,7 @@ namespace IGC
             // Single PS
             CodeGen(ctx, shaders);
             // Assuming single shader information in metadata
-            Function* pFunc = getUniqueEntryFunc(pMdUtils, ctx->getModuleMetaData());
+            Function* pFunc = getUniqueEntryFunc(ctx->getMetaDataUtils(), ctx->getModuleMetaData());
             // gather data to send back to the driver
             shaders[pFunc]->FillProgram(&ctx->programOutput);
             COMPILER_SHADER_STATS_PRINT(shaders[pFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");
@@ -1355,6 +1385,7 @@ namespace IGC
             // if there is no pixel phase we have nothing to do
             return;
         }
+        encoder.MarkAsOutput(m_R1);
         Function* pixelPhase = mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
         for (auto BB = pixelPhase->begin(), BE = pixelPhase->end(); BB != BE; ++BB)
         {

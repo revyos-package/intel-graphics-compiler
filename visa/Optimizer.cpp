@@ -388,7 +388,7 @@ void Optimizer::insertDummyCompactInst()
     G4_Declare *dcl = builder.getBuiltinR0();
     auto src = builder.createSrcRegRegion(Mod_src_undef, Direct,
         dcl->getRegVar(), 0, 0, builder.getRegionScalar(), Type_F);
-    auto dst = builder.createDstRegRegion(Direct, dcl->getRegVar(), 0, 0, 1, Type_F);
+    auto dst = builder.createDst(dcl->getRegVar(), 0, 0, 1, Type_F);
     G4_INST *movInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
 
     auto bb = fg.getEntryBB();
@@ -858,6 +858,10 @@ bool Optimizer::isCopyPropProfitable(G4_INST* movInst) const
 
 void Optimizer::reRAPostSchedule()
 {
+    // No rera for stackcall functions
+    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
+        return;
+
     std::vector<Assignment> assignments;
     auto finalizerInfo = *builder.getJitInfo();
     auto oldRAType = kernel.getRAType();
@@ -2433,9 +2437,7 @@ void Optimizer::reassociateConst()
                 }
                 else if (inst->getSrc(0)->isImm() && !inst->getSrc(1)->isImm())
                 {
-                    auto tmp = inst->getSrc(0);
-                    inst->setSrc(inst->getSrc(1), 0);
-                    inst->setSrc(tmp, 1);
+                    inst->swapSrc(0, 1);
                     inst->swapDefUse(); // swap def/use for src0 and src1
                     return true;
                 }
@@ -3519,7 +3521,7 @@ static void expandPseudoLogic(IR_Builder& builder,
             {
                 auto src = Opnd->asSrcRegRegion();
                 auto newDcl = builder.createTempVar(tmpSize, Type_UW, Any);
-                auto newDst = builder.createDstRegRegion(Direct, newDcl->getRegVar(), 0, 0, 1, Type_UW);
+                auto newDst = builder.createDst(newDcl->getRegVar(), 0, 0, 1, Type_UW);
                 auto newPred = builder.createPredicate(PredState_Plus, src->getBase(), src->getSubRegOff());
                 auto newSel = builder.createInternalInst(newPred, G4_sel, nullptr, false, tmpSize, newDst,
                                                          builder.createImm(1, Type_UW),
@@ -3816,8 +3818,7 @@ bool Optimizer::foldCmpToCondMod(G4_BB* bb, INST_LIST_ITER& iter)
             // see if we can replace dst with null
             if (inst->supportsNullDst() && !fg.globalOpndHT.isOpndGlobal(inst->getDst()))
             {
-                inst->setDest(builder.createDstRegRegion(
-                    Direct,
+                inst->setDest(builder.createDst(
                     builder.phyregpool.getNullReg(),
                     0,
                     0,
@@ -3955,8 +3956,7 @@ bool Optimizer::foldCmpSel(G4_BB *BB, G4_INST *selInst, INST_LIST_ITER &selInst_
     // Normalize SEL's predicate state to Plus.
     if (G4_PredState::PredState_Minus == pred->getState())
     {
-        selInst->setSrc(sel_src0, 1);
-        selInst->setSrc(sel_src1, 0);
+        selInst->swapSrc(0, 1);
         selInst->swapDefUse();
         pred->setState(G4_PredState::PredState_Plus);
         std::swap(sel_src0, sel_src1);
@@ -4324,8 +4324,7 @@ void Optimizer::optimizeLogicOperation()
                                                               : PredState_Plus;
                             Pred->setState(State);
                             // Swap source operands.
-                            inst->setSrc(Src1, 0);
-                            inst->setSrc(Src0, 1);
+                            inst->swapSrc(0, 1);
                             inst->swapDefUse();
                         }
                         inst->setOpcode(G4_mov);
@@ -5169,7 +5168,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         // create new dst region to replace one in iVector[i]
                         G4_DstRegRegion *cDst = cInst->getDst();
                         G4_DstRegRegion *iDst = iInst->getDst();
-                        G4_DstRegRegion *newDstRegion = builder.createDstRegRegion(Direct, cDst->getTopDcl()->getRegVar(),
+                        G4_DstRegRegion *newDstRegion = builder.createDst(cDst->getTopDcl()->getRegVar(),
                                 iDst->getRegOff(), iDst->getSubRegOff(), iDst->getHorzStride(), iDst->getType());
                         iInst->setDest(newDstRegion);
 
@@ -5679,8 +5678,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             2,
             builder.getRegionScalar(),
             Type_UD);
-        G4_DstRegRegion *dst1_opnd = builder.createDstRegRegion(
-            Direct,
+        G4_DstRegRegion *dst1_opnd = builder.createDst(
             dcl->getRegVar(),
             0,
             0,
@@ -6438,8 +6436,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             src02Opnd = inst->getSrc(2);
             if (src1Opnd->getType() == src02Opnd->getType())
             {
-                inst->setSrc(src1Opnd, 2);
-                inst->setSrc(src02Opnd, 1);
+                inst->swapSrc(1, 2);
             }
         }
 
@@ -6449,8 +6446,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             src02Opnd = inst->getSrc(0);
             if (src1Opnd->getType() == src02Opnd->getType())
             {
-                inst->setSrc(src1Opnd, 0);
-                inst->setSrc(src02Opnd, 1);
+                inst->swapSrc(0, 1);
             }
         }
 
@@ -6462,7 +6458,10 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     {
         const RegionDesc* rd = NULL;
         uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
-        if (!src->getRegion()->isRegionWH())
+        // even if src has VxH region, it could have a width that is equal to exec_size,
+        // meaning that it's really just a 1x1 region.
+        auto isVxHRegion = src->getRegion()->isRegionWH() && start >= wd;
+        if (!isVxHRegion)
         {
             // r[a0.0,0]<4;2,1> and size is 4 or 1
             if (size < newWd)
@@ -6476,22 +6475,20 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
         if (src->getRegAccess() != Direct)
         {
-            if (src->getRegion()->isRegionWH())
+            if (isVxHRegion)
             {
                 // just handle <1,0>
                 if (start > 0)
                 {
-                    // just change immediate offset
-                    uint16_t subRegOff = src->getSubRegOff() + start;
-                    G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
-                        src->getRegOff(), subRegOff, src->getRegion(), src->getType(), src->getAccRegSel());
-                    newSrc->setImmAddrOff(src->getAddrImm());
-                    return newSrc;
+                    // Change a0.N to a0.(N+start)
+                    assert((start % wd == 0) && "illegal starting offset and width combination");
+                    uint16_t subRegOff = src->getSubRegOff() + start / wd;
+                    return createIndirectSrc(src->getModifier(), src->getBase(), src->getRegOff(), subRegOff,
+                        src->getRegion(), src->getType(), src->getAddrImm());
                 }
                 else
                 {
-                    G4_SrcRegRegion* newSrc = duplicateOperand(src);
-                    return newSrc;
+                    return duplicateOperand(src);
                 }
             }
 
@@ -6500,12 +6497,9 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 short numRows = start / wd;
                 short numCols = start % wd;
                 short newOff = (numRows * vs + numCols * hs) * G4_Type_Table[src->getType()].byteSize;
-
-                G4_SrcRegRegion* newSrc = createSrcRegRegion(src->getModifier(), src->getRegAccess(), src->getBase(),
-                    src->getRegOff(), src->getSubRegOff(), rd, src->getType(), src->getAccRegSel());
-                newSrc->setImmAddrOff(src->getAddrImm() + newOff);
+                auto newSrc = createIndirectSrc(src->getModifier(), src->getBase(), src->getRegOff(), src->getSubRegOff(), rd,
+                    src->getType(), src->getAddrImm() + newOff);
                 return newSrc;
-
             }
             else
             {
@@ -6606,8 +6600,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 case Type_F:
                     // must be acc1.0 as result of simd16 -> 8 split
                     assert(size == 8 && "only support simd16->simd8 for now");
-                    return createDstRegRegion(
-                        Direct,
+                    return createDst(
                         phyregpool.getAcc1Reg(),
                         0,
                         0,
@@ -6621,8 +6614,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         start += 16;
                     }
                     G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
-                    return createDstRegRegion(
-                        Direct, accReg, 0, start % 16, hs, dstType);
+                    return createDst(accReg, 0, start % 16, hs, dstType);
                 }
                 default:
 
@@ -6646,7 +6638,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 subRegOff = newSubRegOff;
             }
             // create a new one
-            return createDstRegRegion(Direct, dst->getBase(), regOff, subRegOff, hs, dst->getType(),
+            return createDst(dst->getBase(), regOff, subRegOff, hs, dst->getType(),
                 dst->getAccRegSel());
         }
         else
@@ -6691,22 +6683,27 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     // HW WAs that are done before RA.
     void Optimizer::preRA_HWWorkaround()
     {
-        // -forceNoMaskToAnyWA : to force running this WA pass.
+        // -forceNoMaskWA : to force running this WA pass on platform other than TGLLP.
         // By default, it is only on for TGL
-        // noMaskToAnyhWA:
-        //     bit[2]:  0 - simple insertion of flag. A new flag is added
-        //                  each time it is needed by reading ce0.0
-        //     bit[2]:  1 - optimized. May use the exisiting flag register
-        //                  or read ce0 once per each BB
+        // noMaskWA:
         //   bit[1:0]:  0 - off
-        //              1 - on, replacing nomask in divergent BB (conservative)
+        //              1 - on, replacing nomask in any divergent BB (conservative)
         //              2 - on, replacing nomask in nested divergent BB(aggressive)
+        //              3 - not used, will behave the same as 2
+        //     bit[2]:  0 - simple insertion of flag. A new flag is added
+        //                  each time it is needed by "emask flag".
+        //              1 - optimized. "emask flag" is created once per ech BB
+        //     bit[3]:  0 - "emask flag" is created using ce and dmask/vmask
+        //              1 - "emask flag" is created using cmp instructions.
         //
-        if ((builder.getuint32Option(vISA_noMaskToAnyhWA) & 0x3) > 0 &&
-            (getGenxPlatform() == GENX_TGLLP || builder.getOption(vISA_forceNoMaskToAnyhWA)))
+        if (builder.kernel.getOptions()->getTarget() != VISA_CM &&
+            ((builder.getuint32Option(vISA_noMaskWA) & 0x3) > 0 ||
+             builder.getOption(vISA_forceNoMaskWA)))
         {
             replaceNoMaskWithAnyhWA();
         }
+
+        insertFenceAtEntry();
     }
 
     /*
@@ -6756,8 +6753,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         nextIter++;
                         G4_DstRegRegion* dst = inst->getDst();
                         G4_Declare* fenceDcl = dst->getBase()->asRegVar()->getDeclare();
-                        G4_DstRegRegion* movDst = builder.createDstRegRegion(
-                            Direct, builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
+                        G4_DstRegRegion* movDst = builder.createDst(
+                            builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
                         G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(fenceDcl, builder.createRegionDesc(8, 8, 1));
                         G4_INST* movInst = builder.createMov(8, movDst, movSrc, InstOpt_WriteEnable, false);
                         bb->insert(nextIter, movInst);
@@ -6800,7 +6797,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     inst->isSplitSend() &&
                     !(inst->getSrc(1)->isNullReg()))
                 {
-                    inst->setOptions(inst->getOption() | InstOpt_NoPreempt);
+                    inst->setOptionOn(InstOpt_NoPreempt);
                 }
 
                 if (inst->isSend() && !inst->isNoPreemptInst() && builder.needsNoPreemptR2ForSend())
@@ -6811,7 +6808,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         unsigned LB = Src0->getLinearizedStart();
                         if (LB == 2 * GENX_GRF_REG_SIZ)
                         {
-                            inst->setOptions(inst->getOption() | InstOpt_NoPreempt);
+                            inst->setOptionOn(InstOpt_NoPreempt);
                         }
                     }
                 }
@@ -6873,7 +6870,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 {
                     // insert
                     // mov(8) tdr0:uw 0x0:uw {NoMask}
-                    G4_DstRegRegion* tdrDst = builder.createDstRegRegion(Direct, builder.phyregpool.getTDRReg(),
+                    G4_DstRegRegion* tdrDst = builder.createDst(builder.phyregpool.getTDRReg(),
                         0, 0, 1, Type_UW);
                     G4_Imm* src = builder.createImm(0, Type_UW);
                     G4_INST* movInst = builder.createMov(8, tdrDst, src, InstOpt_WriteEnable | InstOpt_Switch, false);
@@ -6884,7 +6881,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 {
                     // insert "(W) mov(16) acc0.0:f 0x0:f" before EOT
                     G4_INST* movInst = builder.createMov(16,
-                        builder.createDstRegRegion(Direct, builder.phyregpool.getAcc0Reg(),0, 0, 1, Type_F),
+                        builder.createDst(builder.phyregpool.getAcc0Reg(),0, 0, 1, Type_F),
                         builder.createImm(0, Type_F), InstOpt_WriteEnable, false);
                     // insert mov before contiguous send, in case that there are instruction combined set on continuous
                     // two send
@@ -6902,7 +6899,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     inst->isSend() && inst->getMsgDesc()->isBarrierMsg())
                 {
                     // mov (1) n0.0 0x0 {Switch}
-                    G4_DstRegRegion* n0Dst = builder.createDstRegRegion(Direct,
+                    G4_DstRegRegion* n0Dst = builder.createDst(
                         builder.phyregpool.getN0Reg(), 0, 0, 1, Type_UD);
                     auto movInst = builder.createMov(1, n0Dst,
                         builder.createImm(0, Type_UD), InstOpt_WriteEnable | InstOpt_Switch, false);
@@ -6926,7 +6923,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
         if (builder.needResetA0forVxHA0())
         {
-            // reset a0 to 0 at the beginning of a shader. TGL WA
+            // reset a0 to 0 at the beginning of a shader.
             resetA0();
         }
 
@@ -6941,6 +6938,14 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             // replace ret in the external functions with jmpi. That we will
             // also return the call with jmpi in VISAKernelImpl::compilePostOptimize
             replaceRetWithJmpi();
+        }
+
+        if (kernel.hasIndirectCall())
+        {
+            // If the indirect call has regiser src0, the register must be a
+            // ip-based address of the call target. Insert a add before call to
+            // calculate the relative offset from call to the target
+            expandIndirectCallWithRegTarget();
         }
     }
 
@@ -7786,7 +7791,7 @@ public:
             msgDescImm |= i;
 
             G4_SendMsgDescriptor* desc = kernel.fg.builder->createSendMsgDesc(
-                msgDescImm, 0, 1, funcID, false, msgSize, extFuncCtrl, SendAccess::WRITE_ONLY);
+                msgDescImm, 0, 1, funcID, msgSize, extFuncCtrl, SendAccess::WRITE_ONLY);
             const RegionDesc* region = kernel.fg.builder->getRegionStride1();
             G4_SrcRegRegion* headerOpnd = kernel.fg.builder->Create_Src_Opnd_From_Dcl(kernel.fg.builder->getBuiltinR0(), region);
             G4_Declare* tempDcl = builder.createHardwiredDeclare(msgSize * 8, Type_UD, i, 0);
@@ -7845,8 +7850,7 @@ public:
             builder.getRegionStride1(),
             Type_UD);
 
-        G4_DstRegRegion* R0CopyOpnd = builder.createDstRegRegion(
-            Direct,
+        G4_DstRegRegion* R0CopyOpnd = builder.createDst(
             builder.getBuiltinR0()->getRegVar(),
             0,
             0,
@@ -7927,7 +7931,7 @@ public:
         {
             int reg_init = reg_offset + i;
             G4_Declare* tempDcl = builder.createHardwiredDeclare(16, Type_UD, reg_init, 0);
-            G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, tempDcl->getRegVar(), 0, 0, 1, Type_UD);
+            G4_DstRegRegion* dst = builder.createDst(tempDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_Imm * src0 = builder.createImm(0, Type_UD);
             G4_INST* initInst = builder.createMov(16, dst, src0, InstOpt_WriteEnable, false);
             bb->insert(iter, initInst);
@@ -7937,7 +7941,7 @@ public:
         if ((num_reg_init % 2))
         {
             G4_Declare* tempDcl = builder.createHardwiredDeclare(8, Type_UD, 128 - (num_reg_init % 2), 0);
-            G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, tempDcl->getRegVar(), 0, 0, 1, Type_UD);
+            G4_DstRegRegion* dst = builder.createDst(tempDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_Imm * src0 = builder.createImm(0, Type_UD);
             G4_INST* spIncInst = builder.createMov(8, dst, src0, InstOpt_WriteEnable, false);
             G4_BB* bb = kernel.fg.getEntryBB();
@@ -7954,7 +7958,7 @@ public:
             for (int i = 0; i < remainder_bytes - (remainder_bytes % exec_size); i += exec_size, sub_offset += exec_size)
             {
                 G4_Declare* tempDcl = builder.createHardwiredDeclare(exec_size, Type_UB, reg_offset - 1, sub_offset);
-                G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, tempDcl->getRegVar(), 0, 0, 1, Type_UB);
+                G4_DstRegRegion* dst = builder.createDst(tempDcl->getRegVar(), 0, 0, 1, Type_UB);
 
                 G4_Declare* tempDclSrc = builder.createHardwiredDeclare(1, Type_UD, 126, 0);
                 G4_SrcRegRegion *src0 = builder.createSrcRegRegion(Mod_src_undef, Direct, tempDclSrc->getRegVar(), 0, 0, builder.getRegionScalar(), Type_UB);
@@ -7974,7 +7978,7 @@ public:
         {
             G4_Declare* tmpFlagDcl = builder.createTempFlag(2);
             tmpFlagDcl->getRegVar()->setPhyReg(builder.phyregpool.getFlagAreg(i), 0);
-            G4_DstRegRegion *tempPredVar = builder.createDstRegRegion(Direct, tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
+            G4_DstRegRegion *tempPredVar = builder.createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_INST *predInst = builder.createMov(1, tempPredVar, builder.createImm(0, Type_UW), InstOpt_WriteEnable, false);
             bb = kernel.fg.getEntryBB();
             bb->insert(iter, predInst);
@@ -8004,7 +8008,7 @@ public:
                 Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(), 0, 0,
                 builder.getRegionScalar(), Type_UD);
             auto src1 = builder.createImm(0xF0FFFFFF, Type_UD);
-            auto dst = builder.createDstRegRegion(Direct, rtail->getRegVar(), 0, 0, 1, Type_UD);
+            auto dst = builder.createDst(rtail->getRegVar(), 0, 0, 1, Type_UD);
 
             return builder.createInternalInst(nullptr, G4_and, nullptr, false, 1,
                 dst, src0, src1, InstOpt_WriteEnable);
@@ -8017,7 +8021,7 @@ public:
                 Mod_src_undef, Direct, rtail->getRegVar(), 0, 0,
                 builder.getRegionScalar(), Type_UD);
             auto src1 = builder.createImm(imm, Type_UD);
-            auto dst = builder.createDstRegRegion(Direct,
+            auto dst = builder.createDst(
                 builder.phyregpool.getSr0Reg(), 0, 0, 1, Type_UD);
 
             return builder.createInternalInst(nullptr, G4_or, nullptr, false, 1,
@@ -8108,6 +8112,7 @@ public:
 
         bool hasUAVWrites = false;
         bool hasSLMWrites = false;
+        std::list<SFID> funcIDs;
         for (auto bb : kernel.fg)
         {
             for (auto inst : *bb)
@@ -8115,16 +8120,20 @@ public:
                 if (inst->isSend())
                 {
                     auto msgDesc = inst->asSendInst()->getMsgDesc();
-                    if (msgDesc->isDataPortWrite() && msgDesc->isHDC())
+                    if (msgDesc->isDataPortWrite())
                     {
-                        if (msgDesc->isSLMMessage())
+                        if (msgDesc->isHDC())
                         {
-                            hasSLMWrites = true;
+                            if (msgDesc->isSLMMessage())
+                            {
+                                hasSLMWrites = true;
+                            }
+                            else
+                            {
+                                hasUAVWrites = true;
+                            }
                         }
-                        else
-                        {
-                            hasUAVWrites = true;
-                        }
+
                     }
                 }
                 if (hasUAVWrites && hasSLMWrites)
@@ -8138,30 +8147,41 @@ public:
             }
         }
 
-        if (!hasUAVWrites && !hasSLMWrites)
+        if ((!hasUAVWrites) && (!hasSLMWrites) && funcIDs.empty())
         {
             return;
         }
 
+        funcIDs.unique();
         for (auto bb : kernel.fg)
         {
             if (bb->isLastInstEOT())
             {
                 auto iter = std::prev(bb->end());
-                if (hasUAVWrites)
+
                 {
-                    auto fenceInst = builder.createFenceInstruction(0, true, true, false);
-                    bb->insert(iter, fenceInst);
-                }
-                if (hasSLMWrites)
-                {
-                    auto fenceInst = builder.createFenceInstruction(0, true, false, false);
-                    bb->insert(iter, fenceInst);
+                    if (hasUAVWrites)
+                    {
+                        auto fenceInst = builder.createFenceInstruction(0, true, true, false);
+                        bb->insert(iter, fenceInst);
+                    }
+                    if (hasSLMWrites)
+                    {
+                        auto fenceInst = builder.createFenceInstruction(0, true, false, false);
+                        bb->insert(iter, fenceInst);
+                    }
                 }
                 builder.instList.clear();
             }
         }
     }
+
+    // some platform/shaders require a memory fence at kernel entry
+    // this needs to be called before RA since fence may have a (dummy) destination.
+    void Optimizer::insertFenceAtEntry()
+    {
+    }
+
 
     void Optimizer::mapOrphans()
     {
@@ -8285,10 +8305,158 @@ public:
             auto insertIt = std::find_if(bb->begin(), bb->end(),
                 [](G4_INST* inst) { return !inst->isLabel(); });
             bb->insert(insertIt,
-                builder.createMov(16, builder.createDstRegRegion(Direct,
+                builder.createMov(16, builder.createDst(
                     builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
                     builder.createImm(0, Type_UW), InstOpt_WriteEnable, false));
         }
+    }
+
+    G4_Declare* Optimizer::createInstsForCallTargetOffset(
+        InstListType& insts, G4_INST* fcall, int64_t adjust_off)
+    {
+        // create instruction sequence:
+        //       add  r2.0  -IP   call_target
+        //       add  r2.0  r2.0  adjust_off
+
+        // call's dst must be r1.0, which is reserved at
+        // GlobalRA::setABIForStackCallFunctionCalls. It must not be overlapped with
+        // r2.0, that is hardcoded as the new jump target
+        assert(fcall->getDst()->isGreg());
+        assert((fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ) != 2);
+
+        // hardcoded add's dst to r2.0
+        G4_Declare* add_dst_decl =
+            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), 2, 0);
+
+        // create the first add instruction
+        // add  r2.0  -IP   call_target
+        G4_INST* add_inst = builder.createInternalInst(
+            nullptr, G4_add, nullptr, false, 1,
+            builder.Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+            builder.createSrcRegRegion(
+                Mod_Minus, Direct, builder.phyregpool.getIpReg(), 0, 0,
+                builder.getRegionScalar(), Type_UD),
+            fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
+
+        // create the second add to add the -ip to adjust_off, adjust_off dependes
+        // on how many instructions from the fist add to the jmp instruction, and
+        // if it's post-increment (jmpi) or pre-increment (call)
+        // add  r2.0  r2.0  adjust_off
+        G4_INST* add_inst2 = builder.createInternalInst(
+            nullptr, G4_add, nullptr, false, 1,
+            builder.Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
+            builder.Create_Src_Opnd_From_Dcl(
+                add_dst_decl, builder.getRegionScalar()),
+            builder.createImm(adjust_off, Type_D),
+            InstOpt_WriteEnable | InstOpt_NoCompact);
+
+        insts.push_back(add_inst);
+        insts.push_back(add_inst2);
+
+        return add_dst_decl;
+    }
+
+    void Optimizer::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
+    {
+        // SKL workaround for indirect call
+        // r1.0 is the return IP (the instruction right after jmpi)
+        // r1.1 is the return mask. While we'll replace the ret in calee to jmpi as well,
+        // we do not need to consider the return mask here.
+
+        // Do not allow predicate call on jmpi WA
+        assert(fcall->getPredicate() == nullptr);
+
+        // calculate the reserved register's num from fcall's dst register (shoud be r1)
+        assert(fcall->getDst()->isGreg());
+        uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
+
+        G4_Declare* new_target_decl = createInstsForCallTargetOffset(insts, fcall, -64);
+
+        // add  r1.0   IP   32
+        G4_Declare* r1_0_decl =
+            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
+        insts.push_back(builder.createInternalInst(
+            nullptr, G4_add, nullptr, false, 1,
+            builder.Create_Dst_Opnd_From_Dcl(r1_0_decl, 1),
+            builder.createSrcRegRegion(
+                Mod_src_undef, Direct, builder.phyregpool.getIpReg(), 0, 0,
+                builder.getRegionScalar(), Type_UD),
+            builder.createImm(32, Type_UD),
+            InstOpt_WriteEnable | InstOpt_NoCompact));
+
+        // jmpi r2.0
+        // update jump target (src0) to add's dst
+        G4_SrcRegRegion* jump_target = builder.Create_Src_Opnd_From_Dcl(
+            new_target_decl, builder.getRegionScalar());
+        jump_target->setType(Type_D);
+        insts.push_back(builder.createInternalInst(
+            nullptr, G4_jmpi, nullptr, false, 1, nullptr, jump_target,
+            nullptr, InstOpt_NoCompact));
+    }
+
+    void Optimizer::expandIndirectCallWithRegTarget()
+    {
+        // check every fcall
+        for (auto bb : kernel.fg)
+        {
+            // At this point G4_pseudo_fcall may be converted to G4_call,
+            // check all call (???)
+            if (bb->back()->isFCall()) //|| bb->back()->isCall())
+            {
+                G4_INST* fcall = bb->back();
+                if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0()) {
+                    // at this point the call instruction's src0 has the target_address
+                    // and the call dst is the reserved register for ret
+                    // All the caller save register should be saved. We usd r2.0 directly
+                    // here to calculate the new call's target. We picked r2.0 due to the
+                    // HW's limitation that call/calla's src and dst offset (the subreg num)
+                    // must be 0.
+                    //
+                    // expand call
+                    // From:
+                    //       call r1.0 call_target
+                    // To:
+                    //       add  r2.0  -IP   call_target
+                    //       add  r2.0  r2.0  -32
+                    //       call r1.0  r2.0
+
+                    // For SKL workaround, expand call
+                    // From:
+                    //       call r1.0 call_target
+                    // To:
+                    //       add  r2.0   -IP    call_target
+                    //       add  r2.0   r2.0   -64
+                    //       add  r1.0   IP   32              // set the return IP
+                    //       jmpi r2.0
+
+                    InstListType expanded_insts;
+                    if (builder.needReplaceIndirectCallWithJmpi()) {
+                        createInstForJmpiSequence(expanded_insts, fcall);
+                    }
+                    else {
+                        G4_Declare* jmp_target_decl =
+                            createInstsForCallTargetOffset(expanded_insts, fcall, -32);
+                        // Updated call's target to the new target
+                        G4_SrcRegRegion* jump_target = builder.Create_Src_Opnd_From_Dcl(
+                            jmp_target_decl, builder.getRegionScalar());
+                        fcall->setSrc(jump_target, 0);
+                        fcall->setNoCompacted();
+                    }
+                    // then insert the expaneded instructions right before the call
+                    INST_LIST_ITER insert_point = bb->end();
+                    --insert_point;
+                    for (auto inst_to_add : expanded_insts) {
+                        bb->getInstList().insert(insert_point, inst_to_add);
+                        inst_to_add->setCISAOff(fcall->getCISAOff());
+                    }
+
+                    // remove call from the instlist for Jmpi WA
+                    if (builder.needReplaceIndirectCallWithJmpi())
+                        bb->getInstList().erase(--bb->end());
+                }
+            }
+        }
+
     }
 
     // Replace ret with jmpi, must be single return
@@ -8370,7 +8538,7 @@ public:
             {
                 // "(W) mov(8) a0.0:uw tdr0.0:uw"
                 bb->insert(--bb->end(), builder.createMov(8,
-                    builder.createDstRegRegion(Direct, builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
+                    builder.createDst(builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
                     builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getTDRReg(), 0,
                                                0, builder.getRegionScalar(), Type_UW),
                     InstOpt_WriteEnable, false));
@@ -9039,7 +9207,7 @@ bool BUNDLE_INFO::doMerge(IR_Builder& builder,
 #endif
             }
         }
-        G4_DstRegRegion* newDst = builder.createDstRegRegion(Direct, newDcl->getRegVar(), 0, 0, 1, dstType);
+        G4_DstRegRegion* newDst = builder.createDst(newDcl->getRegVar(), 0, 0, 1, dstType);
         newInst->setDest(newDst);
     }
     else
@@ -10404,8 +10572,7 @@ void MadSequenceInfo::processCandidates()
     G4_INST *src2Def = getSrc2Def();
     {
         // change dst of the last MAD
-        G4_DstRegRegion *accDstOpnd = builder.createDstRegRegion(
-            Direct, builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
+        G4_DstRegRegion *accDstOpnd = builder.createDst(builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
         src2Def->setDest(accDstOpnd);
 
         // Convert splat.
@@ -10436,8 +10603,7 @@ void MadSequenceInfo::processCandidates()
                 break;
 
             // Also update the destination.
-            G4_DstRegRegion *accDstOpnd = builder.createDstRegRegion(
-                Direct, builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
+            G4_DstRegRegion *accDstOpnd = builder.createDst(builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
             useInst->setDest(accDstOpnd);
 
             // move to the next pair.
@@ -10465,8 +10631,7 @@ void MadSequenceInfo::processCandidates()
         // destination.
         if (getLastMad() != inst || !lastMadUserChain.empty())
         {
-            G4_DstRegRegion *accDstOpnd = builder.createDstRegRegion(
-                Direct, builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
+            G4_DstRegRegion *accDstOpnd = builder.createDst(builder.phyregpool.getAcc0Reg(), 0, 0, 1, AdjustedType);
             inst->setDest(accDstOpnd);
         }
         inst->setOpcode(G4_mac);
@@ -10762,7 +10927,7 @@ void Optimizer::splitVariables()
             G4_DstRegRegion *Dst = Inst->getDst();
             G4_Type Ty = Dst->getType();
             auto NewDcl = DclMap[Dst->getTopDcl()]->getDcl(builder, Ty, IsLow);
-            auto NewDst = builder.createDstRegRegion(Direct, NewDcl->getRegVar(), 0, 0, 1, Ty);
+            auto NewDst = builder.createDst(NewDcl->getRegVar(), 0, 0, 1, Ty);
             Inst->setDest(NewDst);
         }
 
@@ -10945,7 +11110,7 @@ void Optimizer::split4GRFVars()
                 {
                     bool isLow = dst->getLeftBound() < 2u * GENX_GRF_REG_SIZ;
                     auto NewDcl = DclMap[dstRootDcl]->getDcl(builder, dst->getType(), isLow);
-                    auto NewDst = builder.createDstRegRegion(Direct, NewDcl->getRegVar(),
+                    auto NewDst = builder.createDst(NewDcl->getRegVar(),
                         dst->getRegOff() - (isLow ? 0 : 2), dst->getSubRegOff(),
                         dst->getHorzStride(), dst->getType(), dst->getAccRegSel());
                     inst->setDest(NewDst);
@@ -11619,8 +11784,7 @@ static G4_INST* emitRetiringMov(IR_Builder& builder, G4_BB* BB, G4_INST* SI,
     Dcl->setGRFBaseOffset(RegNum * G4_GRF_REG_NBYTES);
     Dcl->getRegVar()->setPhyReg(builder.phyregpool.getGreg(RegNum), 0);
 
-    G4_DstRegRegion* MovDst = builder.createDstRegRegion(
-        Direct, Dcl->getRegVar(), 0, 0, 1, Type_F);
+    G4_DstRegRegion* MovDst = builder.createDst(Dcl->getRegVar(), 0, 0, 1, Type_F);
     G4_SrcRegRegion* MovSrc = builder.createSrcRegRegion(
         Mod_src_undef, Direct, Dcl->getRegVar(), 0, 0,
         builder.getRegionStride1(), Type_F);
@@ -11694,8 +11858,8 @@ void Optimizer::clearSendDependencies()
                 // OK, too many live sends. Retire the earliest live send.
                 G4_INST* SI = LiveSends.front();
                 G4_INST* MovInst = emitRetiringMov(builder, BB, SI, CurI);
-                retireSends(LiveSends, MovInst);
-                assert(LiveSends.size() < MAX_SENDS);
+retireSends(LiveSends, MovInst);
+assert(LiveSends.size() < MAX_SENDS);
             }
 
             // If this is EOT and send queue is not full, then nothing to do.
@@ -11720,16 +11884,46 @@ void Optimizer::clearSendDependencies()
 
 void Optimizer::replaceNoMaskWithAnyhWA()
 {
-    if (builder.kernel.getOptions()->getTarget() == VISA_CM ||
-        (builder.getuint32Option(vISA_noMaskToAnyhWA) & 0x7) == 0)
-    {
-        return;
-    }
+    // Identify BBs that need WA
+    fg.reassignBlockIDs();
+    fg.findNestedDivergentBBs();
 
     // Save dmask for the shader. Need to read them again
     // whenever sr0.2 is modified in the shader.
     G4_RegVar* dmaskVarUD = nullptr;
     std::vector<INST_LIST_ITER> NoMaskCandidates;
+    uint32_t simdsize = fg.getKernel()->getSimdSize();
+
+    // When using cmp to generate emask, the default is to create
+    // all-one flag so it applies to all execution size and quarter
+    // control combination. Doing so needs 3 instructions for each BB.
+    // On the other hand, if anyh can be used, 2 insts would be needed
+    // so that we save 1 insts for each BB. The condition that anyh
+    // can be used is that M0 is used for all NoMask insts that needs
+    // WA and all its execsize is no larger than simdsize.
+    bool enableAnyh = false;
+    bool  useAnyh = false;  // default use all-one flag.
+    if ((builder.getuint32Option(vISA_noMaskWA) & 0x10) != 0)
+    {
+        enableAnyh = true;
+    }
+    if ((builder.getuint32Option(vISA_noMaskWA) & 0x8) == 0 ||
+        (builder.getuint32Option(vISA_noMaskWA) & 0x4) == 0)
+    {
+        // When reading ce or doing WA per inst, do not use anyh
+        enableAnyh = false;
+    }
+
+
+    auto getPredCtrl = [&](bool isUseAnyh) -> G4_Predicate_Control
+    {
+        if (isUseAnyh)
+        {
+            return simdsize == 8 ? PRED_ANY8H
+                                 : (simdsize == 16 ? PRED_ANY16H : PRED_ANY32H);
+        }
+        return PRED_DEFAULT;
+    };
 
     // Return condMod if a flag register is used. Since sel
     // does not update flag register, return null for sel.
@@ -11763,7 +11957,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 #endif
         {
             if (Inst->isSend() && Inst->getPredicate() &&
-                Inst->getExecSize() > cfg.getKernel()->getSimdSize())
+                Inst->getExecSize() > simdsize)
             {
                 // fused send, already correctly predicated, skip
                 return false;
@@ -11773,16 +11967,88 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         return false;
     };
 
+    // Use cmp to calculate emask flag. This is an alternative to
+    // createFlagFromCE0().
+    auto createFlagFromCmp = [&](G4_INST*& flagDefInst,
+        uint32_t flagBits, G4_BB* BB, INST_LIST_ITER& II)->G4_RegVar*
+    {
+        //  Ty  (for flag):  big enough to hold flag for either anyh or all one flag.
+        //                   if useAnyh
+        //                      Ty = (simdsize > 16> ? UD : UW
+        //                   else
+        //                      Ty = max(simdsize, flagBits) > 16 ? UD : UW
+        //
+        //  if useAnyh
+        //    I0:               (W) mov (1|M0)  flag:Ty,  0
+        //    flagDefInst:          cmp (simdsize|M0) (eq)flag  r0:uw  r0:uw
+        //  else
+        //    I0:               (W) mov (1|M0)  flag:Ty,  0
+        //    I1:                   cmp (simdsize|M0) (eq)flag  r0:uw  r0:uw
+        //    flagDefInst: (W&flag.anyh) mov flag:Ty 0xFFFFFFFF:Ty
+        //
+        G4_Type Ty = (simdsize > 16) ? Type_UD : Type_UW;
+        if (!useAnyh && flagBits == 32 && flagBits > simdsize)
+        {
+            Ty = Type_UD;
+        }
+        G4_Declare* flagDecl = builder.createTempFlag((Ty == Type_UW ? 1 : 2), "cmpFlag");
+        G4_RegVar* flagVar = flagDecl->getRegVar();
+        G4_DstRegRegion* flag = builder.createDst(flagVar, 0, 0, 1, Ty);
+        G4_INST* I0 = builder.createMov(1, flag,
+            builder.createImm(0, Ty), InstOpt_WriteEnable, false);
+        BB->insert(II, I0);
+
+        G4_SrcRegRegion* r0_0 = builder.createSrcRegRegion(
+            Mod_src_undef, Direct,
+            builder.getRealR0()->getRegVar(), 0, 0,
+            builder.getRegionScalar(), Type_UW);
+        G4_SrcRegRegion* r0_1 = builder.createSrcRegRegion(
+            Mod_src_undef, Direct,
+            builder.getRealR0()->getRegVar(), 0, 0,
+            builder.getRegionScalar(), Type_UW);
+        G4_CondMod* flagCM = builder.createCondMod(Mod_e, flagVar, 0);
+        G4_DstRegRegion* nullDst = builder.createNullDst(Type_UW);
+        G4_INST* I1 = builder.createInternalInst(
+            NULL, G4_cmp, flagCM, false, simdsize, nullDst, r0_0, r0_1, InstOpt_M0);
+        BB->insert(II, I1);
+
+        if (useAnyh)
+        {
+            flagDefInst = I1;
+            return flagVar;
+        }
+
+        G4_Imm* allone = builder.createImm(0xFFFFFFFF, Ty);
+        G4_DstRegRegion* tFlag = builder.createDst(flagVar, 0, 0, 1, Ty);
+        flagDefInst = builder.createMov(1, tFlag, allone, InstOpt_WriteEnable, false);
+        G4_Predicate* tP = builder.createPredicate(
+            PredState_Plus, flagVar, 0,
+            (simdsize == 8 ? PRED_ANY8H : (simdsize == 16 ? PRED_ANY16H : PRED_ANY32H)));
+        flagDefInst->setPredicate(tP);
+        tP->setSameAsNoMask(true);
+        BB->insert(II, flagDefInst);
+
+        // update DefUse
+        flagDefInst->addDefUse(I0, Opnd_pred);
+        flagDefInst->addDefUse(I1, Opnd_pred);
+        return flagVar;
+    };
+
     // For a BB, calculating its emask and storing the emask in a flag.
     //
     // flagDefInst: created to define an emask flag using 'ce0 AND dmask'.
     //
-    // The function returns that the emask flag's G4_RegVar (refer to as flagVar).
+    // The function returns that emask flag's G4_RegVar (refer to as flagVar).
     // Note that flagDefInst will be inserted a few insts before II in BB,
     // not right before II if possible.
     auto createFlagFromCE0 = [&](G4_INST*& flagDefInst,
         uint32_t flagBits, G4_BB* BB, INST_LIST_ITER& II) -> G4_RegVar*
     {
+        if ((builder.getuint32Option(vISA_noMaskWA) & 0x8) != 0)
+        {
+            return createFlagFromCmp(flagDefInst, flagBits, BB, II);
+        }
+
         //
         // This create an inst definging flag:
         //    (w) and  flag:Ty  ce0.0<0;1,0>:Ty  dmaskVar:Ty
@@ -11796,14 +12062,19 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         //
         if (dmaskVarUD == nullptr)
         {
-            // (W) mov (1|M0) r10.0<1>:ud sr0.2.0<0;1,0>:ud
+            // Using dmask:
+            //     (W) mov (1|M0) r10.0<1>:ud sr0.2<0;1,0>:ud
+            // or using vmaks
+            //     (W) mov (1|M0) r10.0<1>:ud sr0.3<0;1,0>:ud
+            bool useVMask = builder.getOption(vISA_VME);
+
             G4_Declare* dmaskDecl = builder.createTempVar(1, Type_UD, Any, "DMaskUD");
             dmaskVarUD = dmaskDecl->getRegVar();
             G4_SrcRegRegion* Src = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(),
-                0, 2, builder.getRegionScalar(), Type_UD);
-            G4_DstRegRegion* Dst = builder.createDstRegRegion(
-                Direct, dmaskVarUD, 0, 0, 1, Type_UD);
+                0, (useVMask ? 3 : 2), builder.getRegionScalar(), Type_UD);
+            G4_DstRegRegion* Dst = builder.createDst(
+                dmaskVarUD, 0, 0, 1, Type_UD);
             G4_INST* dmaskInst = builder.createMov(1, Dst, Src, InstOpt_WriteEnable, false);
 
             G4_BB* entryBB = fg.getEntryBB();
@@ -11846,8 +12117,8 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             G4_SrcRegRegion* flagSrc = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, flagVar, 0, 0,
                 builder.getRegionScalar(), Type_UW);
-            G4_DstRegRegion* flagDst = builder.createDstRegRegion(
-                Direct, flagVar, 0, 0, 1, Type_UW);
+            G4_DstRegRegion* flagDst = builder.createDst(
+                flagVar, 0, 0, 1, Type_UW);
             G4_INST* tInst = builder.createMov(2, flagDst, flagSrc, InstOpt_WriteEnable, false);
             BB->insert(II, tInst);
 
@@ -11903,10 +12174,9 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         else {
             Src1 = builder.createImm(I->getExecLaneMask(), Ty);
         }
-        G4_DstRegRegion* tDst = builder.createDstRegRegion(
-            Direct, tPVar, 0, 0, 1, Ty);
+        G4_DstRegRegion* tDst = builder.createDst(tPVar, 0, 0, 1, Ty);
         G4_Predicate* flag0 = builder.createPredicate(
-            PredState_Plus, flagVar, 0, PRED_DEFAULT);
+            PredState_Plus, flagVar, 0, getPredCtrl(useAnyh));
         G4_INST* I0 = builder.createInternalInst(
             flag0, G4_sel, nullptr, false,
             1, tDst, Src0, Src1, InstOpt_WriteEnable);
@@ -11946,21 +12216,37 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 
         G4_DstRegRegion* dst = I->getDst();
         assert((dst && !dst->isNullReg()) && "ICE: expect dst to be non-null!");
+
+        // Create a temp that's big enough to hold data and possible gap
+        // b/w data due to alignment/hw restriction.
         G4_Declare* saveDecl = builder.createTempVar(
-            I->getExecSize(), dst->getType(), Any, "saveTmp");
-        G4_DstRegRegion* tDst = builder.createDstRegRegion(
-            Direct, saveDecl->getRegVar(), 0, 0, 1, dst->getType());
+            I->getExecSize() * dst->getHorzStride(), dst->getType(), Any, "saveTmp");
+
+        G4_DstRegRegion* tDst = builder.createDst(
+            saveDecl->getRegVar(), 0, 0, dst->getHorzStride(), dst->getType());
         I->setDest(tDst);
 
-        G4_SrcRegRegion* tSrc = builder.createSrcRegRegion(
-            Mod_src_undef, Direct, saveDecl->getRegVar(), 0, 0,
-            I->getExecSize() == 1 ? builder.getRegionScalar() : builder.getRegionStride1(),
-            dst->getType());
+        const RegionDesc* regionSave;
+        if (I->getExecSize() == 1) {
+            regionSave = builder.getRegionScalar();
+        }
+        else {
+            switch (dst->getHorzStride())
+            {
+            case 1: regionSave = builder.getRegionStride1(); break;
+            case 2: regionSave = builder.getRegionStride2(); break;
+            case 4: regionSave = builder.getRegionStride4(); break;
+            default:
+                assert(false && "ICE: unsupported dst horz stride!");
+            }
+        }
 
+        G4_SrcRegRegion* tSrc = builder.createSrcRegRegion(
+            Mod_src_undef, Direct, saveDecl->getRegVar(), 0, 0, regionSave, dst->getType());
         G4_INST* I0 = builder.createMov(
             I->getExecSize(), dst, tSrc, InstOpt_WriteEnable, false);
         G4_Predicate* flag0 = builder.createPredicate(
-            PredState_Plus, flagVar, 0, PRED_DEFAULT);
+            PredState_Plus, flagVar, 0, getPredCtrl(useAnyh));
         I0->setPredicate(flag0);
         flag0->setSameAsNoMask(true);
 
@@ -12027,8 +12313,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             G4_SrcRegRegion* I0S0 = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, modDcl->getRegVar(),
                 0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D0 = builder.createDstRegRegion(
-                Direct, saveVar, 0, 0, 1, Ty);
+            G4_DstRegRegion* D0 = builder.createDst(saveVar, 0, 0, 1, Ty);
             G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
             currBB->insert(currII, I0);
 
@@ -12037,11 +12322,11 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             G4_SrcRegRegion* I1S0 = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, saveVar,
                 0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D1 = builder.createDstRegRegion(
-                Direct, modDcl->getRegVar(), 0, 0, 1, Ty);
+            G4_DstRegRegion* D1 = builder.createDst(
+                modDcl->getRegVar(), 0, 0, 1, Ty);
             G4_INST* I1 = builder.createMov(1, D1, I1S0, InstOpt_WriteEnable, false);
             G4_Predicate* flag = builder.createPredicate(
-                PredState_Minus, flagVar, 0, PRED_DEFAULT);
+                PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
             I1->setPredicate(flag);
             currBB->insert(nextII, I1);
 
@@ -12063,24 +12348,26 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             G4_SrcRegRegion* I0S0 = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, flagVar,
                 0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D0 = builder.createDstRegRegion(Direct, nPVar, 0, 0, 1, Ty);
+            G4_DstRegRegion* D0 = builder.createDst(nPVar, 0, 0, 1, Ty);
             G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
             currBB->insert(currII, I0);
 
             // Use the new flag
+            // Note that if useAny is true, nP should use anyh
             G4_Predicate* nP = builder.createPredicate(
-                PredState_Plus, nPVar, 0, PRED_DEFAULT);
+                PredState_Plus, nPVar, 0, getPredCtrl(useAnyh));
             G4_CondMod* nM = builder.createCondMod(P->getMod(), nPVar, 0);
             I->setPredicate(nP);
+            nP->setSameAsNoMask(true);
             I->setCondMod(nM);
 
             G4_SrcRegRegion* I1S0 = builder.createSrcRegRegion(
                 Mod_src_undef, Direct, nPVar,
                 0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D1 = builder.createDstRegRegion(
-                Direct, modDcl->getRegVar(), 0, 0, 1, Ty);
+            G4_DstRegRegion* D1 = builder.createDst(
+                modDcl->getRegVar(), 0, 0, 1, Ty);
             G4_Predicate* flag1 = builder.createPredicate(
-                PredState_Plus, flagVar, 0, PRED_DEFAULT);
+                PredState_Plus, flagVar, 0, getPredCtrl(useAnyh));
             G4_INST* I1 = builder.createMov(1, D1, I1S0, InstOpt_WriteEnable, false);
             I1->setPredicate(flag1);
             flag1->setSameAsNoMask(true);
@@ -12100,7 +12387,6 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 // copyUsesTo() to achieve that, which is conservative.
                 I->copyUsesTo(I1, false);
             }
-
             return;
         }
 
@@ -12110,8 +12396,8 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_SrcRegRegion* I0S0 = builder.createSrcRegRegion(
             Mod_src_undef, Direct, modDcl->getRegVar(),
             0, 0, builder.getRegionScalar(), Ty);
-        G4_DstRegRegion* D0 = builder.createDstRegRegion(
-            Direct, saveVar, 0, 0, 1, Ty);
+        G4_DstRegRegion* D0 = builder.createDst(
+            saveVar, 0, 0, 1, Ty);
         G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
         currBB->insert(currII, I0);
 
@@ -12135,11 +12421,11 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_SrcRegRegion* I2S0 = builder.createSrcRegRegion(
             Mod_src_undef, Direct, saveVar,
             0, 0, builder.getRegionScalar(), Ty);
-        G4_DstRegRegion* D2 = builder.createDstRegRegion(
-            Direct, modDcl->getRegVar(), 0, 0, 1, Ty);
+        G4_DstRegRegion* D2 = builder.createDst(
+            modDcl->getRegVar(), 0, 0, 1, Ty);
         G4_INST* I2 = builder.createMov(1, D2, I2S0, InstOpt_WriteEnable, false);
         G4_Predicate* flag2 = builder.createPredicate(
-            PredState_Minus, flagVar, 0, PRED_DEFAULT);
+            PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I2->setPredicate(flag2);
         currBB->insert(nextII, I2);
 
@@ -12163,7 +12449,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
     //       I:  (W&[-]P)  and (16|M0) (ne)P  ....
     //
     //    After:
-    //       I0: (W)           mov (1|M0) save:uw  f1.0<0;1,0>:uw
+    //       I0: (W)           mov (1|M0) save:uw  P
     //       I1: (W&-flagVar)  mov (1|M0) P<1>:uw  0:uw | 0xFFFF (for -P)
     //       I:  (W&P)         and (16|M0) (ne)P  ....
     //       I2: (W&-flagVar)  mov (1|M0)  P   save:uw
@@ -12191,13 +12477,13 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_SrcRegRegion* I0S0 = builder.createSrcRegRegion(
             Mod_src_undef, Direct, modDcl->getRegVar(),
             0, 0, builder.getRegionScalar(), Ty);
-        G4_DstRegRegion* D0 = builder.createDstRegRegion(
-            Direct, saveVar, 0, 0, 1, Ty);
+        G4_DstRegRegion* D0 = builder.createDst(
+            saveVar, 0, 0, 1, Ty);
         G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
         currBB->insert(currII, I0);
 
-        G4_DstRegRegion* D1 = builder.createDstRegRegion(
-            Direct, modDcl->getRegVar(), 0, 0, 1, Ty);
+        G4_DstRegRegion* D1 = builder.createDst(
+            modDcl->getRegVar(), 0, 0, 1, Ty);
         G4_Imm* immS0;
         if (P->getState() == PredState_Plus) {
             immS0 = builder.createImm(0, Ty);
@@ -12207,7 +12493,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         }
         G4_INST* I1 = builder.createMov(1, D1, immS0, InstOpt_WriteEnable, false);
         G4_Predicate* flag1 = builder.createPredicate(
-            PredState_Minus, flagVar, 0, PRED_DEFAULT);
+            PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I1->setPredicate(flag1);
         currBB->insert(currII, I1);
 
@@ -12218,11 +12504,11 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_SrcRegRegion* I2S0 = builder.createSrcRegRegion(
             Mod_src_undef, Direct, saveVar,
             0, 0, builder.getRegionScalar(), Ty);
-        G4_DstRegRegion* D2 = builder.createDstRegRegion(
-            Direct, modDcl->getRegVar(), 0, 0, 1, Ty);
+        G4_DstRegRegion* D2 = builder.createDst(
+            modDcl->getRegVar(), 0, 0, 1, Ty);
         G4_INST* I2 = builder.createMov(1, D2, I2S0, InstOpt_WriteEnable, false);
         G4_Predicate* flag2 = builder.createPredicate(
-            PredState_Minus, flagVar, 0, PRED_DEFAULT);
+            PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I2->setPredicate(flag2);
         currBB->insert(nextII, I2);
 
@@ -12247,9 +12533,9 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             continue;
         }
 
-        if ((builder.getuint32Option(vISA_noMaskToAnyhWA) & 0x4) == 0)
+        if ((builder.getuint32Option(vISA_noMaskWA) & 0x4) == 0)
         {
-            // simple flag insertion: every time a flag is needed, read it from ce0
+            // simple flag insertion: every time a flag is needed, calcalate it.
             for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
             {
                 G4_INST* I = *II;
@@ -12273,7 +12559,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 {
                     // case 1: no predicate, no flagModifier (common case)
                     G4_Predicate* newPred = builder.createPredicate(
-                        PredState_Plus, flagVar, 0, PRED_DEFAULT);
+                        PredState_Plus, flagVar, 0, getPredCtrl(useAnyh));
                     newPred->setSameAsNoMask(true);
                     I->setPredicate(newPred);
 
@@ -12300,7 +12586,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             continue;
         }
 
-        // Now, builder.getuint32Option(vISA_noMaskToAnyhWA) & 0x4) != 0
+        // Now, builder.getuint32Option(vISA_noMaskWA) & 0x4) != 0
         // (optimized version)
         //
         // For each BB that needs to modify NoMask, create a flag once right
@@ -12308,17 +12594,27 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         //
         //    BB:
         //       ......
-        //       (W) and (16|M0) (nz)f0.0  null<1>:ud  ce0.0:ud   dmask:ud
-        //       ** If any nomask inst uses bits beyond 16, need the following too **
-        //       (W)  mov (2|M0)  f0.0<1>:uw   f0.0<0;1,0>:uw
+        //       if (using ce0)
+        //         (W) and (16|M0) (nz)f0.0  null<1>:ud  ce0.0:ud   dmask:ud
+        //         ** If any nomask inst uses bits beyond 16, need the following too **
+        //         (W)  mov (2|M0)  f0.0<1>:uw   f0.0<0;1,0>:uw
+        //       else // using cmp
+        //         (W) mov (1|M0)           f0.0:uw   0:uw  // or ud
+        //             cmp (16|M0) (eq)f0.0 null:uw  r0.0<0;1,0::uw  r0.0<0;1,0>:uw
+        //           if (!useAnyh)
+        //             (W&f0.0.any16h)  mov (1|M0) f0.0  0xFFFF:uw
         //
         //       (W&f0.0) inst0
         //       ......
         //       (W&f0.0) inst1
         //
+        //  If useAnyh,  the predicate would be (W & f0.0.any16h). The new flag,
+        //  either f0.0 (all-one) or f0.0.any16h (useAnyh) is equivalent to noMask.
 
         //  1. Collect all candidates and check if 32 bit flag is needed
+        //     and if useAnyh can be set to true.
         bool need32BitFlag = false;
+        useAnyh = enableAnyh; // need to reset for each BB
         for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
         {
             G4_INST* I = *II;
@@ -12328,6 +12624,13 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 if ((I->getExecSize() + I->getMaskOffset()) > 16)
                 {
                     need32BitFlag = true;
+                }
+                if (enableAnyh)
+                {
+                    if (I->getExecSize() > simdsize || I->getMaskOffset() != 0)
+                    {
+                        useAnyh = false;
+                    }
                 }
             }
         }
@@ -12355,7 +12658,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             {
                 // case 1: no predicate, no flagModifier (common case)
                 G4_Predicate* newPred = builder.createPredicate(
-                    PredState_Plus, flagVarForBB, 0, PRED_DEFAULT);
+                    PredState_Plus, flagVarForBB, 0, getPredCtrl(useAnyh));
                 newPred->setSameAsNoMask(true);
                 I->setPredicate(newPred);
 
@@ -12385,7 +12688,9 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 
     if (dmaskVarUD && fg.getSR0Modified())
     {
-        // modification made. Make sure that if sr0.2 is updated, reread dmask
+        // modification made. Make sure that if sr0.2 is updated, reread dmask/vmask
+        // Note that vmask is updated automatically when sr0.2 is set.
+        bool useVMask = builder.getOption(vISA_VME);
         auto BI = fg.begin();
         auto BE = fg.end();
         ++BI; // skip entryBB
@@ -12406,9 +12711,9 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 {
                     G4_SrcRegRegion* Src = builder.createSrcRegRegion(
                         Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(),
-                        0, 2, builder.getRegionScalar(), Type_UD);
-                    G4_DstRegRegion* Dst = builder.createDstRegRegion(
-                        Direct, dmaskVarUD, 0, 0, 1, Type_UD);
+                        0, (useVMask ? 3 : 2), builder.getRegionScalar(), Type_UD);
+                    G4_DstRegRegion* Dst = builder.createDst(
+                        dmaskVarUD, 0, 0, 1, Type_UD);
                     G4_INST* dmaskI = builder.createMov(1, Dst, Src, InstOpt_WriteEnable, false);
 
                     BB->insert(NextI, dmaskI);

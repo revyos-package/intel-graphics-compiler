@@ -875,13 +875,13 @@ public:
     void initBuiltinSLMSpillAddr(int perThreadSLMSize);
 
     IR_Builder(INST_LIST_NODE_ALLOCATOR &alloc, PhyRegPool &pregs, G4_Kernel &k,
-        Mem_Manager &m, Options *options, bool isFESP64Bits,
+        Mem_Manager &m, Options *options,
         FINALIZER_INFO *jitInfo = NULL, PVISA_WA_TABLE pWaTable = NULL)
         : curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), func_id(-1), metaData(jitInfo),
         isKernel(false), cunit(0),
         builtinSamplerHeaderInitialized(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
         CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
-        use64BitFEStackVars(isFESP64Bits), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
+        use64BitFEStackVars(false), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
         instList(alloc), kernel(k)
     {
         num_general_dcl = 0;
@@ -1106,13 +1106,17 @@ public:
 
     G4_INST* createPseudoKill(G4_Declare* dcl, PseudoKillType ty)
     {
-        auto dstRgn = createDstRegRegion(Direct, dcl->getRegVar(), 0, 0, 1, Type_UD);
+        auto dstRgn = createDst(dcl->getRegVar(), 0, 0, 1, Type_UD);
         G4_INST* inst = createIntrinsicInst(nullptr, Intrinsic::PseudoKill, 1,
             dstRgn, createImm((unsigned int)ty, Type_UD), nullptr, nullptr, InstOpt_WriteEnable);
 
         return inst;
     }
 
+    static const unsigned int HWORD_BYTE_SIZE = 32;
+
+    // numRows is in hword units
+    // offset is in hword units
     G4_INST* createSpill(
         G4_DstRegRegion* dst, G4_SrcRegRegion* header, G4_SrcRegRegion* payload,
         unsigned int execSize,
@@ -1124,7 +1128,8 @@ public:
         spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
         spill->asSpillIntrinsic()->setCISAOff(CISAoff);
         spill->asSpillIntrinsic()->setFP(fp);
-        spill->asSpillIntrinsic()->setOffset(offset);
+        spill->asSpillIntrinsic()->setOffset((uint32_t)
+            (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
         spill->asSpillIntrinsic()->setNumRows(numRows);
         return spill;
     }
@@ -1144,7 +1149,8 @@ public:
         spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
         spill->asSpillIntrinsic()->setCISAOff(CISAoff);
         spill->asSpillIntrinsic()->setFP(fp);
-        spill->asSpillIntrinsic()->setOffset(offset);
+        spill->asSpillIntrinsic()->setOffset((uint32_t)
+            (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
         spill->asSpillIntrinsic()->setNumRows(numRows);
         return spill;
     }
@@ -1157,7 +1163,8 @@ public:
         fill->asFillIntrinsic()->setSrcFilename(srcFilename);
         fill->asFillIntrinsic()->setCISAOff(CISAoff);
         fill->asFillIntrinsic()->setFP(fp);
-        fill->asFillIntrinsic()->setOffset(offset);
+        fill->asFillIntrinsic()->setOffset((uint32_t)
+            (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
         fill->asFillIntrinsic()->setNumRows(numRows);
         return fill;
     }
@@ -1173,7 +1180,8 @@ public:
         fill->asFillIntrinsic()->setSrcFilename(srcFilename);
         fill->asFillIntrinsic()->setCISAOff(CISAoff);
         fill->asFillIntrinsic()->setFP(fp);
-        fill->asFillIntrinsic()->setOffset(offset);
+        fill->asFillIntrinsic()->setOffset((uint32_t)
+            (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
         fill->asFillIntrinsic()->setNumRows(numRows);
         return fill;
     }
@@ -1315,12 +1323,11 @@ public:
         unsigned regs2rcv,
         unsigned regs2snd,
         SFID funcID,
-        bool eot,
         unsigned extMsgLength,
         uint16_t extFuncCtrl,
         SendAccess access,
-        G4_Operand *bti = nullptr,
-        G4_Operand *sti = nullptr);
+        G4_Operand* bti = nullptr,
+        G4_Operand* sti = nullptr);
 
     G4_Operand* emitSampleIndexGE16(
         G4_Operand* sampler, G4_Declare* headerDecl);
@@ -1414,6 +1421,8 @@ public:
     }
 
     // create a new dstregregion allocated in mem
+    // TODO: Avoid calling this directly since direct dst and indirect dst
+    // have different parameters. Will make it private in the future.
     G4_DstRegRegion* createDstRegRegion(G4_RegAccess a,
         G4_VarBase* b,
         short roff,
@@ -1424,6 +1433,30 @@ public:
     {
         G4_DstRegRegion* rgn = new (mem) G4_DstRegRegion(a, b, roff, sroff, hstride, ty, regSel);
         return rgn;
+    }
+
+    // create a direct DstRegRegion
+    G4_DstRegRegion* createDst(G4_VarBase* b,
+        short roff,
+        short sroff,
+        unsigned short hstride,
+        G4_Type        ty,
+        G4_AccRegSel regSel = ACC_UNDEFINED)
+    {
+        return createDstRegRegion(Direct, b, roff, sroff, hstride, ty, regSel);
+    }
+
+    // create a indirect DstRegRegion
+    // b is the address variable, which only supports subreg offset
+    G4_DstRegRegion* createIndirectDst(G4_VarBase* b,
+        short sroff,
+        uint16_t hstride,
+        G4_Type ty,
+        int16_t immOff)
+    {
+        auto dst = createDstRegRegion(IndirGRF, b, 0, sroff, hstride, ty);
+        dst->setImmAddrOff(immOff);
+        return dst;
     }
 
     //
@@ -1781,7 +1814,11 @@ public:
         const char* srcFilename = NULL);
 
     G4_INST* createMov(uint8_t execSize, G4_DstRegRegion* dst,
-        G4_Operand* src0, uint32_t option, bool appendToInstList);
+        G4_Operand* src0, uint32_t option, bool appendToInstList,
+        int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr);
+
+    G4_INST* createBinOp(G4_opcode op, uint8_t execSize, G4_DstRegRegion* dst,
+        G4_Operand* src0, G4_Operand* src1, uint32_t option, bool appendToInstList);
 
     G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
     void resizePredefinedStackVars();
@@ -1825,32 +1862,31 @@ public:
         unsigned option);
 
     G4_InstSend* Create_Send_Inst_For_CISA(
-                        G4_Predicate* pred,
-                        G4_DstRegRegion *postDst,
-                        G4_SrcRegRegion *payload,
-                        unsigned regs2snd,
-                        unsigned regs2rcv,
-                        unsigned execsize,
-                        unsigned fc,
-                        SFID tf_id,
-                        bool eot,
-                        bool head_present,
-                        SendAccess access,
-                        G4_Operand *bti,
-                        G4_Operand *sti,
-                        unsigned int option,
-                        bool is_sendc);
-
-    G4_InstSend* Create_SplitSend_Inst_For_CISA(G4_Predicate* pred, G4_DstRegRegion *dst,
-        G4_SrcRegRegion *src1, unsigned regs2snd1,
-        G4_SrcRegRegion *src2, unsigned regs2snd2,
+        G4_Predicate* pred,
+        G4_DstRegRegion* postDst,
+        G4_SrcRegRegion* payload,
+        unsigned regs2snd,
         unsigned regs2rcv,
         unsigned execsize,
-        unsigned fc, unsigned exFuncCtrl,
-        SFID tf_id, bool eot,
+        unsigned fc,
+        SFID tf_id,
         bool head_present,
         SendAccess access,
-        G4_Operand *bti, G4_Operand *sti,
+        G4_Operand* bti,
+        G4_Operand* sti,
+        unsigned int option,
+        bool is_sendc);
+
+    G4_InstSend* Create_SplitSend_Inst_For_CISA(G4_Predicate* pred, G4_DstRegRegion* dst,
+        G4_SrcRegRegion* src1, unsigned regs2snd1,
+        G4_SrcRegRegion* src2, unsigned regs2snd2,
+        unsigned regs2rcv,
+        unsigned execsize,
+        unsigned fc,
+        SFID tf_id,
+        bool head_present,
+        SendAccess access,
+        G4_Operand* bti, G4_Operand* sti,
         unsigned option,
         bool is_sendc);
 
@@ -1890,6 +1926,8 @@ public:
 
     G4_INST* createFenceInstruction(
         uint8_t flushParam, bool commitEnable, bool globalMemFence, bool isSendc);
+
+    G4_INST* createSLMFence();
 
     // short hand for creating a dstRegRegion
     G4_DstRegRegion* Create_Dst_Opnd_From_Dcl(G4_Declare* dcl, unsigned short hstride);

@@ -26,6 +26,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 #include "common/igc_regkeys.hpp"
 #include "common/Types.hpp"
+#include "inc/common/igfxfmid.h"
+
 /*
 This provides hook to query whether a feature is supported by the runtime we are compiling for
 This file has default value, then each adapter can overload any of the query to tell the backend
@@ -95,9 +97,6 @@ namespace IGC
         /// The driver implements single instance vertex dispatch feature
         virtual bool SupportsSingleInstanceVertexDispatch() const { return false; }
 
-        /// We can safely ignore Nan
-        virtual bool IgnoreNan() const { return false; }
-
         // Allow branch swapping for better Nan perf
         virtual bool BranchSwapping() const { return false; }
 
@@ -128,7 +127,7 @@ namespace IGC
         virtual bool NeedI64BitDivRem() const { return false; }
 
         /// Must support FP64
-        virtual bool NeedFP64() const { return false; }
+        virtual bool NeedFP64(PRODUCT_FAMILY productFamily) const { return false; }
 
         /// Must support of f32 IEEE divide (also sqrt)
         virtual bool NeedIEEESPDiv() const { return false; }
@@ -255,9 +254,6 @@ namespace IGC
 
         /// Does not emit an error if recursive functions calls are detected.
         virtual bool AllowRecursion() const { return false; }
-
-        /// Allow aggressive vector value aliasing
-        virtual bool EnableVecAliasing() const { return false; }
 
         /// Restrict dessa aliasing level. -1 : no restriction; max level otherwise.
         virtual int DessaAliasLevel() const { return -1; }

@@ -48,23 +48,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../AdaptorOCL/OCL/LoadBuffer.h"
 #include "Compiler/CISACodeGen/Platform.hpp"
 #include "common/debug/Debug.hpp"
-
-#include "common/SIPKernels/Gen10SIPCSR.h"
-#include "common/SIPKernels/Gen10SIPCSRDebug.h"
-#include "common/SIPKernels/Gen10SIPDebug.h"
-#include "common/SIPKernels/Gen10SIPDebugBindless.h"
-#include "common/SIPKernels/Gen9BXTSIPCSR.h"
-#include "common/SIPKernels/Gen9SIPCSR.h"
-#include "common/SIPKernels/Gen9SIPCSRDebug.h"
-#include "common/SIPKernels/Gen9SIPCSRDebugLocal.h"
-#include "common/SIPKernels/Gen9SIPDebug.h"
-#include "common/SIPKernels/Gen9SIPDebugBindless.h"
-#include "common/SIPKernels/Gen9GLVSIPCSR.h"
-#include "common/SIPKernels/Gen11HPSIPCSR.h"
-#include "common/SIPKernels/Gen11SIPCSR.h"
-#include "common/SIPKernels/Gen11LKFSIPCSR.h"
-#include "common/SIPKernels/Gen12LPSIPCSR.h"
-
+#include "Probe.h"
 
 namespace SIP
 {
@@ -84,9 +68,11 @@ namespace SIP
         GEN9_SIP_CSR_DEBUG_LOCAL,
         GEN9_GLV_SIP_CSR,
         GEN11_SIP_CSR,
+        GEN11_SIP_CSR_DEBUG,
         GEN11_HP_SIP_CSR,
         GEN11_LKF_SIP_CSR,
         GEN12_LP_CSR,
+        GEN12_LP_CSR_DEBUG,
         GEN_SIP_MAX_INDEX
     };
 
@@ -118,8 +104,8 @@ namespace SIP
             void Delete(CGenSystemInstructionKernelProgram* &pKernelProgram );
 
             CGenSystemInstructionKernelProgram(const USC::SYSTEM_THREAD_MODE mode);
-            unsigned int  GetProgramSize(){ ASSERT(m_ProgramSize) ; return m_ProgramSize;}
-            void * GetLinearAddress(){ ASSERT(m_LinearAddress); return m_LinearAddress;}
+            unsigned int  GetProgramSize(){ IGC_ASSERT(m_ProgramSize) ; return m_ProgramSize;}
+            void * GetLinearAddress(){ IGC_ASSERT(m_LinearAddress); return m_LinearAddress;}
 
     protected:
 

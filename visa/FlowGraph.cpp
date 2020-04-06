@@ -822,10 +822,10 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         pKernel->dumpDotFile("afterRemoveRedundantLabels");
     }
 
-    // Ensure each block other than entry starts with a label.
+    // Ensure each block starts with a label.
     for (auto bb : BBs)
     {
-        if (bb != getEntryBB() && !bb->empty())
+        if (!bb->empty())
         {
             G4_INST *inst = bb->front();
             if (inst->isLabel())
@@ -933,6 +933,11 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         kernelInfo->updateExitBB(BBs.back());
     }
 
+    if ((hasSIMDCF || hasGoto) && builder->getOption(vISA_divergentBB))
+    {
+        markDivergentBBs();
+    }
+
     builder->materializeGlobalImm(getEntryBB());
     normalizeRegionDescriptors();
     localDataFlowAnalysis();
@@ -1002,7 +1007,7 @@ void FlowGraph::handleWait()
                     G4_INST* nextInst = *nextIter;
                     if (nextInst->isSend())
                     {
-                        nextInst->setOpcode(nextInst->isSplitSend() ? G4_sendsc : G4_sendc);
+                        nextInst->asSendInst()->setSendc();
                         sunk = true;
                         break;
                     }
@@ -1014,9 +1019,13 @@ void FlowGraph::handleWait()
                 }
                 if (!sunk)
                 {
-                    bool commitEnable = builder->needsFenceCommitEnable();
-                    G4_INST* fenceInst = builder->createFenceInstruction(0, commitEnable, false, true);
-                    bb->insert(iter, fenceInst);
+                    auto fenceInst = builder->createSLMFence();
+                    auto sendInst = fenceInst->asSendInst();
+                    if (sendInst != NULL)
+                    {
+                        sendInst->setSendc();
+                        bb->insert(iter, fenceInst);
+                    }
                 }
                 iter = bb->erase(iter);
             }
@@ -1476,12 +1485,9 @@ void FlowGraph::decoupleInitBlock(G4_BB* bb, FuncInfoHashTable& funcInfoHashTabl
 {
     G4_BB* oldInitBB = bb;
     G4_BB* newInitBB = createNewBB();
-    BBs.insert(BBs.end(), newInitBB);
-
-    FuncInfoHashTable::iterator old_iter = funcInfoHashTable.find(oldInitBB->getId());
-    MUST_BE_TRUE(old_iter != funcInfoHashTable.end(), " Function info is not in hashtable.");
-    G4_BB* exitBB = (*old_iter).second->getExitBB();
-    unsigned funcId = (*old_iter).second->getId();
+    BB_LIST_ITER insertBefore = std::find(BBs.begin(), BBs.end(), bb);
+    MUST_BE_TRUE(insertBefore != BBs.end(), ERROR_FLOWGRAPH);
+    BBs.insert(insertBefore, newInitBB);
 
     BB_LIST_ITER kt = oldInitBB->Preds.begin();
     while (kt != oldInitBB->Preds.end())
@@ -1503,23 +1509,6 @@ void FlowGraph::decoupleInitBlock(G4_BB* bb, FuncInfoHashTable& funcInfoHashTabl
             (*kt)->Succs.insert(jt, newInitBB);
             (*kt)->Succs.erase(jt);
 
-            // update info in func table
-            FuncInfoHashTable::iterator calleeInfoLoc = funcInfoHashTable.find(newInitBB->getId());
-
-            if (calleeInfoLoc != funcInfoHashTable.end()) {
-                (*calleeInfoLoc).second->incrementCallCount();
-                (*kt)->setCalleeInfo((*calleeInfoLoc).second);
-            }
-            else {
-                FuncInfo *funcInfo = new (mem)FuncInfo(
-                    funcId, newInitBB, exitBB);
-                std::pair<FuncInfoHashTable::iterator, bool> loc =
-                    funcInfoHashTable.insert(
-                        std::make_pair(newInitBB->getId(), funcInfo));
-                MUST_BE_TRUE(loc.second, ERROR_FLOWGRAPH);
-                (*kt)->setCalleeInfo((*(loc.first)).second);
-            }
-
             BB_LIST_ITER tmp_kt = kt;
             ++kt;
             // erase this pred from old INIT BB's pred
@@ -1531,16 +1520,14 @@ void FlowGraph::decoupleInitBlock(G4_BB* bb, FuncInfoHashTable& funcInfoHashTabl
         }
     }
 
-    // Erase item from unordered_map using
-    // key rather than iterator since iterator may be
-    // invalid due to insert operation since last find.
-    {
-        FuncInfoHashTable::iterator calleeInfoLoc = funcInfoHashTable.find(oldInitBB->getId());
-        if (calleeInfoLoc != funcInfoHashTable.end()) {
-            (*calleeInfoLoc).second->~FuncInfo();
-        }
-        funcInfoHashTable.erase(oldInitBB->getId());
-    }
+    FuncInfoHashTable::iterator old_iter = funcInfoHashTable.find(oldInitBB->getId());
+    MUST_BE_TRUE(old_iter != funcInfoHashTable.end(), " Function info is not in hashtable.");
+    FuncInfo* funcInfo = (*old_iter).second;
+
+    // Erase the old item from unordered_map and add the new one.
+    funcInfo->updateInitBB(newInitBB);
+    funcInfoHashTable.erase(old_iter);
+    funcInfoHashTable.insert(std::make_pair(newInitBB->getId(), funcInfo));
 
     oldInitBB->unsetBBType(G4_BB_INIT_TYPE);
     newInitBB->setBBType(G4_BB_INIT_TYPE);
@@ -1557,7 +1544,10 @@ void FlowGraph::decoupleExitBlock(G4_BB* bb)
 {
     G4_BB* oldExitBB = bb;
     G4_BB* newExitBB = createNewBB();
-    BBs.insert(BBs.end(), newExitBB);
+    BB_LIST_ITER insertBefore = std::find(BBs.begin(), BBs.end(), bb);
+    MUST_BE_TRUE(insertBefore != BBs.end(), ERROR_FLOWGRAPH);
+    ++insertBefore;
+    BBs.insert(insertBefore, newExitBB);
 
     BB_LIST_ITER kt = oldExitBB->Succs.begin();
 
@@ -1606,7 +1596,9 @@ void FlowGraph::decoupleReturnBlock(G4_BB* bb)
 {
     G4_BB* oldRetBB = bb;
     G4_BB* newRetBB = createNewBB();
-    BBs.insert(BBs.end(), newRetBB);
+    BB_LIST_ITER insertBefore = std::find(BBs.begin(), BBs.end(), bb);
+    MUST_BE_TRUE(insertBefore != BBs.end(), ERROR_FLOWGRAPH);
+    BBs.insert(insertBefore, newRetBB);
     G4_BB* itsExitBB = oldRetBB->BBBeforeCall()->getCalleeInfo()->getExitBB();
 
     BB_LIST_ITER jt = itsExitBB->Succs.begin();
@@ -1651,7 +1643,7 @@ void FlowGraph::decoupleReturnBlock(G4_BB* bb)
     newRetBB->setBBBeforeCall(oldRetBB->BBBeforeCall());
     oldRetBB->BBBeforeCall()->setBBAfterCall(newRetBB);
 
-    bb->setBBBeforeCall(NULL);
+    oldRetBB->setBBBeforeCall(NULL);
 
     std::string str = "LABEL__EMPTYBB__" + std::to_string(newRetBB->getId());
     G4_Label* label = builder->createLabel(str, LABEL_BLOCK);
@@ -1659,24 +1651,35 @@ void FlowGraph::decoupleReturnBlock(G4_BB* bb)
     newRetBB->push_back(labelInst);
 }
 
+// Make sure that a BB is at most one of CALL/RETURN/EXIT/INIT. If any
+// BB is both, say INIT and CALL, decouple them by inserting a new BB.
+// [The above comments are post-added from reading the code.]
+//
+// The inserted BB must be in the original place so that each subroutine
+// has a list of consecutive BBs.
 void FlowGraph::normalizeSubRoutineBB(FuncInfoHashTable& funcInfoTable)
 {
-    for (BB_LIST_ITER it = BBs.begin(); it != BBs.end(); ++it)
+    BB_LIST_ITER nexti = BBs.begin();
+    for (BB_LIST_ITER it = nexti; it != BBs.end(); it = nexti)
     {
+        ++nexti;
+
         if (((*it)->getBBType() & G4_BB_CALL_TYPE))
         {
             G4_BB* callBB = (*it);
 
+            if (callBB->getBBType() & G4_BB_EXIT_TYPE)
+            {
+                // As call BB has RETURN BB as fall-thru, cannot be EXIT
+                MUST_BE_TRUE(false, ERROR_FLOWGRAPH);
+            }
+
+            // BB could be either INIT or RETURN, but not both.
             if (callBB->getBBType() & G4_BB_INIT_TYPE)
             {
                 decoupleInitBlock(callBB, funcInfoTable);
             }
-            if (callBB->getBBType() & G4_BB_EXIT_TYPE)
-            {
-                decoupleExitBlock(callBB);
-            }
-
-            if (callBB->getBBType() & G4_BB_RETURN_TYPE)
+            else if (callBB->getBBType() & G4_BB_RETURN_TYPE)
             {
                 decoupleReturnBlock(callBB);
             }
@@ -1684,7 +1687,16 @@ void FlowGraph::normalizeSubRoutineBB(FuncInfoHashTable& funcInfoTable)
         else if (((*it)->getBBType() & G4_BB_INIT_TYPE))
         {
             G4_BB* initBB = (*it);
-            if (initBB->getBBType() != G4_BB_INIT_TYPE)
+
+            if (initBB->getBBType() & G4_BB_RETURN_TYPE)
+            {
+                // As retrun BB must have a pred, it cannot be init BB
+                MUST_BE_TRUE(false, ERROR_FLOWGRAPH);
+            }
+
+            // Two possible combinations: INIT & CALL, or INIT & EXIT. INIT & CALL has
+            // been processed in the previous IF, here only INIT and EXIT is possible.
+            if (initBB->getBBType() & G4_BB_EXIT_TYPE)
             {
                 decoupleInitBlock(initBB, funcInfoTable);
             }
@@ -1693,15 +1705,8 @@ void FlowGraph::normalizeSubRoutineBB(FuncInfoHashTable& funcInfoTable)
         {
             G4_BB* exitBB = (*it);
 
-            if (exitBB->getBBType() & G4_BB_INIT_TYPE)
-            {
-                decoupleInitBlock(exitBB, funcInfoTable);
-            }
-            if (exitBB->getBBType() & G4_BB_CALL_TYPE)
-            {
-                decoupleExitBlock(exitBB);
-            }
-
+            // Only EXIT & RETURN are possible. (INIT & EXIT
+            // has been processed)
             if (exitBB->getBBType() & G4_BB_RETURN_TYPE)
             {
                 decoupleReturnBlock(exitBB);
@@ -1711,20 +1716,8 @@ void FlowGraph::normalizeSubRoutineBB(FuncInfoHashTable& funcInfoTable)
         {
             G4_BB* retBB = (*it);
 
-            if (retBB->getBBType() & G4_BB_INIT_TYPE)
-            {
-                MUST_BE_TRUE(false, ERROR_FLOWGRAPH);
-            }
-            if (retBB->getBBType() & G4_BB_EXIT_TYPE)
-            {
-                MUST_BE_TRUE(!(retBB->getBBType() & G4_BB_CALL_TYPE), ERROR_FLOWGRAPH);
-                decoupleReturnBlock(retBB);
-            }
-            else if (retBB->getBBType() & G4_BB_CALL_TYPE)
-            {
-                decoupleReturnBlock(retBB);
-            }
-            else if (retBB->Preds.size() > 1)
+            // Do we need to do this ?
+            if (retBB->Preds.size() > 1)
             {
                 decoupleReturnBlock(retBB);
             }
@@ -1913,11 +1906,58 @@ void FlowGraph::AssignDFSBasedIds(G4_BB* bb, unsigned &preId, unsigned &postId, 
 static _THREAD int dotDumpCount = 0;
 
 //
+// Remove redundant goto/jmpi
 // Remove the fall through edges between subroutine and its non-caller preds
-// Remove basic blocks that only contain a label, funcation lebels are untouched.
+// Remove basic blocks that only contain a label, function labels are untouched.
+// Remove empty blocks.
 //
 void FlowGraph::removeRedundantLabels()
 {
+    // first,  remove redundant goto
+    //    goto L0
+    //      ....
+    //    goto L1     <-- redundant goto
+    // L0: <empty BB>
+    // L1:
+    BB_LIST_ITER Next = BBs.begin(), IE = BBs.end();
+    for (BB_LIST_ITER II = Next; II != IE; II = Next)
+    {
+        ++Next;
+
+        G4_BB* BB = *II;
+        G4_opcode lastop = BB->getLastOpcode();
+        if (BB->Succs.size() == 1 && (lastop == G4_goto || lastop == G4_jmpi))
+        {
+            G4_BB* SuccBB = BB->Succs.back();
+            G4_BB* BB1 = nullptr;
+            // Skip over empty BBs
+            for (auto iter = Next; iter != IE; ++iter)
+            {
+                BB1 = *iter;
+                if (BB1 != SuccBB &&
+                    (BB1->empty() ||
+                     (BB1->size() == 1 && BB1->getLastOpcode() == G4_label)))
+                {
+                    continue;
+                }
+                break;
+            }
+            if (BB1 && SuccBB == BB1)
+            {
+                // Remove goto and its fall-thru will be its succ.
+                G4_BB* fallThruBB = *Next;
+                if (fallThruBB != SuccBB)
+                {
+                    // Reconnect succ/pred for BB
+                    removePredSuccEdges(BB, SuccBB);
+                    addPredSuccEdges(BB, fallThruBB);
+                }
+                BB->pop_back();
+            }
+        }
+    }
+
+
     for (BB_LIST_ITER it = BBs.begin(); it != BBs.end();)
     {
         G4_BB* bb = *it;
@@ -1937,6 +1977,37 @@ void FlowGraph::removeRedundantLabels()
             }
 
             bb->clear();
+            BB_LIST_ITER rt = it++;
+            BBs.erase(rt);
+
+            continue;
+        }
+
+        // Remove empty blocks
+        if (bb->size() == 0)
+        {
+            // Handle this case by connecting Pred to Succ and delete bb!
+            //   Pred:
+            //   bb:
+            //     <empty>
+            //   Succ:
+            assert(bb->Preds.size() < 2 && "Empty BB has at most 1 pred!");
+            assert(bb->Succs.size() < 2 && "Empty BB has at most 1 succ!");
+            G4_BB* Pred = bb->Preds.size() == 1 ? bb->Preds.back() : nullptr;
+            G4_BB* Succ = bb->Succs.size() == 1 ? bb->Succs.back() : nullptr;
+            if (Pred)
+            {
+                removePredSuccEdges(Pred, bb);
+            }
+            if (Succ)
+            {
+                removePredSuccEdges(bb, Succ);
+            }
+            if (Pred && Succ)
+            {
+                addPredSuccEdges(Pred, Succ);
+            }
+
             BB_LIST_ITER rt = it++;
             BBs.erase(rt);
 
@@ -2546,6 +2617,27 @@ G4_BB *FlowGraph::findLabelBB(char *label, int &label_offset)
     return NULL;
 }
 
+G4_BB* FlowGraph::findLabelBB(
+    BB_LIST_ITER StartIter, BB_LIST_ITER EndIter, const char* Label)
+{
+    for (BB_LIST_ITER it = StartIter; it != EndIter; ++it)
+    {
+        G4_BB* bb = *it;
+        G4_INST* first = bb->empty() ? NULL : bb->front();
+
+        if (first && first->isLabel())
+        {
+            const char* currLabel = first->getLabelStr();
+            if (strcmp(Label, currLabel) == 0)
+            {
+                return bb;
+            }
+        }
+    }
+    return NULL;
+}
+
+
 /*
 *  Mark blocks that are nested in SIMD control flow.
 *  Only structured CF is handled here, SIMD BBs due to goto/join
@@ -2691,6 +2783,342 @@ void FlowGraph::markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfo
     }
 }
 
+// markDivergentBBs()
+//    If BB is on the divergent path, mark it as divergent.
+// Divergent:
+//    If all active simd lanes on entry to shader/kernel are
+//    active in a BB,  that BB is NOT divergent;  otherwise,
+//    it is divergent.
+//
+//    Note that this does not require the number of all the
+//    active simd lanes equals to the simd dispatch width!
+//    For example,  simd8 kernel might have 4 active lanes
+//    on entry to the kernel, thus if any BB of the kernel
+//    has less than 4 active lanes,  it is divergent! As
+//    matter of fact, the entry BB must not be divergent.
+//
+// Note: this will be used to replace inSIMDCF gradually.
+void FlowGraph::markDivergentBBs()
+{
+    // Assumption:
+    //       1.  For each function, it has a single return (for function)
+    //           or exit (for entry function). And that return/exit is the
+    //           last BB of that function.
+    //       2.  The entry function will appear first in the BB list, and
+    //           if there is a call from A to B,  A shall appear prior to B
+    //           in BB list.
+    //       3.  There is no indirect call, and no recursive call.
+    //
+    // Required:  need to set BB id.
+    //
+    // Key variables:
+    //   LastJoinBB:
+    //     LastJoinBB is the fartherest joinBB of any goto/break/if/while
+    //     so far, as described below in the algorithm.
+    //   LastJoinBBId:  Id(LastJoinBB).
+    //
+    // The algorithm initializes LastJoinBBId to -1 and scans all BBs in order.
+    // It checks control-flow instructions to see if it diverges (has join).
+    // If so, the algorithm sets LastJoinBBId to be the larger one of its join BB
+    // and LastJoinBBId; For a non-negative LastJoinBBId, it means that there is
+    // an active join in that BB, and therefore, all BBs from the current BB to
+    // that LastJoinBB (LastJoinBB not included) will be in divergent path.
+    //
+    // The algorithm checks the following cases and their join BBs are:
+    //     case 1: cf inst = goto
+    //          <currBB>    [(p)] goto L
+    //                           ...
+    //          <joinBB>    L:
+    //     case 2: cf inst = if
+    //          <currBB>    if
+    //                          ...
+    //          <joinBB>    endif
+    //
+    //     case 3:  cf inst = break
+    //          <currBB>   break
+    //                     ...
+    //                     [(p)] while
+    //          <joinBB>
+    //     case 4:
+    //          <currBB>  L:
+    //                     ....
+    //                    [(p)] while/goto L
+    //          <joinBB>
+    //
+    int LastJoinBBId;
+
+    auto pushJoin = [&](G4_BB* joinBB) {
+        LastJoinBBId = std::max(LastJoinBBId, (int)joinBB->getId());
+    };
+    auto popJoinIfMatch = [&](G4_BB* BB) {
+        if ((int)BB->getId() == LastJoinBBId) {
+            LastJoinBBId = -1;
+        }
+    };
+    auto isPriorToLastJoin = [&](G4_BB* aBB) ->bool {
+        return (int)aBB->getId() < LastJoinBBId;
+    };
+
+    if (BBs.empty())
+    {
+        // Sanity check
+        return;
+    }
+
+    reassignBlockIDs();
+
+    // Analyze function in topological order. As there is no recursion
+    // and no indirect call,  a function will be analyzed only if all
+    // its callers have been analyzed.
+    //
+    // If no subroutine, sortedFuncTable is empty. Here keep all functions
+    // in a vector first (it works with and without subroutines), then scan
+    // functions in topological order.
+    struct StartEndIter {
+        BB_LIST_ITER StartI;
+        BB_LIST_ITER EndI;
+        bool  InvokedFromDivergentBB;
+    };
+    int numFuncs = (int)sortedFuncTable.size();
+    std::vector<StartEndIter> allFuncs;
+    std::unordered_map<FuncInfo*, uint32_t> funcInfoIndex;
+    if (numFuncs == 0)
+    {
+        numFuncs = 1;
+        allFuncs.resize(1);
+        allFuncs[0].StartI = BBs.begin();
+        allFuncs[0].EndI = BBs.end();
+        allFuncs[0].InvokedFromDivergentBB = false;
+    }
+    else
+    {
+        allFuncs.resize(numFuncs);
+        for (int i = numFuncs; i > 0; --i)
+        {
+            uint32_t ix = (uint32_t)(i - 1);
+            FuncInfo* pFInfo = sortedFuncTable[ix];
+            G4_BB* StartBB = pFInfo->getInitBB();
+            G4_BB* EndBB = pFInfo->getExitBB();
+            uint32_t ui = (uint32_t)(numFuncs - i);
+            allFuncs[ui].StartI = std::find(BBs.begin(), BBs.end(), StartBB);
+            auto nextI = std::find(BBs.begin(), BBs.end(), EndBB);
+            assert(nextI != BBs.end() && "ICE: subroutine's end BB not found!");
+            allFuncs[ui].EndI = (++nextI);
+            allFuncs[ui].InvokedFromDivergentBB = false;
+
+            funcInfoIndex[pFInfo] = ui;
+        }
+    }
+
+    // Check if the BB referred to by CurrIT needs to update lastJoin and do
+    // updating if so.  The IterEnd is the end iterator of current function
+    // that CurrIT refers to.
+    //
+    //    1. update lastJoinBB if needed
+    //    2. set up divergence for entry of subroutines if divergent
+    //
+    auto updateLastJoinForBB = [&](BB_LIST_ITER& CurrIT, BB_LIST_ITER& IterEnd) ->bool
+    {
+        G4_BB* aBB = *CurrIT;
+        if (aBB->size() == 0)
+        {
+            return false;
+        }
+
+        int old_lastJoinBBId = LastJoinBBId;
+
+        G4_INST* lastInst = aBB->back();
+        if ((lastInst->opcode() == G4_while ||
+             (lastInst->opcode() == G4_goto && lastInst->asCFInst()->isBackward())) &&
+            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
+        {
+            if (CurrIT != IterEnd) {
+                auto NI = CurrIT;
+                ++NI;
+                G4_BB* joinBB = *NI;
+                pushJoin(joinBB);
+            }
+        }
+        else if (((lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward()) ||
+             lastInst->opcode() == G4_break) &&
+            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
+        {
+            // forward goto/break : the last Succ BB is our target BB
+            // For break, it should be the BB right after while inst.
+            G4_BB* joinBB = aBB->Succs.back();
+            pushJoin(joinBB);
+        }
+        else if (lastInst->opcode() == G4_if &&
+            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
+        {
+            G4_Label* labelInst = lastInst->asCFInst()->getUip();
+            G4_BB* joinBB = findLabelBB(CurrIT, IterEnd, labelInst->getLabel());
+            assert(joinBB && "ICE(vISA) : missing endif label!");
+            pushJoin(joinBB);
+        }
+        else if (lastInst->opcode() == G4_call || lastInst->opcode() == G4_pseudo_fcall)
+        {
+            // If this function is already in divergent branch, the callee
+            // must be in a divergent branch!.
+            if (aBB->isDivergent() || lastInst->getPredicate() != nullptr)
+            {
+                FuncInfo* calleeFunc = aBB->getCalleeInfo();
+                if (funcInfoIndex.count(calleeFunc))
+                {
+                    int ix = funcInfoIndex[calleeFunc];
+                    allFuncs[ix].InvokedFromDivergentBB = true;
+                }
+            }
+        }
+
+        return old_lastJoinBBId != LastJoinBBId;
+    };
+
+    for (int i = 0; i < numFuncs; ++i)
+    {
+        // each function: [IT, IE)
+        BB_LIST_ITER& IS = allFuncs[i].StartI;
+        BB_LIST_ITER& IE = allFuncs[i].EndI;
+        if (IS == IE)
+        {
+            // sanity check
+            continue;
+        }
+
+        if (allFuncs[i].InvokedFromDivergentBB)
+        {
+            // subroutine's divergent on entry. Mark every BB as divergent
+            for (auto IT = IS; IT != IE; ++IT)
+            {
+                G4_BB* BB = *IT;
+
+                BB->setDivergent(true);
+                // set InSIMDFlow as well, will merge two gradually
+                BB->setInSimdFlow(true);
+
+                if (BB->size() == 0)
+                {
+                    // sanity check
+                    continue;
+                }
+                if (BB->isEndWithCall() || BB->isEndWithFCall())
+                {
+                    FuncInfo* calleeFunc = BB->getCalleeInfo();
+                    if (funcInfoIndex.count(calleeFunc))
+                    {
+                        int ix = funcInfoIndex[calleeFunc];
+                        allFuncs[ix].InvokedFromDivergentBB = true;
+                    }
+                }
+            }
+            // continue for next func
+            continue;
+        }
+
+        LastJoinBBId = -1;
+        for (auto IT = IS; IT != IE; ++IT)
+        {
+            G4_BB* BB = *IT;
+
+            // join could be: explicit (join inst) or implicit (endif/while)
+            popJoinIfMatch(BB);
+
+            // Handle loop
+            //    Loop needs to be scanned twice in order to get an accurate marking.
+            //    For example,
+            //         L:
+            //    B1:
+            //            if (p0) goto B2
+            //               ...
+            //            else
+            //               if (p1) goto OUT
+            //            endif
+            //    B2:
+            //            (p2) goto L
+            //    B3:
+            //    OUT:
+            //
+            // We don't know whether B1 is divergent until the entire loop body has been
+            // scanned, so that we know any out-of-loop gotos (goto out and goto L in this
+            // case). This require scanning the loop twice.
+            //
+            for (auto iter = BB->Preds.begin(), iterEnd = BB->Preds.end(); iter != iterEnd; ++iter)
+            {
+                G4_BB* predBB = *iter;
+                if (predBB->getId() < BB->getId())
+                    continue;
+
+                assert(predBB->size() > 0 && "ICE: missing branch inst!");
+                G4_INST* bInst = predBB->back();
+                if (bInst->opcode() != G4_goto &&
+                    bInst->opcode() != G4_while &&
+                    bInst->opcode() != G4_jmpi)
+                {
+                    // not loop
+                    continue;
+                }
+
+                // If lastJoin is already after loop end, no need to scan loop twice
+                // as all BBs in the loop must be divergent
+                if (isPriorToLastJoin(predBB))
+                {
+                    continue;
+                }
+
+                BB_LIST_ITER LoopIterEnd = std::find(BBs.begin(), BBs.end(), predBB);
+
+                // joinBB of a loop is the BB right after backward-goto/while
+                BB_LIST_ITER loopJoinIter = LoopIterEnd;
+                ++loopJoinIter;
+                if (loopJoinIter == BBs.end())
+                {
+                    // Loop end is the last BB (no Join BB). This happens for CM
+                    // in which CM's return is in the middle of code! Note that
+                    // IGC's return is the last BB always.
+                    if (builder->kernel.getOptions()->getTarget() != VISA_CM)
+                    {
+                        // IGC: loop end should not be the last BB as the last
+                        //      BB must be the return.
+                        assert(false && "ICE: return must be the last BB!");
+                    }
+                    continue;
+                }
+
+                // If backward goto/while is divergent, update lastJoin with
+                // loop's join BB.  No need to pre-scan loop!
+                G4_BB* joinBB = *loopJoinIter;
+                if (!bInst->asCFInst()->isUniform() &&
+                    bInst->opcode() != G4_jmpi)
+                {
+                    pushJoin(joinBB);
+                    continue;
+                }
+
+                // pre-scan loop to find any out-of-loop branch, set join if found
+                for (auto LoopIter = IT; LoopIter != LoopIterEnd; ++LoopIter)
+                {
+                    if (updateLastJoinForBB(LoopIter, IE))
+                    {
+                        if (isPriorToLastJoin(predBB))
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if (isPriorToLastJoin(BB)) {
+                BB->setDivergent(true);
+                // set InSIMDFlow as well, will merge these two fields gradually
+                BB->setInSimdFlow(true);
+            }
+
+            (void)updateLastJoinForBB(IT, IE);
+        }
+    }
+    return;
+}
+
 /*
 * Insert a join at the beginning of this basic block, immediately after the label
 * If a join is already present, nothing will be done
@@ -2732,64 +3160,34 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
     }
 }
 
-struct SJoinInfo {
-    SJoinInfo(G4_BB* B, uint16_t E, bool Nested = false) :
-        BB(B), ExecSize(E), IsNestedJoin(Nested) {}
-    G4_BB* BB;
-    uint16_t ExecSize;
-    // [HW WA] If IsNestedJoin is true, all BBs from the current to this 'BB'
-    // are considered as nested divergent, meaning they could be 00 fused mask
-    // that come out of fused mask 01.
-    bool IsNestedJoin;
-};
+typedef std::pair<G4_BB*, int> BlockSizePair;
 
-static void addBBToActiveJoinList(std::list<SJoinInfo>& activeJoinBlocks,
-    G4_BB* bb, int execSize, bool backwardGoto = false)
+static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, int execSize)
 {
-    // [HW WA] as backward goto never changes fuseMask 01 to 00, it is not
-    // considered as nested divergent. It inherits the nesting divergence
-    // from the next join entry.
-    //
-    // If a joinBB is nested, all active preceding joinBBs must be nested
-
     // add goto target to list of active blocks that need a join
-    std::list<SJoinInfo>::iterator listIter;
+    std::list<BlockSizePair>::iterator listIter;
     for (listIter = activeJoinBlocks.begin(); listIter != activeJoinBlocks.end(); ++listIter)
     {
-        // If activeJoinBlocks isn't empty, this join should be considered as a nested join
-        SJoinInfo& jinfo = (*listIter);
-        G4_BB* aBB = jinfo.BB;
+        G4_BB* aBB = (*listIter).first;
         if (aBB->getId() == bb->getId())
         {
             // block already in list, update exec size if necessary
-            if (execSize > jinfo.ExecSize)
+            if (execSize > (*listIter).second)
             {
-                jinfo.ExecSize = execSize;
-            }
-
-            if (!backwardGoto)
-            {
-                jinfo.IsNestedJoin = true;
+                (*listIter).second = execSize;
             }
             break;
         }
         else if (aBB->getId() > bb->getId())
         {
-            bool nested = (backwardGoto ? jinfo.IsNestedJoin : true);
-            activeJoinBlocks.insert(listIter, SJoinInfo(bb, execSize, nested));
+            activeJoinBlocks.insert(listIter, BlockSizePair(bb, execSize));
             break;
-        }
-
-        if (!backwardGoto)
-        {   // Mark all preceding joinBB as nested.
-            jinfo.IsNestedJoin = true;
         }
     }
 
     if (listIter == activeJoinBlocks.end())
     {
-        bool nested = (backwardGoto || activeJoinBlocks.empty()) ? false : true;
-        activeJoinBlocks.push_back(SJoinInfo(bb, execSize, nested));
+        activeJoinBlocks.push_back(BlockSizePair(bb, execSize));
     }
 }
 
@@ -2918,7 +3316,7 @@ void FlowGraph::setJIPForEndif(G4_INST* endif, G4_INST* target, G4_BB* targetBB)
 void FlowGraph::processGoto(bool HasSIMDCF)
 {
     // list of active blocks where a join needs to be inserted, sorted in lexical order
-    std::list<SJoinInfo> activeJoinBlocks;
+    std::list<BlockSizePair> activeJoinBlocks;
     bool doScalarJmp = !builder->noScalarJmp();
 
     for (BB_LIST_ITER it = BBs.begin(), itEnd = BBs.end(); it != itEnd; ++it)
@@ -2931,18 +3329,18 @@ void FlowGraph::processGoto(bool HasSIMDCF)
 
         if (activeJoinBlocks.size() > 0)
         {
-            if (bb == activeJoinBlocks.front().BB)
+            if (bb == activeJoinBlocks.front().first)
             {
                 // This block is the target of one or more forward goto,
                 // or the fall-thru of a backward goto, needs to insert a join
-                int execSize = activeJoinBlocks.front().ExecSize;
+                int execSize = activeJoinBlocks.front().second;
                 G4_Label* joinJIP = NULL;
 
                 activeJoinBlocks.pop_front();
                 if (activeJoinBlocks.size() > 0)
                 {
                     //set join JIP to the next active join
-                    G4_BB* joinBlock = activeJoinBlocks.front().BB;
+                    G4_BB* joinBlock = activeJoinBlocks.front().first;
                     joinJIP = joinBlock->getLabel();
                 }
 
@@ -2956,7 +3354,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
         for (std::list<G4_BB*>::iterator iter = bb->Preds.begin(), iterEnd = bb->Preds.end(); iter != iterEnd; ++iter)
         {
             G4_BB* predBB = *iter;
-            G4_INST *lastInst = predBB->back();
+            G4_INST* lastInst = predBB->back();
             if (lastInst->opcode() == G4_goto && lastInst->asCFInst()->isBackward() &&
                 lastInst->asCFInst()->getUip() == bb->getLabel())
             {
@@ -2988,7 +3386,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // (i.e., the loop has no breaks but only EOT sends)
                     if (loopExitBB != NULL)
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, loopExitBB, lastInst->getExecSize(), true);
+                        addBBToActiveJoinList(activeJoinBlocks, loopExitBB, lastInst->getExecSize());
                     }
 
                 }
@@ -3004,7 +3402,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // add join to the fall-thru BB
                     if (G4_BB* fallThruBB = predBB->getPhysicalSucc())
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize, true);
+                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize);
                         lastInst->asCFInst()->setJip(fallThruBB->getLabel());
                     }
                 }
@@ -3018,24 +3416,6 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             bb->setInSimdFlow(true);
         }
 
-        // [HW WA] set nested divergent branch.
-        //    1) [conservative] set it if it is divergent, but not necessarily nested, or
-        //    2) Set it if there are at least two active joins or one nested join.
-        if ((builder->getuint32Option(vISA_noMaskToAnyhWA) & 0x3) > 1)
-        {
-            if (activeJoinBlocks.size() > 0 && activeJoinBlocks.front().IsNestedJoin)
-            {
-                setInNestedDivergentBranch(bb);
-            }
-        }
-        else if ((builder->getuint32Option(vISA_noMaskToAnyhWA) & 0x3) > 0)
-        {
-            if (activeJoinBlocks.size() > 0)
-            {
-                setInNestedDivergentBranch(bb);
-            }
-        }
-
         G4_INST* lastInst = bb->back();
         if (lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward())
         {
@@ -3045,7 +3425,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             bool isUniform = lastInst->getExecSize() == 1 || lastInst->getPredicate() == NULL;
 
             if (isUniform && doScalarJmp &&
-                (activeJoinBlocks.size() == 0 || activeJoinBlocks.front().BB->getId() > gotoTargetBB->getId()))
+                (activeJoinBlocks.size() == 0 || activeJoinBlocks.front().first->getId() > gotoTargetBB->getId()))
             {
                 // can convert goto into a scalar jump to UIP, if the jmp will not make us skip any joins
                 // CFG itself does not need to be updated
@@ -3056,7 +3436,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 //set goto JIP to the first active block
                 uint8_t eSize = lastInst->getExecSize() > 1 ? lastInst->getExecSize() : pKernel->getSimdSize();
                 addBBToActiveJoinList(activeJoinBlocks, gotoTargetBB, eSize);
-                G4_BB* joinBlock = activeJoinBlocks.front().BB;
+                G4_BB* joinBlock = activeJoinBlocks.front().first;
                 if (lastInst->getExecSize() == 1)
                 {   // For simd1 goto, convert it to a goto with the right execSize.
                     lastInst->setExecSize(eSize);
@@ -3068,7 +3448,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 {
                     // For BDW/SKL goto, the false channels are the ones that actually will take the jump,
                     // and we thus have to flip the predicate
-                    G4_Predicate *pred = lastInst->getPredicate();
+                    G4_Predicate* pred = lastInst->getPredicate();
                     if (pred != NULL)
                     {
                         pred->setState(pred->getState() == PredState_Plus ? PredState_Minus : PredState_Plus);
@@ -3079,9 +3459,9 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                         // if predicate is SIMD32, we have to use a :ud dst type for the move
                         uint8_t execSize = lastInst->getExecSize() > 16 ? 2 : 1;
                         G4_Declare* tmpFlagDcl = builder->createTempFlag(execSize);
-                        G4_DstRegRegion* newPredDef = builder->createDstRegRegion(Direct, tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == 2 ? Type_UD : Type_UW);
-                        G4_INST *predInst = builder->createMov(1, newPredDef, builder->createImm(0, Type_UW),
-                            InstOpt_WriteEnable, false);
+                        G4_DstRegRegion* newPredDef = builder->createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == 2 ? Type_UD : Type_UW);
+                        G4_INST* predInst = builder->createMov(1, newPredDef, builder->createImm(0, Type_UW),
+                            InstOpt_WriteEnable, false, lastInst->getLineNo(), lastInst->getCISAOff(), lastInst->getSrcFilename());
                         INST_LIST_ITER iter = bb->end();
                         iter--;
                         bb->insert(iter, predInst);
@@ -3096,6 +3476,270 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             }
         }
     }
+}
+
+// TGL NoMask WA : to identify which BB needs WA
+void FlowGraph::findNestedDivergentBBs()
+{
+    // Control-Flow state
+    //    Used for keeping the current state of control flow during
+    //    traversing BBs in the layout order. Assuming the current
+    //    BB is 'currBB', this class shows whether currBB is in any
+    //    divergent branch/nested divergent branch.
+    class CFState
+    {
+        // If currBB is the head of loop or currBB has a cf inst such as goto/break/if,
+        // the code will diverge from currBB to the joinBB.  The following cases shows where
+        // joinBB is:
+        //     case 1: cf inst = goto
+        //          <currBB>    [(p)] goto L
+        //                           ...
+        //          <joinBB>    L:
+        //     case 2: cf inst = if
+        //          <currBB>    if
+        //                          ...
+        //          <joinBB>    endif
+        //
+        //         Note that else does not increase nor decrease divergence level.
+        //     case 3:  cf inst = break
+        //          <currBB>   break
+        //                     ...
+        //                     [(p)] while
+        //          <joinBB>
+        //     case 4:
+        //          <currBB>  L:
+        //                     ....
+        //                    [(p)] while/goto L
+        //          <joinBB>
+        // Case 1/2/3 will increase divergence level, while case 4 does not.
+        //
+        // The following are used for tracking nested divergence
+        //    LastDivergentBBId:  Id(LastDivergentBB).
+        //        LastDivergentBB is the fartherest joinBB of any goto/break/if/while
+        //        so far, as described above.  That is, [currBB, LastDivergentBB) is
+        //        a divergent code path. LastDivergentBB is not included in this
+        //        divergent path.
+        //    LastNestedBBId:  Id(LastNestedBB).
+        //        LastNestedBB is the current fartherest join BB that is inside
+        //        [currBB, LastDivergentBB). We have LastNestedBB if a goto/break/if (no
+        //        loop) is encountered inside an already divergent code path. It is also
+        //        called nested divergent (or just nested).
+        //
+        // The following is always true:
+        //    LastDivergentBBId >= LastNestedBBId
+        int LastDivergentBBId;
+        int LastNestedBBId;
+
+        void setLastDivergentBBId(G4_BB* toBB)
+        {
+            LastDivergentBBId = std::max(LastDivergentBBId, (int)toBB->getId());
+        }
+
+        void setLastNestedBBId(G4_BB* toBB)
+        {
+            LastNestedBBId = std::max(LastNestedBBId, (int)toBB->getId());
+            setLastDivergentBBId(toBB);
+        }
+
+        // Increase divergence level
+        void incDivergenceLevel(G4_BB* toBB)
+        {
+            if (isInDivergentBranch())
+            {
+                setLastNestedBBId(toBB);
+            }
+            else
+            {
+                setLastDivergentBBId(toBB);
+            }
+        }
+
+    public:
+        CFState() : LastNestedBBId(-1), LastDivergentBBId(-1) {}
+
+        bool isInDivergentBranch() const { return (LastDivergentBBId > 0);  }
+        bool isInNestedDivergentBranch() const { return LastNestedBBId > 0; }
+
+        //  pushLoop: for case 4
+        //  pushJoin: for case 1/2/3
+        void pushLoop(G4_BB* joinBB) { setLastDivergentBBId(joinBB); }
+        void pushJoin(G4_BB* joinBB) { incDivergenceLevel(joinBB); }
+        void popJoinIfMatching(G4_BB* currBB)
+        {
+            if ((int)currBB->getId() == LastNestedBBId)
+            {
+                LastNestedBBId = -1;
+            }
+            if ((int)currBB->getId() == LastDivergentBBId)
+            {
+                LastDivergentBBId = -1;
+            }
+            assert(!(LastDivergentBBId == -1 && LastNestedBBId >= 0) &&
+                   "ICE:  something wrong in setting divergent BB Id!");
+        }
+    };
+
+    if (BBs.empty())
+    {
+        // Sanity check
+        return;
+    }
+
+    // Analyze function in topological order. As there is no recursion
+    // and no indirect call,  a function will be analyzed only if all
+    // its callers have been analyzed.
+    //
+    // If no subroutine, sortedFuncTable is empty. Here keep all functions
+    // in a vector first (it works with and without subroutines), then scan
+    // functions in topological order.
+    struct StartEndIter {
+        BB_LIST_ITER StartI;
+        BB_LIST_ITER EndI;
+
+        // When a subroutine is entered, the fusedMask must not be 00, but it
+        // could be 01. This field shows it could be 01 if set to true.
+        bool  isInDivergentBranch;
+    };
+    int numFuncs = (int)sortedFuncTable.size();
+    std::vector<StartEndIter> allFuncs;
+    std::unordered_map<FuncInfo*, uint32_t> funcInfoIndex;
+    if (numFuncs == 0)
+    {
+        numFuncs = 1;
+        allFuncs.resize(1);
+        allFuncs[0].StartI = BBs.begin();
+        allFuncs[0].EndI = BBs.end();
+        allFuncs[0].isInDivergentBranch = false;
+    }
+    else
+    {
+        allFuncs.resize(numFuncs);
+        for (int i = numFuncs; i > 0; --i)
+        {
+            uint32_t ix = (uint32_t)(i - 1);
+            FuncInfo* pFInfo = sortedFuncTable[ix];
+            G4_BB* StartBB = pFInfo->getInitBB();
+            G4_BB* EndBB = pFInfo->getExitBB();
+            uint32_t ui = (uint32_t)(numFuncs - i);
+            allFuncs[ui].StartI = std::find(BBs.begin(), BBs.end(), StartBB);
+            auto nextI = std::find(BBs.begin(), BBs.end(), EndBB);
+            assert(nextI != BBs.end() && "ICE: subroutine's end BB not found!");
+            allFuncs[ui].EndI = (++nextI);
+            allFuncs[ui].isInDivergentBranch = false;
+
+            funcInfoIndex[pFInfo] = ui;
+        }
+    }
+
+    for (int i = 0; i < numFuncs; ++i)
+    {
+        // each function: [IT, IE)
+        BB_LIST_ITER& IT = allFuncs[i].StartI;
+        BB_LIST_ITER& IE = allFuncs[i].EndI;
+        if (IT == IE)
+        {
+            // Sanity check
+            continue;
+        }
+
+        CFState cfs;
+        if (allFuncs[i].isInDivergentBranch)
+        {
+            // subroutine's divergent on entry. Mark [StartBB, EndBB) as divergent
+            auto prevI = IE;
+            --prevI;
+            G4_BB* EndBB = *prevI;
+            cfs.pushJoin(EndBB);
+        }
+
+        for (; IT != IE; ++IT)
+        {
+            G4_BB* BB = *IT;
+
+            // This handles cases in which BB has endif/while/join as well as others
+            // so we don't need to explicitly check whether BB has endif/while/join, etc.
+            cfs.popJoinIfMatching(BB);
+
+            G4_INST* firstInst = BB->getFirstInst();
+            if (firstInst == nullptr)
+            {
+                // empty BB or BB with only label inst
+                continue;
+            }
+
+            // Handle loop
+            for (auto iter = BB->Preds.begin(), iterEnd = BB->Preds.end(); iter != iterEnd; ++iter)
+            {
+                G4_BB* predBB = *iter;
+                G4_INST* lastInst = predBB->back();
+                if ( (lastInst->opcode() == G4_while &&
+                      lastInst->asCFInst()->getJip() == BB->getLabel()) ||
+                     (lastInst->opcode() == G4_goto && lastInst->asCFInst()->isBackward() &&
+                      lastInst->asCFInst()->getUip() == BB->getLabel()) )
+                {
+                    // joinBB is the BB right after goto/while
+                    BB_LIST_ITER predIter = std::find(BBs.begin(), BBs.end(), predBB);
+                    ++predIter;
+                    assert(predIter != BBs.end() && "ICE: missing join BB!");
+                    G4_BB* joinBB = *predIter;
+                    cfs.pushLoop(joinBB);
+                }
+            }
+
+            if ((builder->getuint32Option(vISA_noMaskWA) & 0x3) > 1)
+            {
+                if (cfs.isInNestedDivergentBranch())
+                {
+                    setInNestedDivergentBranch(BB);
+                }
+            }
+            else if ((builder->getuint32Option(vISA_noMaskWA) & 0x3) > 0)
+            {
+                if (cfs.isInDivergentBranch())
+                {
+                    setInNestedDivergentBranch(BB);
+                }
+            }
+
+            G4_INST* lastInst = BB->back();
+            if ((lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward()) ||
+                lastInst->opcode() == G4_break)
+            {
+                // forward goto/break : the last Succ BB is our target BB
+                // For break, it should be the BB right after while inst.
+                G4_BB* joinBB = BB->Succs.back();
+                cfs.pushJoin(joinBB);
+            }
+            else if (lastInst->opcode() == G4_if)
+            {
+                G4_Label* labelInst = lastInst->asCFInst()->getUip();
+                G4_BB* joinBB = findLabelBB(IT, IE, labelInst->getLabel());
+                assert(joinBB && "ICE(vISA) : missing endif label!");
+                cfs.pushJoin(joinBB);
+            }
+            else if (lastInst->opcode() == G4_call)
+            {
+                // If this function is already in divergent branch, the callee
+                // must be in a divergent branch!.
+                if (allFuncs[i].isInDivergentBranch ||
+                    cfs.isInDivergentBranch() ||
+                    lastInst->getPredicate() != nullptr)
+                {
+                    FuncInfo* calleeFunc = BB->getCalleeInfo();
+                    if (funcInfoIndex.count(calleeFunc))
+                    {
+                        int ix = funcInfoIndex[calleeFunc];
+                        allFuncs[ix].isInDivergentBranch = true;
+                    }
+                }
+            }
+        }
+
+        // Once all BBs are precessed, cfs should be clear
+        assert((!cfs.isInDivergentBranch()) &&
+               "ICE(vISA): there is an error in divergence tracking!");
+    }
+    return;
 }
 
 //
@@ -3135,10 +3779,10 @@ void G4_Kernel::evalAddrExp()
 
 void G4_Kernel::setKernelParameters()
 {
-    unsigned numThreads = m_options->getuInt32Option(vISA_HWThreadNumberPerEU);
+    unsigned overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
+
 
     // Set the number of GRFs
-    unsigned overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
     if (overrideGRFNum > 0)
     {
         // User-provided number of GRFs
@@ -3195,8 +3839,16 @@ void G4_Kernel::setKernelParameters()
         default:
             numAcc = 2;
         }
+    }
 
-
+    // Set number of threads if it was not defined before
+    if (numThreads == 0)
+    {
+        switch (getGenxPlatform())
+        {
+        default:
+            numThreads = 7;
+        }
     }
 }
 
@@ -3361,6 +4013,13 @@ void G4_Kernel::dumpPassInternal(const char* appendix)
         // Emit BB number
         G4_BB* bb = (*it);
         bb->writeBBId(ofile);
+
+        // Emit BB type
+        if (bb->getBBType())
+        {
+            ofile << " [" << bb->getBBTypeStr() << "] ";
+        }
+
         ofile << "\tPreds: ";
         for (auto pred : bb->Preds)
         {
@@ -3640,9 +4299,10 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
 
         output << "\n" << "//.platform " << platformString[getGenxPlatform()];
         output << "\n" << "//.stepping " << GetSteppingString();
-        output << "\n" << "//.CISA version " << (unsigned int)major_version
+        output << "\n" << "//.vISA version " << (unsigned int)major_version
             << "." << (unsigned int)minor_version;
-        output << "\n" << "//.options " << m_options->getArgString().str();
+        output << "\n" << "//.options_string \"" << m_options->getUserArgString().str() << "\"";
+        output << "\n" << "//.full_options \"" << m_options->getFullArgString() << "\"";
         output << "\n" << "//.instCount " << asmInstCount;
         output << "\n//.RA type\t" << RATypeString[RAType];
 
@@ -3678,21 +4338,66 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
         for (auto dcl : Declares)
         {
             dcl->emit(output, false, m_options->getOption(vISA_SymbolReg));
-            output << "\n";
         }
+        output << std::endl;
 
         // emit input location and size
         output << "//.kernel_reordering_info_start" << std::endl;
-        output << "//id\tbyte_offset\tbyte_size\tkind\timplicit_kind" << std::endl;
+        output <<
+            "//" <<
+            "  " << std::setw(12) << "id" <<
+            "  " << std::setw(12) << "location" <<
+            "  " << std::setw(12) << "bytes" <<
+            "  " << std::setw(12) << "class" <<
+            "  " << std::setw(12) << "kind" <<
+            std::endl;
 
+        const unsigned grfSize = getGRFSize();
         unsigned int inputCount = fg.builder->getInputCount();
         for (unsigned int id = 0; id < inputCount; id++)
         {
-            input_info_t* input_info = fg.builder->getInputArg(id);
-            output << "//.arg_" << (id + 1) << "\t" << input_info->offset
-                << "\t" << input_info->size << "\t"
-                << (int)input_info->getInputClass() << "\t"
-                << (int)input_info->getImplicitKind() << std::endl;
+            const input_info_t* input_info = fg.builder->getInputArg(id);
+            //
+            output << "//";
+            //
+            // id
+            std::stringstream ss;
+            ss << ".arg_" << (id + 1);
+            output <<
+                "   " << std::setw(12) << ss.str();
+
+            // location
+            unsigned reg = input_info->offset / grfSize,
+                     subRegBytes = input_info->offset % grfSize;
+            std::stringstream ss2;
+            ss2 << "r" << reg;
+            if (subRegBytes != 0)
+                ss2 << "+" << subRegBytes;
+            //
+            // offset and size
+            output <<
+                "  " << std::setw(12) << ss2.str() <<
+                "  " << std::setw(12) << input_info->size;
+
+            // class and kind
+            output << "  ";
+            switch (input_info->getInputClass()) {
+            case INPUT_GENERAL: output << std::setw(12) << "general"; break;
+            case INPUT_SAMPLER: output << std::setw(12) << "sampler"; break;
+            case INPUT_SURFACE: output << std::setw(12) << "surface"; break;
+            default: output << std::setw(12) << (int)input_info->getInputClass(); break;
+            }
+            //
+            output << "  ";
+            switch ((int)input_info->getImplicitKind()) {
+            case 0x00: output << std::setw(12) << "explicit"; break;
+            case 0x01: output << std::setw(12) << "local_size"; break;
+            case 0x02: output << std::setw(12) << "group_count"; break;
+            case 0x03: output << std::setw(12) << "local_id"; break;
+            case 0x10: output << std::setw(12) << "pseudo_input"; break;
+            default: output << std::setw(12) << (int)input_info->getImplicitKind(); break;
+            }
+            output << std::endl;
         }
 
         output << "//.kernel_reordering_info_end" << std::endl;
@@ -3870,7 +4575,10 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
                     continue;
                 }
 
-                (*itBB)->emitInstructionInfo(output, itInst);
+                if (!(getOptions()->getOption(vISA_disableInstDebugInfo)))
+                {
+                    (*itBB)->emitInstructionInfo(output, itInst);
+                }
                 output << std::endl;
 
                 auto errString = errorToStringMap.find(pc);
@@ -3952,7 +4660,9 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     G4_DstRegRegion* movDst = builder->Create_Dst_Opnd_From_Dcl(dcl, 1);
     G4_SrcRegRegion* r0Src = builder->Create_Src_Opnd_From_Dcl(
         builder->getBuiltinR0(), builder->getRegionStride1());
-    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false);
+    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false,
+        lastInst ? lastInst->getLineNo() : 0, lastInst ? lastInst->getCISAOff() : UNMAPPABLE_VISA_INDEX,
+        lastInst ? lastInst->getSrcFilename() : nullptr);
     if (lastInst)
     {
         movInst->setLocation(lastInst->getLocation());
@@ -4020,27 +4730,12 @@ void G4_BB::emitInstructionInfo(std::ostream& output, INST_LIST_ITER &it)
         output << "// File: " << curFilename << "\n";
     }
 
-    auto getSrcLine = [](std::string fileName, int srcLine)
-    {
-        std::ifstream ifs(fileName);
-        if (!ifs)
-        {
-            return std::string("Can't find src file");
-        }
-        std::string line;
-        int i = 0;
-        for (; i < srcLine && std::getline(ifs, line); i++)
-        {
-        }
-        return i == srcLine ? line : "Invalid line no";
-    };
-
     if (emitLineNo)
     {
         output << "\n// Line " << curSrcLineNo << ":\t";
         if (curFilename)
         {
-            std::string curLine = getSrcLine(std::string(curFilename), curSrcLineNo);
+            std::string curLine = parent->getKernel()->getDebugSrcLine(std::string(curFilename), curSrcLineNo);
             auto isNotSpace = [](int ch) { return !std::isspace(ch); };
             curLine.erase(curLine.begin(), std::find_if(curLine.begin(), curLine.end(), isNotSpace));
             curLine.erase(std::find_if(curLine.rbegin(), curLine.rend(), isNotSpace).base(), curLine.end());
@@ -4058,6 +4753,37 @@ void G4_BB::emitInstructionInfo(std::ostream& output, INST_LIST_ITER &it)
         prevSrcLineNo = curSrcLineNo;
     }
 }
+
+std::string G4_Kernel::getDebugSrcLine(const std::string& fileName, int srcLine)
+{
+    auto iter = debugSrcLineMap.find(fileName);
+    if (iter == debugSrcLineMap.end())
+    {
+        std::ifstream ifs(fileName);
+        if (!ifs)
+        {
+            return "Can't find src file";
+        }
+        std::string line;
+        std::vector<std::string> srcLines;
+        while (std::getline(ifs, line))
+        {
+            srcLines.push_back(line);
+        }
+        debugSrcLineMap[fileName] = srcLines;
+    }
+    iter = debugSrcLineMap.find(fileName);
+    if (iter == debugSrcLineMap.end())
+    {
+        return "Can't find src file";
+    }
+    auto lines = iter->second;
+    if (srcLine > (int) lines.size() || srcLine <= 0)
+    {
+        return "invalid line number";
+    }
+    return lines[srcLine - 1];
+};
 
 void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
 {
@@ -4421,6 +5147,7 @@ static int getConflictTimesForTGL(std::ostream& output, int *firstRegCandidate, 
             if (zeroOne)
             {
                 bankID = (firstRegCandidate[i]) % 2;
+                bundleID = (firstRegCandidate[i] % 32) / 2;
             }
 
             //Same bank and same bundle
@@ -5115,7 +5842,10 @@ void G4_BB::emitBasicInstruction(std::ostream& output, INST_LIST_ITER &it)
 void G4_BB::emitInstruction(std::ostream& output, INST_LIST_ITER &it)
 {
     //prints out instruction line
-    emitInstructionInfo(output, it);
+    if (!(parent->getKernel()->getOptions()->getOption(vISA_disableInstDebugInfo)))
+    {
+        emitInstructionInfo(output, it);
+    }
 
     emitBasicInstruction(output, it);
 
@@ -5142,30 +5872,53 @@ void G4_BB::resetLocalId()
     }
 }
 
-void G4_BB::dump(bool printCFG = false) const
+const char* G4_BB::getBBTypeStr() const
 {
-    if (printCFG)
-    {
-        std::cerr << "BB" << getId() << "\n";
-        std::cerr << "Pred: ";
-        for (auto pred : Preds)
-        {
-            std::cerr << pred->getId() << " ";
-        }
-        std::cerr << "\nSucc: ";
-        for (auto succ : Succs)
-        {
-            std::cerr << succ->getId() << " ";
-        }
-        std::cerr << "\n";
-        if (getBBType())
-        {
-            std::cerr << "BB type: " << getBBType() << "\n";
-        }
+    switch (getBBType()) {
+    default:
+        break;
+    case G4_BB_CALL_TYPE:
+        return "CALL";
+    case G4_BB_RETURN_TYPE:
+        return "RETURN";
+    case G4_BB_INIT_TYPE:
+        return "INIT";
+    case G4_BB_EXIT_TYPE:
+        return "EXIT";
     }
+    return " ";
+}
+
+void G4_BB::print(std::ostream& OS) const
+{
+    OS << "BB" << getId() << ":";
+    if (getBBType())
+    {
+        OS << " [" << getBBTypeStr() << "], ";
+    }
+    if (isInSimdFlow())
+    {
+        OS << " [inSimdFlow],";
+    }
+    OS << "        Pred: ";
+    for (auto pred : Preds)
+    {
+        OS << pred->getId() << " ";
+    }
+    OS << "  Succ: ";
+    for (auto succ : Succs)
+    {
+        OS << succ->getId() << " ";
+    }
+    OS << "\n";
     for (auto& x : instList)
-        x->dump();
-    std::cerr << "\n";
+        x->print(OS);
+    OS << "\n";
+}
+
+void G4_BB::dump() const
+{
+    print(std::cerr);
 }
 
 void G4_BB::dumpDefUse() const
@@ -5281,7 +6034,6 @@ void GlobalOpndHashTable::dump()
 
 void G4_Kernel::computeChannelSlicing()
 {
-    std::unordered_set<G4_Declare*> skipSendDcls;
     unsigned int simdSize = getSimdSize();
     channelSliced = true;
 
@@ -5292,30 +6044,6 @@ void G4_Kernel::computeChannelSlicing()
         return;
     }
 
-    for (auto bb : fg)
-    {
-        for (auto inst : bb->getInstList())
-        {
-            if (inst->isPseudoKill() || inst->isWriteEnableInst())
-                continue;
-
-            if (inst->isSend())
-            {
-                auto dst = inst->getDst();
-                if (dst && dst->isDstRegRegion())
-                    skipSendDcls.insert(dst->getTopDcl());
-
-                auto src = inst->getSrc(0);
-                if (src && src->isSrcRegRegion())
-                    skipSendDcls.insert(src->getTopDcl());
-
-                src = inst->getSrc(1);
-                if (src && src->isSrcRegRegion())
-                    skipSendDcls.insert(src->getTopDcl());
-            }
-        }
-    }
-
     // .dcl V1 size = 128 bytes
     // op (16|M0) V1(0,0)     ..
     // op (16|M16) V1(2,0)    ..
@@ -5324,16 +6052,21 @@ void G4_Kernel::computeChannelSlicing()
     // Allocation of dcl is still as if it were a
     // SIMD32 kernel.
 
-    // dcl -> lb, rb, emask offset
-    std::unordered_map<G4_Declare*, std::vector<std::tuple<unsigned int, unsigned int, unsigned int>>> defaultDefs;
+    // Store emask bits that are ever used to define a variable
+    std::unordered_map<G4_Declare*, std::bitset<32>> emaskRef;
     for (auto bb : fg)
     {
         for (auto inst : bb->getInstList())
         {
+            if (inst->isSend())
+                continue;
+
             auto dst = inst->getDst();
-            if (!dst || !dst->isDstRegRegion() || !dst->getTopDcl() ||
-                skipSendDcls.find(dst->getTopDcl()) != skipSendDcls.end() ||
-                dst->asDstRegRegion()->getHorzStride() != 1)
+            if (!dst || !dst->getTopDcl() ||
+                dst->getHorzStride() != 1)
+                continue;
+
+            if (inst->isWriteEnableInst())
                 continue;
 
             auto regFileKind = dst->getTopDcl()->getRegFile();
@@ -5345,31 +6078,32 @@ void G4_Kernel::computeChannelSlicing()
             if (dst->getTopDcl()->getByteSize() <= dstElemSize * simdSize)
                 continue;
 
-            std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> v =
-                { std::make_tuple(dst->getLeftBound(), dst->getRightBound(), inst->getMaskOffset()) };
-            defaultDefs.insert(std::make_pair(dst->getTopDcl(), v));
+            auto emaskOffStart = inst->getMaskOffset();
+
+            // Reset all bits on first encounter of dcl
+            if (emaskRef.find(dst->getTopDcl()) == emaskRef.end())
+                emaskRef[dst->getTopDcl()].reset();
+
+            // Set bits based on which EM bits are used in the def
+            for (unsigned int i = emaskOffStart; i != (emaskOffStart + inst->getExecSize()); i++)
+            {
+                emaskRef[dst->getTopDcl()].set(i);
+            }
         }
     }
 
-    for (auto dd : defaultDefs)
+    // Check whether any variable's emask usage straddles across lower and upper 16 bits
+    for (auto& emRefs : emaskRef)
     {
-        auto elemSize = dd.first->getElemSize();
-        for (auto defs : dd.second)
+        auto& bits = emRefs.second;
+        auto num = bits.to_ulong();
+
+        // Check whether any lower 16 and upper 16 bits are set
+        if (((num & 0xffff) != 0) && ((num & 0xffff0000) != 0))
         {
-            auto lb = std::get<0>(defs);
-            auto rb = std::get<1>(defs);
-            auto emaskOffset = std::get<2>(defs);
-
-            // Look for single instruction
-            if (emaskOffset == 0 && lb == 0 && rb == elemSize * 32)
-                channelSliced = false;
-            // Or broken instruction
-            if (emaskOffset == 16 && lb == elemSize * 16 && rb == elemSize * 32)
-                channelSliced = false;
+            channelSliced = false;
+            return;
         }
-
-        if (!channelSliced)
-            break;
     }
 
     return;
@@ -5418,16 +6152,15 @@ void G4_Kernel::calculateSimdSize()
         computeChannelSlicing();
 }
 
-void G4_Kernel::dump() const
+void G4_Kernel::print(std::ostream& OS) const
 {
-    std::cerr << "G4_Kernel: " << this->name << "\n";
-    for (auto I = fg.cbegin(), E = fg.cend(); I != E; ++I)
-    {
-        auto& B = *I;
-        B->dump();
-    }
+    fg.print(OS);
 }
 
+void G4_Kernel::dump() const
+{
+    print(std::cerr);
+}
 //
 // Perform DFS traversal on the flow graph (do not enter subroutine, but mark subroutine blocks
 // so that they will be processed independently later)
@@ -6085,8 +6818,7 @@ bool FlowGraph::convertJmpiToGoto()
 
                     // Common dst and src0 operand for flag.
                     G4_Declare *newDcl = builder->createTempFlag(predSize > 16 ? 2 : 1);
-                    auto pDst = builder->createDstRegRegion(
-                        G4_RegAccess::Direct, newDcl->getRegVar(), 0, 0, 1, DstTy);
+                    auto pDst = builder->createDst(newDcl->getRegVar(), 0, 0, 1, DstTy);
                     auto pSrc0 = builder->createSrcRegRegion(
                         G4_SrcModifier::Mod_src_undef, G4_RegAccess::Direct,
                         pred->getBase(), 0, 0, builder->getRegionScalar(), SrcTy);
@@ -6150,6 +6882,24 @@ bool FlowGraph::convertJmpiToGoto()
         }
     }
     return Changed;
+}
+
+void FlowGraph::print(std::ostream& OS) const
+{
+    const char* kname = nullptr;
+    if (getKernel()) {
+        kname = getKernel()->getName();
+    }
+    kname = kname ? kname : "unnamed";
+    OS << "\n\nCFG: " << kname << "\n\n";
+    for (auto BB : BBs) {
+        BB->print(OS);
+    }
+}
+
+void FlowGraph::dump() const
+{
+    print(std::cerr);
 }
 
 FlowGraph::~FlowGraph()
@@ -6292,6 +7042,7 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     gtpin::igc::igc_init_t t;
     std::vector<unsigned char> buffer;
     unsigned int numTokens = 0;
+    auto stackABI = kernel.fg.getIsStackCallFunc() || kernel.fg.getHasStackCalls();
     bufferSize = 0;
 
     memset(&t, 0, sizeof(t));
@@ -6299,12 +7050,16 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     t.version = gtpin::igc::GTPIN_IGC_INTERFACE_VERSION;
     if (gtpin_init->grf_info)
     {
-        t.grf_info = 1;
+        if (!stackABI)
+            t.grf_info = 1;
         numTokens++;
     }
 
     if (gtpin_init->re_ra)
-        t.re_ra = 1;
+    {
+        if(!stackABI)
+            t.re_ra = 1;
+    }
 
     if (gtpin_init->srcline_mapping && kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
         t.srcline_mapping = 1;
@@ -6441,6 +7196,28 @@ void RelocationEntry::doRelocation(const G4_Kernel& kernel, void* binary, uint32
 {
     // FIXME: nothing to do here
     // we have only dynamic relocations now, which cannot be resolved at compilation time
+}
+
+uint32_t RelocationEntry::getTargetOffset(const IR_Builder& builder) const
+{
+    // currently we only support relocation on mov instruction
+    assert(inst->isMov());
+    assert(inst->isCompactedInst() == false);
+    auto src0 = inst->getSrc(0);
+    assert(src0->isRelocImm() && ((src0->getType() == Type_UD) || (src0->getType() == Type_UQ)));
+
+    // When src0 type is 64 bits:
+    //  On PreGen12:
+    //   Src0.imm[31:0] mapped to Instruction [95:64]
+    //   Src0.imm[63:32] mapped to Instruction [127:96]
+    //  On Gen12+:
+    //   Src0.imm[31:0] mapped to Instruction [127:96]
+    //   Src0.imm[63:32] mapped to Instruction [95:64]
+
+    // When src0 type is 32 bits:
+    //   Src0.imm[31:0] mapped to instruction [127:96]
+
+    return (src0->getType() == Type_UD) ? 12 : 8;
 }
 
 void RelocationEntry::dump() const

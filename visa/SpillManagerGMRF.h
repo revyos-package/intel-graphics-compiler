@@ -101,10 +101,6 @@ public:
         PointsToAnalysis& pointsToAnalysis
     );
 
-    void
-    fixSpillFillCode    (
-        G4_Kernel*         kernel
-    );
     unsigned getNumGRFSpill() const { return numGRFSpill; }
     unsigned getNumGRFFill() const { return numGRFFill; }
     unsigned getNumGRFMove() const { return numGRFMove; }
@@ -251,6 +247,9 @@ private:
     getRegionOriginOffset (
         REGION_TYPE * region
     ) const;
+
+    unsigned
+    grfMask() const;
 
     unsigned
     hwordMask () const;
@@ -595,7 +594,7 @@ private:
         unsigned        regOff,
         unsigned        height,
         unsigned &      execSize,
-        G4_RegVar* base = NULL
+        G4_RegVar*      base
     );
 
     G4_Imm *
@@ -603,12 +602,6 @@ private:
         G4_DstRegRegion * spilledRangeRegion,
         unsigned &        execSize
     );
-
-    G4_Imm *
-        createSpillSendMsgDesc(
-        int size,
-        int offset
-        );
 
     G4_INST *
     createAddFPInst (
@@ -638,17 +631,8 @@ private:
         unsigned          option
         );
 
-    void
-    copyOut256BitWideRegVar (
-        G4_Declare *      dstRegDcl,
-        G4_Declare *      srcRegDcl,
-        unsigned          dstOff = 0
-    );
-
     bool
     shouldPreloadSpillRange (
-        G4_DstRegRegion * spilledRangeRegion,
-        uint8_t     execSize,
         G4_INST *         instContext
     );
 
@@ -678,26 +662,6 @@ private:
         unsigned          option
     );
 
-    G4_Imm *
-    createFillSendMsgDesc (
-        unsigned          regOff,
-        unsigned          height,
-        unsigned &        execSize,
-        G4_RegVar* base = NULL
-    );
-
-    template <class REGION_TYPE>
-    G4_Imm *
-    createFillSendMsgDesc (
-        REGION_TYPE *     filledRangeRegion,
-        unsigned &        execSize
-    );
-
-    G4_Imm*
-        createFillSendMsgDesc(
-        int size,
-        int memOffset);
-
     G4_INST *
         createFillSendInstr (
         G4_Declare *      fillRangeDcl,
@@ -716,9 +680,8 @@ private:
         unsigned           regOff = 0
     );
 
-
     G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, unsigned regOff, unsigned height, unsigned srcRegOff = 0);
-    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, G4_SrcRegRegion* filledRangeRegion, unsigned execSize, unsigned regOff = 0);
+    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, G4_SrcRegRegion* filledRangeRegion, unsigned execSize);
 
     void
     replaceSpilledRange (
@@ -736,7 +699,6 @@ private:
 
     INST_LIST::iterator
     insertSpillRangeCode (
-        G4_DstRegRegion *   spilledRegion,
         INST_LIST::iterator spilledInstIter,
         G4_BB* bb
     );
@@ -765,41 +727,6 @@ private:
     );
 
     bool useSplitSend() const;
-
-    int getHWordEncoding(int numHWord)
-    {
-        switch (numHWord)
-        {
-        case 1:
-            return 0;
-        case 2:
-            return 1;
-        case 4:
-            return 2;
-        case 8:
-            return 3;
-        default:
-            MUST_BE_TRUE(false, "only 1/2/4/8 HWords are supported");
-            return 0;
-        }
-    }
-
-    ChannelMask getChMaskForSpill(int numHWord) const
-    {
-        switch (numHWord)
-        {
-        case 1:
-        case 2:
-            return ChannelMask::createFromAPI(CHANNEL_MASK_R);
-        case 4:
-            return ChannelMask::createFromAPI(CHANNEL_MASK_RG);
-        case 8:
-            return ChannelMask::createFromAPI(CHANNEL_MASK_RGBA);
-        default:
-            assert(false && "illegal spill size");
-            return ChannelMask::createFromAPI(CHANNEL_MASK_R);
-        }
-    }
 
     // Data
     GlobalRA&                gra;
@@ -892,30 +819,6 @@ bool isPartialRegion (
     {
         return false;
     }
-}
-
-// Check if the instruction context is partial or not, i.e does it possibly
-// disable some channels or not.
-
-template <class REGION_TYPE>
-inline bool isPartialContext (
-    REGION_TYPE * region,
-    vISA::G4_INST *     ctxt,
-    bool          isInSimdFlow
-)
-{
-    if ((ctxt->getPredicate () != NULL && ctxt->opcode() != G4_sel) ||
-        (isInSimdFlow == true &&
-         ctxt->isWriteEnableInst() == false &&
-         region->getElemSize() != 4 ) ) {
-        return true;
-    }
-
-    if (ctxt->getDst()) {
-        return false;
-    }
-
-    return false;
 }
 
 #endif // __SPILLMANAGERGMRF_H__

@@ -34,11 +34,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <unordered_set>
 #include <limits>
 #include "RPE.h"
-
 #include "BitSet.h"
+#include "VarSplit.h"
 
 #define BITS_DWORD 32
 #define SCRATCH_MSG_LIMIT (128 * 1024)
+#define ROUND(x,y)    ((x) + ((y - x % y) % y))
 
 extern unsigned int BitMask[BITS_DWORD];
 namespace vISA
@@ -91,6 +92,8 @@ class LiveRange
     AssignedReg reg;
     float spillCost;
     BankConflict bc = BankConflict::BANK_CONFLICT_NONE;
+    const static unsigned int UndefHint = 0xffffffff;
+    unsigned int allocHint = UndefHint;
 
     union {
         uint16_t bunch = 0;
@@ -185,6 +188,11 @@ public:
     void setBC(BankConflict c)  { bc = c; }
     void setParentLRID(int id) { parentLRID = id; }
     unsigned getParentLRID() const { return parentLRID; }
+
+    unsigned int getAllocHint() const { return allocHint; }
+    bool hasAllocHint() const { return allocHint != UndefHint; }
+    void setAllocHint(unsigned int h);
+    void resetAllocHint() { allocHint = UndefHint; }
 
     // From VarBasis
     public:
@@ -349,7 +357,7 @@ namespace vISA
         // like dense matrix, interference is not symmetric (that is, if v1 and v2 interfere and v1 < v2,
         // we insert (v1, v2) but not (v2, v1)) for better cache behavior
         std::vector<std::unordered_set<uint32_t> > sparseMatrix;
-        const uint32_t denseMatrixLimit = 32768;
+        const uint32_t denseMatrixLimit = 65536;
 
         void updateLiveness(BitSet& live, uint32_t id, bool val)
         {
@@ -509,6 +517,8 @@ namespace vISA
         void buildInterferenceWithLocalRA(G4_BB* bb);
 
         void buildInterferenceAmongLiveIns();
+
+        void markInterferenceToAvoidDstSrcOvrelap(G4_BB* bb, G4_INST* inst);
 
         void generateSparseIntfGraph();
         bool isStrongEdgeBetween(G4_Declare*, G4_Declare*);
@@ -709,7 +719,7 @@ namespace vISA
         static unsigned owordMask();
         static bool owordAligned(unsigned offset);
         template <class REGION_TYPE> bool isUnalignedRegion(REGION_TYPE * region, unsigned execSize);
-        bool shouldPreloadDst(G4_DstRegRegion* spilledRangeRegion, uint8_t execSize, G4_INST* instContext, G4_BB* curBB);
+        bool shouldPreloadDst(G4_INST* instContext, G4_BB* curBB);
         static unsigned sendBlockSizeCode(unsigned owordSize);
         void updateDefSet(std::set<G4_Declare*>& defs, G4_Declare* referencedDcl);
         void detectUndefinedUses(LivenessAnalysis& liveAnalysis, G4_Kernel& kernel);
@@ -728,6 +738,13 @@ namespace vISA
         // note only GRFs that are used by LRA get a declare
         std::vector<G4_Declare*> GRFDclsForHRA;
 
+        // Store all LocalLiveRange instances created so they're
+        // appropriately destroyed alongwith instance of GlobalRA.
+        // This needs to be a list because we'll take address of
+        // its elements and std::vector cannot be used due to its
+        // reallocation policy.
+        std::list<LocalLiveRange> localLiveRanges;
+
         std::unordered_map<G4_BB*, unsigned int> subretloc;
         // map ret location to declare for call/ret
         std::map<uint32_t, G4_Declare*> retDecls;
@@ -745,6 +762,9 @@ namespace vISA
         // new temps for each reference of spilled address/flag decls
         std::unordered_set<G4_Declare*> addrFlagSpillDcls;
 
+        // store iteration number for GRA loop
+        unsigned int iterNo = 0;
+
         void expandFillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
         void expandSpillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
         void expandFillStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
@@ -756,6 +776,10 @@ namespace vISA
         PhyRegPool& regPool;
         PointsToAnalysis& pointsToAnalysis;
         FCALL_RET_MAP fcallRetMap;
+        VarSplitPass* splitPass = nullptr;
+
+        void setVarSplitPass(VarSplitPass* p) { splitPass = p; }
+        VarSplitPass* getVarSplitPass() { return splitPass; }
 
         unsigned int getSubRetLoc(G4_BB* bb)
         {
@@ -773,6 +797,8 @@ namespace vISA
         void insertCallReturnVar();
         void insertSaveAddr(G4_BB*);
         void insertRestoreAddr(G4_BB*);
+        void setIterNo(unsigned int i) { iterNo = i; }
+        unsigned int getIterNo() { return iterNo; }
 
         G4_Declare* getRetDecl(uint32_t retLoc)
         {
@@ -800,6 +826,11 @@ namespace vISA
             retDecls[retLoc] = dcl;
             return dcl;
         }
+
+        static unsigned int owordToGRFSize(unsigned int numOwords);
+        static unsigned int hwordToGRFSize(unsigned int numHwords);
+        static unsigned int GRFToHwordSize(unsigned int numGRFs);
+        static unsigned int GRFSizeToOwords(unsigned int numGRFs);
 
         // RA specific fields
         G4_Declare* getGRFDclForHRA(int GRFNum) const { return GRFDclsForHRA[GRFNum]; }

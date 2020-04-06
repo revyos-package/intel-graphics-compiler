@@ -23,18 +23,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-#ifndef __LINK_TESS_CONTROL_SHADER_NO_BARRIERS__
-#define __LINK_TESS_CONTROL_SHADER_NO_BARRIERS__
 
-#include "common/LLVMWarningsPush.hpp"
-#include <llvm/Pass.h>
-#include "common/LLVMWarningsPop.hpp"
-#include "Compiler/InitializePasses.h"
-void initializeLinkTessControlShaderMCFPass(llvm::PassRegistry&);
+#pragma once
+
+namespace llvm
+{
+    class FunctionPass;
+}
 
 namespace IGC
 {
-    llvm::Pass* createLinkTessControlShaderMCF();
-}
-
-#endif
+    struct PSSignature;
+    llvm::FunctionPass* createCrossPhaseConstPropPass(PSSignature* signature);
+}  // namespace IGC

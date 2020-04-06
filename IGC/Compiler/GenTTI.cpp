@@ -133,7 +133,7 @@ namespace llvm {
             LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
         }
         unsigned totalInstCountInShader = countTotalInstructions(L->getBlocks()[0]->getParent());
-        bool lowPressure = (this->ctx->m_tempCount < 64) && (totalInstCountInShader < LoopUnrollThreshold);
+        bool lowPressure = (this->ctx->m_tempCount < IGC_GET_FLAG_VALUE(SetRegisterPressureThresholdForLoopUnroll)) && (totalInstCountInShader < LoopUnrollThreshold);
         // For OCL shaders, do a two-step loop unrolling. The first
         // unrolling is simple and full, and the second runs after
         // LICM, which allows partial unrolling. Same for other APIs?
@@ -145,7 +145,10 @@ namespace llvm {
         }
         else  // for high registry pressure shaders, limit the unrolling to small loops and only fully unroll
         {
-            UP.Threshold = 200;
+            if(IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure) != 0)
+                UP.Threshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure);
+            else
+                UP.Threshold = 200;
         }
 
 #if LLVM_VERSION_MAJOR == 4
@@ -222,14 +225,6 @@ namespace llvm {
                     }
                     return Total - PHIs;
                 };
-                auto countIntegerOperations = [](BasicBlock* BB) {
-                    unsigned Int_Instructions = 0;
-                    for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
-                        if (isa<IntegerType>((&*BI)->getType()))
-                            ++Int_Instructions;
-                    }
-                    return Int_Instructions;
-                };
                 auto hasLoad = [](BasicBlock* BB) {
                     for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI)
                         if (isa<LoadInst>(&*BI))
@@ -251,13 +246,11 @@ namespace llvm {
                 };
                 // For innermost loop, allow certain patterns.
                 unsigned Count = 0;
-                unsigned Int_Count = 0;
                 bool HasCall = false;
                 bool HasStore = false;
                 bool MayHasLoadInHeaderOnly = true;
                 for (auto BI = L->block_begin(), BE = L->block_end(); BI != BE; ++BI) {
                     Count += countNonPHI(*BI);
-                    Int_Count += countIntegerOperations(*BI);
                     HasCall |= hasCall(*BI);
                     HasStore |= hasStore(*BI);
                     if (L->getHeader() != *BI)
@@ -273,17 +266,7 @@ namespace llvm {
                     // The following is only available and required from LLVM 3.7+.
                     UP.AllowExpensiveTripCount = true;
                 }
-                //Controls stack size growth being too big to compile. When we get into SCEV
-                //and start processing the i32 instructions we can get too deep in the call stack
-                //that we cause a stack overflow during compilation.
-                unsigned Total_Potential_Inst = TripCount * Int_Count;
-                if (Total_Potential_Inst > 2700)
-                {
-#if LLVM_VERSION_MAJOR >= 9
-                    UP.Threshold = 2000;
-                    UP.PartialThreshold = 2000;
-#endif
-                }
+
             }
             return;
         }
@@ -333,14 +316,17 @@ namespace llvm {
             }
         }
 
-        int estimateUnrolledInstCount = (instCount + sendMessage * 4) * TripCount;
-        int unrollLimitInstCount = MAX(LoopUnrollThreshold - totalInstCountInShader, 0);
+        unsigned int estimateUnrolledInstCount = (instCount + sendMessage * 4) * TripCount;
+        unsigned int unrollLimitInstCount = LoopUnrollThreshold > totalInstCountInShader ? LoopUnrollThreshold - totalInstCountInShader : 0;
+        bool limitUnrolling = (estimateUnrolledInstCount > unrollLimitInstCount) ||
+                              (TripCount > unrollLimitInstCount) ||
+                              (instCount + sendMessage * 4 > unrollLimitInstCount);
 
         // if the loop doesn't have sample, skip the unrolling parameter change
         if (!sendMessage)
         {
             // if the estimated unrolled instruction count is larger than the unrolling threshold, limit unrolling.
-            if (estimateUnrolledInstCount > unrollLimitInstCount)
+            if (limitUnrolling)
             {
                 UP.Count = MIN(unrollLimitInstCount / (instCount + sendMessage * 4), 4);
                 if (TripCount != 0)
@@ -352,7 +338,7 @@ namespace llvm {
         }
 
         // if the TripCount is known, and the estimated unrolled count exceed LoopUnrollThreshold, set the unrolling count to 4
-        if (estimateUnrolledInstCount > unrollLimitInstCount)
+        if (limitUnrolling)
         {
             UP.Count = MIN(TripCount, 4);
             UP.MaxCount = UP.Count;

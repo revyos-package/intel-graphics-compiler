@@ -130,8 +130,8 @@ namespace IGC
     {
     public:
         void InitEncoder(bool canAbortOnSpill, bool hasStackCall);
-        void InitBuildParams(llvm::SmallVector<const char*, 10> & params);
-        void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall);
+        void InitBuildParams(llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10> & params);
+        void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
         void SetEncoderState(SEncoderState& newState);
 
@@ -474,6 +474,7 @@ namespace IGC
 
         void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
         void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+        void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
 
         uint32_t getGRFSize() const;
 
@@ -573,6 +574,34 @@ namespace IGC
         VISA_SamplerVar* samplervar;
 
         CShader* m_program;
+
+        // Keep a map between a function and its per-function attributes needed for function pointer support
+        struct FuncAttrib
+        {
+            bool isKernel = false;
+            bool hasBarrier = false;
+            unsigned argumentStackSize = 0;
+            unsigned allocaStackSize = 0;
+        };
+        llvm::SmallDenseMap<llvm::Function*, FuncAttrib> funcAttributeMap;
+
+    public:
+        // Used by EmitVISAPass to set function attributes
+        void InitFuncAttribute(llvm::Function* F, bool isKernel = false) {
+            funcAttributeMap[F].isKernel = isKernel;
+        }
+        void SetFunctionHasBarrier(llvm::Function* F) {
+            if (funcAttributeMap.find(F) != funcAttributeMap.end())
+                funcAttributeMap[F].hasBarrier = true;
+        }
+        void SetFunctionMaxArgumentStackSize(llvm::Function* F, unsigned size) {
+            if (funcAttributeMap.find(F) != funcAttributeMap.end())
+                funcAttributeMap[F].argumentStackSize = MAX(funcAttributeMap[F].argumentStackSize, size);
+        }
+        void SetFunctionAllocaStackSize(llvm::Function* F, unsigned size) {
+            if (funcAttributeMap.find(F) != funcAttributeMap.end())
+                funcAttributeMap[F].allocaStackSize = size;
+        }
     };
 
     inline void CEncoder::Jump(uint label)

@@ -592,6 +592,35 @@ void BinaryEncodingIGA::SetSWSB(G4_INST *inst, iga::SWSB &sw)
     return;
 }
 
+void BinaryEncodingIGA::getIGAFlagInfo(
+    G4_INST* inst, const OpSpec* opSpec, Predication& pred, FlagModifier& condMod, RegRef& flagReg)
+{
+    G4_Predicate* predG4 = inst->getPredicate();
+    G4_CondMod* condModG4 = inst->getCondMod();
+    iga::RegRef predFlag;
+    bool hasPredFlag = false;
+
+    if (opSpec->supportsPredication() && predG4 != nullptr)
+    {
+        pred = getIGAPredication(predG4);
+        predFlag = getIGAFlagReg(predG4->getBase());
+        flagReg = predFlag;
+        hasPredFlag = true;
+    }
+
+    if ((opSpec->supportsFlagModifier() || opSpec->hasImplicitFlagModifier()) &&
+        condModG4 != nullptr)
+    {
+        condMod = getIGAFlagModifier(condModG4);
+        // in case for min/max sel instruction, it could have CondMod but has no flag registers
+        if (condModG4->getBase() != nullptr) {
+            flagReg = getIGAFlagReg(condModG4->getBase());
+            // pred and condMod Flags must be the same
+            assert(!hasPredFlag || predFlag == flagReg);
+        }
+    }
+}
+
 void BinaryEncodingIGA::DoAll()
 {
     FixInst();
@@ -629,8 +658,9 @@ void BinaryEncodingIGA::DoAll()
                         nullptr, G4_nop, nullptr, false, 1, nullptr, nullptr, nullptr, InstOpt_NoCompact));
         }
         // set all instruction to be NoCompact
-        for (auto inst : *first_bb) {
-            inst->setOptions(inst->getOption() | InstOpt_NoCompact);
+        for (auto inst : *first_bb)
+        {
+            inst->setOptionOn(InstOpt_NoCompact);
         }
     }
 
@@ -675,16 +705,7 @@ void BinaryEncodingIGA::DoAll()
             MaskCtrl maskCtrl = getIGAMaskCtrl(inst->opcode() == G4_jmpi ? true : inst->isWriteEnableInst());
             FlagModifier condModifier = FlagModifier::NONE;
 
-            if (opSpec->supportsPredication())
-            {
-                flagReg = getIGAFlagReg(inst);
-                pred = getIGAPredication(inst->getPredicate());
-            }
-            if (opSpec->supportsFlagModifier())
-            {
-                flagReg = getIGAFlagReg(inst);
-                condModifier = getIGAFlagModifier(inst);
-            }
+            getIGAFlagInfo(inst, opSpec, pred, condModifier, flagReg);
 
             if (opSpec->isBranching())
             {

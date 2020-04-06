@@ -446,8 +446,8 @@ namespace IGC {
 
         if (auto CI = dyn_cast<CastInst>(Inst))
         {
-            unsigned SrcSize = CI->getSrcTy()->getPrimitiveSizeInBits();
-            unsigned DstSize = CI->getDestTy()->getPrimitiveSizeInBits();
+            unsigned SrcSize = (unsigned int)CI->getSrcTy()->getPrimitiveSizeInBits();
+            unsigned DstSize = (unsigned int)CI->getDestTy()->getPrimitiveSizeInBits();
             if (SrcSize == 0 || DstSize == 0)
             {
                 // Non-primitive types.
@@ -745,7 +745,9 @@ namespace IGC {
         {
             CallInst* call1 = dyn_cast<CallInst>(src1);
             assert(call1 != nullptr);
-            if (call0->getCalledFunction() != call1->getCalledFunction() ||
+
+            if (!call0->getCalledFunction() ||
+                call0->getCalledFunction() != call1->getCalledFunction() ||
                 !call0->getCalledFunction()->doesNotReadMemory() ||
                 call0->isConvergent())
             {

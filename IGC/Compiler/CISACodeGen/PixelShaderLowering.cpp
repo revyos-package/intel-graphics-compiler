@@ -67,8 +67,10 @@ namespace IGC
 
         hasDiscard = (mod->getNamedMetadata("KillPixel") != nullptr);
         m_modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+        IGCMD::MetaDataUtils* pMdUtils =
+            getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
 
-        if (!hasDiscard)
+        if (!hasDiscard || pMdUtils->findFunctionsInfoItem(&F) == pMdUtils->end_FunctionsInfo())
         {
             return false;
         }
@@ -1201,34 +1203,37 @@ namespace IGC
         llvm::DenseMap<llvm::Value*, llvm::PHINode*>& valueToPhiMap)
     {
         unsigned numPredBB = predBB.size();
-        for (unsigned i = 0; i < call->getNumArgOperands(); i++)
+        if (numPredBB > 1)
         {
-            if (Instruction * inst = dyn_cast<Instruction>(call->getArgOperand(i)))
+            for (unsigned i = 0; i < call->getNumArgOperands(); i++)
             {
-                auto it = valueToPhiMap.find(inst);
-                if (it != valueToPhiMap.end())
+                if (Instruction * inst = dyn_cast<Instruction>(call->getArgOperand(i)))
                 {
-                    call->setArgOperand(i, it->second);
-                    continue;
-                }
+                    auto it = valueToPhiMap.find(inst);
+                    if (it != valueToPhiMap.end())
+                    {
+                        call->setArgOperand(i, it->second);
+                        continue;
+                    }
 
-                PHINode* phi = PHINode::Create(
-                    inst->getType(), numPredBB, "", &(*toBB->begin()));
-                valueToPhiMap[inst] = phi;
-                for (unsigned j = 0; j < numPredBB; j++)
-                {
-                    Value* inVal;
-                    if (predBB[j] == call->getParent())
+                    PHINode* phi = PHINode::Create(
+                        inst->getType(), numPredBB, "", &(*toBB->begin()));
+                    valueToPhiMap[inst] = phi;
+                    for (unsigned j = 0; j < numPredBB; j++)
                     {
-                        inVal = inst;
+                        Value* inVal;
+                        if (predBB[j] == call->getParent())
+                        {
+                            inVal = inst;
+                        }
+                        else
+                        {
+                            inVal = UndefValue::get(inst->getType());
+                        }
+                        phi->addIncoming(inVal, predBB[j]);
                     }
-                    else
-                    {
-                        inVal = UndefValue::get(inst->getType());
-                    }
-                    phi->addIncoming(inVal, predBB[j]);
+                    call->setArgOperand(i, phi);
                 }
-                call->setArgOperand(i, phi);
             }
         }
 
@@ -1252,8 +1257,20 @@ namespace IGC
 
             if (useDualSrcBlend(colors))
             {
-                moveRTWriteToBlock(colors[0].inst, predBB, m_ReturnBlock, valueToPhiMap);
-                moveRTWriteToBlock(colors[1].inst, predBB, m_ReturnBlock, valueToPhiMap);
+                // For SIMD16 PS thread with two output colors must send
+                // messages in the following sequence for each RT: SIMD8 dual
+                // source RTW message (low); SIMD8 dual source RTW message
+                // (high); SIMD16 single src RTW message with second color.
+                CallInst* const dualSourceRTW =
+                    isa<RTDualBlendSourceIntrinsic>(colors[0].inst) ? colors[0].inst : colors[1].inst;
+                CallInst* const singleSourceRTW =
+                    isa<RTDualBlendSourceIntrinsic>(colors[0].inst) ? colors[1].inst : colors[0].inst;
+
+                assert(isa<RTWritIntrinsic>(singleSourceRTW));
+                assert(isa<RTDualBlendSourceIntrinsic>(dualSourceRTW));
+
+                moveRTWriteToBlock(dualSourceRTW, predBB, m_ReturnBlock, valueToPhiMap);
+                moveRTWriteToBlock(singleSourceRTW, predBB, m_ReturnBlock, valueToPhiMap);
             }
             else
             {

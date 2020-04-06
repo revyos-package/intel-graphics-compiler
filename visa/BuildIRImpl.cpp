@@ -145,7 +145,6 @@ G4_SendMsgDescriptor* IR_Builder::createSendMsgDesc(
     unsigned regs2rcv,
     unsigned regs2snd,
     SFID funcID,
-    bool eot,
     unsigned extMsgLength,
     uint16_t extFuncCtrl,
     SendAccess access,
@@ -153,7 +152,7 @@ G4_SendMsgDescriptor* IR_Builder::createSendMsgDesc(
     G4_Operand *sti)
 {
     G4_SendMsgDescriptor* msgDesc = new (mem) G4_SendMsgDescriptor(
-        funcCtrl, regs2rcv, regs2snd, SFIDtoInt(funcID), eot, (uint16_t) extMsgLength,
+        funcCtrl, regs2rcv, regs2snd, funcID, (uint16_t) extMsgLength,
         extFuncCtrl, access, bti, sti, *this);
     return msgDesc;
 }
@@ -232,31 +231,31 @@ G4_Operand* IR_Builder::emitSampleIndexGE16(
 
     // calculate the sampler state base pointer offset based on
     // sample index, for putting to msg header M0.3
-    createInst(NULL, G4_shr, NULL, false, 1,
+    createBinOp(G4_shr, 1,
         t0Dst, sampler, createImm(4, Type_UD),
-        InstOpt_WriteEnable, 0);
-    createInst(NULL, G4_shl, NULL, false, 1,
+        InstOpt_WriteEnable, true);
+    createBinOp(G4_shl, 1,
         baseAdjDst, t0Src, createImm(8, Type_UD),
-        InstOpt_WriteEnable, 0);
+        InstOpt_WriteEnable, true);
 
     // get low 4 bits of sample index for putting into msg descriptor
     G4_SrcRegRegion* sampler2Src
         = createSrcRegRegion(Mod_src_undef, Direct,
         sampler->getTopDcl()->getRegVar(), 0, 0, getRegionScalar(), Type_UD);
-    createInst(NULL, G4_and, NULL, false, 1,
+    createBinOp(G4_and, 1,
         idxLowDst, sampler2Src, createImm(0xf, Type_UD),
-        InstOpt_WriteEnable, 0);
+        InstOpt_WriteEnable, true);
     samplerIdx = idxLowSrc;
 
     // add the base pointer offset with r0.3 and put to M0.3
     G4_DstRegRegion* stateBaseRgn
-        = createDstRegRegion(Direct, headerDecl->getRegVar(),
+        = createDst(headerDecl->getRegVar(),
             0, 3, 1, Type_UD);
     G4_SrcRegRegion* src0
         = createSrcRegRegion(Mod_src_undef, Direct,
             builtinR0->getRegVar(), 0, 3, getRegionScalar(), Type_UD);
-    createInst(NULL, G4_add, NULL, false, 1, stateBaseRgn,
-        src0, baseAdjSrc, InstOpt_WriteEnable, 0);
+    createBinOp(G4_add, 1, stateBaseRgn,
+        src0, baseAdjSrc, InstOpt_WriteEnable, true);
 
     return samplerIdx;
 }
@@ -357,15 +356,34 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 }
 
 G4_INST* IR_Builder::createMov(uint8_t execSize, G4_DstRegRegion* dst,
-    G4_Operand* src0, uint32_t option, bool appendToInstList)
+    G4_Operand* src0, uint32_t option, bool appendToInstList,
+    int lineno, int CISAoff, const char* srcFilename)
 {
+    G4_INST* newInst = nullptr;
     if (appendToInstList)
     {
-        return createInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
+        newInst = createInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
     }
     else
     {
-        return createInternalInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
+        newInst = createInternalInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
+    }
+    newInst->setLineNo(lineno);
+    newInst->setCISAOff(CISAoff);
+    newInst->setSrcFilename(srcFilename);
+    return newInst;
+}
+
+G4_INST* IR_Builder::createBinOp(G4_opcode op, uint8_t execSize, G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, uint32_t option, bool appendToInstList)
+{
+    if (appendToInstList)
+    {
+        return createInst(nullptr, op, nullptr, false, execSize, dst, src0, src1, option);
+    }
+    else
+    {
+        return createInternalInst(nullptr, op, nullptr, false, execSize, dst, src0, src1, option);
     }
 }
 
@@ -829,7 +847,6 @@ G4_InstSend* IR_Builder::Create_Send_Inst_For_CISA(
     unsigned execsize,
     unsigned fc,
     SFID tf_id,
-    bool eot,
     bool header_present,
     SendAccess access,
     G4_Operand* bti,
@@ -839,7 +856,7 @@ G4_InstSend* IR_Builder::Create_Send_Inst_For_CISA(
 {
     G4_SendMsgDescriptor* msgDesc =
         createSendMsgDesc(fc, regs2rcv, regs2snd, tf_id,
-                          eot, 0, 0, access, bti, sti);
+                          0, 0, access, bti, sti);
 
     msgDesc->setHeaderPresent(header_present);
 
@@ -864,7 +881,7 @@ G4_SrcRegRegion* IR_Builder::createBindlessExDesc(uint32_t exdesc)
     }
     else
     {
-        createInst(NULL, G4_add, NULL, false, 1, dst, T252, createImm(exdesc, Type_UD), InstOpt_WriteEnable);
+        createBinOp(G4_add, 1, dst, T252, createImm(exdesc, Type_UD), InstOpt_WriteEnable, true);
     }
     return Create_Src_Opnd_From_Dcl(exDescDecl, getRegionScalar());
 }
@@ -897,17 +914,14 @@ G4_InstSend *IR_Builder::Create_Send_Inst_For_CISA(G4_Predicate *pred,
         {
             //add (1) a0.0:ud bti:ud desc:ud
             // create source for bti
-            createInst(
-                NULL,
+            createBinOp(
                 G4_add,
-                NULL,
-                false,
                 1,
                 addr_dst_opnd,
                 bti,
                 createImm( desc, Type_UD ),
                 InstOpt_WriteEnable,
-                0 );
+                true);
         }
 
         if (needSamplerMove)
@@ -915,49 +929,40 @@ G4_InstSend *IR_Builder::Create_Send_Inst_For_CISA(G4_Predicate *pred,
             G4_Declare *dcl1 = createTempVar(1, Type_UD, Any );
             G4_DstRegRegion* tmp_dst_opnd = Create_Dst_Opnd_From_Dcl(dcl1, 1);
 
-            createInst(
-                NULL,
+            createBinOp(
                 G4_shl,
-                NULL,
-                false,
                 1,
                 tmp_dst_opnd,
                 sti,
                 createImm( 8, Type_UD ),
                 InstOpt_WriteEnable,
-                0 );
+                true );
 
             G4_SrcRegRegion* tmp_src_opnd = Create_Src_Opnd_From_Dcl(dcl1, getRegionScalar());
 
             if( !bti || bti->isImm() )
             {
-                createInst(
-                    NULL,
+                createBinOp(
                     G4_add,
-                    NULL,
-                    false,
                     1,
                     addr_dst_opnd,
                     tmp_src_opnd,
                     createImm( desc, Type_UD ),
                     InstOpt_WriteEnable,
-                    0 );
+                    true);
             }
             else
             {
                 G4_SrcRegRegion* addr_src_opnd = Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar());
 
-                createInst(
-                    NULL,
+                createBinOp(
                     G4_add,
-                    NULL,
-                    false,
                     1,
                     duplicateOperand( addr_dst_opnd ),
                     addr_src_opnd,
                     tmp_src_opnd,
                     InstOpt_WriteEnable,
-                    0 );
+                    true );
             }
         }
 
@@ -996,9 +1001,7 @@ G4_InstSend* IR_Builder::Create_SplitSend_Inst_For_CISA(
     unsigned regs2rcv,
     unsigned execsize,
     unsigned fc,
-    unsigned exFuncCtrl,
     SFID tf_id,
-    bool eot,
     bool header_present,
     SendAccess access,
     G4_Operand* bti,
@@ -1007,8 +1010,8 @@ G4_InstSend* IR_Builder::Create_SplitSend_Inst_For_CISA(
     bool is_sendc)
 {
     G4_SendMsgDescriptor *msgDesc =
-        createSendMsgDesc(fc, regs2rcv, regs2snd1, tf_id, eot, regs2snd2,
-                          (uint16_t)exFuncCtrl, access, bti, sti);
+        createSendMsgDesc(fc, regs2rcv, regs2snd1, tf_id, regs2snd2,
+                          0, access, bti, sti);
 
     msgDesc->setHeaderPresent(header_present);
 
@@ -1066,8 +1069,8 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst(G4_Predicate *pred,
         //add (1) a0.0:ud bti:ud desc:ud
         G4_DstRegRegion* addrDstOpnd = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
 
-        createInst(nullptr, G4_add, nullptr, false, 1, addrDstOpnd, bti,
-            createImm(desc, Type_UD), InstOpt_WriteEnable, 0);
+        createBinOp(G4_add, 1, addrDstOpnd, bti,
+            createImm(desc, Type_UD), InstOpt_WriteEnable, true);
     }
 
     if (needsSamplerMove)
@@ -1092,8 +1095,8 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst(G4_Predicate *pred,
         {
             // shl (1) tmp:ud sti:ud 0x8:uw
             G4_DstRegRegion* tmpDstOpnd = Create_Dst_Opnd_From_Dcl(dcl1, 1);
-            createInst(nullptr, G4_shl, nullptr, false, 1, tmpDstOpnd, sti,
-                createImm(8, Type_UD), InstOpt_WriteEnable, 0);
+            createBinOp(G4_shl, 1, tmpDstOpnd, sti,
+                createImm(8, Type_UD), InstOpt_WriteEnable, true);
         }
 
         G4_SrcRegRegion* tmpSrcOpnd = Create_Src_Opnd_From_Dcl(dcl1, getRegionScalar());
@@ -1101,17 +1104,17 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst(G4_Predicate *pred,
         if (!needsSurfaceMove)
         {
             // add (1) a0.0 tmp:ud desc:ud
-            createInst(nullptr, G4_add, nullptr, false, 1, addrDstOpnd, tmpSrcOpnd,
+            createBinOp(G4_add, 1, addrDstOpnd, tmpSrcOpnd,
                 createImm(desc, Type_UD),
                 InstOpt_WriteEnable,
-                0);
+                true);
         }
         else
         {
             // add (1) a0.0 a0.0:ud tmp:ud
             G4_SrcRegRegion* addrSrcOpnd = Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar());
-            createInst(nullptr, G4_add, nullptr, false, 1, addrDstOpnd, addrSrcOpnd,
-                tmpSrcOpnd, InstOpt_WriteEnable, 0);
+            createBinOp(G4_add, 1, addrDstOpnd, addrSrcOpnd,
+                tmpSrcOpnd, InstOpt_WriteEnable, true);
         }
     }
 
@@ -1165,8 +1168,8 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst_For_RTWrite(G4_Predicate *pred,
     {
         //add (1) a0.0:ud bti:ud desc:ud
         G4_DstRegRegion* addrDstOpnd = Create_Dst_Opnd_From_Dcl(builtinA0, 1);
-        createInst(nullptr, G4_add, nullptr, false, 1, addrDstOpnd, bti,
-            createImm(desc, Type_UD), InstOpt_WriteEnable, 0);
+        createBinOp(G4_add, 1, addrDstOpnd, bti,
+            createImm(desc, Type_UD), InstOpt_WriteEnable, true);
         descOpnd = Create_Src_Opnd_From_Dcl(builtinA0, getRegionScalar());
     }
     else
@@ -1196,14 +1199,12 @@ G4_Declare* IR_Builder::createSendPayloadDcl( unsigned num_elt, G4_Type type )
 
 void IR_Builder::Create_MOVR0_Inst( G4_Declare* dcl, short regOff, short subregOff, bool use_nomask )
 {
-    G4_DstRegRegion dst1(
-        Direct,
+    G4_DstRegRegion* dst1_opnd = createDst(
         dcl->getRegVar(),
         regOff,
         subregOff,
         1,
         dcl->getElemType());
-    G4_DstRegRegion* dst1_opnd = createDstRegRegion(dst1);
 
     // create r0 src
     G4_SrcRegRegion* r0_src_opnd = Create_Src_Opnd_From_Dcl(builtinR0, getRegionStride1());
@@ -1219,24 +1220,23 @@ void IR_Builder::Create_MOVR0_Inst( G4_Declare* dcl, short regOff, short subregO
 void IR_Builder::Create_ADD_Inst(G4_Declare* dcl, short regOff, short subregOff, uint8_t execsize,
     G4_Predicate* pred, G4_CondMod* condMod, G4_Operand* src0_opnd, G4_Operand* src1_opnd, G4_InstOption options)
 {
-
-    G4_DstRegRegion dst(Direct, dcl->getRegVar(), regOff, subregOff, 1, dcl->getElemType());
+    auto dst = createDst(dcl->getRegVar(), regOff, subregOff, 1, dcl->getElemType());
 
     if (src0_opnd->isImm() && src0_opnd->asImm()->isZero())
     {
-        createInst(pred, G4_mov, condMod, false, execsize, createDstRegRegion(dst), src1_opnd, NULL, options);
+        createInst(pred, G4_mov, condMod, false, execsize, dst, src1_opnd, NULL, options);
     }
     else if (src1_opnd->isImm() && src1_opnd->asImm()->isZero())
     {
-        createInst(pred, G4_mov, condMod, false, execsize, createDstRegRegion(dst), src0_opnd, NULL, options);
+        createInst(pred, G4_mov, condMod, false, execsize, dst, src0_opnd, NULL, options);
     }
     else if (src0_opnd->isImm() && !src1_opnd->isImm())
     {
-        createInst(pred, G4_add, condMod, false, execsize, createDstRegRegion(dst), src1_opnd, src0_opnd, options);
+        createInst(pred, G4_add, condMod, false, execsize, dst, src1_opnd, src0_opnd, options);
     }
     else
     {
-        createInst(pred, G4_add, condMod, false, execsize, createDstRegRegion(dst), src0_opnd, src1_opnd, options);
+        createInst(pred, G4_add, condMod, false, execsize, dst, src0_opnd, src1_opnd, options);
     }
 }
 
@@ -1253,14 +1253,12 @@ void IR_Builder::Create_MOV_Inst(
     G4_Operand* src_opnd,
     bool use_nomask )
 {
-    G4_DstRegRegion dst2(
-        Direct,
+    G4_DstRegRegion* dst2_opnd = createDst(
         dcl->getRegVar(),
         regOff,
         subregOff,
         1,
         dcl->getElemType());
-    G4_DstRegRegion* dst2_opnd = createDstRegRegion( dst2 );
 
     createInst(
         pred,
@@ -1391,14 +1389,12 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
             }
         }
 
-        G4_DstRegRegion dst_region(
-            Direct,
+        dst = createDst(
             dst_dcl->getRegVar(),
             dst_regoff,
             dst_subregoff,
             1,
             dst_dcl->getElemType());
-        dst = createDstRegRegion( dst_region );
 
         if (scalar_src && src_opnd->isImm())
         {
@@ -1459,7 +1455,7 @@ void IR_Builder::Create_MOV_Send_Src_Inst(
 // create an opnd without regpoff and subregoff
 G4_DstRegRegion* IR_Builder::Create_Dst_Opnd_From_Dcl( G4_Declare* dcl, unsigned short hstride )
 {
-    return createDstRegRegion( Direct,
+    return createDst(
         dcl->getRegVar(),
         0,
         0,
@@ -1482,7 +1478,7 @@ G4_SrcRegRegion* IR_Builder::Create_Src_Opnd_From_Dcl(
 
 G4_DstRegRegion* IR_Builder::createNullDst(G4_Type dstType)
 {
-    return createDstRegRegion( Direct,
+    return createDst(
         phyregpool.getNullReg(),
         0,
         0,
@@ -1888,7 +1884,7 @@ void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
     G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);
     instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
     vec = createImm(0xFEDCBA98, Type_UV);
-    dst = createDstRegRegion(Direct, builtinImmVector4->getRegVar(), 0, 8, 1, Type_UW);
+    dst = createDst(builtinImmVector4->getRegVar(), 0, 8, 1, Type_UW);
     instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
     G4_SrcRegRegion* mulSrc = Create_Src_Opnd_From_Dcl(builtinImmVector4, getRegionStride1());
     dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);

@@ -50,7 +50,7 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
         fp = kernel.fg.getFramePtrDcl();
     unsigned int option = useNoMask ? InstOpt_WriteEnable : 0;
     auto spillInst = kernel.fg.builder->createSpill(kernel.fg.builder->createNullDst(Type_UW), header, spillSrcPayload, 16, payloadSize,
-        scratchOffset, fp, static_cast<G4_InstOption>(option), 0, srcCISAOff);
+        GlobalRA::GRFToHwordSize(scratchOffset), fp, static_cast<G4_InstOption>(option), 0, srcCISAOff);
 
     if (!useNoMask)
     {
@@ -84,7 +84,7 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
     }
     fillDcl->setDoNotSpill();
 
-    auto fillDst = kernel.fg.builder->createDstRegRegion(Direct, fillDcl->getRegVar(), 0,
+    auto fillDst = kernel.fg.builder->createDst(fillDcl->getRegVar(), 0,
         0, 1, Type_UW);
     auto header = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
         kernel.fg.builder->getBuiltinR0()->getRegVar(), 0, 0,
@@ -94,8 +94,8 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
     if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
         fp = kernel.fg.getFramePtrDcl();
 
-    kernel.fg.builder->createFill(header, fillDst, 16, payloadSize, scratchOffset, fp,
-        InstOpt_WriteEnable, 0, srcCISAOff);
+    kernel.fg.builder->createFill(header, fillDst, 16, payloadSize,
+        GlobalRA::GRFToHwordSize(scratchOffset), fp, InstOpt_WriteEnable, 0, srcCISAOff);
 
 #if 0
     fillInst->dump();
@@ -131,7 +131,7 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
             if (size > 8)
                 simdSize = 16;
 
-            G4_DstRegRegion* movDst = kernel.fg.builder->createDstRegRegion(Direct,
+            G4_DstRegRegion* movDst = kernel.fg.builder->createDst(
                 oldFill.first->getBase(), rowOff, 0, 1, Type_UD);
 
             G4_SrcRegRegion* src = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
@@ -445,20 +445,7 @@ void CoalesceSpillFills::sendsInRange(std::list<INST_LIST_ITER>& instList,
     {
         unsigned scratchOffset, sizeInGrfUnit, lastScratchOffset;
         auto inst = *(*iter);
-        if (inst->isSpillIntrinsic())
-        {
-            scratchOffset = inst->asSpillIntrinsic()->getOffset();
-            sizeInGrfUnit = inst->asSpillIntrinsic()->getNumRows();
-        }
-        else if (inst->isFillIntrinsic())
-        {
-            scratchOffset = inst->asFillIntrinsic()->getOffset();
-            sizeInGrfUnit = inst->asFillIntrinsic()->getNumRows();
-        }
-        else
-        {
-            MUST_BE_TRUE(false, "unknown inst type");
-        }
+        getScratchMsgInfo(inst, scratchOffset, sizeInGrfUnit);
         lastScratchOffset = scratchOffset + sizeInGrfUnit - 1;
 
         if (min == 0xffffffff && max == 0)
@@ -947,7 +934,7 @@ void CoalesceSpillFills::replaceCoalescedOperands(G4_INST* inst)
         if (it != replaceMap.end())
         {
             auto dstRgn = dst->asDstRegRegion();
-            auto newDstRgn = kernel.fg.builder->createDstRegRegion(Direct, it->second.first->getRegVar(),
+            auto newDstRgn = kernel.fg.builder->createDst(it->second.first->getRegVar(),
                 it->second.second + dstRgn->getRegOff(), dstRgn->getSubRegOff(), dstRgn->getHorzStride(), dstRgn->getType());
 
             newDstRgn->setAccRegSel(dstRgn->getAccRegSel());
@@ -1351,8 +1338,8 @@ void CoalesceSpillFills::fixSendsSrcOverlap()
                         G4_SrcRegRegion* srcRgn = kernel.fg.builder->createSrcRegRegion(
                             Mod_src_undef, Direct, src1->getTopDcl()->getRegVar(), row, 0,
                             kernel.fg.builder->getRegionStride1(), Type_UD);
-                        G4_DstRegRegion* dstRgn = kernel.fg.builder->createDstRegRegion(
-                            Direct, copyDcl->getRegVar(), row, 0, 1, Type_UD);
+                        G4_DstRegRegion* dstRgn = kernel.fg.builder->createDst(
+                            copyDcl->getRegVar(), row, 0, 1, Type_UD);
                         G4_INST* copyInst = kernel.fg.builder->createMov(8, dstRgn, srcRgn, InstOpt_WriteEnable, false);
                         copyInst->setCISAOff(inst->getCISAOff());
                         bb->insert(instIt, copyInst);
@@ -1761,10 +1748,11 @@ void CoalesceSpillFills::spillFillCleanup()
                         }
                     }
 
+                    auto type = Type_UD;
                     // Insert SIMD8 mov per row
-                    G4_DstRegRegion* nDst = kernel.fg.builder->createDstRegRegion(Direct,
+                    G4_DstRegRegion* nDst = kernel.fg.builder->createDst(
                         inst->getDst()->getBase(), row + inst->getDst()->asDstRegRegion()->getRegOff() - rowStart,
-                        0, 1, Type_UD);
+                        0, 1, type);
 
                     auto write = writesPerOffset.find(row)->second;
                     G4_SrcRegRegion* src1Write = write->getSrc(1)->asSrcRegRegion();
@@ -1772,7 +1760,7 @@ void CoalesceSpillFills::spillFillCleanup()
                     unsigned int diff = row - writeRowStart;
                     G4_SrcRegRegion* nSrc = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
                         src1Write->getBase(), diff + src1Write->getRegOff(), 0,
-                        kernel.fg.builder->getRegionStride1(), Type_UD);
+                        kernel.fg.builder->getRegionStride1(), type);
 
                     G4_INST* mov = kernel.fg.builder->createMov((unsigned char)execSize,
                         nDst, nSrc, InstOpt_WriteEnable, false);

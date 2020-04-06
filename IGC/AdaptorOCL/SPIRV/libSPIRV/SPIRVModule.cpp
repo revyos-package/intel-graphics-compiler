@@ -70,6 +70,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SPIRVValue.h"
 #include "SPIRVFunction.h"
 #include "SPIRVInstruction.h"
+#include "SPIRVAsm.h"
+#include "Probe.h"
 
 namespace spv{
 
@@ -114,19 +116,20 @@ public:
   SPIRVAddressingModelKind getAddressingModel() override { return AddrModel;}
   SPIRVExtInstSetKind getBuiltinSet(SPIRVId SetId) const override;
   const SPIRVCapSet &getCapability() const override { return CapSet;}
-  bool isSpecConstant(SPIRVWord spec_id) const override {
+  bool isSpecConstantSpecialized(SPIRVWord spec_id) const override {
     if(SCMap)
       return SCMap->find(spec_id) != SCMap->end();
     else
       return false;
   }
   uint64_t getSpecConstant(SPIRVWord spec_id) override {
-    spirv_assert(isSpecConstant(spec_id) && "Specialization constant was not specialized!");
+    IGC_ASSERT_EXIT(isSpecConstantSpecialized(spec_id) && "Specialization constant was not specialized!");
     return SCMap->at(spec_id);
   }
   void setSpecConstantMap(SPIRVSpecConstantMap *specConstants) override { SCMap = specConstants; }
   std::set<std::string> &getExtension() override { return SPIRVExt;}
   SPIRVFunction *getFunction(unsigned I) const override { return FuncVec[I];}
+  SPIRVAsmINTEL *getAsm(unsigned I) const override { return AsmVec[I]; }
   SPIRVVariable *getVariable(unsigned I) const override { return VariableVec[I];}
   virtual SPIRVValue *getValue(SPIRVId TheId) const override;
   virtual std::vector<SPIRVValue *> getValues(const std::vector<SPIRVId>&)const override;
@@ -147,7 +150,7 @@ public:
     auto Loc = EntryPointVec.find(EM);
     if (Loc == EntryPointVec.end())
       return nullptr;
-    spirv_assert(I < Loc->second.size());
+    IGC_ASSERT_EXIT(I < Loc->second.size());
     return get<SPIRVFunction>(Loc->second[I]);
   }
   unsigned getNumFunctions() const override { return FuncVec.size();}
@@ -222,6 +225,11 @@ public:
   virtual SPIRVInstruction *
   addInstruction(SPIRVInstruction *Inst, SPIRVBasicBlock *BB,
                  SPIRVInstruction *InsertBefore = nullptr);
+  SPIRVEntry *addAsmTargetINTEL(const std::string &) override;
+  SPIRVValue *addAsmINTEL(SPIRVTypeFunction *, SPIRVAsmTargetINTEL *,
+                          const std::string &, const std::string &) override;
+  SPIRVInstruction *addAsmCallINTELInst(SPIRVAsmINTEL *, const std::vector<SPIRVWord> &,
+                                   SPIRVBasicBlock *) override;
 
   virtual SPIRVExtInst* getCompilationUnit() const override
   {
@@ -309,7 +317,9 @@ private:
   typedef std::map<SPIRVExecutionModelKind, SPIRVIdSet> SPIRVExecModelIdSetMap;
   typedef std::map<SPIRVExecutionModelKind, SPIRVIdVec> SPIRVExecModelIdVecMap;
   typedef std::unordered_map<std::string, SPIRVString*> SPIRVStringMap;
+  typedef std::vector<SPIRVAsmINTEL *> SPIRVAsmVector;
 
+  SPIRVAsmVector AsmVec;
   SPIRVIdToEntryMap IdEntryMap;
   SPIRVUnknownStructFieldMap UnknownStructFieldMap;
   SPIRVFunctionVector FuncVec;
@@ -425,11 +435,11 @@ SPIRVModuleImpl::layoutEntry(SPIRVEntry* E) {
 // logic layout of SPIRV.
 SPIRVEntry *
 SPIRVModuleImpl::addEntry(SPIRVEntry *Entry) {
-    assert(Entry && "Invalid entry");
+    IGC_ASSERT(Entry && "Invalid entry");
     if (Entry->hasId())
     {
         SPIRVId Id = Entry->getId();
-        assert(Entry->getId() != SPIRVID_INVALID && "Invalid id");
+        IGC_ASSERT(Entry->getId() != SPIRVID_INVALID && "Invalid id");
         SPIRVEntry *Mapped = nullptr;
         if (exist(Id, &Mapped))
         {
@@ -439,7 +449,7 @@ SPIRVModuleImpl::addEntry(SPIRVEntry *Entry) {
             }
             else
             {
-                assert(Mapped == Entry && "Id used twice");
+                IGC_ASSERT(Mapped == Entry && "Id used twice");
             }
         }
         else
@@ -465,7 +475,7 @@ SPIRVModuleImpl::exist(SPIRVId Id) const {
 
 bool
 SPIRVModuleImpl::exist(SPIRVId Id, SPIRVEntry **Entry) const {
-  assert (Id != SPIRVID_INVALID && "Invalid Id");
+  IGC_ASSERT(Id != SPIRVID_INVALID && "Invalid Id");
   SPIRVIdToEntryMap::const_iterator Loc = IdEntryMap.find(Id);
   if (Loc == IdEntryMap.end())
     return false;
@@ -488,9 +498,9 @@ SPIRVModuleImpl::getId(SPIRVId Id, unsigned increment) {
 
 SPIRVEntry *
 SPIRVModuleImpl::getEntry(SPIRVId Id) const {
-  assert (Id != SPIRVID_INVALID && "Invalid Id");
+  IGC_ASSERT(Id != SPIRVID_INVALID && "Invalid Id");
   SPIRVIdToEntryMap::const_iterator Loc = IdEntryMap.find(Id);
-  spirv_assert (Loc != IdEntryMap.end() && "Id is not in map");
+  IGC_ASSERT_EXIT(Loc != IdEntryMap.end() && "Id is not in map");
   return Loc->second;
 }
 
@@ -522,15 +532,15 @@ void SPIRVModuleImpl::resolveUnknownStructFields()
 SPIRVExtInstSetKind
 SPIRVModuleImpl::getBuiltinSet(SPIRVId SetId) const {
   auto Loc = IdBuiltinMap.find(SetId);
-  spirv_assert(Loc != IdBuiltinMap.end() && "Invalid builtin set id");
+  IGC_ASSERT_EXIT(Loc != IdBuiltinMap.end() && "Invalid builtin set id");
   return Loc->second;
 }
 
 bool
 SPIRVModuleImpl::isEntryPoint(SPIRVExecutionModelKind ExecModel, SPIRVId EP)
   const {
-  assert(isValid(ExecModel) && "Invalid execution model");
-  assert(EP != SPIRVID_INVALID && "Invalid function id");
+  IGC_ASSERT(isValid(ExecModel) && "Invalid execution model");
+  IGC_ASSERT(EP != SPIRVID_INVALID && "Invalid function id");
   auto Loc = EntryPointSet.find(ExecModel);
   if (Loc == EntryPointSet.end())
     return false;
@@ -612,7 +622,7 @@ SPIRVModuleImpl::addDecorate(const SPIRVDecorateGeneric *Dec) {
   SPIRVId Id = Dec->getTargetId();
   SPIRVEntry *Target = nullptr;
   bool Found = exist(Id, &Target);
-  assert (Found && "Decorate target does not exist");
+  IGC_ASSERT(Found && "Decorate target does not exist");
   if (!Dec->getOwner())
     DecorateSet.insert(Dec);
   return Dec;
@@ -621,8 +631,8 @@ SPIRVModuleImpl::addDecorate(const SPIRVDecorateGeneric *Dec) {
 void
 SPIRVModuleImpl::addEntryPoint(SPIRVExecutionModelKind ExecModel,
     SPIRVId EntryPoint){
-  assert(isValid(ExecModel) && "Invalid execution model");
-  assert(EntryPoint != SPIRVID_INVALID && "Invalid entry point");
+  IGC_ASSERT(isValid(ExecModel) && "Invalid execution model");
+  IGC_ASSERT(EntryPoint != SPIRVID_INVALID && "Invalid entry point");
   EntryPointSet[ExecModel].insert(EntryPoint);
   EntryPointVec[ExecModel].push_back(EntryPoint);
 }
@@ -645,7 +655,7 @@ SPIRVModuleImpl::replaceForward(SPIRVForward *Forward, SPIRVEntry *Entry) {
     IdEntryMap[Id] = Entry;
   else {
     auto Loc = IdEntryMap.find(Id);
-    spirv_assert(Loc != IdEntryMap.end());
+    IGC_ASSERT_EXIT(Loc != IdEntryMap.end());
     IdEntryMap.erase(Loc);
     Entry->setId(ForwardId);
     IdEntryMap[ForwardId] = Entry;
@@ -684,6 +694,29 @@ SPIRVModuleImpl::addInstruction(SPIRVInstruction *Inst, SPIRVBasicBlock *BB,
   return static_cast<SPIRVInstruction *>(addConstant(Inst));
 }
 
+SPIRVEntry *SPIRVModuleImpl::addAsmTargetINTEL(const std::string &TheTarget) {
+  auto Asm = new SPIRVAsmTargetINTEL(this, getId(), TheTarget);
+  return add(Asm);
+}
+
+SPIRVValue *SPIRVModuleImpl::addAsmINTEL(SPIRVTypeFunction *TheType,
+                                         SPIRVAsmTargetINTEL *TheTarget,
+                                         const std::string &TheInstructions,
+                                         const std::string &TheConstraints) {
+  auto Asm = new SPIRVAsmINTEL(this, TheType, getId(), TheTarget,
+                               TheInstructions, TheConstraints);
+  AsmVec.push_back(Asm);
+  return add(Asm);
+}
+
+SPIRVInstruction *
+SPIRVModuleImpl::addAsmCallINTELInst(SPIRVAsmINTEL *TheAsm,
+                                     const std::vector<SPIRVWord> &TheArguments,
+                                     SPIRVBasicBlock *BB) {
+  return addInstruction(
+      new SPIRVAsmCallINTEL(getId(), TheAsm, TheArguments, BB), BB);
+}
+
 SPIRVInstruction *SPIRVModuleImpl::addLoopMergeInst(
   SPIRVId MergeBlock, SPIRVId ContinueTarget, SPIRVWord LoopControl,
   std::vector<SPIRVWord> LoopControlParameters, SPIRVBasicBlock *BB) {
@@ -711,7 +744,7 @@ SPIRVModuleImpl::addDecorationGroup(SPIRVDecorationGroup* Group) {
   add(Group);
   Group->takeDecorates(DecorateSet);
   DecGroupVec.push_back(Group);
-  assert(DecorateSet.empty());
+  IGC_ASSERT(DecorateSet.empty());
   return Group;
 }
 
@@ -762,20 +795,14 @@ operator>> (std::istream &I, SPIRVModule &M) {
   SPIRVWord Magic;
   Decoder >> Magic;
 
-  if (Magic != MagicNumber)
-  {
-      spirv_fatal_error("Invalid magic number");
-  }
+  IGC_ASSERT_EXIT((MagicNumber == Magic) && "Invalid magic number");
 
   Decoder >> MI.SPIRVVersion;
 
   bool supportVersion =
       MI.SPIRVVersion <= SPIRVVersionSupported::fullyCompliant;
 
-  if (!supportVersion)
-  {
-      spirv_fatal_error("Unsupported SPIRV version number");
-  }
+  IGC_ASSERT_EXIT(supportVersion && "Unsupported SPIRV version number");
 
   Decoder >> MI.SPIRVGenerator;
 
@@ -783,7 +810,7 @@ operator>> (std::istream &I, SPIRVModule &M) {
   Decoder >> MI.NextId;
 
   Decoder >> MI.InstSchema;
-  assert(MI.InstSchema == SPIRVISCH_Default && "Unsupported instruction schema");
+  IGC_ASSERT(MI.InstSchema == SPIRVISCH_Default && "Unsupported instruction schema");
 
   while(Decoder.getWordCountAndOpCode())
     Decoder.getEntry();

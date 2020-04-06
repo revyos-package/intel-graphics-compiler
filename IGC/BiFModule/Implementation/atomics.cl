@@ -51,13 +51,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define FENCE_PRE_OP(Scope, Semantics) \
   if( ( (Semantics) & ( SEMANTICS_PRE_OP_NEED_FENCE ) ) > 0 )                     \
   {                                                                               \
-      __builtin_spirv_OpMemoryBarrier_i32_i32( (Scope), (Semantics) );            \
+      __builtin_IB_memfence(true, false, false, false, false, true, false);            \
   }
 
 #define FENCE_POST_OP(Scope, Semantics) \
   if( ( (Semantics) & ( SEMANTICS_POST_OP_NEEDS_FENCE ) ) > 0 )                   \
   {                                                                               \
-      __builtin_spirv_OpMemoryBarrier_i32_i32( (Scope), (Semantics) );            \
+      __builtin_IB_memfence(true, false, false, false, false, true, false);            \
   }
 
 // This fencing scheme allows us to obey the memory model when coherency is
@@ -952,13 +952,13 @@ uint __builtin_spirv_OpAtomicISub_p0i32_i32_i32_i32( volatile __private uint *Po
 
 uint __builtin_spirv_OpAtomicISub_p1i32_i32_i32_i32( volatile __global uint *Pointer, uint Scope, uint Semantics, uint Value )
 {
-    atomic_operation_1op( __builtin_IB_atomic_add_global_i32, uint, (global int*)Pointer, Scope, Semantics, -as_int(Value) );
+    atomic_operation_1op( __builtin_IB_atomic_sub_global_i32, uint, (global int*)Pointer, Scope, Semantics, Value );
 }
 
 
 uint __builtin_spirv_OpAtomicISub_p3i32_i32_i32_i32( volatile __local uint *Pointer, uint Scope, uint Semantics, uint Value )
 {
-    atomic_operation_1op( __builtin_IB_atomic_add_local_i32, uint, (local int*)Pointer, Scope, Semantics, -as_int(Value) );
+    atomic_operation_1op( __builtin_IB_atomic_sub_local_i32, uint, (local int*)Pointer, Scope, Semantics, Value );
 }
 
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
@@ -967,11 +967,11 @@ uint __builtin_spirv_OpAtomicISub_p4i32_i32_i32_i32( volatile __generic uint *Po
 {
     if(__builtin_spirv_OpGenericCastToPtrExplicit_p3i8_p4i8_i32(__builtin_astype((Pointer), __generic void*), StorageWorkgroup))
     {
-        atomic_operation_1op( __builtin_IB_atomic_add_local_i32, uint, (__local int*)Pointer, Scope, Semantics, -as_int(Value) );
+        atomic_operation_1op( __builtin_IB_atomic_sub_local_i32, uint, (__local int*)Pointer, Scope, Semantics, Value );
     }
     else
     {
-        atomic_operation_1op( __builtin_IB_atomic_add_global_i32, uint, (__global int*)Pointer, Scope, Semantics, -as_int(Value) );
+        atomic_operation_1op( __builtin_IB_atomic_sub_global_i32, uint, (__global int*)Pointer, Scope, Semantics, Value );
     }
 }
 
@@ -988,7 +988,7 @@ ulong __builtin_spirv_OpAtomicISub_p0i64_i32_i32_i64( volatile __private ulong *
 
 ulong __builtin_spirv_OpAtomicISub_p1i64_i32_i32_i64( volatile __global ulong *Pointer, uint Scope, uint Semantics, ulong Value )
 {
-    atomic_operation_1op( __builtin_IB_atomic_add_global_i64, ulong, (global long*)Pointer, Scope, Semantics, -as_long(Value) );
+    atomic_operation_1op( __builtin_IB_atomic_sub_global_i64, ulong, (global long*)Pointer, Scope, Semantics, Value );
 }
 
 
@@ -1646,7 +1646,7 @@ void __builtin_spirv_OpAtomicFlagClear_p4i32_i32_i32( volatile __generic uint *P
 #define KMP_LOCK_FREE 0
 #define KMP_LOCK_BUSY 1
 
-void __builtin_IB_kmp_acquire_lock(__global int *lock)
+void __builtin_IB_kmp_acquire_lock(int *lock)
 {
   volatile atomic_uint *lck = (volatile atomic_uint *)lock;
   uint expected = KMP_LOCK_FREE;
@@ -1658,7 +1658,7 @@ void __builtin_IB_kmp_acquire_lock(__global int *lock)
   }
 }
 
-void __builtin_IB_kmp_release_lock(__global int *lock)
+void __builtin_IB_kmp_release_lock(int *lock)
 {
   volatile atomic_uint *lck = (volatile atomic_uint *)lock;
   atomic_store_explicit(lck, KMP_LOCK_FREE, memory_order_release);

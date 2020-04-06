@@ -27,6 +27,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 
 #include "cif/helpers/error.h"
+#if !defined(_WIN32)
+#include "inc/common/secure_mem.h"
+#endif
 
 namespace CIF{
 
@@ -47,9 +50,7 @@ inline void SafeCopy(void *dst, size_t dstAvailableSizeInBytes, const void *src,
     const char * srcAsChar = reinterpret_cast<const char*>(src);
 
     // TODO : Verify that compiler actually picks this pattern-up as memcpy and optimizes it
-    for(size_t i = 0; i < bytesToCopy; ++i){
-        dstAsChar[i] = srcAsChar[i];
-    }
+    memcpy_s(dstAsChar, dstAvailableSizeInBytes, srcAsChar, bytesToCopy);
 }
 
 template<typename T>

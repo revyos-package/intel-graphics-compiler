@@ -105,6 +105,9 @@ class SPIRVGroupDecorate;
 class SPIRVGroupMemberDecorate;
 class SPIRVGroupDecorateGeneric;
 class SPIRVInstTemplateBase;
+class SPIRVAsmTargetINTEL;
+class SPIRVAsmINTEL;
+class SPIRVAsmCallINTEL;
 
 typedef SPIRVBasicBlock SPIRVLabel;
 struct SPIRVTypeImageDescriptor;
@@ -143,12 +146,13 @@ public:
   virtual SPIRVAddressingModelKind getAddressingModel() = 0;
   virtual const SPIRVCapSet &getCapability() const = 0;
   virtual SPIRVExtInstSetKind getBuiltinSet(SPIRVId) const = 0;
-  virtual bool isSpecConstant(SPIRVWord) const = 0;
+  virtual bool isSpecConstantSpecialized(SPIRVWord) const = 0;
   virtual uint64_t getSpecConstant(SPIRVWord) = 0;
   virtual void setSpecConstantMap(SPIRVSpecConstantMap *) = 0;
   virtual SPIRVFunction *getEntryPoint(SPIRVExecutionModelKind, unsigned) const = 0;
   virtual std::set<std::string> &getExtension() = 0;
   virtual SPIRVFunction *getFunction(unsigned) const = 0;
+  virtual SPIRVAsmINTEL *getAsm(unsigned) const = 0;
   virtual SPIRVVariable *getVariable(unsigned) const = 0;
   virtual SPIRVMemoryModelKind getMemoryModel() = 0;
   virtual unsigned getNumFunctions() const = 0;
@@ -212,6 +216,12 @@ public:
   virtual SPIRVInstruction *addLoopMergeInst(
     SPIRVId MergeBlock, SPIRVId ContinueTarget, SPIRVWord LoopControl,
     std::vector<SPIRVWord> LoopControlParameters, SPIRVBasicBlock *BB) = 0;
+  virtual SPIRVEntry *addAsmTargetINTEL(const std::string &) = 0;
+  virtual SPIRVValue *addAsmINTEL(SPIRVTypeFunction *, SPIRVAsmTargetINTEL *,
+                                  const std::string &, const std::string &) = 0;
+  virtual SPIRVInstruction *addAsmCallINTELInst(SPIRVAsmINTEL *,
+                                                const std::vector<SPIRVWord> &,
+                                                SPIRVBasicBlock *) = 0;
 
   virtual void addCapability(SPIRVCapabilityKind) = 0;
 

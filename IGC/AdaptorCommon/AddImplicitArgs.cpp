@@ -36,6 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/ADT/SCCIterator.h"
 #include <llvm/IR/Module.h>
 #include <llvmWrapper/IR/Function.h>
+#include <llvmWrapper/ADT/STLExtras.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/DerivedTypes.h>
 #include "llvm/IR/DIBuilder.h"
@@ -75,66 +76,6 @@ bool AddImplicitArgs::runOnModule(Module &M)
     m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
 
-    // Set all implicit args needed by indirect calls
-    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
-    {
-        m_IndirectImplicitArgs.push_back(ImplicitArg::R0);
-        m_IndirectImplicitArgs.push_back(ImplicitArg::PAYLOAD_HEADER);
-        m_IndirectImplicitArgs.push_back(ImplicitArg::PRIVATE_BASE);
-
-        // Check if any indirect functions uses GAS, if so we have to add the implicit arg to all indirect functions
-        // Lazy Method. Can be removed once we can support GAS without using implicit args
-        if (ctx->m_instrTypes.hasGenericAddressSpacePointers)
-        {
-            bool hasGASImplicitArgs = false;
-            for (auto& F : M)
-            {
-                Function* pFunc = &F;
-                if (pFunc->isDeclaration()) continue;
-                if (m_pMdUtils->findFunctionsInfoItem(pFunc) == m_pMdUtils->end_FunctionsInfo()) continue;
-                if (pFunc->hasFnAttribute("IndirectlyCalled"))
-                {
-                    ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
-                    if (implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS) &&
-                        implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE) &&
-                        implicitArgs.isImplicitArgExist(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE))
-                    {
-                        m_IndirectImplicitArgs.push_back(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS);
-                        m_IndirectImplicitArgs.push_back(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE);
-                        m_IndirectImplicitArgs.push_back(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE);
-                        hasGASImplicitArgs = true;
-                        break;
-                    }
-                }
-            }
-            // If any indirect functions uses GAS, add it to every indirect func
-            if (hasGASImplicitArgs)
-            {
-                for (auto& F : M)
-                {
-                    Function* pFunc = &F;
-                    if (pFunc->isDeclaration()) continue;
-                    if (m_pMdUtils->findFunctionsInfoItem(pFunc) == m_pMdUtils->end_FunctionsInfo()) continue;
-                    if (pFunc->hasFnAttribute("IndirectlyCalled"))
-                    {
-                        ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
-                        if (!implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS) &&
-                            !implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE) &&
-                            !implicitArgs.isImplicitArgExist(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE))
-                        {
-                            SmallVector<ImplicitArg::ArgType, 3> args;
-                            args.push_back(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS);
-                            args.push_back(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE);
-                            args.push_back(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE);
-                            implicitArgs.addImplicitArgs(*pFunc, args, m_pMdUtils);
-                        }
-                    }
-                }
-            }
-        }
-        ctx->m_numIndirectImplicitArgs = m_IndirectImplicitArgs.size();
-    }
-
     // Update function signatures
     // Create new functions with implicit args
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
@@ -144,6 +85,8 @@ bool AddImplicitArgs::runOnModule(Module &M)
         if (pFunc->isDeclaration()) continue;
         // skip non-entry functions
         if (m_pMdUtils->findFunctionsInfoItem(pFunc) == m_pMdUtils->end_FunctionsInfo()) continue;
+        // No implicit arg support for indirect calls
+        if (pFunc->hasFnAttribute("IndirectlyCalled")) continue;
 
         // see the detail in StatelessToStatefull.cpp.
         // If SToSProducesPositivePointer is true, do not generate implicit arguments.
@@ -224,11 +167,6 @@ bool AddImplicitArgs::runOnModule(Module &M)
         // Now, after changing funciton signature,
         // and validate there are no calls to the old function we can erase it.
         pFunc->eraseFromParent();
-    }
-
-    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer))
-    {
-        FixIndirectCalls(M);
     }
 
     return true;
@@ -334,11 +272,12 @@ void AddImplicitArgs::updateNewFuncArgs(llvm::Function* pFunc, llvm::Function* p
 
             llvm::DIBuilder Builder(*pNewFunc->getParent());
             IF_DEBUG_INFO(auto DIVar = d->getVariable();)
+            IF_DEBUG_INFO(auto DIExpr = d->getExpression();)
 
-                Value* v = dyn_cast_or_null<Value>(&(*pNewFuncArg));
+            Value* v = dyn_cast_or_null<Value>(&(*pNewFuncArg));
             if (v)
             {
-                IF_DEBUG_INFO(Builder.insertDeclare(v, DIVar, nullptr, d->getDebugLoc().get(), d);)
+                IF_DEBUG_INFO(Builder.insertDeclare(v, DIVar, DIExpr, d->getDebugLoc().get(), d);)
                 IF_DEBUG_INFO(auto oldInst = d;)
                 IF_DEBUG_INFO(oldInst->eraseFromParent();)
             }
@@ -546,121 +485,6 @@ void AddImplicitArgs::replaceAllUsesWithNewOCLBuiltinFunction(CodeGenContext* ct
     }
 }
 
-void AddImplicitArgs::FixIndirectCalls(Module& M)
-{
-    // Handle indirect call instructions by inserting implicit args
-    std::vector<Instruction*> list_delete;
-    std::vector<Function*> funcs_delete;
-
-    // First handle direct calls to function declarations
-    for (auto& F : M)
-    {
-        Function* pFunc = &F;
-        // Handle external function calls
-        if (pFunc->hasFnAttribute("IndirectlyCalled") && pFunc->isDeclaration() && pFunc->getNumUses() > 0)
-        {
-            SmallVector<Type*, 8> argTy;
-            // original arg types
-            for (auto& args : pFunc->args()) argTy.push_back(args.getType());
-            // implicit arg types
-            // HACK: manually set implicit arg types
-            argTy.push_back(VectorType::get(Type::getInt32Ty(pFunc->getContext()), 8)); // R0
-            argTy.push_back(VectorType::get(Type::getInt32Ty(pFunc->getContext()), 8)); // payload_header
-            argTy.push_back(Type::getInt8PtrTy(pFunc->getContext(), 0)); // private_base
-
-            FunctionType* fTy = FunctionType::get(pFunc->getReturnType(), argTy, false);
-            Function* pNewFunc = Function::Create(fTy, pFunc->getLinkage());
-            pNewFunc->copyAttributesFrom(pFunc);
-            pNewFunc->setSubprogram(pFunc->getSubprogram());
-            M.getFunctionList().insert(pFunc->getIterator(), pNewFunc);
-            pNewFunc->takeName(pFunc);
-
-            // Modify each call instruction. Direct calls only.
-            for (auto user : pFunc->users())
-            {
-                if (CallInst* call = dyn_cast<CallInst>(user))
-                {
-                    Function* parentF = call->getParent()->getParent();
-                    ImplicitArgs implicitArgs(*parentF, m_pMdUtils);
-                    SmallVector<Value*, 8> args(call->arg_operands());
-                    for (auto IA : m_IndirectImplicitArgs)
-                    {
-                        args.push_back(implicitArgs.getImplicitArg(*parentF, IA));
-                    }
-
-                    IRBuilder<> builder(call);
-                    CallInst* newCall = builder.CreateCall(pNewFunc, args);
-                    call->replaceAllUsesWith(newCall);
-                    newCall->copyMetadata(*call);
-                    list_delete.push_back(call);
-                }
-            }
-            funcs_delete.push_back(pFunc);
-        }
-    }
-    for (auto i : list_delete)
-    {
-        i->eraseFromParent();
-    }
-    for (auto func : funcs_delete)
-    {
-        func->eraseFromParent();
-    }
-    list_delete.clear();
-    funcs_delete.clear();
-
-    // Handle all indirect calls
-    for (auto &F : M)
-    {
-        for (auto &BB : F)
-        {
-            for (auto &II : BB)
-            {
-                if (CallInst* call = dyn_cast<CallInst>(&II))
-                {
-                    if (call->isInlineAsm()) continue;
-                    if (call->getCalledFunction() != nullptr) continue;
-
-                    SmallVector<Value*, 8> args;
-                    SmallVector<Type*, 8> argTys;
-                    for (unsigned i = 0; i < call->getNumArgOperands(); i++)
-                    {
-                        args.push_back(call->getArgOperand(i));
-                    }
-
-                    Function* pFunc = call->getParent()->getParent();
-                    ImplicitArgs implicitArgs(*pFunc, m_pMdUtils);
-
-                    for (auto IA : m_IndirectImplicitArgs)
-                    {
-                        args.push_back(implicitArgs.getImplicitArg(*pFunc, IA));
-                    }
-
-                    for (auto arg : args) argTys.push_back(arg->getType());
-
-                    IRBuilder<> builder(call);
-                    Value* funcPtr = call->getCalledValue();
-                    unsigned fAS = funcPtr->getType()->getPointerAddressSpace();
-                    PointerType* funcTy = PointerType::get(FunctionType::get(call->getType(), argTys, false), fAS);
-                    funcPtr = builder.CreatePointerBitCastOrAddrSpaceCast(funcPtr, funcTy);
-                    CallInst* newCall = builder.CreateCall(funcPtr, args);
-
-                    newCall->copyMetadata(*call);
-                    newCall->setCallingConv(call->getCallingConv());
-                    newCall->setAttributes(call->getAttributes());
-                    call->replaceAllUsesWith(newCall);
-                    list_delete.push_back(call);
-                }
-            }
-        }
-    }
-
-    for (auto i : list_delete)
-    {
-        i->eraseFromParent();
-    }
-}
-
 // Builtin CallGraph Analysis
 #define PASS_FLAG2 "igc-callgraphscc-analysis"
 #define PASS_DESCRIPTION2 "Analyzes CallGraphSCC"
@@ -758,7 +582,7 @@ void BuiltinCallGraphAnalysis::traveseCallGraphSCC(const std::vector<CallGraphNo
         }
         if (argData == nullptr)
         {
-            argDetails.push_back(make_unique<ImplicitArgmentDetail>());
+            argDetails.push_back(IGCLLVM::make_unique<ImplicitArgmentDetail>());
             argData = argDetails[argDetails.size() - 1].get();
         }
 

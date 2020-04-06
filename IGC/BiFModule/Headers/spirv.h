@@ -99,7 +99,8 @@ typedef enum
 {
     GroupOperationReduce = 0,
     GroupOperationInclusiveScan = 1,
-    GroupOperationExclusiveScan = 2
+    GroupOperationExclusiveScan = 2,
+    GroupOperationClusteredReduce = 3
 } GroupOperations_t;
 
 // Note: Unify these defines in a common header that this and
@@ -4107,12 +4108,15 @@ void __builtin_spirv_OpAtomicFlagClear_p4i32_i32_i32(volatile generic uint *Poin
 void __builtin_spirv_OpControlBarrier_i32_i32_i32(Scope_t Execution, Scope_t Memory, uint Semantics);
 void __builtin_spirv_OpMemoryBarrier_i32_i32(Scope_t Memory, uint Semantics);
 
+#ifndef NAMED_BARRIER_STRUCT_TYPE
+#define NAMED_BARRIER_STRUCT_TYPE
 typedef struct
 {
     int count;
     int orig_count;
     int inc;
 } __namedBarrier;
+#endif
 
 local __namedBarrier* __builtin_spirv_OpNamedBarrierInitialize_i32_p3__namedBarrier_p3i32(int Count, local __namedBarrier* nb_array, local uint* id);
 void __builtin_spirv_OpMemoryNamedBarrier_p3__namedBarrier_i32_i32(local __namedBarrier* NB, Scope_t Memory, uint Semantics);
@@ -4296,44 +4300,217 @@ void __builtin_spirv_OpGroupWaitEvents_i32_i32_p0i64(uint Execution, uint NumEve
 void __builtin_spirv_OpGroupWaitEvents_i32_i32_p4i64(uint Execution, uint NumEvents, generic Event_t *EventsList);
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
+#if defined(cl_khr_subgroup_non_uniform_vote)
+bool __builtin_spirv_OpGroupNonUniformElect_i32(uint Execution);
+bool __builtin_spirv_OpGroupNonUniformAll_i32_i1(uint Execution, bool Predicate);
+bool __builtin_spirv_OpGroupNonUniformAny_i32_i1(uint Execution, bool Predicate);
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_i8(uint Execution, uchar Value);
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_i16(uint Execution, ushort Value);
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_i32(uint Execution, uint Value);
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_i64(uint Execution, ulong Value);
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_f32(uint Execution, float Value);
+#if defined(cl_khr_fp64)
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_f64(uint Execution, double Value);
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+bool __builtin_spirv_OpGroupNonUniformAllEqual_i32_f16(uint Execution, half Value);
+#endif // defined(cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_non_uniform_vote)
+
 bool __builtin_spirv_OpGroupAll_i32_i1(uint Execution, bool Predicate);
 bool __builtin_spirv_OpGroupAny_i32_i1(uint Execution, bool Predicate);
-uchar __builtin_spirv_OpGroupBroadcast_i32_i8_v3i32(uint Execution, uchar Value, uint3 LocalId);
-ushort __builtin_spirv_OpGroupBroadcast_i32_i16_v3i32(uint Execution, ushort Value, uint3 LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_v3i32(uint Execution, uint Value, uint3 LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_v3i32(uint Execution, ulong Value, uint3 LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_v3i32(uint Execution, half Value, uint3 LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_v3i32(uint Execution, float Value, uint3 LocalId);
-uchar __builtin_spirv_OpGroupBroadcast_i32_i8_v3i64(uint Execution, uchar Value, ulong3 LocalId);
-ushort __builtin_spirv_OpGroupBroadcast_i32_i16_v3i64(uint Execution, ushort Value, ulong3 LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_v3i64(uint Execution, uint Value, ulong3 LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_v3i64(uint Execution, ulong Value, ulong3 LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_v3i64(uint Execution, half Value, ulong3 LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_v3i64(uint Execution, float Value, ulong3 LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_v2i32(uint Execution, uint Value, uint2 LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_v2i32(uint Execution, ulong Value, uint2 LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_v2i32(uint Execution, half Value, uint2 LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_v2i32(uint Execution, float Value, uint2 LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_v2i64(uint Execution, uint Value, ulong2 LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_v2i64(uint Execution, ulong Value, ulong2 LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_v2i64(uint Execution, half Value, ulong2 LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_v2i64(uint Execution, float Value, ulong2 LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_i32(uint Execution, uint Value, uint LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_i32(uint Execution, ulong Value, uint LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_i32(uint Execution, half Value, uint LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_i32(uint Execution, float Value, uint LocalId);
-uint __builtin_spirv_OpGroupBroadcast_i32_i32_i64(uint Execution, uint Value, ulong LocalId);
-ulong __builtin_spirv_OpGroupBroadcast_i32_i64_i64(uint Execution, ulong Value, ulong LocalId);
-half __builtin_spirv_OpGroupBroadcast_i32_f16_i64(uint Execution, half Value, ulong LocalId);
-float __builtin_spirv_OpGroupBroadcast_i32_f32_i64(uint Execution, float Value, ulong LocalId);
+#define DECL_SUB_GROUP_BROADCAST_BASE(TYPE, TYPE_ABBR)                                                      \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_v3i32(uint Execution, TYPE Value, uint3 LocalId);   \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_v3i64(uint Execution, TYPE Value, ulong3 LocalId);  \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_v2i32(uint Execution, TYPE Value, uint2 LocalId);   \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_v2i64(uint Execution, TYPE Value, ulong2 LocalId);  \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_i32(uint Execution, TYPE Value, uint LocalId);      \
+TYPE __builtin_spirv_OpGroupBroadcast_i32_##TYPE_ABBR##_i64(uint Execution, TYPE Value, ulong LocalId);
+
+#define DECL_SUB_GROUP_BROADCAST(TYPE, TYPE_ABBR)       \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE, TYPE_ABBR)          \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE##2, v2##TYPE_ABBR)   \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE##3, v3##TYPE_ABBR)   \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE##4, v4##TYPE_ABBR)   \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE##8, v8##TYPE_ABBR)   \
+DECL_SUB_GROUP_BROADCAST_BASE(TYPE##16, v16##TYPE_ABBR)
+
+DECL_SUB_GROUP_BROADCAST(uchar, i8)
+DECL_SUB_GROUP_BROADCAST(ushort, i16)
+DECL_SUB_GROUP_BROADCAST(uint, i32)
+DECL_SUB_GROUP_BROADCAST(ulong, i64)
+DECL_SUB_GROUP_BROADCAST(float, f32)
+#if defined(cl_khr_fp16)
+DECL_SUB_GROUP_BROADCAST(half, f16)
+#endif // defined(cl_khr_fp16)
 #if defined(cl_khr_fp64)
-double __builtin_spirv_OpGroupBroadcast_i32_f64_i32(uint Execution, double Value, uint LocalId);
-double __builtin_spirv_OpGroupBroadcast_i32_f64_v2i32(uint Execution, double Value, uint2 LocalId);
-double __builtin_spirv_OpGroupBroadcast_i32_f64_v3i32(uint Execution, double Value, uint3 LocalId);
-double __builtin_spirv_OpGroupBroadcast_i32_f64_v2i64(uint Execution, double Value, ulong2 LocalId);
-double __builtin_spirv_OpGroupBroadcast_i32_f64_v3i64(uint Execution, double Value, ulong3 LocalId);
-double __builtin_spirv_OpGroupBroadcast_i32_f64_i64(uint Execution, double Value, ulong LocalId);
+DECL_SUB_GROUP_BROADCAST(double, f64)
 #endif // defined(cl_khr_fp64)
+
+#if defined(cl_khr_subgroup_ballot)
+#define DECL_NON_UNIFORM_BROADCAST_BASE(TYPE, TYPE_ABBR)                        \
+    TYPE __builtin_spirv_OpGroupNonUniformBroadcast_i32_##TYPE_ABBR##_i32(      \
+        uint Execution, TYPE Value, uint Id);                                   \
+    TYPE __builtin_spirv_OpGroupNonUniformBroadcastFirst_i32_##TYPE_ABBR(uint Execution, TYPE Value);
+
+#define DECL_NON_UNIFORM_BROADCAST(TYPE, TYPE_ABBR)         \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE, TYPE_ABBR)        \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##2, v2##TYPE_ABBR) \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##3, v3##TYPE_ABBR) \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##4, v4##TYPE_ABBR) \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##8, v8##TYPE_ABBR) \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##16, v16##TYPE_ABBR)
+
+DECL_NON_UNIFORM_BROADCAST(uchar,  i8)
+DECL_NON_UNIFORM_BROADCAST(ushort, i16)
+DECL_NON_UNIFORM_BROADCAST(uint,   i32)
+DECL_NON_UNIFORM_BROADCAST(ulong,  i64)
+DECL_NON_UNIFORM_BROADCAST(float,  f32)
+#if defined(cl_khr_fp64)
+DECL_NON_UNIFORM_BROADCAST(double, f64)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_NON_UNIFORM_BROADCAST(half,   f16)
+#endif // defined(cl_khr_fp16)
+
+uint4 __builtin_spirv_OpGroupNonUniformBallot_i32_i1(uint Execution, bool Predicate);
+bool __builtin_spirv_OpGroupNonUniformInverseBallot_i32_v4i32(uint Execution, uint4 Value);
+bool __builtin_spirv_OpGroupNonUniformBallotBitExtract_i32_v4i32_i32(uint Execution, uint4 Value, uint Index);
+uint __builtin_spirv_OpGroupNonUniformBallotBitCount_i32_i32_v4i32(uint Execution, uint Operation, uint4 Value);
+uint __builtin_spirv_OpGroupNonUniformBallotFindLSB_i32_v4i32(uint Execution, uint4 Value);
+uint __builtin_spirv_OpGroupNonUniformBallotFindLSB_i32_v4i32(uint Execution, uint4 Value);
+uint4 __builtin_spirv_BuiltInSubgroupEqMask();
+uint4 __builtin_spirv_BuiltInSubgroupGeMask();
+uint4 __builtin_spirv_BuiltInSubgroupGtMask();
+uint4 __builtin_spirv_BuiltInSubgroupLeMask();
+uint4 __builtin_spirv_BuiltInSubgroupLtMask();
+#endif // defined(cl_khr_subgroup_ballot)
+
+#if defined(cl_khr_subgroup_shuffle)
+#define DECL_NON_UNIFORM_SHUFFLE(TYPE, TYPE_ABBR)                           \
+    TYPE __builtin_spirv_OpGroupNonUniformShuffle_i32_##TYPE_ABBR##_i32(    \
+        uint Execution, TYPE Value, uint Id);                               \
+    TYPE __builtin_spirv_OpGroupNonUniformShuffleXor_i32_##TYPE_ABBR##_i32(uint Execution, TYPE Value, uint Mask);
+
+DECL_NON_UNIFORM_SHUFFLE(uchar,  i8)
+DECL_NON_UNIFORM_SHUFFLE(ushort, i16)
+DECL_NON_UNIFORM_SHUFFLE(uint,   i32)
+DECL_NON_UNIFORM_SHUFFLE(ulong,  i64)
+DECL_NON_UNIFORM_SHUFFLE(float,  f32)
+#if defined(cl_khr_fp64)
+DECL_NON_UNIFORM_SHUFFLE(double, f64)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_NON_UNIFORM_SHUFFLE(half,   f16)
+#endif // defined(cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_shuffle)
+
+#if defined(cl_khr_subgroup_shuffle_relative)
+#define DECL_NON_UNIFORM_SHUFFLE_RELATIVE(TYPE, TYPE_ABBR)                   \
+    TYPE __builtin_spirv_OpGroupNonUniformShuffleUp_i32_##TYPE_ABBR##_i32(   \
+        uint Execution, TYPE Value, uint Delta);                             \
+    TYPE __builtin_spirv_OpGroupNonUniformShuffleDown_i32_##TYPE_ABBR##_i32(uint Execution, TYPE Value, uint Delta);
+
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(uchar,  i8)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(ushort, i16)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(uint,   i32)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(ulong,  i64)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(float,  f32)
+#if defined(cl_khr_fp64)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(double, f64)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_NON_UNIFORM_SHUFFLE_RELATIVE(half,   f16)
+#endif // defined(cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_shuffle_relative)
+
+#if defined(cl_khr_subgroup_non_uniform_arithmetic) || defined(cl_khr_subgroup_clustered_reduce)
+#define DEFN_NON_UNIFORM_OPERATION_BASE(TYPE, OPERATION, TYPE_ABBR)
+#define DEFN_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, OPERATION, TYPE_ABBR)
+
+#if defined(cl_khr_subgroup_non_uniform_arithmetic)
+#define DEFN_NON_UNIFORM_OPERATION_BASE(TYPE, OPERATION, TYPE_ABBR)   \
+TYPE  __builtin_spirv_OpGroupNonUniform##OPERATION##_i32_i32_##TYPE_ABBR(uint Execution, uint Operation, TYPE X);
+#endif // defined(cl_khr_subgroup_non_uniform_arithmetic)
+
+#if defined(cl_khr_subgroup_clustered_reduce)
+#define DEFN_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, OPERATION, TYPE_ABBR)   \
+TYPE  __builtin_spirv_OpGroupNonUniform##OPERATION##_i32_i32_##TYPE_ABBR##_i32(uint Execution, uint Operation, TYPE X, uint ClusterSize);
+#endif // defined(cl_khr_subgroup_clustered_reduce)
+
+#define DEFN_NON_UNIFORM_OPERATION(TYPE, OPERATION, TYPE_ABBR)     \
+DEFN_NON_UNIFORM_OPERATION_BASE(TYPE, OPERATION, TYPE_ABBR)        \
+DEFN_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, OPERATION, TYPE_ABBR)
+
+// ARITHMETIC OPERATIONS
+
+// - OpGroupNonUniformIAdd, OpGroupNonUniformFAdd
+// - OpGroupNonUniformIMul, OpGroupNonUniformFMul
+#define DEFN_NON_UNIFORM_ADD_MUL(TYPE, TYPE_SIGN, TYPE_ABBR)   \
+DEFN_NON_UNIFORM_OPERATION(TYPE, TYPE_SIGN##Add, TYPE_ABBR)    \
+DEFN_NON_UNIFORM_OPERATION(TYPE, TYPE_SIGN##Mul, TYPE_ABBR)
+
+DEFN_NON_UNIFORM_ADD_MUL(uchar,  I, i8)
+DEFN_NON_UNIFORM_ADD_MUL(ushort, I, i16)
+DEFN_NON_UNIFORM_ADD_MUL(uint,   I, i32)
+DEFN_NON_UNIFORM_ADD_MUL(ulong,  I, i64)
+DEFN_NON_UNIFORM_ADD_MUL(float,  F, f32)
+#if defined(cl_khr_fp64)
+DEFN_NON_UNIFORM_ADD_MUL(double, F, f64)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DEFN_NON_UNIFORM_ADD_MUL(half,   F, f16)
+#endif // defined(cl_khr_fp16)
+
+// - OpGroupNonUniformSMin, OpGroupNonUniformUMin, OpGroupNonUniformFMin
+// - OpGroupNonUniformSMax, OpGroupNonUniformUMax, OpGroupNonUniformFMax
+#define DEFN_NON_UNIFORM_MIN_MAX(TYPE, TYPE_SIGN, TYPE_ABBR)   \
+DEFN_NON_UNIFORM_OPERATION(TYPE, TYPE_SIGN##Min, TYPE_ABBR)    \
+DEFN_NON_UNIFORM_OPERATION(TYPE, TYPE_SIGN##Max, TYPE_ABBR)
+
+DEFN_NON_UNIFORM_MIN_MAX(char,   S, i8)
+DEFN_NON_UNIFORM_MIN_MAX(uchar,  U, i8)
+DEFN_NON_UNIFORM_MIN_MAX(short,  S, i16)
+DEFN_NON_UNIFORM_MIN_MAX(ushort, U, i16)
+DEFN_NON_UNIFORM_MIN_MAX(int,    S, i32)
+DEFN_NON_UNIFORM_MIN_MAX(uint,   U, i32)
+DEFN_NON_UNIFORM_MIN_MAX(long,   S, i64)
+DEFN_NON_UNIFORM_MIN_MAX(ulong,  U, i64)
+DEFN_NON_UNIFORM_MIN_MAX(float,  F, f32)
+#if defined(cl_khr_fp64)
+DEFN_NON_UNIFORM_MIN_MAX(double, F, f64)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DEFN_NON_UNIFORM_MIN_MAX(half,   F, f16)
+#endif // defined(cl_khr_fp16)
+
+// BITWISE OPERATIONS
+
+// - OpGroupNonUniformBitwiseAnd
+// - OpGroupNonUniformBitwiseOr
+// - OpGroupNonUniformBitwiseXor
+#define DEFN_NON_UNIFORM_BITWISE_OPERATIONS(TYPE, TYPE_ABBR)  \
+DEFN_NON_UNIFORM_OPERATION(TYPE, BitwiseAnd, TYPE_ABBR)       \
+DEFN_NON_UNIFORM_OPERATION(TYPE, BitwiseOr, TYPE_ABBR)        \
+DEFN_NON_UNIFORM_OPERATION(TYPE, BitwiseXor, TYPE_ABBR)
+
+DEFN_NON_UNIFORM_BITWISE_OPERATIONS(uchar,  i8)
+DEFN_NON_UNIFORM_BITWISE_OPERATIONS(ushort, i16)
+DEFN_NON_UNIFORM_BITWISE_OPERATIONS(uint,   i32)
+DEFN_NON_UNIFORM_BITWISE_OPERATIONS(ulong,  i64)
+
+// LOGICAL OPERATIONS
+
+// - OpGroupNonUniformLogicalAnd
+// - OpGroupNonUniformLogicalOr
+// - OpGroupNonUniformLogicalXor
+#define DEFN_NON_UNIFORM_LOGICAL_OPERATIONS(TYPE, TYPE_ABBR)  \
+DEFN_NON_UNIFORM_OPERATION(TYPE, LogicalAnd, TYPE_ABBR)       \
+DEFN_NON_UNIFORM_OPERATION(TYPE, LogicalOr, TYPE_ABBR)        \
+DEFN_NON_UNIFORM_OPERATION(TYPE, LogicalXor, TYPE_ABBR)
+
+DEFN_NON_UNIFORM_LOGICAL_OPERATIONS(bool, i1)
+#endif // defined(cl_khr_subgroup_non_uniform_arithmetic) || defined(cl_khr_subgroup_clustered_reduce)
 
 uchar  __builtin_spirv_OpGroupIAdd_i32_i32_i8(uint Execution, uint Operation, uchar X);
 ushort __builtin_spirv_OpGroupIAdd_i32_i32_i16(uint Execution, uint Operation, ushort X);

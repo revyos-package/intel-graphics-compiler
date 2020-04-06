@@ -23,9 +23,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-#pragma once
 
-void spirv_fatal_error(const std::string &reason);
-void spirv_fatal_error(void);
+#ifndef IGCLLVM_IR_INTRINSICS_H
+#define IGCLLVM_IR_INTRINSICS_H
 
-#define spirv_assert(cond) { assert(cond); if (!(cond)) spirv_fatal_error(); }
+#include <llvm/IR/Intrinsics.h>
+
+namespace IGCLLVM
+{
+#if LLVM_VERSION_MAJOR < 10
+    using Intrinsic = llvm::Intrinsic::ID;
+#else
+    using Intrinsic = llvm::Intrinsic::IndependentIntrinsics;
+#endif
+}
+
+#endif

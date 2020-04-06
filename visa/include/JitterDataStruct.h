@@ -42,8 +42,9 @@ typedef struct {
     int numGRFUsed;
     int numAsmCount;
 
-    // Kernel specific area.
-    unsigned int spillMemUsed;
+    // spillMemUsed is the scratch size in byte of entire vISA stack for this function/kernel
+    // It contains spill size and caller/callee save size.
+    unsigned int spillMemUsed = 0;
 
     // Debug info is callee allocated
     // and populated only if
@@ -75,6 +76,8 @@ typedef struct {
     // for compute (GP or GP1), skip this offset to set FFID_GP1.
     // Will set FFID_GP if not skip
     uint32_t offsetToSkipSetFFIDGP = 0;
+
+    bool hasStackcalls = false;
 } FINALIZER_INFO;
 
 #endif // JITTERDATASTRUCT_

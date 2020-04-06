@@ -34,6 +34,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
+
+#include <llvmWrapper/Support/Alignment.h>
+
 #include "common/LLVMWarningsPop.hpp"
 
 using namespace llvm;
@@ -228,6 +231,25 @@ void InlineLocalsResolution::collectInfoOnSharedLocalMem(Module& M)
         unsigned maxBytesOnModule = 0;
         unsigned maxAlignOnModule = 0;
 
+        unsigned int maxWorkGroupSize = 448;
+        if (pCtx->platform.enableMaxWorkGroupSizeCalculation() &&
+            platform.EUCount != 0 && platform.SubSliceCount != 0)
+        {
+            unsigned int maxNumEUsPerSubSlice = platform.EuCountPerPoolMin;
+            if (platform.EuCountPerPoolMin == 0 || pCtx->platform.supportPooledEU())
+            {
+                maxNumEUsPerSubSlice = platform.EUCount / platform.SubSliceCount;
+            }
+            const unsigned int numThreadsPerEU = platform.ThreadCount / platform.EUCount;
+            unsigned int simdSizeUsed = 8;
+            unsigned int maxWS = maxNumEUsPerSubSlice * numThreadsPerEU * simdSizeUsed;
+            if (!iSTD::IsPowerOfTwo(maxWS))
+            {
+                maxWS = iSTD::RoundPower2((DWORD)maxWS) >> 1;
+            }
+            maxWorkGroupSize = std::min(maxWS, 1024u);
+        }
+
         // scan inst to collect all call instructions
 
         for (Module::iterator F = M.begin(), FE = M.end(); F != FE; ++F)
@@ -258,14 +280,7 @@ void InlineLocalsResolution::collectInfoOnSharedLocalMem(Module& M)
                         unsigned int numElements = numAdditionalElements;
                         if (allocAllWorkgroups)
                         {
-                            if (platform.ThreadCount > 448)
-                            {
-                                numElements += platform.ThreadCount;
-                            }
-                            else
-                            {
-                                numElements += 448;
-                            }
+                            numElements += maxWorkGroupSize;
                         }
                         const unsigned int size = numElements * elementSize;
                         const unsigned int align = elementSize;
@@ -296,7 +311,7 @@ void InlineLocalsResolution::collectInfoOnSharedLocalMem(Module& M)
                 GlobalVariable::ThreadLocalMode::NotThreadLocal,
                 ADDRESS_SPACE_LOCAL);
 
-            m_pGV->setAlignment(maxAlignOnModule);
+            m_pGV->setAlignment(MaybeAlign(maxAlignOnModule));
 
             for (auto call : callsToReplace)
             {

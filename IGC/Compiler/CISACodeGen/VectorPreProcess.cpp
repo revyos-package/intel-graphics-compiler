@@ -36,6 +36,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/InstIterator.h>
 #include <llvm/Support/MathExtras.h>
 #include <llvm/Transforms/Utils/Local.h>
+
+#include <llvmWrapper/Support/Alignment.h>
+
 #include "common/LLVMWarningsPop.hpp"
 
 using namespace llvm;
@@ -125,7 +128,7 @@ namespace
         {
             if (isa<LoadInst>(m_inst))
             {
-                getLoad()->setAlignment(alignment);
+                getLoad()->setAlignment(MaybeAlign(alignment));
             }
             else
             {
@@ -138,7 +141,7 @@ namespace
         }
         bool getIsVolatile() const
         {
-            return isa<LoadInst>(m_inst) ? getLoad()->isVolatile() : false;
+            return isa<LoadInst>(m_inst) ? getLoad()->isVolatile() : getLdRaw()->isVolatile();
         }
         Instruction* Create(Type* returnType)
         {
@@ -159,7 +162,7 @@ namespace
                 Value* offsetVal = hasComputedOffset ? ptr : ldraw->getOffsetValue();
                 ptr = ldraw->getResourceValue();
                 Type* types[2] = { returnType , ptr->getType() };
-                Value* args[3] = { ptr, offsetVal, m_builder.getInt32(alignment) };
+                Value* args[4] = { ptr, offsetVal, m_builder.getInt32(alignment), m_builder.getInt1(isVolatile) };
                 Function* newLdRawFunction =
                     GenISAIntrinsic::getDeclaration(ldraw->getModule(), ldraw->getIntrinsicID(), types);
                 return m_builder.CreateCall(newLdRawFunction, args);
@@ -206,15 +209,15 @@ namespace
         Instruction* const m_inst;
         IRBuilder<> m_builder;
         AbstractStoreInst(StoreInst* SI) : m_inst(SI), m_builder(SI) {}
-        AbstractStoreInst(GenIntrinsicInst* SRI) : m_inst(SRI), m_builder(SRI) {}
+        AbstractStoreInst(StoreRawIntrinsic* SRI) : m_inst(SRI), m_builder(SRI) {}
 
         StoreInst* getStore() const
         {
             return cast<StoreInst>(m_inst);
         }
-        GenIntrinsicInst* getStoreRaw() const
+        StoreRawIntrinsic* getStoreRaw() const
         {
-            return cast<GenIntrinsicInst>(m_inst);
+            return cast<StoreRawIntrinsic>(m_inst);
         }
     public:
         Instruction* getInst() const
@@ -223,13 +226,13 @@ namespace
         }
         unsigned int getAlignment() const
         {
-            return isa<StoreInst>(m_inst) ? getStore()->getAlignment() : (unsigned int)llvm::cast<ConstantInt>(getStoreRaw()->getArgOperand(3))->getZExtValue();
+            return isa<StoreInst>(m_inst) ? getStore()->getAlignment() : getStoreRaw()->getAlignment();
         }
         void setAlignment(unsigned int alignment)
         {
             if (isa<StoreInst>(m_inst))
             {
-                getStore()->setAlignment(alignment);
+                getStore()->setAlignment(MaybeAlign(alignment));
             }
         }
         Value* getValueOperand() const
@@ -259,7 +262,7 @@ namespace
                 Value* offset = hasComputedOffset ? ptr : getStoreRaw()->getArgOperand(1);
                 ptr = getPointerOperand();
                 Type* types[2] = { ptr->getType(), newType };
-                Value* args[4] = { ptr, offset, storedValue, m_builder.getInt32(alignment) };
+                Value* args[5] = { ptr, offset, storedValue, m_builder.getInt32(alignment), m_builder.getInt1(isVolatile) };
                 Function* newStoreRawFunction =
                     GenISAIntrinsic::getDeclaration(getStoreRaw()->getModule(), getStoreRaw()->getIntrinsicID(), types);
                 return m_builder.CreateCall(newStoreRawFunction, args);
@@ -290,13 +293,9 @@ namespace
             {
                 return Optional<AbstractStoreInst>(SI);
             }
-            else if (GenIntrinsicInst * II = dyn_cast<GenIntrinsicInst>(value))
+            else if (StoreRawIntrinsic* SRI = dyn_cast<StoreRawIntrinsic>(value))
             {
-                if (II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed ||
-                    II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed)
-                {
-                    return Optional<AbstractStoreInst>(II);
-                }
+                return Optional<AbstractStoreInst>(SRI);
             }
             return Optional<AbstractStoreInst>();
         }
@@ -531,7 +530,7 @@ void VectorPreProcess::createSplitVectorTypes(
     uint32_t* SVCounts,
     uint32_t& Len)
 {
-    uint32_t ebytes = ETy->getPrimitiveSizeInBits() / 8;
+    uint32_t ebytes = (unsigned int)ETy->getPrimitiveSizeInBits() / 8;
     if (ETy->isPointerTy())
     {
         ebytes = m_DL->getPointerTypeSize(ETy);
@@ -656,7 +655,7 @@ bool VectorPreProcess::splitStore(
             if (ETy->getPrimitiveSizeInBits() > tys[0]->getScalarSizeInBits())
             {
                 std::vector<Value*> splitScalars;
-                const uint32_t vectorSize = ETy->getPrimitiveSizeInBits() / tys[0]->getScalarSizeInBits();
+                const uint32_t vectorSize = (unsigned int)ETy->getPrimitiveSizeInBits() / tys[0]->getScalarSizeInBits();
                 Type* splitType = llvm::VectorType::get(tys[0], vectorSize);
                 for (uint32_t i = 0; i < nelts; i++)
                 {
@@ -820,7 +819,7 @@ bool VectorPreProcess::splitLoad(
     {
         if (svals[0]->getType()->getPrimitiveSizeInBits() < ETy->getPrimitiveSizeInBits())
         {
-            uint32_t scalarsPerElement = ETy->getPrimitiveSizeInBits() / svals[0]->getType()->getPrimitiveSizeInBits();
+            uint32_t scalarsPerElement = (unsigned int)ETy->getPrimitiveSizeInBits() / (unsigned int)svals[0]->getType()->getPrimitiveSizeInBits();
             assert(svals.size() % scalarsPerElement == 0 && scalarsPerElement > 1);
             ValVector mergedScalars;
             IRBuilder<> builder(LI->getParent());

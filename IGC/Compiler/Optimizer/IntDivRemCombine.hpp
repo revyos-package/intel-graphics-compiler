@@ -23,21 +23,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-#include <exception>
-#include <string>
-#include "SPIRVException.h"
-#include "common/LLVMWarningsPush.hpp"
-#include <llvm/Support/ErrorHandling.h>
-#include "common/LLVMWarningsPop.hpp"
+#pragma once
 
-void spirv_fatal_error(const std::string &reason)
-{
-    std::string msg = "SPIRV internal error: " + reason;
-    llvm::report_fatal_error(msg);
-}
+#include "Compiler/IGCPassSupport.h"
+#include "IGC/common/Types.hpp"
 
-void spirv_fatal_error(void)
+#include <llvm/Pass.h>
+
+
+namespace llvm {class FunctionPass;}
+namespace IGC
 {
-    std::string msg = "SPIRV internal error.";
-    llvm::report_fatal_error(msg);
-}
+    llvm::FunctionPass* createIntDivRemCombinePass();
+} // namespace IGC

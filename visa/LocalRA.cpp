@@ -45,8 +45,6 @@ using namespace vISA;
 #define SPLIT_USE_CNT_THRESHOLD 2
 #define SPLIT_USE_DISTANCE_THRESHOLD 100
 
-#define GET_BUNDLE(r, o)  (((r + o) % 64) / 4)
-
 extern unsigned int getStackCallRegSize(bool reserveStackCallRegs);
 extern void getForbiddenGRFs(vector<unsigned int>& regNum, G4_Kernel& kernel, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned reservedRegNum);
 extern void getCallerSaveGRF(vector<unsigned int>& regNum, G4_Kernel* kernel);
@@ -212,7 +210,7 @@ void LocalRA::preLocalRAAnalysis()
                 pregs->setGRFUnavailable(regNum);
             }
 
-            numRegLRA = 125 - numRowsReserved;
+            numRegLRA = (kernel.getNumRegTotal() - 3) - numRowsReserved;
         }
 
         if (builder.getOption(vISA_Debug))
@@ -692,6 +690,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
     std::vector<G4_Declare*> unallocatedRanges;
     bool needGlobalRA = true;
     uint32_t nextEOTGRF = numRegLRA;
+    std::unordered_set<unsigned int> emptyForbidden;
 
     if (nextEOTGRF < 112 && builder.hasEOTGRFBinding())
     {
@@ -804,12 +803,12 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
                 unsigned short occupiedBundles = gra.getOccupiedBundle(dcl);
 
                 nrows = phyRegMgr.findFreeRegs(sizeInWords, (bankAlign != BankAlign::Either) ? bankAlign : align,
-                    subAlign, regNum, subregNum, 0, numRegLRA - 1, occupiedBundles, 0, false);
+                    subAlign, regNum, subregNum, 0, numRegLRA - 1, occupiedBundles, 0, false, emptyForbidden, false);
             }
             else
             {
                 nrows = phyRegMgr.findFreeRegs(sizeInWords, (bankAlign != BankAlign::Either) ? bankAlign : align,
-                    subAlign, regNum, subregNum, numRegLRA - 1, 0, 0, 0, false);
+                    subAlign, regNum, subregNum, numRegLRA - 1, 0, 0, 0, false, emptyForbidden, false);
             }
 
             if (nrows)
@@ -851,7 +850,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
         {
             if (kernel.getOption(vISA_GenerateDebugInfo))
             {
-                uint32_t start = 0;
+                uint32_t start = 0, end = UNMAPPABLE_VISA_INDEX;
                 for (auto rit = kernel.fg.rbegin();
                     rit != kernel.fg.rend();
                     rit++)
@@ -860,13 +859,22 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
 
                     if (bb->size() > 0)
                     {
-                        break;
+                        for (auto inst : bb->getInstList())
+                        {
+                            if (inst->getCISAOff() != UNMAPPABLE_VISA_INDEX)
+                            {
+                                end = bb->back()->getCISAOff();
+                                break;
+                            }
+                        }
+                        if(end != UNMAPPABLE_VISA_INDEX)
+                            break;
                     }
                 }
 
                 for (auto dcl : unallocatedRanges)
                 {
-                    updateDebugInfo(kernel, dcl, start);
+                    updateDebugInfo(kernel, dcl, start, end);
                 }
 
                 // unallocatedRanges doesnt contain input dcls
@@ -874,7 +882,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
                 {
                     if (dcl->isInput())
                     {
-                        updateDebugInfo(kernel, dcl, start);
+                        updateDebugInfo(kernel, dcl, start, end);
                     }
                 }
             }
@@ -1083,7 +1091,8 @@ LocalLiveRange* GlobalRA::GetOrCreateLocalLiveRange(G4_Declare* topdcl)
     // Check topdcl of operand and setup a new live range if required
     if (!lr)
     {
-        lr = new (builder.mem) LocalLiveRange(builder);
+        localLiveRanges.push_back(LocalLiveRange(builder));
+        lr = &localLiveRanges.back();
         setLocalLR(topdcl, lr);
     }
 
@@ -1246,6 +1255,10 @@ void LocalRA::markReferences(unsigned int& numRowsEOT,
             {
                 curInst->setLexicalId(id);
                 lifetimeOpFound = true;
+                if (curInst->opcode() == G4_pseudo_lifetime_end)
+                {
+                    markReferencesInInst(inst_it);
+                }
                 continue;
             }
 
@@ -1387,7 +1400,16 @@ void LocalRA::calculateInputIntervals()
                                         pregs->isGRFAvailable(idx / G4_GRF_REG_SIZE))
                                     {
                                         inputRegLastRef[idx] = curInstId;
-                                        inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId));
+                                        if (builder.avoidDstSrcOverlap() &&
+                                            curInst->getDst() != NULL &&
+                                            hasDstSrcOverlapPotential(curInst->getDst(), src->asSrcRegRegion()))
+                                        {
+                                            inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId + 1));
+                                        }
+                                        else
+                                        {
+                                            inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId));
+                                        }
                                         if (kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
                                         {
                                             updateDebugInfo(kernel, topdcl, 0, curInst->getCISAOff());
@@ -1429,6 +1451,44 @@ void LocalRA::calculateInputIntervals()
         }
     }
 #endif
+}
+
+bool LocalRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegion* src)
+{
+    int dstOpndNumRows = 0;
+
+    if (dst->getBase()->isRegVar())
+    {
+        G4_Declare* dstDcl = dst->getBase()->asRegVar()->getDeclare();
+        if (dstDcl != nullptr)
+        {
+            int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) / G4_GRF_REG_NBYTES;
+            G4_DstRegRegion* dstRgn = dst;
+            dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + 1 > G4_GRF_REG_NBYTES;
+
+            if (src != NULL &&
+                src->isSrcRegRegion() &&
+                src->asSrcRegRegion()->getBase()->isRegVar())
+            {
+                G4_SrcRegRegion* srcRgn = src->asSrcRegRegion();
+                G4_Declare* srcDcl = src->getBase()->asRegVar()->getDeclare();
+                int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) / G4_GRF_REG_NBYTES;
+                bool srcOpndNumRows = srcRgn->getSubRegOff() + srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 > G4_GRF_REG_NBYTES;
+
+                if (dstOpndNumRows || srcOpndNumRows)
+                {
+                    if (!(gra.isEvenAligned(dstDcl) && gra.isEvenAligned(srcDcl) &&
+                        srcOffset % 2 == dstOffset % 2 &&
+                        dstOpndNumRows && srcOpndNumRows))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 // Function to calculate local live intervals in ascending order of starting point
@@ -1507,6 +1567,12 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
                             (curInst->isSplitSend() && i == 1)))
                            )
                         {
+#ifdef DEBUG_VERBOSE_ON
+                            if (curInst->getDst() != NULL && hasDstSrcOverlapPotential(curInst->getDst(), src->asSrcRegRegion()))
+                            {
+                                curInst->dump();
+                            }
+#endif
                             lr->setLastRef(curInst, idx + 1);
                         }
                         else
@@ -1518,7 +1584,8 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
             }
         }
 
-        if (G4_Inst_Table[curInst->opcode()].n_dst == 1)
+        if (G4_Inst_Table[curInst->opcode()].n_dst == 1  ||
+            curInst->isSplitIntrinsic())
         {
             // Scan dst
             G4_DstRegRegion* dst = curInst->getDst();
@@ -1951,7 +2018,7 @@ inline bool PhyRegsLocalRA::isWordBusy(int whichgrf, int word, int howmany)
     return retval;
 }
 
-bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, int &regnum, int nrows, int lastRowSize, int endReg, unsigned short occupiedBundles, int instID, bool isHybridAlloc)
+bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, int &regnum, int nrows, int lastRowSize, int endReg, unsigned short occupiedBundles, int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hintSet)
 {
     int foundItem = 0;
     int startReg = 0;
@@ -1974,9 +2041,9 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
     startReg = i;
     while (i <= endReg + nrows - 1)
     {
-        if (isGRFAvailable(i) &&
+        if (isGRFAvailable(i) && forbidden.find(i) == forbidden.end() &&
             regBusyVector[i] == 0 &&
-            (!isHybridAlloc || (((instID - regLastUse[i]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i] == 0))))
+            (!isHybridAlloc || (((instID - regLastUse[i]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i] == 0)) || hintSet))
         {
             foundItem++;
         }
@@ -2000,7 +2067,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
             else
             {
                 if (i + 1 <= endReg + nrows - 1 &&
-                    isGRFAvailable(i + 1) &&
+                    isGRFAvailable(i + 1) && forbidden.find(i+1) == forbidden.end() &&
                     (isWordBusy(i + 1, 0, lastRowSize) == false) &&
                     (!isHybridAlloc || (((instID - regLastUse[i + 1]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i + 1] == 0))))
                 {
@@ -2025,7 +2092,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
     return false;
 }
 
-bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, int &regnum, int nrows, int lastRowSize, int endReg, int instID, bool isHybridAlloc)
+bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, int &regnum, int nrows, int lastRowSize, int endReg, int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden)
 {
     int foundItem = 0;
     int startReg = 0;
@@ -2048,7 +2115,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, i
 
     while (i >= endReg && i >= 0)
     {
-        if (isGRFAvailable(i) &&
+        if (isGRFAvailable(i) && forbidden.find(i) == forbidden.end() &&
             regBusyVector[i] == 0 &&
             (!isHybridAlloc || (((instID - regLastUse[i]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i] == 0))))
         {
@@ -2074,7 +2141,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, i
             else
             {
                 if (i + 1 <= endReg &&
-                    isGRFAvailable(i + 1) &&
+                    isGRFAvailable(i + 1) && forbidden.find(i+1) ==forbidden.end() &&
                     (isWordBusy(i + 1, 0, lastRowSize) == false) &&
                     (!isHybridAlloc || (((instID - regLastUse[i + 1]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i + 1] == 0))))
                 {
@@ -2099,7 +2166,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, i
     return false;
 }
 
-bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, int size, BankAlign align, G4_SubReg_Align subalign, int &regnum, int &subregnum, int endReg, int instID, bool isHybridAlloc, bool forward)
+bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, int size, BankAlign align, G4_SubReg_Align subalign, int &regnum, int &subregnum, int endReg, int instID, bool isHybridAlloc, bool forward, std::unordered_set<unsigned int>& forbidden)
 {
     int i = regIdx;
     bool found = false;
@@ -2139,7 +2206,7 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, int size, BankAlign align, G4
             continue;
         }
 
-        if (isGRFAvailable(i, 1) &&
+        if (isGRFAvailable(i, 1) && forbidden.find(i) ==forbidden.end() &&
             (!isHybridAlloc || (((instID - regLastUse[i]) / 2 >= FF_LRA_WINDOW_SIZE) || (regLastUse[i] == 0))))
         {
             found = findFreeSingleReg(i, subalign, regnum, subregnum, size);
@@ -2282,13 +2349,13 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
 }
 
 int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align subalign, int& regnum, int& subregnum,
-    int startRegNum, int endRegNum, unsigned short occupiedBundles, unsigned int instID, bool isHybridAlloc)
+    int startRegNum, int endRegNum, unsigned short occupiedBundles, unsigned int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hintSet)
 {
     int nrows = 0;
     int lastRowSize = 0;
     LocalRA::getRowInfo(size, nrows, lastRowSize);
 
-    bool forward = startRegNum <= endRegNum ? true : false;
+    bool forward = hintSet ? startRegNum : (startRegNum <= endRegNum ? true : false);
     int startReg = forward ? startRegNum : startRegNum - nrows + 1;
     int endReg = forward ? endRegNum - nrows + 1 : endRegNum;
 
@@ -2298,11 +2365,11 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
     {
         if (forward)
         {
-            found = availableRegs.findFreeMultipleRegsForward(startReg, align, regnum, nrows, lastRowSize, endReg, occupiedBundles, instID, isHybridAlloc);
+            found = availableRegs.findFreeMultipleRegsForward(startReg, align, regnum, nrows, lastRowSize, endReg, occupiedBundles, instID, isHybridAlloc, forbidden, hintSet);
         }
         else
         {
-            found = availableRegs.findFreeMultipleRegsBackward(startReg, align, regnum, nrows, lastRowSize, endReg, instID, isHybridAlloc);
+            found = availableRegs.findFreeMultipleRegsBackward(startReg, align, regnum, nrows, lastRowSize, endReg, instID, isHybridAlloc, forbidden);
         }
         if (found)
         {
@@ -2320,7 +2387,7 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
     }
     else
     {
-        found = availableRegs.findFreeSingleReg(startReg, size, align, subalign, regnum, subregnum, endReg, instID, isHybridAlloc, forward);
+        found = availableRegs.findFreeSingleReg(startReg, size, align, subalign, regnum, subregnum, endReg, instID, isHybridAlloc, forward, forbidden);
         if (found)
         {
             availableRegs.setWordBusy(regnum, subregnum, size);
@@ -2438,8 +2505,10 @@ void LinearScan::run(G4_BB* bb, IR_Builder& builder, LLR_USE_MAP& LLRUseMap)
 
         expireRanges(idx);
         expireInputRanges(currInst->getLexicalId(), idx, firstGlobalIdx);
+        expireSplitParent(lr);
 
-        if (doBankConflict && builder.lowHighBundle() && (highInternalConflict || (simdSize >= 16 && builder.oneGRFBankDivision())))
+        if (!lr->hasHint() &&
+            doBankConflict && builder.lowHighBundle() && (highInternalConflict || (simdSize >= 16 && builder.oneGRFBankDivision())))
         {
             allocateRegResult = allocateRegsFromBanks(lr);
         }
@@ -2524,6 +2593,77 @@ void LinearScan::expireAllActive()
 
         expireRanges(endIdx);
     }
+}
+
+void LinearScan::expireSplitParent(LocalLiveRange* lr)
+{
+    // If lr is a partial live range, then expire its parent
+    // if all its children can get allocated such that they
+    // will all be coalesced away.
+
+    // Assumptions:
+    // 1) LR extends only upto last intrinsic_split inst
+    // 2) intrinsic_split instructions appear immediately
+    //     after ccurrent inst
+    auto varSplit = gra.getVarSplitPass();
+
+    if (!varSplit->isPartialDcl(lr->getTopDcl()))
+        return;
+
+    // lr is a partial dcl
+    auto parentDcl = varSplit->getParentDcl(lr->getTopDcl());
+
+    if (parentDcl == nullptr)
+        return;
+
+    // Now check whether parent in in active set
+    LocalLiveRange* parentLR = nullptr;
+    for (auto activeLR : active)
+    {
+        if (activeLR->getTopDcl() == parentDcl)
+        {
+            parentLR = activeLR;
+            break;
+        }
+    }
+
+    if (!parentLR)
+        return;
+
+    int subreg = 0;
+    if (!parentLR->getPhyReg(subreg) || !parentLR->getPhyReg(subreg)->isGreg())
+        return;
+
+    unsigned int phyRegNum = parentLR->getPhyReg(subreg)->asGreg()->getRegNum();
+
+    // Update forbidden for all children of lr
+    for (auto l : liveIntervals)
+    {
+        if (!varSplit->isPartialDcl(l->getTopDcl()))
+            continue;
+
+        // Partial dcl, check whether it is one of children of lr
+        if (varSplit->getParentDcl(l->getTopDcl()) == parentDcl)
+        {
+            auto siblingNum = varSplit->getSiblingNum(l->getTopDcl());
+            unsigned int sizePerChild = l->getTopDcl()->getNumRows();
+
+            l->setHint(phyRegNum + (siblingNum * sizePerChild));
+
+            if ((phyRegNum + (siblingNum * sizePerChild)) < (phyRegNum + parentDcl->getNumRows()))
+            {
+                // Setup forbidden vector
+                for (unsigned int i = phyRegNum + ((siblingNum +1)* sizePerChild); i != (phyRegNum + parentDcl->getNumRows()); i++)
+                {
+                    l->addForbidden(i);
+                }
+            }
+        }
+    }
+
+    unsigned int idx = 0;
+    parentLR->getLastRef(idx);
+    expireRanges(idx);
 }
 
 // idx is the current position being processed
@@ -2648,6 +2788,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
         bankAlign = gra.isEvenAligned(dcl) ? BankAlign::Even : BankAlign::Either;
     }
 
+    *startGRFReg = lr->hasHint() ? lr->getHint() : *startGRFReg;
     if (useRoundRobin)
     {
         nrows = pregManager.findFreeRegs(size,
@@ -2659,7 +2800,9 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
             localRABound,
             occupiedBundles,
             instID,
-            false);
+            false,
+            lr->getForbidden(),
+            lr->hasHint());
     }
     else
     {
@@ -2672,7 +2815,9 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
             localRABound,
             occupiedBundles,
             instID,
-            true);
+            true,
+            lr->getForbidden(),
+            lr->hasHint());
 
         if (!nrows)
         {
@@ -2685,7 +2830,9 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                 localRABound,
                 occupiedBundles,
                 instID,
-                false);
+                false,
+                lr->getForbidden(),
+                lr->hasHint());
         }
     }
 
@@ -2709,7 +2856,9 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                 endGRFReg,
                 occupiedBundles,
                 instID,
-                false);
+                false,
+                lr->getForbidden(),
+                lr->hasHint());
 
             if (nrows)
             {
@@ -2811,7 +2960,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
 
                                     if (totalElems == 32)
                                     {
-                                        G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, splitDcl->getRegVar(), 2, 0, 1, oldDcl->getElemType());
+                                        G4_DstRegRegion* dst = builder.createDst(splitDcl->getRegVar(), 2, 0, 1, oldDcl->getElemType());
                                         auto src = builder.createSrcRegRegion(Mod_src_undef, Direct, oldDcl->getRegVar(), 2, 0, builder.getRegionStride1(), oldDcl->getElemType());
                                         G4_INST* splitInst2 = builder.createMov(16, dst, src, InstOpt_WriteEnable, false);
                                         bb->insert(iter, splitInst2);
@@ -2841,7 +2990,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
 
                                     if (totalElems == 32)
                                     {
-                                        G4_DstRegRegion* dst = builder.createDstRegRegion(Direct, newDcl->getRegVar(), 2, 0, 1, splitDcl->getElemType());
+                                        G4_DstRegRegion* dst = builder.createDst(newDcl->getRegVar(), 2, 0, 1, splitDcl->getElemType());
                                         auto src = builder.createSrcRegRegion(Mod_src_undef, Direct, splitDcl->getRegVar(), 2, 0, builder.getRegionStride1(), splitDcl->getElemType());
                                         G4_INST* movInst2 = builder.createMov(16, dst, src, InstOpt_WriteEnable, false);
                                         bb->insert(iter, movInst2);
@@ -3022,6 +3171,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
             tmpLocalRABound,
             0,
             instID,
+            false,
+            lr->getForbidden(),
             false);
 
         if (nrows)
@@ -3071,6 +3222,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
                 tmpLocalRABound,
                 0,
                 instID,
+                false,
+                lr->getForbidden(),
                 false);
 
             if (!nrows)
@@ -3097,6 +3250,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
                     tmpLocalRABound,
                     0,
                     instID,
+                    false,
+                    lr->getForbidden(),
                     false);
             }
         }
@@ -3112,7 +3267,9 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
             tmpLocalRABound,
             0,
             instID,
-            true);
+            true,
+            lr->getForbidden(),
+            false);
 
         if (!nrows)
         {   //Try without window, no even/odd alignment for bank, but still low and high(keep in same bank)
@@ -3125,6 +3282,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
                 tmpLocalRABound,
                 0,
                 instID,
+                false,
+                lr->getForbidden(),
                 false);
         }
 
@@ -3151,6 +3310,8 @@ bool LinearScan::allocateRegsFromBanks(LocalLiveRange* lr)
                 tmpLocalRABound,
                 0,
                 instID,
+                false,
+                lr->getForbidden(),
                 false);
         }
     }

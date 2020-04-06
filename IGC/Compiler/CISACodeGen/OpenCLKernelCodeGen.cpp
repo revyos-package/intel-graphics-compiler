@@ -45,6 +45,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/Stats.hpp"
 #include "common/SystemThread.h"
 #include "common/secure_mem.h"
+#include "common/MDFrameWork.h"
 
 #include <iStdLib/utility.h>
 
@@ -73,6 +74,7 @@ namespace IGC
         m_pBtiLayout = &(ctx->btiLayout);
         m_Platform = &(ctx->platform);
         m_DriverInfo = &(ctx->m_DriverInfo);
+
     }
 
     COpenCLKernel::~COpenCLKernel()
@@ -757,6 +759,8 @@ namespace IGC
             locAnnotation->PayloadPosition = payloadPosition;
             locAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
             locAnnotation->ArgumentNumber = kernelArg->getAssociatedArgNo();
+            locAnnotation->LocationIndex = kernelArg->getLocationIndex();
+            locAnnotation->LocationCount = kernelArg->getLocationCount();
             m_kernelInfo.m_localPointerArgument.push_back(locAnnotation);
         }
         break;
@@ -1277,7 +1281,6 @@ namespace IGC
         }
         break;
         default:
-            // OCLTODO: What about PTR_LOCAL? no annotation?
             // Do nothing
             break;
         }
@@ -1566,6 +1569,10 @@ namespace IGC
             if (loadThreadPayload)
             {
                 uint perThreadInputSize = SIZE_WORD * 3 * (m_dispatchSize == SIMDMode::SIMD32 ? 32 : 16);
+                if (m_dispatchSize == SIMDMode::SIMD16 && getGRFSize() == 64)
+                {
+                    perThreadInputSize *= 2;
+                }
                 encoder.GetVISAKernel()->AddKernelAttribute("perThreadInputSize", sizeof(uint16_t), &perThreadInputSize);
             }
         }
@@ -1811,10 +1818,7 @@ namespace IGC
 
             size_t bufferSize = (ipsbMDHandle.Buffer).size();
             initConstant->InlineData.resize(bufferSize);
-            for (size_t i = 0; i < bufferSize; ++i)
-            {
-                initConstant->InlineData[i] = (ipsbMDHandle.Buffer)[i];
-            }
+            memcpy_s(initConstant->InlineData.data(), bufferSize, ipsbMDHandle.Buffer.data(), bufferSize);
 
             ctx->m_programInfo.m_initConstantAnnotation.push_back(std::move(initConstant));
         }
@@ -1828,10 +1832,7 @@ namespace IGC
 
             size_t bufferSize = (ipsbMDHandle.Buffer).size();
             initGlobal->InlineData.resize(bufferSize);
-            for (size_t i = 0; i < bufferSize; ++i)
-            {
-                initGlobal->InlineData[i] = (ipsbMDHandle.Buffer)[i];
-            }
+            memcpy_s(initGlobal->InlineData.data(), bufferSize, ipsbMDHandle.Buffer.data(), bufferSize);
 
             ctx->m_programInfo.m_initGlobalAnnotation.push_back(std::move(initGlobal));
         }
@@ -1904,7 +1905,7 @@ namespace IGC
 
         if (pOutput->m_scratchSpaceUsedBySpills == 0 ||
             noRetry ||
-            ctx->m_retryManager.IsLastTry(ctx) ||
+            ctx->m_retryManager.IsLastTry() ||
             fullDebugInfo)
         {
             // Save the shader program to the state processor to be handled later
@@ -2109,8 +2110,8 @@ namespace IGC
         CShader* simd8Program = m_parent->GetShader(SIMDMode::SIMD8);
         CShader* simd16Program = m_parent->GetShader(SIMDMode::SIMD16);
         CShader* simd32Program = m_parent->GetShader(SIMDMode::SIMD32);
-        CodeGenContext* pCtx = GetContext();
 
+        CodeGenContext* pCtx = GetContext();
         // Here we see if we have compiled a size for this shader already
         if ((simd8Program && simd8Program->ProgramOutput()->m_programSize > 0) ||
             (simd16Program && simd16Program->ProgramOutput()->m_programSize > 0) ||
@@ -2126,6 +2127,17 @@ namespace IGC
         ModuleMetaData* modMD = pCtx->getModuleMetaData();
         FunctionInfoMetaDataHandle funcInfoMD = pMdUtils->getFunctionsInfoItem(&F);
         int simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
+
+        // Finds the kernel and get the group simd size from the kernel
+        if (m_FGA)
+        {
+            llvm::Function* Kernel = &F;
+            auto FG = m_FGA->getGroup(&F);
+            Kernel = FG->getHead();
+            funcInfoMD = pMdUtils->getFunctionsInfoItem(Kernel);
+            simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
+        }
+
         uint32_t groupSize = 0;
         if (modMD->csInfo.maxWorkGroupSize)
         {

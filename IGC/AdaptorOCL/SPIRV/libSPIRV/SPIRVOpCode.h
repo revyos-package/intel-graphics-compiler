@@ -69,7 +69,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SPIRVUtil.h"
 #include "spirv.hpp"
 #include <string>
-
+#include "Probe.h"
 
 namespace spv{
 
@@ -82,7 +82,7 @@ SPIRVMap<Op, std::string>::init() {
 SPIRV_DEF_NAMEMAP(Op, OpCodeNameMap)
 
 inline bool isAtomicOpCode(Op OpCode) {
-  assert(OpAtomicLoad < OpAtomicXor);
+  IGC_ASSERT(OpAtomicLoad < OpAtomicXor);
   return ((unsigned)OpCode >= OpAtomicLoad
       && (unsigned)OpCode <= OpAtomicXor)
       || OpCode == OpAtomicFlagTestAndSet
@@ -166,7 +166,8 @@ inline bool hasExecScope(Op OpCode) {
 
 inline bool hasGroupOperation(Op OpCode) {
   unsigned OC = OpCode;
-  return OpGroupIAdd <= OC && OC <= OpGroupSMax;
+  return (OpGroupIAdd <= OC && OC <= OpGroupSMax) ||
+         (OpGroupNonUniformIAdd <= OC && OC <= OpGroupNonUniformLogicalXor);
 }
 
 inline bool isSubgroupAvcINTELTypeOpCode(Op OpCode) {
@@ -175,7 +176,7 @@ inline bool isSubgroupAvcINTELTypeOpCode(Op OpCode) {
 }
 
 inline unsigned getSubgroupAvcINTELTypeVectorWidth(Op Opcode) {
-  assert(isSubgroupAvcINTELTypeOpCode(Opcode));
+  IGC_ASSERT(isSubgroupAvcINTELTypeOpCode(Opcode));
 
   switch (Opcode) {
   case OpTypeAvcImeResultSingleReferenceStreamoutINTEL:
@@ -200,7 +201,7 @@ inline unsigned getSubgroupAvcINTELTypeVectorWidth(Op Opcode) {
     return 1;
 
   default:
-    assert(0 && "Unknown VME Opcode!");
+    IGC_ASSERT(0 && "Unknown VME Opcode!");
     return 0;
   }
 }

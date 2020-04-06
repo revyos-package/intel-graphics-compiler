@@ -608,6 +608,16 @@ void __attribute__((overloadable)) work_group_barrier(cl_mem_fence_flags flags, 
 void __attribute__((overloadable)) work_group_barrier(cl_mem_fence_flags flags);
 #endif
 
+#define DECL_GROUP_ADD_MIN_MAX(prefix, type) \
+type __attribute__((overloadable)) prefix##_add(type x); \
+type __attribute__((overloadable)) prefix##_min(type x); \
+type __attribute__((overloadable)) prefix##_max(type x);
+
+#define DECL_GROUP_REDUCE_SCAN(prefix, type) \
+DECL_GROUP_ADD_MIN_MAX(prefix##_reduce, type) \
+DECL_GROUP_ADD_MIN_MAX(prefix##_scan_exclusive, type) \
+DECL_GROUP_ADD_MIN_MAX(prefix##_scan_inclusive, type)
+
 /// OCL 2.0 built-ins
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
 // Workgroup builtins
@@ -638,52 +648,16 @@ WG_BROADCAST_ALL_DECL(float)
 WG_BROADCAST_ALL_DECL(double)
 #endif
 
-#define DECL_WORK_GROUP_REDUCE_OP(type, op_name) \
-type __attribute__((overloadable)) work_group_reduce_##op_name(type x);
-#define DECL_WORK_GROUP_SCAN_EXCLUSIVE_OP(type, op_name) \
-type __attribute__((overloadable)) work_group_scan_exclusive_##op_name(type x);
-#define DECL_WORK_GROUP_SCAN_INCLUSIVE_OP(type, op_name) \
-type __attribute__((overloadable)) work_group_scan_inclusive_##op_name(type x);
-
-#define DECL_WORK_GROUP_REDUCE_ALL(type) \
-DECL_WORK_GROUP_REDUCE_OP(type, add) \
-DECL_WORK_GROUP_REDUCE_OP(type, min) \
-DECL_WORK_GROUP_REDUCE_OP(type, max)
-
-#define DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(type) \
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_OP(type, add) \
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_OP(type, min) \
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_OP(type, max)
-
-#define DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(type) \
-DECL_WORK_GROUP_SCAN_INCLUSIVE_OP(type, add) \
-DECL_WORK_GROUP_SCAN_INCLUSIVE_OP(type, min) \
-DECL_WORK_GROUP_SCAN_INCLUSIVE_OP(type, max)
-
 #ifdef cl_khr_fp16
-DECL_WORK_GROUP_REDUCE_ALL(half)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(half)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(half)
+DECL_GROUP_REDUCE_SCAN(work_group, half)
 #endif
-DECL_WORK_GROUP_REDUCE_ALL(int)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(int)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(int)
-DECL_WORK_GROUP_REDUCE_ALL(uint)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(uint)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(uint)
-DECL_WORK_GROUP_REDUCE_ALL(long)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(long)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(long)
-DECL_WORK_GROUP_REDUCE_ALL(ulong)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(ulong)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(ulong)
-DECL_WORK_GROUP_REDUCE_ALL(float)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(float)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(float)
+DECL_GROUP_REDUCE_SCAN(work_group, int)
+DECL_GROUP_REDUCE_SCAN(work_group, uint)
+DECL_GROUP_REDUCE_SCAN(work_group, long)
+DECL_GROUP_REDUCE_SCAN(work_group, ulong)
+DECL_GROUP_REDUCE_SCAN(work_group, float)
 #if defined(cl_khr_fp64)
-DECL_WORK_GROUP_REDUCE_ALL(double)
-DECL_WORK_GROUP_SCAN_EXCLUSIVE_ALL(double)
-DECL_WORK_GROUP_SCAN_INCLUSIVE_ALL(double)
+DECL_GROUP_REDUCE_SCAN(work_group, double)
 #endif
 
 // Workitem builtins
@@ -5793,86 +5767,129 @@ void    __attribute__((overloadable)) sub_group_barrier( cl_mem_fence_flags flag
 int     __attribute__((overloadable)) sub_group_all( int predicate );
 int     __attribute__((overloadable)) sub_group_any( int predicate );
 
+#if defined(cl_khr_subgroup_non_uniform_vote)
+int     __attribute__((overloadable)) sub_group_elect(void);
+int     __attribute__((overloadable)) sub_group_non_uniform_all(int predicate);
+int     __attribute__((overloadable)) sub_group_non_uniform_any(int predicate);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(char value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(uchar value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(short value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(ushort value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(int value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(uint value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(long value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(ulong value);
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(float value);
+#if defined(cl_khr_fp64)
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(double value);
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(half value);
+#endif // defined(cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_non_uniform_vote)
+
+#if defined(cl_khr_subgroup_ballot)
+#define DECL_NON_UNIFORM_BROADCAST_BASE(GENTYPE)                                                          \
+    GENTYPE __attribute__((overloadable)) sub_group_non_uniform_broadcast(GENTYPE value, uint index);     \
+    GENTYPE __attribute__((overloadable)) sub_group_non_uniform_broadcast_first(GENTYPE value);
+
+#define DECL_NON_UNIFORM_BROADCAST(TYPE)        \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE)       \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##2)    \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##3)    \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##4)    \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##8)    \
+    DECL_NON_UNIFORM_BROADCAST_BASE(TYPE##16)
+
+DECL_NON_UNIFORM_BROADCAST(char)
+DECL_NON_UNIFORM_BROADCAST(uchar)
+DECL_NON_UNIFORM_BROADCAST(short)
+DECL_NON_UNIFORM_BROADCAST(ushort)
+DECL_NON_UNIFORM_BROADCAST(int)
+DECL_NON_UNIFORM_BROADCAST(uint)
+DECL_NON_UNIFORM_BROADCAST(long)
+DECL_NON_UNIFORM_BROADCAST(ulong)
+DECL_NON_UNIFORM_BROADCAST(float)
+#if defined(cl_khr_fp64)
+DECL_NON_UNIFORM_BROADCAST(double)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_NON_UNIFORM_BROADCAST(half)
+#endif // defined(cl_khr_fp16)
+
+uint4  __attribute__((overloadable)) sub_group_ballot(int predicate);
+int    __attribute__((overloadable)) sub_group_inverse_ballot(uint4 value);
+int    __attribute__((overloadable)) sub_group_ballot_bit_extract(uint4 value, uint index);
+uint   __attribute__((overloadable)) sub_group_ballot_bit_count(uint4 value);
+uint   __attribute__((overloadable)) sub_group_ballot_inclusive_scan(uint4 value);
+uint   __attribute__((overloadable)) sub_group_ballot_exclusive_scan(uint4 value);
+uint   __attribute__((overloadable)) sub_group_ballot_find_lsb(uint4 value);
+uint   __attribute__((overloadable)) sub_group_ballot_find_msb(uint4 value);
+uint4  __attribute__((overloadable)) get_sub_group_eq_mask(void);
+uint4  __attribute__((overloadable)) get_sub_group_ge_mask(void);
+uint4  __attribute__((overloadable)) get_sub_group_gt_mask(void);
+uint4  __attribute__((overloadable)) get_sub_group_le_mask(void);
+uint4  __attribute__((overloadable)) get_sub_group_lt_mask(void);
+#endif // defined(cl_khr_subgroup_ballot)
+
 int     __attribute__((overloadable)) sub_group_broadcast( int   x, uint sub_group_local_id );
 uint    __attribute__((overloadable)) sub_group_broadcast( uint  x, uint sub_group_local_id );
 long    __attribute__((overloadable)) sub_group_broadcast( long  x, uint sub_group_local_id );
 ulong   __attribute__((overloadable)) sub_group_broadcast( ulong x, uint sub_group_local_id );
 float   __attribute__((overloadable)) sub_group_broadcast( float x, uint sub_group_local_id );
 
-int     __attribute__((overloadable)) sub_group_reduce_add( int   x );
-uint    __attribute__((overloadable)) sub_group_reduce_add( uint  x );
-long    __attribute__((overloadable)) sub_group_reduce_add( long  x );
-ulong   __attribute__((overloadable)) sub_group_reduce_add( ulong x );
-float   __attribute__((overloadable)) sub_group_reduce_add( float x );
-int     __attribute__((overloadable)) sub_group_reduce_min( int   x );
-uint    __attribute__((overloadable)) sub_group_reduce_min( uint  x );
-long    __attribute__((overloadable)) sub_group_reduce_min( long  x );
-ulong   __attribute__((overloadable)) sub_group_reduce_min( ulong x );
-float   __attribute__((overloadable)) sub_group_reduce_min( float x );
-int     __attribute__((overloadable)) sub_group_reduce_max( int   x );
-uint    __attribute__((overloadable)) sub_group_reduce_max( uint  x );
-long    __attribute__((overloadable)) sub_group_reduce_max( long  x );
-ulong   __attribute__((overloadable)) sub_group_reduce_max( ulong x );
-float   __attribute__((overloadable)) sub_group_reduce_max( float x );
-
-int     __attribute__((overloadable)) sub_group_scan_exclusive_add( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_exclusive_add( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_exclusive_add( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_exclusive_add( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_exclusive_add( float x );
-int     __attribute__((overloadable)) sub_group_scan_exclusive_min( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_exclusive_min( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_exclusive_min( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_exclusive_min( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_exclusive_min( float x );
-int     __attribute__((overloadable)) sub_group_scan_exclusive_max( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_exclusive_max( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_exclusive_max( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_exclusive_max( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_exclusive_max( float x );
-
-int     __attribute__((overloadable)) sub_group_scan_inclusive_add( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_inclusive_add( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_inclusive_add( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_inclusive_add( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_inclusive_add( float x );
-int     __attribute__((overloadable)) sub_group_scan_inclusive_min( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_inclusive_min( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_inclusive_min( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_inclusive_min( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_inclusive_min( float x );
-int     __attribute__((overloadable)) sub_group_scan_inclusive_max( int   x );
-uint    __attribute__((overloadable)) sub_group_scan_inclusive_max( uint  x );
-long    __attribute__((overloadable)) sub_group_scan_inclusive_max( long  x );
-ulong   __attribute__((overloadable)) sub_group_scan_inclusive_max( ulong x );
-float   __attribute__((overloadable)) sub_group_scan_inclusive_max( float x );
+DECL_GROUP_REDUCE_SCAN(sub_group, int)
+DECL_GROUP_REDUCE_SCAN(sub_group, uint)
+DECL_GROUP_REDUCE_SCAN(sub_group, long)
+DECL_GROUP_REDUCE_SCAN(sub_group, ulong)
+DECL_GROUP_REDUCE_SCAN(sub_group, float)
 
 #ifdef cl_khr_fp16
 half    __attribute__((overloadable)) sub_group_broadcast( half x, uint sub_group_local_id );
-half    __attribute__((overloadable)) sub_group_reduce_add( half x );
-half    __attribute__((overloadable)) sub_group_reduce_min( half x );
-half    __attribute__((overloadable)) sub_group_reduce_max( half x );
-half    __attribute__((overloadable)) sub_group_scan_exclusive_add( half x );
-half    __attribute__((overloadable)) sub_group_scan_exclusive_min( half x );
-half    __attribute__((overloadable)) sub_group_scan_exclusive_max( half x );
-half    __attribute__((overloadable)) sub_group_scan_inclusive_add( half x );
-half    __attribute__((overloadable)) sub_group_scan_inclusive_min( half x );
-half    __attribute__((overloadable)) sub_group_scan_inclusive_max( half x );
+DECL_GROUP_REDUCE_SCAN(sub_group, half)
 #endif
 
 #if defined(cl_khr_fp64)
 double  __attribute__((overloadable)) sub_group_broadcast( double x, uint sub_group_local_id );
-double  __attribute__((overloadable)) sub_group_reduce_add( double x );
-double  __attribute__((overloadable)) sub_group_reduce_min( double x );
-double  __attribute__((overloadable)) sub_group_reduce_max( double x );
-double  __attribute__((overloadable)) sub_group_scan_exclusive_add( double x );
-double  __attribute__((overloadable)) sub_group_scan_exclusive_min( double x );
-double  __attribute__((overloadable)) sub_group_scan_exclusive_max( double x );
-double  __attribute__((overloadable)) sub_group_scan_inclusive_add( double x );
-double  __attribute__((overloadable)) sub_group_scan_inclusive_min( double x );
-double  __attribute__((overloadable)) sub_group_scan_inclusive_max( double x );
+DECL_GROUP_REDUCE_SCAN(sub_group, double)
 #endif
 #endif
+
+#if defined(cl_khr_subgroup_extended_types)
+
+char    __attribute__((overloadable)) sub_group_broadcast( char   x, uint sub_group_local_id );
+uchar   __attribute__((overloadable)) sub_group_broadcast( uchar  x, uint sub_group_local_id );
+short   __attribute__((overloadable)) sub_group_broadcast( short  x, uint sub_group_local_id );
+ushort  __attribute__((overloadable)) sub_group_broadcast( ushort x, uint sub_group_local_id );
+
+#define DECL_SUB_GROUP_BROADCAST_VEC(type) \
+type##2  __attribute__((overloadable)) sub_group_broadcast( type##2  x, uint sub_group_local_id ); \
+type##3  __attribute__((overloadable)) sub_group_broadcast( type##3  x, uint sub_group_local_id ); \
+type##4  __attribute__((overloadable)) sub_group_broadcast( type##4  x, uint sub_group_local_id ); \
+type##8  __attribute__((overloadable)) sub_group_broadcast( type##8  x, uint sub_group_local_id ); \
+type##16 __attribute__((overloadable)) sub_group_broadcast( type##16 x, uint sub_group_local_id );
+DECL_SUB_GROUP_BROADCAST_VEC(char)
+DECL_SUB_GROUP_BROADCAST_VEC(uchar)
+DECL_SUB_GROUP_BROADCAST_VEC(short)
+DECL_SUB_GROUP_BROADCAST_VEC(ushort)
+DECL_SUB_GROUP_BROADCAST_VEC(int)
+DECL_SUB_GROUP_BROADCAST_VEC(uint)
+DECL_SUB_GROUP_BROADCAST_VEC(long)
+DECL_SUB_GROUP_BROADCAST_VEC(ulong)
+DECL_SUB_GROUP_BROADCAST_VEC(float)
+#ifdef cl_khr_fp16
+DECL_SUB_GROUP_BROADCAST_VEC(half)
+#endif
+#if defined(cl_khr_fp64)
+DECL_SUB_GROUP_BROADCAST_VEC(double)
+#endif
+
+DECL_GROUP_REDUCE_SCAN(sub_group, char)
+DECL_GROUP_REDUCE_SCAN(sub_group, uchar)
+DECL_GROUP_REDUCE_SCAN(sub_group, short)
+DECL_GROUP_REDUCE_SCAN(sub_group, ushort)
+
+#endif // defined(cl_khr_subgroup_extended_types)
 
 #if defined(cl_khr_subgroups)
 // Any KHR-specific Sub Group Functions will go here.
@@ -6137,26 +6154,8 @@ ushort4  __attribute__((overloadable)) intel_sub_group_shuffle_xor( ushort4  x, 
 ushort8  __attribute__((overloadable)) intel_sub_group_shuffle_xor( ushort8  x, uint c );
 ushort16 __attribute__((overloadable)) intel_sub_group_shuffle_xor( ushort16 x, uint c );
 
-short    __attribute__((overloadable)) intel_sub_group_reduce_add( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_reduce_add( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_reduce_min( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_reduce_min( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_reduce_max( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_reduce_max( ushort  x );
-
-short    __attribute__((overloadable)) intel_sub_group_scan_exclusive_add( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_exclusive_add( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_scan_exclusive_min( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_exclusive_min( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_scan_exclusive_max( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_exclusive_max( ushort  x );
-
-short    __attribute__((overloadable)) intel_sub_group_scan_inclusive_add( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_inclusive_add( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_scan_inclusive_min( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_inclusive_min( ushort  x );
-short    __attribute__((overloadable)) intel_sub_group_scan_inclusive_max( short   x );
-ushort   __attribute__((overloadable)) intel_sub_group_scan_inclusive_max( ushort  x );
+DECL_GROUP_REDUCE_SCAN(intel_sub_group, short)
+DECL_GROUP_REDUCE_SCAN(intel_sub_group, ushort)
 
 ushort   __attribute__((overloadable)) intel_sub_group_block_read_us( read_only image2d_t image, int2 coord );
 ushort2  __attribute__((overloadable)) intel_sub_group_block_read_us2( read_only image2d_t image, int2 coord );
@@ -6260,26 +6259,8 @@ uchar4  __attribute__((overloadable)) intel_sub_group_shuffle_xor(uchar4  x, uin
 uchar8  __attribute__((overloadable)) intel_sub_group_shuffle_xor(uchar8  x, uint c);
 uchar16 __attribute__((overloadable)) intel_sub_group_shuffle_xor(uchar16 x, uint c);
 
-char    __attribute__((overloadable)) intel_sub_group_reduce_add(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_reduce_add(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_reduce_min(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_reduce_min(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_reduce_max(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_reduce_max(uchar  x);
-
-char    __attribute__((overloadable)) intel_sub_group_scan_exclusive_add(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_exclusive_add(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_scan_exclusive_min(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_exclusive_min(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_scan_exclusive_max(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_exclusive_max(uchar  x);
-
-char    __attribute__((overloadable)) intel_sub_group_scan_inclusive_add(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_inclusive_add(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_scan_inclusive_min(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_inclusive_min(uchar  x);
-char    __attribute__((overloadable)) intel_sub_group_scan_inclusive_max(char   x);
-uchar   __attribute__((overloadable)) intel_sub_group_scan_inclusive_max(uchar  x);
+DECL_GROUP_REDUCE_SCAN(intel_sub_group, char)
+DECL_GROUP_REDUCE_SCAN(intel_sub_group, uchar)
 
 uchar   __attribute__((overloadable)) intel_sub_group_block_read_uc(read_only image2d_t image, int2 coord);
 uchar2  __attribute__((overloadable)) intel_sub_group_block_read_uc2(read_only image2d_t image, int2 coord);
@@ -6408,6 +6389,84 @@ void    __attribute__((overloadable)) intel_sub_group_block_write_ul8(__local ul
 
 #endif // cl_intel_subgroup_local_block_io
 
+#if defined(cl_khr_subgroup_non_uniform_arithmetic) || defined(cl_khr_subgroup_clustered_reduce)
+#define DECL_SUB_GROUP_NON_UNIFORM_OPERATION(TYPE, GROUP_TYPE, OPERATION)
+#define DECL_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, GROUP_TYPE, OPERATION)
+
+#if defined(cl_khr_subgroup_non_uniform_arithmetic)
+#define DECL_SUB_GROUP_NON_UNIFORM_OPERATION(TYPE, GROUP_TYPE, OPERATION) \
+TYPE    __attribute__((overloadable)) sub_group_non_uniform_##GROUP_TYPE##_##OPERATION(TYPE value);
+#endif // defined(cl_khr_subgroup_non_uniform_arithmetic)
+
+#if defined(cl_khr_subgroup_clustered_reduce)
+#define DECL_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, GROUP_TYPE, OPERATION) \
+TYPE    __attribute__((overloadable)) sub_group_non_uniform_##GROUP_TYPE##_##OPERATION(TYPE value, uint clustersize);
+#endif // defined(cl_khr_subgroup_clustered_reduce)
+
+#define DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, OPERATION)           \
+DECL_SUB_GROUP_NON_UNIFORM_OPERATION(TYPE, reduce, OPERATION)            \
+DECL_SUB_GROUP_NON_UNIFORM_OPERATION(TYPE, scan_inclusive, OPERATION)    \
+DECL_SUB_GROUP_NON_UNIFORM_OPERATION(TYPE, scan_exclusive, OPERATION)    \
+DECL_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, reduce, OPERATION)
+
+// ARITHMETIC OPERATIONS
+// gentype sub_group_non_uniform_GROUP_TYPE_add(gentype value)
+// gentype sub_group_non_uniform_GROUP_TYPE_min(gentype value)
+// gentype sub_group_non_uniform_GROUP_TYPE_max(gentype value)
+// gentype sub_group_non_uniform_GROUP_TYPE_mul(gentype value)
+#define DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(TYPE)   \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, add)     \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, min)     \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, max)     \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, mul)
+
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(char)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(uchar)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(short)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(ushort)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(int)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(uint)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(long)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(ulong)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(float)
+#if defined(cl_khr_fp64)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(double)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_SUB_GROUP_ARITHMETIC_OPERATIONS(half)
+#endif // defined(cl_khr_fp16)
+
+// BITWISE OPERATIONS
+// gentype sub_group_non_uniform_GROUP_TYPE_and(gentype value)
+// gentype sub_group_non_uniform_GROUP_TYPE_or(gentype value)
+// gentype sub_group_non_uniform_GROUP_TYPE_xor(gentype value)
+#define DECL_SUB_GROUP_BITWISE_OPERATIONS(TYPE)    \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, and)   \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, or)    \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, xor)
+
+DECL_SUB_GROUP_BITWISE_OPERATIONS(char)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(uchar)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(short)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(ushort)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(int)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(uint)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(long)
+DECL_SUB_GROUP_BITWISE_OPERATIONS(ulong)
+
+// LOGICAL OPERATIONS
+// int sub_group_non_uniform_GROUP_TYPE_logical_and(int predicate)
+// int sub_group_non_uniform_GROUP_TYPE_logical_or(int predicate)
+// int sub_group_non_uniform_GROUP_TYPE_logical_xor(int predicate)
+#define DECL_SUB_GROUP_BITWISE_OPERATIONS(TYPE)             \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, logical_and)    \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, logical_or)     \
+DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, logical_xor)
+
+DECL_SUB_GROUP_BITWISE_OPERATIONS(int)
+
+#endif // defined(cl_khr_subgroup_non_uniform_arithmetic) || defined(cl_khr_subgroup_clustered_reduce)
+
 #ifdef cl_intel_media_block_io
 
 // Media Block read/write extension
@@ -6505,6 +6564,46 @@ double  __attribute__((overloadable)) intel_sub_group_shuffle_xor( double x, uin
 #endif
 
 #endif // defined(cl_intel_simd_operations_placeholder) || defined(cl_intel_subgroups) || defined(cl_khr_subgroups)
+
+#if defined(cl_khr_subgroup_shuffle)
+#define DECL_SUB_GROUP_SHUFFLE(TYPE)                                                  \
+TYPE    __attribute__((overloadable)) sub_group_shuffle(TYPE value, uint index);      \
+TYPE    __attribute__((overloadable)) sub_group_shuffle_xor(TYPE value, uint mask);
+
+DECL_SUB_GROUP_SHUFFLE(char)
+DECL_SUB_GROUP_SHUFFLE(uchar)
+DECL_SUB_GROUP_SHUFFLE(int)
+DECL_SUB_GROUP_SHUFFLE(uint)
+DECL_SUB_GROUP_SHUFFLE(long)
+DECL_SUB_GROUP_SHUFFLE(ulong)
+DECL_SUB_GROUP_SHUFFLE(float)
+#if defined(cl_khr_fp64)
+DECL_SUB_GROUP_SHUFFLE(double)
+#endif // defined(cl_khr_fp64)
+#if defined (cl_khr_fp16)
+DECL_SUB_GROUP_SHUFFLE(half)
+#endif // defined (cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_shuffle)
+
+#ifdef defined(cl_khr_subgroup_relative)
+#define DECL_SUB_GROUP_SHUFFLE_RELATIVE(TYPE)                                          \
+TYPE    __attribute__((overloadable)) sub_group_shuffle_up(TYPE value, uint delta);    \
+TYPE    __attribute__((overloadable)) sub_group_shuffle_down(TYPE value, uint delta);
+
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(char)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(uchar)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(int)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(uint)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(long)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(ulong)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(float)
+#if defined(cl_khr_fp64)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(double)
+#endif // defined(cl_khr_fp64)
+#if defined(cl_khr_fp16)
+DECL_SUB_GROUP_SHUFFLE_RELATIVE(half)
+#endif // defined (cl_khr_fp16)
+#endif // defined(cl_khr_subgroup_relative)
 
 #if defined(cl_intel_simd_operations_placeholder)
 // SIMD Operations

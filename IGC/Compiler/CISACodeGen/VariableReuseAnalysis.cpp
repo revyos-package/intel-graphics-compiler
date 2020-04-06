@@ -46,6 +46,12 @@ namespace
         VectorType* VTy = dyn_cast<VectorType>(V->getType());
         return VTy ? (int)VTy->getNumElements() : 1;
     }
+
+    inline int getTypeSizeInBits(Type* Ty) {
+        int scalarBits = Ty->getScalarSizeInBits();
+        VectorType* VTy = dyn_cast<VectorType>(Ty);
+        return scalarBits * (VTy ? (int)VTy->getNumElements() : 1);
+    }
 }
 
 char VariableReuseAnalysis::ID = 0;
@@ -365,7 +371,7 @@ void VariableReuseAnalysis::postProcessing()
     // BlockCoalescing : check if a BB is a to-be-skipped empty BB.
     // It is used for selecting BB to add lifetime start
     BlockCoalescing* theBC = &getAnalysis<BlockCoalescing>();
-    if (!m_DeSSA || IGC_GET_FLAG_VALUE(VATemp) < 3)
+    if (!m_DeSSA || m_pCtx->getVectorCoalescingControl() < 3)
         return;
 
     DenseMap<Value*, int> dessaRootVisited;
@@ -415,7 +421,7 @@ void VariableReuseAnalysis::postProcessing()
     }
 
     // For other vector values
-    if (IGC_GET_FLAG_VALUE(VATemp) < 4)
+    if (m_pCtx->getVectorCoalescingControl() < 4)
         return;
 
     for (auto II = inst_begin(*m_F), IE = inst_end(*m_F); II != IE; ++II)
@@ -495,16 +501,9 @@ bool VariableReuseAnalysis::getVectorIndicesIfConstant(
 
 void VariableReuseAnalysis::visitExtractElementInst(ExtractElementInst& I)
 {
-    if (IGC_GET_FLAG_VALUE(VATemp) == 0) {
+    if (m_pCtx->getVectorCoalescingControl() == 0) {
         return;
     }
-
-    // Do it for OCL only (todo enable it for other api)
-    if (!m_pCtx->m_DriverInfo.EnableVecAliasing())
-    {
-        return;
-    }
-
 
     ExtractElementInst* EEI = &I;
     Value* vecVal = EEI->getVectorOperand();
@@ -917,8 +916,7 @@ bool VariableReuseAnalysis::getElementValue(
 void VariableReuseAnalysis::InsertElementAliasing(Function* F)
 {
     // Do it if VATemp >= 2 and for ocl only for now
-    if (IGC_GET_FLAG_VALUE(VATemp) < 2 ||
-        !m_pCtx->m_DriverInfo.EnableVecAliasing()) {
+    if (m_pCtx->getVectorCoalescingControl() < 2) {
         return;
     }
 

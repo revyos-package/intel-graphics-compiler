@@ -176,6 +176,8 @@ class G4_VarBase;
 
 class G4_SpillIntrinsic;
 class G4_FillIntrinsic;
+
+
 }
 void associateOpndWithInst(vISA::G4_Operand*, vISA::G4_INST*);
 
@@ -298,8 +300,8 @@ public:
     static const int SLMIndex = 0xFE;
 
     G4_SendMsgDescriptor(uint32_t fCtrl, uint32_t regs2rcv, uint32_t regs2snd,
-        uint32_t fID, bool isEot, uint16_t extMsgLength, uint32_t extFCtrl,
-        SendAccess access, G4_Operand *bti, G4_Operand *sti, IR_Builder& builder);
+        SFID fID, uint16_t extMsgLength, uint32_t extFCtrl,
+        SendAccess access, G4_Operand* bti, G4_Operand* sti, IR_Builder& builder);
 
     /// Construct a object with descriptor and extended descriptor values.
     /// used in IR_Builder::createSendMsgDesc(uint32_t desc, uint32_t extDesc, SendAccess access)
@@ -376,16 +378,18 @@ public:
     }
 
     /* Info methods */
+    // common for all sends
     uint16_t ResponseLength() const { return desc.layout.rspLength; }
     uint16_t MessageLength() const { return desc.layout.msgLength; }
     uint16_t extMessageLength() const { return (uint16_t)src1Len; }
-
-    bool isCPSEnabled() const {return extDesc.layout.cps != 0;}
     bool isDataPortRead() const { return accessType != SendAccess::WRITE_ONLY; }
     bool isDataPortWrite() const { return accessType != SendAccess::READ_ONLY; }
     SendAccess getAccess() const { return accessType; }
-    bool isValidFuncCtrl() const { return funcCtrlValid;  }
-    bool isSampler() const {return getFuncId() == SFID::SAMPLER;}
+    bool isValidFuncCtrl() const { return funcCtrlValid; }
+    bool isHeaderPresent() const;
+    void setHeaderPresent(bool val);
+
+    // for HDC messages only (DC0/DC1/DC2)
     bool isHDC() const
     {
         auto funcID = getFuncId();
@@ -395,43 +399,19 @@ public:
             funcID == SFID::DP_DC2 ||
             funcID == SFID::DP_CC;
     }
-    // isHDC() must be true
+
     uint32_t getHdcMessageType() const;
-
-    bool isThreadMessage() const {
-        return getFuncId() == SFID::GATEWAY || getFuncId() == SFID::SPAWNER;
-    }
-
     bool isAtomicMessage() const;
     uint16_t getHdcAtomicOp() const;
 
     bool isSLMMessage() const;
 
-    bool isBarrierMsg() const;
-    bool isFence() const;
-
-    bool isSendBarrier() const {
-        return isAtomicMessage() || isBarrierMsg();  // atomic write or explicit barrier
-    }
-
-    /////////////////////////////////////////////////////////
-    // the following may only be called on HDC messages
     unsigned int getEnabledChannelNum() const;
     unsigned int getBlockNum() const;
     unsigned int getBlockSize() const;
-    // true if the message is either oword read or unaligned oword read
     bool isOwordLoad() const;
 
-    // introduced to replace direct access to desc bits
     bool isHdcTypedSurfaceWrite() const;
-
-    // TODO: this should be eliminated; it only supports a subset of messages
-    // and can produce a false negative on newer messages; it also doesn't
-    // support the SFID separate from the descriptor
-    //
-    // read-only implies that it doesn't write (e.g. an atomic)
-    static bool isReadOnlyMessage(uint32_t msgDesc, uint32_t exDesc);
-
 
     // return offset in unit of GRF
     uint16_t getScratchRWOffset() const
@@ -440,19 +420,6 @@ public:
         return (getFuncCtrl() & 0xFFFu);
     }
 
-    // number of GRFs to read/write
-    //
-    // Block Size indicates the number of simd-8 registers to be read|written.
-    //  11: 8 registers
-    //  10: 4 registers
-    //  01: 2 registers
-    //  00: 1 register
-    uint16_t getScratchRWSize() const
-    {
-        MUST_BE_TRUE(isScratchRW(), "Message is not scratch space R/W.");
-        uint16_t bitV = ((getFuncCtrl() & 0x3000u) >> 12);
-        return  0x1 << bitV;
-    }
     bool isScratchRW() const
     {
         // scratch msg: DC0, bit 18 = 1
@@ -460,23 +427,38 @@ public:
     }
     bool isScratchRead() const
     {
-        if( !isScratchRW() )
-            return false;
-        return ((getFuncCtrl() & 0x20000u) == 0);
+        return isScratchRW() && (getFuncCtrl() & 0x20000u) == 0;
     }
     bool isScratchWrite() const
     {
-        if( !isScratchRW() )
-            return false;
-        return ((getFuncCtrl ()& 0x20000u) != 0);
+        return isScratchRW() && (getFuncCtrl() & 0x20000u) != 0;
+    }
+    uint16_t getScratchRWSize() const
+    {
+        MUST_BE_TRUE(isScratchRW(), "Message is not scratch space R/W.");
+        uint16_t bitV = ((getFuncCtrl() & 0x3000u) >> 12);
+        return  0x1 << bitV;
     }
 
-    bool isHeaderPresent() const;
-    void setHeaderPresent(bool val);
+    bool isA64Message() const;
 
+    // for sampler mesasges only
+    bool isSampler() const { return getFuncId() == SFID::SAMPLER; }
+    bool isCPSEnabled() const { return extDesc.layout.cps != 0; }
     bool is16BitInput() const;
     bool is16BitReturn() const;
-    bool isA64Message() const;
+
+    bool isThreadMessage() const
+    {
+        return getFuncId() == SFID::GATEWAY || getFuncId() == SFID::SPAWNER;
+    }
+
+    bool isBarrierMsg() const;
+    bool isFence() const;
+
+    bool isSendBarrier() const {
+        return isAtomicMessage() || isBarrierMsg();  // atomic write or explicit barrier
+    }
 
     const G4_Operand *getBti() const {return m_bti;}
           G4_Operand *getBti()       {return m_bti;}
@@ -700,6 +682,7 @@ public:
     G4_SpillIntrinsic* asSpillIntrinsic() const;
     bool isFillIntrinsic() const;
     G4_FillIntrinsic* asFillIntrinsic() const;
+    bool isSplitIntrinsic() const;
     bool isLifeTimeEnd() const { return op == G4_pseudo_lifetime_end; }
     bool isMov() const { return G4_Inst_Table[op].instType == InstTypeMov; }
     bool isLogic() const { return G4_Inst_Table[op].instType == InstTypeLogic; }
@@ -752,6 +735,7 @@ public:
     }
 
     bool isPartialWrite() const;
+    bool isPartialWriteForSpill(bool inSIMDCF) const;
     bool isArithAddr() const;
     bool isMovAddr() const;
     bool isAccSrcInst() const;
@@ -802,6 +786,15 @@ public:
     void setSrc(G4_Operand* opnd, unsigned i);
     int getNumSrc() const;
 
+    // this assume we don't have to recompute bound for the swapped source
+    // Note that def-use chain is not maintained after this; call swapDefUse
+    // if you want to update the du-chain.
+    void swapSrc(int src1, int src2)
+    {
+        assert(src1 >= 0 && src1 < getNumSrc() && src2 >= 0 && src2 < getNumSrc() && "illegal src number");
+        std::swap(srcs[src1], srcs[src2]);
+    }
+
     G4_Label* getLabel()
     {
         MUST_BE_TRUE( op == G4_label, "inst must be a label");
@@ -835,13 +828,18 @@ public:
 
     void computeARFRightBound();
 
+    static bool isMaskOption(G4_InstOption opt)
+    {
+        return (opt & InstOpt_QuarterMasks) != 0;
+    }
+
     void setOptions(unsigned int o)
     {
         unsigned int oldMaskOffset = getMaskOffset();
         option = o;
         unsigned int newMaskOffset = getMaskOffset();
 
-        if( oldMaskOffset != newMaskOffset )
+        if (oldMaskOffset != newMaskOffset)
         {
             // Change in mask offset requires change in
             // bounds for pred/cond mod/impl acc src/dst
@@ -849,32 +847,16 @@ public:
         }
     }
 
-    void setOptionOn(unsigned int o)
+    void setOptionOn(G4_InstOption o)
     {
-        unsigned int oldMaskOffset = getMaskOffset();
+        assert(!isMaskOption(o) && "use setMaskOption() to change emask instead");
         option |= o;
-        unsigned int newMaskOffset = getMaskOffset();
-
-        if( oldMaskOffset != newMaskOffset )
-        {
-            // Change in mask offset requires change in
-            // bounds for pred/cond mod/impl acc src/dst
-            computeARFRightBound();
-        }
     }
 
-    void setOptionOff(unsigned int o)
+    void setOptionOff(G4_InstOption o)
     {
-        unsigned int oldMaskOffset = getMaskOffset();
+        assert(!isMaskOption(o) && "use setMaskOption() to change emask instead");
         option &= (~o);
-        unsigned int newMaskOffset = getMaskOffset();
-
-        if( oldMaskOffset != newMaskOffset )
-        {
-            // Change in mask offset requires change in
-            // bounds for pred/cond mod/impl acc src/dst
-            computeARFRightBound();
-        }
     }
     unsigned int getOption() const {return option;}
     unsigned int getMaskOption() const {return option & InstOpt_Masks;}
@@ -886,6 +868,19 @@ public:
         setOptions((option & ~InstOpt_QuarterMasks) | opt);
     }
 
+    void setNoMask(bool clearEMask)
+    {
+        if (clearEMask)
+        {
+            // Clear the M0/M4/M8 emask as well
+            setOptions((getOption() & ~InstOpt_Masks) | InstOpt_WriteEnable);
+        }
+        else
+        {
+            setOptionOn(InstOpt_WriteEnable);
+        }
+    }
+
     bool is1QInst() const { return execSize == 8 && getMaskOffset() == 0; }
     bool isWriteEnableInst() const { return (option & InstOpt_WriteEnable) ? true : false; }
     bool isYieldInst() const { return (option & InstOpt_Switch) ? true : false; }
@@ -894,6 +889,7 @@ public:
     void emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs);
     void emit(std::ostream& output, bool symbolreg = false, bool dotStyle = false);
     void emitDefUse(std::ostream& output);
+    void print(std::ostream& OS) const;
     void dump() const;
     bool isValidSymbolOperand(bool &dst_valid, bool *srcs_valid) const;
     const char *getLabelStr() const;
@@ -1220,8 +1216,14 @@ class G4_InstCF : public G4_INST
     // list of labels that this instruction could jump to.  Only used for switch jmps
     std::list<G4_Label*> indirectJmpTarget;
 
-    // Ture if this is a backward branch.
+    // True if this is a backward branch.
     bool isBackwardBr;
+
+    // True if this branch is a uniform. By uniform, it means that all active lanes
+    // at the branch goes to the same target (Valid for if/while/break/goto/jmpi only.
+    // This info could be encoded in instOpt.).  Note that all active lanes at the
+    // branch could be subset of all active lanes on entry to shader/kernel.
+    bool isUniformBr;
 
 public:
 
@@ -1236,9 +1238,10 @@ public:
         G4_Label* uipLabel,
         uint32_t instOpt) :
         G4_INST(builder, prd, op, nullptr, false, size, nullptr, nullptr, nullptr, instOpt),
-        jip(jipLabel), uip(uipLabel), isBackwardBr(false)
+        jip(jipLabel), uip(uipLabel), isBackwardBr(false), isUniformBr(false)
     {
-
+        isUniformBr = (op == G4_jmpi ||
+                       (op == G4_goto && (size == 1 || prd == nullptr)));
     }
 
     // used by jump/call/ret
@@ -1253,8 +1256,10 @@ public:
         G4_Operand* s0,
         unsigned int opt) :
         G4_INST(builder, prd, o, m, sat, size, d, s0, nullptr, opt),
-        jip(NULL), uip(NULL), isBackwardBr(false)
+        jip(NULL), uip(NULL), isBackwardBr(false), isUniformBr(false)
     {
+        isUniformBr = (op == G4_jmpi ||
+            (op == G4_goto && (size == 1 || prd == nullptr)));
     }
 
     bool isCFInst() const override { return true; }
@@ -1283,6 +1288,9 @@ public:
     void setBackward(bool val) {isBackwardBr = val;}
 
     bool isBackward() const {return isBackwardBr;}
+
+    void setUniform(bool val) { isUniformBr = val; }
+    bool isUniform() const { return isUniformBr; }
 
     bool isIndirectJmp() const;
 
@@ -1342,6 +1350,18 @@ public:
         G4_SendMsgDescriptor* md);
 
     bool isSendc() const { return op == G4_sendc || op == G4_sendsc; }
+    void setSendc()
+    {
+        // no effect if op is already G4_sendc/G4_sendsc
+        if (op == G4_send)
+        {
+            op = G4_sendc;
+        }
+        else if (op == G4_sends)
+        {
+            op = G4_sendsc;
+        }
+    }
     bool mayExceedTwoGRF() const override { return true; }
 
     G4_Operand* getMsgDescOperand() const
@@ -1431,6 +1451,7 @@ enum class Intrinsic
     PseudoKill,
     Spill,
     Fill,
+    Split,
     NumIntrinsics
 };
 
@@ -1468,7 +1489,8 @@ static const IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] =
     {Intrinsic::MemFence,   "mem_fence",    0,      0,      Phase::BinaryEncoding,  { 0, 0, 0, false, false } },
     {Intrinsic::PseudoKill, "pseudo_kill",  1,      1,      Phase::RA,              { 0, 0, 0, false, false} },
     {Intrinsic::Spill,      "spill",        1,      2,      Phase::RA,              { 0, 0, 0, false, false } },
-    {Intrinsic::Fill,       "fill",         1,      1,      Phase::RA,              { 0, 0, 0, false, false } }
+    {Intrinsic::Fill,       "fill",         1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::Split,      "split",        1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
 };
 
 namespace vISA
@@ -2285,6 +2307,21 @@ public:
     virtual G4_CmpRelation compareOperand(G4_Operand *opnd)
     {
         return Rel_disjoint;
+    }
+
+    static G4_Type GetNonVectorImmType(G4_Type type)
+    {
+        switch (type)
+        {
+            case Type_V:
+                return Type_W;
+            case Type_UV:
+                return Type_UW;
+            case Type_VF:
+                return Type_F;
+            default:
+                return type;
+        }
     }
 };
 
@@ -3818,6 +3855,11 @@ inline G4_FillIntrinsic* G4_INST::asFillIntrinsic() const
 {
     MUST_BE_TRUE(isFillIntrinsic(), "not a fill intrinsic");
     return const_cast<G4_FillIntrinsic*>(reinterpret_cast<const G4_FillIntrinsic*>(this));
+}
+
+inline bool G4_INST::isSplitIntrinsic() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::Split;
 }
 
 inline const char* G4_INST::getLabelStr() const

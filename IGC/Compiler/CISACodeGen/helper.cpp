@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <llvmWrapper/Support/KnownBits.h>
 #include <llvmWrapper/IR/Instructions.h>
+#include <llvmWrapper/Support/Alignment.h>
 
 #include "common/LLVMWarningsPop.hpp"
 
@@ -226,7 +227,7 @@ namespace IGC
     {
         llvm::LoadInst* LI = new llvm::LoadInst(Ptr, "", Orig);
         LI->setVolatile(Orig->isVolatile());
-        LI->setAlignment(Orig->getAlignment());
+        LI->setAlignment(MaybeAlign(Orig->getAlignment()));
         if (LI->isAtomic())
         {
             LI->setAtomic(Orig->getOrdering(), IGCLLVM::getSyncScopeID(Orig));
@@ -246,7 +247,7 @@ namespace IGC
     {
         llvm::StoreInst* SI = new llvm::StoreInst(Val, Ptr, Orig);
         SI->setVolatile(Orig->isVolatile());
-        SI->setAlignment(Orig->getAlignment());
+        SI->setAlignment(MaybeAlign(Orig->getAlignment()));
         if (SI->isAtomic())
         {
             SI->setAtomic(Orig->getOrdering(), IGCLLVM::getSyncScopeID(Orig));
@@ -284,7 +285,8 @@ namespace IGC
         {
             bufPtr,
             offsetVal,
-            builder.getInt32(alignment)
+            builder.getInt32(alignment),
+            builder.getInt1(inst->isVolatile()) // volatile
         };
         Value* ld = builder.CreateCall(func, attr);
         assert(ld->getType() == inst->getType());
@@ -321,7 +323,8 @@ namespace IGC
             bufPtr,
             offsetVal,
             storeVal,
-            builder.getInt32(storeVal->getType()->getScalarSizeInBits() / 8)
+            builder.getInt32(storeVal->getType()->getScalarSizeInBits() / 8),
+            builder.getInt1(inst->isVolatile()) // volatile
         };
         Value* st = builder.CreateCall(func, attr);
         return st;
@@ -331,7 +334,7 @@ namespace IGC
     /// Tries to trace a resource pointer (texture/sampler/buffer) back to
     /// the pointer source. Also returns a vector of all instructions in the search path
     ///
-    Value* TracePointerSource(Value* resourcePtr, bool hasBranching, bool fillList,
+    Value* TracePointerSource(Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList,
         std::vector<Value*>& instList, llvm::SmallSet<PHINode*, 8> & visitedPHIs)
     {
         Value* srcPtr = nullptr;
@@ -396,7 +399,7 @@ namespace IGC
                     // All phi paths must be trace-able and trace back to the same source
                     Value* phiVal = inst->getIncomingValue(i);
                     std::vector<Value*> splitList;
-                    Value* phiSrcPtr = TracePointerSource(phiVal, true, fillList, splitList, visitedPHIs);
+                    Value* phiSrcPtr = TracePointerSource(phiVal, true, enablePhiLoops, fillList, splitList, visitedPHIs);
                     if (phiSrcPtr == nullptr)
                     {
                         // Incoming value not trace-able, bail out.
@@ -405,7 +408,10 @@ namespace IGC
                     else if (isa<PHINode>(phiSrcPtr) && phiSrcPtr == baseValue)
                     {
                         // Found a loop in one of the phi paths. We can still trace as long as all the other paths match
-                        continue;
+                        if (enablePhiLoops)
+                            continue;
+                        else
+                            return nullptr;
                     }
                     else if (srcPtr == nullptr)
                     {
@@ -431,8 +437,8 @@ namespace IGC
                 }
                 // Trace both operands of the select instruction. Both have to be traced back to the same
                 // source pointer, otherwise we can't determine which one to use.
-                Value* selectSrc0 = TracePointerSource(inst->getOperand(1), true, fillList, instList, visitedPHIs);
-                Value* selectSrc1 = TracePointerSource(inst->getOperand(2), true, false, instList, visitedPHIs);
+                Value* selectSrc0 = TracePointerSource(inst->getOperand(1), true, enablePhiLoops, fillList, instList, visitedPHIs);
+                Value* selectSrc1 = TracePointerSource(inst->getOperand(2), true, enablePhiLoops, false, instList, visitedPHIs);
                 if (selectSrc0 && selectSrc1 && selectSrc0 == selectSrc1)
                 {
                     srcPtr = selectSrc0;
@@ -468,13 +474,13 @@ namespace IGC
     {
         std::vector<Value*> tempList; //unused
         llvm::SmallSet<PHINode*, 8> visitedPHIs;
-        return TracePointerSource(resourcePtr, false, false, tempList, visitedPHIs);
+        return TracePointerSource(resourcePtr, false, true, false, tempList, visitedPHIs);
     }
 
-    Value* TracePointerSource(Value* resourcePtr, bool hasBranching, bool fillList, std::vector<Value*>& instList)
+    Value* TracePointerSource(Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList, std::vector<Value*>& instList)
     {
         llvm::SmallSet<PHINode*, 8> visitedPHIs;
-        return TracePointerSource(resourcePtr, hasBranching, fillList, instList, visitedPHIs);
+        return TracePointerSource(resourcePtr, hasBranching, enablePhiLoops, fillList, instList, visitedPHIs);
     }
 
     static BufferAccessType getDefaultAccessType(BufferType bufTy)
@@ -667,146 +673,6 @@ namespace IGC
         return false;
     }
 
-    ///
-    /// Wrapper method for changing PTRType for PromoteToBindless Pass.
-    /// Replaces oldPtr with newPtr in a sample/ld intrinsic's argument list. The new instrinsic will
-    /// replace the old one in the module
-    ///
-    void ChangePtrTypeInIntrinsic(llvm::GenIntrinsicInst*& pIntr, llvm::Value* oldPtr, llvm::Value* newPtr, bool isExtendedForBindlessPromotion)
-    {
-        llvm::Module* pModule = pIntr->getParent()->getParent()->getParent();
-        llvm::Function* pCalledFunc = pIntr->getCalledFunction();
-
-        // Look at the intrinsic and figure out which pointer to change
-        int num_ops = pIntr->getNumArgOperands();
-        llvm::SmallVector<llvm::Value*, 5> args;
-
-        for (int i = 0; i < num_ops; ++i)
-        {
-            if (pIntr->getArgOperand(i) == oldPtr)
-                args.push_back(newPtr);
-            else
-                args.push_back(pIntr->getArgOperand(i));
-        }
-
-        llvm::Function* pNewIntr = nullptr;
-        llvm::SmallVector<llvm::Type*, 4> overloadedTys;
-        GenISAIntrinsic::ID id = pIntr->getIntrinsicID();
-
-        bool isPointerChangedInFallbackMethod = false;
-
-        switch (id)
-        {
-        case llvm::GenISAIntrinsic::GenISA_ldmcsptr:
-        case llvm::GenISAIntrinsic::GenISA_ldptr:
-        case llvm::GenISAIntrinsic::GenISA_ldmsptr:
-        case llvm::GenISAIntrinsic::GenISA_resinfoptr:
-        case llvm::GenISAIntrinsic::GenISA_readsurfaceinfoptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleinfoptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleBptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleCptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleDptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleLptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleBCptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleDCptr:
-        case llvm::GenISAIntrinsic::GenISA_sampleLCptr:
-        case llvm::GenISAIntrinsic::GenISA_gather4ptr:
-        case llvm::GenISAIntrinsic::GenISA_gather4POptr:
-        case llvm::GenISAIntrinsic::GenISA_gather4Cptr:
-        case llvm::GenISAIntrinsic::GenISA_gather4POCptr:
-        case llvm::GenISAIntrinsic::GenISA_lodptr:
-        case llvm::GenISAIntrinsic::GenISA_typedread:
-        case llvm::GenISAIntrinsic::GenISA_typedwrite:
-        case llvm::GenISAIntrinsic::GenISA_intatomicraw:
-        case llvm::GenISAIntrinsic::GenISA_icmpxchgatomicraw:
-        case llvm::GenISAIntrinsic::GenISA_intatomicrawA64:
-        case llvm::GenISAIntrinsic::GenISA_icmpxchgatomicrawA64:
-
-            // fallback to not extended version
-            ChangePtrTypeInIntrinsic(pIntr, oldPtr, newPtr);
-            isPointerChangedInFallbackMethod = true;
-            break;
-
-        case llvm::GenISAIntrinsic::GenISA_floatatomicraw:
-        case llvm::GenISAIntrinsic::GenISA_floatatomicrawA64:
-        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicraw:
-        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64:
-
-            overloadedTys.push_back(pIntr->getType());
-            overloadedTys.push_back(newPtr->getType());
-            if (id == GenISAIntrinsic::GenISA_intatomicrawA64)
-            {
-                args[0] = args[1];
-                args[1] = CastInst::CreatePointerCast(args[1], Type::getInt32Ty(pModule->getContext()), "", pIntr);
-                id = GenISAIntrinsic::GenISA_intatomicraw;
-            }
-            else if (id == GenISAIntrinsic::GenISA_icmpxchgatomicrawA64)
-            {
-                args[0] = args[1];
-                args[1] = CastInst::CreatePointerCast(args[1], Type::getInt32Ty(pModule->getContext()), "", pIntr);
-                id = GenISAIntrinsic::GenISA_icmpxchgatomicraw;
-            }
-            else if (id == GenISAIntrinsic::GenISA_floatatomicrawA64)
-            {
-                args[0] = args[1];
-                args[1] = CastInst::CreatePointerCast(args[1], Type::getFloatTy(pModule->getContext()), "", pIntr);
-                id = GenISAIntrinsic::GenISA_floatatomicraw;
-            }
-            else if (id == GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64)
-            {
-                args[0] = args[1];
-                args[1] = CastInst::CreatePointerCast(args[1], Type::getFloatTy(pModule->getContext()), "", pIntr);
-                id = GenISAIntrinsic::GenISA_fcmpxchgatomicraw;
-            }
-            break;
-        case llvm::GenISAIntrinsic::GenISA_dwordatomicstructured:
-        case llvm::GenISAIntrinsic::GenISA_floatatomicstructured:
-        case llvm::GenISAIntrinsic::GenISA_cmpxchgatomicstructured:
-        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicstructured:
-            overloadedTys.push_back(pIntr->getType());
-            overloadedTys.push_back(args[0]->getType());
-            break;
-        case GenISAIntrinsic::GenISA_intatomictyped:
-        case GenISAIntrinsic::GenISA_icmpxchgatomictyped:
-            overloadedTys.push_back(newPtr->getType());
-            break;
-        case GenISAIntrinsic::GenISA_atomiccounterinc:
-        case GenISAIntrinsic::GenISA_atomiccounterpredec:
-            overloadedTys.push_back(pIntr->getType());
-            overloadedTys.push_back(args[0]->getType());
-            break;
-            //case llvm::GenISAIntrinsic::GenISA_ldrawvector_indexed:
-        case llvm::GenISAIntrinsic::GenISA_ldraw_indexed:
-            overloadedTys.push_back(pCalledFunc->getReturnType());
-            overloadedTys.push_back(newPtr->getType());
-            break;
-        case llvm::GenISAIntrinsic::GenISA_storeraw_indexed:
-            overloadedTys.push_back(newPtr->getType());
-            overloadedTys.push_back(args[2]->getType());
-
-            break;
-        default:
-            assert(0 && "Unknown intrinsic encountered while changing pointer types");
-            break;
-        }
-
-        // if processed by this method, let's replace instruction here.
-        if (!isPointerChangedInFallbackMethod)
-        {
-            pNewIntr = llvm::GenISAIntrinsic::getDeclaration(
-                pModule,
-                id,
-                overloadedTys);
-
-            llvm::CallInst* pNewCall = llvm::CallInst::Create(pNewIntr, args, "", pIntr);
-
-            pIntr->replaceAllUsesWith(pNewCall);
-            pIntr->eraseFromParent();
-
-            pIntr = llvm::cast<llvm::GenIntrinsicInst>(pNewCall);
-        }
-    }
 
     ///
     /// Replaces oldPtr with newPtr in a sample/ld intrinsic's argument list. The new instrinsic will
@@ -895,6 +761,10 @@ namespace IGC
         case llvm::GenISAIntrinsic::GenISA_icmpxchgatomicraw:
         case llvm::GenISAIntrinsic::GenISA_intatomicrawA64:
         case llvm::GenISAIntrinsic::GenISA_icmpxchgatomicrawA64:
+        case llvm::GenISAIntrinsic::GenISA_floatatomicraw:
+        case llvm::GenISAIntrinsic::GenISA_floatatomicrawA64:
+        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicraw:
+        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64:
             overloadedTys.push_back(pIntr->getType());
             overloadedTys.push_back(newPtr->getType());
             if (id == GenISAIntrinsic::GenISA_intatomicrawA64)
@@ -909,6 +779,44 @@ namespace IGC
                 args[1] = CastInst::CreatePointerCast(args[1], Type::getInt32Ty(pModule->getContext()), "", pIntr);
                 id = GenISAIntrinsic::GenISA_icmpxchgatomicraw;
             }
+            else if (id == GenISAIntrinsic::GenISA_floatatomicrawA64)
+            {
+                args[0] = args[1];
+                args[1] = CastInst::CreatePointerCast(args[1], Type::getFloatTy(pModule->getContext()), "", pIntr);
+                id = GenISAIntrinsic::GenISA_floatatomicraw;
+            }
+            else if (id == GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64)
+            {
+                args[0] = args[1];
+                args[1] = CastInst::CreatePointerCast(args[1], Type::getFloatTy(pModule->getContext()), "", pIntr);
+                id = GenISAIntrinsic::GenISA_fcmpxchgatomicraw;
+            }
+            break;
+        case llvm::GenISAIntrinsic::GenISA_dwordatomicstructured:
+        case llvm::GenISAIntrinsic::GenISA_floatatomicstructured:
+        case llvm::GenISAIntrinsic::GenISA_cmpxchgatomicstructured:
+        case llvm::GenISAIntrinsic::GenISA_fcmpxchgatomicstructured:
+            overloadedTys.push_back(pIntr->getType());
+            overloadedTys.push_back(args[0]->getType());
+            break;
+        case GenISAIntrinsic::GenISA_intatomictyped:
+        case GenISAIntrinsic::GenISA_icmpxchgatomictyped:
+            overloadedTys.push_back(pIntr->getType());
+            overloadedTys.push_back(newPtr->getType());
+            break;
+        case GenISAIntrinsic::GenISA_atomiccounterinc:
+        case GenISAIntrinsic::GenISA_atomiccounterpredec:
+            overloadedTys.push_back(pIntr->getType());
+            overloadedTys.push_back(args[0]->getType());
+            break;
+            //case llvm::GenISAIntrinsic::GenISA_ldrawvector_indexed:
+        case llvm::GenISAIntrinsic::GenISA_ldraw_indexed:
+            overloadedTys.push_back(pCalledFunc->getReturnType());
+            overloadedTys.push_back(newPtr->getType());
+            break;
+        case llvm::GenISAIntrinsic::GenISA_storeraw_indexed:
+            overloadedTys.push_back(newPtr->getType());
+            overloadedTys.push_back(args[2]->getType());
             break;
         default:
             assert(0 && "Unknown intrinsic encountered while changing pointer types");
@@ -1827,9 +1735,9 @@ namespace IGC
             PointerType* dPTy = dyn_cast<PointerType>(dTy);
             PointerType* sPTy = dyn_cast<PointerType>(sTy);
             uint32_t dBits = dPTy ? Ctx->getRegisterPointerSizeInBits(dPTy->getAddressSpace())
-                : dTy->getPrimitiveSizeInBits();
+                : (unsigned int)dTy->getPrimitiveSizeInBits();
             uint32_t sBits = sPTy ? Ctx->getRegisterPointerSizeInBits(sPTy->getAddressSpace())
-                : sTy->getPrimitiveSizeInBits();
+                : (unsigned int)sTy->getPrimitiveSizeInBits();
             if (dBits == 0 || sBits == 0 || dBits != sBits) {
                 // Not primitive type or not equal in size (inttoptr, etc)
                 return false;

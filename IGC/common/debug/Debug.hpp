@@ -29,14 +29,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/raw_ostream.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "IGC/common/igc_debug.h"
-// igc_debug.h defines this to be USC_ASSERT... we want it to be assert
-#undef ASSERT
-
 #include "common/debug/DebugMacros.hpp"
-
-#include <cassert>
 #include <string>
 
 namespace llvm

@@ -5,10 +5,6 @@ set(IGC_BUILD__PROJ_LABEL__AdaptorOCL "AdaptorOCL")
 
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
 
-if(IGC_BUILD__SPIRV-Tools)
-    include_directories("${IGC_BUILD__SPIRV-Tools_DIR}/include")
-endif()
-
 #include_directories("${CMAKE_CURRENT_SOURCE_DIR}/ocl_igc_shared/executable_format")
 
   set(IGC_BUILD__SRC__AdaptorOCL
@@ -56,8 +52,6 @@ if(IGC_BUILD__SPIRV_ENABLED)
       SPIRV/libSPIRV/SPIRVValue.cpp
       SPIRV/SPIRVReader.cpp
       SPIRV/SPIRVUtil.cpp
-      SPIRV/SPIRVException.h
-      SPIRV/SPIRVException.cpp
       SPIRV/libSPIRV/SPIRV.DebugInfo.h
       SPIRV/libSPIRV/SPIRV.DebugInfofuncs.h
       SPIRV/libSPIRV/SPIRVDebugInfoExt.h
@@ -144,9 +138,6 @@ add_library("${IGC_BUILD__PROJ__AdaptorOCL}" STATIC
   )
 
 add_dependencies("${IGC_BUILD__PROJ__AdaptorOCL}" "${IGC_BUILD__PROJ__GenISAIntrinsics}")
-if(IGC_BUILD__SPIRV-Tools)
-    add_dependencies("${IGC_BUILD__PROJ__AdaptorOCL}" "${IGC_BUILD__PROJ__SPIRV-Tools}")
-endif()
 set_property(TARGET "${IGC_BUILD__PROJ__AdaptorOCL}" PROPERTY PROJECT_LABEL "${IGC_BUILD__PROJ_LABEL__AdaptorOCL}")
 
 

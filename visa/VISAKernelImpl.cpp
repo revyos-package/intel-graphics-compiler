@@ -201,155 +201,6 @@ int VISAKernelImpl::compileTillOptimize()
     return optimizer.optimization();
 }
 
-G4_Declare* VISAKernelImpl::createInstsForCallTargetOffset(
-        InstListType& insts, G4_INST* fcall, int64_t adjust_off)
-{
-    // create instruction sequence:
-    //       add  r2.0  -IP   call_target
-    //       add  r2.0  r2.0  adjust_off
-
-    // call's dst must be r1.0, which is reserved at
-    // GlobalRA::setABIForStackCallFunctionCalls. It must not be overlapped with
-    // r2.0, that is hardcoded as the new jump target
-    assert(fcall->getDst()->isGreg());
-    assert((fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ) != 2);
-
-    // hardcoded add's dst to r2.0
-    G4_Declare* add_dst_decl =
-        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), 2, 0);
-
-    // create the first add instruction
-    // add  r2.0  -IP   call_target
-    G4_INST* add_inst = m_builder->createInternalInst(
-        nullptr, G4_add, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
-        m_builder->createSrcRegRegion(
-            Mod_Minus, Direct, m_phyRegPool->getIpReg(), 0, 0,
-            m_builder->getRegionScalar(), Type_UD),
-        fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
-
-    // create the second add to add the -ip to adjust_off, adjust_off dependes
-    // on how many instructions from the fist add to the jmp instruction, and
-    // if it's post-increment (jmpi) or pre-increment (call)
-    // add  r2.0  r2.0  adjust_off
-    G4_INST* add_inst2 = m_builder->createInternalInst(
-        nullptr, G4_add, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
-        m_builder->Create_Src_Opnd_From_Dcl(
-            add_dst_decl, m_builder->getRegionScalar()),
-        m_builder->createImm(adjust_off, Type_D),
-        InstOpt_WriteEnable | InstOpt_NoCompact);
-
-    insts.push_back(add_inst);
-    insts.push_back(add_inst2);
-
-    return add_dst_decl;
-}
-
-void VISAKernelImpl::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
-{
-    // SKL workaround for indirect call
-    // r1.0 is the return IP (the instruction right after jmpi)
-    // r1.1 is the return mask. While we'll replace the ret in calee to jmpi as well,
-    // we do not need to consider the return mask here.
-
-    // Do not allow predicate call on jmpi WA
-    assert(fcall->getPredicate() == nullptr);
-
-    // calculate the reserved register's num from fcall's dst register (shoud be r1)
-    assert(fcall->getDst()->isGreg());
-    uint32_t reg_num = fcall->getDst()->getLinearizedStart() / GENX_GRF_REG_SIZ;
-
-    G4_Declare* new_target_decl = createInstsForCallTargetOffset(insts, fcall, -64);
-
-    // add  r1.0   IP   32
-    G4_Declare* r1_0_decl =
-        m_builder->createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_add, nullptr, false, 1,
-        m_builder->Create_Dst_Opnd_From_Dcl(r1_0_decl, 1),
-        m_builder->createSrcRegRegion(
-            Mod_src_undef, Direct, m_phyRegPool->getIpReg(), 0, 0,
-            m_builder->getRegionScalar(), Type_UD),
-        m_builder->createImm(32, Type_UD),
-        InstOpt_WriteEnable | InstOpt_NoCompact));
-
-    // jmpi r2.0
-    // update jump target (src0) to add's dst
-    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
-        new_target_decl, m_builder->getRegionScalar());
-    jump_target->setType(Type_D);
-    insts.push_back(m_builder->createInternalInst(
-        nullptr, G4_jmpi, nullptr, false, 1, nullptr, jump_target,
-        nullptr, InstOpt_NoCompact));
-}
-
-void VISAKernelImpl::expandIndirectCallWithRegTarget()
-{
-    // check every fcall
-    for (BB_LIST_ITER it = m_kernel->fg.begin();
-        it != m_kernel->fg.end();
-        it++)
-    {
-        G4_BB* bb = (*it);
-        // At this point G4_pseudo_fcall may be converted to G4_call,
-        // check all call
-        if (bb->back()->isFCall() || bb->back()->isCall())
-        {
-            G4_INST* fcall = bb->back();
-            if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0()) {
-                // at this point the call instruction's src0 has the target_address
-                // and the call dst is the reserved register for ret
-                // All the caller save register should be saved. We usd r2.0 directly
-                // here to calculate the new call's target. We picked r2.0 due to the
-                // HW's limitation that call/calla's src and dst offset (the subreg num)
-                // must be 0.
-                //
-                // expand call
-                // From:
-                //       call r1.0 call_target
-                // To:
-                //       add  r2.0  -IP   call_target
-                //       add  r2.0  r2.0  -32
-                //       call r1.0  r2.0
-
-                // For SKL workaround, expand call
-                // From:
-                //       call r1.0 call_target
-                // To:
-                //       add  r2.0   -IP    call_target
-                //       add  r2.0   r2.0   -64
-                //       add  r1.0   IP   32              // set the return IP
-                //       jmpi r2.0
-
-                InstListType expanded_insts;
-                if (m_builder->needReplaceIndirectCallWithJmpi()) {
-                    createInstForJmpiSequence(expanded_insts, fcall);
-                } else {
-                    G4_Declare* jmp_target_decl =
-                        createInstsForCallTargetOffset(expanded_insts, fcall, -32);
-                    // Updated call's target to the new target
-                    G4_SrcRegRegion* jump_target = m_builder->Create_Src_Opnd_From_Dcl(
-                        jmp_target_decl, m_builder->getRegionScalar());
-                    fcall->setSrc(jump_target, 0);
-                    fcall->setNoCompacted();
-                }
-                // then insert the expaneded instructions right before the call
-                INST_LIST_ITER insert_point = bb->end();
-                --insert_point;
-                for (auto inst_to_add : expanded_insts) {
-                    bb->getInstList().insert(insert_point, inst_to_add);
-                    inst_to_add->setCISAOff(fcall->getCISAOff());
-                }
-
-                // remove call from the instlist for Jmpi WA
-                if (m_builder->needReplaceIndirectCallWithJmpi())
-                    bb->getInstList().erase(--bb->end());
-            }
-        }
-    }
-}
-
 void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
 {
     void* binary = NULL;
@@ -364,21 +215,12 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         m_kernel->setKernelID(kernelID);
     }
 
-    if (m_kernel->hasIndirectCall())
-    {
-        // If the indirect call has regiser src0, the register must be a
-        // ip-based address of the call target. Insert a add before call to
-        // calculate the relative offset from call to the target
-        expandIndirectCallWithRegTarget();
-    }
-
     // remove SW fences at this point
     // ToDo: remove all intrinsics?
     for (auto bb : m_kernel->fg)
     {
         bb->removeIntrinsics(Intrinsic::MemFence);
     }
-
     if (m_builder->hasSWSB())
     {
         if (!getOptions()->getOption(vISA_forceDebugSWSB))
@@ -613,27 +455,12 @@ int VISAKernelImpl::InitializeFastPath()
     }
     m_jitInfo = (FINALIZER_INFO*)m_mem.alloc(sizeof(FINALIZER_INFO));
 
-    int feSPSize = 32;
-    if (!getIntKernelAttributeValue("FESPSize", feSPSize))
-    {
-        feSPSize = 32;
-    }
-    int spillMemOffset = 0;
-    if (getIntKernelAttributeValue("SpillMemOffset", spillMemOffset))
-    {
-        if (spillMemOffset > 0)
-        {
-            getOptions()->setOption(vISA_SpillMemOffset, (uint32_t)spillMemOffset);
-        }
-    }
-
     void* addr = m_kernelMem->alloc(sizeof(class IR_Builder));
     m_builder = new(addr)IR_Builder(m_instListNodeAllocator,
         *m_phyRegPool,
         *m_kernel,
         *m_kernelMem,
         m_options,
-        (feSPSize == 64),
         m_jitInfo,
         m_pWaTable
         );
@@ -951,10 +778,12 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
         }
 
         // force subalign to be GRF if total size is larger than or equal to GRF
-        if (info->dcl->getSubRegAlign() != GRFALIGN)
+        if ((info->dcl->getSubRegAlign() != GRFALIGN) ||
+            (varAlign == ALIGN_2_GRF))
         {
             setDeclAlignment(info->dcl, varAlign);
         }
+
         info->name_index = -1;
     }
 
@@ -1321,7 +1150,12 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             std::string str((const char *)valueBuffer);
             if (m_options->getOption(vISA_dumpToCurrentDir))
             {
-                auto found = str.find_last_of(DIR_SEPARATOR);
+                auto found = str.find_last_of(DIR_WIN32_SEPARATOR);
+                if (found == string::npos)
+                {
+                    found = str.find_last_of(DIR_UNIX_SEPARATOR);
+                }
+
                 if (found != string::npos)
                 {
                     str = str.substr(found + 1);
@@ -1666,7 +1500,7 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
             dcl->getRegVar()->setPhyReg(m_phyRegPool->getGreg(regNum), subRegNum);
             dcl->setRegFile( G4_INPUT );
             unsigned int reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
-            if (regNum + dcl->getNumRows() > m_builder->getOptions()->getuInt32Option(vISA_TotalGRFNum) - reservedGRFNum) {
+            if (regNum + dcl->getNumRows() > m_kernel->getNumRegTotal() - reservedGRFNum) {
                 MUST_BE_TRUE(false, "INPUT payload execeeds the regsiter number");
             }
         }
@@ -1758,8 +1592,7 @@ int VISAKernelImpl::CreateVISAAddressOperand(VISA_VectorOpnd *&cisa_opnd, VISA_A
         }
         else
         {
-            cisa_opnd->g4opnd = m_builder->createDstRegRegion(
-                Direct,
+            cisa_opnd->g4opnd = m_builder->createDst(
                 dcl->getRegVar(),
                 0, //opnd->opnd_val.addr_opnd.index, // should we use 0 here?
                 (uint16_t)offset,
@@ -1920,14 +1753,13 @@ int VISAKernelImpl::CreateVISAIndirectGeneralOperand(VISA_VectorOpnd *& cisa_opn
         }
         else
         {
-            G4_DstRegRegion* dst = m_builder->createDstRegRegion(
-                IndirGRF,
+            auto dst = m_builder->createIndirectDst(
                 dcl->getRegVar(),
-                0, //opnd->opnd_val.addr_opnd.index, // should we use 0 here?
                 (uint16_t)addrOffset,
                 horizontalStride,
-                GetGenTypeFromVISAType(type));
-            dst->setImmAddrOff( immediateOffset );
+                GetGenTypeFromVISAType(type),
+                immediateOffset);
+
             cisa_opnd->g4opnd = dst;
         }
     }
@@ -2030,8 +1862,7 @@ int VISAKernelImpl::CreateVISAPredicateDstOperand(VISA_VectorOpnd *& opnd, VISA_
     {
         G4_Declare *dcl = decl->predVar.dcl;
 
-        opnd->g4opnd = m_builder->createDstRegRegion(
-            Direct,
+        opnd->g4opnd = m_builder->createDst(
             dcl->getRegVar(),
             0,
             0,
@@ -2160,7 +1991,7 @@ int VISAKernelImpl::CreateVISADstOperand(VISA_VectorOpnd *&cisa_opnd, VISA_GenVa
         //create reg region
         G4_Declare *dcl = cisa_decl->genVar.dcl;
 
-        cisa_opnd->g4opnd = m_builder->createDstRegRegion( Direct, dcl->getRegVar(), rowOffset, colOffset, hStride, dcl->getElemType());
+        cisa_opnd->g4opnd = m_builder->createDst(dcl->getRegVar(), rowOffset, colOffset, hStride, dcl->getElemType());
     }
 
     if(IS_VISA_BOTH_PATH)
@@ -2183,31 +2014,31 @@ int VISAKernelImpl::CreateVISADstOperand(VISA_VectorOpnd *&cisa_opnd, VISA_GenVa
     return VISA_SUCCESS;
 }
 
-int VISAKernelImpl::CreateVISAImmediate(VISA_VectorOpnd *&cisa_opnd, const void *value, VISA_Type isaType)
+int VISAKernelImpl::CreateVISAImmediate(VISA_VectorOpnd*& cisa_opnd, const void* value, VISA_Type isaType)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     startTimer(TIMER_VISA_BUILDER_CREATE_OPND);
 #endif
-    cisa_opnd = (VISA_VectorOpnd *)getOpndFromPool();
-    if(IS_GEN_BOTH_PATH)
+    cisa_opnd = (VISA_VectorOpnd*)getOpndFromPool();
+    if (IS_GEN_BOTH_PATH)
     {
         G4_Type g4type = GetGenTypeFromVISAType(isaType);
 
-        if( isaType == ISA_TYPE_Q ) {
-            cisa_opnd->g4opnd = m_builder->createImmWithLowerType(*(int64_t *)value, Type_Q);
+        if (isaType == ISA_TYPE_Q) {
+            cisa_opnd->g4opnd = m_builder->createImmWithLowerType(*(int64_t*)value, Type_Q);
         }
-        else if( isaType == ISA_TYPE_UQ) {
-            cisa_opnd->g4opnd = m_builder->createImmWithLowerType(*(int64_t *)value, Type_UQ);
+        else if (isaType == ISA_TYPE_UQ) {
+            cisa_opnd->g4opnd = m_builder->createImmWithLowerType(*(int64_t*)value, Type_UQ);
         }
-        else if( isaType == ISA_TYPE_DF )
+        else if (isaType == ISA_TYPE_DF)
         {
             cisa_opnd->g4opnd = m_builder->createDFImm(*(double*)value);
         }
-        else if( isaType == ISA_TYPE_F )
+        else if (isaType == ISA_TYPE_F)
         {
             cisa_opnd->g4opnd = m_builder->createImm(*(float*)(value));
         }
-        else if( isaType == ISA_TYPE_HF )
+        else if (isaType == ISA_TYPE_HF)
         {
             cisa_opnd->g4opnd = m_builder->createImmWithLowerType(*(unsigned*)(value), Type_HF);
         }
@@ -2215,13 +2046,11 @@ int VISAKernelImpl::CreateVISAImmediate(VISA_VectorOpnd *&cisa_opnd, const void 
         {
             int64_t tmpValue = typecastVals(value, isaType);
             cisa_opnd->g4opnd = m_builder->createImmWithLowerType(
-                tmpValue, g4type );
+                tmpValue, g4type);
         }
     }
-    if(IS_VISA_BOTH_PATH)
+    if (IS_VISA_BOTH_PATH)
     {
-        //memset(cisa_opnd, 0, sizeof(VISA_opnd));
-
         cisa_opnd->opnd_type = CISA_OPND_VECTOR;
         cisa_opnd->tag = OPERAND_IMMEDIATE;
         cisa_opnd->_opnd.v_opnd.tag = OPERAND_IMMEDIATE;
@@ -2229,24 +2058,24 @@ int VISAKernelImpl::CreateVISAImmediate(VISA_VectorOpnd *&cisa_opnd, const void 
 
         int size = CISATypeTable[isaType].typeSize;
 
-        if( size == 0 )
+        if (size == 0)
         {
-            assert( 0 );
+            assert(0);
             return VISA_FAILURE;
         }
-        if(isaType == ISA_TYPE_DF)
+        if (isaType == ISA_TYPE_DF)
         {
             cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val.dval = *((double*)value);
         }
-        else if(isaType == ISA_TYPE_F)
+        else if (isaType == ISA_TYPE_F)
         {
             cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val.fval = *((float*)value);
         }
-        else if(isaType == ISA_TYPE_Q || isaType == ISA_TYPE_UQ || isaType == ISA_TYPE_HF)
+        else if (isaType == ISA_TYPE_Q || isaType == ISA_TYPE_UQ)
         {
             cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val.lval = *((uint64_t*)value);
         }
-        else if( isaType == ISA_TYPE_V || isaType == ISA_TYPE_UV )
+        else if (isaType == ISA_TYPE_V || isaType == ISA_TYPE_UV)
         {
             int size = Get_VISA_Type_Size(isaType);
             memcpy_s(&cisa_opnd->_opnd.v_opnd.opnd_val.const_opnd._val, size, value, size);
@@ -2311,8 +2140,7 @@ int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&cisa_opnd, CISA_GEN
         }
         else
         {
-            cisa_opnd->g4opnd = m_builder->createDstRegRegion(
-                Direct,
+            cisa_opnd->g4opnd = m_builder->createDst(
                 dcl->getRegVar(),
                 0,
                 offset,
@@ -2441,8 +2269,7 @@ int VISAKernelImpl::CreateGenRawDstOperand(VISA_RawOpnd *& cisa_opnd)
             short row_offset = offset/G4_GRF_REG_NBYTES;
             short col_offset = (offset%G4_GRF_REG_NBYTES)/G4_Type_Table[dcl->getElemType()].byteSize;
 
-            cisa_opnd->g4opnd = m_builder->createDstRegRegion(
-                Direct,
+            cisa_opnd->g4opnd = m_builder->createDst(
                 dcl->getRegVar(),
                 row_offset,
                 col_offset,
@@ -8012,15 +7839,8 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
     for (auto reloc : reloc_table)
     {
         auto inst = reloc.getInst();
-        assert(inst->isMov());
-        assert(inst->isCompactedInst() == false);
-        auto src0 = inst->getSrc(0);
-        assert(src0->isRelocImm() && ((src0->getType() == Type_UD) || (src0->getType() == Type_UQ)));
-
         buffer_p->r_type = reloc.getType();
-        // hard-coded for now
-        uint32_t immOffset = getTypeSize(src0->getType()) == 8 ? 8 : 12;
-        buffer_p->r_offset = static_cast<uint32_t>(inst->getGenOffset()) + immOffset;
+        buffer_p->r_offset = static_cast<uint32_t>(inst->getGenOffset()) + reloc.getTargetOffset(*m_builder);
         assert((buffer_p->r_offset > inst->getGenOffset()) && (buffer_p->r_offset < inst->getGenOffset() + BYTES_PER_INST));
 
         assert(reloc.getSymbolName().size() <= MAX_SYMBOL_NAME_LENGTH);
@@ -8308,6 +8128,23 @@ int VISAKernelImpl::getVISAOffset() const
     }
     // ToDo: we should probably move vISA offset in VISKernelImpl so that we have it in vISA path too
     return -1;
+}
+
+void VISAKernelImpl::processAttributes()
+{
+  int feSPSize = 32;
+  if (getIntKernelAttributeValue("FESPSize", feSPSize) && feSPSize == 64)
+  {
+    m_builder->set64BitFEStackVars();
+  }
+  int spillMemOffset = 0;
+  if (getIntKernelAttributeValue("SpillMemOffset", spillMemOffset))
+  {
+    if (spillMemOffset > 0)
+    {
+      getOptions()->setOption(vISA_SpillMemOffset, (uint32_t)spillMemOffset);
+    }
+  }
 }
 
 void VISAKernelImpl::computeFCInfo(BinaryEncodingBase* binEncodingInstance)

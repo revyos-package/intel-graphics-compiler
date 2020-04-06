@@ -82,7 +82,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 # ================================================ Flags ===============================================
 
-
 # Escapes text for regular expressions.
 #
 # @param retValName Name of variable placeholder where result will be returned.
@@ -3309,9 +3308,15 @@ else()
         "LLVMDemangle"
         )
 
-    if(LLVM_VERSION_MAJOR EQUAL 8)
+    if(LLVM_VERSION_MAJOR GREATER_EQUAL 8)
         list(APPEND IGC_BUILD__LLVM_LIBS_TO_LINK
           "LLVMInstCombine"
+          )
+    endif()
+
+    if(LLVM_VERSION_MAJOR GREATER_EQUAL 9)
+        list(APPEND IGC_BUILD__LLVM_LIBS_TO_LINK
+          "LLVMBitstreamReader"
           )
     endif()
 
@@ -3349,7 +3354,8 @@ include_directories(
 
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL/ocl_igc_shared/executable_format"
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL"
-  )
+    )
+
 
   include_directories(
       "${IGC_BUILD__COMMON_COMPILER_DIR}/common"
@@ -3402,49 +3408,21 @@ add_subdirectory(common)
 igc_sg_define(IGC__common)
 igc_sg_define(IGC__Common_CLElfLib)
 
-add_subdirectory(GenISAIntrinsics)
-
-if(LLVM_ON_WIN32 AND (("${BUILD_TYPE}" STREQUAL "debug") OR ("${BUILD_TYPE}" STREQUAL "release-internal")))
-    set(IGC_BUILD__SPIRV-Tools ON)
+if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+    set(IGC_BUILD__SPIRV_TOOLS_ENABLED ON)
 endif()
 
-if(IGC_BUILD__SPIRV-Tools)
-    message(STATUS "============================ SPIRV-Tools project ============================")
-    set(IGC_BUILD__SPIRV-Headers_DIR "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/SPIRV-Headers")
-    set(IGC_BUILD__SPIRV-Tools_DIR "${BS_DIR_EXTERNAL_COMPONENTS}/build-tools/SPIRV-Tools")
-    set(IGC_BUILD__SPIRV-Headers_OUTPUT_DIR "${IGC_BUILD__TOOLS_OUTPUT_DIR}/SPIRV-Headers")
-    set(IGC_BUILD__SPIRV-Tools_OUTPUT_DIR "${IGC_BUILD__TOOLS_OUTPUT_DIR}/SPIRV-Tools")
-    set(SPIRV-Headers_SOURCE_DIR "${IGC_BUILD__SPIRV-Headers_DIR}")
-    option(SKIP_SPIRV_TOOLS_INSTALL "Skip SPIRV-Tools installation" ON)
-    option(SPIRV_SKIP_TESTS "Skip building SPIRV-Tools tests along with the library" ON)
-    option(SPIRV_SKIP_EXECUTABLES "Skip building SPIRV-Tools executables and tests along with the library" ON)
-    option(SPIRV_HEADERS_SKIP_INSTALL "Skip SPIRV-Headers installation" ON)
-    option(SPIRV_HEADERS_SKIP_EXAMPLES "Skip building SPIRV-Headers examples" ON)
-    message(STATUS "SPIRV-Tools source directory: ${IGC_BUILD__SPIRV-Tools_DIR}")
-    message(STATUS "SPIRV-Headers source directory: ${IGC_BUILD__SPIRV-Headers_DIR}")
-    message(STATUS "SPIRV-Tools output directory: ${IGC_BUILD__SPIRV-Tools_OUTPUT_DIR}")
-    message(STATUS "SPIRV-Headers output directory: ${IGC_BUILD__SPIRV-Headers_OUTPUT_DIR}")
-    message(STATUS "Option SKIP_SPIRV_TOOLS_INSTALL: ${SKIP_SPIRV_TOOLS_INSTALL}")
-    message(STATUS "Option SPIRV_SKIP_TESTS: ${SPIRV_SKIP_TESTS}")
-    message(STATUS "Option SPIRV_SKIP_EXECUTABLES: ${SPIRV_SKIP_EXECUTABLES}")
-    message(STATUS "Option SPIRV_HEADERS_SKIP_INSTALL: ${SPIRV_HEADERS_SKIP_INSTALL}")
-    message(STATUS "Option SPIRV_HEADERS_SKIP_EXAMPLES: ${SPIRV_HEADERS_SKIP_EXAMPLES}")
-    # add_subdirectory("${IGC_BUILD__SPIRV-Headers_DIR}" "${IGC_BUILD__SPIRV-Headers_OUTPUT_DIR}")
-    add_subdirectory("${IGC_BUILD__SPIRV-Tools_DIR}" "${IGC_BUILD__SPIRV-Tools_OUTPUT_DIR}")
-    set(IGC_BUILD__PROJ__SPIRV-Tools "SPIRV-Tools")
-    set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS IGC_BUILD_SPIRV_TOOLS)
-    unset(IGC_BUILD__SPIRV-Headers_OUTPUT_DIR)
-    unset(IGC_BUILD__SPIRV-Tools_OUTPUT_DIR)
-    unset(SPIRV-Headers_SOURCE_DIR)
-    unset(SKIP_SPIRV_TOOLS_INSTALL)
-    unset(SPIRV_SKIP_TESTS)
-    unset(SPIRV_SKIP_EXECUTABLES)
-    unset(SPIRV_HEADERS_SKIP_INSTALL)
-    unset(SPIRV_HEADERS_SKIP_EXAMPLES)
+
+if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
+    add_subdirectory("${IGC_SOURCE_DIR}/../external/SPIRV-Tools" "${IGC_OPTION__OUTPUT_DIR}/external/SPIRV-Tools/config" EXCLUDE_FROM_ALL)
     include_directories("${IGC_BUILD__SPIRV-Headers_DIR}/include")
     include_directories("${IGC_BUILD__SPIRV-Tools_DIR}/include")
-    message(STATUS "=============================================================================")
+    set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS_DEBUG IGC_SPIRV_TOOLS_ENABLED)
+    set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS_RELEASEINTERNAL IGC_SPIRV_TOOLS_ENABLED)
+    igc_sg_define(IGC__SPIRV-Tools)
 endif()
+
+add_subdirectory(GenISAIntrinsics)
 
 if(LLVM_ON_WIN32
         )
@@ -3455,10 +3433,6 @@ endif()
 
 
 
-if(IGC_BUILD__VULKAN_FRONTEND_ENABLED)
-  add_subdirectory(VulkanFrontend)
-  igc_sg_define(IGC__VulkanFrontend)
-endif()
 
 add_subdirectory(Compiler)
 add_subdirectory(DriverInterface)
@@ -3513,7 +3487,8 @@ set(IGC_BUILD__SRC__IGC__igc_lib
 set(IGC_BUILD__HDR__IGC__igc_common
     ${IGC_BUILD__HDR__IGC_AdaptorOCL} # currently empty
     ${IGC_BUILD__HDR__IGC_common}
-    ${IGC_BUILD__HDR__IGC_Common_CLElfLib})
+    ${IGC_BUILD__HDR__IGC_Common_CLElfLib}
+    )
 
 
 set(IGC_BUILD__HDR__IGC__igc_dll
@@ -3554,6 +3529,7 @@ add_dependencies("${IGC_BUILD__PROJ__fcl_dll}" opencl-clang-lib)
 
 add_dependencies("${IGC_BUILD__PROJ__igc_dll}" "${IGC_BUILD__PROJ_NAME_PREFIX}ElfPackager")
 
+
 target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared"
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared/device_enqueue"
@@ -3562,6 +3538,7 @@ target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/"
   "${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/"
 )
+
 
 #IGC_DLL
 igc_target_flag_property_add_once_config_var("${IGC_BUILD__PROJ__igc_dll}" LINK_FLAGS IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS)
@@ -3680,7 +3657,6 @@ endforeach()
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__BiFModule_OCL}")
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__ElfPackager}")
 
-
 if(LLVM_ON_WIN32)
   if(IGC_OPTION__USCLAUNCHER_TOOL)
     add_dependencies("${IGC_BUILD__PROJ__ILAdapter}"           "${IGC_BUILD__PROJ__GenISAIntrinsics}")
@@ -3697,53 +3673,52 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
   endif()
   unset(_targetType)
 
-
-  set(_targetLinkLine)
+  # list of libraries linked in all configurations
+  set(_targetLinkLineCommon)
+  # list of libraries additionally linked in Debug and ReleaseInternal configurations
+  set(_targetLinkLineDebugAndReleaseInternalOnly)
 
   # Generated link line for IGC static library allows to properly use it in other projects.
   if(_targetIsStatic)
-    list(APPEND _targetLinkLine
+    list(APPEND _targetLinkLineCommon
         "${IGC_BUILD__PROJ${_libBuildSuffix}}"
       )
   endif()
 
   if(LLVM_ON_WIN32)
-    list(APPEND _targetLinkLine
+    list(APPEND _targetLinkLineCommon
         "${IGC_BUILD__PROJ__AdaptorOCL}"
     )
 
     if(IGC_OPTION__USCLAUNCHER_TOOL)
-      list(APPEND _targetLinkLine
+      list(APPEND _targetLinkLineCommon
           "${IGC_BUILD__PROJ__ILAdapter}")
     endif()
 
   endif()
 
-  list(APPEND _targetLinkLine
+
+  list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__PROJ__AdaptorOGL}"
   )
 
-  if(IGC_BUILD__SPIRV-Tools)
-    list(APPEND _targetLinkLine
-      "${IGC_BUILD__PROJ__SPIRV-Tools}"
-    )
-  endif()
 
-  if(IGC_BUILD__VULKAN_FRONTEND_ENABLED)
-    list(APPEND _targetLinkLine
-      "${IGC_BUILD__PROJ__VulkanFrontend}"
+  if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
+    list(APPEND _targetLinkLineDebugAndReleaseInternalOnly
+        "${IGC_BUILD__PROJ__SPIRV-Tools}"
     )
   endif()
 
 
-  list(APPEND _targetLinkLine
+
+  list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__PROJ__Compiler}"
       "${IGC_BUILD__PROJ__GenISAIntrinsics}"
       GenX_IR
     )
 
   if(LLVM_ON_UNIX AND IGC_OPTION__BIF_LINK_BC)
-    list(APPEND _targetLinkLine
+    list(APPEND _targetLinkLineCommon
         "${IGC_BUILD__WHOLE_ARCHIVE}"
         "${IGC_BUILD__PROJ__BiFLib_OCL}"
         "${IGC_BUILD__NO_WHOLE_ARCHIVE}"
@@ -3752,12 +3727,12 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
 
   # Generated link line for IGC static library allows to properly use it in other projects.
   if(_targetIsStatic)
-    list(APPEND _targetLinkLine
+    list(APPEND _targetLinkLineCommon
         "${IGC_BUILD__PROJ${_libBuildSuffix}}"
       )
   endif()
 
-  list(APPEND _targetLinkLine
+  list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__START_GROUP}"
       ${IGC_BUILD__LLVM_LIBS_TO_LINK}
       "${IGC_BUILD__END_GROUP}"
@@ -3765,13 +3740,18 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
 
   if(_targetIsStatic)
     # Link line for projects that use IGC as static library (allows to resolve multi-circular dependencies between libraries).
-    set("IGC_BUILD__LINK_LINE${_libBuildSuffix}"
-        ${_targetLinkLine}
+    set("IGC_BUILD__LINK_LINE_RELEASE${_libBuildSuffix}"
+        ${_targetLinkLineCommon}
+      )
+    set("IGC_BUILD__LINK_LINE_RELEASEINTERNAL_AND_DEBUG${_libBuildSuffix}"
+        ${_targetLinkLineCommon}
+        ${_targetLinkLineDebugAndReleaseInternalOnly}
       )
   else()
     target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
-        ${_targetLinkLine}
-        ${CMAKE_DL_LIBS}
+        "${_targetLinkLineCommon}"
+        "$<$<NOT:$<CONFIG:Release>>:${_targetLinkLineDebugAndReleaseInternalOnly}>"
+        "${CMAKE_DL_LIBS}"
       )
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ${_libBuildSuffix}}" PROPERTY LINK_INTERFACE_LIBRARIES "")
@@ -3853,10 +3833,6 @@ if(_targetIsStatic)
 unset(_targetIsStatic)
 unset(_targetLinkLine)
 
-if(LLVM_ON_WIN32 AND IGC_BUILD__VULKAN_FRONTEND_ENABLED)
-  add_subdirectory(VulkanFrontend/ULT)
-  igc_sg_define(IGC__VulkanFrontendULT)
-endif()
 
 
 win_static_runtime()

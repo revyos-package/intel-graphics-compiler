@@ -313,6 +313,8 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
 
         bool useQW = useA64 && ((TBytes % 8) == 0) &&
             ((has_8Byte_A64_BS && align < 4) || (eTyBytes == 8U && align >= 8U));
+
+
         const uint32_t new_eTyBytes = useQW ? 8 : 4;
         if (eTyBytes == new_eTyBytes)
         {
@@ -465,7 +467,7 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
                 II->getParent()->getParent()->getParent(),
                 GenISAIntrinsic::GenISA_ldrawvector_indexed,
                 types);
-            Value* V = Builder.CreateCall3(F, newPtr, II->getOperand(1), II->getOperand(2));
+            Value* V = Builder.CreateCall4(F, newPtr, II->getOperand(1), II->getOperand(2), II->getOperand(3));
             V = Builder.CreateBitCast(V, Ty);
 
             II->replaceAllUsesWith(V);
@@ -484,7 +486,7 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
                 GenISAIntrinsic::GenISA_storerawvector_indexed,
                 types);
             Value* V = Builder.CreateBitCast(II->getOperand(2), newVTy);
-            Builder.CreateCall4(F, newPtr, II->getOperand(1), V, II->getOperand(3));
+            Builder.CreateCall5(F, newPtr, II->getOperand(1), V, II->getOperand(3), II->getOperand(4));
             II->eraseFromParent();
         }
     return true;

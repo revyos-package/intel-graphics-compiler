@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/ADT/STLExtras.h>
 #include <llvmWrapper/Analysis/MemoryLocation.h>
+#include <llvmWrapper/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/InstructionSimplify.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -79,6 +80,8 @@ namespace {
         CodeGenContext* CGC;
         TargetLibraryInfo* TLI;
 
+        bool AllowNegativeSymPtrsForLoad = false;
+
         // Map of profit vector lengths per scalar type. Each entry specifies the
         // profit vector length of a given scalar type.
         // NOTE: Prepare the profit vector lengths in the *DESCENDING* order.
@@ -93,9 +96,9 @@ namespace {
     public:
         static char ID;
 
-        MemOpt() :
+        MemOpt(bool AllowNegativeSymPtrsForLoad = false) :
             FunctionPass(ID), DL(nullptr), AA(nullptr), SE(nullptr), WI(nullptr),
-            CGC(nullptr) {
+            CGC(nullptr), AllowNegativeSymPtrsForLoad(AllowNegativeSymPtrsForLoad) {
             initializeMemOptPass(*PassRegistry::getPassRegistry());
         }
 
@@ -353,8 +356,8 @@ namespace {
     };
 }
 
-FunctionPass* createMemOptPass() {
-    return new MemOpt();
+FunctionPass* createMemOptPass(bool AllowNegativeSymPtrsForLoad) {
+    return new MemOpt(AllowNegativeSymPtrsForLoad);
 }
 
 #define PASS_FLAG     "igc-memopt"
@@ -615,8 +618,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
                 continue;
             }
             else {
-                if (CGC->type != ShaderType::OPENCL_SHADER &&
-                    LeadingSymPtr.Offset < 0)
+                if (!AllowNegativeSymPtrsForLoad && LeadingSymPtr.Offset < 0)
                     continue;
             }
         }
@@ -639,10 +641,10 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
         // For example, we could have a packed struct <{i64, i32, i64}> that
         // would compute a size of 20 but, without this guard, would set
         // 'NumElts' to 2 as if the i32 wasn't present.
-        if (unsigned(newHighestOffset - newLowestOffset) % LdScalarSize != 0)
+        if (uint64_t(newHighestOffset - newLowestOffset) % LdScalarSize != 0)
             continue;
 
-        unsigned newNumElts = unsigned((newHighestOffset - newLowestOffset) /
+        uint64_t newNumElts = uint64_t((newHighestOffset - newLowestOffset) /
             LdScalarSize);
 
         // Bail out if the resulting vector load is already not profitable.
@@ -651,7 +653,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
 
         HighestOffset = newHighestOffset;
         LowestOffset = newLowestOffset;
-        NumElts = newNumElts;
+        NumElts = static_cast<unsigned>(newNumElts);
 
         // This load is to be merged. Remove it from check list.
         CheckList.pop_back();
@@ -1070,7 +1072,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
                     Val =
                         Builder.CreatePtrToInt(Val,
                             Type::getIntNTy(Val->getContext(),
-                                LeadingStoreScalarType->getPrimitiveSizeInBits()));
+                            (unsigned int)LeadingStoreScalarType->getPrimitiveSizeInBits()));
                     // LeadingStoreScalarType may not be an integer type, bitcast it to
                     // the appropiate type.
                     Val = Builder.CreateBitCast(Val, LeadingStoreScalarType);
@@ -1158,6 +1160,9 @@ bool MemOpt::isSafeToMergeStores(
     // Arrange CheckList as the outer loop to favor the case where there are
     // back-to-back stores only.
     for (auto* I : CheckList) {
+        if (I->getMetadata(LLVMContext::MD_invariant_load))
+            continue;
+
         MemoryLocation A = getLocation(I);
 
         for (auto& S : Stores) {
@@ -1439,7 +1444,7 @@ SymbolicPointer::getLinearExpression(Value* V, APInt& Scale, APInt& Offset,
         (isa<ZExtInst>(V) && Extension != EK_SignExt)) {
         Value* CastOp = cast<CastInst>(V)->getOperand(0);
         unsigned OldWidth = Scale.getBitWidth();
-        unsigned SmallWidth = CastOp->getType()->getPrimitiveSizeInBits();
+        unsigned SmallWidth = (unsigned int)CastOp->getType()->getPrimitiveSizeInBits();
         Scale = Scale.trunc(SmallWidth);
         Offset = Offset.trunc(SmallWidth);
         Extension = isa<SExtInst>(V) ? EK_SignExt : EK_ZeroExt;

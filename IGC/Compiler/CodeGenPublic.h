@@ -110,6 +110,9 @@ namespace IGC
         void* m_funcRelocationTable = nullptr;
         unsigned int    m_funcRelocationTableSize = 0;
         unsigned int    m_funcRelocationTableEntries = 0;
+        void* m_funcAttributeTable = nullptr;
+        unsigned int    m_funcAttributeTableSize = 0;
+        unsigned int    m_funcAttributeTableEntries = 0;
         unsigned int    m_offsetToSkipPerThreadDataLoad = 0;
         uint32_t        m_offsetToSkipSetFFIDGP = 0;
         //true means we separate pvtmem and spillfill. pvtmem could go into stateless.
@@ -131,6 +134,10 @@ namespace IGC
             if (m_debugDataGenISA)
             {
                 IGC::aligned_free(m_debugDataGenISA);
+            }
+            if (m_funcAttributeTable)
+            {
+                IGC::aligned_free(m_funcAttributeTable);
             }
         }
 
@@ -210,6 +217,7 @@ namespace IGC
         bool hasSel;
         bool hasPointer;
         bool hasLocalLoadStore;
+        bool hasBufferStore;
         bool hasSubroutines;
         bool hasPrimitiveAlloca;
         bool hasNonPrimitiveAlloca;
@@ -222,6 +230,7 @@ namespace IGC
         bool hasAtomics;
         bool hasBarrier;        //<! true if module has thread group barrier
         bool hasDiscard;
+        bool hasTypedwrite;
         bool mayHaveIndirectOperands;  //<! true if code may have indirect operands like r5[a0].
         bool hasUniformAssumptions;
         unsigned int numSample;
@@ -264,7 +273,7 @@ namespace IGC
 
         unsigned int NOSBufferSize = 0;
         unsigned int ConstantBufferLoaded = 0;
-        unsigned int UavLoaded = 0;
+        uint64_t     UavLoaded = 0;
         unsigned int ShaderResourceLoaded[4];
         unsigned int RenderTargetLoaded = 0;
 
@@ -627,7 +636,7 @@ namespace IGC
         bool AllowSimd32Slicing();
         bool AllowLargeURBWrite();
         bool IsFirstTry();
-        bool IsLastTry(CodeGenContext* cgCtx);
+        bool IsLastTry();
         unsigned GetRetryId() const;
 
         void Enable();
@@ -726,11 +735,6 @@ namespace IGC
         bool m_enableSubroutine = false;
         bool m_enableFunctionPointer = false;
 
-        // Tracks the number of allowed implicit arguments used by indirect function calls.
-        // Since we cannot determine which function is called, indirect callsites needs a global count
-        // of all implicit args possibly used by the function
-        unsigned m_numIndirectImplicitArgs = 0;
-
         /// Adding multiversioning to partially redundant samples, if AIL is on.
         bool m_enableSampleMultiversioning = false;
 
@@ -776,6 +780,16 @@ namespace IGC
         bool m_doSimd16Stage2 = false;
         std::string m_savedBitcodeString;
         SInstrTypes m_savedInstrTypes;
+
+        std::vector<int> m_hsIdxMap;
+        std::vector<int> m_dsIdxMap;
+        std::vector<int> m_gsIdxMap;
+        std::vector<int> m_hsNoDefaultIdxMap;
+        std::vector<int> m_dsNoDefaultIdxMap;
+        std::vector<int> m_gsNoDefaultIdxMap;
+        std::vector<int> m_psIdxMap;
+        DWORD LtoUsedMask = 0;
+
 
     protected:
         // Objects pointed to by these pointers are owned by this class.
@@ -846,6 +860,8 @@ namespace IGC
         virtual uint32_t getNumThreadsPerEU() const;
         virtual uint32_t getNumGRFPerThread() const;
         virtual bool forceGlobalMemoryAllocation() const;
+        virtual bool hasNoLocalToGenericCast() const;
+        virtual int16_t getVectorCoalescingControl() const;
         bool isPOSH() const;
 
         CompilerStats& Stats()
@@ -1054,6 +1070,11 @@ namespace IGC
                     IntelHasBufferOffsetArg = true;
                 }
 
+                if (strstr(options, "-cl-intel-disable-a64WA"))
+                {
+                    IntelDisableA64WA = true;
+                }
+
                 if (strstr(options, "-cl-intel-gtpin-rera"))
                 {
                     DoReRA = true;
@@ -1074,6 +1095,24 @@ namespace IGC
                 {
                     IntelForceGlobalMemoryAllocation = true;
                 }
+                if (strstr(options, "-cl-intel-no-local-to-generic"))
+                {
+                    hasNoLocalToGeneric = true;
+                }
+                if (const char* O = strstr(options, "-cl-intel-vector-coalesing"))
+                {
+                    // -cl-intel-vector-coalescing=<0-5>.
+                    const char* optionVal = O + strlen("-cl-intel-vector-coalesing");
+                    if (*optionVal != 0 && *optionVal == '=' && isdigit(*(optionVal+1)))
+                    {
+                        ++optionVal;
+                        int16_t val = (int16_t)atoi(optionVal);
+                        if (val >= 0 && val <= 5)
+                        {
+                            VectorCoalescingControl = val;
+                        }
+                    }
+                }
             }
 
 
@@ -1081,6 +1120,7 @@ namespace IGC
             bool IncludeSIPCSR;
             bool IncludeSIPKernelDebug;
             bool IntelGreaterThan4GBBufferRequired;
+            bool IntelDisableA64WA = false;
             bool Use32BitPtrArith = false;
             bool IncludeSIPKernelDebugWithLocalMemory;
             bool DoReRA;
@@ -1090,6 +1130,11 @@ namespace IGC
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
             bool IntelForceGlobalMemoryAllocation = false;
+            bool hasNoLocalToGeneric = false;
+
+            // -1 : initial value that means it is not set from cmdline
+            // 0-5: valid values set from the cmdline
+            int16_t VectorCoalescingControl = -1;
 
         };
 
@@ -1166,9 +1211,11 @@ namespace IGC
         bool isSPIRV() const;
         void setAsSPIRV();
         float getProfilingTimerResolution();
-        uint32_t getNumGRFPerThread() const;
-        uint32_t getNumThreadsPerEU() const;
-        bool forceGlobalMemoryAllocation() const;
+        uint32_t getNumGRFPerThread() const override;
+        uint32_t getNumThreadsPerEU() const override;
+        bool forceGlobalMemoryAllocation() const override;
+        bool hasNoLocalToGenericCast() const override;
+        int16_t getVectorCoalescingControl() const override;
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;
     };
@@ -1181,8 +1228,6 @@ namespace IGC
     void CodeGen(GeometryShaderContext* ctx);
     void CodeGen(OpenCLProgramContext* ctx);
 
-    void SaveIR(CodeGenContext* ctx);
-    void RestoreIR(CodeGenContext* ctx);
     void OptimizeIR(CodeGenContext* ctx);
 
     /**

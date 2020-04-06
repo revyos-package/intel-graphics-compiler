@@ -77,8 +77,7 @@ bool FindInterestingConstants::FoldsToConst(Instruction* inst, Instruction* use,
                 if (selInst->getOperand(0) == inst)
                     return true;
             }
-            else
-                return false;
+            return false;
         }
     }
     propagate = true;
@@ -245,7 +244,7 @@ bool FindInterestingConstants::getConstantAddress(llvm::LoadInst& I, unsigned& b
     {
         return false;
     }
-    size_in_bytes = I.getType()->getPrimitiveSizeInBits() / 8;
+    size_in_bytes = (unsigned int)I.getType()->getPrimitiveSizeInBits() / 8;
     return true;
 }
 
@@ -263,7 +262,16 @@ void FindInterestingConstants::addInterestingConstant(llvm::Type* loadTy, unsign
             cl.anyValue = anyValue;
             cl.value = value;
 
-            m_InterestingConstants.push_back(cl);
+            std::vector<SConstantAddrValue>& interestingConstantVector = m_InterestingConstants[cl.ca.bufId];
+            for (unsigned i = 0; i < interestingConstantVector.size(); i++)
+            {
+                if ((interestingConstantVector[i].ca.eltId == cl.ca.eltId) &&
+                    (interestingConstantVector[i].ca.size == cl.ca.size) &&
+                    (interestingConstantVector[i].anyValue == cl.anyValue) &&
+                    (interestingConstantVector[i].value == cl.value))
+                    return;
+            }
+            interestingConstantVector.push_back(cl);
         }
     }
     else
@@ -274,7 +282,7 @@ void FindInterestingConstants::addInterestingConstant(llvm::Type* loadTy, unsign
         {
             Type * srcEltTy = loadTy->getVectorElementType();
             unsigned srcNElts = loadTy->getVectorNumElements();
-            unsigned eltSize_in_bytes = srcEltTy->getPrimitiveSizeInBits() / 8;
+            unsigned eltSize_in_bytes = (unsigned int)srcEltTy->getPrimitiveSizeInBits() / 8;
             for (unsigned i = 0; i < srcNElts; i++)
             {
                 SConstantAddrValue cl;
@@ -284,7 +292,16 @@ void FindInterestingConstants::addInterestingConstant(llvm::Type* loadTy, unsign
                 cl.anyValue = anyValue;
                 cl.value = value;
 
-                m_InterestingConstants.push_back(cl);
+                std::vector<SConstantAddrValue>& interestingConstantVector = m_InterestingConstants[cl.ca.bufId];
+                for (unsigned i = 0; i < interestingConstantVector.size(); i++)
+                {
+                    if ((interestingConstantVector[i].ca.eltId == cl.ca.eltId) &&
+                        (interestingConstantVector[i].ca.size == cl.ca.size) &&
+                        (interestingConstantVector[i].anyValue == cl.anyValue) &&
+                        (interestingConstantVector[i].value == cl.value))
+                        return;
+                }
+                interestingConstantVector.push_back(cl);
             }
         }
     }
@@ -330,45 +347,76 @@ void FindInterestingConstants::visitLoadInst(llvm::LoadInst& I)
             // Get the ConstantAddress from LoadInst and log it in interesting constants
             addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, true);
         }
-        else
+        m_foldsToConst = 0;     // Reset FoldsToConst count to zero. We can keep looking for this case when FoldsToZero cannot be propagated further
+        m_constFoldBranch = 0;
+        FoldsToZeroPropagate(&I);
+        // If m_foldsToZero is greater than threshold or some branch instruction gets simplified because of this constant
+        if ((m_constFoldBranch) ||
+            ((m_foldsToZero + m_foldsToConst) >= IGC_GET_FLAG_VALUE(FoldsToZeroPropThreshold)))
         {
-            m_foldsToConst = 0;     // Reset FoldsToConst count to zero. We can keep looking for this case when FoldsToZero cannot be propagated further
-            FoldsToZeroPropagate(&I);
-            // If m_foldsToZero is greater than threshold or some branch instruction gets simplified because of this constant
-            if ((m_constFoldBranch) ||
-                ((m_foldsToZero + m_foldsToConst) >= IGC_GET_FLAG_VALUE(FoldsToZeroPropThreshold)))
-            {
-                // Zero value for this constant is interesting
-                // Get the ConstantAddress from LoadInst and log it in interesting constants
-                addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, 0);
-                // Continue finding if ONE_VALUE is beneficial for this constant
-            }
+            // Zero value for this constant is interesting
+            // Get the ConstantAddress from LoadInst and log it in interesting constants
+            addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, 0);
+            // Continue finding if ONE_VALUE is beneficial for this constant
+        }
 
-            FoldsToSourcePropagate(&I);
-            if (m_foldsToSource >= IGC_GET_FLAG_VALUE(FoldsToSourceThreshold))
+        FoldsToSourcePropagate(&I);
+        if (m_foldsToSource >= IGC_GET_FLAG_VALUE(FoldsToSourceThreshold))
+        {
+            // One value for this constant is interesting
+            // Get the ConstantAddress from LoadInst and log it in interesting constants
+            if (I.getType()->isIntegerTy())
             {
-                // One value for this constant is interesting
-                // Get the ConstantAddress from LoadInst and log it in interesting constants
-                if (I.getType()->isIntegerTy())
-                {
-                    addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, 1);
-                }
-                else if (I.getType()->isFloatTy())
-                {
-                    uint32_t value;
-                    float floatValue = 1.0;
-                    memcpy_s(&value, sizeof(uint32_t), &floatValue, sizeof(float));
-                    addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, value);
-                }
+                addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, 1);
+            }
+            else if (I.getType()->isFloatTy())
+            {
+                uint32_t value;
+                float floatValue = 1.0;
+                memcpy_s(&value, sizeof(uint32_t), &floatValue, sizeof(float));
+                addInterestingConstant(I.getType(), bufIdOrGRFOffset, eltId, size_in_bytes, false, value);
             }
         }
     }
 }
 
+bool SConstantAddrValue_LessThanOp(const SConstantAddrValue& left, const SConstantAddrValue& right)
+{
+    if (left.ca.bufId < right.ca.bufId)
+    {
+        return true;
+    }
+    else if (left.ca.bufId == right.ca.bufId)
+    {
+        if (left.ca.eltId < right.ca.eltId)
+        {
+            return true;
+        }
+        else if (left.ca.eltId == right.ca.eltId)
+        {
+            if (left.anyValue < right.anyValue)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 template<typename ContextT>
 void FindInterestingConstants::copyInterestingConstants(ContextT* pShaderCtx)
 {
-    pShaderCtx->programOutput.m_pInterestingConstants = m_InterestingConstants;
+    for (auto I = m_InterestingConstants.begin(), E = m_InterestingConstants.end(); I != E; I++)
+    {
+        if (I->second.size())
+        {
+            std::sort(I->second.begin(), I->second.end(), SConstantAddrValue_LessThanOp);
+            for (unsigned i = 0; i < I->second.size(); i++)
+            {
+                pShaderCtx->programOutput.m_pInterestingConstants.push_back(I->second[i]);
+            }
+        }
+    }
 }
 
 bool FindInterestingConstants::doFinalization(llvm::Module& M)

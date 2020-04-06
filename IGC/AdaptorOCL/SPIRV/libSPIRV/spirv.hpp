@@ -403,6 +403,7 @@ enum Decoration {
     DecorationNoSignedWrap = 4469,
     DecorationNoUnsignedWrap = 4470,
     DecorationReferencedIndirectlyINTEL = 5602,
+    DecorationSideEffectsINTEL = 5608,
     DecorationUserSemantic = 5635,
 };
 
@@ -514,6 +515,7 @@ enum GroupOperation {
     GroupOperationReduce = 0,
     GroupOperationInclusiveScan = 1,
     GroupOperationExclusiveScan = 2,
+    GroupOperationClusteredReduce = 3,
     GroupOperationCount /* internal use only */
 };
 
@@ -587,9 +589,16 @@ enum Capability {
     CapabilityDerivativeControl = 51,
     CapabilityInterpolationFunction = 52,
     CapabilityTransformFeedback = 53,
+    CapabilityNamedBarrier = 54,
     CapabilitySubgroupDispatch = 58,
     CapabilityPipeStorage = 60,
-    CapabilityNamedBarrier = 54,
+    CapabilityNonUniform = 61,
+    CapabilityNonUniformVote = 62,
+    CapabilityNonUniformArithmetic = 63,
+    CapabilityNonUniformBallot = 64,
+    CapabilityNonUniformShuffle = 65,
+    CapabilityNonUniformShuffleRelative = 66,
+    CapabilityNonUniformClustered = 67,
     CapabilityNone = 1024, /* internal use only */
     CapabilitySubgroupBallotKHR = 4423,
     CapabilitySubgroupShuffleINTEL = 5568,
@@ -598,6 +607,7 @@ enum Capability {
     CapabilitySubgroupImageMediaBlockIOINTEL = 5579,
     CapabilityFunctionPointersINTEL = 5603,
     CapabilityIndirectReferencesINTEL = 5604,
+    CapabilityAsmINTEL = 5606,
     CapabilitySubgroupAvcMotionEstimationINTEL = 5696,
     CapabilitySubgroupAvcMotionEstimationIntraINTEL = 5697,
     CapabilitySubgroupAvcMotionEstimationChromaINTEL = 5698,

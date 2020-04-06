@@ -36,7 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/AsmParser/Parser.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/CodeGenPublicEnums.h"
-#include "../AdaptorCommon/SurfaceFormats.hpp"
+#include "inc/common/Compiler/API/SurfaceFormats.h"
 #include "inc/common/igfxfmid.h"
 #include "common/IGCIRBuilder.h"
 
@@ -675,12 +675,14 @@ public:
         llvm::Value* srcBuffer,
         llvm::Value* offset,
         llvm::Value* alignment,
-        llvm::Type* returnType);
+        llvm::Type* returnType,
+        bool isVolatile = false);
 
     llvm::Value* create_indirectStore(
         llvm::Value* srcBuffer,
         llvm::Value* offset,
-        llvm::Value* data);
+        llvm::Value* data,
+        bool isVolatile = false);
 
     llvm::Value* create_atomicCounterIncrement(llvm::Value* srcBuffer);
     llvm::Value* create_atomicCounterDecrement(llvm::Value* srcBuffer);
@@ -762,7 +764,7 @@ public:
     llvm::CallInst* create_countbits(llvm::Value* src);
     llvm::Value* create_waveBallot(llvm::Value* src);
     llvm::Value* create_waveInverseBallot(llvm::Value* src);
-    llvm::Value* create_waveshuffleIndex(llvm::Value* src, llvm::Value* index);
+    llvm::Value* create_waveshuffleIndex(llvm::Value* src, llvm::Value* index, llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_waveAll(llvm::Value* src, llvm::Value* type);
     llvm::Value* create_wavePrefix(
         llvm::Value* src, llvm::Value* type, bool inclusive,

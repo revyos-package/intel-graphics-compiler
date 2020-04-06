@@ -230,6 +230,8 @@ public:
 
     int getVISAOffset() const;
 
+    void processAttributes();
+
     /***************** START EXPOSED APIS *************************/
     VISA_BUILDER_API int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
         VISA_Align varAlign, VISA_GenVar *parentDecl = NULL, int aliasOffset = 0);
@@ -850,17 +852,6 @@ private:
     int predefinedVarRegAssignment();
     int calculateTotalInputSize();
     int compileTillOptimize();
-    // expandIndirectCallWithRegTarget:
-    // The indirect call with src0 is a register, the register must be a
-    // ip-based address of the call target. We need to insert the add before call to
-    // calculate the relative offset from call to the target
-    typedef std::vector<vISA::G4_INST*> InstListType;
-    void expandIndirectCallWithRegTarget();
-
-    // create the instructions to calculate the jump target offset, return G4_Declare of the
-    // new created jmp target
-    G4_Declare* createInstsForCallTargetOffset(InstListType& insts, vISA::G4_INST* fcall, int64_t adjust_off);
-    void createInstForJmpiSequence(InstListType& insts, G4_INST* fcall);
 
     void getHeightWidth(G4_Type type, unsigned int numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize);
     CisaFramework::CisaInst* AppendVISASvmGeneralScatterInst(VISA_PredOpnd* pred,

@@ -66,6 +66,7 @@ Imported_Intrinsics = \
     "GenISA_ftoui_rte": ["anyint",["anyfloat"],"NoMem"],
     "GenISA_ftoui_rtp": ["anyint",["anyfloat"],"NoMem"],
     "GenISA_ftoui_rtn": ["anyint",["anyfloat"],"NoMem"],
+    "GenISA_ftof_rte": ["anyfloat",["anyfloat"],"NoMem"],
     "GenISA_ftof_rtn": ["anyfloat",["anyfloat"],"NoMem"],
     "GenISA_ftof_rtp": ["anyfloat",["anyfloat"],"NoMem"],
     "GenISA_ftof_rtz": ["anyfloat",["anyfloat"],"NoMem"],
@@ -85,10 +86,40 @@ Imported_Intrinsics = \
     "GenISA_storestructured4": ["void",["anyptr","int","int","float","float","float","float"],"None"],
     "GenISA_typedread": ["float4",["anyptr","int","int","int", "int"],"ReadArgMem"],
     "GenISA_typedwrite": ["void",["anyptr","int","int","int","int","float","float","float","float"],"None"],
-    "GenISA_ldraw_indexed": ["any:float",["anyptr","int", "int"],"ReadArgMem"],
-    "GenISA_ldrawvector_indexed": ["anyvector",["anyptr","int", "int"],"ReadArgMem"],
-    "GenISA_storeraw_indexed": ["void",["anyptr","int","any:float", "int"],"None"],
-    "GenISA_storerawvector_indexed": ["void",["anyptr","int","anyvector", "int"],"None"],
+    # Read a scalar value from a buffer pointer at byte offset
+    "GenISA_ldraw_indexed":
+    ["any:float",
+     ["anyptr", # buffer pointer, result of GetBufferPtr
+      "int",    # offset from the base pointer, in bytes
+      "int",    # aligment in bytes
+      "bool"],  # volatile, must be an immediate
+     "ReadArgMem"],
+    # Read a vector from a buffer pointer at byte offset
+    "GenISA_ldrawvector_indexed":
+    ["anyvector",
+     ["anyptr", # buffer pointer, result of GetBufferPtr
+      "int",    # offset from the base pointer, in bytes
+      "int",    # aligment in bytes
+      "bool"],  # volatile, must be an immediate
+     "ReadArgMem"],
+    # Write a scalar value to a buffer pointer at byte offset
+    "GenISA_storeraw_indexed":
+    ["void",
+     ["anyptr",    # buffer pointer, result of GetBufferPtr
+      "int",       # offset from the base pointer, in bytes
+      "any:float", # value to store
+      "int",       # aligment in bytes
+      "bool"],  # volatile, must be an immediate
+     "None"],
+    # Write a vector to a buffer pointer at byte offset
+    "GenISA_storerawvector_indexed":
+    ["void",
+     ["anyptr",    # buffer pointer, result of GetBufferPtr
+      "int",       # offset from the base pointer, in bytes
+      "anyvector", # value to store
+      "int",       # aligment in bytes
+      "bool"],     # volatile, must be an immediate
+     "None"],
     "GenISA_intatomicraw": ["anyint",["anyptr","int",0,"int"],"ReadWriteArgMem"],
     "GenISA_floatatomicraw": ["anyfloat",["anyptr","int",0,"int"],"ReadWriteArgMem"],
     "GenISA_intatomicrawA64": ["anyint",["anyptr","anyptr",0,"int"],"ReadWriteArgMem"],
@@ -153,16 +184,21 @@ Imported_Intrinsics = \
     "GenISA_DCL_input": ["int",["int","int"],"None"],
     "GenISA_OUTPUT": ["void",["anyfloat",0,0,0,"int","int"],"NoDuplicate"],
     "GenISA_PatchConstantOutput": ["void",["anyfloat",0,0,0,"int","int"],"None"],
-    "GenISA_PHASE_OUTPUT": ["void",["float","int"],"None"],
-    "GenISA_PHASE_INPUT": ["float",["int"],"NoMem"],
+    "GenISA_PHASE_OUTPUT": ["void",["anyfloat","int"],"None"],
+    "GenISA_PHASE_OUTPUTVEC": ["void",["anyvector","int"],"None"],
+    "GenISA_PHASE_INPUT": ["anyfloat",["int"],"NoMem"],
+    "GenISA_PHASE_INPUTVEC": ["anyfloat",["int", "short", "short"],"NoMem"],
     "GenISA_cycleCounter": ["int2",[],"None"],
     "GenISA_PullSampleIndexBarys": ["float2",["int","bool"],"NoMem"],
     "GenISA_PullSnappedBarys": ["float2",["int","int","bool"],"NoMem"],
+    "GenISA_PullCentroidBarys": ["float2",["bool"],"NoMem"],
+    "GenISA_Interpolant": ["float4",["int"],"NoMem"],
     "GenISA_Interpolate": ["float",["int","float2"],"NoMem"],
+    "GenISA_Interpolate2": ["float",["float4","float2"],"NoMem"],
     "GenISA_GradientX": ["anyfloat",[0],"NoMem"],
-    "GenISA_GradientXfine": ["float",["float"],"NoMem"],
+    "GenISA_GradientXfine": ["anyfloat",[0],"NoMem"],
     "GenISA_GradientY": ["anyfloat",[0],"NoMem"],
-    "GenISA_GradientYfine": ["float",["float"],"NoMem"],
+    "GenISA_GradientYfine": ["anyfloat",[0],"NoMem"],
     "GenISA_discard": ["void",["bool"],"None"],
     "GenISA_OUTPUTGS": ["void",["float","float","float","float","int","int","int"],"None"],
     "GenISA_OUTPUTGS2": ["void",["float","float","float","float","float","float","float","float","int","int","int"],"None"],
@@ -283,8 +319,9 @@ Imported_Intrinsics = \
     "GenISA_WaveBallot": ["int",["bool"],"Convergent,InaccessibleMemOnly"],
     # For each active lane n, return value of n-th bit from the input bitfield. Signature: (bitfield)->bool
     "GenISA_WaveInverseBallot": ["bool",["int"],"Convergent,InaccessibleMemOnly"],
-    # Read from a specific lane. Signature: (value, lane)->value
-    "GenISA_WaveShuffleIndex": ["anyint",[0,"int"],"Convergent,NoMem"],
+    # Read from a specific lane. Signature: (value, lane, helperLaneMode)->value
+    # helperLaneMode is to tell if helper lane could be used under some situations. 0: not used; 1: used.
+    "GenISA_WaveShuffleIndex": ["anyint",[0,"int", "int"],"Convergent,NoMem"],
     # Accumulate all the active lanes. Signature: (value, op)->result; where op is one of IGC::WaveOps
     "GenISA_WaveAll": ["anyint",[0,"char"],"Convergent,InaccessibleMemOnly"],
     # Accumulate all active lanes within consecutive input clusters and broadcast the result to associated output clusters.

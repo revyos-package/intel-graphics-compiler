@@ -106,7 +106,11 @@ void CodeAssumption::uniformHelper(Module* M)
                 CallInst* CallI = dyn_cast<CallInst>(II);
                 if (!CallI)
                     continue;
+
                 Function* callee = CallI->getCalledFunction();
+                if(!callee)
+                    continue;
+
                 StringRef FN = callee->getName();
 
                 // sub_group_id
@@ -116,11 +120,12 @@ void CodeAssumption::uniformHelper(Module* M)
                     // The value must be uniform. Using shuffle with index=0 to
                     // enforce it. (This is entry BB, thus lane 0 must be active.)
                     Type* int32Ty = Type::getInt32Ty(M->getContext());
-                    Value* args[2];
+                    Value* args[3];
                     args[0] = CallI;
                     args[1] = ConstantInt::getNullValue(int32Ty);
+                    args[2] = ConstantInt::get(int32Ty, 0);
 
-                    Type* ITys[2] = { args[0]->getType(), int32Ty };
+                    Type* ITys[3] = { args[0]->getType(), int32Ty, int32Ty};
                     Function* shuffleIntrin = GenISAIntrinsic::getDeclaration(
                         M,
                         GenISAIntrinsic::GenISA_WaveShuffleIndex,

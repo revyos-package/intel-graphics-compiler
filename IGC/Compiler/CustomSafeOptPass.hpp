@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 #pragma once
 #include "Compiler/CodeGenContextWrapper.hpp"
+#include "common/MDFrameWork.h"
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
@@ -32,6 +33,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/LoopPass.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/ConstantFolder.h>
 #include "common/LLVMWarningsPop.hpp"
 
 namespace llvm
@@ -78,6 +80,7 @@ namespace IGC
         void visitExtractElementInst(llvm::ExtractElementInst& I);
         void visitLdptr(llvm::CallInst* inst);
         void visitLoadInst(llvm::LoadInst& I);
+
         //
         // IEEE Floating point arithmetic is not associative.  Any pattern
         // match that changes the order or paramters is unsafe.
@@ -96,6 +99,8 @@ namespace IGC
         void visitBinaryOperatorPropNegate(llvm::BinaryOperator& I);
         void visitBitCast(llvm::BitCastInst& BC);
 
+        void matchDp4a(llvm::BinaryOperator& I);
+
     private:
         bool psHasSideEffect;
     };
@@ -109,6 +114,12 @@ namespace IGC
         TrivialLocalMemoryOpsElimination();
 
         ~TrivialLocalMemoryOpsElimination() {}
+
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.addRequired<CodeGenContextWrapper>();
+            AU.setPreservesCFG();
+        }
 
         virtual bool runOnFunction(llvm::Function& F) override;
 
@@ -165,6 +176,9 @@ namespace IGC
         void visitSDiv(llvm::BinaryOperator& I);
         void visitTruncInst(llvm::TruncInst& I);
         void visitBitCastInst(llvm::BitCastInst& I);
+#if LLVM_VERSION_MAJOR >= 10
+        void visitFNeg(llvm::UnaryOperator& I);
+#endif
 
         template <typename MaskType> void matchReverse(llvm::BinaryOperator& I);
         void createBitcastExtractInsertPattern(llvm::BinaryOperator& I,
@@ -188,6 +202,19 @@ namespace IGC
         }
 
         void visitSelectInst(llvm::SelectInst& I);
+    };
+
+    class IGCConstantFolder : public llvm::ConstantFolder
+    {
+    public:
+        IGCConstantFolder() :
+            ConstantFolder()
+        {}
+
+        llvm::Constant* CreateCanonicalize(llvm::Constant* C0, bool flushDenorms = true) const;
+        llvm::Constant* CreateFAdd(llvm::Constant* C0, llvm::Constant* C1, llvm::APFloatBase::roundingMode roundingMode) const;
+        llvm::Constant* CreateFMul(llvm::Constant* C0, llvm::Constant* C1, llvm::APFloatBase::roundingMode roundingMode) const;
+        llvm::Constant* CreateFPTrunc(llvm::Constant* C0, llvm::Type* dstType, llvm::APFloatBase::roundingMode roundingMode) const;
     };
 
     class IGCConstProp : public llvm::FunctionPass
@@ -214,13 +241,14 @@ namespace IGC
             // specialized const-prop with shader-const replacement
             return "const-prop with shader-const replacement";
         }
+
     private:
         llvm::Module* module;
         llvm::Constant* ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, llvm::LoadInst* inst);
         llvm::Constant* replaceShaderConstant(llvm::LoadInst* inst);
-        llvm::Constant* ConstantFoldCallInstruction(llvm::CallInst* inst);
         llvm::Constant* ConstantFoldCmpInst(llvm::CmpInst* inst);
         llvm::Constant* ConstantFoldExtractElement(llvm::ExtractElementInst* inst);
+        llvm::Constant* ConstantFoldCallInstruction(llvm::CallInst* inst);
         bool simplifyAdd(llvm::BinaryOperator* BO);
         bool simplifyGEP(llvm::GetElementPtrInst* GEP);
         bool m_enableMathConstProp;

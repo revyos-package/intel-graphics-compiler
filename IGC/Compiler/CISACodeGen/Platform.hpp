@@ -40,6 +40,7 @@ namespace IGC
     WA_TABLE m_WaTable;
     SKU_FEATURE_TABLE m_SkuTable;
     GT_SYSTEM_INFO      m_GTSystemInfo;
+    OCLCaps m_OCLCaps;
 
     public:
     CPlatform(PLATFORM platform) {
@@ -47,6 +48,9 @@ namespace IGC
         m_GTSystemInfo = { 0 };
     }
     CPlatform() {}
+
+    void setOclCaps(OCLCaps& caps) { m_OCLCaps = caps; }
+    uint32_t getMaxOCLParameteSize() const { return m_OCLCaps.MaxParameterSize;  }
 
         WA_TABLE const& getWATable() const { return m_WaTable; }
     SKU_FEATURE_TABLE const& getSkuTable() const { return m_SkuTable; }
@@ -259,9 +263,8 @@ namespace IGC
 
     unsigned int GetLogBindlessSamplerSize() const
     {
-        // On Gen10+ bindless sampler are 16Bytes instead of 32bytes before
-        GFXCORE_FAMILY familyCheck = IGC_IS_FLAG_ENABLED(Use16ByteBindlessSampler) ? IGFX_GEN9_CORE : IGFX_GEN10_CORE;
-        return (m_platformInfo.eRenderCoreFamily >= familyCheck) ? 4 : 5;
+        // Samplers are 16 bytes
+        return 4;
     }
 
     bool SupportCPS() const
@@ -276,10 +279,19 @@ namespace IGC
             m_GTSystemInfo.SubSliceCount == 2);
     }
 
-    bool doIntegerMad() const
+    bool enableMaxWorkGroupSizeCalculation() const
     {
-        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE && IGC_IS_FLAG_ENABLED(EnableIntegerMad);
+        return (m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE) &&
+            IGC_IS_FLAG_ENABLED(EnableMaxWGSizeCalculation);
     }
+
+    bool has8DWA64ScatteredMessage() const { return m_platformInfo.eRenderCoreFamily < IGFX_GEN12_CORE; }
+
+    bool flushL3ForTypedMemory() const
+    {
+        return m_platformInfo.eRenderCoreFamily <= IGFX_GEN11_CORE;
+    }
+
     bool supportsSIMD16TypedRW() const
     {
         return false;
@@ -308,6 +320,7 @@ namespace IGC
     bool hasCorrectlyRoundedMacros() const {
         return m_platformInfo.eProductFamily != IGFX_ICELAKE_LP &&
             m_platformInfo.eProductFamily != IGFX_LAKEFIELD &&
+            m_platformInfo.eProductFamily != IGFX_JASPERLAKE &&
             m_platformInfo.eProductFamily != IGFX_TIGERLAKE_LP;
     }
 
@@ -335,8 +348,11 @@ namespace IGC
             m_platformInfo.eProductFamily != IGFX_JASPERLAKE &&
             m_platformInfo.eProductFamily != IGFX_TIGERLAKE_LP);
     }
-    bool has8DWA64ScatteredMessage() const { return true; }
+    bool hasHWDp4AddSupport() const {
+        return m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP;
+    }
     bool useOnlyEightPatchDispatchHS() const { return false; }
+    bool hasFusedEU() const { return m_platformInfo.eRenderCoreFamily >= IGFX_GEN12_CORE; }
     bool supports256GRFPerThread() const { return false; }
     bool hasFDIV() const { return true; }
     bool supportMixMode() const {
@@ -389,6 +405,28 @@ namespace IGC
     {
         return IGC_IS_FLAG_ENABLED(FuseTypedWrite);
     }
+
+    bool doIntegerMad() const
+    {
+        return m_platformInfo.eRenderCoreFamily >= IGFX_GEN11_CORE && IGC_IS_FLAG_ENABLED(EnableIntegerMad);
+    }
+
+    unsigned int getMaxNumberHWThreadForEachWG() const
+    {
+        return getMaxNumberThreadPerSubslice();
+    }
+
+    // max block size for legacy OWord block messages
+    uint32_t getMaxBlockMsgSize(bool isSLM) const
+    {
+        return 128;
+    }
+
+    SIMDMode getMinDispatchMode() const
+    {
+        return SIMDMode::SIMD8;
+    }
+
     // ***** Below go accessor methods for testing WA data from WA_TABLE *****
 
     bool WaDoNotPushConstantsForAllPulledGSTopologies() const
@@ -477,25 +515,28 @@ namespace IGC
 
     bool alignBindlessSampler() const
     {
-        return IGC_IS_FLAG_ENABLED(Use16ByteBindlessSampler) &&
-            (m_platformInfo.eProductFamily == IGFX_SKYLAKE ||
-                m_platformInfo.eProductFamily == IGFX_KABYLAKE ||
-                m_platformInfo.eProductFamily == IGFX_COFFEELAKE);
+            return true;
     }
 
     bool WaDisableSendSrcDstOverlap() const
     {
-        // originally implemented due to HW restriction when pagefault was enabled
-        // however there seems to be an issue with overlap regardless
-        // So enabling for all platforms less than or equal to gen11
         return (!IGC_IS_FLAG_ENABLED(DisableSendSrcDstOverlapWA)) &&
-            (m_SkuTable.FtrWddm2Svm != 0 || m_platformInfo.eRenderCoreFamily <= IGFX_GEN11_CORE);
+            (m_SkuTable.FtrWddm2Svm != 0 || m_platformInfo.eRenderCoreFamily == IGFX_GEN10_CORE ||
+                m_platformInfo.eRenderCoreFamily == IGFX_GEN11_CORE);
 
     }
 
     bool WaInsertHDCFenceBeforeEOTWhenSparseAliasedResources() const
     {
-        return IGFX_GEN11_CORE >= m_platformInfo.eRenderCoreFamily;
+        return m_WaTable.Wa_1807084924 != 0;
+    }
+
+    bool WaEnableA64WA() const
+    {
+        if (IGC_IS_FLAG_ENABLED(EnableA64WA) && m_WaTable.Wa_14010595310) {
+            return true;
+        }
+        return false;
     }
 
         const SCompilerHwCaps& GetCaps() { return m_caps; }

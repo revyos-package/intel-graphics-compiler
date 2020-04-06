@@ -381,7 +381,7 @@
 
     bool needResetA0forVxHA0() const
     {
-        return getGenxPlatform() >= GENX_TGLLP;
+        return getGenxPlatform() >= GENX_ICLLP;
     }
 
     unsigned getCoIssueUints() const
@@ -412,9 +412,25 @@
 
     bool needReplaceIndirectCallWithJmpi() const
     {
-        return getGenxPlatform() == GENX_SKL ||
+        return getGenxPlatform() <= GENX_ICLLP ||
                getOption(vISA_replaceIndirectCallWithJmpi);
     }
+
+    bool canEncodeFullExtDesc() const
+    {
+        return getGenxPlatform() >= GENX_TGLLP;
+    }
+
+    bool needSwap64ImmLoHi() const
+    {
+        return getGenxPlatform() >= GENX_TGLLP;
+    }
+
+    bool has8ByteA64Gather() const
+    {
+        return getGenxPlatform() != GENX_TGLLP;
+    }
+
     bool no64bitType() const
     {
         return getGenxPlatform() == GENX_ICLLP || isGen12LP();
@@ -516,12 +532,6 @@
         return Type_HF;
     }
 
-    unsigned getHWThreadNumberPerEU() const
-    {
-        unsigned Val = getOptions()->getuInt32Option(vISA_HWThreadNumberPerEU);
-        return (Val != 0) ? Val : 7;
-    }
-
     // each flag register is 16-bit
     uint32_t getNumFlagRegisters(void)
     {
@@ -544,11 +554,6 @@
     }
 
     bool noScalarByteToFloat() const
-    {
-        return false;
-    }
-
-    bool canEncodeFullExtDesc() const
     {
         return false;
     }
@@ -581,6 +586,21 @@
     bool hasNibCtrl() const
     {
         return true;
+    }
+
+    bool hasMaskForScratchMsg() const
+    {
+        return true;
+    }
+
+    bool avoidDstSrcOverlap()
+    {
+        return false;
+    }
+
+    bool hasTwoGRFMathMacro() const
+    {
+        return false;
     }
 
 

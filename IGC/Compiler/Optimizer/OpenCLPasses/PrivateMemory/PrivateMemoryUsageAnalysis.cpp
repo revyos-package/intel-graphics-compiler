@@ -64,6 +64,8 @@ bool PrivateMemoryUsageAnalysis::runOnModule(Module& M)
             continue;
         if (pMdUtils->findFunctionsInfoItem(pFunc) == pMdUtils->end_FunctionsInfo())
             continue;
+        if (pFunc->hasFnAttribute("IndirectlyCalled"))
+            continue;
         if (runOnFunction(*pFunc))
         {
             changed = true;
@@ -79,6 +81,19 @@ bool PrivateMemoryUsageAnalysis::runOnFunction(Function& F)
     m_hasPrivateMem = false;
 
     visit(F);
+
+    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    IGCMD::MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+
+    // Add private base to kernels if function pointers are present,
+    // since stack might need to be allocated
+    if (!m_hasPrivateMem)
+    {
+        if (pCtx->m_enableFunctionPointer && isEntryFunc(pMdUtils, &F))
+        {
+            m_hasPrivateMem = true;
+        }
+    }
 
     // Struct types always use private memory unless regtomem can
     // promote them.  Check the function signature to see if any
@@ -115,15 +130,13 @@ bool PrivateMemoryUsageAnalysis::runOnFunction(Function& F)
     // For double emulation, need to add private base (conservative).
     if (!m_hasPrivateMem)
     {
-        CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
         // This is the condition that double emulation is used.
         if ((IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
-            (pCtx->m_DriverInfo.NeedFP64() && !pCtx->platform.supportFP64())))
+            (pCtx->m_DriverInfo.NeedFP64(pCtx->platform.getPlatformInfo().eProductFamily) && !pCtx->platform.supportFP64())))
         {
             m_hasPrivateMem = true;
         }
     }
-
 
     if (m_hasPrivateMem)
     {

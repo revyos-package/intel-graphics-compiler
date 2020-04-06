@@ -40,7 +40,6 @@ set(IGC_BUILD__SRC__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/layout.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LdShrink.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LinkTessControlShaderPass.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/LinkTessControlShaderMCFPass.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LiveVars.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LivenessAnalysis.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LoopDCE.cpp"
@@ -83,6 +82,7 @@ set(IGC_BUILD__SRC__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/WIAnalysis.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/SLMConstProp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/POSH_RemoveNonPositionOutput.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CrossPhaseConstProp.cpp"
   )
 
 
@@ -131,7 +131,6 @@ set(IGC_BUILD__HDR__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/layout.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LdShrink.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/LinkTessControlShaderPass.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/LinkTessControlShaderMCFPass.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/LiveVars.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LivenessAnalysis.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RegisterEstimator.hpp"
@@ -173,6 +172,7 @@ set(IGC_BUILD__HDR__CISACodeGen_Common
     "${CMAKE_CURRENT_SOURCE_DIR}/WIAnalysis.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/SLMConstProp.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/POSH_RemoveNonPositionOutput.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CrossPhaseConstProp.hpp"
   )
 
 

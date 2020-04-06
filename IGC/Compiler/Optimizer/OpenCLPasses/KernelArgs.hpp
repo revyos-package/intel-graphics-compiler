@@ -419,14 +419,16 @@ namespace IGC
         ///         This enables iteration over a container of containers
         class const_iterator {
         public:
+            enum IterPos
+            {
+                BEGIN,
+                END,
+            };
+
             /// Constructor
-            /// @param  major       An iterator to the initial position in the external container
-            /// @param  majorEnd    An iterator to the end of the external container
-            /// @param  minor       An iterator to the initial position in the internal container
-            const_iterator(
-                AllocationArgs::const_iterator major,
-                AllocationArgs::const_iterator majorEnd,
-                std::vector<KernelArg>::const_iterator minor);
+            /// @param  args       The allocation args structure
+            /// @param  pos        ENUM of initial iterator position: BEGIN or END
+            const_iterator(AllocationArgs& args, IterPos pos);
 
             /// @brief  Advances the iterator to the next element
             /// @return The iterator, pointing to the next element
@@ -436,16 +438,23 @@ namespace IGC
             /// @return The element the iterator points to
             const KernelArg& operator*();
 
-            // @brief  Checks whether this iterator and the given iterator are different
+            /// @brief  Checks whether this iterator and the given iterator are different
             ///         by checking if they point to the same element
             /// @param  iterator    An iterator to compare this iterator
             /// @return true if the iterators pare different, false otherwise
             bool operator!=(const const_iterator& iterator);
 
+            /// @brief  Checks whether this iterator and the given iterator are same
+            ///         by checking if they point to the same element
+            /// @param  iterator    An iterator to compare this iterator
+            /// @return true if the iterators are same, false otherwise
+            bool operator==(const const_iterator& iterator);
+
         private:
             AllocationArgs::const_iterator          m_major;
             AllocationArgs::const_iterator          m_majorEnd;
             std::vector<KernelArg>::const_iterator  m_minor;
+            bool                                    m_empty;
         };
 
         // Member functions
@@ -470,6 +479,10 @@ namespace IGC
         /// #brief Check if we need to insert dummy per-thread data for OpenCL
         ///
         void checkForZeroPerThreadData();
+
+        /// @brief  Checks if there are any kernel arguments
+        /// @return true if there are no arguments, false otherwise
+        bool empty();
 
     private:
         /// @brief  Check if the given argument needs to be allocated and add it to the allocation args container.
@@ -498,7 +511,6 @@ namespace IGC
         KernelArgsOrder m_KernelArgsOrder;
         /// @brief  Contains all the kernel arguments that need to be allocated or annotated, sorted by their type
         AllocationArgs m_args;
-
     };
 
 } // namespace IGC

@@ -34,6 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Dominators.h"
 #include "common/LLVMWarningsPop.hpp"
 
@@ -77,7 +78,7 @@ namespace IGC {
 
         /// @brief  Resolve collected alloca instructions.
         /// @return true if there were resolved alloca, false otherwise.
-        bool resolveAllocaInstuctions(bool stackCall);
+        bool resolveAllocaInstructions(bool stackCall);
 
         /// Initialize setup like UseScratchSpacePrivateMemory.
         bool safeToUseScratchSpace(llvm::Module& M) const;
@@ -124,48 +125,46 @@ namespace IGC {
         ModuleAllocaInfo& operator=(const ModuleAllocaInfo&) = delete;
 
         /// \brief Return the offset of alloca instruction in private memory buffer.
-        unsigned getBufferOffset(AllocaInst* AI) {
+        unsigned getBufferOffset(AllocaInst* AI) const {
             Function* F = AI->getParent()->getParent();
             return getFuncAllocaInfo(F)->AllocaDesc[AI].first;
         }
 
         /// \brief Return the size of alloca instruction in private memory buffer.
-        unsigned getBufferSize(AllocaInst* AI) {
+        unsigned getBufferSize(AllocaInst* AI) const {
             Function* F = AI->getParent()->getParent();
             return getFuncAllocaInfo(F)->AllocaDesc[AI].second;
         }
 
         /// \brief Return all alloca instructions of a given function.
-        SmallVector<AllocaInst*, 8> & getAllocaInsts(Function * F) {
+        SmallVector<AllocaInst*, 8> & getAllocaInsts(Function * F) const {
             return getFuncAllocaInfo(F)->Allocas;
         }
 
         /// \brief Return the total private memory size per WI of a given function.
-        unsigned getTotalPrivateMemPerWI(Function* F) {
+        unsigned getTotalPrivateMemPerWI(Function* F) const {
             auto FI = getFuncAllocaInfo(F);
             return FI ? FI->TotalSize : 0;
         }
 
     private:
         /// \brief The module being analyzed.
-        Module* M;
+        Module* const M;
 
         /// \brief The DataLayout object.
-        const DataLayout* DL;
+        const DataLayout* const DL;
 
         /// \brief The optional function group analysis.
-        GenXFunctionGroupAnalysis* FGA;
+        GenXFunctionGroupAnalysis* const FGA;
 
         struct FunctionAllocaInfo {
-            FunctionAllocaInfo() : TotalSize(0) {}
-
             void setAllocaDesc(AllocaInst* AI, unsigned Offset, unsigned Size) {
                 AllocaDesc[AI] = std::make_pair(Offset, Size);
             }
 
             /// \brief Total amount of private memory size per kernel. All functions in
             /// a kernel will have the same size.
-            unsigned TotalSize;
+            unsigned TotalSize = 0;
 
             /// \brief Alloca instructions for a function.
             SmallVector<AllocaInst*, 8> Allocas;
@@ -174,7 +173,7 @@ namespace IGC {
             DenseMap<AllocaInst*, std::pair<unsigned, unsigned>> AllocaDesc;
         };
 
-        FunctionAllocaInfo* getFuncAllocaInfo(Function* F) {
+        FunctionAllocaInfo* getFuncAllocaInfo(Function* F) const {
             auto Iter = InfoMap.find(F);
             if (Iter != InfoMap.end())
                 return Iter->second;
@@ -210,8 +209,8 @@ namespace IGC {
 void ModuleAllocaInfo::analyze() {
     if (FGA && FGA->getModule()) {
         assert(FGA->getModule() == M);
-        for (auto I = FGA->begin(), E = FGA->end(); I != E; ++I)
-            analyze(*I);
+        for (auto FG : *FGA)
+            analyze(FG);
     }
     else {
         for (auto& F : M->getFunctionList()) {
@@ -227,6 +226,7 @@ void ModuleAllocaInfo::analyze() {
         }
     }
 }
+
 void ModuleAllocaInfo::analyze(FunctionGroup* FG)
 {
     // Calculate the size of private-memory we need to allocate to
@@ -235,11 +235,10 @@ void ModuleAllocaInfo::analyze(FunctionGroup* FG)
     // Note that the function order does affect the final total amount of
     // private memory due to possible alignment constraints.
     //
-    for (auto SubGI = FG->Functions.begin(), SubGE = FG->Functions.end(); SubGI != SubGE; ++SubGI) {
+    for (auto SubG : FG->Functions) {
         unsigned Offset = 0;
         unsigned Alignment = 0;
-        for (auto I = (*SubGI)->begin(), E = (*SubGI)->end(); I != E; ++I) {
-            Function* F = *I;
+        for (Function* F : *SubG) {
             if (F->empty())
                 continue;
             analyze(F, Offset, Alignment);
@@ -250,8 +249,7 @@ void ModuleAllocaInfo::analyze(FunctionGroup* FG)
             Offset = iSTD::Align(Offset, Alignment);
 
         // All functions in this group will get the same final size.
-        for (auto I = (*SubGI)->begin(), E = (*SubGI)->end(); I != E; ++I) {
-            Function* F = *I;
+        for (Function* F : *SubG) {
             if (F->empty())
                 continue;
             getOrCreateFuncAllocaInfo(F)->TotalSize = Offset;
@@ -481,9 +479,9 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
     bool bRet = safeToUseScratchSpace(M);
     modMD.compOpt.UseScratchSpacePrivateMemory = bRet;
 
-    for (Module::iterator I = M.begin(); I != M.end(); ++I)
+    for (Function& F : M)
     {
-        m_currFunction = &*I;
+        m_currFunction = &F;
 
         if (m_currFunction->isDeclaration())
         {
@@ -496,7 +494,7 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
         }
         bool hasStackCall = (FGA && FGA->getGroup(m_currFunction)->hasStackCall());
         // Resolve collected alloca instructions for current function
-        changed |= resolveAllocaInstuctions(hasStackCall);
+        changed |= resolveAllocaInstructions(hasStackCall);
     }
 
     if (changed)
@@ -543,7 +541,7 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
 static void sinkAllocas(SmallVectorImpl<AllocaInst*>& Allocas) {
     assert(!Allocas.empty());
     DominatorTree DT;
-    bool Calcluated = false;
+    bool Calcuated = false;
 
     // For each alloca, sink it if it has a use that dominates all other uses.
     // This use is called the dominating use.
@@ -570,10 +568,10 @@ static void sinkAllocas(SmallVectorImpl<AllocaInst*>& Allocas) {
             continue;
 
         // Compute dominator tree lazily.
-        if (!Calcluated) {
+        if (!Calcuated) {
             Function* F = AI->getParent()->getParent();
             DT.recalculate(*F);
-            Calcluated = true;
+            Calcuated = true;
         }
 
         // Find the Nearest Common Denominator for all the uses
@@ -592,8 +590,7 @@ static void sinkAllocas(SmallVectorImpl<AllocaInst*>& Allocas) {
             // If DomBB has a use in it, insert it just before the first use.
             // Otherwise, append it to the end of the block, to reduce register pressure.
             Instruction* InsertPt = DomBB->getTerminator();
-            for (unsigned i = 0; i < UInsts.size(); ++i) {
-                Instruction* Use = UInsts[i];
+            for (Instruction* Use : UInsts) {
                 if (DomBB == Use->getParent() && DT.dominates(Use, InsertPt)) {
                     InsertPt = Use;
                 }
@@ -687,7 +684,7 @@ public:
 };
 
 
-bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
+bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
 {
     // It is possible that there is no alloca instruction in the caller but there
     // is alloca in the callee. Save the total private memory to the metadata.
@@ -746,25 +743,27 @@ bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
     // Creates intrinsics that will be lowered in the CodeGen and will handle the simd size
     Function* simdSizeFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_simdSize);
 
-    Instruction* pEntryPoint = &(*m_currFunction->getEntryBlock().getFirstInsertionPt());
+    llvm::IRBuilder<> entryBuilder(&*m_currFunction->getEntryBlock().getFirstInsertionPt());
     ImplicitArgs implicitArgs(*m_currFunction, m_pMdUtils);
 
-    // This declaration will invoke constructor of DebugLoc class and result in an empty DebugLoc
-    // instance, ie with line and scope set to 0.
-    IF_DEBUG_INFO(DebugLoc emptyDebugLoc);
+    // Construct an empty DebugLoc.
+    IF_DEBUG_INFO(DebugLoc entryDebugLoc);
+    // Assign with the function location if available.
+    IF_DEBUG_INFO_IF(DISubprogram *subprogram = m_currFunction->getSubprogram(), entryDebugLoc = DebugLoc::get(subprogram->getLine(), 0, subprogram););
+    IF_DEBUG_INFO(entryBuilder.SetCurrentDebugLocation(entryDebugLoc));
 
     if (stackCall)
     {
         // Creates intrinsics that will be lowered in the CodeGen and will handle the stack-pointer
         Function* stackAllocaFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_StackAlloca);
-        Instruction* simdLaneId16 = CallInst::Create(simdLaneIdFunc, VALUE_NAME("simdLaneId16"), pEntryPoint);
-        Value* simdLaneId = ZExtInst::CreateIntegerCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"), pEntryPoint);
-        Instruction* simdSize = CallInst::Create(simdSizeFunc, VALUE_NAME("simdSize"), pEntryPoint);
+        Instruction* simdLaneId16 = entryBuilder.CreateCall(simdLaneIdFunc, llvm::None, VALUE_NAME("simdLaneId16"));
+        Value* simdLaneId = entryBuilder.CreateIntCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"));
+        Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
         for (auto pAI : allocaInsts)
         {
             bool isUniform = pAI->getMetadata("uniform") != nullptr;
             llvm::IRBuilder<> builder(pAI);
-            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(emptyDebugLoc));
+            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
 
             // SP will be adjusted to include all the alloca space, therefore offset need to be adjusted back
             int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI) - totalPrivateMemPerWI;
@@ -794,16 +793,16 @@ bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
         // private base from threadid as we did previously.  In this case, we only need
         // PrivateMemoryUsageAnalysis pass, no need to run AddImplicitArgs pass.
 
-        Instruction* simdLaneId16 = CallInst::Create(simdLaneIdFunc, VALUE_NAME("simdLaneId16"), pEntryPoint);
-        Value* simdLaneId = ZExtInst::CreateIntegerCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"), pEntryPoint);
-        Instruction* simdSize = CallInst::Create(simdSizeFunc, VALUE_NAME("simdSize"), pEntryPoint);
+        Instruction* simdLaneId16 = entryBuilder.CreateCall(simdLaneIdFunc, llvm::None, VALUE_NAME("simdLaneId16"));
+        Value* simdLaneId = entryBuilder.CreateIntCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"));
+        Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
 
         Value* privateBase = nullptr;
         if (modMD->compOpt.UseScratchSpacePrivateMemory)
         {
             Argument* r0Arg = implicitArgs.getArgInFunc(*m_currFunction, ImplicitArg::R0);
-            ExtractElementInst* r0_5 = ExtractElementInst::Create(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"), pEntryPoint);
-            privateBase = BinaryOperator::CreateAnd(r0_5, ConstantInt::get(typeInt32, 0xFFFFFC00), VALUE_NAME("privateBase"), pEntryPoint);
+            Value* r0_5 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
+            privateBase = entryBuilder.CreateAnd(r0_5, ConstantInt::get(typeInt32, 0xFFFFFC00), VALUE_NAME("privateBase"));
         }
 
         for (auto pAI : allocaInsts)
@@ -812,14 +811,13 @@ bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
             llvm::IRBuilder<> builder(pAI);
             // Post upgrade to LLVM 3.5.1, it was found that inliner propagates debug info of callee
             // in to the alloca. Further, those allocas are somehow hoisted to the top of program.
-            // When those allocas are lowered to below sequence, they result in prolog instructions
+            // When those allocas are lowered to below sequence, they result in prologue instructions
             // pointing to a much later line of code. This causes a single src line to now have
             // multiple VISA offset mappings and prevents debugger from setting breakpoints
-            // correctly. So instead, we clear DebugLoc for the instructions generated by lowering
-            // alloca and so the incorrect mapping will not be emitted.
+            // correctly. So instead, we set DebugLoc for the instructions generated by lowering
+            // alloca to mark that they are part of the prologue.
             // Note: As per Amjad, later LLVM version has a fix for this in llvm/lib/Transforms/Utils/InlineFunction.cpp.
-
-            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(emptyDebugLoc));
+            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
 
             // Get buffer information from the analysis
             unsigned int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI);
@@ -918,30 +916,30 @@ bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
 
     ConstantInt* totalPrivateMemPerWIValue = ConstantInt::get(typeInt32, totalPrivateMemPerWI);
 
-    Instruction* simdLaneId16 = CallInst::Create(simdLaneIdFunc, VALUE_NAME("simdLaneId16"), pEntryPoint);
-    Value* simdLaneId = ZExtInst::CreateIntegerCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"), pEntryPoint);
-    Instruction* simdSize = CallInst::Create(simdSizeFunc, VALUE_NAME("simdSize"), pEntryPoint);
-    BinaryOperator* totalPrivateMemPerThread = BinaryOperator::CreateMul(simdSize, totalPrivateMemPerWIValue, VALUE_NAME("totalPrivateMemPerThread"), pEntryPoint);
-    ExtractElementInst* r0_5 = ExtractElementInst::Create(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"), pEntryPoint);
+    Instruction* simdLaneId16 = entryBuilder.CreateCall(simdLaneIdFunc, llvm::None, VALUE_NAME("simdLaneId16"));
+    Value* simdLaneId = entryBuilder.CreateIntCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"));
+    Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
+    Value* totalPrivateMemPerThread = entryBuilder.CreateMul(simdSize, totalPrivateMemPerWIValue, VALUE_NAME("totalPrivateMemPerThread"));
+    Value* r0_5 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
     ConstantInt* FFTIDMask = ConstantInt::get(typeInt32, Ctx.platform.getFFTIDBitMask());
-    Value* threadId = BinaryOperator::CreateAnd(r0_5, FFTIDMask, VALUE_NAME("threadId"), pEntryPoint);
+    Value* threadId = entryBuilder.CreateAnd(r0_5, FFTIDMask, VALUE_NAME("threadId"));
     {
         if (Ctx.platform.supportTwoStackTSG() && IGC_IS_FLAG_ENABLED(EnableGen11TwoStackTSG))
         {
             // Gen11 , 2 - stack configuration : (FFTID[9:0] << 1) | FFSID[0]) * scratch_size
-            BinaryOperator* shlThreadID = BinaryOperator::CreateShl(threadId, ConstantInt::get(typeInt32, 1), VALUE_NAME("shlThreadID"), pEntryPoint);
+            Value* shlThreadID = entryBuilder.CreateShl(threadId, ConstantInt::get(typeInt32, 1), VALUE_NAME("shlThreadID"));
 
             // FFSID - r0.0 bit 16
-            ExtractElementInst* r0_0 = ExtractElementInst::Create(r0Arg, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"), pEntryPoint);
-            BinaryOperator* FFSIDbit = BinaryOperator::CreateLShr(r0_0, ConstantInt::get(typeInt32, 16), VALUE_NAME("FFSIDbit"), pEntryPoint);
-            BinaryOperator* FFSID = BinaryOperator::CreateAnd(FFSIDbit, ConstantInt::get(typeInt32, 1), VALUE_NAME("FFSID"), pEntryPoint);
+            Value* r0_0 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"));
+            Value* FFSIDbit = entryBuilder.CreateLShr(r0_0, ConstantInt::get(typeInt32, 16), VALUE_NAME("FFSIDbit"));
+            Value* FFSID = entryBuilder.CreateAnd(FFSIDbit, ConstantInt::get(typeInt32, 1), VALUE_NAME("FFSID"));
 
-            threadId = BinaryOperator::CreateOr(FFSID, shlThreadID, VALUE_NAME("threadId"), pEntryPoint);
+            threadId = entryBuilder.CreateOr(FFSID, shlThreadID, VALUE_NAME("threadId"));
         }
     }
 
 
-    Instruction* perThreadOffset = BinaryOperator::CreateMul(threadId, totalPrivateMemPerThread, VALUE_NAME("perThreadOffset"), pEntryPoint);
+    Value* perThreadOffset = entryBuilder.CreateMul(threadId, totalPrivateMemPerThread, VALUE_NAME("perThreadOffset"));
 
     for (auto pAI : allocaInsts)
     {
@@ -953,7 +951,7 @@ bool PrivateMemoryResolution::resolveAllocaInstuctions(bool stackCall)
         // %privateBuffer               = bitcast i8* %offsettmp1 to <buffer type>
 
         llvm::IRBuilder<> builder(pAI);
-        IF_DEBUG_INFO(builder.SetCurrentDebugLocation(emptyDebugLoc));
+        IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
         bool isUniform = pAI->getMetadata("uniform") != nullptr;
         // Get buffer information from the analysis
         unsigned int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI);

@@ -166,6 +166,7 @@ namespace IGC
         CVariable* ImmToVariable(uint64_t immediate, VISA_Type type);
         CVariable* GetConstant(llvm::Constant* C, CVariable* dstVar = nullptr);
         CVariable* GetScalarConstant(llvm::Value* c);
+        CVariable* GetStructVariable(llvm::Value* v, llvm::Constant* initValue = nullptr);
         CVariable* GetUndef(VISA_Type type);
         llvm::Constant* findCommonConstant(llvm::Constant* C, uint elts, uint currentEmitElts, bool& allSame);
         virtual unsigned int GetGlobalMappingValue(llvm::Value* c);
@@ -251,6 +252,9 @@ namespace IGC
         SIMDMode m_dispatchSize;
         /// SIMD Size is the default size of instructions
         ShaderDispatchMode m_ShaderDispatchMode;
+        /// the default emit size for this shader. This is the default size for variables as well
+        /// as the default execution size for each instruction. encoder may override it explicitly
+        /// via CEncoder::SetSIMDSize
         SIMDMode m_SIMDSize;
         uint8_t m_numberInstance;
         PushInfo pushInfo;
@@ -304,7 +308,6 @@ namespace IGC
             llvm::Argument* Arg,
             bool ArgInCallee, // true if Arg isn't in current func
             bool useStackCall = false);
-        CVariable* getOrCreateArgSymbolForIndirectCall(llvm::CallInst* cInst, unsigned argIdx, unsigned numImplicitArgs);
         VISA_Type GetType(llvm::Type* type);
 
         /// Evaluate constant expression and return the result immediate value.
@@ -345,7 +348,7 @@ namespace IGC
                     }
                     else if (bufType == UAV)
                     {
-                        m_uavLoaded |= BIT(typeBti);
+                        m_uavLoaded |= (uint64_t)1 << (typeBti);
                     }
                     else if (bufType == RENDER_TARGET)
                     {
@@ -377,7 +380,8 @@ namespace IGC
                     }
                     else if (bufType == UAV)
                     {
-                        m_uavLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetUavIndexSize());
+                        //m_uavLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetUavIndexSize());
+                        m_uavLoaded |= ((~((0xffffffffffffffff) << (m_pBtiLayout->GetUavIndexSize() + 1))) & (~((0xffffffffffffffff) << 0)));
                     }
                     else if (bufType == RENDER_TARGET)
                     {
@@ -452,7 +456,6 @@ namespace IGC
         GenXFunctionGroupAnalysis* m_FGA;
         VariableReuseAnalysis* m_VRA;
 
-        uint m_currentBlock;
         uint m_numBlocks;
         IGC::IGCMD::MetaDataUtils* m_pMdUtils;
 
@@ -495,12 +498,12 @@ namespace IGC
         CVariable* m_RETV;
 
         std::vector<USC::SConstantGatherEntry> gatherMap;
-        uint m_ConstantBufferLength;
-        uint m_constantBufferMask;
-        uint m_constantBufferLoaded;
-        uint m_uavLoaded;
-        uint m_shaderResourceLoaded[4];
-        uint m_renderTargetLoaded;
+        uint     m_ConstantBufferLength;
+        uint     m_constantBufferMask;
+        uint     m_constantBufferLoaded;
+        uint64_t m_uavLoaded;
+        uint     m_shaderResourceLoaded[4];
+        uint     m_renderTargetLoaded;
 
         int  m_cbSlot;
         uint m_statelessCBPushedSize;

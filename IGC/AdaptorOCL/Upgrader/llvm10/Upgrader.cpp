@@ -24,4 +24,42 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-#include "SurfaceFormats.hpp"
+// vim:ts=2:sw=2:et:
+
+#pragma warning(disable:4141)
+#pragma warning(disable:4146)
+#pragma warning(disable:4244)
+#pragma warning(disable:4624)
+#pragma warning(disable:4800)
+
+#include "Upgrader.h"
+
+#include "common/LLVMWarningsPush.hpp"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/raw_ostream.h>
+#include "common/LLVMWarningsPop.hpp"
+
+using namespace llvm;
+
+std::unique_ptr<MemoryBuffer>
+upgrader::upgradeBitcodeFile(MemoryBufferRef Buffer, LLVMContext &Context) {
+  auto ErrM = upgrader::parseBitcodeFile(Buffer, Context);
+  Module *M = ErrM.get().get();
+  if (!M)
+    return nullptr;
+
+  SmallVector<char, 0> Buf;
+  Buf.reserve(1024*1024);
+
+  raw_svector_ostream OS(Buf);
+  WriteBitcodeToFile(*M, OS);
+
+  return MemoryBuffer::getMemBufferCopy(OS.str());
+}
+
+Expected<std::unique_ptr<Module>>
+upgrader::upgradeAndParseBitcodeFile(MemoryBufferRef Buffer, LLVMContext &Context) {
+  return upgrader::parseBitcodeFile(Buffer, Context);
+}

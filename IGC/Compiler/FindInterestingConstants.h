@@ -39,12 +39,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace IGC
 {
-    struct ConstInstrCBLoads
-    {
-        bool isConst;
-        std::map<llvm::Value*, IGC::ConstantAddress> CBloads;
-    };
-
     class FindInterestingConstants : public llvm::FunctionPass, public llvm::InstVisitor<FindInterestingConstants>
     {
     public:
@@ -72,7 +66,7 @@ namespace IGC
         unsigned int m_foldsToConst;
         unsigned int m_foldsToSource;
         bool m_constFoldBranch;
-        std::vector<SConstantAddrValue> m_InterestingConstants;
+        std::unordered_map<unsigned int, std::vector<SConstantAddrValue>> m_InterestingConstants;
         const llvm::DataLayout* m_DL;
 
         // Helper functions
