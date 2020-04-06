@@ -1,10 +1,10 @@
-intel-graphics-compiler (1.0.3627-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.3627-1) unstable; urgency=medium
 
   * New upstream release.
   * control: Use debhelper-compat, bump to 12.
   * control: Bump policy to 4.5.0.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Mon, 06 Apr 2020 10:52:45 +0300
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 06 Apr 2020 11:18:55 +0300
 
 intel-graphics-compiler (1.0.3151-1) unstable; urgency=medium
 
