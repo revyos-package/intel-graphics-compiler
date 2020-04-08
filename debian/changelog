@@ -1,9 +1,9 @@
-intel-graphics-compiler (1.0.3627-2) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.3627-2) unstable; urgency=medium
 
   * control, rules: Build with clang-10, bump libopencl-clang-dev build-dep.
     (LP: #1871345)
 
- -- Timo Aaltonen <tjaalton@debian.org>  Tue, 07 Apr 2020 19:05:02 +0300
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 08 Apr 2020 18:50:39 +0300
 
 intel-graphics-compiler (1.0.3627-1) unstable; urgency=medium
 
