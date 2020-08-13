@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 #===================== begin_copyright_notice ==================================
 
 #Copyright (c) 2017 Intel Corporation
@@ -83,6 +81,7 @@ attribute_map = {
     "NoMem":               set(["NoUnwind","ReadNone"]),
     "ReadMem":             set(["NoUnwind","ReadOnly"]),
     "ReadArgMem":          set(["NoUnwind","ReadOnly","ArgMemOnly"]),
+    "WriteMem":            set(["NoUnwind","WriteOnly"]),
     "ReadWriteArgMem":     set(["NoUnwind","ArgMemOnly"]),
     "NoReturn":            set(["NoUnwind","NoReturn"]),
     "NoDuplicate":         set(["NoUnwind","NoDuplicate"]),
@@ -91,7 +90,7 @@ attribute_map = {
 }
 
 # order taken from IntrinsicEmitter::EmitAttributes to match attribute order used for llvm intrinsics
-attribute_order = ("NoUnwind", "NoReturn", "NoDuplicate", "Convergent", "ReadNone", "ReadOnly", "ArgMemOnly", "InaccessibleMemOnly")
+attribute_order = ("NoUnwind", "NoReturn", "NoDuplicate", "Convergent", "ReadNone", "WriteOnly", "ReadOnly", "ArgMemOnly", "InaccessibleMemOnly")
 
 def getAttributeList(Attrs):
     """
@@ -106,9 +105,13 @@ def getAttributeList(Attrs):
 Intrinsics = dict()
 parse = sys.argv
 
+turnOnComments = True;
+
 for i in range(len(parse)):
     #Populate the dictionary with the appropriate Intrinsics
     if i != 0:
+        if parse[i] == "false":
+            turnOnComments = False;
         if (".py" in parse[i]):
             module = importlib.import_module(os.path.split(parse[i])[1].replace(".py",""))
             Intrinsics.update(module.Imported_Intrinsics)
@@ -270,15 +273,15 @@ def createOverloadTable():
         if ((i+1)%8 == 0):
             f.write(",\n  0")
         isOverloadable = False
-        genISA_Intrinsic = Intrinsics[ID_array[i]]
-        for j in range(3):
+        genISA_Intrinsic = Intrinsics[ID_array[i]][1]
+        for j in range(len(genISA_Intrinsic)):
             if isinstance(genISA_Intrinsic[j],list):
                 for z in range(len(genISA_Intrinsic[j])):
-                    if "any" in genISA_Intrinsic[j][z]:
+                    if "any" in genISA_Intrinsic[j][z][0]:
                         isOverloadable = True
                         break
             else:
-                if "any" in genISA_Intrinsic[j]:
+                if "any" in genISA_Intrinsic[j][0]:
                     isOverloadable = True
                     break
         if isOverloadable:
@@ -301,7 +304,7 @@ def addAnyTypes(value,argNum):
         return_val = "<" + str(calculated_num) + ">" #Can't represent in hex we will need to use long table
     return_val = "F" + return_val
     if default_value:
-        encoded_default_value = encodeTypeString([default_value], str(), [])[0] #encode the default value
+        encoded_default_value = encodeTypeString([(default_value, "")], str(), [])[0] #encode the default value
         return_val = return_val + encoded_default_value
     return return_val
 
@@ -316,19 +319,19 @@ def addVectorTypes(source):
 
 def encodeTypeString(array_of_types,type_string,array_of_anys):
     for j in range(len(array_of_types)):
-        if isinstance(array_of_types[j],int):
-            type_string += array_of_anys[array_of_types[j]]
-        elif array_of_types[j] in type_map:
-            type_string += type_map[array_of_types[j]]
+        if isinstance(array_of_types[j][0],int):
+            type_string += array_of_anys[array_of_types[j][0]]
+        elif array_of_types[j][0] in type_map:
+            type_string += type_map[array_of_types[j][0]]
         else: #vector or any case
-            if "any" in array_of_types[j]:
-                new_string = addAnyTypes(array_of_types[j], len(array_of_anys))
+            if "any" in array_of_types[j][0]:
+                new_string = addAnyTypes(array_of_types[j][0], len(array_of_anys))
                 type_string += new_string
                 array_of_anys.append(new_string)
-            elif "ptr_" in array_of_types[j]:
-                type_string += pointerTypesi8_map[array_of_types[j]]
+            elif "ptr_" in array_of_types[j][0]:
+                type_string += pointerTypesi8_map[array_of_types[j][0]]
             else:
-                type_string += addVectorTypes(array_of_types[j])
+                type_string += addVectorTypes(array_of_types[j][0])
     return [type_string,array_of_anys]
 
 
@@ -337,14 +340,14 @@ def createTypeTable():
     IIT_Long = []
     # For the first part we will create the basic type table
     for i in range(len(ID_array)):
-        genISA_Intrinsic = Intrinsics[ID_array[i]] # This is our array of types
+        genISA_Intrinsic = Intrinsics[ID_array[i]][1] # This is our array of types
         dest = genISA_Intrinsic[0]
         source_list = genISA_Intrinsic[1]
         anyArgs_array = []
         type_string = str()
 
         #Start with Destination
-        if isinstance(dest,str):
+        if isinstance(dest[0],str):
             dest = [dest]
         else:
             if len(dest) > 1:
@@ -357,7 +360,6 @@ def createTypeTable():
         #Next we go over the Source
         source_result = encodeTypeString(source_list,type_string,anyArgs_array)
         type_string = source_result[0]
-
         array_of_longs = re.findall("(?<=\<)(.*?)(?=\>)",type_string) #Search for my long values <>
         type_string = re.sub("(<)(.*?)(>)",".",type_string) #Replace long_nums for now with .
         IIT_Basic.append(["0x"+type_string[::-1],array_of_longs]) #Reverse the string before appending and add array of longs
@@ -417,7 +419,7 @@ def createAttributeTable():
     attribute_Array = []
     for i in range(len(ID_array)):
         found = False
-        intrinsic_attribute = Intrinsics[ID_array[i]][2] #This is the location of that attribute
+        intrinsic_attribute = Intrinsics[ID_array[i]][1][2] #This is the location of that attribute
         for j in range(len(attribute_Array)):
             if intrinsic_attribute == attribute_Array[j]:
                 found = True
@@ -432,7 +434,7 @@ def createAttributeTable():
             "  unsigned NumAttrs = 0;\n"
             "  if (id != 0) {\n"
             "    switch(IntrinsicsToAttributesMap[id - Intrinsic::num_intrinsics]) {\n"
-            "    default: llvm_unreachable(\"Invalid attribute number\");\n")
+            "    default: IGC_ASSERT_EXIT_MESSAGE(0, \"Invalid attribute number\");\n")
 
     for i in range(len(attribute_Array)): #Building case statements
         Attrs = getAttributeList([x.strip() for x in attribute_Array[i].split(',')])
@@ -447,6 +449,42 @@ def createAttributeTable():
             "  return IGCLLVM::AttributeSet::get(C, makeArrayRef(AS, NumAttrs));\n"
             "}\n"
             "#endif // GET_INTRINSIC_ATTRIBUTES\n\n")
+    f.close()
+
+def compileComments():
+    f = open(outputFile,"a")
+    f.write("//Comments for each Intrinsic\n"
+            "#ifdef GET_INTRINSIC_COMMENTS_TABLE\n")
+    f.write("static const std::array<IntrinsicComments,"+str(len(ID_array))+"> IDComments = {{\n")
+    for i in range(len(ID_array)):
+        func_desc = Intrinsics[ID_array[i]][0]
+        output_array = Intrinsics[ID_array[i]][1][0]
+        input_array = Intrinsics[ID_array[i]][1][1]
+        f.write('{"'+func_desc+'", {')
+        if len(output_array) == 2 and isinstance(output_array[0], str):
+            f.write('"'+output_array[1]+'"')
+        else:
+            if len(output_array) == 0:
+                f.write('"none"')
+            else:
+                for o in range(len(output_array)):
+                    f.write('"'+output_array[o][1]+'"')
+                    if o != (len(output_array) - 1):
+                        f.write(",")
+        f.write('}, {')
+        if len(input_array) == 0:
+            f.write('"none"')
+        else:
+            for input in range(len(input_array)):
+                f.write('"'+input_array[input][1]+'"')
+                if input != (len(input_array) - 1):
+                    f.write(",")
+        f.write('}}')
+        if i != (len(ID_array) - 1):
+            f.write(",\n")
+    f.write('}};\n')
+    f.write("return IDComments[id-Intrinsic::num_intrinsics - 1];\n")
+    f.write("#endif //GET_INTRINSIC_COMMENTS_TABLE\n")
     f.close()
 
 def emitSuffix():
@@ -466,4 +504,12 @@ createOverloadTable()
 sortedIntrinsicsOnLenth()
 createTypeTable()
 createAttributeTable()
+if turnOnComments:
+    compileComments()
+else:
+    f = open(outputFile,"a")
+    f.write("#ifdef GET_INTRINSIC_COMMENTS_TABLE\n")
+    f.write('return {"", {""}, {""}};\n')
+    f.write("#endif //GET_INTRINSIC_COMMENTS_TABLE\n\n")
+    f.close()
 emitSuffix()

@@ -385,6 +385,22 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
         }
     }
 
+#ifndef NDEBUG
+    for (unsigned i = 0; i < numAddrs; i++)
+    {
+        REGVAR_VECTOR& vec = pointsToSets[addrPointsToSetIndex[i]];
+        unsigned indirectVarSize = 0;
+        for (REGVAR_VECTOR::iterator it = vec.begin();
+            it != vec.end();
+            it++)
+        {
+            G4_RegVar* cur = (*it);
+            indirectVarSize += cur->getDeclare()->getByteSize();
+        }
+        assert((indirectVarSize < (unsigned)getGRFSize()* fg.getKernel()->getNumRegTotal()) && "indirected variables' size is larger than GRF file size");
+    }
+#endif
+
 #ifdef DEBUG_VERBOSE_ON
     for (unsigned int i = 0; i < numBBs; i++)
     {
@@ -602,9 +618,9 @@ bool LivenessAnalysis::livenessCandidate(G4_Declare* decl, bool verifyRA)
     }
     else if ((selectedRF & decl->getRegFile()))
     {
-        if ((selectedRF & G4_GRF) && (decl->getRegFile() & G4_INPUT))
+        if (selectedRF & G4_GRF)
         {
-            if (decl->getRegVar()->isPhyRegAssigned() && !decl->getRegVar()->isGreg())
+            if ((decl->getRegFile() & G4_INPUT) && decl->getRegVar()->isPhyRegAssigned() && !decl->getRegVar()->isGreg())
             {
                 return false;
             }
@@ -888,7 +904,7 @@ void LivenessAnalysis::computeLiveness()
     BitSet* subEntryKill = NULL;
     BitSet* subEntryGen = NULL;
 
-    if (fg.builder->getOptions()->getTarget() == VISA_CM)
+    if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
     {
         //
         // Top-down order of BB list iteration guarantees that
@@ -1120,7 +1136,7 @@ void LivenessAnalysis::computeLiveness()
             while(rit != fg.begin());
         }
 
-        if (fg.builder->getOptions()->getTarget() == VISA_CM)
+        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
         {
             for (unsigned i = 0; i < numFnId; i++)
             {
@@ -1229,7 +1245,7 @@ void LivenessAnalysis::computeLiveness()
     dump_fn_vector("MAYDEF", fns, maydef);
 #endif
 
-        if (fg.builder->getOptions()->getTarget() == VISA_CM)
+        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
         {
             for (unsigned i = 0; i < numFnId; i++)
             {
@@ -1282,7 +1298,7 @@ void LivenessAnalysis::computeLiveness()
     //
     else {
 
-        if (fg.builder->getOptions()->getTarget() == VISA_3D &&
+        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
             (selectedRF & G4_GRF || selectedRF & G4_FLAG) &&
             (numFnId > 0))
         {
@@ -1828,7 +1844,8 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
     unsigned execSize = inst->getExecSize();
     MUST_BE_TRUE(dst->getBase()->isRegVar(), ERROR_REGALLOC);
 
-    if( bb->isInSimdFlow() && !inst->isWriteEnableInst() && opt->getTarget() != VISA_3D )
+    if( !bb->isAllLaneActive() && !inst->isWriteEnableInst() &&
+        fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D )
     {
         // conservatively assume non-nomask instructions in simd control flow
         // may not write the whole region
@@ -1911,7 +1928,7 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
                                         G4_VarBase* flagReg,
                                         const Options *opt)
 {
-    if( bb->isInSimdFlow() && !inst->isWriteEnableInst() && opt->getTarget() != VISA_3D )
+    if( !bb->isAllLaneActive() && !inst->isWriteEnableInst() && opt->getTarget() != VISA_3D )
     {
         // conservatively assume non-nomask instructions in simd control flow
         // may not write the whole region
@@ -1937,9 +1954,9 @@ void LivenessAnalysis::footprintDst(G4_BB* bb,
     if (dstfootprint &&
         !(i->isPartialWrite()) &&
         ((isLocal ||
-            bb->isInSimdFlow() == false ||
+            bb->isAllLaneActive() ||
             i->isWriteEnableInst() == true) ||
-            gra.kernel.getOptions()->getTarget() == VISA_3D))
+            gra.kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D))
     {
         // Bitwise OR left-bound/right-bound with dst footprint to indicate
         // bytes that are written in to
@@ -2003,7 +2020,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
         G4_INST* i = (*rit);
         G4_DstRegRegion* dst = i->getDst();
 
-        if (i->opcode() == G4_pseudo_lifetime_end)
+        if (i->isLifeTimeEnd())
         {
             continue;
         }
@@ -2441,7 +2458,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
             --iterToInsert;
         } while ((*iterToInsert)->isPseudoKill());
         G4_INST* killInst = fg.builder->createPseudoKill(pseudoKill.first, PseudoKillType::FromLiveness);
-        bb->insert(iterToInsert, killInst);
+        bb->insertBefore(iterToInsert, killInst);
     }
 
     //
@@ -3051,9 +3068,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
     {
         if (bb->isEndWithFCall())
         {
-            const char* n = builder->getNameString(mem, 25,
-                builder->getIsKernel() ? "FCALL_RET_LOC_k_%d" : "FCALL_RET_LOC_f%d_%d",
-                builder->getCUnitId(), call_id++);
+            const char* n = builder->getNameString(mem, 25, "FCALL_RET_LOC_%d", call_id++);
 
             G4_INST* fcall = bb->back();
             // Set call dst to r1.0, here reserve 8 dwords in r1.0 for the use of call dst
@@ -3068,9 +3083,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
 
         if (bb->isEndWithFRet())
         {
-            const char* n = builder->getNameString(mem, 25,
-                builder->getIsKernel() ? "FRET_RET_LOC_k_%d" : "FRET_RET_LOC_f%d_%d",
-                builder->getCUnitId(), ret_id++);
+            const char* n = builder->getNameString(mem, 25, "FRET_RET_LOC_%d", ret_id++);
             G4_INST* fret = bb->back();
             const RegionDesc* rd = builder->createRegionDesc(2, 2, 1);
             G4_Declare* r1_src = builder->createDeclareNoLookup(n, G4_INPUT, 8, 1, Type_UD);
@@ -3494,7 +3507,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     MUST_BE_TRUE(var->getId() == varID, "RA verification error: Invalid regVar ID!");
                     MUST_BE_TRUE(var->getPhyReg()->isGreg(), "RA verification error: Invalid dst reg!");
 
-                    if (inst->opcode() != G4_pseudo_lifetime_end)
+                    if (!inst->isLifeTimeEnd())
                     {
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
@@ -3714,11 +3727,25 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
         }
     }
 
+    if (builder.getOption(vISA_DumpDotAll))
+    {
+        kernel.dumpDotFile("PreRegAlloc");
+    }
+
+    kernel.fg.callerSaveAreaOffset = kernel.fg.calleeSaveAreaOffset = kernel.fg.frameSizeInOWord = 0;
+
+    // This must be done before Points-to analysis as it may modify CFG and add new BB!
+    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
+    {
+        kernel.fg.setABIForStackCallFunctionCalls();
+        kernel.fg.addFrameSetupDeclares(builder, regPool);
+        kernel.fg.NormalizeFlowGraph();
+    }
+
     kernel.fg.reassignBlockIDs();
 
-    if (kernel.getOptions()->getTarget() == VISA_3D)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
     {
-
         kernel.fg.findNaturalLoops();
 
 #ifdef DEBUG_VERBOSE_ON
@@ -3732,23 +3759,6 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
             DEBUG_VERBOSE(std::endl);
         }
 #endif
-
-    }
-
-    if (builder.getOption(vISA_DumpDotAll))
-    {
-        kernel.dumpDotFile("PreRegAlloc");
-    }
-
-    kernel.fg.callerSaveAreaOffset = kernel.fg.calleeSaveAreaOffset = kernel.fg.paramOverflowAreaOffset =
-        kernel.fg.paramOverflowAreaSize = 0;
-
-    // This must be done before Points-to analysis as it may modify CFG and add new BB!
-    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
-    {
-        kernel.fg.setABIForStackCallFunctionCalls();
-        kernel.fg.addFrameSetupDeclares(builder, regPool);
-        kernel.fg.NormalizeFlowGraph();
     }
 
     //
@@ -3757,13 +3767,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     PointsToAnalysis pointsToAnalysis(kernel.Declares, kernel.fg.getNumBB());
     pointsToAnalysis.doPointsToAnalysis(kernel.fg);
 
-    // Run explicit variable split pass
-    VarSplitPass splitPass(kernel);
-    if(kernel.getOption(vISA_IntrinsicSplit))
-        splitPass.run();
-
     GlobalRA gra(kernel, regPool, pointsToAnalysis);
-    gra.setVarSplitPass(&splitPass);
 
     //
     // insert pseudo save/restore return address so that reg alloc
@@ -3773,7 +3777,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 
     //FIXME: here is a temp WA
     if (kernel.fg.funcInfoTable.size() > 0 &&
-        kernel.fg.builder->getOptions()->getTarget() == VISA_3D)
+        kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
     {
         kernel.getOptions()->setOption(vISAOptions::vISA_LocalRA, false);
     }
@@ -3788,7 +3792,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     //Remove the un-referenced declares
     gra.removeUnreferencedDcls();
 
-    if (kernel.fg.builder->getOptions()->getTarget() == VISA_CM)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
     {
         kernel.fg.markScope();
     }
@@ -3808,7 +3812,11 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     {
         jitInfo->numBytesScratchGtpin = kernel.getGTPinData()->getNumBytesScratchUse();
     }
-    splitPass.replaceIntrinsics();
+
+    if (auto sp = kernel.getVarSplitPass())
+    {
+        sp->replaceIntrinsics();
+    }
 
     recordRAStats(builder, kernel, status);
     if (status != VISA_SUCCESS)

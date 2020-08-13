@@ -34,8 +34,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <map>
 
-struct AccInterval;
-
 namespace vISA
 {
     class HWConformity
@@ -43,9 +41,6 @@ namespace vISA
         IR_Builder& builder;
         G4_Kernel& kernel;
         vISA::Mem_Manager& mem;
-        int numAccSubDef = 0;
-        int numAccSubUse = 0;
-
 
         // This is added for data layout optimization.
         // Currently it only targets packed-byte pattern.
@@ -135,13 +130,13 @@ namespace vISA
         void convertMAD2MulAdd(INST_LIST_ITER iter, G4_BB *bb);
         G4_Type getAccType(G4_Type ty);
         bool findHoistLocation(INST_LIST_ITER start, INST_LIST_ITER &end, uint16_t &movDist, G4_INST *boundary);
-        void convertComprInstSrcRegion(G4_INST *inst);
         void addACCOpnd(G4_INST *inst, bool needACCSrc, int stride, G4_Type accTy);
         void maintainDU4TempMov(G4_INST *inst, G4_INST *movInst);
         void fixImm64(INST_LIST_ITER i, G4_BB* bb);
         bool checkSrcCrossGRF(INST_LIST_ITER &i, G4_BB* bb);
         G4_INST* checkSrcDefInst(G4_INST *inst, G4_INST *def_inst, uint32_t srcNum);
-        void fix64bInst(INST_LIST_ITER i, G4_BB* bb);
+        bool emulate64bMov(INST_LIST_ITER iter, G4_BB* bb);
+        bool fix64bInst(INST_LIST_ITER i, G4_BB* bb);
         bool fixPlaneInst(INST_LIST_ITER i, G4_BB* bb);
         void expandPlaneInst(INST_LIST_ITER i, G4_BB* bb);
         bool fixAddcSubb(G4_BB* bb);
@@ -195,9 +190,8 @@ namespace vISA
 
         void fixSelCsel(INST_LIST_ITER it, G4_BB *bb);
 
+        void avoidDstSrcOverlap(INST_LIST_ITER i, G4_BB* bb);
         void* operator new(size_t sz, vISA::Mem_Manager& m) { return m.alloc(sz); }
-        void multiAccSubstitution(G4_BB* bb);
-
 
         bool checkSrcMod(INST_LIST_ITER it, G4_BB* bb, int srcPos);
 
@@ -214,9 +208,6 @@ namespace vISA
         }
         void chkHWConformity();
         static void tryEliminateMadSrcModifier(IR_Builder &builder, G4_INST *inst);
-        int getNumAccSubDef() const { return numAccSubDef; }
-        int getNumAccSubUse() const { return numAccSubUse; }
-        void accSubstitution(G4_BB* bb);
         void localizeForAcc(G4_BB* bb);
     };
 }

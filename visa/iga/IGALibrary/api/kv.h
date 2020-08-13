@@ -75,6 +75,7 @@ typedef enum {
     KV_NON_SEND_INSTRUCTION   = 20, /* underlying inst isn't a send */
     KV_DESCRIPTOR_INDIRECT    = 21, /* a send message with a reg desc */
     KV_DESCRIPTOR_INVALID     = 22, /* an unrecognized send descriptor */
+    KV_NO_SUBFUNCTION         = 23, /* underlyting inst has no sub-function*/
 } kv_status_t;
 
 /*
@@ -147,7 +148,8 @@ IGA_API uint32_t kv_get_inst_targets(
 /*
  * This function returns the syntax for a given instruction.
  * The user passes the buffer 'sbuf' (along with its capacity) to hold
- * the output.
+ * the output.  The formatting options are the same as those in
+ * iga_disassemble_options_t::formatting_opts.
  *
  * The optional 'get_label_name' callback converts a PC into a label.
  * The caller can provide NULL and internal label names will be used.
@@ -160,6 +162,7 @@ IGA_API size_t kv_get_inst_syntax(
     int32_t pc,
     char *sbuf,
     size_t sbuf_cap,
+    uint32_t fmt_opts,
     const char *(*get_label_name)(int32_t, void *),
     void *env
 );
@@ -314,6 +317,12 @@ IGA_API int32_t kv_get_number_sources(const kv_t *kv, int32_t pc);
 IGA_API uint32_t kv_get_opcode(const kv_t *kv, int32_t pc);
 
 /*
+ * This function returns OPcode integer.  The value corresponds to
+ * binary encoding value of the opcode.
+ */
+IGA_API kv_status_t kv_get_subfunction(const kv_t *kv, int32_t pc, uint32_t* subfunc);
+
+/*
  * This function returns if intruction has destination.
  */
 IGA_API int32_t kv_get_has_destination(const kv_t *kv, int32_t pc);
@@ -407,6 +416,40 @@ IGA_API int32_t kv_get_source_region(
  */
 IGA_API int32_t kv_get_source_immediate(
     const kv_t *kv, int32_t pc, uint32_t src_op, uint64_t *imm);
+
+/*
+ * This function exposes indirect source's immediate offset.
+   Return -1 if given source is not indirect srouce
+ */
+IGA_API int32_t kv_get_source_indirect_imm_off(
+    const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *immoff);
+
+/*
+ * This function exposes indirect destination's immediate offset.
+   Return -1 if given destination is not indirect srouce
+ */
+IGA_API int32_t kv_get_destination_indirect_imm_off(
+    const kv_t *kv, int32_t pc, int16_t *mme);
+
+/*
+ * This function exposes source's MathMacroExt number for
+   math macro instructions.
+   mme is the mme numbar, set to 8 if it's nomme.
+   Return 0 if the given instruction is math macro instruction.
+   Return -1 if given instruction is not math macro instruction.
+ */
+IGA_API int32_t kv_get_source_mme_number(
+    const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *mme);
+
+/*
+ * This function exposes destination's MathMacroExt number for
+   math macro instructions.
+   mme is the mme numbar, set to 8 if it's nomme.
+   Return 0 if the given instruction is math macro instruction.
+   Return -1 if given instruction is not math macro instruction.
+ */
+IGA_API int32_t kv_get_destination_mme_number(
+    const kv_t *kv, int32_t pc, int16_t *immoff);
 
 /*
  * This function return flag modifier

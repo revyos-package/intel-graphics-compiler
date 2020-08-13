@@ -23,9 +23,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "MergeURBWrites.hpp"
 #include "Compiler/CodeGenPublic.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
 #include <llvm/IR/BasicBlock.h>
@@ -33,13 +33,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Constants.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
+#include "Probe/Assertion.h"
 
 namespace
 {
-
     using namespace llvm;
     using namespace IGC;
 
@@ -73,7 +72,6 @@ namespace
             FunctionPass(ID)
         { }
 
-        virtual bool doInitialization(Function& F);
         virtual bool runOnFunction(Function& F);
 
         virtual void getAnalysisUsage(AnalysisUsage& AU) const
@@ -94,8 +92,20 @@ namespace
         // in order of offsets and merging adjacent writes.
         void MergeInstructions();
 
+        // Returns the dynamic URB base offset and an immediate const offset
+        // from the dynamic base. The function calculates the result by walking
+        // the use-def chain of pUrbOffset.
+        // If pUrbOffset is an immediate constant (==offset) then
+        // <nullptr, offset> is returned.
+        // In all other cases <pUrbOffset, 0> is returned.
+        std::pair<Value*, unsigned int> GetBaseAndOffset(Value* pUrbOffset);
+
         // represents the map (urb index) --> (instruction, instruction index in BB)
-        std::vector<InstWithIndex> m_writeList;
+        // The key consists of a dynamic URB base offset (key.first) and
+        // an immediate offset from this dynamic base
+        // Dynamic URB base offset is null if URB offset is constant.
+        std::map<std::pair<Value*, unsigned int>, InstWithIndex> m_writeList;
+
         bool m_bbModified;
         static char ID;
     };
@@ -109,13 +119,6 @@ namespace
 
 } // end of unnamed namespace to contain class definition and auxiliary functions
 
-/// Do initialization of the data structure.
-/// We want to allocate space for the vector only once.
-bool MergeURBWrites::doInitialization(Function& F)
-{
-    m_writeList.reserve(128); //most of the time we won't exceed offset = 127
-    return false;
-}
 
 /// This optimization merges shorter writes to URB to get a smaller number of longer writes
 /// which is more efficient.
@@ -131,7 +134,7 @@ bool MergeURBWrites::doInitialization(Function& F)
 /// locations with one.
 ///
 /// for now, we don't handle the following cases:
-/// 1) offset is a runtime value
+/// 1) channel mask is a runtime value
 /// 2) handling of writes of size >4
 ///    so e.g. we don't handle |aaaa|bbbbbbbb|cccc| -> |aaaabbbb|bbbbcccc|
 /// this will be addressed in the future.
@@ -172,31 +175,28 @@ void MergeURBWrites::FillWriteList(BasicBlock& BB)
         }
 
         // intrinsic has the format: URB_write (%offset, %mask, %data0, ... , %data7)
-        ConstantInt* pOffset = dyn_cast<ConstantInt>(iit->getOperand(0));
         ConstantInt* pImmediateMask = dyn_cast<ConstantInt>(iit->getOperand(1));
-        if (pOffset == nullptr || pImmediateMask == nullptr || (GetChannelMask(intrinsic) > 0x0F))
+        if (pImmediateMask == nullptr || (GetChannelMask(intrinsic) > 0x0F))
         {
             // for now, we don't handle the following cases:
-            // 1) offset is a runtime value
-            // 2) mask is a runtime value
-            // 3) handling of writes of size >4
+            // 1) mask is a runtime value
+            // 2) handling of writes of size >4
             //    so e.g. we don't handle |aaaa|bbbbbbbb|cccc| -> |aaaabbbb|bbbbcccc|
             // this will be addressed in the future
             continue;
         }
-        const unsigned int offset = int_cast<unsigned int>(pOffset->getZExtValue());
-        // if we reach outside of the vector, grow it (filling with nullptr)
-        if (offset >= m_writeList.size())
-        {
-            m_writeList.resize(offset + 1);
-        }
-        auto elem = m_writeList[offset];
+
+        std::pair<Value*, unsigned int> baseAndOffset =
+            GetBaseAndOffset(iit->getOperand(0));
+
+        auto it = m_writeList.find(baseAndOffset);
         // we encountered an instruction writing at the same offset,
         // most likely we write RTAI, VAI or PSIZE to vertex header
         // or we overwrite the old value
-        if (elem.GetInst() != nullptr)
+        if (it != m_writeList.end())
         {
-            auto oldMask = GetChannelMask(m_writeList[offset].GetInst());
+            const InstWithIndex& instWithIndex = it->second;
+            auto oldMask = GetChannelMask(instWithIndex.GetInst());
             auto newMask = GetChannelMask(intrinsic);
             // assume the write lengths are <=4
             // if we have writes to the same channel, we retain the later one,
@@ -219,21 +219,21 @@ void MergeURBWrites::FillWriteList(BasicBlock& BB)
                     {
                         intrinsic->setOperand(
                             opIndex + 2,
-                            m_writeList[offset].GetInst()->getOperand(opIndex + 2));
+                            instWithIndex.GetInst()->getOperand(opIndex + 2));
                     }
                     ++opIndex;
                     takeFromOlderMask = takeFromOlderMask >> 1;
                 }
                 // after transferring the operands, remove the old instruction and store the new one
-                m_writeList[offset].GetInst()->eraseFromParent();
+                instWithIndex.GetInst()->eraseFromParent();
                 m_bbModified = true;
-                m_writeList[offset] = InstWithIndex(intrinsic, instCounter);
+                m_writeList[baseAndOffset] = InstWithIndex(intrinsic, instCounter);
             }
         }
         else
         {
             // adding new write at this offset
-            m_writeList[offset] = InstWithIndex(intrinsic, instCounter);
+            m_writeList[baseAndOffset] = InstWithIndex(intrinsic, instCounter);
         }
     }
 } // FillWriteList()
@@ -253,9 +253,22 @@ void MergeURBWrites::MergeInstructions()
     for (auto ii = m_writeList.begin(); ii != m_writeList.end() && ii != last; ++ii)
     {
         auto next = std::next(ii);
-        if (ii->GetInst() == nullptr || next->GetInst() == nullptr)
+        if (ii->second.GetInst() == nullptr || next->second.GetInst() == nullptr)
         {
             //nothing to do, no write at current or next offset
+            continue;
+        }
+
+        // ii->first.first is the dynamic URB base offset, may be nullptr
+        // ii->first.second is the immediate constant offset from ii->first.first
+        if (ii->first.first != next->first.first)
+        {
+            // nothing to do, different base URB offset
+            continue;
+        }
+        if (ii->first.second + 1 != next->first.second)
+        {
+            // nothing to do, not a consecutive URB access
             continue;
         }
         // We have two instructions, merge them by moving operands from the one appearing
@@ -281,14 +294,15 @@ void MergeURBWrites::MergeInstructions()
         // and 'next' corresponds to 'offset+1'.
         //
         // determine which instruction is appearing earlier in the BB
-        const bool inOrder = ii->GetPlace() < next->GetPlace();
-        CallInst* earlierInst = inOrder ? ii->GetInst() : next->GetInst();
-        CallInst* laterInst = !inOrder ? ii->GetInst() : next->GetInst();
+        const bool inOrder = ii->second.GetPlace() < next->second.GetPlace();
+        CallInst* earlierInst = inOrder ? ii->second.GetInst() : next->second.GetInst();
+        CallInst* laterInst = !inOrder ? ii->second.GetInst() : next->second.GetInst();
 
         // merge per-channel write masks
-        auto lowWriteMask = GetChannelMask(ii->GetInst());
-        auto highWriteMask = GetChannelMask(next->GetInst());
-        assert(lowWriteMask <= 0x0F && highWriteMask <= 0x0F);
+        auto lowWriteMask = GetChannelMask(ii->second.GetInst());
+        auto highWriteMask = GetChannelMask(next->second.GetInst());
+        IGC_ASSERT(lowWriteMask <= 0x0F);
+        IGC_ASSERT(highWriteMask <= 0x0F);
         auto mergedMask = lowWriteMask | (highWriteMask << 4);
 
         // Move the data operands from the earlier instruction to the later instruction.
@@ -306,7 +320,7 @@ void MergeURBWrites::MergeInstructions()
         }
 
         // now take the smaller of the two offsets from the instruction in the current slot
-        laterInst->setOperand(0, ii->GetInst()->getOperand(0));
+        laterInst->setOperand(0, ii->second.GetInst()->getOperand(0));
         // and update the mask operand
         auto mergedMaskVal = llvm::ConstantInt::get(
             llvm::Type::getInt32Ty(laterInst->getParent()->getContext()),
@@ -317,11 +331,138 @@ void MergeURBWrites::MergeInstructions()
         earlierInst->eraseFromParent();
         m_bbModified = true;
         ++ii; // skip the next slot since we just considered it as 'next'
-        URBWrite8.push_back(laterInst == ii->GetInst() ? *ii : *next);
+        if (nullptr == ii->first.first) // if URB offset is immediate const
+        {
+            URBWrite8.push_back(laterInst == ii->second.GetInst() ? ii->second : next->second);
+        }
     } // for
 
 } // MergeInstructions
 
+
+std::pair<Value*, unsigned int> MergeURBWrites::GetBaseAndOffset(Value* pUrbOffset)
+{
+    Value* pBase = pUrbOffset;
+    unsigned int offset = 0;
+
+    auto GetConstant = [](Value* pVal)->unsigned int
+    {
+        IGC_ASSERT(isa<ConstantInt>(pVal));
+        ConstantInt* pConst = cast<ConstantInt>(pVal);
+        return int_cast<unsigned int>(pConst->getZExtValue());
+    };
+
+    if (isa<ConstantInt>(pUrbOffset))
+    {
+        Value* pNullBase = nullptr;
+        return std::make_pair(
+            pNullBase,
+            GetConstant(pUrbOffset));
+    }
+    else if (isa<Instruction>(pUrbOffset))
+    {
+        Instruction* pInstr = cast<Instruction>(pUrbOffset);
+        if (pInstr->getOpcode() == Instruction::Add)
+        {
+            Value* src0 = pInstr->getOperand(0);
+            Value* src1 = pInstr->getOperand(1);
+            if (isa<ConstantInt>(src1))
+            {
+                auto baseAndOffset = GetBaseAndOffset(src0);
+                pBase = baseAndOffset.first;
+                offset = GetConstant(src1) + baseAndOffset.second;
+            }
+            else if (isa<ConstantInt>(src0))
+            {
+                auto baseAndOffset = GetBaseAndOffset(src1);
+                pBase = baseAndOffset.first;
+                offset = GetConstant(src0) + baseAndOffset.second;
+            }
+        }
+        else if (pInstr->getOpcode() == Instruction::Or)
+        {
+            // Examples of patterns matched below:
+            // 1. shl + or
+            //    urbOffset = urbOffset << 1;
+            //    urbOffset = urbOffset | 1;
+            // 2. mul + or
+            //    urbOffset = urbOffset * 2;
+            //    urbOffset = urbOffset | 1;
+            // 3. two oword urb writes in loop
+            //    urbOffset = urbOffset * 2;
+            //    for(...) {
+            //      {...}
+            //      urbOffset = urbOffset | 1;
+            //      urbOffset = urbOffset + 2;
+            //      {...}
+            //    }
+            //
+            //
+
+            std::function<unsigned int(Value*)> GetAlignment =
+                [&GetAlignment, &GetConstant](Value* pUrbOffset)->unsigned int
+            {
+                unsigned int alignment = 1;
+                Instruction* pInstr = dyn_cast<Instruction>(pUrbOffset);
+                if (pInstr &&
+                    pInstr->getOpcode() == Instruction::Shl &&
+                    isa<ConstantInt>(pInstr->getOperand(1)))
+                {
+                    alignment = GetAlignment(pInstr->getOperand(0)) *
+                        (1u << GetConstant(pInstr->getOperand(1)));
+                }
+                else if (pInstr &&
+                    pInstr->getOpcode() == Instruction::Mul &&
+                    isa<ConstantInt>(pInstr->getOperand(1)) &&
+                    iSTD::IsPowerOfTwo(GetConstant(pInstr->getOperand(1))))
+                {
+                    alignment = GetAlignment(pInstr->getOperand(0)) *
+                        GetConstant(pInstr->getOperand(1));
+                }
+                return alignment;
+            };
+
+            Value* src0 = pInstr->getOperand(0);
+            Value* src1 = pInstr->getOperand(1);
+            unsigned int alignment = 1;
+            if (isa<PHINode>(src0) && isa<ConstantInt>(src1))
+            {
+                // pattern 3
+                PHINode* pPhi = cast<PHINode>(src0);
+                alignment = std::numeric_limits<unsigned int>::max();
+                for (unsigned int i = 0; i < pPhi->getNumIncomingValues(); i++)
+                {
+                    Instruction* pIncoming = dyn_cast<Instruction>(pPhi->getIncomingValue(i));
+                    if (pIncoming &&
+                        pIncoming->getOpcode() == Instruction::Add &&
+                        pPhi == pIncoming->getOperand(0) &&
+                        isa<ConstantInt>(pIncoming->getOperand(1)) &&
+                        iSTD::IsPowerOfTwo(GetConstant(pIncoming->getOperand(1))))
+                    {
+                        alignment = std::min(alignment, GetConstant(pIncoming->getOperand(1)));
+                    }
+                    else
+                    {
+                        alignment = std::min(alignment, GetAlignment(pIncoming));
+                    }
+                }
+            }
+            else
+            {
+                // patterns 1 and 2
+                alignment = GetAlignment(src0);
+            }
+            if (alignment > GetConstant(src1))
+            {
+                IGC_ASSERT(iSTD::IsPowerOfTwo(alignment));
+                pBase = src0;
+                offset = GetConstant(src1);
+            }
+        }
+    }
+
+    return std::make_pair(pBase, offset);
+}
 
 llvm::FunctionPass* IGC::createMergeURBWritesPass()
 {

@@ -24,19 +24,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-// vim:ts=2:sw=2:et:
-
 #define DEBUG_TYPE "type-legalizer"
 #include "TypeLegalizer.h"
 #include "InstScalarizer.h"
 #include "common/LLVMWarningsPush.hpp"
-
 #include "llvmWrapper/Support/Debug.h"
-
 #include "llvm/Support/raw_ostream.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include "common/Types.hpp"
+#include "Probe/Assertion.h"
+
 using namespace llvm;
 using namespace IGC::Legalizer;
 
@@ -57,7 +54,7 @@ bool InstScalarizer::scalarize(Instruction* I) {
 // By default, capture all missing instructions!
 bool InstScalarizer::visitInstruction(Instruction& I) {
     LLVM_DEBUG(dbgs() << "SCALARIZE: " << I << '\n');
-    llvm_unreachable("UNKNOWN INSTRUCTION IS BEING SCALARIZED!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "UNKNOWN INSTRUCTION IS BEING SCALARIZED!");
     return false;
 }
 
@@ -81,7 +78,7 @@ bool InstScalarizer::visitBinaryOperator(BinaryOperator& I) {
     ValueSeq Ops0Copy(*Ops0);
 
     std::tie(Ops1, std::ignore) = TL->getLegalizedValues(I.getOperand(1));
-    assert(Ops0Copy.size() == Ops1->size());
+    IGC_ASSERT(Ops0Copy.size() == Ops1->size());
 
     for (unsigned i = 0, e = Ops0Copy.size(); i != e; ++i) {
         Value* LHS = (Ops0Copy)[i];
@@ -132,8 +129,7 @@ bool InstScalarizer::visitLoadInst(LoadInst& I) {
 
         // NOTE: It's assumed the element in this case is byte-addressable;
         // otherwise, it's broken.
-        assert(TL->getTypeSizeInBits(EltTy) ==
-            TL->getTypeStoreSizeInBits(EltTy));
+        IGC_ASSERT(TL->getTypeSizeInBits(EltTy) == TL->getTypeStoreSizeInBits(EltTy));
 
         unsigned NumElts = OrigTy->getVectorNumElements();
         unsigned Elt = 0;
@@ -149,7 +145,7 @@ bool InstScalarizer::visitLoadInst(LoadInst& I) {
         for (auto PLI = ProfitLengths.rbegin(),
             PLE = ProfitLengths.rend(); PLI != PLE; ++PLI) {
             unsigned PL = *PLI;
-            assert(PL > 0);
+            IGC_ASSERT(PL > 0);
 
             for (; NumElts >= PL; NumElts -= PL) {
                 Value* NewPtr =
@@ -235,7 +231,7 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
 
     ValueSeq* ValSeq;
     std::tie(ValSeq, std::ignore) = TL->getLegalizedValues(OrigVal);
-    assert(ValSeq->size() == OrigTy->getVectorNumElements());
+    IGC_ASSERT(ValSeq->size() == OrigTy->getVectorNumElements());
 
     StringRef Name = OrigVal->getName();
 
@@ -271,8 +267,7 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
 
         // NOTE: It's assumed the element in this case is byte-addressable;
         // otherwise, it's broken.
-        assert(TL->getTypeSizeInBits(EltTy) ==
-            TL->getTypeStoreSizeInBits(EltTy));
+        IGC_ASSERT(TL->getTypeSizeInBits(EltTy) == TL->getTypeStoreSizeInBits(EltTy));
 
         unsigned NumElts = OrigTy->getVectorNumElements();
         unsigned Elt = 0;
@@ -288,7 +283,7 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
         for (auto PLI = ProfitLengths.rbegin(),
             PLE = ProfitLengths.rend(); PLI != PLE; ++PLI) {
             unsigned PL = *PLI;
-            assert(PL > 0);
+            IGC_ASSERT(PL > 0);
 
             for (; NumElts >= PL; NumElts -= PL) {
                 Value* NewPtr =
@@ -401,7 +396,7 @@ bool InstScalarizer::visitBitCastInst(BitCastInst& I) {
     TL->repack(&Repacked, *TySeq, *ValSeq, I.getName() + getSuffix());
 
     if (Act == Legal) {
-        assert(Repacked.size() == 1);
+        IGC_ASSERT(Repacked.size() == 1);
 
         I.replaceAllUsesWith(Repacked.front());
         return true;
@@ -431,8 +426,7 @@ bool InstScalarizer::visitExtractElementInst(ExtractElementInst& I) {
         // %elt = load eT* %eptr
         //
         // It would be much more complicated if eT is not byte addressable.
-        llvm_unreachable(
-            "NON-CONSTANT IDX IN EXTRACT-ELEMENT IS NOT SUPPORTED YET!");
+        IGC_ASSERT_EXIT_MESSAGE(0, "NON-CONSTANT IDX IN EXTRACT-ELEMENT IS NOT SUPPORTED YET!");
     }
 
     ConstantInt* CI = cast<ConstantInt>(I.getIndexOperand());
@@ -477,8 +471,7 @@ bool InstScalarizer::visitInsertElementInst(InsertElementInst& I) {
         // %vec1 = load <N x eT>* %stk
         //
         // It would be much more complicated if eT is not byte addressable.
-        llvm_unreachable(
-            "NON-CONSTANT IDX IN INSERT-ELEMENT IS NOT SUPPORTED YET!");
+        IGC_ASSERT_EXIT_MESSAGE(0, "NON-CONSTANT IDX IN INSERT-ELEMENT IS NOT SUPPORTED YET!");
     }
 
     ConstantInt* CI = cast<ConstantInt>(I.getOperand(2));
@@ -492,7 +485,8 @@ bool InstScalarizer::visitInsertElementInst(InsertElementInst& I) {
     // and previously received ValueSeq objects will become invalid.
     ValueSeq VecSeqCopy(*VecSeq);
 
-    ValueSeq* EltSeq; LegalizeAction Act;
+    ValueSeq* EltSeq = nullptr;
+    LegalizeAction Act;
     std::tie(EltSeq, Act) = TL->getLegalizedValues(I.getOperand(1));
 
     ValueSeq LegalVal;
@@ -501,7 +495,9 @@ bool InstScalarizer::visitInsertElementInst(InsertElementInst& I) {
         EltSeq = &LegalVal;
     }
 
-    assert(VecSeqCopy.size() % EltSeq->size() == 0);
+    IGC_ASSERT(nullptr != EltSeq);
+    IGC_ASSERT(EltSeq->size());
+    IGC_ASSERT(VecSeqCopy.size() % EltSeq->size() == 0);
 
     unsigned NumElts = I.getOperand(0)->getType()->getVectorNumElements();
     unsigned i = 0;

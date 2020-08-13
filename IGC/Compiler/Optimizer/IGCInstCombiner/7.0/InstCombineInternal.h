@@ -66,8 +66,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/InstCombine/InstCombineWorklist.h"
-#include <cassert>
 #include <cstdint>
+#include "Probe/Assertion.h"
 
 #define DEBUG_TYPE "instcombine"
 
@@ -247,7 +247,7 @@ namespace IGCombiner {
     /// If no identity constant exists, replace undef with some other safe constant.
     static inline Constant* getSafeVectorConstantForBinop(
         BinaryOperator::BinaryOps Opcode, Constant* In, bool IsRHSConstant) {
-        assert(In->getType()->isVectorTy() && "Not expecting scalars here");
+        IGC_ASSERT_MESSAGE(In->getType()->isVectorTy(), "Not expecting scalars here");
 
         Type* EltTy = In->getType()->getVectorElementType();
         auto* SafeC = ConstantExpr::getBinOpIdentity(Opcode, EltTy, IsRHSConstant);
@@ -264,7 +264,7 @@ namespace IGCombiner {
                     SafeC = ConstantFP::get(EltTy, 1.0);
                     break;
                 default:
-                    llvm_unreachable("Only rem opcodes have no identity constant for RHS");
+                    IGC_ASSERT_EXIT_MESSAGE(0, "Only rem opcodes have no identity constant for RHS");
                 }
             }
             else {
@@ -283,11 +283,11 @@ namespace IGCombiner {
                     SafeC = Constant::getNullValue(EltTy);
                     break;
                 default:
-                    llvm_unreachable("Expected to find identity constant for opcode");
+                    IGC_ASSERT_EXIT_MESSAGE(0, "Expected to find identity constant for opcode");
                 }
             }
         }
-        assert(SafeC && "Must have safe constant for binop");
+        IGC_ASSERT_MESSAGE(SafeC, "Must have safe constant for binop");
         unsigned NumElts = In->getType()->getVectorNumElements();
         SmallVector<Constant*, 16> Out(NumElts);
         for (unsigned i = 0; i != NumElts; ++i) {
@@ -589,8 +589,8 @@ namespace IGCombiner {
         /// Also adds the new instruction to the worklist and returns \p New so that
         /// it is suitable for use as the return from the visitation patterns.
         Instruction* InsertNewInstBefore(Instruction* New, Instruction& Old) {
-            assert(New && !New->getParent() &&
-                "New instruction already inserted into a basic block!");
+            IGC_ASSERT(nullptr != New);
+            IGC_ASSERT_MESSAGE(nullptr == New->getParent(), "New instruction already inserted into a basic block");
             BasicBlock* BB = Old.getParent();
             BB->getInstList().insert(Old.getIterator(), New); // Insert inst
             Worklist.Add(New);
@@ -645,7 +645,7 @@ namespace IGCombiner {
         /// methods should return the value returned by this function.
         Instruction* eraseInstFromFunction(Instruction& I) {
             LLVM_DEBUG(dbgs() << "IC: ERASE " << I << '\n');
-            assert(I.use_empty() && "Cannot erase instruction that is used!");
+            IGC_ASSERT_MESSAGE(I.use_empty(), "Cannot erase instruction that is used!");
             salvageDebugInfo(I);
 
             // Make sure that we reprocess all operands now that we reduced their

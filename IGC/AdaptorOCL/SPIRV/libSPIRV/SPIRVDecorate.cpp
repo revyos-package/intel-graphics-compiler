@@ -66,7 +66,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "SPIRVDecorate.h"
 #include "SPIRVValue.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -94,7 +94,7 @@ SPIRVDecorateGeneric::getDecorateKind()const {
 
 SPIRVWord
 SPIRVDecorateGeneric::getLiteral(size_t i) const {
-  IGC_ASSERT_EXIT(i <= Literals.size() && "Out of bounds");
+  IGC_ASSERT_EXIT_MESSAGE(i <= Literals.size(), "Out of bounds");
   return Literals[i];
 }
 

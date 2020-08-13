@@ -98,6 +98,8 @@ static const unsigned IN_LOOP_REFERENCE_COUNT_FACTOR = 4;
 #define BANK_CONFLICT_SIMD16_OVERHEAD_CYCLE    2
 #define INTERNAL_CONFLICT_RATIO_HEURISTIC 0.25
 
+#define NOMASK_BYTE 0x80
+
 
 Interference::Interference(LivenessAnalysis* l, LiveRange**& lr, unsigned n, unsigned ns, unsigned nm,
     GlobalRA& g) : gra(g), kernel(g.kernel), lrs(lr),
@@ -1005,7 +1007,7 @@ void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
             }
             else
             {
-                    setupBankConflictsforTwoGRFs(inst);
+                setupBankConflictsforTwoGRFs(inst);
             }
 
         }
@@ -1021,7 +1023,7 @@ void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
 
     if ((float)threeSourceInstNum / bb->size() > 0.1)
     {
-        if (!gra.kernel.fg.builder->lowHighBundle() && gra.kernel.fg.builder->hasCrossInstructionConflict() && GetStepping() == Step_A)
+        if (!gra.kernel.fg.builder->lowHighBundle() && gra.kernel.fg.builder->hasEarlyGRFRead())
         {
             for (std::list<G4_INST*>::iterator i = bb->begin(), iend = bb->end();
                 i != iend;
@@ -1118,6 +1120,66 @@ bool BankConflictPass::setupBankConflictsForKernel(bool doLocalRR, bool &threeSo
     }
 
     return true;
+}
+
+bool GlobalRA::areAllDefsNoMask(G4_Declare* dcl)
+{
+    bool retval = true;
+    auto maskUsed = getMask(dcl);
+    if (maskUsed != NULL &&
+        getAugmentationMask(dcl) != AugmentationMasks::NonDefault)
+    {
+        auto byteSize = dcl->getByteSize();
+        for (unsigned int i = 0; i < byteSize; i++)
+        {
+            if (maskUsed[i] != NOMASK_BYTE)
+            {
+                retval = false;
+                break;
+            }
+        }
+    }
+    else
+    {
+        if (getAugmentationMask(dcl) == AugmentationMasks::NonDefault)
+            retval = true;
+        else
+            retval = false;
+    }
+    return retval;
+}
+
+BankAlign GlobalRA::getBankAlign(G4_Declare* dcl)
+{
+    IR_Builder* builder = kernel.fg.builder;
+    switch (getBankConflict(dcl))
+    {
+    case BANK_CONFLICT_FIRST_HALF_EVEN:
+    case BANK_CONFLICT_SECOND_HALF_EVEN:
+        if (builder->oneGRFBankDivision())
+        {
+            return BankAlign::Even;
+        }
+        else
+        {
+            return BankAlign::Even2GRF;
+        }
+        break;
+    case BANK_CONFLICT_FIRST_HALF_ODD:
+    case BANK_CONFLICT_SECOND_HALF_ODD:
+        if (builder->oneGRFBankDivision())
+        {
+            return BankAlign::Odd;
+        }
+        else
+        {
+            return BankAlign::Odd2GRF;
+        }
+        break;
+    default: break;
+    }
+
+    return BankAlign::Either;
 }
 
 void GlobalRA::emitFGWithLiveness(LivenessAnalysis& liveAnalysis)
@@ -1254,8 +1316,7 @@ void GlobalRA::reportSpillInfo(LivenessAnalysis& liveness, GraphColor& coloring)
         if ((*it)->getRegKind() == G4_GRF) {
             G4_RegVar* spillVar = (*it)->getVar();
             optreport << "Spill candidate " << spillVar->getName() << " intf:";
-            optreport << "\t(" << spillVar->getDeclare()->getNumRows() << "x" <<
-                spillVar->getDeclare()->getNumElems() << "):" <<
+            optreport << "\t(" << spillVar->getDeclare()->getTotalElems() << "):" <<
                 G4_Type_Table[spillVar->getDeclare()->getElemType()].str << std::endl;
 
             if (getLocalLR(spillVar->getDeclare()) != NULL)
@@ -1282,8 +1343,7 @@ void GlobalRA::reportSpillInfo(LivenessAnalysis& liveness, GraphColor& coloring)
                     G4_RegVar* intfRangeVar = lrs[i]->getVar();
 
                     optreport << "\t" << intfRangeVar->getName() << "(" <<
-                        intfRangeVar->getDeclare()->getNumRows() << "x" <<
-                        intfRangeVar->getDeclare()->getNumElems() << "):" <<
+                        intfRangeVar->getDeclare()->getTotalElems() << "):" <<
                         G4_Type_Table[intfRangeVar->getDeclare()->getElemType()].str;
 
                     if (lrs[i]->getPhyReg() == NULL)
@@ -2201,7 +2261,7 @@ void Interference::buildInterferenceWithinBB(G4_BB* bb, BitSet& live)
         }
 
         if ((inst->isSend() || inst->isFillIntrinsic()) && !dst->isNullReg() &&
-            VISA_WA_CHECK(kernel.fg.builder->getPWaTable(), WaDisableSendSrcDstOverlap))
+            kernel.fg.builder->WaDisableSendSrcDstOverlap())
         {
             markInterferenceForSend(bb, inst, dst);
         }
@@ -2262,7 +2322,7 @@ void Interference::buildInterferenceWithinBB(G4_BB* bb, BitSet& live)
                     unsigned id = ((G4_RegVar*)(srcRegion)->getBase())->getId();
                     lrs[id]->setRefCount(lrs[id]->getRefCount() + refCount); // update reference count
 
-                    if (inst->opcode() != G4_pseudo_lifetime_end)
+                    if (!inst->isLifeTimeEnd())
                     {
                         updateLiveness(live, id, true);
                         if (lrs[id]->getIsSplittedDcl())
@@ -2397,7 +2457,7 @@ void Interference::computeInterference()
         buildInterferenceWithinBB((*it), live);
     }
 
-    if (kernel.getOptions()->getTarget() != VISA_3D ||
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D ||
         kernel.fg.builder->getOption(vISA_enablePreemption) ||
         kernel.fg.getHasStackCalls() ||
         kernel.fg.getIsStackCallFunc())
@@ -3259,7 +3319,7 @@ void Augmentation::markNonDefaultDstRgn(G4_INST* inst, G4_Operand* opnd)
     }
 
     // Handle dst
-    if (inst->isCall() || inst->opcode() == G4_pseudo_caller_save)
+    if (inst->isCall() || inst->isCallerSave())
     {
         G4_Declare* dcl = dst->getBase()->asRegVar()->getDeclare();
         if (dcl && liveAnalysis.livenessClass(dcl->getRegFile()))
@@ -4729,11 +4789,14 @@ void Augmentation::buildInterferenceIncompatibleMask()
 void Augmentation::augmentIntfGraph()
 {
     {
-        if (!(kernel.getOptions()->getTarget() == VISA_3D &&
+        if (!(kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
             !liveAnalysis.livenessClass(G4_ADDRESS) &&
             kernel.fg.size() > 2))
         {
-            return;
+            if (!kernel.getOption(vISA_DumpRegChart))
+            {
+                return;
+            }
         }
     }
 
@@ -4752,6 +4815,12 @@ void Augmentation::augmentIntfGraph()
 
         // Sort live-intervals based on their start
         sortLiveIntervals();
+
+        if (kernel.getOption(vISA_DumpRegChart))
+        {
+            gra.regChart = new RegChartDump(gra);
+            gra.regChart->recordLiveIntervals(sortedIntervals);
+        }
 
         if (gra.verifyAugmentation)
         {
@@ -5301,9 +5370,9 @@ void GraphColor::computeSpillCosts(bool useSplitLLRHeuristic)
         //
         else
         {
-            float spillCost;
-            // NOTE: Add 1 to degree to avoid divide-by-0.
-            if (m_options->getTarget() == VISA_3D)
+            float spillCost = 0.0f;
+            // NOTE: Add 1 to degree to avoid divide-by-0, as a live range may have no neighbors
+            if (builder.kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
             {
                 if (useSplitLLRHeuristic)
                 {
@@ -5311,9 +5380,11 @@ void GraphColor::computeSpillCosts(bool useSplitLLRHeuristic)
                 }
                 else
                 {
+                    assert(lrs[i]->getDcl()->getTotalElems() > 0);
+                    unsigned short numRows = lrs[i]->getDcl()->getNumRows();
                     spillCost = 1.0f * lrs[i]->getRefCount() * lrs[i]->getRefCount() * lrs[i]->getDcl()->getByteSize() *
                         (float)sqrt(lrs[i]->getDcl()->getByteSize())
-                        / ((float)sqrt(lrs[i]->getDegree() + 1) * (float)(sqrt(sqrt(lrs[i]->getDcl()->getNumRows()))));
+                        / ((float)sqrt(lrs[i]->getDegree() + 1) * (float)(sqrt(sqrt(numRows))));
                 }
             }
             else
@@ -5630,7 +5701,7 @@ void PhyRegUsage::updateRegUsage(LiveRange* lr)
     }
 }
 
-bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConflict, bool highInternalConflict)
+bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConflict, bool highInternalConflict, bool honorHints)
 {
     if (builder.getOption(vISA_RATrace))
     {
@@ -5685,7 +5756,18 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
 
     auto& varSplitPass = *gra.getVarSplitPass();
 
-    auto assignColor = [&](LiveRange* lr, bool ignoreChildrenIntf = false)
+    // Returns true when valid assignment is found or when lr is added to spilled set.
+    // Adding to spill set happens only if heuristic is not round_robin (FF may not spill).
+    // Parameter returnFalseOnFail is set when the function is required to return false on
+    // assignment failure.
+    // When parameter spillAllowed is set to true, this function adds lr to spilled set. If
+    // spillAllowed is false, the lr is not added to spill set. This logic is useful to
+    // try re-allocation of a child/parent dcl when split is enabled.
+    // ignoreChildrenIntf is set to true when all children are assigned to consecutive ranges
+    // and we want to get fully coalesceable assignment for parent. In such circumstance, we
+    // dont want to account for interference between parent/child since doing so cannot result
+    // in a coalesceable assignment.
+    auto assignColor = [&](LiveRange* lr, bool ignoreChildrenIntf = false, bool spillAllowed = true, bool returnFalseOnFail = false)
     {
         auto lrVar = lr->getVar();
 
@@ -5698,7 +5780,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
             bool skipParentIntf = false;
             if (lr->hasAllocHint())
             {
-                parms.startGRFReg = lr->getAllocHint();
+                parms.startGRFReg = (lr->getAllocHint() >= maxGRFCanBeUsed ? 0 : lr->getAllocHint());
                 if (varSplitPass.isPartialDcl(lr->getDcl()))
                 {
                     parentDcl = varSplitPass.getParentDcl(lr->getDcl());
@@ -5711,11 +5793,20 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                         }
                         if (parentGRF)
                         {
+                            // mark interference between partial lr and all
+                            // other GRFs allocated to parent dcl. this logic
+                            // allows either coalesceable allocation or a
+                            // fully non-overlapping assignment.
                             auto siblingNum = varSplitPass.getSiblingNum(lr->getDcl());
                             auto parentGRFNum = parentGRF->asGreg()->getRegNum();
-                            auto forbiddenStart = parentGRFNum + ((siblingNum + 1) * lr->getDcl()->getNumRows());
-                            auto forbiddenEnd = parentGRFNum + parentDcl->getNumRows();
-                            lr->markForbidden(forbiddenStart, forbiddenEnd - forbiddenStart);
+                            auto parentNumRows = parentDcl->getNumRows();
+                            auto numRows = lr->getDcl()->getNumRows();
+                            for (unsigned int i = parentGRFNum; i != (parentGRFNum + parentNumRows); i += numRows)
+                            {
+                                if ((i - parentGRFNum) == siblingNum * numRows)
+                                    continue;
+                                lr->markForbidden(i, numRows);
+                            }
                             skipParentIntf = true;
                         }
                     }
@@ -5829,7 +5920,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 {
 
                     if (!isHybrid && oneGRFBankDivision &&
-                        (!evenAlignNeeded || getPlatformGeneration(getGenxPlatform()) == PlatformGen::GEN9))
+                        (!evenAlignNeeded || getPlatformGeneration(builder.getPlatform()) == PlatformGen::GEN9))
                     {
                         gra.getBankAlignment(lr, align);
                     }
@@ -5865,7 +5956,18 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 else
                 {
                     // for first-fit register assignment track spilled live ranges
-                    spilledLRs.push_back(lr);
+                    if (spillAllowed)
+                    {
+                        // When retrying a coalesceable assignment, dont spill
+                        // if there is no GRF available.
+                        spilledLRs.push_back(lr);
+                        lr->setSpilled(true);
+                    }
+                }
+
+                if (returnFalseOnFail)
+                {
+                    return false;
                 }
             }
             else
@@ -5889,14 +5991,32 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
     for (auto iter = colorOrder.rbegin(), iterEnd = colorOrder.rend(); iter != iterEnd; ++iter)
     {
         auto lr = (*iter);
+
+        // in case child/parent was already spilled earlier, dont recolor
+        if(lr->isSpilled())
+            continue;
+
         bool ret = assignColor(lr);
 
         // early exit
         if (!ret)
             return false;
 
-        if (gra.getIterNo() < 3)
+        if (lr->getSpillCost() == MAXSPILLCOST &&
+            !lr->getPhyReg() &&
+            honorHints)
         {
+            // infinite spill cost range spilled
+            // undo all allocations done to split vars
+            // and skip adhering to hints for preserving
+            // correctness.
+            resetTemporaryRegisterAssignments();
+            return assignColors(colorHeuristicGRF, doBankConflict, highInternalConflict, false);
+        }
+
+        if (honorHints && gra.getIterNo() == 0)
+        {
+            // attempt coalescing in non-spill iteration only
             if (varSplitPass.isSplitDcl(lr->getDcl()))
             {
                 // Try allocating children, out of order in hopes
@@ -5909,7 +6029,27 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                         auto childLR = lrs[child->getRegVar()->getId()];
                         if (!childLR->getPhyReg())
                         {
-                            assignColor(childLR);
+                            auto isChildSpilled = childLR->isSpilled();
+                            assignColor(childLR, false, !isChildSpilled);
+                            // if allocated GRF is different than hint, then
+                            // undo allocation and let coloring take its course.
+                            // this can be done only if the childLR wasnt
+                            // already processed in colorOrder.
+                            if (!isChildSpilled && childLR->getPhyReg())
+                            {
+                                auto hint = childLR->getAllocHint();
+                                if (childLR->getPhyReg()->asGreg()->getRegNum() != hint)
+                                {
+                                    // this is executed only if childLR is guaranteed to be
+                                    // processed later on in colorOrder.
+                                    childLR->resetPhyReg();
+                                }
+                            }
+                            else if (isChildSpilled && childLR->getPhyReg())
+                            {
+                                // was spilled earlier, got allocation now
+                                spilledLRs.remove(childLR);
+                            }
                         }
                         else
                         {
@@ -5920,7 +6060,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                             if (oldPhyReg->asGreg()->getRegNum() == hint)
                                 continue;
                             childLR->resetPhyReg();
-                            bool success = assignColor(childLR);
+                            bool success = assignColor(childLR, false, false, true);
                             if (!success || childLR->getPhyReg()->asGreg()->getRegNum() != hint)
                                 childLR->setPhyReg(oldPhyReg, oldPhySubReg);
                         }
@@ -5937,9 +6077,10 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 auto parentLR = getLiveRanges()[parentDcl->getRegVar()->getId()];
                 auto oldPhyReg = parentLR->getPhyReg();
                 auto oldPhySubReg = parentLR->getPhyRegOff();
+                bool isParentSpilled = parentLR->isSpilled();
                 parentLR->resetPhyReg();
                 varSplitPass.writeHints(lr->getDcl(), getLiveRanges());
-                assignColor(parentLR, true);
+                assignColor(parentLR, true, !isParentSpilled);
                 // If parent's assigned GRF is non-coalesceable assignment then
                 // undo it as it is risky to keep this because parent's intf
                 // doesnt include children.
@@ -5947,6 +6088,13 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 if ((newParentAssignment && newParentAssignment->asGreg()->getRegNum() != parentLR->getAllocHint()) ||
                     !newParentAssignment)
                     parentLR->setPhyReg(oldPhyReg, oldPhySubReg);
+
+                if (isParentSpilled && parentLR->getPhyReg())
+                {
+                    // remove parent from spill list since it got an allocation this time
+                    spilledLRs.remove(parentLR);
+                    parentLR->setSpilled(false);
+                }
             }
         }
     }
@@ -5963,6 +6111,43 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
             kernel.setRAType(doBankConflict ? RA_Type::GRAPH_COLORING_FF_BC_RA : RA_Type::GRAPH_COLORING_FF_RA);
         }
     }
+
+#ifdef _DEBUG
+    // Verify that spilledLRs has no duplicate
+    for (auto item : spilledLRs)
+    {
+        unsigned int count = 0;
+        for (auto checkItem : spilledLRs)
+        {
+            if (checkItem == item)
+            {
+                MUST_BE_TRUE(count == 0, "Duplicate entry found in spilledLRs");
+                count++;
+            }
+        }
+    }
+
+    // Verify that none of spilledLRs have an allocation
+    for (auto lr : spilledLRs)
+    {
+        MUST_BE_TRUE(lr->getPhyReg() == nullptr, "Spilled LR contains valid allocation");
+    }
+
+    // Verify that all spilled LRs are synced
+    for (auto lr : spilledLRs)
+    {
+        MUST_BE_TRUE(lr->isSpilled(), "LR not marked as spilled, but inserted in spilledLRs list");
+    }
+
+    // Verify if all LRs have either an allocation or are spilled
+    for (auto lr : colorOrder)
+    {
+        if (!kernel.fg.isPseudoDcl(lr->getDcl()))
+        {
+            MUST_BE_TRUE(lr->isSpilled() || lr->getPhyReg() || lr->getDcl()->isSpilled(), "Range without allocation and not spilled");
+        }
+    }
+#endif
 
     return true;
 }
@@ -6037,7 +6222,7 @@ bool GlobalRA::shouldPreloadDst(
 
     if (isPartialRegion(spilledRangeRegion, execSize) ||
         isUnalignedRegion(spilledRangeRegion, execSize) ||
-        instContext->isPartialWriteForSpill(curBB->isInSimdFlow())) {
+        instContext->isPartialWriteForSpill(!curBB->isAllLaneActive())) {
         return true;
     }
     // No pre-load for whole and aligned region writes
@@ -6060,7 +6245,7 @@ void GlobalRA::determineSpillRegSize(unsigned& spillRegSize, unsigned& indrSpill
             G4_INST* curInst = (*inst_it);
 
             if (curInst->isPseudoKill() ||
-                curInst->opcode() == G4_pseudo_lifetime_end ||
+                curInst->isLifeTimeEnd() ||
                 curInst->opcode() == G4_pseudo_fcall ||
                 curInst->opcode() == G4_pseudo_fret)
             {
@@ -6323,7 +6508,7 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
     {
         bool hasStackCall = kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc();
 
-        bool willSpill = kernel.getOptions()->getTarget() == VISA_3D &&
+        bool willSpill = kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
             rpe->getMaxRP() >= kernel.getNumRegTotal() + 24;
         if (willSpill)
         {
@@ -6414,8 +6599,10 @@ void GraphColor::resetTemporaryRegisterAssignments()
         if (lrs[i]->getVar()->getPhyReg() == NULL) {
             lrs[i]->resetPhyReg();
             lrs[i]->resetAllocHint();
+            lrs[i]->setSpilled(false);
         }
     }
+    spilledLRs.clear();
 }
 
 void GraphColor::cleanupRedundantARFFillCode()
@@ -6641,7 +6828,7 @@ void GraphColor::stackCallProlog()
 
     G4_BB* entryBB = builder.kernel.fg.getEntryBB();
     auto iter = std::find_if(entryBB->begin(), entryBB->end(), [](G4_INST* inst) { return !inst->isLabel(); });
-    entryBB->insert(iter, mov);
+    entryBB->insertBefore(iter, mov);
 }
 
 //
@@ -6652,7 +6839,7 @@ void GraphColor::saveRegs(
     unsigned frameOwordOffset, G4_BB* bb, INST_LIST_ITER insertIt)
 {
 
-    assert(getGenxPlatform() >= GENX_SKL && "stack call only supported on SKL+");
+    assert(builder.getPlatform() >= GENX_SKL && "stack call only supported on SKL+");
 
     if (owordSize == 8 || owordSize == 4 || owordSize == 2)
     {
@@ -6667,7 +6854,7 @@ void GraphColor::saveRegs(
             builder.getRegionStride1(), Type_UD);
         G4_DstRegRegion* dst = builder.createNullDst((execSize > 8) ? Type_UW : Type_UD);
         auto spillIntrinsic = builder.createSpill(dst, sendSrc2, execSize, messageLength, frameOwordOffset/2, framePtr, InstOpt_WriteEnable);
-        bb->insert(insertIt, spillIntrinsic);
+        bb->insertBefore(insertIt, spillIntrinsic);
     }
     else if (owordSize > 8)
     {
@@ -6748,7 +6935,7 @@ void GraphColor::restoreRegs(
         dstDcl->getRegVar()->setPhyReg(regPool.getGreg(startReg), 0);
         G4_DstRegRegion* dstRgn = builder.createDst(dstDcl->getRegVar(), 0, 0, 1, (execSize > 8) ? Type_UW : Type_UD);
         auto fillIntrinsic = builder.createFill(dstRgn, execSize, responseLength, frameOwordOffset / 2, framePtr, InstOpt_WriteEnable);
-        bb->insert(insertIt, fillIntrinsic);
+        bb->insertBefore(insertIt, fillIntrinsic);
     }
     //
     // Split into chunks of sizes 8 and remaining owords.
@@ -6912,8 +7099,8 @@ void GraphColor::OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs, std::v
 //
 void GraphColor::addCallerSaveRestoreCode()
 {
-    // maxCallerSaveSize in Oword
-    unsigned int maxCallerSaveSize = builder.kernel.fg.callerSaveAreaOffset;
+
+    uint32_t maxCallerSaveSize = 0;
     unsigned int callerSaveNumGRF = builder.kernel.getCallerSaveLastGRF() + 1;
 
     for (BB_LIST_ITER it = builder.kernel.fg.begin(); it != builder.kernel.fg.end(); ++it)
@@ -6982,7 +7169,7 @@ void GraphColor::addCallerSaveRestoreCode()
             {
                 --insertSaveIt;
             }
-            MUST_BE_TRUE((*insertSaveIt)->opcode() == G4_pseudo_caller_save, ERROR_REGALLOC);
+            MUST_BE_TRUE((*insertSaveIt)->isCallerSave(), ERROR_REGALLOC);
             INST_LIST_ITER rmIt = insertSaveIt;
             if (insertSaveIt == (*it)->begin())
             {
@@ -7022,7 +7209,7 @@ void GraphColor::addCallerSaveRestoreCode()
             }
             (*it)->erase(rmIt);
             INST_LIST_ITER insertRestIt = afterFCallBB->begin();
-            for (; (*insertRestIt)->opcode() != G4_pseudo_caller_restore; ++insertRestIt);
+            for (; !(*insertRestIt)->isCallerRestore(); ++insertRestIt);
             if (callerSaveRegCount > 0)
             {
                 if (builder.kernel.getOption(vISA_GenerateDebugInfo))
@@ -7049,10 +7236,7 @@ void GraphColor::addCallerSaveRestoreCode()
             }
             afterFCallBB->erase(insertRestIt);
 
-            // FIXME: maxCallerSaveSize in unit of OWord, here assume a register is 2 Oword
-            // builder.kernel.fg.paramOverflowAreaOffset = builder.kernel.fg.callerSaveAreaOffset + callerSaveRegsWritten * 2;
-            if (maxCallerSaveSize < (builder.kernel.fg.callerSaveAreaOffset + callerSaveRegsWritten * 2))
-                maxCallerSaveSize = (builder.kernel.fg.callerSaveAreaOffset + callerSaveRegsWritten * 2);
+            maxCallerSaveSize = std::max(maxCallerSaveSize, callerSaveRegsWritten * getGRFSize());
 
             if (m_options->getOption(vISA_OptReport))
             {
@@ -7066,7 +7250,8 @@ void GraphColor::addCallerSaveRestoreCode()
         }
     }
 
-    builder.kernel.fg.paramOverflowAreaOffset = maxCallerSaveSize;
+    auto byteOffset = builder.kernel.fg.callerSaveAreaOffset * 16 + maxCallerSaveSize;
+    builder.kernel.fg.frameSizeInOWord = ROUND(byteOffset, 64) / 16;
 
     builder.instList.clear();
 }
@@ -7076,7 +7261,7 @@ void GraphColor::addCallerSaveRestoreCode()
 //
 void GraphColor::addCalleeSaveRestoreCode()
 {
-    builder.kernel.fg.callerSaveAreaOffset = builder.kernel.fg.calleeSaveAreaOffset;
+
     unsigned int callerSaveNumGRF = builder.kernel.getCallerSaveLastGRF() + 1;
     unsigned int numCalleeSaveRegs = builder.kernel.getNumCalleeSaveRegs();
 
@@ -7120,7 +7305,7 @@ void GraphColor::addCalleeSaveRestoreCode()
         calleeSaveRegsWritten += ((*vit) ? 1 : 0);
 
     INST_LIST_ITER insertSaveIt = builder.kernel.fg.getEntryBB()->end();
-    for (--insertSaveIt; (*insertSaveIt)->opcode() != G4_pseudo_callee_save; --insertSaveIt);
+    for (--insertSaveIt; !(*insertSaveIt)->isCalleeSave(); --insertSaveIt);
     if (calleeSaveRegCount > 0)
     {
         if (builder.kernel.getOption(vISA_GenerateDebugInfo))
@@ -7148,7 +7333,7 @@ void GraphColor::addCalleeSaveRestoreCode()
     }
     builder.kernel.fg.getEntryBB()->erase(insertSaveIt);
     INST_LIST_ITER insertRestIt = builder.kernel.fg.getUniqueReturnBlock()->end();
-    for (--insertRestIt; (*insertRestIt)->opcode() != G4_pseudo_callee_restore; --insertRestIt);
+    for (--insertRestIt; !(*insertRestIt)->isCalleeRestore(); --insertRestIt);
     INST_LIST_ITER eraseIt = insertRestIt++;
     if (calleeSaveRegCount > 0)
     {
@@ -7176,15 +7361,11 @@ void GraphColor::addCalleeSaveRestoreCode()
     }
     builder.kernel.fg.getUniqueReturnBlock()->erase(eraseIt);
 
-    // FIXME: builder.kernel.fg.calleeSaveAreaOffset looks like in OWord, here assume
-    // register size is two Oword, so
-    // builder.kernel.fg.callerSaveAreaOffset = calleeSaveAreaOffset + calleeSaveRegsWritten * 2
-    builder.kernel.fg.callerSaveAreaOffset =
-        MAX(
-            builder.kernel.fg.calleeSaveAreaOffset + calleeSaveRegsWritten * 2,
-            builder.kernel.fg.callerSaveAreaOffset);
     builder.instList.clear();
 
+    // caller-save starts after callee-save and is 64-byte aligned
+    auto byteOffset = builder.kernel.fg.calleeSaveAreaOffset * 16 + calleeSaveRegsWritten * getGRFSize();
+    builder.kernel.fg.callerSaveAreaOffset = ROUND(byteOffset, 64) / 16;
     if (m_options->getOption(vISA_OptReport))
     {
         std::ofstream optreport;
@@ -7200,12 +7381,12 @@ void GraphColor::addCalleeSaveRestoreCode()
 //
 void GraphColor::addGenxMainStackSetupCode()
 {
-    uint32_t fpInitVal = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
-    // FIXME: a potential failure here is that paramOverflowAreaOffset is already the offset based on
+    uint32_t fpInitVal = (uint32_t)kernel.getIntKernelAttribute(Attributes::ATTR_SpillMemOffset);
+    // FIXME: a potential failure here is that frameSizeInOword is already the offset based on
     // GlobalSratchOffset, which is the value of fpInitVal. So below we generate code to do
     // SP = fpInitVal + frameSize, which does not make sense. It is correct now since when there's stack call,
     // IGC will not use scratch, so fpInitVal will be 0.
-    unsigned frameSize = builder.kernel.fg.paramOverflowAreaOffset + builder.kernel.fg.paramOverflowAreaSize;
+    unsigned frameSize = builder.kernel.fg.frameSizeInOWord;
     G4_Declare* framePtr = builder.kernel.fg.framePtrDcl;
     G4_Declare* stackPtr = builder.kernel.fg.stackPtrDcl;
 
@@ -7218,7 +7399,7 @@ void GraphColor::addGenxMainStackSetupCode()
         G4_DstRegRegion* dst = builder.createDst(framePtr->getRegVar(), 0, 0, 1, Type_UD);
         G4_Imm * src = builder.createImm(fpInitVal, Type_UD);
         G4_INST* fpInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
-        insertIt = entryBB->insert(insertIt, fpInst);
+        insertIt = entryBB->insertBefore(insertIt, fpInst);
 
         if (builder.kernel.getOption(vISA_GenerateDebugInfo))
         {
@@ -7233,7 +7414,7 @@ void GraphColor::addGenxMainStackSetupCode()
         G4_DstRegRegion* dst = builder.createDst(stackPtr->getRegVar(), 0, 0, 1, Type_UD);
         G4_Imm * src = builder.createImm(fpInitVal + frameSize, Type_UD);
         G4_INST* spIncInst = builder.createMov(1, dst, src, InstOpt_WriteEnable, false);
-        entryBB->insert(++insertIt, spIncInst);
+        entryBB->insertBefore(++insertIt, spIncInst);
     }
 
     if (m_options->getOption(vISA_OptReport))
@@ -7250,22 +7431,19 @@ void GraphColor::addGenxMainStackSetupCode()
 //
 void GraphColor::addCalleeStackSetupCode()
 {
-    int frameSize = (int)builder.kernel.fg.paramOverflowAreaOffset /*- builder.kernel.fg.calleeSaveAreaOffset*/;
+    int frameSize = (int)builder.kernel.fg.frameSizeInOWord;
     G4_Declare* framePtr = builder.kernel.fg.framePtrDcl;
     G4_Declare* stackPtr = builder.kernel.fg.stackPtrDcl;
 
     if (frameSize == 0)
     {
-        // Remove pseudo_store/restore_be_fp because a new frame is not needed
-        INST_LIST_ITER insertIt = builder.kernel.fg.getEntryBB()->begin();
-        for (; insertIt != builder.kernel.fg.getEntryBB()->end() && (*insertIt)->opcode() != G4_pseudo_store_be_fp;
-            ++insertIt)
-        {   /* void */
-        };
+        // Remove store/restore_be_fp because a new frame is not needed
+        G4_BB* entryBB = builder.kernel.fg.getEntryBB();
+        auto insertIt = std::find(entryBB->begin(), entryBB->end(), gra.getSaveBE_FPInst());
         builder.kernel.fg.getEntryBB()->erase(insertIt);
 
         insertIt = builder.kernel.fg.getUniqueReturnBlock()->end();
-        for (--insertIt; (*insertIt)->opcode() != G4_pseudo_restore_be_fp; --insertIt)
+        for (--insertIt; (*insertIt) != gra.getRestoreBE_FPInst(); --insertIt)
         {   /* void */
         };
         builder.kernel.fg.getUniqueReturnBlock()->erase(insertIt);
@@ -7274,7 +7452,7 @@ void GraphColor::addCalleeStackSetupCode()
     }
     //
     // BE_FP = BE_SP
-    // BE_SP += FrameSize (overflow-area offset + overflow-area size)
+    // BE_SP += FrameSize
     //
     {
         G4_DstRegRegion* dst = builder.createDst(stackPtr->getRegVar(), 0, 0, 1, Type_UD);
@@ -7285,16 +7463,11 @@ void GraphColor::addCalleeStackSetupCode()
         G4_Operand* sp_src = builder.createSrcRegRegion(Mod_src_undef, Direct, stackPtr->getRegVar(), 0, 0, rDesc, Type_UD);
         G4_Imm * src1 = builder.createImm(frameSize, Type_UD);
         auto createBEFP = builder.createMov(1, fp_dst, sp_src, InstOpt_WriteEnable, false);
-        auto addInst = builder.createInternalInst(NULL, G4_add, NULL, false, 1,
-            dst, src0, src1, InstOpt_WriteEnable);
+        auto addInst = builder.createBinOp(G4_add, 1,
+            dst, src0, src1, InstOpt_WriteEnable, false);
         G4_BB* entryBB = builder.kernel.fg.getEntryBB();
-        auto insertIt = std::find_if(entryBB->begin(), entryBB->end(),
-            [](G4_INST* inst) { return inst->opcode() == G4_pseudo_store_be_fp; });
-
-        MUST_BE_TRUE(insertIt != entryBB->end(), "Can't find pseudo_store_be_fp");
-        // Convert pseudo_store_be_fp to mov
-        (*insertIt)->setOpcode(G4_mov);
-        (*insertIt)->setOptionOn(InstOpt_WriteEnable);
+        auto insertIt = std::find(entryBB->begin(), entryBB->end(), gra.getSaveBE_FPInst());
+        MUST_BE_TRUE(insertIt != entryBB->end(), "Can't find BE_FP store inst");
 
         if (builder.kernel.getOption(vISA_GenerateDebugInfo))
         {
@@ -7305,8 +7478,8 @@ void GraphColor::addCalleeStackSetupCode()
         }
 
         insertIt++;
-        entryBB->insert(insertIt, createBEFP);
-        entryBB->insert(insertIt, addInst);
+        entryBB->insertBefore(insertIt, createBEFP);
+        entryBB->insertBefore(insertIt, addInst);
     }
     //
     // BE_SP = BE_FP
@@ -7319,17 +7492,15 @@ void GraphColor::addCalleeStackSetupCode()
             Mod_src_undef, Direct, framePtr->getRegVar(), 0, 0, rDesc, Type_UD);
         G4_INST* spRestore = builder.createMov(1, sp_dst, fp_src, InstOpt_WriteEnable, false);
         INST_LIST_ITER insertIt = builder.kernel.fg.getUniqueReturnBlock()->end();
-        for (--insertIt; (*insertIt)->opcode() != G4_pseudo_restore_be_fp; --insertIt);
-        // Convert pseudo_restore_be_fp to mov
-        (*insertIt)->setOpcode(G4_mov);
-        (*insertIt)->setOptionOn(InstOpt_WriteEnable);
+        for (--insertIt; (*insertIt) != gra.getRestoreBE_FPInst(); --insertIt);
+
         if (builder.kernel.getOption(vISA_GenerateDebugInfo))
         {
             G4_INST* callerFPRestore = (*insertIt);
             builder.kernel.getKernelDebugInfo()->setCallerSPRestoreInst(spRestore);
             builder.kernel.getKernelDebugInfo()->setCallerBEFPRestoreInst(callerFPRestore);
         }
-        builder.kernel.fg.getUniqueReturnBlock()->insert(insertIt, spRestore);
+        builder.kernel.fg.getUniqueReturnBlock()->insertBefore(insertIt, spRestore);
     }
     builder.instList.clear();
 
@@ -7362,7 +7533,7 @@ void GraphColor::addA0SaveRestoreCode()
             if (!assocPseudoA0->getPhyReg())
             {
                 // Insert save/restore code because the pseudo node did not get an allocation
-                const char* name = builder.getNameString(builder.mem, 20, builder.getIsKernel() ? "SA0_k%d_%d" : "SA0_f%d_%d", builder.getCUnitId(), count++);
+                const char* name = builder.getNameString(builder.mem, 20, "SA0_%d", count++);
                 G4_Declare* savedDcl = builder.createDeclareNoLookup(name, G4_GRF, numA0Elements, 1, Type_UW);
 
                 {
@@ -7375,7 +7546,7 @@ void GraphColor::addA0SaveRestoreCode()
                         Mod_src_undef, Direct, regPool.getAddrReg(), 0, 0, rDesc, Type_UW);
                     G4_INST* saveInst = builder.createMov(numA0Elements, dst, src, InstOpt_WriteEnable, false);
                     INST_LIST_ITER insertIt = std::prev(bb->end());
-                    bb->insert(insertIt, saveInst);
+                    bb->insertBefore(insertIt, saveInst);
                 }
 
                 {
@@ -7388,7 +7559,7 @@ void GraphColor::addA0SaveRestoreCode()
                         Mod_src_undef, Direct, savedDcl->getRegVar(), 0, 0, rDesc, Type_UW);
                     G4_INST* restoreInst = builder.createMov(numA0Elements, dst, src, InstOpt_WriteEnable, false);
                     auto insertIt = std::find_if(succ->begin(), succ->end(), [](G4_INST* inst) { return !inst->isLabel(); });
-                    succ->insert(insertIt, restoreInst);
+                    succ->insertBefore(insertIt, restoreInst);
                 }
             }
         }
@@ -7426,7 +7597,7 @@ void GraphColor::addFlagSaveRestoreCode()
             if (!assocPseudoFlag->getPhyReg())
             {
                 // Insert save/restore code because the pseudo node did not get an allocation
-                const char* name = builder.getNameString(builder.mem, 32, builder.getIsKernel() ? "SFLAG_k%d_%d" : "SFLAG_f%d_%d", builder.getCUnitId(), count++);
+                const char* name = builder.getNameString(builder.mem, 32, "SFLAG_%d", count++);
                 G4_Declare* savedDcl1 = builder.createDeclareNoLookup(name, G4_GRF, num32BitFlags, 1, Type_UD);
                 {
                     //
@@ -7446,7 +7617,7 @@ void GraphColor::addFlagSaveRestoreCode()
                     for (int i = 0; i < num32BitFlags; ++i)
                     {
                         auto saveInst = createFlagSaveInst(i);
-                        bb->insert(iter, saveInst);
+                        bb->insertBefore(iter, saveInst);
                     }
                 }
 
@@ -7468,7 +7639,7 @@ void GraphColor::addFlagSaveRestoreCode()
                     for (int i = 0; i < num32BitFlags; ++i)
                     {
                         auto restoreInst = createRestoreFlagInst(i);
-                        succ->insert(insertIt, restoreInst);
+                        succ->insertBefore(insertIt, restoreInst);
                     }
                 }
             }
@@ -7480,6 +7651,8 @@ void GraphColor::addFlagSaveRestoreCode()
 
 //
 // Add GRF caller/callee save/restore code for stack calls.
+// localSpillAreaOwordsize specifices the starting offset of the caller/callee-save area in this frame.
+// It is 64-byte aligned.
 //
 void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
 {
@@ -7496,9 +7669,6 @@ void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
     }
     else
     {
-        // FIXME: looks like inside addCalleeSaveRestoreCode() and addCallerSaveRestoreCode(),
-        // the expected offset (of calleeSaveAreaOffset and callerSaveAreaOffset) is 0-based.
-        // But localSpillAreaOwordSize is based on globalScratchOffset.
         builder.kernel.fg.calleeSaveAreaOffset = localSpillAreaOwordSize;
         addCalleeSaveRestoreCode();
     }
@@ -7513,6 +7683,11 @@ void GraphColor::addSaveRestoreCode(unsigned localSpillAreaOwordSize)
     }
     stackCallProlog();
     builder.instList.clear();
+
+    if (kernel.getOption(vISA_GenerateDebugInfo))
+    {
+        kernel.getKernelDebugInfo()->computeGRFToStackOffset();
+    }
 }
 
 //
@@ -7534,11 +7709,9 @@ void GlobalRA::addCallerSavePseudoCode()
             auto fcallInst = bb->back()->asCFInst();
             G4_Declare* pseudoVCADcl = bb->getParent().fcallToPseudoDclMap[fcallInst].VCA;
             G4_DstRegRegion* dst = builder.createDst(pseudoVCADcl->getRegVar(), 0, 0, 1, Type_UD);
-            G4_INST* saveInst = builder.createInternalInst(
-                NULL, G4_pseudo_caller_save, NULL, false, 1,
-                dst, NULL, NULL, InstOpt_WriteEnable);
+            G4_INST* saveInst = builder.createInternalIntrinsicInst(nullptr, Intrinsic::CallerSave, 1, dst, nullptr, nullptr, nullptr, InstOpt_WriteEnable);
             INST_LIST_ITER callBBIt = bb->end();
-            bb->insert(--callBBIt, saveInst);
+            bb->insertBefore(--callBBIt, saveInst);
 
             G4_FCALL* fcall = builder.getFcallInfo(bb->back());
             MUST_BE_TRUE(fcall != NULL, "fcall info not found");
@@ -7559,10 +7732,8 @@ void GlobalRA::addCallerSavePseudoCode()
             INST_LIST_ITER retBBIt = retBB->begin();
             for (; retBBIt != retBB->end() && (*retBBIt)->isLabel(); ++retBBIt);
             G4_INST* restoreInst =
-                builder.createInternalInst(
-                    NULL, G4_pseudo_caller_restore, NULL, false, 1,
-                    NULL, src, NULL, InstOpt_WriteEnable);
-            retBB->insert(retBBIt, restoreInst);
+                builder.createInternalIntrinsicInst(nullptr, Intrinsic::CallerRestore, 1, nullptr, src, nullptr, nullptr, InstOpt_WriteEnable);
+            retBB->insertBefore(retBBIt, restoreInst);
         }
     }
     builder.instList.clear();
@@ -7578,28 +7749,24 @@ void GlobalRA::addCalleeSavePseudoCode()
     G4_Declare* pseudoVCEDcl = builder.kernel.fg.pseudoVCEDcl;
 
     G4_DstRegRegion* dst = builder.createDst(pseudoVCEDcl->getRegVar(), 0, 0, 1, Type_UD);
-    G4_INST* saveInst = builder.createInternalInst(
-        NULL, G4_pseudo_callee_save, NULL, false, 1, dst,
-        NULL, NULL, InstOpt_WriteEnable);
+    auto saveInst = builder.createInternalIntrinsicInst(nullptr, Intrinsic::CalleeSave, 1, dst, nullptr, nullptr, nullptr, InstOpt_WriteEnable);
     INST_LIST_ITER insertIt = builder.kernel.fg.getEntryBB()->begin();
     for (; insertIt != builder.kernel.fg.getEntryBB()->end() && (*insertIt)->isLabel();
         ++insertIt)
     {   /*  void */
     };
-    builder.kernel.fg.getEntryBB()->insert(insertIt, saveInst);
+    builder.kernel.fg.getEntryBB()->insertBefore(insertIt, saveInst);
 
     G4_BB* exitBB = builder.kernel.fg.getUniqueReturnBlock();
     const RegionDesc* rDesc = builder.getRegionScalar();
     G4_Operand* src = builder.createSrcRegRegion(
         Mod_src_undef, Direct, pseudoVCEDcl->getRegVar(), 0, 0, rDesc, Type_UD);
     G4_INST* restoreInst =
-        builder.createInternalInst(
-            NULL, G4_pseudo_callee_restore, NULL, false, 1, NULL,
-            src, NULL, InstOpt_WriteEnable);
+        builder.createInternalIntrinsicInst(nullptr, Intrinsic::CalleeRestore, 1, nullptr, src, nullptr, nullptr, InstOpt_WriteEnable);
     INST_LIST_ITER exitBBIt = exitBB->end();
     --exitBBIt;
     MUST_BE_TRUE((*exitBBIt)->isFReturn(), ERROR_REGALLOC);
-    exitBB->insert(exitBBIt, restoreInst);
+    exitBB->insertBefore(exitBBIt, restoreInst);
     builder.instList.clear();
 }
 
@@ -7619,31 +7786,28 @@ void GlobalRA::addStoreRestoreForFP()
     rd = builder.getRegionScalar();
     G4_Operand* FPsrc = builder.createSrcRegRegion(Mod_src_undef, Direct, builder.kernel.fg.framePtrDcl->getRegVar(), 0, 0, rd, Type_UD);
 
-    G4_INST* storeInst = builder.createInternalInst(NULL, G4_pseudo_store_be_fp, NULL, false, 1,
-        oldFPDst, FPsrc, NULL, 0);
-    G4_INST* restoreInst = builder.createInternalInst(NULL, G4_pseudo_restore_be_fp, NULL, false, 1,
-        FPdst, oldFPSrc, NULL, 0);
-
-    auto gtpin = builder.kernel.getGTPinData();
-    if (gtpin &&
-        gtpin->isFirstRAPass())
-    {
-        gtpin->markInst(storeInst);
-        gtpin->markInst(restoreInst);
-    }
-
+    saveBE_FPInst = builder.createMov(1, oldFPDst, FPsrc, InstOpt_WriteEnable, false);
     INST_LIST_ITER insertIt = builder.kernel.fg.getEntryBB()->begin();
     for (; insertIt != builder.kernel.fg.getEntryBB()->end() && (*insertIt)->isLabel();
         ++insertIt)
     {   /*  void */
     };
-    builder.kernel.fg.getEntryBB()->insert(insertIt, storeInst);
+    builder.kernel.fg.getEntryBB()->insertBefore(insertIt, saveBE_FPInst);
 
+    restoreBE_FPInst = builder.createMov(1, FPdst, oldFPSrc, InstOpt_WriteEnable, false);
     insertIt = builder.kernel.fg.getUniqueReturnBlock()->end();
     for (--insertIt; (*insertIt)->isFReturn() == false; --insertIt)
     {   /*  void */
     };
-    builder.kernel.fg.getUniqueReturnBlock()->insert(insertIt, restoreInst);
+    builder.kernel.fg.getUniqueReturnBlock()->insertBefore(insertIt, restoreBE_FPInst);
+
+    auto gtpin = builder.kernel.getGTPinData();
+    if (gtpin &&
+        gtpin->isFirstRAPass())
+    {
+        gtpin->markInst(saveBE_FPInst);
+        gtpin->markInst(restoreBE_FPInst);
+    }
 }
 
 void GlobalRA::reportUndefinedUses(LivenessAnalysis& liveAnalysis, G4_BB* bb, G4_INST* inst, G4_Declare* referencedDcl, std::set<G4_Declare*>& defs, std::ofstream& optreport, Gen4_Operand_Number opndNum)
@@ -8161,7 +8325,7 @@ void VarSplit::insertMovesToTemp(IR_Builder& builder, G4_Declare* oldDcl, G4_Ope
             auto src = builder.createSrcRegRegion(Mod_src_undef, Direct, oldDcl->getRegVar(),
                 (gra.getSubOffset(subDcl)) / G4_GRF_REG_NBYTES, 0, builder.getRegionStride1(), oldDcl->getElemType());
             G4_INST* splitInst = builder.createMov((uint8_t)subDcl->getTotalElems(), dst, src, maskFlag, false);
-            bb->insert(iter, splitInst);
+            bb->insertBefore(iter, splitInst);
         }
     }
 
@@ -8214,9 +8378,8 @@ void VarSplit::insertMovesFromTemp(G4_Kernel& kernel, G4_Declare* oldDcl, int in
                     kernel.fg.builder->getRegionStride1(),
                     oldSrc->getType());
                 G4_INST* movInst = kernel.fg.builder->createMov(
-                    (unsigned char)subDcl->getTotalElems(), dst, src, InstOpt_WriteEnable, false,
-                    inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
-                bb->insert(instIter, movInst);
+                    (unsigned char)subDcl->getTotalElems(), dst, src, InstOpt_WriteEnable, false);
+                bb->insertBefore(instIter, movInst);
             }
         }
         auto newSrc = kernel.fg.builder->createSrcRegRegion(oldSrc->getModifier(), Direct, newDcl->getRegVar(),
@@ -8258,7 +8421,7 @@ bool VarSplit::canDoGlobalSplit(IR_Builder& builder, G4_Kernel &kernel, uint32_t
     }
 
     if (!builder.getOption(vISA_Debug) &&               //Not work in debug mode
-        kernel.getOptions()->getTarget() == VISA_3D &&      //Only works for 3D/OCL/OGL
+        kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&   //Only works for 3D/OCL/OGL
         sendSpillRefCount)
     {
         return true;
@@ -8284,7 +8447,7 @@ void VarSplit::globalSplit(IR_Builder& builder, G4_Kernel &kernel)
             G4_INST* inst = (*it);
             G4_DstRegRegion* dst = inst->getDst();
 
-            if (inst->opcode() == G4_pseudo_lifetime_end || inst->isPseudoKill())
+            if (inst->isLifeTimeEnd() || inst->isPseudoKill())
             {
                 continue;
             }
@@ -8322,7 +8485,7 @@ void VarSplit::globalSplit(IR_Builder& builder, G4_Kernel &kernel)
 
             G4_INST* inst = (*it);
 
-            if (inst->opcode() == G4_pseudo_lifetime_end || inst->isPseudoKill())
+            if (inst->isLifeTimeEnd() || inst->isPseudoKill())
             {
                 continue;
             }
@@ -8477,7 +8640,7 @@ void VarSplit::localSplit(IR_Builder& builder,
         G4_INST* i = (*rit);
         G4_DstRegRegion* dst = i->getDst();
 
-        if (i->opcode() == G4_pseudo_lifetime_end || i->isPseudoKill())
+        if (i->isLifeTimeEnd() || i->isPseudoKill())
         {
             continue;
         }
@@ -8973,7 +9136,7 @@ bool GlobalRA::hybridRA(bool doBankConflictReduction, bool highInternalConflict,
         RPE rpe(*this, &liveAnalysis);
         rpe.run();
 
-        bool spillLikely = kernel.getOptions()->getTarget() == VISA_3D &&
+        bool spillLikely = kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
             rpe.getMaxRP() >= kernel.getNumRegTotal() - 16;
         if (spillLikely)
         {
@@ -9023,6 +9186,18 @@ bool GlobalRA::hybridRA(bool doBankConflictReduction, bool highInternalConflict,
 
     kernel.setRAType(doBankConflictReduction ? RA_Type::HYBRID_BC_RA : RA_Type::HYBRID_RA);
     return true;
+}
+
+bool canDoHRA(G4_Kernel& kernel)
+{
+    bool ret = true;
+
+    if (kernel.getVarSplitPass()->splitOccured())
+    {
+        ret = false;
+    }
+
+    return ret;
 }
 
 bool canDoLRA(G4_Kernel& kernel)
@@ -9094,9 +9269,20 @@ int GlobalRA::coloringRegAlloc()
         stopTimer(TIMER_LOCAL_RA);
         if (!success)
         {
-            startTimer(TIMER_HYBRID_RA);
-            success = hybridRA(lra.doHybridBCR(), lra.hasHighInternalBC(), lra);
-            stopTimer(TIMER_HYBRID_RA);
+            if (canDoHRA(kernel))
+            {
+                startTimer(TIMER_HYBRID_RA);
+                success = hybridRA(lra.doHybridBCR(), lra.hasHighInternalBC(), lra);
+                stopTimer(TIMER_HYBRID_RA);
+            }
+            else
+            {
+                if (builder.getOption(vISA_RATrace))
+                {
+                    std::cout << "\t--skip HRA due to var split. undo LRA results." << "\n";
+                }
+                lra.undoLocalRAAssignments(false);
+            }
         }
         if (success)
         {
@@ -9113,7 +9299,7 @@ int GlobalRA::coloringRegAlloc()
 
     std::vector<SpillManagerGRF::EDGE> prevIntfEdges;
 
-    int globalScratchOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
+    int globalScratchOffset = kernel.getIntKernelAttribute(Attributes::ATTR_SpillMemOffset);
     bool useScratchMsgForSpill = globalScratchOffset < (int) (SCRATCH_MSG_LIMIT * 0.6) && !hasStackCall;
     bool enableSpillSpaceCompression = builder.getOption(vISA_SpillSpaceCompression);
 
@@ -9180,7 +9366,7 @@ int GlobalRA::coloringRegAlloc()
             !kernel.getHasAddrTaken();
         bool reserveSpillReg = false;
         if (builder.getOption(vISA_FailSafeRA) &&
-            kernel.getOptions()->getTarget() == VISA_3D &&
+            kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
             !hasStackCall &&
             allowAddrTaken &&
             iterationNo == failSafeRAIteration)
@@ -9230,8 +9416,8 @@ int GlobalRA::coloringRegAlloc()
                     return VISA_SPILL;
                 }
 
-                bool runRemat = kernel.getOptions()->getTarget() == VISA_CM ? true :
-                    kernel.getSimdSize() < G4_GRF_REG_NBYTES;
+                bool runRemat = kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM
+                    ? true :  kernel.getSimdSize() < G4_GRF_REG_NBYTES;
                 // -noremat takes precedence over -forceremat
                 bool rematOff = !kernel.getOption(vISA_Debug) &&
                     (!kernel.getOption(vISA_NoRemat) || kernel.getOption(vISA_FastSpill)) &&
@@ -9331,7 +9517,7 @@ int GlobalRA::coloringRegAlloc()
 
                 if (iterationNo == 0 &&
                     enableSpillSpaceCompression &&
-                    kernel.getOptions()->getTarget() == VISA_3D &&
+                    kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
                     !hasStackCall)
                 {
                     unsigned int spillSize = 0;
@@ -9411,9 +9597,19 @@ int GlobalRA::coloringRegAlloc()
 
                 if (hasStackCall)
                 {
-                    unsigned localSpillAreaOwordSize = ROUND(scratchOffset, 16) / 16;
-                    // the given localSpillAreaOwordSize is the offset based on globalScratchOffset
+                    // spill/fill intrinsics expect offset in HWord, so round up to 64 byte but maintain it in OWord unit
+                    // ToDo: we really need to change everything to byte for everyone's sanity..
+                    unsigned localSpillAreaOwordSize = ROUND(scratchOffset, 64) / 16;
                     coloring.addSaveRestoreCode(localSpillAreaOwordSize);
+                }
+
+                if (kernel.getOption(vISA_DumpRegChart))
+                {
+                    assignRegForAliasDcl();
+                    computePhyReg();
+                    // invoke before expanding spill/fill since
+                    // it modifies IR
+                    regChart->dumpRegChart(std::cerr);
                 }
 
                 expandSpillFillIntrinsics();
@@ -9504,9 +9700,9 @@ int GlobalRA::coloringRegAlloc()
     //
     if (spillMemUsed)
     {
-        RELEASE_MSG("Spill memory used = " << spillMemUsed << " bytes for kernel " <<
-            kernel.getName() << std::endl << " Compiling kernel with spill code may degrade performance." <<
-            " Please consider rewriting the kernel to use less registers." << std::endl);
+        builder.criticalMsgStream() << "Spill memory used = " << spillMemUsed << " bytes for kernel " <<
+            kernel.getName() << "\n Compiling kernel with spill code may degrade performance." <<
+            " Please consider rewriting the kernel to use less registers.\n";
     }
 
     // update jit metadata information for spill
@@ -9515,7 +9711,7 @@ int GlobalRA::coloringRegAlloc()
         jitInfo->isSpill = spillMemUsed > 0;
         jitInfo->hasStackcalls = kernel.fg.getHasStackCalls();
 
-        if (builder.kernel.fg.paramOverflowAreaOffset != 0) {
+        if (builder.kernel.fg.frameSizeInOWord != 0) {
             // jitInfo->spillMemUsed is the entire visa stack size. Consider the caller/callee
             // save size if having caller/callee save
             // globalScratchOffset in unit of byte, others in Oword
@@ -9529,17 +9725,11 @@ int GlobalRA::coloringRegAlloc()
             //  callerSaveAreaOffset    -> ---------------------
             //                             |  caller save      |
             //  paramOverflowAreaOffset -> ---------------------
-            //                             | paramOverflowArea |
-            //                             ---------------------
-            // FIXME: paramOverflowAreaOffset and paramOverflowAreaSize don't seem like be used
-            // anywhere, do we need them?
             jitInfo->spillMemUsed =
-                (builder.kernel.fg.paramOverflowAreaOffset +
-                    builder.kernel.fg.paramOverflowAreaSize) * 16 - globalScratchOffset;
+                builder.kernel.fg.frameSizeInOWord * 16;
 
             // reserve spillMemUsed #bytes before 8kb boundary
-            kernel.getGTPinData()->setScratchNextFree(8*1024 - (kernel.getGTPinData()->getGTPinInit() ?
-                kernel.getGTPinData()->getGTPinInit()->scratch_area_size : 0));
+            kernel.getGTPinData()->setScratchNextFree(8*1024 - kernel.getGTPinData()->getNumBytesScratchUse());
         } else {
             jitInfo->spillMemUsed = spillMemUsed;
             kernel.getGTPinData()->setScratchNextFree(spillMemUsed);
@@ -9640,7 +9830,7 @@ bool FlagSpillCleanup::replaceWithPreDcl(IR_Builder&     builder,
     }
     G4_Declare *dcl = reuseOpnd->getBase()->asRegVar()->getDeclare();
 
-    if (VISA_WA_CHECK(builder.getPWaTable(), WaDisableSendSrcDstOverlap))
+    if (builder.WaDisableSendSrcDstOverlap())
     {
         for (auto &renameOpnd : scratchAccess->renameOperandVec)
         {
@@ -10926,7 +11116,7 @@ void GlobalRA::fixAlignment()
         }
     }
 
-    if (getGenxPlatform() == GENX_BDW)
+    if (builder.getPlatform() == GENX_BDW)
     {
         // BDW requires even_word alignment for scalar HF variables
         for (auto dcl : kernel.Declares)
@@ -11128,7 +11318,6 @@ bool VerifyAugmentation::interfereBetween(G4_Declare* dcl1, G4_Declare* dcl2)
                 {
                     if (!intf->interfereBetween(var, v2))
                     {
-                        std::cerr << dcl1->getName() << "'s LRA assignment " << grf << " doesnt interfere with " << dcl2->getName() << std::endl;
                         interferes = false;
                     }
                 }
@@ -12164,7 +12353,7 @@ bool dump(const char* s, G4_Kernel* kernel)
     {
         if (name.compare(dcl->getName()) == 0)
         {
-            dcl->emit(std::cerr, false, false);
+            dcl->dump();
             return true;
         }
     }
@@ -12203,4 +12392,159 @@ void LiveRange::setAllocHint(unsigned int h)
 {
     if((h + dcl->getNumRows()) <= gra.kernel.getNumRegTotal())
         allocHint = h;
+}
+
+// sortedIntervals comes from augmentation.
+// This can be invoked either post RA where phy regs are assigned to dcls,
+// or after assignColors with lrs and numLRs passed which makes this function
+// use temp allocations from lrs. Doesnt handle sub-routines yet.
+void RegChartDump::dumpRegChart(std::ostream& os, LiveRange** lrs, unsigned int numLRs)
+{
+    constexpr unsigned int N = 128;
+    std::unordered_map<G4_INST*, std::bitset<N>> busyGRFPerInst;
+    bool dumpHex = false;
+
+    auto getPhyReg = [&](G4_Declare* dcl)
+    {
+        auto preg = dcl->getRegVar()->getPhyReg();
+        if (preg)
+            return preg;
+
+        for (unsigned int i = 0; i != numLRs; i++)
+        {
+            LiveRange* lr = lrs[i];
+            if (lr->getDcl() == dcl)
+            {
+                preg = lr->getPhyReg();
+                break;
+            }
+        }
+
+        return preg;
+    };
+
+    for (auto dcl : sortedLiveIntervals)
+    {
+        if (dcl->getRegFile() != G4_RegFileKind::G4_GRF &&
+            dcl->getRegFile() != G4_RegFileKind::G4_INPUT)
+            continue;
+
+        auto phyReg = getPhyReg(dcl);
+        if (!phyReg)
+            continue;
+
+        if (!phyReg->isGreg())
+            continue;
+
+        auto GRFStart = phyReg->asGreg()->getRegNum();
+        auto numRows = dcl->getNumRows();
+
+        auto startInst = startEnd[dcl].first;
+        auto endInst = startEnd[dcl].second;
+
+        bool start = (dcl->getRegFile() == G4_RegFileKind::G4_INPUT);
+        bool done = false;
+        for (auto bb : gra.kernel.fg.getBBList())
+        {
+            for (auto inst : *bb)
+            {
+                if (inst == startInst)
+                {
+                    start = true;
+                    continue;
+                }
+
+                if (!start)
+                    continue;
+
+                for (unsigned int i = GRFStart; i != (GRFStart + numRows); i++)
+                {
+                    busyGRFPerInst[inst].set(i, true);
+                }
+
+                if (inst == endInst)
+                {
+                    done = true;
+                    break;
+                }
+            }
+
+            if (done)
+                break;
+        }
+    }
+
+    // Now emit instructions with GRFs
+    for (auto bb : gra.kernel.fg.getBBList())
+    {
+        for (auto inst : *bb)
+        {
+            constexpr unsigned int maxInstLen = 80;
+            auto item = busyGRFPerInst[inst];
+            std::stringstream ss;
+            inst->emit(ss);
+            auto len = ss.str().length();
+
+            if (len <= maxInstLen)
+            {
+                os << ss.str();
+                for (unsigned int i = 0; i != maxInstLen - ss.str().length(); i++)
+                    os << " ";
+            }
+            else
+            {
+                auto tmpStr = ss.str();
+                auto limitedStr = tmpStr.substr(0, maxInstLen);
+                os << std::string(limitedStr);
+            }
+
+            os << "        ";
+
+            if (!dumpHex)
+            {
+                // dump GRFs | - busy, * - free
+                for (unsigned int i = 0; i != N; i++)
+                {
+                    // emit in groups of 10 GRFs
+                    if (i > 0 && (i % 10) == 0)
+                        os << "  ";
+
+                    if (item[i] == true)
+                        os << "|"; // busy
+                    else
+                        os << "*"; // free
+                }
+            }
+            else
+            {
+                for (unsigned int i = 0; i != N; i+=sizeof(unsigned short)*8)
+                {
+                    unsigned short busyGRFs = 0;
+                    for (unsigned int j = 0; j != sizeof(unsigned short)*8; j++)
+                    {
+                        auto offset = i + j;
+                        if (offset < N)
+                        {
+                            if (item[offset])
+                                busyGRFs |= (1 << j);
+                        }
+                    }
+                    printf("r%d:%4x      ", i, busyGRFs);
+                }
+            }
+            os << std::endl;
+        }
+        os << std::endl;
+    }
+}
+
+void RegChartDump::recordLiveIntervals(std::vector<G4_Declare*>& dcls)
+{
+    sortedLiveIntervals = dcls;
+    for (auto dcl : dcls)
+    {
+        auto start = gra.getStartInterval(dcl);
+        auto end = gra.getEndInterval(dcl);
+        startEnd.insert(std::make_pair(dcl, std::make_pair(start, end)));
+    }
 }

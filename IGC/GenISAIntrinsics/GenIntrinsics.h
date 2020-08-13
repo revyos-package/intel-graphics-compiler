@@ -24,6 +24,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#ifndef GENINTRINSICS_H
+#define GENINTRINSICS_H
+
 #pragma once
 
 #include "common/LLVMWarningsPush.hpp"
@@ -51,6 +54,15 @@ namespace GenISAIntrinsic {
   /// "llvm.ppc.altivec.lvx".
   std::string getName(ID id, ArrayRef<Type*> Tys = None);
 
+
+  struct IntrinsicComments
+  {
+      const char* funcDescription;
+      std::vector<const char*> outputs;
+      std::vector<const char*> inputs;
+  };
+
+  IntrinsicComments getIntrinsicComments(ID id);
 
   /// Intrinsic::getDeclaration(M, ID) - Create or insert an LLVM Function
   /// declaration for an intrinsic, and return it.
@@ -86,3 +98,4 @@ namespace GenISAIntrinsic {
 
 } // namespace llvm
 
+#endif //GENINTRINSICS_H

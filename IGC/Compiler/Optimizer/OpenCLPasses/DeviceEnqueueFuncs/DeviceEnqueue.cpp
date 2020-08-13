@@ -27,8 +27,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/DeviceEnqueueFuncs/DeviceEnqueue.hpp"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/IGCPassSupport.h"
-
 #include <set>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -75,6 +75,7 @@ DeviceEnqueueFuncsAnalysis::DeviceEnqueueFuncsAnalysis() :
 
 bool DeviceEnqueueFuncsAnalysis::runOnModule(Module& M) {
     bool changed = false;
+    m_pMDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     // Run on all functions defined in this module
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
         Function* pFunc = &(*I);
@@ -88,6 +89,9 @@ bool DeviceEnqueueFuncsAnalysis::runOnModule(Module& M) {
         }
     }
 
+    if(changed)
+        m_pMDUtils->save(M.getContext());
+
     return changed;
 }
 
@@ -99,8 +103,8 @@ bool DeviceEnqueueFuncsAnalysis::runOnFunction(Function& F) {
     // Visit the function
     visit(F);
 
-    ImplicitArgs::addImplicitArgs(F, m_newImplicitArgs, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
-    ImplicitArgs::addNumberedArgs(F, m_newNumberedImplicitArgs, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
+    ImplicitArgs::addImplicitArgs(F, m_newImplicitArgs, m_pMDUtils);
+    ImplicitArgs::addNumberedArgs(F, m_newNumberedImplicitArgs, m_pMDUtils);
 
     return m_hasDeviceEnqueue;
 }
@@ -140,11 +144,11 @@ void DeviceEnqueueFuncsAnalysis::visitCallInst(CallInst& CI)
     else if (funcName == GET_OBJECT_ID)
     {
         // Extract the arg num and add it to the appropriate data structure
-        assert(CI.getNumArgOperands() == 1 && "get_object_id function is expected to have only one argument");
+        IGC_ASSERT_MESSAGE(CI.getNumArgOperands() == 1, "get_object_id function is expected to have only one argument");
 
         // We support only compile-time constants as arguments of get_object_id()
         ConstantInt* callArg = dyn_cast<ConstantInt>(CI.getArgOperand(0));
-        assert(callArg != NULL && "get_object_id function is expected to have only conatnt argument");
+        IGC_ASSERT_MESSAGE(callArg != NULL, "get_object_id function is expected to have only conatnt argument");
 
         m_newNumberedImplicitArgs[ImplicitArg::GET_OBJECT_ID].insert((int)callArg->getZExtValue());
         m_hasDeviceEnqueue = true;
@@ -152,11 +156,11 @@ void DeviceEnqueueFuncsAnalysis::visitCallInst(CallInst& CI)
     else if (funcName == GET_BLOCK_SIMD_SIZE)
     {
         // Extract the arg num and add it to the appropriate data structure
-        assert(CI.getNumArgOperands() == 1 && "get_block_simd_size function is expected to have only one argument");
+        IGC_ASSERT_MESSAGE(CI.getNumArgOperands() == 1, "get_block_simd_size function is expected to have only one argument");
 
         // We support only compile-time constants as arguments of get_object_id()
         ConstantInt* callArg = dyn_cast<ConstantInt>(CI.getArgOperand(0));
-        assert(callArg != NULL && "get_block_simd_size function is expected to have only constant argument");
+        IGC_ASSERT_MESSAGE(callArg != NULL, "get_block_simd_size function is expected to have only constant argument");
 
         m_newNumberedImplicitArgs[ImplicitArg::GET_BLOCK_SIMD_SIZE].insert((int)callArg->getZExtValue());
         m_hasDeviceEnqueue = true;
@@ -214,37 +218,37 @@ void DeviceEnqueueFuncsResolution::visitCallInst(CallInst& CI)
     if (funcName == GET_DEFAULT_DEVICE_QUEUE)
     {
         enqueueResource = m_implicitArgs.getImplicitArg(F, ImplicitArg::DEVICE_ENQUEUE_DEFAULT_DEVICE_QUEUE);
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_EVENT_POOL)
     {
         enqueueResource = m_implicitArgs.getImplicitArg(F, ImplicitArg::DEVICE_ENQUEUE_EVENT_POOL);
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_MAX_WORKGROUP_SIZE)
     {
         enqueueResource = m_implicitArgs.getImplicitArg(F, ImplicitArg::DEVICE_ENQUEUE_MAX_WORKGROUP_SIZE);
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_PARENT_EVENT)
     {
         enqueueResource = m_implicitArgs.getImplicitArg(F, ImplicitArg::DEVICE_ENQUEUE_PARENT_EVENT);
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_PREFERED_WORKGROUP_MULTIPLE)
     {
         enqueueResource = m_implicitArgs.getImplicitArg(F, ImplicitArg::DEVICE_ENQUEUE_PREFERED_WORKGROUP_MULTIPLE);
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_OBJECT_ID)
     {
         enqueueResource = m_implicitArgs.getNumberedImplicitArg(F, ImplicitArg::GET_OBJECT_ID, (int)(cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue()));
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
     else if (funcName == GET_BLOCK_SIMD_SIZE)
     {
         enqueueResource = m_implicitArgs.getNumberedImplicitArg(F, ImplicitArg::GET_BLOCK_SIMD_SIZE, (int)(cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue()));
-        assert(enqueueResource != NULL);
+        IGC_ASSERT(enqueueResource != NULL);
     }
 
 

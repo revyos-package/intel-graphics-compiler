@@ -28,23 +28,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/CISACodeGen.h"
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs.hpp"
 #include "Compiler/MetaDataUtilsWrapper.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/GetElementPtrTypeIterator.h>
 #include <llvm/Analysis/ValueTracking.h>
-
 #include <llvmWrapper/Support/KnownBits.h>
 #include <llvmWrapper/IR/Instructions.h>
 #include <llvmWrapper/Support/Alignment.h>
-
 #include "common/LLVMWarningsPop.hpp"
-
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
-
 #include "common/secure_mem.h"
-
 #include <stack>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace GenISAIntrinsic;
@@ -77,7 +72,7 @@ namespace IGC
     {
         GFXResourceAddrSpace temp;
         temp.u32Val = 0;
-        assert((bufType + 1) < 16);
+        IGC_ASSERT((bufType + 1) < 16);
         temp.bits.bufType = bufType + 1;
         if (bufType == SLM)
         {
@@ -94,7 +89,7 @@ namespace IGC
         else if (llvm::isa<llvm::ConstantInt>(&bufIdx))
         {
             unsigned int bufId = (unsigned int)(llvm::cast<llvm::ConstantInt>(&bufIdx)->getZExtValue());
-            assert(bufId < (1 << 31));
+            IGC_ASSERT(bufId < (1 << 31));
             temp.bits.bufId = bufId;
             return temp.u32Val;
         }
@@ -103,6 +98,25 @@ namespace IGC
         temp.bits.bufId = uniqueIndAS;
         temp.bits.indirect = 1;
         return temp.u32Val;
+    }
+
+    // Return true if AS is for a stateful surface.
+    //    Stateful surface should have an encoded AS that is bigger than
+    //    ADDRESS_SPACE_NUM_ADDRESSES.
+    bool isStatefulAddrSpace(unsigned AS)
+    {
+        return AS > ADDRESS_SPACE_NUM_ADDRESSES;
+    }
+
+    bool isDummyBasicBlock(llvm::BasicBlock* BB)
+    {
+        if (BB->size() != 1)
+            return false;
+        if ((++pred_begin(BB)) != pred_end(BB))
+            return false;
+        if ((++succ_begin(BB)) != succ_end(BB))
+            return false;
+        return true;
     }
 
     unsigned SetBufferAsBindless(unsigned addressSpaceOfPtr, BufferType bufferType)
@@ -123,8 +137,7 @@ namespace IGC
         }
         else
         {
-            // other types of buffers shouldn't reach this part.
-            assert(0);
+            IGC_ASSERT_MESSAGE(0, "other types of buffers shouldn't reach this part");
         }
 
         return temp.u32Val;
@@ -289,7 +302,8 @@ namespace IGC
             builder.getInt1(inst->isVolatile()) // volatile
         };
         Value* ld = builder.CreateCall(func, attr);
-        assert(ld->getType() == inst->getType());
+        IGC_ASSERT(nullptr != ld);
+        IGC_ASSERT(ld->getType() == inst->getType());
         return ld;
     }
 
@@ -310,7 +324,10 @@ namespace IGC
         else
         {
             llvm::Type* dataType = storeVal->getType();
-            assert(dataType->getPrimitiveSizeInBits() == 16 || dataType->getPrimitiveSizeInBits() == 32);
+            IGC_ASSERT(nullptr != dataType);
+            IGC_ASSERT((dataType->getPrimitiveSizeInBits() == 8)  ||
+                       (dataType->getPrimitiveSizeInBits() == 16) ||
+                       (dataType->getPrimitiveSizeInBits() == 32));
 
             llvm::Type* types[2] = {
                 bufPtr->getType(),
@@ -505,7 +522,7 @@ namespace IGC
             return BufferAccessType::ACCESS_WRITE;
 
         default:
-            assert(false && "Invalid buffer type");
+            IGC_ASSERT_MESSAGE(0, "Invalid buffer type");
             return BufferAccessType::ACCESS_READWRITE;
         }
     }
@@ -599,7 +616,7 @@ namespace IGC
         return false;
     }
 
-    bool EvalConstantAddress(Value* address, unsigned int& offset, const llvm::DataLayout* pDL, Value* ptrSrc)
+    bool EvalConstantAddress(Value* address, int& offset, const llvm::DataLayout* pDL, Value* ptrSrc)
     {
 
         if ((ptrSrc == nullptr && isa<ConstantPointerNull>(address)) ||
@@ -616,7 +633,7 @@ namespace IGC
                 ConstantInt* eltIdx = dyn_cast<ConstantInt>(eltIdxVal);
                 if (!eltIdx)
                     return false;
-                offset = int_cast<unsigned>(eltIdx->getZExtValue());
+                offset = int_cast<int>(eltIdx->getZExtValue());
                 return true;
             }
         }
@@ -633,7 +650,7 @@ namespace IGC
                 ConstantInt * eltIdx = dyn_cast<ConstantInt>(eltIdxVal);
                 if (!eltIdx)
                     return false;
-                offset = int_cast<unsigned>(eltIdx->getZExtValue());
+                offset = int_cast<int>(eltIdx->getZExtValue());
                 return true;
             }
             else if (ptrExpr->getOpcode() == Instruction::GetElementPtr)
@@ -650,14 +667,14 @@ namespace IGC
                     if (StructType * StTy = GTI.getStructTypeOrNull()) {
                         unsigned Field = int_cast<unsigned>(cast<ConstantInt>(Idx)->getZExtValue());
                         if (Field) {
-                            offset += int_cast<unsigned int>(pDL->getStructLayout(StTy)->getElementOffset(Field));
+                            offset += int_cast<int>(pDL->getStructLayout(StTy)->getElementOffset(Field));
                         }
                         Ty = StTy->getElementType(Field);
                     }
                     else {
                         Ty = GTI.getIndexedType();
                         if (const ConstantInt * CI = dyn_cast<ConstantInt>(Idx)) {
-                            offset += int_cast<unsigned int>(
+                            offset += int_cast<int>(
                             pDL->getTypeAllocSize(Ty) * CI->getSExtValue());
 
                         }
@@ -819,7 +836,7 @@ namespace IGC
             overloadedTys.push_back(args[2]->getType());
             break;
         default:
-            assert(0 && "Unknown intrinsic encountered while changing pointer types");
+            IGC_ASSERT_MESSAGE(0, "Unknown intrinsic encountered while changing pointer types");
             break;
         }
 
@@ -1146,6 +1163,47 @@ namespace IGC
 
     }
 
+    llvm::Instruction* AdjustSystemValueCall(llvm::GenIntrinsicInst* inst)
+    {
+        IGC_ASSERT(inst->getIntrinsicID() == GenISAIntrinsic::GenISA_DCL_SystemValue);
+        llvm::Module* pModule = inst->getParent()->getParent()->getParent();
+        auto CommonConvertFunc = [pModule](llvm::GenIntrinsicInst* inst, llvm::Type* outputType)
+        {
+            IGC_ASSERT(outputType->isVectorTy() == false);
+            IGC_ASSERT(inst->getType()->isVectorTy() == false);
+            llvm::Instruction* result = inst;
+            if (inst->getType() != outputType)
+            {
+                llvm::IRBuilder<> builder(inst);
+                llvm::Function* systemValueFunc = llvm::GenISAIntrinsic::getDeclaration(pModule, GenISAIntrinsic::GenISA_DCL_SystemValue, outputType);
+                llvm::Instruction* sgv = builder.CreateCall(systemValueFunc, inst->getOperand(0));
+                // a default system value intrinsic function returns a float value. The returned value is bit casted to an appropriate integer or floating point value
+                // in reference to HW specification. Casting from floating point to integer and in the opposite direction is not expected.
+                sgv = llvm::cast<llvm::Instruction>(builder.CreateZExtOrTrunc(sgv, builder.getIntNTy((unsigned int)inst->getType()->getPrimitiveSizeInBits())));
+                sgv = llvm::cast<llvm::Instruction>(builder.CreateBitCast(sgv, inst->getType()));
+                inst->replaceAllUsesWith(sgv);
+                inst->eraseFromParent();
+                result = sgv;
+            }
+            return result;
+        };
+
+        SGVUsage usage = static_cast<SGVUsage>(llvm::cast<llvm::ConstantInt>(inst->getOperand(0))->getZExtValue());
+        llvm::Instruction* result = inst;
+
+        switch (usage)
+        {
+        case THREAD_ID_IN_GROUP_X:
+        case THREAD_ID_IN_GROUP_Y:
+        case THREAD_ID_IN_GROUP_Z:
+            result = CommonConvertFunc(inst, llvm::IntegerType::get(pModule->getContext(), 16));
+            break;
+        default:
+            break;
+        }
+        return result;
+    }
+
     bool isReadInput(llvm::Instruction* pLLVMInstr);
 
 #define DECLARE_OPCODE(instName, llvmType, name, modifiers, sat, pred, condMod, mathIntrinsic, atomicIntrinsic, regioning) \
@@ -1253,6 +1311,26 @@ namespace IGC
     }
 #undef DECLARE_OPCODE
 
+    bool IsExtendedMathInstruction(llvm::Instruction* Inst)
+    {
+        EOPCODE opcode = GetOpCode(Inst);
+        switch (opcode)
+        {
+        case llvm_fdiv:
+        case llvm_sdiv:
+        case llvm_udiv:
+        case llvm_log:
+        case llvm_exp:
+        case llvm_sqrt:
+        case llvm_sin:
+        case llvm_cos:
+        case llvm_pow:
+            return true;
+        default:
+            return false;
+        }
+        return false;
+    }
     // for now just include shuffle, reduce and scan,
     // which have simd32 implementations and should not be split into two instances
     bool IsSubGroupIntrinsicWithSimd32Implementation(EOPCODE opcode)
@@ -1289,7 +1367,8 @@ namespace IGC
     uint getImmValueU32(const llvm::Value* value)
     {
         const llvm::ConstantInt* cval = llvm::cast<llvm::ConstantInt>(value);
-        assert(cval->getBitWidth() == 32);
+        IGC_ASSERT(nullptr != cval);
+        IGC_ASSERT(cval->getBitWidth() == 32);
 
         uint ival = int_cast<uint>(cval->getZExtValue());
         return ival;
@@ -1306,7 +1385,7 @@ namespace IGC
         llvm::InsertElementInst* ie = llvm::dyn_cast<llvm::InsertElementInst>(inst);
         while (ie != NULL) {
             int64_t iOffset = llvm::dyn_cast<llvm::ConstantInt>(ie->getOperand(2))->getSExtValue();
-            assert(iOffset >= 0);
+            IGC_ASSERT(iOffset >= 0);
             if (iOffset == pos) {
                 return ie->getOperand(1);
             }
@@ -1320,7 +1399,7 @@ namespace IGC
     {
         llvm::ConstantDataVector* cstV = llvm::dyn_cast<llvm::ConstantDataVector>(inst);
         if (cstV != NULL) {
-            assert(cstV->getNumElements() == 4);
+            IGC_ASSERT(cstV->getNumElements() == 4);
             for (int i = 0; i < 4; i++) {
                 elem[i] = cstV->getElementAsConstant(i);
             }
@@ -1335,7 +1414,7 @@ namespace IGC
         llvm::InsertElementInst* ie = llvm::dyn_cast<llvm::InsertElementInst>(inst);
         while (ie != NULL) {
             int64_t iOffset = llvm::dyn_cast<llvm::ConstantInt>(ie->getOperand(2))->getSExtValue();
-            assert(iOffset >= 0);
+            IGC_ASSERT(iOffset >= 0);
             if (elem[iOffset] == NULL) {
                 elem[iOffset] = ie->getOperand(1);
                 count++;
@@ -1377,11 +1456,10 @@ namespace IGC
     {
         llvm::Value* ret = val;
         llvm::Type* type = val->getType();
-        assert(type->isSingleValueType() && !type->isVectorTy() && "Only scalar data is supported here!");
-        assert(type->getTypeID() == Type::FloatTyID ||
-            type->getTypeID() == Type::HalfTyID ||
-            type->getTypeID() == Type::IntegerTyID ||
-            type->getTypeID() == Type::DoubleTyID);
+        IGC_ASSERT(nullptr != type);
+        IGC_ASSERT_MESSAGE(type->isSingleValueType(), "Only scalar data is supported here");
+        IGC_ASSERT_MESSAGE(!type->isVectorTy(), "Only scalar data is supported here");
+        IGC_ASSERT((type->getTypeID() == Type::FloatTyID) || (type->getTypeID() == Type::HalfTyID) || (type->getTypeID() == Type::IntegerTyID) || (type->getTypeID() == Type::DoubleTyID));
 
         unsigned dataSize = type->getScalarSizeInBits();
         if (16 == dataSize){
@@ -1392,7 +1470,7 @@ namespace IGC
             llvm::Type* vecType = llvm::VectorType::get(builder.getFloatTy(), 2);
             ret = builder.CreateBitCast(val, vecType);
         }else{
-            llvm_unreachable("Unsupported type in ConvertToFloat of helper.");
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unsupported type in ConvertToFloat of helper.");
         }
 
         return ret;
@@ -1454,7 +1532,7 @@ namespace IGC
             }
             break;
         default:
-            llvm_unreachable("Unsupported type in ScalarizeAggregateMembers of helper! Please enhance this function first.");
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unsupported type in ScalarizeAggregateMembers of helper! Please enhance this function first.");
             break;
         }
     }
@@ -1499,7 +1577,7 @@ namespace IGC
             }
             break;
         default:
-            llvm_unreachable("Unsupported type in ScalarizeAggregateMemberAddresses of helper! Please enhance this function first.");
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unsupported type in ScalarizeAggregateMemberAddresses of helper! Please enhance this function first.");
             break;
         }
     }
@@ -1573,7 +1651,7 @@ namespace IGC
         {
             if (ConstantExpr * cexpr = dyn_cast<ConstantExpr>(ptrv))
             {
-                assert(cexpr->getOpcode() == Instruction::IntToPtr);
+                IGC_ASSERT(cexpr->getOpcode() == Instruction::IntToPtr);
                 Value* offset = cexpr->getOperand(0);
                 ptrv = builder.CreateIntToPtr(offset, newType);
             }
@@ -1664,7 +1742,8 @@ namespace IGC
                 pHeader = CRastHeader_SIMD32;
                 break;
 
-            default: assert("Invalid SIMD Mode for Conservative Raster WA");
+            default:
+                IGC_ASSERT_MESSAGE(0, "Invalid SIMD Mode for Conservative Raster WA");
                 break;
             }
 
@@ -1711,9 +1790,9 @@ namespace IGC
                 return F;
             }
         }
-        assert(entryFunc && "No entry func!");
+        IGC_ASSERT_MESSAGE(nullptr != entryFunc, "No entry func!");
         auto ei = FuncMD.find(entryFunc);
-        assert(ei != FuncMD.end());
+        IGC_ASSERT(ei != FuncMD.end());
         ei->second.isUniqueEntry = true;
         return entryFunc;
     }
@@ -1885,4 +1964,155 @@ namespace IGC
         InsertPos = I;
         return true;
     }
+
+    ConstantInt* getConstantSInt(
+        IRBuilder<>& Builder, const int bitSize, int64_t val)
+    {
+        ConstantInt* res = nullptr;
+        switch (bitSize) {
+        case 8: res = Builder.getInt8((uint8_t)val); break;
+        case 16: res = Builder.getInt16((uint16_t)val); break;
+        case 32: res = Builder.getInt32((uint32_t)val); break;
+        case 64: res = Builder.getInt64((uint64_t)val); break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "invalid bitsize");
+        }
+        return res;
+    }
+
+    ConstantInt* getConstantUInt(
+        IRBuilder<>& Builder, const int bitSize, uint64_t val)
+    {
+        ConstantInt* res = nullptr;
+        switch (bitSize) {
+        case 8: res = Builder.getInt8((uint8_t)val); break;
+        case 16: res = Builder.getInt16((uint16_t)val); break;
+        case 32: res = Builder.getInt32((uint32_t)val); break;
+        case 64: res = Builder.getInt64(val); break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "invalid bitsize");
+        }
+        return res;
+    }
+
+    // MulH implementation for 64-bit signed integers
+    Value* CreateMulhS64(IRBuilder<>& B, Value* const u, Value* const v) {
+        // This comes from Hacker's Delight 8-2.
+        // Think of this as elementry schoole multiplication, but base 2^32.
+        ConstantInt* const loMask = getConstantSInt(B, 64, 0xFFFFFFFFll);
+        ConstantInt* const hiShift = getConstantSInt(B, 64, 32);
+        //
+        // u64 u0 = u & 0xFFFFFFFF; s64 u1 = u >> 32;
+        // u64 v0 = v & 0xFFFFFFFF; s64 v1 = v >> 32;
+        Value* const u0 = B.CreateAnd(u, loMask, "u.lo32");
+        Value* const u1 = B.CreateAShr(u, hiShift, "u.hi32");
+        Value* const v0 = B.CreateAnd(v, loMask, "v.lo32");
+        Value* const v1 = B.CreateAShr(v, hiShift, "v.hi32");
+        //
+        // w = u0*v0
+        Value* const w0 = B.CreateMul(u0, v0, "w0");
+        //
+        // t = u1*v0 + (w0 >> 32)
+        Value* const tLHS = B.CreateMul(u1, v0);
+        Value* const tRHS = B.CreateLShr(w0, hiShift, "w0.lo32");
+        Value* const t = B.CreateAdd(tLHS, tRHS, "t");
+        //
+        // w1 = u0*v0 + (t >> 32)
+        Value* const u0v1 = B.CreateMul(u0, v1);
+        Value* const tLO32 = B.CreateAnd(t, loMask, "t.lo32");
+        Value* const w1 = B.CreateAdd(u0v1, tLO32, "w1");
+        //
+        // return u0*v1 + (t >> 32) + (w1 >> 32)
+        Value* const u1v1 = B.CreateMul(u1, v1);
+        Value* const tHI32 = B.CreateAShr(t, hiShift, "t.hi32");
+        Value* const rLHS = B.CreateAdd(u1v1, tHI32);
+        Value* const rRHS = B.CreateAShr(w1, hiShift, "w1.lo32");
+        Value* const r = B.CreateAdd(rLHS, rRHS, "uv");
+        //
+        return r;
+    }
+
+    // MulH implementation for 64-bit unsigned integers
+    Value* CreateMulhU64(IRBuilder<>& B, Value* const u, Value* const v)
+    {
+        // This is the same as CreateMulhS64, but with all logical shifts.
+        ConstantInt* const loMask = getConstantUInt(B, 64, 0xFFFFFFFFull);
+        ConstantInt* const hiShift = getConstantUInt(B, 64, 32);
+        //
+        // u64 u0 = u & 0xFFFFFFFF, u1 = u >> 32;
+        // u64 v0 = v & 0xFFFFFFFF, v1 = v >> 32;
+        Value* const u0 = B.CreateAnd(u, loMask, "u.lo32");
+        Value* const u1 = B.CreateLShr(u, hiShift, "u.hi32");
+        Value* const v0 = B.CreateAnd(v, loMask, "v.lo32");
+        Value* const v1 = B.CreateLShr(v, hiShift, "v.hi32");
+        //
+        // w0 = u0*v0
+        Value* const w0 = B.CreateMul(u0, v0, "w0");
+        //
+        // t = u1*v0 + (w0 >> 32)
+        Value* const tLHS = B.CreateMul(u1, v0);
+        Value* const tRHS = B.CreateLShr(w0, hiShift, "w0.lo32");
+        Value* const t = B.CreateAdd(tLHS, tRHS, "t");
+        //
+        // w1 = u0*v0 + (t >> 32)
+        Value* const u0v1 = B.CreateMul(u0, v1);
+        Value* const tLO32 = B.CreateAnd(t, loMask, "t.lo32");
+        Value* const w1 = B.CreateAdd(u0v1, tLO32, "w1");
+        //
+        // w1 = u0*v1 + (t >> 32) + (w1 >> 32)
+        Value* const u1v1 = B.CreateMul(u1, v1);
+        Value* const tHI32 = B.CreateLShr(t, hiShift, "t.hi32");
+        Value* const rLHS = B.CreateAdd(u1v1, tHI32);
+        Value* const rRHS = B.CreateLShr(w1, hiShift, "w1.lo32");
+        Value* const r = B.CreateAdd(rLHS, rRHS, "uv");
+        //
+        return r;
+    }
+
+    // MulH implementation for 32/64 bit integers
+    Value* CreateMulh(
+        Function& F,
+        IRBuilder<>&  B,
+        const bool isSigned,
+        Value* const u,
+        Value* const v)
+    {
+        Value* res = nullptr;
+        IGC_ASSERT(nullptr != u);
+        IGC_ASSERT(nullptr != u->getType());
+        int bitWidth = u->getType()->getIntegerBitWidth();
+        switch(bitWidth)
+        {
+        case 32:
+        {
+            // we have a dedicated machine instruction for 32b
+            SmallVector<Value*, 2> imulhArgs;
+            imulhArgs.push_back(u);
+            imulhArgs.push_back(v);
+            auto intrinsic = isSigned ?
+                GenISAIntrinsic::GenISA_imulH :
+                GenISAIntrinsic::GenISA_umulH;
+            IGC_ASSERT(nullptr != v);
+            Function* const iMulhDecl = llvm::GenISAIntrinsic::getDeclaration(
+                F.getParent(),
+                intrinsic,
+                v->getType());
+            res = B.CreateCall(iMulhDecl, imulhArgs, "q_appx");
+            break;
+        }
+        case 64:
+            // emulate via 64b arithmetic
+            if (isSigned) {
+                res = CreateMulhS64(B, u, v);
+            }
+            else {
+                res = CreateMulhU64(B, u, v);
+            }
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "CreateMulH must be 32 or 64");
+        }
+        return res;
+    }
+
 } // namespace IGC

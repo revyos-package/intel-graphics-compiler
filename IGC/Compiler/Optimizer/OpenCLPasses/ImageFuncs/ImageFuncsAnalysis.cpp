@@ -27,8 +27,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncsAnalysis.hpp"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/IGCPassSupport.h"
-
 #include <set>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -69,6 +69,7 @@ const llvm::StringRef ImageFuncsAnalysis::GET_FLAT_IMAGE_PITCH = "__builtin_IB_g
 
 bool ImageFuncsAnalysis::runOnModule(Module& M) {
     bool changed = false;
+    m_pMDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     // Run on all functions defined in this module
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
         Function* pFunc = &(*I);
@@ -78,6 +79,10 @@ bool ImageFuncsAnalysis::runOnModule(Module& M) {
             changed = true;
         }
     }
+
+    // Update LLVM metadata based on IGC MetadataUtils
+    if (changed)
+        m_pMDUtils->save(M.getContext());
 
     return changed;
 }
@@ -177,8 +182,7 @@ void ImageFuncsAnalysis::visitCallInst(CallInst& CI)
     }
 
     // Extract the arg num and add it to the appropriate data structure
-    assert(CI.getNumArgOperands() == 1 && "Supported image/sampler functions are expected\
-                                           to have only one argument");
+    IGC_ASSERT_MESSAGE(CI.getNumArgOperands() == 1, "Supported image/sampler functions are expected to have only one argument");
 
     // We only care about image and sampler arguments here, inline samplers
     // don't require extra kernel parameters.
@@ -197,6 +201,6 @@ void ImageFuncsAnalysis::visitCallInst(CallInst& CI)
     else
     {
         // Only these args should be hit by the indirect case
-        assert(funcName == GET_SAMPLER_NORMALIZED_COORDS || funcName == GET_SAMPLER_SNAP_WA_REQUIRED);
+        IGC_ASSERT(funcName == GET_SAMPLER_NORMALIZED_COORDS || funcName == GET_SAMPLER_SNAP_WA_REQUIRED);
     }
 }

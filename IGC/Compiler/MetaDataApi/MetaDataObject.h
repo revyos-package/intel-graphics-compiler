@@ -23,6 +23,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
 
 #include "MetaDataTraits.h"
@@ -36,6 +37,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Support/Atomic.h>
 #include "common/LLVMWarningsPop.hpp"
 #include <atomic>
+#include "Probe/Assertion.h"
 
 namespace IGC
 {
@@ -108,10 +110,7 @@ namespace IGC
                 return NULL;
             }
 
-            if (!pNode->getNumOperands())
-            {
-                assert(0 && "Named list doesn't have a name node");
-            }
+            IGC_ASSERT_MESSAGE(0 < pNode->getNumOperands(), "Named list doesn't have a name node");
 
             llvm::MDString* pIdNode = llvm::dyn_cast<llvm::MDString>(pNode->getOperand(0));
 
@@ -207,13 +206,13 @@ namespace IGC
 
         T& operator*() const
         {
-            assert(m_ptr != 0);
+            IGC_ASSERT(m_ptr != 0);
             return (*get());
         }
 
         T* operator->() const
         {
-            assert(m_ptr != 0);
+            IGC_ASSERT(m_ptr != 0);
             return (get());
         }
 
@@ -297,8 +296,8 @@ namespace IGC
             }
             else
             {
-                llvm::MDNode* pMDNode = llvm::dyn_cast<llvm::MDNode>(pNode);
-                assert(pMDNode && "pNode is not an MDNode value");
+                llvm::MDNode* const pMDNode = llvm::dyn_cast<llvm::MDNode>(pNode);
+                IGC_ASSERT_MESSAGE(nullptr != pMDNode, "pNode is not an MDNode value");
                 return MetaObjectHandle<T>(new T(pMDNode, false));
             }
         }

@@ -37,11 +37,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///////////////////////////////////////////////////////////////////////////////
 
 #include "llvm/Config/llvm-config.h"
-
 #include "Compiler/DebugInfo/DIE.hpp"
 #include "Compiler/DebugInfo/DwarfDebug.hpp"
 #include "Compiler/DebugInfo/StreamEmitter.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -50,11 +48,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/MC/MCExpr.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/LEB128.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace ::IGC;
@@ -159,8 +157,8 @@ DIE::~DIE()
 /// belongs.
 const DIE* DIE::getCompileUnit() const
 {
-    const DIE* Cu = getCompileUnitOrNull();
-    assert(Cu && "We should not have orphaned DIEs.");
+    const DIE* const Cu = getCompileUnitOrNull();
+    IGC_ASSERT_MESSAGE(nullptr != Cu, "We should not have orphaned DIEs.");
     return Cu;
 }
 
@@ -284,7 +282,7 @@ void DIEInteger::EmitValue(StreamEmitter* Asm, dwarf::Form Form) const
     case dwarf::DW_FORM_sdata: Asm->EmitSLEB128(Integer); return;
     case dwarf::DW_FORM_addr:
         Size = Asm->GetPointerSize(); break;
-    default: llvm_unreachable("DIE Value form not supported yet");
+    default: IGC_ASSERT_EXIT_MESSAGE(0, "DIE Value form not supported yet");
     }
     Asm->EmitIntValue(Integer, Size);
 }
@@ -311,7 +309,7 @@ unsigned DIEInteger::SizeOf(StreamEmitter* AP, dwarf::Form Form) const
     case dwarf::DW_FORM_udata: return getULEB128Size(Integer);
     case dwarf::DW_FORM_sdata: return getSLEB128Size(Integer);
     case dwarf::DW_FORM_addr:  return AP->GetPointerSize();
-    default: llvm_unreachable("DIE Value form not supported yet");
+    default: IGC_ASSERT_EXIT_MESSAGE(0, "DIE Value form not supported yet");
     }
 }
 
@@ -515,7 +513,7 @@ void DIEBlock::EmitValue(StreamEmitter* Asm, dwarf::Form Form) const
 {
     switch (Form)
     {
-    default: llvm_unreachable("Improper form for block");
+    default: IGC_ASSERT_EXIT_MESSAGE(0, "Improper form for block");
     case dwarf::DW_FORM_block1: Asm->EmitInt8(Size);    break;
     case dwarf::DW_FORM_block2: Asm->EmitInt16(Size);   break;
     case dwarf::DW_FORM_block4: Asm->EmitInt32(Size);   break;
@@ -537,7 +535,7 @@ unsigned DIEBlock::SizeOf(StreamEmitter* /*AP*/, dwarf::Form Form) const
     case dwarf::DW_FORM_block2: return Size + sizeof(int16_t);
     case dwarf::DW_FORM_block4: return Size + sizeof(int32_t);
     case dwarf::DW_FORM_block:  return Size + getULEB128Size(Size);
-    default: llvm_unreachable("Improper form for block");
+    default: IGC_ASSERT_EXIT_MESSAGE(0, "Improper form for block");
     }
 }
 

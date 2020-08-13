@@ -25,17 +25,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "Compiler/CISACodeGen/Simd32Profitability.hpp"
-
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/Platform.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Operator.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -70,7 +69,7 @@ getInductionVariable(Loop* L) {
 
     BasicBlock* Incoming = 0, *Backedge = 0;
     pred_iterator PI = pred_begin(H);
-    assert(PI != pred_end(H) && "Loop must have at least one backedge!");
+    IGC_ASSERT_MESSAGE(PI != pred_end(H), "Loop must have at least one backedge!");
     Backedge = *PI++;
     if (PI == pred_end(H)) // dead loop
         return std::make_tuple(nullptr, nullptr, nullptr, nullptr);
@@ -186,7 +185,7 @@ static Value* getLoopCounter(Loop* L, Value* X) {
 
     BasicBlock* Incoming = 0, *Backedge = 0;
     pred_iterator PI = pred_begin(H);
-    assert(PI != pred_end(H) && "Loop must have at least one backedge!");
+    IGC_ASSERT_MESSAGE(PI != pred_end(H), "Loop must have at least one backedge!");
     Backedge = *PI++;
     if (PI == pred_end(H)) // dead loop
         return nullptr;
@@ -246,8 +245,7 @@ countOperands(Value* V, Value* LHS, Value* RHS) {
     }
 
 
-    assert(BO->getOpcode() == Instruction::Add ||
-        BO->getOpcode() == Instruction::Sub);
+    IGC_ASSERT((BO->getOpcode() == Instruction::Add) || (BO->getOpcode() == Instruction::Sub));
 
     if (isa<Constant>(BO->getOperand(1)))
         return countOperands(BO->getOperand(0), LHS, RHS);
@@ -258,7 +256,7 @@ countOperands(Value* V, Value* LHS, Value* RHS) {
     if (BO->getOpcode() == Instruction::Add)
         return std::make_tuple(L0 + R0, L1 + R1);
 
-    assert(BO->getOpcode() == Instruction::Sub);
+    IGC_ASSERT(BO->getOpcode() == Instruction::Sub);
     return std::make_tuple(L0 - R0, L1 - R1);
 }
 
@@ -317,9 +315,8 @@ unsigned Simd32ProfitabilityAnalysis::estimateLoopCount_CASE1(Loop* L) {
         if (PN->getNumIncomingValues() != 2)
             return LOOPCOUNT_UNKNOWN;
         BasicBlock* BB0 = PN->getIncomingBlock(0);
-        BasicBlock* BB1 = PN->getIncomingBlock(1);
         BasicBlock* IfBB = BB0->getSinglePredecessor();
-        if (!IfBB && IfBB == BB1->getSinglePredecessor())
+        if (!IfBB)
             return LOOPCOUNT_UNKNOWN;
         Br = dyn_cast<BranchInst>(IfBB->getTerminator());
         if (!Br || !Br->isConditional())

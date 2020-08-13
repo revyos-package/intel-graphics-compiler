@@ -189,11 +189,6 @@ typedef iga_status_t(CDECLATTRIBUTE * pIGAOpspecDescription)(
 typedef iga_status_t(CDECLATTRIBUTE * pIGAOpspecOp)(
     iga_opspec_t op,
     uint32_t *opcode);
-#define IGA_OPSPEC_PARENT_OP_STR "iga_opspec_parent_op"
-typedef iga_status_t(CDECLATTRIBUTE * pIGAOpspecParentOp)(
-    iga_opspec_t op,
-    uint32_t *parent_op);
-
 
 
 /*************************************************************************
@@ -229,6 +224,7 @@ typedef size_t(CDECLATTRIBUTE *pIGAKVGetDefaultLabelName)(
 typedef size_t(CDECLATTRIBUTE *pIGAKVGetInstSyntax)(
     const kv_t *kv,
     int32_t pc,
+    uint32_t fmt_opts,
     char *sbuf,
     size_t sbuf_cap,
     const char *(*get_label_name)(int32_t, void *),
@@ -271,6 +267,8 @@ typedef bool(CDECLATTRIBUTE *pIGAKVGetSWSBInfo)(
 typedef int32_t(CDECLATTRIBUTE *pIGAKVGetNumberSources)(const kv_t *kv, int32_t pc);
 #define IGA_KV_GET_OPCODE_STR "kv_get_opcode"
 typedef uint32_t(CDECLATTRIBUTE *pIGAKVGetOpcode)(const kv_t *kv, int32_t pc);
+#define IGA_KV_GET_SUBFUNCTION_STR "kv_get_subfunction"
+typedef uint32_t(CDECLATTRIBUTE *pIGAKVGetSubfunction)(const kv_t *kv, int32_t pc, uint32_t* subfunc);
 #define IGA_KV_GET_HAS_DESTINATION_STR "kv_get_has_destination"
 typedef int32_t(CDECLATTRIBUTE *pIGAKVGetHasDestination)(const kv_t *kv, int32_t pc);
 #define IGA_KV_GET_DESTINATION_REGISTER_STR "kv_get_destination_register"
@@ -325,8 +323,14 @@ typedef int32_t(CDECLATTRIBUTE *pIGAKVGetFlagSubReg)(const kv_t *kv, int32_t pc)
 typedef uint32_t(CDECLATTRIBUTE *pIGAKVGetPredicate)(const kv_t *kv, int32_t pc);
 #define IGA_KV_GET_IS_INVERSE_PREDICATE "kv_get_is_inverse_predicate"
 typedef uint32_t(CDECLATTRIBUTE *pIGAKVGetIsInversePred)(const kv_t *kv, int32_t pc);
-
-
+#define IGA_KV_GET_SOURCE_INDIRECT_IMM_OFF_STR "kv_get_source_indirect_imm_off"
+typedef int32_t(CDECLATTRIBUTE *pIGAKVGetSrcIndirectImmOff)(const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *immoff);
+#define IGA_KV_GET_DESTINATION_INDIRECT_IMM_OFF_STR "kv_get_destination_indirect_imm_off"
+typedef int32_t(CDECLATTRIBUTE *pIGAKVGetDstIndirectImmOff)(const kv_t *kv, int32_t pc, int16_t *immoff);
+#define IGA_KV_GET_SOURCE_MME_NUMBER "kv_get_source_mme_number"
+typedef int32_t(CDECLATTRIBUTE *pIGAKVGetSrcMMENumber)(const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *mme);
+#define IGA_KV_GET_DESTINATION_MME_NUMBER "kv_get_destination_mme_number"
+typedef int32_t(CDECLATTRIBUTE *pIGAKVGetDstMMENumber)(const kv_t *kv, int32_t pc, int16_t *mme);
 /*
  * A table of IGA functions
  */
@@ -356,7 +360,6 @@ typedef struct
     pIGAOpspecName                      iga_opspec_name;
     pIGAOpspecDescription               iga_opspec_description;
     pIGAOpspecOp                        iga_opspec_op;
-    pIGAOpspecParentOp                  iga_opspec_parent_op;
 } iga_functions_t;
 
 /*
@@ -390,6 +393,7 @@ typedef struct
     pIGAKVGetExecutionSize     kv_get_execution_size;
     pIGAKVGetNumberSources     kv_get_number_sources;
     pIGAKVGetOpcode            kv_get_opcode;
+    pIGAKVGetSubfunction       kv_get_subfunction;
     pIGAKVGetHasDestination    kv_get_has_destination;
     pIGAKVGetDstRegister       kv_get_destination_register;
     pIGAKVGetDstSubRegister    kv_get_destination_sub_register;
@@ -419,4 +423,8 @@ typedef struct
     pIGAKVGetIsInversePred     kv_get_inverse_predicate;
     pIGAKVGetSWSBInfo          kv_get_swsb_info;
     pIGAKVHasInstOpt           kv_has_inst_opt;
+    pIGAKVGetSrcIndirectImmOff kv_get_source_indirect_imm_off;
+    pIGAKVGetDstIndirectImmOff kv_get_destination_indirect_imm_off;
+    pIGAKVGetSrcMMENumber      kv_get_source_mme_number;
+    pIGAKVGetDstMMENumber      kv_get_destination_mme_number;
 } kv_functions_t;

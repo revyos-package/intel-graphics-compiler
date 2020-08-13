@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "FunctionUpgrader.h"
 #include "IGCIRBuilder.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -43,6 +44,8 @@ void FunctionUpgrader::Clean()
 
 llvm::Value* FunctionUpgrader::AddArgument(llvm::StringRef argName, llvm::Type* argType)
 {
+    IGC_ASSERT(nullptr != m_pFunction);
+
     llvm::IGCIRBuilder<> builder(m_pFunction->getContext());
     if (m_pFunction->begin()->empty())
     {
@@ -82,13 +85,13 @@ Argument* FunctionUpgrader::GetArgumentFromRebuild(llvm::LoadInst* pPlaceHolderA
         }
         else
         {
-            assert(false && "There is no created new argument, did you call RebuildFunction?");
+            IGC_ASSERT_MESSAGE(0, "There is no created new argument, did you call RebuildFunction?");
             return nullptr;
         }
     }
     else
     {
-        assert(false && "Didn't found new argument!");
+        IGC_ASSERT_MESSAGE(0, "Didn't found new argument!");
         return nullptr;
     }
 }
@@ -100,12 +103,17 @@ std::vector<LoadInst*> FunctionUpgrader::GetPlaceholderVec()
 
 uint32_t FunctionUpgrader::GetArgumentsSize()
 {
+    IGC_ASSERT(nullptr != m_pFunction);
+
     return m_placeHolders.size() + m_pFunction->arg_size();
 }
 
 Function* FunctionUpgrader::RebuildFunction()
 {
     Function* pFunctionRebuild = UpgradeFunctionWithNewArgs();
+
+    IGC_ASSERT(nullptr != m_pFunction);
+    IGC_ASSERT(nullptr != pFunctionRebuild);
 
     auto i_arg_old = m_pFunction->arg_begin();
     auto i_arg_new = pFunctionRebuild->arg_begin();
@@ -159,6 +167,8 @@ FunctionType* FunctionUpgrader::UpgradeFunctionTypeWithNewArgs()
 
 Function* FunctionUpgrader::UpgradeFunctionWithNewArgs()
 {
+    IGC_ASSERT(nullptr != m_pFunction);
+
     auto fType = UpgradeFunctionTypeWithNewArgs();
     auto fModule = m_pFunction->getParent();
     auto fName = m_pFunction->getName();
@@ -170,6 +180,8 @@ Function* FunctionUpgrader::UpgradeFunctionWithNewArgs()
             fType,
             fLinkage,
             fName);
+
+    IGC_ASSERT(nullptr != fModule);
 
     fModule->getFunctionList().insert(m_pFunction->getIterator(), pNewFunc);
 

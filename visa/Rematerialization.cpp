@@ -180,7 +180,7 @@ namespace vISA
 
                     auto dupOp = samplerHeaderMov->cloneInst();
 
-                    bb->insert(instIt, dupOp);
+                    bb->insertBefore(instIt, dupOp);
                 }
             }
 
@@ -500,19 +500,10 @@ namespace vISA
         if (!inSameSubroutine(bb, uniqueDefBB))
             return false;
 
-#if 0
-        // idom currently not computed
-
-        // Def must be in a dominating BB
-        auto defDomsUse = doms.dominates(uniqueDefBB, bb);
-        if (!defDomsUse)
-            return false;
-#endif
-
         // If uniqueDefBB is not under SIMD CF, current BB is under SIMD CF
         // then we can remat only if def has NoMask option set.
-        if (!uniqueDefBB->isInSimdFlow() &&
-            bb->isInSimdFlow() &&
+        if (uniqueDefBB->isAllLaneActive() &&
+            !bb->isAllLaneActive() &&
             !uniqueDefInst->isWriteEnableInst())
         {
             return false;
@@ -750,7 +741,7 @@ namespace vISA
                     auto srcOpndUniqueDef = findUniqueDef(srcOpndRefs, srcOpndRgn);
 
                     bool isSrcAvailble = false;
-                    if (kernel.getOptions()->getTarget() == VISA_CM &&
+                    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM &&
                         uniqueDefBB == bb)
                     {
                         isSrcAvailble = checkLocalWAR(uniqueDefInst, bb, instIter);
@@ -857,8 +848,7 @@ namespace vISA
 
             dupOp = dstInst->cloneInst();
             dupOp->setDest(newDst);
-
-            dupOp->setLineNo(dstInst->getLineNo());
+            dupOp->setLocation(dstInst->getLocation());
             dupOp->setCISAOff(dstInst->getCISAOff());
 
             rematSrc = createSrcRgn(src, dst, newTemp);
@@ -945,7 +935,7 @@ namespace vISA
                 kernel.fg.builder->duplicateOperand(dstInst->getSrc(1))->asSrcRegRegion(),
                 kernel.fg.builder->duplicateOperand(dstInst->asSendInst()->getMsgDescOperand()), dstInst->getOption(),
                 newMsgDesc, kernel.fg.builder->duplicateOperand(dstInst->getSrc(3)), dstInst->getLineNo());
-            dupOp->setLineNo(dstInst->getLineNo());
+            dupOp->setLocation(dstInst->getLocation());
             dupOp->setCISAOff(dstInst->getCISAOff());
 
             newInst.push_back(dupOp);
@@ -1055,7 +1045,7 @@ namespace vISA
 
         for (auto bb : kernel.fg)
         {
-            if (kernel.getOptions()->getTarget() == VISATarget::VISA_3D)
+            if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISATarget::VISA_3D)
             {
                 // For Cm, assume cr0 def is live across BBs
                 // For IGC, assume cr0 is reset at each BB entry
@@ -1154,7 +1144,7 @@ namespace vISA
                                 rematSrc = rematerialize(src->asSrcRegRegion(), bb, uniqueDef, newInsts, cacheInst);
                                 while (!newInsts.empty())
                                 {
-                                    bb->insert(instIt, newInsts.front());
+                                    bb->insertBefore(instIt, newInsts.front());
                                     newInsts.pop_front();
                                 }
 
@@ -1180,47 +1170,5 @@ namespace vISA
         }
 
         //unsigned int after = getNumSamplers(kernel);
-    }
-
-    void Dominators::computeDominators()
-    {
-        // Compute all doms for given bb.
-        // Flowgraph already has idoms for each bb.
-        for (auto&& bb : fg)
-        {
-            std::pair<G4_BB*, std::set<G4_BB*>> domBB;
-            domBB.first = bb;
-            auto idom = bb->getIDom();
-            while (idom)
-            {
-                domBB.second.insert(bb->getIDom());
-                idom = idom->getIDom();
-            }
-        }
-    }
-    bool Dominators::dominates(G4_BB* def, G4_BB* use)
-    {
-        auto dIt = dom.find(use);
-        if (dIt == dom.end())
-            return false;
-
-        auto bbIt = dIt->second.find(def);
-        if (bbIt == dIt->second.end())
-            return false;
-
-        return true;
-    }
-
-    void Dominators::dump()
-    {
-        for (auto&& bb : dom)
-        {
-            printf("BB%d:", bb.first->getId());
-            for (auto&& d : bb.second)
-            {
-                printf("BB%d, ", d->getId());
-            }
-            printf("\n\n");
-        }
     }
 }

@@ -41,6 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <algorithm>
 #include <iomanip>
 #include <stack>
+#include <optional>
 
 #include "Mem_Manager.h"
 #include "G4_Opcode.h"
@@ -48,6 +49,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "visa_igc_common_header.h"
 #include "Common_ISA.h"
 #include "Common_GEN.h"
+#include "Attributes.hpp"
 #include "JitterDataStruct.h"
 #include "Metadata.h"
 #include "BitSet.h"
@@ -158,7 +160,6 @@ class G4_Declare;
 class G4_Operand;
 class G4_CondMod;
 class G4_Predicate;
-class G4_Attribute;
 class GlobalRA;
 
 class G4_Imm;
@@ -213,6 +214,26 @@ typedef enum
     MATH_INVM = 0xE,
     MATH_RSQRTM = 0xF
 } G4_MathOp;
+
+inline const char* MathOpNames[16] =
+{
+    "reserved",
+    "inv",
+    "log",
+    "exp",
+    "sqrt",
+    "rsq",
+    "sin",
+    "cos",
+    "undefined",
+    "fdiv",
+    "pow",
+    "intdiv",
+    "quot",
+    "rem",
+    "invm",
+    "rsqrtm"
+};
 
 
 typedef vISA::std_arena_based_allocator<vISA::G4_INST*> INST_LIST_NODE_ALLOCATOR;
@@ -325,7 +346,7 @@ public:
         return createExtDesc(funcID, isEot, 0, 0);
     }
 
-    static uint32_t createMRTExtDesc(bool src0Alpha, uint8_t RTIndex, bool isEOT, uint32_t extMsgLen)
+    static uint32_t createMRTExtDesc(bool src0Alpha, uint8_t RTIndex, bool isEOT, uint32_t extMsgLen, uint16_t extFuncCtrl)
     {
         ExtDescData data;
         data.value = 0;
@@ -334,6 +355,7 @@ public:
         data.layout.src0Alpha = src0Alpha;
         data.layout.eot = isEOT;
         data.layout.extMsgLength = extMsgLen;
+        data.layout.extFuncCtrl = extFuncCtrl;
         return data.value;
     }
 
@@ -455,7 +477,6 @@ public:
 
     bool isBarrierMsg() const;
     bool isFence() const;
-
     bool isSendBarrier() const {
         return isAtomicMessage() || isBarrierMsg();  // atomic write or explicit barrier
     }
@@ -523,9 +544,10 @@ protected:
     // instruction's id in BB. Each optimization should re-initialize before using
     int32_t   local_id;
 
-    int srcCISAoff; // record CISA inst offset that resulted in this instruction
+    static const int UndefinedCisaOffset = -1;
+    int srcCISAoff = UndefinedCisaOffset; // record CISA inst offset that resulted in this instruction
 
-    MDLocation* location;
+    Metadata* MD = nullptr;
 
 #define UNDEFINED_GEN_OFFSET -1
     int64_t genOffset = UNDEFINED_GEN_OFFSET;
@@ -547,8 +569,11 @@ protected:
     uint32_t global_id = (uint32_t) -1;
 
     const IR_Builder& builder;  // link to builder to access the various compilation options
+    const void *llvmInst;
 
 public:
+    const void* GetLLVMInst() { return llvmInst; };
+    G4_INST* InheritLLVMInst(G4_INST* i) { llvmInst = i->GetLLVMInst(); return this; };
     enum SWSBTokenType {
         TOKEN_NONE,
         AFTER_READ,
@@ -615,16 +640,12 @@ public:
         return depTokens[i].token;
     }
 
-    bool distanceHonourInstruction() const
-    {
-        if (isSend() || op == G4_nop || isWait() || isMath())
-        {
-            return false;
-        }
-        return true;
-    }
+    bool isDFInstruction() const;
 
-    bool tokenHonourInstruction() const { return isSend() || isMath(); }
+    bool isMathPipeInst() const;
+
+    bool distanceHonourInstruction() const;
+    bool tokenHonourInstruction() const;
 
     void setALUID(int i) { ALUID = i; }
     int getALUID() const { return ALUID; }
@@ -655,7 +676,9 @@ public:
         G4_Operand* s2,
         unsigned int opt);
 
-    virtual ~G4_INST() {}
+    virtual ~G4_INST()
+    {
+    }
 
     // The method is declared virtual so subclasses of G4_INST
     // should also implement this method to populate members
@@ -678,12 +701,17 @@ public:
     bool supportsNullDst() const;
 
     bool isPseudoKill() const;
+    bool isLifeTimeEnd() const;
     bool isSpillIntrinsic() const;
     G4_SpillIntrinsic* asSpillIntrinsic() const;
     bool isFillIntrinsic() const;
     G4_FillIntrinsic* asFillIntrinsic() const;
     bool isSplitIntrinsic() const;
-    bool isLifeTimeEnd() const { return op == G4_pseudo_lifetime_end; }
+    bool isCallerSave() const;
+    bool isCallerRestore() const;
+    bool isCalleeSave() const;
+    bool isCalleeRestore() const;
+    bool isRelocationMov() const;
     bool isMov() const { return G4_Inst_Table[op].instType == InstTypeMov; }
     bool isLogic() const { return G4_Inst_Table[op].instType == InstTypeLogic; }
     bool isCompare() const
@@ -724,9 +752,10 @@ public:
     virtual void computeRightBound(G4_Operand* opnd);
 
     bool isWait() const { return op == G4_wait; }
+    static bool isSyncOpcode(G4_opcode opcode) { return opcode == G4_sync_nop || opcode == G4_sync_allrd || opcode == G4_sync_allwr; }
     bool isSWSBSync() const
     {
-        return op == G4_sync_nop || op == G4_sync_allrd || op == G4_sync_allwr;
+        return G4_INST::isSyncOpcode(op);
     }
 
     bool isPseudoLogic() const
@@ -785,6 +814,7 @@ public:
     }
     void setSrc(G4_Operand* opnd, unsigned i);
     int getNumSrc() const;
+    int getNumDst() const;
 
     // this assume we don't have to recompute bound for the swapped source
     // Note that def-use chain is not maintained after this; call swapDefUse
@@ -801,28 +831,6 @@ public:
         return (G4_Label*) getSrc(0);
     }
 
-    MDLocation *getLocation() const { return location; }
-    void setLocation(MDLocation* loc) {
-        location = loc;
-    }
-    void setLineNo(int i) {
-        if (location != nullptr)
-            location->setLineNo(i);
-    }
-    int getLineNo() const {
-        if (location == nullptr)
-            return 0;
-        return location->getLineNo();
-    }
-    void setSrcFilename(const char* filename) {
-        if (location != nullptr)
-            location->setSrcFilename(filename);
-    }
-    const char* getSrcFilename() const {
-        if (location == nullptr)
-            return nullptr;
-        return location->getSrcFilename();
-    }
     void setDest(G4_DstRegRegion* opnd);
     void setExecSize(unsigned char s);
 
@@ -941,6 +949,7 @@ public:
 
     void setCISAOff(int offset) { srcCISAoff = offset; }
     int getCISAOff() const { return srcCISAoff; }
+    bool isCISAOffValid() const { return getCISAOff() != UndefinedCisaOffset; }
 
     bool isOptBarrier() const;
     bool hasImplicitAccSrc() const
@@ -1145,6 +1154,48 @@ public:
     bool canDstBeAcc() const;
     bool canSrcBeAcc(Gen4_Operand_Number opndNum) const;
 
+    TARGET_PLATFORM getPlatform() const;
+
+    void setMetadata(const std::string& key, MDNode* value);
+
+    MDNode* getMetadata(const std::string& key) const
+    {
+        return MD ? MD->getMetadata(key) : nullptr;
+    }
+
+    void setComments(const std::string& comments);
+
+    std::string getComments()
+    {
+        auto comments = getMetadata(Metadata::InstComment);
+        return comments && comments->isMDString() ? comments->asMDString()->getData() : "";
+    }
+
+    MDLocation* getLocation() const
+    {
+        auto location = getMetadata(Metadata::InstLoc);
+        return (location && location->isMDLocation()) ? location->asMDLocation() : nullptr;
+    }
+
+    void setLocation(MDLocation* loc)
+    {
+        setMetadata(Metadata::InstLoc, loc);
+    }
+
+    int getLineNo() const
+    {
+        auto location = getLocation();
+        return location ? location->getLineNo() : 0;
+    }
+
+    const char* getSrcFilename() const
+    {
+        auto location = getLocation();
+        return location ? location->getSrcFilename() : nullptr;
+    }
+
+    void inheritDIFrom(const G4_INST* inst);
+
 private:
     bool detectComprInst() const;
     bool isLegalType(G4_Type type, Gen4_Operand_Number opndNum) const;
@@ -1156,7 +1207,6 @@ std::ostream& operator<<(std::ostream& os, vISA::G4_INST& inst);
 
 namespace vISA
 {
-
 
 class G4_InstMath : public G4_INST
 {
@@ -1216,7 +1266,7 @@ class G4_InstCF : public G4_INST
     // list of labels that this instruction could jump to.  Only used for switch jmps
     std::list<G4_Label*> indirectJmpTarget;
 
-    // True if this is a backward branch.
+    // True if this is a backward branch (including while)
     bool isBackwardBr;
 
     // True if this branch is a uniform. By uniform, it means that all active lanes
@@ -1238,7 +1288,7 @@ public:
         G4_Label* uipLabel,
         uint32_t instOpt) :
         G4_INST(builder, prd, op, nullptr, false, size, nullptr, nullptr, nullptr, instOpt),
-        jip(jipLabel), uip(uipLabel), isBackwardBr(false), isUniformBr(false)
+        jip(jipLabel), uip(uipLabel), isBackwardBr(op == G4_while), isUniformBr(false)
     {
         isUniformBr = (op == G4_jmpi ||
                        (op == G4_goto && (size == 1 || prd == nullptr)));
@@ -1256,7 +1306,7 @@ public:
         G4_Operand* s0,
         unsigned int opt) :
         G4_INST(builder, prd, o, m, sat, size, d, s0, nullptr, opt),
-        jip(NULL), uip(NULL), isBackwardBr(false), isUniformBr(false)
+        jip(NULL), uip(NULL), isBackwardBr(o == G4_while), isUniformBr(false)
     {
         isUniformBr = (op == G4_jmpi ||
             (op == G4_goto && (size == 1 || prd == nullptr)));
@@ -1310,6 +1360,30 @@ public:
         {
             return nullptr;
         }
+    }
+
+    void pseudoCallToCall()
+    {
+        assert(isFCall() || op == G4_pseudo_fc_call);
+        setOpcode(G4_call);
+    }
+
+    void pseudoRetToRet()
+    {
+        assert(isFReturn() || op == G4_pseudo_fc_ret);
+        setOpcode(G4_return);
+    }
+
+    void callToFCall()
+    {
+        assert(isCall());
+        setOpcode(G4_pseudo_fcall);
+    }
+
+    void retToFRet()
+    {
+        assert(isReturn());
+        setOpcode(G4_pseudo_fret);
     }
 };
 
@@ -1443,15 +1517,21 @@ enum PseudoKillType
 // -- it must be lowered/deleted before certain phases in the finalizer (no later than binary encoding)
 
 // all intrinsic opcode go here
+// order must match that of the G4_Intrinsics table
 enum class Intrinsic
 {
     Wait,
     Use,
     MemFence,
     PseudoKill,
+    PseudoUse,  // ToDo: can we merge Use and PseudoUse? former is from input while latter is internally generated.
     Spill,
     Fill,
     Split,
+    CallerSave,
+    CallerRestore,
+    CalleeSave,
+    CalleeRestore,
     NumIntrinsics
 };
 
@@ -1483,14 +1563,19 @@ struct IntrinsicInfo
 
 static const IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] =
 {
-    //  id                  name            numDst  numSrc  loweredBy               temp
-    {Intrinsic::Wait,       "wait",         0,      0,      Phase::Optimizer,       { 0, 0, 0, false, false } },
-    {Intrinsic::Use,        "use",          0,      1,      Phase::Scheduler,       { 0, 0, 0, false, false } },
-    {Intrinsic::MemFence,   "mem_fence",    0,      0,      Phase::BinaryEncoding,  { 0, 0, 0, false, false } },
-    {Intrinsic::PseudoKill, "pseudo_kill",  1,      1,      Phase::RA,              { 0, 0, 0, false, false} },
-    {Intrinsic::Spill,      "spill",        1,      2,      Phase::RA,              { 0, 0, 0, false, false } },
-    {Intrinsic::Fill,       "fill",         1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
-    {Intrinsic::Split,      "split",        1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    //  id                      name            numDst  numSrc  loweredBy               temp
+    {Intrinsic::Wait,           "wait",         0,      0,      Phase::Optimizer,       { 0, 0, 0, false, false } },
+    {Intrinsic::Use,            "use",          0,      1,      Phase::Scheduler,       { 0, 0, 0, false, false } },
+    {Intrinsic::MemFence,       "mem_fence",    0,      0,      Phase::BinaryEncoding,  { 0, 0, 0, false, false } },
+    {Intrinsic::PseudoKill,     "pseudo_kill",  1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::PseudoUse,      "pseudo_use",   0,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::Spill,          "spill",        1,      2,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::Fill,           "fill",         1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::Split,          "split",        1,      1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::CallerSave,     "caller_save",  1,      0,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::CallerRestore,  "caller_restore", 0,    1,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::CalleeSave,     "callee_save",  1,      0,      Phase::RA,              { 0, 0, 0, false, false } },
+    {Intrinsic::CalleeRestore,  "callee_restore", 0,    1,      Phase::RA,              { 0, 0, 0, false, false } },
 };
 
 namespace vISA
@@ -1622,6 +1707,7 @@ namespace vISA
 
     private:
         std::list<std::pair<uint32_t, uint32_t>> liveIntervals;
+        std::vector<std::pair<unsigned int, unsigned int>> saveRestore;
         uint32_t cleanedAt;
         DebugLiveIntervalState state;
         uint32_t openIntervalVISAIndex;
@@ -1631,6 +1717,7 @@ namespace vISA
 
         void addLiveInterval(uint32_t start, uint32_t end);
         void liveAt(uint32_t cisaOff);
+        const std::vector<std::pair<uint32_t, uint32_t>>& getSaveRestore();
         void getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals);
         void clearLiveIntervals() { liveIntervals.clear(); }
 
@@ -1648,6 +1735,21 @@ namespace vISA
             //MUST_BE_TRUE(state == Open, "Cannot close interval in Close state");
             state = Closed;
             addLiveInterval(VISAIndex, openIntervalVISAIndex);
+        }
+
+        bool isLiveAt(uint32_t VISAIndex) const
+        {
+            for (auto& k : liveIntervals)
+            {
+                if (k.first <= VISAIndex && k.second >= VISAIndex)
+                    return true;
+            }
+            return false;
+        }
+
+        void addGRFSave(uint32_t cisaIndex, uint32_t stack_Slot)
+        {
+            saveRestore.push_back(std::make_pair(cisaIndex, stack_Slot));
         }
 
         LiveIntervalInfo() { cleanedAt = 0; state = Closed; openIntervalVISAIndex = 0; }
@@ -1726,8 +1828,6 @@ class G4_Declare
         assert(regFile == G4_FLAG && "may only be called on a flag");
         numFlagElements = numEl;
     }
-
-#define NOMASK_BYTE 0x80
 
 public:
     G4_Declare(const char*    n,
@@ -2002,7 +2102,9 @@ public:
         }
     }
 
-    void emit(std::ostream& output, bool isDumpDot, bool isSymbolReg) const;
+    void emit(std::ostream& output) const;
+
+    void dump() const { emit(std::cerr); }
 
     void prepareForRealloc(G4_Kernel*);
 };
@@ -2194,7 +2296,7 @@ public:
         return const_cast<G4_Predicate*>(((const G4_Operand *)this)->asPredicate());
     }
 
-    const G4_CondMod*    asCondMod() const {
+    const G4_CondMod* asCondMod() const {
 #ifdef _DEBUG
         if (!isCondMod())
         {
@@ -2203,6 +2305,7 @@ public:
 #endif
         return reinterpret_cast<const G4_CondMod*>(this);
     }
+
     G4_CondMod* asCondMod()
     {
         return const_cast<G4_CondMod*>(((const G4_Operand *)this)->asCondMod());
@@ -2222,6 +2325,13 @@ public:
     {
         return const_cast<G4_Label*>(((const G4_Operand *)this)->asLabel());
     }
+
+    bool isSrc() const
+    {
+        return isImm() || isAddrExp() || isSrcRegRegion();
+    }
+
+    bool isScalarSrc() const;
 
     bool crossGRF()
     {
@@ -2610,7 +2720,13 @@ public:
     void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
     bool isRelocImm() const override { return true; }
 
+    // G4_Reloc_Imm is the relocation target field. If the value is not given,
+    // a magic number 0x6e10ca2e will present in final output
     G4_Reloc_Imm(G4_Type ty) : G4_Imm((int64_t)0x6e10ca2e, ty)
+    {
+    }
+
+    G4_Reloc_Imm(int64_t val, G4_Type ty) : G4_Imm(val, ty)
     {
     }
 };
@@ -3090,15 +3206,6 @@ public:
     G4_RegAccess   getRegAccess() const { return acc; }
     short          getRegOff() const { return regOff; }
     short          getSubRegOff() const { return subRegOff; }
-    void  setSubRegOff(short off)
-    {
-        if (subRegOff != off)
-        {
-            subRegOff = off;
-            computeLeftBound();
-            unsetRightBound();
-        }
-    }
 
     bool isCrossGRFDst()
     {
@@ -3208,7 +3315,6 @@ public:
 
         return false;
     }
-
 };
 }
 
@@ -3779,6 +3885,7 @@ class PhyRegPool
     G4_Areg* ARF_Table[AREG_LAST];
 public:
     PhyRegPool(Mem_Manager&m, unsigned int maxRegisterNumber); // create all physical register operands
+    void rebuildRegPool(Mem_Manager& m, unsigned int numRegisters);
     G4_Greg* getGreg(unsigned i)
     {
         MUST_BE_TRUE(i < maxGRFNum, "invalid GRF");
@@ -3825,6 +3932,12 @@ inline int G4_INST::getNumSrc() const
                          : G4_Inst_Table[op].n_srcs;
 }
 
+inline int G4_INST::getNumDst() const
+{
+    return isIntrinsic() ? asIntrinsicInst()->getNumDst()
+        : G4_Inst_Table[op].n_dst;
+}
+
 inline bool G4_INST::isPseudoUse() const
 {
     return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::Use;
@@ -3833,6 +3946,11 @@ inline bool G4_INST::isPseudoUse() const
 inline bool G4_INST::isPseudoKill() const
 {
     return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::PseudoKill;
+}
+
+inline bool G4_INST::isLifeTimeEnd() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::PseudoUse;
 }
 
 inline bool G4_INST::isSpillIntrinsic() const
@@ -3860,6 +3978,31 @@ inline G4_FillIntrinsic* G4_INST::asFillIntrinsic() const
 inline bool G4_INST::isSplitIntrinsic() const
 {
     return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::Split;
+}
+
+inline bool G4_INST::isCallerSave() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::CallerSave;
+}
+
+inline bool G4_INST::isCallerRestore() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::CallerRestore;
+}
+
+inline bool G4_INST::isCalleeSave() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::CalleeSave;
+}
+
+inline bool G4_INST::isCalleeRestore() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::CalleeRestore;
+}
+
+inline bool G4_INST::isRelocationMov() const
+{
+    return isMov() && srcs[0]->isRelocImm();
 }
 
 inline const char* G4_INST::getLabelStr() const
@@ -3942,6 +4085,8 @@ public:
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
     G4_Declare* getFP() const { return fp; }
+    G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
+    G4_SrcRegRegion* getPayload() const { return getSrc(1)->asSrcRegRegion(); }
 
     void setNumRows(uint32_t r) { numRows = r; }
     void setOffset(uint32_t o) { offset = o; }
@@ -3994,10 +4139,13 @@ public:
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
     G4_Declare* getFP() const { return fp; }
+    G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
 
     void setNumRows(uint32_t r) { numRows = r; }
     void setOffset(uint32_t o) { offset = o; }
     void setFP(G4_Declare* f) { fp = f; }
+
+
 
     bool isOffsetValid() { return offset != InvalidOffset; }
 
@@ -4021,6 +4169,11 @@ private:
     uint32_t numRows = 0;
     uint32_t offset = InvalidOffset;
 };
+
+inline bool G4_Operand::isScalarSrc() const
+{
+    return isImm() || isAddrExp() || (isSrcRegRegion() && asSrcRegRegion()->isScalar());
+}
 
 } // namespace vISA
 

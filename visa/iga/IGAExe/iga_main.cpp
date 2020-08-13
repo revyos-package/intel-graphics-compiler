@@ -26,7 +26,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "iga_main.hpp"
 #include "opts.hpp"
 
-#include <cctype>
 #include <iomanip>
 #include <sstream>
 #include <tuple>
@@ -65,7 +64,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "Without this iga attempts to infer the mode based on the extension.  "
         "Files ending in '.krn' are assumed binary without this option.",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.mode = Opts::Mode::DIS;
         });
     cmdline.defineFlag(
@@ -76,8 +75,28 @@ extern "C" int iga_main(int argc, const char **argv)
         "Without this iga attempts to infer the mode based on the extension.  "
         "Files ending in '.asm' are assumed syntax input without this option.",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.mode = Opts::Mode::ASM;
+        });
+    cmdline.defineOpt(
+        nullptr,
+        "color",
+        "COLORING",
+        "colors assembly output ('always', 'never', and 'auto')",
+        "This option enables decoration of assembly syntax with ANSI escape "
+        "sequences.  The 'auto' value will enable escapes if the output is a "
+        "terminal.",
+        opts::OptAttrs::ALLOW_UNSET,
+        [] (const char *ck, const opts::ErrorHandler &eh, Opts &baseOpts) {
+            std::string k(ck);
+            if (k == "always" || k == "1" || k == "true")
+                baseOpts.color = Opts::Color::ALWAYS;
+            else if (k == "auto")
+                baseOpts.color = Opts::Color::AUTO;
+            else if (k == "never" || k == "0" || k == "false")
+                baseOpts.color = Opts::Color::NEVER;
+            else
+                eh("option must be 'always', 'never', or 'auto'");
         });
     cmdline.defineFlag(
         "n",
@@ -86,38 +105,66 @@ extern "C" int iga_main(int argc, const char **argv)
         "labels will be in bytes relative to the IP pre-increment "
         "(even for jmpi and on HSW)",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.numericLabels = true;
         });
-    ///////////////////////////////////////////// about the 80 col limit
-    std::string platformExtendedDescription;
-    std::vector<std::tuple<iga_gen_t,std::string>> platforms;
-    {
-        std::stringstream ss;
-        const char *defaultPlatformInfo =
-            "Examples of valid platforms are: GEN7.5, GEN8, GEN8LP, GEN9, ...\n"
-            "We also accept code names: HSW, BDW, CHV, ...";
-        size_t nps;
-        if (iga_platforms_list(0,nullptr,&nps) != IGA_SUCCESS) {
-            platformExtendedDescription = defaultPlatformInfo;
-        } else {
-            iga_gen_t *gens = (iga_gen_t *)alloca(nps);
-            if (iga_platforms_list(nps,gens,&nps) != IGA_SUCCESS) {
-               platformExtendedDescription = defaultPlatformInfo;
+    cmdline.defineFlag(
+        "q",
+        "quiet",
+        "lower verbosity output",
+        "This is the same as -v=-1",
+        opts::OptAttrs::ALLOW_UNSET,
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
+            baseOpts.verbosity = -1;
+        });
+    cmdline.defineOpt(
+        "v",
+        "verbosity",
+        "INT",
+        "Sets the verbosity level",
+        "The verbosity level is integral with <0 meaning quiet, "
+        "0 meaning normal, and >0 meaning verbose and debug.  "
+        "If given as a flag -v, then -v=1 is assumed.",
+        opts::OptAttrs::ALLOW_UNSET|opts::OptAttrs::OPT_FLAG_VAL,
+        [] (const char *cinp, const opts::ErrorHandler &eh, Opts &baseOpts) {
+            if (cinp == nullptr) {
+                baseOpts.verbosity = 1;
             } else {
-                ss << "Valid platforms are:\n";
-                for (size_t pi = 0; pi < nps/sizeof(iga_gen_t); pi++) {
-                    const char *suffix = nullptr;
-                    if (iga_platform_symbol_suffix(gens[pi],&suffix) == IGA_SUCCESS) {
-                        ss << "  - " << std::setw(5) << std::left << suffix <<
-                          " (for GEN" << suffix << ")\n";
-                        platforms.emplace_back(gens[pi],suffix);
-                    }
-                } // for
-                platformExtendedDescription = ss.str();
+                baseOpts.verbosity = eh.parseInt(cinp);
             }
+        });
+
+    ///////////////////////////////////////////// abt. the 80 col limit in desc
+    std::vector<igax::PlatformInfo> platforms;
+    std::string platformExtendedDescription;
+    try {
+        platforms = igax::QueryPlatforms();
+        //
+        std::stringstream ss;
+        ss << "Valid platforms are:\n";
+        for (const auto &pi : platforms) {
+            ss << "  - " << std::setw(5) << std::left << pi.suffix <<
+                " for ";
+            if (pi.names.empty())
+                ss << " [no platform names]?";
+            else
+                for (int i = 0; i < (int)pi.names.size(); i++) {
+                    if (i > 0)
+                        ss << "/";
+                    ss << pi.names[i];
+                }
+            ss << "\n";
         }
-    } // platform extended description
+        platformExtendedDescription = ss.str();
+    } catch (const igax::Error &err) {
+        std::stringstream ss;
+        ss << err.api << ": " <<
+            iga_status_to_string(err.status) <<
+            ": failed to query platforms\n";
+        platformExtendedDescription = ss.str();
+        std::cerr << ss.str() << "\n";
+    }
+
     cmdline.defineOpt(
         "p",
         "platform",
@@ -125,59 +172,40 @@ extern "C" int iga_main(int argc, const char **argv)
         "specifies the platform (e.g. \"GEN9\")",
         platformExtendedDescription.c_str(),
         opts::OptAttrs::ALLOW_UNSET,
-        [&] (const char *cinp, const opts::ErrorHandler &err, Opts &baseOpts) {
-            std::string inp;
-            while (*cinp) {
-                inp += std::toupper(*cinp++);
-            }
-            if (inp.substr(0,3) == "GEN")
-              inp = inp.substr(3); // GEN9 -> 9
+        [&] (const char *cinp, const opts::ErrorHandler &eh, Opts &baseOpts) {
+            // normalize the input name
+            // examples:
+            //   "12.1" => 12p1
+            //   "12P1  => 12p1
+            //   "TGLLP" ==> "tgllp"
+            //   "GEN12P1"  ==> "12p1"
+            std::string inp = normalizePlatformName(cinp);
 
-            // try IGA-preferred names first
-            iga_gen_t p = IGA_GEN_INVALID;
+            if (inp.substr(0,3) == "gen")
+              inp = inp.substr(3); // gen9 -> 9
+            //
             for (const auto &pt : platforms) {
-                std::string pnm = std::get<1>(pt);
-                std::transform(pnm.begin(), pnm.end(), pnm.begin(), ::toupper);
+                std::string pnm = normalizePlatformName(pt.suffix);
+                // try IGA-preferred names first (e.g. "12p1")
+                // normalized the IGA-returned platform name to lowercase
                 if (pnm == inp) {
-                    p = std::get<0>(pt);
-                    break;
+                    baseOpts.platform = pt.toGen();
+                    return; // bail out
+                }
+                // Try library returned names second (e.g. "skl")
+                for (std::string pnm : pt.names) {
+                    // normalized the IGA-returned platform name to lowercase
+                    pnm = normalizePlatformName(pnm);
+                    if (pnm == inp) {
+                        baseOpts.platform = pt.toGen();
+                        return;
+                    }
                 }
             }
-
-            if (p != IGA_GEN_INVALID) {
-              baseOpts.platform = p;
-              return;
-            }
-
-            // fall back on code names and other names
-            if (inp == "IVB" || inp == "7") {
-                p = IGA_GEN7;
-            } else if (inp == "HSW" || inp == "7P5" || inp == "7.5") {
-                p = IGA_GEN7p5;
-            } else if (inp == "BDW" || inp == "8") {
-                p = IGA_GEN8;
-            } else if (inp == "CHV" ||
-                inp == "8LP" || inp == "8P1" || inp == "8.1") {
-                p = IGA_GEN8lp;
-            } else if (inp == "SKL" || inp == "9") {
-                p = IGA_GEN9;
-            } else if (inp == "BXT" ||
-                inp == "9LP" || inp == "9P1" || inp == "9.1") {
-                p = IGA_GEN9lp;
-            } else if (inp == "KBL" || inp == "9P5" || inp == "9.5") {
-                p = IGA_GEN9p5;
-            } else if (inp == "CNL" || inp == "10") {
-                p = IGA_GEN10;
-            } else if (inp == "ICL" || inp == "CNLH" || inp == "11") {
-                p = IGA_GEN11;
-            } else if (inp == "TGL" || inp == "TGLLP" ||
-                inp == "12LP" || inp == "12P1" || inp == "12.1") {
-                p = IGA_GEN12p1;
-            } else {
-                err("invalid platform option "
-                    "(use option -h=p to list platforms)");
-            }
-            baseOpts.platform = p;
+            //
+            eh("invalid platform option "
+                "(use option -h=p to list platforms)");
+            baseOpts.platform = IGA_GEN_INVALID;
         });
 
     cmdline.defineOpt(
@@ -198,7 +226,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "disables all warnings",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings = IGA_WARNINGS_NONE;
         });
     wGrp.defineFlag(
@@ -207,7 +235,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "enables all warnings",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings = IGA_WARNINGS_ALL;
         });
     wGrp.defineFlag(
@@ -216,7 +244,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "uses default warnings",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings = IGA_WARNINGS_DEFAULT;
         });
     wGrp.defineFlag(
@@ -225,7 +253,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "checks some don't-care fields for being in normal forms",
         "examples of this are types and regions on send operands",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings |= IGA_WARNINGS_NORMFORM;
         });
     wGrp.defineFlag(
@@ -234,7 +262,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "enables warnings on invalid regions",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings |= IGA_WARNINGS_REGIONS;
         });
     wGrp.defineFlag(
@@ -243,7 +271,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "enables warnings on invalid operand type combinations",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings |= IGA_WARNINGS_TYPES;
         });
     wGrp.defineFlag(
@@ -252,7 +280,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "enables warnings related to scheduling (e.g. use of Switch)",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings |= IGA_WARNINGS_SCHED;
         });
 
@@ -267,10 +295,10 @@ extern "C" int iga_main(int argc, const char **argv)
         "disables the IR checking on assembly",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.enabledWarnings = IGA_WARNINGS_NONE;
-            fprintf(stderr, "%s\n",
-                "-Xdisable-ir-checking is deprecated; use -W* options");
+            std::cerr <<
+                "-Xdisable-ir-checking is deprecated; use -W* options\n";
         });
     xGrp.defineFlag(
         "auto-deps",
@@ -299,7 +327,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "This mode debugs an instruction's compaction.  The input format is the same as -Xifs\n"
         "See that option for more information\n",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.mode = Opts::Mode::XDCMP;
         });
     xGrp.defineFlag(
@@ -310,7 +338,7 @@ extern "C" int iga_main(int argc, const char **argv)
         " This is a best effort and not all messages or platforms are "
             "supported.\n"
         "\n"
-        "SFIDS are: DC0, DC1, DC2, DCRO, GTWY, RC, SMPL, TS, URB"
+        "SFIDS are: DC0, DC1, DC2, DCRO, GTWY, RC, SMPL, TS, URB, VME"
         "\n"
         "\n"
         "EXAMPLES:\n"
@@ -362,7 +390,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "displays all ops for the given platform",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler, Opts &baseOpts) {
             baseOpts.mode = Opts::Mode::XLST;
         });
     xGrp.defineFlag(
@@ -387,7 +415,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "the inverse (default) of -Xprint-ldst",
         nullptr,
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *cinp, const opts::ErrorHandler &, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.printLdSt = false;
         });
     xGrp.defineFlag(
@@ -435,6 +463,18 @@ extern "C" int iga_main(int argc, const char **argv)
         "Send instructions are emitted as load/store instructions",
         opts::OptAttrs::ALLOW_UNSET,
         baseOpts.printLdSt);
+    xGrp.defineOpt(
+        "sbid-count",
+        "sbid-count",
+        "INT",
+        "number of sbid being used on auto dependency set",
+        "",
+        opts::OptAttrs::ALLOW_UNSET,
+        [] (const char *cinp, const opts::ErrorHandler &eh, Opts &baseOpts) {
+            std::string str = cinp;
+            baseOpts.sbidCount = eh.parseInt(cinp);
+        }
+    );
     xGrp.defineFlag(
         "warn-on-compact-fail",
         nullptr,
@@ -442,7 +482,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "By default we fail if we are unable to compact an instruction with "
         "the {Compacted} option set; this allows one to make it a warning",
         opts::OptAttrs::ALLOW_UNSET,
-        [] (const char *, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.errorOnCompactFail = false;
         });
 
@@ -452,7 +492,7 @@ extern "C" int iga_main(int argc, const char **argv)
         "the input files",
         "The input files to assemble.  This defaults to stdin.",
         opts::OptAttrs::ALLOW_UNSET | opts::OptAttrs::ALLOW_MULTI,
-        [] (const char *inp, const opts::ErrorHandler &err, Opts &baseOpts) {
+        [] (const char *inp, const opts::ErrorHandler &, Opts &baseOpts) {
             baseOpts.inputFiles.push_back(inp);
         });
 
@@ -482,9 +522,9 @@ extern "C" int iga_main(int argc, const char **argv)
     // one of the files has an error
     bool hasError = false;
 
-    if (baseOpts.mode == Opts::XLST) {
+    if (baseOpts.mode == Opts::Mode::XLST) {
         if (baseOpts.platform == IGA_GEN_INVALID) {
-            fatalExitWithMessage("op listing requires platform (-p)");
+            fatalExitWithMessage("op listing requires platform (e.g. -p=...)");
         }
         // list all operations if they used -Xlist-ops
         if (baseOpts.inputFiles.empty()) {
@@ -495,11 +535,11 @@ extern "C" int iga_main(int argc, const char **argv)
                 hasError |= listOps(baseOpts, inpFile);
             }
         }
-    } else if (baseOpts.mode == Opts::XIFS) {
+    } else if (baseOpts.mode == Opts::Mode::XIFS) {
         hasError |= decodeInstructionFields(baseOpts);
-    } else if (baseOpts.mode == Opts::XDCMP) {
+    } else if (baseOpts.mode == Opts::Mode::XDCMP) {
         hasError |= debugCompaction(baseOpts);
-    } else if (baseOpts.mode == Opts::XDSD) {
+    } else if (baseOpts.mode == Opts::Mode::XDSD) {
         hasError |= decodeSendDescriptor(baseOpts);
     } else {
         if (baseOpts.inputFiles.empty()) {
@@ -515,9 +555,9 @@ extern "C" int iga_main(int argc, const char **argv)
             struct Opts opts = optsForFile(inpFile);
             try {
                 igax::Context ctx(opts.platform);
-                if (opts.mode == Opts::DIS) {
+                if (opts.mode == Opts::Mode::DIS) {
                     hasError |= !disassemble(opts, ctx, inpFile);
-                } else if (opts.mode == Opts::ASM) {
+                } else if (opts.mode == Opts::Mode::ASM) {
                     hasError |= !assemble(opts, ctx, inpFile);
                 } else {
                     fatalExitWithMessage(

@@ -50,17 +50,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "Compiler/CISACodeGen/LiveVars.hpp"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/debug/Debug.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/Debug.h>
 #include <llvm/ADT/DepthFirstIterator.h>
 #include <llvm/ADT/STLExtras.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include <algorithm>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -217,7 +215,7 @@ void LiveVars::setupBBIds(Function* F)
 
 /// getLVInfo - Get (possibly creating) a LVInfo object for the given vreg.
 LiveVars::LVInfo& LiveVars::getLVInfo(Value* LV) {
-    assert(isa<Instruction>(LV) || isa<Argument>(LV));
+    IGC_ASSERT(isa<Instruction>(LV) || isa<Argument>(LV));
     DenseMap<Value*, LiveVars::LVInfo*>::const_iterator it = VirtRegInfo.find(LV);
     if (it == VirtRegInfo.end()) {
         LiveVars::LVInfo* lvInfo = new (Allocator.Allocate()) LiveVars::LVInfo();
@@ -320,8 +318,8 @@ void LiveVars::HandleVirtRegUse(Value* VL, BasicBlock* MBB,
         for (unsigned i = 0, e = VRInfo.Kills.size(); i != e; ++i) {
             if (VRInfo.Kills[i]->getParent() == MBB) {
                 Instruction* killInst = VRInfo.Kills[i];
-                assert(DistanceMap.count(killInst) && DistanceMap.count(MI) &&
-                    "DistanceMap not set up yet.");
+                IGC_ASSERT_MESSAGE(DistanceMap.count(killInst), "DistanceMap not set up yet.");
+                IGC_ASSERT_MESSAGE(DistanceMap.count(MI), "DistanceMap not set up yet.");
                 if (DistanceMap[killInst] < DistanceMap[MI]) {
                     VRInfo.Kills[i] = MI;
                 }
@@ -346,10 +344,11 @@ void LiveVars::HandleVirtRegUse(Value* VL, BasicBlock* MBB,
             return;
         }
 
-#ifndef NDEBUG
-        for (unsigned i = 0, e = VRInfo.Kills.size(); i != e; ++i)
-            assert(VRInfo.Kills[i]->getParent() != MBB && "entry should be at end!");
-#endif
+        for(size_t i = 0, e = VRInfo.Kills.size(); i < e; ++i)
+        {
+            IGC_ASSERT(nullptr != VRInfo.Kills[i]);
+            IGC_ASSERT_MESSAGE((VRInfo.Kills[i]->getParent() != MBB), "entry should be at end!");
+        }
     }
 
     // This situation can occur:
@@ -726,15 +725,14 @@ bool LiveVars::hasInterference(llvm::Value* V0, llvm::Value* V1)
 // updated to reflect such a merging.
 void LiveVars::mergeUseFrom(Value* V, Value* fromV)
 {
-    assert(VirtRegInfo.count(V) && VirtRegInfo.count(fromV) &&
-        "MergeUseFrom should be used after LVInfo has been contructed!");
+    IGC_ASSERT_MESSAGE(VirtRegInfo.count(V), "MergeUseFrom should be used after LVInfo has been contructed!");
+    IGC_ASSERT_MESSAGE(VirtRegInfo.count(fromV), "MergeUseFrom should be used after LVInfo has been contructed!");
 
     LVInfo& LVI = getLVInfo(V);
     LVInfo& fromLVI = getLVInfo(fromV);
     uint32_t newNumUses = LVI.NumUses + fromLVI.NumUses;
 
-    assert(LVI.uniform == fromLVI.uniform &&
-        "ICE: cannot merge uniform with non-uniform values!");
+    IGC_ASSERT_MESSAGE(LVI.uniform == fromLVI.uniform, "ICE: cannot merge uniform with non-uniform values!");
 
     // Use V's defining BB, not fromV's
     Instruction* defInst = dyn_cast<Instruction>(V);

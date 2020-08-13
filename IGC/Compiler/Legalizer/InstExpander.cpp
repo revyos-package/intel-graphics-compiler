@@ -24,17 +24,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-// vim:ts=2:sw=2:et:
-
 #define DEBUG_TYPE "type-legalizer"
 #include "TypeLegalizer.h"
 #include "InstExpander.h"
 #include "common/LLVMWarningsPush.hpp"
-
 #include "llvmWrapper/Support/Debug.h"
-
 #include "llvm/Support/raw_ostream.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
+
 using namespace llvm;
 using namespace IGC::Legalizer;
 
@@ -55,7 +53,7 @@ bool InstExpander::expand(Instruction* I) {
 // By default, capture all missing instructions!
 bool InstExpander::visitInstruction(Instruction& I) {
     LLVM_DEBUG(dbgs() << "EXPAND: " << I << '\n');
-    llvm_unreachable("UNKNOWN INSTRUCTION IS BEING EXPANDED!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "UNKNOWN INSTRUCTION IS BEING EXPANDED!");
     return false;
 }
 
@@ -91,43 +89,43 @@ bool InstExpander::visitTerminatorInst(IGCLLVM::TerminatorInst& I) {
 //
 bool InstExpander::visitAdd(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitSub(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitMul(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitUDiv(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitSDiv(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitURem(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
 bool InstExpander::visitSRem(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -136,14 +134,12 @@ bool InstExpander::visitShl(BinaryOperator& I) {
     TypeSeq* TySeq;
     std::tie(Ops0, std::ignore) = TL->getLegalizedValues(I.getOperand(0));
     std::tie(TySeq, std::ignore) = TL->getLegalizedTypes(I.getType());
-    assert(TySeq->size() == Ops0->size());
+    IGC_ASSERT(TySeq->size() == Ops0->size());
 
     Type* MajorTy = TySeq->front();
     IntegerType* MajorITy = cast<IntegerType>(MajorTy);
     IntegerType* ITy = cast<IntegerType>(I.getType());
-    assert(ITy->getBitWidth() < MajorITy->getBitMask() &&
-        "YOU HAVE A HUGE INTEGER TO BE SHIFTED! "
-        "Shift amount cannot be encoded in legal integer types!");
+    IGC_ASSERT_MESSAGE(ITy->getBitWidth() < MajorITy->getBitMask(), "YOU HAVE A HUGE INTEGER TO BE SHIFTED! Shift amount cannot be encoded in legal integer types!");
 
     // Arbitrary integer left-shift is implemented as follows:
     //
@@ -269,14 +265,12 @@ bool InstExpander::visitLShr(BinaryOperator& I) {
     TypeSeq* TySeq;
     std::tie(Ops0, std::ignore) = TL->getLegalizedValues(I.getOperand(0));
     std::tie(TySeq, std::ignore) = TL->getLegalizedTypes(I.getType());
-    assert(TySeq->size() == Ops0->size());
+    IGC_ASSERT(TySeq->size() == Ops0->size());
 
     Type* MajorTy = TySeq->front();
     IntegerType* MajorITy = cast<IntegerType>(MajorTy);
     IntegerType* ITy = cast<IntegerType>(I.getType());
-    assert(ITy->getBitWidth() < MajorITy->getBitMask() &&
-        "YOU HAVE A HUGE INTEGER TO BE SHIFTED! "
-        "Shift amount cannot be encoded in legal integer types!");
+    IGC_ASSERT_MESSAGE(ITy->getBitWidth() < MajorITy->getBitMask(), "YOU HAVE A HUGE INTEGER TO BE SHIFTED! Shift amount cannot be encoded in legal integer types!");
 
     // Arbitrary integer logic-right-shift is implemented similar to
     // arbitrary integer left-shift.
@@ -360,7 +354,7 @@ bool InstExpander::visitLShr(BinaryOperator& I) {
 
 bool InstExpander::visitAShr(BinaryOperator& I) {
     // FIXME:
-    llvm_unreachable("NOT IMPLEMENTED YET!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -373,7 +367,7 @@ bool InstExpander::visitBinaryOperator(BinaryOperator& I) {
     ValueSeq Ops0Copy(*Ops0);
 
     std::tie(Ops1, std::ignore) = TL->getLegalizedValues(I.getOperand(1));
-    assert(Ops0Copy.size() == Ops1->size());
+    IGC_ASSERT(Ops0Copy.size() == Ops1->size());
 
     switch (I.getOpcode()) {
     case Instruction::And:
@@ -390,7 +384,7 @@ bool InstExpander::visitBinaryOperator(BinaryOperator& I) {
         break;
     }
     default:
-        llvm_unreachable("UNKNOWN BINARY OPERATOR IS BEING EXPANDED!");
+        IGC_ASSERT_EXIT_MESSAGE(0, "UNKNOWN BINARY OPERATOR IS BEING EXPANDED!");
     }
     return true;
 }
@@ -441,7 +435,7 @@ bool InstExpander::visitStoreInst(StoreInst& I) {
     TypeSeq* TySeq;
     std::tie(ValSeq, std::ignore) = TL->getLegalizedValues(OrigVal);
     std::tie(TySeq, std::ignore) = TL->getLegalizedTypes(OrigTy);
-    assert(ValSeq->size() == TySeq->size());
+    IGC_ASSERT(ValSeq->size() == TySeq->size());
 
     unsigned AS = I.getPointerAddressSpace();
 
@@ -477,7 +471,7 @@ bool InstExpander::visitStoreInst(StoreInst& I) {
 bool InstExpander::visitTruncInst(TruncInst& I) {
     ValueSeq* ValSeq;
     std::tie(ValSeq, std::ignore) = TL->getLegalizedValues(I.getOperand(0));
-    assert(ValSeq->size() > 1);
+    IGC_ASSERT(ValSeq->size() > 1);
 
     TypeSeq* TySeq; LegalizeAction Act;
     std::tie(TySeq, Act) = TL->getLegalizedTypes(I.getDestTy());
@@ -493,14 +487,14 @@ bool InstExpander::visitTruncInst(TruncInst& I) {
         return true;
     }
 
-    assert(TySeq->size() <= ValSeq->size());
+    IGC_ASSERT(TySeq->size() <= ValSeq->size());
 
     unsigned Part = 0;
     for (auto* Ty : *TySeq) {
         Value* Val = (*ValSeq)[Part];
-        assert(isa<IntegerType>(Ty) && isa<IntegerType>(Val->getType()));
-        assert(cast<IntegerType>(Val->getType())->getBitWidth() >=
-            cast<IntegerType>(Ty)->getBitWidth());
+        IGC_ASSERT(isa<IntegerType>(Ty));
+        IGC_ASSERT(isa<IntegerType>(Val->getType()));
+        IGC_ASSERT(cast<IntegerType>(Val->getType())->getBitWidth() >= cast<IntegerType>(Ty)->getBitWidth());
 
         Expanded.push_back(
             IRB->CreateTrunc(Val, Ty,
@@ -532,15 +526,15 @@ bool InstExpander::visitZExtInst(ZExtInst& I) {
     TypeSeq* TySeq;
     std::tie(TySeq, std::ignore) = TL->getLegalizedTypes(I.getDestTy());
 
-    assert(TySeq->size() >= ValSeq->size());
+    IGC_ASSERT(TySeq->size() >= ValSeq->size());
 
     unsigned Part = 0;
     for (auto* Ty : *TySeq) {
         Value* Val =
             Part < ValSeq->size() ? (*ValSeq)[Part] : Constant::getNullValue(Ty);
-        assert(isa<IntegerType>(Ty) && isa<IntegerType>(Val->getType()));
-        assert(cast<IntegerType>(Val->getType())->getBitWidth() <=
-            cast<IntegerType>(Ty)->getBitWidth());
+        IGC_ASSERT(isa<IntegerType>(Ty));
+        IGC_ASSERT(isa<IntegerType>(Val->getType()));
+        IGC_ASSERT(cast<IntegerType>(Val->getType())->getBitWidth() <= cast<IntegerType>(Ty)->getBitWidth());
 
         if (Ty != Val->getType())
             Expanded.push_back(IRB->CreateZExt(Val, Ty, Twine(Val->getName(), ".zext")));
@@ -575,7 +569,7 @@ bool InstExpander::visitBitCastInst(BitCastInst& I) {
     TL->repack(&Repacked, *TySeq, *ValSeq, I.getName() + getSuffix());
 
     if (Act == Legal) {
-        assert(Repacked.size() == 1);
+        IGC_ASSERT(Repacked.size() == 1);
 
         I.replaceAllUsesWith(Repacked.front());
         return true;

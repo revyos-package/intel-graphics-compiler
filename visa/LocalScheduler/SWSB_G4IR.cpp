@@ -62,11 +62,11 @@ static bool hasSameFunctionID(G4_INST* inst1, G4_INST* inst2)
     {
         return false;
     }
-    else if (inst1->isMath() && inst2->isMath())
+    else if (inst1->isMathPipeInst() && inst2->isMathPipeInst())
     {
         return true;
     }
-    else if (inst1->isMath() || inst2->isMath())
+    else if (inst1->isMathPipeInst() || inst2->isMathPipeInst())
     {
         return false;
     }
@@ -117,6 +117,11 @@ static bool hasSamePredicator(G4_INST* inst1, G4_INST* inst2)
     }
 
     if (pred1 || pred2)
+    {
+        return false;
+    }
+
+    if (inst1->isWriteEnableInst() || inst2->isWriteEnableInst())
     {
         return false;
     }
@@ -615,7 +620,7 @@ void SWSB::SWSBDepDistanceGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
     BBVector.resize(numBBId);
 
     //Set distance 1 at the first instruction in case there are runtime inserted instructions at prolog
-    if (kernel.getOptions()->getTarget() != VISA_3D)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D)
     {
         setDefaultDistanceAtFirstInstruction();
     }
@@ -642,13 +647,53 @@ void SWSB::SWSBDepDistanceGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
         }
     }
 
-    loopVector.resize(nestLoopLevel + 1);
-
     return;
 }
 
+void SWSB::handleIndirectCall()
+{
+    for (size_t i = 0; i < BBVector.size(); i++)
+    {
+        if (BBVector[i]->last_node == -1)
+        {
+            continue;
+        }
+
+        SBNode* node = SBNodes[BBVector[i]->last_node];
+
+        if ((node->GetInstruction()->isCall() && !node->GetInstruction()->getSrc(0)->isLabel()) ||
+            node->GetInstruction()->isReturn())
+        {
+            LiveGRFBuckets send_use_out(mem, kernel.getNumRegTotal(), *fg.getKernel());
+            for (size_t j = 0; j < globalSendOpndList.size(); j++)
+            {
+                SBBucketNode* sBucketNode = globalSendOpndList[j];
+                SBNode* sNode = sBucketNode->node;
+                if (BBVector[i]->send_live_out->isSrcSet(sNode->globalID) &&
+                    (sBucketNode->opndNum == Opnd_src0 ||
+                    sBucketNode->opndNum == Opnd_src1 ||
+                    sBucketNode->opndNum == Opnd_src2 ||
+                    sBucketNode->opndNum == Opnd_src3))
+                {
+                    BBVector[i]->createAddGRFEdge(sNode, node, WAR, DEP_EXPLICT);
+                }
+                if (BBVector[i]->send_live_out->isDstSet(sNode->globalID) && (sBucketNode->opndNum == Opnd_dst))
+                {
+                    BBVector[i]->createAddGRFEdge(sNode, node, RAW, DEP_EXPLICT);
+                }
+            }
+        }
+        if (node->GetInstruction()->isReturn())
+        {
+            node->GetInstruction()->setDistance(1);
+        }
+    }
+
+    return;
+}
 void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, LiveGRFBuckets& globalSendsLB)
 {
+    bool hasIndirectCall = false;
     allTokenNodesMap = (BitSet * *)mem.alloc(sizeof(BitSet*) * totalTokenNum);
     for (size_t i = 0; i < totalTokenNum; i++)
     {
@@ -658,6 +703,16 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
     // Get the live out, may kill bit sets
     for (size_t i = 0; i < BBVector.size(); i++)
     {
+        if (BBVector[i]->last_node != -1)
+        {
+            SBNode* node = SBNodes[BBVector[i]->last_node];
+
+            if (node->GetInstruction()->isCall() && !node->GetInstruction()->getSrc(0)->isLabel())
+            {
+                hasIndirectCall = true;
+            }
+        }
+
         BBVector[i]->send_live_in = new (mem)SBBitSets(mem, globalSendNum);
         BBVector[i]->send_live_out = new (mem)SBBitSets(mem, globalSendNum);
         BBVector[i]->send_def_out = new (mem)SBBitSets(mem, globalSendNum);
@@ -707,30 +762,44 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
 #ifdef DEBUG_VERBOSE_ON
         BBVector[i]->dumpLiveInfo(&globalSendOpndList, globalSendNum, nullptr);
 #endif
-
-        int loopLevel = BBVector[i]->getBB()->getNestLevel();
-        if (loopLevel)
-        {
-            if (loopVector[loopLevel].entryBBID == -1 ||
-                BBVector[loopVector[loopLevel].entryBBID]->first_node > BBVector[i]->first_node)
-            {
-                loopVector[loopLevel].entryBBID = i;
-            }
-            if (loopVector[loopLevel].endBBID == -1 ||
-                BBVector[loopVector[loopLevel].entryBBID]->last_node < BBVector[i]->last_node)
-            {
-                loopVector[loopLevel].endBBID = i;
-            }
-        }
     }
 
+    /*
+    Loop info is used to reduce the token required for certain instructions, or count the delay of the backedge for token reuse
+    We do the token reduction and count delay of backedge only for the nature loops, i.e with the backedge,
+    if the instruction distance is far enough, there is no need to set dependence.
+    For the irreducible flow graph, those optimizations wouldn't be kicked in.
+    */
     for (size_t i = 0; i < BBVector.size(); i++)
     {
-        int loopLevel = BBVector[i]->getBB()->getNestLevel();
-        if (loopLevel)
+        for (auto&& be : kernel.fg.backEdges)
         {
-            BBVector[i]->setLoopStartBBID(loopVector[loopLevel].entryBBID);
-            BBVector[i]->setLoopEndBBID(loopVector[loopLevel].endBBID);
+            auto loopIt = kernel.fg.naturalLoops.find(be);
+
+            if (loopIt != kernel.fg.naturalLoops.end())
+            {
+                auto&& bbsInLoop = (*loopIt).second;
+
+                auto bb1InLoop = bbsInLoop.find(BBVector[i]->getBB());
+                if (bb1InLoop != bbsInLoop.end())
+                {
+                    if (BBVector[i]->getLoopStartBBID() != -1)
+                    {
+                        //Innerest loop only
+                        if (BBVector[i]->getLoopStartBBID() <= be.second->getId() &&
+                            BBVector[i]->getLoopEndBBID() >= be.first->getId())
+                        {
+                            BBVector[i]->setLoopStartBBID(be.second->getId());
+                            BBVector[i]->setLoopEndBBID(be.first->getId());
+                        }
+                    }
+                    else
+                    {
+                        BBVector[i]->setLoopStartBBID(be.second->getId());
+                        BBVector[i]->setLoopEndBBID(be.first->getId());
+                    }
+                }
+            }
         }
     }
 
@@ -748,6 +817,11 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
         addGlobalDependence(globalSendNum, &globalSendOpndList, &SBNodes, p, true);
     }
 
+    if (hasIndirectCall)
+    {
+        handleIndirectCall();
+    }
+
     for (size_t i = 0; i < BBVector.size(); i++)
     {
         *BBVector[i]->send_live_in_scalar = *BBVector[i]->send_live_in;
@@ -762,6 +836,7 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
     addGlobalDependence(globalSendNum, &globalSendOpndList, &SBNodes, p, false);
 
     //SWSB token alloation with linear scan algorithm.
+    tokenProfile = new (mem)SWSB_TOKEN_PROFILE();
     if (fg.builder->getOptions()->getOption(vISA_GlobalTokenAllocation))
     {
         tokenAllocationGlobal();
@@ -797,7 +872,7 @@ static unsigned getRegAccessPipe(G4_INST* Inst) {
         Pipe = FCPatchingInfo::Pipe_Send;
         SFID = SFIDtoInt(Inst->getMsgDesc()->getFuncId()) & 0xF; // 4-bit SFID
     }
-    else if (Inst->isMath())
+    else if (Inst->isMathPipeInst())
     {
         Pipe = FCPatchingInfo::Pipe_Math;
     }
@@ -878,7 +953,7 @@ static void updateRegAccess(FCPatchingInfo* FCPI, SBNode* Node,
 static void insertSyncBarrier(FCPatchingInfo* FCPI, SBNode* Node,
     unsigned NumRegs) {
     // Skip if sync barrier is already inserted.
-    if (FCPI->RegFirstAccessList.back().RegNo == unsigned(-1))
+    if (FCPI->RegFirstAccessList.size() == 0 || FCPI->RegFirstAccessList.back().RegNo == unsigned(-1))
         return;
 
     // Sync barrier is a special relocation where all registers are forced to be
@@ -1090,7 +1165,8 @@ void SWSB::SWSBGenerator()
     PointsToAnalysis p(kernel.Declares, kernel.fg.getNumBB());
     p.doPointsToAnalysis(kernel.fg);
 
-    if (kernel.getOptions()->getTarget() != VISA_3D)
+    //For VISA_3D, the naturalLoop finding is handled in register allocation already
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D)
     {
         kernel.fg.findNaturalLoops();
     }
@@ -1195,7 +1271,7 @@ unsigned SWSB::getDepDelay(SBNode* curNode)
             reuseDelay = TOKEN_AFTER_WRITE_SEND_MEMORY_CYCLE;
         }
     }
-    else if (curNode->GetInstruction()->isMath())
+    else if (curNode->GetInstruction()->isMathPipeInst())
     {
 
         reuseDelay = TOKEN_AFTER_WRITE_MATH_CYCLE;
@@ -1398,7 +1474,7 @@ bool  SWSB::cycleExpired(SBNode* node, int currentID)
             return TOKEN_AFTER_WRITE_SEND_MEMORY_CYCLE <= (currentID - node->getLiveStartID());
         }
     }
-    else if (node->GetInstruction()->isMath())
+    else if (node->GetInstruction()->isMathPipeInst())
     {
         return TOKEN_AFTER_WRITE_MATH_CYCLE <= (currentID - node->getLiveStartID());
     }
@@ -1456,12 +1532,12 @@ void SWSB::tokenDepReduction(SBNode* n1, SBNode* n2)
             //BB:
             //     node2
             //     succ(node1)
-            if ((node1BBID == node2BBID && bbID1 != node2BBID) ||
-                (node1BBID != node2BBID && bbID1 == node2BBID && succ1->getNodeID() > node2->getNodeID()))
-            {
-                node_it = node1->succs.erase(node_it);//FIXME, if the succ is the token instruction, do we need free the tokens assigned to the instruction because of the dependence
-                continue;
-            }
+            //if ((node1BBID == node2BBID && bbID1 != node2BBID) ||
+            //    (node1BBID != node2BBID && bbID1 == node2BBID && succ1->getNodeID() > node2->getNodeID()))
+            //{
+            //    node_it = node1->succs.erase(node_it);//FIXME, if the succ is the token instruction, do we need free the tokens assigned to the instruction because of the dependence
+            //    continue;
+            //}
 
             //When two sucessors are in same BB, previous one kill the following one
             // FIXME: This may not be good, because the policy is trying to keep the longest dependence and move the short one
@@ -2039,7 +2115,7 @@ bool SWSB::propogateDist(G4_BB* bb)
 
     for (unsigned i = 0; i < globalSendNum; i++)
     {
-        tokenLiveInDist[i] = -1;
+        tokenLiveInDist[i] = BBVector[bbID]->tokenLiveInDist[i];
     }
 
     //Get the live out from all predicator BBs
@@ -2061,7 +2137,8 @@ bool SWSB::propogateDist(G4_BB* bb)
     //Update the live in
     for (unsigned i = 0; i < globalSendNum; i++)
     {
-        if (tokenLiveInDist[i] != BBVector[bbID]->tokenLiveInDist[i])
+        if (tokenLiveInDist[i] != BBVector[bbID]->tokenLiveInDist[i] &&
+            tokenLiveInDist[i] != -1)
         {
             changed = true;
             BBVector[bbID]->tokenLiveInDist[i] = tokenLiveInDist[i];
@@ -2077,7 +2154,7 @@ bool SWSB::propogateDist(G4_BB* bb)
                 BBVector[bbID]->send_live_out->isDstSet(i) &&
                 !BBVector[bbID]->send_may_kill->isDstSet(i))
             {
-                BBVector[bbID]->tokenLiveOutDist[i] = BBVector[bbID]->tokenLiveInDist[i] + bb->getInstList().size();
+                BBVector[bbID]->tokenLiveOutDist[i] = BBVector[bbID]->tokenLiveInDist[i] + bb->size();
             }
         }
     }
@@ -2176,7 +2253,7 @@ void SWSB::tokenAllocation()
     }
     topIndex = 0;
 
-    kernel.setTokenInstructionCount((int)SBSendNodes.size());
+    tokenProfile->setTokenInstructionCount((int)SBSendNodes.size());
     uint32_t AWTokenReuseCount = 0;
     uint32_t ARTokenReuseCount = 0;
     uint32_t AATokenReuseCount = 0;
@@ -2203,7 +2280,7 @@ void SWSB::tokenAllocation()
         }
 
 
-        if (inst->isMath())
+        if (inst->isMathPipeInst())
         {
             mathInstCount++;
         }
@@ -2245,10 +2322,10 @@ void SWSB::tokenAllocation()
         unsigned prunedDiffBBEdgeNum = 0;
         unsigned prunedDiffBBSameTokenEdgeNum = 0;
         tokenEdgePrune(prunedEdgeNum, prunedGlobalEdgeNum, prunedDiffBBEdgeNum, prunedDiffBBSameTokenEdgeNum);
-        kernel.setPrunedEdgeNum(prunedEdgeNum);
-        kernel.setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
-        kernel.setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
-        kernel.setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
+        tokenProfile->setPrunedEdgeNum(prunedEdgeNum);
+        tokenProfile->setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
+        tokenProfile->setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
+        tokenProfile->setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
     }
 
     for (auto node_it = SBSendNodes.begin();
@@ -2270,10 +2347,10 @@ void SWSB::tokenAllocation()
         }
     }
 
-    kernel.setAWTokenReuseCount(AWTokenReuseCount);
-    kernel.setARTokenReuseCount(ARTokenReuseCount);
-    kernel.setAATokenReuseCount(AATokenReuseCount);
-    kernel.setMathInstCount(mathInstCount);
+    tokenProfile->setAWTokenReuseCount(AWTokenReuseCount);
+    tokenProfile->setARTokenReuseCount(ARTokenReuseCount);
+    tokenProfile->setAATokenReuseCount(AATokenReuseCount);
+    tokenProfile->setMathInstCount(mathInstCount);
 }
 
 unsigned short SWSB::reuseTokenSelectionGlobal(SBNode* node, G4_BB* bb, SBNode*& candidateNode, bool& fromSibling)
@@ -2446,20 +2523,6 @@ void SWSB::assignTokenToPred(SBNode* node, SBNode* pred, G4_BB* bb)
         printf("Node: %d, PRED assign: %d, token: %d\n", node->getNodeID(), canidateNode->getNodeID(), canidateNode->getLastInstruction()->getToken());
 #endif
     }
-}
-
-void SWSB::assignTokenToSucc(SBNode* node, G4_BB* bb)
-{
-    for (auto node_it = node->succs.begin();
-        node_it != node->succs.end(); node_it++)
-    {
-        SBDEP_ITEM& curSucc = (*node_it);
-        SBNode* succ = curSucc.node;
-
-        assignTokenToPred(succ, node, bb);
-    }
-
-    return;
 }
 
 bool SWSB::assignTokenWithPred(SBNode* node, G4_BB* bb)
@@ -2791,7 +2854,7 @@ void SWSB::buildExclusiveForCoalescing()
             SBDEP_ITEM& curSucc = node->succs[i];
             SBNode* succ = curSucc.node;
             DepType type = curSucc.type;
-            if ((type == RAW) || (type == WAW))
+            if (((type == RAW) || (type == WAW)) && succ->reachingSends)
             {
                 send_live = *succ->reachingSends;
                 //FIXME, the complexity may be a little big high, n*n*succSize
@@ -2896,10 +2959,10 @@ void SWSB::tokenAllocationGlobalWithPropogation()
         unsigned prunedDiffBBEdgeNum = 0;
         unsigned prunedDiffBBSameTokenEdgeNum = 0;
         tokenEdgePrune(prunedEdgeNum, prunedGlobalEdgeNum, prunedDiffBBEdgeNum, prunedDiffBBSameTokenEdgeNum);
-        kernel.setPrunedEdgeNum(prunedEdgeNum);
-        kernel.setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
-        kernel.setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
-        kernel.setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
+        tokenProfile->setPrunedEdgeNum(prunedEdgeNum);
+        tokenProfile->setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
+        tokenProfile->setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
+        tokenProfile->setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
     }
 
     for (auto node_it = SBSendNodes.begin();
@@ -2972,10 +3035,10 @@ void SWSB::tokenAllocationGlobal()
         unsigned prunedDiffBBEdgeNum = 0;
         unsigned prunedDiffBBSameTokenEdgeNum = 0;
         tokenEdgePrune(prunedEdgeNum, prunedGlobalEdgeNum, prunedDiffBBEdgeNum, prunedDiffBBSameTokenEdgeNum);
-        kernel.setPrunedEdgeNum(prunedEdgeNum);
-        kernel.setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
-        kernel.setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
-        kernel.setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
+        tokenProfile->setPrunedEdgeNum(prunedEdgeNum);
+        tokenProfile->setPrunedGlobalEdgeNum(prunedGlobalEdgeNum);
+        tokenProfile->setPrunedDiffBBEdgeNum(prunedDiffBBEdgeNum);
+        tokenProfile->setPrunedDiffBBSameTokenEdgeNum(prunedDiffBBSameTokenEdgeNum);
     }
 
     for (auto node_it = SBSendNodes.begin();
@@ -3003,8 +3066,8 @@ void SWSB::tokenAllocationGlobal()
 G4_INST* SWSB::insertSyncInstruction(G4_BB* bb, INST_LIST_ITER nextIter, int CISAOff, int lineNo)
 {
     G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
-    G4_INST* syncInst = fg.builder->createInternalInst(NULL, G4_sync_nop, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
-    bb->insert(nextIter, syncInst);
+    G4_INST* syncInst = fg.builder->createSync(G4_sync_nop, src0);
+    bb->insertBefore(nextIter, syncInst);
     syncInstCount++;
 
     return syncInst;
@@ -3015,8 +3078,8 @@ G4_INST* SWSB::insertSyncInstructionAfter(G4_BB* bb, INST_LIST_ITER iter, int CI
     INST_LIST_ITER nextIter = iter;
     nextIter++;
     G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
-    G4_INST* syncInst = fg.builder->createInternalInst(NULL, G4_sync_nop, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
-    bb->insert(nextIter, syncInst);
+    G4_INST* syncInst = fg.builder->createSync(G4_sync_nop, src0);
+    bb->insertBefore(nextIter, syncInst);
     syncInstCount++;
 
     return syncInst;
@@ -3024,8 +3087,8 @@ G4_INST* SWSB::insertSyncInstructionAfter(G4_BB* bb, INST_LIST_ITER iter, int CI
 
 G4_INST* SWSB::insertTestInstruction(G4_BB* bb, INST_LIST_ITER nextIter, int CISAOff, int lineNo, bool countSync)
 {
-    G4_INST* nopInst = fg.builder->createInternalInst(NULL, G4_nop, NULL, false, 1, NULL, NULL, NULL, 0, lineNo, CISAOff, NULL);
-    bb->insert(nextIter, nopInst);
+    G4_INST* nopInst = fg.builder->createNop(InstOpt_NoOpt);
+    bb->insertBefore(nextIter, nopInst);
     if (countSync)
     {
         syncInstCount++;
@@ -3040,16 +3103,16 @@ G4_INST* SWSB::insertSyncAllRDInstruction(G4_BB* bb, unsigned int SBIDs, INST_LI
     if (SBIDs)
     {
         G4_Imm* src0 = fg.builder->createImm(SBIDs, Type_UD);
-        syncInst = fg.builder->createInternalInst(NULL, G4_sync_allrd, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
+        syncInst = fg.builder->createSync(G4_sync_allrd, src0);
         ARSyncInstCount++;
     }
     else
     {
         G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
-        syncInst = fg.builder->createInternalInst(NULL, G4_sync_allrd, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
+        syncInst = fg.builder->createSync(G4_sync_allrd, src0);
         ARSyncAllCount++;
     }
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
 
     return syncInst;
 }
@@ -3060,16 +3123,16 @@ G4_INST* SWSB::insertSyncAllWRInstruction(G4_BB* bb, unsigned int SBIDs, INST_LI
     if (SBIDs)
     {
         G4_Imm* src0 = fg.builder->createImm(SBIDs, Type_UD);
-        syncInst = fg.builder->createInternalInst(NULL, G4_sync_allwr, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
+        syncInst = fg.builder->createSync(G4_sync_allwr, src0);
         AWSyncInstCount++;
     }
     else
     {
         G4_SrcRegRegion* src0 = fg.builder->createNullSrc(Type_UD);
-        syncInst = fg.builder->createInternalInst(NULL, G4_sync_allwr, NULL, false, 1, NULL, src0, NULL, 0, lineNo, CISAOff, NULL);
+        syncInst = fg.builder->createSync(G4_sync_allwr, src0);
         AWSyncAllCount++;
     }
-    bb->insert(nextIter, syncInst);
+    bb->insertBefore(nextIter, syncInst);
 
     return syncInst;
 }
@@ -3249,7 +3312,7 @@ void SWSB::insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER ins
     {
         INST_LIST_ITER nextIt = inst_it;
         nextIt++;
-        if (nextIt != bb->getInstList().end())
+        if (nextIt != bb->end())
         {
             G4_INST *nextInst = *nextIt;
             if (tokenHonourInstruction(nextInst) ||
@@ -3435,13 +3498,13 @@ void SWSB::insertTest()
         }
     }
 
-    kernel.setSyncInstCount(syncInstCount);
-    kernel.setMathReuseCount(mathReuseCount);
-    kernel.setAWSyncInstCount(AWSyncInstCount);
-    kernel.setARSyncInstCount(ARSyncInstCount);
-    kernel.setAWSyncAllCount(AWSyncAllCount);
-    kernel.setARSyncAllCount(ARSyncAllCount);
-    kernel.setTokenReuseCount(tokenReuseCount);
+    tokenProfile->setSyncInstCount(syncInstCount);
+    tokenProfile->setMathReuseCount(mathReuseCount);
+    tokenProfile->setAWSyncInstCount(AWSyncInstCount);
+    tokenProfile->setARSyncInstCount(ARSyncInstCount);
+    tokenProfile->setAWSyncAllCount(AWSyncAllCount);
+    tokenProfile->setARSyncAllCount(ARSyncAllCount);
+    tokenProfile->setTokenReuseCount(tokenReuseCount);
 }
 
 void SWSB::dumpDepInfo()
@@ -4199,12 +4262,19 @@ void G4_BB_SB::getGRFFootprintForIndirect(SBNode* node,
 void G4_BB_SB::getGRFBuckets(SBNode* node,
     SBFootprint* footprint,
     Gen4_Operand_Number opndNum,
-    std::vector<SBBucketDescr>& BDvec)
+    std::vector<SBBucketDescr>& BDvec,
+    bool GRFOnly)
 {
     SBFootprint* curFootprint = footprint;
 
     while (curFootprint != nullptr)
     {
+        if (GRFOnly && (curFootprint->fType != GRF_T))
+        {
+            curFootprint = curFootprint->next;
+            continue;
+        }
+
         int aregOffset = totalGRFNum;
         int startingBucket = curFootprint->LeftB / G4_GRF_REG_NBYTES;
         int endingBucket = curFootprint->RightB / G4_GRF_REG_NBYTES;
@@ -4273,7 +4343,7 @@ void G4_BB_SB::getGRFBucketsForOperands(SBNode* node,
         {
             continue;
         }
-        getGRFBuckets(node, footprint, opndNum, BDvec);
+        getGRFBuckets(node, footprint, opndNum, BDvec, GRFOnly);
     }
 
     return;
@@ -4540,7 +4610,6 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
 
                 if (!hasOverlap &&
                     dep == RAW &&
-                    (liveNode->getNodeID() + 1) == node->getNodeID() && //Adjacent nodes
                     liveInst->isMath() &&
                     (!hasSamePredicator(liveInst, curInst)))
                 {
@@ -4702,7 +4771,8 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
         }
 
 
-        if (builder.getOption(vISA_EnableSwitch) && node->GetInstruction()->isYieldInst())
+        if ((builder.getOption(vISA_EnableSwitch) && node->GetInstruction()->isYieldInst()) ||
+            (node->GetInstruction()->isCall() && !node->GetInstruction()->getSrc(0)->isLabel()))
         {
             node->setDistance(1);
         }
@@ -5385,13 +5455,15 @@ void SWSB::addReachingDefineSet(SBNode* node, SBBitSets* globalLiveSet, SBBitSet
 
 void SWSB::addReachingUseSet(SBNode* node, SBNode* use)
 {
-    if (node->reachedUses == nullptr)
+    if (use->getSendUseID() != -1)
     {
-        node->reachedUses = new (mem)SBBitSets(mem, SBSendUses.size());
-    }
+        if (node->reachedUses == nullptr)
+        {
+            node->reachedUses = new (mem)SBBitSets(mem, SBSendUses.size());
+        }
 
-    assert(use->getSendUseID() != -1);
-    node->reachedUses->setDst(use->getSendUseID(), true);
+        node->reachedUses->setDst(use->getSendUseID(), true);
+    }
 
     return;
 }
@@ -5787,21 +5859,11 @@ void G4_BB_SB::createAddGRFEdge(SBNode* pred, SBNode* succ, DepType d, SBDepende
 
 void G4_Kernel::emit_dep(std::ostream& output)
 {
-    output << "//.platform " << platformString[getGenxPlatform()];
+    output << "//.platform " << platformString[fg.builder->getPlatform()];
     output << "\n" << "//.stepping " << GetSteppingString();
     output << "\n" << "//.CISA version " << (unsigned int)major_version
         << "." << (unsigned int)minor_version;
     output << "\n" << "//.kernel ID 0x" << hex << getKernelID() << "\n";
-    output << "\n" << "//.Token_Instruction_Count " << dec << getTokenInstructionCount() << "\n";
-    output << "\n" << "//.Token_Reuse_Count " << dec << getTokenReuseCount() << "\n";
-    output << "\n" << "//.Math_Token_Reuse_Count " << dec << getMathReuseCount() << "\n";
-    output << "\n" << "//.AW_Token_Reuse_Count " << dec << getAWTokenReuseCount() << "\n";
-    output << "\n" << "//.AR_Token_Reuse_Count " << dec << getARTokenReuseCount() << "\n";
-    output << "\n" << "//.AA_Token_Reuse_Count " << dec << getAATokenReuseCount() << "\n";
-    output << "\n" << "//.Math_Inst_Count " << dec << getMathInstCount() << "\n";
-    output << "\n" << "//.Sync_Inst_Count " << dec << getSyncInstCount() << "\n";
-    output << "\n" << "//.AW_Sync_Inst_Count " << dec << getAWSyncInstCount() << "\n";
-    output << "\n" << "//.AR_Sync_Inst_Count " << dec << getARSyncInstCount() << "\n";
     output << "\n" << "//.Bank_Good_Count " << dec << getBankGoodNum() << "\n";
     output << "\n" << "//.Bank_Ok_Count " << dec << getBankOkNum() << "\n";
     output << "\n" << "//.Bank_Bad_Count " << dec << getBankBadNum() << "\n";
@@ -5893,7 +5955,7 @@ void G4_BB::emitDepInfo(std::ostream& output, G4_INST* inst, int offset)
     return;
 }
 
-static bool isSWSBRequired(G4_INST* inst)
+static bool isSWSBRequired(IR_Builder* builder, G4_INST* inst)
 {
     // Iterate over all operands and create buckets.
     for (Gen4_Operand_Number opndNum
@@ -5929,11 +5991,12 @@ static bool isSWSBRequired(G4_INST* inst)
     return false;
 }
 
-static G4_INST* setForceDebugSWSB(IR_Builder* builder, G4_BB* bb, G4_INST* inst)
+static G4_INST* setForceDebugSWSB(IR_Builder* builder, G4_BB* bb, INST_LIST_ITER inst_it)
 {
+    G4_INST* inst = (*inst_it);
     G4_INST* syncInst = nullptr;
 
-    if (!isSWSBRequired(inst))
+    if (!isSWSBRequired(builder, inst))
     {
         return nullptr;
     }
@@ -5945,7 +6008,7 @@ static G4_INST* setForceDebugSWSB(IR_Builder* builder, G4_BB* bb, G4_INST* inst)
         inst->setToken(0);
 
         G4_SrcRegRegion* src0 = builder->createNullSrc(Type_UD);
-        syncInst = builder->createInternalInst(NULL, G4_sync_nop, NULL, false, 1, NULL, src0, NULL, 0, inst->getLineNo(), inst->getCISAOff(), NULL);
+        syncInst = builder->createSync(G4_sync_nop, src0);
         G4_Operand* opnd = inst->getOperand(Opnd_dst);
         SWSBTokenType tokenType = SWSBTokenType::TOKEN_NONE;
         if (!opnd || !opnd->getBase() || opnd->isNullReg())
@@ -5982,7 +6045,7 @@ void vISA::forceDebugSWSB(G4_Kernel* kernel)
                 G4_INST* inst = (*inst_it);
                 G4_INST* newInst = nullptr;
 
-                newInst = setForceDebugSWSB(kernel->fg.builder, bb, inst);
+                newInst = setForceDebugSWSB(kernel->fg.builder, bb, inst_it);
                 inst->setLexicalId(instID);
                 instID++;
 
@@ -5990,9 +6053,14 @@ void vISA::forceDebugSWSB(G4_Kernel* kernel)
                 {
                     INST_LIST_ITER new_it = inst_it;
                     new_it++;
-                    bb->insert(new_it, newInst);
+                    bb->insertBefore(new_it, newInst);
                     newInst->setLexicalId(instID);
                     instID++;
+                    if (new_it == bb->end())
+                    {
+                        break;
+                    }
+                    inst_it++;
                 }
             }
         }
@@ -6024,7 +6092,7 @@ static void setInstructionStallSWSB(IR_Builder* builder,
 
         G4_INST* syncInst = nullptr;
         G4_SrcRegRegion* src0 = builder->createNullSrc(Type_UD);
-        syncInst = builder->createInternalInst(NULL, G4_sync_nop, NULL, false, 1, NULL, src0, NULL, 0, inst->getLineNo(), inst->getCISAOff(), NULL);
+        syncInst = builder->createSync(G4_sync_nop, src0);
 
         unsigned short token = inst->getToken();
         SWSBTokenType tokenType = SWSBTokenType::TOKEN_NONE;
@@ -6038,7 +6106,7 @@ static void setInstructionStallSWSB(IR_Builder* builder,
             tokenType = SWSBTokenType::AFTER_WRITE;
         }
         syncInst->setDepToken(token, tokenType);
-        inst_it = bb->insert(next_it, syncInst);
+        inst_it = bb->insertBefore(next_it, syncInst);
     }
 
     return;
@@ -6048,23 +6116,22 @@ static void setInstructionBarrierSWSB(IR_Builder* builder,
     G4_BB* bb,
     INST_LIST_ITER& inst_it)
 {
-    G4_INST* inst = *inst_it;
 
     G4_INST* syncAllRdInst = nullptr;
     G4_SrcRegRegion* src0 = builder->createNullSrc(Type_UD);
-    syncAllRdInst = builder->createInternalInst(NULL, G4_sync_allrd, NULL, false, 1, NULL, src0, NULL, 0, inst->getLineNo(), inst->getCISAOff(), NULL);
+    syncAllRdInst = builder->createSync(G4_sync_allrd, src0);
     syncAllRdInst->setDistance(1);
     INST_LIST_ITER next_it = inst_it;
     next_it++;
-    inst_it = bb->insert(next_it, syncAllRdInst);
+    inst_it = bb->insertBefore(next_it, syncAllRdInst);
 
     G4_INST* syncAllWrInst = nullptr;
     src0 = builder->createNullSrc(Type_UD);
-    syncAllWrInst = builder->createInternalInst(NULL, G4_sync_allwr, NULL, false, 1, NULL, src0, NULL, 0, inst->getLineNo(), inst->getCISAOff(), NULL);
+    syncAllWrInst = builder->createSync(G4_sync_allwr, src0);
 
     next_it = inst_it;
     next_it++;
-    inst_it = bb->insert(next_it, syncAllWrInst);
+    inst_it = bb->insertBefore(next_it, syncAllWrInst);
 }
 
 
@@ -6461,4 +6528,47 @@ G4_BB* Dom::getCommonImmDom(std::unordered_set<G4_BB*>& bbs)
     }
 
     return entryBB;
+}
+
+bool G4_INST::isDFInstruction() const
+{
+    G4_Operand* dst = getDst();
+    if (dst && (dst->getType() == Type_DF))
+    {
+        return true;
+    }
+    for (int i = 0; i < getNumSrc(); i++)
+    {
+        G4_Operand* src = getSrc(i);
+        if (src && (src->getType() == Type_DF))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool G4_INST::isMathPipeInst() const
+{
+    if (isMath())
+    {
+        return true;
+    }
+
+
+    return false;
+}
+
+bool G4_INST::distanceHonourInstruction() const
+{
+    if (isSend() || op == G4_nop || isWait() || isMath())
+    {
+        return false;
+    }
+    return true;
+}
+
+bool G4_INST::tokenHonourInstruction() const
+{
+    return isSend() || isMath();
 }

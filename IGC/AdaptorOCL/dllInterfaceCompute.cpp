@@ -39,7 +39,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "AdaptorOCL/OCL/BuiltinResource.h"
 #include "AdaptorOCL/OCL/TB/igc_tb.h"
 
-#include "AdaptorOCL/Upgrader/Upgrader.h"
 #include "AdaptorOCL/UnifyIROCL.hpp"
 #include "AdaptorOCL/DriverInfoOCL.hpp"
 
@@ -54,8 +53,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "usc.h"
 
 #include "AdaptorOCL/OCL/sp/gtpin_igc_ocl.h"
-#include "AdaptorOCL/igcmc.h"
 #include "AdaptorOCL/cmc.h"
+#include "common/LLVMWarningsPush.hpp"
+#include <llvm/ADT/ScopeExit.h>
+#include "VectorCompiler/include/vc/Support/StatusCode.h"
+#include "VectorCompiler/include/vc/GenXCodeGen/GenXWrapper.h"
+#include "common/LLVMWarningsPop.hpp"
 
 #include <iStdLib/MemCopy.h>
 
@@ -78,7 +81,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <sstream>
 #include <iomanip>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 //In case of use GT_SYSTEM_INFO in GlobalData.h from inc/umKmInc/sharedata.h
 //We have to do this temporary defines
@@ -293,7 +296,7 @@ bool CIGCTranslationBlock::Translate(
     }
     else
     {
-        IGC_ASSERT(0 && "Unsupported input format");
+        IGC_ASSERT_MESSAGE(0, "Unsupported input format");
         return false;
     }
     return false;
@@ -328,6 +331,63 @@ void GenerateCompilerOptionsMD(llvm::LLVMContext &C, llvm::Module &M, llvm::Stri
     NamedMD->addOperand(llvm::MDNode::get(C, ValueVec));
 }
 
+// Dump shader (binary or text), to output directory.
+// Create directory if it doesn't exist.
+// Works for all OSes.
+// ext - file name suffix (optional) and extension.
+void DumpShaderFile(
+    const std::string& dstDir,
+    const char* pBuffer,
+    const UINT bufferSize,
+    const QWORD hash,
+    const std::string& ext)
+{
+    if (pBuffer && bufferSize > 0)
+    {
+        std::ostringstream fullPath(dstDir, std::ostringstream::ate);
+        fullPath << "OCL_asm"
+            << std::hex
+            << std::setfill('0')
+            << std::setw(sizeof(hash) * CHAR_BIT / 4)
+            << hash
+            << std::dec
+            << std::setfill(' ')
+            << ext;
+
+        FILE* pFile = NULL;
+        fopen_s(&pFile, fullPath.str().c_str(), "wb");
+        if (pFile)
+        {
+            fwrite(pBuffer, 1, bufferSize, pFile);
+            fclose(pFile);
+        }
+    }
+}
+
+#if defined(IGC_SPIRV_TOOLS_ENABLED)
+spv_result_t DisassembleSPIRV(const char* pBuffer, UINT bufferSize, spv_text* outSpirvAsm)
+{
+    const spv_target_env target_env = SPV_ENV_UNIVERSAL_1_3;
+    spv_context context = spvContextCreate(target_env);
+    const uint32_t* const binary = reinterpret_cast<const uint32_t*> (pBuffer);
+    const size_t word_count = (bufferSize / sizeof(uint32_t));
+    const uint32_t options = (SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES | SPV_BINARY_TO_TEXT_OPTION_INDENT | SPV_BINARY_TO_TEXT_OPTION_SHOW_BYTE_OFFSET);
+    spv_diagnostic diagnostic = nullptr;
+
+    const spv_result_t result = spvBinaryToText(
+        context,
+        binary,
+        word_count,
+        options,
+        outSpirvAsm,
+        &diagnostic);
+
+    spvContextDestroy(context);
+    spvDiagnosticDestroy(diagnostic);
+    return result;
+}
+#endif // defined(IGC_SPIRV_TOOLS_ENABLED)
+
 bool ProcessElfInput(
   STB_TranslateInputArgs &InputArgs,
   STB_TranslateOutputArgs &OutputArgs,
@@ -361,6 +421,7 @@ bool ProcessElfInput(
         {
             pElfReader->GetSectionData(i, pData, dataSize);
             InputArgs.pSpecConstantsIds = reinterpret_cast<const uint32_t*>(pData);
+            InputArgs.SpecConstantsSize = static_cast<uint32_t>(dataSize / sizeof(uint32_t));
         }
 
         if (pSectionHeader->Type == CLElfLib::SH_TYPE_SPIRV_SC_VALUES)
@@ -401,6 +462,11 @@ bool ProcessElfInput(
               std::string stringErrMsg{ "SPIRV consumption not enabled for the TARGET." };
               bool success = false;
 #endif
+              // unset specialization constants, to avoid using them by subsequent SPIR-V modules
+              InputArgs.pSpecConstantsIds = nullptr;
+              InputArgs.pSpecConstantsValues = nullptr;
+              InputArgs.SpecConstantsSize = 0;
+
               if (success)
               {
                   InputModule.reset(pKernelModule);
@@ -420,7 +486,7 @@ bool ProcessElfInput(
                       llvm::SMDiagnostic(pInputBuffer->getBufferIdentifier(), llvm::SourceMgr::DK_Error,
                           EIB.message());
                   });
-                  IGC_ASSERT(errMsg.empty() && "parsing bitcode failed");
+                  IGC_ASSERT_MESSAGE(errMsg.empty(), "parsing bitcode failed");
               }
 
               InputModule = std::move(errorOrModule.get());
@@ -472,10 +538,48 @@ bool ProcessElfInput(
             // destroying it
             OutputArgs.OutputSize = OutputString.size();
             OutputArgs.pOutput = pBufResult;
+
+#if defined(IGC_SPIRV_ENABLED)
+            if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
+            {
+                // Dumping SPIRV files needs to be done after linking process, as we need to know
+                // the output parameters to prepare the correct file hash
+                for (unsigned i = 1; i < pHeader->NumSectionHeaderEntries; i++)
+                {
+                    const CLElfLib::SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
+                    IGC_ASSERT(pSectionHeader != NULL);
+                    if (pSectionHeader->Type == CLElfLib::SH_TYPE_SPIRV)
+                    {
+                        char* pSPIRVBitcode = NULL;
+                        size_t size = 0;
+                        pElfReader->GetSectionData(i, pSPIRVBitcode, size);
+                        QWORD hash = ShaderHashOCL((const UINT*)OutputArgs.pOutput, OutputArgs.OutputSize / 4).getAsmHash();
+
+                        // beyond of general hash, each SPIR-V module needs to have it's own hash
+                        QWORD spvHash = ShaderHashOCL((const UINT*)pSPIRVBitcode, size / 4).getAsmHash();
+                        std::ostringstream spvHashSuffix("_", std::ostringstream::ate);
+                        spvHashSuffix << std::hex << std::setfill('0') << std::setw(sizeof(spvHash)* CHAR_BIT / 4) << spvHash;
+                        const std::string suffix = spvHashSuffix.str();
+
+                        const char* pOutputFolder = IGC::Debug::GetShaderOutputFolder();
+                        DumpShaderFile(pOutputFolder, pSPIRVBitcode, size, hash, suffix + ".spv");
+
+#if defined(IGC_SPIRV_TOOLS_ENABLED)
+                        spv_text spirvAsm = nullptr;
+                        if (DisassembleSPIRV(pSPIRVBitcode, size, &spirvAsm) == SPV_SUCCESS)
+                        {
+                            DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, suffix + ".spvasm");
+                        }
+                        spvTextDestroy(spirvAsm);
+#endif // defined(IGC_SPIRV_TOOLS_ENABLED)
+                    }
+                }
+            }
+#endif // defined(IGC_SPIRV_ENABLED)
           }
           else
           {
-            IGC_ASSERT(0 && "Unrecognized output format when processing ELF input");
+            IGC_ASSERT_MESSAGE(0, "Unrecognized output format when processing ELF input");
             success = false;
           }
         }
@@ -568,13 +672,11 @@ bool ParseInput(
         }
     }
 
-    // BEGIN HACK
-    // Upgrade BC to LLVM 3.5.1+ from LLVM 3.4+
     if (inputDataFormatTemp == TB_DATA_FORMAT_LLVM_BINARY) {
         std::unique_ptr<llvm::MemoryBuffer> Buf =
             llvm::MemoryBuffer::getMemBuffer(strInput, "<origin>", false);
         llvm::Expected<std::unique_ptr<llvm::Module>> MOE =
-            upgrader::upgradeAndParseBitcodeFile(Buf->getMemBufferRef(), oclContext);
+            llvm::parseBitcodeFile(Buf->getMemBufferRef(), oclContext);
         if (llvm::Error E = MOE.takeError())
         {
             llvm::handleAllErrors(std::move(E), [&](llvm::ErrorInfoBase &EIB) {
@@ -588,7 +690,6 @@ bool ParseInput(
             pKernelModule = MOE->release();
         }
     }
-    // END HACK
     else if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V) {
 #if defined(IGC_SPIRV_ENABLED)
         //convert SPIR-V binary to LLVM module
@@ -625,7 +726,7 @@ bool ParseInput(
     if (pKernelModule == nullptr)
     {
         err.print(nullptr, llvm::errs(), false);
-        IGC_ASSERT(false && "Parsing module failed!");
+        IGC_ASSERT_MESSAGE(0, "Parsing module failed!");
     }
     if (pKernelModule == nullptr)
     {
@@ -649,7 +750,7 @@ bool ReadSpecConstantsFromSPIRV(std::istream &IS, std::vector<std::pair<uint32_t
     for (auto& SC : SPV)
     {
         SPIRVType *type = SC->getType();
-        uint32_t spec_size = type->getBitWidth() / 8;
+        uint32_t spec_size = type->isTypeBool() ? 1 : type->getBitWidth() / 8;
 
         if (SC->hasDecorate(DecorationSpecId))
         {
@@ -663,7 +764,7 @@ bool ReadSpecConstantsFromSPIRV(std::istream &IS, std::vector<std::pair<uint32_t
             }
             else
             {
-                IGC_ASSERT(0 && "Wrong instruction opcode, shouldn't be here!");
+                IGC_ASSERT_MESSAGE(0, "Wrong instruction opcode, shouldn't be here!");
                 return false;
             }
         }
@@ -694,7 +795,7 @@ void overrideOCLProgramBinary(OpenCLProgramContext &Ctx, char *&binaryOutput, in
     char *newBinaryOutput = new char[newBinarySize];
     f.read(newBinaryOutput, newBinarySize);
 
-    IGC_ASSERT(f && "Not fully read!");
+    IGC_ASSERT_MESSAGE(f.good(), "Not fully read!");
 
     delete[] binaryOutput;
     binaryOutput = newBinaryOutput;
@@ -717,44 +818,68 @@ void dumpOCLProgramBinary(OpenCLProgramContext &Ctx, char *binaryOutput, int bin
 #endif
 }
 
-// Dump shader (binary or text), to default directory.
-// Create directory if it doesn't exist.
-// Works for all OSes.
-// pExt - file name suffix (optional) and extenstion.
-void DumpShaderFile(const char *pOutputFolder, const char * pBuffer, UINT bufferSize, QWORD hash, const char * pExt )
-{
-    using namespace std;
+#if !defined(WDDM_LINUX)
+static std::error_code TranslateBuildVC(
+    const STB_TranslateInputArgs* pInputArgs,
+    STB_TranslateOutputArgs* pOutputArgs, TB_DATA_FORMAT inputDataFormatTemp,
+    const IGC::CPlatform& IGCPlatform, float profilingTimerResolution);
+#endif //  !defined(WDDM_LINUX)
 
-    stringstream ss;
+#if !defined(WDDM_LINUX)
+struct VcPayloadInfo {
+    bool IsValid = false;
+    uint64_t VcOptsOffset = 0;
+    uint64_t IrSize = 0;
+};
+VcPayloadInfo tryExtractPayload(char* pInput, size_t inputSize) {
 
-    if (pBuffer && bufferSize > 0)
-    {
-        ss << pOutputFolder;
-        ss << "OCL_"
-            << "asm"
-            << std::hex
-            << std::setfill('0')
-            << std::setw(sizeof(hash) * CHAR_BIT / 4)
-            << hash
-            << std::dec
-            << std::setfill(' ')
-            << pExt;
+    // Payload format:
+    // |-vc-codegen|c-str llvm-opts|i64(IR size)|i64(Payload size)|-vc-codegen|
+    //
+    // Should be in sync with:
+    //  Source/IGC/AdaptorOCL/ocl_igc_interface/impl/fcl_ocl_translation_ctx_impl.cpp
 
-        FILE* pFile = NULL;
-        fopen_s(&pFile, ss.str().c_str(), "wb");
-        if (pFile)
-        {
-            fwrite(pBuffer, 1, bufferSize, pFile);
-            fclose(pFile);
-        }
-    }
+    // Check for availability of "-vc-codegen" marker at the end
+    const std::string CodegenMarker = "-vc-codegen";
+    // make sure that we also have a room for 2 i64 size items
+    if (inputSize < (CodegenMarker.size() + 2 * sizeof(uint64_t)))
+        return {};
+    const char* const pInputEnd = pInput + inputSize;
+    if (std::memcmp(pInputEnd - CodegenMarker.size(),
+                    CodegenMarker.data(), CodegenMarker.size()) != 0)
+        return {};
+
+    // Read IR and Payload sizes. We already ensured that we have the room
+    uint64_t IrSize;
+    uint64_t PayloadSize;
+    const char* pIrSizeBuff = pInputEnd - CodegenMarker.size() - 2 * sizeof(uint64_t);
+    const char* pPayloadSizeBuff = pInputEnd - CodegenMarker.size() - 1 * sizeof(uint64_t);
+    std::memcpy(&IrSize, pIrSizeBuff, sizeof(IrSize));
+    std::memcpy(&PayloadSize, pPayloadSizeBuff, sizeof(PayloadSize));
+    if (inputSize != (PayloadSize + IrSize))
+        return {};
+
+    // Search for the start of payload, it should start with "-vc-codegen" marker
+    const char* const pIREnd = pInputEnd - PayloadSize;
+    if (std::memcmp(pIREnd, CodegenMarker.data(), CodegenMarker.size()) != 0)
+        return {};
+
+    // Make sure that we have a zero-terminated c-string (vc-options are encoded as such)
+    auto NullPos = std::find(pIREnd, pInputEnd, 0);
+    if (NullPos == pInputEnd)
+        return {};
+    // Consistency check, see the Payload format
+    if ((NullPos + 1) != pIrSizeBuff)
+        return {};
+
+    VcPayloadInfo Result;
+    Result.VcOptsOffset = (pIREnd + CodegenMarker.size()) - pInput;
+    Result.IrSize = IrSize;
+    Result.IsValid = true;
+
+    return Result;
 }
-
-static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
-    STB_TranslateOutputArgs* pOutputArgs,
-    TB_DATA_FORMAT inputDataFormatTemp,
-    const IGC::CPlatform& IGCPlatform,
-    float profilingTimerResolution);
+#endif //  !defined(WDDM_LINUX)
 
 bool TranslateBuild(
     const STB_TranslateInputArgs* pInputArgs,
@@ -764,13 +889,16 @@ bool TranslateBuild(
     float profilingTimerResolution)
 {
     if (pInputArgs->pOptions) {
-        static const char* CMC = "-cmc";
-        if (strstr(pInputArgs->pOptions, CMC) != nullptr)
-            return TranslateBuildCM(pInputArgs,
-                                    pOutputArgs,
-                                    inputDataFormatTemp,
-                                    IGCPlatform,
-                                    profilingTimerResolution);
+#if !defined(WDDM_LINUX)
+        std::error_code Status =
+            TranslateBuildVC(pInputArgs, pOutputArgs, inputDataFormatTemp,
+                             IGCPlatform, profilingTimerResolution);
+        if (!Status)
+            return true;
+        // If vc codegen option was not specified, then vc was not called.
+        if (static_cast<vc::errc>(Status.value()) != vc::errc::not_vc_codegen)
+            return false;
+#endif // !defined(WDDM_LINUX)
     }
 
     // Disable code sinking in instruction combining.
@@ -813,36 +941,14 @@ bool TranslateBuild(
         else if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V)
         {
             DumpShaderFile(pOutputFolder, (char *)pInputArgs->pInput, pInputArgs->InputSize, hash, ".spv");
-
-            #ifdef IGC_SPIRV_TOOLS_ENABLED
-
-            const spv_target_env target_env = SPV_ENV_UNIVERSAL_1_3;
-            spv_context context = spvContextCreate(target_env);
-            const uint32_t* const binary = reinterpret_cast<const uint32_t*> (pInputArgs->pInput);
-            const size_t word_count = (pInputArgs->InputSize / sizeof(uint32_t));
-            const uint32_t options = (SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES | SPV_BINARY_TO_TEXT_OPTION_INDENT | SPV_BINARY_TO_TEXT_OPTION_SHOW_BYTE_OFFSET);
-            spv_text text = nullptr;
-            spv_diagnostic diagnostic = nullptr;
-
-            const spv_result_t result = spvBinaryToText(
-                context,
-                binary,
-                word_count,
-                options,
-                &text,
-                &diagnostic);
-
-            spvContextDestroy(context);
-
-            if (SPV_SUCCESS == result)
+#if defined(IGC_SPIRV_TOOLS_ENABLED)
+            spv_text spirvAsm = nullptr;
+            if (DisassembleSPIRV(pInputArgs->pInput, pInputArgs->InputSize, &spirvAsm) == SPV_SUCCESS)
             {
-                DumpShaderFile(pOutputFolder, text->str, text->length, hash, ".spvasm");
+                DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, ".spvasm");
             }
-
-            spvTextDestroy(text);
-            spvDiagnosticDestroy(diagnostic);
-
-            #endif
+            spvTextDestroy(spirvAsm);
+#endif // defined(IGC_SPIRV_TOOLS_ENABLED)
         }
 
         DumpShaderFile(pOutputFolder, (char *)pInputArgs->pInternalOptions, pInputArgs->InternalOptionsSize, hash, "_internal_options.txt");
@@ -986,22 +1092,21 @@ bool TranslateBuild(
                     _snprintf(ResNumber, sizeof(ResNumber), "#%d", OCL_BC_64);
                     break;
                 default:
-                    IGC_ASSERT(0 && "Unknown bitness of compiled module");
+                    IGC_ASSERT_MESSAGE(0, "Unknown bitness of compiled module");
                 }
 
                 // the MemoryBuffer becomes owned by the module and does not need to be managed
                 pSizeTBuffer.reset(llvm::LoadBufferFromResource(ResNumber, "BC"));
-                IGC_ASSERT(pSizeTBuffer && "Error loading builtin resource");
+                IGC_ASSERT_MESSAGE(pSizeTBuffer, "Error loading builtin resource");
 
                 llvm::Expected<std::unique_ptr<llvm::Module>> ModuleOrErr =
                     getLazyBitcodeModule(pSizeTBuffer->getMemBufferRef(), *oclContext.getLLVMContext());
                 if (llvm::Error EC = ModuleOrErr.takeError())
-                    IGC_ASSERT(0 && "Error lazily loading bitcode for size_t builtins");
+                    IGC_ASSERT_MESSAGE(0, "Error lazily loading bitcode for size_t builtins");
                 else
                     BuiltinSizeModule = std::move(*ModuleOrErr);
 
-                IGC_ASSERT(BuiltinSizeModule
-                    && "Error loading builtin module from buffer");
+                IGC_ASSERT_MESSAGE(BuiltinSizeModule, "Error loading builtin module from buffer");
             }
 
             BuiltinGenericModule->setDataLayout(BuiltinSizeModule->getDataLayout());
@@ -1064,18 +1169,32 @@ bool TranslateBuild(
         }
     } while (retry);
 
-    // Create the binary streams for each compiled kernel
-    oclContext.m_programOutput.CreateKernelBinaries();
-
+    // Prepare and set program binary
     unsigned int pointerSizeInBytes = (PtrSzInBits == 64) ? 8 : 4;
 
-    // Prepare and set program binary
-    Util::BinaryStream programBinary;
-    oclContext.m_programOutput.GetProgramBinary(programBinary, pointerSizeInBytes);
+    // FIXME: zebin currently only support program output itself, will add debug info
+    // into it
+    int binarySize = 0;
+    char* binaryOutput = nullptr;
+    if (!IGC_IS_FLAG_ENABLED(EnableZEBinary)) {
+        Util::BinaryStream programBinary;
+        // Patch token based binary format
+        oclContext.m_programOutput.CreateKernelBinaries();
+        oclContext.m_programOutput.GetProgramBinary(programBinary, pointerSizeInBytes);
+        binarySize = static_cast<int>(programBinary.Size());
+        binaryOutput = new char[binarySize];
+        memcpy_s(binaryOutput, binarySize, (char*)programBinary.GetLinearPointer(), binarySize);
+    } else {
+        // ze binary foramt
+        llvm::SmallVector<char, 64> buf;
+        llvm::raw_svector_ostream llvm_os(buf);
+        oclContext.m_programOutput.GetZEBinary(llvm_os, pointerSizeInBytes);
 
-    int binarySize = static_cast<int>(programBinary.Size());
-    char* binaryOutput = new char[binarySize];
-    memcpy_s(binaryOutput, binarySize, (char*)programBinary.GetLinearPointer(), binarySize);
+        // FIXME: try to avoid memory copy here
+        binarySize = buf.size();
+        binaryOutput = new char[binarySize];
+        memcpy_s(binaryOutput, binarySize, buf.data(), buf.size());
+    }
 
     if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
         dumpOCLProgramBinary(oclContext, binaryOutput, binarySize);
@@ -1181,7 +1300,7 @@ bool CIGCTranslationBlock::Initialize(
         (m_DataFormatInput == TB_DATA_FORMAT_SPIR_V) &&
         isDeviceBinaryFormat(m_DataFormatOutput);
 
-    IGC_ASSERT(validTBChain && "Invalid TB Chain");
+    IGC_ASSERT_MESSAGE(validTBChain, "Invalid TB Chain");
 
     return validTBChain;
 }
@@ -1339,47 +1458,151 @@ static void getvISACompileOpts(const STB_TranslateInputArgs* pInputArgs,
     }
 }
 
-// When an internal otion "-cmc" is present, compile the input as a CM program.
-static bool TranslateBuildCM(const STB_TranslateInputArgs* pInputArgs,
-    STB_TranslateOutputArgs* pOutputArgs,
-    TB_DATA_FORMAT inputDataFormatTemp,
-    const IGC::CPlatform& IGCPlatform,
-    float profilingTimerResolution)
+
+#if !defined(WDDM_LINUX)
+
+static void adjustPlatformVC(const IGC::CPlatform& IGCPlatform,
+                             vc::CompileOptions& Opts)
 {
-    cmc::CMCLibraryLoader Loader;
-    if (!Loader.isValid()) {
-        SetErrorMessage(Loader.ErrMsg, *pOutputArgs);
-        return false;
-    }
-
-    cmc_compile_info* output = nullptr;
-    const std::string cmd = getCommandLine(pInputArgs, inputDataFormatTemp, IGCPlatform);
-    int32_t status = Loader.compileFn(pInputArgs->pInput, pInputArgs->InputSize, cmd.c_str(), &output);
-    if (status == 0 && output) {
-        iOpenCL::CGen8CMProgram CMProgram(IGCPlatform.getPlatformInfo());
-        std::vector<std::string> optstrings;
-        std::vector<const char*> opts;
-        getvISACompileOpts(pInputArgs, optstrings, opts);
-        cmc::vISACompile(output, CMProgram, opts);
-
-        // Prepare and set program binary
-        Util::BinaryStream programBinary;
-        CMProgram.GetProgramBinary(programBinary, output->pointer_size_in_bytes);
-        size_t binarySize = static_cast<size_t>(programBinary.Size());
-        char* binaryOutput = new char[binarySize];
-        memcpy_s(binaryOutput, binarySize, (char*)programBinary.GetLinearPointer(), binarySize);
-        pOutputArgs->OutputSize = static_cast<uint32_t>(binarySize);
-        pOutputArgs->pOutput = binaryOutput;
-
-        // Free the resource allocated in the dll side.
-        Loader.freeFn(output);
-        return true;
-    }
-
-    // Set the error message.
-    const char* Err = "compilation error";
-    SetErrorMessage(Err, *pOutputArgs);
-    return false;
+    Opts.CPUStr = cmc::getPlatformStr(IGCPlatform.getPlatformInfo());
+    Opts.WATable = std::make_unique<WA_TABLE>(IGCPlatform.getWATable());
 }
+
+static void adjustFileTypeVC(TB_DATA_FORMAT DataFormat,
+                             vc::CompileOptions& Opts)
+{
+    switch (DataFormat)
+    {
+    case TB_DATA_FORMAT::TB_DATA_FORMAT_SPIR_V:
+        Opts.FType = vc::FileType::SPIRV;
+        return;
+    default:
+        llvm_unreachable("Data format is not supported yet");
+    }
+}
+
+static void adjustOptLevelVC(vc::CompileOptions& Opts)
+{
+    if (IGC_IS_FLAG_ENABLED(VCOptimizeNone))
+        Opts.OptLevel = vc::OptimizerLevel::None;
+}
+
+static void adjustOptionsVC(const IGC::CPlatform& IGCPlatform,
+                            TB_DATA_FORMAT DataFormat, vc::CompileOptions& Opts)
+{
+    adjustPlatformVC(IGCPlatform, Opts);
+    adjustFileTypeVC(DataFormat, Opts);
+    adjustOptLevelVC(Opts);
+}
+
+static std::error_code getErrorVC(llvm::Error Err,
+                                  STB_TranslateOutputArgs* pOutputArgs)
+{
+    std::error_code Status;
+    llvm::handleAllErrors(
+        std::move(Err), [&Status, pOutputArgs](const llvm::ErrorInfoBase& EI) {
+            Status = EI.convertToErrorCode();
+            // Some tests check for build log when everything is ok.
+            // So let's not even try to touch things if we were not called.
+            if (static_cast<vc::errc>(Status.value()) == vc::errc::not_vc_codegen)
+              return;
+            SetErrorMessage(EI.message(), *pOutputArgs);
+        });
+    return Status;
+}
+
+static void outputBinaryVC(llvm::StringRef Binary,
+                           STB_TranslateOutputArgs* pOutputArgs)
+{
+    size_t BinarySize = static_cast<size_t>(Binary.size());
+    char* pBinaryOutput = new char[BinarySize];
+    memcpy_s(pBinaryOutput, BinarySize, Binary.data(), BinarySize);
+    pOutputArgs->OutputSize = static_cast<uint32_t>(BinarySize);
+    pOutputArgs->pOutput = pBinaryOutput;
+}
+
+static std::error_code TranslateBuildVC(
+    const STB_TranslateInputArgs* pInputArgs,
+    STB_TranslateOutputArgs* pOutputArgs, TB_DATA_FORMAT inputDataFormatTemp,
+    const IGC::CPlatform& IGCPlatform, float profilingTimerResolution)
+{
+#if IGC_VC_DISABLED
+    SetErrorMessage("IGC VC explicitly disabled in build", *pOutputArgs);
+    return false;
+#else
+
+    llvm::StringRef ApiOptions{pInputArgs->pOptions, pInputArgs->OptionsSize};
+    llvm::StringRef InternalOptions{pInputArgs->pInternalOptions,
+                                    pInputArgs->InternalOptionsSize};
+    auto pInput = pInputArgs->pInput;
+    size_t InputSize = pInputArgs->InputSize;
+
+    auto NewPathPayload = tryExtractPayload(pInputArgs->pInput,
+                                            pInputArgs->InputSize);
+    if (NewPathPayload.IsValid) {
+        ApiOptions = "-vc-codegen";
+        InternalOptions = pInputArgs->pInput + NewPathPayload.VcOptsOffset;
+        InputSize = static_cast<size_t>(NewPathPayload.IrSize);
+    }
+
+    auto ExpOptions = vc::ParseOptions(ApiOptions, InternalOptions);
+    if (!ExpOptions)
+        return getErrorVC(ExpOptions.takeError(), pOutputArgs);
+
+    // Reset options when everything is done here.
+    // This is needed to not interfere with subsequent translations.
+    const auto ClOptGuard =
+        llvm::make_scope_exit([]() { llvm::cl::ResetAllOptionOccurrences(); });
+
+    vc::CompileOptions& Opts = ExpOptions.get();
+    adjustOptionsVC(IGCPlatform, inputDataFormatTemp, Opts);
+
+    llvm::ArrayRef<char> Input{pInput, InputSize};
+    auto ExpOutput = vc::Compile(Input, Opts);
+    if (!ExpOutput)
+        return getErrorVC(ExpOutput.takeError(), pOutputArgs);
+    vc::CompileOutput& Res = ExpOutput.get();
+
+    auto Visitor = [&IGCPlatform, pOutputArgs](auto&& CompileResult) {
+        using Ty = std::decay_t<decltype(CompileResult)>;
+        if constexpr (std::is_same_v<Ty, vc::cm::CompileOutput>)
+        {
+            outputBinaryVC(CompileResult.IsaBinary, pOutputArgs);
+        }
+        else if constexpr (std::is_same_v<Ty, vc::ocl::CompileOutput>)
+        {
+            iOpenCL::CGen8CMProgram CMProgram{IGCPlatform.getPlatformInfo()};
+            vc::createBinary(CMProgram, CompileResult.Kernels);
+            if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
+            {
+                llvm::SmallVector<char, 0> ProgramBinary;
+                llvm::raw_svector_ostream ProgramBinaryOS{ProgramBinary};
+                CMProgram.GetZEBinary(ProgramBinaryOS, CompileResult.PointerSizeInBytes);
+                llvm::StringRef BinaryRef(ProgramBinary.data(), ProgramBinary.size());
+                outputBinaryVC(BinaryRef, pOutputArgs);
+            }
+            else
+            {
+                CMProgram.CreateKernelBinaries();
+                Util::BinaryStream ProgramBinary;
+                CMProgram.GetProgramBinary(ProgramBinary,
+                                           CompileResult.PointerSizeInBytes);
+                llvm::StringRef BinaryRef(ProgramBinary.GetLinearPointer(),
+                                          ProgramBinary.Size());
+                outputBinaryVC(BinaryRef, pOutputArgs);
+            }
+        }
+        else
+        {
+            static_assert(!sizeof(Ty), "One of compile output is not visited");
+        }
+    };
+
+    std::visit(Visitor, Res);
+
+    return {};
+#endif
+}
+#endif // !defined(WDDM_LINUX)
 
 } // namespace TC

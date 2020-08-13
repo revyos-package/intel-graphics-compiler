@@ -80,8 +80,6 @@ namespace IGC
 
         /// Asm - Target of Dwarf emission.
         StreamEmitter* Asm;
-        /// m_pModule - VISA processed module
-        VISAModule* m_pModule;
 
         // Holders for some common dwarf information.
         IGC::DwarfDebug* DD;
@@ -116,7 +114,7 @@ namespace IGC
 
     public:
         CompileUnit(unsigned UID, DIE* D, llvm::DICompileUnit* CU,
-            StreamEmitter* A, VISAModule* M, IGC::DwarfDebug* DW);
+            StreamEmitter* A, IGC::DwarfDebug* DW);
         ~CompileUnit();
 
         // Accessors.
@@ -237,6 +235,9 @@ namespace IGC
         /// addTemplateParams - Add template parameters in buffer.
         void addTemplateParams(DIE& Buffer, llvm::DINodeArray TParams);
 
+        ///  addRegisterLoc - Decide whether to emit regx or bregx
+        void addRegisterLoc(DIEBlock* TheDie, unsigned DWReg, int64_t Offset, const llvm::Instruction* dbgInst);
+
         /// addRegisterOp - Add register operand.
         void addRegisterOp(DIEBlock* TheDie, unsigned Reg);
 
@@ -247,6 +248,47 @@ namespace IGC
         /// and attribute parameter because DW_AT_friend attributes are also
         /// type references.
         void addType(DIE* Entity, llvm::DIType* Ty, llvm::dwarf::Attribute Attribute = llvm::dwarf::DW_AT_type);
+
+        // addSimdWidth - add SIMD width
+        void addSimdWidth(DIE* Die, uint16_t SimdWidth);
+
+        // addGTRelativeLocation - add a sequence of attributes to calculate either:
+        // - BTI-relative location of variable in surface state, or
+        // - stateless surface location, or
+        // - bindless surface location or
+        // - bindless sampler location
+        void addGTRelativeLocation(DIEBlock* Block, VISAVariableLocation* Loc);
+
+        // addBindlessOrStatelessLocation - add a sequence of attributes to calculate stateless or
+        // bindless location of variable. baseAddr is one of the following base addreses:
+        // - General State Base Address when variable located in stateless surface
+        // - Bindless Surface State Base Address when variable located in bindless surface
+        // - Bindless Sampler State Base Addres when variable located in bindless sampler
+        void addBindlessOrStatelessLocation(DIEBlock* Block, VISAVariableLocation* Loc, uint32_t baseAddr);
+
+        // addStatelessLocation - add a sequence of attributes to calculate stateless surface location of variable
+        void addStatelessLocation(DIEBlock* Block, VISAVariableLocation* Loc);
+
+        // addBindlessSurfaceLocation - add a sequence of attributes to calculate bindless surface location of variable
+        void addBindlessSurfaceLocation(DIEBlock* Block, VISAVariableLocation* Loc);
+
+        // addBindlessSamplerLocation - add a sequence of attributes to calculate bindless sampler location of variable
+        void addBindlessSamplerLocation(DIEBlock* Block, VISAVariableLocation* Loc);
+
+        // addScratchLocation - add a sequence of attributes to emit scratch space location
+        // of variable
+        void addScratchLocation(DIEBlock* Block, DbgDecoder::VarInfo* varInfo, int32_t vectorOffset);
+
+        // addSLMLocation - add a sequence of attributes to emit SLM location of variable
+        void addSLMLocation(DIEBlock* Block, VISAVariableLocation* Loc);
+
+        // addSimdLane - add a sequence of attributes to calculate location of variable
+        // among SIMD lanes, e.g. a GRF subregister.
+        void addSimdLane(DIEBlock* Block, DbgVariable& DV, VISAVariableLocation *Loc, DbgDecoder::VarInfo* varInfo, bool isPacked);
+
+        // addSimdLaneScalar - add a sequence of attributes to calculate location of scalar variable
+        // e.g. a GRF subregister.
+        void addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, VISAVariableLocation* Loc, DbgDecoder::VarInfo* varInfo, uint16_t subRegInBytes);
 
         /// getOrCreateNameSpace - Create a DIE for DINameSpace.
         DIE* getOrCreateNameSpace(llvm::DINamespace* NS);

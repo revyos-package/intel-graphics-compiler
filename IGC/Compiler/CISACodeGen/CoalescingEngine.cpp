@@ -41,16 +41,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "PayloadMapping.hpp"
-
 #include "common/debug/Debug.hpp"
 #include "common/debug/Dump.hpp"
 #include "common/igc_regkeys.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/InstVisitor.h>
 #include <llvm/ADT/SmallVector.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/IGCPassSupport.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -201,7 +200,8 @@ namespace IGC
                 {
                     GenISAIntrinsic::ID IID = intrinsic->getIntrinsicID();
                     if ((isURBWriteIntrinsic(intrinsic) && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_URB))) ||
-                        (IID == GenISAIntrinsic::GenISA_RTWrite && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))))
+                        (IID == GenISAIntrinsic::GenISA_RTWrite && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))) ||
+                        (IID == GenISAIntrinsic::GenISA_RTDualBlendSource && !(IGC_IS_FLAG_ENABLED(DisablePayloadCoalescing_RT))))
                     {
                         ProcessTuple(DefMI);
                     }
@@ -264,7 +264,7 @@ namespace IGC
 
         }
 
-        assert(numOperands >= 2);
+        IGC_ASSERT(numOperands >= 2);
 
         //No result, but has side effects of updating the split mapping.
         DecideSplit(tupleGeneratingInstruction);
@@ -341,7 +341,7 @@ namespace IGC
                         rootTupleStartOffset,
                         thisTupleStartOffset);
 
-                    assert(ccTuple);
+                    IGC_ASSERT(ccTuple);
 
                     /* Step II: Interference checking */
                     int offsetDiff = rootTupleStartOffset - thisTupleStartOffset;
@@ -417,8 +417,8 @@ namespace IGC
                                     continue;
 
                                 //We do not expect to get Argument here, it must have been isolated.
-                                assert(dyn_cast<llvm::Instruction>(val));
-                                assert(ValueNodeMap.count(val));
+                                IGC_ASSERT(dyn_cast<llvm::Instruction>(val));
+                                IGC_ASSERT(ValueNodeMap.count(val));
                                 //auto RI = ValueNodeMap.find(val);
                                 //ElementNode *Node = RI->second;
                                 ElementNode* Node = ValueNodeMap[val];
@@ -426,7 +426,7 @@ namespace IGC
                                 if (!interferencesFunctor.GetComputedValuesForIsolation().count(val))
                                 {
                                     ccTuple->AttachNodeAtIndex(i + offsetDiff, Node, *this);
-                                    assert(getRegRoot(val));
+                                    IGC_ASSERT(getRegRoot(val));
                                 }
                             }
                         }//for
@@ -532,7 +532,7 @@ namespace IGC
         uint splitPoint = 0;
         const uint numOperands = m_PayloadMapping.GetNumPayloadElements(tupleGeneratingInstruction);
         //No sense entering here if we have less than 2 operands.
-        assert(numOperands >= 2);
+        IGC_ASSERT(numOperands >= 2);
         Value* val = m_PayloadMapping.GetPayloadElementToValueMapping(tupleGeneratingInstruction, 0);
         if (IsValConstOrIsolated(val) || !getRegRoot(val))
         {
@@ -577,11 +577,11 @@ namespace IGC
             }
 
             Value* RootV = getRegRoot(val);
-            assert(RootV);
+            IGC_ASSERT(RootV);
             {
                 isAnyNodeCoalescable = true;
 
-                assert(ValueNodeMap.count(RootV));
+                IGC_ASSERT(ValueNodeMap.count(RootV));
                 auto RI = ValueNodeMap.find(RootV);
                 ElementNode* Node = RI->second;
 
@@ -650,7 +650,7 @@ namespace IGC
                 continue;
             }
 
-            assert(ValueNodeMap.count(RootV));
+            IGC_ASSERT(ValueNodeMap.count(RootV));
             ElementNode* RootNode = ValueNodeMap[RootV];
 
             auto CCTI = NodeCCTupleMap.find(RootNode);
@@ -705,18 +705,18 @@ namespace IGC
             if (!RootV)
                 continue;
 
-            assert(ValueNodeMap.count(RootV));
+            IGC_ASSERT(ValueNodeMap.count(RootV));
             ElementNode* RootNode = ValueNodeMap[RootV];
 
             auto CCTI = NodeCCTupleMap.find(RootNode);
             if (CCTI != NodeCCTupleMap.end()) {
                 //Element is constrained by ccTuple.
-                assert(NodeOffsetMap.count(RootNode));
+                IGC_ASSERT(NodeOffsetMap.count(RootNode));
                 rootTupleStartOffset = NodeOffsetMap[RootNode];
                 thisTupleStartOffset = i;
                 ccTuple = NodeCCTupleMap[RootNode];
                 //Just a sanity check.. :
-                assert(RootNode == ccTuple->GetCCNodeWithIndex(NodeOffsetMap[RootNode]));
+                IGC_ASSERT(RootNode == ccTuple->GetCCNodeWithIndex(NodeOffsetMap[RootNode]));
                 break;
             }
 
@@ -736,7 +736,7 @@ namespace IGC
         const bool evictFullCongruenceClass)
     {
         ElementNode* RootNode = ccTuple->OffsetToCCMap[index];
-        assert(RootNode);
+        IGC_ASSERT(RootNode);
 
         if (evictFullCongruenceClass) {
             Value* NewParent = GetActualDominatingParent(RootNode->value, inst);
@@ -802,7 +802,7 @@ namespace IGC
 
             //Sanity check: tuple contains the root element.
 
-            //assert(getRegRoot(nodeToCheck->value) == nodeToCheck->value);
+            //IGC_ASSERT(getRegRoot(nodeToCheck->value) == nodeToCheck->value);
             Value* RootV = nodeToCheck->value;
             Value* NewParent = GetActualDominatingParent(RootV, tupleGeneratingInstruction);
             //FIXME: what if we do not have pure ssa form? Look at de-ssa comment.
@@ -859,7 +859,7 @@ namespace IGC
                         break;
                 }
 
-                assert(ValueNodeMap.count(val));
+                IGC_ASSERT(ValueNodeMap.count(val));
                 ElementNode* Node = ValueNodeMap[val];
                 ElementNode* ccRootNode = ccTuple->GetCCNodeWithIndex(i + offsetDiff);
 
@@ -874,7 +874,7 @@ namespace IGC
                 }
                 else
                 {
-                    assert(llvm::isa<llvm::Instruction>(val));
+                    IGC_ASSERT(llvm::isa<llvm::Instruction>(val));
                     //Here comes the meat, and the most interesting case:
                     if (ccRootNode != NULL)
                     {
@@ -903,7 +903,7 @@ namespace IGC
                         // and its lifetime spans until (but not including) tupleInst.
                         if (dominating == nullptr && dominated != nullptr)
                         {
-                            //assert( LV->isLiveAt(val, tupleInst) );
+                            //IGC_ASSERT(LV->isLiveAt(val, tupleInst));
                             //Interference check: value is live at dominated
                             if (functor->visitInterfering(val, false))
                                 continue;
@@ -956,7 +956,7 @@ namespace IGC
                             //It is possible that the ccRootNode is not empty, but all
                             //elements that belong to it have been isolated in previously
                             //dominating tuples.
-                            //assert( 0 );
+                            //IGC_ASSERT(0);
                         }
                     }
                     else
@@ -1030,7 +1030,7 @@ namespace IGC
                 ccTuple = GetValueCCTupleMapping(val);
 
                 Value* valRoot = getRegRoot(val);
-                assert(valRoot);
+                IGC_ASSERT(valRoot);
                 ElementNode* Node = ValueNodeMap[valRoot];
                 int offset = NodeOffsetMap[Node];
                 zeroBasedPayloadElementOffset = (offset - ccTuple->GetLeftBound()) - index;
@@ -1144,8 +1144,8 @@ namespace IGC
             {
                 if (terminator != &(*terminator->getParent()->begin()))
                 {
-                    assert(dyn_cast<GenIntrinsicInst>(inst));
-                    assert(terminator->getPrevNode());
+                    IGC_ASSERT(dyn_cast<GenIntrinsicInst>(inst));
+                    IGC_ASSERT(terminator->getPrevNode());
                     if (terminator->getPrevNode() == inst)
                     {
                         //heuristic:
@@ -1209,7 +1209,8 @@ namespace IGC
         }
         else
         {
-            payload = outProgram->GetNewVariable(numOperands * numLanes(simdMode), ISA_TYPE_F, EALIGN_GRF);
+            payload = outProgram->GetNewVariable(
+                numOperands * numLanes(simdMode), ISA_TYPE_F, outProgram->GetContext()->platform.getGRFSize() == 64 ? EALIGN_32WORD : EALIGN_HWORD, CName::NONE);
 
             for (uint i = 0; i < numOperands; i++)
             {
@@ -1252,9 +1253,9 @@ namespace IGC
     }
 
     Value* CoalescingEngine::getPHIRoot(Instruction* PHI) const {
-        assert(dyn_cast<PHINode>(PHI));
+        IGC_ASSERT(dyn_cast<PHINode>(PHI));
         auto RI = ValueNodeMap.find(PHI);
-        assert(RI != ValueNodeMap.end());
+        IGC_ASSERT(RI != ValueNodeMap.end());
         ElementNode* DestNode = RI->second;
         if (DestNode->parent.getInt() & ElementNode::kPHIIsolatedFlag)
             return 0x0;
@@ -1313,7 +1314,8 @@ namespace IGC
         if (isSampleInstruction(inst) ||
             isLdInstruction(inst) ||
             isURBWriteIntrinsic(inst) ||
-            IID == GenISAIntrinsic::GenISA_RTWrite)
+            IID == GenISAIntrinsic::GenISA_RTWrite ||
+            IID == GenISAIntrinsic::GenISA_RTDualBlendSource)
         {
             uint numOperands = inst->getNumOperands();
             for (uint i = 0; i < numOperands; i++)

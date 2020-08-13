@@ -26,7 +26,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs.hpp"
 #include "AdaptorCommon/ImplicitArgs.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/DataLayout.h>
@@ -35,6 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace IGC;
 using namespace IGC::IGCMD;
@@ -95,6 +95,8 @@ KernelArg::KernelArg(const ImplicitArg& implicitArg, const DataLayout* DL, const
     m_isEmulationArgument(false),
     m_imageInfo({ false, false })
 {
+    IGC_ASSERT(implicitArg.getNumberElements());
+
     m_elemAllocateSize = m_allocateSize / implicitArg.getNumberElements();
     if (implicitArg.isLocalIDs() && GRFSize == 64)
     {
@@ -198,7 +200,7 @@ KernelArg::ArgType KernelArg::calcArgType(const Argument* arg, const StringRef t
             // on subroutines.
             //
             // FIXME: There is a chain of dependency.
-            assert(false && "Unrecognized address space");
+            IGC_ASSERT_MESSAGE(0, "Unrecognized address space");
 #endif
             // This is a buffer. Try to decode this
             int address_space = ptrType->getPointerAddressSpace();
@@ -731,7 +733,7 @@ bool KernelArgsOrder::VerifyOrder(std::array<KernelArg::ArgType, static_cast<int
     }
     else
     {
-        assert(0);
+        IGC_ASSERT(0);
     }
 
     return validOrder;
@@ -980,7 +982,7 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
     }
     break;
     default:
-        assert(0);
+        IGC_ASSERT(0);
         break;
     }
 }
@@ -1011,7 +1013,7 @@ KernelArgs::const_iterator::const_iterator(AllocationArgs& args, IterPos pos)
 
 KernelArgs::const_iterator& KernelArgs::const_iterator::operator++()
 {
-    assert(!m_empty);
+    IGC_ASSERT(!m_empty);
     ++m_minor;
 
     if (m_minor == (*m_major).second.end())
@@ -1028,7 +1030,7 @@ KernelArgs::const_iterator& KernelArgs::const_iterator::operator++()
 
 const KernelArg& KernelArgs::const_iterator::operator*()
 {
-    assert(!m_empty);
+    IGC_ASSERT(!m_empty);
     return *m_minor;
 }
 

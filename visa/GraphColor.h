@@ -83,6 +83,7 @@ class LiveRange
     G4_RegFileKind regKind;
     bool* forbidden = nullptr;
     int numForbidden = -1;
+    bool spilled = false;
 
     GlobalRA& gra;
     unsigned numRegNeeded;
@@ -245,6 +246,9 @@ public:
         void setRetIp() { retIp = true; }
         bool isRetIp() const { return retIp; }
 
+        bool isSpilled() const { return spilled; }
+        void setSpilled(bool v) { spilled = v; }
+
 private:
     //const Options *m_options;
     unsigned getForbiddenVectorSize();
@@ -357,7 +361,7 @@ namespace vISA
         // like dense matrix, interference is not symmetric (that is, if v1 and v2 interfere and v1 < v2,
         // we insert (v1, v2) but not (v2, v1)) for better cache behavior
         std::vector<std::unordered_set<uint32_t> > sparseMatrix;
-        const uint32_t denseMatrixLimit = 65536;
+        const uint32_t denseMatrixLimit = 0x20000;
 
         void updateLiveness(BitSet& live, uint32_t id, bool val)
         {
@@ -524,6 +528,20 @@ namespace vISA
         bool isStrongEdgeBetween(G4_Declare*, G4_Declare*);
     };
 
+    // Class to compute reg chart dump and dump it to ostream.
+    // Used only when -dumpregchart is passed.
+    class RegChartDump
+    {
+    public:
+        GlobalRA& gra;
+        std::vector<G4_Declare*> sortedLiveIntervals;
+        std::unordered_map<G4_Declare*, std::pair<G4_INST*, G4_INST*>> startEnd;
+        void recordLiveIntervals(std::vector<G4_Declare*>& dcls);
+        void dumpRegChart(std::ostream&, LiveRange** lrs = nullptr, unsigned int numLRs = 0);
+
+        RegChartDump(GlobalRA& g) : gra(g) {}
+    };
+
     class GraphColor
     {
         GlobalRA& gra;
@@ -569,7 +587,7 @@ namespace vISA
         void removeConstrained();
         void relaxNeighborDegreeGRF(LiveRange* lr);
         void relaxNeighborDegreeARF(LiveRange* lr);
-        bool assignColors(ColorHeuristic heuristicGRF, bool doBankConflict, bool highInternalConflict);
+        bool assignColors(ColorHeuristic heuristicGRF, bool doBankConflict, bool highInternalConflict, bool honorHints = true);
 
         void clearSpillAddrLocSignature()
         {
@@ -704,6 +722,7 @@ namespace vISA
     {
     public:
         VerifyAugmentation *verifyAugmentation = nullptr;
+        RegChartDump* regChart = nullptr;
         static bool useGenericAugAlign()
         {
             auto gen = getPlatformGeneration(getGenxPlatform());
@@ -759,11 +778,18 @@ namespace vISA
         // created in addStoreRestoreForFP
         G4_Declare* oldFPDcl = nullptr;
 
+        // instruction to save/restore vISA FP, only present in functions
+        G4_INST* saveBE_FPInst = nullptr;
+        G4_INST* restoreBE_FPInst = nullptr;
+
         // new temps for each reference of spilled address/flag decls
         std::unordered_set<G4_Declare*> addrFlagSpillDcls;
 
         // store iteration number for GRA loop
         unsigned int iterNo = 0;
+
+        uint32_t numGRFSpill = 0;
+        uint32_t numGRFFill = 0;
 
         void expandFillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
         void expandSpillNonStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* header, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
@@ -776,10 +802,8 @@ namespace vISA
         PhyRegPool& regPool;
         PointsToAnalysis& pointsToAnalysis;
         FCALL_RET_MAP fcallRetMap;
-        VarSplitPass* splitPass = nullptr;
 
-        void setVarSplitPass(VarSplitPass* p) { splitPass = p; }
-        VarSplitPass* getVarSplitPass() { return splitPass; }
+        VarSplitPass* getVarSplitPass() { return kernel.getVarSplitPass(); }
 
         unsigned int getSubRetLoc(G4_BB* bb)
         {
@@ -811,21 +835,17 @@ namespace vISA
             const char* name = builder.getNameString(kernel.fg.mem, 24, "RET__loc%d", retLoc);
             G4_Declare* dcl = builder.createDeclareNoLookup(name, G4_GRF, 2, 1, Type_UD);
 
-            if (VISA_WA_CHECK(builder.getPWaTable(), WaSIMD16SIMD32CallDstAlign))
-            {
-                dcl->setSubRegAlign(Sixteen_Word);
-                setSubRegAlign(dcl, Sixteen_Word);
-            }
-            else
-            {
-                // call destination must still be QWord aligned
-                dcl->setSubRegAlign(Four_Word);
-                setSubRegAlign(dcl, Four_Word);
-            }
+
+            // call destination must still be QWord aligned
+            dcl->setSubRegAlign(Four_Word);
+            setSubRegAlign(dcl, Four_Word);
 
             retDecls[retLoc] = dcl;
             return dcl;
         }
+
+        G4_INST* getSaveBE_FPInst() const { return saveBE_FPInst; };
+        G4_INST* getRestoreBE_FPInst() const { return restoreBE_FPInst; };
 
         static unsigned int owordToGRFSize(unsigned int numOwords);
         static unsigned int hwordToGRFSize(unsigned int numHwords);
@@ -1110,11 +1130,13 @@ namespace vISA
                 {
                     unsigned int reg = bDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum();
                     unsigned int bundle = get_bundle(reg, offset);
+                    unsigned int bundle1 = get_bundle(reg, offset + 1);
                     if (!(occupiedBundles & ((unsigned short)1 << bundle)))
                     {
                         bundleNum++;
                     }
                     occupiedBundles |= (unsigned short)1 << bundle;
+                    occupiedBundles |= (unsigned short)1 << bundle1;
                 }
             }
             if (bundleNum > 12)
@@ -1242,6 +1264,9 @@ namespace vISA
         {
             if (verifyAugmentation)
                 delete verifyAugmentation;
+
+            if (regChart)
+                delete regChart;
         }
 
         void emitFGWithLiveness(LivenessAnalysis& liveAnalysis);

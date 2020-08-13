@@ -68,7 +68,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "SPIRVValue.h"
 #include <algorithm>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 class SPIRVFunction;
@@ -117,7 +117,7 @@ public:
   _SPIRV_DCL_DEC
   void validate()const {
     SPIRVValue::validate();
-    IGC_ASSERT(ParentF && "Invalid parent function");
+    IGC_ASSERT_MESSAGE(ParentF, "Invalid parent function");
   }
 
 private:

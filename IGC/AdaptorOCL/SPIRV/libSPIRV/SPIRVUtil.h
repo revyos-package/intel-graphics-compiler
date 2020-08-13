@@ -49,7 +49,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -69,14 +69,14 @@ public:
   static Ty2 map(Ty1 Key) {
     Ty2 Val;
     bool Found = find(Key, &Val);
-    IGC_ASSERT(Found && "Invalid key");
+    IGC_ASSERT_MESSAGE(Found, "Invalid key");
     return Val;
   }
 
   static Ty1 rmap(Ty2 Key) {
     Ty1 Val;
     bool Found = rfind(Key, &Val);
-    IGC_ASSERT(Found && "Invalid key");
+    IGC_ASSERT_MESSAGE(Found, "Invalid key");
     return Val;
   }
 

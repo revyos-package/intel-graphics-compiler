@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "DebugInfo.hpp"
 #include "GenCodeGenModule.h"
 #include "common/Types.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -62,9 +63,9 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
     auto moduleMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
     bool isOneStepElf = false;
 
-    auto isCandidate = [](CShaderProgram* shaderProgram, SIMDMode m)
+    auto isCandidate = [](CShaderProgram* shaderProgram, SIMDMode m, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE)
     {
-        auto currShader = shaderProgram->GetShader(m);
+        auto currShader = shaderProgram->GetShader(m, mode);
         if (!currShader || !currShader->diData)
             return (CShader*)nullptr;
 
@@ -113,24 +114,103 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
 
         // Sort modules in order of their placement in binary
         DbgDecoder decodedDbg(m_currShader->ProgramOutput()->m_debugDataGenISA);
-        auto getLastGenOff = [&decodedDbg](IGC::VISAModule* v)
+        auto getGenOff = [&decodedDbg](std::vector<std::pair<unsigned int, unsigned int>>& data, unsigned int VISAIndex)
+        {
+            unsigned retval = 0;
+            for (auto& item : data)
+            {
+                if (item.first == VISAIndex)
+                {
+                    retval = item.second;
+                }
+            }
+            return retval;
+        };
+
+        auto getLastGenOff = [this, &decodedDbg, &getGenOff](IGC::VISAModule* v)
         {
             unsigned int genOff = 0;
+            // Detect last instructions of kernel. This information is absent in
+            // dbg info. So detect is as first instruction of first subroutine - 1.
+            // reloc_index, first sub inst's VISA id
+            std::unordered_map<uint32_t, unsigned int> firstSubVISAIndex;
+
+            for (auto& item : decodedDbg.compiledObjs)
+            {
+                firstSubVISAIndex[item.relocOffset] = item.CISAIndexMap.back().first;
+                for (auto& sub : item.subs)
+                {
+                    auto subStartVISAIndex = sub.startVISAIndex;
+                    if (firstSubVISAIndex[item.relocOffset] > subStartVISAIndex)
+                        firstSubVISAIndex[item.relocOffset] = subStartVISAIndex - 1;
+                }
+            }
 
             for (auto& item : decodedDbg.compiledObjs)
             {
                 auto& name = item.kernelName;
                 auto firstInst = (v->GetInstInfoMap()->begin())->first;
                 auto funcName = firstInst->getParent()->getParent()->getName();
-                if (funcName.compare(name) == 0)
+                if (item.subs.size() == 0 && funcName.compare(name) == 0)
+                {
                     genOff = item.CISAIndexMap.back().second;
+                }
+                else
+                {
+                    if (funcName.compare(name) == 0)
+                    {
+                        genOff = getGenOff(item.CISAIndexMap, firstSubVISAIndex[item.relocOffset]);
+                        break;
+                    }
+                    for (auto& sub : item.subs)
+                    {
+                        auto& subName = sub.name;
+                        if (funcName.compare(subName) == 0)
+                        {
+                            genOff = getGenOff(item.CISAIndexMap, sub.endVISAIndex);
+                            break;
+                        }
+                    }
+                }
+
+                if (genOff)
+                    break;
             }
 
             return genOff;
         };
 
+        auto setType = [&decodedDbg](VISAModule* v)
+        {
+            auto firstInst = (v->GetInstInfoMap()->begin())->first;
+            auto funcName = firstInst->getParent()->getParent()->getName();
+
+            for (auto& item : decodedDbg.compiledObjs)
+            {
+                auto& name = item.kernelName;
+                if (funcName.compare(name) == 0)
+                {
+                    if (item.relocOffset == 0)
+                        v->SetType(VISAModule::ObjectType::KERNEL);
+                    else
+                        v->SetType(VISAModule::ObjectType::STACKCALL_FUNC);
+                    return;
+                }
+                for (auto& sub : item.subs)
+                {
+                    auto& subName = sub.name;
+                    if (funcName.compare(subName) == 0)
+                    {
+                        v->SetType(VISAModule::ObjectType::SUBROUTINE);
+                        return;
+                    }
+                }
+            }
+        };
+
         for (auto& m : m_currShader->diData->m_VISAModules)
         {
+            setType(m.second);
             auto lastVISAId = getLastGenOff(m.second);
             sortedVISAModules.push_back(std::make_pair(lastVISAId, std::make_pair(m.first, m.second)));
         }
@@ -141,6 +221,11 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         {
             return p1.first < p2.first;
         });
+
+        for (auto& m : sortedVISAModules)
+        {
+            m_pDebugEmitter->AddVISAModFunc(m.second.second, m.second.first);
+        }
 
         for (auto& m : sortedVISAModules)
         {
@@ -184,7 +269,7 @@ void DebugInfoPass::EmitDebugInfo(bool finalize)
 
         if (dbgSize != 0)
         {
-            assert(buffer != nullptr && "Failed to generate VISA debug info");
+            IGC_ASSERT_MESSAGE(nullptr != buffer, "Failed to generate VISA debug info");
 
             dbgInfo = IGC::aligned_malloc(dbgSize, sizeof(void*));
 
@@ -274,8 +359,13 @@ void DebugInfoData::markOutputVars(const llvm::Instruction* pInst)
         // values anywhere in the code till they are in scope.
         if (m_outputVals.find(pVar) == m_outputVals.end())
         {
-            m_pShader->GetEncoder().GetVISAKernel()->AddAttributeToVar(pVar->visaGenVariable[0], "Output", 0, nullptr);
-            (void)m_outputVals.insert(pVar);
+            if (m_pShader->GetContext()->getModuleMetaData()->compOpt.OptDisable)
+            {
+                // Emit "Output" attribute only when -g and -cl-opt-disable are both passed
+                // -g by itself shouldnt alter generated code
+                m_pShader->GetEncoder().GetVISAKernel()->AddAttributeToVar(pVar->visaGenVariable[0], "Output", 0, nullptr);
+                (void)m_outputVals.insert(pVar);
+            }
         }
     }
 }

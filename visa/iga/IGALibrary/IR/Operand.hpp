@@ -45,7 +45,9 @@ public:
     };
 
     Operand()
-        : m_kind(Kind::INVALID), m_lblBlock(nullptr), m_type(Type::INVALID) {}
+        : m_kind(Kind::INVALID)
+        , m_lblBlock(nullptr)
+        , m_type(Type::INVALID) {}
 
     // direct destination constructor (for constants etc)
     Operand(
@@ -87,7 +89,17 @@ public:
         }
     }
 
+    ///////////////////////////////////////////////////////////////////////////
+    // derived accessors
 
+    // returns true if a direct register reference to the null register
+    bool isNull() const {
+        return getKind() == Kind::DIRECT &&
+            getDirRegName() == RegName::ARF_NULL;
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // other accessors
     DstModifier getDstModifier() const { return m_regOpDstMod; }
     SrcModifier getSrcModifier() const { return m_regOpSrcMod; }
 
@@ -159,11 +171,11 @@ public:
         SrcModifier srcMod,
         RegName rName,
         const RegRef &reg,
-        Region rgn,
+        Region /* rgn */,
         MathMacroExt mme,
         Type type)
     {
-        setMacroSource(srcMod,rName,reg,mme,Region::SRC110,type);
+        setMacroSource(srcMod, rName, reg, mme, Region::SRC110, type);
     }
     void setMacroSource(
         SrcModifier srcMod,

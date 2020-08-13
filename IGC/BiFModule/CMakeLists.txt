@@ -72,7 +72,6 @@ if(NOT CCLANG_FROM_SYSTEM)
     endif()
   endif()
   set(CCLANG_BUILD_INTREE_LLVM_DIR ${LLVM_SOURCE_DIR}/projects/opencl-clang)
-
   ### Check if user by choosing some way of linking with opencl-clang provided required folders
   if(${CCLANG_BUILD_PREBUILDS})
     if(NOT EXISTS ${CCLANG_BUILD_PREBUILDS_DIR})
@@ -85,7 +84,6 @@ if(NOT CCLANG_FROM_SYSTEM)
       set(CCLANG_BUILD_INTREE_LLVM FALSE)
     endif()
   ###
-
   ### User didn't define nothing, then pick the method 2 or 3.
   elseif(EXISTS ${CCLANG_BUILD_PREBUILDS_DIR})
     set(CCLANG_BUILD_PREBUILDS TRUE)
@@ -731,10 +729,15 @@ function(igc_bif_build_bc)
 
     # LLVM linking is triggered by host LLVM package change (where tools are), change of intermediate .bc files or change of additional dependencies.
     # Makes sure that LLVM is unzipped before.
+    if(CMAKE_WDDM_LINUX)
+      find_program(link_command "llvm-link")
+    else()
+      set(link_command "llvm-link")
+    endif()
     add_custom_command(
         OUTPUT "${_bcTempFilePath}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_outBcFileDir}"
-        COMMAND llvm-link -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_BC} ${_bcFiles}
+        COMMAND ${link_command} -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_BC} ${_bcFiles}
         DEPENDS ${_bcFiles} ${_dependencies}
         COMMENT "BiF: \"${_outBcFileName}\": Linking intermediate .bc into output .bc."
       )
@@ -863,13 +866,13 @@ endfunction()
 
 file(GLOB_RECURSE _PRE_RELEASE_CL "${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/PreRelease/*.cl")
 
+
+  set(IGC_BUILD__BIF_OCL_SHARED_INC                "${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/opencl_cth_released.h")
+  set(IGC_BUILD__BIF_OCL_SHARED_INC_PRE_RELEASE    "${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/PreRelease/opencl_cth_pre_release.h")
+
 set(_concatScript   "${IGC_SOURCE_DIR}/BiFModule/concat.py")
 set(IGC_BUILD__BIF_OCL_FORCE_INC "${IGC_BUILD__BIF_DIR}/opencl_cth.h")
-set(IGC_BUILD__BIF_OCL_SHARED_INC  "${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/opencl_cth_released.h")
-set(IGC_BUILD__BIF_OCL_SHARED_INC_PRE_RELEASE    "${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/PreRelease/opencl_cth_pre_release.h")
 set(IGC_BUILD__BIF_OCL_INCLUDES ${IGC_BUILD__BIF_OCL_INCLUDES} ${IGC_BUILD__BIF_OCL_FORCE_INC})
-
-
 
 add_custom_command(
     OUTPUT "${IGC_BUILD__BIF_OCL_FORCE_INC}"
@@ -909,7 +912,8 @@ igc_bif_find_cl_files(IGC_BUILD__BIF_OCL_COMMON_DEPENDS ${IGC_BUILD__BIF_OCL_COM
 set(KHR_DEFINES "cl_khr_f16" "cl_khr_fp64" "cl_khr_gl_msaa_sharing" "cl_khr_mipmap_image" "cl_khr_depth_images" "cl_intel_subgroups_short"
                 "cl_intel_subgroups_char" "cl_intel_subgroups_long" "cl_intel_subgroup_local_block_io" "cl_intel_64bit_global_atomics_placeholder"
                 "cl_khr_subgroup_extended_types" "cl_khr_subgroup_non_uniform_vote" "cl_khr_subgroup_ballot" "cl_khr_subgroup_shuffle"
-                "cl_khr_subgroup_shuffle_relative" "cl_khr_subgroup_non_uniform_arithmetic" "cl_khr_subgroup_clustered_reduce")
+                "cl_khr_subgroup_shuffle_relative" "cl_khr_subgroup_non_uniform_arithmetic" "cl_khr_subgroup_clustered_reduce"
+                "cl_intel_bit_instructions")
 
 igc_bif_build_bc(
     OUTPUT               "${IGC_BUILD__BIF_DIR}/IBiF_Impl_int.bc"

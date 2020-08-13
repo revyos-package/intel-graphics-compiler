@@ -27,29 +27,33 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <sstream>
 #include <fstream>
 #include <functional>
+
 #include "visa_igc_common_header.h"
 #include "Common_ISA.h"
 #include "Common_ISA_util.h"
 #include "Common_ISA_framework.h"
 #include "JitterDataStruct.h"
 #include "VISAKernel.h"
+#include "Attributes.hpp"
 #include "Timer.h"
 #include "FlowGraph.h"
 #include "BuildIR.h"
-#include "BuildCISAIR.h"
 #include "Optimizer.h"
 #include "BinaryEncoding.h"
 #include "BinaryEncodingCNL.h"
 #include "Common_BinaryEncoding.h"
 #include "DebugInfo.h"
-#include "iga/IGALibrary/IR/Instruction.hpp"
 #include "BinaryEncodingIGA.h"
 #include "IsaDisassembly.h"
 #include "LocalScheduler/SWSB_G4IR.h"
+#include "visa/include/RelocationInfo.h"
+#include "InstSplit.h"
 
 #if defined( _DEBUG ) && ( defined( _WIN32 ) || defined( _WIN64 ) )
 #include <windows.h>
 #endif
+
+#include <cctype>
 
 using namespace std;
 using namespace CisaFramework;
@@ -101,6 +105,27 @@ static void GET_NUM_PRED_DESC_OPNDS(int &predOpnd, VISA_INST_Desc *inst_desc_tem
     }
 }
 
+static void getHeightWidth(G4_Type type, unsigned int numberElements,
+    unsigned short& dclWidth, unsigned short& dclHeight, int& totalByteSize)
+{
+    dclWidth = 1, dclHeight = 1;
+    totalByteSize = numberElements * G4_Type_Table[type].byteSize;
+    if (totalByteSize <= G4_GRF_REG_NBYTES)
+    {
+        dclWidth = (uint16_t)numberElements;
+    }
+    else {
+        // here we assume that the start point of the var is the beginning of a GRF?
+        // so subregister must be 0?
+        dclWidth = G4_GRF_REG_NBYTES / G4_Type_Table[type].byteSize;
+        dclHeight = totalByteSize / G4_GRF_REG_NBYTES;
+        if (totalByteSize % G4_GRF_REG_NBYTES != 0) {
+            dclHeight++;
+        }
+    }
+}
+
+
 #if defined(_DEBUG) || defined(_INTERNAL)
     #define START_ASSERT_CHECK 1
 #else
@@ -125,6 +150,14 @@ int VISAKernelImpl::calculateTotalInputSize()
 int VISAKernelImpl::compileFastPath()
 {
     int status = VISA_SUCCESS;
+
+    // make sure attributes for kernel/function are correct
+    assert(
+        (getIsKernel() ||
+         (m_kernelAttrs->isSet(Attributes::ATTR_ArgSize) &&
+          m_kernelAttrs->isSet(Attributes::ATTR_RetValSize))) &&
+        "vISA: input for function must have attributes ArgSize and RetValSize!");
+
     if (getIsKernel())
     {
         status = calculateTotalInputSize();
@@ -147,26 +180,26 @@ void replaceFCOpcodes(IR_Builder& builder)
 {
     BB_LIST_ITER bbEnd = builder.kernel.fg.end();
 
-    for(BB_LIST_ITER bb_it = builder.kernel.fg.begin();
+    for (BB_LIST_ITER bb_it = builder.kernel.fg.begin();
         bb_it != bbEnd;
         bb_it++)
     {
         G4_BB* bb = (*bb_it);
 
-        if(bb->size() > 0)
+        if (bb->size() > 0)
         {
             // pseudo_fc_call/ret would always be last
             // instruction in BB so only look at back
             // of instlist.
             G4_INST* lastInstInBB = bb->back();
 
-            if(lastInstInBB->opcode() == G4_pseudo_fc_call)
+            if (lastInstInBB->opcode() == G4_pseudo_fc_call)
             {
-                lastInstInBB->setOpcode(G4_call);
+                lastInstInBB->asCFInst()->pseudoCallToCall();
             }
-            else if(lastInstInBB->opcode() == G4_pseudo_fc_ret)
+            else if (lastInstInBB->opcode() == G4_pseudo_fc_ret)
             {
-                lastInstInBB->setOpcode(G4_return);
+                lastInstInBB->asCFInst()->pseudoRetToRet();
             }
         }
     }
@@ -181,14 +214,32 @@ static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
     case ALIGN_DWORD: dcl->setSubRegAlign(Even_Word); break;//dword aligned;
     case ALIGN_QWORD: dcl->setSubRegAlign(Four_Word); break;//8 byte aligned;
     case ALIGN_OWORD: dcl->setSubRegAlign(Eight_Word); break;//oword aligned;
-    case ALIGN_GRF: dcl->setSubRegAlign(GRFALIGN); break; //grf aligned;
-    case ALIGN_2_GRF: dcl->setSubRegAlign(GRFALIGN); dcl->setEvenAlign(); break; //2 grf aligned;
+    case ALIGN_GRF: //grf aligned;
+        dcl->setSubRegAlign(Sixteen_Word);
+        break;
+    case ALIGN_2_GRF:  //2 grf aligned;
+        {
+            dcl->setSubRegAlign(Sixteen_Word); dcl->setEvenAlign();
+        }
+        break;
+    case ALIGN_HWORD: dcl->setSubRegAlign(Sixteen_Word); break; // grf aligned for 32 bytes GRF
+    case ALIGN_32WORD:
+        {
+            dcl->setSubRegAlign(Sixteen_Word); dcl->setEvenAlign(); break;  //2 grf aligned for 32 bytes
+        }
+        break;
     default: assert(false && "Incorrect vISA alignment"); break;
     }
 }
 
 int VISAKernelImpl::compileTillOptimize()
 {
+    if (m_options->getOption(vISA_splitInstructions))
+    {
+        InstSplitPass instSplit(m_builder);
+        instSplit.run();
+    }
+
     // For separate compilation run compilation till RA then return
     startTimer(TIMER_CFG);
     m_kernel->fg.constructFlowGraph(m_builder->instList);
@@ -199,6 +250,73 @@ int VISAKernelImpl::compileTillOptimize()
     Optimizer optimizer(*m_kernelMem, *m_builder, *m_kernel, m_kernel->fg);
 
     return optimizer.optimization();
+}
+
+void VISAKernelImpl::adjustIndirectCallOffset()
+{
+    // the call code sequence done at Optimizer::expandIndirectCallWithRegTarget
+    // is:
+    //       add  r2.0  -IP   call_target
+    //       add  r2.0  r2.0  -32
+    //       call r1.0  r2.0
+    // -32 is hardcoded. But SWSB could've inserted sync instructions between
+    // call and add. So we need to re-adjust the offset
+
+    for (auto bb : m_kernel->fg)
+    {
+        if (bb->empty())
+            continue;
+
+        // At this point G4_pseudo_fcall may be converted to G4_call
+        if (bb->back()->isCall() || bb->back()->isFCall())
+        {
+            G4_INST* fcall = bb->back();
+            if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0())
+            {
+                // for every indirect call, count # of instructions inserted
+                // between call and the first add
+                uint64_t sync_offset = 0;
+                G4_INST* first_add = nullptr;
+                INST_LIST::reverse_iterator it = bb->rbegin();
+                // skip call itself
+                ++it;
+                for (; it != bb->rend(); ++it)
+                {
+                    G4_INST* inst = *it;
+                    G4_opcode op = inst->opcode();
+                    if (op == G4_sync_allrd || op == G4_sync_allwr)
+                    {
+                        inst->setNoCompacted();
+                        sync_offset += 16;
+                        continue;
+                    }
+                    else if (op == G4_sync_nop) {
+                        inst->setCompacted();
+                        sync_offset += 8;
+                        continue;
+                    }
+                    else if (op == G4_add)
+                    {
+                        if (first_add == nullptr)
+                        {
+                            first_add = inst;
+                            continue;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    // instructions between call and add could only be
+                    // sync.nop, sync.allrd or sync.allwr
+                    assert(0);
+                }
+                assert(first_add->getSrc(1)->isImm());
+                int64_t adjust_off = first_add->getSrc(1)->asImm()->getInt() - sync_offset;
+                first_add->setSrc(m_builder->createImm(adjust_off, Type_D), 1);
+            }
+        }
+    }
 }
 
 void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
@@ -232,6 +350,10 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         {
             forceDebugSWSB(m_kernel);
         }
+        if (getOptions()->getOption(vISA_DumpDotAll))
+        {
+            m_kernel->dumpDotFile("SWSB");
+        }
     }
 
     if (getOptions()->getuInt32Option(vISA_SWSBTokenBarrier) != 0)
@@ -244,6 +366,9 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         singleInstStallSWSB(m_kernel, getOptions()->getuInt32Option(vISA_SWSBInstStall), getOptions()->getuInt32Option(vISA_SWSBInstStallEnd), false);
     }
 
+
+    if (m_kernel->hasIndirectCall() && m_builder->hasSWSB())
+        adjustIndirectCallOffset();
 
     m_kernel->evalAddrExp();
 
@@ -281,8 +406,8 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
     {
 
         // ToDo: add support for debug info/FastComposite
-        BinaryEncodingIGA pBinaryEncoding(*m_kernelMem, *m_kernel, std::string(m_asmName));
-        pBinaryEncoding.DoAll();
+        BinaryEncodingIGA pBinaryEncoding(*m_kernelMem, *m_kernel, m_asmName);
+        pBinaryEncoding.Encode();
         binary = pBinaryEncoding.EmitBinary(binarySize);
 
         if (isFCCallableKernel() || isFCCallerKernel())
@@ -300,13 +425,13 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
     {
         BinaryEncodingBase* pBinaryEncoding = NULL;
 
-        if (getGenxPlatform() >= GENX_CNL && m_options->getOption(vISA_BXMLEncoder))
+        if (getGenxPlatform() >= GENX_ICLLP && m_options->getOption(vISA_BXMLEncoder))
         {
-            pBinaryEncoding = new BinaryEncodingCNL(*m_kernelMem, *m_kernel, std::string(m_asmName));
+            pBinaryEncoding = new BinaryEncodingCNL(*m_kernelMem, *m_kernel, m_asmName);
         }
         else
         {
-            pBinaryEncoding = new BinaryEncoding(*m_kernelMem, *m_kernel, std::string(m_asmName));
+            pBinaryEncoding = new BinaryEncoding(*m_kernelMem, *m_kernel, m_asmName);
         }
 
         pBinaryEncoding->DoAll();
@@ -394,7 +519,8 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
 
     if (m_options->getOption(vISA_PrintASMCount))
     {
-        RELEASE_MSG("\tKernel " << m_asmName << " : " << m_kernel->getAsmCount() << " asm_count" << std::endl);
+        m_builder->criticalMsgStream() << "\tKernel " << m_kernel->getName() << " : " <<
+            m_kernel->getAsmCount() << " asm instructions\n";
     }
     stopTimer(TIMER_ENCODE_AND_EMIT);
 
@@ -423,51 +549,57 @@ void* VISAKernelImpl::compilePostOptimize(unsigned int& binarySize)
         krnlOutput.close();
     }
 
-    if (m_builder->getJitInfo())
-    {
-        m_builder->getJitInfo()->numAsmCount = m_kernel->getAsmCount();
-    }
+    recordFinalizerInfo();
 
 
     return binary;
+}
+
+void VISAKernelImpl::recordFinalizerInfo()
+{
+    if (m_builder->getJitInfo())
+    {
+        m_builder->getJitInfo()->numAsmCount = m_kernel->getAsmCount();
+        m_builder->getJitInfo()->numGRFTotal = m_kernel->getNumRegTotal();
+    }
 }
 
 int VISAKernelImpl::InitializeFastPath()
 {
 
     m_kernelMem = new vISA::Mem_Manager(4096);
-    m_globalMem = new vISA::Mem_Manager(4096);
 
-    void *frpPnt = m_mem.alloc(sizeof(PhyRegPool));
-
-    m_kernel = new (m_mem) G4_Kernel(m_instListNodeAllocator, *m_kernelMem, m_options, m_major_version, m_minor_version);
+    m_kernel = new (m_mem) G4_Kernel(
+        m_instListNodeAllocator,
+        *m_kernelMem,
+        m_options,
+        m_kernelAttrs,
+        m_major_version,
+        m_minor_version);
     m_kernel->setName(m_name.c_str());
-    m_phyRegPool = new (frpPnt) PhyRegPool(*m_globalMem, m_kernel->getNumRegTotal());
 
     if (getOptions()->getOption(vISA_GenerateDebugInfo))
     {
         m_kernel->getKernelDebugInfo()->setVISAKernel(this);
     }
 
-    if (getOptions()->getOption(vISA_DumpCompilerStats))
+    if (getOptions()->getOption(vISA_EnableCompilerStats))
     {
         m_compilerStats.Enable(false);
     }
     m_jitInfo = (FINALIZER_INFO*)m_mem.alloc(sizeof(FINALIZER_INFO));
 
     void* addr = m_kernelMem->alloc(sizeof(class IR_Builder));
-    m_builder = new(addr)IR_Builder(m_instListNodeAllocator,
-        *m_phyRegPool,
+    m_builder = new(addr)IR_Builder(getGenxPlatform(), m_instListNodeAllocator,
         *m_kernel,
         *m_kernelMem,
         m_options,
+        getCISABuilder(),
         m_jitInfo,
-        m_pWaTable
-        );
+        getCISABuilder()->getWATable()
+    );
 
     m_builder->setIsKernel(m_isKernel);
-    m_builder->setCUnitId(m_kernelID);
-    m_builder->num_general_dcl = this->m_num_pred_vars;
     m_builder->getcompilerStats().Link(m_compilerStats);
     initCompilerStats();
 
@@ -513,6 +645,10 @@ int VISAKernelImpl::InitializeKernel(const char *kernel_name)
 // This enables the the statistic to be printed out even If the optimization did not happen.
 void VISAKernelImpl::initCompilerStats()
 {
+    m_compilerStats.Init(CompilerStats::numGRFSpillStr(), CompilerStats::type_int64);
+    m_compilerStats.Init(CompilerStats::numGRFFillStr(), CompilerStats::type_int64);
+    m_compilerStats.Init(CompilerStats::numSendStr(), CompilerStats::type_int64);
+    m_compilerStats.Init(CompilerStats::numCyclesStr(), CompilerStats::type_int64);
 #if COMPILER_STATS_ENABLE
     m_compilerStats.Init("PreRASchedulerForPressure", CompilerStats::type_bool);
     m_compilerStats.Init("PreRASchedulerForLatency", CompilerStats::type_bool);
@@ -627,80 +763,152 @@ void VISAKernelImpl::createBindlessSampler()
     }
 }
 
-void VISAKernelImpl::setDefaultVariableName(Common_ISA_Var_Class Ty, const char *&varName)
+void VISAKernelImpl::createReservedKeywordSet() {
+    for (int i = 0; i < ISA_NUM_OPCODE; i++) {
+        const VISA_INST_Desc &desc = CISA_INST_table[i];
+        if (desc.name != nullptr)
+            reservedNames.insert(desc.name);
+        int subOpsLen = 0;
+        const ISA_SubInst_Desc *subOps = getSubInstTable(desc.opcode, subOpsLen);
+        if (subOps != nullptr) {
+            // e.g. ops like ISA_SVM have a sub-table of operations
+            for (int si = 0; si < subOpsLen; si++) {
+                // some tables have padding and empty ops; a nullptr name indicates that
+                if (subOps[si].name != nullptr)
+                    reservedNames.insert(subOps[si].name);
+            }
+        }
+    }
+
+    // a mishmash of some of the other reserved words from the lexical
+    // specification
+    reservedNames.insert("FILE");
+    reservedNames.insert("LOC");
+}
+
+bool VISAKernelImpl::isReservedName(const std::string &nm) const {
+    auto opItr = reservedNames.find(nm);
+    return (opItr != reservedNames.end());
+}
+
+void VISAKernelImpl::ensureVariableNameUnique(const char *&varName)
 {
-    // Do not reassign a name if there is one already.
-    if (varName && strlen(varName) > 0)
+    // legalize the LLVM name to vISA standards; some examples follow:
+    // given  ==> we fix it to this
+    // 1.  "0"  ==> "_0"              (LLVM name)
+    // 2.  "add.i.i" ==> "add_i_i"    (LLVM compound name)
+    // 3.  "mul" ==> "mul_"           (vISA keyword)
+    // 4.  suppose both variable "x" and "x0" exist
+    //       "x" ==> "x_1"            (since "x0" already used)
+    //       "x0" ==> "x0_1"          (it's a dumb suffixing strategy)
+    std::stringstream escdName;
+
+    // step 1
+    if (isdigit(varName[0]))
+        escdName << '_';
+
+    // step 2
+    for (size_t i = 0, slen = strlen(varName); i < slen; i++) {
+        char c = varName[i];
+        if (!isalnum(c)) {
+            c = '_';
+        }
+        escdName << c;
+    }
+
+    // case 3: "mul" ==> "mul_"
+    while (isReservedName(escdName.str()))
+        escdName << '_';
+
+    // case 4: if "x" already exists, then use "x_#" where # is 0,1,..
+    std::string varNameS = escdName.str();
+    if (varNames.find(varNameS) != varNames.end()) {
+        // not unqiue, add a counter until it is unique
+        int instance = 0;
+        do {
+            std::stringstream ss;
+            ss << escdName.str() << '_' << instance++;
+            varNameS = ss.str();
+        } while (varNames.find(varNameS) != varNames.end());
+    }
+    varNames.insert(varNameS);
+
+    char *buf = (char*)m_mem.alloc(varNameS.size() + 1);
+    memcpy_s(buf, varNameS.size(), varNameS.c_str(), varNameS.size());
+    buf[varNameS.size()] = 0;
+    varName = buf;
+}
+
+void VISAKernelImpl::generateVariableName(Common_ISA_Var_Class Ty, const char *&varName)
+{
+    if (!m_options->getOption(vISA_GenerateISAASM) &&
+        !m_options->getOption(vISA_IsaAssembly))
         return;
 
-#ifndef _DEBUG
-    // In a debug build, always set a default name. Otherwise, only set default
-    // if emitting visaasm files.
-    if (!m_options->getOption(vISA_GenerateISAASM) && !m_options->getOption(vISA_IsaAssembly))
+    if (varName && *varName) {
+        // if a custom name is given, then ensure it's unique;
+        // if it's not, we will suffix it
+        ensureVariableNameUnique(varName);
         return;
-#endif
-    char* buf = (char*)m_mem.alloc(256);
+    }
+
+    // fall back onto a generic naming scheme
+    // e.g. _V## for generic variables, etc...
+    auto createAnonVarName = [&] (char pfx, unsigned index, int fillW) {
+        std::stringstream ss;
+        ss << pfx << std::setfill('0') << std::setw(fillW) << index;
+        size_t slen = (size_t)ss.tellp();
+        char *buf = (char *)m_mem.alloc(slen + 1);
+        memcpy_s(buf, slen + 1, ss.str().c_str(), slen);
+        buf[slen] = 0;
+        return buf;
+    };
 
     switch (Ty) {
     case Common_ISA_Var_Class::GENERAL_VAR:
-        SNPRINTF(buf, 256, "V%d", varNameCount++);
-        varName = buf;
+        varName = createAnonVarName('V', varNameCount++, 4);
         break;
     case Common_ISA_Var_Class::PREDICATE_VAR:
-        SNPRINTF(buf, 256, "P%d", predicateNameCount++);
-        varName = buf;
+        varName = createAnonVarName('P', predicateNameCount++, 2);
         break;
     case Common_ISA_Var_Class::ADDRESS_VAR:
-        SNPRINTF(buf, 256, "A%d", addressNameCount++);
-        varName = buf;
+        varName = createAnonVarName('A', addressNameCount++, 2);
         break;
     case Common_ISA_Var_Class::SURFACE_VAR:
-        SNPRINTF(buf, 256, "T%d", surfaceNameCount++);
-        varName = buf;
+        varName = createAnonVarName('T', surfaceNameCount++, 3);
         break;
     case Common_ISA_Var_Class::SAMPLER_VAR:
-        SNPRINTF(buf, 256, "S%d", samplerNameCount++);
-        varName = buf;
+        varName = createAnonVarName('S', samplerNameCount++, 3);
         break;
     default:
+        varName = createAnonVarName('X', unknownNameCount++, 2);
         break;
     }
+
+    // ensure that our auto-generated name is unique
+    // i.e. suffix the variable if input already uses this name
+    ensureVariableNameUnique(varName);
 }
 
 std::string VISAKernelImpl::getVarName(VISA_GenVar* decl) const
 {
-    int index = getDeclarationID(decl);
-    stringstream ss;
-    ss << "V" << index;
-    return ss.str();
+    return getVarName((CISA_GEN_VAR*)decl);
 }
 std::string VISAKernelImpl::getVarName(VISA_PredVar* decl) const
 {
-    int index = getDeclarationID(decl) + COMMON_ISA_NUM_PREDEFINED_PRED;
-    stringstream ss;
-    ss << "P" << index;
-    return ss.str();
+    return getVarName((CISA_GEN_VAR*)decl);
 }
 std::string VISAKernelImpl::getVarName(VISA_AddrVar* decl) const
 {
-    int index = getDeclarationID(decl);
-    stringstream ss;
-    ss << "A" << index;
-    return ss.str();
+    return getVarName((CISA_GEN_VAR*)decl);
 }
 std::string VISAKernelImpl::getVarName(VISA_SurfaceVar* decl) const
 {
-    int index = getDeclarationID(decl);
-    stringstream ss;
-    ss << "T" << index;
-    return ss.str();
+    return getVarName((CISA_GEN_VAR*)decl);
 }
 std::string VISAKernelImpl::getVarName(VISA_SamplerVar* decl) const
 {
-    int index = getDeclarationID(decl);
-    stringstream ss;
-    ss << "S" << index;
-    return ss.str();
+    return getVarName((CISA_GEN_VAR*)decl);
 }
 
 std::string VISAKernelImpl::getVectorOperandName(VISA_VectorOpnd* opnd, bool showRegion) const
@@ -715,27 +923,31 @@ std::string VISAKernelImpl::getPredicateOperandName(VISA_PredOpnd* opnd) const
     return printVectorOperand(&fmt, opnd->_opnd.v_opnd, m_options, false);
 }
 
-int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
-                                     VISA_Align varAlign, VISA_GenVar *parentDecl, int aliasOffset)
+int VISAKernelImpl::CreateVISAGenVar(
+    VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
+    VISA_Align varAlign, VISA_GenVar *parentDecl, int aliasOffset)
 {
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     startTimer(TIMER_VISA_BUILDER_CREATE_VAR);
 #endif
+    if (varName == nullptr)
+        varName = "";
     decl = (VISA_GenVar *)m_mem.alloc(sizeof(VISA_GenVar));
-    ////memset(decl, 0, sizeof(VISA_GenVar));
     decl->type = GENERAL_VAR;
     var_info_t *info = &decl->genVar;
 
-    if(m_options->getOption(vISA_isParseMode) && !this->setNameIndexMap(std::string(varName), decl))
+    generateVariableName(decl->type, varName);
+
+    if (m_options->getOption(vISA_isParseMode) && !setNameIndexMap(varName, decl))
     {
         assert( 0 );
         return VISA_FAILURE;
     }
-    setDefaultVariableName(decl->type, varName);
+
+    m_GenVarToNameMap[decl] = varName;
 
     info->bit_properties = (uint8_t)dataType;
     info->bit_properties += varAlign << 4;
-    info->bit_properties += STORAGE_REG << 7;
 
     info->num_elements = (uint16_t)numberElements;
     info->alias_offset = 0;
@@ -750,6 +962,8 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
 
     info->attribute_count = 0;
     info->attributes = NULL;
+
+    decl->index = m_var_info_count++;
 
     if(IS_GEN_BOTH_PATH)
     {
@@ -795,16 +1009,10 @@ int VISAKernelImpl::CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, i
         // Write asm variable decl to stream
         if (IsAsmWriterMode())
         {
-            unsigned funcId = 0;
-            if (!this->getIsKernel())
-            {
-                this->GetFunctionId(funcId);
-            }
             VISAKernel_format_provider fmt(this);
-            m_CISABuilder->m_ssIsaAsm << printVariableDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.var_index++, getIsKernel(), funcId, getOptions()) << endl;
+            m_CISABuilder->m_ssIsaAsm << printVariableDecl(&fmt, m_printDeclIndex.var_index++, getOptions()) << "\n";
         }
     }
-    decl->index = m_var_info_count++;
 
 #if defined(MEASURE_COMPILATION_TIME) && defined(TIME_BUILDER)
     stopTimer(TIMER_VISA_BUILDER_CREATE_VAR);
@@ -828,7 +1036,9 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
     }
 
     addr_info_t * addr = &decl->addrVar;
-    setDefaultVariableName(decl->type, varName);
+    generateVariableName(decl->type, varName);
+
+    m_GenVarToNameMap[decl] = varName;
 
     decl->index = m_addr_info_count++;
     if (IS_GEN_BOTH_PATH)
@@ -854,7 +1064,7 @@ int VISAKernelImpl::CreateVISAAddrVar(VISA_AddrVar *& decl, const char *varName,
         if (IsAsmWriterMode())
         {
             VISAKernel_format_provider fmt(this);
-            m_CISABuilder->m_ssIsaAsm << printAddressDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.addr_index++) << endl;
+            m_CISABuilder->m_ssIsaAsm << printAddressDecl(m_CISABuilder->m_header, &fmt, m_printDeclIndex.addr_index++) << "\n";
         }
     }
 
@@ -882,7 +1092,9 @@ int VISAKernelImpl::CreateVISAPredVar(VISA_PredVar *& decl, const char* varName,
         assert(0);
         return VISA_FAILURE;
     }
-    setDefaultVariableName(decl->type, varName);
+    generateVariableName(decl->type, varName);
+
+    m_GenVarToNameMap[decl] = varName;
 
     pred_info_t * pred = &decl->predVar;
 
@@ -928,7 +1140,9 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
         assert( 0 );
         return VISA_FAILURE;
     }
-    setDefaultVariableName(decl->type, varName);
+    generateVariableName(decl->type, varName);
+
+    m_GenVarToNameMap[decl] = varName;
 
     state_info_t * state = &decl->stateVar;
     state->attribute_count = 0;
@@ -969,7 +1183,7 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
             if (IsAsmWriterMode())
             {
                 VISAKernel_format_provider fmt(this);
-                m_CISABuilder->m_ssIsaAsm << printSamplerDecl(&fmt, m_printDeclIndex.sampler_index++) << endl;
+                m_CISABuilder->m_ssIsaAsm << printSamplerDecl(&fmt, m_printDeclIndex.sampler_index++) << "\n";
             }
             break;
         }
@@ -980,7 +1194,7 @@ int VISAKernelImpl::CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class typ
             {
                 VISAKernel_format_provider fmt(this);
                 unsigned numPreDefinedSurfs = Get_CISA_PreDefined_Surf_Count();
-                m_CISABuilder->m_ssIsaAsm << printSurfaceDecl(&fmt, m_printDeclIndex.surface_index++, numPreDefinedSurfs) << endl;
+                m_CISABuilder->m_ssIsaAsm << printSurfaceDecl(&fmt, m_printDeclIndex.surface_index++, numPreDefinedSurfs) << "\n";
             }
             break;
         }
@@ -1125,12 +1339,13 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
 
     attribute_info_t* attr = (attribute_info_t*)m_mem.alloc(sizeof(attribute_info_t));
 
+    Attributes::ID attrID = Attributes::getAttributeID(attrName);
+
     /*
     if set through NG path it stores wrong name .isa file
     so in CMRT in simulation mode it fails to look up the name
     */
-    if(strcmp(attrName, "AsmName") == 0 ||
-        strcmp(attrName, "OutputAsmPath") == 0)
+    if (attrID == Attributes::ATTR_OutputAsmPath)
     {
         if (m_options->getOption(VISA_AsmFileNameUser))
         {
@@ -1173,21 +1388,12 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
     }
 
     attr->size  = (uint8_t)size;
-    attr->isInt = size != 0 && (!strcmp(attrName, "SLMSize") ||
-        !strcmp(attrName, "SurfaceUsage") ||
-        !strcmp(attrName, "SpillMemOffset") ||
-        !strcmp(attrName, "Scope") ||
-        !strcmp(attrName, "Target") ||
-        !strcmp(attrName, "ArgSize") ||
-        !strcmp(attrName, "RetValSize") ||
-        !strcmp(attrName, "FESPSize") ||
-        !strcmp(attrName, "perThreadInputSize") ||
-        !strcmp(attrName, "Extern"));
-
+    attr->isInt = Attributes::isIntAttribute(attrID);
     if (attr->isInt)
     {
         switch (attr->size)
         {
+        case 0: attr->value.intVal = 1; break;
         case 1: attr->value.intVal = *((int8_t *) valueBuffer); break;
         case 2: attr->value.intVal = *((int16_t*) valueBuffer); break;
         case 4: attr->value.intVal = *((int32_t*) valueBuffer); break;
@@ -1195,9 +1401,15 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             ASSERT_USER(false, "Unsupported attribute size");
             break;
         }
+
+        if (Attributes::isIntKernelAttribute(attrID))
+        {
+            m_kernelAttrs->setIntKernelAttribute(attrID, attr->value.intVal);
+        }
     }
     else
     {
+        // Should be valid attribute of string type!
         if (size > 0)
         {
             attr->value.stringVal = (char*)m_mem.alloc(size + 1);
@@ -1207,9 +1419,15 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
         {
             attr->value.stringVal = (char*) "";
         }
+        if (Attributes::isStringKernelAttribute(attrID))
+        {
+            m_kernelAttrs->setStringKernelAttribute(attrID, attr->value.stringVal);
+        }
+
+        MUST_BE_TRUE(Attributes::isStringAttribute(attrID), "Unsupported attribute!");
     }
 
-    if (strcmp(attrName, "Target" ) == 0)
+    if (attrID == Attributes::ATTR_Target)
     {
         if (attr->value.intVal == 0)
         {
@@ -1227,18 +1445,17 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
         {
             ASSERT_USER( false, "Invalid kernel target attribute." );
         }
-        mTargetAttributeSet = true;
     }
 
-    if(strcmp(attrName, "Callable") == 0)
+    if(attrID == Attributes::ATTR_Callable)
     {
         setFCCallableKernel(true);
     }
-    else if(strcmp(attrName, "Caller") == 0)
+    else if(attrID == Attributes::ATTR_Caller)
     {
         setFCCallerKernel(true);
     }
-    else if(strcmp(attrName, "Composable") == 0)
+    else if(attrID == Attributes::ATTR_Composable)
     {
         setFCComposableKernel(true);
         if (IS_GEN_BOTH_PATH)
@@ -1247,16 +1464,12 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
         }
         m_options->setOption(vISA_loadThreadPayload, false);
     }
-    else if (strcmp(attrName, "Entry") == 0)
+    else if (attrID == Attributes::ATTR_Entry)
     {
         m_builder->getFCPatchInfo()->setIsEntryKernel(true);
         m_options->setOption(vISA_loadThreadPayload, true);
     }
-    else if (strcmp(attrName, "Extern") == 0)
-    {
-        m_builder->setIsExtern((bool)(attr->value.intVal != 0));
-    }
-    else if (strcmp(attrName, "RetValSize") == 0)
+    else if (attrID == Attributes::ATTR_RetValSize)
     {
         if (IS_GEN_BOTH_PATH)
         {
@@ -1266,7 +1479,7 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             }
         }
     }
-    else if (strcmp(attrName, "ArgSize") == 0)
+    else if (attrID == Attributes::ATTR_ArgSize)
     {
         if (IS_GEN_BOTH_PATH)
         {
@@ -1274,13 +1487,6 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             {
                 m_builder->setArgSize((unsigned short)(attr->value.intVal));
             }
-        }
-    }
-    else if (strcmp(attrName, "perThreadInputSize") == 0)
-    {
-        if (IS_GEN_BOTH_PATH)
-        {
-            m_builder->setPerThreadInputSize(attr->value.intVal);
         }
     }
 
@@ -1296,13 +1502,21 @@ int VISAKernelImpl::AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* var
     attribute_info_t *attr = (attribute_info_t *) m_mem.alloc(sizeof(attribute_info_t));
     //memset(attr,0,sizeof(attribute_info_t));
 
-    attr->isInt = false;
     attr->nameIndex = addStringPool(std::string(varName));
+    attr->isInt = Attributes::isIntNonKernelAttribute(Attributes::getAttributeID(varName));
 
-    void * temp = m_mem.alloc(size);
-    memcpy_s(temp, size, val,size);
-    attr->value.stringVal = (char *)temp;
     attr->size = (uint8_t)size;
+    if (attr->isInt)
+    {
+        attr->value.intVal = val ? *((int*)val) : 0;
+        assert(attr->size <= 4 && "Int attribute has a value of 4 bytes at most!");
+    }
+    else
+    {
+        void* temp = m_mem.alloc(size);
+        memcpy_s(temp, size, val, size);
+        attr->value.stringVal = (char*)temp;
+    }
 
     switch(decl->type)
     {
@@ -1314,18 +1528,17 @@ int VISAKernelImpl::AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* var
             //this->m_var_info_size += Get_Size_Attribute_Info(attr);
             if(IS_GEN_BOTH_PATH)
             {
-                if (strcmp(varName, "Input") == 0 ||
-                    strcmp(varName, "Input_Output") == 0)
+                if (Attributes::isAttribute(Attributes::ATTR_Input, varName) ||
+                    Attributes::isAttribute(Attributes::ATTR_Input_Output, varName))
                 {
                     decl->genVar.dcl->getRootDeclare()->setLiveIn();
-
                 }
-                if (strcmp(varName, "Output") == 0 ||
-                    strcmp(varName, "Input_Output") == 0)
+                if (Attributes::isAttribute(Attributes::ATTR_Output, varName) ||
+                    Attributes::isAttribute(Attributes::ATTR_Input_Output, varName))
                 {
                     decl->genVar.dcl->getRootDeclare()->setLiveOut();
                 }
-                if (strcmp(varName, "NoWidening") == 0)
+                if (Attributes::isAttribute(Attributes::ATTR_NoWidening, varName))
                 {
                     decl->genVar.dcl->getRootDeclare()->setDoNotWiden();
                 }
@@ -1494,15 +1707,7 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
 
         if (status == VISA_SUCCESS)
         {
-            // decide the physical register number and sub register number
-            unsigned int regNum = offset / GENX_GRF_REG_SIZ;
-            unsigned int subRegNum = ( offset % GENX_GRF_REG_SIZ ) / dcl->getElemSize();
-            dcl->getRegVar()->setPhyReg(m_phyRegPool->getGreg(regNum), subRegNum);
-            dcl->setRegFile( G4_INPUT );
-            unsigned int reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
-            if (regNum + dcl->getNumRows() > m_kernel->getNumRegTotal() - reservedGRFNum) {
-                MUST_BE_TRUE(false, "INPUT payload execeeds the regsiter number");
-            }
+            m_builder->bindInputDecl(dcl, offset);
         }
         input->dcl = dcl;
         //used in asm generation
@@ -1524,7 +1729,7 @@ int VISAKernelImpl::CreateVISAInputVar(CISA_GEN_VAR *decl,
             {
                 // Print input var
                 VISAKernel_format_provider fmt(this);
-                m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << endl;
+                m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << "\n";
             }
         }
     }
@@ -5500,7 +5705,7 @@ int VISAKernelImpl::AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl 
         G4_SrcRegRegion *cPSCounterOpnd = (cPSCounter) ? cPSCounter->g4opnd->asSrcRegRegion(): NULL;
         G4_SrcRegRegion *sampleIndexOpnd = (cntrls.isSampleIndex) ? sampleIndex->g4opnd->asSrcRegRegion() : NULL;
         G4_Operand *renderTargetIndexOpnd = (cntrls.RTIndexPresent) ? renderTargetIndex->g4opnd : NULL;
-        G4_SrcRegRegion *r1HeaderOpnd = NULL;
+        G4_SrcRegRegion *r1HeaderOpnd = nullptr;
 
         if (r1Header)
         {
@@ -5508,9 +5713,12 @@ int VISAKernelImpl::AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl 
             r1HeaderOpnd = r1Header->g4opnd->asSrcRegRegion();
         }
 
-        G4_Predicate * g4Pred = (pred != NULL)? pred->g4opnd->asPredicate() : NULL;
-        status = m_builder->translateVISARTWrite3DInst(g4Pred, executionSize, emask,
-            surface->g4opnd, r1HeaderOpnd, renderTargetIndexOpnd, cntrls, sampleIndexOpnd, cPSCounterOpnd, numMsgSpecificOpnds, g4params);
+        G4_Predicate * g4Pred = pred ? pred->g4opnd->asPredicate() : nullptr;
+
+        {
+            status = m_builder->translateVISARTWrite3DInst(g4Pred, executionSize, emask,
+                surface->g4opnd, r1HeaderOpnd, renderTargetIndexOpnd, cntrls, sampleIndexOpnd, cPSCounterOpnd, numMsgSpecificOpnds, g4params);
+        }
     }
     if(IS_VISA_BOTH_PATH)
     {
@@ -5523,16 +5731,17 @@ int VISAKernelImpl::AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl 
         int num_operands = 0;
         bool isCPSCounter = (cPSCounter)? true: false;
 
-        int mode =  ((int)cntrls.isSampleIndex << 11)  |
+        int mode =  ((int)cntrls.isNullRT      << 12)   |
+                    ((int)cntrls.isSampleIndex << 11)   |
                     ((int)cntrls.isCoarseMode   << 10)  |
                     ((int)cntrls.isPerSample    << 9)   |
                     ((int)(isCPSCounter)        << 8)   |
-                    (((int)cntrls.isLastWrite   << 7)   |
+                    ((int)cntrls.isLastWrite    << 7)   |
                     ((int)cntrls.isStencil      << 6)   |
                     ((int)cntrls.zPresent       << 5)   |
                     ((int)cntrls.oMPresent      << 4)   |
                     ((int)cntrls.s0aPresent     << 3)   |
-                    ((int)cntrls.RTIndexPresent << 2));
+                    ((int)cntrls.RTIndexPresent << 2);
 
         //mode
         ADD_OPND(num_operands, opnd, this->CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, mode));
@@ -7258,6 +7467,10 @@ int VISAKernelImpl::AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOp
 
 
 
+
+
+
+
 int VISAKernelImpl::patchLastInst(VISA_LabelOpnd *label)
 {
     if(label->_opnd.other_opnd == CISA_INVALID_VAR_ID)
@@ -7307,7 +7520,7 @@ void VISAKernelImpl::addInstructionToEnd(CisaInst * inst)
     {
         // Print instructions
         VISAKernel_format_provider fmt(this);
-        m_CISABuilder->m_ssIsaAsm << printInstruction(&fmt, inst->getCISAInst(), getOptions()) << endl;
+        m_CISABuilder->m_ssIsaAsm << printInstruction(&fmt, inst->getCISAInst(), getOptions()) << "\n";
     }
 }
 
@@ -7378,18 +7591,30 @@ void VISAKernelImpl::patchLabels()
 
     return;
 }
+
+/**
+*  finalizeAttributes() sets attributes based on options, etc.
+*     This is a temporary solution to move some options to attributes.
+*     Once clients set attributes directily without using options, this
+*     function shall be removed.
+*/
+void VISAKernelImpl::finalizeAttributes()
+{
+    if (!m_kernelAttrs->isSet(Attributes::ATTR_Target))
+    {
+        VISATarget target = m_options->getTarget();
+        uint8_t val = (uint8_t)target;
+        AddKernelAttribute("Target", 1, &val);
+    }
+}
+
 /**
 * This function is called right before the kernel instructions are outputed in to a buffer.
 * It assumes that all the VISA instructions have already been generated.
 */
 void VISAKernelImpl::finalizeKernel()
 {
-    if(!mTargetAttributeSet)
-    {
-        VISATarget target = m_options->getTarget();
-        AddKernelAttribute("Target", 1, &target);
-    }
-
+    finalizeAttributes();
     patchLabels();
     m_cisa_kernel.string_count = (uint32_t)m_string_pool.size();
     m_cisa_kernel.strings = (const char **) m_mem.alloc(m_cisa_kernel.string_count * sizeof(char *));
@@ -7603,25 +7828,19 @@ unsigned long VISAKernelImpl::writeInToCisaBinaryBuffer(const void * value, int 
 
 VISA_LabelOpnd* VISAKernelImpl::getLabelOperandFromFunctionName(std::string name)
 {
-    std::map<std::string, VISA_LabelOpnd *>::iterator it;
-    it = m_funcName_to_labelID_map.find(name);
-    if(m_funcName_to_labelID_map.end() == it)
-    {
-        return NULL;
-    }else
-    {
+    auto it = m_funcName_to_labelID_map.find(name);
+    if(m_funcName_to_labelID_map.end() == it) {
+        return nullptr;
+    } else {
         return it->second;
     }
 }
 unsigned int VISAKernelImpl::getLabelIdFromFunctionName(std::string name)
 {
-    std::map<std::string, VISA_LabelOpnd *>::iterator it;
-    it = m_funcName_to_labelID_map.find(name);
-    if(m_funcName_to_labelID_map.end() == it)
-    {
+    auto it = m_funcName_to_labelID_map.find(name);
+    if (m_funcName_to_labelID_map.end() == it) {
         return INVALID_LABEL_ID;
-    }else
-    {
+    } else {
         return it->second->_opnd.other_opnd;
     }
 }
@@ -7687,26 +7906,20 @@ void VISAKernelImpl::popIndexMapScopeLevel()
 
 unsigned int VISAKernelImpl::getIndexFromLabelName(const std::string &name)
 {
-    std::map<std::string, VISA_LabelOpnd *>::iterator it;
-    it = m_label_name_to_index_map.find(name);
-    if(m_label_name_to_index_map.end() == it)
-    {
+    auto it = m_label_name_to_index_map.find(name);
+    if (m_label_name_to_index_map.end() == it) {
         return CISA_INVALID_VAR_ID;
-    }else
-    {
+    } else {
         return it->second->_opnd.other_opnd;
     }
 }
 
 VISA_LabelOpnd* VISAKernelImpl::getLabelOpndFromLabelName(const std::string &name)
 {
-    std::map<std::string, VISA_LabelOpnd *>::iterator it;
-    it = m_label_name_to_index_map.find(name);
-    if(m_label_name_to_index_map.end() == it)
-    {
+    auto it = m_label_name_to_index_map.find(name);
+    if (m_label_name_to_index_map.end() == it) {
         return NULL;
-    }else
-    {
+    } else {
         return (VISA_LabelOpnd *)it->second;
     }
 }
@@ -7716,8 +7929,7 @@ bool VISAKernelImpl::setLabelNameIndexMap(const std::string &name, VISA_LabelOpn
     bool succeeded = true;
 
     //make sure mapping doesn't already exist
-    if( getIndexFromLabelName(name) != CISA_INVALID_VAR_ID )
-    {
+    if (getIndexFromLabelName(name) != CISA_INVALID_VAR_ID) {
         return false;
     }
     m_label_name_to_index_map[name] = lbl;
@@ -7808,7 +8020,6 @@ VISAKernelImpl::~VISAKernelImpl()
         //so that internal data structures get cleared.
         m_kernel->~G4_Kernel();
         m_builder->~IR_Builder();
-        delete m_globalMem;
         delete m_kernelMem;
     }
 }
@@ -7817,6 +8028,20 @@ int VISAKernelImpl::GetGenxBinary(void *&buffer, int &size)
 {
     buffer = this->m_genx_binary_buffer;
     size = this->m_genx_binary_size;
+    return VISA_SUCCESS;
+}
+
+int VISAKernelImpl::GetRelocations(RelocListType &relocs)
+{
+    G4_Kernel::RelocationTableTy& reloc_table = m_kernel->getRelocationTable();
+    for (RelocationEntry& reloc : reloc_table)
+    {
+        G4_INST* inst = reloc.getInst();
+        int64_t genOffset = inst->getGenOffset();
+        uint32_t offset = static_cast<uint32_t>(genOffset + reloc.getTargetOffset(*m_builder));
+        relocs.emplace_back(reloc.getType(), offset, reloc.getSymbolName());
+        assert((genOffset != UNDEFINED_GEN_OFFSET) && (offset > genOffset) && (offset < genOffset + BYTES_PER_INST));
+    }
     return VISA_SUCCESS;
 }
 
@@ -7844,6 +8069,8 @@ int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize
         assert((buffer_p->r_offset > inst->getGenOffset()) && (buffer_p->r_offset < inst->getGenOffset() + BYTES_PER_INST));
 
         assert(reloc.getSymbolName().size() <= MAX_SYMBOL_NAME_LENGTH);
+        // clean the buffer first
+        memset(buffer_p->r_symbol, '0', MAX_SYMBOL_NAME_LENGTH);
         strcpy_s(buffer_p->r_symbol, MAX_SYMBOL_NAME_LENGTH, reloc.getSymbolName().c_str());
         ++buffer_p;
     }
@@ -7896,10 +8123,19 @@ int VISAKernelImpl::GetFunctionId(unsigned int& id) const
 
 int VISAKernelImpl::SetGTPinInit(void* buffer)
 {
-    if (buffer)
+    if (!m_kernel)
+        return VISA_FAILURE;
+
+    auto gtpin = m_kernel->getGTPinData();
+    if (gtpin)
     {
-        auto gtpin = m_kernel->getGTPinData();
-        if (gtpin)
+        if (getOptions()->getOption(vISA_GTPinReRA) || getOptions()->getOption(vISA_GetFreeGRFInfo)
+            || getOptions()->getuInt32Option(vISA_GTPinScratchAreaSize))
+        {
+            // GTPin init set by L0 driver through flags
+            gtpin->setGTPinInitFromL0(true);
+        }
+        if (buffer)
         {
             gtpin->setGTPinInit(buffer);
         }
@@ -7913,13 +8149,13 @@ int VISAKernelImpl::GetGTPinBuffer(void*& buffer, unsigned int& size)
     buffer = nullptr;
     size = 0;
 
-    if (m_kernel->hasGTPinInit())
+    if (!m_kernel)
+        return VISA_FAILURE;
+
+    auto gtpin = m_kernel->getGTPinData();
+    if (gtpin)
     {
-        auto gtpin = m_kernel->getGTPinData();
-        if (gtpin)
-        {
-            buffer = gtpin->getGTPinInfoBuffer(size);
-        }
+        buffer = gtpin->getGTPinInfoBuffer(size);
     }
 
     return VISA_SUCCESS;
@@ -7932,6 +8168,7 @@ int VISAKernelImpl::GetFreeGRFInfo(void*& buffer, unsigned int& size)
 
     if (getOptions()->getOption(vISA_GetFreeGRFInfo))
     {
+        assert(m_kernel);
         auto gtpin = m_kernel->getGTPinData();
         if (gtpin)
         {
@@ -8057,25 +8294,6 @@ G4_Operand* VISAKernelImpl::CommonISABuildPreDefinedSrc(
     return tmpsrc;
 }
 
-void VISAKernelImpl::getHeightWidth(G4_Type type, unsigned int numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize)
-{
-    dclWidth = 1, dclHeight = 1;
-    totalByteSize = numberElements * G4_Type_Table[type].byteSize;
-    if( totalByteSize <= G4_GRF_REG_NBYTES )
-    {
-        dclWidth = (uint16_t)numberElements;
-    }
-    else{
-        // here we assume that the start point of the var is the beginning of a GRF?
-        // so subregister must be 0?
-        dclWidth = G4_GRF_REG_NBYTES / G4_Type_Table[type].byteSize;
-        dclHeight = totalByteSize / G4_GRF_REG_NBYTES;
-        if( totalByteSize % G4_GRF_REG_NBYTES != 0 ){
-            dclHeight++;
-        }
-    }
-}
-
 void VISAKernelImpl::setName(const char* n)
 {
     if (!strcmp("", n)) return;
@@ -8128,23 +8346,6 @@ int VISAKernelImpl::getVISAOffset() const
     }
     // ToDo: we should probably move vISA offset in VISKernelImpl so that we have it in vISA path too
     return -1;
-}
-
-void VISAKernelImpl::processAttributes()
-{
-  int feSPSize = 32;
-  if (getIntKernelAttributeValue("FESPSize", feSPSize) && feSPSize == 64)
-  {
-    m_builder->set64BitFEStackVars();
-  }
-  int spillMemOffset = 0;
-  if (getIntKernelAttributeValue("SpillMemOffset", spillMemOffset))
-  {
-    if (spillMemOffset > 0)
-    {
-      getOptions()->setOption(vISA_SpillMemOffset, (uint32_t)spillMemOffset);
-    }
-  }
 }
 
 void VISAKernelImpl::computeFCInfo(BinaryEncodingBase* binEncodingInstance)
@@ -8346,7 +8547,7 @@ int64_t VISAKernelImpl::getGenSize() const
     return size;
 }
 
-void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions)
+void VISAKernelImpl::computeAndEmitDebugInfo(VISAKernelImplListTy& functions)
 {
     std::list<VISAKernelImpl*> compilationUnitsForDebugInfo;
     compilationUnitsForDebugInfo.push_back(this);
@@ -8392,6 +8593,12 @@ void VISAKernelImpl::computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functio
     emitDebugInfoToMem(this, functions, ptr, size);
     setGenxDebugInfoBuffer((char*)ptr, size);
 #endif
+}
+
+int VISAKernelImpl::AppendVISALLVMInst(void *inst)
+{
+    m_builder->SetCurrentInst(inst);
+    return VISA_SUCCESS;
 }
 
 extern "C" void freeBlock(void* ptr);

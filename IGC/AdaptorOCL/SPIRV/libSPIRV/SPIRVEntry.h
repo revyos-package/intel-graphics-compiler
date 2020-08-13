@@ -74,7 +74,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <set>
 #include <string>
 #include <vector>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -126,7 +126,7 @@ class SPIRVExtInst;
 #define _SPIRV_DEF_DEC1(x)                                                               \
     void decode(std::istream &I) { getDecoder(I) >> x;}
 #define _SPIRV_DEF_DEC2(x,y)                                                             \
-    void decode(std::istream &I) { getDecoder(I) >> x >> y;}
+    void decode(std::istream &I) override { getDecoder(I) >> x >> y;}
 #define _SPIRV_DEF_DEC3(x,y,z)                                                           \
     void decode(std::istream &I) { getDecoder(I) >> x >> y >> z;}
 #define _SPIRV_DEF_DEC3_OVERRIDE(x,y,z)                                                  \
@@ -138,7 +138,7 @@ class SPIRVExtInst;
 #define _SPIRV_DEF_DEC5(x,y,z,u,v)                                                       \
     void decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v;}
 #define _SPIRV_DEF_DEC6(x,y,z,u,v,w)                                                     \
-    void decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v >> w;}
+    void decode(std::istream &I) override { getDecoder(I) >> x >> y >> z >> u >> v >> w;}
 #define _SPIRV_DEF_DEC7(x,y,z,u,v,w,r)                                                   \
     void decode(std::istream &I) { getDecoder(I) >> x >> y >> z >> u >> v >> w >> r;}
 #define _SPIRV_DEF_DEC8(x,y,z,u,v,w,r,s)                                                 \
@@ -294,9 +294,9 @@ public:
 
   /// Checks the integrity of the object.
   virtual void validate()const {
-    IGC_ASSERT(Module && "Invalid module");
-    IGC_ASSERT(OpCode != OpNop && "Invalid op code");
-    IGC_ASSERT((!hasId() || isValid(Id)) && "Invalid Id");
+    IGC_ASSERT_MESSAGE(Module, "Invalid module");
+    IGC_ASSERT_MESSAGE(OpCode != OpNop, "Invalid op code");
+    IGC_ASSERT_MESSAGE((!hasId() || isValid(Id)), "Invalid Id");
   }
   void validateFunctionControlMask(SPIRVWord FCtlMask)const;
   void validateValues(const std::vector<SPIRVId> &)const;

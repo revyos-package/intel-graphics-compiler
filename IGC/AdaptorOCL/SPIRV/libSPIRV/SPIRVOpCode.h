@@ -69,7 +69,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SPIRVUtil.h"
 #include "spirv.hpp"
 #include <string>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -167,6 +167,7 @@ inline bool hasExecScope(Op OpCode) {
 inline bool hasGroupOperation(Op OpCode) {
   unsigned OC = OpCode;
   return (OpGroupIAdd <= OC && OC <= OpGroupSMax) ||
+         (OpGroupNonUniformBallotBitCount == OC)  ||
          (OpGroupNonUniformIAdd <= OC && OC <= OpGroupNonUniformLogicalXor);
 }
 
@@ -201,7 +202,7 @@ inline unsigned getSubgroupAvcINTELTypeVectorWidth(Op Opcode) {
     return 1;
 
   default:
-    IGC_ASSERT(0 && "Unknown VME Opcode!");
+    IGC_ASSERT_MESSAGE(0, "Unknown VME Opcode!");
     return 0;
   }
 }

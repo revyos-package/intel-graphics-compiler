@@ -41,6 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Common_BinaryEncoding.h"
 #include <tuple>
 #include "DebugInfo.h"
+#include "AccSubstitution.h"
 
 using namespace std;
 using namespace vISA;
@@ -62,10 +63,11 @@ void Optimizer::LVN()
     for (auto bb : kernel.fg)
     {
         ::LVN lvn(fg, bb, mem, *fg.builder, p);
-
         lvn.doLVN();
 
         numInstsRemoved += lvn.getNumInstsRemoved();
+
+        numInstsRemoved += ::LVN::removeRedundantSamplerMovs(kernel, bb);
     }
 
     if(kernel.getOption(vISA_OptReport))
@@ -158,49 +160,6 @@ void Optimizer::insertFallThroughJump()
     }
 }
 
-//
-// Check if any GRF is out-of-boundary
-//
-void Optimizer::chkRegBoundary()
-{
-    for (auto bb : fg)
-    {
-        for (INST_LIST_ITER i = bb->begin(), end = bb->end(); i != end; i++)
-        {
-            G4_INST *inst = *i;
-            if (!chkOpndBoundary(inst, inst->getDst())) {
-                MUST_BE_TRUE(false, "region boundary check failure");
-            }
-            else
-            {
-                for (int src=0; src<G4_MAX_SRCS; src++)
-                    if (!chkOpndBoundary(inst, inst->getSrc(src)))
-                    {
-                        MUST_BE_TRUE(false, "region boundary check failure");
-                    }
-            }
-        }
-    }
-}
-
-//
-// Check if GRF (if we know the phy reg num) is out-of-boundary
-// If the operand is not GRF, we return "true" without any check
-//
-bool Optimizer::chkOpndBoundary(G4_INST *inst, G4_Operand *opnd)
-{
-    if (opnd == NULL || (!opnd->isDstRegRegion() && !opnd->isSrcRegRegion()))
-        return true;
-
-    // we can not check indirect addressing now, leave it to address propagation
-    if (opnd->isDstRegRegion() && opnd->asDstRegRegion()->getRegAccess() != Direct)
-        return true;
-    if (opnd->isSrcRegRegion() && opnd->asSrcRegRegion()->getRegAccess() != Direct)
-        return true;
-
-    return true;
-}
-
 void Optimizer::regAlloc()
 {
     if (builder.getOption(vISA_DumpDotAll))
@@ -229,7 +188,6 @@ void Optimizer::countBankConflicts()
 {
     std::list<G4_INST*> conflicts;
     unsigned int numLocals = 0, numGlobals = 0;
-    bool isSKLPlus = ( getGenxPlatform() >= GENX_SKL ? true : false );
 
     for (auto curBB : kernel.fg)
     {
@@ -242,13 +200,13 @@ void Optimizer::countBankConflicts()
             G4_Operand* src1 = curInst->getSrc(1);
             G4_Operand* src2 = curInst->getSrc(2);
 
-            if( ( isSKLPlus && src0 == NULL ) || src1 == NULL || src2 == NULL)
+            if (src0 == NULL || src1 == NULL || src2 == NULL)
                 continue;
 
-            if( ( isSKLPlus && !src0->isSrcRegRegion() ) || !src1->isSrcRegRegion() || !src2->isSrcRegRegion())
+            if (!src0->isSrcRegRegion() || !src1->isSrcRegRegion() || !src2->isSrcRegRegion())
                 continue;
 
-            if( (isSKLPlus && !src0->asSrcRegRegion()->getBase()->asRegVar()->getPhyReg()->isGreg()) ||
+            if (!src0->asSrcRegRegion()->getBase()->asRegVar()->getPhyReg()->isGreg() ||
                 !src1->asSrcRegRegion()->getBase()->asRegVar()->getPhyReg()->isGreg() ||
                 !src1->asSrcRegRegion()->getBase()->asRegVar()->getPhyReg()->isGreg())
                 continue;
@@ -256,11 +214,8 @@ void Optimizer::countBankConflicts()
             // We have a 3 src instruction with each src operand a GRF register region
             unsigned int src0grf = 0, src1grf = 0, src2grf = 0;
 
-            if( isSKLPlus )
-            {
-                src0grf = src0->getBase()->asRegVar()->getPhyReg()->asGreg()->getRegNum() +
-                    src0->asSrcRegRegion()->getRegOff();
-            }
+            src0grf = src0->getBase()->asRegVar()->getPhyReg()->asGreg()->getRegNum() +
+                src0->asSrcRegRegion()->getRegOff();
             src1grf = src1->getBase()->asRegVar()->getPhyReg()->asGreg()->getRegNum() +
                 src1->asSrcRegRegion()->getRegOff();
             src2grf = src2->getBase()->asRegVar()->getPhyReg()->asGreg()->getRegNum() +
@@ -270,55 +225,52 @@ void Optimizer::countBankConflicts()
 
             unsigned int src0partition = 0, src1partition = 0, src2partition = 0;
 
-            if( isSKLPlus )
+            if (src0grf < 64)
             {
-                if(src0grf < 64)
-                {
-                    src0partition = 1;
-                    if(src0grf%2 == 0)
-                        src0partition = 0;
-                }
-                else
-                {
-                    src0partition = 3;
-                    if(src0grf%2 == 0)
-                        src0partition = 2;
-                }
+                src0partition = 1;
+                if (src0grf % 2 == 0)
+                    src0partition = 0;
+            }
+            else
+            {
+                src0partition = 3;
+                if (src0grf % 2 == 0)
+                    src0partition = 2;
             }
 
-            if(src1grf < 64)
+            if (src1grf < 64)
             {
                 src1partition = 1;
-                if(src1grf%2 == 0)
+                if (src1grf % 2 == 0)
                     src1partition = 0;
             }
             else
             {
                 src1partition = 3;
-                if(src1grf%2 == 0)
+                if (src1grf % 2 == 0)
                     src1partition = 2;
             }
 
-            if(src2grf < 64)
+            if (src2grf < 64)
             {
                 src2partition = 1;
-                if(src2grf%2 == 0)
+                if (src2grf % 2 == 0)
                     src2partition = 0;
             }
             else
             {
                 src2partition = 3;
-                if(src2grf%2 == 0)
+                if (src2grf % 2 == 0)
                     src2partition = 2;
             }
 
-            if( ( !isSKLPlus || src0partition == src1partition ) && src1partition == src2partition)
+            if (src0partition == src1partition && src1partition == src2partition)
                 isConflict = true;
 
-            if(curInst->getExecSize() == 16)
+            if (curInst->getExecSize() == 16)
                 isConflict = true;
 
-            if(isConflict == true)
+            if (isConflict == true)
             {
                 conflicts.push_back(curInst);
                 numBankConflicts++;
@@ -330,22 +282,19 @@ void Optimizer::countBankConflicts()
                     return false;
                 };
 
-                if( isSKLPlus )
-                {
-                    if(!isGlobal(curInst->getSrc(0), kernel.fg) &&
-                        curInst->getSrc(0)->getTopDcl()->getRegVar()->getPhyReg())
-                        numLocals++;
-                    else
-                        numGlobals++;
-                }
+                if (!isGlobal(curInst->getSrc(0), kernel.fg) &&
+                    curInst->getSrc(0)->getTopDcl()->getRegVar()->getPhyReg())
+                    numLocals++;
+                else
+                    numGlobals++;
 
-                if(!isGlobal(curInst->getSrc(1), kernel.fg) &&
+                if (!isGlobal(curInst->getSrc(1), kernel.fg) &&
                     curInst->getSrc(1)->getTopDcl()->getRegVar()->getPhyReg())
                     numLocals++;
                 else
                     numGlobals++;
 
-                if(!isGlobal(curInst->getSrc(2), kernel.fg) &&
+                if (!isGlobal(curInst->getSrc(2), kernel.fg) &&
                     curInst->getSrc(2)->getTopDcl()->getRegVar()->getPhyReg())
                     numLocals++;
                 else
@@ -354,34 +303,34 @@ void Optimizer::countBankConflicts()
         }
     }
 
-    if(numBankConflicts > 0)
+    if (numBankConflicts > 0)
     {
         std::ofstream optreport;
-        getOptReportStream( optreport, builder.getOptions() );
+        getOptReportStream(optreport, builder.getOptions());
 
         optreport << std::endl << std::endl;
 
         optreport << "===== Bank conflicts =====" << std::endl;
-        optreport <<  "Found " << numBankConflicts << " conflicts (" << numLocals << " locals, " << numGlobals << " globals) in kernel: " << kernel.getName() << std::endl;
-        for(std::list<G4_INST*>::iterator it = conflicts.begin();
+        optreport << "Found " << numBankConflicts << " conflicts (" << numLocals << " locals, " << numGlobals << " globals) in kernel: " << kernel.getName() << std::endl;
+        for (std::list<G4_INST*>::iterator it = conflicts.begin();
             it != conflicts.end();
             it++)
         {
             G4_INST* i = (*it);
-            i->emit( optreport );
+            i->emit(optreport);
             optreport << " // $" << i->getCISAOff() << ":#" << i->getLineNo() << std::endl;
         }
 
         optreport << std::endl << std::endl;
 
-        closeOptReportStream( optreport );
+        closeOptReportStream(optreport);
     }
 }
 
 void Optimizer::insertDummyCompactInst()
 {
     // Only for SKL+ and compaction is enabled.
-    if (getGenxPlatform() < GENX_SKL || !builder.getOption(vISA_Compaction))
+    if (builder.getPlatform() < GENX_SKL || !builder.getOption(vISA_Compaction))
         return;
 
     // Insert mov (1) r0 r0 at the beginning of this kernel.
@@ -396,7 +345,7 @@ void Optimizer::insertDummyCompactInst()
     {
         if ((*it)->opcode() != G4_label)
         {
-            bb->insert(it, movInst);
+            bb->insertBefore(it, movInst);
             return;
         }
     }
@@ -442,13 +391,13 @@ void Optimizer::insertHashMovs()
                         16,
                         kernel.fg.builder->createNullDst(Type_UD),
                         kernel.fg.builder->createImm((unsigned int)(hashVal & 0xffffffff), Type_UD),
-                        InstOpt_WriteEnable, false);
+                        InstOpt_WriteEnable, false)->InheritLLVMInst(inst);
 
                     hi = kernel.fg.builder->createMov(
                         16,
                         kernel.fg.builder->createNullDst(Type_UD),
                         kernel.fg.builder->createImm((unsigned int)((hashVal >> 32) & 0xffffffff), Type_UD),
-                        InstOpt_WriteEnable, false);
+                        InstOpt_WriteEnable, false)->InheritLLVMInst(inst);
 
                     bb->push_back(lo);
                     bb->push_back(hi);
@@ -569,11 +518,8 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(reassignBlockIDs,        vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(evalAddrExp,             vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(FoldAddrImmediate,       vISA_FoldAddrImmed,           TIMER_MISC_OPTS);
-    INITIALIZE_PASS(chkRegBoundary,          vISA_EnableAlways,            TIMER_NUM_TIMERS);
     INITIALIZE_PASS(localSchedule,           vISA_LocalScheduling,         TIMER_SCHEDULING);
-    INITIALIZE_PASS(NoDD,                    vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(HWWorkaround,            vISA_EnableAlways,            TIMER_MISC_OPTS);
-    INITIALIZE_PASS(NoSrcDepSet,             vISA_EnableNoSrcDep,          TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertInstLabels,        vISA_EnableAlways,            TIMER_NUM_TIMERS);
     INITIALIZE_PASS(insertHashMovs,          vISA_InsertHashMovs,          TIMER_NUM_TIMERS);
     INITIALIZE_PASS(insertDummyCompactInst,  vISA_InsertDummyCompactInst,  TIMER_NUM_TIMERS);
@@ -583,12 +529,11 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(ifCvt,                   vISA_ifCvt,                   TIMER_OPTIMIZER);
     INITIALIZE_PASS(dumpPayload,             vISA_dumpPayload,             TIMER_MISC_OPTS);
     INITIALIZE_PASS(normalizeRegion,         vISA_EnableAlways,            TIMER_MISC_OPTS);
-    INITIALIZE_PASS(checkBarrierUsage,       vISA_EnableAlways,            TIMER_MISC_OPTS);
+    INITIALIZE_PASS(collectStats,            vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(createR0Copy,            vISA_enablePreemption,        TIMER_MISC_OPTS);
     INITIALIZE_PASS(initializePayload,       vISA_InitPayload,             TIMER_NUM_TIMERS);
     INITIALIZE_PASS(cleanupBindless,         vISA_enableCleanupBindless,   TIMER_OPTIMIZER);
     INITIALIZE_PASS(countGRFUsage,           vISA_PrintRegUsage,           TIMER_MISC_OPTS);
-    INITIALIZE_PASS(splitVariables,          vISA_EnableSplitVariables,    TIMER_MISC_OPTS);
     INITIALIZE_PASS(changeMoveType,          vISA_ChangeMoveType,          TIMER_MISC_OPTS);
     INITIALIZE_PASS(reRAPostSchedule,        vISA_ReRAPostSchedule,        TIMER_OPTIMIZER);
     INITIALIZE_PASS(accSubPostSchedule,      vISA_accSubstitution,         TIMER_OPTIMIZER);
@@ -600,6 +545,8 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(insertFenceBeforeEOT,    vISA_EnableAlways,            TIMER_MISC_OPTS);
     INITIALIZE_PASS(insertScratchReadBeforeEOT, vISA_clearScratchWritesBeforeEOT, TIMER_MISC_OPTS);
     INITIALIZE_PASS(mapOrphans,              vISA_EnableAlways,            TIMER_MISC_OPTS);
+    INITIALIZE_PASS(varSplit,                vISA_EnableAlways,            TIMER_OPTIMIZER);
+    INITIALIZE_PASS(legalizeType,            vISA_EnableAlways,            TIMER_MISC_OPTS);
 
     // Verify all passes are initialized.
 #ifdef _DEBUG
@@ -955,10 +902,9 @@ void Optimizer::accSubPostSchedule()
     kernel.fg.resetLocalDataFlowData();
     kernel.fg.localDataFlowAnalysis();
 
-    HWConformity hwConf(builder, kernel, mem);
-
     if (builder.getOption(vISA_localizationForAccSub))
     {
+        HWConformity hwConf(builder, kernel, mem);
         for (auto bb : kernel.fg)
         {
             hwConf.localizeForAcc(bb);
@@ -968,10 +914,8 @@ void Optimizer::accSubPostSchedule()
         kernel.fg.localDataFlowAnalysis();
     }
 
-    for (auto bb : kernel.fg)
-    {
-        hwConf.accSubstitution(bb);
-    }
+    AccSubPass accSub(builder, kernel);
+    accSub.run();
 }
 
 void* gtPinData::getFreeGRFInfo(unsigned int& size)
@@ -1070,9 +1014,6 @@ int Optimizer::optimization()
     // remove redundant movs
     runPass(PI_newLocalCopyPropagation);
 
-    // split 4GRF variables.
-    runPass(PI_splitVariables);
-
     runPass(PI_mergeScalarInst);
 
     runPass(PI_cselPeepHoleOpt);
@@ -1100,6 +1041,8 @@ int Optimizer::optimization()
 
     runPass(PI_insertFenceBeforeEOT);
 
+    runPass(PI_varSplit);
+
     // PreRA scheduling
     runPass(PI_preRA_Schedule);
 
@@ -1116,18 +1059,6 @@ int Optimizer::optimization()
     runPass(PI_removeLifetimeOps);
 
     runPass(PI_countBankConflicts);
-
-    // some passes still rely on G4_Declares and their def-use even after RA,
-    // and removeRedundantMove will break them since it deletes moves solely based on GRF assignment
-    // without maintaining def-use of G4_Declares.
-    // so when these passes are active we have to defer removeRedundMov until after the passes
-    // ToDo: study the perf impact of moving this post scheduling
-    bool preserveVirtualDefUse = kernel.getOption(vISA_ReRAPostSchedule) || builder.doAccSub();
-
-    if (!preserveVirtualDefUse)
-    {
-        runPass(PI_removeRedundMov);
-    }
 
     //
     // if a fall-through BB does not immediately follow its predecessor
@@ -1146,32 +1077,19 @@ int Optimizer::optimization()
 
     runPass(PI_FoldAddrImmediate);
 
-    //
-    // Check if any GRF is out-of-boundary
-    // FIXME: Now we can only check part of the out-of-boundary cases. We can not find out-of-boundary errors in:
-    // (1). <post_dst>/<curr_dst> in send inst; (2). cross 256-bit bar case in compressed instruction
-    //
-    runPass(PI_chkRegBoundary);
-
     runPass(PI_localSchedule);
 
     runPass(PI_accSubPostSchedule);
 
-    runPass(PI_changeMoveType);
+    runPass(PI_legalizeType);
 
-    // NoDD optimization
-    runPass(PI_NoDD);
+    runPass(PI_changeMoveType);
 
     runPass(PI_reRAPostSchedule);
 
-    if (preserveVirtualDefUse
-        )
-    {
-        runPass(PI_removeRedundMov);
-    }
-
-    // Insert NoSrcDepSet flag to improve performance
-    runPass(PI_NoSrcDepSet);
+    // No pass after this should expect def-use to be preserved as this pass
+    // removes raw movs with identical src/dst physical GRFs.
+    runPass(PI_removeRedundMov);
 
     // remove any placeholders blocks inserted to aid regalloc
     // run this pass after reRA pass otherwise CFG can become
@@ -1195,10 +1113,7 @@ int Optimizer::optimization()
 
     runPass(PI_insertHashMovs);
 
-    if (builder.getOptions()->getTarget() == VISA_CM)
-    {
-        runPass(PI_checkBarrierUsage);
-    }
+    runPass(PI_collectStats);
 
     // Create a copy of R0 at the top of kernel.
     // This must be done after all other optimizer
@@ -1275,7 +1190,7 @@ void Optimizer::insertInstLabels()
             if (endifLabel)
             {
                 G4_INST* labelInst = fg.createNewLabelInst( endifLabel, inst->getLineNo(), inst->getCISAOff() );
-                bb->insert( currIter, labelInst );
+                bb->insertBefore( currIter, labelInst );
             }
         }
     }
@@ -1345,7 +1260,7 @@ void Optimizer::insertInstLabels()
              G4_INST *newInst = fg.createNewLabelInst(label, inst->getLineNo(),
                                                       inst->getCISAOff());
 
-             whileBB->insert(whileIter, newInst);
+             whileBB->insertBefore(whileIter, newInst);
          }
     }
 }
@@ -1739,7 +1654,7 @@ G4_SrcModifier Optimizer::mergeModifier( G4_Operand *src, G4_Operand *use )
 static bool checkLifetime(G4_INST *defInst, G4_INST *inst)
 {
     // Check whether current instruction ends any src opnd of op
-    if (inst->opcode() != G4_pseudo_lifetime_end)
+    if (!inst->isLifeTimeEnd())
         return true;
 
     G4_RegVar *Var = GetTopDclFromRegRegion(inst->getSrc(0))->getRegVar();
@@ -1839,7 +1754,7 @@ static bool canSink(G4_BB *bb, INST_LIST_RITER revIter, INST_LIST_RITER other)
     // Both 'other' and 'it' are reverse iterators, and sinking is through
     // forward iterators. The fisrt base should not be decremented by 1,
     // otherwise, the instruction will be inserted before not after.
-    bb->insert(other.base(), defInst);
+    bb->insertBefore(other.base(), defInst);
     bb->erase(--it.base());
 
     return true;
@@ -1854,17 +1769,22 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
     // Cannot hoist if this is not a move, or it is a global operand.
     if  (inst->opcode() != G4_mov ||
          fg.globalOpndHT.isOpndGlobal(inst->getSrc(0)) ||
-         !inst->canHoist(bb->isInSimdFlow(), fg.builder->getOptions()))
+         !inst->canHoist(!bb->isAllLaneActive(), fg.builder->getOptions()))
     {
          return false;
     }
 
-    // Do not do def-hoisting for seeting flags which is likely to increase flag
+    // Do not do def-hoisting for setting flags which is likely to increase flag
     // register pressure.
     if (auto Dst = inst->getDst())
     {
         G4_Declare *Dcl = Dst->getTopDcl();
         if (Dcl && Dcl->getRegFile() == G4_RegFileKind::G4_FLAG)
+        {
+            return false;
+        }
+
+        if (!fg.builder->hasByteALU() && (getTypeSize(Dst->getType()) == 1))
         {
             return false;
         }
@@ -1874,7 +1794,7 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
     for (auto I = inst->def_begin(), E = inst->def_end(); I != E; ++I)
     {
         ASSERT_USER(I->second == Opnd_src0, "invalid use-def chain");
-        if (!inst->canHoistTo(I->first, bb->isInSimdFlow()))
+        if (!inst->canHoistTo(I->first, !bb->isAllLaneActive()))
             return false;
 
         auto defInst = I->first;
@@ -2162,7 +2082,7 @@ static void doHoisting(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
             defInst->setExecSize(defInst->getExecSize() * inst->getExecSize());
         }
         defInst->setSaturate(inst->getSaturate() || defInst->getSaturate());
-        if (bb->isInSimdFlow())
+        if (!bb->isAllLaneActive())
         {
             // set writeEnable of dstInst to be off
             defInst->setOptions((defInst->getOption() & ~0xFFF000C) |
@@ -2692,7 +2612,7 @@ static void hoistUseInst(G4_BB *bb, G4_INST *inst , INST_LIST_ITER forwardIter, 
         {
             // hoisting
             backwardIter++;
-            bb->insert( backwardIter, useInst );
+            bb->insertBefore( backwardIter, useInst );
             bb->erase( useInstIter );
         }
     }
@@ -2842,7 +2762,7 @@ void Optimizer::newLocalCopyPropagation()
                     break;
                 }
 
-                if (!inst->canPropagateTo(useInst, opndNum, MT, bb->isInSimdFlow()))
+                if (!inst->canPropagateTo(useInst, opndNum, MT, !bb->isAllLaneActive()))
                 {
                     canRemove = false;
                     break;
@@ -3487,7 +3407,8 @@ static void expandPseudoLogic(IR_Builder& builder,
                 auto newSrc1 = builder.createSrcWithNewSubRegOff(inst->getSrc(1)->asSrcRegRegion(), 1);
                 inst->setSrc(newSrc1, 1);
             }
-            inst->getDst()->setSubRegOff(1);
+            auto newDst = builder.createDstWithNewSubRegOff(inst->getDst(), 1);
+            inst->setDest(newDst);
         }
 
         switch (inst->opcode())
@@ -3531,7 +3452,7 @@ static void expandPseudoLogic(IR_Builder& builder,
                                                          inst->getCISAOff(),
                                                          inst->getSrcFilename());
                 inst->transferDef(newSel, opNum, Gen4_Operand_Number::Opnd_pred);
-                bb->insert(newIter, newSel);
+                bb->insertBefore(newIter, newSel);
                 SI = newSel;
                 const RegionDesc *rd = (tmpSize == 1) ? builder.getRegionScalar() : builder.getRegionStride1();
                 return builder.Create_Src_Opnd_From_Dcl(newDcl, rd);
@@ -3602,7 +3523,7 @@ static void expandPseudoLogic(IR_Builder& builder,
             Sel1->addDefUse(newLogicOp, Gen4_Operand_Number::Opnd_src1);
         }
         inst->transferUse(newLogicOp);
-        bb->insert(newIter, newLogicOp);
+        bb->insertBefore(newIter, newLogicOp);
         bb->erase(newIter);
     }
 
@@ -3632,7 +3553,7 @@ bool Optimizer::createSmov(G4_BB *bb, G4_INST* flagMove, G4_INST* next_inst)
         next_inst->getDst()->getRegAccess() == Direct ||
         getTypeSize(next_inst->getDst()->getType()) == 1 ||
         getTypeSize(next_inst->getSrc(0)->getType()) == 1 ||
-        (getGenxPlatform() < GENX_SKL && getGenxPlatform() != GENX_BDW) ||
+        (builder.getPlatform() < GENX_SKL && builder.getPlatform() != GENX_BDW) ||
         getTypeSize(next_inst->getDst()->getType()) < getTypeSize(next_inst->getSrc(0)->getType()))
     {
         return false;
@@ -3655,7 +3576,7 @@ bool Optimizer::createSmov(G4_BB *bb, G4_INST* flagMove, G4_INST* next_inst)
         return false;
     }
 
-    if (builder.getOptions()->getTarget() == VISA_3D || bb->isInSimdFlow())
+    if (builder.getOptions()->getTarget() == VISA_3D || !bb->isAllLaneActive())
     {
         if (!flagMove->isWriteEnableInst())
         {
@@ -3743,7 +3664,7 @@ bool Optimizer::foldCmpToCondMod(G4_BB* bb, INST_LIST_ITER& iter)
         return false;
     }
 
-    if (builder.getOptions()->getTarget() == VISA_3D || bb->isInSimdFlow())
+    if (builder.getOptions()->getTarget() == VISA_3D || !bb->isAllLaneActive())
     {
         // Make sure masks of both instructions are same
         if (inst->getMaskOption() != cmpInst->getMaskOption())
@@ -4714,8 +4635,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         else
         {
             short subRegOff = dest->getDst()->getSubRegOff();
-            dest->setDest( builder.duplicateOperand( mDot2->getDst() ) );
-            dest->getDst()->setSubRegOff( subRegOff );
+            auto newDst = builder.createDstWithNewSubRegOff(mDot2->getDst(), subRegOff);
+            dest->setDest(newDst);
         }
     }
 
@@ -4766,7 +4687,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             newSrcOpnd,
             m->getOption(),
             false);
-        bb->insert(pos, mov);
+        bb->insertBefore(pos, mov);
 
         // maintain def-use.
         //
@@ -5640,11 +5561,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                      (src0->asSrcRegRegion()->getRegOff() == 0) &&
                      (src0->asSrcRegRegion()->getSubRegOff() == 2)); // r0.2
 
-                bool isSrc1 = ((src1->isImm() && !src1->isRelocImm()) &&
-                               (((src1->asImm()->getInt() == 0x0F000000) &&
-                                 (getGenxPlatform() < GENX_SKL)) ||
-                                ((src1->asImm()->getInt() == 0x8F000000) &&
-                                 (getGenxPlatform() >= GENX_SKL))));
+                bool isSrc1 = src1->isImm() && !src1->isRelocImm() &&
+                    src1->asImm()->getInt() == (builder.getPlatform() >= GENX_SKL ? 0x8F000000 : 0x0F000000);
 
                 if (isSrc0 && isSrc1 && sendInst->getSrc(0) &&
                     sendInst->getSrc(0)->isSrcRegRegion())
@@ -5689,50 +5607,25 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
         //for SKL+ there are 5 bits for barrierID
         //5th bit is stored in bit 31 of second dword
-        if(getGenxPlatform() < GENX_SKL)
+        if (builder.getPlatform() < GENX_SKL)
         {
-            g4Imm = builder.createImm( 0x0F000000, Type_UD );
+            g4Imm = builder.createImm(0x0F000000, Type_UD);
         }
         else
         {
-            g4Imm = builder.createImm( 0x8F000000, Type_UD );
+            g4Imm = builder.createImm(0x8F000000, Type_UD);
         }
 
-        // create inst
-        G4_INST *andInst =
-            builder.createInst(     NULL,
-                G4_and,
-                NULL,
-                false,
-                8,
-                dst1_opnd,
-                r0_src_opnd,
-                g4Imm,
-                InstOpt_WriteEnable,
-                0 );
-
-        // add "and" to the instruction list
-        BB_LIST_ITER ib = fg.begin();
-        G4_INST *inst = NULL;
-        BB_LIST_ITER bend(fg.end());
-        INST_LIST_ITER ii;
-        // skip all the labels, find 1st inst and insert the barrier header
-        for(ib = fg.begin(); ib != bend; ++ib)
+        G4_INST *andInst = builder.createBinOp(G4_and, 8, dst1_opnd, r0_src_opnd, g4Imm, InstOpt_WriteEnable, false);
+        for (auto bb : fg)
         {
-            G4_BB* bb = (*ib);
-            ii = bb->begin();
-            INST_LIST_ITER iend = bb->end();
-            for (; ii != iend;ii++ )
+            auto iter = std::find_if(bb->begin(), bb->end(), [](G4_INST* inst) { return !inst->isLabel();});
+            if (iter != bb->end())
             {
-                inst = *ii;
-                if (inst->opcode() != G4_label)
-                {
-                    bb->insert( ii, andInst );
-                    return;
-                }
+                bb->insertBefore(iter, andInst);
+                return;
             }
         }
-
     }
 
     /*
@@ -6166,7 +6059,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionScalar());
         G4_INST* movInst = builder.createMov(1, movDst, movSrc, InstOpt_WriteEnable, false);
         movInst->setOptionOn(InstOpt_Switch);
-        bb->insert(instIter, movInst);
+        bb->insertBefore(instIter, movInst);
     }
 
     void Optimizer::linePlaneWA(G4_INST* inst)
@@ -6311,7 +6204,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                             builder.getRegionScalar(), Type_UD);
                         G4_DstRegRegion* nullDst = builder.createNullDst(Type_UD);
                         G4_INST* inst = builder.createMov(1, nullDst, flagSrc, InstOpt_WriteEnable, false);
-                        bb->insert(instIter, inst);
+                        bb->insertBefore(instIter, inst);
                     }
                     if (unusedFlag[1])
                     {
@@ -6320,7 +6213,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                             builder.getRegionScalar(), Type_UD);
                         G4_DstRegRegion* nullDst = builder.createNullDst(Type_UD);
                         G4_INST* inst = builder.createMov(1, nullDst, flagSrc, InstOpt_WriteEnable, false);
-                        bb->insert(instIter, inst);
+                        bb->insertBefore(instIter, inst);
                     }
                 }
             }
@@ -6458,9 +6351,10 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     {
         const RegionDesc* rd = NULL;
         uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
-        // even if src has VxH region, it could have a width that is equal to exec_size,
+        G4_Type srcType = src->getType();
+        // even if src has VxH region, it could have a width that is equal to the new exec_size,
         // meaning that it's really just a 1x1 region.
-        auto isVxHRegion = src->getRegion()->isRegionWH() && start >= wd;
+        auto isVxHRegion = src->getRegion()->isRegionWH() && wd < size;
         if (!isVxHRegion)
         {
             // r[a0.0,0]<4;2,1> and size is 4 or 1
@@ -6496,7 +6390,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             {
                 short numRows = start / wd;
                 short numCols = start % wd;
-                short newOff = (numRows * vs + numCols * hs) * G4_Type_Table[src->getType()].byteSize;
+                short newOff = (numRows * vs + numCols * hs) * G4_Type_Table[srcType].byteSize;
                 auto newSrc = createIndirectSrc(src->getModifier(), src->getBase(), src->getRegOff(), src->getSubRegOff(), rd,
                     src->getType(), src->getAddrImm() + newOff);
                 return newSrc;
@@ -6510,64 +6404,55 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         }
 
         // direct access oprand
-        uint16_t regOff, subRegOff;
-        if (start > 0)
+        if (src->isAccReg())
         {
-            G4_Type srcType = src->getType();
-            uint16_t newEleOff;
-            uint16_t vs = src->getRegion()->vertStride, hs = src->getRegion()->horzStride, wd = src->getRegion()->width;
-
-            if (src->isAccReg())
+            switch (srcType)
             {
-                switch (srcType)
+            case Type_F:
+                // must be acc1.0 as result of simd16 -> 8 split
+                assert(size == 8 && "only support simd16->simd8 for now");
+                return createSrcRegRegion(src->getModifier(), Direct, phyregpool.getAcc1Reg(), 0, 0, src->getRegion(), srcType);
+            case Type_HF:
+            {
+                // can be one of acc0.8, acc1.0, acc1.8
+                if (src->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
                 {
-                case Type_F:
-                    // must be acc1.0 as result of simd16 -> 8 split
-                    assert(size == 8 && "only support simd16->simd8 for now");
-                    return createSrcRegRegion(src->getModifier(), Direct, phyregpool.getAcc1Reg(), 0, 0, src->getRegion(), srcType);
-                case Type_HF:
-                {
-                    // can be one of acc0.8, acc1.0, acc1.8
-                    if (src->getBase()->asAreg()->getArchRegType() == AREG_ACC1)
-                    {
-                        start += 16;
-                    }
-                    G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
-                    return createSrcRegRegion(src->getModifier(), Direct, accReg, 0, start % 16, src->getRegion(), srcType);
-
+                    start += 16;
                 }
-                default:
-                    // Keep using acc0 for other types.
-                    return duplicateOperand(src);
-                }
-            }
+                G4_Areg* accReg = start >= 16 ? phyregpool.getAcc1Reg() : phyregpool.getAcc0Reg();
+                return createSrcRegRegion(src->getModifier(), Direct, accReg, 0, start % 16, src->getRegion(), srcType);
 
-            newEleOff = start * hs +
-                (start >= wd && vs != wd * hs ? (start / wd * (vs - wd * hs)) : 0);
-
-            uint16_t newSubRegOff = src->getSubRegOff() + newEleOff;
-            bool crossGRF = newSubRegOff * G4_Type_Table[srcType].byteSize >= G4_GRF_REG_NBYTES;
-            if (crossGRF)
-            {
-                regOff = src->getRegOff() + 1;
-                subRegOff = newSubRegOff - G4_GRF_REG_NBYTES / G4_Type_Table[srcType].byteSize;
             }
-            else
-            {
-                regOff = src->getRegOff();
-                subRegOff = newSubRegOff;
+            default:
+                // Keep using acc0 for other types.
+                return duplicateOperand(src);
             }
-
-            // create a new one
-            return createSrcRegRegion(src->getModifier(), Direct, src->getBase(), regOff, subRegOff, rd,
-                srcType, src->getAccRegSel());
         }
-        else
-        {
-            G4_SrcRegRegion* newSrc = duplicateOperand(src);
-            newSrc->setRegion(rd);
-            return newSrc;
-        }
+
+        // Since this function creates a new sub src operand based on a start offset,
+        // the reg and subreg offsets need to be re-computed.
+        uint16_t regOff, subRegOff, subRegOffByte, newSubRegOffByte, newEleOff, newEleOffByte, crossGRF;
+
+        newEleOff = start * hs +
+            (start >= wd && vs != wd * hs ? (start / wd * (vs - wd * hs)) : 0);
+
+        // Linearize offsets into bytes to verify potential GRF crossing
+        newEleOffByte = newEleOff * G4_Type_Table[src->getType()].byteSize;
+        subRegOffByte = src->getSubRegOff() * G4_Type_Table[src->getType()].byteSize;
+
+        // If subreg crosses GRF size, update reg and subreg offset accordingly
+        newSubRegOffByte = subRegOffByte + newEleOffByte;
+        crossGRF = newSubRegOffByte / G4_GRF_REG_NBYTES;
+
+        newSubRegOffByte = newSubRegOffByte - crossGRF * G4_GRF_REG_NBYTES;
+
+        // Compute final reg and subreg offsets
+        regOff = src->getRegOff() + crossGRF;
+        subRegOff = newSubRegOffByte / G4_Type_Table[src->getType()].byteSize;
+
+        return createSrcRegRegion(src->getModifier(), Direct, src->getBase(), regOff, subRegOff, rd,
+            srcType, src->getAccRegSel());
+
     }
 
     G4_DstRegRegion* IR_Builder::createSubDstOperand(G4_DstRegRegion* dst, uint16_t start, uint8_t size)
@@ -6658,9 +6543,9 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         {
             newInst = createMathInst(NULL, inst->getSaturate(), ExSize,
                 NULL, NULL, NULL, inst->asMathInst()->getMathCtrl(),
-                inst->getOption(), inst->getLineNo());
+                inst->getOption());
             newInst->setCISAOff(inst->getCISAOff());
-            newInst->setSrcFilename(inst->getSrcFilename());
+            newInst->setLocation(inst->getLocation());
         }
         else if (inst->getNumSrc() < 3)
         {
@@ -6684,23 +6569,20 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     void Optimizer::preRA_HWWorkaround()
     {
         // -forceNoMaskWA : to force running this WA pass on platform other than TGLLP.
-        // By default, it is only on for TGL
-        // noMaskWA:
+        // noMaskWA:  only apply on TGLLP
         //   bit[1:0]:  0 - off
         //              1 - on, replacing nomask in any divergent BB (conservative)
-        //              2 - on, replacing nomask in nested divergent BB(aggressive)
+        //              2 - on, replacing nomask in nested divergent BB (aggressive)
         //              3 - not used, will behave the same as 2
-        //     bit[2]:  0 - simple insertion of flag. A new flag is added
-        //                  each time it is needed by "emask flag".
-        //              1 - optimized. "emask flag" is created once per ech BB
-        //     bit[3]:  0 - "emask flag" is created using ce and dmask/vmask
-        //              1 - "emask flag" is created using cmp instructions.
-        //
-        if (builder.kernel.getOptions()->getTarget() != VISA_CM &&
+        //     bit[2]:  0 - optimized. "emask flag" is created once per each BB
+        //              1 - simple insertion of "emask flag". A new flag is created
+        //                  each time it is needed, that is, created per each inst.
+        //  (See comments for more details at doNoMaskWA().
+        if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_CM &&
             ((builder.getuint32Option(vISA_noMaskWA) & 0x3) > 0 ||
              builder.getOption(vISA_forceNoMaskWA)))
         {
-            replaceNoMaskWithAnyhWA();
+            doNoMaskWA();
         }
 
         insertFenceAtEntry();
@@ -6757,13 +6639,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                             builder.phyregpool.getNullReg(), 0, 0, 1, fenceDcl->getElemType());
                         G4_SrcRegRegion* movSrc = builder.Create_Src_Opnd_From_Dcl(fenceDcl, builder.createRegionDesc(8, 8, 1));
                         G4_INST* movInst = builder.createMov(8, movDst, movSrc, InstOpt_WriteEnable, false);
-                        bb->insert(nextIter, movInst);
+                        bb->insertBefore(nextIter, movInst);
                     }
-                }
-
-                if (getGenxPlatform() == GENX_TGLLP && VISA_WA_CHECK(builder.getPWaTable(), WaSwapForSrc1Replicate))
-                {
-                    swapSrc1(inst);
                 }
 
                 if (inst->isCall() || inst->isFCall())
@@ -6791,13 +6668,6 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     {
                         inst->setOptionOn(InstOpt_Switch);
                     }
-                }
-
-                if (VISA_WA_CHECK(builder.getPWaTable(), WaDisableSendsPreemption) &&
-                    inst->isSplitSend() &&
-                    !(inst->getSrc(1)->isNullReg()))
-                {
-                    inst->setOptionOn(InstOpt_NoPreempt);
                 }
 
                 if (inst->isSend() && !inst->isNoPreemptInst() && builder.needsNoPreemptR2ForSend())
@@ -6828,8 +6698,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     if (!nextInst->isSend() && nextInst->getDst() && !nextInst->hasNULLDst() && nextInst->getDst()->crossGRF())
                     {
                         // insert a nop
-                        G4_INST *nopInst = builder.createInternalInst(NULL, G4_nop, NULL, false, 1, NULL, NULL, NULL, inst->getOption());
-                        bb->insert(nextIter, nopInst);
+                        G4_INST *nopInst = builder.createNop(inst->getOption());
+                        bb->insertBefore(nextIter, nopInst);
                     }
                 }
 
@@ -6874,15 +6744,15 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         0, 0, 1, Type_UW);
                     G4_Imm* src = builder.createImm(0, Type_UW);
                     G4_INST* movInst = builder.createMov(8, tdrDst, src, InstOpt_WriteEnable | InstOpt_Switch, false);
-                    bb->insert(ii, movInst);
+                    bb->insertBefore(ii, movInst);
                 }
 
-                if (inst->isEOT() && builder.getOption(vISA_clearAccBeforeEOT))
+                if (inst->isEOT() && VISA_WA_CHECK(builder.getPWaTable(), Wa_14010017096))
                 {
                     // insert "(W) mov(16) acc0.0:f 0x0:f" before EOT
                     G4_INST* movInst = builder.createMov(16,
                         builder.createDst(builder.phyregpool.getAcc0Reg(),0, 0, 1, Type_F),
-                        builder.createImm(0, Type_F), InstOpt_WriteEnable, false);
+                        builder.createImm(0, Type_F), InstOpt_WriteEnable, false)->InheritLLVMInst(inst);
                     // insert mov before contiguous send, in case that there are instruction combined set on continuous
                     // two send
                     INST_LIST_ITER insert_point = ii;
@@ -6892,7 +6762,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
                     if (!(*insert_point)->isEOT())
                         ++insert_point;
-                    bb->insert(insert_point, movInst);
+                    bb->insertBefore(insert_point, movInst);
                 }
 
                 if (VISA_WA_CHECK(builder.getPWaTable(), WaResetN0BeforeGatewayMessage) &&
@@ -6903,7 +6773,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         builder.phyregpool.getN0Reg(), 0, 0, 1, Type_UD);
                     auto movInst = builder.createMov(1, n0Dst,
                         builder.createImm(0, Type_UD), InstOpt_WriteEnable | InstOpt_Switch, false);
-                    bb->insert(ii, movInst);
+                    bb->insertBefore(ii, movInst);
                 }
 
                 linePlaneWA(inst);
@@ -6924,6 +6794,15 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         if (builder.needResetA0forVxHA0())
         {
             // reset a0 to 0 at the beginning of a shader.
+            // The goal of this initialization is to make sure that there is no
+            // garbage values in the address register for inactive simd lanes.
+            // With indirect addressing HW requires that there is no
+            // out-of-bounds access even on inactive simd lanes.
+
+
+            // Note: this initialization doesn't cover scenarios where the
+            // address register is used in a send descriptor and later used in
+            // indirect addressing.
             resetA0();
         }
 
@@ -6933,7 +6812,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             setA0toTdrForSendc();
         }
 
-        if (builder.needReplaceIndirectCallWithJmpi() && kernel.getIsExternFunc())
+        if (builder.needReplaceIndirectCallWithJmpi() &&
+            kernel.getIntKernelAttribute(Attributes::ATTR_Extern) != 0)
         {
             // replace ret in the external functions with jmpi. That we will
             // also return the call with jmpi in VISAKernelImpl::compilePostOptimize
@@ -7480,163 +7360,6 @@ public:
     }
 };
 
-    // Scan the code and insert the NoSrcDepSet flag if possible to remove some
-    // scoreboard delays. The NoSrcDepSet flag allows the instruction that
-    // follows to ignore the scoreboard dependence check for the registers read
-    // and issue right away.
-    //
-    // Scenario 1: A send without the NoSrcDepSet can cover all sends with a
-    //             RAR dependence against the registers they read.
-    //    ... = send R1 SFID0 {NoSrcDepSet} (covered by the send below)
-    //    ... = send R1 SFID2      -        (different SFID)
-    //    ... = send R1 SFID0 {NoSrcDepSet} (covered by the send below)
-    //    ... = send R1 SFID0
-    //     ...
-    //    ... = R1
-    //     R1 = ...
-    //
-    // Scenario 2: A RAW dependence between an instruction and the destination
-    //             register of a send allows it to be marked {NoSrcDepSet}
-    //    send R1, Rx  SFID0 {NoSrcDepSet}
-    //    R2 = send R1 SFID0 {NoSrcDepSet} (covered by RAW dependence)
-    //    ... = R2
-    //    R1 = ...
-    //
-    // Scenario 3: A covered send can also cover other sends of the same SFID
-    //             if the sources of these sends are only accessed after the
-    //             instruction that covered the first send
-    //    send R2 SFID0 {NoSrcDepSet}
-    //    send R1 SIFD0
-    //    ...
-    //    ... = R1
-    //    R2 = ...
-
-    // We can only set the flag if the registers read by the send are all read
-    // by following sends before any write to that register.
-    //
-    // We visit the instructions top-down in a single pass.
-    // For each instruction we collect the register buckets read and written.
-    //
-    // If the instruction is a send, we link it with the corresponding buckets
-    // that are read by it.
-    // Each instruction is wrapped in an IstrDescr object which keeps track of
-    // the bucket status: that is whether they are covered or not by succeeding
-    // instructions that read those registers.
-    /*
-          InstrDescr
-          +--------+ +--------+
-          | sendA  | | sendB  |
-          |r0,r1,r2| |r2,r3,r4|  bucketStatusR,W
-          | T, F, T| | F, F, F| (covered flag T/F)
-          +--------+ +--------+
-            /  |  \  /   |   \
-       +----+----+----+----+----+....+----+----+----+...
-       | r0 | r1 | r2 | r3 | r4 |    |r128| p0 | p1 |
-       +----+----+----+----+----+....+----+----+----+...
-       Bucket                                           bucketVec
-    */
-    // For each register read we check the bucket tha that corresponds to it.
-    // We iterate over all the sends connected to it and mark that bucket
-    // as covered. If the send instruction has all its buckets covered,
-    // then it is legal to mark it with the NoSrcDepSet flag.
-    // The marked sends are removed from the bucket array.
-    //
-    // Upon an instruction that writes to a register, we access the
-    // corresponding bucket in bucketVec, we go through all the instructions
-    // that access it and we remove those instructions from the data structure.
-    // For example upon an instruction r2=... we will remove both sendA and
-    // sendB from the data structure.
-    //
-
-    // The entry point for the code that adds the NoSrcDepSet flag to
-    // specific send isntructions for better performance.
-    // For a description of the algorithm check the comments of the NSDS class.
-    void Optimizer::NoSrcDepSet(void)
-    {
-        #define NSDS_RAW        // Enable NoSrcDepSet for RAW
-        // Early return if invalid platform
-        if (! builder.noSrcDepSetAllowedPlatform()
-            || ! builder.getOption(vISA_EnableNoSrcDep)) {
-            return;
-        }
-        #if (defined(_DEBUG) || defined(_INTERNAL))
-        int dbgCnt = 0;
-        #endif
-        for (auto bb : fg) {
-            NSDS nsds(builder.getOptions(), bb);
-            for (auto instr : *bb) {
-                if (instr->isLabel()) {
-                    continue;
-                }
-                instr->setLocalId(0); // We are storing the IDs in it
-
-                NSDS::BucketDescrBox instrBuckets;
-                (void) nsds.getBucketDescrs(instr, instrBuckets);
-
-                // Cover any registers that the current instruction reads
-                // To be safe, predicated instrs can kill but cannot cover.
-                if (! instr->getPredicate()) {
-                    // This is for Scenario 1.
-                    // A send without the nosrcdepset flag can cover other sends
-                    // that read the same register
-                    if (instr->isSend()) {
-                        if (builder.getOption(vISA_EnableNoSrcDepScen1)) {
-                            auto SFID = instr->getMsgDesc()->getFuncId();
-                            nsds.coverInstrReadingBucketsReadBy(instrBuckets, SFID);
-                        }
-                    }
-                    // This is for Scenario 2.
-                    // A non-send instruction reading from Rx
-                    // can cover sends that write to Rx
-                    else {
-                        if (builder.getOption(vISA_EnableNoSrcDepScen2)) {
-                            nsds.coverInstrWritingBucketsReadBy(instrBuckets);
-                        }
-                    }
-
-                    // Check if all registers read by the instruction cover
-                    // a send in NSDS. If so, this instruction gets marked.
-                    for (G4_INST *coveredSend : nsds.getCoveredInstrsAndClear()) {
-                        assert(coveredSend->isSend());
-                        #if (defined(_DEBUG) || defined(_INTERNAL))
-                        // Disable marking the instruction
-                        int stopAt = builder.getOptions()->getuInt32Option(vISA_stopNoSrcDepSetAt);
-                        if (stopAt == UINT_MAX || dbgCnt++ < abs(stopAt))
-                        #endif
-                            // MARK the instruction
-                            coveredSend->setOptionOn(InstOpt_NoSrcDepSet);
-                        // Kill the buckets associated to this instruction
-                        nsds.killInstrBuckets(coveredSend);
-
-                        // Verifier for NSDS
-                        // #define NSDS_VERIFY
-                        #ifdef NSDS_VERIFY
-                        nsds.verify(bb, coveredSend, instr);
-                        #endif
-                    }
-                }
-
-                // Kill any bucket this instruction writes to.
-                nsds.killWriteBuckets(instrBuckets);
-
-                // Populate the buckets read by this send
-                if (instr->isSend()) {
-                    // RAR
-                    nsds.genReadBuckets(instr, instrBuckets);
-                    #ifdef NSDS_RAW
-                    // RAW
-                    nsds.genWriteBuckets(instr, instrBuckets);
-                    #endif
-                }
-                #if (defined(_DEBUG) || defined(_INTERNAL))
-                if (builder.getOptions()->getOption(vISA_DumpNoSrcDep)) {
-                    nsds.dump();
-                }
-                #endif
-            }
-        }
-    }
-
     //
     // rewrite source regions to satisfy various HW requirements.  This pass will not modify the instrppuctions otherwise
     // -- rewrite <1;1,0> to <2;2,1> when possible (exec size > 1, width is not used to cross GRF)
@@ -7648,7 +7371,8 @@ public:
         {
             for (auto inst : *bb)
             {
-                if (inst->isCall() || inst->isReturn())
+                if (inst->isCall() ||
+                    inst->isReturn())
                 {
                     // Do not rewrite region for call or return,
                     // as the effective execution size is 2.
@@ -7731,7 +7455,8 @@ public:
             }
         }
         fg.builder->getJitInfo()->numGRFUsed = count;
-        RELEASE_MSG("\tKernel " << kernel.getOrigCMName() << " : " << count << " registers\n");
+        fg.builder->criticalMsgStream() << "\tKernel " << kernel.getName() << " : " <<
+            count << " registers\n";
     }
 
     //
@@ -7801,30 +7526,37 @@ public:
             G4_INST* sendInst = kernel.fg.builder->createSplitSendInst(
                 nullptr, G4_sends, 16, dstOpnd, headerOpnd, srcOpnd,
                 kernel.fg.builder->createImm(msgDescImm, Type_UD), InstOpt_WriteEnable, desc, nullptr, 0);
-            bb->insert(iter, sendInst);
+            bb->insertBefore(iter, sendInst);
         }
     }
 
-    void Optimizer::checkBarrierUsage()
+    // perform simple stat collection (e.g., numBarriers, numSends)
+    // IR is not modified
+    void Optimizer::collectStats()
     {
         builder.getJitInfo()->usesBarrier = false;
+        uint32_t numSends = 0;
         for (auto bb : fg)
         {
             for (auto inst : *bb)
             {
-                if (inst->isSend() && inst->getMsgDesc()->isBarrierMsg())
+                if (inst->isSend())
                 {
-                    builder.getJitInfo()->usesBarrier = true;
-                    return;
+                    numSends++;
+                    if (inst->asSendInst()->getMsgDesc()->isBarrierMsg())
+                    {
+                        // ToDo: remove this at some point as only legacy CMRT needs this information
+                        builder.getJitInfo()->usesBarrier = true;
+                    }
+
                 }
             }
         }
+        builder.getcompilerStats().SetI64(CompilerStats::numSendStr(), numSends, builder.kernel.getSimdSize());
     }
 
     // Create a copy of R0 at top of kernel,
     // to support midthread preemption.
-    // This must be called before all other optimizer
-    // passes, except PI_initializePayload.
     void Optimizer::createR0Copy()
     {
         if (!builder.getIsKernel())
@@ -7879,7 +7611,7 @@ public:
                 inst = *ii;
                 if (inst->opcode() != G4_label)
                 {
-                    bb->insert(ii, movInst);
+                    bb->insertBefore(ii, movInst);
                     return;
                 }
             }
@@ -7934,7 +7666,7 @@ public:
             G4_DstRegRegion* dst = builder.createDst(tempDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_Imm * src0 = builder.createImm(0, Type_UD);
             G4_INST* initInst = builder.createMov(16, dst, src0, InstOpt_WriteEnable, false);
-            bb->insert(iter, initInst);
+            bb->insertBefore(iter, initInst);
         }
 
         //init last register if bulk of GRFs was odd
@@ -7945,7 +7677,7 @@ public:
             G4_Imm * src0 = builder.createImm(0, Type_UD);
             G4_INST* spIncInst = builder.createMov(8, dst, src0, InstOpt_WriteEnable, false);
             G4_BB* bb = kernel.fg.getEntryBB();
-            bb->insert(iter, spIncInst);
+            bb->insertBefore(iter, spIncInst);
         }
 
         //inits remainder GRF
@@ -7964,7 +7696,7 @@ public:
                 G4_SrcRegRegion *src0 = builder.createSrcRegRegion(Mod_src_undef, Direct, tempDclSrc->getRegVar(), 0, 0, builder.getRegionScalar(), Type_UB);
 
                 G4_INST* initInst = builder.createMov((uint8_t)exec_size, dst, src0, InstOpt_WriteEnable, false);
-                bb->insert(iter, initInst);
+                bb->insertBefore(iter, initInst);
             }
             //caluclates bytes that remain to be initialized
             remainder_bytes = remainder_bytes % exec_size;
@@ -7981,7 +7713,7 @@ public:
             G4_DstRegRegion *tempPredVar = builder.createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, Type_UD);
             G4_INST *predInst = builder.createMov(1, tempPredVar, builder.createImm(0, Type_UW), InstOpt_WriteEnable, false);
             bb = kernel.fg.getEntryBB();
-            bb->insert(iter, predInst);
+            bb->insertBefore(iter, predInst);
         }
     }
 
@@ -8010,8 +7742,8 @@ public:
             auto src1 = builder.createImm(0xF0FFFFFF, Type_UD);
             auto dst = builder.createDst(rtail->getRegVar(), 0, 0, 1, Type_UD);
 
-            return builder.createInternalInst(nullptr, G4_and, nullptr, false, 1,
-                dst, src0, src1, InstOpt_WriteEnable);
+            return builder.createBinOp(G4_and, 1,
+                dst, src0, src1, InstOpt_WriteEnable, false);
         };
 
         // (W) or  (1|M0)  sr0.0<1>:ud   127.0<0;1,0>:ud    imm:ud
@@ -8024,8 +7756,8 @@ public:
             auto dst = builder.createDst(
                 builder.phyregpool.getSr0Reg(), 0, 0, 1, Type_UD);
 
-            return builder.createInternalInst(nullptr, G4_or, nullptr, false, 1,
-                dst, src0, src1, InstOpt_WriteEnable);
+            return builder.createBinOp(G4_or, 1,
+                dst, src0, src1, InstOpt_WriteEnable, false);
         };
 
         // (W) jmpi (1|M0) label
@@ -8071,7 +7803,7 @@ public:
             {
                 std::string label_name("ffid_prolog_end");
                 jmp_label = builder.createLabel(label_name, LABEL_BLOCK);
-                next_bb->insert(next_bb->begin(), createLabelInst(jmp_label));
+                next_bb->insertBefore(next_bb->begin(), createLabelInst(jmp_label));
             }
             entry_0_bb->push_back(createJmpi(jmp_label));
 
@@ -8110,11 +7842,29 @@ public:
             return;
         }
 
+        if (!kernel.fg.builder->getIsKernel())
+        {
+            // we dont allow a function to exit
+            return;
+        }
+
         bool hasUAVWrites = false;
         bool hasSLMWrites = false;
-        std::list<SFID> funcIDs;
+        bool hasTypedWrites = false;
+
         for (auto bb : kernel.fg)
         {
+            if (bb->isEndWithFCall())
+            {
+                // conservatively assume we need a fence
+                // ToDo: we don't need a SLM fence if kernel doesnt use SLM, since function can't allocate SLM on its own
+                // We can move this W/A to IGC for more precise analysis
+                hasUAVWrites = true;
+                hasSLMWrites = true;
+                hasTypedWrites = true;
+                break;
+            }
+
             for (auto inst : *bb)
             {
                 if (inst->isSend())
@@ -8128,6 +7878,10 @@ public:
                             {
                                 hasSLMWrites = true;
                             }
+                            else if (msgDesc->isHdcTypedSurfaceWrite())
+                            {
+                                hasTypedWrites = true;
+                            }
                             else
                             {
                                 hasUAVWrites = true;
@@ -8136,23 +7890,14 @@ public:
 
                     }
                 }
-                if (hasUAVWrites && hasSLMWrites)
-                {
-                    break;
-                }
-            }
-            if (hasUAVWrites && hasSLMWrites)
-            {
-                break;
             }
         }
 
-        if ((!hasUAVWrites) && (!hasSLMWrites) && funcIDs.empty())
+        if (!hasUAVWrites && !hasSLMWrites && !hasTypedWrites)
         {
             return;
         }
 
-        funcIDs.unique();
         for (auto bb : kernel.fg)
         {
             if (bb->isLastInstEOT())
@@ -8160,15 +7905,20 @@ public:
                 auto iter = std::prev(bb->end());
 
                 {
-                    if (hasUAVWrites)
+                    if (builder.getPlatform() == GENX_ICLLP)
+                    {
+                        hasTypedWrites = false; // Workaround Under debug and being clarified
+                        hasSLMWrites = false;   // Workaround not needed for ICL SLM Writes
+                    }
+                    if (hasUAVWrites || hasTypedWrites)
                     {
                         auto fenceInst = builder.createFenceInstruction(0, true, true, false);
-                        bb->insert(iter, fenceInst);
+                        bb->insertBefore(iter, fenceInst);
                     }
                     if (hasSLMWrites)
                     {
                         auto fenceInst = builder.createFenceInstruction(0, true, false, false);
-                        bb->insert(iter, fenceInst);
+                        bb->insertBefore(iter, fenceInst);
                     }
                 }
                 builder.instList.clear();
@@ -8191,7 +7941,7 @@ public:
 
         for (auto bb : kernel.fg)
         {
-            for (auto inst : bb->getInstList())
+            for (auto inst : *bb)
             {
                 if (inst->getCISAOff() == UNMAPPABLE_VISA_INDEX)
                 {
@@ -8201,12 +7951,21 @@ public:
         }
     }
 
+    void Optimizer::varSplit()
+    {
+        VarSplitPass* splitPass = kernel.getVarSplitPass();
+        // Run explicit variable split pass
+        if (kernel.getOption(vISA_IntrinsicSplit))
+        {
+            splitPass->run();
+        }
+    }
+
     // some platforms require extra instruction before an EOT to
     // ensure that all outstanding scratch writes are globally observed
     void Optimizer::insertScratchReadBeforeEOT()
     {
-
-        int globalScratchOffset = builder.getOptions()->getuInt32Option(vISA_SpillMemOffset);
+        int globalScratchOffset = kernel.getIntKernelAttribute(Attributes::ATTR_SpillMemOffset);
         if (builder.needFenceBeforeEOT() ||
             (globalScratchOffset == 0 && builder.getJitInfo()->spillMemUsed == 0))
         {
@@ -8242,7 +8001,7 @@ public:
             if (bb->isLastInstEOT())
             {
                 auto iter = std::prev(bb->end());
-                if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::GEN10)
+                if (getPlatformGeneration(builder.getPlatform()) >= PlatformGen::GEN10)
                 {
                     // an HDC fence is more efficient in this case
                     // fence with commit enable
@@ -8252,7 +8011,7 @@ public:
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(builder.getBuiltinR0(), 1);
                     G4_INST* inst = builder.createSendInst(nullptr, G4_send, 8, dst, src,
                         builder.createImm(fenceDesc, Type_UD), InstOpt_WriteEnable, msgDesc);
-                    bb->insert(iter, inst);
+                    bb->insertBefore(iter, inst);
                 }
                 else
                 {
@@ -8264,7 +8023,7 @@ public:
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(dstDcl, 1);
                     G4_INST* sendInst = builder.createSendInst(nullptr, G4_send, 8, dst, src,
                         builder.createImm(desc.value, Type_UD), InstOpt_WriteEnable, msgDesc);
-                    bb->insert(iter, sendInst);
+                    bb->insertBefore(iter, sendInst);
                 }
 
                 builder.instList.clear();
@@ -8304,7 +8063,7 @@ public:
             G4_BB* bb = *kernel.fg.begin();
             auto insertIt = std::find_if(bb->begin(), bb->end(),
                 [](G4_INST* inst) { return !inst->isLabel(); });
-            bb->insert(insertIt,
+            bb->insertBefore(insertIt,
                 builder.createMov(16, builder.createDst(
                     builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
                     builder.createImm(0, Type_UW), InstOpt_WriteEnable, false));
@@ -8330,25 +8089,25 @@ public:
 
         // create the first add instruction
         // add  r2.0  -IP   call_target
-        G4_INST* add_inst = builder.createInternalInst(
-            nullptr, G4_add, nullptr, false, 1,
+        G4_INST* add_inst = builder.createBinOp(
+            G4_add, 1,
             builder.Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
             builder.createSrcRegRegion(
                 Mod_Minus, Direct, builder.phyregpool.getIpReg(), 0, 0,
                 builder.getRegionScalar(), Type_UD),
-            fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact);
+            fcall->getSrc(0), InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
         // create the second add to add the -ip to adjust_off, adjust_off dependes
         // on how many instructions from the fist add to the jmp instruction, and
         // if it's post-increment (jmpi) or pre-increment (call)
         // add  r2.0  r2.0  adjust_off
-        G4_INST* add_inst2 = builder.createInternalInst(
-            nullptr, G4_add, nullptr, false, 1,
+        G4_INST* add_inst2 = builder.createBinOp(
+            G4_add, 1,
             builder.Create_Dst_Opnd_From_Dcl(add_dst_decl, 1),
             builder.Create_Src_Opnd_From_Dcl(
                 add_dst_decl, builder.getRegionScalar()),
             builder.createImm(adjust_off, Type_D),
-            InstOpt_WriteEnable | InstOpt_NoCompact);
+            InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
         insts.push_back(add_inst);
         insts.push_back(add_inst2);
@@ -8375,23 +8134,21 @@ public:
         // add  r1.0   IP   32
         G4_Declare* r1_0_decl =
             builder.createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
-        insts.push_back(builder.createInternalInst(
-            nullptr, G4_add, nullptr, false, 1,
+        insts.push_back(builder.createBinOp(
+            G4_add, 1,
             builder.Create_Dst_Opnd_From_Dcl(r1_0_decl, 1),
             builder.createSrcRegRegion(
                 Mod_src_undef, Direct, builder.phyregpool.getIpReg(), 0, 0,
                 builder.getRegionScalar(), Type_UD),
             builder.createImm(32, Type_UD),
-            InstOpt_WriteEnable | InstOpt_NoCompact));
+            InstOpt_WriteEnable | InstOpt_NoCompact, false));
 
         // jmpi r2.0
         // update jump target (src0) to add's dst
         G4_SrcRegRegion* jump_target = builder.Create_Src_Opnd_From_Dcl(
             new_target_decl, builder.getRegionScalar());
         jump_target->setType(Type_D);
-        insts.push_back(builder.createInternalInst(
-            nullptr, G4_jmpi, nullptr, false, 1, nullptr, jump_target,
-            nullptr, InstOpt_NoCompact));
+        insts.push_back(builder.createJmp(nullptr, jump_target, InstOpt_NoCompact, false));
     }
 
     void Optimizer::expandIndirectCallWithRegTarget()
@@ -8446,13 +8203,13 @@ public:
                     INST_LIST_ITER insert_point = bb->end();
                     --insert_point;
                     for (auto inst_to_add : expanded_insts) {
-                        bb->getInstList().insert(insert_point, inst_to_add);
                         inst_to_add->setCISAOff(fcall->getCISAOff());
+                        bb->insertBefore(insert_point, inst_to_add);
                     }
 
                     // remove call from the instlist for Jmpi WA
                     if (builder.needReplaceIndirectCallWithJmpi())
-                        bb->getInstList().erase(--bb->end());
+                        bb->erase(--bb->end());
                 }
             }
         }
@@ -8485,29 +8242,27 @@ public:
                 //     jmpi  r1.0
 
                 // add   r1.0  -ip   r1.0
-                G4_INST* add0 = builder.createInternalInst(
-                    nullptr, G4_add, nullptr, false, 1,
+                G4_INST* add0 = builder.createBinOp(
+                    G4_add, 1,
                     builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
                     builder.createSrcRegRegion(
                         Mod_Minus, Direct, builder.phyregpool.getIpReg(), 0, 0,
                         builder.getRegionScalar(), Type_UD),
                     builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
-                    InstOpt_WriteEnable | InstOpt_NoCompact);
+                    InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
                 // add   r1.0  r1.0  -48
-                G4_INST* add1 = builder.createInternalInst(
-                    nullptr, G4_add, nullptr, false, 1,
+                G4_INST* add1 = builder.createBinOp(
+                    G4_add, 1,
                     builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
                     builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
-                    builder.createImm(-48, Type_D), InstOpt_WriteEnable | InstOpt_NoCompact);
+                    builder.createImm(-48, Type_D), InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
                 // jmpi r1.0
                 G4_SrcRegRegion* jmpi_target = builder.Create_Src_Opnd_From_Dcl(
                     r_1_0, builder.getRegionScalar());
                 jmpi_target->setType(Type_D);
-                G4_INST* jmpi = builder.createInternalInst(
-                    nullptr, G4_jmpi, nullptr, false, 1, nullptr, jmpi_target,
-                    nullptr, InstOpt_NoCompact);
+                G4_INST* jmpi = builder.createJmp(nullptr, jmpi_target, InstOpt_NoCompact, false);
 
                 // remove the ret
                 bb->pop_back();
@@ -8537,7 +8292,7 @@ public:
                 bb->back()->opcode() == G4_opcode::G4_sendsc)
             {
                 // "(W) mov(8) a0.0:uw tdr0.0:uw"
-                bb->insert(--bb->end(), builder.createMov(8,
+                bb->insertBefore(--bb->end(), builder.createMov(8,
                     builder.createDst(builder.phyregpool.getAddrReg(), 0, 0, 1, Type_UW),
                     builder.createSrcRegRegion(Mod_src_undef, Direct, builder.phyregpool.getTDRReg(), 0,
                                                0, builder.getRegionScalar(), Type_UW),
@@ -8738,7 +8493,7 @@ public:
                     inst->getPredicate() ||
                     Seen.count(inst) > 0 ||
                     inst->def_size() != 1 ||
-                    !inst->canHoist(bb->isInSimdFlow(), fg.builder->getOptions()) )
+                    !inst->canHoist(!bb->isAllLaneActive(), fg.builder->getOptions()) )
                 {
                     ii++;
                     continue;
@@ -8829,7 +8584,7 @@ public:
                         (!(inst->isWriteEnableInst()) &&
                         useInst->getMaskOption() != instMaskOption) ||
                         //fix described above
-                        (bb->isInSimdFlow() &&
+                        (!bb->isAllLaneActive() &&
                         !inst->isWriteEnableInst() &&
                         !(inst->getExecSize() == defInst->getExecSize() &&
                                 inst->getExecSize() == useInst->getExecSize())
@@ -9877,7 +9632,7 @@ void Optimizer::mergeScalarInst()
 {
 
     int bundleSizeLimit = MAX_BUNDLE_SIZE;
-    if (builder.getOptions()->getTarget() == VISA_3D)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
     {
         bundleSizeLimit = 4;
     }
@@ -9900,10 +9655,10 @@ void Optimizer::mergeScalarInst()
             G4_INST *inst = *ii;
             auto nextIter = ii;
             ++nextIter;
-            if (nextIter != iiEnd && isMergeCandidate(inst, builder, bb->isInSimdFlow()))
+            if (nextIter != iiEnd && isMergeCandidate(inst, builder, !bb->isAllLaneActive()))
             {
                 BUNDLE_INFO* bundle = new (mergeManager) BUNDLE_INFO(bb, ii, bundleSizeLimit);
-                findInstructionToMerge(bundle, nextIter, bb->end(), builder, bb->isInSimdFlow());
+                findInstructionToMerge(bundle, nextIter, bb->end(), builder, !bb->isAllLaneActive());
                 if (bundle->size > 1)
                 {
                     bundles.push_back(bundle);
@@ -10267,6 +10022,14 @@ bool MadSequenceInfo::checkMadSequence()
             return false;
         }
 
+        if (!builder.hasByteALU())
+        {
+            if (IS_BTYPE(src0->getType()) || IS_BTYPE(src1->getType()))
+            {
+                return false;
+            }
+        }
+
         // If there is a modifier for src2, or src2 is accessed somewhere
         // indirectly then we will not generate a MAC.
         if (!src2->isSrcRegRegion())
@@ -10425,6 +10188,18 @@ void MadSequenceInfo::populateSrc2Def()
         return setNotSafe();
     }
 
+    if (!builder.hasByteALU())
+    {
+        // do not allow acc if src2Dest inst has byte source
+        for (int i = 0; i < src2Def->getNumSrc(); ++i)
+        {
+            if (IS_BTYPE(src2Def->getSrc(i)->getType()))
+            {
+                return setNotSafe();
+            }
+        }
+    }
+
     // Check if there is any ACC dependency.
     if (!checkACCDependency(src2Def, firstMad))
         return setNotSafe();
@@ -10485,9 +10260,8 @@ void MadSequenceInfo::populateUserChain(G4_INST *defInst, int level)
         return setNotSafe();
 
     G4_INST *useInst = defInst->use_back().first;
-    G4_Operand *useDst = useInst->getDst();
+    auto useDst = useInst->getDst();
 
-    // Should support a null dst?
     if (useDst == nullptr)
         return setNotSafe();
 
@@ -10675,7 +10449,7 @@ void Optimizer::lowerMadSequence()
 {
 
     // Only enable CM for now.
-    if (builder.getOptions()->getTarget() != VISA_CM)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_CM)
         return;
 
     for (G4_BB *bb : fg)
@@ -10722,7 +10496,7 @@ enum SplitBounds : unsigned {
     HiRBound = 127
 };
 
-bool isCandidateDecl(G4_Declare *Dcl)
+static bool isCandidateDecl(G4_Declare *Dcl, const IR_Builder& builder)
 {
     G4_Declare *RootDcl = Dcl->getRootDeclare();
     if (RootDcl->getRegFile() != G4_GRF)
@@ -10735,6 +10509,13 @@ bool isCandidateDecl(G4_Declare *Dcl)
 
     if (RootDcl->getAddressed())
         return false;
+
+    if (builder.isPreDefArg(RootDcl) || builder.isPreDefRet(RootDcl))
+    {
+        return false;
+    }
+
+    // ToDo: add more special declares to exclude list
 
     return true;
 }
@@ -10788,174 +10569,7 @@ private:
 }  // namespace
 
 //
-// mov (M1, 8) V45(0,0)<1>:q V42(0,0)<8;8,1>:d                                      /// $7
-// mov (M3, 8) V45(2,0)<1>:q V42(1,0)<8;8,1>:d                                      /// $8
-// shl (M1, 8) V46(0,0)<1>:q V45(0,0)<8;8,1>:q 0x2:q                                /// $9
-// shl (M3, 8) V46(2,0)<1>:q V45(2,0)<8;8,1>:q 0x2:q                                /// $10
-//
-// into
-//
-// mov (M1, 8) V45L(0,0)<1>:q V42(0,0)<8;8,1>:d                                      /// $7
-// mov (M3, 8) V45H(0,0)<1>:q V42(1,0)<8;8,1>:d                                      /// $8
-// shl (M1, 8) V46(0,0)<1>:q V45L(0,0)<8;8,1>:q 0x2:q                                /// $9
-// shl (M3, 8) V46(2,0)<1>:q V45H(0,0)<8;8,1>:q 0x2:q                                /// $10
-//
-void Optimizer::splitVariables()
-{
-    if (builder.getOptions()->getTarget() != VISA_3D)
-    {
-        return;
-    }
-
-    if (builder.getOption(vISA_Debug))
-    {
-        return;
-    }
-
-    // Only for simd16 and simd32.
-    if (kernel.getSimdSize() == 8)
-    {
-        return;
-    }
-
-    // All declarations in this map are candidates for variable splitting.
-    std::map<const G4_Declare *, DclMapInfo *> DclMap;
-
-    // All instructions to be updated, and the flag indicates if this
-    // instruction defines low part or ont.
-    std::vector<std::pair<G4_INST *, bool>> InstsToUpdate;
-
-    for (G4_BB *bb : fg)
-    {
-        for (G4_INST *inst : *bb)
-        {
-            // Only for variables defined by non-send instructions.
-            if (inst->opcode() == G4_label || inst->isSend())
-                continue;
-
-            // TODO: Allow global variables.
-            auto Dst = inst->getDst();
-            if (!Dst || Dst->getHorzStride() != 1 ||
-                fg.globalOpndHT.isOpndGlobal(Dst))
-                continue;
-            auto Dcl = Dst->getTopDcl();
-            if (!Dcl || !isCandidateDecl(Dcl))
-                continue;
-
-            unsigned LBound = Dst->getLeftBound();
-            unsigned RBound = Dst->getRightBound();
-            if ((LBound == LoLBound && RBound == LoRBound) ||
-                (LBound == HiLBound && RBound == HiRBound))
-            {
-                // OK, only defines low or high part.
-                // Bound constraints imply that def and uses are in two grfs.
-            }
-            else
-            {
-                continue;
-            }
-
-            if (inst->useEmpty())
-            {
-                continue;
-            }
-
-            // Check all uses.
-            bool DoSplitting = true;
-            for (auto UI = inst->use_begin(), UE = inst->use_end(); UI != UE; ++UI)
-            {
-                G4_Operand *Op = UI->first->getOperand(UI->second);
-                if (Op && Op->compareOperand(Dst) != Rel_eq)
-                {
-                    DoSplitting = false;
-                    break;
-                }
-
-                // The def-use chain is broken in the following code:
-                //
-                // mov (8, M1_NM) V33(0,0):df 0  <- not def
-                // mov (8, M3_NM) V33(2,0):df 0  <- not def
-                // mov (8, M1) V33(0,0):df 1     <- def
-                // mov (8, M3_NM) V33(2,0):df 1  <- def
-                //
-                // use of V33(0,0) and V33(2,0)
-                //
-                // FIXME: remove this if def-use chain is accurate.
-                if (UI->first->isWriteEnableInst() && !inst->isWriteEnableInst())
-                {
-                    DoSplitting = false;
-                    break;
-                }
-
-                // Only allow single definition:
-                // mov (8, M1_NM) V33:q 0
-                // mov (8, M1)    V33:q 1
-                // add (8, M1_NM  V34:q V33:q V32:q
-                //
-                if (UI->first->getSingleDef(UI->second) != inst)
-                {
-                    DoSplitting = false;
-                    break;
-                }
-            }
-
-            if (!DoSplitting)
-                continue;
-
-            G4_Type Ty = Dcl->getElemType();
-            auto Iter = DclMap.find(Dcl);
-            if (Iter == DclMap.end())
-            {
-                unsigned NElts = Dcl->getTotalElems();
-                auto DclLow = builder.createTempVar(NElts / 2, Ty, GRFALIGN, "Lo");
-                auto DclHi = builder.createTempVar(NElts / 2, Ty, GRFALIGN, "Hi");
-                DclMap[Dcl] = new DclMapInfo(DclLow, DclHi);
-            }
-            bool IsLow = LBound == LoLBound;
-            InstsToUpdate.push_back(std::make_pair(inst, IsLow));
-        }
-    }
-
-    // Iterate instructions that define hi or low parts. Update their defs and uses.
-    for (auto IPair : InstsToUpdate)
-    {
-        G4_INST *Inst = IPair.first;
-        bool IsLow = IPair.second;
-
-        // Update Inst's Dst.
-        {
-            G4_DstRegRegion *Dst = Inst->getDst();
-            G4_Type Ty = Dst->getType();
-            auto NewDcl = DclMap[Dst->getTopDcl()]->getDcl(builder, Ty, IsLow);
-            auto NewDst = builder.createDst(NewDcl->getRegVar(), 0, 0, 1, Ty);
-            Inst->setDest(NewDst);
-        }
-
-        // Update Inst's uses.
-        for (auto UI = Inst->use_begin(), UE = Inst->use_end(); UI != UE; ++UI)
-        {
-            G4_INST *UseInst = UI->first;
-            G4_SrcRegRegion *UseOpnd = UseInst->getOperand(UI->second)->asSrcRegRegion();
-            G4_Type UseTy = UseOpnd->getType();
-            auto NewUseDcl = DclMap[UseOpnd->getTopDcl()]->getDcl(builder, UseTy, IsLow);
-            auto NewUseOpnd = builder.createSrcRegRegion(
-                UseOpnd->getModifier(), UseOpnd->getRegAccess(),
-                NewUseDcl->getRegVar(), 0, 0, UseOpnd->getRegion(), UseTy);
-            UseInst->setSrc(NewUseOpnd, G4_INST::getSrcNum(UI->second));
-        }
-    }
-
-    // Cleanup.
-    for (auto DI : DclMap)
-    {
-        delete DI.second;
-    }
-}
-
-//
-// replacement of the above that can handle global variables
-// basically we split any 4GRF variables (they typically result from
-// simd16 64-bit vars) into two half if
+// We split any 4GRF variables (they typically result from simd16 64-bit vars) into two half if
 // -- they are not address taken or used in send
 // -- none of the operands cross from the 2nd to the 3rd GRF
 // This is intended to give RA more freedom as the split variables do
@@ -10969,7 +10583,7 @@ void Optimizer::split4GRFVars()
     // map each split candidate to their replacement split variables
     std::unordered_map<const G4_Declare *, DclMapInfo *> DclMap;
 
-    if (builder.getOptions()->getTarget() != VISA_3D)
+    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D)
     {
         return;
     }
@@ -10990,7 +10604,7 @@ void Optimizer::split4GRFVars()
     {
         if (dcl->getAliasDeclare() == nullptr)
         {
-            if (isCandidateDecl(dcl))
+            if (isCandidateDecl(dcl, builder))
             {
                 if (varToSplit.find(dcl) == varToSplit.end())
                 {
@@ -11008,7 +10622,7 @@ void Optimizer::split4GRFVars()
             // must appear before its alias decls
             uint32_t offset = 0;
             G4_Declare* rootDcl = dcl->getRootDeclare(offset);
-            if (offset != 0 && isCandidateDecl(rootDcl))
+            if (offset != 0 && isCandidateDecl(rootDcl, builder))
             {
                 varToSplit.erase(rootDcl);
             }
@@ -11146,6 +10760,79 @@ void Optimizer::split4GRFVars()
 }
 
 //
+// A platform may not support 64b types (FP64, INT64, or neither).
+// While HW conformity should have legalized away use of such types, they may get
+// re-introduced again later due to copy moves inserted by spill code generation, rematerialization etc.
+// Instead of checking whether 64b type is used at each createMov(), we add a catch-all pass here.
+// Since this is called post-RA the change we can make are very limited, for now just handle copy moves.
+// We make this a separate pass instead of part of changeMoveType() as the latter is considered an optimization.
+//
+void Optimizer::legalizeType()
+{
+    if (builder.noFP64() || builder.noInt64())
+    {
+        for (auto bb : kernel.fg)
+        {
+            for (auto inst : *bb)
+            {
+                auto uses64bType = [](G4_INST* inst)
+                {
+                    bool useFP64 = false;
+                    bool useInt64 = false;
+                    {
+                        auto dstTy = inst->getDst() ? inst->getDst()->getType() : Type_UNDEF;
+                        if (dstTy == Type_DF)
+                        {
+                            useFP64 = true;
+                        }
+                        else if (dstTy == Type_Q || dstTy == Type_UQ)
+                        {
+                            useInt64 = true;
+                        }
+                    }
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        auto srcTy = inst->getSrc(i) ? inst->getSrc(i)->getType() : Type_UNDEF;
+                        if (srcTy == Type_DF)
+                        {
+                            useFP64 = true;
+                        }
+                        else if (srcTy == Type_Q || srcTy == Type_UQ)
+                        {
+                            useInt64 = true;
+                        }
+                    }
+                    return std::make_tuple(useFP64, useInt64);
+                };
+                //ToDo: handle more cases (e.g., immSrc, use UD for copy moves)
+                if (inst->isRawMov() && inst->getSrc(0)->isSrcRegRegion())
+                {
+                    bool hasFP64 = false, hasInt64 = false;
+                    std::tie(hasFP64, hasInt64) = uses64bType(inst);
+                    if (hasFP64 && hasInt64)
+                    {
+                        assert(false && "can't handle inst with both FP64 and INT64 at this point");
+                        return;
+                    }
+                    if (hasFP64 && builder.noFP64())
+                    {
+                        assert(!builder.noInt64() && "can't change DF to UQ");
+                        inst->getDst()->setType(Type_UQ);
+                        inst->getSrc(0)->asSrcRegRegion()->setType(Type_UQ);
+                    }
+                    if (hasInt64 && builder.noInt64())
+                    {
+                        assert(!builder.noFP64() && "can't change Q/UQ to DF");
+                        inst->getDst()->setType(Type_DF);
+                        inst->getSrc(0)->asSrcRegRegion()->setType(Type_DF);
+                    }
+                }
+            }
+        }
+    }
+}
+
+//
 // for some platforms int has half throughout compared to float,
 // so for copy moves we should change their type
 // from D/UD to F or W/UW to HF when possible
@@ -11237,443 +10924,6 @@ void Optimizer::changeMoveType()
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-
-// NoDD
-namespace {
-    // This describes the part of the GRF accessed.
-    struct AccessMask {
-        uint64_t mask;
-        // int from;
-        // int to;
-        void setMask(int From, int To) {
-            mask = (((uint64_t) 1L << (To + 1L)) - 1L)
-                & ~(((uint64_t) 1L << From) - 1L);
-        }
-        AccessMask(void) {
-            mask = 0;
-        }
-        AccessMask(int From, int To) {
-            setMask(From, To);
-        }
-        AccessMask(G4_Operand *opnd, int bucket) {
-            int linearStart = opnd->getLinearizedStart();
-            int linearEnd = opnd->getLinearizedEnd();
-            int buLinearStart = bucket * G4_GRF_REG_NBYTES;
-            int buLinearEnd = buLinearStart + G4_GRF_REG_NBYTES - 1;
-
-            // If the OPND is accessing more than 1 GRF
-            // get the addresses that fit within the bucket
-            int fittedLinearStart = std::max(linearStart, buLinearStart);
-            int fittedLinearEnd = std::min(linearEnd, buLinearEnd);
-
-            int from = fittedLinearStart - buLinearStart;
-            assert(from >= 0);
-            int to = fittedLinearEnd - buLinearStart;
-            setMask(from, to);
-            assert(to < G4_GRF_REG_NBYTES);
-        }
-
-        // Return TRUE if this mask and AM have some overlap
-        bool hasOverlapWith(const AccessMask &AM) const {
-            // if (AM.from >= from) {
-            //     return AM.from <= to;
-            // } else {
-            //     return AM.to >= from;
-            // }
-            return (mask & AM.mask) != 0;
-        }
-        // Return TRUE if this mask fully covers the AM mask
-        bool fullyCovers(const AccessMask &AM) const {
-            // return (from <= AM.from && to >= AM.to);
-            return (mask | AM.mask) == mask;
-        }
-        // Return TRUE if the mask covers the full GRF
-        bool coversFullGRF(void) const {
-            // return (to > from
-            //         && (from % G4_GRF_REG_NBYTES) == 0
-            //         && (to & G4_GRF_REG_NBYTES) == 0);
-            return mask == ((uint64_t) 1 << G4_GRF_REG_NBYTES) - (uint64_t) 1;
-        }
-        void setBits(const AccessMask &AM) {
-            mask |= AM.mask;
-        }
-        void clearBits(void) {
-            mask = 0;
-        }
-        void clearBits(const AccessMask &AM) {
-            mask &= ~AM.mask;
-        }
-        // Return true if all bits set in AM are also set in this mask
-        bool areBitsSet(const AccessMask &AM) const {
-            return (AM.mask & mask) == AM.mask;
-        }
-        // Debug print
-        void dump(void) const {
-            for (int i = 0; i < G4_GRF_REG_NBYTES; ++i) {
-                if (((uint64_t) 1 << i) & mask)
-                    std::cerr << "1";
-                else
-                    std::cerr << "0";
-            }
-            fprintf(stderr, "    0x%lX\n", (unsigned long)mask);
-        }
-    };
-
-
-
-
-    enum RW {
-        RW_UNINIT = 0,
-        READ = 1 << 0,
-        WRITE = 1 << 1,
-        RW_MAX
-    };
-
-
-    // Points to the bucket
-    struct BucketDescr {
-        int bucketIdx;
-        RW type;
-        AccessMask mask;
-        bool isARF;
-        G4_Type dataType;
-
-        BucketDescr(int BI, G4_Type DT, RW RWT, AccessMask AM, bool IsARF)
-            : bucketIdx(BI), type(RWT), mask(AM), isARF(IsARF), dataType(DT)
-        {
-            assert(dataType != Type_UNDEF && "Bad data type ?");
-        }
-        bool sameReg(const BucketDescr &BD) const {
-            return bucketIdx == BD.bucketIdx;
-        }
-        bool sameDataType(const BucketDescr &BD) const {
-            return dataType == BD.dataType;
-        }
-        bool hasOverlapWith(const BucketDescr &BD) const {
-            return sameReg(BD) && mask.hasOverlapWith(BD.mask);
-        }
-        bool accessesARF(void) const {
-            return isARF;
-        }
-    };
-
-    typedef std::vector<BucketDescr> BDVec_t;
-
-    // Parse INSTR's OPND and generate the Bucket Descriptors.
-    // Insert them into BDVec.
-    void getBucketsForOperand(G4_INST* inst, RW rwType, G4_Operand* opnd,
-                              BDVec_t& BDVec) {
-        if (opnd->isLabel() || opnd->isImm()) {
-            return;
-        }
-#define UNINIT_BUCKET -1
-        int startingBucket = UNINIT_BUCKET;
-        G4_VarBase* base = opnd->getBase();
-        bool canSpanMultipleBuckets = false;
-        bool isARF = false;
-
-        assert(base && "If no base, then the operand is not touched by instr.");
-
-        // If a register allocated regvar, then get the physical register
-        G4_VarBase *phyReg = (base->isRegVar()) ?
-            base->asRegVar()->getPhyReg() : base;
-
-        switch (phyReg->getKind()) {
-        case G4_VarBase::VK_phyGReg:
-            // Handle GRFs - fast path
-            startingBucket = opnd->getLinearizedStart()/G4_GRF_REG_NBYTES;
-            canSpanMultipleBuckets = true;
-            break;
-        case G4_VarBase::VK_phyAReg:
-            isARF = true;
-            break;
-        default:
-            assert(0 && "Bad kind");
-            break;
-        }
-
-        // Create one or more buckets and push them into the vector
-        if (startingBucket != UNINIT_BUCKET) {
-            if (canSpanMultipleBuckets) {
-                assert(! isARF);
-                unsigned int divisor;
-                int baseBucket;
-                assert(base->isGreg());
-                divisor = G4_GRF_REG_NBYTES;
-                baseBucket = 0;
-                int endingBucket = baseBucket
-                    + opnd->getLinearizedEnd() / divisor;
-                MUST_BE_TRUE(endingBucket >= startingBucket,
-                             "Ending bucket less than starting bucket");
-                int numBuckets = endingBucket - startingBucket + 1;
-                for (int bucket_j = startingBucket;
-                     bucket_j < (startingBucket + numBuckets); bucket_j++ ) {
-                    AccessMask AM(opnd, bucket_j);
-                    BDVec.push_back(BucketDescr(bucket_j, opnd->getType(),
-                                                rwType, AM, isARF));
-                }
-            }
-            else {
-                AccessMask AM(opnd, startingBucket);
-                BDVec.push_back(BucketDescr(startingBucket, opnd->getType(),
-                                            rwType, AM, isARF));
-            }
-        }
-    }
-
-    // We pack all information we have collected for the instruction
-    struct BucketDescrWrapper {
-        BucketDescrWrapper() : hasIndirW(false) {
-            BDVec.reserve(16);
-        }
-        // The vector of buckets read/writen by the instruction
-        BDVec_t BDVec;
-        // The instruction has an indirect write
-        bool hasIndirW;
-        // Return TRUE if there is a RAW dependence between this and prevBDW
-        // even without any overlap: e.g:
-        // math (8) r86.0<1>:hf r86.0<8;8,1>:hf null:ud
-        // math (8) r86.8<1>:hf r86.8<8;8,1>:hf null:ud
-        // Although there is no a real data movement between
-        // r86.0<1>:hf -> r86.8<8;8,1>:hf, adding noDDclr and noDDChck would
-        // lead to a hang
-        bool hasRAW(const BucketDescrWrapper &prevBDW) const {
-            for (const auto &prevBD : prevBDW.BDVec) {
-                if (prevBD.type == WRITE) {
-                    for (const auto &currBD : BDVec) {
-                        if (currBD.type == READ) {
-                            // if (currBD.hasOverlapWith(prevBD)) {
-                            if (currBD.sameReg(prevBD)) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Return TRUE if there is a subreg WAW dependence between
-        // this and prevBDW
-        // This is TRUE only if the data types match.
-        bool hasSubregWAW(const BucketDescrWrapper &prevBDW) const {
-            bool noWAW = false;
-            for (const auto &prevBD : prevBDW.BDVec) {
-                if (prevBD.type == WRITE) {
-                    for (const auto &currBD : BDVec) {
-                        if (currBD.type == WRITE) {
-                            if (currBD.sameReg(prevBD)) {
-                                if (! currBD.hasOverlapWith(prevBD)
-                                    && currBD.sameDataType(prevBD)) {
-                                    noWAW = true;
-                                } else {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return noWAW;
-        }
-
-        // Return TRUE if writing to more than 1 GRF
-        bool touchesManyGRFs(void) const {
-            std::set<int> bucketsTouched;
-            for (const auto &BD : BDVec) {
-                if (BD.type == WRITE) {
-                    bucketsTouched.insert(BD.bucketIdx);
-                }
-            }
-            return bucketsTouched.size() > 1;
-        }
-
-        // Return TRUE if we are accessing an ARF
-        bool accessesARF(void) const {
-            for (const auto &BD : BDVec) {
-                if (BD.accessesARF()) {
-                    return true;
-                }
-            }
-            return false;
-        }
-    };
-
-    // Given an inst with physical register assignment,
-    // return all bucket descriptors that the physical register can map
-    // to. This requires taking in to account exec size, data
-    // type, and whether inst is a send
-    BucketDescrWrapper getBucketDescrsForInst(G4_INST* inst,
-                                              BucketDescrWrapper &instrBuckets) {
-        // Iterate over all WRITTEN operands and create buckets.
-        for (Gen4_Operand_Number opndNum : {Opnd_dst}) {
-            G4_Operand *opnd = inst->getOperand(opndNum);
-            if (! opnd || ! opnd->getBase()) {
-                continue;
-            }
-            getBucketsForOperand(inst, WRITE, opnd, instrBuckets.BDVec);
-            instrBuckets.hasIndirW |= opnd->asDstRegRegion()->isIndirect();
-        }
-        for (Gen4_Operand_Number opndNum
-                 : {Opnd_src0, Opnd_src1, Opnd_src2, Opnd_src3}) {
-            G4_Operand *opnd = inst->getOperand(opndNum);
-            if (! opnd || ! opnd->getBase()) {
-                continue;
-            }
-            getBucketsForOperand(inst, READ, opnd, instrBuckets.BDVec);
-        }
-        return instrBuckets;
-    }
-
-
-    bool mustAddNoDD(const BucketDescrWrapper &prevBDW,
-                     const BucketDescrWrapper &currBDW) {
-        if (currBDW.hasRAW(prevBDW)) {
-            return false;
-        }
-        // This also confirms that the data types are equal
-        if (currBDW.hasSubregWAW(prevBDW)) {
-            return true;
-        }
-        return false;
-    }
-
-    static bool areOnSamePipeline(G4_INST *prevInstr, G4_INST *currInstr) {
-        // Forbid different opcodes
-        if (prevInstr->opcode() != currInstr->opcode()) {
-            return false;
-        }
-        // Math check type
-        if (prevInstr->isMath() && currInstr->isMath()) {
-            auto prevMathTy = prevInstr->asMathInst()->getMathCtrl();
-            auto currMathTy = currInstr->asMathInst()->getMathCtrl();
-            return prevMathTy == currMathTy;
-        }
-
-        return true;
-    }
-
-}
-
-// Scan the code and insert NoDDclr and NoDDchk flags to avoid unnecessary
-// latencies when accessing sub-registers.
-// This happens because the scoreboard works with a GRF granularity.
-// Therefore a sub-reg is considered to access the whole GRF and dependencies
-// are over-estimated.
-//
-// NoDDclr: Do not mark the destination registers in the scoreboard
-// NoDDchk: Do not check the scoreboard for the source registers
-//
-// Example:
-//     A: add(8) R1.0 = ...
-//     B: add(8) R1.8 = ...
-//    Instruction B will wait until A has written back to the RF because
-//    R1.0 and R1.8 alias in the scoreboard
-//   Solution:
-//     A: add(8) R1.0 = ... {NoDDclr}
-//     B: add(8) R1.8 = ... {NoDDchk}
-//    Now B will issue right after A.
-//
-static bool tryToAddNoDD(G4_INST *currInstr, G4_INST *prevInstr,
-                         BucketDescrWrapper &prevBDW,
-                         BucketDescrWrapper &currBDW,
-                         const Options *options) {
-    // 1. To be safe, predicated instrs can kill but cannot cover.
-    // 2. Must be on same pipeline
-    // 3. If subreg WAW and no RAW dep, insert NoDD flags
-    if (prevInstr
-        && ! prevBDW.touchesManyGRFs()
-        && ! prevBDW.hasIndirW
-        && ! prevInstr->isSend()
-        && ! currInstr->isSend()
-        && ! currInstr->getPredicate()
-        && ! prevInstr->getPredicate()
-        && ! prevBDW.accessesARF()
-        && ! currBDW.accessesARF()
-        && areOnSamePipeline(prevInstr, currInstr)
-        && mustAddNoDD(prevBDW, currBDW)) {
-
-        // Tag the instructions with the NoDD flag
-        prevInstr->setOptionOn(InstOpt_NoDDClr);
-        currInstr->setOptionOn(InstOpt_NoDDChk);
-
-        // Sanity check
-        G4_Operand *dst = prevInstr->getOperand(Opnd_dst);
-        G4_Operand *src = currInstr->getOperand(Opnd_src0);
-        if (dst && src)
-        {
-            G4_VarBase *dstBase = dst->getBase();
-            G4_VarBase *srcBase = src->getBase();
-            if (dstBase && srcBase && dstBase->isRegVar() && srcBase->isRegVar())
-            {
-                G4_VarBase *dstReg = (dstBase->isRegVar()) ?
-                    dstBase->asRegVar()->getPhyReg() : dstBase;
-                G4_VarBase *srcReg = (srcBase->isRegVar()) ?
-                    srcBase->asRegVar()->getPhyReg() : srcBase;
-                if (srcReg && srcReg->isGreg() && dstReg && dstReg->isGreg())
-                {
-                    auto dstPhyReg = dstReg->asGreg();
-                    int dstNum = dstPhyReg->getRegNum();
-                    auto srcPhyReg = srcReg->asGreg();
-                    int srcNum = srcPhyReg->getRegNum();
-                    assert(dstNum != srcNum);
-                }
-            }
-        }
-        // DEBUGGING: dump NoDD pairs into a file
-        if (options->getOption(vISA_DebugNoDD)) {
-            fstream ofile("C:\\Intel\\nodd.txt",
-                          std::fstream::out | std::fstream::app);
-            ofile << *prevInstr << std::endl;
-            ofile << *currInstr << std::endl << std::endl;
-        }
-        return true;
-    }
-    return false;
-}
-
-// NOTE: It is currently disabled (vISA_EnableNoDD == false).
-void Optimizer::NoDD(void) {
-    const Options *options = builder.getOptions();
-    if (! builder.noDDAllowedPlatform()
-        || ! options->getOption(vISA_EnableNoDD)) {
-        return;
-    }
-    const int MAX_LOOK_BACK = options->getuInt32Option(vISA_NoDDLookBack);
-
-    for (auto bb : fg) {
-        // Keep the last few instructions
-        std::vector<G4_INST *> prevInstrs;
-        std::vector<BucketDescrWrapper> prevBDWs;
-        // G4_INST *prevInstr = nullptr;
-        // BucketDescrWrapper prevBDW;
-        for (auto currInstr : *bb) {
-            if (currInstr->isLabel()) {
-                continue;
-            }
-            BucketDescrWrapper currBDW;
-            (void) getBucketDescrsForInst(currInstr, currBDW);
-
-            // Try to insert NoDD in MAX_LOOK_BACK previous intructions
-            bool succ = false;
-            int prevIdx = 0;
-            while (! succ && prevIdx < (int)prevInstrs.size()) {
-                G4_INST *prevInstr = prevInstrs[prevIdx];
-                BucketDescrWrapper &prevBDW = prevBDWs[prevIdx];
-                succ = tryToAddNoDD(currInstr, prevInstr,
-                                    prevBDW, currBDW, options);
-                prevIdx++;
-            }
-            prevInstrs.insert(prevInstrs.begin(), currInstr);
-            prevBDWs.insert(prevBDWs.begin(), currBDW);
-            if (prevInstrs.size() == MAX_LOOK_BACK) {
-                prevInstrs.pop_back();
-                prevBDWs.pop_back();
             }
         }
     }
@@ -11789,7 +11039,7 @@ static G4_INST* emitRetiringMov(IR_Builder& builder, G4_BB* BB, G4_INST* SI,
         Mod_src_undef, Direct, Dcl->getRegVar(), 0, 0,
         builder.getRegionStride1(), Type_F);
     G4_INST* MovInst = builder.createMov(8, MovDst, MovSrc, InstOpt_M0 | InstOpt_WriteEnable, false);
-    BB->insert(InsertBefore, MovInst);
+    BB->insertBefore(InsertBefore, MovInst);
     return MovInst;
 }
 
@@ -11882,15 +11132,49 @@ assert(LiveSends.size() < MAX_SENDS);
     }
 }
 
-void Optimizer::replaceNoMaskWithAnyhWA()
+// [HW WA]
+// Fused Mask cannot change from 01 to 00, therefore, EU will go through
+// insts that it should skip, causing incorrect result if NoMask instructions
+// that has side-effect (send, or modifying globals, etc) are executed.
+// A WA is to change any NoMask instruction by adding a predicate to it.
+// And the predicated is equivalent to NoMask. For example, the following
+// instruction
+//
+//    (W) add (8|M0)  r10.0<1>:d  r11.0<1;1,0>:d  r12.0<1;1,0>:d
+//
+//  will be changed to
+//
+//    (W)  mov (1|M0) f0.0<1>:w  0
+//         cmp (8|M0) (eq)f0.0 r0:uw  r0:uw
+//    (W&f0.0.any8h) add (8|M0)  r10.0<1>:d  r11.0<1;1,0>:d  r12.0<1;1,0>:d
+//
+//  Note that f0.0 is called "emask flag".
+//
+// Even with this HW bug, the HW still have the correct CE mask so that the
+// above mov&cmp sequence still works, that is, f0.0 will be all zero if no
+// active lanes and will not be zero if there is at least one active lane.
+//
+// Nested Divergence
+//   For a fused mask to be 01,  the control-flow must be divergent
+//   at that point. Furthermore, changing 01 to 00 happens only if a further
+//   divergence happens within a already-divergent path. This further
+//   divergence is called nested divergence here.
+//
+//   As changing from 01 to 00 never happens with backward goto, backward
+//   goto is treated as divergent, but not nested divergent for the purpose
+//   of this WA.
+//
+// This function first finds out which BB are in nested divergent branch and
+// then add predicates to those NoMask instructions.
+//
+void Optimizer::doNoMaskWA()
 {
+    std::unordered_map<G4_BB*, int> nestedDivergentBBs;
+
     // Identify BBs that need WA
     fg.reassignBlockIDs();
-    fg.findNestedDivergentBBs();
+    fg.findNestedDivergentBBs(nestedDivergentBBs);
 
-    // Save dmask for the shader. Need to read them again
-    // whenever sr0.2 is modified in the shader.
-    G4_RegVar* dmaskVarUD = nullptr;
     std::vector<INST_LIST_ITER> NoMaskCandidates;
     uint32_t simdsize = fg.getKernel()->getSimdSize();
 
@@ -11901,19 +11185,8 @@ void Optimizer::replaceNoMaskWithAnyhWA()
     // so that we save 1 insts for each BB. The condition that anyh
     // can be used is that M0 is used for all NoMask insts that needs
     // WA and all its execsize is no larger than simdsize.
-    bool enableAnyh = false;
-    bool  useAnyh = false;  // default use all-one flag.
-    if ((builder.getuint32Option(vISA_noMaskWA) & 0x10) != 0)
-    {
-        enableAnyh = true;
-    }
-    if ((builder.getuint32Option(vISA_noMaskWA) & 0x8) == 0 ||
-        (builder.getuint32Option(vISA_noMaskWA) & 0x4) == 0)
-    {
-        // When reading ce or doing WA per inst, do not use anyh
-        enableAnyh = false;
-    }
-
+    bool enableAnyh = true; // try to use anyh if possible
+    bool  useAnyh = enableAnyh;  // Set for each BB/inst.
 
     auto getPredCtrl = [&](bool isUseAnyh) -> G4_Predicate_Control
     {
@@ -11949,12 +11222,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_CondMod* condmod = getFlagModifier(Inst);
         bool dstGlb = (dst && !dst->isNullReg() && cfg.globalOpndHT.isOpndGlobal(dst));
         bool condmodGlb = (condmod && cfg.globalOpndHT.isOpndGlobal(condmod));
-#if 0
-        if (Inst->isSend() || dstGlb || condmodGlb ||
-            (dst && !dst->isNullReg() && dst->isAreg()))
-#else
         if (Inst->isSend() || dstGlb || condmodGlb)
-#endif
         {
             if (Inst->isSend() && Inst->getPredicate() &&
                 Inst->getExecSize() > simdsize)
@@ -11967,14 +11235,13 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         return false;
     };
 
-    // Use cmp to calculate emask flag. This is an alternative to
-    // createFlagFromCE0().
+    // Use cmp to calculate "emask flag(or flag)" (see comment at entry of this function)
     auto createFlagFromCmp = [&](G4_INST*& flagDefInst,
         uint32_t flagBits, G4_BB* BB, INST_LIST_ITER& II)->G4_RegVar*
     {
         //  Ty  (for flag):  big enough to hold flag for either anyh or all one flag.
         //                   if useAnyh
-        //                      Ty = (simdsize > 16> ? UD : UW
+        //                      Ty = (simdsize > 16 ? UD : UW
         //                   else
         //                      Ty = max(simdsize, flagBits) > 16 ? UD : UW
         //
@@ -11996,7 +11263,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_DstRegRegion* flag = builder.createDst(flagVar, 0, 0, 1, Ty);
         G4_INST* I0 = builder.createMov(1, flag,
             builder.createImm(0, Ty), InstOpt_WriteEnable, false);
-        BB->insert(II, I0);
+        BB->insertBefore(II, I0);
 
         G4_SrcRegRegion* r0_0 = builder.createSrcRegRegion(
             Mod_src_undef, Direct,
@@ -12010,7 +11277,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_DstRegRegion* nullDst = builder.createNullDst(Type_UW);
         G4_INST* I1 = builder.createInternalInst(
             NULL, G4_cmp, flagCM, false, simdsize, nullDst, r0_0, r0_1, InstOpt_M0);
-        BB->insert(II, I1);
+        BB->insertBefore(II, I1);
 
         if (useAnyh)
         {
@@ -12026,7 +11293,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             (simdsize == 8 ? PRED_ANY8H : (simdsize == 16 ? PRED_ANY16H : PRED_ANY32H)));
         flagDefInst->setPredicate(tP);
         tP->setSameAsNoMask(true);
-        BB->insert(II, flagDefInst);
+        BB->insertBefore(II, flagDefInst);
 
         // update DefUse
         flagDefInst->addDefUse(I0, Opnd_pred);
@@ -12034,102 +11301,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         return flagVar;
     };
 
-    // For a BB, calculating its emask and storing the emask in a flag.
-    //
-    // flagDefInst: created to define an emask flag using 'ce0 AND dmask'.
-    //
-    // The function returns that emask flag's G4_RegVar (refer to as flagVar).
-    // Note that flagDefInst will be inserted a few insts before II in BB,
-    // not right before II if possible.
-    auto createFlagFromCE0 = [&](G4_INST*& flagDefInst,
-        uint32_t flagBits, G4_BB* BB, INST_LIST_ITER& II) -> G4_RegVar*
-    {
-        if ((builder.getuint32Option(vISA_noMaskWA) & 0x8) != 0)
-        {
-            return createFlagFromCmp(flagDefInst, flagBits, BB, II);
-        }
-
-        //
-        // This create an inst definging flag:
-        //    (w) and  flag:Ty  ce0.0<0;1,0>:Ty  dmaskVar:Ty
-        //
-        // Note that dmaskVar shall be inserted at the end of
-        // entry BB.
-        //
-        // If sr0.2 (dmask) is modified in other BBs instead of entry BB,
-        // dmaskVar must be updated right after the place where sr0.2 is
-        // set. This is done at the end of replaceNoMaskWithAnyhWA().
-        //
-        if (dmaskVarUD == nullptr)
-        {
-            // Using dmask:
-            //     (W) mov (1|M0) r10.0<1>:ud sr0.2<0;1,0>:ud
-            // or using vmaks
-            //     (W) mov (1|M0) r10.0<1>:ud sr0.3<0;1,0>:ud
-            bool useVMask = builder.getOption(vISA_VME);
-
-            G4_Declare* dmaskDecl = builder.createTempVar(1, Type_UD, Any, "DMaskUD");
-            dmaskVarUD = dmaskDecl->getRegVar();
-            G4_SrcRegRegion* Src = builder.createSrcRegRegion(
-                Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(),
-                0, (useVMask ? 3 : 2), builder.getRegionScalar(), Type_UD);
-            G4_DstRegRegion* Dst = builder.createDst(
-                dmaskVarUD, 0, 0, 1, Type_UD);
-            G4_INST* dmaskInst = builder.createMov(1, Dst, Src, InstOpt_WriteEnable, false);
-
-            G4_BB* entryBB = fg.getEntryBB();
-            assert(!fg.isInNestedDivergentBranch(entryBB) &&
-                "ICE: Entry BB should not be marked as divergent!");
-
-            INST_LIST_ITER beforePos = entryBB->end();
-            if (!entryBB->empty()) {
-                INST_LIST_ITER tII = beforePos;
-                --tII;
-                if ((*tII)->isCFInst()) {
-                    beforePos = tII;
-                }
-            }
-            entryBB->insert(beforePos, dmaskInst);
-
-            fg.globalOpndHT.addGlobalOpnd(Dst);
-        }
-
-        G4_Type Ty = (flagBits > 16) ? Type_UD : Type_UW;
-        G4_Declare* flagDecl = builder.createTempFlag(
-            (Ty == Type_UD) ? 2 : 1, "newFlag");
-        G4_RegVar* flagVar = flagDecl->getRegVar();
-        G4_SrcRegRegion* ceSrc0 = builder.createSrcRegRegion(
-            Mod_src_undef, Direct, builder.phyregpool.getMask0Reg(), 0, 0,
-            builder.getRegionScalar(), Type_UD);
-        G4_SrcRegRegion* dmaskSrc1 = builder.createSrcRegRegion(
-            Mod_src_undef, Direct, dmaskVarUD, 0, 0,
-            builder.getRegionScalar(), Type_UD);
-        G4_DstRegRegion* tDst = builder.createNullDst(Type_UD);
-        G4_CondMod* condMod = builder.createCondMod(Mod_nz, flagVar, 0);
-        flagDefInst = builder.createInternalInst(
-            nullptr, G4_and, condMod, false,
-            (flagBits > 16 ? 16 : flagBits), tDst, ceSrc0, dmaskSrc1,
-            InstOpt_WriteEnable);
-        BB->insert(II, flagDefInst);
-
-        if (flagBits == 32)
-        {
-            G4_SrcRegRegion* flagSrc = builder.createSrcRegRegion(
-                Mod_src_undef, Direct, flagVar, 0, 0,
-                builder.getRegionScalar(), Type_UW);
-            G4_DstRegRegion* flagDst = builder.createDst(
-                flagVar, 0, 0, 1, Type_UW);
-            G4_INST* tInst = builder.createMov(2, flagDst, flagSrc, InstOpt_WriteEnable, false);
-            BB->insert(II, tInst);
-
-            // update defuse
-            tInst->addDefUse(flagDefInst, Opnd_src0);
-            flagDefInst = tInst;
-        }
-        return flagVar;
-    };
-
-    // flagVar : emask for this BB:
+    // flagVar : emask flag for this BB:
     // currII:  iter to I
     //   positive predicate:
     //        I :  (W&P) <inst> (8|M0) ...
@@ -12180,7 +11352,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_INST* I0 = builder.createInternalInst(
             flag0, G4_sel, nullptr, false,
             1, tDst, Src0, Src1, InstOpt_WriteEnable);
-        currBB->insert(currII, I0);
+        currBB->insertBefore(currII, I0);
         flag0->setSameAsNoMask(true);
 
         flagVarDefInst->addDefUse(I0, Opnd_pred);
@@ -12202,7 +11374,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
     //     I:  (W) sel.ge.f0.0  (1|M0)   r10.0<1>:f  r20.0<0;1,0>:f  0:f
     // After
     //     I:  (W) sel.ge.f0.0  (1|M0)  t:f  r20.0<0;1,0>:f   0:f
-    //     I0: (W%flagVar) mov (1|M0)  r10.0<1>:f t:f
+    //     I0: (W&flagVar) mov (1|M0)  r10.0<1>:f t:f
     //
     auto doFlagModifierSelInstWA = [&](
         G4_INST* flagVarDefInst,  // inst that defines flagVar
@@ -12252,7 +11424,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 
         auto nextII = currII;
         ++nextII;
-        currBB->insert(nextII, I0);
+        currBB->insertBefore(nextII, I0);
 
         flagVarDefInst->addDefUse(I0, Opnd_pred);
         // As I's dst must be global (otherwise, WA is not needed),
@@ -12315,7 +11487,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 0, 0, builder.getRegionScalar(), Ty);
             G4_DstRegRegion* D0 = builder.createDst(saveVar, 0, 0, 1, Ty);
             G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
-            currBB->insert(currII, I0);
+            currBB->insertBefore(currII, I0);
 
             auto nextII = currII;
             ++nextII;
@@ -12328,7 +11500,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             G4_Predicate* flag = builder.createPredicate(
                 PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
             I1->setPredicate(flag);
-            currBB->insert(nextII, I1);
+            currBB->insertBefore(nextII, I1);
 
             flagVarDefInst->addDefUse(I1, Opnd_pred);
             I0->addDefUse(I1, Opnd_src0);
@@ -12350,7 +11522,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 0, 0, builder.getRegionScalar(), Ty);
             G4_DstRegRegion* D0 = builder.createDst(nPVar, 0, 0, 1, Ty);
             G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
-            currBB->insert(currII, I0);
+            currBB->insertBefore(currII, I0);
 
             // Use the new flag
             // Note that if useAny is true, nP should use anyh
@@ -12374,7 +11546,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 
             auto nextII = currII;
             ++nextII;
-            currBB->insert(nextII, I1);
+            currBB->insertBefore(nextII, I1);
 
             flagVarDefInst->addDefUse(I0, Opnd_src0);
             flagVarDefInst->addDefUse(I1, Opnd_pred);
@@ -12399,7 +11571,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_DstRegRegion* D0 = builder.createDst(
             saveVar, 0, 0, 1, Ty);
         G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
-        currBB->insert(currII, I0);
+        currBB->insertBefore(currII, I0);
 
         G4_DstRegRegion* D1 = builder.createNullDst(Ty);
         G4_SrcRegRegion* I1S0 = builder.createSrcRegRegion(
@@ -12409,7 +11581,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             D1, I1S0, (InstOpt_WriteEnable | I->getMaskOption()), false);
         G4_CondMod* nM0 = builder.createCondMod(Mod_nz, modDcl->getRegVar(), 0);
         I1->setCondMod(nM0);
-        currBB->insert(currII, I1);
+        currBB->insertBefore(currII, I1);
 
         G4_Predicate* nP = builder.createPredicate(
             PredState_Plus, modDcl->getRegVar(), 0, PRED_DEFAULT);
@@ -12427,7 +11599,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_Predicate* flag2 = builder.createPredicate(
             PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I2->setPredicate(flag2);
-        currBB->insert(nextII, I2);
+        currBB->insertBefore(nextII, I2);
 
         flagVarDefInst->addDefUse(I1, Opnd_src0);
         flagVarDefInst->addDefUse(I2, Opnd_pred);
@@ -12480,7 +11652,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_DstRegRegion* D0 = builder.createDst(
             saveVar, 0, 0, 1, Ty);
         G4_INST* I0 = builder.createMov(1, D0, I0S0, InstOpt_WriteEnable, false);
-        currBB->insert(currII, I0);
+        currBB->insertBefore(currII, I0);
 
         G4_DstRegRegion* D1 = builder.createDst(
             modDcl->getRegVar(), 0, 0, 1, Ty);
@@ -12495,7 +11667,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_Predicate* flag1 = builder.createPredicate(
             PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I1->setPredicate(flag1);
-        currBB->insert(currII, I1);
+        currBB->insertBefore(currII, I1);
 
         // No change to I
 
@@ -12510,7 +11682,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         G4_Predicate* flag2 = builder.createPredicate(
             PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
         I2->setPredicate(flag2);
-        currBB->insert(nextII, I2);
+        currBB->insertBefore(nextII, I2);
 
         flagVarDefInst->addDefUse(I1, Opnd_pred);
         flagVarDefInst->addDefUse(I2, Opnd_pred);
@@ -12529,11 +11701,17 @@ void Optimizer::replaceNoMaskWithAnyhWA()
     for (auto BI : fg)
     {
         G4_BB* BB = BI;
-        if (!fg.isInNestedDivergentBranch(BB)) {
+        if (nestedDivergentBBs.count(BB) == 0)
+        {
+            continue;
+        }
+        if (((builder.getuint32Option(vISA_noMaskWA) & 0x3) >= 2) &&
+            nestedDivergentBBs[BB] < 2)
+        {
             continue;
         }
 
-        if ((builder.getuint32Option(vISA_noMaskWA) & 0x4) == 0)
+        if ((builder.getuint32Option(vISA_noMaskWA) & 0x4) != 0)
         {
             // simple flag insertion: every time a flag is needed, calcalate it.
             for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
@@ -12549,9 +11727,17 @@ void Optimizer::replaceNoMaskWithAnyhWA()
                 {
                     flagbits = 32;
                 }
+                useAnyh = enableAnyh;
+                if (enableAnyh)
+                {
+                    if (I->getExecSize() > simdsize || I->getMaskOffset() != 0)
+                    {
+                        useAnyh = false;
+                    }
+                }
 
                 G4_INST* flagDefInst = nullptr;
-                G4_RegVar* flagVar = createFlagFromCE0(flagDefInst, flagbits, BB, II);
+                G4_RegVar* flagVar = createFlagFromCmp(flagDefInst, flagbits, BB, II);
 
                 G4_Predicate* pred = I->getPredicate();
                 G4_CondMod* condmod = I->getCondMod();
@@ -12586,30 +11772,28 @@ void Optimizer::replaceNoMaskWithAnyhWA()
             continue;
         }
 
-        // Now, builder.getuint32Option(vISA_noMaskWA) & 0x4) != 0
-        // (optimized version)
-        //
         // For each BB that needs to modify NoMask, create a flag once right
         // prior to the first NoMask inst to be modified like the following:
         //
         //    BB:
-        //       ......
-        //       if (using ce0)
-        //         (W) and (16|M0) (nz)f0.0  null<1>:ud  ce0.0:ud   dmask:ud
-        //         ** If any nomask inst uses bits beyond 16, need the following too **
-        //         (W)  mov (2|M0)  f0.0<1>:uw   f0.0<0;1,0>:uw
-        //       else // using cmp
+        //      Before:
+        //             (W&f0.0) inst0 (16|M0) ...
+        //             ......
+        //             (W&f0.0) inst0 (16|M0) ...
+        //      After:
         //         (W) mov (1|M0)           f0.0:uw   0:uw  // or ud
         //             cmp (16|M0) (eq)f0.0 null:uw  r0.0<0;1,0::uw  r0.0<0;1,0>:uw
-        //           if (!useAnyh)
+        //         if (!useAnyh)
         //             (W&f0.0.any16h)  mov (1|M0) f0.0  0xFFFF:uw
         //
-        //       (W&f0.0) inst0
-        //       ......
-        //       (W&f0.0) inst1
+        //             (W&f0.0) inst0 (16|M0) ...
+        //             ......
+        //             (W&f0.0) inst0 (16|M0) ...
+        //         else
+        //             (W&f0.0.any16h) inst0 (16|M0) ...
+        //             ......
+        //             (W&f0.0.any16h) inst0 (16|M0) ...
         //
-        //  If useAnyh,  the predicate would be (W & f0.0.any16h). The new flag,
-        //  either f0.0 (all-one) or f0.0.any16h (useAnyh) is equivalent to noMask.
 
         //  1. Collect all candidates and check if 32 bit flag is needed
         //     and if useAnyh can be set to true.
@@ -12644,7 +11828,7 @@ void Optimizer::replaceNoMaskWithAnyhWA()
 
         G4_INST* flagDefInst = nullptr;
         uint32_t flagBits = need32BitFlag ? 32 : 16;
-        G4_RegVar* flagVarForBB = createFlagFromCE0(flagDefInst, flagBits, BB, II0);
+        G4_RegVar* flagVarForBB = createFlagFromCmp(flagDefInst, flagBits, BB, II0);
 
         // 3. Do WA by adding predicate to each candidate
         for (int i = 0, sz = (int)NoMaskCandidates.size(); i < sz; ++i)
@@ -12684,41 +11868,5 @@ void Optimizer::replaceNoMaskWithAnyhWA()
         }
         // Clear it to prepare for the next BB
         NoMaskCandidates.clear();
-    }
-
-    if (dmaskVarUD && fg.getSR0Modified())
-    {
-        // modification made. Make sure that if sr0.2 is updated, reread dmask/vmask
-        // Note that vmask is updated automatically when sr0.2 is set.
-        bool useVMask = builder.getOption(vISA_VME);
-        auto BI = fg.begin();
-        auto BE = fg.end();
-        ++BI; // skip entryBB
-        for (; BI != BE; ++BI)
-        {
-            G4_BB* BB = *BI;
-            auto NextI = BB->begin();
-            auto IE = BB->end();
-            for (auto II = NextI; II != IE; II = NextI)
-            {
-                ++NextI;
-                G4_INST* inst = *II;
-                G4_DstRegRegion* dst = inst->getDst();
-                // Check if sr0.2 (DW) is modified.
-                if (dst && dst->isAreg() && dst->isSrReg() &&
-                    ((dst->getLeftBound() <= 8 && dst->getRightBound() >= 8) ||
-                    (dst->getLeftBound() <= 11 && dst->getRightBound() >= 11)))
-                {
-                    G4_SrcRegRegion* Src = builder.createSrcRegRegion(
-                        Mod_src_undef, Direct, builder.phyregpool.getSr0Reg(),
-                        0, (useVMask ? 3 : 2), builder.getRegionScalar(), Type_UD);
-                    G4_DstRegRegion* Dst = builder.createDst(
-                        dmaskVarUD, 0, 0, 1, Type_UD);
-                    G4_INST* dmaskI = builder.createMov(1, Dst, Src, InstOpt_WriteEnable, false);
-
-                    BB->insert(NextI, dmaskI);
-                }
-            }
-        }
     }
 }

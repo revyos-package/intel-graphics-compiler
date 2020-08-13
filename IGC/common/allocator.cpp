@@ -42,7 +42,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace std;
 
-#endif
+#endif // _WIN32
+
+#include "Probe/Assertion.h"
 
 #if ( defined ( _DEBUG ) || defined ( _INTERNAL ) )
 /*****************************************************************************\
@@ -347,36 +349,26 @@ locally visible new & delete for Linux
     */
 
 // TODO: Throw exception if the allocation fails.
-#if defined(ANDROID)
 inline void* operator new(size_t size)
-#else
-inline void* operator new(size_t size)
-#endif
 {
     void* storage = CAllocator::Allocate(size);
-    assert(storage && "Could not allocate the required memory to storage");
+    IGC_ASSERT_EXIT_MESSAGE(nullptr != storage, "Could not allocate the required memory to storage");
     return storage;
 }
 
 inline void operator delete(void* ptr)
 {
-    assert( ptr && "ptr cannot be null");
     CAllocator::Deallocate(ptr);
 }
 
 // TODO: Throw exception if the allocation fails.
-#if defined(ANDROID)
 inline void* operator new[](size_t size)
-#else
-inline void* operator new[](size_t size)
-#endif
 {
     return ::operator new(size);
 }
 
 inline void operator delete[](void* ptr)
 {
-    assert( ptr && "ptr cannot be null");
     CAllocator::Deallocate(ptr);
 }
 #endif // !defined __clang__
@@ -394,9 +386,7 @@ inline void operator delete[](void* ptr)
 void* __cdecl operator new( size_t size )
 {
     void* storage = CAllocator::Allocate(size);
-#if defined ( _DEBUG ) || defined ( _INTERNAL )
-    assert(storage && "Could not allocate the required memory to storage");
-#endif
+    IGC_ASSERT_EXIT_MESSAGE(nullptr != storage, "Could not allocate the required memory to storage");
     return storage;
 }
 

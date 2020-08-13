@@ -12,12 +12,12 @@
 #include <llvm/Transforms/Utils/Local.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
-
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/CISACodeGen/AdvCodeMotion.h"
 #include "Compiler/CISACodeGen/WIAnalysis.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -273,16 +273,6 @@ static bool hasMemoryWrite(BasicBlock* BB) {
     return false;
 }
 
-static bool isDummyBasicBlock(BasicBlock* BB) {
-    if (BB->size() != 1)
-        return false;
-    if ((++pred_begin(BB)) != pred_end(BB))
-        return false;
-    if ((++succ_begin(BB)) != succ_end(BB))
-        return false;
-    return true;
-}
-
 static BasicBlock* getJointBasicBlock(PostDominatorTree* PDT, BasicBlock* BB,
     BasicBlock* IfBB) {
     if (isDummyBasicBlock(BB))
@@ -524,9 +514,13 @@ bool AdvCodeMotion::runOnFunction(Function& F) {
     if (!WIS.hasOneDim())
         return false;
 
-    assert(WIS.LocalSize.X && WIS.EnqueuedLocalSize.X && WIS.GlobalSize.X &&
-        WIS.GroupId.X && WIS.GlobalOffset.X && WIS.LocalId.X &&
-        WIS.GlobalId.X && "Missing necessary work-item settings");
+    IGC_ASSERT_MESSAGE(WIS.LocalSize.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.EnqueuedLocalSize.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.GlobalSize.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.GroupId.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.GlobalOffset.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.LocalId.X, "Missing necessary work-item setting");
+    IGC_ASSERT_MESSAGE(WIS.GlobalId.X, "Missing necessary work-item setting");
 
     bool Changed = false;
 

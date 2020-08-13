@@ -70,26 +70,6 @@ namespace vISA
         std::unordered_set<unsigned int> rowsUsed;
     };
 
-    class Dominators
-    {
-    private:
-        std::map<G4_BB*, std::set<G4_BB*>> dom;
-
-        FlowGraph& fg;
-
-    public:
-        Dominators(FlowGraph& f) : fg(f)
-        {
-            computeDominators();
-        }
-
-        // Store dominator information in data structure above for easy querying.
-        // Flow graph stores immediate doms of each BB.s
-        void computeDominators();
-        bool dominates(G4_BB*, G4_BB*);
-        void dump();
-    };
-
     class Rematerialization
     {
     private:
@@ -97,7 +77,6 @@ namespace vISA
         LivenessAnalysis& liveness;
         GraphColor& coloring;
         GlobalRA& gra;
-        Dominators doms;
         G4_Declare* samplerHeader = nullptr;
         unsigned int numRematsInLoop = 0;
         bool IRChanged = false;
@@ -194,15 +173,15 @@ namespace vISA
             if (inst->isFlowControl() || inst->isWait() ||
                 (inst->isSend() && inst->asSendInst()->isFence()) ||
                 inst->isLifeTimeEnd() || inst->isAccDstInst() || inst->isAccSrcInst() ||
-                inst->getImplAccDst() || inst->getImplAccSrc())
+                inst->getImplAccDst() || inst->getImplAccSrc() || inst->isRelocationMov())
             {
                 return false;
             }
 
-            auto op = inst->opcode();
-            if (op == G4_pseudo_callee_restore || op == G4_pseudo_callee_save ||
-                op == G4_pseudo_caller_restore || op == G4_pseudo_caller_save)
+            if (inst->isCallerRestore() || inst->isCallerSave() || inst->isCalleeRestore() || inst->isCalleeSave())
+            {
                 return false;
+            }
 
             G4_Declare* dcl = nullptr;
             if (inst->getDst() && inst->getDst()->getTopDcl())
@@ -223,7 +202,7 @@ namespace vISA
 
     public:
         Rematerialization(G4_Kernel& k, LivenessAnalysis& l, GraphColor& c, RPE& r, GlobalRA& g) :
-            kernel(k), liveness(l), coloring(c), gra(g), doms(k.fg), rpe(r)
+            kernel(k), liveness(l), coloring(c), gra(g), rpe(r)
         {
             unsigned numGRFs = k.getNumRegTotal();
             auto scale = [=](unsigned threshold) -> unsigned {

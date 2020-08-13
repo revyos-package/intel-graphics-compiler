@@ -13,6 +13,7 @@ namespace llvm
     class Function;
     class Value;
     class GlobalVariable;
+    class StructType;
 }
 
 const unsigned int INPUT_RESOURCE_SLOT_COUNT = 128;
@@ -207,6 +208,7 @@ namespace IGC
         bool GreaterThan2GBBufferRequired               = true;
         bool GreaterThan4GBBufferRequired               = true;
         bool DisableA64WA                               = false;
+        bool ForceEnableA64WA                           = false;
         bool PushConstantsEnable                        = true;
         bool HasBufferOffsetArg                         = false;
         bool replaceGlobalOffsetsByZero                 = false;
@@ -214,11 +216,14 @@ namespace IGC
         bool pixelShaderDoNotAbortOnSpill               = false;
         bool UniformWGS                                 = false;
         bool disableVertexComponentPacking              = false;
+        bool disablePartialVertexComponentPacking       = false;
         bool PreferBindlessImages                       = false;
         bool disableMathRefactoring                     = false;
         bool EnableTakeGlobalAddress                    = false;
         bool IsLibraryCompilation                       = false;
         bool FastVISACompile                            = false;
+        bool MatchSinCosPi                              = false;
+        bool CaptureCompilerStats                       = false;
     };
 
     struct ComputeShaderInfo
@@ -230,10 +235,6 @@ namespace IGC
         bool forcedVISAPreRAScheduler = false;
     };
 
-    struct VertexShaderInfo
-    {
-        int DrawIndirectBufferIndex = -1;
-    };
 
     struct PixelShaderInfo
     {
@@ -247,6 +248,10 @@ namespace IGC
         bool blendToFillEnabled              = false;
         bool forceEarlyZ                     = false;   // force earlyz test
         bool hasVersionedLoop                = false;   // if versioned by customloopversioning
+        // Number of samples for this pixel shader if known.
+        // Valid values 0, 1, 2, 4, 8 and 16.
+        // 0 means unknown or not set.
+        unsigned char NumSamples             = 0;
         std::vector<int> blendOptimizationMode;
         std::vector<int> colorOutputMask;
     };
@@ -259,13 +264,19 @@ namespace IGC
         int interpolationMode = 0;
     };
 
-    // SimplePushInfo holding the argument number in map so that we can retrieve relavent Argument as a value pointer from Function
+    // SimplePushInfo holds information about the promoted constant buffer
+    // region (see member descriptions in SSimplePushInfo). It also holds
+    // mappings between the byte offsets in the promoted region and
+    // corresponding argument index.
     struct SimplePushInfo
     {
         unsigned int cbIdx = 0;
+        int pushableAddressGrfOffset = -1;
+        int pushableOffsetGrfOffset = -1;
         unsigned int offset = 0;
         unsigned int size = 0;
         bool isStateless = false;
+        // std::map<offset, argumentIndex>
         std::map<unsigned int, int> simplePushLoads;
     };
 
@@ -307,6 +318,7 @@ namespace IGC
     struct InlineProgramScopeBuffer
     {
         int alignment;
+        unsigned allocSize;
         std::vector<unsigned char> Buffer;
     };
 
@@ -342,7 +354,6 @@ namespace IGC
         CompOptions compOpt;
         std::map<llvm::Function*, IGC::FunctionMetaData>   FuncMD;
         PushInfo pushInfo;
-        VertexShaderInfo vsInfo;
         PixelShaderInfo psInfo;
         ComputeShaderInfo csInfo;
         std::map<ConstantAddress, uint32_t>   inlineDynConstants;
@@ -357,6 +368,7 @@ namespace IGC
         ShaderData shaderData;
         URBLayoutInfo URBInfo;
         bool UseBindlessImage = false;
+        bool enableRangeReduce = false;
 
         // When true compiler can assume that resources bound to two different
         // bindings do not alias.
@@ -365,6 +377,7 @@ namespace IGC
 
         unsigned int privateMemoryPerWI = 0;
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};
+        unsigned int computedDepthMode = 0; //Defaults to 0 meaning depth mode is off
     };
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
     void deserialize(IGC::ModuleMetaData &deserializedMD, const llvm::Module* module);

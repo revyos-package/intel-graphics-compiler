@@ -47,7 +47,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/SIPKernels/Gen11LKFSIPCSR.h"
 #include "common/SIPKernels/Gen12LPSIPCSR.h"
 #include "common/SIPKernels/Gen12LPSIPCSRDebug.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace USC;
@@ -89,7 +89,7 @@ bool CSystemThread::CreateSystemThreadKernel(
         // Allocate memory for SSystemThreadKernelOutput.
         if( success )
         {
-            IGC_ASSERT( pSystemThreadKernelOutput == nullptr );
+            IGC_ASSERT(pSystemThreadKernelOutput == nullptr);
             pSystemThreadKernelOutput = new SSystemThreadKernelOutput;
 
             success = ( pSystemThreadKernelOutput != nullptr );
@@ -157,12 +157,9 @@ bool CSystemThread::CreateSystemThreadKernel(
 void CSystemThread::DeleteSystemThreadKernel(
     USC::SSystemThreadKernelOutput* &pSystemThreadKernelOutput )
 {
-    if (pSystemThreadKernelOutput->m_pKernelProgram &&
-        (pSystemThreadKernelOutput->m_KernelProgramSize > 0) )
-    {
-        IGC::aligned_free(pSystemThreadKernelOutput->m_pKernelProgram);
-        delete pSystemThreadKernelOutput;
-    }
+    IGC::aligned_free(pSystemThreadKernelOutput->m_pKernelProgram);
+    delete pSystemThreadKernelOutput;
+    pSystemThreadKernelOutput = nullptr;
 }
 
 //populate the SIPKernelInfo map with starting address and size of every SIP kernels
@@ -334,7 +331,8 @@ CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
         }
         else if (mode == SYSTEM_THREAD_MODE_CSR)
         {
-            if (platform.getPlatformInfo().eProductFamily == IGFX_TIGERLAKE_LP
+            if (   platform.getPlatformInfo().eProductFamily == IGFX_TIGERLAKE_LP
+                || platform.getPlatformInfo().eProductFamily == IGFX_DG1
             )
             {
                 SIPIndex = GEN12_LP_CSR;
@@ -367,7 +365,7 @@ CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
     }
     else
     {
-        IGC_ASSERT((SIPIndex < SIPKernelInfo.size()) && ("Invalid SIPIndex while loading"));
+        IGC_ASSERT_MESSAGE((SIPIndex < SIPKernelInfo.size()), "Invalid SIPIndex while loading");
         m_LinearAddress = SIPKernelInfo[SIPIndex].first;
         m_ProgramSize = SIPKernelInfo[SIPIndex].second;
     }

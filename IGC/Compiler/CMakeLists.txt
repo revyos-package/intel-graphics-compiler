@@ -47,7 +47,6 @@ set(IGC_BUILD__SRC__Compiler
     "${CMAKE_CURRENT_SOURCE_DIR}/ThreadCombining.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/GenUpdateCB.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConvertMSAAPayloadTo16Bit.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/FindInterestingConstants.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/DynamicTextureFolding.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/SampleMultiversioning.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/HandleFRemInstructions.cpp"
@@ -68,6 +67,8 @@ set(IGC_BUILD__SRC__Compiler
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/ilkf_sw_wa.c"
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/itgl_lp_hw_wa.c"
     "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/itgl_lp_sw_wa.c"
+    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/idg1_hw_wa.c"
+    "${IGC_BUILD__GFX_DEV_SRC_DIR}/skuwa/idg1_sw_wa.c"
     ${IGC_BUILD__SRC__Compiler_CISACodeGen}
     ${IGC_BUILD__SRC__Compiler_DebugInfo}
     ${IGC_BUILD__SRC__Compiler_Legalizer}
@@ -115,7 +116,6 @@ set(IGC_BUILD__HDR__Compiler
     "${CMAKE_CURRENT_SOURCE_DIR}/GenUpdateCB.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConvertMSAAPayloadTo16Bit.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/WorkaroundAnalysisPass.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/FindInterestingConstants.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/DynamicTextureFolding.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/SampleMultiversioning.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/HandleFRemInstructions.hpp"

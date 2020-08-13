@@ -24,10 +24,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#include <vector>
+
 #include "Compiler/Optimizer/OpenCLPasses/BreakConstantExpr/BreakConstantExpr.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -36,6 +37,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/InstIterator.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -107,6 +109,11 @@ bool BreakConstantExpr::runOnFunction(Function& F)
             {
                 changed |= breakExpressionsInVector(cvec, i, pInst);
             }
+            else if (ConstantStruct *CS = dyn_cast<ConstantStruct>(op))
+            {
+                breakConstantStruct(CS, i, pInst);
+                changed = true;
+            }
         }
     }
     return changed;
@@ -128,7 +135,7 @@ void BreakConstantExpr::replaceConstantWith(llvm::Constant* exprOrVec, llvm::Ins
         // llvm 3.6.0 transition
         user->setOperand(operandIndex, newInst);
 #else
-        assert(false);
+        IGC_ASSERT(0);
 #endif
     }
     else
@@ -220,4 +227,48 @@ bool BreakConstantExpr::breakExpressionsInVector(llvm::ConstantVector* cvec, int
     }
 
     return hasConstantExpression;
+}
+
+void BreakConstantExpr::breakConstantStruct(ConstantStruct* cs,
+                                            int operandIndex,
+                                            Instruction *user)
+{
+    StructType *structType = cs->getType();
+    IRBuilder<> B(user);
+    Value *newStruct = UndefValue::get(structType);
+
+    // Create a structure from scratch, replace every constant operand by an
+    // instruction.
+    for (unsigned i = 0; i < cs->getNumOperands(); ++i)
+    {
+        Value *constStructOp = cs->getOperand(i);
+        Value *newStructOp = constStructOp;
+
+        // TODO: Handle more cases, such as ConstantStruct, ConstantVector, etc.
+        if (ConstantExpr *c = dyn_cast<ConstantExpr>(constStructOp))
+        {
+            Instruction *newInst = c->getAsInstruction();
+            newInst->setDebugLoc(user->getDebugLoc());
+            newStructOp = newInst;
+
+            if (PHINode * phi = dyn_cast<PHINode>(user))
+            {
+                newInst->insertBefore(phi->getIncomingBlock(operandIndex)->
+                    getTerminator());
+            }
+            else
+            {
+                newInst->insertBefore(user);
+            }
+        }
+
+        newStruct = B.CreateInsertValue(newStruct, newStructOp, i);
+    }
+
+    user->replaceUsesOfWith(cs, newStruct);
+
+    if (cs->use_empty())
+    {
+        cs->destroyConstant();
+    }
 }

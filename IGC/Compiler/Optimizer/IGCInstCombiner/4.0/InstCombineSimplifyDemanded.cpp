@@ -36,11 +36,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // about how they are used.
 //
 //===----------------------------------------------------------------------===//
+
 #include "common/LLVMWarningsPush.hpp"
 #include "InstCombineInternal.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PatternMatch.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -53,8 +55,8 @@ using namespace IGCombiner;
 /// constant that are not demanded. If so, shrink the constant and return true.
 static bool ShrinkDemandedConstant(Instruction *I, unsigned OpNo,
                                    APInt Demanded) {
-  assert(I && "No instruction?");
-  assert(OpNo < I->getNumOperands() && "Operand index too large");
+  IGC_ASSERT_MESSAGE(I, "No instruction?");
+  IGC_ASSERT_MESSAGE(OpNo < I->getNumOperands(), "Operand index too large");
 
   // If the operand is not a constant integer, nothing to do.
   ConstantInt *OpC = dyn_cast<ConstantInt>(I->getOperand(OpNo));
@@ -130,16 +132,15 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
                                              APInt &KnownZero, APInt &KnownOne,
                                              unsigned Depth,
                                              Instruction *CxtI) {
-  assert(V != nullptr && "Null pointer of Value???");
-  assert(Depth <= 6 && "Limit Search Depth");
+  IGC_ASSERT_MESSAGE(V != nullptr, "Null pointer of Value???");
+  IGC_ASSERT_MESSAGE(Depth <= 6, "Limit Search Depth");
   uint32_t BitWidth = DemandedMask.getBitWidth();
   Type *VTy = V->getType();
-  assert(
-      (!VTy->isIntOrIntVectorTy() || VTy->getScalarSizeInBits() == BitWidth) &&
-      KnownZero.getBitWidth() == BitWidth &&
-      KnownOne.getBitWidth() == BitWidth &&
-      "Value *V, DemandedMask, KnownZero and KnownOne "
-      "must have same BitWidth");
+
+  IGC_ASSERT_MESSAGE((!VTy->isIntOrIntVectorTy() || VTy->getScalarSizeInBits() == BitWidth), "Value *V, DemandedMask, KnownZero and KnownOne must have same BitWidth");
+  IGC_ASSERT_MESSAGE(KnownZero.getBitWidth() == BitWidth, "Value *V, DemandedMask, KnownZero and KnownOne must have same BitWidth");
+  IGC_ASSERT_MESSAGE(KnownOne.getBitWidth() == BitWidth, "Value *V, DemandedMask, KnownZero and KnownOne must have same BitWidth");
+
   if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
     // We know all of the bits for a constant!
     KnownOne = CI->getValue() & DemandedMask;
@@ -270,8 +271,8 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         SimplifyDemandedBits(I->getOperandUse(0), DemandedMask & ~RHSKnownZero,
                              LHSKnownZero, LHSKnownOne, Depth + 1))
       return I;
-    assert(!(RHSKnownZero & RHSKnownOne) && "Bits known to be one AND zero?");
-    assert(!(LHSKnownZero & LHSKnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(RHSKnownZero & RHSKnownOne), "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(LHSKnownZero & LHSKnownOne), "Bits known to be one AND zero?");
 
     // If the client is only demanding bits that we know, return the known
     // constant.
@@ -308,8 +309,8 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         SimplifyDemandedBits(I->getOperandUse(0), DemandedMask & ~RHSKnownOne,
                              LHSKnownZero, LHSKnownOne, Depth + 1))
       return I;
-    assert(!(RHSKnownZero & RHSKnownOne) && "Bits known to be one AND zero?");
-    assert(!(LHSKnownZero & LHSKnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(RHSKnownZero & RHSKnownOne), "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(LHSKnownZero & LHSKnownOne), "Bits known to be one AND zero?");
 
     // If the client is only demanding bits that we know, return the known
     // constant.
@@ -350,8 +351,8 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         SimplifyDemandedBits(I->getOperandUse(0), DemandedMask, LHSKnownZero,
                              LHSKnownOne, Depth + 1))
       return I;
-    assert(!(RHSKnownZero & RHSKnownOne) && "Bits known to be one AND zero?");
-    assert(!(LHSKnownZero & LHSKnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(RHSKnownZero & RHSKnownOne), "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(LHSKnownZero & LHSKnownOne), "Bits known to be one AND zero?");
 
     // Output known-0 bits are known if clear or set in both the LHS & RHS.
     APInt IKnownZero = (RHSKnownZero & LHSKnownZero) |
@@ -443,8 +444,8 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         SimplifyDemandedBits(I->getOperandUse(1), DemandedMask, LHSKnownZero,
                              LHSKnownOne, Depth + 1))
       return I;
-    assert(!(RHSKnownZero & RHSKnownOne) && "Bits known to be one AND zero?");
-    assert(!(LHSKnownZero & LHSKnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(RHSKnownZero & RHSKnownOne), "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(LHSKnownZero & LHSKnownOne), "Bits known to be one AND zero?");
 
     // If the operands are constants, see if we can simplify them.
     if (ShrinkDemandedConstant(I, 1, DemandedMask) ||
@@ -466,7 +467,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
     DemandedMask = DemandedMask.trunc(BitWidth);
     KnownZero = KnownZero.trunc(BitWidth);
     KnownOne = KnownOne.trunc(BitWidth);
-    assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
     break;
   }
   case Instruction::BitCast:
@@ -489,7 +490,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
     if (SimplifyDemandedBits(I->getOperandUse(0), DemandedMask, KnownZero,
                              KnownOne, Depth + 1))
       return I;
-    assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
     break;
   case Instruction::ZExt: {
     // Compute the bits in the result that are not present in the input.
@@ -504,7 +505,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
     DemandedMask = DemandedMask.zext(BitWidth);
     KnownZero = KnownZero.zext(BitWidth);
     KnownOne = KnownOne.zext(BitWidth);
-    assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
     // The top bits are known to be zero.
     KnownZero |= APInt::getHighBitsSet(BitWidth, BitWidth - SrcBitWidth);
     break;
@@ -531,7 +532,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
     InputDemandedBits = InputDemandedBits.zext(BitWidth);
     KnownZero = KnownZero.zext(BitWidth);
     KnownOne = KnownOne.zext(BitWidth);
-    assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+    IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
 
     // If the sign bit of the input is known set or clear, then we know the
     // top bits of the result.
@@ -602,7 +603,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
       if (SimplifyDemandedBits(I->getOperandUse(0), DemandedMaskIn, KnownZero,
                                KnownOne, Depth + 1))
         return I;
-      assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+      IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
       KnownZero <<= ShiftAmt;
       KnownOne  <<= ShiftAmt;
       // low bits known zero.
@@ -626,7 +627,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
       if (SimplifyDemandedBits(I->getOperandUse(0), DemandedMaskIn, KnownZero,
                                KnownOne, Depth + 1))
         return I;
-      assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+      IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
       KnownZero = APIntOps::lshr(KnownZero, ShiftAmt);
       KnownOne  = APIntOps::lshr(KnownOne, ShiftAmt);
       if (ShiftAmt) {
@@ -671,7 +672,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
       if (SimplifyDemandedBits(I->getOperandUse(0), DemandedMaskIn, KnownZero,
                                KnownOne, Depth + 1))
         return I;
-      assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+      IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
       // Compute the new bits that are at the top now.
       APInt HighBits(APInt::getHighBitsSet(BitWidth, ShiftAmt));
       KnownZero = APIntOps::lshr(KnownZero, ShiftAmt);
@@ -727,7 +728,7 @@ Value *InstCombiner::SimplifyDemandedUseBits(Value *V, APInt DemandedMask,
         if (LHSKnownOne[BitWidth-1] && ((LHSKnownOne & LowBits) != 0))
           KnownOne |= ~LowBits;
 
-        assert(!(KnownZero & KnownOne) && "Bits known to be one AND zero?");
+        IGC_ASSERT_MESSAGE(!(KnownZero & KnownOne), "Bits known to be one AND zero?");
       }
     }
 
@@ -934,7 +935,7 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
                                                 unsigned Depth) {
   unsigned VWidth = V->getType()->getVectorNumElements();
   APInt EltMask(APInt::getAllOnesValue(VWidth));
-  assert((DemandedElts & ~EltMask) == 0 && "Invalid DemandedElts!");
+  IGC_ASSERT_MESSAGE((DemandedElts & ~EltMask) == 0, "Invalid DemandedElts!");
 
   if (isa<UndefValue>(V)) {
     // If the entire vector is undefined, just return this info.
@@ -1054,8 +1055,7 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
       if (DemandedElts[i]) {
         unsigned MaskVal = Shuffle->getMaskValue(i);
         if (MaskVal != -1u) {
-          assert(MaskVal < LHSVWidth * 2 &&
-                 "shufflevector mask index out of range!");
+          IGC_ASSERT_MESSAGE(MaskVal < LHSVWidth * 2, "shufflevector mask index out of range!");
           if (MaskVal < LHSVWidth)
             LeftDemanded.setBit(MaskVal);
           else
@@ -1246,7 +1246,7 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
           UndefElts.setBit(OutIdx);
       }
     } else {
-      llvm_unreachable("Unimp");
+      IGC_ASSERT_EXIT_MESSAGE(0, "Unimp");
     }
     break;
   }
@@ -1478,7 +1478,7 @@ Value *InstCombiner::SimplifyDemandedVectorElts(Value *V, APInt DemandedElts,
       Value *Op0 = II->getArgOperand(0);
       Value *Op1 = II->getArgOperand(1);
       unsigned InnerVWidth = Op0->getType()->getVectorNumElements();
-      assert((VWidth * 2) == InnerVWidth && "Unexpected input size");
+      IGC_ASSERT_MESSAGE((VWidth * 2) == InnerVWidth, "Unexpected input size");
 
       APInt InnerDemandedElts(InnerVWidth, 0);
       for (unsigned i = 0; i != VWidth; ++i)

@@ -195,17 +195,18 @@ public:
 
     // Generates syntax for the instruction at 'pc' to a user-provided buffer.
     // The required number of bytes is returned.  If sBuf is nullptr, then
-    // it is ignored.
+    // it is ignored and the function just computes the number of characters
+    // needed to format the instruction.
     //
     // An example use of this API is as follows:
-    //    size_t n = kv.getInstSyntax(pc,nullptr,0);
+    //    size_t n = kv.getInstSyntax(pc, nullptr, 0);
     //    char *str = (char *)alloca(n);
-    //    (void)kv.getInstSyntax(str,n);
+    //    auto fmtOpts = IGA_FORMATTING_OPTS_DEFAULT; // see iga.h
+    //    (void)kv.getInstSyntax(pc, str, n, fmtOpts);
     //
-    // Conversely, if  you are relatively sure it'll fit within some fixed
-    // size, you can directly use it.
-    //    char buf[256];
-    //    (void)kv.getIntSyntax(pc,buf,sizeof(buf));
+    // The formatter options 'fmtOpts' are the same as those in
+    // iga_disassemble_options_t::formatting_opts.  See iga.h for a
+    // valid values.
     //
     // The final two arguments are for an optional labeler callback.
     // The function pointer points to a function which converts a PC
@@ -220,20 +221,27 @@ public:
     //    callback for both labels.
     //
     // E.g.
-    // static const char *labeler(int32_t pc, void *buf) {
+    // static const char *labelerFunction(int32_t pc, void *buf) {
     //    snprintf((char*)buf, 63, "LABEL%u", pc);
     // }
     //
-    // Then in your code.
+    // Then in your code you'd have:
+    //
     //   char lblbuf[64];
-    //   char instbuf[256];
-    //   kv.getInstSyntax(pc, instbuf, sizeof(instbuf), &labler, lblbuf);
+    //   char instbuf[256]; // labeler environment (state)
+    //   kv.getInstSyntax(
+    //         pc,
+    //         instbuf, sizeof(instbuf),
+    //         IGA_FORMATTING_OPTS_DEFAULT,
+    //         &labelerFunction, lblbuf);
+    //
     // The above is safe for any instruction with multiple labels as 'lblbuf'
-    // can be used twice safely.
+    // can be used multiple times safely.
     size_t getInstSyntax(
         int32_t pc,
         char *sBuf,
         size_t sBufCapacity,
+        uint32_t fmtOpts,
         const char *(*labeler)(int32_t, void *) = nullptr,
         void *env = nullptr) const
     {
@@ -242,9 +250,19 @@ public:
             pc,
             sBuf,
             sBufCapacity,
+            fmtOpts,
             labeler,
-            env
-        );
+            env);
+    }
+    size_t getInstSyntax(
+        int32_t pc,
+        char *sBuf,
+        size_t sBufCapacity,
+        const char *(*labeler)(int32_t, void *) = nullptr,
+        void *env = nullptr) const
+    {
+        return getInstSyntax(
+            pc, sBuf, sBufCapacity, IGA_FORMATTING_OPTS_DEFAULT, labeler, env);
     }
 
     // This function returns the default label name if custom labeler is not used.
@@ -338,6 +356,24 @@ public:
         return static_cast<iga::Op>(kv_get_opcode(m_kv, pc));
     }
 
+    // Returns the subfunction (iga::Subfunction) of the given operation.
+    // E.g. for "math.exp" (iga::Op::MATH) this returns
+    //   static_cast<uint32_t>(iga::MathFC::EXP);
+    //
+    // For operations that do not support a subfunction this returns
+    // (uint32_t)-1.  For invalid PC's this also returns that value.
+    //
+    // Example usage:
+    //   if (getOpcode(pc) == iga::Op::MATH) {
+    //      iga::MathFC mfc = static_cast<iga::MathFC>(getSubfunction(pc));
+    //      ...
+    //   }
+    iga::Subfunction getSubfunction(int32_t pc) const {
+        iga::Subfunction sf;
+        kv_get_subfunction(m_kv, pc, &sf.bits);
+        return sf;
+    }
+
     // Returns the Execution Mask Offset for the given PC
     iga::ChannelOffset getChannelOffset(int32_t pc) const {
         return static_cast<iga::ChannelOffset>(kv_get_channel_offset(m_kv, pc));
@@ -416,6 +452,34 @@ public:
         return static_cast<iga::Kind>(kv_get_source_register_kind(m_kv, pc, sourceNumber));
     }
 
+    // Returns source Indirect Immediate Offset
+    int16_t getSrcRegIndirectImmOff(int32_t pc, uint32_t sourceNumber) const {
+        int16_t result = 0;
+        kv_get_source_indirect_imm_off(m_kv, pc, sourceNumber, &result);
+        return result;
+    }
+
+    // Returns destination Indirect Immediate Offset
+    int16_t getDstRegIndirectImmOff(int32_t pc) const {
+        int16_t result = 0;
+        kv_get_destination_indirect_imm_off(m_kv, pc, &result);
+        return result;
+    }
+
+    // Returns source mme number
+    int16_t getSrcMMENumber(int32_t pc, uint32_t sourceNumber) const {
+        int16_t result = 0;
+        kv_get_source_mme_number(m_kv, pc, sourceNumber, &result);
+        return result;
+    }
+
+    // Returns destination mme number
+    int16_t getDstMMENumber(int32_t pc) const {
+        int16_t result = 0;
+        kv_get_destination_mme_number(m_kv, pc, &result);
+        return result;
+    }
+
     // Returns if source is a vector
     // -1 - ERROR
     // 0  - FALSE
@@ -427,7 +491,8 @@ public:
     // Returns 0 if instruction's destination operand horizontal stride
     // (DstRgnHz) is succesfully returned.
     // Otherwise returns -1.
-    // DstRgnHz is returned by *hz parameter, as numeric numeric value (e.g. 1,2,4).
+    // DstRgnHz is returned by *hz parameter, as numeric numeric value
+    // (e.g. 1,2,4).
     int32_t getDstRegion(int32_t pc, uint32_t *hz) const {
         return kv_get_destination_region(m_kv, pc, hz);
     }
@@ -439,17 +504,18 @@ public:
     // Vt, Wi and Hz are returned by *vt, *wi and *hz parameter,
     // as numeric numeric values (e.g. 1,2,4).
     int32_t getSrcRegion(
-        int32_t pc, uint32_t src_op, uint32_t *vt, uint32_t *wi, uint32_t *hz) const
+        int32_t pc, uint32_t src_op,
+        uint32_t *vt, uint32_t *wi, uint32_t *hz) const
     {
         return kv_get_source_region(m_kv, pc, src_op, vt, wi, hz);
     }
 
-    // Returns 0 if the source is an immediate and sets the 64b immediate value in imm
-    // otherwise it returns -1.
+    // Returns 0 if the source is an immediate and sets the 64b immediate value
+    // in imm; otherwise it returns -1.
     //
     // 16b and 32b immediate will stored in the lower bits of imm.
     int32_t getSrcImmediate(
-        const kv_t *kv, int32_t pc, uint32_t src_op, uint64_t *imm) const
+        int32_t pc, uint32_t src_op, uint64_t *imm) const
     {
         return kv_get_source_immediate(m_kv, pc, src_op, imm);
     }

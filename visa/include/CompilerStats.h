@@ -82,9 +82,11 @@ class CompilerStats {
         Value   values[NUM_SIMD_TYPES];
     };
 
-#if COMPILER_STATS_ENABLE
     // Create empty statistic if does not exist, return existing if it does.
     inline Statistic& PrivateInit(const std::string& name, Statistic::Type type, int simd);
+
+    // Returns true if the statistic name exists in the map.
+    inline bool PrivateFind(const std::string& name);
 
     // Try to find statistic. Return empty one if it does not exist.
     inline const Statistic& PrivateGet(const std::string& name, int simd) const;
@@ -98,12 +100,17 @@ class CompilerStats {
 
     std::shared_ptr<State> m_pState;
     Statistic m_ZeroStat;
-#endif // COMPILER_STATS_ENABLE
 
 public:
     static constexpr Statistic::Type type_bool     = Statistic::Type::type_bool;
     static constexpr Statistic::Type type_int64    = Statistic::Type::type_int64;
     static constexpr Statistic::Type type_double   = Statistic::Type::type_double;
+
+    static constexpr const char* numSendStr() { return "NumSendInst"; };
+    static constexpr const char* numGRFSpillStr() { return "NumGRFSpill"; };
+    static constexpr const char* numGRFFillStr() { return "NumGRFFill"; };
+    static constexpr const char* numCyclesStr() { return "NumCycles"; };
+
 
     // Statistic collection is disabled by default.
     inline void Enable(bool collectOnlyInitialized);
@@ -118,7 +125,10 @@ public:
     inline void Init(const std::string& name, Statistic::Type type, int simd=0);
 
     // Set value to zero/false.
-    inline void Reset(const std::string& name, int simd=0);
+    inline void Reset(const std::string& name, int simd = 0);
+
+    // Return true if the statistic name exists.
+    inline bool Find(const std::string& name);
 
     // Set flag statistic to true.
     inline void SetFlag(const std::string& name, int simd=0);
@@ -152,30 +162,25 @@ public:
 // collectOnlyInitialized - if true, statistic initialization is required, otherwise statistic update will be ignored
 void CompilerStats::Enable(bool collectOnlyInitialized)
 {
-#if COMPILER_STATS_ENABLE
     if (!IsEnabled())
     {
         m_pState = std::make_shared<State>();
         m_pState->m_CollectOnlyInitialized = collectOnlyInitialized;
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Link statistics to the one from the provided object.
 void CompilerStats::Link(CompilerStats& sharedData)
 {
-#if COMPILER_STATS_ENABLE
     if (m_pState != nullptr)
     {
         m_pState.reset();
     }
     m_pState = sharedData.m_pState;
-#endif // COMPILER_STATS_ENABLE
 }
 
 void CompilerStats::MergeStats(CompilerStats& from, int simd)
 {
-#if COMPILER_STATS_ENABLE
     for (auto elem : from.m_pState->m_Stats)
     {
         auto name = elem.first;
@@ -201,13 +206,11 @@ void CompilerStats::MergeStats(CompilerStats& from, int simd)
             }
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Create statistic with value set to zero/false.
 void CompilerStats::Init(const std::string& name, Statistic::Type type, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -216,13 +219,11 @@ void CompilerStats::Init(const std::string& name, Statistic::Type type, int simd
             PrivateInit(name, type, simd);
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Set value to zero/false.
 void CompilerStats::Reset(const std::string& name, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -231,14 +232,18 @@ void CompilerStats::Reset(const std::string& name, int simd)
             f->second[simd].value = 0;
         }
     }
-#endif // COMPILER_STATS_ENABLE
+}
+
+// Return true if the statistic name exists.
+bool CompilerStats::Find(const std::string& name)
+{
+    return PrivateFind(name);
 }
 
 // Set flag statistic to true.
 // If statistic does not exist, create new one.
 void CompilerStats::SetFlag(const std::string& name, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -257,14 +262,12 @@ void CompilerStats::SetFlag(const std::string& name, int simd)
             s[simd].bool_value = true;
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Set value of integer statistic.
 // If statistic does not exist, create new one.
 void CompilerStats::SetI64(const std::string& name, int64_t value, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -283,14 +286,12 @@ void CompilerStats::SetI64(const std::string& name, int64_t value, int simd)
             s[simd].int64_value = value;
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Set value of floating point statistic.
 // If statistic does not exist, create new one.
 void CompilerStats::SetF64(const std::string& name, double value, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -309,14 +310,12 @@ void CompilerStats::SetF64(const std::string& name, double value, int simd)
             s[simd].double_value = value;
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Increase value of integer statistic.
 // If statistic does not exist, create new one.
 void CompilerStats::IncreaseI64(const std::string& name, int64_t value, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -335,14 +334,12 @@ void CompilerStats::IncreaseI64(const std::string& name, int64_t value, int simd
             s[simd].int64_value += value;
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Increase value of floating point statistic.
 // If statistic does not exist, create new one.
 void CompilerStats::IncreaseF64(const std::string& name, double value, int simd)
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled())
     {
         auto f = m_pState->m_Stats.find(name);
@@ -361,43 +358,29 @@ void CompilerStats::IncreaseF64(const std::string& name, double value, int simd)
             s[simd].double_value += value;
         }
     }
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Get value of a flag. Returns false if not found.
 bool CompilerStats::GetFlag(const std::string& name, int simd) const
 {
-#if COMPILER_STATS_ENABLE
     return PrivateGet(name, simd)[simd].bool_value;
-#else
-    return false;
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Get value of an integer. Returns 0 if not found.
 int64_t CompilerStats::GetI64(const std::string& name, int simd) const
 {
-#if COMPILER_STATS_ENABLE
     return PrivateGet(name, simd)[simd].int64_value;
-#else
-    return 0;
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Get value of a floating point. Returns 0.0 if not found.
 double CompilerStats::GetF64(const std::string& name, int simd) const
 {
-#if COMPILER_STATS_ENABLE
     return PrivateGet(name, simd)[simd].double_value;
-#else
-    return 0.0;
-#endif // COMPILER_STATS_ENABLE
 }
 
 // Dump stats to csv format string.
 std::string CompilerStats::ToCsv() const
 {
-#if COMPILER_STATS_ENABLE
     if (IsEnabled() == false)
         return "";
 
@@ -425,12 +408,8 @@ std::string CompilerStats::ToCsv() const
         ss << "\n";
     }
     return ss.str();
-#else
-    return "";
-#endif // COMPILER_STATS_ENABLE
 }
 
-#if COMPILER_STATS_ENABLE
 // Create empty statistic if does not exist, return existing if it does.
 CompilerStats::Statistic& CompilerStats::PrivateInit(const std::string& name, Statistic::Type type, int simd)
 {
@@ -438,6 +417,16 @@ CompilerStats::Statistic& CompilerStats::PrivateInit(const std::string& name, St
     s.type = type;
     m_pState->m_Stats[name] = s;
     return m_pState->m_Stats[name];
+}
+
+// Checks if the statistic name exists in the map
+bool CompilerStats::PrivateFind(const std::string& name)
+{
+    if (IsEnabled())
+    {
+        return m_pState->m_Stats.find(name) != m_pState->m_Stats.end();
+    }
+    return false;
 }
 
 // Try to find statistic. Return empty one if it does not exist.
@@ -450,7 +439,6 @@ const CompilerStats::Statistic& CompilerStats::PrivateGet(const std::string& nam
     }
     return m_ZeroStat;
 }
-#endif // COMPILER_STATS_ENABLE
 
 
 // Helper function to convert from SimdType enum to integer represenation (8/16/32). Returns 0 for generic simd.

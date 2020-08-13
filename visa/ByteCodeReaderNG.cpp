@@ -50,6 +50,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "JitterDataStruct.h"
 #include "visa_igc_common_header.h"
 #include "common.h"
+#include "Attributes.hpp"
 #include "Mem_Manager.h"
 #include "Common_ISA.h"
 #include "Common_ISA_framework.h"
@@ -58,12 +59,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "IsaDisassembly.h"
 
 #include "VISAKernel.h"
-#include "BuildCISAIR.h"
-
-#include "Gen4_IR.hpp"
-#include "BuildIR.h"
 
 using namespace std;
+using namespace vISA;
 
 struct RoutineContainer
 {
@@ -950,6 +948,7 @@ static void readInstructionDataportNG(unsigned& bytePos, const char* buf, ISA_Op
             cntrls.isCoarseMode  = (mode & (0x1 << 10))? true:false;
             cntrls.isSampleIndex = (mode & (0x1 << 11)) ? true : false;
             cntrls.RTIndexPresent = (mode & (0x1 << 2)) ? true : false;
+            cntrls.isNullRT = (mode & (0x1 << 12)) ? true : false;
             cntrls.isHeaderMaskfromCe0 = 0;
 
             VISA_VectorOpnd *sampleIndex = cntrls.isSampleIndex ? readVectorOperandNG(bytePos, buf, container, false) : NULL;
@@ -2078,7 +2077,8 @@ void readInstructionNG(
     }
 }
 
-static void readAttributesNG(uint8_t major, uint8_t minor, unsigned& bytePos, const char* buf, kernel_format_t& header, attribute_info_t* attributes, int numAttributes, vISA::Mem_Manager& mem)
+static void readAttributesNG(uint8_t major, uint8_t minor, unsigned& bytePos, const char* buf, kernel_format_t& header,
+    attribute_info_t* attributes, int numAttributes, vISA::Mem_Manager& mem)
 {
     MUST_BE_TRUE(buf    , "Argument Exception: argument buf    is NULL.");
 
@@ -2093,15 +2093,16 @@ static void readAttributesNG(uint8_t major, uint8_t minor, unsigned& bytePos, co
         char* valueBuffer = (char*)mem.alloc(sizeof(char) * (attributes[i].size + 1));
         memcpy_s(valueBuffer, attributes[i].size, &buf[bytePos], attributes[i].size);
         bytePos += attributes[i].size;
-        if (strcmp(attrName, "SLMSize")  == 0 ||
-            strcmp(attrName, "SurfaceUsage" ) == 0 ||
-            strcmp(attrName, "Scope") == 0 ||
-            strcmp(attrName, "Target") == 0 ||
-            strcmp(attrName, "FESPSize") == 0)
+        vISA::Attributes::ID attrID = vISA::Attributes::getAttributeID(attrName);
+        if (vISA::Attributes::isIntAttribute(attrID))
         {
             attributes[i].isInt = true;
             switch (attributes[i].size)
             {
+            case 0:
+                // No value attribute, treat it as boolean internally.
+                attributes[i].value.intVal = 1;
+                break;
             case 1:
                 attributes[i].value.intVal = *valueBuffer;
                 break;
@@ -2116,11 +2117,17 @@ static void readAttributesNG(uint8_t major, uint8_t minor, unsigned& bytePos, co
                 break;
             }
         }
-        else
+        else if (vISA::Attributes::isStringAttribute(attrID))
         {
             attributes[i].isInt = false;    //by default assume attributes have string value
             attributes[i].value.stringVal = valueBuffer;
             attributes[i].value.stringVal[attributes[i].size] = '\0';
+        }
+        else
+        {
+            std::string errMsg(attrName);
+            errMsg += " : unsupported attribute!";
+            MUST_BE_TRUE(false, errMsg);
         }
     }
 }
@@ -2195,7 +2202,7 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         var_info_t* var = &header.variables[declID];
         VISA_GenVar* decl = NULL;
         VISA_Type  varType  = (VISA_Type)  ((var->bit_properties     ) & 0xF);
-        VISA_Align varAlign = (VISA_Align) ((var->bit_properties >> 4) & 0x7);
+        VISA_Align varAlign = (VISA_Align) ((var->bit_properties >> 4) & 0xF);
         uint8_t aliasScopeSpecifier = header.variables[declID].alias_scope_specifier;
         int status = VISA_SUCCESS;
 
@@ -2229,7 +2236,8 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
         for (unsigned ai = 0; ai < var->attribute_count; ai++)
         {
             attribute_info_t* attribute = &var->attributes[ai];
-            kernelBuilderImpl->AddAttributeToVar(decl, header.strings[attribute->nameIndex], attribute->size, attribute->value.stringVal);
+            kernelBuilderImpl->AddAttributeToVar(decl, header.strings[attribute->nameIndex], attribute->size,
+                attribute->isInt ? (char *)&attribute->value.intVal : attribute->value.stringVal);
         }
 
         container.generalVarDecls[i] = decl;
@@ -2408,13 +2416,14 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
             attribute_info_t* attribute = &var->attributes[ai];
 
             /// TODO: Does this code even make sense anymore???
-            if (!strcmp(header.strings[attribute->nameIndex], "SurfaceUsage"))
+            const char* attrName = header.strings[attribute->nameIndex];
+            if (Attributes::isAttribute(Attributes::ATTR_SurfaceUsage, attrName))
             {
                 header.surface_attrs[i] = (attribute->value.intVal == 2);
                 break;
             }
 
-            kernelBuilderImpl->AddAttributeToVar(decl, header.strings[attribute->nameIndex], attribute->size, attribute->value.stringVal);
+            kernelBuilderImpl->AddAttributeToVar(decl, attrName, attribute->size, attribute->value.stringVal);
         }
 
         container.surfaceVarDecls[i] = decl;
@@ -2478,17 +2487,12 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
     header.attributes = (attribute_info_t*)mem.alloc(sizeof(attribute_info_t) * header.attribute_count);
     readAttributesNG(majorVersion, minorVersion, bytePos, buf, header, header.attributes, header.attribute_count, mem);
 
-    bool isTargetSet = false;
     for (unsigned ai = 0; ai < header.attribute_count; ai++)
     {
         attribute_info_t* attribute = &header.attributes[ai];
         /// TODO: This parameter ordering is inconsistent.
         if (attribute->isInt)
         {
-            if(strcmp( header.strings[attribute->nameIndex], "Target") == 0)
-            {
-                isTargetSet = true;
-            }
             kernelBuilderImpl->AddKernelAttribute(header.strings[attribute->nameIndex], attribute->size, &attribute->value.intVal  );
         }
         else
@@ -2496,7 +2500,7 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
             kernelBuilderImpl->AddKernelAttribute(header.strings[attribute->nameIndex], attribute->size, attribute->value.stringVal);
         }
     }
-    if(isTargetSet == false)
+    if (!kernelBuilderImpl->getKernelAttributes()->isSet(vISA::Attributes::ATTR_Target))
     {
         VISATarget target = kernelBuilderImpl->getOptions()->getTarget();
         kernelBuilderImpl->AddKernelAttribute("Target", 1, &target);
@@ -2506,27 +2510,10 @@ static void readRoutineNG(unsigned& bytePos, const char* buf, vISA::Mem_Manager&
     unsigned kernelEnd   = kernelEntry + header.size;
 
     bytePos = kernelEntry;
-    unsigned int startBytePos = bytePos;
-    bool updateDebugInfo = false;
-    if( kernelBuilderImpl->getIsGenBothPath() && kernelBuilderImpl->getOptions()->getOption(vISA_GenerateDebugInfo))
-    {
-        updateDebugInfo = true;
-    }
 
     for (unsigned i = 0; bytePos < kernelEnd; i++)
     {
-        VISAKernel*     kernelBuilder     = container.kernelBuilder;
-        VISAKernelImpl* kernelBuilderImpl = ((VISAKernelImpl*)kernelBuilder);
-        uint32_t cisaByteOffset;
-        if(updateDebugInfo == true)
-        {
-            cisaByteOffset = bytePos - startBytePos;
-        }
         readInstructionNG(bytePos, buf, container, i);
-        if(updateDebugInfo == true)
-        {
-            kernelBuilderImpl->getKernel()->getKernelDebugInfo()->mapCISAOffsetInsert(kernelBuilderImpl->getVISAOffset(), cisaByteOffset);
-        }
     }
 }
 

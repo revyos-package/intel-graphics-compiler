@@ -23,20 +23,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "Compiler/Optimizer/BuiltInFuncImport.h"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMWarningsPush.hpp"
-
 #include "llvmWrapper/IR/Attributes.h"
 #include <llvmWrapper/IR/Function.h>
-
+#include <llvm/IR/CallSite.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Linker/Linker.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Support/Error.h>
@@ -44,6 +45,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 #include <unordered_set>
 #include <unordered_map>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -375,7 +377,7 @@ std::unique_ptr<llvm::Module> BIImport::Construct(Module& M, CLElfLib::CElfReade
                         getOwningLazyBitcodeModule(std::move(OutputBuffer), M.getContext());
                     if (llvm::Error EC = ModuleOrErr.takeError())
                     {
-                        assert(0 && "Error linking generic builtin module");
+                        IGC_ASSERT_MESSAGE(0, "Error linking generic builtin module");
                     }
                     elf_index[SectionIndex] = (std::move(*ModuleOrErr));
                 }
@@ -396,7 +398,7 @@ std::unique_ptr<llvm::Module> BIImport::Construct(Module& M, CLElfLib::CElfReade
                     handleAllErrors(std::move(Err), [&](ErrorInfoBase& EIB) {
                         errs() << "===> Materialize Failure: " << EIB.message().c_str() << '\n';
                     });
-                    assert(0 && "Failed to materialize Global Variables");
+                    IGC_ASSERT_MESSAGE(0, "Failed to materialize Global Variables");
                 }
                 else {
                     pFunc->addAttribute(IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::Builtin);
@@ -442,12 +444,12 @@ std::unique_ptr<llvm::Module> BIImport::Construct(Module& M, CLElfLib::CElfReade
 
         if (Error err = setIterator->materializeAll())
         {
-            assert(0 && "materializeAll failed for size_t builtin module");
+            IGC_ASSERT_MESSAGE(0, "materializeAll failed for size_t builtin module");
         }
 
         if (ld.linkInModule(std::move(setIterator), Linker::OverrideFromSrc))
         {
-            assert(0 && "Error linking generic builtin module");
+            IGC_ASSERT_MESSAGE(0, "Error linking generic builtin module");
         }
     }
 
@@ -472,11 +474,11 @@ std::unique_ptr<llvm::Module> BIImport::Construct(Module& M, CLElfLib::CElfReade
                 getOwningLazyBitcodeModule(std::move(OutputBuffer), M.getContext());
             if (llvm::Error EC = ModuleOrErr.takeError())
             {
-                assert(0 && "Error when LazyLoading global module");
+                IGC_ASSERT_MESSAGE(0, "Error when LazyLoading global module");
             }
             if (ld.linkInModule(std::move(*ModuleOrErr)))
             {
-                assert(0 && "Error linking generic builtin module");
+                IGC_ASSERT_MESSAGE(0, "Error linking generic builtin module");
             }
         }
     }
@@ -553,7 +555,7 @@ bool BIImport::runOnModule(Module& M)
                     handleAllErrors(std::move(Err), [&](ErrorInfoBase& EIB) {
                         errs() << "===> Materialize Failure: " << EIB.message().c_str() << '\n';
                     });
-                    assert(0 && "Failed to materialize Global Variables");
+                    IGC_ASSERT_MESSAGE(0, "Failed to materialize Global Variables");
                 }
                 else {
                     pFunc->addAttribute(IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::Builtin);
@@ -594,12 +596,12 @@ bool BIImport::runOnModule(Module& M)
     Linker ld(M);
 
     if (Error err = m_GenericModule->materializeAll()) {
-        assert(0 && "materializeAll failed for generic builtin module");
+        IGC_ASSERT_MESSAGE(0, "materializeAll failed for generic builtin module");
     }
 
     if (ld.linkInModule(std::move(m_GenericModule)))
     {
-        assert(0 && "Error linking generic builtin module");
+        IGC_ASSERT_MESSAGE(0, "Error linking generic builtin module");
     }
 
     if (m_SizeModule)
@@ -607,12 +609,12 @@ bool BIImport::runOnModule(Module& M)
         CleanUnused(m_SizeModule.get());
         if (Error err = m_SizeModule->materializeAll())
         {
-            assert(0 && "materializeAll failed for size_t builtin module");
+            IGC_ASSERT_MESSAGE(0, "materializeAll failed for size_t builtin module");
         }
 
         if (ld.linkInModule(std::move(m_SizeModule)))
         {
-            assert(0 && "Error linking size_t builtin module");
+            IGC_ASSERT_MESSAGE(0, "Error linking size_t builtin module");
         }
     }
 
@@ -795,8 +797,13 @@ void BIImport::InitializeBIFlags(Module& M)
     initializeVarWithValue("__FlushDenormals", isFlushDenormToZero ? 1 : 0);
     initializeVarWithValue("__DashGSpecified", MD.compOpt.DashGSpecified ? 1 : 0);
     initializeVarWithValue("__FastRelaxedMath", MD.compOpt.RelaxedBuiltins ? 1 : 0);
+    //my understanding of legacy code is that we didn't distinguish if one platform supports int64 or FP64?
+    // if so, what if this platform only supports one of them?
+    //todo: see if we can distinguish int64 or fp64 support here.
+    //initializeVarWithValue("__UseNative64BitSubgroupBuiltin",
+    //    pCtx->platform.hasNo64BitInst() ? 0 : 1);
     initializeVarWithValue("__UseNative64BitSubgroupBuiltin",
-        pCtx->platform.hasNo64BitInst() ? 0 : 1);
+        (pCtx->platform.hasNoInt64Inst() || pCtx->platform.hasNoFP64Inst()) ? 0 : 1);
     initializeVarWithValue("__CRMacros",
         pCtx->platform.hasCorrectlyRoundedMacros() ? 1 : 0);
 
@@ -845,7 +852,7 @@ const llvm::StringRef PreBIImportAnalysis::OCL_GET_GLOBAL_OFFSET = "_Z17get_glob
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_LOCAL_ID = "_Z12get_local_idj";
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_GROUP_ID = "_Z12get_group_idj";
 const llvm::StringRef PreBIImportAnalysis::OCL_GET_SUBGROUP_ID_SPIRV = "__builtin_spirv_BuiltInSubgroupId";
-const llvm::StringRef PreBIImportAnalysis::OCL_GET_SUBGROUP_ID = "get_sub_group_id";
+const llvm::StringRef PreBIImportAnalysis::OCL_GET_SUBGROUP_ID = "_Z16get_sub_group_idv";
 
 PreBIImportAnalysis::PreBIImportAnalysis() : ModulePass(ID)
 {
@@ -855,6 +862,10 @@ PreBIImportAnalysis::PreBIImportAnalysis() : ModulePass(ID)
 bool PreBIImportAnalysis::runOnModule(Module& M)
 {
     // Run on all functions defined in this module
+    SmallVector<std::pair<Instruction*, double>, 8> InstToModify;
+    SmallVector<std::pair<Function*, std::string>, 8> FuncToRename;
+    SmallVector<std::pair<Instruction*, Instruction*>, 8> CallToReplace;
+
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
     {
         Function* pFunc = &(*I);
@@ -903,49 +914,190 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                 }
 
                 // loop all callers
-                for (auto f : callerSet)
-                {
-                    if (visited.find(f) == visited.end())
-                    {
-                        // this function is not visited before,
-                        // insert it into queue
-                        functQueue.push(f);
-                    }
+                for (auto f : callerSet) {
+                  if (visited.find(f) == visited.end()) {
+                    // this function is not visited before,
+                    // insert it into queue
+                    functQueue.push(f);
+                  }
                 }
             }
 
             // search all marked functions
             for (auto f : visited)
             {
-                if (pMdUtil->findFunctionsInfoItem(f) != pMdUtil->end_FunctionsInfo())
+              if (pMdUtil->findFunctionsInfoItem(f) != pMdUtil->end_FunctionsInfo())
+              {
+                // It is kernel Function, set metaData
+                if (funcName == OCL_GET_GLOBAL_OFFSET)
                 {
-                    // It is kernel Function, set metaData
-                    if (funcName == OCL_GET_GLOBAL_OFFSET)
-                    {
-                        modMD->FuncMD[f].globalIDPresent = true;
-                    }
-                    else if (funcName == OCL_GET_LOCAL_ID)
-                    {
-                        //localIDPresent info will be added to new framework here
-                        //and extracted from new framework later
-                        modMD->FuncMD[f].localIDPresent = true;
-                    }
-                    else if (funcName == OCL_GET_GROUP_ID)
-                    {
-                        //groupIDPresent info will be added to new framework here
-                        //and extracted from new framework later
-                        modMD->FuncMD[f].groupIDPresent = true;
-                    }
-                    else if (funcName == OCL_GET_SUBGROUP_ID_SPIRV ||
-                             funcName == OCL_GET_SUBGROUP_ID)
-                    {
-                        modMD->FuncMD[f].workGroupWalkOrder.dim0 = 0;
-                        modMD->FuncMD[f].workGroupWalkOrder.dim1 = 1;
-                        modMD->FuncMD[f].workGroupWalkOrder.dim2 = 2;
-                    }
+                  modMD->FuncMD[f].globalIDPresent = true;
                 }
+                else if (funcName == OCL_GET_LOCAL_ID)
+                {
+                  //localIDPresent info will be added to new framework here
+                  //and extracted from new framework later
+                  modMD->FuncMD[f].localIDPresent = true;
+                }
+                else if (funcName == OCL_GET_GROUP_ID)
+                {
+                  //groupIDPresent info will be added to new framework here
+                  //and extracted from new framework later
+                  modMD->FuncMD[f].groupIDPresent = true;
+                }
+                else if (funcName == OCL_GET_SUBGROUP_ID_SPIRV ||
+                  funcName == OCL_GET_SUBGROUP_ID)
+                {
+                    modMD->FuncMD[f].workGroupWalkOrder.dim0 = 0;
+                    modMD->FuncMD[f].workGroupWalkOrder.dim1 = 1;
+                    modMD->FuncMD[f].workGroupWalkOrder.dim2 = 2;
+                }
+              }
             }
         }
+
+        auto modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+        if ((modMD->compOpt.MatchSinCosPi) &&
+            !(modMD->compOpt.FastRelaxedMath) &&
+            (funcName.startswith("__builtin_spirv_OpenCL_cos_f32") ||
+             funcName.startswith("__builtin_spirv_OpenCL_sin_f32"))) {
+          for (auto Users : pFunc->users()) {
+            if (auto CI = dyn_cast<CallInst>(Users)) {
+              IRBuilder<> builder(CI);
+              Value* inputV = CI->getOperand(0);
+              bool isCandidate = false;
+              BinaryOperator* fmulInst = dyn_cast<BinaryOperator>(inputV);
+
+              if (LoadInst* load = dyn_cast<LoadInst>(inputV)) {
+                Value* ptrV = load->getPointerOperand();
+
+                if (AllocaInst* ptrAlloca = dyn_cast<AllocaInst>(ptrV)) {
+                  Value::use_iterator allocaUse = ptrV->use_begin();
+                  Value::use_iterator allocaUseEnd = ptrV->use_end();
+                  StoreInst* store = nullptr;
+
+                  for (; allocaUse != allocaUseEnd; ++allocaUse) {
+                    if (StoreInst* useInst =
+                      dyn_cast<StoreInst>(allocaUse->getUser())) {
+                      if (store == nullptr) {
+                        store = dyn_cast<StoreInst>(allocaUse->getUser());
+                      }
+                      else {
+                        store = nullptr;
+                        break;
+                      }
+                    }
+                  }
+
+                  Value* storeV = nullptr;
+
+                  if (store && (storeV = store->getValueOperand())) {
+                    fmulInst = dyn_cast<BinaryOperator>(storeV);
+                  }
+                }
+              }
+
+              if (fmulInst && fmulInst->getOpcode() == Instruction::FMul) {
+                isCandidate = true;
+              }
+
+              if (isCandidate && fmulInst->getNumUses() > 1) {
+                Value::use_iterator fmulUse = fmulInst->use_begin();
+                Value::use_iterator fmulUseEnd = fmulInst->use_end();
+
+                for (; fmulUse != fmulUseEnd; ++fmulUse) {
+                  if (CallInst* useInst =
+                    dyn_cast<CallInst>(fmulUse->getUser())) {
+                    StringRef funcName = useInst->getCalledFunction()->getName();
+                    if (!funcName.startswith("__builtin_spirv_OpenCL_cos_f32") &&
+                      !funcName.startswith("__builtin_spirv_OpenCL_sin_f32")) {
+                      isCandidate = false;
+                      break;
+                    }
+                  }
+                  else
+                  {
+                    isCandidate = false;
+                    break;
+                  }
+                }
+              }
+
+              if (isCandidate) {
+                ConstantFP *fmulConstant =
+                    dyn_cast<ConstantFP>(fmulInst->getOperand(0));
+
+                double intValue = 0.0;
+                double fractValue = 1.0;
+                if (fmulConstant) {
+                  auto APF = fmulConstant->getValueAPF();
+                  llvm::Type *type = fmulInst->getType();
+                  double fmulValue = type->isFloatTy() ? APF.convertToFloat()
+                                                       : APF.convertToDouble();
+                  const double PI =
+                      3.1415926535897932384626433832795028841971693993751058209;
+                  double coefficient = fmulValue / PI;
+                  intValue = trunc(coefficient);
+                  fractValue = coefficient - intValue;
+                }
+
+                if (fabs(fractValue) <= 0.0001) {
+                  InstToModify.push_back(
+                      std::pair<Instruction *, double>(fmulInst, intValue));
+
+                  std::string newName;
+                  if (funcName.startswith("__builtin_spirv_OpenCL_cos_f32")) {
+                    newName = "__builtin_spirv_OpenCL_cospi_f32";
+                  } else if (funcName.startswith(
+                                 "__builtin_spirv_OpenCL_sin_f32")) {
+                    newName = "__builtin_spirv_OpenCL_sinpi_f32";
+                  }
+
+                  if (Function *newFunc = M.getFunction(newName)) {
+                    SmallVector<Value *, 8> Args;
+                    for (unsigned I = 0, E = CI->getNumArgOperands(); I != E;
+                         ++I) {
+                      Args.push_back(CI->getArgOperand(I));
+                    }
+                    auto newCI = CallInst::Create(newFunc, Args);
+                    newCI->setCallingConv(CI->getCallingConv());
+                    CallToReplace.push_back(
+                        std::pair<Instruction *, Instruction *>(CI, newCI));
+                  } else {
+                    FuncToRename.push_back(
+                        std::pair<Function*, std::string>(pFunc, newName));
+                  }
+                }
+              }
+            }
+          }
+        }
     }
+
+    for (auto InstPair : InstToModify)
+    {
+      auto inst = InstPair.first;
+      auto value = InstPair.second;
+      inst->setOperand(
+        0, ConstantFP::get(
+          Type::getFloatTy(inst->getContext()),
+          (float) value));
+    }
+
+    for (auto FuncPair : FuncToRename)
+    {
+      auto func = FuncPair.first;
+      auto name = FuncPair.second;
+      func->setName(name);
+    }
+
+    for (auto CIPair : CallToReplace)
+    {
+      auto oldCI = CIPair.first;
+      auto newCI = CIPair.second;
+      oldCI->replaceAllUsesWith(newCI);
+      ReplaceInstWithInst(oldCI, newCI);
+    }
+
     return true;
 }

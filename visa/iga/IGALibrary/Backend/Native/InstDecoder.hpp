@@ -47,7 +47,7 @@ namespace iga
 {
     typedef std::function<void(uint64_t bits, std::stringstream &ss)> FormatFunction;
 
-    static int nextPowerOfTwo(int v) {
+    static inline int nextPowerOfTwo(int v) {
         v--;
         v |= v >> 1;
         v |= v >> 2;
@@ -57,10 +57,10 @@ namespace iga
         v++;
         return v;
     }
-    static PredCtrl decodePredCtrl(uint64_t bits) {
+    static inline PredCtrl decodePredCtrl(uint64_t bits) {
         return static_cast<PredCtrl>(bits);
     }
-    static ExecSize decodeExecSizeBits(uint64_t val) {
+    static inline ExecSize decodeExecSizeBits(uint64_t val) {
         switch (val) {
         case 0: return ExecSize::SIMD1;
         case 1: return ExecSize::SIMD2;
@@ -71,10 +71,10 @@ namespace iga
         default: return ExecSize::INVALID;
         }
     }
-    static ChannelOffset decodeChannelOffsetBits(uint64_t val) {
+    static inline ChannelOffset decodeChannelOffsetBits(uint64_t val) {
         return static_cast<ChannelOffset>(val);
     }
-    static FlagModifier decodeFlagModifierBits(uint64_t val) {
+    static inline FlagModifier decodeFlagModifierBits(uint64_t val) {
         FlagModifier fm;
         switch (val) {
         case 0: fm = FlagModifier::NONE; break;
@@ -91,7 +91,7 @@ namespace iga
         }
         return fm;
     }
-    static SrcModifier decodeSrcModifierBits(uint64_t bits)
+    static inline SrcModifier decodeSrcModifierBits(uint64_t bits)
     {
         switch (bits) {
         case 0: return SrcModifier::NONE;
@@ -101,7 +101,7 @@ namespace iga
         default: return static_cast<SrcModifier>(bits);
         }
     }
-    static FlagModifier decodeFlagModifier(uint64_t bits)
+    static inline FlagModifier decodeFlagModifier(uint64_t bits)
     {
         switch (bits) {
         case 0: return FlagModifier::NONE;
@@ -141,17 +141,17 @@ namespace iga
     //       for GEN-specific stuff use this var; e.g. P.decodeBasicRegType(...)
     struct InstDecoder
     {
-        InstBuilder    &builder;
-        ErrorHandler   &errorHandler;
-        const Model    &model;
-        const OpSpec   &os;
-        MInst           bits;
-        FragmentList   *fields;
-        Loc             loc;
+        InstBuilder              &builder;
+        ErrorHandler             &errorHandler;
+        const Model              &model;
+        const OpSpec             &os;
+        MInst                     bits;
+        FragmentList             *fields;
+        Loc                       loc;
 
         // instruction state
-        ExecSize        execSize;
-        InstOptSet      instOptSet;
+        ExecSize                  execSize;
+        InstOptSet                instOptSet;
 
         InstDecoder(
             InstBuilder &_builder,
@@ -161,7 +161,7 @@ namespace iga
             MInst _bits,
             FragmentList *_fields,
             Loc _loc)
-            :  builder(_builder)
+            : builder(_builder)
             , errorHandler(_errorHandler)
             , model(_model)
             , os(_os)
@@ -202,22 +202,21 @@ namespace iga
         // PRIMITIVE FIELD ADDERS
         void addDecodedField(const Field &f, std::string meaning) {
             if (fields) {
-                int nEncoded = 0;
+                int encodedFragments = 0;
                 for (const Fragment &fr : f.fragments) {
                     if (fr.isInvalid())
                         break;
                     else if (fr.isEncoded())
-                        if (++nEncoded >= 2)
-                            break;
+                        encodedFragments++;
                 }
-                bool needsFragmentPrefix = nEncoded >= 2;
+                bool multipleFragments = false;
                 int fragIx = 0;
                 for (const Fragment &fr : f.fragments) {
                     if (fr.isInvalid())
                         break;
                     else if (fr.isEncoded()) {
                         std::string fragMeaning;
-                        if (needsFragmentPrefix) {
+                        if (multipleFragments) {
                             std::stringstream ss;
                             ss << "[frag. " << fragIx << "]: " << meaning;
                             fragMeaning = ss.str();
@@ -235,26 +234,24 @@ namespace iga
                 fields->emplace_back(fr, val);
         }
         uint64_t decodeFragment(const Fragment &f) {
-            if (fields)
-                fields->emplace_back(f, "");
+            addDecodedFragment(f, "");
             return bits.getFragment(f);
         }
         uint64_t decodeFragment(const Fragment &f, FormatFunction fmt) {
             auto val = bits.getFragment(f);
             if (fields) {
                 std::stringstream ss;
-                fmt(val,ss);
-                fields->emplace_back(f, ss.str());
+                fmt(val, ss);
+                addDecodedFragment(f, ss.str());
             }
             return val;
         }
-        uint64_t decodeFieldWithFunction(const Fragment &f, FormatFunction fmt) {
+        uint64_t decodeFieldWithFunction(
+            const Fragment &f, FormatFunction fmt)
+        {
             return decodeFragment(f, fmt);
         }
 
-        void addFieldSubfunction(const Field &f, std::string val = "") {
-            addDecodedField(f, val);
-        }
 
         void addReserved(int off, int len, std::string errStr = "?") {
             Fragment fRSVD("Reserved", off, len);
@@ -308,7 +305,8 @@ namespace iga
             const char *falseMeaning,
             const char *trueMeaning)
         {
-            return decodeField<bool>(f, false, falseMeaning, true, trueMeaning);
+            return decodeField<bool>(
+                f, false, falseMeaning, true, trueMeaning);
         }
 
         ///////////////////////////////////////////////////////////////////////
@@ -324,7 +322,7 @@ namespace iga
         {
             // IGA_ASSERT(f.length == 2, "field is not a two bits");
             // we can have subset fields like Dst.RgnHz[0] in ternary
-            IGA_ASSERT(f.length() <= 2, "field is not a two bits");
+            IGA_ASSERT(f.length() <= 2, "field is <=2 bits");
             T val;
             const char *str = "";
             auto b = bits.getField(f);
@@ -380,7 +378,7 @@ namespace iga
                 }
                 i++;
             }
-            if (i == vals.size() || retVal == invalid) { // didn't find it
+            if (i == (int)vals.size() || retVal == invalid) { // didn't find it
                 retVal = invalid;
                 strVal = "?";
                 reportFieldErrorInvalidValue(f);
@@ -396,6 +394,10 @@ namespace iga
         ///////////////////////////////////////////////////////////////////////
         // generic GEN helpers
         ///////////////////////////////////////////////////////////////////////
+        bool isMacro() const {
+            return builder.isMacroOp();
+        }
+
         void decodeMaskCtrl(const Field &fMASKCTRL) {
             if (decodeBoolField(fMASKCTRL, "", "WrEn")) {
                 builder.InstNoMask(loc);
@@ -423,13 +425,13 @@ namespace iga
 
         void decodeBrCtl(const Field &fBRCTL) {
             bool brCtl = decodeBoolField(fBRCTL, "", ".b");
-            builder.InstBrCtl(brCtl ? BranchCntrl::ON : BranchCntrl::OFF);
+            builder.InstSubfunction(
+                brCtl ? BranchCntrl::ON : BranchCntrl::OFF);
         }
 
         RegRef peekFlagRegRef(const Field &fFLAGREG) const {
-            auto val = bits.getField(fFLAGREG);
-            RegRef rr{(uint8_t)(val >> 1),(uint8_t)(val & 0x1)};
-            return rr;
+            auto val = (uint32_t)bits.getField(fFLAGREG);
+            return RegRef(val >> 1, val & 0x1);
         }
 
         RegRef decodeFlagReg(const Field &fFLAGREG) {
@@ -448,7 +450,7 @@ namespace iga
             FlagModifier invalidModifier = static_cast<FlagModifier>(-1);
             FlagModifier zeroValue = FlagModifier::NONE;
             const char *zeroString = "";
-            if (os.isMathSubFunc() && os.isMacro()) {
+            if (os.is(Op::MATH) && isMacro()) {
                 zeroValue = FlagModifier::EO;
                 zeroString = "(eo) (early out)";
             }
@@ -614,7 +616,7 @@ namespace iga
                 fSRCMODS,
                 SrcModifier::NONE,"",
                 SrcModifier::ABS, "(abs)",
-                SrcModifier::NEG,  os.isBitwise() ? "~" : "-",
+                SrcModifier::NEG, os.isBitwise() ? "~" : "-",
                 SrcModifier::NEG_ABS,"-(abs)");
         }
 
@@ -624,26 +626,23 @@ namespace iga
         }
 
         void decodeSubReg(
-            OpIx opIndex,
             OperandInfo &opInfo,
             const Field &fSUBREG)
         {
             decodeSubRegWithType(
-                opIndex, opInfo, fSUBREG, opInfo.type, ToSyntax(opInfo.type));
+                opInfo, fSUBREG, opInfo.type, ToSyntax(opInfo.type));
         }
 
         // e.g. for subregisters without proper types
         void decodeSubRegWithImplicitType(
-            OpIx opIndex,
             OperandInfo &opInfo,
             const Field &fSUBREG,
             Type t)
         {
-            decodeSubRegWithType(opIndex, opInfo, fSUBREG, t, "");
+            decodeSubRegWithType(opInfo, fSUBREG, t, "");
         }
 
         void decodeSubRegWithType(
-            OpIx opIndex,
             OperandInfo &opInfo,
             const Field &fSUBREG,
             Type type,
@@ -653,7 +652,7 @@ namespace iga
             auto scaled = BytesOffsetToSubReg(srb, opInfo.regOpName, type);
             auto unscaled =
                 SubRegToBytesOffset((int)scaled, opInfo.regOpName, type);
-            if (unscaled != srb) {
+            if ((int)unscaled != srb) {
                 reportFieldError(fSUBREG,
                     "subregister offset is misaligned for type size");
             }
@@ -673,7 +672,7 @@ namespace iga
             const Field &fREG)
         {
             decodeRegFields(opInfo, fREGFILE, fREG);
-            if (os.isMacro()) {
+            if (isMacro()) {
                 opInfo.kind = Operand::Kind::MACRO;
                 opInfo.regOpMathMacroExtReg = decodeMathMacroRegField(fSPCACC);
                 addReserved(
@@ -689,7 +688,7 @@ namespace iga
                 }
             } else {
                 opInfo.kind = Operand::Kind::DIRECT;
-                decodeSubReg(opIndex, opInfo, fSUBREG);
+                decodeSubReg(opInfo, fSUBREG);
             }
         }
 
@@ -700,50 +699,63 @@ namespace iga
         {
             bool isGrf = decodeBoolField(fREGFILE, "ARF", "GRF");
             std::stringstream ss;
-            auto val = bits.getField(fREG);
+            auto regVal = bits.getField(fREG);
             if (isGrf) {
                 opInfo.regOpName = RegName::GRF_R;
-                opInfo.regOpReg.regNum = (uint8_t)val;
-                ss << "r" << val;
+                opInfo.regOpReg.regNum = (uint16_t)regVal;
+                ss << "r" << regVal;
             } else {
-                const RegInfo *regInfo =
-                    model.lookupArfRegInfoByRegNum((uint8_t)val);
-                if (regInfo == nullptr) {
-                    ss << "ARF?";
-                    std::stringstream ssErr;
-                    ssErr << "invalid ARF Reg (" << fmtHex(val,2) << ")";
-                    reportFieldError(fREG,  ssErr.str().c_str());
-                } else {
-                    opInfo.regOpName = regInfo->regName;
-                    ss << regInfo->syntax;
-                    int arfReg = 0;
-                    if(val > 0xFF || !regInfo->decode((uint8_t)val, arfReg)) {
-                        ss << arfReg << "?";
-                        std::stringstream ss;
-                        ss << regInfo->syntax << arfReg << " is out of bounds";
-                        reportFieldError(fREG, ss.str().c_str());
-                    } else {
-                        if (regInfo->hasRegNum()) {
-                            ss << arfReg;
-                        }
-                        opInfo.regOpReg.regNum = (int)arfReg;
-                        if (regInfo->regNumBase > 0) {
-                            // if the register covers to another, let's tell
-                            // them which
-                            uint8_t coverRegBits = (uint8_t)val & 0xF0;
-                            const RegInfo *coverRegInfo =
-                                model.lookupArfRegInfoByRegNum(coverRegBits);
-                            if (coverRegInfo) {
-                                // e.g. GEN12 acc10 is mme2
-                                ss << " (" <<
-                                    coverRegInfo->syntax << (val & 0xF) << ")";
-                            }
-                        }
-                    }
-                }
+                readArfRegisterInfo(opInfo, fREG, ss);
             }
             addDecodedField(fREG, ss.str());
         }
+
+        // factored out so decodeInstSendDstOperand can share it
+        void readArfRegisterInfo(
+            OperandInfo &opInfo,
+            const Field &fREG,
+            std::stringstream &ssDesc)
+        {
+            auto regVal = bits.getField(fREG);
+            const RegInfo *regInfo =
+                model.lookupArfRegInfoByRegNum((uint8_t)regVal);
+            if (regInfo == nullptr) {
+                opInfo.regOpName = RegName::INVALID;
+                ssDesc << "invalid ARF";
+                std::stringstream ssErr;
+                ssErr << "invalid ARF Reg (" << fmtHex(regVal, 2) << ")";
+                reportFieldError(fREG, ssErr.str().c_str());
+                return;
+            }
+            //
+            opInfo.regOpName = regInfo->regName;
+            ssDesc << regInfo->syntax;
+            int arfReg = 0;
+            if (regVal > 0xFF || !regInfo->decode((uint8_t)regVal, arfReg)) {
+                ssDesc << arfReg << "?";
+                std::stringstream ss;
+                ss << regInfo->syntax << arfReg << " is out of bounds";
+                reportFieldError(fREG, ss.str().c_str());
+            } else {
+                if (regInfo->hasRegNum()) {
+                    ssDesc << arfReg;
+                }
+                opInfo.regOpReg.regNum = (uint16_t)arfReg;
+                if (regInfo->regNumBase > 0) {
+                    // if the register covers to another, let's tell
+                    // them which
+                    uint8_t coverRegBits = (uint8_t)(regVal & 0xF0);
+                    const RegInfo *coverRegInfo =
+                        model.lookupArfRegInfoByRegNum(coverRegBits);
+                    if (coverRegInfo) {
+                        // e.g. GEN12+ acc10 is mme2
+                        ssDesc << " (" <<
+                            coverRegInfo->syntax << (regVal & 0xF) << ")";
+                    }
+                }
+            }
+        }
+
 
         MathMacroExt decodeMathMacroRegField(const Field &fSPCACC) {
             return decodeField<MathMacroExt>(

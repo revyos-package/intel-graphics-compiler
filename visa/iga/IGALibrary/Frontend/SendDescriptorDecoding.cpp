@@ -26,39 +26,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "SendDescriptorDecoding.hpp"
 #include "../bits.hpp"
-#include "../Backend/MessageInfo.hpp"
+#include "../IR/Messages.hpp"
+#include "../strings.hpp"
+
+#include <algorithm>
+
 
 using namespace iga;
-
-static uint32_t getMsgLength(uint32_t desc) {return getBits(desc, 25, 4);}
-static uint32_t getHeaderBit(uint32_t desc) {return getBits(desc, 19, 1);}
-static uint32_t getRespLength(uint32_t desc) {return getBits(desc, 20, 5);}
-static uint32_t getSrc1LengthFromExDesc(uint32_t exDesc) {
-    return getBits(exDesc, 6, 5);
-}
-static uint32_t getMiscMsgDescBits(uint32_t desc) {return getBits(desc, 8, 6);}
-
-static void formatMessageInfoDescription(
-    Platform p,
-    SFID sfid,
-    const OpSpec &os,
-    const SendDescArg &exDesc,
-    uint32_t desc,
-    std::stringstream &ss)
-{
-    DiagnosticList ws, es;
-    auto exDescImm =
-        exDesc.type == SendDescArg::REG32A ? 0xFFFFFFFF : exDesc.imm;
-    auto mi =
-        MessageInfo::tryDecode(p, sfid, exDescImm, desc, ws, es, nullptr);
-    if (!mi.description.empty()) {
-            ss << " " << mi.description;
-    } else {
-        if (!es.empty())
-            ss << es.back().second;
-        ss << "?";
-    }
-}
 
 
 static const char *getSFIDString(Platform p, uint32_t sfid)
@@ -96,7 +70,7 @@ static const char *getSFIDString(Platform p, uint32_t sfid)
         "spawner",  // 0111b thread spawner
 
         "vme",      // 1000b video motion estimation
-        "hdc.dcro0", // 1001b data cache read only (renaming)
+        "hdc.dcro", // 1001b data cache read only (renaming)
         "hdc.dc0",  // 1010b
         "pi",       // 1011b pixel interpolator
 
@@ -115,56 +89,108 @@ static const char *getSFIDString(Platform p, uint32_t sfid)
 }
 
 
+static uint32_t getHeaderBit(uint32_t desc) {return getBits(desc, 19, 1);}
+
+
 void iga::EmitSendDescriptorInfo(
     Platform p,
-    const OpSpec &os,
-    const SendDescArg &exDesc,
-    uint32_t desc,
+    SFID sfid,
+    ExecSize execSize,
+    bool dstNonNull,
+    int dstLen, int src0Len, int src1Len,
+    const SendDesc &exDesc, const SendDesc &desc,
+    RegRef indDesc,
     std::stringstream &ss)
 {
-    uint32_t exDescImm = exDesc.type == SendDescArg::IMM ? exDesc.imm : 0;
-    SFID sfid =
-        p < Platform::GEN12P1 && exDesc.type == SendDescArg::REG32A ?
-            SFID::INVALID : MessageInfo::sfidFromOp(p, os.op, exDescImm);
-    bool exDescHasA0 = exDesc.type == SendDescArg::REG32A;
-    bool src1LenIsInA0 = exDesc.type == SendDescArg::REG32A;
+    DiagnosticList ws, es;
 
     //////////////////////////////////////
-    // emit the: "wr:3h+2, rd:4" part
-    ss << "wr:" << getMsgLength(desc);
+    // emit the: "wr:1h+2, rd:4" part
+    ss << "wr:";
+    if (src0Len >= 0) {
+        ss << src0Len;
+    } else if (desc.isReg()) {
+        ss << "a0." << (int)desc.reg.subRegNum << "[28:25]";
+    } else {
+        ss << "?";
+    }
     bool hasHeaderBit = true;
-    if (hasHeaderBit && getHeaderBit(desc)) {
+    bool hasEncodedDstLen = true;
+    if (hasHeaderBit && desc.isImm() && getHeaderBit(desc.imm)) {
         ss << "h";
     }
-    int src1Len = 0;
-    if (exDesc.type == SendDescArg::IMM) {
-        src1Len = getSrc1LengthFromExDesc(exDescImm);
+    //
+    ss << "+";
+    if (src1Len >= 0) {
+        ss << src1Len;
+    } else if (exDesc.isReg()) {
+        ss << "a0." << (int)exDesc.reg.subRegNum << "[10:6]";
+    } else {
+        ss << "?";
     }
-    if (src1Len) {
-        ss << "+" << src1Len;
-    } else if (exDescHasA0) {
-        if (src1LenIsInA0) {
-            ss << "+a0.#[10:6]";
+    ss << ", rd:";
+    if (desc.isReg()) {
+        ss << "a0." << (int)desc.reg.subRegNum << "[24:20]";
+    } else if (hasEncodedDstLen) {
+        ss << dstLen;
+    } else {
+        if (dstNonNull) {
+            if (dstLen < 0) {
+                PayloadLengths lens(p, sfid, execSize, desc.imm);
+                dstLen = lens.dstLen;
+            }
+            if (dstLen >= 0) {
+                ss << dstLen;
+            } else {
+                // we cannot decode this message and thus cannot infer the
+                // destination length; so we just say so
+                ss << "non-zero";
+            }
         } else {
-            ss << "+?";
+            ss << "0";
         }
     }
-    ss << ", rd:" << getRespLength(desc);
-    ss << ";";
     //
     ////////////////////////////////
     // now the message description
     if (p < Platform::GEN12P1) {
         // pre-GEN12, emit the SFID first since it's not part of the op yet
-        if (exDescHasA0) {
-            ss << " sfid is in a0.#[3:0]:";
+        if (exDesc.isReg()) {
+            ss << "; sfid a0." << (int)exDesc.reg.subRegNum << "[3:0]";
         } else { // no a0.0
-            ss << " " << getSFIDString(p, exDescImm & 0xF) << ":";
+            ss << "; " << getSFIDString(p, exDesc.imm & 0xF);
         }
     }
-    if (sfid != SFID::INVALID) {
-        formatMessageInfoDescription(p, sfid, os, exDesc, desc, ss);
-    } else {
-        ss << "cannot determine SFID";
+
+    if (desc.isImm()) {
+        const DecodeResult dr =
+            tryDecode(p, sfid, exDesc, desc, indDesc, nullptr);
+        if (dr.syntax.isValid()) {
+            ss << "; " << dr.syntax.sym();
+        } else if (!dr.info.description.empty()) {
+            ss << "; " << dr.info.description;
+        } else {
+            if (!es.empty() &&
+                es.back().second.find("unsupported sfid") == std::string::npos)
+            {
+                ss << "; " << es.back().second << "?";
+            }
+            // skip unsupported SFIDs
+        }
+
+        if (dr.info.hasAttr(MessageInfo::HAS_UVRLOD) && src0Len > 0) {
+            const int REG_FILE_BITS =
+                    256;
+            const int QUARTER_EXEC_BITS = REG_FILE_BITS/32/2/2;
+            int elems = std::max<int>(QUARTER_EXEC_BITS, dr.info.execWidth);
+            int regsForU =
+                std::max<int>(1, elems*dr.info.addrSizeBits/REG_FILE_BITS);
+            switch (src0Len/regsForU) {
+            case 1: ss << "; u"; break;
+            case 2: ss << "; u,v"; break;
+            case 3: ss << "; u,v,r"; break;
+            case 4: ss << "; u,v,r,lod"; break;
+            }
+        } // U,V,R,LOD
     }
-}
+} // iga::EmitSendDescriptorInfo

@@ -26,11 +26,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 
 #include "llvm/Config/llvm-config.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Support/DataTypes.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include <vector>
 #include <map>
 #include <string>
@@ -39,6 +37,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/DebugInfo/VISAIDebugEmitter.hpp"
 #include "Compiler/DebugInfo/LexicalScopes.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
+#include "Probe/Assertion.h"
 
 namespace llvm
 {
@@ -69,27 +68,32 @@ namespace IGC
     {
     public:
         /// @brief Default Constructor. Creates empty location.
-        VISAVariableLocation()
+        VISAVariableLocation(const VISAModule* m)
         {
             Reset();
+            m_pVISAModule = m;
         }
 
         /// @brief Constructor. Creates constant value location.
         /// @param pConstVal constant value.
-        VISAVariableLocation(const llvm::Constant* pConstVal)
+        /// @param m points to VISAModule corresponding to this location
+        VISAVariableLocation(const llvm::Constant* pConstVal, const VISAModule* m)
         {
             Reset();
             m_isImmediate = true;
             m_pConstVal = pConstVal;
+            m_pVISAModule = m;
         }
 
         /// @brief Constructor. Creates surface entry location.
         /// @param surfaceReg register number that indicates the surface entry.
-        VISAVariableLocation(unsigned int surfaceReg)
+        /// @param m points to VISAModule corresponding to this location
+        VISAVariableLocation(unsigned int surfaceReg, const VISAModule* m)
         {
             Reset();
             m_hasSurface = true;
             m_surfaceReg = surfaceReg;
+            m_pVISAModule = m;
         }
 
         /// @brief Constructor. Creates surface entry + offset location.
@@ -98,7 +102,9 @@ namespace IGC
         /// @param isRegister true if offset value is a register, false if it is immediate.
         /// @param isInMemory true if location is stored in memory, false otherwise.
         /// @param isVectorized true if the underlying virtual variable has been vectorized during codegen.
-        VISAVariableLocation(unsigned int surfaceReg, unsigned int locationValue, bool isRegister, bool isInMemory, bool isVectorized)
+        /// @param m points to VISAModule corresponding to this location
+        VISAVariableLocation(unsigned int surfaceReg, unsigned int locationValue, bool isRegister,
+            bool isInMemory, unsigned int vectorNumElements, bool isVectorized, const VISAModule* m)
         {
             Reset();
             m_hasSurface = true;
@@ -108,7 +114,9 @@ namespace IGC
             m_isRegister = isRegister;
             m_locationReg = isRegister ? locationValue : 0;
             m_locationOffset = isRegister ? 0 : locationValue;
-            m_IsVectorized = isVectorized;
+            m_isVectorized = isVectorized;
+            m_vectorNumElements = isVectorized ? vectorNumElements : 0;
+            m_pVISAModule = m;
         }
 
         /// @brief Constructor. Creates address/register location.
@@ -117,8 +125,9 @@ namespace IGC
         /// @param isInMemory true if location is stored in memory, false otherwise.
         /// @param isVectorized true if the underlying virtual variable has been vectorized during codegen.
         /// @param isGlobalAddrSpace true if variable represents a src var belonging to global address space.
-        VISAVariableLocation(unsigned int locationValue, bool isRegister,
-            bool isInMemory, bool isVectorized, bool isGlobalAddrSpace)
+        /// @param m points to VISAModule corresponding to this location
+        VISAVariableLocation(unsigned int locationValue, bool isRegister, bool isInMemory,
+             unsigned int vectorNumElements, bool isVectorized, bool isGlobalAddrSpace, const VISAModule* m)
         {
             Reset();
             m_hasLocation = true;
@@ -126,8 +135,10 @@ namespace IGC
             m_isRegister = isRegister;
             m_locationReg = isRegister ? locationValue : 0;
             m_locationOffset = isRegister ? 0 : locationValue;
-            m_IsVectorized = isVectorized;
+            m_isVectorized = isVectorized;
+            m_vectorNumElements = isVectorized ? vectorNumElements : 0;
             m_isGlobalAddrSpace = isGlobalAddrSpace;
+            m_pVISAModule = m;
         }
 
         // Getter methods
@@ -136,13 +147,16 @@ namespace IGC
         bool HasLocation() const { return m_hasLocation; }
         bool IsInMemory() const { return m_isInMemory; }
         bool IsRegister() const { return m_isRegister; }
-        bool IsVectorized() const { return m_IsVectorized; }
+        bool IsVectorized() const { return m_isVectorized; }
         bool IsInGlobalAddrSpace() const { return m_isGlobalAddrSpace; }
 
         const llvm::Constant* GetImmediate() { return m_pConstVal; }
         unsigned int GetSurface() const { return m_surfaceReg; }
         unsigned int GetRegister() const { return m_locationReg; }
         unsigned int GetOffset() const { return m_locationOffset; }
+        unsigned int GetVectorNumElements() const { return m_vectorNumElements; }
+        const VISAModule* GetVISAModule() { return m_pVISAModule; }
+
         bool IsSampler() const;
         bool IsTexture() const;
         bool IsSLM() const;
@@ -160,8 +174,9 @@ namespace IGC
             m_surfaceReg = (~0);
             m_locationReg = (~0);
             m_locationOffset = (~0);
-            m_IsVectorized = false;
+            m_isVectorized = false;
             m_isGlobalAddrSpace = false;
+            m_pVISAModule = nullptr;
         }
 
     private:
@@ -170,14 +185,15 @@ namespace IGC
         bool m_hasLocation;
         bool m_isInMemory;
         bool m_isRegister;
-        bool m_IsVectorized;
+        bool m_isVectorized;
         bool m_isGlobalAddrSpace;
 
         const llvm::Constant* m_pConstVal;
         unsigned int m_surfaceReg;
         unsigned int m_locationReg;
         unsigned int m_locationOffset;
-
+        unsigned int m_vectorNumElements;
+        const VISAModule* m_pVISAModule = nullptr;
     };
 
     typedef uint64_t GfxAddress;
@@ -270,21 +286,21 @@ namespace IGC
             SetSpace(Space space)
         {
             GfxAddress s = static_cast<GfxAddress>(space);
-            assert(s == (s & c_space_mask));
+            IGC_ASSERT(s == (s & c_space_mask));
             m_addr = (m_addr & ~(c_space_mask << c_space_shift)) | ((s & c_space_mask) << c_space_shift);
         }
 
         void
             SetIndex(uint32_t index)
         {
-            assert(index == (index & c_index_mask));
+            IGC_ASSERT(index == (index & c_index_mask));
             m_addr = (m_addr & ~(c_index_mask << c_index_shift)) | ((index & c_index_mask) << c_index_shift);
         }
 
         void
             SetOffset(uint64_t offset)
         {
-            assert(offset == (offset & c_offset_mask));
+            IGC_ASSERT(offset == (offset & c_offset_mask));
             m_addr = (m_addr & ~(c_offset_mask << c_offset_shift)) | ((offset & c_offset_mask) << c_offset_shift);
         }
 
@@ -456,6 +472,7 @@ namespace IGC
         std::map<std::string, DbgDecoder::VarInfo, comparer> VirToPhyMap;
 
         bool getVarInfo(std::string prefix, unsigned int vreg, DbgDecoder::VarInfo& var);
+        bool hasOrIsStackCall() const;
         std::vector<DbgDecoder::SubroutineInfo>* getSubroutines() const;
         DbgDecoder::DbgInfoFormat* getCompileUnit() const;
 
@@ -497,6 +514,17 @@ namespace IGC
 
         DwarfDebug* GetDwarfDebug() { return dd; }
 
+        enum class ObjectType
+        {
+            UNKNOWN = 0,
+            KERNEL = 1,
+            STACKCALL_FUNC = 2,
+            SUBROUTINE = 3
+        };
+
+        ObjectType GetType() const { return m_objectType; }
+        void SetType(ObjectType t) { m_objectType = t; }
+
     private:
         /// @brief Default Constructor.
         ///        Defined as private to prevent creation of default constructor.
@@ -519,6 +547,9 @@ namespace IGC
         // Triple to use for debug info
         //std::string m_triple = "vISA_64";
         const llvm::Module* m_pModule;
+        // m_pEntryFunction points to llvm::Function that resulted in this VISAModule instance.
+        // There is a 1:1 mapping between the two.
+        // Its value is setup in DebugInfo pass, prior to it this is undefined.
         const llvm::Function* m_pEntryFunc;
         InstList m_instList;
         std::map<const llvm::Function*, unsigned int> FuncIDMap;
@@ -531,6 +562,8 @@ namespace IGC
         bool isCloned;
 
         InstInfoMap m_instInfoMap;
+
+        ObjectType m_objectType = ObjectType::UNKNOWN;
 
     public:
         /// Constants represents VISA register encoding in DWARF

@@ -27,11 +27,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/WIFuncs/WIFuncResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/WIFuncs/WIFuncsAnalysis.hpp"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvmWrapper/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -91,12 +91,6 @@ bool WIFuncResolution::runOnFunction(Function& F)
     }
 
     return m_changed;
-}
-
-// Debug line info helper function
-static void updateDebugLoc(Instruction* pOrigin, Instruction* pNew) {
-    assert(pOrigin && pNew && "Expect valid instructions");
-    pNew->setDebugLoc(pOrigin->getDebugLoc());
 }
 
 void WIFuncResolution::visitCallInst(CallInst& CI)

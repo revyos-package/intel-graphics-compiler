@@ -48,7 +48,6 @@ class KernelViewImpl {
 private:
     KernelViewImpl(const KernelViewImpl& k)
         : m_model(*iga::Model::LookupModel(k.m_model.platform)) { }
-    KernelViewImpl& operator =(const KernelViewImpl &k) { return *this; }
 public:
     const iga::Model                       &m_model;
     iga::Kernel                            *m_kernel = nullptr;
@@ -263,6 +262,7 @@ size_t kv_get_inst_syntax(
     int32_t pc,
     char *sbuf,
     size_t sbuf_cap,
+    uint32_t fmt_opts,
     const char *(*labeler)(int32_t, void *),
     void *labeler_env)
 {
@@ -282,6 +282,7 @@ size_t kv_get_inst_syntax(
 
     std::stringstream ss;
     FormatOpts fopts(kvImpl->m_model.platform, labeler, labeler_env);
+    fopts.addApiOpts(fmt_opts);
     fopts.setSWSBEncodingMode(kvImpl->m_model.getSWSBEncodeMode());
     FormatInstruction(
         kvImpl->m_errHandler,
@@ -344,7 +345,8 @@ int32_t kv_get_opgroup(const kv_t *kv, int32_t pc)
 
 
 uint32_t kv_get_send_descs(
-    const kv_t *kv, int32_t pc, uint32_t *ex_desc, uint32_t *desc)
+    const kv_t *kv, int32_t pc,
+    uint32_t *ex_desc, uint32_t *desc)
 {
     if (!kv || !ex_desc || !desc)
         return 0;
@@ -355,13 +357,13 @@ uint32_t kv_get_send_descs(
     }
 
     uint32_t n = 0;
-    if (inst->getExtMsgDescriptor().type == SendDescArg::IMM) {
+    if (inst->getExtMsgDescriptor().isImm()) {
         n++;
         *ex_desc = inst->getExtMsgDescriptor().imm;
     } else {
         *ex_desc = KV_INVALID_SEND_DESC;
     }
-    if (inst->getMsgDescriptor().type == SendDescArg::IMM) {
+    if (inst->getMsgDescriptor().isImm()) {
         n++;
         *desc = inst->getMsgDescriptor().imm;
     } else {
@@ -371,7 +373,8 @@ uint32_t kv_get_send_descs(
 }
 
 void kv_get_send_indirect_descs(
-    const kv_t *kv, int32_t pc, uint8_t *ex_desc_reg, uint8_t *ex_desc_subreg,
+    const kv_t *kv, int32_t pc,
+    uint8_t *ex_desc_reg, uint8_t *ex_desc_subreg,
     uint8_t *desc_reg, uint8_t *desc_subreg)
 {
     if (!kv || !ex_desc_reg || !ex_desc_subreg || !desc_reg || !desc_subreg)
@@ -383,17 +386,17 @@ void kv_get_send_indirect_descs(
         return;
     }
 
-    if (inst->getExtMsgDescriptor().type == SendDescArg::REG32A) {
-        *ex_desc_reg = inst->getExtMsgDescriptor().reg.regNum;
-        *ex_desc_subreg = inst->getExtMsgDescriptor().reg.subRegNum;
+    if (inst->getExtMsgDescriptor().isReg()) {
+        *ex_desc_reg = (uint8_t)inst->getExtMsgDescriptor().reg.regNum;
+        *ex_desc_subreg = (uint8_t)inst->getExtMsgDescriptor().reg.subRegNum;
     }
     else {
         *ex_desc_reg = *ex_desc_subreg = KV_INVALID_REG;
     }
 
-    if (inst->getMsgDescriptor().type == SendDescArg::REG32A) {
-        *desc_reg = inst->getMsgDescriptor().reg.regNum;
-        *desc_subreg = inst->getMsgDescriptor().reg.subRegNum;
+    if (inst->getMsgDescriptor().isReg()) {
+        *desc_reg = (uint8_t)inst->getMsgDescriptor().reg.regNum;
+        *desc_subreg = (uint8_t)inst->getMsgDescriptor().reg.subRegNum;
     }
     else {
         *desc_reg = *desc_subreg = KV_INVALID_REG;
@@ -428,12 +431,12 @@ kv_status_t kv_get_message_type(
     auto desc = inst->getMsgDescriptor();
 
     // NOTE: we could probably get the message just from desc
-    if (desc.type != SendDescArg::IMM)
+    if (desc.isReg())
         return kv_status_t::KV_DESCRIPTOR_INDIRECT;
 
     Platform p = ((KernelViewImpl *)kv)->m_model.platform;
     SFMessageType msgType =
-        getMessageType(p, inst->getOpSpec(), exDesc.imm, desc.imm);
+        getMessageType(p, inst->getSendFc(), desc.imm);
     *message_type_enum = static_cast<int32_t>(msgType);
 
     if (msgType == SFMessageType::INVALID)
@@ -455,14 +458,14 @@ kv_status_t kv_get_message_sfid(const kv_t *kv, int32_t pc, int32_t *sfid_enum)
         return kv_status_t::KV_NON_SEND_INSTRUCTION;
     }
 
-    Platform p = ((KernelViewImpl*)kv)->m_model.platform;
-    auto exDesc = inst->getExtMsgDescriptor();
-    bool isTrue = false;
+    const auto exDesc = inst->getExtMsgDescriptor();
 
-    if (exDesc.type != SendDescArg::IMM && isTrue)
+    Platform p = ((KernelViewImpl*)kv)->m_model.platform;
+    // <TGL: SFID is ExDesc[3:0]; if it's in a0, we're sunk
+    if (exDesc.isReg() && p < Platform::GEN12P1)
         return kv_status_t::KV_DESCRIPTOR_INDIRECT;
 
-    SFID sfid = getSFID(p, inst->getOpSpec(), exDesc.imm, 0);
+    SFID sfid = inst->getSendFc();
     *sfid_enum = static_cast<int32_t>(sfid);
 
     if (sfid == SFID::INVALID)
@@ -483,25 +486,18 @@ uint32_t kv_get_message_len(
     else if (!inst->getOpSpec().isSendOrSendsFamily())
         return 0;
 
-    auto exDesc = inst->getExtMsgDescriptor();
-    auto desc = inst->getMsgDescriptor();
-
+    // set the values and count how many are valid
     uint32_t numSet = 0;
-    if (desc.type == SendDescArg::IMM) {
-        *rLen = (desc.imm >> 20) & 0x1F; // Desc[24:20]
-        *mLen = (desc.imm >> 25) & 0x1F; // Desc[29:25]
-        numSet += 2;
-    } else {
-        *rLen = KV_INVALID_LEN;
-        *mLen = KV_INVALID_LEN;
-    }
-
-    if (exDesc.type == SendDescArg::IMM) {
-        *emLen = (exDesc.imm >> 6) & 0x3F; // ExDesc[10:6]
+    //
+    auto setOne = [&numSet](int n) {
+        if (n < 0)
+            return KV_INVALID_LEN;
         numSet++;
-    } else {
-        *emLen = KV_INVALID_LEN;
-    }
+        return (uint32_t)n;
+    };
+    *rLen = setOne(inst->getDstLength());
+    *mLen = setOne(inst->getSrc0Length());
+    *emLen = setOne(inst->getSrc1Length());
 
     return numSet;
 }
@@ -519,8 +515,8 @@ uint32_t kv_get_execution_size(const kv_t *kv, int32_t pc)
     return static_cast<uint32_t>(inst->getExecSize());
 }
 
-bool kv_get_swsb_info(const kv_t *kv, int32_t pc,
-    iga::SWSB_ENCODE_MODE encdoe_mode, iga::SWSB& swsb)
+bool kv_get_swsb_info(
+    const kv_t *kv, int32_t pc, iga::SWSB_ENCODE_MODE, iga::SWSB& swsb)
 {
     if (!kv) {
         return false;
@@ -556,7 +552,34 @@ uint32_t kv_get_opcode(const kv_t *kv, int32_t pc)
         return static_cast<uint32_t>(Op::INVALID);
     }
     return static_cast<uint32_t>(inst->getOpSpec().op);
-    //    return static_cast<uint32_t>(inst->getOpSpec().code);
+}
+
+kv_status_t kv_get_subfunction(const kv_t *kv, int32_t pc, uint32_t* subfunc)
+{
+    *subfunc = static_cast<uint32_t>(InvalidFC::INVALID);
+
+    if (!kv) {
+        return KV_INVALID_ARGUMENT;
+    }
+    const Instruction *inst = getInstruction(kv, pc);
+    if (!inst) {
+        return KV_INVALID_PC;
+    }
+
+    // for send, get_message_sfid to support decoding SFID from exDesc
+    if (inst->getOpSpec().isSendOrSendsFamily()) {
+        int32_t sfid = -1;
+        kv_status_t st = kv_get_message_sfid(kv, pc, &sfid);
+        *subfunc = static_cast<uint32_t>(sfid);
+        return st;
+    }
+
+    *subfunc = inst->getSubfunction().bits;
+
+    if (!inst->getSubfunction().isValid())
+        return KV_NO_SUBFUNCTION;
+
+    return KV_SUCCESS;
 }
 
 int32_t kv_get_has_destination(const kv_t *kv, int32_t pc)
@@ -586,7 +609,8 @@ int32_t kv_get_destination_register(const kv_t *kv, int32_t pc)
         return -1;
     }
     const Operand &dst = inst->getDestination();
-    if (dst.getKind() == Operand::Kind::DIRECT) {
+    if (dst.getKind() == Operand::Kind::DIRECT ||
+        dst.getKind() == Operand::Kind::MACRO) {
         return dst.getDirRegRef().regNum;
     }
 
@@ -668,7 +692,8 @@ int32_t kv_get_source_register(const kv_t *kv, int32_t pc, uint32_t sourceNumber
         return -1;
     }
     const auto &src = inst->getSource((size_t)sourceNumber);
-    if (src.getKind() == Operand::Kind::DIRECT) {
+    if (src.getKind() == Operand::Kind::DIRECT ||
+        src.getKind() == Operand::Kind::MACRO) {
         return (int32_t)src.getDirRegRef().regNum;
     }
 
@@ -728,7 +753,7 @@ uint32_t kv_get_source_register_type(const kv_t *kv, int32_t pc, uint32_t source
     }
     const auto &src = inst->getSource((size_t)sourceNumber);
     if (src.getKind() == Operand::Kind::INVALID) {
-        return -1;
+        return (uint32_t)-1;
     }
     return static_cast<uint32_t>(src.getDirRegName());
 }
@@ -825,15 +850,14 @@ int32_t kv_get_source_region(const kv_t *kv, int32_t pc, uint32_t src_op, uint32
         return -1;
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if (!inst ||
-        !(inst->getOpSpec().getSourceCount() > src_op)) {
+    if (!inst || inst->getSourceCount() <= src_op) {
         *vt = SrcRgnVt;
         *wi = SrcRgnWi;
         *hz = SrcRgnHz;
         return -1;
     }
     const Operand &src = inst->getSource(src_op);
-    if(!(src.getKind() == Operand::Kind::DIRECT || src.getKind() == Operand::Kind::INDIRECT) ||
+    if (!(src.getKind() == Operand::Kind::DIRECT || src.getKind() == Operand::Kind::INDIRECT) ||
         !(src.getDirRegName() == RegName::GRF_R || src.getDirRegName() == RegName::ARF_SR ||
             src.getDirRegName() == RegName::ARF_ACC))
     {
@@ -851,20 +875,126 @@ int32_t kv_get_source_region(const kv_t *kv, int32_t pc, uint32_t src_op, uint32
     return 0;
 }
 
-int32_t kv_get_source_immediate(const kv_t *kv, int32_t pc, uint32_t src_op, uint64_t *imm)
+int32_t kv_get_source_immediate(
+    const kv_t *kv, int32_t pc, uint32_t src_op, uint64_t *imm)
 {
-    if(!kv) {
+    if (!kv) {
         return -1;
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if(!inst || src_op >= inst->getSourceCount()) {
+    if (!inst || src_op >= inst->getSourceCount()) {
         return -1;
     }
     const auto &src = inst->getSource((size_t)src_op);
-    if(src.getKind() != Operand::Kind::IMMEDIATE) {
+    if (src.getKind() != Operand::Kind::IMMEDIATE) {
         return -1;
     }
     *imm = src.getImmediateValue().u64;
+    return 0;
+}
+
+int32_t kv_get_source_indirect_imm_off(
+    const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *immoff) {
+    if (!kv) {
+        return -1;
+    }
+    const Instruction *inst = getInstruction(kv, pc);
+    if (!inst || src_op >= inst->getSourceCount()) {
+        return -1;
+    }
+    const auto &src = inst->getSource((size_t)src_op);
+    if (src.getKind() != Operand::Kind::INDIRECT) {
+        return -1;
+    }
+    *immoff = src.getIndImmAddr();
+    return 0;
+}
+
+int32_t kv_get_destination_indirect_imm_off(
+    const kv_t *kv, int32_t pc, int16_t *immoff) {
+    if (!kv) {
+        return -1;
+    }
+    const Instruction *inst = getInstruction(kv, pc);
+    if (!inst)
+        return -1;
+
+    if (!inst->getOpSpec().supportsDestination()) {
+        return -1;
+    }
+    const Operand &dst = inst->getDestination();
+    if (dst.getKind() != Operand::Kind::INDIRECT) {
+        return -1;
+    }
+
+    *immoff = dst.getIndImmAddr();
+    return 0;
+}
+
+static int16_t getMathMacroNum(MathMacroExt mme)
+{
+    switch (mme) {
+        case MathMacroExt::MME0:
+            return 0;
+        case MathMacroExt::MME1:
+            return 1;
+        case MathMacroExt::MME2:
+            return 2;
+        case MathMacroExt::MME3:
+            return 3;
+        case MathMacroExt::MME4:
+            return 4;
+        case MathMacroExt::MME5:
+            return 5;
+        case MathMacroExt::MME6:
+            return 6;
+        case MathMacroExt::MME7:
+            return 7;
+        case MathMacroExt::NOMME: // follow the encoding value, set NOMME to 8
+            return 8;
+        case MathMacroExt::INVALID:
+            break;
+    }
+    return -1;
+}
+
+int32_t kv_get_source_mme_number(
+    const kv_t *kv, int32_t pc, uint32_t src_op, int16_t *mme)
+{
+    *mme = -1;
+    if (!kv) {
+        return -1;
+    }
+    const Instruction *inst = getInstruction(kv, pc);
+    if (!inst || src_op >= inst->getSourceCount()) {
+        return -1;
+    }
+    const auto &src = inst->getSource((size_t)src_op);
+
+    *mme = getMathMacroNum(src.getMathMacroExt());
+    if (*mme == -1)
+        return -1;
+    return 0;
+}
+
+int32_t kv_get_destination_mme_number(
+    const kv_t *kv, int32_t pc, int16_t *mme)
+{
+    *mme = -1;
+    if (!kv)
+        return -1;
+
+    const Instruction *inst = getInstruction(kv, pc);
+    if (!inst)
+        return -1;
+
+    if (!inst->getOpSpec().supportsDestination()) {
+        return -1;
+    }
+    const Operand &dst = inst->getDestination();
+    *mme = getMathMacroNum(dst.getMathMacroExt());
+    if (*mme == -1)
+        return -1;
     return 0;
 }
 
@@ -874,11 +1004,11 @@ int32_t kv_get_source_immediate(const kv_t *kv, int32_t pc, uint32_t src_op, uin
 */
 uint32_t kv_get_flag_modifier(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return static_cast<uint32_t>(FlagModifier::NONE);
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if(!inst || inst->getOp() == Op::ILLEGAL) {
+    if (!inst || inst->getOp() == Op::ILLEGAL) {
         return static_cast<uint32_t>(FlagModifier::NONE);
     }
     return (uint32_t)inst->getFlagModifier();
@@ -890,19 +1020,19 @@ uint32_t kv_get_flag_modifier(const kv_t *kv, int32_t pc)
 */
 uint32_t kv_get_source_modifier(const kv_t *kv, int32_t pc, uint32_t src_op)
 {
-    if(!kv) {
+    if (!kv) {
         return static_cast<uint32_t>(SrcModifier::NONE);
     }
     const Instruction *inst = getInstruction(kv, pc);
 
-    if(!inst || inst->getOp() == Op::ILLEGAL) {
+    if (!inst || inst->getOp() == Op::ILLEGAL) {
         return static_cast<uint32_t>(SrcModifier::NONE);
     }
-    if(!inst || src_op >= inst->getSourceCount()) {
+    if (!inst || src_op >= inst->getSourceCount()) {
         return static_cast<uint32_t>(SrcModifier::NONE);
     }
     const auto &src = inst->getSource((size_t)src_op);
-    if(src.getKind() == Operand::Kind::IMMEDIATE){
+    if (src.getKind() == Operand::Kind::IMMEDIATE){
         return static_cast<uint32_t>(SrcModifier::NONE);
     }
 
@@ -915,12 +1045,12 @@ uint32_t kv_get_source_modifier(const kv_t *kv, int32_t pc, uint32_t src_op)
 */
 uint32_t kv_get_destination_modifier(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return static_cast<uint32_t>(DstModifier::NONE);
     }
     const Instruction *inst = getInstruction(kv, pc);
 
-    if(!inst || inst->getOp() == Op::ILLEGAL) {
+    if (!inst || inst->getOp() == Op::ILLEGAL) {
         return static_cast<uint32_t>(DstModifier::NONE);
     }
 
@@ -934,12 +1064,12 @@ uint32_t kv_get_destination_modifier(const kv_t *kv, int32_t pc)
 */
 int32_t kv_get_flag_register(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return -1;
     }
     const Instruction *inst = getInstruction(kv, pc);
 
-    if(!inst || inst->getOp() == Op::ILLEGAL) {
+    if (!inst || inst->getOp() == Op::ILLEGAL) {
         return -1;
     }
 
@@ -951,11 +1081,11 @@ int32_t kv_get_flag_register(const kv_t *kv, int32_t pc)
 */
 int32_t kv_get_flag_sub_register(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return -1;
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if(!inst || inst->getOp() == Op::ILLEGAL)
+    if (!inst || inst->getOp() == Op::ILLEGAL)
     {
         return -1;
     }
@@ -968,11 +1098,11 @@ int32_t kv_get_flag_sub_register(const kv_t *kv, int32_t pc)
 */
 uint32_t kv_get_predicate(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return static_cast<uint32_t>(PredCtrl::NONE);
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if(!inst || inst->getOp() == Op::ILLEGAL)
+    if (!inst || inst->getOp() == Op::ILLEGAL)
     {
         return static_cast<uint32_t>(PredCtrl::NONE);
     }
@@ -984,11 +1114,11 @@ uint32_t kv_get_predicate(const kv_t *kv, int32_t pc)
 */
 uint32_t kv_get_is_inverse_predicate(const kv_t *kv, int32_t pc)
 {
-    if(!kv) {
+    if (!kv) {
         return 0;
     }
     const Instruction *inst = getInstruction(kv, pc);
-    if(!inst || inst->getOp() == Op::ILLEGAL)
+    if (!inst || inst->getOp() == Op::ILLEGAL)
     {
         return 0;
     }

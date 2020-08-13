@@ -50,7 +50,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/WIAnalysis.hpp"
 #include "Compiler/CISACodeGen/PatternMatchPass.hpp"
 #include "Compiler/MetaDataUtilsWrapper.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
 #include <llvm/IR/Function.h>
@@ -67,8 +66,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/DenseSet.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include <map>
+#include "Probe/Assertion.h"
 
 namespace IGC {
 
@@ -267,6 +266,8 @@ namespace IGC {
         /// If there is no node for Val, create a new one.
         void addReg(llvm::Value* Val, e_alignment Align);
 
+        int getGRFSize() const { return CTX->platform.getGRFSize(); }
+
         /// union-by-rank:
         ///   Join the congruence classes of two registers by attaching
         ///   a shorter tree to a taller tree. If they have the same height,
@@ -302,7 +303,7 @@ namespace IGC {
             }
         }
         void InsEltMapUnionValue(llvm::Value* SrcVal, llvm::Value* DefVal) {
-            assert(InsEltMap.find(SrcVal) != InsEltMap.end());
+            IGC_ASSERT(InsEltMap.find(SrcVal) != InsEltMap.end());
             InsEltMap[DefVal] = InsEltMap[SrcVal];
         }
 

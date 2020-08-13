@@ -34,11 +34,243 @@ VarSplitPass::VarSplitPass(G4_Kernel& k) : kernel(k)
 {
 }
 
+void VarSplitPass::buildPreVerify()
+{
+    for (auto bb : kernel.fg.getBBList())
+    {
+        for (auto inst :*bb)
+        {
+            if (inst->getDst())
+            {
+                splitVerify[inst].dst = inst->getDst();
+                splitVerify[inst].dstLb = inst->getDst()->getLeftBound();
+                splitVerify[inst].dstRb = inst->getDst()->getRightBound();
+            }
+            for (unsigned int i = 0; i != G4_MAX_SRCS; i++)
+            {
+                if (inst->getSrc(i) && inst->getSrc(i)->isSrcRegRegion())
+                {
+                    splitVerify[inst].src[i] = inst->getSrc(i);
+                    splitVerify[inst].srcLb[i] = inst->getSrc(i)->getLeftBound();
+                    splitVerify[inst].srcRb[i] = inst->getSrc(i)->getRightBound();
+                }
+            }
+        }
+    }
+}
+
+void VarSplitPass::verify()
+{
+    // verify
+    // parent, <child, <lb, rb>>
+    std::unordered_map<G4_Declare*, std::unordered_map<G4_Declare*, std::pair<unsigned int, unsigned int>>> parentSplit;
+    std::unordered_set<G4_Declare*> splitDcls;
+    unsigned int numSplitIntrinsics = 0;
+
+    auto getChildData = [&](G4_Declare* child)
+    {
+        std::pair<unsigned int, unsigned int> childLbRb = { 0,0 };
+        bool found = false;
+        for (auto& item : parentSplit)
+        {
+            for (auto& itemCh : (item).second)
+            {
+                if (itemCh.first == child)
+                {
+                    MUST_BE_TRUE(!found, "Duplicate lb/rb entry found");
+                    childLbRb = itemCh.second;
+                    found = true;
+                }
+            }
+        }
+
+        MUST_BE_TRUE(found, "Didnt find child dcl");
+        return childLbRb;
+    };
+
+    // create parent->child mapping
+    for (auto bb : kernel.fg.getBBList())
+    {
+        for (auto inst :*bb)
+        {
+            if (inst->isSplitIntrinsic())
+            {
+                // ensure this is split mov instruction
+                MUST_BE_TRUE(inst->isSplitIntrinsic(), "Didnt expect new non-split intrinsic instruction");
+
+                // verify that split instruction's dst, src(0) is correct
+                splitDcls.insert(inst->getDst()->getTopDcl());
+
+                MUST_BE_TRUE(!inst->getSrc(0)->getTopDcl()->getAddressed(), "Shouldnt split indirectly addressed variable");
+
+                auto origSrc0 = inst->getSrc(0)->asSrcRegRegion();
+                auto origLb = origSrc0->getLeftBound();
+                auto origRb = origSrc0->getRightBound();
+                auto itemToInsert = std::make_pair(inst->getDst()->getTopDcl(), std::make_pair((unsigned int)origLb, (unsigned int)origRb));
+                parentSplit[origSrc0->getTopDcl()].insert(itemToInsert);
+
+                numSplitIntrinsics++;
+            }
+        }
+    }
+
+    // now check whether usage of child is correct
+    std::unordered_map<G4_Declare*, unsigned int> parentDefCount;
+    for (auto bb : kernel.fg.getBBList())
+    {
+        for (auto inst :*bb)
+        {
+            auto dst = inst->getDst();
+
+            if (dst && splitDcls.find(dst->getTopDcl()) != splitDcls.end())
+            {
+                MUST_BE_TRUE(inst->isSplitIntrinsic(), "Found split dcl as dst in non-split intrinsic instruction");
+            }
+
+            if (dst && parentSplit.find(dst->getTopDcl()) != parentSplit.find(dst->getTopDcl()))
+            {
+                auto oldDefCount = parentDefCount[dst->getTopDcl()];
+                parentDefCount[dst->getTopDcl()] = oldDefCount + 1;
+                MUST_BE_TRUE(oldDefCount == 0, "Found second def of parent of split variable");
+            }
+
+            for (unsigned int i = 0; i != G4_MAX_SRCS; i++)
+            {
+                auto src = inst->getSrc(i);
+                if (!src || !src->asSrcRegRegion())
+                    continue;
+
+                if (parentSplit.find(src->asSrcRegRegion()->getTopDcl()) != parentSplit.end())
+                {
+                    MUST_BE_TRUE(inst->isSplitIntrinsic(), "Found src opnd using pre-split parent");
+                }
+
+                if (splitDcls.find(src->asSrcRegRegion()->getTopDcl()) == splitDcls.end())
+                    continue; // not a split dcl
+
+                // src is a split dcl, verify its usage is consistent with pre-transformation data structure
+                auto lb = src->getLeftBound();
+                auto rb = src->getRightBound();
+
+                auto childData = getChildData(src->asSrcRegRegion()->getTopDcl());
+                auto childLb = childData.first;
+                //auto childRb = childData.second;
+
+                auto totalLb = childLb + lb;
+                auto totalRb = childLb + rb;
+
+                auto origInstData = splitVerify[inst];
+                auto origLb = origInstData.srcLb[i];
+                auto origRb = origInstData.srcRb[i];
+
+                MUST_BE_TRUE(origLb == totalLb, "Mismatch in lb");
+                MUST_BE_TRUE(origRb == totalRb, "Mismatch in rb");
+            }
+        }
+    }
+
+    printf("Split verification passed successfully - %d split!\n", numSplitIntrinsics);
+}
+
+void VarSplitPass::verifyOverlap()
+{
+    // For defs, map GRF written with G4_Declare of dst rgn.
+    // Verify that src reg# used in intrinsic_split comes from
+    // parent dcl of the split dst.
+    std::unordered_map<unsigned int, G4_Declare*> regToDcl;
+    unsigned int numSplitLeft = 0;
+    for (auto bb : kernel.fg.getBBList())
+    {
+        for (auto inst :*bb)
+        {
+            if (inst->isSplitIntrinsic())
+            {
+                auto dst = inst->getDst();
+                auto src = inst->getSrc(0);
+                auto dstTopDcl = dst->getTopDcl();
+                auto srcTopDcl = src->getTopDcl();
+                MUST_BE_TRUE(dstTopDcl->getRegVar()->getPhyReg() &&
+                    dstTopDcl->getRegVar()->getPhyReg()->isGreg(), "Unexpected assignment condition on split dst");
+                MUST_BE_TRUE(srcTopDcl->getRegVar()->getPhyReg() &&
+                    srcTopDcl->getRegVar()->getPhyReg()->isGreg(), "Unexpected assignment condition on split src");
+
+                auto dstLS = dst->getLinearizedStart();
+                auto dstLE = dst->getLinearizedEnd();
+
+                auto srcLS = src->getLinearizedStart();
+                auto srcLE = src->getLinearizedEnd();
+
+                if (dstLS == srcLS &&
+                    dstLE == srcLE)
+                {
+                    // assignment is ok and will be coalesced away
+                    continue;
+                }
+
+                numSplitLeft++;
+
+                auto srcDclRegNum = srcLS / G4_GRF_REG_NBYTES;
+                auto srcDclNumRows = ((srcLE + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES) - srcDclRegNum;
+
+                // check whether src GRF# is written by parent of dst split dcl
+                for (unsigned int i = srcDclRegNum; i != (srcDclRegNum + srcDclNumRows); i++)
+                {
+                    auto dcl = regToDcl[i];
+                    if (dcl != getParentDcl(dstTopDcl))
+                    {
+                        if (!dstTopDcl->getRegVar()->isRegVarTransient() &&
+                            !dstTopDcl->getRegVar()->isRegVarCoalesced())
+                        {
+                            MUST_BE_TRUE(false, "split src uses GRF value from non-parent");
+                        }
+                        else if(dstTopDcl->getRegVar()->isRegVarTransient())
+                        {
+                            // dst is spilled
+                            auto dstOrigDcl = dstTopDcl->getRegVar()->getNonTransientBaseRegVar()->getDeclare()->getRootDeclare();
+                            if (dcl != getParentDcl(dstOrigDcl))
+                            {
+                                MUST_BE_TRUE(false, "split src uses GRF value from non-parent. dst spilled.");
+                            }
+                        }
+                        else
+                        {
+                            // do nothing for coalesced ranges
+                        }
+                    }
+                }
+            }
+            else
+            {
+                auto dstRgn = inst->getDst();
+                if (dstRgn && dstRgn->getTopDcl() &&
+                    dstRgn->getTopDcl()->getRegVar()->getPhyReg() &&
+                    dstRgn->getTopDcl()->getRegVar()->getPhyReg()->isGreg())
+                {
+                    auto grf = dstRgn->getTopDcl()->getRegVar()->getPhyReg()->asGreg()->getRegNum();
+                    auto numRows = (dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES;
+                    for (unsigned int i = grf; i != (grf + numRows); i++)
+                    {
+                        regToDcl[i] = dstRgn->getTopDcl();
+                    }
+                }
+            }
+        }
+    }
+
+    printf("Split assignment overlap passed successfully - %d splits left\n", numSplitLeft);
+}
+
 void VarSplitPass::run()
 {
+    if (kernel.getOption(vISA_VerifyExplicitSplit))
+        buildPreVerify();
+
     findSplitCandidates();
 
     split();
+
+    if (kernel.getOption(vISA_VerifyExplicitSplit))
+        verify();
 }
 
 void VarSplitPass::findSplitCandidates()
@@ -53,16 +285,23 @@ void VarSplitPass::findSplitCandidates()
     // Find all dcls that can be split in to smaller chunks
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst : bb->getInstList())
+        for (auto inst :*bb)
         {
-            if (canSplit(inst))
+            if (inst->getDst() && inst->getDst()->getTopDcl())
             {
                 auto dstDcl = inst->getDst()->getTopDcl();
-                if (dstDcl && dstDcl->getRegFile() == G4_RegFileKind::G4_GRF)
+
+                if (dstDcl &&
+                    !dstDcl->getAddressed() &&
+                    dstDcl->getRegFile() == G4_RegFileKind::G4_GRF)
                 {
                     auto& prop = splitVars[dstDcl];
                     prop.numDefs++;
                     prop.def = std::make_pair(inst->getDst(), bb);
+                    if (canSplit(inst))
+                    {
+                        prop.candidateDef = true;
+                    }
                 }
             }
 
@@ -90,7 +329,8 @@ void VarSplitPass::findSplitCandidates()
     for (auto itemIt = splitVars.begin(); itemIt != splitVars.end(); itemIt++)
     {
         auto& item = (*itemIt);
-        if (item.second.numDefs != 1)
+        if (item.second.numDefs != 1 || !item.second.candidateDef ||
+            !item.second.isDefUsesInSameBB())
         {
             item.second.legitCandidate = false;
             continue;
@@ -102,6 +342,12 @@ void VarSplitPass::findSplitCandidates()
             auto src = srcpair.first;
             auto numRows = (src->getRightBound() - src->getLeftBound() + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES;
             auto regOff = src->getRegOff();
+
+            if (item.first->getByteSize() < src->getRightBound())
+            {
+                item.second.legitCandidate = false;
+                break;
+            }
 
             if (numRows == 1)
             {
@@ -128,6 +374,12 @@ void VarSplitPass::findSplitCandidates()
                     break;
                 }
             }
+            else if (numRows > 2)
+            {
+                // use as send src
+                item.second.legitCandidate = false;
+                break;
+            }
         }
     }
 
@@ -148,7 +400,7 @@ void VarSplitPass::findSplitCandidates()
     std::unordered_map<G4_INST*, unsigned int> instId;
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst : bb->getInstList())
+        for (auto inst :*bb)
         {
             instId[inst] = instId.size();
         }
@@ -186,10 +438,10 @@ void VarSplitPass::findSplitCandidates()
                 }
             }
 
-            // split if def-first use distance > 8
-            if (!split &&
-                (instId[item.second.srcs.front().first->getInst()] - instId[item.second.def.first->getInst()]) > 8)
-                split = true;
+            // dont split if def-last first use distance <= 8
+            if (split &&
+                (instId[item.second.srcs.back().first->getInst()] - instId[item.second.def.first->getInst()]) <= 8)
+                split = false;
 
             if (!split)
             {
@@ -219,8 +471,14 @@ void VarSplitPass::split()
     unsigned int numIntrinsicsInserted = 0;
 #endif
     // Do actual splitting
-    for (auto& item : splitVars)
+    for(auto curDcl : kernel.Declares)
     {
+        auto isCandidate = splitVars.find(curDcl);
+        if (isCandidate == splitVars.end())
+            continue;
+
+        auto item = *isCandidate;
+
         MUST_BE_TRUE(item.second.legitCandidate, "Cannot split non-candidate");
 
         // Insert intrinsics
@@ -264,8 +522,10 @@ void VarSplitPass::split()
             unsigned int esize = (getGRFSize() / G4_Type_Table[Type_UD].byteSize) * numRows;
             auto intrin = kernel.fg.builder->createIntrinsicInst(nullptr, Intrinsic::Split, esize, dstRgn, srcRgn, nullptr, nullptr,
                 item.second.def.first->getInst()->getOption() | G4_InstOption::InstOpt_WriteEnable, item.second.def.first->getInst()->getLineNo());
-            item.second.def.second->insert(it, intrin);
+            intrin->setCISAOff(item.second.def.first->getInst()->getCISAOff());
+            item.second.def.second->insertBefore(it, intrin);
             splitDcls.push_back(std::make_tuple(lb, rb, splitDcl));
+            IRchanged = true;
 #ifdef DEBUG_VERBOSE_ON
             numIntrinsicsInserted++;
 #endif
@@ -275,11 +535,12 @@ void VarSplitPass::split()
         {
             for (auto& item : splitDcls)
             {
-                if (std::get<0>(item) == lb &&
-                    std::get<1>(item) == rb)
-                    return std::get<2>(item);
+                if (std::get<0>(item) <= lb &&
+                    std::get<1>(item) >= rb)
+                    return std::tuple(std::get<0>(item),
+                        std::get<1>(item), std::get<2>(item));
             }
-            return (G4_Declare*)nullptr;
+            return std::tuple(0u,0u,(G4_Declare*)nullptr);
         };
 
         auto getOpndNum = [](G4_SrcRegRegion* src)
@@ -302,10 +563,14 @@ void VarSplitPass::split()
             auto lb = srcRgn->getLeftBound();
             auto rb = srcRgn->getRightBound();
 
-            auto dcl = getSplitDcl(lb, rb);
+            auto item = getSplitDcl(lb, rb);
+            auto item_lb = std::get<0>(item);
+            auto dcl = std::get<2>(item);
             MUST_BE_TRUE(dcl, "Didnt find split dcl");
 
-            auto newSrc = kernel.fg.builder->createSrcRegRegion(srcRgn->getModifier(), srcRgn->getRegAccess(), dcl->getRegVar(), 0, srcRgn->getSubRegOff(), srcRgn->getRegion(), srcRgn->getType());
+            unsigned int regNum = (lb - item_lb)/G4_GRF_REG_NBYTES;
+
+            auto newSrc = kernel.fg.builder->createSrcRegRegion(srcRgn->getModifier(), srcRgn->getRegAccess(), dcl->getRegVar(), regNum, srcRgn->getSubRegOff(), srcRgn->getRegion(), srcRgn->getType());
             auto opndNum = getOpndNum(srcRgn);
             auto tup = std::make_tuple(srcRgn->getInst(), srcRgn, opndNum);
             preSplit.insert(std::make_pair(newSrc, tup));
@@ -321,10 +586,18 @@ void VarSplitPass::replaceIntrinsics()
 #ifdef DEBUG_VERBOSE_ON
     unsigned int numSplitMovs = 0;
 #endif
+
+    if (kernel.getOption(vISA_VerifyExplicitSplit))
+    {
+        // Check whether intrinsic assignments overlap with other
+        // rows of original variable
+        verifyOverlap();
+    }
+
     // Replace intrinsic.split with mov
     for (auto bb : kernel.fg.getBBList())
     {
-        for (auto inst : bb->getInstList())
+        for (auto inst :*bb)
         {
             if (inst->isSplitIntrinsic())
             {
@@ -678,6 +951,13 @@ bool VarSplitPass::isParentChildRelation(G4_Declare* parent, G4_Declare* child)
     }
 
     return false;
+}
+bool VarSplitPass::isSplitVarLocal(G4_Declare* dcl)
+{
+    auto it = splitVars.find(dcl);
+    MUST_BE_TRUE(it != splitVars.end(), "Not a split dcl");
+
+    return (*it).second.isDefUsesInSameBB();
 }
 
 };

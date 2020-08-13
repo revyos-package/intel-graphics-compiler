@@ -26,7 +26,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "RegDeps.hpp"
 #include "Traversals.hpp"
 #include "BitSet.hpp"
+
 #include <iterator>
+
 using namespace iga;
 
 /**
@@ -42,7 +44,7 @@ using namespace iga;
  *
  * add (8) r10 r20 r30
  * add (8) r11 r21 r22
- * if(..)
+ * if (..)
  *   // if instruction doesn't count in if calculations, but it takes about 6 cycles to resolve for fall through
  *   // can treat it as continue BB. Only when this BB has one predecessor
  *   add r40 r10 r50 {@2}
@@ -227,18 +229,21 @@ void SWSBAnalyzer::calculateDependence(DepSet &currDep, SWSB &distanceDependency
             if (dep && (dep->getDepType() == DEP_TYPE::WRITE_ALWAYS_INTERFERE ||
                         dep->getDepType() == DEP_TYPE::READ_ALWAYS_INTERFERE))
             {
-                if (dep->getBitSet().empty())
+                // force to sync with dep
+                if (dep->getDepClass() == DEP_CLASS::OUT_OF_ORDER)
                 {
-                    m_errorHandler.reportWarning(currInst.getPC(),
-                        "Dependency in bucket with no bits set.");
+                    setSbidDependency(*dep, currInst, needSyncForShootDownInst, activeSBID);
                 }
-
-                distanceDependency.minDist = 1;
-                // in this case we are not sure which pipelines to check (e.g. indirect)
-                // so set to check all
-                if (getNumOfDistPipe() == 1)
-                    distanceDependency.distType = SWSB::DistType::REG_DIST;
-                bucket->clearDepSet(index);
+                else
+                {
+                    // Set to sync with all in-order-pipes. WRITE/READ_ALWAYS_INTERFERE
+                    // could be used to mark arf dependency, which is required to be all pipes
+                    // instead of dep's pipe only
+                    distanceDependency.minDist = 1;
+                    if (getNumOfDistPipe() == 1)
+                        distanceDependency.distType = SWSB::DistType::REG_DIST;
+                    bucket->clearDepSet(index);
+                }
             }
 
             //See if anything matches for this GRF bucket.
@@ -257,12 +262,14 @@ void SWSBAnalyzer::calculateDependence(DepSet &currDep, SWSB &distanceDependency
                 DEP_PIPE prevDepPipe = dep->getDepPipe();
                 DEP_CLASS prevDepClass = dep->getDepClass();
 
-                bool differentSFIDs = false;
+                // Send with different SFID could write to different pipes
+                bool send_in_diff_pipe = false;
                 if (dep->getInstruction()->getOpSpec().isSendFamily() &&
                     currDep.getInstruction()->getOpSpec().isSendFamily())
                 {
-                    differentSFIDs = (dep->getInstruction()->getOpSpec().op !=
-                        currDep.getInstruction()->getOpSpec().op);
+                    send_in_diff_pipe =
+                        (dep->getInstruction()->getSendFc() !=
+                         currDep.getInstruction()->getSendFc());
                 }
 
                 bool isRAW = currDepType == DEP_TYPE::READ &&
@@ -270,11 +277,11 @@ void SWSBAnalyzer::calculateDependence(DepSet &currDep, SWSB &distanceDependency
                 //WAW: different pipelines W2 kill W1  W2-->live      explict dependence
                 bool isWAW = (currDepType == DEP_TYPE::WRITE &&
                               prevDepType == DEP_TYPE::WRITE &&
-                              (currDepPipe != prevDepPipe || differentSFIDs));
+                     (currDepPipe != prevDepPipe || send_in_diff_pipe));
                 //WAR: different pipelines W kill R    W-->live       explict dependence
                 bool isWAR = currDepType == DEP_TYPE::WRITE &&
                              prevDepType == DEP_TYPE::READ  &&
-                             (currDepPipe != prevDepPipe || differentSFIDs);
+                             (currDepPipe != prevDepPipe || send_in_diff_pipe);
                 bool isWAW_out_of_order
                            = (currDepType == DEP_TYPE::WRITE &&
                               prevDepType == DEP_TYPE::WRITE &&
@@ -330,7 +337,9 @@ void SWSBAnalyzer::calculateDependence(DepSet &currDep, SWSB &distanceDependency
                     // clearing previous dependence
                     if (dep->getBitSet().empty())
                     {
-                        m_errorHandler.reportWarning(currInst.getPC(), "Dependency in bucket with no bits set.");
+                        m_errorHandler.reportWarning(
+                            currInst.getPC(),
+                            "Dependency in bucket with no bits set");
                     }
                     // removing from bucket if there is nothing
                     if (!dep->getBitSet().testAny(bucketID * 32, m_DB->getGRF_BYTES_PER_REG()))
@@ -382,68 +391,91 @@ void SWSBAnalyzer::calculateDependence(DepSet &currDep, SWSB &distanceDependency
                     } // end of if (prevDepClass == DEP_CLASS::IN_ORDER)
                     else if (prevDepClass == DEP_CLASS::OUT_OF_ORDER) // prev is out of order
                     {
-                        /* For out of order we don't know how long it will finish
-                         * so need to test for SBID.
-                         * Instruction can depend on more then one SBID
-                         * send r10
-                         * send r20
-                         * send r30
-                         * ....
-                         * add r10 r20 r30
-                         * between different buckets and srcs/dst dependencies instruction can rely on multiple SBID
-                         */
-                        SBID depSBID = dep->getSBID();
-                        if (depSBID.isFree)
-                        {
-                            m_errorHandler.reportError((int)dep->getInstGlobalID(), "SBID SHOULDN'T BE FREE!");
-                        }
-                        // clears all the buckets
-                        clearDepBuckets(*dep);
-
-                        // In case of shooting down of this instruction, we need to add sync to preserve the swsb id sync,
-                        // so that it's safe to clear the dep
-                        if (currInst.hasPredication() ||
-                            (currInst.getExecSize() != dep->getInstruction()->getExecSize()) ||
-                            (currInst.getChannelOffset() != dep->getInstruction()->getChannelOffset()))
-                            needSyncForShootDownInst = true;
-
-                        // used to set read or write dependency
-                        depSBID.dType = prevDepType;
-
-                        // Adding the swsb id into m_activeSBID that will be process in processActiveSBID
-                        // to set the swsb on instructions.
-                        // m_activeSBID should stores all sbid that this inst has dependency on
-                        bool push_back = true;
-                        // making sure there are no duplicates
-                        for (auto& aSBID : activeSBID)
-                        {
-                            if (aSBID.sbid == depSBID.sbid)
-                            {
-                                //write takes longer then read
-                                //so we only need to check on one.
-                                //so this either sets a write or resets back to read
-                                if (aSBID.dType == DEP_TYPE::READ)
-                                {
-                                    aSBID.dType = depSBID.dType;
-                                }
-                                push_back = false;
-                                break;
-                            }
-                        }
-                        // adding to active SBID
-                        // in Run function we will see how many this instruction relies on
-                        // and generate approriate SWSB and if needed test instruction
-                        // in that level also will add them back to free list
-                        if (push_back)
-                        {
-                            activeSBID.push_back(depSBID);
-                        }
+                        setSbidDependency(*dep, currInst, needSyncForShootDownInst, activeSBID);
                     }
                     // for the instruction in "OTHER" DEP_CLASS, such as sync, we don't need
                     // to consider their dependency that is implied by hardware
                 }
             }
         }
+    }
+}
+
+void SWSBAnalyzer::setSbidDependency(DepSet& dep, const Instruction& currInst,
+    bool& needSyncForShootDownInst, vector<SBID>& activeSBID)
+{
+    /* For out of order we don't know how long it will finish
+    * so need to test for SBID.
+    * Instruction can depend on more then one SBID
+    * send r10
+    * send r20
+    * send r30
+    * ....
+    * add r10 r20 r30
+    * between different buckets and srcs/dst dependencies instruction can rely on multiple SBID
+    */
+    SBID depSBID = dep.getSBID();
+    if (depSBID.isFree)
+    {
+        m_errorHandler.reportError((int)dep.getInstGlobalID(), "SBID SHOULDN'T BE FREE!");
+    }
+    // clears all the buckets
+    clearDepBuckets(dep);
+
+    // In case of shooting down of this instruction, we need to add sync to preserve the swsb id sync,
+    // so that it's safe to clear the dep
+    if (currInst.hasPredication() ||
+        (currInst.getExecSize() != dep.getInstruction()->getExecSize()) ||
+        (currInst.getChannelOffset() != dep.getInstruction()->getChannelOffset()))
+        needSyncForShootDownInst = true;
+
+    // used to set read or write dependency
+    depSBID.dType = dep.getDepType();
+
+    // activeSBID stores all sbid that this inst has dependency on
+    // and it'll be processed in processActiveSBID
+    bool push_back = true;
+    // making sure there are no duplicates
+    for (auto& aSBID : activeSBID)
+    {
+        if (aSBID.sbid == depSBID.sbid)
+        {
+            //write takes longer then read
+            //so we only need to check on one.
+            //so this either sets a write or resets back to read
+            if (aSBID.dType == DEP_TYPE::READ)
+            {
+                aSBID.dType = depSBID.dType;
+            }
+            push_back = false;
+            break;
+        }
+    }
+    // adding to active SBID
+    // in Run function we will see how many this instruction relies on
+    // and generate approriate SWSB and if needed test instruction
+    // in that level also will add them back to free list
+    if (push_back)
+    {
+        activeSBID.push_back(depSBID);
+    }
+}
+
+void SWSBAnalyzer::insertSyncAllRdWr(InstList::iterator insertPoint, Block *bb)
+{
+    SWSB distanceDependency;
+    auto clearRD = m_kernel.createSyncAllRdInstruction(distanceDependency);
+    auto clearWR = m_kernel.createSyncAllWrInstruction(distanceDependency);
+
+    if (insertPoint == bb->getInstList().end())
+    {
+        bb->getInstList().push_back(clearRD);
+        bb->getInstList().push_back(clearWR);
+    }
+    else
+    {
+        bb->insertInstBefore(insertPoint, clearRD);
+        bb->insertInstBefore(insertPoint, clearWR);
     }
 }
 
@@ -463,7 +495,7 @@ Right now mov will have false dependense on the first send.
 void SWSBAnalyzer::clearSBIDDependence(InstList::iterator insertPoint, Instruction *lastInst, Block *bb)
 {
     bool sbidInUse = false;
-    for (uint32_t i = 0; i < MAX_SBID; ++i)
+    for (uint32_t i = 0; i < m_SBIDCount; ++i)
     {
         //there are still dependencies that might be used outside of this basic block
         if (!m_freeSBIDList[i].isFree)
@@ -483,21 +515,7 @@ void SWSBAnalyzer::clearSBIDDependence(InstList::iterator insertPoint, Instructi
     // platform check is mainly for testing purposes
     if (sbidInUse)
     {
-        //bb->
-        SWSB distanceDependency;
-        auto clearRD = m_kernel.createSyncAllRdInstruction(distanceDependency);
-        auto clearWR = m_kernel.createSyncAllWrInstruction(distanceDependency);
-
-        if (insertPoint == bb->getInstList().end())
-        {
-            bb->getInstList().push_back(clearRD);
-            bb->getInstList().push_back(clearWR);
-        }
-        else
-        {
-            bb->insertInstBefore(insertPoint, clearRD);
-            bb->insertInstBefore(insertPoint, clearWR);
-        }
+        insertSyncAllRdWr(insertPoint, bb);
     }
 }
 
@@ -515,26 +533,38 @@ void SWSBAnalyzer::clearBuckets(DepSet* input, DepSet* output) {
     else {
         // add DepSet to m_distanceTracker
         m_distanceTracker.emplace_back(input, output);
-            // check the distance
-            // DepSet::m_depID is the unique id assigned to in-order instructions
-            size_t new_id = input->getInstIDs().inOrder;
 
-            // Remove nodes from the Tracker if the latency is already satified
-            m_distanceTracker.remove_if(
-                [=](const distanceTrackerNode& node) {
-                // get the latency: the latency of a instructions depends on its dis type size
-                size_t max_dis = DISTANCE_FOR_OTHER_INST;
+        auto get_depset_id = [&](DEP_PIPE pipe_type, DepSet& dep_set) {
+            if (getNumOfDistPipe() == 1)
+                return dep_set.getInstIDs().inOrder;
+            return (uint32_t)0;
+        };
 
-                // if the distance >= latency, clear buckets for corresponding input and
-                // output Dependency
-                if ((new_id - node.input->getInstIDs().inOrder) >= (size_t)max_dis) {
+        auto get_latency = [&](DEP_PIPE pipe_type) {
+            return m_LatencyInOrderPipe;
+        };
+
+        DEP_PIPE new_pipe = input->getDepPipe();
+        // max B2B latency of thie pipe
+        size_t max_dis = get_latency(new_pipe);
+        // Remove nodes from the Tracker if the latency is already satified
+        m_distanceTracker.remove_if(
+            [=](const distanceTrackerNode& node) {
+                // bypass nodes those are not belong to the same pipe
+                if (node.input->getDepPipe() != new_pipe)
+                    return false;
+
+                // if the distance >= max_latency, clear buckets for corresponding
+                // input and output Dependency
+                size_t new_id = get_depset_id(new_pipe, *input);
+                if ((new_id - get_depset_id(new_pipe, *node.input)) >= max_dis) {
                     clearDepBuckets(*node.input);
                     clearDepBuckets(*node.output);
                     return true;
                 }
                 return false;
             }
-            );
+        );
     }
 }
 
@@ -565,7 +595,8 @@ void SWSBAnalyzer::processActiveSBID(SWSB &distanceDependency, const DepSet* inp
         }
 
         SWSB::TokenType tType = SWSB::TokenType::NOTOKEN;
-        if (aSBID.dType == DEP_TYPE::READ)
+        if (aSBID.dType == DEP_TYPE::READ ||
+            aSBID.dType == DEP_TYPE::READ_ALWAYS_INTERFERE)
         {
             tType = SWSB::TokenType::SRC;
         }
@@ -615,7 +646,7 @@ void SWSBAnalyzer::processActiveSBID(SWSB &distanceDependency, const DepSet* inp
 SWSB::InstType SWSBAnalyzer::getInstType(const Instruction& inst) {
     if (inst.getOpSpec().isSendOrSendsFamily())
         return SWSB::InstType::SEND;
-    else if (inst.getOpSpec().isMathSubFunc())
+    else if (inst.is(Op::MATH))
         return SWSB::InstType::MATH;
     return SWSB::InstType::OTHERS;
 }
@@ -638,6 +669,10 @@ void SWSBAnalyzer::advanceInorderInstCounter(DEP_PIPE dep_pipe)
 }
 
 
+static bool isSyncNop(const Instruction &i) {
+    return i.is(Op::SYNC) && i.getSyncFc() == SyncFC::NOP;
+};
+
 void SWSBAnalyzer::postProcess()
 {
     // revisit all instructions to remove redundant sync.nop
@@ -652,11 +687,12 @@ void SWSBAnalyzer::postProcess()
             continue;
         auto inst_it = instList.begin();
         // skip the first instruction, which must not be sync
+
         ++inst_it;
         for (; inst_it != instList.end(); ++inst_it)
         {
             Instruction* inst = *inst_it;
-            if (inst->getOp() == Op::SYNC_NOP)
+            if (isSyncNop(*inst))
                 continue;
             SWSB cur_swsb = inst->getSWSB();
             if (cur_swsb.hasToken() && (cur_swsb.tokenType == SWSB::TokenType::SET)) {
@@ -665,7 +701,7 @@ void SWSBAnalyzer::postProcess()
                 --sync_it;
                 while (sync_it != instList.begin()) {
                     Instruction* sync_inst = *sync_it;
-                    if (sync_inst->getOp() != Op::SYNC_NOP)
+                    if (!isSyncNop(*sync_inst))
                         break;
                     SWSB sync_swsb = sync_inst->getSWSB();
                     // if the sync has sbid set, it could be the reserved sbid for shoot down
@@ -681,12 +717,85 @@ void SWSBAnalyzer::postProcess()
         }
         // remove the redundant sync.nop (sync.nop with no swsb)
         instList.remove_if([](const Instruction* inst) {
-            if (inst->getOp() == Op::SYNC_NOP &&
-                (!inst->getSWSB().hasSWSB()))
-                return true;
-            return false;
+            return isSyncNop(*inst) && !inst->getSWSB().hasSWSB();
         });
     }
+}
+
+SBID& SWSBAnalyzer::assignSBID(DepSet* input, DepSet* output, Instruction& inst, SWSB& distanceDependency,
+    InstList::iterator insertPoint, Block *curBB, bool needSyncForShootDown)
+{
+    bool foundFree = false;
+    SBID *sbidFree = nullptr;
+    for (uint32_t i = 0; i < m_SBIDCount; ++i)
+    {
+        if (m_freeSBIDList[i].isFree)
+        {
+            foundFree = true;
+            sbidFree = &m_freeSBIDList[i];
+            m_freeSBIDList[i].sbid = i;
+            break;
+        }
+    }
+    // no free SBID.
+    if (!foundFree)
+    {
+        unsigned int index = (m_SBIDRRCounter++) % m_SBIDCount;
+
+        // While swsb id being reuse, the dependency will automatically resolved by hardware,
+        // so cleanup the dependency bucket for instruction that previously used this id
+        assert(m_IdToDepSetMap.find(index) != m_IdToDepSetMap.end());
+        assert(m_IdToDepSetMap[index].first->getDepClass() == DEP_CLASS::OUT_OF_ORDER);
+        clearDepBuckets(*m_IdToDepSetMap[index].first);
+        clearDepBuckets(*m_IdToDepSetMap[index].second);
+
+        m_freeSBIDList[index].reset();
+        sbidFree = &m_freeSBIDList[index];
+        sbidFree->sbid = index;
+    }
+    sbidFree->isFree = false;
+    input->setSBID(*sbidFree);
+    output->setSBID(*sbidFree);
+    if (m_IdToDepSetMap.find(sbidFree->sbid) != m_IdToDepSetMap.end())
+        m_IdToDepSetMap.erase(sbidFree->sbid);
+    m_IdToDepSetMap.insert(make_pair(sbidFree->sbid, make_pair(input, output)));
+
+    // adding the set for this SBID
+    // if the swsb has the token set already, move it out to a sync
+    if (distanceDependency.tokenType != SWSB::TokenType::NOTOKEN) {
+        SWSB tDep(SWSB::DistType::NO_DIST, distanceDependency.tokenType,
+            0, distanceDependency.sbid);
+        Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
+        curBB->insertInstBefore(insertPoint, tInst);
+    }
+    // set the sbid
+    distanceDependency.tokenType = SWSB::TokenType::SET;
+    distanceDependency.sbid = sbidFree->sbid;
+
+    // verify if the token and dist combination is valid, if not, move the dist out to a sync
+    // FIXME: move the dist out here to let the sbid set on the instruction could have better readability
+    // but a potential issue is that A@1 is required to be set on the instruction having
+    // architecture read/write. This case A@1 will be moved out from the instruction
+    if (!distanceDependency.verify(m_swsbMode, getInstType(inst))) {
+        SWSB tDep(distanceDependency.distType, SWSB::TokenType::NOTOKEN,
+            distanceDependency.minDist, 0);
+        Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
+        curBB->insertInstBefore(insertPoint, tInst);
+        distanceDependency.distType = SWSB::DistType::NO_DIST;
+        distanceDependency.minDist = 0;
+    }
+    assert(distanceDependency.verify(m_swsbMode, getInstType(inst)));
+
+    // add a sync to preserve the token for possibly shooting down instruction
+    if (needSyncForShootDown) {
+        SWSB tDep(SWSB::DistType::NO_DIST, distanceDependency.tokenType,
+            0, distanceDependency.sbid);
+        Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
+        curBB->insertInstBefore(insertPoint, tInst);
+    }
+
+    assert(sbidFree != nullptr);
+    return *sbidFree;
 }
 
 void SWSBAnalyzer::run()
@@ -740,7 +849,7 @@ void SWSBAnalyzer::run()
 
             if (math_wa_info.math_inst != nullptr)
                 math_wa_info.previous_is_math = true;
-            if (inst->getOpSpec().isMathSubFunc()) {
+            if (inst->getOpSpec().is(Op::MATH)) {
                 math_wa_info.math_inst = inst;
 
                 // if the math following a math, we only care about the last math
@@ -761,7 +870,17 @@ void SWSBAnalyzer::run()
             if (input->hasIndirect() || output->hasIndirect() ||
                 input->hasSR() || output->hasSR())
             {
-                    clearSBIDDependence(instIter, inst, bb);
+                // clear out-of-order dependency, insert sync.allrd and sync.allwr
+                // if there are un-resolved sbid dependecny
+                // if this instruction itself is an out-of-order instruction, insert
+                // sync.all anyway.
+                InstListIterator insert_point = instIter;
+                if (input->getDepClass() == DEP_CLASS::OUT_OF_ORDER)
+                    insertSyncAllRdWr(insert_point, bb);
+                else
+                    clearSBIDDependence(insert_point, inst, bb);
+
+                // clear in-order dependency
                 clearBuckets(input, output);
 
                 // will add direct accesses to buckets
@@ -780,16 +899,25 @@ void SWSBAnalyzer::run()
                     distanceDependency.distType = SWSB::REG_DIST;
 
                 distanceDependency.minDist = 1;
-                inst->setSWSB(distanceDependency);
                 // input and output must have the same dep class and in the same pipe
                 // so check the input only to add the instCounter
                 // FIXME: is it possilbe that a instruction has output and no input?
                 if (input->getDepClass() == DEP_CLASS::IN_ORDER)
-                {
                     advanceInorderInstCounter(input->getDepPipe());
+
+                // if this is an out-of-order instruction, we still need to assign an sbid for it
+                if (output->getDepClass() == DEP_CLASS::OUT_OF_ORDER)
+                    assignSBID(input, output, *inst, distanceDependency, insert_point, bb, false);
+
+                inst->setSWSB(distanceDependency);
+                // clean up math_wa_info, this instruction force to sync all, no need to consider
+                // math wa
+                if (math_wa_info.previous_is_math) {
+                    math_wa_info.reset();
                 }
+                // early out, no need to calculateDependenc that all dependencies are resolved.
                 continue;
-            }
+            } // end indirect access handling
 
             if (math_wa_info.previous_is_math) {
                 // math WA affect the instruction right after the math, and with different predication
@@ -825,78 +953,13 @@ void SWSBAnalyzer::run()
             if (output->getDepClass() == DEP_CLASS::OUT_OF_ORDER &&
                 !(inst->getOpSpec().isSendFamily() && inst->hasInstOpt(InstOpt::EOT)))
             {
-                bool foundFree = false;
-                SBID *sbidFree = nullptr;
-                for (uint32_t i = 0; i < MAX_SBID; ++i)
-                {
-                    if (m_freeSBIDList[i].isFree)
-                    {
-                        foundFree = true;
-                        sbidFree = &m_freeSBIDList[i];
-                        m_freeSBIDList[i].sbid = i;
-                        break;
-                    }
-                }
-                // no free SBID.
-                if (!foundFree)
-                {
-                    unsigned int index = (m_SBIDRRCounter++) % MAX_SBID;
+                InstList::iterator insertPoint = instIter;
+                SBID& assigned_id = assignSBID(input, output, *inst, distanceDependency,
+                    insertPoint, bb, needSyncForShootDown);
 
-                    // While swsb id being reuse, the dependency will automatically resolved by hardware,
-                    // so cleanup the dependency bucket for instruction that previously used this id
-                    assert(m_IdToDepSetMap.find(index) != m_IdToDepSetMap.end());
-                    assert(m_IdToDepSetMap[index].first->getDepClass() == DEP_CLASS::OUT_OF_ORDER);
-                    clearDepBuckets(*m_IdToDepSetMap[index].first);
-                    clearDepBuckets(*m_IdToDepSetMap[index].second);
-
-                    m_freeSBIDList[index].reset();
-                    sbidFree = &m_freeSBIDList[index];
-                    sbidFree->sbid = index;
-                }
-                sbidFree->isFree = false;
-                input->setSBID(*sbidFree);
-                output->setSBID(*sbidFree);
-                if (m_IdToDepSetMap.find(sbidFree->sbid) != m_IdToDepSetMap.end())
-                    m_IdToDepSetMap.erase(sbidFree->sbid);
-                m_IdToDepSetMap.insert(make_pair(sbidFree->sbid, make_pair(input, output)));
-
-                // adding the set for this SBID
-                // if the swsb has the token set already, move it out to a sync
-                if (distanceDependency.tokenType != SWSB::TokenType::NOTOKEN) {
-                    SWSB tDep(SWSB::DistType::NO_DIST, distanceDependency.tokenType,
-                                0, distanceDependency.sbid);
-                    Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
-                        bb->insertInstBefore(instIter, tInst);
-                }
-                // set the sbid
-                distanceDependency.tokenType = SWSB::TokenType::SET;
-                distanceDependency.sbid = sbidFree->sbid;
-
-                // verify if the token and dist combination is valid, if not, move the dist out to a sync
-                // FIXME: move the dist out here to let the sbid set on the instruction could have better readability
-                // but a potential issue is that A@1 is required to be set on the instruction having
-                // architecture read/write. This case A@1 will be moved out from the instruction
-                if (!distanceDependency.verify(m_swsbMode, getInstType(*inst))) {
-                    SWSB tDep(distanceDependency.distType, SWSB::TokenType::NOTOKEN,
-                        distanceDependency.minDist, 0);
-                    Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
-                        bb->insertInstBefore(instIter, tInst);
-                    distanceDependency.distType = SWSB::DistType::NO_DIST;
-                    distanceDependency.minDist = 0;
-                }
-                assert(distanceDependency.verify(m_swsbMode, getInstType(*inst)));
-
-                // add a sync to preserve the token for possibly shooting down instruction
-                if (needSyncForShootDown) {
-                    SWSB tDep(SWSB::DistType::NO_DIST, distanceDependency.tokenType,
-                        0, distanceDependency.sbid);
-                    Instruction* tInst = m_kernel.createSyncNopInstruction(tDep);
-                        bb->insertInstBefore(instIter, tInst);
-                }
-
-                //record the sbid if it's math
-                if (inst->getOpSpec().isMathSubFunc()) {
-                    math_wa_info.math_sbid = *sbidFree;
+                // record the sbid if it's math, for use of math wa
+                if (inst->getOpSpec().is(Op::MATH)) {
+                    math_wa_info.math_sbid = assigned_id;
                 }
             }
 
@@ -940,8 +1003,6 @@ void SWSBAnalyzer::run()
                 }
             }
 
-            // out of order instructions don't count in distance calculations
-            // controlFlow, Math, send
             if (input->getDepClass() == DEP_CLASS::IN_ORDER)
             {
                 advanceInorderInstCounter(input->getDepPipe());

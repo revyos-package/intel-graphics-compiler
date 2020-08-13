@@ -38,8 +38,6 @@ namespace TC
 
         bool SupportsIEEEMinMax() const override { return true; }
 
-        bool SupportsPreciseMath() const override { return true; }
-
         bool NeedCheckContractionAllowed() const override { return true; }
 
         bool NeedI64BitDivRem() const override { return true; }
@@ -78,6 +76,8 @@ namespace TC
 #endif
             return false;
         }
+
+        bool EnableIntegerMad() const override { return true; }
     };
 
     // In case some cpas are specific to NEO

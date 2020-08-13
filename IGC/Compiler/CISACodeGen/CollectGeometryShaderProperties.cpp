@@ -23,16 +23,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-#include "CollectGeometryShaderProperties.hpp"
-
-#include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstVisitor.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "ShaderTypesEnum.h"
+#include "CollectGeometryShaderProperties.hpp"
+#include "Compiler/IGCPassSupport.h"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "Compiler/InitializePasses.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -114,7 +115,7 @@ void CollectGeometryShaderProperties::ExtractGlobalVariables(llvm::Function& F)
     m_gsProps.SamplerCount(int_cast<unsigned int>(samplerCount));
 
     pGlobal = module->getGlobalVariable("GsInputPrimitiveType");
-    auto inputPrimitiveType = static_cast<USC::GSHADER_INPUT_PRIMITIVE_TYPE>
+    auto inputPrimitiveType = static_cast<IGC::GSHADER_INPUT_PRIMITIVE_TYPE>
         (llvm::cast<llvm::ConstantInt>(pGlobal->getInitializer())->getZExtValue());
     m_gsProps.Input().InputPrimitiveType(inputPrimitiveType);
 
@@ -216,8 +217,7 @@ void CollectGeometryShaderProperties::HandleOutputWrite(llvm::GenIntrinsicInst& 
         // shader has output clip or cull distances
         // this should have been recognized already by global variable extraction
         // that deals with clip or cull distance masks
-        assert(m_gsProps.Output().PerVertex().HasClipDistances() ||
-            m_gsProps.Output().PerVertex().HasCullDistances());
+        IGC_ASSERT((m_gsProps.Output().PerVertex().HasClipDistances()) || (m_gsProps.Output().PerVertex().HasCullDistances()));
         break;
     case SHADER_OUTPUT_TYPE_VIEWPORT_ARRAY_INDEX:
         m_gsProps.Output().HasViewportArrayIndex(true);

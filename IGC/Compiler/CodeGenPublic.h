@@ -23,6 +23,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
 
 #include "usc.h"
@@ -44,11 +45,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
+#include "visa/include/RelocationInfo.h"
+#include "ZEBinWriter/zebin/source/autogen/ZEInfo.hpp"
 
 #include "../AdaptorOCL/OCL/sp/spp_g8.h"
 #include "../GenISAIntrinsics/GenIntrinsics.h"
 #include "../GenISAIntrinsics/GenIntrinsicInst.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/ADT/DenseMap.h>
@@ -58,14 +60,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/ValueMap.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include "CodeGenPublicEnums.h"
 #include "AdaptorOCL/TranslationBlock.h"
-
 #include "common/MDFrameWork.h"
-
 #include "CompilerStats.h"
 #include <unordered_set>
+#include "Probe/Assertion.h"
+#include <optional>
 
 /************************************************************************
 This file contains the interface structure and functions to communicate
@@ -89,30 +90,46 @@ namespace IGC
 
     struct SProgramOutput
     {
-        void* m_programBin;     //<! Must be 16 byte aligned, and padded to a 64 byte boundary
-        unsigned int    m_programSize;    //<! Number of bytes of program data (including padding)
-        unsigned int    m_unpaddedProgramSize;      //<! program size without padding used for binary linking
-        unsigned int    m_startReg;                 //<! Which GRF to start with
-        unsigned int    m_scratchSpaceUsedBySpills; //<! amount of scratch space needed for shader spilling
-        unsigned int    m_scratchSpaceUsedByShader; //<! amount of scratch space needed by shader
-        unsigned int    m_scratchSpaceUsedByGtpin; //<! amount of scratch space used by gtpin
-        void* m_debugDataVISA;            //<! VISA debug data (source -> VISA)
-        unsigned int    m_debugDataVISASize;        //<! Number of bytes of VISA debug data
-        void* m_debugDataGenISA;          //<! GenISA debug data (VISA -> GenISA)
-        unsigned int    m_debugDataGenISASize;      //<! Number of bytes of GenISA debug data
-        unsigned int    m_InstructionCount;
-        unsigned int    m_BasicBlockCount;
+    public:
+        typedef std::vector<vISA::ZESymEntry> SymbolListTy;
+        typedef std::vector<vISA::ZERelocEntry> RelocListTy;
+        typedef std::vector<vISA::ZEFuncAttribEntry> FuncAttrListTy;
+        struct SymbolLists {
+            SymbolListTy function;    // function symbols
+            SymbolListTy global;      // global symbols
+            SymbolListTy globalConst; // global constant symbols
+            SymbolListTy sampler;     // sampler symbols
+            SymbolListTy local;       // local symbols
+        };
+
+    public:
+        void* m_programBin = nullptr;     //<! Must be 16 byte aligned, and padded to a 64 byte boundary
+        unsigned int    m_programSize = 0;    //<! Number of bytes of program data (including padding)
+        unsigned int    m_unpaddedProgramSize = 0;      //<! program size without padding used for binary linking
+        unsigned int    m_startReg = 0;                 //<! Which GRF to start with
+        unsigned int    m_scratchSpaceUsedBySpills = 0; //<! amount of scratch space needed for shader spilling
+        unsigned int    m_scratchSpaceUsedByShader = 0; //<! amount of scratch space needed by shader
+        unsigned int    m_scratchSpaceUsedByGtpin = 0; //<! amount of scratch space used by gtpin
+        void* m_debugDataVISA = nullptr;            //<! VISA debug data (source -> VISA)
+        unsigned int    m_debugDataVISASize = 0;        //<! Number of bytes of VISA debug data
+        void* m_debugDataGenISA = nullptr;          //<! GenISA debug data (VISA -> GenISA)
+        unsigned int    m_debugDataGenISASize = 0;      //<! Number of bytes of GenISA debug data
+        unsigned int    m_InstructionCount = 0;
+        unsigned int    m_BasicBlockCount = 0;
         void* m_gtpinBuffer = nullptr;              // Will be populated by VISA only when special switch is passed by gtpin
         unsigned int    m_gtpinBufferSize = 0;
         void* m_funcSymbolTable = nullptr;
         unsigned int    m_funcSymbolTableSize = 0;
         unsigned int    m_funcSymbolTableEntries = 0;
+        SymbolLists     m_symbols;                 // duplicated information of m_funcSymbolTable, for zebin
         void* m_funcRelocationTable = nullptr;
         unsigned int    m_funcRelocationTableSize = 0;
         unsigned int    m_funcRelocationTableEntries = 0;
+        RelocListTy     m_relocs;                  // duplicated information of m_funcRelocationTable, for zebin
         void* m_funcAttributeTable = nullptr;
         unsigned int    m_funcAttributeTableSize = 0;
         unsigned int    m_funcAttributeTableEntries = 0;
+        FuncAttrListTy  m_funcAttrs;               // duplicated information of m_funcAttributeTable, for zebin
         unsigned int    m_offsetToSkipPerThreadDataLoad = 0;
         uint32_t        m_offsetToSkipSetFFIDGP = 0;
         //true means we separate pvtmem and spillfill. pvtmem could go into stateless.
@@ -120,6 +137,14 @@ namespace IGC
         bool            m_separatePvtSpill = false;
         bool            m_roundPower2KBytes = false;
         unsigned int m_scratchSpaceSizeLimit = 0;
+        unsigned int m_numGRFTotal = 128;
+
+        // Optional statistics
+        std::optional<uint64_t> m_NumGRFSpill;
+        std::optional<uint64_t> m_NumGRFFill;
+        std::optional<uint64_t> m_NumSends;
+        std::optional<uint64_t> m_NumCycles;
+
 
         void Destroy()
         {
@@ -189,6 +214,7 @@ namespace IGC
     enum InstrStatTypes
     {
         SROA_PROMOTED,
+        LICM_STAT,
         TOTAL_TYPES
     };
     enum InstrStatStage
@@ -233,6 +259,7 @@ namespace IGC
         bool hasTypedwrite;
         bool mayHaveIndirectOperands;  //<! true if code may have indirect operands like r5[a0].
         bool hasUniformAssumptions;
+        bool hasWaveIntrinsics;
         unsigned int numSample;
         unsigned int numBB;
         unsigned int numLoopInsts;
@@ -244,21 +271,57 @@ namespace IGC
 
     struct SSimplePushInfo
     {
+        // Constant buffer BTI - valid only if isStateless is false
         uint m_cbIdx = 0;
+        // m_pushableAddressGrfOffset and m_pushableOffsetGrfOffset are GRF
+        // offsets in the runtime data pushed to the shader. UMD uses these
+        // offsets to calculate the starting address of a simple push region.
+        // These fields are valid only if greater or equal to 0 and if
+        // isStateless is true. Offsets are in DWORDs.
+        // Runtime data starting at m_pushableAddressGrfOffset contains the
+        // 64bit stateless address, data starting at m_pushableOffsetGrfOffset
+        // contains 32bit offset relative to the 64bit starting address.
+        // pseudo-code to calculate the address:
+        //   uint8_t* pShaderRuntimeData ={...}; // to be pushed
+        //   uint64_t pushableAddress =
+        //     *(uint64_t*)(pShaderRuntimeData + 4*pushableAddressGrfOffset);
+        //   if (pushableOffsetGrfOffset >=0) {
+        //     pushableAddress +=
+        //       *(uint32_t*)(pShaderRuntimeData + 4*pushableOffsetGrfOffset);
+        //   }
+        //   pushableAddress += m_offset;
+        int m_pushableAddressGrfOffset = -1;
+        int m_pushableOffsetGrfOffset = -1;
+        // Immediate offset in bytes add to the start of the simple push region.
         uint m_offset = 0;
+        // Data size in bytes, must be a multiple of GRF size
         uint m_size = 0;
         bool isStateless = false;
     };
 
-    struct SConstantAddrValue
+
+    enum SIMDInfoBit
     {
-        ConstantAddress ca;
-        bool anyValue;
-        uint32_t value;
+        SIMD_SELECTED,       // 0: if the SIMD is selected. If 1, all the other bits are ignored.
+        SIMD_RETRY,          // 1: is a retry
+        SIMD_SKIP_HW,        // 2: skip this SIMD due to HW restriction / WA.
+        SIMD_SKIP_REGPRES,   // 3: skip this SIMD due to register pressure early out.
+        SIMD_SKIP_SPILL,     // 4: skip this SIMD due to spill or high chance of spilling.
+        SIMD_SKIP_STALL,     // 5: skip this SIMD due to stall cycle or thread occupancy heuristic.
+        SIMD_SKIP_THGRPSIZE, // 6: skip due to threadGroupSize heuristic(CS / OCL only).
+        SIMD_SKIP_PERF       // 7: skip this SIMD due to performance concern (dx12 + discard, MRT, etc) or other reasons.
+    };
+
+    enum SIMDInfoOffset
+    {
+        SIMD8_OFFSET = 0,
+        SIMD16_OFFSET = 8,
+        SIMD32_OFFSET = 16,
     };
 
     struct SKernelProgram
     {
+        SProgramOutput simd1;
         SProgramOutput simd8;
         SProgramOutput simd16;
         SProgramOutput simd32;
@@ -290,12 +353,12 @@ namespace IGC
 
         SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
-        // Interesting constants for dynamic constant folding
-        std::vector<SConstantAddrValue> m_pInterestingConstants;
+        uint64_t    SIMDInfo;
     };
 
     struct SPixelShaderKernelProgram : SKernelProgram
     {
+
         USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT attributeActiveComponent[g_c_Max_PS_attributes];
         DWORD m_AccessedBySampleC[4];
 
@@ -383,7 +446,7 @@ namespace IGC
 
         DWORD        m_AccessedBySampleC[4];
         bool         HasClipCullAsOutput;
-        bool         EnableVertexReordering;
+
 
         unsigned int BindingTableEntryBitmap;
         unsigned int m_SamplerCount;
@@ -556,6 +619,12 @@ namespace IGC
         iOpenCL::KernelTypeProgramBinaryInfo m_kernelTypeInfo = {};
 
         SKernelProgram                m_kernelProgram = {};
+
+        // Information for zebin
+        // Cross-thread payload arguments
+        zebin::PayloadArgumentsTy m_zePayloadArgs;
+        // BTI information for payload arguments
+        zebin::BindingTableIndicesTy m_zeBTIArgs;
     };
 
 
@@ -784,12 +853,12 @@ namespace IGC
         std::vector<int> m_hsIdxMap;
         std::vector<int> m_dsIdxMap;
         std::vector<int> m_gsIdxMap;
-        std::vector<int> m_hsNoDefaultIdxMap;
-        std::vector<int> m_dsNoDefaultIdxMap;
-        std::vector<int> m_gsNoDefaultIdxMap;
+        std::vector<int> m_hsNonDefaultIdxMap;
+        std::vector<int> m_dsNonDefaultIdxMap;
+        std::vector<int> m_gsNonDefaultIdxMap;
         std::vector<int> m_psIdxMap;
         DWORD LtoUsedMask = 0;
-
+        uint64_t m_SIMDInfo;
 
     protected:
         // Objects pointed to by these pointers are owned by this class.
@@ -809,7 +878,8 @@ namespace IGC
             const CDriverInfo& driverInfo, ///< Queries to know runtime features support
             const bool          createResourceDimTypes = true,
             LLVMContextWrapper* LLVMContext = nullptr)///< LLVM context to use, if null a new one will be created
-            : type(_type), platform(_platform), btiLayout(_bitLayout), m_DriverInfo(driverInfo), llvmCtxWrapper(LLVMContext)
+            : type(_type), platform(_platform), btiLayout(_bitLayout), m_DriverInfo(driverInfo),
+            llvmCtxWrapper(LLVMContext), m_SIMDInfo(0)
         {
             if (llvmCtxWrapper == nullptr)
             {
@@ -855,6 +925,7 @@ namespace IGC
         virtual ~CodeGenContext();
         void clear();
         void EmitError(const char* errorstr);
+        bool HasError() const;
         CompOptions& getCompilerOption();
         virtual void resetOnRetry();
         virtual uint32_t getNumThreadsPerEU() const;
@@ -868,6 +939,47 @@ namespace IGC
         {
             return m_Stats;
         }
+
+        unsigned int GetSIMDInfoOffset(SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = 0;
+
+            switch (mode) {
+            case ShaderDispatchMode::NOT_APPLICABLE:
+                switch (simd) {
+                case SIMDMode::SIMD8:
+                    offset = SIMD8_OFFSET;
+                    break;
+                case SIMDMode::SIMD16:
+                    offset = SIMD16_OFFSET;
+                    break;
+                case SIMDMode::SIMD32:
+                    offset = SIMD32_OFFSET;
+                    break;
+                default:
+                    break;
+                }
+                break;
+
+            default:
+                break;
+            }
+            return offset;
+        }
+
+        void SetSIMDInfo(SIMDInfoBit bit, SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = GetSIMDInfoOffset(simd, mode);
+            m_SIMDInfo |= (uint64_t)1 << (bit + offset);
+        }
+
+        void ClearSIMDInfo(SIMDMode simd, ShaderDispatchMode mode)
+        {
+            unsigned int offset = GetSIMDInfoOffset(simd, mode);
+            m_SIMDInfo &= ~(0xff << offset);
+        }
+
+        uint64_t GetSIMDInfo() { return m_SIMDInfo; }
     };
 
     class VertexShaderContext : public CodeGenContext
@@ -1032,77 +1144,94 @@ namespace IGC
                 if (pInputArgs->pInternalOptions == nullptr)
                     return;
 
+                // Build options are of the form -cl-xxxx and -ze-xxxx
+                // So we skip these prefixes when reading the options to be agnostic of their source
+
                 const char* options = pInputArgs->pInternalOptions;
-                if (strstr(options, "-cl-replace-global-offsets-by-zero"))
+                if (strstr(options, "-replace-global-offsets-by-zero"))
                 {
                     replaceGlobalOffsetsByZero = true;
                 }
-                if (strstr(options, "-cl-kernel-debug-enable"))
+                if (strstr(options, "-kernel-debug-enable"))
                 {
                     KernelDebugEnable = true;
                 }
 
-                if (strstr(options, "-cl-include-sip-csr"))
+                if (strstr(options, "-include-sip-csr"))
                 {
                     IncludeSIPCSR = true;
                 }
 
-                if (strstr(options, "-cl-include-sip-kernel-debug"))
+                if (strstr(options, "-include-sip-kernel-debug"))
                 {
                     IncludeSIPKernelDebug = true;
                 }
-                else if (strstr(options, "-cl-include-sip-kernel-local-debug"))
+                else if (strstr(options, "-include-sip-kernel-local-debug"))
                 {
                     IncludeSIPKernelDebugWithLocalMemory = true;
                 }
 
-                if (strstr(options, "-cl-intel-use-32bit-ptr-arith"))
+                if (strstr(options, "-intel-use-32bit-ptr-arith"))
                 {
                     Use32BitPtrArith = true;
                 }
 
-                if (strstr(options, "-cl-intel-greater-than-4GB-buffer-required"))
+                if (strstr(options, "-intel-greater-than-4GB-buffer-required"))
                 {
                     IntelGreaterThan4GBBufferRequired = true;
                 }
-                else if (strstr(options, "-cl-intel-has-buffer-offset-arg"))
+                else if (strstr(options, "-intel-has-buffer-offset-arg"))
                 {
                     IntelHasBufferOffsetArg = true;
                 }
 
-                if (strstr(options, "-cl-intel-disable-a64WA"))
+                if (strstr(options, "-intel-disable-a64WA"))
                 {
                     IntelDisableA64WA = true;
                 }
 
-                if (strstr(options, "-cl-intel-gtpin-rera"))
+                if (strstr(options, "-intel-force-enable-a64WA"))
+                {
+                    IntelForceEnableA64WA = true;
+                }
+
+                if (strstr(options, "-intel-gtpin-rera"))
                 {
                     DoReRA = true;
                 }
-                if (strstr(options, "-cl-intel-no-prera-scheduling"))
+                if (strstr(options, "-intel-no-prera-scheduling"))
                 {
                     IntelEnablePreRAScheduling = false;
                 }
-                if (strstr(options, "-cl-intel-use-bindless-buffers"))
+                if (strstr(options, "-intel-use-bindless-buffers"))
                 {
                     PromoteStatelessToBindless = true;
                 }
-                if (strstr(options, "-cl-intel-use-bindless-images"))
+                if (strstr(options, "-intel-use-bindless-images"))
                 {
                     PreferBindlessImages = true;
                 }
-                if (strstr(options, "-cl-intel-force-global-mem-allocation"))
+                if (strstr(options, "-intel-use-bindless-mode"))
+                {
+                    // This is a new option that combines bindless generation for buffers
+                    // and images. Keep the old internal options to have compatibility
+                    // for existing tests. Those (old) options could be removed in future.
+                    UseBindlessMode = true;
+                    PreferBindlessImages = true;
+                    PromoteStatelessToBindless = true;
+                }
+                if (strstr(options, "-intel-force-global-mem-allocation"))
                 {
                     IntelForceGlobalMemoryAllocation = true;
                 }
-                if (strstr(options, "-cl-intel-no-local-to-generic"))
+                if (strstr(options, "-intel-no-local-to-generic"))
                 {
                     hasNoLocalToGeneric = true;
                 }
-                if (const char* O = strstr(options, "-cl-intel-vector-coalesing"))
+                if (const char* O = strstr(options, "-intel-vector-coalesing"))
                 {
                     // -cl-intel-vector-coalescing=<0-5>.
-                    const char* optionVal = O + strlen("-cl-intel-vector-coalesing");
+                    const char* optionVal = O + strlen("-intel-vector-coalesing");
                     if (*optionVal != 0 && *optionVal == '=' && isdigit(*(optionVal+1)))
                     {
                         ++optionVal;
@@ -1121,6 +1250,7 @@ namespace IGC
             bool IncludeSIPKernelDebug;
             bool IntelGreaterThan4GBBufferRequired;
             bool IntelDisableA64WA = false;
+            bool IntelForceEnableA64WA = false;
             bool Use32BitPtrArith = false;
             bool IncludeSIPKernelDebugWithLocalMemory;
             bool DoReRA;
@@ -1129,6 +1259,7 @@ namespace IGC
             bool IntelEnablePreRAScheduling = true;
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
+            bool UseBindlessMode = false;
             bool IntelForceGlobalMemoryAllocation = false;
             bool hasNoLocalToGeneric = false;
 
@@ -1152,27 +1283,50 @@ namespace IGC
                 if (pInputArgs->pOptions == nullptr)
                     return;
 
+                // Build options are of the form -cl-xxxx and -ze-xxxx
+                // So we skip these prefixes when reading the options to be agnostic of their source
+
                 const char* options = pInputArgs->pOptions;
-                if (strstr(options, "-cl-fp32-correctly-rounded-divide-sqrt"))
+                if (strstr(options, "-fp32-correctly-rounded-divide-sqrt"))
                 {
                     CorrectlyRoundedSqrt = true;
                 }
 
-                if (strstr(options, "-cl-no-subgroup-ifp"))
+                if (strstr(options, "-no-subgroup-ifp"))
                 {
                     NoSubgroupIFP = true;
                 }
 
-                if (strstr(options, "-cl-uniform-work-group-size"))
+                if (strstr(options, "-uniform-work-group-size"))
                 {
                     // Note that this is only available for -cl-std >= 2.0.
                     // This will be checked before we place this into the
                     // the module metadata.
                     UniformWGS = true;
                 }
-                if (strstr(options, "-cl-take-global-address"))
+                if (strstr(options, "-take-global-address"))
                 {
                     EnableTakeGlobalAddress = true;
+                }
+
+                // GTPin flags used by L0 driver runtime
+                if (strstr(options, "-gtpin-rera"))
+                {
+                    GTPinReRA = true;
+                }
+                if (strstr(options, "-gtpin-grf-info"))
+                {
+                    GTPinGRFInfo = true;
+                }
+                if (const char* op = strstr(options, "-gtpin-scratch-area-size"))
+                {
+                    GTPinScratchAreaSize = true;
+                    const char* optionVal = op + strlen("-gtpin-scratch-area-size");
+                    if ((*optionVal == '=' || *optionVal == ' ') && isdigit(*(optionVal + 1)))
+                    {
+                        ++optionVal;
+                        GTPinScratchAreaSizeValue = atoi(optionVal);
+                    }
                 }
             }
 
@@ -1180,6 +1334,10 @@ namespace IGC
             bool NoSubgroupIFP;
             bool UniformWGS;
             bool EnableTakeGlobalAddress = false;
+            bool GTPinReRA = false;
+            bool GTPinGRFInfo = false;
+            bool GTPinScratchAreaSize = false;
+            uint32_t GTPinScratchAreaSizeValue = 0;
         };
 
         // output: shader information

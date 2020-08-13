@@ -240,13 +240,6 @@ G4_BB* FlowGraph::createNewBB(bool insertInFG)
     if (insertInFG)
         numBBId++;
 
-    if (builder->getOptions()->getTarget() == VISA_3D)
-    {
-        // all 3D bbs are considered to be in SIMD CF since the dispatch mask may
-        // have some channels off.
-        bb->setInSimdFlow(true);
-    }
-
     BBAllocList.push_back(bb);
     return bb;
 }
@@ -284,7 +277,7 @@ int64_t FlowGraph::insertDummyUUIDMov()
             {
                 if ((*it)->isLabel())
                 {
-                    bb->insert(++it, movInst);
+                    bb->insertBefore(++it, movInst);
                     return uuID;
                 }
 
@@ -316,9 +309,7 @@ bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
         assert(inst->asCFInst()->getJip() == nullptr && "IF should not have a label at this point");
 
         // create if_label
-        std::string createdLabel = (builder->getIsKernel() ? "k" : "f") +
-            std::to_string(builder->getCUnitId()) + "_AUTO_GENERATED_IF_LABEL_" +
-            std::to_string(sn);
+        std::string createdLabel = "_AUTO_GENERATED_IF_LABEL_" + std::to_string(sn);
         sn++;
         if_label = builder->createLabel(createdLabel, LABEL_BLOCK);
         inst->asCFInst()->setJip(if_label);
@@ -347,9 +338,7 @@ bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
                 it1++;
 
                 // add endif label to "else"
-                std::string createdLabel = (builder->getIsKernel() ? "k" : "f") +
-                    std::to_string(builder->getCUnitId()) + "__AUTO_GENERATED_ELSE_LABEL__" +
-                    std::to_string(sn);
+                std::string createdLabel = "__AUTO_GENERATED_ELSE_LABEL__" + std::to_string(sn);
                 sn++;
                 else_label = builder->createLabel(createdLabel, LABEL_BLOCK);
                 inst->asCFInst()->setJip(else_label);
@@ -530,8 +519,7 @@ void FlowGraph::NormalizeFlowGraph()
                 addPredSuccEdges(newNode, retBB);
 
                 // Create and insert label inst
-                std::string name = (builder->getIsKernel() ? "L_AUTO_k" : "L_AUTO_f") +
-                    std::to_string(builder->getCUnitId()) + "_" + std::to_string(newNode->getId());
+                std::string name = "L_AUTO_" + std::to_string(newNode->getId());
                 G4_Label* lbl = builder->createLabel(name, LABEL_BLOCK);
                 G4_INST* inst = createNewLabelInst(lbl, lInst->getLineNo(), lInst->getCISAOff());
                 newNode->push_back(inst);
@@ -618,12 +606,6 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
             subroutineStartBB.push_back(curr_BB);
         }
 
-        G4_DstRegRegion* dst = i->getDst();
-        if (dst && dst->isAreg() && dst->isSrReg())
-        {
-            setSR0Modified(true);
-        }
-
         //
         // do and endif do not have predicate and jump-to label,so we treated them as non-control instruction
         // the labels around them will decides the beginning of a new BB
@@ -660,7 +642,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                         const std::list<G4_Label*>& jmpTargets = i->asCFInst()->getIndirectJmpLabels();
                         for (std::list<G4_Label*>::const_iterator it = jmpTargets.begin(), jmpTrgEnd = jmpTargets.end(); it != jmpTrgEnd; ++it)
                         {
-                            G4_INST* jmpInst = builder->createInst(NULL, G4_jmpi, NULL, false, 1, NULL, *it, NULL, 0);
+                            G4_INST* jmpInst = builder->createJmp(nullptr, *it, InstOpt_NoOpt, true);
                             indirectJmpTarget.emplace(jmpInst);
                             INST_LIST_ITER jmpInstIter = builder->instList.end();
                             curr_BB->splice(curr_BB->end(), builder->instList, --jmpInstIter);
@@ -833,9 +815,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
 
             std::string name = "_AUTO_LABEL_" + std::to_string(autoLabelId++);
             G4_Label *label = builder->createLabel(name, LABEL_BLOCK);
-            G4_INST *labelInst = builder->createInst(
-                nullptr, G4_label, nullptr, false, UNDEFINED_EXEC_SIZE, nullptr,
-                label, nullptr, 0);
+            auto labelInst = createNewLabelInst(label);
             bb->push_front(labelInst);
         }
     }
@@ -916,9 +896,9 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
     reassignBlockIDs();
     findBackEdges();
 
-    if (hasSIMDCF && builder->getOptions()->getTarget() == VISA_CM)
+    if (hasSIMDCF && pKernel->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
     {
-        markSimdBlocks(labelMap, funcInfoHashTable);
+        processSCF(labelMap, funcInfoHashTable);
         addSIMDEdges();
     }
 
@@ -933,7 +913,10 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         kernelInfo->updateExitBB(BBs.back());
     }
 
-    if ((hasSIMDCF || hasGoto) && builder->getOption(vISA_divergentBB))
+    // For non-kernel function, always invoke markDivergentBBs to
+    // conservatively assume divergence.
+    if ((hasSIMDCF || hasGoto || !builder->getIsKernel()) &&
+        builder->getOption(vISA_divergentBB))
     {
         markDivergentBBs();
     }
@@ -979,7 +962,7 @@ void IR_Builder::materializeGlobalImm(G4_BB* entryBB)
             Create_Dst_Opnd_From_Dcl(dcl, 1), immVal.imm, InstOpt_WriteEnable, false);
         auto iter = std::find_if(entryBB->begin(), entryBB->end(),
             [](G4_INST* inst) { return !inst->isLabel(); });
-        entryBB->insert(iter, inst);
+        entryBB->insertBefore(iter, inst);
     }
 }
 
@@ -1024,7 +1007,7 @@ void FlowGraph::handleWait()
                     if (sendInst != NULL)
                     {
                         sendInst->setSendc();
-                        bb->insert(iter, fenceInst);
+                        bb->insertBefore(iter, fenceInst);
                     }
                 }
                 iter = bb->erase(iter);
@@ -1201,8 +1184,7 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
 
             if (retInst->getExecSize() == 1)
             {
-                G4_INST* jmpInst = builder->createInternalInst(retInst->getPredicate(), G4_jmpi,
-                    NULL, false, 1, NULL, exitLabel, NULL, InstOpt_NoOpt);
+                G4_INST* jmpInst = builder->createJmp(retInst->getPredicate(), exitLabel, InstOpt_NoOpt, false);
                 retBB->push_back(jmpInst);
             }
             else
@@ -1316,39 +1298,6 @@ void FlowGraph::handleReturn(std::map<std::string, G4_BB*>& labelMap, FuncInfoHa
         }
     }
 }
-
-#ifdef _DEBUG
-void dump(FlowGraph* fg)
-{
-    for (auto bbIt = fg->begin(); bbIt != fg->end(); bbIt++)
-    {
-        auto bb = (*bbIt);
-
-        printf("BB%d\n", bb->getId());
-        printf("Pred: ");
-        for (auto p : bb->Preds)
-        {
-            printf("%d, ", p->getId());
-        }
-        printf("\nSucc: ");
-        for (auto s : bb->Succs)
-        {
-            printf("%d, ", s->getId());
-        }
-        printf("\n");
-
-        if (bb->getInstList().size() > 0 &&
-            bb->front()->isLabel())
-            bb->front()->dump();
-
-        printf("\n...\n");
-        if (bb->getInstList().size() > 0)
-            bb->getInstList().back()->dump();
-
-        printf("\n-----\n");
-    }
-}
-#endif
 
 void FlowGraph::linkReturnAddr(G4_BB* entryBB, G4_BB* returnAddr)
 {
@@ -2477,11 +2426,11 @@ void FlowGraph::mergeFReturns()
         {
             G4_BB* newExit = createNewBB();
             assert(!builder->getIsKernel() && "Not expecting fret in kernel");
-            std::string str = "__MERGED_FRET_EXIT_BLOCK_f" + std::to_string(builder->getCUnitId());
+            std::string str = "__MERGED_FRET_EXIT_BLOCK";
             dumLabel = builder->createLabel(str, LABEL_BLOCK);
             G4_INST* label = createNewLabelInst(dumLabel);
             newExit->push_back(label);
-            G4_INST* fret = builder->createInst(NULL, G4_pseudo_fret, NULL, false, 1, NULL, NULL, NULL, 0);
+            G4_INST* fret = builder->createInternalCFInst(nullptr, G4_pseudo_fret, 1, nullptr, nullptr, InstOpt_NoOpt);
             newExit->push_back(fret);
             BBs.push_back(newExit);
             candidateFretBB = newExit;
@@ -2639,11 +2588,9 @@ G4_BB* FlowGraph::findLabelBB(
 
 
 /*
-*  Mark blocks that are nested in SIMD control flow.
-*  Only structured CF is handled here, SIMD BBs due to goto/join
-*  are marked in processGoto()
+*  This function sets the JIP for Structured CF (SCF) instructions, Unstructured
+*  Control Flow (UCF) instructions (goto) are handled in processGoto().
 *
-*  This function also sets the JIP of the endif to its enclosing endif/while, if it exists
 *  Note: we currently do not consider goto/join when adding the JIP for endif,
 *  since structure analysis should not allow goto into/out of if-endif.  This means
 *  we only need to set the the JIP of the endif to its immediately enclosing endif/while
@@ -2651,7 +2598,7 @@ G4_BB* FlowGraph::findLabelBB(
 *  The simd control flow blocks must be well-structured
 *
 */
-void FlowGraph::markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable &FuncInfoMap)
+void FlowGraph::processSCF(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable &FuncInfoMap)
 {
     std::stack<StructuredCF*> ifAndLoops;
     std::vector<StructuredCF*> structuredSimdCF;
@@ -2703,11 +2650,6 @@ void FlowGraph::markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfo
             }
         }
 
-        if (ifAndLoops.size() > 0)
-        {
-            bb->setInSimdFlow(true);
-        }
-
         if (bb->size() > 0)
         {
             G4_INST* lastInst = bb->back();
@@ -2742,45 +2684,6 @@ void FlowGraph::markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfo
             setJIPForEndif(cf->mEndInst, cf->enclosingCF->mEndInst, cf->enclosingCF->mEndBB);
         }
     }
-
-    // Visit the call graph, and mark simd blocks in subroutines.
-    std::set<FuncInfo*> Visited;
-    std::queue<FuncInfo*> Funcs;
-
-    // Starting with kernel.
-    Funcs.push(kernelInfo);
-
-    // Now process all subroutines called in a simd-cf block.
-    while (!Funcs.empty())
-    {
-        FuncInfo* CallerInfo = Funcs.front();
-        Funcs.pop();
-
-        // Skip if this is already visited.
-        if (!Visited.insert(CallerInfo).second)
-            continue;
-
-        for (auto BB : CallerInfo->getBBList())
-        {
-            if (BB->isInSimdFlow() && BB->isEndWithCall())
-            {
-                G4_INST *CI = BB->back();
-                if (CI->getSrc(0)->isLabel())
-                {
-                    G4_Label* Callee = CI->getSrc(0)->asLabel();
-                    G4_BB* CalleeEntryBB = labelMap[Callee->getLabel()];
-                    FuncInfo* CalleeInfo = CalleeEntryBB->getFuncInfo();
-                    Funcs.push(CalleeInfo);
-
-                    // Mark all blocks in this subroutine.
-                    for (auto BB1 : CalleeInfo->getBBList())
-                    {
-                        BB1->setInSimdFlow(true);
-                    }
-                }
-            }
-        }
-    }
 }
 
 // markDivergentBBs()
@@ -2800,14 +2703,32 @@ void FlowGraph::markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfo
 // Note: this will be used to replace inSIMDCF gradually.
 void FlowGraph::markDivergentBBs()
 {
-    // Assumption:
-    //       1.  For each function, it has a single return (for function)
-    //           or exit (for entry function). And that return/exit is the
-    //           last BB of that function.
-    //       2.  The entry function will appear first in the BB list, and
-    //           if there is a call from A to B,  A shall appear prior to B
-    //           in BB list.
-    //       3.  There is no indirect call, and no recursive call.
+    if (BBs.empty())
+    {
+        // Sanity check
+        return;
+    }
+
+    // fcall'ed Function:  to be conservative and assume that any function
+    // that is fcall'ed is divergent on entry
+    // (Note that each function has its own CFG)
+    if (!builder->getIsKernel())
+    {
+        for (auto IT = BBs.begin(), IE = BBs.end(); IT != IE; ++IT)
+        {
+            G4_BB* BB = *IT;
+            BB->setDivergent(true);
+        }
+        return;
+    }
+
+    //  Now, handle kernel function.
+    //       1.  It would be perfered to have a single return/exit for kernel and
+    //           and all its subroutines in the last BB (IGC does, cm does not),
+    //           although the code  can handle return in the middle of kernel.
+    //       2.  The entry function will appear first in the BB list, and if there
+    //           is a call from A to B,   subroutine A shall appear prior to
+    //           subroutine B in BB list.
     //
     // Required:  need to set BB id.
     //
@@ -2845,6 +2766,27 @@ void FlowGraph::markDivergentBBs()
     //                    [(p)] while/goto L
     //          <joinBB>
     //
+    //  The presence of loop makes the checking complicated. Before checking the
+    //  divergence of a loop head, we need to know if the loop has any non-uniform
+    //  out-of-loop branch, which includes checking the loop's backedge and any
+    //  out-going branches inside the loop body. For example,
+    //      L0:
+    //          B0   if (uniform cond)
+    //          B1:  else
+    //             B2
+    //      L1:
+    //             B3: goto OUT
+    //             B4 : if (non-uniform cond) goto  L1
+    //    OUT1:
+    //             B5
+    //          B6 : if (uniform cond) goto L0
+    //
+    //     OUT: B6
+    //
+    //  Once scanning B0, we don't know whether it is divergent until we find out "goto OUT"
+    //  is divergent out-of-loop branch.  In turn, in order to know "goto OUT" is divergent,
+    //  we need to check the back branch of loop L1.  For this, we will pre-scan the loop.
+    //
     int LastJoinBBId;
 
     auto pushJoin = [&](G4_BB* joinBB) {
@@ -2858,12 +2800,6 @@ void FlowGraph::markDivergentBBs()
     auto isPriorToLastJoin = [&](G4_BB* aBB) ->bool {
         return (int)aBB->getId() < LastJoinBBId;
     };
-
-    if (BBs.empty())
-    {
-        // Sanity check
-        return;
-    }
 
     reassignBlockIDs();
 
@@ -2910,38 +2846,66 @@ void FlowGraph::markDivergentBBs()
         }
     }
 
-    // Check if the BB referred to by CurrIT needs to update lastJoin and do
-    // updating if so.  The IterEnd is the end iterator of current function
-    // that CurrIT refers to.
-    //
-    //    1. update lastJoinBB if needed
-    //    2. set up divergence for entry of subroutines if divergent
-    //
-    auto updateLastJoinForBB = [&](BB_LIST_ITER& CurrIT, BB_LIST_ITER& IterEnd) ->bool
+    // Update LastJoin for the backward branch of BB referred to by IT.
+    auto updateLastJoinForBwdBrInBB = [&](BB_LIST_ITER& IT)
     {
-        G4_BB* aBB = *CurrIT;
+        G4_BB* predBB = *IT;
+        G4_INST* bInst = predBB->back();
+        assert(bInst->isCFInst() &&
+            (bInst->opcode() == G4_while || bInst->asCFInst()->isBackward()) &&
+            "ICE: expected backward branch/while!");
+
+        // joinBB of a loop is the BB right after tail BB
+        BB_LIST_ITER loopJoinIter = IT;
+        ++loopJoinIter;
+        if (loopJoinIter == BBs.end())
+        {
+            // Loop end is the last BB (no Join BB). This happens in the
+            // following cases:
+            //    1. For CM, CM's return is in the middle of code! For IGC,
+            //       this never happen as a return, if present, must be in
+            //       the last BB.
+            //    2. The last segment code is an infinite loop (static infinite
+            //       loop so that compiler knows it is an infinite loop).
+            // In either case, no join is needed.
+            return;
+        }
+
+        // Update LastJoin if the branch itself is divergent.
+        // (todo: checking G4_jmpi is redundant as jmpi must have isUniform()
+        //  return true.)
+        if ((!bInst->asCFInst()->isUniform() && bInst->opcode() != G4_jmpi))
+        {
+            G4_BB* joinBB = *loopJoinIter;
+            pushJoin(joinBB);
+        }
+        return;
+    };
+
+    // Update LastJoin for BB referred to by IT. It is called either from normal
+    // scan (setting BB's divergent field) or from loop pre-scan (no setting to
+    // BB's divergent field).  IsPreScan indicates whether it is called from
+    // the pre-scan or not.
+    //
+    // The normal scan (IsPreScan is false), this function also update the divergence
+    // info for any called subroutines.
+    //
+    auto updateLastJoinForFwdBrInBB = [&](BB_LIST_ITER& IT, bool IsPreScan)
+    {
+        G4_BB* aBB = *IT;
         if (aBB->size() == 0)
         {
-            return false;
+            return;
         }
 
-        int old_lastJoinBBId = LastJoinBBId;
+        // Using isPriorToLastJoin() works for both loop pre-scan and normal scan.
+        // (aBB->isDivergent() works for normal scan only.)
+        bool isBBDivergent = isPriorToLastJoin(aBB);
 
         G4_INST* lastInst = aBB->back();
-        if ((lastInst->opcode() == G4_while ||
-             (lastInst->opcode() == G4_goto && lastInst->asCFInst()->isBackward())) &&
-            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
-        {
-            if (CurrIT != IterEnd) {
-                auto NI = CurrIT;
-                ++NI;
-                G4_BB* joinBB = *NI;
-                pushJoin(joinBB);
-            }
-        }
-        else if (((lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward()) ||
+        if (((lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward()) ||
              lastInst->opcode() == G4_break) &&
-            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
+            (!lastInst->asCFInst()->isUniform() || isBBDivergent))
         {
             // forward goto/break : the last Succ BB is our target BB
             // For break, it should be the BB right after while inst.
@@ -2949,18 +2913,18 @@ void FlowGraph::markDivergentBBs()
             pushJoin(joinBB);
         }
         else if (lastInst->opcode() == G4_if &&
-            (!lastInst->asCFInst()->isUniform() || aBB->isDivergent()))
+            (!lastInst->asCFInst()->isUniform() || isBBDivergent))
         {
             G4_Label* labelInst = lastInst->asCFInst()->getUip();
-            G4_BB* joinBB = findLabelBB(CurrIT, IterEnd, labelInst->getLabel());
+            G4_BB* joinBB = findLabelBB(IT, BBs.end(), labelInst->getLabel());
             assert(joinBB && "ICE(vISA) : missing endif label!");
             pushJoin(joinBB);
         }
-        else if (lastInst->opcode() == G4_call || lastInst->opcode() == G4_pseudo_fcall)
+        else if (!IsPreScan && lastInst->opcode() == G4_call)
         {
             // If this function is already in divergent branch, the callee
             // must be in a divergent branch!.
-            if (aBB->isDivergent() || lastInst->getPredicate() != nullptr)
+            if (isBBDivergent || lastInst->getPredicate() != nullptr)
             {
                 FuncInfo* calleeFunc = aBB->getCalleeInfo();
                 if (funcInfoIndex.count(calleeFunc))
@@ -2970,10 +2934,11 @@ void FlowGraph::markDivergentBBs()
                 }
             }
         }
-
-        return old_lastJoinBBId != LastJoinBBId;
+        return;
     };
 
+
+    // Now, scan all subroutines (kernels or functions)
     for (int i = 0; i < numFuncs; ++i)
     {
         // each function: [IT, IE)
@@ -2993,9 +2958,6 @@ void FlowGraph::markDivergentBBs()
                 G4_BB* BB = *IT;
 
                 BB->setDivergent(true);
-                // set InSIMDFlow as well, will merge two gradually
-                BB->setInSimdFlow(true);
-
                 if (BB->size() == 0)
                 {
                     // sanity check
@@ -3011,10 +2973,11 @@ void FlowGraph::markDivergentBBs()
                     }
                 }
             }
-            // continue for next func
+            // continue for next subroutine
             continue;
         }
 
+        // Scaning all BBs of a single subroutine (or kernel, or function).
         LastJoinBBId = -1;
         for (auto IT = IS; IT != IE; ++IT)
         {
@@ -3025,38 +2988,26 @@ void FlowGraph::markDivergentBBs()
 
             // Handle loop
             //    Loop needs to be scanned twice in order to get an accurate marking.
-            //    For example,
-            //         L:
-            //    B1:
-            //            if (p0) goto B2
-            //               ...
-            //            else
-            //               if (p1) goto OUT
-            //            endif
-            //    B2:
-            //            (p2) goto L
-            //    B3:
-            //    OUT:
-            //
-            // We don't know whether B1 is divergent until the entire loop body has been
-            // scanned, so that we know any out-of-loop gotos (goto out and goto L in this
-            // case). This require scanning the loop twice.
-            //
-            for (auto iter = BB->Preds.begin(), iterEnd = BB->Preds.end(); iter != iterEnd; ++iter)
-            {
-                G4_BB* predBB = *iter;
-                if (predBB->getId() < BB->getId())
-                    continue;
+            //    In pre-scan (1st scan), it finds out divergent out-of-loop branch.
+            //    If found,  it updates LastJoin to the target of that out-of-loop branch
+            //    and restart the normal scan. If not, it restarts the normal scan with
+            //    the original LastJoin unchanged.
 
-                assert(predBB->size() > 0 && "ICE: missing branch inst!");
-                G4_INST* bInst = predBB->back();
-                if (bInst->opcode() != G4_goto &&
-                    bInst->opcode() != G4_while &&
-                    bInst->opcode() != G4_jmpi)
-                {
-                    // not loop
+            // BB could be head of several loops, and the following does pre-scan for
+            //  every one of those loops.
+            for (auto PI0 = BB->Preds.begin(), PI0E = BB->Preds.end(); PI0 != PI0E; ++PI0)
+            {
+                G4_BB* predBB = *PI0;
+                if (!isBackwardBranch(predBB, BB)) {
+                    G4_opcode t_opc = predBB->getLastOpcode();
+                    bool isBr = (t_opc == G4_goto || t_opc == G4_jmpi);
+                    assert((!isBr || (BB->getId() > predBB->getId())) && "backward Branch did not set correctly!");
                     continue;
                 }
+                assert(BB->getId() <= predBB->getId() && "Branch incorrectly set to be backward!");
+
+                BB_LIST_ITER LoopITEnd = std::find(BBs.begin(), BBs.end(), predBB);
+                updateLastJoinForBwdBrInBB(LoopITEnd);
 
                 // If lastJoin is already after loop end, no need to scan loop twice
                 // as all BBs in the loop must be divergent
@@ -3065,55 +3016,90 @@ void FlowGraph::markDivergentBBs()
                     continue;
                 }
 
-                BB_LIST_ITER LoopIterEnd = std::find(BBs.begin(), BBs.end(), predBB);
-
-                // joinBB of a loop is the BB right after backward-goto/while
-                BB_LIST_ITER loopJoinIter = LoopIterEnd;
-                ++loopJoinIter;
-                if (loopJoinIter == BBs.end())
+                // pre-scan loop (BB, predBB)
+                //
+                //    Observation:
+                //        pre-scan loop once and as a BB is scanned. Each backward
+                //        branch to this BB and a forward branch from this BB are processed.
+                //        Doing so finds out any divergent out-of-loop branch iff the
+                //        loop has one. In addition, if a loop has more than one divergent
+                //        out-of-loop branches, using any of those branches would get us
+                //        precise divergence during the normal scan.
+                //
+                // LastJoinBBId will be updated iff there is an out-of-loop branch that is
+                // is also divergent. For example,
+                //  a)  "goto OUT" is out-of-loop branch, but not divergent. Thus, LastJoinBB
+                //      will not be updated.
+                //
+                //      L :
+                //           B0
+                //           if (uniform cond) goto OUT;
+                //           if  (non-uniform cond)
+                //              B1
+                //           else
+                //              B2
+                //           B3
+                //           (p) jmpi L
+                //      OUT:
+                //
+                //  b)  "goto OUT" is out-of-loop branch and divergent. Thus, update LastJoinBB.
+                //      Note that "goto OUT" is divergent because loop L1 is divergent, which
+                //      makes every BB in L1 divergent. And any branch from a divergent BB
+                //      must be divergent.
+                //
+                //      L :
+                //           B0
+                //      L1:
+                //           B1
+                //           if (uniform cond) goto OUT;
+                //           if  (cond)
+                //              B2
+                //           else
+                //              B3
+                //           if (non-uniform cond) goto L1
+                //           B4
+                //           (uniform cond) while L
+                //      OUT:
+                //
+                int orig_LastJoinBBId = LastJoinBBId;
+                for (auto LoopIT = IT; LoopIT != LoopITEnd; ++LoopIT)
                 {
-                    // Loop end is the last BB (no Join BB). This happens for CM
-                    // in which CM's return is in the middle of code! Note that
-                    // IGC's return is the last BB always.
-                    if (builder->kernel.getOptions()->getTarget() != VISA_CM)
+                    if (LoopIT != IT)
                     {
-                        // IGC: loop end should not be the last BB as the last
-                        //      BB must be the return.
-                        assert(false && "ICE: return must be the last BB!");
-                    }
-                    continue;
-                }
-
-                // If backward goto/while is divergent, update lastJoin with
-                // loop's join BB.  No need to pre-scan loop!
-                G4_BB* joinBB = *loopJoinIter;
-                if (!bInst->asCFInst()->isUniform() &&
-                    bInst->opcode() != G4_jmpi)
-                {
-                    pushJoin(joinBB);
-                    continue;
-                }
-
-                // pre-scan loop to find any out-of-loop branch, set join if found
-                for (auto LoopIter = IT; LoopIter != LoopIterEnd; ++LoopIter)
-                {
-                    if (updateLastJoinForBB(LoopIter, IE))
-                    {
-                        if (isPriorToLastJoin(predBB))
+                        // Check loops that are fully inside the current loop.
+                        G4_BB* H = *LoopIT;
+                        for (auto PI1 = H->Preds.begin(), PI1E = H->Preds.end(); PI1 != PI1E; ++PI1)
                         {
-                            continue;
+                            G4_BB* T = *PI1;
+                            if (!isBackwardBranch(T, H)) {
+                                continue;
+                            }
+                            assert(H->getId() <= T->getId() && "Branch incorrectly set to be backward!");
+                            BB_LIST_ITER TIter = std::find(BBs.begin(), BBs.end(), T);
+                            updateLastJoinForBwdBrInBB(TIter);
                         }
                     }
+                    updateLastJoinForFwdBrInBB(LoopIT, true);
+                }
+
+                // After scan, if no branch out of loop, restore the original LastJoinBBId
+                if (!isPriorToLastJoin(predBB))
+                {   // case a) above.
+                    LastJoinBBId = orig_LastJoinBBId;
                 }
             }
 
+            // normal scan of BB
             if (isPriorToLastJoin(BB)) {
                 BB->setDivergent(true);
-                // set InSIMDFlow as well, will merge these two fields gradually
-                BB->setInSimdFlow(true);
             }
-
-            (void)updateLastJoinForBB(IT, IE);
+            // Temporary for debugging, toBeDelete!
+            // if (pKernel->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+            // {
+            //    assert((BB->isDivergent() && BB->isInSimdFlow() ||
+            //        (!BB->isDivergent() && !BB->isInSimdFlow())) && " isDivergent != isInSimdFlow!");
+            // }
+            updateLastJoinForFwdBrInBB(IT, false);
         }
     }
     return;
@@ -3155,7 +3141,7 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
         {
             G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt,
                 secondInst->getLineNo(), secondInst->getCISAOff(), secondInst->getSrcFilename());
-            bb->insert(iter, jInst);
+            bb->insertBefore(iter, jInst);
         }
     }
 }
@@ -3221,7 +3207,7 @@ G4_Label* FlowGraph::insertEndif(G4_BB* bb, unsigned char execSize, bool createL
     INST_LIST_ITER iter = bb->begin();
     MUST_BE_TRUE(iter != bb->end(), "empty BB");
     iter++;
-    bb->insert(iter, endifInst);
+    bb->insertBefore(iter, endifInst);
 
     // this block may be a target of multiple ifs, in which case we will need to insert
     // one endif for each if.  The innermost endif will use the BB label, while for the other
@@ -3409,13 +3395,6 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             }
         }
 
-        // at this point if there are active join blocks, we are in SIMD control flow
-        // FIXME: This is over pessimistic for kernels with actual simd cf.
-        if (HasSIMDCF && !activeJoinBlocks.empty())
-        {
-            bb->setInSimdFlow(true);
-        }
-
         G4_INST* lastInst = bb->back();
         if (lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward())
         {
@@ -3461,10 +3440,10 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                         G4_Declare* tmpFlagDcl = builder->createTempFlag(execSize);
                         G4_DstRegRegion* newPredDef = builder->createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == 2 ? Type_UD : Type_UW);
                         G4_INST* predInst = builder->createMov(1, newPredDef, builder->createImm(0, Type_UW),
-                            InstOpt_WriteEnable, false, lastInst->getLineNo(), lastInst->getCISAOff(), lastInst->getSrcFilename());
+                            InstOpt_WriteEnable, false);
                         INST_LIST_ITER iter = bb->end();
                         iter--;
-                        bb->insert(iter, predInst);
+                        bb->insertBefore(iter, predInst);
 
                         pred = builder->createPredicate(
                             PredState_Plus,
@@ -3479,7 +3458,12 @@ void FlowGraph::processGoto(bool HasSIMDCF)
 }
 
 // TGL NoMask WA : to identify which BB needs WA
-void FlowGraph::findNestedDivergentBBs()
+//
+// nestedDivergentBBs[BB] = 2;
+//      BB is in a nested divergent branch
+// nestedDivergentBBs[BB] = 1;
+//      BB is not in a nested divergent branch, but in a divergent branch.
+void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDivergentBBs)
 {
     // Control-Flow state
     //    Used for keeping the current state of control flow during
@@ -3585,13 +3569,13 @@ void FlowGraph::findNestedDivergentBBs()
         return;
     }
 
-    // Analyze function in topological order. As there is no recursion
-    // and no indirect call,  a function will be analyzed only if all
+    // Analyze subroutines in topological order. As there is no recursion
+    // and no indirect call,  a subroutine will be analyzed only if all
     // its callers have been analyzed.
     //
-    // If no subroutine, sortedFuncTable is empty. Here keep all functions
-    // in a vector first (it works with and without subroutines), then scan
-    // functions in topological order.
+    // If no subroutine, sortedFuncTable is empty. Here keep the entry and
+    // subroutines in a vector first (it works with and without subroutines),
+    // then scan subroutines in topological order.
     struct StartEndIter {
         BB_LIST_ITER StartI;
         BB_LIST_ITER EndI;
@@ -3686,19 +3670,13 @@ void FlowGraph::findNestedDivergentBBs()
                 }
             }
 
-            if ((builder->getuint32Option(vISA_noMaskWA) & 0x3) > 1)
+            if (cfs.isInNestedDivergentBranch())
             {
-                if (cfs.isInNestedDivergentBranch())
-                {
-                    setInNestedDivergentBranch(BB);
-                }
+                nestedDivergentBBs[BB] = 2;
             }
-            else if ((builder->getuint32Option(vISA_noMaskWA) & 0x3) > 0)
+            else if (cfs.isInDivergentBranch())
             {
-                if (cfs.isInDivergentBranch())
-                {
-                    setInNestedDivergentBranch(BB);
-                }
+                nestedDivergentBBs[BB] = 1;
             }
 
             G4_INST* lastInst = BB->back();
@@ -3779,7 +3757,11 @@ void G4_Kernel::evalAddrExp()
 
 void G4_Kernel::setKernelParameters()
 {
-    unsigned overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
+    unsigned overrideGRFNum = 0;
+    unsigned overrideNumThreads = 0;
+
+    TARGET_PLATFORM platform = getGenxPlatform();
+    overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
 
 
     // Set the number of GRFs
@@ -3816,7 +3798,7 @@ void G4_Kernel::setKernelParameters()
     else
     {
         // Default value based on platform
-        switch (getGenxPlatform())
+        switch (platform)
         {
         default:
             numSWSBTokens = 16;
@@ -3834,7 +3816,7 @@ void G4_Kernel::setKernelParameters()
     else
     {
         // Default value based on platform
-        switch (getGenxPlatform())
+        switch (platform)
         {
         default:
             numAcc = 2;
@@ -3844,10 +3826,17 @@ void G4_Kernel::setKernelParameters()
     // Set number of threads if it was not defined before
     if (numThreads == 0)
     {
-        switch (getGenxPlatform())
+        if (overrideNumThreads > 0)
         {
-        default:
-            numThreads = 7;
+            numThreads = overrideNumThreads;
+        }
+        else
+        {
+            switch (platform)
+            {
+            default:
+                numThreads = 7;
+            }
         }
     }
 }
@@ -3914,9 +3903,9 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
         const int maxIdLen = 3;
         const char* name = builder.getNameString(mem, strlen(nameBase) + maxIdLen + 1, "%s_%d", nameBase, i);
         G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, 8, 59, Type_UD);
-        name = builder.getNameString(mem, 50, builder.getIsKernel() ? "k%d_SA0_%d" : "f%d_SA0_%d", builder.getCUnitId(), i);
+        name = builder.getNameString(mem, 50, "SA0_%d", i);
         G4_Declare* saveA0 = builder.createDeclareNoLookup(name, G4_ADDRESS, (uint16_t)getNumAddrRegisters(), 1, Type_UW);
-        name = builder.getNameString(mem, 64, builder.getIsKernel() ? "k%d_SFLAG_%d" : "f%d_SFLAG_%d", builder.getCUnitId(), i);
+        name = builder.getNameString(mem, 64, "SFLAG_%d", i);
         G4_Declare* saveFLAG = builder.createDeclareNoLookup(name, G4_FLAG, (uint16_t) builder.getNumFlagRegisters(), 1, Type_UW);
         fcallToPseudoDclMap[callSite->asCFInst()] = { VCA, saveA0, saveFLAG };
         i++;
@@ -4234,9 +4223,6 @@ static iga_gen_t getIGAPlatform()
     case GENX_BXT:
         platform = IGA_GEN9lp;
         break;
-    case GENX_CNL:
-        platform = IGA_GEN10;
-        break;
     case GENX_ICLLP:
         platform = IGA_GEN11;
         break;
@@ -4269,9 +4255,7 @@ split(const string & str, const char * delimiter) {
         v.emplace_back(str, start, str.length() - start);
     return v;
 }
-#ifdef DEBUG_VERBOSE_ON
-static int noBankCount = 0;
-#endif
+
 void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binary, uint32_t binarySize)
 {
     //
@@ -4337,70 +4321,131 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
 
         for (auto dcl : Declares)
         {
-            dcl->emit(output, false, m_options->getOption(vISA_SymbolReg));
+            dcl->emit(output);
         }
         output << std::endl;
 
+        auto fmtHex = [](int i) {
+            std::stringstream ss;
+            ss << "0x" << std::hex << std::uppercase << i;
+            return ss.str();
+        };
+
+        const unsigned inputCount = fg.builder->getInputCount();
+        std::vector<std::string> argNames;
+        size_t maxNameLen = 8;
+        for (unsigned id = 0; id < inputCount; id++)
+        {
+            const input_info_t* ii = fg.builder->getInputArg(id);
+            std::stringstream ss;
+            if (ii->dcl && ii->dcl->getName()) {
+                ss << ii->dcl->getName();
+            } else {
+                ss << "__unnamed" << (id + 1);
+            }
+            argNames.push_back(ss.str());
+            maxNameLen = std::max(maxNameLen, argNames.back().size());
+        }
+
         // emit input location and size
-        output << "//.kernel_reordering_info_start" << std::endl;
+        output << "// .inputs" << std::endl;
+               const size_t COLW_IDENT = maxNameLen;
+        static const size_t COLW_TYPE = 8;
+        static const size_t COLW_SIZE = 6;
+        static const size_t COLW_AT = 8;
+        static const size_t COLW_CLASS = 10;
+
+        std::stringstream bordss;
+        bordss << "// ";
+        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_IDENT + 2) << "";
+        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_TYPE + 2) << "";
+        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_SIZE + 2) << "";
+        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_AT + 2) << "";
+        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_CLASS + 2) << "";
+        bordss << '+' << std::endl;
+        std::string border = bordss.str();
+
+        output << border;
         output <<
             "//" <<
-            "  " << std::setw(12) << "id" <<
-            "  " << std::setw(12) << "location" <<
-            "  " << std::setw(12) << "bytes" <<
-            "  " << std::setw(12) << "class" <<
-            "  " << std::setw(12) << "kind" <<
-            std::endl;
+            " | " << std::left << std::setw(COLW_IDENT) << "id" <<
+            " | " << std::left << std::setw(COLW_TYPE) << "type" <<
+            " | " << std::right << std::setw(COLW_SIZE) << "bytes" <<
+            " | " << std::left << std::setw(COLW_AT) << "at" <<
+            " | " << std::left << std::setw(COLW_CLASS) << "class" <<
+            " |" << std::endl;
+        output << border;
 
         const unsigned grfSize = getGRFSize();
-        unsigned int inputCount = fg.builder->getInputCount();
-        for (unsigned int id = 0; id < inputCount; id++)
+        for (unsigned id = 0; id < inputCount; id++)
         {
             const input_info_t* input_info = fg.builder->getInputArg(id);
             //
             output << "//";
             //
             // id
-            std::stringstream ss;
-            ss << ".arg_" << (id + 1);
             output <<
-                "   " << std::setw(12) << ss.str();
+                " | " << std::left << std::setw(COLW_IDENT) << argNames[id];
+            //
+            // type and length
+            //   e.g. :uq x 16
+            const G4_Declare *dcl = input_info->dcl;
+            std::stringstream sstype;
+            if (dcl) {
+                switch (dcl->getElemType()) {
+                case Type_B: sstype << ":b"; break;
+                case Type_W: sstype << ":w"; break;
+                case Type_D: sstype << ":d"; break;
+                case Type_Q: sstype << ":q"; break;
+                case Type_V: sstype << ":v"; break;
+                case Type_UB: sstype << ":ub"; break;
+                case Type_UW: sstype << ":uw"; break;
+                case Type_UD: sstype << ":ud"; break;
+                case Type_UQ: sstype << ":uq"; break;
+                case Type_UV: sstype << ":uv"; break;
+                    //
+                case Type_F:  sstype << ":f"; break;
+                case Type_HF: sstype << ":hf"; break;
+                case Type_DF: sstype << ":df"; break;
+                case Type_NF: sstype << ":nf"; break;
+                default:
+                    sstype << fmtHex((int)dcl->getElemType()) << "?";
+                    break;
+                }
+                if (dcl->getTotalElems() != 1)
+                    sstype << " x " << dcl->getTotalElems();
+            } else {
+                sstype << "?";
+            }
+            output << " | " << std::left << std::setw(COLW_TYPE) << sstype.str();
+            //
+            // size
+            output << " | " << std::right << std::setw(COLW_SIZE) << std::dec << input_info->size;
 
             // location
             unsigned reg = input_info->offset / grfSize,
                      subRegBytes = input_info->offset % grfSize;
-            std::stringstream ss2;
-            ss2 << "r" << reg;
+            std::stringstream ssloc;
+            ssloc << "r" << reg;
             if (subRegBytes != 0)
-                ss2 << "+" << subRegBytes;
-            //
-            // offset and size
-            output <<
-                "  " << std::setw(12) << ss2.str() <<
-                "  " << std::setw(12) << input_info->size;
+                ssloc << "+" << subRegBytes;
+            output << " | " << std::left << std::setw(COLW_AT) << ssloc.str();
 
-            // class and kind
-            output << "  ";
+            // class
+            std::string inpcls;
             switch (input_info->getInputClass()) {
-            case INPUT_GENERAL: output << std::setw(12) << "general"; break;
-            case INPUT_SAMPLER: output << std::setw(12) << "sampler"; break;
-            case INPUT_SURFACE: output << std::setw(12) << "surface"; break;
-            default: output << std::setw(12) << (int)input_info->getInputClass(); break;
+            case INPUT_GENERAL: inpcls = "general"; break;
+            case INPUT_SAMPLER: inpcls = "sampler"; break;
+            case INPUT_SURFACE: inpcls = "surface"; break;
+            default: inpcls = fmtHex((int)input_info->getInputClass()); break;
             }
+            output << " | " << std::left << std::setw(COLW_CLASS) << inpcls;
             //
-            output << "  ";
-            switch ((int)input_info->getImplicitKind()) {
-            case 0x00: output << std::setw(12) << "explicit"; break;
-            case 0x01: output << std::setw(12) << "local_size"; break;
-            case 0x02: output << std::setw(12) << "group_count"; break;
-            case 0x03: output << std::setw(12) << "local_id"; break;
-            case 0x10: output << std::setw(12) << "pseudo_input"; break;
-            default: output << std::setw(12) << (int)input_info->getImplicitKind(); break;
-            }
-            output << std::endl;
+            output << " |" << std::endl;
         }
+        output << border;
+        output << std::endl;
 
-        output << "//.kernel_reordering_info_end" << std::endl;
         if (getPlatformGeneration(getGenxPlatform()) < PlatformGen::GEN12)
         {
             fg.BCStats.clear();
@@ -4588,7 +4633,15 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
                     output << "// Text representation might not be correct" << std::endl;
                 }
 
-                kView.getInstSyntax(pc, stringBuffer, 512, labelerLambda, (void*)&lambdaArg);
+                static const uint32_t IGA_FMT_OPTS =
+                    IGA_FORMATTING_OPT_PRINT_LDST
+                    // | IGA_FORMATTING_OPT_SYNTAX_EXTS
+                    ;
+                kView.getInstSyntax(
+                    pc,
+                    stringBuffer, 512,
+                    IGA_FMT_OPTS,
+                    labelerLambda, (void*)&lambdaArg);
                 pc += kView.getInstSize(pc);
 
                 (*itBB)->emitBasicInstructionIga(stringBuffer, output, itInst, suppressRegs, lastRegs);
@@ -4606,9 +4659,7 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
 
         }
     }
-#ifdef DEBUG_VERBOSE_ON
-    printf("noBankCount: %d\n", noBankCount);
-#endif
+
     if (!newAsm)
     {
         //Step4: emit clean-up.
@@ -4627,16 +4678,6 @@ void G4_Kernel::emit_asm(std::ostream& output, bool beforeRegAlloc, void * binar
             output << "//.twoSrcBankConflicts: " <<  fg.G12BCStats.twoSrcBC << "\n";
             output << "//.SIMD8s: " <<  fg.G12BCStats.simd8 << "\n//\n";
             output << "//.RMWs: " << fg.numRMWs << "\n//\n";
-            output << "//.sync.nop number: " << syncInstCount << "\n";
-            output << "//.sync.allwr number: " << AWSyncInstCount << "\n";
-            output << "//.sync.allrd number: " << ARSyncInstCount << "\n";
-            output << "//.sync.all wr number: " << AWSyncAllCount << "\n";
-            output << "//.sync.all rd number: " << ARSyncAllCount << "\n";
-            output << "//.Token reuse times: " << tokenReuseCount << "\n";
-            output << "//.Pruned edge number: " << prunedDepEdges << "\n";
-            output << "//.Pruned global edge number: " << prunedGlobalEdgeNum << "\n";
-            output << "//.Pruned Diff BB edge number: " << prunedDiffBBEdgeNum << "\n";
-            output << "//.Pruned Diff BB Same token edge number: " << prunedDiffBBSameTokenEdgeNum << "\n";
         }
         else
         {
@@ -4660,11 +4701,10 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     G4_DstRegRegion* movDst = builder->Create_Dst_Opnd_From_Dcl(dcl, 1);
     G4_SrcRegRegion* r0Src = builder->Create_Src_Opnd_From_Dcl(
         builder->getBuiltinR0(), builder->getRegionStride1());
-    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false,
-        lastInst ? lastInst->getLineNo() : 0, lastInst ? lastInst->getCISAOff() : UNMAPPABLE_VISA_INDEX,
-        lastInst ? lastInst->getSrcFilename() : nullptr);
+    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false);
     if (lastInst)
     {
+        movInst->setCISAOff(lastInst->getCISAOff());
         movInst->setLocation(lastInst->getLocation());
     }
     instList.push_back(movInst);
@@ -4727,7 +4767,7 @@ void G4_BB::emitInstructionInfo(std::ostream& output, INST_LIST_ITER &it)
 
     if (emitFile)
     {
-        output << "// File: " << curFilename << "\n";
+        output << "\n// File: " << curFilename << "\n";
     }
 
     if (emitLineNo)
@@ -4883,15 +4923,6 @@ void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
                 maxGRFNum = ((execSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ) > maxGRFNum ?
                     ((execSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ) : maxGRFNum;
             }
-
-#ifdef DEBUG_VERBOSE_ON
-            if (((regNum[0][1] & 0x02) == (regNum[0][2] & 0x02)) &&
-                ((regNum[0][1] >= SECOND_HALF_BANK_START_GRF && regNum[0][2] < SECOND_HALF_BANK_START_GRF) ||
-                (regNum[0][1] < SECOND_HALF_BANK_START_GRF && regNum[0][2] >= SECOND_HALF_BANK_START_GRF)))
-            {
-                noBankCount++;
-            }
-#endif
         }
         output << "BC=";
         if (!parent->builder->twoSourcesCollision())
@@ -5015,7 +5046,7 @@ void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
     }
 }
 
-static bool hasInternalConflict(int reg1, int reg2)
+static bool hasInternalConflict(IR_Builder *builder, int reg1, int reg2)
 {
     int bundleID1 = (reg1 % 16) / 2;
     int bankID1 = reg1 % 2;
@@ -5191,33 +5222,20 @@ static int getConflictTimesForTGL(std::ostream& output, int *firstRegCandidate, 
 
 /*
  * Gen12 BC evaluation
- * In Gen12, there are 8 bundles and 2 banks per HW thread.
- * Banks are divided according to EVEN/ODD of register index: 0101010101010101
- * There are 8 bundles per 16 registers:  0011223344556677
- * For two adjacent instructions: inst1 and inst2,  inst1_src1(, inst1_src2) and inst2_src0 will be read in same cycle
- * Considered HW swap and read suppresion mechanisms
- * HW swap:
- *     The origional GRF register reading sequence for a three source instruction is: src0 in cycle0 and src1 and src2 in cycle2.
- *     HW swap mechanism detects the conflict between src1 and src2, if there is a conflict,  HW will read src1 in cycle0 and src0 and src2 in cycle1.
- *     Note that:
- *     1. for SIMD16, HW swap only happens when detecting conflicts in first simd8's registers. conflict in second simd8 will not trigger swap.
- *     2. for SIMD16, when swapping happens, the src1 and src0 of both simd8 instructions will be swapped.
+ * All read suppression is GRF granularity based.
+ * Read suppression only happens between or within a physical instruction not compressed one. Compressed one will be split into physical instructions.
  * Read suppression between instructions:
  *     The read suppression mechanism is used to save the GRF register reading operations with a register cache in HW. The suppression we talked here
  *     is the suppression between instructions. For each source operand slot, HW provide a GRF cache. With the cache, if the same GRF will be read in
  *     the instruction, the read will not happen, the cached value will be used directly.
  *     Note that:
- *     1. The cache will only buffer the latest GRF which was read
- *     2. The cache will be flushed if the buffered register is used as destination operand.
- *     3. For SIMD16, if one source is scalar, the read suppression doen't happen, no matter within the SIMD16 instruction or with the following instruction.
- *     4. The read suppression between instructions only happens in src1 and src2
- *     5. 2 GRFs read suppression for src1 and 1 GRF read suppression for src0 and src2.
+ *     1. Inter read suppression is the suppression cache based.
+ *     2. For compressed instructino 2 GRFs read suppression for src1 for DF and F type operands and 1 GRF read suppression for src0 and src2.
+ *     3. The slot cache will be flushed if the buffered register is used as destination operand.
+ *
  * Read suppression within a instruction:
  *     1. Works for all source operands.
- *
- * suppressRegs is used as the read suppression buffer
- * lastDst is used to keep dst register of last instruction. It's used to clear read suppression buffer. Once a register is defined, it's not buffered anymore
- * lastRegs is used to keep the src1 and src2 of last instruction, in case there is conflict with current instruction GRF read
+ *     2. intra suppression is the GRF read operation based(no read no suppression).
  */
 uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, int *suppressRegs, int &sameConflictTimes, int &twoSrcConflicts, int &simd16RS, bool zeroOne, bool isTGLLP)
 {
@@ -5238,10 +5256,10 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
     }
 
     int currInstRegs[2][G4_MAX_SRCS];
+    int readRegs[2][G4_MAX_SRCS];
     int currInstExecSize[G4_MAX_SRCS] = {0};
     int firstRegCandidate[G4_MAX_SRCS];
     int secondRegCandidate[G4_MAX_SRCS];
-    bool isScalar[G4_MAX_SRCS];
     int candidateNum = 0;
     int dstExecSize = 0;
     int dstRegs[2];
@@ -5252,12 +5270,16 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         setInValidReg(secondRegCandidate[i]);
         setInValidReg(currInstRegs[0][i]);
         setInValidReg(currInstRegs[1][i]);
-        isScalar[i] = false;
+        setInValidReg(readRegs[0][i]);
+        setInValidReg(readRegs[1][i]);
     }
     setInValidReg(dstRegs[0]);
     setInValidReg(dstRegs[1]);
 
-    bool instSplit = false;
+    bool isCompressedInst = false;
+    bool isLastInstCompressed = suppressRegs[4] == 1;
+    bool isFDFSrc1 = false;
+    bool isSrc1Suppressed = false;
 
     //Get Dst
     G4_DstRegRegion* dstOpnd = inst->getDst();
@@ -5268,10 +5290,10 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
         dstRegs[0] = byteAddress / GENX_GRF_REG_SIZ;
-        if (dstExecSize > 32)
+        if (dstExecSize > getGRFSize())
         {
             dstRegs[1] = dstRegs[0] + (dstExecSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
-            instSplit = true;
+            isCompressedInst = true;
         }
     }
 
@@ -5292,77 +5314,30 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
                     currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
-
-                    if (currInstExecSize[i] > 32)
+                    if (i == 1)
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + 1;// (currInstExecSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
-                        instSplit = true;
+                        isFDFSrc1 = IS_TYPE_F32_F64(srcOpnd->getType());
                     }
-                    else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
+                    if (currInstExecSize[i] > getGRFSize())
+                    {
+                        currInstRegs[1][i] = currInstRegs[0][i] + 1;
+                        isCompressedInst = true;
+                    }
+                    else //Read suppression will be handled later
                     {
                         currInstRegs[1][i] = currInstRegs[0][i];
-                        isScalar[i] = true;
-                    }
-                    else
-                    {
-                        setInValidReg(currInstRegs[1][i]);
                     }
                 }
             }
         }
     }
 
-    if (instSplit)
+    if (isCompressedInst)
     {
         parent->G12BCStats.addSIMD8();
     }
 
-    bool lastInstSplit = suppressRegs[4] == 1;
-
-    if (instSplit != lastInstSplit)
-    {
-        for (int i = 0; i < 4; i++)
-        {
-            setInValidReg(suppressRegs[i]);
-        }
-    }
-    else
-    {
-        //Read Suppression for current instruction
-        output << " R{";
-        for (int i = 0; i < 3; i++)
-        {
-            if (instSplit && i != 1)
-            {
-                continue;
-            }
-
-            if (!instSplit && i == 1)
-            {
-                continue;
-            }
-
-            if (isValidReg(suppressRegs[i]) &&
-                currInstRegs[0][i] == suppressRegs[i] && !isScalar[i])
-            {
-                setInValidReg(currInstRegs[0][i]);
-                setInValidReg(currInstRegs[1][i]);
-                output << "r" << suppressRegs[i] << ",";
-            }
-        }
-        output << "}";
-    }
-
-    if (instSplit)
-    {
-        suppressRegs[4] = 1;
-    }
-    else
-    {
-        suppressRegs[4] = 0;
-    }
-
-    //Kill all previous read suppression candiadte if it wrote in DST
+    //Kill previous read suppression candiadte if it wrote in DST
     if (isValidReg(dstRegs[0]))
     {
         for (int i = 0; i < 4; i++)
@@ -5374,8 +5349,63 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    //No suppression, update the suppressRegs[0] for gen12lp
-    //suppressRegs[1], suppressRegs[2] will be updated with next instruction
+    //Read Suppression from previous instruction
+    //Keep suppressRegs, if suppression happen
+    //Update suppression, and registers to be read.
+    // inst1: mad(8)   r10, r20, r20, r40
+    // inst2: mad(8)   r10, r30, r20, r50
+    // the suppression of r20 inst2 will happen
+    output << " R{";
+    for (int i = 0; i < 3; i++)
+    {
+        //Read suppression for src0, src1 and src2
+        if (isValidReg(suppressRegs[i]) &&
+            currInstRegs[0][i] == suppressRegs[i])
+        {
+            setInValidReg(currInstRegs[0][i]);
+            if (isCompressedInst &&
+                isLastInstCompressed && //Two GRF operand instructions
+                isFDFSrc1 &&
+                i == 1)
+            {
+                setInValidReg(currInstRegs[1][i]);
+                isSrc1Suppressed = true;
+            }
+            output << "r" << suppressRegs[i] << ",";
+        }
+        else
+        {
+            suppressRegs[i] = currInstRegs[0][i];
+        }
+    }
+    output << "}";
+
+    //Intra suppression for the first GRF
+    //Inter and intra will happen only once, if inter happen, intra wouldn't read
+    //Such as in following case, the src1 r20 of inst2 need be read because src0 r20 of inst2 is suppressed
+    // inst1: mad(8)   r10, r20, r30, r40
+    // inst2: mad(8)   r10, r20, r20, r50
+    // for this case, currInstRegs[0][j] is updated to invalid in this case because inter is handled first.
+    output << " IR{";
+    for (int i = 0; i < inst->getNumSrc(); i++)
+    {
+        if (isValidReg(currInstRegs[0][i]))
+        {
+            for (int k = 0; k < G4_MAX_SRCS; k++)
+            {
+                if (isValidReg(readRegs[0][k]) && readRegs[0][k] == currInstRegs[0][i])
+                {
+                    setInValidReg(currInstRegs[0][i]);
+                    output << "r" << readRegs[0][k] << ",";
+                }
+            }
+            readRegs[0][i] = currInstRegs[0][i];
+        }
+    }
+    output << "}";
+
+    suppressRegs[4] = isCompressedInst ? 1 : 0;
+
     int conflictTimes = 0;
     for (int i = 0; i < 3; i++)
     {
@@ -5386,6 +5416,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
+    //Get the bank conflict for the first GRF instruction.
     if (candidateNum > 1)
     {
         conflictTimes = getConflictTimesForTGL(output, firstRegCandidate, sameConflictTimes, zeroOne, isTGLLP);
@@ -5395,7 +5426,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    if (instSplit)
+    if (isCompressedInst)
     {
         if (isValidReg(dstRegs[1]))
         {
@@ -5403,10 +5434,52 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
             {
                 if (suppressRegs[i] == dstRegs[1])
                 {
+                    //Should be no real overlap, only GRF level overlap may happen
                     setInValidReg(suppressRegs[i]);
                 }
             }
         }
+
+        output << " R{";
+        //Inter for the second instruction
+        for (int i = 0; i < 3; i++)
+        {
+            if (isSrc1Suppressed)
+            {
+                continue;
+            }
+            //Read suppression for src0, src1 and src2
+            if (isValidReg(suppressRegs[i]) &&
+                currInstRegs[1][i] == suppressRegs[i])
+            {
+                setInValidReg(currInstRegs[1][i]);
+                output << "r" << suppressRegs[i] << ",";
+            }
+            else
+            {
+                suppressRegs[i] = currInstRegs[1][i];
+            }
+        }
+        output << "}";
+
+        output << " IR{";
+        //Intra suppression for the second instruction
+        for (int i = 0; i < inst->getNumSrc(); i++)
+        {
+            if (isValidReg(currInstRegs[1][i]))
+            {
+                for (int k = 0; k < G4_MAX_SRCS; k++)
+                {
+                    if (isValidReg(readRegs[1][k]) && readRegs[1][k] == currInstRegs[1][i])
+                    {
+                        setInValidReg(currInstRegs[1][i]);
+                        output << "r" << readRegs[1][k] << ",";
+                    }
+                }
+                readRegs[1][i] = currInstRegs[1][i];
+            }
+        }
+        output << "}";
 
         candidateNum = 0;
         //For SIMD8, if any GRF0 of src1 or src2 of inst1 is GRF register
@@ -5435,15 +5508,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
         }
     }
 
-    for (int i = 0; i < 3; i++)
-    {
-        if (isValidReg(currInstRegs[0][i]))
-        {
-            suppressRegs[i] = currInstRegs[0][i];
-        }
-    }
-
-    if (conflictTimes != 0)
+    if (conflictTimes != 0 || parent->builder->getOption(vISA_DumpAllBCInfo))
     {
         output << " {";
         output << "BC=";
@@ -5455,6 +5520,19 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
     return conflictTimes;
 }
 
+/*
+* In Gen12lp, there are 8 bundles and 2 banks per HW thread.
+* Banks are divided according to EVEN / ODD of register index: 0101010101010101
+* There are 8 bundles per 16 registers : 0011223344556677
+* For two adjacent instructions : inst1 and inst2, inst1_src1(, inst1_src2) and inst2_src0 will be read in same cycle
+* Considered HW swapand read suppresion mechanisms
+* HW swap :
+*The origional GRF register reading sequence for a three source instruction is : src0 in cycle0and src1and src2 in cycle2.
+* HW swap mechanism detects the conflict between src1and src2, if there is a conflict, HW will read src1 in cycle0and src0and src2 in cycle1.
+* Note that :
+* 1. for SIMD16, HW swap only happens when detecting conflicts in first simd8's registers. conflict in second simd8 will not trigger swap.
+* 2. for SIMD16, when swapping happens, the src1and src0 of both simd8 instructions will be swapped.
+*/
 uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, int *suppressRegs, int *lastRegs, int &sameConflictTimes, int &twoSrcConflicts, int &simd16RS)
 {
     std::stringstream output;
@@ -5527,7 +5605,7 @@ uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, 
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
         dstRegs[0] = byteAddress / GENX_GRF_REG_SIZ;
-        if (dstExecSize > 32)
+        if (dstExecSize > getGRFSize())
         {
             dstRegs[1] = dstRegs[0] + (dstExecSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
             instSplit = true;
@@ -5552,7 +5630,7 @@ uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, 
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
                     currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
 
-                    if (currInstExecSize[i] > 32)
+                    if (currInstExecSize[i] > getGRFSize())
                     {
                         currInstRegs[1][i] = currInstRegs[0][i] + (currInstExecSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
                         instSplit = true;
@@ -5608,7 +5686,7 @@ uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, 
     //SWAP: has lower proirity than read suppression
     //For SIMD16, the SWAP is triggered by first register, but the second one will be swapped as well
     if (isValidReg(currInstRegs[0][0]) && isValidReg(currInstRegs[0][1]) && isValidReg(currInstRegs[0][2]) &&
-        hasInternalConflict(currInstRegs[0][1], currInstRegs[0][2]))
+        hasInternalConflict(parent->builder, currInstRegs[0][1], currInstRegs[0][2]))
     {
         int tmpReg = currInstRegs[0][1];
         currInstRegs[0][1] = currInstRegs[0][0];
@@ -5775,13 +5853,21 @@ void G4_BB::emitBasicInstructionIga(char* instSyntax, std::ostream& output, INST
 {
     G4_INST* inst = *it;
 
+    auto platform = inst->getPlatform();
+
     output << instSyntax;
     if (!inst->isLabel() && inst->opcode() < G4_NUM_OPCODE)
     {
         output << " //";
+
+        auto comments = inst->getComments();
+        if (comments != "")
+        {
+            output << " " << comments << ", ";
+        }
         emitInstId(output, inst->getLineNo(), inst->getCISAOff(), inst->getLexicalId(), inst->getGenOffset());
 
-        if (getPlatformGeneration(getGenxPlatform()) < PlatformGen::GEN12)
+        if (getPlatformGeneration(platform) < PlatformGen::GEN12)
         {
             emitBankConflict(output, inst);
         }
@@ -5791,7 +5877,7 @@ void G4_BB::emitBasicInstructionIga(char* instSyntax, std::ostream& output, INST
             int twoSrcConflicts = 0;
             int simd16SuppressionConflicts = 0;
             unsigned BCNum = 0;
-            if (getGenxPlatform() == GENX_TGLLP && GetStepping() == Step_A)
+            if (parent->builder->hasEarlyGRFRead())
             {
                 BCNum = emitBankConflictGen12lp(output, inst, suppressRegs, lastRegs, sameBankConflicts, twoSrcConflicts, simd16SuppressionConflicts);
             }
@@ -5811,6 +5897,7 @@ void G4_BB::emitBasicInstructionIga(char* instSyntax, std::ostream& output, INST
 }
 void G4_BB::emitBasicInstruction(std::ostream& output, INST_LIST_ITER &it)
 {
+    const void *llvmInst = (*it)->GetLLVMInst();
     if ((*it)->isSend())
     {
         //
@@ -5872,6 +5959,17 @@ void G4_BB::resetLocalId()
     }
 }
 
+bool G4_BB::isAllLaneActive() const
+{
+    G4_Kernel* pK = parent->getKernel();
+    if (pK->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM && !isDivergent())
+    {
+        // CM: if BB isn't divergent, all lanes (32) must be active (dmask = 0xFFFFFFFF)
+        return true;
+    }
+    return false;
+}
+
 const char* G4_BB::getBBTypeStr() const
 {
     switch (getBBType()) {
@@ -5896,9 +5994,9 @@ void G4_BB::print(std::ostream& OS) const
     {
         OS << " [" << getBBTypeStr() << "], ";
     }
-    if (isInSimdFlow())
+    if (isDivergent())
     {
-        OS << " [inSimdFlow],";
+        OS << " [inDivergent],";
     }
     OS << "        Pred: ";
     for (auto pred : Preds)
@@ -5991,7 +6089,7 @@ void GlobalOpndHashTable::dump()
     for (auto&& entry : globalOperands)
     {
         G4_Declare* dcl = entry.first;
-        dcl->emit(std::cerr, false, false);
+        dcl->dump();
         if ((dcl->getRegFile() & G4_FLAG) == 0)
         {
             std::vector<bool> globalElt;
@@ -6056,7 +6154,7 @@ void G4_Kernel::computeChannelSlicing()
     std::unordered_map<G4_Declare*, std::bitset<32>> emaskRef;
     for (auto bb : fg)
     {
-        for (auto inst : bb->getInstList())
+        for (auto inst : *bb)
         {
             if (inst->isSend())
                 continue;
@@ -6122,30 +6220,37 @@ void G4_Kernel::calculateSimdSize()
         return;
     }
 
-    simdSize = 8;
-
-    for (auto bb : fg)
+    // First, get simdsize from attribute (0 : not given)
+    // If not 0|8|16|32, wrong value from attribute.
+    simdSize = m_kernelAttrs->getIntKernelAttribute(Attributes::ATTR_SimdSize);
+    if (simdSize != 8 && simdSize != 16 && simdSize != 32)
     {
-        for (auto inst : *bb)
+        assert(simdSize == 0 && "vISA: wrong value for SimdSize attribute");
+        simdSize = 8;
+
+        for (auto bb : fg)
         {
-            // do not consider send since for certain messages we have to set its execution size
-            // to 16 even in simd8 shaders
-            if (!inst->isLabel() && !inst->isSend())
+            for (auto inst : *bb)
             {
-                uint32_t size = inst->getMaskOffset() + inst->getExecSize();
-                if (size > 16)
+                // do not consider send since for certain messages we have to set its execution size
+                // to 16 even in simd8 shaders
+                if (!inst->isLabel() && !inst->isSend())
                 {
-                    simdSize = 32;
-                    break;
-                }
-                else if (size > 8)
-                {
-                    simdSize = 16;
+                    uint32_t size = inst->getMaskOffset() + inst->getExecSize();
+                    if (size > 16)
+                    {
+                        simdSize = 32;
+                        break;
+                    }
+                    else if (size > 8)
+                    {
+                        simdSize = 16;
+                    }
                 }
             }
+            if (simdSize == 32)
+                break;
         }
-        if (simdSize == 32)
-            break;
     }
 
     if(GlobalRA::useGenericAugAlign())
@@ -6832,20 +6937,20 @@ bool FlowGraph::convertJmpiToGoto()
                     {
                         // P = P & 1
                         auto pSrc1 = builder->createImm(1, Type_UW);
-                        auto pInst = builder->createInternalInst(
-                            nullptr, G4_and, nullptr, false, 1, pDst, pSrc0, pSrc1,
-                            InstOpt_M0 | InstOpt_WriteEnable);
-                        bb->insert(I, pInst);
+                        auto pInst = builder->createBinOp(
+                            G4_and, 1, pDst, pSrc0, pSrc1,
+                            InstOpt_M0 | InstOpt_WriteEnable, false);
+                        bb->insertBefore(I, pInst);
                     }
                     else if (G4_Predicate::isAnyH(pCtrl))
                     {
                         // P = P & mask
                         uint32_t mask = getFlagMask(pCtrl);
                         auto pSrc1 = builder->createImm(truncMask(mask, DstTy), DstTy);
-                        auto pInst = builder->createInternalInst(
-                            nullptr, G4_and, nullptr, false, 1, pDst, pSrc0, pSrc1,
-                            InstOpt_M0 | InstOpt_WriteEnable);
-                        bb->insert(I, pInst);
+                        auto pInst = builder->createBinOp(
+                            G4_and, 1, pDst, pSrc0, pSrc1,
+                            InstOpt_M0 | InstOpt_WriteEnable, false);
+                        bb->insertBefore(I, pInst);
                     }
                     else
                     {
@@ -6853,10 +6958,10 @@ bool FlowGraph::convertJmpiToGoto()
                         // P = P | mask
                         uint32_t mask = getFlagMask(pCtrl);
                         auto pSrc1 = builder->createImm(truncMask(mask, DstTy), DstTy);
-                        auto pInst = builder->createInternalInst(
-                            nullptr, G4_or, nullptr, false, 1, pDst, pSrc0, pSrc1,
-                            InstOpt_M0 | InstOpt_WriteEnable);
-                        bb->insert(I, pInst);
+                        auto pInst = builder->createBinOp(
+                            G4_or, 1, pDst, pSrc0, pSrc1,
+                            InstOpt_M0 | InstOpt_WriteEnable, false);
+                        bb->insertBefore(I, pInst);
                     }
 
                     // Adjust pred control to the new execution size and build the
@@ -6891,7 +6996,10 @@ void FlowGraph::print(std::ostream& OS) const
         kname = getKernel()->getName();
     }
     kname = kname ? kname : "unnamed";
-    OS << "\n\nCFG: " << kname << "\n\n";
+    OS  << "\n\nCFG: "
+        << kname
+        << (builder->getIsKernel() ? " [kernel]" : " [non-kernel function]")
+        << "\n\n";
     for (auto BB : BBs) {
         BB->print(OS);
     }
@@ -6928,6 +7036,13 @@ FlowGraph::~FlowGraph()
     }
 }
 
+RelocationEntry& RelocationEntry::createRelocation(G4_Kernel& kernel, G4_INST& inst,
+    int opndPos, const std::string& symbolName, RelocationType type)
+{
+    kernel.getRelocationTable().emplace_back(RelocationEntry(&inst, opndPos, type, symbolName));
+    return kernel.getRelocationTable().back();
+}
+
 KernelDebugInfo* G4_Kernel::getKernelDebugInfo()
 {
     if (kernelDbgInfo == nullptr)
@@ -6950,7 +7065,23 @@ G4_Kernel::~G4_Kernel()
         gtPinInfo->~gtPinData();
     }
 
+    if (varSplitPass)
+    {
+        delete varSplitPass;
+        varSplitPass = nullptr;
+    }
+
     Declares.clear();
+}
+
+VarSplitPass* G4_Kernel::getVarSplitPass()
+{
+    if (varSplitPass)
+        return varSplitPass;
+
+    varSplitPass = new VarSplitPass(*this);
+
+    return varSplitPass;
 }
 
 //
@@ -6976,7 +7107,7 @@ void G4_Kernel::renameAliasDeclares()
             {
                 newName += "_" + to_string(offset);
             }
-            dcl->setName(fg.builder->getNameString(fg.mem, 64, newName.c_str()));
+            dcl->setName(fg.builder->getNameString(fg.mem, 64, "%s", newName.c_str()));
         }
     }
 #endif
@@ -7027,6 +7158,19 @@ unsigned int getBinOffsetNextBB(G4_Kernel& kernel, G4_BB* bb)
     return (unsigned int)(*iter)->getGenOffset();
 }
 
+uint8_t gtPinData::getNumBytesScratchUse()
+{
+    if (gtpin_init)
+    {
+        return gtpin_init->scratch_area_size;
+    }
+    else if (isGTPinInitFromL0())
+    {
+        return kernel.getOptions()->getuInt32Option(vISA_GTPinScratchAreaSize);
+    }
+    return 0;
+}
+
 unsigned int gtPinData::getCrossThreadNextOff()
 {
     return getBinOffsetNextBB(kernel, crossThreadPayloadBB);
@@ -7039,6 +7183,11 @@ unsigned int gtPinData::getPerThreadNextOff()
 
 void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
 {
+    if (!gtpin_init && !gtpinInitFromL0)
+    {
+        bufferSize = 0;
+        return nullptr;
+    }
     gtpin::igc::igc_init_t t;
     std::vector<unsigned char> buffer;
     unsigned int numTokens = 0;
@@ -7048,26 +7197,55 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     memset(&t, 0, sizeof(t));
 
     t.version = gtpin::igc::GTPIN_IGC_INTERFACE_VERSION;
-    if (gtpin_init->grf_info)
+    //t.igc_init_size = sizeof(t);
+    if (gtpinInitFromL0)
     {
-        if (!stackABI)
-            t.grf_info = 1;
-        numTokens++;
+        if (kernel.getOption(vISA_GetFreeGRFInfo))
+        {
+            if (!stackABI)
+                t.grf_info = 1;
+            numTokens++;
+        }
+
+        if (kernel.getOption(vISA_GTPinReRA))
+        {
+            if (!stackABI)
+                t.re_ra = 1;
+        }
+
+        if (kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
+            t.srcline_mapping = 1;
+
+        if (kernel.getOptions()->getuInt32Option(vISA_GTPinScratchAreaSize) > 0)
+        {
+            t.scratch_area_size = getNumBytesScratchUse();
+            numTokens++;
+        }
     }
-
-    if (gtpin_init->re_ra)
+    else
     {
-        if(!stackABI)
-            t.re_ra = 1;
-    }
+        t.version = std::min(gtpin_init->version, gtpin::igc::GTPIN_IGC_INTERFACE_VERSION);
+        if (gtpin_init->grf_info)
+        {
+            if (!stackABI)
+                t.grf_info = 1;
+            numTokens++;
+        }
 
-    if (gtpin_init->srcline_mapping && kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
-        t.srcline_mapping = 1;
+        if (gtpin_init->re_ra)
+        {
+            if (!stackABI)
+                t.re_ra = 1;
+        }
 
-    if (gtpin_init->scratch_area_size > 0)
-    {
-        t.scratch_area_size = gtpin_init->scratch_area_size;
-        numTokens++;
+        if (gtpin_init->srcline_mapping && kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
+            t.srcline_mapping = 1;
+
+        if (gtpin_init->scratch_area_size > 0)
+        {
+            t.scratch_area_size = gtpin_init->scratch_area_size;
+            numTokens++;
+        }
     }
 
     // For payload offsets
@@ -7119,6 +7297,34 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     void* gtpinBuffer = allocCodeBlock(bufferSize);
 
     memcpy_s(gtpinBuffer, bufferSize, (const void*)(buffer.data()), bufferSize);
+
+    // Dump buffer with shader dumps
+    if (kernel.getOption(vISA_outputToFile))
+    {
+        auto asmName = kernel.getOptions()->getOptionCstr(VISA_AsmFileName);
+        if (asmName)
+        {
+            std::ofstream ofInit;
+            std::stringstream ssInit;
+            ssInit << std::string(asmName) << ".gtpin_igc_init";
+            ofInit.open(ssInit.str(), std::ofstream::binary);
+            if (gtpin_init)
+            {
+                ofInit.write((const char*)gtpin_init, sizeof(*gtpin_init));
+            }
+            ofInit.close();
+
+            std::ofstream ofInfo;
+            std::stringstream ssInfo;
+            ssInfo << std::string(asmName) << ".gtpin_igc_info";
+            ofInfo.open(ssInfo.str(), std::ofstream::binary);
+            if (gtpinBuffer)
+            {
+                ofInfo.write((const char*)gtpinBuffer, bufferSize);
+            }
+            ofInfo.close();
+        }
+    }
 
     return gtpinBuffer;
 }
@@ -7200,24 +7406,42 @@ void RelocationEntry::doRelocation(const G4_Kernel& kernel, void* binary, uint32
 
 uint32_t RelocationEntry::getTargetOffset(const IR_Builder& builder) const
 {
-    // currently we only support relocation on mov instruction
-    assert(inst->isMov());
+    // instruction being relocated must not be compacted, or the offset need to be re-adjusted
+    // FIXME: This only check if vISA force to compact the instruction, it cannot make sure
+    // the Binary encoder won't compact it
     assert(inst->isCompactedInst() == false);
-    auto src0 = inst->getSrc(0);
-    assert(src0->isRelocImm() && ((src0->getType() == Type_UD) || (src0->getType() == Type_UQ)));
 
-    // When src0 type is 64 bits:
-    //  On PreGen12:
-    //   Src0.imm[31:0] mapped to Instruction [95:64]
-    //   Src0.imm[63:32] mapped to Instruction [127:96]
-    //  On Gen12+:
-    //   Src0.imm[31:0] mapped to Instruction [127:96]
-    //   Src0.imm[63:32] mapped to Instruction [95:64]
+    G4_Operand* target_operand = inst->getSrc(opndPos);
+    assert(target_operand->isRelocImm());
 
-    // When src0 type is 32 bits:
-    //   Src0.imm[31:0] mapped to instruction [127:96]
+    switch (inst->opcode()) {
+    case G4_mov:
+        // When src0 type is 64 bits:
+        //  On PreGen12:
+        //   Src0.imm[31:0] mapped to Instruction [95:64]
+        //   Src0.imm[63:32] mapped to Instruction [127:96]
+        //  On Gen12+:
+        //   Src0.imm[31:0] mapped to Instruction [127:96]
+        //   Src0.imm[63:32] mapped to Instruction [95:64]
+        // When src0 type is 32 bits:
+        //   Src0.imm[31:0] mapped to instruction [127:96]
+        assert((target_operand->getType() == Type_UD) || (target_operand->getType() == Type_UQ));
+        assert(opndPos == 0);
+        return (target_operand->getType() == Type_UD) ? 12 : 8;
 
-    return (src0->getType() == Type_UD) ? 12 : 8;
+    case G4_add:
+        // add instruction cannot have 64-bit imm
+        assert(relocType != R_SYM_ADDR && relocType != R_SYM_ADDR_32_HI);
+        assert(opndPos == 1);
+        // Src1.imm[31:0] mapped to Instruction [127:96]
+        return 12;
+    default:
+        break;
+    }
+
+    // currently we only support relocation on mov or add instruction
+    assert(false && "Unreachable");
+    return 0;
 }
 
 void RelocationEntry::dump() const
@@ -7238,6 +7462,9 @@ void RelocationEntry::dump() const
             break;
         case RelocationType::R_SYM_ADDR_32_HI:
             std::cerr << "R_SYM_ADDR_32_HI: symbol name = " << symName;
+            break;
+        case RelocationType::R_PER_THREAD_PAYLOAD_OFFSET_32:
+            std::cerr << "R_PER_THREAD_PAYLOAD_OFFSET_32: symbol name = " << symName;
             break;
     }
     std::cerr << "\n";

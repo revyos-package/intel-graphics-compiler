@@ -108,11 +108,7 @@ namespace IGC {
         typedef std::pair<llvm::Instruction*, llvm::Instruction*> InstPair;
         typedef smallvector<llvm::Instruction*, 4> InstVec;
 
-        // this vector maps all instructions leading to source0 of phi instruction to
-        // the corresponding instructions of source1
-        std::vector<InstPair> instMap;
-
-        void appendIfNotExist(InstPair src)
+        void appendIfNotExist(InstPair src, std::vector<InstPair> &instMap)
         {
             if (std::find(instMap.begin(), instMap.end(), src) == instMap.end())
             {
@@ -136,7 +132,7 @@ namespace IGC {
 
         // check if two values are congruent (derived from same values), and
         // record all intermediate results in vector.
-        bool checkCongruent(const InstPair& values, InstVec& leaves, unsigned depth);
+        bool checkCongruent(std::vector<InstPair> &instMap, const InstPair& values, InstVec& leaves, unsigned depth);
 
         /**
          * Detech phi with congruent incoming values, and try to hoist them to
@@ -151,6 +147,10 @@ namespace IGC {
         bool canLoopSink(llvm::Instruction* I, llvm::Loop* L, llvm::BasicBlock* BB);
         bool LoopSinkInstructions(
             llvm::SmallVector<llvm::Instruction*, 64> sinkCandidates, llvm::Loop* L);
+
+        // Move referencing DbgValueInst intrinsics calls after defining instructions
+        void ProcessDbgValueInst(llvm::BasicBlock& blk);
+
     };
 
 }

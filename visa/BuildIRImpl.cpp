@@ -35,13 +35,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Common_ISA_util.h"
 #include "Common_ISA_framework.h"
 #include "JitterDataStruct.h"
-#include "VISAKernel.h"
-#include "BuildCISAIR.h"
 #include "BuildIR.h"
-#include "FlowGraph.h"
 #include "common.h"
 #include "Timer.h"
-#include "PhyRegUsage.h"
 
 using namespace vISA;
 //
@@ -304,7 +300,7 @@ G4_INST* IR_Builder::createInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -349,15 +345,26 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno, curFile));
+        ii->setLocation(allocateMDLocation(lineno, curFile));
     }
 
     return ii;
 }
 
+G4_INST* IR_Builder::createNop(uint32_t instOpt)
+{
+    return createInternalInst(nullptr, G4_nop, nullptr, false, 1, nullptr, nullptr, nullptr, instOpt);
+}
+
+// sync inst are always internal, so no option to append it to instList. Also currently don't take any InstOpt
+G4_INST* IR_Builder::createSync(G4_opcode syncOp, G4_Operand* src)
+{
+    assert(G4_INST::isSyncOpcode(syncOp) && "expect a sync op");
+    return createInternalInst(nullptr, syncOp, nullptr, false, 1, nullptr, src, nullptr, InstOpt_NoOpt);
+}
+
 G4_INST* IR_Builder::createMov(uint8_t execSize, G4_DstRegRegion* dst,
-    G4_Operand* src0, uint32_t option, bool appendToInstList,
-    int lineno, int CISAoff, const char* srcFilename)
+    G4_Operand* src0, uint32_t option, bool appendToInstList)
 {
     G4_INST* newInst = nullptr;
     if (appendToInstList)
@@ -368,9 +375,6 @@ G4_INST* IR_Builder::createMov(uint8_t execSize, G4_DstRegRegion* dst,
     {
         newInst = createInternalInst(nullptr, G4_mov, nullptr, false, execSize, dst, src0, nullptr, option);
     }
-    newInst->setLineNo(lineno);
-    newInst->setCISAOff(CISAoff);
-    newInst->setSrcFilename(srcFilename);
     return newInst;
 }
 
@@ -385,6 +389,33 @@ G4_INST* IR_Builder::createBinOp(G4_opcode op, uint8_t execSize, G4_DstRegRegion
     {
         return createInternalInst(nullptr, op, nullptr, false, execSize, dst, src0, src1, option);
     }
+}
+
+// mach creates both implicit acc and src using the supplied accType. AccWrCtrl is turned on.
+// acc0.0 is always used
+G4_INST* IR_Builder::createMach(uint8_t execSize, G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType)
+{
+    auto machInst = createInternalInst(nullptr, G4_mach, nullptr, false, execSize, dst, src0, src1, option);
+    const RegionDesc* rd = execSize > 1 ? getRegionStride1() : getRegionScalar();
+    auto accSrc = createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getAcc0Reg(), 0, 0, rd, accType);
+    machInst->setImplAccSrc(accSrc);
+    auto accDSt = createDst(phyregpool.getAcc0Reg(), 0, 0, 1, accType);
+    machInst->setImplAccDst(accDSt);
+    machInst->setOptionOn(InstOpt_AccWrCtrl);
+    return machInst;
+}
+
+// macl creates an implicit src using the supplied the accType. AccWrCtrl is not set.
+// acc0.0 is always used
+G4_INST* IR_Builder::createMacl(uint8_t execSize, G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType)
+{
+    auto maclInst = createInternalInst(nullptr, G4_mach, nullptr, false, execSize, dst, src0, src1, option);
+    const RegionDesc* rd = execSize > 1 ? getRegionStride1() : getRegionScalar();
+    auto accSrc = createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getAcc0Reg(), 0, 0, rd, accType);
+    maclInst->setImplAccSrc(accSrc);
+    return maclInst;
 }
 
 G4_INST* IR_Builder::createIf(G4_Predicate* prd, uint8_t size, uint32_t option)
@@ -403,6 +434,31 @@ G4_INST* IR_Builder::createEndif(uint8_t size, uint32_t option)
 {
     auto inst = createCFInst(nullptr, G4_endif, size, nullptr, nullptr, option);
     return inst;
+}
+
+G4_INST* IR_Builder::createLabelInst(G4_Label* label, bool appendToInstList)
+{
+    if (appendToInstList)
+    {
+        return createInst(nullptr, G4_label, nullptr, false, UNDEFINED_EXEC_SIZE, nullptr, label, nullptr, 0, 0);
+    }
+    else
+    {
+        return createInternalInst(nullptr, G4_label, nullptr, false, UNDEFINED_EXEC_SIZE, nullptr, label, nullptr, 0, 0);
+    }
+}
+
+// jmpTarget may be either a label (direct jmp) or scalar operand (indirect jmp)
+G4_INST* IR_Builder::createJmp(G4_Predicate* pred, G4_Operand* jmpTarget, uint32_t option, bool appendToInstList)
+{
+    if (appendToInstList)
+    {
+        return createInst(pred, G4_jmpi, nullptr, false, 1, nullptr, jmpTarget, nullptr, option);
+    }
+    else
+    {
+        return createInternalInst(pred, G4_jmpi, nullptr, false, 1, nullptr, jmpTarget, nullptr, option);
+    }
 }
 
 G4_INST* IR_Builder::createInternalCFInst(
@@ -425,7 +481,7 @@ G4_INST* IR_Builder::createInternalCFInst(
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno, srcFilename));
     }
 
     return ii;
@@ -452,7 +508,7 @@ G4_INST* IR_Builder::createCFInst(
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(ii);
     }
@@ -503,7 +559,7 @@ G4_INST* IR_Builder::createInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -548,7 +604,7 @@ G4_INST* IR_Builder::createInternalInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -575,7 +631,7 @@ G4_InstSend* IR_Builder::createSendInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            m->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            m->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(m);
@@ -605,7 +661,7 @@ G4_InstSend* IR_Builder::createInternalSendInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -648,7 +704,7 @@ G4_InstSend* IR_Builder::createSplitSendInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            m->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            m->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(m);
     }
@@ -679,7 +735,7 @@ G4_InstSend* IR_Builder::createInternalSplitSendInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -710,7 +766,7 @@ G4_INST* IR_Builder::createMathInst(G4_Predicate* prd,
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
         instList.push_back(i);
     }
@@ -738,7 +794,7 @@ G4_INST* IR_Builder::createInternalMathInst(G4_Predicate* prd,
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -765,7 +821,7 @@ G4_INST* IR_Builder::createIntrinsicInst(
 
         if (m_options->getOption(vISA_EmitLocation))
         {
-            i->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, curFile));
+            i->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, curFile));
         }
 
         instList.push_back(i);
@@ -788,7 +844,7 @@ G4_INST* IR_Builder::createInternalIntrinsicInst(G4_Predicate* prd, Intrinsic in
 
     if (m_options->getOption(vISA_EmitLocation))
     {
-        ii->setLocation(new (mem) MDLocation(lineno == 0 ? curLine : lineno, srcFilename));
+        ii->setLocation(allocateMDLocation(lineno == 0 ? curLine : lineno, srcFilename));
     }
 
     return ii;
@@ -1185,7 +1241,7 @@ G4_InstSend *IR_Builder::Create_SplitSend_Inst_For_RTWrite(G4_Predicate *pred,
 // create a declare for send payload
 G4_Declare* IR_Builder::createSendPayloadDcl( unsigned num_elt, G4_Type type )
 {
-    const char* name = getNameString(mem, 16, "M%u", ++num_general_dcl);
+    const char* name = getNameString(mem, 16, "M%u", ++num_temp_dcl);
     unsigned short numRow = ( num_elt * G4_Type_Table[type].byteSize - 1 ) / GENX_GRF_REG_SIZ + 1;
     unsigned short numElt = ( numRow == 1 ) ? num_elt : (GENX_GRF_REG_SIZ/G4_Type_Table[type].byteSize);
     G4_Declare *dcl = createDeclareNoLookup(
@@ -1754,150 +1810,6 @@ bool IR_Builder::isOpndAligned( G4_Operand *opnd, unsigned short &offset, int al
     return isAligned;
 }
 
-// TR code
-void IR_Builder::initBuiltinSLMSpillAddr(int perThreadSLMSize)
-{
-
-    assert(builtinSLMSpillAddr == nullptr && builtinImmVector4 == nullptr);
-    builtinSLMSpillAddr = createDeclareNoLookup("slm_spill_addr", G4_GRF, 16, 1, Type_UD);
-    builtinImmVector4 = createDeclareNoLookup("imm_vec4", G4_GRF, 16, 1, Type_UW);
-
-    G4_BB* entryBB =kernel.fg.getEntryBB();
-    assert(entryBB != nullptr && "CFG is not yet created");
-    auto insertIter = std::find_if(entryBB->begin(), entryBB->end(), [](G4_INST* inst) { return !inst->isLabel(); });
-    std::vector<G4_INST*> instBuffer;
-
-    // compute per-thread SLM start and add it to entry BB
-    // SLM per_thead_id = subslice_id * #thread_per_subslice + EU_id * #threads_per_EU + thread_id
-    // #thread_per_subslice = 56
-    // #threads_per_EU = 7
-    // subslice_id = sr0.0[8:10]
-    // EU_id = sr0.0[4:7]
-    // tid = sr0.0[0:2]
-    //
-    const int numThreadPerSS = 56;
-    const int numThreadPerEU = 7;
-    G4_Declare* SSID = createTempVar(1, Type_UW, Four_Word); // SSID may also be used as mad dst
-    G4_Declare* EUID = createTempVar(1, Type_UW, Any);
-    G4_Declare* TID = createTempVar(1, Type_UW, Any);
-
-    auto getSr0Bits = [this, &instBuffer](G4_Declare* result, uint32_t width, uint32_t offset)
-    {
-        // shr (1) result<2>:uw sr0.0:ud offset
-        // and (1) result<1>:uw result<0;1,0>:uw (1 << width) - 1;
-        bool needsShift = offset != 0;
-        if (needsShift)
-        {
-
-            G4_SrcRegRegion* sr0 = createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getSr0Reg(), 0, 0,
-                getRegionScalar(), Type_UD);
-            G4_DstRegRegion* shrDst = Create_Dst_Opnd_From_Dcl(result, 2);
-            instBuffer.push_back(createInternalInst(nullptr, G4_shr, nullptr, false, 1, shrDst, sr0, createImm(offset & 0x1F, Type_UW), InstOpt_WriteEnable));
-        }
-        G4_SrcRegRegion* andSrc0 = needsShift ? Create_Src_Opnd_From_Dcl(result, getRegionScalar()) :
-            createSrcRegRegion(Mod_src_undef, Direct, phyregpool.getSr0Reg(), 0, 0, getRegionScalar(), Type_UD);
-        G4_DstRegRegion* andDst = Create_Dst_Opnd_From_Dcl(result, needsShift ? 1 : 2);
-        int mask = (1 << (width & 0x1F)) - 1;
-        instBuffer.push_back(createInternalInst(nullptr, G4_and, nullptr, false, 1, andDst, andSrc0, createImm(mask, Type_UW), InstOpt_WriteEnable));
-    };
-
-    auto genMulAdd = [this, &instBuffer](G4_DstRegRegion* dst, G4_Operand* src0 ,G4_Operand* src1, G4_Operand* src2)
-    {
-        // Gen10+:  mad (1) dst src0 src1 src2
-        // pre-Gen10:
-        //          mul (1) dst src1 src2
-        //          add (1) dst dst src0
-        if (hasAlign1Ternary())
-        {
-            instBuffer.push_back(createInternalInst(nullptr, G4_mad, nullptr, false, 1, dst, src0, src1, src2, InstOpt_WriteEnable));
-        }
-        else
-        {
-            G4_Declare* tempDcl = createTempVar(1, Type_UW, Any);
-            G4_DstRegRegion* tmpDst = Create_Dst_Opnd_From_Dcl(tempDcl, 1);
-            G4_SrcRegRegion* tmpSrc = Create_Src_Opnd_From_Dcl(tempDcl, getRegionScalar());
-            instBuffer.push_back(createInternalInst(nullptr, G4_mul, nullptr, false, 1, tmpDst, src1, src2, InstOpt_WriteEnable));
-            instBuffer.push_back(createInternalInst(nullptr, G4_add, nullptr, false, 1, dst, tmpSrc, src0, InstOpt_WriteEnable));
-        }
-    };
-
-    struct BitLoc
-    {
-        int width;
-        int offset;
-        BitLoc(int w, int ofst) : width(w), offset(ofst) {}
-    };
-    enum class ID { SSID, EUID, TID };
-    auto getBitLoc = [this](ID myID)
-    {
-        switch (myID)
-        {
-        case ID::SSID:
-            uint32_t width, startOffset;
-            getSSIDBits(width, startOffset);
-            return BitLoc(width, startOffset);
-        case ID::EUID:
-            return getGenxPlatform() < GENX_CNL ? BitLoc(4, 8) : BitLoc(4, 4); //[8:11] or [4:7]
-        case ID::TID:
-            return BitLoc(3, 0); //[0:2]
-        default:
-            assert(false);
-            return BitLoc(0, 0);
-        }
-    };
-    BitLoc loc = getBitLoc(ID::SSID);
-    getSr0Bits(SSID, loc.width, loc.offset);    // subslice_id
-    loc = getBitLoc(ID::TID);
-    getSr0Bits(TID, loc.width, loc.offset);    // Tid
-    {
-        // temp1 = thread_id + subslice_id * #thread_per_subslice
-        G4_SrcRegRegion* madSrc0 = Create_Src_Opnd_From_Dcl(TID, getRegionScalar());
-        G4_SrcRegRegion* madSrc1 = Create_Src_Opnd_From_Dcl(SSID, getRegionScalar());
-        G4_Imm* madSrc2 = createImm(numThreadPerSS, Type_UW);
-        G4_DstRegRegion* madDst = Create_Dst_Opnd_From_Dcl(SSID, 1);
-        genMulAdd(madDst, madSrc0, madSrc1, madSrc2);
-    }
-    loc = getBitLoc(ID::EUID);
-    getSr0Bits(EUID, loc.width, loc.offset);    // EU_id
-    {
-        // temp1 = temp1 + EU_id * #threads_per_EU
-        G4_SrcRegRegion* madSrc0 = Create_Src_Opnd_From_Dcl(SSID, getRegionScalar());
-        G4_SrcRegRegion* madSrc1 = Create_Src_Opnd_From_Dcl(EUID, getRegionScalar());
-        G4_Imm* madSrc2 = createImm(numThreadPerEU, Type_UW);
-        G4_DstRegRegion* madDst = Create_Dst_Opnd_From_Dcl(SSID, 1);
-        genMulAdd(madDst, madSrc0, madSrc1, madSrc2);
-    }
-
-    // perThreadSLMStart is a UD as it can exceed 64K
-    G4_Declare* perThreadSLMStart = createTempVar(1, Type_UD, Any);
-    G4_SrcRegRegion* mulSrc0 = Create_Src_Opnd_From_Dcl(SSID, getRegionScalar());
-    G4_Imm* mulSrc1 = createImm(perThreadSLMSize, Type_UW);
-    G4_DstRegRegion* mulDst = Create_Dst_Opnd_From_Dcl(perThreadSLMStart, 1);
-    instBuffer.push_back(createInternalInst(nullptr, G4_mul, nullptr, false, 1, mulDst, mulSrc0, mulSrc1, InstOpt_WriteEnable));
-
-    // add to entryBB:
-    // (W) mov (8) immVec4.0<1>:uw 0x76543210:uv
-    // (W) mov (8) immVec.8<1>:uw 0xFEDCBA98:uv
-    // (W) mul (16) immVec.0:uw immVec.0:uw 4
-    // (W) add (16) SLMSpillAddr:ud perThreadSLMStart<0;1,0>:ud immVec<8;8,1>:uw
-    G4_Imm* vec = createImm(0x76543210, Type_UV);
-    G4_DstRegRegion* dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);
-    instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
-    vec = createImm(0xFEDCBA98, Type_UV);
-    dst = createDst(builtinImmVector4->getRegVar(), 0, 8, 1, Type_UW);
-    instBuffer.push_back(createMov(8, dst, vec, InstOpt_WriteEnable, false));
-    G4_SrcRegRegion* mulSrc = Create_Src_Opnd_From_Dcl(builtinImmVector4, getRegionStride1());
-    dst = Create_Dst_Opnd_From_Dcl(builtinImmVector4, 1);
-    instBuffer.push_back(createInst(nullptr, G4_mul, nullptr, false, 16, dst, mulSrc, createImm(4, Type_UW), InstOpt_WriteEnable));
-    {
-        G4_SrcRegRegion* addSrc0 = Create_Src_Opnd_From_Dcl(perThreadSLMStart, getRegionScalar());
-        G4_SrcRegRegion* addSrc1 = Create_Src_Opnd_From_Dcl(builtinImmVector4, getRegionStride1());
-        G4_DstRegRegion* addDst = Create_Dst_Opnd_From_Dcl(builtinSLMSpillAddr, 1);
-        instBuffer.push_back(createInst(nullptr, G4_add, nullptr, false, 16, addDst, addSrc0, addSrc1, InstOpt_WriteEnable));
-    }
-    entryBB->insert(insertIter, instBuffer.begin(), instBuffer.end());
-}
-
 G4_Predicate_Control IR_Builder::vISAPredicateToG4Predicate(VISA_PREDICATE_CONTROL control, int size)
 {
     switch (control)
@@ -1959,4 +1871,18 @@ G4_Predicate_Control IR_Builder::vISAPredicateToG4Predicate(VISA_PREDICATE_CONTR
         return PRED_DEFAULT;
     }
 }
+
+// bind a vISA input variable <dcl> to the GRF byte offset <offset>
+void IR_Builder::bindInputDecl(G4_Declare* dcl, int offset)
+{    // decide the physical register number and sub register number
+    unsigned int regNum = offset / getGRFSize();
+    unsigned int subRegNum = (offset % getGRFSize()) / dcl->getElemSize();
+    dcl->getRegVar()->setPhyReg(phyregpool.getGreg(regNum), subRegNum);
+    dcl->setRegFile(G4_INPUT);
+    unsigned int reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
+    if (regNum + dcl->getNumRows() > kernel.getNumRegTotal() - reservedGRFNum) {
+        MUST_BE_TRUE(false, "INPUT payload execeeds the regsiter number");
+    }
+}
+
 

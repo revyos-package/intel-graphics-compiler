@@ -33,18 +33,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "iga.h"
 #include "iga_bxml_ops.hpp"
 
+#include <cstdarg>
+#include <cstring>
 #include <exception>
 #include <iomanip>
 #include <ostream>
 #include <sstream>
-#include <stdarg.h>
-#include <string.h>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace igax {
 
-enum Platform {
+enum class Platform {
       GEN_INVALID   = IGA_GEN_INVALID
     , GEN7          = IGA_GEN7
     , GEN7P5        = IGA_GEN7p5
@@ -57,6 +58,15 @@ enum Platform {
     , GEN11         = IGA_GEN11
     , GEN12P1       = IGA_GEN12p1
 };
+
+struct PlatformInfo {
+    Platform                   platform;
+    std::string                suffix;
+    std::vector<std::string>   names;
+
+    iga_gen_t toGen() const {return static_cast<iga_gen_t>(platform);}
+};
+static std::vector<PlatformInfo> QueryPlatforms();
 
 struct Diagnostic {
     std::string message; // diagnostic message
@@ -110,7 +120,7 @@ class Context {
 
   public:
     Context(const iga_context_options_t &copts);
-    Context(igax::Platform p) : Context(static_cast<iga_gen_t>(p)) {}
+    Context(Platform p) : Context(static_cast<iga_gen_t>(p)) {}
     Context(iga_gen_t p) : Context(IGA_CONTEXT_OPTIONS_INIT(p)) {}
     ~Context();
 
@@ -223,7 +233,6 @@ public:
     std::string menmonic() const;
     std::string name() const;
     std::string description() const;
-    OpSpec parent() const;
 
     // enumerates all the operations for a given platform
     static std::vector<OpSpec> enumerate(Platform p);
@@ -244,7 +253,47 @@ public:
             throw Error(_st, #API);          \
     } while (0)
 
-static std::vector<Diagnostic> getDiagnostics(const iga_context_t &context, bool errs)
+static inline std::vector<PlatformInfo> QueryPlatforms()
+{
+    size_t nps = 0;
+    IGA_CHECKED_CALL(iga_platforms_list, 0, nullptr, &nps);
+    std::vector<iga_gen_t> gens;
+    gens.resize(nps/sizeof(iga_gen_t));
+    IGA_CHECKED_CALL(iga_platforms_list,
+        gens.size()*sizeof(iga_gen_t), gens.data(), nullptr);
+    //
+    std::vector<PlatformInfo> pis;
+    pis.reserve(gens.size());
+    for (size_t piIx = 0; piIx < gens.size(); piIx++) {
+        const char *suffix = nullptr;
+        IGA_CHECKED_CALL(iga_platform_symbol_suffix, gens[piIx], &suffix);
+        size_t names_bytes_needed = 0;
+        IGA_CHECKED_CALL(
+            iga_platform_names, gens[piIx], 0, nullptr, &names_bytes_needed);
+        std::vector<const char *> names_cstr;
+        names_cstr.resize(names_bytes_needed/sizeof(const char *));
+        IGA_CHECKED_CALL(iga_platform_names,
+            gens[piIx],
+            names_cstr.size()*sizeof(const char *),
+            names_cstr.data(),
+            nullptr);
+        std::vector<std::string> names;
+        names.reserve(names_cstr.size());
+        for (const char *nm : names_cstr)
+            names.push_back(nm);
+        //
+        pis.emplace_back();
+        auto &pi = pis.back();
+        pi.platform = static_cast<igax::Platform>(gens[piIx]);
+        pi.suffix = suffix;
+        pi.names = names;
+    }
+    //
+    return pis;
+}
+
+static inline std::vector<Diagnostic> getDiagnostics(
+    const iga_context_t &context, bool errs)
 {
     std::vector<Diagnostic> out;
     const iga_diagnostic_t *ds = nullptr;
@@ -274,11 +323,11 @@ static std::vector<Diagnostic> getDiagnostics(const iga_context_t &context, bool
     }
     return out;
 }
-static std::vector<Diagnostic> getWarnings(const iga_context_t &ctx)
+static inline std::vector<Diagnostic> getWarnings(const iga_context_t &ctx)
 {
     return igax::getDiagnostics(ctx, false);
 }
-static std::vector<Diagnostic> getErrors(const iga_context_t &ctx)
+static inline std::vector<Diagnostic> getErrors(const iga_context_t &ctx)
 {
     return igax::getDiagnostics(ctx, true);
 }
@@ -290,7 +339,6 @@ inline Context::Context(const iga_context_options_t &copts)
 }
 
 inline Context::~Context() {
-    // ignore the return value since we are in a destructor
     (void)iga_release_context(context);
     context = nullptr;
 }
@@ -492,16 +540,19 @@ inline iga::Op OpSpec::op() const
 }
 
 
-#define IGA_OPSPEC_STRING_GETTER(API, INITSIZE) { \
-        char _staticBuf[INITSIZE]; \
-        char *strPtr = &_staticBuf[0]; \
-        size_t strCap = sizeof(_staticBuf); \
-        IGA_CHECKED_CALL(API, m_op, strPtr, &strCap); \
-        if (strCap > sizeof(_staticBuf)) { \
-            strPtr = (char *)alloca(strCap); \
+#define IGA_OPSPEC_STRING_GETTER(API, INITSIZE) {         \
+        char _staticBuf[INITSIZE];                        \
+        char *strPtr  = &_staticBuf[0];                   \
+        size_t strCap = sizeof(_staticBuf);               \
+        IGA_CHECKED_CALL(API, m_op, strPtr, &strCap);     \
+        if (strCap > sizeof(_staticBuf)) {                \
+            strPtr = (char *)malloc(strCap);              \
             IGA_CHECKED_CALL(API, m_op, strPtr, &strCap); \
-        } \
-        return std::string(strPtr); \
+            std::string res(strPtr);                      \
+            free(strPtr);                                 \
+            return res;                                   \
+        }                                                 \
+        return std::string(strPtr);                       \
     }
 inline std::string OpSpec::menmonic() const
 IGA_OPSPEC_STRING_GETTER(iga_opspec_mnemonic, 16);
@@ -509,18 +560,6 @@ inline std::string OpSpec::name() const
 IGA_OPSPEC_STRING_GETTER(iga_opspec_name, 32);
 inline std::string OpSpec::description() const
 IGA_OPSPEC_STRING_GETTER(iga_opspec_description, 128);
-
-inline OpSpec OpSpec::parent() const
-{
-    uint32_t op_enum;
-    iga_opspec_t par_op;
-    IGA_CHECKED_CALL(iga_opspec_parent_op, m_op, &op_enum);
-    IGA_CHECKED_CALL(iga_opspec_from_op,
-        static_cast<iga_gen_t>(m_platform),
-        op_enum,
-        &par_op);
-    return OpSpec(m_platform, par_op);
-}
 
 #undef IGA_OPSPEC_STRING_GETTER
 

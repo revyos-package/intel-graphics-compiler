@@ -45,6 +45,15 @@ namespace iga
 {
     template<typename T> using IdentMap =
         std::initializer_list<std::pair<const char *,T>>;
+    template <typename T>
+    static inline T Lookup(std::string sym, const IdentMap<T> &M, T orElse) {
+        for (const auto &e : M) {
+            if (e.first == sym)
+                return e.second;
+        }
+        return orElse;
+    }
+
 
     // this type is used to bail out of the parsing algorithm upon syntax error
     struct SyntaxError : std::runtime_error {
@@ -85,9 +94,9 @@ namespace iga
         // DEBUGGING
         // void DumpLookaheads(int n = 1) const {m_lexer.DumpLookaheads(n); }
         void ShowCurrentLexicalContext(std::ostream &os) const {
-            ShowCurrentLexicalContext(os,NextLoc());
+            ShowCurrentLexicalContext(os, NextLoc());
         }
-        void ShowCurrentLexicalContext(std::ostream &os,const Loc &loc) const;
+        void ShowCurrentLexicalContext(std::ostream &os, const Loc &loc) const;
 
         //////////////////////////////////////////////////////////////////////
         // ERRORS and WARNINGS
@@ -97,7 +106,7 @@ namespace iga
         void Fail(const Loc &loc, const char *msg);
         void FailF(const char *pat, ...);
         void FailF(const Loc &loc, const char *pat, ...);
-        void FailAtPrev(const char *msg);
+        void FailAfterPrev(const char *msg);
 
         void Warning(const Loc &loc, const char *msg);
         void Warning(const char *msg);
@@ -130,7 +139,7 @@ namespace iga
         // BASIC and GENERAL FUNCTIONS
         const Token &Next(int i = 0) const {return m_lexer.Next(i);}
 
-        Loc NextLoc(int i = 0) const {return Next().loc;}
+        Loc NextLoc(int i = 0) const {return Next(i).loc;}
 
         uint32_t ExtentToPrevEnd(const Loc &start) const;
 
@@ -141,6 +150,9 @@ namespace iga
         bool Skip(int k = 1) {return m_lexer.Skip(k);}
 
         std::string GetTokenAsString(const Token &token) const;
+        std::string GetTokenAsString() const {
+            return GetTokenAsString(Next());
+        }
 
         //////////////////////////////////////////////////////////////////////
         // QUERYING (non-destructive lookahead)
@@ -148,9 +160,11 @@ namespace iga
         bool LookingAtFrom(int k, Lexeme lxm) const;
 
         bool LookingAtSeq(Lexeme lxm0, Lexeme lxm1) const {return LookingAtSeq({lxm0,lxm1});}
+        bool LookingAtSeq(Lexeme lxm0, Lexeme lxm1, Lexeme lxm2) const {return LookingAtSeq({lxm0,lxm1,lxm2});}
         bool LookingAtSeq(std::initializer_list<Lexeme> lxms) const;
 
         bool LookingAtAnyOf(Lexeme lxm0, Lexeme lxm1) const {return LookingAtAnyOf({lxm0,lxm1}); }
+        bool LookingAtAnyOf(Lexeme lxm0, Lexeme lxm1, Lexeme lxm2) const {return LookingAtAnyOf({lxm0,lxm1,lxm2}); }
         bool LookingAtAnyOf(std::initializer_list<Lexeme> lxms) const;
         bool LookingAtAnyOfFrom(int i, std::initializer_list<Lexeme> lxms) const;
 
@@ -165,7 +179,7 @@ namespace iga
         void ConsumeOrFailAfterPrev(Lexeme lxm, const char *msg);
         bool Consume(Lexeme lxm0, Lexeme lxm1) {
             // first block doesn't require a label
-            if (LookingAtSeq(lxm0,lxm1)) {
+            if (LookingAtSeq(lxm0, lxm1)) {
                 return Skip(2);
             }
             return false;
@@ -185,7 +199,7 @@ namespace iga
 
         template <typename T>
         bool IdentLookupFrom(int k, const IdentMap<T> &map, T &value) const {
-            if (!LookingAtFrom(k,IDENT)) {
+            if (!LookingAtFrom(k, IDENT)) {
                 return false;
             }
             for (const std::pair<const char *,T> &p : map) {
@@ -304,6 +318,5 @@ namespace iga
         }
     }; // Parser
 } // namespace IGA
-
 
 #endif // IGA_FRONTEND_PARSER_HPP

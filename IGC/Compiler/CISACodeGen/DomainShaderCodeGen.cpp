@@ -23,20 +23,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "Compiler/CISACodeGen/DomainShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
-
 #include "common/debug/Debug.hpp"
 #include "common/debug/Dump.hpp"
 #include "common/igc_regkeys.hpp"
 #include "common/secure_mem.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/IRBuilder.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include <iStdLib/utility.h>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -69,14 +68,14 @@ namespace IGC
         CreateImplicitArgs();
 
         // allocate register for urb write handles
-        m_pURBWriteHandleReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
-        m_pURBReadHandleReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
+        m_pURBWriteHandleReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "URBWriteHandle");
+        m_pURBReadHandleReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "URBReadHandle");
 
         if (m_ShaderDispatchMode == ShaderDispatchMode::DUAL_PATCH)
         {
             if (!m_Platform->DSPrimitiveIDPayloadPhaseCanBeSkipped() || m_hasPrimitiveIdInput)
             {
-                m_pPatchPrimitiveId = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
+                m_pPatchPrimitiveId = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "PatchPrimId");
             }
         }
     }
@@ -98,7 +97,9 @@ namespace IGC
         {
             if (setup.size() <= index / 4 || setup[index / 4] == nullptr)
             {
-                inputVar = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_F, EALIGN_GRF, false);
+                inputVar = GetNewVariable(
+                    numLanes(m_SIMDSize), ISA_TYPE_F, EALIGN_GRF, false,
+                    CName("inputVar", index));
                 AddSetup(index / 4, inputVar);
             }
             else
@@ -110,7 +111,8 @@ namespace IGC
         {
             if (setup.size() <= index || setup[index] == nullptr)
             {
-                inputVar = GetNewVariable(1, ISA_TYPE_F, EALIGN_DWORD, true);
+                inputVar = GetNewVariable(1, ISA_TYPE_F, EALIGN_DWORD, true,
+                    CName("inputVar", index));
                 AddSetup(index, inputVar);
             }
             else
@@ -171,7 +173,7 @@ namespace IGC
         }
         else if (m_ShaderDispatchMode == ShaderDispatchMode::DUAL_PATCH)
         {
-            encoder.SetSimdSize(SIMDMode::SIMD8);
+            encoder.SetSimdSize(m_Platform->getMinDispatchMode());
             encoder.SetSrcRegion(0, 1, 4, 0);
             encoder.SetSrcSubReg(0, 0);
 
@@ -191,7 +193,7 @@ namespace IGC
         uint offset = 0;
 
         //R0 is always allocated as a predefined variable. Increase offset for R0
-        assert(m_R0);
+        IGC_ASSERT(m_R0);
         offset += getGRFSize();
 
         if (m_ShaderDispatchMode == ShaderDispatchMode::DUAL_PATCH)
@@ -213,17 +215,18 @@ namespace IGC
         offset += getGRFSize();
 
         // allocate input for URB return handles
-        assert(m_pURBWriteHandleReg);
+        IGC_ASSERT(m_pURBWriteHandleReg);
         AllocateInput(m_pURBWriteHandleReg, offset);
         offset += getGRFSize();
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(0 < getGRFSize());
+        IGC_ASSERT((offset % getGRFSize()) == 0);
         ProgramOutput()->m_startReg = offset / getGRFSize();
 
         // allocate space for NOS constants and pushed constants
         AllocateConstants3DShader(offset);
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT((offset % getGRFSize()) == 0);
         // Allocate space for vertex element data
         for (uint i = 0; i < setup.size(); ++i)
         {
@@ -244,11 +247,15 @@ namespace IGC
 
     void CShaderProgram::FillProgram(SDomainShaderKernelProgram* pKernelProgram)
     {
-        CDomainShader* pShader = static_cast<CDomainShader*>(GetShader(SIMDMode::SIMD8));
+        auto simdMode = m_context->platform.getMinDispatchMode();
+        CDomainShader* pShader = static_cast<CDomainShader*>(GetShader(simdMode));
         pShader->FillProgram(pKernelProgram);
-        pKernelProgram->simd8 = *pShader->ProgramOutput();
 
-        CDomainShader* dualPatchShader = static_cast<CDomainShader*>(GetShader(SIMDMode::SIMD8, ShaderDispatchMode::DUAL_PATCH));
+        SProgramOutput* output  = &pKernelProgram->simd8;
+
+        *output = *pShader->ProgramOutput();
+
+        CDomainShader* dualPatchShader = static_cast<CDomainShader*>(GetShader(simdMode, ShaderDispatchMode::DUAL_PATCH));
         if (dualPatchShader)
         {
             pKernelProgram->simd8DualPatch = *dualPatchShader->ProgramOutput();
@@ -298,13 +305,13 @@ namespace IGC
             m_ShaderDispatchMode != ShaderDispatchMode::DUAL_PATCH)
         {
             CVariable* channelMask = ImmToVariable(0xFF, ISA_TYPE_D);
-            CVariable* URBHandle = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
+            CVariable* URBHandle = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "URBWriteHandle");
             encoder.SetNoMask();
             encoder.SetSrcRegion(0, 0, 1, 0);
             encoder.Or(URBHandle, GetURBOutputHandle(), ImmToVariable(0x0000F000, ISA_TYPE_D));
             encoder.Push();
             CVariable* offset = ImmToVariable(0, ISA_TYPE_D);
-            CVariable* payload = GetNewVariable(8 * numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
+            CVariable* payload = GetNewVariable(8 * numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "URBPayload");
             encoder.SetNoMask();
             encoder.URBWrite(payload, 0, offset, URBHandle, channelMask);
             encoder.Push();

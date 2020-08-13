@@ -75,6 +75,7 @@ namespace vISA
         GlobalRA& gra;
         bool doBCR = false;
         bool highInternalConflict = false;
+        bool hasSplitInsts = false;
 
         BankAlign getBankAlignForUniqueAssign(G4_Declare *dcl);
         bool hasBackEdge();
@@ -109,10 +110,6 @@ namespace vISA
 
     public:
         static void getRowInfo(int size, int& nrows, int& lastRowSize);
-        static void findRegisterCandiateWithAlignForward(int &i, BankAlign align, bool evenAlign);
-        static unsigned int get_bundle(unsigned int baseReg, int offset);
-        static int findBundleConflictFreeRegister(int curReg, int endReg, unsigned short occupiedBundles, BankAlign align, bool evenAlign);
-        static void findRegisterCandiateWithAlignBackward(int &i, BankAlign align, bool evenAlign);
         static unsigned int convertSubRegOffFromWords(G4_Declare* dcl, int subregnuminwords);
         static unsigned int convertSubRegOffToWords(G4_Declare* dcl, int subregnum);
         static void countLocalLiveIntervals(std::vector<LocalLiveRange*>& liveIntervals);
@@ -271,6 +268,7 @@ namespace vISA
 class PhyRegsLocalRA
 {
 private:
+    IR_Builder* builder;
     unsigned int numRegs;
     // nth bit represents whether the register's nth word is free/busy
     // 1 - busy, 0 - free
@@ -290,8 +288,10 @@ private:
     bool r0Forbidden;
     bool r1Forbidden;
 
+    int LraFFWindowSize;
+
 public:
-    PhyRegsLocalRA(uint32_t nregs) : numRegs(nregs)
+    PhyRegsLocalRA(IR_Builder* _builder, uint32_t nregs) : builder(_builder), numRegs(nregs)
     {
         uint32_t grfFree = 0;
 
@@ -315,9 +315,18 @@ public:
         simpleGRFAvailable = false;
         r0Forbidden = false;
         r1Forbidden = false;
+       LraFFWindowSize = (int)builder->getOptions()->getuInt32Option(vISA_LraFFWindowSize);
     }
 
     void* operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
+
+    void findRegisterCandiateWithAlignForward(int& i, BankAlign align, bool evenAlign);
+
+    unsigned int get_bundle(unsigned int baseReg, int offset);
+
+    int findBundleConflictFreeRegister(int curReg, int endReg, unsigned short occupiedBundles, BankAlign align, bool evenAlign);
+
+    void findRegisterCandiateWithAlignBackward(int& i, BankAlign align, bool evenAlign);
 
     void setGRFBusy( int which );
     void setGRFBusy( int which, int howmany );
@@ -461,7 +470,8 @@ public:
     }
 
     int findFreeRegs(int size, BankAlign align, G4_SubReg_Align subalign, int & regnum, int & subregnum, int startRegNum, int endRegNum,
-        unsigned short occupiedBundles, unsigned int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hasHint);
+        unsigned short occupiedBundles, unsigned int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hasHint,
+        unsigned int hintReg);
 
     void freeRegs( int regnum, int subregnum, int numwords, int instID);
     PhyRegsLocalRA * getAvaialableRegs() { return &availableRegs; }
@@ -481,10 +491,11 @@ private:
 
     void expireRanges(unsigned int);
     void expireInputRanges(unsigned int, unsigned int, unsigned int);
+    unsigned short getOccupiedBundle(G4_Declare* dcl);
     void expireAllActive();
-    void expireSplitParent(LocalLiveRange*);
     bool allocateRegsFromBanks(LocalLiveRange*);
     bool allocateRegs(LocalLiveRange*, G4_BB* bb, IR_Builder& builder, LLR_USE_MAP& LLRUseMap);
+    void coalesceSplit(LocalLiveRange* lr);
     void freeAllocedRegs(LocalLiveRange*, bool);
     void updateActiveList(LocalLiveRange*);
     void updateBitset(LocalLiveRange*);

@@ -419,8 +419,7 @@ private:
 
     G4_Declare *
     createPostDstSpillRangeDeclare (
-        G4_INST *         sendOut,
-        G4_DstRegRegion * spillRegion
+        G4_INST *         sendOut
     );
 
     G4_Declare *
@@ -594,7 +593,7 @@ private:
         unsigned        regOff,
         unsigned        height,
         unsigned &      execSize,
-        G4_RegVar*      base
+        G4_RegVar* base = NULL
     );
 
     G4_Imm *
@@ -603,12 +602,17 @@ private:
         unsigned &        execSize
     );
 
+    G4_Imm *
+        createSpillSendMsgDesc(
+        int size,
+        int offset
+        );
+
     G4_INST *
     createAddFPInst (
         unsigned char      execSize,
         G4_DstRegRegion *      dst,
-        G4_Operand *      src,
-        G4_Predicate *    predicate = NULL
+        G4_Operand *      src
     );
 
     G4_INST *
@@ -631,9 +635,9 @@ private:
         unsigned          option
         );
 
-    bool
-    shouldPreloadSpillRange (
-        G4_INST *         instContext
+    bool shouldPreloadSpillRange(
+        G4_INST* instContext,
+        G4_BB* parentBB
     );
 
     void
@@ -650,7 +654,7 @@ private:
         G4_Declare *      mRangeDcl,
         unsigned          regOff,
         unsigned          height,
-        unsigned          srcRegOff = 0
+        unsigned          spillOff
     );
 
     G4_INST *
@@ -662,13 +666,33 @@ private:
         unsigned          option
     );
 
+    G4_Imm *
+    createFillSendMsgDesc (
+        unsigned          regOff,
+        unsigned          height,
+        unsigned &        execSize,
+        G4_RegVar* base = NULL
+    );
+
+    template <class REGION_TYPE>
+    G4_Imm *
+    createFillSendMsgDesc (
+        REGION_TYPE *     filledRangeRegion,
+        unsigned &        execSize
+    );
+
+    G4_Imm*
+        createFillSendMsgDesc(
+        int size,
+        int memOffset);
+
     G4_INST *
         createFillSendInstr (
         G4_Declare *      fillRangeDcl,
         G4_Declare *      mRangeDcl,
         unsigned          regOff,
         unsigned          height,
-        unsigned          srcRegOff = 0
+        unsigned          spillOff
     );
 
     G4_INST *
@@ -676,12 +700,10 @@ private:
         G4_Declare *       fillRangeDcl,
         G4_Declare *       mRangeDcl,
         G4_SrcRegRegion *  filledRangeRegion,
-        unsigned           execSize,
-        unsigned           regOff = 0
+        unsigned           execSize
     );
 
-    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, unsigned regOff, unsigned height, unsigned srcRegOff = 0);
-    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, G4_SrcRegRegion* filledRangeRegion, unsigned execSize);
+    G4_INST* createFillInstr(G4_Declare* fillRangeDcl, G4_Declare* mRangeDcl, unsigned regOff, unsigned height, unsigned srcRegOff);
 
     void
     replaceSpilledRange (
@@ -728,6 +750,41 @@ private:
 
     bool useSplitSend() const;
 
+    int getHWordEncoding(int numHWord)
+    {
+        switch (numHWord)
+        {
+        case 1:
+            return 0;
+        case 2:
+            return 1;
+        case 4:
+            return 2;
+        case 8:
+            return 3;
+        default:
+            MUST_BE_TRUE(false, "only 1/2/4/8 HWords are supported");
+            return 0;
+        }
+    }
+
+    ChannelMask getChMaskForSpill(int numHWord) const
+    {
+        switch (numHWord)
+        {
+        case 1:
+        case 2:
+            return ChannelMask::createFromAPI(CHANNEL_MASK_R);
+        case 4:
+            return ChannelMask::createFromAPI(CHANNEL_MASK_RG);
+        case 8:
+            return ChannelMask::createFromAPI(CHANNEL_MASK_RGBA);
+        default:
+            assert(false && "illegal spill size");
+            return ChannelMask::createFromAPI(CHANNEL_MASK_R);
+        }
+    }
+
     // Data
     GlobalRA&                gra;
     IR_Builder *             builder_;
@@ -746,7 +803,6 @@ private:
     unsigned                 iterationNo_;
     unsigned                 bbId_;
     unsigned                 spillAreaOffset_;
-    bool                     inSIMDCFContext_;
     bool                     doSpillSpaceCompression;
 
     bool                     failSafeSpill_;
@@ -778,7 +834,7 @@ private:
     {
         bool needed = true;
 
-        if (useScratchMsg_ && getGenxPlatform() >= GENX_SKL)
+        if (useScratchMsg_ && builder_->getPlatform() >= GENX_SKL)
             needed = false;
 
         if (builder_->kernel.fg.getHasStackCalls() ||
@@ -788,7 +844,11 @@ private:
         return needed;
     }
 
-    void saveRestoreA0(G4_BB*);
+    // return true if offset for spill/fill message needs to be 32byte aligned
+    bool need32ByteAlignedOffset() const
+    {
+        return useScratchMsg_ || useSplitSend();
+    }
 };
 }
 bool isDisContRegion (

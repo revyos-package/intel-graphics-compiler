@@ -72,7 +72,7 @@ namespace iga
         va_end(ap);
         Fail(loc, str.c_str());
     }
-    void Parser::FailAtPrev(const char *msg) {
+    void Parser::FailAfterPrev(const char *msg) {
         Token pv = Next(-1);
         if (pv.loc.extent == 0) {
             // previous location is not valid => use the other path
@@ -109,7 +109,7 @@ namespace iga
     //////////////////////////////////////////////////////////////////////
     // BASIC and GENERAL FUNCTIONS
     uint32_t Parser::ExtentToPrevEnd(const Loc &start) const {
-        return ExtentTo(start,NextLoc(-1));
+        return ExtentTo(start, NextLoc(-1));
     }
 
     uint32_t Parser::ExtentTo(const Loc &start, const Loc &end) const {
@@ -165,7 +165,7 @@ namespace iga
 
     void Parser::ConsumeOrFailAfterPrev(Lexeme lxm, const char *msg) {
         if (!Consume(lxm)) {
-            FailAtPrev(msg);
+            FailAfterPrev(msg);
         }
     }
 
@@ -242,7 +242,7 @@ namespace iga
         const char *val_start = m_lexer.GetSource().c_str() + loc.offset;
         char *val_end;
         value = strtod(val_start,&val_end);
-        if (val_end - val_start != loc.extent) {
+        if ((uint32_t)(val_end - val_start) != loc.extent) {
             // TODO: this is an internal error since it indicates an
             // inconsistency between the lexical specification and the parser
             Fail(loc,"INTERNAL ERROR: parsing float literal");

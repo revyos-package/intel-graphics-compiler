@@ -11,12 +11,12 @@
 #include <llvm/Transforms/Utils/Local.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
-
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/CISACodeGen/AdvMemOpt.h"
 #include "Compiler/CISACodeGen/WIAnalysis.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -55,7 +55,7 @@ namespace {
         }
 
         bool collectOperandInst(SmallPtrSetImpl<Instruction*>&,
-            Instruction*) const;
+            Instruction*, BasicBlock*) const;
         bool collectTrivialUser(SmallPtrSetImpl<Instruction*>&,
             Instruction*) const;
         bool hoistUniformLoad(LoadInst*, BasicBlock*) const;
@@ -192,7 +192,11 @@ bool AdvMemOpt::hasMemoryWrite(BasicBlock* BB) const {
 
 bool AdvMemOpt::hasMemoryWrite(BasicBlock* Entry, BasicBlock* Exit) const {
     // Entry and Exit must be on line of code.
-    assert(DT->dominates(Entry, Exit) && PDT->dominates(Exit, Entry));
+    IGC_ASSERT(nullptr != DT);
+    IGC_ASSERT(DT->dominates(Entry, Exit));
+    IGC_ASSERT(nullptr != PDT);
+    IGC_ASSERT(PDT->dominates(Exit, Entry));
+
     RegionSubgraph RSG(Exit);
     for (auto SI = po_ext_begin(Entry, RSG),
         SE = po_ext_end(Entry, RSG); SI != SE; ++SI)
@@ -202,12 +206,23 @@ bool AdvMemOpt::hasMemoryWrite(BasicBlock* Entry, BasicBlock* Exit) const {
 }
 
 bool AdvMemOpt::collectOperandInst(SmallPtrSetImpl<Instruction*>& Set,
-    Instruction* Inst) const {
+    Instruction* Inst, BasicBlock* LeadingBlock) const {
     for (Value* V : Inst->operands()) {
         Instruction* I = dyn_cast<Instruction>(V);
-        if (!I || I->getParent() != Inst->getParent())
+        if (!I)
             continue;
-        if (isa<PHINode>(I) || collectOperandInst(Set, I))
+        else if (I->getParent() != Inst->getParent())
+        {
+            // moving load instruction can be done only if operands
+            // comes from the same basic block or a dominator of
+            // the destination basic block. The condition is required
+            // to counteract using uninitialized or wrong filled registers
+            if (DT->dominates(I->getParent(), LeadingBlock))
+                continue;
+            else
+                return true;
+        }
+        if (isa<PHINode>(I) || collectOperandInst(Set, I, LeadingBlock))
             return true;
     }
     Set.insert(Inst);
@@ -231,7 +246,7 @@ bool AdvMemOpt::collectTrivialUser(SmallPtrSetImpl<Instruction*>& Set,
 
 bool AdvMemOpt::hoistUniformLoad(LoadInst* LD, BasicBlock* BB) const {
     SmallPtrSet<Instruction*, 32> ToHoist;
-    if (collectOperandInst(ToHoist, LD))
+    if (collectOperandInst(ToHoist, LD, BB))
         return false;
     if (collectTrivialUser(ToHoist, LD))
         return false;

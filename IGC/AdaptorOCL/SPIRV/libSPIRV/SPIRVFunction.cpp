@@ -65,7 +65,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SPIRVFunction.h"
 #include "SPIRVInstruction.h"
 #include "SPIRVStream.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 using namespace spv;
 
@@ -125,7 +125,7 @@ SPIRVFunction::decode(std::istream &I) {
       break;
     }
     default:
-      IGC_ASSERT_EXIT(0 && "Invalid SPIRV format");
+      IGC_ASSERT_EXIT_MESSAGE(0, "Invalid SPIRV format");
       break;
     }
   }
@@ -184,7 +184,7 @@ SPIRVFunction::decodeBB(SPIRVDecoder &Decoder) {
           else if (newEntry->endsScope())
               diScope = nullptr;
           else
-              IGC_ASSERT(false && "Non-instruction entry found");
+              IGC_ASSERT_MESSAGE(0, "Non-instruction entry found");
       }
       Decoder.setScope(this);
   }

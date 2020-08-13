@@ -31,7 +31,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
 #include "llvm/Config/llvm-config.h"
-
 #include "Compiler/DebugInfo/VISAModule.hpp"
 #include "Compiler/DebugInfo/DebugInfoUtils.hpp"
 #include "Compiler/DebugInfo/LexicalScopes.hpp"
@@ -39,15 +38,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs.hpp"
 #include "Compiler/CodeGenPublicEnums.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Instruction.h"
 #include "llvmWrapper/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/DebugInfo.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include <vector>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -77,7 +75,7 @@ VISAModule::const_iterator VISAModule::end() const
 
 void VISAModule::BeginInstruction(Instruction* pInst)
 {
-    assert(!m_instInfoMap.count(pInst) && "Instruction emitted twice!");
+    IGC_ASSERT_MESSAGE(!m_instInfoMap.count(pInst), "Instruction emitted twice!");
     // Assume VISA Id was updated by this point, validate that.
     ValidateVisaId();
     unsigned int nextVISAInstId = m_currentVisaId + 1;
@@ -87,12 +85,11 @@ void VISAModule::BeginInstruction(Instruction* pInst)
 
 void VISAModule::EndInstruction(Instruction* pInst)
 {
-    assert(m_instList.size() > 0 &&
-        m_instList.back() == pInst &&
-        "Trying to end Instruction other than the last one called with begin!");
-    assert(m_instInfoMap.count(pInst) &&
-        m_instInfoMap[pInst].m_size == INVALID_SIZE &&
-        "Trying to end instruction more than once!");
+    IGC_ASSERT_MESSAGE(m_instList.size() > 0, "Trying to end Instruction other than the last one called with begin!");
+    IGC_ASSERT_MESSAGE(m_instList.back() == pInst, "Trying to end Instruction other than the last one called with begin!");
+    IGC_ASSERT_MESSAGE(m_instInfoMap.count(pInst), "Trying to end instruction more than once!");
+    IGC_ASSERT_MESSAGE(m_instInfoMap[pInst].m_size == INVALID_SIZE, "Trying to end instruction more than once!");
+
     // Assume VISA Id was updated by this point, validate that.
     ValidateVisaId();
 
@@ -114,15 +111,15 @@ void VISAModule::EndEncodingMark()
 unsigned int VISAModule::GetVisaOffset(const llvm::Instruction* pInst) const
 {
     InstInfoMap::const_iterator itr = m_instInfoMap.find(pInst);
-    assert(itr != m_instInfoMap.end() && "Invalid Instruction");
+    IGC_ASSERT_MESSAGE(itr != m_instInfoMap.end(), "Invalid Instruction");
     return itr->second.m_offset;
 }
 
 unsigned int VISAModule::GetVisaSize(const llvm::Instruction* pInst) const
 {
     InstInfoMap::const_iterator itr = m_instInfoMap.find(pInst);
-    assert(itr != m_instInfoMap.end() && "Invalid Instruction");
-    assert(itr->second.m_size != INVALID_SIZE && "Invalid Size");
+    IGC_ASSERT_MESSAGE(itr != m_instInfoMap.end(), "Invalid Instruction");
+    IGC_ASSERT_MESSAGE(itr->second.m_size != INVALID_SIZE, "Invalid Size");
     return itr->second.m_size;
 }
 
@@ -170,13 +167,13 @@ unsigned VISAModule::GetFunctionNumber(const char* name)
                 return lookup->second;
             else
             {
-                assert("Unexpected function number");
+                IGC_ASSERT_MESSAGE(0, "Unexpected function number");
                 return 0;
             }
         }
     }
 
-    assert("Unexpected function number");
+    IGC_ASSERT_MESSAGE(0, "Unexpected function number");
     return 0;
 }
 
@@ -214,7 +211,7 @@ unsigned VISAModule::GetFunctionNumber(const llvm::Function* F)
         return FuncIDMap.find(F)->second;
     }
 
-    assert("Unexpected function number");
+    IGC_ASSERT_MESSAGE(0, "Unexpected function number");
 
     return 0;
 }
@@ -235,7 +232,7 @@ const MDNode* VISAModule::GetDebugVariable(const Instruction* pInst) const
     {
         return pValInst->getVariable();
     }
-    assert(false && "Expected debug info instruction");
+    IGC_ASSERT_MESSAGE(0, "Expected debug info instruction");
     return nullptr;
 }
 
@@ -422,21 +419,21 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
     }
     else
     {
-        assert(false && "Expected debug info instruction");
+        IGC_ASSERT_MESSAGE(0, "Expected debug info instruction");
     }
 
     if (!pVal || isa<UndefValue>(pVal))
     {
         // No debug info value, return empty location!
-        return VISAVariableLocation();
+        return VISAVariableLocation(this);
     }
 
     if (const Constant * pConstVal = dyn_cast<Constant>(pVal))
     {
         if (!isa<GlobalVariable>(pVal) && !isa<ConstantExpr>(pVal))
         {
-            assert(!isDbgDclInst && "address cannot be immediate!");
-            return VISAVariableLocation(pConstVal);
+            IGC_ASSERT_MESSAGE(!isDbgDclInst, "address cannot be immediate!");
+            return VISAVariableLocation(pConstVal, this);
         }
     }
 
@@ -452,23 +449,28 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
 
     if (pArgument)
     {
-        assert(pArgument->getParent() == m_pEntryFunc && "Argument does not belong to current processed function");
+        IGC_ASSERT_MESSAGE((pArgument->getParent() == m_pEntryFunc || pArgument->getParent()->hasFnAttribute("IndirectlyCalled")), "Argument does not belong to current processed function");
+
+        const Function* curFunc = pArgument->getParent()->hasFnAttribute("IndirectlyCalled")
+            ? pArgument->getParent() : m_pEntryFunc;
         // Check if it is argument of image or sampler
         IGC::IGCMD::MetaDataUtils::FunctionsInfoMap::iterator itr =
-            m_pShader->GetMetaDataUtils()->findFunctionsInfoItem(const_cast<Function*>(m_pEntryFunc));
+            m_pShader->GetMetaDataUtils()->findFunctionsInfoItem(const_cast<Function*>(curFunc));
         CodeGenContext* pCtx = m_pShader->GetContext();
         ModuleMetaData* modMD = pCtx->getModuleMetaData();
+        // TODO: ProcessBuiltinMetaData pass needs to be run when stack call/subroutine is enabled as duplicated functions for
+        // stackcall need updated metadata.
         if (itr != m_pShader->GetMetaDataUtils()->end_FunctionsInfo()
-            && modMD->FuncMD.find(const_cast<Function*>(m_pEntryFunc)) != modMD->FuncMD.end())
+            && modMD->FuncMD.find(const_cast<Function*>(curFunc)) != modMD->FuncMD.end())
         {
-            unsigned int explicitArgsNum = IGCLLVM::GetFuncArgSize(m_pEntryFunc) - itr->second->size_ImplicitArgInfoList();
+            unsigned int explicitArgsNum = IGCLLVM::GetFuncArgSize(curFunc) - itr->second->size_ImplicitArgInfoList();
             if (pArgument->getArgNo() < explicitArgsNum)
             {
-                const std::string typeStr = modMD->FuncMD[const_cast<Function*>(m_pEntryFunc)].m_OpenCLArgBaseTypes[pArgument->getArgNo()];
+                const std::string typeStr = modMD->FuncMD[const_cast<Function*>(curFunc)].m_OpenCLArgBaseTypes[pArgument->getArgNo()];
                 KernelArg::ArgType argType = KernelArg::calcArgType(pArgument, typeStr);
-                FunctionMetaData* funcMD = &modMD->FuncMD[const_cast<Function*>(m_pEntryFunc)];
+                FunctionMetaData* funcMD = &modMD->FuncMD[const_cast<Function*>(curFunc)];
                 ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
-                assert(resAllocMD->argAllocMDList.size() == IGCLLVM::GetFuncArgSize(m_pEntryFunc) && "Invalid ArgAllocMDList");
+                IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() == IGCLLVM::GetFuncArgSize(curFunc), "Invalid ArgAllocMDList");
                 ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[pArgument->getArgNo()];
                 unsigned int index = argAlloc->indexType;
 
@@ -477,8 +479,8 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
                 default:
                     break;
                 case KernelArg::ArgType::SAMPLER:
-                    assert(index < SAMPLER_REGISTER_NUM && "Bad sampler index");
-                    return VISAVariableLocation(SAMPLER_REGISTER_BEGIN + index);
+                    IGC_ASSERT_MESSAGE(index < SAMPLER_REGISTER_NUM, "Bad sampler index");
+                    return VISAVariableLocation(SAMPLER_REGISTER_BEGIN + index, this);
                 case KernelArg::ArgType::IMAGE_1D:
                 case KernelArg::ArgType::IMAGE_1D_BUFFER:
                 case KernelArg::ArgType::IMAGE_2D:
@@ -497,16 +499,16 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
                     case UAVResourceType:
                         // Found write image
                         index = m_pShader->m_pBtiLayout->GetUavIndex(index);
-                        assert(index < TEXTURE_REGISTER_NUM && "Bad texture index");
-                        return VISAVariableLocation(TEXTURE_REGISTER_BEGIN + index);
+                        IGC_ASSERT_MESSAGE(index < TEXTURE_REGISTER_NUM, "Bad texture index");
+                        return VISAVariableLocation(TEXTURE_REGISTER_BEGIN + index, this);
                     case SRVResourceType:
                         // Found read image
                         index = m_pShader->m_pBtiLayout->GetTextureIndex(index);
-                        assert(index < TEXTURE_REGISTER_NUM && "Bad texture index");
-                        return VISAVariableLocation(TEXTURE_REGISTER_BEGIN + index);
+                        IGC_ASSERT_MESSAGE(index < TEXTURE_REGISTER_NUM, "Bad texture index");
+                        return VISAVariableLocation(TEXTURE_REGISTER_BEGIN + index, this);
                     default:
-                        assert(false && "Unknown texture resource");
-                        return VISAVariableLocation();
+                        IGC_ASSERT_MESSAGE(0, "Unknown texture resource");
+                        return VISAVariableLocation(this);
                     }
                 }
             }
@@ -516,11 +518,12 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
     Value* pValue = const_cast<Value*>(pVal);
 
     Type* pType = pValue->getType();
+
     if (isDbgDclInst)
     {
         if (!pType->isPointerTy()) {
-            assert(0 && "DBG declare intrinsic must point to an address");
-            return VISAVariableLocation();
+            IGC_ASSERT_MESSAGE(0, "DBG declare intrinsic must point to an address");
+            return VISAVariableLocation(this);
         }
         pType = pType->getPointerElementType();
     }
@@ -556,16 +559,16 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
         unsigned int offset = m_pShader->GetGlobalMappingValue(pValue);
         if (isInSurface)
         {
-            return VISAVariableLocation(surfaceReg, offset, false, isDbgDclInst, false);
+            return VISAVariableLocation(surfaceReg, offset, false, isDbgDclInst, 0, false, this);
         }
-        return VISAVariableLocation(offset, false, isDbgDclInst, false, false);
+        return VISAVariableLocation(offset, false, isDbgDclInst, 0, false, false, this);
     }
 
     // At this point we expect only a register
     auto globalSubCVar = m_pShader->GetGlobalCVar(pValue);
 
     if (!globalSubCVar && !m_pShader->IsValueUsed(pValue)) {
-        return VISAVariableLocation();
+        return VISAVariableLocation(this);
     }
 
     CVariable* pVar = nullptr;
@@ -573,10 +576,12 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
         pVar = globalSubCVar;
     else
         pVar = m_pShader->GetSymbol(pValue);
-    assert(!pVar->IsImmediate() && "Do not expect an immediate value at this level");
+    IGC_ASSERT_MESSAGE(false == pVar->IsImmediate(), "Do not expect an immediate value at this level");
 
     std::string varName = cast<DIVariable>(pNode)->getName();
     unsigned int reg = 0;
+    unsigned int vectorNumElements = 0;
+
     switch (pVar->GetVarType()) {
     case EVARTYPE_GENERAL:
         // We want to attach "Output" attribute to all src variables
@@ -584,24 +589,35 @@ VISAVariableLocation VISAModule::GetVariableLocation(const llvm::Instruction* pI
         // the program. This will help debugger examine their
         // values anywhere in the code till they are in scope.
         reg = m_pShader->GetEncoder().GetVISAKernel()->getDeclarationID(pVar->visaGenVariable[0]);
-        assert(reg < GENERAL_REGISTER_NUM && "Bad VISA general register");
+        IGC_ASSERT_MESSAGE(reg < GENERAL_REGISTER_NUM, "Bad VISA general register");
+
+        if (pType->isVectorTy())
+        {
+            vectorNumElements = pType->getVectorNumElements();
+        }
+        else if (!pVar->IsUniform())
+        {
+            vectorNumElements = 1;
+        }
+
         if (isInSurface)
         {
-            return VISAVariableLocation(surfaceReg, GENERAL_REGISTER_BEGIN + reg, true, isDbgDclInst, !pVar->IsUniform());
+            return VISAVariableLocation(surfaceReg, GENERAL_REGISTER_BEGIN + reg, true, isDbgDclInst, vectorNumElements, !pVar->IsUniform(), this);
         }
-        return VISAVariableLocation(GENERAL_REGISTER_BEGIN + reg, true, isDbgDclInst, !pVar->IsUniform(), isGlobalAddrSpace);
+        return VISAVariableLocation(GENERAL_REGISTER_BEGIN + reg, true, isDbgDclInst, vectorNumElements, !pVar->IsUniform(), isGlobalAddrSpace, this);
     case EVARTYPE_ADDRESS:
     case EVARTYPE_PREDICATE:
     case EVARTYPE_SURFACE:
     case EVARTYPE_SAMPLER:
-        assert(false && "Unexpected VISA register type!");
+        IGC_ASSERT_MESSAGE(0, "Unexpected VISA register type!");
         break;
     default:
-        assert(false && "Unhandled VISA register type!");
+        IGC_ASSERT_MESSAGE(0, "Unhandled VISA register type!");
+        break;
     }
 
-    assert(false && "Empty variable location");
-    return VISAVariableLocation();
+    IGC_ASSERT_MESSAGE(0, "Empty variable location");
+    return VISAVariableLocation(this);
 }
 
 void VISAModule::GetConstantData(const Constant* pConstVal, DataVector& rawData) const
@@ -633,7 +649,7 @@ void VISAModule::GetConstantData(const Constant* pConstVal, DataVector& rawData)
         for (int i = 0; i < numElts; ++i)
         {
             Constant* C = pConstVal->getAggregateElement(i);
-            assert(C && "getAggregateElement returned null, unsupported constant");
+            IGC_ASSERT_MESSAGE(C, "getAggregateElement returned null, unsupported constant");
             // Since the type may not be primitive, extra alignment is required.
             GetConstantData(C, rawData);
         }
@@ -652,11 +668,13 @@ void VISAModule::GetConstantData(const Constant* pConstVal, DataVector& rawData)
         }
         else
         {
-            assert(0 && "Unsupported constant type");
+            IGC_ASSERT_MESSAGE(0, "Unsupported constant type");
         }
 
-        int bitWidth = intVal.getBitWidth();
-        assert((bitWidth % 8 == 0) && (bitWidth <= 64) && "Unsupported bitwidth");
+        const int bitWidth = intVal.getBitWidth();
+        IGC_ASSERT_MESSAGE((0 < bitWidth), "Unsupported bitwidth");
+        IGC_ASSERT_MESSAGE((bitWidth % 8 == 0), "Unsupported bitwidth");
+        IGC_ASSERT_MESSAGE((bitWidth <= 64), "Unsupported bitwidth");
 
         const uint64_t* val = intVal.getRawData();
         rawData.insert(rawData.end(), (char*)val, ((char*)val) + (bitWidth / 8));
@@ -696,7 +714,7 @@ void VISAModule::UpdateVisaId()
 
 void VISAModule::ValidateVisaId()
 {
-    assert(m_currentVisaId == m_pShader->GetEncoder().GetVISAKernel()->getvIsaInstCount() && "Missed emitted pattern!");
+    IGC_ASSERT_MESSAGE(m_currentVisaId == m_pShader->GetEncoder().GetVISAKernel()->getvIsaInstCount(), "Missed emitted pattern!");
 }
 
 uint16_t VISAModule::GetSIMDSize() const

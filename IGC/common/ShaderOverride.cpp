@@ -31,6 +31,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "visaBuilder_interface.h"
 #include "common/secure_mem.h"
 #include "common/secure_string.h"
+#include "Probe/Assertion.h"
 #if defined(WIN32)
 #include "WinDef.h"
 #include "Windows.h"
@@ -140,12 +141,13 @@ iga_gen_t GetIGAPlatform(const IGC::CPlatform* platform)
     case IGFX_GEN12_CORE:
     case IGFX_GEN12LP_CORE:
         if (   platform->getPlatformInfo().eProductFamily == IGFX_TIGERLAKE_LP
+            || platform->getPlatformInfo().eProductFamily == IGFX_DG1
            )
         {
             return IGA_GEN12p1;
         }
     default:
-        assert(0 && "unsupported platform");
+        IGC_ASSERT_MESSAGE(0, "unsupported platform");
         break;
     }
     return IGA_GEN9;

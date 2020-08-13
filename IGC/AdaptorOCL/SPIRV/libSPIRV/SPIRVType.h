@@ -77,7 +77,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <vector>
 #include <map>
 #include <iostream>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -175,7 +175,8 @@ protected:
   _SPIRV_DEF_DEC3(Id, BitWidth, IsSigned)
   void validate()const {
     SPIRVEntry::validate();
-    IGC_ASSERT_EXIT(BitWidth > 1 && BitWidth <= 64 && "Invalid bit width");
+    IGC_ASSERT_EXIT_MESSAGE(1 < BitWidth, "Invalid bit width");
+    IGC_ASSERT_EXIT_MESSAGE(BitWidth <= 64, "Invalid bit width");
   }
 private:
   unsigned BitWidth;    // Bit width
@@ -195,9 +196,10 @@ public:
 
 protected:
   _SPIRV_DEF_DEC2(Id, BitWidth)
-  void validate()const {
+  void validate()const override {
     SPIRVEntry::validate();
-    IGC_ASSERT_EXIT(BitWidth >= 16 && BitWidth <= 64 && "Invalid bit width");
+    IGC_ASSERT_EXIT_MESSAGE(16 <= BitWidth, "Invalid bit width");
+    IGC_ASSERT_EXIT_MESSAGE(BitWidth <= 64, "Invalid bit width");
   }
 private:
   unsigned BitWidth;    // Bit width
@@ -266,8 +268,13 @@ protected:
   void validate()const {
     SPIRVEntry::validate();
     CompType->validate();
+#if 1
+    // Allow any vector from 1 to 16 for testing.
+    IGC_ASSERT(CompCount >= 1 && CompCount <= 16);
+#else
     IGC_ASSERT(CompCount == 2 || CompCount == 3 || CompCount == 4 ||
         CompCount == 8 || CompCount == 16);
+#endif
   }
 private:
   SPIRVType *CompType;                // Component Type
@@ -307,7 +314,7 @@ public:
 
 protected:
   _SPIRV_DEF_DEC2(Id, Name)
-  void validate()const {
+  void validate()const override{
     SPIRVEntry::validate();
   }
 };
@@ -468,7 +475,7 @@ public:
 protected:
   SPIRVTypeImage *ImgTy;
   _SPIRV_DEF_DEC2(Id, ImgTy)
-  void validate()const {
+  void validate()const override {
     IGC_ASSERT(OpCode == OC);
     IGC_ASSERT(WordCount == FixedWC);
     IGC_ASSERT(ImgTy && ImgTy->isTypeImage());
@@ -598,12 +605,12 @@ public:
     AccessQualifier = AccessQual;
     IGC_ASSERT(isValid(AccessQualifier));
   }
-  CapVec getRequiredCapability() const {
+  CapVec getRequiredCapability() const override {
      return getVec(SPIRVCapabilityKind::CapabilityPipes);
   }
 protected:
   _SPIRV_DEF_DEC2(Id, AccessQualifier)
-  void validate()const {
+  void validate()const override {
     SPIRVEntry::validate();
   }
 private:
@@ -670,7 +677,7 @@ public:
         return std::vector<SPIRVEntry*>(1, ImgTy);
     }
 
-    CapVec getRequiredCapability() const {
+    CapVec getRequiredCapability() const override {
         return getVec(CapabilitySubgroupAvcMotionEstimationINTEL);
     }
 
@@ -678,7 +685,7 @@ protected:
     SPIRVTypeImage * ImgTy;
     _SPIRV_DEF_DEC2(Id, ImgTy)
 
-        void validate()const {
+        void validate()const override{
         IGC_ASSERT(OpCode == OC);
         IGC_ASSERT(WordCount == FixedWC);
         IGC_ASSERT(ImgTy && ImgTy->isTypeImage());

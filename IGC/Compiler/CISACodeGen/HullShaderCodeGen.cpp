@@ -23,19 +23,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "Compiler/CISACodeGen/HullShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
-
 #include "common/debug/Debug.hpp"
 #include "common/debug/Dump.hpp"
 #include "common/secure_mem.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/IRBuilder.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include <iStdLib/utility.h>
+#include "Probe/Assertion.h"
 
 /***********************************************************************************
 This file contains the code specific to hull shader
@@ -101,11 +100,13 @@ namespace IGC
     {
         CreateImplicitArgs();
 
-        m_pURBWriteHandleReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF);
+        m_pURBWriteHandleReg = GetNewVariable(
+            numLanes(m_SIMDSize), ISA_TYPE_D, EALIGN_GRF, "URBWriteHandle");
 
         if (m_HasPrimitiveIDInstruction)
         {
-            m_R2 = GetNewVariable((getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF, false, 1);
+            m_R2 = GetNewVariable(
+                (getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF, false, 1, CName::NONE);
         }
     }
 
@@ -132,14 +133,15 @@ namespace IGC
             break;
         case EIGHT_PATCH_DISPATCH_MODE:
             // URB handles are in R1
-            m_R1 = GetNewVariable((getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF, false, 1);
+            m_R1 = GetNewVariable(
+                (getGRFSize() >> 2), ISA_TYPE_D, EALIGN_GRF, false, 1, CName::NONE);
             m_pURBWriteHandleReg = m_R1;
 
             // calculate the number of URB read Handles GRF
             m_pNumURBReadHandleGRF = m_properties.m_pInputControlPointCount;
             break;
         default:
-            assert(0 && "Dispatch mode does not exist");
+            IGC_ASSERT_MESSAGE(0, "Dispatch mode does not exist");
             break;
         }
     }
@@ -155,7 +157,7 @@ namespace IGC
             AllocateEightPatchPayload();
             break;
         default:
-            assert(false && "dispatch mode does not exist");
+            IGC_ASSERT_MESSAGE(0, "dispatch mode does not exist");
             break;
         }
     }
@@ -165,16 +167,16 @@ namespace IGC
         uint offset = 0;
 
         //R0 is always allocated as a predefined variable. Increase offset for R0
-        assert(m_R0);
+        IGC_ASSERT(m_R0);
         offset += getGRFSize();
 
-        assert(m_R1);
+        IGC_ASSERT(m_R1);
         AllocateInput(m_R1, offset);
         offset += getGRFSize();
 
         if (m_HasPrimitiveIDInstruction)
         {
-            assert(m_R2);
+            IGC_ASSERT(m_R2);
             AllocateInput(m_R2, offset);
             offset += getGRFSize();
         }
@@ -190,13 +192,13 @@ namespace IGC
             offset += (m_properties.m_pInputControlPointCount) * getGRFSize();
         }
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(offset % getGRFSize() == 0);
         ProgramOutput()->m_startReg = offset / getGRFSize();
 
         // allocate space for NOS constants and pushed constants
         AllocateConstants3DShader(offset);;
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(offset % getGRFSize() == 0);
 
         // Allocate space for vertex element data
         for (uint i = 0; i < setup.size(); ++i)
@@ -214,7 +216,7 @@ namespace IGC
         uint offset = 0;
 
         //R0 is always allocated as a predefined variable. Increase offset for R0
-        assert(m_R0);
+        IGC_ASSERT(m_R0);
         offset += getGRFSize();
 
         // if m_pURBReadHandlesReg != nullptr, then we need to allocate ( (m_pOutputControlPointCount - 1)/8 + 1 ) registers for input handles
@@ -228,13 +230,13 @@ namespace IGC
             offset += ((m_properties.m_pInputControlPointCount - 1) / 8 + 1) * getGRFSize();
         }
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(offset % getGRFSize() == 0);
         ProgramOutput()->m_startReg = offset / getGRFSize();
 
         // allocate space for NOS constants and pushed constants
         AllocateConstants3DShader(offset);
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(offset % getGRFSize() == 0);
 
         // Allocate space for vertex element data
         for (uint i = 0; i < setup.size(); ++i)
@@ -265,7 +267,7 @@ namespace IGC
 
     void CShaderProgram::FillProgram(SHullShaderKernelProgram* pKernelProgram)
     {
-        CHullShader* pShader = static_cast<CHullShader*>(GetShader(SIMDMode::SIMD8));
+        CHullShader* pShader = static_cast<CHullShader*>(GetShader(m_context->platform.getMinDispatchMode()));
         pShader->FillProgram(pKernelProgram);
     }
 
@@ -311,7 +313,8 @@ namespace IGC
             m_pURBReadHandlesReg = GetNewVariable(
                 numLanes(m_SIMDSize) * (m_pNumURBReadHandleGRF),
                 ISA_TYPE_UD,
-                EALIGN_GRF);
+                EALIGN_GRF,
+                "URBReadHandle");
         }
         return m_pURBReadHandlesReg;
     }
@@ -329,7 +332,8 @@ namespace IGC
         else
         {
             // index of the input vertex in the input URBHandle Array
-            CVariable* pPerLaneOffsetsReg = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_UW, EALIGN_GRF, false);
+            CVariable* pPerLaneOffsetsReg = GetNewVariable(
+                numLanes(m_SIMDSize), ISA_TYPE_UW, EALIGN_GRF, false, "PerLaneOffSet");
             CVariable* pVertexIndexWord = BitCast(pVertexIndex, ISA_TYPE_UW);
             // perLaneOffsets = 4 * pVertexIndex
             if (!pVertexIndex->IsUniform())
@@ -353,11 +357,13 @@ namespace IGC
             encoder.Push();
 
             // selectedHandles = addressof(urbhandles) + pPerLaneOffsetsReg
-            CVariable* pSelectedHandles = GetNewAddressVariable(numLanes(m_SIMDSize), ISA_TYPE_UD, false, false);
+            CVariable* pSelectedHandles =
+                GetNewAddressVariable(numLanes(m_SIMDSize), ISA_TYPE_UD, false, false, "SelectedHandles");
 
             if (m_properties.m_pShaderDispatchMode == EIGHT_PATCH_DISPATCH_MODE)
             {
-                CVariable* pPerLaneOffsetsRaw = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_UW, EALIGN_GRF);
+                CVariable* pPerLaneOffsetsRaw =
+                    GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_UW, EALIGN_GRF, "PerLaneOffsets");
                 GetSimdOffsetBase(pPerLaneOffsetsRaw);
                 encoder.Mad(pPerLaneOffsetsReg, pPerLaneOffsetsRaw, ImmToVariable(0x04, ISA_TYPE_UW), pPerLaneOffsetsReg);
                 encoder.Push();
@@ -427,8 +433,9 @@ namespace IGC
         uint messageLength = 9; // 8 DWORDS of output + 1 GRF for URBHandles
 
         // Allocate payload with size = messageLength
-        CVariable* pPayload = GetNewVariable(messageLength * numLanes(m_SIMDSize),
-            ISA_TYPE_D, IGC::EALIGN_GRF);
+        CVariable* pPayload = GetNewVariable(
+            messageLength * numLanes(m_SIMDSize),
+            ISA_TYPE_D, EALIGN_GRF, CName::NONE);
 
         // Get the register with URBHandles
         CopyVariable(pPayload, m_pURBWriteHandleReg);

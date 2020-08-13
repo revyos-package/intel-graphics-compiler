@@ -367,6 +367,22 @@ DEFN_INTEL_SUB_GROUP_SCAN_EXCL(ushort, max, OpGroupUMax, i16)
 DEFN_INTEL_SUB_GROUP_SCAN_EXCL(ushort, min, OpGroupUMin, i16)
 DEFN_INTEL_SUB_GROUP_SCAN_EXCL_S_ADD(short, i16)
 #endif // defined(cl_intel_subgroups_short)
+#if defined(cl_khr_subgroup_extended_types)
+// 8bit
+DEFN_SUB_GROUP_SCAN_EXCL(char, max, OpGroupSMax, i8)
+DEFN_SUB_GROUP_SCAN_EXCL(char, min, OpGroupSMin, i8)
+DEFN_SUB_GROUP_SCAN_EXCL(uchar, add, OpGroupIAdd, i8)
+DEFN_SUB_GROUP_SCAN_EXCL(uchar, max, OpGroupUMax, i8)
+DEFN_SUB_GROUP_SCAN_EXCL(uchar, min, OpGroupUMin, i8)
+DEFN_SUB_GROUP_SCAN_EXCL_S_ADD(char, i8)
+// 16bit
+DEFN_SUB_GROUP_SCAN_EXCL(short, max, OpGroupSMax, i16)
+DEFN_SUB_GROUP_SCAN_EXCL(short, min, OpGroupSMin, i16)
+DEFN_SUB_GROUP_SCAN_EXCL(ushort, add, OpGroupIAdd, i16)
+DEFN_SUB_GROUP_SCAN_EXCL(ushort, max, OpGroupUMax, i16)
+DEFN_SUB_GROUP_SCAN_EXCL(ushort, min, OpGroupUMin, i16)
+DEFN_SUB_GROUP_SCAN_EXCL_S_ADD(short, i16)
+#endif defined(cl_khr_subgroup_extended_types)
 // 32bit
 DEFN_SUB_GROUP_SCAN_EXCL(int,   max, OpGroupSMax, i32)
 DEFN_SUB_GROUP_SCAN_EXCL(int,   min, OpGroupSMin, i32)
@@ -410,7 +426,7 @@ INLINE type OVERLOADABLE sub_group_non_uniform_##group_type##_##operation(type x
 
 #if defined(cl_khr_subgroup_clustered_reduce)
 #define DEFN_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(type, operation, spv_operation, abbr_type, group_type, spv_group_type)       \
-INLINE type OVERLOADABLE sub_group_##group_type##__clustered_##operation(type x, uint clustersize)                                  \
+INLINE type OVERLOADABLE sub_group_clustered_##group_type##_##operation(type x, uint clustersize)                                   \
 {                                                                                                                                   \
     return __builtin_spirv_OpGroupNonUniform##spv_operation##_i32_i32_##abbr_type##_i32(Subgroup, spv_group_type, x, clustersize);  \
 }
@@ -420,7 +436,7 @@ INLINE type OVERLOADABLE sub_group_##group_type##__clustered_##operation(type x,
 DEFN_SUB_GROUP_NON_UNIFORM_OPERATION(type, op_name, new_name, abbr_type, reduce, GroupOperationReduce)                     \
 DEFN_SUB_GROUP_NON_UNIFORM_OPERATION(type, op_name, new_name, abbr_type, scan_inclusive, GroupOperationInclusiveScan)      \
 DEFN_SUB_GROUP_NON_UNIFORM_OPERATION(type, op_name, new_name, abbr_type, scan_exclusive, GroupOperationExclusiveScan)      \
-DEFN_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(type, op_name, new_name, abbr_type, reduce, GroupOperationReduce)
+DEFN_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(type, op_name, new_name, abbr_type, reduce, GroupOperationClusteredReduce)
 
 // ARITHMETIC OPERATIONS
 
@@ -432,8 +448,8 @@ DEFN_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(type, op_name, new_name, abbr_typ
 // gentype sub_group_non_uniform_scan_exclusive_add( gentype value )
 // gentype sub_group_non_uniform_scan_exclusive_mul( gentype value )
 // cl_khr_subgroup_clustered_reduce:
-// gentype sub_group_reduce_clustered_add( gentype value, uint clustersize )
-// gentype sub_group_reduce_clustered_mul( gentype value, uint clustersize )
+// gentype sub_group_clustered_reduce_add( gentype value, uint clustersize )
+// gentype sub_group_clustered_reduce_mul( gentype value, uint clustersize )
 #define DEFN_SUB_GROUP_NON_UNIFORM_ADD_MUL(type, type_sign, abbr_type)       \
 DEFN_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(type, add, type_sign##Add, abbr_type)  \
 DEFN_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(type, mul, type_sign##Mul, abbr_type)
@@ -462,8 +478,8 @@ DEFN_SUB_GROUP_NON_UNIFORM_ADD_MUL(half,   F, f16)
 // gentype sub_group_non_uniform_scan_exclusive_min( gentype value )
 // gentype sub_group_non_uniform_scan_exclusive_max( gentype value )
 // cl_khr_subgroup_clustered_reduce:
-// gentype sub_group_reduce_clustered_min( gentype value, uint clustersize )
-// gentype sub_group_reduce_clustered_max( gentype value, uint clustersize )
+// gentype sub_group_clustered_reduce_min( gentype value, uint clustersize )
+// gentype sub_group_clustered_reduce_max( gentype value, uint clustersize )
 
 #define DEFN_SUB_GROUP_NON_UNIFORM_MIN_MAX(type, type_sign, abbr_type)       \
 DEFN_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(type, min, type_sign##Min, abbr_type)  \

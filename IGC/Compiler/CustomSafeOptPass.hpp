@@ -69,6 +69,7 @@ namespace IGC
         void visitInstruction(llvm::Instruction& I);
         void visitAllocaInst(llvm::AllocaInst& I);
         void visitCallInst(llvm::CallInst& C);
+        void removeHftoFCast(llvm::Instruction& I);
         void visitBinaryOperator(llvm::BinaryOperator& I);
         bool isEmulatedAdd(llvm::BinaryOperator& I);
         void visitBfi(llvm::CallInst* inst);
@@ -79,6 +80,7 @@ namespace IGC
         void visitFPTruncInst(llvm::FPTruncInst& I);
         void visitExtractElementInst(llvm::ExtractElementInst& I);
         void visitLdptr(llvm::CallInst* inst);
+        void visitLdRawVec(llvm::CallInst* inst);
         void visitLoadInst(llvm::LoadInst& I);
 
         //
@@ -204,26 +206,12 @@ namespace IGC
         void visitSelectInst(llvm::SelectInst& I);
     };
 
-    class IGCConstantFolder : public llvm::ConstantFolder
-    {
-    public:
-        IGCConstantFolder() :
-            ConstantFolder()
-        {}
-
-        llvm::Constant* CreateCanonicalize(llvm::Constant* C0, bool flushDenorms = true) const;
-        llvm::Constant* CreateFAdd(llvm::Constant* C0, llvm::Constant* C1, llvm::APFloatBase::roundingMode roundingMode) const;
-        llvm::Constant* CreateFMul(llvm::Constant* C0, llvm::Constant* C1, llvm::APFloatBase::roundingMode roundingMode) const;
-        llvm::Constant* CreateFPTrunc(llvm::Constant* C0, llvm::Type* dstType, llvm::APFloatBase::roundingMode roundingMode) const;
-    };
-
     class IGCConstProp : public llvm::FunctionPass
     {
     public:
         static char ID;
 
-        IGCConstProp(bool enableMathConstProp = false,
-            bool enableSimplifyGEP = false);
+        IGCConstProp(bool enableSimplifyGEP = false);
 
         ~IGCConstProp() {}
 
@@ -244,7 +232,6 @@ namespace IGC
 
     private:
         llvm::Module* module;
-        llvm::Constant* ReplaceFromDynConstants(unsigned bufId, unsigned eltId, unsigned int size_in_bytes, llvm::LoadInst* inst);
         llvm::Constant* replaceShaderConstant(llvm::LoadInst* inst);
         llvm::Constant* ConstantFoldCmpInst(llvm::CmpInst* inst);
         llvm::Constant* ConstantFoldExtractElement(llvm::ExtractElementInst* inst);

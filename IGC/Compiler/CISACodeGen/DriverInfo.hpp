@@ -47,6 +47,9 @@ namespace IGC
         /// Driver supports Simple Push Mechanism only.
         virtual bool SupportsSimplePushOnly() const { return false; }
 
+        /// Driver supports Gather Constant Mechanism only.
+        virtual bool SupportsGatherConstantOnly() const { return false; }
+
         /// Driver supports resource streamer if HW supportes it, otherwise simple push
         virtual bool SupportsHWResourceStreameAndSimplePush() const { return false; }
 
@@ -111,9 +114,6 @@ namespace IGC
 
         /// API supports IEEE min/max
         virtual bool SupportsIEEEMinMax() const { return false; }
-
-        /// Supports precise math
-        virtual bool SupportsPreciseMath() const { return false; }
 
         virtual bool NeedCountSROA() const { return false; }
 
@@ -267,6 +267,20 @@ namespace IGC
         /// Check for flush to zero for DP emulated function
         virtual bool DPEmulationFlushToZero() const { return false; }
 
+        // Maximum id that can be used by simple push constant buffers. The default is maximum unsigned int (no restriction)
+        virtual unsigned int MaximumSimplePushBufferID() const { return std::numeric_limits<unsigned int>::max(); }
+
+        /// Check if integer mad is enabled
+        virtual bool EnableIntegerMad() const { return false; }
+
+        /// add shader hash code after EOT for debug purposes
+        virtual bool EnableShaderDebugHashCodeInKernel() const { return false; }
+
+        // The size of output printf buffer is 4 MB by default by agreement with Runtime.
+        virtual uint32_t getPrintfBufferSize() const
+        {
+            return 4 * sizeof(MEGABYTE);
+        }
 
 
     };

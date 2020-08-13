@@ -44,12 +44,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 
 #include <stdarg.h>
-
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <mutex>
 #include <algorithm>
+#include "Probe/Assertion.h"
 
 using namespace IGC;
 using namespace IGC::Debug;
@@ -76,7 +76,7 @@ DumpName::DumpName()
 
 DumpName DumpName::ShaderName(std::string const& name) const
 {
-    assert( name.find(" ") == std::string::npos && "Shader name must not contain spaces");
+    IGC_ASSERT_MESSAGE(name.find(" ") == std::string::npos, "Shader name must not contain spaces");
     DumpName copy(*this);
     copy.m_shaderName = name;
     return copy;
@@ -105,10 +105,9 @@ DumpName DumpName::Retry(unsigned retryId) const
 
 DumpName DumpName::Extension(std::string const& extension) const
 {
-    assert(
-        (extension.size() == 0 || extension.at(0) != '.') &&
+    IGC_ASSERT_MESSAGE((extension.size() == 0) || (extension.at(0) != '.'),
         "Extension shouldn't start with a '.', and shouldn't be empty");
-    assert( extension.find(" ") == std::string::npos && "Extension must not contain spaces" );
+    IGC_ASSERT_MESSAGE(extension.find(" ") == std::string::npos, "Extension must not contain spaces");
     DumpName copy(*this);
     copy.m_extension = extension;
     return copy;
@@ -184,7 +183,7 @@ DumpName DumpName::Pass(std::string const& name, llvm::Optional<unsigned int> in
     }),
         newName.end());
 
-    assert(newName.find(" ") == std::string::npos && "Pass name must not contain spaces");
+    IGC_ASSERT_MESSAGE(newName.find(" ") == std::string::npos, "Pass name must not contain spaces");
     DumpName copy(*this);
     CPassDescriptor pd = { newName, index };
     copy.m_pass = pd;
@@ -228,7 +227,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         case ShaderType::GEOMETRY_SHADER: ss << "GS"; break;
         case ShaderType::COMPUTE_SHADER: ss << "CS"; break;
         case ShaderType::UNKNOWN:
-        default: assert(0 && "Unknown Shader Type"); break;
+        default: IGC_ASSERT_MESSAGE(0, "Unknown Shader Type"); break;
         }
         underscore = true;
     }
@@ -241,7 +240,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
             {
             case PixelShaderPhaseType::PSPHASE_COARSE: ss << "CPS"; break;
             case PixelShaderPhaseType::PSPHASE_PIXEL: ss << "PS"; break;
-            default: assert(0); break;
+            default: IGC_ASSERT(0); break;
             }
         }
     }
@@ -259,14 +258,16 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
                << "_";
         }
 
-        ss << (underscore ? "_" : "")
-            << "asm"
-            << std::hex
-            << std::setfill('0')
-            << std::setw(sizeof(m_hash->asmHash) * CHAR_BIT / 4)
-            << m_hash->asmHash
-            << std::dec
-            << std::setfill(' ');
+        if (m_hash->asmHash != 0) {
+            ss << (underscore ? "_" : "")
+                << "asm"
+                << std::hex
+                << std::setfill('0')
+                << std::setw(sizeof(m_hash->asmHash) * CHAR_BIT / 4)
+                << m_hash->asmHash
+                << std::dec
+                << std::setfill(' ');
+        }
 
         if (m_hash->nosHash != 0)
         {
@@ -303,6 +304,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
                 << std::dec
                 << std::setfill(' ');
         }
+
         underscore = true;
     }
     if(m_pass.hasValue())
@@ -330,7 +332,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         }
         else
         {
-            assert(m_cgFlag.getValue() == FLAG_CG_STAGE1_BEST_PERF);
+            IGC_ASSERT(m_cgFlag.getValue() == FLAG_CG_STAGE1_BEST_PERF);
             ss << "BestStage1";
         }
 
@@ -446,13 +448,13 @@ namespace {
         case DumpType::TIME_STATS_TEXT       : return true;
         case DumpType::TIME_STATS_CSV        : return true;
         case DumpType::DBG_MSG_TEXT          : return true;
-        default                              : assert( 0 && "unreachable" ); return true;
+        default                              : IGC_ASSERT_MESSAGE(0, "unreachable"); return true;
         }
     }
 
     const char* commentPrefix( DumpType type )
     {
-        assert( isText( type ) && "Only text types supported" );
+        IGC_ASSERT_MESSAGE(isText(type), "Only text types are supported");
         switch ( type )
         {
         case DumpType::NOS_TEXT              : return "// ";
@@ -467,8 +469,8 @@ namespace {
         case DumpType::LLVM_OPT_STAT_TEXT    : return "";
         case DumpType::TIME_STATS_TEXT       : return "";
         case DumpType::DBG_MSG_TEXT          : return "";
-        case DumpType::TIME_STATS_CSV        : assert( 0 && "CSV doesn't have comments" ); return "";
-        default                              : assert( 0 && "unreachable" ); return "#";
+        case DumpType::TIME_STATS_CSV        : IGC_ASSERT_MESSAGE(0, "CSV doesn't have comments"); return "";
+        default                              : IGC_ASSERT_MESSAGE(0, "unreachable"); return "#";
         }
     }
 

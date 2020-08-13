@@ -25,9 +25,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
-
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/IGCPassSupport.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -54,23 +54,51 @@ PrivateMemoryUsageAnalysis::PrivateMemoryUsageAnalysis()
 bool PrivateMemoryUsageAnalysis::runOnModule(Module& M)
 {
     bool changed = false;
-    IGCMD::MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    m_pMDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    bool hasStackCall = false;
 
     // Run on all functions defined in this module
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
     {
         Function* pFunc = &(*I);
+        if (pFunc->hasFnAttribute("visaStackCall"))
+        {
+            hasStackCall = true;
+            continue;
+        }
         if (pFunc->isDeclaration())
             continue;
-        if (pMdUtils->findFunctionsInfoItem(pFunc) == pMdUtils->end_FunctionsInfo())
-            continue;
-        if (pFunc->hasFnAttribute("IndirectlyCalled"))
+        if (m_pMDUtils->findFunctionsInfoItem(pFunc) == m_pMDUtils->end_FunctionsInfo())
             continue;
         if (runOnFunction(*pFunc))
         {
             changed = true;
         }
     }
+
+    // If there are stack called functions in the module, add PRIVATE_BASE to all kernels to be safe.
+    // PRIVATE_BASE is needed for kernel to get the stack base offset.
+    // Callee does not require this arg, since all stack access will be done using the stack-pointer
+    if (hasStackCall || pCtx->m_enableFunctionPointer)
+    {
+        for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
+        {
+            Function* pFunc = &(*I);
+            if (isEntryFunc(m_pMDUtils, pFunc))
+            {
+                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+                implicitArgs.push_back(ImplicitArg::PRIVATE_BASE);
+                ImplicitArgs::addImplicitArgs(*pFunc, implicitArgs, m_pMDUtils);
+                changed = true;
+            }
+        }
+    }
+
+    // Update LLVM metadata based on IGC MetaDataUtils
+    if (changed)
+        m_pMDUtils->save(M.getContext());
 
     return changed;
 }
@@ -81,19 +109,6 @@ bool PrivateMemoryUsageAnalysis::runOnFunction(Function& F)
     m_hasPrivateMem = false;
 
     visit(F);
-
-    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    IGCMD::MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
-
-    // Add private base to kernels if function pointers are present,
-    // since stack might need to be allocated
-    if (!m_hasPrivateMem)
-    {
-        if (pCtx->m_enableFunctionPointer && isEntryFunc(pMdUtils, &F))
-        {
-            m_hasPrivateMem = true;
-        }
-    }
 
     // Struct types always use private memory unless regtomem can
     // promote them.  Check the function signature to see if any
@@ -119,24 +134,22 @@ bool PrivateMemoryUsageAnalysis::runOnFunction(Function& F)
             }
         }
     }
-    //Add private memory implicit arg
-    SmallVector<ImplicitArg::ArgType, ImplicitArg::NUM_IMPLICIT_ARGS> implicitArgs;
-    implicitArgs.push_back(ImplicitArg::R0);
-    if (F.hasFnAttribute("visaStackCall"))
-    {
-        m_hasPrivateMem = true;
-    }
 
     // For double emulation, need to add private base (conservative).
     if (!m_hasPrivateMem)
     {
+        CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
         // This is the condition that double emulation is used.
         if ((IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
-            (pCtx->m_DriverInfo.NeedFP64(pCtx->platform.getPlatformInfo().eProductFamily) && !pCtx->platform.supportFP64())))
+            (pCtx->m_DriverInfo.NeedFP64(pCtx->platform.getPlatformInfo().eProductFamily) && pCtx->platform.hasNoFP64Inst())))
         {
             m_hasPrivateMem = true;
         }
     }
+
+    //Add private memory implicit arg
+    SmallVector<ImplicitArg::ArgType, ImplicitArg::NUM_IMPLICIT_ARGS> implicitArgs;
+    implicitArgs.push_back(ImplicitArg::R0);
 
     if (m_hasPrivateMem)
     {
@@ -147,19 +160,9 @@ bool PrivateMemoryUsageAnalysis::runOnFunction(Function& F)
     return true;
 }
 
-void PrivateMemoryUsageAnalysis::visitCallInst(llvm::CallInst& CI)
-{
-    Function* calledFunc = CI.getCalledFunction();
-    if (!calledFunc || calledFunc->hasFnAttribute("visaStackCall"))
-    {
-        // If a called function is indirect or uses stack call, we need private memory for the parent
-        m_hasPrivateMem = true;
-    }
-}
-
 void PrivateMemoryUsageAnalysis::visitAllocaInst(llvm::AllocaInst& AI)
 {
-    assert(AI.getType()->getAddressSpace() == ADDRESS_SPACE_PRIVATE && "Allocaitons are expected to be in private address space");
+    IGC_ASSERT_MESSAGE(AI.getType()->getAddressSpace() == ADDRESS_SPACE_PRIVATE, "Allocaitons are expected to be in private address space");
 
     // If we encountered Alloca, then the function uses private memory
     m_hasPrivateMem = true;

@@ -46,16 +46,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // reset to the default value after the builder is destroyed.  We will move these options to be
 // part of the builder in the near future.
 
-void Options::setGTPin()
-{
-    // GTPin mode, we need to
-    // 1. reserve 16 GRF's worth of spill memory starting at 0
-    // 3. produce asm output
-    // spillMemOffset = 16 * G4_GRF_REG_NBYTES;
-    m_vISAOptions.setUint32(vISA_SpillMemOffset, (uint32_t) 16 * G4_GRF_REG_NBYTES);
-    m_vISAOptions.setBool(vISA_outputToFile, true);         //outputToFile = true;
-}
-
 bool Options::get_isaasm(int argc, const char *argv[])
 {
     return true;
@@ -199,9 +189,6 @@ bool Options::parseOptions(int argc, const char* argv[])
             return false;
         }
     }
-    if (m_vISAOptions.isArgSetByUser(vISA_Gtpin)) {
-        setGTPin();
-    }
     if (m_vISAOptions.isArgSetByUser(vISA_DumpPasses)) {
         m_vISAOptions.setBool(vISA_DumpDotAll, true);
     }
@@ -215,11 +202,6 @@ bool Options::parseOptions(int argc, const char* argv[])
         target = VISA_3D;
     }
 
-    if (m_vISAOptions.isArgSetByUser(vISA_SpillMemOffset)) {
-        assert((m_vISAOptions.getUint32(vISA_SpillMemOffset)
-                & (GENX_GRF_REG_SIZ - 1)) == 0
-               && "-spilloffset is mis-aligned");
-    }
     if (m_vISAOptions.isArgSetByUser(vISA_ReservedGRFNum)) {
         if (m_vISAOptions.getUint32(vISA_ReservedGRFNum)) {
             m_vISAOptions.setBool(vISA_LocalBankConflictReduction, false);
@@ -260,6 +242,13 @@ bool Options::parseOptions(int argc, const char* argv[])
             return false;
         }
         m_vISAOptions.setBool(vISA_PlatformIsSet, true);   //platformIsSet = true;
+        if (GetStepping() == Step_A)
+        {
+            if (getGenxPlatform() == GENX_TGLLP)
+            {
+                m_vISAOptions.setBool(vISA_HasEarlyGRFRead, true);
+            }
+        }
     }
 
     if (m_vISAOptions.isArgSetByUser(vISA_GetvISABinaryName)) {
@@ -281,13 +270,10 @@ bool Options::parseOptions(int argc, const char* argv[])
         m_vISAOptions.setBool(vISA_DisableSpillCoalescing, true);
     }
 
-    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::GEN12)
+    if (m_vISAOptions.isArgSetByUser(vISA_forceDebugSWSB))
     {
-        if (m_vISAOptions.isArgSetByUser(vISA_forceDebugSWSB))
-        {
-            m_vISAOptions.setUint32(vISA_SWSBInstStall, 0);
-            m_vISAOptions.setUint32(vISA_SWSBTokenBarrier, 0);
-        }
+        m_vISAOptions.setUint32(vISA_SWSBInstStall, 0);
+        m_vISAOptions.setUint32(vISA_SWSBTokenBarrier, 0);
     }
 
 #if (defined(_DEBUG) || defined(_INTERNAL))

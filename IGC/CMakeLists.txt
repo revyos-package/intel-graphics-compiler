@@ -997,6 +997,7 @@ function(igc_arch_crosscompile_needed retVarName targetArch hostArch)
   # Allowed cross-executions (keys list, lists for each key).
   # Key:    host architecture.
   # Values: target architecture that can be run on host (different than host).
+    set(__allowedCrossExecution "Windows64")
   set(__allowedCrossExecution_Windows64 "Windows32")
 
   igc_arch_normalize(_targetArch "${targetArch}")
@@ -1708,7 +1709,6 @@ function(igc_target_exclude_from_symbol_export targetName)
       set(_excludedExportTargets)
       foreach(_excludedExportTarget ${ARGN})
         string(REPLACE ";" "\;" _excludedExportTarget "${_excludedExportTarget}") # [WA#1] Must escape ; again if occurred in item.
-
         if(TARGET "${_excludedExportTarget}")
           get_property(_locationSet TARGET "${_excludedExportTarget}" PROPERTY "${_locPropName}" SET)
           if(_locationSet)
@@ -2102,7 +2102,7 @@ if(NOT DEFINED IGC_OPTION__OUTPUT_DIR)
 set(IGC_OPTION__OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}" CACHE PATH "Output directory path where the final libraries will be stored.")
 endif()
 get_filename_component(IGC_OPTION__OUTPUT_DIR ${IGC_OPTION__OUTPUT_DIR} ABSOLUTE)
-set(USC_OPTION__OUTPUT_DIR "${IGC_SOURCE_DIR}/../../dump${_cpuSuffix}/usc" CACHE PATH "Output directory path where the final USC libraries will be stored.")
+set(USC_OPTION__OUTPUT_DIR "${IGC_SOURCE_DIR}/../../../output/dump${_cpuSuffix}/usc" CACHE PATH "Output directory path where the final USC libraries will be stored.")
 unset(_cpuSuffix)
 
 if(NOT DEFINED IGC_OPTION__INCLUDE_IGC_COMPILER_TOOLS)
@@ -2196,11 +2196,21 @@ set(IGC_BUILD__PROJ_NAME_PREFIX "")
   set(IGC_BUILD__SPIRV_ENABLED ON)
 
 
+# Enable vector compiler for Linux and Windows
+# If user already defined this, honor decision
+if(NOT DEFINED IGC_BUILD__VC_ENABLED)
+  if(LLVM_ON_UNIX OR LLVM_ON_WIN32)
+    set(IGC_BUILD__VC_ENABLED ON)
+  endif()
+endif()
+
+
 # ======================================== Path helper variables =======================================
 
 
 set(IGC_BUILD__IGC_SRC_DIR          "${IGC_SOURCE_DIR}")
 set(IGC_BUILD__IGC_COMMON_DIR       "${IGC_BUILD__IGC_SRC_DIR}/common")
+
 
 set(IGC_BUILD__IGC_BIN_DIR          "${IGC_BINARY_DIR}")
 
@@ -2210,7 +2220,6 @@ set(IGC_BUILD__GFX_OCL_DIR          "${IGC_SOURCE_DIR}/../../Source_OCL")
 
 set(IGC_BUILD__COMMON_DIR           "${IGC_BUILD__GFX_DEV_SRC_DIR}/Common")
 set(IGC_BUILD__3D_COMMON_DIR        "${IGC_BUILD__GFX_DEV_SRC_DIR}/3d/common")
-
 
 set(IGC_BUILD__INC_DIR              "${IGC_BUILD__GFX_DEV_SRC_DIR}/inc")
 set(IGC_BUILD__COMMON_COMPILER_DIR  "${IGC_BUILD__GFX_DEV_SRC_DIR}/inc/common/Compiler")
@@ -2781,6 +2790,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -Wno-enum-compare
           -Wno-type-limits
           -Wno-ignored-qualifiers
+          -Wno-shadow
           -Wformat
           -Wformat-security
           -Wno-extra
@@ -2796,37 +2806,37 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -msse4.2
           -Wno-unknown-pragmas
           -fPIC
-      )
-      igc_config_flag_apply_settings(
+    )
+    igc_config_flag_apply_settings(
         CompilerOptions
         "${_compilerFlagName}"
         PATTERN "${IGC_BUILD__RELEASE_PATTERN}"
         SET_RAW
           -D_FORTIFY_SOURCE=2
           -fstack-protector
+    )
+    if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
+      igc_config_flag_apply_settings(
+          CompilerOptions
+          "${_compilerFlagName}"
+          ALL_PATTERN ""
+          SET_RAW
+            -finline-functions
       )
-      if(_igc_compiler_is_gnu OR (_igc_compiler_is_clang AND NOT CMAKE_C_COMPILER_VERSION LESS "4.0"))
-    igc_config_flag_apply_settings(
-        CompilerOptions
-        "${_compilerFlagName}"
-        ALL_PATTERN ""
-        SET_RAW
-          -finline-functions
-      )
+    endif()
+    if(NOT _igc_compiler_is_clang)
+      set(flags -funswitch-loops -Wno-maybe-uninitialized)
+      if(NOT ANDROID)
+        list(APPEND flags -lrt)
       endif()
-      if(NOT _igc_compiler_is_clang)
-        set(flags -funswitch-loops -Wno-maybe-uninitialized)
-        if(NOT ANDROID)
-          list(APPEND flags -lrt)
-        endif()
-    igc_config_flag_apply_settings(
-        CompilerOptions
-        "${_compilerFlagName}"
-        ALL_PATTERN ""
-        SET_RAW
-          ${flags}
+      igc_config_flag_apply_settings(
+          CompilerOptions
+          "${_compilerFlagName}"
+          ALL_PATTERN ""
+          SET_RAW
+            ${flags}
       )
-      endif()
+    endif()
   elseif(_igc_compiler_is_clang)
     igc_config_flag_apply_settings(
         CompilerOptions
@@ -2842,16 +2852,16 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
         -finline
         -fkeep-inline-functions
         -msse4.2
+    )
+    if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
+      igc_config_flag_apply_settings(
+          CompilerOptions
+         "${_compilerFlagName}"
+          ALL_PATTERN ""
+          SET_RAW
+            -finline-functions
       )
-      if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
-    igc_config_flag_apply_settings(
-        CompilerOptions
-        "${_compilerFlagName}"
-        ALL_PATTERN ""
-        SET_RAW
-          -finline-functions
-      )
-      endif()
+    endif()
   endif()
 endforeach()
 
@@ -2957,7 +2967,7 @@ foreach(_linkerFlagName IN ITEMS "CMAKE_EXE_LINKER_FLAGS" "CMAKE_SHARED_LINKER_F
 endforeach()
 
 if(MSVC)
-if(${LLVM_VERSION_MAJOR} EQUAL 8)
+if(LLVM_VERSION_MAJOR EQUAL 8)
 message("WA For LLVM8 : Igonre warning 4199 - Need to fix it")
   igc_config_flag_apply_settings(
       LinkerOptions
@@ -3014,9 +3024,6 @@ if(_igc_compiler_is_clang)
         -Wl,-headerpad_max_install_names
     )
 endif()
-
-
-
 
 
 # ================================== Compiler preprocessor definitions =================================
@@ -3080,6 +3087,12 @@ if(IGC_BUILD__SPIRV_ENABLED)
     )
 endif()
 
+#VC OPT switch on/off
+if(NOT IGC_BUILD__VC_ENABLED)
+  set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
+      IGC_VC_DISABLED
+    )
+endif()
   set_property(DIRECTORY APPEND PROPERTY COMPILE_DEFINITIONS
       _SCL_SECURE_NO_WARNINGS
       _CRT_SECURE_NO_WARNINGS
@@ -3274,8 +3287,21 @@ endif()
 if(LLVM_LINK_LLVM_DYLIB)
     # LLVM was built and configured in a way that tools (in our case IGC) should be linked
     # against single LLVM dynamic library.
-    message(STATUS "[IGC] Link against LLVM dylib")
-    set(IGC_BUILD__LLVM_LIBS_TO_LINK "LLVM")
+
+    # SET_LLVM_LIB_PATH is a CMake variable that can be passed in to specify the location
+    # to look for the LLVM .so. In some cases this is useful if multiple LLVM versions are installed
+    if(SET_LLVM_LIB_PATH)
+        set(IGC_BUILD__LLVM_LIBS_TO_LINK "${SET_LLVM_LIB_PATH}/libLLVM-${LLVM_VERSION_MAJOR}.so")
+        message(STATUS "[IGC] Link against specified LLVM dylib ${IGC_BUILD__LLVM_LIBS_TO_LINK}")
+    else()
+        find_library(IGC_BUILD__LLVM_LIBS_TO_LINK "libLLVM-${LLVM_VERSION_MAJOR}.so")
+        if(IGC_BUILD__LLVM_LIBS_TO_LINK)
+          message(STATUS "[IGC] Link against found LLVM dylib ${IGC_BUILD__LLVM_LIBS_TO_LINK}")
+        else()
+          message(FATAL_ERROR "[IGC] Could not find the LLVM dylib. Aborting.")
+        endif()
+    endif()
+
 else()
     # LLVM was built into multiple libraries (static or shared).
     message(STATUS "[IGC] Link against LLVM static or shared component libs")
@@ -3352,6 +3378,8 @@ include_directories(
 
     "${IGC_OPTION__OUTPUT_DIR}"
 
+    "${IGC_BUILD__IGC_BIN_DIR}/${CMAKE_CFG_INTDIR}"
+
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL/ocl_igc_shared/executable_format"
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL"
     )
@@ -3376,6 +3404,12 @@ if(LLVM_ON_WIN32)
     )
 endif()
 
+# ==================================== ZE Binary Writer ================================================
+
+add_subdirectory(ZEBinWriter/zebin)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/ZEBinWriter/zebin/source")
+set(ZEBIN_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ZEBinWriter/zebin/source/autogen")
+include_directories("${ZEBIN_INCLUDE_PATH}")
 
 # ===================================== Projects and source groups =====================================
 
@@ -3408,10 +3442,10 @@ add_subdirectory(common)
 igc_sg_define(IGC__common)
 igc_sg_define(IGC__Common_CLElfLib)
 
+
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
     set(IGC_BUILD__SPIRV_TOOLS_ENABLED ON)
 endif()
-
 
 if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
     add_subdirectory("${IGC_SOURCE_DIR}/../external/SPIRV-Tools" "${IGC_OPTION__OUTPUT_DIR}/external/SPIRV-Tools/config" EXCLUDE_FROM_ALL)
@@ -3431,8 +3465,13 @@ if(LLVM_ON_WIN32
 
 endif()
 
+if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
+  add_subdirectory(CMFE)
+endif()
 
-
+if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
+  add_subdirectory(VectorCompiler)
+endif()
 
 add_subdirectory(Compiler)
 add_subdirectory(DriverInterface)
@@ -3441,7 +3480,9 @@ igc_sg_define(IGC__DriverInterface)
 # Built-in Functions (and resources).
 if(IGC_OPTION__BIF_LINK_BC)
   add_subdirectory(BiFModule)
+if(NOT CMAKE_WDDM_LINUX)
   add_subdirectory(ElfPackager)
+endif()
 endif()
 
     add_subdirectory(OCLFE)
@@ -3526,8 +3567,6 @@ add_library("${IGC_BUILD__PROJ__igc_dll}" SHARED
   )
 
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}" opencl-clang-lib)
-
-add_dependencies("${IGC_BUILD__PROJ__igc_dll}" "${IGC_BUILD__PROJ_NAME_PREFIX}ElfPackager")
 
 
 target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
@@ -3655,7 +3694,9 @@ endforeach()
 
 #FCL
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__BiFModule_OCL}")
+if (NOT CMAKE_WDDM_LINUX)
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__ElfPackager}")
+endif()
 
 if(LLVM_ON_WIN32)
   if(IGC_OPTION__USCLAUNCHER_TOOL)
@@ -3675,8 +3716,6 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
 
   # list of libraries linked in all configurations
   set(_targetLinkLineCommon)
-  # list of libraries additionally linked in Debug and ReleaseInternal configurations
-  set(_targetLinkLineDebugAndReleaseInternalOnly)
 
   # Generated link line for IGC static library allows to properly use it in other projects.
   if(_targetIsStatic)
@@ -3697,18 +3736,11 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
 
   endif()
 
+list(APPEND _targetLinkLineCommon zebinlib)
 
   list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__PROJ__AdaptorOGL}"
   )
-
-
-  if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
-    list(APPEND _targetLinkLineDebugAndReleaseInternalOnly
-        "${IGC_BUILD__PROJ__SPIRV-Tools}"
-    )
-  endif()
-
 
 
   list(APPEND _targetLinkLineCommon
@@ -3732,6 +3764,12 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
       )
   endif()
 
+  if(IGC_BUILD__VC_ENABLED)
+    list(APPEND _targetLinkLineCommon
+      ${IGC_BUILD__PROJ_VC_LIBS_TO_LINK}
+    )
+  endif()
+
   list(APPEND _targetLinkLineCommon
       "${IGC_BUILD__START_GROUP}"
       ${IGC_BUILD__LLVM_LIBS_TO_LINK}
@@ -3743,16 +3781,20 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
     set("IGC_BUILD__LINK_LINE_RELEASE${_libBuildSuffix}"
         ${_targetLinkLineCommon}
       )
-    set("IGC_BUILD__LINK_LINE_RELEASEINTERNAL_AND_DEBUG${_libBuildSuffix}"
-        ${_targetLinkLineCommon}
-        ${_targetLinkLineDebugAndReleaseInternalOnly}
-      )
   else()
+    if(CMAKE_WDDM_LINUX)
     target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
+        "${}"
         "${_targetLinkLineCommon}"
-        "$<$<NOT:$<CONFIG:Release>>:${_targetLinkLineDebugAndReleaseInternalOnly}>"
         "${CMAKE_DL_LIBS}"
       )
+    target_include_directories("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE ${LLVM_INCLUDE_DIRS})
+    else()
+    target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
+        "${_targetLinkLineCommon}"
+        "${CMAKE_DL_LIBS}"
+      )
+    endif()
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ${_libBuildSuffix}}" PROPERTY LINK_INTERFACE_LIBRARIES "")
     set("IGC_BUILD__LINK_LINE${_libBuildSuffix}"
@@ -3823,6 +3865,9 @@ if(_targetIsStatic)
         ${COMMON_CLANG}
         ${CMAKE_DL_LIBS}
       )
+    if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
+      target_link_libraries("${IGC_BUILD__PROJ__fcl_dll}" AdaptorCM)
+    endif()
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY LINK_INTERFACE_LIBRARIES "")
     set("IGC_BUILD__LINK_LINE__fcl_dll"
@@ -3916,6 +3961,9 @@ if(UNIX)
 
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig COMPONENT igc-opencl-devel)
   install(FILES ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
+   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../NOTICES.txt)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../NOTICES.txt DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/igc COMPONENT igc-core)
+  endif()
   install(FILES ${IGC_BUILD__VISA_DIR}/include/RelocationInfo.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/visa COMPONENT igc-opencl-devel)
   install(DIRECTORY ${IGC_BUILD__VISA_DIR}/iga/IGALibrary/api/ DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/iga COMPONENT igc-opencl-devel FILES_MATCHING PATTERN "*.h*")
 elseif (WIN32)

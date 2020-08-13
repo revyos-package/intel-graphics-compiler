@@ -162,10 +162,10 @@ namespace iga
 
         BackpatchList &getBackpatches() {return backpatches;}
 
-        const OpSpec &getOpSpec() const {return state.inst->getOpSpec();}
-
+        const Instruction &getInst() const {return *state.inst;}
+        const OpSpec &getOpSpec() const {return getInst().getOpSpec();}
         const Model &getModel() const {return model;}
-        Platform platform() const {return model.platform;}
+        Platform platform() const {return getModel().platform;}
 
 //        void setBits(MInst mi) {*bits = mi;}
 //        MInst getBits() const {return *bits;}
@@ -224,7 +224,7 @@ namespace iga
         void encode(const Field &f, uint32_t val) {encodeFieldBits(f, (uint64_t)val);}
         void encode(const Field &f, uint64_t val) {encodeFieldBits(f, val);}
         void encode(const Field &f, bool val) {encodeFieldBits(f, val ? 1 : 0);}
-        void encode(const Field &f, const Model &model, const OpSpec &os);
+        void encode(const Field &f, const OpSpec &os);
         void encode(const Field &f, ExecSize es);
         void encode(const Field &f, MathMacroExt acc);
         void encode(const Field &f, Region::Vert vt);
@@ -302,21 +302,12 @@ namespace iga
     // longer method implementations (declared above)
     ///////////////////////////////////////////////////////////////////////////
 
-    inline void InstEncoder::encode(
-        const Field &f, const Model &model, const OpSpec &os)
+    inline void InstEncoder::encode(const Field &f, const OpSpec &os)
     {
         if (!os.isValid()) {
             encodingError(f, "invalid opcode");
         }
-        encodeFieldBits(f, os.code);
-        if (os.isSubop()) {
-            int fcValue = os.functionControlValue;
-            const OpSpec *parOp = model.lookupSubOpParent(os);
-            IGA_ASSERT(parOp != nullptr, "cannot find SubOpParent");
-            IGA_ASSERT(parOp->functionControlField.name != nullptr,
-                "cannot find subop fields");
-            encode(parOp->functionControlField, fcValue);
-        }
+        encodeFieldBits(f, os.opcode);
     }
 
 #define ENCODING_CASE(X, V) case X: val = (V); break
@@ -448,7 +439,8 @@ namespace iga
         switch (platform()) {
         case Platform::GENNEXT:
         default:
-            encodingError("unsupported platform for native encoder");
+            // caller checks this and gives a soft error
+            IGA_ASSERT_FALSE("unsupported platform for native encoder");
         }
     }
 } // end iga::*

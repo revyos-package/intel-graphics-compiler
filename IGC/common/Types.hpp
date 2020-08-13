@@ -23,6 +23,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
+#ifndef IGC_COMMON_TYPES_H
+#define IGC_COMMON_TYPES_H
+
 #pragma once
 
 #include "3d/common/iStdLib/types.h"
@@ -35,35 +39,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/TypeSize.h"
 #endif
 #include "IGC/common/LLVMWarningsPop.hpp"
-
-// Forward declarations
-class ShaderHash;
+#include "Probe/Assertion.h"
+#include "IGC/common/shaderHash.hpp"
 namespace USC
 {
     struct ShaderD3D;
 }
 
-
-
-class ShaderHash
-{
-public:
-    ShaderHash()
-        : asmHash(0)
-        , nosHash(0)
-        , psoHash(0)
-        , perShaderPsoHash(0)
-    {}
-    QWORD getAsmHash() const { return asmHash; }
-    QWORD getNosHash() const { return nosHash; }
-    QWORD getPsoHash() const { return psoHash; }
-    QWORD getPerShaderPsoHash() const { return perShaderPsoHash; }
-
-    QWORD asmHash;
-    QWORD nosHash;
-    QWORD psoHash;
-    QWORD perShaderPsoHash;
-};
 
 enum class SIMDMode : unsigned char
 {
@@ -98,9 +80,10 @@ inline uint16_t numLanes(SIMDMode width)
     case SIMDMode::SIMD16  : return 16;
     case SIMDMode::SIMD32  : return 32;
     case SIMDMode::UNKNOWN :
-    default                : assert(0 && "unreachable"); break;
+    default:
+        IGC_ASSERT_MESSAGE(0, "unreachable");
+        return 1;
     }
-    return 1;
 }
 
 inline SIMDMode lanesToSIMDMode(unsigned lanes) {
@@ -112,11 +95,9 @@ inline SIMDMode lanesToSIMDMode(unsigned lanes) {
     case 16: return SIMDMode::SIMD16;
     case 32: return SIMDMode::SIMD32;
     default:
-        break;
+        IGC_ASSERT_MESSAGE(0, "Unexpected number of lanes!");
+        return SIMDMode::UNKNOWN;
     }
-
-    assert(false && "Unexpected number of lanes!");
-    return SIMDMode::UNKNOWN;
 }
 
 enum class ShaderType
@@ -276,8 +257,9 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value && std::is_integral<TSrc>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(std::numeric_limits<TDst>::min() <= value &&
-        value <= std::numeric_limits<TDst>::max());
+    IGC_ASSERT(std::numeric_limits<TDst>::min() <= value);
+    IGC_ASSERT(value <= std::numeric_limits<TDst>::max());
+
     return static_cast<TDst>(value);
 }
 
@@ -289,8 +271,8 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value && std::is_integral<TSrc>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(value <= static_cast<typename std::make_unsigned<TDst>::type>(
-        std::numeric_limits<TDst>::max()));
+    IGC_ASSERT(value <= static_cast<typename std::make_unsigned<TDst>::type>(std::numeric_limits<TDst>::max()));
+
     return static_cast<TDst>(value);
 }
 
@@ -302,8 +284,9 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value && std::is_integral<TSrc>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(0 <= value &&
-        static_cast<typename std::make_unsigned<TSrc>::type>(value) <= std::numeric_limits<TDst>::max());
+    IGC_ASSERT(0 <= value);
+    IGC_ASSERT(static_cast<typename std::make_unsigned<TSrc>::type>(value) <= std::numeric_limits<TDst>::max());
+
     return static_cast<TDst>(value);
 }
 
@@ -315,7 +298,7 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value && std::is_integral<TSrc>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(value <= std::numeric_limits<TDst>::max());
+    IGC_ASSERT(value <= std::numeric_limits<TDst>::max());
     return static_cast<TDst>(value);
 }
 
@@ -328,7 +311,7 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(value.getFixedSize() <= std::numeric_limits<TDst>::max());
+    IGC_ASSERT(value.getFixedSize() <= std::numeric_limits<TDst>::max());
     return static_cast<TDst>(value.getFixedSize());
 }
 
@@ -340,9 +323,10 @@ inline typename std::enable_if<
     static_assert(std::is_integral<TDst>::value,
         "int_cast<>() should be used only for conversions between integer types.");
 
-    assert(value.getFixedSize() <= static_cast<typename std::make_unsigned<TDst>::type>(
-        std::numeric_limits<TDst>::max()));
+    IGC_ASSERT(value.getFixedSize() <= static_cast<typename std::make_unsigned<TDst>::type>(std::numeric_limits<TDst>::max()));
     return static_cast<TDst>(value.getFixedSize());
 }
 
 #endif
+
+#endif //IGC_COMMON_TYPES_H

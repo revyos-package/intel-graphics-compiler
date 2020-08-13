@@ -32,6 +32,7 @@ namespace llvm {
 // The following declarations are placed according to alphabetic order for simplicity
 void initializeAddImplicitArgsPass(llvm::PassRegistry&);
 void initializeAddressSpaceAliasAnalysisPass(llvm::PassRegistry&);
+void initializeAnnotateUniformAllocasPass(llvm::PassRegistry&);
 void initializeAggregateArgumentsAnalysisPass(llvm::PassRegistry&);
 void initializeAlignmentAnalysisPass(llvm::PassRegistry&);
 void initializePreBIImportAnalysisPass(llvm::PassRegistry&);
@@ -80,6 +81,7 @@ void initializeImplicitGlobalIdPass(llvm::PassRegistry&);
 void initializeInlineLocalsResolutionPass(llvm::PassRegistry&);
 void initializeLegalizationPass(llvm::PassRegistry&);
 void initializeLegalizeResourcePointerPass(llvm::PassRegistry&);
+void initializeLegalizeFunctionSignaturesPass(llvm::PassRegistry&);
 void initializeLiveVarsAnalysisPass(llvm::PassRegistry&);
 void initializeLowerGEPForPrivMemPass(llvm::PassRegistry&);
 void initializeLowPrecisionOptPass(llvm::PassRegistry&);
@@ -142,7 +144,7 @@ void initializeTrivialLocalMemoryOpsEliminationPass(llvm::PassRegistry&);
 void initializeSLMConstPropPass(llvm::PassRegistry&);
 void initializeBlendToDiscardPass(llvm::PassRegistry&);
 void initializeCheckInstrTypesPass(llvm::PassRegistry&);
-void initializeInstrStatiticPass(llvm::PassRegistry&);
+void initializeInstrStatisticPass(llvm::PassRegistry&);
 void initializeHalfPromotionPass(llvm::PassRegistry&);
 void initializeFixFastMathFlagsPass(llvm::PassRegistry&);
 void initializeFCmpPaternMatchPass(llvm::PassRegistry&);

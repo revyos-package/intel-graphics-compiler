@@ -21,7 +21,7 @@
 #include "SPIRVEntry.h"
 #include "SPIRVValue.h"
 #include "SPIRVInstruction.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 #include <iostream>
 #include <map>
@@ -126,12 +126,12 @@ public:
   SPIRVAsmINTEL *getAsm() const { return Asm; }
 
 protected:
-  _SPIRV_DEF_DEC4(Type, Id, Asm, Args)
+  _SPIRV_DEF_DEC4_OVERRIDE(Type, Id, Asm, Args)
   void validate() const override {
     SPIRVInstruction::validate();
     IGC_ASSERT(WordCount >= FixedWC);
     IGC_ASSERT(OpCode == OC);
-    IGC_ASSERT(getBasicBlock() && "Invalid BB");
+    IGC_ASSERT_MESSAGE(getBasicBlock(), "Invalid BB");
     IGC_ASSERT(getBasicBlock()->getModule() == Asm->getModule());
   }
   SPIRVAsmINTEL *Asm;

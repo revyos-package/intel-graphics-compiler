@@ -1,4 +1,3 @@
-// vim:ts=2:sw=2:et:
 /*===================== begin_copyright_notice ==================================
 
 Copyright (c) 2017 Intel Corporation
@@ -31,13 +30,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/LLVMWarningsPush.hpp"
-
 #include "WrapperLLVM/Utils.h"
 #include "llvmWrapper/Support/Debug.h"
 #include "llvmWrapper/IR/Constant.h"
-
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -45,10 +41,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/NoFolder.h>
 #include <llvm/Pass.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "GenISAIntrinsics/GenIntrinsics.h"
-
-
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -482,9 +476,29 @@ bool GASPropagator::visitSelect(SelectInst& I) {
     if (!ASCI || ASCI->getSrcTy() != NonGASTy)
         return false;
 
+    // Change select operands to non-GAS
     TheUse->set(TheVal);
     TheOtherUse->set(ASCI->getOperand(0));
 
+    // Handle select return type
+    BuilderType::InsertPointGuard Guard(*IRB);
+    IRB->SetInsertPoint(&(*std::next(BasicBlock::iterator(&I))));
+
+    PointerType* DstPtrTy = cast<PointerType>(I.getType());
+    PointerType* NonGASPtrTy = dyn_cast<PointerType>(NonGASTy);
+
+    // Push 'addrspacecast' forward by changing the select return type to non-GAS pointer
+    // followed by a new 'addrspacecast' to GAS
+    PointerType* TransPtrTy = PointerType::get(DstPtrTy->getElementType(), NonGASPtrTy->getAddressSpace());
+    I.mutateType(TransPtrTy);
+    Value* NewPtr = IRB->CreateAddrSpaceCast(&I, DstPtrTy);
+
+    for (auto UI = I.use_begin(), UE = I.use_end(); UI != UE;) {
+        Use& U = *UI++;
+        if (U.getUser() == NewPtr)
+            continue;
+        U.set(NewPtr);
+    }
     return true;
 }
 
@@ -513,19 +527,27 @@ static bool handelMemTransferInst(MemTransferInst& I) {
                    NewSrcTy ? NewSrcTy : I.getArgOperand(1)->getType(),
                    I.getArgOperand(2)->getType() };
     Function* Fn = nullptr;
+    IGC_ASSERT(nullptr != I.getParent());
+    IGC_ASSERT(nullptr != I.getParent()->getParent());
     Module* M = I.getParent()->getParent()->getParent();
     if (isa<MemCpyInst>(I))
         Fn = Intrinsic::getDeclaration(M, Intrinsic::memcpy, Tys);
     else if (isa<MemMoveInst>(I))
         Fn = Intrinsic::getDeclaration(M, Intrinsic::memmove, Tys);
     else
-        llvm_unreachable("unsupported memory intrinsic kind");
+        IGC_ASSERT_EXIT_MESSAGE(0, "unsupported memory intrinsic");
 
     I.setCalledFunction(Fn);
-    if (NewDst)
+    if(nullptr != NewDst)
+    {
+        IGC_ASSERT(nullptr != DstUse);
         DstUse->set(NewDst);
-    if (NewSrc)
+    }
+    if(nullptr != NewSrc)
+    {
+        IGC_ASSERT(nullptr != SrcUse);
         SrcUse->set(NewSrc);
+    }
     return true;
 }
 

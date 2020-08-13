@@ -102,7 +102,6 @@ bool G4Verifier::verifyInst(G4_INST *inst)
         passIndex == Optimizer::PI_renameRegister ||
         passIndex == Optimizer::PI_newLocalDefHoisting ||
         passIndex == Optimizer::PI_newLocalCopyPropagation ||
-        passIndex == Optimizer::PI_splitVariables ||
         passIndex == Optimizer::PI_cselPeepHoleOpt)
     {
         // def-use chain should be valid after these passes
@@ -271,6 +270,11 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             return;
         }
 
+        if (!inst->isComprInst())
+        {
+            return;
+        }
+
         int dstStart = dst->getLinearizedStart() / GENX_GRF_REG_SIZ;
         int dstEnd = dst->getLinearizedEnd() / GENX_GRF_REG_SIZ;
 
@@ -280,14 +284,14 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             if (src != NULL && !src->isNullReg() && src->getTopDcl() &&
                 (src->getTopDcl()->getRegFile() == G4_GRF || src->getTopDcl()->getRegFile() == G4_INPUT))
             {
-                bool noOverlap = dataHazardCheck(dst, src);
+                bool overlap = dataHazardCheck(dst, src);
 
                 int srcStart = src->getLinearizedStart() / GENX_GRF_REG_SIZ;
                 int srcEnd = src->getLinearizedEnd() / GENX_GRF_REG_SIZ;
                 if (dstEnd != dstStart ||
                     srcStart != srcEnd)  //Any operand is more than 2 GRF
                 {
-                    MUST_BE_TRUE(!noOverlap, "dst and src0 overlap");
+                    MUST_BE_TRUE(!overlap, "dst and src0 overlap");
                 }
             }
         }
@@ -337,7 +341,7 @@ void G4Verifier::verifySend(G4_INST* inst)
             }
         }
 
-        if (VISA_WA_CHECK(kernel.fg.builder->getPWaTable(), WaDisableSendSrcDstOverlap))
+        if (kernel.fg.builder->WaDisableSendSrcDstOverlap())
         {
             if (!dst->isNullReg())
             {
@@ -388,7 +392,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
         opnd->isNullReg() == false &&
         opnd->isAddrExp() == false)
     {
-        DEBUG_VERBOSE("Inst not set correctly for opnd ");
+        DEBUG_VERBOSE("operand does not have exactly one owning instruction (shared or orphaned)");
 
         std::cerr << "operand: ";
         opnd->emit(std::cerr);
@@ -398,15 +402,13 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
 
         if (opnd->getInst() == NULL)
         {
-            DEBUG_VERBOSE("Inst set to NULL");
-            MUST_BE_TRUE(false, "Inst pointer set to NULL in opnd");
+            DEBUG_VERBOSE("operand has no owner instruction (orphaned)");
+            MUST_BE_TRUE(false, "operand has no owner instruction (orphaned)");
         }
         else
         {
-            opnd->getInst()->emit(std::cerr);
-            std::cerr << "\n";
-            DEBUG_VERBOSE("Inst ptr set to incorrect inst");
-            MUST_BE_TRUE(false, "Inst pointer incorrectly set in opnd");
+            DEBUG_VERBOSE("operand pointer is shared by another instruction");
+            MUST_BE_TRUE(false, "operand pointer is shared by another instruction");
         }
         DEBUG_VERBOSE(std::endl);
     }
@@ -790,6 +792,18 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                         assert((offset % 16 == 0 && dstOffset % 16 == 0) &&
                             "explicit acc source and its dst must be oword-aligned");
                     }
+                }
+            }
+
+            // if src0 is V/UV/VF imm, dst must be 16 byte aligned.
+            if (inst->opcode() == G4_mov && IS_VTYPE(inst->getSrc(0)->getType()))
+            {
+                auto dst = inst->getDst();
+                // should we assert if dst is not phyReg assigned?
+                bool dstIsAssigned = dst->getBase()->isRegVar() && dst->getBase()->asRegVar()->isPhyRegAssigned();
+                if (dstIsAssigned && dst->getLinearizedStart() % 16 != 0)
+                {
+                    assert(false && "destination of move instruction with V/VF imm is not 16-byte aligned");
                 }
             }
         }

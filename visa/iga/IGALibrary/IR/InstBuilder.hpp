@@ -27,6 +27,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define _IGA_INST_BUILDER_HPP_
 
 #include "Kernel.hpp"
+#include "Messages.hpp"
 #include "../asserts.hpp"
 #include "../ErrorHandler.hpp"
 #include "../Frontend/IRToString.hpp"
@@ -62,21 +63,21 @@ struct OperandInfo
 
     union // optional modifier (e.g. -r12, ~r12, (abs) (sat))
     {
-        SrcModifier  regOpSrcMod = SrcModifier::NONE;
-        DstModifier  regOpDstMod;
+        SrcModifier          regOpSrcMod = SrcModifier::NONE;
+        DstModifier          regOpDstMod;
     };
-    RegName        regOpName = RegName::INVALID;    // e.g. r#, a#, null, ...
-    Region         regOpRgn = Region::INVALID;     // e.g. <1>, <8;8,1>
-    MathMacroExt   regOpMathMacroExtReg = MathMacroExt::INVALID; // e.g. math macro spc acc
+    RegName                  regOpName = RegName::INVALID;    // e.g. r#, a#, null, ...
+    Region                   regOpRgn = Region::INVALID;     // e.g. <1>, <8;8,1>
+    MathMacroExt             regOpMathMacroExtReg = MathMacroExt::INVALID; // e.g. math macro spc acc
 
     // direct/indirect register info
-    RegRef   regOpReg; // direct operands
+    RegRef                   regOpReg; // direct operands
 
     // indirect register offset
-    int16_t  regOpIndOff = 0; // e.g. "16" in "r[a0.4,16]"
+    int16_t                  regOpIndOff = 0; // e.g. "16" in "r[a0.4,16]"
 
     // imm field
-    ImmVal   immValue;
+    ImmVal                   immValue;
 
     std::string              immLabel;
     Type                     type = Type::INVALID;
@@ -130,7 +131,8 @@ class InstBuilder {
     Loc                         m_loc;
     Predication                 m_predication;
     const OpSpec               *m_opSpec = nullptr;
-    BranchCntrl                 m_brnchCtrl = BranchCntrl::OFF;
+
+    Subfunction                 m_subfunc;
 
     RegRef                      m_flagReg; // shared by predication / condition modifier
 
@@ -145,8 +147,12 @@ class InstBuilder {
     OperandInfo                 m_srcs[3];
     int                         m_nSrcs = 0;
 
-    SendDescArg                 m_exDesc;
-    SendDescArg                 m_desc;
+    SendDesc                    m_exDesc;
+    SendDesc                    m_desc;
+    // int                         m_sendDst;  // (extracted later)
+    int                         m_sendSrc0Len;
+    int                         m_sendSrc1Len;
+
     InstOptSet                  m_instOpts;
 
     std::string                 m_comment;
@@ -181,26 +187,38 @@ class InstBuilder {
 
 public:
     struct SWSBInfo {
-        enum DIST_TYPE {
-            NONE,
-            REG_DIST,
-        };
-        DIST_TYPE distType = NONE;
+        SWSB::DistType distType = SWSB::DistType::NO_DIST;
         uint32_t regDist = 0;      // e.g. @3       0 = not set
         int32_t memSBidAlloc = -1; // e.g. $2      -1 = not set
         int32_t memSBidDst = -1;   // e.g. $2.dst  -1 = not set
         int32_t memSBidSrc = -1;   // e.g. $2.src  -1 = not set
+
         SWSBInfo() { } // sets default values as above
+
         bool anyBarrierSet() const {
             return sbidAllocSet() || sbidDstSet() || sbidSrcSet();
         }
         bool sbidAllocSet() const {return memSBidAlloc >= 0;}
         bool sbidDstSet() const {return memSBidDst >= 0;}
         bool sbidSrcSet() const {return memSBidSrc >= 0;}
+
+        bool operator==(const SWSBInfo &sbi) const {
+            return
+                distType == sbi.distType &&
+                regDist == sbi.regDist &&
+                memSBidAlloc == sbi.memSBidAlloc &&
+                memSBidDst == sbi.memSBidDst &&
+                memSBidSrc == sbi.memSBidSrc;
+        }
+        bool operator!=(const SWSBInfo &sbi) const {
+            return !(*this == sbi);
+        }
     };
 
 private:
     SWSBInfo                    m_depInfo;
+
+    Platform platform() const {return m_model.platform;}
 
     void clearInstState() {
         m_predication.function = PredCtrl::NONE;
@@ -212,7 +230,7 @@ private:
 
         m_execSize = ExecSize::SIMD1;
         m_chOff = ChannelOffset::M0;
-        m_brnchCtrl = BranchCntrl::OFF;
+        m_subfunc = InvalidFC::INVALID; // invalid
         m_maskCtrl = MaskCtrl::NORMAL;
 
         m_flagModifier = FlagModifier::NONE;
@@ -228,7 +246,10 @@ private:
         m_exDesc.imm = 0;
         m_desc.imm = 0;
 
+        m_sendSrc0Len = m_sendSrc1Len = -1;
+
         m_instOpts.clear();
+
         m_depInfo = SWSBInfo();
 
         m_comment.clear();
@@ -247,8 +268,19 @@ public:
 
     ErrorHandler &errorHandler() {return m_errorHandler;}
 
-    void setSWSBEncodingMode(SWSB_ENCODE_MODE mode)
-    {
+    ///////////////////////////////////////////////////////////////////////////
+    // specific IR accessors
+    bool isMacroOp() const {
+        return m_opSpec->is(Op::MADM) ||
+            (m_opSpec->is(Op::MATH) && IsMacro(m_subfunc.math));
+    }
+
+    const SendDesc getExDesc() const {return m_exDesc;}
+    Subfunction getSubfunction() const {return m_subfunc;}
+
+    ///////////////////////////////////////////////////////////////////////////
+    // specific IR setters
+    void setSWSBEncodingMode(SWSB_ENCODE_MODE mode) {
         m_swsbEncodeMode = mode;
     }
 
@@ -311,9 +343,10 @@ public:
         // set the full instruction length in chars (for text)
         // or bytes (for decoding bits)
         m_loc.extent = extent;
+        IGA_ASSERT(m_opSpec != nullptr, "OpSpec never set");
 
         Instruction *inst = nullptr;
-        if (m_opSpec->isMathSubFunc()) {
+        if (m_opSpec->is(Op::MATH)) {
             inst =
                 m_kernel->createBasicInstruction(
                     *m_opSpec,
@@ -322,7 +355,8 @@ public:
                     m_execSize,
                     m_chOff,
                     m_maskCtrl,
-                    m_flagModifier);
+                    m_flagModifier,
+                    m_subfunc);
         } else if (m_opSpec->format == OpSpec::Format::SYNC_UNARY) {
             inst =
                 m_kernel->createBasicInstruction(
@@ -332,7 +366,8 @@ public:
                     m_execSize,
                     m_chOff,
                     m_maskCtrl,
-                    FlagModifier::NONE);
+                    FlagModifier::NONE,
+                    m_subfunc);
         } else if (m_opSpec->isBranching()) {
             inst =
                 m_kernel->createBranchInstruction(
@@ -342,18 +377,30 @@ public:
                     m_execSize,
                     m_chOff,
                     m_maskCtrl,
-                    m_brnchCtrl);
+                    m_subfunc);
         } else if (m_opSpec->isSendOrSendsFamily()) {
+            if (m_subfunc.send == SFID::INVALID) {
+                if (platform() <= Platform::GEN11 && m_exDesc.isImm()) {
+                    m_subfunc.send =
+                        sfidFromEncoding(platform(), m_exDesc.imm);
+                }
+            }
             inst =
                 m_kernel->createSendInstruction(
                     *m_opSpec,
+                    m_subfunc.send,
                     m_predication,
                     m_flagReg,
                     m_execSize,
                     m_chOff,
                     m_maskCtrl,
                     m_exDesc,
-                    m_desc);
+                    m_desc
+                );
+            if (m_sendSrc0Len >= 0)
+                inst->setSrc0Length(m_sendSrc0Len);
+            if (m_sendSrc1Len >= 0)
+                inst->setSrc1Length(m_sendSrc1Len);
         } else if (m_opSpec->op == Op::NOP) {
             inst = m_kernel->createNopInstruction();
         } else if (m_opSpec->op == Op::ILLEGAL) {
@@ -367,12 +414,15 @@ public:
                     m_execSize,
                     m_chOff,
                     m_maskCtrl,
-                    m_flagModifier);
+                    m_flagModifier,
+                    m_subfunc);
         }
         inst->setLoc(m_loc);
         m_insts.emplace_back(inst);
 
         if (m_opSpec->supportsDestination()) {
+            IGA_ASSERT(m_dst.kind != Operand::Kind::INVALID,
+                "destination never set");
             if (m_dst.kind == Operand::Kind::DIRECT) {
                 inst->setDirectDestination(
                     m_dstModifier,
@@ -401,6 +451,8 @@ public:
         // set source operands
         for (int i = 0; i < m_nSrcs; i++) {
             const OperandInfo &src = m_srcs[i];
+            IGA_ASSERT(src.kind != Operand::Kind::INVALID, "source never set");
+
             SourceIndex opIx = (SourceIndex)((int)SourceIndex::SRC0 + i);
             if (src.kind == Operand::Kind::DIRECT) {
                 inst->setDirectSource(
@@ -477,21 +529,13 @@ public:
 
         if (m_depInfo.regDist > 0)
         {
-            SWSB::DistType swsb_type = SWSB::DistType::NO_DIST;
-            switch(m_depInfo.distType) {
-            case SWSBInfo::REG_DIST:
-                swsb_type = SWSB::REG_DIST;
-                break;
-            default:
-                break;
-            }
             swInfo.minDist = m_depInfo.regDist;
-            swInfo.distType = swsb_type;
+            swInfo.distType = m_depInfo.distType;
         }
         SWSB::InstType inst_type = SWSB::InstType::OTHERS;
         if (m_opSpec->isSendOrSendsFamily())
             inst_type = SWSB::InstType::SEND;
-        else if (m_opSpec->isMathSubFunc())
+        else if (m_opSpec->is(Op::MATH))
             inst_type = SWSB::InstType::MATH;
         if (!swInfo.verify(m_model.getSWSBEncodeMode(), inst_type))
             m_errorHandler.reportError(m_loc,
@@ -510,7 +554,7 @@ public:
 
 
     void InstPredication(
-        const Loc &loc,
+        const Loc &,
         bool inv,
         const RegRef &flagReg,
         PredCtrl predCtrl)
@@ -526,27 +570,22 @@ public:
     }
 
 
-    // The absense of this implies branch control is either off or not
-    // present (e.g. HSW or an instruction without that option).
-    //
-    // E.g.   if.b   (16)   64    80        // YES
-    // E.g.   if     (16)   64    80        // NO
-    //        while ...                     // NO
-    void InstBrCtl(BranchCntrl bc) {
-        m_brnchCtrl = bc;
+    void InstSubfunction(Subfunction sf) {
+        IGA_ASSERT(!m_subfunc.isValid(), "subfunction already set");
+        m_subfunc = sf;
     }
 
 
     void InstExecInfo(
-        const Loc &execSizeLoc, ExecSize execSize,
-        const Loc &execOffLoc, ChannelOffset execOff)
+        const Loc &, ExecSize execSize,
+        const Loc &, ChannelOffset execOff)
     {
         m_execSize = execSize;
         m_chOff = execOff;
     }
 
 
-    void InstNoMask(const Loc &loc) {
+    void InstNoMask(const Loc &) {
         m_maskCtrl = MaskCtrl::NOMASK;
     }
 
@@ -633,7 +672,6 @@ public:
     void InstDstOpRegMathMacroExtReg(
         const Loc &loc,
         const RegInfo &ri,
-        RegName rnm,
         int regNum,
         MathMacroExt mme,
         Region::Horz rgnH,
@@ -681,8 +719,7 @@ public:
         Region rgn, // region parameters
         Type ty)
     {
-        RegRef rr;
-        rr.regNum = (uint8_t)reg;
+        RegRef rr((uint8_t)reg, 0);
         InstSrcOpRegDirect(srcOpIx, loc, SrcModifier::NONE, rnm, rr, rgn, ty);
     }
     void InstSrcOpRegDirect(
@@ -848,11 +885,8 @@ public:
         // some sanity validation
         switch (opInfo.kind) {
         case Operand::Kind::DIRECT:
-            break;
         case Operand::Kind::MACRO:
-            break;
         case Operand::Kind::INDIRECT:
-            break;
         case Operand::Kind::IMMEDIATE:
         case Operand::Kind::LABEL:
             break;
@@ -867,25 +901,28 @@ public:
     // E.g. "send ... 0xC  a0.0"
     // (we translate  this to:  a0.0<0;1,0>:ud)
     void InstSendDescs(
-        const Loc &locExDesc,
-        const SendDescArg &exDesc,
-        const Loc &locDesc,
-        const SendDescArg &desc)
+        const Loc &,
+        const SendDesc &exDesc,
+        const Loc &,
+        const SendDesc &desc)
     {
         m_exDesc = exDesc;
         m_desc = desc;
     }
 
 
-    /////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
     // instruction option callbacks
-    void InstOpts(const InstOptSet &instOpts) {
-        m_instOpts = instOpts;
+    void InstOptsAdd(const InstOptSet &instOpts) {
+        m_instOpts.add(instOpts);
     }
 
+    void InstOptAdd(InstOpt instOpt) {
+        m_instOpts.add(instOpt);
+    }
 
-    void setDepInfoSBidSrc(Loc loc, int32_t sbid) {
-        if (sbid > (int32_t)m_model.getSWSBTokenNum())
+    void InstDepInfoSBidSrc(Loc loc, int32_t sbid) {
+        if (sbid > (int32_t)m_model.getMaxSWSBTokenNum())
             m_errorHandler.reportError(loc, "Invalid SWSB ID number");
         if (m_depInfo.anyBarrierSet())
             m_errorHandler.reportError(loc, "More than one SWSB barrier set");
@@ -893,8 +930,8 @@ public:
         m_depInfo.memSBidSrc = sbid;
     }
 
-    void setDepInfoSBidDst(Loc loc, int32_t sbid) {
-        if (sbid > (int32_t)m_model.getSWSBTokenNum())
+    void InstDepInfoSBidDst(Loc loc, int32_t sbid) {
+        if (sbid > (int32_t)m_model.getMaxSWSBTokenNum())
             m_errorHandler.reportError(loc, "Invalid SWSB ID number");
         if (m_depInfo.anyBarrierSet())
             m_errorHandler.reportError(loc, "More than one SWSB barrier set");
@@ -902,8 +939,8 @@ public:
         m_depInfo.memSBidDst = sbid;
     }
 
-    void setDepInfoSBidAlloc(Loc loc, int32_t sbid) {
-        if (sbid > (int32_t)m_model.getSWSBTokenNum())
+    void InstDepInfoSBidAlloc(Loc loc, int32_t sbid) {
+        if (sbid > (int32_t)m_model.getMaxSWSBTokenNum())
             m_errorHandler.reportError(loc, "Invalid SWSB ID number");
         if (m_depInfo.anyBarrierSet())
             m_errorHandler.reportError(loc, "More than one SWSB barrier set");
@@ -911,10 +948,10 @@ public:
         m_depInfo.memSBidAlloc = sbid;
     }
 
-    void setDepInfoDist(Loc loc, SWSBInfo::DIST_TYPE type, uint32_t dist) {
+    void InstDepInfoDist(Loc loc, SWSB::DistType type, uint32_t dist) {
         if (dist > m_model.getSWSBMaxValidDistance())
             m_errorHandler.reportError(loc, "Invalid SWSB distance number");
-        if (m_depInfo.distType != SWSBInfo::DIST_TYPE::NONE)
+        if (m_depInfo.distType != SWSB::DistType::NO_DIST)
             m_errorHandler.reportError(loc, "More than one SWSB distance set");
         m_depInfo.distType = type;
         m_depInfo.regDist = dist;
@@ -923,10 +960,11 @@ public:
     ///////////////////////////////////////////////
     // for decoding from binary
     void InstSwsb(Loc loc, SWSB swsb) {
-        m_depInfo = SWSBInfo(); // clobber old value
+        IGA_ASSERT(m_depInfo == SWSBInfo(), "resetting SWSB info");
+
         // verify the given swsb
-        SWSB::InstType inst_type = m_opSpec->getSWSBInstType();
-        if (!swsb.verify(m_model.getSWSBEncodeMode(), inst_type))
+        SWSB::InstType instType = m_opSpec->getSWSBInstType();
+        if (!swsb.verify(m_model.getSWSBEncodeMode(), instType))
             m_errorHandler.reportError(loc, "invalid SWSB bits");
 
         switch(swsb.tokenType) {
@@ -943,16 +981,7 @@ public:
             break;
         }
 
-        switch (swsb.distType) {
-        case SWSB::DistType::NO_DIST:
-            m_depInfo.distType = SWSBInfo::NONE;
-            break;
-        case SWSB::DistType::REG_DIST:
-            m_depInfo.distType = SWSBInfo::REG_DIST;
-            break;
-        default:
-            m_errorHandler.reportError(loc, "invalid SWSB bits");
-        }
+        m_depInfo.distType = swsb.distType;
         if (swsb.distType != SWSB::DistType::NO_DIST)
             m_depInfo.regDist = swsb.minDist;
     }

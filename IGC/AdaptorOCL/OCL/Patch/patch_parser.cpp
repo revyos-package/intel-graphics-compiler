@@ -34,7 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "patch_g9.h"
 #include "visa/include/RelocationInfo.h"
 #include "../sp/sp_debug.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace iOpenCL
 {
@@ -908,6 +908,12 @@ void DebugPatchList(
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                     "\tNumGRFRequired = %d\n",
                     pPatchItem->NumGRFRequired);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tUseBindlessMode = %d\n",
+                    pPatchItem->UseBindlessMode);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tSIMDInfo = %lld\n",
+                    pPatchItem->SIMDInfo);
             }
             break;
 

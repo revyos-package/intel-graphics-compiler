@@ -30,6 +30,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <cassert>
 #include <iostream>
 
+#include "visa_igc_common_header.h"
 #include "VISADefines.h"
 
 #ifndef _WIN32
@@ -74,8 +75,8 @@ static errno_t memcpy_s(void* dst, size_t numberOfElements, const void* src, siz
 typedef char CHAR;
 typedef int INT;
 typedef short SHORT;
-typedef long LONG;
-typedef long long LONGLONG;
+typedef int32_t LONG;
+typedef int64_t LONGLONG;
 
 typedef uint32_t UINT32;
 typedef uint32_t DWORD;
@@ -84,6 +85,7 @@ typedef uint16_t WORD;
 typedef double DOUBLE;
 typedef float FLOAT;
 
+#ifndef __LARGE_INTEGER_STRUCT_DEFINED
 union LARGE_INTEGER {
     struct dummy {
         DWORD LowPart;
@@ -97,6 +99,8 @@ union LARGE_INTEGER {
 
     LONGLONG QuadPart;
 };
+#define __LARGE_INTEGER_STRUCT_DEFINED
+#endif /* __LARGE_INTEGER_STRUCT_DEFINED */
 
 #endif /* Windows types for non-Windows end */
 
@@ -143,18 +147,6 @@ extern std::stringstream errorMsgs;
 #define DEBUG_EMIT(obj)
 
 #endif  // #ifdef _DEBUG
-
-#if !defined(DLL_MODE)
-//important messages that we should relay to the user
-//(things like if RA is spilling, etc.)
-// this is only enabled in offline vISA executable
-#define RELEASE_MSG(msg) { \
-    std::cerr << msg; \
-}
-#else
-// do nothing for driver build
-#define RELEASE_MSG(msg)
-#endif
 
 // disable asserts only for release DLL
 #if defined(_DEBUG) || !defined(DLL_MODE) || !defined(NDEBUG)
@@ -214,7 +206,6 @@ extern const char* steppingNames[];
 // -- "CHV" --> GENX_CHV
 // -- "SKL" --> GENX_SKL
 // -- "BXT" --> GENX_BXT
-// -- "CNL" --> GENX_CNL
 // -- "ICLLP" --> GENX_ICLLP
 // -- "TGLLP" --> GENX_TGLLP
 extern "C" int SetPlatform(const char* s);
@@ -270,5 +261,15 @@ extern "C" const char * GetSteppingString( void );
 #define GENX_GRF_REG_SIZ   getGRFSize()
 #define NUM_WORDS_PER_GRF  (getGRFSize() / 2)
 #define NUM_DWORDS_PER_GRF (getGRFSize() / 4u)
+
+
+// Target should be specified as follows
+// - VISA builder mode in CreateBuilder API through fast-path
+// - Kernel target attribute in VISA binarary or ISAASM
+typedef enum {
+    VISA_CM = 0,
+    VISA_3D = 1,
+    VISA_CS = 2,
+} VISATarget;
 
 #endif //_COMMON_H_

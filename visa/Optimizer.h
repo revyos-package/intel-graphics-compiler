@@ -147,8 +147,6 @@ class Optimizer
     void cselPeepHoleOpt();
     void regAlloc();
     void insertFallThroughJump();
-    void chkRegBoundary();
-    bool chkOpndBoundary(G4_INST *inst, G4_Operand *opnd);
     void reverseOffsetProp(
             AddrSubReg_Node addrRegInfo[8],
             int subReg,
@@ -163,12 +161,10 @@ class Optimizer
     bool foldCmpToCondMod(G4_BB* BB, INST_LIST_ITER& iter);
     void HWWorkaround();
     void preRA_HWWorkaround();
-    void NoSrcDepSet();
     void normalizeRegion();
-    void NoDD();
     void initializePayload();
     void dumpPayload();
-    void checkBarrierUsage();
+    void collectStats();
     void createR0Copy();
 
     void insertInstLabels();
@@ -223,9 +219,9 @@ private:
     void cleanupBindless();
     G4_Operand* updateSendsHeaderReuse(std::vector<std::vector<G4_INST*>> &, std::vector<G4_INST*> &, INST_LIST_ITER);
     void countGRFUsage();
-    void splitVariables();
     void changeMoveType();
     void split4GRFVars();
+    void legalizeType();
 
     void countBankConflicts();
     unsigned int numBankConflicts;
@@ -250,7 +246,7 @@ private:
     void resetA0();
     void setA0toTdrForSendc();
     void replaceRetWithJmpi();
-    void replaceNoMaskWithAnyhWA();
+    void doNoMaskWA();
     void insertFenceAtEntry();
 
     typedef std::vector<vISA::G4_INST*> InstListType;
@@ -267,6 +263,7 @@ private:
     void recomputeBound(std::unordered_set<G4_Declare*>& declares);
 
     void mapOrphans();
+    void varSplit();
 
     G4_Imm* foldConstVal(G4_Imm* const1, G4_Imm* const2, G4_opcode op);
 
@@ -315,7 +312,6 @@ public:
         PI_preRA_HWWorkaround,         // always, each WA under specific control
         PI_preRA_Schedule,
         PI_regAlloc,                   // always
-        PI_NoDD,
         PI_removeLifetimeOps,          // always
         PI_countBankConflicts,
         PI_removeRedundMov,            // always
@@ -324,10 +320,8 @@ public:
         PI_reassignBlockIDs,           // always
         PI_evalAddrExp,                // always
         PI_FoldAddrImmediate,
-        PI_chkRegBoundary,
         PI_localSchedule,
         PI_HWWorkaround,               // always
-        PI_NoSrcDepSet,                // always
         PI_insertInstLabels,           // always
         PI_insertHashMovs,
         PI_insertDummyCompactInst,
@@ -337,12 +331,11 @@ public:
         PI_ifCvt,
         PI_normalizeRegion,            // always
         PI_dumpPayload,
-        PI_checkBarrierUsage,          // always
+        PI_collectStats,          // always
         PI_createR0Copy,
         PI_initializePayload,
         PI_cleanupBindless,
         PI_countGRFUsage,
-        PI_splitVariables,
         PI_changeMoveType,
         PI_reRAPostSchedule,
         PI_accSubPostSchedule,
@@ -354,6 +347,8 @@ public:
         PI_insertFenceBeforeEOT,
         PI_insertScratchReadBeforeEOT,
         PI_mapOrphans,
+        PI_varSplit,
+        PI_legalizeType,
         PI_NUM_PASSES
     };
 

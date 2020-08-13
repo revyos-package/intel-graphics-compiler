@@ -32,8 +32,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
-
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
@@ -41,6 +39,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/InstIterator.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -112,7 +111,7 @@ bool FixResourcePtr::runOnFunction(llvm::Function& F)
 // Function modifies address space in all BitCast or GEP uses input pointer.
 void FixResourcePtr::FixAddressSpaceInAllUses(Value* ptr, uint newAS, uint oldAS)
 {
-    assert(newAS != oldAS);
+    IGC_ASSERT(newAS != oldAS);
 
     for (auto UI = ptr->user_begin(), E = ptr->user_end(); UI != E; ++UI)
     {
@@ -158,8 +157,8 @@ void FixResourcePtr::RemoveGetBufferPtr(GenIntrinsicInst* bufPtr, Value* bufIdx)
         Instruction* inst = foldlist.back();
         foldlist.pop_back();
 
-        PointerType* instType = dyn_cast<PointerType>(inst->getType());
-        assert(instType);
+        PointerType* const instType = dyn_cast<PointerType>(inst->getType());
+        IGC_ASSERT(nullptr != instType);
         Type* eltType = instType->getElementType();
         PointerType* ptrType = PointerType::get(eltType, outAS);
         inst->mutateType(ptrType);
@@ -250,7 +249,7 @@ void FixResourcePtr::FindLoadStore(Instruction* bufPtr, Instruction* eltPtr, Ins
 
 Value* FixResourcePtr::GetByteOffset(Instruction* eltPtr)
 {
-    assert(eltPtr->getNumOperands() == 2);
+    IGC_ASSERT(eltPtr->getNumOperands() == 2);
     Value* ptrOp = eltPtr->getOperand(0);
     PointerType* ptrTy = dyn_cast<PointerType>(ptrOp->getType());
     Value* eltIdx = eltPtr->getOperand(1);
@@ -336,7 +335,7 @@ Value* FixResourcePtr::CreateStoreIntrinsic(StoreInst* inst, Instruction* bufPtr
     {
         llvm::Type* dataType = storeVal->getType();
 
-        assert(dataType->getPrimitiveSizeInBits() == 16 || dataType->getPrimitiveSizeInBits() == 32);
+        IGC_ASSERT(dataType->getPrimitiveSizeInBits() == 16 || dataType->getPrimitiveSizeInBits() == 32);
 
         if (!dataType->isFloatingPointTy())
         {
@@ -400,7 +399,10 @@ Value* FixResourcePtr::ResolveBufferIndex(Value* bufferIndex, Value* vectorIndex
         {
             return bufferIndex;
         }
-        assert(0);
+        else
+        {
+            IGC_ASSERT(0);
+        }
     }
     else if (ExtractElementInst * ee = dyn_cast<ExtractElementInst>(bufferIndex))
     {

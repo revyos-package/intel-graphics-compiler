@@ -27,12 +27,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.hpp"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -59,9 +59,6 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     bool hasInlineConstantBuffer = false;
     bool hasInlineGlobalBuffer = false;
 
-    unsigned globalBufferAlignment = 0;
-    unsigned constantBufferAlignment = 0;
-
     BufferOffsetMap inlineProgramScopeOffsets;
 
     // maintains pointer information so we can patch in
@@ -74,12 +71,14 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     MetaDataUtils* mdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     ModuleMetaData* modMd = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
 
+    SmallVector<GlobalVariable*, 32> zeroInitializedGlobals;
+
     for (Module::global_iterator I = M.global_begin(), E = M.global_end(); I != E; ++I)
     {
         GlobalVariable* globalVar = &(*I);
 
-        PointerType* ptrType = cast<PointerType>(globalVar->getType());
-        assert(ptrType && "The type of a global variable must be a pointer type");
+        PointerType* const ptrType = cast<PointerType>(globalVar->getType());
+        IGC_ASSERT_MESSAGE(nullptr != ptrType, "The type of a global variable must be a pointer type");
 
         // Pointer's address space should be either constant or global
         // The ?: is a workaround for clang bug, clang creates string constants with private address sapce!
@@ -97,14 +96,14 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         if (AS != ADDRESS_SPACE_CONSTANT &&
             AS != ADDRESS_SPACE_GLOBAL)
         {
-            assert(0 && "program scope variable with unexpected address space");
+            IGC_ASSERT_MESSAGE(0, "program scope variable with unexpected address space");
             continue;
         }
 
         // The only way to get a null initializer is via an external variable.
         // Linking has already occurred; everything should be resolved.
         Constant* initializer = globalVar->getInitializer();
-        assert(initializer && "Constant must be initialized");
+        IGC_ASSERT_MESSAGE(initializer, "Constant must be initialized");
         if (!initializer)
         {
             continue;
@@ -122,13 +121,13 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         }
 
         DataVector* inlineProgramScopeBuffer = nullptr;
-        unsigned& bufferAlignment = (AS == ADDRESS_SPACE_GLOBAL) ? globalBufferAlignment : constantBufferAlignment;
         if (AS == ADDRESS_SPACE_GLOBAL)
         {
             if (!hasInlineGlobalBuffer)
             {
                 InlineProgramScopeBuffer ilpsb;
-                ilpsb.alignment = bufferAlignment;
+                ilpsb.alignment = 0;
+                ilpsb.allocSize = 0;
                 modMd->inlineGlobalBuffers.push_back(ilpsb);
                 hasInlineGlobalBuffer = true;
             }
@@ -139,20 +138,23 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
             if (!hasInlineConstantBuffer)
             {
                 InlineProgramScopeBuffer ilpsb;
-                ilpsb.alignment = bufferAlignment;
+                ilpsb.alignment = 0;
+                ilpsb.allocSize = 0;
                 modMd->inlineConstantBuffers.push_back(ilpsb);
                 hasInlineConstantBuffer = true;
             }
             inlineProgramScopeBuffer = &modMd->inlineConstantBuffers.back().Buffer;
         }
 
-        // Align the buffer.
-        // If this is the first constant, set the initial alignment, otherwise add padding.
-        if (!bufferAlignment)
+        // For zero initialized values, we dont need to copy the data, just tell driver how much to allocate
+        if (initializer->isZeroValue())
         {
-            bufferAlignment = m_DL->getPreferredAlignment(globalVar);
+            zeroInitializedGlobals.push_back(globalVar);
+            continue;
         }
-        else
+
+        // Align the buffer.
+        if (inlineProgramScopeBuffer->size() != 0)
         {
             alignBuffer(*inlineProgramScopeBuffer, m_DL->getPreferredAlignment(globalVar));
         }
@@ -162,6 +164,23 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
 
         // Add the data to the buffer
         addData(initializer, *inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, AS);
+    }
+
+    // Set the needed allocation size to the actual buffer size
+    if (hasInlineGlobalBuffer)
+        modMd->inlineGlobalBuffers.back().allocSize = modMd->inlineGlobalBuffers.back().Buffer.size();
+    if (hasInlineConstantBuffer)
+        modMd->inlineConstantBuffers.back().allocSize = modMd->inlineConstantBuffers.back().Buffer.size();
+
+    // Calculate the correct offsets for zero-initialized globals/constants
+    // Total allocation size in runtime needs to include zero-init values, but data copied to compiler output can ignore them
+    for (auto globalVar : zeroInitializedGlobals)
+    {
+        unsigned AS = cast<PointerType>(globalVar->getType())->getAddressSpace();
+        unsigned &offset = (AS == ADDRESS_SPACE_GLOBAL) ? modMd->inlineGlobalBuffers.back().allocSize : modMd->inlineConstantBuffers.back().allocSize;
+        offset = iSTD::Align(offset, m_DL->getPreferredAlignment(globalVar));
+        inlineProgramScopeOffsets[globalVar] = offset;
+        offset += (unsigned)(m_DL->getTypeAllocSize(globalVar->getType()->getPointerElementType()));
     }
 
     if (inlineProgramScopeOffsets.size())
@@ -189,13 +208,12 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         {
             if (pFunc.isDeclaration()) continue;
             // Don't add implicit arg if doing relocation
-            if (pFunc.hasFnAttribute("EnableGlobalRelocation")) continue;
+            if (pFunc.hasFnAttribute("visaStackCall")) continue;
 
             SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
             implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
             ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
         }
-        mdUtils->save(C);
     }
 
     if (hasInlineGlobalBuffer)
@@ -204,13 +222,12 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         {
             if (pFunc.isDeclaration()) continue;
             // Don't add implicit arg if doing relocation
-            if (pFunc.hasFnAttribute("EnableGlobalRelocation")) continue;
+            if (pFunc.hasFnAttribute("visaStackCall")) continue;
 
             SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
             implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
             ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
         }
-        mdUtils->save(C);
     }
 
     // Setup the metadata for pointer patch info to be utilized during
@@ -243,11 +260,9 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
             }
             else
             {
-                assert(0 && "trying to patch unsupported address space");
+                IGC_ASSERT_MESSAGE(0, "trying to patch unsupported address space");
             }
         }
-
-        mdUtils->save(C);
     }
 
     const bool changed = !inlineProgramScopeOffsets.empty();
@@ -256,6 +271,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         modMd->inlineProgramScopeOffsets[offset.first] = offset.second;
     }
 
+    // Update LLVM metadata based on IGC MetadataUtils
     if (changed)
     {
         mdUtils->save(C);
@@ -283,7 +299,7 @@ void ProgramScopeConstantAnalysis::alignBuffer(DataVector& buffer, unsigned int 
 //
 static unsigned WalkCastsToFindNamedAddrSpace(const Value* val)
 {
-    assert(isa<PointerType>(val->getType()));
+    IGC_ASSERT(isa<PointerType>(val->getType()));
 
     const unsigned currAddrSpace = cast<PointerType>(val->getType())->getAddressSpace();
 
@@ -346,7 +362,7 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         {
             const unsigned pointedToAddrSpace = WalkCastsToFindNamedAddrSpace(initializer);
 
-            assert(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
+            IGC_ASSERT(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
 
             // We can only patch global and constant pointers.
             if ((pointedToAddrSpace == ADDRESS_SPACE_GLOBAL ||
@@ -355,7 +371,7 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
                     addressSpace == ADDRESS_SPACE_CONSTANT))
             {
                 auto iter = inlineProgramScopeOffsets.find(ptrBase);
-                assert(iter != inlineProgramScopeOffsets.end());
+                IGC_ASSERT(iter != inlineProgramScopeOffsets.end());
 
                 const uint64_t pointeeOffset = iter->second + offset;
 
@@ -413,13 +429,13 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
             }
             else
             {
-                assert(0 && "unknown constant expression");
+                IGC_ASSERT_MESSAGE(0, "unknown constant expression");
             }
         }
         else
         {
             // What other shapes can pointers take at the program scope?
-            assert(0 && "unknown pointer shape encountered");
+            IGC_ASSERT_MESSAGE(0, "unknown pointer shape encountered");
         }
     }
     else if (const UndefValue * UV = dyn_cast<UndefValue>(initializer))
@@ -441,8 +457,9 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         }
         else if (ce->getOpcode() == Instruction::IntToPtr)
         {
-            ConstantExpr* opExpr = dyn_cast<ConstantExpr>(ce->getOperand(0));
-            assert(opExpr && opExpr->getOpcode() == Instruction::PtrToInt && "Unexpected operand of IntToPtr");
+            ConstantExpr* const opExpr = dyn_cast<ConstantExpr>(ce->getOperand(0));
+            IGC_ASSERT_MESSAGE(nullptr != opExpr, "Unexpected operand of IntToPtr");
+            IGC_ASSERT_MESSAGE(opExpr->getOpcode() == Instruction::PtrToInt, "Unexpected operand of IntToPtr");
             addData(opExpr->getOperand(0), inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace);
         }
         else if (ce->getOpcode() == Instruction::PtrToInt)
@@ -451,7 +468,7 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         }
         else
         {
-            assert(0 && "Unexpected constant expression type");
+            IGC_ASSERT_MESSAGE(0, "Unexpected constant expression type");
         }
     }
     else if (ConstantDataSequential * cds = dyn_cast<ConstantDataSequential>(initializer))
@@ -475,7 +492,7 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         for (int i = 0; i < numElts; ++i)
         {
             Constant* C = initializer->getAggregateElement(i);
-            assert(C && "getAggregateElement returned null, unsupported constant");
+            IGC_ASSERT_MESSAGE(C, "getAggregateElement returned null, unsupported constant");
             // Since the type may not be primitive, extra alignment is required.
             addData(C, inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace);
         }
@@ -494,13 +511,14 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         }
         else
         {
-            assert(0 && "Unsupported constant type");
+            IGC_ASSERT_MESSAGE(0, "Unsupported constant type");
         }
 
-        int bitWidth = intVal.getBitWidth();
-        assert((bitWidth % 8 == 0) && (bitWidth <= 64) && "Unsupported bitwidth");
+        const int bitWidth = intVal.getBitWidth();
+        IGC_ASSERT_MESSAGE((bitWidth % 8 == 0), "Unsupported bitwidth");
+        IGC_ASSERT_MESSAGE((bitWidth <= 64), "Unsupported bitwidth");
 
-        const uint64_t* val = intVal.getRawData();
+        const uint64_t* const val = intVal.getRawData();
         inlineProgramScopeBuffer.insert(inlineProgramScopeBuffer.end(), (char*)val, ((char*)val) + (bitWidth / 8));
     }
 

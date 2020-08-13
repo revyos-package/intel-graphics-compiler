@@ -28,13 +28,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "KernelParser.hpp"
 #include "Lexemes.hpp"
 #include "Parser.hpp"
-#include "LdStSyntax/MessageParsing.hpp"
 #include "../IR/InstBuilder.hpp"
 #include "../IR/Types.hpp"
 #include "../strings.hpp"
 
+#include <algorithm>
 #include <limits>
-#include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -143,6 +143,7 @@ static const IdentMap<MathMacroExt> MATHMACROREGS_OLDSTYLE = {
     {"noacc", MathMacroExt::NOMME},
 };
 
+
 GenParser::GenParser(
     const Model &model,
     InstBuilder &handler,
@@ -151,8 +152,8 @@ GenParser::GenParser(
     const ParseOpts &pots)
     : Parser(inp,eh)
     , m_model(model)
-    , m_handler(handler)
-    , m_parseOpts(pots)
+    , m_builder(handler)
+    , m_opts(pots)
 {
     initSymbolMaps();
 }
@@ -166,7 +167,7 @@ void GenParser::ParseExecInfo(
     ExecSize &execSize,
     ChannelOffset &chOff)
 {
-    Loc execSizeLoc = NextLoc(0);
+    Loc execSizeLoc = m_execSizeLoc = NextLoc(0);
     Loc execOffsetLoc = NextLoc(0);
     // we are careful here since we might have things like:
     //    jmpi        (1*16)
@@ -211,7 +212,7 @@ void GenParser::ParseExecInfo(
         if (m_opSpec && m_opSpec->hasImpicitEm()) {
             chOff = ChannelOffset::M0;
             execSizeVal = 1;
-        } else if (m_parseOpts.supportLegacyDirectives) {
+        } else if (m_opts.supportLegacyDirectives) {
             chOff = ChannelOffset::M0;
             execSizeVal = (int)dftExecSize;
         } else {
@@ -229,19 +230,25 @@ void GenParser::ParseExecInfo(
     default: Fail("invalid SIMD width");
     }
 
-    m_handler.InstExecInfo(
+    m_builder.InstExecInfo(
         execSizeLoc, execSize, execOffsetLoc, chOff);
 }
-Type GenParser::ParseSendOperandTypeWithDefault(int srcIx) {
-    // sends's second parameter doesn't have a valid type
+
+Type GenParser::SendOperandDefaultType(int srcIx) const {
     auto t = srcIx == 1 ? Type::INVALID : Type::UD;
     if (srcIx < 0) {
-        if (m_opSpec->hasImplicitDstType(m_model.platform))
-            t = m_opSpec->implicitDstType(m_model.platform);
+        if (m_opSpec->hasImplicitDstType())
+            t = m_opSpec->implicitDstType();
     } else {
-        if (m_opSpec->hasImplicitSrcType(srcIx, false, m_model.platform))
-            t = m_opSpec->implicitSrcType(srcIx, false, m_model.platform);
+        if (m_opSpec->hasImplicitSrcType(srcIx, false))
+            t = m_opSpec->implicitSrcType(srcIx, false);
     }
+    return t;
+}
+
+Type GenParser::ParseSendOperandTypeWithDefault(int srcIx) {
+    // sends's second parameter doesn't have a valid type
+    Type t = Type::INVALID;
     if (Consume(COLON)) {
         if (!LookingAt(IDENT)) {
             Fail("expected a send operand type");
@@ -250,6 +257,8 @@ Type GenParser::ParseSendOperandTypeWithDefault(int srcIx) {
             Fail("unexpected operand type for send");
         }
         Skip();
+    } else {
+        t = SendOperandDefaultType(srcIx);
     }
     return t;
 }
@@ -304,22 +313,25 @@ bool GenParser::PeekReg(const RegInfo*& regInfo, int& regNum) {
         // helpful translation that permits acc2-acc9 and translates them
         // to mme0-7 with a warning (or whatever they map to on the given
         // platform
-        if (regInfo->regName == RegName::ARF_ACC && regNum >= regInfo->numRegs) {
-            const RegInfo *mme = m_model.lookupRegInfoByRegName(RegName::ARF_MME);
+        if (regInfo->regName == RegName::ARF_ACC &&
+            regNum >= regInfo->numRegs)
+        {
+            const RegInfo *mme =
+                m_model.lookupRegInfoByRegName(RegName::ARF_MME);
             IGA_ASSERT(mme != nullptr, "unable to find MMR on this platform");
             if (mme) {
                 // switch acc to mme
                 regInfo = mme;
                 // adjust the reg num (e.g. acc2 -> mme0 on GEN8)
                 regNum -= mme->regNumBase;
-                WarningF(tk.loc,"old-style access to mme via acc"
-                    " (use mme%d for acc%d)",
+                WarningF(tk.loc,
+                    "old-style access to mme via acc (use mme%d for acc%d)",
                     regNum,
                     regNum + mme->regNumBase);
             }
         }
         if (!regInfo->isRegNumberValid(regNum)) {
-            Warning(tk.loc,"register number out of bounds");
+            Warning(tk.loc, "register number out of bounds");
         }
         return true;
     } else {
@@ -383,7 +395,7 @@ static bool isIntegral(const ImmVal &v) {
 // +,-
 // *,/,%
 // -(unary neg)
-bool GenParser::TryParseConstExpr(ImmVal &v,int srcOpIx) {
+bool GenParser::TryParseConstExpr(ImmVal &v, int srcOpIx) {
     if (parseBitwiseExpr(false, v)) {
         if (srcOpIx >= 0) {
             m_srcKinds[srcOpIx] = Operand::Kind::IMMEDIATE;
@@ -392,15 +404,15 @@ bool GenParser::TryParseConstExpr(ImmVal &v,int srcOpIx) {
     }
     return false;
 }
-bool GenParser::TryParseIntConstExpr(ImmVal &v, const char *for_what) {
+bool GenParser::TryParseIntConstExpr(ImmVal &v, const char *forWhat) {
     Loc loc = NextLoc();
     bool z = TryParseConstExpr(v);
     if (!z) {
         return false;
     } else if (!isIntegral(v)) {
         std::stringstream ss;
-        if (for_what) {
-            ss << for_what << " must be a constant integer expression";
+        if (forWhat) {
+            ss << forWhat << " must be a constant integer expression";
         } else {
             ss << "expected constant integer expression";
         }
@@ -414,7 +426,9 @@ void GenParser::ensureIntegral(const Token &t, const ImmVal &v) {
         Fail(t.loc, "argument to operator must be integral");
     }
 }
-void GenParser::checkNumTypes(const ImmVal &v1, const Token &op, const ImmVal &v2) {
+void GenParser::checkNumTypes(
+    const ImmVal &v1, const Token &op, const ImmVal &v2)
+{
     if (isFloating(v1) && !isFloating(v2)) {
         Fail(op.lexeme, "right operand to operator must be floating point"
             " (append a .0 to force floating point)");
@@ -424,7 +438,9 @@ void GenParser::checkNumTypes(const ImmVal &v1, const Token &op, const ImmVal &v
     }
 }
 // target must be float
-void GenParser::checkIntTypes(const ImmVal &v1, const Token &op, const ImmVal &v2) {
+void GenParser::checkIntTypes(
+    const ImmVal &v1, const Token &op, const ImmVal &v2)
+{
     if (isFloating(v1)) {
         Fail(op.lexeme, "left operand to operator must be integral");
     } else if (isFloating(v2)) {
@@ -432,7 +448,9 @@ void GenParser::checkIntTypes(const ImmVal &v1, const Token &op, const ImmVal &v
     }
 }
 
-ImmVal GenParser::evalBinExpr(const ImmVal &v1, const Token &op, const ImmVal &v2) {
+ImmVal GenParser::evalBinExpr(
+    const ImmVal &v1, const Token &op, const ImmVal &v2)
+{
     bool isF = isFloating(v1) || isFloating(v2);
     bool isU = isUnsignedInt(v1) || isUnsignedInt(v2);
     ImmVal result = v1;
@@ -603,6 +621,7 @@ bool GenParser::parseMulExpr(bool consumed, ImmVal &v) {
     }
     return true;
 }
+
 // E -> ('-'|'~') E
 bool GenParser::parseUnExpr(bool consumed, ImmVal &v) {
     if (!LookingAtAnyOf(SUB, TILDE)) {
@@ -626,6 +645,7 @@ bool GenParser::parseUnExpr(bool consumed, ImmVal &v) {
     }
     return true;
 }
+
 // special symbol (e.g. nan, inf, ...)
 // grouped expression (E)
 // literal
@@ -682,7 +702,7 @@ bool GenParser::parsePrimary(bool consumed, ImmVal &v) {
         ParseFltFrom(t.loc, v.f64);
         v.kind = ImmVal::Kind::F64;
         Skip();
-    } else if (LookingAtAnyOf({INTLIT02,INTLIT10,INTLIT16})) {
+    } else if (LookingAtAnyOf({INTLIT02, INTLIT10, INTLIT16})) {
         // we parse as unsigned, but tag as signed for negation etc...
         ParseIntFrom<uint64_t>(t.loc, v.u64);
         v.kind = ImmVal::Kind::S64;
@@ -700,7 +720,7 @@ bool GenParser::parsePrimary(bool consumed, ImmVal &v) {
         // // join (16) LABEL                // passes
         // // mov (1) r65:ud LABEL:ud        // fails
         // // mov (1) r65:ud (2 + LABEL):ud  // fails (poor diagnostic)
-        if (m_opSpec && (m_opSpec->isBranching() || m_opSpec->op == Op::MOV)) {
+        if (m_opSpec && (m_opSpec->isBranching() || m_opSpec->is(Op::MOV))) {
             if (consumed) {
                 //   jmpi (LABEL + 2)
                 //         ^^^^^ already consumed LPAREN
@@ -750,213 +770,6 @@ bool GenParser::parsePrimary(bool consumed, ImmVal &v) {
     return true;
 } // parsePrimary
 
-bool GenParser::TryParseInstOptOrDepInfo(InstOptSet &instOpts)
-{
-    return tryParseInstOptDepInfoToken(instOpts) ||
-        tryParseInstOptToken(instOpts);
-}
-
-
-bool GenParser::tryParseInstOptDepInfoToken(InstOptSet &instOpts)
-{
-    auto loc = NextLoc();
-    if (LookingAt(IDENT)) {
-        InstOpt newOpt = InstOpt::ACCWREN;
-        bool is_swsb = false;
-        // classic instruction option that affects instruction dependency
-        // scheduling etc...
-        if (ConsumeIdentEq("NoDDChk")) {
-            newOpt = InstOpt::NODDCHK;
-            if (!m_model.supportsHwDeps()) {
-                Fail(loc, "NoDDChk not supported on given platform");
-            }
-        } else if (ConsumeIdentEq("NoDDClr")) {
-            newOpt = InstOpt::NODDCLR;
-            if (!m_model.supportsHwDeps()) {
-                Fail(loc, "NoDDClr not supported on given platform");
-            }
-        } else if (ConsumeIdentEq("NoPreempt")) {
-            if (m_model.supportsNoPreempt()) {
-                newOpt = InstOpt::NOPREEMPT;
-            } else {
-                Fail(loc, "NoPreempt not supported on given platform");
-            }
-        } else if (ConsumeIdentEq("NoSrcDepSet")) {
-            if (m_model.supportNoSrcDepSet()) {
-                newOpt = InstOpt::NOSRCDEPSET;
-            } else {
-                Fail(loc, "NoSrcDep not supported on given platform");
-            }
-        } else if (ConsumeIdentEq("Switch")) {
-            newOpt = InstOpt::SWITCH;
-            if (!m_model.supportsHwDeps()) {
-                m_errorHandler.reportWarning(loc,
-                    "ignoring unsupported instruction option {Switch}");
-            }
-        } else {
-            return false; // unrecognized option
-        }
-        if ((!is_swsb) && (!instOpts.add(newOpt))) {
-            // adding the option doesn't change the set... (it's a duplicate)
-            Fail(loc, "duplicate instruction options");
-        }
-    } else if (Consume(DOLLAR)) {
-        // sbid directive
-        if (m_model.supportsHwDeps()) {
-            Fail(loc, "software dependencies not supported on this platform");
-        }
-        int32_t sbid;
-        ConsumeIntLitOrFail(sbid, "expected SBID token");
-        // $4
-        if (Consume(DOT)) {
-            if (ConsumeIdentEq("dst")) {
-                // $4.dst
-                m_handler.setDepInfoSBidDst(loc, sbid);
-            } else if (ConsumeIdentEq("src")) {
-                // $4.src
-                m_handler.setDepInfoSBidSrc(loc, sbid);
-            } else {
-                Fail("invalid SBID directive expecting 'dst' or 'src'");
-            }
-        } else if (!LookingAtAnyOf(COMMA,RBRACE)) {
-            Fail("syntax error in SBID directive"
-                " (expected '.' ',' or '}')");
-        } else {
-            // $4 (allocate/.set)
-            m_handler.setDepInfoSBidAlloc(loc, sbid);
-        }
-    } else if (Consume(AT)) {
-        // min dependency distance @3
-        if (m_model.supportsHwDeps()) {
-            Fail(loc, "software dependencies not supported on this platform");
-        }
-        int32_t dist;
-        auto loc = NextLoc();
-        ConsumeIntLitOrFail(dist,"expected register min distance value");
-        m_handler.setDepInfoDist(loc, InstBuilder::SWSBInfo::REG_DIST, dist);
-    } else {
-        return false;
-    }
-    return true;
-}
-
-bool GenParser::tryParseInstOptToken(InstOptSet &instOpts) {
-    auto loc = NextLoc();
-    InstOpt newOpt = InstOpt::ACCWREN;
-    if (ConsumeIdentEq("AccWrEn")) {
-        newOpt = InstOpt::ACCWREN;
-    } else if (ConsumeIdentEq("Atomic")) {
-        if (m_model.platform < Platform::GEN7) {
-            Fail(loc, "Atomic mot supported on given platform");
-        }
-        newOpt = InstOpt::ATOMIC;
-        if (instOpts.contains(InstOpt::SWITCH)) {
-            Fail(loc, "Atomic mutually exclusive with Switch");
-        } else if (instOpts.contains(InstOpt::NOPREEMPT)) {
-            Fail(loc, "Atomic mutually exclusive with NoPreempt");
-        }
-    } else if (ConsumeIdentEq("Breakpoint")) {
-        newOpt = InstOpt::BREAKPOINT;
-    } else if (ConsumeIdentEq("Compacted")) {
-        newOpt = InstOpt::COMPACTED;
-        if (instOpts.contains(InstOpt::NOCOMPACT)) {
-            Fail(loc, "Compacted mutually exclusive with "
-                "Uncompacted/NoCompact");
-        }
-    } else if (ConsumeIdentEq("EOT")) {
-        newOpt = InstOpt::EOT;
-        if (!m_opSpec->isSendOrSendsFamily()) {
-            Fail(loc, "EOT is only allowed on send instructions");
-        }
-    } else if (ConsumeIdentEq("NoCompact") ||
-        ConsumeIdentEq("Uncompacted"))
-    {
-        newOpt = InstOpt::NOCOMPACT;
-        if (instOpts.contains(InstOpt::COMPACTED)) {
-            Fail(loc, "Uncomapcted/NoCompact mutually exclusive "
-                "with Compacted");
-        }
-    } else if (ConsumeIdentEq("Serialize")) {
-        newOpt = InstOpt::SERIALIZE;
-    } else if (ConsumeIdentEq("NoMask")) {
-        Fail(loc, "NoMask goes precedes predication as (W) for WrEn: "
-            "e.g. (W) op (..) ...   or    (W&f0.0) op (..) ..");
-    } else if (ConsumeIdentEq("H1")) {
-        Fail(loc, "H1 is obsolete; use M0 in execution offset: "
-            "e.g. op (16|M0) ...");
-    } else if (ConsumeIdentEq("H2")) {
-        Fail(loc, "H2 is obsolete; use M16 in execution offset: "
-            "e.g. op (16|M16) ...");
-    } else if (ConsumeIdentEq("Q1")) {
-        Fail(loc, "Q1 is obsolete; use M0 in execution offset: "
-            "e.g. op (8|M0) ...");
-    } else if (ConsumeIdentEq("Q2")) {
-        Fail(loc, "Q2 is obsolete; use M8 in execution offset: "
-            "e.g. op (8|M8) ...");
-    } else if (ConsumeIdentEq("Q3")) {
-        Fail(loc, "Q3 is obsolete; use M16 in execution offset: "
-            "e.g. op (8|M16) ...");
-    } else if (ConsumeIdentEq("Q4")) {
-        Fail(loc, "Q4 is obsolete; use M24 in execution offset: "
-            "e.g. op (8|M24) ...");
-    } else if (ConsumeIdentEq("N1")) {
-        Fail(loc, "N1 is obsolete; use M0 in execution offset: "
-            "e.g. op (4|M0) ...");
-    } else if (ConsumeIdentEq("N2")) {
-        Fail(loc, "N2 is obsolete; use M4 in execution offset: "
-            "e.g. op (4|M4) ...");
-    } else if (ConsumeIdentEq("N3")) {
-        Fail(loc, "N3 is obsolete; use M8 in execution offset: "
-            "e.g. op (4|M8) ...");
-    } else if (ConsumeIdentEq("N4")) {
-        Fail(loc, "N4 is obsolete; use M12 in execution offset: "
-            "e.g. op (4|M12) ...");
-    } else if (ConsumeIdentEq("N5")) {
-        Fail(loc, "N5 is obsolete; use M16 in execution offset: "
-            "e.g. op (4|M16) ...");
-    } else if (ConsumeIdentEq("N6")) {
-        Fail(loc, "N6 is obsolete; use M20 in execution offset: "
-            "e.g. op (4|M20) ...");
-    } else if (ConsumeIdentEq("N7")) {
-        Fail(loc, "N7 is obsolete; use M24 in execution offset: "
-            "e.g. op (4|M24) ...");
-    } else if (ConsumeIdentEq("N8")) {
-        Fail(loc, "N8 is obsolete; use M28 in execution offset: "
-            "e.g. op (4|M28) ...");
-    } else {
-        return false;
-    }
-
-    if (!instOpts.add(newOpt)) {
-        // adding the option doesn't change the set... (it's duplicate)
-        Fail(loc, "duplicate instruction options");
-    }
-    return true;
-}
-
-/*
-// constructs
-class KernelBuilder {
-    // all the instructions in order
-    std::vector<Instruction*>                         instructions;
-    std::vector<std::tuple<Loc,Operand&>>             patches;
-    std::map<std::string,int32_t>                     labelOffsets;
-    std::set<int32_t>                                 blockStarts;
-
-    InstBuilder                                       instBuilder;
-    const Model                                      &model;
-    Kernel                                           *kernel;
-    ErrorHandler                                     &errorHandler;
-public:
-    KernelBuilder(const Model &m, ErrorHandler &e)
-        : InstBuilder(kernel, e), model(m), errorHandler(e)
-    {
-    }
-
-    Kernel *endListing() {
-    }
-};
-*/
 
 void GenParser::initSymbolMaps()
 {
@@ -967,7 +780,7 @@ void GenParser::initSymbolMaps()
     const RegInfo *table = GetRegisterSpecificationTable(tableLen);
     for (int i = 0; i < tableLen; i++) {
         const RegInfo *ri = table + i;
-        if (ri->supportedOn(m_model.platform)) {
+        if (ri->supportedOn(platform())) {
             m_regmap[ri->syntax] = ri;
         }
     }
@@ -977,10 +790,21 @@ void GenParser::initSymbolMaps()
 class KernelParser : GenParser
 {
     // maps mnemonics and registers for faster lookup
-    std::map<std::string,const OpSpec*>   opmap;
+    std::unordered_map<std::string,const OpSpec*>   opmap;
 
-    ExecSize                       m_defaultExecutionSize;
-    Type                           m_defaultRegisterType;
+    ExecSize              m_defaultExecutionSize;
+    Type                  m_defaultRegisterType;
+
+    // instruction state
+    bool                  m_hasWrEn;
+    Type                  m_unifType;
+    const Token          *m_unifTypeTk;
+    RegRef                m_flagReg;
+    ExecSize              m_execSize;
+    ChannelOffset         m_chOff;
+
+    Loc                   m_mnemonicLoc;
+    Loc                   m_srcLocs[3];
 
 public:
     KernelParser(
@@ -999,66 +823,24 @@ public:
     void ParseListing() {
         ParseProgram();
     }
-private:
-    // instruction state
-    bool                  m_hasWrEn;
-    Type                  m_unifType;
-    const Token          *m_unifTypeTk;
-    RegRef                m_flagReg;
-    ExecSize              m_execSize;
-    ChannelOffset         m_chOff;
-
-    Loc                   m_srcLocs[3];
 
     void initSymbolMaps() {
         // map mnemonics names to their ops
         // subops only get mapped by their fully qualified names in this pass
-        std::vector<const OpSpec *> subOps;
         for (const OpSpec *os : m_model.ops()) {
             if (os->isValid()) {
-                if (os->isSubop()) {
-                    opmap[os->fullMnemonic] = os;
-                    subOps.emplace_back(os);
-                } else {
-                    opmap[os->mnemonic] = os;
-                }
-            }
-        }
-        // subops get mapped by their short names only if that does not
-        // conflict with some other op.
-        // e.g. "sync.nop" will not parse as "nop", but as the real nop.
-        for (auto os : subOps) {
-            // frequency of a short name in the subops
-            auto subOpMnemonicFreq = [&](const std::string &mne) {
-                int k = 0;
-                for (auto os : subOps) {
-                    if (mne == os->mnemonic) {
-                        k++;
-                    }
-                }
-                return k;
-            };
-            // e.g. SYNC_NOP's "nop" conflicts with NOP
-            bool conflictsWithRealOp = opmap.find(os->mnemonic) != opmap.end();
-            // e.g. A_C's "c" short name would conflict with B_C's "c" short op
-            bool conflictsWithOtherSubOp = subOpMnemonicFreq(os->mnemonic) != 1;
-            if (!conflictsWithRealOp && !conflictsWithOtherSubOp) {
                 opmap[os->mnemonic] = os;
             }
         }
     }
 
-    bool isMacroOp() const {
-        return m_opSpec->isMacro();
-    }
-
 
     // Program = (Label? Insts* (Label Insts))?
     void ParseProgram() {
-        m_handler.ProgramStart();
+        m_builder.ProgramStart();
 
         // parse default type directives
-        if (m_parseOpts.supportLegacyDirectives) {
+        if (m_opts.supportLegacyDirectives) {
             // e.g. .default_execution_size...
             ParseLegacyDirectives();
         }
@@ -1078,14 +860,14 @@ private:
             Fail("expected instruction, block, or EOF");
         }
 
-        m_handler.ProgramEnd();
+        m_builder.ProgramEnd();
     }
 
     // fix to support .default_execution_size
     bool ParseLegacyDirectives() {
         int parsed = 0;
         try {
-            while (LookingAtSeq(Lexeme::DOT,Lexeme::IDENT)) {
+            while (LookingAtSeq(Lexeme::DOT, Lexeme::IDENT)) {
                 Skip();
                 parsed++;
                 if (ConsumeIdentEq("default_execution_size")) {
@@ -1132,7 +914,7 @@ private:
         m_errorHandler.reportError(s.loc, s.message);
         // bail if we've reached the max number of errors
         if (m_errorHandler.getErrors().size() >=
-            m_parseOpts.maxSyntaxErrors)
+            m_opts.maxSyntaxErrors)
         {
             throw s;
         }
@@ -1153,12 +935,12 @@ private:
 
 
     void ParseBlock(const Loc &lblLoc, const std::string &label) {
-        m_handler.BlockStart(lblLoc, label);
+        m_builder.BlockStart(lblLoc, label);
         auto lastInst = NextLoc();
         while (true) {
             if (Consume(Lexeme::NEWLINE) || Consume(Lexeme::SEMI)) {
                 continue;
-            } else if (m_parseOpts.supportLegacyDirectives &&
+            } else if (m_opts.supportLegacyDirectives &&
                 ParseLegacyDirectives())
             {
                 // .default_execution_size...
@@ -1175,7 +957,7 @@ private:
             lastInst = NextLoc(-1); // peek at the end of the last instruction
         }
 
-        m_handler.BlockEnd(ExtentTo(lblLoc,lastInst));
+        m_builder.BlockEnd(ExtentTo(lblLoc,lastInst));
     }
 
 
@@ -1198,14 +980,17 @@ private:
     void ParseInstCanThrowException() {
         // ShowCurrentLexicalContext();
         const Loc startLoc = NextLoc();
-        m_handler.InstStart(startLoc);
+        m_builder.InstStart(startLoc);
 
         m_flagReg = REGREF_INVALID;
         m_opSpec = nullptr;
         m_unifType = Type::INVALID;
         m_unifTypeTk = nullptr;
-        for (size_t i = 0; i < sizeof(m_srcKinds)/sizeof(m_srcKinds[0]); i++)
+        m_mnemonicLoc = Loc::INVALID;
+        for (size_t i = 0; i < sizeof(m_srcKinds)/sizeof(m_srcKinds[0]); i++) {
+            m_srcLocs[i] = Loc::INVALID;
             m_srcKinds[i] = Operand::Kind::INVALID;
+        }
 
         // (W&~f0) mov (8|M0) r1 r2
         // ^
@@ -1216,20 +1001,30 @@ private:
         //
         //         math.sqrt (8|M0) ...
         //         ^
-        //
-        // (f0.0)  ld.sc8.x4 (8) ... surf[4][...]
-        //         ^
-        const Loc mnemonicLoc = NextLoc();
+        m_mnemonicLoc = NextLoc();
         m_opSpec = ParseMnemonic();
         if (m_opSpec) {
             // looking at a regular instruction (non special-ld-st inst)
-            m_handler.InstOp(m_opSpec);
+            m_builder.InstOp(m_opSpec);
             FinishNonLdStInstBody();
-        } else if (!ParseLdStInst(m_defaultExecutionSize, *this)) {
-            Fail(mnemonicLoc, "invalid mnemonic");
+        } else
+        {
+            Fail(m_mnemonicLoc, "invalid mnemonic");
         }
-        m_handler.InstEnd(ExtentToPrevEnd(startLoc));
+
+        // .... {...}
+        ParseInstOpts();
+
+        if (!LookingAt(Lexeme::NEWLINE) &&
+            !LookingAt(Lexeme::SEMI) &&
+            !LookingAt(Lexeme::END_OF_FILE))
+        {
+            FailAfterPrev("expected newline, ';', or EOF");
+        }
+
+        m_builder.InstEnd(ExtentToPrevEnd(startLoc));
     }
+
 
     // e.g.  add (8|M8) ...
     //           ^
@@ -1258,8 +1053,6 @@ private:
             break; // fallthrough to instruction options
         case OpSpec::BASIC_UNARY_REG:
         case OpSpec::BASIC_UNARY_REGIMM:
-        case OpSpec::MATH_UNARY_REGIMM:
-        case OpSpec::MATH_MACRO_UNARY_REG:
             ParseDstOp();
             ParseSrcOp(0);
             if (m_opSpec->format == OpSpec::BASIC_UNARY_REG &&
@@ -1279,30 +1072,34 @@ private:
             }
             break;
         case OpSpec::SEND_UNARY:
+            // <=Gen11
             ParseSendDstOp();
             ParseSendSrcOp(0, false);
-            ParseSendDescs();
+            ParseSendDescsLegacy();
             break;
-        case OpSpec::SEND_BINARY: {
-            ParseSendDstOp();
-            ParseSendSrcOp(0, false);
-                ParseSendSrcOp(1,
-                    m_model.supportsUnarySend() &&
-                    m_parseOpts.supportLegacyDirectives);
-                ParseSendDescs();
+        case OpSpec::SEND_BINARY:
+            if (platform() <= Platform::GEN12P1) {
+                ParseSendInstructionLegacy();
+            } else {
+                IGA_ASSERT_FALSE("invalid format for platform");
+            }
             break;
-        }
         case OpSpec::BASIC_BINARY_REG_IMM:
         case OpSpec::BASIC_BINARY_REG_REG:
         case OpSpec::BASIC_BINARY_REG_REGIMM:
-        case OpSpec::MATH_BINARY_REG_REGIMM:
-        case OpSpec::MATH_MACRO_BINARY_REG_REG:
             ParseDstOp();
             ParseSrcOp(0);
             ParseSrcOp(1);
             break;
+        case OpSpec::MATH_BINARY_REG_REGIMM:
+            ParseDstOp();
+            ParseSrcOp(0);
+            if (m_opSpec->getSourceCount(m_builder.getSubfunction()) > 1) {
+                // math sometimes has only one operand
+                ParseSrcOp(1);
+            }
+            break;
         case OpSpec::TERNARY_REGIMM_REG_REGIMM:
-        case OpSpec::TERNARY_MACRO_REG_REG_REG:
             ParseDstOp();
             ParseSrcOp(0);
             ParseSrcOp(1);
@@ -1377,15 +1174,19 @@ private:
         default:
             IGA_ASSERT_FALSE("unhandled syntax class in parser");
         }
-        ParseInstOpts();
-
-        if (!LookingAt(Lexeme::NEWLINE) &&
-            !LookingAt(Lexeme::SEMI) &&
-            !LookingAt(Lexeme::END_OF_FILE))
-        {
-            FailAtPrev("expected '\\n', ';', or EOF");
-        }
     }
+
+
+    // Original binary send <=GEN12P1
+    void ParseSendInstructionLegacy() {
+        ParseSendDstOp();
+        ParseSendSrcOp(0, false);
+        ParseSendSrcOp(1,
+            m_model.supportsUnarySend() &&
+            m_opts.supportLegacyDirectives);
+        ParseSendDescsLegacy();
+    }
+
 
 
     // Predication = ('(' WrEnPred ')')?
@@ -1400,7 +1201,7 @@ private:
             const Loc nmLoc = NextLoc(0);
             if (ConsumeIdentEq("W")) {
                 m_hasWrEn = true;
-                m_handler.InstNoMask(nmLoc);
+                m_builder.InstNoMask(nmLoc);
                 if (Consume(AMP)) {
                     ParsePred();
                 }
@@ -1443,7 +1244,7 @@ private:
         } else {
             predCtrl = PredCtrl::SEQ;
         }
-        m_handler.InstPredication(prLoc, predInv, m_flagReg, predCtrl);
+        m_builder.InstPredication(prLoc, predInv, m_flagReg, predCtrl);
     }
 
 
@@ -1513,12 +1314,11 @@ private:
 #endif
     void failWithUnexpectedSubfunction(
         const Loc &loc,
-        const std::string &sfIdent)
+        const std::string &)
     {
-        std::stringstream ss;
-        ss << "unexpected subfunction for op";
-        std::vector<std::pair<float,const char *>> matches;
+        Fail(loc, "unexpected subfunction for op");
 #if 0
+        std::vector<std::pair<float,const char *>> matches;
         for (int i = (int)m_opSpec->op + 1;
             i < (int)m_opSpec->op + m_opSpec->subopsLength;
             i++)
@@ -1554,10 +1354,9 @@ private:
                 ss << matches[i].second;
             }
         }
-
 #endif
-        Fail(loc, ss.str());
     }
+
 
 
     //
@@ -1565,43 +1364,65 @@ private:
     //     = Ident SubMnemonic?
     //     | Ident BrCtl
     //   SubMnemoninc
-    //     = '.' Ident
+    //     = '.' SfIdent
     //     | '.' HEX_INT | '.' DEC_INT
     //
-    //   BrCtl = '.b'
-    //
+    //   SfIdent =
+    //     | BrnchCtl
+    //     | SFID
+    //     | SyncFc
+    //     | ... other subfunction identifier
     const OpSpec *ParseMnemonic() {
         const Loc mnemonicLoc = NextLoc();
         const OpSpec *pOs = TryConsumeMmenonic();
         if (!pOs) {
             return nullptr;
         }
-        if (pOs->format == OpSpec::GROUP) {
-            // e.g. math.*, send.*, etc...
-            pOs = ParseSubOp(pOs);
-        }
-
+        m_builder.InstOp(pOs);
         // GED will reject this otherwise
         if (!m_hasWrEn && pOs->op == Op::JMPI) {
             Warning(mnemonicLoc,
                 "jmpi must have (W) specified (automatically adding)");
-            m_handler.InstNoMask(mnemonicLoc);
+            m_builder.InstNoMask(mnemonicLoc);
         }
 
+        // TODO: abstract this all into a something that's contained in
+        // the IGA bxml enums files.
+        //   e.g. use OpSpec::supportsSubfunction()
+        //        bool Subfunction::FromString(Op, Subfunction&)
         if (pOs->supportsBranchCtrl()) {
+            BranchCntrl brctl = BranchCntrl::OFF;
             if (Consume(DOT)) {
                 if (!ConsumeIdentEq("b")) {
                     Fail("expected 'b' (branch control)");
                 }
-                m_handler.InstBrCtl(BranchCntrl::ON);
-            } else {
-                m_handler.InstBrCtl(BranchCntrl::OFF);
+                brctl = BranchCntrl::ON;
             }
-        } else if (LookingAt(DOT)) {
+            m_builder.InstSubfunction(brctl);
+        } else if (pOs->is(Op::MATH)) {
+            // e.g. math.*, send.*, etc...
+            m_builder.InstSubfunction(ParseSubfunctionFromBxmlEnum<MathFC>());
+        } else if (pOs->is(Op::SYNC)) {
+            m_builder.InstSubfunction(ParseSubfunctionFromBxmlEnum<SyncFC>());
+        } else if (pOs->isOneOf(Op::SEND, Op::SENDC)) {
+            if (platform() >= Platform::GEN12P1)
+                m_builder.InstSubfunction(
+                    ParseSubfunctionFromBxmlEnum<SFID>());
+            // else: it's part of ExDesc
+        } else {
+            // isOldSend: pre GEN12 will have a subfunction,
+            // but we pull it from ExDesc
+            bool isOldSend =
+                platform() < Platform::GEN12P1 || pOs->isSendOrSendsFamily();
+            IGA_ASSERT(!pOs->supportsSubfunction() || isOldSend,
+                "INTERNAL ERROR: subfunction expected");
+        }
+
+        if (LookingAt(DOT)) {
             // maybe an old condition modifier or saturation
             FlagModifier fm;
             if (LookingAtIdentEq(1,"sat")) {
-                Fail("saturation flag goes on destination operand: "
+                Fail("saturation flag prefixes destination operand: "
                     "e.g. op (..) (sat)dst ...");
             } else if (
                 IdentLookupFrom(1, FLAGMODS, fm) ||
@@ -1618,50 +1439,29 @@ private:
         return pOs;
     }
 
-    //   SubMnemoninc
-    //     = '.' Ident
-    //     | '.' HEX_INT | '.' DEC_INT
-    //
-    // E.g.
-    //    math.inv
-    //    math.1
-    //    math.0x1
-    const OpSpec* ParseSubOp(const OpSpec *pParent)
-    {
-        const OpSpec *pOp = nullptr;
-        ConsumeOrFail(DOT, "expected operation subfunction");
+    template <typename T>
+    T ParseSubfunctionFromBxmlEnum() {
+        if (!Consume(DOT)) {
+            FailAfterPrev("expected operation subfunction");
+        }
 
         auto sfLoc = NextLoc();
         if (LookingAt(IDENT)) {
-            auto sfIdent = GetTokenAsString(Next());
-            // look up the function by the fully qualified name
-            std::stringstream ss;
-            ss << pParent->mnemonic << "." << sfIdent;
-            auto itr = opmap.find(ss.str());
-            if (itr == opmap.end()) {
-                failWithUnexpectedSubfunction(sfLoc, sfIdent);
-            } else {
-                // resolve to idiv etc...
-                Skip();
-                pOp = itr->second;
-                if (pOp->format == OpSpec::GROUP) {
-                    return ParseSubOp(pOp);
-                }
+            auto loc = NextLoc();
+            const std::string sfIdent = GetTokenAsString();
+            Skip();
+            auto x = FromSyntax<T>(sfIdent);
+            if (x == T::INVALID) {
+                Fail(loc, "invalid subfunction");
             }
-        } else if (LookingAtAnyOf(INTLIT10,INTLIT16)) {
-            // e.g. math.0x1
-            unsigned sfVal;
-            ParseIntFrom<unsigned>(NextLoc(), sfVal);
-            Skip(1);
-            pOp = &m_model.lookupGroupSubOp(pParent->op, sfVal);
-            if (!pOp->isValid()) {
-                Fail(sfLoc, "subfunction is out of bounds");
-            }
-        } else {
-            Fail(sfLoc, "invalid subfunction");
+            return x;
+        } else if (LookingAtAnyOf(INTLIT10, INTLIT16)) {
+            uint32_t val;
+            (void)ConsumeIntLit(val);
+            return (T)val;
         }
-
-        return pOp;
+        Fail(sfLoc, "invalid subfunction");
+        return (T)-1;
     }
 
 
@@ -1676,12 +1476,12 @@ private:
             }
             ParseFlagModFlagReg();
             ConsumeOrFail(RBRACK, "expected ]");
-            if (m_parseOpts.deprecatedSyntaxWarnings) {
-                Warning(loc,
-                    "deprecated flag modifier "
-                    "syntax (omit the brackets)");
+            if (m_opts.deprecatedSyntaxWarnings) {
+                Warning(
+                    loc,
+                    "deprecated flag modifier syntax (omit the brackets)");
             }
-            m_handler.InstFlagModifier(m_flagReg, flagMod);
+            m_builder.InstFlagModifier(m_flagReg, flagMod);
         } else {
             // try the short form
             // (le)f0.0
@@ -1691,7 +1491,7 @@ private:
                 return;
             }
             ParseFlagModFlagReg();
-            m_handler.InstFlagModifier(m_flagReg, flagMod);
+            m_builder.InstFlagModifier(m_flagReg, flagMod);
         }
     }
     // e.g. "(le)"
@@ -1703,7 +1503,7 @@ private:
             Loc loc = NextLoc(1);
             if (!IdentLookupFrom(1, FLAGMODS_LEGACY, flagMod)) {
                 return false;
-            } else if (m_parseOpts.deprecatedSyntaxWarnings) {
+            } else if (m_opts.deprecatedSyntaxWarnings) {
                 // deprecated syntax
                 std::stringstream ss;
                 ss << "deprecated flag modifier syntax: ";
@@ -1748,7 +1548,7 @@ private:
         const Loc opStart = NextLoc(0);
         // ParseSatOpt increments m_offset.
         if (ParseSatOpt()) {
-            m_handler.InstDstOpSaturate();
+            m_builder.InstDstOpSaturate();
         }
         // Note that, if there is SAT token, opStart != regStart.
         // This is because m_offset changed.
@@ -1825,7 +1625,7 @@ private:
         }
         // determine if we support the old-style
         bool supportOldStyleAcc2ToAcc7 = true;
-        supportOldStyleAcc2ToAcc7 = m_model.platform < Platform::GEN12P1;
+        supportOldStyleAcc2ToAcc7 = platform() < Platform::GEN12P1;
 
         if (supportOldStyleAcc2ToAcc7) {
             if (ConsumeIdentOneOf<MathMacroExt>(MATHMACROREGS_OLDSTYLE, mme)) {
@@ -1863,19 +1663,19 @@ private:
         if (m_opSpec->isSendOrSendsFamily() && Consume(DOT)) {
             ConsumeIntLitOrFail(subregNum, "expected subregister");
             // whine about them using a subregister on a send operand
-            if (m_parseOpts.deprecatedSyntaxWarnings) {
+            if (m_opts.deprecatedSyntaxWarnings) {
                 Warning(subregLoc, "send operand subregisters have no effect"
                     " and are deprecated syntax");
             }
             if (m_opSpec->isSendOrSendsFamily() && LookingAt(LANGLE)) {
-                if (m_parseOpts.deprecatedSyntaxWarnings) {
+                if (m_opts.deprecatedSyntaxWarnings) {
                     // whine about them using a region
                     Warning("send operand region has no effect and is"
                         " deprecated syntax");
                 }
             }
             rgnHz = ParseDstOpRegion();
-        } else if (isMacroOp()) {
+        } else if (m_builder.isMacroOp()) {
             // implicit accumulator operand
             mmeReg = ParseMathMacroReg();
         } else {
@@ -1905,27 +1705,32 @@ private:
         // ensure the subregister is not out of bounds
         if (dty != Type::INVALID) {
             int typeSize = TypeSizeInBits(dty)/8;
-            if (!ri.isSubRegByteOffsetValid(regNum, subregNum * typeSize, m_model.getGRFByteSize())) {
+            if (!ri.isSubRegByteOffsetValid(
+                regNum, subregNum * typeSize, m_model.getGRFByteSize()))
+            {
                 if (ri.regName == RegName::GRF_R) {
                     Error(subregLoc,
-                        "subregister out of bounds for data type", ToSyntax(dty));
+                        "subregister out of bounds for data type",
+                        ToSyntax(dty));
                 } else {
-                    // Print warning for non-GRF register, in case for those valid but strange case
-                    // e.g. null0.20:f
+                    // Print warning for non-GRF register, in case for those
+                    // valid but strange case e.g. null0.20:f
                     Warning(subregLoc,
                         "subregister out of bounds for data type");
                 }
             } else if (typeSize < ri.accGran) {
-                Warning(regnameLoc, "access granularity too small for data type");
+                Warning(regnameLoc,
+                    "access granularity too small for data type");
             }
         }
 
-        if (isMacroOp()) {
-            m_handler.InstDstOpRegMathMacroExtReg(
+        if (m_builder.isMacroOp()) {
+            m_builder.InstDstOpRegMathMacroExtReg(
                 opStart, ri.regName, regNum, mmeReg, rgnHz, dty);
         } else {
-            m_handler.InstDstOpRegDirect(
-                opStart, ri.regName, MakeRegRef(regNum, subregNum), rgnHz, dty);
+            RegRef reg(regNum, subregNum);
+            m_builder.InstDstOpRegDirect(
+                opStart, ri.regName, reg, rgnHz, dty);
         }
     }
 
@@ -1954,13 +1759,15 @@ private:
         }
 
         // check if the imm offset out of bound
-        int addroff_up_bound = 511;
-        int addroff_low_bound = -512;
-        if (addrOff < addroff_low_bound || addrOff > addroff_up_bound)
+        int addroffMax = 511;
+        int addroffMin = -512;
+        if (addrOff < addroffMin || addrOff > addroffMax)
         {
-            std::string err_str = "immediate offset is out of range; must be in [" +
-                std::to_string(addroff_low_bound) + "," + std::to_string(addroff_up_bound) + "]";
-            Fail(addrOffLoc, err_str);
+            std::string err =
+                "immediate offset is out of range; must be in [" +
+                std::to_string(addroffMin) + "," +
+                std::to_string(addroffMax) + "]";
+            Fail(addrOffLoc, err);
         }
 
         ConsumeOrFail(RBRACK, "expected ]");
@@ -1975,13 +1782,13 @@ private:
         RegRef addrRegRef;
         ParseIndOpArgs(addrRegRef, addrOff);
         addrOff += baseAddr;
-
+        //
         // <1>
         Region::Horz rgnHz = ParseDstOpRegion();
-
+        //
         // :t
         Type dty = ParseDstOpTypeWithDefault();
-        m_handler.InstDstOpRegIndirect(
+        m_builder.InstDstOpRegIndirect(
             opStart, addrRegRef, addrOff, rgnHz, dty);
     }
 
@@ -1989,8 +1796,8 @@ private:
     // '<' INT '>'
     Region::Horz ParseDstOpRegion() {
         if (!LookingAt(LANGLE)) {
-            if (m_opSpec->hasImplicitDstRegion()) {
-                return m_opSpec->implicitDstRegion().getHz();
+            if (m_opSpec->hasImplicitDstRegion(m_builder.isMacroOp())) {
+                return m_opSpec->implicitDstRegion(m_builder.isMacroOp()).getHz();
             } else {
                 return Region::Horz::HZ_1;
             }
@@ -2073,34 +1880,28 @@ private:
             if (pipeAbs) {
                 ConsumeOrFailAfterPrev(PIPE, "expected |");
             }
-        } else if (ConsumeReg(regInfo, regNum)) {
-            // register direct or new pre-scaled register indirect
-            // r13
-            //   or
-            // r13[a0.0,4] translates to r[a0.0, 13*sizeof(GRF) + 4]
-            if (LookingAt(LBRACK)) {
-                if (!regInfo->supportsRegioning()) {
-                    Fail("this doesn't support regioning");
-                }
-                m_srcKinds[srcOpIx] = Operand::Kind::INDIRECT;
-                ParseSrcOpInd(
-                    srcOpIx,
-                    m_srcLocs[srcOpIx],
-                    srcMods,
-                    32*regNum);
-            } else {
-                // normal register access
-                //   r13.3<0;1,0>
-                //   acc3
-                m_srcKinds[srcOpIx] = Operand::Kind::DIRECT;
-                FinishSrcOpRegDirSubRegRgnTy(
-                    srcOpIx,
-                    m_srcLocs[srcOpIx],
-                    regnameTk.loc,
-                    srcMods,
-                    *regInfo,
-                    regNum);
+            if (!m_opSpec->supportsSourceModifiers() &&
+                srcMods != SrcModifier::NONE)
+            {
+                Fail(m_srcLocs[srcOpIx], "source modifier not supported");
             }
+        } else if (ConsumeReg(regInfo, regNum)) {
+            // normal register access
+            //   r13.3<0;1,0>
+            //   acc3
+            m_srcKinds[srcOpIx] = Operand::Kind::DIRECT;
+            if (!m_opSpec->supportsSourceModifiers() &&
+                srcMods != SrcModifier::NONE)
+            {
+                Fail(m_srcLocs[srcOpIx], "source modifier not supported");
+            }
+            FinishSrcOpRegDirSubRegRgnTy(
+                srcOpIx,
+                m_srcLocs[srcOpIx],
+                regnameTk.loc,
+                srcMods,
+                *regInfo,
+                regNum);
             if (pipeAbs) {
                 ConsumeOrFailAfterPrev(PIPE, "expected |");
             }
@@ -2113,7 +1914,7 @@ private:
 
             // try as constant expression
             ImmVal immVal;
-            if (TryParseConstExpr(immVal,srcOpIx)) {
+            if (TryParseConstExpr(immVal, srcOpIx)) {
                 // does not match labels
                 m_srcKinds[srcOpIx] = Operand::Kind::IMMEDIATE;
                 if (pipeAbs) {
@@ -2136,12 +1937,11 @@ private:
                     // e.g. LABEL64
                     if (m_opSpec->isBranching() || m_opSpec->op == Op::MOV) {
                         m_srcKinds[srcOpIx] = Operand::Kind::LABEL;
-                        std::string str = GetTokenAsString(Next(0));
+                        std::string str = GetTokenAsString();
                         Skip(1);
                         FinishSrcOpImmLabel(
                             srcOpIx,
                             m_srcLocs[srcOpIx],
-                            srcMods,
                             regnameTk.loc,
                             str);
                     } else {
@@ -2177,7 +1977,7 @@ private:
         // :t
         Type sty = ParseSrcOpTypeWithDefault(srcOpIx, true);
 
-        m_handler.InstSrcOpRegIndirect(
+        m_builder.InstSrcOpRegIndirect(
             srcOpIx, opStart, srcMods, addrRegRef, addrOff, rgn, sty);
     }
 
@@ -2207,7 +2007,7 @@ private:
         Loc subregLoc = NextLoc(1);
         MathMacroExt mme = MathMacroExt::INVALID;
         bool hasExplicitSubreg = false;
-        if (isMacroOp()) {
+        if (m_builder.isMacroOp()) {
             // implicit accumulator operand
             // r13.acc2:f
             subregNum = 0;
@@ -2262,8 +2062,8 @@ private:
             }
         }
 
-        if (isMacroOp()) {
-            m_handler.InstSrcOpRegMathMacroExtReg(
+        if (m_builder.isMacroOp()) {
+            m_builder.InstSrcOpRegMathMacroExtReg(
                 srcOpIx,
                 opStart,
                 srcMod,
@@ -2273,12 +2073,13 @@ private:
                 rgn,
                 sty);
         } else {
-            m_handler.InstSrcOpRegDirect(
+            RegRef reg((uint8_t)regNum, (uint8_t)subregNum);
+            m_builder.InstSrcOpRegDirect(
                 srcOpIx,
                 opStart,
                 srcMod,
                 ri.regName,
-                MakeRegRef(regNum,subregNum),
+                reg,
                 rgn,
                 sty);
         }
@@ -2289,9 +2090,12 @@ private:
     Region ParseSrcOpRegionVWH(
         const RegInfo &ri, int srcOpIx, bool hasExplicitSubreg)
     {
-        if (m_opSpec->hasImplicitSrcRegion(srcOpIx, m_model.platform, m_execSize)) {
+        if (m_opSpec->hasImplicitSrcRegion(
+            srcOpIx, m_execSize, m_builder.isMacroOp()))
+        {
             if (!LookingAt(LANGLE)) {
-                return m_opSpec->implicitSrcRegion(srcOpIx, m_model.platform, m_execSize);
+                return m_opSpec->implicitSrcRegion(
+                    srcOpIx, m_execSize, m_builder.isMacroOp());
             } else {
                 WarningF("%s.Src%d region should be implicit",
                     m_opSpec->mnemonic,
@@ -2307,6 +2111,8 @@ private:
             ConsumeOrFailAfterPrev(COMMA, "expected ,");
             rgn.set(ParseRegionHorz());
             ConsumeOrFailAfterPrev(RANGLE, "expected >");
+        } else if (m_opSpec->isSendOrSendsFamily()) {
+            rgn = defaultSendOperandRegion(ri.regName, srcOpIx);
         } else if (ri.supportsRegioning()) {
             // N.B. <1;1,0> won't coissue on PreGEN11
             rgn = hasExplicitSubreg || m_execSize == ExecSize::SIMD1 ?
@@ -2321,10 +2127,13 @@ private:
     // '<' INT ';' INT '>'   (CNL Align1 ternary)
     Region ParseSrcOpRegionVH(int srcOpIx, bool hasExplicitSubreg)
     {
-        if (m_opSpec->hasImplicitSrcRegion(srcOpIx, m_model.platform, m_execSize)) {
+        if (m_opSpec->hasImplicitSrcRegion(
+            srcOpIx, m_execSize, m_builder.isMacroOp()))
+        {
             if (!LookingAt(LANGLE)) {
-                return m_opSpec->implicitSrcRegion(srcOpIx, m_model.platform, m_execSize);
-            } else if (m_parseOpts.deprecatedSyntaxWarnings) {
+                return m_opSpec->implicitSrcRegion(
+                    srcOpIx, m_execSize, m_builder.isMacroOp());
+            } else if (m_opts.deprecatedSyntaxWarnings) {
                 WarningF("%s.Src%d region should be implicit",
                     m_opSpec->mnemonic,
                     srcOpIx);
@@ -2343,7 +2152,7 @@ private:
                 rgn = Region::SRC0X0;
             } else {
                 // packed access
-                rgn = m_model.platform >= Platform::GEN12P1 ?
+                rgn = platform() >= Platform::GEN12P1 ?
                     Region::SRC1X0 : Region::SRC2X1; // most conservative mux
             }
         }
@@ -2354,10 +2163,13 @@ private:
     // '<' INT '>'   (CNL Align1 ternary src2)
     Region ParseSrcOpRegionH(int srcOpIx, bool hasExplicitSubreg)
     {
-        if (m_opSpec->hasImplicitSrcRegion(srcOpIx, m_model.platform, m_execSize)) {
+        if (m_opSpec->hasImplicitSrcRegion(
+            srcOpIx, m_execSize, m_builder.isMacroOp()))
+        {
             if (!LookingAt(LANGLE)) {
-                return m_opSpec->implicitSrcRegion(srcOpIx, m_model.platform, m_execSize);
-            } else if (m_parseOpts.deprecatedSyntaxWarnings) {
+                return m_opSpec->implicitSrcRegion(
+                    srcOpIx, m_execSize, m_builder.isMacroOp());
+            } else if (m_opts.deprecatedSyntaxWarnings) {
                 WarningF("%s.Src%d region should be implicit",
                     m_opSpec->mnemonic,
                     srcOpIx);
@@ -2380,17 +2192,36 @@ private:
         return rgn;
     }
 
+    Region defaultSendOperandRegion(RegName rn, int opIx) const {
+        Region r = Region::INVALID;
+        if (opIx < 0) {
+            if (m_opSpec->hasImplicitDstRegion(m_builder.isMacroOp())) {
+                r = m_opSpec->implicitDstRegion(m_builder.isMacroOp());
+            }
+        } else {
+            if (m_opSpec->hasImplicitSrcRegion(
+                opIx, m_execSize, m_builder.isMacroOp())) {
+                r =  m_opSpec->implicitSrcRegion(
+                    0, m_execSize, m_builder.isMacroOp());
+            } else if (rn == RegName::ARF_NULL) {
+                r = Region::SRC010;
+            } else {
+                r = Region::SRC110;
+            }
+        }
+        return r;
+    }
 
     // '<' INT ',' INT '>'             (VxH mode)
     // '<' INT ';' INT ',' INT '>'
     Region ParseSrcOpRegionInd(int srcOpIx) {
         if (m_opSpec->hasImplicitSrcRegion(
-            srcOpIx, m_model.platform, m_execSize))
+            srcOpIx, m_execSize, m_builder.isMacroOp()))
         {
             if (!LookingAt(LANGLE)) {
                 return m_opSpec->implicitSrcRegion(
-                    srcOpIx, m_model.platform, m_execSize);
-            } else if (m_parseOpts.deprecatedSyntaxWarnings) {
+                    srcOpIx, m_execSize, m_builder.isMacroOp());
+            } else if (m_opts.deprecatedSyntaxWarnings) {
                 WarningF("%s.Src%d region should be implicit",
                     m_opSpec->mnemonic,
                     srcOpIx);
@@ -2717,20 +2548,20 @@ private:
 
         if (m_opSpec->isBranching()) {
             if (m_opSpec->isJipAbsolute()) {
-                m_handler.InstSrcOpImmLabelAbsolute(
+                m_builder.InstSrcOpImmLabelAbsolute(
                     srcOpIx,
                     opStart,
                     val.s64,
                     sty);
             } else {
-                m_handler.InstSrcOpImmLabelRelative(
+                m_builder.InstSrcOpImmLabelRelative(
                     srcOpIx,
                     opStart,
                     val.s64,
                     sty);
             }
         } else {
-            m_handler.InstSrcOpImmValue(srcOpIx, opStart, val, sty);
+            m_builder.InstSrcOpImmValue(srcOpIx, opStart, val, sty);
         }
     }
 
@@ -2738,31 +2569,17 @@ private:
     void FinishSrcOpImmLabel(
         int srcOpIx,
         const Loc &opStart,
-        const SrcModifier &srcMod,
-        const Loc valLoc,
+        const Loc /* lblLoc */,
         const std::string &lbl)
     {
         Type type = ParseSrcOpTypeWithDefault(srcOpIx, true, true);
-        m_handler.InstSrcOpImmLabel(srcOpIx, opStart, lbl, type);
+        m_builder.InstSrcOpImmLabel(srcOpIx, opStart, lbl, type);
     }
 
 
     // = '-' | '~' | '(abs)' | '-(abs)' | '~(abs)'
     // = or start of "|r3|" like
     SrcModifier ParseSrcModifierOpt(bool &pipeAbs) {
-        if (!m_opSpec->supportsSourceModifiers()) {
-            if (LookingAt(SUB) &&
-                LookingAtAnyOfFrom(1, {INTLIT02, INTLIT10, INTLIT16}))
-            {
-                // e.g. jmpi (...) -16:d
-                //                 ^ we will convert the literal
-                Skip();
-                return SrcModifier::NEG;
-            } else if (LookingAtAnyOf(TILDE, ABS)) {
-                Fail("source modifier unsupported on this op");
-            }
-            return SrcModifier::NONE;
-        }
         SrcModifier srcMod = SrcModifier::NONE;
         if (Consume(SUB) || Consume(TILDE)) { // same lexeme as -
             srcMod = SrcModifier::NEG;
@@ -2790,7 +2607,7 @@ private:
         if (enableImplicitOperand) {
             bool isSuccess = PeekReg(regInfo, regNum);
             if (!isSuccess || regInfo->regName == RegName::ARF_A) {
-                m_handler.InstSrcOpRegDirect(
+                m_builder.InstSrcOpRegDirect(
                     srcOpIx,
                     m_srcLocs[srcOpIx],
                     SrcModifier::NONE,
@@ -2817,7 +2634,7 @@ private:
             }
         }
         RegRef reg = {
-            static_cast<uint8_t>(regNum),
+            static_cast<uint16_t>(regNum),
             0
         };
         // gets the implicit region and warns against using explicit regioning
@@ -2836,31 +2653,38 @@ private:
 #endif
     }
 
+
+
+
     Type ParseDstOpTypeWithDefault() {
-        if (m_opSpec->hasImplicitDstType(m_model.platform)) {
+        if (m_opSpec->hasImplicitDstType()) {
             if (LookingAt(COLON)) {
-                if (m_parseOpts.deprecatedSyntaxWarnings)
+                if (m_opts.deprecatedSyntaxWarnings)
                     Warning("implicit type on dst should be omitted");
                 // parse the type but ignore it
                 ParseOpTypeWithDefault(DST_TYPES, "expected destination type");
             }
             // use the implicit type anyway
-            return m_opSpec->implicitDstType(m_model.platform);
+            return m_opSpec->implicitDstType();
         }
         return ParseOpTypeWithDefault(DST_TYPES, "expected destination type");
     }
 
-    Type ParseSrcOpTypeWithDefault(int srcOpIx, bool immOrLbl, bool isLable = false) {
-        if (m_opSpec->hasImplicitSrcType(srcOpIx, immOrLbl, m_model.platform)) {
+
+    Type ParseSrcOpTypeWithDefault(
+        int srcOpIx, bool immOrLbl, bool isLabel = false)
+    {
+        if (m_opSpec->hasImplicitSrcType(srcOpIx, immOrLbl)) {
             if (LookingAt(COLON)) {
-                if (m_parseOpts.deprecatedSyntaxWarnings)
+                if (m_opts.deprecatedSyntaxWarnings)
                     WarningF("implicit type on src should be omitted", srcOpIx);
                 // parse the type but ignore it
                 ParseOpTypeWithDefault(SRC_TYPES, "expected source type");
             }
             // use the implicit type anyway
-            return m_opSpec->implicitSrcType(srcOpIx, immOrLbl, m_model.platform);
-        } else if(m_opSpec->op == Op::MOV && immOrLbl && isLable) {
+            return
+                m_opSpec->implicitSrcType(srcOpIx, immOrLbl);
+        } else if (m_opSpec->op == Op::MOV && immOrLbl && isLabel) {
             // support mov label without giving label's type
             return Type::UD;
         }
@@ -2868,19 +2692,20 @@ private:
         return ParseOpTypeWithDefault(SRC_TYPES, "expected source type");
     }
     Type ParseSrcOpTypeWithoutDefault(int srcOpIx, bool immOrLbl) {
-        if (m_opSpec->hasImplicitSrcType(srcOpIx, immOrLbl, m_model.platform)) {
+        if (m_opSpec->hasImplicitSrcType(srcOpIx, immOrLbl)) {
             if (LookingAt(COLON)) {
-                if (m_parseOpts.deprecatedSyntaxWarnings)
+                if (m_opts.deprecatedSyntaxWarnings)
                     WarningF("implicit type on src should be omitted", srcOpIx);
                 // parse the type but ignore it
                 TryParseOpType(SRC_TYPES);
             }
             // use the implicit type anyway
-            return m_opSpec->implicitSrcType(srcOpIx, immOrLbl, m_model.platform);
+            return m_opSpec->implicitSrcType(srcOpIx, immOrLbl);
         }
         Type t = TryParseOpType(SRC_TYPES);
         if (t == Type::INVALID &&
-            !(m_opSpec->isBranching() && !m_model.supportsSimplifiedBranches()))
+            !(m_opSpec->isBranching() &&
+                !m_model.supportsSimplifiedBranches()))
         {
             Fail("expected source type");
         }
@@ -2895,7 +2720,9 @@ private:
                 t = m_defaultRegisterType;
             } else if (m_opSpec->isSendOrSendsFamily()) {
                 t = Type::UD;
-            } else if (m_opSpec->isBranching() && m_model.supportsSimplifiedBranches()) {
+            } else if (m_opSpec->isBranching() &&
+                m_model.supportsSimplifiedBranches())
+            {
                 // no more types for branching
                 t = Type::UD;
             } else {
@@ -2916,15 +2743,24 @@ private:
     }
 
 
+
+    //
     // (INTEXPR|AddrRegRef) (INTEXPR|AddrRegRef)
-    void ParseSendDescs() {
+    void ParseSendDescsLegacy() {
+        IGA_ASSERT(platform() <= Platform::GEN12P1,
+            "wrong platform for function");
+
+
         const Loc exDescLoc = NextLoc();
-        SendDescArg exDesc;
+        SendDesc exDesc;
         if (ParseAddrRegRefOpt(exDesc.reg)) {
-            exDesc.type = SendDescArg::REG32A;
+            exDesc.type = SendDesc::Kind::REG32A;
+            if (platform() < Platform::GEN12P1)
+                m_builder.InstSubfunction(SFID::A0REG);
+            // subfunc is already set as part of opcode (e.g. send.gtwy)
         } else {
-            ImmVal v;
             // constant integral expression
+            ImmVal v;
             if (!TryParseConstExpr(v)) {
                 Fail("expected extended send descriptor");
             }
@@ -2933,11 +2769,15 @@ private:
                     "immediate descriptor expression must be integral");
             }
             exDesc.imm = (uint32_t)v.s64;
-            exDesc.type = SendDescArg::IMM;
-            if (m_model.platform >= Platform::GEN12P1 && (exDesc.imm & 0xF)) {
+            exDesc.type = SendDesc::Kind::IMM;
+            if (platform() >= Platform::GEN12P1 && (exDesc.imm & 0xF)) {
                 Fail(exDescLoc,
                     "ExDesc[3:0] must be 0's; SFID is expressed "
                     "as a function control value (e.g. send.dc0 ...)");
+            }
+            if (platform() < Platform::GEN12P1) {
+                SFID sfid = sfidFromEncoding(platform(), exDesc.imm & 0xF);
+                m_builder.InstSubfunction(sfid);
             }
         }
 
@@ -2946,9 +2786,9 @@ private:
         }
 
         const Loc descLoc = NextLoc();
-        SendDescArg desc;
+        SendDesc desc;
         if (ParseAddrRegRefOpt(desc.reg)) {
-            desc.type = SendDescArg::REG32A;
+            desc.type = SendDesc::Kind::REG32A;
         } else {
             // constant integral expression
             ImmVal v;
@@ -2960,10 +2800,10 @@ private:
                     "immediate descriptor expression must be integral");
             }
             desc.imm = (uint32_t)v.s64;
-            desc.type = SendDescArg::IMM;
+            desc.type = SendDesc::Kind::IMM;
         }
 
-        m_handler.InstSendDescs(exDescLoc, exDesc, descLoc, desc);
+        m_builder.InstSendDescs(exDescLoc, exDesc, descLoc, desc);
 
         if (LookingAt(COLON)) {
             Fail(NextLoc(), "Message Descriptor is typeless");
@@ -2980,30 +2820,208 @@ private:
 
         if (Consume(LBRACE)) {
             if (!LookingAt(RBRACE))
-                ParseInstOptOrFail(instOpts); // else could be an empty list "{}"
+                ParseInstOptOrFail(instOpts); // else: could be empty list "{}"
             while (Consume(COMMA)) {
                 ParseInstOptOrFail(instOpts);
             }
-            ConsumeOrFail(RBRACE,"expected }");
+            ConsumeOrFail(RBRACE, "expected }");
         }
 
-        m_handler.InstOpts(instOpts);
+
+        m_builder.InstOptsAdd(instOpts);
     }
 
-    void ParseInstOptOrFail(InstOptSet &instOpts)
-    {
+    void ParseInstOptOrFail(InstOptSet &instOpts) {
         auto loc = NextLoc();
-        if (!TryParseInstOptOrDepInfo(instOpts)) {
+        if (!tryParseInstOptToken(instOpts) &&
+            !tryParseInstOptDepInfo(instOpts))
+        {
             Fail(loc, "invalid instruction option");
         }
     }
 
+    bool tryParseInstOptToken(InstOptSet &instOpts) {
+        auto loc = NextLoc();
+        InstOpt newOpt = InstOpt::ACCWREN;
+        if (ConsumeIdentEq("AccWrEn")) {
+            newOpt = InstOpt::ACCWREN;
+        } else if (ConsumeIdentEq("Atomic")) {
+            if (platform() < Platform::GEN7) {
+                Fail(loc, "Atomic mot supported on given platform");
+            }
+            newOpt = InstOpt::ATOMIC;
+            if (instOpts.contains(InstOpt::SWITCH)) {
+                Fail(loc, "Atomic mutually exclusive with Switch");
+            } else if (instOpts.contains(InstOpt::NOPREEMPT)) {
+                Fail(loc, "Atomic mutually exclusive with NoPreempt");
+            }
+        } else if (ConsumeIdentEq("Breakpoint")) {
+            newOpt = InstOpt::BREAKPOINT;
+        } else if (ConsumeIdentEq("Compacted")) {
+            newOpt = InstOpt::COMPACTED;
+            if (instOpts.contains(InstOpt::NOCOMPACT)) {
+                Fail(loc, "Compacted mutually exclusive with "
+                    "Uncompacted/NoCompact");
+            }
+        } else if (ConsumeIdentEq("EOT")) {
+            newOpt = InstOpt::EOT;
+            if (!m_opSpec->isSendOrSendsFamily()) {
+                Fail(loc, "EOT is only allowed on send instructions");
+            }
+        } else if (ConsumeIdentEq("NoCompact") ||
+            ConsumeIdentEq("Uncompacted"))
+        {
+            newOpt = InstOpt::NOCOMPACT;
+            if (instOpts.contains(InstOpt::COMPACTED)) {
+                Fail(loc, "Uncomapcted/NoCompact mutually exclusive "
+                    "with Compacted");
+            }
+        } else if (ConsumeIdentEq("Serialize")) {
+            newOpt = InstOpt::SERIALIZE;
+        } else if (ConsumeIdentEq("NoMask")) {
+            Fail(loc, "NoMask goes precedes predication as (W) for WrEn: "
+                "e.g. (W) op (..) ...   or    (W&f0.0) op (..) ..");
+        } else if (ConsumeIdentEq("H1")) {
+            Fail(loc, "H1 is obsolete; use M0 in execution offset: "
+                "e.g. op (16|M0) ...");
+        } else if (ConsumeIdentEq("H2")) {
+            Fail(loc, "H2 is obsolete; use M16 in execution offset: "
+                "e.g. op (16|M16) ...");
+        } else if (ConsumeIdentEq("Q1")) {
+            Fail(loc, "Q1 is obsolete; use M0 in execution offset: "
+                "e.g. op (8|M0) ...");
+        } else if (ConsumeIdentEq("Q2")) {
+            Fail(loc, "Q2 is obsolete; use M8 in execution offset: "
+                "e.g. op (8|M8) ...");
+        } else if (ConsumeIdentEq("Q3")) {
+            Fail(loc, "Q3 is obsolete; use M16 in execution offset: "
+                "e.g. op (8|M16) ...");
+        } else if (ConsumeIdentEq("Q4")) {
+            Fail(loc, "Q4 is obsolete; use M24 in execution offset: "
+                "e.g. op (8|M24) ...");
+        } else if (ConsumeIdentEq("N1")) {
+            Fail(loc, "N1 is obsolete; use M0 in execution offset: "
+                "e.g. op (4|M0) ...");
+        } else if (ConsumeIdentEq("N2")) {
+            Fail(loc, "N2 is obsolete; use M4 in execution offset: "
+                "e.g. op (4|M4) ...");
+        } else if (ConsumeIdentEq("N3")) {
+            Fail(loc, "N3 is obsolete; use M8 in execution offset: "
+                "e.g. op (4|M8) ...");
+        } else if (ConsumeIdentEq("N4")) {
+            Fail(loc, "N4 is obsolete; use M12 in execution offset: "
+                "e.g. op (4|M12) ...");
+        } else if (ConsumeIdentEq("N5")) {
+            Fail(loc, "N5 is obsolete; use M16 in execution offset: "
+                "e.g. op (4|M16) ...");
+        } else if (ConsumeIdentEq("N6")) {
+            Fail(loc, "N6 is obsolete; use M20 in execution offset: "
+                "e.g. op (4|M20) ...");
+        } else if (ConsumeIdentEq("N7")) {
+            Fail(loc, "N7 is obsolete; use M24 in execution offset: "
+                "e.g. op (4|M24) ...");
+        } else if (ConsumeIdentEq("N8")) {
+            Fail(loc, "N8 is obsolete; use M28 in execution offset: "
+                "e.g. op (4|M28) ...");
+        } else {
+            return false;
+        }
+
+        if (!instOpts.add(newOpt)) {
+            // adding the option doesn't change the set... (it's duplicate)
+            Fail(loc, "duplicate instruction options");
+        }
+        return true;
+    }
+
+    bool tryParseInstOptDepInfo(InstOptSet &instOpts) {
+        auto loc = NextLoc();
+        if (LookingAt(IDENT)) {
+            InstOpt newOpt = InstOpt::ACCWREN;
+            bool isSwsbOpt = false;
+            // classic instruction option that affects instruction dependency
+            // scheduling etc...
+            if (ConsumeIdentEq("NoDDChk")) {
+                newOpt = InstOpt::NODDCHK;
+                if (!m_model.supportsHwDeps()) {
+                    Fail(loc, "NoDDChk not supported on given platform");
+                }
+            } else if (ConsumeIdentEq("NoDDClr")) {
+                newOpt = InstOpt::NODDCLR;
+                if (!m_model.supportsHwDeps()) {
+                    Fail(loc, "NoDDClr not supported on given platform");
+                }
+            } else if (ConsumeIdentEq("NoPreempt")) {
+                if (m_model.supportsNoPreempt()) {
+                    newOpt = InstOpt::NOPREEMPT;
+                } else {
+                    Fail(loc, "NoPreempt not supported on given platform");
+                }
+            } else if (ConsumeIdentEq("NoSrcDepSet")) {
+                if (m_model.supportNoSrcDepSet()) {
+                    newOpt = InstOpt::NOSRCDEPSET;
+                } else {
+                    Fail(loc, "NoSrcDep not supported on given platform");
+                }
+            } else if (ConsumeIdentEq("Switch")) {
+                newOpt = InstOpt::SWITCH;
+                if (!m_model.supportsHwDeps()) {
+                    m_errorHandler.reportWarning(loc,
+                        "ignoring unsupported instruction option {Switch}");
+                }
+            } else {
+                return false; // unrecognized option
+            }
+            if (!isSwsbOpt && !instOpts.add(newOpt)) {
+                // adding the option doesn't change the set... (it's a duplicate)
+                Fail(loc, "duplicate instruction options");
+            }
+        } else if (Consume(DOLLAR)) {
+            // sbid directive
+            if (m_model.supportsHwDeps()) {
+                Fail(loc, "software dependencies not supported on this platform");
+            }
+            int32_t sbid;
+            ConsumeIntLitOrFail(sbid, "expected SBID token");
+            // $4
+            if (Consume(DOT)) {
+                if (ConsumeIdentEq("dst")) {
+                    // $4.dst
+                    m_builder.InstDepInfoSBidDst(loc, sbid);
+                } else if (ConsumeIdentEq("src")) {
+                    // $4.src
+                    m_builder.InstDepInfoSBidSrc(loc, sbid);
+                } else {
+                    Fail("invalid SBID directive expecting 'dst' or 'src'");
+                }
+            } else if (!LookingAtAnyOf(COMMA,RBRACE)) {
+                Fail("syntax error in SBID directive"
+                    " (expected '.' ',' or '}')");
+            } else {
+                // $4 (allocate/.set)
+                m_builder.InstDepInfoSBidAlloc(loc, sbid);
+            }
+        } else if (Consume(AT)) {
+            // min dependency distance @3
+            if (m_model.supportsHwDeps()) {
+                Fail(loc, "software dependencies not supported on this platform");
+            }
+            int32_t dist;
+            auto loc = NextLoc();
+            ConsumeIntLitOrFail(dist,"expected register min distance value");
+            m_builder.InstDepInfoDist(loc, SWSB::DistType::REG_DIST, dist);
+        } else {
+            return false;
+        }
+        return true;
+    }
+
     // FlagRegRef = ('f0'|'f1'|'f2'|'f3') ('.' ('0'|'1'))?
     void ParseFlagRegRef(RegRef &freg) {
-        // TODO: use RegInfo for "f"
         if (!LookingAt(IDENT)) {
             Fail("expected flag register");
         }
+
         if (ConsumeIdentEq("f0")) {
             freg.regNum = 0;
         } else if (ConsumeIdentEq("f1")) {
@@ -3013,18 +3031,26 @@ private:
         } else if (ConsumeIdentEq("f3")) {
             freg.regNum = 3;
         } else {
-            Fail("Unexpected flag register number");
+            Fail("unexpected flag register number");
         }
-        if(LookingAtSeq(DOT,INTLIT10)) { // e.g. .1
+
+        if (LookingAtSeq(DOT, INTLIT10)) {
+            // e.g. f0.1
+            //        ^
             // protects predication's use in short predication code
             // (f0.any2h)
             Skip();
+            auto srLoc = NextLoc();
             ConsumeIntLitOrFail(freg.subRegNum, "expected flag subregister");
+            if (freg.subRegNum > 1) {
+                Error(srLoc, "flag sub-register out of bounds");
+            }
         } else {
             // e.g. f0.any2h (treat as f0.0.any2h)
             freg.subRegNum = 0;
         }
     }
+
 
     bool ConsumeDstType(Type &dty) {
         return ConsumeIdentOneOf(DST_TYPES, dty);
@@ -3039,7 +3065,7 @@ private:
     // See LookingAtLabelDef for definition of a label
     bool ConsumeLabelDef(std::string &label) {
         if (LookingAtLabelDef()) {
-            label = GetTokenAsString(Next(0));
+            label = GetTokenAsString();
             (void)Skip(2);
             return true;
         }
@@ -3047,7 +3073,7 @@ private:
     }
 
 
-    // Label = IDENT ':' (not followed by ident
+    // Label = IDENT ':' (not followed by identifier)
     //   mov:ud (16) -- not a label
     //
     //   mov:       -- label
@@ -3074,6 +3100,31 @@ private:
     }
 
 }; // class KernelParser
+
+
+///////////////////////////////////////////////////////////////////////////////
+struct ParsedPayloadInfo {
+    Loc regLoc = Loc::INVALID;
+    int regNum = -1;
+    RegName regName = RegName::INVALID;
+    Loc regLenLoc = Loc::INVALID;
+    int regLen = 0;
+    bool regLenWasImplicit = false;
+};
+struct ParsedAddrOperand {
+    Loc surfArgLoc = Loc::INVALID;
+    SendDesc surfArg; // won't be set for flat
+                         //
+    Loc scaleLoc = Loc::INVALID;
+    int scale = 1;
+    //
+    ParsedPayloadInfo payload;
+    //
+    Loc immOffsetLoc = Loc::INVALID;
+    int immOffset = 0;
+};
+
+
 
 
 Kernel *iga::ParseGenKernel(

@@ -29,8 +29,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace vISA;
 
-using std::printf;
-
 uint8_t HWConformity::checkMinExecSize( G4_opcode op )
 {
     if( op == G4_dp2 ||
@@ -59,7 +57,7 @@ void HWConformity::fixOpndTypeAlign( G4_BB* bb )
     {
         G4_INST *inst = *i;
         G4_opcode opcode = inst->opcode();
-        if (opcode == G4_nop || opcode == G4_label || inst->isSend()) {
+        if (opcode == G4_nop || opcode == G4_label || inst->mayExceedTwoGRF()) {
             next_iter++;
         } else if (fixInstOpndTypeAlign(i, bb)) {
             next_iter = i;
@@ -248,7 +246,7 @@ bool HWConformity::checkSrcCrossGRF( INST_LIST_ITER& iter, G4_BB* bb )
             }
 
             auto doSplit = [&](bool canCrossGRF) -> void {
-                if (inst->usesFlag() || (bb->isInSimdFlow() && !inst->isWriteEnableInst()))
+                if (inst->usesFlag() || (!bb->isAllLaneActive() && !inst->isWriteEnableInst()))
                 {
                     // splitting may be unsafe, insert a move then split the move
                     G4_Operand* newSrc = insertMovBefore(iter, i, inst->getSrc(i)->getType(), bb);
@@ -310,7 +308,7 @@ void HWConformity::fixInstExecSize( G4_BB* bb )
         next_iter++;
         G4_INST *inst = *i;
         G4_opcode opcode = inst->opcode();
-        if (opcode == G4_nop || opcode == G4_label || inst->isSend())
+        if (opcode == G4_nop || opcode == G4_label || inst->mayExceedTwoGRF())
         {
             continue;
         }
@@ -357,7 +355,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
     bool specialCondForComprInst = ( execSize < 8 && dst && dst->getHorzStride() != 1 &&
         inst->getCondMod() && inst->opcode() != G4_sel );
 
-    TARGET_PLATFORM genX = getGenxPlatform();
+    TARGET_PLATFORM genX = builder.getPlatform();
 
     // rules specific to math instructions
     // INT DIV function does not support SIMD16
@@ -386,7 +384,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
     bool compOpt = false,
         forceEvenSplit = ( execSize == 32 && inst->opcode() == G4_sel && inst->getCondMod() ) || packedByteDst;
     uint8_t numInFirstMov = 0;
-    bool useFlag = inst->getPredicate() || inst->getCondMod() || ( bb->isInSimdFlow() && !inst->isWriteEnableInst() );
+    bool useFlag = inst->getPredicate() || inst->getCondMod() || ( !bb->isAllLaneActive() && !inst->isWriteEnableInst() );
     bool evenSplitDst = false;
 
     // separate the checks for BDW to make it more maintainable
@@ -520,12 +518,6 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
         {
             if( forceEvenSplit )
             {
-                if( builder.getOption(vISA_OptReport) )
-                {
-                    printf( "\nFix Inst Size for:\n" );
-                    inst->emit( std::cout );
-                    printf( "\nsplit into: \n" );
-                }
                 splitSIMD32Inst( iter, bb );
                 return insertMOV;
             }
@@ -664,16 +656,10 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
         if( !splitOp && execSize == 32 &&
              (packedByteDst || ( inst->getPredicate() || inst->getCondMod() )) )
         {
-            if( forceEvenSplit )
+            if (forceEvenSplit)
             {
-                if( builder.getOption(vISA_OptReport) )
-                {
-                    printf( "\nFix Inst Size for:\n" );
-                    inst->emit( std::cout );
-                    printf( "\nsplit into: \n" );
-                }
                 // FIXME: try to use evenlySplitInst() instead.
-                splitSIMD32Inst( iter, bb );
+                splitSIMD32Inst(iter, bb);
                 return insertMOV;
             }
         }
@@ -681,7 +667,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
         // You will need to do this ONLY when destination spans 2 registers, src1 is a word or byte and you expect channels to be turned off !!
         // currrently for instruction with pred or emask on pre-BDW
         bool specialCondForShootDown = ( dst && goodTwoGRFDst &&
-            ( inst->getPredicate() || ( bb->isInSimdFlow() && !inst->isWriteEnableInst() ) ) &&
+            ( inst->getPredicate() || ( !bb->isAllLaneActive() && !inst->isWriteEnableInst() ) ) &&
             oneGRFSrc[1] && ( IS_BTYPE( srcs[1]->getType() ) || IS_WTYPE( srcs[1]->getType() ) ) );
         if( specialCondForShootDown )
         {
@@ -692,13 +678,6 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
     if( !splitOp )
     {
         return insertMOV;
-    }
-
-    if( builder.getOption(vISA_OptReport) )
-    {
-        printf( "\nFix Inst Size for:\n" );
-        inst->emit( std::cout );
-        printf( "\nsplit into: \n" );
     }
 
     MUST_BE_TRUE( (inst->opcode() != G4_smov), "Error in splitting smov instruction" );
@@ -785,7 +764,7 @@ bool HWConformity::reduceExecSize( INST_LIST_ITER iter, G4_BB* bb )
 
             // can't split if inst is in SIMD flow and is not NoMask, or the inst has predicate
             // Have to introduce a temp that supports splitting instead
-            if ((bb->isInSimdFlow() && !inst->isWriteEnableInst()) || inst->getPredicate())
+            if ((!bb->isAllLaneActive() && !inst->isWriteEnableInst()) || inst->getPredicate())
             {
                 saveDst( iter, scale, bb );
                 INST_LIST_ITER tmpIter = iter;
@@ -932,7 +911,7 @@ void HWConformity::splitSIMD32Inst( INST_LIST_ITER iter, G4_BB* bb )
             newInst->setDest( newDst );
             newInst->setPredicate( newPredOpnd );
             newInst->setCondMod( newCondMod );
-            bb->insert( iter, newInst );
+            bb->insertBefore( iter, newInst );
         }
         else
         {
@@ -1014,7 +993,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
     // mov (16) r2.0<1>:uw 0:uw {Align1, NoMask}   // 0:uw
     // mov (16) r2.0<1>:uw 0x1:uw {Align1}   // 1:uw
     // this part is currently not used since we do not split inst with predicate or emask
-    bool isSIMDCFInst = bb->isInSimdFlow() && !inst->isWriteEnableInst();
+    bool isSIMDCFInst = !bb->isAllLaneActive() && !inst->isWriteEnableInst();
     G4_Declare *maskDcl = NULL;
     if (instPred || isSIMDCFInst)
     {
@@ -1025,9 +1004,8 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
             tmpMaskOpnd, builder.createImm(0, Type_UW), inst->getOption(), false);
 
         G4_Predicate* pred = builder.duplicateOperand(inst->getPredicate());
-        builder.createInternalInst(pred, G4_mov, NULL, false, instExSize,
-            tmpMaskOpnd, builder.createImm(1, Type_UW), NULL, inst->getOption(), inst->getLineNo(),
-            inst->getCISAOff(), inst->getSrcFilename());
+        auto movInst = builder.createMov(instExSize, tmpMaskOpnd, builder.createImm(1, Type_UW), inst->getOption(), false);
+        movInst->setPredicate(pred);
 
         if (isSIMDCFInst)
         {
@@ -1053,7 +1031,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
             // update def-use chain
             inst->copyDefsTo(newInst, true);
             inst->copyDefsTo(newInst, true);
-            bb->insert(iter, newInst);
+            bb->insertBefore(iter, newInst);
             continue;
         }
 
@@ -1154,7 +1132,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
             newInst->setDest( newDst );
             newInst->setPredicate(builder.duplicateOperand(inst->getPredicate()));
             newInst->setCondMod(builder.duplicateOperand(inst->getCondMod()) );
-            bb->insert( iter, newInst );
+            bb->insertBefore( iter, newInst );
             newInstIter = iter;
             newInstIter--;
         }
@@ -1276,11 +1254,11 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
 
 // evenly split an inst into two instructions with half execution size.
 // this is used to split a simd16 math into two simd8 before other reducing exeuction size actions
-bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap)
+bool HWConformity::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap)
 {
-    G4_INST *inst = *iter;
+    G4_INST* inst = *iter;
     G4_opcode op = inst->opcode();
-    G4_Operand *srcs[3];
+    G4_Operand* srcs[3];
     int origMaskOffset = inst->getMaskOffset();
     bool extraMov = false;
     const int numSrc = inst->getNumSrc();
@@ -1301,31 +1279,31 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
     // boundary is GRF-boundary and HS change, but for Dst, elements should be symetric
     // if half-GRF boundary is crossed.
 
-    G4_DstRegRegion *dst = inst->getDst();
+    G4_DstRegRegion* dst = inst->getDst();
     bool nullDst = dst && inst->hasNULLDst();
     uint8_t instExSize = inst->getExecSize(), currExSize = instExSize >> 1;
 
-    G4_Predicate *newPred = NULL;
-    if( inst->getPredicate() )
+    G4_Predicate* newPred = NULL;
+    if (inst->getPredicate())
     {
         newPred = inst->getPredicate();
         newPred->splitPred();
     }
 
-    G4_CondMod *newCond = NULL;
-    if( inst->getCondMod() )
+    G4_CondMod* newCond = NULL;
+    if (inst->getCondMod())
     {
         newCond = inst->getCondMod();
         newCond->splitCondMod();
     }
 
-    G4_SrcRegRegion *accSrcRegion = NULL;
-    if( inst->getImplAccSrc() )
+    G4_SrcRegRegion* accSrcRegion = NULL;
+    if (inst->getImplAccSrc())
     {
         accSrcRegion = inst->getImplAccSrc()->asSrcRegRegion();
     }
 
-    G4_DstRegRegion *accDstRegion = NULL;
+    G4_DstRegRegion* accDstRegion = NULL;
     if (inst->getImplAccDst())
     {
         accDstRegion = inst->getImplAccDst();
@@ -1336,13 +1314,13 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
         useARF = true;
     }
 
-    for( int i = 0; i < instExSize; i += currExSize )
+    for (int i = 0; i < instExSize; i += currExSize)
     {
         // create new Oprands.
-        G4_DstRegRegion *newDst;
-        if( !nullDst )
+        G4_DstRegRegion* newDst;
+        if (!nullDst)
         {
-            newDst = builder.createSubDstOperand(dst, (uint16_t) i, currExSize );
+            newDst = builder.createSubDstOperand(dst, (uint16_t)i, currExSize);
         }
         else
         {
@@ -1350,38 +1328,38 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
         }
         // generate new inst
         G4_INST* newInst;
-        if( ( i + currExSize ) < instExSize )
+        if ((i + currExSize) < instExSize)
         {
             newInst = builder.makeSplittingInst(inst, currExSize);
-            newInst->setImplAccDst( builder.duplicateOperand(accDstRegion) );
-            newInst->setImplAccSrc( builder.duplicateOperand(accSrcRegion) );
-            newInst->setDest( newDst );
-            newInst->setPredicate(builder.duplicateOperand(newPred) );
-            newInst->setCondMod(builder.duplicateOperand(newCond) );
+            newInst->setImplAccDst(builder.duplicateOperand(accDstRegion));
+            newInst->setImplAccSrc(builder.duplicateOperand(accSrcRegion));
+            newInst->setDest(newDst);
+            newInst->setPredicate(builder.duplicateOperand(newPred));
+            newInst->setCondMod(builder.duplicateOperand(newCond));
             newInst->setEvenlySplitInst(true);
-            bb->insert( iter, newInst );
+            bb->insertBefore(iter, newInst);
         }
         else
         {
             // reuse the original inst
             newInst = inst;
-            newInst->setExecSize( currExSize );
-            newInst->setDest( newDst );
-            if( newPred )
+            newInst->setExecSize(currExSize);
+            newInst->setDest(newDst);
+            if (newPred)
             {
-                inst->setPredicate(builder.duplicateOperand( newPred ) );
+                inst->setPredicate(builder.duplicateOperand(newPred));
             }
-            if( newCond )
+            if (newCond)
             {
-                inst->setCondMod(builder.duplicateOperand( newCond ) );
+                inst->setCondMod(builder.duplicateOperand(newCond));
             }
-            if( accSrcRegion )
+            if (accSrcRegion)
             {
-                newInst->setImplAccSrc( builder.createSrcRegRegion( *accSrcRegion ) );
+                newInst->setImplAccSrc(builder.createSrcRegRegion(*accSrcRegion));
             }
-            if( accDstRegion )
+            if (accDstRegion)
             {
-                newInst->setImplAccDst( builder.createDstRegRegion( *accDstRegion ) );
+                newInst->setImplAccDst(builder.createDstRegRegion(*accDstRegion));
             }
         }
 
@@ -1389,14 +1367,13 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
         {
             if (srcs[j])
             {
-                // src1 for single source math should be arc reg null.
-                if (srcs[j]->isImm() ||
-                    (inst->opcode() == G4_math && j == 1 && srcs[j]->isNullReg()))
+                if (srcs[j]->isImm() || srcs[j]->isNullReg())
                 {
                     newInst->setSrc(srcs[j], j);
                 }
-                else if (srcs[j]->asSrcRegRegion()->isScalar() || (j == 0 && op == G4_line))
+                else if (srcs[j]->isScalarSrc() || (j == 0 && op == G4_line))
                 {
+                    // no need to split, but need to duplicate
                     newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
                 }
                 else
@@ -1409,7 +1386,7 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
         }
 
         // set mask
-        bool needsMaskOffset = useARF || (bb->isInSimdFlow() && !inst->isWriteEnableInst());
+        bool needsMaskOffset = useARF || (!bb->isAllLaneActive() && !inst->isWriteEnableInst());
         if (needsMaskOffset)
         {
             int newMaskOffset = origMaskOffset + (i == 0 ? 0 : currExSize);
@@ -1419,7 +1396,7 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
             if (newMask == InstOpt_NoOpt)
             {
                 bool useMask = inst->getPredicate() || inst->getCondModBase() ||
-                    (bb->isInSimdFlow() && !inst->isWriteEnableInst());
+                    (!bb->isAllLaneActive() && !inst->isWriteEnableInst());
                 MUST_BE_TRUE(!useMask, "no legal emask found for the split instruction");
             }
             else
@@ -1429,7 +1406,7 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
         }
 
         // maintain def-use chain
-        if( newInst == inst )
+        if (newInst == inst)
         {
             newInst->trimDefInstList();
         }
@@ -1438,9 +1415,9 @@ bool HWConformity::evenlySplitInst( INST_LIST_ITER iter, G4_BB* bb, bool checkOv
             inst->copyDefsTo(newInst, /*checked*/true);
             inst->copyUsesTo(newInst, /*checked*/true);
         }
-        if( builder.getOption(vISA_OptReport) )
+        if (builder.getOption(vISA_OptReport))
         {
-            newInst->emit( std::cout );
+            newInst->emit(std::cout);
             std::cout << std::endl;
         }
     }
@@ -1538,7 +1515,7 @@ void HWConformity::moveSrcToGRF( INST_LIST_ITER it, uint32_t srcNum, uint16_t nu
         ( def_inst->getExecSize() == execSize ) &&
         def_inst->getDst()->coverGRF( numGRF, execSize ) &&
         def_inst->getDst()->checkGRFAlign() &&
-        ( !bb->isInSimdFlow() || def_inst->isWriteEnableInst() ) )
+        ( bb->isAllLaneActive() || def_inst->isWriteEnableInst() ) )
     {
 
         //inst->removeDefUse( Gen4_Operand_Number(srcNum + 1) );
@@ -1565,10 +1542,10 @@ void HWConformity::moveSrcToGRF( INST_LIST_ITER it, uint32_t srcNum, uint16_t nu
                         hs,
                         dcl->getElemType());
     G4_INST* newInst = builder.createMov(
-        execSize, dstRegion, src, (bb->isInSimdFlow() ? InstOpt_WriteEnable : InstOpt_NoOpt), false);
+        execSize, dstRegion, src, (!bb->isAllLaneActive() ? InstOpt_WriteEnable : InstOpt_NoOpt), false);
 
     // insert instruction and maintain def-use chain
-    bb->insert( it, newInst );
+    bb->insertBefore( it, newInst );
     inst->transferDef( newInst, Gen4_Operand_Number(srcNum + 1), Opnd_src0 );
     newInst->addDefUse(inst, Gen4_Operand_Number(srcNum + 1));
 
@@ -1615,7 +1592,7 @@ void HWConformity::saveDst( INST_LIST_ITER& it, uint8_t stride, G4_BB *bb )
     G4_INST* newInst = builder.createMov(execSize, tmpDstOpnd, srcRegion, new_option, false);
     newInst->setNoMask(true);
 
-    bb->insert(it, newInst);
+    bb->insertBefore(it, newInst);
     inst->setDest(builder.duplicateOperand( tmpDstOpnd ) );
 }
 
@@ -1637,7 +1614,7 @@ void HWConformity::restoreDst( INST_LIST_ITER& it, G4_DstRegRegion *origDst, G4_
 
     INST_LIST_ITER iter = it;
     iter++;
-    bb->insert( iter, newInst );
+    bb->insertBefore( iter, newInst );
 
     // how about def-use?
     inst->transferUse(newInst);
@@ -1675,13 +1652,12 @@ void HWConformity::insertMovAfter( INST_LIST_ITER& it, uint16_t stride, G4_BB* b
     }
     unsigned int new_option = inst->getOption();
 
-    G4_INST* newInst = builder.createInternalInst( pred, G4_mov, NULL, false,
-        execSize, dst, srcRegion, NULL, new_option, inst->getLineNo(), inst->getCISAOff(),
-        inst->getSrcFilename() );
+    G4_INST* newInst = builder.createMov(execSize, dst, srcRegion, new_option, false);
+    newInst->setPredicate(pred);
 
     INST_LIST_ITER iter = it;
     iter++;
-    bb->insert( iter, newInst );
+    bb->insertBefore( iter, newInst );
     // change dst of inst
     inst->setDest( tmpDstOpnd );
 

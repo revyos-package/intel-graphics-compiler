@@ -23,12 +23,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/ScaledNumber.h>
 #include "llvm/IR/DataLayout.h"
 #include "llvm/ADT/StringExtras.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
@@ -46,10 +46,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/SystemThread.h"
 #include "common/secure_mem.h"
 #include "common/MDFrameWork.h"
-
 #include <iStdLib/utility.h>
-
 #include "Compiler/DebugInfo/VISADebugEmitter.hpp"
+#include "Probe/Assertion.h"
+#include "ZEBinWriter/zebin/source/ZEELFObjectBuilder.hpp"
 
 /***********************************************************************************
 This file contains the code specific to opencl kernels
@@ -255,7 +255,7 @@ namespace IGC
         ModuleMetaData* modMD = pCtx->getModuleMetaData();
         FunctionMetaData* funcMD = &modMD->FuncMD[entry];
         ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
-        assert(resAllocMD->argAllocMDList.size() > 0 && "ArgAllocMD List Out of Bounds");
+        IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() > 0, "ArgAllocMD List Out of Bounds");
         ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[argNo];
 
         SOpenCLKernelInfo::SResourceInfo resInfo;
@@ -284,7 +284,7 @@ namespace IGC
         ModuleMetaData* modMD = pCtx->getModuleMetaData();
         FunctionMetaData* funcMD = &modMD->FuncMD[entry];
         ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
-        assert(resAllocMD->argAllocMDList.size() > 0 && "ArgAllocMD List Out of Bounds");
+        IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() > 0, "ArgAllocMD List Out of Bounds");
         ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[argNo];
         return (ResourceExtensionTypeEnum)argAlloc->extensionType;
     }
@@ -374,7 +374,7 @@ namespace IGC
                 kernelArgInfo->AddressQualifier = "__private";
                 break;
             default:
-                assert(0 && "Unexpected address space");
+                IGC_ASSERT_MESSAGE(0, "Unexpected address space");
                 break;
             }
 
@@ -550,7 +550,7 @@ namespace IGC
                 vecTypeString += "long";
                 break;
             default:
-                assert(0 && "Unexpected data type in vec_type_hint");
+                IGC_ASSERT_MESSAGE(0, "Unexpected data type in vec_type_hint");
                 break;
             }
             break;
@@ -564,7 +564,7 @@ namespace IGC
             vecTypeString += "half";
             break;
         default:
-            assert(0 && "Unexpected data type in vec_type_hint");
+            IGC_ASSERT_MESSAGE(0, "Unexpected data type in vec_type_hint");
             break;
         }
 
@@ -580,34 +580,155 @@ namespace IGC
 
     void COpenCLKernel::CreatePrintfStringAnnotations()
     {
-        std::string MDNodeName = "printf.strings";
-        NamedMDNode* printfMDNode = entry->getParent()->getOrInsertNamedMetadata(MDNodeName);
+        std::vector<std::pair<unsigned int, std::string>> printfStrings;
+        GetPrintfStrings(printfStrings);
 
-        for (uint i = 0, NumStrings = printfMDNode->getNumOperands();
-            i < NumStrings;
-            i++)
+        for (auto printfString : printfStrings)
         {
             iOpenCL::PrintfStringAnnotation* printfAnnotation = new iOpenCL::PrintfStringAnnotation();
-
-            llvm::MDNode* argMDNode = printfMDNode->getOperand(i);
-
-            llvm::ConstantInt* indexOpndVal =
-                mdconst::dyn_extract<llvm::ConstantInt>(argMDNode->getOperand(0));
-            llvm::Metadata* stringOpnd = argMDNode->getOperand(1);
-            llvm::MDString* stringOpndVal = dyn_cast<llvm::MDString>(stringOpnd);
-
-            llvm::StringRef stringData(stringOpndVal->getString());
-
             printfAnnotation->AnnotationSize = sizeof(printfAnnotation);
-            printfAnnotation->Index = int_cast<unsigned int>(indexOpndVal->getZExtValue());
-            printfAnnotation->StringSize = stringData.size() + 1;
+            printfAnnotation->Index = printfString.first;
+            printfAnnotation->StringSize = printfString.second.size() + 1;
             printfAnnotation->StringData = new char[printfAnnotation->StringSize + 1];
 
-            memcpy_s(printfAnnotation->StringData, printfAnnotation->StringSize, stringData.data(), printfAnnotation->StringSize);
+            memcpy_s(printfAnnotation->StringData, printfAnnotation->StringSize, printfString.second.c_str(), printfAnnotation->StringSize);
             printfAnnotation->StringData[printfAnnotation->StringSize - 1] = '\0';
 
             m_kernelInfo.m_printfStringAnnotations.push_back(printfAnnotation);
         }
+    }
+
+    void COpenCLKernel::CreateZEPayloadArguments(IGC::KernelArg* kernelArg, uint payloadPosition)
+    {
+        switch (kernelArg->getArgType()) {
+
+        // Implicit args
+        case KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER:{
+            // PayloadHeader contains global work offset x,y,z and local size x,y,z
+            // global work offset, size is int32x3
+            uint cur_pos = payloadPosition;
+            uint32_t size = iOpenCL::DATA_PARAMETER_DATA_SIZE * 3;
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::global_id_offset, cur_pos, size);
+            cur_pos += size;
+            // local size, size is int32x3, the same as above
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::local_size, cur_pos, size);
+            break;
+        }
+        case KernelArg::ArgType::IMPLICIT_PRIVATE_BASE:
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::private_base_stateless,
+                payloadPosition, kernelArg->getAllocateSize());
+            break;
+
+        case KernelArg::ArgType::IMPLICIT_NUM_GROUPS:
+            // FIXME: num_groups is group_size?
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::group_size,
+                payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
+            break;
+
+        case KernelArg::ArgType::IMPLICIT_LOCAL_SIZE:
+            // FIXME: duplicated information as KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER?
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::local_size,
+                payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
+            break;
+
+        // pointer args
+        case KernelArg::ArgType::PTR_GLOBAL:
+        case KernelArg::ArgType::PTR_CONSTANT: {
+            uint32_t arg_idx = kernelArg->getAssociatedArgNo();
+
+            // Add BTI argument if being promoted
+            // FIXME: do not set bti if the number is 0xffffffff (?)
+            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(arg_idx);
+            uint32_t bti_idx = getBTI(resInfo);
+            if (bti_idx != 0xffffffff) {
+                // add BTI argument with addr_mode set to stateful
+                // promoted arg has 0 offset and 0 size
+                zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
+                    0, 0, arg_idx,
+                    zebin::PreDefinedAttrGetter::ArgAddrMode::stateful,
+                    (kernelArg->getArgType() == KernelArg::ArgType::PTR_GLOBAL)?
+                    zebin::PreDefinedAttrGetter::ArgAddrSpace::global :
+                    zebin::PreDefinedAttrGetter::ArgAddrSpace::constant,
+                    (kernelArg->getArgType() == KernelArg::ArgType::PTR_GLOBAL)?
+                    zebin::PreDefinedAttrGetter::ArgAccessType::readwrite :
+                    zebin::PreDefinedAttrGetter::ArgAccessType::readonly
+                );
+                // add the corresponding BTI table index
+                zebin::ZEInfoBuilder::addBindingTableIndex(m_kernelInfo.m_zeBTIArgs,
+                    bti_idx, arg_idx);
+            }
+            // FIXME: check if all reference are promoted, if it is, we can skip
+            // creating non-bti payload arg
+            /*
+            bool is_bti_only =
+                IGC_IS_FLAG_ENABLED(EnableStatelessToStatefull) &&
+                IGC_IS_FLAG_ENABLED(EnableStatefulToken) &&
+                m_DriverInfo->SupportStatefulToken() &&
+                kernelArg->getArg() &&
+                ((kernelArg->getArgType() == KernelArg::ArgType::PTR_GLOBAL &&
+                (kernelArg->getArg()->use_empty() || !GetHasGlobalStatelessAccess())) ||
+                    (kernelArg->getArgType() == KernelArg::ArgType::PTR_CONSTANT &&
+                    (kernelArg->getArg()->use_empty() || !GetHasConstantStatelessAccess())));
+            // no need to add normal argument if all use are promoted
+            if (is_bti_only)
+                break;
+             */
+            ResourceAllocMD& resAllocMD = GetContext()->getModuleMetaData()->FuncMD[entry].resAllocMD;
+            IGC_ASSERT_MESSAGE(resAllocMD.argAllocMDList.size() > 0, "ArgAllocMDList is empty.");
+
+            ArgAllocMD& argAlloc = resAllocMD.argAllocMDList[arg_idx];
+
+            zebin::PreDefinedAttrGetter::ArgAddrMode addr_mode =
+                zebin::PreDefinedAttrGetter::ArgAddrMode::stateless;
+            if (argAlloc.type == ResourceTypeEnum::BindlessUAVResourceType)
+                addr_mode = zebin::PreDefinedAttrGetter::ArgAddrMode::bindless;
+
+            zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
+                payloadPosition, kernelArg->getAllocateSize(), arg_idx, addr_mode,
+                (kernelArg->getArgType() == KernelArg::ArgType::PTR_GLOBAL)?
+                  zebin::PreDefinedAttrGetter::ArgAddrSpace::global :
+                  zebin::PreDefinedAttrGetter::ArgAddrSpace::constant,
+                (kernelArg->getArgType() == KernelArg::ArgType::PTR_GLOBAL)?
+                  zebin::PreDefinedAttrGetter::ArgAccessType::readwrite :
+                zebin::PreDefinedAttrGetter::ArgAccessType::readonly
+                );
+            break;
+        }
+        case KernelArg::ArgType::PTR_LOCAL:
+            zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
+                payloadPosition, kernelArg->getAllocateSize(),
+                kernelArg->getAssociatedArgNo(),
+                zebin::PreDefinedAttrGetter::ArgAddrMode::shared_local_memory,
+                zebin::PreDefinedAttrGetter::ArgAddrSpace::local,
+                zebin::PreDefinedAttrGetter::ArgAccessType::readwrite);
+            break;
+        // by value arguments
+        case KernelArg::ArgType::CONSTANT_REG:
+            zebin::ZEInfoBuilder::addPayloadArgumentByValue(m_kernelInfo.m_zePayloadArgs,
+                payloadPosition, kernelArg->getAllocateSize(),
+                kernelArg->getAssociatedArgNo());
+            break;
+        // Local ids are supported in per-thread payload arguments
+        case KernelArg::ArgType::IMPLICIT_LOCAL_IDS:
+            break;
+        // FIXME: Seen this in a simple test case, should be supported?
+        case KernelArg::ArgType::IMPLICIT_R0:
+        case KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE:
+            break;
+        case KernelArg::ArgType::IMPLICIT_CONSTANT_BASE:
+        case KernelArg::ArgType::IMPLICIT_GLOBAL_BASE:
+        case KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE:
+        case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN:
+        case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE:
+        default:
+            IGC_ASSERT_MESSAGE(0, "ZEBin: unsupported KernelArg Type");
+            break;
+        } // end switch (kernelArg->getArgType())
     }
 
     void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition)
@@ -711,7 +832,7 @@ namespace IGC
                 addressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_CONSTANT;
             }
             // may reach here from PTR_GLOBAL, PTR_CONSTANT
-            assert(addressSpace != iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID);
+            IGC_ASSERT(addressSpace != iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID);
 
             {
                 int argNo = kernelArg->getAssociatedArgNo();
@@ -721,7 +842,7 @@ namespace IGC
                 ModuleMetaData* modMD = pCtx->getModuleMetaData();
                 FunctionMetaData* funcMD = &modMD->FuncMD[entry];
                 ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
-                assert(resAllocMD->argAllocMDList.size() > 0 && "ArgAllocMDList is empty.");
+                IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() > 0, "ArgAllocMDList is empty.");
                 ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[argNo];
 
                 iOpenCL::PointerArgumentAnnotation* ptrAnnotation = new iOpenCL::PointerArgumentAnnotation();
@@ -875,7 +996,7 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE:
 
             constantType = kernelArg->getDataParamToken();
-            assert(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
+            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
 
             for (int i = 0; i < 3; ++i)
             {
@@ -921,7 +1042,7 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DISPATCHER_SIMD_SIZE:
         case KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET:
             constantType = kernelArg->getDataParamToken();
-            assert(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
+            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
             {
                 iOpenCL::ConstantInputAnnotation* constInput = new iOpenCL::ConstantInputAnnotation();
 
@@ -1041,7 +1162,7 @@ namespace IGC
                 imageType = iOpenCL::IMAGE_MEMORY_OBJECT_CUBE_ARRAY;
             }
             // may reach here from IMAGE_1D, IMAGE_2D, IMAGE_3D, MSAA, DEPTH, and IMAGE ARRAYS
-            assert(imageType != iOpenCL::IMAGE_MEMORY_OBJECT_INVALID);
+            IGC_ASSERT(imageType != iOpenCL::IMAGE_MEMORY_OBJECT_INVALID);
             {
                 int argNo = kernelArg->getAssociatedArgNo();
                 SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
@@ -1075,7 +1196,8 @@ namespace IGC
                     imageInput->Writeable = false;
                     break;
                 default:
-                    assert(0 && "Unknown resource type");
+                    IGC_ASSERT_MESSAGE(0, "Unknown resource type");
+                    break;
                 }
                 m_kernelInfo.m_imageInputAnnotations.push_back(imageInput);
 
@@ -1285,8 +1407,6 @@ namespace IGC
             break;
         }
 
-        // todo: get it from per-kernel data.
-        m_kernelInfo.m_executionEnivronment.NumGRFRequired = m_Context->getNumGRFPerThread();
 
         // DATA_PARAMETER_BUFFER_STATEFUL
         //   ( SPatchDataParameterBuffer for this token only uses one field: ArgumentNumber )
@@ -1409,7 +1529,7 @@ namespace IGC
 
     void COpenCLKernel::AllocatePayload()
     {
-        assert(m_Context);
+        IGC_ASSERT(m_Context);
 
         bool loadThreadPayload = false;
 
@@ -1495,7 +1615,7 @@ namespace IGC
             }
 
             if (!nosBufferAllocated && isRuntimeValue) {
-                assert(arg.isConstantBuf() && "RuntimeValues must be marked as isConstantBuf");
+                IGC_ASSERT_MESSAGE(arg.isConstantBuf(), "RuntimeValues must be marked as isConstantBuf");
                 AllocateNOSConstants(offset);
                 nosBufferAllocated = true;
             }
@@ -1545,7 +1665,11 @@ namespace IGC
                 // Create annotations for the kernel argument
                 // If an arg is unused, don't generate patch token for it.
                 CreateAnnotations(&arg, offset - constantBufferStart);
-
+                if (IGC_IS_FLAG_ENABLED(EnableZEBinary)) {
+                    // FIXME: once we transit to zebin completely, we don't need to do
+                    // CreateAnnotations. Only CreateZEPayloadArguments is required
+                    CreateZEPayloadArguments(&arg, offset - constantBufferStart);
+                }
                 if (arg.needsAllocation())
                 {
                     for (int i = 0; i < numAllocInstances; ++i)
@@ -1573,7 +1697,7 @@ namespace IGC
                 {
                     perThreadInputSize *= 2;
                 }
-                encoder.GetVISAKernel()->AddKernelAttribute("perThreadInputSize", sizeof(uint16_t), &perThreadInputSize);
+                encoder.GetVISAKernel()->AddKernelAttribute("PerThreadInputSize", sizeof(uint16_t), &perThreadInputSize);
             }
         }
 
@@ -1603,7 +1727,7 @@ namespace IGC
         }
         else
         {
-            assert(0 && "Trying to access a GlobalVariable not in locals map");
+            IGC_ASSERT_MESSAGE(0, "Trying to access a GlobalVariable not in locals map");
         }
         return val;
     }
@@ -1633,6 +1757,7 @@ namespace IGC
     {
         m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace = ProgramOutput()->getScratchSpaceUsageInSlot0();
         m_kernelInfo.m_executionEnivronment.PerThreadScratchSpaceSlot1 = ProgramOutput()->getScratchSpaceUsageInSlot1();
+        m_kernelInfo.m_executionEnivronment.PerThreadPrivateOnStatelessSize = m_perWIStatelessPrivateMemSize;
         m_kernelInfo.m_kernelProgram.NOSBufferSize = m_NOSBufferSize / getGRFSize(); // in 256 bits
         m_kernelInfo.m_kernelProgram.ConstantBufferLength = m_ConstantBufferLength / getGRFSize(); // in 256 bits
         m_kernelInfo.m_kernelProgram.MaxNumberOfThreads = m_Platform->getMaxGPGPUShaderThreads();
@@ -1644,7 +1769,7 @@ namespace IGC
             m_Context->getModuleMetaData()->compOpt.SubgroupIndependentForwardProgressRequired;
         m_kernelInfo.m_executionEnivronment.CompiledForGreaterThan4GBBuffers =
             m_Context->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired;
-        assert(gatherMap.size() == 0);
+        IGC_ASSERT(gatherMap.size() == 0);
         m_kernelInfo.m_kernelProgram.gatherMapSize = 0;
         m_kernelInfo.m_kernelProgram.bindingTableEntryCount = 0;
 
@@ -1704,6 +1829,10 @@ namespace IGC
         m_kernelInfo.m_threadPayload.OffsetToSkipPerThreadDataLoad = ProgramOutput()->m_offsetToSkipPerThreadDataLoad;
         m_kernelInfo.m_threadPayload.OffsetToSkipSetFFIDGP = ProgramOutput()->m_offsetToSkipSetFFIDGP;
 
+        m_kernelInfo.m_executionEnivronment.NumGRFRequired = ProgramOutput()->m_numGRFTotal;
+
+
+        m_kernelInfo.m_executionEnivronment.UseBindlessMode = m_Context->m_InternalOptions.UseBindlessMode;
     }
 
     void COpenCLKernel::RecomputeBTLayout()
@@ -1815,6 +1944,7 @@ namespace IGC
             auto ipsbMDHandle = modMD->inlineConstantBuffers[0];
             std::unique_ptr<iOpenCL::InitConstantAnnotation> initConstant(new iOpenCL::InitConstantAnnotation());
             initConstant->Alignment = ipsbMDHandle.alignment;
+            initConstant->AllocSize = ipsbMDHandle.allocSize;
 
             size_t bufferSize = (ipsbMDHandle.Buffer).size();
             initConstant->InlineData.resize(bufferSize);
@@ -1829,6 +1959,7 @@ namespace IGC
 
             std::unique_ptr<iOpenCL::InitGlobalAnnotation> initGlobal(new iOpenCL::InitGlobalAnnotation());
             initGlobal->Alignment = ipsbMDHandle.alignment;
+            initGlobal->AllocSize = ipsbMDHandle.allocSize;
 
             size_t bufferSize = (ipsbMDHandle.Buffer).size();
             initGlobal->InlineData.resize(bufferSize);
@@ -1886,7 +2017,7 @@ namespace IGC
 
     void GatherDataForDriver(OpenCLProgramContext* ctx, COpenCLKernel* pShader, CShaderProgram* pKernel, Function* pFunc, MetaDataUtils* pMdUtils)
     {
-        assert(pShader != nullptr);
+        IGC_ASSERT(pShader != nullptr);
         pShader->FillKernel();
         SProgramOutput* pOutput = pShader->ProgramOutput();
 
@@ -1896,17 +2027,16 @@ namespace IGC
         bool noRetry = ((subGrpSize > 0 || pOutput->m_scratchSpaceUsedBySpills < 1000) &&
             ctx->m_instrTypes.mayHaveIndirectOperands);
 
-        bool fullDebugInfo = false;
-        if (ctx->m_instrTypes.hasDebugInfo)
+        bool optDisable = false;
+        if (ctx->getModuleMetaData()->compOpt.OptDisable)
         {
-            IF_DEBUG_INFO(bool hasLineNumber = false;)
-                IF_DEBUG_INFO(IGC::DebugMetadataInfo::hasAnyDebugInfo(ctx, fullDebugInfo, hasLineNumber);)
+            optDisable = true;
         }
 
         if (pOutput->m_scratchSpaceUsedBySpills == 0 ||
             noRetry ||
             ctx->m_retryManager.IsLastTry() ||
-            fullDebugInfo)
+            optDisable)
         {
             // Save the shader program to the state processor to be handled later
             if (ctx->m_programOutput.m_ShaderProgramList.size() == 0 ||
@@ -1924,7 +2054,7 @@ namespace IGC
         }
     }
 
-    static bool SetKernelProgram(COpenCLKernel* shader, DWORD simdMode)
+    static bool SetKernelProgram(OpenCLProgramContext* ctx, COpenCLKernel* shader, DWORD simdMode)
     {
         if (shader && shader->ProgramOutput()->m_programSize > 0)
         {
@@ -1935,16 +2065,20 @@ namespace IGC
                 //shader->m_kernelInfo.m_executionEnivronment.PerThreadSpillFillSize =
                 //    shader->ProgramOutput()->m_scratchSpaceUsedBySpills;
                 shader->m_kernelInfo.m_kernelProgram.simd32 = *shader->ProgramOutput();
+                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
             }
             else if (simdMode == 16)
             {
                 shader->m_kernelInfo.m_kernelProgram.simd16 = *shader->ProgramOutput();
+                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
             }
             else if (simdMode == 8)
             {
                 shader->m_kernelInfo.m_kernelProgram.simd8 = *shader->ProgramOutput();
+                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
             }
             shader->m_kernelInfo.m_executionEnivronment.CompiledSIMDSize = simdMode;
+            shader->m_kernelInfo.m_executionEnivronment.SIMDInfo = ctx->GetSIMDInfo();
             return true;
         }
         return false;
@@ -2015,21 +2149,21 @@ namespace IGC
             if (ctx->m_DriverInfo.sendMultipleSIMDModes() && (ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 0))
             {
                 //Gather the kernel binary for each compiled kernel
-                if (SetKernelProgram(simd32Shader, 32))
+                if (SetKernelProgram(ctx, simd32Shader, 32))
                     GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils);
-                if (SetKernelProgram(simd16Shader, 16))
+                if (SetKernelProgram(ctx, simd16Shader, 16))
                     GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils);
-                if (SetKernelProgram(simd8Shader, 8))
+                if (SetKernelProgram(ctx, simd8Shader, 8))
                     GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils);
             }
             else
             {
                 //Gather the kernel binary only for 1 SIMD mode of the kernel
-                if (SetKernelProgram(simd32Shader, 32))
+                if (SetKernelProgram(ctx, simd32Shader, 32))
                     GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils);
-                else if (SetKernelProgram(simd16Shader, 16))
+                else if (SetKernelProgram(ctx, simd16Shader, 16))
                     GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils);
-                else if (SetKernelProgram(simd8Shader, 8))
+                else if (SetKernelProgram(ctx, simd8Shader, 8))
                     GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils);
             }
         }
@@ -2065,6 +2199,12 @@ namespace IGC
         if (!CompileSIMDSizeInCommon())
             return false;
 
+        if (!m_Context->m_retryManager.IsFirstTry())
+        {
+            m_Context->ClearSIMDInfo(simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+            m_Context->SetSIMDInfo(SIMD_RETRY, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+        }
+
 
 
         //If forced SIMD Mode (by driver or regkey), then:
@@ -2093,7 +2233,7 @@ namespace IGC
         if (simdStatus == SIMDStatus::SIMD_FUNC_FAIL)
             return false;
 
-        assert(simdStatus == SIMDStatus::SIMD_PERF_FAIL);
+        IGC_ASSERT(simdStatus == SIMDStatus::SIMD_PERF_FAIL);
         //not profitable
         if (m_Context->m_DriverInfo.sendMultipleSIMDModes())
         {
@@ -2138,6 +2278,26 @@ namespace IGC
             simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
         }
 
+        // Cannot compile simd32 for function calls due to slicing
+        if (m_FGA && (!m_FGA->getGroup(&F)->isSingle() || m_FGA->getGroup(&F)->hasStackCall()))
+        {
+            if (pCtx->m_enableFunctionPointer || simd_size)
+            {
+                if (simdMode == SIMDMode::SIMD32)
+                {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                    return SIMDStatus::SIMD_FUNC_FAIL;
+                }
+            }
+            else if (simdMode != SIMDMode::SIMD8)
+            {
+                pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+
+                // default simd8
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+        }
+
         uint32_t groupSize = 0;
         if (modMD->csInfo.maxWorkGroupSize)
         {
@@ -2160,12 +2320,14 @@ namespace IGC
             case 8:
                 if (simdMode == SIMDMode::SIMD16 || simdMode == SIMDMode::SIMD32)
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_FUNC_FAIL;
                 }
                 break;
             case 16:
                 if (simdMode == SIMDMode::SIMD8 || simdMode == SIMDMode::SIMD32)
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_FUNC_FAIL;
                 }
                 EP.m_canAbortOnSpill = false;
@@ -2173,12 +2335,14 @@ namespace IGC
             case 32:
                 if (simdMode == SIMDMode::SIMD8 || simdMode == SIMDMode::SIMD16)
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_FUNC_FAIL;
                 }
                 EP.m_canAbortOnSpill = false;
                 break;
             default:
-                assert(0 && "Unsupported required sub group size");
+                IGC_ASSERT_MESSAGE(0, "Unsupported required sub group size");
+                break;
             }
         }
         else
@@ -2207,6 +2371,7 @@ namespace IGC
                 if (simdMode == SIMDMode::SIMD32 ||
                     (groupSize <= 8 && simdMode != SIMDMode::SIMD8))
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_FUNC_FAIL;
                 }
             }
@@ -2214,42 +2379,35 @@ namespace IGC
             // Here we check profitablility, etc.
             if (simdMode == SIMDMode::SIMD16)
             {
-                if (pCtx->m_instrTypes.hasDebugInfo)
-                {
-                    bool hasFullDebugInfo = false;
-                    IF_DEBUG_INFO(bool hasLineNumbersOnly = false;)
-                        IF_DEBUG_INFO(DebugMetadataInfo::hasAnyDebugInfo(pCtx, hasFullDebugInfo, hasLineNumbersOnly);)
+                bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
 
-                        if (hasFullDebugInfo)
-                        {
-                            return SIMDStatus::SIMD_FUNC_FAIL;
-                        }
+                if (optDisable)
+                {
+                    return SIMDStatus::SIMD_FUNC_FAIL;
                 }
 
                 // bail out of SIMD16 if it's not profitable.
                 Simd32ProfitabilityAnalysis& PA = EP.getAnalysis<Simd32ProfitabilityAnalysis>();
                 if (!PA.isSimd16Profitable())
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_PERF_FAIL;
                 }
             }
             if (simdMode == SIMDMode::SIMD32)
             {
-                if (pCtx->m_instrTypes.hasDebugInfo)
-                {
-                    bool hasFullDebugInfo = false;
-                    IF_DEBUG_INFO(bool hasLineNumbersOnly = false;)
-                        IF_DEBUG_INFO(DebugMetadataInfo::hasAnyDebugInfo(pCtx, hasFullDebugInfo, hasLineNumbersOnly);)
+                bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
 
-                        if (hasFullDebugInfo)
-                        {
-                            return SIMDStatus::SIMD_FUNC_FAIL;
-                        }
+                if (optDisable)
+                {
+                    return SIMDStatus::SIMD_FUNC_FAIL;
                 }
+
                 // bail out of SIMD32 if it's not profitable.
                 Simd32ProfitabilityAnalysis& PA = EP.getAnalysis<Simd32ProfitabilityAnalysis>();
                 if (!PA.isSimd32Profitable())
                 {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return SIMDStatus::SIMD_PERF_FAIL;
                 }
             }

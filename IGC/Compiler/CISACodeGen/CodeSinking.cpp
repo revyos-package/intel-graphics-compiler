@@ -57,7 +57,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/debug/Dump.hpp"
 #include "common/Stats.hpp"
 #include "common/LLVMUtils.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -65,12 +64,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/CFG.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/CISACodeGen/CodeSinking.hpp"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/IGCPassSupport.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC::Debug;
@@ -369,6 +368,7 @@ namespace IGC {
         BasicBlock::iterator I = blk.end();
         --I;
         bool processedBegin = false;
+        bool metDbgValueIntrinsic = false;
         SmallPtrSet<Instruction*, 16> stores;
         undoLocas.clear();
         movedInsts.clear();
@@ -390,6 +390,10 @@ namespace IGC {
             else if (isa<DbgInfoIntrinsic>(inst) || inst->isTerminator() ||
                 isa<PHINode>(inst) || inst->use_empty())
             {
+                if (isa<DbgValueInst>(inst))
+                {
+                    metDbgValueIntrinsic = true;
+                }
                 prevLoca = inst;
             }
             else {
@@ -421,7 +425,7 @@ namespace IGC {
                     for (int i = 0; i < numChanges; ++i)
                     {
                         Instruction* undoLoca = undoLocas[i];
-                        assert(undoLoca);
+                        IGC_ASSERT(undoLoca);
                         movedInsts[i]->moveBefore(undoLoca);
                     }
                     madeChange = false;
@@ -431,6 +435,9 @@ namespace IGC {
                     totalGradientMoved += numGradientMovedOutBB;
                 }
             }
+        }
+        if (madeChange || metDbgValueIntrinsic) {
+            ProcessDbgValueInst(blk);
         }
 
         return madeChange;
@@ -721,11 +728,14 @@ namespace IGC {
                 }
             }
         }
+        if (madeChange) {
+            ProcessDbgValueInst(*blk);
+        }
         return madeChange;
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    bool CodeSinking::checkCongruent(const InstPair& values, InstVec& leaves, unsigned depth)
+    bool CodeSinking::checkCongruent(std::vector<InstPair> &instMap, const InstPair& values, InstVec& leaves, unsigned depth)
     {
         Instruction* src0 = values.first;
         Instruction* src1 = values.second;
@@ -744,7 +754,7 @@ namespace IGC {
         if (CallInst * call0 = dyn_cast<CallInst>(src0))
         {
             CallInst* call1 = dyn_cast<CallInst>(src1);
-            assert(call1 != nullptr);
+            IGC_ASSERT(call1 != nullptr);
 
             if (!call0->getCalledFunction() ||
                 call0->getCalledFunction() != call1->getCalledFunction() ||
@@ -758,7 +768,7 @@ namespace IGC {
             if (LoadInst * ld0 = dyn_cast<LoadInst>(src0))
             {
                 LoadInst* ld1 = dyn_cast<LoadInst>(src1);
-                assert(ld1 != nullptr);
+                IGC_ASSERT(ld1 != nullptr);
                 if (ld0->getPointerAddressSpace() != ld1->getPointerAddressSpace())
                 {
                     return false;
@@ -824,7 +834,7 @@ namespace IGC {
             if (iv0 && iv0->getParent() == src0->getParent() &&
                 iv1 && iv1->getParent() == src1->getParent())
             {
-                if (!checkCongruent(std::make_pair(iv0, iv1), tmpVec, depth + 1))
+                if (!checkCongruent(instMap, std::make_pair(iv0, iv1), tmpVec, depth + 1))
                 {
                     equals = false;
                     break;
@@ -838,7 +848,7 @@ namespace IGC {
         }
         if (equals)
         {
-            appendIfNotExist(std::make_pair(src0, src1));
+            appendIfNotExist(std::make_pair(src0, src1), instMap);
             appendIfNotExist(leaves, tmpVec);
             return equals;
         }
@@ -884,7 +894,7 @@ namespace IGC {
             if (iv0 && iv0->getParent() == src0->getParent() &&
                 iv1 && iv1->getParent() == src1->getParent())
             {
-                if (!checkCongruent(std::make_pair(iv0, iv1), leaves, depth + 1))
+                if (!checkCongruent(instMap, std::make_pair(iv0, iv1), leaves, depth + 1))
                 {
                     equals = false;
                     break;
@@ -898,7 +908,7 @@ namespace IGC {
         }
         if (equals)
         {
-            appendIfNotExist(std::make_pair(src0, src1));
+            appendIfNotExist(std::make_pair(src0, src1), instMap);
             appendIfNotExist(leaves, tmpVec);
         }
         return equals;
@@ -917,7 +927,11 @@ namespace IGC {
         src1 = dyn_cast<Instruction>(phi->getIncomingValue(1));
         if (src0 && src1 && src0 != src1)
         {
-            if (checkCongruent(std::make_pair(src0, src1), leaves, 0))
+            // this vector maps all instructions leading to source0 of phi instruction to
+            // the corresponding instructions of source1
+            std::vector<InstPair> instMap;
+
+            if (checkCongruent(instMap, std::make_pair(src0, src1), leaves, 0))
             {
                 BasicBlock* predBB = nullptr;
                 Instruction* insertPos = nullptr;
@@ -1003,7 +1017,6 @@ namespace IGC {
                 }
             }
         }
-        instMap.clear();
         return changed;
     }
 
@@ -1104,6 +1117,10 @@ namespace IGC {
 
             bool t = LoopSinkInstructions(sinkCandidates, L);
             changed |= t;
+
+            if (changed) {
+                ProcessDbgValueInst(*Preheader);
+            }
         }
 
         // Invoke LocalSink() to move def to its first use
@@ -1296,6 +1313,41 @@ namespace IGC {
         delete[] allGroups;
 
         return changed;
+    }
+
+    // Move referenced DbgValueInst intrinsics calls after defining instructions
+    // it is requared for correct work of LiveVariables analysis and other
+    void CodeSinking::ProcessDbgValueInst(BasicBlock& blk)
+    {
+        if (!CTX->m_instrTypes.hasDebugInfo)
+        {
+            return;
+        }
+
+        BasicBlock::iterator I = blk.end();
+        --I;
+        bool processedBegin = false;
+        do {
+            Instruction* inst = cast<Instruction>(I);
+            processedBegin = (I == blk.begin());
+            if (!processedBegin)
+                --I;
+
+            if (auto* DVI = dyn_cast<DbgValueInst>(inst))
+            {
+                if (auto* def = dyn_cast<Instruction>(DVI->getValue()))
+                {
+                    if (!DT->dominates(def, inst))
+                    {
+                        auto* instClone = inst->clone();
+                        instClone->insertAfter(def);
+                        Value* undef = UndefValue::get(def->getType());
+                        MetadataAsValue* MAV = MetadataAsValue::get(inst->getContext(), ValueAsMetadata::get(undef));
+                        cast<CallInst>(inst)->setArgOperand(0, MAV);
+                    }
+                }
+            }
+        } while (!processedBegin);
     }
 
     char CodeSinking::ID = 0;

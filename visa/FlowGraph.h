@@ -47,14 +47,16 @@ namespace vISA
 {
 class IR_Builder;
 class PhyRegSummary;
-class KernelDebugInfo;
 
 //
 // Forward definitions
 //
 
 class G4_BB;
+class G4_Kernel;
 class FlowGraph;
+class KernelDebugInfo;
+class VarSplitPass;
 
 //
 // FuncInfo - Function CFG information
@@ -246,10 +248,6 @@ class G4_BB
     //
     unsigned traversal;
     //
-    // its immediate dominator
-    //
-    G4_BB* idom;
-    //
     // if the current BB is the return block after a CALL subroutine, then beforeCall points
     // to the BB before the subroutine call.
     //
@@ -286,13 +284,9 @@ class G4_BB
     // indicates the scoping info in call graph
     unsigned scopeID;
 
-    // if the block is under simd flow control
-    bool inSimdFlow;
-
     // If a BB is divergent, this field is set to true. By divergent, it means
     // that among all active lanes on entry to shader/kernel, not all lanes may
     // be active in this BB.
-    // Note : this field will be used to replace inSimdFlow.
     bool divergent;
 
     // the physical pred/succ for this block (i.e., the pred/succ for this block in the BB list)
@@ -305,23 +299,45 @@ class G4_BB
 
     INST_LIST instList;
 
+    INST_LIST_ITER insert(INST_LIST::iterator iter, G4_INST* inst)
+    {
+        return instList.insert(iter, inst);
+    }
 public:
-
     // forwarding functions to this BB's instList
     INST_LIST_ITER begin() { return instList.begin(); }
     INST_LIST_ITER end() { return instList.end(); }
     INST_LIST::reverse_iterator rbegin() { return instList.rbegin(); }
     INST_LIST::reverse_iterator rend() { return instList.rend(); }
     INST_LIST& getInstList() { return instList; }
-    INST_LIST_ITER insert(INST_LIST::iterator iter, G4_INST* inst)
-    {
-        return instList.insert(iter, inst);
-    }
+
     template <class InputIt>
     INST_LIST_ITER insert(INST_LIST::iterator iter, InputIt first, InputIt last)
     {
         return instList.insert(iter, first, last);
     }
+
+    INST_LIST_ITER insertBefore(INST_LIST::iterator iter, G4_INST* inst)
+    {
+        if (iter != instList.end() && !inst->isCISAOffValid())
+            inst->inheritDIFrom(*iter);
+        return instList.insert(iter, inst);
+    }
+
+    INST_LIST_ITER insertAfter(INST_LIST::iterator iter, G4_INST* inst)
+    {
+        auto next = iter;
+        ++next;
+        if (!inst->isCISAOffValid())
+        {
+            // Inheriting from iter seems more reasonable
+            // since invoking invokeAfter on iter means
+            // we're processing iter and not ++iter
+            inst->inheritDIFrom(*iter);
+        }
+        return instList.insert(next, inst);
+    }
+
     INST_LIST_ITER erase(INST_LIST::iterator iter)
     {
         return instList.erase(iter);
@@ -334,8 +350,14 @@ public:
     void clear() { instList.clear(); }
     void pop_back() { instList.pop_back(); }
     void pop_front() { instList.pop_front(); }
-    void push_back(G4_INST* inst) { instList.push_back(inst); }
-    void push_front(G4_INST* inst) { instList.push_front(inst); }
+    void push_back(G4_INST* inst)
+    {
+        insertBefore(instList.end(), inst);
+    }
+    void push_front(G4_INST* inst)
+    {
+        insertBefore(instList.begin(), inst);
+    }
     size_t size() const { return instList.size(); }
     bool empty() const { return instList.empty(); }
     G4_INST* front() { return instList.front(); }
@@ -377,10 +399,10 @@ public:
 
     G4_BB(INST_LIST_NODE_ALLOCATOR& alloc, unsigned i, FlowGraph* fg) :
         id(i), preId(0), rpostId(0),
-        traversal(0), idom(NULL), beforeCall(NULL),
+        traversal(0), beforeCall(NULL),
         afterCall(NULL), calleeInfo(NULL), BBType(G4_BB_NONE_TYPE),
         inNaturalLoop(false), hasSendInBB(false), loopNestLevel(0), scopeID(0),
-        inSimdFlow(false), divergent(false), physicalPred(NULL), physicalSucc(NULL),
+        divergent(false), physicalPred(NULL), physicalSucc(NULL),
         parent(fg), instList(alloc)
     {
     }
@@ -407,8 +429,6 @@ public:
     void     removePredEdge(G4_BB* pred);
     void     writeBBId(std::ostream& cout)    {cout << "BB" << id;}
     G4_BB*   fallThroughBB();
-    G4_BB*   getIDom()                        {return idom;}
-    void     setIDom(G4_BB* dom)              {idom = dom;}
     G4_BB*   BBBeforeCall()                   {return beforeCall;}
     G4_BB*   BBAfterCall()                    {return afterCall;}
     void     setBBBeforeCall(G4_BB* before)   {beforeCall = before;}
@@ -428,10 +448,9 @@ public:
     void     setNestLevel()                   {loopNestLevel ++;}
     unsigned char getNestLevel()              {return loopNestLevel;}
     void     resetNestLevel()                 { loopNestLevel = 0; }
-    void     setInSimdFlow(bool val)          {inSimdFlow = val;}
-    bool     isInSimdFlow() const             {return inSimdFlow;}
     void     setDivergent(bool val) { divergent = val; }
     bool     isDivergent() const    { return divergent; }
+    bool     isAllLaneActive() const;
     unsigned getScopeID() { return scopeID; }
     void setScopeID(unsigned id) { scopeID = id; }
 
@@ -654,7 +673,6 @@ typedef std::pair<BB_LIST_ITER, BB_LIST_ITER> GRAPH_CUT_BOUNDS;
 namespace vISA
 {
 
-class G4_Kernel; // forward declaration
 class FlowGraph
 {
     // Data
@@ -701,42 +719,6 @@ private:
     // ToDo: We should use FuncInfo instead, but at the time it was needed FuncInfo was not constructed yet..
     std::unordered_map<G4_Label*, std::vector<G4_BB*>> subroutines;
 
-    // [HW WA]
-    // Fused Mask cannot change from 01 to 00, therefore, EU will go through
-    // insts that it should skip, causing incorrect result if NoMask instructions
-    // that has side-effect (send, or modifying globals, etc) are executed.
-    // A WA is to change those NoMask instructions with anyh predicate using ce
-    // (ce would be correct (all 0) even though fused mask is wrong) and dmask.
-    //
-    // For a fused mask to be 01,  the control-flow must be divergent
-    // at that point. Furthermore, changing 01 to 00 happens only if a further
-    // divergence happens within a already-divergent path. This further
-    // divergence is called nested divergence here.
-    //
-    // How to identify nested divergent BBs:
-    //    If the block does not post-dominate the entry, it is considered
-    //    as divergent BB. Within a divergent BB, a further divergence is
-    //    considered as nested divergent.
-    //
-    //    [Formal def] define root_1_divergentBB (level 1 divergent root)
-    //    to be BBs that
-    //        1.  not pdom(BB, entry); and
-    //        2.  There exists P, so that idom(P, BB) && pdom(P, entry)
-    //    A BB is in a nested divergent branch if  there is a root_1_divergentBB,
-    //    say B1,  such that dom(B1, BB) && not pdom(BB, B1).
-    //
-    // This is set in processGoto() without using dom/pdom.
-    //
-    // As changing from 01 to 00 never happens with backward goto, backward
-    // goto is treated as divergent, but not nested divergent for the purpose
-    // of this WA.
-    //
-    // This is set in processGoto().
-    std::unordered_map<G4_BB*, int> nestedDivergentBBs;
-
-    // If sr0 is modified within a shader, set it to true.
-    bool isSR0Modified;
-
 public:
     typedef std::pair<G4_BB*, G4_BB*> Edge;
     typedef std::set<G4_BB*> Blocks;
@@ -776,8 +758,7 @@ public:
     // offset in unit of OW
     unsigned                    callerSaveAreaOffset = 0;
     unsigned                    calleeSaveAreaOffset = 0;
-    unsigned                    paramOverflowAreaOffset = 0;
-    unsigned                    paramOverflowAreaSize = 0;
+    unsigned                    frameSizeInOWord = 0;
 
     // Bank conflict statistics.
     struct BankConflictStatistics
@@ -954,17 +935,6 @@ public:
         return false;
     }
 
-    void setInNestedDivergentBranch(G4_BB* B)
-    {
-        nestedDivergentBBs[B] = 1;
-    }
-    bool isInNestedDivergentBranch(G4_BB* B) const
-    {
-        return nestedDivergentBBs.count(B) > 0;
-    }
-    void setSR0Modified(bool v) { isSR0Modified = v; }
-    bool getSR0Modified() const { return isSR0Modified; }
-
     //
     // Merge multiple returns into one, prepare for spill code insertion
     //
@@ -975,6 +945,7 @@ public:
     void decoupleExitBlock(G4_BB*);
     void normalizeSubRoutineBB( FuncInfoHashTable& funcInfoTable );
     void processGoto(bool HasSIMDCF);
+    void processSCF(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable& FuncInfoMap);
     void insertJoinToBB( G4_BB* bb, uint8_t execSize, G4_Label* jip );
 
     // functions for structure analysis
@@ -1017,7 +988,7 @@ public:
     FlowGraph& operator=(const FlowGraph&) = delete;
 
     FlowGraph(INST_LIST_NODE_ALLOCATOR& alloc, G4_Kernel* kernel, Mem_Manager& m) :
-      isSR0Modified(false), traversalNum(0), numBBId(0), reducible(true),
+      traversalNum(0), numBBId(0), reducible(true),
       doIPA(false), hasStackCalls(false), isStackCallFunc(false), autoLabelId(0),
       pKernel(kernel), mem(m), instListAlloc(alloc),
       kernelInfo(NULL), builder(NULL), globalOpndHT(m), framePtrDcl(NULL),
@@ -1123,7 +1094,6 @@ public:
 
     void addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool);
     void addSaveRestorePseudoDeclares(IR_Builder& builder);
-    void markSimdBlocks(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable &FuncInfoMap);
     void markDivergentBBs();
 
     // Used for CISA 3.0
@@ -1236,10 +1206,22 @@ public:
         return lastBB->isEndWithGoto();
     }
 
+    /// Return true if PredBB->SuccBB is a backward branch goto/jmpi/while.
+    bool isBackwardBranch(G4_BB* PredBB, G4_BB* SuccBB) const
+    {
+        if (PredBB->size() == 0) return false;
+        G4_INST* bInst = PredBB->back();
+        G4_BB* targetBB = PredBB->Succs.size() > 0 ? PredBB->Succs.back() : nullptr;
+        bool isBr = (bInst->opcode() == G4_goto || bInst->opcode() == G4_jmpi);
+        // Note that isBackward() should return true for while as well.
+        return targetBB == SuccBB &&
+            ((isBr && bInst->asCFInst()->isBackward()) || bInst->opcode() == G4_while);
+    }
+
     void setABIForStackCallFunctionCalls();
 
     // This is for TGL WA
-    void findNestedDivergentBBs();
+    void findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDivergentBBs);
 
     void print(std::ostream& OS) const;
     void dump() const;
@@ -1324,16 +1306,6 @@ public:
     unsigned int getFreeGlobalReg(unsigned int n) { return globalFreeRegs[n]; }
     void addFreeGlobalReg(unsigned int n) { globalFreeRegs.push_back(n); }
 
-    void dumpGlobalFreeGRFs()
-    {
-        printf("Global free regs:");
-        for (unsigned int i = 0; i < globalFreeRegs.size(); i++)
-        {
-            printf("r%d.%d:b, ", globalFreeRegs[i]/G4_GRF_REG_NBYTES, globalFreeRegs[i]%G4_GRF_REG_NBYTES);
-        }
-        printf("\n");
-    }
-
     // This function internally mallocs memory to hold buffer
     // of free GRFs. It is meant to be freed by caller after
     // last use of the buffer.
@@ -1350,18 +1322,16 @@ public:
     {
         nextScratchFree = ((next + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES) * G4_GRF_REG_NBYTES;
     }
-    uint8_t getNumBytesScratchUse()
-    {
-        if (gtpin_init)
-            return gtpin_init->scratch_area_size;
-        return 0;
-    }
+    uint8_t getNumBytesScratchUse();
 
     void setPerThreadPayloadBB(G4_BB* bb) { perThreadPayloadBB = bb; }
     void setCrossThreadPayloadBB(G4_BB* bb) { crossThreadPayloadBB = bb; }
 
     unsigned int getCrossThreadNextOff();
     unsigned int getPerThreadNextOff();
+
+    void setGTPinInitFromL0(bool val) { gtpinInitFromL0 = val; }
+    bool isGTPinInitFromL0() { return gtpinInitFromL0; }
 
 private:
     G4_Kernel& kernel;
@@ -1374,6 +1344,7 @@ private:
     // Member stores next free scratch slot
     unsigned int nextScratchFree = 0;
 
+    bool gtpinInitFromL0 = false;
     gtpin::igc::igc_init_t* gtpin_init = nullptr;
 
     G4_BB* perThreadPayloadBB = nullptr;
@@ -1392,11 +1363,8 @@ class RelocationEntry
         inst(i), opndPos(pos), relocType(type), symName(symbolName){}
 
 public:
-    static RelocationEntry createSymbolAddrReloc(G4_INST* inst, int opndPos, const std::string& symbolName, RelocationType type)
-    {
-        RelocationEntry entry(inst, opndPos, type, symbolName);
-        return entry;
-    }
+    static RelocationEntry& createRelocation(G4_Kernel& kernel, G4_INST& inst,
+        int opndPos, const std::string& symbolName, RelocationType type);
 
     G4_INST* getInst() const
     {
@@ -1418,6 +1386,8 @@ public:
                 return "R_SYM_ADDR_32";
             case RelocationType::R_SYM_ADDR_32_HI:
                 return "R_SYM_ADDR_32_HI";
+            case RelocationType::R_PER_THREAD_PAYLOAD_OFFSET_32:
+                return "R_PER_THREAD_PAYLOAD_OFFSET_32";
             default:
                 assert(false && "unhandled relocation type");
                 return "";
@@ -1431,12 +1401,6 @@ public:
 
     const std::string& getSymbolName() const
     {
-        bool isValidRelocType =
-            relocType == RelocationType::R_SYM_ADDR ||
-            relocType == RelocationType::R_SYM_ADDR_32 ||
-            relocType == RelocationType::R_SYM_ADDR_32_HI;
-
-        assert(isValidRelocType && "invalid relocation type");
         return symName;
     }
 
@@ -1460,6 +1424,7 @@ class G4_Kernel
     bool hasAddrTaken;
     bool sharedRegisters;
     Options *m_options;
+    const Attributes* m_kernelAttrs;
 
     RA_Type RAType;
     KernelDebugInfo* kernelDbgInfo;
@@ -1470,22 +1435,6 @@ class G4_Kernel
 
     uint32_t asmInstCount;
     uint64_t kernelID;
-    uint32_t tokenInstructionCount;
-    uint32_t tokenReuseCount;
-    uint32_t AWTokenReuseCount;
-    uint32_t ARTokenReuseCount;
-    uint32_t AATokenReuseCount;
-    uint32_t mathInstCount;
-    uint32_t syncInstCount;
-    uint32_t mathReuseCount;
-    uint32_t ARSyncInstCount;
-    uint32_t AWSyncInstCount;
-    uint32_t ARSyncAllCount;
-    uint32_t AWSyncAllCount;
-    uint32_t prunedDepEdges;
-    uint32_t prunedGlobalEdgeNum;
-    uint32_t prunedDiffBBEdgeNum;
-    uint32_t prunedDiffBBSameTokenEdgeNum;
 
     uint32_t bank_good_num;
     uint32_t bank_ok_num;
@@ -1494,7 +1443,8 @@ class G4_Kernel
     unsigned int callerSaveLastGRF;
 
     bool m_hasIndirectCall = false;
-    bool m_isExternFunction = false;
+
+    VarSplitPass* varSplitPass = nullptr;
 
     // store the actual sourfce line stream for each source file referenced by this kernel.
     std::map<std::string, std::vector<std::string> > debugSrcLineMap;
@@ -1514,15 +1464,12 @@ public:
     unsigned char minor_version;
 
     G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
-              Mem_Manager &m, Options *options, unsigned char major, unsigned char minor)
-              : m_options(options), RAType(RA_Type::UNKNOWN_RA),
-              asmInstCount(0), kernelID(0), tokenInstructionCount(0), tokenReuseCount(0),
-              AWTokenReuseCount(0), ARTokenReuseCount(0), AATokenReuseCount(0),
-              mathInstCount(0), syncInstCount(0),mathReuseCount(0),
-              ARSyncInstCount(0), AWSyncInstCount(0), ARSyncAllCount(0), AWSyncAllCount(0),
-              prunedDepEdges(0), prunedGlobalEdgeNum(0), prunedDiffBBEdgeNum(0), prunedDiffBBSameTokenEdgeNum(0),
-              bank_good_num(0), bank_ok_num(0),
-              bank_bad_num(0), fg(alloc, this, m), major_version(major), minor_version(minor)
+        Mem_Manager& m, Options* options, Attributes* anAttr,
+        unsigned char major, unsigned char minor)
+        : m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
+        asmInstCount(0), kernelID(0),
+        bank_good_num(0), bank_ok_num(0),
+        bank_bad_num(0), fg(alloc, this, m), major_version(major), minor_version(minor)
     {
         ASSERT_USER(
             major < COMMON_ISA_MAJOR_VER ||
@@ -1536,7 +1483,8 @@ public:
         hasAddrTaken = false;
         kernelDbgInfo = nullptr;
         if (options->getOption(vISAOptions::vISA_ReRAPostSchedule) ||
-            options->getOption(vISAOptions::vISA_GetFreeGRFInfo))
+            options->getOption(vISAOptions::vISA_GetFreeGRFInfo) ||
+            options->getuInt32Option(vISAOptions::vISA_GTPinScratchAreaSize))
         {
             allocGTPinData();
         }
@@ -1562,13 +1510,6 @@ public:
     void setNumThreads(int nThreads) { numThreads = nThreads; }
     uint32_t getNumThreads() const { return numThreads; }
 
-    void updateKernelByNumThreads(int nThreads)
-    {
-        numThreads = nThreads;
-        m_options->setOption(vISA_TotalGRFNum, (uint32_t)0);
-        setKernelParameters();
-    }
-
     void setNumSWSBTokens(int nSWSBs) { numSWSBTokens = nSWSBs; }
     uint32_t getNumSWSBTokens() const { return numSWSBTokens; }
 
@@ -1576,54 +1517,6 @@ public:
 
     void setAsmCount(int count) { asmInstCount = count; }
     uint32_t getAsmCount() const { return asmInstCount; }
-
-    void setTokenInstructionCount(int count) {tokenInstructionCount = count; }
-    uint32_t getTokenInstructionCount() {return tokenInstructionCount; }
-
-    void setTokenReuseCount(int count) {tokenReuseCount= count; }
-    uint32_t getTokenReuseCount() {return tokenReuseCount; }
-
-    void setAWTokenReuseCount(int count) {AWTokenReuseCount= count; }
-    uint32_t getAWTokenReuseCount() {return AWTokenReuseCount; }
-
-    void setARTokenReuseCount(int count) {ARTokenReuseCount= count; }
-    uint32_t getARTokenReuseCount() {return ARTokenReuseCount; }
-
-    void setAATokenReuseCount(int count) {AATokenReuseCount= count; }
-    uint32_t getAATokenReuseCount() {return AATokenReuseCount; }
-
-    void setMathInstCount(int count) {mathInstCount= count; }
-    uint32_t getMathInstCount() {return mathInstCount; }
-
-    void setSyncInstCount(int count) {syncInstCount= count; }
-    uint32_t getSyncInstCount() {return syncInstCount; }
-
-    void setMathReuseCount(int count) {mathReuseCount= count; }
-    uint32_t getMathReuseCount() {return mathReuseCount; }
-
-    void setARSyncInstCount(int count) {ARSyncInstCount= count; }
-    uint32_t getARSyncInstCount() {return ARSyncInstCount; }
-
-    void setAWSyncInstCount(int count) {AWSyncInstCount= count; }
-    uint32_t getAWSyncInstCount() {return AWSyncInstCount; }
-
-    void setARSyncAllCount(int count) { ARSyncAllCount = count; }
-    uint32_t getARSyncAllCount() { return ARSyncAllCount; }
-
-    void setAWSyncAllCount(int count) { AWSyncAllCount = count; }
-    uint32_t getAWSyncAllCount() { return AWSyncAllCount; }
-
-    void setPrunedEdgeNum(int num) { prunedDepEdges = num; }
-    uint32_t getPrunedEdgeNum() { return prunedDepEdges; }
-
-    void setPrunedGlobalEdgeNum(int num) { prunedGlobalEdgeNum = num; }
-    uint32_t getPrunedGlobalEdgeNum() { return prunedGlobalEdgeNum; }
-
-    void setPrunedDiffBBEdgeNum(int num) { prunedDiffBBEdgeNum = num; }
-    uint32_t getPrunedDiffBBEdgeNum() { return prunedDiffBBEdgeNum; }
-
-    void setPrunedDiffBBSameTokenEdgeNum(int num) { prunedDiffBBSameTokenEdgeNum = num; }
-    uint32_t getPrunedDiffBBSameTokenEdgeNum() { return prunedDiffBBSameTokenEdgeNum; }
 
     void setBankGoodNum(int num) {bank_good_num = num; }
     uint32_t getBankGoodNum() {return bank_good_num; }
@@ -1638,6 +1531,11 @@ public:
     uint64_t getKernelID() const { return kernelID; }
 
     Options *getOptions(){ return m_options; }
+    const Attributes* getKernelAttrs() const { return m_kernelAttrs; }
+    int getIntKernelAttribute(Attributes::ID aID) const
+    {
+        return getKernelAttrs()->getIntKernelAttribute(aID);
+    }
     bool getOption(vISAOptions opt) const { return m_options->getOption(opt); }
     void computeChannelSlicing();
     void calculateSimdSize();
@@ -1653,11 +1551,11 @@ public:
 
     void setName(const char* n) { name = n; }
     const char* getName() { return name; }
-    const char* getOrigCMName() { return name + 2; }
     void emit_asm(std::ostream& output, bool beforeRegAlloc, void * binary, uint32_t binarySize);
     void emit_dep(std::ostream& output);
 
     void setKernelParameters(void);
+
     void evalAddrExp(void);
     void dumpDotFile(const char* appendix);
 
@@ -1721,19 +1619,6 @@ public:
     {
         m_hasIndirectCall = true;
     }
-    bool getIsExternFunc() const
-    {
-        return m_isExternFunction;
-    }
-    void setIsExternFunc()
-    {
-        m_isExternFunction = true;
-    }
-
-    void addRelocation(RelocationEntry& entry)
-    {
-        relocationTable.push_back(entry);
-    }
 
     RelocationTableTy& getRelocationTable()
     {
@@ -1750,6 +1635,8 @@ public:
     G4_INST* getFirstNonLabelInst() const;
 
     std::string getDebugSrcLine(const std::string& filename, int lineNo);
+
+    VarSplitPass* getVarSplitPass();
 
 };
 

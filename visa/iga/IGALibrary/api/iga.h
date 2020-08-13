@@ -29,6 +29,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef IGA_H
 #define IGA_H
 
+#include "iga_types_swsb.hpp"
+
 #include <stdint.h>
 #include <stddef.h>
 #ifdef _WIN32
@@ -74,7 +76,8 @@ typedef enum {
     IGA_INVALID_OBJECT = 8, /* attempt to use an destroyed object
                              * (e.g. iga_context_t) */
     IGA_INVALID_STATE  = 9, /* e.g. call to iga_get_errors before disassembly*/
-    IGA_UNSUPPORTED_PLATFORM = 10 /* platform not supported with this binary */
+    IGA_UNSUPPORTED_PLATFORM = 10, /* platform not supported with this binary */
+    IGA_DIFF_FAILURE = 11 /* used by -Xifs for diffing instructions */
 } iga_status_t;
 
 /*
@@ -110,6 +113,10 @@ typedef enum {
   , IGA_GEN12p1   = GEN_VER(12,1)
 } iga_gen_t;
 
+
+/*****************************************************************************/
+/*                     Platform Query Functions                              */
+/*****************************************************************************/
 
 /*
  * Returns a list of the platforms enumeration values supported by this
@@ -149,7 +156,33 @@ IGA_API iga_status_t iga_platforms_list(
 IGA_API iga_status_t iga_platform_symbol_suffix(
     iga_gen_t gen,
     const char **suffix);
+/*
+ * Returns the names for a given platform.  E.g. IGA_GEN9 returns "skl".
+ *
+ * PARAMETERS:
+ *  gen                   the platform to query
+ *  names_bytes           the length in bytes of the names array passed in
+ *                        0 iff 'names' is nullptr
+ *  names                 the array to return the platform names in
+ *  names_bytes_needed    the required length of 'names' in bytes
+ *
+ * RETURNS:
+ *   IGA_INVALID_ARGUMENT  if gen is an invalid platform
+ *                         supported by this platform
+ *   IGA_INVALID_ARGUMENT  if names_bytes != 0 && names == nullptr
+ *   IGA_SUCCESS           otherwise
+ */
+IGA_API iga_status_t iga_platform_names(
+    iga_gen_t gen,
+    size_t names_bytes,
+    const char **names,
+    size_t *names_bytes_needed);
 
+
+
+/*****************************************************************************/
+/*                  Context Creation Functions                               */
+/*****************************************************************************/
 
 /*
  * Context options
@@ -206,6 +239,11 @@ IGA_API iga_status_t  iga_context_release(iga_context_t ctx);
 /* deprecated: covers to iga_context_release */
 IGA_API iga_status_t  iga_release_context(iga_context_t ctx);
 
+
+/*****************************************************************************/
+/*                  Assembly Functions                                       */
+/*****************************************************************************/
+
 /*
  * This structure contains options to the 'iga_assemble' call.
  */
@@ -223,11 +261,18 @@ typedef struct {
      * do not reuse _reserved0 and _reserved1 since those were
      * historically something else
      */
+
+    // number of sbid used for auto dependency setting. This value is effective
+    // only when IGA_ENCODER_OPT_AUTO_DEPENDENCIES is given
+    uint32_t sbid_count;
+    // force the swsb_encode_mode. If not given, the encode mode will be
+    // derived from platform
+    iga::SWSB_ENCODE_MODE swsb_encode_mode;
 } iga_assemble_options_t;
 
 /* detects screwups where someone adds a field and the compiler pads
  * the structure out implicitly */
-static_assert(sizeof(iga_assemble_options_t) == 6*4,
+static_assert(sizeof(iga_assemble_options_t) == 8*4,
     "wrong size for iga_assemble_options");
 
 
@@ -286,10 +331,11 @@ static_assert(sizeof(iga_assemble_options_t) == 6*4,
       IGA_WARNINGS_DEFAULT, \
       (IGA_ENCODER_OPT_ERROR_ON_COMPACT_FAIL), \
       0, /* syntax_opts = NONE */ \
-      0, /* reserved */ \
-      0  /* reserved */ \
+      0, /* reserved */  \
+      0, /* reserved */  \
+      16, /* sbid_count */ \
+      iga::SWSB_ENCODE_MODE::SWSBInvalidMode \
     }
-
 
 /*
  * Assembles some text into bits.
@@ -329,6 +375,10 @@ IGA_API iga_status_t  iga_assemble(
     void **output,
     uint32_t *output_size);
 
+
+/*****************************************************************************/
+/*                  Disassembly Functions                                    */
+/*****************************************************************************/
 
 /*
  * This structure contains options to the 'iga_disassemble' call.
@@ -379,6 +429,8 @@ static_assert(sizeof(iga_disassemble_options_t) == 5*4,
 #define IGA_FORMATTING_OPT_PRINT_DEPS       0x00000020u
 /* print load/store pseduo instructions where possible */
 #define IGA_FORMATTING_OPT_PRINT_LDST       0x00000040u
+/* use ansi_span escapes when possible */
+#define IGA_FORMATTING_OPT_PRINT_ANSI       0x00000100u
 
 /* just the default formatting opts */
 #define IGA_FORMATTING_OPTS_DEFAULT \
@@ -500,6 +552,11 @@ IGA_API  iga_status_t  iga_disassemble_instruction(
     const char *(*fmt_label_name)(int32_t, void *),
     void *fmt_label_ctx,
     char **kernel_text);
+
+
+/*****************************************************************************/
+/*             Diagnostic Processing Functions                               */
+/*****************************************************************************/
 
 /*
  * A diagnostic message (e.g. error or warning)
@@ -667,6 +724,10 @@ IGA_API iga_status_t iga_diagnostic_get_text_extent(
     uint32_t *extent);
 
 
+
+/*****************************************************************************/
+/*             Operation Enumeration Functions                               */
+/*****************************************************************************/
 /*
  * An opaque type representing an operation (instruction) type.
  * Can be efficiently copied and passed by value.
@@ -786,23 +847,6 @@ IGA_API iga_status_t iga_opspec_op(
 IGA_API iga_status_t iga_opspec_op_encoding(
     iga_opspec_t op,
     uint32_t *opcode);
-
-
-/*
- * Returns the parent operation for a given op.  The value returned is the
- * op enumerate element, not it's encoding.
- *
- * If an operation is root-level (has no parent), this assigns NULL
- * to the output (but returns IGA_SUCCESS).
- *
- * RETURNS:
- *  IGA_SUCCESS           upon success
- *  IGA_INVALID_ARG       if a gen argument invalid
- */
-IGA_API iga_status_t iga_opspec_parent_op(
-    iga_opspec_t op,
-    uint32_t *parent_op);
-
 
 #ifdef __cplusplus
 }

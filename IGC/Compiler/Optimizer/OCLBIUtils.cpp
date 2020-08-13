@@ -28,31 +28,29 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/DebugInfo/DebugInfoUtils.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
-
 #include "llvmWrapper/IR/IRBuilder.h"
 #include "llvmWrapper/IR/Instructions.h"
-
 #include "common/LLVMWarningsPop.hpp"
-
 #include "LLVM3DBuilder/BuiltinsFrontend.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
 using namespace IGC::IGCMD;
 
-void CCommand::execute(CallInst* Inst)
+void CCommand::execute(CallInst* Inst, CodeGenContext* CodeGenContext)
 {
-    init(Inst);
+    init(Inst, CodeGenContext);
     createIntrinsic();
 }
 
-void CCommand::init(CallInst* Inst)
+void CCommand::init(CallInst* Inst, CodeGenContext* CodeGenContext)
 {
     m_pCallInst = Inst;
     m_pFunc = m_pCallInst->getParent()->getParent();
     m_pCtx = &(m_pFunc->getContext());
+    m_pCodeGenContext = CodeGenContext;
     m_pFloatType = Type::getFloatTy(*m_pCtx);
     m_pIntType = Type::getInt32Ty(*m_pCtx);
     m_pFloatZero = Constant::getNullValue(m_pFloatType);
@@ -194,11 +192,11 @@ void CImagesBI::prepareImageBTI()
     }
 }
 
-void CImagesBI::verifiyCommand(CodeGenContext* context)
+void CImagesBI::verifyCommand()
 {
     if (m_IncorrectBti)
     {
-        context->EmitError("Inconsistent use of image!");
+        m_pCodeGenContext->EmitError("Inconsistent use of image!");
     }
 }
 
@@ -208,7 +206,7 @@ Argument* CImagesBI::CImagesUtils::findImageFromBufferPtr(const MetaDataUtils& M
     {
         FunctionMetaData funcMD = modMD->FuncMD.find(F)->second;
         ResourceAllocMD resAllocMD = funcMD.resAllocMD;
-        assert(resAllocMD.argAllocMDList.size() > 0 && "ArgAllocMDList is empty.");
+        IGC_ASSERT_MESSAGE(resAllocMD.argAllocMDList.size() > 0, "ArgAllocMDList is empty.");
         for (auto& arg : F->args())
         {
             unsigned argNo = arg.getArgNo();
@@ -226,87 +224,54 @@ Argument* CImagesBI::CImagesUtils::findImageFromBufferPtr(const MetaDataUtils& M
 Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst, unsigned int paramIndex, const MetaDataUtils* pMdUtils, const IGC::ModuleMetaData* modMD)
 {
     std::vector<ConstantInt*> gepIndices;
+    using VisitedValuesSetType = SmallPtrSet<Value*, 10>;
+    VisitedValuesSetType visitedValues;
 
-    std::function<Value* (Value*)> track = [&track](Value* pVal) -> Value *
+    // This lambda looks for the value stored into alloca. A specific case here is that
+    // alloca can contain pointer instead of value. In such case, we also looks into another allocas
+    // containing the same pointer.
+    std::function<Value*(Value*, unsigned int)> findArgument =
+        [&](Value* pVal, unsigned int depth) -> Value *
     {
+        if (!pVal) return nullptr;
+
+        visitedValues.insert(pVal);
         for (auto U : pVal->users())
         {
-            if (auto * GEP = dyn_cast<GetElementPtrInst>(U))
-            {
-                if (!GEP->hasAllZeroIndices())
-                    continue;
+            if (visitedValues.find(U) != visitedValues.end()) continue;
+            visitedValues.insert(U);
 
-                if (auto * leaf = track(GEP))
-                    return leaf;
-            }
-            else if (CastInst * inst = dyn_cast<CastInst>(U))
-            {
-                if (auto * leaf = track(inst))
-                    return leaf;
-            }
-            else if (auto * ST = dyn_cast<StoreInst>(U))
-            {
-                return ST->getValueOperand();
-            }
-        }
-
-        return nullptr;
-    };
-
-    std::function<Value* (Value*)> findAlloca = [&](Value* pVal) -> Value *
-    {
-        if (auto * GEP = dyn_cast<GetElementPtrInst>(pVal))
-        {
-            if (!GEP->hasAllConstantIndices())
-                return nullptr;
-
-            for (unsigned int i = GEP->getNumIndices(); i > 1; --i)
-                gepIndices.push_back(cast<ConstantInt>(GEP->getOperand(i)));
-
-            if (auto * leaf = findAlloca(GEP->getOperand(0)))
-                return leaf;
-        }
-        else if (CastInst * inst = dyn_cast<CastInst>(pVal))
-        {
-            if (auto * leaf = findAlloca(inst->getOperand(0)))
-                return leaf;
-        }
-        else if (auto * allocaInst = dyn_cast<AllocaInst>(pVal))
-        {
-            return allocaInst;
-        }
-        return nullptr;
-    };
-
-    std::function<Value* (Value*, int)> findArgument = [&](Value* pVal, unsigned int depth) -> Value *
-    {
-        for (auto U : pVal->users())
-        {
             if (auto * GEP = dyn_cast<GetElementPtrInst>(U))
             {
                 if (!GEP->hasAllConstantIndices())
                     return nullptr;
 
-                if (GEP->getNumIndices() > depth + 1)
+                unsigned numIndices = GEP->getNumIndices();
+                if (numIndices > depth + 1)
                     continue;
 
                 bool matchingGep = false;
-                for (unsigned int i = 1; i < GEP->getNumIndices(); ++i)
+                for (unsigned int i = 1; i < numIndices; ++i)
                 {
                     if (gepIndices[depth - i]->getZExtValue() == cast<ConstantInt>(GEP->getOperand(i + 1))->getZExtValue())
                         matchingGep = true;
                     else
                     {
                         matchingGep = false;
-                        continue;
+                        break;
                     }
                 }
 
                 if (!matchingGep)
                     continue;
 
-                if (auto * leaf = findArgument(GEP, depth - (GEP->getNumIndices() - 1)))
+                unsigned reducedIndices = numIndices - 1;
+                if (auto * leaf = findArgument(GEP, depth - reducedIndices))
+                {
+                    IGC_ASSERT(gepIndices.size() >= reducedIndices);
+                    gepIndices.resize(gepIndices.size() - reducedIndices);
                     return leaf;
+                }
             }
             else if (CastInst * inst = dyn_cast<CastInst>(U))
             {
@@ -317,13 +282,40 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
             {
                 if (callInst->getCalledFunction()->getIntrinsicID() == Intrinsic::memcpy)
                 {
-                    if (auto * leaf = findArgument(findAlloca(callInst->getOperand(1)), depth))
+                    return callInst->getOperand(1);
+                }
+            }
+            else if (LoadInst * loadInst = dyn_cast<LoadInst>(U))
+            {
+                // Continue tracing load if it's type is a pointer. Example(tracing %1 alloca value):
+                // %0 = alloca %opencl.image2d_t.read_only addrspace(1)*, align 8
+                // %1 = alloca %opencl.image2d_t.read_only addrspace(1)*, align 8
+                // %2 = load %opencl.image2d_t.read_only addrspace(1)*, %opencl.image2d_t.read_only addrspace(1)** %1, align 8
+                // store %opencl.image2d_t.read_only addrspace(1)* %2, %opencl.image2d_t.read_only addrspace(1)** %0, align 8
+                // %3 = load % opencl.image2d_t.read_only addrspace(1)*, %opencl.image2d_t.read_only addrspace(1)** %0, align 8
+                // We cannot ignore load if alloca type is a pointer.
+                if (loadInst->getType()->isPointerTy())
+                {
+                    if (auto * leaf = findArgument(loadInst, depth))
                         return leaf;
                 }
             }
             else if (auto * ST = dyn_cast<StoreInst>(U))
             {
-                return ST->getValueOperand();
+                Value* V = ST->getValueOperand();
+                if (V == pVal)
+                {
+                    // If we are here, it means that alloca value is stored into another alloca.
+                    // Check if value is pointer type, if so, it means that our object can be accessed
+                    // through another alloca and we need to continue tracing it.
+                    if (V->getType()->isPointerTy())
+                    {
+                        if (auto * leaf = findArgument(ST->getPointerOperand(), depth))
+                            return leaf;
+                    }
+                }
+                else
+                    return ST->getValueOperand();
             }
         }
         return nullptr;
@@ -332,6 +324,7 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
     Value* baseValue = pCallInst->getOperand(paramIndex);
     while (true)
     {
+        visitedValues.insert(baseValue);
         if (isa<Argument>(baseValue))
         {
             // Reached an Argument, return it.
@@ -360,8 +353,8 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
             GenIntrinsicInst* gbpInst = cast<GenIntrinsicInst>(baseValue);
             Value* bufIdV = gbpInst->getOperand(0);
             Value* bufTyV = gbpInst->getOperand(1);
-            assert(isa<ConstantInt>(bufIdV));
-            assert(isa<ConstantInt>(bufTyV));
+            IGC_ASSERT(isa<ConstantInt>(bufIdV));
+            IGC_ASSERT(isa<ConstantInt>(bufTyV));
             IGC::BufferType bufType = (IGC::BufferType)(cast<ConstantInt>(bufTyV)->getZExtValue());
             unsigned as = IGC::EncodeAS4GFXResource(*bufIdV, bufType, 0);
 
@@ -390,7 +383,7 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                     modMD);
             }
 
-            assert(0 && "Found GetBufferPtr but cannot match it with an argument!");
+            IGC_ASSERT_MESSAGE(0, "Found GetBufferPtr but cannot match it with an argument!");
             return nullptr;
         }
         else if (CastInst * inst = dyn_cast<CastInst>(baseValue))
@@ -409,7 +402,7 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
             }
             else
             {
-                assert(0 && "dynamic index");
+                IGC_ASSERT_MESSAGE(0, "dynamic index");
                 return nullptr;
             }
 
@@ -433,7 +426,7 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                     }
                     else
                     {
-                        assert(0 && "dynamic index");
+                        IGC_ASSERT_MESSAGE(0, "dynamic index");
                         return nullptr;
                     }
                 }
@@ -446,10 +439,42 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                 }
                 else
                 {
-                    assert(0 && "unknown construct!");
+                    IGC_ASSERT_MESSAGE(0, "unknown construct!");
                     return nullptr;
                 }
             }
+        }
+        else if (AllocaInst * alloca = dyn_cast<AllocaInst>(baseValue))
+        {
+            auto* pArg = findArgument(alloca, gepIndices.size());
+            if (pArg)
+            {
+                if ((isa<Argument>(pArg) || isa<ConstantInt>(pArg)))
+                {
+                    return pArg;
+                }
+                else
+                {
+                    baseValue = pArg;
+                    continue;
+                }
+            }
+            else
+            {
+                // Cannot trace, it could be a bindless or indirect access
+                return nullptr;
+            }
+        }
+        else if (GetElementPtrInst * gep = dyn_cast<GetElementPtrInst>(baseValue))
+        {
+            if (!gep->hasAllConstantIndices())
+                return nullptr;
+
+            for (unsigned int i = gep->getNumIndices(); i > 1; --i)
+                gepIndices.push_back(cast<ConstantInt>(gep->getOperand(i)));
+
+            baseValue = gep->getOperand(0);
+            continue;
         }
         else if (LoadInst * load = dyn_cast<LoadInst>(baseValue))
         {
@@ -470,46 +495,16 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                     pSamplerVal->getAggregateElement(0U) : pSamplerVal;
             }
 
-            // Simple case:
-            // If, after stripping casts and zero GEPs, we make it to alloca then the base of that alloca must contain the image.
-            // track() will walk through casts and zero GEPs that don't change the offset of the pointer until arriving at the store
-            // (assuming it is the only store to that location for an image) whose value should be the image argument.
-            Value* pVal = addr->stripPointerCasts();
-            if (isa<AllocaInst>(pVal))
+            if (isa<LoadInst>(addr) ||
+                isa<AllocaInst>(addr) ||
+                isa<GetElementPtrInst>(addr))
             {
-                auto* pArg = track(pVal);
-                if (pArg && (isa<Argument>(pArg) || isa<ConstantInt>(pArg)))
-                    return pArg;
-            }
-
-            // More complicated case:
-            // We need to go through non-zero GEPs, memcpys and casts to reach an argument.
-            // In the same time we need to track the indices for geps as there might be more loads/stores to given alloca.
-            if (GetElementPtrInst * getElementPtr = dyn_cast<GetElementPtrInst>(addr))
-            {
-                addr = findAlloca(getElementPtr);
-                if (addr && isa<AllocaInst>(addr))
-                {
-                    auto* pArg = findArgument(addr, gepIndices.size());
-                    if (pArg && isa<Argument>(pArg))
-                    {
-                        return pArg;
-                    }
-                    else
-                    {
-                        // Cannot trace, it could be indirect access
-                        return nullptr;
-                    }
-                }
-                else
-                {
-                    // Cannot trace, it could be indirect access
-                    return nullptr;
-                }
+                baseValue = addr;
+                continue;
             }
             else
             {
-                assert(getElementPtr && "Expected GEP instruction.");
+                IGC_ASSERT_MESSAGE(0, "Unexpected instruction");
                 return nullptr;
             }
         }
@@ -748,6 +743,11 @@ public:
     {
         ConstantInt* samplerIndex = nullptr;
         Value* samplerParam = CImagesBI::CImagesUtils::traceImageOrSamplerArgument(m_pCallInst, 1, m_pMdUtils, m_modMD);
+        if (!samplerParam) {
+            m_pCodeGenContext->EmitError("There are instructions that use a sampler, but no sampler found in the kernel!");
+            return nullptr;
+        }
+
         // Argument samplers are looked up in the parameter map
         if (isa<Argument>(samplerParam))
         {
@@ -757,7 +757,7 @@ public:
         }
 
         // The sampler is not an argument, make sure it's a constant
-        assert(isa<ConstantInt>(samplerParam) && "Sampler must be a global variable or a constant");
+        IGC_ASSERT_MESSAGE(isa<ConstantInt>(samplerParam), "Sampler must be a global variable or a constant");
         ConstantInt* constSampler = cast<ConstantInt>(samplerParam);
         int samplerValue = int_cast<int>(constSampler->getZExtValue());
 
@@ -827,7 +827,7 @@ public:
 #endif // RELEASE INTERNAL||DEBUG
 
             default:
-                assert(0 && "Invalid sampler type");
+                IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
                 break;
             }
 
@@ -844,7 +844,7 @@ public:
                 inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
                 break;
             default:
-                assert(0 && "Filter Type must have value");
+                IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
                 break;
             }
 
@@ -897,7 +897,7 @@ public:
 #endif // RELEASE INTERNAL||DEBUG
 
             default:
-                assert(0 && "Invalid sampler type");
+                IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
                 break;
             }
 
@@ -910,7 +910,7 @@ public:
                 inlineSamplerMD.NormalizedCoords = (LEGACY_CLK_NORMALIZED_COORDS_FALSE);
                 break;
             default:
-                assert(0 && "Invalid normalized coords");
+                IGC_ASSERT_MESSAGE(0, "Invalid normalized coords");
                 break;
             }
 
@@ -926,7 +926,7 @@ public:
                 inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
                 break;
             default:
-                assert(0 && "Filter Type must have value");
+                IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
                 break;
             }
 
@@ -938,16 +938,18 @@ public:
         }
         else
         {
-            assert(0 && "Input IR version must be OCL or SPIR");
+            IGC_ASSERT_MESSAGE(0, "Input IR version must be OCL or SPIR");
         }
     }
 
-    void prepareSamplerIndex()
+    bool prepareSamplerIndex()
     {
         ConstantInt* samplerIndex = getSamplerIndex();
+        if (!samplerIndex) return false;
         unsigned int addrSpace = EncodeAS4GFXResource(*samplerIndex, SAMPLER, 0);
         Value* sampler = ConstantPointerNull::get(PointerType::get(samplerIndex->getType(), addrSpace));
         m_args.push_back(sampler);
+        return true;
     }
 
     void prepareGradients(Dimension Dim, Value* gradX, Value* gradY)
@@ -1038,7 +1040,9 @@ public:
         m_args.push_back(CoordZ);
         m_args.push_back(m_pFloatZero); // ai (?)
         createGetBufferPtr();
-        prepareSamplerIndex();
+        bool samplerIndexFound = prepareSamplerIndex();
+        if (!samplerIndexFound) return;
+
         prepareZeroOffsets();
         Type* types[] = { m_pCallInst->getType(), m_pFloatType, m_args[5]->getType(), m_args[6]->getType() };
         replaceGenISACallInst(GenISAIntrinsic::GenISA_sampleLptr, types);
@@ -1234,8 +1238,7 @@ protected:
     void createIntrinsicType(const CallInst* pCI, ArrayRef<Type*> overloadTypes)
     {
         m_args.append(pCI->op_begin(), pCI->op_begin() + pCI->getNumArgOperands());
-        assert(!(id != Intrinsic::num_intrinsics && isaId != GenISAIntrinsic::ID::num_genisa_intrinsics) &&
-            "Both intrinsic id's cannot be valid at the same time");
+        IGC_ASSERT_MESSAGE(!(id != Intrinsic::num_intrinsics && isaId != GenISAIntrinsic::ID::num_genisa_intrinsics), "Both intrinsic id's cannot be valid at the same time");
 
         // GenISA intrinsics ID start after llvm intrinsics
         if (isaId != GenISAIntrinsic::num_genisa_intrinsics && isaId > static_cast<int>(Intrinsic::num_intrinsics))
@@ -1267,7 +1270,7 @@ public:
 
     void createIntrinsic()
     {
-        assert(!(this->isOverloadable && m_pCallInst->getNumArgOperands() == 0) && "Cannot create an overloadable with no args");
+        IGC_ASSERT_MESSAGE(!(this->isOverloadable && m_pCallInst->getNumArgOperands() == 0), "Cannot create an overloadable with no args");
         llvm::Type* tys[2];
         switch (isaId)
         {
@@ -1289,8 +1292,7 @@ public:
             tys[0] = m_pCallInst->getCalledFunction()->getReturnType();
             tys[1] = m_pCallInst->getArgOperand(0)->getType();
             m_args.append(m_pCallInst->op_begin(), m_pCallInst->op_begin() + m_pCallInst->getNumArgOperands());
-            assert(!(id != Intrinsic::num_intrinsics && isaId != GenISAIntrinsic::ID::num_genisa_intrinsics) &&
-                "Both intrinsic id's cannot be valid at the same time");
+            IGC_ASSERT_MESSAGE(!(id != Intrinsic::num_intrinsics && isaId != GenISAIntrinsic::ID::num_genisa_intrinsics), "Both intrinsic id's cannot be valid at the same time");
             replaceGenISACallInst(isaId, llvm::ArrayRef<llvm::Type*>(tys));
             break;
         case GenISAIntrinsic::GenISA_simdGetMessagePhase:
@@ -1403,7 +1405,7 @@ public:
         m_args.append(m_pCallInst->op_begin(), m_pCallInst->op_begin() + 3);
 
         // Push images like src image, fwd ref image, and bwd ref image.
-        assert((num_images >= 2) && (num_images <= 3));
+        IGC_ASSERT((num_images >= 2) && (num_images <= 3));
         for (uint i = 0; i < num_images; i++) {
             Argument* pImg = nullptr;
             m_args.push_back(CImagesBI::CImagesUtils::getImageIndex(m_pParamMap, m_pCallInst, i + 3, pImg));
@@ -1919,8 +1921,8 @@ bool CBuiltinsResolver::resolveBI(CallInst* Inst)
     {
         return false;
     }
-    m_CommandMap[calleeName]->execute(Inst);
-    m_CommandMap[calleeName]->verifiyCommand(m_CodeGenContext);
+    m_CommandMap[calleeName]->execute(Inst, m_CodeGenContext);
+    m_CommandMap[calleeName]->verifyCommand();
 
-    return true;
+    return !m_CodeGenContext->HasError();
 }

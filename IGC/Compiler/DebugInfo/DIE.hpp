@@ -37,21 +37,44 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///////////////////////////////////////////////////////////////////////////////
 
 #pragma once
-
 #include "llvm/Config/llvm-config.h"
-
 #include "common/LLVMWarningsPush.hpp"
+#include "common/igc_regkeys.hpp"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvmWrapper/BinaryFormat/Dwarf.h"
 #include "llvm/ADT/StringRef.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include <vector>
+#include "Probe/Assertion.h"
+
 
 namespace llvm
 {
+
+//namespace dwarf
+// Intel extensions
+#ifndef DW_AT_INTEL_simd_width
+#define DW_AT_INTEL_simd_width 0x2400
+#endif
+#ifndef DW_OP_INTEL_regs
+#define DW_OP_INTEL_regs 0xeb
+#endif
+#ifndef DW_OP_INTEL_push_bit_piece_stack
+#define DW_OP_INTEL_push_bit_piece_stack 0xec
+#endif
+#ifndef DW_OP_INTEL_push_simd_lane
+#define DW_OP_INTEL_push_simd_lane 0xed
+#endif
+#ifndef DW_OP_INTEL_piece_stack
+#define DW_OP_INTEL_piece_stack 0xee
+#endif
+#ifndef DW_OP_INTEL_bit_piece_stack
+#define DW_OP_INTEL_bit_piece_stack 0xef
+#endif
+
+
     class MCSymbol;
     class raw_ostream;
     class MCExpr;
@@ -59,6 +82,37 @@ namespace llvm
 
 namespace IGC
 {
+    class RegisterNumbering
+    {
+    public:
+        constexpr static unsigned int IP = 0;
+        constexpr static unsigned int EMask = 1;
+        constexpr static unsigned int BTBase = 5;
+        constexpr static unsigned int ScratchBase = 6;
+        constexpr static unsigned int GenStateBase = 7;
+        constexpr static unsigned int SurfStateBase = 8;
+        constexpr static unsigned int BindlessSurfStateBase = 9;
+        constexpr static unsigned int BindlessSamplerStateBase = 10;
+        constexpr static unsigned int GRFBase = 16;
+        constexpr static unsigned int A0Base = 272;
+        constexpr static unsigned int F0Base = 288;
+        constexpr static unsigned int Acc0Base = 304;
+        constexpr static unsigned int Mme0Base = 335;
+    };
+
+    // Use following templated method to get encoded register number
+    // for regx and bregx operations. For eg, if GRF to encode in regx is
+    // 10 then invoke method as GetEncodedRegNum<RegisterNumbering::GRFBase>(10).
+    template<unsigned int T>
+    unsigned int GetEncodedRegNum(unsigned int i)
+    {
+        if (IGC_IS_FLAG_ENABLED(UseNewRegEncoding))
+        {
+            return (T + i);
+        }
+        return i;
+    }
+
     class StreamEmitter;
 
     //===--------------------------------------------------------------------===//
@@ -205,7 +259,7 @@ namespace IGC
         ///
         void addChild(DIE* Child)
         {
-            assert(!Child->getParent());
+            IGC_ASSERT(!Child->getParent());
             Abbrev.setChildrenFlag(llvm::dwarf::DW_CHILDREN_yes);
             Children.push_back(Child);
             Child->Parent = this;
@@ -471,7 +525,7 @@ namespace IGC
     public:
         explicit DIEEntry(DIE* E, unsigned Version) : DIEValue(isEntry), Entry(E), DwarfVersion(Version)
         {
-            assert(E && "Cannot construct a DIEEntry with a null DIE");
+            IGC_ASSERT_MESSAGE(nullptr != E, "Cannot construct a DIEEntry with a null DIE");
         }
 
         DIE* getEntry() const { return Entry; }

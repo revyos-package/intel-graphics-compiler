@@ -25,7 +25,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 
-
 /*******************************************************
  * This performs a basic liveness/DU analysis (reverse) of the register files
  * (GRF and ARF).  The RegSet abstraction tracks bytes and words touched
@@ -420,7 +419,7 @@ struct DepAnalysisComputer
     bool joinBlocks(
               LiveDepMap &predOUT, // predecessor block live OUT
         const LiveDepMap &succIN,  // successor   block live IN
-        bool isJump)               // as opposed to fallthrough
+        bool /* isJump */)         // as opposed to fallthrough
     {
         bool changed = false;
         for (const auto &lrElem : succIN) {

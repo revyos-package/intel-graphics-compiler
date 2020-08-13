@@ -23,6 +23,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
 
 #include "MetaDataTraits.h"
@@ -36,6 +37,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/LLVMContext.h>
 #include "common/LLVMWarningsPop.hpp"
 #include <vector>
+#include "Probe/Assertion.h"
 
 namespace IGC
 {
@@ -204,7 +206,7 @@ namespace IGC
                 llvm::MDNode::deleteTemporary(pNode);
 #else
                 // todo llvm 3.6.0 transition
-                assert(false);
+                IGC_ASSERT(0);
 #endif
                 return;
             }
@@ -364,7 +366,7 @@ namespace IGC
             if (!dirty())
                 return;
 
-            assert(m_isLoaded && "Collection should be loaded at this point (since it is dirty)");
+            IGC_ASSERT_MESSAGE(m_isLoaded, "Collection should be loaded at this point (since it is dirty)");
 
             if (pNode->getNumOperands() > size())
                 pNode->dropAllReferences();
@@ -384,7 +386,8 @@ namespace IGC
                 }
                 else
                 {
-                    assert(i != e && mi == me);
+                    IGC_ASSERT(i != e);
+                    IGC_ASSERT(mi == me);
                     pNode->addOperand(llvm::cast<llvm::MDNode>(Traits::generateValue(context, *i)));
                     ++i;
                 }
@@ -526,10 +529,10 @@ namespace IGC
             lazyLoad();
             if (find(key) == end())
             {
+                IGC_ASSERT_MESSAGE(0, "Trying to get key that does not exists in Metadata map");
                 std::string Msg = "Invalid user defined function being processed: ";
                 Msg += key->getName();
                 Msg += "()\n";
-                assert(0 && "Trying to get key that does not exists in Metadata map");
                 m_pNode->getParent()->getContext().emitError(Msg);
             }
             return m_data[key];
@@ -589,7 +592,7 @@ namespace IGC
             if (!dirty())
                 return;
 
-            assert(m_isLoaded && "Collection should be loaded at this point (since it is dirty)");
+            IGC_ASSERT_MESSAGE(m_isLoaded, "Collection should be loaded at this point (since it is dirty)");
 
             pNode->dropAllReferences();
 
@@ -600,7 +603,8 @@ namespace IGC
 
             while (i != e || mi != me)
             {
-                assert(i != e && mi == me);
+                IGC_ASSERT(i != e);
+                IGC_ASSERT(mi == me);
                 llvm::SmallVector<llvm::Metadata*, 2> args;
                 args.push_back(KeyTraits::generateValue(context, (*i).first));
                 args.push_back(ValTraits::generateValue(context, (*i).second));
@@ -660,8 +664,9 @@ namespace IGC
 
             for (meta_iterator i(m_pNode, 0), e(m_pNode); i != e; ++i)
             {
-                llvm::MDNode* node = i.get();
-                assert(node->getNumOperands() == 2 && "MetaDataMap node assumed to have exactly two operands");
+                llvm::MDNode* const node = i.get();
+                IGC_ASSERT(nullptr != node);
+                IGC_ASSERT_MESSAGE(node->getNumOperands() == 2, "MetaDataMap node assumed to have exactly two operands");
                 key_type key = KeyTraits::load(node->getOperand(0));
                 item_type val = ValTraits::load(node->getOperand(1));
                 m_data[key] = val;
@@ -721,6 +726,7 @@ namespace IGC
             {
                 return;
             }
+            IGC_ASSERT(nullptr != module);
             if (!m_pNode)
             {
                 m_pNode = module->getOrInsertNamedMetadata(nodeName);
@@ -738,4 +744,4 @@ namespace IGC
         bool m_isDirty;
     };
 
-} //namespace
+} // IGC

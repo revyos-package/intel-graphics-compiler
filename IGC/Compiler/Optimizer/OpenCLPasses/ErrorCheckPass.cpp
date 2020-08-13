@@ -110,7 +110,7 @@ void ErrorCheck::visitInstruction(llvm::Instruction& I)
 {
     auto ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
 
-    if (!ctx->m_DriverInfo.NeedFP64(ctx->platform.getPlatformInfo().eProductFamily) && !ctx->platform.supportFP64()
+    if (!ctx->m_DriverInfo.NeedFP64(ctx->platform.getPlatformInfo().eProductFamily) && ctx->platform.hasNoFP64Inst()
         && IGC_IS_FLAG_DISABLED(ForceDPEmulation))
     {
         // check that input does not use double
@@ -129,6 +129,35 @@ void ErrorCheck::visitInstruction(llvm::Instruction& I)
                 m_hasError = true;
                 return;
             }
+        }
+    }
+}
+
+void ErrorCheck::visitCallInst(CallInst& CI)
+{
+    if (auto* GII = dyn_cast<GenIntrinsicInst>(&CI))
+    {
+        switch (GII->getIntrinsicID()) {
+        case GenISAIntrinsic::GenISA_dp4a_ss:
+        case GenISAIntrinsic::GenISA_dp4a_su:
+        case GenISAIntrinsic::GenISA_dp4a_us:
+        case GenISAIntrinsic::GenISA_dp4a_uu:
+        {
+            CodeGenContext* Ctx =
+                getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+            if (!Ctx->platform.hasHWDp4AddSupport())
+            {
+                std::string Msg = "Unsupported call to ";
+                Msg += CI.getCalledFunction() ?
+                    CI.getCalledFunction()->getName() : "indirect function";
+                Ctx->EmitError(Msg.c_str());
+                m_hasError = true;
+            }
+            break;
+        }
+        default:
+            // Intrinsic supported.
+            break;
         }
     }
 }

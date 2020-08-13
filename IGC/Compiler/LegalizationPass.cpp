@@ -30,7 +30,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/CommandLine.h>
 #include <llvm/IR/Instructions.h>
@@ -38,8 +37,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Transforms/Utils/Local.h>
 #include <llvmWrapper/IR/InstrTypes.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -97,7 +96,7 @@ bool Legalization::runOnFunction(Function& F)
     {
         for (auto OI = I->op_begin(), OE = I->op_end(); OI != OE; ++OI)
         {
-            assert(!isa<ConstantExpr>(OI) && "Function must not contain constant expressions");
+            IGC_ASSERT_MESSAGE(!isa<ConstantExpr>(OI), "Function must not contain constant expressions");
         }
     }
 
@@ -256,7 +255,7 @@ void Legalization::visitBinaryOperator(llvm::BinaryOperator& I)
                     }
                     else if (BranchInst * br = dyn_cast<BranchInst>(*U))
                     {
-                        assert(br->isConditional());
+                        IGC_ASSERT(br->isConditional());
                         br->swapSuccessors();
                         br->setCondition(invert);
                     }
@@ -380,11 +379,14 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
 
             // The shift amount shall be a multiple of base element.
             uint64_t ShAmt = CI->getZExtValue();
-            if (ShAmt % EltTy->getPrimitiveSizeInBits() != 0)
+            const unsigned int denominator = EltTy->getPrimitiveSizeInBits();
+            IGC_ASSERT(denominator);
+
+            if (ShAmt % denominator != 0)
                 return false;
 
             // Compute the index of the element to be extracted.
-            Index = int_cast<int>(ShAmt / EltTy->getPrimitiveSizeInBits());
+            Index = int_cast<int>(ShAmt / denominator);
         }
 
         // The second instruction is *not* optional.
@@ -508,7 +510,7 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
 
             if (BI)
             {
-                assert(BI->getType() == EltTy);
+                IGC_ASSERT(BI->getType() == EltTy);
 
                 // BO, TI, and BI are dead.
                 BI->replaceAllUsesWith(V);
@@ -525,8 +527,7 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
             }
             else
             {
-                assert(TI->getType()->getPrimitiveSizeInBits() ==
-                    EltTy->getPrimitiveSizeInBits());
+                IGC_ASSERT(TI->getType()->getPrimitiveSizeInBits() == EltTy->getPrimitiveSizeInBits());
                 if (V->getType() != TI->getType())
                     V = Builder->CreateBitCast(V, TI->getType());
 
@@ -578,7 +579,8 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
             int dstSize = int_cast<int>(castType->getPrimitiveSizeInBits());
 
             // vecSize is 128/8 = 16 in above example
-            assert(srcSize % dstSize == 0);
+            IGC_ASSERT(dstSize);
+            IGC_ASSERT(srcSize % dstSize == 0);
             uint vecSize = srcSize / dstSize;
 
             Builder->SetInsertPoint(TI);
@@ -732,7 +734,7 @@ void Legalization::visitSelectInst(SelectInst& I)
     }
     else if (I.getType()->isDoubleTy() &&
         (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
-            !m_ctx->platform.supportFP64()))
+            m_ctx->platform.hasNoFP64Inst()))
     {
         // Split double select to i32 select.
 
@@ -813,8 +815,9 @@ static Value* GetMaskedValue(IRBuilder<>* IRB, bool Signed, Value* Src, Type* Ty
     IntegerType* SrcITy = dyn_cast<IntegerType>(Src->getType());
     IntegerType* ITy = dyn_cast<IntegerType>(Ty);
 
-    assert(SrcITy && ITy && SrcITy->getBitWidth() > ITy->getBitWidth() &&
-        "The source integer must be wider than the target integer.");
+    IGC_ASSERT_MESSAGE(SrcITy, "The source integer must be wider than the target integer.");
+    IGC_ASSERT_MESSAGE(ITy, "The source integer must be wider than the target integer.");
+    IGC_ASSERT_MESSAGE(SrcITy->getBitWidth() > ITy->getBitWidth(), "The source integer must be wider than the target integer.");
 
     if (!Signed) // For unsigned value, just mask off non-significant bits.
         return IRB->CreateAnd(Src, ITy->getBitMask());
@@ -1009,7 +1012,7 @@ void Legalization::visitFCmpInstUndorderedPredicate(FCmpInst& FC)
             }
             else if (BranchInst * br = dyn_cast<BranchInst>(*I))
             {
-                assert(br->isConditional());
+                IGC_ASSERT(br->isConditional());
                 br->swapSuccessors();
                 br->setCondition(invertedOrderedInst);
             }
@@ -1075,7 +1078,7 @@ CmpInst::Predicate getOrderedPredicate(CmpInst::Predicate pred)
     case CmpInst::FCMP_UGE: return CmpInst::FCMP_OGE;
     case CmpInst::FCMP_ULE: return CmpInst::FCMP_OLE;
     default:
-        assert(0 && "wrong predicate");
+        IGC_ASSERT_MESSAGE(0, "wrong predicate");
         break;
     }
     return pred;
@@ -1241,7 +1244,10 @@ void Legalization::visitStoreInst(StoreInst& I)
         Value* storeVal = BitCastInst::Create(Instruction::BitCast, I.getOperand(0), legalTy, "", &I);
         Value* storePtr = I.getPointerOperand();
 
-        assert(storePtr->getType()->getPointerElementType()->isIntegerTy(srcWidth));
+        IGC_ASSERT(nullptr != storePtr);
+        IGC_ASSERT(nullptr != storePtr->getType());
+        IGC_ASSERT(nullptr != storePtr->getType()->getPointerElementType());
+        IGC_ASSERT(storePtr->getType()->getPointerElementType()->isIntegerTy(srcWidth));
 
         PointerType* ptrTy = PointerType::get(legalTy, storePtr->getType()->getPointerAddressSpace());
         IntToPtrInst* intToPtr = dyn_cast<IntToPtrInst>(storePtr);
@@ -1444,7 +1450,7 @@ void Legalization::visitShuffleVectorInst(ShuffleVectorInst& I)
             Constant* constSrc = dyn_cast<Constant>(srcVector);
             if (constSrc)
             {
-                srcVal = constSrc->getAggregateElement(dstIndex);
+                srcVal = constSrc->getAggregateElement(srcIndex);
             }
             else
             {
@@ -1510,7 +1516,7 @@ Value* Cast(Value* val, Type* type, Instruction* insertBefore)
     }
     else
     {
-        assert(0 && "unexpected type");
+        IGC_ASSERT_MESSAGE(0, "unexpected type");
     }
     return newVal;
 }
@@ -1596,7 +1602,7 @@ Type* Legalization::LegalAllocaType(Type* type) const
     case Type::PointerTyID:
         break;
     default:
-        assert(0 && "Alloca of unsupported type");
+        IGC_ASSERT_MESSAGE(0, "Alloca of unsupported type");
         break;
     }
     return legalType;
@@ -1641,7 +1647,7 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
         case Intrinsic::uadd_sat: OverflowIntrinID = Intrinsic::uadd_with_overflow; break;
         case Intrinsic::sadd_sat: OverflowIntrinID = Intrinsic::sadd_with_overflow; break;
 #endif
-        default: assert(0 && "Incorrect intrinsic"); break;
+        default: IGC_ASSERT_MESSAGE(0, "Incorrect intrinsic"); break;
         }
 
         int BitWidth = I.getType()->getIntegerBitWidth();
@@ -1676,7 +1682,9 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
         }
             break;
 #endif
-        default: assert(0 && "Incorrect intrinsic"); break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "Incorrect intrinsic");
+            break;
         }
 
         Value* Saturated = Builder.CreateSelect(Overflow, Boundary, Result);
@@ -1690,6 +1698,8 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
     case Intrinsic::usub_with_overflow:
     case Intrinsic::ssub_with_overflow:
     case Intrinsic::uadd_with_overflow:
+    case Intrinsic::umul_with_overflow:
+    case Intrinsic::smul_with_overflow:
     {
         Value* src0 = I.getArgOperand(0);
         Value* src1 = I.getArgOperand(1);
@@ -1731,7 +1741,75 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
                 isOverflow = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, andOpt, zero, "", &I);
             }
             break;
-            default: assert(0 && "Incorrect intrinsic"); break;
+            case Intrinsic::umul_with_overflow:
+            case Intrinsic::smul_with_overflow:
+            {
+                IGC_ASSERT(nullptr != src0);
+                IGC_ASSERT(nullptr != src1);
+                IGC_ASSERT(src0->getType() == src1->getType());
+                IGC_ASSERT(src0->getType()->isIntegerTy());
+                bool isSigned = intrinsicID == Intrinsic::smul_with_overflow;
+                res = BinaryOperator::Create(Instruction::Mul, src0, src1, "", &I);
+                const unsigned int bitWidth = src0->getType()->getIntegerBitWidth();
+                if (bitWidth == 64 || bitWidth == 32 )
+                {
+                    BasicBlock* const bb = I.getParent();
+                    IGC_ASSERT(nullptr != bb);
+                    Function* const f = bb->getParent();
+                    IGC_ASSERT(nullptr != f);
+                    Value* hiDst = CreateMulh(*f, Builder, isSigned, src0, src1);
+                    if (isSigned)
+                    {
+                        // Signed a * b overflows if Mulh(a, b) != 0 or -1   and consequently
+                        // if Mulh(a, b) + 1 > 1 (for an unsigned comparison)
+                        Value* const one = ConstantInt::get(src0->getType(), 1, true);
+                        Value* const add1 = BinaryOperator::Create(Instruction::Add, hiDst, one, "", &I);
+                        isOverflow = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_UGT, add1, one, "", &I);
+                    }
+                    else
+                    {
+                        // Unsigned a * b overflows if Mulh(a, b) != 0
+                        Value* const zero = ConstantInt::get(src0->getType(), 0, isSigned);
+                        isOverflow = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_NE, hiDst, zero, "", &I);
+                    }
+                }
+                else
+                {
+                    IGC_ASSERT(bitWidth < 32);
+                    Value* ores = nullptr;
+                    if (isSigned)
+                    {
+                        // Signed a * b overflows if (a * b) + (1 << (bitWidth-1)) >= (1 << bitWidth)
+                        //   (for an unsigned comparison)
+                        // For example. If src0 is 0xFF (-1) and src0 is 0xFF (-1) then
+                        //   src0SExt is 0xFFFFFFFF
+                        //   src1SExt is 0xFFFFFFFF
+                        //   mulRes is 0x00000001   (0xFFFFFFFF * 0xFFFFFFFF or -1 * -1)
+                        //   oneShl is 0x00000080   (1 << 7)
+                        //   ores is 0x00000081     (1 + 128)
+                        //   overflowed is 0x00000100    (1 << 8)
+                        //   isOverflow is false    (129 >= 256)
+                        Value* const src0SExt = BitCastInst::CreateSExtOrBitCast(src0, Builder.getInt32Ty(), "", &I);
+                        Value* const src1SExt = BitCastInst::CreateSExtOrBitCast(src1, Builder.getInt32Ty(), "", &I);
+                        Value* const mulRes = BinaryOperator::Create(Instruction::Mul, src0SExt, src1SExt, "", &I);
+                        Value* const oneShl = ConstantInt::get(Builder.getInt32Ty(), 1LL << (bitWidth - 1), true);
+                        ores = BinaryOperator::Create(Instruction::Add, mulRes, oneShl, "", &I);
+                    }
+                    else
+                    {
+                        // Unsigned a * b overflows if a * b >= (1 << bitWidth) (for an unsigned comparison)
+                        Value* const src0ZExt = BitCastInst::CreateZExtOrBitCast(src0, Builder.getInt32Ty(), "", &I);
+                        Value* const src1ZExt = BitCastInst::CreateZExtOrBitCast(src1, Builder.getInt32Ty(), "", &I);
+                        ores = BinaryOperator::Create(Instruction::Mul, src0ZExt, src1ZExt, "", &I);
+                    }
+                    Value* const overflowed = ConstantInt::get(Builder.getInt32Ty(), 1LL << bitWidth, false);
+                    isOverflow = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_UGE, ores, overflowed, "", &I);
+                }
+            }
+            break;
+            default:
+                IGC_ASSERT_MESSAGE(0, "Incorrect intrinsic");
+                break;
         }
 
         // llvm.x.with.overflow returns a struct, where the first element is the operation result,
@@ -1742,7 +1820,7 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
             ExtractValueInst* extract = dyn_cast<ExtractValueInst>(*U);
             if (!extract)
             {
-                assert(0 && "Did not expect anything but an extract after uadd_with_overflow");
+                IGC_ASSERT_MESSAGE(0, "Did not expect anything but an extract after uadd_with_overflow");
                 continue;
             }
 
@@ -1757,7 +1835,7 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
             }
             else
             {
-                assert(0 && "Unexpected index when handling uadd_with_overflow");
+                IGC_ASSERT_MESSAGE(0, "Unexpected index when handling uadd_with_overflow");
             }
 
             m_instructionsToRemove.push_back(extract);
@@ -1769,33 +1847,73 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
     case Intrinsic::assume:
         m_instructionsToRemove.push_back(&I);
         break;
-    case Intrinsic::umul_with_overflow:
-    case Intrinsic::smul_with_overflow:
-        TODO("Handle the other with_overflow intrinsics");
-        assert(0 && "Unhandled llvm.x.with.overflow intrinsic");
-        break;
-    default:
-        break;
-    }
-    if (!m_ctx->platform.supportFP16Rounding() && I.getType()->isHalfTy()) {
-        // On platform lacking of FP16 rounding, promote them to FP32 and
-        // demote back.
-        Intrinsic::ID IID = I.getIntrinsicID();
-        switch (IID) {
-        default:
-            break;
-        case llvm::Intrinsic::floor:
-        case llvm::Intrinsic::ceil:
-        case llvm::Intrinsic::trunc: {
+    case Intrinsic::floor:
+    case Intrinsic::ceil:
+    case Intrinsic::trunc:
+    {
+        if (!m_ctx->platform.supportFP16Rounding() && I.getType()->isHalfTy())
+        {
+            // On platform lacking of FP16 rounding, promote them to FP32 and
+            // demote back.
             Value* Val = Builder.CreateFPExt(I.getOperand(0), Builder.getFloatTy());
-            Value* Callee = Intrinsic::getDeclaration(I.getParent()->getParent()->getParent(), IID, Builder.getFloatTy());
+            Value* Callee = Intrinsic::getDeclaration(I.getParent()->getParent()->getParent(), intrinsicID, Builder.getFloatTy());
             Val = Builder.CreateCall(Callee, Val);
             Val = Builder.CreateFPTrunc(Val, I.getType());
             I.replaceAllUsesWith(Val);
             I.eraseFromParent();
-            break;
         }
+    }
+    break;
+    case Intrinsic::copysign:
+    {
+        Value* const src0 = I.getArgOperand(0);
+        Value* const src1 = I.getArgOperand(1);
+        Type* const srcType = src0->getType();
+
+        IGC_ASSERT(nullptr != srcType);
+        IGC_ASSERT_MESSAGE(srcType->getScalarType()->isFloatingPointTy(), "llvm.copysign supports only floating-point type");
+
+        auto cpySign = [&Builder](Value* const src0, Value* const src1) {
+            Type* const srcType = src0->getType();
+            const unsigned int srcTypeSize = srcType->getPrimitiveSizeInBits();
+            const uint64_t signMask = (uint64_t)0x1 << (srcTypeSize - 1);
+
+            Value* const src0Int = Builder.CreateBitCast(src0, Builder.getIntNTy(srcTypeSize));
+            Value* const src1Int = Builder.CreateBitCast(src1, Builder.getIntNTy(srcTypeSize));
+
+            Value* const src0NoSign = Builder.CreateAnd(src0Int, Builder.getIntN(srcTypeSize, ~signMask));
+            Value* const src1Sign = Builder.CreateAnd(src1Int, Builder.getIntN(srcTypeSize, signMask));
+
+            Value* newValue = static_cast<Value*>(Builder.CreateOr(src0NoSign, src1Sign));
+            newValue = Builder.CreateBitCast(newValue, srcType);
+            return newValue;
+        };
+
+        Value* newValue = nullptr;
+        if (srcType->isVectorTy())
+        {
+            const unsigned int numElements = srcType->getVectorNumElements();
+            Value* dstVec = UndefValue::get(srcType);
+            for (unsigned int i = 0; i < numElements; ++i)
+            {
+                Value* const src0Scalar = Builder.CreateExtractElement(src0, i);
+                Value* const src1Scalar = Builder.CreateExtractElement(src1, i);
+                auto newValue = cpySign(src0Scalar, src1Scalar);
+                dstVec = Builder.CreateInsertElement(dstVec, newValue, i);
+            }
+            newValue = dstVec;
         }
+        else
+        {
+            newValue = cpySign(src0, src1);
+        }
+        IGC_ASSERT(nullptr != newValue);
+        I.replaceAllUsesWith(newValue);
+        I.eraseFromParent();
+    }
+    break;
+    default:
+        break;
     }
 }
 
@@ -1924,7 +2042,7 @@ void Legalization::visitTruncInst(llvm::TruncInst& I) {
 
     m_builder->SetInsertPoint(&I);
 
-    assert(Idx < 3 && "The initial index is out of range!");
+    IGC_ASSERT_MESSAGE(Idx < 3, "The initial index is out of range!");
 
     Value* NewVal =
         m_builder->CreateZExt(

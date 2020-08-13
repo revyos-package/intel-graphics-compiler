@@ -29,6 +29,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/helper.h"
 
 #include "visa_wa.h"
+#include "inc/common/sku_wa.h"
 
 namespace IGC
 {
@@ -124,6 +125,7 @@ namespace IGC
         bool      m_noMask;
         bool      m_SubSpanDestination;
         bool      m_secondHalf;
+        bool      m_secondNibble = false;
     };
 
     class CEncoder
@@ -134,8 +136,10 @@ namespace IGC
         void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
         void SetEncoderState(SEncoderState& newState);
+        VISA_Align GetVISAAlign(CVariable* var);
 
-        void SetKernelStackPointer64();
+        void SetDispatchSimdSize();
+        void SetSpillMemOffset();
         void SetStackFunctionArgSize(uint size);  // size in GRFs
         void SetStackFunctionRetSize(uint size);  // size in GRFs
         void SetExternFunctionFlag();
@@ -145,6 +149,9 @@ namespace IGC
         void DeclareInput(CVariable* var, uint offset, uint instance);
         void MarkAsOutput(CVariable* var);
         void Compile(bool hasSymbolTable = false);
+        void ReportCompilerStatistics(VISAKernel* pMainKernel, SProgramOutput* pOutput);
+        int GetThreadCount(SIMDMode simdMode);
+
         CEncoder();
         ~CEncoder();
         void SetProgram(CShader* program);
@@ -232,6 +239,7 @@ namespace IGC
         void File(std::string& s);
         void PredAdd(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1);
         void DebugLinePlaceholder();
+        void SetCurrentInst(llvm::Instruction *inst);
 
         inline void Jump(uint label);
         inline void Cast(CVariable* dst, CVariable* src);
@@ -263,6 +271,7 @@ namespace IGC
         inline void Rsqrt(CVariable* dst, CVariable* src0);
         inline void Inv(CVariable* dst, CVariable* src0);
         inline void Not(CVariable* dst, CVariable* src0);
+        // src0 * src1 + src2
         inline void Mad(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         inline void Lrp(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         inline void Xor(CVariable* dst, CVariable* src0, CVariable* src1);
@@ -345,6 +354,8 @@ namespace IGC
         inline bool IsSubSpanDestination();
         inline void SetSecondHalf(bool secondHalf);
         inline bool IsSecondHalf();
+        inline void SetSecondNibble(bool secondNibble);
+        inline bool IsSecondNibble();
 
         void Wait();
 
@@ -383,6 +394,8 @@ namespace IGC
 
         std::string GetVariableName(CVariable* var);
         std::string GetDumpFileName(std::string extension);
+
+
 
     private:
         // helper functions
@@ -472,9 +485,24 @@ namespace IGC
         // save compile time by avoiding retry if the amount of spill is (very) small
         bool AvoidRetryOnSmallSpill() const;
 
-        void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
-        void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
-        void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+        // CreateSymbolTable, CreateRelocationTable and CreateFuncAttributeTable will create symbols, relococations and FuncAttributes in
+        // two formats. One in given buffer that will be later parsed as patch token based format, another as struct type that will be parsed
+        // as ZE binary format
+
+        // CreateSymbolTable
+        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        // input/output: symbols: for ZEBinary foramt
+        // FIXME: Currently we will fill both structures for patch-token-based and ZEBinary format. Can refactor the code
+        // to do only one based on produced binary format (regkey: EnableZEBinary)
+        void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::SymbolLists& symbols);
+        // Create function symbols for kernels. This is ZEBinary foramt only.
+        void CreateKernelSymbol(const std::string& kernelName, const VISAKernel& visaKernel, SProgramOutput::SymbolLists& symbols);
+
+        // CreateRelocationTable
+        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        // input/output: relocations: for ZEBinary foramt
+        void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::RelocListTy& relocations);
+        void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs);
 
         uint32_t getGRFSize() const;
 
@@ -529,7 +557,9 @@ namespace IGC
 
         llvm::DenseMap<SAlias, CVariable*, SAliasMapInfo> m_aliasesMap;
 
-        VISA_WA_TABLE m_WaTable;
+        // vISA needs its own Wa-table as some of the W/A are applicable
+        // only to certain APIs/shader types/reg key settings/etc.
+        WA_TABLE m_vISAWaTable;
 
         enum OpType
         {
@@ -764,6 +794,7 @@ namespace IGC
         DataMov(ISA_MOV, dst, src);
     }
 
+    // src0 * src1 + src2
     inline void CEncoder::Mad(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
     {
         Arithmetic(ISA_MAD, dst, src0, src1, src2);
@@ -907,6 +938,16 @@ namespace IGC
     inline bool CEncoder::IsSecondHalf()
     {
         return m_encoderState.m_secondHalf;
+    }
+
+    inline void CEncoder::SetSecondNibble(bool secondNibble)
+    {
+        m_encoderState.m_secondNibble = secondNibble;
+    }
+
+    inline bool CEncoder::IsSecondNibble()
+    {
+        return m_encoderState.m_secondNibble;
     }
 
     inline bool CEncoder::IsSubSpanDestination()

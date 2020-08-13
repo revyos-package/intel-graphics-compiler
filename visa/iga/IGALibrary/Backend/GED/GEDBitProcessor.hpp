@@ -44,6 +44,8 @@ namespace iga
     protected:
         const Model &m_model;
 
+        Platform platform() const {return m_model.platform;}
+
     public:
         GEDBitProcessor(const Model& model,ErrorHandler& errHandler);
 
@@ -58,7 +60,7 @@ namespace iga
         bool isAlign16MathMacroRegisterCsrOperand(
             Operand::Kind opKind,
             RegName reg,
-            uint8_t regNum) const;
+            uint16_t regNum) const;
         bool isAlign16MathMacroRegisterCsrOperand(const Operand &op) const{
             return isAlign16MathMacroRegisterCsrOperand(
                 op.getKind(),

@@ -23,19 +23,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "Compiler/CISACodeGen/VertexShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
-
 #include "common/debug/Debug.hpp"
 #include "common/debug/Dump.hpp"
 #include "common/secure_mem.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/IRBuilder.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include <iStdLib/utility.h>
+#include "Probe/Assertion.h"
 
 /***********************************************************************************
 This file contains the code specific to vertex shader
@@ -67,20 +66,21 @@ namespace IGC
         //R0 and R1 are always allocated
 
         //R0 is always allocated as a predefined variable. Increase offset for R0
-        assert(m_R0);
+        IGC_ASSERT(m_R0);
         offset += getGRFSize();
 
-        assert(m_R1);
+        IGC_ASSERT(m_R1);
         AllocateInput(m_R1, offset);
         offset += getGRFSize();
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(getGRFSize());
+        IGC_ASSERT(offset % getGRFSize() == 0);
         ProgramOutput()->m_startReg = offset / getGRFSize();
 
         // allocate space for NOS constants and pushed constants
         AllocateConstants3DShader(offset);
 
-        assert(offset % getGRFSize() == 0);
+        IGC_ASSERT(offset % getGRFSize() == 0);
 
         // TODO: handle packed vertex attribute even if we pull
         bool packedInput = m_Platform->hasPackedVertexAttr() &&
@@ -120,7 +120,8 @@ namespace IGC
 
     void CVertexShader::PackVFInput(unsigned int index, unsigned int& offset)
     {
-        bool dontPackPartialElement = IGC_IS_FLAG_ENABLED(VFPackingDisablePartialElements);
+        bool dontPackPartialElement = m_ModuleMetadata->compOpt.disablePartialVertexComponentPacking ||
+            IGC_IS_FLAG_ENABLED(VFPackingDisablePartialElements);
         if (dontPackPartialElement)
         {
             if (m_ElementComponentEnableMask[index / 4] == 0)
@@ -153,16 +154,19 @@ namespace IGC
 
     void CShaderProgram::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     {
-        CVertexShader* pShader = static_cast<CVertexShader*>(GetShader(SIMDMode::SIMD8));
+        CVertexShader* pShader = static_cast<CVertexShader*>(GetShader(m_context->platform.getMinDispatchMode()));
         pShader->FillProgram(pKernelProgram);
     }
 
     void CVertexShader::FillProgram(SVertexShaderKernelProgram* pKernelProgram)
     {
-        assert(entry && entry->getParent());
+        IGC_ASSERT(nullptr != entry);
+        IGC_ASSERT(entry->getParent());
         const bool isPositionOnlyShader = (entry->getParent()->getModuleFlag("IGC::PositionOnlyVertexShader") != nullptr);
 
-        pKernelProgram->simd8 = *ProgramOutput();
+        {
+            pKernelProgram->simd8 = *ProgramOutput();
+        }
         pKernelProgram->MaxNumInputRegister = GetMaxNumInputRegister();
         pKernelProgram->VertexURBEntryReadLength = GetVertexURBEntryReadLength();
         pKernelProgram->VertexURBEntryReadOffset = GetVertexURBEntryReadOffset();
@@ -192,8 +196,6 @@ namespace IGC
         pKernelProgram->isMessageTargetDataCacheDataPort = isMessageTargetDataCacheDataPort;
         pKernelProgram->singleInstanceVertexShader =
             ((entry->getParent())->getNamedMetadata("ConstantBufferIndexedWithInstanceId") != nullptr) ? true : false;
-        pKernelProgram->EnableVertexReordering =
-            (GetContext()->getModuleMetaData()->vsInfo.DrawIndirectBufferIndex != -1);
 
         CreateGatherMap();
         CreateConstantBufferOutput(pKernelProgram);
@@ -227,7 +229,8 @@ namespace IGC
     void CVertexShader::PreCompile()
     {
         CreateImplicitArgs();
-        m_R1 = GetNewVariable(8, ISA_TYPE_D, EALIGN_GRF);
+        m_R1 = GetNewVariable(
+            numLanes(m_Platform->getMinDispatchMode()), ISA_TYPE_D, EALIGN_GRF, "R1");
     }
 
     void CVertexShader::AddPrologue()
@@ -300,7 +303,8 @@ namespace IGC
 
     void CVertexShader::SetShaderSpecificHelper(EmitPass* emitPass)
     {
-        m_properties = emitPass->getAnalysisIfAvailable<CollectVertexShaderProperties>()->GetProperties();
+        m_properties =
+            emitPass->getAnalysisIfAvailable<CollectVertexShaderProperties>()->GetProperties();
     }
 
     void CVertexShader::AddEpilogue(llvm::ReturnInst* pRet)

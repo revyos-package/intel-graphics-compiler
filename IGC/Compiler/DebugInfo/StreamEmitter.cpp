@@ -32,18 +32,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
 #include "llvm/Config/llvm-config.h"
-
+#include "Compiler/DebugInfo/DIE.hpp"
 #include "Compiler/DebugInfo/StreamEmitter.hpp"
 #include "Compiler/DebugInfo/Version.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvmWrapper/MC/MCAsmBackend.h"
 #include "llvmWrapper/ADT/STLExtras.h"
-
 #include "llvm/MC/MCAsmInfoELF.h"
-
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -58,13 +55,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/SourceMgr.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
-
-
-
-
 
 namespace IGC
 {
@@ -138,21 +132,21 @@ namespace IGC
                 {
                     switch ((unsigned)fixup.getKind())
                     {
-                    default: llvm_unreachable("invalid fixup kind!");
+                    default: IGC_ASSERT_EXIT_MESSAGE(0, "invalid fixup kind!");
 
                     case FK_Data_8: type = ELF::R_X86_64_PC64; break;
                     case FK_Data_4: type = ELF::R_X86_64_PC32; break;
                     case FK_Data_2: type = ELF::R_X86_64_PC16; break;
 
                     case FK_PCRel_8:
-                        assert(modifier == MCSymbolRefExpr::VK_None);
+                        IGC_ASSERT(modifier == MCSymbolRefExpr::VK_None);
                         type = ELF::R_X86_64_PC64;
                         break;
                     case FK_PCRel_4:
                         switch (modifier)
                         {
                         default:
-                            llvm_unreachable("Unimplemented");
+                            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
                         case MCSymbolRefExpr::VK_None:
                             type = ELF::R_X86_64_PC32;
                             break;
@@ -174,11 +168,11 @@ namespace IGC
                         }
                         break;
                     case FK_PCRel_2:
-                        assert(modifier == MCSymbolRefExpr::VK_None);
+                        IGC_ASSERT(modifier == MCSymbolRefExpr::VK_None);
                         type = ELF::R_X86_64_PC16;
                         break;
                     case FK_PCRel_1:
-                        assert(modifier == MCSymbolRefExpr::VK_None);
+                        IGC_ASSERT(modifier == MCSymbolRefExpr::VK_None);
                         type = ELF::R_X86_64_PC8;
                         break;
                     }
@@ -187,12 +181,12 @@ namespace IGC
                 {
                     switch ((unsigned)fixup.getKind())
                     {
-                    default: llvm_unreachable("invalid fixup kind!");
+                    default: IGC_ASSERT_EXIT_MESSAGE(0, "invalid fixup kind!");
                     case FK_Data_8:
                         switch (modifier)
                         {
                         default:
-                            llvm_unreachable("Unimplemented");
+                            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
                         case MCSymbolRefExpr::VK_None:
                             type = ELF::R_X86_64_64;
                             break;
@@ -225,14 +219,14 @@ namespace IGC
                 {
                     switch ((unsigned)fixup.getKind())
                     {
-                    default: llvm_unreachable("invalid fixup kind!");
+                    default: IGC_ASSERT_EXIT_MESSAGE(0, "invalid fixup kind!");
 
                     case FK_PCRel_4:
                     case FK_Data_4:
                         switch (modifier)
                         {
                         default:
-                            llvm_unreachable("Unimplemented");
+                            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
                         case MCSymbolRefExpr::VK_None:
                             type = ELF::R_386_PC32;
                             break;
@@ -247,14 +241,14 @@ namespace IGC
                 {
                     switch ((unsigned)fixup.getKind())
                     {
-                    default: llvm_unreachable("invalid fixup kind!");
+                    default: IGC_ASSERT_EXIT_MESSAGE(0, "invalid fixup kind!");
 
                     case FK_PCRel_4:
                     case FK_Data_4:
                         switch (modifier)
                         {
                         default:
-                            llvm_unreachable("Unimplemented");
+                            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
                         case MCSymbolRefExpr::VK_None:
                             type = ELF::R_386_32;
                             break;
@@ -297,7 +291,7 @@ namespace IGC
                 }
             }
             else
-                llvm_unreachable("Unsupported ELF machine type.");
+                IGC_ASSERT_EXIT_MESSAGE(0, "Unsupported ELF machine type.");
 
             return type;
         }
@@ -321,7 +315,7 @@ namespace IGC
         {
             switch (Kind)
             {
-            default: llvm_unreachable("invalid fixup kind!");
+            default: IGC_ASSERT_EXIT_MESSAGE(0, "invalid fixup kind!");
             case FK_PCRel_1:
             case FK_SecRel_1:
             case FK_Data_1: return 0;
@@ -342,15 +336,13 @@ namespace IGC
         {
             unsigned size = 1 << getFixupKindLog2Size(fixup.getKind());
 
-            assert(fixup.getOffset() + size <= dataSize &&
-                "Invalid fixup offset!");
+            IGC_ASSERT_MESSAGE(fixup.getOffset() + size <= dataSize, "Invalid fixup offset!");
 
             // Check that uppper bits are either all zeros or all ones.
             // Specifically ignore overflow/underflow as long as the leakage is
             // limited to the lower bits. This is to remain compatible with
             // other assemblers.
-            assert(isIntN(size * 8 + 1, value) &&
-                "value does not fit in the fixup field");
+            IGC_ASSERT_MESSAGE(isIntN(size * 8 + 1, value), "value does not fit in the fixup field");
 
             for (unsigned i = 0; i != size; ++i)
             {
@@ -365,15 +357,13 @@ namespace IGC
         {
             unsigned size = 1 << getFixupKindLog2Size(fixup.getKind());
 
-            assert(fixup.getOffset() + size <= Data.size() &&
-                "Invalid fixup offset!");
+            IGC_ASSERT_MESSAGE(fixup.getOffset() + size <= Data.size(), "Invalid fixup offset!");
 
             // Check that uppper bits are either all zeros or all ones.
             // Specifically ignore overflow/underflow as long as the leakage is
             // limited to the lower bits. This is to remain compatible with
             // other assemblers.
-            assert(isIntN(size * 8 + 1, value) &&
-                "value does not fit in the fixup field");
+            IGC_ASSERT_MESSAGE(isIntN(size * 8 + 1, value), "value does not fit in the fixup field");
 
             for (unsigned i = 0; i != size; ++i)
             {
@@ -388,8 +378,8 @@ namespace IGC
         bool mayNeedRelaxation(const MCInst & inst, const MCSubtargetInfo & STI) const override
 #endif
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
             return false;
         }
 
@@ -398,16 +388,16 @@ namespace IGC
             const MCRelaxableFragment* pDF,
             const MCAsmLayout& layout) const override
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
             return false;
         }
 
         void relaxInstruction(const MCInst& inst, const MCSubtargetInfo& STI,
             MCInst& res) const override
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
         }
 
 #if LLVM_VERSION_MAJOR == 4
@@ -461,8 +451,8 @@ namespace IGC
 #if LLVM_VERSION_MAJOR >= 7
         std::unique_ptr<MCObjectTargetWriter> createObjectTargetWriter() const override
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
         }
 #endif
     };
@@ -474,14 +464,14 @@ namespace IGC
         virtual void encodeInstruction(const MCInst& inst, raw_ostream& os, SmallVectorImpl<MCFixup>& fixups,
             const MCSubtargetInfo& m) const
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
         }
 
         void operator=(const VISAMCCodeEmitter&)
         {
-            assert(false && "TODO: implement this");
-            llvm_unreachable("Unimplemented");
+            // TODO: implement this
+            IGC_ASSERT_EXIT_MESSAGE(0, "Unimplemented");
         }
 
     };
@@ -646,7 +636,7 @@ MCSymbol* StreamEmitter::GetSymbol(const GlobalValue* pGV) const
     M.getNameWithPrefix(NameStr, pGV, false);
     return m_pContext->GetOrCreateSymbol(NameStr.str());
     */
-    assert(pGV->hasName() && "TODO: fix this case");
+    IGC_ASSERT_MESSAGE(pGV->hasName(), "TODO: fix this case");
     return m_pContext->getOrCreateSymbol(Twine(m_pAsmInfo->getPrivateGlobalPrefix()) + pGV->getName());
 }
 
@@ -807,8 +797,7 @@ void StreamEmitter::EmitSectionOffset(const MCSymbol* pLabel, const MCSymbol* pS
 
     // If pLabel has already been emitted, verify that it is in the same section as
     // section label for sanity.
-    assert((!pLabel->isInSection() || &pLabel->getSection() == &section) &&
-        "section offset using wrong section base for label");
+    IGC_ASSERT_MESSAGE((!pLabel->isInSection() || &pLabel->getSection() == &section), "section offset using wrong section base for label");
 
     // If the section in question will end up with an address of 0 anyway, we can
     // just emit an absolute reference to save a relocation.
@@ -826,31 +815,32 @@ void StreamEmitter::EmitSectionOffset(const MCSymbol* pLabel, const MCSymbol* pS
 
 void StreamEmitter::EmitDwarfRegOp(unsigned reg, unsigned offset, bool indirect) const
 {
+    auto regEncoded = GetEncodedRegNum<RegisterNumbering::GRFBase>(reg);
     if (indirect)
     {
-        if (reg < 32)
+        if (regEncoded < 32)
         {
-            EmitInt8(dwarf::DW_OP_breg0 + reg);
+            EmitInt8(dwarf::DW_OP_breg0 + regEncoded);
         }
         else
         {
             // Emit ("DW_OP_bregx");
             EmitInt8(dwarf::DW_OP_bregx);
-            EmitULEB128(reg);
+            EmitULEB128(regEncoded);
         }
         EmitSLEB128(offset);
     }
     else
     {
-        if (reg < 32)
+        if (regEncoded < 32)
         {
-            EmitInt8(dwarf::DW_OP_reg0 + reg);
+            EmitInt8(dwarf::DW_OP_reg0 + regEncoded);
         }
         else
         {
             // Emit ("DW_OP_regx");
             EmitInt8(dwarf::DW_OP_regx);
-            EmitULEB128(reg);
+            EmitULEB128(regEncoded);
         }
     }
 }
@@ -885,7 +875,7 @@ void StreamEmitter::Finalize() const
 
 const MCObjectFileInfo& StreamEmitter::GetObjFileLowering() const
 {
-    assert(m_pObjFileInfo && "Object File Lowering was not initialized");
+    IGC_ASSERT_MESSAGE(m_pObjFileInfo, "Object File Lowering was not initialized");
     return *m_pObjFileInfo;
 }
 

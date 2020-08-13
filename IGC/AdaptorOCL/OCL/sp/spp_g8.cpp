@@ -28,6 +28,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "../../../Compiler/CodeGenPublic.h"
 #include "program_debug_data.h"
+#include "../../../common/SystemThread.h"
 #include "../../../common/Types.hpp"
 #include "../../../common/shaderOverride.hpp"
 #include "../../../Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
@@ -35,7 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <iomanip>
 #include <fstream>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace iOpenCL
 {
@@ -58,8 +59,10 @@ CGen8OpenCLProgramBase::~CGen8OpenCLProgramBase()
         delete data.kernelDebugData;
     }
 
-    delete m_pSystemThreadKernelOutput;
-    m_pSystemThreadKernelOutput = nullptr;
+    if (m_pSystemThreadKernelOutput)
+    {
+        SIP::CSystemThread::DeleteSystemThreadKernel(m_pSystemThreadKernelOutput);
+    }
 }
 
 RETVAL CGen8OpenCLProgramBase::GetProgramBinary(
@@ -221,9 +224,70 @@ void overrideOCLKernelBinary(
     std::unique_ptr<char[]> Buf(new char[newBinarySize]);
     f.read(Buf.get(), newBinarySize);
 
-    IGC_ASSERT(f && "Not fully read!");
+    IGC_ASSERT_MESSAGE(f.good(), "Not fully read!");
 
     KernBin->Write(Buf.get(), newBinarySize);
+}
+
+
+void CGen8OpenCLProgram::GetZEBinary(
+    llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes)
+{
+    auto isValidShader = [&](IGC::COpenCLKernel* shader)->bool
+    {
+        return (shader && shader->ProgramOutput()->m_programSize > 0);
+    };
+
+    ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8, m_pContext->m_programInfo);
+
+    for (auto pKernel : m_ShaderProgramList)
+    {
+        IGC::COpenCLKernel* simd8Shader = static_cast<IGC::COpenCLKernel*>(pKernel->GetShader(SIMDMode::SIMD8));
+        IGC::COpenCLKernel* simd16Shader = static_cast<IGC::COpenCLKernel*>(pKernel->GetShader(SIMDMode::SIMD16));
+        IGC::COpenCLKernel* simd32Shader = static_cast<IGC::COpenCLKernel*>(pKernel->GetShader(SIMDMode::SIMD32));
+
+        // Determine how many simd modes we have per kernel
+        // FIXME: We actually expect only one simd mode per kernel. There should not be multiple SIMD mode available
+        // for one kernel (runtime cannot support that). So these check can be simplified
+        std::vector<IGC::COpenCLKernel*> kernelVec;
+        if (m_pContext->m_DriverInfo.sendMultipleSIMDModes() && (m_pContext->getModuleMetaData()->csInfo.forcedSIMDSize == 0))
+        {
+            // For multiple SIMD modes, send SIMD modes in descending order
+            if (isValidShader(simd32Shader))
+                kernelVec.push_back(simd32Shader);
+            if (isValidShader(simd16Shader))
+                kernelVec.push_back(simd16Shader);
+            if (isValidShader(simd8Shader))
+                kernelVec.push_back(simd8Shader);
+        }
+        else
+        {
+            if (isValidShader(simd32Shader))
+                kernelVec.push_back(simd32Shader);
+            else if (isValidShader(simd16Shader))
+                kernelVec.push_back(simd16Shader);
+            else if (isValidShader(simd8Shader))
+                kernelVec.push_back(simd8Shader);
+        }
+
+        for (auto kernel : kernelVec)
+        {
+            IGC::SProgramOutput* pOutput = kernel->ProgramOutput();
+
+            zebuilder.createKernel(
+                (const char*)pOutput->m_programBin,
+                pOutput->m_programSize,
+                kernel->m_kernelInfo,
+                kernel->getGRFSize());
+
+            // FIXME: Handle IGC_IS_FLAG_ENABLED(ShaderDumpEnable) and
+            // IGC_IS_FLAG_ENABLED(ShaderOverride)
+
+            // ... Create the debug data binary streams
+        }
+    }
+
+    zebuilder.getBinaryObject(programBinary);
 }
 
 void CGen8OpenCLProgram::CreateKernelBinaries()
@@ -338,6 +402,22 @@ void CGen8CMProgram::CreateKernelBinaries()
 
         m_KernelBinaries.push_back(data);
     }
+}
+
+void CGen8CMProgram::GetZEBinary(
+    llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes)
+{
+    ZEBinaryBuilder zebuilder{m_Platform, pointerSizeInBytes == 8, *m_programInfo};
+
+    for (auto *kernel : m_kernels)
+    {
+        zebuilder.createKernel(
+            reinterpret_cast<const char*>(kernel->m_prog.m_programBin),
+            kernel->m_prog.m_programSize,
+            kernel->m_kernelInfo,
+            kernel->m_GRFSizeInBytes);
+    }
+    zebuilder.getBinaryObject(programBinary);
 }
 
 } // namespace iOpenCL

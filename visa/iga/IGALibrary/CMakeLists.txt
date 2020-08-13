@@ -11,16 +11,16 @@ execute_process(
     OUTPUT_VARIABLE GIT_COMMIT
     OUTPUT_STRIP_TRAILING_WHITESPACE
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-
+#
 execute_process(
     COMMAND git diff-index --quiet HEAD --
-    OUTPUT_VARIABLE GIT_DIRTY
+    RESULT_VARIABLE GIT_DIRTY
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 set(IGA_VERSION_SUFFIX "")
 if(GIT_COMMIT)
     set(IGA_VERSION_DIRTY_TAG "")
-    if (NOT GIT_DIRTY EQUAL 0)
+    if (NOT ${GIT_DIRTY} EQUAL 0)
         set(IGA_VERSION_DIRTY_TAG "+")
     endif()
     set(IGA_VERSION_SUFFIX "${IGA_VERSION_SUFFIX}-${GIT_COMMIT}${IGA_VERSION_DIRTY_TAG}")
@@ -59,10 +59,20 @@ else ()
 endif()
 
 # Mimick IGC/MDF warnings within IGA library on our side to ensure we don't
-# break the build.
+# break the build.  We're a little more strict here.
 if (MSVC)
-  add_compile_options(/w14189)
+  # unhandled enum case not handled in switch (from comp/igc I believe)
   add_compile_options(/w14062)
+  # add_compile_options(/w14100) # unreferenced parameter. Enable caused Release build failure
+  add_compile_options(/w14189) # unreachable code
+  add_compile_options(/w14244) # implicit narrowing
+  add_compile_options(/w14245) # signed/unsigned conversion
+  add_compile_options(/w14389) # signed/unsigned compare
+  # add_compile_options(/w14456) # var name shadows outer scope var
+  # add_compile_options(/w14458) # var name shadows field
+  # add_compile_options(/w14505) # unreferenced local function (static). Enable caused Release build failure
+
+  # warnings are errors
   add_compile_options(/WX)
 endif()
 
@@ -116,14 +126,14 @@ set(IGA_Misc
   ${CMAKE_CURRENT_SOURCE_DIR}/deprecation.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/strings.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/strings.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/system.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/system.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/version.hpp
 )
 
 set(IGA_Frontend
   ${IGA_Frontend_Formatter}
-  ${IGA_Frontend_Formatter_LdStSyntax}
   ${IGA_Frontend_Parser}
-  ${IGA_Frontend_Parser_LdStSyntax}
 )
 
 set(IGA_Backend_GED
@@ -138,6 +148,7 @@ set(IGA_SOURCES
   ${IGA_API_Source}
   ${IGA_Backend}
   ${IGA_Backend_GED}
+  ${IGA_Backend_Messages}
   ${IGA_Backend_Native}
   ${IGA_Backend_Native_Gen12}
   ${IGA_Frontend}
@@ -149,7 +160,7 @@ set(IGA_SOURCES
   ${GED_INCLUDE}/ged.h
 )
 
-set(FLAG "")
+set(BUILD_EXPOSURE_FLAG "")
 
 set(IGA_DEFINITIONS _CONSOLE _LIB ${VSVERSION} ${GED_BRANCH})
 if (MSVC)
@@ -245,7 +256,6 @@ set(IGA_SOURCES_ENCODER_ONLY
   ${IGA_Backend}
   ${IGA_Backend_GED_EncoderOnly}
   ${IGA_Frontend_Formatter}
-  ${IGA_Frontend_Formatter_LdStSyntax}
   ${IGA_IR}
   ${IGA_MemManager}
 #  ${IGA_Misc}
@@ -271,12 +281,12 @@ if(IGC_BUILD AND MSVC)
 bs_set_wdk(IGA_ENC_LIB)
 endif()
 
-# DISABLE_ENCODER_EXCEPTIONS: Disabling exceptions for encoder only project.
+# IGA_DISABLE_ENCODER_EXCEPTIONS: Disabling exceptions for encoder-only project.
 # So it can be used in vISA BE, which is used in IGC. (IGC doesn't permit C++
 # exceptions to be used
 # Alex: seems like this is the way to do it so it works in various
 # linux, android builds.
-target_compile_definitions(IGA_ENC_LIB PUBLIC DISABLE_ENCODER_EXCEPTIONS)
+target_compile_definitions(IGA_ENC_LIB PUBLIC IGA_DISABLE_ENCODER_EXCEPTIONS)
 
 ##############################################################################
 # iga##.dll
@@ -335,20 +345,17 @@ source_group("API" FILES ${IGA_API_Headers} ${IGA_API_EncoderInterface} ${IGA_AP
 source_group("Backend" FILES ${IGA_Backend})
 
 if(WIN32)
-source_group("Backend\\GED" FILES ${IGA_Backend_GED})
-source_group("Backend\\Native" FILES ${IGA_Backend_Native})
+  source_group("Backend\\GED" FILES ${IGA_Backend_GED})
+  source_group("Backend\\Messages" FILES ${IGA_Backend_Messages})
+  source_group("Backend\\Native" FILES ${IGA_Backend_Native})
 else()
-source_group("Backend/GED" FILES ${IGA_Backend_GED})
-source_group("Backend/Native" FILES ${IGA_Backend_Native})
+  source_group("Backend/GED" FILES ${IGA_Backend_GED})
+  source_group("Backend/Messages" FILES ${IGA_Backend_Messages})
+  source_group("Backend/Native" FILES ${IGA_Backend_Native})
 endif()
 
 
 source_group("Frontend" FILES ${IGA_Frontend_Formatter} ${IGA_Frontend_Parser})
-if(WIN32)
-source_group("Frontend\\LdStSyntax" FILES ${IGA_Frontend_Formatter_LdStSyntax} ${IGA_Frontend_Parser_LdStSyntax})
-else()
-source_group("Frontend/LdStSyntax" FILES ${IGA_Frontend_Formatter_LdStSyntax} ${IGA_Frontend_Parser_LdStSyntax})
-endif()
 
 source_group("IR" FILES ${IGA_IR})
 source_group("MemManager" FILES ${IGA_MemManager})

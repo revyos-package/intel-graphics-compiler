@@ -26,14 +26,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/ScaledNumber.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "Compiler/CISACodeGen/ComputeShaderBase.hpp"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "common/allocator.h"
 #include "common/secure_mem.h"
 #include <iStdLib/utility.h>
-
 #include <algorithm>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -67,12 +66,12 @@ namespace IGC
         // m_NOSBufferSize is the additional space for cross-thread constant data (constants set by driver).
         curbeTotalDataLength = iSTD::Align(dimX_aligned * dimY * sizeof(ThreadPayloadEntry) + m_NOSBufferSize, alignedVal);
 
-        assert(pThreadPayload == nullptr && "Thread payload should be a null variable");
+        IGC_ASSERT_MESSAGE((pThreadPayload == nullptr), "Thread payload should be a null variable");
 
         unsigned threadPayloadEntries = curbeTotalDataLength / sizeof(ThreadPayloadEntry);
 
-        ThreadPayloadEntry* pThreadPayloadMem =
-            (ThreadPayloadEntry*)IGC::aligned_malloc(threadPayloadEntries * sizeof(ThreadPayloadEntry), 16);
+        ThreadPayloadEntry* pThreadPayloadMem = (ThreadPayloadEntry*)IGC::aligned_malloc(threadPayloadEntries * sizeof(ThreadPayloadEntry), 16);
+        IGC_ASSERT(nullptr != pThreadPayloadMem);
         std::fill(pThreadPayloadMem, pThreadPayloadMem + threadPayloadEntries, 0);
 
         pThreadPayload = pThreadPayloadMem;
@@ -164,29 +163,35 @@ namespace IGC
 
     CVariable* CComputeShaderBase::CreateThreadIDinGroup(SGVUsage channelNum)
     {
-        assert(channelNum <= THREAD_ID_IN_GROUP_Z && channelNum >= THREAD_ID_IN_GROUP_X && "Thread id's are in 3 dimensions only");
+        IGC_ASSERT_MESSAGE((channelNum <= THREAD_ID_IN_GROUP_Z), "Thread id's are in 3 dimensions only");
+        IGC_ASSERT_MESSAGE((channelNum >= THREAD_ID_IN_GROUP_X), "Thread id's are in 3 dimensions only");
+
         switch(channelNum)
         {
         case THREAD_ID_IN_GROUP_X:
             if(m_pThread_ID_in_Group_X == nullptr)
             {
-                m_pThread_ID_in_Group_X = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_W, EALIGN_GRF, false, m_numberInstance);
+                m_pThread_ID_in_Group_X = GetNewVariable(
+                    numLanes(m_SIMDSize), ISA_TYPE_W, getGRFAlignment(), false, m_numberInstance, "threadIdInGroupX");
             }
             return m_pThread_ID_in_Group_X;
         case THREAD_ID_IN_GROUP_Y:
             if(m_pThread_ID_in_Group_Y == nullptr)
             {
-                m_pThread_ID_in_Group_Y = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_W, EALIGN_GRF, false, m_numberInstance);
+                m_pThread_ID_in_Group_Y = GetNewVariable(
+                    numLanes(m_SIMDSize), ISA_TYPE_W, getGRFAlignment(), false, m_numberInstance, "threadIdInGroupY");
             }
             return m_pThread_ID_in_Group_Y;
         case THREAD_ID_IN_GROUP_Z:
             if(m_pThread_ID_in_Group_Z == nullptr)
             {
-                m_pThread_ID_in_Group_Z = GetNewVariable(numLanes(m_SIMDSize), ISA_TYPE_W, EALIGN_GRF, false, m_numberInstance);
+                m_pThread_ID_in_Group_Z = GetNewVariable(
+                    numLanes(m_SIMDSize), ISA_TYPE_W, getGRFAlignment(), false, m_numberInstance, "threadIdInGroupZ");
             }
             return m_pThread_ID_in_Group_Z;
         default:
-            assert(0 && "Invalid channel number");
+            IGC_ASSERT_MESSAGE(0, "Invalid channel number");
+            break;
         }
 
         return nullptr;

@@ -1,3 +1,28 @@
+/*===================== begin_copyright_notice ==================================
+
+Copyright (c) 2017 Intel Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+======================= end_copyright_notice ==================================*/
 #include "iga.h"
 #include "igad.h"
 #include "iga.hpp"
@@ -9,6 +34,7 @@
 #include "../Frontend/KernelParser.hpp"
 #include "../IR/DUAnalysis.hpp"
 #include "../IR/IRChecker.hpp"
+#include "../Models/Models.hpp"
 #include "../strings.hpp"
 #include "../version.hpp"
 #include "common/secure_string.h"
@@ -73,35 +99,20 @@ const char *iga_status_to_string(iga_status_t st) {
     case IGA_INVALID_OBJECT:       return "invalid object";
     case IGA_INVALID_STATE:        return "invalid state";
     case IGA_UNSUPPORTED_PLATFORM: return "unsupported platform";
+    case IGA_DIFF_FAILURE:         return "differences encountered";
     default:                       return "invalid error code";
     }
 }
 
-struct PlatformEntry {
-  iga_gen_t     gen;
-  iga::Platform platform;
-  const char   *suffix;
-};
-
-static const PlatformEntry ALL_PLATFORMS[] {
-    {IGA_GEN7,    iga::Platform::GEN7,    "7"    },
-    {IGA_GEN7p5,  iga::Platform::GEN7P5,  "7p5"  },
-    {IGA_GEN8,    iga::Platform::GEN8,    "8"    },
-    {IGA_GEN8lp,  iga::Platform::GEN8LP,  "8lp"  },
-    {IGA_GEN9,    iga::Platform::GEN9,    "9"    },
-    {IGA_GEN9lp,  iga::Platform::GEN9LP,  "9lp"  },
-    {IGA_GEN9p5,  iga::Platform::GEN9P5,  "9p5"  },
-    {IGA_GEN10,   iga::Platform::GEN10,   "10"   },
-    {IGA_GEN11,   iga::Platform::GEN11,   "11"   },
-    {IGA_GEN12p1, iga::Platform::GEN12P1, "12p1" },
-};
-
 // conversion to an internal platform
 iga::Platform ToPlatform(iga_gen_t gen)
 {
-    for (const auto &p : ALL_PLATFORMS)
-        if (p.gen == gen)
-          return p.platform;
+    for (size_t i = 0; i < ALL_PLATFORMS_LEN; i++) {
+        const auto &p = ALL_PLATFORMS[i];
+        if (p.platform == static_cast<iga::Platform>(gen))
+            return p.platform;
+    }
+
     return iga::Platform::INVALID;
 }
 
@@ -113,8 +124,7 @@ iga_status_t iga_platforms_list(
     if (gens_length_bytes != 0 && gens == nullptr)
         return IGA_INVALID_ARG;
 
-    const size_t MAX_SPACE_NEEDED =
-      sizeof(ALL_PLATFORMS)/sizeof(ALL_PLATFORMS[0])*sizeof(iga_gen_t);
+    const size_t MAX_SPACE_NEEDED = ALL_PLATFORMS_LEN*sizeof(iga_gen_t);
     if (gens_length_bytes_required)
         *gens_length_bytes_required = MAX_SPACE_NEEDED;
     if (gens) {
@@ -122,7 +132,7 @@ iga_status_t iga_platforms_list(
             i < std::min(gens_length_bytes,MAX_SPACE_NEEDED)/sizeof(iga_gen_t);
             i++)
         {
-            gens[i] = ALL_PLATFORMS[i].gen;
+            gens[i] = static_cast<iga_gen_t>(ALL_PLATFORMS[i].platform);
         }
     }
     return IGA_SUCCESS;
@@ -133,8 +143,9 @@ iga_status_t iga_platform_symbol_suffix(
 {
     if (suffix == nullptr)
         return IGA_INVALID_ARG;
-    for (const auto &p : ALL_PLATFORMS) {
-        if (gen == p.gen) {
+    for (size_t i = 0; i < ALL_PLATFORMS_LEN; i++) {
+        const auto &p = ALL_PLATFORMS[i];
+        if (p.platform == static_cast<iga::Platform>(gen)) {
             *suffix = p.suffix;
             return IGA_SUCCESS;
         }
@@ -142,7 +153,34 @@ iga_status_t iga_platform_symbol_suffix(
     *suffix = nullptr;
     return IGA_INVALID_ARG;
 }
-
+iga_status_t iga_platform_names(
+    iga_gen_t gen,
+    size_t names_bytes,
+    const char **names,
+    size_t *names_bytes_needed)
+{
+    if (names_bytes != 0 && names == nullptr)
+        return IGA_INVALID_ARG;
+    for (size_t i = 0; i < ALL_PLATFORMS_LEN; i++) {
+        const auto &p = ALL_PLATFORMS[i];
+        if (p.platform == static_cast<iga::Platform>(gen)) {
+            int p_names = 0;
+            for (p_names = 0;
+                p.names[p_names] && p_names < MAX_PLATFORM_NAMES;
+                p_names++)
+                ;
+            if (names_bytes_needed)
+                *names_bytes_needed = p_names*sizeof(const char*);
+            const int n_copy = std::min<int>(
+                p_names,
+                (int)names_bytes/sizeof(const char *));
+            for (int ni = 0; ni < n_copy; ni++)
+                names[ni] = p.names[ni];
+            return IGA_SUCCESS;
+        }
+    }
+    return IGA_INVALID_ARG;
+}
 
 class IGAContext {
 private:
@@ -200,18 +238,18 @@ public:
         return IGA_SUCCESS;
     }
 
-    iga_status_t translateDiagnostics(const iga::ErrorHandler &err) {
+    iga_status_t translateDiagnostics(const iga::ErrorHandler &eh) {
         clearDiagnostics(m_errors);
         clearDiagnostics(m_warnings);
         m_warningsValid = m_errorsValid = false;
 
-        iga_status_t s1 = translateDiagnosticList(err.getErrors(), m_errors);
+        iga_status_t s1 = translateDiagnosticList(eh.getErrors(), m_errors);
         if (s1 != IGA_SUCCESS) {
             clearDiagnostics(m_errors);
             return s1;
         }
 
-        iga_status_t s2 = translateDiagnosticList(err.getWarnings(), m_warnings);
+        iga_status_t s2 = translateDiagnosticList(eh.getWarnings(), m_warnings);
         if (s2 != IGA_SUCCESS) {
             clearDiagnostics(m_warnings);
             clearDiagnostics(m_errors);
@@ -233,7 +271,7 @@ public:
     static const uint64_t VALID_COOKIE = 0xFEDCBA9876543210ull;
 
 public:
-    IGAContext(iga_context_options_t opts, iga::Platform platf)
+    IGAContext(iga_context_options_t opts)
         : m_validToken(VALID_COOKIE)
         , m_opts(opts)
         , m_model(convertPlatform(opts.gen))
@@ -292,30 +330,25 @@ public:
         ParseOpts popts(m_model);
         popts.supportLegacyDirectives =
             (aopts.syntax_opts & IGA_SYNTAX_OPT_LEGACY_SYNTAX) != 0;
-        Kernel *kernel = iga::ParseGenKernel(m_model, inp, errHandler, popts);
-        if (kernel && !errHandler.hasErrors() && aopts.enabled_warnings) {
+        Kernel *pKernel = iga::ParseGenKernel(m_model, inp, errHandler, popts);
+        if (pKernel && !errHandler.hasErrors() && aopts.enabled_warnings) {
             // check semantics if we parsed without error && they haven't
             // disabled all checking (-Wnone)
-            CheckSemantics(*kernel, errHandler, aopts.enabled_warnings);
+            CheckSemantics(*pKernel, errHandler, aopts.enabled_warnings);
         }
         if (errHandler.hasErrors()) {
             *bits = nullptr;
             *bitsLen32 = 0;
             iga_status_t st = translateDiagnostics(errHandler);
-            if (st != IGA_SUCCESS)
-                return st;
-            return IGA_PARSE_ERROR;
-        }
-
-        if (errHandler.hasErrors()) {
-            *bits = nullptr;
-            *bitsLen32 = 0;
-            iga_status_t st = translateDiagnostics(errHandler);
-            if (st != IGA_SUCCESS) {
-                return st;
-            }
-            delete kernel;
-            return st == IGA_SUCCESS ? IGA_ENCODE_ERROR : st;
+            if (pKernel)
+                delete pKernel;
+            return (st != IGA_SUCCESS) ? st : IGA_PARSE_ERROR;
+        } else if (pKernel == nullptr) {
+            // parser returned nullptr for kernel, but with no errors
+            // shouldn't be reachable; implies we have a missing diagnostic
+            if (pKernel)
+                delete pKernel;
+            return IGA_ERROR;
         }
 
         // 3. Encode the final IR into bits
@@ -330,32 +363,32 @@ public:
               (aopts.encoder_opts & IGA_ENCODER_OPT_AUTO_COMPACT) != 0,
               (aopts.encoder_opts & IGA_ENCODER_OPT_ERROR_ON_COMPACT_FAIL) == 0);
         eopts.autoDepSet = (aopts.encoder_opts & IGA_ENCODER_OPT_AUTO_DEPENDENCIES) != 0;
+        eopts.sbidCount = aopts.sbid_count;
+        eopts.swsbEncodeMode = aopts.swsb_encode_mode;
 
         if ((aopts.encoder_opts & IGA_ENCODER_OPT_USE_NATIVE) == 0) {
             if (!iga::ged::IsEncodeSupported(m_model, eopts)) {
-                delete kernel;
+                delete pKernel;
                 return IGA_UNSUPPORTED_PLATFORM;
             }
-            assert(kernel != nullptr);
-            iga::ged::Encode(m_model, eopts, errHandler, *kernel, *bits, bitsLen);
+            iga::ged::Encode(m_model, eopts, errHandler, *pKernel, *bits, bitsLen);
         } else {
             if (!iga::native::IsEncodeSupported(m_model, eopts)) {
-                delete kernel;
+                delete pKernel;
                 return IGA_UNSUPPORTED_PLATFORM;
             }
-            assert(kernel != nullptr);
             iga::native::Encode(
                 m_model,
                 eopts,
                 errHandler,
-                *kernel,
+                *pKernel,
                 *bits,
                 bitsLen);
         }
         *bitsLen32 = (uint32_t)bitsLen;
         if (errHandler.hasErrors()) {
             // failed encoding
-            delete kernel;
+            delete pKernel;
             iga_status_t st = translateDiagnostics(errHandler);
             return st == IGA_SUCCESS ? IGA_ENCODE_ERROR : st;
         }
@@ -364,12 +397,12 @@ public:
         // encoding succeeded, copy the bits out
         m_assemble_bits = (void *)malloc(*bitsLen32);
         if (!m_assemble_bits) {
-            delete kernel;
+            delete pKernel;
             return IGA_OUT_OF_MEM;
         }
         memcpy_s(m_assemble_bits, *bitsLen32, * bits, *bitsLen32);
         *bits = m_assemble_bits;
-        delete kernel;
+        delete pKernel;
         return translateDiagnostics(errHandler);
     }
 
@@ -385,20 +418,7 @@ public:
             m_model.platform,
             formatLabel,
             formatLabelEnv);
-        fopts.numericLabels =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_NUMERIC_LABELS) != 0;
-        fopts.syntaxExtensions =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_SYNTAX_EXTS) != 0;
-        fopts.hexFloats =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_PRINT_HEX_FLOATS) != 0;
-        fopts.printInstPc =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_PRINT_PC) != 0;
-        fopts.printInstBits =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_PRINT_BITS) != 0;
-        fopts.printInstDeps =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_PRINT_DEPS) != 0;
-        fopts.printLdSt =
-            (dopts.formatting_opts & IGA_FORMATTING_OPT_PRINT_LDST) != 0;
+        fopts.addApiOpts(dopts.formatting_opts);
         if (swsbEnMod == SWSB_ENCODE_MODE::SWSBInvalidMode)
             fopts.setSWSBEncodingMode(m_model.getSWSBEncodeMode());
         else
@@ -614,7 +634,7 @@ public:
         *ds = *ds_len ? &m_warnings[0] : nullptr;
         return IGA_SUCCESS;
     }
-};
+}; // class IGAContext
 
 
 #define RETURN_INVALID_ARG_ON_NULL(X) \
@@ -654,7 +674,7 @@ iga_status_t  iga_context_create(
 
     IGAContext *ctx_obj = nullptr;
     try {
-        ctx_obj = new IGAContext(*opts, p);
+        ctx_obj = new IGAContext(*opts);
     } catch (std::bad_alloc &) {
         return IGA_OUT_OF_MEM;
     }
@@ -976,10 +996,10 @@ iga_status_t iga_diagnostic_get_text_extent(
 // relative to something near the instspec....
 // That would translate to fairly small integer that should be in the
 // no access range (near 0)
-static iga_opspec_t opspec_to_handle(const OpSpec *i) {
+static iga_opspec_t opspec_to_handle(const OpSpec *os) {
     const uintptr_t TOP_BIT = (sizeof(void *) == 4) ?
         0xC0000000 : 0x8000000000000000;
-    return (iga_opspec_t)((uintptr_t)i ^ TOP_BIT);
+    return (iga_opspec_t)((uintptr_t)os ^ TOP_BIT);
 }
 static const OpSpec *opspec_from_handle(iga_opspec_t os) {
     const uintptr_t TOP_BIT = (sizeof(void *) == 4) ?
@@ -1084,21 +1104,7 @@ iga_status_t iga_opspec_op_encoding(
     RETURN_INVALID_ARG_ON_NULL(op);
     RETURN_INVALID_ARG_ON_NULL(opcode);
 
-    *opcode = static_cast<uint32_t>(opspec_from_handle(op)->code);
-    return IGA_SUCCESS;
-}
-
-
-iga_status_t iga_opspec_parent_op(
-    iga_opspec_t op,
-    uint32_t *parent_op)
-{
-    RETURN_INVALID_ARG_ON_NULL(op);
-    RETURN_INVALID_ARG_ON_NULL(parent_op);
-
-    const OpSpec *os = opspec_from_handle(op);
-    *parent_op = static_cast<uint32_t>(os->groupOp);
-
+    *opcode = static_cast<uint32_t>(opspec_from_handle(op)->opcode);
     return IGA_SUCCESS;
 }
 
@@ -1135,7 +1141,6 @@ iga_status_t  iga_get_interface(iga_functions_t *funcs)
     funcs->iga_opspec_name = &iga_opspec_name;
     funcs->iga_opspec_description = &iga_opspec_description;
     funcs->iga_opspec_op = &iga_opspec_op;
-    funcs->iga_opspec_parent_op = &iga_opspec_parent_op;
 
     return IGA_SUCCESS;
 }

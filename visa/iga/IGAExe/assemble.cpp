@@ -43,7 +43,7 @@ bool assemble(
 bool assemble(
     const Opts &opts,
     igax::Context &ctx,
-    const std::string &inpFile,
+    const std::string &,
     const std::string &inpText,
     igax::Bits &bits)
 {
@@ -68,6 +68,7 @@ bool assemble(
     setOptBit(aopts.syntax_opts,
         IGA_SYNTAX_OPT_EXTENSIONS,
         opts.syntaxExts);
+    aopts.sbid_count = opts.sbidCount;
 
     try {
         auto r = ctx.assembleFromString(inpText, aopts);

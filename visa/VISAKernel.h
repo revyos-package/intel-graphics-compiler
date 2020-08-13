@@ -27,10 +27,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef VISA_KERNEL_H
 #define VISA_KERNEL_H
 #include "VISABuilderAPIDefinition.h"
-#include "DebugInfo.h"
+#include "Common_ISA_util.h"
+#include "BuildCISAIR.h"
 #include "visa_wa.h"
-
+#include "Mem_Manager.h"
+#include "JitterDataStruct.h"
+//#include "Gen4_IR.hpp"  // for PhyRegPool
+#include "Attributes.hpp"
 #include "CompilerStats.h"
+
+#include <list>
+#include <map>
+#include <string>
+#include <vector>
+#include <unordered_set>
 
 #define MAX_ERROR_MSG_LEN            511
 #define vISA_NUMBER_OF_OPNDS_IN_POOL 47
@@ -38,15 +48,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //forward declaration
 namespace vISA
 {
-class G4_Declare;
-class G4_Inst;
 class G4_Kernel;
-class IR_Builder;
 class DebugInfoFormat;
-class BinaryEncoding;
 class BinaryEncodingBase;
 }
-class CISA_IR_Builder;
 
 // Class hierarchy is as follows:
 // VISAKernel -> Abstract class that declares virtual functions to build a kernel object
@@ -101,7 +106,7 @@ public:
         m_kernel = NULL;
         m_builder = NULL;
         m_globalMem = NULL;
-        m_phyRegPool = NULL;
+
         m_kernelID = 0;
         m_inputSize = 0;
         m_opndCounter = 0;
@@ -117,8 +122,7 @@ public:
         predicateNameCount = COMMON_ISA_NUM_PREDEFINED_PRED;
         surfaceNameCount = COMMON_ISA_NUM_PREDEFINED_SURF_VER_3_1;
         samplerNameCount = 0;
-        mTargetAttributeSet = false;
-
+        unknownNameCount = 0;
         m_functionId = 0;
         m_vISAInstCount = -1;
 
@@ -127,7 +131,11 @@ public:
         mIsFCComposableKernel = false;
 
         // Initialize first level scope of the map
-        m_GenNamedVarMap.push_back(GenDeclNameToVarMap());
+        // m_GenNamedVarMap.push_back(GenDeclNameToVarMap());
+        m_GenNamedVarMap.emplace_back();
+
+        createKernelAttributes();
+        createReservedKeywordSet();
     }
 
     void* alloc(size_t sz) { return m_mem.alloc(sz); }
@@ -142,10 +150,9 @@ public:
         m_minor_version = minor_ver;
     }
 
-    void setPWaTable(PVISA_WA_TABLE pWaTable){
-        m_pWaTable = pWaTable;
-    }
-
+    vISA::Attributes* getKernelAttributes() { return m_kernelAttrs; }
+    // Temporary function to move options to attributes!
+    void finalizeAttributes();
     void finalizeKernel();
     unsigned long writeInToCisaBinaryBuffer(const void * value, int size);
     unsigned long getBytesWritten() { return m_bytes_written_cisa_buffer; }
@@ -229,8 +236,6 @@ public:
     CISA_IR_Builder* getCISABuilder() { return m_CISABuilder; }
 
     int getVISAOffset() const;
-
-    void processAttributes();
 
     /***************** START EXPOSED APIS *************************/
     VISA_BUILDER_API int CreateVISAGenVar(VISA_GenVar *& decl, const char *varName, int numberElements, VISA_Type dataType,
@@ -481,6 +486,8 @@ public:
 
     VISA_BUILDER_API int AppendVISADebugLinePlaceholder();
 
+    VISA_BUILDER_API int AppendVISALLVMInst(void *inst);
+
     VISA_BUILDER_API int AppendVISAMiscRawSend(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, unsigned char modifiers,
         unsigned int exMsgDesc, unsigned char srcSize, unsigned char dstSize, VISA_VectorOpnd *desc,
         VISA_RawOpnd *src, VISA_RawOpnd *dst);
@@ -575,6 +582,13 @@ public:
     VISA_BUILDER_API int AppendVISALifetime(VISAVarLifetime startOrEnd, VISA_VectorOpnd *varId);
 
 
+
+
+
+
+
+
+
     /********** APPEND INSTRUCTION APIS END   ******************/
 
     /********** APPEND 3D Instructions START ******************/
@@ -594,7 +608,8 @@ public:
         int numMsgSpecificOpnds,
         VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dLoad(VISASampler3DSubOpCode subOpcode,
+    VISA_BUILDER_API int AppendVISA3dLoad(
+        VISASampler3DSubOpCode subOpcode,
         bool pixelNullMask,
         VISA_PredOpnd *pred,
         VISA_EMask_Ctrl emask,
@@ -606,7 +621,8 @@ public:
         int numMsgSpecificOpnds,
         VISA_RawOpnd ** opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dGather4(VISASampler3DSubOpCode subOpcode,
+    VISA_BUILDER_API int AppendVISA3dGather4(
+        VISASampler3DSubOpCode subOpcode,
         bool pixelNullMask,
         VISA_PredOpnd *pred,
         VISA_EMask_Ctrl emask,
@@ -621,15 +637,18 @@ public:
 
     VISA_BUILDER_API int AppendVISA3dInfo(VISASampler3DSubOpCode subOpcode, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISAChannelMask srcChannel, VISA_StateOpndHandle *surface, VISA_RawOpnd *lod, VISA_RawOpnd *dst);
 
-    VISA_BUILDER_API int AppendVISA3dRTWrite(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
+    VISA_BUILDER_API int AppendVISA3dRTWrite(
+        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
         VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd, VISA_VectorOpnd *sampleIndex,
         uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dRTWriteCPS(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
+    VISA_BUILDER_API int AppendVISA3dRTWriteCPS(
+        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize, VISA_VectorOpnd* renderTargetIndex, vISA_RT_CONTROLS cntrls,
         VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd, VISA_VectorOpnd *sampleIndex,
         VISA_VectorOpnd *cPSCounter, uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray);
 
-    VISA_BUILDER_API int AppendVISA3dURBWrite(VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
+    VISA_BUILDER_API int AppendVISA3dURBWrite(
+        VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
         VISA_Exec_Size executionSize, unsigned char numberOutputParams,
         VISA_RawOpnd *channelMask, unsigned short globalOffset, VISA_RawOpnd *URBHandle,
         VISA_RawOpnd *perSLotOffset, VISA_RawOpnd *vertexData);
@@ -651,6 +670,9 @@ public:
     VISA_BUILDER_API virtual int GetGenxDebugInfo(void *&buffer, unsigned int &size, void*&, unsigned int&);
     /// GetGenRelocEntryBuffer -- allocate and return a buffer of all GenRelocEntry that are created by vISA
     VISA_BUILDER_API int GetGenRelocEntryBuffer(void *&buffer, unsigned int &byteSize, unsigned int &numEntries);
+    /// GetRelocations -- add vISA created relocations into given relocation list
+    /// This get the same information as GetGenRelocEntryBuffer, but in different foramt
+    VISA_BUILDER_API int GetRelocations(RelocListType &relocs);
     VISA_BUILDER_API int GetGTPinBuffer(void*& buffer, unsigned int& size);
     VISA_BUILDER_API int SetGTPinInit(void* buffer);
     VISA_BUILDER_API int GetFreeGRFInfo(void*& buffer, unsigned int& size);
@@ -749,8 +771,6 @@ public:
     unsigned char m_major_version;
     unsigned char m_minor_version;
 
-    PVISA_WA_TABLE m_pWaTable;
-
     void* compilePostOptimize(unsigned int& binarySize);
 
     void setInputSize(uint8_t size);
@@ -837,14 +857,25 @@ public:
         return (*it);
     }
 
+    std::string getVarName(CISA_GEN_VAR* decl) const
+    {
+        assert(m_GenVarToNameMap.count(decl) && "Can't find the decl's name");
+        return m_GenVarToNameMap.find(decl)->second;
+    }
+
     Options * getOptions() { return m_options; }
 
     bool IsAsmWriterMode() const { return m_options->getOption(vISA_IsaAssembly); }
 
-    void computeAndEmitDebugInfo(std::list<VISAKernelImpl*>& functions);
+    typedef std::list<VISAKernelImpl*> VISAKernelImplListTy;
+    void computeAndEmitDebugInfo(VISAKernelImplListTy& functions);
 
 private:
-    void setDefaultVariableName(Common_ISA_Var_Class Ty, const char *&varName);
+    void createReservedKeywordSet();
+    bool isReservedName(const std::string &nm) const;
+    void ensureVariableNameUnique(const char *&varName);
+    void generateVariableName(Common_ISA_Var_Class Ty, const char *&varName);
+
     void dumpDebugFormatFile(std::vector<vISA::DebugInfoFormat>& debugSymbols, std::string filename);
     void patchLabels();
     int InitializeFastPath();
@@ -852,8 +883,11 @@ private:
     int predefinedVarRegAssignment();
     int calculateTotalInputSize();
     int compileTillOptimize();
+    void recordFinalizerInfo();
 
-    void getHeightWidth(G4_Type type, unsigned int numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize);
+    // Re-adjust indirect call target after swsb
+    void adjustIndirectCallOffset();
+
     CisaFramework::CisaInst* AppendVISASvmGeneralScatterInst(VISA_PredOpnd* pred,
         VISA_EMask_Ctrl emask, VISA_Exec_Size execSize, unsigned char blockSize,
         unsigned char numBlocks, VISA_RawOpnd* address, VISA_RawOpnd *srcDst, bool isRead);
@@ -876,8 +910,6 @@ private:
 
     kernel_format_t m_cisa_kernel;
 
-
-    bool mTargetAttributeSet;
     unsigned int m_num_pred_vars;
     //size of various arrays in kernel header.
     //used for buffer size allocation.
@@ -945,7 +977,7 @@ private:
 
     unsigned int m_input_count;
     std::vector<input_info_t *> m_input_info_list;
-    //std::map<unsigned int, unsigned int> m_declID_to_inputID_map;
+    // std::map<unsigned int, unsigned int> m_declID_to_inputID_map;
 
     unsigned int m_attribute_count;
     std::list<attribute_info_t *> m_attribute_info_list;
@@ -953,7 +985,7 @@ private:
     unsigned int m_label_count;
     std::vector<label_info_t *> m_label_info_list;
 
-    //list of cisa operands representing labels that need to be resolved
+    // list of cisa operands representing labels that need to be resolved
     std::list<VISA_opnd *> m_pending_labels;
     std::list<std::string> m_pending_label_names;
 
@@ -964,8 +996,12 @@ private:
     std::vector<GenDeclNameToVarMap> m_GenNamedVarMap;
     GenDeclNameToVarMap m_UniqueNamedVarMap;
 
-    std::map<std::string, VISA_LabelOpnd *> m_label_name_to_index_map;
-    std::map<std::string, VISA_LabelOpnd *> m_funcName_to_labelID_map;
+    // reverse map from a GenVar to its declared name, used in inline assembly
+    // Note that name is only unique within the same scope
+    std::map<CISA_GEN_VAR*, std::string> m_GenVarToNameMap;
+
+    std::unordered_map<std::string, VISA_LabelOpnd *> m_label_name_to_index_map;
+    std::unordered_map<std::string, VISA_LabelOpnd *> m_funcName_to_labelID_map;
 
     char errorMessage[MAX_ERROR_MSG_LEN];
 
@@ -975,7 +1011,6 @@ private:
     vISA::IR_Builder* m_builder;
     vISA::Mem_Manager *m_globalMem;
     vISA::Mem_Manager *m_kernelMem;
-    vISA::PhyRegPool *m_phyRegPool;
     //customized allocator for allocating
     //It is very important that the same allocator is used by all instruction lists
     //that might be joined/spliced.
@@ -990,6 +1025,12 @@ private:
     unsigned int predicateNameCount;
     unsigned int surfaceNameCount;
     unsigned int samplerNameCount;
+    unsigned int unknownNameCount;
+
+    // TODO: this should be merged and re-worked to fit into the symbol table
+    // scheme
+    std::unordered_set<std::string> varNames;
+    std::unordered_set<std::string> reservedNames;
 
     int m_vISAInstCount;
     print_decl_index_t m_printDeclIndex;
@@ -1004,6 +1045,13 @@ private:
     Options *m_options;
 
     bool getIntKernelAttributeValue(const char* attrName, int& value);
+    void createKernelAttributes() {
+        void* pmem = m_mem.alloc(sizeof(vISA::Attributes));
+        m_kernelAttrs = new (pmem) vISA::Attributes();
+    }
+
+    // Shared with G4_kernel
+    vISA::Attributes* m_kernelAttrs;
 };
 
 class VISAKernel_format_provider : public print_format_provider_t

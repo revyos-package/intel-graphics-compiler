@@ -30,8 +30,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Common_ISA_framework.h"
 #include "JitterDataStruct.h"
 #include "VISAKernel.h"
-#include "BuildCISAIR.h"
 #include "Gen4_IR.hpp"
+#include "BuildIR.h"
 
 using namespace std;
 using namespace vISA;
@@ -153,7 +153,7 @@ bool Is_Type_Included(G4_Type type1, G4_Type type2, const IR_Builder& builder)
         return false;
     }
     if (type1 == Type_F && type2 == builder.getMixModeType() &&
-        getGenxPlatform() > GENX_BDW && builder.getOption(vISA_enableUnsafeCP_DF))
+        builder.getPlatform() > GENX_BDW && builder.getOption(vISA_enableUnsafeCP_DF))
     {
         return true;
     }
@@ -244,7 +244,6 @@ G4_SendMsgDescriptor::G4_SendMsgDescriptor(
     // All unnamed bits should be passed with those control bits.
     // Otherwise, need to be set individually.
     desc.value = fCtrl;
-
 
     desc.layout.rspLength = regs2rcv;
     desc.layout.msgLength = regs2snd;
@@ -732,8 +731,10 @@ const char* G4_SendMsgDescriptor::getDescType() const
     return NULL;
 }
 
-
-
+TARGET_PLATFORM G4_INST::getPlatform() const
+{
+    return builder.getPlatform();
+}
 
 G4_INST::G4_INST(const IR_Builder& irb,
     G4_Predicate* prd,
@@ -749,13 +750,13 @@ G4_INST::G4_INST(const IR_Builder& irb,
     useInstList(irb.getAllocator()),
     defInstList(irb.getAllocator()),
     local_id(0),
-    srcCISAoff(-1),
-    location(NULL),
+    srcCISAoff(UndefinedCisaOffset),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
     bin(nullptr),
-    builder(irb)
+    builder(irb),
+    llvmInst(irb.GetCurrentInst())
 {
     srcs[0] = s0;
     srcs[1] = s1;
@@ -792,13 +793,13 @@ G4_INST::G4_INST(const IR_Builder& irb,
     useInstList(irb.getAllocator()),
     defInstList(irb.getAllocator()),
     local_id(0),
-    srcCISAoff(-1),
-    location(NULL),
+    srcCISAoff(UndefinedCisaOffset),
     sat(s),
     evenlySplitInst(false),
     execSize(size),
     bin(nullptr),
-    builder(irb)
+    builder(irb),
+    llvmInst(irb.GetCurrentInst())
 {
     srcs[0] = s0;
     srcs[1] = s1;
@@ -1093,6 +1094,22 @@ uint16_t G4_INST::getMaskOffset() const
         MUST_BE_TRUE(0, "Incorrect instruction execution mask");
         return 0;
     }
+}
+
+void G4_INST::setMetadata(const std::string& key, MDNode* value)
+{
+    if (!MD)
+    {
+        MD = const_cast<IR_Builder&>(builder).allocateMD();
+    }
+    MD->setMetadata(key, value);
+}
+
+void G4_INST::setComments(const std::string& str)
+{
+    // we create a new MDNode the assumption is that comment should be unique and there is no opportunity for sharing
+    auto node = const_cast<IR_Builder&>(builder).allocateMDString(str);
+    setMetadata(Metadata::InstComment, node);
 }
 
 //
@@ -1846,6 +1863,12 @@ G4_INST::MovType G4_INST::canPropagate() const
     G4_Type dstType = dst->getType();
     G4_Type srcType = src->getType();
 
+    if (!builder.hasByteALU()
+        && (getTypeSize(dstType) == 1 || getTypeSize(srcType) == 1))
+    {
+        return SuperMov;
+    }
+
     G4_SrcModifier srcMod = Mod_src_undef;
     if (src->isSrcRegRegion()) {
         srcMod = src->asSrcRegRegion()->getModifier();
@@ -2152,6 +2175,7 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum, MovT
     {
         return false;
     }
+
 
     // skip the instruction has no dst. e.g. G4_pseudo_fcall
     if (useInst->getDst() == nullptr)
@@ -2991,49 +3015,49 @@ bool G4_INST::goodTwoGRFDst( bool& evenSplitDst )
 // check if there is WAW, WAR, RAW dependency between the passing-in inst and this instruction
 // there is no check for the case that two instructions are both send, since these checks are
 // only used in def-joisting and copy propagation
-bool G4_INST::isWARdep( G4_INST *inst )
+bool G4_INST::isWARdep(G4_INST* inst)
 {
-    G4_Operand *msg0 = NULL;
-    G4_Operand *src0_0 = inst->getSrc( 0 );
-    G4_Operand *src0_1 = inst->getSrc( 1 );
-    G4_Operand *src0_2 = inst->getSrc( 2 );
-    G4_Operand *implicitSrc0   = inst->getImplAccSrc();
-    G4_Predicate *pred0   = inst->getPredicate();
+    G4_Operand* msg0 = NULL;
+    G4_Operand* src0_0 = inst->getSrc(0);
+    G4_Operand* src0_1 = inst->getSrc(1);
+    G4_Operand* src0_2 = inst->getSrc(2);
+    G4_Operand* implicitSrc0 = inst->getImplAccSrc();
+    G4_Predicate* pred0 = inst->getPredicate();
 
-    G4_Operand *dst1 = this->dst;
+    G4_Operand* dst1 = this->dst;
 
-    if( dst1 && !this->hasNULLDst() )
+    if (dst1 && !this->hasNULLDst())
     {
 
-        if( //checkDst0 && ( dependency = DoInterfere( dst0, dst1, RET_WAR, noDDChkMode ) ) ||
-            ( src0_0 && src0_0->compareOperand( dst1 ) != Rel_disjoint ) ||
-            ( src0_1 && src0_1->compareOperand( dst1 ) != Rel_disjoint ) ||
-            ( src0_2 && src0_2->compareOperand( dst1 ) != Rel_disjoint ) ||
-            ( msg0 && ( msg0->compareOperand( dst1 ) != Rel_disjoint ) ) ||
-            ( pred0 && ( pred0->compareOperand( dst1 ) != Rel_disjoint ) ) ||
-            ( implicitSrc0 && ( implicitSrc0->compareOperand( dst1 ) != Rel_disjoint ) ) )
+        if (
+            (src0_0 && src0_0->compareOperand(dst1) != Rel_disjoint) ||
+            (src0_1 && src0_1->compareOperand(dst1) != Rel_disjoint) ||
+            (src0_2 && src0_2->compareOperand(dst1) != Rel_disjoint) ||
+            (msg0 && (msg0->compareOperand(dst1) != Rel_disjoint)) ||
+            (pred0 && (pred0->compareOperand(dst1) != Rel_disjoint)) ||
+            (implicitSrc0 && (implicitSrc0->compareOperand(dst1) != Rel_disjoint)))
         {
             return true;
         }
     }
 
-    if( mod )
+    if (mod)
     {
-        if( ( pred0 && pred0->compareOperand( mod ) != Rel_disjoint ) ||
-            ( src0_0 && src0_0->isFlag() && src0_0->compareOperand( mod ) != Rel_disjoint ) ||
-            ( src0_1 && src0_1->isFlag() && src0_1->compareOperand( mod ) != Rel_disjoint ) ||
-            ( src0_2 && src0_2->isFlag() && src0_2->compareOperand( mod ) != Rel_disjoint ) )
+        if ((pred0 && pred0->compareOperand(mod) != Rel_disjoint) ||
+            (src0_0 && src0_0->isFlag() && src0_0->compareOperand(mod) != Rel_disjoint) ||
+            (src0_1 && src0_1->isFlag() && src0_1->compareOperand(mod) != Rel_disjoint) ||
+            (src0_2 && src0_2->isFlag() && src0_2->compareOperand(mod) != Rel_disjoint))
         {
             return true;
         }
     }
 
-    if( this->implAccDst )
+    if (this->implAccDst)
     {
-        if( ( implicitSrc0 && implicitSrc0->compareOperand( implAccDst ) != Rel_disjoint ) ||
-            ( src0_0 && src0_0->isAccReg() && src0_0->compareOperand( implAccDst ) != Rel_disjoint ) ||
-            ( src0_1 && src0_1->isAccReg() && src0_1->compareOperand( implAccDst ) != Rel_disjoint ) ||
-            ( src0_2 && src0_2->isAccReg() && src0_2->compareOperand( implAccDst ) != Rel_disjoint ) )
+        if ((implicitSrc0 && implicitSrc0->compareOperand(implAccDst) != Rel_disjoint) ||
+            (src0_0 && src0_0->isAccReg() && src0_0->compareOperand(implAccDst) != Rel_disjoint) ||
+            (src0_1 && src0_1->isAccReg() && src0_1->compareOperand(implAccDst) != Rel_disjoint) ||
+            (src0_2 && src0_2->isAccReg() && src0_2->compareOperand(implAccDst) != Rel_disjoint))
         {
             return true;
         }
@@ -3303,8 +3327,10 @@ bool G4_INST::isPartialWriteForSpill(bool inSIMDCF) const
 
     if (inSIMDCF && !isWriteEnableInst())
     {
-        if (!(builder.hasMaskForScratchMsg() && getDst()->getElemSize() == 4))
+        if (builder.usesStack() || !(builder.hasMaskForScratchMsg() && getDst()->getElemSize() == 4))
         {
+            // scratch message only supports DWord mask
+            // also we can't use the scratch message when under stack call
             return true;
         }
     }
@@ -3535,10 +3561,8 @@ void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_
         output << ".sat";
     }
     output << ' ';
-    if (UNDEFINED_EXEC_SIZE != sendInst->execSize)
-    {
-        output << '(' << static_cast<int>(sendInst->execSize) << ") ";
-    }
+
+    output << '(' << static_cast<int>(sendInst->execSize) << ") ";
 
     sendInst->dst->emit(output, symbol_dst);
     output << ' ';
@@ -3588,30 +3612,7 @@ void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_
 
 void G4_InstSend::emit_send(std::ostream& output, bool dotStyle)
 {
-
-    if (pCisaBuilder->m_options.getOption(vISA_SymbolReg))
-    {
-        //
-        // Emit as comment if there is invalid operand, then emit instruction based on the situation of operand
-        //
-        bool dst_valid = true;
-        bool srcs_valid[G4_MAX_SRCS];
-        if (!isValidSymbolOperand(dst_valid, srcs_valid))
-        {
-            if (!dotStyle)
-            {
-                bool srcs_valid1[G4_MAX_SRCS];
-                for (unsigned i=0; i<G4_MAX_SRCS; i++)
-                    srcs_valid1[i] = true;
-                output << "//";
-                emit_send(output, true, srcs_valid1);       // emit comments
-                output << std::endl;
-            }
-        }
-        emit_send(output, dst_valid, srcs_valid);
-    }
-    else
-        emit_send(output, false, NULL);
+    emit_send(output, false, NULL);
 }
 
 void G4_InstSend::emit_send_desc(std::ostream& output)
@@ -3678,6 +3679,14 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
                 output << "." << asFillIntrinsic()->getNumRows();
             }
         }
+        else if (op == G4_goto)
+        {
+            output << (asCFInst()->isBackward() ? ".bwd" : ".fwd");
+        }
+        else if (isMath() && asMathInst()->getMathCtrl() != MATH_RESERVED)
+        {
+            output << "." << MathOpNames[asMathInst()->getMathCtrl()];
+        }
 
         if (mod)
         {
@@ -3693,14 +3702,13 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         {// no need to emit size for nop, wait
             output << '(' << static_cast<int>(execSize) << ") ";
         }
-
         if (isSpillIntrinsic())
         {
-            output << "Scratch[" << asSpillIntrinsic()->getOffset() << "] ";
+            output << "Scratch[" << asSpillIntrinsic()->getOffset() << "x32] ";
         }
         else if (dst)
         {
-            dst->emit(output, symbol_dst);  // emit symbolic/physical register depends on the flag
+            dst->emit(output, symbol_dst);
             output << ' ';
         }
 
@@ -3722,51 +3730,25 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         }
         if (isFillIntrinsic())
         {
-            output << "Scratch[" << asFillIntrinsic()->getOffset() << "] ";
+            output << "Scratch[" << asFillIntrinsic()->getOffset() << "x32] ";
         }
 
-        if( isMath() && asMathInst()->getMathCtrl() != MATH_RESERVED )
-        {
-            output << (hex) << "0x" << asMathInst()->getMathCtrl() << (dec) << " ";
-        }
-
-        if( isFlowControl() && asCFInst()->getJip() )
+        if (isFlowControl() && asCFInst()->getJip())
         {
             asCFInst()->getJip()->emit(output);
             output << ' ';
         }
 
-        if( isFlowControl() && asCFInst()->getUip() )
+        if (isFlowControl() && asCFInst()->getUip())
         {
             asCFInst()->getUip()->emit(output);
             output << ' ';
         }
 
-        if( op == G4_goto )
-        {
-            if (asCFInst()->isBackward())
-            {
-                output << 1;
-            }
-            else
-            {
-                output << 0;
-            }
-            output << ' ';
-        }
+
         this->emit_options(output);
         output << "//" << srcCISAoff;
-        //
-        // emit src2 of pln as comments
-        //
-        if (op == G4_pln)
-        {
-            if (srcs[2] != NULL)
-            {
-                output << "\t//";
-                srcs[2]->emit(output, false);
-            }
-        }
+
     }
 }
 
@@ -4354,36 +4336,25 @@ void printRegVarOff(std::ostream&  output,
                     // No matter the type of register and if the allocation successed, we output format <symbol>(RegOff, SubRegOff)
                     // Note: we have check if the register allocation  successed when emit the declare!
                     //
-                    if (pCisaBuilder->m_options.getOption(vISA_UniqueLabels))
-                    {
-                        const char *labelStr = nullptr;
-                        pCisaBuilder->m_options.getOption(vISA_LabelStr, labelStr);
-                        if (labelStr != nullptr)
-                        {
-                        output << labelStr << "_" << base->asRegVar()->getName() << "(" << regOff << "," << subRegOff << ")";
-                        }
-                    } else
-                    {
-                        output << base->asRegVar()->getName() << "(" << regOff << "," << subRegOff << ")";
-                    }
+                    output << base->asRegVar()->getName() << "(" << regOff << "," << subRegOff << ")";
                     return;
                 }
 
                 if (baseVar->getPhyReg()->isGreg())
                 {
-                     uint32_t byteAddress = opnd->getLinearizedStart();
-                     int regNum = 0, subRegNum = 0;
-                     if (byteAddress != 0)
-                     {
-                         regNum = byteAddress / GENX_GRF_REG_SIZ;
-                         subRegNum = ( byteAddress % GENX_GRF_REG_SIZ ) / G4_Type_Table[type].byteSize;
-                     }
-                     else
-                     {
-                         // before RA, use the value in Greg directly
-                         regNum = baseVar->getPhyReg()->asGreg()->getRegNum();
-                         subRegNum = baseVar->getPhyRegOff();
-                     }
+                    int regNum = 0, subRegNum = 0;
+                    uint32_t byteAddress = opnd->getLinearizedStart();
+
+                    if (baseVar->getDeclare()->getGRFBaseOffset() == 0)
+                    {
+                        // This is before RA and getLineariedStart() only contains the left bound
+                        // we have to add the declare's phyreg
+                        byteAddress += baseVar->getPhyReg()->asGreg()->getRegNum() * getGRFSize() + baseVar->getPhyRegOff() * getTypeSize(type);
+                    }
+
+                    regNum = byteAddress / getGRFSize();
+                    subRegNum = (byteAddress % getGRFSize()) / G4_Type_Table[type].byteSize;
+
 
                      output << "r" << regNum;
                      if (printSubReg)
@@ -4464,14 +4435,6 @@ void printRegVarOff(std::ostream&  output,
 
                 if (symbolreg)
                 {
-                    if (pCisaBuilder->m_options.getOption(vISA_UniqueLabels)) {
-                        const char* labelStr = nullptr;
-                        pCisaBuilder->m_options.getOption(vISA_LabelStr, labelStr);
-                        if (labelStr != nullptr)
-                        {
-                        output << labelStr << "_";
-                    }
-                    }
                     output << baseVar->getName();
                     output << '(' << regOff << ',' << subRegOffset << ")," << immAddrOff << ']';
                 }
@@ -4529,7 +4492,7 @@ void G4_SrcRegRegion::emit(std::ostream& output, bool symbolreg)
     // do not emit region for macro madm
     if (desc && !base->isNullReg() && !base->isNReg() && !isAccRegValid())// rgn == NULL, the default region is used
     {
-        bool align1ternary = getGenxPlatform() >= GENX_CNL && inst != NULL && inst->getNumSrc() == 3 &&
+        bool align1ternary = inst && inst->getNumSrc() == 3 && inst->getPlatform() >= GENX_ICLLP &&
             !inst->isSend() && inst->isAligned1Inst();
 
         // RegionV is invalid for SRC operands
@@ -4659,7 +4622,7 @@ bool G4_SrcRegRegion::obeySymbolRegRule() const
 void G4_SrcRegRegion::emitRegVarOff(std::ostream& output, bool symbolreg)
 {
     bool printSubReg = true;
-    if (inst != NULL && inst->isSend())
+    if (inst && inst->isSend())
     {
         printSubReg = false;
     }
@@ -5528,7 +5491,7 @@ PhyRegPool::PhyRegPool(Mem_Manager& m, unsigned int maxRegisterNumber)
     ARF_Table[AREG_ACC1]     = new (m) G4_Areg(AREG_ACC1);
     ARF_Table[AREG_MASK0]    = new (m) G4_Areg(AREG_MASK0);
     ARF_Table[AREG_MS0]      = new (m) G4_Areg(AREG_MS0);
-    ARF_Table[AREG_DBG]     = new (m) G4_Areg(AREG_DBG);
+    ARF_Table[AREG_DBG]      = new (m) G4_Areg(AREG_DBG);
     ARF_Table[AREG_SR0]      = new (m) G4_Areg(AREG_SR0);
     ARF_Table[AREG_CR0]      = new (m) G4_Areg(AREG_CR0);
     ARF_Table[AREG_TM0]      = new (m) G4_Areg(AREG_TM0);
@@ -5541,71 +5504,20 @@ PhyRegPool::PhyRegPool(Mem_Manager& m, unsigned int maxRegisterNumber)
     ARF_Table[AREG_SP]       = new (m)G4_Areg(AREG_SP);
 }
 
-bool GlobalRA::areAllDefsNoMask(G4_Declare* dcl)
+void PhyRegPool::rebuildRegPool(Mem_Manager& m, unsigned int numRegisters)
 {
-    bool retval = true;
-    auto maskUsed = getMask(dcl);
-    if (maskUsed != NULL &&
-        getAugmentationMask(dcl) != AugmentationMasks::NonDefault)
-    {
-        auto byteSize = dcl->getByteSize();
-        for (unsigned int i = 0; i < byteSize; i++)
-        {
-            if (maskUsed[i] != NOMASK_BYTE)
-            {
-                retval = false;
-                break;
-            }
-        }
-    }
-    else
-    {
-        if (getAugmentationMask(dcl) == AugmentationMasks::NonDefault)
-            retval = true;
-        else
-            retval = false;
-    }
-    return retval;
+    maxGRFNum = numRegisters;
+
+    GRF_Table = (G4_Greg**)m.alloc(sizeof(G4_Greg*) * maxGRFNum);
+    // create General Registers
+    for (unsigned int i = 0; i < maxGRFNum; i++)
+        GRF_Table[i] = new (m) G4_Greg(i);
 }
 
 void G4_Declare::setEvenAlign()
 {
     regVar->setEvenAlign();
 }
-
-BankAlign GlobalRA::getBankAlign(G4_Declare* dcl)
-{
-    IR_Builder* builder = kernel.fg.builder;
-    switch (getBankConflict(dcl))
-    {
-    case BANK_CONFLICT_FIRST_HALF_EVEN:
-    case BANK_CONFLICT_SECOND_HALF_EVEN:
-        if (builder->oneGRFBankDivision())
-        {
-            return BankAlign::Even;
-        }
-        else
-        {
-            return BankAlign::Even2GRF;
-        }
-        break;
-    case BANK_CONFLICT_FIRST_HALF_ODD:
-    case BANK_CONFLICT_SECOND_HALF_ODD:
-        if (builder->oneGRFBankDivision())
-        {
-            return BankAlign::Odd;
-        }
-        else
-        {
-            return BankAlign::Odd2GRF;
-        }
-        break;
-    default: break;
-    }
-
-    return BankAlign::Either;
-}
-
 
 void G4_Declare::setSubRegAlign(G4_SubReg_Align subAl)
 {
@@ -5631,176 +5543,74 @@ void G4_Declare::copyAlign(G4_Declare* dcl)
     regVar->setSubRegAlignment(dcl->getSubRegAlign());
 }
 
-void G4_Declare::emit(
-    std::ostream &output, bool isDumpDot,  bool isSymbolReg) const
+void G4_Declare::emit(std::ostream &output) const
 {
 
-    //
-    // .declare <symbol>    Base=RegFile RegBase {.SubRegBase}
-    //                              ElementSize=ElementSize
-    //                              {SrcRegion=DefaultSrcRegion}
-    //                              {DstRegion=DefaultDstRegion}
-    //                              {Type=DefaultType}
-    //
-    if (isSymbolReg)
+    output << "//.declare " << name;
+    output << " rf=";
+    if (useGRF())
     {
-        //
-        // check if the register allocation is success
-        //
-        if (isSpilled())        // FIXME: check the "spill code" mark instead here!
-        {
-            //
-            // spill code: do not emit declare
-            //
-            output << "//.declare " << name;
-            // Base field
-            output << "\tBase=";
-            if (useGRF())
-            {
-                output << "r (spilled)";                        // currently will not happen
-            }
-            else if (regFile == G4_ADDRESS)
-            {
-                output << "a (spilled)";
-            }
-            else if (regFile == G4_FLAG)
-            {
-                output << "f (spilled)";
-            }
-            else
-            {
-                MUST_BE_TRUE(false, ERROR_UNKNOWN); //unhandled case
-            }
-            return;
-        }
-        else if (regVar->isFlag() )
-        {
-            return;
-        }
-        else
-        {
-            if (pCisaBuilder->m_options.getOption(vISA_UniqueLabels))
-            {
-                const char * labelStr = nullptr;
-                pCisaBuilder->m_options.getOption(vISA_LabelStr, labelStr);
-                if (labelStr != nullptr)
-                {
-                output << ".declare " << labelStr << "_" << name;
-            }
-            }
-            else
-            {
-                output << ".declare " << name;
-            }
-
-            // Base field
-            if (useGRF())
-            {
-                if( regVar->isGreg() )
-                {
-                    output << "\tBase=r";
-                    G4_Greg * GrfReg = (G4_Greg *) regVar->getPhyReg();
-                    int reg = GrfReg->getRegNum();
-                    int off = regVar->getPhyRegOff();
-                    output<<reg<<"."<<off;
-                }
-            }
-            else if (regFile == G4_ADDRESS)
-            {
-                output << "\tBase=a";
-                if (regVar->isA0())
-                {
-                    int off = regVar->getPhyRegOff();
-                    output<<"0."<<off;
-                }
-            }
-            else
-            {
-                MUST_BE_TRUE(false, ERROR_UNKNOWN); //unhandled case
-            }
-        }
-
-        int elemSize = G4_Type_Table[elemType].byteSize;
-        output << " ElementSize="<<elemSize;
+        output << 'r';
     }
-    //
-    // .declare Var_Name reg_file = r|a
-    //          width = (# of elements)
-    //          height = (# of rows)
-    //          elem_type=UD|W|...
-    //          srcRegion=<vertStride;width,horzStride>  --- default src region
-    //          dstRegion=<horzStride>      --- default dst region
-    //
+    else if (regFile == G4_ADDRESS)
+    {
+        output << 'a';
+    }
+    else if (regFile == G4_FLAG)
+    {
+        output << 'f';
+    }
     else
     {
-        output << "//.declare " << name;
-        output << " rf=";
-        if (useGRF())
+        MUST_BE_TRUE(false, ERROR_UNKNOWN); //unhandled case
+    }
+
+    output << " size=" << getByteSize();
+    if (Type_UNDEF != elemType)
+    {
+        output << " type=" << G4_Type_Table[elemType].str;
+    }
+    if (AliasDCL)
+    {
+        output << " alias=" << AliasDCL->getName() << "+" << getAliasOffset();
+    }
+    output << " align=" << getSubRegAlign() << " words";
+    if (regVar->isPhyRegAssigned())
+    {
+        G4_VarBase* phyreg = regVar->getPhyReg();
+        if (phyreg->isGreg())
         {
-            output << 'r';
+            output << " (r" << phyreg->asGreg()->getRegNum() << "." << regVar->getPhyRegOff() << ")";
         }
-        else if (regFile == G4_ADDRESS)
+        else if (phyreg->isAddress())
         {
-            output << 'a';
+            output << " (a0." << regVar->getPhyRegOff() << ")";
         }
-        else if (regFile == G4_FLAG)
+        else if (phyreg->isFlag())
         {
-            output << 'f';
+            bool valid = false;
+            output << " (f" << phyreg->asAreg()->ExRegNum(valid) << "." << regVar->getPhyRegOff() << ")";
+        }
+    }
+    else if (isSpilled())
+    {
+        if (spillDCL)
+        {
+            // flag/addr spill
+            output << " (spilled -> " << spillDCL->getName() << ")";
         }
         else
         {
-            MUST_BE_TRUE(false, ERROR_UNKNOWN); //unhandled case
-        }
-
-        output << " size=" << getByteSize();
-        if (Type_UNDEF != elemType)
-        {
-            output << " type=" << G4_Type_Table[elemType].str;
-        }
-        if (AliasDCL)
-        {
-            output << " alias=" << AliasDCL->getName() << "+" << getAliasOffset();
-        }
-        output << " align=" << getSubRegAlign() << " words";
-        if (regVar->isPhyRegAssigned())
-        {
-            G4_VarBase* phyreg = regVar->getPhyReg();
-            if (phyreg->isGreg())
+            // GRF spill
+            auto GRFOffset = getRegVar()->getDisp() / getGRFSize();
+            if (!AliasDCL)
             {
-                output << " (r" << phyreg->asGreg()->getRegNum() << "." << regVar->getPhyRegOff() << ")";
-            }
-            else if (phyreg->isAddress())
-            {
-                output << " (a0." << regVar->getPhyRegOff() << ")";
-            }
-            else if (phyreg->isFlag())
-            {
-                bool valid = false;
-                output << " (f" << phyreg->asAreg()->ExRegNum(valid) << "." << regVar->getPhyRegOff() << ")";
-            }
-        }
-        else if (isSpilled())
-        {
-            if (spillDCL != nullptr)
-            {
-                output << " (spilled -> " << spillDCL->getName() << ")";
+                output << " (spilled -> Scratch[" << GRFOffset << "x" << (int)getGRFSize() << "])";
             }
             else
             {
                 output << " (spilled)";
             }
-        }
-    }
-
-    //
-    // emit data type in symbolic register case
-    //
-    if (isSymbolReg)
-    {
-        // Type=
-        if (Type_UNDEF != elemType)
-        {
-            output << " Type=" << G4_Type_Table[elemType].str;
         }
     }
 
@@ -5817,7 +5627,7 @@ void G4_Declare::emit(
         output << " Output";
     }
 
-    output << std::endl;
+    output << "\n";
 }
 
 void
@@ -6856,20 +6666,7 @@ void RegionDesc::emit(std::ostream& output) const
 
 void G4_Label::emit(std::ostream& output, bool symbolreg)
 {
-    if (pCisaBuilder->m_options.getOption(vISA_UniqueLabels))
-    {
-        const char* labelStr = nullptr;
-        pCisaBuilder->m_options.getOption(vISA_LabelStr, labelStr);
-        if (labelStr != nullptr)
-        {
-        output << (pCisaBuilder != NULL ? pCisaBuilder->getCurrentKernel()->getName() : "") << "_" <<
-            labelStr << "_" << label;
-    }
-    }
-    else
-    {
-        output << label;
-    }
+    output << label;
 }
 
 unsigned G4_RegVar::getByteAddr() const
@@ -6879,6 +6676,10 @@ unsigned G4_RegVar::getByteAddr() const
     {
         return reg.phyReg->asGreg()->getRegNum() * GENX_GRF_REG_SIZ +
             reg.subRegOff * (G4_Type_Table[decl->getElemType()].byteSize);
+    }
+    if (reg.phyReg->isA0())
+    {
+        return reg.subRegOff * (G4_Type_Table[Type_UW].byteSize);
     }
 
     MUST_BE_TRUE(false, ERROR_UNKNOWN);
@@ -7226,7 +7027,7 @@ void G4_Operand::dump() const
 
 void G4_INST::setPredicate(G4_Predicate* p)
 {
-    if( predicate != NULL && predicate->getInst() == this )
+    if (predicate && predicate->getInst() == this)
     {
         predicate->setInst(NULL);
     }
@@ -7282,7 +7083,7 @@ void G4_INST::setDest(G4_DstRegRegion* opnd)
 
 void G4_INST::setCondMod(G4_CondMod* m)
 {
-    if (mod != NULL && mod->getInst() == this)
+    if (mod && mod->getInst() == this)
     {
         mod->setInst(NULL);
     }
@@ -7457,14 +7258,14 @@ bool G4_INST::canSupportCondMod() const
 
 bool G4_INST::canSupportSrcModifier() const
 {
-    const iga::Model* iga_model = builder.getIGAModel();
+    const iga::Model* igaModel = builder.getIGAModel();
 
-    assert(iga_model != nullptr);
+    assert(igaModel != nullptr);
 
-    const iga::OpSpec& iga_opspec =
-        iga_model->lookupOpSpec(BinaryEncodingIGA::getIGAOp(op, this, iga_model->platform));
-
-    return iga_opspec.supportsSourceModifiers();
+    const auto opInfo =
+        BinaryEncodingIGA::getIgaOpInfo(op, this, igaModel->platform);
+    const iga::OpSpec& opSpec = igaModel->lookupOpSpec(opInfo.first);
+    return opSpec.supportsSourceModifiers();
 }
 
 // convert (execsize, offset) into emask option
@@ -7627,7 +7428,7 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
 
 void resetRightBound( G4_Operand* opnd )
 {
-    if( opnd != NULL )
+    if (opnd)
     {
         opnd->unsetRightBound();
     }
@@ -7635,10 +7436,15 @@ void resetRightBound( G4_Operand* opnd )
 
 void associateOpndWithInst(G4_Operand* opnd, G4_INST* inst)
 {
-    if( opnd != NULL )
+    if (opnd)
     {
         opnd->setInst(inst);
     }
+}
+
+const std::vector<std::pair<uint32_t, uint32_t>>& LiveIntervalInfo::getSaveRestore()
+{
+    return saveRestore;
 }
 
 void LiveIntervalInfo:: getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals)
@@ -7879,9 +7685,25 @@ bool G4_INST::canExecSizeBeAcc(Gen4_Operand_Number opndNum) const
 {
     switch (dst->getType())
     {
+    case Type_HF:
+        if (builder.relaxedACCRestrictions())
+        {
+            if (!((isMixedMode() && getExecSize() == 8) ||
+                (getExecSize() == 16)))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (getExecSize() != (builder.getNativeExecSize() * 2))
+            {
+                return false;
+            }
+        }
+        break;
     case Type_W:
     case Type_UW:
-    case Type_HF:
         if (getExecSize() != (builder.getNativeExecSize() * 2))
         {
             return false;
@@ -7936,12 +7758,17 @@ bool G4_INST::canDstBeAcc() const
         return false;
     }
 
-    if (dst == nullptr || dst->getTopDcl() == nullptr || dst->asDstRegRegion()->getHorzStride() != 1)
+    if (dst == nullptr || dst->getTopDcl() == nullptr || dst->getHorzStride() != 1)
     {
         return false;
     }
 
     if (dst->getTopDcl()->getRegFile() != G4_GRF)
+    {
+        return false;
+    }
+
+    if (!builder.hasFP64Acc() && dst->getType() == Type_DF)
     {
         return false;
     }
@@ -7974,6 +7801,20 @@ bool G4_INST::canDstBeAcc() const
             return false;
         }
     }
+
+    if (builder.avoidAccDstWithIndirectSource())
+    {
+        for (int i = 0, numSrc = getNumSrc(); i < numSrc; ++i)
+        {
+            bool indirectSrc = getSrc(i) && getSrc(i)->isSrcRegRegion() &&
+                getSrc(i)->asSrcRegRegion()->getRegAccess() != Direct;
+            if (indirectSrc)
+            {
+                return false;
+            }
+        }
+    }
+
     switch (opcode())
     {
     case G4_add:
@@ -8044,6 +7885,13 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
         return false;
     }
 
+    if (builder.relaxedACCRestrictions() &&
+         isMixedMode() &&
+         isLowPrecisionFloatTy(src->getType()))
+    {
+        return false;
+    }
+
     if (!canExecSizeBeAcc(opndNum))
     {
         return false;
@@ -8064,8 +7912,20 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
     else if (isLowPrecisionFloatTy(getDst()->getType()) && src->getType() == Type_F &&
         dstEltSize == 2)
     {
-        // no acc for mix mode inst with packed HF dst
-        return false;
+        if (builder.relaxedACCRestrictions())
+        {
+            //When source is float or half float from accumulator register and destination is half float with a stride of 1,
+            //the source must register aligned. i.e., source must have offset zero.
+            if ((src->getLinearizedStart() % GENX_GRF_REG_SIZ) != 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            // no acc for mix mode inst with packed HF dst
+            return false;
+        }
     }
 
     if (opcode() == G4_mad && srcId == 0 &&
@@ -8114,7 +7974,7 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
     case G4_csel:
         return builder.canMadHaveAcc();
     case G4_mul:
-        return IS_FTYPE(src->getType());
+        return IS_TYPE_FLOAT_ALL(src->getType());
     case G4_and:
     case G4_not:
     case G4_or:
@@ -8294,3 +8154,10 @@ G4_INST* G4_InstMath::cloneInst()
         src0, src1, getMathCtrl(), option, getLineNo(), getCISAOff(), getSrcFilename());
 }
 
+
+void G4_INST::inheritDIFrom(const G4_INST* inst)
+{
+    // Copy over debug info from inst
+    setLocation(inst->getLocation());
+    setCISAOff(getCISAOff() == UndefinedCisaOffset ? inst->getCISAOff() : getCISAOff());
+}

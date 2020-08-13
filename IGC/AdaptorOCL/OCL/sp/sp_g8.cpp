@@ -63,7 +63,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <algorithm>
 #include <cstring>
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 using namespace IGC;
 using namespace IGC::IGCMD;
@@ -349,15 +349,17 @@ void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCL
         patch.Token = iOpenCL::PATCH_TOKEN_ALLOCATE_CONSTANT_MEMORY_SURFACE_PROGRAM_BINARY_INFO;
         patch.Size = sizeof( patch );
         patch.ConstantBufferIndex = DEFAULT_CONSTANT_BUFFER_INDEX;
-        patch.InlineDataSize = (DWORD)iter->InlineData.size();
+        patch.InlineDataSize = (DWORD)iter->AllocSize;
 
         retValue = AddPatchItem(
             patch,
             membuf );
 
         // And now write the actual data
-        membuf.Write((char*)iter->InlineData.data(),
-                     iter->InlineData.size());
+        membuf.Write((char*)iter->InlineData.data(), iter->InlineData.size());
+        // Pad the end with zeros
+        unsigned zeroPadding = iter->AllocSize - iter->InlineData.size();
+        membuf.AddPadding(zeroPadding);
     }
 
     for (auto &iter : annotations.m_initGlobalAnnotation)
@@ -369,15 +371,17 @@ void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCL
         patch.Size = sizeof( patch );
         patch.Type = iOpenCL::GLOBAL_BUFFER_TYPE_INLINE;
         patch.GlobalBufferIndex = 0;
-        patch.InlineDataSize = (DWORD)iter->InlineData.size();
+        patch.InlineDataSize = (DWORD)iter->AllocSize;
 
         retValue = AddPatchItem(
             patch,
             membuf );
 
         // And now write the actual data
-        membuf.Write((char*)iter->InlineData.data(),
-                     iter->InlineData.size());
+        membuf.Write((char*)iter->InlineData.data(), iter->InlineData.size());
+        // Pad the end with zeros
+        unsigned zeroPadding = iter->AllocSize - iter->InlineData.size();
+        membuf.AddPadding(zeroPadding);
     }
 
 
@@ -801,7 +805,7 @@ RETVAL CGen8OpenCLStateProcessor::CreateSurfaceStateHeap(
                 }
             }
 
-            IGC_ASSERT(found && "GTPIN_IGC_OCL Error: Fail to find a free BTI for GT-Pin surface (i)");
+            IGC_ASSERT_MESSAGE(found, "GTPIN_IGC_OCL Error: Fail to find a free BTI for GT-Pin surface (i)");
         }
         const int res = GTPIN_IGC_OCL_UpdateKernelInfo(0, btiAssigned[0], btiAssigned[1]);
 
@@ -973,7 +977,7 @@ RETVAL CGen8OpenCLStateProcessor::CreateDynamicStateHeap(
 
                 if( !retValue.Success )
                 {
-                    IGC_ASSERT(0 && "Error during adding sampler state for sampler argument (index: samplerAnnotation->SamplerTableIndex, type: samplerAnnotation->SamplerType)");
+                    IGC_ASSERT_MESSAGE(0, "Error during adding sampler state for sampler argument (index: samplerAnnotation->SamplerTableIndex, type: samplerAnnotation->SamplerType)");
                     break;
                 }
             }
@@ -1028,7 +1032,7 @@ RETVAL CGen8OpenCLStateProcessor::CreateDynamicStateHeap(
 
                 if( !retValue.Success )
                 {
-                    IGC_ASSERT(0 && "Error during adding sampler state for inline sampler (index: samplerAnnotation->SamplerTableIndex, type: samplerAnnotation->SamplerType)");
+                    IGC_ASSERT_MESSAGE(0, "Error during adding sampler state for inline sampler (index: samplerAnnotation->SamplerTableIndex, type: samplerAnnotation->SamplerType)");
                     break;
                 }
             }
@@ -2031,6 +2035,8 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
         patch.HasGlobalAtomics = annotations.m_executionEnivronment.HasGlobalAtomics;
 
 
+        patch.UseBindlessMode = annotations.m_executionEnivronment.UseBindlessMode;
+        patch.SIMDInfo = annotations.m_executionEnivronment.SIMDInfo;
 
         retValue = AddPatchItem(
             patch,
@@ -2188,6 +2194,12 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             size = program->simd32.m_funcSymbolTableSize;
             entries = program->simd32.m_funcSymbolTableEntries;
         }
+        else if (annotations.m_executionEnivronment.CompiledSIMDSize == 1)
+        {
+            buffer = program->simd1.m_funcSymbolTable;
+            size = program->simd1.m_funcSymbolTableSize;
+            entries = program->simd1.m_funcSymbolTableEntries;
+        }
 
         if (size > 0)
         {
@@ -2241,6 +2253,14 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             buffer = program->simd32.m_funcRelocationTable;
             size = program->simd32.m_funcRelocationTableSize;
             entries = program->simd32.m_funcRelocationTableEntries;
+        }
+        // CM kernels are dispatched with CompiledSIMDSize == 1, this is just a contract
+        // between igcmc and patch token generator, shouldn't break existing scenarios for IGC
+        else if (annotations.m_executionEnivronment.CompiledSIMDSize == 1)
+        {
+            buffer = program->simd1.m_funcRelocationTable;
+            size = program->simd1.m_funcRelocationTableSize;
+            entries = program->simd1.m_funcRelocationTableEntries;
         }
 
         if (size > 0)

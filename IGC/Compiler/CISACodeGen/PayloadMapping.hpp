@@ -35,7 +35,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 #include "Compiler/CISACodeGen/Platform.hpp"
 #include "Compiler/CodeGenPublic.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
@@ -44,8 +43,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/helper.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "common/Types.hpp"
-
-#define  GENX_GRF_REG_SIZ          32  // # of bytes in a GRF register
+#include "Probe/Assertion.h"
 
 namespace IGC
 {
@@ -66,6 +64,7 @@ namespace IGC
         uint GetNumPayloadElements(const llvm::Instruction* inst);
         uint GetNumPayloadElements_URBWrite(const llvm::GenIntrinsicInst* inst);
         uint GetNumPayloadElements_RTWrite(const llvm::GenIntrinsicInst* inst);
+        uint GetNumPayloadElements_DSRTWrite(const llvm::GenIntrinsicInst* inst);
         uint GetNumPayloadElements_LDMS(const llvm::GenIntrinsicInst* inst);
         uint GetNonAdjustedNumPayloadElements_Sample(const llvm::SampleIntrinsic* inst);
         uint GetNumPayloadElements_Sample(const llvm::SampleIntrinsic* inst);
@@ -76,6 +75,7 @@ namespace IGC
         llvm::Value* GetPayloadElementToValueMapping(const llvm::Instruction* inst, uint index);
         llvm::Value* GetPayloadElementToValueMapping_URBWrite(const llvm::GenIntrinsicInst* inst, uint index);
         llvm::Value* GetPayloadElementToValueMapping_RTWrite(const llvm::GenIntrinsicInst* inst, const uint index);
+        llvm::Value* GetPayloadElementToValueMapping_DSRTWrite(const llvm::GenIntrinsicInst* inst, const uint index);
         uint GetNonAdjustedPayloadElementIndexToValueIndexMapping_sample(const llvm::SampleIntrinsic* inst, uint index);
         llvm::Value* GetPayloadElementToValueMapping_LDMS(const llvm::SamplerLoadIntrinsic* inst, const uint index);
         llvm::Value* GetNonAdjustedPayloadElementToValueMapping_sample(const llvm::SampleIntrinsic* inst, const uint index);
@@ -91,9 +91,12 @@ namespace IGC
         const llvm::Instruction* GetSupremumOfNonHomogeneousPart_RTWrite(
             const llvm::Instruction* inst1,
             const llvm::Instruction* inst2);
-        int GetLeftReservedOffset_RTWrite(const llvm::Instruction* inst, SIMDMode simdMode);
-        int GetRightReservedOffset_RTWrite(const llvm::Instruction* inst, SIMDMode simdMode);
-        bool HasNonHomogeneousPayloadElements_RTWrite(const llvm::Instruction* inst);
+        template <typename T>
+        int GetLeftReservedOffset_RTWrite(const T* inst, SIMDMode simdMode);
+        template <typename T>
+        int GetRightReservedOffset_RTWrite(const T* inst, SIMDMode simdMode);
+        template <typename T>
+        bool HasNonHomogeneousPayloadElements_RTWrite(const T* inst);
 
         /// ------------------------------
         bool IsUndefOrZeroImmediate(const llvm::Value* value);
@@ -103,7 +106,7 @@ namespace IGC
         bool DoesAllowSplit(const llvm::Instruction* inst)
         {
             const llvm::GenIntrinsicInst* intrinsicInst = llvm::dyn_cast<llvm::GenIntrinsicInst>(inst);
-            assert(intrinsicInst);
+            IGC_ASSERT(intrinsicInst);
             if (llvm::dyn_cast<llvm::SampleIntrinsic>(inst))
             {
                 return true;

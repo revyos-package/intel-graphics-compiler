@@ -32,12 +32,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Common_BinaryEncoding.h"
 #include "RegAlloc.h"
 #include "GraphColor.h"
-
-// G4IR instructions added by JIT that do not result from lowering
-// any CISA bytecode will be assigned CISA offset = 0xffffffff.
-// This includes pseudo nodes, G4_labels, mov introduced for copying
-// r0 for pre-emption support.
-constexpr int UNMAPPABLE_VISA_INDEX = IR_Builder::OrphanVISAIndex;
+#include <unordered_map>
 
 #define CALLER_SAVE_START 1
 #define CALLEE_SAVE_START 60
@@ -255,6 +250,7 @@ public:
     G4_Declare* getFretVar() { return fretVar; }
     void setFretVar(G4_Declare* dcl) { fretVar = dcl; }
 
+    void updateExpandedIntrinsic(G4_InstIntrinsic* spillOrFill, G4_INST* inst);
     void addCallerSaveInst(G4_INST* fcall, G4_INST* inst);
     void addCallerRestoreInst(G4_INST* fcall, G4_INST* inst);
     void addCalleeSaveInst(G4_INST* inst);
@@ -296,6 +292,16 @@ public:
         mapCISAOffset.insert(std::make_pair(a, b));
     }
 
+    unsigned int getGenOffsetFromVISAIndex(unsigned int v)
+    {
+        for (auto& item : mapCISAIndexGenOffset)
+        {
+            if(item.first == v)
+                return item.second;
+        }
+        return 0;
+    }
+
     std::vector<std::pair<unsigned int, unsigned int>>& getMapCISAOffsetGenOffset() { return mapCISAOffsetGenOffset; }
     std::vector<std::pair<unsigned int, unsigned int>>& getMapCISAIndexGenOffset() { return mapCISAIndexGenOffset; }
     std::vector<std::pair<unsigned int, unsigned int>>& getMapGenISAOffsetToCISAIndex() { return genISAOffsetToVISAIndex; }
@@ -305,6 +311,8 @@ public:
 
     void computeMissingVISAIds();
     bool isMissingVISAId(unsigned int);
+
+    void computeGRFToStackOffset();
 };
 
 class SaveRestoreInfo

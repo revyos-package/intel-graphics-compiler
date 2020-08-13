@@ -38,11 +38,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #pragma once
 
 #include "llvm/Config/llvm-config.h"
-
 #include "Compiler/DebugInfo/DIE.hpp"
 #include "Compiler/DebugInfo/LexicalScopes.hpp"
 #include "Compiler/DebugInfo/Version.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Instruction.h"
 #include "llvm/ADT/DenseMap.h"
@@ -53,11 +51,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/Allocator.h"
 #include "llvmWrapper/IR/DebugInfoMetadata.h"
 #include "common/LLVMWarningsPop.hpp"
-
 #include "Compiler/DebugInfo/VISAModule.hpp"
 #include "Compiler/DebugInfo/LexicalScopes.hpp"
-
 #include <set>
+#include "Probe/Assertion.h"
 
 namespace llvm
 {
@@ -165,7 +162,19 @@ namespace IGC
         DbgVariable* getAbstractVariable()  const { return AbsVar; }
         const llvm::Instruction* getDbgInst() const { return m_pDbgInst; }
         void setDbgInst(const llvm::Instruction* pInst) { m_pDbgInst = pInst; }
+
+        /// If this type is derived from a base type then return base type size
+        /// even if it derived directly or indirectly from Composite Type
+        uint64_t getBasicTypeSize(llvm::DIDerivedType* Ty);
+        /// If this type is derived from a base type then return base type size
+        /// even if it derived directly or indirectly from Derived Type
+        uint64_t getBasicTypeSize(llvm::DICompositeType* Ty);
+
+        /// Return base type size even if it derived directly or indirectly from Composite Type
+        uint64_t getBasicSize(DwarfDebug* DD);
+
         // Translate tag to proper Dwarf tag.
+
         llvm::dwarf::Tag getTag()                  const
         {
             // FIXME: Why don't we just infer this tag and store it all along?
@@ -196,7 +205,7 @@ namespace IGC
 #if LLVM_3_5
         bool variableHasComplexAddress()   const
         {
-            assert(Var.isVariable() && "Invalid complex DbgVariable!");
+            IGC_ASSERT_MESSAGE(Var.isVariable(), "Invalid complex DbgVariable!");
             return Var.hasComplexAddress();
         }
 #endif
@@ -204,7 +213,7 @@ namespace IGC
 #if LLVM_3_5
         unsigned getNumAddrElements()      const
         {
-            assert(Var.isVariable() && "Invalid complex DbgVariable!");
+            IGC_ASSERT_MESSAGE(Var.isVariable(), "Invalid complex DbgVariable!");
             return Var.getNumAddrElements();
         }
         uint64_t getAddrElement(unsigned i) const
@@ -383,6 +392,8 @@ namespace IGC
         unsigned NextStringPoolNumber;
         std::string StringPref;
 
+        llvm::DenseMap<VISAModule*, llvm::Function*> VISAModToFunc;
+
     private:
 
         void addScopeVariable(::IGC::LexicalScope* LS, DbgVariable* Var);
@@ -391,13 +402,13 @@ namespace IGC
         DbgVariable* findAbstractVariable(llvm::DIVariable* Var, llvm::DebugLoc Loc);
 
         /// \brief Find DIE for the given subprogram and attach appropriate
-        /// DW_AT_low_pc and DW_AT_high_pc attributes. If there are global
-        /// variables in this scope then create and insert DIEs for these
-        /// variables.
+        /// DW_AT_low_pc, DW_AT_high_pc and DW_AT_INTEL_simd_width.
+        /// If there are globalvariables in this scope then create and insert
+        /// DIEs for these variables.
         DIE* updateSubprogramScopeDIE(CompileUnit* SPCU, llvm::DISubprogram* SP);
 
         /// \brief Construct new DW_TAG_lexical_block for this scope and
-        /// attach DW_AT_low_pc/DW_AT_high_pc labels.
+        /// attach DW_AT_low_pc/DW_AT_high_pc and DW_AT_INTEL_simd_width labels.
         DIE* constructLexicalScopeDIE(CompileUnit* TheCU, ::IGC::LexicalScope* Scope);
         /// A helper function to check whether the DIE for a given Scope is going
         /// to be null.
@@ -454,9 +465,6 @@ namespace IGC
         /// \brief Emit visible names into a debug macinfo section.
         void emitDebugMacInfo();
 
-        /// \brief Emit debug frame section to allow stack traversal.
-        void emitDebugFrame();
-
         /// \brief Recursively Emits a debug information entry.
         void emitDIE(DIE* Die);
 
@@ -496,7 +504,7 @@ namespace IGC
         llvm::MCSymbol* getLabelBeforeInsn(const llvm::Instruction* MI)
         {
             llvm::MCSymbol* Label = LabelsBeforeInsn.lookup(MI);
-            assert(Label && "Didn't insert label before instruction");
+            IGC_ASSERT_MESSAGE(Label, "Didn't insert label before instruction");
             return Label;
         }
 
@@ -613,6 +621,37 @@ namespace IGC
             }
             return false;
         }
+
+        void AddVISAModToFunc(VISAModule* M, llvm::Function* F)
+        {
+            VISAModToFunc[M] = F;
+        }
+
+        llvm::Function* GetFunction(VISAModule* M)
+        {
+            auto it = VISAModToFunc.find(M);
+            if (it != VISAModToFunc.end())
+                return (*it).second;
+            return nullptr;
+        }
+
+        VISAModule* GetVISAModule(const llvm::Function* F)
+        {
+            for (auto& p : VISAModToFunc)
+            {
+                if (p.second == F)
+                    return p.first;
+            }
+            return nullptr;
+        }
+
+        bool IsDirectElfInput() const
+        {
+            if (!m_pModule)
+                return false;
+
+            return m_pModule->isDirectElfInput;
+        }
     private:
         // Store all DISubprogram nodes from LLVM IR as they are no longer available
         // in DICompileUnit
@@ -660,6 +699,9 @@ namespace IGC
 
         unsigned int lowPc = 0, highPc = 0;
 
+        // SIMD width
+        unsigned short simdWidth = 0;   // Not set until IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging)
+
         DbgDecoder* getDecodedDbg() { return decodedDbg; }
         void setDecodedDbg(DbgDecoder* d)
         {
@@ -671,11 +713,18 @@ namespace IGC
         }
         unsigned int CopyDebugLoc(unsigned int offset);
 
+
     private:
         void encodeRange(CompileUnit* TheCU, DIE* ScopeDIE, const llvm::SmallVectorImpl<InsnRange>* Ranges);
         void writeCIE();
-        void writeFDE(DbgDecoder::SubroutineInfo& sub);
-        const uint8_t returnReg = 128;
+        void writeFDESubroutine(VISAModule* m);
+        void writeFDEStackCall(VISAModule* m);
+        bool DwarfFrameSectionNeeded()
+        {
+            return (m_pModule->hasOrIsStackCall() || (m_pModule->getSubroutines()->size() > 0));
+        }
+        const uint16_t returnReg = 256;
+        const uint16_t fpReg = 257;
     };
 } // namespace IGC
 

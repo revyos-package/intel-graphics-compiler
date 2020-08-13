@@ -41,7 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "inc/common/Compiler/API/SurfaceFormats.h"
 #include "usc.h"
 #include "sp_debug.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace IGC
 {
@@ -79,6 +79,8 @@ private:
     DisallowCopy& operator=(const DisallowCopy&);
 };
 
+/// CGen8OpenCLStateProcessor - Provides services to create (legacy) patch token
+/// based binary from given SProgramOutput information
 class CGen8OpenCLStateProcessor : DisallowCopy
 {
 
@@ -253,7 +255,7 @@ inline DWORD CGen8OpenCLStateProcessor::GetSamplerStateSizeMultiplier(
     case SAMPLER_OBJECT_SAMPLE_8X8_BOOL_CENTROID:   multiplier =   0; break;
     case SAMPLER_OBJECT_SAMPLE_8X8_BOOL_SUM:        multiplier =   0; break;
     default:
-        IGC_ASSERT(0 && "Unknown sampler type");
+        IGC_ASSERT_MESSAGE(0, "Unknown sampler type");
         multiplier = 0;
         break;
     }

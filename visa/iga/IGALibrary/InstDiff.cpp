@@ -46,17 +46,16 @@ using namespace iga;
 static std::string disassembleInst(
     Platform platform,
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     size_t fromPc,
-    const void *bits,
-    bool enableSWSBGen12HPencoding = true)
+    const void *bits)
 {
     ErrorHandler eh;
     std::stringstream ss;
     FormatOpts fopts(platform);
-    fopts.numericLabels = true;
-    // fopts.hexFloats = opts.printHexFloats;
-    fopts.hexFloats = false;
-    fopts.setSWSBEncodingMode(iga::Model::LookupModel(platform)->getSWSBEncodeMode());
+    fopts.addApiOpts(fmtOpts);
+    fopts.setSWSBEncodingMode(
+        iga::Model::LookupModel(platform)->getSWSBEncodeMode());
     FormatInstruction(eh, ss, fopts, fromPc, bits, useNativeDecoder);
 
     return ss.str();
@@ -175,9 +174,13 @@ static FragmentList decodeFieldsWithWarnings(
                     (int)bitIx,
                     (int)(endIx - bitIx));
                 FragmentList::iterator itr = fields.begin();
-                for (; itr != fields.end() && itr->first.offset < errorField.offset; itr++)
+                for (;
+                    itr != fields.end() &&
+                        itr->first.offset < errorField.offset;
+                    itr++)
                     ;
-                fields.insert(itr,std::pair<Fragment,std::string>(errorField,""));
+                fields.insert(itr,
+                    std::pair<Fragment,std::string>(errorField,""));
                 success = false;
             }
             bitIx = endIx; // sanity restarts (or some new error)
@@ -210,17 +213,21 @@ static void decodeFieldHeaders(std::ostream &os)
 
 static bool decodeFieldsForInst(
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
     size_t pc,
     const Model &model,
     const MInst *mi)
 {
-    auto syntax = disassembleInst(model.platform, useNativeDecoder, pc, (const void *)mi);
+    bool success = true;
+
+    auto syntax = disassembleInst(
+        model.platform, useNativeDecoder, fmtOpts, pc, (const void *)mi);
     os << fmtPc(mi, pc) << " " <<  syntax << "\n";
     os.flush();
-    bool success = true;
-    FragmentList fields = decodeFieldsWithWarnings(
-        model, os, Loc((uint32_t)pc), mi, success);
+
+    FragmentList fields =
+        decodeFieldsWithWarnings(model, os, Loc((uint32_t)pc), mi, success);
 
     auto fieldOverlaps =
         [&] (const Fragment &f) {
@@ -232,8 +239,8 @@ static bool decodeFieldsForInst(
             return false;
         };
 
-    for (const auto &fv : fields) {
-        const auto &f = fv.first;
+    for (const FragmentListElem &fv : fields) {
+        const Fragment &f = fv.first;
         uint64_t val = mi->getFragment(f);
         std::stringstream ss;
         ss << std::setw(FIELD_PC_WIDTH) << std::left << " ";
@@ -250,7 +257,8 @@ static bool decodeFieldsForInst(
         ss << " ";
 
         // 0x1234
-        ss << std::right << std::setw(FIELD_VALUE_INT_WIDTH) << fmtHexValue(val);
+        ss << std::right <<
+            std::setw(FIELD_VALUE_INT_WIDTH) << fmtHexValue(val);
         ss << " ";
 
         // :q
@@ -277,7 +285,9 @@ static bool decodeFieldsForInst(
 
 iga_status_t iga::DecodeFields(
     Platform p,
-    bool useNativeDecoder, // TODO: use this once decoder is implemented
+    int /* verbosity */,
+    bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
     const uint8_t *bits,
     size_t bitsLen)
@@ -305,7 +315,8 @@ iga_status_t iga::DecodeFields(
             break;
         }
 
-        success &= decodeFieldsForInst(useNativeDecoder, os, pc, *model, mi);
+        success &= decodeFieldsForInst(
+            useNativeDecoder, fmtOpts, os, pc, *model, mi);
 
         pc += iLen;
     }
@@ -316,39 +327,47 @@ iga_status_t iga::DecodeFields(
 
 iga_status_t iga::DiffFields(
     Platform p,
+    int verbosity,
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
-    const char *source1,
-    const uint8_t *bits1,
-    size_t bitsLen1,
-    const char *source2,
-    const uint8_t *bits2,
-    size_t bitsLen2)
+    const char *source1, const uint8_t *bits1, size_t bitsLen1,
+    const char *source2, const uint8_t *bits2, size_t bitsLen2)
 {
     return DiffFieldsFromPCs(
-        p, useNativeDecoder, os,
+        p, verbosity, useNativeDecoder, fmtOpts, os,
         source1, 0, bits1, bitsLen1,
         source2, 0, bits2, bitsLen2);
 }
 
+
 iga_status_t iga::DiffFieldsFromPCs(
     Platform p,
+    int verbosity,
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
-    const char *source1,
-    size_t startPc1,
-    const uint8_t *bits1,
-    size_t bitsLen1,
-    const char *source2,
-    size_t startPc2,
-    const uint8_t *bits2,
-    size_t bitsLen2)
+    const char *source1, size_t startPc1,
+        const uint8_t *bits1, size_t bitsLen1,
+    const char *source2, size_t startPc2,
+        const uint8_t *bits2, size_t bitsLen2)
 {
     const Model *model = Model::LookupModel(p);
     if (model == nullptr) {
         return IGA_UNSUPPORTED_PLATFORM;
     } else if (!iga::native::IsDecodeSupported(*model, DecoderOpts())) {
         return IGA_UNSUPPORTED_PLATFORM;
+    }
+
+    if (bitsLen1 == bitsLen2 &&
+        memcmp(bits1, bits2, bitsLen1) == 0 &&
+        verbosity < 0)
+    {
+        // don't show any output if they match exactly
+        //
+        // SPECIFY: this short-circuit prevents us from testing disassembly
+        // on each instruction.  Is that what we want here?
+        return IGA_SUCCESS;
     }
 
     if (source1 == nullptr) {
@@ -366,12 +385,14 @@ iga_status_t iga::DiffFieldsFromPCs(
     os << " ";
     os << std::setw(FIELD_SIZE_WIDTH) << " "; // (..)
     os << " ";
-    os << std::setw(FIELD_VALUE_INT_WIDTH + 1 + FIELD_VALUE_STR_WIDTH) << std::right << source1;
+    os << std::setw(FIELD_VALUE_INT_WIDTH + 1 + FIELD_VALUE_STR_WIDTH) <<
+        std::right << source1;
     os << " ";
-    os << std::setw(FIELD_VALUE_INT_WIDTH + 1 + FIELD_VALUE_STR_WIDTH) << std::right << source2;
+    os << std::setw(FIELD_VALUE_INT_WIDTH + 1 + FIELD_VALUE_STR_WIDTH) <<
+        std::right << source2;
     os << "\n";
 
-    bool success = true;
+    bool decodeFailure = false, differencesFound = false;
     size_t pc1 = startPc1, pc2 = startPc2;
 
     while (pc1 - startPc1 < bitsLen1 || pc2 - startPc2 < bitsLen2) {
@@ -381,6 +402,7 @@ iga_status_t iga::DiffFieldsFromPCs(
             if (bitsLen - pc < 4) {
                 std::stringstream ss;
                 ss << which << ": extra padding at end of kernel";
+                decodeFailure = true;
             }
             const iga::MInst *mi = (const iga::MInst *)&bits[pc];
             if ((mi->isCompact() && bitsLen - pc < 8) ||
@@ -388,6 +410,7 @@ iga_status_t iga::DiffFieldsFromPCs(
             {
                 std::stringstream ss;
                 ss << which << ": extra padding at end of kernel";
+                decodeFailure = true;
             }
             return mi;
         };
@@ -396,114 +419,131 @@ iga_status_t iga::DiffFieldsFromPCs(
             *mi1 = getPc("kernel 1", bits1, bitsLen1, pc1 - startPc1),
             *mi2 = getPc("kernel 2", bits2, bitsLen2, pc2 - startPc2);
 
-        // TODO: do a colored diff here (words with given separators)
-        // lex with BufferedLexer and do an LCS
-        os << fmtPc(mi1, pc1) << " " <<
-            disassembleInst(p, useNativeDecoder, pc1, (const void *)mi1) << "\n";
-        os << fmtPc(mi2, pc2) << " " <<
-            disassembleInst(p, useNativeDecoder, pc2, (const void *)mi2) << "\n";
+        // if given -q, then we ignore differences
+        if (verbosity >= 0 || *mi1 != *mi2) {
+            os << fmtPc(mi1, pc1) << " " <<
+                disassembleInst(
+                    p, useNativeDecoder, fmtOpts,
+                    pc1, (const void *)mi1) << "\n";
+            os << fmtPc(mi2, pc2) << " " <<
+                disassembleInst(
+                    p, useNativeDecoder, fmtOpts,
+                    pc2, (const void *)mi2) << "\n";
 
-        FragmentList fields1;
-        bool successLeft = true;
-        if (mi1) {
-            fields1 = decodeFieldsWithWarnings(
-                *model, os, Loc((uint32_t)pc1), mi1, successLeft, "left");
-        }
-        bool successRight = true;
-        FragmentList fields2;
-        if (mi2) {
-            fields2 = decodeFieldsWithWarnings(
-                *model, os, Loc((uint32_t)pc2), mi2, successRight, "right");
-        }
-        success &= successLeft & successRight;
+            FragmentList fields1;
+            bool successL = true;
+            if (mi1) {
+                fields1 = decodeFieldsWithWarnings(
+                    *model, os, Loc((uint32_t)pc1), mi1, successL, "left");
+            }
+            decodeFailure |= !successL;
 
-        // union the fields
-        FieldSet allFields;
-        for (const auto &f : fields1) {allFields.insert(&f.first);}
-        for (const auto &f : fields2) {allFields.insert(&f.first);}
+            bool successR = true;
+            FragmentList fields2;
+            if (mi2) {
+                fields2 = decodeFieldsWithWarnings(
+                    *model, os, Loc((uint32_t)pc2), mi2, successR, "right");
+            }
+            decodeFailure |= !successR;
 
-        for (const Fragment *f : allFields) {
-            auto inList = [&] (const FragmentList &flist) {
-                auto fieldEq = [&](const FragmentListElem &p) {
-                    return p.first == *f;
+            // union the fields
+            FieldSet allFields;
+            for (const auto &f : fields1) {allFields.insert(&f.first);}
+            for (const auto &f : fields2) {allFields.insert(&f.first);}
+
+            for (const Fragment *f : allFields) {
+                auto inList = [&] (const FragmentList &flist) {
+                    auto fieldEq = [&](const FragmentListElem &p) {
+                        return p.first == *f;
+                    };
+                    return std::find_if(
+                        flist.begin(), flist.end(), fieldEq) != flist.end();
                 };
-                return std::find_if(flist.begin(), flist.end(), fieldEq) !=
-                    flist.end();
-            };
-            auto findStr = [&](const FragmentList &flist) {
-                for (const auto &fp : flist) {
-                    if (fp.first == *f) {
-                        return std::string(fp.second);
+                auto findStr = [&](const FragmentList &flist) {
+                    for (const auto &fp : flist) {
+                        if (fp.first == *f) {
+                            return std::string(fp.second);
+                        }
                     }
-                }
-                return std::string("");
-            };
+                    return std::string("");
+                };
 
-            bool inList1 = mi1 != nullptr && inList(fields1);
-            uint64_t val1 = mi1 ? mi1->getFragment(*f) : 0;
-            std::string valStr1 = findStr(fields1);
+                bool inList1 = mi1 != nullptr && inList(fields1);
+                uint64_t val1 = mi1 ? mi1->getFragment(*f) : 0;
+                std::string valStr1 = findStr(fields1);
 
-            bool inList2 = mi2 != nullptr && inList(fields2);
-            uint64_t val2 = mi2 ? mi2->getFragment(*f) : 0;
-            std::string valStr2 = findStr(fields2);
+                bool inList2 = mi2 != nullptr && inList(fields2);
+                uint64_t val2 = mi2 ? mi2->getFragment(*f) : 0;
+                std::string valStr2 = findStr(fields2);
 
-            std::string diffToken = "  ";
-            if (inList1 && inList2) {
-                if (val1 != val2) {
-                    diffToken = "~~"; // changed
-                    success = false;
+                std::string diffToken = "  ";
+                if (inList1 && inList2) {
+                    if (val1 != val2) {
+                        diffToken = "~~"; // changed
+                        differencesFound = true;
+                    } else if (verbosity < 0) {
+                        // skip to the next field
+                        continue;
+                    } else {
+                        diffToken = "  ";
+                    }
+                } else if (inList1) {
+                    diffToken = "--"; // removed
+                    differencesFound = true;
+                } else if (inList2) {
+                    diffToken = "++"; // added
+                    differencesFound = true;
                 } else {
+                    // unreachable???
                     diffToken = "  ";
                 }
-            } else if (inList1) {
-                diffToken = "--"; // removed
-                success = false;
-            } else if (inList2) {
-                diffToken = "++"; // added
-                success = false;
-            } else {
-                diffToken = "  ";
-            }
-            os << std::setw(FIELD_PC_WIDTH) << std::left << diffToken;
 
-            // e.g. Src1.Imm32
-            os << std::setw(FIELD_NAME_WIDTH) << std::left << f->name;
-            os << " ";
+                os << std::setw(FIELD_PC_WIDTH) << std::left << diffToken;
 
-            // e.g. [127:96]
-            os << std::setw(FIELD_OFFSET_WIDTH) << std::left << fmtBitRange(*f);
-            os << " ";
+                // e.g. Src1.Imm32
+                os << std::setw(FIELD_NAME_WIDTH) << std::left << f->name;
+                os << " ";
 
-            // e.g. (32)
-            os << std::setw(FIELD_SIZE_WIDTH) << std::left << fmtSize(*f);
-            os << " ";
+                // e.g. [127:96]
+                os << std::setw(FIELD_OFFSET_WIDTH) <<
+                    std::left << fmtBitRange(*f);
+                os << " ";
 
-            // bit value
-            auto fmtElem = [&](bool inList, uint64_t val, const std::string &str) {
-                if (inList) {
-                    os << std::right << std::setw(FIELD_VALUE_INT_WIDTH) <<
-                        fmtHex(val);
-                } else {
-                    os << std::right << std::setw(FIELD_VALUE_INT_WIDTH) << " ";
+                // e.g. (32)
+                os << std::setw(FIELD_SIZE_WIDTH) << std::left << fmtSize(*f);
+                os << " ";
+
+                // bit value
+                auto fmtElem =
+                    [&] (bool inList, uint64_t val, const std::string &str) {
+                        if (inList) {
+                            os << std::right <<
+                                std::setw(FIELD_VALUE_INT_WIDTH) <<
+                                fmtHex(val);
+                        } else {
+                            os << std::right <<
+                                std::setw(FIELD_VALUE_INT_WIDTH) <<
+                                " ";
+                        }
+                        os << " " << std::setw(FIELD_VALUE_STR_WIDTH) << str;
+                    };
+                if (inList1 && val1 != val2) {
+                    os << Intensity::BRIGHT << Color::GREEN;
                 }
-                os << " " << std::setw(FIELD_VALUE_STR_WIDTH) << str;
-            };
-            if (inList1 && val1 != val2) {
-                os << Intensity::BRIGHT << Color::GREEN;
-            }
-            fmtElem(inList1, val1, valStr1);
-            os << " ";
+                fmtElem(inList1, val1, valStr1);
+                os << " ";
 
-            if (inList2 && val1 != val2) {
-                os << Intensity::BRIGHT << Color::RED;
-            }
-            fmtElem(inList2, val2, valStr2);
+                if (inList2 && val1 != val2) {
+                    os << Intensity::BRIGHT << Color::RED;
+                }
+                fmtElem(inList2, val2, valStr2);
 
-            if (val1 != val2) {
-                os << Reset::RESET;
-            }
-            os << "\n";
-        } // for
+                if (val1 != val2) {
+                    os << Reset::RESET;
+                }
+                os << "\n";
+            } // for
+        } // if verbose or different
 
         // on to the next instruction
         if (mi1) {
@@ -514,7 +554,10 @@ iga_status_t iga::DiffFieldsFromPCs(
         }
     } // for all instructions in both streams (in parallel)
 
-    return success ? IGA_SUCCESS : IGA_ERROR;
+    return
+        decodeFailure ? IGA_DECODE_ERROR :
+        differencesFound ? IGA_DIFF_FAILURE :
+        IGA_SUCCESS;
 }
 
 // emits output such as  "0`001`1`0`001"
@@ -560,6 +603,8 @@ struct MappingStats
 };
 struct CompactionStats
 {
+    using CompactionMisses = std::map<Mapping,MappingStats>;
+
     int64_t hits = 0;
     int64_t misses = 0;
     int64_t noCompactSet = 0;
@@ -569,11 +614,12 @@ struct CompactionStats
     //   each value that missed maps to:
     //       - # of times it missed
     //       - # of times this miss was the unique
-    std::map<const CompactionMapping *,std::map<Mapping,MappingStats>> fieldMisses;
+    std::map<const CompactionMapping *,CompactionMisses> fieldMisses;
 };
 
 static bool listInstructionCompaction(
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
     CompactionStats &cmpStats,
     const Model &m,
@@ -585,7 +631,8 @@ static bool listInstructionCompaction(
 
     MInst compactedInst;
     CompactionDebugInfo cdi;
-    CompactionResult cr = iga::native::DebugCompaction(m, bits, &compactedInst, cdi);
+    CompactionResult cr =
+        iga::native::DebugCompaction(m, bits, &compactedInst, cdi);
 
     bool success = true;
     switch (cr) {
@@ -593,7 +640,8 @@ static bool listInstructionCompaction(
         cmpStats.hits++;
         os << Color::GREEN << Intensity::BRIGHT <<
             "=> compaction hit " << Reset::RESET << "\n";
-        success &= decodeFieldsForInst(useNativeDecoder, os, pc, m, &compactedInst);
+        success &=
+            decodeFieldsForInst(useNativeDecoder, fmtOpts, os, pc, m, &compactedInst);
         break;
     case CompactionResult::CR_MISS: {
         cmpStats.misses++;
@@ -648,7 +696,8 @@ static bool listInstructionCompaction(
             // find the closest hits
             std::vector<size_t> closestIndices;
             for (size_t dist = 1;
-                dist < MAX_HAMMING_DIST && closestIndices.size() < MAX_CLOSE_MAPPINGS;
+                dist < MAX_HAMMING_DIST &&
+                    closestIndices.size() < MAX_CLOSE_MAPPINGS;
                 dist++)
             {
                 // closest hits of distance `dist`
@@ -672,7 +721,8 @@ static bool listInstructionCompaction(
                     os << "  #" << std::setw(2) << std::left << cIx;
                     os << "  " << fmtHex(cf.values[cIx], hexDigits) << ": ";
                     int bitOff = (int)cf.countNumBitsMapped();
-                    // walk through the fields listing who misses (from high to low bits)
+                    // walk through the fields listing who misses
+                    // (from high to low bits)
                     std::vector<const Field *> missingFields;
                     for (int mIx = 0; mIx < (int)cf.numMappings; ++mIx) {
                         if (mIx != 0) {
@@ -715,7 +765,8 @@ static bool listInstructionCompaction(
     }
     case CompactionResult::CR_NO_COMPACT:
         cmpStats.noCompactSet++;
-        os << Color::WHITE << "{NoCompact/Uncompacted} set" << Reset::RESET << "\n";
+        os << Color::WHITE << "{NoCompact/Uncompacted} set" <<
+            Reset::RESET << "\n";
         break;
     case CompactionResult::CR_NO_FORMAT:
         cmpStats.noCompactForm++;
@@ -730,7 +781,9 @@ static bool listInstructionCompaction(
 
 iga_status_t iga::DebugCompaction(
     Platform p,
+    int /* verbosity */,
     bool useNativeDecoder,
+    uint32_t fmtOpts,
     std::ostream &os,
     const uint8_t *bits,
     size_t bitsLen)
@@ -759,11 +812,12 @@ iga_status_t iga::DebugCompaction(
         }
 
         os << "============================================================\n";
-        auto syntax = disassembleInst(p, useNativeDecoder, pc, (const void *)mi);
+        auto syntax =
+            disassembleInst(p, useNativeDecoder, fmtOpts, pc, (const void *)mi);
         os << fmtPc(mi, pc) << " " <<  syntax << "\n";
         os.flush();
         success &= listInstructionCompaction(
-            useNativeDecoder, os, cs, *model, pc, mi);
+            useNativeDecoder, fmtOpts, os, cs, *model, pc, mi);
         pc += iLen;
     }
     os << "\n";
@@ -844,23 +898,27 @@ iga_status_t iga::DebugCompaction(
                     misses3plus++;
                 }
             }
-            os << "  1m:" << misses1 << "  2m:" << misses2 << "  3+m:" << misses3plus;
+            os << "  1m:" << misses1 <<
+                "  2m:" << misses2 <<
+                "  3+m:" << misses3plus;
 
             if (cf->format) {
                 os << "  ";
-                Op HACK = Op::ADD; // gives - instead of ~ for bitwise, but it's the best I can do
-                os << cf->format(HACK,mVal);
+                Op HACK = Op::ADD; // gives - instead of ~ for bitwise,
+                                   // but it's the best I can do
+                os << cf->format(HACK, mVal);
             }
             os << "\n";
 
             // emit those that miss
             // mStats.orderMisses();
             for (const auto &missExample : mStats.misses) {
-                PC pc = missExample.first;
+                PC missPc = missExample.first;
                 int totalMissesForThisPc = missExample.second;
-                os << "        misses " << totalMissesForThisPc << ": "
-                    << disassembleInst(p, useNativeDecoder, pc, bits+pc)
-                    << "\n";
+                os << "        misses " << totalMissesForThisPc << ": " <<
+                    disassembleInst(
+                        p, useNativeDecoder,
+                        fmtOpts, missPc, bits + missPc) << "\n";
             }
         }
     }

@@ -55,12 +55,12 @@ static void parseBitsFromFile(
     igax::Bits &bits)
 {
     Opts opts = opts0;
-    opts.mode = Opts::AUTO; // allow file inference
+    opts.mode = Opts::Mode::AUTO; // allow file inference
     inferPlatformAndMode(inpFile, opts);
 
-    if (opts.mode == Opts::DIS) {
+    if (opts.mode == Opts::Mode::DIS) {
         readBinaryFile(inpFile.c_str(), bits);
-    } else if (opts.mode == Opts::ASM) {
+    } else if (opts.mode == Opts::Mode::ASM) {
         if (opts.platform == IGA_GEN_INVALID) {
             errorInFile(opts, inpFile, "platform required (-p)");
         }
@@ -138,7 +138,7 @@ static void parseBitsAsHex(
             return -1;
         }
         int digit = 0;
-        char chr = ::toupper(inp[off]);
+        char chr = (char)::toupper(inp[off]);
         if (chr >= '0' && chr <= '9') {
             digit = chr - '0';
         } else if (chr >= 'A' && chr <= 'F') {
@@ -182,7 +182,8 @@ static void parseBitsAsHex(
                 int b = parseByte();
                 if (b < 0) {
                     std::stringstream ss;
-                    ss << "invalid file, syntax, or raw byte sequence (w" << wIx << ")";
+                    ss << "invalid file, syntax, or raw byte sequence "
+                        "(w" << wIx << ")";
                     error(ss.str().c_str());
                 }
                 ws[wIx][i] = (uint8_t)b;
@@ -237,9 +238,10 @@ static igax::Bits parseBits(const std::string &inp, Opts &opts)
 {
     igax::Bits bits;
     if (doesFileExist(inp.c_str())) {
-        if (opts.verbosity > 0) {
+        if (opts.verbosity > 1) {
             std::cerr << "iga: parsing argument as file (since it exists)\n";
         }
+        inferPlatform(inp, opts);
         parseBitsFromFile(inp, opts, bits);
     } else {
         bool allHexDigits = true, hasSeps = false;
@@ -252,29 +254,18 @@ static igax::Bits parseBits(const std::string &inp, Opts &opts)
             }
         }
         if (allHexDigits) {
-            if (opts.verbosity > 0) {
+            if (opts.verbosity > 1) {
                 std::cerr << "iga: parsing argument as immediate hex string\n";
             }
             parseBitsAsHex(inp, opts, hasSeps, bits);
         } else {
-            if (opts.verbosity > 0) {
+            if (opts.verbosity > 1) {
                 std::cerr << "iga: parsing argument as syntax string\n";
             }
             parseBitsAsSyntax(inp, opts, bits);
         }
     }
     return bits;
-}
-
-static void checkPlatform(Opts &opts)
-{
-    if (opts.platform == IGA_GEN_INVALID) {
-        if (!opts.inputFiles.empty() && opts.mode != Opts::Mode::XDSD) {
-            // mode will be ignored, don't worry
-            inferPlatformAndMode(opts.inputFiles[0], opts);
-        }
-        ensurePlatformIsSet(opts);
-    } // else -p=... was given
 }
 
 static bool decodeFieldsSingle(Opts opts)
@@ -288,15 +279,18 @@ static bool decodeFieldsSingle(Opts opts)
         outfile = new std::ofstream(opts.outputFile, std::ios::out);
     }
     std::ostream &os = outfile ? *outfile : std::cout;
+    uint32_t fmtOpts =  makeFormattingOpts(opts);
     iga_status_t st =
         iga::DecodeFields(
             static_cast<iga::Platform>(opts.platform),
+            opts.verbosity,
             opts.useNativeEncoder,
+            fmtOpts,
             os,
             bits.data(),
             bits.size());
     if (st != IGA_SUCCESS) {
-        std::cerr << "decode error: " << iga_status_to_string(st) << "\n";
+        std::cerr << iga_status_to_string(st) << "\n";
     }
     os.flush();
     if (outfile) {
@@ -331,7 +325,8 @@ static bool decodeFieldsDiff(Opts opts)
             opts1.platform != IGA_GEN_INVALID &&
             opts0.platform != opts1.platform)
         {
-            fatalExitWithMessage("-Xifs: conflicting platforms inferred (override with -p)");
+            fatalExitWithMessage(
+                "-Xifs: conflicting platforms inferred (override with -p)");
         }
         if (opts0.platform != IGA_GEN_INVALID) {
             opts.platform = opts0.platform;
@@ -342,15 +337,19 @@ static bool decodeFieldsDiff(Opts opts)
         }
     } // else: we have (-p=...)
 
+    uint32_t fmtOpts =  makeFormattingOpts(opts);
     std::ofstream *outfile = nullptr;
     if (!opts.outputFile.empty()) {
         outfile = new std::ofstream(opts.outputFile, std::ios::out);
     }
     std::ostream &os = outfile ? *outfile : std::cout;
+    //
     iga_status_t st =
         iga::DiffFields(
             static_cast<iga::Platform>(opts.platform),
+            opts.verbosity,
             opts.useNativeEncoder,
+            fmtOpts,
             os,
             source0,
             bits0.data(),
@@ -358,8 +357,10 @@ static bool decodeFieldsDiff(Opts opts)
             source1,
             bits1.data(),
             bits1.size());
-    if (st != IGA_SUCCESS) {
-        std::cerr << "decode error: " << iga_status_to_string(st) << "\n";
+    if (st == IGA_DIFF_FAILURE) {
+        std::cout << "differences encountered\n";
+    } else if (st != IGA_SUCCESS) {
+        std::cerr << iga_status_to_string(st) << "\n";
     }
 
     os.flush();
@@ -401,12 +402,15 @@ bool debugCompaction(Opts opts)
         outfile = new std::ofstream(opts.outputFile, std::ios::out);
     }
     std::ostream &os = outfile ? *outfile : std::cout;
+    uint32_t fmtOpts =  makeFormattingOpts(opts);
 
     std::string warnings;
     iga_status_t st =
         iga::DebugCompaction(
             static_cast<iga::Platform>(opts.platform),
+            opts.verbosity,
             opts.useNativeEncoder,
+            fmtOpts,
             os,
             bits.data(),
             bits.size());

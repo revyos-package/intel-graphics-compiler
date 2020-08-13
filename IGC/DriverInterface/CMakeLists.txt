@@ -1,4 +1,7 @@
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}")
+
+include_directories(
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${IGC_BUILD__IGC_SRC_DIR}")
 
 set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/AddImplicitArgs.cpp"
@@ -7,6 +10,7 @@ set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/ImplicitArgs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/ProcessFuncAttributes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/TypesLegalizationPass.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/LegalizeFunctionSignatures.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorCommon/IRUpgrader/UpgraderResourceAccess.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/LoadBuffer.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/Patch/patch_parser.cpp"
@@ -17,11 +21,10 @@ set(IGC_BUILD__SRC__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/gtpin_igc_ocl.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/util/BinaryStream.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/BitcodeReader.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/UnifyIROCL.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/cmc.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/zebin_builder.cpp"
   )
 
 
@@ -74,10 +77,9 @@ set(IGC_BUILD__HDR__DriverInterface
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/gtpin_igc_ocl.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/sp_debug.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/util/BinaryStream.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/Upgrader/llvm${LLVM_VERSION_MAJOR}/Upgrader.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/OCL/sp/zebin_builder.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/MoveStaticAllocas.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/cmc.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../AdaptorOCL/igcmc.h"
 
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/ErrorCode.h"
     "${IGC_BUILD__COMMON_COMPILER_DIR}/API/SurfaceFormats.h"

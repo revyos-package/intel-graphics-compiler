@@ -23,10 +23,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "igc_workaround.h"
-#include "assert.h"
 #include <string.h>
 #include <stdlib.h>
+#include "Probe/Assertion.h"
 
 namespace IGC
 {
@@ -37,6 +38,8 @@ namespace IGC
         memset(&waTable, 0, sizeof(WA_TABLE));
         WA_INIT_PARAM      stWaInitParam = {};
         stWaInitParam.ePlatformType = platform->getPlatformInfo().ePlatformType;
+        if (IGC_GET_FLAG_VALUE(OverrideRevId))
+            platform->OverrideRevId(IGC_GET_FLAG_VALUE(OverrideRevId));
         stWaInitParam.usRevId = platform->getPlatformInfo().usRevId;
         stWaInitParam.usRevId_PCH = platform->getPlatformInfo().usRevId_PCH;
         GT_SYSTEM_INFO sysInfo = platform->GetGTSystemInfo();
@@ -73,23 +76,32 @@ namespace IGC
             break;
         case IGFX_ICELAKE:
             InitIclHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            InitIclSwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             break;
         case IGFX_ICELAKE_LP:
             InitIclLpHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            InitIclLpSwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             break;
         case IGFX_LAKEFIELD:
             InitLkfHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            InitLkfSwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             break;
         case IGFX_TIGERLAKE_LP:
             {
                 InitTglLpHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+                InitTglLpSwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             }
             break;
         case IGFX_JASPERLAKE:
             InitJslHwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            InitJslSwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            break;
+        case IGFX_DG1:
+            InitDg1HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+            InitDg1SwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
             break;
         default:
-            assert(false);
+            IGC_ASSERT(0);
             break;
         }
 

@@ -32,7 +32,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
 #include "llvm/Config/llvm-config.h"
-
 #include "Compiler/DebugInfo/VISADebugEmitter.hpp"
 #include "Compiler/DebugInfo/DwarfDebug.hpp"
 #include "Compiler/DebugInfo/StreamEmitter.hpp"
@@ -49,10 +48,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/BinaryFormat/ELF.h"
 #endif
 #include "common/LLVMWarningsPop.hpp"
-
 #include "Compiler/DebugInfo/DebugInfoUtils.hpp"
 #include "common/secure_mem.h"
 #include "Compiler/CISACodeGen/DriverInfo.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -110,12 +109,8 @@ void IGC::insertOCLMissingDebugConstMetadata(CodeGenContext* ctx)
         return;
     }
 
-    for (auto func_it = M->begin();
-        func_it != M->end();
-        func_it++)
+    for (auto& func : *M)
     {
-        auto& func = (*func_it);
-
         if (func.isDeclaration())
             continue;
 
@@ -163,13 +158,13 @@ void IGC::insertOCLMissingDebugConstMetadata(CodeGenContext* ctx)
 
 void DebugEmitter::Initialize(CShader* pShader, bool debugEnabled)
 {
-    assert(!m_initialized && "DebugEmitter is already initialized!");
+    IGC_ASSERT_MESSAGE(false == m_initialized, "DebugEmitter is already initialized!");
     m_initialized = true;
 
     m_debugEnabled = debugEnabled;
     // VISA module will be initialized even when debugger is disabled.
     // Its overhead is minimum and it will be used in debug mode to
-    // assert on calling DebugEmitter in the right order.
+    // assertion test on calling DebugEmitter in the right order.
     m_pVISAModule = VISAModule::BuildNew(pShader);
     toFree.push_back(m_pVISAModule);
 
@@ -197,6 +192,12 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
         return;
     }
 
+    if (m_pVISAModule->isDirectElfInput)
+    {
+        auto decodedDbg = new DbgDecoder(m_pVISAModule->m_pShader->ProgramOutput()->m_debugDataGenISA);
+        m_pDwarfDebug->setDecodedDbg(decodedDbg);
+    }
+
     if (!doneOnce)
     {
         m_pDwarfDebug->beginModule();
@@ -207,13 +208,9 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
     // Collect debug information for given function.
     m_pStreamEmitter->SwitchSection(m_pStreamEmitter->GetTextSection());
     m_pDwarfDebug->beginFunction(pFunc, m_pVISAModule);
-    unsigned int prevOffset = 0;
 
     if (m_pVISAModule->isDirectElfInput)
     {
-        auto decodedDbg = new DbgDecoder(m_pVISAModule->m_pShader->ProgramOutput()->m_debugDataGenISA);
-        m_pDwarfDebug->setDecodedDbg(decodedDbg);
-
         m_pVISAModule->buildDirectElfMaps();
         auto co = m_pVISAModule->getCompileUnit();
 
@@ -227,6 +224,12 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
         unsigned int prevLastGenOff = lastGenOff;
         m_pDwarfDebug->lowPc = lastGenOff;
 
+        if (IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging))
+        {
+            // SIMD width
+            m_pDwarfDebug->simdWidth = m_pVISAModule->GetSIMDSize();
+        }
+
         if (co->subs.size() == 0)
         {
             GenISAToVISAIndex = m_pVISAModule->GenISAToVISAIndex;
@@ -238,13 +241,13 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
         {
             for (auto item : m_pVISAModule->GenISAToVISAIndex)
             {
-                if ((item.first > lastGenOff) || ((item.first | lastGenOff) == 0))
+                if ((item.first >= lastGenOff) || ((item.first | lastGenOff) == 0))
                 {
-                    if (item.second <= subEnd ||
-                        item.second == 0xffffffff)
+                    if (item.second <= subEnd || item.second == 0xffffffff)
                     {
                         GenISAToVISAIndex.push_back(item);
-                        lastGenOff = item.first;
+                        auto size = m_pVISAModule->GenISAInstSizeBytes[item.first];
+                        lastGenOff = item.first + size;
                         continue;
                     }
 
@@ -317,11 +320,25 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
 
             if (emptyLoc && prevSrcLoc)
             {
+              if (IGC_IS_FLAG_ENABLED(FillMissingDebugLocations))
+              {
+                if (auto scope = pFunc->getSubprogram())
+                {
+                  auto src = m_pDwarfDebug->getOrCreateSourceID(scope->getFilename(), scope->getDirectory(), m_pStreamEmitter->GetDwarfCompileUnitID());
+
+                  // Emit func top as line# for unattributed lines
+                  m_pStreamEmitter->EmitDwarfLocDirective(src, scope->getLine(), 0, 0, 0, 0, scope->getFilename());
+                }
+              }
+              else
+              {
                 auto scope = prevSrcLoc->getScope();
                 auto src = m_pDwarfDebug->getOrCreateSourceID(scope->getFilename(), scope->getDirectory(), m_pStreamEmitter->GetDwarfCompileUnitID());
 
                 // Emit 0 as line# for unattributed lines
                 m_pStreamEmitter->EmitDwarfLocDirective(src, 0, 0, 0, 0, 0, scope->getFilename());
+              }
+
                 prevSrcLoc = DebugLoc();
             }
         }
@@ -334,14 +351,23 @@ void DebugEmitter::Finalize(void*& pBuffer, unsigned int& size, bool finalize)
                 lastGenOff++;
             }
         }
+        else if (pc != lastGenOff)
+        {
+            // for subroutines
+            for (unsigned int i = pc; i != lastGenOff; i++)
+            {
+                m_pStreamEmitter->EmitInt8(genxISA[i]);
+            }
+        }
 
         m_pDwarfDebug->highPc = lastGenOff;
     }
     else
     {
-        for (VISAModule::const_iterator II = m_pVISAModule->begin(), IE = m_pVISAModule->end(); II != IE; ++II)
+        unsigned int prevOffset = 0;
+        for (const Instruction *pInst : *m_pVISAModule)
         {
-            const Instruction* pInst = *II;
+
             unsigned int currOffset = m_pVISAModule->GetVisaOffset(pInst);
 
             int currSize = (int)m_pVISAModule->GetVisaSize(pInst);
@@ -594,4 +620,9 @@ std::string DebugMetadataInfo::getUniqueFuncName(Function& F)
     DebugMetadataInfo::hasAnyDebugInfo(s->GetContext(), fullDebugInfo, lineTableOnly);
 
     return lineTableOnly && !fullDebugInfo;
+}
+
+void DebugEmitter::AddVISAModFunc(IGC::VISAModule* v, llvm::Function* f)
+{
+    m_pDwarfDebug->AddVISAModToFunc(v, f);
 }

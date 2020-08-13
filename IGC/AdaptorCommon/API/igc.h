@@ -86,7 +86,8 @@ typedef struct {
 typedef struct {
     CG_CTX_STATS_t  m_stats;              // record what simd has been generated
     void*           m_pixelShaderGen;     // Generated pixel shader output
-    std::string     m_savedBitcodeString; // Serialized Bitcode
+    char*           m_savedBitcodeCharArray; // Serialized Bitcode
+    unsigned int    m_savedBitcodeCharArraySize;
     void*           m_savedInstrTypes;
     SHADER_STATS_t  m_savedShaderStats;
 } CG_CTX_t;
@@ -118,21 +119,26 @@ typedef enum {
 #define IsStage1(pCtx)   (IsStage1BestPerf(pCtx->m_CgFlag, pCtx->m_StagingCtx) || \
                           IsStage1FastCompile(pCtx->m_CgFlag, pCtx->m_StagingCtx))
 #define HasSavedIR(pCtx) (pCtx && IsStage2RestSIMDs(pCtx->m_StagingCtx) && \
-                          pCtx->m_StagingCtx->m_savedBitcodeString.size() > 0)
+                          pCtx->m_StagingCtx->m_savedBitcodeCharArraySize > 0)
 
 #define DoSimd32Stage2(prev_ctx_ptr) (IsStage2RestSIMDs(prev_ctx_ptr) && DoSimd32(prev_ctx_ptr->m_stats))
 #define DoSimd16Stage2(prev_ctx_ptr) (IsStage2RestSIMDs(prev_ctx_ptr) && DoSimd16(prev_ctx_ptr->m_stats))
 
-// We don't need compile continuation if no staged compilation enabled denoted by RegKeys.
+#define ContinueFastCompileStage1(flag, prev_ctx_ptr, stats) ( \
+    IsStage1FastCompile(flag, prev_ctx_ptr) && \
+    (IsRetry(stats) || DoSimd16(stats)))
+
 // If the staged compilation enabled, we don't need compile continuation when SIMD8 is spilled.
-#define HasCompileContinuation(flag, prev_ctx_ptr, stats) ( \
-    IGC_IS_FLAG_ENABLED(StagedCompilation) && \
-    ((IsStage1FastCompile(flag, prev_ctx_ptr) && \
-     !(!IsRetry(stats) && !DoSimd16(stats))) || \
-    ((IsStage1BestPerf(flag, prev_ctx_ptr)) && \
-     ( IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && !HasSimdSpill(8, stats)) || \
-     (!IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && (!HasSimd(8, stats) || DoSimd32(stats))))) \
-    )
+#define ContinueBestPerfStage1(flag, prev_ctx_ptr, stats) ( \
+    IsStage1BestPerf(flag, prev_ctx_ptr) && \
+     (( IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && !HasSimdSpill(8, stats)) || \
+      (!IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && (!HasSimd(8, stats) || DoSimd32(stats)))))
+
+// We don't need compile continuation if no staged compilation enabled denoted by RegKeys.
+#define HasCompileContinuation(Ail, flag, prev_ctx_ptr, stats) ( \
+    (IGC_IS_FLAG_ENABLED(StagedCompilation) || Ail) && \
+    (ContinueFastCompileStage1(flag, prev_ctx_ptr, stats) || \
+     ContinueBestPerfStage1(flag, prev_ctx_ptr, stats)))
 
 // Return true when simd MODE has been generated previously
 #define AvoidDupStage2(MODE, flag, prev_ctx_ptr)      (IsStage2RestSIMDs(prev_ctx_ptr) && HasSimdNoSpill(MODE, prev_ctx_ptr->m_stats))

@@ -36,13 +36,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 //===----------------------------------------------------------------------===//
 #include "common/LLVMWarningsPush.hpp"
-
 #include "InstCombineInternal.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/PatternMatch.h"
+#include "Probe/Assertion.h"
+
 using namespace llvm;
 using namespace PatternMatch;
 using namespace IGCombiner;
@@ -53,7 +54,7 @@ static SelectPatternFlavor
 getInverseMinMaxSelectPattern(SelectPatternFlavor SPF) {
   switch (SPF) {
   default:
-    llvm_unreachable("unhandled!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "unhandled!");
 
   case SPF_SMIN:
     return SPF_SMAX;
@@ -70,7 +71,7 @@ static CmpInst::Predicate getCmpPredicateForMinMax(SelectPatternFlavor SPF,
                                                    bool Ordered=false) {
   switch (SPF) {
   default:
-    llvm_unreachable("unhandled!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "unhandled!");
 
   case SPF_SMIN:
     return ICmpInst::ICMP_SLT;
@@ -91,7 +92,7 @@ static Value *generateMinMaxSelectPattern(InstCombiner::BuilderTy *Builder,
                                           SelectPatternFlavor SPF, Value *A,
                                           Value *B) {
   CmpInst::Predicate Pred = getCmpPredicateForMinMax(SPF);
-  assert(CmpInst::isIntPredicate(Pred));
+  IGC_ASSERT(CmpInst::isIntPredicate(Pred));
   return Builder->CreateSelect(Builder->CreateICmp(Pred, A, B), A, B);
 }
 
@@ -128,7 +129,7 @@ static unsigned getSelectFoldableOperands(Instruction *I) {
 /// constant that goes into the select.
 static Constant *getSelectFoldableConstant(Instruction *I) {
   switch (I->getOpcode()) {
-  default: llvm_unreachable("This cannot happen!");
+  default: IGC_ASSERT_EXIT_MESSAGE(0, "This cannot happen!");
   case Instruction::Add:
   case Instruction::Sub:
   case Instruction::Or:

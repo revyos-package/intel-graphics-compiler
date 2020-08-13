@@ -23,6 +23,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/ScaledNumber.h>
 #include "llvm/ADT/SmallSet.h"
@@ -37,27 +38,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/IRReader/IRReader.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/Optimizer/PreCompiledFuncImport.hpp"
 #include "Compiler/Optimizer/PreCompiledFuncLibrary.cpp"
-
-// No Support to double emulation.
-const unsigned char igcbuiltin_emu_dp_add_sub[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_fma_mul[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_cmp[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_conv_i32[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_conv_sp[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_div[] = { 0 };
-const unsigned char igcbuiltin_emu_dp_sqrt[] = { 0 };
-// No Support to IEEE compliant emulation
-const unsigned char igcbuiltin_emu_sp_div[] = { 0 };
+#include <unordered_map>
+#include "Compiler/Builtins/LibraryIntS32DivRemEmu.hpp"
+#include "Compiler/Builtins/LibraryIntU32DivRemEmu.hpp"
+#include "Compiler/Builtins/LibraryIntS32DivRemEmuSP.hpp"
+#include "Compiler/Builtins/LibraryIntU32DivRemEmuSP.hpp"
+#include "Compiler/Builtins/LibraryDPEmu.hpp"
+#include "Compiler/Builtins/LibraryMiscEmu.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMUtils.h"
 #include "AdaptorOCL/OCL/BuiltinResource.h"
 #include "AdaptorOCL/OCL/LoadBuffer.h"
-#include "AdaptorOCL/Upgrader/Upgrader.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -130,6 +125,13 @@ const char* PreCompiledFuncImport::m_sFunctionNames[NUM_FUNCTIONS][NUM_TYPES] =
     }
 };
 
+const char* PreCompiledFuncImport::m_Int32EmuFunctionNames[NUM_INT32_EMU_FUNCTIONS] =
+{
+    "precompiled_u32divrem",
+    "precompiled_s32divrem",
+    "precompiled_u32divrem_sp",
+    "precompiled_s32divrem_sp"
+};
 
 const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_IDS] =
 {
@@ -152,6 +154,10 @@ const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_ID
 const LibraryModuleInfo PreCompiledFuncImport::m_libModInfos[NUM_LIBMODS] =
 {
     /* LIBMOD_INT_DIV_REM */   { preCompiledFunctionLibrary, sizeof(preCompiledFunctionLibrary) },
+    /* LIBMOD_UINT32_DIV_REM */     { precompiled_u32divrem, sizeof(precompiled_u32divrem) },
+    /* LIBMOD_SINT32_DIV_REM,*/     { precompiled_s32divrem, sizeof(precompiled_s32divrem) },
+    /* LIBMOD_UINT32_DIV_REM_SP */  { precompiled_u32divrem_sp, sizeof(precompiled_u32divrem_sp) },
+    /* LIBMOD_SINT32_DIV_REM_SP,*/  { precompiled_s32divrem_sp, sizeof(precompiled_s32divrem_sp) },
     /* LIBMOD_INT_ADD_SUB */   { igcbuiltin_emu_dp_add_sub, sizeof(igcbuiltin_emu_dp_add_sub) },
     /* LIBMOD_DP_FMA_MUL  */   { igcbuiltin_emu_dp_fma_mul, sizeof(igcbuiltin_emu_dp_fma_mul) },
     /* LIBMOD_DP_DIV      */   { igcbuiltin_emu_dp_div, sizeof(igcbuiltin_emu_dp_div) },
@@ -332,6 +338,14 @@ bool PreCompiledFuncImport::preProcessDouble()
     return (toBeDeleted.size() > 0);
 }
 
+inline bool isPrecompiledEmulationFunction(Function* func)
+{
+    return func->getName().contains("precompiled_s32divrem") ||
+    func->getName().contains("precompiled_u32divrem") ||
+        func->getName().contains("precompiled_s32divrem_sp") ||
+        func->getName().contains("precompiled_u32divrem_sp") ||
+    func->getName().contains("__igcbuiltin_sp_div");
+}
 
 bool PreCompiledFuncImport::runOnModule(Module& M)
 {
@@ -376,6 +390,7 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
         count++;
         visit(M);
 
+        m_CallRemDiv.clear();
         if (m_changed)
         {
             llvm::Linker ld(M);
@@ -400,10 +415,10 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
                     llvm::parseBitcodeFile(MemoryBufferRef(BitRef.str(), ""), M.getContext());
                 if (llvm::Error EC = ModuleOrErr.takeError())
                 {
-                    assert(0 && "llvm getLazyBitcodeModule - FAILED to parse bitcode");
+                    IGC_ASSERT_MESSAGE(0, "llvm getLazyBitcodeModule - FAILED to parse bitcode");
                 }
                 std::unique_ptr<llvm::Module> m_pBuiltinModule = std::move(*ModuleOrErr);
-                assert(m_pBuiltinModule && "llvm version mismatch - could not load llvm module");
+                IGC_ASSERT_MESSAGE(m_pBuiltinModule, "llvm version mismatch - could not load llvm module");
 
                 // Set target triple and datalayout to the original module (emulation func
                 // works for both 64 & 32 bit applications).
@@ -415,7 +430,7 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
 
                 if (ld.linkInModule(std::move(m_pBuiltinModule)))
                 {
-                    assert(0 && "Error linking the two modules");
+                    IGC_ASSERT_MESSAGE(0, "Error linking the two modules");
                 }
                 m_libModuleAlreadyImported[i] = true;
                 m_pBuiltinModule = nullptr;
@@ -431,6 +446,71 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
     FuncNeedIA.clear();
     NewFuncWithIA.clear();
 
+    //post-process the Int32 precompiled emulation function for div/rem
+    if (isI32DivRem() || isI32DivRemSP() || isSPDiv())
+    {
+        std::unordered_map<CallInst*, CallInst*> replaceInsts;
+        for (auto FI = M.begin(), FE = M.end(); FI != FE; )
+        {
+            llvm::Function* func = &(*FI);
+            ++FI;
+            if (isPrecompiledEmulationFunction(func))
+            {
+                for (auto BBI = func->begin(), BBE = func->end(); BBI != BBE; )
+                {
+                    llvm::BasicBlock* BB = &(*BBI);
+                    ++BBI;
+                    for (auto I = BB->begin(), IE = BB->end(); I != IE; I++)
+                    {
+                        if (CallInst * CI = dyn_cast<CallInst>(I))
+                        {
+                            Function* pFunc = nullptr;
+                            GenISAIntrinsic::ID GISAIntr = GenISAIntrinsic::no_intrinsic;
+                            //ATTN: This can be made generic/cleaned up through an enum or something
+                            if (CI->getCalledFunction()->getName().equals("GenISA_fma_rtz"))
+                            {
+                                GISAIntr = GenISAIntrinsic::GenISA_fma_rtz;
+                            }
+                            else if (CI->getCalledFunction()->getName().equals("GenISA_mul_rtz"))
+                            {
+                                GISAIntr = GenISAIntrinsic::GenISA_mul_rtz;
+                            }
+                            else if (CI->getCalledFunction()->getName().equals("GenISA_add_rtz"))
+                            {
+                                GISAIntr = GenISAIntrinsic::GenISA_add_rtz;
+                            }
+                            else if (CI->getCalledFunction()->getName().equals("GenISA_uitof_rtz"))
+                            {
+                                GISAIntr = GenISAIntrinsic::GenISA_uitof_rtz;
+                            }
+                            if (GISAIntr != GenISAIntrinsic::no_intrinsic)
+                            {
+                                IRBuilder<> builder(CI);
+                                std::vector<Value*> args;
+                                std::vector<Type*> types;
+
+                                types.push_back(CI->getType());
+
+                                for (unsigned int i = 0; i < CI->getNumArgOperands(); i++)
+                                {
+                                    types.push_back(CI->getArgOperand(i)->getType());
+                                    args.push_back(CI->getArgOperand(i));
+                                }
+                                pFunc = GenISAIntrinsic::getDeclaration(&M, GISAIntr, types);
+                                CallInst* pCall = builder.CreateCall(pFunc, args);
+                                replaceInsts.insert(std::make_pair(CI, pCall));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (auto p : replaceInsts)
+        {
+            p.first->replaceAllUsesWith(p.second);
+            p.first->eraseFromParent();
+        }
+    }
 
     unsigned totalNumberOfInlinedInst = 0;
 
@@ -595,6 +675,57 @@ void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator& I)
                 };
             }
         }
+        else
+        {
+            //for any other integer bit width - 8/16 will all get up-cast to 32 bit before emulation
+            if (isI32DivRem() || isI32DivRemSP())
+            {
+                switch (I.getOpcode())
+                {
+                case Instruction::UDiv:
+                case Instruction::URem:
+                {
+                    Int32DivRemEmuRemaining = true;
+                    BinaryOperator* newInst = &I;
+                    if (integerBitWidth != 32)
+                    {
+                        newInst = upcastTo32Bit(&I);
+                    }
+                    if (isI32DivRem())
+                    {
+                    processInt32Divide(*newInst, FUNCTION_32_UDIVREM);
+                }
+                    else
+                    {
+                        processInt32Divide(*newInst, FUNCTION_32_UDIVREM_SP);
+                    }
+                }
+                break;
+                case Instruction::SDiv:
+                case Instruction::SRem:
+                {
+                    Int32DivRemEmuRemaining = true;
+                    BinaryOperator* newInst = &I;
+                    if (integerBitWidth != 32)
+                    {
+                        newInst = upcastTo32Bit(&I);
+                    }
+                    if (isI32DivRem())
+                    {
+                    processInt32Divide(*newInst, FUNCTION_32_SDIVREM);
+                }
+                    else
+                    {
+                        processInt32Divide(*newInst, FUNCTION_32_SDIVREM_SP);
+                    }
+                }
+                break;
+                default:
+                    // nothing
+                    break;
+                };
+            }
+        }
     }
     else if (isDPEmu() && I.getOperand(0)->getType()->isDoubleTy())
     {
@@ -620,6 +751,151 @@ void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator& I)
     }
 }
 
+//%rem = srem i8 %a, %b
+// to
+// %rem1 = srem i32 %c, %d
+BinaryOperator* PreCompiledFuncImport::upcastTo32Bit(BinaryOperator* I)
+{
+    IRBuilder<> IRB(I);
+
+    //original 8/16 bit src0 and src1
+    Value* src0 = I->getOperand(0);
+    Value* src1 = I->getOperand(1);
+
+    //new 32 bit src0 and src1
+    Value* newSrc0 = nullptr;
+    Value* newSrc1 = nullptr;
+
+    BinaryOperator* new32BitInst = nullptr;
+
+    switch (I->getOpcode())
+    {
+    case Instruction::UDiv:
+    {
+        newSrc0 = IRB.CreateZExt(src0, Type::getInt32Ty(I->getContext()));
+        newSrc1 = IRB.CreateZExt(src1, Type::getInt32Ty(I->getContext()));
+        //newInst = dyn_cast<BinaryOperator>(IRB.CreateUDiv(newSrc0, newSrc1));
+    }
+    break;
+    case Instruction::URem:
+    {
+        newSrc0 = IRB.CreateZExt(src0, Type::getInt32Ty(I->getContext()));
+        newSrc1 = IRB.CreateZExt(src1, Type::getInt32Ty(I->getContext()));
+        //newInst = dyn_cast<BinaryOperator>(IRB.CreateURem(newSrc0, newSrc1));
+    }
+    break;
+    case Instruction::SDiv:
+    {
+        newSrc0 = IRB.CreateSExt(src0, Type::getInt32Ty(I->getContext()));
+        newSrc1 = IRB.CreateSExt(src1, Type::getInt32Ty(I->getContext()));
+        //newInst = dyn_cast<BinaryOperator>(IRB.CreateSDiv(newSrc0, newSrc1));
+    }
+    break;
+    case Instruction::SRem:
+    {
+        newSrc0 = IRB.CreateSExt(src0, Type::getInt32Ty(I->getContext()));
+        newSrc1 = IRB.CreateSExt(src1, Type::getInt32Ty(I->getContext()));
+        //newInst = dyn_cast<BinaryOperator>(IRB.CreateSRem(newSrc0, newSrc1));
+    }
+    break;
+    default:
+    {
+        IGC_ASSERT_MESSAGE(0, "should not reach here for Any other inst");
+        break;
+    }
+    };
+    new32BitInst = dyn_cast<BinaryOperator>(IRB.CreateBinOp(I->getOpcode(), newSrc0, newSrc1, ""));
+
+    Instruction* replaceInst = dyn_cast<Instruction>(IRB.CreateTrunc(new32BitInst, I->getType()));
+    I->replaceAllUsesWith(replaceInst);
+    replaceInst->setDebugLoc(I->getDebugLoc());
+    I->eraseFromParent();
+
+    return new32BitInst;
+}
+
+//32 bit emulation for division/remainder
+void PreCompiledFuncImport::processInt32Divide(BinaryOperator& inst, Int32EmulatedFunctions function)
+{
+    StringRef funcName = m_Int32EmuFunctionNames[function];
+    Function* func = m_pModule->getFunction(funcName);
+
+    Type* intTy = Type::getInt32Ty(inst.getContext());
+    Type* intPtrTy = Type::getInt32PtrTy(inst.getContext());
+
+    // Try to look up the function in the module's symbol
+    // table first, else add it.
+    if (func == NULL)
+    {
+        Type* types[3];
+
+        types[0] = inst.getOperand(0)->getType();
+        types[1] = inst.getOperand(1)->getType();
+        types[2] = intPtrTy;
+        FunctionType* FuncIntrType = FunctionType::get(
+            intTy, //void Return Type
+            types,//params
+            false);
+
+        func = Function::Create(
+            FuncIntrType,
+            GlobalValue::ExternalLinkage,
+            funcName,
+            m_pModule);
+    }
+    func->addAttribute(0, llvm::Attribute::AlwaysInline);
+
+
+
+    //Create a call to emulation function
+    Constant* One = ConstantInt::get(intTy, 1);
+    Value* args[3];
+    args[0] = inst.getOperand(0);
+    args[1] = inst.getOperand(1);
+    IRBuilder<> builder(
+        &*inst.getFunction()->getEntryBlock().getFirstInsertionPt());
+    AllocaInst* pRem = builder.CreateAlloca(intTy, One, "Remainder");
+    builder.SetInsertPoint(&inst);
+    args[2] = pRem;
+    CallInst* funcCall = CallInst::Create(func, args, inst.getName(), &inst);
+
+    if (inst.getOpcode() == Instruction::UDiv || inst.getOpcode() == Instruction::URem)
+    {
+        if (isI32DivRem())
+        {
+        m_libModuleToBeImported[LIBMOD_UINT32_DIV_REM] = true;
+        }
+        else
+        {
+            m_libModuleToBeImported[LIBMOD_UINT32_DIV_REM_SP] = true;
+        }
+    }
+    else if (inst.getOpcode() == Instruction::SDiv || inst.getOpcode() == Instruction::SRem)
+    {
+        if (isI32DivRem())
+        {
+        m_libModuleToBeImported[LIBMOD_SINT32_DIV_REM] = true;
+    }
+        else
+        {
+            m_libModuleToBeImported[LIBMOD_SINT32_DIV_REM_SP] = true;
+        }
+    }
+
+    //Replace the original int32 udiv/sdiv/urem/srem inst with call to emulation function
+    if (inst.getOpcode() == Instruction::UDiv || inst.getOpcode() == Instruction::SDiv)
+    {
+        inst.replaceAllUsesWith(funcCall);
+        inst.eraseFromParent();
+    }
+    else
+    {
+        Value* l = builder.CreateLoad(pRem, "rem");
+        inst.replaceAllUsesWith(l);
+        inst.eraseFromParent();
+    }
+    m_changed = true;
+}
 
 //64 bit emulation for divide
 void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunctions function)
@@ -655,7 +931,7 @@ void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunction
         elementIndex = 5;
         break;
     default:
-        assert(0 && "Unexpected vector size");
+        IGC_ASSERT_MESSAGE(0, "Unexpected vector size");
         return;
     }
 
@@ -706,7 +982,7 @@ void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst& inst)
     {
         if (inst.getDestTy()->isVectorTy())
         {
-            assert(0 && "Unexpected vector size");
+            IGC_ASSERT_MESSAGE(0, "Unexpected vector size");
             return;
         }
 
@@ -975,7 +1251,7 @@ Function* PreCompiledFuncImport::getOrCreateFunction(FunctionIDs FID)
         break;
 
     default:
-        llvm_unreachable("Undefined FunctionIDs");
+        IGC_ASSERT_EXIT_MESSAGE(0, "Undefined FunctionIDs");
     }
 
     FunctionType* funcType = FunctionType::get(retTy, argTypes, false);
@@ -1177,7 +1453,7 @@ uint32_t PreCompiledFuncImport::getFCmpMask(CmpInst::Predicate Pred)
         break;
 
     default:
-        llvm_unreachable("Wrong fcmp flag");
+        IGC_ASSERT_EXIT_MESSAGE(0, "Wrong fcmp flag");
     }
 
     switch (Pred) {
@@ -1332,6 +1608,53 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
         return;
     }
 
+/*In TGLLP (or any platform that does not support int "/" and "%"),
+we have to emulate both integer divide and integer modulo.
+For that we use emulation routines that do both operations in the same time:
+OCL:
+  int c = a/b;
+  int d = a%b;
+LLVM before opt:
+  %Remainder3 = alloca i32
+  %Remainder = alloca i32
+  %div2 = call i32 @precompiled_s32divrem_sp(i32 %a, i32 %b, i32* %Remainder)
+  store i32 %div2, i32 addrspace(1)* %c, align 4
+  %rem4 = call i32 @precompiled_s32divrem_sp(i32 %a, i32 %b, i32* %Remainder3)
+  %rem5 = load i32, i32* %Remainder3
+  store i32 %rem5, i32 addrspace(1)* %d, align 4
+  ret void
+LLVM after opt:
+  %Remainder3 = alloca i32
+  %Remainder = alloca i32
+  %div2 = call i32 @precompiled_s32divrem_sp(i32 %a, i32 %b, i32* %Remainder)
+  store i32 %div2, i32 addrspace(1)* %c, align 4
+  %rem5 = load i32, i32* %Remainder
+  store i32 %rem5, i32 addrspace(1)* %d, align 4
+  ret void
+
+As a result, we reduce 2x necessary work
+*/
+    Function* fn = I.getCalledFunction();
+    if (fn && (fn->getName() == "precompiled_s32divrem_sp"
+        || fn->getName() == "precompiled_u32divrem_sp"))
+    {
+        for (CallInst* InstCompare : m_CallRemDiv)
+        {
+            if (I.getArgOperand(0) == InstCompare->getArgOperand(0) &&
+                I.getArgOperand(1) == InstCompare->getArgOperand(1))
+            {
+                Value* remValue = I.getArgOperand(2);
+                Value* remValueCompare = InstCompare->getArgOperand(2);
+                remValue->replaceAllUsesWith(remValueCompare);
+
+                I.replaceAllUsesWith(InstCompare);
+                I.eraseFromParent();
+                m_changed = true;
+                return;
+            }
+        }
+        m_CallRemDiv.push_back(&I);
+    }
     if (!isDPEmu()) {
         return;
     }
@@ -1571,7 +1894,7 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
         llvm::Function::arg_iterator new_arg_iter = new_func->arg_begin();
         llvm::Function::arg_iterator new_arg_end = new_func->arg_end();
 
-        assert(IGCLLVM::GetFuncArgSize(new_func) >= numArgOperands);
+        IGC_ASSERT(IGCLLVM::GetFuncArgSize(new_func) >= numArgOperands);
 
         // basic arguments
         for (unsigned int i = 0; i < numArgOperands; ++i, ++new_arg_iter)
@@ -1615,7 +1938,7 @@ void PreCompiledFuncImport::replaceFunc(Function* old_func, Function* new_func)
         i->eraseFromParent();
     }
 
-    assert(old_func->use_empty() && "old_func should have no use at this point!");
+    IGC_ASSERT_MESSAGE(old_func->use_empty(), "old_func should have no use at this point!");
     // Now, after changing funciton signature,
     // and validate there are no calls to the old function we can erase it.
     //

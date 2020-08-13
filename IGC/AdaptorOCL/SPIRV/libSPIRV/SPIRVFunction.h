@@ -66,7 +66,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define SPIRVFUNCTION_HPP_
 #include "SPIRVValue.h"
 #include "SPIRVBasicBlock.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 namespace spv{
 
@@ -94,15 +94,15 @@ public:
   {
       return hasDecorate(DecorationMaxByteOffset, 0, &offset);
   }
-  CapVec getRequiredCapability() const {
+  CapVec getRequiredCapability() const override {
      if (hasLinkageType() && getLinkageType() == SPIRVLinkageTypeKind::LinkageTypeImport)
         return getVec(SPIRVCapabilityKind::CapabilityLinkage);
     return CapVec();
   }
 protected:
-  void validate()const {
+  void validate()const override {
     SPIRVValue::validate();
-    IGC_ASSERT(ParentFunc && "Invalid parent function");
+    IGC_ASSERT_MESSAGE(ParentFunc, "Invalid parent function");
   }
   _SPIRV_DEF_DEC2(Type, Id)
 private:
@@ -162,7 +162,7 @@ public:
   _SPIRV_DCL_DEC
   void validate()const {
     SPIRVValue::validate();
-    IGC_ASSERT(FuncType && "Invalid func type");
+    IGC_ASSERT_MESSAGE(FuncType, "Invalid func type");
   }
 
 private:

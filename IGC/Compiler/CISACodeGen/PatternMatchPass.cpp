@@ -29,7 +29,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/DeSSA.hpp"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "common/igc_regkeys.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Dominators.h>
@@ -40,6 +39,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/InitializePasses.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -104,7 +104,6 @@ namespace IGC
         ConstantPlacement.clear();
         PairOutputMap.clear();
         UniformBools.clear();
-        StructValueInsertMap.clear();
 
         delete[] m_blocks;
         m_blocks = nullptr;
@@ -256,7 +255,7 @@ namespace IGC
         // Find the common dominator as CSE.
         if (BasicBlock * BB = ConstantPlacement.lookup(C))
             LCA = DT->findNearestCommonDominator(LCA, BB);
-        assert(LCA && "LCA always exists for reachable BBs within a function!");
+        IGC_ASSERT_MESSAGE(LCA, "LCA always exists for reachable BBs within a function!");
         ConstantPlacement[C] = LCA;
     }
 
@@ -285,7 +284,10 @@ namespace IGC
             while (!ValList.empty()) {
                 Value* V = ValList.back();
                 ValList.pop_back();
-                assert(isUniform(V) && V->getType()->isIntegerTy(1));
+                IGC_ASSERT(nullptr != V);
+                IGC_ASSERT(nullptr != V->getType());
+                IGC_ASSERT(isUniform(V));
+                IGC_ASSERT(V->getType()->isIntegerTy(1));
 
                 // Check uses.
                 for (auto UI = V->user_begin(), UE = V->user_end(); UI != UE; ++UI) {
@@ -297,15 +299,15 @@ namespace IGC
                 // Check defs.
                 Vals.insert(V);
                 if (auto CI = dyn_cast<CmpInst>(V)) {
-                    assert(isUniform(CI->getOperand(0)));
-                    assert(isUniform(CI->getOperand(1)));
+                    IGC_ASSERT(isUniform(CI->getOperand(0)));
+                    IGC_ASSERT(isUniform(CI->getOperand(1)));
                     if (CI->getOperand(0)->getType()->getScalarSizeInBits() == 1)
                         goto FAIL;
                     continue;
                 }
                 else if (auto BI = dyn_cast<BinaryOperator>(V)) {
-                    assert(isUniform(BI->getOperand(0)));
-                    assert(isUniform(BI->getOperand(1)));
+                    IGC_ASSERT(isUniform(BI->getOperand(0)));
+                    IGC_ASSERT(isUniform(BI->getOperand(1)));
                     if (isa<Instruction>(BI->getOperand(0)))
                         ValList.push_back(BI->getOperand(0));
                     if (isa<Instruction>(BI->getOperand(1)))
@@ -333,7 +335,7 @@ namespace IGC
         llvm::BasicBlock::InstListType& instructionList = bb->getInstList();
         llvm::BasicBlock::InstListType::reverse_iterator I, E;
         auto it = m_blockMap.find(bb);
-        assert(it != m_blockMap.end());
+        IGC_ASSERT(it != m_blockMap.end());
         SBasicBlock* block = it->second;
 
         // loop through instructions bottom up
@@ -483,7 +485,7 @@ namespace IGC
         using namespace llvm::PatternMatch; // Scoped using declaration.
 
         unsigned Opcode = I->getOpcode();
-        assert(Opcode == Instruction::FPToSI || Opcode == Instruction::FPToUI);
+        IGC_ASSERT(Opcode == Instruction::FPToSI || Opcode == Instruction::FPToUI);
 
         unsigned BitWidth = I->getDestTy()->getIntegerBitWidth();
         APFloat FMin(I->getSrcTy()->getFltSemantics());
@@ -671,7 +673,7 @@ namespace IGC
         }
 
         // Match!
-        assert(Opcode == Instruction::FPToSI || Opcode == Instruction::FPToUI);
+        IGC_ASSERT(Opcode == Instruction::FPToSI || Opcode == Instruction::FPToUI);
 
         struct FPToIntegerWithSaturationPattern : public Pattern {
             bool isUnsigned, needBitCast;
@@ -769,7 +771,7 @@ namespace IGC
         return std::make_tuple(LHS, isSignedDst, true);
     }
 
-    bool CodeGenPatternMatch::MatchIntegerSatModifier(llvm::SelectInst& I) {
+    bool CodeGenPatternMatch::MatchIntegerTruncSatModifier(llvm::SelectInst& I) {
         // Only match BYTE or WORD.
         if (!I.getType()->isIntegerTy(8) && !I.getType()->isIntegerTy(16))
             return false;
@@ -799,12 +801,12 @@ namespace IGC
 
     void CodeGenPatternMatch::visitFPToSIInst(llvm::FPToSIInst& I) {
         bool match = MatchFPToIntegerWithSaturation(I) || MatchModifier(I);
-        assert(match && "Pattern match Failed\n");
+        IGC_ASSERT_MESSAGE(match, "Pattern match Failed");
     }
 
     void CodeGenPatternMatch::visitFPToUIInst(llvm::FPToUIInst& I) {
         bool match = MatchFPToIntegerWithSaturation(I) || MatchModifier(I);
-        assert(match && "Pattern match Failed\n");
+        IGC_ASSERT_MESSAGE(match, "Pattern match Failed");
     }
 
     bool CodeGenPatternMatch::MatchSIToFPZExt(llvm::SIToFPInst* S2FI) {
@@ -876,7 +878,7 @@ namespace IGC
 
     void CodeGenPatternMatch::HandleSubspanUse(llvm::Value* v)
     {
-        assert(m_root != nullptr);
+        IGC_ASSERT(m_root != nullptr);
         if (m_ctx->type != ShaderType::PIXEL_SHADER)
         {
             return;
@@ -945,14 +947,14 @@ namespace IGC
 
     void CodeGenPatternMatch::visitSelectInst(SelectInst& I)
     {
-        bool match = MatchSatModifier(I) ||
-            MatchIntegerSatModifier(I) ||
+        bool match = MatchFloatingPointSatModifier(I) ||
+            MatchIntegerTruncSatModifier(I) ||
             MatchAbsNeg(I) ||
             MatchFPToIntegerWithSaturation(I) ||
             MatchMinMax(I) ||
             /*MatchPredicate(I)   ||*/
             MatchSelectModifier(I);
-        assert(match && "Pattern Match failed\n");
+        IGC_ASSERT_MESSAGE(match, "Pattern Match failed");
     }
 
     void CodeGenPatternMatch::visitBinaryOperator(llvm::BinaryOperator& I)
@@ -1027,17 +1029,17 @@ namespace IGC
                 MatchLogicAlu(I);
             break;
         default:
-            assert(0 && "unknown binary instruction");
+            IGC_ASSERT_MESSAGE(0, "unknown binary instruction");
             break;
         }
-        assert(match == true);
+        IGC_ASSERT(match == true);
     }
 
     void CodeGenPatternMatch::visitCmpInst(llvm::CmpInst& I)
     {
         bool match = MatchCondModifier(I) ||
             MatchModifier(I);
-        assert(match);
+        IGC_ASSERT(match);
     }
 
     void CodeGenPatternMatch::visitBranchInst(llvm::BranchInst& I)
@@ -1109,7 +1111,11 @@ namespace IGC
                 match = MatchSampleDerivative(*CI);
                 break;
             case GenISAIntrinsic::GenISA_fsat:
-                match = MatchSatModifier(I);
+                match = MatchFloatingPointSatModifier(I);
+                break;
+            case GenISAIntrinsic::GenISA_usat:
+            case GenISAIntrinsic::GenISA_isat:
+                match = MatchIntegerSatModifier(I);
                 break;
             case GenISAIntrinsic::GenISA_WaveShuffleIndex:
                 match = MatchRegisterRegion(*CI) ||
@@ -1131,7 +1137,7 @@ namespace IGC
                 // no pattern for the rest of the intrinsics
                 break;
             }
-            assert(match && "no pattern found for GenISA intrinsic");
+            IGC_ASSERT_MESSAGE(match, "no pattern found for GenISA intrinsic");
         }
         else
         {
@@ -1156,7 +1162,7 @@ namespace IGC
                 match = MatchSingleInstruction(I);
             }
         }
-        assert(match && "no match for this call");
+        IGC_ASSERT_MESSAGE(match, "no match for this call");
     }
 
     void CodeGenPatternMatch::visitUnaryInstruction(llvm::UnaryInstruction& I)
@@ -1170,7 +1176,7 @@ namespace IGC
             match = MatchSingleInstruction(I);
             break;
         }
-        assert(match);
+        IGC_ASSERT(match);
     }
 
     void CodeGenPatternMatch::visitIntrinsicInst(llvm::IntrinsicInst& I)
@@ -1203,7 +1209,7 @@ namespace IGC
             break;
         case Intrinsic::maxnum:
         case Intrinsic::minnum:
-            match = MatchSatModifier(I) ||
+            match = MatchFloatingPointSatModifier(I) ||
                 MatchModifier(I);
             break;
         default:
@@ -1211,7 +1217,7 @@ namespace IGC
             // no pattern for the rest of the intrinsics
             break;
         }
-        assert(match && "no pattern found");
+        IGC_ASSERT_MESSAGE(match, "no pattern found");
     }
 
     void CodeGenPatternMatch::visitStoreInst(StoreInst& I)
@@ -1227,7 +1233,7 @@ namespace IGC
             match = MatchLoadStorePointer(I, *(I.getPointerOperand())) ||
                 MatchSingleInstruction(I);
         }
-        assert(match);
+        IGC_ASSERT(match);
     }
 
     void CodeGenPatternMatch::visitLoadInst(LoadInst& I)
@@ -1243,7 +1249,7 @@ namespace IGC
             match = MatchLoadStorePointer(I, *(I.getPointerOperand())) ||
                 MatchSingleInstruction(I);
         }
-        assert(match);
+        IGC_ASSERT(match);
     }
 
     void CodeGenPatternMatch::visitInstruction(llvm::Instruction& I)
@@ -1337,120 +1343,25 @@ namespace IGC
         MatchDbgInstruction(I);
     }
 
-    void CodeGenPatternMatch::visitInsertValueInst(InsertValueInst& I)
-    {
-        if (!MatchCopyToStruct(&I))
-        {
-            assert(0 && "Unknown `insertvalue` instruction!");
-        }
-    }
-
     void CodeGenPatternMatch::visitExtractValueInst(ExtractValueInst& I) {
         bool Match = false;
 
         // Ignore the extract value instruction. Handled in the call inst.
-        bool isExtractFromInlineAsm = false;
         if (CallInst * call = dyn_cast<CallInst>(I.getOperand(0)))
         {
-            isExtractFromInlineAsm = call->isInlineAsm() && call->getType()->isStructTy();
+            if (call->isInlineAsm() && call->getType()->isStructTy())
+            {
+                MarkAsSource(call);
+                return;
+            }
         }
 
-        Match = isExtractFromInlineAsm ||
-            MatchCopyFromStruct(&I) ||
-            matchAddPair(&I) ||
+        Match = matchAddPair(&I) ||
             matchSubPair(&I) ||
             matchMulPair(&I) ||
             matchPtrToPair(&I);
 
-        assert(Match && "Unknown `extractvalue` instruction!");
-    }
-
-    bool CodeGenPatternMatch::MatchCopyToStruct(InsertValueInst* II)
-    {
-        if (II->getNumIndices() != 1)
-            return false;
-
-        // Find the final insertvalue instruction, this will be
-        // the instruction we map to the VISA struct variable.
-        // Matches the following type of sequence:
-        //  %struct.S = type { i32, i32 }
-        //  % 3 = insertvalue % struct.S undef, i32 % 0, 0
-        //  % 4 = insertvalue % struct.S % 3, i32 % 2, 1   <--- Mapped Instruction
-        InsertValueInst* baseInst = II;
-        while (true)
-        {
-            Value* user = *baseInst->user_begin();
-            if (baseInst->getNumUses() != 1)
-                return false;
-            else if (InsertValueInst* inst = dyn_cast<InsertValueInst>(user))
-                baseInst = inst;
-            else
-                break;
-        }
-        assert(baseInst);
-
-        auto Iter = StructValueInsertMap.find(baseInst);
-        if (Iter != StructValueInsertMap.end())
-        {
-            // Already handled for this set of insertvalue instructions
-            return true;
-        }
-
-        // Find the list of all source values and indices inserted for this struct
-        std::vector<std::pair<SSource, unsigned>> srcList;
-        Value* initValue = baseInst;
-        while (true)
-        {
-            if (InsertValueInst* inst = dyn_cast<InsertValueInst>(initValue))
-            {
-                srcList.push_back(std::make_pair(GetSource(inst->getOperand(1), false, false), *inst->idx_begin()));
-                initValue = inst->getOperand(0);
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        Constant* constInit = dyn_cast<Constant>(initValue);
-        StructValueInsertMap[baseInst] = std::make_pair(constInit, srcList);
-
-        struct AddCopyStructPattern : public Pattern {
-            InsertValueInst* inst;
-            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
-                Pass->EmitCopyToStruct(inst, DstMod);
-            }
-        };
-
-        AddCopyStructPattern* Pat = new (m_allocator) AddCopyStructPattern();
-        Pat->inst = baseInst;
-        AddPattern(Pat);
-
-        return true;
-    }
-
-    bool CodeGenPatternMatch::MatchCopyFromStruct(ExtractValueInst* EI)
-    {
-        if (EI->getNumIndices() != 1)
-            return false;
-        if (GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(EI->getOperand(0)))
-            return false;
-
-        struct AddReadStructPattern : public Pattern {
-            Value* value;
-            unsigned idx;
-            virtual void Emit(EmitPass* Pass, const DstModifier& DstMod) {
-                Pass->EmitCopyFromStruct(value, idx, DstMod);
-            }
-        };
-
-        AddReadStructPattern* Pat = new (m_allocator) AddReadStructPattern();
-        Pat->value = EI->getOperand(0);
-        Pat->idx = *EI->idx_begin();
-        AddPattern(Pat);
-
-        MarkAsSource(EI->getOperand(0));
-        return true;
+        IGC_ASSERT_MESSAGE(Match, "Unknown `extractvalue` instruction!");
     }
 
     bool CodeGenPatternMatch::matchAddPair(ExtractValueInst* Ex) {
@@ -1688,7 +1599,7 @@ namespace IGC
                 pass->Frc(source, modifier);
             }
         };
-        assert(I.getOpcode() == Instruction::FSub);
+        IGC_ASSERT(I.getOpcode() == Instruction::FSub);
         llvm::Value* source0 = I.getOperand(0);
         llvm::IntrinsicInst* source1 = llvm::dyn_cast<llvm::IntrinsicInst>(I.getOperand(1));
         bool found = false;
@@ -1836,7 +1747,7 @@ namespace IGC
             }
         }
 
-        assert(I.getOpcode() == Instruction::FAdd || I.getOpcode() == Instruction::FSub);
+        IGC_ASSERT(I.getOpcode() == Instruction::FAdd || I.getOpcode() == Instruction::FSub);
         for (uint iAdd = 0; iAdd < 2 && !found; iAdd++)
         {
             Value* src = I.getOperand(iAdd);
@@ -1960,7 +1871,7 @@ namespace IGC
             }
         };
 
-        assert(I.getOpcode() == Instruction::FAdd);
+        IGC_ASSERT(I.getOpcode() == Instruction::FAdd);
 
         if (IGC_IS_FLAG_ENABLED(DisableMatchSimpleAdd))
         {
@@ -2079,7 +1990,7 @@ namespace IGC
         {
             return false;
         }
-        if (!isFpMad(I) && !m_Platform.doIntegerMad())
+        if (!isFpMad(I) && !(m_Platform.doIntegerMad() && m_ctx->m_DriverInfo.EnableIntegerMad()))
         {
             return false;
         }
@@ -2088,7 +1999,7 @@ namespace IGC
         llvm::Value* sources[3];
         e_modifier src_mod[3];
 
-        assert(I.getOpcode() == Instruction::FAdd ||
+        IGC_ASSERT(I.getOpcode() == Instruction::FAdd ||
             I.getOpcode() == Instruction::FSub ||
             I.getOpcode() == Instruction::Add ||
             I.getOpcode() == Instruction::Sub);
@@ -2221,7 +2132,8 @@ namespace IGC
                     pass->emitSimdBlockWrite(inst, offset);
                     break;
                 default:
-                    assert(false && "unexpected intrinsic");
+                    IGC_ASSERT_MESSAGE(0, "unexpected intrinsic");
+                    break;
                 }
             }
         };
@@ -2267,7 +2179,7 @@ namespace IGC
 
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                assert(m_inst->getIntrinsicID() == GenISAIntrinsic::GenISA_URBRead ||
+                IGC_ASSERT(m_inst->getIntrinsicID() == GenISAIntrinsic::GenISA_URBRead ||
                     m_inst->getIntrinsicID() == GenISAIntrinsic::GenISA_URBReadOutput);
                 pass->emitURBReadCommon(m_inst, m_globalOffset, m_perSlotOffset);
             }
@@ -2305,8 +2217,7 @@ namespace IGC
                 const bool isConstant1 = llvm::isa<llvm::ConstantInt>(inst->getOperand(1));
                 if (isConstant0 || isConstant1)
                 {
-                    assert(!(isConstant0 && isConstant1) &&
-                        "Both operands are immediate - constants should be folded elsewhere.");
+                    IGC_ASSERT_MESSAGE(!(isConstant0 && isConstant1), "Both operands are immediate - constants should be folded elsewhere.");
 
                     if (hasVertexIndexAsArg0)
                     {
@@ -2412,7 +2323,7 @@ namespace IGC
             return false;
         }
 
-        assert(I.getOpcode() == Instruction::FAdd || I.getOpcode() == Instruction::FSub);
+        IGC_ASSERT((I.getOpcode() == Instruction::FAdd) || (I.getOpcode() == Instruction::FSub));
 
         bool startPatternIsAdd = false;
         if (I.getOpcode() == Instruction::FAdd)
@@ -2718,7 +2629,7 @@ namespace IGC
             }
         };
 
-        assert(I.getOpcode() == llvm::Instruction::Mul && "Mul instruction is expected!");
+        IGC_ASSERT_MESSAGE(I.getOpcode() == llvm::Instruction::Mul, "Mul instruction is expected!");
 
         if (!I.getType()->isIntegerTy(64))
             return false;
@@ -2749,7 +2660,7 @@ namespace IGC
         else {
             // Bailout if it's unknown that LHS have less significant bits than the
             // product.
-            // NOTE we don't assert the case where LHS is an constant to prevent
+            // NOTE we don't assertion fail the case where LHS is an constant to prevent
             // the assertion in O0 mode. Otherwise, we expect there's at most 1
             // constant operand.
             return false;
@@ -2839,10 +2750,7 @@ namespace IGC
         }
 
         unsigned opc = I.getOpcode();
-        assert((opc == Instruction::Mul ||
-            opc == Instruction::Add ||
-            opc == Instruction::Sub) &&
-            "Mul instruction is expected!");
+        IGC_ASSERT_MESSAGE((opc == Instruction::Mul) || (opc == Instruction::Add) || (opc == Instruction::Sub), "Mul instruction is expected!");
 
         // Handle 32 bit integer mul/add/sub only.
         if (!I.getType()->isIntegerTy(32))
@@ -3067,7 +2975,8 @@ namespace IGC
             llvm::Instruction* inst;
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                assert(modifier.sat == false && modifier.flag == nullptr);
+                IGC_ASSERT(modifier.sat == false);
+                IGC_ASSERT(modifier.flag == nullptr);
                 pass->EmitNoModifier(inst);
             }
         };
@@ -3102,7 +3011,7 @@ namespace IGC
 
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                assert(modifier.sat == false && modifier.flag == nullptr);
+                IGC_ASSERT(modifier.sat == false && modifier.flag == nullptr);
                 if (m_IsNeeded)
                 {
                     pass->emitCanonicalize(m_pInst);
@@ -3110,7 +3019,7 @@ namespace IGC
             }
         };
 
-        assert(I.getNumOperands() == 1);
+        IGC_ASSERT(I.getNumOperands() == 1);
         bool isNeeded = true;
 
         // FAdd, FSub, FMul, FDiv instructions flush subnormals to zero.
@@ -3174,12 +3083,13 @@ namespace IGC
         return true;
     }
 
-    bool CodeGenPatternMatch::MatchSatModifier(llvm::Instruction& I)
+    bool CodeGenPatternMatch::MatchFloatingPointSatModifier(llvm::Instruction& I)
     {
         struct SatPattern : Pattern
         {
             Pattern* pattern;
             SSource source;
+            bool isUnsigned;
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
                 DstModifier mod = modifier;
@@ -3196,7 +3106,8 @@ namespace IGC
         };
         bool match = false;
         llvm::Value* source = nullptr;
-        if (isSat(&I, source))
+        bool isUnsigned = false;
+        if (isSat(&I, source, isUnsigned))
         {
             SatPattern* satPattern = new (m_allocator) SatPattern();
             if (llvm::Instruction * inst = llvm::dyn_cast<Instruction>(source))
@@ -3207,7 +3118,7 @@ namespace IGC
                 if (inst->hasOneUse() && SupportsSaturate(inst))
                 {
                     satPattern->pattern = Match(*inst);
-                    assert(satPattern->pattern && "Failed to match pattern");
+                    IGC_ASSERT_MESSAGE(satPattern->pattern, "Failed to match pattern");
                     match = true;
                 }
             }
@@ -3222,6 +3133,101 @@ namespace IGC
                 gatherUniformBools(source);
             }
             AddPattern(satPattern);
+        }
+        return match;
+    }
+
+    bool CodeGenPatternMatch::MatchIntegerSatModifier(llvm::Instruction& I)
+    {
+        // a default pattern
+        struct SatPattern : Pattern
+        {
+            Pattern* pattern;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                DstModifier mod = modifier;
+                mod.sat = true;
+                pattern->Emit(pass, mod);
+            }
+        };
+
+        // a special pattern is required because of the fact that the instruction works on unsigned values
+        // whereas the default type is signed for arithmetic instructions
+        struct UAddPattern : Pattern
+        {
+            BinaryOperator* inst;
+
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                DstModifier mod = modifier;
+                mod.sat = true;
+                pass->EmitUAdd(inst, modifier);
+            }
+        };
+
+        struct IntegerSatTruncPattern : public Pattern {
+            SSource src;
+            bool isSigned;
+            virtual void Emit(EmitPass* pass, const DstModifier& dstMod)
+            {
+                pass->EmitIntegerTruncWithSat(isSigned, isSigned, src, dstMod);
+            }
+        };
+
+        bool match = false;
+        llvm::Value* source = nullptr;
+        bool isUnsigned = false;
+        if (isSat(&I, source, isUnsigned))
+        {
+            IGC_ASSERT(llvm::isa<Instruction>(source));
+
+            // As an heuristic we only match saturate if the instruction has one use
+            // to avoid duplicating expensive instructions and increasing reg pressure
+            // without improve code quality this may be refined in the future
+            if (llvm::Instruction* sourceInst = llvm::cast<llvm::Instruction>(source);
+                sourceInst->hasOneUse() && SupportsSaturate(sourceInst))
+            {
+                if (llvm::BinaryOperator* binaryOpInst = llvm::dyn_cast<llvm::BinaryOperator>(source);
+                    binaryOpInst && (binaryOpInst->getOpcode() == llvm::BinaryOperator::BinaryOps::Add) && isUnsigned)
+                {
+                    match = true;
+                    UAddPattern* uAddPattern = new (m_allocator) UAddPattern();
+                    uAddPattern->inst = binaryOpInst;
+                    AddPattern(uAddPattern);
+                }
+                else if (binaryOpInst && (binaryOpInst->getOpcode() == llvm::BinaryOperator::BinaryOps::Add) && !isUnsigned)
+                {
+                    match = true;
+                    SatPattern* satPattern = new (m_allocator) SatPattern();
+                    satPattern->pattern = Match(*sourceInst);
+                    AddPattern(satPattern);
+                }
+                else if (llvm::TruncInst* truncInst = llvm::dyn_cast<llvm::TruncInst>(source);
+                    truncInst)
+                {
+                    match = true;
+                    IntegerSatTruncPattern* satPattern = new (m_allocator) IntegerSatTruncPattern();
+                    satPattern->isSigned = !isUnsigned;
+                    satPattern->src = GetSource(truncInst->getOperand(0), !isUnsigned, false);
+                    AddPattern(satPattern);
+                }
+                else if (llvm::GenIntrinsicInst * genIsaInst = llvm::dyn_cast<llvm::GenIntrinsicInst>(source);
+                    genIsaInst &&
+                    (genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_ss ||
+                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_su ||
+                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_uu ||
+                    genIsaInst->getIntrinsicID() == llvm::GenISAIntrinsic::ID::GenISA_dp4a_us))
+                {
+                    match = true;
+                    SatPattern* satPattern = new (m_allocator) SatPattern();
+                    satPattern->pattern = Match(*sourceInst);
+                    AddPattern(satPattern);
+                }
+                else
+                {
+                    IGC_ASSERT_MESSAGE(0, "An undefined pattern match");
+                }
+            }
         }
         return match;
     }
@@ -3274,8 +3280,8 @@ namespace IGC
             pattern->invertFlag = invertFlag;
             pattern->patternNotPredicated = Match(*source1);
             pattern->patternPredicated = Match(*source0);
-            assert(pattern->patternNotPredicated &&
-                pattern->patternPredicated && "Failed to match pattern");
+            IGC_ASSERT_MESSAGE(pattern->patternNotPredicated, "Failed to match pattern");
+            IGC_ASSERT_MESSAGE(pattern->patternPredicated, "Failed to match pattern");
             AddPattern(pattern);
         }
         return match;
@@ -3428,7 +3434,8 @@ namespace IGC
             CmpInst* cmp;
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                assert(modifier.flag == nullptr && modifier.sat == false);
+                IGC_ASSERT(modifier.flag == nullptr);
+                IGC_ASSERT(modifier.sat == false);
                 pass->emitAluConditionMod(pattern, alu, cmp);
             }
         };
@@ -3442,7 +3449,7 @@ namespace IGC
                 {
                     CondModifierPattern* pattern = new (m_allocator) CondModifierPattern();
                     pattern->pattern = Match(*alu);
-                    assert(pattern->pattern && "Failed to match pattern");
+                    IGC_ASSERT_MESSAGE(pattern->pattern, "Failed to match pattern");
                     pattern->alu = alu;
                     pattern->cmp = &I;
                     AddPattern(pattern);
@@ -3471,7 +3478,7 @@ namespace IGC
             }
         };
 
-        assert(I.getOpcode() == Instruction::Or || I.getOpcode() == Instruction::And);
+        IGC_ASSERT(I.getOpcode() == Instruction::Or || I.getOpcode() == Instruction::And);
         bool found = false;
         if (I.getType()->isIntegerTy(1))
         {
@@ -3549,7 +3556,7 @@ namespace IGC
 
         // Sanity check:
         //   make sure that rotate is supported and "I" is a scalar "or" instruction
-        assert(!I.getType()->isVectorTy() && "Vector type not expected here");
+        IGC_ASSERT_MESSAGE(false == I.getType()->isVectorTy(), "Vector type not expected here");
 
         uint64_t typeWidth = I.getType()->getScalarSizeInBits();
         Instruction* OrInst = nullptr;
@@ -3574,7 +3581,7 @@ namespace IGC
         }
         else
         {
-            assert(false && "Should be invoked with Or/Trunc instruction");
+            IGC_ASSERT_MESSAGE(0, "Should be invoked with Or/Trunc instruction");
         }
 
         // Do rotate only if
@@ -3861,7 +3868,7 @@ namespace IGC
         }
         else
         {
-            assert(false && "Unhandled Dbg intrinsic");
+            IGC_ASSERT_MESSAGE(0, "Unhandled Dbg intrinsic");
         }
         AddPattern(pattern);
         return true;
@@ -3890,7 +3897,7 @@ namespace IGC
         llvm::Value* sources[2];
         e_modifier   src_mod[2];
 
-        assert(I.getOpcode() == Instruction::SDiv || I.getOpcode() == Instruction::UDiv || I.getOpcode() == Instruction::AShr);
+        IGC_ASSERT(I.getOpcode() == Instruction::SDiv || I.getOpcode() == Instruction::UDiv || I.getOpcode() == Instruction::AShr);
 
         // We expect 2 for "div" and 1 for "right shift".
         int  expectedVal = (I.getOpcode() == Instruction::SDiv ? 2 : 1);
@@ -3971,7 +3978,7 @@ namespace IGC
     bool CodeGenPatternMatch::MatchWaveShuffleIndex(llvm::GenIntrinsicInst& I)
     {
         llvm::Value* helperLaneMode = I.getOperand(2);
-        assert(helperLaneMode);
+        IGC_ASSERT(helperLaneMode);
         if (int_cast<int>(cast<ConstantInt>(helperLaneMode)->getSExtValue()) == 1)
         {
             //only if helperLaneMode==1, we enable helper lane under some shuffleindex cases (not for all cases).
@@ -4009,6 +4016,7 @@ namespace IGC
 
         Value* data = I.getOperand(0);
         Value* source = I.getOperand(1);
+        uint typeByteSize = data->getType()->getScalarSizeInBits() / 8;
         bool isMatch = false;
         int subReg = 0;
         uint verticalStride = 1; //Default value for special case  Shuffle( data, (laneID << x) + y )  when x = 0
@@ -4061,21 +4069,27 @@ namespace IGC
         //Finally check for simLaneID intrisic
         if (intrin && (intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_simdLaneId))
         {
-            MatchRegionPattern* pattern = new (m_allocator) MatchRegionPattern();
-            pattern->source.elementOffset = subReg;
+            //To avoid compiler crash, pattern match with direct mov will be disable
+            //Conservetively, we assum simd16 for 32 bytes GRF platforms and simd32 for 64 bytes GRF platforms
+            bool cross2GRFs = typeByteSize * (subReg + verticalStride * (m_Platform.getGRFSize() > 32 ? 32 : 16)) > (2 * m_Platform.getGRFSize());
+            if (!cross2GRFs)
+            {
+                MatchRegionPattern* pattern = new (m_allocator) MatchRegionPattern();
+                pattern->source.elementOffset = subReg;
 
-            //Set Region Parameters <VerString;Width,HorzString>
-            pattern->source.region_set = true;
-            pattern->source.region[0] = verticalStride;
-            pattern->source.region[1] = 1;
-            pattern->source.region[2] = 0;
+                //Set Region Parameters <VerString;Width,HorzString>
+                pattern->source.region_set = true;
+                pattern->source.region[0] = verticalStride;
+                pattern->source.region[1] = 1;
+                pattern->source.region[2] = 0;
 
-            pattern->source.value = data;
-            MarkAsSource(data);
-            HandleSubspanUse(data);
-            AddPattern(pattern);
+                pattern->source.value = data;
+                MarkAsSource(data);
+                HandleSubspanUse(data);
+                AddPattern(pattern);
 
-            isMatch = true;
+                isMatch = true;
+            }
         }
 
         return isMatch;
@@ -4501,19 +4515,22 @@ namespace IGC
         return false;
     }
 
-    bool isSat(llvm::Instruction* sat, llvm::Value*& source)
+    bool isSat(llvm::Instruction* sat, llvm::Value*& source, bool& isUnsigned)
     {
         bool found = false;
         llvm::Value* sources[2] = { 0 };
-        bool typeMatch = sat->getType()->isFloatingPointTy();
-
+        bool floatMatch = sat->getType()->isFloatingPointTy();
         GenIntrinsicInst* intrin = dyn_cast<GenIntrinsicInst>(sat);
-        if (intrin && intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_fsat)
+        if (intrin &&
+            (intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_fsat ||
+            intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_usat ||
+            intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_isat))
         {
             source = intrin->getOperand(0);
             found = true;
+            isUnsigned = intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_usat;
         }
-        else if (typeMatch && isMax(sat, sources[0], sources[1]))
+        else if (floatMatch && isMax(sat, sources[0], sources[1]))
         {
             for (int i = 0; i < 2; i++)
             {
@@ -4528,6 +4545,7 @@ namespace IGC
                             {
                                 found = true;
                                 source = maxSources[1 - j];
+                                isUnsigned = false;
                                 break;
                             }
                         }
@@ -4536,7 +4554,7 @@ namespace IGC
                 }
             }
         }
-        else if (typeMatch && isMin(sat, sources[0], sources[1]))
+        else if (floatMatch && isMin(sat, sources[0], sources[1]))
         {
             for (int i = 0; i < 2; i++)
             {
@@ -4551,6 +4569,7 @@ namespace IGC
                             {
                                 found = true;
                                 source = maxSources[1 - j];
+                                isUnsigned = false;
                                 break;
                             }
                         }
@@ -4573,7 +4592,7 @@ namespace IGC
     uint CodeGenPatternMatch::GetBlockId(llvm::BasicBlock* block)
     {
         auto it = m_blockMap.find(block);
-        assert(it != m_blockMap.end());
+        IGC_ASSERT(it != m_blockMap.end());
 
         uint blockID = it->second->id;
         return blockID;

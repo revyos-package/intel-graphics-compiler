@@ -66,22 +66,14 @@ namespace iga
         vector<DepSet*> dependencies;
     };
 
-    const int MAX_GRF_BUCKETS = 128;
-    const int DISTANCE_FOR_OTHER_INST = 10;
-
-
-    // FIXME:
-    // we're not able to decide the mas sbid num, to be conservative, make it 16
-    // while it could be 8/16/32
-    const int MAX_SBID = 16;
-
     class SWSBAnalyzer
     {
     public:
         typedef DepSet::InstIDs InstIDs;
     public:
         //Blocks have already been created
-        SWSBAnalyzer(Kernel &k, ErrorHandler &errHandler, SWSB_ENCODE_MODE encode_mode)
+        SWSBAnalyzer(Kernel &k, ErrorHandler &errHandler,
+            SWSB_ENCODE_MODE encode_mode, int sbid_count)
                       : m_kernel(k),
                         m_errorHandler(errHandler),
                         m_SBIDRRCounter(0),
@@ -94,8 +86,16 @@ namespace iga
             else
                 m_swsbMode = k.getModel().getSWSBEncodeMode();
 
+
             m_DB = new DepSetBuilder(k.getModel());
             m_buckets = new Bucket[m_DB->getTOTAL_BUCKETS()];
+
+            // set sbid count to 16 if not given
+            if (sbid_count)
+                m_SBIDCount = sbid_count;
+            else
+                m_SBIDCount = 16;
+            m_freeSBIDList.resize(m_SBIDCount);
         }
 
         ~SWSBAnalyzer()
@@ -127,12 +127,27 @@ namespace iga
                                InstList::iterator iter,
                                vector<SBID>& activeSBID);
 
+        // helper function to pick a free SBID and set it to distanceDependency.
+        // This function only set SBID to distanceDependency, will not assign distanceDependency to
+        // the inst
+        SBID& assignSBID(DepSet* input, DepSet* output, Instruction& inst, SWSB& distanceDependency,
+            InstList::iterator insertPoint, Block *curBB, bool needSyncForShootDown);
+
+        // helper fuction to set out-of-order dependecy. Called by calculateDependence.
+        // This function create SBID with depedency to given dep, and add it to activeSBID
+        // it also set needSyncForShootDownInst if required.
+        void setSbidDependency(DepSet& dep, const Instruction& currInst,
+            bool& needSyncForShootDownInst, vector<SBID>& activeSBID);
+
         // clear dependency of the given dep
         void clearDepBuckets(DepSet &dep);
         // clear all sbid, set ids to all free and insert sync to sync with all pipes
-        void clearSBIDDependence(InstList::iterator iter, Instruction *lastInst, Block *bb);
+        void clearSBIDDependence(InstList::iterator insertPoint, Instruction *lastInst, Block *bb);
         // clear given input and output dependency in the buckets (for in-order pipes only)
         void clearBuckets(DepSet* input, DepSet* output);
+
+        // helper function to insert sync.allrd and sync.allwr before the given inserPoint of given bb
+        void insertSyncAllRdWr(InstList::iterator insertPoint, Block *bb);
 
         // a helper function to increase inst id counter based on the current encoding (gen12 hp or lp)
         // For lp, only consider one id counder for all in-order instrucions, for hp, all four
@@ -146,6 +161,13 @@ namespace iga
 
 
     private:
+        const uint32_t MAX_GRF_BUCKETS = 128;
+        int m_LatencyInOrderPipe = 10;
+
+    private:
+        // m_SBIDCound - number of SBID can be used
+        uint32_t m_SBIDCount;
+
         // m_InstIdCounter - record the current instruction state
         InstIDs m_InstIdCounter;
 
@@ -156,7 +178,7 @@ namespace iga
         DepSetBuilder* m_DB = nullptr;
 
         // This is the list to recored all sbid, if it's free or not
-        SBID m_freeSBIDList[MAX_SBID];
+        std::vector<SBID> m_freeSBIDList;
 
         // m_SBIDRRCounter - the round robin counter for SB id reuse
         unsigned int m_SBIDRRCounter;

@@ -23,13 +23,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-#ifndef FRONTEND_SEND_DESCRIPTOR_DECODING_HPP
-#define FRONTEND_SEND_DESCRIPTOR_DECODING_HPP
+#ifndef IGA_FRONTEND_SEND_DESCRIPTOR_DECODING_HPP
+#define IGA_FRONTEND_SEND_DESCRIPTOR_DECODING_HPP
 
 
 #include "../IR/Types.hpp"
 #include "../Models/Models.hpp"
-#include "../strings.hpp"
 
 #include <sstream>
 
@@ -37,9 +36,15 @@ namespace iga
 {
     void EmitSendDescriptorInfo(
         Platform p,
-        const OpSpec &os,
-        const SendDescArg &exDesc0,
-        uint32_t desc,
+        SFID sfid,
+        ExecSize execSize,
+        bool dstNonNull,
+        int dstLen,
+        int src0Len,
+        int src1Len,
+        const SendDesc &exDesc,
+        const SendDesc &desc,
+        RegRef indDesc,
         std::stringstream &ss);
 } // iga::
 

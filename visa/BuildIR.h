@@ -44,6 +44,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "PreDefinedVars.h"
 #include "CompilerStats.h"
 #include "BinaryEncodingIGA.h"
+#include "inc/common/sku_wa.h"
+
 
 #define MAX_DWORD_VALUE  0x7fffffff
 #define MIN_DWORD_VALUE  0x80000000
@@ -75,6 +77,10 @@ enum DeclareType
     CoalescedFill = 5,
     CoalescedSpill = 6
 };
+
+// forward declaration
+// FIXME: our #include is a mess, need to clean it up
+class CISA_IR_Builder;
 
 namespace vISA
 {
@@ -331,6 +337,7 @@ public:
     std::vector<G4_Declare*>& getDeclareList() {return dcllist;}
 };
 
+
 //
 // interface for creating operands and instructions
 //
@@ -402,17 +409,16 @@ private:
 
     GlobalImmPool immPool;
 
+    const TARGET_PLATFORM platform;
+
     //allocator pools
     USE_DEF_ALLOCATOR useDefAllocator;
 
-    int                 func_id;
     FINALIZER_INFO*        metaData;
     CompilerStats       compilerStats;
 
+    int subroutineId = -1;   // the kernel itself has id 0, as we always emit a subroutine label for kernel too
     bool isKernel;
-    int cunit;
-
-    bool isExternFunc = false;
 
     // pre-defined declare that binds to R0 (the entire GRF)
     // when pre-emption is enabled, builtinR0 is replaced by a temp,
@@ -433,12 +439,11 @@ private:
     G4_Declare* builtinBindlessSampler;
     // pre-defined sampler header
     G4_Declare* builtinSamplerHeader;
-    //pre-defined vector of stride 4 (16 W of [0, 4, 8, 12, ..., 60])
-    //only intialized if the kernel uses SLM untyped r/w for spill
-    G4_Declare* builtinImmVector4;
-    // pre-defined SLM scatter spill address: SLMStart(tid) + builtinImmVector4, 16 DW
-    // like builinImmVector4, only initialized if kernel uses SLM untyped r/w (ok, may need it for blocked SLM message as well)
-    G4_Declare* builtinSLMSpillAddr;
+
+    // common message header for spill/fill intrinsics
+    // We put them here instead of spillManager since there may be multiple rounds of spill,
+    // and we want to use a common header
+    G4_Declare* spillFillHeader = nullptr;
 
 
     // Indicates that sampler header cache (builtinSamplerHeader) is correctly
@@ -461,7 +466,7 @@ private:
     // information.
     FCPatchingInfo* fcPatchInfo;
 
-    const PVISA_WA_TABLE m_pWaTable;
+    const PWA_TABLE m_pWaTable;
     Options *m_options;
 
     std::map<G4_INST*, G4_FCALL*> m_fcallInfo;
@@ -510,20 +515,25 @@ private:
         G4_Declare* predefinedVars[static_cast<int>(PreDefinedVarsInternal::VAR_LAST)];
     };
 
-    bool use64BitFEStackVars;
     bool hasNullReturnSampler = false;
 
-    int perThreadInputSize = 0;
     bool hasPerThreadProlog = false;
     // Have inserted two entires prolog for setting FFID for compute shaders
     bool hasComputeFFIDProlog = false;
 
     const iga::Model* igaModel;
 
+    const CISA_IR_Builder* parentBuilder = nullptr;
+
+    // stores all metadata ever allocated
+    Mem_Manager metadataMem;
+    std::vector<Metadata*> allMDs;
+    std::vector<MDNode*> allMDNodes;
+
 public:
     PreDefinedVars preDefVars;
     Mem_Manager&        mem;        // memory for all operands and insts
-    PhyRegPool&         phyregpool; // all physical regs
+    PhyRegPool         phyregpool; // all physical regs
     OperandHashTable    hashtable;  // all created region operands
     RegionPool          rgnpool;    // all region description
     DeclarePool         dclpool;    // all created decalres
@@ -534,7 +544,6 @@ public:
     G4_Kernel&          kernel;
     // the following fileds are used for dcl name when a new dcl is created.
     // number of predefined variables are included.
-    int                 num_general_dcl;
     unsigned            num_temp_dcl;
     // number of temp GRF vars created to hold spilled addr/flag
     uint32_t            numAddrFlagSpillLoc = 0;
@@ -548,10 +557,11 @@ public:
     input_info_t * getInputArg(unsigned int index);
     unsigned int getInputCount();
     input_info_t *getRetIPArg();
+    const void* GetCurrentInst() const { return m_inst; };
+    void SetCurrentInst(const void* inst) { m_inst = inst; };
 
-    // all vISA functions directly called by this kernel
-    // this will be resolved later in Stitch_Compiler_Unit
-    std::set<std::string> funcCallees;
+    const CISA_IR_Builder* getParent() const { return parentBuilder; }
+    std::stringstream& criticalMsgStream();
 
     const USE_DEF_ALLOCATOR& getAllocator() const { return useDefAllocator; }
 
@@ -566,7 +576,7 @@ public:
     // Getter/setter for be_sp and be_fp
     G4_Declare* getBESP()
     {
-        if( be_sp == NULL )
+        if (be_sp == NULL)
         {
             be_sp = createDeclareNoLookup("be_sp", G4_GRF, 1, 1, Type_UD);
             be_sp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getStackCallStartReg()), SubRegs_SP_FP::BE_SP);
@@ -577,9 +587,9 @@ public:
 
     G4_Declare* getBEFP()
     {
-        if( be_fp == NULL )
+        if (be_fp == NULL)
         {
-            be_fp = createDeclareNoLookup("be_fp", G4_GRF, 1, 1, Type_UD );
+            be_fp = createDeclareNoLookup("be_fp", G4_GRF, 1, 1, Type_UD);
             be_fp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getStackCallStartReg()), SubRegs_SP_FP::BE_FP);
         }
 
@@ -620,10 +630,22 @@ public:
         return dcl == getFE_SP() || dcl == getFE_FP();
     }
 
-    const iga::Model* getIGAModel() const { return igaModel; }
+    // this refers to vISA's internal stack for spill and caller/callee-save
+    // Note that this is only valid after CFG is constructed
+    // ToDo: make this a pass?
+    bool usesStack() const
+    {
+        return kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc();
+    }
 
-    uint32_t getPerThreadInputSize() const { return perThreadInputSize; }
-    void setPerThreadInputSize(uint32_t val) { perThreadInputSize = val; }
+    void bindInputDecl(G4_Declare* dcl, int grfOffset);
+
+    const iga::Model* getIGAModel() const { return igaModel; }
+    uint32_t getPerThreadInputSize() const
+    {
+        return kernel.getIntKernelAttribute(Attributes::ATTR_PerThreadInputSize);
+    }
+
     bool getHasPerThreadProlog() const { return hasPerThreadProlog; }
     void setHasPerThreadProlog() { hasPerThreadProlog = true; }
 
@@ -641,10 +663,6 @@ public:
         return isOpndAligned(opnd, offset, alignByte);
     }
 
-    void setFuncId( int id ) { func_id = id; }
-    int getFuncId() { return func_id; }
-    void setCUnitId( int id ) { cunit = id; }
-    int getCUnitId() { return cunit; }
     void setIsKernel( bool value ) { isKernel = value; }
     bool getIsKernel() { return isKernel; }
     void predefinedVarRegAssignment(uint8_t inputSize);
@@ -653,8 +671,6 @@ public:
     unsigned short getArgSize() { return arg_size; }
     void setRetVarSize( unsigned short size ) { return_var_size = size; }
     unsigned short getRetVarSize() { return return_var_size; }
-    bool getIsExtern() { return isExternFunc; }
-    void setIsExtern(bool val) { isExternFunc = val; }
     FCPatchingInfo* getFCPatchInfo()
     {
         // Create new instance of FC patching class if one is not
@@ -671,7 +687,7 @@ public:
 
     void setFCPatchInfo(FCPatchingInfo* instance) { fcPatchInfo = instance; }
 
-    PVISA_WA_TABLE getPWaTable() { return m_pWaTable; }
+    const PWA_TABLE getPWaTable() { return m_pWaTable; }
 
     const char* getNameString(Mem_Manager& mem, size_t size, const char* format, ...)
     {
@@ -786,7 +802,7 @@ public:
                 case PreDefinedVarsInternal::FE_SP:
                 {
                     unsigned int startReg = kernel.getStackCallStartReg();
-                    dcl = createDeclareNoLookup(name, G4_GRF, 1, 1, is64BitFEStackVars() ? Type_UQ : Type_UD);
+                    dcl = createDeclareNoLookup(name, G4_GRF, 1, 1, Type_UQ);
                     dcl->getRegVar()->setPhyReg(phyregpool.getGreg(startReg), SubRegs_SP_FP::FE_SP);
                     break;
                 }
@@ -794,7 +810,7 @@ public:
                 {
                     // PREDEFINED_FE_FP
                     unsigned int startReg = kernel.getStackCallStartReg();
-                    dcl = createDeclareNoLookup(name, G4_GRF, 1, 1, is64BitFEStackVars() ? Type_UQ : Type_UD);
+                    dcl = createDeclareNoLookup(name, G4_GRF, 1, 1, Type_UQ);
                     dcl->getRegVar()->setPhyReg(phyregpool.getGreg(startReg), SubRegs_SP_FP::FE_FP);
                     break;
                 }
@@ -839,6 +855,7 @@ public:
         {
             G4_Declare *R0CopyDcl = createTempVar(8, Type_UD, GRFALIGN);
             builtinR0 = R0CopyDcl;
+            R0CopyDcl->setDoNotSpill();
         }
 
 
@@ -864,27 +881,28 @@ public:
 
         builtinSamplerHeader = createDeclareNoLookup("samplerHeader", G4_GRF, NUM_DWORDS_PER_GRF, 1, Type_UD);
 
-        builtinSLMSpillAddr = nullptr;
-        builtinImmVector4 = nullptr;
-
     }
 
-    G4_Declare* getBuiltinSLMSpillAddr() const { return builtinSLMSpillAddr; }
-    G4_Declare* getBuiltinImmVector4() const { return builtinImmVector4; }
+    G4_Declare* getSpillFillHeader()
+    {
+        if (!spillFillHeader)
+        {
+            spillFillHeader = createDeclareNoLookup("spillHeader", G4_GRF, getGRFSize() / sizeof(int), 1, Type_UD);
+        }
+        return spillFillHeader;
+    }
 
-    void initBuiltinSLMSpillAddr(int perThreadSLMSize);
-
-    IR_Builder(INST_LIST_NODE_ALLOCATOR &alloc, PhyRegPool &pregs, G4_Kernel &k,
-        Mem_Manager &m, Options *options,
-        FINALIZER_INFO *jitInfo = NULL, PVISA_WA_TABLE pWaTable = NULL)
-        : curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), func_id(-1), metaData(jitInfo),
-        isKernel(false), cunit(0),
+    IR_Builder(TARGET_PLATFORM genPlatform, INST_LIST_NODE_ALLOCATOR &alloc, G4_Kernel &k,
+        Mem_Manager &m, Options *options, CISA_IR_Builder* parent,
+        FINALIZER_INFO *jitInfo, PWA_TABLE pWaTable)
+        : platform(genPlatform), curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), metaData(jitInfo),
+        isKernel(false), parentBuilder(parent),
         builtinSamplerHeaderInitialized(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
         CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
-        use64BitFEStackVars(false), mem(m), phyregpool(pregs), hashtable(m), rgnpool(m), dclpool(m),
-        instList(alloc), kernel(k)
+        mem(m), phyregpool(m, k.getNumRegTotal()), hashtable(m), rgnpool(m), dclpool(m),
+        instList(alloc), kernel(k), metadataMem(4096)
     {
-        num_general_dcl = 0;
+        m_inst = nullptr;
         num_temp_dcl = 0;
         kernel.setBuilder(this); // kernel needs pointer to the builder
         createBuiltinDecls();
@@ -906,7 +924,7 @@ public:
         createPreDefinedVars();
 
         igaModel = iga::Model::LookupModel(
-            BinaryEncodingIGA::getIGAInternalPlatform(getGenxPlatform()));
+            BinaryEncodingIGA::getIGAInternalPlatform(getPlatform()));
     }
 
     ~IR_Builder()
@@ -922,11 +940,28 @@ public:
         }
         instAllocList.clear();
 
-        if (fcPatchInfo != NULL)
+        for (auto MD : allMDs)
+        {
+            MD->~Metadata();
+        }
+
+        for (auto node : allMDNodes)
+        {
+            node->~MDNode();
+        }
+
+        if (fcPatchInfo)
         {
             fcPatchInfo->~FCPatchingInfo();
         }
     }
+
+    void rebuildPhyRegPool(unsigned int numRegisters)
+    {
+        phyregpool.rebuildRegPool(mem, numRegisters);
+    }
+
+    TARGET_PLATFORM getPlatform() const { return platform; }
 
     G4_Declare* createDeclareNoLookup(const char*    name,
         G4_RegFileKind regFile,
@@ -948,7 +983,6 @@ public:
 
         kernel.Declares.push_back(dcl);
 
-        ++num_general_dcl;
         return dcl;
     }
 
@@ -1120,13 +1154,10 @@ public:
     G4_INST* createSpill(
         G4_DstRegRegion* dst, G4_SrcRegRegion* header, G4_SrcRegRegion* payload,
         unsigned int execSize,
-        uint16_t numRows, uint32_t offset, G4_Declare* fp, G4_InstOption option,
-        unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+        uint16_t numRows, uint32_t offset, G4_Declare* fp, G4_InstOption option)
     {
         G4_INST* spill = createIntrinsicInst(nullptr, Intrinsic::Spill, execSize, dst,
-            header, payload, nullptr, option, lineno);
-        spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
-        spill->asSpillIntrinsic()->setCISAOff(CISAoff);
+            header, payload, nullptr, option);
         spill->asSpillIntrinsic()->setFP(fp);
         spill->asSpillIntrinsic()->setOffset((uint32_t)
             (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
@@ -1137,17 +1168,13 @@ public:
     G4_INST* createSpill(
         G4_DstRegRegion* dst, G4_SrcRegRegion* payload,
         unsigned int execSize, uint16_t numRows, uint32_t offset,
-        G4_Declare* fp, G4_InstOption option,
-        unsigned int lineno = 0, int CISAoff = -1,
-        const char* srcFilename = nullptr)
+        G4_Declare* fp, G4_InstOption option)
     {
         auto builtInR0 = getBuiltinR0();
         auto rd = getRegionStride1();
         auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
         G4_INST* spill = createIntrinsicInst(nullptr, Intrinsic::Spill, execSize, dst,
-            srcRgnr0, payload, nullptr, option, lineno);
-        spill->asSpillIntrinsic()->setSrcFilename(srcFilename);
-        spill->asSpillIntrinsic()->setCISAOff(CISAoff);
+            srcRgnr0, payload, nullptr, option);
         spill->asSpillIntrinsic()->setFP(fp);
         spill->asSpillIntrinsic()->setOffset((uint32_t)
             (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
@@ -1156,12 +1183,10 @@ public:
     }
 
     G4_INST* createFill(G4_SrcRegRegion* header, G4_DstRegRegion* dstData, unsigned int execSize, uint16_t numRows, uint32_t offset,
-        G4_Declare* fp, G4_InstOption option, unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+        G4_Declare* fp, G4_InstOption option)
     {
         G4_INST* fill = createIntrinsicInst(nullptr, Intrinsic::Fill, execSize, dstData,
-            header, nullptr, nullptr, option, lineno);
-        fill->asFillIntrinsic()->setSrcFilename(srcFilename);
-        fill->asFillIntrinsic()->setCISAOff(CISAoff);
+            header, nullptr, nullptr, option);
         fill->asFillIntrinsic()->setFP(fp);
         fill->asFillIntrinsic()->setOffset((uint32_t)
             (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
@@ -1169,16 +1194,14 @@ public:
         return fill;
     }
 
-    G4_INST* createFill(G4_DstRegRegion* dstData, unsigned int execSize, uint16_t numRows, uint32_t offset, G4_Declare* fp , G4_InstOption option,
-        unsigned int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr)
+    G4_INST* createFill(G4_DstRegRegion* dstData, unsigned int execSize, uint16_t numRows, uint32_t offset, G4_Declare* fp , G4_InstOption option)
     {
         auto builtInR0 = getBuiltinR0();
         auto rd = getRegionStride1();
         auto srcRgnr0 = createSrcRegRegion(Mod_src_undef, Direct, builtInR0->getRegVar(), 0, 0, rd, Type_UD);
         G4_INST* fill = createIntrinsicInst(nullptr, Intrinsic::Fill, execSize, dstData,
-            srcRgnr0, nullptr, nullptr, option, lineno);
-        fill->asFillIntrinsic()->setSrcFilename(srcFilename);
-        fill->asFillIntrinsic()->setCISAOff(CISAoff);
+            srcRgnr0, nullptr, nullptr, option);
+
         fill->asFillIntrinsic()->setFP(fp);
         fill->asFillIntrinsic()->setOffset((uint32_t)
             (((uint64_t)offset * HWORD_BYTE_SIZE) / G4_GRF_REG_NBYTES));
@@ -1459,6 +1482,18 @@ public:
         return dst;
     }
 
+    G4_DstRegRegion* createDstWithNewSubRegOff(G4_DstRegRegion* old, short newSubRegOff)
+    {
+        if (old->getRegAccess() == Direct)
+        {
+            return createDst(old->getBase(), old->getRegOff(), newSubRegOff, old->getHorzStride(), old->getType(), old->getAccRegSel());
+        }
+        else
+        {
+            return createIndirectDst(old->getBase(), newSubRegOff, old->getHorzStride(), old->getType(), old->getAddrImm());
+        }
+    }
+
     //
     // return the imm operand; create one if not yet created
     //
@@ -1475,7 +1510,7 @@ public:
     {
         uint32_t imm = *((uint32_t*) &fp);
         G4_Type immType = Type_F;
-        if (getGenxPlatform() >= GENX_CHV && m_options->getOption(vISA_FImmToHFImm) &&
+        if (getPlatform() >= GENX_CHV && m_options->getOption(vISA_FImmToHFImm) &&
             !VISA_WA_CHECK(getPWaTable(), WaSrc1ImmHfNotAllowed))
         {
             // we may be able to lower it to HF
@@ -1591,6 +1626,18 @@ public:
     }
 
     //
+    // Create immediate operand without looking up hash table. This operand
+    // is a relocatable immediate type. Specify the value of this imm field,
+    // which will present in the output instruction's imm value.
+    //
+    G4_Reloc_Imm* createRelocImm(int64_t immval, G4_Type ty)
+    {
+        G4_Reloc_Imm* newImm;
+        newImm = new (mem)G4_Reloc_Imm(immval, ty);
+        return newImm;
+    }
+
+    //
     // return the label operand; create one if not found
     //
     G4_Label* lookupLabel(char* lab)
@@ -1647,9 +1694,8 @@ public:
         return new (mem) G4_AddrExp(reg, offset, ty);
     }
 
-    //
-    // create instructions
-    //
+ private:
+    // please leave all createInst() as private and use the public wrappers below
     G4_INST* createInst(G4_Predicate* prd, G4_opcode op,
                         G4_CondMod* mod, bool sat,
                         unsigned char size, G4_DstRegRegion* dst,
@@ -1680,18 +1726,6 @@ public:
         unsigned char sz = static_cast<unsigned char>(size);
         return createInst(prd, op, mod, sat, sz, dst, src0, src1, option);
     }
-
-    G4_INST* createInternalInst(G4_Predicate* prd, G4_opcode op,
-        G4_CondMod* mod, bool sat,
-        unsigned char size, G4_DstRegRegion* dst,
-        G4_Operand* src0, G4_Operand* src1,
-        unsigned int option);
-    G4_INST* createInternalInst(G4_Predicate* prd, G4_opcode op,
-        G4_CondMod* mod, bool sat,
-        unsigned char size, G4_DstRegRegion* dst,
-        G4_Operand* src0, G4_Operand* src1,
-        unsigned int option, int lineno, int CISAoff,
-        const char* srcFilename);
 
     G4_INST* createInst(G4_Predicate* prd, G4_opcode op,
         G4_CondMod* mod, bool sat,
@@ -1725,9 +1759,26 @@ public:
         return createInst(prd, op, mod, sat, sz, dst, src0, src1, src2, option, lineno);
     }
 
+public:
+
     G4_INST* createIf(G4_Predicate* prd, uint8_t size, uint32_t option);
     G4_INST* createElse(uint8_t size, uint32_t option);
     G4_INST* createEndif(uint8_t size, uint32_t option);
+    G4_INST* createLabelInst(G4_Label* label, bool appendToInstList);
+    G4_INST* createJmp(G4_Predicate* pred, G4_Operand* jmpTarget, uint32_t option, bool appendToInstList);
+
+    // ToDo: make createInternalInst() private as well and add wraper for them
+    G4_INST* createInternalInst(G4_Predicate* prd, G4_opcode op,
+        G4_CondMod* mod, bool sat,
+        unsigned char size, G4_DstRegRegion* dst,
+        G4_Operand* src0, G4_Operand* src1,
+        unsigned int option);
+    G4_INST* createInternalInst(G4_Predicate* prd, G4_opcode op,
+        G4_CondMod* mod, bool sat,
+        unsigned char size, G4_DstRegRegion* dst,
+        G4_Operand* src0, G4_Operand* src1,
+        unsigned int option, int lineno, int CISAoff,
+        const char* srcFilename);
 
     G4_INST* createInternalInst(G4_Predicate* prd, G4_opcode op,
         G4_CondMod* mod, bool sat,
@@ -1754,7 +1805,6 @@ public:
         unsigned char size, G4_Label* jip, G4_Label* uip,
         unsigned int option, int lineno = 0, int CISAoff = -1,
         const char* srcFilename = NULL);
-
 
     G4_InstSend* createSendInst(G4_Predicate* prd, G4_opcode op,
                             unsigned char size, G4_DstRegRegion* postDst,
@@ -1813,14 +1863,23 @@ public:
         unsigned int option, int lineno = 0, int CISAoff = -1,
         const char* srcFilename = NULL);
 
+    G4_INST* createNop(uint32_t option);
+    G4_INST* createSync(G4_opcode syncOp, G4_Operand* src);
+
     G4_INST* createMov(uint8_t execSize, G4_DstRegRegion* dst,
-        G4_Operand* src0, uint32_t option, bool appendToInstList,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr);
+        G4_Operand* src0, uint32_t option, bool appendToInstList);
 
     G4_INST* createBinOp(G4_opcode op, uint8_t execSize, G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1, uint32_t option, bool appendToInstList);
 
-    G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
+    G4_INST* createMach(uint8_t execSize, G4_DstRegRegion* dst,
+        G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType);
+
+    G4_INST* createMacl(uint8_t execSize, G4_DstRegRegion* dst,
+        G4_Operand* src0, G4_Operand* src1, uint32_t option, G4_Type accType);
+
+    static G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
+
     void resizePredefinedStackVars();
 
     G4_Operand* duplicateOpndImpl( G4_Operand* opnd );
@@ -2557,6 +2616,8 @@ public:
                         unsigned int numParms,
                         G4_SrcRegRegion ** msgOpnds);
 
+
+
     int translateVISASVMBlockReadInst(
         VISA_Oword_Num numOword,
         bool unaligned,
@@ -2697,7 +2758,10 @@ public:
     G4_SrcRegRegion *coalescePayload(
         unsigned alignSourcesTo,
         unsigned alignPayloadTo,
-        std::initializer_list<G4_SrcRegRegion *> srcs);
+        uint32_t payloadSize,
+        uint32_t srcSize,
+        std::initializer_list<G4_SrcRegRegion *> srcs,
+        VISA_EMask_Ctrl emask);
 
     // struct PayloadElem {
     //     enum PayloadKind {REG,IMM};
@@ -2715,15 +2779,32 @@ public:
 
     bool useSends() const
     {
-        return getGenxPlatform() >= GENX_SKL && m_options->getOption(vISA_UseSends) &&
+        return getPlatform() >= GENX_SKL && m_options->getOption(vISA_UseSends) &&
             !(VISA_WA_CHECK(m_pWaTable, WaDisableSendsSrc0DstOverlap));
     }
 
-    void doSamplerHeaderMove(G4_Declare* header, G4_Operand* sampler);
+    Metadata* allocateMD()
+    {
+        Metadata* newMD = new (metadataMem) Metadata();
+        allMDs.push_back(newMD);
+        return newMD;
+    }
 
-    void set64BitFEStackVars() { use64BitFEStackVars = true; }
-    void set32BitFEStackVars() { use64BitFEStackVars = false; }
-    bool is64BitFEStackVars() { return use64BitFEStackVars; }
+    MDNode* allocateMDString(const std::string& str)
+    {
+        auto newNode = new (metadataMem) MDString(str);
+        allMDNodes.push_back(newNode);
+        return newNode;
+    }
+
+    MDLocation* allocateMDLocation(int line, const char* file)
+    {
+        auto newNode = new (metadataMem) MDLocation(line, file);
+        allMDNodes.push_back(newNode);
+        return newNode;
+    }
+
+    void doSamplerHeaderMove(G4_Declare* header, G4_Operand* sampler);
 
     void expandFdiv(uint8_t exsize, G4_Predicate *predOpnd, bool saturate,
         G4_DstRegRegion *dstOpnd, G4_Operand *src0Opnd, G4_Operand *src1Opnd, uint32_t instOpt);
@@ -2739,9 +2820,12 @@ public:
     int generateDebugInfoPlaceholder();
 
 
+
+
 #include "HWCaps.inc"
 
 private:
+    const void* m_inst;
     G4_SrcRegRegion* createBindlessExDesc(uint32_t exdesc);
 
     int translateVISASLMByteScaledInst(
@@ -2802,7 +2886,14 @@ private:
         G4_Predicate* pred,
         uint32_t mask);
 
+    VISA_Exec_Size roundUpExecSize(VISA_Exec_Size execSize);
 };
 }
+
+// G4IR instructions added by JIT that do not result from lowering
+// any CISA bytecode will be assigned CISA offset = 0xffffffff.
+// This includes pseudo nodes, G4_labels, mov introduced for copying
+// r0 for pre-emption support.
+constexpr int UNMAPPABLE_VISA_INDEX = IR_Builder::OrphanVISAIndex;
 
 #endif

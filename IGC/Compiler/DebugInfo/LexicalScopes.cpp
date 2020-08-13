@@ -36,21 +36,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///////////////////////////////////////////////////////////////////////////////
 
 #include "llvm/Config/llvm-config.h"
-
 #define DEBUG_TYPE "lexicalscopes"
 #include "Compiler/DebugInfo/LexicalScopes.hpp"
 #include "Compiler/DebugInfo/VISAModule.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/IR/Module.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -158,10 +156,10 @@ LexicalScope* LexicalScopes::findLexicalScope(const DILocation* DL)
 
     // The scope that we were created with could have an extra file - which
     // isn't what we care about in this case.
-    if (auto * File = dyn_cast<DILexicalBlockFile>(Scope))
+    if (auto* File = dyn_cast<DILexicalBlockFile>(Scope))
         Scope = File->getScope();
 
-    if (auto * IA = DL->getInlinedAt()) {
+    if (auto* IA = DL->getInlinedAt()) {
         auto I = InlinedLexicalScopeMap.find(std::make_pair(Scope, IA));
         return I != InlinedLexicalScopeMap.end() ? &I->second : nullptr;
     }
@@ -186,8 +184,7 @@ LexicalScope* LexicalScopes::getOrCreateLexicalScope(const DILocalScope* Scope,
 /// getOrCreateRegularScope - Find or create a regular lexical scope.
 LexicalScope*
 LexicalScopes::getOrCreateRegularScope(const DILocalScope* Scope) {
-    if (auto * File = dyn_cast<DILexicalBlockFile>(Scope))
-        Scope = File->getScope();
+    Scope = Scope->getNonLexicalBlockFileScope();
 
     auto I = LexicalScopeMap.find(Scope);
     if (I != LexicalScopeMap.end())
@@ -195,7 +192,7 @@ LexicalScopes::getOrCreateRegularScope(const DILocalScope* Scope) {
 
     // FIXME: Should the following dyn_cast be DILexicalBlock?
     LexicalScope* Parent = nullptr;
-    if (auto * Block = dyn_cast<DILexicalBlockBase>(Scope))
+    if (auto* Block = dyn_cast<DILexicalBlockBase>(Scope))
         Parent = getOrCreateLexicalScope(Block->getScope());
     I = LexicalScopeMap.emplace(std::piecewise_construct,
         std::forward_as_tuple(Scope),
@@ -203,8 +200,8 @@ LexicalScopes::getOrCreateRegularScope(const DILocalScope* Scope) {
             false)).first;
 
     if (!Parent) {
-        //assert(cast<DISubprogram>(Scope)->describes(VisaM->GetEntryFunction()));
-        //assert(!CurrentFnLexicalScope);
+        //IGC_ASSERT(cast<DISubprogram>(Scope)->describes(VisaM->GetEntryFunction()));
+        //IGC_ASSERT(!CurrentFnLexicalScope);
         CurrentFnLexicalScope = &I->second;
     }
 
@@ -215,13 +212,14 @@ LexicalScopes::getOrCreateRegularScope(const DILocalScope* Scope) {
 LexicalScope*
 LexicalScopes::getOrCreateInlinedScope(const DILocalScope* Scope,
     const DILocation* InlinedAt) {
+    Scope = Scope->getNonLexicalBlockFileScope();
     std::pair<const DILocalScope*, const DILocation*> P(Scope, InlinedAt);
     auto I = InlinedLexicalScopeMap.find(P);
     if (I != InlinedLexicalScopeMap.end())
         return &I->second;
 
     LexicalScope* Parent;
-    if (auto * Block = dyn_cast<DILexicalBlockBase>(Scope))
+    if (auto* Block = dyn_cast<DILexicalBlockBase>(Scope))
         Parent = getOrCreateInlinedScope(Block->getScope(), InlinedAt);
     else
         Parent = getOrCreateLexicalScope(InlinedAt);
@@ -237,17 +235,15 @@ LexicalScopes::getOrCreateInlinedScope(const DILocalScope* Scope,
 /// getOrCreateAbstractScope - Find or create an abstract lexical scope.
 LexicalScope*
 LexicalScopes::getOrCreateAbstractScope(const DILocalScope* Scope) {
-    assert(Scope && "Invalid Scope encoding!");
-
-    if (auto * File = dyn_cast<DILexicalBlockFile>(Scope))
-        Scope = File->getScope();
+    IGC_ASSERT_MESSAGE(Scope, "Invalid Scope encoding!");
+    Scope = Scope->getNonLexicalBlockFileScope();
     auto I = AbstractScopeMap.find(Scope);
     if (I != AbstractScopeMap.end())
         return &I->second;
 
     // FIXME: Should the following isa be DILexicalBlock?
     LexicalScope* Parent = nullptr;
-    if (auto * Block = dyn_cast<DILexicalBlockBase>(Scope))
+    if (auto* Block = dyn_cast<DILexicalBlockBase>(Scope))
         Parent = getOrCreateAbstractScope(Block->getScope());
 
     I = AbstractScopeMap.emplace(std::piecewise_construct,
@@ -261,7 +257,7 @@ LexicalScopes::getOrCreateAbstractScope(const DILocalScope* Scope) {
 
 /// constructScopeNest
 void LexicalScopes::constructScopeNest(LexicalScope* Scope) {
-    assert(Scope && "Unable to calculate scope dominance graph!");
+    IGC_ASSERT_MESSAGE(Scope, "Unable to calculate scope dominance graph!");
     SmallVector<LexicalScope*, 4> WorkStack;
     WorkStack.push_back(Scope);
     unsigned Counter = 0;
@@ -293,14 +289,13 @@ void LexicalScopes::
 assignInstructionRanges(SmallVectorImpl<InsnRange>& MIRanges,
     DenseMap<const Instruction*, LexicalScope*>& MI2ScopeMap)
 {
-
     LexicalScope* PrevLexicalScope = NULL;
     for (SmallVectorImpl<InsnRange>::const_iterator RI = MIRanges.begin(),
         RE = MIRanges.end(); RI != RE; ++RI)
     {
         const InsnRange& R = *RI;
         LexicalScope* S = MI2ScopeMap.lookup(R.first);
-        assert(S && "Lost LexicalScope for a machine instruction!");
+        IGC_ASSERT_MESSAGE(S, "Lost LexicalScope for a machine instruction!");
         if (PrevLexicalScope && !PrevLexicalScope->dominates(S))
             PrevLexicalScope->closeInsnRange(S);
         S->openInsnRange(R.first);

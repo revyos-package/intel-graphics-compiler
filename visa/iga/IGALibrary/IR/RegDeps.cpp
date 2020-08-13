@@ -26,17 +26,38 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "RegDeps.hpp"
 #include "../asserts.hpp"
+#include "../bits.hpp"
 
 #include <sstream>
 #include <cstring>
 
 using namespace iga;
 
+static DEP_CLASS getClassFromPipeType(DEP_PIPE type, const OpSpec& opspec)
+{
+    if (opspec.is(Op::SYNC) || opspec.op == Op::ILLEGAL)
+        return DEP_CLASS::OTHER;
+
+    switch(type) {
+        case DEP_PIPE::NONE:
+        case DEP_PIPE::SHORT:
+        case DEP_PIPE::LONG:
+        case DEP_PIPE::CONTROL_FLOW:
+            return DEP_CLASS::IN_ORDER;
+
+        case DEP_PIPE::SEND:
+        case DEP_PIPE::MATH:
+            return DEP_CLASS::OUT_OF_ORDER;
+
+    }
+    return DEP_CLASS::NONE;
+}
+
 static void setDEPPipeClass_SingleDistPipe(DepSet &dep, const Instruction &inst)
 {
     auto opsec = inst.getOpSpec();
     dep.setDepPipe(DEP_PIPE::SHORT);
-    if (opsec.isMathSubFunc())
+    if (opsec.is(Op::MATH))
     {
         dep.setDepPipe(DEP_PIPE::MATH);
     }
@@ -72,25 +93,15 @@ static void setDEPPipeClass_SingleDistPipe(DepSet &dep, const Instruction &inst)
             }
         }
     }
-    if (opsec.isVariableLatency())
-    {
-        dep.setDepClass(DEP_CLASS::OUT_OF_ORDER);
-    }
-    else if (opsec.groupOp == Op::SYNC  ||
-             opsec.op == Op::ILLEGAL)
-    {
-        dep.setDepClass(DEP_CLASS::OTHER);
-    }
-    else
-    {
-        dep.setDepClass(DEP_CLASS::IN_ORDER);
-    }
+
+    dep.setDepClass(getClassFromPipeType(dep.getDepPipe(), opsec));
 }
 
 
-static void setDEPPipeClass(SWSB_ENCODE_MODE enc_mode, DepSet &dep, const Instruction &inst)
+static void setDEPPipeClass(
+    SWSB_ENCODE_MODE enc_mode, DepSet &dep, const Instruction &inst, const Model& model)
 {
-    if (enc_mode == SingleDistPipe)
+    if (enc_mode == SWSB_ENCODE_MODE::SingleDistPipe)
         setDEPPipeClass_SingleDistPipe(dep, inst);
 }
 
@@ -121,7 +132,7 @@ DepSet* DepSetBuilder::createSrcDepSet(const Instruction &i,
     inps->m_instruction = &i;
     inps->setDepType(DEP_TYPE::READ);
 
-    setDEPPipeClass(enc_mode, *inps, i);
+    setDEPPipeClass(enc_mode, *inps, i, mPlatformModel);
 
     inps->setInputsFlagDep();
     inps->setInputsSrcDep();
@@ -163,11 +174,11 @@ void DepSet::setInputsFlagDep()
     // immediate send descriptors
     if (m_instruction->getOpSpec().isSendOrSendsFamily()) {
         auto desc = m_instruction->getMsgDescriptor();
-        if (desc.type == SendDescArg::REG32A) {
+        if (desc.isReg()) {
             addA_D(desc.reg); // e.g. a0.0
         }
         auto exDesc = m_instruction->getExtMsgDescriptor();
-        if (exDesc.type == SendDescArg::REG32A) {
+        if (exDesc.isReg()) {
             addA_D(exDesc.reg); // e.g. a0.0
         }
     }
@@ -182,7 +193,7 @@ void DepSet::setInputsSrcDep()
         ) {
         setSrcRegion(
             RegName::ARF_ACC,
-            MakeRegRef(0, 0),
+            RegRef(0, 0),
             Region::SRC110,
             execSize,
             16); // assume it's :w, though for acc access it actually does not matter,
@@ -200,7 +211,7 @@ void DepSet::setInputsSrcDep()
     // For sync instructions we do not need to consider its dependency. Though it may still apply the above
     // case so still set ARF_CR to it.
     if (m_instruction->getSourceCount() == 0 ||
-        m_instruction->getOpSpec().isSyncSubFunc()) {
+        m_instruction->getOpSpec().is(Op::SYNC)) {
         m_bucketList.push_back(m_DB.getBucketStart(RegName::ARF_CR));
         return;
     }
@@ -274,29 +285,18 @@ void DepSet::setInputsSrcDep()
             if (m_instruction->getOpSpec().isSendOrSendsFamily()) {
                 if (op.getDirRegName() == RegName::GRF_R) {
                     // send source GRF (not null reg)
-                    uint32_t nregs = 1;
-
-                    if (srcIx == 0) {
-                        // src0 length, get from Desc
-                        auto desc = m_instruction->getMsgDescriptor();
-                        if (desc.type == SendDescArg::IMM) {
-                            nregs = (desc.imm >> 25) & 0xF; // desc[28:25]
-                        } else {
-                            nregs = 31; //since we don't know the length must be conservative
-                        }
-                    } else {
-                        // src1 legnth, get from exDesc
-                        auto ex_desc = m_instruction->getExtMsgDescriptor();
-                        if (ex_desc.type == SendDescArg::IMM) {
-                            nregs = ((ex_desc.imm >> 6) & 0xF);
-                        } else {
-                                nregs = op.getDirRegName() == RegName::GRF_R ? 31 : 0;
-                        }
-                    }
+                    int nregs =
+                        (srcIx == 0) ?
+                            m_instruction->getSrc0Length() :
+                            m_instruction->getSrc1Length();
+                    // if we can't tell the number of registers
+                    // (e.g. the descriptor is in a register),
+                    // then we must conservatively assume the worst (31)
+                    if (nregs < 0)
+                        nregs = 31;
                     uint32_t regNum = op.getDirRegRef().regNum;
-                    for (uint32_t i = 0; i < nregs; i++) {
-                        if ((regNum + i) >= m_DB.getGRF_REGS())
-                        {
+                    for (uint32_t i = 0; i < (uint32_t)nregs; i++) {
+                        if ((regNum + i) >= m_DB.getGRF_REGS()) {
                             break;
                         }
                         addGrf((size_t)regNum + i);
@@ -305,7 +305,6 @@ void DepSet::setInputsSrcDep()
                     addToBucket(m_DB.getBucketStart(RegName::ARF_CR));
                 }
             } else {
-
                 if (m_instruction->getOp() == Op::BRC) {
                     rgn = Region::SRC221;
                 }
@@ -331,7 +330,7 @@ void DepSet::setInputsSrcDep()
                     static_cast<int>(MathMacroExt::MME0);
                 setSrcRegion(
                     RegName::ARF_ACC,
-                    MakeRegRef(mmeNum,0),
+                    RegRef(mmeNum, 0),
                     Region::SRC110,
                     execSize,
                     typeSizeInBits);
@@ -340,7 +339,7 @@ void DepSet::setInputsSrcDep()
         }
         case Operand::Kind::INDIRECT: {
             setHasIndirect();
-            setDepType(DEP_TYPE::WRITE_ALWAYS_INTERFERE);
+            setDepType(DEP_TYPE::READ_ALWAYS_INTERFERE);
             auto rgn = op.getRegion();
             if (rgn.getVt() == Region::Vert::VT_VxH) {
                 // VxH or Vx1 mode
@@ -418,8 +417,8 @@ void DepSet::setOutputsDstcDep()
         m_instruction->getOp() == Op::MACH) {
         auto elemsPerAccReg = 8 * m_DB.getARF_ACC_BYTES_PER_REG() / typeSizeBits; // e.g. 8 subreg elems for :f
         RegRef ar;
-        ar.regNum = (uint8_t)(execOff / elemsPerAccReg);
-        ar.subRegNum = (uint8_t)(execOff % elemsPerAccReg);
+        ar.regNum = (uint16_t)(execOff / elemsPerAccReg);
+        ar.subRegNum = (uint16_t)(execOff % elemsPerAccReg);
         setDstRegion(
             RegName::ARF_ACC,
             ar,
@@ -435,16 +434,12 @@ void DepSet::setOutputsDstcDep()
         if (m_instruction->getOpSpec().isSendOrSendsFamily() &&
             op.getDirRegName() == RegName::GRF_R)
         {
-            uint32_t nregs = 1;
-
-            auto desc = m_instruction->getMsgDescriptor();
-            if (desc.type == SendDescArg::IMM) {
-                nregs = (desc.imm >> 20) & 0x1F; // desc[24:20] => rlen
-            }
-            else {
-                nregs = 31; // have to be pessimistic
-            }
-            for (uint32_t i = 0; i < nregs; i++) {
+            int nregs = m_instruction->getDstLength();
+            // getDstLength return -1 when it's not able to deduce the length
+            // we have to be conservative and use the max
+            if (nregs < 0)
+                nregs = 31;
+            for (uint32_t i = 0; i < (uint32_t)nregs; i++) {
                 uint32_t regNum = op.getDirRegRef().regNum;
                 if ((regNum + i) >= m_DB.getGRF_REGS()) {
                     break;
@@ -457,11 +452,11 @@ void DepSet::setOutputsDstcDep()
             addToBucket(m_DB.getBucketStart(RegName::ARF_CR));
 
         }
-        else if (m_instruction->getOpSpec().isMathSubFunc() &&
+        else if (m_instruction->getOpSpec().is(Op::MATH) &&
             op.getDirRegName() == RegName::GRF_R &&
-            m_instruction->getOpSpec().functionControlValue == static_cast<int>(MathFC::IDIV))
+            m_instruction->getMathFc() == MathFC::IDIV)
         {
-            uint8_t regNum = op.getDirRegRef().regNum;
+            uint16_t regNum = op.getDirRegRef().regNum;
             addGrf(regNum);
             addToBucket(regNum);
             addGrf((size_t)regNum + 1);
@@ -530,7 +525,7 @@ DepSet* DepSetBuilder::createDstDepSet(
     mAllDepSet.push_back(oups);
 
     oups->m_instruction = &i;
-    setDEPPipeClass(enc_mode, *oups, i);
+    setDEPPipeClass(enc_mode, *oups, i, mPlatformModel);
 
     oups->setDepType(DEP_TYPE::WRITE);
 
@@ -547,7 +542,7 @@ DepSet* DepSetBuilder::createMathDstWADepSet(
     mAllDepSet.push_back(oups);
 
     oups->m_instruction = &i;
-    setDEPPipeClass(enc_mode, *oups, i);
+    setDEPPipeClass(enc_mode, *oups, i, mPlatformModel);
 
     oups->setDepType(DEP_TYPE::WRITE);
     oups->setMathWAOutputsDstcDep();

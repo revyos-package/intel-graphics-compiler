@@ -30,18 +30,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "TypeLegalizer.h"
 #include "InstLegalChecker.h"
 #include "common/LLVMWarningsPush.hpp"
-
 #include "llvmWrapper/Support/Debug.h"
-
 #include "llvm/Support/raw_ostream.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
+
 using namespace llvm;
 using namespace IGC::Legalizer;
 
 // By default, capture all missing instructions!
 LegalizeAction InstLegalChecker::visitInstruction(Instruction& I) {
     LLVM_DEBUG(dbgs() << "LEGAL-CHECK: " << I << '\n');
-    llvm_unreachable("UNKNOWN INSTRUCTION IS BEING LEGAL-CHECKED!");
+    IGC_ASSERT_EXIT_MESSAGE(0, "UNKNOWN INSTRUCTION IS BEING LEGAL-CHECKED!");
 }
 
 /// Terminator instructions
@@ -168,7 +168,7 @@ LegalizeAction InstLegalChecker::visitIntrinsicInst(IntrinsicInst& I) {
     case Intrinsic::exp:
     case Intrinsic::exp2:
     case Intrinsic::fabs:
-        // case Intrinsic::copysign:
+    case Intrinsic::copysign:
     case Intrinsic::floor:
     case Intrinsic::ceil:
     case Intrinsic::trunc:

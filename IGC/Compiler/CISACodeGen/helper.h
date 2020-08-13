@@ -25,7 +25,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 #pragma once
 
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/IR/Instruction.h>
@@ -50,6 +49,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/MDFrameWork.h"
 #include "common/Types.hpp"
+#include "Probe/Assertion.h"
 
 typedef unsigned int uint;
 
@@ -106,6 +106,7 @@ namespace IGC
     bool IsMathIntrinsic(EOPCODE opcode);
     bool IsAtomicIntrinsic(EOPCODE opcode);
     bool IsGradientIntrinsic(EOPCODE opcode);
+    bool IsExtendedMathInstruction(llvm::Instruction* Inst);
     bool IsSubGroupIntrinsicWithSimd32Implementation(EOPCODE opcode);
     bool UsesTypedConstantBuffer(CodeGenContext* pContext);
 
@@ -158,7 +159,7 @@ namespace IGC
     bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
     // try to evaluate the address if it is constant.
-    bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
+    bool EvalConstantAddress(llvm::Value* address, int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
 
 
     bool isSampleLoadGather4InfoInstruction(llvm::Instruction* inst);
@@ -174,15 +175,20 @@ namespace IGC
 
     bool isURBWriteIntrinsic(const llvm::Instruction* inst);
 
+    llvm::Instruction* AdjustSystemValueCall(llvm::GenIntrinsicInst* inst);
+
     unsigned EncodeAS4GFXResource(
         const llvm::Value& bufIdx,
         BufferType bufType,
         unsigned uniqueIndAS);
 
     unsigned SetBufferAsBindless(unsigned addressSpaceOfPtr, BufferType bufferType);
+    bool isStatefulAddrSpace(unsigned AS);
 
     BufferType DecodeAS4GFXResource(unsigned addrSpace, bool& directIdx, unsigned& bufId);
     int getConstantBufferLoadOffset(llvm::LoadInst* ld);
+
+    bool isDummyBasicBlock(llvm::BasicBlock* BB);
 
     bool IsDirectIdx(unsigned addrSpace);
     bool isNaNCheck(llvm::FCmpInst& FC);
@@ -213,7 +219,7 @@ namespace IGC
             return false;
 
         IGCMD::FunctionInfoMetaDataHandle Info = pM->getFunctionsInfoItem(F);
-        assert(Info->isTypeHasValue() && "FunctionInfoMetaData missing type!");
+        IGC_ASSERT_MESSAGE(Info->isTypeHasValue(), "FunctionInfoMetaData missing type!");
         return Info->getType() == FunctionTypeMD::KernelFunction;
     }
 
@@ -293,14 +299,17 @@ namespace IGC
         return &(*I);
     }
 
+    template <typename T>
     inline bool RTWriteHasSource0Alpha(
-        const llvm::RTWritIntrinsic* rtWrite,
+        const T* rtWrite,
         ModuleMetaData* md)
     {
-        return !llvm::isa<llvm::UndefValue>(rtWrite->getSource0Alpha());
+        return (nullptr != rtWrite->getSource0Alpha()) && !llvm::isa<llvm::UndefValue>(rtWrite->getSource0Alpha());
     }
+
+    template <typename T>
     inline bool DoesRTWriteSrc0AlphaBelongToHomogeneousPart(
-        const llvm::RTWritIntrinsic* rtWrite,
+        const T* rtWrite,
         ModuleMetaData* md)
     {
         return !rtWrite->hasMask() && RTWriteHasSource0Alpha(rtWrite, md);
@@ -354,7 +363,7 @@ namespace IGC
         const llvm::Instruction* pos)
     {
         // must within same basic block
-        assert(inst->getParent() == pos->getParent());
+        IGC_ASSERT(inst->getParent() == pos->getParent());
         if (inst == pos)
         {
             return true;
@@ -388,15 +397,17 @@ namespace IGC
         case SIMDMode::SIMD16:  simdWidth = 16; break;
         case SIMDMode::SIMD32:  simdWidth = 32; break;
         default:
-            assert(false && "Invalid SIMD mode");
+            IGC_ASSERT_MESSAGE(0, "Invalid SIMD mode");
+            break;
         }
-        unsigned nThreadsPerTG = (threadGroupSize + simdWidth - 1) / simdWidth;
 
-        unsigned TGPerSubsliceNoSLM = hwThreadPerSubslice / nThreadsPerTG;
-        unsigned nTGDispatch = (slmSize == 0) ? TGPerSubsliceNoSLM : std::min(TGPerSubsliceNoSLM, slmSizePerSubSlice / slmSize);
-
-        float occupancy =
-            float(nTGDispatch * nThreadsPerTG) / float(hwThreadPerSubslice);
+        IGC_ASSERT(simdWidth);
+        const unsigned nThreadsPerTG = (threadGroupSize + simdWidth - 1) / simdWidth;
+        IGC_ASSERT(nThreadsPerTG);
+        const unsigned TGPerSubsliceNoSLM = hwThreadPerSubslice / nThreadsPerTG;
+        const unsigned nTGDispatch = (slmSize == 0) ? TGPerSubsliceNoSLM : std::min(TGPerSubsliceNoSLM, slmSizePerSubSlice / slmSize);
+        IGC_ASSERT(float(hwThreadPerSubslice));
+        const float occupancy = float(nTGDispatch * nThreadsPerTG) / float(hwThreadPerSubslice);
         return occupancy;
     }
 
@@ -435,5 +446,19 @@ namespace IGC
             return SIMDMode::SIMD32;
         }
     }
+
+    // Debug line info helper function
+    inline void updateDebugLoc(llvm::Instruction* pOrigin, llvm::Instruction* pNew)
+    {
+        IGC_ASSERT_MESSAGE(nullptr != pOrigin, "Expect valid instructions");
+        IGC_ASSERT_MESSAGE(nullptr != pNew, "Expect valid instructions");
+        pNew->setDebugLoc(pOrigin->getDebugLoc());
+    }
+
+    llvm::ConstantInt* getConstantSInt(llvm::IRBuilder<>& Builder, const int bitSize, int64_t val);
+    llvm::ConstantInt* getConstantUInt(llvm::IRBuilder<>& Builder, const int bitSize, uint64_t val);
+    llvm::Value* CreateMulhS64(llvm::IRBuilder<>& B, llvm::Value* const u, llvm::Value* const v);
+    llvm::Value* CreateMulhU64(llvm::IRBuilder<>& B, llvm::Value* const u, llvm::Value* const v);
+    llvm::Value* CreateMulh(llvm::Function& F, llvm::IRBuilder<>& B, const bool isSigned, llvm::Value* const u, llvm::Value* const v);
 
 } // namespace IGC

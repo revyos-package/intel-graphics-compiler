@@ -47,7 +47,20 @@ public:
     unsigned int numDefs = 0;
     std::pair<G4_DstRegRegion*, G4_BB*> def;
     std::vector<std::pair<G4_SrcRegRegion*, G4_BB*>> srcs;
+    bool candidateDef = false;
     bool legitCandidate = true;
+
+    // API to check whether variable is local or global
+    bool isDefUsesInSameBB()
+    {
+        auto defBB = def.second;
+        for (auto src : srcs)
+        {
+            if (src.second != defBB)
+                return false;
+        }
+        return true;
+    }
 
     bool isPartDclUsed(unsigned int lb, unsigned int rb)
     {
@@ -81,6 +94,8 @@ public:
     void undo(G4_Declare*);
     bool reallocParent(G4_Declare*, LiveRange**);
     bool isParentChildRelation(G4_Declare*, G4_Declare*);
+    bool isSplitVarLocal(G4_Declare*);
+    bool splitOccured() { return IRchanged; }
 
 private:
     G4_Kernel& kernel;
@@ -97,6 +112,35 @@ private:
     // Store pre-split regions for undo
     // <new src/dst region, <old src inst, old src rgn, old src#>>
     std::unordered_map<G4_Operand*, std::tuple<G4_INST*, G4_Operand*, unsigned int>> preSplit;
+    bool IRchanged = false;
+
+private:
+    // Split verification related declarations
+    void buildPreVerify();
+    void verify();
+    void verifyOverlap();
+
+    class InstData
+    {
+    public:
+        G4_DstRegRegion* dst = nullptr;
+        unsigned int dstLb = 0;
+        unsigned int dstRb = 0;
+        G4_Operand* src[G4_MAX_SRCS];
+        unsigned int srcLb[G4_MAX_SRCS];
+        unsigned int srcRb[G4_MAX_SRCS];
+
+        InstData()
+        {
+            for (unsigned int i = 0; i != G4_MAX_SRCS; i++)
+            {
+                src[i] = nullptr;
+                srcLb[i] = 0;
+                srcRb[i] = 0;
+            }
+        }
+    };
+    std::unordered_map<G4_INST*, InstData> splitVerify;
 };
 };
 #endif

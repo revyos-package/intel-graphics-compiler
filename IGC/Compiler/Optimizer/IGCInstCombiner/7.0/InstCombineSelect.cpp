@@ -62,12 +62,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Transforms/InstCombine/InstCombineWorklist.h"
-
-#include <cassert>
 #include <utility>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace PatternMatch;
@@ -78,7 +76,7 @@ using namespace IGCombiner;
 static Value* createMinMax(InstCombiner::BuilderTy& Builder,
     SelectPatternFlavor SPF, Value* A, Value* B) {
     CmpInst::Predicate Pred = getMinMaxPred(SPF);
-    assert(CmpInst::isIntPredicate(Pred) && "Expected integer predicate");
+    IGC_ASSERT_MESSAGE(CmpInst::isIntPredicate(Pred), "Expected integer predicate");
     return Builder.CreateSelect(Builder.CreateICmp(Pred, A, B), A, B);
 }
 
@@ -150,7 +148,7 @@ static Value* foldSelectICmpAnd(SelectInst& Sel, ICmpInst* Cmp,
     }
     else if (decomposeBitTestICmp(Cmp->getOperand(0), Cmp->getOperand(1),
         Pred, V, AndMask)) {
-        assert(ICmpInst::isEquality(Pred) && "Not equality test?");
+        IGC_ASSERT_MESSAGE(ICmpInst::isEquality(Pred), "Not equality test?");
         if (!AndMask.isPowerOf2())
             return nullptr;
 
@@ -194,7 +192,7 @@ static Value* foldSelectICmpAnd(SelectInst& Sel, ICmpInst* Cmp,
             Constant* C = ConstantInt::get(SelType, FC);
             return ExtraBitInTC ? Builder.CreateOr(V, C) : Builder.CreateXor(V, C);
         }
-        llvm_unreachable("Only expecting equality predicates");
+        IGC_ASSERT_EXIT_MESSAGE(0, "Only expecting equality predicates");
     }
 
     // Make sure one of the select arms is a power-of-2.
@@ -267,7 +265,7 @@ static unsigned getSelectFoldableOperands(BinaryOperator* I) {
 /// constant that goes into the select.
 static APInt getSelectFoldableConstant(BinaryOperator* I) {
     switch (I->getOpcode()) {
-    default: llvm_unreachable("This cannot happen!");
+    default: IGC_ASSERT_EXIT_MESSAGE(0, "This cannot happen!");
     case Instruction::Add:
     case Instruction::Sub:
     case Instruction::Or:
@@ -396,7 +394,7 @@ Instruction* InstCombiner::foldSelectOpOp(SelectInst& SI, Instruction* TI,
             ? GetElementPtrInst::CreateInBounds(ElementType, Op0, { Op1 })
             : GetElementPtrInst::Create(ElementType, Op0, { Op1 });
     }
-    llvm_unreachable("Expected BinaryOperator or GEP");
+    IGC_ASSERT_EXIT_MESSAGE(0, "Expected BinaryOperator or GEP");
     return nullptr;
 }
 
@@ -659,8 +657,7 @@ static Value* canonicalizeSaturatedSubtract(const ICmpInst* ICI,
         Pred = ICmpInst::getSwappedPredicate(Pred);
     }
 
-    assert((Pred == ICmpInst::ICMP_UGE || Pred == ICmpInst::ICMP_UGT) &&
-        "Unexpected isUnsigned predicate!");
+    IGC_ASSERT_MESSAGE((Pred == ICmpInst::ICMP_UGE || Pred == ICmpInst::ICMP_UGT), "Unexpected isUnsigned predicate!");
 
     // Account for swapped form of subtraction: ((a > b) ? b - a : 0).
     bool IsNegative = false;
@@ -866,8 +863,8 @@ canonicalizeMinMaxWithConstant(SelectInst& Sel, ICmpInst& Cmp,
         return &Sel;
 
     // If we are swapping the select operands, swap the metadata too.
-    assert(Sel.getTrueValue() == RHS && Sel.getFalseValue() == LHS &&
-        "Unexpected results from matchSelectPattern");
+    IGC_ASSERT_MESSAGE(Sel.getTrueValue() == RHS, "Unexpected results from matchSelectPattern");
+    IGC_ASSERT_MESSAGE(Sel.getFalseValue() == LHS, "Unexpected results from matchSelectPattern");
     Sel.setTrueValue(LHS);
     Sel.setFalseValue(RHS);
     Sel.swapProfMetadata();
@@ -896,8 +893,7 @@ static Instruction* canonicalizeAbsNabs(SelectInst& Sel, ICmpInst& Cmp,
 
     Value* TVal = Sel.getTrueValue();
     Value* FVal = Sel.getFalseValue();
-    assert(isKnownNegation(TVal, FVal) &&
-        "Unexpected result from matchSelectPattern");
+    IGC_ASSERT_MESSAGE(isKnownNegation(TVal, FVal), "Unexpected result from matchSelectPattern");
 
     // The compare may use the negated abs()/nabs() operand, or it may use
     // negation in non-canonical form such as: sub A, B.
@@ -928,7 +924,7 @@ static Instruction* canonicalizeAbsNabs(SelectInst& Sel, ICmpInst& Cmp,
 
     // Create the canonical RHS: RHS = sub (0, LHS).
     if (!RHSCanonicalized) {
-        assert(RHS->hasOneUse() && "RHS use number is not right");
+        IGC_ASSERT_MESSAGE(RHS->hasOneUse(), "RHS use number is not right");
         RHS = Builder.CreateNeg(LHS);
         if (TVal == LHS) {
             Sel.setFalseValue(RHS);
@@ -944,12 +940,12 @@ static Instruction* canonicalizeAbsNabs(SelectInst& Sel, ICmpInst& Cmp,
     if (SPF == SelectPatternFlavor::SPF_NABS) {
         if (TVal == LHS)
             return &Sel;
-        assert(FVal == LHS && "Unexpected results from matchSelectPattern");
+        IGC_ASSERT_MESSAGE(FVal == LHS, "Unexpected results from matchSelectPattern");
     }
     else {
         if (FVal == LHS)
             return &Sel;
-        assert(TVal == LHS && "Unexpected results from matchSelectPattern");
+        IGC_ASSERT_MESSAGE(TVal == LHS, "Unexpected results from matchSelectPattern");
     }
 
     // We are swapping the select operands, so swap the metadata too.
@@ -1515,7 +1511,7 @@ static Instruction* foldSelectCmpXchg(SelectInst& SI) {
 static Instruction* factorizeMinMaxTree(SelectPatternFlavor SPF, Value* LHS,
     Value* RHS,
     InstCombiner::BuilderTy& Builder) {
-    assert(SelectPatternResult::isMinOrMax(SPF) && "Expected a min/max");
+    IGC_ASSERT_MESSAGE(SelectPatternResult::isMinOrMax(SPF), "Expected a min/max");
     // TODO: Allow FP min/max with nnan/nsz.
     if (!LHS->getType()->isIntOrIntVectorTy())
         return nullptr;

@@ -77,9 +77,11 @@ namespace iga
             // wonky because null and sp have "0" registers (meaning 1 implied)
             // so reg==0 is alway valid for everyone
             return reg == 0 ||
-                          (reg >= 0 && reg < numRegs); // otherwise: one of several registers
+                (reg >= 0 && reg < numRegs); // otherwise: one of several registers
         }
-        bool isSubRegByteOffsetValid(int regNum, int subregByte, int grfSize) const {
+        bool isSubRegByteOffsetValid(
+            int regNum, int subregByte, int grfSize) const
+        {
             int regBytes = regName == RegName::GRF_R ? grfSize :
                 numBytesPerReg[regNum];
             return subregByte < regBytes;
@@ -119,7 +121,7 @@ namespace iga
     const RegInfo *GetRegisterSpecificationTable(int &len);
 
     // See IRChecker.cpp / checkDst (these ARFs need {Switch})
-    static bool arfNeedsSwitch(RegName rn) {
+    static inline bool arfNeedsSwitch(RegName rn) {
         // ARFs without a scoreboard need {Switch} before the write
         //  Registers with scoreboard and no switch required -
         //    Accumulator/address register/flag register/notify register
@@ -142,7 +144,7 @@ namespace iga
         }
     }
 
-    static bool IsRegisterScaled(RegName regName)
+    static inline bool IsRegisterScaled(RegName regName)
     {
         switch (regName)
         {
@@ -167,18 +169,18 @@ namespace iga
     }
 
     // helper function to translate byte offset to subReg Num
-    static uint8_t BytesOffsetToSubReg(
+    static inline uint8_t BytesOffsetToSubReg(
         uint32_t offset, RegName regName, Type type)
     {
         if (!IsRegisterScaled(regName) || type == Type::INVALID) {
-            return offset;
+            return (uint8_t)offset;
         }
         auto tsh = TypeSizeShiftsOffsetToSubreg(type);
         return (uint8_t)((offset << std::get<0>(tsh)) >> std::get<1>(tsh));
     }
 
     // helper functions to translate subReg number to Offset in binary
-    static uint32_t SubRegToBytesOffset(
+    static inline uint32_t SubRegToBytesOffset(
         int subRegNum, RegName regName, Type type)
     {
         if (!IsRegisterScaled(regName) || type == Type::INVALID) {
@@ -189,20 +191,20 @@ namespace iga
         return (subRegNum << std::get<1>(tsh)) >> std::get<0>(tsh);
     }
 
-    static uint8_t WordsOffsetToSubReg(
+    static inline uint8_t WordsOffsetToSubReg(
         uint32_t offset, RegName regName, Type type)
     {
         // for the non-scaled registers (e.g. fc), the sub-register in binary
         // and in asm is the same value
         if (!IsRegisterScaled(regName) || type == Type::INVALID) {
-            return offset;
+            return (uint8_t)offset;
         }
         return BytesOffsetToSubReg(offset * 2, regName, type);
     }
 
     // reutrn if the given subreg num is Word aligned or not and
     // the corresponding word offset
-    static std::pair<bool, uint32_t> SubRegToWordsOffset(
+    static inline std::pair<bool,uint32_t> SubRegToWordsOffset(
         int subRegNum, RegName regName, Type type)
     {
         // for the non-scaled registers (e.g. fc), the sub-register in binary
@@ -275,9 +277,6 @@ namespace iga
     // only valid if `decoodeOpSpec` returns nullptr
     struct OpSpecMissInfo
     {
-        const OpSpec *parent; // nullptr if at the root  (a top-level op)
-                              // otherwise if it's a group op (e.g. math.*,
-                              // this'll be that parent
         uint64_t     opcode;  // the opcode bits we tried to lookup
                               // for subfunctions (e.g. math.*), this'll be
                               // the subfunction bits we were looking for
@@ -308,8 +307,6 @@ namespace iga
         const OpSpec&        lookupOpSpec(Op op) const;
         const OpSpec&        lookupOpSpecByCode(unsigned opcode) const;
         const OpSpec&        lookupOpSpecFromBits(const void *bits, OpSpecMissInfo &missInfo) const;
-        const OpSpec&        lookupGroupSubOp(Op op, unsigned fcBits) const;
-        const OpSpec*        lookupSubOpParent(const OpSpec &os) const;
         const RegInfo*       lookupArfRegInfoByRegNum(uint8_t regNum7_0) const;
         const RegInfo*       lookupRegInfoByRegName(RegName name) const;
 
@@ -372,13 +369,12 @@ namespace iga
         /// getSWSBEncodeMode - get the default swsb encoding mode derived from platform
         SWSB_ENCODE_MODE getSWSBEncodeMode() const {
             if (platform == Platform::GEN12P1)
-                return SingleDistPipe;
-            return SWSBInvalidMode;
+                return SWSB_ENCODE_MODE::SingleDistPipe;
+            return SWSB_ENCODE_MODE::SWSBInvalidMode;
         }
 
         // Get the max number of swsb id
-        uint32_t getSWSBTokenNum() const {
-
+        uint32_t getMaxSWSBTokenNum() const {
             switch(getSWSBEncodeMode()) {
             case SWSB_ENCODE_MODE::SingleDistPipe:
                 return 16;
@@ -393,8 +389,21 @@ namespace iga
             return 7;
         }
 
+    }; // class Model
 
-    }; // class model
+    ///////////////////////////////////////////////////////////////////////////
+    // Functions to enumerate information about platforms such as names
+    // extensions and whatnot.
+    //
+    static size_t const MAX_PLATFORM_NAMES = 3;
+    struct PlatformEntry {
+        iga::Platform    platform;
+        const char      *suffix; // platform file suffix; e.g. "12p1"
+        const char      *names[MAX_PLATFORM_NAMES]; // various platform names
+    };
+    //
+    extern const PlatformEntry ALL_PLATFORMS[];
+    extern size_t ALL_PLATFORMS_LEN;
 } // namespace iga::*
 
-#endif // MODELS_HPP
+#endif // IGA_MODELS_HPP

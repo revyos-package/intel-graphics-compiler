@@ -58,7 +58,7 @@ enum class Platform
     GEN10       = IGA_GEN_VER_ORDINAL(10, 0 ),
     GEN11       = IGA_GEN_VER_ORDINAL(11, 0 ),
     GEN12P1     = IGA_GEN_VER_ORDINAL(12, 1 ), // TGL
-    GENNEXT     = IGA_GEN_VER_ORDINAL(13, 0)
+    GENNEXT     = IGA_GEN_VER_ORDINAL(14, 0)
 #undef IGA_GEN_VER_ORDINAL
 };
 
@@ -72,11 +72,6 @@ struct Predication
 };
 
 
-enum class BranchCtrl
-{
-    OFF,
-    ON,
-};
 typedef BranchCtrl BranchCntrl; // for backwards compatibility
 
 static inline int ExecSizeToInt(ExecSize es)
@@ -110,7 +105,8 @@ enum class MathMacroExt
 // to subregister offset
 //   I.e. subReg = (byteOff << left) >> right;
 // this allows us to scale a subregister byte offset up OR down
-static inline std::tuple<uint32_t, uint32_t> TypeSizeShiftsOffsetToSubreg(Type type)
+static inline std::tuple<uint32_t, uint32_t>
+    TypeSizeShiftsOffsetToSubreg(Type type)
 {
     uint32_t shl = 0, shr = 0; // by default no scaling
 
@@ -157,7 +153,7 @@ static inline bool TypeIs64b(Type t)
 {
     return TypeSizeInBitsWithDefault(t,0) == 64;
 }
-static bool TypeIsFloating(Type t)
+static inline bool TypeIsFloating(Type t)
 {
     switch (t)
     {
@@ -212,11 +208,11 @@ struct Region {
         uint32_t bits;
     };
 
-    void set(Vert v, Width w, Horz h) {
+    void set(Vert _v, Width _w, Horz _h) {
         this->bits = 0; // clear padding
-        this->v = static_cast<unsigned int>(v);
-        this->w =  static_cast<unsigned int>(w);
-        this->h =  static_cast<unsigned int>(h);
+        v = static_cast<unsigned int>(_v);
+        w = static_cast<unsigned int>(_w);
+        h = static_cast<unsigned int>(_h);
     }
 
     void set(Vert vt) {
@@ -232,9 +228,9 @@ struct Region {
         set(Vert::VT_INVALID, Width::WI_INVALID, hz);
     }
 
-    Horz    getHz() const { return static_cast<Horz>(h); }
-    Vert    getVt() const { return static_cast<Vert>(v); }
-    Width   getWi() const { return static_cast<Width>(w); }
+    Horz    getHz() const {return static_cast<Horz>(h);}
+    Vert    getVt() const {return static_cast<Vert>(v);}
+    Width   getWi() const {return static_cast<Width>(w);}
 
     // checks if a region is invalid (assembler will program it to correct bits)
     bool isInvalid() const {
@@ -282,12 +278,16 @@ typedef EnumBitset<InstOpt> InstOptSet;
 
 
 struct RegRef {
-    uint8_t  regNum    = 0;
-    uint8_t  subRegNum = 0;
+    uint16_t  regNum    = 0;
+    uint16_t  subRegNum = 0;
 
-    RegRef(uint8_t reg_num, uint8_t sub_reg_num)
-        : regNum(reg_num), subRegNum(sub_reg_num) {}
-    RegRef() {}
+    constexpr RegRef() { }
+    constexpr RegRef(uint16_t rNum, uint16_t srNum)
+        : regNum(rNum), subRegNum(srNum) { }
+    constexpr RegRef(int rNum, int srNum)
+        : regNum((uint8_t)rNum), subRegNum((uint8_t)srNum) { }
+    constexpr RegRef(uint32_t rNum, uint32_t srNum)
+        : regNum((uint8_t)rNum), subRegNum((uint8_t)srNum) { }
 
     bool operator==(const RegRef &rr) const {
         return regNum == rr.regNum && subRegNum == rr.subRegNum;
@@ -297,27 +297,25 @@ struct RegRef {
     }
 };
 
-static inline RegRef MakeRegRef(int r, int sr = 0) {
-    RegRef ref;
-    ref.regNum = r;
-    ref.subRegNum = sr;
-    return ref;
-}
+static constexpr RegRef REGREF_INVALID {0xFF, 0xFF};
+static constexpr RegRef REGREF_ZERO_ZERO {0, 0};
 
-static const RegRef REGREF_INVALID = MakeRegRef(0xFF,0xFF);
-static const RegRef REGREF_ZERO_ZERO = MakeRegRef(0,0);
+struct SendDesc {
+    enum class Kind {IMM, REG32A};
+    Kind type;
 
-struct SendDescArg {
-    enum {IMM, REG32A}  type;
     union {
         RegRef         reg;
         uint32_t       imm;
     };
 
-    SendDescArg() {
-        type = IMM;
-        imm = 0;
-    }
+    constexpr SendDesc() : SendDesc(0) { }
+    constexpr SendDesc(uint32_t desc) : type(Kind::IMM), imm(desc) { }
+    constexpr SendDesc(RegRef a0r) : type(Kind::REG32A), reg(a0r) { }
+
+    bool isReg() const {return type == Kind::REG32A;}
+    bool isImm() const {return type == Kind::IMM;}
 };
+
 } // namespace
 #endif

@@ -5791,7 +5791,7 @@ int     __attribute__((overloadable)) sub_group_non_uniform_all_equal(half value
 #if defined(cl_khr_subgroup_ballot)
 #define DECL_NON_UNIFORM_BROADCAST_BASE(GENTYPE)                                                          \
     GENTYPE __attribute__((overloadable)) sub_group_non_uniform_broadcast(GENTYPE value, uint index);     \
-    GENTYPE __attribute__((overloadable)) sub_group_non_uniform_broadcast_first(GENTYPE value);
+    GENTYPE __attribute__((overloadable)) sub_group_broadcast_first(GENTYPE value);
 
 #define DECL_NON_UNIFORM_BROADCAST(TYPE)        \
     DECL_NON_UNIFORM_BROADCAST_BASE(TYPE)       \
@@ -6400,7 +6400,7 @@ TYPE    __attribute__((overloadable)) sub_group_non_uniform_##GROUP_TYPE##_##OPE
 
 #if defined(cl_khr_subgroup_clustered_reduce)
 #define DECL_SUB_GROUP_NON_UNIFORM_CLUSTERED_OPERATION(TYPE, GROUP_TYPE, OPERATION) \
-TYPE    __attribute__((overloadable)) sub_group_non_uniform_##GROUP_TYPE##_##OPERATION(TYPE value, uint clustersize);
+TYPE    __attribute__((overloadable)) sub_group_clustered_##GROUP_TYPE##_##OPERATION(TYPE value, uint clustersize);
 #endif // defined(cl_khr_subgroup_clustered_reduce)
 
 #define DECL_SUB_GROUP_NON_UNIFORM_ALL_GROUPS(TYPE, OPERATION)           \
@@ -6585,7 +6585,7 @@ DECL_SUB_GROUP_SHUFFLE(half)
 #endif // defined (cl_khr_fp16)
 #endif // defined(cl_khr_subgroup_shuffle)
 
-#ifdef defined(cl_khr_subgroup_relative)
+#if defined(cl_khr_subgroup_shuffle_relative)
 #define DECL_SUB_GROUP_SHUFFLE_RELATIVE(TYPE)                                          \
 TYPE    __attribute__((overloadable)) sub_group_shuffle_up(TYPE value, uint delta);    \
 TYPE    __attribute__((overloadable)) sub_group_shuffle_down(TYPE value, uint delta);
@@ -6603,7 +6603,7 @@ DECL_SUB_GROUP_SHUFFLE_RELATIVE(double)
 #if defined(cl_khr_fp16)
 DECL_SUB_GROUP_SHUFFLE_RELATIVE(half)
 #endif // defined (cl_khr_fp16)
-#endif // defined(cl_khr_subgroup_relative)
+#endif // defined(cl_khr_subgroup_shuffle_relative)
 
 #if defined(cl_intel_simd_operations_placeholder)
 // SIMD Operations

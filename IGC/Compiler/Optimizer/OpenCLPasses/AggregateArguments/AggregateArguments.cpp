@@ -26,10 +26,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "Compiler/Optimizer/OpenCLPasses/AggregateArguments/AggregateArguments.hpp"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/Function.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -72,7 +72,7 @@ bool isSupportedAggregateArgument(Argument* arg)
     return false;
 }
 
-AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : FunctionPass(ID)
+AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : ModulePass(ID)
 {
     initializeAggregateArgumentsAnalysisPass(*PassRegistry::getPassRegistry());
 }
@@ -82,39 +82,46 @@ AggregateArgumentsAnalysis::AggregateArgumentsAnalysis() : FunctionPass(ID)
 // arguments into multiple implicit basic type arguments.  This pass
 // must be run after function inlining.
 //
-bool AggregateArgumentsAnalysis::runOnFunction(Function& F)
+bool AggregateArgumentsAnalysis::runOnModule(Module& M)
 {
-    if (F.isDeclaration())
-    {
-        return false;
-    }
-
-    if (!isEntryFunc(getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils(), &F))
-    {
-        return false;
-    }
-
-    m_pDL = &F.getParent()->getDataLayout();
-
     bool changed = false;
+    m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
 
-    Function::arg_iterator argument = F.arg_begin();
-    for (; argument != F.arg_end(); ++argument)
+    for (Function& F : M)
     {
-        Argument* arg = &(*argument);
-
-        if (!isSupportedAggregateArgument(arg))
+        if (F.isDeclaration())
         {
             continue;
         }
-        m_argList.clear();
 
-        Type* type = arg->getType()->getPointerElementType();
-        assert(m_pDL->getStructLayout(cast<StructType>(type))->getSizeInBytes() < UINT_MAX);
-        addImplictArgs(type, 0);
-        ImplicitArgs::addStructArgs(F, arg, m_argList, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
-        changed = true;
+        if (!isEntryFunc(m_pMdUtils, &F))
+        {
+            continue;
+        }
+
+        m_pDL = &F.getParent()->getDataLayout();
+
+        Function::arg_iterator argument = F.arg_begin();
+        for (; argument != F.arg_end(); ++argument)
+        {
+            Argument* arg = &(*argument);
+
+            if (!isSupportedAggregateArgument(arg))
+            {
+                continue;
+            }
+            m_argList.clear();
+
+            Type* type = arg->getType()->getPointerElementType();
+            IGC_ASSERT(m_pDL->getStructLayout(cast<StructType>(type))->getSizeInBytes() < UINT_MAX);
+            addImplictArgs(type, 0);
+            ImplicitArgs::addStructArgs(F, arg, m_argList, m_pMdUtils);
+            changed = true;
+        }
     }
+
+    if (changed)
+        m_pMdUtils->save(M.getContext());
 
     return changed;
 }
@@ -129,13 +136,13 @@ static uint64_t getNumElements(SequentialType* type)
     {
         return vectorType->getNumElements();
     }
-    assert(false && "expected array or vector");
+    IGC_ASSERT_MESSAGE(0, "expected array or vector");
     return 0;
 }
 
 void AggregateArgumentsAnalysis::addImplictArgs(Type* type, uint64_t baseAllocaOffset)
 {
-    assert(baseAllocaOffset < UINT_MAX);
+    IGC_ASSERT(baseAllocaOffset < UINT_MAX);
     // Structs and Unions are StructTypes
     if (StructType * structType = dyn_cast<StructType>(type))
     {
@@ -157,7 +164,7 @@ void AggregateArgumentsAnalysis::addImplictArgs(Type* type, uint64_t baseAllocaO
     {
         SequentialType* seqType = cast<SequentialType>(type);
         uint64_t numElements = getNumElements(seqType);
-        assert(numElements < UINT_MAX);
+        IGC_ASSERT(numElements < UINT_MAX);
 
         Type* elementType = seqType->getElementType();
         uint64_t elementSize = m_pDL->getTypeStoreSize(elementType);
@@ -203,7 +210,7 @@ void AggregateArgumentsAnalysis::addImplictArgs(Type* type, uint64_t baseAllocaO
             implicitArgType = ImplicitArg::CONSTANT_REG_QWORD;
             break;
         default:
-            assert(0 && "unknown primitve type");
+            IGC_ASSERT_MESSAGE(0, "unknown primitve type");
             break;
         };
 

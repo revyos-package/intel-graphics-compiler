@@ -29,15 +29,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvmWrapper/Transforms/Utils/LoopUtils.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "common/LLVMUtils.h"
-
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/CustomLoopOpt.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
-
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -297,11 +295,15 @@ void CustomLoopVersioning::rewriteLoopSeg1(Loop* loop,
     Value* interval_x, Value* interval_y)
 {
     BasicBlock* header = loop->getHeader();
+    IGC_ASSERT(nullptr != header);
     BasicBlock* body = loop->getLoopLatch();
+    IGC_ASSERT(nullptr != body);
 
     BranchInst* br = cast<BranchInst>(header->getTerminator());
+    IGC_ASSERT(nullptr != br);
     FCmpInst* fcmp = dyn_cast<FCmpInst>(br->getCondition());
-    assert(fcmp && fcmp->getOperand(1) == interval_y);
+    IGC_ASSERT(nullptr != fcmp);
+    IGC_ASSERT(fcmp->getOperand(1) == interval_y);
 
     fcmp->setOperand(1, interval_x);
 
@@ -310,7 +312,8 @@ void CustomLoopVersioning::rewriteLoopSeg1(Loop* loop,
 
     IntrinsicInst* imax = cast<IntrinsicInst>(i0);
     IntrinsicInst* imin = cast<IntrinsicInst>(i1);
-    assert(imax && imin);
+    IGC_ASSERT(imax);
+    IGC_ASSERT(imin);
 
     imax->replaceAllUsesWith(interval_x);
     imin->replaceAllUsesWith(imin->getArgOperand(1));
@@ -410,11 +413,15 @@ void CustomLoopVersioning::rewriteLoopSeg2(Loop* loop,
     Value* interval_y, Value* cbLoad)
 {
     BasicBlock* header = loop->getHeader();
+    IGC_ASSERT(nullptr != header);
     BasicBlock* body = loop->getLoopLatch();
+    IGC_ASSERT(nullptr != body);
 
     BranchInst* br = cast<BranchInst>(header->getTerminator());
+    IGC_ASSERT(nullptr != br);
     FCmpInst* fcmp = dyn_cast<FCmpInst>(br->getCondition());
-    assert(fcmp && fcmp->getOperand(1) == interval_y);
+    IGC_ASSERT(nullptr != fcmp);
+    IGC_ASSERT(fcmp->getOperand(1) == interval_y);
 
     Instruction* v = BinaryOperator::Create(Instruction::FDiv,
         interval_y, cbLoad, "", fcmp);
@@ -426,7 +433,7 @@ void CustomLoopVersioning::rewriteLoopSeg2(Loop* loop,
 
     IntrinsicInst* imax = cast<IntrinsicInst>(i0);
     IntrinsicInst* imin = cast<IntrinsicInst>(i1);
-    assert(imax && imin);
+    IGC_ASSERT(imax && imin);
 
     // find
     //   %206 = call float @llvm.maxnum.f32()
@@ -479,7 +486,7 @@ void CustomLoopVersioning::rewriteLoopSeg3(BasicBlock* bb,
 
     IntrinsicInst* imax = cast<IntrinsicInst>(i0);
     IntrinsicInst* imin = cast<IntrinsicInst>(i1);
-    assert(imax && imin);
+    IGC_ASSERT(imax && imin);
 
     imax->replaceAllUsesWith(imax->getArgOperand(1));
     imin->replaceAllUsesWith(interval_y);
@@ -491,7 +498,7 @@ void CustomLoopVersioning::rewriteLoopSeg3(BasicBlock* bb,
     {
         PHINode* PN = cast<PHINode>(II);
 
-        assert(PN->getNumIncomingValues() == 2);
+        IGC_ASSERT(PN->getNumIncomingValues() == 2);
         for (unsigned i = 0; i < PN->getNumIncomingValues(); i++)
         {
             if (PN->getIncomingBlock(i) != bb)
@@ -509,8 +516,8 @@ void CustomLoopVersioning::linkLoops(
     BasicBlock* afterLoop)
 {
     // we are handling do/while loop
-    assert(loopSeg1->getHeader() == loopSeg1->getLoopLatch());
-    assert(loopSeg2->getHeader() == loopSeg2->getLoopLatch());
+    IGC_ASSERT(loopSeg1->getHeader() == loopSeg1->getLoopLatch());
+    IGC_ASSERT(loopSeg2->getHeader() == loopSeg2->getLoopLatch());
 
     BasicBlock* seg1Body = loopSeg1->getLoopLatch();
     BasicBlock* seg2PreHdr = loopSeg2->getLoopPreheader();
@@ -538,7 +545,7 @@ void CustomLoopVersioning::linkLoops(
             }
         }
 
-        assert(liveOut != nullptr);
+        IGC_ASSERT(liveOut != nullptr);
         for (unsigned i = 0; i < PN2->getNumIncomingValues(); i++)
         {
 
@@ -605,8 +612,8 @@ bool CustomLoopVersioning::processLoop(Loop* loop)
         loopSeg1->getLoopPreheader(),
         loop->getLoopPreheader());
 
-    BasicBlock* afterLoop = loop->getExitBlock();
-    assert(afterLoop && "No single successor to loop exit block");
+    BasicBlock* const afterLoop = loop->getExitBlock();
+    IGC_ASSERT_MESSAGE(nullptr != afterLoop, "No single successor to loop exit block");
 
     // create loop seg 2 and insert before orig loop (after loop seg 1)
     SmallVector<BasicBlock*, 8> seg2Blocks;
@@ -647,8 +654,8 @@ void CustomLoopVersioning::addPhiNodes(
     const SmallVectorImpl<Instruction*>& liveOuts,
     Loop* loopSeg1, Loop* loopSeg2, BasicBlock* bbSeg3, Loop* origLoop)
 {
-    BasicBlock* phiBB = origLoop->getExitBlock();
-    assert(phiBB && "No single successor to loop exit block");
+    BasicBlock* const phiBB = origLoop->getExitBlock();
+    IGC_ASSERT_MESSAGE(nullptr != phiBB, "No single successor to loop exit block");
 
     for (auto* Inst : liveOuts)
     {
@@ -738,7 +745,8 @@ LoopCanonicalization::LoopCanonicalization() : FunctionPass(ID)
 /// have exactly one backedge.
 static BasicBlock* insertUniqueBackedgeBlock(Loop* L, BasicBlock* Preheader,
     DominatorTree* DT, LoopInfo* LI) {
-    assert(L->getNumBackEdges() > 1 && "Must have > 1 backedge!");
+    IGC_ASSERT(nullptr != L);
+    IGC_ASSERT_MESSAGE(L->getNumBackEdges() > 1, "Must have > 1 backedge!");
 
     // Get information about the loop
     BasicBlock* Header = L->getHeader();
@@ -749,7 +757,7 @@ static BasicBlock* insertUniqueBackedgeBlock(Loop* L, BasicBlock* Preheader,
         return nullptr;
 
     // The header is not an EH pad; preheader insertion should ensure this.
-    assert(!Header->isEHPad() && "Can't insert backedge to EH pad");
+    IGC_ASSERT_MESSAGE(!Header->isEHPad(), "Can't insert backedge to EH pad");
 
     // Figure out which basic blocks contain back-edges to the loop header.
     std::vector<BasicBlock*> BackedgeBlocks;
@@ -803,7 +811,7 @@ static BasicBlock* insertUniqueBackedgeBlock(Loop* L, BasicBlock* Preheader,
         }
 
         // Delete all of the incoming values from the old PN except the preheader's
-        assert(PreheaderIdx != ~0U && "PHI has no preheader entry??");
+        IGC_ASSERT_MESSAGE(PreheaderIdx != ~0U, "PHI has no preheader entry??");
         if (PreheaderIdx != 0) {
             PN->setIncomingValue(0, PN->getIncomingValue(PreheaderIdx));
             PN->setIncomingBlock(0, PN->getIncomingBlock(PreheaderIdx));

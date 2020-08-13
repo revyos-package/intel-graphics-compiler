@@ -34,7 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // Copyright (c) 2014 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
+// copy of this software and associated documentation filesf (the "Software"),
 // to deal with the Software without restriction, including without limitation
 // the rights to use, copy, modify, merge, publish, distribute, sublicense,
 // and/or sell copies of the Software, and to permit persons to whom the
@@ -71,7 +71,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "SPIRVValue.h"
 #include "SPIRVBasicBlock.h"
 #include "SPIRVFunction.h"
-#include "Probe.h"
+#include "Probe/Assertion.h"
 
 #include <cstdint>
 #include <functional>
@@ -194,7 +194,7 @@ public:
   }
 
   virtual bool isOperandLiteral(unsigned Index) const {
-    IGC_ASSERT(0 && "not implemented");
+    IGC_ASSERT_MESSAGE(0, "not implemented");
     return false;
   }
 protected:
@@ -240,7 +240,7 @@ public:
   SPIRVInstTemplateBase *init(SPIRVType *TheType,
       SPIRVId TheId, SPIRVBasicBlock *TheBB,
       SPIRVModule *TheModule){
-    IGC_ASSERT((TheBB || TheModule) && "Invalid BB or Module");
+    IGC_ASSERT_MESSAGE((TheBB || TheModule), "Invalid BB or Module");
     if (TheBB)
       setBasicBlock(TheBB);
     else {
@@ -276,7 +276,7 @@ public:
   /// \return Expected number of operands. If the instruction has variable
   /// number of words, return the minimum.
   SPIRVWord getExpectedNumOperands() const {
-    IGC_ASSERT(WordCount > 0 && "Word count not initialized");
+    IGC_ASSERT_MESSAGE(WordCount > 0, "Word count not initialized");
     auto Exp = WordCount - 1;
     if (hasId())
       --Exp;
@@ -298,14 +298,15 @@ public:
       if (WordCount == WC) {
         // do nothing
       } else {
-        IGC_ASSERT(HasVariWC && WC >= WordCount && "Invalid word count");
+        IGC_ASSERT_MESSAGE(HasVariWC, "Invalid word count");
+        IGC_ASSERT_MESSAGE(WC >= WordCount, "Invalid word count");
         SPIRVEntry::setWordCount(WC);
       }
     } else
       SPIRVEntry::setWordCount(WC);
     Ops = TheOps;
   }
-  virtual void setWordCount(SPIRVWord TheWordCount) {
+  virtual void setWordCount(SPIRVWord TheWordCount) override {
     SPIRVEntry::setWordCount(TheWordCount);
     auto NumOps = WordCount - 1;
     if (hasId())
@@ -330,7 +331,7 @@ public:
   // Get operands which are values.
   // Drop execution scope and group operation literals.
   // Return other literals as uint32 constants.
-  virtual std::vector<SPIRVValue *> getOperands() {
+  virtual std::vector<SPIRVValue *> getOperands() override {
     std::vector<SPIRVValue*> VOps;
     for (size_t I = 0, E = Ops.size(); I != E; ++I)
       VOps.push_back(getOperand(I));
@@ -372,7 +373,7 @@ public:
   }
 
 protected:
-  virtual void decode(std::istream &I) {
+  virtual void decode(std::istream &I) override {
     auto D = getDecoder(I);
     if (hasType())
       D >> Type;
@@ -425,7 +426,7 @@ public:
       Volatile |= MAValue & MemoryAccessVolatileMask;
       readAlignment = (MAValue & MemoryAccessAlignedMask) != 0;
     }
-    IGC_ASSERT(!readAlignment && "MemoryAccess Alignment flag is not followed by value");
+    IGC_ASSERT_MESSAGE(false == readAlignment, "MemoryAccess Alignment flag is not followed by value");
   }
   SPIRVWord getVolatile() const { return Volatile; }
   SPIRVWord getAlignment() const { return Alignment; }
@@ -517,24 +518,23 @@ protected:
     SPIRVInstruction::validate();
     if (getSrc()->isForward() || getDst()->isForward())
       return;
-    IGC_ASSERT(getValueType(PtrId)->getPointerElementType()->isTypeVoid() == getValueType(ValId)->isTypeVoid()
-        && getValueType(PtrId)->getPointerElementType()->isTypeArray() == getValueType(ValId)->isTypeArray()
-        && getValueType(PtrId)->getPointerElementType()->isTypeBool() == getValueType(ValId)->isTypeBool()
-        && getValueType(PtrId)->getPointerElementType()->isTypeComposite() == getValueType(ValId)->isTypeComposite()
-        && getValueType(PtrId)->getPointerElementType()->isTypeEvent() == getValueType(ValId)->isTypeEvent()
-        && getValueType(PtrId)->getPointerElementType()->isTypeFloat(0) == getValueType(ValId)->isTypeFloat(0)
-        && getValueType(PtrId)->getPointerElementType()->isTypeImage() == getValueType(ValId)->isTypeImage()
-        && getValueType(PtrId)->getPointerElementType()->isTypeOCLImage() == getValueType(ValId)->isTypeOCLImage()
-        && getValueType(PtrId)->getPointerElementType()->isTypePipe() == getValueType(ValId)->isTypePipe()
-        && getValueType(PtrId)->getPointerElementType()->isTypeInt(0) == getValueType(ValId)->isTypeInt(0)
-        && getValueType(PtrId)->getPointerElementType()->isTypeSampler() == getValueType(ValId)->isTypeSampler()
-        && getValueType(PtrId)->getPointerElementType()->isTypeStruct() == getValueType(ValId)->isTypeStruct()
-        && getValueType(PtrId)->getPointerElementType()->isTypeVector() == getValueType(ValId)->isTypeVector()
-        && getValueType(PtrId)->getPointerElementType()->isTypeVectorInt() == getValueType(ValId)->isTypeVectorInt()
-        && getValueType(PtrId)->getPointerElementType()->isTypeVectorFloat() == getValueType(ValId)->isTypeVectorFloat()
-        && getValueType(PtrId)->getPointerElementType()->isTypeVectorBool() == getValueType(ValId)->isTypeVectorBool()
-        && getValueType(PtrId)->getPointerElementType()->isTypeNamedBarrier() == getValueType(ValId)->isTypeNamedBarrier()
-        && "Inconsistent operand types");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeVoid() == getValueType(ValId)->isTypeVoid(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeArray() == getValueType(ValId)->isTypeArray(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeBool() == getValueType(ValId)->isTypeBool(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeComposite() == getValueType(ValId)->isTypeComposite(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeEvent() == getValueType(ValId)->isTypeEvent(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeFloat(0) == getValueType(ValId)->isTypeFloat(0), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeImage() == getValueType(ValId)->isTypeImage(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeOCLImage() == getValueType(ValId)->isTypeOCLImage(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypePipe() == getValueType(ValId)->isTypePipe(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeInt(0) == getValueType(ValId)->isTypeInt(0), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeSampler() == getValueType(ValId)->isTypeSampler(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeStruct() == getValueType(ValId)->isTypeStruct(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeVector() == getValueType(ValId)->isTypeVector(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeVectorInt() == getValueType(ValId)->isTypeVectorInt(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeVectorFloat() == getValueType(ValId)->isTypeVectorFloat(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeVectorBool() == getValueType(ValId)->isTypeVectorBool(), "Inconsistent operand type");
+    IGC_ASSERT_MESSAGE(getValueType(PtrId)->getPointerElementType()->isTypeNamedBarrier() == getValueType(ValId)->isTypeNamedBarrier(), "Inconsistent operand type");
   }
 private:
   std::vector<SPIRVWord> MemoryAccess;
@@ -564,9 +564,7 @@ protected:
 
   void validate()const {
     SPIRVInstruction::validate();
-    IGC_ASSERT((getValue(PtrId)->isForward() ||
-        Type == getValueType(PtrId)->getPointerElementType()) &&
-        "Inconsistent types");
+    IGC_ASSERT_MESSAGE((getValue(PtrId)->isForward() || Type == getValueType(PtrId)->getPointerElementType()), "Inconsistent types");
   }
 private:
   SPIRVId PtrId;
@@ -585,9 +583,7 @@ protected:
     if (getValueType(Op1)->isTypeVector()) {
       op1Ty = getValueType(Op1)->getVectorComponentType();
       op2Ty = getValueType(Op2)->getVectorComponentType();
-      IGC_ASSERT(getValueType(Op1)->getVectorComponentCount() ==
-             getValueType(Op2)->getVectorComponentCount() &&
-               "Inconsistent Vector component width");
+      IGC_ASSERT_MESSAGE(getValueType(Op1)->getVectorComponentCount() == getValueType(Op2)->getVectorComponentCount(), "Inconsistent Vector component width");
     }
     else {
       op1Ty = getValueType(Op1);
@@ -595,25 +591,18 @@ protected:
     }
 
     if (isBinaryOpCode(OpCode)) {
-      IGC_ASSERT(getValueType(Op1)== getValueType(Op2) &&
-             "Invalid type for binary instruction");
-      IGC_ASSERT((op1Ty->isTypeInt() || op2Ty->isTypeFloat()) &&
-               "Invalid type for Binary instruction");
-      IGC_ASSERT((op1Ty->getBitWidth() == op2Ty->getBitWidth()) &&
-               "Inconsistent BitWidth");
+      IGC_ASSERT_MESSAGE(getValueType(Op1)== getValueType(Op2), "Invalid type for binary instruction");
+      IGC_ASSERT_MESSAGE((op1Ty->isTypeInt() || op2Ty->isTypeFloat()), "Invalid type for Binary instruction");
+      IGC_ASSERT_MESSAGE((op1Ty->getBitWidth() == op2Ty->getBitWidth()), "Inconsistent BitWidth");
     } else if (isShiftOpCode(OpCode)) {
-      IGC_ASSERT((op1Ty->isTypeInt() || op2Ty->isTypeInt()) &&
-          "Invalid type for shift instruction");
+      IGC_ASSERT_MESSAGE((op1Ty->isTypeInt() || op2Ty->isTypeInt()), "Invalid type for shift instruction");
     } else if (isLogicalOpCode(OpCode)) {
-      IGC_ASSERT((op1Ty->isTypeBool() || op2Ty->isTypeBool()) &&
-          "Invalid type for logical instruction");
+      IGC_ASSERT_MESSAGE((op1Ty->isTypeBool() || op2Ty->isTypeBool()), "Invalid type for logical instruction");
     } else if (isBitwiseOpCode(OpCode)) {
-      IGC_ASSERT((op1Ty->isTypeInt() || op2Ty->isTypeInt()) &&
-          "Invalid type for bitwise instruction");
-      IGC_ASSERT((op1Ty->getIntegerBitWidth() == op2Ty->getIntegerBitWidth()) &&
-          "Inconsistent BitWidth");
+      IGC_ASSERT_MESSAGE((op1Ty->isTypeInt() || op2Ty->isTypeInt()), "Invalid type for bitwise instruction");
+      IGC_ASSERT_MESSAGE((op1Ty->getIntegerBitWidth() == op2Ty->getIntegerBitWidth()), "Inconsistent BitWidth");
     } else {
-      IGC_ASSERT_EXIT(0 && "Invalid op code!");
+      IGC_ASSERT_EXIT_MESSAGE(0, "Invalid op code!");
     }
   }
 };
@@ -747,8 +736,7 @@ protected:
     IGC_ASSERT(WordCount == 4 || WordCount == 6);
     IGC_ASSERT(WordCount == BranchWeights.size() + 4);
     IGC_ASSERT(OpCode == OC);
-    IGC_ASSERT(getCondition()->isForward() ||
-        getCondition()->getType()->isTypeBool());
+    IGC_ASSERT(getCondition()->isForward() || getCondition()->getType()->isTypeBool());
     IGC_ASSERT(getTrueLabel()->isForward() || getTrueLabel()->isLabel());
     IGC_ASSERT(getFalseLabel()->isForward() || getFalseLabel()->isLabel());
   }
@@ -831,19 +819,16 @@ protected:
       op1Ty = getValueType(Op1)->getVectorComponentType();
       op2Ty = getValueType(Op2)->getVectorComponentType();
       resTy = Type->getVectorComponentType();
-      IGC_ASSERT(getValueType(Op1)->getVectorComponentCount() ==
-             getValueType(Op2)->getVectorComponentCount() &&
-               "Inconsistent Vector component width");
+      IGC_ASSERT_MESSAGE(getValueType(Op1)->getVectorComponentCount() == getValueType(Op2)->getVectorComponentCount(), "Inconsistent Vector component width");
     }
     else {
       op1Ty = getValueType(Op1);
       op2Ty = getValueType(Op2);
       resTy = Type;
     }
-    IGC_ASSERT(isCmpOpCode(OpCode) && "Invalid op code for cmp inst");
-    IGC_ASSERT((resTy->isTypeBool() || resTy->isTypeInt()) &&
-        "Invalid type for compare instruction");
-    IGC_ASSERT(op1Ty == op2Ty && "Inconsistent types");
+    IGC_ASSERT_MESSAGE(isCmpOpCode(OpCode), "Invalid op code for cmp inst");
+    IGC_ASSERT_MESSAGE((resTy->isTypeBool() || resTy->isTypeInt()), "Invalid type for compare instruction");
+    IGC_ASSERT_MESSAGE(op1Ty == op2Ty, "Inconsistent types");
   }
 };
 
@@ -899,9 +884,9 @@ protected:
     SPIRVType *conTy = getValueType(Condition)->isTypeVector() ?
         getValueType(Condition)->getVectorComponentType() :
         getValueType(Condition);
-    IGC_ASSERT(conTy->isTypeBool() && "Invalid type");
-    IGC_ASSERT(getType() == getValueType(Op1) && getType() == getValueType(Op2) &&
-        "Inconsistent type");
+    IGC_ASSERT_MESSAGE(conTy->isTypeBool(), "Invalid type");
+    IGC_ASSERT_MESSAGE(getType() == getValueType(Op1), "Inconsistent type");
+    IGC_ASSERT_MESSAGE(getType() == getValueType(Op2), "Inconsistent type");
   }
   SPIRVId Condition;
   SPIRVId Op1;
@@ -923,7 +908,7 @@ public:
     LoopControl(TheLoopControl),
     LoopControlParameters(TheLoopControlParameters) {
     validate();
-    IGC_ASSERT(BB && "Invalid BB");
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
   }
 
   SPIRVLoopMerge()
@@ -1026,15 +1011,10 @@ protected:
       SPIRVType *opTy = Type->isTypeVector() ?
         getValueType(Op)->getVectorComponentType() : getValueType(Op);
 
-      IGC_ASSERT(getType() == getValueType(Op)  &&
-        "Inconsistent type");
-      IGC_ASSERT((resTy->isTypeInt() || resTy->isTypeFloat()) &&
-        "Invalid type for Generic Negate instruction");
-      IGC_ASSERT((resTy->getBitWidth() == opTy->getBitWidth()) &&
-        "Invalid bitwidth for Generic Negate instruction");
-      IGC_ASSERT((Type->isTypeVector() ? (Type->getVectorComponentCount() ==
-          getValueType(Op)->getVectorComponentCount()): 1) &&
-          "Invalid vector component Width for Generic Negate instruction");
+      IGC_ASSERT_MESSAGE(getType() == getValueType(Op), "Inconsistent type");
+      IGC_ASSERT_MESSAGE((resTy->isTypeInt() || resTy->isTypeFloat()), "Invalid type for Generic Negate instruction");
+      IGC_ASSERT_MESSAGE((resTy->getBitWidth() == opTy->getBitWidth()), "Invalid bitwidth for Generic Negate instruction");
+      IGC_ASSERT_MESSAGE((false == Type->isTypeVector()) || (Type->getVectorComponentCount() == getValueType(Op)->getVectorComponentCount()), "Invalid vector component Width for Generic Negate instruction");
     }
   }
 };
@@ -1110,7 +1090,7 @@ public:
       BB),
     Args(TheArgs) {
     SPIRVFunctionCallGeneric::validate();
-    IGC_ASSERT(BB && "Invalid BB");
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
   }
   SPIRVFunctionCallGeneric(SPIRVType *TheType, SPIRVId TheId,
     const std::vector<SPIRVValue *> &TheArgs,
@@ -1119,7 +1099,7 @@ public:
       BB) {
     Args = getIds(TheArgs);
     SPIRVFunctionCallGeneric::validate();
-    IGC_ASSERT(BB && "Invalid BB");
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
   }
 
   SPIRVFunctionCallGeneric(SPIRVModule *BM, SPIRVWord ResId, SPIRVType *TheType,
@@ -1176,7 +1156,7 @@ public:
   SPIRVValue* getCalledValue() const { return SPIRVEntry::get<SPIRVValue>(CalledValueId); }
   _SPIRV_DEF_DEC4_OVERRIDE(Type, Id, CalledValueId, Args)
   void validate() const override;
-  bool isOperandLiteral(unsigned Index) const { return false; }
+  bool isOperandLiteral(unsigned Index) const override{ return false; }
   CapVec getRequiredCapability() const override {
     return getVec(CapabilityFunctionPointersINTEL);
   }
@@ -1195,7 +1175,7 @@ public:
   SPIRVFunction* getFunction() const { return SPIRVEntry::get<SPIRVFunction>(TheFunction); }
   _SPIRV_DEF_DEC3_OVERRIDE(Type, Id, TheFunction)
   void validate() const override;
-  bool isOperandLiteral(unsigned Index) const { return false; }
+  bool isOperandLiteral(unsigned Index) const override { return false; }
   CapVec getRequiredCapability() const override {
     return getVec(CapabilityFunctionPointersINTEL);
   }
@@ -1218,11 +1198,9 @@ public:
     return ExtOp;
   }
   void setExtSetKindById() {
-    IGC_ASSERT(Module && "Invalid module");
+    IGC_ASSERT_MESSAGE(Module, "Invalid module");
     ExtSetKind = Module->getBuiltinSet(ExtSetId);
-    IGC_ASSERT((ExtSetKind == SPIRVEIS_OpenCL ||
-        ExtSetKind == SPIRVEIS_DebugInfo) &&
-        "not supported");
+    IGC_ASSERT_MESSAGE((ExtSetKind == SPIRVEIS_OpenCL) || (ExtSetKind == SPIRVEIS_DebugInfo), "not supported");
   }
   void decode(std::istream &I) {
     getDecoder(I) >> Type >> Id >> ExtSetId;
@@ -1235,7 +1213,7 @@ public:
         getDecoder(I) >> ExtOpDbgInfo;
         break;
     default:
-      IGC_ASSERT_EXIT(0 && "not supported");
+      IGC_ASSERT_EXIT_MESSAGE(0, "not supported");
       getDecoder(I) >> ExtOp;
       break;
     }
@@ -1246,8 +1224,7 @@ public:
     validateBuiltin(ExtSetId, ExtOp);
   }
   bool isOperandLiteral(unsigned Index) const {
-    IGC_ASSERT(ExtSetKind == SPIRVEIS_OpenCL &&
-        "Unsupported extended instruction set");
+    IGC_ASSERT_MESSAGE(ExtSetKind == SPIRVEIS_OpenCL, "Unsupported extended instruction set");
     auto EOC = static_cast<OCLExtOpKind>(ExtOp);
     switch(EOC) {
     default:
@@ -1322,9 +1299,7 @@ protected:
   // need to trace through the base type for struct types
   void validate()const {
     SPIRVInstruction::validate();
-    IGC_ASSERT(getValueType(Composite)->isTypeArray() ||
-        getValueType(Composite)->isTypeStruct() ||
-        getValueType(Composite)->isTypeVector());
+    IGC_ASSERT(getValueType(Composite)->isTypeArray() || getValueType(Composite)->isTypeStruct() || getValueType(Composite)->isTypeVector());
   }
   SPIRVId Composite;
   std::vector<SPIRVWord> Indices;
@@ -1353,9 +1328,7 @@ protected:
     SPIRVInstruction::validate();
     IGC_ASSERT(OpCode == OC);
     IGC_ASSERT(WordCount == Indices.size() + FixedWordCount);
-    IGC_ASSERT(getValueType(Composite)->isTypeArray() ||
-        getValueType(Composite)->isTypeStruct() ||
-        getValueType(Composite)->isTypeVector());
+    IGC_ASSERT(getValueType(Composite)->isTypeArray() || getValueType(Composite)->isTypeStruct() || getValueType(Composite)->isTypeVector());
     IGC_ASSERT(Type == getValueType(Composite));
   }
   SPIRVId Object;
@@ -1415,10 +1388,9 @@ protected:
   }
 
   void validate()const {
-    IGC_ASSERT((getValueType(Id) == getValueType(Source)) && "Inconsistent type");
-    IGC_ASSERT(getValueType(Id)->isTypePointer() && "Invalid type");
-    IGC_ASSERT(!(getValueType(Id)->getPointerElementType()->isTypeVoid()) &&
-        "Invalid type");
+    IGC_ASSERT_MESSAGE((getValueType(Id) == getValueType(Source)), "Inconsistent type");
+    IGC_ASSERT_MESSAGE(getValueType(Id)->isTypePointer(), "Invalid type");
+    IGC_ASSERT_MESSAGE(!(getValueType(Id)->getPointerElementType()->isTypeVoid()), "Invalid type");
     SPIRVInstruction::validate();
   }
 
@@ -1529,8 +1501,7 @@ protected:
     IGC_ASSERT(OpCode == OC);
     IGC_ASSERT(WordCount == Components.size() + FixedWordCount);
     IGC_ASSERT(Type->isTypeVector());
-    IGC_ASSERT(Type->getVectorComponentType() ==
-        getValueType(Vector1)->getVectorComponentType());
+    IGC_ASSERT(Type->getVectorComponentType() == getValueType(Vector1)->getVectorComponentType());
     if (getValue(Vector1)->isForward() ||
         getValue(Vector2)->isForward())
       return;
@@ -1751,7 +1722,7 @@ _SPIRV_OP(GroupNonUniformBroadcastFirst, true, 5)
 _SPIRV_OP(GroupNonUniformBallot, true, 5)
 _SPIRV_OP(GroupNonUniformInverseBallot, true, 5)
 _SPIRV_OP(GroupNonUniformBallotBitExtract, true, 6)
-_SPIRV_OP(GroupNonUniformBallotBitCount, true, 6)
+_SPIRV_OP(GroupNonUniformBallotBitCount, true, 6, false, 1)
 _SPIRV_OP(GroupNonUniformBallotFindLSB, true, 5)
 _SPIRV_OP(GroupNonUniformBallotFindMSB, true, 5)
 #undef _SPIRV_OP

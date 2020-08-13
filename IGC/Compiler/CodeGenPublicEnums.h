@@ -23,6 +23,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+#ifndef CODE_GEN_PUBLIC_ENUMS_H_
+#define CODE_GEN_PUBLIC_ENUMS_H_
+
 #pragma once
 
 namespace IGC
@@ -189,6 +192,13 @@ namespace IGC
         UNDEF
     };
 
+    enum GroupOpType
+    {
+        GroupOperationScan,
+        GroupOperationReduce,
+        GroupOperationClusteredReduce
+    };
+
     enum SGVUsage
     {
         POSITION_X,
@@ -252,3 +262,5 @@ namespace IGC
 
 
 }
+
+#endif //CODE_GEN_PUBLIC_ENUMS_H_

@@ -242,12 +242,14 @@ struct InitConstantAnnotation
 {
     std::vector<unsigned char> InlineData;
     int Alignment;
+    unsigned AllocSize;
 };
 
 struct InitGlobalAnnotation
 {
     std::vector<unsigned char> InlineData;
     int Alignment;
+    unsigned AllocSize;
 };
 
 struct ConstantPointerAnnotation
@@ -296,6 +298,13 @@ struct ExecutionEnivronment
     //legacy design:not used
     //new design:   hold private memory used by shader if non-ZERO
     DWORD  PerThreadScratchSpaceSlot1                 = 0;
+    // Size in bytes of the stateless memory requirement for allocating
+    // private variables.
+    // This field is added for zebin
+    // The same information for path token based format is passed in
+    // PrivateMemSizeAnnotation which will point to a PrivateInputAnnotation
+    // that contains the size
+    DWORD  PerThreadPrivateOnStatelessSize            = 0;
     //legacy design:not used
     //new design:   hold private memory used by shader if non-ZERO
     DWORD  SumFixedTGSMSizes                          = 0;
@@ -314,6 +323,8 @@ struct ExecutionEnivronment
     DWORD  NumGRFRequired                             = 0;
     DWORD  WorkgroupWalkOrder[3]                      = {};
     bool   HasGlobalAtomics                           = false;
+    bool   UseBindlessMode                            = false;
+    uint64_t SIMDInfo                                 = 0;
 };
 
 struct KernelTypeProgramBinaryInfo

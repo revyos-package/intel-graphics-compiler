@@ -31,12 +31,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
 #include "Compiler/CISACodeGen/LowerGEPForPrivMem.hpp"
-
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Dominators.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -84,12 +85,13 @@ namespace IGC {
         bool safeToUseScratchSpace(llvm::Module& M) const;
 
     private:
-
         struct arrayIndex
         {
             llvm::GetElementPtrInst* gep;
             unsigned int operandIndex;
         };
+
+        static bool testTransposedMemory(const Type* pTmpType, const Type* const pTypeOfAccessedObject, uint64_t tmpAllocaSize, const uint64_t bufferSizeLimit);
 
         /// @brief  The module level alloca information
         ModuleAllocaInfo* m_ModAllocaInfo;
@@ -208,7 +210,7 @@ namespace IGC {
 
 void ModuleAllocaInfo::analyze() {
     if (FGA && FGA->getModule()) {
-        assert(FGA->getModule() == M);
+        IGC_ASSERT(FGA->getModule() == M);
         for (auto FG : *FGA)
             analyze(FG);
     }
@@ -298,8 +300,9 @@ void ModuleAllocaInfo::analyze(Function* F, unsigned& Offset,
             MaxAlignment = Alignment;
 
         // Compute alloca size.
-        assert(isa<ConstantInt>(AI->getArraySize()));
-        ConstantInt* SizeVal = cast<ConstantInt>(AI->getArraySize());
+        IGC_ASSERT(isa<ConstantInt>(AI->getArraySize()));
+        ConstantInt* const SizeVal = cast<ConstantInt>(AI->getArraySize());
+        IGC_ASSERT(nullptr != SizeVal);
         unsigned CurSize = (unsigned)(SizeVal->getZExtValue() *
             DL->getTypeAllocSize(AI->getAllocatedType()));
         AllocaInfo->setAllocaDesc(AI, Offset, CurSize);
@@ -492,7 +495,7 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
         {
             continue;
         }
-        bool hasStackCall = (FGA && FGA->getGroup(m_currFunction)->hasStackCall());
+        bool hasStackCall = (FGA && FGA->getGroup(m_currFunction)->hasStackCall()) || m_currFunction->hasFnAttribute("visaStackCall");
         // Resolve collected alloca instructions for current function
         changed |= resolveAllocaInstructions(hasStackCall);
     }
@@ -539,7 +542,7 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
 // [7] bar(j)
 //
 static void sinkAllocas(SmallVectorImpl<AllocaInst*>& Allocas) {
-    assert(!Allocas.empty());
+    IGC_ASSERT(false == Allocas.empty());
     DominatorTree DT;
     bool Calcuated = false;
 
@@ -615,7 +618,8 @@ public:
     }
     void handleLoadInst(LoadInst* pLoad, Value* pScalarizedIdx)
     {
-        assert(pLoad->isSimple());
+        IGC_ASSERT(nullptr != pLoad);
+        IGC_ASSERT(pLoad->isSimple());
         IRBuilder<> IRB(pLoad);
         if (isa<Instruction>(pLoad->getPointerOperand()))
         {
@@ -629,8 +633,9 @@ public:
         if (!vectorIO && pLoad->getType()->isVectorTy())
         {
             Type* scalarType = pLoad->getPointerOperand()->getType()->getPointerElementType()->getScalarType();
+            IGC_ASSERT(nullptr != scalarType);
             Type* scalarptrTy = PointerType::get(scalarType, pLoad->getPointerAddressSpace());
-            assert(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
+            IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = UndefValue::get(pLoad->getType());
             for (unsigned i = 0, e = pLoad->getType()->getVectorNumElements(); i < e; ++i)
             {
@@ -650,7 +655,8 @@ public:
     }
     void handleStoreInst(StoreInst* pStore, Value* pScalarizedIdx)
     {
-        assert(pStore->isSimple());
+        IGC_ASSERT(nullptr != pStore);
+        IGC_ASSERT(pStore->isSimple());
         IRBuilder<> IRB(pStore);
         if (isa<Instruction>(pStore->getPointerOperand()))
         {
@@ -664,8 +670,9 @@ public:
         if (!vectorIO && pStore->getValueOperand()->getType()->isVectorTy())
         {
             Type* scalarType = pStore->getPointerOperand()->getType()->getPointerElementType()->getScalarType();
+            IGC_ASSERT(nullptr != scalarType);
             Type* scalarptrTy = PointerType::get(scalarType, pStore->getPointerAddressSpace());
-            assert(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
+            IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = pStore->getValueOperand();
             for (unsigned i = 0, e = pStore->getValueOperand()->getType()->getVectorNumElements(); i < e; ++i)
             {
@@ -683,6 +690,80 @@ public:
     }
 };
 
+bool PrivateMemoryResolution::testTransposedMemory(const Type* pTmpType, const Type* const pTypeOfAccessedObject, uint64_t tmpAllocaSize, const uint64_t bufferSizeLimit)
+{
+    // verify that the size of transposed memory fits into the allocated scratch region
+
+    bool ok = true;
+
+    if(ok)
+    {
+        ok = (nullptr != pTmpType);
+        IGC_ASSERT(ok);
+    }
+
+    if(ok)
+    {
+        ok = (nullptr != pTypeOfAccessedObject);
+        IGC_ASSERT(ok);
+    }
+
+    if(ok)
+    {
+        ok = (0 < tmpAllocaSize);
+        IGC_ASSERT(ok);
+    }
+
+    if(ok)
+    {
+        ok = (tmpAllocaSize <= bufferSizeLimit);
+        IGC_ASSERT(ok);
+    }
+
+    while(ok && (pTypeOfAccessedObject != pTmpType))
+    {
+        if(pTmpType->isStructTy() && (pTmpType->getStructNumElements() == 1))
+        {
+            pTmpType = pTmpType->getStructElementType(0);
+            ok = (nullptr != pTmpType);
+            IGC_ASSERT(ok);
+        }
+        else if(pTmpType->isArrayTy())
+        {
+            tmpAllocaSize *= pTmpType->getArrayNumElements();
+            pTmpType = pTmpType->getSequentialElementType();
+            ok = (nullptr != pTmpType);
+            IGC_ASSERT(ok);
+        }
+        else if(pTmpType->isVectorTy())
+        {
+            tmpAllocaSize *= pTmpType->getVectorNumElements();
+            pTmpType = pTmpType->getSequentialElementType();
+            ok = (nullptr != pTmpType);
+            IGC_ASSERT(ok);
+        }
+        else
+        {
+            // unsupported type for memory transposition
+            ok = false;
+            IGC_ASSERT(ok);
+        }
+    }
+
+    if(ok)
+    {
+        ok = (0 < tmpAllocaSize);
+        IGC_ASSERT(ok);
+    }
+
+    if(ok)
+    {
+        ok = (tmpAllocaSize <= bufferSizeLimit);
+        IGC_ASSERT(ok);
+    }
+
+    return ok;
+}
 
 bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
 {
@@ -691,8 +772,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
     unsigned int totalPrivateMemPerWI = m_ModAllocaInfo->getTotalPrivateMemPerWI(m_currFunction);
 
     // This change is only till the FuncMD is ported to new MD framework
-    ModuleMetaData* modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
-    assert(modMD && "Invalid metadata utils wrapper");
+    ModuleMetaData* const modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+    IGC_ASSERT(nullptr != modMD);
     modMD->FuncMD[m_currFunction].privateMemoryPerWI = totalPrivateMemPerWI;
     modMD->privateMemoryPerWI = totalPrivateMemPerWI;//redundant ?
 
@@ -775,6 +856,16 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
             Value* totalOffset = builder.CreateAdd(bufferOffset, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
             Value* stackAlloca = builder.CreateCall(stackAllocaFunc, totalOffset, VALUE_NAME("stackAlloca"));
             Value* privateBuffer = builder.CreatePointerCast(stackAlloca, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
+            auto DbgUses = llvm::FindDbgAddrUses(pAI);
+            for (auto Use : DbgUses)
+            {
+                if (auto DbgDcl = dyn_cast_or_null<DbgDeclareInst>(Use))
+                {
+                    // Attach metadata to instruction containing offset of storage
+                    auto OffsetMD = MDNode::get(builder.getContext(), ConstantAsMetadata::get(builder.getInt32(scalarBufferOffset)));
+                    DbgDcl->setMetadata("StorageOffset", OffsetMD);
+                }
+            }
             // Replace all uses of original alloca with the bitcast
             pAI->replaceAllUsesWith(privateBuffer);
             pAI->eraseFromParent();
@@ -831,38 +922,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
             {
                 auto DL = &m_currFunction->getParent()->getDataLayout();
                 bufferSize = (unsigned)DL->getTypeAllocSize(pTypeOfAccessedObject);
-
-#if defined(_DEBUG)
-                {
-                    // Debug code to verify that the size of transposed memory
-                    // fits into the allocated scratch region.
-                    Type* pTmpType = pAI->getType()->getPointerElementType();
-                    uint64_t tmpAllocaSize = bufferSize;
-                    while (pTmpType != pTypeOfAccessedObject)
-                    {
-                        if (pTmpType->isStructTy() && pTmpType->getStructNumElements() == 1)
-                        {
-                            pTmpType = pTmpType->getStructElementType(0);
-                        }
-                        else if (pTmpType->isArrayTy())
-                        {
-                            tmpAllocaSize *= pTmpType->getArrayNumElements();
-                            pTmpType = pTmpType->getSequentialElementType();
-                        }
-                        else if (pTmpType->isVectorTy())
-                        {
-                            tmpAllocaSize *= pTmpType->getVectorNumElements();
-                            pTmpType = pTmpType->getSequentialElementType();
-                        }
-                        else
-                        {
-                            assert(!"Unsupported type for memory transposition.");
-                            break;
-                        }
-                    }
-                    assert(tmpAllocaSize <= m_ModAllocaInfo->getBufferSize(pAI));
-                }
-#endif
+                IGC_ASSERT(testTransposedMemory((pAI->getType()->getPointerElementType()), pTypeOfAccessedObject, bufferSize, (m_ModAllocaInfo->getBufferSize(pAI))));
             }
             else
             {
@@ -920,24 +980,22 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
     Value* simdLaneId = entryBuilder.CreateIntCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"));
     Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
     Value* totalPrivateMemPerThread = entryBuilder.CreateMul(simdSize, totalPrivateMemPerWIValue, VALUE_NAME("totalPrivateMemPerThread"));
-    Value* r0_5 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
-    ConstantInt* FFTIDMask = ConstantInt::get(typeInt32, Ctx.platform.getFFTIDBitMask());
-    Value* threadId = entryBuilder.CreateAnd(r0_5, FFTIDMask, VALUE_NAME("threadId"));
+
+    Function* pHWTIDFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_hw_thread_id, Type::getInt32Ty(C));
+    Value* threadId = entryBuilder.CreateCall(pHWTIDFunc);
+
+    if (Ctx.platform.supportTwoStackTSG() && IGC_IS_FLAG_ENABLED(EnableGen11TwoStackTSG))
     {
-        if (Ctx.platform.supportTwoStackTSG() && IGC_IS_FLAG_ENABLED(EnableGen11TwoStackTSG))
-        {
-            // Gen11 , 2 - stack configuration : (FFTID[9:0] << 1) | FFSID[0]) * scratch_size
-            Value* shlThreadID = entryBuilder.CreateShl(threadId, ConstantInt::get(typeInt32, 1), VALUE_NAME("shlThreadID"));
+        // Gen11 , 2 - stack configuration : (FFTID[9:0] << 1) | FFSID[0]) * scratch_size
+        Value* shlThreadID = entryBuilder.CreateShl(threadId, ConstantInt::get(typeInt32, 1), VALUE_NAME("shlThreadID"));
 
-            // FFSID - r0.0 bit 16
-            Value* r0_0 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"));
-            Value* FFSIDbit = entryBuilder.CreateLShr(r0_0, ConstantInt::get(typeInt32, 16), VALUE_NAME("FFSIDbit"));
-            Value* FFSID = entryBuilder.CreateAnd(FFSIDbit, ConstantInt::get(typeInt32, 1), VALUE_NAME("FFSID"));
+        // FFSID - r0.0 bit 16
+        Value* r0_0 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"));
+        Value* FFSIDbit = entryBuilder.CreateLShr(r0_0, ConstantInt::get(typeInt32, 16), VALUE_NAME("FFSIDbit"));
+        Value* FFSID = entryBuilder.CreateAnd(FFSIDbit, ConstantInt::get(typeInt32, 1), VALUE_NAME("FFSID"));
 
-            threadId = entryBuilder.CreateOr(FFSID, shlThreadID, VALUE_NAME("threadId"));
-        }
+        threadId = entryBuilder.CreateOr(FFSID, shlThreadID, VALUE_NAME("threadId"));
     }
-
 
     Value* perThreadOffset = entryBuilder.CreateMul(threadId, totalPrivateMemPerThread, VALUE_NAME("perThreadOffset"));
 
@@ -964,6 +1022,17 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
         Value* totalOffset = builder.CreateAdd(bufferOffsetForThread, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
         Value* privateBufferGEP = builder.CreateGEP(privateMemArg, totalOffset, VALUE_NAME(pAI->getName() + ".privateBufferGEP"));
         Value* privateBuffer = builder.CreatePointerCast(privateBufferGEP, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
+
+        auto DbgUses = llvm::FindDbgAddrUses(pAI);
+        for (auto Use : DbgUses)
+        {
+            if (auto DbgDcl = dyn_cast_or_null<DbgDeclareInst>(Use))
+            {
+                // Attach metadata to instruction containing offset of storage
+                auto OffsetMD = MDNode::get(builder.getContext(), ConstantAsMetadata::get(builder.getInt32(scalarBufferOffset)));
+                DbgDcl->setMetadata("StorageOffset", OffsetMD);
+            }
+        }
 
         // Replace all uses of original alloca with the bitcast
         pAI->replaceAllUsesWith(privateBuffer);

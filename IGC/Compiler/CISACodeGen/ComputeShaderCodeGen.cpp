@@ -26,15 +26,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/ScaledNumber.h>
 #include "common/LLVMWarningsPop.hpp"
-
 #include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "common/allocator.h"
 #include "common/secure_mem.h"
 #include <iStdLib/utility.h>
 #include <iStdLib/FloatUtil.h>
-
 #include <algorithm>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -191,7 +190,7 @@ namespace IGC
 
         // R0 is used as a Predefined variable so that vISA doesn't free it later. In CS, we expect the
         // thread group id's in R0.
-        assert(GetR0());
+        IGC_ASSERT(GetR0());
 
         // We use predefined variables so offset has to be added for R0.
         offset += getGRFSize();
@@ -237,8 +236,7 @@ namespace IGC
                 }
                 else
                 {
-                    // should not compile again if already got a non spill kernel
-                    assert(false);
+                    IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
             }
         }
@@ -256,8 +254,7 @@ namespace IGC
                 }
                 else
                 {
-                    // should not compile again if already got a non spill kernel
-                    assert(false);
+                    IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
             }
         }
@@ -275,8 +272,7 @@ namespace IGC
                 }
                 else
                 {
-                    // should not compile again if already got a non spill kernel
-                    assert(false);
+                    IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
             }
         }
@@ -401,6 +397,12 @@ namespace IGC
         bool hasSimd16 = simd16Program && simd16Program->ProgramOutput()->m_programSize > 0;
         bool hasSimd32 = simd32Program && simd32Program->ProgramOutput()->m_programSize > 0;
 
+        if (!ctx->m_retryManager.IsFirstTry())
+        {
+            ctx->ClearSIMDInfo(simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+            ctx->SetSIMDInfo(SIMD_RETRY, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+        }
+
         ////////
         // dynamic rules
         ////////
@@ -415,6 +417,7 @@ namespace IGC
         if (simdMode == SIMDMode::SIMD32 && simd16Program &&
             simd16Program->m_spillSize > 0)
         {
+            ctx->SetSIMDInfo(SIMD_SKIP_SPILL, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
             return false;
         }
 
@@ -449,11 +452,20 @@ namespace IGC
                 {
                     return true;
                 }
+
+                ctx->SetSIMDInfo(SIMD_SKIP_THGRPSIZE, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
             }
             else    // SIMD8
             {
                 if (simd16Program->m_spillCost <= ctx->GetSpillThreshold())
                 {
+                    ctx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                    return false;
+                }
+                else if (!ctx->m_retryManager.IsLastTry() && ctx->instrStat[LICM_STAT][EXCEED_THRESHOLD])
+                {
+                    // skip SIMD8 if LICM threshold is met, unless it's lastTry
+                    ctx->SetSIMDInfo(SIMD_SKIP_REGPRES, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                     return false;
                 }
                 else

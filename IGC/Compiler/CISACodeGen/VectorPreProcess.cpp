@@ -28,7 +28,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
-
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Instructions.h>
@@ -36,10 +35,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/InstIterator.h>
 #include <llvm/Support/MathExtras.h>
 #include <llvm/Transforms/Utils/Local.h>
-
 #include <llvmWrapper/Support/Alignment.h>
-
 #include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
+
+#include <utility>    // std::pair, std::make_pair
 
 using namespace llvm;
 using namespace IGC;
@@ -65,6 +65,11 @@ using namespace IGC;
 //        <39xi8>  ---> <32xi8>, <4xi8>, <3xi8>
 //    Note that splitting keeps the vector element's type without
 //    changing it.
+//
+//    Note that as 6/2020,
+//      if size of vector element >= DW, the number of elements of the new vector
+//      should be power of 2 except for vector3.  Thus, we should not see 5xi32,
+//      7xi32, etc.  This makes code emit easier.
 //
 // 2. Special processing of 3-element vectors
 //    If (vector element's size < 4 bytes)
@@ -316,17 +321,13 @@ namespace
         // map from Vector value to its Component Values
         typedef DenseMap<Value*, ValVector> V2SMap;
 
-        enum {
-            // If a vector's size is bigger than VP_SPLIT_SIZE, split it into
-            // multiple of VP_SPLIT_SIZE (plus smaller sub-vectors or scalar
-            // if any). This means the max elements of a vector after this
-            // pass is 32 (<32 x i8>)!
-            //
-            // VP_SPLIT_SIZE is at least 8 bytes (largest element size) and
-            // must be power of 2.
-            VP_SPLIT_SIZE = 32,       // 32 bytes (must power of 2)
-            VP_RAW_SPLIT_SIZE = 16,
-            VP_MAX_VECTOR_SIZE = 128  // max vector length
+        enum class VPConst {
+            // If a vector's size is bigger than SPLIT_SIZE, split it into multiple
+            // of SPLIT_SIZE (plus smaller sub-vectors or scalar if any).
+            // With SPLIT_SIZE=32, we have the max vectors as below after this pass:
+            //     <32 x i8>, 16xi16, 8xi32, or 4xi64!
+            SPLIT_SIZE = 32,              // default, 32 bytes
+            RAW_SPLIT_SIZE = 16
         };
 
         static char ID; // Pass identification, replacement for typeid
@@ -348,13 +349,14 @@ namespace
             AU.setPreservesCFG();
             AU.addRequired<CodeGenContextWrapper>();
             AU.addRequired<MetaDataUtilsWrapper>();
+            AU.addRequired<DominatorTreeWrapperPass>();
             AU.addRequired<PostDominatorTreeWrapperPass>();
         }
 
     private:
 
         void getOrGenScalarValues(
-            Function& F, Value* VecVal, Value** scalars, Instruction*& availBeforeInst);
+            Function& F, Value* VecVal, ValVector& scalars, Instruction*& availBeforeInst);
         void replaceAllVectorUsesWithScalars(Instruction* VI,
             ValVector& SVals);
 
@@ -364,6 +366,7 @@ namespace
         bool isValueUsedOnlyByEEI(Value* V, ExtractElementInst** EEInsts);
 
         // Split load/store that cannot be re-layout or is too big.
+        uint32_t getSplitByteSize(Instruction* I, WIAnalysisRunner& WI) const;
         bool splitLoadStore(Instruction* Inst, V2SMap& vecToSubVec, WIAnalysisRunner& WI);
         bool splitLoad(AbstractLoadInst& LI, V2SMap& vecToSubVec, WIAnalysisRunner& WI);
         bool splitStore(AbstractStoreInst& SI, V2SMap& vecToSubVec, WIAnalysisRunner& WI);
@@ -375,9 +378,7 @@ namespace
             Type* ETy,
             uint32_t NElts,
             uint32_t SplitSize,
-            Type** SVTypes,
-            uint32_t* SVCounts,
-            uint32_t& Len);
+            SmallVector<std::pair<Type*, uint32_t>, 8>& SplitInfo);
 
     private:
         const DataLayout* m_DL;
@@ -397,6 +398,7 @@ namespace
 IGC_INITIALIZE_PASS_BEGIN(VectorPreProcess, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 IGC_INITIALIZE_PASS_DEPENDENCY(PostDominatorTreeWrapperPass)
 IGC_INITIALIZE_PASS_END(VectorPreProcess, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
@@ -521,14 +523,11 @@ void VectorPreProcess::replaceAllVectorUsesWithScalars(Instruction* VI, ValVecto
     }
 }
 
-
 void VectorPreProcess::createSplitVectorTypes(
     Type* ETy,
     uint32_t NElts,
     uint32_t SplitSize,
-    Type** SVTypes,
-    uint32_t* SVCounts,
-    uint32_t& Len)
+    SmallVector<std::pair<Type*, uint32_t>, 8>& SplitInfo)
 {
     uint32_t ebytes = (unsigned int)ETy->getPrimitiveSizeInBits() / 8;
     if (ETy->isPointerTy())
@@ -536,63 +535,81 @@ void VectorPreProcess::createSplitVectorTypes(
         ebytes = m_DL->getPointerTypeSize(ETy);
     }
 
+    // todo: generalize splitting for cases whose element size is bigger than splitsize!
     if (IGC_IS_FLAG_ENABLED(EnableSplitUnalignedVector))
     {
         if (ebytes > SplitSize)
         {
-            SVCounts[0] = NElts * ebytes / SplitSize;
-            SVTypes[0] = IntegerType::get(ETy->getContext(), SplitSize * 8);
-            Len = 1;
+            IGC_ASSERT(SplitSize);
+            uint32_t M = NElts * ebytes / SplitSize;
+            Type* Ty = IntegerType::get(ETy->getContext(), SplitSize * 8);
+            SplitInfo.push_back(std::make_pair(Ty, M));
             return;
         }
     }
 
-    assert((SplitSize % ebytes) == 0 &&
-        "Internal Error: Wrong split size!");
+    // Both SplitSize and ebytes shall be a power of 2
+    IGC_ASSERT(ebytes);
+    IGC_ASSERT_MESSAGE((SplitSize % ebytes) == 0, "Internal Error: Wrong split size!");
 
-    // the number of elements of a new vector
-    uint32_t E = SplitSize / ebytes;
-    // number of vectors
-    uint32_t N = NElts / E;
-    // remaining number of elements.
-    uint32_t R = NElts % E;
+    uint32_t E = SplitSize / ebytes; // split size in elements
+    uint32_t N = NElts;  // the number of elements to be split
 
-    int j = 0;
+    IGC_ASSERT(E);
+
+    // 1. Make sure splitting it by SplitSize as required
+    uint32_t M = N / E;  // the number of subvectors for split size E
+    if (M > 0)
+    {
+        Type* Ty = (E == 1) ? ETy : VectorType::get(ETy, E);
+        SplitInfo.push_back(std::make_pair(Ty, M));
+    }
+    N = N % E;
+    E = E / 2;  // next split size
+
+    // 2. The remaining elts are splitted if not power of 2 until N <= 4.
+    while (N > 4)
+    {
+        IGC_ASSERT(E);
+
+        M = N / E;  // the number of subvectors for split size E
+        if (M > 0)
+        {
+            SplitInfo.push_back(std::make_pair(VectorType::get(ETy, E), M));
+        }
+        // The remaining elts are to be split for next iteration.
+        N = N % E;
+        E = E / 2;  // next split size
+    }
+
+    // 3. A vector of 1|2|3|4 elements. No further splitting!
     if (N > 0)
     {
-        SVCounts[0] = N;
-        SVTypes[0] = VectorType::get(ETy, E);
-        ++j;
+        Type* Ty = (N == 1) ? ETy : VectorType::get(ETy, N);
+        SplitInfo.push_back(std::make_pair(Ty, 1));
     }
+}
 
-    // Sub-vectors are
-    //   1. ebytes >=4, the remaing is a single sub-vector; or
-    //   2. ebytes < 4, the remaining is splitted into
-    //        one sub-vector of multiple 4xebytes, and
-    //        the remaining vector of 3|2|1 elements.
-    //
-    //        Note that we keep vector 3 here so that we may convert
-    //        vector3 to vector4 later when special-handling vector3.
-    if (ebytes < 4 && R > 0)
+uint32_t VectorPreProcess::getSplitByteSize(Instruction* I, WIAnalysisRunner& WI) const
+{
+    uint32_t bytes = 0;
+    if (LoadInst* LI = dyn_cast<LoadInst>(I))
     {
-        N = R / 4;
-        R = R % 4;
-        if (N > 0)
-        {
-            SVCounts[j] = 1;
-            SVTypes[j] = VectorType::get(ETy, 4 * N);
-            ++j;
-        }
+        bytes = (uint32_t)VPConst::SPLIT_SIZE;
     }
-
-    // remaining sub-vector
-    if (R > 0)
+    else if (StoreInst* SI = dyn_cast<StoreInst>(I))
     {
-        SVCounts[j] = 1;
-        SVTypes[j] = (R == 1) ? ETy : VectorType::get(ETy, R);
-        ++j;
+        bytes = (uint32_t)VPConst::SPLIT_SIZE;
     }
-    Len = j;
+    else if (isa<LdRawIntrinsic>(I) || isa<StoreRawIntrinsic>(I))
+    {
+        bytes = (uint32_t)VPConst::RAW_SPLIT_SIZE;
+    }
+    else
+    {
+        bytes = (uint32_t)VPConst::SPLIT_SIZE;
+    }
+    return bytes;
 }
 
 bool VectorPreProcess::splitStore(
@@ -604,37 +621,43 @@ bool VectorPreProcess::splitStore(
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
-    assert(nelts <= VP_MAX_VECTOR_SIZE && "Vector length is too big!");
-
-    Type* tys[6];
-    uint32_t tycnts[6];
-    uint32_t len;
-    // Generate splitted loads and save them in the map
+    // splitInfo: Keep track of all pairs of (sub-vec type, #sub-vec).
+    SmallVector<std::pair<Type*, uint32_t>, 8> splitInfo;
     bool isStoreInst = isa<StoreInst>(SI);
-
+    uint32_t splitSize = getSplitByteSize(SI, WI);
     if (IGC_IS_FLAG_ENABLED(EnableSplitUnalignedVector))
     {
         // byte and word-aligned stores can only store a dword at a time.
         unsigned int alignment = ASI.getAlignment();
         if (isStoreInst && alignment < 4)
         {
-            ASI.setAlignment(std::max(getKnownAlignment(ASI.getPointerOperand(), *m_DL), alignment));
+            uint32_t newAlign = getKnownAlignment(ASI.getPointerOperand(), *m_DL);
+            if (newAlign > alignment)
+            {
+                // For the same reason as Load, use DW-aligned for OCL stateful.
+                StoreInst* aSI = dyn_cast<StoreInst>(SI);
+                if (aSI && newAlign > 4 && isStatefulAddrSpace(aSI->getPointerAddressSpace()))
+                {
+                    newAlign = 4;
+                }
+                ASI.setAlignment(newAlign);
+            }
         }
         bool needsDWordSplit =
             (!isStoreInst ||
                 m_CGCtx->m_DriverInfo.splitUnalignedVectors() ||
                 !WI.isUniform(ASI.getInst()))
             && ASI.getAlignment() < 4;
-        const uint32_t splitSize = needsDWordSplit ? 4 : (isStoreInst ? VP_SPLIT_SIZE : VP_RAW_SPLIT_SIZE);
-        createSplitVectorTypes(ETy, nelts, splitSize, tys, tycnts, len);
+        if (needsDWordSplit)
+        {
+            splitSize = 4;
+        }
     }
-    else
-    {
-        createSplitVectorTypes(ETy, nelts, isStoreInst ? VP_SPLIT_SIZE : VP_RAW_SPLIT_SIZE, tys, tycnts, len);
-    }
+    createSplitVectorTypes(ETy, nelts, splitSize, splitInfo);
 
     // return if no split
-    if (len == 1 && tycnts[0] == 1)
+    uint32_t len = splitInfo.size();
+    if (len == 1 && splitInfo[0].second == 1)
     {
         return false;
     }
@@ -644,19 +667,21 @@ bool VectorPreProcess::splitStore(
     {
         // Need to create splitted values.
         Instruction* insertBeforeInst = nullptr;
-        Value* scalars[VP_MAX_VECTOR_SIZE];
+        ValVector scalars(nelts, nullptr);
         getOrGenScalarValues(*SI->getParent()->getParent(),
             StoredVal, scalars, insertBeforeInst);
         insertBeforeInst = insertBeforeInst ? insertBeforeInst : SI;
         IRBuilder<> aBuilder(insertBeforeInst);
 
+        Type* Ty1 = splitInfo[0].first;
         if (IGC_IS_FLAG_ENABLED(EnableSplitUnalignedVector))
         {
-            if (ETy->getPrimitiveSizeInBits() > tys[0]->getScalarSizeInBits())
+            if (ETy->getPrimitiveSizeInBits() > Ty1->getScalarSizeInBits())
             {
                 std::vector<Value*> splitScalars;
-                const uint32_t vectorSize = (unsigned int)ETy->getPrimitiveSizeInBits() / tys[0]->getScalarSizeInBits();
-                Type* splitType = llvm::VectorType::get(tys[0], vectorSize);
+                IGC_ASSERT(Ty1->getScalarSizeInBits());
+                const uint32_t vectorSize = (unsigned int)ETy->getPrimitiveSizeInBits() / Ty1->getScalarSizeInBits();
+                Type* splitType = llvm::VectorType::get(Ty1, vectorSize);
                 for (uint32_t i = 0; i < nelts; i++)
                 {
                     Value* splitInst = aBuilder.CreateBitCast(scalars[i], splitType);
@@ -665,7 +690,7 @@ bool VectorPreProcess::splitStore(
                         splitScalars.push_back(aBuilder.CreateExtractElement(splitInst, j));
                     }
                 }
-                assert(splitScalars.size() < VP_MAX_VECTOR_SIZE);
+                scalars.resize(splitScalars.size());
                 for (uint32_t i = 0; i < splitScalars.size(); i++)
                 {
                     scalars[i] = splitScalars[i];
@@ -676,8 +701,10 @@ bool VectorPreProcess::splitStore(
         // Now generate svals
         for (uint32_t i = 0, Idx = 0; i < len; ++i)
         {
-            VectorType* VTy1 = dyn_cast<VectorType>(tys[i]);
-            for (uint32_t j = 0; j < tycnts[i]; ++j)
+            Type* Ty1 = splitInfo[i].first;
+            uint32_t len1 = splitInfo[i].second;
+            VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+            for (uint32_t j = 0; j < len1; ++j)
             {
                 Value* subVec;
                 if (!VTy1)
@@ -687,7 +714,7 @@ bool VectorPreProcess::splitStore(
                 }
                 else
                 {
-                    subVec = UndefValue::get(tys[i]);
+                    subVec = UndefValue::get(Ty1);
                     uint32_t n1 = int_cast<uint32_t>(VTy1->getNumElements());
                     for (uint32_t k = 0; k < n1; ++k)
                     {
@@ -711,10 +738,12 @@ bool VectorPreProcess::splitStore(
 
     for (uint32_t i = 0, subIdx = 0; i < len; ++i)
     {
-        VectorType* VTy1 = dyn_cast<VectorType>(tys[i]);
-        for (uint32_t j = 0; j < tycnts[i]; ++j)
+        Type* Ty1 = splitInfo[i].first;
+        uint32_t len1 = splitInfo[i].second;
+        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+        for (uint32_t j = 0; j < len1; ++j)
         {
-            uint32_t vAlign = (uint32_t)MinAlign(Align, eOffset * EBytes);
+            uint32_t vAlign = (uint32_t)MinAlign(Align, (uint32_t)eOffset * EBytes);
             Value* offsetAddr = ASI.CreateConstScalarGEP(svals[subIdx]->getType(), Addr, eOffset);
             Instruction* newST = ASI.Create(svals[subIdx], offsetAddr, vAlign, IsVolatile);
             eOffset += (VTy1 ? int_cast<uint32_t>(VTy1->getNumElements()) : 1);
@@ -759,28 +788,46 @@ bool VectorPreProcess::splitLoad(
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
-    Type* tys[6];
-    uint32_t tycnts[6];
-    uint32_t len;
-    // Generate splitted loads and save them in the map
-    uint32_t splitSize = isLdRaw ? VP_RAW_SPLIT_SIZE : VP_SPLIT_SIZE;
+    // Split a vector type into multiple sub-types:
+    //       'len0' number of sub-vectors of type 'vecTy0'
+    //       'len1' number of sub-vectors of type 'vecTy1'
+    //       ...
+    // SplitInfo : all pairs, each of which is (sub-vector's type, #sub-vectors).
+    SmallVector< std::pair<Type*, uint32_t>, 8 > splitInfo;
+    uint32_t splitSize = getSplitByteSize(LI, WI);
     if (IGC_IS_FLAG_ENABLED(EnableSplitUnalignedVector))
     {
         // byte and word-aligned loads can only load a dword at a time.
         unsigned int alignment = ALI.getAlignment();
         if (!isLdRaw && alignment < 4)
         {
-            ALI.setAlignment(std::max(getKnownAlignment(ALI.getPointerOperand(), *m_DL), alignment));
+            uint32_t newAlign = getKnownAlignment(ALI.getPointerOperand(), *m_DL);
+            if (newAlign > alignment)
+            {
+                //  For OCL stateful, the base can be as little as DW-aligned. To be safe,
+                //  need to use DW-aligned. For example,
+                //       % 0 = add i32 0, 16
+                //       % 4 = inttoptr i32 % 0 to <8 x i16> addrspace(131073) *
+                //       %5 = load <8 x i16>, <8 x i16> addrspace(131073) * %4, align 2
+                //  newAlign from getKnownAlignment() is 16. But we can only set align to 4 as
+                //  the base of this stateful could be just DW-aligned.
+                LoadInst* aLI = dyn_cast<LoadInst>(LI);
+                if (aLI && newAlign > 4 && isStatefulAddrSpace(aLI->getPointerAddressSpace()))
+                {
+                    newAlign = 4;
+                }
+                ALI.setAlignment(newAlign);
+            }
         }
 
         if ((isLdRaw || !WI.isUniform(ALI.getInst())) && ALI.getAlignment() < 4)
             splitSize = 4;
     }
-
-    createSplitVectorTypes(ETy, nelts, splitSize, tys, tycnts, len);
+    createSplitVectorTypes(ETy, nelts, splitSize, splitInfo);
 
     // return if no split
-    if (len == 1 && tycnts[0] == 1)
+    uint32_t len = splitInfo.size();
+    if (len == 1 &&  splitInfo[0].second == 1)
     {
         return false;
     }
@@ -797,12 +844,14 @@ bool VectorPreProcess::splitLoad(
 
     for (uint32_t i = 0; i < len; ++i)
     {
-        VectorType* VTy1 = dyn_cast<VectorType>(tys[i]);
-        for (uint32_t j = 0; j < tycnts[i]; ++j)
+        Type* Ty1 = splitInfo[i].first;
+        uint32_t len1 = splitInfo[i].second;
+        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+        for (uint32_t j = 0; j < len1; ++j)
         {
             uint32_t vAlign = (uint32_t)MinAlign(Align, eOffset * EBytes);
-            Value* offsetAddr = ALI.CreateConstScalarGEP(tys[i], Addr, eOffset);
-            Instruction* I = ALI.Create(tys[i], offsetAddr, vAlign, IsVolatile);
+            Value* offsetAddr = ALI.CreateConstScalarGEP(Ty1, Addr, eOffset);
+            Instruction* I = ALI.Create(Ty1, offsetAddr, vAlign, IsVolatile);
             eOffset += (VTy1 ? int_cast<uint32_t>(VTy1->getNumElements()) : 1);
 
             svals.push_back(I);
@@ -819,8 +868,13 @@ bool VectorPreProcess::splitLoad(
     {
         if (svals[0]->getType()->getPrimitiveSizeInBits() < ETy->getPrimitiveSizeInBits())
         {
-            uint32_t scalarsPerElement = (unsigned int)ETy->getPrimitiveSizeInBits() / (unsigned int)svals[0]->getType()->getPrimitiveSizeInBits();
-            assert(svals.size() % scalarsPerElement == 0 && scalarsPerElement > 1);
+            const unsigned int denominator = (unsigned int)svals[0]->getType()->getPrimitiveSizeInBits();
+            IGC_ASSERT(0 < denominator);
+
+            const uint32_t scalarsPerElement = (unsigned int)ETy->getPrimitiveSizeInBits() / denominator;
+            IGC_ASSERT(1 < scalarsPerElement);
+            IGC_ASSERT((svals.size() % scalarsPerElement) == 0);
+
             ValVector mergedScalars;
             IRBuilder<> builder(LI->getParent());
             Instruction* nextInst = LI->getNextNode();
@@ -858,7 +912,7 @@ bool VectorPreProcess::splitLoadStore(
 {
     Optional<AbstractLoadInst> ALI = AbstractLoadInst::get(Inst);
     Optional<AbstractStoreInst> ASI = AbstractStoreInst::get(Inst);
-    assert((ALI || ASI) && "Inst should be either load or store");
+    IGC_ASSERT_MESSAGE((ALI || ASI), "Inst should be either load or store");
     Type* Ty = ALI ? ALI->getInst()->getType() : ASI->getValueOperand()->getType();
     VectorType* VTy = dyn_cast<VectorType>(Ty);
     if (!VTy)
@@ -916,11 +970,11 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
     AbstractLoadInst* ALI = optionalALI ? optionalALI.getPointer() : nullptr;
     Optional<AbstractStoreInst> optionalASI = AbstractStoreInst::get(Inst);
     AbstractStoreInst* ASI = optionalASI ? optionalASI.getPointer() : nullptr;
-    assert((optionalALI || optionalASI) && "Inst should be either load or store");
+    IGC_ASSERT_MESSAGE((optionalALI || optionalASI), "Inst should be either load or store");
     Type* Ty = ALI ? ALI->getInst()->getType() : ASI->getValueOperand()->getType();
     VectorType* VTy = dyn_cast<VectorType>(Ty);
-    assert(VTy && VTy->getNumElements() == 3 &&
-        "Inst should be a 3-element vector load/store!");
+    IGC_ASSERT_MESSAGE(nullptr != VTy, "Inst should be a 3-element vector load/store!");
+    IGC_ASSERT_MESSAGE(VTy->getNumElements() == 3, "Inst should be a 3-element vector load/store!");
 
     Type* eTy = VTy->getElementType();
     uint32_t etyBytes = int_cast<unsigned int>(m_DL->getTypeAllocSize(eTy));
@@ -1083,11 +1137,11 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
 }
 
 // availBeforeInst:
-//    Used to indicate that all scalar values of VecVal are available right
-//    before the instruction pointed to availBeforeInst.
-//    If availBeforeInst is null, it means all scalar values are constants.
+//    Indicate that all scalar values of VecVal are available right before
+//    instruction 'availBeforeInst'. If availBeforeInst is null, it means
+//    all scalar values are constants.
 void VectorPreProcess::getOrGenScalarValues(
-    Function& F, Value* VecVal, Value** scalars, Instruction*& availBeforeInst)
+    Function& F, Value* VecVal, ValVector& scalars, Instruction*& availBeforeInst)
 {
     availBeforeInst = nullptr;
 
@@ -1230,7 +1284,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         }
 
         // All uses are constant EEI.
-        assert(ConstEEIUses.size() == Inst->getNumUses() && "out of sync");
+        IGC_ASSERT_MESSAGE(ConstEEIUses.size() == Inst->getNumUses(), "out of sync");
 
         // FIXME: this is to WA an issue that splitLoadStore does not split
         // vectors of size 5, 6, 7.
@@ -1264,7 +1318,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
             EEI->replaceAllUsesWith(NewEEI[Idx]);
             EEI->eraseFromParent();
         }
-        assert(Inst->use_empty() && "out of sync");
+        IGC_ASSERT_MESSAGE(Inst->use_empty(), "out of sync");
         Inst->eraseFromParent();
         return NewLI;
     }
@@ -1282,7 +1336,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
     // %8 = insertelement <3 x float> %3, float 1.000000e+00, i32 2
     // store <3 x float> %8, <3 x float>* %5, align 16
     //
-    assert(isAbstractStoreInst(Inst));
+    IGC_ASSERT(isAbstractStoreInst(Inst));
     Optional<AbstractStoreInst> optionalASI = AbstractStoreInst::get(Inst);
     AbstractStoreInst& ASI = optionalASI.getValue();
     Value* Val = ASI.getValueOperand();
@@ -1429,6 +1483,8 @@ bool VectorPreProcess::runOnFunction(Function& F)
         {
             auto* MDUtils =
                 getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+            auto* DT =
+                &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
             auto* PDT =
                 &getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
             auto* ModMD =
@@ -1436,7 +1492,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
 
             TranslationTable TT;
             TT.run(F);
-            WIAnalysisRunner WI(&F, PDT, MDUtils, m_CGCtx, ModMD, &TT);
+            WIAnalysisRunner WI(&F, DT, PDT, MDUtils, m_CGCtx, ModMD, &TT);
             WI.run();
 
             for (uint32_t i = 0; i < m_WorkList.size(); ++i)
