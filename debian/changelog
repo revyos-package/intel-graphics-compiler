@@ -1,6 +1,7 @@
 intel-graphics-compiler (1.0.5064-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * rules: Disable Vector Compute for now.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 13 Aug 2020 14:01:35 +0300
 
