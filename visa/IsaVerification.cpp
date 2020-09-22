@@ -119,7 +119,7 @@ static int getDstIndex(const CISA_INST* inst)
     int dstIndex = -1;
     if (inst->opnd_count > 0)
     {
-        switch(ISA_Inst_Table[opcode].type)
+        switch (ISA_Inst_Table[opcode].type)
         {
             case ISA_Inst_Mov:
             case ISA_Inst_Arith:
@@ -171,7 +171,7 @@ static string diagDumpInstructionOperandDecls(
         else if (inst->opnd_array[i]->opnd_type == CISA_OPND_RAW)
         {
             uint32_t index = getRawOperand(inst, i).index;
-            if ( numPreDefinedVars <= index && index < header->getVarCount() + numPreDefinedVars )
+            if (numPreDefinedVars <= index && index < header->getVarCount() + numPreDefinedVars)
                 sstr << printVariableDecl(header, index-numPreDefinedVars, options);
         }
         else if (inst->opnd_array[i]->opnd_type == CISA_OPND_OTHER) // new loader only
@@ -438,11 +438,11 @@ void vISAVerifier::verifyRegion(
 
     Common_ISA_Region_Val width    = (Common_ISA_Region_Val)((region >> 4) & 0xF);
     Common_ISA_Region_Val h_stride = (Common_ISA_Region_Val)((region >> 8) & 0xF);
-    Common_ISA_Region_Val v_stride = (Common_ISA_Region_Val)((region     ) & 0xF);
+    Common_ISA_Region_Val v_stride = (Common_ISA_Region_Val)((region    ) & 0xF);
 
     short v_stride_val = Common_ISA_Get_Region_Value(v_stride);
     short h_stride_val = Common_ISA_Get_Region_Value(h_stride);
-    short width_val    = Common_ISA_Get_Region_Value(width   );
+    short width_val    = Common_ISA_Get_Region_Value(width  );
 
     /// INFO: Catch zero width, because we'll sigsegv otherwise.
     REPORT_INSTRUCTION(options,width_val, "CISA region has width of 0");
@@ -531,7 +531,7 @@ void vISAVerifier::verifyRegion(
         if (operand_class == OPERAND_GENERAL)
         {
             const var_info_t*      var      = header->getVar(vect.getOperandIndex()-numPreDefinedVars);
-            VISA_Type  isa_type = getVectorOperandType(isaHeader, header, vect);
+            VISA_Type  isa_type = getVectorOperandType(header, vect);
             unsigned         VN_size  = CISATypeTable[isa_type].typeSize;
 
             uint16_t num_elements = var->num_elements;
@@ -551,24 +551,28 @@ void vISAVerifier::verifyRegion(
                     (exec_sz - 1) * h_stride_val * VN_size + VN_size - 1;
             }
 
-            REPORT_INSTRUCTION(options,(COMMON_ISA_GRF_REG_SIZE * 2u) > last_region_elt_byte,
-                "CISA operand region access out of 2 GRF boundary (within %d bytes): %d",
-                (COMMON_ISA_GRF_REG_SIZE * 2),
-                last_region_elt_byte);
+            // Check if the operand may touch more than 2 GRFs due to bad alignment
+            // So far vISA is able to handle the splitting of: Moves
+            if (ISA_Inst_Mov != ISA_Inst_Table[opcode].type)
+            {
+                REPORT_INSTRUCTION(options, (COMMON_ISA_GRF_REG_SIZE * 2u) > last_region_elt_byte,
+                    "CISA operand region access out of 2 GRF boundary (within %d bytes): %d",
+                    (COMMON_ISA_GRF_REG_SIZE * 2),
+                    last_region_elt_byte);
+
+                // check if the operand may touch more than 2 GRFs due to bad alignment
+                unsigned startByte = getStartByteOffset(header, var, numPreDefinedVars) +
+                    row_offset * COMMON_ISA_GRF_REG_SIZE +
+                    col_offset * CISATypeTable[var->getType()].typeSize;
+                unsigned endByte = startByte + last_region_elt_byte;
+                unsigned startGRF = startByte / COMMON_ISA_GRF_REG_SIZE;
+                unsigned endGRF = endByte / COMMON_ISA_GRF_REG_SIZE;
+                REPORT_INSTRUCTION(options, endGRF == startGRF || endGRF == (startGRF + 1),
+                    "CISA operand accesses more than 2 GRF due to mis-alignment: start byte offset = %d, end byte offset = %d",
+                    startByte, endByte);
+            }
 
             unsigned firstElementIndex = row_offset * COMMON_ISA_GRF_REG_SIZE + col_offset;
-
-            // check if the operand may touch more than 2 GRFs due to bad alignment
-            unsigned startByte = getStartByteOffset(header, var, numPreDefinedVars) +
-                row_offset * COMMON_ISA_GRF_REG_SIZE +
-                col_offset * CISATypeTable[var->getType()].typeSize;
-            unsigned endByte = startByte + last_region_elt_byte;
-            unsigned startGRF = startByte / COMMON_ISA_GRF_REG_SIZE;
-            unsigned endGRF = endByte / COMMON_ISA_GRF_REG_SIZE;
-            REPORT_INSTRUCTION(options,endGRF == startGRF || endGRF == (startGRF + 1),
-                "CISA operand accesses more than 2 GRF due to mis-alignment: start byte offset = %d, end byte offset = %d",
-                startByte, endByte);
-
 
             for (int i = 0; i < exec_sz / width_val; i++)
             {
@@ -579,8 +583,9 @@ void vISAVerifier::verifyRegion(
                         (j * h_stride_val)) *
                         VN_size);
 
-                    if (region_offset > var_size )
+                    if (region_offset > var_size)
                     {
+#ifndef DLL_MODE
                         std::cout << "WARNING: CISA region and offset cause an out of bounds byte access: "<< region_offset << "\n";
                         std::cout << "An access should not exceed the declared allocation size: " << var_size << "\n";
                         std::cout << "  The access fails the following check to determine correct bounds (see CISA manual section 5.1 Region-based Addressing):\n";
@@ -591,18 +596,8 @@ void vISAVerifier::verifyRegion(
                         std::cout << "Violating Instruction: "
                             << printInstruction(header, inst, options)
                             << endl;
+#endif // DLL_MODE
                     }
-
-#if 0
-                    if (region_offset > var_size)
-                    {
-                        cerr << "i = " << i << " j = " << j << endl;
-                        cerr << "Violating Instruction: "
-                            << ((CisaInst*)this->getParent())->toString()
-                            << endl;
-                        exit(0);
-                    }
-#endif
                 }
             }
         }
@@ -617,7 +612,7 @@ void vISAVerifier::verifyRegion(
                     "the destination operand's horizontal stride must be 1.");
         }
 
-        VISA_Type opnd_type = getVectorOperandType(isaHeader, header, vect);
+        VISA_Type opnd_type = getVectorOperandType(header, vect);
         REPORT_INSTRUCTION(options, opnd_type == ISA_TYPE_F, "LRP instruction only supports sources and destination of type F.");
 
         if (dstIndex != i)
@@ -686,7 +681,7 @@ void vISAVerifier::verifyRawOperand(
 
     const raw_opnd& opnd = getRawOperand(inst, i);
 
-    if ( numPreDefinedVars > opnd.index )
+    if (numPreDefinedVars > opnd.index)
     {
         return; // allow raw operands to be predefined variables
     }
@@ -695,7 +690,7 @@ void vISAVerifier::verifyRawOperand(
     uint16_t opnd_offset = opnd.offset;
 
 
-    if (opnd_index < variable_count )
+    if (opnd_index < variable_count)
     {
         const var_info_t* currVar = header->getVar(opnd_index);
         unsigned totalOffset = opnd_offset;
@@ -719,20 +714,20 @@ void vISAVerifier::verifyRawOperand(
                               currVar->alias_index);
 
             totalOffset += currVar->alias_offset;
-            if ( numPreDefinedVars > currVar->alias_index )
+            if (numPreDefinedVars > currVar->alias_index)
             {
                 break; // // allow alias index to be predefined variables
             }
             currVar = header->getVar(currVar->alias_index-numPreDefinedVars);
         }
 
-        if (currVar->getSize() >= GENX_GRF_REG_SIZ && totalOffset % GENX_GRF_REG_SIZ != 0)
+        if (currVar->getSize() >= numEltPerGRF(Type_UB) && totalOffset % numEltPerGRF(Type_UB) != 0)
         {
             // raw operand must be GRF-aligned if it's >= 1GRF
             REPORT_INSTRUCTION(options,false, "Raw operand should be GRF-aligned: Raw offset is %d", totalOffset);
         }
 
-        if ( numPreDefinedVars <= currVar->alias_index )
+        if (numPreDefinedVars <= currVar->alias_index)
         {
             REPORT_INSTRUCTION(options,totalOffset < currVar->num_elements * (unsigned)CISATypeTable[currVar->getType()].typeSize,
                     "A CISA raw operand's offset field must be within the allocated operand size. "
@@ -827,7 +822,7 @@ void vISAVerifier::verifyVectorOperand(
     if (operand_class == OPERAND_IMMEDIATE)
     {
         /// Do checks for immediate operands here
-        REPORT_INSTRUCTION(options,getVectorOperandType(isaHeader, header, opnd) != ISA_TYPE_BOOL,
+        REPORT_INSTRUCTION(options,getVectorOperandType(header, opnd) != ISA_TYPE_BOOL,
             "Boolean types for immediate (constant literals) operands are disallowed.");
     }
 
@@ -913,8 +908,8 @@ void vISAVerifier::verifyInstructionMove(
     {
         case ISA_MOV:
         {
-             VISA_Type     dstType     = getVectorOperandType(isaHeader, header, dst );
-             VISA_Type     src0Type    = getVectorOperandType(isaHeader, header, src0);
+             VISA_Type     dstType     = getVectorOperandType(header, dst);
+             VISA_Type     src0Type    = getVectorOperandType(header, src0);
              VISA_Modifier dstModifier = dst.getOperandModifier();
 
              if (OPERAND_PREDICATE == operand_class_src0)
@@ -1078,16 +1073,6 @@ void vISAVerifier::verifyInstructionControlFlow(
         }
         case ISA_SWITCHJMP:
         {
-             /// TODO: Reenable this check if possible.
-             #if 0
-             ASSERT_USER(numLabels > 0 && numLabels < 33, "Number of labels in SWITCHJMP must be between 1 and 32");
-             ASSERT_USER(IS_UNSIGNED_INT(indexOpnd->getType()), "index for SWITCHJMP must have unsigned type");
-             ASSERT_USER(CISA_Opnd_Class( index) == OPERAND_GENERAL || CISA_Opnd_Class( index ) == OPERAND_INDIRECT ||
-                     CISA_Opnd_Class( index) == OPERAND_IMMEDIATE,
-                     "index for SWITCHJMP must be one of general/indirect/immediate operand.");
-             ASSERT_USER( indexOpnd->isImm() || indexOpnd->isSrcRegRegion() && indexOpnd->asSrcRegRegion()->isScalar(),
-                     "index for SWITCHJMP must be a scalar value");
-             #endif
              break;
         }
         default: REPORT_INSTRUCTION(options,false, "Illegal Scalar Control Flow Instruction Opcode: %d, %s.", opcode, ISA_Inst_Table[opcode].str);
@@ -1291,7 +1276,7 @@ void vISAVerifier::verifyInstructionMisc(
 
             unsigned char type = (properties >> 4) & 0x3;
 
-            if(type != OPERAND_GENERAL && type != OPERAND_ADDRESS && type != OPERAND_PREDICATE)
+            if (type != OPERAND_GENERAL && type != OPERAND_ADDRESS && type != OPERAND_PREDICATE)
             {
                 REPORT_INSTRUCTION(options, false, "Invalid encoding for register file");
             }
@@ -1399,7 +1384,7 @@ void vISAVerifier::verifyInstructionArith(
 
     unsigned i = 0;
     const vector_opnd& dst = getVectorOperand(inst, i);
-    VISA_Type         dstType = getVectorOperandType(isaHeader, header, dst);
+    VISA_Type         dstType = getVectorOperandType(header, dst);
     VISA_Modifier dstModifier = dst.getOperandModifier();
     auto platform = getGenxPlatform();
 
@@ -1514,7 +1499,7 @@ void vISAVerifier::verifyInstructionArith(
     for (unsigned i = 0; i < ISA_Inst_Table[opcode].n_srcs; i++)
     {
         const vector_opnd& src = getVectorOperand(inst, i + ISA_Inst_Table[opcode].n_dsts); /// dst is at index 0, addc/subbb have two destinations
-        VISA_Type         srcType = getVectorOperandType(isaHeader, header, src);
+        VISA_Type         srcType = getVectorOperandType(header, src);
         VISA_Modifier srcModifier = src.getOperandModifier();
 
         REPORT_INSTRUCTION(options, srcModifier != MODIFIER_SAT && srcModifier != MODIFIER_NOT,
@@ -1647,7 +1632,7 @@ void vISAVerifier::verifyInstructionLogic(
     for (unsigned i = 0; i < opend_count; i++)
     {
         const vector_opnd& opnd = getVectorOperand(inst, i);
-        VISA_Type opnd_type = getVectorOperandType(isaHeader, header, opnd);
+        VISA_Type opnd_type = getVectorOperandType(header, opnd);
 
         REPORT_INSTRUCTION(options,opnd.getOperandClass() != OPERAND_ADDRESS,
                           "Common ISA Logic instrutions are not allowed to have address operands.");
@@ -1786,7 +1771,7 @@ void vISAVerifier::verifyInstructionAddress(
 
         if (2 == i)
         {
-            VISA_Type opnd_type = getVectorOperandType(isaHeader, header, getVectorOperand(inst, i));
+            VISA_Type opnd_type = getVectorOperandType(header, getVectorOperand(inst, i));
             REPORT_INSTRUCTION(options,opnd_type == ISA_TYPE_B || opnd_type == ISA_TYPE_UB ||
                               opnd_type == ISA_TYPE_W || opnd_type == ISA_TYPE_UW,
                               "Data type of the second source of ADDR_ADD should be WORD or BYTE.");
@@ -1869,11 +1854,11 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST* inst)
             REPORT_INSTRUCTION(options,channel, "CISA SAMPLER ISA_SAMPLE/ISA_LOAD instruction only accepts non-zero channel masks.");
 
             uint8_t SIMD_mode = (mod >> 4) & 0x3;
-            if((unsigned)SIMD_mode == 0)
+            if ((unsigned)SIMD_mode == 0)
             {
                 SIMD_mode = 8;
             }
-            else if((unsigned)SIMD_mode == 1)
+            else if ((unsigned)SIMD_mode == 1)
             {
                 SIMD_mode = 16;
             }
@@ -2637,7 +2622,7 @@ void vISAVerifier::verifyInstructionDataport(
                                     (9  <= block_width && block_width <= 16 && block_height <= 16)  ||
                                     (17 <= block_width && block_width <= 32 && block_height <=  8)  ||
                                     (33 <= block_width && block_width <= 64 && block_height <=  4)) &&
-                                    (block_width * block_height <= 256                           ),
+                                    (block_width * block_height <= 256                          ),
                                     "MEDIA_LD only supports objects that fit into a single dataport "
                                     "transaction where block width <= 64 bytes and size <= 256 bytes. "
                                     "Block width: %d. Block height: %d", block_width, block_height);
@@ -2649,7 +2634,7 @@ void vISAVerifier::verifyInstructionDataport(
                                     (9  <= block_width && block_width <= 16 && block_height <= 16)  ||
                                     (17 <= block_width && block_width <= 32 && block_height <=  8)  ||
                                     (33 <= block_width && block_width <= 64 && block_height <=  4)) &&
-                                    (block_width * block_height <= 256                           ),
+                                    (block_width * block_height <= 256                          ),
                                     "MEDIA_ST only supports objects that fit into a single dataport "
                                     "transaction where block width <= 64 bytes and size <= 256 bytes. "
                                     "Block width: %d. Block height: %d", block_width, block_height);
@@ -2704,7 +2689,7 @@ void vISAVerifier::verifyInstructionDataport(
              {
                  elt_size = getPrimitiveOperand<uint8_t>(inst, i++);
                  elt_size = elt_size & 0x3;
-                 switch((GATHER_SCATTER_ELEMENT_SIZE)elt_size)
+                 switch ((GATHER_SCATTER_ELEMENT_SIZE)elt_size)
                  {
                      case GATHER_SCATTER_BYTE:
                          elt_size = 1;
@@ -2889,7 +2874,8 @@ void vISAVerifier::verifyKernelAttributes()
     {
         auto attr = header->getAttr(i);
         const char* attrName = header->getString(attr->nameIndex);
-        if (Attributes::isAttribute(Attributes::ATTR_SLMSize, attrName))
+        Attributes::ID aID = Attributes::getAttributeID(attrName);
+        if (aID == Attributes::ATTR_SLMSize)
         {
             numSLMSize++;
         }

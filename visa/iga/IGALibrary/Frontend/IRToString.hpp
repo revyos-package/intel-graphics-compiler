@@ -87,9 +87,8 @@ static inline std::string ToSymbol(PredCtrl x) {
 
 
 static inline std::string ToSymbol(Op op) {
-    // TODO: expand this manually, this is a crude approximation
     std::stringstream ss;
-    ss << "op#" << (int)op;
+    ss << "Op::0x" << std::hex << std::uppercase << (int)op;
     return ss.str();
 }
 
@@ -276,6 +275,8 @@ static inline std::string ToSymbol(Region x)
         return "Region::DST1";
     else if (x == Region::SRC0X0)
         return "Region::SRC0X0";
+    else if (x == Region::SRC1X0)
+        return "Region::SRC1X0";
     else if (x == Region::SRC2X1)
         return "Region::SRC2X1";
     else if (x == Region::SRC4X1)
@@ -676,6 +677,7 @@ template <> SFID FromSyntax<SFID>(std::string str);
 
 std::string ToSyntax(SyncFC sfc);
 template <> SyncFC FromSyntax<SyncFC>(std::string str);
+
 
 
 

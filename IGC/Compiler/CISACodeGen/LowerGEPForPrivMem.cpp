@@ -33,6 +33,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/IRBuilder.h"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -77,7 +78,9 @@ namespace IGC {
 
         void visitAllocaInst(llvm::AllocaInst& I);
 
-        unsigned int extractAllocaSize(llvm::AllocaInst* pAlloca);
+        unsigned int extractConstAllocaSize(llvm::AllocaInst* pAlloca);
+
+        static bool IsVariableSizeAlloca(llvm::AllocaInst& pAlloca);
 
     private:
         llvm::AllocaInst* createVectorForAlloca(
@@ -89,6 +92,7 @@ namespace IGC {
         bool IsNativeType(Type* type);
         /// Conservatively check if a store allow an Alloca to be uniform
         bool IsUniformStore(llvm::StoreInst* pStore);
+
     public:
         static char ID;
 
@@ -141,16 +145,20 @@ llvm::AllocaInst* LowerGEPForPrivMem::createVectorForAlloca(
     llvm::AllocaInst* pAlloca,
     llvm::Type* pBaseType)
 {
+    IGC_ASSERT(pAlloca != nullptr);
     IGCLLVM::IRBuilder<> IRB(pAlloca);
+    AllocaInst* pAllocaValue = nullptr;
+    if (IsVariableSizeAlloca(*pAlloca)) {
+        pAllocaValue = IRB.CreateAlloca(pBaseType, pAlloca->getArraySize());
 
-    IGC_ASSERT(nullptr != m_pDL);
-    const unsigned int denominator = int_cast<unsigned int>(m_pDL->getTypeAllocSize(pBaseType));
-    IGC_ASSERT(0 < denominator);
-    const unsigned int totalSize = extractAllocaSize(pAlloca) / denominator;
+    } else {
+        IGC_ASSERT(nullptr != m_pDL);
+        const unsigned int denominator = int_cast<unsigned int>(m_pDL->getTypeAllocSize(pBaseType));
+        IGC_ASSERT(0 < denominator);
+        const unsigned int totalSize = extractConstAllocaSize(pAlloca) / denominator;
+        pAllocaValue = IRB.CreateAlloca(IGCLLVM::FixedVectorType::get(pBaseType, totalSize));
+    }
 
-    llvm::VectorType* pVecType = llvm::VectorType::get(pBaseType, totalSize);
-
-    AllocaInst* pAllocaValue = IRB.CreateAlloca(pVecType);
     return pAllocaValue;
 }
 
@@ -207,7 +215,15 @@ void TransposeHelper::EraseDeadCode()
     }
 }
 
-unsigned int LowerGEPForPrivMem::extractAllocaSize(llvm::AllocaInst* pAlloca)
+bool LowerGEPForPrivMem::IsVariableSizeAlloca(llvm::AllocaInst& pAlloca)
+{
+    IGC_ASSERT(nullptr != pAlloca.getArraySize());
+    if (isa<ConstantInt>(pAlloca.getArraySize()))
+        return false;
+    return true;
+}
+
+unsigned int LowerGEPForPrivMem::extractConstAllocaSize(llvm::AllocaInst* pAlloca)
 {
     IGC_ASSERT(nullptr != m_pDL);
     IGC_ASSERT(nullptr != pAlloca);
@@ -250,11 +266,16 @@ bool LowerGEPForPrivMem::IsNativeType(Type* type)
 
 bool LowerGEPForPrivMem::CheckIfAllocaPromotable(llvm::AllocaInst* pAlloca)
 {
+    // vla is not promotable
+    IGC_ASSERT(pAlloca != nullptr);
+    if (IsVariableSizeAlloca(*pAlloca))
+        return false;
+
     bool isUniformAlloca = pAlloca->getMetadata("uniform") != nullptr;
-    unsigned int allocaSize = extractAllocaSize(pAlloca);
+    unsigned int allocaSizeInBytes = extractConstAllocaSize(pAlloca);
     unsigned int allowedAllocaSizeInBytes = MAX_ALLOCA_PROMOTE_GRF_NUM * 4;
 
-    // scale alloc size based on the number of GRFs we have
+    // scale alloc size based on the number of GRFs we have.
     float grfRatio = m_ctx->getNumGRFPerThread() / 128.0f;
     allowedAllocaSizeInBytes = (uint32_t)(allowedAllocaSizeInBytes * grfRatio);
 
@@ -275,23 +296,30 @@ bool LowerGEPForPrivMem::CheckIfAllocaPromotable(llvm::AllocaInst* pAlloca)
     {
         return false;
     }
-    if (isUniformAlloca)
-    {
-        // Heuristic: for uniform alloca we divide the size by 8 to adjust the pressure
-        // as they will be allocated as uniform array
-        allocaSize = iSTD::Round(allocaSize, 8) / 8;
-    }
 
-    if (allocaSize <= IGC_GET_FLAG_VALUE(ByPassAllocaSizeHeuristic))
+    const unsigned int hwRegSizeInBytes = 32;
+    unsigned int hwRegsPerAlloca = iSTD::Round( allocaSizeInBytes, hwRegSizeInBytes) / hwRegSizeInBytes;
+
+    if (allocaSizeInBytes <= IGC_GET_FLAG_VALUE(ByPassAllocaSizeHeuristic))
     {
         return true;
     }
 
     // if alloca size exceeds alloc size threshold, return false
-    if (allocaSize > allowedAllocaSizeInBytes)
+    if (isUniformAlloca)
+    {
+        unsigned int allocaUniform = iSTD::Round(allocaSizeInBytes, 8) / 8;
+
+        if (allocaUniform > allowedAllocaSizeInBytes)
+        {
+            return false;
+        }
+    }
+    else if (allocaSizeInBytes > allowedAllocaSizeInBytes)
     {
         return false;
     }
+
     // if no live range info
     if (!m_pRegisterPressureEstimate->isAvailable())
     {
@@ -324,14 +352,14 @@ bool LowerGEPForPrivMem::CheckIfAllocaPromotable(llvm::AllocaInst* pAlloca)
         }
     }
 
-    if (allocaSize + pressure > maxGRFPressure)
+    if (hwRegsPerAlloca + pressure > maxGRFPressure)
     {
         return false;
     }
     PromotedLiverange liverange;
     liverange.lowId = lowestAssignedNumber;
     liverange.highId = highestAssignedNumber;
-    liverange.varSize = allocaSize;
+    liverange.varSize = hwRegsPerAlloca;
     m_promotedLiveranges.push_back(liverange);
     return true;
 }
@@ -435,6 +463,12 @@ static bool CheckUsesForSOAAlyout(Instruction* I, bool& vectorSOA)
 
 bool IGC::CanUseSOALayout(AllocaInst* I, Type*& base)
 {
+    // Do not allow SOA layout for vla which will be stored on the stack.
+    // We don't support SOA layout for privates on stack at all so this is just to make
+    // the implementation simpler.
+    if (LowerGEPForPrivMem::IsVariableSizeAlloca(*I))
+        return false;
+
     // Don't even look at non-array allocas.
     // (extractAllocaDim can not handle them anyway, causing a crash)
     llvm::Type* pType = I->getType()->getPointerElementType();
@@ -598,9 +632,9 @@ void TransposeHelper::handleGEPInst(
             }
             else
             {
-                arr_sz = T->getVectorNumElements();
+                arr_sz = (unsigned)cast<VectorType>(T)->getNumElements();
             }
-            T = T->getVectorElementType();
+            T = cast<VectorType>(T)->getElementType();
         }
 
         pScalarizedIdx = IRB.CreateNUWAdd(pScalarizedIdx, GepOpnd);
@@ -634,7 +668,7 @@ static Value* loadEltsFromVecAlloca(
     // %v1 = extractelement <32 x float> %w, i32 %idx+1
     // replace all uses of %v with <%v0, %v1>
     IGC_ASSERT_MESSAGE((N > 1), "out of sync");
-    Type* Ty = VectorType::get(scalarType, N);
+    Type* Ty = IGCLLVM::FixedVectorType::get(scalarType, N);
     Value* Result = UndefValue::get(Ty);
 
     for (unsigned i = 0; i < N; ++i)
@@ -657,7 +691,7 @@ void TransposeHelperPromote::handleLoadInst(
     IRBuilder<> IRB(pLoad);
     IGC_ASSERT(nullptr != pLoad->getType());
     unsigned N = pLoad->getType()->isVectorTy()
-        ? pLoad->getType()->getVectorNumElements()
+        ? (unsigned)cast<VectorType>(pLoad->getType())->getNumElements()
         : 1;
     Value* Val = loadEltsFromVecAlloca(N, pVecAlloca, pScalarizedIdx, IRB, pLoad->getType()->getScalarType());
     pLoad->replaceAllUsesWith(Val);
@@ -689,7 +723,7 @@ void TransposeHelperPromote::handleStoreInst(
         // %v1 = extractelement <2 x float> %v, i32 1
         // %w1 = insertelement <32 x float> %w0, float %v1, i32 %idx+1
         // store <32 x float> %w1, <32 x float>* %ptr1
-        for (unsigned i = 0, e = pStoreVal->getType()->getVectorNumElements(); i < e; ++i)
+        for (unsigned i = 0, e = (unsigned)cast<VectorType>(pStoreVal->getType())->getNumElements(); i < e; ++i)
         {
             Value* VectorIdx = ConstantInt::get(pScalarizedIdx->getType(), i);
             auto Val = IRB.CreateExtractElement(pStoreVal, VectorIdx);

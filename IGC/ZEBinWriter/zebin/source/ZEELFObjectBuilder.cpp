@@ -39,16 +39,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 #endif
 
-#ifndef ZEBinStandAloneBuild
-#include "Probe/Assertion.h"
-#endif
-
-#ifdef ZEBinStandAloneBuild
-#define IGC_ASSERT(x) ((void)0)
-#define IGC_ASSERT_MESSAGE(x, m, ...) ((void)0)
-#endif
-
 #include <iostream>
+#include "Probe/Assertion.h"
 
 namespace zebin {
 
@@ -217,6 +209,20 @@ ZEELFObjectBuilder::addSectionData(
     Section& sect = addStandardSection(name, sectName, data, size, ELF::SHT_PROGBITS,
         padding, align, m_dataSections);
     return sect.id();
+}
+
+void
+ZEELFObjectBuilder::addSectionGTPinInfo(std::string name, const uint8_t* data, uint64_t size)
+{
+    // adjust the section name
+    std::string sectName;
+    if (name != "")
+        sectName = m_GTPinInfoName + "." + name;
+    else
+        sectName = m_GTPinInfoName;
+
+    addStandardSection(name, sectName,
+        data, size, SHT_ZEBIN_GTPIN_INFO, 0, 0, m_otherStdSections);
 }
 
 void

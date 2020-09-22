@@ -43,46 +43,18 @@ InstSplitPass::InstSplitPass(IR_Builder* builder) : m_builder(builder)
 //      - Instructions with indirect addressing other than 1x1 indirect region
 void InstSplitPass::run()
 {
-    auto hasIndirectAccess = [](G4_INST* inst)
-    {
-        G4_Operand* dst = inst->getDst();
-
-        if (dst && dst->getRegAccess() == IndirGRF)
-        {
-            return true;
-        }
-        for (int i = 0, srcNum = inst->getNumSrc(); i < srcNum; i++)
-        {
-            G4_Operand* src = inst->getSrc(i);
-            if (!src || !src->isSrcRegRegion())
-                continue;
-
-            const RegionDesc* rd = src->asSrcRegRegion()->getRegion();
-            if (src->getRegAccess() == IndirGRF && rd->isRegionWH())
-            {
-                return true;
-            }
-        }
-        return false;
-    };
-
     for (INST_LIST_ITER it = m_builder->instList.begin(), instlistEnd = m_builder->instList.end(); it != instlistEnd; ++it)
     {
         G4_INST* inst = *it;
 
-        if (inst->getExecSize() == 1)
+        if (inst->getExecSize() == g4::SIMD1)
         {
             continue;
         }
 
-        if (inst->isSend() || inst->opcode() == G4_label || inst->opcode() == G4_pln
-            || inst->opcode() == G4_return || inst->isFlowControl() || inst->isPseudoLogic())
-        {
-            continue;
-        }
-
-        // Skip inst with indirect access for now
-        if (hasIndirectAccess(inst))
+        if (inst->isSend() || inst->opcode() == G4_label ||
+            inst->opcode() == G4_pln || inst->opcode() == G4_return ||
+            inst->isFlowControl() || inst->isPseudoLogic())
         {
             continue;
         }
@@ -102,7 +74,7 @@ INST_LIST_ITER InstSplitPass::splitInstruction(INST_LIST_ITER it)
 {
     G4_INST* inst = *it;
     bool doSplit = false;
-    uint8_t execSize = inst->getExecSize();
+    G4_ExecSize execSize = inst->getExecSize();
 
     auto cross2GRF = [this](G4_Operand* opnd)
     {
@@ -149,7 +121,7 @@ INST_LIST_ITER InstSplitPass::splitInstruction(INST_LIST_ITER it)
 
     G4_opcode op = inst->opcode();
     int numSrc = inst->getNumSrc();
-    uint8_t newExecSize = execSize >> 1;
+    G4_ExecSize newExecSize {execSize / 2};
 
     G4_DstRegRegion* dst = inst->getDst();
     bool nullDst = dst && inst->hasNULLDst();
@@ -263,7 +235,10 @@ INST_LIST_ITER InstSplitPass::splitInstruction(INST_LIST_ITER it)
         }
 
         // Set new mask
-        bool needsMaskOffset = newCondMod || newPred;
+        // FIXME: To update the mask in a CM kernel, the inst's BB should be divergent.
+        //        However, at this stage BBs are not constructed yet.
+        bool isCMKernel = m_builder->kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM;
+        bool needsMaskOffset = newCondMod || newPred || (!isCMKernel && !inst->isWriteEnableInst());
         if (needsMaskOffset)
         {
             int newMaskOffset = inst->getMaskOffset() + (i == 0 ? 0 : newExecSize);
@@ -459,7 +434,7 @@ void InstSplitPass::computeDstBounds(G4_DstRegRegion* dstRegion, uint32_t& leftB
         {
             if (dstRegion->getRegAccess() == Direct)
             {
-                leftBound = offset + newregoff * G4_GRF_REG_NBYTES + subRegOff * typeSize;
+                leftBound = offset + newregoff * numEltPerGRF(Type_UB) + subRegOff * typeSize;
             }
             else
             {
@@ -532,7 +507,7 @@ void InstSplitPass::computeSrcBounds(G4_SrcRegRegion* srcRegion, uint32_t& leftB
         {
             if (srcRegion->getRegAccess() == Direct)
             {
-                leftBound = offset + newregoff * G4_GRF_REG_NBYTES + subRegOff * typeSize;
+                leftBound = offset + newregoff * numEltPerGRF(Type_UB) + subRegOff * typeSize;
             }
             else
             {

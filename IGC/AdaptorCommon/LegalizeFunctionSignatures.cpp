@@ -30,6 +30,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include <llvmWrapper/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include "llvm/IR/InstIterator.h"
@@ -122,9 +124,9 @@ inline bool isLegalReturnType(Type* ty, bool isStackCall)
 
 inline bool isLegalIntVectorType(Module& M, Type* ty)
 {
-    if (ty->isVectorTy() && ty->getVectorElementType()->isIntegerTy())
+    if (ty->isVectorTy() && cast<VectorType>(ty)->getElementType()->isIntegerTy())
     {
-        unsigned size = (unsigned)M.getDataLayout().getTypeSizeInBits(ty->getVectorElementType());
+        unsigned size = (unsigned)M.getDataLayout().getTypeSizeInBits(cast<VectorType>(ty)->getElementType());
         switch (size)
         {
         case 8:
@@ -143,10 +145,10 @@ inline Type* LegalizedIntVectorType(Module& M, const Type* const oldTy)
 {
     IGC_ASSERT(nullptr != oldTy);
     IGC_ASSERT(oldTy->isVectorTy());
-    IGC_ASSERT(nullptr != oldTy->getVectorElementType());
-    IGC_ASSERT(oldTy->getVectorElementType()->isIntegerTy());
+    IGC_ASSERT(nullptr != cast<VectorType>(oldTy)->getElementType());
+    IGC_ASSERT(cast<VectorType>(oldTy)->getElementType()->isIntegerTy());
 
-    const unsigned size = (unsigned)M.getDataLayout().getTypeSizeInBits(oldTy->getVectorElementType());
+    const unsigned size = (unsigned)M.getDataLayout().getTypeSizeInBits(cast<VectorType>(oldTy)->getElementType());
     unsigned newSize = 0;
 
     // Upscale the size to the next supported legal size
@@ -156,7 +158,7 @@ inline Type* LegalizedIntVectorType(Module& M, const Type* const oldTy)
     else if (size <= 64) newSize = 64;
     else IGC_ASSERT_MESSAGE(0, "Currently don't support upscaling int sizes > 64 bits");
 
-    return VectorType::get(IntegerType::get(M.getContext(), newSize), oldTy->getVectorNumElements());
+    return IGCLLVM::FixedVectorType::get(IntegerType::get(M.getContext(), newSize), (unsigned)cast<VectorType>(oldTy)->getNumElements());
 }
 
 void LegalizeFunctionSignatures::FixFunctionSignatures()
@@ -409,7 +411,7 @@ void LegalizeFunctionSignatures::FixCallInstruction(CallInst* callInst)
             }
             Type* retType = returnPtr ? Type::getVoidTy(callInst->getContext()) : callInst->getType();
             FunctionType* newFnTy = FunctionType::get(retType, argTypes, false);
-            Value* calledValue = callInst->getCalledValue();
+            Value* calledValue = IGCLLVM::getCalledValue(callInst);
             newCalledValue = m_pBuilder->CreatePointerCast(calledValue, PointerType::get(newFnTy, 0));
         }
         else

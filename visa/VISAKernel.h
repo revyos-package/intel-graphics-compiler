@@ -65,7 +65,6 @@ public:
     VISAKernelImpl(CISA_IR_Builder* cisaBuilder, VISA_BUILDER_OPTION buildOption, Options *option)
         : m_mem(4096), m_CISABuilder(cisaBuilder), m_options(option)
     {
-        //CisaBinary* module = NULL;
         mBuildOption = buildOption;
         m_magic_number = COMMON_ISA_MAGIC_NUM;
         m_major_version = 0;
@@ -81,7 +80,7 @@ public:
 
         m_string_pool_size = 0;
         m_var_info_size = 0;
-        m_adress_info_size = 0;
+        m_address_info_size = 0;
         m_predicate_info_size = 0;
         m_label_info_size = 0;
         m_input_info_size = 0;
@@ -142,10 +141,10 @@ public:
 
     virtual ~VISAKernelImpl();
 
-    void *operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); };
+    void *operator new(size_t sz, vISA::Mem_Manager& m) { return m.alloc(sz); };
     int InitializeKernel(const char *kernel_name);
     int CISABuildPreDefinedDecls();
-    void setVersion(unsigned char major_ver, unsigned char minor_ver){
+    void setVersion(unsigned char major_ver, unsigned char minor_ver) {
         m_major_version = major_ver;
         m_minor_version = minor_ver;
     }
@@ -220,7 +219,7 @@ public:
     void addPendingLabelNames(std::string name) { m_pending_label_names.push_back(name); }
     void setIsKernel(bool isKernel) { m_isKernel = isKernel; };
     bool getIsKernel() const { return m_isKernel; }
-    unsigned long getCodeOffset(){ return m_cisa_kernel.entry; }
+    unsigned long getCodeOffset() { return m_cisa_kernel.entry; }
 
     CISA_GEN_VAR * getDeclFromName(const std::string &name);
     bool setNameIndexMap(const std::string &name, CISA_GEN_VAR *, bool unique = false);
@@ -330,7 +329,7 @@ public:
     VISA_BUILDER_API int AppendVISAArithmeticInst(ISA_Opcode opcode, VISA_PredOpnd *pred, bool satMode, VISA_EMask_Ctrl emask,
         VISA_Exec_Size executionSize, VISA_VectorOpnd *tmpDst, VISA_VectorOpnd *src0, VISA_VectorOpnd *src1, VISA_VectorOpnd *src2);
 
-    VISA_BUILDER_API int AppendVISAArithmeticInst(ISA_Opcode opcode, VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
+    VISA_BUILDER_API int AppendVISATwoDstArithmeticInst(ISA_Opcode opcode, VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
         VISA_Exec_Size executionSize, VISA_VectorOpnd *dst1, VISA_VectorOpnd *carry_borrow, VISA_VectorOpnd *src0, VISA_VectorOpnd *src1);
 
     VISA_BUILDER_API int AppendVISALogicOrShiftInst(ISA_Opcode opcode, VISA_PredOpnd *pred, bool satMode, VISA_EMask_Ctrl emask,
@@ -663,7 +662,7 @@ public:
     /********** APPEND 3D Instructions END ******************/
 
     /********** MISC APIs START *************************/
-    VISA_BUILDER_API int GetGenxBinary(void *&buffer, int &size);
+    VISA_BUILDER_API int GetGenxBinary(void *&buffer, int &size) const;
     VISA_BUILDER_API int GetJitInfo(FINALIZER_INFO *&jitInfo);
     VISA_BUILDER_API int GetCompilerStats(CompilerStats &compilerStats);
     VISA_BUILDER_API int GetErrorMessage(const char *&errorMsg) const;
@@ -702,6 +701,9 @@ public:
 
     ///Gets gen binary size within instruction heap
     VISA_BUILDER_API int64_t getGenSize() const;
+
+    /// Get global function name
+    VISA_BUILDER_API const char* getFunctionName() const;
 
     //Gets the VISA string format for the variable
     VISA_BUILDER_API std::string getVarName(VISA_GenVar* decl) const;
@@ -747,7 +749,16 @@ public:
         unsigned int numMsgSpecificOpnds,
         VISA_RawOpnd **opndArray);
 
-    int AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* varName, unsigned int size, void *val);
+    attribute_info_t* allocAttribute(CISA_GEN_VAR* Dcl)
+    {
+        return allocAttributeImpl(Dcl, 0);
+    }
+    attribute_info_t* resizeAttribute(CISA_GEN_VAR* Dcl, uint32_t AllocMaxNum)
+    {
+        return allocAttributeImpl(Dcl, AllocMaxNum);
+    }
+
+    int AddAttributeToVarGeneric(CISA_GEN_VAR *decl, const char* varName, unsigned int size, const void *val);
 
     int CreateStateVar(CISA_GEN_VAR *&decl, Common_ISA_Var_Class type, const char* name, unsigned int numberElements);
 
@@ -759,9 +770,9 @@ public:
 
     int CreateDummyLabelOperand(VISA_LabelOpnd *& opnd, char *name, VISA_Label_Kind kind);
 
-    void setGenxBinaryBuffer(void *buffer, int size){ m_genx_binary_buffer = (char *)buffer; m_genx_binary_size = size; }
-    void setJitInfo(FINALIZER_INFO* jitInfo){ m_jitInfo = jitInfo; }
-    // char * getErrorMsgPtr(){ return errorMessage; }
+    void setGenxBinaryBuffer(void *buffer, int size) { m_genx_binary_buffer = (char *)buffer; m_genx_binary_size = size; }
+    void setJitInfo(FINALIZER_INFO* jitInfo) { m_jitInfo = jitInfo; }
+    // char * getErrorMsgPtr() { return errorMessage; }
 
     std::string getOutputAsmPath() const { return m_asmName; }
 
@@ -913,14 +924,14 @@ private:
     unsigned int m_num_pred_vars;
     //size of various arrays in kernel header.
     //used for buffer size allocation.
-    unsigned int m_string_pool_size; //done
-    unsigned int m_var_info_size; //done
-    unsigned int m_adress_info_size;
-    unsigned int m_predicate_info_size; //done
-    unsigned int m_label_info_size; //done
-    unsigned int m_input_info_size; //done
-    unsigned int m_attribute_info_size; //done
-    unsigned int m_instruction_size; //done
+    unsigned int m_string_pool_size;
+    unsigned int m_var_info_size;
+    unsigned int m_address_info_size;
+    unsigned int m_predicate_info_size;
+    unsigned int m_label_info_size;
+    unsigned int m_input_info_size;
+    unsigned int m_attribute_info_size;
+    unsigned int m_instruction_size;
     unsigned int m_surface_info_size;
     unsigned int m_sampler_info_size;
 
@@ -1044,11 +1055,18 @@ private:
     //memory managed by the entity that creates vISA Kernel object
     Options *m_options;
 
-    bool getIntKernelAttributeValue(const char* attrName, int& value);
     void createKernelAttributes() {
         void* pmem = m_mem.alloc(sizeof(vISA::Attributes));
         m_kernelAttrs = new (pmem) vISA::Attributes();
     }
+    void destroyKernelAttributes() {
+        // Even though attributes is allocated from m_mem, need to invoke dtor.
+        if (m_kernelAttrs) {
+            m_kernelAttrs->~Attributes();
+            m_kernelAttrs = nullptr;
+        }
+    }
+    attribute_info_t* allocAttributeImpl(CISA_GEN_VAR* Dcl, uint32_t AllocNum);
 
     // Shared with G4_kernel
     vISA::Attributes* m_kernelAttrs;

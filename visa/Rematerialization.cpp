@@ -59,8 +59,8 @@ namespace vISA
                         srcOpnd->isSrcRegRegion())
                     {
                         auto topdcl = srcOpnd->asSrcRegRegion()->getTopDcl();
-                        unsigned int startRow = srcOpnd->getLeftBound() / G4_GRF_REG_NBYTES;
-                        unsigned int endRow = srcOpnd->getRightBound() / G4_GRF_REG_NBYTES;
+                        unsigned int startRow = srcOpnd->getLeftBound() / numEltPerGRF(Type_UB);
+                        unsigned int endRow = srcOpnd->getRightBound() / numEltPerGRF(Type_UB);
                         if (topdcl)
                         {
                             auto dclIt = operations.find(topdcl);
@@ -477,6 +477,11 @@ namespace vISA
             uniqueDef->first->getCondMod())
             return false;
 
+        // It is illegal to rematerialize intrinsic.split instruction as it
+        // is dependent on an earlier send.
+        if (uniqueDef->first->isSplitIntrinsic())
+            return false;
+
         ref = uniqueDef;
 
         // Check whether op1 can be recomputed
@@ -741,7 +746,7 @@ namespace vISA
                     auto srcOpndUniqueDef = findUniqueDef(srcOpndRefs, srcOpndRgn);
 
                     bool isSrcAvailble = false;
-                    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM &&
+                    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM &&
                         uniqueDefBB == bb)
                     {
                         isSrcAvailble = checkLocalWAR(uniqueDefInst, bb, instIter);
@@ -836,13 +841,13 @@ namespace vISA
 
         if (!isSampler)
         {
-            unsigned int diffBound = dst->getRightBound() - (dst->getRegOff() * G4_GRF_REG_NBYTES);
+            unsigned int diffBound = dst->getRightBound() - (dst->getRegOff() * numEltPerGRF(Type_UB));
             unsigned numElems = (diffBound + 1) / G4_Type_Table[dst->getType()].byteSize;
             auto newTemp = kernel.fg.builder->createTempVar(numElems, dst->getType(), Any, "REMAT_");
             newTemp->copyAlign(dst->getTopDcl());
             gra.copyAlignment(newTemp, dst->getTopDcl());
             G4_DstRegRegion* newDst = kernel.fg.builder->createDst(newTemp->getRegVar(), 0,
-                (dst->getLeftBound() % G4_GRF_REG_NBYTES) / G4_Type_Table[dst->getType()].byteSize,
+                (dst->getLeftBound() % numEltPerGRF(Type_UB)) / G4_Type_Table[dst->getType()].byteSize,
                 dst->getHorzStride(), dst->getType());
             G4_INST* dupOp = nullptr;
 
@@ -895,7 +900,7 @@ namespace vISA
                 MUST_BE_TRUE(ops != operations.end(), "Didnt find record in map");
                 MUST_BE_TRUE((*ops).second.numUses == 1, "Expecting src0 to be used only in sampler");
 
-                auto newSrc0Dcl = kernel.fg.builder->createTempVar(src0TopDcl->getNumElems(),
+                auto newSrc0Dcl = kernel.fg.builder->createTempVar(src0TopDcl->getTotalElems(),
                     src0TopDcl->getElemType(), gra.getSubRegAlign(src0TopDcl));
 
                 // Clone all defining instructions for sampler's msg header
@@ -952,8 +957,8 @@ namespace vISA
     {
         G4_SrcRegRegion* rematSrc = nullptr;
 
-        unsigned row = (srcToRemat->getLeftBound() / G4_GRF_REG_NBYTES) - (uniqueDef->getLeftBound() / G4_GRF_REG_NBYTES);
-        unsigned subReg = (srcToRemat->getLeftBound() % G4_GRF_REG_NBYTES) / G4_Type_Table[srcToRemat->getType()].byteSize;
+        unsigned row = (srcToRemat->getLeftBound() / numEltPerGRF(Type_UB)) - (uniqueDef->getLeftBound() / numEltPerGRF(Type_UB));
+        unsigned subReg = (srcToRemat->getLeftBound() % numEltPerGRF(Type_UB)) / G4_Type_Table[srcToRemat->getType()].byteSize;
 
         rematSrc = kernel.fg.builder->createSrcRegRegion(srcToRemat->getModifier(), Direct,
             rematTemp->getRegVar(), (short)row, (short)subReg, srcToRemat->getRegion(), srcToRemat->getType());
@@ -1032,20 +1037,13 @@ namespace vISA
 
     void Rematerialization::run()
     {
-        //unsigned int before = getNumSamplers(kernel);
-
-        if (kernel.fg.builder->getOption(vISA_DumpDotAll))
-        {
-            kernel.dumpDotFile("before.remat");
-        }
-
         populateRefs();
 
         auto firstProgInst = kernel.fg.getEntryBB()->getFirstInst();
 
         for (auto bb : kernel.fg)
         {
-            if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISATarget::VISA_3D)
+            if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISATarget::VISA_3D)
             {
                 // For Cm, assume cr0 def is live across BBs
                 // For IGC, assume cr0 is reset at each BB entry

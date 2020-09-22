@@ -2434,7 +2434,7 @@ elseif(_igc_compiler_is_gnu)
       ALIAS OptimizeDisabled           "-O0"
       ALIAS OptimizeSize               "-Os"
       ALIAS OptimizeSpeed              "-O2"
-      ALIAS OptimizeFull               "-03"
+      ALIAS OptimizeFull               "-O3"
       ALIAS RtMultiThreadedStatic
       ALIAS RtMultiThreadedShared
       ALIAS RtMultiThreadedStaticDebug
@@ -3474,6 +3474,7 @@ if(IGC_BUILD__VC_ENABLED AND NOT CMAKE_WDDM_LINUX)
 endif()
 
 add_subdirectory(Compiler)
+add_subdirectory(DebugInfo)
 add_subdirectory(DriverInterface)
 igc_sg_define(IGC__DriverInterface)
 
@@ -3747,6 +3748,7 @@ list(APPEND _targetLinkLineCommon zebinlib)
       "${IGC_BUILD__PROJ__Compiler}"
       "${IGC_BUILD__PROJ__GenISAIntrinsics}"
       GenX_IR
+      LibDebugInfo
     )
 
   if(LLVM_ON_UNIX AND IGC_OPTION__BIF_LINK_BC)
@@ -3767,7 +3769,21 @@ list(APPEND _targetLinkLineCommon zebinlib)
   if(IGC_BUILD__VC_ENABLED)
     list(APPEND _targetLinkLineCommon
       ${IGC_BUILD__PROJ_VC_LIBS_TO_LINK}
-    )
+      )
+    if(_targetIsStatic)
+      # Add some VC headers for static library manually since there is
+      # no private target_link_libraries for static igc library and
+      # include directories are not propagated.
+      target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}"
+          PRIVATE
+            VCHeaders
+        )
+      get_target_property(VC_IGCDEPS_HEADERS VCIGCDeps INTERFACE_INCLUDE_DIRECTORIES)
+      target_include_directories("${IGC_BUILD__PROJ${_libBuildSuffix}}"
+          PRIVATE
+            ${VC_IGCDEPS_HEADERS}
+        )
+    endif()
   endif()
 
   list(APPEND _targetLinkLineCommon

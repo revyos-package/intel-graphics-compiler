@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvmWrapper/IR/Instructions.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/IGCPassSupport.h"
@@ -90,9 +91,9 @@ namespace IGC
     void CodeGenPatternMatch::CodeGenNode(llvm::DomTreeNode* node)
     {
         // Process blocks by processing the dominance tree depth first
-        for (uint i = 0; i < node->getNumChildren(); i++)
+        for (auto child = node->begin(); child != node->end(); ++child)
         {
-            CodeGenNode(node->getChildren()[i]);
+            CodeGenNode(*child);
         }
         llvm::BasicBlock* bb = node->getBlock();
         CodeGenBlock(bb);
@@ -1132,6 +1133,12 @@ namespace IGC
                 match = MatchURBRead(*CI) ||
                     MatchSingleInstruction(*CI);
                 break;
+            case GenISAIntrinsic::GenISA_UnmaskedRegionBegin:
+                match = MatchUnmaskedRegionBoundary(I, true);
+                break;
+            case GenISAIntrinsic::GenISA_UnmaskedRegionEnd:
+                match = MatchUnmaskedRegionBoundary(I, false);
+                break;
             default:
                 match = MatchSingleInstruction(I);
                 // no pattern for the rest of the intrinsics
@@ -1302,7 +1309,7 @@ namespace IGC
         };
 
         if (I.getType()->isIntegerTy(64) && I.getOperand(0)->getType()->isVectorTy() &&
-            I.getOperand(0)->getType()->getVectorElementType()->isIntegerTy(32))
+            cast<VectorType>(I.getOperand(0)->getType())->getElementType()->isIntegerTy(32))
         {
             if (auto IEI = dyn_cast<InsertElementInst>(I.getOperand(0)))
             {
@@ -1981,6 +1988,21 @@ namespace IGC
             m_ctx->m_DriverInfo.DisabeMatchMad())
         {
             return false;
+        }
+
+        using namespace llvm::PatternMatch;
+        Value* LHS = NULL, * RHS = NULL, * Op1 = NULL, * Op0 = NULL;
+        if (m_ctx->type == ShaderType::VERTEX_SHADER &&
+            m_ctx->m_DriverInfo.PreventZFighting() &&
+            (match(&I,m_BinOp(m_FMul(m_Value(LHS), m_Value(RHS)), m_Value(Op1))) ||
+             match(&I,m_BinOp(m_Value(Op0), m_FMul(m_Value(LHS), m_Value(RHS))))) &&
+            I.hasOneUse() && isa<IntrinsicInst>(I.user_back()))
+        {
+            auto fmul_val = Op0 != NULL ? I.getOperand(1) : I.getOperand(0);
+            auto fmul = cast<BinaryOperator>(fmul_val);
+            if (cast<IntrinsicInst>(I.user_back())->getIntrinsicID() == llvm::Intrinsic::sin &&
+                m_PosDep->PositionDependsOnInst(fmul) && NeedInstruction(*fmul))
+                return false;
         }
         if (IGC_IS_FLAG_ENABLED(DisableMatchMad))
         {
@@ -2893,8 +2915,8 @@ namespace IGC
                 llvm::Type* srcTy = bTInst->getOperand(0)->getType();
                 llvm::Type* dstTy = bTInst->getType();
 
-                srcNElts = (srcTy->isVectorTy()) ? srcTy->getVectorNumElements() : 1;
-                dstNElts = (dstTy->isVectorTy()) ? dstTy->getVectorNumElements() : 1;
+                srcNElts = (srcTy->isVectorTy()) ? (uint32_t)cast<VectorType>(srcTy)->getNumElements() : 1;
+                dstNElts = (dstTy->isVectorTy()) ? (uint32_t)cast<VectorType>(dstTy)->getNumElements() : 1;
 
                 if (srcNElts < dstNElts && srcTy->getScalarSizeInBits() < 64)
                 {
@@ -2993,7 +3015,7 @@ namespace IGC
             // Mark the function pointer in indirect calls as a source
             if (!callinst->getCalledFunction())
             {
-                MarkAsSource(callinst->getCalledValue());
+                MarkAsSource(IGCLLVM::getCalledValue(callinst));
             }
         }
         AddPattern(pattern);
@@ -3432,11 +3454,12 @@ namespace IGC
             Pattern* pattern;
             Instruction* alu;
             CmpInst* cmp;
+            int aluOprdNum = 0;  // 0: alu is src0; otherwise, alu is src1
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
                 IGC_ASSERT(modifier.flag == nullptr);
                 IGC_ASSERT(modifier.sat == false);
-                pass->emitAluConditionMod(pattern, alu, cmp);
+                pass->emitAluConditionMod(pattern, alu, cmp, aluOprdNum);
             }
         };
         bool found = false;
@@ -3452,6 +3475,7 @@ namespace IGC
                     IGC_ASSERT_MESSAGE(pattern->pattern, "Failed to match pattern");
                     pattern->alu = alu;
                     pattern->cmp = &I;
+                    pattern->aluOprdNum = 1 - i;
                     AddPattern(pattern);
                     found = true;
                     break;
@@ -3726,6 +3750,24 @@ namespace IGC
         pattern->sources[1] = GetSource(Amt, true, false);
         pattern->rotateOPCode = isROL ? EOPCODE_ROL : EOPCODE_ROR;
 
+        AddPattern(pattern);
+        return true;
+    }
+
+    bool CodeGenPatternMatch::MatchUnmaskedRegionBoundary(Instruction &I, bool start)
+    {
+        struct UnmaskedBoundaryPattern : public Pattern
+        {
+            bool start;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                (void) modifier;
+                pass->emitUnmaskedRegionBoundary(start);
+            }
+        };
+
+        UnmaskedBoundaryPattern* pattern = new (m_allocator) UnmaskedBoundaryPattern();
+        pattern->start = start;
         AddPattern(pattern);
         return true;
     }

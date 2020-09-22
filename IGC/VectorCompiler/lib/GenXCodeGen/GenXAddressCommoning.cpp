@@ -108,6 +108,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
+#include "Probe/Assertion.h"
+
+#include "llvmWrapper/Support/TypeSize.h"
 
 using namespace llvm;
 using namespace genx;
@@ -219,6 +222,9 @@ private:
   bool vectorizeAddrsFromOneVector(ArrayRef<Instruction *> Addrs);
   DominatorTree *getDominatorTree();
   bool isValueInCurrentFunc(Value *V);
+  unsigned getNumberElementsInAddrReg() const {
+    return 8;
+  }
 };
 
 } // end anonymous namespace
@@ -293,7 +299,7 @@ bool GenXAddressCommoning::processFunction(Function *F)
           // A write region may be baled into a g_store.
           LR = Liveness->getLiveRangeOrNull(Inst);
           if (!LR) {
-            assert(Inst->hasOneUse());
+            IGC_ASSERT(Inst->hasOneUse());
             auto SI = dyn_cast<StoreInst>(Inst->user_back());
             if (!SI)
               continue;
@@ -444,8 +450,8 @@ bool GenXAddressCommoning::processCommonAddrs(ArrayRef<Instruction *> Addrs)
   {
     std::set<Instruction *> AddrSet;
     for (auto i = Addrs.begin(), e = Addrs.end(); i != e; ++i) {
-      assert(AddrSet.insert(*i).second);
-      assert((*i)->getParent()->getParent() == F);
+      IGC_ASSERT(AddrSet.insert(*i).second);
+      IGC_ASSERT((*i)->getParent()->getParent() == F);
     }
   }
 #endif
@@ -455,7 +461,7 @@ bool GenXAddressCommoning::processCommonAddrs(ArrayRef<Instruction *> Addrs)
   SmallVector<int, 4> Offsets;
   for (unsigned i = 0, e = Addrs.size(); i != e; ++i) {
     int Offset = 0;
-    assert(Addrs[i]->hasOneUse());
+    IGC_ASSERT(Addrs[i]->hasOneUse());
     auto AddrUse = cast<Instruction>(Addrs[i]->use_begin()->getUser());
     if (GenXIntrinsic::getGenXIntrinsicID(AddrUse) ==
         GenXIntrinsic::genx_add_addr) {
@@ -533,7 +539,8 @@ bool GenXAddressCommoning::processCommonAddrs(ArrayRef<Instruction *> Addrs)
         Constant *C = ConstantInt::get(CommonOffsetVal->getType(),
               AdjustedOffset);
         if (auto VT = dyn_cast<VectorType>(Addr->getType()))
-          C = ConstantVector::getSplat(VT->getNumElements(), C);
+          C = ConstantVector::getSplat(
+              IGCLLVM::getElementCount(VT->getNumElements()), C);
         auto CI = createAddAddr(Addr, C,
             Addr->getName() + ".addaddr", AddAddr);
         *U = CI;
@@ -547,14 +554,15 @@ bool GenXAddressCommoning::processCommonAddrs(ArrayRef<Instruction *> Addrs)
         Constant *C = ConstantInt::get(CommonOffsetVal->getType(),
               AdjustedOffset);
         if (auto VT = dyn_cast<VectorType>(AddAddr->getOperand(1)->getType()))
-          C = ConstantVector::getSplat(VT->getNumElements(), C);
+          C = ConstantVector::getSplat(
+              IGCLLVM::getElementCount(VT->getNumElements()), C);
         AddAddr->setOperand(1, C);
         // Ensure the add_addr is baled in to the rdregion/wrregion that uses
         // it. (It was not if we have just created it, or if its offset was out
         // of range.) Also remove its live range.
-        assert(AddAddr->hasOneUse());
+        IGC_ASSERT(AddAddr->hasOneUse());
         auto User = cast<Instruction>(AddAddr->use_begin()->getUser());
-        assert(GenXIntrinsic::isRdRegion(User) || GenXIntrinsic::isWrRegion(User));
+        IGC_ASSERT(GenXIntrinsic::isRdRegion(User) || GenXIntrinsic::isWrRegion(User));
         auto BI = Baling->getBaleInfo(User);
         BI.setOperandBaled(AddAddr->use_begin()->getOperandNo());
         Baling->setBaleInfo(User, BI);
@@ -606,7 +614,7 @@ void GenXAddressCommoning::processCommonAddrsWithValidOffsets(
     // the address conversion does not appear to interfere with the operands
     // of a cmp baled into a conditional branch, but in practice this is not
     // a problem because the result of an address conversion is an address
-    // register and the 
+    // register and the
     unsigned Num = Numbering->getNumber(InsertBefore);
     Bale B;
     Baling->buildBale(Addrs[0], &B);
@@ -641,7 +649,7 @@ void GenXAddressCommoning::processCommonAddrsWithValidOffsets(
            Addr->eraseFromParent();
            EraseAddr = false;
 
-           assert(II->use_empty());
+           IGC_ASSERT(II->use_empty());
            Liveness->removeValue(II);
            II->eraseFromParent();
          }
@@ -728,12 +736,12 @@ void GenXAddressCommoning::addAddrConvIfExtract(
     Index = cast<Instruction>(Index)->getOperand(0);
   if (isa<Constant>(Index))
     return;
-  assert(GenXIntrinsic::getGenXIntrinsicID(Index) ==
+  IGC_ASSERT(GenXIntrinsic::getGenXIntrinsicID(Index) ==
          GenXIntrinsic::genx_convert_addr);
   auto RdR = dyn_cast<Instruction>(cast<Instruction>(Index)->getOperand(0));
   if (!GenXIntrinsic::isRdRegion(RdR))
     return;
-  assert(RdR);
+  IGC_ASSERT(RdR);
   if (!isa<Constant>(RdR->getOperand(GenXIntrinsic::GenXRegion::RdIndexOperandNum)))
     return;
   if (!RdR->hasOneUse())
@@ -752,7 +760,7 @@ void GenXAddressCommoning::addAddrConvIfExtract(
  *                      combined with corresponding region offset
  *          VecDef -- instruction definition from first extract
  *
- * This is subroutine of vectorizeAddrsFromOneVector, see more comments 
+ * This is subroutine of vectorizeAddrsFromOneVector, see more comments
  * in parent function. Idea of this subroutine is to convert whole
  * region if possible
  */
@@ -821,7 +829,7 @@ bool GenXAddressCommoning::tryConvertWholeRegion(SmallVector<Extract, 4> &Extrac
       *ui = NewExtract;
     }
     Liveness->removeValue(OldConv);
-    assert(!Liveness->getLiveRangeOrNull(OldExtract) && "expected extract to be baled in");
+    IGC_ASSERT(!Liveness->getLiveRangeOrNull(OldExtract) && "expected extract to be baled in");
     OldConv->eraseFromParent();
     OldExtract->eraseFromParent();
   }
@@ -867,11 +875,12 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
   }
   bool ConvertWholeRegion = false;
   Instruction *FirstRdR = cast<Instruction>(Extracts[0].Addr->getOperand(0));
-  assert(FirstRdR);
+  IGC_ASSERT(FirstRdR);
   Instruction *VecDef = cast<Instruction>(FirstRdR->getOperand(0));
-  assert(VecDef);
+  IGC_ASSERT(VecDef);
 
-  unsigned InputNumElements = VecDef->getType()->getVectorNumElements();
+  unsigned InputNumElements =
+      cast<VectorType>(VecDef->getType())->getNumElements();
 
   if (HasVector) {
     if (InputNumElements == 2 || InputNumElements == 4 ||
@@ -903,9 +912,9 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
   // if we tried to convert whole region and failed
   // we shall check that we will try to optimize further
   // correct extract set
-  assert(Extracts.size() > 0);
+  IGC_ASSERT(Extracts.size() > 0);
   Type *FirstType = Extracts[0].Addr->getOperand(0)->getType();
-  assert(FirstType);
+  IGC_ASSERT(FirstType);
 
   for (auto e : Extracts) {
     Type *Tp = e.Addr->getOperand(0)->getType();
@@ -917,9 +926,9 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
   for (unsigned Idx = 0, Num = 1, End = Extracts.size();
       Idx < End - 2; Idx += Num) {
     // See how many extracts we can take in one go that have evenly spaced
-    // offsets, max 8.
+    // offsets, max is the number of elements in address register.
     int Diff = Extracts[Idx + 1].Offset - Extracts[Idx].Offset;
-    for (Num = 2; Num != 8 && Num != End - Idx; ++Num)
+    for (Num = 2; Num != getNumberElementsInAddrReg() && Num != End - Idx; ++Num)
       if (Extracts[Idx + Num].Offset - Extracts[Idx + Num - 1].Offset != Diff)
         break;
     if (Num == 1)
@@ -934,8 +943,8 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
     R.NumElements = R.Width = Num;
     R.Stride = Diff / R.ElementBytes;
     // See how big we can legally make the region.
-    unsigned InputNumElements = FirstRdR
-          ->getOperand(0)->getType()->getVectorNumElements();
+    unsigned InputNumElements =
+        cast<VectorType>(FirstRdR->getOperand(0)->getType())->getNumElements();
     Num = R.getLegalSize(0, /*Allow2D=*/true, InputNumElements, ST);
     if (Num == 1)
       continue;
@@ -1003,7 +1012,7 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
       }
       Liveness->removeValue(OldConv);
       auto OldExtract = cast<Instruction>(OldConv->getOperand(0));
-      assert(!Liveness->getLiveRangeOrNull(OldExtract) && "expected extract to be baled in");
+      IGC_ASSERT(!Liveness->getLiveRangeOrNull(OldExtract) && "expected extract to be baled in");
       OldConv->eraseFromParent();
       OldExtract->eraseFromParent();
     }

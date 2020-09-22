@@ -85,7 +85,7 @@ public:
     static iga::ChannelOffset  getIGAChannelOffset(int offset);
     static iga::MaskCtrl       getIGAMaskCtrl(bool noMask);
     static iga::RegName        getIGAARFName(G4_ArchRegKind areg);
-    static iga::Type           getIGAType(G4_Type type);
+    static iga::Type           getIGAType(G4_Type type, TARGET_PLATFORM genxPlatform);
 
     /// getIGAInternalPlatform - a helper function to transform visa platform to iga platform
     static iga::Platform       getIGAInternalPlatform(TARGET_PLATFORM genxPlatform);
@@ -93,7 +93,7 @@ public:
     static iga::SWSB_ENCODE_MODE getIGASWSBEncodeMode(const IR_Builder& builder);
 
     static std::pair<iga::Op,iga::Subfunction> getIgaOpInfo(
-        G4_opcode op, const G4_INST *inst, iga::Platform p);
+        G4_opcode op, const G4_INST *inst, iga::Platform p, bool allowUnknownOp);
 private:
     static iga::PredCtrl getIGAPredCtrl(G4_Predicate_Control g4PredCntrl);
     static iga::Predication getIGAPredication(G4_Predicate* predG4);
@@ -177,8 +177,8 @@ private:
         if (base->isGreg())
         {
             uint32_t byteAddress = opnd->getLinearizedStart();
-            regRef.regNum = byteAddress / GENX_GRF_REG_SIZ;
-            regRef.subRegNum = (byteAddress % GENX_GRF_REG_SIZ) / G4_Type_Table[opnd->getType()].byteSize;
+            regRef.regNum = byteAddress / numEltPerGRF(Type_UB);
+            regRef.subRegNum = (byteAddress % numEltPerGRF(Type_UB)) / G4_Type_Table[opnd->getType()].byteSize;
         }
         else if (opnd->isSrcRegRegion())
         {

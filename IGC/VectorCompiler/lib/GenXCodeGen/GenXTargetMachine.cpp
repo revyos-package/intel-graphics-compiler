@@ -51,10 +51,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //===----------------------------------------------------------------------===//
 
 #include "GenXTargetMachine.h"
+
 #include "FunctionGroup.h"
 #include "GenX.h"
+#include "GenXBackendConfig.h"
+#include "GenXDebugInfo.h"
 #include "GenXModule.h"
 #include "GenXOCLRuntimeInfo.h"
+
 #include "vc/GenXOpts/GenXOpts.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/Passes.h"
@@ -77,9 +81,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace llvm;
 
-static cl::opt<bool> DumpRegAlloc("genx-dump-regalloc", cl::init(false), cl::Hidden,
-                  cl::desc("Enable dumping of GenX liveness and register allocation to a file."));
-
 static cl::opt<bool> EmitVLoadStore(
     "genx-emit-vldst", cl::init(true), cl::Hidden,
     cl::desc("Emit load/store intrinsic calls for pass-by-ref arguments"));
@@ -90,6 +91,7 @@ static std::string getDL(bool Is64Bit) {
 }
 
 namespace llvm {
+
 //===----------------------------------------------------------------------===//
 // This function is required to add GenX passes to opt tool
 //===----------------------------------------------------------------------===//
@@ -132,6 +134,8 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXVisaRegAllocPass(registry);
   initializeTransformPrivMemPass(registry);
   initializeGenXFunctionPointersLoweringPass(registry);
+  initializeGenXBackendConfigPass(registry);
+  initializeGenXImportBiFPass(registry);
 
   // WRITE HERE MORE PASSES IF IT'S NEEDED;
 }
@@ -148,10 +152,30 @@ namespace {
 class GenXPassConfig : public TargetPassConfig {
 public:
   GenXPassConfig(GenXTargetMachine &TM, PassManagerBase &PM)
-      : TargetPassConfig(TM, PM) {}
+      : TargetPassConfig(TM, PM) {
+    // Cannot add INITIALIZE_PASS with needed dependencies because ID
+    // is in parent TargetPassConfig class with its own initialization
+    // routine.
+    initializeGenXBackendConfigPass(*PassRegistry::getPassRegistry());
+  }
 
   GenXTargetMachine &getGenXTargetMachine() const {
     return getTM<GenXTargetMachine>();
+  }
+
+  // PassConfig will always be available: in BE it is created inside
+  // addPassesToEmitFile, opt creates it manually before adding other
+  // passes. BackendConfig will be either created manually with
+  // options structure or default-constructed using cl::opt values.
+  void getAnalysisUsage(AnalysisUsage &AU) const {
+    AU.addRequired<GenXBackendConfig>();
+    TargetPassConfig::getAnalysisUsage(AU);
+  }
+
+  // Should only be used after GenXPassConfig is added to PassManager.
+  // Otherwise getAnalysis won't work.
+  const GenXBackendConfig &getBackendConfig() const {
+    return getAnalysis<GenXBackendConfig>();
   }
 };
 
@@ -167,12 +191,17 @@ GenXTargetMachine::GenXTargetMachine(const Target &T, const Triple &TT,
                                  RM ? RM.getValue() : Reloc::Model::Static,
                                  CM ? CM.getValue() : CodeModel::Model::Small,
                                  OL),
-      Is64Bit(Is64Bit), Subtarget(TT, CPU, FS) {}
+      Is64Bit(Is64Bit), Subtarget(TT, CPU.str(), FS.str()) {}
 
 GenXTargetMachine::~GenXTargetMachine() = default;
 
+static GenXPassConfig *createGenXPassConfig(GenXTargetMachine &TM,
+                                            PassManagerBase &PM) {
+  return new GenXPassConfig(TM, PM);
+}
+
 TargetPassConfig *GenXTargetMachine::createPassConfig(PassManagerBase &PM) {
-  return new GenXPassConfig(*this, PM);
+  return createGenXPassConfig(*this, PM);
 }
 
 void GenXTargetMachine32::anchor() {}
@@ -211,7 +240,6 @@ extern "C" void LLVMInitializeGenXPasses() {
 //===----------------------------------------------------------------------===//
 // Pass Pipeline Configuration
 //===----------------------------------------------------------------------===//
-
 bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
                                             raw_pwrite_stream &o,
                                             raw_pwrite_stream * pi,
@@ -225,14 +253,9 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
       (FileType != IGCLLVM::TargetMachine::CodeGenFileType::CGFT_AssemblyFile))
     return true;
 
-  TargetPassConfig *PassConfig = createPassConfig(PM);
+  GenXPassConfig *PassConfig = createGenXPassConfig(*this, PM);
   PM.add(PassConfig);
-
-  // Wrapper structure for collecting information related to OCL runtime.
-  // Can be used by external caller by adding extractor pass in the end
-  // of compilation pipeline.
-  if (Subtarget.isOCLRuntime())
-    PM.add(new GenXOCLRuntimeInfo());
+  const GenXBackendConfig &BackendConfig = PassConfig->getBackendConfig();
 
   // Install GenX-specific TargetTransformInfo for passes such as
   // LowerAggrCopies and InfoAddressSpace
@@ -450,12 +473,22 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// .. include:: GenXVisaRegAlloc.h
   auto RegAlloc = createGenXVisaRegAllocPass();
   PM.add(RegAlloc);
-  if (DumpRegAlloc || Subtarget.dumpRegAlloc())
+  if (BackendConfig.enableRegAllocDump() || Subtarget.dumpRegAlloc())
     PM.add(createGenXGroupAnalysisDumperPass(RegAlloc, ".regalloc"));
 
   /// .. include:: GenXCisaBuilder.cpp
   PM.add(createGenXCisaBuilderPass());
   PM.add(createGenXFinalizerPass(o));
+  PM.add(createGenXDebugInfoPass());
+
+  // Analysis for collecting information related to OCL runtime. Can
+  // be used by external caller by adding extractor pass in the end of
+  // compilation pipeline.
+  // Explicit construction can be omitted because adding of extractor
+  // pass will create runtime info analysis. Leaving it exlicit for
+  // clarity.
+  if (Subtarget.isOCLRuntime())
+    PM.add(new GenXOCLRuntimeInfo());
 
   return false;
 }
@@ -471,6 +504,7 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
   // Packetize.
   auto AddPacketize = [](const PassManagerBuilder &Builder,
                          PassManagerBase &PM) {
+    PM.add(createGenXImportBiFPass());
     PM.add(createGenXPacketizePass());
     PM.add(createAlwaysInlinerLegacyPass());
     PM.add(createGlobalDCEPass());

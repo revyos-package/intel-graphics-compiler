@@ -80,7 +80,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "Probe/Assertion.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -342,7 +344,7 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
         if (TruncBits > NewBits)
           Opcode = Inst->getOpcode();
         auto ElTy = Type::getIntNTy(InsertBefore->getContext(), TruncBits);
-        auto Ty = VectorType::get(ElTy, NumElements);
+        auto Ty = IGCLLVM::FixedVectorType::get(ElTy, NumElements);
         NewInst = CastInst::Create((Instruction::CastOps)Opcode, NewVal,
             Ty, "", InsertBefore);
       }
@@ -376,7 +378,7 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
                 ->getNumElements();
             auto ElTy = Type::getIntNTy(InsertBefore->getContext(),
                   TruncBits);
-            auto Ty = VectorType::get(ElTy, NumElements);
+            auto Ty = IGCLLVM::FixedVectorType::get(ElTy, NumElements);
             auto NewScalar = CastInst::Create(Instruction::Trunc,
                 IE->getOperand(1), ElTy,
                 IE->getOperand(1)->getName() + ".reduceintsize", InsertBefore);
@@ -401,7 +403,7 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
     NewInst->takeName(Inst);
     NewVal = NewInst;
   }
-  assert(NewVal);
+  IGC_ASSERT(NewVal);
   // NewVal is the replacement for Inst with a smaller int size.
   LLVM_DEBUG(dbgs() << "GenXReduceIntSize::reverse: NewVal: " << *NewVal << "\n");
   // Replace the uses of Inst, which we know are all things that
@@ -443,7 +445,7 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
         if (ThisTruncBits != TruncBits) {
           // Need to trunc or extend our new instruction's result to match
           // the result of the "and".
-          assert(ThisNewVal);
+          IGC_ASSERT(ThisNewVal);
           auto NewCast = CastInst::Create(
               ThisTruncBits > TruncBits ? Instruction::ZExt : Instruction::Trunc,
               ThisNewVal, user->getType(), "", user);
@@ -460,7 +462,7 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
       }
       break;
     default:
-      assert(0 && "unexpected use");
+      IGC_ASSERT(0 && "unexpected use");
       break;
     }
   }
@@ -500,7 +502,7 @@ Value *GenXReduceIntSize::truncValue(Value *V, unsigned NumBits,
 {
   unsigned NumElements = cast<VectorType>(V->getType())->getNumElements();
   auto ElTy = Type::getIntNTy(InsertBefore->getContext(), NumBits);
-  auto Ty = VectorType::get(ElTy, NumElements);
+  auto Ty = IGCLLVM::FixedVectorType::get(ElTy, NumElements);
   if (Ty == V->getType())
     return V;
   if (auto C = dyn_cast<Constant>(V)) {
@@ -641,13 +643,14 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
     if (Value *V = getSplatValue(cast<ShuffleVectorInst>(Inst))) {
       // Transform "splat (ext v)" to "ext (splat v)".
       if (auto Ext = dyn_cast<ExtOperator>(V)) {
-        unsigned NumElts = Inst->getType()->getVectorNumElements();
+        unsigned NumElts = cast<VectorType>(Inst->getType())->getNumElements();
         IntegerType *I32Ty = Type::getInt32Ty(Inst->getContext());
-        VectorType *MaskTy = VectorType::get(I32Ty, NumElts);
+        VectorType *MaskTy = IGCLLVM::FixedVectorType::get(I32Ty, NumElts);
         Value *Mask = Constant::getNullValue(MaskTy);
         Value *Src = Ext->getOperand(0);
         if (!isa<VectorType>(Src->getType())) {
-          VectorType *VTy = VectorType::get(Src->getType(), NumElts);
+          VectorType *VTy =
+              IGCLLVM::FixedVectorType::get(Src->getType(), NumElts);
           Src =
               InsertElementInst::Create(UndefValue::get(VTy), Src,
                                         Constant::getNullValue(I32Ty), "",
@@ -663,22 +666,9 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
       }
     }
     break;
-  case Instruction::LShr: {
-      // LShr can just truncate as long as it does not need sign extending.
-      auto VNB0 = getValueNumBits(Inst->getOperand(0));
-      if (!VNB0.IsSignExtended)
-        TruncBits = VNB0.NumBits;
-    }
-    goto binop;
-  case Instruction::AShr: {
-      // AShr can just truncate as long as it does need sign extending.
-      auto VNB0 = getValueNumBits(Inst->getOperand(0),
-          /*PreferSigned=*/true);
-      if (VNB0.IsSignExtended) {
-        TruncBits = VNB0.NumBits;
-        NeedSignExtend = true;
-      }
-    }
+  case Instruction::LShr:
+    /*fallthrough*/
+  case Instruction::AShr:
     goto binop;
   case Instruction::And:
     {
@@ -932,7 +922,7 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
     }
     *Inst->use_begin() = Extended;
   }
-  // Erase Inst. Its operands may now become unused, in which case remove 
+  // Erase Inst. Its operands may now become unused, in which case remove
   // those too.
   auto Opnd0Inst = dyn_cast<Instruction>(Inst->getOperand(0));
   Instruction *Opnd1Inst = nullptr;
@@ -991,7 +981,8 @@ GenXReduceIntSize::ValueNumBits GenXReduceIntSize::getValueNumBits(
       if (Val >= 0)
         return ValueNumBits(64 - countLeadingZeros((uint64_t)Val, ZB_Width)
             + PreferSigned, /*IsSignExtended=*/PreferSigned);
-      return ValueNumBits(63 - countLeadingZeros((uint64_t)-Val, ZB_Undefined),
+      IGC_ASSERT(Val != std::numeric_limits<int64_t>::min());
+      return ValueNumBits(64 - countLeadingZeros((uint64_t)-Val, ZB_Undefined),
             /*IsSignExtended=*/true);
     }
     return NumBits;
@@ -1020,7 +1011,8 @@ GenXReduceIntSize::ValueNumBits GenXReduceIntSize::getValueNumBits(
 }
 
 Value *GenXReduceIntSize::getSplatValue(ShuffleVectorInst *SVI) const {
-  if (!SVI->getMask()->isNullValue())
+  auto ShuffleMask = SVI->getShuffleMask();
+  if (std::any_of(ShuffleMask.begin(), ShuffleMask.end(), [](int V) { return V != 0; }))
     return nullptr;
 
   Value *Src = SVI->getOperand(0);

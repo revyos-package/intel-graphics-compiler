@@ -1106,6 +1106,14 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
     {
         GII_id = GII->getIntrinsicID();
     }
+
+    const llvm::IntrinsicInst* llvmintrin = dyn_cast<llvm::IntrinsicInst>(inst);
+    if (llvmintrin != nullptr &&
+        (llvmintrin->getIntrinsicID() == llvm::Intrinsic::stacksave ||
+         llvmintrin->getIntrinsicID() == llvm::Intrinsic::stackrestore)) {
+        return WIAnalysis::UNIFORM;
+    }
+
     if (IsMathIntrinsic(intrinsic_name) ||
         intrinsic_name == llvm_input ||
         intrinsic_name == llvm_sgv ||
@@ -1139,7 +1147,8 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_slice_id ||
         GII_id == GenISAIntrinsic::GenISA_subslice_id ||
         GII_id == GenISAIntrinsic::GenISA_eu_id ||
-        GII_id == GenISAIntrinsic::GenISA_eu_thread_id)
+        GII_id == GenISAIntrinsic::GenISA_eu_thread_id ||
+        GII_id == GenISAIntrinsic::GenISA_hw_thread_id)
     {
         if (intrinsic_name == llvm_input ||
             intrinsic_name == llvm_shaderinputvec)
@@ -1150,6 +1159,12 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             {
                 return WIAnalysis::RANDOM;
             }
+        }
+
+        if (GII_id == GenISAIntrinsic::GenISA_hw_thread_id &&
+            m_CGCtx->platform.hasFusedEU())
+        {
+            return WIAnalysis::RANDOM;
         }
 
 

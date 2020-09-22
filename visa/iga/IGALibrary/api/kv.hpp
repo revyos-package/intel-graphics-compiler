@@ -68,7 +68,7 @@ public:
         iga_gen_t platf,
         const void *bytes,
         size_t bytesLength,
-        iga::SWSB_ENCODE_MODE swsb_mode,
+        iga::SWSB_ENCODE_MODE swsb_mode = iga::SWSB_ENCODE_MODE::SWSBInvalidMode,
         char *decodeLog = nullptr,
         size_t decodeLogLen = 0)
         : m_kv(nullptr)
@@ -297,6 +297,7 @@ public:
         return kv_get_number_sources(m_kv, pc);
     }
 
+
     // Fetches the message type for send/sends instructions.
     //
     // Returns:
@@ -520,12 +521,35 @@ public:
         return kv_get_source_immediate(m_kv, pc, src_op, imm);
     }
 
+    // Return the flag predicate mode
+    iga::PredCtrl getPredicate(int32_t pc) const
+    {
+        return static_cast<iga::PredCtrl>(kv_get_predicate(m_kv, pc));
+    }
+
+    // Return if inverse predicate is on or not
+    bool isInversePredicate(int32_t pc) const
+    {
+        return static_cast<bool>(kv_get_is_inverse_predicate(m_kv, pc));
+    }
+
+    // Return the flag register
+    int32_t getFlagReg(int32_t pc) const
+    {
+        return kv_get_flag_register(m_kv, pc);
+    }
+
+    // Return the flag sub register
+    int32_t getFlagSubReg(int32_t pc) const
+    {
+        return kv_get_flag_sub_register(m_kv, pc);
+    }
+
 private:
     // disable value assignment
     KernelView(const KernelView &) { }
     KernelView& operator = (const KernelView&) {return *this;}
 };
-
 
 inline kv_status_t KernelView::getMessageType(
     int32_t pc, iga::SFMessageType &sfmt) const

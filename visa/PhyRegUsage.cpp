@@ -89,11 +89,11 @@ void PhyRegUsage::markBusyForDclSplit(G4_RegFileKind kind,
     MUST_BE_TRUE(numRows > 0 && nunits > 0, ERROR_INTERNAL_ARGUMENT);
     MUST_BE_TRUE(regNum + numRows <= maxGRFCanBeUsed, ERROR_UNKNOWN);
 
-    unsigned start_GRF = (regNum * G4_GRF_REG_SIZE + regOff) / G4_GRF_REG_SIZE;
-    unsigned end_GRF = (regNum * G4_GRF_REG_SIZE + regOff + nunits) / G4_GRF_REG_SIZE;
+    unsigned start_GRF = (regNum * numEltPerGRF(Type_UW) + regOff) / numEltPerGRF(Type_UW);
+    unsigned end_GRF = (regNum * numEltPerGRF(Type_UW) + regOff + nunits) / numEltPerGRF(Type_UW);
 
-    unsigned start_sub_GRF = (regNum * G4_GRF_REG_SIZE + regOff) % G4_GRF_REG_SIZE;
-    unsigned end_sub_GRF = (regNum * G4_GRF_REG_SIZE + regOff + nunits) % G4_GRF_REG_SIZE;
+    unsigned start_sub_GRF = (regNum * numEltPerGRF(Type_UW) + regOff) % numEltPerGRF(Type_UW);
+    unsigned end_sub_GRF = (regNum * numEltPerGRF(Type_UW) + regOff + nunits) % numEltPerGRF(Type_UW);
 
     for (unsigned i = start_GRF; i < end_GRF; i++)
     {
@@ -231,7 +231,7 @@ int PhyRegUsage::findContiguousWords(
     int step = getSubAlignInWords(subAlign);
     int startWord = 0;
 
-    for (int i = startWord; i + numWords <= (int)G4_GRF_REG_SIZE; i += step)
+    for (int i = startWord; i + numWords <= (int)numEltPerGRF(Type_UW); i += step)
     {
         uint32_t bitMask = getSubregBitMask(i, numWords);
         if ((bitMask & words) == bitMask)
@@ -532,7 +532,7 @@ bool PhyRegUsage::findContiguousNoWrapGRF(bool availRegs[],
                 i++;
             }
             else if (occupiedBundles & (1 << gra.get_bundle(i, 0)) ||
-                     occupiedBundles & (1 << gra.get_bundle(i, 1)) )
+                     occupiedBundles & (1 << gra.get_bundle(i, 1)))
             {
                 i++;
             }
@@ -707,7 +707,7 @@ bool PhyRegUsage::canGRFSubRegAlloc(G4_Declare* decl)
 {
     if (decl->getNumRows() != 1) // more than 1 row
         return false;
-    if (numAllocUnit(decl->getNumElems(), decl->getElemType()) < G4_GRF_REG_SIZE)
+    if (numAllocUnit(decl->getNumElems(), decl->getElemType()) < numEltPerGRF(Type_UW))
         return true;
     return false;
 }
@@ -1011,7 +1011,7 @@ bool PhyRegUsage::assignRegs(bool  highInternalConflict,
 
     auto getAlignToUse = [](BankAlign align, BankAlign bankAlign)
     {
-        if(GlobalRA::useGenericAugAlign())
+        if (GlobalRA::useGenericAugAlign())
             return (align != BankAlign::Either ? align : bankAlign);
         else
             return (bankAlign != BankAlign::Either ? bankAlign : align);
@@ -1218,18 +1218,6 @@ void LiveRange::allocForbiddenVector(Mem_Manager& mem)
     }
 }
 
-unsigned int getStackCallRegSize(bool reserveStackCallRegs)
-{
-    if (reserveStackCallRegs)
-    {
-        return 3;
-    }
-    else
-    {
-        return 0;
-    }
-}
-
 void getForbiddenGRFs(vector<unsigned int>& regNum, G4_Kernel &kernel, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned rerservedRegNum)
 {
     // Push forbidden register numbers to vector regNum
@@ -1312,7 +1300,7 @@ void LiveRange::allocForbidden(Mem_Manager& mem, bool reserveStackCallRegs, unsi
     if (regKind == G4_GRF)
     {
         vector<unsigned int> forbiddenGRFs;
-        unsigned int stackCallRegSize = getStackCallRegSize(reserveStackCallRegs);
+        unsigned int stackCallRegSize = reserveStackCallRegs ? gra.kernel.numReservedABIGRF() : 0;
         getForbiddenGRFs(forbiddenGRFs, gra.kernel, stackCallRegSize, reserveSpillSize, rerservedRegNum);
 
         for (unsigned int i = 0; i < forbiddenGRFs.size(); i++)

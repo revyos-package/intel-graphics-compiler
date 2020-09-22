@@ -29,7 +29,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../../asserts.hpp"
 #include "../../Frontend/Formatter.hpp"
 #include "../../Frontend/IRToString.hpp"
-#include "../../IR/IRChecker.hpp"
+#include "../../IR/Checker/IRChecker.hpp"
 #include "../../IR/Messages.hpp"
 #include "../../IR/SWSBSetter.hpp"
 #include "../../MemManager/MemManager.hpp"
@@ -107,13 +107,11 @@ static Region macroDefaultSourceRegion(
 Decoder::Decoder(const Model &model, ErrorHandler &errHandler) :
     GEDBitProcessor(model,errHandler),
     m_gedModel(lowerPlatform(model.platform)),
+    m_SWSBEncodeMode(model.getSWSBEncodeMode()),
     m_kernel(nullptr),
     m_opSpec(nullptr),
     m_binary(nullptr)
 {
-    // Derived the swsb mode from plaform
-    if (m_SWSBEncodeMode == SWSB_ENCODE_MODE::SWSBInvalidMode)
-        m_SWSBEncodeMode = model.getSWSBEncodeMode();
     IGA_ASSERT(m_gedModel != GED_MODEL_INVALID, "invalid GED model");
 }
 

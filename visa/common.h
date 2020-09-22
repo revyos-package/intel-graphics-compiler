@@ -85,7 +85,7 @@ typedef uint16_t WORD;
 typedef double DOUBLE;
 typedef float FLOAT;
 
-#ifndef __LARGE_INTEGER_STRUCT_DEFINED
+#ifndef __LARGE_INTEGER_STRUCT_DEFINED__
 union LARGE_INTEGER {
     struct dummy {
         DWORD LowPart;
@@ -99,8 +99,8 @@ union LARGE_INTEGER {
 
     LONGLONG QuadPart;
 };
-#define __LARGE_INTEGER_STRUCT_DEFINED
-#endif /* __LARGE_INTEGER_STRUCT_DEFINED */
+#define __LARGE_INTEGER_STRUCT_DEFINED__
+#endif // __LARGE_INTEGER_STRUCT_DEFINED__
 
 #endif /* Windows types for non-Windows end */
 
@@ -234,9 +234,9 @@ PlatformGen getPlatformGeneration(TARGET_PLATFORM platform);
 extern "C" int getGenxPlatformEncoding();
 
 extern "C" void InitStepping();
-extern "C" int SetStepping( const char* s);
-extern "C" Stepping GetStepping( void );
-extern "C" const char * GetSteppingString( void );
+extern "C" int SetStepping(const char* s);
+extern "C" Stepping GetStepping(void);
+extern "C" const char * GetSteppingString(void);
 
 // Error types
 #define ERROR_UNKNOWN                       "ERROR: Unkown fatal internal error!"
@@ -255,13 +255,6 @@ extern "C" const char * GetSteppingString( void );
 #define ERROR_SYNTAX( x )                       "ERROR: Syntax error -- " << x << "!"
 #define ERROR_DATA_RANGE( x )           "ERROR: Out of boundary or invalid data value in " << x << "!"
 // end of Error Message
-
-#define G4_GRF_REG_SIZE    (getGRFSize() / 2u)
-#define G4_GRF_REG_NBYTES  getGRFSize()
-#define GENX_GRF_REG_SIZ   getGRFSize()
-#define NUM_WORDS_PER_GRF  (getGRFSize() / 2)
-#define NUM_DWORDS_PER_GRF (getGRFSize() / 4u)
-
 
 // Target should be specified as follows
 // - VISA builder mode in CreateBuilder API through fast-path

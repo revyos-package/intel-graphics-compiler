@@ -262,19 +262,21 @@ void CPixelShader::AllocatePSPayload()
     AllocateConstants3DShader(offset);
 
 
+    // Allocate size for attributes coming from VS
     IGC_ASSERT(offset % getGRFSize() == 0);
     unsigned int payloadEnd = offset;
-
-    //Allocate size for values coming from VS
     for (uint i = 0; i < setup.size(); i++)
     {
+
         if (setup[i] && setup[i]->GetAlias() == NULL)
         {
             uint subRegOffset = 0;
-            // PS uniform inputs are stored in the 3rd subreg
+            // PS uniform (constant interpolation) inputs
             if (setup[i]->GetSize() == SIZE_DWORD)
             {
-                subRegOffset = 3 * SIZE_DWORD;
+                {
+                    subRegOffset = 3 * SIZE_DWORD;
+                }
             }
             AllocateInput(setup[i], offset + subRegOffset);
             if (m_Signature)
@@ -283,6 +285,7 @@ void CPixelShader::AllocatePSPayload()
             }
             payloadEnd = offset;
         }
+
         else
         {
             offset += 4 * SIZE_DWORD;
@@ -290,6 +293,8 @@ void CPixelShader::AllocatePSPayload()
     }
 
     offset = payloadEnd;
+
+
     // create output registers for coarse phase
     calignmentSize as;
     for (auto it = m_CoarseOutput.begin(), ie = m_CoarseOutput.end(); it != ie; ++it)
@@ -712,8 +717,10 @@ void CPixelShader::InitEncoder(SIMDMode simdMode, bool canAbortOnSpill, ShaderDi
     CShader::InitEncoder(simdMode, canAbortOnSpill, shaderMode);
 }
 
+
 void CShaderProgram::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
 {
+
     const unsigned int InstCacheSize = 0xC000;
     CPixelShader* simd8Shader = static_cast<CPixelShader*>(GetShader(SIMDMode::SIMD8));
     CPixelShader* simd16Shader = static_cast<CPixelShader*>(GetShader(SIMDMode::SIMD16));
@@ -729,11 +736,9 @@ void CShaderProgram::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
         if ((!simd8Shader && !simd16Shader) ||
             (kernelSize > 0 && (kernelSize < InstCacheSize || forceSIMD32)))
         {
-            {
-                pKernelProgram->simd32 = *simd32Shader->ProgramOutput();
-                pShader = simd32Shader;
-                GetContext()->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
-            }
+            pKernelProgram->simd32 = *simd32Shader->ProgramOutput();
+            pShader = simd32Shader;
+            GetContext()->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
         }
         else if (kernelSize > 0 && (kernelSize < InstCacheSize))
         {
@@ -758,7 +763,6 @@ void CShaderProgram::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
             GetContext()->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
         }
     }
-
 
     if (pShader)
     {
@@ -830,27 +834,15 @@ void CPixelShader::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
     // PS packed attributes
     for (uint i = 0; i < setup.size(); i = i + 4)
     {
-        bool useComponent = true;
-        if (((i + 3) < setup.size()) && setup[i + 3])
-        {
-            pKernelProgram->attributeActiveComponent[i / 4] = USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XYZW;
-        }
-        else if (((i + 2) < setup.size()) && setup[i + 2])
-        {
-            pKernelProgram->attributeActiveComponent[i / 4] = USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XYZ;
-        }
-        else if ((((i + 1) < setup.size()) && setup[i + 1]) || setup[i])
-        {
-            pKernelProgram->attributeActiveComponent[i / 4] = USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XY;
-        }
-        else
-        {
-            useComponent = false;
-            pKernelProgram->attributeActiveComponent[i / 4] = USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_DISABLED;
-        }
+        const uint attribute = i / 4;
+
+        pKernelProgram->attributeActiveComponent[attribute] = GetActiveComponents(attribute);
+
+        const bool useComponent = pKernelProgram->attributeActiveComponent[attribute] !=
+            USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_DISABLED;
         if (useComponent)
         {
-            pKernelProgram->nbOfSFOutput = i / 4 + 1;
+            pKernelProgram->nbOfSFOutput = attribute + 1;
         }
     }
 
@@ -1103,7 +1095,9 @@ void CPixelShader::AddEpilogue(llvm::ReturnInst* ret)
         encoder.Push();
         encoder.Jump(flag, m_pixelPhaseLabel);
         encoder.Push();
-        EOTRenderTarget();
+        const bool isPerCoarse = true;
+        EOTRenderTarget(GetR1(), isPerCoarse);
+        m_hasEOT = true;
     }
     if (IsLastPhase())
     {
@@ -1204,7 +1198,8 @@ bool CPixelShader::CompileSIMDSize(SIMDMode simdMode, EmitPass& EP, llvm::Functi
         ctx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, EP.m_ShaderDispatchMode);
         return false;
     }
-    if (m_phase != PSPHASE_LEGACY && simdMode == SIMDMode::SIMD32)
+    if (m_phase != PSPHASE_LEGACY &&
+        simdMode == SIMDMode::SIMD32)
     {
         // Coarse pixel shader doesn't support SIMD32
         ctx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, EP.m_ShaderDispatchMode);
@@ -1409,10 +1404,12 @@ void CodeGen(PixelShaderContext* ctx)
         }
         pMdUtils = ctx->getMetaDataUtils();
     }
-    CShaderProgram::KernelShaderMap shaders;
 
     if (coarsePhase && pixelPhase)
-    {
+   {
+        CShaderProgram::KernelShaderMap coarseShaders;
+        CShaderProgram::KernelShaderMap pixelShaders;
+
         // Cancelling staged compilation for multi stage PS.
         ctx->m_CgFlag = FLAG_CG_ALL_SIMDS;
 
@@ -1425,13 +1422,12 @@ void CodeGen(PixelShaderContext* ctx)
         pixelFI = pMdUtils->getFunctionsInfoItem(pixelPhase);
 
         memset(&outputs, 0, 2 * sizeof(SPixelShaderKernelProgram));
+
         for (unsigned int i = 0; i < numStage; i++)
         {
             Function* phaseFunc = (i == 0) ? coarsePhase : pixelPhase;
             FunctionInfoMetaDataHandle phaseFI = (i == 0) ? coarseFI : pixelFI;
-
-            shaders.clear();
-
+            CShaderProgram::KernelShaderMap& shaders = (i == 0) ? coarseShaders : pixelShaders;
 
             pMdUtils->clearFunctionsInfo();
             pMdUtils->setFunctionsInfoItem(phaseFunc, phaseFI);
@@ -1439,12 +1435,24 @@ void CodeGen(PixelShaderContext* ctx)
             CodeGen(ctx, shaders, &signature);
 
             // Read the phase function from metadata again as it could be changed in the PushAnalysis pass
-            coarseNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_COARSE_PHASE);
-            pixelNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE);
+            if (i == 0)
+            {
+                coarseNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_COARSE_PHASE);
+            }
+            else
+            {
+                pixelNode = ctx->getModule()->getNamedMetadata(NAMED_METADATA_PIXEL_PHASE);
+            }
+        }
 
-            phaseFunc = ( i == 0) ?
+
+        for (unsigned int i = 0; i < numStage; i++)
+        {
+            Function* phaseFunc = (i == 0) ?
                 mdconst::dyn_extract<Function>(coarseNode->getOperand(0)->getOperand(0)) :
                 mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
+
+            CShaderProgram::KernelShaderMap& shaders = (i == 0) ? coarseShaders : pixelShaders;
 
             shaders[phaseFunc]->FillProgram(&outputs[i]);
             COMPILER_SHADER_STATS_PRINT(shaders[phaseFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");
@@ -1452,6 +1460,7 @@ void CodeGen(PixelShaderContext* ctx)
             COMPILER_SHADER_STATS_DEL(shaders[phaseFunc]->m_shaderStats);
             delete shaders[phaseFunc];
         }
+
         linkCPS(outputs, ctx->programOutput, numStage);
         // Kernels allocated in CISABuilder.cpp (Compile())
         // are freed in CompilerOutputOGL.hpp (DeleteShaderCompilerOutputOGL())
@@ -1467,6 +1476,8 @@ void CodeGen(PixelShaderContext* ctx)
     }
     else
     {
+        CShaderProgram::KernelShaderMap shaders;
+
         // Single PS
         CodeGen(ctx, shaders);
         // Assuming single shader information in metadata
@@ -1656,4 +1667,27 @@ void CPixelShader::MarkConstantInterpolation(unsigned int index)
 {
     m_ConstantInterpolationMask |= BIT(index / 4);
 }
+
+// Take PS attribute and return active components within, encoded as HW expects.
+USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT CPixelShader::GetActiveComponents(uint attribute) const
+{
+    // First component in the attrib
+    const uint component = 4 * attribute;
+    IGC_ASSERT(component < setup.size());
+
+    if (((component + 3) < setup.size()) && setup[component + 3])
+    {
+        return USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XYZW;
+    }
+    else if (((component + 2) < setup.size()) && setup[component + 2])
+    {
+        return USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XYZ;
+    }
+    else if ((((component + 1) < setup.size()) && setup[component + 1]) || setup[component])
+    {
+        return USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_XY;
+    }
+    return USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT_DISABLED;
+}
+
 } // namespace IGC

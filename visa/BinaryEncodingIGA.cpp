@@ -120,6 +120,15 @@ iga::InstOptSet BinaryEncodingIGA::getIGAInstOptSet(G4_INST* inst) const
             options.add(iga::InstOpt::SERIALIZE);
         }
     }
+
+    // Force instruction to be compacted if InstOpt::COMPACTED is given
+    // even if autoCompact is not given to IGA
+    if (inst->isCompactedInst())
+    {
+        options.add(iga::InstOpt::COMPACTED);
+    }
+
+    // Force instruction to be nocompacted
     if (inst->isNoCompactedInst())
     {
         options.add(iga::InstOpt::NOCOMPACT);
@@ -207,9 +216,18 @@ iga::MathFC BinaryEncodingIGA::getMathFC(const G4_INST *inst)
     }
 }
 
+//
+// Return the IGA op for the given vISA instruction <op> for platform p.
+// <inst> is sometimes necessary to compute the subopcode (e.g., send)
+// As vISA may call this function to access instruction properties such as
+// saturation and conditional modifier and this may happen before all pseudo
+// opperations are lowered, <allowUnknownOp> may be used to suppress assert;
+// an invalid will be returned in this case.
+//
 std::pair<iga::Op,iga::Subfunction> BinaryEncodingIGA::getIgaOpInfo(
-    G4_opcode op, const G4_INST *inst, iga::Platform p)
+    G4_opcode op, const G4_INST *inst, iga::Platform p, bool allowUnknownOp)
 {
+
     iga::Op igaOp = iga::Op::INVALID;
     iga::Subfunction sf = iga::InvalidFC::INVALID;
     switch (op)
@@ -325,10 +343,10 @@ std::pair<iga::Op,iga::Subfunction> BinaryEncodingIGA::getIgaOpInfo(
         break;
     case G4_pseudo_mad: igaOp = iga::Op::MAD; break;
     case G4_do:
-        ASSERT_USER(false, "G4_do is not GEN ISA OPCODE.");
+        ASSERT_USER(!allowUnknownOp, "G4_do is not GEN ISA OPCODE.");
         break;
     case G4_mulh:
-        ASSERT_USER(false, "G4_mulh is not GEN ISA OPCODE.");
+        ASSERT_USER(!allowUnknownOp, "G4_mulh is not GEN ISA OPCODE.");
         break;
     case G4_pseudo_and:   igaOp = iga::Op::AND; break;
     case G4_pseudo_or:    igaOp = iga::Op::OR; break;
@@ -338,12 +356,12 @@ std::pair<iga::Op,iga::Subfunction> BinaryEncodingIGA::getIgaOpInfo(
     case G4_pseudo_fret:  igaOp = iga::Op::RET; break;
     case G4_pseudo_sada2: igaOp = iga::Op::SADA2; break;
     case G4_pseudo_exit:
-        ASSERT_USER(false, "G4_pseudo_exit not GEN ISA OPCODE.");
+        ASSERT_USER(!allowUnknownOp, "G4_pseudo_exit not GEN ISA OPCODE.");
         break;
     case G4_pseudo_fc_call: igaOp = iga::Op::CALL; break;
     case G4_pseudo_fc_ret:  igaOp = iga::Op::RET; break;
     case G4_intrinsic:
-        ASSERT_USER(false, "G4_intrinsic not GEN ISA OPCODE.");
+        ASSERT_USER(!allowUnknownOp, "G4_intrinsic not GEN ISA OPCODE.");
         break;
     case G4_sync_nop:
         igaOp = iga::Op::SYNC;
@@ -358,8 +376,10 @@ std::pair<iga::Op,iga::Subfunction> BinaryEncodingIGA::getIgaOpInfo(
         sf = iga::SyncFC::ALLWR;
         break;
     case G4_NUM_OPCODE:
+        assert(false);
+        break;
     default:
-        ASSERT_USER(false, "INVALID opcode.");
+        ASSERT_USER(!allowUnknownOp, "INVALID opcode.");
         break;
     }
 
@@ -537,7 +557,7 @@ void BinaryEncodingIGA::Encode()
                     instTy = SWSB::InstType::OTHERS;
 
                 // Verify if swsb is in encode-able dist and token combination
-                if(!sw.verify(getIGASWSBEncodeMode(*kernel.fg.builder), instTy))
+                if (!sw.verify(getIGASWSBEncodeMode(*kernel.fg.builder), instTy))
                     IGA_ASSERT_FALSE("Invalid swsb dist and token combination");
                 igaInst->setSWSB(sw);
             }
@@ -564,7 +584,6 @@ void BinaryEncodingIGA::Encode()
 
     kernel.setAsmCount(IGAInstId);
 
-
     if (m_kernelBuffer)
     {
         m_kernelBufferSize = 0;
@@ -572,29 +591,26 @@ void BinaryEncodingIGA::Encode()
         m_kernelBuffer = nullptr;
     }
 
-    //Will compact only if Compaction flag is present
-    startTimer(TIMER_IGA_ENCODER);
-    bool autoCompact = true;
 
-    if (kernel.getOption(vISA_Compaction) == false)
-    {
-        autoCompact = false;
+    { // time the encoding
+        TIME_SCOPE(IGA_ENCODER);
+        bool autoCompact = kernel.getOption(vISA_Compaction);
+
+
+        KernelEncoder encoder(IGAKernel, autoCompact);
+        encoder.setSWSBEncodingMode(getIGASWSBEncodeMode(*kernel.fg.builder));
+
+        if (kernel.getOption(vISA_EnableIGASWSB))
+        {
+            encoder.enableIGAAutoDeps();
+        }
+
+        encoder.encode();
+
+        m_kernelBufferSize = encoder.getBinarySize();
+        m_kernelBuffer = allocCodeBlock(m_kernelBufferSize);
+        memcpy_s(m_kernelBuffer, m_kernelBufferSize, encoder.getBinary(), m_kernelBufferSize);
     }
-
-    KernelEncoder encoder(IGAKernel, autoCompact);
-    encoder.setSWSBEncodingMode(getIGASWSBEncodeMode(*kernel.fg.builder));
-
-    if (kernel.getOption(vISA_EnableIGASWSB))
-    {
-        encoder.enableIGAAutoDeps();
-    }
-
-    encoder.encode();
-
-    stopTimer(TIMER_IGA_ENCODER);
-    m_kernelBufferSize = encoder.getBinarySize();
-    m_kernelBuffer = allocCodeBlock(m_kernelBufferSize);
-    memcpy_s(m_kernelBuffer, m_kernelBufferSize, encoder.getBinary(), m_kernelBufferSize);
 
     // encodedPC is available after encoding
     for (auto&& inst : encodedInsts)
@@ -631,7 +647,7 @@ iga::Instruction *BinaryEncodingIGA::translateInstruction(
     G4_INST *g4inst, iga::Block*& bbNew)
 {
     iga::Instruction *igaInst = nullptr;
-    auto opinfo = getIgaOpInfo(g4inst->opcode(), g4inst, platformModel->platform);
+    auto opinfo = getIgaOpInfo(g4inst->opcode(), g4inst, platformModel->platform, false);
     iga::Op igaOp = opinfo.first;
     iga::Subfunction sf = opinfo.second;
     // common fields: op, predicate, flag reg, exec size, exec mask offset,
@@ -752,7 +768,8 @@ void BinaryEncodingIGA::translateInstructionDst(
     G4_DstRegRegion* dst = g4inst->getDst();
     DstModifier dstModifier = getIGADstModifier(g4inst->getSaturate());
     Region::Horz hstride = getIGAHorz(dst->getHorzStride());
-    Type type = getIGAType(dst->getType());
+    Type type;
+    type = getIGAType(dst->getType(), platform);
 
     // workaround for SKL bug
     // not all bits are copied from immediate descriptor
@@ -781,7 +798,6 @@ void BinaryEncodingIGA::translateInstructionDst(
     }
     else if (dst->getRegAccess() == Direct)
     {
-
         igaInst->setDirectDestination(
             dstModifier,
             getIGARegName(dst),
@@ -888,7 +904,7 @@ void BinaryEncodingIGA::translateInstructionSrcs(
             // let IGA take care of types for send/s instructions
             if (!igaInst->getOpSpec().isSendOrSendsFamily())
             {
-                type = getIGAType(src->getType());
+                type = getIGAType(src->getType(), platform);
             }
             else if (i == 0 && platform >= GENX_SKL && platform < GENX_ICLLP)
             {
@@ -948,7 +964,7 @@ void BinaryEncodingIGA::translateInstructionSrcs(
         }
         else if (src->isImm())
         {
-            Type type = getIGAType(src->getType());
+            Type type = getIGAType(src->getType(), platform);
             ImmVal val;
             val = src->asImm()->getImm();
             val.kind = getIGAImmType(src->getType());
@@ -1151,7 +1167,8 @@ iga::RegName BinaryEncodingIGA::getIGAARFName(G4_ArchRegKind areg)
     }
 }
 
-iga::Type BinaryEncodingIGA::getIGAType(G4_Type type)
+
+iga::Type BinaryEncodingIGA::getIGAType(G4_Type type, TARGET_PLATFORM genxPlatform)
 {
     switch (type)
     {

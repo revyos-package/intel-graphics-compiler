@@ -1165,25 +1165,6 @@ protected:
   SPIRVId CalledValueId;
 };
 
-class SPIRVFunctionPointerINTEL : public SPIRVInstruction {
-  const static Op OC = OpFunctionPointerINTEL;
-  const static SPIRVWord FixedWordCount = 4;
-public:
-  SPIRVFunctionPointerINTEL(SPIRVId TheId, SPIRVType* TheType,
-    SPIRVFunction* TheFunction, SPIRVBasicBlock* BB);
-  SPIRVFunctionPointerINTEL() : SPIRVInstruction(OC), TheFunction(SPIRVID_INVALID) {}
-  SPIRVFunction* getFunction() const { return SPIRVEntry::get<SPIRVFunction>(TheFunction); }
-  _SPIRV_DEF_DEC3_OVERRIDE(Type, Id, TheFunction)
-  void validate() const override;
-  bool isOperandLiteral(unsigned Index) const override { return false; }
-  CapVec getRequiredCapability() const override {
-    return getVec(CapabilityFunctionPointersINTEL);
-  }
-
-protected:
-  SPIRVId TheFunction;
-};
-
 class SPIRVExtInst: public SPIRVFunctionCallGeneric<OpExtInst, 5> {
 public:
   SPIRVExtInst(SPIRVExtInstSetKind SetKind = SPIRVEIS_Count,
@@ -1909,6 +1890,52 @@ _SPIRV_OP(SubgroupBallotKHR, true /*HasId*/, 4 /*WC*/, false /*VariWC*/)
 _SPIRV_OP(SubgroupFirstInvocationKHR, true /*HasId*/, 4 /*WC*/, false /*VariWC*/)
 #undef _SPIRV_OP
 
+class SPIRVAssumeTrueINTEL : public SPIRVInstruction {
+public:
+  static const Op OC = OpAssumeTrueINTEL;
+  static const SPIRVWord FixedWordCount = 2;
+
+  SPIRVAssumeTrueINTEL(SPIRVId TheCondition, SPIRVBasicBlock* BB)
+    : SPIRVInstruction(FixedWordCount, OC, BB), ConditionId(TheCondition) {
+    validate();
+    setHasNoId();
+    setHasNoType();
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
+  }
+
+  SPIRVAssumeTrueINTEL() : SPIRVInstruction(OC), ConditionId(SPIRVID_MAX) {
+    setHasNoId();
+    setHasNoType();
+  }
+
+  CapVec getRequiredCapability() const override {
+    return getVec(CapabilityOptimizationHintsINTEL);
+  }
+
+  SPIRVValue* getCondition() const { return getValue(ConditionId); }
+
+  void setWordCount(SPIRVWord TheWordCount) override {
+    SPIRVEntry::setWordCount(TheWordCount);
+  }
+  _SPIRV_DEF_DEC1_OVERRIDE(ConditionId)
+
+protected:
+    SPIRVId ConditionId;
+};
+
+class SPIRVExpectINTELInstBase : public SPIRVInstTemplateBase {
+protected:
+  CapVec getRequiredCapability() const override {
+    return getVec(CapabilityOptimizationHintsINTEL);
+  }
+};
+
+#define _SPIRV_OP(x, ...)                                                      \
+  typedef SPIRVInstTemplate<SPIRVExpectINTELInstBase, Op##x, __VA_ARGS__>      \
+      SPIRV##x;
+_SPIRV_OP(ExpectINTEL, true, 5)
+#undef _SPIRV_OP
+
 class SPIRVSubgroupShuffleINTELInstBase : public SPIRVInstTemplateBase {
 protected:
   CapVec getRequiredCapability() const override {
@@ -2122,6 +2149,20 @@ _SPIRV_OP(SicGetIpeChromaMode, true, 4)
 
 SPIRVSpecConstantOp *createSpecConstantOpInst(SPIRVInstruction *Inst);
 SPIRVInstruction *createInstFromSpecConstantOp(SPIRVSpecConstantOp *C);
+
+class SPIRVVariableLengthArrayINTELInstBase : public SPIRVInstTemplateBase {
+protected:
+    CapVec getRequiredCapability() const override {
+        return getVec(CapabilityVariableLengthArrayINTEL);
+    }
+};
+#define _SPIRV_OP(x, ...)                                                      \
+  typedef SPIRVInstTemplate<SPIRVVariableLengthArrayINTELInstBase,             \
+    Op##x##INTEL, __VA_ARGS__> SPIRV##x##INTEL;
+_SPIRV_OP(VariableLengthArray, true, 4)
+_SPIRV_OP(SaveMemory, true, 3)
+_SPIRV_OP(RestoreMemory, false, 2)
+#undef _SPIRV_OP
 }
 
 #endif // SPIRVINSTRUCTION_HPP_

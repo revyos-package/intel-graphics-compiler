@@ -117,7 +117,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 
+#include "Probe/Assertion.h"
 #include "llvmWrapper/Support/MathExtras.h"
+#include "llvmWrapper/Support/TypeSize.h"
 
 using namespace llvm;
 using namespace genx;
@@ -208,7 +210,7 @@ bool genx::loadNonSimpleConstants(Instruction *Inst,
 bool genx::loadConstantsForInlineAsm(
     CallInst *CI, SmallVectorImpl<Instruction *> *AddedInstructions,
     const GenXSubtarget *Subtarget) {
-  assert(CI->isInlineAsm() && "Inline asm expected");
+  IGC_ASSERT(CI->isInlineAsm() && "Inline asm expected");
   bool Modified = false;
   auto ConstraintsInfo = genx::getGenXInlineAsmInfo(CI);
   Use *U;
@@ -469,7 +471,7 @@ bool genx::loadConstants(Instruction *Inst,
         // is undefined and RAW_NULLALLOWED is enabled.
         if (AI.isRaw()) {
           if ((unsigned)AI.getArgIdx() >= MaxRawOperands) {
-            assert(C->isNullValue());
+            IGC_ASSERT(C->isNullValue());
             continue;
           }
           if (isa<UndefValue>(C) && AI.rawNullAllowed())
@@ -636,7 +638,7 @@ bool genx::loadPhiConstants(Function *F, DominatorTree *DT,
         // "true" successor of branching simd cf block. In this case we cannot
         // insert anything in current block and have to create partial
         // redundancy.
-        assert(InsertBB);
+        IGC_ASSERT(InsertBB);
         auto *InsertTerm = InsertBB->getTerminator();
         auto *SinglePred = InsertBB->getSinglePredecessor();
         if (InsertTerm->getNumSuccessors() == 1 &&
@@ -678,9 +680,9 @@ bool genx::loadPhiConstants(Function *F, DominatorTree *DT,
 }
 
 void ConstantLoader::fixSimple(int OperandIdx) {
-  assert(NewC &&
+  IGC_ASSERT(NewC &&
      "no need to fix simple case");
-  assert(User->getOperand(OperandIdx) == C &&
+  IGC_ASSERT(User->getOperand(OperandIdx) == C &&
       "wrong arguments: wrong operand index was provided");
   User->setOperand(OperandIdx, NewC);
   C = NewC;
@@ -699,11 +701,11 @@ void ConstantLoader::fixSimple(int OperandIdx) {
  */
 Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
 {
-  assert(!isSimple());
+  IGC_ASSERT(!isSimple());
   if (!isLegalSize())
     return loadBig(Inst);
   if (PackedFloat) {
-    unsigned NumElts = C->getType()->getVectorNumElements();
+    unsigned NumElts = cast<VectorType>(C->getType())->getNumElements();
     SmallVector<Instruction *, 4> Quads;
     for (unsigned i = 0, e = NumElts; i != e; i += 4) {
       SmallVector<Constant *, 4> Quad;
@@ -731,8 +733,8 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
       PackTy = Type::getInt32Ty(Inst->getContext());
     // Load as a packed int vector with scale and/or adjust.
     SmallVector<Constant *, 8> PackedVals;
-    for (unsigned i = 0, e = C->getType()->getVectorNumElements();
-        i != e; ++i) {
+    for (unsigned i = 0, e = cast<VectorType>(C->getType())->getNumElements();
+         i != e; ++i) {
       int64_t Val = 0;
       if (auto CI = dyn_cast<ConstantInt>(C->getAggregateElement(i))) {
         Val = CI->getSExtValue();
@@ -740,21 +742,29 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
         Val /= PackedIntScale;
       }
       PackedVals.push_back(ConstantInt::get(PackTy, Val, /*isSigned=*/true));
-      assert(cast<ConstantInt>(PackedVals.back())->getSExtValue() >= -8
+      IGC_ASSERT(cast<ConstantInt>(PackedVals.back())->getSExtValue() >= -8
           && cast<ConstantInt>(PackedVals.back())->getSExtValue() <= 15);
     }
     ConstantLoader Packed(ConstantVector::get(PackedVals));
     auto LoadPacked = Packed.load(Inst);
     if (PackedIntScale != 1)
-      LoadPacked = BinaryOperator::Create(Instruction::Mul, LoadPacked,
-          ConstantVector::getSplat(C->getType()->getVectorNumElements(),
-            ConstantInt::get(PackTy, PackedIntScale,
-            /*isSigned=*/true)), "constantscale", Inst);
+      LoadPacked = BinaryOperator::Create(
+          Instruction::Mul, LoadPacked,
+          ConstantVector::getSplat(
+              IGCLLVM::getElementCount(
+                  cast<VectorType>(C->getType())->getNumElements()),
+              ConstantInt::get(PackTy, PackedIntScale,
+                               /*isSigned=*/true)),
+          "constantscale", Inst);
     if (PackedIntAdjust)
-      LoadPacked = BinaryOperator::Create(Instruction::Add, LoadPacked,
-          ConstantVector::getSplat(C->getType()->getVectorNumElements(),
-            ConstantInt::get(PackTy, PackedIntAdjust,
-            /*isSigned=*/true)), "constantadjust", Inst);
+      LoadPacked = BinaryOperator::Create(
+          Instruction::Add, LoadPacked,
+          ConstantVector::getSplat(
+              IGCLLVM::getElementCount(
+                  cast<VectorType>(C->getType())->getNumElements()),
+              ConstantInt::get(PackTy, PackedIntAdjust,
+                               /*isSigned=*/true)),
+          "constantadjust", Inst);
     if (PackTy->getPrimitiveSizeInBits() < 
 		C->getType()->getScalarType()->getPrimitiveSizeInBits()) {
       LoadPacked = CastInst::CreateSExtOrBitCast(
@@ -786,7 +796,7 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
     // Gather the elements.
     for (unsigned i = 0; i != NumElements; ++i) {
       Constant *El = CDV->getElementAsConstant(i);
-      assert(!isa<UndefValue>(El) && "CDV element can't be undef");
+      IGC_ASSERT(!isa<UndefValue>(El) && "CDV element can't be undef");
       Elements.push_back(El);
     }
   } else {
@@ -927,17 +937,18 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
     if (!Result) {
       // For the first time round the loop, just splat the whole vector,
       // whatever BestSplatBits says.
-      Result =
-          loadConstant(ConstantVector::getSplat(NumElements, BestSplatSetConst),
-                       Inst, AddedInstructions, Subtarget);
+      Result = loadConstant(
+          ConstantVector::getSplat(IGCLLVM::getElementCount(NumElements),
+                                   BestSplatSetConst),
+          Inst, AddedInstructions, Subtarget);
       Result->setDebugLoc(Inst->getDebugLoc());
     } else {
       // Not the first time round the loop. Set up the splatted subvector,
       // and write it as a region.
       Region R(BestSplatSetBits,
           VT->getElementType()->getPrimitiveSizeInBits() / 8);
-      Constant *NewConst = ConstantVector::getSplat(R.NumElements,
-          BestSplatSetConst);
+      Constant *NewConst = ConstantVector::getSplat(
+          IGCLLVM::getElementCount(R.NumElements), BestSplatSetConst);
       Result = cast<Instruction>(R.createWrConstRegion(Result, NewConst, "constant",
             Inst, Inst->getDebugLoc()));
       if (AddedInstructions)
@@ -1066,7 +1077,7 @@ Instruction *ConstantLoader::loadSplatConstant(Instruction *InsertPos) {
  */
 Instruction *ConstantLoader::load(Instruction *InsertBefore)
 {
-  assert(isSimple());
+  IGC_ASSERT(isSimple());
   // Do not splat load on byte data as HW does not support byte imm source.
   if (!C->getType()->getScalarType()->isIntegerTy(8))
     if (auto NewInst = loadSplatConstant(InsertBefore))
@@ -1115,12 +1126,12 @@ Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
       return loadNonSimple(InsertBefore);
     return load(InsertBefore);
   }
-  assert(!C->getType()->getScalarType()->isIntegerTy(1) && "not expecting predicate in here");
+  IGC_ASSERT(!C->getType()->getScalarType()->isIntegerTy(1) && "not expecting predicate in here");
   if (Constant *Consolidated = getConsolidatedConstant(C)) {
     // Load as a consolidated constant, then bitcast to the correct type.
     auto Load = ConstantLoader(Consolidated, nullptr, AddedInstructions, Subtarget)
           .loadBig(InsertBefore);
-    assert(Load);
+    IGC_ASSERT(Load);
     Load = CastInst::Create(Instruction::BitCast, Load, C->getType(),
         Load->getName() + ".cast", InsertBefore);
     if (AddedInstructions)
@@ -1188,7 +1199,7 @@ bool ConstantLoader::isLegalSize()
  */
 bool ConstantLoader::isBigSimple()
 {
-  assert(!needFixingSimple() &&
+  IGC_ASSERT(!needFixingSimple() &&
       "simple case shall be fixed first before this call");
   if (isa<UndefValue>(C))
     return true; // undef is simple
@@ -1209,7 +1220,7 @@ bool ConstantLoader::isBigSimple()
  */
 bool ConstantLoader::isSimple()
 {
-  assert(!needFixingSimple() &&
+  IGC_ASSERT(!needFixingSimple() &&
       "simple case shall be fixed first before this call");
   if (isa<UndefValue>(C))
     return true; // undef is simple (and generates no vISA code)
@@ -1372,13 +1383,14 @@ void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
   }
   if (Elements.empty()) {
     // Constant is undef.
-    assert(C == UndefValue::get(C->getType()) &&
+    IGC_ASSERT(C == UndefValue::get(C->getType()) &&
            "constant consists only of undef elements only if it's undef itself");
     return;
   }
   if (Elements.size() == 1) {
     // All but one element undef. Turn into a splat constant.
-    NewC = ConstantVector::getSplat(NumElements, SomeDefinedElement);
+    NewC = ConstantVector::getSplat(IGCLLVM::getElementCount(NumElements),
+                                    SomeDefinedElement);
     return;
   }
   int64_t ResArith;
@@ -1425,7 +1437,7 @@ void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
     if (DiffsSet.insert(AbsDiff).second)
       Diffs.push_back(AbsDiff);
   }
-  assert(!Diffs.empty() && "not expecting splatted constant");
+  IGC_ASSERT(!Diffs.empty() && "not expecting splatted constant");
   // Calculate the GCD (greatest common divisor) of the diffs
   uint64_t GCD = Diffs[0];
   if (Diffs.size() > 1) {

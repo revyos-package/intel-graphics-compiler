@@ -468,6 +468,7 @@
     bool hasBankCollision() const
     {
         return (getPlatformGeneration(getPlatform()) <= PlatformGen::GEN11) ||
+        (getGenxPlatform() == GENX_TGLLP) ||
         (getOption(vISA_enableBCR) && !hasEarlyGRFRead());
     }
 
@@ -577,9 +578,10 @@
         return SFID::SPAWNER;
     }
 
-    uint32_t getNativeExecSize() const
+    // EU native execution size for 32-bit types
+    G4_ExecSize getNativeExecSize() const
     {
-        return 8;
+        return g4::SIMD8;
     }
 
     bool noScalarByteToFloat() const
@@ -619,7 +621,7 @@
 
     bool avoidDstSrcOverlap()
     {
-        return false;
+        return getPlatform() >= GENX_ICLLP && getOption(vISA_DstSrcOverlapWA);
     }
 
     bool hasTwoGRFMathMacro() const
@@ -632,10 +634,25 @@
         return !noFP64();
     }
 
+    bool hasFixedCycleMathPipeline()
+    {
+        return false;
+    }
 
     bool hasByteALU() const
     {
         return true;
+    }
+
+    bool supportsSampler() const
+    {
+        return true;
+    }
+
+
+    int get3SrcDstAlign() const
+    {
+        return 8;
     }
 
     // end HW capabilities

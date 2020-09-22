@@ -78,8 +78,9 @@ namespace IGC {
         bool runOnModule(llvm::Module& M) override;
 
         /// @brief  Resolve collected alloca instructions.
+        /// @param privateOnStack: whether the private variables are allocated on the stack
         /// @return true if there were resolved alloca, false otherwise.
-        bool resolveAllocaInstructions(bool stackCall);
+        bool resolveAllocaInstructions(bool privateOnStack);
 
         /// Initialize setup like UseScratchSpacePrivateMemory.
         bool safeToUseScratchSpace(llvm::Module& M) const;
@@ -127,13 +128,17 @@ namespace IGC {
         ModuleAllocaInfo& operator=(const ModuleAllocaInfo&) = delete;
 
         /// \brief Return the offset of alloca instruction in private memory buffer.
-        unsigned getBufferOffset(AllocaInst* AI) const {
+        //  This function should not be called when AI is variable length alloca
+        unsigned getConstBufferOffset(AllocaInst* AI) const {
+            IGC_ASSERT(isa<ConstantInt>(AI->getArraySize()));
             Function* F = AI->getParent()->getParent();
             return getFuncAllocaInfo(F)->AllocaDesc[AI].first;
         }
 
         /// \brief Return the size of alloca instruction in private memory buffer.
-        unsigned getBufferSize(AllocaInst* AI) const {
+        //  This function should not be called when AI is variable length alloca
+        unsigned getConstBufferSize(AllocaInst* AI) const {
+            IGC_ASSERT(isa<ConstantInt>(AI->getArraySize()));
             Function* F = AI->getParent()->getParent();
             return getFuncAllocaInfo(F)->AllocaDesc[AI].second;
         }
@@ -285,6 +290,7 @@ void ModuleAllocaInfo::analyze(Function* F, unsigned& Offset,
             Alignment = DL->getABITypeAlignment(AI->getAllocatedType());
         return Alignment;
     };
+
     std::sort(Allocas.begin(), Allocas.end(),
         [=](AllocaInst* AI1, AllocaInst* AI2) {
         return getAlignment(AI1) < getAlignment(AI2);
@@ -299,8 +305,11 @@ void ModuleAllocaInfo::analyze(Function* F, unsigned& Offset,
         if (Alignment > MaxAlignment)
             MaxAlignment = Alignment;
 
-        // Compute alloca size.
-        IGC_ASSERT(isa<ConstantInt>(AI->getArraySize()));
+        // Compute alloca size. We don't know the variable length
+        // alloca size so skip it.
+        if (!isa<ConstantInt>(AI->getArraySize())) {
+            continue;
+        }
         ConstantInt* const SizeVal = cast<ConstantInt>(AI->getArraySize());
         IGC_ASSERT(nullptr != SizeVal);
         unsigned CurSize = (unsigned)(SizeVal->getZExtValue() *
@@ -496,8 +505,9 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
             continue;
         }
         bool hasStackCall = (FGA && FGA->getGroup(m_currFunction)->hasStackCall()) || m_currFunction->hasFnAttribute("visaStackCall");
+        bool hasVLA = (FGA && FGA->getGroup(m_currFunction)->hasVariableLengthAlloca()) || m_currFunction->hasFnAttribute("hasVLA");
         // Resolve collected alloca instructions for current function
-        changed |= resolveAllocaInstructions(hasStackCall);
+        changed |= resolveAllocaInstructions(hasStackCall || hasVLA);
     }
 
     if (changed)
@@ -637,7 +647,8 @@ public:
             Type* scalarptrTy = PointerType::get(scalarType, pLoad->getPointerAddressSpace());
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = UndefValue::get(pLoad->getType());
-            for (unsigned i = 0, e = pLoad->getType()->getVectorNumElements(); i < e; ++i)
+            auto pLoadVT = cast<VectorType>(pLoad->getType());
+            for (unsigned i = 0, e = (unsigned)pLoadVT->getNumElements(); i < e; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
                 Value* v = IRB.CreateLoad(ptr);
@@ -674,7 +685,9 @@ public:
             Type* scalarptrTy = PointerType::get(scalarType, pStore->getPointerAddressSpace());
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = pStore->getValueOperand();
-            for (unsigned i = 0, e = pStore->getValueOperand()->getType()->getVectorNumElements(); i < e; ++i)
+
+            unsigned vecNumElts = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
+            for (unsigned i = 0; i < vecNumElts; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
                 IRB.CreateStore(IRB.CreateExtractElement(vec, IRB.getInt32(i)), ptr);
@@ -731,14 +744,15 @@ bool PrivateMemoryResolution::testTransposedMemory(const Type* pTmpType, const T
         else if(pTmpType->isArrayTy())
         {
             tmpAllocaSize *= pTmpType->getArrayNumElements();
-            pTmpType = pTmpType->getSequentialElementType();
+            pTmpType = pTmpType->getContainedType(0);
             ok = (nullptr != pTmpType);
             IGC_ASSERT(ok);
         }
         else if(pTmpType->isVectorTy())
         {
-            tmpAllocaSize *= pTmpType->getVectorNumElements();
-            pTmpType = pTmpType->getSequentialElementType();
+            auto pTmpVType = cast<VectorType>(pTmpType);
+            tmpAllocaSize *= pTmpVType->getNumElements();
+            pTmpType = pTmpType->getContainedType(0);
             ok = (nullptr != pTmpType);
             IGC_ASSERT(ok);
         }
@@ -765,7 +779,7 @@ bool PrivateMemoryResolution::testTransposedMemory(const Type* pTmpType, const T
     return ok;
 }
 
-bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
+bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
 {
     // It is possible that there is no alloca instruction in the caller but there
     // is alloca in the callee. Save the total private memory to the metadata.
@@ -784,7 +798,15 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
         return false;
     }
 
-    sinkAllocas(allocaInsts);
+    // Disable sinking of alloca when optimizations are disabled. allocas (and associated bitcasts) dont
+    // contain any DebugLoc. Emitting low/high_pc for inlined subprograms becomes messy as allocas appear
+    // in subprogram prolog without any debug info. This makes debug info assume alloca code belongs to
+    // main program causing a break in low/high_pc of such subprograms. Not sinking allocas makes them
+    // appear in entry block of entry function. All such allocas get treated as being in prolog of
+    // entry function. This results in live-range extension, but with -O0 this is not a problem as debugging
+    // experience is more important than extra spills.
+    if(!modMD->compOpt.OptDisable)
+        sinkAllocas(allocaInsts);
     // If there are N+1 private buffers, and M+1 threads,
     // the layout representing the private memory will look like this:
 
@@ -833,10 +855,9 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
     IF_DEBUG_INFO_IF(DISubprogram *subprogram = m_currFunction->getSubprogram(), entryDebugLoc = DebugLoc::get(subprogram->getLine(), 0, subprogram););
     IF_DEBUG_INFO(entryBuilder.SetCurrentDebugLocation(entryDebugLoc));
 
-    if (stackCall)
+    if (privateOnStack)
     {
         // Creates intrinsics that will be lowered in the CodeGen and will handle the stack-pointer
-        Function* stackAllocaFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_StackAlloca);
         Instruction* simdLaneId16 = entryBuilder.CreateCall(simdLaneIdFunc, llvm::None, VALUE_NAME("simdLaneId16"));
         Value* simdLaneId = entryBuilder.CreateIntCast(simdLaneId16, typeInt32, false, VALUE_NAME("simdLaneId"));
         Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
@@ -846,26 +867,49 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
             llvm::IRBuilder<> builder(pAI);
             IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
 
-            // SP will be adjusted to include all the alloca space, therefore offset need to be adjusted back
-            int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI) - totalPrivateMemPerWI;
-            unsigned int bufferSize = m_ModAllocaInfo->getBufferSize(pAI);
-
-            Value* bufferOffset = builder.CreateMul(simdSize, ConstantInt::get(typeInt32, scalarBufferOffset), VALUE_NAME(pAI->getName() + ".SIMDBufferOffset"));
-            Value* increment = isUniform ? builder.getInt32(0) : simdLaneId;
-            Value* perLaneOffset = builder.CreateMul(increment, ConstantInt::get(typeInt32, bufferSize), VALUE_NAME("perLaneOffset"));
-            Value* totalOffset = builder.CreateAdd(bufferOffset, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
-            Value* stackAlloca = builder.CreateCall(stackAllocaFunc, totalOffset, VALUE_NAME("stackAlloca"));
-            Value* privateBuffer = builder.CreatePointerCast(stackAlloca, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
-            auto DbgUses = llvm::FindDbgAddrUses(pAI);
-            for (auto Use : DbgUses)
+            // buffer of this private var
+            Value* privateBuffer = nullptr;
+            if (!isa<ConstantInt>(pAI->getArraySize()))
             {
-                if (auto DbgDcl = dyn_cast_or_null<DbgDeclareInst>(Use))
+                // vla array must be AOS layout on stack
+                Value* increment = isUniform ? builder.getInt32(0) : simdLaneId;
+                // truncate alloca size to i32
+                Value* arraySize = builder.CreateTrunc(pAI->getArraySize(), increment->getType(), VALUE_NAME("TruncVLASize"));
+                Value* sizeWithType = builder.CreateMul(arraySize,
+                    builder.getInt32(static_cast<uint32_t>(m_currFunction->getParent()->getDataLayout().getTypeAllocSize(pAI->getAllocatedType()))),
+                    VALUE_NAME("VLASizeWithType"));
+                Value* perLaneOffset = builder.CreateMul(increment, sizeWithType, VALUE_NAME("VLAPerLaneOffset"));
+                // Create VLAStackAlloca intrinsic which will set private buffer offset to "SP + laneOffset",
+                // and set SP to "SP + buffer_size" in visa emitPass
+                Value* intrinArgs[] = { perLaneOffset, sizeWithType };
+                Function* stackAllocaFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_VLAStackAlloca);
+                Value* stackAlloca = builder.CreateCall(stackAllocaFunc, intrinArgs , VALUE_NAME("VLAStackAlloca"));
+                privateBuffer = builder.CreatePointerCast(stackAlloca, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
+            }
+            else
+            {
+                int scalarBufferOffset = m_ModAllocaInfo->getConstBufferOffset(pAI);
+                unsigned int bufferSize = m_ModAllocaInfo->getConstBufferSize(pAI);
+
+                Value* bufferOffset = builder.CreateMul(simdSize, ConstantInt::get(typeInt32, scalarBufferOffset), VALUE_NAME(pAI->getName() + ".SIMDBufferOffset"));
+                Value* increment = isUniform ? builder.getInt32(0) : simdLaneId;
+                Value* perLaneOffset = builder.CreateMul(increment, ConstantInt::get(typeInt32, bufferSize), VALUE_NAME("perLaneOffset"));
+                Value* totalOffset = builder.CreateAdd(bufferOffset, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
+                Function* stackAllocaFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_StackAlloca);
+                Value* stackAlloca = builder.CreateCall(stackAllocaFunc, totalOffset, VALUE_NAME("stackAlloca"));
+                privateBuffer = builder.CreatePointerCast(stackAlloca, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
+                auto DbgUses = llvm::FindDbgAddrUses(pAI);
+                for (auto Use : DbgUses)
                 {
-                    // Attach metadata to instruction containing offset of storage
-                    auto OffsetMD = MDNode::get(builder.getContext(), ConstantAsMetadata::get(builder.getInt32(scalarBufferOffset)));
-                    DbgDcl->setMetadata("StorageOffset", OffsetMD);
+                    if (auto DbgDcl = dyn_cast_or_null<DbgDeclareInst>(Use))
+                    {
+                        // Attach metadata to instruction containing offset of storage
+                        auto OffsetMD = MDNode::get(builder.getContext(), ConstantAsMetadata::get(builder.getInt32(scalarBufferOffset)));
+                        DbgDcl->setMetadata("StorageOffset", OffsetMD);
+                    }
                 }
             }
+
             // Replace all uses of original alloca with the bitcast
             pAI->replaceAllUsesWith(privateBuffer);
             pAI->eraseFromParent();
@@ -911,7 +955,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
             IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
 
             // Get buffer information from the analysis
-            unsigned int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI);
+            unsigned int scalarBufferOffset = m_ModAllocaInfo->getConstBufferOffset(pAI);
 
             // If we can use SOA layout transpose the memory
             Type* pTypeOfAccessedObject = nullptr;
@@ -922,11 +966,11 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
             {
                 auto DL = &m_currFunction->getParent()->getDataLayout();
                 bufferSize = (unsigned)DL->getTypeAllocSize(pTypeOfAccessedObject);
-                IGC_ASSERT(testTransposedMemory((pAI->getType()->getPointerElementType()), pTypeOfAccessedObject, bufferSize, (m_ModAllocaInfo->getBufferSize(pAI))));
+                IGC_ASSERT(testTransposedMemory((pAI->getType()->getPointerElementType()), pTypeOfAccessedObject, bufferSize, (m_ModAllocaInfo->getConstBufferSize(pAI))));
             }
             else
             {
-                bufferSize = m_ModAllocaInfo->getBufferSize(pAI);
+                bufferSize = m_ModAllocaInfo->getConstBufferSize(pAI);
             }
 
 
@@ -1012,8 +1056,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool stackCall)
         IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
         bool isUniform = pAI->getMetadata("uniform") != nullptr;
         // Get buffer information from the analysis
-        unsigned int scalarBufferOffset = m_ModAllocaInfo->getBufferOffset(pAI);
-        unsigned int bufferSize = m_ModAllocaInfo->getBufferSize(pAI);
+        unsigned int scalarBufferOffset = m_ModAllocaInfo->getConstBufferOffset(pAI);
+        unsigned int bufferSize = m_ModAllocaInfo->getConstBufferSize(pAI);
 
         Value* bufferOffset = builder.CreateMul(simdSize, ConstantInt::get(typeInt32, scalarBufferOffset), VALUE_NAME(pAI->getName() + ".SIMDBufferOffset"));
         Value* bufferOffsetForThread = builder.CreateAdd(perThreadOffset, bufferOffset, VALUE_NAME(pAI->getName() + ".bufferOffsetForThread"));

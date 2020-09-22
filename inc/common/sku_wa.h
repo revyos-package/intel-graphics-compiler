@@ -268,6 +268,8 @@ typedef struct _SKU_FEATURE_TABLE
         unsigned int   FtrOSManagedAllocations  : 1;
         unsigned int   FtrCsResponseEventOptimization : 1;
         unsigned int   FtrRuntimeLogBuffer            : 1;
+        unsigned int   FtrLocalMemory                 : 1;
+
     };
 
     struct
@@ -8474,6 +8476,17 @@ typedef struct _WA_TABLE
         WA_BUG_TYPE_UNKNOWN,
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
 
+        WA_DECLARE(
+        Wa_1607871015,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
+        Wa_22011157800,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
 } WA_TABLE, *PWA_TABLE;
 
 #ifdef _USC_

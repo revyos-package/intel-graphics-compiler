@@ -32,6 +32,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "common/IGCIRBuilder.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPop.hpp"
 #include <list>
@@ -44,6 +45,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace llvm;
 using namespace IGC;
+using IGCLLVM::getAlign;
 
 // Register pass to igc-opt
 #define PASS_FLAG "igc-constant-coalescing"
@@ -311,7 +313,7 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
         {
             if (load->getType()->isVectorTy() && (wiAns->whichDepend(load) == WIAnalysis::UNIFORM))
             {
-                srcNElts = load->getType()->getVectorNumElements();
+                srcNElts = (uint32_t)cast<VectorType>(load->getType())->getNumElements();
                 DenseMap<uint64_t, Instruction*> extractElementMap;
 
                 for (auto iter = load->user_begin(); iter != load->user_end(); iter++)
@@ -395,7 +397,7 @@ bool ConstantCoalescing::isProfitableLoad(
             (isa<LoadInst>(I) && wiAns->whichDepend(I) == WIAnalysis::UNIFORM) ?
             16 : 4;
 
-        if (LoadTy->getVectorNumElements() > MaxVectorInput)
+        if (cast<VectorType>(LoadTy)->getNumElements() > MaxVectorInput)
             return false;
 
         MaxEltPlus = CheckVectorElementUses(I);
@@ -929,7 +931,7 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
         load->replaceAllUsesWith(load0);
         return;
     }
-    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
+    Type* vty = IGCLLVM::FixedVectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
     irBuilder->SetInsertPoint(load0);
     if (isa<LoadInst>(cov_chunk->chunkIO))
     {
@@ -939,11 +941,13 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
         unsigned addrSpace = (cast<PointerType>(addr_ptr->getType()))->getAddressSpace();
         if (addrSpace == ADDRESS_SPACE_CONSTANT)
         {
-            // no GEP, OCL path
-            IGC_ASSERT(isa<IntToPtrInst>(addr_ptr));
+            // OCL path
+            IGC_ASSERT(
+                isa<IntToPtrInst>(addr_ptr) ||
+                isa<BitCastInst>(addr_ptr)  ||
+                cast<GetElementPtrInst>(addr_ptr)->hasAllZeroIndices());
             Value* eac = cast<Instruction>(addr_ptr)->getOperand(0);
             // non-uniform, address must be non-uniform
-            IGC_ASSERT(isa<Instruction>(eac));
             // modify the address calculation if the chunk-start is changed
             if (eltid0 != cov_chunk->chunkStart)
             {
@@ -951,11 +955,12 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
             }
             // new IntToPtr and new load
             // cannot use irbuilder to create IntToPtr. It may create ConstantExpr instead of instruction
-            Value* ptrcast = IntToPtrInst::Create(Instruction::IntToPtr, eac, PointerType::get(vty, addrSpace), "twoScalar", load0);
+            auto* ptrcast = CastInst::CreateBitOrPointerCast(
+                eac, PointerType::get(vty, addrSpace), "twoScalar", load0);
             m_TT->RegisterNewValueAndAssignID(ptrcast);
             wiAns->incUpdateDepend(ptrcast, WIAnalysis::RANDOM);
             cov_chunk->chunkIO = irBuilder->CreateLoad(ptrcast, false);
-            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(MaybeAlign(4)); // \todo, more precise
+            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(getAlign(4)); // \todo, more precise
             wiAns->incUpdateDepend(cov_chunk->chunkIO, WIAnalysis::RANDOM);
         }
         else
@@ -963,7 +968,7 @@ void ConstantCoalescing::CombineTwoLoads(BufChunk* cov_chunk, Instruction* load,
             IGC_ASSERT(isa<IntToPtrInst>(addr_ptr));
             addr_ptr->mutateType(PointerType::get(vty, addrSpace));
             cov_chunk->chunkIO = irBuilder->CreateLoad(addr_ptr, false);
-            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(MaybeAlign(4));  // \todo, more precise
+            cast<LoadInst>(cov_chunk->chunkIO)->setAlignment(getAlign(4));  // \todo, more precise
             wiAns->incUpdateDepend(cov_chunk->chunkIO, WIAnalysis::RANDOM);
             // modify the address calculation if the chunk-start is changed
             if (eltid0 != cov_chunk->chunkStart)
@@ -1030,7 +1035,7 @@ void ConstantCoalescing::SetAlignment(Instruction* load, uint alignment)
 
     if (isa<LoadInst>(load))
     {
-        cast<LoadInst>(load)->setAlignment(MaybeAlign(alignment));
+        cast<LoadInst>(load)->setAlignment(getAlign(alignment));
     }
     else
     {
@@ -1054,7 +1059,7 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
     }
 
     const Type* LoadEltTy = load->getType()->getScalarType();
-    const uint scalarSizeInBytes = LoadEltTy->getPrimitiveSizeInBits() / 8;
+    const uint scalarSizeInBytes = (const uint)(LoadEltTy->getPrimitiveSizeInBits() / 8);
 
     IGC_ASSERT(isPowerOf2_32(alignment));
     IGC_ASSERT(0 != scalarSizeInBytes);
@@ -1517,7 +1522,7 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
                 }
             }
         }
-        Type* vty = VectorType::get(load->getType()->getScalarType(), chunk->chunkSize);
+        Type* vty = IGCLLVM::FixedVectorType::get(load->getType()->getScalarType(), chunk->chunkSize);
         unsigned addrSpace = (cast<PointerType>(cb_ptr->getType()))->getAddressSpace();
         PointerType* pty = PointerType::get(vty, addrSpace);
         // cannot use irbuilder to create IntToPtr. It may create ConstantExpr instead of instruction
@@ -1527,7 +1532,7 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
         ptr->setDebugLoc(irBuilder->getCurrentDebugLocation());
         wiAns->incUpdateDepend(ptr, WIAnalysis::UNIFORM);
         chunkLoad = irBuilder->CreateLoad(ptr);
-        chunkLoad->setAlignment(MaybeAlign(alignment));
+        chunkLoad->setAlignment(getAlign(alignment));
         chunk->chunkIO = chunkLoad;
     }
     else
@@ -1548,7 +1553,7 @@ Instruction* ConstantCoalescing::CreateChunkLoad(Instruction* seedi, BufChunk* c
                 eac = chunk->baseIdxV;
             }
         }
-        Type* vty = VectorType::get(ldRaw->getType()->getScalarType(), chunk->chunkSize);
+        Type* vty =IGCLLVM::FixedVectorType::get(ldRaw->getType()->getScalarType(), chunk->chunkSize);
         Type* types[] =
         {
             vty,
@@ -1632,7 +1637,7 @@ void ConstantCoalescing::AdjustChunk(BufChunk* cov_chunk, uint start_adj, uint s
     cov_chunk->chunkStart -= start_adj;
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
-    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
+    Type* vty = IGCLLVM::FixedVectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
     cov_chunk->chunkIO->mutateType(vty);
     // change the dest ptr-type on bitcast
     if (isa<LoadInst>(cov_chunk->chunkIO))
@@ -1783,7 +1788,7 @@ void ConstantCoalescing::AdjustChunk(BufChunk* cov_chunk, uint start_adj, uint s
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < originalType->getVectorNumElements(); i++)
+        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1847,7 +1852,7 @@ void ConstantCoalescing::MoveExtracts(BufChunk* cov_chunk, Instruction* load, ui
             irBuilder->SetInsertPoint(load->getNextNode());
             Type* vecType = load->getType();
             Value* vec = UndefValue::get(vecType);
-            for (unsigned i = 0; i < vecType->getVectorNumElements(); i++)
+            for (unsigned i = 0; i < cast<VectorType>(vecType)->getNumElements(); i++)
             {
                 Value* channel = irBuilder->CreateExtractElement(
                     cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1869,7 +1874,7 @@ void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
     cov_chunk->chunkSize += size_adj;
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
-    Type* vty = VectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
+    Type* vty = IGCLLVM::FixedVectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);
     cov_chunk->chunkIO->mutateType(vty);
     if (isa<LoadInst>(cov_chunk->chunkIO))
     {
@@ -1911,7 +1916,7 @@ void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < originalType->getVectorNumElements(); i++)
+        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i));
@@ -2090,7 +2095,7 @@ void ConstantCoalescing::ScatterToSampler(
     const uint loadSizeInBytes = (unsigned int)load->getType()->getPrimitiveSizeInBits() / 8;
 
     IGC_ASSERT(nullptr != (load->getType()));
-    IGC_ASSERT((!load->getType()->isVectorTy()) || (load->getType()->getVectorNumElements() <= 4));
+    IGC_ASSERT((!load->getType()->isVectorTy()) || (cast<VectorType>(load->getType())->getNumElements() <= 4));
 
     const bool useByteAddress = m_ctx->m_DriverInfo.UsesTypedConstantBuffersWithByteAddress();
 
@@ -2205,7 +2210,7 @@ Instruction* ConstantCoalescing::CreateSamplerLoad(Value* index, uint addrSpace)
 {
     unsigned int AS = addrSpace;
     PointerType* resourceType = PointerType::get(irBuilder->getFloatTy(), AS);
-    Type* types[] = { llvm::VectorType::get(irBuilder->getFloatTy(), 4), resourceType };
+    Type* types[] = { IGCLLVM::FixedVectorType::get(irBuilder->getFloatTy(), 4), resourceType };
     Function* l = GenISAIntrinsic::getDeclaration(curFunc->getParent(),
         llvm::GenISAIntrinsic::GenISA_ldptr,
         types);
@@ -2236,8 +2241,8 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
     IGC_ASSERT(nullptr != srcTy);
     IGC_ASSERT(nullptr != dstTy);
     IGC_ASSERT(srcTy->isVectorTy());
-    IGC_ASSERT(srcTy->getVectorElementType());
-    IGC_ASSERT(srcTy->getVectorElementType()->isFloatTy());
+    IGC_ASSERT(cast<VectorType>(srcTy)->getElementType());
+    IGC_ASSERT(cast<VectorType>(srcTy)->getElementType()->isFloatTy());
 
     const uint dstSizeInBytes = (unsigned int)dstTy->getPrimitiveSizeInBits() / 8;
 
@@ -2271,7 +2276,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
         // bitcast to the destination type
         const uint numElem = (dstSizeInBytes + 3) / 4;
         const uint firstElem = offsetInBytes / 4;
-        result = UndefValue::get(VectorType::get(srcTy->getVectorElementType(), numElem));
+        result = UndefValue::get(IGCLLVM::FixedVectorType::get(cast<VectorType>(srcTy)->getElementType(), numElem));
         for (uint i = 0; i < numElem; ++i)
         {
             Value* element = (irBuilder->CreateExtractElement(ldData, irBuilder->getInt32(firstElem + i)));
@@ -2339,9 +2344,9 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
         if (dstTy->isVectorTy())
         {
             result = UndefValue::get(dstTy);
-            for (uint i = 0; i < dstTy->getVectorNumElements(); i++)
+            for (uint i = 0; i < cast<VectorType>(dstTy)->getNumElements(); i++)
             {
-                Value* tmpData = ExtractFromSamplerData(dstTy->getVectorElementType(), i);
+                Value* tmpData = ExtractFromSamplerData(cast<VectorType>(dstTy)->getElementType(), i);
                 result = irBuilder->CreateInsertElement(result, tmpData, irBuilder->getInt32(i));
                 wiAns->incUpdateDepend(result, WIAnalysis::RANDOM);
             }
@@ -2408,7 +2413,7 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk* chunk)
         owordIndex = irBuilder->CreateAdd(owordIndex, ConstantInt::get(irBuilder->getInt32Ty(), chunk->chunkStart / 4));
         wiAns->incUpdateDepend(owordIndex, WIAnalysis::UNIFORM);
     }
-    Type* vty = VectorType::get(load->getType()->getScalarType(), 4);
+    Type* vty = IGCLLVM::FixedVectorType::get(load->getType()->getScalarType(), 4);
     Function* l = GenISAIntrinsic::getDeclaration(curFunc->getParent(),
         llvm::GenISAIntrinsic::GenISA_OWordPtr,
         PointerType::get(vty, addrSpace));
@@ -2420,7 +2425,7 @@ void ConstantCoalescing::ChangePTRtoOWordBased(BufChunk* chunk)
     Instruction* owordPtr = irBuilder->CreateCall(l, attr);
     wiAns->incUpdateDepend(owordPtr, WIAnalysis::UNIFORM);
     load->setOperand(0, owordPtr);
-    load->setAlignment(MaybeAlign(16));
+    load->setAlignment(getAlign(16));
 }
 
 char IGC::ConstantCoalescing::ID = 0;

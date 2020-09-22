@@ -28,18 +28,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "EstimateFunctionSize.h"
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/CISACodeGen/helper.h"
+#include "Compiler/DebugInfo/ScalarVISAModule.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "common/igc_regkeys.hpp"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include "llvmWrapper/IR/Argument.h"
 #include "llvmWrapper/IR/Attributes.h"
 #include "llvmWrapper/Analysis/InlineCost.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/IR/CallSite.h"
+#include "llvmWrapper/IR/CallSite.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -49,7 +51,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DIBuilder.h"
 #include "common/LLVMWarningsPop.hpp"
-#include "Compiler/DebugInfo/VISADebugEmitter.hpp"
+#include "DebugInfo/VISADebugEmitter.hpp"
 #include <numeric>
 #include <utility>
 #include "Probe/Assertion.h"
@@ -528,13 +530,35 @@ bool GenXFunctionGroupAnalysis::useStackCall(llvm::Function* F)
     return (F->hasFnAttribute("visaStackCall"));
 }
 
+void GenXFunctionGroupAnalysis::setHasVariableLengthAlloca(llvm::Module* pModule)
+{
+    // check all functions in the group to see if there's an vla alloca
+    // function attribute "hasVLA" should be set at ProcessFuncAttributes pass
+    for (auto GI = begin(), GE = end(); GI != GE; ++GI) {
+        for (auto SubGI = (*GI)->Functions.begin(), SubGE = (*GI)->Functions.end();
+            SubGI != SubGE; ++SubGI) {
+            for (auto FI = (*SubGI)->begin(), FE = (*SubGI)->end(); FI != FE; ++FI) {
+                Function* F = *FI;
+                if (F->hasFnAttribute("hasVLA")) {
+                    (*GI)->m_hasVaribleLengthAlloca = true;
+                    break;
+                }
+            }
+            if ((*GI)->m_hasVaribleLengthAlloca)
+                break;
+        }
+    }
+}
+
 void GenXFunctionGroupAnalysis::addIndirectFuncsToKernelGroup(llvm::Module* pModule)
 {
     auto pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
-    auto modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
 
-    Function* defaultKernel = getUniqueEntryFunc(pMdUtils, modMD);
-    IGC_ASSERT_MESSAGE(nullptr != defaultKernel, "kernel does not exist in this group");
+    Function* defaultKernel = IGC::getIntelSymbolTableVoidProgram(pModule);
+    if (!defaultKernel)
+    {
+        return;
+    }
 
     FunctionGroup* defaultFG = getGroupForHead(defaultKernel);
     IGC_ASSERT_MESSAGE(nullptr != defaultFG, "default kernel group does not exist");
@@ -548,7 +572,9 @@ void GenXFunctionGroupAnalysis::addIndirectFuncsToKernelGroup(llvm::Module* pMod
         if (F->hasFnAttribute("IndirectlyCalled"))
         {
             if (!F->isDeclaration())
+            {
                 addToFunctionGroup(F, defaultFG, F);
+            }
         }
     }
 
@@ -557,9 +583,13 @@ void GenXFunctionGroupAnalysis::addIndirectFuncsToKernelGroup(llvm::Module* pMod
     for (auto I = pModule->begin(), E = pModule->end(); I != E; ++I)
     {
         Function* F = &(*I);
-        auto FG = getGroup(F);
-        if (FG && !FG->m_hasStackCall)
+        if (auto FG = getGroup(F))
         {
+            // Already set for this group
+            if (FG->m_hasStackCall) continue;
+            // Don't set it for the dummy kernel group
+            if (FG == defaultFG) continue;
+            // Set hasStackCall if there are any indirect calls
             for (auto ii = inst_begin(F), ei = inst_end(F); ii != ei; ii++)
             {
                 if (CallInst* call = dyn_cast<CallInst>(&*ii))
@@ -625,6 +655,9 @@ bool GenXFunctionGroupAnalysis::rebuild(llvm::Module* Mod) {
 
     // Re-add all indirect functions to the default kernel group
     addIndirectFuncsToKernelGroup(Mod);
+
+    // Once FGs are formed, set FG's HasVariableLengthAlloca
+    setHasVariableLengthAlloca(Mod);
 
     // Verification.
     if (!verify())
@@ -784,7 +817,7 @@ namespace {
             : LegacyInlinerBase(ID, /*InsertLifetime*/ false),
             FSA(nullptr) {}
 
-        InlineCost getInlineCost(CallSite CS) override;
+        InlineCost getInlineCost(IGCLLVM::CallSiteRef CS) override;
 
         void getAnalysisUsage(AnalysisUsage& AU) const override;
         bool runOnSCC(CallGraphSCC& SCC) override;
@@ -819,7 +852,7 @@ bool SubroutineInliner::runOnSCC(CallGraphSCC& SCC)
 
 /// \brief Get the inline cost for the subroutine-inliner.
 ///
-InlineCost SubroutineInliner::getInlineCost(CallSite CS)
+InlineCost SubroutineInliner::getInlineCost(IGCLLVM::CallSiteRef CS)
 {
     Function* Callee = CS.getCalledFunction();
     Function* Caller = CS.getCaller();
@@ -827,7 +860,11 @@ InlineCost SubroutineInliner::getInlineCost(CallSite CS)
 
     // Inline direct calls to functions with always inline attribute or a function
     // whose estimated size is under certain predefined limit.
-    if (Callee && !Callee->isDeclaration() && isInlineViable(*Callee))
+    if (Callee && !Callee->isDeclaration() && isInlineViable(*Callee)
+#if LLVM_VERSION_MAJOR >= 11
+        .isSuccess()
+#endif
+        )
     {
         if (CS.hasFnAttr(llvm::Attribute::AlwaysInline))
             return IGCLLVM::InlineCost::getAlways();
@@ -842,7 +879,6 @@ InlineCost SubroutineInliner::getInlineCost(CallSite CS)
             return IGCLLVM::InlineCost::getAlways();
 
         if (pCtx->type == ShaderType::OPENCL_SHADER &&
-            IGC_IS_FLAG_ENABLED(EnableOCLNoInlineAttr) &&
             Callee->hasFnAttribute(llvm::Attribute::NoInline))
             return IGCLLVM::InlineCost::getNever();
 
@@ -851,6 +887,9 @@ InlineCost SubroutineInliner::getInlineCost(CallSite CS)
 
         if (Callee->hasFnAttribute("UserSubroutine") &&
             Callee->hasFnAttribute(llvm::Attribute::NoInline))
+            return IGCLLVM::InlineCost::getNever();
+
+        if (Callee->hasFnAttribute("igc-force-stackcall"))
             return IGCLLVM::InlineCost::getNever();
 
         if (FCtrl != FLAG_FCALL_FORCE_SUBROUTINE &&

@@ -50,6 +50,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Pass.h"
 
 #include <list>
+#include "Probe/Assertion.h"
 
 namespace llvm {
 
@@ -77,16 +78,23 @@ public:
   // group, starting with the head Function.
   AssertingVH<Function> &at(unsigned i) { return Functions[i]; }
   typedef SmallVectorImpl<AssertingVH<Function>>::iterator iterator;
+  typedef SmallVectorImpl<AssertingVH<Function>>::const_iterator const_iterator;
   iterator begin() { return Functions.begin(); }
   iterator end() { return Functions.end(); }
+  const_iterator begin() const { return Functions.begin(); }
+  const_iterator end() const { return Functions.end(); }
   typedef SmallVectorImpl<AssertingVH<Function>>::reverse_iterator
       reverse_iterator;
   reverse_iterator rbegin() { return Functions.rbegin(); }
   reverse_iterator rend() { return Functions.rend(); }
-  size_t size() { return Functions.size(); }
+  size_t size() const { return Functions.size(); }
   // accessors
   Function *getHead() {
-    assert(size());
+    IGC_ASSERT(size());
+    return *begin();
+  }
+  const Function *getHead() const {
+    IGC_ASSERT(size());
     return *begin();
   }
   StringRef getName() { return getHead()->getName(); }
@@ -164,9 +172,12 @@ public:
   void replaceFunction(Function *OldF, Function *NewF);
   // iterator for FunctionGroups in the analysis
   typedef SmallVectorImpl<FunctionGroup *>::iterator iterator;
+  typedef SmallVectorImpl<FunctionGroup *>::const_iterator const_iterator;
   iterator begin() { return iterator(Groups.begin()); }
   iterator end() { return iterator(Groups.end()); }
-  size_t size() { return Groups.size(); }
+  const_iterator begin() const { return const_iterator(Groups.begin()); }
+  const_iterator end() const { return const_iterator(Groups.end()); }
+  size_t size() const { return Groups.size(); }
   // addToFunctionGroup : add Function F to FunctionGroup FG
   // Using this (rather than calling push_back directly on the FunctionGroup)
   // means that the mapping from F to FG will be created, and getGroup() will
@@ -193,7 +204,7 @@ inline raw_ostream &operator<<(raw_ostream &OS,
     OS << "Subgroup";
     break;
   default:
-    llvm_unreachable("Invalid FG type");
+    IGC_ASSERT_EXIT_MESSAGE(0, "Invalid FG type");
     break;
   }
   return OS;

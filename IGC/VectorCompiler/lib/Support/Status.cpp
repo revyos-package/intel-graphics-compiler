@@ -25,14 +25,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "vc/Support/Status.h"
-
 #include "vc/Support/StatusCode.h"
 #include "vc/Support/StatusTraits.h"
-
-#include "llvm/Support/ErrorHandling.h"
-
 #include <string>
 #include <system_error>
+#include "Probe/Assertion.h"
 
 namespace {
 class vc_error_category : public std::error_category {
@@ -51,25 +48,27 @@ std::string vc_error_category::message(int condition) const {
 
   switch (static_cast<errc>(condition)) {
   case errc::dynamic_load_fail:
-    return ErrorTraits<errc::dynamic_load_fail>::getMessage();
+    return std::string(ErrorTraits<errc::dynamic_load_fail>::getMessage());
   case errc::symbol_not_found:
-    return ErrorTraits<errc::symbol_not_found>::getMessage();
+    return std::string(ErrorTraits<errc::symbol_not_found>::getMessage());
   case errc::bad_spirv:
-    return ErrorTraits<errc::bad_spirv>::getMessage();
+    return std::string(ErrorTraits<errc::bad_spirv>::getMessage());
   case errc::bad_bitcode:
-    return ErrorTraits<errc::bad_bitcode>::getMessage();
+    return std::string(ErrorTraits<errc::bad_bitcode>::getMessage());
   case errc::invalid_module:
-    return ErrorTraits<errc::invalid_module>::getMessage();
+    return std::string(ErrorTraits<errc::invalid_module>::getMessage());
   case errc::target_machine_not_created:
-    return ErrorTraits<errc::target_machine_not_created>::getMessage();
+    return std::string(ErrorTraits<errc::target_machine_not_created>::getMessage());
   case errc::not_vc_codegen:
-    return ErrorTraits<errc::not_vc_codegen>::getMessage();
+    return std::string(ErrorTraits<errc::not_vc_codegen>::getMessage());
   case errc::invalid_api_option:
-    return ErrorTraits<errc::invalid_api_option>::getMessage();
+    return std::string(ErrorTraits<errc::invalid_api_option>::getMessage());
   case errc::invalid_internal_option:
-    return ErrorTraits<errc::invalid_internal_option>::getMessage();
+    return std::string(ErrorTraits<errc::invalid_internal_option>::getMessage());
+  case errc::generic_bif_load_fail:
+    return std::string(ErrorTraits<errc::generic_bif_load_fail>::getMessage());
   }
-  llvm_unreachable("Unknown error code");
+  IGC_ASSERT_EXIT_MESSAGE(0, "Unknown error code");
 }
 
 static vc_error_category vc_err_category;

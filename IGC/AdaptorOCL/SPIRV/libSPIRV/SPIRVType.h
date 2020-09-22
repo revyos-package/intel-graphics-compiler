@@ -176,7 +176,7 @@ protected:
   void validate()const {
     SPIRVEntry::validate();
     IGC_ASSERT_EXIT_MESSAGE(1 < BitWidth, "Invalid bit width");
-    IGC_ASSERT_EXIT_MESSAGE(BitWidth <= 64, "Invalid bit width");
+    IGC_ASSERT_EXIT_MESSAGE(BitWidth <= 1024, "Invalid bit width");
   }
 private:
   unsigned BitWidth;    // Bit width
@@ -239,6 +239,21 @@ protected:
 private:
   SPIRVStorageClassKind StorageClass;     // Storage Class
   SPIRVType *ElemType;                    // Element Type
+};
+
+class SPIRVTypeForwardPointer : public SPIRVEntryNoId<OpTypeForwardPointer> {
+public:
+  SPIRVTypeForwardPointer(SPIRVModule* M, SPIRVTypePointer* Pointer,
+      SPIRVStorageClassKind SC)
+      : SPIRVEntryNoId(M, 3), Pointer(Pointer), SC(SC) {}
+
+  SPIRVTypeForwardPointer()
+      : Pointer(nullptr), SC(StorageClassUniformConstant) {}
+
+  _SPIRV_DCL_DEC
+private:
+  SPIRVTypePointer* Pointer;
+  SPIRVStorageClassKind SC;
 };
 
 class SPIRVTypeVector:public SPIRVType {

@@ -41,11 +41,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #define DEBUG_TYPE "cmabi"
 
+#include "llvmWrapper/IR/CallSite.h"
 #include "llvmWrapper/Support/Alignment.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "vc/GenXOpts/GenXOpts.h"
 #include "vc/GenXOpts/Utils/GenXSTLExtras.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/STLExtras.h"
@@ -56,7 +58,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/CFG.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
@@ -76,6 +77,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvmWrapper/Analysis/CallGraph.h"
 
 #include <iterator>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -205,11 +207,11 @@ public:
   }
 
   void setArgIndex(GlobalVariable *GV, unsigned ArgIndex) {
-    assert(!IndexMap.count(GV));
+    IGC_ASSERT(!IndexMap.count(GV));
     IndexMap[GV] = ArgIndex;
   }
   unsigned getArgIndex(GlobalVariable *GV) const {
-    assert(IndexMap.count(GV));
+    IGC_ASSERT(IndexMap.count(GV));
     return IndexMap.lookup(GV);
   }
 
@@ -358,7 +360,7 @@ auto selectGlobalsToLocalize(ForwardRange Globals, T Bound,
                              ExcludePredT ExcludePred,
                              WeightCalculatorT WeightCalculator)
     -> std::vector<genx::ranges::range_pointer_t<ForwardRange>> {
-  assert(Bound >= 0 && "bound must be nonnegative");
+  IGC_ASSERT(Bound >= 0 && "bound must be nonnegative");
   using GVPtr = genx::ranges::range_pointer_t<ForwardRange>;
   using GVRef = genx::ranges::range_reference_t<ForwardRange>;
   if (Bound == 0)
@@ -419,7 +421,7 @@ bool CMABI::doInitialization(CallGraph &CG) {
   // Collect all CM kernels from named metadata.
   if (NamedMDNode *Named =
           CG.getModule().getNamedMetadata(genx::FunctionMD::GenXKernels)) {
-    assert(Named);
+    IGC_ASSERT(Named);
     for (unsigned I = 0, E = Named->getNumOperands(); I != E; ++I) {
       MDNode *Node = Named->getOperand(I);
       if (Function *F =
@@ -488,7 +490,7 @@ bool CMABI::runOnSCC(CallGraphSCC &SCC) {
 static void fixPhiUseIssue(Instruction *Inst) {
   auto PhiUse = cast<PHINode>(Inst->use_begin()->getUser());
   auto InstOpNoInPhi = Inst->use_begin()->getOperandNo();
-  assert(Inst->getParent() == PhiUse->getParent());
+  IGC_ASSERT(Inst->getParent() == PhiUse->getParent());
   Inst->removeFromParent();
   Inst->insertBefore(PhiUse->getIncomingBlock(InstOpNoInPhi)->getTerminator());
 }
@@ -534,7 +536,7 @@ void CMABI::LocalizeGlobals(LocalizationInfo &LI) {
     Type *ElemTy = GV->getType()->getElementType();
     AllocaInst *Alloca = new AllocaInst(ElemTy, 0 /*AddressSpace*/,
                                         GV->getName() + ".local", &FirstI);
-    Alloca->setAlignment(MaybeAlign(GV->getAlignment()));
+    Alloca->setAlignment(IGCLLVM::getCorrectAlign(GV->getAlignment()));
     if (!isa<UndefValue>(GV->getInitializer()))
       new StoreInst(GV->getInitializer(), Alloca, &FirstI);
 
@@ -682,7 +684,7 @@ bool CMABI::OnlyUsedBySimpleValueLoadStore(Value *Arg) {
 
 // \brief Fix argument passing for kernels: i1 -> i8.
 CallGraphNode *CMABI::TransformKernel(Function *F) {
-  assert(F->getReturnType()->isVoidTy());
+  IGC_ASSERT(F->getReturnType()->isVoidTy());
   LLVMContext &Context = F->getContext();
 
   AttributeList AttrVec;
@@ -698,7 +700,8 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
     if (ArgTy->getScalarType()->isIntegerTy(1)) {
       Type *Ty = IntegerType::get(F->getContext(), 8);
       if (ArgTy->isVectorTy())
-        ArgTys.push_back(VectorType::get(Ty, ArgTy->getVectorNumElements()));
+        ArgTys.push_back(IGCLLVM::FixedVectorType::get(
+            Ty, cast<VectorType>(ArgTy)->getNumElements()));
       else
         ArgTys.push_back(Ty);
     } else {
@@ -713,7 +716,7 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
   }
 
   FunctionType *NFTy = FunctionType::get(F->getReturnType(), ArgTys, false);
-  assert((NFTy != F->getFunctionType()) &&
+  IGC_ASSERT((NFTy != F->getFunctionType()) &&
          "type out of sync, expect bool arguments");
 
   // Add any function attributes.
@@ -906,16 +909,16 @@ CallGraphNode *CMABI::TransformNode(Function *F,
   // Loop over all of the callers of the function, transforming the call sites
   // to pass in the loaded pointers.
   for (auto U: DirectUsers) {
-    CallSite CS(U);
-    assert(CS.getCalledFunction() == F);
-    Instruction *Call = CS.getInstruction();
+    auto &CS = *cast<CallInst>(U);
+    IGC_ASSERT(CS.getCalledFunction() == F);
+    auto *Call = &CS;
     const AttributeList &CallPAL = CS.getAttributes();
 
     SmallVector<Value*, 16> Args;
     AttributeList NewAttrVec;
 
     // Loop over the operands, inserting loads in the caller.
-    CallSite::arg_iterator AI = CS.arg_begin();
+    auto AI = CS.arg_begin();
     ArgIndex = 0;
     for (Function::arg_iterator I = F->arg_begin(), E = F->arg_end(); I != E;
          ++I, ++AI, ++ArgIndex) {
@@ -928,13 +931,16 @@ CallGraphNode *CMABI::TransformNode(Function *F,
         }
         Args.push_back(*AI);
       } else if (!I->use_empty()) {
-        LoadInst *Load = new LoadInst(*AI, (*AI)->getName() + ".val", Call);
+        LoadInst *Load = new LoadInst((*AI)->getType()->getPointerElementType(),
+                                      *AI, (*AI)->getName() + ".val",
+                                      /* isVolatile */ false, Call);
         Args.push_back(Load);
       }
     }
 
     // Push any varargs arguments on the list.
-    for (; AI != CS.arg_end(); ++AI, ++ArgIndex) {
+    auto AE = CS.arg_end();
+    for (; AI != AE; ++AI, ++ArgIndex) {
       AttributeSet attrs = CallPAL.getParamAttributes(ArgIndex);
       if (attrs.hasAttributes()) {
         AttrBuilder B(attrs);
@@ -947,7 +953,9 @@ CallGraphNode *CMABI::TransformNode(Function *F,
     for (IteratorTy I = LI.getGlobals().begin(), E = LI.getGlobals().end();
          I != E; ++I) {
       GlobalVariable *GV = *I;
-      LoadInst *Load = new LoadInst(GV, GV->getName() + ".val", Call);
+      LoadInst *Load =
+          new LoadInst(GV->getType()->getPointerElementType(), GV,
+                       GV->getName() + ".val", /* isVolatile */ false, Call);
       Args.push_back(Load);
     }
 
@@ -957,10 +965,10 @@ CallGraphNode *CMABI::TransformNode(Function *F,
       NewAttrVec = NewAttrVec.addAttributes(Context, AttributeList::FunctionIndex, B);
     }
 
-    if (isa<InvokeInst>(Call))
-      llvm_unreachable("InvokeInst not supported");
+    IGC_ASSERT_EXIT_MESSAGE(false == isa<InvokeInst>(Call), "InvokeInst not supported");
 
-    CallInst *New = CallInst::Create(NF, Args, "", Call);
+    CallInst* const New = CallInst::Create(NF, Args, "", Call);
+    IGC_ASSERT(nullptr != New);
     New->setCallingConv(CS.getCallingConv());
     New->setAttributes(NewAttrVec);
     if (cast<CallInst>(Call)->isTailCall())
@@ -970,7 +978,13 @@ CallGraphNode *CMABI::TransformNode(Function *F,
     // Update the callgraph to know that the callsite has been transformed.
     auto CalleeNode = static_cast<IGCLLVM::CallGraphNode *>(
         CG[Call->getParent()->getParent()]);
-    CalleeNode->replaceCallEdge(CallSite(Call), New, NF_CGN);
+    CalleeNode->replaceCallEdge(
+#if LLVM_VERSION_MAJOR <= 10
+        CallSite(Call), New,
+#else
+        *Call, *New,
+#endif
+        NF_CGN);
 
     unsigned Index = 0;
     IRBuilder<> Builder(Call);
@@ -997,7 +1011,7 @@ CallGraphNode *CMABI::TransformNode(Function *F,
       Value *OutVal = Builder.CreateExtractValue(New, Index++);
       Builder.CreateStore(OutVal, GV);
     }
-    assert(Index == New->getType()->getStructNumElements() && "type out of sync");
+    IGC_ASSERT(Index == New->getType()->getStructNumElements() && "type out of sync");
 
     // Remove the old call from the function, reducing the use-count of F.
     Call->eraseFromParent();
@@ -1090,7 +1104,7 @@ CallGraphNode *CMABI::TransformNode(Function *F,
 
       if (!F->getReturnType()->isVoidTy()) {
         Value *RV = RI->getReturnValue();
-        assert(RV && RV->getType()->isSingleValueType() && "type unexpected");
+        IGC_ASSERT(RV && RV->getType()->isSingleValueType() && "type unexpected");
         RetVal = Builder.CreateInsertValue(RetVal, RV, Index++);
       }
       for (unsigned i = 0, e = Allocas.size(); i < e; ++i) {
@@ -1099,7 +1113,7 @@ CallGraphNode *CMABI::TransformNode(Function *F,
       }
 
       StructType *ST = cast<StructType>(NFRetTy);
-      assert(ST->getNumElements() == Index && "type out of sync");
+      IGC_ASSERT(ST->getNumElements() == Index && "type out of sync");
       (void)ST;
 
       // Return the final struct by value.
@@ -1137,7 +1151,7 @@ static void breakConstantVector(unsigned i, Instruction *CurInst,
     auto Inst = S->getAsInstruction();
     Inst->setDebugLoc(CurInst->getDebugLoc());
     Inst->insertBefore(InsertPt);
-    Type *NewTy = VectorType::get(Inst->getType(), 1);
+    Type *NewTy = IGCLLVM::FixedVectorType::get(Inst->getType(), 1);
     Inst = CastInst::Create(Instruction::BitCast, Inst, NewTy, "", CurInst);
     Inst->setDebugLoc(CurInst->getDebugLoc());
 
@@ -1389,7 +1403,7 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
         // Result element type is bigger than input element type, so there are
         // fewer result elements. Just use an arbitrarily chosen non-zero entry
         // of the N input elements to set the 1 result element.
-        assert(!(OpndEntry->size() & ((1U << LogRatio) - 1)));
+        IGC_ASSERT(!(OpndEntry->size() & ((1U << LogRatio) - 1)));
         for (unsigned i = 0, e = OpndEntry->size(); i != e; i += 1U << LogRatio) {
           unsigned FoundArgIndex = 0;
           for (unsigned j = 0; j != 1U << LogRatio; ++j)
@@ -1433,12 +1447,13 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
               Entry->clear();
               Entry->insert(Entry->begin(), OpndEntry->begin(), OpndEntry->end());
               // Then copy the "new value" elements according to the region.
-              TempVector.resize(CI->getType()->getVectorNumElements(), 0);
+              TempVector.resize(
+                  cast<VectorType>(CI->getType())->getNumElements(), 0);
               int VStride = cast<ConstantInt>(CI->getOperand(
                     GenXIntrinsic::GenXRegion::WrVStrideOperandNum))->getSExtValue();
               unsigned Width = cast<ConstantInt>(CI->getOperand(
                     GenXIntrinsic::GenXRegion::WrWidthOperandNum))->getZExtValue();
-              assert((Width > 0)&& "Width of a region must be non-zero");
+              IGC_ASSERT((Width > 0)&& "Width of a region must be non-zero");
               int Stride = cast<ConstantInt>(CI->getOperand(
                     GenXIntrinsic::GenXRegion::WrStrideOperandNum))->getSExtValue();
               OpndEntry = &ValMap[CI->getOperand(
@@ -1476,7 +1491,7 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
     if (Entry->empty())
       Entry->insert(Entry->end(), VectorToMerge->begin(), VectorToMerge->end());
     else {
-      assert(VectorToMerge->size() == Entry->size());
+      IGC_ASSERT(VectorToMerge->size() == Entry->size());
       for (unsigned i = 0; i != VectorToMerge->size(); ++i) {
         unsigned ArgIdx1 = (*VectorToMerge)[i];
         unsigned ArgIdx2 = (*Entry)[i];
@@ -1759,7 +1774,7 @@ static bool isBitCastForLifetimeMarker(Value *V) {
 
 // Check whether two values are bitwise identical.
 static bool isBitwiseIdentical(Value *V1, Value *V2) {
-  assert(V1 && V2 && "null value");
+  IGC_ASSERT(V1 && V2 && "null value");
   if (V1 == V2)
     return true;
   if (BitCastInst *BI = dyn_cast<BitCastInst>(V1))
@@ -1799,7 +1814,7 @@ static bool isBitwiseIdentical(Value *V1, Value *V2) {
     BasicBlock::iterator I = L1->getParent()->begin();
     for (; &*I != L1 && &*I != L2; ++I)
       /*empty*/;
-    assert(&*I == L1 || &*I == L2);
+    IGC_ASSERT(&*I == L1 || &*I == L2);
     auto IEnd = (&*I == L1) ? L2->getIterator() : L1->getIterator();
     for (; I != IEnd; ++I) {
       Instruction *Inst = &*I;
@@ -1816,7 +1831,7 @@ static bool isBitwiseIdentical(Value *V1, Value *V2) {
 }
 
 bool ArgRefPattern::match(DominatorTree &DT, PostDominatorTree &PDT) {
-  assert(Alloca);
+  IGC_ASSERT(Alloca);
   if (Alloca->use_empty())
     return false;
 
@@ -1886,7 +1901,7 @@ bool ArgRefPattern::match(DominatorTree &DT, PostDominatorTree &PDT) {
 
   // Ensure read-in and write-out to the same region. It is possible that region
   // collasping does not simplify region accesses completely.
-  // Probably we should assert on region descriptors.
+  // Probably we should use an assertion statement on region descriptors.
   if (CopyOutRegion &&
       !isBitwiseIdentical(CopyInRegion->getOperand(0),
                           CopyOutRegion->getOperand(0)))
@@ -1902,7 +1917,7 @@ void ArgRefPattern::process() {
   // 'Spill' the base region into memory during rewriting.
   IRBuilder<> Builder(Alloca);
   Function *RdFn = CopyInRegion->getCalledFunction();
-  assert(RdFn);
+  IGC_ASSERT(RdFn);
   Type *BaseAllocaTy = RdFn->getFunctionType()->getParamType(0);
   AllocaInst *BaseAlloca = Builder.CreateAlloca(BaseAllocaTy, nullptr,
                                                 Alloca->getName() + ".refprom");

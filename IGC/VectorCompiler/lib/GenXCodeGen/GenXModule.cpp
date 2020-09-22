@@ -32,11 +32,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define DEBUG_TYPE "GENX_MODULE"
 
 #include "GenXModule.h"
+
 #include "FunctionGroup.h"
 #include "GenX.h"
+#include "GenXBackendConfig.h"
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXWATable.h"
+
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/Function.h"
@@ -45,6 +48,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Transforms/Utils/Cloning.h"
 
 #include <set>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -52,6 +56,7 @@ char GenXModule::ID = 0;
 INITIALIZE_PASS_BEGIN(GenXModule, "GenXModule", "GenXModule", false,
                       true /*analysis*/)
 INITIALIZE_PASS_DEPENDENCY(FunctionGroupAnalysis)
+INITIALIZE_PASS_DEPENDENCY(GenXBackendConfig)
 INITIALIZE_PASS_DEPENDENCY(GenXWATable)
 INITIALIZE_PASS_END(GenXModule, "GenXModule", "GenXModule", false,
                     true /*analysis*/)
@@ -63,6 +68,7 @@ ModulePass *llvm::createGenXModulePass() {
 
 void GenXModule::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<FunctionGroupAnalysis>();
+  AU.addRequired<GenXBackendConfig>();
   AU.addRequired<GenXWATable>();
   AU.addRequired<TargetPassConfig>();
   AU.setPreservesAll();
@@ -98,6 +104,11 @@ bool GenXModule::runOnModule(Module &M) {
   WaTable = getAnalysis<GenXWATable>().getWATable();
   Ctx = &M.getContext();
 
+  // Remember required config variables here. Getting other analysis
+  // after runOnModule looks dangerous.
+  const auto &BC = getAnalysis<GenXBackendConfig>();
+  AsmDumpsEnabled = BC.asmDumpsEnabled();
+
   InlineAsm = CheckForInlineAsm(M);
 
   // Iterate, processing each Function that is not yet assigned to a
@@ -124,7 +135,7 @@ bool GenXModule::runOnModule(Module &M) {
         }
         // recursive funcs must use stack
         if (Inst->getFunction() == &F)
-          assert(F.hasFnAttribute(genx::FunctionMD::CMStackCall) &&
+          IGC_ASSERT(F.hasFnAttribute(genx::FunctionMD::CMStackCall) &&
                  "Found recursive function without CMStackCall attribute");
       }
     }
@@ -141,4 +152,17 @@ bool GenXModule::runOnModule(Module &M) {
   }
 
   return ModuleModified;
+}
+void GenXModule::updateVisaDebugInfo(const Function *F,
+                                     const Instruction *Inst) {
+  auto &DebugInfo = VisaDebugMap[F];
+  if (Inst) {
+    DebugInfo.Locations.insert(std::make_pair(DebugInfo.visaCounter, Inst));
+  }
+  // Always advance visa counter
+  ++DebugInfo.visaCounter;
+}
+const genx::VisaDebugInfo *
+GenXModule::getVisaDebugInfo(const Function *F) const {
+  return &VisaDebugMap.at(F);
 }

@@ -45,7 +45,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
-#include "llvm/PassAnalysisSupport.h"
 #include "llvm/Analysis/TargetFolder.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "common/Types.hpp"
@@ -289,8 +288,8 @@ namespace IGC {
                 if (!Ty->isVectorTy())
                     return false;
 
-                unsigned NumElts = Ty->getVectorNumElements();
-                Type* EltTy = Ty->getVectorElementType();
+                unsigned NumElts = (unsigned)cast<VectorType>(Ty)->getNumElements();
+                Type* EltTy = cast<VectorType>(Ty)->getElementType();
                 const auto& ProfitLengths = getProfitLoadVectorLength(EltTy);
 
                 return std::any_of(ProfitLengths.begin(), ProfitLengths.end(),
@@ -613,7 +612,7 @@ namespace IGC {
             unsigned Align = getAlignment(RefLd);
 
             NewLd->setVolatile(RefLd->isVolatile());
-            NewLd->setAlignment(MaybeAlign(int_cast<unsigned int>(MinAlign(Align, Off))));
+            NewLd->setAlignment(IGCLLVM::getCorrectAlign(int_cast<unsigned int>(MinAlign(Align, Off))));
             NewLd->setOrdering(RefLd->getOrdering());
             IGCLLVM::CopySyncScopeID(NewLd, RefLd);
         }
@@ -625,7 +624,7 @@ namespace IGC {
             unsigned Align = getAlignment(RefSt);
 
             NewSt->setVolatile(RefSt->isVolatile());
-            NewSt->setAlignment(MaybeAlign(int_cast<unsigned int>(MinAlign(Align, Off))));
+            NewSt->setAlignment(IGCLLVM::getCorrectAlign(int_cast<unsigned int>(MinAlign(Align, Off))));
             NewSt->setOrdering(RefSt->getOrdering());
             IGCLLVM::CopySyncScopeID(NewSt, RefSt);
         }

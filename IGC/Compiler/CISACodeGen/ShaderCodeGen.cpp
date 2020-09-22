@@ -74,7 +74,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/RegisterEstimator.hpp"
 #include "Compiler/CISACodeGen/ComputeShaderLowering.hpp"
 #include "Compiler/CISACodeGen/CrossPhaseConstProp.hpp"
+
 #include "Compiler/CISACodeGen/SLMConstProp.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/GenericAddressResolution/GenericAddressDynamicResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryResolution.hpp"
@@ -87,6 +89,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/UndefinedReferences/UndefinedReferencesPass.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStatefull/StatelessToStatefull.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DisableLoopUnrollOnRetry/DisableLoopUnrollOnRetry.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass.h"
 #include "Compiler/Optimizer/MCSOptimization.hpp"
 #include "Compiler/Optimizer/RectListOptimizationPass.hpp"
 #include "Compiler/Optimizer/GatingSimilarSamples.hpp"
@@ -121,6 +124,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/MemStats.h"
 #include <iStdLib/utility.h>
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Verifier.h>
@@ -155,7 +159,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/CoalescingEngine.hpp"
 #include "Compiler/GenTTI.h"
 #include "Compiler/Optimizer/SetMathPrecisionForPositionOutput.hpp"
-#include "Compiler/DebugInfo/VISADebugEmitter.hpp"
 #include "Compiler/SampleCmpToDiscard.h"
 #include "Compiler/Optimizer/IGCInstCombiner/IGCInstructionCombining.hpp"
 #include "DebugInfo.hpp"
@@ -399,6 +402,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 
     bool needDPEmu = (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
         (ctx.m_DriverInfo.NeedFP64(ctx.platform.getPlatformInfo().eProductFamily) && ctx.platform.hasNoFP64Inst()));
+    needDPEmu &= ctx.m_instrTypes.hasFP64Inst;
     uint32_t theEmuKind = (needDPEmu ? EmuKind::EMU_DP : 0);
     theEmuKind |= (ctx.m_DriverInfo.NeedI64BitDivRem() ? EmuKind::EMU_I64DIVREM : 0);
     theEmuKind |=
@@ -537,8 +541,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     {
         mpm.add(createPruneUnusedArgumentsPass());
 
-        if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT &&
-            IGC_IS_FLAG_DISABLED(EnableOCLNoInlineAttr))
+        if (!ctx.enableFunctionCall())
         {
             // Don't run IPConstantProp when debugging function calls, to avoid folding function arg/ret constants
             mpm.add(createIPConstantPropagationPass());
@@ -550,6 +553,14 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     // Since we don't support switch statements, switch lowering is needed after the last CFG simplication
     mpm.add(llvm::createLowerSwitchPass());
 
+    // There's no particular reason for this exact place, but it should be after LowerGEPForPrivMem
+    if (IGC_IS_FLAG_ENABLED(EnableSplitIndirectEEtoSel))
+    {
+        mpm.add(createSplitIndirectEEtoSelPass());
+    }
+
+    // Preprocess vector bitcasts to enable memory operations simplification.
+    mpm.add(createVectorBitCastOptPass());
     // Split big vector & 3-element load/store, etc.
     mpm.add(createVectorPreProcessPass());
 
@@ -615,6 +626,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     if (!isOptDisabled)
     {
         mpm.add(createGenStrengthReductionPass());
+        mpm.add(createVectorBitCastOptPass());
     }
 
     if (ctx.m_instrTypes.hasUniformAssumptions) {
@@ -666,6 +678,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         if (KeepGEPs)
         {
             mpm.add(createGEPLoweringPass());
+            mpm.add(llvm::createEarlyCSEPass());
         }
         // Run dead code elimination pass right before Emu64OpsPass,
         // as legalization passes do not always clear unused (operating
@@ -841,7 +854,8 @@ static void PSCodeGen(
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, !ctx->m_retryManager.IsLastTry(), ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
     }
-    else if (IsStage1FastCompile(ctx->m_CgFlag, ctx->m_StagingCtx))
+    else if (IsStage1FastCompile(ctx->m_CgFlag, ctx->m_StagingCtx) ||
+             IsStage1FastestCompile(ctx->m_CgFlag, ctx->m_StagingCtx))
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD8, false, ShaderDispatchMode::NOT_APPLICABLE, pSignature);
         useRegKeySimd = true;
@@ -1086,27 +1100,30 @@ void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap& kernels
     AddAnalysisPasses(*ctx, Passes);
 
     if (ctx->m_enableFunctionPointer
-        && ctx->platform.getMinDispatchMode() == SIMDMode::SIMD8
         && ctx->m_DriverInfo.sendMultipleSIMDModes()
         && ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 0)
     {
         // In order to support compiling multiple SIMD modes for function pointer calls,
         // we require a separate pass manager per SIMD mode, due to interdependencies across
         // function compilations.
-        // Only SIMD16 and SIMD8 are supported.
-
-        // Run first pass for SIMD8
-        AddCodeGenPasses(*ctx, kernels, Passes, SIMDMode::SIMD8, false);
-        COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
+        SIMDMode pass1Mode;
+        SIMDMode pass2Mode;
+        {
+            pass1Mode = SIMDMode::SIMD16;
+            pass2Mode = SIMDMode::SIMD8;
+        }
+        // Run first pass
+        AddCodeGenPasses(*ctx, kernels, Passes, pass1Mode, false);
         Passes.run(*(ctx->getModule()));
 
-        // Create and run second pass for SIMD16
+        // Create and run second pass
         IGCPassManager Passes2(ctx, "CG2");
         // Add required immutable passes
         Passes2.add(new MetaDataUtilsWrapper(ctx->getMetaDataUtils(), ctx->getModuleMetaData()));
         Passes2.add(new CodeGenContextWrapper(ctx));
         Passes2.add(createGenXFunctionGroupAnalysisPass());
-        AddCodeGenPasses(*ctx, kernels, Passes2, SIMDMode::SIMD16, false);
+        AddCodeGenPasses(*ctx, kernels, Passes2, pass2Mode, false);
+        COMPILER_TIME_END(ctx, TIME_CG_Add_Passes);
         Passes2.run(*(ctx->getModule()));
 
         COMPILER_TIME_END(ctx, TIME_CodeGen);
@@ -1345,6 +1362,13 @@ void OptimizeIR(CodeGenContext* const pContext)
 
     // Remove inline attribute if subroutine is enabled.
     purgeInlineAttribute(pContext, NoOpt);
+
+    if (pContext->getModuleMetaData()->compOpt.DashGSpecified)
+    {
+        IGCPassManager mpm(pContext, "CleanImplicitId");
+        IF_DEBUG_INFO(mpm.add(new CleanImplicitIds()));
+        mpm.run(*pContext->getModule());
+    }
     if (NoOpt)
     {
         return;
@@ -1400,8 +1424,11 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(createIPConstantPropagationPass());
         }
 
+
         // enable this only when Pooled EU is not supported
-        if (IGC_IS_FLAG_ENABLED(EnableThreadCombiningOpt) &&
+        if ((IGC_IS_FLAG_ENABLED(EnableThreadCombiningOpt) ||
+             IGC_IS_FLAG_ENABLED(EnableForceThreadCombining) ||
+             IGC_IS_FLAG_ENABLED(EnableForceGroupSize)) &&
             (pContext->type == ShaderType::COMPUTE_SHADER) &&
             !pContext->platform.supportPooledEU() &&
             pContext->platform.supportsThreadCombining())
@@ -1742,6 +1769,11 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(new PurgeMetaDataUtils());
         }
         // mpm.add(llvm::createDeadCodeEliminationPass()); // this should be done both before/after constant propagation
+
+        if(IGC_IS_FLAG_ENABLED(EnableUnmaskedFunctions))
+        {
+            mpm.add(new InlineUnmaskedFunctionsPass());
+        }
 
         if (pContext->m_instrTypes.hasLoop)
         {

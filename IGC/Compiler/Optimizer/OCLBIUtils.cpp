@@ -27,8 +27,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
-#include "Compiler/DebugInfo/DebugInfoUtils.hpp"
+#include "DebugInfo/DebugInfoUtils.hpp"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/IRBuilder.h"
 #include "llvmWrapper/IR/Instructions.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -146,7 +147,7 @@ void CImagesBI::prepareColor(Value* Color)
         Instruction* tmp = BitCastInst::Create(
             Instruction::BitCast,
             Color,
-            VectorType::get(m_pFloatType, 4),
+            IGCLLVM::FixedVectorType::get(m_pFloatType, 4),
             "floatColor",
             m_pCallInst);
         tmp->setDebugLoc(m_DL);
@@ -434,7 +435,8 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                 {
                     auto mask = inst->getShuffleMask();
                     uint shuffleidx = int_cast<uint>(mask[(uint)idx]);
-                    baseValue = (shuffleidx < inst->getOperand(0)->getType()->getVectorNumElements()) ?
+                    auto vType = dyn_cast<VectorType>(inst->getOperand(0)->getType());
+                    baseValue = (shuffleidx < vType->getNumElements()) ?
                         inst->getOperand(0) : inst->getOperand(1);
                 }
                 else
@@ -1113,7 +1115,7 @@ public:
         m_args.push_back(CoordZ);
         Value* pDstBuffer = createGetBufferPtr();
         prepareZeroOffsets();
-        Type* types[] = { llvm::VectorType::get(m_pFloatType, 4), pDstBuffer->getType() };
+        Type* types[] = { IGCLLVM::FixedVectorType::get(m_pFloatType, 4), pDstBuffer->getType() };
         replaceGenISACallInst(GenISAIntrinsic::GenISA_ldptr, llvm::ArrayRef<llvm::Type*>(types, 2));
     }
 };
@@ -1133,7 +1135,7 @@ public:
         m_args.push_back(m_pIntZero);   // LOD
         prepareImageBTI();
         prepareZeroOffsets();
-        Type* types[] = { llvm::VectorType::get(m_pFloatType, 4), m_pIntType, m_args[7]->getType() };
+        Type* types[] = { IGCLLVM::FixedVectorType::get(m_pFloatType, 4), m_pIntType, m_args[7]->getType() };
         replaceGenISACallInst(GenISAIntrinsic::GenISA_ldmcsptr, types);
     }
 };
@@ -1181,7 +1183,7 @@ public:
         m_args.push_back(m_pIntZero); // LOD
         prepareImageBTI();
         prepareZeroOffsets();
-        replaceGenISACallInst(GenISAIntrinsic::GenISA_ldmsptr, { VectorType::get(m_pIntType, 4), m_args[7]->getType() });
+        replaceGenISACallInst(GenISAIntrinsic::GenISA_ldmsptr, { IGCLLVM::FixedVectorType::get(m_pIntType, 4), m_args[7]->getType() });
     }
 };
 
@@ -1202,7 +1204,7 @@ public:
         m_args.push_back(m_pIntZero); // LOD
         prepareImageBTI();
         prepareZeroOffsets();
-        replaceGenISACallInst(GenISAIntrinsic::GenISA_ldmsptr, { VectorType::get(m_pIntType, 4), m_args[7]->getType() });
+        replaceGenISACallInst(GenISAIntrinsic::GenISA_ldmsptr, { IGCLLVM::FixedVectorType::get(m_pIntType, 4), m_args[7]->getType() });
     }
 };
 
@@ -1734,7 +1736,6 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_memfence"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_memoryfence, false);
     m_CommandMap["__builtin_IB_flush_sampler_cache"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_flushsampler, false);
     m_CommandMap["__builtin_IB_typedmemfence"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_typedmemoryfence, false);
-    m_CommandMap[ "__builtin_IB_aux_update" ] = CSimpleIntrinMapping::create( GenISAIntrinsic::GenISA_AUXupdate, true );
     // helper built-ins
     m_CommandMap["__builtin_IB_simd_lane_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_simdLaneId, false);
 

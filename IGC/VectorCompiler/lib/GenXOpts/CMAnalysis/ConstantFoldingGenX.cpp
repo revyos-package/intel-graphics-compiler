@@ -33,10 +33,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
+#include "Probe/Assertion.h"
+#include "llvmWrapper/Support/TypeSize.h"
+
+#include "llvmWrapper/Analysis/CallGraph.h"
+#include "llvmWrapper/IR/CallSite.h"
 
 #define DEBUG_TYPE "genx-constantfolding"
 
@@ -76,14 +80,15 @@ static Constant *constantFoldRdRegion(Type *RetTy,
   if (isa<UndefValue>(Input))
     return UndefValue::get(RetTy);
   // Parse the region parameters.
-  unsigned WholeNumElements = Input->getType()->getVectorNumElements();
+  unsigned WholeNumElements =
+      cast<VectorType>(Input->getType())->getNumElements();
   auto OffsetC = dyn_cast<Constant>(
       Operands[GenXIntrinsic::GenXRegion::RdIndexOperandNum]);
   if (!OffsetC)
     return nullptr;
   int RetElemSize = RetTy->getScalarType()->getPrimitiveSizeInBits() / 8;
   if (!RetElemSize) {
-    assert(RetTy->getScalarType()->isPointerTy() &&
+    IGC_ASSERT(RetTy->getScalarType()->isPointerTy() &&
            RetTy->getScalarType()->getPointerElementType()->isFunctionTy());
     RetElemSize = DL->getTypeSizeInBits(RetTy) / 8;
   }
@@ -91,7 +96,8 @@ static Constant *constantFoldRdRegion(Type *RetTy,
   if (!isa<VectorType>(OffsetC->getType()))
     Offset = dyn_cast<ConstantInt>(OffsetC)->getZExtValue() / RetElemSize;
   else
-    assert(OffsetC->getType()->getVectorNumElements() == R.NumElements);
+    IGC_ASSERT(cast<VectorType>(OffsetC->getType())->getNumElements() ==
+               R.NumElements);
   if (Offset >= WholeNumElements)
     return UndefValue::get(RetTy); // out of range index
   if (!isa<VectorType>(RetTy))
@@ -137,14 +143,14 @@ static Constant *constantFoldWrRegion(Type *RetTy,
   // CallAnalyzer.
   if (isa<ConstantExpr>(OldValue) || isa<ConstantExpr>(NewValue))
     return nullptr;
-  assert(RetTy == OldValue->getType());
+  IGC_ASSERT(RetTy == OldValue->getType());
   auto OffsetC =
       dyn_cast<ConstantInt>(Operands[GenXIntrinsic::GenXRegion::WrIndexOperandNum]);
   if (!OffsetC)
     return nullptr; // allow for but do not const fold when index is vector
   int RetElemSize = RetTy->getScalarType()->getPrimitiveSizeInBits() / 8;
   if (!RetElemSize) {
-    assert(RetTy->getScalarType()->isPointerTy() &&
+    IGC_ASSERT(RetTy->getScalarType()->isPointerTy() &&
            RetTy->getScalarType()->getPointerElementType()->isFunctionTy());
     RetElemSize = DL->getTypeSizeInBits(RetTy) / 8;
   }
@@ -157,12 +163,14 @@ static Constant *constantFoldWrRegion(Type *RetTy,
       Splat = NewValue->getSplatValue();
     if (Splat)
       if (RetTy->getPrimitiveSizeInBits() <= 2 * 32 * 8)
-        return ConstantVector::getSplat(RetTy->getVectorNumElements(), Splat);
+        return ConstantVector::getSplat(
+            IGCLLVM::getElementCount(cast<VectorType>(RetTy)->getNumElements()),
+            Splat);
     // If new value fills the whole vector, just return the new value.
     if (NewValue->getType() == RetTy)
       return NewValue;
   }
-  unsigned WholeNumElements = RetTy->getVectorNumElements();
+  unsigned WholeNumElements = cast<VectorType>(RetTy)->getNumElements();
   // Gather the elements of the old value.
   SmallVector<Constant *, 8> Values;
   for (unsigned i = 0; i != WholeNumElements; ++i)
@@ -215,19 +223,19 @@ static Constant *constantFoldAny(Type *RetTy, Constant *In)
  *    unsuccessful
  */
 Constant *llvm::ConstantFoldGenXIntrinsic(unsigned IID, Type *RetTy,
-    ArrayRef<Constant *> Operands, ImmutableCallSite CS, const DataLayout *DL)
-{
-  Instruction *I = const_cast<Instruction *>(CS.getInstruction());
+                                          ArrayRef<Constant *> Operands,
+                                          Instruction *CSInst,
+                                          const DataLayout *DL) {
   switch (IID) {
   case GenXIntrinsic::genx_rdregioni:
   case GenXIntrinsic::genx_rdregionf: {
-    CMRegion R(I);
+    CMRegion R(CSInst);
     return constantFoldRdRegion(RetTy, Operands, R, DL);
   }
   // The wrregion case specifically excludes genx_wrconstregion
   case GenXIntrinsic::genx_wrregioni:
   case GenXIntrinsic::genx_wrregionf: {
-    CMRegion R(I);
+    CMRegion R(CSInst);
     return constantFoldWrRegion(RetTy, Operands, R, DL);
   }
   case GenXIntrinsic::genx_all:
@@ -250,7 +258,8 @@ Constant *llvm::ConstantFoldGenX(Instruction *I, const DataLayout &DL) {
     return nullptr;
   }
 
-  CallSite CS{I};
+  auto &CS = *cast<CallInst>(I);
+
   auto CheckConst = [](const Use &A) {
     Value *V = A.get();
     bool IsConst = isa<Constant>(V);
@@ -262,7 +271,7 @@ Constant *llvm::ConstantFoldGenX(Instruction *I, const DataLayout &DL) {
     return nullptr;
 
   SmallVector<Constant *, 4> ConstantArgs;
-  ConstantArgs.reserve(CS.arg_size());
+  ConstantArgs.reserve(CS.getNumArgOperands());
   auto FoldOperand = [&DL](const Use &A) {
     auto *C = cast<Constant>(A.get());
     Constant *Folded = ConstantFoldConstant(C, DL);
@@ -275,7 +284,7 @@ Constant *llvm::ConstantFoldGenX(Instruction *I, const DataLayout &DL) {
                  FoldOperand);
 
   Constant *Folded = ConstantFoldGenXIntrinsic(
-      IID, CS.getFunctionType()->getReturnType(), ConstantArgs, CS, &DL);
+      IID, CS.getFunctionType()->getReturnType(), ConstantArgs, I, &DL);
   if (Folded)
     LLVM_DEBUG(dbgs() << "Successfully constant folded intruction to "
                       << *Folded << "\n");

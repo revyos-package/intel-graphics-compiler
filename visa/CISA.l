@@ -178,7 +178,6 @@ static void                    appendStringLiteralChar(char c, char *buf, size_t
 ".version"          {TRACE("\n** VERSION "); return DIRECTIVE_VERSION;}
 ".decl"             {TRACE("\n** DECLARE "); return DIRECTIVE_DECL;}
 ".funcdecl"         {TRACE("\n** FUNCTION DECLARE "); return DIRECTIVE_FUNCDECL;}
-".attr"             {TRACE("\n** ATTR "); return DIRECTIVE_ATTR;}
 ".kernel_attr"      {TRACE("\n** KERNEL ATTR "); return DIRECTIVE_KERNEL_ATTR;}
 ".input"            {TRACE("\n** INPUT "); return DIRECTIVE_INPUT;}
 "."implicit[a-zA-Z0-9_\-$@?]* {
@@ -197,7 +196,7 @@ align[ ]*=    {TRACE("\n** ALIGN_EQ ");    return ALIGN_EQ;}
 offset[ ]*=   {TRACE("\n** OFFSET_EQ ");   return OFFSET_EQ;}
 size[ ]*=     {TRACE("\n** SIZE_EQ ");     return SIZE_EQ;}
 alias[ ]*=    {TRACE("\n** ALIAS_EQ ");    return ALIAS_EQ;}
-attr[ ]*=     {TRACE("\n** ATTR_EQ ");     return ATTR_EQ;}
+attrs[ ]*=     {TRACE("\n** ATTR_EQ ");     return ATTR_EQ;}
 v_name[ ]*=   {TRACE("\n** V_NAME_EQ ");   return V_NAME_EQ;}
 
 v_type[ ]*=[ ]*G {TRACE("\n** V_TYPE_EQ_G "); return V_TYPE_EQ_G;}
@@ -273,6 +272,7 @@ rol|ror {
         CISAlval.opcode = str2opcode(yytext);
         return BINARY_LOGIC_OP;
     }
+
 
 
 
@@ -853,7 +853,7 @@ type[ ]*=[ ]*(ud|d|uw|w|ub|b|df|f|bool|uq|q|UD|D|UW|W|UB|B|DF|F|Bool|BOOL|UQ|Q|h
 
 [ \n\t]+"\\"\n {TRACE("\n** Multiple instructions in a line");}
 
-    /* <<EOF>> {TRACE("\n** EOF_TOKEN"); return EOF_TOKEN;} */
+
 %%
 
 int yywrap() { return 1;}

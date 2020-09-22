@@ -113,10 +113,10 @@ FunctionGroupPass *createGenXAddressCommoningPass();
 FunctionGroupPass *createGenXArgIndirectionPass();
 FunctionPass *createGenXTidyControlFlowPass();
 FunctionGroupPass *createGenXVisaRegAllocPass();
-FunctionGroupPass *createGenXVisaFuncWriterPass();
 FunctionGroupPass *createGenXCisaBuilderPass();
 ModulePass *createGenXFinalizerPass(raw_pwrite_stream &o);
-ModulePass *createGenXVisaWriterPass(raw_pwrite_stream &o);
+ModulePass *createGenXDebugInfoPass();
+ModulePass *createGenXImportBiFPass();
 
 namespace genx {
 

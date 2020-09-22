@@ -28,14 +28,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define VCOPT_LIB_GENXCODEGEN_GENXOCLRUNTIMEINFO_H
 
 #include "FunctionGroup.h"
-#include "JitterDataStruct.h"
+#include "GenXBackendConfig.h"
+
 #include "vc/GenXOpts/Utils/KernelInfo.h"
+
 #include "llvm/ADT/Optional.h"
 #include "llvm/Pass.h"
 
+#include "JitterDataStruct.h"
 #include "RelocationInfo.h"
 
-#include <cassert>
 #include <map>
 
 namespace llvm {
@@ -44,10 +46,7 @@ class GenXSubtarget;
 
 void initializeGenXOCLRuntimeInfoPass(PassRegistry &PR);
 
-// This is an immutable pass to allow it creation once in the beginning of
-// pipeline since creating it before actual place of need (cisa builder)
-// will invalidate every other analyses required by builder.
-class GenXOCLRuntimeInfo : public ImmutablePass {
+class GenXOCLRuntimeInfo : public ModulePass {
 public:
   class KernelArgInfo {
   public:
@@ -153,8 +152,8 @@ public:
     TableInfo SymbolTable;
 
   private:
-    void setInstructionUsageProperties(FunctionGroup &FG,
-                                       const GenXSubtarget &ST);
+    void setInstructionUsageProperties(const FunctionGroup &FG,
+                                       const GenXBackendConfig &BC);
     void setMetadataProperties(genx::KernelMetadata &KM,
                                const GenXSubtarget &ST);
     void setArgumentProperties(const Function &Kernel,
@@ -168,7 +167,8 @@ public:
 
   public:
     // Creates kernel info for given function group.
-    KernelInfo(FunctionGroup &FG, const GenXSubtarget &ST);
+    KernelInfo(const FunctionGroup &FG, const GenXSubtarget &ST,
+               const GenXBackendConfig &BC);
 
     const std::string &getName() const { return Name; }
 
@@ -213,19 +213,32 @@ public:
     const TableInfo &getSymbolTable() const { return SymbolTable; }
   };
 
+  class GTPinInfo {
+    std::vector<char> gtpinBuffer;
+  public:
+    GTPinInfo(std::vector<char>&& buf): gtpinBuffer(std::move(buf)) {}
+    unsigned getGTPinBufferSize() const { return gtpinBuffer.size(); }
+    const std::vector<char> &getGTPinBuffer() const { return gtpinBuffer; }
+  };
 
   class CompiledKernel {
     KernelInfo CompilerInfo;
     FINALIZER_INFO JitterInfo;
-    std::string GenBinary;
+    GTPinInfo GtpinInfo;
+    std::vector<char> GenBinary;
+    std::vector<char> DebugInfo;
 
   public:
     CompiledKernel(KernelInfo &&KI, const FINALIZER_INFO &JI,
-                   ArrayRef<char> GenBin);
+                   const GTPinInfo &GI,
+                   std::vector<char> GenBin,
+                   std::vector<char> DebugInfo);
 
     const KernelInfo &getKernelInfo() const { return CompilerInfo; }
     const FINALIZER_INFO &getJitterInfo() const { return JitterInfo; }
-    const std::string &getGenBinary() const { return GenBinary; }
+    const GTPinInfo &getGTPinInfo() const { return GtpinInfo; }
+    const std::vector<char> &getGenBinary() const { return GenBinary; }
+    const std::vector<char> &getDebugInfo() const { return DebugInfo; }
   };
 
 public:
@@ -241,14 +254,16 @@ private:
 public:
   static char ID;
 
-  GenXOCLRuntimeInfo() : ImmutablePass(ID) {
+  GenXOCLRuntimeInfo() : ModulePass(ID) {
     initializeGenXOCLRuntimeInfoPass(*PassRegistry::getPassRegistry());
   }
 
-  // Save kernel info and jit info for given function in this pass.
-  void saveCompiledKernel(CompiledKernel &&KD) {
-    Kernels.push_back(std::move(KD));
-  }
+  StringRef getPassName() const override { return "GenX OCL Runtime Info"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnModule(Module &M) override;
+
+  void releaseMemory() override { Kernels.clear(); }
 
   // Move compiled kernels out of this pass.
   KernelStorageTy stealCompiledKernels() { return std::move(Kernels); }

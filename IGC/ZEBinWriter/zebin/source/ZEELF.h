@@ -50,8 +50,9 @@ enum ELF_TYPE_ZEBIN
 // ELF section type for ELF32_Shdr::sh_type
 enum SHT_ZEBIN
 {
-    SHT_ZEBIN_SPIRV  = 0xff000009, // .spv.kernel section, value the same as SHT_OPENCL_SPIRV
-    SHT_ZEBIN_ZEINFO = 0xff000011  // .ze.info section
+    SHT_ZEBIN_SPIRV      = 0xff000009, // .spv.kernel section, value the same as SHT_OPENCL_SPIRV
+    SHT_ZEBIN_ZEINFO     = 0xff000011, // .ze.info section
+    SHT_ZEBIN_GTPIN_INFO = 0xff000012  // .gtpin_info section
 };
 
 // ELF relocation type for ELF32_Rel::ELF32_R_TYPE
@@ -67,11 +68,11 @@ enum R_TYPE_ZEBIN
 struct TargetFlags {
 
     // bit[7:0]: dedicated for specific generator (meaning based on generatorId)
-    enum GeneratorSpecificFlags {
+    enum GeneratorSpecificFlags : uint8_t {
         NONE = 0
     };
     // bit[23:21]: generator of this device binary
-    enum GeneratorId {
+    enum GeneratorId : uint8_t {
         UNREGISTERED = 0,
         IGC          = 1
     };
@@ -96,8 +97,8 @@ struct TargetFlags {
             bool machineEntryUsesGfxCoreInsteadOfProductFamily : 1;
             // bit[20:16]:  max compatbile device revision Id (stepping)
             uint8_t maxHwRevisionId : 5;
-            // bit[23:21]: generator of this device binary
-            GeneratorId generatorId : 3;
+            // bit[23:21]: generator of this device binary. Value defined in above GeneratorId
+            uint8_t generatorId : 3;
             // bit[31:24]: MBZ, reserved for future use
             uint8_t reserved : 8;
         };

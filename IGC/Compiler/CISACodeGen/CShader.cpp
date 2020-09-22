@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvmWrapper/IR/Function.h>
+#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
@@ -159,6 +160,7 @@ SProgramOutput* CShader::ProgramOutput()
 
 void CShader::EOTURBWrite()
 {
+
     CEncoder& encoder = GetEncoder();
     uint messageLength = 3;
 
@@ -192,41 +194,29 @@ void CShader::EOTURBWrite()
     encoder.Push();
 }
 
-void CShader::EOTRenderTarget()
+void CShader::EOTRenderTarget(CVariable* r1, bool isPerCoarse)
 {
-    // dummy render target to do EOT and free release the pixel scoreboard
-    EU_GEN6_DATA_PORT_RENDER_TARGET_WRITE_CONTROL msgControl =
-        (m_SIMDSize == SIMDMode::SIMD8)
-        ? EU_GEN6_DATA_PORT_RENDER_TARGET_WRITE_CONTROL_SIMD8_SINGLE_SOURCE_LOW
-        : EU_GEN6_DATA_PORT_RENDER_TARGET_WRITE_CONTROL_SIMD16_SINGLE_SOURCE;
-
-    bool perCoarse = false;
-    if (GetShaderType() == ShaderType::PIXEL_SHADER)
-    {
-        perCoarse = (static_cast<CPixelShader*>(this)->GetPhase() != PSPHASE_LEGACY);
-    }
-
-    const uint Desc = PixelDataPort(
-        false,
-        m_SIMDSize == SIMDMode::SIMD8 ? 4 : 8,
-        0,
-        false,
-        perCoarse,
-        false,
-        true, // scoreboard release
-        false,
-        msgControl,
-        m_pBtiLayout->GetNullSurfaceIdx());
-
-    // we don't want to update the usage mask for null surface, so set the buffer type to be unknown.
-    this->SetBindingTableEntryCountAndBitmap(true, BUFFER_TYPE_UNKNOWN, 0, m_pBtiLayout->GetNullSurfaceIdx());
-
-    constexpr uint nullRenderTargetBit = BIT(20);
-    constexpr uint exDesc = EU_MESSAGE_TARGET_DATA_PORT_WRITE | cMessageExtendedDescriptorEOTBit | nullRenderTargetBit;
-
-    CVariable* payload = GetNewVariable(
-        4 * numLanes(m_SIMDSize), ISA_TYPE_UD, EALIGN_GRF, "EOTPayload");
-    encoder.SendC(nullptr, payload, exDesc, ImmToVariable(Desc, ISA_TYPE_UD));
+    CVariable* src[4] = { nullptr, nullptr, nullptr, nullptr };
+    bool isUndefined[4] = { true, true, true, true };
+    CVariable* const nullSurfaceBti = ImmToVariable(m_pBtiLayout->GetNullSurfaceIdx(), ISA_TYPE_D);
+    CVariable* const blendStateIndex = ImmToVariable(0, ISA_TYPE_D);
+    SetBindingTableEntryCountAndBitmap(true, BUFFER_TYPE_UNKNOWN, 0, m_pBtiLayout->GetNullSurfaceIdx());
+    encoder.RenderTargetWrite(
+        src,
+        isUndefined,
+        true,  // lastRenderTarget,
+        false, // perSample,
+        isPerCoarse, // coarseMode,
+        false, // isHeaderMaskFromCe0,
+        nullSurfaceBti,
+        blendStateIndex,
+        nullptr, // source0Alpha,
+        nullptr, // oMaskOpnd,
+        nullptr, // outputDepthOpnd,
+        nullptr, // stencilOpnd,
+        nullptr, // cpscounter,
+        nullptr, // sampleIndex,
+        r1);
     encoder.Push();
 }
 
@@ -237,7 +227,7 @@ void CShader::AddEpilogue(llvm::ReturnInst* ret)
     encoder.Push();
 }
 
-CVariable* CShader::CreateSP()
+CVariable* CShader::CreateFPAndSP()
 {
     // create argument-value register, limited to 12 GRF
     m_ARGV = GetNewVariable(getGRFSize() * 3, ISA_TYPE_D, getGRFAlignment(), false, 1, "ARGV");
@@ -276,7 +266,9 @@ uint32_t CShader::GetMaxPrivateMem()
 /// save FP of previous frame when entering a stack-call function
 void CShader::SaveStackState()
 {
-    IGC_ASSERT(!m_SavedFP && m_FP && m_SP);
+    IGC_ASSERT(!m_SavedFP);
+    IGC_ASSERT(m_FP);
+    IGC_ASSERT(m_SP);
     m_SavedFP = GetNewVariable(m_FP);
     encoder.Copy(m_SavedFP, m_FP);
     encoder.Push();
@@ -285,7 +277,9 @@ void CShader::SaveStackState()
 /// restore SP and FP when exiting a stack-call function
 void CShader::RestoreStackState()
 {
-    IGC_ASSERT(m_SavedFP && m_FP && m_SP);
+    IGC_ASSERT(m_SavedFP);
+    IGC_ASSERT(m_FP);
+    IGC_ASSERT(m_SP);
     // Restore SP to current FP
     encoder.Copy(m_SP, m_FP);
     encoder.Push();
@@ -306,10 +300,10 @@ void CShader::CreateImplicitArgs()
     unsigned numImplicitArgs = implicitArgs.size();
 
     // Push Args are only for entry function
-    unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) && !isNonEntryMultirateShader(entry) ? numPushArgsEntry : 0);
-    int numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
-    IGC_ASSERT(numFuncArgs >= 0 && "Function arg size does not match meta data and push args.");
+    const unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
+    const unsigned numPushArgs = (isEntryFunc(m_pMdUtils, entry) && !isNonEntryMultirateShader(entry) ? numPushArgsEntry : 0);
+    const int numFuncArgs = IGCLLVM::GetFuncArgSize(entry) - numImplicitArgs - numPushArgs;
+    IGC_ASSERT_MESSAGE(0 <= numFuncArgs, "Function arg size does not match meta data and push args.");
 
     // Create symbol for every arguments [5/2019]
     //   (Previously, symbols are created only for implicit args.)
@@ -505,6 +499,7 @@ void CShader::AddPatchConstantSetup(uint index, CVariable* var)
 void CShader::AllocateInput(CVariable* var, uint offset, uint instance)
 {
     // the input offset must respect the variable alignment
+    IGC_ASSERT(nullptr != var);
     IGC_ASSERT(as[var->GetAlign()]);
     IGC_ASSERT(offset % as[var->GetAlign()] == 0);
     encoder.DeclareInput(var, offset, instance);
@@ -512,6 +507,7 @@ void CShader::AllocateInput(CVariable* var, uint offset, uint instance)
 
 void CShader::AllocateOutput(CVariable* var, uint offset, uint instance)
 {
+    IGC_ASSERT(nullptr != var);
     IGC_ASSERT(as[var->GetAlign()]);
     IGC_ASSERT(offset % as[var->GetAlign()] == 0);
     encoder.DeclareInput(var, offset, instance);
@@ -851,9 +847,32 @@ CVariable* CShader::GetGlobalCVar(llvm::Value* value)
 CVariable* CShader::BitCast(CVariable* var, VISA_Type newType)
 {
     CVariable* bitCast = nullptr;
+    uint32_t newEltSz = CEncoder::GetCISADataTypeSize(newType);
+    uint32_t eltSz = var->GetElemSize();
+    // Bitcase requires both src and dst have the same size, which means
+    // one element size is the same as or multiple of the other (if they
+    // are vectors with different number of elements).
+    IGC_ASSERT(   (newEltSz >= eltSz && (newEltSz % eltSz) == 0)
+               || (newEltSz < eltSz && (eltSz% newEltSz) == 0));
     if (var->IsImmediate())
     {
-        bitCast = ImmToVariable(var->GetImmediateValue(), newType);
+        if (newEltSz == eltSz)
+            bitCast = ImmToVariable(var->GetImmediateValue(), newType);
+        else
+        {
+            // Need a temp. For example,  bitcast i64 0 -> 2xi32
+            CVariable* tmp = GetNewVariable(
+                1,
+                var->GetType(),
+                CEncoder::GetCISADataTypeAlignment(var->GetType()),
+                true,
+                1,
+                "vecImmBitCast");
+            encoder.Copy(tmp, var);
+            encoder.Push();
+
+            bitCast = GetNewAlias(tmp, newType, 0, 0);
+        }
     }
     else
     {
@@ -1145,7 +1164,7 @@ uint32_t CShader::GetExtractMask(llvm::Value* vecVal)
     {
         return it->second;
     }
-    const unsigned int numChannels = vecVal->getType()->isVectorTy() ? vecVal->getType()->getVectorNumElements() : 1;
+    const unsigned int numChannels = vecVal->getType()->isVectorTy() ? (unsigned)cast<VectorType>(vecVal->getType())->getNumElements() : 1;
     IGC_ASSERT_MESSAGE(numChannels <= 32, "Mask has 32 bits maximally!");
     return (1ULL << numChannels) - 1;
 }
@@ -1153,7 +1172,7 @@ uint32_t CShader::GetExtractMask(llvm::Value* vecVal)
 uint16_t CShader::AdjustExtractIndex(llvm::Value* vecVal, uint16_t index)
 {
     uint16_t result = index;
-    if (vecVal->getType()->getVectorNumElements() < 32)
+    if (cast<VectorType>(vecVal->getType())->getNumElements() < 32)
     {
         uint32_t mask = GetExtractMask(vecVal);
         for (uint i = 0; i < index; ++i)
@@ -1313,7 +1332,8 @@ uint CShader::GetNbElementAndMask(llvm::Value* value, uint32_t& mask)
 
     uint nbElement = 0;
     uint bSize = 0;
-    llvm::Type* type = value->getType();
+    llvm::Type* const type = value->getType();
+    IGC_ASSERT(nullptr != type);
     switch (type->getTypeID())
     {
     case llvm::Type::FloatTyID:
@@ -1328,7 +1348,7 @@ uint CShader::GetNbElementAndMask(llvm::Value* value, uint32_t& mask)
             nbElement = numLanes(m_SIMDSize);
         }
         break;
-    case llvm::Type::VectorTyID:
+    case IGCLLVM::VectorTyID:
     {
         uint nElem = GetNbVectorElementAndMask(value, mask);
         nbElement = GetIsUniform(value) ? nElem : (nElem * numLanes(m_SIMDSize));
@@ -1365,6 +1385,7 @@ CVariable* CShader::GetUndef(VISA_Type type)
 // TODO: Obviously, lots of works are needed to support constant expression
 // better.
 uint64_t CShader::GetConstantExpr(ConstantExpr* CE) {
+    IGC_ASSERT(nullptr != CE);
     switch (CE->getOpcode()) {
     default:
         break;
@@ -1405,10 +1426,8 @@ uint64_t CShader::GetConstantExpr(ConstantExpr* CE) {
     }
     }
 
-    errs() << "CE: " << *CE << '\n';
-    IGC_ASSERT_MESSAGE(0, "Unsupported constant expression!");
-    return 0xBADDCAFEbaddcafeU;
-
+    IGC_ASSERT_EXIT_MESSAGE(0, "Unsupported constant expression!");
+    return 0;
 }
 
 unsigned int CShader::GetGlobalMappingValue(llvm::Value* c)
@@ -1426,9 +1445,10 @@ CVariable* CShader::GetGlobalMapping(llvm::Value* c)
     return ImmToVariable(0, type);
 }
 
-CVariable* CShader::GetScalarConstant(llvm::Value* c)
+CVariable* CShader::GetScalarConstant(llvm::Value* const c)
 {
-    VISA_Type type = GetType(c->getType());
+    IGC_ASSERT(nullptr != c);
+    const VISA_Type type = GetType(c->getType());
 
     // Constants
     if (isa<ConstantInt>(c) || isa<ConstantFP>(c) || isa<ConstantPointerNull>(c))
@@ -1729,6 +1749,9 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 
 VISA_Type IGC::GetType(llvm::Type* type, CodeGenContext* pContext)
 {
+    IGC_ASSERT(nullptr != pContext);
+    IGC_ASSERT(nullptr != type);
+
     switch (type->getTypeID())
     {
     case llvm::Type::FloatTyID:
@@ -1751,7 +1774,7 @@ VISA_Type IGC::GetType(llvm::Type* type, CodeGenContext* pContext)
             break;
         }
         break;
-    case llvm::Type::VectorTyID:
+    case IGCLLVM::VectorTyID:
         return GetType(type->getContainedType(0), pContext);
     case llvm::Type::PointerTyID:
     {
@@ -1771,6 +1794,7 @@ VISA_Type IGC::GetType(llvm::Type* type, CodeGenContext* pContext)
     case llvm::Type::HalfTyID:
         return ISA_TYPE_HF;
     default:
+        IGC_ASSERT(0);
         break;
     }
     IGC_ASSERT(0);
@@ -1780,6 +1804,20 @@ VISA_Type IGC::GetType(llvm::Type* type, CodeGenContext* pContext)
 VISA_Type CShader::GetType(llvm::Type* type)
 {
     return IGC::GetType(type, GetContext());
+}
+
+uint32_t CShader::GetNumElts(llvm::Type* type, bool isUniform)
+{
+    uint32_t numElts = isUniform ? 1 : numLanes(m_SIMDSize);
+
+    if (type->isVectorTy())
+    {
+        IGC_ASSERT(type->getContainedType(0)->isIntegerTy() || type->getContainedType(0)->isFloatingPointTy());
+
+        auto VT = cast<VectorType>(type);
+        numElts *= (uint16_t)VT->getNumElements();
+    }
+    return numElts;
 }
 
 uint64_t IGC::GetImmediateVal(llvm::Value* Const)
@@ -2089,20 +2127,16 @@ CVariable* CShader::getOrCreateReturnSymbol(llvm::Function* F)
     }
 
     auto retType = F->getReturnType();
+    IGC_ASSERT(nullptr != retType);
     if (F->isDeclaration() || retType->isVoidTy())
         return nullptr;
 
     IGC_ASSERT(retType->isSingleValueType());
     VISA_Type type = GetType(retType);
-    uint16_t nElts = numLanes(m_SIMDSize);
-    if (retType->isVectorTy())
-    {
-        nElts *= (uint16_t)retType->getVectorNumElements();
-    }
+    uint16_t nElts = (uint16_t)GetNumElts(retType, false);
     e_alignment align = getGRFAlignment();
-    static const bool nonUniform = false;
     CVariable* var = GetNewVariable(
-        nElts, type, align, nonUniform, m_numberInstance,
+        nElts, type, align, false, m_numberInstance,
         CName(F->getName(), "_RETVAL"));
     globalSymbolMapping.insert(std::make_pair(F, var));
     return var;
@@ -2115,37 +2149,41 @@ CVariable* CShader::getOrCreateArgumentSymbol(
     bool useStackCall)
 {
     llvm::DenseMap<llvm::Value*, CVariable*>* pSymMap = &globalSymbolMapping;
+    IGC_ASSERT(nullptr != pSymMap);
     auto it = pSymMap->find(Arg);
     if (it != pSymMap->end())
     {
         return it->second;
     }
 
-    // An explicit argument is not uniform, and for an implicit argument, it
-    // is predefined. Note that it is not necessarily uniform.
-    Function* F = Arg->getParent();
-    ImplicitArgs implicitArgs(*F, m_pMdUtils);
-    unsigned numImplicitArgs = implicitArgs.size();
-    unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
-    unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) && !isNonEntryMultirateShader(F) ? numPushArgsEntry : 0);
-    unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(F) - numImplicitArgs - numPushArgs;
-
     CVariable* var = nullptr;
-    llvm::Function::arg_iterator arg = F->arg_begin();
-    std::advance(arg, numFuncArgs);
-    for (unsigned i = 0; i < numImplicitArgs; ++i, ++arg)
-    {
-        Argument* argVal = &(*arg);
-        if (argVal == Arg)
-        {
-            ImplicitArg implictArg = implicitArgs[i];
-            auto ArgType = implictArg.getArgType();
 
-            // Just reuse the kernel arguments for the following.
-            // Note that for read only general arguments, we may do similar
-            // optimization, with some advanced analysis.
-            if (!useStackCall &&
-                (ArgType == ImplicitArg::ArgType::R0 ||
+    // Stack call does not use implicit args
+    if (!useStackCall)
+    {
+        // An explicit argument is not uniform, and for an implicit argument, it
+        // is predefined. Note that it is not necessarily uniform.
+        Function* F = Arg->getParent();
+        ImplicitArgs implicitArgs(*F, m_pMdUtils);
+        unsigned numImplicitArgs = implicitArgs.size();
+        unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
+        unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) && !isNonEntryMultirateShader(F) ? numPushArgsEntry : 0);
+        unsigned numFuncArgs = IGCLLVM::GetFuncArgSize(F) - numImplicitArgs - numPushArgs;
+
+        llvm::Function::arg_iterator arg = F->arg_begin();
+        std::advance(arg, numFuncArgs);
+        for (unsigned i = 0; i < numImplicitArgs; ++i, ++arg)
+        {
+            Argument* argVal = &(*arg);
+            if (argVal == Arg)
+            {
+                ImplicitArg implictArg = implicitArgs[i];
+                auto ArgType = implictArg.getArgType();
+
+                // Just reuse the kernel arguments for the following.
+                // Note that for read only general arguments, we may do similar
+                // optimization, with some advanced analysis.
+                if (ArgType == ImplicitArg::ArgType::R0 ||
                     ArgType == ImplicitArg::ArgType::PAYLOAD_HEADER ||
                     ArgType == ImplicitArg::ArgType::WORK_DIM ||
                     ArgType == ImplicitArg::ArgType::NUM_GROUPS ||
@@ -2155,37 +2193,38 @@ CVariable* CShader::getOrCreateArgumentSymbol(
                     ArgType == ImplicitArg::ArgType::CONSTANT_BASE ||
                     ArgType == ImplicitArg::ArgType::GLOBAL_BASE ||
                     ArgType == ImplicitArg::ArgType::PRIVATE_BASE ||
-                    ArgType == ImplicitArg::ArgType::PRINTF_BUFFER))
-            {
-                Function& K = *m_FGA->getSubGroupMap(F);
-                ImplicitArgs IAs(K, m_pMdUtils);
-                uint32_t nIAs = (uint32_t)IAs.size();
-                uint32_t iArgIx = IAs.getArgIndex(ArgType);
-                uint32_t argIx = (uint32_t)IGCLLVM::GetFuncArgSize(K) - nIAs + iArgIx;
-                if (isEntryFunc(m_pMdUtils, &K) && !isNonEntryMultirateShader(&K)) {
-                    argIx = argIx - numPushArgsEntry;
+                    ArgType == ImplicitArg::ArgType::PRINTF_BUFFER)
+                {
+                    Function& K = *m_FGA->getSubGroupMap(F);
+                    ImplicitArgs IAs(K, m_pMdUtils);
+                    uint32_t nIAs = (uint32_t)IAs.size();
+                    uint32_t iArgIx = IAs.getArgIndex(ArgType);
+                    uint32_t argIx = (uint32_t)IGCLLVM::GetFuncArgSize(K) - nIAs + iArgIx;
+                    if (isEntryFunc(m_pMdUtils, &K) && !isNonEntryMultirateShader(&K)) {
+                        argIx = argIx - numPushArgsEntry;
+                    }
+                    Function::arg_iterator arg = K.arg_begin();
+                    for (uint32_t j = 0; j < argIx; ++j, ++arg);
+                    Argument* kerArg = &(*arg);
+
+                    // Pre-condition: all kernel arguments have been created already.
+                    IGC_ASSERT(pSymMap->count(kerArg));
+                    return (*pSymMap)[kerArg];
                 }
-                Function::arg_iterator arg = K.arg_begin();
-                for (uint32_t j = 0; j < argIx; ++j, ++arg);
-                Argument* kerArg = &(*arg);
+                else
+                {
+                    bool isUniform = implictArg.getDependency() == WIAnalysis::UNIFORM;
+                    uint16_t nbElements = (uint16_t)implictArg.getNumberElements();
 
-                // Pre-condition: all kernel arguments have been created already.
-                IGC_ASSERT(pSymMap->count(kerArg));
-                return (*pSymMap)[kerArg];
+
+                    var = GetNewVariable(nbElements,
+                        implictArg.getVISAType(*m_DL),
+                        implictArg.getAlignType(*m_DL), isUniform,
+                        isUniform ? 1 : m_numberInstance,
+                        argVal->getName());
+                }
+                break;
             }
-            else
-            {
-                bool isUniform = implictArg.getDependency() == WIAnalysis::UNIFORM;
-                uint16_t nbElements = (uint16_t)implictArg.getNumberElements();
-
-
-                var = GetNewVariable(nbElements,
-                    implictArg.getVISAType(*m_DL),
-                    implictArg.getAlignType(*m_DL), isUniform,
-                    isUniform ? 1 : m_numberInstance,
-                    argVal->getName());
-            }
-            break;
         }
     }
 
@@ -2204,16 +2243,16 @@ CVariable* CShader::getOrCreateArgumentSymbol(
         }
 
         VISA_Type type = GetType(Arg->getType());
-        uint16_t nElts = numLanes(m_SIMDSize);
-        if (Arg->getType()->isVectorTy())
-        {
-            IGC_ASSERT((Arg->getType()->getVectorElementType()->isIntegerTy()) || (Arg->getType()->getVectorElementType()->isFloatingPointTy()));
-            nElts *= (uint16_t)Arg->getType()->getVectorNumElements();
-        }
+        uint16_t nElts = (uint16_t)GetNumElts(Arg->getType(), isUniform);
         var = GetNewVariable(nElts, type, align, isUniform, m_numberInstance, Arg->getName());
     }
     pSymMap->insert(std::make_pair(Arg, var));
     return var;
+}
+
+void CShader::UpdateSymbolMap(llvm::Value* v, CVariable* CVar)
+{
+    symbolMapping[v] = CVar;
 }
 
 // Reuse a varable in the following case
@@ -2470,7 +2509,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
                 if (isVecType)
                 {
                     // Map the entire vector value to the CVar
-                    unsigned numElements = value->getType()->getVectorNumElements();
+                    unsigned numElements = (unsigned)cast<VectorType>(value->getType())->getNumElements();
                     var = GetNewVariable(numElements, ISA_TYPE_UQ, (GetContext()->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD, true, 1, valName);
                     symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
 
@@ -2572,7 +2611,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
     {
         if (CanTreatAsAlias(EEI))
         {
-            llvm::ConstantInt* pConstElem = llvm::dyn_cast<llvm::ConstantInt>(EEI->getIndexOperand());
+            llvm::ConstantInt* const pConstElem = llvm::dyn_cast<llvm::ConstantInt>(EEI->getIndexOperand());
             IGC_ASSERT(nullptr != pConstElem);
             Value* vecOperand = EEI->getVectorOperand();
             // need to call GetSymbol() before AdjustExtractIndex(), since
@@ -2986,8 +3025,8 @@ bool CShader::isUnpacked(llvm::Value* value)
     {
         if (isa<SampleIntrinsic>(value) || isa<LdmcsInstrinsic>(value))
         {
-            if (value->getType()->getVectorElementType()->isHalfTy() ||
-                value->getType()->getVectorElementType()->isIntegerTy(16))
+            if (cast<VectorType>(value->getType())->getElementType()->isHalfTy() ||
+                cast<VectorType>(value->getType())->getElementType()->isIntegerTy(16))
             {
                 isUnpacked = true;
                 auto uses = value->user_begin();
@@ -3303,6 +3342,9 @@ CShader* CShaderProgram::CreateNewShader(SIMDMode simd)
             break;
         }
     }
+
+    IGC_ASSERT(nullptr != pShader);
+
     pShader->m_shaderStats = m_shaderStats;
     pShader->m_DriverInfo = &m_context->m_DriverInfo;
     pShader->m_Platform = &m_context->platform;
@@ -3310,6 +3352,13 @@ CShader* CShaderProgram::CreateNewShader(SIMDMode simd)
     pShader->m_ModuleMetadata = m_context->getModuleMetaData();
 
     return pShader;
+}
+
+void CShaderProgram::DeleteShader(SIMDMode simd, ShaderDispatchMode mode)
+{
+    CShader*& pShader = GetShaderPtr(simd, mode);
+    delete pShader;
+    pShader = nullptr;
 }
 
 unsigned int CShader::GetSamplerCount(unsigned int samplerCount)

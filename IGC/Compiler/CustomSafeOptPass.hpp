@@ -23,17 +23,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "common/MDFrameWork.h"
-
 #include "common/LLVMWarningsPush.hpp"
-#include <llvm/Pass.h>
-#include <llvm/IR/InstVisitor.h>
-#include <llvm/Analysis/TargetLibraryInfo.h>
-#include <llvm/Analysis/LoopPass.h>
-#include <llvm/IR/Instructions.h>
-#include <llvm/IR/ConstantFolder.h>
+#include "llvm/Config/llvm-config.h"
+#include "llvm/Pass.h"
+#include "llvm/IR/InstVisitor.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/LoopPass.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/ConstantFolder.h"
 #include "common/LLVMWarningsPop.hpp"
 
 namespace llvm
@@ -80,8 +81,9 @@ namespace IGC
         void visitFPTruncInst(llvm::FPTruncInst& I);
         void visitExtractElementInst(llvm::ExtractElementInst& I);
         void visitLdptr(llvm::CallInst* inst);
-        void visitLdRawVec(llvm::CallInst* inst);
         void visitLoadInst(llvm::LoadInst& I);
+        void dp4WithIdentityMatrix(llvm::ExtractElementInst& I);
+        bool isIdentityMatrix(llvm::ExtractElementInst& I);
 
         //
         // IEEE Floating point arithmetic is not associative.  Any pattern
@@ -103,6 +105,7 @@ namespace IGC
 
         void matchDp4a(llvm::BinaryOperator& I);
 
+        template <typename MaskType> void matchReverse(llvm::BinaryOperator& I);
     private:
         bool psHasSideEffect;
     };
@@ -182,7 +185,6 @@ namespace IGC
         void visitFNeg(llvm::UnaryOperator& I);
 #endif
 
-        template <typename MaskType> void matchReverse(llvm::BinaryOperator& I);
         void createBitcastExtractInsertPattern(llvm::BinaryOperator& I,
             llvm::Value* Op1, llvm::Value* Op2, unsigned extractNum1, unsigned extractNum2);
     };
@@ -244,9 +246,11 @@ namespace IGC
         llvm::TargetLibraryInfo* m_TLI;
     };
 
+    llvm::FunctionPass* createVectorBitCastOptPass();
     llvm::FunctionPass* createGenStrengthReductionPass();
     llvm::FunctionPass* createNanHandlingPass();
     llvm::FunctionPass* createFlattenSmallSwitchPass();
+    llvm::FunctionPass* createSplitIndirectEEtoSelPass();
     llvm::FunctionPass* createIGCIndirectICBPropagaionPass();
     llvm::FunctionPass* createBlendToDiscardPass();
     llvm::FunctionPass* createMarkReadOnlyLoadPass();

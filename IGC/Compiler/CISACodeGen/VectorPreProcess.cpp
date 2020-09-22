@@ -31,10 +31,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Instructions.h>
-#include <llvm/IR/IRBuilder.h>
+#include <llvmWrapper/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/Support/MathExtras.h>
 #include <llvm/Transforms/Utils/Local.h>
+#include <llvmWrapper/IR/DerivedTypes.h>
 #include <llvmWrapper/Support/Alignment.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
@@ -43,6 +44,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace llvm;
 using namespace IGC;
+using IGCLLVM::FixedVectorType;
 
 //
 // Description of VectorPreProcess Pass
@@ -108,9 +110,8 @@ namespace
     class AbstractLoadInst
     {
         Instruction* const m_inst;
-        IRBuilder<> m_builder;
-        AbstractLoadInst(LoadInst* LI) : m_inst(LI), m_builder(LI) {}
-        AbstractLoadInst(LdRawIntrinsic* LdRI) : m_inst(LdRI), m_builder(LdRI) {}
+        AbstractLoadInst(LoadInst* LI) : m_inst(LI) {}
+        AbstractLoadInst(LdRawIntrinsic* LdRI) : m_inst(LdRI) {}
 
         LoadInst* getLoad() const
         {
@@ -133,7 +134,7 @@ namespace
         {
             if (isa<LoadInst>(m_inst))
             {
-                getLoad()->setAlignment(MaybeAlign(alignment));
+                getLoad()->setAlignment(IGCLLVM::getCorrectAlign(alignment));
             }
             else
             {
@@ -154,11 +155,12 @@ namespace
         }
         Instruction* Create(Type* returnType, Value* ptr, unsigned int alignment, bool isVolatile)
         {
+            IRBuilder<> builder(m_inst);
             if (isa<LoadInst>(m_inst))
             {
                 Type* newPtrType = PointerType::get(returnType, ptr->getType()->getPointerAddressSpace());
-                ptr = m_builder.CreateBitCast(ptr, newPtrType);
-                return m_builder.CreateAlignedLoad(ptr, alignment, isVolatile);
+                ptr = builder.CreateBitCast(ptr, newPtrType);
+                return builder.CreateAlignedLoad(ptr, IGCLLVM::getAlign(alignment), isVolatile);
             }
             else
             {
@@ -167,25 +169,26 @@ namespace
                 Value* offsetVal = hasComputedOffset ? ptr : ldraw->getOffsetValue();
                 ptr = ldraw->getResourceValue();
                 Type* types[2] = { returnType , ptr->getType() };
-                Value* args[4] = { ptr, offsetVal, m_builder.getInt32(alignment), m_builder.getInt1(isVolatile) };
+                Value* args[4] = { ptr, offsetVal, builder.getInt32(alignment), builder.getInt1(isVolatile) };
                 Function* newLdRawFunction =
                     GenISAIntrinsic::getDeclaration(ldraw->getModule(), ldraw->getIntrinsicID(), types);
-                return m_builder.CreateCall(newLdRawFunction, args);
+                return builder.CreateCall(newLdRawFunction, args);
             }
         }
         // Emulates a GEP on a pointer of the scalar type of returnType.
         Value* CreateConstScalarGEP(Type* returnType, Value* ptr, uint32_t offset)
         {
+            IRBuilder<> builder(m_inst);
             if (isa<LoadInst>(m_inst))
             {
                 Type* ePtrType = PointerType::get(returnType->getScalarType(), ptr->getType()->getPointerAddressSpace());
-                ptr = m_builder.CreateBitCast(ptr, ePtrType);
-                return m_builder.CreateConstGEP1_32(ptr, offset);
+                ptr = builder.CreateBitCast(ptr, ePtrType);
+                return builder.CreateConstGEP1_32(ptr, offset);
             }
             else
             {
-                Value* offsetInBytes = m_builder.getInt32(offset * returnType->getScalarSizeInBits() / 8);
-                return m_builder.CreateAdd(offsetInBytes, getLdRaw()->getOffsetValue());
+                Value* offsetInBytes = builder.getInt32(offset * returnType->getScalarSizeInBits() / 8);
+                return builder.CreateAdd(offsetInBytes, getLdRaw()->getOffsetValue());
             }
         }
         static Optional<AbstractLoadInst> get(llvm::Value* value)
@@ -212,9 +215,8 @@ namespace
     class AbstractStoreInst
     {
         Instruction* const m_inst;
-        IRBuilder<> m_builder;
-        AbstractStoreInst(StoreInst* SI) : m_inst(SI), m_builder(SI) {}
-        AbstractStoreInst(StoreRawIntrinsic* SRI) : m_inst(SRI), m_builder(SRI) {}
+        AbstractStoreInst(StoreInst* SI) : m_inst(SI) {}
+        AbstractStoreInst(StoreRawIntrinsic* SRI) : m_inst(SRI) {}
 
         StoreInst* getStore() const
         {
@@ -237,7 +239,7 @@ namespace
         {
             if (isa<StoreInst>(m_inst))
             {
-                getStore()->setAlignment(MaybeAlign(alignment));
+                getStore()->setAlignment(IGCLLVM::getCorrectAlign(alignment));
             }
         }
         Value* getValueOperand() const
@@ -254,12 +256,13 @@ namespace
         }
         Instruction* Create(Value* storedValue, Value* ptr, unsigned int alignment, bool isVolatile)
         {
+            IRBuilder<> builder(m_inst);
             Type* newType = storedValue->getType();
             if (isa<StoreInst>(m_inst))
             {
                 Type* newPtrType = PointerType::get(newType, ptr->getType()->getPointerAddressSpace());
-                ptr = m_builder.CreateBitCast(ptr, newPtrType);
-                return m_builder.CreateAlignedStore(storedValue, ptr, alignment, isVolatile);
+                ptr = builder.CreateBitCast(ptr, newPtrType);
+                return builder.CreateAlignedStore(storedValue, ptr, IGCLLVM::getAlign(alignment), isVolatile);
             }
             else
             {
@@ -267,10 +270,10 @@ namespace
                 Value* offset = hasComputedOffset ? ptr : getStoreRaw()->getArgOperand(1);
                 ptr = getPointerOperand();
                 Type* types[2] = { ptr->getType(), newType };
-                Value* args[5] = { ptr, offset, storedValue, m_builder.getInt32(alignment), m_builder.getInt1(isVolatile) };
+                Value* args[5] = { ptr, offset, storedValue, builder.getInt32(alignment), builder.getInt1(isVolatile) };
                 Function* newStoreRawFunction =
                     GenISAIntrinsic::getDeclaration(getStoreRaw()->getModule(), getStoreRaw()->getIntrinsicID(), types);
-                return m_builder.CreateCall(newStoreRawFunction, args);
+                return builder.CreateCall(newStoreRawFunction, args);
             }
         }
         Instruction* Create(Value* storedValue)
@@ -280,16 +283,17 @@ namespace
         // Emulates a GEP on a pointer of the scalar type of storedType.
         Value* CreateConstScalarGEP(Type* storedType, Value* ptr, uint32_t offset)
         {
+            IRBuilder<> builder(m_inst);
             if (isa<StoreInst>(m_inst))
             {
                 Type* ePtrType = PointerType::get(storedType->getScalarType(), ptr->getType()->getPointerAddressSpace());
-                ptr = m_builder.CreateBitCast(ptr, ePtrType);
-                return m_builder.CreateConstGEP1_32(ptr, offset);
+                ptr = builder.CreateBitCast(ptr, ePtrType);
+                return builder.CreateConstGEP1_32(ptr, offset);
             }
             else
             {
-                Value* offsetInBytes = m_builder.getInt32(offset * storedType->getScalarSizeInBits() / 8);
-                return m_builder.CreateAdd(offsetInBytes, getStoreRaw()->getArgOperand(1));
+                Value* offsetInBytes = builder.getInt32(offset * storedType->getScalarSizeInBits() / 8);
+                return builder.CreateAdd(offsetInBytes, getStoreRaw()->getArgOperand(1));
             }
         }
         static Optional<AbstractStoreInst> get(llvm::Value* value)
@@ -561,7 +565,7 @@ void VectorPreProcess::createSplitVectorTypes(
     uint32_t M = N / E;  // the number of subvectors for split size E
     if (M > 0)
     {
-        Type* Ty = (E == 1) ? ETy : VectorType::get(ETy, E);
+        Type* Ty = (E == 1) ? ETy : FixedVectorType::get(ETy, E);
         SplitInfo.push_back(std::make_pair(Ty, M));
     }
     N = N % E;
@@ -575,7 +579,7 @@ void VectorPreProcess::createSplitVectorTypes(
         M = N / E;  // the number of subvectors for split size E
         if (M > 0)
         {
-            SplitInfo.push_back(std::make_pair(VectorType::get(ETy, E), M));
+            SplitInfo.push_back(std::make_pair(FixedVectorType::get(ETy, E), M));
         }
         // The remaining elts are to be split for next iteration.
         N = N % E;
@@ -585,7 +589,7 @@ void VectorPreProcess::createSplitVectorTypes(
     // 3. A vector of 1|2|3|4 elements. No further splitting!
     if (N > 0)
     {
-        Type* Ty = (N == 1) ? ETy : VectorType::get(ETy, N);
+        Type* Ty = (N == 1) ? ETy : FixedVectorType::get(ETy, N);
         SplitInfo.push_back(std::make_pair(Ty, 1));
     }
 }
@@ -631,7 +635,7 @@ bool VectorPreProcess::splitStore(
         unsigned int alignment = ASI.getAlignment();
         if (isStoreInst && alignment < 4)
         {
-            uint32_t newAlign = getKnownAlignment(ASI.getPointerOperand(), *m_DL);
+            uint32_t newAlign = (uint32_t)IGCLLVM::getAlignmentValue(getKnownAlignment(ASI.getPointerOperand(), *m_DL));
             if (newAlign > alignment)
             {
                 // For the same reason as Load, use DW-aligned for OCL stateful.
@@ -681,7 +685,7 @@ bool VectorPreProcess::splitStore(
                 std::vector<Value*> splitScalars;
                 IGC_ASSERT(Ty1->getScalarSizeInBits());
                 const uint32_t vectorSize = (unsigned int)ETy->getPrimitiveSizeInBits() / Ty1->getScalarSizeInBits();
-                Type* splitType = llvm::VectorType::get(Ty1, vectorSize);
+                Type* splitType = FixedVectorType::get(Ty1, vectorSize);
                 for (uint32_t i = 0; i < nelts; i++)
                 {
                     Value* splitInst = aBuilder.CreateBitCast(scalars[i], splitType);
@@ -801,7 +805,7 @@ bool VectorPreProcess::splitLoad(
         unsigned int alignment = ALI.getAlignment();
         if (!isLdRaw && alignment < 4)
         {
-            uint32_t newAlign = getKnownAlignment(ALI.getPointerOperand(), *m_DL);
+            uint32_t newAlign = (uint32_t)IGCLLVM::getAlignmentValue(getKnownAlignment(ALI.getPointerOperand(), *m_DL));
             if (newAlign > alignment)
             {
                 //  For OCL stateful, the base can be as little as DW-aligned. To be safe,
@@ -882,7 +886,7 @@ bool VectorPreProcess::splitLoad(
             {
                 builder.SetInsertPoint(nextInst);
             }
-            Value* undef = UndefValue::get(VectorType::get(svals[0]->getType(), scalarsPerElement));
+            Value* undef = UndefValue::get(FixedVectorType::get(svals[0]->getType(), scalarsPerElement));
             for (uint32_t i = 0; i < svals.size() / scalarsPerElement; i++)
             {
                 Value* newElement = undef;
@@ -999,7 +1003,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
             if (ALI->getAlignment() >= 4 * etyBytes)
             {
                 // Make it 4-element load
-                Type* newVTy = VectorType::get(eTy, 4);
+                Type* newVTy = FixedVectorType::get(eTy, 4);
                 Value* V = ALI->Create(newVTy);
 
                 Elt0 = Builder.CreateExtractElement(V, Builder.getInt32(0), "elt0");
@@ -1009,7 +1013,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
             else
             {
                 // One 2-element vector load + one scalar load
-                Type* newVTy = VectorType::get(eTy, 2);
+                Type* newVTy = FixedVectorType::get(eTy, 2);
                 Value* offsetAddr = ALI->CreateConstScalarGEP(eTy, ALI->getPointerOperand(), 2);
                 Value* V2 = ALI->Create(newVTy);
                 Elt0 = Builder.CreateExtractElement(V2, Builder.getInt32(0), "elt0");
@@ -1057,7 +1061,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
         {
             Value* Ptr = ASI->getPointerOperand();
             // Split 3-element into 2-element + 1 scalar
-            Type* newVTy = VectorType::get(eTy, 2);
+            Type* newVTy = FixedVectorType::get(eTy, 2);
             Value* StoredVal = ASI->getValueOperand();
             Value* offsetAddr = ASI->CreateConstScalarGEP(StoredVal->getType(), Ptr, 2);
             InsertElementInst* IEInsts[3];
@@ -1296,11 +1300,11 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         //
         // TODO: further optimize this load into a message with channel masks
         // for cases in which use indices are sparse like {0, 2}.
-        unsigned N = Inst->getType()->getVectorNumElements();
+        unsigned N = (unsigned)cast<VectorType>(Inst->getType())->getNumElements();
         if (N == MaxIndex + 1)
             return Inst;
 
-        Type* NewVecTy = VectorType::get(Inst->getType()->getVectorElementType(),
+        Type* NewVecTy = FixedVectorType::get(cast<VectorType>(Inst->getType())->getElementType(),
             MaxIndex + 1);
         IRBuilder<> Builder(Inst);
         Instruction* NewLI = ALI.Create(NewVecTy);
@@ -1353,7 +1357,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
     if (NBits < 32)
         return Inst;
 
-    unsigned N = Val->getType()->getVectorNumElements();
+    unsigned N = (unsigned)cast<VectorType>(Val->getType())->getNumElements();
     if (auto CV = dyn_cast<ConstantVector>(Val))
     {
         unsigned MaxIndex = 0;
@@ -1412,7 +1416,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
     if (MaxIndex >= 0 && MaxIndex + 1 < (int)N && isa<UndefValue>(ChainVal))
     {
         IRBuilder<> Builder(ASI.getInst());
-        Type* NewVecTy = VectorType::get(Val->getType()->getVectorElementType(),
+        Type* NewVecTy = FixedVectorType::get(cast<VectorType>(Val->getType())->getElementType(),
             MaxIndex + 1);
         Value* SVal = UndefValue::get(NewVecTy);
         for (int i = 0; i <= MaxIndex; ++i)
@@ -1571,7 +1575,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
                     // If this is a 3-element vector load, remove it
                     // from m_Vector3List as well.
                     if (isAbstractLoadInst(tInst) && tInst->getType()->isVectorTy() &&
-                        tInst->getType()->getVectorNumElements() == 3)
+                        cast<VectorType>(tInst->getType())->getNumElements() == 3)
                     {
                         InstWorkVector::iterator
                             tI = m_Vector3List.begin(),

@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include <llvm/ADT/STLExtras.h>
 #include <llvmWrapper/Analysis/MemoryLocation.h>
 #include <llvmWrapper/Analysis/TargetLibraryInfo.h>
@@ -38,6 +39,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/GlobalAlias.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/Pass.h>
+#include <llvmWrapper/Support/Alignment.h>
+#include <llvmWrapper/IR/DerivedTypes.h>
 #include <llvm/Support/Debug.h>
 #include <llvm/Support/DebugCounter.h>
 #include <llvm/Support/raw_ostream.h>
@@ -124,7 +127,7 @@ namespace {
             MemRefListTy& MemRefs, TrivialMemRefListTy& ToOpt);
 
         unsigned getNumElements(Type* Ty) const {
-            return Ty->isVectorTy() ? Ty->getVectorNumElements() : 1;
+            return Ty->isVectorTy() ? (unsigned)cast<VectorType>(Ty)->getNumElements() : 1;
         }
 
         MemoryLocation getLocation(Instruction* I) const {
@@ -155,18 +158,36 @@ namespace {
             if (V->getType() == DestTy)
                 return V;
 
-            if (V->getType()->isPointerTy() && DestTy->isIntegerTy())
-                return Builder.CreatePtrToInt(V, DestTy);
-
-            if (V->getType()->isIntegerTy() && DestTy->isPointerTy())
-                return Builder.CreateIntToPtr(V, DestTy);
-
             if (V->getType()->isPointerTy() && DestTy->isPointerTy()) {
                 PointerType* SrcPtrTy = cast<PointerType>(V->getType());
                 PointerType* DstPtrTy = cast<PointerType>(DestTy);
                 if (SrcPtrTy->getPointerAddressSpace() !=
                     DstPtrTy->getPointerAddressSpace())
                     return Builder.CreateAddrSpaceCast(V, DestTy);
+            }
+
+            if (V->getType()->isPointerTy()) {
+                if (DestTy->isIntegerTy()) {
+                    return Builder.CreatePtrToInt(V, DestTy);
+                }
+                else if (DestTy->isFloatingPointTy()) {
+                    uint32_t Size = (uint32_t)DestTy->getPrimitiveSizeInBits();
+                    Value* Cast = Builder.CreatePtrToInt(
+                        V, Builder.getIntNTy(Size));
+                    return Builder.CreateBitCast(Cast, DestTy);
+                }
+            }
+
+            if (DestTy->isPointerTy()) {
+                if (V->getType()->isIntegerTy()) {
+                    return Builder.CreateIntToPtr(V, DestTy);
+                }
+                else if (V->getType()->isFloatingPointTy()) {
+                    uint32_t Size = (uint32_t)V->getType()->getPrimitiveSizeInBits();
+                    Value* Cast = Builder.CreateBitCast(
+                        V, Builder.getIntNTy(Size));
+                    return Builder.CreateIntToPtr(Cast, DestTy);
+                }
             }
 
             return Builder.CreateBitCast(V, DestTy);
@@ -745,12 +766,12 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
             Ptr = Builder.CreateGEP(Ptr, Idx);
     }
 
-    Type* NewLoadType = VectorType::get(LeadingLoadScalarType, NumElts);
+    Type* NewLoadType = IGCLLVM::FixedVectorType::get(LeadingLoadScalarType, NumElts);
     Type* NewPointerType =
         PointerType::get(NewLoadType, LeadingLoad->getPointerAddressSpace());
     Value* NewPointer = Builder.CreateBitCast(Ptr, NewPointerType);
     LoadInst* NewLoad =
-        Builder.CreateAlignedLoad(NewPointer, FirstLoad->getAlignment());
+        Builder.CreateAlignedLoad(NewPointer, IGCLLVM::getAlign(FirstLoad->getAlignment()));
     NewLoad->setDebugLoc(LeadingLoad->getDebugLoc());
 
     // Unpack the load value to their uses. For original vector loads, extracting
@@ -773,7 +794,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
         Pos = unsigned((std::get<1>(I) - FirstOffset) / LdScalarSize);
 
         if (Ty->isVectorTy()) {
-            if (Pos + Ty->getVectorNumElements() > NumElts) {
+            if (Pos + cast<VectorType>(Ty)->getNumElements() > NumElts) {
                 // This implies we're trying to extract an element from our new load
                 // with an index > the size of the new load.  If this happens,
                 // we'll generate correct code if it does since we don't remove the
@@ -781,7 +802,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
                 continue;
             }
             Value* Val = UndefValue::get(Ty);
-            for (unsigned i = 0, e = Ty->getVectorNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(NewLoad, Builder.getInt32(Pos + i));
                 Ex = createBitOrPointerCast(Ex, ScalarTy, Builder);
                 Val = Builder.CreateInsertElement(Val, Ex, Builder.getInt32(i));
@@ -1036,7 +1057,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     StoresToMerge.resize(s);
     std::sort(StoresToMerge.begin(), StoresToMerge.end(), less_tuple<1>());
 
-    Type* NewStoreType = VectorType::get(LeadingStoreScalarType, NumElts);
+    Type* NewStoreType = IGCLLVM::FixedVectorType::get(LeadingStoreScalarType, NumElts);
     Value* NewStoreVal = UndefValue::get(NewStoreType);
 
     // Pack the store value from their original store values. For original vector
@@ -1050,7 +1071,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         IGC_ASSERT(hasSameSize(ScalarTy, LeadingStoreScalarType));
 
         if (Ty->isVectorTy()) {
-            for (unsigned i = 0, e = Ty->getVectorNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(Val, Builder.getInt32(i));
                 Ex = createBitOrPointerCast(Ex, LeadingStoreScalarType, Builder);
                 NewStoreVal = Builder.CreateInsertElement(NewStoreVal, Ex,
@@ -1105,7 +1126,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         Builder.CreateBitCast(FirstStore->getPointerOperand(), NewPointerType);
     StoreInst* NewStore =
         Builder.CreateAlignedStore(NewStoreVal, NewPointer,
-            FirstStore->getAlignment());
+            IGCLLVM::getAlign(FirstStore->getAlignment()));
     NewStore->setDebugLoc(TailingStore->getDebugLoc());
 
     // Replace the list to be optimized with the new store.
@@ -1117,11 +1138,23 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         Value* Ptr = ST->getPointerOperand();
         ST->eraseFromParent();
         RecursivelyDeleteTriviallyDeadInstructions(Ptr);
-        // Mark it as already merged.
-        std::get<2>(I)->first = nullptr;
-        // Checking zero distance is intentionally omitted here due to the first
-        // memory access won't be able to be checked again.
-        std::get<2>(I)->second -= 1;
+
+        if (std::get<2>(I)->first == TailingStore)
+            // Writing NewStore to MemRefs for correct isSafeToMergeLoad working.
+            // For example if MemRefs contains this sequence: S1, S2, S3, L5, L6, L7, S4, L4
+            // after stores merge MemRefs contains : L5, L6, L7, S1234, L4 and loads are
+            // merged to L567, final instructions instructions sequence is L567, S1234, L4.
+            // Otherwise the sequence could be merged to sequence L4567, S1234 with
+            // unordered L4,S4 accesses.
+            std::get<2>(I)->first = NewStore;
+        else {
+            // Mark it as already merged.
+            std::get<2>(I)->first = nullptr;
+            // Checking zero distance is intentionally omitted here due to the first
+            // memory access won't be able to be checked again.
+            std::get<2>(I)->second -= 1;
+        }
+
     }
 
     return true;

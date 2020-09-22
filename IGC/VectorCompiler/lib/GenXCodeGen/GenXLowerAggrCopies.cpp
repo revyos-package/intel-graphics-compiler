@@ -47,6 +47,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
+#include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/DerivedTypes.h"
 
 #define DEBUG_TYPE "GENX_LOWERAGGRCOPIES"
 
@@ -136,10 +139,10 @@ bool GenXLowerAggrCopies::runOnFunction(Function &F) {
       if (doLinearExpand) {
         llvm::Value *SetVal = Memset->getValue();
         llvm::Value *LenVal = Memset->getLength();
-        assert(isa<Constant>(LenVal));
-        assert(SetVal->getType()->getScalarSizeInBits() == 8);
+        IGC_ASSERT(isa<Constant>(LenVal));
+        IGC_ASSERT(SetVal->getType()->getScalarSizeInBits() == 8);
         auto Len = (unsigned)cast<ConstantInt>(LenVal)->getZExtValue();
-        auto VecTy = VectorType::get(SetVal->getType(), Len);
+        auto VecTy = IGCLLVM::FixedVectorType::get(SetVal->getType(), Len);
         Value *WriteOut = UndefValue::get(VecTy);
         IRBuilder<> IRB(Memset);
         for (unsigned i = 0; i < Len; ++i) {
@@ -164,13 +167,13 @@ template <typename T>
 void GenXLowerAggrCopies::expandMemMov2VecLoadStore(T *MemCall) {
   IRBuilder<> IRB(MemCall);
   llvm::Value *LenVal = MemCall->getLength();
-  assert(isa<Constant>(LenVal));
+  IGC_ASSERT(isa<Constant>(LenVal));
   auto Len = (unsigned)cast<ConstantInt>(LenVal)->getZExtValue();
   auto DstPtrV = MemCall->getRawDest();
-  assert(DstPtrV->getType()->isPointerTy());
+  IGC_ASSERT(DstPtrV->getType()->isPointerTy());
   auto I8Ty = cast<PointerType>(DstPtrV->getType())->getElementType();
-  assert(I8Ty->isIntegerTy(8));
-  auto VecTy = VectorType::get(I8Ty, Len);
+  IGC_ASSERT(I8Ty->isIntegerTy(8));
+  auto VecTy = IGCLLVM::FixedVectorType::get(I8Ty, Len);
   auto SrcAddr = MemCall->getRawSource();
   unsigned srcAS = cast<PointerType>(SrcAddr->getType())->getAddressSpace();
   auto LoadPtrV = IRB.CreateBitCast(SrcAddr, VecTy->getPointerTo(srcAS));

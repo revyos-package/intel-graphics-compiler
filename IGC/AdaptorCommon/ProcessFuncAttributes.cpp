@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "ProcessFuncAttributes.h"
+#include "Compiler/CISACodeGen/EstimateFunctionSize.h"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/IGCPassSupport.h"
@@ -35,6 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPush.hpp"
 
 #include "llvmWrapper/IR/Attributes.h"
+#include "llvmWrapper/IR/Instructions.h"
 
 #include <llvm/Pass.h>
 #include <llvm/IR/Module.h>
@@ -58,11 +60,12 @@ class ProcessFuncAttributes : public ModulePass
 {
 public:
     static char ID;
-    virtual void getAnalysisUsage(llvm::AnalysisUsage &AU) const
+    virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const
     {
         AU.setPreservesCFG();
         AU.addRequired<MetaDataUtilsWrapper>();
         AU.addRequired<CodeGenContextWrapper>();
+        AU.addRequired<EstimateFunctionSize>();
     }
 
     ProcessFuncAttributes();
@@ -79,6 +82,7 @@ public:
 private:
     bool isGASPointer(Value* arg);
 
+    bool shouldForceToInline(const Function* F);
 };
 
 } // namespace
@@ -90,6 +94,8 @@ private:
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(ProcessFuncAttributes, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(EstimateFunctionSize)
 IGC_INITIALIZE_PASS_END(ProcessFuncAttributes, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char ProcessFuncAttributes::ID = 0;
@@ -187,6 +193,27 @@ static DenseSet<Function*> collectMemPoolUsage(const Module &M)
     return FuncsToInline;
 }
 
+bool ProcessFuncAttributes::shouldForceToInline(const Function* F)
+{
+    for (auto& arg : F->args())
+    {
+        if (containsOpaque(arg.getType()))
+        {
+            return true;
+        }
+    }
+
+    // SPIR-V image functions don't contain opaque types for images,
+    // they use i64 values instead.
+    // We need to detect them based on function name.
+    if (F->getName().startswith(spv::kLLVMName::builtinPrefix) &&
+        F->getName().contains("Image")) {
+        return true;
+    }
+
+    return false;
+}
+
 bool ProcessFuncAttributes::runOnModule(Module& M)
 {
     MetaDataUtilsWrapper &mduw = getAnalysis<MetaDataUtilsWrapper>();
@@ -194,6 +221,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
     ModuleMetaData *modMD = mduw.getModuleMetaData();
     auto MemPoolFuncs = collectMemPoolUsage(M);
     CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    EstimateFunctionSize& efs = getAnalysis<EstimateFunctionSize>();
 
     std::set<llvm::Function *> fastMathFunct;
     GlobalVariable *gv_fastMath = M.getGlobalVariable("__FastRelaxedMath", true);
@@ -246,12 +274,21 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         {
             continue;
         }
+        // Do not reset attributes for SYCL unmasked functions.
+        if (IGC_IS_FLAG_ENABLED(EnableUnmaskedFunctions) && F->hasFnAttribute("sycl-unmasked"))
+        {
+            continue;
+        }
 
         // Go through call sites and remove NoInline atrributes.
         for (auto I : F->users()) {
             if (CallInst* callInst = dyn_cast<CallInst>(&*I)) {
                 if (callInst->hasFnAttr(llvm::Attribute::NoInline)) {
                     callInst->removeAttribute(IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::NoInline);
+                }
+                if (getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData()->compOpt.OptDisable &&
+                    callInst->hasFnAttr(llvm::Attribute::AlwaysInline)) {
+                    callInst->removeAttribute(IGCLLVM::AttributeSet::FunctionIndex, llvm::Attribute::AlwaysInline);
                 }
             }
         }
@@ -285,8 +322,23 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
 
         bool istrue = false;
 
-        const bool isKernel = isEntryFunc(pMdUtils, F);
+        // set hasVLA function attribute
+        bool isSet = false;
+        for (auto& BB : F->getBasicBlockList()) {
+            for (auto& Inst : BB.getInstList()) {
+                if (AllocaInst * AI = dyn_cast<AllocaInst>(&Inst)) {
+                    if (!isa<ConstantInt>(AI->getArraySize())) {
+                        F->addFnAttr("hasVLA");
+                        isSet = true;
+                        break;
+                    }
+                }
+            }
+            if (isSet)
+                break;
+        }
 
+        const bool isKernel = isEntryFunc(pMdUtils, F);
         if (isKernel && !istrue)
         {
             // No need to process kernel funcs any further
@@ -309,7 +361,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
             {
                 CallInst* call = dyn_cast<CallInst>(*u);
 
-                if (!call || call->getCalledValue() != F)
+                if (!call || IGCLLVM::getCalledValue(call) != F)
                 {
                     isIndirect = true;
                 }
@@ -363,38 +415,39 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         {
             F->removeFnAttr(llvm::Attribute::NoInline);
             F->addFnAttr(llvm::Attribute::AlwaysInline);
+
             Changed = true;
             continue;
+        }
+
+        // Fixme: Can we support user noinline attrib from non-OCL shader?
+        if (pCtx->type != ShaderType::OPENCL_SHADER)
+        {
+            F->removeFnAttr(llvm::Attribute::NoInline);
         }
 
         // Set default inline mode
         auto FCtrl = IGC_GET_FLAG_VALUE(FunctionControl);
         if (FCtrl == FLAG_FCALL_DEFAULT)
         {
-            // Respect the noinline attribute given by user if EnableOCLNoInlineAttr is set
-            bool hasNoInlineAttr = false;
-            if (IGC_IS_FLAG_ENABLED(EnableOCLNoInlineAttr) &&
-                pCtx->type == ShaderType::OPENCL_SHADER &&
-                F->hasFnAttribute(llvm::Attribute::NoInline))
-            {
-                hasNoInlineAttr = true;
-            }
-            else
-            {
-                F->removeFnAttr(llvm::Attribute::NoInline);
-            }
-
+            const bool forceStackCall = F->hasFnAttribute("igc-force-stackcall");
             // If this flag is enabled, default function call mode will be stackcall.
             // Otherwise subroutines are used.
-            if (IGC_IS_FLAG_ENABLED(EnableStackCallFuncCall))
+            if (IGC_IS_FLAG_ENABLED(EnableStackCallFuncCall) || forceStackCall)
             {
+                pCtx->m_enableStackCall = true;
                 F->addFnAttr("visaStackCall");
+                if (forceStackCall) {
+                    F->removeFnAttr(llvm::Attribute::AlwaysInline);
+                    F->addFnAttr(llvm::Attribute::NoInline);
+                }
             }
 
-            if (!hasNoInlineAttr &&
+            if (!F->hasFnAttribute(llvm::Attribute::NoInline) &&
                 IGC_IS_FLAG_DISABLED(DisableAddingAlwaysAttribute))
             {
                 bool shouldAlwaysInline = (MemPoolFuncs.count(F) != 0);
+
                 if (!shouldAlwaysInline)
                 {
                     for (auto& arg : F->args())
@@ -409,7 +462,24 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
                 }
                 if (shouldAlwaysInline)
                 {
-                    F->addFnAttr(llvm::Attribute::AlwaysInline);
+                    if (IGC_IS_FLAG_ENABLED(ControlKernelTotalSize) &&
+                        pCtx->m_enableSubroutine &&
+                        efs.isTrimmedFunction(F))
+                    {
+                        if( ( IGC_GET_FLAG_VALUE( PrintControlKernelTotalSize ) & 0x4 ) != 0 )
+                        {
+                            std::cout << "Trimmed function " << F->getName().str() << std::endl;
+                        }
+
+                        if (IGC_IS_FLAG_ENABLED(AddNoInlineToTrimmedFunctions))
+                        {
+                            F->addFnAttr(llvm::Attribute::NoInline);
+                        }
+                    }
+                    else
+                    {
+                        F->addFnAttr(llvm::Attribute::AlwaysInline);
+                    }
                 }
             }
         }
@@ -434,6 +504,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
                 F->addFnAttr(llvm::Attribute::NoInline);
                 if (forceStackCall)
                 {
+                    pCtx->m_enableStackCall = true;
                     F->addFnAttr("visaStackCall");
                 }
                 Changed = true;
@@ -512,7 +583,7 @@ bool ProcessBuiltinMetaData::runOnModule(Module& M)
     bool Changed = false;
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
     {
-        Function *F = &(*I);
+        Function* F = &(*I);
         if (!F || F->isDeclaration()) continue;
 
         // add AlwaysInline for functions. It will be handle in optimization phase
@@ -529,6 +600,7 @@ bool ProcessBuiltinMetaData::runOnModule(Module& M)
         }
         Changed = true;
     }
+
     return Changed;
 }
 
@@ -550,4 +622,110 @@ void ProcessBuiltinMetaData::updateBuiltinFunctionMetaData(llvm::Function* pFunc
         funcMD->m_OpenCLArgBaseTypes.push_back(x.str());
     }
     m_pMdUtil->setFunctionsInfoItem(pFunc, fHandle);
+}
+
+
+//
+// InsertDummyKernelForSymbolTable
+//
+namespace {
+
+    class InsertDummyKernelForSymbolTable : public ModulePass
+    {
+    public:
+        static char ID;
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const
+        {
+            AU.setPreservesCFG();
+            AU.addRequired<MetaDataUtilsWrapper>();
+            AU.addRequired<CodeGenContextWrapper>();
+        }
+
+        InsertDummyKernelForSymbolTable();
+
+        ~InsertDummyKernelForSymbolTable() {}
+
+        virtual bool runOnModule(Module& M);
+
+        virtual llvm::StringRef getPassName() const
+        {
+            return "InsertDummyKernelForSymbolTable";
+        }
+    private:
+    };
+
+} // namespace
+
+// Register pass to igc-opt
+#define PASS_FLAG3 "igc-insert-dummy-kernel-for-symbol-table"
+#define PASS_DESCRIPTION3 "If symbol table is needed, insert a dummy kernel to attach it to"
+#define PASS_CFG_ONLY3 false
+#define PASS_ANALYSIS3 false
+IGC_INITIALIZE_PASS_BEGIN(InsertDummyKernelForSymbolTable, PASS_FLAG3, PASS_DESCRIPTION3, PASS_CFG_ONLY3, PASS_ANALYSIS3)
+IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
+IGC_INITIALIZE_PASS_END(InsertDummyKernelForSymbolTable, PASS_FLAG3, PASS_DESCRIPTION3, PASS_CFG_ONLY3, PASS_ANALYSIS3)
+
+char InsertDummyKernelForSymbolTable::ID = 0;
+
+InsertDummyKernelForSymbolTable::InsertDummyKernelForSymbolTable() : ModulePass(ID)
+{
+    initializeInsertDummyKernelForSymbolTablePass(*PassRegistry::getPassRegistry());
+}
+
+ModulePass* createInsertDummyKernelForSymbolTablePass()
+{
+    return new InsertDummyKernelForSymbolTable();
+}
+
+bool InsertDummyKernelForSymbolTable::runOnModule(Module& M)
+{
+    MetaDataUtilsWrapper& mduw = getAnalysis<MetaDataUtilsWrapper>();
+    MetaDataUtils* pMdUtils = mduw.getMetaDataUtils();
+    ModuleMetaData* modMD = mduw.getModuleMetaData();
+    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    bool needDummyKernel = false;
+
+    // Creates an empty dummy kernel.
+    // This kernel will only be used for creating the symbol table.
+    // All indirectly called functions will also be attached to this kernel's binary.
+    if (IGC_IS_FLAG_ENABLED(EnableFunctionPointer) &&
+        pCtx->type == ShaderType::OPENCL_SHADER)
+    {
+        if (pCtx->m_enableFunctionPointer)
+        {
+            // Symbols are needed for external functions and function pointers
+            needDummyKernel = true;
+        }
+        else if (!modMD->inlineProgramScopeOffsets.empty())
+        {
+            // Create one also if global variables are present and require symbols
+            needDummyKernel = true;
+        }
+    }
+
+    if (needDummyKernel)
+    {
+        // Create empty kernel function
+        IGC_ASSERT(IGC::getIntelSymbolTableVoidProgram(&M) == nullptr);
+        Type* voidTy = Type::getVoidTy(M.getContext());
+        FunctionType* fTy = FunctionType::get(voidTy, false);
+        Function* pNewFunc = Function::Create(fTy, GlobalValue::ExternalLinkage, IGC::INTEL_SYMBOL_TABLE_VOID_PROGRAM, &M);
+        BasicBlock* entry = BasicBlock::Create(M.getContext(), "entry", pNewFunc);
+        IRBuilder<> builder(entry);
+        builder.CreateRetVoid();
+
+        // Set spirv calling convention and kernel metadata
+        pNewFunc->setCallingConv(llvm::CallingConv::SPIR_KERNEL);
+        IGCMD::FunctionInfoMetaDataHandle fHandle = IGCMD::FunctionInfoMetaDataHandle(IGCMD::FunctionInfoMetaData::get());
+        FunctionMetaData* funcMD = &modMD->FuncMD[pNewFunc];
+        funcMD->functionType = IGC::FunctionTypeMD::KernelFunction;
+        fHandle->setType(FunctionTypeMD::KernelFunction);
+        pMdUtils->setFunctionsInfoItem(pNewFunc, fHandle);
+        pMdUtils->save(M.getContext());
+
+        return true;
+    }
+    return false;
 }

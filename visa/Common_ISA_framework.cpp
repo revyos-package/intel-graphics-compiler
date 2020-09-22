@@ -36,7 +36,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "IsaDisassembly.h"
 #include "IsaVerification.h"
 
-#if defined( _DEBUG ) && ( defined( _WIN32 ) || defined( _WIN64 ) )
+#if defined(_DEBUG) && (defined(_WIN32) || defined(_WIN64))
 #include <Windows.h>
 #endif
 
@@ -148,22 +148,35 @@ int CisaInst::createCisaInstruction(
     return VISA_SUCCESS;
 }
 
-void CisaBinary::initKernel( int kernelIndex, VISAKernelImpl * kernel )
+CisaBinary::CisaBinary(CISA_IR_Builder* builder) :
+    m_mem(4096),
+    m_header_size(0),
+    m_total_size(0),
+    m_bytes_written_cisa_buffer(0),
+    m_header_buffer(NULL),
+    m_options(builder->getOptions()),
+    parent(builder)
+{
+    memset(&m_header, 0, sizeof(common_isa_header));
+}
+
+
+void CisaBinary::initKernel(int kernelIndex, VISAKernelImpl * kernel)
 {
     unsigned functionIndex = 0; // separating function and kernel index
-    MUST_BE_TRUE( kernelIndex < (m_upper_bound_kernels + m_upper_bound_functions) && kernelIndex >= 0,
+    MUST_BE_TRUE(kernelIndex < (m_upper_bound_kernels + m_upper_bound_functions) && kernelIndex >= 0,
         "Invalid kernelIndex in CisaBinary initialization.\n");
 
     int nameLen = (int) strlen(kernel->getName());
 
-    MUST_BE_TRUE( nameLen <= COMMON_ISA_MAX_FILENAME_LENGTH,
+    MUST_BE_TRUE(nameLen <= COMMON_ISA_MAX_FILENAME_LENGTH,
         "Kernel Name exceeds maximum length allowed.\n");
 
 
 
-    if(this->getMajorVersion())
+    if (this->getMajorVersion())
     {
-        if(kernel->getIsKernel())
+        if (kernel->getIsKernel())
             kernelIndex = m_header.num_kernels++;
         else
         {
@@ -209,10 +222,10 @@ void CisaBinary::initKernel( int kernelIndex, VISAKernelImpl * kernel )
 
 unsigned long CisaBinary::writeInToCisaHeaderBuffer(const void * value, int size)
 {
-    MUST_BE_TRUE( m_bytes_written_cisa_buffer + size <= m_header_size,
-        "Size of CISA instructions header buffer is exceeded." );
+    MUST_BE_TRUE(m_bytes_written_cisa_buffer + size <= m_header_size,
+        "Size of CISA instructions header buffer is exceeded.");
 
-    memcpy_s( &m_header_buffer[m_bytes_written_cisa_buffer], size, value, size );
+    memcpy_s(&m_header_buffer[m_bytes_written_cisa_buffer], size, value, size);
     m_bytes_written_cisa_buffer += size;
 
     return m_bytes_written_cisa_buffer;
@@ -225,9 +238,10 @@ int CisaBinary::finalizeCisaBinary()
 {
     m_bytes_written_cisa_buffer = 0;
 
-    m_total_size = m_header_size = get_Size_Isa_Header( &m_header, getMajorVersion(), this->getMinorVersion() );
+    m_total_size = m_header_size = m_header.getSizeInBinary();
 
-    m_header_buffer  = ( char * )this->m_mem.alloc(m_header_size);
+    m_header_buffer  = (char *)this->m_mem.alloc(m_header_size);
+    memset(m_header_buffer, 0, m_header_size);
 
     writeInToCisaHeaderBuffer(&m_header.magic_number, sizeof(m_header.magic_number));
 
@@ -236,25 +250,23 @@ int CisaBinary::finalizeCisaBinary()
     uint8_t minor = COMMON_ISA_MINOR_VER;
     writeInToCisaHeaderBuffer(&major, sizeof(uint8_t));
     writeInToCisaHeaderBuffer(&minor, sizeof(uint8_t));
-    //writeInToCisaHeaderBuffer( &m_header.major_version, sizeof(m_header.major_version) );
-    //writeInToCisaHeaderBuffer( &m_header.minor_version, sizeof(m_header.minor_version) );
 
-    writeInToCisaHeaderBuffer( &m_header.num_kernels, sizeof(m_header.num_kernels) );
+    writeInToCisaHeaderBuffer(&m_header.num_kernels, sizeof(m_header.num_kernels));
 
-    for(int i = 0; i < m_header.num_kernels; i++)
+    for (int i = 0; i < m_header.num_kernels; i++)
     {
-        writeInToCisaHeaderBuffer( &m_header.kernels[i].name_len, sizeof(m_header.kernels[i].name_len) );
+        writeInToCisaHeaderBuffer(&m_header.kernels[i].name_len, sizeof(m_header.kernels[i].name_len));
 
-        writeInToCisaHeaderBuffer( &m_header.kernels[i].name, m_header.kernels[i].name_len );
+        writeInToCisaHeaderBuffer(&m_header.kernels[i].name, m_header.kernels[i].name_len);
 
         //setting offset to the compiled cisa binary kernel
         //to correct offset in final cisa binary
         m_header.kernels[i].offset = m_total_size;
         //for patching later if genx binary is generated
         this->m_kernelOffsetLocationsArray[i] = m_bytes_written_cisa_buffer;
-        writeInToCisaHeaderBuffer( &m_header.kernels[i].offset, sizeof(m_header.kernels[i].offset) );
+        writeInToCisaHeaderBuffer(&m_header.kernels[i].offset, sizeof(m_header.kernels[i].offset));
 
-        writeInToCisaHeaderBuffer( &m_header.kernels[i].size, sizeof(m_header.kernels[i].size) );
+        writeInToCisaHeaderBuffer(&m_header.kernels[i].size, sizeof(m_header.kernels[i].size));
 
         //this was originally set to relative offset from the
         //compiled cisa binary kernel
@@ -262,7 +274,7 @@ int CisaBinary::finalizeCisaBinary()
         //cisa binary
         m_header.kernels[i].input_offset += m_total_size;
         this->m_kernelInputOffsetLocationsArray[i] = m_bytes_written_cisa_buffer;
-        writeInToCisaHeaderBuffer( &m_header.kernels[i].input_offset, sizeof(m_header.kernels[i].input_offset) );
+        writeInToCisaHeaderBuffer(&m_header.kernels[i].input_offset, sizeof(m_header.kernels[i].input_offset));
 
         //setting offset to the compiled genx binary kernel
         //to correct offset in final cisa binary
@@ -337,22 +349,20 @@ int CisaBinary::dumpToStream(std::ostream * os)
     for (int i = 0; i < m_header.num_functions; i++)
     {
         os->write(m_header.functions[i].cisa_binary_buffer, m_header.functions[i].size);
-        os->write(m_header.functions[i].genx_binary_buffer, m_header.functions[i].binary_size);
     }
     return VISA_SUCCESS;
 }
 
 int CisaBinary::dumpToFile(std::string binFileName)
 {
-    if ( binFileName == "" )
+    if (binFileName == "")
     {
         binFileName = "temp.isa";
     }
     std::ofstream os(binFileName.c_str(), ios::binary|ios::out);
     if (!os)
     {
-        assert(0);
-        std::cerr<<"Could not open %s"<< binFileName.c_str()<<std::endl;
+        std::cerr << binFileName << ": unable to open output file\n";
         return VISA_FAILURE;
     }
     int result = dumpToStream(&os);
@@ -417,7 +427,6 @@ void CisaBinary::patchFunctionWithGenBinary(int index, unsigned int genxBufferSi
     size_t copySize = sizeof(m_header.functions[index].offset);
     memcpy_s(&m_header_buffer[this->m_functionOffsetLocationsArray[index]], copySize, &m_header.functions[index].offset, copySize);
 
-    m_header.functions[index].binary_size = genxBufferSize;
     m_header.functions[index].genx_binary_buffer = buffer;
 
     this->genxBinariesSize += genxBufferSize;
@@ -429,21 +438,18 @@ void CisaBinary::patchFunction(int index, unsigned genxBufferSize)
     size_t copySize = sizeof(m_header.functions[index].offset);
     memcpy_s(&m_header_buffer[this->m_functionOffsetLocationsArray[index]], copySize, &m_header.functions[index].offset, copySize);
 
-    m_header.functions[index].binary_size = genxBufferSize;
     this->genxBinariesSize += genxBufferSize;
 }
 
-void CisaBinary::isaDumpVerify(
+int CisaBinary::isaDump(
     std::list<VISAKernelImpl*> m_kernels, Options* options)
 {
 #ifdef IS_RELEASE_DLL
-    return;
+    return VISA_SUCCESS;
 #else
     bool dump =  m_options->getOption(vISA_GenerateISAASM);
-    // disable verification in isaasm mode
-    bool verify = !m_options->getOption(vISA_NoVerifyvISA); // && !m_options->getOption(vISA_isParseMode);
-    if (!(dump || verify))
-        return;
+    if (!dump)
+        return VISA_SUCCESS;
 
     struct ScopedFile
     {
@@ -461,26 +467,24 @@ void CisaBinary::isaDumpVerify(
         {
             const char* isaasmNamesFile = nullptr;
             options->getOption(vISA_ISAASMNamesFile, isaasmNamesFile);
-            if (isaasmNamesFile != nullptr && (ILFile.isaasmListFile = fopen(isaasmNamesFile, "w")) == nullptr)
+            if (isaasmNamesFile && (ILFile.isaasmListFile = fopen(isaasmNamesFile, "w")) == nullptr)
             {
-                fprintf(stderr, "Cannot open file %s\n", isaasmNamesFile);
-                exit(1);
+                std::cerr << "Cannot open file " << isaasmNamesFile << "\n";
+                return VISA_FAILURE;
             }
         }
         else
         {
             if ((ILFile.isaasmListFile = fopen("isaasmListFile.txt", "w")) == nullptr)
             {
-                fprintf(stderr, "Cannot open file %s\n", "isaasmListFile.txt");
-                exit(1);
+                std::cerr << "Cannot open isaasmListFile.txt\n";
+                return VISA_FAILURE;
             }
         }
     }
 
     std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
     std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
-    bool hasErrors = false;
-    unsigned totalErrors = 0;
     std::string testName; // base kernel name saved for function's isaasm file name
 
     for (; iter != end; iter++)
@@ -503,19 +507,20 @@ void CisaBinary::isaDumpVerify(
         }
     }
 
-    for( iter = m_kernels.begin(); iter != end; iter++ )
+    std::vector<std::string> failedFiles;
+    for (iter = m_kernels.begin(); iter != end; iter++)
     {
         VISAKernelImpl * kTemp = *iter;
         std::list<CisaFramework::CisaInst *>::iterator inst_iter = kTemp->getInstructionListBegin();
         std::list<CisaFramework::CisaInst *>::iterator inst_iter_end = kTemp->getInstructionListEnd();
 
         unsigned funcId = 0;
-        if (dump && !(m_options->getOption(vISA_GeneratevISABInary)  && m_options->getOption(vISA_IsaasmNamesFileUsed)))
+        if (!(m_options->getOption(vISA_GeneratevISABInary) && m_options->getOption(vISA_IsaasmNamesFileUsed)))
         {
             stringstream sstr;
             stringstream asmName;
 
-            if ( kTemp->getIsKernel() )
+            if (kTemp->getIsKernel())
             {
                 asmName << kTemp->getOutputAsmPath();
             }
@@ -533,7 +538,7 @@ void CisaBinary::isaDumpVerify(
 
             VISAKernel_format_provider fmt(kTemp);
             sstr << printKernelHeader(m_header, &fmt, kTemp->getIsKernel(), funcId, options);
-            for(; inst_iter != inst_iter_end; inst_iter++)
+            for (; inst_iter != inst_iter_end; inst_iter++)
             {
                 CisaFramework::CisaInst * cisa_inst = *inst_iter;
                 CISA_INST * inst = cisa_inst->getCISAInst();
@@ -542,43 +547,9 @@ void CisaBinary::isaDumpVerify(
 
             writeIsaAsmFile(asmName.str(), sstr.str());
         }
-
-        if (verify)
-        {
-            VISAKernel_format_provider fmt(kTemp);
-
-            vISAVerifier verifier(m_header, &fmt, m_options);
-            verifier.run(kTemp);
-
-            if (verifier.hasErrors())
-            {
-                stringstream verifierName;
-
-                if (kTemp->getIsKernel())
-                {
-                    verifierName << kTemp->getOutputAsmPath();
-                }
-                else
-                {   // test9_genx_f0.errors.txt in above example, for func 0
-                    kTemp->GetFunctionId(funcId);
-                    verifierName << testName;
-                    verifierName << "_f";
-                    verifierName << funcId;
-                }
-                verifierName << ".errors.txt";
-                verifier.writeReport(verifierName.str().c_str());
-                hasErrors = true;
-                totalErrors += (uint32_t) verifier.getNumErrors();
-                cerr << "Found " << verifier.getNumErrors() << " errors in vISA files.\n";
-                cerr << "Please see error report written to the file "<< verifierName.str() << "\n";
-            }
-        }
-        if ( hasErrors )
-        {
-            cerr << "Found a total of " << totalErrors << " errors in vISA files." << endl;
-            exit(EXIT_FAILURE);
-        }
     }
+
+    return VISA_SUCCESS;
 #endif // IS_RELEASE_DLL
 }
 

@@ -216,7 +216,8 @@ G4_BB_Schedule::G4_BB_Schedule(G4_Kernel* k, Mem_Manager& m, G4_BB* block,
 
     DDD ddd(mem, bb, LT, k);
     // Generate pairs of TypedWrites
-    bool doMessageFuse = (k->fg.builder->fuseTypedWrites() && k->getSimdSize() >= 16) ||
+    bool doMessageFuse =
+        (k->fg.builder->fuseTypedWrites() && k->getSimdSize() >= g4::SIMD16) ||
         k->fg.builder->fuseURBMessage();
 
     if (doMessageFuse)
@@ -371,7 +372,7 @@ void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
 
     switch (phyReg->getKind()) {
     case G4_VarBase::VK_phyGReg:
-        startingBucket = opnd->getLinearizedStart() / G4_GRF_REG_NBYTES;
+        startingBucket = opnd->getLinearizedStart() / numEltPerGRF(Type_UB);
         canSpanMultipleBuckets = true;
         break;
     case G4_VarBase::VK_phyAReg: {
@@ -410,7 +411,7 @@ void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
     if (startingBucket != UNINIT_BUCKET) {
         if (canSpanMultipleBuckets) {
             assert(base->isGreg());
-            unsigned divisor = G4_GRF_REG_NBYTES;
+            unsigned divisor = numEltPerGRF(Type_UB);
             int baseBucket = GRF_BUCKET;
             int endingBucket = baseBucket + opnd->getLinearizedEnd() / divisor;
             MUST_BE_TRUE(endingBucket >= startingBucket, "Ending bucket less than starting bucket");
@@ -814,11 +815,11 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    currInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     if (opndSize > getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
                     {
@@ -847,13 +848,13 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    nextInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    nextInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     liveSrc.set(nextInstRegs[0][i], true);  //Set live
 
                     if (opndSize > getGRFSize())
                     {
-                        int reg = nextInstRegs[0][i] + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        int reg = nextInstRegs[0][i] + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                         nextInstRegs[1][i] =  reg;
                         liveSrc.set(reg, true);  //Set live
                     }
@@ -882,7 +883,7 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
     {
         opndSize = nextDstOpnd->getLinearizedEnd() - nextDstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = nextDstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / GENX_GRF_REG_SIZ;
+        dstReg0 = byteAddress / numEltPerGRF(Type_UB);
         liveDst.set(dstReg0, true);
         if (opndSize <= getGRFSize())
         {
@@ -890,7 +891,7 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstReg1 = dstReg0 + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
             liveDst.set(dstReg1, true);
         }
     }
@@ -906,7 +907,7 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
     {
         opndSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / GENX_GRF_REG_SIZ;
+        dstReg0 = byteAddress / numEltPerGRF(Type_UB);
         //If there is RAW and WAW dependence
         if (liveSrc.isSet(dstReg0) || liveDst.isSet(dstReg0))
         {
@@ -919,7 +920,7 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstReg1 = dstReg0 + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
 
             //If there is RAW and WAW dependence
             if (liveSrc.isSet(dstReg1) || liveDst.isSet(dstReg1))
@@ -1042,11 +1043,11 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    currInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     if (opndSize > getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
                     {
@@ -1075,11 +1076,11 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    nextInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    nextInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     if (opndSize > getGRFSize())
                     {
-                        int reg = nextInstRegs[0][i] + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        int reg = nextInstRegs[0][i] + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                         nextInstRegs[1][i] = reg;
                     }
                     if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
@@ -1107,14 +1108,14 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
     {
         opndSize = nextDstOpnd->getLinearizedEnd() - nextDstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = nextDstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / GENX_GRF_REG_SIZ;
+        dstReg0 = byteAddress / numEltPerGRF(Type_UB);
         if (opndSize <= getGRFSize())
         {
             nextInstSimd8 = true;
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstReg1 = dstReg0 + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
         }
     }
 
@@ -1129,7 +1130,7 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
     {
         opndSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / GENX_GRF_REG_SIZ;
+        dstReg0 = byteAddress / numEltPerGRF(Type_UB);
 
         if (opndSize <= getGRFSize())
         {
@@ -1137,7 +1138,7 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstReg1 = dstReg0 + (opndSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
         }
     }
 
@@ -1545,7 +1546,7 @@ static bool canAvoidDepCycles(Node *firstNode, Node *secondNode, bool isFirstLev
 // Return TRUE if INST is the the partN'th part {0,1,2,3} of a typedWrite
 static bool isTypedWritePart(G4_INST* inst, int partN) {
     return inst->isSend()
-        && inst->getExecSize() == 8
+        && inst->getExecSize() == g4::SIMD8
         && inst->getMsgDesc()->isHdcTypedSurfaceWrite()
         && inst->getMaskOffset() == partN * 8;
 };
@@ -2051,7 +2052,7 @@ uint32_t DDD::listScheduleForSuppression(G4_BB_Schedule* schedule)
                     G4_INST* scheduledInst = scheduled->getInstructions()->front();
                     if (!((scheduledInst->opcode() == G4_mad ||
                         scheduledInst->opcode() == G4_dp4a) &&
-                        hasReadSuppression(inst, scheduledInst, inst->getExecSize() == 8)))
+                        hasReadSuppression(inst, scheduledInst, inst->getExecSize() == g4::SIMD8)))
                     {
                         for (int i = 0; i < searchSize; ++i)
                         {
@@ -2062,7 +2063,7 @@ uint32_t DDD::listScheduleForSuppression(G4_BB_Schedule* schedule)
                                 readyList.pop();
                                 if ((nextInst->opcode() == G4_mad ||
                                     nextInst->opcode() == G4_dp4a) &&
-                                    hasReadSuppression(inst, nextInst, inst->getExecSize() == 8))
+                                    hasReadSuppression(inst, nextInst, inst->getExecSize() == g4::SIMD8))
                                 {
                                     readyList.push(scheduled);
                                     scheduled = next;
@@ -2674,11 +2675,11 @@ bool Node::hasConflict(Node* node2)
                 prevInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    prevInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    prevInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     if (prevInstExecSize[i] > 32)
                     {
-                        prevInstRegs[1][i] = prevInstRegs[0][i] + (prevInstExecSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        prevInstRegs[1][i] = prevInstRegs[0][i] + (prevInstExecSize[i] + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                         instSplit = true;
                     }
                     else
@@ -2730,7 +2731,7 @@ bool Node::hasConflict(Node* node2)
             G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
             if (baseVar->isGreg()) {
                 uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                firstRegCandidate[candidateNum] = byteAddress / GENX_GRF_REG_SIZ;
+                firstRegCandidate[candidateNum] = byteAddress / numEltPerGRF(Type_UB);
                 candidateNum++;
             }
         }

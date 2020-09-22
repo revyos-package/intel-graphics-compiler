@@ -249,27 +249,27 @@ SBFootprint* G4_BB_SB::getFootprintForGRF(G4_Operand* opnd,
         RB = (unsigned short)opnd->getLinearizedEnd();
         if (inst->isSend())
         {
-            assert((LB % GENX_GRF_REG_SIZ) == 0);
+            assert((LB % numEltPerGRF(Type_UB)) == 0);
             //For the operands of the send instructions,
             //we are using the message length to avoid the in-consistence with the HW requirement.
             //
             if (opnd_num == Opnd_src0)
             {
-                RB = LB + G4_GRF_REG_NBYTES * inst->getMsgDesc()->MessageLength() - 1;
+                RB = LB + numEltPerGRF(Type_UB) * inst->getMsgDesc()->MessageLength() - 1;
             }
 
             if (inst->isSplitSend() &&
                 opnd_num == Opnd_src1)
             {
-                RB = LB + G4_GRF_REG_NBYTES * inst->getMsgDesc()->extMessageLength() - 1;
+                RB = LB + numEltPerGRF(Type_UB) * inst->getMsgDesc()->extMessageLength() - 1;
             }
 
             if (opnd_num == Opnd_dst)
             {
-                RB = LB + G4_GRF_REG_NBYTES * inst->getMsgDesc()->ResponseLength() - 1;
+                RB = LB + numEltPerGRF(Type_UB) * inst->getMsgDesc()->ResponseLength() - 1;
             }
 
-            assert(RB < (G4_GRF_REG_NBYTES * aregOffset) && "Out of register bound");
+            assert(RB < (numEltPerGRF(Type_UB) * aregOffset) && "Out of register bound");
         }
         break;
     default:
@@ -280,16 +280,16 @@ SBFootprint* G4_BB_SB::getFootprintForGRF(G4_Operand* opnd,
     SBFootprint* footprint = nullptr;
     if (startingBucket >= aregOffset)
     {
-        LB = startingBucket * G4_GRF_REG_NBYTES + LB;
-        RB = startingBucket * G4_GRF_REG_NBYTES + RB;
+        LB = startingBucket * numEltPerGRF(Type_UB) + LB;
+        RB = startingBucket * numEltPerGRF(Type_UB) + RB;
     }
 
     //This is WA which assumes whole GRF will be touched in send instruction, not matter the occupation of real valid value.
     //FIXME: But this is not true in media block read/write, which can specify the byte level size in descriptor, no GRF align required.
     if (mustBeWholeGRF)
     {
-        LB = (LB / G4_GRF_REG_NBYTES) * G4_GRF_REG_NBYTES;
-        RB = ((RB / G4_GRF_REG_NBYTES) + 1) * G4_GRF_REG_NBYTES - 1;
+        LB = (LB / numEltPerGRF(Type_UB)) * numEltPerGRF(Type_UB);
+        RB = ((RB / numEltPerGRF(Type_UB)) + 1) * numEltPerGRF(Type_UB) - 1;
     }
 
     footprint = new(allocedMem)SBFootprint(GRF_T, type, LB, RB, inst);
@@ -327,8 +327,8 @@ SBFootprint* G4_BB_SB::getFootprintForACC(G4_Operand* opnd,
     else if (opnd->isSrcRegRegion())
         regNum += opnd->asSrcRegRegion()->getRegOff();
 
-    LB += regNum * G4_GRF_REG_NBYTES;
-    RB += regNum * G4_GRF_REG_NBYTES;
+    LB += regNum * numEltPerGRF(Type_UB);
+    RB += regNum * numEltPerGRF(Type_UB);
 
     void* allocedMem = mem.alloc(sizeof(SBFootprint));
     SBFootprint* footprint = nullptr;
@@ -349,14 +349,14 @@ SBFootprint* G4_BB_SB::getFootprintForFlag(G4_Operand* opnd,
     unsigned short LB = 0;
     unsigned short RB = 0;
     G4_Type type = opnd->getType();
-    unsigned short bitToBytes = G4_GRF_REG_NBYTES / 16;
+    unsigned short bitToBytes = numEltPerGRF(Type_UB) / 16;
     bool valid = true;
     unsigned subRegOff = opnd->getBase()->ExSubRegNum(valid);
     LB = (unsigned short)(opnd->getLeftBound() + subRegOff * 16) * bitToBytes;
     RB = (unsigned short)(opnd->getRightBound() + subRegOff * 16) * bitToBytes;
 
-    LB += (builder.kernel.getNumRegTotal() + builder.kernel.getNumAcc()) * G4_GRF_REG_NBYTES;
-    RB += (builder.kernel.getNumRegTotal() + builder.kernel.getNumAcc()) * G4_GRF_REG_NBYTES;
+    LB += (builder.kernel.getNumRegTotal() + builder.kernel.getNumAcc()) * numEltPerGRF(Type_UB);
+    RB += (builder.kernel.getNumRegTotal() + builder.kernel.getNumAcc()) * numEltPerGRF(Type_UB);
 
     void* allocedMem = mem.alloc(sizeof(SBFootprint));
     SBFootprint* footprint = nullptr;
@@ -620,7 +620,8 @@ void SWSB::SWSBDepDistanceGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
     BBVector.resize(numBBId);
 
     //Set distance 1 at the first instruction in case there are runtime inserted instructions at prolog
-    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D)
+    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) != VISA_3D ||
+        fg.builder->getOptions()->getOption(vISA_SWSBStitch) )
     {
         setDefaultDistanceAtFirstInstruction();
     }
@@ -847,7 +848,14 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis& p, LiveGRFBuckets& LB, Liv
     }
     else
     {
-        tokenAllocation();
+        if (fg.builder->getOptions()->getOption(vISA_QuickTokenAllocation))
+        {
+            quickTokenAllocation();
+        }
+        else
+        {
+            tokenAllocation();
+        }
     }
 
     //Insert test instruction in case the dependences are more than token field in the instruction.
@@ -884,8 +892,8 @@ static unsigned getRegAccessPipe(G4_INST* Inst) {
 static void updateRegAccess(FCPatchingInfo* FCPI, SBNode* Node,
     Gen4_Operand_Number OpndNo, unsigned NumRegs) {
     for (auto F = Node->getFirstFootprint(OpndNo); F != nullptr; F = F->next) {
-        unsigned L = F->LeftB / G4_GRF_REG_NBYTES;
-        unsigned R = F->RightB / G4_GRF_REG_NBYTES;
+        unsigned L = F->LeftB / numEltPerGRF(Type_UB);
+        unsigned R = F->RightB / numEltPerGRF(Type_UB);
         if (F->fType != GRF_T)
         {
             continue;
@@ -1166,7 +1174,7 @@ void SWSB::SWSBGenerator()
     p.doPointsToAnalysis(kernel.fg);
 
     //For VISA_3D, the naturalLoop finding is handled in register allocation already
-    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D)
+    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) != VISA_3D)
     {
         kernel.fg.findNaturalLoops();
     }
@@ -2236,6 +2244,55 @@ void SWSB::calculateDist()
 }
 
 
+/* Quick token allocation, allocate the token in round robin.
+ */
+void SWSB::quickTokenAllocation()
+{
+    uint32_t token = 0;
+
+    //Linear scan
+    for (auto node_it = SBSendNodes.begin();
+        node_it != SBSendNodes.end();
+        node_it++)
+    {
+        SBNode* node = *node_it;
+
+        if (node->getLastInstruction()->isEOT())
+        {
+            continue;
+        }
+
+        assert(node->getLastInstruction()->getToken() == (unsigned short)UNKNOWN_TOKEN);
+        node->getLastInstruction()->setToken(token);
+        if (token >= totalTokenNum - 1)
+        {
+            token = 0;
+        }
+        else
+        {
+            token ++;
+        }
+    }
+
+    for (auto node_it = SBSendNodes.begin();
+        node_it != SBSendNodes.end();
+        node_it++)
+    {
+        SBNode* node = *node_it;
+        G4_INST* inst = node->getLastInstruction();
+
+        if (inst->isEOT())
+        {
+            continue;
+        }
+
+        unsigned short token = node->getLastInstruction()->getToken();
+        if (token != (unsigned short)-1)
+        {
+            assignDepToken(node);
+        }
+    }
+}
 
 /* Linear scan algorithm is used for the token allocation.
  * Based on the assumption that instruction scheduling has scheduled the instruction to the best.
@@ -3137,7 +3194,7 @@ G4_INST* SWSB::insertSyncAllWRInstruction(G4_BB* bb, unsigned int SBIDs, INST_LI
     return syncInst;
 }
 
-bool SWSB::insertSyncToken(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens, bool removeAllToken)
+bool SWSB::insertSyncToken(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens, bool& keepDst, bool removeAllToken)
 {
     //Non-test instruction can only have
     // 1. non-send: one Dst Token with distance, or
@@ -3146,7 +3203,6 @@ bool SWSB::insertSyncToken(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITE
     // 3. one Src token
     unsigned short dst = 0;
     unsigned short src = 0;
-    bool keepDst = false;
     bool multipleDst = false;
     bool multipleSrc = false;
     unsigned short token = (unsigned short)-1;
@@ -3300,6 +3356,7 @@ void SWSB::insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER ins
 {
     //The inst after arch register instruction.
     bool insertedSync = false;
+    bool keepDst = false;
     INST_LIST_ITER prevIt = inst_it;
     if (node->followDistOneAreg())
     {
@@ -3324,7 +3381,7 @@ void SWSB::insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER ins
     }
 
     {
-        insertedSync = insertSyncToken(bb, node, inst, inst_it, newInstID, dstTokens, srcTokens, false);
+        insertedSync = insertSyncToken(bb, node, inst, inst_it, newInstID, dstTokens, srcTokens, keepDst, false);
     }
 
     if (node->followDistOneAreg() && insertedSync)
@@ -4227,7 +4284,7 @@ void G4_BB_SB::getGRFFootprintForIndirect(SBNode* node,
 
         if (dcl->isSpilled()) //FIXME: Lost point analysis tracking due to spill, assume all registers are touched
         {
-            linearizedEnd = totalGRFNum * G4_GRF_REG_NBYTES - 1;
+            linearizedEnd = totalGRFNum * numEltPerGRF(Type_UB) - 1;
         }
         else
         {
@@ -4239,16 +4296,16 @@ void G4_BB_SB::getGRFFootprintForIndirect(SBNode* node,
             uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
             uint32_t regOff = var->getPhyRegOff();
 
-            linearizedStart = regNum * G4_GRF_REG_NBYTES + regOff * G4_Type_Table[dcl->getElemType()].byteSize;
-            linearizedEnd = regNum * G4_GRF_REG_NBYTES + regOff * G4_Type_Table[dcl->getElemType()].byteSize + dcl->getByteSize() - 1;
+            linearizedStart = regNum * numEltPerGRF(Type_UB) + regOff * G4_Type_Table[dcl->getElemType()].byteSize;
+            linearizedEnd = regNum * numEltPerGRF(Type_UB) + regOff * G4_Type_Table[dcl->getElemType()].byteSize + dcl->getByteSize() - 1;
         }
 
         void* allocedMem = mem.alloc(sizeof(SBFootprint));
         footprint = new(allocedMem)SBFootprint(GRF_T, type, (unsigned short)linearizedStart, (unsigned short)linearizedEnd, node->GetInstruction());
         node->setFootprint(footprint, opnd_num);
 #ifdef DEBUG_VERBOSE_ON
-        int startingBucket = linearizedStart / G4_GRF_REG_NBYTES;
-        int endingBucket = linearizedEnd / G4_GRF_REG_NBYTES;
+        int startingBucket = linearizedStart / numEltPerGRF(Type_UB);
+        int endingBucket = linearizedEnd / numEltPerGRF(Type_UB);
         std::cerr << dcl->getName() << "<" << startingBucket << "," << endingBucket << ">";
 #endif
     }
@@ -4276,8 +4333,8 @@ void G4_BB_SB::getGRFBuckets(SBNode* node,
         }
 
         int aregOffset = totalGRFNum;
-        int startingBucket = curFootprint->LeftB / G4_GRF_REG_NBYTES;
-        int endingBucket = curFootprint->RightB / G4_GRF_REG_NBYTES;
+        int startingBucket = curFootprint->LeftB / numEltPerGRF(Type_UB);
+        int endingBucket = curFootprint->RightB / numEltPerGRF(Type_UB);
         if (curFootprint->fType == ACC_T)
         {
             startingBucket = startingBucket + aregOffset;
@@ -4413,7 +4470,7 @@ void G4_BB_SB::clearKilledBucketNodeGen12LP(LiveGRFBuckets* LB, int ALUID)
 }
 
 
-void G4_BB_SB::setDistance(SBFootprint* footprint, SBNode* node, SBNode* liveNode)
+void G4_BB_SB::setDistance(SBFootprint* footprint, SBNode* node, SBNode* liveNode, bool dstDep)
 {
     {
         auto dist = node->getALUID() - liveNode->getALUID();
@@ -4443,6 +4500,16 @@ void G4_BB_SB::footprintMerge(SBNode* node, SBNode* nextNode)
     return;
 }
 
+
+void G4_BB_SB::pushItemToQueue(std::vector<unsigned> *nodeIDQueue, unsigned nodeID)
+{
+    nodeIDQueue->push_back(nodeID);
+
+    if (nodeIDQueue->size() > SWSB_MAX_ALU_DEPENDENCE_DISTANCE_VALUE)
+    {
+        nodeIDQueue->erase(nodeIDQueue->begin());
+    }
+}
 
 void G4_BB_SB::SBDDD(G4_BB* bb,
     LiveGRFBuckets*& LB,
@@ -4693,7 +4760,7 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                         curBucket < totalGRFNum)
                     {//Only need track GRF RAW dependence
                         LB->killOperand(bn_it);
-                        setDistance(curFootprint, node, liveNode);
+                        setDistance(curFootprint, node, liveNode, false);
                         liveNode->setInstKilled(true);  //Instrtuction level kill
                         instKill = true;
                         continue;
@@ -4717,7 +4784,7 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                                     LB->killOperand(bn_it);
                                     killed = true;
                                 }
-                                setDistance(curFootprint, node, liveNode);
+                                setDistance(curFootprint, node, liveNode, true);
                                 liveNode->setInstKilled(true); //Instrtuction level kill
                                 instKill = true;
                             }
@@ -4744,7 +4811,7 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                                     LB->killOperand(bn_it);
                                     killed = true;
                                 }
-                                setDistance(curFootprint, node, liveNode);
+                                setDistance(curFootprint, node, liveNode, true);
                                 liveNode->setSourceKilled(true);
                             }
                         if (killed)
@@ -5212,8 +5279,8 @@ void G4_BB_SB::getLiveBucketsFromFootprint(SBFootprint* firstFootprint, SBBucket
 
     while (footprint)
     {
-        int startBucket = footprint->LeftB / G4_GRF_REG_NBYTES;
-        int endBucket = footprint->RightB / G4_GRF_REG_NBYTES;
+        int startBucket = footprint->LeftB / numEltPerGRF(Type_UB);
+        int endBucket = footprint->RightB / numEltPerGRF(Type_UB);
         if (footprint->fType == ACC_T)
         {
             startBucket = startBucket + aregOffset;
@@ -5856,6 +5923,50 @@ void G4_BB_SB::createAddGRFEdge(SBNode* pred, SBNode* succ, DepType d, SBDepende
     return;
 }
 
+void G4_Kernel::emit_RegInfo()
+{
+    const char* asmName = nullptr;
+    getOptions()->getOption(VISA_AsmFileName, asmName);
+    char dumpFileName[MAX_OPTION_STR_LENGTH];
+    SNPRINTF(dumpFileName, MAX_OPTION_STR_LENGTH, "%s.regInfo",
+        asmName);
+    fstream ofile(dumpFileName, ios::out);
+
+    emit_RegInfoKernel(ofile);
+
+    ofile.close();
+}
+
+void G4_Kernel::emit_RegInfoKernel(std::ostream& output)
+{
+    output << "//.platform " << platformString[fg.builder->getPlatform()];
+    output << "\n" << "//.stepping " << GetSteppingString();
+    output << "\n" << "//.CISA version " << (unsigned int)major_version
+        << "." << (unsigned int)minor_version;
+    output << "\n" << "//.kernel ID 0x" << hex << getKernelID() << "\n";
+    output << dec << "\n";
+    int instOffset = 0;
+
+    for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB)
+    {
+        for (INST_LIST_ITER itInst = (*itBB)->begin(); itInst != (*itBB)->end(); ++itInst)
+        {
+            G4_INST* inst = (*itInst);
+            if (inst->isLabel())
+            {
+                continue;
+            }
+            if (inst->getLexicalId() == -1)
+            {
+                continue;
+            }
+
+            (*itBB)->emitRegInfo(output, inst, instOffset);
+            instOffset += inst->isCompactedInst() ? 8 : 16;
+        }
+    }
+    return;
+}
 
 void G4_Kernel::emit_dep(std::ostream& output)
 {
@@ -5888,6 +5999,49 @@ void G4_Kernel::emit_dep(std::ostream& output)
             instOffset += inst->isCompactedInst() ? 8 : 16;
         }
     }
+    return;
+}
+
+void G4_BB::emitRegInfo(std::ostream& output, G4_INST* inst, int offset)
+{
+    output << "#" << inst->getLexicalId() << "|" << offset << ":";
+    G4_DstRegRegion* dstOpnd = inst->getDst();
+
+    if (dstOpnd &&
+        !dstOpnd->isIndirect() &&
+        dstOpnd->isGreg())
+    {
+        uint32_t byteAddress = dstOpnd->getLinearizedStart();
+        unsigned dstReg0 = byteAddress / numEltPerGRF(Type_UB);
+        output << " {";
+        output << "D:" << dstReg0;
+        output << "}";
+    }
+
+    for (int i = 0; i < inst->getNumSrc(); i++)
+    {
+        G4_Operand* srcOpnd = inst->getSrc(i);
+        if (srcOpnd)
+        {
+            if (srcOpnd->isSrcRegRegion() &&
+                srcOpnd->asSrcRegRegion()->getBase() &&
+                !srcOpnd->asSrcRegRegion()->isIndirect() &&
+                srcOpnd->asSrcRegRegion()->getBase()->isRegVar())
+            {
+                G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
+                if (baseVar->isGreg()) {
+                    uint32_t byteAddress = srcOpnd->getLinearizedStart();
+                    unsigned srcReg = byteAddress / numEltPerGRF(Type_UB);
+                    output << " {";
+                    output << "S" << i;
+                    output << ":" << srcReg;
+                    output << "}";
+                }
+            }
+        }
+    }
+
+    output << std::endl;
     return;
 }
 

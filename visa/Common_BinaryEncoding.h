@@ -57,9 +57,9 @@ const uint32_t SCRATCH_BINDING_TABLE_INDEX = 255;
 
 typedef enum _RegFile_
 {
-    REG_FILE_A      ,
-    REG_FILE_R      ,
-    REG_FILE_M      ,
+    REG_FILE_A,
+    REG_FILE_R,
+    REG_FILE_M,
     REG_FILE_I
 } RegFile;
 
@@ -790,7 +790,7 @@ static struct _CompactSubRegTable_
                 found[2] = true;
             }
 
-            if(found[0] && found[1] && found[2])
+            if (found[0] && found[1] && found[2])
                 return true;
         }
 
@@ -1489,8 +1489,7 @@ namespace vISA
     protected:
 
         // returns the offset for label in # of half instructions (kernel entry is 0), or -1 if the label is not present
-        inline uint32_t GetLabelInfo(std::map<std::string, uint32_t>& LabelMap,
-            std::string& label)
+        inline uint32_t GetLabelInfo(G4_Label* label)
         {
             auto iter = LabelMap.find(label);
             if (iter == LabelMap.end())
@@ -1504,7 +1503,7 @@ namespace vISA
         std::string          fileName; ///< Name of the binary file
         G4_Kernel&      kernel;
         BinInstList     binInstList; ///< Reference to the binary instructions
-        std::map<std::string, uint32_t> LabelMap;
+        std::map<G4_Label*, uint32_t> LabelMap;
 
         uint32_t        instCounts;
 
@@ -1564,7 +1563,7 @@ namespace vISA
     {
         if (inst->isLabel())
         {
-            this->LabelMap[inst->getLabelStr()] = globalHalfInstNum;
+            this->LabelMap[inst->getLabel()] = globalHalfInstNum;
         }
         else
         {

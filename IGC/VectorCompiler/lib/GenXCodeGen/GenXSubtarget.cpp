@@ -34,9 +34,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/InstrTypes.h"
-#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -51,9 +51,6 @@ static cl::opt<bool>
     StackScratchMem("stack-scratch-mem",
                     cl::desc("Specify what surface should be used for stack"),
                     cl::init(true));
-static cl::opt<unsigned> StackMemSize("stack-mem-size",
-                                      cl::desc("Available space for stack"),
-                                      cl::init(8 * 1024));
 
 void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
 
@@ -63,13 +60,13 @@ void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
   DisableJmpi = false;
   DisableVectorDecomposition = false;
   WarnCallable = false;
+  EmulateLongLong = false;
   OCLRuntime = false;
 
   if (StackScratchMem)
     StackSurf = PreDefined_Surface::PREDEFINED_SURFACE_T255;
   else
     StackSurf = PreDefined_Surface::PREDEFINED_SURFACE_STACK;
-  StackSurfMaxSize = StackMemSize;
 
   GenXVariant = llvm::StringSwitch<GenXTag>(CPU)
     .Case("HSW", GENX_HSW)
@@ -84,7 +81,7 @@ void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
     .Case("TGLLP", GENX_TGLLP)
     .Default(GENX_SKL);
 
-  std::string CPUName = CPU;
+  std::string CPUName(CPU);
   if (CPUName.empty())
     CPUName = "generic";
 

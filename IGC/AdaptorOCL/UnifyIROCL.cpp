@@ -97,6 +97,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/Optimizer/OpenCLPasses/SubGroupFuncs/SubGroupFuncsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/BIFTransforms/BIFTransforms.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/BreakdownIntrinsic.h"
+#include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStatefull/StatelessToStatefull.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/KernelFunctionCloning.h"
 #include "Compiler/Legalizer/TypeLegalizerPass.h"
@@ -123,9 +124,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <iStdLib/utility.h>
 
-#include "Compiler/DebugInfo/VISADebugEmitter.hpp"
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
 #include "Compiler/CISACodeGen/TimeStatsCounter.h"
+#include "Compiler/DebugInfo/ScalarVISAModule.h"
+#include "DebugInfo/VISADebugEmitter.hpp"
+#include "DebugInfo/DebugInfoUtils.hpp"
 
 #include <string>
 #include <algorithm>
@@ -263,6 +266,9 @@ static void CommonOCLBasedPasses(
     CompilerOpts.EnableTakeGlobalAddress =
         pContext->m_Options.EnableTakeGlobalAddress;
 
+    CompilerOpts.EnableZEBinary =
+        pContext->m_InternalOptions.EnableZEBinary;
+
     // right now we don't support any standard function in the code gen
     // maybe we want to support some at some point to take advantage of LLVM optimizations
     TargetLibraryInfoImpl TLI;
@@ -282,6 +288,11 @@ static void CommonOCLBasedPasses(
 
     mpm.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
     mpm.add(new CodeGenContextWrapper(pContext));
+
+    if (IGC_IS_FLAG_ENABLED(EnableUnmaskedFunctions))
+    {
+        mpm.add(new TransformUnmaskedFunctionsPass());
+    }
 
     mpm.add(new ClampLoopUnroll(256));
 
@@ -332,6 +343,7 @@ static void CommonOCLBasedPasses(
     }
 
     mpm.add(new CatchAllLineNumber());
+
 
     // OCL has built-ins so it always need to run inlining
     {
@@ -484,6 +496,10 @@ static void CommonOCLBasedPasses(
     // "false" to createScalarizerPass() means that vector load/stores are NOT scalarized
     mpm.add(createScalarizerPass(false));
 
+    // Create a dummy kernel to attach the symbol table if necessary
+    // Only needed if function pointers, externally linked functions, or relocatable global variables are present
+    mpm.add(createInsertDummyKernelForSymbolTablePass());
+
     // Add SetFastMathFalgs pass at the end so that we don't need to worry about previous passes that
     // forget setting math flags. We expect the generic llvm optimizations after the unification
     // (optimizeIR()) will fully take advantage of the flags.
@@ -533,4 +549,5 @@ void UnifyIRSPIR(
 {
     CommonOCLBasedPasses(pContext, std::move(BuiltinGenericModule), std::move(BuiltinSizeModule));
 }
+
 }

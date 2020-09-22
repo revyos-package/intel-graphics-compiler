@@ -51,7 +51,7 @@ BinaryEncodingBase::Status BinaryEncodingBase::WriteToDatFile()
     {
         BinInst *bin = binInstList[i];
 
-        if ( GetCompactCtrl(bin) )
+        if (GetCompactCtrl(bin))
         {
             os.write(reinterpret_cast<char *>(&(bin->Bytes)), BYTES_PER_INST / 2);
         }
@@ -78,7 +78,7 @@ void EncodingHelper::dumpOptReport(int totalInst,
         optReport<< fixed << endl;
         optReport<< kernel.getName() <<": "
             << numCompactedInst <<" out of " <<totalInst <<" instructions are compacted."<<endl;
-        if ( numCompacted3SrcInst>0 )
+        if (numCompacted3SrcInst>0)
         {
             optReport<< kernel.getName() <<": "
                 << numCompacted3SrcInst <<" instructions of 3 src (mad/pln) are compacted."<<endl;
@@ -123,10 +123,10 @@ G4_INST *BinaryEncodingBase::getFirstNonLabelInst(G4_BB *bb)
 
 void BinaryEncodingBase::ProduceBinaryBuf(void* &handle)
 {
-    uint32_t binarySize = GetInstCounts() * ( BYTES_PER_INST / 2 );
+    uint32_t binarySize = GetInstCounts() * (BYTES_PER_INST / 2);
     handle = allocCodeBlock(binarySize);
     char *buf = (char *)handle;
-    if ( handle == NULL )
+    if (handle == NULL)
     {
         MUST_BE_TRUE(0, "mem manager alloc failure in bin encoding");
     }
@@ -189,7 +189,7 @@ void BinaryEncodingBase::FixAlign16Inst(G4_INST* inst)
     }
 
     bool isDoubleInst = (dst->getType() == Type_DF);
-    if (inst->getExecSize() == 1)
+    if (inst->getExecSize() == g4::SIMD1)
     {
         int subRegOffset = dst->getLinearizedStart() % 16;
         if (inst->getCondMod())
@@ -221,7 +221,7 @@ void BinaryEncodingBase::FixAlign16Inst(G4_INST* inst)
         dst->setWriteMask(writeMask);
         dst->setLeftBound(dst->getLeftBound() - subRegOffset);
         dst->setRightBound(dst->getLeftBound() + 16);
-        inst->setExecSize(isDoubleInst ? 2 : 4);
+        inst->setExecSize(isDoubleInst ? g4::SIMD2 : g4::SIMD4);
         G4_Predicate* pred = inst->getPredicate();
         if (pred != NULL)
         {
@@ -261,7 +261,7 @@ void BinaryEncodingBase::FixMathInst(G4_INST* inst)
         {
             G4_SrcRegRegion* srcRegion = src->asSrcRegRegion();
             const RegionDesc* region = srcRegion->getRegion();
-            if (inst->getExecSize() > 1 &&
+            if (inst->getExecSize() > g4::SIMD1 &&
                 region->vertStride == 1 && region->width == 1 && region->horzStride == 0)
             {
                 // rewrite <1;1,0> to <2;2,1> to avoid simulator warning
@@ -317,14 +317,14 @@ void *BinaryEncodingBase::EmitBinary(uint32_t& binarySize)
 {
     void *handle = NULL;
     //CommitRelativeAddresses();
-    binarySize = GetInstCounts() * ( BYTES_PER_INST / 2 );
+    binarySize = GetInstCounts() * (BYTES_PER_INST / 2);
 
     /*
         Simplifying this. Whatever invokes vISA builder
         should know whether to generate binary or not.
         Through dll mode, this shouldn't be set.
     */
-    if(kernel.getOption(vISA_GenerateBinary))
+    if (kernel.getOption(vISA_GenerateBinary))
     {
         WriteToDatFile();
     }

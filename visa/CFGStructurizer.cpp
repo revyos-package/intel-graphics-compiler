@@ -307,7 +307,7 @@ namespace {
         // it is the same as the input CFG->BBs. As the algo goes, new BBs
         // can be inserted in the list.
         BB_LIST* BBs;               // ptr to CFG->BBs
-        uint8_t kernelExecSize;     // default execSize
+        G4_ExecSize kernelExecSize;     // default execSize
 
         void init();
         void fini();
@@ -909,7 +909,7 @@ ANode *ANode::getChildANode(ANode *parent)
 //
 //     changed to
 //           goto L0
-//       L0:
+//       L0:      (new empty BB)
 //       L1:
 //           goto L1
 //  2) avoid a fall-thru BB of a backward goto BB is the target BB of another
@@ -921,62 +921,114 @@ ANode *ANode::getChildANode(ANode *parent)
 //    changed to
 //          L0:
 //            (p0) goto L0
-//          L :
+//          L :         (new empty BB)
 //          L1 :
 //            (p1) goto L1
+// 3) make sure the last BB's pred is its physical predecessor.
+//    In another word, if there is a case:
+//          B0 : goto L1
+//          ...
+//        L0:
+//          ...
+//          B1:  goto L0
+//        L1:
+//           ret
+//   changed to
+//          B0 : goto L
+//          ...
+//       L0:
+//          ...
+//          B1: goto L0
+//       L:            (new empty BB)
+//       L1:
+//          ret
+//   This case is to guarantee that the last HG has its valid, non-null exit BB
+//   except Basic block ANode. (Without this, the last HG isn't handled completely
+//   with the current algo.)
 void CFGStructurizer::preProcess()
 {
     bool CFGChanged = false;
     for (BB_LIST_ITER BI = CFG->begin(), BE = CFG->end();
         BI != BE; ++BI)
     {
-        G4_BB *B = *BI;
-        if (B->Preds.size() < 2)
+        G4_BB* B = *BI;
+        if (B->getBBType() & (G4_BB_RETURN_TYPE | G4_BB_INIT_TYPE))
         {
+            // If B is RETURN_BB, don't insert as all cases should not happen,
+            // so is INIT BB.
             continue;
         }
 
-        // Check if this B is a successor of both backward and forward branches.
-        bool isForwardTarget = false;
-        bool isBackwardTarget = false;
-        bool isFallThruOfBackwardGotoBB = false;
+        bool insertEmptyBBBefore = false;
+        // Both entry's end (with or without subroutine and subroutine's end.
+        G4_BB* phySucc = B->getPhysicalSucc();
+        bool isLastBB = ((std::next(BI) == BE)
+            || (B->Succs.empty() && phySucc && (phySucc->getBBType() & G4_BB_INIT_TYPE))
+            || (B->getBBType() & G4_BB_EXIT_TYPE));
         BB_LIST_ITER IT, IE;
-        for (IT = B->Preds.begin(), IE = B->Preds.end(); IT != IE; IT++)
+        if (isLastBB)
         {
-            G4_BB* P = *IT;
-            if (P->getId() >= B->getId())
+            // case 3
+            if (B->Preds.size() >= 2)
             {
-                isBackwardTarget = true;
-                continue;
+                // Maybe don't set if B's physical pred is its pred.
+                // But doing so shouldn't cause any perf regression!
+                insertEmptyBBBefore = true;
             }
-            // P is a BB before B
-            G4_INST *gotoInst = getGotoInst(B);
-            G4_INST* gotoInstP = getGotoInst(P);
-            if (gotoInst && P->getPhysicalSucc() != B)
+            else if (B->Preds.size() == 1)
             {
-                isForwardTarget = true;
-            }
-            else if (gotoInstP
-                && P->getPhysicalSucc() == B
-                && gotoInstP->asCFInst()->isBackward())
-            {
-                isFallThruOfBackwardGotoBB = true;
+                G4_BB* phyPred = B->getPhysicalPred();
+                G4_BB* pred = B->Preds.back();
+                insertEmptyBBBefore = (phyPred != pred);
             }
         }
 
-        if (   !(isBackwardTarget && isForwardTarget)              // case 1
-            && !(isBackwardTarget && isFallThruOfBackwardGotoBB))  // case 2
+        if (!insertEmptyBBBefore && B->Preds.size() >= 2)
         {
-            // not candidate
+            // case 1 & 2
+            // Check if this B is a successor of both backward and forward branches.
+            bool isForwardTarget = false;
+            bool isBackwardTarget = false;
+            bool isFallThruOfBackwardGotoBB = false;
+            for (IT = B->Preds.begin(), IE = B->Preds.end(); IT != IE; IT++)
+            {
+                G4_BB* P = *IT;
+                G4_INST* gotoInstP = getGotoInst(P);
+                if (!gotoInstP)
+                {
+                    continue;
+                }
+                if (P->getId() >= B->getId())
+                {
+                    isBackwardTarget = true;
+                    continue;
+                }
+                // P is a BB before B
+                if (P->getPhysicalSucc() != B)
+                {
+                    isForwardTarget = true;
+                }
+                else if (P->getPhysicalSucc() == B
+                    && gotoInstP->asCFInst()->isBackward())
+                {
+                    isFallThruOfBackwardGotoBB = true;
+                }
+            }
+
+            if (   (isBackwardTarget && isForwardTarget)              // case 1
+                || (isBackwardTarget && isFallThruOfBackwardGotoBB))  // case 2
+            {
+                insertEmptyBBBefore = true;
+            }
+        }
+
+        if (!insertEmptyBBBefore)
+        {
             continue;
         }
 
-        // "B" is the target of both forward and backward branching, or is the
-        // target of a backward branching and also the fall-thru of another
-        // backward goto BB.
-        //
-        // Create an empty BB right before "B", and adjust all forward
-        // branching to this new BB.
+        // Now, create an empty BB right before "B", and adjust all forward
+        // branching to this new BB and leave all backward branching unchanged.
         G4_BB *newBB = createBBWithLabel();
         G4_Label *newLabel = newBB->getLabel();
 
@@ -993,16 +1045,29 @@ void CFGStructurizer::preProcess()
                 // keep the backward branch unchanged.
                 continue;
             }
-            // forward branching/fall-thru P->B is changed to P->newBB
+            G4_INST* gotoInst = getGotoInst(P);
+            G4_INST* jmpiInst = getJmpiInst(P);
+            if (   !gotoInst && !jmpiInst       // not jump to B
+                && P->getPhysicalSucc() != B)   // not fall-thru to B
+            {
+                // Shouldn't happen.
+                assert(false && "unknown control-flow instruction!");
+            }
+
+            // forward branching/fall-thru "P->B" is changed to "P->newBB"
             BBListReplace(P->Succs, B, newBB);
             newBB->Preds.push_back(P);
 
             // Change this branching
-            G4_INST* gotoInst = getGotoInst(P);
             if (gotoInst && gotoInst->asCFInst()->getUip() == B->getLabel())
             {
                 gotoInst->asCFInst()->setUip(newLabel);
             }
+            else if (jmpiInst && jmpiInst->getSrc(0) == B->getLabel())
+            {
+                jmpiInst->setSrc(newLabel, 0);
+            }
+
             // the edge from B's Preds
             B->Preds.erase(IT);
         }
@@ -1052,7 +1117,7 @@ void CFGStructurizer::init()
     BBs = &(CFG->getBBList());
     numOfBBs = CFG->getNumBB();
     numOfANodes = 0;
-    kernelExecSize = (uint8_t)CFG->getKernel()->getSimdSize();
+    kernelExecSize = CFG->getKernel()->getSimdSize();
 
     // caching the flags
     doScalarJmp = !CFG->builder->noScalarJmp();
@@ -1345,7 +1410,7 @@ bool CFGStructurizer::getCGBegin(G4_BB *bb, CGList &cgs)
 inline bool CFGStructurizer::isGotoScalarJmp(G4_INST *gotoInst)
 {
     MUST_BE_TRUE(gotoInst->opcode() == G4_goto, "It should be a goto inst");
-    return gotoInst->getExecSize() == 1 ||
+    return gotoInst->getExecSize() == g4::SIMD1 ||
            gotoInst->getPredicate() == nullptr ||
            gotoInst->asCFInst()->isUniform();
 }
@@ -1488,7 +1553,7 @@ void CFGStructurizer::getNewRange(
 // Node's range from this cg.
 void CFGStructurizer::extendNode(ANode *Node, ControlGraph *CG)
 {
-    if(!Node)
+    if (!Node)
     {
         return;
     }
@@ -1740,7 +1805,7 @@ void CFGStructurizer::condenseNode(ANodeHG *node)
     G4_BB *exit = node->getExitBB();
     ANList::iterator I = entryNode->preds.begin();
     ANList::iterator E = entryNode->preds.end();
-    while ( I != E)
+    while (I != E)
     {
         ANList::iterator Iter = I;
         ++I;
@@ -1995,13 +2060,13 @@ ANodeBB* CFGStructurizer::addLandingBB(
         if (lastInst)
         {
             gotoInst = CFG->builder->createInternalCFInst(
-                NULL, G4_goto, 1, NULL, targetLabel, InstOpt_NoOpt,
+                NULL, G4_goto, g4::SIMD1, NULL, targetLabel, InstOpt_NoOpt,
                 lastInst->getLineNo(), lastInst->getCISAOff(), lastInst->getSrcFilename());
         }
         else
         {
             gotoInst = CFG->builder->createInternalCFInst(
-                NULL, G4_goto, 1, NULL, targetLabel, InstOpt_NoOpt);
+                NULL, G4_goto, g4::SIMD1, NULL, targetLabel, InstOpt_NoOpt);
         }
         newBB->push_back(gotoInst);
     }
@@ -2534,7 +2599,9 @@ void CFGStructurizer::constructPST(BB_LIST_ITER IB, BB_LIST_ITER IE)
         G4_BB *bb = *II;
         ANodeBB *ndbb = getANodeBB(bb);
 
-        // Do the following cases in order:
+        // Do the following cases in order. (Note that bb should be part of
+        // the current pending ANode (top of ANStack), although it could
+        // be the beginning node of the new inner ANode.)
         //
         // 1: If bb is the target of some gotos, that is, the end of
         //    some CGs, merge the current bb into ANStack nodes of
@@ -2548,15 +2615,16 @@ void CFGStructurizer::constructPST(BB_LIST_ITER IB, BB_LIST_ITER IE)
         //    cg that is associated with a backward goto, a forward
         //    conditional goto, and the root (first) forward unconditional
         //    goto.  No new HG is created for a non-root unconditional
-        //    goto (see details in code).
+        //    goto (see details in code). This is where an inner HG is formed.)
         //
         // 3: Add bb into this node as it is part of node. If bb can
         //    be merged with its pred, merge it. The new node's type
         //    must be type AN_SEQUENCE.
         //
         // 4: Check if bb is the end of the node.  If it is, finalize the
-        //    node. If it is not, go on to process the next BB and continue
-        //    the next iteration.
+        //    node. If it is not, go on to process the next BB in the next
+        //    iteration (This implies that if the next BB should be part
+        //    of the current pending HG in ANStack).
         //
 
         // case 1.
@@ -3068,7 +3136,7 @@ void CFGStructurizer::convertChildren(ANodeHG *nodehg, G4_BB *nextJoinBB)
     //    1. nextJoinBB
     //    2. the nodehg's exit(s).
     //       nodehg is a hammock, so it should have a single exit. However,
-    //       for something like "if(c) break endif", and nodehg is somehow
+    //       for something like "if (c) break endif", and nodehg is somehow
     //       decided to be non-SCF (ie converted to goto), nodehg will have
     //       two exits.
     //  [todo: have a simple/better way to handle this]
@@ -3122,7 +3190,7 @@ void CFGStructurizer::convertIf(ANodeHG *node, G4_BB *nextJoinBB)
     G4_Label *nextJoinLabel = nextJoinBB ? nextJoinBB->getLabel() : nullptr;
     G4_BB *begin = node->getBeginBB();
     G4_INST *gotoInst = begin->back();
-    uint8_t execSize = gotoInst->getExecSize();
+    G4_ExecSize execSize = gotoInst->getExecSize();
     execSize = execSize > 1 ? execSize : kernelExecSize;
     ANList::iterator II = node->children.begin();
     ANode *thenNode = *(++II);  // children[1]
@@ -3410,8 +3478,8 @@ void CFGStructurizer::convertDoWhile(ANodeHG *node, G4_BB *nextJoinBB)
 
     G4_BB *end = node->getEndBB();
     G4_INST *gotoInst = end->back();
-    uint8_t execSize = gotoInst->getExecSize();
-    execSize = execSize > 1 ? execSize : kernelExecSize;
+    G4_ExecSize execSize = gotoInst->getExecSize();
+    execSize = execSize > g4::SIMD1 ? execSize : kernelExecSize;
     G4_BB *head = node->getBeginBB();
     G4_BB *exit = node->getExitBB();
 
@@ -3495,10 +3563,10 @@ void CFGStructurizer::generateGotoJoin(G4_BB *gotoBB, G4_BB *jibBB, G4_BB *joinB
     MUST_BE_TRUE(gotoInst && gotoInst->opcode() == G4_goto,
                  "gotoBB should have goto instruction");
     G4_Label *nextJoinLabel = jibBB ? jibBB->getLabel() : nullptr;
-    uint8_t execSize = gotoInst->getExecSize();
-    execSize = execSize > 1 ? execSize : kernelExecSize;
+    G4_ExecSize execSize = gotoInst->getExecSize();
+    execSize = execSize > g4::SIMD1 ? execSize : kernelExecSize;
 
-    if (gotoInst->getExecSize() == 1)
+    if (gotoInst->getExecSize() == g4::SIMD1)
     {   // For simd1 goto, convert it to a goto with the right execSize.
         gotoInst->setExecSize(execSize);
         gotoInst->setOptions(InstOpt_M0);
@@ -3520,11 +3588,12 @@ void CFGStructurizer::generateGotoJoin(G4_BB *gotoBB, G4_BB *jibBB, G4_BB *joinB
         {
             // if there is no predicate, generate a predicate with all 0s.
             // if predicate is SIMD32, we have to use a :ud dst type for the move
-            uint8_t numFlags = gotoInst->getExecSize() > 16 ? 2 : 1;
+            uint8_t numFlags = gotoInst->getExecSize() > g4::SIMD16 ? 2 : 1;
             G4_Declare* tmpFlagDcl = CFG->builder->createTempFlag(numFlags);
             G4_DstRegRegion* newPredDef = CFG->builder->createDst(tmpFlagDcl->getRegVar(), 0, 0, 1,
                 numFlags == 2 ? Type_UD : Type_UW);
-            G4_INST *predInst = CFG->builder->createMov(1,
+            G4_INST *predInst = CFG->builder->createMov(
+                g4::SIMD1,
                 newPredDef,
                 CFG->builder->createImm(0, Type_UW),
                 InstOpt_WriteEnable, false);
@@ -3578,8 +3647,8 @@ void CFGStructurizer::convertGoto(ANodeBB *node, G4_BB *nextJoinBB)
     //
     // generate goto/join
     //
-    uint8_t execSize = gotoInst->getExecSize();
-    execSize = execSize > 1 ? execSize : kernelExecSize;
+    G4_ExecSize execSize = gotoInst->getExecSize();
+    execSize = execSize > g4::SIMD1 ? execSize : kernelExecSize;
 
     if (kind == ANKIND_JMPI)
     {

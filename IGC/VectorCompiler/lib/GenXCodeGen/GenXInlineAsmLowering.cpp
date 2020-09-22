@@ -41,6 +41,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenXSubtarget.h"
 #include "GenXUtil.h"
 #include "GenXVisa.h"
+#include "Probe/Assertion.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "visa_igc_common_header.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallSet.h"
@@ -133,7 +136,7 @@ bool GenXInlineAsmLowering::runOnFunction(Function &F) {
         auto *CI = dyn_cast<CallInst>(&I);
         // No need to process inline asm with empty constraint string
         return CI && CI->isInlineAsm() &&
-               !cast<InlineAsm>(CI->getCalledValue())
+               !cast<InlineAsm>(IGCLLVM::getCalledValue(CI))
                     ->getConstraintString()
                     .empty();
       });
@@ -147,7 +150,7 @@ bool GenXInlineAsmLowering::runOnFunction(Function &F) {
 
   Context = &InlineAsms[0]->getContext();
   for (auto *CI : InlineAsms) {
-    auto *IA = cast<InlineAsm>(CI->getCalledValue());
+    auto *IA = cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
     InlineAsm::ConstraintInfoVector ConstraintsInfo = IA->ParseConstraints();
     MDNode *ConstraintsMD = createInlineAsmMetadata(CI, ConstraintsInfo);
     GenXConstraintInfoVector GenXConstraintsInfo =
@@ -179,8 +182,8 @@ bool GenXInlineAsmLowering::runOnFunction(Function &F) {
 // where this information is needed.
 MDNode *GenXInlineAsmLowering::createInlineAsmMetadata(
     CallInst *CI, const ConstraintInfoVector &ConstraintsInfo) const {
-  assert(!ConstraintsInfo.empty() && "Non empty constraints expected");
-  assert(CI->isInlineAsm() && "Inline asm expected");
+  IGC_ASSERT(!ConstraintsInfo.empty() && "Non empty constraints expected");
+  IGC_ASSERT(CI->isInlineAsm() && "Inline asm expected");
 
   Type *Int1Ty = Type::getInt1Ty(*Context);
   Type *Int32Ty = Type::getInt32Ty(*Context);
@@ -220,11 +223,12 @@ Type *GenXInlineAsmLowering::rewriteTypeForConstraintIfNeeded(
 }
 
 Type *GenXInlineAsmLowering::rewriteTypeForCR(Type *CRType) const {
-  assert(CRType->isIntOrIntVectorTy() &&
+  IGC_ASSERT(CRType->isIntOrIntVectorTy() &&
          "Expected integer inputs for 'cr' constraint");
   Type *Int1Ty = Type::getInt1Ty(*Context);
   return CRType->isVectorTy()
-             ? VectorType::get(Int1Ty, CRType->getVectorNumElements())
+             ? IGCLLVM::FixedVectorType::get(
+                   Int1Ty, cast<VectorType>(CRType)->getNumElements())
              : Int1Ty;
 }
 
@@ -308,8 +312,8 @@ void GenXInlineAsmLowering::replaceInlineAsmUses(
 // truncations for inputs and zero extensions for outputs.
 CallInst *GenXInlineAsmLowering::recreateInlineAsmWithCR(
     CallInst *CI, const GenXConstraintInfoVector &ConstraintsInfo) {
-  assert(!ConstraintsInfo.empty() && "Non empty constraints expected");
-  assert(CI->isInlineAsm() && "Inline asm expected");
+  IGC_ASSERT(!ConstraintsInfo.empty() && "Non empty constraints expected");
+  IGC_ASSERT(CI->isInlineAsm() && "Inline asm expected");
 
   // If there exist 'cr' output a new result type must be constructed
   FunctionType *NewFTy =
@@ -330,7 +334,7 @@ CallInst *GenXInlineAsmLowering::recreateInlineAsmWithCR(
                  });
 
   // Create exactly the same inline assembly but with new function type
-  auto *IA = cast<InlineAsm>(CI->getCalledValue());
+  auto *IA = cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
   InlineAsm *NewIA = InlineAsm::get(
       NewFTy, IA->getAsmString(), IA->getConstraintString(),
       IA->hasSideEffects(), IA->isAlignStack(), IA->getDialect());

@@ -146,11 +146,24 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
             inlineProgramScopeBuffer = &modMd->inlineConstantBuffers.back().Buffer;
         }
 
-        // For zero initialized values, we dont need to copy the data, just tell driver how much to allocate
         if (initializer->isZeroValue())
         {
-            zeroInitializedGlobals.push_back(globalVar);
-            continue;
+            // For zero initialized values, we dont need to copy the data, just tell driver how much to allocate
+            // However, if it's used as a pointer value, we need to do patching and therefore cannot defer the offset calculation
+            bool hasPointerUser = false;
+            for (auto UI : globalVar->users())
+            {
+                if (isa<Constant>(UI) && UI->getType()->isPointerTy())
+                {
+                    hasPointerUser = true;
+                    break;
+                }
+            }
+            if (!hasPointerUser)
+            {
+                zeroInitializedGlobals.push_back(globalVar);
+                continue;
+            }
         }
 
         // Align the buffer.
@@ -195,38 +208,44 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         IGC::appendToUsed(M, globalArray);
     }
 
-    if (hasInlineConstantBuffer)
+    // Always rely on relocation for ZEBinary, so only need to generate these
+    // implcit args when disabling ZEBinary
+    if (IGC_IS_FLAG_DISABLED(EnableZEBinary) &&
+        !modMd->compOpt.EnableZEBinary)
     {
-        // Just add the implicit argument to each function if a constant
-        // buffer has been created.  This will technically burn a patch
-        // token on kernels that don't actually use the buffer but it saves
-        // us having to walk the def-use chain (we can't just check if a
-        // constant is used in the kernel; for example, a global buffer
-        // may contain pointers that in turn point into the constant
-        // address space).
-        for (auto& pFunc : M)
+        if (hasInlineConstantBuffer)
         {
-            if (pFunc.isDeclaration()) continue;
-            // Don't add implicit arg if doing relocation
-            if (pFunc.hasFnAttribute("visaStackCall")) continue;
+            // Just add the implicit argument to each function if a constant
+            // buffer has been created.  This will technically burn a patch
+            // token on kernels that don't actually use the buffer but it saves
+            // us having to walk the def-use chain (we can't just check if a
+            // constant is used in the kernel; for example, a global buffer
+            // may contain pointers that in turn point into the constant
+            // address space).
+            for (auto& pFunc : M)
+            {
+                if (pFunc.isDeclaration()) continue;
+                // Don't add implicit arg if doing relocation
+                if (pFunc.hasFnAttribute("visaStackCall")) continue;
 
-            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-            implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
-            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+                implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
+                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            }
         }
-    }
 
-    if (hasInlineGlobalBuffer)
-    {
-        for (auto& pFunc : M)
+        if (hasInlineGlobalBuffer)
         {
-            if (pFunc.isDeclaration()) continue;
-            // Don't add implicit arg if doing relocation
-            if (pFunc.hasFnAttribute("visaStackCall")) continue;
+            for (auto& pFunc : M)
+            {
+                if (pFunc.isDeclaration()) continue;
+                // Don't add implicit arg if doing relocation
+                if (pFunc.hasFnAttribute("visaStackCall")) continue;
 
-            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-            implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
-            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+                implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
+                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
+            }
         }
     }
 
@@ -486,7 +505,11 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
     // If this is an sequential type which is not a CDS or zero, have to collect the values
     // element by element. Note that this is not exclusive with the two cases above, so the
     // order of ifs is meaningful.
-    else if (dyn_cast<CompositeType>(initializer->getType()))
+    else if (
+        initializer->getType()->isArrayTy() ||
+        initializer->getType()->isStructTy() ||
+        initializer->getType()->isVectorTy()
+    )
     {
         const int numElts = initializer->getNumOperands();
         for (int i = 0; i < numElts; ++i)

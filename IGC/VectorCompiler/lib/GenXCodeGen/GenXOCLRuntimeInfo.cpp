@@ -25,15 +25,33 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "GenXOCLRuntimeInfo.h"
+
 #include "GenX.h"
+#include "GenXModule.h"
 #include "GenXSubtarget.h"
+#include "GenXTargetMachine.h"
+#include "GenXUtil.h"
+
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/DataLayout.h"
+
+#include <visaBuilder_interface.h>
+
+#include <llvm/CodeGen/TargetPassConfig.h>
+#include <llvm/IR/Argument.h>
+#include <llvm/IR/DataLayout.h>
 
 #include <cctype>
 #include <functional>
 #include <iterator>
+
+#include "Probe/Assertion.h"
+
+#define CISA_CALL(c)                                                           \
+  do {                                                                         \
+    auto Result = (c);                                                         \
+    (void)Result;                                                              \
+    IGC_ASSERT_MESSAGE(Result == 0, "Call to VISA API failed: " #c);           \
+  } while (0);
 
 using namespace llvm;
 
@@ -47,7 +65,7 @@ char GenXOCLRuntimeInfo::ID = 0;
 // Just perform linear instructions scan to find usage stats.
 // Intrinsic set copied from igcmc.
 void GenXOCLRuntimeInfo::KernelInfo::setInstructionUsageProperties(
-    FunctionGroup &FG, const GenXSubtarget &ST) {
+    const FunctionGroup &FG, const GenXBackendConfig &BC) {
   for (Function *F : FG) {
     for (BasicBlock &BB : *F) {
       for (Instruction &I : BB) {
@@ -72,9 +90,18 @@ void GenXOCLRuntimeInfo::KernelInfo::setInstructionUsageProperties(
         case GenXIntrinsic::genx_usdp4a_sat:
         case GenXIntrinsic::genx_uudp4a_sat:
           break;
+#if 0
+        // ThreadPrivateMemSize was not copied to igcmc structures
+        // always defaulting to zero and everything worked. After
+        // removal of igcmc structures TPMSize started to be
+        // initialized to values other than zero and some ispc tests
+        // started to fail.
+        // Restore old behavior as temporary fix until proper
+        // investigation will be performed. This is really strange.
         case GenXIntrinsic::genx_alloca:
-          ThreadPrivateMemSize = ST.stackSurfaceMaxSize();
+          ThreadPrivateMemSize = BC.getStackSurfaceMaxSize();
           break;
+#endif
         }
       }
     }
@@ -93,7 +120,7 @@ void GenXOCLRuntimeInfo::KernelInfo::setMetadataProperties(
 
 void GenXOCLRuntimeInfo::KernelInfo::setArgumentProperties(
     const Function &Kernel, genx::KernelMetadata &KM) {
-  assert(Kernel.arg_size() == KM.getNumArgs() &&
+  IGC_ASSERT(Kernel.arg_size() == KM.getNumArgs() &&
          "Expected same number of arguments");
   // Some arguments are part of thread payload and do not require
   // entries in arguments info for OCL runtime.
@@ -129,14 +156,15 @@ void GenXOCLRuntimeInfo::KernelInfo::setPrintStrings(
                  });
 }
 
-GenXOCLRuntimeInfo::KernelInfo::KernelInfo(FunctionGroup &FG,
-                                           const GenXSubtarget &ST) {
-  setInstructionUsageProperties(FG, ST);
+GenXOCLRuntimeInfo::KernelInfo::KernelInfo(const FunctionGroup &FG,
+                                           const GenXSubtarget &ST,
+                                           const GenXBackendConfig &BC) {
+  setInstructionUsageProperties(FG, BC);
 
   GRFSizeInBytes = ST.getGRFWidth();
 
   genx::KernelMetadata KM{FG.getHead()};
-  assert(KM.isKernel() && "Expected kernel as head of function group");
+  IGC_ASSERT(KM.isKernel() && "Expected kernel as head of function group");
   setMetadataProperties(KM, ST);
   setArgumentProperties(*FG.getHead(), KM);
   setPrintStrings(*FG.getHead()->getParent());
@@ -281,9 +309,272 @@ GenXOCLRuntimeInfo::KernelArgInfo::KernelArgInfo(const Argument &Arg,
 //===----------------------------------------------------------------------===//
 GenXOCLRuntimeInfo::CompiledKernel::CompiledKernel(KernelInfo &&KI,
                                                    const FINALIZER_INFO &JI,
-                                                   ArrayRef<char> GenBin)
+                                                   const GTPinInfo &GI,
+                                                   std::vector<char> GenBinIn,
+                                                   std::vector<char> DbgInfoIn)
     : CompilerInfo(std::move(KI)), JitterInfo(JI),
-      GenBinary(GenBin.begin(), GenBin.end()) {}
+      GtpinInfo(GI),
+      GenBinary{std::move(GenBinIn)},
+      DebugInfo{std::move(DbgInfoIn)} {
+}
+
+//===----------------------------------------------------------------------===//
+//
+// Runtime info pass implementation.
+//
+//===----------------------------------------------------------------------===//
+namespace {
+
+// SymbolTableBuilder: it's a helper class to generate symbol table.
+// Collecting/constructing symbols and emitting structures
+// with collected symbols are separated. Emitter part supports 2 formats:
+// legacy (patch tokens), zebin.
+class SymbolTableBuilder final {
+  // Using ZE struct as it covers all that is required, e.g. uses std::string
+  // instead of C char array.
+  using SymbolsInfo = GenXOCLRuntimeInfo::ZEBinaryInfo::SymbolsInfo;
+  using SymbolSeq = SymbolsInfo::ZESymEntrySeq;
+  using SymbolT = vISA::ZESymEntry;
+  using GenBinaryT = genx::BinaryDataAccumulator<const Function *>;
+
+  const GenBinaryT &GenBinary;
+  SymbolsInfo Symbols;
+
+public:
+  SymbolTableBuilder(const GenBinaryT &GenBinaryIn) : GenBinary{GenBinaryIn} {
+    validateInitialData();
+  }
+
+  void constructFunctionSymbols() {
+    // Skipping first section with the kernel.
+    std::transform(std::next(GenBinary.begin()), GenBinary.end(),
+                   std::back_inserter(Symbols.Functions),
+                   [](const auto &Section) -> SymbolT {
+                     return {vISA::GenSymType::S_FUNC,
+                             static_cast<uint32_t>(Section.Info.Offset),
+                             static_cast<uint32_t>(Section.Info.getSize()),
+                             Section.Key->getName().str()};
+                   });
+  }
+
+  // EnableZEBinary: this is requred by ZEBinary
+  void constructLocalSymbols() {
+    auto &KernelSection = getKernelSection();
+    Symbols.Local.emplace_back(
+        vISA::GenSymType::S_KERNEL, KernelSection.Info.Offset,
+        KernelSection.Info.getSize(), KernelSection.Key->getName().str());
+    // for now only kernel symbol is required
+  }
+
+  void constructAllSymbols() {
+    constructFunctionSymbols();
+    constructLocalSymbols();
+  }
+
+  GenXOCLRuntimeInfo::TableInfo emitLegacySymbolTable() const {
+    GenXOCLRuntimeInfo::TableInfo TI;
+    // Local symbols are ZE binary only, thus it is not part of the sum.
+    TI.Entries = Symbols.Functions.size();
+    TI.Size = TI.Entries * sizeof(vISA::GenSymEntry);
+    // this will be eventually freed in AdaptorOCL
+    auto *SymbolStorage = new vISA::GenSymEntry[TI.Entries];
+    TI.Buffer = SymbolStorage;
+    auto *Inserter = SymbolStorage;
+    appendLegacySymbolTable(Symbols.Functions.begin(), Symbols.Functions.end(),
+                            Inserter);
+    return std::move(TI);
+  }
+
+  SymbolsInfo emitZESymbolTable() const & { return Symbols; }
+
+  SymbolsInfo emitZESymbolTable() && { return std::move(Symbols); }
+
+private:
+  // appendLegacySymbolTable: a helper function to append symbols to a legasy
+  // symbol table.
+  // Output iterator is represented by a pointer \p OutIt, so the table/array
+  // it points to has to have enough space.
+  // The range [\p First, \p Last) must consist of SybolSeq::value elements.
+  template <typename InputIter>
+  static void appendLegacySymbolTable(InputIter First, InputIter Last,
+                                      vISA::GenSymEntry *OutIt) {
+    std::transform(
+        First, Last, OutIt,
+        [](SymbolSeq::const_reference SI) -> vISA::GenSymEntry {
+          vISA::GenSymEntry Entry;
+          Entry.s_offset = SI.s_offset;
+          Entry.s_size = SI.s_size;
+          Entry.s_type = SI.s_type;
+          IGC_ASSERT_MESSAGE(SI.s_name.size() < vISA::MAX_SYMBOL_NAME_LENGTH,
+                             "no solution for long symbol names for legacy "
+                             "symbol info is yet provided");
+          std::copy(SI.s_name.begin(), SI.s_name.end(), Entry.s_name);
+          // Null-terminating the string.
+          Entry.s_name[SI.s_name.size()] = '\0';
+          return std::move(Entry);
+        });
+  }
+
+  GenBinaryT::const_reference getKernelSection() const {
+    return GenBinary.front();
+  }
+
+  void validateInitialData() const {
+    IGC_ASSERT_MESSAGE(!GenBinary.empty(),
+                       "The binary must contain a least the kernel");
+    auto &KernelSection = getKernelSection();
+    IGC_ASSERT_MESSAGE(
+        KernelSection.Info.Offset == 0,
+        "It's presumed that the kernel is at the front of the binary");
+  }
+};
+
+} // namespace
+
+// Appends the binary of function/kernel represented by \p Func and \p BuiltFunc
+// to \p GenBinary.
+static void
+appendFuncBinary(genx::BinaryDataAccumulator<const Function *> &GenBinary,
+                 const Function &Func, const VISAKernel &BuiltFunc) {
+  void *GenBin = nullptr;
+  int GenBinSize = 0;
+  CISA_CALL(BuiltFunc.GetGenxBinary(GenBin, GenBinSize));
+  IGC_ASSERT_MESSAGE(
+      GenBin && GenBinSize,
+      "Unexpected null buffer or zero-sized kernel (compilation failed?)");
+  GenBinary.append(&Func, ArrayRef<char>{reinterpret_cast<char *>(GenBin),
+                                         static_cast<size_t>(GenBinSize)});
+  freeBlock(GenBin);
+}
+
+// Constructs gen binary for provided function group \p FG.
+static genx::BinaryDataAccumulator<const Function *>
+getGenBinary(const FunctionGroup &FG, VISABuilder &VB) {
+  genx::BinaryDataAccumulator<const Function *> GenBinary;
+  VISAKernel *BuiltKernel = VB.GetVISAKernel(FG.getHead()->getName().str());
+  appendFuncBinary(GenBinary, *FG.getHead(), *BuiltKernel);
+  for (Function *F : FG) {
+    if (F->hasFnAttribute(genx::FunctionMD::ReferencedIndirectly)) {
+      VISAKernel *ExtKernel = VB.GetVISAKernel(F->getName().str());
+      IGC_ASSERT_MESSAGE(ExtKernel, "Kernel is null");
+      appendFuncBinary(GenBinary, *F, *ExtKernel);
+    }
+  }
+  return std::move(GenBinary);
+}
+
+namespace {
+
+class RuntimeInfoCollector final {
+  const FunctionGroupAnalysis &FGA;
+  const GenXBackendConfig &BC;
+  VISABuilder &VB;
+  const GenXSubtarget &ST;
+  const Module &M;
+  const GenXDebugInfo &DBG;
+
+public:
+  using KernelStorageTy = GenXOCLRuntimeInfo::KernelStorageTy;
+  using CompiledKernel = GenXOCLRuntimeInfo::CompiledKernel;
+
+public:
+  RuntimeInfoCollector(const FunctionGroupAnalysis &InFGA,
+                       const GenXBackendConfig &InBC, VISABuilder &InVB,
+                       const GenXSubtarget &InST, const Module &InM,
+                       const GenXDebugInfo &InDbg)
+      : FGA{InFGA}, BC{InBC}, VB{InVB}, ST{InST}, M{InM}, DBG{InDbg} {}
+
+  KernelStorageTy run() &&;
+
+private:
+  CompiledKernel collectFunctionGroupInfo(const FunctionGroup &FG) const;
+};
+
+} // namespace
+
+RuntimeInfoCollector::KernelStorageTy RuntimeInfoCollector::run() && {
+  KernelStorageTy Kernels;
+  std::transform(FGA.begin(), FGA.end(), std::back_inserter(Kernels),
+                 [this](const FunctionGroup *FG) {
+                   return collectFunctionGroupInfo(*FG);
+                 });
+  return std::move(Kernels);
+}
+
+RuntimeInfoCollector::CompiledKernel
+RuntimeInfoCollector::collectFunctionGroupInfo(const FunctionGroup &FG) const {
+  using KernelInfo = GenXOCLRuntimeInfo::KernelInfo;
+  using GTPinInfo = GenXOCLRuntimeInfo::GTPinInfo;
+  using CompiledKernel = GenXOCLRuntimeInfo::CompiledKernel;
+  using TableInfo = GenXOCLRuntimeInfo::TableInfo;
+
+  // Compiler info.
+  KernelInfo Info{FG, ST, BC};
+
+  const Function *KernelFunction = FG.getHead();
+  const std::string KernelName = KernelFunction->getName().str();
+  VISAKernel *VK = VB.GetVISAKernel(KernelName);
+  IGC_ASSERT_MESSAGE(VK, "Kernel is null");
+  FINALIZER_INFO *JitInfo = nullptr;
+  CISA_CALL(VK->GetJitInfo(JitInfo));
+  IGC_ASSERT_MESSAGE(JitInfo, "Jit info is not set by finalizer");
+  genx::BinaryDataAccumulator<const Function *> GenBinary =
+      getGenBinary(FG, VB);
+
+  const auto& Dbg = DBG.getModuleDebug();
+  auto DbgIt = Dbg.find(KernelFunction);
+  std::vector<char> DebugData;
+  if (DbgIt != std::end(Dbg)) {
+    const auto &ElfImage = DbgIt->second;
+    DebugData = {ElfImage.begin(), ElfImage.end()};
+  }
+  TableInfo &RTable = Info.getRelocationTable();
+  CISA_CALL(
+      VK->GetGenRelocEntryBuffer(RTable.Buffer, RTable.Size, RTable.Entries));
+  // EnableZEBinary: this is requred by ZEBinary
+  CISA_CALL(VK->GetRelocations(Info.ZEBinInfo.Relocations));
+  SymbolTableBuilder STBuilder{GenBinary};
+  STBuilder.constructAllSymbols();
+  Info.getSymbolTable() = STBuilder.emitLegacySymbolTable();
+  Info.ZEBinInfo.Symbols = std::move(STBuilder).emitZESymbolTable();
+
+  void *GTPinBuffer = nullptr;
+  unsigned GTPinBufferSize = 0;
+  CISA_CALL(VK->GetGTPinBuffer(GTPinBuffer, GTPinBufferSize));
+
+  auto *GTPinBytes = static_cast<char *>(GTPinBuffer);
+  GTPinInfo gtpin{{GTPinBytes, GTPinBytes + GTPinBufferSize}};
+
+  return CompiledKernel{std::move(Info), *JitInfo, std::move(gtpin),
+                        std::move(GenBinary).emitConsolidatedData(),
+                        std::move(DebugData)};
+}
+
+void GenXOCLRuntimeInfo::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<FunctionGroupAnalysis>();
+  AU.addRequired<GenXBackendConfig>();
+  AU.addRequired<GenXModule>();
+  AU.addRequired<GenXDebugInfo>();
+  AU.addRequired<TargetPassConfig>();
+  AU.setPreservesAll();
+}
+
+bool GenXOCLRuntimeInfo::runOnModule(Module &M) {
+  const auto &FGA = getAnalysis<FunctionGroupAnalysis>();
+  const auto &BC = getAnalysis<GenXBackendConfig>();
+  // Getters for builders are not constant.
+  auto &GM = getAnalysis<GenXModule>();
+  const auto &ST = getAnalysis<TargetPassConfig>()
+                       .getTM<GenXTargetMachine>()
+                       .getGenXSubtarget();
+  const auto &DBG = getAnalysis<GenXDebugInfo>();
+
+  VISABuilder &VB =
+      *(GM.HasInlineAsm() ? GM.GetVISAAsmReader() : GM.GetCisaBuilder());
+
+  Kernels = RuntimeInfoCollector{FGA, BC, VB, ST, M, DBG}.run();
+  return false;
+}
 
 INITIALIZE_PASS_BEGIN(GenXOCLRuntimeInfo, "GenXOCLRuntimeInfo",
                       "GenXOCLRuntimeInfo", false, true)

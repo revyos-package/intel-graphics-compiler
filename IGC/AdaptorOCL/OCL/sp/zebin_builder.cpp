@@ -37,7 +37,8 @@ using namespace iOpenCL;
 using namespace zebin;
 
 ZEBinaryBuilder::ZEBinaryBuilder(
-    const PLATFORM plat, bool is64BitPointer, const IGC::SOpenCLProgramInfo& programInfo)
+    const PLATFORM plat, bool is64BitPointer, const IGC::SOpenCLProgramInfo& programInfo,
+    const uint8_t* spvData, uint32_t spvSize)
     : mPlatform(plat), mBuilder(is64BitPointer)
 {
     G6HWC::InitializeCapsGen8(&mHWCaps);
@@ -56,6 +57,17 @@ ZEBinaryBuilder::ZEBinaryBuilder(
     mBuilder.setTargetFlag(tf);
 
     addProgramScopeInfo(programInfo);
+
+    if (spvData != nullptr)
+        addSPIRV(spvData, spvSize);
+}
+
+void ZEBinaryBuilder::setGfxCoreFamilyToELFMachine(uint32_t value)
+{
+    TargetFlags tf = mBuilder.getTargetFlag();
+    tf.machineEntryUsesGfxCoreInsteadOfProductFamily = true;
+    mBuilder.setTargetFlag(tf);
+    mBuilder.setMachine(value);
 }
 
 void ZEBinaryBuilder::createKernel(
@@ -71,14 +83,47 @@ void ZEBinaryBuilder::createKernel(
 
     zeInfoKernel& zeKernel = mZEInfoBuilder.createKernel(annotations.m_kernelName);
     addKernelExecEnv(annotations, zeKernel);
-    addLocalIds(annotations.m_executionEnivronment.CompiledSIMDSize,
-        grfSize,
-        annotations.m_threadPayload.HasLocalIDx,
-        annotations.m_threadPayload.HasLocalIDy,
-        annotations.m_threadPayload.HasLocalIDz,
-        zeKernel);
+    if (annotations.m_threadPayload.HasLocalIDx ||
+        annotations.m_threadPayload.HasLocalIDy ||
+        annotations.m_threadPayload.HasLocalIDz) {
+        addLocalIds(annotations.m_executionEnivronment.CompiledSIMDSize,
+            grfSize,
+            annotations.m_threadPayload.HasLocalIDx,
+            annotations.m_threadPayload.HasLocalIDy,
+            annotations.m_threadPayload.HasLocalIDz,
+            zeKernel);
+    }
     addPayloadArgsAndBTI(annotations, zeKernel);
     addMemoryBuffer(annotations, zeKernel);
+    addGTPinInfo(annotations);
+}
+
+void ZEBinaryBuilder::addGTPinInfo(const IGC::SOpenCLKernelInfo& annotations)
+{
+    const IGC::SKernelProgram* program = &(annotations.m_kernelProgram);
+    uint8_t* buffer = nullptr;
+    uint32_t size = 0;
+    switch (annotations.m_executionEnivronment.CompiledSIMDSize) {
+    case 1:
+        buffer = (uint8_t*)program->simd1.m_gtpinBuffer;
+        size = program->simd1.m_gtpinBufferSize;
+        break;
+    case 8:
+        buffer = (uint8_t*)program->simd8.m_gtpinBuffer;
+        size = program->simd8.m_gtpinBufferSize;
+        break;
+    case 16:
+        buffer = (uint8_t*)program->simd16.m_gtpinBuffer;
+        size = program->simd16.m_gtpinBufferSize;
+        break;
+    case 32:
+        buffer = (uint8_t*)program->simd32.m_gtpinBuffer;
+        size = program->simd32.m_gtpinBufferSize;
+        break;
+    }
+
+    if (buffer != nullptr && size)
+        mBuilder.addSectionGTPinInfo(annotations.m_kernelName, buffer, size);
 }
 
 void ZEBinaryBuilder::addProgramScopeInfo(const IGC::SOpenCLProgramInfo& programInfo)
@@ -104,8 +149,11 @@ ZEBinaryBuilder::addGlobalConstants(const IGC::SOpenCLProgramInfo& annotations)
     // FIXME: not sure in what cases there will be more than one global constant buffer
     IGC_ASSERT(annotations.m_initConstantAnnotation.size() == 1);
     auto& ca = annotations.m_initConstantAnnotation.front();
-    return mBuilder.addSectionData("global_const", (const uint8_t*)ca->InlineData.data(),
-        ca->InlineData.size());
+    uint32_t dataSize = ca->InlineData.size();
+    uint32_t paddingSize = ca->AllocSize - dataSize;
+    uint32_t alignment = ca->Alignment;
+    return mBuilder.addSectionData("const", (const uint8_t*)ca->InlineData.data(),
+        dataSize, paddingSize, alignment);
 }
 
 bool ZEBinaryBuilder::hasGlobals(const IGC::SOpenCLProgramInfo& annotations)
@@ -115,6 +163,7 @@ bool ZEBinaryBuilder::hasGlobals(const IGC::SOpenCLProgramInfo& annotations)
     return false;
 }
 
+
 ZEELFObjectBuilder::SectionID ZEBinaryBuilder::addGlobals(
     const IGC::SOpenCLProgramInfo& annotations)
 {
@@ -123,8 +172,16 @@ ZEELFObjectBuilder::SectionID ZEBinaryBuilder::addGlobals(
     // FIXME: not sure in what cases there will be more than one global buffer
     IGC_ASSERT(annotations.m_initGlobalAnnotation.size() == 1);
     auto& ca = annotations.m_initGlobalAnnotation.front();
+    uint32_t dataSize = ca->InlineData.size();
+    uint32_t paddingSize = ca->AllocSize - dataSize;
+    uint32_t alignment = ca->Alignment;
     return mBuilder.addSectionData("global", (const uint8_t*)ca->InlineData.data(),
-        ca->InlineData.size());
+        dataSize, paddingSize, alignment);
+}
+
+void ZEBinaryBuilder::addSPIRV(const uint8_t* data, uint32_t size)
+{
+    mBuilder.addSectionSpirv("", data, size);
 }
 
 ZEELFObjectBuilder::SectionID ZEBinaryBuilder::addKernelBinary(const std::string& kernelName,
@@ -366,7 +423,7 @@ void ZEBinaryBuilder::addLocalIds(uint32_t simdSize, uint32_t grfSize,
     int32_t per_id_size = 2 * simdSize;
     // byte size for one id have to be grf align
     per_id_size = (per_id_size % grfSize) == 0 ?
-        per_id_size : (per_id_size / grfSize) + 1;
+        per_id_size : ((per_id_size / grfSize) + 1) * grfSize;
     // total_size = num_of_ids * per_id_size
     int32_t total_size = per_id_size * ((has_local_id_x ? 1 : 0) +
         (has_local_id_y ? 1 : 0) + (has_local_id_z ? 1 : 0));

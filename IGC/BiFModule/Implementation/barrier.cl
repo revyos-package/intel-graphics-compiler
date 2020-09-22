@@ -42,16 +42,15 @@ static void __intel_atomic_work_item_fence( Scope_t Memory, uint Semantics )
             // An image fence requires a fence with R/W invalidate (L3 flush) + a flush
             // of the sampler cache,
             // ImageMemory | WorkgroupMemory should count as global!
-            __builtin_IB_memfence(true, true, false, false, false, true, invalidateL1);
-            __builtin_IB_flush_sampler_cache();
+            __builtin_IB_typedmemfence(invalidateL1);
         }
         else if( Semantics & ( CrossWorkgroupMemory | WorkgroupMemory ) )
         {
-            // A global/local opencl fence requires a hardware fence,
-            // but no L3 flush needed.
+            // A global/local opencl fence requires a hardware fence
             // We let the code generation decide whether we can elide local fences or not,
             // so we need to pass the CLK_GLOBAL flag forward
-            __builtin_IB_memfence(true, false, false, false, false, Semantics & CrossWorkgroupMemory, invalidateL1);
+            bool flushL3 = Memory == Device || Memory == CrossDevice;
+            __builtin_IB_memfence(true, flushL3, false, false, false, Semantics & CrossWorkgroupMemory, invalidateL1);
         }
     }
 }

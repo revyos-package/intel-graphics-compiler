@@ -47,7 +47,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/secure_mem.h"
 #include "common/MDFrameWork.h"
 #include <iStdLib/utility.h>
-#include "Compiler/DebugInfo/VISADebugEmitter.hpp"
 #include "Probe/Assertion.h"
 #include "ZEBinWriter/zebin/source/ZEELFObjectBuilder.hpp"
 
@@ -521,8 +520,8 @@ namespace IGC
         unsigned int numElements = 1;
         if (baseType->isVectorTy())
         {
-            numElements = baseType->getVectorNumElements();
-            baseType = baseType->getVectorElementType();
+            numElements = (unsigned)cast<VectorType>(baseType)->getNumElements();
+            baseType = cast<VectorType>(baseType)->getElementType();
         }
 
         // Integer types need to be qualified with a "u" if they are unsigned
@@ -598,7 +597,7 @@ namespace IGC
         }
     }
 
-    void COpenCLKernel::CreateZEPayloadArguments(IGC::KernelArg* kernelArg, uint payloadPosition)
+    bool COpenCLKernel::CreateZEPayloadArguments(IGC::KernelArg* kernelArg, uint payloadPosition)
     {
         switch (kernelArg->getArgType()) {
 
@@ -623,9 +622,8 @@ namespace IGC
             break;
 
         case KernelArg::ArgType::IMPLICIT_NUM_GROUPS:
-            // FIXME: num_groups is group_size?
             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
-                zebin::PreDefinedAttrGetter::ArgType::group_size,
+                zebin::PreDefinedAttrGetter::ArgType::group_count,
                 payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
             break;
 
@@ -635,6 +633,18 @@ namespace IGC
                 zebin::PreDefinedAttrGetter::ArgType::local_size,
                 payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
             break;
+
+         case KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE:
+             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                 zebin::PreDefinedAttrGetter::ArgType::enqueued_local_size,
+                 payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
+             break;
+
+         case KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE:
+             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                 zebin::PreDefinedAttrGetter::ArgType::global_size,
+                 payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
+             break;
 
         // pointer args
         case KernelArg::ArgType::PTR_GLOBAL:
@@ -713,22 +723,30 @@ namespace IGC
                 payloadPosition, kernelArg->getAllocateSize(),
                 kernelArg->getAssociatedArgNo());
             break;
+
         // Local ids are supported in per-thread payload arguments
         case KernelArg::ArgType::IMPLICIT_LOCAL_IDS:
             break;
-        // FIXME: Seen this in a simple test case, should be supported?
+
+        // We don't need these in ZEBinary, can safely skip them
         case KernelArg::ArgType::IMPLICIT_R0:
-        case KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE:
+        case KernelArg::ArgType::R1:
             break;
+
+        // FIXME: should these be supported?
+        // CONSTANT_BASE and GLOBAL_BASE are not required that we should export
+        // all globals and constants and let the runtime relocate them when enabling
+        // ZEBinary
         case KernelArg::ArgType::IMPLICIT_CONSTANT_BASE:
         case KernelArg::ArgType::IMPLICIT_GLOBAL_BASE:
-        case KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE:
         case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN:
         case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE:
         default:
-            IGC_ASSERT_MESSAGE(0, "ZEBin: unsupported KernelArg Type");
+            return false;
             break;
         } // end switch (kernelArg->getArgType())
+
+        return true;
     }
 
     void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition)
@@ -1665,10 +1683,23 @@ namespace IGC
                 // Create annotations for the kernel argument
                 // If an arg is unused, don't generate patch token for it.
                 CreateAnnotations(&arg, offset - constantBufferStart);
-                if (IGC_IS_FLAG_ENABLED(EnableZEBinary)) {
+                if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
+                    m_Context->getCompilerOption().EnableZEBinary) {
                     // FIXME: once we transit to zebin completely, we don't need to do
-                    // CreateAnnotations. Only CreateZEPayloadArguments is required
-                    CreateZEPayloadArguments(&arg, offset - constantBufferStart);
+                    // CreateAnnotations above. Only CreateZEPayloadArguments is required
+
+                    // During the transition, we disable ZEBinary if there are unsupported
+                    // arguments
+                    bool success = CreateZEPayloadArguments(&arg, offset - constantBufferStart);
+                    if (!success) {
+                        // assert if we force to EnableZEBinary but encounter unsupported features
+                        IGC_ASSERT_MESSAGE(!IGC_IS_FLAG_ENABLED(EnableZEBinary),
+                            "ZEBin: unsupported KernelArg Type");
+
+                        // fall back to patch-token if ZEBinary is enabled by CodeGenContext::CompOptions
+                        if (m_Context->getCompilerOption().EnableZEBinary)
+                            m_Context->getCompilerOption().EnableZEBinary = false;
+                    }
                 }
                 if (arg.needsAllocation())
                 {
@@ -1777,7 +1808,7 @@ namespace IGC
         m_kernelInfo.m_executionEnivronment.IsSingleProgramFlow = false;
         //m_kernelInfo.m_executionEnivronment.PerSIMDLanePrivateMemorySize = m_perWIStatelessPrivateMemSize;
         m_kernelInfo.m_executionEnivronment.HasFixedWorkGroupSize = false;
-        m_kernelInfo.m_kernelName = entry->getName();
+        m_kernelInfo.m_kernelName = entry->getName().str();
         m_kernelInfo.m_ShaderHashCode = m_Context->hash.getAsmHash();
 
         FunctionInfoMetaDataHandle funcInfoMD = m_pMdUtils->getFunctionsInfoItem(entry);
@@ -1973,7 +2004,7 @@ namespace IGC
             for (auto i : FuncMap)
             {
                 std::unique_ptr<iOpenCL::KernelTypeProgramBinaryInfo> initConstant(new iOpenCL::KernelTypeProgramBinaryInfo());
-                initConstant->KernelName = i.first->getName();
+                initConstant->KernelName = i.first->getName().str();
                 if (i.second.IsFinalizer)
                 {
 
@@ -2091,7 +2122,11 @@ namespace IGC
         if (ctx->m_retryManager.IsFirstTry())
         {
             CollectProgramInfo(ctx);
-            ctx->m_programOutput.CreateProgramScopePatchStream(ctx->m_programInfo);
+            if (IGC_IS_FLAG_DISABLED(EnableZEBinary) &&
+                !ctx->getCompilerOption().EnableZEBinary)
+            {
+                ctx->m_programOutput.CreateProgramScopePatchStream(ctx->m_programInfo);
+            }
         }
 
         MetaDataUtils* pMdUtils = ctx->getMetaDataUtils();

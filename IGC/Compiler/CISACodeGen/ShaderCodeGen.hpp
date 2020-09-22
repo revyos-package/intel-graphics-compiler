@@ -90,7 +90,7 @@ public:
     virtual void PreAnalysisPass();
     virtual void ExtractGlobalVariables() {}
     void         EOTURBWrite();
-    void         EOTRenderTarget();
+    void         EOTRenderTarget(CVariable* r1, bool isPerCoarse);
     virtual void AddEpilogue(llvm::ReturnInst* ret);
 
     virtual CVariable* GetURBOutputHandle()
@@ -191,7 +191,7 @@ public:
     CVariable* GetFP();
     CVariable* GetARGV();
     CVariable* GetRETV();
-    CVariable* CreateSP();
+    CVariable* CreateFPAndSP();
     CVariable* GetPrivateBase();
     void SaveStackState();
     void RestoreStackState();
@@ -343,7 +343,9 @@ public:
         llvm::Argument* Arg,
         bool ArgInCallee, // true if Arg isn't in current func
         bool useStackCall = false);
+    void UpdateSymbolMap(llvm::Value* v, CVariable* CVar);
     VISA_Type GetType(llvm::Type* type);
+    uint32_t GetNumElts(llvm::Type* type, bool isUniform = false);
 
     /// Evaluate constant expression and return the result immediate value.
     uint64_t GetConstantExpr(llvm::ConstantExpr* C);
@@ -584,6 +586,7 @@ public:
     ~CShaderProgram();
     CShader* GetOrCreateShader(SIMDMode simd, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE);
     CShader* GetShader(SIMDMode simd, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE);
+    void DeleteShader(SIMDMode simd, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE);
     CodeGenContext* GetContext() { return m_context; }
     void FillProgram(SVertexShaderKernelProgram* pKernelProgram);
     void FillProgram(SHullShaderKernelProgram* pKernelProgram);

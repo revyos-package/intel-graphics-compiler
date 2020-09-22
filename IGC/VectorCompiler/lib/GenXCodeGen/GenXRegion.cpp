@@ -44,6 +44,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/Debug.h"
 #include <unordered_map>
+#include "Probe/Assertion.h"
+
+#include "llvmWrapper/Support/TypeSize.h"
 
 using namespace llvm;
 using namespace genx;
@@ -72,7 +75,7 @@ Region Region::getWithOffset(Instruction *Inst, bool WantParentWidth)
       OperandNum = GenXIntrinsic::GenXRegion::WrIndexOperandNum;
       break;
     default:
-      llvm_unreachable("not rdregion or wrregion");
+      IGC_ASSERT_EXIT_MESSAGE(0, "not rdregion or wrregion");
       break;
   }
   BaleInfo BI;
@@ -93,18 +96,19 @@ Region::Region(Instruction *Inst, const BaleInfo &BI, bool WantParentWidth)
   // the region parameters start at.
   unsigned ArgIdx = 0;
   Value *Subregion = 0;
-  assert(isa<CallInst>(Inst));
+  IGC_ASSERT(isa<CallInst>(Inst));
   auto CallI = cast<CallInst>(Inst);
-  assert(CallI->getCalledFunction());
+  IGC_ASSERT(CallI->getCalledFunction());
   switch (GenXIntrinsic::getGenXIntrinsicID(CallI->getCalledFunction())) {
     case GenXIntrinsic::genx_rdpredregion:
-      NumElements = Inst->getType()->getVectorNumElements();
+      NumElements = cast<VectorType>(Inst->getType())->getNumElements();
       Width = NumElements;
       Offset = cast<ConstantInt>(Inst->getOperand(1))->getZExtValue();
       ElementBytes = 1;
       return;
     case GenXIntrinsic::genx_wrpredregion:
-      NumElements = Inst->getOperand(1)->getType()->getVectorNumElements();
+      NumElements =
+          cast<VectorType>(Inst->getOperand(1)->getType())->getNumElements();
       Width = NumElements;
       Offset = cast<ConstantInt>(Inst->getOperand(2))->getZExtValue();
       ElementBytes = 1;
@@ -130,17 +134,17 @@ Region::Region(Instruction *Inst, const BaleInfo &BI, bool WantParentWidth)
           Mask = 0;
       break;
     default:
-      assert(0);
+      IGC_ASSERT(0);
   }
   // Get the region parameters.
-  assert(Subregion);
+  IGC_ASSERT(Subregion);
   ElementTy = Subregion->getType();
   if (VectorType *VT = dyn_cast<VectorType>(ElementTy)) {
     ElementTy = VT->getElementType();
     NumElements = VT->getNumElements();
   }
   const DataLayout &DL = Inst->getModule()->getDataLayout();
-  assert(DL.getTypeSizeInBits(ElementTy) % genx::ByteBits  == 0);
+  IGC_ASSERT(DL.getTypeSizeInBits(ElementTy) % genx::ByteBits  == 0);
   ElementBytes = DL.getTypeSizeInBits(ElementTy) / genx::ByteBits;
   VStride = cast<ConstantInt>(Inst->getOperand(ArgIdx))->getSExtValue();
   Width = cast<ConstantInt>(Inst->getOperand(ArgIdx + 1))->getSExtValue();
@@ -148,11 +152,11 @@ Region::Region(Instruction *Inst, const BaleInfo &BI, bool WantParentWidth)
   ArgIdx += 3;
   // Get the start index.
   Value *V = Inst->getOperand(ArgIdx);
-  assert(V->getType()->getScalarType()->isIntegerTy(16) &&
+  IGC_ASSERT(V->getType()->getScalarType()->isIntegerTy(16) &&
          "region index must be i16 or vXi16 type");
 #if _DEBUG
   if (VectorType *VT = dyn_cast<VectorType>(V->getType()))
-    assert(VT->getNumElements() * Width == NumElements &&
+    IGC_ASSERT(VT->getNumElements() * Width == NumElements &&
            "vector region index size mismatch");
 #endif
   if (ConstantInt *CI = dyn_cast<ConstantInt>(V))
@@ -165,7 +169,7 @@ Region::Region(Instruction *Inst, const BaleInfo &BI, bool WantParentWidth)
       // a baled in add or add_addr, and ignore a baled in rdregion.
       if(!GenXIntrinsic::isRdRegion(Operator)) {
         // The index is variable and has a baled in or/add/sub/add_addr.
-        assert((Operator->getOpcode() == Instruction::Add   ||
+        IGC_ASSERT((Operator->getOpcode() == Instruction::Add   ||
                 Operator->getOpcode() == Instruction::Sub   ||
                 Operator->getOpcode() == Instruction::Or    ||
                 GenXIntrinsic::getGenXIntrinsicID(Operator) == GenXIntrinsic::genx_add_addr)
@@ -180,7 +184,7 @@ Region::Region(Instruction *Inst, const BaleInfo &BI, bool WantParentWidth)
           !haveNoCommonBitsSet(Operator->getOperand(0), Operator->getOperand(1),
           Operator->getModule()->getDataLayout()))
         {
-          assert(false && "or should be changed to add without any errors");
+          IGC_ASSERT(false && "or should be changed to add without any errors");
         }
 
 
@@ -354,11 +358,11 @@ unsigned Region::getLegalSize(unsigned Idx, bool Allow2D,
         // region, a row cannot cross a GRF, unless the region is contiguous.
         // Pending a proper fix, we have a temporary fix here that we disallow
         // GRF crossing completely unless the original region is a destination
-        // operand or is a 1D source operand (so GenXVisaFuncWriter can turn it
+        // operand or is a 1D source operand (so GenXCisaBuilder can turn it
         // into Nx1 instead of 1xN).  We use Allow2D as a proxy for "is source
         // operand".
         unsigned GRFsPerIndirect = 1;
-        assert(ST);
+        IGC_ASSERT(ST);
         if (ST->hasIndirectGRFCrossing() &&
           // SKL+. See if we can allow GRF crossing.
             (Allow2D || !is2D())) {
@@ -493,7 +497,7 @@ bool RdWrRegionSequence::buildFromStartWr(Instruction *ArgStartWr,
 {
   StartWr = ArgStartWr;
   auto Wr = StartWr;
-  assert(GenXIntrinsic::isWrRegion(Wr));
+  IGC_ASSERT(GenXIntrinsic::isWrRegion(Wr));
   Region TotalWrR(Wr, Baling->getBaleInfo(Wr));
   WrR = TotalWrR;
   if (TotalWrR.Mask)
@@ -607,7 +611,7 @@ bool RdWrRegionSequence::buildFromWr(Instruction *Wr, GenXBaling *Baling)
   // Remember that our sequence needs to contain Wr.
   WaitingFor = Wr;
   // Scan back to what looks like the start of the sequence.
-  assert(GenXIntrinsic::isWrRegion(Wr));
+  IGC_ASSERT(GenXIntrinsic::isWrRegion(Wr));
   StartWr = Wr;
   auto RdVal = Wr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum);
   auto Rd = dyn_cast<Instruction>(RdVal);
@@ -623,7 +627,7 @@ bool RdWrRegionSequence::buildFromWr(Instruction *Wr, GenXBaling *Baling)
         Wr->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
     if (!GenXIntrinsic::isWrRegion(Wr))
       break;
-    assert(Wr);
+    IGC_ASSERT(Wr);
     if (!Wr->hasOneUse())
       break;
     RdVal = Wr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum);
@@ -666,7 +670,7 @@ bool RdWrRegionSequence::buildFromWr(Instruction *Wr, GenXBaling *Baling)
  */
 bool RdWrRegionSequence::buildFromRd(Instruction *Rd, GenXBaling *Baling)
 {
-  assert(GenXIntrinsic::isRdRegion(Rd));
+  IGC_ASSERT(GenXIntrinsic::isRdRegion(Rd));
   if (!Rd->hasOneUse())
     return false;
   if (Rd->use_begin()->getOperandNo() != GenXIntrinsic::GenXRegion::NewValueOperandNum)
@@ -713,7 +717,7 @@ Value *RdWrRegionSequence::getRdIndex() const
     return ConstantInt::get(Type::getInt16Ty(StartWr->getContext()), 0);
   auto Rd = cast<Instruction>(
       StartWr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum));
-  assert(GenXIntrinsic::isRdRegion(Rd));
+  IGC_ASSERT(GenXIntrinsic::isRdRegion(Rd));
   return Rd->getOperand(GenXIntrinsic::GenXRegion::RdIndexOperandNum);
 }
 
@@ -738,7 +742,7 @@ Use *RdWrRegionSequence::getInputUse() const
       StartWr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum));
   if (!GenXIntrinsic::isRdRegion(Rd))
     return nullptr;
-  assert(Rd && Rd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum) == Input);
+  IGC_ASSERT(Rd && Rd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum) == Input);
   return &Rd->getOperandUse(GenXIntrinsic::GenXRegion::OldValueOperandNum);
 }
 
@@ -762,7 +766,7 @@ void RdWrRegionSequence::print(raw_ostream &OS) const
 }
 
 static Value *simplifyRegionWrite(Instruction *Inst) {
-  assert(GenXIntrinsic::isWrRegion(Inst));
+  IGC_ASSERT(GenXIntrinsic::isWrRegion(Inst));
   Value *NewVal = Inst->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum);
 
   // Replace C with A
@@ -798,7 +802,7 @@ static Value *simplifyRegionWrite(Instruction *Inst) {
 }
 
 static Value *simplifyRegionRead(Instruction *Inst) {
-  assert(GenXIntrinsic::isRdRegion(Inst));
+  IGC_ASSERT(GenXIntrinsic::isRdRegion(Inst));
   Value *Input = Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
   if (isa<UndefValue>(Input))
     return UndefValue::get(Inst->getType());
@@ -806,7 +810,9 @@ static Value *simplifyRegionRead(Instruction *Inst) {
     if (auto Splat = C->getSplatValue()) {
       Type *Ty = Inst->getType();
       if (Ty->isVectorTy())
-        Splat = ConstantVector::getSplat(Ty->getVectorNumElements(), Splat);
+        Splat = ConstantVector::getSplat(
+            IGCLLVM::getElementCount(cast<VectorType>(Ty)->getNumElements()),
+            Splat);
       return Splat;
     }
   } else if (GenXIntrinsic::isWrRegion(Input) && Input->hasOneUse()) {
@@ -914,7 +920,7 @@ llvm::genx::IsLinearVectorConstantInts(Value* v, int64_t& start, int64_t& stride
         return false;
     // Flatten the vector out into the elements array
     llvm::SmallVector<llvm::Constant*, 16> elements;
-    auto vectorLength = cv->getType()->getVectorNumElements();
+    auto vectorLength = cast<VectorType>(cv->getType())->getNumElements();
     for (unsigned i = 0; i < vectorLength; ++i)
         elements.push_back(cv->getElementAsConstant(i));
 

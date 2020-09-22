@@ -24,12 +24,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-// vim:ts=2:sw=2:et:
-
 #define DEBUG_TYPE "type-legalizer"
 #include "TypeLegalizer.h"
 #include "InstLegalChecker.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include "llvmWrapper/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -262,7 +261,13 @@ LegalizeAction InstLegalChecker::visitShuffleVectorInst(ShuffleVectorInst& I) {
     if ((Act = TL->getTypeLegalizeAction(I.getOperand(0)->getType())) != Legal)
         return Act;
     // Check the constant mask.
-    return TL->getTypeLegalizeAction(I.getMask()->getType());
+    return TL->getTypeLegalizeAction(I.
+#if LLVM_VERSION_MAJOR <= 10
+        getMask
+#else
+        getShuffleMaskForBitcode
+#endif
+        ()->getType());
 }
 
 LegalizeAction InstLegalChecker::visitExtractValueInst(ExtractValueInst& I) {

@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "PromoteStatelessToBindless.h"
+#include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Constants.h>
@@ -33,6 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/IGCIRBuilder.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Probe/Assertion.h"
+using namespace IGC::IGCMD;
 
 using namespace llvm;
 using namespace IGC;
@@ -44,18 +46,29 @@ using namespace GenISAIntrinsic;
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(PromoteStatelessToBindless, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_END(PromoteStatelessToBindless, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char PromoteStatelessToBindless::ID = 0;
 
 PromoteStatelessToBindless::PromoteStatelessToBindless()
-    : FunctionPass(ID)
+    : FunctionPass(ID),
+    m_PrintfBuffer(nullptr)
 {
     initializePromoteStatelessToBindlessPass(*PassRegistry::getPassRegistry());
 }
 
 bool PromoteStatelessToBindless::runOnFunction(Function& F)
 {
+    CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    auto ClContext = static_cast<OpenCLProgramContext*>(ctx);
+
+    m_AccessToSrcPtrMap.clear();
+    m_AddressUsedSrcPtrMap.clear();
+    if (!ClContext->m_InternalOptions.UseBindlessPrintf)
+    {
+        CheckPrintfBuffer(F);
+    }
     visit(F);
     PromoteStatelessToBindlessBuffers(F);
 
@@ -69,6 +82,21 @@ void PromoteStatelessToBindless::visitInstruction(Instruction& I)
     if (bufptr && bufptr->getType()->isPointerTy())
     {
         GetAccessInstToSrcPointerMap(&I, bufptr);
+    }
+}
+
+void PromoteStatelessToBindless::CheckPrintfBuffer(Function& F)
+{
+    MetaDataUtils* MdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    ImplicitArgs implicitArgs(F, MdUtils);
+
+    if (implicitArgs.isImplicitArgExist(ImplicitArg::PRINTF_BUFFER))
+    {
+        m_PrintfBuffer = implicitArgs.getArgInFunc(F, ImplicitArg::PRINTF_BUFFER);
+    }
+    else
+    {
+        m_PrintfBuffer = nullptr;
     }
 }
 
@@ -92,6 +120,9 @@ void PromoteStatelessToBindless::GetAccessInstToSrcPointerMap(Instruction* inst,
             case GenISAIntrinsic::GenISA_simdBlockRead:
             case GenISAIntrinsic::GenISA_simdBlockWrite:
                 break;
+            case GenISAIntrinsic::GenISA_intatomicrawA64:
+                // Ignore a buffer in this intrinsic, keep it stateless.
+                return;
             default:
                 IGC_ASSERT_MESSAGE(0, "Unsupported Instruction");
                 return;
@@ -101,7 +132,8 @@ void PromoteStatelessToBindless::GetAccessInstToSrcPointerMap(Instruction* inst,
             return;
     }
 
-    Value* srcPtr = IGC::TracePointerSource(resourcePtr);
+    std::vector<Value*> tempList;
+    Value* srcPtr = IGC::TracePointerSource(resourcePtr, false, true, true, tempList);
 
     if (!srcPtr ||
         !srcPtr->getType()->isPointerTy() ||
@@ -112,30 +144,50 @@ void PromoteStatelessToBindless::GetAccessInstToSrcPointerMap(Instruction* inst,
         return;
     }
 
+    if (m_PrintfBuffer && srcPtr == m_PrintfBuffer)
+    {
+        // Process PrintfBuffer separately. Printf implementation required operations with
+        // printf buffer address (through atomic add), see printf implementation in
+        // OpenCLPrintfResolution.cpp. Currently keep printf implementation as stateless and
+        // thus skip printf buffer for now.
+        return;
+    }
+
+    // Save the instruction, which makes access (load/store/intrinsic) to the buffer
     m_AccessToSrcPtrMap[inst] = srcPtr;
+    // Save the instruction, which generate an address of the buffer. This is the
+    // instruction right before the last one. The last one has to be the buffer itself.
+    if (tempList.size() > 1)
+    {
+        m_AddressUsedSrcPtrMap[tempList[tempList.size()-2]] = srcPtr;
+    }
+    else
+    {
+        m_AddressUsedSrcPtrMap[inst] = srcPtr;
+    }
 }
 
 void PromoteStatelessToBindless::PromoteStatelessToBindlessBuffers(Function& F) const
 {
     ModuleMetaData* modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
-    for (auto inst : m_AccessToSrcPtrMap)
+    // Modify the reference to the buffer not through all users but only in instructions
+    // which are used in accesing (load/store) the buffer.
+    for (auto inst : m_AddressUsedSrcPtrMap)
     {
+        Instruction* accessInst = cast<Instruction>(inst.first);
         Argument* srcPtr = cast<Argument>(inst.second);
-        if (!srcPtr->use_empty())
+        Value* nullSrcPtr = ConstantPointerNull::get(cast<PointerType>(srcPtr->getType()));
+        accessInst->replaceUsesOfWith(srcPtr, nullSrcPtr);
+        if (modMD->FuncMD.find(&F) != modMD->FuncMD.end())
         {
-            Value* nullSrcPtr = ConstantPointerNull::get(cast<PointerType>(srcPtr->getType()));
-            srcPtr->replaceAllUsesWith(nullSrcPtr);
-            if (modMD->FuncMD.find(&F) != modMD->FuncMD.end())
+            FunctionMetaData* funcMD = &modMD->FuncMD[&F];
+            ResourceAllocMD* resourceAlloc = &funcMD->resAllocMD;
+            ArgAllocMD* argInfo = &resourceAlloc->argAllocMDList[srcPtr->getArgNo()];
+            IGC_ASSERT_MESSAGE((size_t)srcPtr->getArgNo() < resourceAlloc->argAllocMDList.size(), "ArgAllocMD List Out of Bounds");
+            if (argInfo->type == ResourceTypeEnum::UAVResourceType)
             {
-                FunctionMetaData* funcMD = &modMD->FuncMD[&F];
-                ResourceAllocMD* resourceAlloc = &funcMD->resAllocMD;
-                ArgAllocMD* argInfo = &resourceAlloc->argAllocMDList[srcPtr->getArgNo()];
-                IGC_ASSERT_MESSAGE((size_t)srcPtr->getArgNo() < resourceAlloc->argAllocMDList.size(), "ArgAllocMD List Out of Bounds");
-                if (argInfo->type == ResourceTypeEnum::UAVResourceType)
-                {
-                    // Update metadata to show bindless resource type
-                    argInfo->type = ResourceTypeEnum::BindlessUAVResourceType;
-                }
+                // Update metadata to show bindless resource type
+                argInfo->type = ResourceTypeEnum::BindlessUAVResourceType;
             }
         }
     }

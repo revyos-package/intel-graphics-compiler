@@ -330,10 +330,14 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         {
             ss << "FastStage1";
         }
+        else if (m_cgFlag.getValue() == FLAG_CG_STAGE1_BEST_PERF)
+        {
+            ss << "BestStage1";
+        }
         else
         {
-            IGC_ASSERT(m_cgFlag.getValue() == FLAG_CG_STAGE1_BEST_PERF);
-            ss << "BestStage1";
+            IGC_ASSERT(m_cgFlag.getValue() == FLAG_CG_STAGE1_FASTEST_COMPILE);
+            ss << "FastestStage1";
         }
 
         underscore = true;
@@ -368,7 +372,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
                 << "SinglePatch";
             underscore = true;
         }
-        if(m_ShaderMode.getValue() == ShaderDispatchMode::DUAL_PATCH)
+        if (m_ShaderMode.getValue() == ShaderDispatchMode::DUAL_PATCH)
         {
             ss << (underscore ? "_" : "")
                 << "DualPatch";
@@ -407,6 +411,16 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         ss << "." << m_extension.getValue();
     }
     return ss.str();
+}
+
+std::string DumpName::GetKernelName() const
+{
+    std::string kernelName = "";
+    if (m_postfixStr.hasValue() && !m_postfixStr.getValue().empty())
+    {
+        kernelName = m_postfixStr.getValue();
+    }
+    return kernelName;
 }
 
 std::string DumpName::str() const

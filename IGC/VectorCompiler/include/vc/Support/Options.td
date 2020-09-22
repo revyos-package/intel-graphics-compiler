@@ -56,6 +56,10 @@ let Flags = [ApiOption] in {
 def vc_codegen : Flag<["-"], "vc-codegen">,
   HelpText<"Enable vector codegenerator">;
 
+// Generate debug info
+def vc_emit_debug : Flag<["-"], "g">,
+  HelpText<"Enable generation of debug information">;
+
 def optimize : Separate<["-"], "optimize">,
   HelpText<"Set optimization level to either 'none' or 'full'">,
   MetaVarName<"<level>">;
@@ -72,6 +76,20 @@ def no_vector_decomposition_old : Flag<["-"], "no_vector_decomposition">,
   let Flags = [ApiOption, IgcmcApiOption];
 }
 
+def Xfinalizer : Separate<["-"], "Xfinalizer">,
+  HelpText<"Pass <arg> to the visa finalizer">, MetaVarName<"<arg>">;
+
+def gtpin_rera : Flag<["-"], "ze-gtpin-rera">,
+  HelpText<"Enables vISA re_ra interface for gtpin structure generation">;
+
+def gtpin_grf_info : Flag<["-"], "ze-gtpin-grf-info">,
+  HelpText<"Enable vISA grf-info interface for gtpin structure generation">;
+
+def gtpin_scratch_area_size : Separate<["-"], "ze-gtpin-scratch-area-size">,
+  HelpText<"Set gtpin scratch area size">;
+
+def gtpin_scratch_area_size_eq : Joined<["-"], "ze-gtpin-scratch-area-size=">,
+  Alias<gtpin_scratch_area_size>, HelpText<"Alias for -ze-gtpin-scratch-area-size">;
 }
 // }} Api options
 
@@ -97,6 +115,10 @@ def dump_llvm_ir : Flag<["-"], "dump-llvm-ir">,
   HelpText<"Dump llvm IR after SPIRV reading, optimizations and codegen">;
 def dump_isa_binary : Flag<["-"], "dump-isa-binary">,
   HelpText<"Dump isa binary after finalization pass">;
+def dump_asm : Flag<["-"], "dump-asm">,
+  HelpText<"Dump assembly (visaasm, asm, etc.)">;
+def mdump_asm : Flag<["-"], "mdump_asm">,
+  Alias<dump_asm>, HelpText<"Alias for -dump-asm">;
 
 def help : Flag<["-"], "help">,
   HelpText<"Display available API options">;
@@ -113,10 +135,18 @@ def target_features : Separate<["-"], "target-features">,
 def target_features_eq : Joined<["-"], "target-features=">,
   Alias<target_features>, HelpText<"Alias for -target_features">;
 
-def runtime : Separate<["-"], "runtime">,
+def binary_format : Separate<["-"], "binary-format">,
+  HelpText<"Set in which format should be generated binary; values: 'cm', 'ocl' or 'ze'">;
+def binary_format_eq : Joined<["-"], "binary-format=">,
+  Alias<binary_format>, HelpText<"Alias for -binary-format <value>">;
+
+def runtime : Separate<["-"], "runtime">, Alias<binary_format>,
   HelpText<"Set runtime for which binary should be generated; values: 'ocl' or 'cm'">;
 def runtime_eq : Joined<["-"], "runtime=">,
-  Alias<runtime>, HelpText<"Alias for -runtime <value>">;
+  Alias<binary_format>, HelpText<"Alias for -runtime <value>">;
+
+def ftime_report : Flag<["-"], "ftime-report">,
+  HelpText<"Print timing summary of each stage of compilation">;
 
 }
 // }} Internal options

@@ -102,14 +102,14 @@ private:
 
   // Only generate warning when callable is used in the middle of the kernel
   bool WarnCallable;
+  // Some targets do not support i64 ops natively, we have an option to emulate
+  bool EmulateLongLong;
 
   // True if codegenerating for OCL runtime.
   bool OCLRuntime;
 
   // Shows which surface should we use for stack
   PreDefined_Surface StackSurf;
-  // Limit in bytes for stack purposes
-  unsigned StackSurfMaxSize;
 
 public:
   // This constructor initializes the data members to match that
@@ -117,9 +117,6 @@ public:
   //
   GenXSubtarget(const Triple &TT, const std::string &CPU,
                 const std::string &FS);
-
-  // hasLongLong - true for Gen8+
-  bool hasLongLong() { return HasLongLong; }
 
   unsigned getGRFWidth() const { return 32; }
 
@@ -172,7 +169,8 @@ public:
   bool isICLLP() const { return GenXVariant == GENX_ICLLP; }
   /// * isTGLLP - true if target is TGL LP
   bool isTGLLP() const { return GenXVariant == GENX_TGLLP; }
-
+  /// * emulateLongLong - true if i64 emulation is requested
+  bool emulateLongLong() const { return EmulateLongLong; }
   /// * emulateIDivRem - true if emulates integer division and reminder.
   bool emulateIDivRem() const { return GenXVariant >= GENX_TGLLP; }
 
@@ -260,10 +258,6 @@ public:
 
   /// * stackSurface - return a surface that should be used for stack.
   PreDefined_Surface stackSurface() const { return StackSurf; }
-
-  /// * stackSurfaceMaxSize - return available space in bytes for stack
-  /// purposes.
-  unsigned stackSurfaceMaxSize() const { return StackSurfMaxSize; }
 };
 
 } // End llvm namespace

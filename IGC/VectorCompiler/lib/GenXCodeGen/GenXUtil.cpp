@@ -32,6 +32,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenX.h"
 #include "GenXIntrinsics.h"
 #include "GenXRegion.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -46,6 +48,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
+#include "Probe/Assertion.h"
 #include <iterator>
 
 using namespace llvm;
@@ -123,21 +126,28 @@ CallInst *genx::createAddAddr(Value *Lhs, Value *Rhs, const Twine &Name,
  * %Name.unifiedret = call Ty @llvm.ssa_copy(Ty undef)
  */
 CallInst *genx::createUnifiedRet(Type *Ty, const Twine &Name, Module *M) {
-  assert(Ty && M && "wrong arguments");
+  IGC_ASSERT(Ty && M && "wrong arguments");
   auto G = Intrinsic::getDeclaration(M, Intrinsic::ssa_copy, Ty);
   return CallInst::Create(G, UndefValue::get(Ty), Name + ".unifiedret",
                           static_cast<Instruction *>(nullptr));
 }
 
 /***********************************************************************
- * getPredicateConstantAsInt : get an i1 or vXi1 constant's value as a single integer
+ * getPredicateConstantAsInt : get an i1 or vXi1 constant's value as a single
+ * integer
+ *
+ * Elements of constant \p C are encoded as least significant bits of the
+ * result. For scalar case only LSB of the result is set to corresponding value.
  */
-unsigned genx::getPredicateConstantAsInt(Constant *C)
-{
+unsigned genx::getPredicateConstantAsInt(const Constant *C) {
+  IGC_ASSERT(C->getType()->isIntOrIntVectorTy(1) &&
+         "wrong argument: constant of i1 or Nxi1 type was expected");
   if (auto CI = dyn_cast<ConstantInt>(C))
     return CI->getZExtValue(); // scalar
   unsigned Bits = 0;
   unsigned NumElements = cast<VectorType>(C->getType())->getNumElements();
+  IGC_ASSERT(NumElements <= sizeof(Bits) * CHAR_BIT &&
+         "vector has too much elements, it won't fit into Bits");
   for (unsigned i = 0; i != NumElements; ++i) {
     auto El = C->getAggregateElement(i);
     if (!isa<UndefValue>(El))
@@ -153,7 +163,7 @@ Constant *genx::getConstantSubvector(Constant *V,
     unsigned StartIdx, unsigned Size)
 {
   Type *ElTy = cast<VectorType>(V->getType())->getElementType();
-  Type *RegionTy = VectorType::get(ElTy, Size);
+  Type *RegionTy = IGCLLVM::FixedVectorType::get(ElTy, Size);
   if (isa<UndefValue>(V))
     V = UndefValue::get(RegionTy);
   else if (isa<ConstantAggregateZero>(V))
@@ -173,7 +183,7 @@ Constant *genx::getConstantSubvector(Constant *V,
  */
 Constant *genx::concatConstants(Constant *C1, Constant *C2)
 {
-  assert(C1->getType()->getScalarType() == C2->getType()->getScalarType());
+  IGC_ASSERT(C1->getType()->getScalarType() == C2->getType()->getScalarType());
   Constant *CC[] = { C1, C2 };
   SmallVector<Constant *, 8> Vec;
   bool AllUndef = true;
@@ -209,7 +219,7 @@ Constant *genx::concatConstants(Constant *C1, Constant *C2)
 Instruction *genx::findClosestCommonDominator(DominatorTree *DT,
     ArrayRef<Instruction *> Insts)
 {
-  assert(!Insts.empty());
+  IGC_ASSERT(!Insts.empty());
   SmallVector<InstScanner, 8> InstScanners;
   // Find the closest common dominating basic block.
   Instruction *Inst0 = Insts[0];
@@ -345,11 +355,14 @@ bool genx::isIntNot(Instruction *Inst)
  */
 int ShuffleVectorAnalyzer::getAsSlice()
 {
-  unsigned WholeWidth = SI->getOperand(0)->getType()->getVectorNumElements();
+  unsigned WholeWidth =
+      cast<VectorType>(SI->getOperand(0)->getType())->getNumElements();
   Constant *Selector = cast<Constant>(SI->getOperand(2));
-  unsigned Width = SI->getType()->getVectorNumElements();
-  unsigned StartIdx = cast<ConstantInt>(
-      Selector->getAggregateElement((unsigned)0))->getZExtValue();
+  unsigned Width = cast<VectorType>(SI->getType())->getNumElements();
+  auto *Aggr = Selector->getAggregateElement(0u);
+  if (isa<UndefValue>(Aggr))
+    return -1; // operand 0 is undef value
+  unsigned StartIdx = cast<ConstantInt>(Aggr)->getZExtValue();
   if (StartIdx >= WholeWidth)
     return -1; // start index beyond operand 0
   unsigned SliceWidth;
@@ -381,7 +394,8 @@ bool ShuffleVectorAnalyzer::isReplicatedSlice() const {
 
   // Slice should not touch second operand.
   auto MaxIndex = static_cast<size_t>(MaskVals.back());
-  if (MaxIndex >= SI->getOperand(0)->getType()->getVectorNumElements())
+  if (MaxIndex >=
+      cast<VectorType>(SI->getOperand(0)->getType())->getNumElements())
     return false;
 
   // Find first non-one difference.
@@ -410,13 +424,15 @@ bool ShuffleVectorAnalyzer::isReplicatedSlice() const {
 // 2 operands it points. The operand is returned.
 static Value *getOperandByMaskValue(const ShuffleVectorInst &SI,
                                     int MaskValue) {
-  assert(MaskValue >= 0 && "invalid index");
-  int FirstOpSize = SI.getOperand(0)->getType()->getVectorNumElements();
+  IGC_ASSERT(MaskValue >= 0 && "invalid index");
+  int FirstOpSize =
+      cast<VectorType>(SI.getOperand(0)->getType())->getNumElements();
   if (MaskValue < FirstOpSize)
     return SI.getOperand(0);
   else {
-    int SecondOpSize = SI.getOperand(1)->getType()->getVectorNumElements();
-    assert(MaskValue < FirstOpSize + SecondOpSize && "invalid index");
+    int SecondOpSize =
+        cast<VectorType>(SI.getOperand(1)->getType())->getNumElements();
+    IGC_ASSERT(MaskValue < FirstOpSize + SecondOpSize && "invalid index");
     return SI.getOperand(1);
   }
 }
@@ -442,7 +458,8 @@ matchOneElemRegion(const ShuffleVectorInst &SI, int MaskVal) {
   if (Init.Op == SI.getOperand(0))
     Init.R.Offset = MaskVal * Init.R.ElementBytes;
   else {
-    auto FirstOpSize = SI.getOperand(0)->getType()->getVectorNumElements();
+    auto FirstOpSize =
+        cast<VectorType>(SI.getOperand(0)->getType())->getNumElements();
     Init.R.Offset = (MaskVal - FirstOpSize) * Init.R.ElementBytes;
   }
   return Init;
@@ -456,7 +473,8 @@ template <typename ForwardIter, typename OutputIter>
 void makeSVIIndexesOperandIndexes(const ShuffleVectorInst &SI,
                                   const Value &Operand, ForwardIter FirstIt,
                                   ForwardIter LastIt, OutputIter OutIt) {
-  int FirstOpSize = SI.getOperand(0)->getType()->getVectorNumElements();
+  int FirstOpSize =
+      cast<VectorType>(SI.getOperand(0)->getType())->getNumElements();
   if (&Operand == SI.getOperand(0)) {
     std::transform(FirstIt, LastIt, OutIt, [FirstOpSize](int MaskVal) {
       if (MaskVal >= FirstOpSize)
@@ -465,7 +483,7 @@ void makeSVIIndexesOperandIndexes(const ShuffleVectorInst &SI,
     });
     return;
   }
-  assert(&Operand == SI.getOperand(1) &&
+  IGC_ASSERT(&Operand == SI.getOperand(1) &&
          "wrong argument: a shufflevector operand was expected");
   std::transform(FirstIt, LastIt, OutIt,
                  [FirstOpSize](int MaskVal) { return MaskVal - FirstOpSize; });
@@ -484,7 +502,7 @@ void makeSVIIndexesOperandIndexes(const ShuffleVectorInst &SI,
 template <typename ForwardIter>
 Region matchVectorRegionByIndexes(Region FirstElemRegion, ForwardIter FirstIt,
                                   ForwardIter LastIt) {
-  assert(FirstIt != LastIt && "the range must contain at least 1 element");
+  IGC_ASSERT(FirstIt != LastIt && "the range must contain at least 1 element");
 
   if (std::distance(FirstIt, LastIt) == 1)
     return FirstElemRegion;
@@ -499,7 +517,7 @@ Region matchVectorRegionByIndexes(Region FirstElemRegion, ForwardIter FirstIt,
     ++NewRowIt;
   }
   int Width = std::distance(FirstIt, NewRowIt);
-  assert(Width > 0 && "should be at least 1 according to algorithm");
+  IGC_ASSERT(Width > 0 && "should be at least 1 according to algorithm");
   if (Width == 1)
     // Stride doesn't play role when the Width is 1.
     // Also it prevents from writing to big value in the region.
@@ -524,12 +542,12 @@ Region matchVectorRegionByIndexes(Region FirstElemRegion, ForwardIter FirstIt,
 template <typename ForwardIter>
 Region matchMatrixRegionByIndexes(Region FirstRowRegion, ForwardIter FirstIt,
                                   ForwardIter LastIt) {
-  assert(FirstRowRegion.NumElements == FirstRowRegion.Width &&
+  IGC_ASSERT(FirstRowRegion.NumElements == FirstRowRegion.Width &&
          FirstRowRegion.VStride == 0 &&
          "wrong argunent: vector region (with no vstride) was expected");
 
-//  TODO: rewrite this assert to remove VS build error
-//  assert(std::distance(FirstIt, LastIt) >= FirstRowRegion.Width &&
+//  TODO: rewrite this assertion statement to remove VS build error
+//  IGC_ASSERT(std::distance(FirstIt, LastIt) >= FirstRowRegion.Width &&
 //         "wrong argument: number of indexes must be at least equal to region "
 //         "width");
 
@@ -571,7 +589,7 @@ Region matchMatrixRegionByIndexes(Region FirstRowRegion, ForwardIter FirstIt,
 //                             <3;2,1> vstride=3, width=2, stride=1
 ShuffleVectorAnalyzer::OperandRegionInfo
 ShuffleVectorAnalyzer::getMaskRegionPrefix(int StartIdx) {
-  assert(StartIdx >= 0 && 
+  IGC_ASSERT(StartIdx >= 0 && 
          StartIdx < static_cast<int>(SI->getShuffleMask().size()) &&
          "Start index is out of bound");
 
@@ -582,10 +600,15 @@ ShuffleVectorAnalyzer::getMaskRegionPrefix(int StartIdx) {
   if (StartIdx == MaskVals.size() - 1)
     return Res;
 
-  makeSVIIndexesOperandIndexes(*SI, *Res.Op, StartIt, MaskVals.end(), StartIt);
+  std::vector<int>
+      SubMask;
+  makeSVIIndexesOperandIndexes(*SI, *Res.Op, StartIt, MaskVals.end(),
+                               std::back_inserter(SubMask));
 
-  Res.R = matchVectorRegionByIndexes(std::move(Res.R), StartIt, MaskVals.end());
-  Res.R = matchMatrixRegionByIndexes(std::move(Res.R), StartIt, MaskVals.end());
+  Res.R = matchVectorRegionByIndexes(std::move(Res.R), SubMask.begin(),
+                                     SubMask.end());
+  Res.R = matchMatrixRegionByIndexes(std::move(Res.R), SubMask.begin(),
+                                     SubMask.end());
   return Res;
 }
 
@@ -603,8 +626,9 @@ int ShuffleVectorAnalyzer::getAsUnslice()
     return -1;
   Constant *MaskVec = cast<Constant>(SI->getOperand(2));
   // Find prefix of undef or elements from operand 0.
-  unsigned OldWidth = SI2->getType()->getVectorNumElements(); 
-  unsigned NewWidth = SI2->getOperand(0)->getType()->getVectorNumElements(); 
+  unsigned OldWidth = cast<VectorType>(SI2->getType())->getNumElements();
+  unsigned NewWidth =
+      cast<VectorType>(SI2->getOperand(0)->getType())->getNumElements();
   unsigned Prefix = 0;
   for (;; ++Prefix) {
     if (Prefix == OldWidth - NewWidth)
@@ -647,6 +671,24 @@ int ShuffleVectorAnalyzer::getAsUnslice()
   return Prefix;
 }
 
+constexpr int UndefMaskElem = -1;
+
+/***********************************************************************
+ * extension of ShuffleVectorInst::isZeroEltSplatMask method
+ */
+static int nEltSplatMask(ArrayRef<int> Mask) {
+  int Elt = UndefMaskElem;
+  for (int i = 0, NumElts = Mask.size(); i < NumElts; ++i) {
+    if (Mask[i] == UndefMaskElem)
+      continue;
+    if ((Elt != UndefMaskElem) && (Mask[i] != Mask[Elt]))
+      return UndefMaskElem;
+    if ((Mask[i] != UndefMaskElem) && (Elt == UndefMaskElem))
+      Elt = i;
+  }
+  return Elt;
+}
+
 /***********************************************************************
  * ShuffleVectorAnalyzer::getAsSplat : if shufflevector is a splat, get the
  *      splatted input, with its vector index if the input is a vector
@@ -655,14 +697,20 @@ ShuffleVectorAnalyzer::SplatInfo ShuffleVectorAnalyzer::getAsSplat()
 {
   Value *InVec1 = SI->getOperand(0);
   Value *InVec2 = SI->getOperand(1);
-  Constant *MaskVec = cast<Constant>(SI->getOperand(2));
-  ConstantInt *IdxVal = dyn_cast_or_null<ConstantInt>(MaskVec->getSplatValue());
-  if (!IdxVal)
-    return SplatInfo(0, 0);
+
+  SmallVector<int, 16> MaskAsInts;
+  SI->getShuffleMask(MaskAsInts);
+  int ShuffleIdx = nEltSplatMask(MaskAsInts);
+  if (ShuffleIdx == UndefMaskElem)
+    return SplatInfo(nullptr, 0);
+
+  // We have position of shuffleindex as output, turn it to real index
+  ShuffleIdx = MaskAsInts[ShuffleIdx];
+
   // The mask is a splat. Work out which element of which input vector
   // it refers to.
-  unsigned ShuffleIdx = IdxVal->getSExtValue();
-  unsigned InVec1NumElements = InVec1->getType()->getVectorNumElements();
+  int InVec1NumElements =
+      cast<VectorType>(InVec1->getType())->getNumElements();
   if (ShuffleIdx >= InVec1NumElements) {
     ShuffleIdx -= InVec1NumElements;
     InVec1 = InVec2;
@@ -694,14 +742,14 @@ Value *ShuffleVectorAnalyzer::serialize() {
     V = Op1;
 
   // Expand or shink the initial value if sizes mismatch.
-  unsigned NElts = SI->getType()->getVectorNumElements();
-  unsigned M = V->getType()->getVectorNumElements();
+  unsigned NElts = cast<VectorType>(SI->getType())->getNumElements();
+  unsigned M = cast<VectorType>(V->getType())->getNumElements();
   bool SkipBase = true;
   if (M != NElts) {
     if (auto C = dyn_cast<Constant>(V)) {
       SmallVector<Constant *, 16> Vals;
       for (unsigned i = 0; i < NElts; ++i) {
-        Type *Ty = C->getType()->getVectorElementType();
+        Type *Ty = cast<VectorType>(C->getType())->getElementType();
         Constant *Elt =
             (i < M) ? C->getAggregateElement(i) : UndefValue::get(Ty);
         Vals.push_back(Elt);
@@ -743,16 +791,16 @@ unsigned ShuffleVectorAnalyzer::getSerializeCost(unsigned i) {
   unsigned Cost = 0;
   Value *Op = SI->getOperand(i);
   if (!isa<Constant>(Op) && Op->getType() != SI->getType())
-    Cost += Op->getType()->getVectorNumElements();
+    Cost += cast<VectorType>(Op->getType())->getNumElements();
 
-  unsigned NElts = SI->getType()->getVectorNumElements();
+  unsigned NElts = cast<VectorType>(SI->getType())->getNumElements();
   for (unsigned j = 0; j < NElts; ++j) {
     // Undef index returns -1.
     int idx = SI->getMaskValue(j);
     if (idx < 0)
       continue;
     // Count the number of elements out of place.
-    unsigned M = Op->getType()->getVectorNumElements();
+    unsigned M = cast<VectorType>(Op->getType())->getNumElements();
     if ((i == 0 && idx != j) || (i == 1 && idx != j + M))
       Cost++;
   }
@@ -769,11 +817,12 @@ IVSplitter::IVSplitter(Instruction &Inst, unsigned* BaseOpIdx) : Inst(Inst) {
 
   Len = 1;
   if (ETy->isVectorTy()) {
-    Len = ETy->getVectorNumElements();
-    ETy = ETy->getVectorElementType();
+    Len = cast<VectorType>(ETy)->getNumElements();
+    ETy = cast<VectorType>(ETy)->getElementType();
   }
 
-  VI32Ty = VectorType::get(ETy->getInt32Ty(Inst.getContext()), Len * 2);
+  VI32Ty = IGCLLVM::FixedVectorType::get(ETy->getInt32Ty(Inst.getContext()),
+                                         Len * 2);
 }
 
 Region IVSplitter::createSplitRegion(Type *Ty, IVSplitter::RegionType RT) {
@@ -795,7 +844,7 @@ Region IVSplitter::createSplitRegion(Type *Ty, IVSplitter::RegionType RT) {
     R.Offset = (RT == RegionType::FirstHalf) ? 0 : 4 * Len;
   }
   else {
-    llvm_unreachable("incorrect region type");
+    IGC_ASSERT_EXIT_MESSAGE(0, "incorrect region type");
   }
   return R;
 }
@@ -807,7 +856,7 @@ std::pair<Value*, Value*> IVSplitter::splitValue(Value& Val, RegionType RT1,
   const auto &DL = Inst.getDebugLoc();
   auto BaseName = Inst.getName();
 
-  assert(Val.getType()->getScalarType()->isIntegerTy(64));
+  IGC_ASSERT(Val.getType()->getScalarType()->isIntegerTy(64));
   auto *ShreddedVal = new BitCastInst(&Val, VI32Ty, BaseName + ".iv32cast", &Inst);
   ShreddedVal->setDebugLoc(DL);
 
@@ -821,7 +870,7 @@ std::pair<Value*, Value*> IVSplitter::splitValue(Value& Val, RegionType RT1,
 
 IVSplitter::LoHiSplit IVSplitter::splitOperandLoHi(unsigned SourceIdx) {
 
-  assert(Inst.getNumOperands() > SourceIdx);
+  IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
   auto Splitted =  splitValue(*Inst.getOperand(SourceIdx),
                               RegionType::LoRegion, ".LoSplit",
                               RegionType::HiRegion, ".HiSplit");
@@ -830,7 +879,7 @@ IVSplitter::LoHiSplit IVSplitter::splitOperandLoHi(unsigned SourceIdx) {
 }
 IVSplitter::HalfSplit IVSplitter::splitOperandHalf(unsigned SourceIdx) {
 
-  assert(Inst.getNumOperands() > SourceIdx);
+  IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
   auto Splitted =  splitValue(*Inst.getOperand(SourceIdx),
                               RegionType::FirstHalf, ".FirstHalf",
                               RegionType::SecondHalf, ".SecondHalf");
@@ -842,8 +891,8 @@ Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
                                 bool Scalarize) {
   const auto &DL = Inst.getDebugLoc();
 
-  assert(V1.getType() == V2.getType() && V1.getType()->isVectorTy() &&
-         V1.getType()->getVectorElementType()->isIntegerTy(32));
+  IGC_ASSERT(V1.getType() == V2.getType() && V1.getType()->isVectorTy() &&
+             cast<VectorType>(V1.getType())->getElementType()->isIntegerTy(32));
 
   // create the write-regions
   auto R1 = createSplitRegion(VI32Ty, RT1);
@@ -853,12 +902,13 @@ Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
   auto R2 = createSplitRegion(VI32Ty, RT2);
   auto *W2 = R2.createWrRegion(W1, &V2, Name + ".joined", &Inst, DL);
 
-  auto *V64Ty = VectorType::get(ETy->getInt64Ty(Inst.getContext()), Len);
+  auto *V64Ty =
+      IGCLLVM::FixedVectorType::get(ETy->getInt64Ty(Inst.getContext()), Len);
   auto *Result = new BitCastInst(W2, V64Ty, Name, &Inst);
   Result->setDebugLoc(DL);
 
   if (Scalarize) {
-    assert(Result->getType()->getVectorNumElements() == 1);
+    IGC_ASSERT(cast<VectorType>(Result->getType())->getNumElements() == 1);
     Result = new BitCastInst(Result, ETy->getInt64Ty(Inst.getContext()),
                              Name + ".recast", &Inst);
   }
@@ -868,7 +918,7 @@ Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
 Value *IVSplitter::combineLoHiSplit(const LoHiSplit &Split, const Twine &Name,
                                     bool Scalarize) {
 
-  assert(Split.Lo && Split.Hi);
+  IGC_ASSERT(Split.Lo && Split.Hi);
 
   return combineSplit(*Split.Lo, *Split.Hi, RegionType::LoRegion,
                       RegionType::HiRegion, Name, Scalarize);
@@ -876,7 +926,7 @@ Value *IVSplitter::combineLoHiSplit(const LoHiSplit &Split, const Twine &Name,
 
 Value *IVSplitter::combineHalfSplit(const HalfSplit &Split, const Twine &Name,
                                     bool Scalarize) {
-  assert(Split.Left && Split.Right);
+  IGC_ASSERT(Split.Left && Split.Right);
 
   return combineSplit(*Split.Left, *Split.Right, RegionType::FirstHalf,
                       RegionType::SecondHalf, Name, Scalarize);
@@ -898,13 +948,13 @@ void genx::adjustPhiNodesForBlockRemoval(BasicBlock *Succ, BasicBlock *BB)
       break;
     // For this phi node, get the incoming for BB.
     int Idx = Phi->getBasicBlockIndex(BB);
-    assert(Idx >= 0);
+    IGC_ASSERT(Idx >= 0);
     Value *Incoming = Phi->getIncomingValue(Idx);
     // Iterate through BB's predecessors. For the first one, replace the
     // incoming block with the predecessor. For subsequent ones, we need
     // to add new phi incomings.
     auto pi = pred_begin(BB), pe = pred_end(BB);
-    assert(pi != pe);
+    IGC_ASSERT(pi != pe);
     Phi->setIncomingBlock(Idx, *pi);
     for (++pi; pi != pe; ++pi)
       Phi->addIncoming(Incoming, *pi);
@@ -1065,7 +1115,7 @@ void genx::LayoutBlocks(Function &func, LoopInfo &LI)
         if (blk != hd) {
           // move the block to the beginning of the loop 
           auto insp = InsPos[hd];
-          assert(insp);
+          IGC_ASSERT(insp);
           if (blk != insp) {
             blk->moveBefore(insp);
             InsPos[hd] = blk;
@@ -1075,7 +1125,7 @@ void genx::LayoutBlocks(Function &func, LoopInfo &LI)
           // move the entire loop to the beginning of
           // the parent loop
           auto LoopStart = InsPos[hd];
-          assert(LoopStart);
+          IGC_ASSERT(LoopStart);
           auto PaLoop = curLoop->getParentLoop();
           auto PaHd = PaLoop ? PaLoop->getHeader() : entry;
           auto insp = InsPos[PaHd];
@@ -1144,7 +1194,7 @@ void genx::LayoutBlocks(Function &func, LoopInfo &LI)
            predIter != predEnd; ++predIter) {
         llvm::BasicBlock *pred = *predIter;
         llvm::BasicBlock *predPred = pred->getSinglePredecessor();
-        assert(predPred);
+        IGC_ASSERT(predPred);
         pred->moveAfter(predPred);
       }
     }
@@ -1183,7 +1233,7 @@ void genx::LayoutBlocks(Function &func)
 //
 // When a single g_load is being bitcast'ed to different types, clone g_loads.
 bool genx::normalizeGloads(Instruction *Inst) {
-  assert(isa<LoadInst>(Inst));
+  IGC_ASSERT(isa<LoadInst>(Inst));
   auto LI = cast<LoadInst>(Inst);
   if (getUnderlyingGlobalVariable(LI->getPointerOperand()) == nullptr)
     return false;
@@ -1243,7 +1293,7 @@ bool genx::normalizeGloads(Instruction *Inst) {
 
 // fold bitcast instruction into Store by change pointer type.
 Instruction *genx::foldBitCastInst(Instruction *Inst) {
-  assert(isa<LoadInst>(Inst) || isa<StoreInst>(Inst));
+  IGC_ASSERT(isa<LoadInst>(Inst) || isa<StoreInst>(Inst));
   auto LI = dyn_cast<LoadInst>(Inst);
   auto SI = dyn_cast<StoreInst>(Inst);
 
@@ -1269,7 +1319,7 @@ Instruction *genx::foldBitCastInst(Instruction *Inst) {
     if (auto CI = dyn_cast<BitCastInst>(LI->user_back())) {
       auto NewPtrTy = PointerType::get(CI->getType(), LI->getPointerAddressSpace());
       auto NewPtr = ConstantExpr::getBitCast(GV, NewPtrTy);
-      auto NewLI = new LoadInst(NewPtr, "",
+      auto NewLI = new LoadInst(NewPtrTy->getPointerElementType(), NewPtr, "",
                                 /*volatile*/ LI->isVolatile(), Inst);
       NewLI->takeName(LI);
       NewLI->setDebugLoc(LI->getDebugLoc());
@@ -1299,12 +1349,12 @@ GlobalVariable *genx::getUnderlyingGlobalVariable(Value *V) {
 }
 
 bool genx::isGlobalStore(StoreInst *ST) {
-  assert(ST);
+  IGC_ASSERT(ST);
   return getUnderlyingGlobalVariable(ST->getPointerOperand()) != nullptr;
 }
 
 bool genx::isGlobalLoad(LoadInst *LI) {
-  assert(LI);
+  IGC_ASSERT(LI);
   return getUnderlyingGlobalVariable(LI->getPointerOperand()) != nullptr;
 }
 
@@ -1323,7 +1373,7 @@ bool genx::isLegalValueForGlobalStore(Value *V, Value *StorePtr) {
 }
 
 bool genx::isGlobalStoreLegal(StoreInst *ST) {
-  assert(isGlobalStore(ST));
+  IGC_ASSERT(isGlobalStore(ST));
   return isLegalValueForGlobalStore(ST->getValueOperand(),
                                     ST->getPointerOperand());
 }
@@ -1355,7 +1405,7 @@ bool genx::isIdentityBale(const Bale &B) {
   GlobalVariable *GV = getUnderlyingGlobalVariable(ST->getPointerOperand());
   if (!GenXIntrinsic::isWrRegion(B1) || !GV)
     return false;
-  assert(B1);
+  IGC_ASSERT(B1);
   auto B0 = dyn_cast<LoadInst>(B1->getArgOperand(0));
   if (!B0 || GV != getUnderlyingGlobalVariable(B0->getPointerOperand()))
     return false;
@@ -1363,7 +1413,7 @@ bool genx::isIdentityBale(const Bale &B) {
   CallInst *A1 = dyn_cast<CallInst>(B1->getArgOperand(1));
   if (!GenXIntrinsic::isRdRegion(A1))
     return false;
-  assert(A1);
+  IGC_ASSERT(A1);
   LoadInst *A0 = dyn_cast<LoadInst>(A1->getArgOperand(0));
   if (!A0 || GV != getUnderlyingGlobalVariable(A0->getPointerOperand()))
     return false;
@@ -1376,7 +1426,7 @@ bool genx::isIdentityBale(const Bale &B) {
 // Check that region can be represented as raw operand.
 bool genx::isValueRegionOKForRaw(Value *V, bool IsWrite,
                                  const GenXSubtarget *ST) {
-  assert(V);
+  IGC_ASSERT(V);
   switch (GenXIntrinsic::getGenXIntrinsicID(V)) {
   case GenXIntrinsic::genx_rdregioni:
   case GenXIntrinsic::genx_rdregionf:
@@ -1440,10 +1490,10 @@ genx::ConstraintType genx::getInlineAsmConstraintType(StringRef Codes) {
 
 unsigned
 genx::getInlineAsmMatchedOperand(const InlineAsm::ConstraintInfo &Info) {
-  assert(genx::isInlineAsmMatchingInputConstraint(Info) &&
+  IGC_ASSERT(genx::isInlineAsmMatchingInputConstraint(Info) &&
          "Matching input expected");
   int OperandValue = std::stoi(Info.Codes.front());
-  assert(OperandValue >= 0);
+  IGC_ASSERT(OperandValue >= 0);
   return OperandValue;
 }
 
@@ -1451,7 +1501,7 @@ std::vector<GenXInlineAsmInfo> genx::getGenXInlineAsmInfo(MDNode *MD) {
   std::vector<GenXInlineAsmInfo> Result;
   for (auto &MDOp : MD->operands()) {
     auto EntryMD = dyn_cast<MDTuple>(MDOp);
-    assert(EntryMD && EntryMD->getNumOperands() == 3 &&
+    IGC_ASSERT(EntryMD && EntryMD->getNumOperands() == 3 &&
            "error setting metadata for inline asm");
     ConstantAsMetadata *Op0 =
         dyn_cast<ConstantAsMetadata>(EntryMD->getOperand(0));
@@ -1459,7 +1509,7 @@ std::vector<GenXInlineAsmInfo> genx::getGenXInlineAsmInfo(MDNode *MD) {
         dyn_cast<ConstantAsMetadata>(EntryMD->getOperand(1));
     ConstantAsMetadata *Op2 =
         dyn_cast<ConstantAsMetadata>(EntryMD->getOperand(2));
-    assert(Op0 && Op1 && Op2 && "error setting metadata for inline asm");
+    IGC_ASSERT(Op0 && Op1 && Op2 && "error setting metadata for inline asm");
     auto CTy = static_cast<genx::ConstraintType>(
         cast<ConstantInt>(Op0->getValue())->getZExtValue());
     Result.emplace_back(CTy, cast<ConstantInt>(Op1->getValue())->getSExtValue(),
@@ -1469,12 +1519,12 @@ std::vector<GenXInlineAsmInfo> genx::getGenXInlineAsmInfo(MDNode *MD) {
 }
 
 std::vector<GenXInlineAsmInfo> genx::getGenXInlineAsmInfo(CallInst *CI) {
-  assert(CI->isInlineAsm() && "Inline asm expected");
+  IGC_ASSERT(CI->isInlineAsm() && "Inline asm expected");
   MDNode *MD = CI->getMetadata(genx::MD_genx_inline_asm_info);
   // empty constraint info
   if (!MD) {
-    auto *IA = cast<InlineAsm>(CI->getCalledValue());
-    assert(IA->getConstraintString().empty() &&
+    auto *IA = cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
+    IGC_ASSERT(IA->getConstraintString().empty() &&
            "No info only for empty constraint string");
     (void)IA;
     return std::vector<GenXInlineAsmInfo>();
@@ -1491,7 +1541,7 @@ bool genx::hasConstraintOfType(
 }
 
 unsigned genx::getInlineAsmNumOutputs(CallInst *CI) {
-  assert(CI->isInlineAsm() && "Inline asm expected");
+  IGC_ASSERT(CI->isInlineAsm() && "Inline asm expected");
   unsigned NumOutputs;
   if (CI->getType()->isVoidTy())
     NumOutputs = 0;
@@ -1508,11 +1558,11 @@ unsigned genx::getInlineAsmNumOutputs(CallInst *CI) {
  */
 Type *genx::getCorrespondingVectorOrScalar(Type *Ty) {
   if (Ty->isVectorTy()) {
-    assert(Ty->getVectorNumElements() == 1 &&
-      "wrong argument: scalar or degenerate vector is expected");
+    IGC_ASSERT(cast<VectorType>(Ty)->getNumElements() == 1 &&
+               "wrong argument: scalar or degenerate vector is expected");
     return Ty->getScalarType();
   }
-  return VectorType::get(Ty, 1);
+  return IGCLLVM::FixedVectorType::get(Ty, 1);
 }
 
 // info is at main template function
@@ -1640,4 +1690,31 @@ unsigned genx::CeilAlignment(unsigned LogAlignment, unsigned GRFWidth) {
     return Log2_32(GRFWidth) + 1;
   else
     report_fatal_error("Unknown log alignment");
+}
+
+bool genx::isWrPredRegionLegalSetP(const CallInst &WrPredRegion) {
+  IGC_ASSERT(GenXIntrinsic::getGenXIntrinsicID(&WrPredRegion) ==
+             GenXIntrinsic::genx_wrpredregion &&
+         "wrong argument: wrpredregion intrinsic was expected");
+  auto &NewValue = *WrPredRegion.getOperand(WrPredRegionOperand::NewValue);
+  auto ExecSize = NewValue.getType()->isVectorTy()
+                      ? cast<VectorType>(NewValue.getType())->getNumElements()
+                      : 1;
+  auto Offset =
+      cast<ConstantInt>(WrPredRegion.getOperand(WrPredRegionOperand::Offset))
+          ->getZExtValue();
+  if (ExecSize >= 32 || !isPowerOf2_64(ExecSize))
+    return false;
+  if (ExecSize == 32)
+    return Offset == 0;
+  return Offset == 0 || Offset == 16;
+}
+
+CallInst *genx::checkFunctionCall(Value *V, Function *F) {
+  if (!V || !F)
+    return nullptr;
+  auto *CI = dyn_cast<CallInst>(V);
+  if (CI && CI->getCalledFunction() == F)
+    return CI;
+  return nullptr;
 }

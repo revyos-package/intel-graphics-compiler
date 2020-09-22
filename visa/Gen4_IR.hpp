@@ -252,13 +252,13 @@ typedef std::list<USE_DEF_NODE, USE_DEF_ALLOCATOR >::iterator DEF_EDGE_LIST_ITER
 
 namespace vISA
 {
+enum class SendAccess
+{
+    READ_ONLY,
+    WRITE_ONLY,
+    READ_WRITE
+};
 
-    enum class SendAccess
-    {
-        READ_ONLY,
-        WRITE_ONLY,
-        READ_WRITE
-    };
 class G4_SendMsgDescriptor
 {
 private:
@@ -560,12 +560,12 @@ protected:
     // during optimization, an inst may become redundant and be marked dead
     unsigned short dead : 1;
     unsigned short evenlySplitInst : 1;
-    unsigned char    execSize;
+    G4_ExecSize    execSize;
 
     BinInst *bin;
 
     // make it private so only the IR_Builder can create new instructions
-    void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
     uint32_t global_id = (uint32_t) -1;
 
     const IR_Builder& builder;  // link to builder to access the various compilation options
@@ -588,6 +588,7 @@ protected:
     unsigned char depDistance = 0;
     unsigned short SBToken = -1;
     bool operandTypeIndicated = true;
+    bool isClosestALUType_ = false;
 
     struct DepToken {
         unsigned short token;
@@ -598,6 +599,7 @@ protected:
 public:
     void setDistance(unsigned char dep_distance) {depDistance = dep_distance;}
     void setOperandTypeIndicated(bool indicated) { operandTypeIndicated = indicated; }
+    void setIsClosestALUType(bool indicated) { isClosestALUType_ = indicated; }
     void setToken(unsigned short token) {SBToken = token;}
 
     void setDepToken(unsigned short token, SWSBTokenType type)
@@ -630,6 +632,7 @@ public:
     }
 
     bool isOperandTypeIndicated() {return operandTypeIndicated;}
+    bool isClosestALUType() { return isClosestALUType_; }
     unsigned char getDistance() { return depDistance; }
     unsigned short getToken() { return SBToken; }
 
@@ -652,12 +655,13 @@ public:
 
 
 public:
-    G4_INST(const IR_Builder& builder,
+    G4_INST(
+        const IR_Builder& builder,
         G4_Predicate* prd,
         G4_opcode o,
         G4_CondMod* m,
-        bool s,
-        unsigned char size,
+        G4_Sat s,
+        G4_ExecSize size,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
@@ -668,8 +672,8 @@ public:
         G4_Predicate* prd,
         G4_opcode o,
         G4_CondMod* m,
-        bool s,
-        unsigned char size,
+        G4_Sat s,
+        G4_ExecSize size,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
@@ -689,11 +693,15 @@ public:
 
     uint32_t getLexicalId() const { return global_id; }
     void setLexicalId(uint32_t id) { global_id = id; }
+
     void setPredicate(G4_Predicate* p);
-    G4_Predicate* getPredicate() const { return predicate; }
-    void setSaturate(bool s) { sat = s; }
-    bool getSaturate() const { return sat; }
-    G4_opcode opcode()  const { return op; }
+    G4_Predicate* getPredicate() const {return predicate;}
+
+    void setSaturate(G4_Sat s) {sat = s == g4::SAT ? 1 : 0;}
+    void setSaturate(bool z) {sat = z ? 1 : 0;}
+    G4_Sat getSaturate() const {return sat ? g4::SAT : g4::NOSAT;}
+
+    G4_opcode opcode()  const {return op;}
 
     void setOpcode(G4_opcode opcd);
 
@@ -827,12 +835,12 @@ public:
 
     G4_Label* getLabel()
     {
-        MUST_BE_TRUE( op == G4_label, "inst must be a label");
+        MUST_BE_TRUE(op == G4_label, "inst must be a label");
         return (G4_Label*) getSrc(0);
     }
 
     void setDest(G4_DstRegRegion* opnd);
-    void setExecSize(unsigned char s);
+    void setExecSize(G4_ExecSize s);
 
     void computeARFRightBound();
 
@@ -889,7 +897,7 @@ public:
         }
     }
 
-    bool is1QInst() const { return execSize == 8 && getMaskOffset() == 0; }
+    bool is1QInst() const { return execSize == g4::SIMD8 && getMaskOffset() == 0; }
     bool isWriteEnableInst() const { return (option & InstOpt_WriteEnable) ? true : false; }
     bool isYieldInst() const { return (option & InstOpt_Switch) ? true : false; }
     bool isNoPreemptInst() const { return (option & InstOpt_NoPreempt) ? true : false; }
@@ -905,8 +913,8 @@ public:
     // get simd lane mask for this instruction. For example,
     //      add  (8|M8) ...
     // will have 0xFF00, which lane 8-15
-    unsigned getExecLaneMask() const;
-    unsigned char  getExecSize() const {return execSize;}
+    uint32_t getExecLaneMask() const;
+    G4_ExecSize getExecSize() const {return execSize;}
     const G4_CondMod*    getCondMod() const {return mod;}
           G4_CondMod*    getCondMod()       {return mod;}
     const G4_VarBase*    getCondModBase() const;
@@ -916,7 +924,7 @@ public:
     void setCondMod(G4_CondMod* m);
 
     bool isDead() const {return dead;}
-    void markDead()        {dead = true;}
+    void markDead() {dead = true;}
 
     bool isAligned1Inst() const { return !isAligned16Inst(); }
     bool isAligned16Inst() const { return (option & InstOpt_Align16)    ? true : false; }
@@ -1022,7 +1030,7 @@ public:
     /// Copy this instruction's uses to inst2. If checked is true, then only
     /// copy those effective uses.
     void copyUsesTo(G4_INST *inst2, bool checked);
-    void removeUseOfInst( );
+    void removeUseOfInst();
     void trimDefInstList();
     void swapDefUse();
     void addDefUse(G4_INST* use, Gen4_Operand_Number usePos);
@@ -1059,12 +1067,12 @@ public:
     }
 
     void fixMACSrc2DefUse();
-    void setImplAccSrc( G4_Operand* opnd );
-    void setImplAccDst( G4_DstRegRegion* opnd );
+    void setImplAccSrc(G4_Operand* opnd);
+    void setImplAccDst(G4_DstRegRegion* opnd);
 
-    bool isWAWdep( G4_INST *inst ); /* not const: may compute bound */
-    bool isWARdep( G4_INST *inst ); /* not const: may compute bound */
-    bool isRAWdep( G4_INST *inst ); /* not const: may compute bound */
+    bool isWAWdep(G4_INST *inst); /* not const: may compute bound */
+    bool isWARdep(G4_INST *inst); /* not const: may compute bound */
+    bool isRAWdep(G4_INST *inst); /* not const: may compute bound */
     const G4_Operand* getImplAccSrc() const { return implAccSrc; }
           G4_Operand* getImplAccSrc()       { return implAccSrc; }
     const G4_DstRegRegion* getImplAccDst() const { return implAccDst; }
@@ -1074,7 +1082,7 @@ public:
     bool isRawMov() const;
     bool hasACCSrc() const;
     bool hasACCOpnd() const;
-    G4_Type getOpExecType( int& extypesize );
+    G4_Type getOpExecType(int& extypesize);
     bool canHoistTo(const G4_INST *defInst, bool simdBB) const;
     enum MovType {
         Copy        = 0,        // MOV is a copy.
@@ -1096,8 +1104,6 @@ public:
     bool isSignSensitive(Gen4_Operand_Number opndNum) const;
     bool canHoist(bool simdBB, const Options *opt) const;
     bool isCommutative() const;
-    bool canUseACCOpt(bool handleComprInst, bool checkRegion,
-        uint16_t &hs, bool allowTypeDemotion, bool insertMov = false);
 
     bool hasNULLDst() const;
     bool goodTwoGRFDst(bool& evenSplitDst);
@@ -1218,14 +1224,14 @@ public:
         G4_Predicate* prd,
         G4_opcode o,
         G4_CondMod* m,
-        bool sat,
-        unsigned char size,
+        G4_Sat sat,
+        G4_ExecSize execSize,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
         unsigned int opt,
         G4_MathOp mOp = MATH_RESERVED) :
-        G4_INST(builder, prd, o, m, sat, size, d, s0, s1, opt),
+        G4_INST(builder, prd, o, m, sat, execSize, d, s0, s1, opt),
         mathOp(mOp)
     {
 
@@ -1283,15 +1289,15 @@ public:
     G4_InstCF(const IR_Builder& builder,
         G4_Predicate* prd,
         G4_opcode op,
-        unsigned char size,
+        G4_ExecSize size,
         G4_Label* jipLabel,
         G4_Label* uipLabel,
         uint32_t instOpt) :
-        G4_INST(builder, prd, op, nullptr, false, size, nullptr, nullptr, nullptr, instOpt),
+        G4_INST(builder, prd, op, nullptr, g4::NOSAT, size, nullptr, nullptr, nullptr, instOpt),
         jip(jipLabel), uip(uipLabel), isBackwardBr(op == G4_while), isUniformBr(false)
     {
         isUniformBr = (op == G4_jmpi ||
-                       (op == G4_goto && (size == 1 || prd == nullptr)));
+                       (op == G4_goto && (size == g4::SIMD1 || prd == nullptr)));
     }
 
     // used by jump/call/ret
@@ -1300,16 +1306,15 @@ public:
         G4_Predicate* prd,
         G4_opcode o,
         G4_CondMod* m,
-        bool sat,
-        unsigned char size,
+        G4_ExecSize size,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         unsigned int opt) :
-        G4_INST(builder, prd, o, m, sat, size, d, s0, nullptr, opt),
+        G4_INST(builder, prd, o, m, g4::NOSAT, size, d, s0, nullptr, opt),
         jip(NULL), uip(NULL), isBackwardBr(o == G4_while), isUniformBr(false)
     {
         isUniformBr = (op == G4_jmpi ||
-            (op == G4_goto && (size == 1 || prd == nullptr)));
+            (op == G4_goto && (size == g4::SIMD1 || prd == nullptr)));
     }
 
     bool isCFInst() const override { return true; }
@@ -1382,6 +1387,7 @@ public:
 
     void retToFRet()
     {
+        if (isFReturn()) return;
         assert(isReturn());
         setOpcode(G4_pseudo_fret);
     }
@@ -1400,11 +1406,11 @@ public:
         const IR_Builder& builder,
         G4_Predicate* prd,
         G4_opcode o,
-        unsigned char size,
+        G4_ExecSize execSize,
         G4_DstRegRegion* dst,
         G4_SrcRegRegion* payload,
         G4_Operand* desc,
-        uint32_t opt,
+        G4_InstOpts opt,
         G4_SendMsgDescriptor* md);
 
     // split send (two source)
@@ -1414,13 +1420,13 @@ public:
         const IR_Builder& builder,
         G4_Predicate* prd,
         G4_opcode o,
-        unsigned char size,
+        G4_ExecSize execSize,
         G4_DstRegRegion* dst,
         G4_SrcRegRegion* payload,
         G4_SrcRegRegion* src1,
         G4_Operand* desc,
         G4_Operand* extDesc,
-        uint32_t opt,
+        G4_InstOpts opt,
         G4_SendMsgDescriptor* md);
 
     bool isSendc() const { return op == G4_sendc || op == G4_sendsc; }
@@ -1491,12 +1497,8 @@ public:
     void emit_send(std::ostream& output, bool dotStyle = false);
     void emit_send_desc(std::ostream& output);
 
-    void setSerialize()
-    {
-        option = option | InstOpt_Serialize;
-    }
-    bool isSerializedInst() const { return (option & InstOpt_Serialize) ? true : false; }
-
+    void setSerialize() {option = option | InstOpt_Serialize;}
+    bool isSerializedInst() const { return (option & InstOpt_Serialize) != 0; }
 };
 
 
@@ -1595,13 +1597,13 @@ public:
         const IR_Builder& builder,
         G4_Predicate* prd,
         Intrinsic intrinId,
-        uint8_t size,
+        G4_ExecSize execSize,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
         G4_Operand* s2,
-        unsigned int opt) :
-        G4_INST(builder, prd, G4_intrinsic, nullptr, false, size, d, s0, s1, s2, opt),
+        G4_InstOpts opt) :
+        G4_INST(builder, prd, G4_intrinsic, nullptr, g4::NOSAT, execSize, d, s0, s1, s2, opt),
         intrinsicId(intrinId), tmpGRFStart(-1), tmpAddrStart(-1), tmpFlagStart(-1)
     {
 
@@ -1663,13 +1665,13 @@ struct RegionDesc
 
     bool isRegionWH() const {return vertStride == UNDEFINED_SHORT && width != UNDEFINED_SHORT;}
     bool isRegionV() const {return vertStride == UNDEFINED_SHORT && width == UNDEFINED_SHORT;}
-    bool isScalar() const { return ( vertStride == 0 && horzStride == 0 ) || ( width == 1 && vertStride == 0 ); }        // to support decompression
+    bool isScalar() const { return (vertStride == 0 && horzStride == 0) || (width == 1 && vertStride == 0); }        // to support decompression
     bool isRegionSW() const {return vertStride != UNDEFINED_SHORT && width == UNDEFINED_SHORT && horzStride == UNDEFINED_SHORT;}
     bool isEqual(const RegionDesc *r) const { return vertStride == r->vertStride && width == r->width && horzStride == r->horzStride; }        // to support re-compression
     void emit(std::ostream& output) const;
-    bool isPackedRegion() const { return ( ( horzStride == 0 && vertStride <= 1 ) || ( horzStride == 1 && vertStride <= width ) ); }
-    bool isFlatRegion() const { return ( isScalar() || vertStride == horzStride * width ); }
-    bool isRepeatRegion(unsigned short execSize) const { return ( !isScalar() && ( execSize > width && vertStride < horzStride * width ) ); }
+    bool isPackedRegion() const { return ((horzStride == 0 && vertStride <= 1) || (horzStride == 1 && vertStride <= width)); }
+    bool isFlatRegion() const { return (isScalar() || vertStride == horzStride * width); }
+    bool isRepeatRegion(unsigned short execSize) const { return (!isScalar() && (execSize > width && vertStride < horzStride * width)); }
 
     // Contiguous regions are:
     // (1) ExSize is 1, or
@@ -1713,7 +1715,7 @@ namespace vISA
         uint32_t openIntervalVISAIndex;
 
     public:
-        void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+        void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
 
         void addLiveInterval(uint32_t start, uint32_t end);
         void liveAt(uint32_t cisaOff);
@@ -1769,6 +1771,13 @@ typedef enum class AugmentationMasks
 
 namespace vISA
 {
+
+inline unsigned int numEltPerGRF(G4_Type t)
+{
+    auto typeSize = G4_Type_Table[t].byteSize;
+    return getGRFSize() / typeSize;
+}
+
 class G4_Declare
 {
     friend class IR_Builder;
@@ -1880,7 +1889,7 @@ public:
 
     void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
 
-    void setGRFBaseOffset( unsigned int offset ) { GRFBaseOffset = offset; }
+    void setGRFBaseOffset(unsigned int offset) { GRFBaseOffset = offset; }
     unsigned int getGRFBaseOffset() const { return GRFBaseOffset; }
 
     void setLiveIn() { liveIn = true; }
@@ -1912,13 +1921,13 @@ public:
 
     unsigned int getWordSize() const {return (getByteSize() + 1)/2;}
 
-    void resizeNumRows( unsigned int numrows )
+    void resizeNumRows(unsigned int numrows)
     {
-        int byteSize = numrows * GENX_GRF_REG_SIZ;
+        int byteSize = numrows * numEltPerGRF(Type_UB);
         setTotalElems(byteSize / getElemSize());
     }
 
-    void setAddrTakenSpillFill( G4_Declare* dcl )
+    void setAddrTakenSpillFill(G4_Declare* dcl)
     {
         addrTakenSpillFillDcl = dcl;
     }
@@ -1944,7 +1953,7 @@ public:
     }
     void setSpillFlag()
     {
-        if(getAliasDeclare() != NULL)
+        if (getAliasDeclare() != NULL)
         {
             // Iterate to top level dcl to set spill flag
             getAliasDeclare()->setSpillFlag();
@@ -2024,11 +2033,11 @@ public:
     // returns number of elements per row
     unsigned short getNumElems() const
     {
-        return getNumRows() > 1 ? G4_GRF_REG_NBYTES / getElemSize() : numElements;
+        return getNumRows() > 1 ? numEltPerGRF(Type_UB) / getElemSize() : numElements;
     }
     unsigned short getNumRows() const
     {
-        return (getByteSize() + (G4_GRF_REG_NBYTES - 1))/G4_GRF_REG_NBYTES;
+        return (getByteSize() + (numEltPerGRF(Type_UB) - 1))/numEltPerGRF(Type_UB);
     }
     unsigned short getTotalElems() const
     {
@@ -2049,10 +2058,10 @@ public:
 
     int getOffsetFromBase()
     {
-        if( offsetFromBase == -1 )
+        if (offsetFromBase == -1)
         {
             offsetFromBase = 0;
-            for( G4_Declare *dcl = this; dcl->getAliasDeclare() != NULL; dcl = dcl->getAliasDeclare() )
+            for (G4_Declare *dcl = this; dcl->getAliasDeclare() != NULL; dcl = dcl->getAliasDeclare())
             {
                 offsetFromBase += dcl->getAliasOffset();
             }
@@ -2335,8 +2344,8 @@ public:
 
     bool crossGRF()
     {
-        return getRightBound() / G4_GRF_REG_NBYTES !=
-               getLeftBound() / G4_GRF_REG_NBYTES;
+        return getRightBound() / numEltPerGRF(Type_UB) !=
+               getLeftBound() / numEltPerGRF(Type_UB);
     }
 
     unsigned getLeftBound()
@@ -2386,7 +2395,7 @@ public:
     unsigned getByteOffset() const { return byteOffset; }
 
     // ToDo: get rid of this setter
-    void setBitVecL(uint64_t bvl )
+    void setBitVecL(uint64_t bvl)
     {
         bitVec[0] = bvl;
     }
@@ -2395,7 +2404,7 @@ public:
 
     void updateFootPrint(BitSet& footprint, bool isSet);
 
-    virtual unsigned computeRightBound( uint8_t exec_size ) { return left_bound; }
+    virtual unsigned computeRightBound(uint8_t exec_size) { return left_bound; }
     void setRightBound(unsigned val)
     {
         rightBoundSet = true;
@@ -2406,7 +2415,7 @@ public:
     const G4_INST* getInst() const { return inst; }
           G4_INST* getInst()       { return inst; }
     void setInst(G4_INST* op) { inst = op; }
-    void setAccRegSel( G4_AccRegSel value ) { accRegSel = value; }
+    void setAccRegSel(G4_AccRegSel value) { accRegSel = value; }
     G4_AccRegSel getAccRegSel() const { return accRegSel; }
     bool isAccRegValid() const { return accRegSel != ACC_UNDEFINED;}
 
@@ -2717,7 +2726,7 @@ class G4_Reloc_Imm : public G4_Imm
 {
 
 public:
-    void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
     bool isRelocImm() const override { return true; }
 
     // G4_Reloc_Imm is the relocation target field. If the value is not given,
@@ -2755,8 +2764,8 @@ public:
     const char* getLabel() const {return label;}
     void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
     void emit(std::ostream& output, bool symbolreg=false) override;
-    void setFuncLabel( bool val ) { funcLabel = val; }
-    bool isFuncLabel( ) const { return funcLabel; }
+    void setFuncLabel(bool val) { funcLabel = val; }
+    bool isFuncLabel() const { return funcLabel; }
     void setStartLoopLabel() { start_loop_label = true; }
     bool isStartLoopLabel() const { return start_loop_label; }
     bool isFCLabel() const { return isFC; }
@@ -2897,25 +2906,25 @@ namespace vISA
     private:
         G4_RegVar*  baseRegVar;
         G4_Operand* repRegion;
-        unsigned    execSize;
+        G4_ExecSize  execSize;
         TransientType type;
 
     public:
         G4_RegVarTransient(G4_Declare* d, G4_RegVar* base, G4_Operand* reprRegion,
-            unsigned eSize, TransientType t) :
+            G4_ExecSize eSize, TransientType t) :
             G4_RegVar(d, Transient), baseRegVar(base), repRegion(reprRegion),
             execSize(eSize), type(t)
         {
         }
 
-        void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+        void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
 
         G4_RegVar * getBaseRegVar() { return baseRegVar; }
 
         G4_Operand * getRepRegion() const { return repRegion; }
         G4_RegVar * getAbsBaseRegVar();
         G4_RegVar * getNonTransientBaseRegVar();
-        unsigned getExecSize() const { return execSize; }
+        G4_ExecSize getExecSize() const { return execSize; }
 
         bool isRegVarSpill() const { return type == TransientType::Spill; }
         bool isRegVarFill() const { return type == TransientType::Fill; }
@@ -2929,7 +2938,8 @@ namespace vISA
         G4_RegVar * baseRegVar;
 
     public:
-        G4_RegVarTmp(G4_Declare * d, G4_RegVar * base) : G4_RegVar(d, RegVarType::GRFSpillTmp), baseRegVar(base)
+        G4_RegVarTmp(G4_Declare * d, G4_RegVar * base) :
+            G4_RegVar(d, RegVarType::GRFSpillTmp), baseRegVar(base)
         {
             assert(base->isRegVarTransient() == false);
             assert(base == base->getBaseRegVar());
@@ -2973,7 +2983,7 @@ namespace vISA
             f = fill;
         }
 
-        void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+        void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
         bool isSpill() const { return !f; }
         bool isFill() const { return f; }
     };
@@ -3195,7 +3205,7 @@ class G4_DstRegRegion final : public G4_Operand
     }
 
     // DstRegRegion should only be constructed through IR_Builder
-    void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
 
 public:
     G4_DstRegRegion(G4_DstRegRegion& rgn);
@@ -3212,7 +3222,7 @@ public:
         if (isNullReg())
         {
             return inst != NULL &&
-                inst->getExecSize() * G4_Type_Table[type].byteSize * horzStride > G4_GRF_REG_NBYTES;
+                inst->getExecSize() * G4_Type_Table[type].byteSize * horzStride > numEltPerGRF(Type_UB);
         }
         if (isRightBoundSet() == false)
         {
@@ -3220,7 +3230,7 @@ public:
             getInst()->computeRightBound(this);
         }
 
-        return (left_bound / GENX_GRF_REG_SIZ) != right_bound / GENX_GRF_REG_SIZ;
+        return (left_bound / numEltPerGRF(Type_UB)) != right_bound / numEltPerGRF(Type_UB);
     }
     unsigned short getHorzStride() const { return horzStride; }
     ChannelEnable  getWriteMask() const { return writeMask; }
@@ -4015,7 +4025,7 @@ inline bool G4_InstCF::isUniformGoto(unsigned KernelSimdSize) const
 {
     assert(op == G4_goto);
     const G4_Predicate *pred = getPredicate();
-    if (getExecSize() == 1 || pred == nullptr)
+    if (getExecSize() == g4::SIMD1 || pred == nullptr)
         return true;
 
     // This is uniform if group size equals to the kernel simd size.
@@ -4053,7 +4063,7 @@ static void computeSpillFillOperandBound(G4_Operand* opnd, unsigned int LB, int 
 
     // read/write in units of GRF.
     unsigned RB = std::min(opnd->getTopDcl()->getByteSize(),
-        LB + numReg * G4_GRF_REG_NBYTES) - 1;
+        LB + numReg * numEltPerGRF(Type_UB)) - 1;
 
     unsigned NBytes = RB - LB + 1;
     opnd->setBitVecFromSize(NBytes);
@@ -4067,23 +4077,24 @@ public:
         const IR_Builder& builder,
         G4_Predicate* prd,
         Intrinsic intrinId,
-        uint8_t size,
+        G4_ExecSize execSize,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
         G4_Operand* s2,
-        unsigned int opt) :
-        G4_InstIntrinsic(builder, prd, intrinId, size, d, s0, s1, s2, opt)
+        G4_InstOpts opt) :
+        G4_InstIntrinsic(builder, prd, intrinId, execSize, d, s0, s1, s2, opt)
     {
 
     }
 
-    const static unsigned int InvalidOffset = 0xffffffff;
+    const static unsigned int InvalidOffset = 0xfffffffe;
 
     bool isOffBP() const { return getFP() != nullptr; }
 
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
+    uint32_t getOffsetInBytes() const { return offset * getGRFSize(); }
     G4_Declare* getFP() const { return fp; }
     G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
     G4_SrcRegRegion* getPayload() const { return getSrc(1)->asSrcRegRegion(); }
@@ -4121,31 +4132,30 @@ public:
         const IR_Builder& builder,
         G4_Predicate* prd,
         Intrinsic intrinId,
-        uint8_t size,
+        G4_ExecSize execSize,
         G4_DstRegRegion* d,
         G4_Operand* s0,
         G4_Operand* s1,
         G4_Operand* s2,
-        unsigned int opt) :
-        G4_InstIntrinsic(builder, prd, intrinId, size, d, s0, s1, s2, opt)
+        G4_InstOpts opt) :
+        G4_InstIntrinsic(builder, prd, intrinId, execSize, d, s0, s1, s2, opt)
     {
 
     }
 
-    const static unsigned int InvalidOffset = 0xffffffff;
+    const static unsigned int InvalidOffset = 0xfffffffe;
 
     bool isOffBP() const { return getFP() != nullptr; }
 
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
+    uint32_t getOffsetInBytes() const { return offset * getGRFSize(); }
     G4_Declare* getFP() const { return fp; }
     G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
 
     void setNumRows(uint32_t r) { numRows = r; }
     void setOffset(uint32_t o) { offset = o; }
     void setFP(G4_Declare* f) { fp = f; }
-
-
 
     bool isOffsetValid() { return offset != InvalidOffset; }
 

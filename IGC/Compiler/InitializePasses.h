@@ -23,7 +23,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
 #pragma once
+
+#include "llvm/Config/llvm-config.h"
 
 namespace llvm {
     class PassRegistry;
@@ -68,6 +71,7 @@ void initializeGenUpdateCBPass(llvm::PassRegistry&);
 void initializeGenStrengthReductionPass(llvm::PassRegistry&);
 void initializeNanHandlingPass(llvm::PassRegistry&);
 void initializeFlattenSmallSwitchPass(llvm::PassRegistry&);
+void initializeSplitIndirectEEtoSelPass(llvm::PassRegistry&);
 void initializeGenXFunctionGroupAnalysisPass(llvm::PassRegistry&);
 void initializeGenXCodeGenModulePass(llvm::PassRegistry&);
 void initializeEstimateFunctionSizePass(llvm::PassRegistry&);
@@ -94,6 +98,7 @@ void initializePrivateMemoryResolutionPass(llvm::PassRegistry&);
 void initializePrivateMemoryUsageAnalysisPass(llvm::PassRegistry&);
 void initializeProcessFuncAttributesPass(llvm::PassRegistry&);
 void initializeProcessBuiltinMetaDataPass(llvm::PassRegistry&);
+void initializeInsertDummyKernelForSymbolTablePass(llvm::PassRegistry&);
 void initializeProgramScopeConstantAnalysisPass(llvm::PassRegistry&);
 void initializeProgramScopeConstantResolutionPass(llvm::PassRegistry&);
 void initializePromoteResourceToDirectASPass(llvm::PassRegistry&);
@@ -113,6 +118,7 @@ void initializeSetFastMathFlagsPass(llvm::PassRegistry&);
 void initializeSPIRMetaDataTranslationPass(llvm::PassRegistry&);
 void initializeSubGroupFuncsResolutionPass(llvm::PassRegistry&);
 void initializeIndirectCallOptimizationPass(llvm::PassRegistry&);
+void initializeVectorBitCastOptPass(llvm::PassRegistry&);
 void initializeVectorPreProcessPass(llvm::PassRegistry&);
 void initializeVectorProcessPass(llvm::PassRegistry&);
 void initializeVerificationPassPass(llvm::PassRegistry&);

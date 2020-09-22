@@ -195,8 +195,8 @@ namespace vISA
             while (curFootprint2Ptr)
             {
                 if (fType == curFootprint2Ptr->fType &&
-                    ((LeftB / G4_GRF_REG_NBYTES) <= (curFootprint2Ptr->RightB / G4_GRF_REG_NBYTES)) &&
-                    ((RightB / G4_GRF_REG_NBYTES) >= (curFootprint2Ptr->LeftB / G4_GRF_REG_NBYTES)))
+                    ((LeftB / numEltPerGRF(Type_UB)) <= (curFootprint2Ptr->RightB / numEltPerGRF(Type_UB))) &&
+                    ((RightB / numEltPerGRF(Type_UB)) >= (curFootprint2Ptr->LeftB / numEltPerGRF(Type_UB))))
                 {
                     return true;
                 }
@@ -211,8 +211,8 @@ namespace vISA
                 while (curFootprint2Ptr)
                 {
                     if (fType == curFootprint2Ptr->fType &&
-                        ((curFootprintPtr->LeftB  / G4_GRF_REG_NBYTES) <= (curFootprint2Ptr->RightB  / G4_GRF_REG_NBYTES)) &&
-                        ((curFootprintPtr->RightB  / G4_GRF_REG_NBYTES) >= (curFootprint2Ptr->LeftB  / G4_GRF_REG_NBYTES)))
+                        ((curFootprintPtr->LeftB  / numEltPerGRF(Type_UB)) <= (curFootprint2Ptr->RightB  / numEltPerGRF(Type_UB))) &&
+                        ((curFootprintPtr->RightB  / numEltPerGRF(Type_UB)) >= (curFootprint2Ptr->LeftB  / numEltPerGRF(Type_UB))))
                     {
                         return true;
                     }
@@ -819,8 +819,8 @@ namespace vISA
             SBFootprint *footprint = bucketNode->node->getFirstFootprint(bucketNode->opndNum);
             while (footprint)
             {
-                unsigned int startBucket = footprint->LeftB / G4_GRF_REG_NBYTES;
-                unsigned int endBucket = footprint->RightB / G4_GRF_REG_NBYTES;
+                unsigned int startBucket = footprint->LeftB / numEltPerGRF(Type_UB);
+                unsigned int endBucket = footprint->RightB / numEltPerGRF(Type_UB);
                 if (footprint->fType == ACC_T)
                 {
                     startBucket = startBucket + aregOffset;
@@ -1028,8 +1028,10 @@ namespace vISA
             std::vector<SBBucketDescr>& BDvec,
             bool GRFOnly);
 
-        void setDistance(SBFootprint * footprint, SBNode *node, SBNode *liveNode);
+        void setDistance(SBFootprint * footprint, SBNode *node, SBNode *liveNode, bool dstDep);
         void footprintMerge(SBNode * node, SBNode * nextNode);
+
+        void pushItemToQueue(std::vector<unsigned>* nodeIDQueue, unsigned nodeID);
 
         //Local distance dependence analysis and assignment
         void SBDDD(G4_BB* bb,
@@ -1235,6 +1237,8 @@ namespace vISA
 
         void setDefaultDistanceAtFirstInstruction();
 
+        void quickTokenAllocation();
+
         //Token allocation
         void tokenAllocation();
         void buildLiveIntervals();
@@ -1262,7 +1266,6 @@ namespace vISA
         //Assign Token
         void assignToken(SBNode *node, unsigned short token, uint32_t &AWTokenReuseCount, uint32_t &ARTokenReuseCount, uint32_t &AATokenReuseCount);
         void assignDepToken(SBNode *node);
-        bool insertSyncToken(G4_BB *bb, SBNode *node, G4_INST *inst, INST_LIST_ITER inst_it, int newInstID, BitSet *dstTokens, BitSet *srcTokens, bool removeAllTokens);
         void insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens);
         void insertTest();
 
@@ -1272,6 +1275,8 @@ namespace vISA
         G4_INST * insertSyncInstructionAfter(G4_BB * bb, INST_LIST_ITER nextIter, int CISAOff, int lineNo);
         G4_INST* insertSyncAllRDInstruction(G4_BB *bb, unsigned int SBIDs, INST_LIST_ITER nextIter, int CISAOff, int lineNo);
         G4_INST *insertSyncAllWRInstruction(G4_BB *bb, unsigned int SBIDs, INST_LIST_ITER nextIter, int CISAOff, int lineNo);
+
+        bool insertSyncToken(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens, bool& keepDst, bool removeAllToken);
 
         void SWSBDepDistanceGenerator(PointsToAnalysis& p, LiveGRFBuckets &LB, LiveGRFBuckets &globalSendsLB);
         void handleIndirectCall();

@@ -228,8 +228,9 @@ G4_BB* FlowGraph::beginBB(Label_BB_Map& map, G4_INST* first)
 G4_INST* FlowGraph::createNewLabelInst(G4_Label* label, int lineNo, int CISAOff)
 {
     //srcFileName is NULL
+    // TODO: remove this (use createLabelInst)
     return builder->createInternalInst(NULL, G4_label,
-        NULL, false, 1, NULL, label, NULL, 0, lineNo, CISAOff, NULL);
+        NULL, g4::NOSAT, g4::SIMD1, NULL, label, NULL, 0, lineNo, CISAOff, NULL);
 }
 
 G4_BB* FlowGraph::createNewBB(bool insertInFG)
@@ -242,6 +243,16 @@ G4_BB* FlowGraph::createNewBB(bool insertInFG)
 
     BBAllocList.push_back(bb);
     return bb;
+}
+
+G4_BB* FlowGraph::createNewBBWithLabel(const char* LabelPrefix, int Lineno, int CISAoff)
+{
+    G4_BB* newBB = createNewBB(true);
+    std::string name = LabelPrefix + std::to_string(newBB->getId());
+    G4_Label* lbl = builder->createLabel(name, LABEL_BLOCK);
+    G4_INST* inst = createNewLabelInst(lbl, Lineno, CISAoff);
+    newBB->push_back(inst);
+    return newBB;
 }
 
 static int globalCount = 1;
@@ -268,7 +279,7 @@ int64_t FlowGraph::insertDummyUUIDMov()
             G4_DstRegRegion* nullDst = builder->createNullDst(Type_UD);
             int64_t uuID = (int64_t)mt_rand();
             G4_Operand* randImm = (G4_Operand*)builder->createImm(uuID, Type_UD);
-            G4_INST* movInst = builder->createMov(1, nullDst, randImm, InstOpt_NoOpt, false);
+            G4_INST* movInst = builder->createMov(g4::SIMD1, nullDst, randImm, InstOpt_NoOpt, false);
 
             auto instItEnd = bb->end();
             for (auto it = bb->begin();
@@ -794,7 +805,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
 
     if (builder->getOption(vISA_DumpDotAll))
     {
-        pKernel->dumpDotFile("beforeRemoveRedundantLabels");
+        pKernel->dumpDotFile("afterCFGConstruction");
     }
 
     removeRedundantLabels();
@@ -833,11 +844,8 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         mergeFReturns();
     }
 
-    if (builder->getOption(vISA_DumpDotAll))
-    {
-        pKernel->dumpDotFile("beforeRemoveUnreachableBlocks");
-    }
-    removeUnreachableBlocks();
+    setPhysicalPredSucc();
+    removeUnreachableBlocks(funcInfoHashTable);
 
     if (builder->getOption(vISA_DumpDotAll))
     {
@@ -856,7 +864,6 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         funcInfoTable[funcInfo->getId()] = funcInfo;
     }
 
-    setPhysicalPredSucc();
     if (hasGoto)
     {
         // Structurizer requires that the last BB has no goto (ie, the
@@ -864,11 +871,6 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         if (builder->getOption(vISA_EnableStructurizer) &&
             !endWithGotoInLastBB())
         {
-            if (builder->getOption(vISA_DumpDotAll))
-            {
-                pKernel->dumpDotFile("before_doCFGStructurizer");
-            }
-
             doCFGStructurize(this);
 
             if (builder->getOption(vISA_DumpDotAll))
@@ -878,10 +880,6 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         }
         else
         {
-            if (builder->getOption(vISA_DumpDotAll))
-            {
-                pKernel->dumpDotFile("beforeProcessGoto");
-            }
             processGoto(hasSIMDCF);
             if (builder->getOption(vISA_DumpDotAll))
             {
@@ -896,7 +894,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
     reassignBlockIDs();
     findBackEdges();
 
-    if (hasSIMDCF && pKernel->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+    if (hasSIMDCF && pKernel->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
         processSCF(labelMap, funcInfoHashTable);
         addSIMDEdges();
@@ -958,7 +956,8 @@ void IR_Builder::materializeGlobalImm(G4_BB* entryBB)
     {
         auto&& immVal = immPool.getImmVal(i);
         auto dcl = immPool.getImmDcl(i);
-        G4_INST* inst = createMov(immVal.numElt,
+        G4_INST* inst = createMov(
+            G4_ExecSize((unsigned)immVal.numElt),
             Create_Dst_Opnd_From_Dcl(dcl, 1), immVal.imm, InstOpt_WriteEnable, false);
         auto iter = std::find_if(entryBB->begin(), entryBB->end(),
             [](G4_INST* inst) { return !inst->isLabel(); });
@@ -1035,8 +1034,9 @@ void G4_BB::addSamplerFlushBeforeEOT()
         builder->getBuiltinR0(),
         builder->getRegionStride1());
     auto msgDesc = builder->createSyncMsgDesc(SFID::SAMPLER, desc);
-    G4_INST* samplerFlushInst = builder->createSendInst(nullptr, G4_send,
-        8, builder->createNullDst(Type_UD), sendMsgOpnd,
+    G4_INST* samplerFlushInst = builder->createSendInst(
+        nullptr, G4_send, g4::SIMD8,
+        builder->createNullDst(Type_UD), sendMsgOpnd,
         builder->createImm(desc, Type_UD),
         0, msgDesc, 0);
     auto iter = std::prev(this->end());
@@ -1075,8 +1075,8 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
         G4_INST* lastInst = bb->back();
         if (lastInst->opcode() == G4_pseudo_exit)
         {
-            if (lastInst->getExecSize() == 1 &&
-                !(builder->getFCPatchInfo() && builder->getFCPatchInfo()->getFCComposableKernel() == true))
+            if (lastInst->getExecSize() == g4::SIMD1 &&
+                !(builder->getFCPatchInfo() && builder->getFCPatchInfo()->getFCComposableKernel()))
             {
                 //uniform return
                 if (lastInst->getPredicate() != NULL)
@@ -1182,7 +1182,7 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
                 }
             }
 
-            if (retInst->getExecSize() == 1)
+            if (retInst->getExecSize() == g4::SIMD1)
             {
                 G4_INST* jmpInst = builder->createJmp(retInst->getPredicate(), exitLabel, InstOpt_NoOpt, false);
                 retBB->push_back(jmpInst);
@@ -1219,10 +1219,9 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
 
 //
 // This phase iterates each BB and checks if the last inst of a BB is a "call foo".  If yes,
-// the algorith traverses from the block of foo to search for RETURN and link the block of
+// the algorithm traverses from the block of foo to search for RETURN and link the block of
 // RETURN with the block of the return address
 //
-
 void FlowGraph::handleReturn(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable& funcInfoHashTable)
 {
     for (std::list<G4_BB*>::iterator it = BBs.begin(), itEnd = BBs.end(); it != itEnd; ++it)
@@ -1246,6 +1245,23 @@ void FlowGraph::handleReturn(std::map<std::string, G4_BB*>& labelMap, FuncInfoHa
                 // the fall through BB must be the front
                 //
                 G4_BB* retAddr = bb->Succs.front();
+                if (retAddr->Preds.size() > 1)
+                {
+                    // Create an empty BB as a new RETURN BB as we want RETURN BB
+                    // to be reached only by CALL BB.  Note that at this time, call
+                    // return edge has not been added yet.
+                    G4_INST* I0 = retAddr->getFirstInst();
+                    if (I0 == nullptr) I0 = last;
+                    G4_BB* newRetBB = createNewBBWithLabel("Label_return_BB", I0->getLineNo(), I0->getCISAOff());
+                    bb->removeSuccEdge(retAddr);
+                    retAddr->removePredEdge(bb);
+                    addPredSuccEdges(bb, newRetBB, true);
+                    addPredSuccEdges(newRetBB, retAddr, true);
+
+                    BBs.insert(std::next(it), newRetBB);
+                    retAddr = newRetBB;
+                }
+                // Add EXIT->RETURN edge.
                 linkReturnAddr(subBB, retAddr);
 
                 // set callee info for CALL
@@ -1714,11 +1730,9 @@ void doDFS(G4_BB* startBB, unsigned int p)
 // blocks with return/pseudo_fret will be removed is when the header of that function itself
 // is deemed unreachable.
 //
-void FlowGraph::removeUnreachableBlocks()
+void FlowGraph::removeUnreachableBlocks(FuncInfoHashTable& funcInfoHT)
 {
     unsigned preId = 0;
-    std::vector<bool> canRemove(BBs.size(), false);
-
     //
     // initializations
     //
@@ -1731,54 +1745,111 @@ void FlowGraph::removeUnreachableBlocks()
     //
     doDFS(getEntryBB(), preId);
 
-    for (BB_LIST_ITER it = BBs.begin(), itEnd = BBs.end(); it != itEnd; ++it)
-    {
-        if ((*it)->getPreId() == UINT_MAX)
-        {
-            // Entire function is unreachable. So it should be ok
-            // to delete the return as well.
-            canRemove[(*it)->getId()] = true;
-        }
-
-    }
-
     //
-    // Basic blocks with preId/rpostId set to UINT_MAX are unreachable
-    //
+    // Basic blocks with preId/rpostId set to UINT_MAX are unreachable.
+    // Special handling:
+    //   1. If CALL_BB isn't dead, don't remove RETURN_BB;
+    //   2. If INIT_BB isn't dead, don't remove EXIT_BB.
+    //   3. For BB with EOT, don't remove it.
+    // (Note that in BB list (BBs), CALL_BB appears before RETURN_BB and INIT_BB
+    //  appears before EXIT_BB. The algo works under this assumpion.)
     BB_LIST_ITER it = BBs.begin();
     while (it != BBs.end())
     {
         G4_BB* bb = (*it);
-
         if (bb->getPreId() == UINT_MAX)
         {
-            //leaving dangling BBs with return/EOT in for now.
-            //workaround to handle unreachable return
-            //for example return after infinite loop.
-            if (((bb->isEndWithFRet() || (bb->size() > 0 && (G4_INST*)bb->back()->isReturn()))) ||
-                (bb->size() > 0 && bb->back()->isEOT()))
+            if (bb->getBBType() & G4_BB_INIT_TYPE)
             {
-                it++;
+                // Remove it from funcInfoHT.
+                int funcId = bb->getId();
+                unsigned numErased = funcInfoHT.erase(funcId);
+                assert(numErased == 1);
+            }
+            else if (bb->getBBType() & G4_BB_CALL_TYPE)
+            {
+                // If call bb is removed, its return BB shuld be removed as well.
+                G4_BB* retBB = bb->getPhysicalSucc();
+                assert(retBB && "vISA ICE: missing Return BB");
+                if (retBB->getPreId() != UINT_MAX)
+                {
+                    retBB->setPreId(UINT_MAX);
+                }
+            }
+
+            // EOT should be in entry function, we keep it for now.
+            if (bb->size() > 0 && bb->back()->isEOT())
+            {
+                ++it;
                 continue;
             }
 
+            // Now, remove bb.
             while (bb->Succs.size() > 0)
             {
                 removePredSuccEdges(bb, bb->Succs.front());
             }
+            if (bb->getBBType() & G4_BB_RETURN_TYPE)
+            {
+                // As callee may be live, need to remove pred edges from exit BB.
+                for (auto& II : bb->Preds)
+                {
+                    G4_BB* exitBB = II;
+                    if (exitBB->getBBType() & G4_BB_EXIT_TYPE)
+                    {
+                        removePredSuccEdges(exitBB, bb);
+                        break;
+                    }
+                }
+            }
 
             BB_LIST_ITER prev = it;
-            prev++;
-            BBs.erase(it);
-            it = prev;
+            ++it;
+            BBs.erase(prev);
         }
         else
         {
+            if (bb->getBBType() & G4_BB_CALL_TYPE)
+            {
+                // CALL BB isn't dead, don't remove return BB.
+                G4_BB* retBB = bb->getPhysicalSucc();
+                assert(retBB && (retBB->getBBType() & G4_BB_RETURN_TYPE) &&
+                       "vISA ICE: missing RETURN BB");
+                if (retBB->getPreId() == UINT_MAX)
+                {
+                    // For example,
+                    //    CALL_BB  : call A   succ: init_BB
+                    //    RETURN_BB: pred: exit_BB
+                    //
+                    //    // subroutine A
+                    //    init_BB:
+                    //       while (true) ...;  // inifinite loop
+                    //    exit_BB:  succ : RETURN_BB
+                    // Both RETURN_BB and exit_BB are unreachable, but
+                    // we keep both!
+                    retBB->setPreId(UINT_MAX - 1);
+                }
+            }
+            else if (bb->getBBType() & G4_BB_INIT_TYPE)
+            {
+                // function isn't dead, don't remove exit BB.
+                int funcId = bb->getId();
+                auto entry = funcInfoHT.find(funcId);
+                assert(entry != funcInfoHT.end());
+                FuncInfo* finfo = entry->second;
+                G4_BB* exitBB = finfo->getExitBB();
+                assert(exitBB && "vISA ICE: missing exit BB");
+                if (exitBB->getPreId() == UINT_MAX)
+                {
+                    // See the example above for G4_BB_CALL_TYPE
+                    exitBB->setPreId(UINT_MAX - 1);
+                }
+            }
             it++;
         }
     }
-
     reassignBlockIDs();
+    setPhysicalPredSucc();
 }
 
 void FlowGraph::AssignDFSBasedIds(G4_BB* bb, unsigned &preId, unsigned &postId, std::list<G4_BB*>& rpoBBList)
@@ -2430,7 +2501,8 @@ void FlowGraph::mergeFReturns()
             dumLabel = builder->createLabel(str, LABEL_BLOCK);
             G4_INST* label = createNewLabelInst(dumLabel);
             newExit->push_back(label);
-            G4_INST* fret = builder->createInternalCFInst(nullptr, G4_pseudo_fret, 1, nullptr, nullptr, InstOpt_NoOpt);
+            G4_INST* fret = builder->createInternalCFInst(
+                nullptr, G4_pseudo_fret, g4::SIMD1, nullptr, nullptr, InstOpt_NoOpt);
             newExit->push_back(fret);
             BBs.push_back(newExit);
             candidateFretBB = newExit;
@@ -2447,7 +2519,7 @@ void FlowGraph::mergeFReturns()
 
                 last->setOpcode(G4_jmpi);
                 last->setSrc(dumLabel, 0);
-                last->setExecSize(1);
+                last->setExecSize(g4::SIMD1);
             }
         }
     }
@@ -3109,7 +3181,7 @@ void FlowGraph::markDivergentBBs()
 * Insert a join at the beginning of this basic block, immediately after the label
 * If a join is already present, nothing will be done
 */
-void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
+void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
 {
     MUST_BE_TRUE(bb->size() > 0, "empty block");
     INST_LIST_ITER iter = bb->begin();
@@ -3146,9 +3218,9 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, uint8_t execSize, G4_Label* jip)
     }
 }
 
-typedef std::pair<G4_BB*, int> BlockSizePair;
+typedef std::pair<G4_BB*, G4_ExecSize> BlockSizePair;
 
-static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, int execSize)
+static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, G4_ExecSize execSize)
 {
     // add goto target to list of active blocks that need a join
     std::list<BlockSizePair>::iterator listIter;
@@ -3200,7 +3272,7 @@ void FlowGraph::setPhysicalPredSucc()
     }
 }
 
-G4_Label* FlowGraph::insertEndif(G4_BB* bb, unsigned char execSize, bool createLabel)
+G4_Label* FlowGraph::insertEndif(G4_BB* bb, G4_ExecSize execSize, bool createLabel)
 {
     // endif is placed immediately after the label
     G4_INST* endifInst = builder->createInternalCFInst(NULL, G4_endif, execSize, NULL, NULL, InstOpt_NoOpt);
@@ -3319,7 +3391,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             {
                 // This block is the target of one or more forward goto,
                 // or the fall-thru of a backward goto, needs to insert a join
-                int execSize = activeJoinBlocks.front().second;
+                G4_ExecSize execSize = activeJoinBlocks.front().second;
                 G4_Label* joinJIP = NULL;
 
                 activeJoinBlocks.pop_front();
@@ -3330,7 +3402,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     joinJIP = joinBlock->getLabel();
                 }
 
-                insertJoinToBB(bb, (uint8_t)execSize, joinJIP);
+                insertJoinToBB(bb, execSize, joinJIP);
             }
         }
 
@@ -3345,7 +3417,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 lastInst->asCFInst()->getUip() == bb->getLabel())
             {
                 // backward goto
-                bool isUniform = lastInst->getExecSize() == 1 || lastInst->getPredicate() == NULL;
+                bool isUniform = lastInst->getExecSize() == g4::SIMD1 || lastInst->getPredicate() == NULL;
                 if (isUniform && doScalarJmp)
                 {
                     // can always convert a uniform backward goto into a jmp
@@ -3378,8 +3450,9 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 }
                 else
                 {
-                    uint8_t eSize = lastInst->getExecSize() > 1 ? lastInst->getExecSize() : pKernel->getSimdSize();
-                    if (lastInst->getExecSize() == 1)
+                    G4_ExecSize eSize = lastInst->getExecSize() > g4::SIMD1 ?
+                        lastInst->getExecSize() : pKernel->getSimdSize();
+                    if (lastInst->getExecSize() == g4::SIMD1)
                     {   // For simd1 goto, convert it to a goto with the right execSize.
                         lastInst->setExecSize(eSize);
                         // This should have noMask removed if any
@@ -3401,7 +3474,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             // forward goto
             // the last Succ BB is our goto target
             G4_BB* gotoTargetBB = bb->Succs.back();
-            bool isUniform = lastInst->getExecSize() == 1 || lastInst->getPredicate() == NULL;
+            bool isUniform = lastInst->getExecSize() == g4::SIMD1 || lastInst->getPredicate() == NULL;
 
             if (isUniform && doScalarJmp &&
                 (activeJoinBlocks.size() == 0 || activeJoinBlocks.front().first->getId() > gotoTargetBB->getId()))
@@ -3412,11 +3485,12 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             }
             else
             {
-                //set goto JIP to the first active block
-                uint8_t eSize = lastInst->getExecSize() > 1 ? lastInst->getExecSize() : pKernel->getSimdSize();
+                // set goto JIP to the first active block
+                G4_ExecSize eSize = lastInst->getExecSize() > g4::SIMD1 ?
+                    lastInst->getExecSize() : pKernel->getSimdSize();
                 addBBToActiveJoinList(activeJoinBlocks, gotoTargetBB, eSize);
                 G4_BB* joinBlock = activeJoinBlocks.front().first;
-                if (lastInst->getExecSize() == 1)
+                if (lastInst->getExecSize() == g4::SIMD1)
                 {   // For simd1 goto, convert it to a goto with the right execSize.
                     lastInst->setExecSize(eSize);
                     lastInst->setOptions(InstOpt_M0);
@@ -3436,10 +3510,11 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     {
                         // if there is no predicate, generate a predicate with all 0s.
                         // if predicate is SIMD32, we have to use a :ud dst type for the move
-                        uint8_t execSize = lastInst->getExecSize() > 16 ? 2 : 1;
+                        G4_ExecSize execSize = lastInst->getExecSize() > g4::SIMD16 ? g4::SIMD2 : g4::SIMD1;
                         G4_Declare* tmpFlagDcl = builder->createTempFlag(execSize);
-                        G4_DstRegRegion* newPredDef = builder->createDst(tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == 2 ? Type_UD : Type_UW);
-                        G4_INST* predInst = builder->createMov(1, newPredDef, builder->createImm(0, Type_UW),
+                        G4_DstRegRegion* newPredDef = builder->createDst(
+                            tmpFlagDcl->getRegVar(), 0, 0, 1, execSize == g4::SIMD2 ? Type_UD : Type_UW);
+                        G4_INST* predInst = builder->createMov(g4::SIMD1, newPredDef, builder->createImm(0, Type_UW),
                             InstOpt_WriteEnable, false);
                         INST_LIST_ITER iter = bb->end();
                         iter--;
@@ -3656,10 +3731,10 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
             {
                 G4_BB* predBB = *iter;
                 G4_INST* lastInst = predBB->back();
-                if ( (lastInst->opcode() == G4_while &&
+                if ((lastInst->opcode() == G4_while &&
                       lastInst->asCFInst()->getJip() == BB->getLabel()) ||
                      (lastInst->opcode() == G4_goto && lastInst->asCFInst()->isBackward() &&
-                      lastInst->asCFInst()->getUip() == BB->getLabel()) )
+                      lastInst->asCFInst()->getUip() == BB->getLabel()))
                 {
                     // joinBB is the BB right after goto/while
                     BB_LIST_ITER predIter = std::find(BBs.begin(), BBs.end(), predBB);
@@ -3856,8 +3931,8 @@ void FlowGraph::addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool)
     }
     if (scratchRegDcl == NULL)
     {
-        scratchRegDcl = builder.createDeclareNoLookup("SR", G4_GRF, 8, 2, Type_UD);
-        scratchRegDcl->getRegVar()->setPhyReg(regPool.getGreg(builder.kernel.getStackCallStartReg() + 1), 0);
+        scratchRegDcl = builder.createDeclareNoLookup("SR", G4_GRF, numEltPerGRF(Type_UD), 1, Type_UD);
+        scratchRegDcl->getRegVar()->setPhyReg(regPool.getGreg(builder.kernel.getSpillHeaderGRF()), 0);
     }
 }
 
@@ -3875,7 +3950,7 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
     if (pseudoVCEDcl == NULL)
     {
         unsigned int numRowsVCE = getKernel()->getNumCalleeSaveRegs();
-        pseudoVCEDcl = builder.createDeclareNoLookup("VCE_SAVE", G4_GRF, 8, static_cast<unsigned short>(numRowsVCE), Type_UD);
+        pseudoVCEDcl = builder.createDeclareNoLookup("VCE_SAVE", G4_GRF, numEltPerGRF(Type_UD), static_cast<unsigned short>(numRowsVCE), Type_UD);
     }
     else
     {
@@ -3902,7 +3977,7 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
         const char* nameBase = "VCA_SAVE";
         const int maxIdLen = 3;
         const char* name = builder.getNameString(mem, strlen(nameBase) + maxIdLen + 1, "%s_%d", nameBase, i);
-        G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, 8, 59, Type_UD);
+        G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, numEltPerGRF(Type_UD), builder.kernel.getCallerSaveLastGRF(), Type_UD);
         name = builder.getNameString(mem, 50, "SA0_%d", i);
         G4_Declare* saveA0 = builder.createDeclareNoLookup(name, G4_ADDRESS, (uint16_t)getNumAddrRegisters(), 1, Type_UW);
         name = builder.getNameString(mem, 64, "SFLAG_%d", i);
@@ -3995,6 +4070,15 @@ void G4_Kernel::dumpPassInternal(const char* appendix)
         ofile << "UnknownKernel" << std::endl << std::endl;
     else
         ofile << asmFileName << std::endl << std::endl;
+
+    for (const G4_Declare *d : Declares) {
+        // stuff below this is usually builtin-type stuff?
+        static const int MIN_DECL = 34;
+        if (d->getDeclId() > MIN_DECL) {
+            // ofile << d->getDeclId() << "\n";
+            d->emit(ofile);
+        }
+    }
 
     for (std::list<G4_BB*>::iterator it = fg.begin();
         it != fg.end(); ++it)
@@ -4697,11 +4781,12 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     // mov (8) r1.0<1>:ud r0.0<8;8,1>:ud {NoMask}
     // send (8) null r1 0x27 desc
     IR_Builder* builder = parent->builder;
-    G4_Declare *dcl = builder->createSendPayloadDcl(NUM_DWORDS_PER_GRF, Type_UD);
+    G4_Declare *dcl = builder->createSendPayloadDcl(numEltPerGRF(Type_UD), Type_UD);
     G4_DstRegRegion* movDst = builder->Create_Dst_Opnd_From_Dcl(dcl, 1);
     G4_SrcRegRegion* r0Src = builder->Create_Src_Opnd_From_Dcl(
         builder->getBuiltinR0(), builder->getRegionStride1());
-    G4_INST *movInst = builder->createMov(NUM_DWORDS_PER_GRF, movDst, r0Src, InstOpt_WriteEnable, false);
+    G4_INST *movInst = builder->createMov(
+        G4_ExecSize(numEltPerGRF(Type_UD)), movDst, r0Src, InstOpt_WriteEnable, false);
     if (lastInst)
     {
         movInst->setCISAOff(lastInst->getCISAOff());
@@ -4724,7 +4809,7 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     G4_INST* sendInst = builder->createSendInst(
         NULL,
         G4_send,
-        8,
+        g4::SIMD8,
         sendDst,
         sendSrc,
         builder->createImm(desc, Type_UD),
@@ -4738,7 +4823,7 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     sendInst->setLocation(movInst->getLocation());
     instList.push_back(sendInst);
 
-    if (builder->getHasNullReturnSampler())
+    if (builder->getHasNullReturnSampler() && VISA_WA_CHECK(builder->getPWaTable(), Wa_1607871015))
     {
         addSamplerFlushBeforeEOT();
     }
@@ -4848,7 +4933,7 @@ void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
                     if (baseVar->isGreg()) {
                         uint32_t byteAddress = srcOpnd->getLinearizedStart();
                         if (byteAddress != 0) {
-                            regNum[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                            regNum[0][i] = byteAddress / numEltPerGRF(Type_UB);
                         }
                         else {
                             // before RA, use the value in Greg directly
@@ -4896,7 +4981,7 @@ void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
             for (int i = 0; i < 3; i++)
             {
                 output << i << "=";
-                for (int j = 0; j < (execSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ; j++)
+                for (int j = 0; j < (execSize[i] + (int)numEltPerGRF(Type_UB) - 1) / (int)numEltPerGRF(Type_UB); j++)
                 {
                     int reg_num = regNum[0][i] + j;
                     if (!(reg_num & 0x02) && reg_num < SECOND_HALF_BANK_START_GRF)
@@ -4920,8 +5005,8 @@ void G4_BB::emitBankConflict(std::ostream& output, G4_INST *inst)
                         regNum[1][i] = reg_num;
                     }
                 }
-                maxGRFNum = ((execSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ) > maxGRFNum ?
-                    ((execSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ) : maxGRFNum;
+                maxGRFNum = ((execSize[i] + (int)numEltPerGRF(Type_UB) - 1) / (int)numEltPerGRF(Type_UB)) > maxGRFNum ?
+                    ((execSize[i] + (int)numEltPerGRF(Type_UB) - 1) / (int)numEltPerGRF(Type_UB)) : maxGRFNum;
             }
         }
         output << "BC=";
@@ -5289,10 +5374,10 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
     {
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstRegs[0] = byteAddress / GENX_GRF_REG_SIZ;
+        dstRegs[0] = byteAddress / numEltPerGRF(Type_UB);
         if (dstExecSize > getGRFSize())
         {
-            dstRegs[1] = dstRegs[0] + (dstExecSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstRegs[1] = dstRegs[0] + (dstExecSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
             isCompressedInst = true;
         }
     }
@@ -5313,7 +5398,7 @@ uint32_t G4_BB::emitBankConflictGen12(std::ostream& os_output, G4_INST *inst, in
                 currInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    currInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
                     if (i == 1)
                     {
                         isFDFSrc1 = IS_TYPE_F32_F64(srcOpnd->getType());
@@ -5604,10 +5689,10 @@ uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, 
     {
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstRegs[0] = byteAddress / GENX_GRF_REG_SIZ;
+        dstRegs[0] = byteAddress / numEltPerGRF(Type_UB);
         if (dstExecSize > getGRFSize())
         {
-            dstRegs[1] = dstRegs[0] + (dstExecSize + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+            dstRegs[1] = dstRegs[0] + (dstExecSize + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
             instSplit = true;
 
         }
@@ -5628,11 +5713,11 @@ uint32_t G4_BB::emitBankConflictGen12lp(std::ostream& os_output, G4_INST *inst, 
                 currInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / GENX_GRF_REG_SIZ;
+                    currInstRegs[0][i] = byteAddress / numEltPerGRF(Type_UB);
 
                     if (currInstExecSize[i] > getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (currInstExecSize[i] + GENX_GRF_REG_SIZ - 1) / GENX_GRF_REG_SIZ - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (currInstExecSize[i] + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB) - 1;
                         instSplit = true;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
@@ -5962,7 +6047,7 @@ void G4_BB::resetLocalId()
 bool G4_BB::isAllLaneActive() const
 {
     G4_Kernel* pK = parent->getKernel();
-    if (pK->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM && !isDivergent())
+    if (pK->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM && !isDivergent())
     {
         // CM: if BB isn't divergent, all lanes (32) must be active (dmask = 0xFFFFFFFF)
         return true;
@@ -6132,10 +6217,10 @@ void GlobalOpndHashTable::dump()
 
 void G4_Kernel::computeChannelSlicing()
 {
-    unsigned int simdSize = getSimdSize();
+    G4_ExecSize simdSize = getSimdSize();
     channelSliced = true;
 
-    if (simdSize == 8 || simdSize == 16)
+    if (simdSize == g4::SIMD8 || simdSize == g4::SIMD16)
     {
         // SIMD8/16 kernels are not sliced
         channelSliced = false;
@@ -6215,18 +6300,18 @@ void G4_Kernel::calculateSimdSize()
     // to use for GRF candidates.
 
     // only do it once per kernel, as we should not introduce inst with larger simd size than in the input
-    if (simdSize != 0)
+    if (simdSize.value != 0)
     {
         return;
     }
 
     // First, get simdsize from attribute (0 : not given)
     // If not 0|8|16|32, wrong value from attribute.
-    simdSize = m_kernelAttrs->getIntKernelAttribute(Attributes::ATTR_SimdSize);
-    if (simdSize != 8 && simdSize != 16 && simdSize != 32)
+    simdSize = G4_ExecSize((unsigned)m_kernelAttrs->getInt32KernelAttr(Attributes::ATTR_SimdSize));
+    if (simdSize != g4::SIMD8 && simdSize != g4::SIMD16 && simdSize != g4::SIMD32)
     {
-        assert(simdSize == 0 && "vISA: wrong value for SimdSize attribute");
-        simdSize = 8;
+        assert(simdSize.value == 0 && "vISA: wrong value for SimdSize attribute");
+        simdSize = g4::SIMD8;
 
         for (auto bb : fg)
         {
@@ -6239,21 +6324,21 @@ void G4_Kernel::calculateSimdSize()
                     uint32_t size = inst->getMaskOffset() + inst->getExecSize();
                     if (size > 16)
                     {
-                        simdSize = 32;
+                        simdSize = g4::SIMD32;
                         break;
                     }
                     else if (size > 8)
                     {
-                        simdSize = 16;
+                        simdSize = g4::SIMD16;
                     }
                 }
             }
-            if (simdSize == 32)
+            if (simdSize == g4::SIMD32)
                 break;
         }
     }
 
-    if(GlobalRA::useGenericAugAlign())
+    if (GlobalRA::useGenericAugAlign())
         computeChannelSlicing();
 }
 
@@ -6938,7 +7023,7 @@ bool FlowGraph::convertJmpiToGoto()
                         // P = P & 1
                         auto pSrc1 = builder->createImm(1, Type_UW);
                         auto pInst = builder->createBinOp(
-                            G4_and, 1, pDst, pSrc0, pSrc1,
+                            G4_and, g4::SIMD1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
                         bb->insertBefore(I, pInst);
                     }
@@ -6948,7 +7033,7 @@ bool FlowGraph::convertJmpiToGoto()
                         uint32_t mask = getFlagMask(pCtrl);
                         auto pSrc1 = builder->createImm(truncMask(mask, DstTy), DstTy);
                         auto pInst = builder->createBinOp(
-                            G4_and, 1, pDst, pSrc0, pSrc1,
+                            G4_and, g4::SIMD1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
                         bb->insertBefore(I, pInst);
                     }
@@ -6959,7 +7044,7 @@ bool FlowGraph::convertJmpiToGoto()
                         uint32_t mask = getFlagMask(pCtrl);
                         auto pSrc1 = builder->createImm(truncMask(mask, DstTy), DstTy);
                         auto pInst = builder->createBinOp(
-                            G4_or, 1, pDst, pSrc0, pSrc1,
+                            G4_or, g4::SIMD1, pDst, pSrc0, pSrc1,
                             InstOpt_M0 | InstOpt_WriteEnable, false);
                         bb->insertBefore(I, pInst);
                     }
@@ -6977,7 +7062,7 @@ bool FlowGraph::convertJmpiToGoto()
             // P = P & MASK
             // (!P.anyN) goto (N) L
             inst->setOpcode(G4_goto);
-            inst->setExecSize((unsigned char)predSize);
+            inst->setExecSize(G4_ExecSize(predSize));
             if (newPred)
                 inst->setPredicate(newPred);
             inst->asCFInst()->setUip(inst->getSrc(0)->asLabel());
@@ -7158,7 +7243,7 @@ unsigned int getBinOffsetNextBB(G4_Kernel& kernel, G4_BB* bb)
     return (unsigned int)(*iter)->getGenOffset();
 }
 
-uint8_t gtPinData::getNumBytesScratchUse()
+uint32_t gtPinData::getNumBytesScratchUse()
 {
     if (gtpin_init)
     {
@@ -7197,7 +7282,7 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     memset(&t, 0, sizeof(t));
 
     t.version = gtpin::igc::GTPIN_IGC_INTERFACE_VERSION;
-    //t.igc_init_size = sizeof(t);
+    t.igc_init_size = sizeof(t);
     if (gtpinInitFromL0)
     {
         if (kernel.getOption(vISA_GetFreeGRFInfo))
@@ -7251,6 +7336,9 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
     // For payload offsets
     numTokens++;
 
+    // Report #GRFs
+    numTokens++;
+
     writeBuffer(buffer, bufferSize, &t, sizeof(t));
     writeBuffer(buffer, bufferSize, &numTokens, sizeof(uint32_t));
 
@@ -7286,13 +7374,24 @@ void* gtPinData::getGTPinInfoBuffer(unsigned int &bufferSize)
         writeBuffer(buffer, bufferSize, &scratchSlotData, sizeof(scratchSlotData));
     }
 
-    // Write payload offsets
-    gtpin::igc::igc_token_kernel_start_info_t offsets;
-    offsets.token = gtpin::igc::GTPIN_IGC_TOKEN_KERNEL_START_INFO;
-    offsets.per_thread_prolog_size = getPerThreadNextOff();
-    offsets.cross_thread_prolog_size = getCrossThreadNextOff() - offsets.per_thread_prolog_size;
-    offsets.token_size = sizeof(offsets);
-    writeBuffer(buffer, bufferSize, &offsets, sizeof(offsets));
+    {
+        // Write payload offsets
+        gtpin::igc::igc_token_kernel_start_info_t offsets;
+        offsets.token = gtpin::igc::GTPIN_IGC_TOKEN_KERNEL_START_INFO;
+        offsets.per_thread_prolog_size = getPerThreadNextOff();
+        offsets.cross_thread_prolog_size = getCrossThreadNextOff() - offsets.per_thread_prolog_size;
+        offsets.token_size = sizeof(offsets);
+        writeBuffer(buffer, bufferSize, &offsets, sizeof(offsets));
+    }
+
+    {
+        // Report num GRFs
+        gtpin::igc::igc_token_num_grf_regs_t numGRFs;
+        numGRFs.token = gtpin::igc::GTPIN_IGC_TOKEN_NUM_GRF_REGS;
+        numGRFs.token_size = sizeof(numGRFs);
+        numGRFs.num_grf_regs = kernel.getNumRegTotal();
+        writeBuffer(buffer, bufferSize, &numGRFs, sizeof(numGRFs));
+    }
 
     void* gtpinBuffer = allocCodeBlock(bufferSize);
 
@@ -7384,18 +7483,18 @@ unsigned int G4_Kernel::calleeSaveStart()
     return getCallerSaveLastGRF() + 1;
 }
 
-unsigned int G4_Kernel::getStackCallStartReg()
+unsigned int G4_Kernel::getStackCallStartReg() const
 {
     // Last 3 GRFs to be used as scratch
     unsigned int totalGRFs = getNumRegTotal();
-    unsigned int startReg = totalGRFs - getNumScratchRegs();
+    unsigned int startReg = totalGRFs - numReservedABIGRF();
     return startReg;
 }
 
 unsigned int G4_Kernel::getNumCalleeSaveRegs()
 {
     unsigned int totalGRFs = getNumRegTotal();
-    return totalGRFs - calleeSaveStart() - getNumScratchRegs();
+    return totalGRFs - calleeSaveStart() - numReservedABIGRF();
 }
 
 void RelocationEntry::doRelocation(const G4_Kernel& kernel, void* binary, uint32_t binarySize)

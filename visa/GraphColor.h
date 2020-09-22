@@ -117,7 +117,7 @@ public:
 
     LiveRange(G4_RegVar* v, GlobalRA&);
 
-    void* operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); }
+    void* operator new(size_t sz, vISA::Mem_Manager& m) { return m.alloc(sz); }
 
     void setDegree(unsigned d)  {degree = d;}
     unsigned getDegree()        {return degree;}
@@ -133,7 +133,7 @@ public:
     void setActive(bool v) {active = v;}
     bool getActive() {return active;}
 
-    virtual void emit(std::ostream& output, bool symbolreg=false)
+    virtual void emit(std::ostream& output, bool symbolreg = false)
     {
         output << getVar ()->getDeclare ()->getName();
         if (reg.phyReg != NULL)
@@ -518,6 +518,8 @@ namespace vISA
         bool dumpIntf(const char*) const;
         void interferenceVerificationForSplit() const;
 
+        bool linearScanVerify();
+
         void buildInterferenceWithLocalRA(G4_BB* bb);
 
         void buildInterferenceAmongLiveIns();
@@ -641,6 +643,9 @@ namespace vISA
         GlobalRA & getGRA() { return gra; }
         G4_SrcRegRegion* getScratchSurface() const;
         void stackCallProlog();
+        LiveRange** getLRs() {
+            return lrs;
+        }
     };
 
     class RAVarInfo
@@ -650,6 +655,7 @@ namespace vISA
         unsigned int bb_id = UINT_MAX;      // block local variable's block id.
         G4_Declare* splittedDCL = nullptr;
         LocalLiveRange* localLR = nullptr;
+        LSLiveRange* LSLR = nullptr;
         unsigned int numRefs = 0;
         BankConflict conflict = BANK_CONFLICT_NONE;      // used to indicate bank that should be assigned to dcl if possible
         G4_INST* startInterval = nullptr;
@@ -739,7 +745,6 @@ namespace vISA
         static bool owordAligned(unsigned offset);
         template <class REGION_TYPE> bool isUnalignedRegion(REGION_TYPE * region, unsigned execSize);
         bool shouldPreloadDst(G4_INST* instContext, G4_BB* curBB);
-        static unsigned sendBlockSizeCode(unsigned owordSize);
         void updateDefSet(std::set<G4_Declare*>& defs, G4_Declare* referencedDcl);
         void detectUndefinedUses(LivenessAnalysis& liveAnalysis, G4_Kernel& kernel);
         void markBlockLocalVar(G4_RegVar* var, unsigned bbId);
@@ -748,10 +753,12 @@ namespace vISA
         void fixAlignment();
         void expandSpillIntrinsic(G4_BB*);
         void expandFillIntrinsic(G4_BB*);
-        void expandSpillFillIntrinsics();
+        void expandSpillFillIntrinsics(unsigned int);
 
         RAVarInfo defaultValues;
         std::vector<RAVarInfo> vars;
+
+        std::vector<G4_Declare *> UndeclaredVars;
 
         // fake declares for each GRF reg, used by HRA
         // note only GRFs that are used by LRA get a declare
@@ -797,11 +804,15 @@ namespace vISA
         void expandSpillStackcall(uint32_t& numRows, uint32_t& offset, short& rowOffset, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
 
     public:
+        static unsigned sendBlockSizeCode(unsigned owordSize);
+
+    public:
         G4_Kernel& kernel;
         IR_Builder& builder;
         PhyRegPool& regPool;
         PointsToAnalysis& pointsToAnalysis;
         FCALL_RET_MAP fcallRetMap;
+
 
         VarSplitPass* getVarSplitPass() { return kernel.getVarSplitPass(); }
 
@@ -865,6 +876,16 @@ namespace vISA
         void addAddrFlagSpillDcl(G4_Declare* dcl)
         {
             addrFlagSpillDcls.insert(dcl);
+        }
+
+        void addUndefinedDcl(G4_Declare* dcl)
+        {
+            UndeclaredVars.push_back(dcl);
+        }
+
+        bool isUndefinedDcl(G4_Declare* dcl)
+        {
+            return std::find(UndeclaredVars.begin(), UndeclaredVars.end(), dcl) != UndeclaredVars.end();
         }
 
         unsigned int getSplitVarNum(G4_Declare* dcl)
@@ -939,6 +960,32 @@ namespace vISA
             MUST_BE_TRUE(vars[dclid].localLR == NULL, "Local live range already allocated for declaration");
             vars[dclid].localLR = lr;
             lr->setTopDcl(dcl);
+        }
+
+        LSLiveRange* getLSLR(G4_Declare* dcl) const
+        {
+            auto dclid = dcl->getDeclId();
+            if (dclid >= vars.size())
+            {
+                return defaultValues.LSLR;
+            }
+            return vars[dclid].LSLR;
+        }
+
+        void setLSLR(G4_Declare* dcl, LSLiveRange* lr)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            MUST_BE_TRUE(vars[dclid].LSLR == NULL, "Local live range already allocated for declaration");
+            vars[dclid].LSLR = lr;
+            lr->setTopDcl(dcl);
+        }
+
+        void resetLSLR(G4_Declare* dcl)
+        {
+            auto dclid = dcl->getDeclId();
+            resize(dclid);
+            vars[dclid].LSLR = nullptr;
         }
 
         void resetLocalLR(G4_Declare* dcl)

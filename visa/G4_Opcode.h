@@ -30,13 +30,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common.h"
 
 #define G4_MAX_SRCS       4
-#define G4_DEFAULT_GRF_NUM  128
 
 #define UNDEFINED_VAL   0xFFFFFFFF
 #define UNDEFINED_SHORT 0x8000
 #define UNDEFINED_EXEC_SIZE 0xFF
 
-#define G4_BSIZE 1            // 1 byte 8 bits
 #define G4_WSIZE 2            // 2 bytes 16 bits
 #define G4_DSIZE 4            // 4 bytes 32 bits
 #define IS_FTYPE(x) ((x) == Type_F)
@@ -55,100 +53,96 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define IS_TYPE_INT(type)        (IS_SIGNED_INT(type) || IS_UNSIGNED_INT(type))
 #define IS_TYPE_F32_F64(type)         (type == Type_F ||type == Type_DF || type == Type_NF)
 #define IS_TYPE_FLOAT_ALL(type)     (type == Type_F ||type == Type_DF || type == Type_HF || type == Type_NF)
-// added defs for CISA inst translation
-
-#define GENX_GEN8P_MAX_WIDTH      64  // #
 
 #define GENX_DATAPORT_IO_SZ       8   // # of dwords in read/write control area
 #define GENX_SAMPLER_IO_SZ        8   // # of control dwords for Sampling Engine unit
 
-#define G4_MAX_ADDR_IMM        511
-#define G4_MIN_ADDR_IMM        -512
-
-#define IVB_MSG_TYPE_OFFSET    14
-#define MSG_BLOCK_SIZE_OFFSET   8
-#define MSG_BLOCK_NUMBER_OFFSET 10
-#define MAX_SEND_RESP_LEN    8
-#define MAX_SEND_MESG_LEN    15
 #define ADDR_REG_TYPE        Type_UW
 
 #include "VISADefines.h"
-
 
 // ToDo: move them to common.h?
 #define MAKE_ENUM(X) X,
 #define STRINGIFY(X) #X,
 
-/*
- * For Gen6, only the following instructions can have
- * interger sources and float destination:
- * MOV, ADD, MUL, MAC, MAD, LINE
- */
-#define Opcode_int_src_float_dst_OK(opc)        \
-                                 ((opc == G4_mov)  || \
-                                  (opc == G4_add)  || \
-                                  (opc == G4_mul)  || \
-                                  (opc == G4_mac)  || \
-                                  (opc == G4_mad)  || \
-                                  (opc == G4_line) || \
-                                  (opc == G4_send) || \
-                                  (opc == G4_sendc)|| \
-                                  (opc == G4_sendsc) || \
-                                  (opc == G4_sends))
-
-
-#define Opcode_define_cond_mod(opc)        \
-                                 ((opc == G4_add)  || \
-                                  (opc == G4_mul)  || \
-                                  (opc == G4_addc)  || \
-                                  (opc == G4_cmp)  || \
-                                  (opc == G4_cmpn)  || \
-                                  (opc == G4_and)  || \
-                                  (opc == G4_or)  || \
-                                  (opc == G4_xor) || \
-                                  (opc == G4_not)  || \
-                                  (opc == G4_asr)  || \
-                                  (opc == G4_avg)  || \
-                                  (opc == G4_smov)  || \
-                                  (opc == G4_dp2)  || \
-                                  (opc == G4_dp3)  || \
-                                  (opc == G4_dp4)  || \
-                                  (opc == G4_dph)  || \
-                                  (opc == G4_frc)  || \
-                                  (opc == G4_line)  || \
-                                  (opc == G4_lzd)  || \
-                                  (opc == G4_fbh)  || \
-                                  (opc == G4_fbl)  || \
-                                  (opc == G4_cbit)  || \
-                                  (opc == G4_lrp)  || \
-                                  (opc == G4_mac)  || \
-                                  (opc == G4_mad)  || \
-                                  (opc == G4_mov)  || \
-                                  (opc == G4_movi)  || \
-                                  (opc == G4_pln)  || \
-                                  (opc == G4_rndd)  || \
-                                  (opc == G4_rndu)  || \
-                                  (opc == G4_rnde)  || \
-                                  (opc == G4_rndz)  || \
-                                  (opc == G4_sad2)  || \
-                                  (opc == G4_sada2)  || \
-                                  (opc == G4_shl)  || \
-                                  (opc == G4_shr)  || \
-                                  (opc == G4_subb) || \
-                                  (opc == G4_pseudo_mad ))
-
-#define Opcode_can_use_cond_mod(opc)        \
-                                 (opc == G4_sel)
-
 enum class BankAlign
 {
-    Either = 1,          // either
-    Even = 2,            // even align
-    Odd = 3,             // old align
-    Even2GRF = 4,        // 2GRF even align 1100
-    Odd2GRF = 5,          // 2GRF old align, 0011
-    Align_NUM = 6        // Num of alignment
+    Either    = 1, // either
+    Even      = 2, // even align
+    Odd       = 3, // old align
+    Even2GRF  = 4, // 2-GRF even align 1100
+    Odd2GRF   = 5, // 2-GRF old align, 0011
+    Align_NUM = 6  // Num of alignment
 };
+
+// An instruction's execution width
+struct G4_ExecSize {
+    unsigned char value;
+
+    // goal is to keep constructors "explicit" so they
+    // better distingushed in parameter lists for overload resolution
+    explicit constexpr G4_ExecSize(unsigned char _value) : value(_value) { }
+    // we could provide a non-const version of these that asserts on SIMD sizes
+    explicit G4_ExecSize(int _value) : value((unsigned)_value) { }
+    explicit G4_ExecSize(unsigned int _value) : value(_value) { }
+    // the default constructor can be implicit
+    constexpr G4_ExecSize() : value(0) { }
+
+    G4_ExecSize(const G4_ExecSize &) = default;
+    G4_ExecSize &operator =(const G4_ExecSize &) = default;
+
+    G4_ExecSize &operator *=(unsigned char s) {value *= s; return *this;}
+    G4_ExecSize &operator /=(unsigned char s) {value /= s; return *this;}
+
+    bool operator < (G4_ExecSize rhs) const {return value < rhs.value;}
+    bool operator <=(G4_ExecSize rhs) const {return value <= rhs.value;}
+    bool operator ==(G4_ExecSize rhs) const {return value == rhs.value;}
+    bool operator !=(G4_ExecSize rhs) const {return value != rhs.value;}
+    bool operator >=(G4_ExecSize rhs) const {return value >= rhs.value;}
+    bool operator > (G4_ExecSize rhs) const {return value > rhs.value;}
+
+    bool operator < (unsigned rhs) const {return value < (unsigned char)rhs;}
+    bool operator <=(unsigned rhs) const {return value <= (unsigned char)rhs;}
+    bool operator ==(unsigned rhs) const {return value == (unsigned char)rhs;}
+    bool operator !=(unsigned rhs) const {return value != (unsigned char)rhs;}
+    bool operator >=(unsigned rhs) const {return value >= (unsigned char)rhs;}
+    bool operator > (unsigned rhs) const {return value > (unsigned char)rhs;}
+
+    bool operator < (int rhs) const {return value < (unsigned char)rhs;}
+    bool operator <=(int rhs) const {return value <= (unsigned char)rhs;}
+    bool operator ==(int rhs) const {return value == (unsigned char)rhs;}
+    bool operator !=(int rhs) const {return value != (unsigned char)rhs;}
+    bool operator >=(int rhs) const {return value >= (unsigned char)rhs;}
+    bool operator > (int rhs) const {return value > (unsigned char)rhs;}
+
+    operator unsigned char() const {return value;}
+};
+namespace g4 {
+constexpr G4_ExecSize SIMD1((unsigned char)1);
+constexpr G4_ExecSize SIMD2((unsigned char)2);
+constexpr G4_ExecSize SIMD4((unsigned char)4);
+constexpr G4_ExecSize SIMD8((unsigned char)8);
+constexpr G4_ExecSize SIMD16((unsigned char)16);
+constexpr G4_ExecSize SIMD32((unsigned char)32);
+// TODO: remove/merge with G4_ExecSize(0) uses
+constexpr G4_ExecSize SIMD_UNDEFINED((unsigned char)UNDEFINED_EXEC_SIZE);
+}
+
+// saturation
+// (typesafe enum value with operators and conversions)
+//
+// use g4::SAT or g4::NOSAT to reference the two values
+struct G4_Sat {
+    const enum class Value {NOSAT = 0, SAT} value;
+    constexpr G4_Sat(Value _value) : value(_value) { }
+    operator bool () const {return value == Value::SAT;}
+};
+namespace g4 {
+    // enables g4::SAT as a symbol for a short-hand saturation
+    constexpr G4_Sat SAT(G4_Sat::Value::SAT);
+    constexpr G4_Sat NOSAT(G4_Sat::Value::NOSAT);
+}
+
 
 // To support sub register alignment
 enum G4_SubReg_Align
@@ -251,16 +245,15 @@ enum G4_InstType
 enum G4_RegFileKind
 {
     G4_UndefinedRF = 0x0,
-    G4_GRF        = 0x1,            // general register file
-    G4_ADDRESS = 0x2,            // architectural register file
-    G4_INPUT    = 0x4,            // input payload register
+    G4_GRF         = 0x1,   // general register file
+    G4_ADDRESS     = 0x2,   // architectural register file
+    G4_INPUT       = 0x4,   // input payload register
     G4_FLAG        = 0x20,
 };
 
 //
 // multiple options can coexist so we define one bit for each option
 //
-
 enum G4_InstOption
 {
     InstOpt_NoOpt       = 0x0,
@@ -296,6 +289,18 @@ enum G4_InstOption
     (InstOpt_M0 | InstOpt_M4 | InstOpt_M8 | InstOpt_M12 | InstOpt_M16 | InstOpt_M20 | InstOpt_M24 | InstOpt_M28)
 #define InstOpt_Masks (InstOpt_QuarterMasks | InstOpt_WriteEnable)
 
+// TODO: to a more proper data type
+// ==> step 1: use uint32_t so all the untyped uses still compile
+//             but replace all uint32_t (and other int types with G4_InstOpts)
+//     step 2: make G4_InstOpts a typesafe enum;
+//             #define old unscoped enum names to new typesafe enum
+//             (define various set operators so |, &, and ~ still work)
+//             remove the few magic number uses with valid type enumes
+//     step 3: mechanically (find and replace) old unscoped enums with
+//             typesafe symbols and remove #defines
+using G4_InstOpts = uint32_t;
+
+
 typedef struct _G4_InstOptInfo
 {
     G4_InstOption optMask;
@@ -304,17 +309,19 @@ typedef struct _G4_InstOptInfo
 
 extern G4_InstOptInfo InstOptInfo[];
 
+
+
 //various attributes for the Gen opcodes
-#define ATTR_COMMUTATIVE        0x00000010
-#define ATTR_FLOAT_SRC_ONLY     0x00000040
+#define ATTR_PSEUDO             0x00000001
+#define ATTR_COMMUTATIVE        0x00000002
+#define ATTR_FLOAT_SRC_ONLY     0x00000004
 #define ATTR_NONE               0x00000000
 
+#define INST_PSEUDO(inst)           (G4_Inst_Table[inst].attributes & ATTR_PSEUDO)
 #define INST_COMMUTATIVE(inst)      (G4_Inst_Table[inst].attributes & ATTR_COMMUTATIVE)
 #define INST_FLOAT_SRC_ONLY(inst)   (G4_Inst_Table[inst].attributes & ATTR_FLOAT_SRC_ONLY)
 
-#define         GENX_MAX_H_STRIDE           4
-
-#define HANDLE_INST( op, nsrc, ndst, type, plat, attr ) G4_ ## op,
+#define HANDLE_INST(op, nsrc, ndst, type, plat, attr) G4_ ## op,
 enum G4_opcode
 {
 #include "G4Instruction.def"
@@ -410,11 +417,15 @@ enum G4_AccRegSel
     ACC_UNDEFINED = 0xff
 };
 
+#define GRFALIGN (Sixteen_Word)
+#define HALFGRFALIGN (Eight_Word)
+
 // global functions
 inline unsigned int getNumAddrRegisters(void) { return 16; }
-extern short Operand_Type_Rank(G4_Type type);
 uint8_t roundDownPow2(uint8_t n);
-bool isPow2(uint8_t n);
+
+// G4_type related global functions
+// ToDo: consider making G4_Type a class instead to encapsulate these functions
 inline uint32_t getTypeSize(G4_Type ty) { return G4_Type_Table[ty].byteSize; }
 inline bool isLowPrecisionFloatTy(G4_Type ty)
 {
@@ -440,6 +451,57 @@ inline G4_Type floatToSameWidthIntType(G4_Type floatTy)
     }
 }
 
-#define GRFALIGN (Sixteen_Word)
-#define HALFGRFALIGN (Eight_Word)
+// size is the number of byte
+inline G4_SubReg_Align Get_G4_SubRegAlign_From_Size(uint16_t size)
+{
+    switch (size)
+    {
+    case 1:
+    case 2:
+        return Any;
+    case 4:
+        return Even_Word;
+    case 8:
+        if (getGenxPlatform() != GENX_BXT)
+            return Four_Word;
+        // FALL THROUGH
+        // WA: It's a workaround where a potential HW issue needs
+        // identifying.
+    case 16:
+        return Eight_Word;
+    case 32:
+        return Sixteen_Word;
+    case 64:
+        return ThirtyTwo_Word;
+    default:
+        return GRFALIGN;
+    }
+}
+
+inline G4_SubReg_Align Get_G4_SubRegAlign_From_Type(G4_Type ty)
+{
+    switch (ty)
+    {
+    case Type_B:
+    case Type_UB:
+    case Type_W:
+    case Type_UW:
+        return Any;
+    case Type_UD:
+    case Type_D:
+    case Type_F:
+        return Even_Word;
+    case Type_DF:
+        return Four_Word;
+    case Type_V:
+    case Type_VF:
+    case Type_UV:
+        return Eight_Word;
+    case Type_Q:
+    case Type_UQ:
+        return Four_Word;
+    default:
+        return Any;
+    }
+}
 #endif  // _G4_OPCODE_H_

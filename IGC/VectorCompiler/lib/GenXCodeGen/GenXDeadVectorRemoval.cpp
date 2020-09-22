@@ -33,8 +33,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 /// As a result of this analysis, the pass can then make the two following
 /// modifications to the code:
 ///
-/// 1. If all vector elements of an instruction result turn out to be unused, the
-///    instruction is removed. In fact, this pass just sets all its uses to
+/// 1. If all vector elements of an instruction result turn out to be unused,
+///    the instruction is removed. In fact, this pass just sets all its uses to
 ///    undef, relying on the subsequent dead code removal pass to actually
 ///    remove it.
 ///
@@ -50,6 +50,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///       of defs and uses from each other to reduce register pressure in
 ///       between.
 ///
+/// Besides this pass removes all write intrinsics (wrregion, wrpredregion)
+/// that have undef input value and replaces their uses with the old value.
 //===----------------------------------------------------------------------===//
 #define DEBUG_TYPE "GENX_DEAD_VECTOR_REMOVAL"
 
@@ -57,6 +59,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenXBaling.h"
 #include "GenXRegion.h"
 #include "GenXUtil.h"
+#include "vc/GenXOpts/GenXAnalysis.h"
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/CFG.h"
@@ -70,6 +73,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <queue>
 #include <set>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace genx;
@@ -103,7 +107,7 @@ private:
   }
   // setExternal : set the external pointer
   void setExternal(uintptr_t *P) {
-    assert(!getExternal());
+    IGC_ASSERT(!getExternal());
     V = (uintptr_t)P >> 1 | (uintptr_t)1U << (sizeof(uintptr_t) * 8 - 1);
   }
 public:
@@ -138,7 +142,7 @@ public:
   unsigned getNumElements() const { return NumElements; }
   // get : get a bit value
   bool get(unsigned Idx) const {
-    assert(Idx < NumElements);
+    IGC_ASSERT(Idx < NumElements);
     return P[Idx / BitsPerWord] >> (Idx % BitsPerWord) & 1;
   }
   // isAllZero : return true if all bits zero
@@ -182,7 +186,7 @@ private:
   void clear() {
     InstMap.clear();
     WorkListSet.clear();
-    assert(WorkList.empty());
+    IGC_ASSERT(WorkList.empty());
     WrRegionsWithUsedOldInput.clear();
     WorkListPhase = false;
   }
@@ -194,7 +198,8 @@ private:
   void processElementwise(Instruction *Inst, LiveBits LB);
   void markWhollyLive(Value *V);
   void addToWorkList(Instruction *Inst);
-  LiveBits getLiveBits(Instruction *Inst, bool Create = false);
+  LiveBits createLiveBits(Instruction *Inst);
+  LiveBits getLiveBits(Instruction *Inst);
 };
 
 } // end anonymous namespace
@@ -268,6 +273,7 @@ bool GenXDeadVectorRemoval::runOnFunction(Function &F)
   // removes them.
   LLVM_DEBUG(dbgs() << "GenXDeadVectorRemoval: null out instructions\n");
   bool Modified = nullOutInstructions(&F);
+  Modified |= simplifyWritesWithUndefInput(F);
   clear();
   return Modified;
 }
@@ -310,7 +316,7 @@ bool GenXDeadVectorRemoval::nullOutInstructions(Function *F)
         if (!Inst->use_empty()) {
           auto *SI = dyn_cast<StoreInst>(Inst->user_back());
           if (SI && genx::isGlobalStore(SI)) {
-            assert(Inst->hasOneUse() &&
+            IGC_ASSERT(Inst->hasOneUse() &&
                    "Wrregion in gstore bale has more than one use");
             continue;
           }
@@ -430,7 +436,7 @@ void GenXDeadVectorRemoval::processRdRegion(Instruction *Inst, LiveBits LB)
   // Set bits in InLB (InInst's livebits) for live elements read by the
   // rdregion.
   bool Modified = false;
-  LiveBits InLB = getLiveBits(InInst, /*Create=*/true);
+  LiveBits InLB = createLiveBits(InInst);
   for (unsigned RowIdx = R.Offset / R.ElementBytes, Row = 0,
       NumRows = R.NumElements / R.Width; Row != NumRows;
       RowIdx += R.VStride, ++Row)
@@ -459,7 +465,7 @@ void GenXDeadVectorRemoval::processWrRegion(Instruction *Inst, LiveBits LB)
     // Set bits in NewInLB (NewInInst's livebits) for live elements read by
     // the wrregion in the "new value" input.
     bool Modified = false;
-    LiveBits NewInLB = getLiveBits(NewInInst, /*Create=*/true);
+    LiveBits NewInLB = createLiveBits(NewInInst);
     for (unsigned RowIdx = R.Offset / R.ElementBytes, Row = 0,
         NumRows = R.NumElements / R.Width; Row != NumRows;
         RowIdx += R.VStride, ++Row)
@@ -478,7 +484,7 @@ void GenXDeadVectorRemoval::processWrRegion(Instruction *Inst, LiveBits LB)
   auto OldInInst = dyn_cast<Instruction>(
         Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
   if (OldInInst)
-    OldInLB = getLiveBits(OldInInst, /*Create=*/true);
+    OldInLB = createLiveBits(OldInInst);
   bool Modified = false;
   bool UsedOldInput = false;
   if (R.Indirect) {
@@ -535,19 +541,19 @@ void GenXDeadVectorRemoval::processBitCast(Instruction *Inst, LiveBits LB)
   auto InInst = dyn_cast<Instruction>(Inst->getOperand(0));
   if (!InInst)
     return;
-  LiveBits InLB = getLiveBits(InInst, /*Create=*/true);
+  LiveBits InLB = createLiveBits(InInst);
   bool Modified = false;
   if (InLB.getNumElements() == LB.getNumElements())
     Modified = InLB.orBits(LB);
   else if (InLB.getNumElements() > LB.getNumElements()) {
-    assert((InLB.getNumElements() % LB.getNumElements()) == 0);
+    IGC_ASSERT((InLB.getNumElements() % LB.getNumElements()) == 0);
     int Scale = InLB.getNumElements() / LB.getNumElements();
     // Input element is smaller than result element.
     for (unsigned Idx = 0, End = LB.getNumElements(); Idx != End; ++Idx)
       if (LB.get(Idx))
         Modified |= InLB.setRange(Idx * Scale, Scale);
   } else {
-    assert((LB.getNumElements() % InLB.getNumElements()) == 0);
+    IGC_ASSERT((LB.getNumElements() % InLB.getNumElements()) == 0);
     int Scale = LB.getNumElements() / InLB.getNumElements();
     // Input element is bigger than result element.
     for (unsigned Idx = 0, End = InLB.getNumElements(); Idx != End; ++Idx) {
@@ -572,7 +578,7 @@ void GenXDeadVectorRemoval::processElementwise(Instruction *Inst, LiveBits LB)
     auto OpndInst = dyn_cast<Instruction>(Inst->getOperand(oi));
     if (!OpndInst)
       continue;
-    auto OpndLB = getLiveBits(OpndInst, /*Create=*/true);
+    auto OpndLB = createLiveBits(OpndInst);
     if (isa<SelectInst>(Inst) && oi == 0 &&
         !OpndInst->getType()->isVectorTy()) {
       // First operand of select inst can be scalar, ignore it
@@ -593,7 +599,7 @@ void GenXDeadVectorRemoval::markWhollyLive(Value *V)
   auto Inst = dyn_cast_or_null<Instruction>(V);
   if (!Inst)
     return;
-  auto LB = getLiveBits(Inst, /*Create=*/true);
+  auto LB = createLiveBits(Inst);
   if (LB.setRange(0, LB.getNumElements()))
     addToWorkList(Inst);
 }
@@ -616,32 +622,45 @@ void GenXDeadVectorRemoval::addToWorkList(Instruction *Inst)
 }
 
 /***********************************************************************
+ * createLiveBits : create the bitmap of live elements for the given
+ *               instruction if it doesn't exist.
+ *
+ * Return:  LiveBits object, which contains a pointer to the bitmap for
+ *          this instruction, and a size which is set to 0 if there is no
+ *          bitmap allocated yet for this instruction and Create is false
+ */
+LiveBits GenXDeadVectorRemoval::createLiveBits(Instruction *Inst)
+{
+  unsigned NumElements = 1;
+  if (auto VT = dyn_cast<VectorType>(Inst->getType()))
+    NumElements = VT->getNumElements();
+  decltype(InstMap)::iterator Iter;
+  bool WasAnInsertion;
+  std::tie(Iter, WasAnInsertion) = InstMap.insert(std::make_pair(Inst, LiveBitsStorage{}));
+  LiveBitsStorage *LBS = &Iter->second;
+  if (WasAnInsertion) {
+    // New entry. Set its number of elements.
+    LBS->setNumElements(NumElements);
+  }
+  return LiveBits{LBS, NumElements};
+}
+
+/***********************************************************************
  * getLiveBits : get the bitmap of live elements for the given instruction
  *
  * Return:  LiveBits object, which contains a pointer to the bitmap for
  *          this instruction, and a size which is set to 0 if there is no
  *          bitmap allocated yet for this instruction and Create is false
  */
-LiveBits GenXDeadVectorRemoval::getLiveBits(Instruction *Inst, bool Create)
+LiveBits GenXDeadVectorRemoval::getLiveBits(Instruction *Inst)
 {
   unsigned NumElements = 1;
   if (auto VT = dyn_cast<VectorType>(Inst->getType()))
     NumElements = VT->getNumElements();
-  LiveBitsStorage *LBS = nullptr;
-  if (!Create) {
-    auto i = InstMap.find(Inst);
-    if (i == InstMap.end())
-      return LiveBits();
-    LBS = &i->second;
-  } else {
-    auto Ret = InstMap.insert(std::map<Instruction *,
-          LiveBitsStorage>::value_type(Inst, LiveBitsStorage()));
-    LBS = &Ret.first->second;
-    if (Ret.second) {
-      // New entry. Set its number of elements.
-      LBS->setNumElements(NumElements);
-    }
-  }
+  auto i = InstMap.find(Inst);
+  if (i == InstMap.end())
+    return LiveBits();
+  LiveBitsStorage *LBS = &i->second;
   return LiveBits(LBS, NumElements);
 }
 
@@ -667,7 +686,7 @@ bool LiveBits::isAllZero() const
  */
 bool LiveBits::set(unsigned Idx, bool Val)
 {
-  assert(Idx < NumElements);
+  IGC_ASSERT(Idx < NumElements);
   uintptr_t *Ptr = P + Idx / BitsPerWord;
   uintptr_t Bit = 1ULL << (Idx % BitsPerWord);
   uintptr_t Entry = *Ptr;
@@ -685,7 +704,7 @@ bool LiveBits::set(unsigned Idx, bool Val)
  */
 bool LiveBits::copy(LiveBits Src)
 {
-  assert(NumElements == Src.NumElements);
+  IGC_ASSERT(NumElements == Src.NumElements);
   bool Modified = false;
   for (unsigned Idx = 0, End = (NumElements + BitsPerWord - 1) / BitsPerWord;
       Idx != End; ++Idx) {
@@ -700,7 +719,7 @@ bool LiveBits::copy(LiveBits Src)
  */
 bool LiveBits::orBits(LiveBits Src)
 {
-  assert(NumElements == Src.NumElements);
+  IGC_ASSERT(NumElements == Src.NumElements);
   bool Modified = false;
   for (unsigned Idx = 0, End = (NumElements + BitsPerWord - 1) / BitsPerWord;
       Idx != End; ++Idx) {
@@ -718,7 +737,7 @@ bool LiveBits::setRange(unsigned Start, unsigned Len)
 {
   bool Modified = false;
   unsigned End = Start + Len;
-  assert(End <= NumElements);
+  IGC_ASSERT(End <= NumElements);
   while (Start != End) {
     unsigned ThisLen = BitsPerWord - (Start & (BitsPerWord - 1));
     if (ThisLen > End - Start)

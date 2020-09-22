@@ -28,10 +28,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMWarningsPush.hpp"
-#include <llvm/IR/InstIterator.h>
-#include <llvm/Support/MathExtras.h>
-#include <llvm/IR/GetElementPtrTypeIterator.h>
-#include <llvmWrapper/Support/Alignment.h>
+#include "llvm/Config/llvm-config.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/Support/MathExtras.h"
+#include "llvm/IR/GetElementPtrTypeIterator.h"
+#include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPop.hpp"
 #include <deque>
 #include <set>
@@ -224,14 +225,14 @@ void AlignmentAnalysis::SetInstAlignment(LoadInst& I)
 {
     // Set the align attribute of the load according to the detected
     // alignment of its operand.
-    I.setAlignment(MaybeAlign(iSTD::Max(I.getAlignment(), getAlignValue(I.getPointerOperand()))));
+    I.setAlignment(IGCLLVM::getCorrectAlign(iSTD::Max(I.getAlignment(), getAlignValue(I.getPointerOperand()))));
 }
 
 void AlignmentAnalysis::SetInstAlignment(StoreInst& I)
 {
     // Set the align attribute of the store according to the detected
     // alignment of its operand.
-    I.setAlignment(MaybeAlign(iSTD::Max(I.getAlignment(), getAlignValue(I.getPointerOperand()))));
+    I.setAlignment(IGCLLVM::getCorrectAlign(iSTD::Max(I.getAlignment(), getAlignValue(I.getPointerOperand()))));
 }
 
 unsigned int AlignmentAnalysis::visitAdd(BinaryOperator& I)

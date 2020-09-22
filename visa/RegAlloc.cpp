@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include <vector>
+#include <optional>
 #include <limits.h>
 #include "Mem_Manager.h"
 #include "FlowGraph.h"
@@ -42,14 +43,14 @@ using namespace vISA;
 
 #define GRAPH_COLOR
 
-PointsToAnalysis::PointsToAnalysis( DECLARE_LIST &declares, unsigned int numBB ) :
-numBBs(numBB), numAddrs(0), indirectUses(NULL), pointsToSets(NULL), addrPointsToSetIndex(NULL)
+PointsToAnalysis::PointsToAnalysis(DECLARE_LIST &declares, unsigned int numBB) :
+    numBBs(numBB), numAddrs(0), indirectUses(NULL), pointsToSets(NULL), addrPointsToSetIndex(NULL)
 {
     for (auto decl : declares)
     {
         //add alias check, For Alias Dcl
-        if( ( decl->getRegFile() == G4_ADDRESS ) &&
-            decl->getAliasDeclare() == NULL )  // It is a base declaration, not alias
+        if ((decl->getRegFile() == G4_ADDRESS) &&
+            decl->getAliasDeclare() == NULL)  // It is a base declaration, not alias
         {
             // participate liveness analysis
             decl->getRegVar()->setId(numAddrs++);
@@ -63,8 +64,8 @@ numBBs(numBB), numAddrs(0), indirectUses(NULL), pointsToSets(NULL), addrPointsTo
     // assign all addr aliases the same ID as its root
     for (auto decl : declares)
     {
-        if( ( decl->getRegFile() == G4_ADDRESS ) &&
-            decl->getAliasDeclare() != NULL )
+        if ((decl->getRegFile() == G4_ADDRESS) &&
+            decl->getAliasDeclare() != NULL)
         {
             // participate liveness analysis
             decl->getRegVar()->setId(decl->getRegVar()->getId());
@@ -72,14 +73,14 @@ numBBs(numBB), numAddrs(0), indirectUses(NULL), pointsToSets(NULL), addrPointsTo
     }
     indirectUses = new REGVAR_VECTOR[numBBs];
 
-    if( numAddrs > 0 )
+    if (numAddrs > 0)
     {
-        for( unsigned int i = 0; i < numAddrs; i++ )
+        for (unsigned int i = 0; i < numAddrs; i++)
             regVars.push_back(NULL);
 
         for (auto decl : declares)
         {
-            if( ( decl->getRegFile() == G4_ADDRESS ) &&
+            if ((decl->getRegFile() == G4_ADDRESS) &&
                 decl->getAliasDeclare() == NULL &&
                 decl->getRegVar()->getId() != UNDEFINED_VAL)
             {
@@ -90,7 +91,7 @@ numBBs(numBB), numAddrs(0), indirectUses(NULL), pointsToSets(NULL), addrPointsTo
         pointsToSets = new REGVAR_VECTOR[numAddrs];
         addrPointsToSetIndex = new unsigned[numAddrs];
         // initially each address variable has its own points-to set
-        for( unsigned i = 0; i < numAddrs; i++ )
+        for (unsigned i = 0; i < numAddrs; i++)
         {
             addrPointsToSetIndex[i] = i;
         }
@@ -444,7 +445,7 @@ LivenessAnalysis::LivenessAnalysis(
     while (di != gra.kernel.Declares.end())
     {
         G4_Declare* decl = *di;
-        if (livenessCandidate(decl, verifyRA) && decl->getAliasDeclare() == NULL )
+        if (livenessCandidate(decl, verifyRA) && decl->getAliasDeclare() == NULL)
         {
             if (decl->getIsSplittedDcl())
             {
@@ -482,7 +483,7 @@ LivenessAnalysis::LivenessAnalysis(
             // dump Reg Var info for debugging
             //
 
-            if( decl->getRegVar()->isPhyRegAssigned() == false )
+            if (decl->getRegVar()->isPhyRegAssigned() == false)
             {
                 areAllPhyRegAssigned = false;
             }
@@ -662,44 +663,44 @@ void LivenessAnalysis::updateKillSetForDcl(G4_Declare* dcl, BitSet* curBBGen, Bi
 void LivenessAnalysis::performScoping(BitSet* curBBGen, BitSet* curBBKill, G4_BB* curBB, BitSet* entryBBGen, BitSet* entryBBKill, G4_BB* entryBB)
 {
     unsigned scopeID = curBB->getScopeID();
-    for( INST_LIST_ITER it = curBB->begin();
+    for (INST_LIST_ITER it = curBB->begin();
         it != curBB->end();
-        it++ )
+        it++)
     {
         G4_INST* inst = (*it);
 
         G4_DstRegRegion* dst = inst->getDst();
 
-        if( dst &&
-            dst->getBase()->isRegAllocPartaker() )
+        if (dst &&
+            dst->getBase()->isRegAllocPartaker())
         {
-            G4_Declare* dcl = GetTopDclFromRegRegion( dst );
-            updateKillSetForDcl( dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID );
+            G4_Declare* dcl = GetTopDclFromRegRegion(dst);
+            updateKillSetForDcl(dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID);
         }
 
-        for( int i = 0; i < G4_MAX_SRCS; i++ )
+        for (int i = 0; i < G4_MAX_SRCS; i++)
         {
             G4_Operand* src = inst->getSrc(i);
 
-            if( src )
+            if (src)
             {
-                if( src->isSrcRegRegion() &&
-                    src->asSrcRegRegion()->getBase()->isRegAllocPartaker() )
+                if (src->isSrcRegRegion() &&
+                    src->asSrcRegRegion()->getBase()->isRegAllocPartaker())
                 {
-                    G4_Declare* dcl = GetTopDclFromRegRegion( src );
-                    updateKillSetForDcl( dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID );
+                    G4_Declare* dcl = GetTopDclFromRegRegion(src);
+                    updateKillSetForDcl(dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID);
                 }
-                else if( src->isAddrExp() &&
-                    src->asAddrExp()->getRegVar()->isRegAllocPartaker() )
+                else if (src->isAddrExp() &&
+                    src->asAddrExp()->getRegVar()->isRegAllocPartaker())
                 {
                     G4_Declare* dcl = src->asAddrExp()->getRegVar()->getDeclare();
 
-                    while( dcl->getAliasDeclare() != NULL )
+                    while (dcl->getAliasDeclare() != NULL)
                     {
                         dcl = dcl->getAliasDeclare();
                     }
 
-                    updateKillSetForDcl( dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID );
+                    updateKillSetForDcl(dcl, curBBGen, curBBKill, curBB, entryBBGen, entryBBKill, entryBB, scopeID);
                 }
             }
         }
@@ -760,8 +761,8 @@ void LivenessAnalysis::detectNeverDefinedVarRows()
                 unsigned int lb = dst->getLeftBound();
                 unsigned int rb = dst->getRightBound();
 
-                unsigned int rowStart = lb / G4_GRF_REG_NBYTES;
-                unsigned int rowEnd = rb / G4_GRF_REG_NBYTES;
+                unsigned int rowStart = lb / numEltPerGRF(Type_UB);
+                unsigned int rowEnd = rb / numEltPerGRF(Type_UB);
 
                 it->second->set(rowStart, rowEnd);
             }
@@ -791,7 +792,7 @@ void LivenessAnalysis::detectNeverDefinedVarRows()
         {
             if (!it.second->isSet(i))
             {
-                undefinedRows->set((i*G4_GRF_REG_NBYTES), ((i+1)*G4_GRF_REG_NBYTES) - 1);
+                undefinedRows->set((i*numEltPerGRF(Type_UB)), ((i+1)*numEltPerGRF(Type_UB)) - 1);
             }
         }
 
@@ -823,7 +824,7 @@ void LivenessAnalysis::computeLiveness()
         return;
     }
 
-    startTimer(TIMER_LIVENESS);
+    startTimer(TimerID::LIVENESS);
 
 #ifdef DEBUG_VERBOSE_ON
     std::vector<FuncInfo*>& fns = fg.funcInfoTable;
@@ -837,32 +838,46 @@ void LivenessAnalysis::computeLiveness()
 
     for (unsigned i = 0; i < numVarId; i++)
     {
+        bool setLiveIn = false, setLiveOut = false;
+
         G4_Declare *decl = vars[i]->getDeclare();
-        if (((decl->isInput() == true &&
-             !(fg.builder->getFCPatchInfo() &&
-               fg.builder->getFCPatchInfo()->getFCComposableKernel() &&
-               !decl->isLiveIn())) &&
-             !(fg.builder->isPreDefArg(decl) &&
-               (fg.builder->getIsKernel() ||
-                (fg.getIsStackCallFunc() &&
-                 fg.builder->getArgSize() == 0)))) ||
-            (fg.builder->getOption(vISA_enablePreemption) &&
-             decl == fg.builder->getBuiltinR0()) )
+
+        if ((decl->isInput() == true &&
+            !(fg.builder->getFCPatchInfo() &&
+                fg.builder->getFCPatchInfo()->getFCComposableKernel() &&
+                !decl->isLiveIn())) &&
+            !(fg.builder->isPreDefArg(decl) &&
+                (fg.builder->getIsKernel() ||
+                    (fg.getIsStackCallFunc() &&
+                        fg.builder->getArgSize() == 0))))
+            setLiveIn = true;
+
+        if (fg.builder->getOption(vISA_enablePreemption) &&
+            decl == fg.builder->getBuiltinR0())
+            setLiveIn = true;
+
+        if(setLiveIn)
         {
-            inputDefs.set( i, true );
+            inputDefs.set(i, true);
 #ifdef DEBUG_VERBOSE_ON
             DEBUG_VERBOSE("First def input = " << decl->getName() << std::endl);
 #endif
         }
-        if ((decl->isOutput() == true &&
+
+        if (decl->isOutput() == true &&
             !(fg.builder->isPreDefRet(decl) &&
-               (fg.builder->getIsKernel() ||
-                (fg.getIsStackCallFunc() &&
-                 fg.builder->getRetVarSize() == 0)))) ||
-            (fg.builder->getOption(vISA_enablePreemption) &&
-              decl == fg.builder->getBuiltinR0()))
+                (fg.builder->getIsKernel() ||
+                    (fg.getIsStackCallFunc() &&
+                        fg.builder->getRetVarSize() == 0))))
+            setLiveOut = true;
+
+        if (fg.builder->getOption(vISA_enablePreemption) &&
+            decl == fg.builder->getBuiltinR0())
+            setLiveOut = true;
+
+        if(setLiveOut)
         {
-            outputUses.set( i, true );
+            outputUses.set(i, true);
 #ifdef DEBUG_VERBOSE_ON
             DEBUG_VERBOSE("First def output    = " << decl->getName() << std::endl);
 #endif
@@ -904,7 +919,7 @@ void LivenessAnalysis::computeLiveness()
     BitSet* subEntryKill = NULL;
     BitSet* subEntryGen = NULL;
 
-    if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+    if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
         //
         // Top-down order of BB list iteration guarantees that
@@ -935,16 +950,16 @@ void LivenessAnalysis::computeLiveness()
     //
     // compute indr accesses
     //
-    if( selectedRF & G4_GRF )
+    if (selectedRF & G4_GRF)
     {
         // only GRF variables can have their address taken
         for (auto bb : fg)
         {
-            const REGVAR_VECTOR* grfVecPtr = pointsToAnalysis.getIndrUseVectorPtrForBB( bb->getId() );
-            for( unsigned i = 0; i < grfVecPtr->size(); i++ )
+            const REGVAR_VECTOR* grfVecPtr = pointsToAnalysis.getIndrUseVectorPtrForBB(bb->getId());
+            for (unsigned i = 0; i < grfVecPtr->size(); i++)
             {
                 G4_RegVar* addrTaken =(*grfVecPtr)[i];
-                indr_use[bb->getId()].set( addrTaken->getId(), true );
+                indr_use[bb->getId()].set(addrTaken->getId(), true);
                 addr_taken.set(addrTaken->getId(), true);
             }
         }
@@ -960,7 +975,7 @@ void LivenessAnalysis::computeLiveness()
     if (performIPA() && fg.builder->getOption(vISA_hierarchicaIPA))
     {
         hierarchicalIPA(inputDefs, outputUses);
-        stopTimer(TIMER_LIVENESS);
+        stopTimer(TimerID::LIVENESS);
         return;
     }
 
@@ -1007,7 +1022,7 @@ void LivenessAnalysis::computeLiveness()
         //
         std::list<G4_BB*>::iterator it = fg.begin();
 
-        for ( ; it != fg.end(); ++it) {
+        for (; it != fg.end(); ++it) {
             FuncInfo* funcInfoBB = (*it)->getCalleeInfo();
 
             if ((*it)->getBBType() & G4_BB_CALL_TYPE)
@@ -1024,7 +1039,7 @@ void LivenessAnalysis::computeLiveness()
             else if ((*it)->getBBType() & G4_BB_INIT_TYPE)
             {
                 std::list<G4_BB*>::iterator jt = (*it)->Preds.begin();
-                for ( ; jt != (*it)->Preds.end(); ++jt)
+                for (; jt != (*it)->Preds.end(); ++jt)
                 {
                     MUST_BE_TRUE((*jt)->getBBType() & G4_BB_CALL_TYPE, ERROR_REGALLOC);
                 }
@@ -1044,7 +1059,7 @@ void LivenessAnalysis::computeLiveness()
             else if ((*it)->getBBType() & G4_BB_EXIT_TYPE)
             {
                 std::list<G4_BB*>::iterator jt = (*it)->Succs.begin();
-                for ( ; jt != (*it)->Succs.end(); ++jt)
+                for (; jt != (*it)->Succs.end(); ++jt)
                 {
                     MUST_BE_TRUE((*jt)->getBBType() & G4_BB_RETURN_TYPE, ERROR_REGALLOC);
                 }
@@ -1097,7 +1112,7 @@ void LivenessAnalysis::computeLiveness()
                     change = true;
                 }
             }
-            while(rit != fg.begin());
+            while (rit != fg.begin());
         }
 
         change = true;
@@ -1133,10 +1148,10 @@ void LivenessAnalysis::computeLiveness()
                 }
 
             }
-            while(rit != fg.begin());
+            while (rit != fg.begin());
         }
 
-        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+        if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
         {
             for (unsigned i = 0; i < numFnId; i++)
             {
@@ -1190,7 +1205,7 @@ void LivenessAnalysis::computeLiveness()
                 }
 
             }
-            while(rit != fg.begin());
+            while (rit != fg.begin());
         }
 
         //
@@ -1245,7 +1260,7 @@ void LivenessAnalysis::computeLiveness()
     dump_fn_vector("MAYDEF", fns, maydef);
 #endif
 
-        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+        if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
         {
             for (unsigned i = 0; i < numFnId; i++)
             {
@@ -1298,7 +1313,7 @@ void LivenessAnalysis::computeLiveness()
     //
     else {
 
-        if (fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
+        if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D &&
             (selectedRF & G4_GRF || selectedRF & G4_FLAG) &&
             (numFnId > 0))
         {
@@ -1333,7 +1348,7 @@ void LivenessAnalysis::computeLiveness()
                 // use_in  = use_gen + (use_out - use_kill)
                 //
                 --rit;
-                if (contextFreeUseAnalyze((*rit)))
+                if (contextFreeUseAnalyze((*rit), change))
                 {
                     change = true;
                 }
@@ -1360,7 +1375,7 @@ void LivenessAnalysis::computeLiveness()
                 // def_in   = def_out(p1) + def_out(p2) + ... where p1 p2 ... are the predecessors of bb
                 // def_out |= def_in
                 //
-                if (contextFreeDefAnalyze(bb))
+                if (contextFreeDefAnalyze(bb, change))
                 {
                     change = true;
                 }
@@ -1453,7 +1468,7 @@ void LivenessAnalysis::computeLiveness()
     }
 #endif
 
-    stopTimer(TIMER_LIVENESS);
+    stopTimer(TimerID::LIVENESS);
 }
 
 //
@@ -1523,15 +1538,25 @@ void LivenessAnalysis::useAnalysis(FuncInfo* subroutine)
                 }
             }
 
-            BitSet oldUseIn = use_in[bbid];
-
-            use_in[bbid] = use_out[bbid];
-            use_in[bbid] -= use_kill[bbid];
-            use_in[bbid] |= use_gen[bbid];
-
-            if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid])
+            if (changed)
             {
-                changed = true;
+                // no need to update changed, save a copy
+                use_in[bbid] = use_out[bbid];
+                use_in[bbid] -= use_kill[bbid];
+                use_in[bbid] |= use_gen[bbid];
+            }
+            else
+            {
+                BitSet oldUseIn = use_in[bbid];
+
+                use_in[bbid] = use_out[bbid];
+                use_in[bbid] -= use_kill[bbid];
+                use_in[bbid] |= use_gen[bbid];
+
+                if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid])
+                {
+                    changed = true;
+                }
             }
         }
     } while (changed);
@@ -1576,15 +1601,25 @@ void LivenessAnalysis::useAnalysisWithArgRetVal(FuncInfo* subroutine,
                 }
             }
 
-            BitSet oldUseIn = use_in[bbid];
-
-            use_in[bbid] = use_out[bbid];
-            use_in[bbid] -= use_kill[bbid];
-            use_in[bbid] |= use_gen[bbid];
-
-            if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid])
+            if (changed)
             {
-                changed = true;
+                // no need to update changed, save a copy
+                use_in[bbid] = use_out[bbid];
+                use_in[bbid] -= use_kill[bbid];
+                use_in[bbid] |= use_gen[bbid];
+            }
+            else
+            {
+                BitSet oldUseIn = use_in[bbid];
+
+                use_in[bbid] = use_out[bbid];
+                use_in[bbid] -= use_kill[bbid];
+                use_in[bbid] |= use_gen[bbid];
+
+                if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid])
+                {
+                    changed = true;
+                }
             }
         }
     } while (changed);
@@ -1608,7 +1643,11 @@ void LivenessAnalysis::defAnalysis(FuncInfo* subroutine)
         for (auto&& bb : subroutine->getBBList())
         {
             uint32_t bbid = bb->getId();
-            BitSet oldDefIn = def_in[bbid];
+            std::optional<BitSet> defInOrNull = std::nullopt;
+            if (!changed)
+            {
+                defInOrNull = def_in[bbid];
+            }
             auto phyPredBB = (bb == fg.getEntryBB()) ? nullptr : bb->getPhysicalPred();
             if (phyPredBB && (phyPredBB->getBBType() & G4_BB_CALL_TYPE))
             {
@@ -1632,9 +1671,12 @@ void LivenessAnalysis::defAnalysis(FuncInfo* subroutine)
                 }
             }
 
-            if (def_in[bbid] != oldDefIn)
+            if (!changed)
             {
-                changed = true;
+                if (def_in[bbid] != defInOrNull.value())
+                {
+                    changed = true;
+                }
             }
             def_out[bbid] |= def_in[bbid];
         }
@@ -1844,8 +1886,8 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
     unsigned execSize = inst->getExecSize();
     MUST_BE_TRUE(dst->getBase()->isRegVar(), ERROR_REGALLOC);
 
-    if( !bb->isAllLaneActive() && !inst->isWriteEnableInst() &&
-        fg.getKernel()->getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D )
+    if (!bb->isAllLaneActive() && !inst->isWriteEnableInst() &&
+        fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) != VISA_3D)
     {
         // conservatively assume non-nomask instructions in simd control flow
         // may not write the whole region
@@ -1859,10 +1901,10 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
     // e.g., setp (M5_NM, 16) P11 V97(8,0)<0;1,0>
     // It can be only considered as a complete kill
     // if the computed bound diff matches with the number of flag elements
-    if (dst->isFlag() == true )
+    if (dst->isFlag() == true)
     {
-        if( (dst->getRightBound() - dst->getLeftBound() + 1) ==
-            dst->getBase()->asRegVar()->getDeclare()->getNumberFlagElements() )
+        if ((dst->getRightBound() - dst->getLeftBound() + 1) ==
+            dst->getBase()->asRegVar()->getDeclare()->getNumberFlagElements())
         {
         return true;
     }
@@ -1878,7 +1920,7 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
 
     G4_Declare* decl = ((G4_RegVar*)dst->getBase())->getDeclare();
     G4_Declare* primaryDcl = decl;
-    while( primaryDcl->getAliasDeclare() )
+    while (primaryDcl->getAliasDeclare())
     {
         primaryDcl = primaryDcl->getAliasDeclare();
     }
@@ -1895,7 +1937,7 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
         dst->getRegOff() != 0 ||
         dst->getSubRegOff() != 0 ||
         dst->getHorzStride() != 1 ||
-        inst->isPartialWrite() ) {
+        inst->isPartialWrite()) {
         return false;
     }
 
@@ -1928,7 +1970,7 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
                                         G4_VarBase* flagReg,
                                         const Options *opt)
 {
-    if( !bb->isAllLaneActive() && !inst->isWriteEnableInst() && opt->getTarget() != VISA_3D )
+    if (!bb->isAllLaneActive() && !inst->isWriteEnableInst() && opt->getTarget() != VISA_3D)
     {
         // conservatively assume non-nomask instructions in simd control flow
         // may not write the whole region
@@ -1936,7 +1978,7 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
     }
 
     G4_Declare* decl = flagReg->asRegVar()->getDeclare();
-    if( inst->getExecSize() != decl->getNumberFlagElements() )
+    if (inst->getExecSize() != G4_ExecSize(decl->getNumberFlagElements()))
     {
         return false;
     }
@@ -1948,15 +1990,13 @@ bool LivenessAnalysis::writeWholeRegion(G4_BB* bb,
 void LivenessAnalysis::footprintDst(G4_BB* bb,
     G4_INST* i,
     G4_Operand* opnd,
-    BitSet* dstfootprint,
-    bool isLocal)
+    BitSet* dstfootprint)
 {
     if (dstfootprint &&
         !(i->isPartialWrite()) &&
-        ((isLocal ||
-            bb->isAllLaneActive() ||
+        ((bb->isAllLaneActive() ||
             i->isWriteEnableInst() == true) ||
-            gra.kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D))
+            gra.kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D))
     {
         // Bitwise OR left-bound/right-bound with dst footprint to indicate
         // bytes that are written in to
@@ -2104,7 +2144,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
                     }
                     else
                     {
-                        footprintDst(bb, i, dstrgn, dstfootprint, gra.isBlockLocal(topdcl));
+                        footprintDst(bb, i, dstrgn, dstfootprint);
 
                         use_gen.set(id, true);
                     }
@@ -2276,7 +2316,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
                     }
                     else
                     {
-                        footprintDst(bb, i, mod, dstfootprint, gra.isBlockLocal(topdcl));
+                        footprintDst(bb, i, mod, dstfootprint);
                         use_gen.set(id, true);
                     }
                 }
@@ -2550,7 +2590,7 @@ bool LivenessAnalysis::contextSensitiveBackwardDataAnalyze(
     //
     if (summary)
     {
-        if ( bb->getBBType() == G4_BB_INIT_TYPE )
+        if (bb->getBBType() == G4_BB_INIT_TYPE)
         {
             FuncInfo* itsFuncInfo = bb->getFuncInfo();
             MUST_BE_TRUE(itsFuncInfo->getInitBB() == bb, ERROR_REGALLOC);
@@ -2628,7 +2668,7 @@ bool LivenessAnalysis::contextSensitiveForwardDataAnalyze(
     //
     if (summary)
     {
-        if ( bb->getBBType() == G4_BB_EXIT_TYPE )
+        if (bb->getBBType() == G4_BB_EXIT_TYPE)
         {
             FuncInfo* itsFuncInfo = bb->getFuncInfo();
             MUST_BE_TRUE(itsFuncInfo->getExitBB() == bb, ERROR_REGALLOC);
@@ -2643,7 +2683,7 @@ bool LivenessAnalysis::contextSensitiveForwardDataAnalyze(
 // use_out = use_in(s1) + use_in(s2) + ... where s1 s2 ... are the successors of bb
 // use_in  = use_gen + (use_out - use_kill)
 //
-bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB* bb)
+bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB* bb, bool isChanged)
 {
     bool changed;
 
@@ -2653,13 +2693,21 @@ bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB* bb)
     {
         changed = false;
     }
-
+    else if (isChanged)
+    {
+        // no need to update changed. This saves a memcpy
+        for (auto succBB : bb->Succs)
+        {
+            use_out[bbid] |= use_in[succBB->getId()];
+        }
+        changed = true;
+    }
     else
     {
         BitSet old = use_out[bbid];
-        for (BB_LIST_ITER it = bb->Succs.begin(), end = bb->Succs.end(); it != end; it++)
+        for (auto succBB : bb->Succs)
         {
-            use_out[bbid] |= use_in[(*it)->getId()];
+            use_out[bbid] |= use_in[succBB->getId()];
         }
 
         changed = (old != use_out[bbid]);
@@ -2679,7 +2727,7 @@ bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB* bb)
 // def_in = def_out(p1) + def_out(p2) + ... where p1 p2 ... are the predecessors of bb
 // def_out |= def_in
 //
-bool LivenessAnalysis::contextFreeDefAnalyze(G4_BB* bb)
+bool LivenessAnalysis::contextFreeDefAnalyze(G4_BB* bb, bool isChanged)
 {
     bool changed  = false;
     unsigned bbid = bb->getId();
@@ -2688,15 +2736,22 @@ bool LivenessAnalysis::contextFreeDefAnalyze(G4_BB* bb)
     {
         changed = false;
     }
+    else if (isChanged)
+    {
+        // no need to update changed. This saves a memcpy
+        for (auto predBB : bb->Preds)
+        {
+            def_in[bbid] |= def_out[predBB->getId()];
+        }
+        changed = true;
+    }
     else
     {
         BitSet old = def_in[bbid];
-
-        for (BB_LIST_ITER it = bb->Preds.begin(), end = bb->Preds.end(); it != end; it++)
+        for (auto predBB : bb->Preds)
         {
-            def_in[bbid] |= def_out[(*it)->getId()];
+            def_in[bbid] |= def_out[predBB->getId()];
         }
-
         changed = (old != def_in[bbid]);
     }
 
@@ -2779,7 +2834,7 @@ void LivenessAnalysis::dump() const
                 dumpVar(var);
             }
         }
-        std::cerr << "\nBB" << bb->getId() << "'s live in size: " << total_size / GENX_GRF_REG_SIZ << "\n\n";
+        std::cerr << "\nBB" << bb->getId() << "'s live in size: " << total_size / numEltPerGRF(Type_UB) << "\n\n";
         std::cerr << "BB" << bb->getId() << "'s live out: ";
         total_size = 0;
         count = 0;
@@ -2791,7 +2846,7 @@ void LivenessAnalysis::dump() const
                 dumpVar(var);
             }
         }
-        std::cerr << "\nBB" << bb->getId() << "'s live out size: " << total_size / GENX_GRF_REG_SIZ<< "\n\n";
+        std::cerr << "\nBB" << bb->getId() << "'s live out size: " << total_size / numEltPerGRF(Type_UB)<< "\n\n";
     }
 }
 
@@ -2801,14 +2856,14 @@ void LivenessAnalysis::dump() const
 //
 bool LivenessAnalysis::isLiveAtEntry(G4_BB* bb, unsigned var_id) const
 {
-    return use_in[bb->getId()].isSet( var_id ) && def_in[bb->getId()].isSet( var_id );
+    return use_in[bb->getId()].isSet(var_id) && def_in[bb->getId()].isSet(var_id);
 }
 //
 // return true if var is live at the exit of bb
 //
 bool LivenessAnalysis::isLiveAtExit(G4_BB* bb, unsigned var_id) const
 {
-    return use_out[bb->getId()].isSet( var_id ) && def_out[bb->getId()].isSet( var_id );
+    return use_out[bb->getId()].isSet(var_id) && def_out[bb->getId()].isSet(var_id);
 }
 
 
@@ -2816,7 +2871,7 @@ void GlobalRA::markBlockLocalVar(G4_RegVar* var, unsigned bbId)
 {
     G4_Declare* dcl = var->getDeclare();
 
-    while( dcl->getAliasDeclare() != NULL )
+    while (dcl->getAliasDeclare() != NULL)
     {
         dcl = dcl->getAliasDeclare();
     }
@@ -2994,7 +3049,7 @@ void GlobalRA::resetGlobalRAStates()
         };
 
         kernel.Declares.erase(
-            std::remove_if(kernel.Declares.begin(), kernel.Declares.end(), isPartialDcl),
+            std::remove_if (kernel.Declares.begin(), kernel.Declares.end(), isPartialDcl),
             kernel.Declares.end());
     }
 
@@ -3075,7 +3130,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
             // The call dst requires only 2 dword, so in VISAKernelImpl::expandIndirectCallWithRegTarget
             // we take r1.2, r1.3 as the tmp register for calculating the call target offset, if required.
             // That function assumes r1.0 is reserved here and r1.2, r1.3 won't be used
-            G4_Declare* r1_dst = builder->createDeclareNoLookup(n, G4_GRF, 8, 1, Type_UD);
+            G4_Declare* r1_dst = builder->createDeclareNoLookup(n, G4_GRF, numEltPerGRF(Type_UD), 1, Type_UD);
             r1_dst->getRegVar()->setPhyReg(builder->phyregpool.getGreg(1), 0);
             G4_DstRegRegion* dstRgn = builder->createDst(r1_dst->getRegVar(), 0, 0, 1, Type_UD);
             fcall->setDest(dstRgn);
@@ -3086,14 +3141,14 @@ void FlowGraph::setABIForStackCallFunctionCalls()
             const char* n = builder->getNameString(mem, 25, "FRET_RET_LOC_%d", ret_id++);
             G4_INST* fret = bb->back();
             const RegionDesc* rd = builder->createRegionDesc(2, 2, 1);
-            G4_Declare* r1_src = builder->createDeclareNoLookup(n, G4_INPUT, 8, 1, Type_UD);
+            G4_Declare* r1_src = builder->createDeclareNoLookup(n, G4_INPUT, numEltPerGRF(Type_UD), 1, Type_UD);
             r1_src->getRegVar()->setPhyReg(builder->phyregpool.getGreg(1), 0);
             G4_Operand* srcRgn = builder->createSrcRegRegion(Mod_src_undef, Direct, r1_src->getRegVar(), 0, 0, rd, Type_UD);
             fret->setSrc(srcRgn, 0);
-            if (fret->getExecSize() == 1)
+            if (fret->getExecSize() == g4::SIMD1)
             {
-                //due to <2;2,1> regioning we must update exec size as well
-                fret->setExecSize(2);
+                // due to <2;2,1> regioning we must update exec size as well
+                fret->setExecSize(g4::SIMD2);
             }
             if (builder->getOption(vISA_GenerateDebugInfo))
             {
@@ -3135,7 +3190,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
         // Verify Live-in
         std::map<uint32_t, G4_Declare*> LiveInRegMap;
         std::map<uint32_t, G4_Declare*>::iterator LiveInRegMapIt;
-        std::vector<uint32_t> liveInRegVec(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
+        std::vector<uint32_t> liveInRegVec(numGRF * numEltPerGRF(Type_UW), UINT_MAX);
 
         for (auto dcl_it : kernel.Declares)
         {
@@ -3154,7 +3209,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                    uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                         (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3193,7 +3248,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
         G4_Declare *ret = kernel.fg.builder->getStackCallRet();
         std::map<uint32_t, G4_Declare*> liveOutRegMap;
         std::map<uint32_t, G4_Declare*>::iterator liveOutRegMapIt;
-        std::vector<uint32_t> liveOutRegVec(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
+        std::vector<uint32_t> liveOutRegVec(numGRF * numEltPerGRF(Type_UW), UINT_MAX);
 
         for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin();
             dcl_it != kernel.Declares.end();
@@ -3214,7 +3269,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                    uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                         (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3275,7 +3330,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                    uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                         (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3346,7 +3401,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                        uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                             (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3400,7 +3455,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                    uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                         (regOff * G4_Type_Table[ret->getElemType()].byteSize) / G4_WSIZE;
                     for (uint32_t i = 0; i < ret->getWordSize(); ++i, ++idx)
                     {
@@ -3434,7 +3489,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                    uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                         (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3512,7 +3567,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                        uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                             (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3579,7 +3634,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                        uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                             (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3624,7 +3679,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * G4_GRF_REG_SIZE +
+                        uint32_t idx = regNum * numEltPerGRF(Type_UW) +
                             (regOff * G4_Type_Table[dcl->getElemType()].byteSize) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3681,7 +3736,7 @@ static void recordRAStats(IR_Builder& builder,
     if (RAStatus == VISA_SUCCESS)
     {
         Stats.SetFlag("IsRAsuccessful", SimdSize);
-        switch(kernel.getRAType())
+        switch (kernel.getRAType())
         {
         case RA_Type::TRIVIAL_BC_RA:
         case RA_Type::TRIVIAL_RA:
@@ -3705,6 +3760,8 @@ static void recordRAStats(IR_Builder& builder,
         case RA_Type::GRAPH_COLORING_SPILL_FF_RA:
         case RA_Type::GRAPH_COLORING_SPILL_RR_BC_RA:
         case RA_Type::GRAPH_COLORING_SPILL_FF_BC_RA:
+        case RA_Type::GLOBAL_LINEAR_SCAN_RA:
+        case RA_Type::GLOBAL_LINEAR_SCAN_BC_RA:
             Stats.SetFlag("IsGlobalRA", SimdSize);
             break;
         case RA_Type::UNKNOWN_RA:
@@ -3719,13 +3776,6 @@ static void recordRAStats(IR_Builder& builder,
 
 int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 {
-    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
-    {
-        if (kernel.getNumRegTotal() < G4_DEFAULT_GRF_NUM)
-        {
-            MUST_BE_TRUE(false, "total GRF number <128, cannot handle stack call!");
-        }
-    }
 
     if (builder.getOption(vISA_DumpDotAll))
     {
@@ -3744,7 +3794,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 
     kernel.fg.reassignBlockIDs();
 
-    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
+    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D)
     {
         kernel.fg.findNaturalLoops();
 
@@ -3777,7 +3827,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 
     //FIXME: here is a temp WA
     if (kernel.fg.funcInfoTable.size() > 0 &&
-        kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D)
+        kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D)
     {
         kernel.getOptions()->setOption(vISAOptions::vISA_LocalRA, false);
     }
@@ -3792,7 +3842,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     //Remove the un-referenced declares
     gra.removeUnreferencedDcls();
 
-    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_CM)
+    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
         kernel.fg.markScope();
     }
@@ -3801,7 +3851,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     // perform graph coloring for whole program
     //
 
-    if(kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
+    if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
     {
         kernel.fg.addSaveRestorePseudoDeclares(builder);
     }
@@ -3813,15 +3863,15 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
         jitInfo->numBytesScratchGtpin = kernel.getGTPinData()->getNumBytesScratchUse();
     }
 
-    if (auto sp = kernel.getVarSplitPass())
-    {
-        sp->replaceIntrinsics();
-    }
-
     recordRAStats(builder, kernel, status);
     if (status != VISA_SUCCESS)
     {
         return status;
+    }
+
+    if (auto sp = kernel.getVarSplitPass())
+    {
+        sp->replaceIntrinsics();
     }
 
     if (builder.getOption(vISA_VerifyRA))

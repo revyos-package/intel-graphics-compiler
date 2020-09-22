@@ -63,10 +63,16 @@ namespace IGC {
 
         bool hasRecursion() const { return HasRecursion; }
 
+        bool isTrimmedFunction( llvm::Function* F);
+
     private:
         void analyze();
         void checkSubroutine();
         void clear();
+
+        bool funcIsGoodtoTrim( llvm::Function* F );
+        void reduceKernelSize();
+        size_t findKernelTotalSize(llvm::Function* Kernel, uint32_t uk, uint32_t &up);
 
         /// \brief Return the associated opaque data.
         template <typename T> T* get(llvm::Function* F) {

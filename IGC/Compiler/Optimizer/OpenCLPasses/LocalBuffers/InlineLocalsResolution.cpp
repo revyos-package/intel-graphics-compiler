@@ -29,7 +29,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/helper.h"
-#include "Compiler/DebugInfo/DebugInfoUtils.hpp"
+#include "DebugInfo/DebugInfoUtils.hpp"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -309,7 +309,7 @@ void InlineLocalsResolution::collectInfoOnSharedLocalMem(Module& M)
                 GlobalVariable::ThreadLocalMode::NotThreadLocal,
                 ADDRESS_SPACE_LOCAL);
 
-            m_pGV->setAlignment(MaybeAlign(maxAlignOnModule));
+            m_pGV->setAlignment(IGCLLVM::getCorrectAlign(maxAlignOnModule));
 
             for (auto call : callsToReplace)
             {

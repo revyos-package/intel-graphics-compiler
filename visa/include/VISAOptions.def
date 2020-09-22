@@ -30,6 +30,7 @@ DEF_VISA_OPTION(vISA_EmitLocation,          ET_BOOL, "-emitLocation",    UNUSED,
 DEF_VISA_OPTION(vISA_dumpRPE,               ET_BOOL, "-dumpRPE",         UNUSED, false)
 DEF_VISA_OPTION(vISA_dumpLiveness,               ET_BOOL, "-dumpLiveness",         UNUSED, false)
 DEF_VISA_OPTION(vISA_disableInstDebugInfo,  ET_BOOL, "-disableInstDebugInfo",      UNUSED, false)
+DEF_VISA_OPTION(vISA_analyzeMove,           ET_BOOL, "-analyzeMove",     UNUSED, false)
 
 //=== Optimization options ===
 DEF_VISA_OPTION(vISA_EnableAlways,          ET_BOOL, NULLSTR,            UNUSED, true)
@@ -104,12 +105,12 @@ DEF_VISA_OPTION(vISA_LocalBankConflictReduction, ET_BOOL, "-nolocalBCR",   UNUSE
 DEF_VISA_OPTION(vISA_FailSafeRA,            ET_BOOL, "-nofailsafera",    UNUSED, true)
 DEF_VISA_OPTION(vISA_FlagSpillCodeCleanup,  ET_BOOL, "-disableFlagSpillClean",            UNUSED, true)
 DEF_VISA_OPTION(vISA_GRFSpillCodeCleanup,   ET_BOOL, NULLSTR,            UNUSED, true)
-DEF_VISA_OPTION(vISA_SpillSpaceCompression, ET_BOOL, NULLSTR,            UNUSED, true)
+DEF_VISA_OPTION(vISA_SpillSpaceCompression, ET_BOOL, "-nospillcompression",            UNUSED, true)
 DEF_VISA_OPTION(vISA_ConsiderLoopInfoInRA,  ET_BOOL, "-noloopra",        UNUSED, true)
 DEF_VISA_OPTION(vISA_ReserveR0,             ET_BOOL, "-reserveR0",       UNUSED, false)
 DEF_VISA_OPTION(vISA_SpiltLLR,              ET_BOOL, "-nosplitllr",      UNUSED, true)
 DEF_VISA_OPTION(vISA_EnableGlobalScopeAnalysis,   ET_BOOL,  "-enableGlobalScopeAnalysis", UNUSED, false)
-DEF_VISA_OPTION(vISA_LocalDeclareSplitInGlobalRA, ET_BOOL, "-noLocalSplit",        UNUSED, true)
+DEF_VISA_OPTION(vISA_LocalDeclareSplitInGlobalRA, ET_BOOL, "-doOldLocalSplit",        UNUSED, false)
 DEF_VISA_OPTION(vISA_DisableSpillCoalescing, ET_BOOL, "-nospillcleanup", UNUSED, false)
 DEF_VISA_OPTION(vISA_GlobalSendVarSplit,    ET_BOOL, "-globalSendVarSplit", UNUSED, false)
 DEF_VISA_OPTION(vISA_NoRemat,               ET_BOOL, "-noremat",         UNUSED, false)
@@ -123,13 +124,15 @@ DEF_VISA_OPTION(vISA_FastSpill,             ET_BOOL, "-fasterRA", UNUSED, false)
 DEF_VISA_OPTION(vISA_AbortOnSpillThreshold, ET_INT32, NULLSTR, UNUSED, 0)
 DEF_VISA_OPTION(vISA_enableBCR, ET_BOOL, "-enableBCR",   UNUSED, false)
 DEF_VISA_OPTION(vISA_hierarchicaIPA, ET_BOOL, "-oldIPA", UNUSED, true)
-DEF_VISA_OPTION(vISA_IntrinsicSplit,       ET_BOOL, "-doSplit", UNUSED, false)
+DEF_VISA_OPTION(vISA_IntrinsicSplit,       ET_BOOL, "-noLocalSplit", UNUSED, true)
 DEF_VISA_OPTION(vISA_LraFFWindowSize,       ET_INT32, "-lraFFWindowSize", UNUSED, 12)
 
 DEF_VISA_OPTION(vISA_VerifyAugmentation,    ET_BOOL, "-verifyaugmentation", UNUSED, false)
 DEF_VISA_OPTION(vISA_VerifyExplicitSplit,   ET_BOOL, "-verifysplit", UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpRegChart,          ET_BOOL, "-dumpregchart", UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpAllBCInfo,          ET_BOOL, "-dumpAllBCInfo", UNUSED, false)
+DEF_VISA_OPTION(vISA_LinearScan,               ET_BOOL, "-linearScan",       UNUSED, false)
+DEF_VISA_OPTION(vISA_verifyLinearScan,               ET_BOOL, "-verifyLinearScan",       UNUSED, false)
 
 //=== scheduler options ===
 DEF_VISA_OPTION(vISA_LocalScheduling,       ET_BOOL, "-noschedule",      UNUSED, true)
@@ -171,7 +174,9 @@ DEF_VISA_OPTION(vISA_EnableGroupScheduleForBC,      ET_BOOL,  "-groupScheduleFor
 DEF_VISA_OPTION(vISA_SWSBTokenNum,        ET_INT32, "-SWSBTokenNum",      "USAGE: -SWSBTokenNum <tokenNum>\n", 0)
 DEF_VISA_OPTION(vISA_EnableSendTokenReduction,      ET_BOOL,  "-SendTokenReduction",    UNUSED, false)
 DEF_VISA_OPTION(vISA_GlobalTokenAllocation,      ET_BOOL,  "-globalTokenAllocation",    UNUSED, false)
+DEF_VISA_OPTION(vISA_QuickTokenAllocation,      ET_BOOL,  "-quickTokenAllocation",    UNUSED, false)
 DEF_VISA_OPTION(vISA_DistPropTokenAllocation,      ET_BOOL,  "-distPropTokenAllocation",    UNUSED, false)
+DEF_VISA_OPTION(vISA_SWSBStitch,      ET_BOOL,  "-SWSBStitch",    UNUSED, false)
 
 
 //=== binary emission options ===
@@ -204,6 +209,7 @@ DEF_VISA_OPTION(VISA_AsmFileName,       ET_CSTR, "-asmNameUser",           "USAG
 DEF_VISA_OPTION(vISA_DecodeDbg,         ET_CSTR, "-decodedbg",             "USAGE: -decodedbg <dbg filename>\n",    NULL)
 DEF_VISA_OPTION(vISA_encoderFile,       ET_CSTR, "-encoderStatisticsFile", "USAGE: -encoderStatisticsFile <reloc file>\n", "encoderStatistics.csv")
 DEF_VISA_OPTION(vISA_CISAbinary,        ET_CSTR, "-CISAbinary",            "USAGE: File Name with isaasm paths. ",  NULL)
+DEF_VISA_OPTION(vISA_DumpRegInfo, ET_BOOL, "-dumpRegInfo",            UNUSED, false)
 
 //=== misc options ===
 DEF_VISA_OPTION(vISA_PlatformIsSet,       ET_BOOL,  NULLSTR,              UNUSED, false)

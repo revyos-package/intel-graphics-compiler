@@ -32,6 +32,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/IR/Module.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvmWrapper/IR/Intrinsics.h>
+#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
 
@@ -252,10 +253,10 @@ bool VerificationPass::verifyVectorInst(llvm::Instruction& inst)
     {
         Value* val = inst.getOperand(i);
         Type* T = val->getType();
-        if (T->isVectorTy())
+        if (auto VT = dyn_cast<VectorType>(T))
         {
             // Insert and extract element support relaxed vector type
-            T = T->getVectorElementType();
+            T = VT->getElementType();
         }
         if (!verifyType(T, val))
         {
@@ -301,16 +302,17 @@ bool VerificationPass::verifyType(Type* type, Value* val)
         // All integer types are valide
         break;
 
-    case Type::VectorTyID:
+    case IGCLLVM::VectorTyID:
     {
-        unsigned int typeSize = type->getVectorNumElements();
+        auto VType = cast<VectorType>(type);
+        unsigned typeSize = (unsigned)VType->getNumElements();
         if (!m_IGC_IR_spec.vectorTypeSizes.count(typeSize))
         {
             m_messagesToDump << "Unexpected vector size found in value:\n";
             printValue(val);
             success = false;
         }
-        success &= verifyType(type->getVectorElementType(), val);
+        success &= verifyType(VType->getElementType(), val);
         break;
     }
 

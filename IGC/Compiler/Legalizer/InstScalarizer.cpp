@@ -29,6 +29,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "InstScalarizer.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/Support/Debug.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvm/Support/raw_ostream.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "common/Types.hpp"
@@ -105,7 +106,7 @@ bool InstScalarizer::visitLoadInst(LoadInst& I) {
 
     unsigned AS = I.getPointerAddressSpace();
 
-    Type* EltTy = OrigTy->getVectorElementType();
+    Type* EltTy = cast<VectorType>(OrigTy)->getElementType();
 
     if (TL->preferVectorLoad(OrigTy)) {
         // Skip if this load is already legalized.
@@ -131,7 +132,7 @@ bool InstScalarizer::visitLoadInst(LoadInst& I) {
         // otherwise, it's broken.
         IGC_ASSERT(TL->getTypeSizeInBits(EltTy) == TL->getTypeStoreSizeInBits(EltTy));
 
-        unsigned NumElts = OrigTy->getVectorNumElements();
+        unsigned NumElts = (unsigned)cast<VectorType>(OrigTy)->getNumElements();
         unsigned Elt = 0;
 
         Type* NewPtrTy = PointerType::get(EltTy, AS);
@@ -153,7 +154,7 @@ bool InstScalarizer::visitLoadInst(LoadInst& I) {
                         Twine(OldPtr->getName(), getSuffix()) + Twine(Elt));
                 if (PL != 1) {
                     // Load <PL x EltTy>
-                    Type* VecTy = VectorType::get(EltTy, PL);
+                    Type* VecTy = IGCLLVM::FixedVectorType::get(EltTy, PL);
                     Type* VecPtrTy = PointerType::get(VecTy, AS);
                     NewPtr =
                         IRB->CreatePointerCast(NewPtr, VecPtrTy,
@@ -231,13 +232,13 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
 
     ValueSeq* ValSeq;
     std::tie(ValSeq, std::ignore) = TL->getLegalizedValues(OrigVal);
-    IGC_ASSERT(ValSeq->size() == OrigTy->getVectorNumElements());
+    IGC_ASSERT(ValSeq->size() == cast<VectorType>(OrigTy)->getNumElements());
 
     StringRef Name = OrigVal->getName();
 
     unsigned AS = I.getPointerAddressSpace();
 
-    Type* EltTy = OrigTy->getVectorElementType();
+    Type* EltTy = cast<VectorType>(OrigTy)->getElementType();
 
     if (TL->preferVectorStore(OrigTy)) {
         // If the type of store value prefer to be vector, prepare its
@@ -269,7 +270,7 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
         // otherwise, it's broken.
         IGC_ASSERT(TL->getTypeSizeInBits(EltTy) == TL->getTypeStoreSizeInBits(EltTy));
 
-        unsigned NumElts = OrigTy->getVectorNumElements();
+        unsigned NumElts = (unsigned)cast<VectorType>(OrigTy)->getNumElements();
         unsigned Elt = 0;
 
         Type* NewPtrTy = PointerType::get(EltTy, AS);
@@ -291,7 +292,7 @@ bool InstScalarizer::visitStoreInst(StoreInst& I) {
                         Twine(OldPtr->getName(), getSuffix()) + Twine(Elt));
                 if (PL != 1) {
                     // Store <PL x EltTy>
-                    Type* VecTy = VectorType::get(EltTy, PL);
+                    Type* VecTy = IGCLLVM::FixedVectorType::get(EltTy, PL);
                     // Prepare the shorter vector.
                     Value* Vec = UndefValue::get(VecTy);
                     for (unsigned i = 0; i != PL; ++i) {
@@ -499,7 +500,7 @@ bool InstScalarizer::visitInsertElementInst(InsertElementInst& I) {
     IGC_ASSERT(EltSeq->size());
     IGC_ASSERT(VecSeqCopy.size() % EltSeq->size() == 0);
 
-    unsigned NumElts = I.getOperand(0)->getType()->getVectorNumElements();
+    unsigned NumElts = (unsigned)cast<VectorType>(I.getOperand(0)->getType())->getNumElements();
     unsigned i = 0;
     for (unsigned Elt = 0; Elt != NumElts; ++Elt) {
         if (Elt == Idx) {

@@ -110,7 +110,9 @@ public:
     void CreateKernelBinaries();
 
     /// getZEBinary - create and get ZE Binary
-    void GetZEBinary(llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes);
+    /// if spv and spvSize are given, a .spv section will be created in the output ZEBinary
+    void GetZEBinary(llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes,
+        const char* spv, uint32_t spvSize);
 
     // Used to track the kernel info from CodeGen
     std::vector<IGC::CShaderProgram*> m_ShaderProgramList;
@@ -119,6 +121,7 @@ private:
     IGC::OpenCLProgramContext* m_pContext = nullptr;
 };
 
+#if !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 class CGen8CMProgram : public CGen8OpenCLProgramBase {
 public:
     explicit CGen8CMProgram(PLATFORM platform);
@@ -136,6 +139,7 @@ public:
     // Data structure to create patch token based binaries.
     std::unique_ptr<IGC::SOpenCLProgramInfo> m_programInfo;
 };
+#endif // !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 }
 
 #endif //SPP_G8_H

@@ -103,7 +103,6 @@ namespace vISA
         void printLocalLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& liveIntervals);
         void printInputLiveIntervals();
         bool countLiveIntervals();
-        void clearStaleLiveRanges();
 
         // scratch fields used for parameter passing
         G4_BB* curBB = nullptr;
@@ -167,7 +166,7 @@ public:
     }
 
     // A reference to this live range exists in bb basic block, record it
-    void recordRef( G4_BB* );
+    void recordRef(G4_BB*);
 
     void markIndirectRef() { isIndirectAccess = true; }
 
@@ -179,9 +178,9 @@ public:
 
     bool isGRFRegAssigned();
 
-    void setTopDcl( G4_Declare* dcl )
+    void setTopDcl(G4_Declare* dcl)
     {
-        MUST_BE_TRUE( topdcl == NULL, "Redefining top dcl");
+        MUST_BE_TRUE(topdcl == NULL, "Redefining top dcl");
         topdcl = dcl;
     }
 
@@ -215,7 +214,7 @@ public:
         return lastRef;
     }
 
-    void setPhyReg( G4_VarBase* pr, int subreg ) { preg = pr; pregoff = subreg; }
+    void setPhyReg(G4_VarBase* pr, int subreg) { preg = pr; pregoff = subreg; }
     G4_VarBase* getPhyReg(int& subreg) { subreg = pregoff; return preg; }
 
     unsigned int getSizeInWords();
@@ -299,7 +298,7 @@ public:
         regLastUse.resize(numRegs);
         grfAvialable.resize(numRegs);
 
-        for( int i = 0; i < (int) nregs; i++ )
+        for (int i = 0; i < (int) nregs; i++)
         {
             regBusyVector[i] = grfFree;
             regLastUse[i] = 0;
@@ -328,22 +327,26 @@ public:
 
     void findRegisterCandiateWithAlignBackward(int& i, BankAlign align, bool evenAlign);
 
-    void setGRFBusy( int which );
-    void setGRFBusy( int which, int howmany );
-    void setGRFNotBusy( int which, int instID );
-    void setH1GRFBusy( int which );
-    void setH2GRFBusy( int which );
-    void setWordBusy( int whichgrf, int word );
-    void setWordBusy( int whichgrf, int word, int howmany );
-    void setWordNotBusy( int whichgrf, int word, int instID );
+    void setGRFBusy(int which);
+    void setGRFBusy(int which, bool isInput);
+    void setGRFBusy(int which, int howmany, bool isInput);
+    void setGRFBusy(int which, int howmany);
+    void setWordBusy(int whichgrf, int word, bool isInput);
+    void setGRFNotBusy(int which, int instID);
+    void setH1GRFBusy(int which);
+    void setH2GRFBusy(int which);
+    void setWordBusy(int whichgrf, int word);
+    void setWordBusy(int whichgrf, int word, int howmany, bool isInput);
+    void setWordBusy(int whichgrf, int word, int howmany);
+    void setWordNotBusy(int whichgrf, int word, int instID);
 
-    inline bool isGRFBusy( int which ) const
+    inline bool isGRFBusy(int which) const
     {
         MUST_BE_TRUE(isGRFAvailable(which), "Invalid register");
         return (regBusyVector[which] != 0);
     }
 
-    inline bool isGRFBusy( int which, int howmany ) const
+    inline bool isGRFBusy(int which, int howmany) const
     {
         bool retval = false;
 
@@ -355,19 +358,19 @@ public:
         return retval;
     }
 
-    bool isH1GRFBusy( int which );
-    bool isH2GRFBusy( int which );
-    inline bool isWordBusy( int whichgrf, int word );
-    inline bool isWordBusy( int whichgrf, int word, int howmany );
+    bool isH1GRFBusy(int which);
+    bool isH2GRFBusy(int which);
+    inline bool isWordBusy(int whichgrf, int word);
+    inline bool isWordBusy(int whichgrf, int word, int howmany);
 
     bool findFreeMultipleRegsForward(int regIdx, BankAlign align, int & regnum, int nrows, int lastRowSize, int endReg, unsigned short occupiedBundles,
         int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hintSet);
 
-    void markPhyRegs( G4_Declare* topdcl );
+    void markPhyRegs(G4_Declare* topdcl);
 
     // Available/unavailable is different from busy/free
     // Unavailable GRFs are not available for allocation
-    void setGRFUnavailable( int which ) { grfAvialable[which] = false; }
+    void setGRFUnavailable(int which) { grfAvialable[which] = false; }
     bool isGRFAvailable(int which) const
     {
 
@@ -398,7 +401,7 @@ public:
         }
     }
 
-    bool isGRFAvailable( int which, int howmany) const
+    bool isGRFAvailable(int which, int howmany) const
     {
         if (simpleGRFAvailable)
         {
@@ -451,7 +454,7 @@ public:
     void setR1Forbidden() {r1Forbidden = true;}
     bool findFreeMultipleRegsBackward(int regIdx, BankAlign align, int &regnum, int nrows, int lastRowSize, int endReg, int instID,
         bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden);
-    bool findFreeSingleReg( int regIdx, G4_SubReg_Align subalign, int &regnum, int &subregnum, int size);
+    bool findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int &regnum, int &subregnum, int size);
     bool findFreeSingleReg(int regIdx, int size, BankAlign align, G4_SubReg_Align subalign, int &regnum, int &subregnum, int endReg,
         int instID, bool isHybridAlloc, bool forward, std::unordered_set<unsigned int>& forbidden);
 
@@ -473,7 +476,7 @@ public:
         unsigned short occupiedBundles, unsigned int instID, bool isHybridAlloc, std::unordered_set<unsigned int>& forbidden, bool hasHint,
         unsigned int hintReg);
 
-    void freeRegs( int regnum, int subregnum, int numwords, int instID);
+    void freeRegs(int regnum, int subregnum, int numwords, int instID);
     PhyRegsLocalRA * getAvaialableRegs() { return &availableRegs; }
 };
 
@@ -494,11 +497,10 @@ private:
     unsigned short getOccupiedBundle(G4_Declare* dcl);
     void expireAllActive();
     bool allocateRegsFromBanks(LocalLiveRange*);
-    bool allocateRegs(LocalLiveRange*, G4_BB* bb, IR_Builder& builder, LLR_USE_MAP& LLRUseMap);
+    bool allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder, LLR_USE_MAP& LLRUseMap);
     void coalesceSplit(LocalLiveRange* lr);
     void freeAllocedRegs(LocalLiveRange*, bool);
     void updateActiveList(LocalLiveRange*);
-    void updateBitset(LocalLiveRange*);
 
     BitSet pregs;
     unsigned int simdSize;
@@ -545,9 +547,9 @@ public:
 
     void* operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
 
-    void markPhyRegs( G4_VarBase* pr, unsigned int words );
+    void markPhyRegs(G4_VarBase* pr, unsigned int words);
 
-    bool isGRFBusy( int regnum ) const { return GRFUsage[regnum]; }
+    bool isGRFBusy(int regnum) const { return GRFUsage[regnum]; }
 
     void printBusyRegs();
 

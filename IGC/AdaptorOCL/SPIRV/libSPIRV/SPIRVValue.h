@@ -196,15 +196,13 @@ public:
   bool isConstant() { return true; }
 protected:
   void recalculateWordCount() {
-    NumWords = Type->getBitWidth()/32;
-    if (NumWords < 1)
-      NumWords = 1;
+    NumWords = (Type->getBitWidth() + 31) / 32;
     WordCount = 3 + NumWords;
   }
   void validate() const {
     SPIRVValue::validate();
     IGC_ASSERT_EXIT_MESSAGE(1 <= NumWords, "Invalid constant size");
-    IGC_ASSERT_EXIT_MESSAGE(NumWords <= 2, "Invalid constant size");
+    IGC_ASSERT_EXIT_MESSAGE(NumWords <= 32, "Invalid constant size");
   }
   void setWordCount(SPIRVWord WordCount) {
     SPIRVValue::setWordCount(WordCount);
@@ -222,7 +220,7 @@ protected:
     uint64_t UInt64Val;
     float FloatVal;
     double DoubleVal;
-    SPIRVWord Words[2];
+    SPIRVWord Words[32];
     UnionType() {
       UInt64Val = 0;
     }

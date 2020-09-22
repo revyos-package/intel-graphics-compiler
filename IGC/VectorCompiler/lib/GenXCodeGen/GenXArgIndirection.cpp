@@ -173,6 +173,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/DerivedTypes.h"
 
 using namespace llvm;
 using namespace genx;
@@ -577,7 +580,7 @@ bool GenXArgIndirection::processArgLR(LiveRange *ArgLR)
       else
         InsidePile.push_back(SV);
     }
-    assert(!InsidePile.empty());
+    IGC_ASSERT(!InsidePile.empty());
     if (!OutsidePile.empty()) {
       Liveness->removeValuesNoDelete(ArgLR);
       LiveRange *OutsideLR = Liveness->getOrCreateLiveRange(OutsidePile[0]);
@@ -616,7 +619,7 @@ bool GenXArgIndirection::processArgLR(LiveRange *ArgLR)
   // Run gatherBalesToModify again, as the list it made last time is now invalid
   // due to code being changed.
   if (!gatherBalesToModify(ArgLR, Align))
-    llvm_unreachable("not expecting indirection to have become invalid in second run");
+    IGC_ASSERT_EXIT_MESSAGE(0, "not expecting indirection to have become invalid in second run");
   // Indirect the bales.
   for (auto bi = BalesToModify.begin(), be = BalesToModify.end();
       bi != be; ++bi) {
@@ -677,11 +680,13 @@ Indirectability SubroutineArg::checkIndirectability()
     if (Pass->Liveness->getLiveRange(
           SimpleValue(Pass->Liveness->getUnifiedRet(F), ri)) == ArgLR) {
       if (CoalescedRetIdx >= 0) {
-        for (auto ui = F->use_begin(), ue = F->use_end(); ui != ue; ++ui) {
-          auto CI = cast<CallInst>(ui->getUser());
-          DiagnosticInfoArgIndirection Warn(CI, Arg,
-              "Argument coalesced with multiple return values", DS_Warning);
-          CI->getContext().diagnose(Warn);
+        for (auto *U: F->users()) {
+          if (auto *CI = checkFunctionCall(U, F)) {
+            DiagnosticInfoArgIndirection Warn(
+                CI, Arg, "Argument coalesced with multiple return values",
+                DS_Warning);
+            CI->getContext().diagnose(Warn);
+          }
         }
         return Indirectability::CANNOT_INDIRECT;
       }
@@ -715,14 +720,15 @@ Indirectability SubroutineArg::checkIndirectability()
   }
 
   // Create an object of some subclass of CallSite for each call site.
-  for (auto ui = F->use_begin(), ue = F->use_end(); ui != ue; ++ui) {
-    auto CI = cast<CallInst>(ui->getUser());
-    assert(ui->getOperandNo() == CI->getNumArgOperands());
-    auto CallSite = createCallSite(CI);
-    if (!CallSite)
-      return Indirectability::CANNOT_INDIRECT;
-    CallSites.push_back(CallSite);
-    LLVM_DEBUG(dbgs() << "  " << *CallSite << "\n");
+  for (auto &U: F->uses()) {
+    if (auto *CI = checkFunctionCall(U.getUser(), F)) {
+      IGC_ASSERT(U.getOperandNo() == CI->getNumArgOperands());
+      auto CallSite = createCallSite(CI);
+      if (!CallSite)
+        return Indirectability::CANNOT_INDIRECT;
+      CallSites.push_back(CallSite);
+      LLVM_DEBUG(dbgs() << "  " << *CallSite << "\n");
+    }
   }
   // Check indirection state for each call site.
   unsigned States = 0;
@@ -862,14 +868,14 @@ CallSite *SubroutineArg::createCallSite(CallInst *CI)
         if (RetOldValC->getType()->getScalarType()
             != Input->getType()->getScalarType()) {
           Type *ElTy = RetOldValC->getType()->getScalarType();
-          assert(ElTy->getPrimitiveSizeInBits());
-          Input = ConstantExpr::getBitCast(Input,
-              VectorType::get(ElTy,
-                Input->getType()->getPrimitiveSizeInBits()
-                  / ElTy->getPrimitiveSizeInBits()));
+          IGC_ASSERT(ElTy->getPrimitiveSizeInBits());
+          Input = ConstantExpr::getBitCast(
+              Input, IGCLLVM::FixedVectorType::get(
+                         ElTy, Input->getType()->getPrimitiveSizeInBits() /
+                                   ElTy->getPrimitiveSizeInBits()));
         }
         // Construct the constant that needs to be loaded.
-        assert(RetOldValC->getType()->getScalarType() == Input->getType()->getScalarType());
+        IGC_ASSERT(RetOldValC->getType()->getScalarType() == Input->getType()->getScalarType());
         auto LdConst = RetRWS.WrR.evaluateConstantWrRegion(RetOldValC, Input);
         // Create the ConstArgRetCallSite object.
         return new ConstArgRetCallSite(CI, LdConst, RetRWS.EndWr,
@@ -1340,7 +1346,7 @@ Value *ConstArgRetCallSite::process(GenXArgIndirection *Pass,
   SmallVector<Instruction *, 4> AddedInsts;
   ConstantLoader CL(LdConst, nullptr, &AddedInsts);
   auto LoadedConst = CL.loadBig(InsertBefore);
-  assert(LoadedConst);
+  IGC_ASSERT(LoadedConst);
   if (LoadedConst->getType() != RetEndWr->getType()) {
     LoadedConst = CastInst::Create(Instruction::BitCast, LoadedConst,
           RetEndWr->getType(), LoadedConst->getName() + ".bitcast",
@@ -1542,7 +1548,7 @@ void SubroutineArg::coalesceAddressArgs()
     // subroutine where we are indirecting the arg -- the new address args
     // for each subroutine should coalesce together.
     LLVM_DEBUG(dbgs() << "Failed to coalesce:\n " << *AddressLR << "\n " << *CallArgLR << "\n");
-    assert(!Pass->FuncMap[CallSite->CI->getParent()->getParent()]
+    IGC_ASSERT(!Pass->FuncMap[CallSite->CI->getParent()->getParent()]
         && "new address args should coalesce together");
     // We need to insert a copy, in the address arg's pre-copy slot. An address
     // copy is done with a genx.convert, even though it is not actually doing a
@@ -1710,11 +1716,11 @@ void GenXArgIndirection::indirectRegion(Use *U, Value *AddressArg,
       // we've found what we wanted
       break;
     default:
-      llvm_unreachable("unsupported instruction");
+      IGC_ASSERT_EXIT_MESSAGE(0, "unsupported instruction");
     }
     break;
   }
-  assert(GenXIntrinsic::getGenXIntrinsicID(Addr) ==
+  IGC_ASSERT(GenXIntrinsic::getGenXIntrinsicID(Addr) ==
          GenXIntrinsic::genx_convert_addr);
   auto AddrInst = cast<Instruction>(Addr);
   auto AddrSrc = AddrInst->getOperand(0);
@@ -1765,7 +1771,7 @@ Value *SubroutineArg::getRetVal(CallInst *CI, unsigned RetNum)
 {
   auto ST = dyn_cast<StructType>(CI->getType());
   if (!ST) {
-    assert(!RetNum);
+    IGC_ASSERT(!RetNum);
     return CI;
   }
   Value *RetVal = UndefValue::get(ST->getElementType(RetNum));

@@ -41,6 +41,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 
+#include "Probe/Assertion.h"
+
+#include <algorithm>
+#include <iterator>
+#include <unordered_map>
+#include <vector>
+
 namespace llvm {
 namespace genx {
 
@@ -80,7 +87,7 @@ CallInst *createAddAddr(Value *Lhs, Value *Rhs, const Twine &Name,
 CallInst *createUnifiedRet(Type *Ty, const Twine &Name, Module *M);
 
 // getPredicateConstantAsInt : get a vXi1 constant's value as a single integer
-unsigned getPredicateConstantAsInt(Constant *C);
+unsigned getPredicateConstantAsInt(const Constant *C);
 
 // getConstantSubvector : get a contiguous region from a vector constant
 Constant *getConstantSubvector(Constant *V, unsigned StartIdx, unsigned Size);
@@ -216,8 +223,8 @@ public:
   // from first and last elements of mask. This function decomposes
   // replicated slice to its parameters.
   ReplicatedSlice getReplicatedSliceDescriptor() const {
-    assert(isReplicatedSlice() && "Expected replicated slice");
-    const unsigned TotalSize = SI->getType()->getVectorNumElements();
+    IGC_ASSERT(isReplicatedSlice() && "Expected replicated slice");
+    const unsigned TotalSize = (SI->getType())->getNumElements();
     const unsigned SliceStart = SI->getMaskValue(0);
     const unsigned SliceEnd = SI->getMaskValue(TotalSize - 1);
     const unsigned SliceSize = SliceEnd - SliceStart + 1;
@@ -304,7 +311,7 @@ public:
                           bool Scalarize);
 
   // convinence method for quick sanity checking
-  bool IsI64Operation() { return ETy->isIntegerTy(64); }
+  bool IsI64Operation() const { return ETy->isIntegerTy(64); }
 };
 
 // adjustPhiNodesForBlockRemoval : adjust phi nodes when removing a block
@@ -335,7 +342,7 @@ static inline bool isMaskPacking(const Value *V) {
     auto SrcTy = dyn_cast<VectorType>(BC->getSrcTy());
     if (!SrcTy || !SrcTy->getScalarType()->isIntegerTy(1))
       return false;
-    unsigned NElts = SrcTy->getVectorNumElements();
+    unsigned NElts = cast<VectorType>(SrcTy)->getNumElements();
     if (NElts != 8 && NElts != 16 && NElts != 32)
       return false;
     return V->getType()->getScalarType()->isIntegerTy(NElts);
@@ -422,8 +429,8 @@ template <
         int>::type = 0>
 CastInst *scalarizeOrVectorizeIfNeeded(Instruction *Inst, ConstIter FirstType,
                                        ConstIter LastType) {
-  assert(Inst && "wrong argument");
-  assert(std::all_of(FirstType, LastType,
+  IGC_ASSERT(Inst && "wrong argument");
+  IGC_ASSERT(std::all_of(FirstType, LastType,
                      [Inst](Type *Ty) {
                        return Ty == Inst->getType() ||
                               Ty == getCorrespondingVectorOrScalar(
@@ -432,7 +439,7 @@ CastInst *scalarizeOrVectorizeIfNeeded(Instruction *Inst, ConstIter FirstType,
          "wrong arguments: type of instructions must correspond");
 
   if (Inst->getType()->isVectorTy() &&
-      Inst->getType()->getVectorNumElements() > 1)
+      cast<VectorType>(Inst->getType())->getNumElements() > 1)
     return nullptr;
   bool needBitCast = std::any_of(
       FirstType, LastType, [Inst](Type *Ty) { return Ty != Inst->getType(); });
@@ -488,6 +495,112 @@ unsigned CeilAlignment(unsigned LogAlignment, unsigned GRFWidth);
 // ElTy is returned, otherwise original type \p Ty is returned.
 const Type &fixDegenerateVectorType(const Type &Ty);
 Type &fixDegenerateVectorType(Type &Ty);
+
+// Checks whether provided wrpredregion intrinsic can be encoded
+// as legal SETP instruction.
+bool isWrPredRegionLegalSetP(const CallInst &WrPredRegion);
+
+// Cheks if V is a CallInst representing a direct call to F
+// Many of our analyzes do not check whether a function F's user
+// which is a CallInst calls exactly F. This may not be true
+// when a function pointer is passed as an argument of a call to
+// another function, e.g. genx.faddr intrinsic.
+// Returns V casted to CallInst if the check is true,
+// nullptr otherwise
+CallInst *checkFunctionCall(Value *V, Function *F);
+
+// BinaryDataAccumulator: it's a helper class to accumulate binary data
+// in one buffer.
+// Information about each stored section can be accessed via the key with
+// which it was stored. The key must be unique.
+// Accumulated/consolidated binary data can be accesed.
+template <typename KeyT> class BinaryDataAccumulator {
+public:
+  struct SectionInfoT {
+    int Offset = 0;
+    ArrayRef<char> Data;
+
+    SectionInfoT() = default;
+    SectionInfoT(const char *BasePtr, int First, int Last)
+        : Offset{First}, Data{BasePtr + First, BasePtr + Last} {}
+
+    int getSize() const { return Data.size(); }
+  };
+
+  struct SectionT {
+    KeyT Key;
+    SectionInfoT Info;
+  };
+
+private:
+  std::vector<char> Data;
+  using SectionSeq = std::vector<SectionT>;
+  SectionSeq Sections;
+
+public:
+  using value_type = typename SectionSeq::value_type;
+  using reference = typename SectionSeq::reference;
+  using const_reference = typename SectionSeq::const_reference;
+  using iterator = typename SectionSeq::iterator;
+  using const_iterator = typename SectionSeq::const_iterator;
+
+  iterator begin() { return Sections.begin(); }
+  const_iterator begin() const { return Sections.begin(); }
+  const_iterator cbegin() const { return Sections.cbegin(); }
+  iterator end() { return Sections.end(); }
+  const_iterator end() const { return Sections.end(); }
+  const_iterator cend() const { return Sections.cend(); }
+  reference front() { return *begin(); }
+  const_reference front() const { return *begin(); }
+  reference back() { return *std::prev(end()); }
+  const_reference back() const { return *std::prev(end()); }
+
+  // Append the data that is referenced by a \p Key and represented
+  // in range [\p First, \p Last), to the buffer.
+  // The range must consist of char elements.
+  template <typename InputIter>
+  void append(KeyT Key, InputIter First, InputIter Last) {
+    IGC_ASSERT_MESSAGE(
+        std::none_of(Sections.begin(), Sections.end(),
+                     [&Key](const SectionT &S) { return S.Key == Key; }),
+        "There's already a section with such key");
+    SectionT Section;
+    Section.Key = std::move(Key);
+    int Offset = Data.size();
+    std::copy(First, Last, std::back_inserter(Data));
+    Section.Info =
+        SectionInfoT{Data.data(), Offset, static_cast<int>(Data.size())};
+    Sections.push_back(std::move(Section));
+  }
+
+  void append(KeyT Key, ArrayRef<char> SectionBin) {
+    append(std::move(Key), SectionBin.begin(), SectionBin.end());
+  }
+
+  // Get information about the section referenced by \p Key.
+  SectionInfoT getSectionInfo(const KeyT &Key) const {
+    auto SectionIt =
+        std::find_if(Sections.begin(), Sections.end(),
+                     [&Key](const SectionT &S) { return S.Key == Key; });
+    IGC_ASSERT_MESSAGE(SectionIt != Sections.end(),
+                       "There must be a section with such key");
+    return SectionIt->Info;
+  }
+
+  // Get offset of the section referenced by \p Key.
+  int getSectionOffset(const KeyT &Key) const {
+    return getSectionInfo(Key).Offset;
+  }
+  // Get size of the section referenced by \p Key.
+  int getSectionSize(const KeyT &Key) const { return getSectionInfo(Key).Size; }
+  // Get size of the whole collected data.
+  int getFullSize() const { return Data.size(); }
+  // Data buffer empty.
+  bool empty() const { return Data.empty(); }
+  // Emit the whole consolidated data.
+  std::vector<char> emitConsolidatedData() const & { return Data; }
+  std::vector<char> emitConsolidatedData() && { return std::move(Data); }
+};
 
 } // namespace genx
 } // namespace llvm

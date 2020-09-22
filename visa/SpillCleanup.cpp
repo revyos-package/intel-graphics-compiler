@@ -34,13 +34,10 @@ uint32_t computeSpillMsgDesc(unsigned int payloadSize, unsigned int offset);
 
 namespace vISA
 {
-G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratchOffset, unsigned int payloadSize,
+G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(G4_SrcRegRegion* header, unsigned int scratchOffset, unsigned int payloadSize,
     bool useNoMask, G4_InstOption mask, int srcCISAOff, G4_Declare* spillDcl, unsigned int row)
 {
     // Generate split send instruction with specified payload size and offset
-    auto header = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
-        kernel.fg.builder->getBuiltinR0()->getRegVar(), 0, 0,
-        kernel.fg.builder->getRegionStride1(), Type_UD);
     auto spillSrcPayload = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct, spillDcl->getRegVar(),
         row, 0, kernel.fg.builder->getRegionStride1(), Type_UD);
 
@@ -49,7 +46,8 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
     if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
         fp = kernel.fg.getFramePtrDcl();
     unsigned int option = useNoMask ? InstOpt_WriteEnable : 0;
-    auto spillInst = kernel.fg.builder->createSpill(kernel.fg.builder->createNullDst(Type_UW), header, spillSrcPayload, 16, payloadSize,
+    auto spillInst = kernel.fg.builder->createSpill(
+        kernel.fg.builder->createNullDst(Type_UW), header, spillSrcPayload, g4::SIMD16, payloadSize,
         GlobalRA::GRFToHwordSize(scratchOffset), fp, static_cast<G4_InstOption>(option));
 
     if (!useNoMask)
@@ -63,7 +61,7 @@ G4_SrcRegRegion* CoalesceSpillFills::generateCoalescedSpill(unsigned int scratch
     return spillSrcPayload;
 }
 
-G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchOffset, unsigned int payloadSize,
+G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(G4_SrcRegRegion* header, unsigned int scratchOffset, unsigned int payloadSize,
     unsigned int dclSize, int srcCISAOff, bool evenAlignDst)
 {
     // Generate split send instruction with specified payload size and offset
@@ -71,7 +69,7 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
     const char* dclName = kernel.fg.builder->getNameString(kernel.fg.mem, 32,
         "COAL_FILL_%d", kernel.Declares.size());
     auto fillDcl = kernel.fg.builder->createDeclareNoLookup(dclName, G4_GRF,
-        NUM_DWORDS_PER_GRF, dclSize, Type_UD, DeclareType::CoalescedFill);
+        numEltPerGRF(Type_UD), dclSize, Type_UD, DeclareType::CoalescedFill);
 
     if (evenAlignDst)
     {
@@ -82,22 +80,21 @@ G4_DstRegRegion* CoalesceSpillFills::generateCoalescedFill(unsigned int scratchO
 
     auto fillDst = kernel.fg.builder->createDst(fillDcl->getRegVar(), 0,
         0, 1, Type_UW);
-    auto header = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
-        kernel.fg.builder->getBuiltinR0()->getRegVar(), 0, 0,
-        kernel.fg.builder->getRegionStride1(), Type_UD);
 
     G4_Declare* fp = nullptr;
     if (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc())
         fp = kernel.fg.getFramePtrDcl();
 
-    auto fillInst = kernel.fg.builder->createFill(header, fillDst, 16, payloadSize,
+    auto fillInst = kernel.fg.builder->createFill(header, fillDst, g4::SIMD16, payloadSize,
         GlobalRA::GRFToHwordSize(scratchOffset), fp, InstOpt_WriteEnable);
     fillInst->setCISAOff(srcCISAOff);
 
     return fillDst;
 }
 
-void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::list<std::pair<G4_DstRegRegion*, std::pair<unsigned int, unsigned int>>> indFills,
+void CoalesceSpillFills::copyToOldFills(
+    G4_DstRegRegion* coalescedFillDst,
+    std::list<std::pair<G4_DstRegRegion*, std::pair<unsigned int, unsigned int>>> indFills,
     INST_LIST_ITER f, G4_BB* bb, int srcCISAOff)
 {
     // Copy data from coalesced fill in to older fills.
@@ -106,12 +103,12 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
     for (auto oldFill : indFills)
     {
         unsigned int numGRFs = (oldFill.first->getRightBound() - oldFill.first->getLeftBound()
-            + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES;
+            + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB);
         unsigned int rowOff = 0;
         // TODO: Check for > 2 GRF dst
         while (numGRFs > 0)
         {
-            unsigned int simdSize = 8;
+            G4_ExecSize simdSize = g4::SIMD8;
 
             unsigned int off = oldFill.second.first;
             unsigned int size = oldFill.second.second;
@@ -121,8 +118,8 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
             // Scratch msg offset is always equal or lower than individual fills
             unsigned int offToUse = off - scratchOff + rowOff;
 
-            if (size > 8)
-                simdSize = 16;
+            if (size > g4::SIMD8)
+                simdSize = g4::SIMD16;
 
             G4_DstRegRegion* movDst = kernel.fg.builder->createDst(
                 oldFill.first->getBase(), rowOff, 0, 1, Type_UD);
@@ -130,8 +127,8 @@ void CoalesceSpillFills::copyToOldFills(G4_DstRegRegion* coalescedFillDst, std::
             G4_SrcRegRegion* src = kernel.fg.builder->createSrcRegRegion(Mod_src_undef, Direct,
                 coalescedFillDst->getBase(), offToUse, 0, kernel.fg.builder->getRegionStride1(), Type_UD);
 
-            G4_INST* copy = kernel.fg.builder->createMov((unsigned char)simdSize,
-                movDst, src, InstOpt_WriteEnable, false);
+            G4_INST* copy = kernel.fg.builder->createMov(
+                simdSize, movDst, src, InstOpt_WriteEnable, false);
             copy->setCISAOff(srcCISAOff);
 
             bb->insertBefore(f, copy);
@@ -151,14 +148,15 @@ G4_Declare* CoalesceSpillFills::createCoalescedSpillDcl(unsigned int payloadSize
     dclName = kernel.fg.builder->getNameString(kernel.fg.mem, 32,
         "COAL_SPILL_%d", kernel.Declares.size());
     spillDcl = kernel.fg.builder->createDeclareNoLookup(dclName, G4_GRF,
-        NUM_DWORDS_PER_GRF, payloadSize, Type_UD, DeclareType::CoalescedSpill);
+        numEltPerGRF(Type_UD), payloadSize, Type_UD, DeclareType::CoalescedSpill);
 
     spillDcl->setDoNotSpill();
 
     return spillDcl;
 }
 
-void CoalesceSpillFills::coalesceSpills(std::list<INST_LIST_ITER>& coalesceableSpills, unsigned int min,
+void CoalesceSpillFills::coalesceSpills(
+    std::list<INST_LIST_ITER>& coalesceableSpills, unsigned int min,
     unsigned int max, bool useNoMask, G4_InstOption mask, G4_BB* bb, int srcCISAOff)
 {
     // Generate fill with minimum size = max-min. This should be compatible with
@@ -173,7 +171,7 @@ void CoalesceSpillFills::coalesceSpills(std::list<INST_LIST_ITER>& coalesceableS
     for (auto d : coalesceableSpills)
     {
         auto src1Opnd = (*d)->getSrc(1)->asSrcRegRegion();
-        auto curRow = src1Opnd->getLeftBound() / G4_GRF_REG_NBYTES;
+        auto curRow = src1Opnd->getLeftBound() / numEltPerGRF(Type_UB);
         declares.insert(src1Opnd->getTopDcl());
         minRow = minRow > curRow ? curRow : minRow;
     }
@@ -189,8 +187,8 @@ void CoalesceSpillFills::coalesceSpills(std::list<INST_LIST_ITER>& coalesceableS
         minRow = 0;
     }
 
-    auto coalescedSpillSrc = generateCoalescedSpill(min,
-        payloadSize, useNoMask, mask, srcCISAOff, dcl, minRow);
+    auto coalescedSpillSrc = generateCoalescedSpill(kernel.fg.builder->duplicateOperand((*coalesceableSpills.front())->asSpillIntrinsic()->getHeader()),
+        min, payloadSize, useNoMask, mask, srcCISAOff, dcl, minRow);
 
     if (declares.size() != 1)
     {
@@ -198,8 +196,6 @@ void CoalesceSpillFills::coalesceSpills(std::list<INST_LIST_ITER>& coalesceableS
         {
             unsigned int scratchOffset, scratchSize;
             getScratchMsgInfo((*c), scratchOffset, scratchSize);
-            MUST_BE_TRUE((*c)->getSrc(0)->asSrcRegRegion()->getTopDcl() == kernel.fg.builder->getBuiltinR0(),
-                "Unexpected src0");
 
             unsigned int rowOff = scratchOffset - min;
             replaceMap.insert(std::make_pair((*c)->getSrc(1)->getTopDcl(),
@@ -254,8 +250,8 @@ void CoalesceSpillFills::coalesceFills(std::list<INST_LIST_ITER>& coalesceableFi
 
     auto leadInst = *coalesceableFills.front();
 
-    auto coalescedFillDst = generateCoalescedFill(min, payloadSize, dclSize,
-        srcCISAOff, gra.isEvenAligned(leadInst->getDst()->getTopDcl()));
+    auto coalescedFillDst = generateCoalescedFill(kernel.fg.builder->duplicateOperand(leadInst->asFillIntrinsic()->getHeader()),
+        min, payloadSize, dclSize, srcCISAOff, gra.isEvenAligned(leadInst->getDst()->getTopDcl()));
 
     for (auto c : coalesceableFills)
     {
@@ -304,8 +300,12 @@ bool CoalesceSpillFills::fillHeuristic(std::list<INST_LIST_ITER>& coalesceableFi
     }
 
     min = 0xffffffff, max = 0;
+    G4_Declare* header = (*coalesceableFills.front())->asFillIntrinsic()->getHeader()->getTopDcl();
     for (auto f : coalesceableFills)
     {
+        if ((*f)->asFillIntrinsic()->getHeader()->getTopDcl() != header)
+            return false;
+
         unsigned int scratchOffset, scratchSize;
         getScratchMsgInfo(*f, scratchOffset, scratchSize);
 
@@ -542,9 +542,17 @@ void CoalesceSpillFills::keepConsecutiveSpills(std::list<INST_LIST_ITER>& instLi
     if (sendDstDcl.find(sendDstTopDcl) != sendDstDcl.end())
         firstSpillFromSend = true;
 
+    G4_Declare* header = (*instList.front())->asSpillIntrinsic()->getHeader()->getTopDcl();
+
     for (auto instIt : instList)
     {
         auto inst = (*instIt);
+
+        if (inst->asSpillIntrinsic()->getHeader()->getTopDcl() != header)
+        {
+            return;
+        }
+
         useNoMask &= inst->isWriteEnableInst();
 
         if (!useNoMask)
@@ -1160,7 +1168,7 @@ void CoalesceSpillFills::spills()
 
                 for (auto coalIt = spillsToCoalesce.begin();
                     coalIt != spillsToCoalesce.end();
-                    )
+                   )
                 {
                     bool fullOverlap = false;
                     if (overlap(*instIter, *(*coalIt), fullOverlap))
@@ -1321,7 +1329,7 @@ void CoalesceSpillFills::fixSendsSrcOverlap()
                     const char* dclName = kernel.fg.builder->getNameString(kernel.fg.mem, 32,
                         "COPY_%d", kernel.Declares.size());
                     G4_Declare* copyDcl = kernel.fg.builder->createDeclareNoLookup(dclName, G4_GRF,
-                        NUM_DWORDS_PER_GRF, src1->getTopDcl()->getNumRows(),
+                        numEltPerGRF(Type_UD), src1->getTopDcl()->getNumRows(),
                         Type_UD);
 
                     unsigned int elems = copyDcl->getNumElems();
@@ -1333,16 +1341,17 @@ void CoalesceSpillFills::fixSendsSrcOverlap()
                             kernel.fg.builder->getRegionStride1(), Type_UD);
                         G4_DstRegRegion* dstRgn = kernel.fg.builder->createDst(
                             copyDcl->getRegVar(), row, 0, 1, Type_UD);
-                        G4_INST* copyInst = kernel.fg.builder->createMov(8, dstRgn, srcRgn, InstOpt_WriteEnable, false);
+                        G4_INST* copyInst = kernel.fg.builder->createMov(
+                            g4::SIMD8, dstRgn, srcRgn, InstOpt_WriteEnable, false);
                         copyInst->setCISAOff(inst->getCISAOff());
                         bb->insertBefore(instIt, copyInst);
                         elems -= 8;
                         row++;
                     }
 
-                    G4_SrcRegRegion* sendSrc1 = kernel.fg.builder->createSrcRegRegion(Mod_src_undef,
-                        Direct, copyDcl->getRegVar(), 0, 0, kernel.fg.builder->getRegionStride1(),
-                        Type_UD);
+                    G4_SrcRegRegion* sendSrc1 = kernel.fg.builder->createSrcRegRegion(
+                        Mod_src_undef, Direct, copyDcl->getRegVar(), 0, 0,
+                        kernel.fg.builder->getRegionStride1(), Type_UD);
                     inst->setSrc(sendSrc1, 1);
                 }
             }
@@ -1413,7 +1422,7 @@ void CoalesceSpillFills::removeRedundantSplitMovs()
                 unsigned int lb = inst->getSrc(1)->getLeftBound();
                 unsigned int rb = inst->getSrc(1)->getRightBound();
                 std::set<unsigned int> rows;
-                for (unsigned int k = lb / G4_GRF_REG_NBYTES; k != (rb + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES; k++)
+                for (unsigned int k = lb / numEltPerGRF(Type_UB); k != (rb + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB); k++)
                 {
                     rows.insert(k);
                 }
@@ -1444,11 +1453,11 @@ void CoalesceSpillFills::removeRedundantSplitMovs()
                     unsigned int prb = pInst->getDst()->getRightBound();
 
                     // Check whether complete row(s) defined
-                    if ((prb - plb + 1) % G4_GRF_REG_NBYTES != 0)
+                    if ((prb - plb + 1) % numEltPerGRF(Type_UB) != 0)
                         break;
 
-                    unsigned int rowStart = plb / G4_GRF_REG_NBYTES;
-                    unsigned int numRows = (prb - plb + 1) / G4_GRF_REG_NBYTES;
+                    unsigned int rowStart = plb / numEltPerGRF(Type_UB);
+                    unsigned int numRows = (prb - plb + 1) / numEltPerGRF(Type_UB);
                     bool punt = false;
                     for (unsigned int k = rowStart; k != (rowStart + numRows); k++)
                     {
@@ -1474,7 +1483,7 @@ void CoalesceSpillFills::removeRedundantSplitMovs()
                         break;
 
                     // mov src should be GRF aligned
-                    if (pSrc0->getLeftBound() % G4_GRF_REG_NBYTES != 0)
+                    if (pSrc0->getLeftBound() % numEltPerGRF(Type_UB) != 0)
                         break;
 
                     unsigned int src0lb = pSrc0->getLeftBound();
@@ -1484,7 +1493,7 @@ void CoalesceSpillFills::removeRedundantSplitMovs()
                     if ((src0rb - src0lb) != (prb - plb))
                         break;
 
-                    unsigned int pStartRow = pSrc0->getLeftBound() / G4_GRF_REG_NBYTES;
+                    unsigned int pStartRow = pSrc0->getLeftBound() / numEltPerGRF(Type_UB);
                     for (unsigned int k = rowStart; k != (rowStart + numRows); k++)
                     {
                         auto it = dstSrcRowMapping.find(k);
@@ -1507,7 +1516,7 @@ void CoalesceSpillFills::removeRedundantSplitMovs()
                 if (dstSrcRowMapping.size() > 0)
                 {
                     // Now check whether each entry of src1 has a corresponding src offset
-                    unsigned int dstRowStart = lb / G4_GRF_REG_NBYTES;
+                    unsigned int dstRowStart = lb / numEltPerGRF(Type_UB);
                     bool success = true;
                     auto baseIt = dstSrcRowMapping.find(dstRowStart);
                     if (baseIt != dstSrcRowMapping.end())
@@ -1721,23 +1730,21 @@ void CoalesceSpillFills::spillFillCleanup()
                 }
 
                 // Writes for all rows found
-                unsigned int execSize;
-                execSize = kernel.getSimdSize() > 16 ? 16 : kernel.getSimdSize();
+                G4_ExecSize execSize = kernel.getSimdSize() > g4::SIMD16 ? g4::SIMD16 : kernel.getSimdSize();
 
                 for (auto row = rowStart; row <= lastRow;)
                 {
-                    if (execSize == 16 &&
-                        row == lastRow)
+                    if (execSize == g4::SIMD16 && row == lastRow)
                     {
                         // In case of odd rows in SIMD16
-                        execSize = 8;
+                        execSize = g4::SIMD8;
                     }
-                    else if (execSize == 16)
+                    else if (execSize == g4::SIMD16)
                     {
                         // In SIMD16 kernel 2 consecutive rows should come from same spill
                         if (writesPerOffset.find(row)->second != writesPerOffset.find(row + 1)->second)
                         {
-                            execSize = 8;
+                            execSize = g4::SIMD8;
                         }
                     }
 
@@ -1755,8 +1762,8 @@ void CoalesceSpillFills::spillFillCleanup()
                         src1Write->getBase(), diff + src1Write->getRegOff(), 0,
                         kernel.fg.builder->getRegionStride1(), type);
 
-                    G4_INST* mov = kernel.fg.builder->createMov((unsigned char)execSize,
-                        nDst, nSrc, InstOpt_WriteEnable, false);
+                    G4_INST* mov = kernel.fg.builder->createMov(
+                        execSize, nDst, nSrc, InstOpt_WriteEnable, false);
                     bb->insertBefore(instIt, mov);
                     mov->setCISAOff(inst->getCISAOff());
 

@@ -25,6 +25,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -312,16 +313,38 @@ namespace IGC
         }
 
         llvm::GenIntrinsicInst* pRuntimeVal = llvm::dyn_cast<llvm::GenIntrinsicInst>(pAddress);
+        uint runtimeval0;
 
-        if (pRuntimeVal == nullptr ||
-            pRuntimeVal->getIntrinsicID() != llvm::GenISAIntrinsic::GenISA_RuntimeValue)
+        bool isRuntimeValFound = false;
+        if (pRuntimeVal == nullptr)
+        {
+            auto it = std::find(m_argList.begin(), m_argList.end(), pAddress);
+            if (it != m_argList.end())
+            {
+                int argIndex = (int) std::distance(m_argList.begin(), it);
+                PushInfo& pushInfo = m_context->getModuleMetaData()->pushInfo;
+                for (auto index_it = pushInfo.constantReg.begin(); index_it != pushInfo.constantReg.end(); ++index_it)
+                {
+                    if (index_it->second == argIndex)
+                    {
+                        runtimeval0 = index_it->first;
+                        isRuntimeValFound = true;
+                    }
+                }
+            }
+            if (!isRuntimeValFound)
+                return false;
+        }
+        else if(pRuntimeVal->getIntrinsicID() != llvm::GenISAIntrinsic::GenISA_RuntimeValue)
             return false;
+        if (!isRuntimeValFound)
+            runtimeval0 = (uint)llvm::cast<llvm::ConstantInt>(pRuntimeVal->getOperand(0))->getZExtValue();
 
-        IGC_ASSERT(32 == GetSizeInBits(pRuntimeVal->getType()) ||
-            64 == GetSizeInBits(pRuntimeVal->getType()));
-        const bool is64Bit = 64 == GetSizeInBits(pRuntimeVal->getType());
+        uint runtimevalSize = GetSizeInBits(pAddress->getType());
+        IGC_ASSERT(32 == runtimevalSize ||
+            64 == runtimevalSize);
+        const bool is64Bit = 64 == runtimevalSize;
 
-        uint runtimeval0 = (uint)llvm::cast<llvm::ConstantInt>(pRuntimeVal->getOperand(0))->getZExtValue();
         PushInfo& pushInfo = m_context->getModuleMetaData()->pushInfo;
 
         // then check for static flag so that we can do push safely
@@ -362,9 +385,15 @@ namespace IGC
         BasicBlock* retBB = m_PDT->getRootNode()->getBlock();
         if (!retBB)
         {
+#if LLVM_VERSION_MAJOR <= 10
             auto& roots = m_PDT->getRoots();
             IGC_ASSERT_MESSAGE(roots.size() == 1, "Unexpected multiple roots");
             retBB = roots[0];
+#else
+            auto roots = m_PDT->root_begin();
+            IGC_ASSERT_MESSAGE(m_PDT->root_size() == 1, "Unexpected multiple roots");
+            retBB = *roots;
+#endif
         }
 
         for (auto& II : m_pFunction->getEntryBlock())
@@ -507,24 +536,14 @@ namespace IGC
         {
             return GetConstantOffsetForDynamicUniformBuffer(bufferId, bitCast->getOperand(0), relativeOffsetInBytes);
         }
-        else if (GenIntrinsicInst * genIntr = dyn_cast<GenIntrinsicInst>(offsetValue))
-        {
-            if (genIntr->getIntrinsicID() == GenISAIntrinsic::GenISA_RuntimeValue)
-            {
-                if (MDNode * bufIdMd = genIntr->getMetadata("dynamicBufferOffset.bufferId"))
-                {
-                    ConstantInt* bufIdMdVal = mdconst::extract<ConstantInt>(bufIdMd->getOperand(0));
-                    if (bufferId == int_cast<uint>(bufIdMdVal->getZExtValue()))
-                    {
-                        relativeOffsetInBytes = 0;
-                        return true;
-                    }
-                }
-            }
-        }
         else if (IntToPtrInst * i2p = dyn_cast<IntToPtrInst>(offsetValue))
         {
             return GetConstantOffsetForDynamicUniformBuffer(bufferId, i2p->getOperand(0), relativeOffsetInBytes);
+        }
+        else if (m_dynamicBufferOffsetArgs.find(offsetValue) != m_dynamicBufferOffsetArgs.end())
+        {
+            relativeOffsetInBytes = 0;
+            return true;
         }
 
         return false;
@@ -546,8 +565,8 @@ namespace IGC
 
         if (inst->getType()->isVectorTy())
         {
-            if (!(inst->getType()->getVectorElementType()->isFloatTy() ||
-                inst->getType()->getVectorElementType()->isIntegerTy(32)))
+            if (!(cast<VectorType>(inst->getType())->getElementType()->isFloatTy() ||
+                cast<VectorType>(inst->getType())->getElementType()->isIntegerTy(32)))
                 return false;
         }
         else
@@ -754,7 +773,7 @@ namespace IGC
 
     unsigned int PushAnalysis::GetSizeInBits(Type* type) const
     {
-        unsigned int size = type->getPrimitiveSizeInBits();
+        unsigned int size = (unsigned int)type->getPrimitiveSizeInBits();
         if (type->isPointerTy())
         {
             size = m_DL->getPointerSizeInBits(type->getPointerAddressSpace());
@@ -882,11 +901,11 @@ namespace IGC
 
         if (pTypeToPush->isVectorTy())
         {
-            num_elms = pTypeToPush->getVectorNumElements();
-            pTypeToPush = pTypeToPush->getVectorElementType();
-            llvm::Type* pVecTy = llvm::VectorType::get(pTypeToPush, num_elms);
+            num_elms = (unsigned)cast<VectorType>(pTypeToPush)->getNumElements();
+            pTypeToPush = cast<VectorType>(pTypeToPush)->getElementType();
+            llvm::Type* pVecTy = IGCLLVM::FixedVectorType::get(pTypeToPush, num_elms);
             pReplacedInst = llvm::UndefValue::get(pVecTy);
-            pScalarTy = pVecTy->getVectorElementType();
+            pScalarTy = cast<VectorType>(pVecTy)->getElementType();
         }
 
         SmallVector< SmallVector<ExtractElementInst*, 1>, 4> extracts(num_elms);
@@ -955,9 +974,13 @@ namespace IGC
     {
         auto& inputs = m_context->getModuleMetaData()->pushInfo.inputs;
         typedef const std::map<unsigned int, SInputDesc>::value_type& inputPairType;
-        auto largestPair = std::max_element(inputs.begin(), inputs.end(),
-            [](inputPairType a, inputPairType b) { return a.second.index < b.second.index; });
-        unsigned int largestIndex = largestPair != inputs.end() ? largestPair->second.index : 0;
+        unsigned int largestIndex = 0;
+        if (m_context->m_DriverInfo.EnableSimplePushRestriction())
+        {
+            auto largestPair = std::max_element(inputs.begin(), inputs.end(),
+                [](inputPairType a, inputPairType b) { return a.second.index < b.second.index; });
+            largestIndex = largestPair != inputs.end() ? largestPair->second.index : 0;
+        }
         const unsigned int maxPushedGRFs = 96;
         if (largestIndex >= maxPushedGRFs)
         {
@@ -1052,8 +1075,8 @@ namespace IGC
             return;
         }
 
-        unsigned int num_elms =
-            inst->getType()->isVectorTy() ? inst->getType()->getVectorNumElements() : 1;
+        unsigned num_elms =
+            inst->getType()->isVectorTy() ? (unsigned)cast<VectorType>(inst->getType())->getNumElements() : 1;
         llvm::Type* pTypeToPush = inst->getType();
         llvm::Value* replaceVector = nullptr;
         unsigned int numberChannelReplaced = 0;
@@ -1062,7 +1085,7 @@ namespace IGC
         if (inst->getType()->isVectorTy())
         {
             allExtract = LoadUsedByConstExtractOnly(cast<LoadInst>(inst), extracts);
-            pTypeToPush = inst->getType()->getVectorElementType();
+            pTypeToPush = cast<VectorType>(inst->getType())->getElementType();
         }
 
         for (unsigned int i = 0; i < num_elms; ++i)
@@ -1310,7 +1333,7 @@ namespace IGC
         }
     }
 
-    // process runtimve value, update PushInfo.constantReg
+    // process runtime value, update PushInfo.constantReg
     void PushAnalysis::processRuntimeValue(GenIntrinsicInst* intrinsic)
     {
         PushInfo& pushInfo = m_context->getModuleMetaData()->pushInfo;
@@ -1332,6 +1355,15 @@ namespace IGC
                 VALUE_NAME(std::string("runtime_value_") + to_string(index)),
                 WIAnalysis::UNIFORM);
             pushInfo.constantReg[index] = m_argIndex;
+
+            if (m_context->m_DriverInfo.SupportsDynamicUniformBuffers() &&
+                IGC_IS_FLAG_DISABLED(DisableSimplePushWithDynamicUniformBuffers) &&
+                pushInfo.dynamicBufferInfo.numOffsets > 0 &&
+                index >= pushInfo.dynamicBufferInfo.firstIndex &&
+                index < pushInfo.dynamicBufferInfo.firstIndex + pushInfo.dynamicBufferInfo.numOffsets)
+            {
+                m_dynamicBufferOffsetArgs.insert(arg);
+            }
         }
         else
         {
@@ -1469,6 +1501,7 @@ namespace IGC
         {
             BlockPushConstants();
         }
+
         // WA: Gen11+ HW doesn't work correctly if doubles are on vertex shader input and the input has unused components,
         // so ElementComponentEnableMask is not full => packing occurs
         // Code below fills gaps in inputs, so the ElementComponentEnableMask if full even if we don't use all

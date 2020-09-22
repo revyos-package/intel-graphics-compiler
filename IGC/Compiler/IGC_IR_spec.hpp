@@ -30,6 +30,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // and VerificationPass.cpp.
 //
 
+#include "llvm/Config/llvm-config.h"
+
 //=======================================================================================
 // TYPES
 
@@ -99,6 +101,8 @@ IGC_IR_LLVM_INTRINSIC(bswap)
 IGC_IR_LLVM_INTRINSIC(maxnum)
 IGC_IR_LLVM_INTRINSIC(minnum)
 IGC_IR_LLVM_INTRINSIC(canonicalize)
+IGC_IR_LLVM_INTRINSIC(stacksave)
+IGC_IR_LLVM_INTRINSIC(stackrestore)
 #if LLVM_VERSION_MAJOR >= 8
 IGC_IR_LLVM_INTRINSIC(fshl)
 IGC_IR_LLVM_INTRINSIC(fshr)

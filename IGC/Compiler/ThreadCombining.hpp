@@ -87,6 +87,13 @@ namespace IGC
         bool isSLMUsed(llvm::Instruction* I) const;
         unsigned int GetthreadGroupSize(llvm::Module& M, dim dimension);
         void SetthreadGroupSize(llvm::Module& M, llvm::Constant* size, dim dimension);
+        void remapThreads(llvm::Module& M,
+            unsigned int newSizeX,
+            unsigned int newSizeY,
+            unsigned int threadGroupSize_X,
+            unsigned int threadGroupSize_Y,
+            llvm::IRBuilder<>& builder);
+
         void CreateLoopKernel(
             llvm::Module& M,
             unsigned int newSizeX,
@@ -94,10 +101,10 @@ namespace IGC
             unsigned int threadGroupSize_X,
             unsigned int threadGroupSize_Y,
             llvm::Function* newFunc,
-            llvm::IRBuilder<> builder);
+            llvm::IRBuilder<>& builder);
 
         void CreateNewKernel(llvm::Module& M,
-            llvm::IRBuilder<> builder,
+            llvm::IRBuilder<>& builder,
             llvm::Function* newFunc);
 
         bool canDoOptimization(llvm::Function* m_kernel, llvm::Module& M);

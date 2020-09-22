@@ -27,14 +27,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef IGCLLVM_CALL_GRAPH_H
 #define IGCLLVM_CALL_GRAPH_H
 
-#include <llvm/Analysis/CallGraph.h>
-#include <llvm/IR/CallSite.h>
+#include "llvm/Config/llvm-config.h"
+#include "llvm/Analysis/CallGraph.h"
+#if LLVM_VERSION_MAJOR < 11
+#include "llvm/IR/CallSite.h"
+#endif
 
 namespace IGCLLVM
 {
-#if LLVM_VERSION_MAJOR < 9
-using CallGraphNode = llvm::CallGraphNode;
-#else
+#if LLVM_VERSION_MAJOR == 10
     class CallGraphNode : public llvm::CallGraphNode
     {
       public:
@@ -45,6 +46,8 @@ using CallGraphNode = llvm::CallGraphNode;
                                                  NewNode);
         }
     };
+#else
+using CallGraphNode = llvm::CallGraphNode;
 #endif
 }
 

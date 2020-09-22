@@ -61,6 +61,14 @@ static bool ParseEMask(CISA_IR_Builder* pBuilder, const char* sym, VISA_EMask_Ct
   {pBuilder->RecordParseError(LINE, __VA_ARGS__); YYABORT;}
 #define PARSE_ERROR(...)\
     PARSE_ERROR_AT(CISAlineno, __VA_ARGS__)
+
+// Use this to wrap API calls that return false, nullptr, or 0 on failure
+// It's assumed that the API call reported the parse error
+#define ABORT_ON_FAIL(X) \
+    do \
+        if (!(X)) \
+            YYABORT;\
+    while (0)
 #ifdef _DEBUG
 #define TRACE(str) fprintf(CISAout, str)
 #else
@@ -74,6 +82,9 @@ int num_parameters;
 
 VISA_RawOpnd* rawOperandArray[16];
 
+// global var for non-kernel attribute option.
+// The var needs to be cleared before each use.
+std::vector<attr_gen_struct*> AttrOptVar;
 
 #ifdef _MSC_VER
 #pragma warning(disable:4065; disable:4267)
@@ -120,7 +131,6 @@ VISA_RawOpnd* rawOperandArray[16];
         unsigned int v_stride;
         unsigned int h_stride;
         unsigned int width;
-        //RegionDesc*              rgn;
     } cisa_region;
 
     struct {
@@ -129,36 +139,12 @@ VISA_RawOpnd* rawOperandArray[16];
     } offset;
 
     struct {
-        //G4_Operand*        opnd;
-        Common_ISA_Operand_Class type;
-       // VISA_opnd * cisa_gen_opnd;
-    } dstOpnd;
-
-    struct {
-        //G4_Operand*        opnd;
-        Common_ISA_Operand_Class type;
-       // VISA_opnd * cisa_gen_opnd;
-    } srcOpnd;
-
-    struct {
-        //G4_Operand*        opnd;
         Common_ISA_Operand_Class type;
         VISA_opnd * cisa_gen_opnd;
     } genOperand;
 
     struct {
-        //G4_Operand*        opnd;
-        Common_ISA_Operand_Class type;
-        Common_ISA_Function_Parameters_Kind kind;
-        char * var_name; //for Surface, VME, Sampler
-        //for raw operand
-        //G4_Declare *dcl;
-        unsigned short offset;
-    } srcFuncOpnd;
-
-    struct {
         char * var_name;
-        //G4_Operand*        opnd;
         VISA_opnd * cisa_gen_opnd;
         unsigned char streamMode;
         unsigned char searchCtrl;
@@ -183,14 +169,9 @@ VISA_RawOpnd* rawOperandArray[16];
         int                offset;
     } alias;
 
-    struct {
-        //G4_Declare *dcl;
-        unsigned short offset;
-        VISA_opnd * cisa_gen_opnd;
-    } RawVar;
+    VISA_opnd * RawVar;
 
     struct {
-        //G4_Declare *dcl;
         Common_ISA_State_Opnd type;
         unsigned char offset;
         VISA_opnd * cisa_gen_opnd;
@@ -201,7 +182,7 @@ VISA_RawOpnd* rawOperandArray[16];
         int exec_size;
     } emask_exec_size;
 
-    struct attr_gen_struct attr_gen;
+    struct attr_gen_struct*  pattr_gen;
 
 
 
@@ -240,7 +221,6 @@ VISA_RawOpnd* rawOperandArray[16];
 %token <atomic_op> ATOMIC_SUB_OP
 
 // directives
-%token          DIRECTIVE_ATTR        // .attr
 %token          DIRECTIVE_DECL        // .decl
 %token          DIRECTIVE_FUNC        // .function
 %token          DIRECTIVE_FUNCDECL    // .funcdecl
@@ -329,10 +309,8 @@ VISA_RawOpnd* rawOperandArray[16];
 %token <string> BUILTIN_NULL  // %null
 %token <string> BUILTIN       // other builtins e.g. %r0, %cr0, ...
 %token <string> STRING_LIT
-%token          SIZEOF
 
 %token NEWLINE
-%token EOF_TOKEN // EOF is a macro
 
 
 %token <string>            RTWRITE_OPTION
@@ -414,7 +392,6 @@ VISA_RawOpnd* rawOperandArray[16];
 
 %type <intval> SwitchLabels
 %type <intval> RTWriteOperandParse
-%type <intval> RawOperandArray
 
 %type <pred_reg>   Predicate
 %type <pred_sign>  PredSign
@@ -496,9 +473,12 @@ VISA_RawOpnd* rawOperandArray[16];
 %type <cisa_region> SrcRegionDirect
 %type <cisa_region> SrcRegionIndirect
 
-%type <regAccess> IndirectVarAccess
-%type <regAccess> AddrVarAccess
-%type <vISADecl>  PredVar
+%type <regAccess>    IndirectVarAccess
+%type <offset>       TwoDimOffset
+%type <vISADecl>     PredVar
+%type <regAccess>    AddrVarAccess
+%type <regAccess>    AddrVarAccessWithWidth
+// %type <vISADecl>     AddrVar
 
 %type <vmeOpndIvb> VMEOpndIME
 %type <vmeOpndFbr> VMEOpndFBR
@@ -507,37 +487,38 @@ VISA_RawOpnd* rawOperandArray[16];
 %type <align>               AlignAttrOpt
 %type <emask_exec_size>     ExecSize
 %type <intval>              ExecSizeInt
-%type <offset>              TwoDimOffset
 %type <type>                DataType
 %type <type>                DataTypeIntOrVector
 %type <src_mod>             SrcModifier
 %type <sat>                 SatModOpt
 %type <alias>               AliasAttrOpt
 %type <oword_mod>           OwordModifier
-%type <RawVar>              RawOperand
 %type <StateVar>            DstStateOperand
 %type <StateVar>            SrcStateOperand
+%type <StateVar>            StateOperand
+%type <RawVar>              RawOperand
+%type <RawVar>              RawOperandNonNull
+%type <intval>              RawOperandOffsetSuffix
+%type <intval>              RawOperandArray
 %type <pixel_null_mask>     PixelNullMaskEnableOpt
 %type <cps>                 CPSEnableOpt
 %type <non_uniform_sampler> NonUniformSamplerEnableOpt
-%type <attr_gen>            GenAttrOpt
+%type <pattr_gen>           OneAttr
+%type <intval>              AttrOpt
+%type <intval>              GenAttrOpt
 %type <flag>                Atomic16Opt
 %type <intval>              AtomicBitwidthOpt
 
 
 
 %%
-// Listing: PredVar SrcImmOperand
-// Listing: DstGeneralOperand VecSrcOperand_G_I_IMM
-
 Listing: NewlinesOpt ListingHeader NewlinesOpt Statements NewlinesOpt {
         TRACE("\n** Listing Complete\n");
         pBuilder->CISA_post_file_parse();
     }
 
-ListingHeader: DirectiveVersion Newlines DirectiveKernel
+ListingHeader: DirectiveVersion
 
-// StatementsOpt: NewlinesOpt | Statements NewlinesOpt
 Statements: Statements Newlines Statement | Statement
 
 Newlines: Newlines NEWLINE | NEWLINE
@@ -545,6 +526,7 @@ NewlinesOpt: %empty | Newlines
 
 Statement:
       DirectiveDecl
+    | DirectiveKernel
     | DirectiveGlobalFunction
     | DirectiveImplicitInput
     | DirectiveInput
@@ -570,8 +552,7 @@ ScopeStart:
     }
 ScopeEnd: RBRACE {pBuilder->CISA_pop_decl_scope();}
 
-
-
+// ------------- an identifier or string literal -------------
 IdentOrStringLit: IDENT | STRING_LIT;
 
 // ---------------------------------------------------------------------
@@ -618,61 +599,53 @@ DeclVariable:
     //     1         2         3           4             5        6        7            8          9
     DIRECTIVE_DECL IDENT V_TYPE_EQ_G DECL_DATA_TYPE NUM_ELTS_EQ IntExp AlignAttrOpt AliasAttrOpt GenAttrOpt
     {
-       if (!pBuilder->CISA_general_variable_decl($2, (unsigned int)$6, $4, $7, $8.aliasname, $8.offset, $9, CISAlineno)) {
-           YYABORT; // error already reported
-       }
+       ABORT_ON_FAIL(pBuilder->CISA_general_variable_decl(
+           $2, (unsigned int)$6, $4, $7, $8.aliasname, $8.offset, AttrOptVar, CISAlineno));
+       AttrOptVar.clear();
     }
 
                //     1       2        3         4         5        6
 DeclAddress: DIRECTIVE_DECL IDENT V_TYPE_EQ_A NUM_ELTS_EQ IntExp GenAttrOpt
    {
-       pBuilder->CISA_addr_variable_decl($2, (unsigned int)$5, ISA_TYPE_UW, $6, CISAlineno);
+       ABORT_ON_FAIL(
+           pBuilder->CISA_addr_variable_decl($2, (unsigned int)$5, ISA_TYPE_UW, AttrOptVar, CISAlineno));
+       AttrOptVar.clear();
    }
 
                //     1         2         3        4          5       6
 DeclPredicate: DIRECTIVE_DECL IDENT V_TYPE_EQ_P NUM_ELTS_EQ IntExp GenAttrOpt
    {
-       if (!pBuilder->CISA_predicate_variable_decl($2, (unsigned int)$5, $6, CISAlineno)) {
-           YYABORT; // error already reported
-       }
+       ABORT_ON_FAIL(pBuilder->CISA_predicate_variable_decl($2, (unsigned int)$5, AttrOptVar, CISAlineno));
+       AttrOptVar.clear();
    }
 
                //     1       2         3       4          5         6          7
 DeclSampler: DIRECTIVE_DECL IDENT V_TYPE_EQ_S NUM_ELTS_EQ IntExp VNameEqOpt GenAttrOpt
    {
-       if (!pBuilder->CISA_sampler_variable_decl($2, (int)$5, $6, CISAlineno)) {
-           YYABORT; // error already reported
-       }
+       ABORT_ON_FAIL(pBuilder->CISA_sampler_variable_decl($2, (int)$5, $6, CISAlineno));
    }
 VNameEqOpt: %empty  {$$ = "";} | V_NAME_EQ IDENT {$$ = $2;};
 
                //     1       2         3          4         5         6          7
 DeclSurface: DIRECTIVE_DECL IDENT V_TYPE_EQ_T  NUM_ELTS_EQ IntExp  VNameEqOpt GenAttrOpt
    {
-       if (!pBuilder->CISA_surface_variable_decl($2, (int)$5, $6, $7, CISAlineno)) {
-           YYABORT; // error already reported
-       }
+       ABORT_ON_FAIL(pBuilder->CISA_surface_variable_decl($2, (int)$5, $6, AttrOptVar, CISAlineno));
+       AttrOptVar.clear();
    }
 
 // ----- .input ------
 DirectiveInput:
     DIRECTIVE_INPUT IDENT InputOffset InputSize
     {
-        if (!pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)$4, CISAlineno)) {
-            YYABORT; // error already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)$4, CISAlineno));
     }
     |
     DIRECTIVE_INPUT IDENT InputOffset
     {
         int64_t size = 0;
-        if (!pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, size)) {
-            YYABORT; // error already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, size));
         MUST_HOLD(size < 0x10000, "declaration size is too large");
-        if (!pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)size, CISAlineno)) {
-            YYABORT; // error already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)size, CISAlineno));
     }
 
 ///////////////////////////////////////////////////////////
@@ -681,21 +654,17 @@ DirectiveImplicitInput:
     //  1                2        3        4        5
     DIRECTIVE_IMPLICIT IDENT InputOffset InputSize GenAttrOpt
     {
-        pBuilder->CISA_implicit_input_directive(
-            $1, $2, (short)$3, (unsigned short)$4, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_implicit_input_directive(
+            $1, $2, (short)$3, (unsigned short)$4, CISAlineno));
     }
     |
     //  1                2        3           4
     DIRECTIVE_IMPLICIT IDENT InputOffset  GenAttrOpt
     {
         int64_t size = 0;
-        if (!pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, size)) {
-            YYABORT; // error already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, size));
         MUST_HOLD(size < 0x10000, "declaration size is too large");
-        if (!pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)size, CISAlineno)) {
-            YYABORT; // error already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_input_directive($2, (short)$3, (unsigned short)size, CISAlineno));
     }
 
 InputOffset: %empty {$$ = 0;} | OFFSET_EQ IntExp {$$ = $2;}
@@ -707,43 +676,31 @@ InputSize: SIZE_EQ IntExp {$$ = $2;}
 DirectiveParameter:
     //      1            2       3        4
     DIRECTIVE_PARAMETER IDENT InputSize GenAttrOpt {
-        if (!pBuilder->CISA_input_directive($2, 0, (unsigned short)$3, CISAlineno)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_input_directive($2, 0, (unsigned short)$3, CISAlineno));
     }
 // ----- .attribute ------
 
 DirectiveAttr:
     DIRECTIVE_KERNEL_ATTR IDENT EQUALS STRING_LIT {
-        if (!pBuilder->CISA_attr_directive($2, $4, CISAlineno)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_attr_directive($2, $4, CISAlineno));
     }
     |
     DIRECTIVE_KERNEL_ATTR IDENT EQUALS IntExp {
-        if (!pBuilder->CISA_attr_directiveNum($2, (uint32_t)$4, CISAlineno)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_attr_directiveNum($2, (uint32_t)$4, CISAlineno));
     }
     |
     DIRECTIVE_KERNEL_ATTR IDENT {
-        if (!pBuilder->CISA_attr_directive($2, nullptr, CISAlineno)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_attr_directive($2, nullptr, CISAlineno));
     }
     |
     DIRECTIVE_KERNEL_ATTR IDENT EQUALS {
-        if (!pBuilder->CISA_attr_directive($2, nullptr, CISAlineno)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_attr_directive($2, nullptr, CISAlineno));
     }
 
 // ----- .function -----
 DirectiveFunc: DIRECTIVE_FUNC IdentOrStringLit
     {
-        if (!pBuilder->CISA_function_directive($2)) {
-            YYABORT;
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_function_directive($2, CISAlineno));
     }
 
 
@@ -788,35 +745,39 @@ AliasAttrOpt:
        PARSE_ERROR("syntax error in alias attribute");
     }
 
+OneAttr:
+    IDENT EQUALS IntExpNRA
+    {
+      $$ = pBuilder->CISA_Create_Attr($1, $3, nullptr);
+    }
+    | IDENT EQUALS STRING_LIT
+    {
+      $$ = pBuilder->CISA_Create_Attr($1, 0, $3);
+    }
+    | IDENT
+    {
+      $$ = pBuilder->CISA_Create_Attr($1, 0, nullptr);
+    }
+
+AttrOpt:
+    AttrOpt COMMA OneAttr
+    {
+      AttrOptVar.push_back($3);
+    }
+    |
+    OneAttr
+    {
+      AttrOptVar.push_back($1);
+    }
 
 GenAttrOpt:
     %empty
     {
-        $$.name = "";
-        $$.value = 0;
-        $$.attr_set = false;
+        $$ = 0;
     }
-    | ATTR_EQ IDENT EQUALS IntExp
+    | ATTR_EQ LBRACE AttrOpt RBRACE
     {
-      $$.name = $2;
-      $$.isInt = true;
-      $$.value = (int)$4;
-      $$.attr_set = true;
-    }
-    | ATTR_EQ IDENT EQUALS
-    {
-      $$.name = $2;
-      $$.isInt = false;
-      $$.string_val = "";
-      $$.attr_set = true;
-    }
-    //  1        2     3        4
-    | ATTR_EQ IDENT EQUALS STRING_LIT
-    {
-      $$.name = $2;
-      $$.isInt = false;
-      $$.string_val = $4;
-      $$.attr_set = true;
+        $$ = 1;
     }
 
 // ----------------------------------------------------------
@@ -1021,9 +982,7 @@ MovInstruction:
     |
     Predicate MOV_OP SatModOpt ExecSize VecDstOperand_G_I PredVar
     {
-        if (!pBuilder->CISA_create_mov_instruction($5.cisa_gen_opnd, $6, CISAlineno)) {
-            YYABORT; // unbound ientifier: already reported
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_create_mov_instruction($5.cisa_gen_opnd, $6, CISAlineno));
     }
 
 MovsInstruction:
@@ -1052,8 +1011,9 @@ CmpInstruction:
     //                  | Var . DstRegion
     // PredVar: Var .
     //
-    // Given ExecSize VAR with lookahead LPAREN
-    // we cannot decide if we should shift LPAREN or reduce IDENT to PredVar
+    // Given: ExecSize VAR with lookahead LPAREN
+    // we cannot decide if we should shift LPAREN (we're looking at a DstOperand paren)
+    // or reduce IDENT to PredVar
 
     // 1          2               3       4                       5                     6
     CMP_OP ConditionalModifier ExecSize PredVar           VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM
@@ -1075,27 +1035,21 @@ MediaInstruction:
     // 1       2          3           4              5                    6                    7                  8
     MEDIA_OP MEDIA_MODE TwoDimOffset Var MediaInstructionPlaneID VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM  RawOperand
     {
-        if (!pBuilder->CISA_create_media_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_media_instruction(
             $1, $2, $3.row, $3.elem, (int)$5, $4,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, CISAlineno))
-        {
-            YYABORT;
-        }
+            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8, CISAlineno));
     }
     |
     // 1       2          3           4                  5                    6                    7
     MEDIA_OP MEDIA_MODE TwoDimOffset Var         VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM  RawOperand
     {
-        if (!pBuilder->CISA_create_media_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_media_instruction(
             $1, $2, $3.row, $3.elem, (int)0, $4,
-            $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, CISAlineno))
-        {
-            YYABORT;
-        }
+            $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7, CISAlineno));
     }
 
 MediaInstructionPlaneID: DEC_LIT {
-        MUST_HOLD($1 < 0xF, "PlaneID must less than 0xF");
+        MUST_HOLD($1 <= 0xF, "PlaneID must less than 0xF");
         $$ = $1;
     }
 
@@ -1103,64 +1057,62 @@ ScatterInstruction:
     //  1          2        3        4         5          6                7           8
     SCATTER_OP ElemNum ExecSize OwordModifier Var VecSrcOperand_G_I_IMM RawOperand RawOperand
     {
-        pBuilder->CISA_create_scatter_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_scatter_instruction(
             $1, (int)$2, $3.emask, $3.exec_size, $4, $5,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, CISAlineno);
+            $6.cisa_gen_opnd, $7, $8, CISAlineno));
     }
 
 ScatterTypedInstruction:
     //  1             2                 3             4       5         6           7             8           9            10
     Predicate   SCATTER_TYPED_OP  SAMPLER_CHANNEL  ExecSize  Var    RawOperand   RawOperand   RawOperand  RawOperand    RawOperand
     {
-        pBuilder->CISA_create_scatter4_typed_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_scatter4_typed_instruction(
             $2, $1, ChannelMask::createFromAPI($3), $4.emask, $4.exec_size, $5,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd,
-            $9.cisa_gen_opnd, $10.cisa_gen_opnd, CISAlineno);
+            $6, $7, $8, $9, $10, CISAlineno));
     }
 
 Scatter4ScaledInstruction:
     //  1           2               3                4      5          6                 7         8
     Predicate SCATTER4_SCALED_OP SAMPLER_CHANNEL  ExecSize Var VecSrcOperand_G_I_IMM RawOperand RawOperand
     {
-        pBuilder->CISA_create_scatter4_scaled_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_scatter4_scaled_instruction(
             $2, $1, $4.emask, $4.exec_size, ChannelMask::createFromAPI($3), $5,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, CISAlineno);
+            $6.cisa_gen_opnd, $7, $8, CISAlineno));
     }
 
 ScatterScaledInstruction:
     // 1           2             3    4        5      6       7                   8          9
     Predicate SCATTER_SCALED_OP DOT DEC_LIT ExecSize Var VecSrcOperand_G_I_IMM RawOperand RawOperand
     {
-        pBuilder->CISA_create_scatter_scaled_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_scatter_scaled_instruction(
             $2, $1, $5.emask, $5.exec_size, (uint32_t) $4, $6,
-            $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            $7.cisa_gen_opnd, $8, $9, CISAlineno));
     }
 
 SynchronizationInstruction:
     BARRIER_OP {
-        pBuilder->CISA_create_sync_instruction($1);
+        pBuilder->CISA_create_sync_instruction($1, CISAlineno);
     }
     | SBARRIER_SIGNAL {
-        pBuilder->CISA_create_sbarrier_instruction(true);
+        pBuilder->CISA_create_sbarrier_instruction(true, CISAlineno);
     }
     | SBARRIER_WAIT {
-        pBuilder->CISA_create_sbarrier_instruction(false);
+        pBuilder->CISA_create_sbarrier_instruction(false, CISAlineno);
     }
 
 //                      1         2               3             4           5         6     7          8          9          10
 DwordAtomicInstruction: Predicate DWORD_ATOMIC_OP ATOMIC_SUB_OP Atomic16Opt ExecSize Var RawOperand RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_dword_atomic_instruction($1, $3, $4, $5.emask, $5.exec_size, $6,
-            $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10.cisa_gen_opnd, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_dword_atomic_instruction(
+            $1, $3, $4, $5.emask, $5.exec_size, $6, $7, $8, $9, $10, CISAlineno));
     }
 
 //                      1         2               3             4           5        6   7          8          9          10         11         12         13
 TypedAtomicInstruction: Predicate TYPED_ATOMIC_OP ATOMIC_SUB_OP Atomic16Opt ExecSize Var RawOperand RawOperand RawOperand RawOperand RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_typed_atomic_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_typed_atomic_instruction(
             $1, $3, $4, $5.emask, $5.exec_size, $6,
-            $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10.cisa_gen_opnd,
-            $11.cisa_gen_opnd, $12.cisa_gen_opnd, $13.cisa_gen_opnd, CISAlineno);
+            $7, $8, $9, $10, $11, $12, $13, CISAlineno));
     }
 
 Atomic16Opt:
@@ -1172,36 +1124,36 @@ Atomic16Opt:
 
                  //            1               2               3        4   5             6                   7                      8                   9                10
 SampleUnormInstruction: SAMPLE_UNORM_OP SAMPLER_CHANNEL CHANNEL_OUTPUT Var Var VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM RawOperand
-   {
-      pBuilder->CISA_create_sampleunorm_instruction(
-          $1, ChannelMask::createFromAPI($2), $3, $4, $5,
-          $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10.cisa_gen_opnd, CISAlineno);
-   }
+    {
+        ABORT_ON_FAIL(pBuilder->CISA_create_sampleunorm_instruction(
+            $1, ChannelMask::createFromAPI($2), $3, $4, $5,
+            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10, CISAlineno));
+    }
 
 SampleInstruction:
     // 1            2            3      4   5      6          7          8          9
     SAMPLE_OP SAMPLER_CHANNEL SIMDMode Var Var RawOperand RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_sample_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_sample_instruction(
             $1, ChannelMask::createFromAPI($2), (int)$3, $4, $5,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            $6, $7, $8, $9, CISAlineno));
     }
    |
    // 1             2          3       4     5           6         7           8
    SAMPLE_OP SAMPLER_CHANNEL SIMDMode Var RawOperand RawOperand RawOperand RawOperand
    {
-       pBuilder->CISA_create_sample_instruction(
+       ABORT_ON_FAIL(pBuilder->CISA_create_sample_instruction(
            $1, ChannelMask::createFromAPI($2), (int)$3, "", $4,
-           $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, CISAlineno);
+           $5, $6, $7, $8, CISAlineno));
    }
 
            //        1         2            3                      4            5                          6               7        8                     9   10  11         12
 Sample3dInstruction: Predicate SAMPLE_3D_OP PixelNullMaskEnableOpt CPSEnableOpt NonUniformSamplerEnableOpt SAMPLER_CHANNEL ExecSize VecSrcOperand_G_I_IMM Var Var RawOperand RawOperandArray
    {
-       pBuilder->create3DSampleInstruction(
+       ABORT_ON_FAIL(pBuilder->create3DSampleInstruction(
            $1, $2, $3, $4, $5, ChannelMask::createFromAPI($6),
            $7.emask, $7.exec_size, $8.cisa_gen_opnd, $9, $10,
-           $11.cisa_gen_opnd, (unsigned int)$12, rawOperandArray, CISAlineno);
+           $11, (unsigned int)$12, rawOperandArray, CISAlineno));
    }
 
 CPSEnableOpt: %empty {$$ = false;} | CPS  {$$ = true;}
@@ -1211,17 +1163,17 @@ NonUniformSamplerEnableOpt: %empty {$$ = false;} | NON_UNIFORM_SAMPLER {$$ = tru
            //      1         2          3                      4               5        6                     7   8          9
 Load3dInstruction: Predicate LOAD_3D_OP PixelNullMaskEnableOpt SAMPLER_CHANNEL ExecSize VecSrcOperand_G_I_IMM Var RawOperand RawOperandArray
    {
-       pBuilder->create3DLoadInstruction(
+       ABORT_ON_FAIL(pBuilder->create3DLoadInstruction(
            $1, $2, $3, ChannelMask::createFromAPI($4),
-           $5.emask, $5.exec_size, $6.cisa_gen_opnd, $7, $8.cisa_gen_opnd, (unsigned int)$9, rawOperandArray, CISAlineno);
+           $5.emask, $5.exec_size, $6.cisa_gen_opnd, $7, $8, (unsigned int)$9, rawOperandArray, CISAlineno));
    }
 
            //         1         2             3                      4               5        6                     7   8   9          10
 Gather43dInstruction: Predicate SAMPLE4_3D_OP PixelNullMaskEnableOpt SAMPLER_CHANNEL ExecSize VecSrcOperand_G_I_IMM Var Var RawOperand RawOperandArray
    {
-      pBuilder->createSample4Instruction(
+      ABORT_ON_FAIL(pBuilder->createSample4Instruction(
           $1, $2, $3, ChannelMask::createFromAPI($4), $5.emask, $5.exec_size,
-          $6.cisa_gen_opnd, $7, $8, $9.cisa_gen_opnd, (unsigned int)$10, rawOperandArray, CISAlineno);
+          $6.cisa_gen_opnd, $7, $8, $9, (unsigned int)$10, rawOperandArray, CISAlineno));
    }
 
 PixelNullMaskEnableOpt: %empty {$$ = false;} | PIXEL_NULL_MASK {$$ = true;}
@@ -1229,17 +1181,17 @@ PixelNullMaskEnableOpt: %empty {$$ = false;} | PIXEL_NULL_MASK {$$ = true;}
             //          1                   2              3           4           5              6
 ResInfo3dInstruction: RESINFO_OP_3D   SAMPLER_CHANNEL  ExecSize       Var     RawOperand      RawOperand
    {
-        pBuilder->CISA_create_info_3d_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_info_3d_instruction(
             VISA_3D_RESINFO, $3.emask, $3.exec_size,
-            ChannelMask::createFromAPI($2), $4, $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
+            ChannelMask::createFromAPI($2), $4, $5, $6, CISAlineno));
    }
 
            //               1                    2              3         4          5
 SampleInfo3dInstruction: SAMPLEINFO_OP_3D   SAMPLER_CHANNEL  ExecSize    Var     RawOperand
    {
-        pBuilder->CISA_create_info_3d_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_info_3d_instruction(
             VISA_3D_SAMPLEINFO, $3.emask, $3.exec_size,
-            ChannelMask::createFromAPI($2), $4, NULL, $5.cisa_gen_opnd, CISAlineno);
+            ChannelMask::createFromAPI($2), $4, NULL, $5, CISAlineno));
    }
 
 RTWriteOperandParse:
@@ -1252,36 +1204,38 @@ RTWriteOperandParse:
     }
     | RTWriteOperandParse RawOperand
     {
-        RTWriteOperands.push_back($2.cisa_gen_opnd);
+        RTWriteOperands.push_back($2);
     }
             //      1            2                3                 4           5     6
 RTWriteInstruction: Predicate    RTWRITE_OP_3D    RTWriteModeOpt    ExecSize    Var   RTWriteOperandParse
    {
-       pBuilder->CISA_create_rtwrite_3d_instruction(
+       bool result = pBuilder->CISA_create_rtwrite_3d_instruction(
            $1, $3, $4.emask, (unsigned int)$4.exec_size, $5,
-           RTWriteOperands, CISAlineno );
+           RTWriteOperands, CISAlineno);
        RTWriteOperands.clear();
+       if (!result)
+           YYABORT; // already reported
    }
 
 RTWriteModeOpt: %empty {$$ = 0;} | RTWRITE_OPTION
 
 
-            //          1            2                3           4               5              6         7             8               9
-URBWriteInstruction: Predicate  URBWRITE_OP_3D    ExecSize    DEC_LIT    DEC_LIT    RawOperand RawOperand    RawOperand    RawOperand
+            //          1            2                3           4         5           6           7           8          9
+URBWriteInstruction: Predicate  URBWRITE_OP_3D    ExecSize    DEC_LIT    DEC_LIT    RawOperand  RawOperand  RawOperand  RawOperand
     {
         pBuilder->CISA_create_urb_write_3d_instruction(
             $1, $3.emask, (unsigned int)$3.exec_size, (unsigned int)$4, (unsigned int)$5,
-            $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            $6, $7, $8, $9, CISAlineno);
     }
 
-            //      1         2         3     4                       5                       6                   7                     8                     9                     10                    11    12                    13       14                    15
+            //      1         2         3   4          5                       6                   7                     8                     9                     10                    11              12        13                 14               15           16
 AVSInstruction: AVS_OP SAMPLER_CHANNEL Var Var VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM VecSrcOperand_G_I_IMM CNTRL VecSrcOperand_G_I_IMM EXECMODE VecSrcOperand_G_I_IMM RawOperand
     {
         pBuilder->CISA_create_avs_instruction(
             ChannelMask::createFromAPI($2), $3, $4,
             $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, $8.cisa_gen_opnd,
             $9.cisa_gen_opnd, $10.cisa_gen_opnd, $11.cisa_gen_opnd, $12, $13.cisa_gen_opnd,
-            $14, $15.cisa_gen_opnd, $16.cisa_gen_opnd, CISAlineno);
+            $14, $15.cisa_gen_opnd, $16, CISAlineno);
     }
 
 
@@ -1298,34 +1252,34 @@ VMEInstruction:
        //     7 - ref1
        //     8 - CostCenter
        //     9 - Output
-        pBuilder->CISA_create_vme_ime_instruction(
-            $1, $2.streamMode, $2.searchCtrl, $4.cisa_gen_opnd, $5.cisa_gen_opnd, $3,
-            $6.cisa_gen_opnd,$7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_vme_ime_instruction(
+            $1, $2.streamMode, $2.searchCtrl, $4, $5, $3, $6, $7, $8, $9, CISAlineno));
    }
    |
-    //    1      2      3           4          5
-     VME_SIC_OP Var RawOperand RawOperand  RawOperand
+    //    1    2      3           4          5
+   VME_SIC_OP Var RawOperand RawOperand  RawOperand
    {
-        pBuilder->CISA_create_vme_sic_instruction($1, $3.cisa_gen_opnd, $4.cisa_gen_opnd, $2, $5.cisa_gen_opnd, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_vme_sic_instruction($1, $3, $4, $2, $5, CISAlineno));
    }
    |
-   //    1          2       3      4          5         6
-    VME_FBR_OP VMEOpndFBR Var RawOperand RawOperand RawOperand
-    {
+   //    1          2     3      4          5         6
+   VME_FBR_OP VMEOpndFBR Var RawOperand RawOperand RawOperand
+   {
         //    1 - OP
         //    2 - FBRMdMode, FBRSubMbShape, FBRSubPredMode
         //    3 - surface
         //    4 - UNIInput
         //    5 - FBRInput
         //    6 - output
-        pBuilder->CISA_create_vme_fbr_instruction($1, $4.cisa_gen_opnd, $5.cisa_gen_opnd, $3,
-            $2.cisa_fbrMbMode_opnd, $2.cisa_fbrSubMbShape_opnd, $2.cisa_fbrSubPredMode_opnd, $6.cisa_gen_opnd, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_vme_fbr_instruction($1, $4, $5, $3,
+            $2.cisa_fbrMbMode_opnd, $2.cisa_fbrSubMbShape_opnd, $2.cisa_fbrSubPredMode_opnd, $6, CISAlineno));
     }
 
                  //    1         2          3       4            5               6
 OwordInstruction: OWORD_OP OwordModifier ExecSize Var VecSrcOperand_G_I_IMM RawOperand
     {
-        pBuilder->CISA_create_oword_instruction($1, $2, $3.exec_size, $4, $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
+        ABORT_ON_FAIL(
+            pBuilder->CISA_create_oword_instruction($1, $2, $3.exec_size, $4, $5.cisa_gen_opnd, $6, CISAlineno));
     }
 
 SvmInstruction:
@@ -1334,31 +1288,31 @@ SvmInstruction:
     {
         bool aligned = false;
         pBuilder->CISA_create_svm_block_instruction((SVMSubOpcode)$1, $2.exec_size, aligned,
-            $3.cisa_gen_opnd, $4.cisa_gen_opnd, CISAlineno);
+            $3.cisa_gen_opnd, $4, CISAlineno);
     }
     //     1          2         3     4     5     6        7          8        9
     | Predicate SVM_SCATTER_OP DOT DEC_LIT DOT DEC_LIT ExecSize RawOperand RawOperand
     {
         pBuilder->CISA_create_svm_scatter_instruction($1, (SVMSubOpcode)$2, $7.emask, $7.exec_size,
-            (unsigned int)$4, (unsigned int)$6, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            (unsigned int)$4, (unsigned int)$6, $8, $9, CISAlineno);
     }
-    // 1        2             3             4               5        6          7          8          9
+    // 1        2             3             4                 5        6          7          8          9
     | Predicate SVM_ATOMIC_OP ATOMIC_SUB_OP AtomicBitwidthOpt ExecSize RawOperand RawOperand RawOperand RawOperand
     {
         pBuilder->CISA_create_svm_atomic_instruction($1, $5.emask, $5.exec_size, $3, (unsigned short)$4,
-            $6.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $7.cisa_gen_opnd, CISAlineno);
+            $6, $8, $9, $7, CISAlineno);
     }
-    //   1                    2               3   4      5                         6          7
+    //   1                    2               3          4           5                 6          7
     | Predicate SVM_GATHER4SCALED_OP SAMPLER_CHANNEL ExecSize VecSrcOperand_G_I_IMM RawOperand RawOperand
     {
         pBuilder->CISA_create_svm_gather4_scaled($1, $4.emask, $4.exec_size, ChannelMask::createFromAPI($3),
-            $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, CISAlineno);
+            $5.cisa_gen_opnd, $6, $7, CISAlineno);
     }
-    //   1                     2               3   4      5                        6          7
+    //   1                  2               3            4            5                  6          7
     | Predicate SVM_SCATTER4SCALED_OP SAMPLER_CHANNEL ExecSize VecSrcOperand_G_I_IMM RawOperand RawOperand
     {
         pBuilder->CISA_create_svm_scatter4_scaled($1, $4.emask, $4.exec_size, ChannelMask::createFromAPI($3),
-            $5.cisa_gen_opnd, $6.cisa_gen_opnd, $7.cisa_gen_opnd, CISAlineno);
+            $5.cisa_gen_opnd, $6, $7, CISAlineno);
     }
 
 AtomicBitwidthOpt:
@@ -1417,94 +1371,112 @@ BranchInstruction: Predicate BRANCH_OP ExecSize IdentOrStringLit
 
 FILE: FILE_OP STRING_LIT
     {
-        pBuilder->CISA_create_FILE_instruction($1, $2);
+        pBuilder->CISA_create_FILE_instruction($1, $2, CISAlineno);
     }
 
 LOC: LOC_OP DEC_LIT
     {
-        pBuilder->CISA_create_LOC_instruction($1, (unsigned)$2);
+        pBuilder->CISA_create_LOC_instruction($1, (unsigned)$2, CISAlineno);
     }
-        //              1             2            3          4          5           6            7                  8         9
-RawSendInstruction: Predicate  RAW_SEND_STRING  ExecSize HEX_LIT DEC_LIT DEC_LIT VecSrcOperand_G_IMM RawOperand RawOperand
+RawSendInstruction:
+    //    1             2            3       4      5       6           7                8         9
+    Predicate  RAW_SEND_STRING  ExecSize HEX_LIT DEC_LIT DEC_LIT VecSrcOperand_G_IMM RawOperand RawOperand
     {
         pBuilder->CISA_create_raw_send_instruction(ISA_RAW_SEND, false, $3.emask, $3.exec_size, $1,
-            (unsigned)$4, (unsigned char)$5, (unsigned char)$6, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            (unsigned)$4, (unsigned char)$5, (unsigned char)$6, $7.cisa_gen_opnd, $8, $9, CISAlineno);
     }
-    //    1             2               3       4           5           6            7               8           9
-    | Predicate  RAW_SENDC_STRING  ExecSize HEX_LIT DEC_LIT DEC_LIT VecSrcOperand_G_IMM RawOperand RawOperand
+    |
+    //    1             2           3       4        5       6          7               8           9
+    Predicate  RAW_SENDC_STRING  ExecSize HEX_LIT DEC_LIT DEC_LIT VecSrcOperand_G_IMM RawOperand RawOperand
     {
         pBuilder->CISA_create_raw_send_instruction(ISA_RAW_SEND, true, $3.emask, $3.exec_size, $1,
-            (unsigned)$4, (unsigned char)$5, (unsigned char)$6, $7.cisa_gen_opnd, $8.cisa_gen_opnd, $9.cisa_gen_opnd, CISAlineno);
+            (unsigned)$4, (unsigned char)$5, (unsigned char)$6, $7.cisa_gen_opnd, $8, $9, CISAlineno);
     }
 
         //            1                      2
 LifetimeStartInst: LIFETIME_START_OP        IDENT
     {
-        pBuilder->CISA_create_lifetime_inst((unsigned char)0, $2, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_lifetime_inst((unsigned char)0, $2, CISAlineno));
     }
 
         //            1                      2
 LifetimeEndInst:  LIFETIME_END_OP           IDENT
     {
-        pBuilder->CISA_create_lifetime_inst((unsigned char)1, $2, CISAlineno);
+        ABORT_ON_FAIL(pBuilder->CISA_create_lifetime_inst((unsigned char)1, $2, CISAlineno));
     }
-        //              1             2           3        4       5      6          7              8                  9               10         11        12
-RawSendsInstruction: Predicate RAW_SENDS_STRING ElemNum ElemNum  ElemNum ElemNum ExecSize VecSrcOperand_G_IMM   VecSrcOperand_G_IMM RawOperand RawOperand RawOperand
+RawSendsInstruction:
+    //    1             2         3        4       5      6          7              8                  9               10         11        12
+    Predicate RAW_SENDS_STRING ElemNum ElemNum  ElemNum ElemNum ExecSize VecSrcOperand_G_IMM   VecSrcOperand_G_IMM RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_raw_sends_instruction(ISA_RAW_SENDS, false, false, $7.emask, $7.exec_size, $1, $8.cisa_gen_opnd, (unsigned char)$3, (unsigned char)$4,
-            (unsigned char)$5, (unsigned char)$6, $9.cisa_gen_opnd, $10.cisa_gen_opnd, $11.cisa_gen_opnd, $12.cisa_gen_opnd, CISAlineno);
+        pBuilder->CISA_create_raw_sends_instruction(
+            ISA_RAW_SENDS, false, false, $7.emask, $7.exec_size, $1, $8.cisa_gen_opnd,
+            (unsigned char)$3, (unsigned char)$4, (unsigned char)$5, (unsigned char)$6,
+            $9.cisa_gen_opnd, $10, $11, $12, CISAlineno);
     }
     //    1             2               3        4       5      6          7              8                  9               10         11        12
     | Predicate RAW_SENDS_EOT_STRING ElemNum ElemNum  ElemNum ElemNum ExecSize VecSrcOperand_G_IMM   VecSrcOperand_G_IMM RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_raw_sends_instruction(ISA_RAW_SENDS, false, true, $7.emask, $7.exec_size, $1, $8.cisa_gen_opnd, (unsigned char)$3, (unsigned char)$4,
-            (unsigned char)$5, (unsigned char)$6, $9.cisa_gen_opnd, $10.cisa_gen_opnd, $11.cisa_gen_opnd, $12.cisa_gen_opnd, CISAlineno);
+        pBuilder->CISA_create_raw_sends_instruction(
+            ISA_RAW_SENDS, false, true, $7.emask, $7.exec_size, $1, $8.cisa_gen_opnd,
+            (unsigned char)$3, (unsigned char)$4, (unsigned char)$5, (unsigned char)$6,
+            $9.cisa_gen_opnd, $10, $11, $12, CISAlineno);
     }
     //    1             2              3       4       5        6        7                         8             9          10        11
     | Predicate  RAW_SENDSC_STRING  ElemNum ElemNum ElemNum ExecSize VecSrcOperand_G_IMM VecSrcOperand_G_IMM RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_raw_sends_instruction(ISA_RAW_SENDS, true, false, $6.emask, $6.exec_size, $1, $7.cisa_gen_opnd, 0, (unsigned char)$3,
-            (unsigned char)$4, (unsigned char)$5, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10.cisa_gen_opnd, $11.cisa_gen_opnd, CISAlineno);
+        pBuilder->CISA_create_raw_sends_instruction(
+            ISA_RAW_SENDS, true, false, $6.emask, $6.exec_size, $1, $7.cisa_gen_opnd,
+            0, (unsigned char)$3, (unsigned char)$4, (unsigned char)$5,
+            $8.cisa_gen_opnd, $9, $10, $11, CISAlineno);
     }
     //    1             2                  3       4       5        6        7                         8             9          10        11
     | Predicate  RAW_SENDSC_EOT_STRING  ElemNum ElemNum ElemNum ExecSize VecSrcOperand_G_IMM VecSrcOperand_G_IMM RawOperand RawOperand RawOperand
     {
-        pBuilder->CISA_create_raw_sends_instruction(ISA_RAW_SENDS, true, true, $6.emask, $6.exec_size, $1, $7.cisa_gen_opnd, 0, (unsigned char)$3,
-            (unsigned char)$4, (unsigned char)$5, $8.cisa_gen_opnd, $9.cisa_gen_opnd, $10.cisa_gen_opnd, $11.cisa_gen_opnd, CISAlineno);
+        pBuilder->CISA_create_raw_sends_instruction(
+            ISA_RAW_SENDS, true, true, $6.emask, $6.exec_size, $1, $7.cisa_gen_opnd,
+            0, (unsigned char)$3, (unsigned char)$4, (unsigned char)$5,
+            $8.cisa_gen_opnd, $9, $10, $11, CISAlineno);
     }
 
 NullaryInstruction:
-      CACHE_FLUSH_OP
+    CACHE_FLUSH_OP
     {
-        pBuilder->CISA_create_NO_OPND_instruction($1);
+        pBuilder->CISA_create_NO_OPND_instruction($1, CISAlineno);
     }
-    | WAIT_OP VecSrcOperand_G_IMM
+    |
+    WAIT_OP VecSrcOperand_G_IMM
     {
-        pBuilder->CISA_create_wait_instruction($2.cisa_gen_opnd);
+        pBuilder->CISA_create_wait_instruction($2.cisa_gen_opnd, CISAlineno);
     }
-    | YIELD_OP
+    |
+    YIELD_OP
     {
-        pBuilder->CISA_create_yield_instruction($1);
+        pBuilder->CISA_create_yield_instruction($1, CISAlineno);
     }
-    | FENCE_GLOBAL_OP
+    |
+    FENCE_GLOBAL_OP
     {
-        pBuilder->CISA_create_fence_instruction($1, 0x0);
+        pBuilder->CISA_create_fence_instruction($1, 0x0, CISAlineno);
     }
-    | FENCE_GLOBAL_OP FENCE_OPTIONS
+    |
+    FENCE_GLOBAL_OP FENCE_OPTIONS
     {
-        pBuilder->CISA_create_fence_instruction($1, $2);
+        pBuilder->CISA_create_fence_instruction($1, $2, CISAlineno);
     }
-    | FENCE_LOCAL_OP
+    |
+    FENCE_LOCAL_OP
     {
-        pBuilder->CISA_create_fence_instruction($1, 0x20);
+        pBuilder->CISA_create_fence_instruction($1, 0x20, CISAlineno);
     }
-    | FENCE_LOCAL_OP FENCE_OPTIONS
+    |
+    FENCE_LOCAL_OP FENCE_OPTIONS
     {
-        pBuilder->CISA_create_fence_instruction($1, $2 | 0x20);
+        pBuilder->CISA_create_fence_instruction($1, $2 | 0x20, CISAlineno);
     }
-    | FENCE_SW_OP
+    |
+    FENCE_SW_OP
     {
-        pBuilder->CISA_create_fence_instruction($1, 0x80);
+        pBuilder->CISA_create_fence_instruction($1, 0x80, CISAlineno);
     }
 
 OwordModifier: %empty {$$ = false;} | OWORD_MODIFIER;
@@ -1589,8 +1561,8 @@ VecSrcOpndSimple: Var TwoDimOffset
         // simple vector operand with no modifier that has an
         // implicit src region = <1,1,0>
         $$.type = OPERAND_GENERAL;
-        $$.cisa_gen_opnd = pBuilder->CISA_create_gen_src_operand(
-            $1, 1, 1, 0, $2.row, $2.elem, MODIFIER_NONE, CISAlineno);
+        ABORT_ON_FAIL($$.cisa_gen_opnd = pBuilder->CISA_create_gen_src_operand(
+            $1, 1, 1, 0, $2.row, $2.elem, MODIFIER_NONE, CISAlineno));
     }
 
          //   1         2         3      4          5
@@ -1608,38 +1580,71 @@ VMEOpndFBR: LPAREN VecSrcOperand_G_I_IMM COMMA VecSrcOperand_G_I_IMM COMMA VecSr
         $$.cisa_fbrSubPredMode_opnd = $6.cisa_gen_opnd;
     }
 
-SrcStateOperand:
-    Var LPAREN DEC_LIT RPAREN
-    {
-        $$.offset = (unsigned char)$3;
-        $$.cisa_gen_opnd = pBuilder->CISA_create_state_operand($1, (unsigned char)$3, CISAlineno, false);
-    }
+SrcStateOperand: StateOperand
 
-DstStateOperand:
-    Var LPAREN DEC_LIT RPAREN
+DstStateOperand: StateOperand
+
+StateOperand:
+    Var LPAREN IntExp RPAREN
     {
         MUST_HOLD($3 < 0x100, "offset out of bounds");
         $$.offset = (unsigned char)$3;
-        $$.cisa_gen_opnd = pBuilder->CISA_create_state_operand($1, (unsigned char)$3, CISAlineno, true);
+        ABORT_ON_FAIL($$.cisa_gen_opnd = pBuilder->CISA_create_state_operand($1, (unsigned char)$3, CISAlineno, true));
     }
 
 ///////////////////////////////////////////////////////////////////////////////
 // ------------ Operands ------------
 
 // ------  Raw Operands -----
+// EXAMPLES:
+//   VDATA.12   // raw operand with offset
+//   VDATA.(%sizeof X / 2)
+//   %null.0
+// TODO: these cases (see below for needed fixes)
+//   VDATA      // implicitly VDATA.0
+//   %null
 RawOperand:
-    VarNonNull DOT DEC_LIT
-    {
-        $$.offset = (unsigned short)$3;
-        MUST_HOLD($3 <= 0x10000, "offset out of bounds");
-        $$.cisa_gen_opnd = pBuilder->CISA_create_RAW_operand($1, (unsigned short)$3, CISAlineno);
-    }
+    RawOperandNonNull
     |
+//
+// conflicts SampleInstruction: has a ... (Var Var | Var) ... part
+//  also RTWriteOperand, DSRTWriteInstruction
+// those instructions need to parse proper operands
+//
+//    BUILTIN_NULL
+//    {
+//        $$ = pBuilder->CISA_create_RAW_NULL_operand(CISAlineno); // can't fail
+//    }
+//    |
     BUILTIN_NULL DOT DEC_LIT
     {
-        $$.offset = 0;
-        $$.cisa_gen_opnd = pBuilder->CISA_create_RAW_NULL_operand(CISAlineno);
+        MUST_HOLD($3 == 0, "%null must have 0 as offset");
+        $$ = pBuilder->CISA_create_RAW_NULL_operand(CISAlineno); // can't fail
     }
+
+RawOperandNonNull:
+    VarNonNull RawOperandOffsetSuffix
+    {
+        ABORT_ON_FAIL($$ = pBuilder->CISA_create_RAW_operand($1, (unsigned short)$2, CISAlineno));
+    }
+// TODO: see RawOperand: BUILTIN_NULL issues (same here)
+//    |
+//    VarNonNull
+//    {
+//        ABORT_ON_FAIL($$ = pBuilder->CISA_create_RAW_operand($1, 0, CISAlineno));
+//    }
+
+RawOperandOffsetSuffix:
+    DOT DEC_LIT {
+        MUST_HOLD($2 <= 0x10000, "offset out of bounds");
+        $$ = $2;
+    }
+    |
+    DOT LPAREN IntExp RPAREN {
+        MUST_HOLD($3 <= 0x10000, "offset out of bounds");
+        $$ = $3;
+    }
+
 
 RawOperandArray:
     %empty
@@ -1649,39 +1654,35 @@ RawOperandArray:
     |
     RawOperandArray RawOperand
     {
-        rawOperandArray[$1++] = (VISA_RawOpnd*)$2.cisa_gen_opnd;
+        rawOperandArray[$1++] = (VISA_RawOpnd*)$2;
         $$ = $1;
     }
 
 
 // ------  Dst Operands -----
-DstAddrOperand: AddrVarAccess
+DstAddrOperand: AddrVarAccessWithWidth
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_set_address_operand($1.cisa_decl, $1.elem, $1.row, true);
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+          pBuilder->CISA_set_address_operand(
+            $1.cisa_decl, $1.elem, $1.row, true, CISAlineno));
     }
 
 DstGeneralOperand:
     Var TwoDimOffset DstRegion
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_dst_general_operand(
-            $1, $2.row, $2.elem, (unsigned short)$3, CISAlineno);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd = pBuilder->CISA_dst_general_operand(
+            $1, $2.row, $2.elem, (unsigned short)$3, CISAlineno));
     }
     |
     Var DstRegion {
-        $$.cisa_gen_opnd = pBuilder->CISA_dst_general_operand(
-            $1, 0, 0, (unsigned short)$2, CISAlineno);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd = pBuilder->CISA_dst_general_operand(
+            $1, 0, 0, (unsigned short)$2, CISAlineno));
     }
 
 DstIndirectOperand: IndirectVarAccess DstRegion DataType
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_create_indirect_dst(
-            $1.cisa_decl, MODIFIER_NONE, $1.row, $1.elem, $1.immOff, (unsigned short)$2, $3);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd = pBuilder->CISA_create_indirect_dst(
+            $1.cisa_decl, MODIFIER_NONE, $1.row, $1.elem, $1.immOff, (unsigned short)$2, $3, CISAlineno));
     }
 
 
@@ -1701,46 +1702,44 @@ SrcAddrOfOperand:
     // 2.  &V127       -16-32:d
     //
     AddrOfVar {
-         $$.cisa_gen_opnd = pBuilder->CISA_set_address_expression($1.cisa_decl, 0);
+         $$.cisa_gen_opnd = pBuilder->CISA_set_address_expression($1.cisa_decl, 0, CISAlineno);
     }
     |
     AddrOfVar LBRACK IntExp RBRACK {
-         MUST_HOLD($3 < -32768 || $3 >= 32768, "variable address offset is too large");
-         $$.cisa_gen_opnd = pBuilder->CISA_set_address_expression($1.cisa_decl, (short)$3);
+         MUST_HOLD((short)$3 == $3, "variable address offset is too large");
+         $$.cisa_gen_opnd = pBuilder->CISA_set_address_expression($1.cisa_decl, (short)$3, CISAlineno);
     }
 
 AddrOfVar:
     AMP Var {
         // Both GENERAL_VAR and SURFACE_VAR are addressable
         $$.cisa_decl = pBuilder->CISA_find_decl($2);
-        if (!$$.cisa_decl)
+        if ($$.cisa_decl == nullptr)
             PARSE_ERROR("unbound variable");
         $$.row = 0;
         $$.elem = 0;
     }
 
 
-SrcAddrOperand: AddrVarAccess
+SrcAddrOperand: AddrVarAccessWithWidth
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_set_address_operand($1.cisa_decl, $1.elem, $1.row, false);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+            pBuilder->CISA_set_address_operand(
+                $1.cisa_decl, $1.elem, $1.row, false, CISAlineno));
     }
 
 SrcGeneralOperand: Var TwoDimOffset SrcRegionDirect
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_create_gen_src_operand(
-            $1, $3.v_stride, $3.width, $3.h_stride, $2.row, $2.elem, MODIFIER_NONE, CISAlineno);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+            pBuilder->CISA_create_gen_src_operand(
+                $1, $3.v_stride, $3.width, $3.h_stride, $2.row, $2.elem, MODIFIER_NONE, CISAlineno));
     }
                     //   1        2       3          4
 SrcGeneralOperand_1: SrcModifier Var TwoDimOffset SrcRegionDirect
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_create_gen_src_operand(
-            $2, $4.v_stride, $4.width, $4.h_stride, $3.row, $3.elem, $1.mod, CISAlineno);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+            pBuilder->CISA_create_gen_src_operand(
+                $2, $4.v_stride, $4.width, $4.h_stride, $3.row, $3.elem, $1.mod, CISAlineno));
     }
 
 SrcImmOperand:
@@ -1812,20 +1811,18 @@ DoubleFloatLit:
 
 SrcIndirectOperand: IndirectVarAccess SrcRegionDirect DataType
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_create_indirect(
-            $1.cisa_decl, MODIFIER_NONE, $1.row, $1.elem, $1.immOff,
-            $2.v_stride, $2.width, $2.h_stride, $3);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+            pBuilder->CISA_create_indirect(
+                $1.cisa_decl, MODIFIER_NONE, $1.row, $1.elem, $1.immOff,
+                $2.v_stride, $2.width, $2.h_stride, $3, CISAlineno));
     }
 
 SrcIndirectOperand_1: SrcModifier IndirectVarAccess SrcRegionIndirect DataType
     {
-        $$.cisa_gen_opnd = pBuilder->CISA_create_indirect(
-            $2.cisa_decl, $1.mod, $2.row, $2.elem, $2.immOff,
-            $3.v_stride, $3.width, $3.h_stride, $4);
-        if ($$.cisa_gen_opnd == nullptr)
-            YYABORT; // error is already reported
+        ABORT_ON_FAIL($$.cisa_gen_opnd =
+            pBuilder->CISA_create_indirect(
+                $2.cisa_decl, $1.mod, $2.row, $2.elem, $2.immOff,
+                $3.v_stride, $3.width, $3.h_stride, $4, CISAlineno));
     }
 
 // -------- regions -----------
@@ -1861,8 +1858,9 @@ SrcRegionDirect:
     }
 
 SrcRegionIndirect:
-      SrcRegionDirect
-    | LANGLE IntExp COMMA IntExpNRA RANGLE   // <Width,HorzStride>
+    SrcRegionDirect
+    |
+    LANGLE IntExp COMMA IntExpNRA RANGLE   // <Width,HorzStride>
     {
         MUST_HOLD(($2 == 0 || $2 == 1 || $2 == 2 || $2 == 4 || $2 == 8 || $2 == 16),
                  "Width must be 0, 1, 2, 4, 8 or 16");
@@ -1872,7 +1870,8 @@ SrcRegionIndirect:
         $$.width = (unsigned)$2;
         $$.h_stride = (unsigned)$4;
     }
-    | LANGLE IntExpNRA RANGLE   // <HorzStride>
+    |
+    LANGLE IntExpNRA RANGLE   // <HorzStride>
     {
         MUST_HOLD(($2 == 0 || $2 == 1 || $2 == 2 || $2 == 4),
              "HorzStride must be 0, 1, 2, or 4");
@@ -1883,57 +1882,62 @@ SrcRegionIndirect:
 
 
 IndirectVarAccess:
-      IND_LBRACK AddrVarAccess COMMA IntExp RBRACK {
-          $$ = $2;
-          $$.immOff = (int)$4;
-      }
-
-    | IND_LBRACK AddrVarAccess              RBRACK {
+    IND_LBRACK AddrVarAccess COMMA IntExp RBRACK {
+        $$ = $2;
+        $$.immOff = (int)$4;
+    }
+    |
+    IND_LBRACK AddrVarAccess              RBRACK {
           $$ = $2;
           $$.immOff = 0;
     }
 
 TwoDimOffset: LPAREN IntExp COMMA IntExp RPAREN {
+        MUST_HOLD($2 >= 0, "row (register) offset must be positive");
         $$.row = (int)$2;
+        MUST_HOLD($4 >= 0 && $4 <= 0xFFFF, "sub-register offset out of bounds");
         $$.elem = (int)$4;
     }
 
 PredVar:
-    Var
-    {
+    Var {
         $$ = pBuilder->CISA_find_decl($1);
-        if (!$$ || $$->type != PREDICATE_VAR)
+        if ($$ == nullptr)
             PARSE_ERROR($1, ": undefined predicate variable");
+        if ($$->type != PREDICATE_VAR)
+            PARSE_ERROR($1, ": not a predicate variable");
     }
 
 AddrVarAccess:
     Var LPAREN IntExp RPAREN {
         $$.cisa_decl = pBuilder->CISA_find_decl($1);
-        if (!$$.cisa_decl)
-            PARSE_ERROR("unbound variable");
+        if ($$.cisa_decl == nullptr) {
+            PARSE_ERROR($1, ": unbound variable");
+        } else if ($$.cisa_decl->type != ADDRESS_VAR) {
+            PARSE_ERROR($1, ": not an address variable");
+        }
         $$.row = 1;
         $$.elem = (int)$3;
     }
-    | Var LPAREN IntExp RPAREN LANGLE IntExpNRA RANGLE {
+
+AddrVarAccessWithWidth:
+    Var LPAREN IntExp RPAREN LANGLE IntExpNRA RANGLE {
         $$.cisa_decl = pBuilder->CISA_find_decl($1);
-        if (!$$.cisa_decl)
-            PARSE_ERROR("unbound variable");
+        if ($$.cisa_decl == nullptr) {
+            PARSE_ERROR($1, ": unbound variable");
+        } else if ($$.cisa_decl->type != ADDRESS_VAR) {
+            PARSE_ERROR($1, ": not an address variable");
+        }
         $$.row = (int)$6;
         $$.elem = (int)$3;
     }
-    | Var LPAREN IntExp COMMA IntExp RPAREN {
-        $$.cisa_decl = pBuilder->CISA_find_decl($1);
-        if (!$$.cisa_decl)
-            PARSE_ERROR("unbound variable");
-        $$.row = (int)$3;
-        $$.elem = (int)$5;
-    }
 
 
-/* -----------register size ------------------------------*/
+// -----------register size ------------------------------
 SIMDMode:
     %empty {$$ = 0;}
-    | LPAREN DEC_LIT RPAREN
+    |
+    LPAREN DEC_LIT RPAREN
     {
        MUST_HOLD(($2 == 8 || $2 == 16 || $2 == 32),
                  "SIMD mode can only be 8, 16, or 32");
@@ -1942,7 +1946,7 @@ SIMDMode:
 
 
 
-/* ----------- Execution size -------------- */
+// ----------- Execution size --------------
 
 ElemNum: DOT DEC_LIT
     {
@@ -1978,7 +1982,7 @@ ExecSizeInt: DEC_LIT
         $$ = (unsigned short)$1;
     }
 
-/* ------ imm values ----------------------------------- */
+// ------ imm values -----------------------------------
 Var: VarNonNull | BUILTIN_NULL
 VarNonNull: IDENT | BUILTIN
 
@@ -2063,25 +2067,19 @@ IntExpPrim:
     //  %sizeof GRF  << matches GRF size (unless someone declares a GRF variable)
     | BUILTIN_SIZEOF IDENT {
         $$ = 0;
-        if (!pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, $$)) {
-            YYABORT; // error already logged
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_eval_sizeof_decl(CISAlineno, $2, $$));
     }
     | BUILTIN_SIZEOF LPAREN IDENT RPAREN {
         // TODO: %AlignOf(...), %Max(..)
         $$ = 0;
-        if (!pBuilder->CISA_eval_sizeof_decl(CISAlineno, $3, $$)) {
-            YYABORT; // error already logged
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_eval_sizeof_decl(CISAlineno, $3, $$));
     }
     // a built-in constant
     | BUILTIN_DISPATCH_SIMD_SIZE {
         // e.g. %DispatchSimdSize
         // N.B. %sizeof happens above
         $$ = 0;
-        if (!pBuilder->CISA_lookup_builtin_constant(CISAlineno, "%DispatchSimd", $$)) {
-            YYABORT; // error already logged
-        }
+        ABORT_ON_FAIL(pBuilder->CISA_lookup_builtin_constant(CISAlineno, "%DispatchSimd", $$));
     }
 
 

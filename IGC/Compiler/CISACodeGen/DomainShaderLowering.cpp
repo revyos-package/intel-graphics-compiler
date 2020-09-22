@@ -249,7 +249,9 @@ namespace IGC
                             default:
                                 break;
                             }
-                            e_interpolation interpolant = DSDualPatchEnabled(pCtx) ? EINTERPOLATION_UNDEFINED : EINTERPOLATION_CONSTANT;
+                            const e_interpolation interpolant =
+                                DSDualPatchEnabled(pCtx) ?
+                            EINTERPOLATION_UNDEFINED : EINTERPOLATION_CONSTANT;
                             Value* arguments[] =
                             {
                                 builder.getInt32(index),
@@ -275,8 +277,11 @@ namespace IGC
                 }
             }
         }
+
+        const CPlatform& platform = getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->platform;
+
         Value* undef = llvm::UndefValue::get(Type::getFloatTy(F.getContext()));
-        if (getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->platform.WaForceDSToWriteURB())
+        if (platform.WaForceDSToWriteURB())
         {
             unsigned int numPhaseWritten = 0;
             for (unsigned int i = 0; i < m_maxNumOfOutput + m_headerSize.Count(); i += 2)
@@ -314,7 +319,8 @@ namespace IGC
             }
         }
         //URB padding to 32Byte offsets
-        for (unsigned int i = 0; i < m_maxNumOfOutput + m_headerSize.Count(); i++)
+        bool addURBPaddingTo32Bytes = true;
+        for (unsigned int i = 0; addURBPaddingTo32Bytes && i < m_maxNumOfOutput + m_headerSize.Count(); i++)
         {
             //If not aligned to 32Byte offset and has valid data
             if (offsetInst[i])
@@ -443,8 +449,9 @@ namespace IGC
         {
             Value* index = builder.getInt32(currentElementIndex + i);
             auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-            e_interpolation interpolant =
-                DSDualPatchEnabled(pCtx) ? EINTERPOLATION_UNDEFINED : EINTERPOLATION_CONSTANT;
+            const e_interpolation interpolant =
+                DSDualPatchEnabled(pCtx) ?
+                EINTERPOLATION_UNDEFINED : EINTERPOLATION_CONSTANT;
             Value* interpolation = builder.getInt32(interpolant);
             channels[i] = builder.CreateCall2(shaderInputVecFn, index, interpolation);
         }

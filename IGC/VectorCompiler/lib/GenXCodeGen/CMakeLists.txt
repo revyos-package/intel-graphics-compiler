@@ -13,6 +13,7 @@ set(CODEGEN_SOURCES
   GenXAlignmentInfo.cpp
   GenXAnalysisDumper.cpp
   GenXArgIndirection.cpp
+  GenXBackendConfig.cpp
   GenXBaling.cpp
   GenXCategory.cpp
   GenXCFSimplification.cpp
@@ -20,12 +21,14 @@ set(CODEGEN_SOURCES
   GenXConstants.cpp
   GenXCoalescing.cpp
   GenXDeadVectorRemoval.cpp
+  GenXDebugInfo.cpp
   GenXDepressurizer.cpp
   GenXExtractVectorizer.cpp
   GenXFuncPtrsLowering.cpp
   GenXGotoJoin.cpp
   GenXGEPLowering.cpp
   GenXIMadPostLegalization.cpp
+  GenXImportBiF.cpp
   GenXInlineAsmLowering.cpp
   GenXIntrinsics.cpp
   GenXLayoutBlocks.cpp

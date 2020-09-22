@@ -43,7 +43,6 @@ using namespace vISA;
 #define SPLIT_USE_CNT_THRESHOLD 2
 #define SPLIT_USE_DISTANCE_THRESHOLD 100
 
-extern unsigned int getStackCallRegSize(bool reserveStackCallRegs);
 extern void getForbiddenGRFs(vector<unsigned int>& regNum, G4_Kernel& kernel, unsigned stackCallRegSize, unsigned reserveSpillSize, unsigned reservedRegNum);
 extern void getCallerSaveGRF(vector<unsigned int>& regNum, G4_Kernel* kernel);
 
@@ -97,25 +96,25 @@ bool LocalRA::hasBackEdge()
 
 void LocalRA::getRowInfo(int size, int& nrows, int& lastRowSize)
 {
-    if (size <= NUM_WORDS_PER_GRF)
+    if (size <= (int)numEltPerGRF(Type_UW))
     {
         nrows = 1;
     }
     else
     {
         // nrows is total number of rows, including last row even if it is partial
-        nrows = size / NUM_WORDS_PER_GRF;
+        nrows = size / numEltPerGRF(Type_UW);
         // lastrowsize is number of words actually used in last row
-        lastRowSize = size%NUM_WORDS_PER_GRF;
+        lastRowSize = size%numEltPerGRF(Type_UW);
 
-        if (size%NUM_WORDS_PER_GRF != 0)
+        if (size%numEltPerGRF(Type_UW) != 0)
         {
             nrows++;
         }
 
         if (lastRowSize == 0)
         {
-            lastRowSize = NUM_WORDS_PER_GRF;
+            lastRowSize = numEltPerGRF(Type_UW);
         }
     }
 
@@ -124,11 +123,11 @@ void LocalRA::getRowInfo(int size, int& nrows, int& lastRowSize)
 
 void LocalRA::evenAlign()
 {
-    if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
+    if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D &&
         kernel.fg.size() > 2)
     {
-        if ((GlobalRA::useGenericAugAlign() && kernel.getSimdSize() >= NUM_DWORDS_PER_GRF) ||
-            (!GlobalRA::useGenericAugAlign() && kernel.getSimdSize() > NUM_DWORDS_PER_GRF))
+        if ((GlobalRA::useGenericAugAlign() && kernel.getSimdSize() >= numEltPerGRF(Type_UD)) ||
+            (!GlobalRA::useGenericAugAlign() && kernel.getSimdSize() > numEltPerGRF(Type_UD)))
         {
             // Set alignment of all GRF candidates
             // to 2GRF except for NoMask variables
@@ -183,7 +182,7 @@ void LocalRA::preLocalRAAnalysis()
     numRegLRA = numGRF - numRowsReserved;
 
     bool isStackCall = (kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc());
-    unsigned int stackCallRegSize = getStackCallRegSize(isStackCall);
+    unsigned int stackCallRegSize = isStackCall ? kernel.numReservedABIGRF() : 0;
     unsigned int reservedGRFNum = builder.getOptions()->getuInt32Option(vISA_ReservedGRFNum);
 
     if (isStackCall || reservedGRFNum || builder.getOption(vISA_Debug))
@@ -275,7 +274,7 @@ void LocalRA::preLocalRAAnalysis()
     {
         pregs->setSimpleGRFAvailable(true);
         const Options *opt = builder.getOptions();
-        if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) != VISA_3D ||
+        if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) != VISA_3D ||
             opt->getOption(vISA_enablePreemption) ||
             stackCallRegSize > 0 ||
             opt->getOption(vISA_ReserveR0))
@@ -401,7 +400,7 @@ bool LocalRA::localRAPass(bool doRoundRobin, bool doSplitLLR)
 
         if (builder.oneGRFBankDivision())
         {
-            twoBanksAssign = highInternalConflict || (kernel.getSimdSize() == 16);
+            twoBanksAssign = highInternalConflict || kernel.getSimdSize() == g4::SIMD16;
         }
         else
         {
@@ -446,7 +445,7 @@ bool LocalRA::localRA()
 
     doSplitLLR = (builder.getOption(vISA_SpiltLLR) &&
         kernel.fg.size() == 1 &&
-        kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D);
+        kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D);
 
     preLocalRAAnalysis();
 
@@ -873,7 +872,7 @@ bool LocalRA::assignUniqueRegisters(bool twoBanksRA, bool twoDirectionsAssign)
                                 break;
                             }
                         }
-                        if(end != UNMAPPABLE_VISA_INDEX)
+                        if (end != UNMAPPABLE_VISA_INDEX)
                             break;
                     }
                 }
@@ -927,7 +926,8 @@ void GlobalRA::removeUnreferencedDcls()
             getNumRefs(dcl) == 0 &&
             dcl->getRegVar()->isPhyRegAssigned() == false &&
             !(kernel.fg.builder->getOption(vISA_enablePreemption) &&
-                dcl == kernel.fg.builder->getBuiltinR0());
+                dcl == kernel.fg.builder->getBuiltinR0())
+            ;
     };
 
     kernel.Declares.erase(
@@ -1154,7 +1154,7 @@ void LocalRA::markReferencesInOpnd(G4_Operand* opnd, bool isEOT, INST_LIST_ITER 
 
             gra.recordRef(topdcl);
 
-            if (kernel.getIntKernelAttribute(Attributes::ATTR_Target) == VISA_3D &&
+            if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D &&
                 opnd->isDstRegRegion() &&
                 !topdcl->getAddressed())
             {
@@ -1298,7 +1298,7 @@ void LocalRA::calculateInputIntervals()
     setLexicalID(false);
 
     int numGRF = kernel.getNumRegTotal();
-    std::vector<uint32_t> inputRegLastRef(numGRF * G4_GRF_REG_SIZE, UINT_MAX);
+    std::vector<uint32_t> inputRegLastRef(numGRF * numEltPerGRF(Type_UW), UINT_MAX);
 
     for (BB_LIST_RITER bb_it = kernel.fg.rbegin(), bb_rend = kernel.fg.rend();
         bb_it != bb_rend;
@@ -1343,7 +1343,7 @@ void LocalRA::calculateInputIntervals()
                             G4_RegVar* var = topdcl->getRegVar();
                             unsigned int regNum = var->getPhyReg()->asGreg()->getRegNum();
                             unsigned int regOff = var->getPhyRegOff();
-                            unsigned int idx = regNum * G4_GRF_REG_SIZE +
+                            unsigned int idx = regNum * numEltPerGRF(Type_UW) +
                                 (regOff * G4_Type_Table[topdcl->getElemType()].byteSize) / G4_WSIZE + topdcl->getWordSize() - 1;
 
                             unsigned int numWords = topdcl->getWordSize();
@@ -1352,7 +1352,7 @@ void LocalRA::calculateInputIntervals()
                                 if (inputRegLastRef[idx] == UINT_MAX &&
                                     // Check for registers that are marked as forbidden,
                                     // e.g., BuiltinR0 and those reserved for stack call
-                                    pregs->isGRFAvailable(idx / G4_GRF_REG_SIZE))
+                                    pregs->isGRFAvailable(idx / numEltPerGRF(Type_UW)))
                                 {
                                     inputRegLastRef[idx] = curInstId;
                                     inputIntervals.push_front(new (mem)InputLiveRange(idx, curInstId));
@@ -1397,7 +1397,7 @@ void LocalRA::calculateInputIntervals()
                                 G4_RegVar* var = topdcl->getRegVar();
                                 unsigned int regNum = var->getPhyReg()->asGreg()->getRegNum();
                                 unsigned int regOff = var->getPhyRegOff();
-                                unsigned int idx = regNum * G4_GRF_REG_SIZE +
+                                unsigned int idx = regNum * numEltPerGRF(Type_UW) +
                                     (regOff * G4_Type_Table[topdcl->getElemType()].byteSize) / G4_WSIZE + topdcl->getWordSize() - 1;
 
                                 unsigned int numWords = topdcl->getWordSize();
@@ -1406,7 +1406,7 @@ void LocalRA::calculateInputIntervals()
                                     if (inputRegLastRef[idx] == UINT_MAX &&
                                         // Check for registers that are marked as forbidden,
                                         // e.g., BuiltinR0 and those reserved for stack call
-                                        pregs->isGRFAvailable(idx / G4_GRF_REG_SIZE))
+                                        pregs->isGRFAvailable(idx / numEltPerGRF(Type_UW)))
                                     {
                                         inputRegLastRef[idx] = curInstId;
                                         if (builder.avoidDstSrcOverlap() &&
@@ -1446,7 +1446,7 @@ void LocalRA::calculateInputIntervals()
             G4_RegVar* var = curDcl->getRegVar();
             unsigned int regNum = var->getPhyReg()->asGreg()->getRegNum();
             unsigned int regOff = var->getPhyRegOff();
-            unsigned int idx = regNum * G4_GRF_REG_SIZE +
+            unsigned int idx = regNum * numEltPerGRF(Type_UW) +
                 (regOff * G4_Type_Table[curDcl->getElemType()].byteSize) / G4_WSIZE;
 
             unsigned int numWords = curDcl->getWordSize();
@@ -1471,9 +1471,9 @@ bool LocalRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegion* s
         G4_Declare* dstDcl = dst->getBase()->asRegVar()->getDeclare();
         if (dstDcl != nullptr)
         {
-            int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) / G4_GRF_REG_NBYTES;
+            int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) / numEltPerGRF(Type_UB);
             G4_DstRegRegion* dstRgn = dst;
-            dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + 1 > G4_GRF_REG_NBYTES;
+            dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + 1 > numEltPerGRF(Type_UB);
 
             if (src != NULL &&
                 src->isSrcRegRegion() &&
@@ -1481,8 +1481,8 @@ bool LocalRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegion* s
             {
                 G4_SrcRegRegion* srcRgn = src->asSrcRegRegion();
                 G4_Declare* srcDcl = src->getBase()->asRegVar()->getDeclare();
-                int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) / G4_GRF_REG_NBYTES;
-                bool srcOpndNumRows = srcRgn->getSubRegOff() + srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 > G4_GRF_REG_NBYTES;
+                int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) / numEltPerGRF(Type_UB);
+                bool srcOpndNumRows = srcRgn->getSubRegOff() + srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 > numEltPerGRF(Type_UB);
 
                 if (dstOpndNumRows || srcOpndNumRows)
                 {
@@ -1574,6 +1574,7 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
                         if ((builder.WaDisableSendSrcDstOverlap() &&
                             ((curInst->isSend() && i == 0) ||
                             (curInst->isSplitSend() && i == 1)))
+                            || (builder.avoidDstSrcOverlap() &&  curInst->getDst() != NULL && hasDstSrcOverlapPotential(curInst->getDst(), src->asSrcRegRegion()))
                             )
                         {
 #ifdef DEBUG_VERBOSE_ON
@@ -1593,7 +1594,7 @@ void LocalRA::calculateLiveIntervals(G4_BB* bb, std::vector<LocalLiveRange*>& li
             }
         }
 
-        if (G4_Inst_Table[curInst->opcode()].n_dst == 1  ||
+        if (G4_Inst_Table[curInst->opcode()].n_dst == 1 ||
             curInst->isSplitIntrinsic())
         {
             // Scan dst
@@ -1709,8 +1710,8 @@ void LocalRA::printInputLiveIntervals()
         InputLiveRange* lr = (*it);
 
         regWordIdx = lr->getRegWordIdx();
-        regNum = regWordIdx / G4_GRF_REG_SIZE;
-        subRegInWord = regWordIdx % G4_GRF_REG_SIZE;
+        regNum = regWordIdx / numEltPerGRF(Type_UW);
+        subRegInWord = regWordIdx % numEltPerGRF(Type_UW);
         lrEndIdx = lr->getLrEndIdx();
 
         DEBUG_VERBOSE("r" << regNum << "." << subRegInWord << " " << lrEndIdx);
@@ -1874,7 +1875,7 @@ unsigned int LocalLiveRange::getSizeInWords()
         if (sizeInWords > 0)
             words = sizeInWords;
         else
-            words = nrows * NUM_WORDS_PER_GRF;
+            words = nrows * numEltPerGRF(Type_UW);
     }
     else if (nrows == 1)
     {
@@ -1907,6 +1908,7 @@ void PhyRegsLocalRA::setGRFBusy(int which)
     }
 }
 
+// ********* PhyRegsLocalRA class implementation *********
 void PhyRegsLocalRA::setGRFBusy(int which, int howmany)
 {
     for (int i = 0; i < howmany; i++)
@@ -1918,7 +1920,7 @@ void PhyRegsLocalRA::setGRFBusy(int which, int howmany)
 void PhyRegsLocalRA::setWordBusy(int whichgrf, int word)
 {
     MUST_BE_TRUE(isGRFAvailable(whichgrf), "Invalid register");
-    MUST_BE_TRUE(word <= NUM_WORDS_PER_GRF, "Invalid word");
+    MUST_BE_TRUE(word <= (int)numEltPerGRF(Type_UW), "Invalid word");
 
     if (twoBanksRA)
     {
@@ -1949,6 +1951,7 @@ void PhyRegsLocalRA::setWordBusy(int whichgrf, int word, int howmany)
 void PhyRegsLocalRA::setGRFNotBusy(int which, int instID)
 {
     MUST_BE_TRUE(isGRFAvailable(which), "Invalid register");
+
     regBusyVector[which] = 0;
 
     if (twoBanksRA)
@@ -1975,7 +1978,7 @@ void PhyRegsLocalRA::setGRFNotBusy(int which, int instID)
 void PhyRegsLocalRA::setWordNotBusy(int whichgrf, int word, int instID)
 {
     MUST_BE_TRUE(isGRFAvailable(whichgrf), "Invalid register");
-    MUST_BE_TRUE(word <= NUM_WORDS_PER_GRF, "Invalid word");
+    MUST_BE_TRUE(word <= (int)numEltPerGRF(Type_UW), "Invalid word");
 
     if (twoBanksRA)
     {
@@ -2010,7 +2013,7 @@ inline bool PhyRegsLocalRA::isWordBusy(int whichgrf, int word)
 {
     MUST_BE_TRUE(isGRFAvailable(whichgrf), "Invalid register");
 
-    MUST_BE_TRUE(word <= NUM_WORDS_PER_GRF, "Invalid word");
+    MUST_BE_TRUE(word <= (int)numEltPerGRF(Type_UW), "Invalid word");
     bool isBusy = ((regBusyVector[whichgrf] & (WORD_BUSY << word)) != 0);
     return isBusy;
 }
@@ -2035,7 +2038,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
     int grfRows = 0;
     bool multiSteps = nrows > 1;
 
-    if (lastRowSize % NUM_WORDS_PER_GRF == 0)
+    if (lastRowSize % numEltPerGRF(Type_UW) == 0)
     {
         grfRows = nrows;
     }
@@ -2068,7 +2071,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
 
         if (foundItem == grfRows)
         {
-            if (lastRowSize % NUM_WORDS_PER_GRF == 0)
+            if (lastRowSize % numEltPerGRF(Type_UW) == 0)
             {
                 regnum = startReg;
                 return true;
@@ -2109,7 +2112,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, i
     int i = regIdx;
     bool multiSteps = nrows > 1;
 
-    if (lastRowSize % NUM_WORDS_PER_GRF == 0)
+    if (lastRowSize % numEltPerGRF(Type_UW) == 0)
     {
         grfRows = nrows;
     }
@@ -2142,7 +2145,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsBackward(int regIdx, BankAlign align, i
 
         if (foundItem == grfRows)
         {
-            if (lastRowSize % NUM_WORDS_PER_GRF == 0)
+            if (lastRowSize % numEltPerGRF(Type_UW) == 0)
             {
                 regnum = startReg;
                 return true;
@@ -2237,7 +2240,7 @@ void PhyRegsLocalRA::printBusyRegs()
         if (isGRFAvailable(i) == false)
             continue;
 
-        for (int j = 0; j < NUM_WORDS_PER_GRF; j++)
+        for (int j = 0; j < (int)numEltPerGRF(Type_UW); j++)
         {
             if (isWordBusy(i, j) == true)
             {
@@ -2305,9 +2308,9 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
             subregnum = 0;
             found = true;
         }
-        else if (size <= NUM_WORDS_PER_GRF / 2 && isWordBusy(regIdx, NUM_WORDS_PER_GRF / 2, size) == false)
+        else if (size <= (int)numEltPerGRF(Type_UW) / 2 && isWordBusy(regIdx, numEltPerGRF(Type_UW) / 2, size) == false)
         {
-            subregnum = NUM_WORDS_PER_GRF / 2;
+            subregnum = numEltPerGRF(Type_UW) / 2;
             found = true;
         }
     }
@@ -2315,14 +2318,14 @@ bool PhyRegsLocalRA::findFreeSingleReg(int regIdx, G4_SubReg_Align subalign, int
     {
         // ToDo: check if dynamic step size has compile time impact
         int step = 1;
-        int upBound = NUM_WORDS_PER_GRF - size + 1;
+        int upBound = numEltPerGRF(Type_UW) - size + 1;
         switch (subalign)
         {
             case Eight_Word: step = 8; break;
             case Four_Word: step = 4; break;
             case Even_Word: step = 2; break;
             case Any:
-                upBound = NUM_WORDS_PER_GRF - size; //FIXME, why not the last word
+                upBound = numEltPerGRF(Type_UW) - size; //FIXME, why not the last word
                 step = 1; break;
             default:
                 assert("unexpected alignment");
@@ -2359,7 +2362,7 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
 
     bool found = false;
 
-    if (size >= NUM_WORDS_PER_GRF)
+    if (size >= (int)numEltPerGRF(Type_UW))
     {
         if (!hintSet)
         {
@@ -2380,7 +2383,7 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
         if (found)
         {
             subregnum = 0;
-            if (size % NUM_WORDS_PER_GRF == 0)
+            if (size % numEltPerGRF(Type_UW) == 0)
             {
                 availableRegs.setGRFBusy(regnum, nrows);
             }
@@ -2413,10 +2416,10 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
 // subregnum parameter is expected to be in units of word
 void PhyRegsManager::freeRegs(int regnum, int subregnum, int numwords, int instID)
 {
-    while (numwords >= NUM_WORDS_PER_GRF)
+    while (numwords >= (int)numEltPerGRF(Type_UW))
     {
         availableRegs.setGRFNotBusy(regnum, instID);
-        numwords -= NUM_WORDS_PER_GRF;
+        numwords -= numEltPerGRF(Type_UW);
         regnum++;
     }
 
@@ -2425,7 +2428,7 @@ void PhyRegsManager::freeRegs(int regnum, int subregnum, int numwords, int instI
         availableRegs.setWordNotBusy(regnum, subregnum, instID);
         subregnum++;
 
-        if (subregnum >= NUM_WORDS_PER_GRF)
+        if (subregnum >= (int)numEltPerGRF(Type_UW))
         {
             subregnum = 0;
             regnum++;
@@ -2449,7 +2452,7 @@ LinearScan::LinearScan(GlobalRA& g, std::vector<LocalLiveRange*>& localLiveInter
     , liveIntervals(localLiveIntervals)
     , inputIntervals(inputLivelIntervals)
     , summary(s)
-    , pregs(g.kernel.getNumRegTotal() * NUM_WORDS_PER_GRF, false)
+    , pregs(g.kernel.getNumRegTotal() * numEltPerGRF(Type_UW), false)
     , simdSize(simdS)
     , globalLRSize(glrs)
     , numRegLRA(numReg)
@@ -2542,7 +2545,7 @@ void LinearScan::run(G4_BB* bb, IR_Builder& builder, LLR_USE_MAP& LLRUseMap)
 
                 if (lr->getTopDcl()->getWordSize() > 0)
                 {
-                    endsregnum = lr->getTopDcl()->getWordSize() % NUM_WORDS_PER_GRF - 1;
+                    endsregnum = lr->getTopDcl()->getWordSize() % numEltPerGRF(Type_UW) - 1;
                     if (endsregnum < 0) endsregnum = 15;
                 }
                 else
@@ -2666,8 +2669,8 @@ void LinearScan::expireInputRanges(unsigned int global_idx, unsigned int local_i
 
         if (endIdx <= global_idx)
         {
-            unsigned int regnum = lr->getRegWordIdx() / G4_GRF_REG_SIZE;
-            unsigned int subRegInWord = lr->getRegWordIdx() % G4_GRF_REG_SIZE;
+            unsigned int regnum = lr->getRegWordIdx() / numEltPerGRF(Type_UW);
+            unsigned int subRegInWord = lr->getRegWordIdx() % numEltPerGRF(Type_UW);
             int inputIdx = (endIdx < first_idx) ? 0 : (local_idx - (global_idx - endIdx) * 2);
 
             // Free physical regs marked for this range
@@ -2930,8 +2933,10 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     // See the last condition of this if-stmt.
                                     G4_DstRegRegion* dst = builder.Create_Dst_Opnd_From_Dcl(splitDcl, 1);
                                     G4_SrcRegRegion* src = builder.Create_Src_Opnd_From_Dcl(oldDcl, builder.getRegionStride1());
+                                    G4_ExecSize splitInstExecSize (oldDcl->getTotalElems() > 16 ? 16 : oldDcl->getTotalElems());
                                     G4_INST* splitInst = builder.createMov(
-                                        (uint8_t) (oldDcl->getTotalElems() > 16 ? 16 : oldDcl->getTotalElems()), dst, src, InstOpt_WriteEnable, false);
+                                        splitInstExecSize,
+                                        dst, src, InstOpt_WriteEnable, false);
                                     bb->insertBefore(iter, splitInst);
 
                                     unsigned int idx = 0;
@@ -2944,7 +2949,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     {
                                         G4_DstRegRegion* dst = builder.createDst(splitDcl->getRegVar(), 2, 0, 1, oldDcl->getElemType());
                                         auto src = builder.createSrcRegRegion(Mod_src_undef, Direct, oldDcl->getRegVar(), 2, 0, builder.getRegionStride1(), oldDcl->getElemType());
-                                        G4_INST* splitInst2 = builder.createMov(16, dst, src, InstOpt_WriteEnable, false);
+                                        G4_INST* splitInst2 = builder.createMov(g4::SIMD16, dst, src, InstOpt_WriteEnable, false);
                                         bb->insertBefore(iter, splitInst2);
                                     }
 
@@ -2960,7 +2965,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     dst = builder.Create_Dst_Opnd_From_Dcl(newDcl, 1);
                                     src = builder.Create_Src_Opnd_From_Dcl(splitDcl, builder.getRegionStride1());
                                     G4_INST* movInst = builder.createMov(
-                                        (uint8_t) (splitDcl->getTotalElems() > 16 ? 16 : splitDcl->getTotalElems()),
+                                        G4_ExecSize(splitDcl->getTotalElems() > 16 ? 16 : splitDcl->getTotalElems()),
                                         dst, src, InstOpt_WriteEnable, false);
                                     bb->insertBefore(iter, movInst);
 
@@ -2974,7 +2979,7 @@ bool LinearScan::allocateRegs(LocalLiveRange* lr, G4_BB* bb, IR_Builder& builder
                                     {
                                         G4_DstRegRegion* dst = builder.createDst(newDcl->getRegVar(), 2, 0, 1, splitDcl->getElemType());
                                         auto src = builder.createSrcRegRegion(Mod_src_undef, Direct, splitDcl->getRegVar(), 2, 0, builder.getRegionStride1(), splitDcl->getElemType());
-                                        G4_INST* movInst2 = builder.createMov(16, dst, src, InstOpt_WriteEnable, false);
+                                        G4_INST* movInst2 = builder.createMov(g4::SIMD16, dst, src, InstOpt_WriteEnable, false);
                                         bb->insertBefore(iter, movInst2);
                                     }
 
@@ -3103,7 +3108,7 @@ void LinearScan::coalesceSplit(LocalLiveRange* lr)
         l->setHint(regnum + (siblingNum * sizePerChild));
 #ifdef _DEBUG
         int s;
-        if(l->getAssigned())
+        if (l->getAssigned())
             MUST_BE_TRUE(!l->getPhyReg(s), "split child already allocated");
 #endif
         for (unsigned int i = regnum + (siblingNum * sizePerChild); i != regnum + ((siblingNum + 1) * sizePerChild); i++)
@@ -3118,7 +3123,7 @@ void LinearScan::coalesceSplit(LocalLiveRange* lr)
     lr->getFirstRef(idx);
     for (auto f : unrefGRFs)
     {
-        pregManager.freeRegs(f, 0, NUM_WORDS_PER_GRF, idx);
+        pregManager.freeRegs(f, 0, numEltPerGRF(Type_UW), idx);
     }
 }
 
@@ -3412,10 +3417,10 @@ void PhyRegSummary::markPhyRegs(G4_VarBase* pr, unsigned int size)
     // Assume that pr is aligned to GRF start if it cannot fit in a single GRF
     MUST_BE_TRUE(pr->isGreg(), "Expecting GRF as operand");
 
-    int numGRFs = size / NUM_WORDS_PER_GRF;
+    int numGRFs = size / numEltPerGRF(Type_UW);
     unsigned int regnum = pr->asGreg()->getRegNum();
 
-    if (size%NUM_WORDS_PER_GRF != 0)
+    if (size%numEltPerGRF(Type_UW) != 0)
         numGRFs++;
 
     for (int i = 0; i < numGRFs; i++)

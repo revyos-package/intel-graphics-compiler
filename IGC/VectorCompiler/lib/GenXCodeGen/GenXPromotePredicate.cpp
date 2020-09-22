@@ -39,6 +39,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/DerivedTypes.h"
 
 using namespace llvm;
 using namespace genx;
@@ -102,7 +105,7 @@ bool GenXPromotePredicate::runOnFunction(Function &F) {
       auto Cond = dyn_cast<Instruction>(SI->getCondition());
       if (!Cond || !Cond->getType()->isVectorTy())
         continue;
-      if (Cond->getType()->getVectorNumElements() < 32)
+      if (cast<VectorType>(Cond->getType())->getNumElements() < 32)
         continue;
 
       // TODO: analyze when it is benefial to promote.
@@ -116,10 +119,10 @@ bool GenXPromotePredicate::runOnFunction(Function &F) {
   // Do promotions. This is a tree rewrite, with candidates as root,
   // comparisions or constants as leaf nodes.
   for (auto Inst : Candidates) {
-    assert(Inst->hasOneUse());
+    IGC_ASSERT(Inst->hasOneUse());
     Instruction *UI = Inst->user_back();
     Value *V = rewriteTree(Inst);
-    assert(isa<Instruction>(V));
+    IGC_ASSERT(isa<Instruction>(V));
     auto TI = TruncInst::Create(CastInst::Trunc, V, Inst->getType());
     TI->insertAfter(cast<Instruction>(V));
     TI->setDebugLoc(Inst->getDebugLoc());
@@ -163,8 +166,8 @@ bool GenXPromotePredicate::matchOpnds(llvm::BasicBlock *UseBB, Value *V,
 }
 Value *GenXPromotePredicate::rewriteTree(Instruction *Inst) {
   IRBuilder<> Builder(Inst);
-  unsigned N = Inst->getType()->getVectorNumElements();
-  VectorType *VT = VectorType::get(Builder.getInt16Ty(), N);
+  unsigned N = cast<VectorType>(Inst->getType())->getNumElements();
+  VectorType *VT = IGCLLVM::FixedVectorType::get(Builder.getInt16Ty(), N);
   unsigned Opc = Inst->getOpcode();
   switch (Opc) {
   case Instruction::And:
@@ -178,7 +181,7 @@ Value *GenXPromotePredicate::rewriteTree(Instruction *Inst) {
       else if (auto I = dyn_cast<Instruction>(Op))
         Ops[i] = rewriteTree(I);
       else
-        llvm_unreachable("out of sync");
+        IGC_ASSERT_EXIT_MESSAGE(0, "out of sync");
     }
 
     Value *V = Builder.CreateBinOp(Instruction::BinaryOps(Opc), Ops[0], Ops[1]);
@@ -200,5 +203,5 @@ Value *GenXPromotePredicate::rewriteTree(Instruction *Inst) {
     break;
   }
 
-  llvm_unreachable("out of sync");
+  IGC_ASSERT_EXIT_MESSAGE(0, "out of sync");
 }

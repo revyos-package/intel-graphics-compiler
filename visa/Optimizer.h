@@ -120,7 +120,7 @@ public:
     SubLoc(G4_BB* e, SubLoc* s) : entry(e), outter(s) {}
     G4_BB*  getEntry()       {return entry;}
     SubLoc* getOutterLevel() {return outter;}
-    void *operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, vISA::Mem_Manager& m) { return m.alloc(sz); }
 };
 
 class Optimizer
@@ -134,7 +134,7 @@ class Optimizer
     //
     // optimization phases
     //
-    G4_SrcModifier mergeModifier( G4_Operand *src, G4_Operand *use );
+    G4_SrcModifier mergeModifier(G4_Operand *src, G4_Operand *use);
     void cleanMessageHeader();
     void sendFusion();
     void renameRegister();
@@ -153,7 +153,7 @@ class Optimizer
             unsigned int srcNum,
             INST_LIST_ITER lastIter,
             INST_LIST_ITER iend
-        );
+       );
     void FoldAddrImmediate();
     bool foldCmpSel(G4_BB *BB, G4_INST *selInst, INST_LIST_ITER &selInst_II);
     bool foldPseudoNot(G4_BB *bb, INST_LIST_ITER& iter);
@@ -222,6 +222,7 @@ private:
     void changeMoveType();
     void split4GRFVars();
     void legalizeType();
+    void analyzeMove();
 
     void countBankConflicts();
     unsigned int numBankConflicts;
@@ -286,14 +287,14 @@ private:
 
         /// Corresponding timer for this pass. When it is not a concrete
         /// timer i.e. TIMER_NUM_TIMERS, then no time will be recorded.
-        TIMERS Timer;
+        TimerID Timer;
 
         PassInfo(PassType P, const char *N, vISAOptions O,
-                 TIMERS T = TIMER_NUM_TIMERS)
+                 TimerID T = TimerID::NUM_TIMERS)
             : Pass(P), Name(N), Option(O), Timer(T) {}
 
         PassInfo() : Pass(0), Name(0), Option(vISA_EnableAlways),
-            Timer(TIMER_NUM_TIMERS) {}
+            Timer(TimerID::NUM_TIMERS) {}
     };
 
     bool foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& iter);
@@ -349,6 +350,7 @@ public:
         PI_mapOrphans,
         PI_varSplit,
         PI_legalizeType,
+        PI_analyzeMove,
         PI_NUM_PASSES
     };
 

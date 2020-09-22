@@ -265,8 +265,10 @@ namespace IGC
         unsigned int numLoopInsts;
         unsigned int numOfLoop;
         unsigned int numInsts;    //<! measured after optimization, used as a compiler heuristic
+        unsigned int numPsInputs;
         bool sampleCmpToDiscardOptimizationPossible;
         unsigned int sampleCmpToDiscardOptimizationSlot;
+        bool hasFP64Inst;
     };
 
     struct SSimplePushInfo
@@ -530,6 +532,9 @@ namespace IGC
         bool                                CompiledForIndirectPayload;
 
         bool                                DispatchAlongY;
+
+        unsigned int                        ThreadGroupModifier_X;
+        unsigned int                        ThreadGroupModifier_Y;
 
         /* Output related to only the PingPong Textures */
         bool                                SecondCompile;
@@ -802,6 +807,7 @@ namespace IGC
         /// Module level flag. This flag is false either there is an indirect call
         /// in the module or the kernel sizes are small even with complete inlining.
         bool m_enableSubroutine = false;
+        bool m_enableStackCall = false;
         bool m_enableFunctionPointer = false;
 
         /// Adding multiversioning to partially redundant samples, if AIL is on.
@@ -1220,6 +1226,10 @@ namespace IGC
                     PreferBindlessImages = true;
                     PromoteStatelessToBindless = true;
                 }
+                if (strstr(options, "-intel-use-bindless-printf"))
+                {
+                    UseBindlessPrintf = true;
+                }
                 if (strstr(options, "-intel-force-global-mem-allocation"))
                 {
                     IntelForceGlobalMemoryAllocation = true;
@@ -1242,6 +1252,10 @@ namespace IGC
                         }
                     }
                 }
+                if (strstr(options, "-allow-zebin"))
+                {
+                    EnableZEBinary = true;
+                }
             }
 
 
@@ -1260,8 +1274,10 @@ namespace IGC
             bool PromoteStatelessToBindless = false;
             bool PreferBindlessImages = false;
             bool UseBindlessMode = false;
+            bool UseBindlessPrintf = false;
             bool IntelForceGlobalMemoryAllocation = false;
             bool hasNoLocalToGeneric = false;
+            bool EnableZEBinary = false;
 
             // -1 : initial value that means it is not set from cmdline
             // 0-5: valid values set from the cmdline

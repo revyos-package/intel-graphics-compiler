@@ -234,7 +234,7 @@ public:
     /// AppendVISAArithmeticTwoDstInst -- append a two-dst, two-source vISA arithmetic instruction to this kernel
     /// [pred] op (emask, execSize) dst0 dst1 src0 src1
     /// This is used by addc and subb
-    VISA_BUILDER_API virtual int AppendVISAArithmeticInst(ISA_Opcode opcode, VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
+    VISA_BUILDER_API virtual int AppendVISATwoDstArithmeticInst(ISA_Opcode opcode, VISA_PredOpnd *pred, VISA_EMask_Ctrl emask,
                                           VISA_Exec_Size executionSize, VISA_VectorOpnd *dst1, VISA_VectorOpnd *carry_borrow, VISA_VectorOpnd *src0, VISA_VectorOpnd *src1) = 0;
 
 
@@ -735,7 +735,7 @@ public:
     /// This function may only be called after Compile() is called
     /// If finalization fails, buffer will be set to NULL and size will be set to 0
     /// buffer must be de-allocated using freeBLock API.
-    VISA_BUILDER_API virtual int GetGenxBinary(void *&buffer, int &size) = 0;
+    VISA_BUILDER_API virtual int GetGenxBinary(void *&buffer, int &size) const = 0;
 
     /// GetJitInfo -- returns auxiliary information collected during finalization
     /// This function may only be called after Compile() is called
@@ -829,6 +829,9 @@ public:
 
     /// getGenOffset -- Get gen binary offset of this function
     VISA_BUILDER_API virtual int64_t getGenOffset() const = 0;
+
+    /// getFunctionName -- Get function name.
+    VISA_BUILDER_API virtual const char* getFunctionName() const = 0;
 };
 
 typedef enum

@@ -357,6 +357,10 @@ namespace IGC
         m_encoderState.m_noMask = false;
         m_encoderState.m_simdSize = m_program->m_SIMDSize;
         m_encoderState.m_uniformSIMDSize = SIMDMode::SIMD1;
+
+        if (m_insideForcedNoMaskRegion) {
+          m_encoderState.m_noMask = true;
+        }
     }
 
     CEncoder::CEncoder()
@@ -1584,98 +1588,39 @@ namespace IGC
                         srcAlias = src;
                 }
             }
-            unsigned numParts = 0;
-            if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
-                NeedSplitting(src, m_encoderState.m_srcOperand[0], numParts, true)) {
 
-                VISA_EMask_Ctrl execMask = GetAluEMask(dst);
-                VISA_Exec_Size fromExecSize = GetAluExecSize(dst);
-                VISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, numParts);
-
-                for (unsigned thePart = 0; thePart != numParts; ++thePart) {
-                    SModifier newDstMod = SplitVariable(fromExecSize, toExecSize, thePart, dst, m_encoderState.m_dstOperand);
-                    SModifier newSrcMod = SplitVariable(fromExecSize, toExecSize, thePart, src, m_encoderState.m_srcOperand[0], true);
-                    if (Need64BitEmu) {
-                        if (Is64BitSrc && Is64BitDst) {
-                            // Generate data movement on Lo part.
-                            SModifier LoDstMod = EmulateVariable(dst, newDstMod, false, false);
-                            SModifier LoSrcMod = EmulateVariable(src, newSrcMod, false, true);
-                            VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, LoDstMod);
-                            VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, LoSrcMod);
-                            VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                            V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                                toExecSize,
-                                dstOpnd, srcOpnd));
-                            // Generate data movement on Hi part.
-                            SModifier HiDstMod = EmulateVariable(dst, newDstMod, true, false);
-                            SModifier HiSrcMod = EmulateVariable(src, newSrcMod, true, true);
-                            dstOpnd = GetDestinationOperand(dstAlias, HiDstMod);
-                            srcOpnd = srcImmHi ? srcImmHi : GetSourceOperand(srcAlias, HiSrcMod);
-                            predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                            V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                                toExecSize,
-                                dstOpnd, srcOpnd));
-                        }
-                        else if (Is64BitSrc) {
-                            IGC_ASSERT_MESSAGE(!Is64BitDst, "Expect non 64-bit dst!");
-                            // Generate data movement on Lo part only.
-                            SModifier LoSrcMod = EmulateVariable(src, newSrcMod, false, true);
-                            VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, newDstMod);
-                            VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, LoSrcMod);
-                            VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                            V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                                toExecSize,
-                                dstOpnd, srcOpnd));
-                        }
-                        else {
-                            IGC_ASSERT_MESSAGE(Is64BitDst, "Expect 64-bit dst!");
-                            IGC_ASSERT_MESSAGE(!Is64BitSrc, "Expect non 64-bit src!");
-
-                            // Generate data movement on Lo part.
-                            SModifier LoDstMod = EmulateVariable(dst, newDstMod, false, false);
-                            VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, LoDstMod);
-                            VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, newSrcMod);
-                            VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                            V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                                toExecSize,
-                                dstOpnd, srcOpnd));
-                            // Generate data movement on Hi part.
-                            unsigned ImmHi = 0U;
-                            V(vKernel->CreateVISAImmediate(srcImmHi, &ImmHi, ISA_TYPE_UD));
-                            SModifier HiDstMod = EmulateVariable(dst, newDstMod, true, false);
-                            dstOpnd = GetDestinationOperand(dstAlias, HiDstMod);
-                            srcOpnd = srcImmHi;
-                            predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                            V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                                SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                                toExecSize,
-                                dstOpnd, srcOpnd));
-                        }
-                    }
-                    else {
-                        VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
-                        VISA_VectorOpnd* srcOpnd = GetSourceOperand(src, newSrcMod);
-                        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                        V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                            SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                            toExecSize,
+            if (Need64BitEmu)
+            {
+                if (Is64BitSrc && Is64BitDst)
+                {
+                    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+                    if (!predOpnd && !IsSat() && dst->IsUniform() && src->IsUniform() && !src->IsImmediate())
+                    {
+                        // special handling for uniform 64b copy by generating SIMD2 move instead of 2xSIMD1
+                        // technically we need to check for src modifier and whether dst/src are indirect operand as well,
+                        // but it doesn't look like the original code below is doing it anyway..
+                        SModifier dstAsUDMod = m_encoderState.m_dstOperand;
+                        dstAsUDMod.subReg *= 2;
+                        SModifier srcAsUDMod = m_encoderState.m_srcOperand[0];
+                        srcAsUDMod.region[0] = 1;
+                        srcAsUDMod.region[1] = 1;
+                        srcAsUDMod.region[2] = 0;
+                        srcAsUDMod.specialRegion = true;
+                        srcAsUDMod.subReg *= 2;
+                        auto dstOpnd = GetDestinationOperand(dstAlias, dstAsUDMod);
+                        auto SIMDSize = lanesToSIMDMode(numLanes(m_encoderState.m_uniformSIMDSize) * 2);
+                        auto srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, srcAsUDMod);
+                        V(vKernel->AppendVISADataMovementInst(opcode, nullptr, false, vISA_EMASK_M1_NM, visaExecSize(SIMDSize),
                             dstOpnd, srcOpnd));
                     }
-                }
-            }
-            else {
-                if (Need64BitEmu) {
-                    if (Is64BitSrc && Is64BitDst) {
+                    else
+                    {
                         // Generate data movement on Lo part.
                         SModifier LoDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, false, false);
                         SModifier LoSrcMod = EmulateVariable(src, m_encoderState.m_srcOperand[0], false, true);
                         VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, LoDstMod);
                         VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, LoSrcMod);
-                        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+
                         V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
                             GetAluEMask(dst),
                             GetAluExecSize(dst),
@@ -1691,57 +1636,60 @@ namespace IGC
                             GetAluExecSize(dst),
                             dstOpnd, srcOpnd));
                     }
-                    else if (Is64BitSrc) {
-                        IGC_ASSERT_MESSAGE(!Is64BitDst, "Expect non 64-bit dst!");
-                        // Generate data movement on Lo part only.
-                        SModifier LoSrcMod = EmulateVariable(src, m_encoderState.m_srcOperand[0], false, true);
-                        VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, m_encoderState.m_dstOperand);
-                        VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, LoSrcMod);
-                        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                        V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                            GetAluEMask(dst),
-                            GetAluExecSize(dst),
-                            dstOpnd, srcOpnd));
-                    }
-                    else {
-                        IGC_ASSERT_MESSAGE(Is64BitDst, "Expect 64-bit dst!");
-                        IGC_ASSERT_MESSAGE(!Is64BitSrc, "Expect non 64-bit src");
-
-                        // Generate data movement on Lo part.
-                        SModifier LoDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, false, false);
-                        VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, LoDstMod);
-                        VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, m_encoderState.m_srcOperand[0]);
-                        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                        V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                            GetAluEMask(dst),
-                            GetAluExecSize(dst),
-                            dstOpnd, srcOpnd));
-                        // Generate data movement on Hi part.
-                        unsigned ImmHi = 0U;
-                        V(vKernel->CreateVISAImmediate(srcImmHi, &ImmHi, ISA_TYPE_UD));
-                        SModifier HiDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, true, false);
-                        dstOpnd = GetDestinationOperand(dstAlias, HiDstMod);
-                        srcOpnd = srcImmHi;
-                        predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                        V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
-                            GetAluEMask(dst),
-                            GetAluExecSize(dst),
-                            dstOpnd, srcOpnd));
-                    }
                 }
-                else {
-                    VISA_VectorOpnd* srcOpnd = GetSourceOperand(src, m_encoderState.m_srcOperand[0]);
-                    VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
+                else if (Is64BitSrc)
+                {
+                    IGC_ASSERT_MESSAGE(!Is64BitDst, "Expect non 64-bit dst!");
+                    // Generate data movement on Lo part only.
+                    SModifier LoSrcMod = EmulateVariable(src, m_encoderState.m_srcOperand[0], false, true);
+                    VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, m_encoderState.m_dstOperand);
+                    VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, LoSrcMod);
                     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                    V(vKernel->AppendVISADataMovementInst(
-                        opcode,
-                        predOpnd,
-                        IsSat(),
+                    V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
                         GetAluEMask(dst),
                         GetAluExecSize(dst),
-                        dstOpnd,
-                        srcOpnd));
+                        dstOpnd, srcOpnd));
                 }
+                else
+                {
+                    IGC_ASSERT_MESSAGE(Is64BitDst, "Expect 64-bit dst!");
+                    IGC_ASSERT_MESSAGE(!Is64BitSrc, "Expect non 64-bit src");
+
+                    // Generate data movement on Lo part.
+                    SModifier LoDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, false, false);
+                    VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dstAlias, LoDstMod);
+                    VISA_VectorOpnd* srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, m_encoderState.m_srcOperand[0]);
+                    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+                    V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
+                        GetAluEMask(dst),
+                        GetAluExecSize(dst),
+                        dstOpnd, srcOpnd));
+                    // Generate data movement on Hi part.
+                    unsigned ImmHi = 0U;
+                    V(vKernel->CreateVISAImmediate(srcImmHi, &ImmHi, ISA_TYPE_UD));
+                    SModifier HiDstMod = EmulateVariable(dst, m_encoderState.m_dstOperand, true, false);
+                    dstOpnd = GetDestinationOperand(dstAlias, HiDstMod);
+                    srcOpnd = srcImmHi;
+                    predOpnd = GetFlagOperand(m_encoderState.m_flag);
+                    V(vKernel->AppendVISADataMovementInst(opcode, predOpnd, IsSat(),
+                        GetAluEMask(dst),
+                        GetAluExecSize(dst),
+                        dstOpnd, srcOpnd));
+                }
+            }
+            else
+            {
+                VISA_VectorOpnd* srcOpnd = GetSourceOperand(src, m_encoderState.m_srcOperand[0]);
+                VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
+                VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
+                V(vKernel->AppendVISADataMovementInst(
+                    opcode,
+                    predOpnd,
+                    IsSat(),
+                    GetAluEMask(dst),
+                    GetAluExecSize(dst),
+                    dstOpnd,
+                    srcOpnd));
             }
         }
     }
@@ -1935,21 +1883,23 @@ namespace IGC
                 VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, m_encoderState.m_dstOperand);
 
                 VISA_EMask_Ctrl EMask = SplitEMask(FromExecSize, ToExecSize, ThePart, ExecMask);
-                V(vKernel->AppendVISAArithmeticInst(
+                V(vKernel->AppendVISATwoDstArithmeticInst(
                     ISA_ADDC, Pred, EMask, ToExecSize,
                     L, AccOut, S0L, S1L));
 
-                if (H1)
+                if (H1 && !(H1->IsImmediate() && H1->GetImmediateValue() == 0))
                 {
                     SModifier NewS1HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H1, m_encoderState.m_srcOperand[3], true);
                     VISA_VectorOpnd* S1H = GetSourceOperand(H1, NewS1HMod);
-                    V(vKernel->AppendVISAArithmeticInst(
-                        ISA_ADD, Pred, false, EMask, ToExecSize,
-                        H, S0H, S1H));
-                    H = GetDestinationOperand(Hi, NewDstMod);
-                    V(vKernel->AppendVISAArithmeticInst(
-                        ISA_ADD, Pred, false, EMask, ToExecSize,
-                        H, AccIn, HIn));
+                    {
+                        V(vKernel->AppendVISAArithmeticInst(
+                            ISA_ADD, Pred, false, EMask, ToExecSize,
+                            H, S0H, S1H));
+                        H = GetDestinationOperand(Hi, NewDstMod);
+                        V(vKernel->AppendVISAArithmeticInst(
+                            ISA_ADD, Pred, false, EMask, ToExecSize,
+                            H, AccIn, HIn));
+                    }
                 }
                 else
                 {
@@ -1957,7 +1907,6 @@ namespace IGC
                         ISA_ADD, Pred, false, EMask, ToExecSize,
                         H, AccIn, S0H));
                 }
-
             }
         }
         else {
@@ -1986,20 +1935,22 @@ namespace IGC
             VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, MidMod);
 
             VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
-            V(vKernel->AppendVISAArithmeticInst(
+            V(vKernel->AppendVISATwoDstArithmeticInst(
                 ISA_ADDC, Pred, ExecMask, ExecSize,
                 L, AccOut, S0L, S1L));
 
-            if (H1)
+            if (H1 && !(H1->IsImmediate() && H1->GetImmediateValue() == 0))
             {
                 VISA_VectorOpnd* S1H = GetSourceOperand(H1, m_encoderState.m_srcOperand[3]);
-                V(vKernel->AppendVISAArithmeticInst(
-                    ISA_ADD, Pred, false, ExecMask, ExecSize,
-                    H, S0H, S1H));
-                H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
-                V(vKernel->AppendVISAArithmeticInst(
-                    ISA_ADD, Pred, false, ExecMask, ExecSize,
-                    H, AccIn, HIn));
+                {
+                    V(vKernel->AppendVISAArithmeticInst(
+                        ISA_ADD, Pred, false, ExecMask, ExecSize,
+                        H, S0H, S1H));
+                    H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
+                    V(vKernel->AppendVISAArithmeticInst(
+                        ISA_ADD, Pred, false, ExecMask, ExecSize,
+                        H, AccIn, HIn));
+                }
             }
             else
             {
@@ -2011,52 +1962,52 @@ namespace IGC
     }
 
     void CEncoder::SubPair(CVariable* Lo, CVariable* Hi, CVariable* L0, CVariable* H0, CVariable* L1, CVariable* H1) {
-    IGC_ASSERT_MESSAGE(m_encoderState.m_dstOperand.mod == EMOD_NONE, "subPair doesn't support saturate");
+        IGC_ASSERT_MESSAGE(m_encoderState.m_dstOperand.mod == EMOD_NONE, "subPair doesn't support saturate");
 
-    VISA_Exec_Size ExecSize = GetAluExecSize(Lo);
-    IGC_ASSERT((ExecSize == EXEC_SIZE_32) || (ExecSize == EXEC_SIZE_16) || (ExecSize == EXEC_SIZE_8) || (ExecSize == EXEC_SIZE_1));
+        VISA_Exec_Size ExecSize = GetAluExecSize(Lo);
+        IGC_ASSERT((ExecSize == EXEC_SIZE_32) || (ExecSize == EXEC_SIZE_16) || (ExecSize == EXEC_SIZE_8) || (ExecSize == EXEC_SIZE_1));
 
-    if (Hi == nullptr) {
-        // When Hi part is ignored, reduce 64-bit subtraction into 32-bit.
-        SetSrcModifier(1, EMOD_NEG);
-        GenericAlu(EOPCODE_ADD, Lo, L0, L1);
-        return;
-    }
+        if (Hi == nullptr) {
+            // When Hi part is ignored, reduce 64-bit subtraction into 32-bit.
+            SetSrcModifier(1, EMOD_NEG);
+            GenericAlu(EOPCODE_ADD, Lo, L0, L1);
+            return;
+        }
 
-    if (Lo == nullptr) {
-        // We cannot reduce the strength if only Lo is ignored.
-        Lo = m_program->GetNewVariable(
-            Hi->GetNumberElement(), Hi->GetType(), Hi->GetAlign(), Hi->IsUniform(), CName(Hi->getName(), "Carry"));
-    }
+        if (Lo == nullptr) {
+            // We cannot reduce the strength if only Lo is ignored.
+            Lo = m_program->GetNewVariable(
+                Hi->GetNumberElement(), Hi->GetType(), Hi->GetAlign(), Hi->IsUniform(), CName(Hi->getName(), "Carry"));
+        }
 
-    // Use `UD` only.
-    if (Lo->GetType() != ISA_TYPE_UD && Lo->GetType() != ISA_TYPE_UV) Lo = m_program->BitCast(Lo, ISA_TYPE_UD);
-    if (Hi->GetType() != ISA_TYPE_UD && Hi->GetType() != ISA_TYPE_UV) Hi = m_program->BitCast(Hi, ISA_TYPE_UD);
-    if (L0->GetType() != ISA_TYPE_UD && L0->GetType() != ISA_TYPE_UV) L0 = m_program->BitCast(L0, ISA_TYPE_UD);
-    if (H0->GetType() != ISA_TYPE_UD && H0->GetType() != ISA_TYPE_UV) H0 = m_program->BitCast(H0, ISA_TYPE_UD);
-    if (L1->GetType() != ISA_TYPE_UD && L1->GetType() != ISA_TYPE_UV) L1 = m_program->BitCast(L1, ISA_TYPE_UD);
-    if (H1->GetType() != ISA_TYPE_UD && H1->GetType() != ISA_TYPE_UV) H1 = m_program->BitCast(H1, ISA_TYPE_UD);
+        // Use `UD` only.
+        if (Lo->GetType() != ISA_TYPE_UD && Lo->GetType() != ISA_TYPE_UV) Lo = m_program->BitCast(Lo, ISA_TYPE_UD);
+        if (Hi->GetType() != ISA_TYPE_UD && Hi->GetType() != ISA_TYPE_UV) Hi = m_program->BitCast(Hi, ISA_TYPE_UD);
+        if (L0->GetType() != ISA_TYPE_UD && L0->GetType() != ISA_TYPE_UV) L0 = m_program->BitCast(L0, ISA_TYPE_UD);
+        if (H0->GetType() != ISA_TYPE_UD && H0->GetType() != ISA_TYPE_UV) H0 = m_program->BitCast(H0, ISA_TYPE_UD);
+        if (L1->GetType() != ISA_TYPE_UD && L1->GetType() != ISA_TYPE_UV) L1 = m_program->BitCast(L1, ISA_TYPE_UD);
+        if (H1->GetType() != ISA_TYPE_UD && H1->GetType() != ISA_TYPE_UV) H1 = m_program->BitCast(H1, ISA_TYPE_UD);
 
-    if (needsSplitting(ExecSize))
-    {
-        // Have to split it because `acc0` has only 8 elements for 32-bit
-        // integer types.
-        unsigned NumParts = 2;
-        VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
-        VISA_Exec_Size FromExecSize = GetAluExecSize(Lo);
-        VISA_Exec_Size ToExecSize = SplitExecSize(FromExecSize, NumParts);
+        if (needsSplitting(ExecSize))
+        {
+            // Have to split it because `acc0` has only 8 elements for 32-bit
+            // integer types.
+            unsigned NumParts = 2;
+            VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
+            VISA_Exec_Size FromExecSize = GetAluExecSize(Lo);
+            VISA_Exec_Size ToExecSize = SplitExecSize(FromExecSize, NumParts);
 
-        // Negative `S1H`
-        SModifier S1HMod = m_encoderState.m_srcOperand[1];
-        IGC_ASSERT(S1HMod.mod == EMOD_NONE);
-        S1HMod.mod = EMOD_NEG;
+            // Negative `S1H`
+            SModifier S1HMod = m_encoderState.m_srcOperand[1];
+            IGC_ASSERT(S1HMod.mod == EMOD_NONE);
+            S1HMod.mod = EMOD_NEG;
             VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
-        for (unsigned ThePart = 0; ThePart != NumParts; ++ThePart) {
-            SModifier NewDstMod = SplitVariable(FromExecSize, ToExecSize, ThePart, Lo, m_encoderState.m_dstOperand);
-            SModifier NewS0LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L0, m_encoderState.m_srcOperand[0], true);
-            SModifier NewS0HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H0, m_encoderState.m_srcOperand[1], true);
-            SModifier NewS1LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L1, m_encoderState.m_srcOperand[2], true);
-            SModifier NewS1HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H1, S1HMod, true);
+            for (unsigned ThePart = 0; ThePart != NumParts; ++ThePart) {
+                SModifier NewDstMod = SplitVariable(FromExecSize, ToExecSize, ThePart, Lo, m_encoderState.m_dstOperand);
+                SModifier NewS0LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L0, m_encoderState.m_srcOperand[0], true);
+                SModifier NewS0HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H0, m_encoderState.m_srcOperand[1], true);
+                SModifier NewS1LMod = SplitVariable(FromExecSize, ToExecSize, ThePart, L1, m_encoderState.m_srcOperand[2], true);
+                SModifier NewS1HMod = SplitVariable(FromExecSize, ToExecSize, ThePart, H1, S1HMod, true);
                 VISA_VectorOpnd* S0L = GetSourceOperand(L0, NewS0LMod);
                 VISA_VectorOpnd* S0H = GetSourceOperand(H0, NewS0HMod);
                 VISA_VectorOpnd* S1L = GetSourceOperand(L1, NewS1LMod);
@@ -2065,73 +2016,77 @@ namespace IGC
                 VISA_VectorOpnd* H = GetDestinationOperand(Hi, NewDstMod);
                 VISA_VectorOpnd* HIn = GetSourceOperand(Hi, NewDstMod);
 
-            unsigned short NumElems = m_program->m_Platform->getAccChNumUD();
+                unsigned short NumElems = m_program->m_Platform->getAccChNumUD();
                 CVariable* Carry =
                     m_program->GetNewVariable(NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform(), CName(Lo->getName(), "Carry"));
                 VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
-            // Negative `Acc0`
-            SModifier AccMod = m_encoderState.m_dstOperand;
-            IGC_ASSERT(AccMod.mod == EMOD_NONE);
-            AccMod.mod = EMOD_NEG;
+                // Negative `Acc0`
+                SModifier AccMod = m_encoderState.m_dstOperand;
+                IGC_ASSERT(AccMod.mod == EMOD_NONE);
+                AccMod.mod = EMOD_NEG;
                 VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, AccMod);
 
-            VISA_EMask_Ctrl EMask = SplitEMask(FromExecSize, ToExecSize, ThePart, ExecMask);
-            V(vKernel->AppendVISAArithmeticInst(
-                ISA_SUBB, Pred, EMask, ToExecSize,
-                L, AccOut, S0L, S1L));
-            V(vKernel->AppendVISAArithmeticInst(
-                ISA_ADD, Pred, false, EMask, ToExecSize,
-                H, S0H, S1H));
-            H = GetDestinationOperand(Hi, NewDstMod);
-            V(vKernel->AppendVISAArithmeticInst(
-                ISA_ADD, Pred, false, EMask, ToExecSize,
-                H, AccIn, HIn));
-        }
+                VISA_EMask_Ctrl EMask = SplitEMask(FromExecSize, ToExecSize, ThePart, ExecMask);
+                V(vKernel->AppendVISATwoDstArithmeticInst(
+                    ISA_SUBB, Pred, EMask, ToExecSize,
+                    L, AccOut, S0L, S1L));
+                {
+                    V(vKernel->AppendVISAArithmeticInst(
+                        ISA_ADD, Pred, false, EMask, ToExecSize,
+                        H, S0H, S1H));
+                    H = GetDestinationOperand(Hi, NewDstMod);
+                    V(vKernel->AppendVISAArithmeticInst(
+                        ISA_ADD, Pred, false, EMask, ToExecSize,
+                        H, AccIn, HIn));
+                }
+            }
         }
         else {
             VISA_VectorOpnd* S0L = GetSourceOperand(L0, m_encoderState.m_srcOperand[0]);
             VISA_VectorOpnd* S0H = GetSourceOperand(H0, m_encoderState.m_srcOperand[1]);
             VISA_VectorOpnd* S1L = GetSourceOperand(L1, m_encoderState.m_srcOperand[2]);
-        // Negative `S0H`
-        SModifier S1HMod = m_encoderState.m_srcOperand[1];
-        IGC_ASSERT(S1HMod.mod == EMOD_NONE);
-        S1HMod.mod = EMOD_NEG;
+            // Negative `S0H`
+            SModifier S1HMod = m_encoderState.m_srcOperand[1];
+            IGC_ASSERT(S1HMod.mod == EMOD_NONE);
+            S1HMod.mod = EMOD_NEG;
             VISA_VectorOpnd* S1H = GetSourceOperand(H1, S1HMod);
             VISA_VectorOpnd* L = GetDestinationOperand(Lo, m_encoderState.m_dstOperand);
             VISA_VectorOpnd* H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
             VISA_PredOpnd* Pred = GetFlagOperand(m_encoderState.m_flag);
 
-        unsigned short NumElems = (ExecSize == 1) ? 1 : m_program->m_Platform->getAccChNumUD();
+            unsigned short NumElems = (ExecSize == 1) ? 1 : m_program->m_Platform->getAccChNumUD();
             CVariable* Carry = m_program->GetNewVariable(
                 NumElems, Lo->GetType(), Lo->GetAlign(), Lo->IsUniform(), CName(Lo->getName(), "Carry"));
             VISA_VectorOpnd* AccOut = GetDestinationOperand(Carry, m_encoderState.m_dstOperand);
 
-        SModifier MidMod = m_encoderState.m_dstOperand;
-        if (Lo->IsUniform() && NumElems != 1) {
-            MidMod.region[0] = 1;
-            MidMod.region[1] = 1;
-            MidMod.region[2] = 0;
-            MidMod.specialRegion = true;
-        }
+            SModifier MidMod = m_encoderState.m_dstOperand;
+            if (Lo->IsUniform() && NumElems != 1) {
+                MidMod.region[0] = 1;
+                MidMod.region[1] = 1;
+                MidMod.region[2] = 0;
+                MidMod.specialRegion = true;
+            }
             VISA_VectorOpnd* HIn = GetSourceOperand(Hi, MidMod);
-        // Negative `Acc0`
-        SModifier AccMod = MidMod;
-        IGC_ASSERT(AccMod.mod == EMOD_NONE);
-        AccMod.mod = EMOD_NEG;
+            // Negative `Acc0`
+            SModifier AccMod = MidMod;
+            IGC_ASSERT(AccMod.mod == EMOD_NONE);
+            AccMod.mod = EMOD_NEG;
             VISA_VectorOpnd* AccIn = GetSourceOperand(Carry, AccMod);
 
-        VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
-        V(vKernel->AppendVISAArithmeticInst(
-            ISA_SUBB, Pred, ExecMask, ExecSize,
-            L, AccOut, S0L, S1L));
-        V(vKernel->AppendVISAArithmeticInst(
-            ISA_ADD, Pred, false, ExecMask, ExecSize,
-            H, S0H, S1H));
-        H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
-        V(vKernel->AppendVISAArithmeticInst(
-            ISA_ADD, Pred, false, ExecMask, ExecSize,
-            H, AccIn, HIn));
-    }
+            VISA_EMask_Ctrl ExecMask = GetAluEMask(Lo);
+            V(vKernel->AppendVISATwoDstArithmeticInst(
+                ISA_SUBB, Pred, ExecMask, ExecSize,
+                L, AccOut, S0L, S1L));
+            {
+                V(vKernel->AppendVISAArithmeticInst(
+                    ISA_ADD, Pred, false, ExecMask, ExecSize,
+                    H, S0H, S1H));
+                H = GetDestinationOperand(Hi, m_encoderState.m_dstOperand);
+                V(vKernel->AppendVISAArithmeticInst(
+                    ISA_ADD, Pred, false, ExecMask, ExecSize,
+                    H, AccIn, HIn));
+            }
+        }
     }
 
     void CEncoder::CarryBorrowArith(ISA_Opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1)
@@ -2160,7 +2115,7 @@ namespace IGC
     VISA_VectorOpnd* carryBorrowOpnd = GetDestinationOperand(dst, carryOperand);
     IGC_ASSERT_MESSAGE(m_encoderState.m_dstOperand.mod == EMOD_NONE, "addc/subb doesn't support saturate");
 
-    V(vKernel->AppendVISAArithmeticInst(
+    V(vKernel->AppendVISATwoDstArithmeticInst(
         opcode,
         predOpnd,
         GetAluEMask(dst),
@@ -3069,6 +3024,7 @@ namespace IGC
             {
                 return GENX_BDW;
             }
+            // fall-through
         case IGFX_GEN9_CORE:
         case IGFX_GENNEXT_CORE:
             if (platform->getPlatformInfo().eProductFamily == IGFX_BROXTON ||
@@ -3080,6 +3036,7 @@ namespace IGC
             {
                 return GENX_SKL;
             }
+            // fall-through
         case IGFX_GEN11_CORE:
             return GENX_ICLLP;
         case IGFX_GEN12_CORE:
@@ -3090,6 +3047,7 @@ namespace IGC
             {
                 return GENX_TGLLP;
             }
+            // fall-through
         default:
             IGC_ASSERT_MESSAGE(0, "unsupported platform");
             break;
@@ -4041,7 +3999,7 @@ namespace IGC
         }
 
         if ((context->type == ShaderType::OPENCL_SHADER || context->type == ShaderType::COMPUTE_SHADER) &&
-            VISAPlatform >= GENX_SKL && IGC_IS_FLAG_ENABLED(EnablePreemption) && !hasStackCall)
+            VISAPlatform >= GENX_SKL && IGC_IS_FLAG_ENABLED(EnablePreemption))
         {
             SaveOption(vISA_enablePreemption, true);
         }
@@ -4258,9 +4216,26 @@ namespace IGC
             SaveOption(vISA_DstSrcOverlapWA, true);
         }
 
+        if (IGC_IS_FLAG_ENABLED(UseLinearScanRA))
+        {
+            SaveOption(vISA_LinearScan, true);
+        }
+
         if (IGC_IS_FLAG_ENABLED(EnableIGASWSB))
         {
             SaveOption(vISA_EnableIGASWSB, true);
+        }
+
+        if (IGC_IS_FLAG_ENABLED(EnableQuickTokenAlloc))
+        {
+            SaveOption(vISA_QuickTokenAllocation, true);
+        }
+
+        if (IGC_IS_FLAG_ENABLED(EnableSWSBStitch) ||
+            (context->type == ShaderType::PIXEL_SHADER &&
+             static_cast<CPixelShader*>(m_program)->GetPhase() == PSPHASE_PIXEL))
+        {
+            SaveOption(vISA_SWSBStitch, true);
         }
 
         if (IGC_IS_FLAG_ENABLED(EnableForceDebugSWSB) ||
@@ -4368,6 +4343,14 @@ namespace IGC
 
         // Set to stitch all functions to all kernels in a VISABuidler
         SaveOption(vISA_noStitchExternFunc, false);
+
+        // Turning off optimizations as much as possible to have the fastest compilation
+        if (IsStage1FastestCompile(context->m_CgFlag, context->m_StagingCtx))
+        {
+            SaveOption(vISA_FastSpill, true);
+            SaveOption(vISA_LocalScheduling, false);
+            SaveOption(vISA_preRA_Schedule, false);
+        }
     }
 
     void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall)
@@ -4378,6 +4361,7 @@ namespace IGC
         m_encoderState.m_secondHalf = false;
         m_encoderState.m_secondNibble = false;
         m_enableVISAdump = false;
+        m_insideForcedNoMaskRegion = false;
         labelMap.clear();
         labelMap.resize(m_program->entry->size(), nullptr);
         labelCounter = 0;
@@ -4415,7 +4399,7 @@ namespace IGC
 
         vKernel = nullptr;
 
-        std::string kernelName = m_program->entry->getName();
+        std::string kernelName = std::string(m_program->entry->getName());
         if (context->m_instrTypes.hasDebugInfo)
         {
             // This metadata node is added by TransformBlocks pass for device side
@@ -4444,7 +4428,7 @@ namespace IGC
                         auto second = dyn_cast_or_null<MDString>(mdOpnd->getOperand(0));
                         if (second)
                         {
-                            kernelName = second->getString();
+                            kernelName = second->getString().str();
                         }
                     }
                 }
@@ -4810,22 +4794,10 @@ namespace IGC
         {
             GlobalVariable* pGlobal = global.first;
 
-            // Export the symbol if global is external/common linkage
-            bool needSymbol = modMD->compOpt.EnableTakeGlobalAddress && (pGlobal->hasCommonLinkage() || pGlobal->hasExternalLinkage());
-
-            // Otherwise check if relocation is required
-            if (!needSymbol)
-            {
-                for (auto ui = pGlobal->user_begin(), ue = pGlobal->user_end(); ui != ue; ui++)
-                {
-                    Instruction* inst = dyn_cast<Instruction>(*ui);
-                    if (inst && inst->getParent()->getParent()->hasFnAttribute("visaStackCall"))
-                    {
-                        needSymbol = true;
-                        break;
-                    }
-                }
-            }
+            // Export the symbol if global is external/common linkage, or has uses in the module
+            bool needSymbol = pGlobal->use_empty()
+                ? (modMD->compOpt.EnableTakeGlobalAddress && (pGlobal->hasCommonLinkage() || pGlobal->hasExternalLinkage()))
+                : true;
 
             if (needSymbol)
             {
@@ -4878,7 +4850,8 @@ namespace IGC
         void*& buffer, unsigned& bufferSize, unsigned& tableEntries,
         SProgramOutput::RelocListTy& relocations)
     {
-        if (IGC_IS_FLAG_ENABLED(EnableZEBinary)) {
+        if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
+            m_program->GetContext()->getCompilerOption().EnableZEBinary) {
             // for ZEBinary format
             V(vMainKernel->GetRelocations(relocations));
             IGC_ASSERT(sizeof(vISA::GenRelocEntry) * tableEntries == bufferSize);
@@ -4969,18 +4942,54 @@ namespace IGC
         VISAKernel* pMainKernel = nullptr;
 
         // ShaderOverride for .visaasm files
-        std::string visaAsmOverrideFile = "";
+        std::vector<std::string> visaOverrideFiles;
         bool visaAsmOverride = false;
+        std::string kernelName;
         if (IGC_IS_FLAG_ENABLED(ShaderOverride))
         {
+            // Kernel count is one per visaBuilder
+            // Function count depends on stackFuncMap size
+            int kernelCount = 1;
+            int functionCount = stackFuncMap.size();
+            int count = kernelCount + functionCount;
+            IGC::Debug::OutputFolderName folder = IGC::Debug::GetShaderOverridePath();
             Debug::DumpName name = IGC::Debug::GetDumpNameObj(m_program, "visaasm");
-            visaAsmOverrideFile = name.overridePath();
-            // Check if the override file can be opened
-            FILE* tempFile = fopen(visaAsmOverrideFile.c_str(), "r");
-            if (tempFile)
+            kernelName = name.GetKernelName();
+
+            visaOverrideFiles.push_back(name.AbsolutePath(folder));
+
+            for (int i = 0; i < functionCount; i++)
             {
-                visaAsmOverride = true;
-                fclose(tempFile);
+                std::string tmpVisaFile = name.AbsolutePath(folder);
+                std::string::size_type asmNameEnd = tmpVisaFile.find_last_of("_");
+                tmpVisaFile = tmpVisaFile.substr(0, asmNameEnd);
+                std::stringstream asmName;
+                asmName << tmpVisaFile;
+                asmName << "_f";
+                asmName << i;
+                asmName << ".visaasm";
+                visaOverrideFiles.push_back(asmName.str());
+            }
+
+            if (visaOverrideFiles.size() == count)
+            {
+                for (const std::string& file : visaOverrideFiles)
+                {
+                    FILE*  tempFile = fopen(file.c_str(), "r");
+                    if (tempFile)
+                    {
+                        visaAsmOverride = true;
+                        fclose(tempFile);
+                    }
+                    else
+                    {
+                        visaAsmOverride = false;
+                        std::string message = "Cannot open overridden file! Put all .visaasm files in ShaderOverride dir.";
+                        appendToShaderOverrideLogFile(message, "WARNING: ");
+                        break;
+
+                    }
+                }
             }
         }
 
@@ -5003,22 +5012,57 @@ namespace IGC
             TARGET_PLATFORM VISAPlatform = GetVISAPlatform(&(context->platform));
             V(CreateVISABuilder(vAsmTextBuilder, vISA_ASM_READER, VISA_BUILDER_BOTH, VISAPlatform,
                 params.size(), params.data(), &m_vISAWaTable));
-            // Use the same build options as before
+            // Use the same build options as before, except that we enable vISA verifier to catch
+            // potential errors in user inline assembly
             SetBuilderOptions(vAsmTextBuilder);
+            vAsmTextBuilder->SetOption(vISA_NoVerifyvISA, false);
 
             bool vISAAsmParseError = false;
             // Parse the generated VISA text
             if (visaAsmOverride)
             {
-                // Manually set the asm file path instead of using the path provided in the override shader file
-                std::string asmName = GetDumpFileName("");
-                asmName.pop_back();
-                vAsmTextBuilder->SetOption(VISA_AsmFileNameUser, true);
-                vAsmTextBuilder->SetOption(VISA_AsmFileName, asmName.c_str());
-                auto result = vAsmTextBuilder->ParseVISAText(visaAsmOverrideFile);
-                asmName = asmName + ".visaasm";
-                appendToShaderOverrideLogFile(asmName, "OVERRIDEN: ");
-                vISAAsmParseError = (result != 0);
+                for (const std::string& tmpVisaFile : visaOverrideFiles)
+                {
+                    std::string asmName = GetDumpFileName("");
+                    size_t asmNamedBegin = asmName.find_last_of("\\");
+                    size_t asmNameEnd = tmpVisaFile.find_last_of("/");
+                    std::string asmPreName = asmName.substr(0, asmNamedBegin);
+                    std::string asmPostName = tmpVisaFile.substr(asmNameEnd, asmName.length());
+                    asmName = asmPreName + asmPostName;
+                    size_t asmNamed = asmName.find_last_of(".");
+                    asmName = asmName.substr(0, asmNamed);
+                    vAsmTextBuilder->SetOption(VISA_AsmFileNameUser, true);
+                    vAsmTextBuilder->SetOption(VISA_AsmFileName, asmName.c_str());
+                    auto result = vAsmTextBuilder->ParseVISAText(tmpVisaFile.c_str());
+                    asmName = asmName + ".visaasm";
+                    appendToShaderOverrideLogFile(asmName, "OVERRIDEN: ");
+                    vISAAsmParseError = (result != 0);
+                    if (vISAAsmParseError) {
+                        IGC_ASSERT_MESSAGE(0, "visaasm file parse error!");
+                        break;
+                    }
+                }
+
+                // We need to update stackFuncMap for the symbol table for the overridden object,
+                // because stackFuncMap contains information about functions for original object.
+                // Only the IndirectlyCalled functions should be updated,
+                // because these functions can be used in CreateSymbolTable.
+                // Other normal stack call functions aren't used in CreateSymbolTable.
+                if (hasSymbolTable && stackFuncMap.size() > 0)
+                {
+                    Module* pModule = m_program->GetContext()->getModule();
+                    for (auto& F : pModule->getFunctionList())
+                    {
+                        if (F.hasFnAttribute("IndirectlyCalled") && (!F.isDeclaration() || F.getNumUses() > 0))
+                        {
+                            auto Iter = stackFuncMap.find(&F);
+                            IGC_ASSERT_MESSAGE(Iter != stackFuncMap.end(), "vISA function not found");
+
+                            VISAFunction* original = Iter->second;
+                            stackFuncMap[&F] = static_cast<VISAFunction*>(vAsmTextBuilder->GetVISAKernel(original->getFunctionName()));
+                        }
+                    }
+                }
             }
             else
             {
@@ -5028,7 +5072,8 @@ namespace IGC
                 {
                     std::string output;
                     raw_string_ostream S(output);
-                    S << "parsing vISA inline assembly failed:\t" << vAsmTextBuilder->GetCriticalMsg();
+                    S << "parsing vISA inline assembly failed:\n" << vAsmTextBuilder->GetCriticalMsg();
+                    S.flush();
                     context->EmitError(output.c_str());
                     vISAAsmParseError = true;
                 }
@@ -5041,7 +5086,12 @@ namespace IGC
             }
             else
             {
-                pMainKernel = vAsmTextBuilder->GetVISAKernel();
+                if (!visaAsmOverride)
+                {
+                    // vISA verifier is already invoked in ParseVISAText earlier
+                    vAsmTextBuilder->SetOption(vISA_NoVerifyvISA, true);
+                }
+                pMainKernel = vAsmTextBuilder->GetVISAKernel(kernelName);
                 vIsaCompile = vAsmTextBuilder->Compile(m_enableVISAdump ? GetDumpFileName("isa").c_str() : "");
             }
         }
@@ -5262,7 +5312,8 @@ namespace IGC
                 pOutput->m_funcSymbolTableEntries,
                 pOutput->m_symbols);
         }
-        if(IGC_IS_FLAG_ENABLED(EnableZEBinary))
+        if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
+            m_program->GetContext()->getCompilerOption().EnableZEBinary)
         {
             // cretae symbols for kernel. Symbols have name the same as the kernels, and offset to the
             // start of that kernel
@@ -6272,6 +6323,7 @@ namespace IGC
     {
         V(vKernel->AppendVISALLVMInst(inst));
     }
+
 
 
     std::string CEncoder::GetVariableName(CVariable* var)

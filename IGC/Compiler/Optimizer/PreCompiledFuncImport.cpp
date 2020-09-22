@@ -25,18 +25,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ======================= end_copyright_notice ==================================*/
 
 #include "common/LLVMWarningsPush.hpp"
-#include <llvm/Support/ScaledNumber.h>
+#include "llvm/Config/llvm-config.h"
+#include "llvm/Support/ScaledNumber.h"
 #include "llvm/ADT/SmallSet.h"
-#include <llvm/IR/Module.h>
-#include <llvmWrapper/IR/Function.h>
-#include <llvm/IR/InstIterator.h>
-#include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/GenericDomTree.h>
-#include <llvm/Bitcode/BitcodeReader.h>
-#include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvm/Linker/Linker.h>
-#include <llvm/Support/SourceMgr.h>
-#include <llvm/IRReader/IRReader.h>
+#include "llvm/IR/Module.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Function.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/GenericDomTree.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Linker/Linker.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/IRReader/IRReader.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/Optimizer/PreCompiledFuncImport.hpp"
@@ -326,6 +328,36 @@ bool PreCompiledFuncImport::preProcessDouble()
                     toBeDeleted.push_back(CallI);
                 }
             }
+#if LLVM_VERSION_MAJOR >= 10
+            else if (Inst->getOpcode() == Instruction::FNeg)
+            {
+                if (Inst->getType()->isDoubleTy())
+                {
+                    IRBuilder<> builder(Inst);
+                    Value* fsub = nullptr;
+
+                    if (!Inst->getType()->isVectorTy())
+                    {
+                        fsub = builder.CreateFSub(ConstantFP::get(Inst->getType(), 0.0f), Inst->getOperand(0));
+                    }
+                    else
+                    {
+                        uint32_t vectorSize = cast<VectorType>(Inst->getType())->getNumElements();
+                        fsub = llvm::UndefValue::get(Inst->getType());
+
+                        for (uint32_t i = 0; i < vectorSize; ++i)
+                        {
+                            Value* extract = builder.CreateExtractElement(Inst->getOperand(0), i);
+                            Value* extract_fsub = builder.CreateFSub(ConstantFP::get(extract->getType(), 0.0f), extract);
+                            fsub = builder.CreateInsertElement(fsub, extract_fsub, i);
+                        }
+                    }
+
+                    Inst->replaceAllUsesWith(fsub);
+                    toBeDeleted.push_back(Inst);
+                }
+            }
+#endif
         }
     }
 
@@ -407,10 +439,7 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
                 uint32_t libSize = m_libModInfos[i].ModSize;
 
                 // Load the module we want to compile and link it to existing module
-                //StringRef BitRef((char*)preCompiledFunctionLibrary, preCompiledFunctionLibrarySize);
                 StringRef BitRef(pLibraryModule, libSize);
-                //llvm::Expected<std::unique_ptr<llvm::Module>> ModuleOrErr =
-                //    llvm::getLazyBitcodeModule(MemoryBufferRef(BitRef.str(), ""), M.getContext());
                 llvm::Expected<std::unique_ptr<llvm::Module>> ModuleOrErr =
                     llvm::parseBitcodeFile(MemoryBufferRef(BitRef.str(), ""), M.getContext());
                 if (llvm::Error EC = ModuleOrErr.takeError())
@@ -550,7 +579,7 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
             }
 
             // Don't want to subroutine functions that are called only once
-            if (Func->getNumUses() == 1)
+            if (Func->hasOneUse())
             {
                 // Add AlwaysInline attribute to force inlining all calls.
                 Func->addFnAttr(llvm::Attribute::AlwaysInline);
@@ -693,8 +722,8 @@ void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator& I)
                     }
                     if (isI32DivRem())
                     {
-                    processInt32Divide(*newInst, FUNCTION_32_UDIVREM);
-                }
+                        processInt32Divide(*newInst, FUNCTION_32_UDIVREM);
+                    }
                     else
                     {
                         processInt32Divide(*newInst, FUNCTION_32_UDIVREM_SP);
@@ -712,8 +741,8 @@ void PreCompiledFuncImport::visitBinaryOperator(BinaryOperator& I)
                     }
                     if (isI32DivRem())
                     {
-                    processInt32Divide(*newInst, FUNCTION_32_SDIVREM);
-                }
+                        processInt32Divide(*newInst, FUNCTION_32_SDIVREM);
+                    }
                     else
                     {
                         processInt32Divide(*newInst, FUNCTION_32_SDIVREM_SP);
@@ -848,13 +877,12 @@ void PreCompiledFuncImport::processInt32Divide(BinaryOperator& inst, Int32Emulat
 
 
     //Create a call to emulation function
-    Constant* One = ConstantInt::get(intTy, 1);
     Value* args[3];
     args[0] = inst.getOperand(0);
     args[1] = inst.getOperand(1);
     IRBuilder<> builder(
         &*inst.getFunction()->getEntryBlock().getFirstInsertionPt());
-    AllocaInst* pRem = builder.CreateAlloca(intTy, One, "Remainder");
+    AllocaInst* pRem = builder.CreateAlloca(intTy, nullptr, "Remainder");
     builder.SetInsertPoint(&inst);
     args[2] = pRem;
     CallInst* funcCall = CallInst::Create(func, args, inst.getName(), &inst);
@@ -863,7 +891,7 @@ void PreCompiledFuncImport::processInt32Divide(BinaryOperator& inst, Int32Emulat
     {
         if (isI32DivRem())
         {
-        m_libModuleToBeImported[LIBMOD_UINT32_DIV_REM] = true;
+            m_libModuleToBeImported[LIBMOD_UINT32_DIV_REM] = true;
         }
         else
         {
@@ -874,8 +902,8 @@ void PreCompiledFuncImport::processInt32Divide(BinaryOperator& inst, Int32Emulat
     {
         if (isI32DivRem())
         {
-        m_libModuleToBeImported[LIBMOD_SINT32_DIV_REM] = true;
-    }
+            m_libModuleToBeImported[LIBMOD_SINT32_DIV_REM] = true;
+        }
         else
         {
             m_libModuleToBeImported[LIBMOD_SINT32_DIV_REM_SP] = true;
@@ -905,9 +933,9 @@ void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunction
 
     Type* argumentType = inst.getOperand(0)->getType();
 
-    if (argumentType->isVectorTy())
+    if (auto argumentVType = dyn_cast<VectorType>(argumentType))
     {
-        numElements = argumentType->getVectorNumElements();
+        numElements = (unsigned)argumentVType->getNumElements();
     }
 
     switch (numElements)
@@ -1055,7 +1083,7 @@ void PreCompiledFuncImport::processFPBinaryOperator(Instruction& I, FunctionIDs 
     {
         Type* intTy = Type::getInt32Ty(m_pModule->getContext());
         Type* DoubleTy = Type::getDoubleTy(m_pModule->getContext());
-        VectorType* vec2Ty = VectorType::get(intTy, 2);
+        VectorType* vec2Ty = IGCLLVM::FixedVectorType::get(intTy, 2);
 
         Instruction* twoI32 = CastInst::Create(
             Instruction::BitCast, I.getOperand(1), vec2Ty, "", &I);
@@ -1624,7 +1652,6 @@ LLVM before opt:
   store i32 %rem5, i32 addrspace(1)* %d, align 4
   ret void
 LLVM after opt:
-  %Remainder3 = alloca i32
   %Remainder = alloca i32
   %div2 = call i32 @precompiled_s32divrem_sp(i32 %a, i32 %b, i32* %Remainder)
   store i32 %div2, i32 addrspace(1)* %c, align 4
@@ -1636,16 +1663,20 @@ As a result, we reduce 2x necessary work
 */
     Function* fn = I.getCalledFunction();
     if (fn && (fn->getName() == "precompiled_s32divrem_sp"
-        || fn->getName() == "precompiled_u32divrem_sp"))
+            || fn->getName() == "precompiled_u32divrem_sp"))
     {
         for (CallInst* InstCompare : m_CallRemDiv)
         {
             if (I.getArgOperand(0) == InstCompare->getArgOperand(0) &&
-                I.getArgOperand(1) == InstCompare->getArgOperand(1))
+                I.getArgOperand(1) == InstCompare->getArgOperand(1) &&
+                I.getParent() == InstCompare->getParent())
             {
                 Value* remValue = I.getArgOperand(2);
                 Value* remValueCompare = InstCompare->getArgOperand(2);
                 remValue->replaceAllUsesWith(remValueCompare);
+
+                if (auto* AI = dyn_cast<AllocaInst>(remValue))
+                    AI->eraseFromParent();
 
                 I.replaceAllUsesWith(InstCompare);
                 I.eraseFromParent();
@@ -1655,6 +1686,7 @@ As a result, we reduce 2x necessary work
         }
         m_CallRemDiv.push_back(&I);
     }
+
     if (!isDPEmu()) {
         return;
     }
@@ -1709,7 +1741,7 @@ As a result, we reduce 2x necessary work
     if (resTy->isDoubleTy() && II && II->getIntrinsicID() == Intrinsic::fabs)
     {
         // bit 63 is sign bit, set it to zero. Don't use int64.
-        VectorType* vec2Ty = VectorType::get(intTy, 2);
+        VectorType* vec2Ty = IGCLLVM::FixedVectorType::get(intTy, 2);
         Instruction* twoI32 =  CastInst::Create(
             Instruction::BitCast, I.getOperand(0), vec2Ty, "", &I);
         twoI32->setDebugLoc(I.getDebugLoc());

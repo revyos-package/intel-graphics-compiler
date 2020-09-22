@@ -224,6 +224,10 @@ namespace IGC
         bool FastVISACompile                            = false;
         bool MatchSinCosPi                              = false;
         bool CaptureCompilerStats                       = false;
+        // Suggest to enableZEBinary. IGC could still fall-back to legacy
+        // patch-token based binary if the input contains features those
+        // are not supported by ZEBinary
+        bool EnableZEBinary                             = false;
     };
 
     struct ComputeShaderInfo
@@ -295,11 +299,23 @@ namespace IGC
         bool isStatic = false;
     };
 
+
+    struct DynamicBufferInfo
+    {
+        // If numOffsets > 0, dynamic buffer offsets occupy a contiguous region
+        // of runtime values with indices in [firstIndex, firstIndex + numOffsets).
+        unsigned int firstIndex = 0;
+        unsigned int numOffsets = 0;
+    };
+
     // simplePushInfoArr needs to be initialized to a vector of size g_c_maxNumberOfBufferPushed, which we are doing in module MD initialization done in code gen context
     // All the pushinfo below is mapping to an argument number (int) so that we can retrieve relevant Argument as a value pointer from Function
     struct PushInfo
     {
         std::vector<StatelessPushInfo> pushableAddresses;
+        // Dynamic buffer offsets info.
+        // Used only on with clients that support dynamic buffers.
+        DynamicBufferInfo dynamicBufferInfo;
         unsigned int MaxNumberOfPushedBuffers = 0; ///> specifies the maximum number of buffers available for the simple push mechanism for current shader.
 
         unsigned int inlineConstantBufferSlot = INVALID_CONSTANT_BUFFER_INVALID_ADDR; // slot of the inlined constant buffer

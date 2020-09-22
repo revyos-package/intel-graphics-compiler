@@ -24,15 +24,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#include "llvm/Config/llvm-config.h"
 #include "spp_g8.h"
-
 #include "../../../Compiler/CodeGenPublic.h"
 #include "program_debug_data.h"
 #include "../../../common/SystemThread.h"
 #include "../../../common/Types.hpp"
 #include "../../../common/shaderOverride.hpp"
 #include "../../../Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
-#include "cmc.h"
+
+#if !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
+#include "common/LLVMWarningsPush.hpp"
+#include "vc/igcdeps/cmc.h"
+#include "common/LLVMWarningsPop.hpp"
+#endif // !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 
 #include <iomanip>
 #include <fstream>
@@ -231,14 +236,16 @@ void overrideOCLKernelBinary(
 
 
 void CGen8OpenCLProgram::GetZEBinary(
-    llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes)
+    llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes,
+    const char* spv, uint32_t spvSize)
 {
     auto isValidShader = [&](IGC::COpenCLKernel* shader)->bool
     {
         return (shader && shader->ProgramOutput()->m_programSize > 0);
     };
 
-    ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8, m_pContext->m_programInfo);
+    ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8,
+        m_pContext->m_programInfo, (const uint8_t*)spv, spvSize);
 
     for (auto pKernel : m_ShaderProgramList)
     {
@@ -370,6 +377,7 @@ void CGen8OpenCLProgram::CreateKernelBinaries()
     }
 }
 
+#if !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 // Implementation of CGen8CMProgram.
 CGen8CMProgram::CGen8CMProgram(PLATFORM platform)
     : CGen8OpenCLProgramBase(platform)
@@ -385,21 +393,33 @@ CGen8CMProgram::~CGen8CMProgram()
 
 void CGen8CMProgram::CreateKernelBinaries()
 {
-    for (auto kernel : m_kernels) {
+    for (auto *kernel : m_kernels)
+    {
         // Create the kernel binary streams.
         KernelData data;
         data.kernelBinary = new Util::BinaryStream;
 
         m_StateProcessor.CreateKernelBinary(
-            (const char*)kernel->m_prog.m_programBin,
-            kernel->m_prog.m_programSize,
+            reinterpret_cast<const char*>(kernel->getProgramOutput().m_programBin),
+            kernel->getProgramOutput().m_programSize,
             kernel->m_kernelInfo,
             *m_programInfo,
             kernel->m_btiLayout,
             *(data.kernelBinary),
             m_pSystemThreadKernelOutput,
-            kernel->m_prog.m_unpaddedProgramSize);
+            kernel->getProgramOutput().m_unpaddedProgramSize);
 
+        if (kernel->getProgramOutput().m_debugDataVISASize)
+        {
+            data.kernelDebugData = new Util::BinaryStream();
+            m_StateProcessor.CreateKernelDebugData(
+                reinterpret_cast<const char*>(kernel->getProgramOutput().m_debugDataVISA),
+                kernel->getProgramOutput().m_debugDataVISASize,
+                reinterpret_cast<const char*>(kernel->getProgramOutput().m_debugDataGenISA),
+                kernel->getProgramOutput().m_debugDataGenISASize,
+                kernel->m_kernelInfo.m_kernelName,
+                *(data.kernelDebugData));
+        }
         m_KernelBinaries.push_back(data);
     }
 }
@@ -407,17 +427,19 @@ void CGen8CMProgram::CreateKernelBinaries()
 void CGen8CMProgram::GetZEBinary(
     llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes)
 {
-    ZEBinaryBuilder zebuilder{m_Platform, pointerSizeInBytes == 8, *m_programInfo};
+    ZEBinaryBuilder zebuilder{m_Platform, pointerSizeInBytes == 8, *m_programInfo, nullptr, 0};
+    zebuilder.setGfxCoreFamilyToELFMachine(m_Platform.eRenderCoreFamily);
 
     for (auto *kernel : m_kernels)
     {
         zebuilder.createKernel(
-            reinterpret_cast<const char*>(kernel->m_prog.m_programBin),
-            kernel->m_prog.m_programSize,
+            reinterpret_cast<const char*>(kernel->getProgramOutput().m_programBin),
+            kernel->getProgramOutput().m_programSize,
             kernel->m_kernelInfo,
             kernel->m_GRFSizeInBytes);
     }
     zebuilder.getBinaryObject(programBinary);
 }
+#endif // !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 
 } // namespace iOpenCL

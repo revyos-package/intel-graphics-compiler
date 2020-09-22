@@ -40,6 +40,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "Probe/Assertion.h"
 
+#include <functional>
+
 namespace llvm
 {
     class GenIntrinsicInst;
@@ -109,7 +111,7 @@ public:
         const  SSource source[2],
         const SSource& bitSource,
         const DstModifier& modifier);
-    void emitAluConditionMod(Pattern* aluPattern, llvm::Instruction* alu, llvm::CmpInst* cmp);
+    void emitAluConditionMod(Pattern* aluPattern, llvm::Instruction* alu, llvm::CmpInst* cmp, int aluOprdNum);
 
     void EmitAluIntrinsic(llvm::CallInst* I, const SSource source[2], const DstModifier& modifier);
     void EmitSimpleAlu(llvm::Instruction* inst, const SSource source[2], const DstModifier& modifier);
@@ -141,7 +143,6 @@ public:
     void emitStackCall(llvm::CallInst* inst);
     void emitStackFuncEntry(llvm::Function* F);
     void emitStackFuncExit(llvm::ReturnInst* inst);
-    uint stackCallArgumentAlignment(CVariable* argv);
     uint emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool isWrite);
     void InitializeKernelStack(llvm::Function* pKernel);
 
@@ -247,6 +248,7 @@ public:
     void emitSurfaceInfo(llvm::GenIntrinsicInst* intrinsic);
 
     void emitStackAlloca(llvm::GenIntrinsicInst* intrinsic);
+    void emitVLAStackAlloca(llvm::GenIntrinsicInst* intrinsic);
 
     void emitUAVSerialize();
 
@@ -433,6 +435,11 @@ public:
 
     void emitLLVMbswap(llvm::IntrinsicInst* inst);
     void emitDP4A(llvm::GenIntrinsicInst* GII);
+
+    void emitLLVMStackSave(llvm::IntrinsicInst* inst);
+    void emitLLVMStackRestore(llvm::IntrinsicInst* inst);
+
+    void emitUnmaskedRegionBoundary(bool start);
     // Debug Built-Ins
     void emitStateRegID(uint64_t and_imm, uint64_t shr_imm);
     void emitThreadPause(llvm::GenIntrinsicInst* inst);
@@ -529,6 +536,9 @@ public:
 
     /// return true if succeeds, false otherwise.
     bool setCurrentShader(llvm::Function* F);
+
+    /// check if the dummy kernel requires compilation
+    bool compileSymbolTableKernel(llvm::Function* F);
 
     // Arithmetic operations with constant folding
     // Src0 and Src1 are the input operands

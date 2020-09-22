@@ -362,6 +362,9 @@ public:
     bool empty() const { return instList.empty(); }
     G4_INST* front() { return instList.front(); }
     G4_INST* back() { return instList.back(); }
+    // splice functions below expect caller to have correctly set CISA offset
+    // in instructions to be spliced. CISA offsets must be maintained to
+    // preserve debug info links.
     void splice(INST_LIST::iterator pos, INST_LIST& other)
     {
         instList.splice(pos, other);
@@ -434,7 +437,7 @@ public:
     void     setBBBeforeCall(G4_BB* before)   {beforeCall = before;}
     void     setBBAfterCall(G4_BB* after)     {afterCall = after;}
     FuncInfo*  getCalleeInfo() const          {return calleeInfo;}
-    void       setCalleeInfo(FuncInfo* callee){calleeInfo = callee;}
+    void       setCalleeInfo(FuncInfo* callee) {calleeInfo = callee;}
     FuncInfo*  getFuncInfo() const            {return funcInfo;}
     void       setFuncInfo(FuncInfo* func)    {funcInfo = func;}
     int        getBBType() const              {return BBType;}
@@ -470,6 +473,7 @@ public:
     uint32_t emitBankConflictGen12lp(std::ostream & os_output, G4_INST * inst, int * suppressRegs, int * lastRegs, int & sameConflictTimes, int & twoSrcConflicts, int & simd16RS);
     uint32_t countReadModifyWrite(std::ostream& os_output, G4_INST *inst);
     uint32_t emitBankConflictGen12(std::ostream & os_output, G4_INST * inst, int * suppressRegs, int & sameConflictTimes, int & twoSrcConflicts, int & simd16RS, bool zeroOne, bool isTGLLP);
+    void emitRegInfo(std::ostream& output, G4_INST* inst, int offset);
     void emitDepInfo(std::ostream& output, G4_INST *inst, int offset);
 
     bool isEndWithCall() const { return getLastOpcode() == G4_call; }
@@ -483,7 +487,7 @@ public:
         //FIXME: For now not all BBs will start with a label (e.g.,
         //a block that follows a call).  We should fix it by getting rid
         //of the g4_label instruction and associate each label with a BB
-        if( instList.size() > 0 && instList.front()->isLabel() )
+        if (instList.size() > 0 && instList.front()->isLabel())
         {
             return instList.front()->getLabel();
         }
@@ -521,7 +525,7 @@ public:
 
     void removeIntrinsics(Intrinsic intrinId)
     {
-        instList.remove_if([=](G4_INST* inst) { return inst->isIntrinsic() && inst->asIntrinsicInst()->getIntrinsicId() == intrinId;});
+        instList.remove_if ([=](G4_INST* inst) { return inst->isIntrinsic() && inst->asIntrinsicInst()->getIntrinsicId() == intrinId;});
     }
 
     void addSamplerFlushBeforeEOT();
@@ -555,7 +559,7 @@ struct StructuredCF
     StructuredCF(STRUCTURED_CF_TYPE type, vISA::G4_BB* startBB) :
         mType(type), mStartBB(startBB), mEndBB(NULL), mEndInst(NULL), enclosingCF(NULL) {}
 
-    void *operator new(size_t sz, vISA::Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, vISA::Mem_Manager& m) { return m.alloc(sz); }
 
     void setEnd(vISA::G4_BB* endBB, vISA::G4_INST* endInst)
     {
@@ -653,9 +657,9 @@ public:
     {
     }
 
-    void addGlobalOpnd( G4_Operand *opnd);
+    void addGlobalOpnd(G4_Operand *opnd);
     // check if a def is a global variable
-    bool isOpndGlobal( G4_Operand *def );
+    bool isOpndGlobal(G4_Operand *def);
     void clearHashTable()
     {
         for (auto iter = globalOperands.begin(), end = globalOperands.end(); iter != end; ++iter)
@@ -943,22 +947,22 @@ public:
     void decoupleReturnBlock(G4_BB*);
     void decoupleInitBlock(G4_BB*, FuncInfoHashTable& funcInfoTable);
     void decoupleExitBlock(G4_BB*);
-    void normalizeSubRoutineBB( FuncInfoHashTable& funcInfoTable );
+    void normalizeSubRoutineBB(FuncInfoHashTable& funcInfoTable);
     void processGoto(bool HasSIMDCF);
     void processSCF(std::map<std::string, G4_BB*>& labelMap, FuncInfoHashTable& FuncInfoMap);
-    void insertJoinToBB( G4_BB* bb, uint8_t execSize, G4_Label* jip );
+    void insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip);
 
     // functions for structure analysis
     G4_Kernel *getKernel() const { return pKernel; }
-    G4_Label* insertEndif( G4_BB* bb, unsigned char execSize, bool createLabel );
-    void setJIPForEndif( G4_INST* endif, G4_INST* target, G4_BB* targetBB);
+    G4_Label* insertEndif (G4_BB* bb, G4_ExecSize execSize, bool createLabel);
+    void setJIPForEndif (G4_INST* endif, G4_INST* target, G4_BB* targetBB);
     void convertGotoToJmpi(G4_INST *gotoInst)
     {
         gotoInst->setOpcode(G4_jmpi);
         gotoInst->setSrc(gotoInst->asCFInst()->getUip(), 0);
         gotoInst->asCFInst()->setJip(NULL);
         gotoInst->asCFInst()->setUip(NULL);
-        gotoInst->setExecSize(1);
+        gotoInst->setExecSize(g4::SIMD1);
         gotoInst->setOptions(InstOpt_NoOpt | InstOpt_WriteEnable);
     }
     bool convertJmpiToGoto();
@@ -970,7 +974,7 @@ public:
 
     FuncInfo* getFunc(unsigned int id)
     {
-        if(id < getNumFuncs())
+        if (id < getNumFuncs())
             return funcInfoTable[id];
         return nullptr;
     }
@@ -996,7 +1000,7 @@ public:
 
     ~FlowGraph();
 
-    void setBuilder(IR_Builder *pBuilder )
+    void setBuilder(IR_Builder *pBuilder)
     {
         builder = pBuilder;
     }
@@ -1026,17 +1030,17 @@ public:
         MUST_BE_TRUE(pred != NULL && succ != NULL, ERROR_INTERNAL_ARGUMENT);
 
         BB_LIST_ITER lt = pred->Succs.begin();
-        for (; lt != pred->Succs.end(); ++lt){
-            if( (*lt) == succ ){
-                pred->Succs.erase( lt );
+        for (; lt != pred->Succs.end(); ++lt) {
+            if ((*lt) == succ) {
+                pred->Succs.erase(lt);
                 break;
             }
         }
 
         lt = succ->Preds.begin();
-        for (; lt != succ->Preds.end(); ++lt){
-            if( (*lt) == pred ){
-                succ->Preds.erase( lt );
+        for (; lt != succ->Preds.end(); ++lt) {
+            if ((*lt) == pred) {
+                succ->Preds.erase(lt);
                 break;
             }
         }
@@ -1045,6 +1049,7 @@ public:
     G4_INST* createNewLabelInst(G4_Label* label, int lineNo = 0, int CISAOff = -1);
 
     G4_BB* createNewBB(bool insertInFG = true);
+    G4_BB* createNewBBWithLabel(const char* LabelPrefix, int Lineno = 0, int CISAoff = -1);
     int64_t insertDummyUUIDMov();
     //
     // Increase by one so that all BBs' traversal are less than traversalNum
@@ -1081,7 +1086,7 @@ public:
     //
     // Remove blocks that are unreachable via control flow of program
     //
-    void removeUnreachableBlocks();
+    void removeUnreachableBlocks(FuncInfoHashTable& funcInfoHT);
 
     void constructFlowGraph(INST_LIST& instlist);
     bool matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it);
@@ -1104,7 +1109,7 @@ public:
         // Return NULL if multiple return instructions found
         G4_BB* uniqueReturnBlock = NULL;
 
-        for( BB_LIST_ITER bb_it = BBs.begin(); bb_it != BBs.end(); ++bb_it ) {
+        for (BB_LIST_ITER bb_it = BBs.begin(); bb_it != BBs.end(); ++bb_it) {
             G4_BB* curBB = *bb_it;
             G4_INST* last_inst = NULL;
 
@@ -1112,8 +1117,8 @@ public:
             {
                 last_inst = curBB->back();
 
-                if( last_inst->opcode() == G4_pseudo_fret ) {
-                    if( uniqueReturnBlock == NULL ) {
+                if (last_inst->opcode() == G4_pseudo_fret) {
+                    if (uniqueReturnBlock == NULL) {
                         uniqueReturnBlock = curBB;
                     }
                     else {
@@ -1183,7 +1188,7 @@ public:
         return indirectJmpTarget.count(inst) > 0;
     }
 
-    G4_Label* getLabelForEndif(G4_INST* inst) const
+    G4_Label* getLabelForEndif (G4_INST* inst) const
     {
         auto iter = endifWithLabels.find(inst);
         if (iter != endifWithLabels.end())
@@ -1259,6 +1264,8 @@ private:
   DO(GRAPH_COLORING_SPILL_FF_BC_RA)                                            \
   DO(GRAPH_COLORING_SPILL_RR_RA)                                               \
   DO(GRAPH_COLORING_SPILL_FF_RA)                                               \
+  DO(GLOBAL_LINEAR_SCAN_RA)                                                    \
+  DO(GLOBAL_LINEAR_SCAN_BC_RA)                                                 \
   DO(UNKNOWN_RA)
 
 enum RA_Type
@@ -1282,9 +1289,9 @@ public:
         whichRAPass = FirstRAPass;
     }
 
-    void *operator new(size_t sz, Mem_Manager& m){ return m.alloc(sz); }
+    void *operator new(size_t sz, Mem_Manager& m) { return m.alloc(sz); }
 
-    ~gtPinData(){}
+    ~gtPinData() {}
 
     void markInst(G4_INST* i)
     {
@@ -1320,9 +1327,9 @@ public:
 
     void setScratchNextFree(unsigned int next)
     {
-        nextScratchFree = ((next + G4_GRF_REG_NBYTES - 1) / G4_GRF_REG_NBYTES) * G4_GRF_REG_NBYTES;
+        nextScratchFree = ((next + numEltPerGRF(Type_UB) - 1) / numEltPerGRF(Type_UB)) * numEltPerGRF(Type_UB);
     }
-    uint8_t getNumBytesScratchUse();
+    uint32_t getNumBytesScratchUse();
 
     void setPerThreadPayloadBB(G4_BB* bb) { perThreadPayloadBB = bb; }
     void setCrossThreadPayloadBB(G4_BB* bb) { crossThreadPayloadBB = bb; }
@@ -1360,7 +1367,7 @@ class RelocationEntry
     std::string symName;       // the symbol name that it's address to be resolved
 
     RelocationEntry(G4_INST* i, int pos, RelocationType type, const std::string& symbolName) :
-        inst(i), opndPos(pos), relocType(type), symName(symbolName){}
+        inst(i), opndPos(pos), relocType(type), symName(symbolName) {}
 
 public:
     static RelocationEntry& createRelocation(G4_Kernel& kernel, G4_INST& inst,
@@ -1419,7 +1426,7 @@ class G4_Kernel
     unsigned int numThreads;
     unsigned int numSWSBTokens;
     unsigned int numAcc;
-    unsigned int simdSize;
+    G4_ExecSize simdSize {0u}; // must start as 0
     bool channelSliced = true;
     bool hasAddrTaken;
     bool sharedRegisters;
@@ -1479,7 +1486,6 @@ public:
 
         name = NULL;
         numThreads = 0;
-        simdSize = 0;
         hasAddrTaken = false;
         kernelDbgInfo = nullptr;
         if (options->getOption(vISAOptions::vISA_ReRAPostSchedule) ||
@@ -1500,7 +1506,7 @@ public:
 
     void *operator new(size_t sz, Mem_Manager& m)    {return m.alloc(sz);}
 
-    void setBuilder(IR_Builder *pBuilder )
+    void setBuilder(IR_Builder *pBuilder)
     {
         fg.setBuilder(pBuilder);
     }
@@ -1530,16 +1536,20 @@ public:
     void setKernelID(uint64_t ID) { kernelID = ID; }
     uint64_t getKernelID() const { return kernelID; }
 
-    Options *getOptions(){ return m_options; }
+    Options *getOptions() { return m_options; }
     const Attributes* getKernelAttrs() const { return m_kernelAttrs; }
-    int getIntKernelAttribute(Attributes::ID aID) const
+    bool getBoolKernelAttr(Attributes::ID aID) const
     {
-        return getKernelAttrs()->getIntKernelAttribute(aID);
+        return getKernelAttrs()->getBoolKernelAttr(aID);
+    }
+    int32_t getInt32KernelAttr(Attributes::ID aID) const
+    {
+        return getKernelAttrs()->getInt32KernelAttr(aID);
     }
     bool getOption(vISAOptions opt) const { return m_options->getOption(opt); }
     void computeChannelSlicing();
     void calculateSimdSize();
-    unsigned int getSimdSize() { return simdSize; }
+    G4_ExecSize getSimdSize() { return simdSize; }
     bool getChannelSlicing() { return channelSliced; }
     unsigned int getSimdSizeWithSlicing() { return channelSliced ? simdSize/2 : simdSize; }
 
@@ -1552,6 +1562,8 @@ public:
     void setName(const char* n) { name = n; }
     const char* getName() { return name; }
     void emit_asm(std::ostream& output, bool beforeRegAlloc, void * binary, uint32_t binarySize);
+    void emit_RegInfo();
+    void emit_RegInfoKernel(std::ostream& output);
     void emit_dep(std::ostream& output);
 
     void setKernelParameters(void);
@@ -1559,7 +1571,7 @@ public:
     void evalAddrExp(void);
     void dumpDotFile(const char* appendix);
 
-    void setVersion( unsigned char major_ver, unsigned char minor_ver )
+    void setVersion(unsigned char major_ver, unsigned char minor_ver)
     {
         major_version = major_ver;
         minor_version = minor_ver;
@@ -1589,7 +1601,7 @@ public:
 
     gtPinData* getGTPinData()
     {
-        if(!gtPinInfo)
+        if (!gtPinInfo)
             allocGTPinData();
 
         return gtPinInfo;
@@ -1604,10 +1616,37 @@ public:
 
     // This function returns starting register number to use
     // for allocating FE/BE stack/frame ptrs.
-    unsigned int getStackCallStartReg();
+    unsigned int getStackCallStartReg() const;
     unsigned int calleeSaveStart();
-    static unsigned int getNumScratchRegs() { return 3; }
     unsigned int getNumCalleeSaveRegs();
+
+    // return the number of reserved GRFs for stack call ABI
+    // the reserved registers are at the end of the GRF file (e.g., r125-r127)
+    uint32_t numReservedABIGRF() const
+    {
+        return 3;
+    }
+
+    // purpose of the GRFs reserved for stack call ABI
+    const int FPSPGRF = 0;
+    const int SpillHeaderGRF = 1;
+    const int ThreadHeaderGRF = 2;
+
+    uint32_t getFPSPGRF() const
+    {
+        return getStackCallStartReg() + FPSPGRF;
+    }
+
+    uint32_t getSpillHeaderGRF() const
+    {
+        return getStackCallStartReg() + SpillHeaderGRF;
+    }
+
+    uint32_t getThreadHeaderGRF() const
+    {
+        return getStackCallStartReg() + ThreadHeaderGRF;
+    }
+
 
     void renameAliasDeclares();
 

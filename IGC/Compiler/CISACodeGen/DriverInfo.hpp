@@ -182,6 +182,7 @@ namespace IGC
 
         /// Need to know if the driver can accept more than one SIMD mode for compute shaders
         virtual bool sendMultipleSIMDModes() const { return false; }
+
         /// pick behavior whether we need to keep discarded helper pixels to calculate
         /// gradient correctly for sampler or we need to force early out discarded pixels
         virtual bool KeepDiscardHelperPixels() const { return false; }
@@ -223,9 +224,6 @@ namespace IGC
 
         /// disable some optimizations for front end which sends IR with unresolved NOS function when optimizing
         virtual bool WaNOSNotResolved() const { return false; }
-
-        /// Temporarary disable GS attr const interpolation promotion
-        virtual bool WADisableConstInterpolationPromotion() const { return false; }
 
         /// WA for APIs where frc generates a different precision than x - rndd(x) for small negative values
         /// Needs to switch to use fast math flags
@@ -281,6 +279,9 @@ namespace IGC
         {
             return 4 * sizeof(MEGABYTE);
         }
+
+        // Limits simple push constants based on pushed inputs
+        virtual bool EnableSimplePushRestriction() const { return false; }
 
 
     };

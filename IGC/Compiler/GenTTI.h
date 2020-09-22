@@ -23,8 +23,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
+
+#pragma once
+
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/TargetTransformInfoImpl.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -66,14 +70,25 @@ namespace llvm
 #endif
             TTI::UnrollingPreferences & UP);
 
+#if LLVM_VERSION_MAJOR >= 11
+        void getPeelingPreferences(Loop* L, ScalarEvolution& SE,
+            TTI::PeelingPreferences& PP);
+#endif
+
         bool isProfitableToHoist(Instruction* I);
 
+#if LLVM_VERSION_MAJOR <= 10
         using BaseT::getCallCost;
         unsigned getCallCost(const Function* F, ArrayRef<const Value*> Args
 #if LLVM_VERSION_MAJOR >= 9
             , const User * U
 #endif
         );
+#else
+       int getUserCost(const User *U, ArrayRef<const Value *> Operands,
+                      TTI::TargetCostKind CostKind);
+#endif
+
     };
 
 }

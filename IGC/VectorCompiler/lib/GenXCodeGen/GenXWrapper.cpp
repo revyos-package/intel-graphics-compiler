@@ -28,6 +28,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <dlfcn.h>
 #endif
 
+#include "GenXBackendConfig.h"
 #include "GenXOCLRuntimeInfo.h"
 #include "GenXWATable.h"
 
@@ -66,6 +67,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/IPO.h"
@@ -79,6 +81,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <sstream>
 #include <string>
 #include <vector>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -148,9 +151,7 @@ static Expected<std::unique_ptr<llvm::Module>> getModule(ArrayRef<char> Input,
     return llvm::handleExpected(
         std::move(ExpModule),
         []() -> llvm::Error {
-          llvm_unreachable("Should create new error");
-          // Without this dead return MSVC fails with ICE in release-32bit.
-          return llvm::Error::success();
+          IGC_ASSERT_EXIT_MESSAGE(0, "Should create new error");
         },
         [](const llvm::ErrorInfoBase &E) {
           return make_error<vc::BadBitcodeError>(E.message());
@@ -160,32 +161,6 @@ static Expected<std::unique_ptr<llvm::Module>> getModule(ArrayRef<char> Input,
     return make_error<vc::InvalidModuleError>();
 
   return ExpModule;
-}
-
-static void dumpModuleToTemp(const Module &M, const char *Name) {
-  int FD = -1;
-  auto EC = sys::fs::openFileForWrite(
-        Name, FD, sys::fs::CD_CreateAlways, sys::fs::F_None);
-  if (EC) {
-    llvm::errs() << "Can not open file: " << Name << "\n";
-    return;
-  }
-
-  raw_fd_ostream O(FD, /*shouldClose=*/true);
-  M.print(O, nullptr);
-}
-
-static void dumpDataToTemp(StringRef S, const char *Name) {
-  int FD = -1;
-  auto EC = sys::fs::openFileForWrite(
-        Name, FD, sys::fs::CD_CreateAlways, sys::fs::F_None);
-  if (EC) {
-    llvm::errs() << "Can not open file: " << Name << "\n";
-    return;
-  }
-
-  raw_fd_ostream O(FD, /*shouldClose=*/true);
-  O << S;
 }
 
 static vc::ocl::ArgInfo
@@ -285,6 +260,10 @@ static void convertOCLKernelInfo(vc::ocl::KernelInfo &Converted,
   Converted.ZEBinInfo.Symbols.Local = Info.ZEBinInfo.Symbols.Local;
 }
 
+static void convertOCLGTPinInfo(vc::ocl::GTPinInfo &Converted,
+                                const GenXOCLRuntimeInfo::GTPinInfo &Info) {
+  Converted.GTPinBuffer = Info.getGTPinBuffer();
+}
 
 static std::vector<vc::ocl::CompileInfo> convertInternalOCLInfo(
     const std::vector<GenXOCLRuntimeInfo::CompiledKernel> &CompiledKernels) {
@@ -293,8 +272,10 @@ static std::vector<vc::ocl::CompileInfo> convertInternalOCLInfo(
     auto &Conv = Converted[i];
     auto &Orig = CompiledKernels[i];
     convertOCLKernelInfo(Conv.KernelInfo, Orig.getKernelInfo());
+    convertOCLGTPinInfo(Conv.GtpinInfo, Orig.getGTPinInfo());
     Conv.JitInfo = Orig.getJitterInfo();
     Conv.GenBinary = Orig.getGenBinary();
+    Conv.DebugInfo = Orig.getDebugInfo();
   }
   return Converted;
 }
@@ -320,7 +301,7 @@ static std::string getSubtargetFeatureString(const vc::CompileOptions &Opts) {
       bool Enabled = Feature.consume_front("+");
       if (!Enabled) {
         bool Disabled = Feature.consume_front("-");
-        assert(!Disabled && "unexpected feature format");
+        IGC_ASSERT(Disabled && "unexpected feature format");
       }
       Features.AddFeature(Feature.str(), Enabled);
     }
@@ -328,7 +309,8 @@ static std::string getSubtargetFeatureString(const vc::CompileOptions &Opts) {
 
   if (Opts.NoVecDecomp)
     Features.AddFeature("disable_vec_decomp");
-  if (Opts.Runtime == vc::RuntimeKind::OpenCL)
+  if (Opts.Binary == vc::BinaryKind::OpenCL ||
+      Opts.Binary == vc::BinaryKind::ZE)
     Features.AddFeature("ocl_runtime");
 
   return Features.getString();
@@ -343,9 +325,9 @@ static CodeGenOpt::Level getCodeGenOptLevel(const vc::CompileOptions &Opts) {
 static Expected<std::unique_ptr<TargetMachine>>
 createTargetMachine(const vc::CompileOptions &Opts, Triple &TheTriple) {
   std::string Error;
-  const Target *TheTarget =
-      TargetRegistry::lookupTarget(TheTriple.getArchName(), TheTriple, Error);
-  assert(TheTarget && "vc target was not registered");
+  const Target *TheTarget = TargetRegistry::lookupTarget(
+      TheTriple.getArchName().str(), TheTriple, Error);
+  IGC_ASSERT(TheTarget && "vc target was not registered");
 
   const std::string FeaturesStr = getSubtargetFeatureString(Opts);
   // These ones do not look useful for now. Maybe will be adjusted
@@ -361,13 +343,32 @@ createTargetMachine(const vc::CompileOptions &Opts, Triple &TheTriple) {
   return {std::move(TM)};
 }
 
-static void optimizeIR(const vc::CompileOptions &Opts, TargetMachine &TM,
+// Create backend options for immutable config pass. Override default
+// values with provided ones.
+static GenXBackendOptions createBackendOptions(const vc::CompileOptions &Opts) {
+  GenXBackendOptions BackendOpts;
+  if (Opts.StackMemSize)
+    BackendOpts.StackSurfaceMaxSize = Opts.StackMemSize.getValue();
+  BackendOpts.EnableAsmDumps = Opts.DumpAsm;
+  BackendOpts.Dumper = Opts.Dumper.get();
+  return BackendOpts;
+}
+
+static GenXBackendData createBackendData(const vc::ExternalData &Data) {
+  GenXBackendData BackendData{Data.getOCLGenericBIFModule()};
+  return BackendData;
+}
+
+static void optimizeIR(const vc::CompileOptions &Opts,
+                       const vc::ExternalData &ExtData, TargetMachine &TM,
                        Module &M) {
   legacy::PassManager PerModulePasses;
   legacy::FunctionPassManager PerFunctionPasses(&M);
 
   PerModulePasses.add(
       createTargetTransformInfoWrapperPass(TM.getTargetIRAnalysis()));
+  PerModulePasses.add(new GenXBackendConfig{createBackendOptions(Opts),
+                                            createBackendData(ExtData)});
   PerFunctionPasses.add(
       createTargetTransformInfoWrapperPass(TM.getTargetIRAnalysis()));
 
@@ -407,17 +408,20 @@ static void optimizeIR(const vc::CompileOptions &Opts, TargetMachine &TM,
 
 static void dumpFinalOutput(const vc::CompileOptions &Opts, const Module &M,
                             StringRef IsaBinary) {
-  if (Opts.DumpIR)
-    dumpModuleToTemp(M, "final.ll");
-  if (Opts.DumpIsa)
-    dumpDataToTemp(IsaBinary, "final.isa");
+  if (Opts.DumpIR && Opts.Dumper)
+    Opts.Dumper->dumpModule(M, "final.ll");
+  if (Opts.DumpIsa && Opts.Dumper)
+    Opts.Dumper->dumpBinary({IsaBinary.data(), IsaBinary.size()}, "final.isa");
 }
 
 static void populateCodeGenPassManager(const vc::CompileOptions &Opts,
+                                       const vc::ExternalData &ExtData,
                                        TargetMachine &TM, raw_pwrite_stream &OS,
                                        legacy::PassManager &PM) {
   TargetLibraryInfoImpl TLII{TM.getTargetTriple()};
   PM.add(new TargetLibraryInfoWrapperPass(TLII));
+  PM.add(new GenXBackendConfig{createBackendOptions(Opts),
+                               createBackendData(ExtData)});
   // Non-constant pointer.
   WA_TABLE *WaTable = Opts.WATable.get();
   PM.add(new GenXWATable(WaTable));
@@ -425,10 +429,11 @@ static void populateCodeGenPassManager(const vc::CompileOptions &Opts,
   auto FileType = IGCLLVM::TargetMachine::CodeGenFileType::CGFT_AssemblyFile;
   bool AddPasses =
       TM.addPassesToEmitFile(PM, OS, nullptr, FileType, /*NoVerify*/ true);
-  assert(!AddPasses && "Bad filetype for vc-codegen");
+  IGC_ASSERT(!AddPasses && "Bad filetype for vc-codegen");
 }
 
 static vc::ocl::CompileOutput runOclCodeGen(const vc::CompileOptions &Opts,
+                                            const vc::ExternalData &ExtData,
                                             TargetMachine &TM, Module &M) {
   legacy::PassManager PM;
 
@@ -436,9 +441,9 @@ static vc::ocl::CompileOutput runOclCodeGen(const vc::CompileOptions &Opts,
   raw_svector_ostream OS(IsaBinary);
   raw_null_ostream NullOS;
   if (Opts.DumpIsa)
-    populateCodeGenPassManager(Opts, TM, OS, PM);
+    populateCodeGenPassManager(Opts, ExtData, TM, OS, PM);
   else
-    populateCodeGenPassManager(Opts, TM, NullOS, PM);
+    populateCodeGenPassManager(Opts, ExtData, TM, NullOS, PM);
 
   std::vector<GenXOCLRuntimeInfo::CompiledKernel> CompiledKernels;
   PM.add(createGenXOCLInfoExtractorPass(CompiledKernels));
@@ -453,11 +458,12 @@ static vc::ocl::CompileOutput runOclCodeGen(const vc::CompileOptions &Opts,
 }
 
 static vc::cm::CompileOutput runCmCodeGen(const vc::CompileOptions &Opts,
+                                          const vc::ExternalData &ExtData,
                                           TargetMachine &TM, Module &M) {
   legacy::PassManager PM;
   SmallString<32> IsaBinary;
   raw_svector_ostream OS(IsaBinary);
-  populateCodeGenPassManager(Opts, TM, OS, PM);
+  populateCodeGenPassManager(Opts, ExtData, TM, OS, PM);
   PM.run(M);
   dumpFinalOutput(Opts, M, IsaBinary);
   vc::cm::CompileOutput Output;
@@ -466,18 +472,21 @@ static vc::cm::CompileOutput runCmCodeGen(const vc::CompileOptions &Opts,
 }
 
 static vc::CompileOutput runCodeGen(const vc::CompileOptions &Opts,
+                                    const vc::ExternalData &ExtData,
                                     TargetMachine &TM, Module &M) {
-  switch (Opts.Runtime) {
-  case vc::RuntimeKind::CM:
-    return runCmCodeGen(Opts, TM, M);
-  case vc::RuntimeKind::OpenCL:
-    return runOclCodeGen(Opts, TM, M);
+  switch (Opts.Binary) {
+  case vc::BinaryKind::CM:
+    return runCmCodeGen(Opts, ExtData, TM, M);
+  case vc::BinaryKind::OpenCL:
+  case vc::BinaryKind::ZE:
+    return runOclCodeGen(Opts, ExtData, TM, M);
   }
-  llvm_unreachable("Unknown runtime kind");
+  IGC_ASSERT_EXIT_MESSAGE(0, "Unknown runtime kind");
 }
 
 Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
-                                        const vc::CompileOptions &Opts) {
+                                        const vc::CompileOptions &Opts,
+                                        const vc::ExternalData &ExtData) {
   // Environment variable for additional options for debug purposes.
   // This will exit with error if options is incorrect and should not
   // be used to pass meaningful options required for compilation.
@@ -485,6 +494,9 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   constexpr const char *DebugEnvVarName = "IGC_VCCodeGenDebugOpts";
   cl::ParseEnvironmentOptions("vc-codegen", DebugEnvVarName);
 #endif
+
+  if (Opts.DumpIR && Opts.Dumper)
+    Opts.Dumper->dumpBinary(Input, "input.spv");
 
   LLVMContext Context;
   LLVMInitializeGenXTarget();
@@ -496,6 +508,9 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   if (!ExpModule)
     return ExpModule.takeError();
   Module &M = *ExpModule.get();
+
+  if (Opts.DumpIR && Opts.Dumper)
+    Opts.Dumper->dumpModule(M, "after_spirv_reader.ll");
 
   legacy::PassManager PerModulePasses;
   PerModulePasses.add(createGenXSPIRVReaderAdaptorPass());
@@ -511,15 +526,26 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   TargetMachine &TM = *ExpTargetMachine.get();
   M.setDataLayout(TM.createDataLayout());
 
-  if (Opts.DumpIR)
-    dumpModuleToTemp(M, "start.ll");
+  // Save old value and restore at the end.
+  bool TimePassesIsEnabledLocal = TimePassesIsEnabled;
+  if (Opts.TimePasses)
+    TimePassesIsEnabled = true;
 
-  optimizeIR(Opts, TM, M);
+  if (Opts.DumpIR && Opts.Dumper)
+    Opts.Dumper->dumpModule(M, "after_ir_adaptors.ll");
 
-  if (Opts.DumpIR)
-    dumpModuleToTemp(M, "optimized.ll");
+  optimizeIR(Opts, ExtData, TM, M);
 
-  return runCodeGen(Opts, TM, M);
+  if (Opts.DumpIR && Opts.Dumper)
+    Opts.Dumper->dumpModule(M, "optimized.ll");
+
+  vc::CompileOutput Output = runCodeGen(Opts, ExtData, TM, M);
+
+  // Print timers if any and restore old TimePassesIsEnabled value.
+  TimerGroup::printAll(llvm::errs());
+  TimePassesIsEnabled = TimePassesIsEnabledLocal;
+
+  return Output;
 }
 
 static Expected<opt::InputArgList>
@@ -570,7 +596,7 @@ static Expected<opt::InputArgList> parseApiOptions(StringSaver &Saver,
   // Deprecated -cmc parsing just for compatibility.
   const std::string IgcmcOptName =
       Options.getOption(vc::options::OPT_igcmc).getPrefixedName();
-  if (!sys::Process::GetEnv("IGC_VCAvoidCmcFlag") && HasOption(IgcmcOptName))
+  if (HasOption(IgcmcOptName))
     return parseOptions(Argv, vc::options::IgcmcApiOption);
 
   return make_error<vc::NotVCError>();
@@ -581,6 +607,12 @@ parseInternalOptions(StringSaver &Saver, StringRef InternalOptions) {
   SmallVector<const char *, 8> Argv;
   cl::TokenizeGNUCommandLine(InternalOptions, Saver, Argv);
   return parseOptions(Argv, vc::options::InternalOption);
+}
+
+static Error makeOptionError(const opt::Arg &A, const opt::ArgList &Opts,
+                             bool IsInternal) {
+  const std::string BadOpt = A.getAsString(Opts);
+  return make_error<vc::OptionError>(BadOpt, IsInternal);
 }
 
 static Error fillApiOptions(const opt::ArgList &ApiOptions,
@@ -596,11 +628,17 @@ static Error fillApiOptions(const opt::ArgList &ApiOptions,
                           .Case("none", vc::OptimizerLevel::None)
                           .Case("full", vc::OptimizerLevel::Full)
                           .Default(None);
-    if (!MaybeLevel) {
-      const std::string BadOpt = A->getAsString(ApiOptions);
-      return make_error<vc::OptionError>(BadOpt, /*IsInternal=*/false);
-    }
+    if (!MaybeLevel)
+      return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
     Opts.OptLevel = MaybeLevel.getValue();
+  }
+
+  if (opt::Arg *A = ApiOptions.getLastArg(vc::options::OPT_igcmc_stack_size)) {
+    StringRef Val = A->getValue();
+    unsigned Result;
+    if (Val.getAsInteger(/*Radix=*/0, Result))
+      return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
+    Opts.StackMemSize = Result;
   }
 
   return Error::success();
@@ -612,18 +650,22 @@ static Error fillInternalOptions(const opt::ArgList &InternalOptions,
     Opts.DumpIsa = true;
   if (InternalOptions.hasArg(vc::options::OPT_dump_llvm_ir))
     Opts.DumpIR = true;
+  if (InternalOptions.hasArg(vc::options::OPT_dump_asm))
+    Opts.DumpAsm = true;
+  if (InternalOptions.hasArg(vc::options::OPT_ftime_report))
+    Opts.TimePasses = true;
 
-  if (opt::Arg *A = InternalOptions.getLastArg(vc::options::OPT_runtime)) {
+  if (opt::Arg *A =
+          InternalOptions.getLastArg(vc::options::OPT_binary_format)) {
     StringRef Val = A->getValue();
-    auto MaybeRuntime = StringSwitch<Optional<vc::RuntimeKind>>(Val)
-                            .Case("cm", vc::RuntimeKind::CM)
-                            .Case("ocl", vc::RuntimeKind::OpenCL)
-                            .Default(None);
-    if (!MaybeRuntime) {
-      const std::string BadOpt = A->getAsString(InternalOptions);
-      return make_error<vc::OptionError>(BadOpt, /*IsInternal=*/true);
-    }
-    Opts.Runtime = MaybeRuntime.getValue();
+    auto MaybeBinary = StringSwitch<Optional<vc::BinaryKind>>(Val)
+                           .Case("cm", vc::BinaryKind::CM)
+                           .Case("ocl", vc::BinaryKind::OpenCL)
+                           .Case("ze", vc::BinaryKind::ZE)
+                           .Default(None);
+    if (!MaybeBinary)
+      return makeOptionError(*A, InternalOptions, /*IsInternal=*/true);
+    Opts.Binary = MaybeBinary.getValue();
   }
 
   Opts.FeaturesString = llvm::join(
@@ -697,20 +739,48 @@ composeLLVMArgs(const opt::InputArgList &ApiArgs,
     UpdatedArgs.AddSeparateArg(BaseArg, LLVMOpt, BaseArg->getValue());
 
   // Add visaopts if any.
-  if (opt::Arg *VisaArg = ApiArgs.getLastArg(vc::options::OPT_igcmc_visaopts)) {
-    StringRef WrappedVisaOpts =
-        Saver.save(Twine{"-finalizer-opts='"} + VisaArg->getValue() + "'");
-    UpdatedArgs.AddSeparateArg(VisaArg, LLVMOpt, WrappedVisaOpts);
+  for (auto OptID :
+       {vc::options::OPT_igcmc_visaopts, vc::options::OPT_Xfinalizer}) {
+    if (!ApiArgs.hasArg(OptID))
+      continue;
+
+    const std::string FinalizerOpts =
+        llvm::join(ApiArgs.getAllArgValues(OptID), " ");
+    StringRef WrappedOpts =
+        Saver.save(Twine{"-finalizer-opts='"} + FinalizerOpts + "'");
+    UpdatedArgs.AddSeparateArg(ApiArgs.getLastArg(OptID), LLVMOpt, WrappedOpts);
   }
 
 
-  // Stack memory size.
-  if (opt::Arg *StackMemSizeArg =
-          ApiArgs.getLastArg(vc::options::OPT_igcmc_stack_size)) {
-    StringRef MemSizeRef = Saver.save(StackMemSizeArg->getAsString(ApiArgs));
-    UpdatedArgs.AddSeparateArg(StackMemSizeArg, LLVMOpt, MemSizeRef);
+  if (opt::Arg *DbgArg = ApiArgs.getLastArg(vc::options::OPT_vc_emit_debug)) {
+
+    UpdatedArgs.AddSeparateArg(DbgArg, LLVMOpt,
+                               "-finalizer-opts='-generateDebugInfo'");
+    UpdatedArgs.AddSeparateArg(DbgArg, LLVMOpt, "-emit-debug-info");
+
+    // TODO: turn off the debug when debug information is stabilized
+    UpdatedArgs.AddSeparateArg(
+        nullptr, LLVMOpt,
+        "-finalizer-opts='-dumpcommonisa -dumpvisa -output -binary'");
   }
 
+  if (opt::Arg *GTPinReRa = ApiArgs.getLastArg(vc::options::OPT_gtpin_rera)) {
+    UpdatedArgs.AddSeparateArg(GTPinReRa, LLVMOpt,
+                               "-finalizer-opts='-GTPinReRA'");
+  }
+  if (opt::Arg *GTPinFreeGRFInfo =
+          ApiArgs.getLastArg(vc::options::OPT_gtpin_grf_info)) {
+    UpdatedArgs.AddSeparateArg(GTPinFreeGRFInfo, LLVMOpt,
+                               "-finalizer-opts='-getfreegrfinfo -rerapostschedule'");
+  }
+  if (opt::Arg *GTPinScratchAreaSize =
+          ApiArgs.getLastArg(vc::options::OPT_gtpin_scratch_area_size)) {
+    StringRef ScratchRef =
+        Saver.save(GTPinScratchAreaSize->getAsString(ApiArgs));
+    auto s = "-finalizer-opts='-GTPinScratchAreaSize " +
+             std::string(GTPinScratchAreaSize->getValue()) + "'";
+    UpdatedArgs.AddSeparateArg(GTPinScratchAreaSize, LLVMOpt, s);
+  }
 
   return UpdatedArgs;
 }

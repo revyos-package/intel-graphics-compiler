@@ -76,8 +76,24 @@ namespace vISA
         G4_DstRegRegion* insertMovAfter(INST_LIST_ITER& it, G4_DstRegRegion* dst, G4_Type type, G4_BB *bb, G4_SubReg_Align dstAlign = Any);
         G4_Operand* insertMovBefore(INST_LIST_ITER it, uint32_t srcNum, G4_Type type, G4_BB *bb,
             G4_SubReg_Align tmpAlign = Any);
+
+        // replace src <srcNum> for inst <*it> with a temp variable of type <type>
+        // This is used to satisfy various HW restrictions on src type/alignment/region/modifier/etc.
+        void replaceSrc(INST_LIST_ITER it, uint32_t srcNum, G4_Type type, G4_BB* bb, G4_SubReg_Align tmpAlign = Any)
+        {
+            G4_INST* inst = *it;
+            inst->setSrc(insertMovBefore(it, srcNum, type, bb, tmpAlign), srcNum);
+        }
+        // replace dst for inst <*it> with a temp variable of type <type>
+        // This is used to satisfy various HW restrictions on dst type/alignment/etc.
+        void replaceDst(INST_LIST_ITER it, G4_Type type, G4_BB* bb, G4_SubReg_Align dstAlign = Any)
+        {
+            G4_INST* inst = *it;
+            inst->setDest(insertMovAfter(it, inst->getDst(), type, bb, dstAlign));
+        }
+
         G4_SrcRegRegion* insertCopyBefore(INST_LIST_ITER it, uint32_t srcNum, G4_SubReg_Align tmpAlign, G4_BB *bb);
-        G4_SrcRegRegion* insertCopyAtBBEntry(G4_BB* bb, uint8_t newExecSize, G4_Operand* src);
+        G4_SrcRegRegion* insertCopyAtBBEntry(G4_BB* bb, G4_ExecSize newExecSize, G4_Operand* src);
         void broadcast(G4_BB* bb, INST_LIST_ITER it, int srcPos, G4_SubReg_Align subAlign);
 
         G4_INST *splitInstWithByteDst(G4_INST *expand_op);
@@ -126,11 +142,7 @@ namespace vISA
         void insertMovAfter(INST_LIST_ITER& it, uint16_t stride, G4_BB* bb);
         void removeBadSrc(INST_LIST_ITER& it, G4_BB *bb, bool crossGRFDst, bool oneGRFSrc[3], bool badTwoGRFSrc[3]);
         uint8_t checkMinExecSize(G4_opcode op);
-        bool convertMAD2MAC(INST_LIST_ITER it, std::vector<G4_INST*> &madList, G4_BB *bb);
         void convertMAD2MulAdd(INST_LIST_ITER iter, G4_BB *bb);
-        G4_Type getAccType(G4_Type ty);
-        bool findHoistLocation(INST_LIST_ITER start, INST_LIST_ITER &end, uint16_t &movDist, G4_INST *boundary);
-        void addACCOpnd(G4_INST *inst, bool needACCSrc, int stride, G4_Type accTy);
         void maintainDU4TempMov(G4_INST *inst, G4_INST *movInst);
         void fixImm64(INST_LIST_ITER i, G4_BB* bb);
         bool checkSrcCrossGRF(INST_LIST_ITER &i, G4_BB* bb);
@@ -183,6 +195,7 @@ namespace vISA
         bool generateFPMad(G4_BB* bb, INST_LIST_ITER iter);
         bool generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter);
         bool hasSameSubregOffset(G4_INST* inst) const;
+        bool hasSameSubregOffset(G4_INST* inst, uint32_t& byteOffset) const;
 
         void fixImmAndARFSrc(INST_LIST_ITER it, G4_BB *bb);
         void generateMacl(INST_LIST_ITER it, G4_BB *bb);

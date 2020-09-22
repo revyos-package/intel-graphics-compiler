@@ -41,6 +41,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Analysis/TargetFolder.h>
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvmWrapper/IR/Intrinsics.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "common/IGCIRBuilder.h"
@@ -49,6 +50,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 using namespace llvm;
 using namespace IGC;
 using namespace IGC::IGCMD;
+using IGCLLVM::FixedVectorType;
 
 namespace {
     class GenIRLowering : public FunctionPass {
@@ -448,8 +450,19 @@ bool GEPLowering::runOnFunction(Function& F) {
 
 Value* GEPLowering::getSExtOrTrunc(Value* Val, Type* NewTy) const {
     Type* OldTy = Val->getType();
-    unsigned OldWidth = OldTy->getIntegerBitWidth();
-    unsigned NewWidth = NewTy->getIntegerBitWidth();
+    unsigned OldWidth;
+    unsigned NewWidth;
+
+    IGC_ASSERT_MESSAGE(OldTy->isIntOrIntVectorTy(), "Index should be Integer or vector of Integer!");
+
+    if (auto OldVecTy = dyn_cast<VectorType>(OldTy)) {
+        OldWidth = (unsigned)OldVecTy->getNumElements() * OldVecTy->getElementType()->getIntegerBitWidth();
+        NewWidth = (unsigned)OldVecTy->getNumElements() * NewTy->getIntegerBitWidth();
+    }
+    else {
+        OldWidth = OldTy->getIntegerBitWidth();
+        NewWidth = NewTy->getIntegerBitWidth();
+    }
 
     if (OldWidth < NewWidth) { // SExt
         return Builder->CreateSExt(Val, NewTy);
@@ -794,6 +807,13 @@ bool GEPLowering::lowerGetElementPtrInst(GetElementPtrInst* GEP) const
                 }
                 else
                 {
+                    if (auto NewIdxVT = dyn_cast<VectorType>(NewIdx->getType())) {
+                        Value* result = llvm::UndefValue::get(FixedVectorType::get(PtrMathTy, (unsigned)NewIdxVT->getNumElements()));
+                        for (uint32_t j = 0; j < (uint32_t)NewIdxVT->getNumElements(); j++) {
+                            result = Builder->CreateInsertElement(result, PointerValue, Builder->getInt32(j));
+                        }
+                        PointerValue = result;
+                    }
                     PointerValue = Builder->CreateAdd(PointerValue, NewIdx);
                     if (COffset)
                     {

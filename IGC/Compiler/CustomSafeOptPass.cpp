@@ -42,8 +42,10 @@ The passes are
     IGCConstProp
     IGCIndirectICBPropagaion
     CustomLoopInfo
+    VectorBitCastOpt
     GenStrengthReduction
     FlattenSmallSwitch
+    SplitIndirectEEtoSel
 
 CustomSafeOptPass does peephole optimizations
 For example, reduce the alloca size so there is a chance to promote indexed temp.
@@ -60,10 +62,16 @@ use them as immediates instead of using send messages to read from buffer.
 
 CustomLoopInfo returns true if there is any sampleL in a loop for the driver.
 
+VectorBitCastOpt preprocesses vector bitcasts to be after extractelement
+instructions.
+
 GenStrengthReduction performs a fdiv optimization.
 
 FlattenSmallSwitch flatten the if/else or switch structure and use cmp+sel
 instead if the structure is small.
+
+SplitIndirectEEtoSel splits extractelements with very small vec to a series of
+cmp+sel to avoid expensive VxH mov.
 
 =============================================================================*/
 
@@ -75,8 +83,11 @@ instead if the structure is small.
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "common/IGCConstantFolder.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvm/Config/llvm-config.h"
 #include "WrapperLLVM/Utils.h"
+#include <llvmWrapper/IR/DerivedTypes.h>
 #include <llvmWrapper/IR/IRBuilder.h>
+#include <llvmWrapper/IR/PatternMatch.h>
 #include <llvmWrapper/Analysis/TargetLibraryInfo.h>
 #include <llvm/ADT/Statistic.h>
 #include <llvm/ADT/SetVector.h>
@@ -86,7 +97,6 @@ instead if the structure is small.
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/InstIterator.h>
-#include <llvm/IR/PatternMatch.h>
 #include <llvm/Transforms/Utils/Local.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -113,19 +123,6 @@ CustomSafeOptPass::CustomSafeOptPass() : FunctionPass(ID)
 {
     initializeCustomSafeOptPassPass(*PassRegistry::getPassRegistry());
 }
-
-#if 0
-// In some cases we link LLVM with NDEBUG set with IGC without NDEBUG set, this causes this function to not be missing during linking
-// Once we switch to CMAKE this code can be removed
-#if (defined(_INTERNAL) && defined(NDEBUG)) && ( !defined( LLVM_ENABLE_THREADS ) || LLVM_ENABLE_THREADS == 0 || ( defined( IGC_CMAKE ) && defined( NDEBUG ) ) || ( !defined( IGC_CMAKE ) && !defined( NDEBUG ) ) )
-void AnnotateHappensBefore(const char* file, int line,
-    const volatile void* cv) {}
-void AnnotateHappensAfter(const char* file, int line,
-    const volatile void* cv) {}
-void AnnotateIgnoreWritesBegin(const char* file, int line) {}
-void AnnotateIgnoreWritesEnd(const char* file, int line) {}
-#endif
-#endif
 
 #define DEBUG_TYPE "CustomSafeOptPass"
 
@@ -440,12 +437,6 @@ void CustomSafeOptPass::visitCallInst(CallInst& C)
             break;
         }
 
-        case GenISAIntrinsic::GenISA_ldrawvector_indexed:
-        {
-            visitLdRawVec(inst);
-            break;
-        }
-
         default:
             break;
         }
@@ -543,7 +534,7 @@ void CustomSafeOptPass::visitf32tof16(llvm::CallInst* inst)
 
     IRBuilder<> builder(lastValue);
     Type* funcType[] = { Type::getHalfTy(builder.getContext()), Type::getFloatTy(builder.getContext()) };
-    Type* halfx2 = VectorType::get(Type::getHalfTy(builder.getContext()), 2);
+    Type* halfx2 = IGCLLVM::FixedVectorType::get(Type::getHalfTy(builder.getContext()), 2);
 
     if (extInstLo && extInstHi &&
         extInstLo->getOperand(0)->getType()->isHalfTy() &&
@@ -795,6 +786,10 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
     Value* AccVal = nullptr;
     IRBuilder<> Builder(&I);
 
+    // Enum to check if given branch is signed or unsigned, e.g.
+    // comes from SExt or ZExt value.
+    enum class OriginSignedness { originSigned, originUnsigned };
+
     // Note: the returned pattern from this lambda doesn't use m_ZExtOrSExt pattern on purpose -
     // There is no way to bind to both instruction and it's arguments, so we bind to instruction and
     // check the opcode later.
@@ -817,41 +812,100 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
       }
     }
 
-    // Check if values in A and B all have the same extension type (sext/zext) and that they come from i8 type.
-    // A and B extension types can be different.
-    auto checkExt = [](auto &range) {
-      IGC_ASSERT_MESSAGE((range.begin() != range.end()), "Cannot check empty collection.");
-      const unsigned OP = range[0]->getOpcode();
-      return (OP == Instruction::SExt || OP == Instruction::ZExt) &&
-             std::all_of(range.begin(), range.end(), [&](Instruction *I) {
-               return I->getOpcode() == OP &&
-                      I->getOperand(0)->getType()->isIntegerTy(8);
-             });
+
+    // Check if values in A and B all have the same extension type (sext/zext)
+    // and that they come from i8 type. A and B extension types can be
+    // different.
+    auto checkIfValuesComeFromCharType = [](auto &range,
+                                            OriginSignedness &retSign) {
+      IGC_ASSERT_MESSAGE((range.begin() != range.end()),
+                         "Cannot check empty collection.");
+
+      auto shr24Pat = m_Shr(m_Value(), m_SpecificInt(24));
+      auto and255Pat = m_And(m_Value(), m_SpecificInt(255));
+
+      IGC_ASSERT_MESSAGE(range.size() == NUM_DP4A_COMPONENTS,
+                         "Range too big in dp4a pattern match!");
+      std::array<OriginSignedness, NUM_DP4A_COMPONENTS> signs;
+      int counter = 0;
+      for (auto I : range) {
+        if (!I->getType()->isIntegerTy(32)) {
+          return false;
+        }
+
+        switch (I->getOpcode()) {
+        case Instruction::SExt:
+        case Instruction::ZExt:
+          if (!I->getOperand(0)->getType()->isIntegerTy(8)) {
+            return false;
+          }
+          signs[counter] = (I->getOpcode() == Instruction::SExt)
+                               ? OriginSignedness::originSigned
+                               : OriginSignedness::originUnsigned;
+          break;
+        case Instruction::AShr:
+        case Instruction::LShr:
+          if (!match(I, shr24Pat)) {
+            return false;
+          }
+          signs[counter] = (I->getOpcode() == Instruction::AShr)
+                               ? OriginSignedness::originSigned
+                               : OriginSignedness::originUnsigned;
+          break;
+        case Instruction::And:
+          if (!match(I, and255Pat)) {
+            return false;
+          }
+          signs[counter] = OriginSignedness::originUnsigned;
+          break;
+        default:
+          return false;
+        }
+
+        counter++;
+      }
+
+      // check if all have the same sign.
+      retSign = signs[0];
+      return std::all_of(
+          signs.begin(), signs.end(),
+          [&signs](OriginSignedness v) { return v == signs[0]; });
     };
 
-    bool canMatch = AccVal->getType()->isIntegerTy(32) && checkExt(ExtA) && checkExt(ExtB);
+    OriginSignedness ABranch, BBranch;
+    bool canMatch = AccVal->getType()->isIntegerTy(32) && checkIfValuesComeFromCharType(ExtA, ABranch) && checkIfValuesComeFromCharType(ExtB, BBranch);
     if (!canMatch) return;
 
-    auto AOpc = ExtA[0]->getOpcode(), BOpc = ExtB[0]->getOpcode();
     GenISAIntrinsic::ID IntrinsicID{};
 
-    if (AOpc == BOpc) {
-      if (AOpc == Instruction::SExt) {
-        IntrinsicID = GenISAIntrinsic::GenISA_dp4a_ss;
-      } else {
-        IntrinsicID = GenISAIntrinsic::GenISA_dp4a_uu;
-      }
-    } else {
-      if (AOpc == Instruction::SExt) {
-        IntrinsicID = GenISAIntrinsic::GenISA_dp4a_su;
-      } else {
-        IntrinsicID = GenISAIntrinsic::GenISA_dp4a_us;
-      }
-    }
-
     static_assert(ExtA.size() == ArrA.size() && ExtB.size() == ArrB.size() && ExtA.size() == NUM_DP4A_COMPONENTS, "array sizes must match!");
-    std::transform(ExtA.begin(), ExtA.end(), ArrA.begin(), [](Instruction* ExtInst) { return ExtInst->getOperand(0); });
-    std::transform(ExtB.begin(), ExtB.end(), ArrB.begin(), [](Instruction* ExtInst) { return ExtInst->getOperand(0); });
+
+    auto getInt8Origin = [&](Instruction *I) {
+      if (I->getOpcode() == Instruction::SExt ||
+          I->getOpcode() == Instruction::ZExt) {
+        return I->getOperand(0);
+      }
+      Builder.SetInsertPoint(I->getNextNode());
+      return Builder.CreateTrunc(I, Builder.getInt8Ty());
+    };
+
+    std::transform(ExtA.begin(), ExtA.end(), ArrA.begin(), getInt8Origin);
+    std::transform(ExtB.begin(), ExtB.end(), ArrB.begin(), getInt8Origin);
+
+    switch (ABranch) {
+    case OriginSignedness::originSigned:
+      IntrinsicID = (BBranch == OriginSignedness::originSigned)
+                        ? GenISAIntrinsic::GenISA_dp4a_ss
+                        : GenISAIntrinsic::GenISA_dp4a_su;
+      break;
+    case OriginSignedness::originUnsigned:
+      IntrinsicID = (BBranch == OriginSignedness::originSigned)
+                        ? GenISAIntrinsic::GenISA_dp4a_us
+                        : GenISAIntrinsic::GenISA_dp4a_uu;
+      break;
+    default:
+      IGC_ASSERT(0);
+    }
 
     // Additional optimisation: check if the values come from an ExtractElement instruction.
     // If this is the case, reorder the elements in the array to match the ExtractElement pattern.
@@ -864,7 +918,7 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
       for (int i = 0; i < NUM_DP4A_COMPONENTS; ++i) {
         ConstantInt* IndexVal = nullptr;
         Value* OriginVal = nullptr;
-        auto P = m_ExtractElement(m_Value(OriginVal), m_ConstantInt(IndexVal));
+        auto P = m_ExtractElt(m_Value(OriginVal), m_ConstantInt(IndexVal));
         if (!match(Arr[i], P)) {
           CanOptOrder = false;
           break;
@@ -883,8 +937,8 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
     extractElementOrderOpt(ArrA);
     extractElementOrderOpt(ArrB);
 
-    Value* VectorA = UndefValue::get(VectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
-    Value* VectorB = UndefValue::get(VectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
+    Value* VectorA = UndefValue::get(IGCLLVM::FixedVectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
+    Value* VectorB = UndefValue::get(IGCLLVM::FixedVectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
     for (int i = 0; i < NUM_DP4A_COMPONENTS; ++i) {
       VectorA = Builder.CreateInsertElement(VectorA, ArrA[i], i);
       VectorB = Builder.CreateInsertElement(VectorB, ArrB[i], i);
@@ -1118,6 +1172,25 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
     //    d = a + 8
 
     CodeGenContext* pContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    // Before WA if() as it's validated behavior.
+    if (I.getType()->isIntegerTy() && I.getOpcode() == Instruction::Or)
+    {
+        unsigned int bitWidth = cast<IntegerType>(I.getType())->getBitWidth();
+        switch (bitWidth)
+        {
+        case 16:
+            matchReverse<unsigned short>(I);
+            break;
+        case 32:
+            matchReverse<unsigned int>(I);
+            break;
+        case 64:
+            matchReverse<unsigned long long>(I);
+            break;
+        }
+    }
+
     // WA for remaining bug in custom pass
     if (pContext->m_DriverInfo.WADisableCustomPass())
         return;
@@ -1160,8 +1233,7 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
 void IGC::CustomSafeOptPass::visitLdptr(llvm::CallInst* inst)
 {
     if (!IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTextures) &&
-        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers) &&
-        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
+        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers))
     {
         return;
     }
@@ -1184,49 +1256,10 @@ void IGC::CustomSafeOptPass::visitLdptr(llvm::CallInst* inst)
 
     // if only doing the opt on buffers, make sure src1 is zero too
     if (!IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTextures) &&
-        IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers) &&
-        !IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
+        IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllTypedBuffers))
     {
         if (!src1 || !src1->isZeroValue())
             return;
-    }
-
-    // for UseHDCTypedReadForAllNonTemporalTextures, check if the ld uses threadid for index
-    if (IGC_IS_FLAG_ENABLED(UseHDCTypedReadForAllNonTemporalTextures))
-    {
-        Instruction* AddInst0 = dyn_cast<Instruction>(inst->getOperand(0));
-        Instruction* AddInst1 = dyn_cast<Instruction>(inst->getOperand(1));
-        if (!AddInst0 || !AddInst1 ||
-            AddInst0->getOpcode() != Instruction::Add ||
-            AddInst1->getOpcode() != Instruction::Add)
-        {
-            return;
-        }
-
-        Instruction* ShlInst0 = dyn_cast<Instruction>(AddInst0->getOperand(0));
-        Instruction* ShlInst1 = dyn_cast<Instruction>(AddInst1->getOperand(0));
-        if (!ShlInst0 || !ShlInst1 ||
-            ShlInst0->getOpcode() != Instruction::Shl ||
-            ShlInst1->getOpcode() != Instruction::Shl)
-        {
-            return;
-        }
-
-        BitCastInst* bitcastInst0 = dyn_cast<BitCastInst>(ShlInst0->getOperand(0));
-        BitCastInst* bitcastInst1 = dyn_cast<BitCastInst>(ShlInst1->getOperand(0));
-        if (!bitcastInst0 || !bitcastInst1)
-        {
-            return;
-        }
-
-        GenIntrinsicInst* CI0 = dyn_cast<GenIntrinsicInst>(bitcastInst0->getOperand(0));
-        GenIntrinsicInst* CI1 = dyn_cast<GenIntrinsicInst>(bitcastInst1->getOperand(0));
-        if (!CI0 || !CI1 ||
-            CI0->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_SystemValue ||
-            CI1->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_SystemValue)
-        {
-            return;
-        }
     }
 
     // do the transformation
@@ -1254,64 +1287,14 @@ void IGC::CustomSafeOptPass::visitLdptr(llvm::CallInst* inst)
     if (inst->getType() != pNewCallInst->getType())
     {
         IGC_ASSERT_MESSAGE(inst->getType()->isVectorTy(), "expect int4 here");
-        IGC_ASSERT_MESSAGE(inst->getType()->getVectorElementType()->isIntegerTy(32), "expect int4 here");
-        IGC_ASSERT_MESSAGE(inst->getType()->getVectorNumElements() == 4, "expect int4 here");
+        IGC_ASSERT_MESSAGE(cast<VectorType>(inst->getType())->getElementType()->isIntegerTy(32), "expect int4 here");
+        IGC_ASSERT_MESSAGE(cast<VectorType>(inst->getType())->getNumElements() == 4, "expect int4 here");
         auto bitCastInst = builder.CreateBitCast(pNewCallInst, inst->getType());
         inst->replaceAllUsesWith(bitCastInst);
     }
     else
     {
         inst->replaceAllUsesWith(pNewCallInst);
-    }
-}
-
-
-void IGC::CustomSafeOptPass::visitLdRawVec(llvm::CallInst* inst)
-{
-    //Try to optimize and remove vector ld raw and change to scalar ld raw
-
-    //%a = call <4 x float> @llvm.genx.GenISA.ldrawvector.indexed.v4f32.p1441792f32(
-    //.....float addrspace(1441792) * %243, i32 %offset, i32 4, i1 false), !dbg !216
-    //%b = extractelement <4 x float> % 245, i32 0, !dbg !216
-
-    //into
-
-    //%new_offset = add i32 %offset, 0, !dbg !216
-    //%b = call float @llvm.genx.GenISA.ldraw.indexed.f32.p1441792f32.i32.i32.i1(
-    //.....float addrspace(1441792) * %251, i32 %new_offset, i32 4, i1 false)
-
-    if (inst->hasOneUse() &&
-        isa<ExtractElementInst>(inst->user_back()))
-    {
-        auto EE = cast<ExtractElementInst>(inst->user_back());
-        if (auto constIndex = dyn_cast<ConstantInt>(EE->getIndexOperand()))
-        {
-            llvm::IRBuilder<> builder(inst);
-
-            llvm::SmallVector<llvm::Type*, 2> ovldtypes{
-                EE->getType(), //float type
-                inst->getOperand(0)->getType(),
-            };
-
-            // For new_offset we need to take into acount the index of the Extract
-            // and convert it to bytes and add it to the existing offset
-            auto new_offset = constIndex->getZExtValue() * 4;
-
-            llvm::SmallVector<llvm::Value*, 4> new_args{
-                inst->getOperand(0),
-                builder.CreateAdd(inst->getOperand(1),builder.getInt32((unsigned)new_offset)),
-                inst->getOperand(2),
-                inst->getOperand(3)
-            };
-
-            Function* pLdraw_indexed_intrinsic = llvm::GenISAIntrinsic::getDeclaration(
-                inst->getModule(),
-                GenISAIntrinsic::GenISA_ldraw_indexed,
-                ovldtypes);
-
-            llvm::Value* ldraw_indexed = builder.CreateCall(pLdraw_indexed_intrinsic, new_args, "");
-            EE->replaceAllUsesWith(ldraw_indexed);
-        }
     }
 }
 
@@ -1344,6 +1327,192 @@ void IGC::CustomSafeOptPass::visitSampleBptr(llvm::SampleIntrinsic* sampleInst)
         sampleInst->replaceAllUsesWith(newSample);
     }
 }
+
+bool CustomSafeOptPass::isIdentityMatrix(ExtractElementInst& I)
+{
+    bool found = false;
+    auto extractType = cast<VectorType>(I.getVectorOperandType());
+    auto extractTypeVecSize = (uint32_t)extractType->getNumElements();
+    if (extractTypeVecSize == 20 ||
+        extractTypeVecSize == 16)
+    {
+        if (Constant * C = dyn_cast<Constant>(I.getVectorOperand()))
+        {
+            found = true;
+
+            // found = true if the extractelement is like this:
+            // %189 = extractelement <20 x float>
+            //    <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00,
+            //     float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00,
+            //     float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00,
+            //     float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00,
+            //     float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, i32 %188
+            for (unsigned int i = 0; i < extractTypeVecSize; i++)
+            {
+                if (i == 0 || i == 5 || i == 10 || i == 15)
+                {
+                    ConstantFP* fpC = dyn_cast<ConstantFP>(C->getAggregateElement(i));
+                    ConstantInt* intC = dyn_cast<ConstantInt>(C->getAggregateElement(i));
+                    if((fpC && !fpC->isExactlyValue(1.f)) || (intC && !intC->isAllOnesValue()))
+                    {
+                        found = false;
+                        break;
+                    }
+                }
+                else if (!C->getAggregateElement(i)->isZeroValue())
+                {
+                    found = false;
+                    break;
+                }
+            }
+        }
+    }
+    return found;
+}
+
+void CustomSafeOptPass::dp4WithIdentityMatrix(ExtractElementInst& I)
+{
+    /*
+    convert dp4 with identity matrix icb ( ex: "dp4 r[6].x, cb[2][8].xyzw, icb[ r[4].w].xyzw") from
+        %189 = shl nuw nsw i32 %188, 2, !dbg !326
+        %190 = extractelement <20 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, i32 %189, !dbg !326
+        %191 = or i32 %189, 1, !dbg !326
+        %192 = extractelement <20 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, i32 %191, !dbg !326
+        %193 = or i32 %189, 2, !dbg !326
+        %194 = extractelement <20 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, i32 %193, !dbg !326
+        %195 = or i32 %189, 3, !dbg !326
+        %196 = extractelement <20 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00>, i32 %195, !dbg !326
+        %s01_s.chan0141 = fmul fast float %181, %190, !dbg !326
+        %197 = fmul fast float %182, %192, !dbg !326
+        %198 = fadd fast float %197, %s01_s.chan0141, !dbg !326
+        %199 = fmul fast float %183, %194, !dbg !326
+        %200 = fadd fast float %199, %198, !dbg !326
+        %201 = fmul fast float %184, %196, !dbg !326
+        %202 = fadd fast float %201, %200, !dbg !326
+    to
+        %533 = icmp eq i32 %532, 0, !dbg !434
+        %534 = icmp eq i32 %532, 1, !dbg !434
+        %535 = icmp eq i32 %532, 2, !dbg !434
+        %536 = icmp eq i32 %532, 3, !dbg !434
+        %537 = select i1 %533, float %525, float 0.000000e+00, !dbg !434
+        %538 = select i1 %534, float %526, float %537, !dbg !434
+        %539 = select i1 %535, float %527, float %538, !dbg !434
+        %540 = select i1 %536, float %528, float %539, !dbg !434
+    */
+
+    // check %190 = extractelement <20 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00 ...
+    if (!I.hasOneUse() || !isIdentityMatrix(I))
+        return;
+
+    Instruction* offset[4] = {nullptr, nullptr, nullptr, nullptr};
+    ExtractElementInst* eeInst[4] = { &I, nullptr, nullptr, nullptr };
+
+    // check %189 = shl nuw nsw i32 %188, 2, !dbg !326
+    // put it in offset[0]
+    offset[0] = dyn_cast<BinaryOperator>(I.getOperand(1));
+    if (!offset[0] ||
+        offset[0]->getOpcode() != Instruction::Shl ||
+        offset[0]->getOperand(1) != ConstantInt::get(offset[0]->getOperand(1)->getType(), 2))
+    {
+        return;
+    }
+
+    // check %191 = or i32 %189, 1, !dbg !326
+    //       %193 = or i32 % 189, 2, !dbg !326
+    //       %195 = or i32 % 189, 3, !dbg !326
+    // put them in offset[1], offset[2], offset[3]
+    for (auto iter = offset[0]->user_begin(); iter != offset[0]->user_end(); iter++)
+    {
+        // skip checking for the %190 = extractelement <20 x float> <float 1.000000e+00, ....
+        if (*iter == &I)
+            continue;
+
+        if (BinaryOperator * orInst = dyn_cast<BinaryOperator>(*iter))
+        {
+            if (orInst->getOpcode() == BinaryOperator::Or && orInst->getNumUses() == 1)
+            {
+                if (ConstantInt * orSrc1 = dyn_cast<ConstantInt>(orInst->getOperand(1)))
+                {
+                    if (orSrc1->getZExtValue() < 4)
+                    {
+                        offset[orSrc1->getZExtValue()] = orInst;
+                    }
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (offset[i] == nullptr)
+            return;
+    }
+
+    // check %192 = extractelement <20 x float> ...
+    //       %194 = extractelement <20 x float> ...
+    //       %196 = extractelement <20 x float> ...
+    // put them in eeInst[i]
+    for (int i = 1; i < 4; i++)
+    {
+        eeInst[i] = dyn_cast<ExtractElementInst>(*offset[i]->user_begin());
+        if (!eeInst[i] || !isIdentityMatrix(*eeInst[i]))
+        {
+            return;
+        }
+    }
+
+    // check dp4 and put them in mulI[] and addI[]
+    Instruction* mulI[4] = { nullptr, nullptr, nullptr, nullptr };
+    for (int i = 0; i < 4; i++)
+    {
+        mulI[i] = dyn_cast<Instruction>(*eeInst[i]->user_begin());
+        if (mulI[i] == nullptr || !mulI[i]->hasOneUse())
+        {
+            return;
+        }
+    }
+    int inputInSrcIndex = 0;
+    if (mulI[0]->getOperand(0) == eeInst[0])
+        inputInSrcIndex = 1;
+
+    // the 1st and 2nd mul are the srcs for add
+    if (*mulI[0]->user_begin() != *mulI[1]->user_begin())
+    {
+        return;
+    }
+    Instruction* addI[3] = { nullptr, nullptr, nullptr };
+    addI[0] = dyn_cast<Instruction>(*mulI[0]->user_begin());
+    addI[1] = dyn_cast<Instruction>(*mulI[2]->user_begin());
+    addI[2] = dyn_cast<Instruction>(*mulI[3]->user_begin());
+
+    if( addI[0] == nullptr ||
+        addI[1] == nullptr ||
+        addI[2] == nullptr ||
+        !addI[0]->hasOneUse() ||
+        !addI[1]->hasOneUse() ||
+        *addI[0]->user_begin() != *mulI[2]->user_begin() ||
+        *addI[1]->user_begin() != *mulI[3]->user_begin())
+    {
+        return;
+    }
+
+    // start the conversion
+    IRBuilder<> builder(addI[2]);
+
+    Value* cond0 = builder.CreateICmp(ICmpInst::ICMP_EQ, offset[0]->getOperand(0), ConstantInt::get(offset[0]->getOperand(0)->getType(), 0));
+    Value* cond1 = builder.CreateICmp(ICmpInst::ICMP_EQ, offset[0]->getOperand(0), ConstantInt::get(offset[0]->getOperand(0)->getType(), 1));
+    Value* cond2 = builder.CreateICmp(ICmpInst::ICMP_EQ, offset[0]->getOperand(0), ConstantInt::get(offset[0]->getOperand(0)->getType(), 2));
+    Value* cond3 = builder.CreateICmp(ICmpInst::ICMP_EQ, offset[0]->getOperand(0), ConstantInt::get(offset[0]->getOperand(0)->getType(), 3));
+
+    Value* zero = ConstantFP::get(Type::getFloatTy(I.getContext()), 0);
+    Value* sel0 = builder.CreateSelect(cond0, mulI[0]->getOperand(inputInSrcIndex), zero);
+    Value* sel1 = builder.CreateSelect(cond1, mulI[1]->getOperand(inputInSrcIndex), sel0);
+    Value* sel2 = builder.CreateSelect(cond2, mulI[2]->getOperand(inputInSrcIndex), sel1);
+    Value* sel3 = builder.CreateSelect(cond3, mulI[3]->getOperand(inputInSrcIndex), sel2);
+
+    addI[2]->replaceAllUsesWith(sel3);
+}
+
 
 void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst& I)
 {
@@ -1385,24 +1554,27 @@ void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst& I)
             if (bitShift != 0)
             {
                 Type* vecType = I.getVectorOperand()->getType();
-                unsigned int eltSize = (unsigned int)vecType->getVectorElementType()->getPrimitiveSizeInBits();
+                unsigned int eltSize = (unsigned int)cast<VectorType>(vecType)->getElementType()->getPrimitiveSizeInBits();
                 if (bitShift % eltSize == 0)
                 {
                     int elOffset = (int)(bitShift / eltSize);
                     elOffset = rightShift ? elOffset : -elOffset;
                     unsigned int newIndex = (unsigned int)((int)cstIndex->getZExtValue() + elOffset);
-                    if (newIndex < vecType->getVectorNumElements())
+                    if (newIndex < cast<VectorType>(vecType)->getNumElements())
                     {
                         IRBuilder<> builder(&I);
                         Value* newBitCast = builder.CreateBitCast(binOp->getOperand(0), vecType);
                         Value* newScalar = builder.CreateExtractElement(newBitCast, newIndex);
                         I.replaceAllUsesWith(newScalar);
                         I.eraseFromParent();
+                        return;
                     }
                 }
             }
         }
     }
+
+    dp4WithIdentityMatrix(I);
 }
 
 #if LLVM_VERSION_MAJOR >= 7
@@ -1644,7 +1816,7 @@ into:
 And similarly for patterns reversing 16 and 64 bit type values.
 */
 template <typename MaskType>
-void GenSpecificPattern::matchReverse(BinaryOperator& I)
+void CustomSafeOptPass::matchReverse(BinaryOperator& I)
 {
     using namespace llvm::PatternMatch;
     IGC_ASSERT(I.getType()->isIntegerTy());
@@ -1731,7 +1903,7 @@ void GenSpecificPattern::matchReverse(BinaryOperator& I)
         }
         else
         { // bitWidth == 64
-            Value* int32Source = builder.CreateBitCast(nextOrShl, llvm::VectorType::get(builder.getInt32Ty(), 2));
+            Value* int32Source = builder.CreateBitCast(nextOrShl, IGCLLVM::FixedVectorType::get(builder.getInt32Ty(), 2));
             Value* extractElement0 = builder.CreateExtractElement(int32Source, builder.getInt32(0));
             Value* extractElement1 = builder.CreateExtractElement(int32Source, builder.getInt32(1));
             Value* bfrevLow = builder.CreateCall(bfrevFunc, extractElement0);
@@ -1762,7 +1934,7 @@ void GenSpecificPattern::matchReverse(BinaryOperator& I)
 void GenSpecificPattern::createBitcastExtractInsertPattern(BinaryOperator& I, Value* OpLow, Value* OpHi, unsigned extractNum1, unsigned extractNum2)
 {
     llvm::IRBuilder<> builder(&I);
-    auto vec2 = VectorType::get(builder.getInt32Ty(), 2);
+    auto vec2 = IGCLLVM::FixedVectorType::get(builder.getInt32Ty(), 2);
     Value* vec = UndefValue::get(vec2);
     Value* elemLow = nullptr;
     Value* elemHi = nullptr;
@@ -1780,7 +1952,7 @@ void GenSpecificPattern::createBitcastExtractInsertPattern(BinaryOperator& I, Va
         else if (auto IEIInst = dyn_cast<InsertElementInst>(Op))
         {
             auto opType = IEIInst->getType();
-            if (opType->isVectorTy() && opType->getVectorElementType()->isIntegerTy(32) && opType->getVectorNumElements() == 2)
+            if (opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<VectorType>(opType)->getNumElements() == 2)
             {
                 elem = IEIInst->getOperand(1);
             }
@@ -1812,23 +1984,6 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
     {
         using namespace llvm::PatternMatch;
 
-        if (I.getType()->isIntegerTy())
-        {
-            unsigned int bitWidth = cast<IntegerType>(I.getType())->getBitWidth();
-            switch (bitWidth)
-            {
-            case 16:
-                matchReverse<unsigned short>(I);
-                break;
-            case 32:
-                matchReverse<unsigned int>(I);
-                break;
-            case 64:
-                matchReverse<unsigned long long>(I);
-                break;
-            }
-        }
-
         /*
         llvm changes ADD to OR when possible, and this optimization changes it back and allow 2 ADDs to merge.
         This can avoid scattered read for constant buffer when the index is calculated by shl + or + add.
@@ -1850,7 +2005,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         Value * AndOp2 = nullptr, *EltOp2 = nullptr, *VecOp = nullptr;
         auto pattern2 = m_Or(
             m_And(m_Value(AndOp2), m_SpecificInt(0xFFFFFFFF)),
-            m_BitCast(m_InsertElement(m_Value(VecOp), m_Value(EltOp2), m_SpecificInt(1))));
+            m_BitCast(m_InsertElt(m_Value(VecOp), m_Value(EltOp2), m_SpecificInt(1))));
 #endif // LLVM_VERSION_MAJOR >= 7
         if (match(&I, pattern1) && AndOp1->getType()->isIntegerTy(64))
         {
@@ -2006,7 +2161,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
             BitCastInst* opBC = cast<BitCastInst>(op);
 
             auto opType = opBC->getType();
-            if (!(opType->isVectorTy() && opType->getVectorElementType()->isIntegerTy(32) && opType->getVectorNumElements() == 2))
+            if (!(opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<VectorType>(opType)->getNumElements() == 2))
                 return nullptr;
 
             if (opBC->getSrcTy()->isDoubleTy())
@@ -2024,7 +2179,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         Value* src_of_FNeg = nullptr;
         Instruction* inst = nullptr;
 
-        auto fabs_on_int_pattern1 = m_And(m_ExtractElement(m_Instruction(inst), m_SpecificInt(1)), m_SpecificInt(0x7FFFFFFF));
+        auto fabs_on_int_pattern1 = m_And(m_ExtractElt(m_Instruction(inst), m_SpecificInt(1)), m_SpecificInt(0x7FFFFFFF));
         auto fabs_on_int_pattern2 = m_And(m_Instruction(inst), m_SpecificInt(0x7FFFFFFF00000000));
         auto fneg_pattern = m_FNeg(m_Value(src_of_FNeg));
 
@@ -2048,7 +2203,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
             if (src && match(src, fneg_pattern) && src_of_FNeg->getType()->isDoubleTy())
             {
                 llvm::IRBuilder<> builder(&I);
-                VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
+                VectorType* vec2 = IGCLLVM::FixedVectorType::get(builder.getInt32Ty(), 2);
                 Value* BC = builder.CreateBitCast(src_of_FNeg, vec2);
                 Value* EE = builder.CreateExtractElement(BC, builder.getInt32(1));
                 Value* AI = builder.CreateAnd(EE, builder.getInt32(0x7FFFFFFF));
@@ -2092,7 +2247,7 @@ void GenSpecificPattern::visitCmpInst(CmpInst& I)
         Val1->getType()->isIntegerTy(64))
     {
         llvm::IRBuilder<> builder(&I);
-        VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
+        VectorType* vec2 = IGCLLVM::FixedVectorType::get(builder.getInt32Ty(), 2);
         Value* BC = builder.CreateBitCast(Val1, vec2);
         Value* EE = builder.CreateExtractElement(BC, builder.getInt32(1));
         Value* AI = builder.CreateAnd(EE, builder.getInt32(const_int1 >> 32));
@@ -2426,8 +2581,8 @@ void GenSpecificPattern::visitBitCastInst(BitCastInst& I)
                 if (zExtInst->getOperand(0)->getType()->isIntegerTy(32) &&
                     isa<InsertElementInst>(bitCastInst->getOperand(0)) &&
                     bitCastInst->getOperand(0)->getType()->isVectorTy() &&
-                    bitCastInst->getOperand(0)->getType()->getVectorElementType()->isIntegerTy(32) &&
-                    bitCastInst->getOperand(0)->getType()->getVectorNumElements() == 2)
+                    cast<VectorType>(bitCastInst->getOperand(0)->getType())->getElementType()->isIntegerTy(32) &&
+                    cast<VectorType>(bitCastInst->getOperand(0)->getType())->getNumElements() == 2)
                 {
                     InsertElementInst* insertElementInst = cast<InsertElementInst>(bitCastInst->getOperand(0));
 
@@ -2493,7 +2648,7 @@ void GenSpecificPattern::visitTruncInst(llvm::TruncInst& I)
     {
         auto new_shift_size = (unsigned)CI->getZExtValue() - 32;
         llvm::IRBuilder<> builder(&I);
-        VectorType* vec2 = VectorType::get(builder.getInt32Ty(), 2);
+        VectorType* vec2 = IGCLLVM::FixedVectorType::get(builder.getInt32Ty(), 2);
         Value* new_Val = builder.CreateBitCast(LHS, vec2);
         new_Val = builder.CreateExtractElement(new_Val, builder.getInt32(1));
         if (new_shift_size > 0)
@@ -2525,7 +2680,7 @@ void GenSpecificPattern::visitFNeg(llvm::UnaryOperator& I)
     }
     else
     {
-        uint32_t vectorSize = I.getType()->getVectorNumElements();
+        uint32_t vectorSize = cast<VectorType>(I.getType())->getNumElements();
         fsub = llvm::UndefValue::get(I.getType());
 
         for (uint32_t i = 0; i < vectorSize; ++i)
@@ -2638,8 +2793,8 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
                 char* offset = &(modMD->immConstant.data[0]);
                 if (inst->getType()->isVectorTy())
                 {
-                    Type* srcEltTy = inst->getType()->getVectorElementType();
-                    uint32_t srcNElts = inst->getType()->getVectorNumElements();
+                    Type* srcEltTy = cast<VectorType>(inst->getType())->getElementType();
+                    uint32_t srcNElts = (uint32_t)cast<VectorType>(inst->getType())->getNumElements();
                     uint32_t eltSize_in_bytes = (unsigned int)srcEltTy->getPrimitiveSizeInBits() / 8;
                     IRBuilder<> builder(inst);
                     Value* vectorValue = UndefValue::get(inst->getType());
@@ -2779,6 +2934,14 @@ Constant* IGCConstProp::ConstantFoldCallInstruction(CallInst* inst)
             }
         }
         break;
+        case llvm_f32tof16_rtz:
+        {
+            if (C0)
+            {
+                C = constantFolder.CreateFPTrunc(C0, inst->getType(), llvm::APFloatBase::rmTowardZero);
+            }
+        }
+        break;
         case llvm_fadd_rtz:
         {
             Constant* C1 = dyn_cast<Constant>(inst->getOperand(1));
@@ -2841,7 +3004,7 @@ Constant* IGCConstProp::ConstantFoldCmpInst(CmpInst* CI)
     {
         bool AllTrue = true, AllFalse = true;
         auto VecOpnd = cast<Constant>(EEI->getVectorOperand());
-        unsigned N = VecOpnd->getType()->getVectorNumElements();
+        unsigned N = (unsigned)cast<VectorType>(VecOpnd->getType())->getNumElements();
         for (unsigned i = 0; i < N; ++i)
         {
             Constant* const Opnd = VecOpnd->getAggregateElement(i);
@@ -3327,7 +3490,7 @@ bool IGCIndirectICBPropagaion::runOnFunction(Function& F)
                         unsigned int size_in_bytes = (unsigned int)inst->getType()->getPrimitiveSizeInBits() / 8;
                         if (size_in_bytes)
                         {
-                            Value* ICBbuffer = UndefValue::get(VectorType::get(inst->getType(), maxImmConstantSizePushed / size_in_bytes));
+                            Value* ICBbuffer = UndefValue::get(IGCLLVM::FixedVectorType::get(inst->getType(), maxImmConstantSizePushed / size_in_bytes));
                             if (inst->getType()->isFloatTy())
                             {
                                 float returnConstant = 0;
@@ -3588,6 +3751,100 @@ void NanHandling::visitBranchInst(llvm::BranchInst& I)
 IGC_INITIALIZE_PASS_BEGIN(NanHandling, "NanHandling", "NanHandling", false, false)
 IGC_INITIALIZE_PASS_END(NanHandling, "NanHandling", "NanHandling", false, false)
 
+namespace IGC
+{
+
+    class VectorBitCastOpt: public FunctionPass
+    {
+    public:
+        static char ID;
+
+        VectorBitCastOpt() : FunctionPass(ID)
+        {
+            initializeVectorBitCastOptPass(*PassRegistry::getPassRegistry());
+        };
+        ~VectorBitCastOpt() {}
+
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "VectorBitCastOptPass";
+        }
+
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.setPreservesCFG();
+        }
+
+        virtual bool runOnFunction(llvm::Function& F) override;
+
+    private:
+        // Transform (extractelement (bitcast %vector) ...) to
+        // (bitcast (extractelement %vector) ...) in order to help coalescing
+        // in DeSSA and enable memory operations simplification
+        // in VectorPreProcess.
+        bool optimizeVectorBitCast(Function& F) const;
+    };
+
+    bool VectorBitCastOpt::runOnFunction(Function& F)
+    {
+        bool Changed = optimizeVectorBitCast(F);
+        return Changed;
+    }
+
+    bool VectorBitCastOpt::optimizeVectorBitCast(Function& F) const {
+        IRBuilder<> Builder(F.getContext());
+
+        bool Changed = false;
+        for (auto& BB : F) {
+            for (auto BI = BB.begin(), BE = BB.end(); BI != BE; /*EMPTY*/) {
+                BitCastInst* BC = dyn_cast<BitCastInst>(&*BI++);
+                if (!BC) continue;
+                // Skip non-element-wise bitcast.
+                VectorType* DstVTy = dyn_cast<VectorType>(BC->getType());
+                VectorType* SrcVTy = dyn_cast<VectorType>(BC->getOperand(0)->getType());
+                if (!DstVTy || !SrcVTy || DstVTy->getNumElements() != SrcVTy->getNumElements())
+                    continue;
+                // Skip if it's not used only all extractelement.
+                bool ExactOnly = true;
+                for (auto User : BC->users()) {
+                    if (isa<ExtractElementInst>(User)) continue;
+                    ExactOnly = false;
+                    break;
+                }
+                if (!ExactOnly)
+                    continue;
+                // Autobots, transform and roll out!
+                Value* Src = BC->getOperand(0);
+                Type* DstEltTy = DstVTy->getElementType();
+                for (auto UI = BC->user_begin(), UE = BC->user_end(); UI != UE;
+                    /*EMPTY*/) {
+                    auto EEI = cast<ExtractElementInst>(*UI++);
+                    Builder.SetInsertPoint(EEI);
+                    auto NewVal = Builder.CreateExtractElement(Src, EEI->getIndexOperand());
+                    NewVal = Builder.CreateBitCast(NewVal, DstEltTy);
+                    EEI->replaceAllUsesWith(NewVal);
+                    EEI->eraseFromParent();
+                }
+                BI = BC->eraseFromParent();
+                Changed = true;
+            }
+        }
+
+        return Changed;
+    }
+
+    char VectorBitCastOpt::ID = 0;
+    FunctionPass* createVectorBitCastOptPass() { return new VectorBitCastOpt(); }
+
+} // namespace IGC
+
+#define VECTOR_BITCAST_OPT_PASS_FLAG "igc-vector-bitcast-opt"
+#define VECTOR_BITCAST_OPT_PASS_DESCRIPTION "Preprocess vector bitcasts to be after extractelement instructions."
+#define VECTOR_BITCAST_OPT_PASS_CFG_ONLY true
+#define VECTOR_BITCAST_OPT_PASS_ANALYSIS false
+IGC_INITIALIZE_PASS_BEGIN(VectorBitCastOpt, VECTOR_BITCAST_OPT_PASS_FLAG, VECTOR_BITCAST_OPT_PASS_DESCRIPTION, VECTOR_BITCAST_OPT_PASS_CFG_ONLY, VECTOR_BITCAST_OPT_PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_END(VectorBitCastOpt, VECTOR_BITCAST_OPT_PASS_FLAG, VECTOR_BITCAST_OPT_PASS_DESCRIPTION, VECTOR_BITCAST_OPT_PASS_CFG_ONLY, VECTOR_BITCAST_OPT_PASS_ANALYSIS)
+
 namespace {
 
     class GenStrengthReduction : public FunctionPass
@@ -3603,9 +3860,6 @@ namespace {
 
     private:
         bool processInst(Instruction* Inst);
-        // Transform (extract-element (bitcast %vector) ...) to
-        // (bitcast (extract-element %vector) ...) in order to help coalescing in DeSSA.
-        bool optimizeVectorBitCast(Function& F) const;
     };
 
 } // namespace
@@ -3630,9 +3884,6 @@ bool GenStrengthReduction::runOnFunction(Function& F)
             Changed |= processInst(Inst);
         }
     }
-
-    Changed |= optimizeVectorBitCast(F);
-
     return Changed;
 }
 
@@ -3822,48 +4073,6 @@ bool GenStrengthReduction::processInst(Instruction* Inst)
     return false;
 }
 
-bool GenStrengthReduction::optimizeVectorBitCast(Function& F) const {
-    IRBuilder<> Builder(F.getContext());
-
-    bool Changed = false;
-    for (auto& BB : F) {
-        for (auto BI = BB.begin(), BE = BB.end(); BI != BE; /*EMPTY*/) {
-            BitCastInst* BC = dyn_cast<BitCastInst>(&*BI++);
-            if (!BC) continue;
-            // Skip non-element-wise bitcast.
-            VectorType* DstVTy = dyn_cast<VectorType>(BC->getType());
-            VectorType* SrcVTy = dyn_cast<VectorType>(BC->getOperand(0)->getType());
-            if (!DstVTy || !SrcVTy || DstVTy->getNumElements() != SrcVTy->getNumElements())
-                continue;
-            // Skip if it's not used only all extract-element.
-            bool ExactOnly = true;
-            for (auto User : BC->users()) {
-                if (dyn_cast<ExtractElementInst>(User)) continue;
-                ExactOnly = false;
-                break;
-            }
-            if (!ExactOnly)
-                continue;
-            // Autobots, transform and roll out!
-            Value* Src = BC->getOperand(0);
-            Type* DstEltTy = DstVTy->getElementType();
-            for (auto UI = BC->user_begin(), UE = BC->user_end(); UI != UE;
-                /*EMPTY*/) {
-                auto EEI = cast<ExtractElementInst>(*UI++);
-                Builder.SetInsertPoint(EEI);
-                auto NewVal = Builder.CreateExtractElement(Src, EEI->getIndexOperand());
-                NewVal = Builder.CreateBitCast(NewVal, DstEltTy);
-                EEI->replaceAllUsesWith(NewVal);
-                EEI->eraseFromParent();
-            }
-            BI = BC->eraseFromParent();
-            Changed = true;
-        }
-    }
-
-    return Changed;
-}
-
 IGC_INITIALIZE_PASS_BEGIN(GenStrengthReduction, "GenStrengthReduction",
     "GenStrengthReduction", false, false)
     IGC_INITIALIZE_PASS_END(GenStrengthReduction, "GenStrengthReduction",
@@ -3875,9 +4084,11 @@ IGC_INITIALIZE_PASS_BEGIN(GenStrengthReduction, "GenStrengthReduction",
     This class flatten small switch. For example,
 
     before optimization:
+        then153:
         switch i32 %115, label %else229 [
         i32 1, label %then214
         i32 2, label %then222
+        i32 3, label %then222 ; duplicate blocks are fine
         ]
 
         then214:                                          ; preds = %then153
@@ -3981,6 +4192,9 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
         if (br->getSuccessor(0) != MergeBlock)
             return false;
 
+        if (!BB->getUniquePredecessor())
+            return false;
+
         return true;
     };
 
@@ -4059,14 +4273,13 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
     // from BB to the InsertPoint.
     auto splice = [](BasicBlock* BB, Instruction* InsertPoint)
     {
-        Instruction* preIter = nullptr;
-        for (auto& iter : *BB)
+        for (auto II = BB->begin(), IE = BB->end(); II != IE; /* empty */)
         {
-            if (preIter)
-            {
-                preIter->moveBefore(InsertPoint);
-            }
-            preIter = cast<Instruction>(&iter);
+            auto* I = &*II++;
+            if (I->isTerminator())
+                return;
+
+            I->moveBefore(InsertPoint);
         }
     };
 
@@ -4105,6 +4318,8 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
     // connect the original block and the phi node block with a pass through branch
     builder.CreateBr(Dest);
 
+    SmallPtrSet<BasicBlock*, 4> Succs;
+
     // Remove the switch.
     BasicBlock* SelectBB = SI->getParent();
     for (unsigned i = 0, e = SI->getNumSuccessors(); i < e; ++i)
@@ -4114,7 +4329,9 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
         {
             continue;
         }
-        Succ->removePredecessor(SelectBB);
+
+        if (Succs.insert(Succ).second)
+            Succ->removePredecessor(SelectBB);
     }
     SI->eraseFromParent();
 
@@ -4251,6 +4468,210 @@ void FCmpPaternMatch::visitSelectInst(SelectInst& I)
 
 IGC_INITIALIZE_PASS_BEGIN(FlattenSmallSwitch, "flattenSmallSwitch", "flattenSmallSwitch", false, false)
 IGC_INITIALIZE_PASS_END(FlattenSmallSwitch, "flattenSmallSwitch", "flattenSmallSwitch", false, false)
+
+
+
+/*======================== SplitIndirectEEtoSel =============================
+
+This class changes extract element for small vectors to series of cmp+sel to avoid VxH mov.
+before:
+  %268 = mul nuw i32 %res.i2.i, 3
+  %269 = extractelement <12 x float> %234, i32 %268
+  %270 = add i32 %268, 1
+  %271 = extractelement <12 x float> %234, i32 %270
+  %272 = add i32 %268, 2
+  %273 = extractelement <12 x float> %234, i32 %272
+  %274 = extractelement <12 x float> %198, i32 %268
+  %275 = extractelement <12 x float> %198, i32 %270
+  %276 = extractelement <12 x float> %198, i32 %272
+
+after:
+  %250 = icmp eq i32 %res.i2.i, i16 1
+  %251 = select i1 %250, float %206, float %200
+  %252 = select i1 %250, float %208, float %202
+  %253 = select i1 %250, float %210, float %204
+  %254 = select i1 %250, float %48, float %32
+  %255 = select i1 %250, float %49, float %33
+  %256 = select i1 %250, float %50, float %34
+  %257 = icmp eq i32 %res.i2.i, i16 2
+  %258 = select i1 %257, float %214, float %251
+  %259 = select i1 %257, float %215, float %252
+  %260 = select i1 %257, float %216, float %253
+  %261 = select i1 %257, float %64, float %254
+  %262 = select i1 %257, float %65, float %255
+  %263 = select i1 %257, float %66, float %256
+
+  It is a bit similar to SimplifyConstant::isCmpSelProfitable for OCL, but not restricted to api.
+  And to GenSimplification::visitExtractElement() but not restricted to vec of 2, and later.
+  TODO: for known vectors check how many unique items there are.
+===========================================================================*/
+namespace {
+    class SplitIndirectEEtoSel : public FunctionPass, public llvm::InstVisitor<SplitIndirectEEtoSel>
+    {
+    public:
+        static char ID;
+        SplitIndirectEEtoSel() : FunctionPass(ID)
+        {
+            initializeSplitIndirectEEtoSelPass(*PassRegistry::getPassRegistry());
+        }
+        virtual llvm::StringRef getPassName() const { return "Split Indirect EE to ICmp Plus Sel"; }
+        virtual bool runOnFunction(Function& F);
+        void visitExtractElementInst(llvm::ExtractElementInst& I);
+    private:
+        bool isProfitableToSplit(uint64_t num, int64_t mul, int64_t add);
+        bool didSomething;
+    };
+
+} // namespace
+
+
+char SplitIndirectEEtoSel::ID = 0;
+FunctionPass* IGC::createSplitIndirectEEtoSelPass() { return new SplitIndirectEEtoSel(); }
+
+bool SplitIndirectEEtoSel::runOnFunction(Function& F)
+{
+    didSomething = false;
+    visit(F);
+    return didSomething;
+}
+
+bool SplitIndirectEEtoSel::isProfitableToSplit(uint64_t num, int64_t mul, int64_t add)
+{
+    /* Assumption:
+       Pass is profitable when: (X * cmp + Y * sel) < (ExecSize * mov VxH).
+    */
+
+    const int64_t assumedVXHCost = IGC_GET_FLAG_VALUE(SplitIndirectEEtoSelThreshold);
+    int64_t possibleCost = 0;
+
+    /* for: extractelement <4 x float> , %index
+       cost is (4 - 1)  * (icmp + sel) = 6;
+    */
+    possibleCost = ((int64_t)num -1) * 2;
+    if (possibleCost < assumedVXHCost)
+        return true;
+
+    /* for: extractelement <12 x float> , (mul %real_index, 3)
+       cost is ((12/3) - 1) * (icmp + sel) = 6;
+    */
+
+    if (mul > 0) // not tested negative options
+    {
+        int64_t differentOptions = 1 + ((int64_t)num - 1) / mul; // ceil(num/mul)
+        possibleCost = (differentOptions - 1) * 2;
+
+        if (possibleCost < assumedVXHCost)
+            return true;
+    }
+
+    return false;
+}
+
+void SplitIndirectEEtoSel::visitExtractElementInst(llvm::ExtractElementInst& I)
+{
+    using namespace llvm::PatternMatch;
+
+    VectorType* vecTy = I.getVectorOperandType();
+    uint64_t num = vecTy->getNumElements();
+    Type* eleType = vecTy->getElementType();
+
+    Value* vec = I.getVectorOperand();
+    Value* index = I.getIndexOperand();
+
+    // ignore constant index
+    if (dyn_cast<ConstantInt>(index))
+    {
+        return;
+    }
+
+    // ignore others for now (did not yet evaluate perf. impact)
+    if (!(eleType->isIntegerTy(32) || eleType->isFloatTy()))
+    {
+        return;
+    }
+
+    // used to calculate offsets
+    int64_t add = 0;
+    int64_t mul = 1;
+
+
+    /* strip mul/add from index calculation and remember it for later:
+       %268 = mul nuw i32 %res.i2.i, 3
+       %270 = add i32 %268, 1
+       %271 = extractelement <12 x float> %234, i32 %270
+    */
+    Value* Val1 = nullptr;
+    ConstantInt* ci_add = nullptr;
+    ConstantInt* ci_mul = nullptr;
+
+    auto pat1 = m_Add(m_Mul(m_Value(Val1), m_ConstantInt(ci_mul)), m_ConstantInt(ci_add));
+    auto pat2 = m_Mul(m_Value(Val1), m_ConstantInt(ci_mul));
+    // Some code shows `shl+or` instead of mul+add.
+    auto pat21 = m_Or(m_Shl(m_Value(Val1), m_ConstantInt(ci_mul)), m_ConstantInt(ci_add));
+    auto pat22 = m_Shl(m_Value(Val1), m_ConstantInt(ci_mul));
+
+    if (match(index, pat1) || match(index, pat2))
+    {
+        add = ci_add ? ci_add->getSExtValue() : 0;
+        mul = ci_mul ? ci_mul->getSExtValue() : 1;
+        index = Val1;
+    }
+    else if (match(index, pat21) || match(index, pat22))
+    {
+        add = ci_add ? ci_add->getSExtValue() : 0;
+        mul = ci_mul ? (1LL << ci_mul->getSExtValue()) : 1LL;
+        index = Val1;
+    }
+
+    if (!isProfitableToSplit(num, mul, add))
+        return;
+
+    Value* vTemp = llvm::UndefValue::get(eleType);
+    IRBuilder<> builder(I.getNextNode());
+
+    // returns true if we can skip this icmp, such as:
+    // icmp eq (add (mul %index, 3), 2), 1
+    // icmp eq (mul %index, 3), 1
+    auto canSafelySkipThis = [&](int64_t add, int64_t mul, int64_t & newIndex) {
+        if (mul)
+        {
+            newIndex -= add;
+            if ((newIndex % mul) != 0)
+                return true;
+            newIndex = newIndex / mul;
+        }
+        return false;
+    };
+
+    // Generate combinations
+    for (uint64_t elemIndex = 0; elemIndex < num; elemIndex++)
+    {
+        int64_t cmpIndex = elemIndex;
+
+        if (canSafelySkipThis(add, mul, cmpIndex))
+            continue;
+
+        // Those 2 might be different, when cmp will get altered by it's operands, but EE index stays the same
+        ConstantInt* cmpIndexCI = llvm::ConstantInt::get(builder.getInt32Ty(), (uint64_t)cmpIndex);
+        ConstantInt* eeiIndexCI = llvm::ConstantInt::get(builder.getInt32Ty(), (uint64_t)elemIndex);
+
+        Value* cmp = builder.CreateICmp(CmpInst::Predicate::ICMP_EQ, index, cmpIndexCI);
+        Value* subcaseEE = builder.CreateExtractElement(vec, eeiIndexCI);
+        Value* sel = builder.CreateSelect(cmp, subcaseEE, vTemp);
+        vTemp = sel;
+        didSomething = true;
+    }
+
+    // In theory there's no situation where we don't do something up to this point.
+    if (didSomething)
+    {
+        I.replaceAllUsesWith(vTemp);
+    }
+}
+
+
+IGC_INITIALIZE_PASS_BEGIN(SplitIndirectEEtoSel, "SplitIndirectEEtoSel", "SplitIndirectEEtoSel", false, false)
+IGC_INITIALIZE_PASS_END(SplitIndirectEEtoSel, "SplitIndirectEEtoSel", "SplitIndirectEEtoSel", false, false)
 
 ////////////////////////////////////////////////////////////////////////
 // LogicalAndToBranch trying to find logical AND like below:

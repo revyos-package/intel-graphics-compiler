@@ -80,6 +80,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///
 //===----------------------------------------------------------------------===//
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+
 #define DEBUG_TYPE "cmimpparam"
 #include "vc/GenXOpts/GenXOpts.h"
 #include "vc/GenXOpts/Utils/KernelInfo.h"
@@ -103,6 +105,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <set>
 #include <map>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 
@@ -232,7 +235,7 @@ private:
   // and also creates a new one that represents the total implicits for the
   // kernel as a whole (stored in a different object)
   ImplicitUseInfo &getImplicitUseInfoKernel(Function *F) {
-    assert(Kernels.count(F));
+    IGC_ASSERT(Kernels.count(F));
 
     if (KernelsInfo.count(F)) {
       // Kernel already processed
@@ -268,7 +271,7 @@ private:
       return GlobalsMap[IID];
 
     Type * Ty = getIntrinRetType(F->getContext(), IID);
-    assert(Ty);
+    IGC_ASSERT(Ty);
     GlobalVariable *NewVar = new GlobalVariable(
         *F->getParent(), Ty, false,
         GlobalVariable::InternalLinkage,
@@ -286,9 +289,11 @@ private:
       case GenXIntrinsic::genx_local_id:
       case GenXIntrinsic::genx_local_size:
       case GenXIntrinsic::genx_group_count:
-        return llvm::VectorType::get(llvm::Type::getInt32Ty(Context), 3);
+        return IGCLLVM::FixedVectorType::get(llvm::Type::getInt32Ty(Context),
+                                             3);
       case GenXIntrinsic::genx_local_id16:
-        return llvm::VectorType::get(llvm::Type::getInt16Ty(Context), 3);
+        return IGCLLVM::FixedVectorType::get(llvm::Type::getInt16Ty(Context),
+                                             3);
       default:
         // Should be able to extract the type from the intrinsic
         // directly as no overloading is required (if it is then
@@ -364,7 +369,9 @@ bool CMImpParam::runOnModule(Module &M) {
 // Replace the given instruction with a load from a global
 void CMImpParam::replaceWithGlobal(CallInst *CI, unsigned IID) {
   GlobalVariable *GV = getIIDGlobal(CI->getParent()->getParent(), IID);
-  LoadInst *Load = new LoadInst(GV, GV->getName() + ".val", CI);
+  LoadInst *Load =
+      new LoadInst(GV->getType()->getPointerElementType(), GV,
+                   GV->getName() + ".val", /* isVolatile */ false, CI);
   CI->replaceAllUsesWith(Load);
 }
 
@@ -460,8 +467,10 @@ bool CMImpParam::ConvertToOCLPayload(Module &M) {
   };
 
   // Convert genx_local_id -> zext(genx_local_id16)
-  Type *Ty32 = VectorType::get(Type::getInt32Ty(M.getContext()), 3);
-  Type *Ty16 = VectorType::get(Type::getInt16Ty(M.getContext()), 3);
+  Type *Ty32 =
+      IGCLLVM::FixedVectorType::get(Type::getInt32Ty(M.getContext()), 3);
+  Type *Ty16 =
+      IGCLLVM::FixedVectorType::get(Type::getInt16Ty(M.getContext()), 3);
   if (auto LIDFn = getFn(GenXIntrinsic::genx_local_id, Ty32)) {
     Function *LID16 = GenXIntrinsic::getGenXDeclaration(
         &M, GenXIntrinsic::genx_local_id16, Ty16);
@@ -482,7 +491,7 @@ bool CMImpParam::ConvertToOCLPayload(Module &M) {
 
 // Merge implicit uses from the supplied function with implicit set passed in
 void CMImpParam::MergeImplicits(ImplicitUseInfo &implicits, Function *F) {
-  assert(ImplicitsInfo.count(F) && "Function not found in implicits info map");
+  IGC_ASSERT(ImplicitsInfo.count(F) && "Function not found in implicits info map");
   auto IInfo = ImplicitsInfo[F];
   implicits.merge(*IInfo);
 }
@@ -524,7 +533,7 @@ void CMImpParam::PropagateImplicits(Function *F, Module &M,
 CallGraphNode *CMImpParam::ProcessKernel(Function *F) {
   LLVMContext &Context = F->getContext();
   
-  assert(Kernels.count(F) && "ProcessKernel invoked on non-kernel CallGraphNode");
+  IGC_ASSERT(Kernels.count(F) && "ProcessKernel invoked on non-kernel CallGraphNode");
 
   AttributeList AttrVec;
   const AttributeList &PAL = F->getAttributes();
@@ -561,7 +570,7 @@ CallGraphNode *CMImpParam::ProcessKernel(Function *F) {
   }
   
   FunctionType *NFTy = FunctionType::get(F->getReturnType(), ArgTys, false);
-  assert((NFTy != F->getFunctionType()) &&
+  IGC_ASSERT((NFTy != F->getFunctionType()) &&
          "type out of sync, expect bool arguments)");
   
   // Add any function attributes
@@ -601,13 +610,13 @@ CallGraphNode *CMImpParam::ProcessKernel(Function *F) {
     for (unsigned IID : IUI->getImplicits()) {
       // We known that for each IID implicit we've already added an arg
       // Rename the arg to something more meaningful here
-      assert(I2 != NF->arg_end() &&
+      IGC_ASSERT(I2 != NF->arg_end() &&
              "fewer parameters for new function than expected");
       I2->setName("__arg_" + GenXIntrinsic::getAnyName(IID, None));
 
       // Also insert a new store at the start of the function to the global
       // variable used for this implicit argument intrinsic
-      assert(GlobalsMap.count(IID) &&
+      IGC_ASSERT(GlobalsMap.count(IID) &&
              "no global associated with this imp arg intrinsic");
       new StoreInst(I2, GlobalsMap[IID], &FirstI);
 
@@ -643,7 +652,7 @@ CallGraphNode *CMImpParam::ProcessKernel(Function *F) {
           // First add all the current Kinds for explicit operands
           MDNode *TypeNode =
               dyn_cast<MDNode>(Node->getOperand(genx::KernelMDOp::ArgKinds));
-          assert(TypeNode);
+          IGC_ASSERT(TypeNode);
           for (unsigned i = 0; i < TypeNode->getNumOperands(); ++i)
             ArgKinds.push_back(TypeNode->getOperand(i));
           for (uint32_t Kind : ImpKinds)

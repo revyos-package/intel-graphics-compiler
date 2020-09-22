@@ -235,10 +235,10 @@ bool G4Verifier::dataHazardCheck(G4_Operand *dst, G4_Operand *src)
         return false;
     }
 
-    int dstReg = dstStart / GENX_GRF_REG_SIZ;
-    int dstRegNum = (dstEnd - dstStart + GENX_GRF_REG_SIZ) / GENX_GRF_REG_SIZ;
-    int srcReg = srcStart / GENX_GRF_REG_SIZ;
-    int srcRegNum = (srcEnd - srcStart + GENX_GRF_REG_SIZ) / GENX_GRF_REG_SIZ;
+    int dstReg = dstStart / numEltPerGRF(Type_UB);
+    int dstRegNum = (dstEnd - dstStart + numEltPerGRF(Type_UB)) / numEltPerGRF(Type_UB);
+    int srcReg = srcStart / numEltPerGRF(Type_UB);
+    int srcRegNum = (srcEnd - srcStart + numEltPerGRF(Type_UB)) / numEltPerGRF(Type_UB);
     int srcReg2 = -1;
 
     if (srcRegNum > 1)
@@ -275,8 +275,8 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             return;
         }
 
-        int dstStart = dst->getLinearizedStart() / GENX_GRF_REG_SIZ;
-        int dstEnd = dst->getLinearizedEnd() / GENX_GRF_REG_SIZ;
+        int dstStart = dst->getLinearizedStart() / numEltPerGRF(Type_UB);
+        int dstEnd = dst->getLinearizedEnd() / numEltPerGRF(Type_UB);
 
         for (int i = 0; i < inst->getNumSrc(); i++)
         {
@@ -286,8 +286,8 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             {
                 bool overlap = dataHazardCheck(dst, src);
 
-                int srcStart = src->getLinearizedStart() / GENX_GRF_REG_SIZ;
-                int srcEnd = src->getLinearizedEnd() / GENX_GRF_REG_SIZ;
+                int srcStart = src->getLinearizedStart() / numEltPerGRF(Type_UB);
+                int srcEnd = src->getLinearizedEnd() / numEltPerGRF(Type_UB);
                 if (dstEnd != dstStart ||
                     srcStart != srcEnd)  //Any operand is more than 2 GRF
                 {
@@ -310,13 +310,14 @@ void G4Verifier::verifySend(G4_INST* inst)
         if (inst->isEOT() && kernel.fg.builder->hasEOTGRFBinding())
         {
             auto checkEOTSrc = [](G4_SrcRegRegion* src) {
-                const unsigned int EOTStart = 112 * GENX_GRF_REG_SIZ;
+                const unsigned int EOTStart = 112 * numEltPerGRF(Type_UB);
                 if (src->isNullReg())
                 {
                     return true;
                 }
                 return src->getLinearizedStart() >= EOTStart;
             };
+
             if (kernel.getNumRegTotal() >= 128)
             {
                 MUST_BE_TRUE(checkEOTSrc(src0), "src0 for EOT send is not in r112-r127");
@@ -331,9 +332,9 @@ void G4Verifier::verifySend(G4_INST* inst)
         {
             if (src0->getBase()->isGreg() && src1 && src1->getBase()->isGreg())
             {
-                int src0Start = src0->getLinearizedStart() / GENX_GRF_REG_SIZ;
+                int src0Start = src0->getLinearizedStart() / numEltPerGRF(Type_UB);
                 int src0End = src0Start + inst->getMsgDesc()->MessageLength() - 1;
-                int src1Start = src1->getLinearizedStart() / GENX_GRF_REG_SIZ;
+                int src1Start = src1->getLinearizedStart() / numEltPerGRF(Type_UB);
                 int src1End = src1Start + inst->getMsgDesc()->extMessageLength() - 1;
                 bool noOverlap = src0End < src1Start ||
                     src1End < src0Start;
@@ -426,7 +427,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
         {
             if (opnd->isRightBoundSet() && !opnd->isNullReg())
             {
-                unsigned int correctRB = ((inst->getMsgDesc()->ResponseLength() + opnd->asDstRegRegion()->getRegOff()) * G4_GRF_REG_NBYTES) - 1;
+                unsigned int correctRB = ((inst->getMsgDesc()->ResponseLength() + opnd->asDstRegRegion()->getRegOff()) * numEltPerGRF(Type_UB)) - 1;
 
                 if (inst->getMsgDesc()->isScratchRW() == false &&
                     inst->getMsgDesc()->isOwordLoad() &&
@@ -435,7 +436,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 {
                     correctRB = opnd->getLeftBound() + 15;
                 }
-                else if (opnd->getTopDcl()->getByteSize() < G4_GRF_REG_NBYTES)
+                else if (opnd->getTopDcl()->getByteSize() < numEltPerGRF(Type_UB))
                 {
                     correctRB = opnd->getLeftBound() + opnd->getTopDcl()->getByteSize() - 1;
                 }
@@ -467,13 +468,13 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 int msgLength = (opnd == inst->getSrc(0)) ? inst->getMsgDesc()->MessageLength() : inst->getMsgDesc()->extMessageLength();
                 unsigned int numBytes = opnd->getTopDcl()->getByteSize();
                 unsigned int correctRB = 0;
-                if (numBytes < G4_GRF_REG_NBYTES)
+                if (numBytes < numEltPerGRF(Type_UB))
                 {
-                    correctRB = opnd->asSrcRegRegion()->getRegOff() * G4_GRF_REG_NBYTES + numBytes - 1;
+                    correctRB = opnd->asSrcRegRegion()->getRegOff() * numEltPerGRF(Type_UB) + numBytes - 1;
                 }
                 else
                 {
-                    correctRB = ((msgLength + opnd->asSrcRegRegion()->getRegOff()) * G4_GRF_REG_NBYTES) - 1;
+                    correctRB = ((msgLength + opnd->asSrcRegRegion()->getRegOff()) * numEltPerGRF(Type_UB)) - 1;
                 }
 
                 G4_Declare* parentDcl = opnd->getBase()->asRegVar()->getDeclare();
@@ -520,7 +521,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 newRgn.setRightBound(topdcl->getByteSize() - 1);
             }
 
-            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * G4_GRF_REG_NBYTES) &&
+            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * numEltPerGRF(Type_UB)) &&
                 (inst->isPseudoUse() == false))
             {
                 if (!(inst->opcode() == G4_pln && inst->getSrc(1) == opnd))
@@ -538,9 +539,10 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
             {
                 // For pln, src1 uses 2 GRFs if exec size <= 8
                 // and 4 GRFs if exec size == 16
-                newRgn.computeRightBound(inst->getExecSize() > 8 ? inst->getExecSize() : inst->getExecSize() * 2);
+                newRgn.computeRightBound(inst->getExecSize() > g4::SIMD8 ?
+                    inst->getExecSize() : G4_ExecSize(inst->getExecSize() * 2));
 
-                if (inst->getExecSize() > 8)
+                if (inst->getExecSize() > g4::SIMD8)
                 {
                     newRgn.setRightBound(newRgn.getRightBound() * 2 - newRgn.getLeftBound() + 1);
                 }
@@ -616,7 +618,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 newRgn.setRightBound(topdcl->getByteSize() - 1);
             }
 
-            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * G4_GRF_REG_NBYTES) &&
+            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * numEltPerGRF(Type_UB)) &&
                 (inst->isPseudoKill() == false))
             {
                 DEBUG_VERBOSE("Difference between left/right bound is greater than 2 GRF for dst region. Single non-send opnd cannot span 2 GRFs. lb = " <<
@@ -758,7 +760,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
             // alignment checks that can only be performed post RA
             bool threeSrcAlign16 = (inst->getNumSrc() == 3) && !inst->isSend() && !kernel.fg.builder->hasAlign1Ternary();
             bool nonScalar = (opnd->isSrcRegRegion() && !opnd->asSrcRegRegion()->isScalar()) ||
-                (opnd->isDstRegRegion() && inst->getExecSize() > 2);
+                (opnd->isDstRegRegion() && inst->getExecSize() > g4::SIMD2);
             bool isAssigned = opnd->isRegRegion() && opnd->getBase()->isRegVar() &&
                 opnd->getBase()->asRegVar()->isPhyRegAssigned();
             // allow replicated DF source opnd with <2;2,0> region
@@ -986,6 +988,11 @@ void G4Verifier::verifyOpcode(G4_INST* inst)
     {
         //ToDo: add more checks for psuedo inst after RA
         assert(!inst->isPseudoLogic() && "pseudo logic inst should be lowered before RA");
+    }
+
+    if (inst->getSaturate())
+    {
+        assert(inst->canSupportSaturate() && "saturate is set to true but instruction does not support saturation");
     }
 
 }

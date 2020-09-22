@@ -36,6 +36,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvmWrapper/IR/IRBuilder.h"
 #include "llvmWrapper/IR/InstrTypes.h"
 #include "llvmWrapper/IR/Module.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/Support/Alignment.h"
 
 #include <deque>
 #include <unordered_map>
@@ -318,14 +320,16 @@ namespace pktz
           JIT_MEM_CLIENT                         usage = MEM_CLIENT_INTERNAL);
 
         virtual CallInst* MASKED_LOAD(Value*         Ptr,
-          unsigned       Align,
+          unsigned       Alignment,
           Value*         Mask,
           Value*         PassThru = nullptr,
           const Twine&   Name = "",
           Type*          Ty = nullptr,
           JIT_MEM_CLIENT usage = MEM_CLIENT_INTERNAL)
         {
-          return IRB()->CreateMaskedLoad(Ptr, Align, Mask, PassThru, Name);
+          return IRB()->CreateMaskedLoad(
+              Ptr, IGCLLVM::getAlignmentValueIfNeeded(IGCLLVM::getAlign(Alignment)),
+              Mask, PassThru, Name);
         }
 
         LoadInst*  LOADV(Value* BasePtr, const std::initializer_list<Value*>& offset, const llvm::Twine& name = "");

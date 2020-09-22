@@ -130,9 +130,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/Support/TypeSize.h"
+
 #include <algorithm>
 #include <iterator>
 #include <numeric>
+#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace genx;
@@ -147,6 +151,7 @@ class GenXLowering : public FunctionPass {
   DominatorTree *DT = nullptr;
   const GenXSubtarget *ST = nullptr;
   SmallVector<Instruction *, 8> ToErase;
+  const DataLayout *DL = nullptr;
 
 public:
   static char ID;
@@ -233,6 +238,7 @@ bool GenXLowering::runOnFunction(Function &F) {
   ST = &getAnalysis<TargetPassConfig>()
             .getTM<GenXTargetMachine>()
             .getGenXSubtarget();
+  DL = &F.getParent()->getDataLayout();
   // First split any phi nodes with struct type.
   splitStructPhis(&F);
   // Create a list of basic blocks in the order we want to process them, before
@@ -282,7 +288,7 @@ bool GenXLowering::processTwoAddressOpnd(CallInst *CI) {
   // Skip write regions whose OpNum is 0.
   if (OpNum > 0) {
     Type *Ty = CI->getArgOperand(OpNum)->getType();
-    assert(Ty == CI->getType() && "two address op type out of sync");
+    IGC_ASSERT(Ty == CI->getType() && "two address op type out of sync");
 
     for (unsigned i = 0; i < CI->getNumArgOperands(); ++i) {
       auto Op = dyn_cast<Constant>(CI->getArgOperand(i));
@@ -318,7 +324,7 @@ static bool isNewLoadInst(CallInst *Inst) {
 // Find single wrregion user of load instruction.
 // Returns nullptr on failure.
 static CallInst *getLoadWrregion(CallInst *Inst) {
-  assert(isNewLoadInst(Inst) && "Expected new load intrinsics");
+  IGC_ASSERT(isNewLoadInst(Inst) && "Expected new load intrinsics");
   if (Inst->getNumUses() != 1)
     return nullptr;
 
@@ -332,7 +338,7 @@ static CallInst *getLoadWrregion(CallInst *Inst) {
 // Returns nullptr on failure.
 // TODO: maybe just lower every select to wrregion in lowerSelect?
 static SelectInst *getLoadSelect(CallInst *Inst) {
-  assert(isNewLoadInst(Inst) && "Expected new load intrinsics");
+  IGC_ASSERT(isNewLoadInst(Inst) && "Expected new load intrinsics");
   if (Inst->getNumUses() != 1)
     return nullptr;
 
@@ -408,7 +414,7 @@ static Value *generate1ChannelWrrregion(Value *Target, unsigned InitialOffset,
                                         Instruction *InsertBefore) {
   const DebugLoc &DL = Load->getDebugLoc();
   Type *LoadType = Load->getType();
-  unsigned LoadWidth = LoadType->getVectorNumElements();
+  unsigned LoadWidth = cast<VectorType>(LoadType)->getNumElements();
 
   Value *Pred =
       generatePredicateForLoadWrregion(OldPred, LoadWidth * SplitNum, LoadWidth,
@@ -470,7 +476,7 @@ static Value *generateNChannelWrregion(Value *Target, unsigned InitialOffset,
                                        Instruction *InsertBefore) {
   const DebugLoc &DL = Load->getDebugLoc();
   Type *LoadType = Load->getType();
-  unsigned LoadWidth = LoadType->getVectorNumElements();
+  unsigned LoadWidth = cast<VectorType>(LoadType)->getNumElements();
   unsigned ChannelWidth = LoadWidth / NumChannels;
   unsigned MaskOffset = ChannelWidth * SplitNum;
 
@@ -484,7 +490,8 @@ static Value *generateNChannelWrregion(Value *Target, unsigned InitialOffset,
 
   // Generate shuffle writes to the target.
   unsigned ElemByteSize = LoadType->getScalarSizeInBits() / 8;
-  Type *ShuffleType = VectorType::get(LoadType->getScalarType(), ChannelWidth);
+  Type *ShuffleType =
+      IGCLLVM::FixedVectorType::get(LoadType->getScalarType(), ChannelWidth);
   Region ChannelRdR(ShuffleType);
   Region ChannelWrR(ShuffleType);
   Value *ResChannel = nullptr;
@@ -744,14 +751,15 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   else if (AddrIdx != NONEED)
     WidthOperand = AddrIdx;
   else
-    llvm_unreachable("Cannot infer execution width of intrinsic (checked pred and addr operands)");
-  auto Width = CI->getArgOperand(WidthOperand)->getType()->getVectorNumElements();
+    IGC_ASSERT_EXIT_MESSAGE(0, "Cannot infer execution width of intrinsic (checked pred and addr operands)");
+  auto Width = cast<VectorType>(CI->getArgOperand(WidthOperand)->getType())
+                   ->getNumElements();
   unsigned TargetWidth = IsTyped ? 8 : 16;
   if (Width <= TargetWidth)
     return false;
-  assert((Width % TargetWidth) == 0);
+  IGC_ASSERT((Width % TargetWidth) == 0);
   auto NumSplits = Width / TargetWidth;
-  assert(NumSplits == 2 || NumSplits == 4);
+  IGC_ASSERT(NumSplits == 2 || NumSplits == 4);
   unsigned NumChannels = 1;
   if (MaskIdx != NONEED) {
     NumChannels = (unsigned)cast<ConstantInt>(CI->getArgOperand(MaskIdx))
@@ -773,9 +781,9 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   }
   const DebugLoc &DL = CI->getDebugLoc();
   Value *NewResult = nullptr;
-  if (CI->getType() &&
-	  CI->getType()->isVectorTy() &&
-	  CI->getType()->getVectorNumElements() >= Width * NumChannels * NumBlks) {
+  if (CI->getType() && CI->getType()->isVectorTy() &&
+      cast<VectorType>(CI->getType())->getNumElements() >=
+          Width * NumChannels * NumBlks) {
     if (DataIdx != NONEED)
       NewResult = CI->getArgOperand(DataIdx);
     else
@@ -820,8 +828,8 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
     // color.
     if (DataIdx != NONEED) {
       Value *V = CI->getArgOperand(DataIdx);
-      auto DataTy = VectorType::get(V->getType()->getScalarType(),
-                                    TargetWidth * NumChannels * NumBlks);
+      auto DataTy = IGCLLVM::FixedVectorType::get(
+          V->getType()->getScalarType(), TargetWidth * NumChannels * NumBlks);
       auto ElmSz = V->getType()->getScalarSizeInBits() / 8;
       Value *NewVec = UndefValue::get(DataTy);
       if (!isa<UndefValue>(V)) {
@@ -857,8 +865,9 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
       if (DataIdx != NONEED)
         DstTy = Args[DataIdx]->getType();
       else {
-        DstTy = VectorType::get(CI->getType()->getScalarType(),
-                                      TargetWidth * NumBlks * NumChannels);
+        DstTy =
+            IGCLLVM::FixedVectorType::get(CI->getType()->getScalarType(),
+                                          TargetWidth * NumBlks * NumChannels);
       }
       SmallVector<Type *, 4> Tys = {DstTy};
       if (PredIdx != NONEED)
@@ -901,8 +910,8 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
         NewResult = WrR.createWrRegion(NewResult, Gather, "join", CI, DL);
       }
     } else {
-      assert(CI->use_empty());
-      assert(DataIdx != NONEED);
+      IGC_ASSERT(CI->use_empty());
+      IGC_ASSERT(DataIdx != NONEED);
       // Create the target-wide scatter instructions.
       Type *Tys[] = {Args[PredIdx]->getType(), Args[AddrIdx]->getType(),
                      Args[DataIdx]->getType()};
@@ -974,7 +983,7 @@ bool GenXLowering::processInst(Instruction *Inst) {
     unsigned IntrinsicID = GenXIntrinsic::not_any_intrinsic;
     if (Function *Callee = CI->getCalledFunction()) {
       IntrinsicID = GenXIntrinsic::getAnyIntrinsicID(Callee);
-      assert(CI->getNumArgOperands() < GenXIntrinsicInfo::OPNDMASK);
+      IGC_ASSERT(CI->getNumArgOperands() < GenXIntrinsicInfo::OPNDMASK);
     }
        // split gather/scatter/atomic into the width legal to the target
     if (splitGatherScatter(CI, IntrinsicID))
@@ -1004,7 +1013,8 @@ bool GenXLowering::processInst(Instruction *Inst) {
     case GenXIntrinsic::genx_vload: {
       if (!Inst->use_empty()) {
         Value *Ptr = Inst->getOperand(0);
-        LoadInst *LI = new LoadInst(Ptr, "", /*volatile*/ true, Inst);
+        LoadInst *LI = new LoadInst(Ptr->getType()->getPointerElementType(),
+                                    Ptr, "", /*volatile*/ true, Inst);
         LI->takeName(Inst);
         LI->setDebugLoc(Inst->getDebugLoc());
         Inst->replaceAllUsesWith(LI);
@@ -1124,7 +1134,7 @@ bool GenXLowering::lowerRdPredRegion(Instruction *Inst) {
     }
   }
   unsigned Start = cast<ConstantInt>(Inst->getOperand(1))->getZExtValue();
-  unsigned Size = Inst->getType()->getVectorNumElements();
+  unsigned Size = cast<VectorType>(Inst->getType())->getNumElements();
   if (Ok) {
     // All uses in select/wrregion/rdpredregion/non-ALU intrinsic, so we can
     // keep the rdpredregion.  Check for uses in another rdpredregion; we need
@@ -1134,7 +1144,7 @@ bool GenXLowering::lowerRdPredRegion(Instruction *Inst) {
       auto User = *ui;
       unsigned UserStart =
           cast<ConstantInt>(User->getOperand(1))->getZExtValue();
-      unsigned UserSize = User->getType()->getVectorNumElements();
+      unsigned UserSize = cast<VectorType>(User->getType())->getNumElements();
       auto Combined =
           Region::createRdPredRegion(Inst->getOperand(0), Start + UserStart,
                                      UserSize, "", User, User->getDebugLoc());
@@ -1149,7 +1159,8 @@ bool GenXLowering::lowerRdPredRegion(Instruction *Inst) {
   // Convert input to vector of short.
   auto In = Inst->getOperand(0);
   Type *I16Ty = Type::getInt16Ty(Inst->getContext());
-  Type *InI16Ty = VectorType::get(I16Ty, In->getType()->getVectorNumElements());
+  Type *InI16Ty = IGCLLVM::FixedVectorType::get(
+      I16Ty, cast<VectorType>(In->getType())->getNumElements());
   auto InI16 = CastInst::Create(Instruction::ZExt, In, InI16Ty,
                                 Inst->getName() + ".lower1", Inst);
   InI16->setDebugLoc(DL);
@@ -1187,21 +1198,21 @@ bool GenXLowering::lowerWrPredRegion(Instruction *Inst) {
   // Convert "old value" input to vector of short.
   auto OldVal = Inst->getOperand(0);
   Type *I16Ty = Type::getInt16Ty(Inst->getContext());
-  Type *OldValI16Ty =
-      VectorType::get(I16Ty, OldVal->getType()->getVectorNumElements());
+  Type *OldValI16Ty = IGCLLVM::FixedVectorType::get(
+      I16Ty, cast<VectorType>(OldVal->getType())->getNumElements());
   auto OldValI16 = CastInst::Create(Instruction::ZExt, OldVal, OldValI16Ty,
                                     Inst->getName() + ".lower1", Inst);
   OldValI16->setDebugLoc(DL);
   // Convert "new value" input to vector of short.
-  Type *NewValI16Ty =
-      VectorType::get(I16Ty, NewVal->getType()->getVectorNumElements());
+  Type *NewValI16Ty = IGCLLVM::FixedVectorType::get(
+      I16Ty, cast<VectorType>(NewVal->getType())->getNumElements());
   auto NewValI16 = CastInst::Create(Instruction::ZExt, NewVal, NewValI16Ty,
                                     Inst->getName() + ".lower2", Inst);
   NewValI16->setDebugLoc(DL);
   // Use wrregion to write the new value into the old value.
   Region R(OldValI16);
   R.getSubregion(cast<ConstantInt>(Inst->getOperand(2))->getZExtValue(),
-                 NewValI16Ty->getVectorNumElements());
+                 cast<VectorType>(NewValI16Ty)->getNumElements());
   auto Wr = R.createWrRegion(OldValI16, NewValI16, Inst->getName() + ".lower3",
                              Inst, DL);
   // Convert back to predicate.
@@ -1231,7 +1242,7 @@ bool GenXLowering::lowerInsertElement(Instruction *Inst) {
   // worry about what the original vector is (usually undef) since it will be
   // overwritten or undef
   VectorType *VT = dyn_cast<VectorType>(Inst->getType());
-  assert(VT);
+  IGC_ASSERT(VT);
   unsigned NumElements = VT->getNumElements();
   const DebugLoc &DL = Inst->getDebugLoc();
   if (NumElements == 1) {
@@ -1256,8 +1267,8 @@ bool GenXLowering::lowerInsertElement(Instruction *Inst) {
     // insertelement, and cast it back again. All this gets further lowered
     // subsequently.
     auto I16Ty = Type::getIntNTy(Inst->getContext(), 16);
-    auto VecTy =
-        VectorType::get(I16Ty, Inst->getType()->getVectorNumElements());
+    auto VecTy = IGCLLVM::FixedVectorType::get(
+        I16Ty, cast<VectorType>(Inst->getType())->getNumElements());
     auto CastVec =
         CastInst::Create(Instruction::ZExt, Inst->getOperand(0), VecTy,
                          Inst->getOperand(0)->getName() + ".casti16", Inst);
@@ -1308,8 +1319,9 @@ bool GenXLowering::lowerExtractElement(Instruction *Inst) {
     // extractelement, and cast it back again. All this gets further lowered
     // subsequently.
     auto I16Ty = Type::getIntNTy(Inst->getContext(), 16);
-    auto VecTy = VectorType::get(
-        I16Ty, Inst->getOperand(0)->getType()->getVectorNumElements());
+    auto VecTy = IGCLLVM::FixedVectorType::get(
+        I16Ty,
+        cast<VectorType>(Inst->getOperand(0)->getType())->getNumElements());
     auto CastVec =
         CastInst::Create(Instruction::ZExt, Inst->getOperand(0), VecTy,
                          Inst->getOperand(0)->getName() + ".casti16", Inst);
@@ -1337,7 +1349,7 @@ bool GenXLowering::lowerExtractElement(Instruction *Inst) {
 Value *GenXLowering::scaleInsertExtractElementIndex(Value *IdxVal, Type *ElTy,
                                                     Instruction *InsertBefore) {
   // Do the cast and multiply.
-  unsigned ElementBytes = ElTy->getPrimitiveSizeInBits() / 8;
+  unsigned ElementBytes = DL->getTypeSizeInBits(ElTy) / genx::ByteBits;
   IntegerType *I16Ty = Type::getInt16Ty(IdxVal->getContext());
   if (ConstantInt *CI = dyn_cast<ConstantInt>(IdxVal))
     return ConstantInt::get(I16Ty, CI->getSExtValue() * ElementBytes);
@@ -1407,8 +1419,10 @@ bool GenXLowering::lowerTrunc(Instruction *Inst) {
   if (NumElements > 1 && OutElementTy->isIntegerTy(1)) {
     IRBuilder<> Builder(Inst);
     unsigned N = NumElements;
-    Value *Os = ConstantVector::getSplat(N, ConstantInt::get(InElementTy, 1));
-    Value *Zs = ConstantVector::getSplat(N, ConstantInt::get(InElementTy, 0));
+    Value *Os = ConstantVector::getSplat(IGCLLVM::getElementCount(N),
+                                         ConstantInt::get(InElementTy, 1));
+    Value *Zs = ConstantVector::getSplat(IGCLLVM::getElementCount(N),
+                                         ConstantInt::get(InElementTy, 0));
     auto V = Builder.CreateAnd(InValue, Os);
     if (auto I = dyn_cast<Instruction>(V))
       I->setDebugLoc(Inst->getDebugLoc());
@@ -1420,14 +1434,14 @@ bool GenXLowering::lowerTrunc(Instruction *Inst) {
     return true;
   }
 
-  assert(OutElementTy->getPrimitiveSizeInBits());
+  IGC_ASSERT(OutElementTy->getPrimitiveSizeInBits());
   unsigned Stride = InElementTy->getPrimitiveSizeInBits() /
                     OutElementTy->getPrimitiveSizeInBits();
   // Create the new bitcast.
-  Instruction *BC =
-      CastInst::Create(Instruction::BitCast, InValue,
-                       VectorType::get(OutElementTy, Stride * NumElements),
-                       Inst->getName(), Inst /*InsertBefore*/);
+  Instruction *BC = CastInst::Create(
+      Instruction::BitCast, InValue,
+      IGCLLVM::FixedVectorType::get(OutElementTy, Stride * NumElements),
+      Inst->getName(), Inst /*InsertBefore*/);
   BC->setDebugLoc(Inst->getDebugLoc());
   // Create the new rdregion.
   Region R(BC);
@@ -1466,7 +1480,7 @@ bool GenXLowering::lowerCast(Instruction *Inst) {
       OneVal = 1;
       break;
     default:
-      assert(0 && "unknown opcode in lowerCast");
+      IGC_ASSERT(0 && "unknown opcode in lowerCast");
     }
 
     Instruction *NewInst;
@@ -1496,7 +1510,7 @@ bool GenXLowering::lowerCast(Instruction *Inst) {
  *          if we can bale into resulting wrr later
  */
 bool GenXLowering::lowerSelect(SelectInst *SI) {
-  assert(SI);
+  IGC_ASSERT(SI);
 
   if (!isa<VectorType>(SI->getOperand(0)->getType()))
     return false; // scalar selector
@@ -1716,7 +1730,7 @@ bool GenXLowering::lowerBoolShuffle(ShuffleVectorInst *SI) {
   // 1. Check for a slice.
   int SliceStart = SVA.getAsSlice();
   if (SliceStart >= 0) {
-    unsigned Width = SI->getType()->getVectorNumElements();
+    unsigned Width = cast<VectorType>(SI->getType())->getNumElements();
     auto RPR = Region::createRdPredRegion(SI->getOperand(0), SliceStart, Width,
                                           "", SI, SI->getDebugLoc());
     RPR->takeName(SI);
@@ -1768,11 +1782,13 @@ bool GenXLowering::lowerBoolShuffle(ShuffleVectorInst *SI) {
  */
 bool GenXLowering::lowerBoolSplat(ShuffleVectorInst *SI, Value *In,
                                   unsigned Idx) {
-  unsigned Width = SI->getType()->getVectorNumElements();
+  unsigned Width = cast<VectorType>(SI->getType())->getNumElements();
   if (isa<VectorType>(In->getType())) {
     IRBuilder<> B(SI);
-    Constant *C1 = ConstantVector::getSplat(Width, B.getInt16(1));
-    Constant *C0 = ConstantVector::getSplat(Width, B.getInt16(0));
+    Constant *C1 = ConstantVector::getSplat(IGCLLVM::getElementCount(Width),
+                                            B.getInt16(1));
+    Constant *C0 = ConstantVector::getSplat(IGCLLVM::getElementCount(Width),
+                                            B.getInt16(0));
     Value *V = B.CreateSelect(In, C1, C0);
     Region R(V);
     R.NumElements = Width;
@@ -1799,13 +1815,15 @@ bool GenXLowering::lowerBoolSplat(ShuffleVectorInst *SI, Value *In,
     for (unsigned i = 0; i != 2; ++i) {
       auto Opnd = Cmp->getOperand(i);
       if (auto C = dyn_cast<Constant>(Opnd)) {
-        CmpOpnds[i] = ConstantVector::getSplat(R.NumElements, C);
+        CmpOpnds[i] = ConstantVector::getSplat(
+            IGCLLVM::getElementCount(R.NumElements), C);
         continue;
       }
       if (!isa<VectorType>(Opnd->getType())) {
-        auto NewBC = CastInst::Create(Instruction::BitCast, Opnd,
-                                      VectorType::get(Opnd->getType(), 1),
-                                      Opnd->getName() + ".bc", Cmp);
+        auto NewBC =
+            CastInst::Create(Instruction::BitCast, Opnd,
+                             IGCLLVM::FixedVectorType::get(Opnd->getType(), 1),
+                             Opnd->getName() + ".bc", Cmp);
         NewBC->setDebugLoc(Cmp->getDebugLoc());
         Opnd = NewBC;
       }
@@ -1850,7 +1868,8 @@ bool GenXLowering::lowerBoolSplat(ShuffleVectorInst *SI, Value *In,
                                   SI->getName() + ".sel");
   if (auto Inst = dyn_cast<Instruction>(Val))
     Inst->setDebugLoc(SI->getDebugLoc());
-  Val = Builder.CreateBitCast(Val, VectorType::get(Builder.getInt16Ty(), 1));
+  Val = Builder.CreateBitCast(
+      Val, IGCLLVM::FixedVectorType::get(Builder.getInt16Ty(), 1));
   if (auto Inst = dyn_cast<Instruction>(Val))
     Inst->setDebugLoc(SI->getDebugLoc());
 
@@ -1878,15 +1897,16 @@ void GenXLowering::lowerShuffleSplat(ShuffleVectorInst *SI,
   // This is a splat. Turn it into a splatting rdregion.
   if (!isa<VectorType>(Splat.Input->getType())) {
     // The input is a scalar rather than a 1-vector. Bitcast it to a 1-vector.
-    auto *BC = CastInst::Create(Instruction::BitCast, Splat.Input,
-                                VectorType::get(Splat.Input->getType(), 1),
-                                SI->getName(), SI);
+    auto *BC = CastInst::Create(
+        Instruction::BitCast, Splat.Input,
+        IGCLLVM::FixedVectorType::get(Splat.Input->getType(), 1), SI->getName(),
+        SI);
     BC->setDebugLoc(SI->getDebugLoc());
     Splat.Input = BC;
   }
   // Create a rdregion with a stride of 0 to represent this splat
   Region R(Splat.Input);
-  R.NumElements = SI->getType()->getVectorNumElements();
+  R.NumElements = cast<VectorType>(SI->getType())->getNumElements();
   R.Width = R.NumElements;
   R.Stride = 0;
   R.VStride = 0;
@@ -1919,10 +1939,11 @@ bool GenXLowering::lowerShuffle(ShuffleVectorInst *SI) {
 
 // Lower those shufflevector that can be implemented efficiently as select.
 bool GenXLowering::lowerShuffleToSelect(ShuffleVectorInst *SI) {
-  int NumElements = SI->getType()->getVectorNumElements();
+  int NumElements = cast<VectorType>(SI->getType())->getNumElements();
   int NumOpnd = SI->getNumOperands();
   for (int i = 0; i < NumOpnd; ++i) {
-    if (SI->getOperand(i)->getType()->getVectorNumElements() != NumElements)
+    if (cast<VectorType>(SI->getOperand(i)->getType())->getNumElements() !=
+        NumElements)
       return false;
   }
   for (int i = 0; i < NumElements; ++i) {
@@ -1976,7 +1997,7 @@ void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
                        MaskVals.end())) {
     int Idx = It - MaskVals.begin();
     auto OpRegion = Analyzer.getMaskRegionPrefix(Idx);
-    assert(OpRegion.R.NumElements > 0 &&
+    IGC_ASSERT(OpRegion.R.NumElements > 0 &&
            "should've match at least 1 element region");
     Region WrRegion(SI);
     WrRegion.Offset = Idx * WrRegion.ElementBytes;
@@ -1990,7 +2011,7 @@ void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
   std::transform(
       RdRegions.begin(), RdRegions.end(), std::back_inserter(RdRegionInsts),
       [SI](ShuffleVectorAnalyzer::OperandRegionInfo &OpRegion) -> Value * {
-        if (OpRegion.Op->getType()->getVectorNumElements() ==
+        if (cast<VectorType>(OpRegion.Op->getType())->getNumElements() ==
             OpRegion.R.NumElements)
           return OpRegion.Op;
         return OpRegion.R.createRdRegion(
@@ -2002,8 +2023,9 @@ void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
   Value *Result;
   if (WrRegions.size() == 0)
     Result = UndefValue::get(SI->getType());
-  else if (WrRegions.size() == 1 && WrRegions.front().NumElements ==
-                                        SI->getType()->getVectorNumElements())
+  else if (WrRegions.size() == 1 &&
+           WrRegions.front().NumElements ==
+               cast<VectorType>(SI->getType())->getNumElements())
     Result = RdRegionInsts.back();
   else {
     auto WrRegionArgs = zip(WrRegions, RdRegionInsts);
@@ -2084,7 +2106,7 @@ Instruction *llvm::genx::convertShlShr(Instruction *Inst) {
   // We have Shl+AShr or Shl+LShr that can be turned into trunc+sext/zext.
   Type *ConvTy = Type::getIntNTy(Inst->getContext(), RemainingBits);
   if (auto VT = dyn_cast<VectorType>(Inst->getType()))
-    ConvTy = VectorType::get(ConvTy, VT->getNumElements());
+    ConvTy = IGCLLVM::FixedVectorType::get(ConvTy, VT->getNumElements());
   auto Trunc = CastInst::Create(Instruction::Trunc, Shl->getOperand(0), ConvTy,
                                 "", Inst);
   Trunc->takeName(Shl);
@@ -2310,19 +2332,23 @@ bool GenXLowering::lowerTrap(CallInst *CI) {
   IRBuilder<> Builder(CI);
   auto &Ctx = CI->getContext();
   unsigned EMWidth = 32;
-  Type *ArgTypes[] = {VectorType::get(Type::getInt1Ty(Ctx), EMWidth),
-    VectorType::get(Type::getInt16Ty(Ctx), EMWidth)};
+  Type *ArgTypes[] = {
+      IGCLLVM::FixedVectorType::get(Type::getInt1Ty(Ctx), EMWidth),
+      IGCLLVM::FixedVectorType::get(Type::getInt16Ty(Ctx), EMWidth)};
   auto Fn = GenXIntrinsic::getGenXDeclaration(M,
     GenXIntrinsic::genx_raw_send_noresult, ArgTypes);
   SmallVector<Value *, 8> Args;
   // send
   Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0));
   // predicate all lanes
-  Args.push_back(ConstantVector::getSplat(EMWidth, ConstantInt::getTrue(Ctx)));
+  Args.push_back(ConstantVector::getSplat(IGCLLVM::getElementCount(EMWidth),
+                                          ConstantInt::getTrue(Ctx)));
   // EOT
   Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0x27));
   Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0x02000010));
-  Args.push_back(ConstantVector::getSplat(EMWidth, Constant::getNullValue(Type::getInt16Ty(Ctx))));
+  Args.push_back(
+      ConstantVector::getSplat(IGCLLVM::getElementCount(EMWidth),
+                               Constant::getNullValue(Type::getInt16Ty(Ctx))));
   Builder.CreateCall(Fn, Args);
   ToErase.push_back(CI);
 
@@ -2337,7 +2363,7 @@ bool GenXLowering::lowerCtpop(CallInst *CI) {
   Type *Int32Ty = IntegerType::getInt32Ty(CI->getContext());
   Type *RetTy = nullptr;
   if (auto *VT = dyn_cast<VectorType>(CI->getType()))
-    RetTy = VectorType::get(Int32Ty, VT->getNumElements());
+    RetTy = IGCLLVM::FixedVectorType::get(Int32Ty, VT->getNumElements());
   else
     RetTy = Int32Ty;
 
@@ -2438,7 +2464,7 @@ bool GenXLowering::lowerUnorderedFCmpInst(FCmpInst *Inst) {
     return false;
 
   // For UNO and UEQ we have replacement in lowerFCmpInst.
-  assert(Pred != CmpInst::FCMP_UNO && Pred != CmpInst::FCMP_UEQ);
+  IGC_ASSERT(Pred != CmpInst::FCMP_UNO && Pred != CmpInst::FCMP_UEQ);
 
   CmpInst *InverseFCmp = CmpInst::Create(
       Inst->getOpcode(), CmpInst::getInversePredicate(Pred),
@@ -2532,7 +2558,7 @@ bool GenXLowering::widenByteOp(Instruction *Inst) {
     // the wrong size case by adding an rdpredregion, but then we would need
     // to ensure that GenXLegalization can cope with an arbitrary size
     // rdpredregion.)
-    if (R.Mask->getType()->getVectorNumElements() != R.NumElements)
+    if (cast<VectorType>(R.Mask->getType())->getNumElements() != R.NumElements)
       return false;
     // Create the rdregion and select.
     auto NewRd =
@@ -2594,9 +2620,10 @@ bool GenXLowering::widenByteOp(Instruction *Inst) {
   else if (isa<SelectInst>(Inst))
     StartIdx = 1;
   // Extend the operands.
-  auto ExtTy = VectorType::get(
+  auto ExtTy = IGCLLVM::FixedVectorType::get(
       Type::getInt16Ty(Inst->getContext()),
-      Inst->getOperand(StartIdx)->getType()->getVectorNumElements());
+      cast<VectorType>(Inst->getOperand(StartIdx)->getType())
+          ->getNumElements());
   SmallVector<Value *, 4> Opnds;
   for (unsigned Idx = 0; Idx != EndIdx; ++Idx) {
     Value *Opnd = Inst->getOperand(Idx);
@@ -2623,7 +2650,7 @@ bool GenXLowering::widenByteOp(Instruction *Inst) {
   else if (isa<SelectInst>(Inst))
     NewInst = SelectInst::Create(Opnds[0], Opnds[1], Opnds[2], "", Inst);
   else
-    llvm_unreachable("unhandled instruction in widenByteOp");
+    IGC_ASSERT_EXIT_MESSAGE(0, "unhandled instruction in widenByteOp");
   NewInst->takeName(Inst);
   NewInst->setDebugLoc(Inst->getDebugLoc());
   if (ExtendedIsZero) {
@@ -2671,7 +2698,7 @@ static bool breakConstantVector(unsigned i, Instruction *CurInst,
     auto Inst = S->getAsInstruction();
     Inst->setDebugLoc(CurInst->getDebugLoc());
     Inst->insertBefore(InsertPt);
-    Type *NewTy = VectorType::get(Inst->getType(), 1);
+    Type *NewTy = IGCLLVM::FixedVectorType::get(Inst->getType(), 1);
     Inst = CastInst::Create(Instruction::CastOps::BitCast, Inst, NewTy, "",
                             CurInst);
     Inst->setDebugLoc(CurInst->getDebugLoc());
@@ -2908,13 +2935,13 @@ bool LoadStoreResolver::emitGather() {
   Type *ValTy = LI->getType();
   if (ValTy->isPointerTy())
     ValTy = Builder.getIntNTy(getValueSizeInBits(ValTy));
-  Type *DataTy = VectorType::get(ValTy, 1);
+  Type *DataTy = IGCLLVM::FixedVectorType::get(ValTy, 1);
   if (SIMD > 1)
-    DataTy = VectorType::get(Builder.getInt32Ty(), SIMD);
+    DataTy = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), SIMD);
   Value *OldVal = UndefValue::get(DataTy);
 
   // Offset.
-  Type *EltOffsetTy = VectorType::get(Builder.getInt32Ty(), SIMD);
+  Type *EltOffsetTy = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), SIMD);
   Value *EltOffset = Constant::getNullValue(EltOffsetTy);
   if (SIMD > 1) {
     SmallVector<uint32_t, 2> Offsets(SIMD);
@@ -2926,14 +2953,15 @@ bool LoadStoreResolver::emitGather() {
 
   // Arguments.
   Value *Args[] = {
-      Constant::getAllOnesValue(VectorType::get(Builder.getInt1Ty(), SIMD)),
-      Builder.getInt32(NBlocksLog2),   // log[2](NBlocks)
-      Builder.getInt16(0),             // scale
+      Constant::getAllOnesValue(
+          IGCLLVM::FixedVectorType::get(Builder.getInt1Ty(), SIMD)),
+      Builder.getInt32(NBlocksLog2), // log[2](NBlocks)
+      Builder.getInt16(0),           // scale
       Builder.getInt32(visa::getReservedSurfaceIndex(
-                      PreDefined_Surface::PREDEFINED_SURFACE_T255)), // surface
-      Addr,                            // global offset
-      EltOffset,                       // element offset
-      OldVal                           // old value
+          PreDefined_Surface::PREDEFINED_SURFACE_T255)), // surface
+      Addr,                                              // global offset
+      EltOffset,                                         // element offset
+      OldVal                                             // old value
   };
 
   // Overload with return type, predicate type and element offset type
@@ -2971,10 +2999,10 @@ bool LoadStoreResolver::emitScatter() {
   Type *ValTy = (SIMD > 1) ? Builder.getInt32Ty() : Val->getType();
   if (ValTy->isPointerTy())
     ValTy = Builder.getIntNTy(getValueSizeInBits(ValTy));
-  Val = Builder.CreateBitCast(Val, VectorType::get(ValTy, SIMD));
+  Val = Builder.CreateBitCast(Val, IGCLLVM::FixedVectorType::get(ValTy, SIMD));
 
   // Offset.
-  Type *EltOffsetTy = VectorType::get(Builder.getInt32Ty(), SIMD);
+  Type *EltOffsetTy = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), SIMD);
   Value *EltOffset = Constant::getNullValue(EltOffsetTy);
   if (SIMD > 1) {
     SmallVector<uint32_t, 2> Offsets(SIMD);
@@ -2986,14 +3014,15 @@ bool LoadStoreResolver::emitScatter() {
 
   // Arguments.
   Value *Args[] = {
-      Constant::getAllOnesValue(VectorType::get(Builder.getInt1Ty(), SIMD)),
-      Builder.getInt32(NBlocksLog2),   // log[2](NBlocks)
-      Builder.getInt16(0),             // scale
+      Constant::getAllOnesValue(
+          IGCLLVM::FixedVectorType::get(Builder.getInt1Ty(), SIMD)),
+      Builder.getInt32(NBlocksLog2), // log[2](NBlocks)
+      Builder.getInt16(0),           // scale
       Builder.getInt32(visa::getReservedSurfaceIndex(
-                      PreDefined_Surface::PREDEFINED_SURFACE_T255)), // surface
-      Addr,                            // global offset
-      EltOffset,                       // element offset
-      Val                              // value to write
+          PreDefined_Surface::PREDEFINED_SURFACE_T255)), // surface
+      Addr,                                              // global offset
+      EltOffset,                                         // element offset
+      Val                                                // value to write
   };
 
   // Overload with predicate type, element offset type, value to write type.
@@ -3012,7 +3041,7 @@ bool LoadStoreResolver::emitScatter() {
 //
 static unsigned getBlockCount(Type *Ty) {
   unsigned NumBytes = Ty->getPrimitiveSizeInBits() / 8;
-  assert(NumBytes <= 8 && "out of sync");
+  IGC_ASSERT(NumBytes <= 8 && "out of sync");
 
   // If this is N = 2 byte data, use 2 blocks;
   // otherwise, use 1 block of N bytes.
@@ -3030,13 +3059,14 @@ bool LoadStoreResolver::emitSVMGather() {
   Addr = Builder.CreatePtrToInt(Addr, IntTy);
   if (NBits == 32)
     Addr = Builder.CreateZExt(Addr, Builder.getInt64Ty());
-  Addr = Builder.CreateBitCast(Addr, VectorType::get(Addr->getType(), 1));
+  Addr = Builder.CreateBitCast(
+      Addr, IGCLLVM::FixedVectorType::get(Addr->getType(), 1));
 
   // The old value is undef.
   Type *ValTy = LI->getType();
   if (ValTy->isPointerTy())
     ValTy = Builder.getIntNTy(getValueSizeInBits(ValTy));
-  Type *DataTy = VectorType::get(ValTy, 1);
+  Type *DataTy = IGCLLVM::FixedVectorType::get(ValTy, 1);
   Value *OldVal = UndefValue::get(DataTy);
 
   // Num of blocks.
@@ -3044,7 +3074,8 @@ bool LoadStoreResolver::emitSVMGather() {
   unsigned NBlocksLog2 = llvm::Log2_32(NBlocks);
 
   Value *Args[] = {
-      Constant::getAllOnesValue(VectorType::get(Builder.getInt1Ty(), 1)),
+      Constant::getAllOnesValue(
+          IGCLLVM::FixedVectorType::get(Builder.getInt1Ty(), 1)),
       Builder.getInt32(NBlocksLog2), // log2(num_of_blocks)
       Addr,                          // addresses
       OldVal                         // old value
@@ -3073,7 +3104,8 @@ bool LoadStoreResolver::emitSVMScatter() {
   Addr = Builder.CreatePtrToInt(Addr, IntTy);
   if (NBits == 32)
     Addr = Builder.CreateZExt(Addr, Builder.getInt64Ty());
-  Addr = Builder.CreateBitCast(Addr, VectorType::get(Addr->getType(), 1));
+  Addr = Builder.CreateBitCast(
+      Addr, IGCLLVM::FixedVectorType::get(Addr->getType(), 1));
 
   // data to write.
   Value *Val = SI->getValueOperand();
@@ -3082,14 +3114,15 @@ bool LoadStoreResolver::emitSVMScatter() {
     ValTy = Builder.getIntNTy(getValueSizeInBits(ValTy));
     Val = Builder.CreatePtrToInt(Val, ValTy);
   }
-  Val = Builder.CreateBitCast(Val, VectorType::get(ValTy, 1));
+  Val = Builder.CreateBitCast(Val, IGCLLVM::FixedVectorType::get(ValTy, 1));
 
   // Num of blocks.
   unsigned NBlocks = getBlockCount(Val->getType());
   unsigned NBlocksLog2 = llvm::Log2_32(NBlocks);
 
   Value *Args[] = {
-      Constant::getAllOnesValue(VectorType::get(Builder.getInt1Ty(), 1)),
+      Constant::getAllOnesValue(
+          IGCLLVM::FixedVectorType::get(Builder.getInt1Ty(), 1)),
       Builder.getInt32(NBlocksLog2), // log2(num_of_blocks)
       Addr,                          // addresses
       Val                            // value to write

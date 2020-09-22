@@ -191,8 +191,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
-#include "llvmWrapper/IR/InstrTypes.h"
 #include "vc/GenXOpts/Utils/KernelInfo.h"
+
+#include "Probe/Assertion.h"
+#include "llvmWrapper/IR/InstrTypes.h"
+#include "llvmWrapper/IR/Instructions.h"
+
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -205,6 +209,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+
 #include <algorithm>
 #include <vector>
 
@@ -268,6 +273,20 @@ namespace {
         : Phi(Phi), IncomingIdx(IncomingIdx) {}
   };
 
+  enum CopyType { PHICOPY, PHICOPY_BRANCHING_JP, TWOADDRCOPY };
+
+  struct CopyData {
+    SimpleValue Dest;
+    SimpleValue Source;
+    Use *UseInDest;
+    Instruction *InsertPoint;
+    CopyType CopyT;
+    CopyData(SimpleValue Dest, SimpleValue Source, Use *UseInDest,
+             Instruction *InsertPoint, CopyType CopyT)
+        : Dest(Dest), Source(Source), UseInDest(UseInDest),
+          InsertPoint(InsertPoint), CopyT(CopyT) {}
+  };
+
   // GenX coalescing pass
   class GenXCoalescing : public FunctionGroupPass {
   private:
@@ -279,6 +298,7 @@ namespace {
     std::vector<Candidate> CopyCandidates;
     std::vector<Candidate> NormalCandidates;
     std::vector<CallInst*> Callables;
+    std::vector<CopyData> ToCopy;
   public:
     static char ID;
     explicit GenXCoalescing() : FunctionGroupPass(ID) {}
@@ -359,6 +379,8 @@ namespace {
                                   Instruction *InsertBefore);
     void showCoalesceFail(SimpleValue V, const DebugLoc &DL, const char *Intro,
                           LiveRange *DestLR, LiveRange *SourceLR);
+    void applyCopies();
+    void applyCopy(CopyData &CD);
     // Helpers
     DominatorTree *getDomTree(Function *F) { return DTWrapper->getDomTree(F); }
   };
@@ -435,9 +457,12 @@ bool GenXCoalescing::runOnFunctionGroup(FunctionGroup &FG)
   coalesceCallables();
   coalesceOutputArgs(&FG);
 
+  applyCopies();
+
   CopyCandidates.clear();
   NormalCandidates.clear();
   Callables.clear();
+  ToCopy.clear();
   return true;
 }
 
@@ -471,10 +496,10 @@ void GenXCoalescing::recordCandidates(FunctionGroup *FG)
               recordPhiCandidate(Phi, &Phi->getOperandUse(i), Priority);
             }
           }
-        } else if (IGCLLVM::CallInst *CI = dyn_cast<IGCLLVM::CallInst>(Inst)) {
+        } else if (CallInst *CI = dyn_cast<CallInst>(Inst)) {
           if (!GenXIntrinsic::isAnyNonTrivialIntrinsic(CI)) {
             if (CI->isInlineAsm()) {
-              InlineAsm *IA = cast<InlineAsm>(CI->getCalledValue());
+              InlineAsm *IA = cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
               // Do not process if no constraints provided or it's baled
               // (the coalescing actually needs to be done at the wrregion).
               if (IA->getConstraintString().empty() || Baling->isBaled(CI))
@@ -506,7 +531,7 @@ void GenXCoalescing::recordCandidates(FunctionGroup *FG)
                       getPriority(CI->getType(), CI->getParent()));
                 }
               }
-            } else if (CI->isIndirectCall())
+            } else if (IGCLLVM::isIndirectCall(*CI))
               continue;
             // This is a non-intrinsic call. If it returns a value, mark
             // (elements of) the return value for coalescing with the
@@ -546,7 +571,7 @@ void GenXCoalescing::recordCandidates(FunctionGroup *FG)
                 // anything here.
                 //
                 // it may also be baled into a g_store.
-                // assert(Baling->getBaleInfo(CI).isOperandBaled(OperandNum) &&
+                // IGC_ASSERT(Baling->getBaleInfo(CI).isOperandBaled(OperandNum) &&
                 // "expecting rdregion to be baled in to the two addr operand");
                 continue;
               }
@@ -556,8 +581,8 @@ void GenXCoalescing::recordCandidates(FunctionGroup *FG)
             }
           }
         } else if (isa<BitCastInst>(Inst) || isa<AddrSpaceCastInst>(Inst)) {
-          assert(!isa<StructType>(Inst->getType()) && "not expecting bitcast to struct");
-          assert(!isa<StructType>(Inst->getOperand(0)->getType()) && "not expecting bitcast from struct");
+          IGC_ASSERT(!isa<StructType>(Inst->getType()) && "not expecting bitcast to struct");
+          IGC_ASSERT(!isa<StructType>(Inst->getOperand(0)->getType()) && "not expecting bitcast from struct");
           // The source and destination of a bitcast can copy coalesce,
           // but only if it is not the case that the source is a phi and
           // the destination has a use in a phi node in the same block and
@@ -655,8 +680,8 @@ void GenXCoalescing::recordCallCandidates(FunctionGroup *FG)
     Function *F = *fgi;
     // Gather the call sites.
     SmallVector<Instruction *, 8> CallSites;
-    for (auto ui = F->use_begin(), ue = F->use_end(); ui != ue; ++ui)
-      if (auto CI = dyn_cast<CallInst>(ui->getUser()))
+    for (auto *U: F->users())
+      if (auto *CI = checkFunctionCall(U, F))
         CallSites.push_back(CI);
     // For each arg...
     unsigned ArgIdx = 0;
@@ -697,11 +722,13 @@ void GenXCoalescing::recordCallCandidates(FunctionGroup *FG)
  * For each struct element, this adds a coalesce candidate for each unique LR
  * used as a call arg or return value.
  */
-namespace { struct CallArg {
+namespace {
+struct CallArg {
   Use *U;
   LiveRange *LR;
   CallArg(Use *U, LiveRange *LR) : U(U), LR(LR) {}
-}; }
+};
+} // namespace
 void GenXCoalescing::recordCallArgCandidates(Value *Dest, unsigned ArgNum,
     ArrayRef<Instruction *> Insts)
 {
@@ -792,7 +819,7 @@ void GenXCoalescing::recordCandidate(SimpleValue Dest, Use *UseInDest,
 {
   if (UseInDest && isa<UndefValue>(*UseInDest))
     return;
-  assert(!UseInDest || !isa<Constant>(*UseInDest));
+  IGC_ASSERT(!UseInDest || !isa<Constant>(*UseInDest));
   Candidates->push_back(Candidate(Dest, UseInDest, SourceIndex, Priority,
         Candidates->size()));
 }
@@ -841,9 +868,9 @@ void GenXCoalescing::processCandidate(Candidate *Cand, bool IsCopy)
   // Source should not be a constant (but could be undef) because
   // GenXLowering ensured that all our two address operands and phi incomings
   // are not constant.
-  assert(!Cand->UseInDest || !isa<Constant>(Source.getValue()) || isa<UndefValue>(Source.getValue()));
+  IGC_ASSERT(!Cand->UseInDest || !isa<Constant>(Source.getValue()) || isa<UndefValue>(Source.getValue()));
   SourceLR = Liveness->getLiveRange(Source);
-  assert(DestLR);
+  IGC_ASSERT(DestLR);
   if (SourceLR == DestLR)
     return; // already coalesced
   if (SourceLR && SourceLR->Category == DestLR->Category) {
@@ -955,7 +982,7 @@ void GenXCoalescing::processCandidate(Candidate *Cand, bool IsCopy)
     if ((int)genx::exactLog2(
           Dest.getValue()->getType()->getPrimitiveSizeInBits()) <= 8) {
       // This is a bitcast with a legal size for a single copy. We do not
-      // insert a copy, because GenXVisaFuncWriter will generate one.
+      // insert a copy, because GenXCisaBuilder will generate one.
       // (GenXLegalization does not legalize a bitcast, so it can be
       // illegal size here. We do that on the basis that a bitcast is
       // normally copy coalesced.)
@@ -964,20 +991,11 @@ void GenXCoalescing::processCandidate(Candidate *Cand, bool IsCopy)
     // Otherwise, it is a bitcast of size more than 1 GRF or non-power-of-two,
     // so we insert a copy.
   }
-  // Insert the copy now for a two address op. Give it the number of the
-  // pre-copy slot, which is one less than the number of the two address
-  // instruction.
+
+  // Store info for two address op copy
   Instruction *DestInst = cast<Instruction>(Dest.getValue());
-  showCoalesceFail(Dest, DestInst->getDebugLoc(), "two address",
-      DestLR, SourceLR);
-  Instruction *NewCopy = insertCopy(Source, DestLR, DestInst, "twoaddr",
-      Numbering->getNumber(DestInst) - 1);
-  NewCopy = insertIntoStruct(Dest.getValue()->getType(),
-      Dest.getIndex(), *Cand->UseInDest, NewCopy, DestInst);
-  // Replace the use of the old source.
-  *Cand->UseInDest = NewCopy;
-  // No need to extend the live range, as the result of the two address op was
-  // already marked as defined at the pre-copy slot.
+  ToCopy.push_back(
+      CopyData(Dest, Source, Cand->UseInDest, DestInst, TWOADDRCOPY));
 }
 
 /***********************************************************************
@@ -1052,7 +1070,7 @@ void GenXCoalescing::analysePhiCopies(PHINode *Phi,
     // constant.
     if (isa<UndefValue>(Incoming))
       continue; // undef, no copy needed
-    assert(!isa<Constant>(Incoming));
+    IGC_ASSERT(!isa<Constant>(Incoming));
     if (Liveness->getLiveRange(Incoming) == DestLR)
       continue; // coalesced, no copy needed
     // A phi copy is needed
@@ -1073,10 +1091,10 @@ void GenXCoalescing::processPhiCopy(PHINode *Phi, unsigned Inc,
   Value *Incoming = Phi->getIncomingValue(Inc);
   auto *IncomingBlock = Phi->getIncomingBlock(Inc);
   // Should be checked in analysePhiCopies
-  assert(DestLR->getCategory() < RegCategory::NUMREALCATEGORIES &&
+  IGC_ASSERT(DestLR->getCategory() < RegCategory::NUMREALCATEGORIES &&
          "Should be checked earlier!");
-  assert(!isa<UndefValue>(Incoming) && "Should be checked earlier!");
-  assert(!isa<Constant>(Incoming) && "Should be checked earlier!");
+  IGC_ASSERT(!isa<UndefValue>(Incoming) && "Should be checked earlier!");
+  IGC_ASSERT(!isa<Constant>(Incoming) && "Should be checked earlier!");
   // Check it again: something could change
   if (Liveness->getLiveRange(Incoming) == DestLR) {
     LLVM_DEBUG(dbgs() << "Already coalesced " << Incoming->getName() << " -> "
@@ -1099,24 +1117,16 @@ void GenXCoalescing::processPhiCopy(PHINode *Phi, unsigned Inc,
   Instruction *InsertPoint = IncomingBlock->getTerminator();
   InsertPoint = GotoJoin::getLegalInsertionPoint(InsertPoint, DomTree);
 
-  // Give the copy the number allocated to the phi incoming
-  unsigned Num = Numbering->getPhiNumber(Phi, IncomingBlock);
-
   if (auto *I = dyn_cast<Instruction>(Incoming)) {
     // This should not happen for good BBs (not join blocks)
     // if DFG is correct.
-    assert(DomTree->dominates(I->getParent(), InsertPoint->getParent()) &&
+    IGC_ASSERT(DomTree->dominates(I->getParent(), InsertPoint->getParent()) &&
            "Dominance corrupted!");
   }
 
-  showCoalesceFail(SimpleValue(Incoming), InsertPoint->getDebugLoc(), "phi",
-                   DestLR, Liveness->getLiveRange(Incoming));
-  Instruction *NewCopy =
-      insertCopy(SimpleValue(Incoming), DestLR, InsertPoint, "phicopy", Num);
-  Phi->setIncomingValue(Inc, NewCopy);
-  // No need to extend the live range like we do in the two address op case
-  // in processCandidate(). The live range of a phi node already starts at
-  // each point where a copy might need to be inserted.
+  // Store info for copy
+  ToCopy.push_back(CopyData(SimpleValue(Phi), SimpleValue(Incoming),
+                            &Phi->getOperandUse(Inc), InsertPoint, PHICOPY));
 }
 
 /***********************************************************************
@@ -1129,14 +1139,14 @@ void GenXCoalescing::processPhiBranchingJoinLabelCopy(
   Value *Incoming = Phi->getIncomingValue(Inc);
   auto *IncomingBlock = Phi->getIncomingBlock(Inc);
   // Should be checked in analysePhiCopies
-  assert(DestLR->getCategory() < RegCategory::NUMREALCATEGORIES &&
+  IGC_ASSERT(DestLR->getCategory() < RegCategory::NUMREALCATEGORIES &&
          "Should be checked earlier!");
-  assert(!isa<UndefValue>(Incoming) && "Should be checked earlier!");
-  assert(!isa<Constant>(Incoming) && "Should be checked earlier!");
+  IGC_ASSERT(!isa<UndefValue>(Incoming) && "Should be checked earlier!");
+  IGC_ASSERT(!isa<Constant>(Incoming) && "Should be checked earlier!");
   // Should be checked in processPhiCopy
-  assert(Liveness->getLiveRange(Incoming) != DestLR &&
+  IGC_ASSERT(Liveness->getLiveRange(Incoming) != DestLR &&
          "Should be checked earlier!");
-  assert(GotoJoin::isBranchingJoinLabelBlock(IncomingBlock) &&
+  IGC_ASSERT(GotoJoin::isBranchingJoinLabelBlock(IncomingBlock) &&
          "Should be checked earlier!");
 
   LLVM_DEBUG(dbgs() << "Handling branching join label block case\n");
@@ -1144,9 +1154,6 @@ void GenXCoalescing::processPhiBranchingJoinLabelCopy(
   DominatorTree *DomTree = getDomTree(IncomingBlock->getParent());
   Instruction *InsertPoint = IncomingBlock->getTerminator();
   InsertPoint = GotoJoin::getLegalInsertionPoint(InsertPoint, DomTree);
-
-  // Give the copy the number of term to make proper liverange
-  unsigned Num = Numbering->getNumber(InsertPoint);
 
   if (auto *PhiPred = dyn_cast<PHINode>(Incoming)) {
     // In case when pred is Phi, it is possible to meet Phi in
@@ -1159,7 +1166,7 @@ void GenXCoalescing::processPhiBranchingJoinLabelCopy(
     // This situation is detected via corrupted dominance.
     if (!DomTree->dominates(PhiPred->getParent(), InsertPoint->getParent())) {
       auto *PhiCopy = copyNonCoalescedPhi(PhiPred, Phi);
-      assert(PhiCopy && "Invalid phi copy!");
+      IGC_ASSERT(PhiCopy && "Invalid phi copy!");
       Phis.push_back(PhiCopy);
       return;
     }
@@ -1172,18 +1179,14 @@ void GenXCoalescing::processPhiBranchingJoinLabelCopy(
     // For join block, def must be somewhere before it
     // because of SIMD CF Conformance. Case for Phi is
     // described and handled above.
-    assert(DomTree->dominates(I->getParent(), InsertPoint->getParent()) &&
+    IGC_ASSERT(DomTree->dominates(I->getParent(), InsertPoint->getParent()) &&
            "Dominance corrupted!");
   }
 
-  showCoalesceFail(SimpleValue(Incoming), InsertPoint->getDebugLoc(), "phi",
-                   DestLR, Liveness->getLiveRange(Incoming));
-  Instruction *NewCopy =
-      insertCopy(SimpleValue(Incoming), DestLR, InsertPoint, "phicopy", Num);
-  Phi->setIncomingValue(Inc, NewCopy);
-
-  // Extend liverange: we skipped some basic blocks
-  Liveness->rebuildLiveRange(DestLR);
+  // Store info for copy
+  ToCopy.push_back(CopyData(SimpleValue(Phi), SimpleValue(Incoming),
+                            &Phi->getOperandUse(Inc), InsertPoint,
+                            PHICOPY_BRANCHING_JP));
 }
 
 /***********************************************************************
@@ -1233,8 +1236,8 @@ void GenXCoalescing::processCalls(FunctionGroup *FG)
   for (auto fgi = FG->begin() + 1, fge = FG->end(); fgi != fge; ++fgi) {
     Function *F = *fgi;
     // For each call site...
-    for (auto ui = F->use_begin(), ue = F->use_end(); ui != ue; ++ui) {
-      if (auto *CI = dyn_cast<CallInst>(ui->getUser())) {
+    for (auto *U: F->users()) {
+      if (auto *CI = genx::checkFunctionCall(U, F)) {
         // For each func arg...
         unsigned ArgIdx = 0;
         for (auto ai = F->arg_begin(), ae = F->arg_end(); ai != ae;
@@ -1254,7 +1257,7 @@ void GenXCoalescing::processCalls(FunctionGroup *FG)
           for (unsigned StructIdx = 0,
                         se = IndexFlattener::getNumElements(Arg->getType());
                StructIdx != se; ++StructIdx) {
-            assert(!StructIdx &&
+            IGC_ASSERT(!StructIdx &&
                    "coalesce failure on struct call arg not tested");
             auto FuncArgSV = SimpleValue(Arg, StructIdx);
             auto CallArgSV = SimpleValue(CallArg, StructIdx);
@@ -1327,7 +1330,7 @@ void GenXCoalescing::processCalls(FunctionGroup *FG)
           auto SourceLR = Liveness->getLiveRange(UnifiedSV);
           if (DestLR == SourceLR)
             continue; // coalesced
-          assert(SourceLR);
+          IGC_ASSERT(SourceLR);
           if (SourceLR->getCategory() >= RegCategory::NUMREALCATEGORIES)
             continue; // Unified return value is EM, ignore.
           // Remove (the element of) CI, the actual return value, from its
@@ -1343,7 +1346,7 @@ void GenXCoalescing::processCalls(FunctionGroup *FG)
           Instruction *NewCopy =
               insertCopy(SimpleValue(CI, StructIdx), DestLR, InsertBefore,
                          "retval.postcopy", Num);
-          assert(NewCopy);
+          IGC_ASSERT(NewCopy);
           if (AllUsesAreExtract) {
             // For a struct ret value where all the uses are non-struct
             // extractvalue, replace uses of the extractvalues with NewCopy.
@@ -1561,7 +1564,7 @@ void GenXCoalescing::coalesceCallables() {
       CI->getContext().diagnose(Err);
     }
     Function *F = CI->getParent()->getParent();
-    assert(isKernel(F));
+    IGC_ASSERT(isKernel(F));
     KernelMetadata KM(F);
     unsigned Idx = 0; // kernel argument index
     unsigned i = 0;   // call argument index
@@ -1614,10 +1617,10 @@ void GenXCoalescing::coalesceGlobalLoads(FunctionGroup *FG) {
       continue;
 
     // Collect all loads.
-    std::set<Instruction *> LoadsInGroup;
+    SetVector<Instruction *> LoadsInGroup;
     for (auto UI : GV.users()) {
       if (auto LI = dyn_cast<LoadInst>(UI)) {
-        assert(LI->getPointerOperand() == &GV);
+        IGC_ASSERT(LI->getPointerOperand() == &GV);
         auto Fn = LI->getParent()->getParent();
         // Check this load is inside the group.
         if (std::find(FG->begin(), FG->end(), Fn) != FG->end())
@@ -1660,7 +1663,7 @@ void GenXCoalescing::coalesceGlobalLoads(FunctionGroup *FG) {
 Instruction *GenXCoalescing::insertCopy(SimpleValue Input, LiveRange *LR,
     Instruction *InsertBefore, StringRef Name, unsigned Number)
 {
-  assert(!isa<Constant>(Input.getValue()));
+  IGC_ASSERT(!isa<Constant>(Input.getValue()));
   if (auto ST = dyn_cast<StructType>(Input.getValue()->getType())) {
     // Input is a struct element. First extract it. This
     // extract is created coalesced by adding it to the live
@@ -1671,7 +1674,7 @@ Instruction *GenXCoalescing::insertCopy(SimpleValue Input, LiveRange *LR,
     Instruction *Extract = ExtractValueInst::Create(Input.getValue(), Indices,
         "twoaddr.extract", InsertBefore);
     auto SourceLR = Liveness->getLiveRange(Input);
-    assert(SourceLR);
+    IGC_ASSERT(SourceLR);
     Liveness->setLiveRange(SimpleValue(Extract), SourceLR);
     Input = SimpleValue(Extract);
   }
@@ -1727,6 +1730,73 @@ void GenXCoalescing::showCoalesceFail(SimpleValue V, const DebugLoc &DL,
 }
 
 /***********************************************************************
+ * applyCopies : insert copies according to collected data.
+ *
+ * Postponed insertion is possible during coalescing because all
+ * liveranges already contains insertion points. The only possible
+ * exception is Branching Join Blocks copy: the copy will be
+ * created on joins falling path.
+ */
+void GenXCoalescing::applyCopies() {
+  for (auto &CD : ToCopy) {
+    applyCopy(CD);
+  }
+}
+
+/***********************************************************************
+ * applyCopy : insert copy according to collected data.
+ *
+ * Only twoaddr and phi copies are handled now.
+ */
+void GenXCoalescing::applyCopy(CopyData &CD) {
+  LiveRange *DestLR = Liveness->getLiveRange(CD.Dest);
+  LiveRange *SourceLR = Liveness->getLiveRange(CD.Source);
+  switch (CD.CopyT) {
+  case PHICOPY:
+  case PHICOPY_BRANCHING_JP: {
+    PHINode *Phi = dyn_cast<PHINode>(CD.Dest.getValue());
+    IGC_ASSERT(Phi && "Expected PHI");
+    unsigned Num =
+        (CD.CopyT == PHICOPY)
+            ? Numbering->getPhiNumber(
+                  Phi, Phi->getIncomingBlock(CD.UseInDest->getOperandNo()))
+            : Numbering->getNumber(CD.InsertPoint);
+    showCoalesceFail(CD.Dest, CD.InsertPoint->getDebugLoc(), "phi", DestLR,
+                     SourceLR);
+    Instruction *NewCopy =
+        insertCopy(CD.Source, DestLR, CD.InsertPoint, "phicopy", Num);
+    Phi->setIncomingValue(CD.UseInDest->getOperandNo(), NewCopy);
+    break;
+  }
+  case TWOADDRCOPY: {
+    // Insert the copy now for a two address op. Give it the number of the
+    // pre-copy slot, which is one less than the number of the two address
+    // instruction.
+    Instruction *DestInst = cast<Instruction>(CD.Dest.getValue());
+    showCoalesceFail(CD.Dest, DestInst->getDebugLoc(), "two address", DestLR,
+                     SourceLR);
+    Instruction *NewCopy = insertCopy(CD.Source, DestLR, DestInst, "twoaddr",
+                                      Numbering->getNumber(DestInst) - 1);
+    NewCopy =
+        insertIntoStruct(CD.Dest.getValue()->getType(), CD.Dest.getIndex(),
+                         *CD.UseInDest, NewCopy, DestInst);
+    // Replace the use of the old source.
+    *CD.UseInDest = NewCopy;
+    // No need to extend the live range, as the result of the two address op was
+    // already marked as defined at the pre-copy slot.
+    break;
+  }
+  default:
+    IGC_ASSERT_EXIT_MESSAGE(0, "Unknown copy type!");
+  }
+
+  if (CD.CopyT == PHICOPY_BRANCHING_JP) {
+    // Extend liverange: we skipped some basic blocks
+    Liveness->rebuildLiveRange(DestLR);
+  }
+}
+
+/***********************************************************************
 * DiagnosticInfoFastComposition initializer from Instruction
 *
 * If the Instruction has a DebugLoc, then that is used for the error
@@ -1760,5 +1830,4 @@ void DiagnosticInfoFastComposition::print(DiagnosticPrinter &DP) const
     .str());
   DP << Loc << Description;
 }
-
 

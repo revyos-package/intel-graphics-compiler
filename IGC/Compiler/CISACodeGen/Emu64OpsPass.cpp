@@ -41,8 +41,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
-#include "llvm/PassAnalysisSupport.h"
 #include "llvm/Analysis/TargetFolder.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/IR/Intrinsics.h"
 #include "llvmWrapper/Support/Alignment.h"
@@ -132,7 +132,7 @@ namespace {
         bool isArg64Cast(BitCastInst* BC) const { return Arg64Casts.count(BC) != 0; }
 
         Type* getV2Int32Ty(unsigned NumElts = 1) const {
-            return VectorType::get(IRB->getInt32Ty(), NumElts * 2);
+            return IGCLLVM::FixedVectorType::get(IRB->getInt32Ty(), NumElts * 2);
         }
 
         ValuePair getExpandedValues(Value* V);
@@ -158,20 +158,20 @@ namespace {
         }
 
         void dupMemoryAttribute(LoadInst* NewLD, LoadInst* RefLD, unsigned Off) const {
-            unsigned Align = getAlignment(RefLD);
+            unsigned alignment = getAlignment(RefLD);
 
             NewLD->setVolatile(RefLD->isVolatile());
-            NewLD->setAlignment(MaybeAlign(unsigned(MinAlign(Align, Off))));
+            NewLD->setAlignment(IGCLLVM::getAlign(unsigned(MinAlign(alignment, Off))));
             NewLD->setOrdering(RefLD->getOrdering());
             IGCLLVM::CopySyncScopeID(NewLD, RefLD);
             copyKnownMetadata(NewLD, RefLD);
         }
 
         void dupMemoryAttribute(StoreInst* NewST, StoreInst* RefST, unsigned Off) const {
-            unsigned Align = getAlignment(RefST);
+            unsigned alignment = getAlignment(RefST);
 
             NewST->setVolatile(RefST->isVolatile());
-            NewST->setAlignment(MaybeAlign(unsigned(MinAlign(Align, Off))));
+            NewST->setAlignment(IGCLLVM::getAlign(unsigned(MinAlign(alignment, Off))));
             NewST->setOrdering(RefST->getOrdering());
             IGCLLVM::CopySyncScopeID(NewST, RefST);
             copyKnownMetadata(NewST, RefST);
@@ -544,7 +544,6 @@ ValuePair Emu64Ops::getExpandedValues(Value* V) {
         return VMI->second;
     }
 
-    errs() << "V = " << *V << '\n';
     IGC_ASSERT_EXIT_MESSAGE(0, "TODO: NOT IMPLEMENTED!");
 }
 
@@ -661,20 +660,28 @@ bool InstExpander::expand(Instruction* I) {
 }
 
 bool InstExpander::visitInstruction(Instruction& I) {
-#if 1
-    errs() << "I = " << I << '\n';
-#endif
-    llvm_unreachable("UNKNOWN INSTRUCTION is BEING EXPANDED!");
+    IGC_ASSERT_MESSAGE(0, "UNKNOWN INSTRUCTION is BEING EXPANDED!");
     return false;
 }
 
 bool InstExpander::visitRet(ReturnInst& RI) {
-    if (Value * V = RI.getReturnValue())
+    if (Value* V = RI.getReturnValue())
     {
-        // TODO: Add 64-bit return value support when function/subroutine call is supported.
         IGC_ASSERT(nullptr != Emu);
         if (Emu->isInt64(V))
-            llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+        {
+            Value* Lo = nullptr, *Hi = nullptr;
+            std::tie(Lo, Hi) = Emu->getExpandedValues(V);
+            Type* V2I32Ty = Emu->getV2Int32Ty();
+            Value* NewVal = UndefValue::get(V2I32Ty);
+            NewVal = IRB->CreateInsertElement(NewVal, Lo, IRB->getInt32(0));
+            NewVal = IRB->CreateInsertElement(NewVal, Hi, IRB->getInt32(1));
+            NewVal = IRB->CreateBitCast(NewVal, IRB->getInt64Ty());
+
+            IRB->SetInsertPoint(&RI);
+            (void) IRB->CreateRet(NewVal);
+            return true;
+        }
     }
     return false;
 }
@@ -744,29 +751,25 @@ bool InstExpander::visitMul(BinaryOperator& BinOp) {
 
 bool InstExpander::visitSDiv(BinaryOperator& BinOp) {
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&BinOp))
-        llvm_unreachable("There should not be `sdiv` which is already emulated by library call.");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&BinOp), "There should not be `sdiv` which is already emulated by library call.");
     return false;
 }
 
 bool InstExpander::visitUDiv(BinaryOperator& BinOp) {
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&BinOp))
-        llvm_unreachable("There should not be `udiv` which is already emulated by library call.");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&BinOp), "There should not be `udiv` which is already emulated by library call.");
     return false;
 }
 
 bool InstExpander::visitSRem(BinaryOperator& BinOp) {
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&BinOp))
-        llvm_unreachable("There should not be `srem` which is already emulated by library call.");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&BinOp), "There should not be `srem` which is already emulated by library call.");
     return false;
 }
 
 bool InstExpander::visitURem(BinaryOperator& BinOp) {
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&BinOp))
-        llvm_unreachable("There should not be `urem` which is already emulated by library call.");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&BinOp), "There should not be `urem` which is already emulated by library call.");
     return false;
 }
 
@@ -1231,15 +1234,14 @@ bool InstExpander::visitAtomicCmpXchg(AtomicCmpXchgInst& ACXI) {
     Value* V = ACXI.getCompareOperand();
     IGC_ASSERT(nullptr != V);
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(V))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(V), "TODO: NOT IMPLEMENTED YET!");
+
     return false;
 }
 
 bool InstExpander::visitAtomicRMW(AtomicRMWInst& RMW) {
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&RMW))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&RMW), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -1979,7 +1981,9 @@ Emu64BitCall:
         }
     }
     // Support for stack/indirect/subroutine calls
-    else if (!F || F->hasFnAttribute("visaStackCall") || F->hasFnAttribute("UserSubroutine"))
+    // Note: should use enableFunctionCall() without using attr checking.
+    else if (   !F || F->hasFnAttribute("visaStackCall") || F->hasFnAttribute("UserSubroutine")
+             || Emu->CGC->enableFunctionCall())
     {
         auto* CallCopy = Call.clone();
         IGC_ASSERT(nullptr != CallCopy);
@@ -2033,8 +2037,7 @@ bool InstExpander::visitSelect(SelectInst& SI) {
 bool InstExpander::visitVAArg(VAArgInst& VAAI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&VAAI))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&VAAI), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -2055,10 +2058,11 @@ bool InstExpander::visitExtractElement(ExtractElementInst& EEI) {
     // later.
 
     Value* V = EEI.getVectorOperand();
-    unsigned NumElts = V->getType()->getVectorNumElements();
+    unsigned NumElts = (unsigned)cast<VectorType>(V->getType())->getNumElements();
     V = IRB->CreateBitCast(V, Emu->getV2Int32Ty(NumElts));
     // Re-calculate indices to Lo and Hi parts.
     Value* Idx = EEI.getIndexOperand();
+    Idx = IRB->CreateZExt(Idx, IRB->getInt32Ty());
     Idx = IRB->CreateMul(Idx, IRB->getInt32(2));
     Value* IdxLo = IRB->CreateAdd(Idx, IRB->getInt32(0));
     Value* IdxHi = IRB->CreateAdd(Idx, IRB->getInt32(1));
@@ -2091,7 +2095,7 @@ bool InstExpander::visitInsertElement(InsertElementInst& IEI) {
 
     // Create the emulated vector.
     Value* NewVal = IEI.getOperand(0);
-    unsigned NumElts = NewVal->getType()->getVectorNumElements();
+    unsigned NumElts = (unsigned)cast<VectorType>(NewVal->getType())->getNumElements();
     NewVal = IRB->CreateBitCast(NewVal, Emu->getV2Int32Ty(NumElts));
     // Re-calculate indices to Lo and Hi parts.
     Value* Idx = IEI.getOperand(2);
@@ -2110,8 +2114,7 @@ bool InstExpander::visitInsertElement(InsertElementInst& IEI) {
 bool InstExpander::visitExtractValue(ExtractValueInst& EVI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
-    if (Emu->isInt64(&EVI))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(&EVI), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -2119,8 +2122,7 @@ bool InstExpander::visitInsertValue(InsertValueInst& IVI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
     IGC_ASSERT(0 < IVI.getNumOperands());
-    if (Emu->isInt64(IVI.getOperand(1)))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(IVI.getOperand(1)), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
 
@@ -2128,7 +2130,6 @@ bool InstExpander::visitLandingPad(LandingPadInst& LPI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
     IGC_ASSERT(0 < LPI.getNumOperands());
-    if (Emu->isInt64(LPI.getOperand(1)))
-        llvm_unreachable("TODO: NOT IMPLEMENTED YET!");
+    IGC_ASSERT_MESSAGE(false == Emu->isInt64(LPI.getOperand(1)), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
