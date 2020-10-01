@@ -8,7 +8,7 @@ include /usr/share/dpkg/pkg-info.mk
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DIGC_PREFERRED_LLVM_VERSION=10.0.0 \
+		-DIGC_PREFERRED_LLVM_VERSION=11.0.0 \
 		-DIGC_BUILD__VC_ENABLED=FALSE \
 		-Wno-dev
 
