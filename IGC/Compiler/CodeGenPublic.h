@@ -268,7 +268,6 @@ namespace IGC
         unsigned int numPsInputs;
         bool sampleCmpToDiscardOptimizationPossible;
         unsigned int sampleCmpToDiscardOptimizationSlot;
-        bool hasFP64Inst;
     };
 
     struct SSimplePushInfo
@@ -799,6 +798,8 @@ namespace IGC
         Float_DenormMode    m_floatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
         Float_DenormMode    m_floatDenormMode64 = FLOAT_DENORM_FLUSH_TO_ZERO;
 
+        PushConstantMode m_pushConstantMode = PushConstantMode::DEFAULT;
+
         SInstrTypes m_instrTypes;
 
         /////  used for instruction statistic before/after pass
@@ -1182,11 +1183,13 @@ namespace IGC
                     Use32BitPtrArith = true;
                 }
 
-                if (strstr(options, "-intel-greater-than-4GB-buffer-required"))
+                if (strstr(options, "-intel-greater-than-4GB-buffer-required") ||
+                    strstr(options, "-opt-greater-than-4GB-buffer-required"))
                 {
                     IntelGreaterThan4GBBufferRequired = true;
                 }
-                else if (strstr(options, "-intel-has-buffer-offset-arg"))
+                else if (strstr(options, "-intel-has-buffer-offset-arg") ||
+                    strstr(options, "-opt-has-buffer-offset-arg"))
                 {
                     IntelHasBufferOffsetArg = true;
                 }

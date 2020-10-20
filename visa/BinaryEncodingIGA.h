@@ -155,6 +155,11 @@ private:
     iga::SendDesc getIGASendDesc(G4_INST* sendInst) const;
     iga::SendDesc getIGASendExDesc(
         G4_INST* sendInst, int& xlen, iga::InstOptSet& extraOpts) const;
+    iga::SendDesc encodeExDescImm(
+        G4_INST* sendInst, int& xlen, iga::InstOptSet& extraOpts) const;
+    iga::SendDesc encodeExDescRegA0(
+        G4_INST* sendInst, int& xlen, iga::InstOptSet& extraOpts) const;
+
     iga::RegName getIGARegName(G4_Operand* opnd) const
     {
         G4_VarBase *base = opnd->getBase();
@@ -258,6 +263,7 @@ private:
 
     static iga::SFID getSFID(const G4_INST* inst);
     static iga::MathFC getMathFC(const G4_INST *inst);
+    iga::Type getIGAType(const G4_INST* I, Gen4_Operand_Number O, TARGET_PLATFORM P);
 
     void *m_kernelBuffer;
     uint32_t m_kernelBufferSize;

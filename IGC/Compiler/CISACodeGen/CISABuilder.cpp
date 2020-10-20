@@ -560,79 +560,28 @@ namespace IGC
             flagDst = true;
         }
 
-        unsigned numParts = 0;
+        VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
+        VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
 
-        // Due to a simulator quirk, we need to split the instruction even if the
-        // dst operand of the compare is null, if it "looks" too large,
-        // that is, if the execution size is 16 and the comparison type
-        // is QW.
-        bool bNeedSplitting = false;
-        if (flagDst && needsSplitting(GetAluExecSize(dst)) &&
-            (src0->GetElemSize() > 4 || src1->GetElemSize() > 4))
+        if (flagDst)
         {
-            bNeedSplitting = true;
-            numParts = 2;
+            V(vKernel->AppendVISAComparisonInst(
+                subOp,
+                GetAluEMask(dst),
+                GetAluExecSize(dst),
+                dst->visaPredVariable,
+                opnd0,
+                opnd1));
         }
-
-        bNeedSplitting = bNeedSplitting ||
-            NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
-            NeedSplitting(src1, m_encoderState.m_srcOperand[1], numParts, true);
-
-        if (bNeedSplitting)
+        else
         {
-            VISA_EMask_Ctrl execMask = GetAluEMask(dst);
-            VISA_Exec_Size fromExecSize = GetAluExecSize(dst);
-            VISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, numParts);
-
-            for (unsigned thePart = 0; thePart != numParts; ++thePart) {
-                SModifier newSrc0Mod = SplitVariable(fromExecSize, toExecSize, thePart, src0, m_encoderState.m_srcOperand[0], true);
-                SModifier newSrc1Mod = SplitVariable(fromExecSize, toExecSize, thePart, src1, m_encoderState.m_srcOperand[1], true);
-                VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, newSrc0Mod);
-                VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, newSrc1Mod);
-                if (flagDst)
-                {
-                    V(vKernel->AppendVISAComparisonInst(subOp,
-                        SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                        toExecSize,
-                        dst->visaPredVariable,
-                        srcOpnd0, srcOpnd1));
-                }
-                else
-                {
-                    SModifier newDstMod = SplitVariable(fromExecSize, toExecSize, thePart, dst, m_encoderState.m_dstOperand);
-                    VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
-                    V(vKernel->AppendVISAComparisonInst(subOp,
-                        SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                        toExecSize,
-                        dstOpnd,
-                        srcOpnd0, srcOpnd1));
-                }
-            }
-        }
-        else {
-            VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
-            VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
-
-            if (flagDst)
-            {
-                V(vKernel->AppendVISAComparisonInst(
-                    subOp,
-                    GetAluEMask(dst),
-                    GetAluExecSize(dst),
-                    dst->visaPredVariable,
-                    opnd0,
-                    opnd1));
-            }
-            else
-            {
-                V(vKernel->AppendVISAComparisonInst(
-                    subOp,
-                    GetAluEMask(dst),
-                    GetAluExecSize(dst),
-                    GetDestinationOperand(dst, m_encoderState.m_dstOperand),
-                    opnd0,
-                    opnd1));
-            }
+            V(vKernel->AppendVISAComparisonInst(
+                subOp,
+                GetAluEMask(dst),
+                GetAluExecSize(dst),
+                GetDestinationOperand(dst, m_encoderState.m_dstOperand),
+                opnd0,
+                opnd1));
         }
     }
 
@@ -640,45 +589,20 @@ namespace IGC
     {
         m_encoderState.m_flag.var = flag;
 
-        unsigned numParts = 0;
-        if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
-            NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
-            NeedSplitting(src1, m_encoderState.m_srcOperand[1], numParts, true)) {
+        VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
+        VISA_VectorOpnd* src0Opnd = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
+        VISA_VectorOpnd* src1Opnd = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
+        VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
 
-            VISA_EMask_Ctrl execMask = GetAluEMask(dst);
-            VISA_Exec_Size fromExecSize = GetAluExecSize(dst);
-            VISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, numParts);
-
-            for (unsigned thePart = 0; thePart != numParts; ++thePart) {
-                SModifier newDstMod = SplitVariable(fromExecSize, toExecSize, thePart, dst, m_encoderState.m_dstOperand);
-                SModifier newSrc0Mod = SplitVariable(fromExecSize, toExecSize, thePart, src0, m_encoderState.m_srcOperand[0], true);
-                SModifier newSrc1Mod = SplitVariable(fromExecSize, toExecSize, thePart, src1, m_encoderState.m_srcOperand[1], true);
-                VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
-                VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, newSrc0Mod);
-                VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, newSrc1Mod);
-                VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                V(vKernel->AppendVISADataMovementInst(ISA_SEL, predOpnd, IsSat(),
-                    SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                    toExecSize,
-                    dstOpnd, srcOpnd0, srcOpnd1));
-            }
-        }
-        else {
-            VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
-            VISA_VectorOpnd* src0Opnd = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
-            VISA_VectorOpnd* src1Opnd = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
-            VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-
-            V(vKernel->AppendVISADataMovementInst(
-                ISA_SEL,
-                predOpnd,
-                IsSat(),
-                GetAluEMask(dst),
-                GetAluExecSize(dst),
-                dstOpnd,
-                src0Opnd,
-                src1Opnd));
-        }
+        V(vKernel->AppendVISADataMovementInst(
+            ISA_SEL,
+            predOpnd,
+            IsSat(),
+            GetAluEMask(dst),
+            GetAluExecSize(dst),
+            dstOpnd,
+            src0Opnd,
+            src1Opnd));
     }
 
     void CEncoder::PredAdd(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1)
@@ -1069,42 +993,18 @@ namespace IGC
     {
         IGC_ASSERT_MESSAGE(nullptr == m_encoderState.m_flag.var, "min/max doesn't support predication");
 
-        unsigned numParts = 0;
-        if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
-            NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
-            NeedSplitting(src1, m_encoderState.m_srcOperand[1], numParts, true)) {
+        VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
+        VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
+        VISA_VectorOpnd* dstopnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
 
-            VISA_EMask_Ctrl execMask = GetAluEMask(dst);
-            VISA_Exec_Size fromExecSize = GetAluExecSize(dst);
-            VISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, numParts);
-
-            for (unsigned thePart = 0; thePart != numParts; ++thePart) {
-                SModifier newDstMod = SplitVariable(fromExecSize, toExecSize, thePart, dst, m_encoderState.m_dstOperand);
-                SModifier newSrc0Mod = SplitVariable(fromExecSize, toExecSize, thePart, src0, m_encoderState.m_srcOperand[0], true);
-                SModifier newSrc1Mod = SplitVariable(fromExecSize, toExecSize, thePart, src1, m_encoderState.m_srcOperand[1], true);
-                VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
-                VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, newSrc0Mod);
-                VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, newSrc1Mod);
-                V(vKernel->AppendVISAMinMaxInst(subopcode, IsSat(),
-                    SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                    toExecSize,
-                    dstOpnd, srcOpnd0, srcOpnd1));
-            }
-        }
-        else {
-            VISA_VectorOpnd* opnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
-            VISA_VectorOpnd* opnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
-            VISA_VectorOpnd* dstopnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
-
-            V(vKernel->AppendVISAMinMaxInst(
-                subopcode,
-                IsSat(),
-                GetAluEMask(dst),
-                GetAluExecSize(dst),
-                dstopnd,
-                opnd0,
-                opnd1));
-        }
+        V(vKernel->AppendVISAMinMaxInst(
+            subopcode,
+            IsSat(),
+            GetAluEMask(dst),
+            GetAluExecSize(dst),
+            dstopnd,
+            opnd0,
+            opnd1));
     }
 
     // NeedSplitting - Check whether a variable needs splitting due to the
@@ -1594,7 +1494,7 @@ namespace IGC
                 if (Is64BitSrc && Is64BitDst)
                 {
                     VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                    if (!predOpnd && !IsSat() && dst->IsUniform() && src->IsUniform() && !src->IsImmediate())
+                    if (!predOpnd && !IsSat() && dst->IsUniform() && src->IsUniform() && !src->IsImmediate() && m_encoderState.m_uniformSIMDSize == SIMDMode::SIMD1)
                     {
                         // special handling for uniform 64b copy by generating SIMD2 move instead of 2xSIMD1
                         // technically we need to check for src modifier and whether dst/src are indirect operand as well,
@@ -1609,7 +1509,7 @@ namespace IGC
                         srcAsUDMod.subReg *= 2;
                         auto dstOpnd = GetDestinationOperand(dstAlias, dstAsUDMod);
                         auto SIMDSize = lanesToSIMDMode(numLanes(m_encoderState.m_uniformSIMDSize) * 2);
-                        auto srcOpnd = srcImmLo ? srcImmLo : GetSourceOperand(srcAlias, srcAsUDMod);
+                        auto srcOpnd = GetSourceOperand(srcAlias, srcAsUDMod);
                         V(vKernel->AppendVISADataMovementInst(opcode, nullptr, false, vISA_EMASK_M1_NM, visaExecSize(SIMDSize),
                             dstOpnd, srcOpnd));
                     }
@@ -1725,55 +1625,24 @@ namespace IGC
         }
         else
         {
-            unsigned numParts = 0;
-            if (NeedSplitting(dst, m_encoderState.m_dstOperand, numParts) ||
-                NeedSplitting(src0, m_encoderState.m_srcOperand[0], numParts, true) ||
-                NeedSplitting(src1, m_encoderState.m_srcOperand[1], numParts, true) ||
-                NeedSplitting(src2, m_encoderState.m_srcOperand[2], numParts, true) ||
-                NeedSplitting(src3, m_encoderState.m_srcOperand[3], numParts, true)) {
+            VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
+            VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
+            VISA_VectorOpnd* srcOpnd2 = GetSourceOperand(src2, m_encoderState.m_srcOperand[2]);
+            VISA_VectorOpnd* srcOpnd3 = GetSourceOperand(src3, m_encoderState.m_srcOperand[3]);
+            VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
+            VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
 
-                VISA_EMask_Ctrl execMask = GetAluEMask(dst);
-                VISA_Exec_Size fromExecSize = GetAluExecSize(dst);
-                VISA_Exec_Size toExecSize = SplitExecSize(fromExecSize, numParts);
-
-                for (unsigned thePart = 0; thePart != numParts; ++thePart) {
-                    SModifier newDstMod = SplitVariable(fromExecSize, toExecSize, thePart, dst, m_encoderState.m_dstOperand);
-                    SModifier newSrc0Mod = SplitVariable(fromExecSize, toExecSize, thePart, src0, m_encoderState.m_srcOperand[0], true);
-                    SModifier newSrc1Mod = SplitVariable(fromExecSize, toExecSize, thePart, src1, m_encoderState.m_srcOperand[1], true);
-                    SModifier newSrc2Mod = SplitVariable(fromExecSize, toExecSize, thePart, src2, m_encoderState.m_srcOperand[2], true);
-                    SModifier newSrc3Mod = SplitVariable(fromExecSize, toExecSize, thePart, src3, m_encoderState.m_srcOperand[3], true);
-                    VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, newDstMod);
-                    VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, newSrc0Mod);
-                    VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, newSrc1Mod);
-                    VISA_VectorOpnd* srcOpnd2 = GetSourceOperand(src2, newSrc2Mod);
-                    VISA_VectorOpnd* srcOpnd3 = GetSourceOperand(src3, newSrc3Mod);
-                    VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-                    V(vKernel->AppendVISALogicOrShiftInst(opcode, predOpnd, IsSat(),
-                        SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                        toExecSize,
-                        dstOpnd, srcOpnd0, srcOpnd1, srcOpnd2, srcOpnd3));
-                }
-            }
-            else {
-                VISA_VectorOpnd* srcOpnd0 = GetSourceOperand(src0, m_encoderState.m_srcOperand[0]);
-                VISA_VectorOpnd* srcOpnd1 = GetSourceOperand(src1, m_encoderState.m_srcOperand[1]);
-                VISA_VectorOpnd* srcOpnd2 = GetSourceOperand(src2, m_encoderState.m_srcOperand[2]);
-                VISA_VectorOpnd* srcOpnd3 = GetSourceOperand(src3, m_encoderState.m_srcOperand[3]);
-                VISA_VectorOpnd* dstOpnd = GetDestinationOperand(dst, m_encoderState.m_dstOperand);
-                VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-
-                V(vKernel->AppendVISALogicOrShiftInst(
-                    opcode,
-                    predOpnd,
-                    IsSat(),
-                    GetAluEMask(dst),
-                    GetAluExecSize(dst),
-                    dstOpnd,
-                    srcOpnd0,
-                    srcOpnd1,
-                    srcOpnd2,
-                    srcOpnd3));
-            }
+            V(vKernel->AppendVISALogicOrShiftInst(
+                opcode,
+                predOpnd,
+                IsSat(),
+                GetAluEMask(dst),
+                GetAluExecSize(dst),
+                dstOpnd,
+                srcOpnd0,
+                srcOpnd1,
+                srcOpnd2,
+                srcOpnd3));
         }
     }
 
@@ -2336,6 +2205,7 @@ namespace IGC
     void CEncoder::RenderTargetWrite(CVariable* var[],
         bool isUndefined[],
         bool lastRenderTarget,
+        bool isNullRT,
         bool perSample,
         bool coarseMode,
         bool headerMaskFromCe0,
@@ -2429,7 +2299,7 @@ namespace IGC
         cntrls.isLastWrite = lastRenderTarget;
 
         // controls NULL render target enbale bit
-        cntrls.isNullRT = false;
+        cntrls.isNullRT = isNullRT;
 
         //r1Reg should always be populated
         //vISA will decide whether to use it or not.

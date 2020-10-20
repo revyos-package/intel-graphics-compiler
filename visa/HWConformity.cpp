@@ -530,7 +530,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB* bb)
 
         if (dst && dst->getType() == Type_HF)
         {
-            replaceDst(it, Type_F, bb);
+            replaceDst(it, Type_F);
         }
     }
 
@@ -649,8 +649,7 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB* bb)
         (!hasSameOffset && inst->getExecSize() != g4::SIMD1 && !builder.isOpndAligned(dst, numEltPerGRF(Type_UB))))
     {
         mov_dst = true;
-        G4_DstRegRegion* new_dst = insertMovAfter(it, dst, extype, bb);
-        inst->setDest(new_dst);
+        replaceDst(it, extype);
     }
     return mov_dst;
 }
@@ -1174,8 +1173,7 @@ void HWConformity::fixAlign13SrcInst(INST_LIST_ITER iter, G4_BB* bb)
         if (!isGoodAlign1TernaryDst(inst))
         {
             auto alignment = builder.noSrc2Regioning() ? GRFALIGN : Four_Word;
-            G4_DstRegRegion* tmpDst = insertMovAfter(iter, dst, dst->getType(), bb, alignment);
-            inst->setDest(tmpDst);
+            replaceDst(iter, dst->getType(), alignment);
         }
 
         bool canBeImm = true;
@@ -1228,8 +1226,7 @@ void HWConformity::fix3SrcInst(INST_LIST_ITER iter, G4_BB* bb)
         if (dst->getRegAccess() != Direct || dst->getHorzStride() != 1 ||
             !builder.isOpndAligned(dst, (execSize >= 8) ? 32 : execSize * 4))
         {
-            G4_DstRegRegion* tmpDst = insertMovAfter(iter, dst, dst->getType(), bb);
-            inst->setDest(tmpDst);
+            replaceDst(iter, dst->getType());
         }
         for (int i = 0; i < 3; i++)
         {
@@ -1250,10 +1247,7 @@ void HWConformity::fix3SrcInst(INST_LIST_ITER iter, G4_BB* bb)
         {
             if (!builder.isOpndAligned(inst->getDst(), 16))
             {
-                G4_DstRegRegion* new_dst = insertMovAfter(iter, inst->getDst(), inst->getDst()->getType(), bb);
-                G4_Declare* tmpDstDcl = new_dst->getTopDcl();
-                tmpDstDcl->setSubRegAlign(Eight_Word);
-                inst->setDest(new_dst);
+                replaceDst(iter, inst->getDst()->getType(), Eight_Word);
             }
         }
     }
@@ -1421,25 +1415,25 @@ bool HWConformity::fixMov(INST_LIST_ITER i, G4_BB* bb)
 
     if (scalarByteToFloat || dstByteSrc64b)
     {
-        inst->setDest(insertMovAfter(i, inst->getDst(), Type_W, bb));
+        replaceDst(i, Type_W);
         return true;
     }
     if (IS_BTYPE(srcType) && (IS_DFTYPE(dstType) || IS_QTYPE(dstType)))
     {
         // mov Q/DF B
-        inst->setDest(insertMovAfter(i, inst->getDst(), Type_W, bb));
+        replaceDst(i, Type_W);
         return true;
     }
     if (isLowPrecisionFloatTy(dstType) && (IS_DFTYPE(srcType) || IS_QTYPE(srcType)))
     {
         // mov HF Q/DF
-        inst->setDest(insertMovAfter(i, inst->getDst(), Type_F, bb));
+        replaceDst(i, Type_F);
         return true;
     }
     if (isLowPrecisionFloatTy(srcType) && (IS_DFTYPE(dstType) || IS_QTYPE(dstType)))
     {
         // mov Q/DF HF
-        inst->setDest(insertMovAfter(i, inst->getDst(), Type_F, bb));
+        replaceDst(i, Type_F);
         return true;
     }
 
@@ -1467,7 +1461,8 @@ bool HWConformity::fixRotate(INST_LIST_ITER i, G4_BB* bb)
     if (G4_Type_Table[dst->getType()].byteSize != G4_Type_Table[src->getType()].byteSize)
     {
         // keep exec type same and change dst to be same type as src
-        inst->setDest(insertMovAfter(i, dst, src->getType(), bb));
+        replaceDst(i, src->getType());
+        dst = inst->getDst();
         changed = true;
     }
 
@@ -1501,6 +1496,11 @@ bool HWConformity::fixDstAlignment(INST_LIST_ITER i, G4_BB* bb, G4_Type extype, 
     G4_Operand* src0 = inst->getSrc(0);
     unsigned h_stride = dst->getHorzStride();
     unsigned int extypesize = G4_Type_Table[extype].byteSize;
+
+    if (hasDedicateAlignRegionConformity(i))
+    {
+        return insertMOV;
+    }
 
     if (inst->hasNULLDst())
     {
@@ -1566,14 +1566,14 @@ bool HWConformity::fixDstAlignment(INST_LIST_ITER i, G4_BB* bb, G4_Type extype, 
         IS_TYPE_INT(inst->getSrc(0)->getType()) && IS_TYPE_INT(inst->getSrc(1)->getType())))
     {
         // change dst type to W
-        inst->setDest(insertMovAfter(i, dst, Type_W, bb));
+        replaceDst(i, Type_W);
         return true;
     }
 
     if (byteDst && extypesize == 8)
     {
         // Gen doesn't support hstride 8, so we add a W move here
-        inst->setDest(insertMovAfter(i, dst, Type_W, bb));
+        replaceDst(i, Type_W);
         return true;
     }
 
@@ -1639,8 +1639,6 @@ bool HWConformity::fixDstAlignment(INST_LIST_ITER i, G4_BB* bb, G4_Type extype, 
                 return insertMOV;
             }
         }
-
-
 
         if (splitInstListForByteDst(i, bb, (uint16_t)extypesize))
         {
@@ -3478,9 +3476,11 @@ bool HWConformity::isGoodAlign1TernaryDst(G4_INST* inst) const
     auto dstTySize = getTypeSize(dst->getType());
 
     int alignInBytes = std::max((int) dstTySize, builder.get3SrcDstAlign());
-    // if src2 is not a scalar, then align it to 32 bytes.
+
     if (builder.noSrc2Regioning())
     {
+        // src2 is required to have the same subreg as dst if src2 is not a scalar
+        // If we can't guarantee this we have to align both of them to 32 byte
         unsigned src2Pos = inst->opcode() == G4_pseudo_mad ? 0 : 2;
         auto src2 = inst->getSrc(src2Pos);
         if (src2->isSrcRegRegion() && !src2->asSrcRegRegion()->isScalar())
@@ -3937,6 +3937,43 @@ bool HWConformity::generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter)
     MUST_BE_TRUE(inst->opcode() == G4_pseudo_mad, "expect pseudo mad");
     bool mustDoMad = IS_TYPE_FLOAT_ALL(inst->getDst()->getType());
 
+    // try swapping src0 (really src2) and src1 to see if we can save a move
+    // some conditions where swap may help:
+    // -- if src0 is D, as MAD only supports D + D * W
+    // -- if src1 is imm, as MAD src2 supports 16-bit imm
+    // -- if src0 is HF in a mix mode MAD, as MAD src1 supports HF
+    // -- if src1 is scalar, as MAD src2 has more region restrictions
+    // We perform the swapping before the dst checks as some platforms require dst and src2 to have the same subreg
+    {
+        auto src0 = inst->getSrc(0);
+        auto src1 = inst->getSrc(1);
+
+        if (IS_DTYPE(src0->getType()) && src0->isSrcRegRegion() && !IS_DTYPE(src1->getType()))
+        {
+            inst->swapSrc(0, 1);
+        }
+        else if (src1->isImm() && getTypeSize(src1->getType()) == 2)
+        {
+            //swap src0 and src1 as src0 supports imm
+            inst->swapSrc(0, 1);
+        }
+        else if (isLowPrecisionFloatTy(src0->getType()) && src1->getType() == Type_F)
+        {
+            inst->swapSrc(0, 1);
+        }
+        else if (src1->isSrcRegRegion() && src1->asSrcRegRegion()->isScalar())
+        {
+            bool src0NeedMove = !isGoodAlign1TernarySrc(inst, 0, true) ||
+                (src0->isSrcRegRegion() && inst->getExecSize() * getTypeSize(src0->getType()) < getGRFSize());
+            // Swap src0 and src1 if src1 is scalar but src0 may need a move due to limited src2 regioning support.
+            if (src0NeedMove)
+            {
+                inst->swapSrc(0, 1);
+            }
+        }
+
+    }
+
     if (!isGoodAlign1TernaryDst(inst))
     {
         if (mustDoMad)
@@ -3947,38 +3984,6 @@ bool HWConformity::generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter)
         else
         {
             return false;
-        }
-    }
-
-    // try swapping src0 (really src2) and src1 to see if we can save a move
-    // some conditions where swap may help:
-    // -- if src0 is D, as MAD only supports D + D * W
-    // -- if src1 is imm, as MAD src2 supports 16-bit imm
-    // -- if src0 is HF in a mix mode MAD, as MAD src1 supports HF
-    // -- if src1 is scalar, as MAD src2 has more region restrictions
-    {
-        G4_Operand* src0 = inst->getSrc(0);
-        G4_Operand* src1 = inst->getSrc(1);
-        if (IS_DTYPE(src0->getType()) && src0->isSrcRegRegion() && !IS_DTYPE(src1->getType()))
-        {
-            inst->swapSrc(0, 1);
-        }
-        else if (src1->isImm() && getTypeSize(src1->getType()) == 2)
-        {
-            //swap src0 and src1 as src0 supports imm
-            inst->swapSrc(0, 1);
-        }
-        else if (!isGoodAlign1TernarySrc(inst, 0, true) &&
-            src1->isSrcRegRegion() &&
-            src1->asSrcRegRegion()->isScalar())
-        {
-            // Swap src0 and src1 if src1 is scalar but src0 is not a good Align1TernarySrc
-            // when src2 regioning support is quite limited.
-            inst->swapSrc(0, 1);
-        }
-        else if (isLowPrecisionFloatTy(src0->getType()) && src1->getType() == Type_F)
-        {
-            inst->swapSrc(0, 1);
         }
     }
 
@@ -4241,6 +4246,8 @@ void HWConformity::localizeForAcc(G4_BB* bb)
     std::map<const G4_Declare*, G4_Operand*> replacedOperand;
     std::unordered_map<const G4_Declare*, vector<struct LiveNode>> useNodes;
     std::vector<const G4_Declare*> erasedCandidates;
+
+    curBB = bb;
 
     for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd; ++instIter)
     {
@@ -4716,7 +4723,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
         uint16_t offset = 0;
         if (!builder.isOpndAligned(inst->getDst(), offset, numEltPerGRF(Type_UB)))
         {
-            inst->setDest(insertMovAfter(i, inst->getDst(), inst->getDst()->getType(), bb, GRFALIGN));
+            replaceDst(i, inst->getDst()->getType(), GRFALIGN);
         }
 
         G4_Operand* src0 = inst->getSrc(0);
@@ -5136,6 +5143,7 @@ void HWConformity::conformBB(G4_BB* bb)
                 dst_elsize < extypesize &&
                 !IS_VTYPE(extype) &&
                 !inst->isMixedMode() &&
+                !hasDedicateAlignRegionConformity(inst) &&
                 !inst->isSend())
             {
                 fixDstHstride(i, extypesize);
@@ -5295,6 +5303,7 @@ void HWConformity::chkHWConformity()
 
     for (auto bb : kernel.fg)
     {
+        curBB = bb;
         fixIntToHFMove(bb);
 #ifdef _DEBUG
         verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
@@ -5892,6 +5901,7 @@ bool HWConformity::markPackedByteReference(G4_Kernel& kernel, G4_Operand* opnd, 
             !(kernel.fg.globalOpndHT.isOpndGlobal(opnd)) &&
             // check if the opnd is used as packed byte
             G4_Type_Table[opnd->getType()].byteSize == 1 &&
+            !hasDedicateAlignRegionConformity(inst) &&
             dcl->getElemSize() == 1 &&
             opnd->asDstRegRegion()->getHorzStride() == 1 &&
             // check if the instruction is a raw mov
@@ -6624,7 +6634,7 @@ void HWConformity::fixMixedHFInst(G4_BB* bb)
                     {
                         if (!builder.isOpndAligned(inst->getDst(), numEltPerGRF(Type_UB)))
                         {
-                            inst->setDest(insertMovAfter(instIter, inst->getDst(), Type_F, bb, GRFALIGN));
+                            replaceDst(instIter, Type_F, GRFALIGN);
                         }
                         if (!builder.isOpndAligned(inst->getSrc(2), numEltPerGRF(Type_UB)))
                         {
@@ -6777,7 +6787,7 @@ void HWConformity::fixSrc2(INST_LIST_ITER it, G4_BB* bb, bool swapSrc0and2)
         // Check if dst stride aligns with src2.
         if (dstEltSz != G4_Type_Table[srcTy].byteSize)
         {
-            inst->setDest(insertMovAfter(it, inst->getDst(), inst->getDst()->getType(), bb, GRFALIGN));
+            replaceDst(it, inst->getDst()->getType(), GRFALIGN);
         }
     }
 }
@@ -6909,3 +6919,14 @@ void HWConformity::fixPredCtrl(INST_LIST_ITER it, G4_BB* bb)
 }
 
 
+
+
+bool HWConformity::hasDedicateAlignRegionConformity(const G4_INST *I) const
+{
+    switch (I->opcode())
+    {
+    default:
+        break;
+    }
+    return false;
+}

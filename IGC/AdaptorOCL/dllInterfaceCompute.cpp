@@ -61,7 +61,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "vc/igcdeps/cmc.h"
 #include "vc/igcdeps/ShaderDump.h"
 #include "vc/Support/StatusCode.h"
-#include "vc/GenXCodeGen/GenXWrapper.h"
 #include "common/LLVMWarningsPop.hpp"
 #endif // !defined(WDDM_LINUX) && (!defined(IGC_VC_DISABLED) || !IGC_VC_DISABLED)
 
@@ -452,7 +451,7 @@ bool ProcessElfInput(
               llvm::Module* pKernelModule = nullptr;
 #if defined(IGC_SPIRV_ENABLED)
               Context.setAsSPIRV();
-              std::istringstream IS(buf);
+              std::istringstream IS(buf.str());
               std::string stringErrMsg;
               std::unordered_map<uint32_t, uint64_t> specIDToSpecValueMap = UnpackSpecConstants(
                                                                                   InputArgs.pSpecConstantsIds,
@@ -699,7 +698,7 @@ bool ParseInput(
     else if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V) {
 #if defined(IGC_SPIRV_ENABLED)
         //convert SPIR-V binary to LLVM module
-        std::istringstream IS(strInput);
+        std::istringstream IS(strInput.str());
         std::string stringErrMsg;
         std::unordered_map<uint32_t, uint64_t> specIDToSpecValueMap = UnpackSpecConstants(
                                                                             pInputArgs->pSpecConstantsIds,
@@ -1409,6 +1408,9 @@ static void adjustFileTypeVC(TB_DATA_FORMAT DataFormat,
 {
     switch (DataFormat)
     {
+    case TB_DATA_FORMAT_LLVM_TEXT:
+        Opts.FType = vc::FileType::LLVM_TEXT;
+        return;
     case TB_DATA_FORMAT::TB_DATA_FORMAT_SPIR_V:
         Opts.FType = vc::FileType::SPIRV;
         return;
@@ -1439,6 +1441,7 @@ static void adjustDumpOptions(vc::CompileOptions& Opts)
         Opts.DumpIR = true;
         Opts.DumpIsa = true;
         Opts.DumpAsm = true;
+        Opts.DumpDebugInfo = true;
     }
 }
 
@@ -1563,7 +1566,12 @@ static std::error_code TranslateBuildVC(
         return getErrorVC(vc::make_error_code(vc::errc::generic_bif_load_fail),
                           pOutputArgs);
     vc::ExternalData ExtData{std::move(OCLGenericBIFModule)};
-    auto ExpOutput = vc::Compile(Input, Opts, ExtData);
+    llvm::ArrayRef<uint32_t> SpecConstIds{pInputArgs->pSpecConstantsIds,
+                                          pInputArgs->SpecConstantsSize};
+    llvm::ArrayRef<uint64_t> SpecConstValues{pInputArgs->pSpecConstantsValues,
+                                             pInputArgs->SpecConstantsSize};
+    auto ExpOutput =
+        vc::Compile(Input, Opts, ExtData, SpecConstIds, SpecConstValues);
     if (!ExpOutput)
         return getErrorVC(ExpOutput.takeError(), pOutputArgs);
     vc::CompileOutput& Res = ExpOutput.get();

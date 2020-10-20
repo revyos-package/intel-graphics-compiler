@@ -208,7 +208,7 @@ bool GenXPatternMatch::runOnFunction(Function &F) {
   const GenXSubtarget *ST = &getAnalysis<TargetPassConfig>()
                                  .getTM<GenXTargetMachine>()
                                  .getGenXSubtarget();
-  loadPhiConstants(&F, DT, true, ST);
+  loadPhiConstants(F, DT, *ST, *DL, true);
   Changed |= distributeIntegerMul(&F);
   Changed |= propagateFoldableRegion(&F);
   Changed |= reassociateIntegerMad(&F);
@@ -1938,6 +1938,14 @@ bool GenXPatternMatch::simplifyWrRegion(CallInst *Inst) {
     Value *OldV = Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
     if (!isa<UndefValue>(OldV))
       return false;
+
+    // have to keep faddr's wrregion to ensure faddr's proper baling
+    auto *Parent = NewV;
+    while (isa<BitCastInst>(Parent))
+      Parent = cast<Instruction>(Parent)->getOperand(0);
+    if (GenXIntrinsic::getAnyIntrinsicID(Parent) == GenXIntrinsic::genx_faddr)
+      return false;
+
     if (NewVTy->isVectorTy() && cast<VectorType>(NewVTy)->getNumElements() > 1)
       return false;
     // Do not rewrite if input is another region read, as two region reads

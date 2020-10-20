@@ -37,6 +37,7 @@ namespace llvm {
 class FunctionPass;
 class ModulePass;
 class Pass;
+class PassRegistry;
 
 //===----------------------------------------------------------------------===//
 //
@@ -69,6 +70,10 @@ FunctionPass *createGenXLayoutBlocksPass();
 FunctionPass *createGenXLowerAggrCopiesPass();
 
 ModulePass *createGenXPacketizePass();
+
+void initializeGenXSimplifyPass(PassRegistry &);
+void initializeCMABIPass(PassRegistry &);
+
 } // End llvm namespace
 
 #endif

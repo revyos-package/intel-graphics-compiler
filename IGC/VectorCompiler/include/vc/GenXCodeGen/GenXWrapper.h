@@ -137,9 +137,7 @@ struct CompileOutput {
 
 using CompileOutput = std::variant<cm::CompileOutput, ocl::CompileOutput>;
 
-enum class FileType {
-  SPIRV, SOURCE
-};
+enum class FileType { SPIRV, LLVM_TEXT };
 
 enum class OptimizerLevel { None, Full };
 
@@ -163,6 +161,7 @@ struct CompileOptions {
   bool DumpIsa = false;
   bool DumpIR = false;
   bool DumpAsm = false;
+  bool DumpDebugInfo = false;
   bool TimePasses = false;
 };
 
@@ -183,7 +182,9 @@ public:
 
 llvm::Expected<CompileOutput> Compile(llvm::ArrayRef<char> Input,
                                       const CompileOptions &Opts,
-                                      const ExternalData &ExtData);
+                                      const ExternalData &ExtData,
+                                      llvm::ArrayRef<uint32_t> SpecConstIds,
+                                      llvm::ArrayRef<uint64_t> SpecConstValues);
 
 llvm::Expected<CompileOptions> ParseOptions(llvm::StringRef ApiOptions,
                                             llvm::StringRef InternalOptions);

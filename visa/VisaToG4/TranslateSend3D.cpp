@@ -1077,7 +1077,7 @@ int IR_Builder::translateVISARTWrite3DInst(
 #define CPS_COUNTER_EXT_MSG_DESC_OFFSET 16
 
     uint16_t extFuncCtrl = 0;
-    if (cntrls.isNullRT && getPlatform() >= GENX_ICLLP)
+    if (cntrls.isNullRT && getPlatform() >= GENX_TGLLP)
     {
         // extFuncCtrl is the 16:31 bits of extDesc. NullRT is the bit 20 of extDesc.
         // That says NullRT is the bit 4 of extFuncCtrl.
@@ -1150,7 +1150,7 @@ int IR_Builder::translateVISARTWrite3DInst(
             srcToUse = createNullSrc(Type_UD);
         }
 
-        Create_SplitSend_Inst_For_RTWrite(
+        Create_SplitSend_Inst_For_RT(
             pred,
             createNullDst(Type_UD),
             m0,

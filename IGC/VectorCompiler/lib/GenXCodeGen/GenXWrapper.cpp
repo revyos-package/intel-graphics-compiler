@@ -54,6 +54,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Allocator.h"
@@ -64,6 +65,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
@@ -85,7 +87,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using namespace llvm;
 
-static Expected<std::vector<char>> translateSPIRVToIR(ArrayRef<char> Input) {
+static Expected<std::vector<char>>
+translateSPIRVToIR(ArrayRef<char> Input, ArrayRef<uint32_t> SpecConstIds,
+                   ArrayRef<uint64_t> SpecConstValues) {
+  IGC_ASSERT(SpecConstIds.size() == SpecConstValues.size());
 #if defined(_WIN64)
  //TODO: rename to SPIRVDLL64.dll when binary components are fixed
   constexpr char *SpirvLibName = "SPIRVDLL.dll";
@@ -96,7 +101,8 @@ static Expected<std::vector<char>> translateSPIRVToIR(ArrayRef<char> Input) {
 #endif
   constexpr char *SpirvReadVerifyName = "spirv_read_verify_module";
   using SpirvReadVerifyType =
-      int(const char *pIn, size_t InSz,
+      int(const char *pIn, size_t InSz, const uint32_t *SpecConstIds,
+          const uint64_t *SpecConstVals, unsigned SpecConstSz,
           void (*OutSaver)(const char *pOut, size_t OutSize, void *OutUserData),
           void *OutUserData,
           void (*ErrSaver)(const char *pErrMsg, void *ErrUserData),
@@ -128,24 +134,26 @@ static Expected<std::vector<char>> translateSPIRVToIR(ArrayRef<char> Input) {
   };
 
   std::vector<char> Result;
-  int Status = SpirvReadVerifyFunc(Input.data(), Input.size(), OutSaver,
-                                   &Result, ErrSaver, &ErrMsg);
+  int Status = SpirvReadVerifyFunc(
+      Input.data(), Input.size(), SpecConstIds.data(), SpecConstValues.data(),
+      SpecConstValues.size(), OutSaver, &Result, ErrSaver, &ErrMsg);
   if (Status != 0)
     return make_error<vc::BadSpirvError>(ErrMsg);
 
   return {std::move(Result)};
 }
 
-static Expected<std::unique_ptr<llvm::Module>> getModule(ArrayRef<char> Input,
-                                                         LLVMContext &C) {
-  auto ExpIR = translateSPIRVToIR(Input);
+static Expected<std::unique_ptr<llvm::Module>>
+getModuleFromSPIRV(ArrayRef<char> Input, ArrayRef<uint32_t> SpecConstIds,
+                   ArrayRef<uint64_t> SpecConstValues, LLVMContext &Ctx) {
+  auto ExpIR = translateSPIRVToIR(Input, SpecConstIds, SpecConstValues);
   if (!ExpIR)
     return ExpIR.takeError();
 
   std::vector<char> &IR = ExpIR.get();
   llvm::MemoryBufferRef BufferRef(llvm::StringRef(IR.data(), IR.size()),
                                   "Deserialized SPIRV Module");
-  auto ExpModule = llvm::parseBitcodeFile(BufferRef, C);
+  auto ExpModule = llvm::parseBitcodeFile(BufferRef, Ctx);
 
   if (!ExpModule)
     return llvm::handleExpected(
@@ -161,6 +169,36 @@ static Expected<std::unique_ptr<llvm::Module>> getModule(ArrayRef<char> Input,
     return make_error<vc::InvalidModuleError>();
 
   return ExpModule;
+}
+
+static Expected<std::unique_ptr<llvm::Module>>
+getModuleFromLLVMText(ArrayRef<char> Input, LLVMContext &C) {
+  SMDiagnostic Err;
+  llvm::MemoryBufferRef BufferRef(llvm::StringRef(Input.data(), Input.size()),
+                                  "LLVM IR Module");
+  Expected<std::unique_ptr<llvm::Module>> ExpModule =
+      llvm::parseIR(BufferRef, Err, C);
+
+  if (!ExpModule)
+    Err.print("getModuleLL", errs());
+
+  if (verifyModule(*ExpModule.get()))
+    return make_error<vc::InvalidModuleError>();
+
+  return ExpModule;
+}
+
+static Expected<std::unique_ptr<llvm::Module>>
+getModule(ArrayRef<char> Input, vc::FileType FType,
+          ArrayRef<uint32_t> SpecConstIds, ArrayRef<uint64_t> SpecConstValues,
+          LLVMContext &Ctx) {
+  switch (FType) {
+  case vc::FileType::SPIRV:
+    return getModuleFromSPIRV(Input, SpecConstIds, SpecConstValues, Ctx);
+  case vc::FileType::LLVM_TEXT:
+    return getModuleFromLLVMText(Input, Ctx);
+  }
+  IGC_ASSERT_EXIT_MESSAGE(0, "Unknown input kind");
 }
 
 static vc::ocl::ArgInfo
@@ -350,6 +388,7 @@ static GenXBackendOptions createBackendOptions(const vc::CompileOptions &Opts) {
   if (Opts.StackMemSize)
     BackendOpts.StackSurfaceMaxSize = Opts.StackMemSize.getValue();
   BackendOpts.EnableAsmDumps = Opts.DumpAsm;
+  BackendOpts.EnableDebugInfoDumps = Opts.DumpDebugInfo;
   BackendOpts.Dumper = Opts.Dumper.get();
   return BackendOpts;
 }
@@ -486,7 +525,9 @@ static vc::CompileOutput runCodeGen(const vc::CompileOptions &Opts,
 
 Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
                                         const vc::CompileOptions &Opts,
-                                        const vc::ExternalData &ExtData) {
+                                        const vc::ExternalData &ExtData,
+                                        ArrayRef<uint32_t> SpecConstIds,
+                                        ArrayRef<uint64_t> SpecConstValues) {
   // Environment variable for additional options for debug purposes.
   // This will exit with error if options is incorrect and should not
   // be used to pass meaningful options required for compilation.
@@ -504,7 +545,8 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   llvm::PassRegistry &Registry = *llvm::PassRegistry::getPassRegistry();
   llvm::initializeTarget(Registry);
 
-  auto ExpModule = getModule(Input, Context);
+  Expected<std::unique_ptr<llvm::Module>> ExpModule =
+      getModule(Input, Opts.FType, SpecConstIds, SpecConstValues, Context);
   if (!ExpModule)
     return ExpModule.takeError();
   Module &M = *ExpModule.get();
@@ -617,8 +659,6 @@ static Error makeOptionError(const opt::Arg &A, const opt::ArgList &Opts,
 
 static Error fillApiOptions(const opt::ArgList &ApiOptions,
                             vc::CompileOptions &Opts) {
-  if (ApiOptions.hasArg(vc::options::OPT_igcmc))
-    Opts.OptLevel = vc::OptimizerLevel::None;
   if (ApiOptions.hasArg(vc::options::OPT_no_vector_decomposition))
     Opts.NoVecDecomp = true;
 
@@ -755,13 +795,8 @@ composeLLVMArgs(const opt::InputArgList &ApiArgs,
   if (opt::Arg *DbgArg = ApiArgs.getLastArg(vc::options::OPT_vc_emit_debug)) {
 
     UpdatedArgs.AddSeparateArg(DbgArg, LLVMOpt,
-                               "-finalizer-opts='-generateDebugInfo'");
+        "-finalizer-opts='-generateDebugInfo -addKernelID -setstartbp'");
     UpdatedArgs.AddSeparateArg(DbgArg, LLVMOpt, "-emit-debug-info");
-
-    // TODO: turn off the debug when debug information is stabilized
-    UpdatedArgs.AddSeparateArg(
-        nullptr, LLVMOpt,
-        "-finalizer-opts='-dumpcommonisa -dumpvisa -output -binary'");
   }
 
   if (opt::Arg *GTPinReRa = ApiArgs.getLastArg(vc::options::OPT_gtpin_rera)) {

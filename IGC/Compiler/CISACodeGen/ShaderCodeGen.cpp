@@ -402,7 +402,6 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 
     bool needDPEmu = (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
         (ctx.m_DriverInfo.NeedFP64(ctx.platform.getPlatformInfo().eProductFamily) && ctx.platform.hasNoFP64Inst()));
-    needDPEmu &= ctx.m_instrTypes.hasFP64Inst;
     uint32_t theEmuKind = (needDPEmu ? EmuKind::EMU_DP : 0);
     theEmuKind |= (ctx.m_DriverInfo.NeedI64BitDivRem() ? EmuKind::EMU_I64DIVREM : 0);
     theEmuKind |=
@@ -951,6 +950,8 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
         static const int SIMD16_NUM_TEMPREG_THRESHOLD = 92;
         static const int SIMD16_SLM_NUM_TEMPREG_THRESHOLD = 128;
 
+        static const int SIMD32_NUM_TEMPREG_THRESHOLD = 40;
+
         switch (simdModeAllowed)
         {
         case SIMDMode::SIMD8:
@@ -991,7 +992,7 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
                 ctx->m_tempCount <= tempThreshold16;
 
             bool cgSimd32 = maxSimdMode == SIMDMode::SIMD32 &&
-                ctx->m_tempCount <= tempThreshold16;
+                ctx->m_tempCount <= SIMD32_NUM_TEMPREG_THRESHOLD;
 
             if (ctx->m_enableSubroutine || !cgSimd16)
             {

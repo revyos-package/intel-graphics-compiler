@@ -196,6 +196,7 @@ private:
   bool lowerLoadStore(Instruction *Inst);
   bool lowerMul64(Instruction *Inst);
   bool lowerTrap(CallInst *CI);
+  bool generatePredicatedWrrForNewLoad(CallInst *CI);
 };
 
 } // end namespace
@@ -390,6 +391,20 @@ static Value *generatePredicateForLoadWrregion(
   return Res;
 }
 
+static Value *generatePredicatedWrregion(Value *OldVal, Value *NewVal,
+                                         Value *Pred, unsigned Offset,
+                                         Instruction *InsertBefore,
+                                         const llvm::Twine &Name = "") {
+  Type *NewValType = NewVal->getType();
+
+  Region WrR(NewValType);
+  WrR.Mask = Pred;
+  WrR.Offset = Offset;
+  return WrR.createWrRegion(OldVal, NewVal, Name, InsertBefore,
+                            InsertBefore->getDebugLoc());
+}
+
+
 // Generate partial write for result of splitted 1-channel load instruction.
 // Initially we could have following sequence for illegal load (on gather_scaled example):
 //   res = gather_scaled <32>
@@ -581,6 +596,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   unsigned AtomicSrcIdx = NONEED;
   bool IsTyped = false;
   int AtomicNumSrc = (-1); // -1 means not-an-atomic
+  unsigned NumVectorElements = 1;
 
   switch (IID) {
   case GenXIntrinsic::genx_typed_atomic_add:
@@ -760,7 +776,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   IGC_ASSERT((Width % TargetWidth) == 0);
   auto NumSplits = Width / TargetWidth;
   IGC_ASSERT(NumSplits == 2 || NumSplits == 4);
-  unsigned NumChannels = 1;
+  unsigned NumChannels = NumVectorElements;
   if (MaskIdx != NONEED) {
     NumChannels = (unsigned)cast<ConstantInt>(CI->getArgOperand(MaskIdx))
                       ->getZExtValue();
@@ -933,6 +949,28 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
 
 
 /***********************************************************************
+ * generatePrecicatedWrrForNewLoad : Generate predicated wrr if result
+ *                                   of a load that needs no splits
+ * Return: true if predicated wrr was generated
+ */
+
+bool GenXLowering::generatePredicatedWrrForNewLoad(CallInst *CI) {
+  IGC_ASSERT(isNewLoadInst(CI) && "New load expected");
+  // Generate predicated wrr if result of a load is predicated with a select
+  if (auto *SI = getLoadSelect(CI)) {
+    Value *NewResult = UndefValue::get(CI->getType());
+    Value *LoadPred = SI->getCondition();
+    NewResult =
+        generatePredicatedWrregion(NewResult, CI, LoadPred, 0 /* Offset */,
+                                   SI->getNextNode(), "lowerpred");
+    SI->replaceAllUsesWith(NewResult);
+    ToErase.push_back(SI);
+    return true;
+  }
+  return false;
+}
+
+/***********************************************************************
  * processInst : process one instruction in GenXLowering
  *
  * Return:  whether any change was made, and thus the current instruction
@@ -988,6 +1026,9 @@ bool GenXLowering::processInst(Instruction *Inst) {
        // split gather/scatter/atomic into the width legal to the target
     if (splitGatherScatter(CI, IntrinsicID))
       return true;
+    else if (isNewLoadInst(CI))
+      return generatePredicatedWrrForNewLoad(CI);
+
     switch (IntrinsicID) {
     case GenXIntrinsic::genx_rdregioni:
     case GenXIntrinsic::genx_rdregionf:
@@ -1715,7 +1756,7 @@ bool GenXLowering::lowerBoolVectorSelect(SelectInst *Inst) {
  * Return:  whether any change was made, and thus the current instruction
  *          is now marked for erasing
  *
- * We handle three cases:
+ * We handle four cases:
  *
  * 1. A slice of the vector, which can be turned into rdpredregion.
  *
@@ -1724,6 +1765,10 @@ bool GenXLowering::lowerBoolVectorSelect(SelectInst *Inst) {
  *    result of a cmp then we can splat the cmp as an optimization.
  *
  * 3. An unslice of the vector, which can be turned into wrpredregion.
+ *
+ * 4. General case. Like in the splat case we convert input via select and
+ *    result is then bitcasted back to vector of i1. Converted vectors are
+ *    then handled by lowerShuffleToMove
  */
 bool GenXLowering::lowerBoolShuffle(ShuffleVectorInst *SI) {
   ShuffleVectorAnalyzer SVA(SI);
@@ -1768,10 +1813,30 @@ bool GenXLowering::lowerBoolShuffle(ShuffleVectorInst *SI) {
   if (SVA.isReplicatedSlice())
     return false;
 
-  // No other cases handled.
-  SI->getContext().emitError(
-      SI, "general bool shuffle vector instruction not implemented");
-  return false;
+  // 4. General case.
+
+  // The idea is to convert input i1 vector to i16 vector via select,
+  // then do a shufflevector lowering for non-bool case
+  // and convert back to i1 vector via icmp instruction.
+
+  IRBuilder<> B(SI);
+  unsigned WidthInput =
+      cast<VectorType>(SI->getOperand(0)->getType())->getNumElements();
+  unsigned WidthResult = cast<VectorType>(SI->getType())->getNumElements();
+  Constant *C1 = ConstantVector::getSplat(IGCLLVM::getElementCount(WidthInput),
+                                          B.getInt16(1));
+  Constant *C0 = ConstantVector::getSplat(IGCLLVM::getElementCount(WidthInput),
+                                          B.getInt16(0));
+  Value *V1 = B.CreateSelect(SI->getOperand(0), C1, C0);
+  Value *V2 = B.CreateSelect(SI->getOperand(1), C1, C0);
+  Value *SI1 = B.CreateShuffleVector(V1, V2, SI->getMask(), SI->getName());
+  Constant *C2 = ConstantVector::getSplat(IGCLLVM::getElementCount(WidthResult),
+                                          B.getInt16(0));
+  Value *Result = B.CreateICmpNE(SI1, C2);
+  SI->replaceAllUsesWith(Result);
+  ToErase.push_back(SI);
+
+  return true;
 }
 
 /***********************************************************************
@@ -1981,7 +2046,7 @@ template <typename Iter> Iter skipUndefs(Iter First, Iter Last) {
 }
 
 /***********************************************************************
- * lowerShuffleToMove : lower a ShuffleInst (element type not i1) to a
+ * lowerShuffleToMove : lower a ShuffleInst (element type is not i1) to a
  *                      sequence of rd/wrregion intrinsics
  */
 void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
@@ -2011,8 +2076,7 @@ void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
   std::transform(
       RdRegions.begin(), RdRegions.end(), std::back_inserter(RdRegionInsts),
       [SI](ShuffleVectorAnalyzer::OperandRegionInfo &OpRegion) -> Value * {
-        if (cast<VectorType>(OpRegion.Op->getType())->getNumElements() ==
-            OpRegion.R.NumElements)
+        if (OpRegion.R.isWhole(OpRegion.Op->getType()))
           return OpRegion.Op;
         return OpRegion.R.createRdRegion(
             OpRegion.Op, SI->getName() + ".shuffle.rd", SI, SI->getDebugLoc());
@@ -2686,96 +2750,6 @@ bool GenXLowering::widenByteOp(Instruction *Inst) {
   }
   ToErase.push_back(Inst);
   return true;
-}
-
-static bool breakConstantVector(unsigned i, Instruction *CurInst,
-                                Instruction *InsertPt) {
-  ConstantVector *CV = cast<ConstantVector>(CurInst->getOperand(i));
-
-  // Splat case.
-  if (auto S = dyn_cast_or_null<ConstantExpr>(CV->getSplatValue())) {
-    // Turn element into an instruction
-    auto Inst = S->getAsInstruction();
-    Inst->setDebugLoc(CurInst->getDebugLoc());
-    Inst->insertBefore(InsertPt);
-    Type *NewTy = IGCLLVM::FixedVectorType::get(Inst->getType(), 1);
-    Inst = CastInst::Create(Instruction::CastOps::BitCast, Inst, NewTy, "",
-                            CurInst);
-    Inst->setDebugLoc(CurInst->getDebugLoc());
-
-    // Splat this value.
-    Region R(Inst);
-    R.Offset = 0;
-    R.Width = 1;
-    R.Stride = R.VStride = 0;
-    R.NumElements = CV->getNumOperands();
-    Inst = R.createRdRegion(Inst, "", InsertPt /*InsertBefore*/,
-                            Inst->getDebugLoc());
-
-    // Update i-th operand with newly created splat.
-    CurInst->setOperand(i, Inst);
-    return true;
-  }
-
-  SmallVector<Value *, 8> Vals;
-  bool HasConstExpr = false;
-  for (unsigned j = 0, N = CV->getNumOperands(); j < N; ++j) {
-    Value *Elt = CV->getOperand(j);
-    if (auto CE = dyn_cast<ConstantExpr>(Elt)) {
-      auto Inst = CE->getAsInstruction();
-      Inst->setDebugLoc(CurInst->getDebugLoc());
-      Inst->insertBefore(InsertPt);
-      Vals.push_back(Inst);
-      HasConstExpr = true;
-    } else
-      Vals.push_back(Elt);
-  }
-
-  if (HasConstExpr) {
-    Value *Val = UndefValue::get(CV->getType());
-    for (unsigned j = 0, N = CV->getNumOperands(); j < N; ++j) {
-      Region R(Vals[j]);
-      R.Offset = j * R.ElementBytes;
-      Val =
-          R.createWrRegion(Val, Vals[j], "", InsertPt, CurInst->getDebugLoc());
-    }
-    CurInst->setOperand(i, Val);
-    return true;
-  }
-
-  return false;
-}
-
-bool genx::breakConstantExprs(Function *F) {
-  bool Modified = false;
-  for (po_iterator<BasicBlock *> i = po_begin(&F->getEntryBlock()),
-                                 e = po_end(&F->getEntryBlock());
-       i != e; ++i) {
-    BasicBlock *BB = *i;
-    // The effect of this loop is that we process the instructions in reverse
-    // order, and we re-process anything inserted before the instruction
-    // being processed.
-    for (Instruction *CurInst = BB->getTerminator(); CurInst;) {
-      PHINode *PN = dyn_cast<PHINode>(CurInst);
-      for (unsigned i = 0, e = CurInst->getNumOperands(); i < e; ++i) {
-        Instruction *InsertPt =
-            PN ? PN->getIncomingBlock(i)->getTerminator() : CurInst;
-        Value *Op = CurInst->getOperand(i);
-        if (getUnderlyingGlobalVariable(Op) != nullptr)
-          continue;
-        if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Op)) {
-          Instruction *NewInst = CE->getAsInstruction();
-          NewInst->setDebugLoc(CurInst->getDebugLoc());
-          NewInst->insertBefore(CurInst);
-          CurInst->setOperand(i, NewInst);
-          Modified = true;
-        } else if (isa<ConstantVector>(Op))
-          Modified |= breakConstantVector(i, CurInst, InsertPt);
-      }
-      CurInst = CurInst == &BB->front() ? nullptr : CurInst->getPrevNode();
-    }
-  }
-  return Modified;
 }
 
 namespace {

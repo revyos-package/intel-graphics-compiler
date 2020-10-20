@@ -27,6 +27,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef IGC_PROBE_ASSERTION_H
 #define IGC_PROBE_ASSERTION_H
 
+#include "../common/EmUtils.h"
+
 
 #include <cassert>
 #include <cstdlib>

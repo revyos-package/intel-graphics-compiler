@@ -189,10 +189,11 @@ public:
     CVariable* GetHWTID();
     CVariable* GetSP();
     CVariable* GetFP();
+    CVariable* GetPrevFP();
     CVariable* GetARGV();
     CVariable* GetRETV();
-    CVariable* CreateFPAndSP();
     CVariable* GetPrivateBase();
+    void InitializeStackVariables();
     void SaveStackState();
     void RestoreStackState();
     /// Get the max private mem size based on simd width

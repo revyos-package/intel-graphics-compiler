@@ -66,6 +66,35 @@ using namespace std;
 
 char EmitPass::ID = 0;
 
+/// Divide N into multiple of M (must be power of two), and the remaining into M/2,
+/// M/4, ..., 1. Each sequence takes two elements in execsizeSeq, in which first
+/// one has execsize, and the second one the starting offset.
+/// For example with M = 16, N = 47,
+///  {16, 0}, {16, 16}, {8, 32}, {4, 40}, {2, 44} {1, 45}
+static void splitIntoPowerOfTwo(SmallVector<uint32_t, 16>& execsizeSeq, uint32_t N,  uint32_t M)
+{
+    // Max execution size is 16.
+    int n = (int)N / (int)M;
+    uint32_t offset = 0;
+    for (int i = 0; i < n; ++i) {
+        execsizeSeq.push_back(16);
+        execsizeSeq.push_back(offset);
+        offset += 16;
+    }
+
+    int m = (int)(N % M);
+    for (uint32_t s = M/2; m > 0; s = s / 2)
+    {
+        if (m >= (int)s)
+        {
+            execsizeSeq.push_back(s);
+            execsizeSeq.push_back(offset);
+            offset += s;
+            m -= s;
+        }
+    }
+}
+
 EmitPass::EmitPass(CShaderProgram::KernelShaderMap& shaders, SIMDMode mode, bool canAbortOnSpill, ShaderDispatchMode shaderMode, PSSignature* pSignature)
     : FunctionPass(ID),
     m_SimdMode(mode),
@@ -4453,7 +4482,7 @@ void EmitPass::emitRenderTargetWrite(llvm::RTWritIntrinsic* inst, bool fromRet)
 
     bool lastRenderTarget = psProgram->IsLastRTWrite(inst);
     bool EOT = lastRenderTarget && (m_encoder->IsSecondHalf() || m_currShader->m_numberInstance == 1);
-
+    bool isNullRT = false;
     int RTIndex = inst->getRTIndexImm();
     bool oMask = inst->hasMask();
     bool outputDepth = inst->hasDepth();
@@ -4491,6 +4520,8 @@ void EmitPass::emitRenderTargetWrite(llvm::RTWritIntrinsic* inst, bool fromRet)
             return;
         }
         bindingTableIndex = m_currShader->m_pBtiLayout->GetNullSurfaceIdx();
+
+        isNullRT = true;
     }
 
     bool directIdx = inst->isImmRTIndex();
@@ -4606,6 +4637,7 @@ void EmitPass::emitRenderTargetWrite(llvm::RTWritIntrinsic* inst, bool fromRet)
         src,
         isUndefined,
         lastRenderTarget,
+        isNullRT,
         perSample,
         coarseMode,
         isHeaderMaskFromCe0,
@@ -8175,6 +8207,7 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
         break;
     }
     case GenISAIntrinsic::GenISA_hw_thread_id:
+    case GenISAIntrinsic::GenISA_hw_thread_id_alloca:
     {
         m_encoder->Copy(m_destination, m_currShader->GetHWTID());
         m_encoder->Push();
@@ -9536,7 +9569,7 @@ void EmitPass::emitVLAStackAlloca(llvm::GenIntrinsicInst* intrinsic)
     CVariable* pSP = m_currShader->GetSP();
     CVariable* lane_off = m_currShader->GetSymbol(intrinsic->getOperand(0));
     // m_destination = curr_SP + lane_offset
-    emitAddSP(m_destination, pSP, lane_off);
+    emitAddPointer(m_destination, pSP, lane_off);
     m_encoder->Push();
 
     if (m_currShader->m_numberInstance == 1 || m_encoder->IsSecondHalf()) {
@@ -9549,7 +9582,7 @@ void EmitPass::emitVLAStackAlloca(llvm::GenIntrinsicInst* intrinsic)
         m_encoder->Push();
 
         m_encoder->SetSrcRegion(1, 0, 1, 0);
-        emitAddSP(pSP, pSP, vla_size);
+        emitAddPointer(pSP, pSP, vla_size);
         m_encoder->Push();
     }
 }
@@ -9558,8 +9591,16 @@ void EmitPass::emitStackAlloca(GenIntrinsicInst* GII)
 {
     // Static private mem access is done through the FP
     CVariable* pFP = m_currShader->GetFP();
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+    {
+        // If we have written the previous FP to the current frame's start, the start of
+        // private memory will be offset by 16 bytes
+        CVariable* tempFP = m_currShader->GetNewVariable(pFP);
+        emitAddPointer(tempFP, pFP, m_currShader->ImmToVariable(SIZE_OWORD, ISA_TYPE_UD));
+        pFP = tempFP;
+    }
     CVariable* pOffset = m_currShader->GetSymbol(GII->getOperand(0));
-    emitAddSP(m_destination, pFP, pOffset);
+    emitAddPointer(m_destination, pFP, pOffset);
 }
 
 void EmitPass::emitCall(llvm::CallInst* inst)
@@ -9675,7 +9716,7 @@ void EmitPass::emitReturn(llvm::ReturnInst* inst)
 /// Initializes the kernel for stack call by initializing the SP and FP
 void EmitPass::InitializeKernelStack(Function* pKernel)
 {
-    m_currShader->CreateFPAndSP();
+    m_currShader->InitializeStackVariables();
     auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     auto pModuleMetadata = pCtx->getModuleMetaData();
 
@@ -9708,12 +9749,6 @@ void EmitPass::InitializeKernelStack(Function* pKernel)
 
     unsigned totalAllocaSize = 0;
 
-    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
-    {
-        // reserve space for kernel FP
-        totalAllocaSize += SIZE_OWORD;
-    }
-
     // reserve space for alloca
     auto funcMDItr = pModuleMetadata->FuncMD.find(pKernel);
     if (funcMDItr != pModuleMetadata->FuncMD.end())
@@ -9730,9 +9765,6 @@ void EmitPass::InitializeKernelStack(Function* pKernel)
         }
     }
 
-    // Set the total alloca size for the entry function
-    m_encoder->SetFunctionAllocaStackSize(pKernel, totalAllocaSize);
-
     if (!IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
     {
         // If we don't return per-function private memory size,
@@ -9743,23 +9775,20 @@ void EmitPass::InitializeKernelStack(Function* pKernel)
 
     // Initialize SP to per-thread kernel stack base
     CVariable* pSP = m_currShader->GetSP();
-    emitAddSP(pSP, pStackBufferBase, pThreadOffset);
+    emitAddPointer(pSP, pStackBufferBase, pThreadOffset);
 
-    // Init FP to 0. When doing stack-walk, a zero-value FP indicates stack base
-    CVariable* pFP = m_currShader->GetFP();
-    m_encoder->Copy(pFP, m_currShader->ImmToVariable(0, ISA_TYPE_UQ));
-    m_encoder->Push();
+    // Push a new stack frame
+    emitPushFrameToStack(totalAllocaSize);
 
-    // Update FP and SP
-    emitPushToStack(m_currShader->ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
+    // Set the total alloca size for the entry function
+    m_encoder->SetFunctionAllocaStackSize(pKernel, totalAllocaSize);
 }
 
 // Either do a block load or store to the stack-pointer given a vector of function arguments
 uint EmitPass::emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool isWrite)
 {
     uint32_t offsetS = 0;
-    SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> owordBlks;
-
+    SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> dataBlks;
     for (auto Arg : Args)
     {
         // stack offset is always oword-aligned
@@ -9767,30 +9796,18 @@ uint EmitPass::emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool 
 
         // calculate block sizes for each arg
         int32_t RmnBytes = Arg->GetSize();
-        uint32_t BlkBytes = 0;
+        uint32_t ArgOffset = 0;
         do
         {
             uint32_t BlkSize = 0;
-            if (RmnBytes >= SIZE_OWORD * 8)
             {
-                BlkSize = 8 * SIZE_OWORD;
+                BlkSize = getBlockMsgSize(RmnBytes, m_currShader->m_Platform->getMaxBlockMsgSize(false));
+                IGC_ASSERT(BlkSize % SIZE_OWORD == 0);
             }
-            else if (RmnBytes >= SIZE_OWORD * 4)
-            {
-                BlkSize = 4 * SIZE_OWORD;
-            }
-            else if (RmnBytes >= SIZE_OWORD * 2)
-            {
-                BlkSize = 2 * SIZE_OWORD;
-            }
-            else
-            {
-                BlkSize = SIZE_OWORD;
-            }
-            owordBlks.push_back(std::make_tuple(Arg, offsetS, BlkSize, BlkBytes));
+            dataBlks.push_back(std::make_tuple(Arg, offsetS, BlkSize, ArgOffset));
 
             offsetS += BlkSize;
-            BlkBytes += BlkSize;
+            ArgOffset += BlkSize;
             RmnBytes -= BlkSize;
         } while (RmnBytes > 0);
     }
@@ -9799,71 +9816,65 @@ uint EmitPass::emitStackArgumentLoadOrStore(std::vector<CVariable*>& Args, bool 
     {
         // Get current SP
         CVariable* pSP = m_currShader->GetSP();
-        bool is64BitSP = (pSP->GetSize() > 4);
         if (isWrite)
         {
             // If storing to stack, first push SP by total store bytes
             CVariable* pPushSize = m_currShader->ImmToVariable(offsetS, ISA_TYPE_UD);
-            emitAddSP(pSP, pSP, pPushSize);
+            emitAddPointer(pSP, pSP, pPushSize);
         }
 
         // Load or store each OWORD block to stack
-        for (auto& I : owordBlks)
+        for (auto& I : dataBlks)
         {
             CVariable* Arg = std::get<0>(I);
             uint32_t StackOffset = std::get<1>(I);
             uint32_t BlkSize = std::get<2>(I);
             uint32_t ArgOffset = std::get<3>(I);
+            // spOffset is a negative offset from SP
+            int32_t spOffset = StackOffset - offsetS;
 
-            // offset for each block
-            CVariable* pStackOffset = m_currShader->ImmToVariable(StackOffset - offsetS, ISA_TYPE_D);
-
-            CVariable* pTempSP = m_currShader->GetNewVariable(pSP);
-            emitAddSP(pTempSP, pSP, pStackOffset);
-
-            if (isWrite)
+            if (isWrite)  // Write args to stack
             {
-                // Write oword block data to stack
-                if (is64BitSP)
+                {
+                    // SP offset for each block
+                    CVariable* pTempSP = m_currShader->GetNewVariable(pSP);
+                    emitAddPointer(pTempSP, pSP, m_currShader->ImmToVariable(spOffset, ISA_TYPE_D));
+
                     m_encoder->OWStoreA64(Arg, pTempSP, BlkSize, ArgOffset);
-                else
-                    m_encoder->OWStore(Arg, ESURFACE_STATELESS, nullptr, pTempSP, BlkSize, ArgOffset);
-                m_encoder->Push();
+                    m_encoder->Push();
+                }
             }
-            else
+            else  // Read args from stack
             {
-                // Read oword block data from stack
                 CVariable* LdDst = Arg;
                 if (Arg->GetType() == ISA_TYPE_BOOL)
                 {
                     LdDst = m_currShader->GetNewVariable(numLanes(m_currShader->m_dispatchSize), ISA_TYPE_W, EALIGN_HWORD, false, 1, CName::NONE);
                 }
 
-                ResourceDescriptor resource;
-                resource.m_surfaceType = ESURFACE_STATELESS;
                 int RmnBytes = LdDst->GetSize() - ArgOffset;
                 bool needRmCopy = BlkSize == SIZE_OWORD && RmnBytes > 0 && RmnBytes < SIZE_OWORD;
-                if (!needRmCopy)
                 {
-                    if (is64BitSP)
-                        m_encoder->OWLoadA64(LdDst, pTempSP, BlkSize, ArgOffset);
-                    else
-                        m_encoder->OWLoad(LdDst, resource, pTempSP, false, BlkSize, ArgOffset);
-                    m_encoder->Push();
-                }
-                else
-                {
-                    // Reading less than one oword, read one oword, then copy
-                    uint ldDstElemSize = LdDst->GetElemSize();
-                    if (ldDstElemSize > 0)
+                    // SP offset for each block
+                    CVariable* pTempSP = m_currShader->GetNewVariable(pSP);
+                    emitAddPointer(pTempSP, pSP, m_currShader->ImmToVariable(spOffset, ISA_TYPE_D));
+
+                    if (!needRmCopy)
                     {
-                        CVariable* pTempDst = m_currShader->GetNewVariable(SIZE_OWORD / ldDstElemSize, LdDst->GetType(), m_currShader->getGRFAlignment(), true, 1, CName::NONE);
-                        if (is64BitSP)
-                            m_encoder->OWLoadA64(pTempDst, pTempSP, SIZE_OWORD);
-                        else
-                            m_encoder->OWLoad(pTempDst, resource, pTempSP, false, SIZE_OWORD);
+                        m_encoder->OWLoadA64(LdDst, pTempSP, BlkSize, ArgOffset);
                         m_encoder->Push();
-                        emitVectorCopy(LdDst, pTempDst, RmnBytes / ldDstElemSize, ArgOffset, 0);
+                    }
+                    else
+                    {
+                        // Reading less than one oword, read one oword, then copy
+                        uint ldDstElemSize = LdDst->GetElemSize();
+                        if (ldDstElemSize > 0)
+                        {
+                            CVariable* pTempDst = m_currShader->GetNewVariable(SIZE_OWORD / ldDstElemSize, LdDst->GetType(), m_currShader->getGRFAlignment(), true, 1, CName::NONE);
+                            m_encoder->OWLoadA64(pTempDst, pTempSP, SIZE_OWORD);
+                            m_encoder->Push();
+                            emitVectorCopy(LdDst, pTempDst, RmnBytes / ldDstElemSize, ArgOffset, 0);
+                        }
                     }
                 }
                 if (LdDst != Arg)
@@ -10084,14 +10095,14 @@ void EmitPass::emitStackCall(llvm::CallInst* inst)
         //  pop stack pointer after the call
         CVariable* pSP = m_currShader->GetSP();
         CVariable* pPopSize = m_currShader->ImmToVariable((uint64_t)(~offsetS + 1), ISA_TYPE_D);
-        emitAddSP(pSP, pSP, pPopSize);
+        emitAddPointer(pSP, pSP, pPopSize);
     }
 }
 
 void EmitPass::emitStackFuncEntry(Function* F)
 {
     m_encoder->SetDispatchSimdSize();
-    m_currShader->CreateFPAndSP();
+    m_currShader->InitializeStackVariables();
 
     if (F->hasFnAttribute("IndirectlyCalled"))
     {
@@ -10155,12 +10166,6 @@ void EmitPass::emitStackFuncEntry(Function* F)
 
     unsigned totalAllocaSize = 0;
 
-    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
-    {
-        // reserve space for caller's FP
-        totalAllocaSize += SIZE_OWORD;
-    }
-
     // reserve space for all the alloca in the function subgroup
     auto funcMDItr = m_currShader->m_ModuleMetadata->FuncMD.find(F);
     if (funcMDItr != m_currShader->m_ModuleMetadata->FuncMD.end())
@@ -10179,8 +10184,8 @@ void EmitPass::emitStackFuncEntry(Function* F)
     // save FP before allocation
     m_currShader->SaveStackState();
 
-    // Update SP and FP
-    emitPushToStack(m_currShader->ImmToVariable(totalAllocaSize, ISA_TYPE_UD));
+    // Push a new stack frame
+    emitPushFrameToStack(totalAllocaSize);
 
     // Set the per-function private mem size
     m_encoder->SetFunctionAllocaStackSize(F, totalAllocaSize);
@@ -16382,31 +16387,47 @@ void EmitPass::emitGenISACopy(GenIntrinsicInst* GenCopyInst)
     emitCopyAll(Dst, Src, Ty);
 }
 
-// Puts FP on stack, update FP to SP, then update SP by pushOffset
-void EmitPass::emitPushToStack(CVariable* pushOffset)
+// Push a new frame onto the stack by:
+//  Update FP to the current SP
+//  Increment SP by pushSize
+//  Store value of previous frame's FP to the address of updated FP (for stack-walk)
+void EmitPass::emitPushFrameToStack(unsigned& pushSize)
 {
     CVariable* pFP = m_currShader->GetFP();
     CVariable* pSP = m_currShader->GetSP();
 
-    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
-    {
-        // Store FP value into current SP
-        bool is64BitAddr = (pSP->GetSize() > 4);
-        if (is64BitAddr)
-            m_encoder->OWStoreA64(pFP, pSP, SIZE_OWORD, 0);
-        else
-            m_encoder->OWStore(pFP, ESURFACE_STATELESS, nullptr, pSP, SIZE_OWORD, 0);
-        m_encoder->Push();
-    }
     // Set FP = SP
     m_encoder->Copy(pFP, pSP);
     m_encoder->Push();
 
-    // Update SP by pushOffset
-    emitAddSP(pSP, pSP, pushOffset);
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+    {
+        // Allocate 1 extra oword to store previous frame's FP
+        pushSize += SIZE_OWORD;
+    }
+
+    // Update SP by pushSize
+    emitAddPointer(pSP, pSP, m_currShader->ImmToVariable(pushSize, ISA_TYPE_UD));
+
+    if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+    {
+        // Store old FP value to current FP
+        CVariable* pOldFP = m_currShader->GetPrevFP();
+        // If previous FP is null (for kernel frame), we initialize it to 0
+        if (pOldFP == nullptr)
+        {
+            pOldFP = m_currShader->GetNewVariable(pFP);
+            m_encoder->Copy(pOldFP, m_currShader->ImmToVariable(0, ISA_TYPE_UQ));
+            m_encoder->Push();
+        }
+        {
+            m_encoder->OWStoreA64(pOldFP, pFP, SIZE_OWORD, 0);
+            m_encoder->Push();
+        }
+    }
 }
 
-void EmitPass::emitAddSP(CVariable* Dst, CVariable* Src, CVariable* offset)
+void EmitPass::emitAddPointer(CVariable* Dst, CVariable* Src, CVariable* offset)
 {
     if (m_currShader->m_Platform->hasNoInt64Inst() &&
         (Dst->GetType() == ISA_TYPE_Q || Dst->GetType() == ISA_TYPE_UQ) &&

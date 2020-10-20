@@ -175,6 +175,7 @@ namespace IGC
         void RenderTargetWrite(CVariable* var[],
             bool isUndefined[],
             bool lastRenderTarget,
+            bool isNullRT,
             bool perSample,
             bool coarseMode,
             bool headerMaskFromCe0,
@@ -590,7 +591,7 @@ namespace IGC
         VISABuilder* vbuilder;
         VISABuilder* vAsmTextBuilder;
 
-        bool m_insideForcedNoMaskRegion;
+        bool m_insideForcedNoMaskRegion = false;
 
         bool m_enableVISAdump;
         bool m_hasInlineAsm;

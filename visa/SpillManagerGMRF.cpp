@@ -199,12 +199,14 @@ SpillManagerGRF::SpillManagerGRF(
     unsigned spillAreaOffset,
     unsigned varIdCount,
     const LivenessAnalysis* lvInfo,
+    LSLR_LIST* spilledLSLRs,
     bool useScratchMsg)
     : gra(g)
     , builder_(g.kernel.fg.builder)
     , varIdCount_(varIdCount)
     , latestImplicitVarIdCount_(0)
     , lvInfo_(lvInfo)
+    , spilledLSLRs_(spilledLSLRs)
     , nextSpillOffset_(spillAreaOffset)
     , bbId_(UINT_MAX)
     , doSpillSpaceCompression(false)
@@ -2584,10 +2586,8 @@ SpillManagerGRF::createSpillSendInstr (
         messageDescImm =
             createSpillSendMsgDesc(spillOff, height, execSize, rvar->getBaseRegVar());
 #ifdef _DEBUG
-        {
-            int offset = (messageDescImm->getInt() & 0xFFF) * numEltPerGRF(Type_UB);
-            MUST_BE_TRUE(offset >= globalScratchOffset, "incorrect offset");
-        }
+        int offset = (messageDescImm->getInt() & 0xFFF) * numEltPerGRF(Type_UB);
+        MUST_BE_TRUE(offset >= globalScratchOffset, "incorrect offset");
 #endif
     }
     else
@@ -2606,8 +2606,7 @@ SpillManagerGRF::createSpillSendInstr (
 
         auto off = G4_SpillIntrinsic::InvalidOffset;
         G4_Declare* fp = nullptr;
-        if (useScratchMsg_
-            )
+        if (useScratchMsg_)
             off = (messageDescImm->getInt() & 0xfff);
         else
         {
@@ -2622,9 +2621,6 @@ SpillManagerGRF::createSpillSendInstr (
                 off = (offset + spillOff * getGRFSize()) >> SCRATCH_SPACE_ADDRESS_UNIT;
                 if (builder_->kernel.fg.getIsStackCallFunc() || builder_->kernel.fg.getHasStackCalls())
                     fp = builder_->kernel.fg.getFramePtrDcl();
-
-                if (!fp && offset < SCRATCH_MSG_LIMIT)
-                    headerOpnd = builder_->Create_Src_Opnd_From_Dcl(builder_->getBuiltinR0(), builder_->getRegionStride1());
             }
         }
         sendInst = builder_->createSpill(postDst, headerOpnd, srcOpnd, execSize, height, off, fp, InstOpt_WriteEnable);
@@ -2654,8 +2650,7 @@ SpillManagerGRF::createSpillSendInstr (
 )
 {
 #ifdef _DEBUG
-    if (useScratchMsg_
-        )
+    if (useScratchMsg_)
     {
         G4_Imm* messageDescImm =
             createSpillSendMsgDesc(spilledRangeRegion, execSize);
@@ -2676,8 +2671,7 @@ SpillManagerGRF::createSpillSendInstr (
 
         auto off = G4_SpillIntrinsic::InvalidOffset;
         G4_Declare* fp = nullptr;
-        if (useScratchMsg_
-            )
+        if (useScratchMsg_)
         {
             G4_Imm* messageDescImm =
                 createSpillSendMsgDesc(spilledRangeRegion, execSize);
@@ -2697,9 +2691,6 @@ SpillManagerGRF::createSpillSendInstr (
                 off = (offset + regOff * getGRFSize()) >> SCRATCH_SPACE_ADDRESS_UNIT;
                 if (builder_->kernel.fg.getIsStackCallFunc() || builder_->kernel.fg.getHasStackCalls())
                     fp = builder_->kernel.fg.getFramePtrDcl();
-
-                if (!fp && offset < SCRATCH_MSG_LIMIT)
-                    headerOpnd = builder_->Create_Src_Opnd_From_Dcl(builder_->getBuiltinR0(), builder_->getRegionStride1());
             }
         }
         sendInst = builder_->createSpill(postDst, headerOpnd, srcOpnd, execSize, (uint16_t)extMsgLength,
@@ -2913,10 +2904,8 @@ SpillManagerGRF::createFillSendInstr (
         messageDescImm =
             createFillSendMsgDesc (spillOff, height, execSize, rvar->getBaseRegVar());
 #ifdef _DEBUG
-        {
-            int offset = (messageDescImm->getInt() & 0xFFF) * numEltPerGRF(Type_UB);
-            MUST_BE_TRUE(offset >= globalScratchOffset, "incorrect offset");
-        }
+        int offset = (messageDescImm->getInt() & 0xFFF) * numEltPerGRF(Type_UB);
+        MUST_BE_TRUE(offset >= globalScratchOffset, "incorrect offset");
 #endif
     }
     else
@@ -2933,8 +2922,7 @@ SpillManagerGRF::createFillSendInstr (
 
     unsigned int off = G4_FillIntrinsic::InvalidOffset;
     G4_Declare* fp = nullptr;
-    if (useScratchMsg_
-        )
+    if (useScratchMsg_)
         off = (messageDescImm->getInt() & 0xfff);
     else
     {
@@ -2950,9 +2938,6 @@ SpillManagerGRF::createFillSendInstr (
             off = (offset + spillOff * getGRFSize()) >> SCRATCH_SPACE_ADDRESS_UNIT;
             if (builder_->kernel.fg.getIsStackCallFunc() || builder_->kernel.fg.getHasStackCalls())
                 fp = builder_->kernel.fg.getFramePtrDcl();
-
-            if (!fp && offset < SCRATCH_MSG_LIMIT)
-                payload = builder_->Create_Src_Opnd_From_Dcl(builder_->getBuiltinR0(), builder_->getRegionStride1());
         }
     }
     auto fillInst = builder_->createFill(payload, postDst, execSize, height, off, fp, InstOpt_WriteEnable);
@@ -2988,8 +2973,7 @@ SpillManagerGRF::createFillSendInstr(
     unsigned int off = G4_FillIntrinsic::InvalidOffset;
     unsigned segmentByteSize = getSegmentByteSize(filledRangeRegion, oldExecSize);
     G4_Declare* fp = nullptr;
-    if (useScratchMsg_
-        )
+    if (useScratchMsg_)
     {
         G4_Imm* messageDescImm =
             createFillSendMsgDesc(filledRangeRegion, oldExecSize);
@@ -3011,9 +2995,6 @@ SpillManagerGRF::createFillSendInstr(
             off = offset >> SCRATCH_SPACE_ADDRESS_UNIT;
             if (builder_->kernel.fg.getIsStackCallFunc() || builder_->kernel.fg.getHasStackCalls())
                 fp = builder_->kernel.fg.getFramePtrDcl();
-
-            if (!fp && offset < SCRATCH_MSG_LIMIT)
-                payload = builder_->Create_Src_Opnd_From_Dcl(builder_->getBuiltinR0(), builder_->getRegionStride1());
         }
     }
 
@@ -3812,95 +3793,6 @@ void SpillManagerGRF::prunePointsTo(G4_Kernel* kernel, PointsToAnalysis& pointsT
 // physical registers in the current iteration of the graph coloring
 // allocator.
 // returns false if spill fails somehow
-
-bool
-SpillManagerGRF::spillLiveRange(
-    G4_BB* bb, INST_LIST_ITER it
-)
-{
-    G4_INST* inst = *it;
-    curInst = inst;
-
-    G4_RegVar* regVar = nullptr;
-    if (inst->getDst()->getBase()->isRegVar())
-    {
-        regVar = getRegVar(inst->getDst());
-    }
-
-    if (regVar)
-    {
-        if (regVar->getDeclare()->getAddressed())
-        {
-            assert(0);
-        }
-        insertSpillRangeCode(it, bb);
-
-        while (regVar->isAliased()) {
-            G4_Declare* regVarDcl = regVar->getDeclare();
-            regVar = regVarDcl->getAliasDeclare()->getRegVar();
-        }
-        unsigned disp = regVar->getDisp();
-        if (disp != UINT_MAX)
-        {
-            nextSpillOffset_ = std::max(nextSpillOffset_, disp + getByteSize(regVar));
-        }
-        regVar->getDeclare()->setSpillFlag();
-    }
-    else
-    {
-        assert(0);
-    }
-
-    return true;
-}
-
-bool
-SpillManagerGRF::fillLiveRange(
-    G4_BB* bb, INST_LIST_ITER it, Gen4_Operand_Number opndNum
-)
-{
-    G4_INST* inst = *it;
-    int i = inst->getSrcNum(opndNum);
-    curInst = inst;
-
-    if (inst->getSrc(i) &&
-        inst->getSrc(i)->isSrcRegRegion())
-    {
-        auto srcRR = inst->getSrc(i)->asSrcRegRegion();
-        G4_RegVar* regVar = nullptr;
-        if (srcRR->getBase()->isRegVar())
-        {
-            regVar = getRegVar(srcRR);
-        }
-
-        if (regVar)
-        {
-            if (regVar->getDeclare()->getAddressed())
-            {
-                assert(0);
-            }
-            bool mayExceedTwoGRF = (inst->isSend() && i == 0) ||
-                (inst->isSplitSend() && i == 1);
-
-            if (mayExceedTwoGRF)
-            {
-                insertSendFillRangeCode(srcRR, it, bb);
-            }
-            else if (getRFType(regVar) == G4_GRF)
-                insertFillGRFRangeCode(srcRR, it, bb);
-            else
-                assert(0);
-        }
-        else
-        {
-            assert(0);
-        }
-    }
-
-    return true;
-}
-
-
 bool
 SpillManagerGRF::insertSpillFillCode (
     G4_Kernel * kernel, PointsToAnalysis& pointsToAnalysis
@@ -4080,6 +3972,122 @@ SpillManagerGRF::insertSpillFillCode (
 }
 
 
+bool
+SpillManagerGRF::spillLiveRanges (G4_Kernel * kernel)
+{
+    // Set the spill flag of all spilled regvars.
+    for (LSLR_LIST::const_iterator lt = spilledLSLRs_->begin ();
+        lt != spilledLSLRs_->end (); ++lt) {
+        (*lt)->getTopDcl()->setSpillFlag();
+    }
+
+    // Insert spill/fill code for all basic blocks.
+    FlowGraph& fg = kernel->fg;
+    for (BB_LIST_ITER it = fg.begin(); it != fg.end(); it++)
+    {
+        bbId_ = (*it)->getId();
+        INST_LIST::iterator jt = (*it)->begin();
+
+        while (jt != (*it)->end()) {
+            INST_LIST::iterator kt = jt;
+            ++kt;
+            G4_INST* inst = *jt;
+
+            curInst = inst;
+
+            if (failSafeSpill_)
+            {
+                spillRegOffset_ = spillRegStart_;
+            }
+
+            // Insert spill code, when the target is a spilled register.
+            if (inst->getDst())
+            {
+                G4_RegVar* regVar = nullptr;
+                if (inst->getDst()->getBase()->isRegVar())
+                {
+                    regVar = getRegVar(inst->getDst());
+                }
+
+                if (regVar && regVar->getDeclare()->isSpilled())
+                {
+                    if (getRFType(regVar) == G4_GRF)
+                    {
+                        if (inst->isPseudoKill())
+                        {
+                            (*it)->erase(jt);
+                            jt = kt;
+                            continue;
+                        }
+
+                        insertSpillRangeCode(jt, (*it));
+                    }
+                    else
+                    {
+                        assert(0);
+                    }
+                }
+            }
+
+            // Insert fill code, when the source is a spilled register.
+            for (unsigned i = 0; i < G4_MAX_SRCS; i++)
+            {
+                if (inst->getSrc(i) &&
+                    inst->getSrc(i)->isSrcRegRegion ())
+                {
+                    auto srcRR = inst->getSrc(i)->asSrcRegRegion();
+                    G4_RegVar* regVar = nullptr;
+                    if (srcRR->getBase()->isRegVar())
+                    {
+                        regVar = getRegVar(srcRR);
+                    }
+
+                    if (regVar && regVar->getDeclare()->isSpilled())
+                    {
+                        if (inst->isLifeTimeEnd())
+                        {
+                            (*it)->erase(jt);
+                            break;
+                        }
+                        bool mayExceedTwoGRF = (inst->isSend() && i == 0) ||
+                            (inst->isSplitSend() && i == 1);
+
+                        if (mayExceedTwoGRF)
+                        {
+                            insertSendFillRangeCode(srcRR, jt, *it);
+                        }
+                        else if (getRFType(regVar) == G4_GRF)
+                            insertFillGRFRangeCode(srcRR, jt, *it);
+                        else
+                            assert(0);
+                    }
+                }
+            }
+
+            jt = kt;
+        }
+    }
+
+    bbId_ = UINT_MAX;
+
+    // Calculate the spill memory used in this iteration
+
+    for (auto spill : (*spilledLSLRs_))
+    {
+        unsigned disp = spill->getTopDcl()->getRegVar()->getDisp();
+
+        if (spill->getTopDcl()->getRegVar()->isSpilled ())
+        {
+            if (disp != UINT_MAX)
+            {
+                nextSpillOffset_ = std::max(nextSpillOffset_, disp + getByteSize(spill->getTopDcl()->getRegVar()));
+            }
+        }
+    }
+
+    return true;
+}
+
 
 
 uint32_t computeSpillMsgDesc(unsigned int payloadSize, unsigned int offsetInGrfUnits)
@@ -4226,10 +4234,6 @@ void GlobalRA::expandSpillNonStackcall(
             G4_SrcRegRegion* headerOpnd = builder->Create_Src_Opnd_From_Dcl(builder->getBuiltinR0(), region);
             G4_Imm* extDesc = builder->createImm(msgDesc->getExtendedDesc(), Type_UD);
             G4_ExecSize execSize = inst->getExecSize(); // numRows > 1 ? 16 : 8;
-            if (execSize < g4::SIMD8)
-                execSize = g4::SIMD8;
-            else if (execSize < g4::SIMD16 && numRows > 1)
-                execSize = g4::SIMD16;
 
             auto sendInst = builder->createInternalSplitSendInst(nullptr, G4_sends, execSize,
                 inst->getDst(), headerOpnd, payloadToUse, msgDescImm,
@@ -4557,10 +4561,8 @@ void GlobalRA::expandFillIntrinsic(G4_BB* bb)
 }
 
 
-void GlobalRA::expandSpillFillIntrinsics(unsigned int spillSizeInBytes)
+void GlobalRA::expandSpillFillIntrinsics()
 {
-    auto globalScratchOffset = kernel.getInt32KernelAttr(Attributes::ATTR_SpillMemOffset);
-
     for (auto bb : kernel.fg)
     {
         expandSpillIntrinsic(bb);

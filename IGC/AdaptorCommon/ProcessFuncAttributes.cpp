@@ -411,6 +411,11 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         {
             mustAlwaysInline = true;
         }
+        // Enable inlining for -O0 in order to preserve debug info. This may be removed when debug stack call support is enabled.
+        else if (getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData()->compOpt.OptDisable)
+        {
+            mustAlwaysInline = true;
+        }
         if (mustAlwaysInline)
         {
             F->removeFnAttr(llvm::Attribute::NoInline);
@@ -617,7 +622,7 @@ void ProcessBuiltinMetaData::updateBuiltinFunctionMetaData(llvm::Function* pFunc
         llvm::raw_string_ostream x(typeStr);
         arg->getType()->print(x);
 
-        funcMD->m_OpenCLArgNames.push_back(arg->getName());
+        funcMD->m_OpenCLArgNames.push_back(arg->getName().str());
         funcMD->m_OpenCLArgAccessQualifiers.push_back("none");
         funcMD->m_OpenCLArgBaseTypes.push_back(x.str());
     }

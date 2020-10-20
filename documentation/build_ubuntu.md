@@ -64,8 +64,14 @@ $ git clone https://github.com/intel/llvm-patches llvm_patches
 $ mv llvm-project/clang llvm-project/llvm/tools/
 ```
 
-Make sure to specify correct branch for desired version. In this example we use LLVM8/Clang8.
+Make sure to specify correct branch for desired version. In this example we use LLVM10/Clang10.
 All dependencies will be build in the next step.
+
+If you have problems with LLVM patching during IGC build, you can try listed steps:
+```shell
+$ cd llvm-project
+$ git checkout -b llvmorg-10.0.0
+```
 
 ### 3. Build and install IGC
 
@@ -101,6 +107,11 @@ $ sudo make install
 
 ## LLVM/Clang version specific caveats
 
+If you are using LLVM version < 9 be sure to provide cmake an option disabling VC
+```shell
+$ cmake .... -DIGC_BUILD__VC_ENABLED=OFF
+```
+
 ### LLVM7/Clang7
 
 In the **OpenCL Clang** project there are patches for Clang.
@@ -114,7 +125,7 @@ We recommend building LLVM8/Clang8 from sources instead for using prebuilds, bec
 * [0003-OpenCL-Fix-assertion-due-to-blocks.patch](https://github.com/intel/opencl-clang/blob/ocl-open-80/patches/clang/0003-OpenCL-Fix-assertion-due-to-blocks.patch)
 
 which are needed for [enqueue_kernel](https://www.khronos.org/registry/OpenCL/sdk/2.0/docs/man/xhtml/enqueue_kernel.html).
-
+	
 ### LLVM9/Clang9
 
 No additional steps are needed.
@@ -144,10 +155,10 @@ Latest known configuration that compiles successfully:
 ```
 <workspace>
       |- igc                               (master TBD)
-      |- vc-intrinsics                     (master TBD)
-      |- llvm_patches                      (master TBD)
-      |- llvm-project                      (release/11.x TBD)
-            |- llvm/projects/opencl-clang  (ocl-open-110 TBD)
-            |- llvm/projects/llvm-spirv    (llvm_release_110 TBD)
-            |- llvm/tools/clang            (release/11.x TBD)
+      |- vc-intrinsics                     (master c8c52b5fb14b33e32de9df573b7de186a0c97c94)
+      |- llvm_patches                      (master c4a03454d55ed786138128bfd73fba491b31ca7c)
+      |- llvm-project                      (release/11.x 0b56e5490dc33e4e7a4fdd837e642f72a2659189)
+            |- llvm/projects/opencl-clang  (ocl-open-110 05133d9fb4e08b8d3251d6484a3bf2da4c4f62ed)
+            |- llvm/projects/llvm-spirv    (llvm_release_110 73dfc6d450ad0438558bee20505c426319f7624b)
+            |- llvm/tools/clang            (release/11.x 0b56e5490dc33e4e7a4fdd837e642f72a2659189)
 ```

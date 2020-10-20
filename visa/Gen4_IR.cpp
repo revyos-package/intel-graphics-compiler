@@ -939,7 +939,6 @@ G4_Type G4_INST::getExecType() const
         return Type_D;
     }
 
-
     for (unsigned i = 0; i < G4_MAX_SRCS; i++)
     {
         if (srcs[i] != NULL)
@@ -2267,7 +2266,7 @@ bool G4_INST::canPropagateTo(
     if (src->isImm())
     {
         if (isFloatPseudoMAD(useInst) || useInst->opcode() == G4_math ||
-            use->asSrcRegRegion()->getModifier() != Mod_src_undef)
+            use->asSrcRegRegion()->hasModifier())
         {
             return false;
         }
@@ -2332,6 +2331,11 @@ bool G4_INST::canPropagateTo(
         return false;
     }
 
+    if (hasModifier && !useInst->canSupportSrcModifier())
+    {
+        return false;
+    }
+
     // Check 'dst' of MOV and 'use' are the same variable. Otherwise, it's not
     // legal to be propagated.
     G4_CmpRelation rel = dst->compareOperand(use);
@@ -2347,6 +2351,7 @@ bool G4_INST::canPropagateTo(
     {
         return false;
     }
+
 
     // Don't propagate unsupported propType.
     if (!useInst->isLegalType(propType, opndNum))
@@ -2483,7 +2488,7 @@ bool G4_INST::canPropagateTo(
         return false;
     }
 
-    if (src->isImm() && use->asSrcRegRegion()->getModifier() != Mod_src_undef)
+    if (src->isImm() && use->asSrcRegRegion()->hasModifier())
     {
         //FIXME: do we need to worry about signal bit in NaN being dropped?
         if (IS_TYPE_INT(srcType))
@@ -2826,6 +2831,22 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
             return false;
         }
     }
+
+    bool hasSrcModifier = false;
+    for (int i = 0, numSrc = defInst->getNumSrc(); i < numSrc; ++i)
+    {
+        if (defInst->getSrc(i)->isSrcRegRegion() && defInst->getSrc(i)->asSrcRegRegion()->hasModifier())
+        {
+            hasSrcModifier = true;
+            break;
+        }
+    }
+    if (hasSrcModifier && !this->canSupportSrcModifier())
+    {
+        return false;
+    }
+
+
 
     return true;
 }
@@ -7128,6 +7149,15 @@ bool G4_INST::canSupportCondMod() const
 
 bool G4_INST::canSupportSrcModifier() const
 {
+
+
+    if (opcode() == G4_pseudo_mad)
+    {
+        return true;
+    }
+
+    // note that IGA will return false for any opcode it does not recognize
+    // If your psuedo opcode needs to support source modifier you must add explicit check before this
     const iga::Model* igaModel = builder.getIGAModel();
 
     assert(igaModel != nullptr);
