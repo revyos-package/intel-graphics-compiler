@@ -1142,6 +1142,9 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     for (auto& I : StoresToMerge) {
         StoreInst* ST = cast<StoreInst>(std::get<0>(I));
         Value* Ptr = ST->getPointerOperand();
+        // Stores merged in the previous iterations can get merged again, so we need
+        // to update ToOpt vector to avoid null instruction in there
+        ToOpt.erase(std::remove(ToOpt.begin(), ToOpt.end(), ST), ToOpt.end());
         ST->eraseFromParent();
         RecursivelyDeleteTriviallyDeadInstructions(Ptr);
 

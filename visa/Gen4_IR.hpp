@@ -42,6 +42,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <iomanip>
 #include <stack>
 #include <optional>
+#include <array>
 
 #include "Mem_Manager.h"
 #include "G4_Opcode.h"
@@ -53,6 +54,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "JitterDataStruct.h"
 #include "Metadata.h"
 #include "BitSet.h"
+#include "IGC/common/StringMacros.hpp"
 
 #include <memory>
 
@@ -526,7 +528,7 @@ class G4_INST
 
 protected:
     G4_opcode        op;
-    G4_Operand*      srcs[G4_MAX_SRCS];
+    std::array<G4_Operand*, G4_MAX_SRCS> srcs;
     G4_DstRegRegion* dst;
     G4_Predicate*    predicate;
     G4_CondMod*      mod;
@@ -823,6 +825,11 @@ public:
     void setSrc(G4_Operand* opnd, unsigned i);
     int getNumSrc() const;
     int getNumDst() const;
+
+    auto src_begin() const { return srcs.begin(); }
+    auto src_begin() { return srcs.begin(); }
+    auto src_end() const { return srcs.begin() + getNumSrc(); }
+    auto src_end() { return srcs.begin() + getNumSrc(); }
 
     // this assume we don't have to recompute bound for the swapped source
     // Note that def-use chain is not maintained after this; call swapDefUse
@@ -1709,7 +1716,6 @@ namespace vISA
 
     private:
         std::list<std::pair<uint32_t, uint32_t>> liveIntervals;
-        std::vector<std::pair<unsigned int, unsigned int>> saveRestore;
         uint32_t cleanedAt;
         DebugLiveIntervalState state;
         uint32_t openIntervalVISAIndex;
@@ -1719,7 +1725,6 @@ namespace vISA
 
         void addLiveInterval(uint32_t start, uint32_t end);
         void liveAt(uint32_t cisaOff);
-        const std::vector<std::pair<uint32_t, uint32_t>>& getSaveRestore();
         void getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals);
         void clearLiveIntervals() { liveIntervals.clear(); }
 
@@ -1747,11 +1752,6 @@ namespace vISA
                     return true;
             }
             return false;
-        }
-
-        void addGRFSave(uint32_t cisaIndex, uint32_t stack_Slot)
-        {
-            saveRestore.push_back(std::make_pair(cisaIndex, stack_Slot));
         }
 
         LiveIntervalInfo() { cleanedAt = 0; state = Closed; openIntervalVISAIndex = 0; }
@@ -2509,11 +2509,7 @@ public:
         valid = false;
         return UNDEFINED_SHORT;
     }
-    virtual unsigned short ExIndRegNum(bool &valid)
-    {
-        valid = false;
-        return UNDEFINED_SHORT;
-    }
+
     virtual unsigned short ExSubRegNum(bool &valid)
     {
         valid = false;
@@ -2622,18 +2618,6 @@ public:
             valid = false;
         }
         return rNum;
-    }
-
-    unsigned short ExIndRegNum(bool &valid) override
-    {
-        unsigned short rIndNum = UNDEFINED_SHORT;
-        valid = false;
-        if (getArchRegType() == AREG_A0)
-        {
-            rIndNum = 0;
-            valid = true;
-        }
-        return rIndNum;
     }
 
     int getFlagNum() const
@@ -2881,7 +2865,6 @@ namespace vISA
 
         unsigned short ExRegNum(bool &valid) override { return reg.phyReg->ExRegNum(valid); }
         unsigned short ExSubRegNum(bool &valid) override { valid = true; return (unsigned short)reg.subRegOff; }
-        unsigned short ExIndRegNum(bool &valid) override { return reg.phyReg->ExIndRegNum(valid); }
 
     protected:
         bool isEvenAlign() const { return evenAlignment; }
@@ -3081,10 +3064,8 @@ namespace vISA
 
         unsigned short             ExRegNum(bool&) const;
         unsigned short             ExSubRegNum(bool&);
-        unsigned short             ExIndRegNum(bool&);
         unsigned short             ExIndSubRegNum(bool&);
         short                      ExIndImmVal(void);
-        bool                       ExNegMod(bool&);
 
         void                       computePReg();
 
@@ -3263,7 +3244,6 @@ public:
 
     unsigned short             ExRegNum(bool&);
     unsigned short             ExSubRegNum(bool&);
-    unsigned short             ExIndRegNum(bool&);
     unsigned short             ExIndSubRegNum(bool&);
     short                      ExIndImmVal(void);
     void                       computePReg();

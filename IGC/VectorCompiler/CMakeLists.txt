@@ -33,7 +33,9 @@
 # - VC_INTRINSICS_SRC
 set(IGC_BUILD__PROJ__VectorCompiler "${IGC_BUILD__PROJ_NAME_PREFIX}VectorCompiler")
 set(IGC_BUILD__PROJ__VectorCompiler "${IGC_BUILD__PROJ__VectorCompiler}" PARENT_SCOPE)
-set(IGC_BUILD__PROJ_VC_LIBS_TO_LINK VCCodeGen VCIGCDeps PARENT_SCOPE)
+# Ordering matters here.
+# FIXME: set proper dependencies for VCCodeGen and others.
+set(IGC_BUILD__PROJ_VC_LIBS_TO_LINK VCIGCDeps VCCodeGen PARENT_SCOPE)
 
 set(IGC_BUILD__PROJ_LABEL__VectorCompiler "${IGC_BUILD__PROJ__VectorCompiler}")
 
@@ -69,7 +71,7 @@ else()
   # In last scenario we are building with llvm so every target is defined
   # and LLVMConfig will only set needed variables.
   message(STATUS "[VC] Using llvm source build")
-  set(LLVM_BUILD_DIR "${LLVM_SOURCE_DIR}/../build/src")
+  set(LLVM_BUILD_DIR "${LLVM_SOURCE_DIR}/../../build/src")
   set(LLVM_CMAKE_DIR "${LLVM_BUILD_DIR}/lib/cmake/llvm")
   message(STATUS "[VC] LLVMConfig.cmake location: ${LLVM_CMAKE_DIR}")
   find_package(LLVM REQUIRED
@@ -115,11 +117,13 @@ set(VISA_INCLUDE_DIRS ${IGC_BUILD__VISA_DIR})
 add_compile_definitions(LLVM_VERSION_MAJOR=${LLVM_VERSION_MAJOR})
 
 if(LLVM_ON_WIN32)
-  add_compile_options(/experimental:external)
-  foreach(INCDIR ${LLVM_INCLUDE_DIRS})
-    add_compile_options("SHELL:/external:I ${INCDIR}")
-  endforeach()
-  add_compile_options(/external:W0)
+  if (MSVC_IDE)
+    add_compile_options(/experimental:external)
+    foreach(INCDIR ${LLVM_INCLUDE_DIRS})
+      add_compile_options("SHELL:/external:I ${INCDIR}")
+    endforeach()
+    add_compile_options(/external:W0)
+  endif()
 
   # disable 32/64 warnings
   add_compile_options(/wd4244)

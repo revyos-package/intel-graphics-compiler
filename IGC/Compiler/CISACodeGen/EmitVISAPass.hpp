@@ -236,8 +236,6 @@ public:
     void emitInfoInstruction(llvm::InfoIntrinsic* inst);
     void emitGather4Instruction(llvm::SamplerGatherIntrinsic* inst);
     void emitLdmsInstruction(llvm::Instruction* inst);
-    void emitLdStructured(llvm::Instruction* inst);
-    void emitStoreStructured(llvm::Instruction* inst);
     void emitTypedRead(llvm::Instruction* inst);
     void emitTypedWrite(llvm::Instruction* inst);
     void emitThreadGroupBarrier(llvm::Instruction* inst);
@@ -318,7 +316,6 @@ public:
 
     bool IsUniformAtomic(llvm::Instruction* pInst);
     void emitAtomicRaw(llvm::GenIntrinsicInst* pInst);
-    void emitAtomicStructured(llvm::Instruction* pInst);
     void emitAtomicTyped(llvm::GenIntrinsicInst* pInst);
     void emitAtomicCounter(llvm::GenIntrinsicInst* pInst);
     void emitUniformAtomicCounter(llvm::GenIntrinsicInst* pInst);
@@ -434,14 +431,16 @@ public:
     void emitRsq(llvm::Instruction* inst);
 
     void emitLLVMbswap(llvm::IntrinsicInst* inst);
-    void emitDP4A(llvm::GenIntrinsicInst* GII);
+    void emitDP4A(llvm::GenIntrinsicInst* GII,
+        const SSource* source = nullptr,
+        const DstModifier& modifier = DstModifier());
 
     void emitLLVMStackSave(llvm::IntrinsicInst* inst);
     void emitLLVMStackRestore(llvm::IntrinsicInst* inst);
 
     void emitUnmaskedRegionBoundary(bool start);
     // Debug Built-Ins
-    void emitStateRegID(uint64_t and_imm, uint64_t shr_imm);
+    void emitStateRegID(uint32_t and_imm, uint32_t shr_imm);
     void emitThreadPause(llvm::GenIntrinsicInst* inst);
 
     void MovPhiSources(llvm::BasicBlock* bb);
@@ -701,6 +700,9 @@ private:
     bool isHalfGRFReturn(CVariable* dst, SIMDMode simdMode);
 
     void emitFeedbackEnable();
+
+    // Helper function to create address space tag on generic pointers
+    CVariable* createAddressSpaceTag(CVariable* src, unsigned int addrSpace);
 
     // used for loading/storing uniform value using scatter/gather messages.
     CVariable* prepareAddressForUniform(

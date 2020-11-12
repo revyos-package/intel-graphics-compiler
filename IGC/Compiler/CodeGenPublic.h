@@ -26,6 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
+#include "IGC/common/StringMacros.hpp"
 #include "usc.h"
 #include "usc_gen7.h"
 #include "usc_gen9.h"
@@ -828,6 +829,10 @@ namespace IGC
         std::vector<unsigned> m_indexableTempSize;
         bool         m_highPsRegisterPressure = 0;
 
+        bool m_hasNonKernelArgLoad = false;
+        bool m_hasNonKernelArgStore = false;
+        bool m_hasNonKernelArgAtomic = false;
+
         // For IR dump after pass
         unsigned     m_numPasses = 0;
         bool m_threadCombiningOptDone = false;
@@ -915,7 +920,7 @@ namespace IGC
         CodeGenContext& operator =(CodeGenContext&) = delete;
 
         void initLLVMContextWrapper(bool createResourceDimTypes = true);
-        llvm::LLVMContext* getLLVMContext();
+        llvm::LLVMContext* getLLVMContext() const;
         IGC::IGCMD::MetaDataUtils* getMetaDataUtils();
         IGCLLVM::Module* getModule() const;
 

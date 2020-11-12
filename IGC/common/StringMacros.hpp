@@ -23,28 +23,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ======================= end_copyright_notice ==================================*/
-
-#ifndef IGCLLVM_IR_GLOBALVALUE_H
-#define IGCLLVM_IR_GLOBALVALUE_H
-
-#include "llvm/Config/llvm-config.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/GlobalValue.h"
-
-namespace IGCLLVM
-{
-class GlobalValue : public llvm::GlobalValue
-{
-public:
-    static inline llvm::StringRef getRealLinkageName(llvm::StringRef Name)
-    {
-#if LLVM_VERSION_MAJOR == 4
-        return llvm::GlobalValue::getRealLinkageName(Name);
-#elif LLVM_VERSION_MAJOR >= 7
-        return llvm::GlobalValue::dropLLVMManglingEscape(Name);
-#endif
-    }
-};
-}
-
-#endif
+#pragma once
+#include <cstddef>
+#define IGC_STRDEBUG(STR) (STR)
+#define IGC_MANGLE(STR) (STR)

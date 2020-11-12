@@ -148,7 +148,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Transforms/IPO/FunctionAttrs.h>
 #include <llvmWrapper/Transforms/Utils.h>
-#include <llvmWrapper/Transforms/Scalar/InstSimplifyPass.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvmWrapper/Transforms/Scalar.h>
 #include <llvmWrapper/Bitcode/BitcodeWriter.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
@@ -165,6 +165,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/HalfPromotion.h"
 #include "Compiler/CISACodeGen/AnnotateUniformAllocas.h"
 #include "Probe/Assertion.h"
+
+#include <iostream>
 
 /***********************************************************************************
 This file contains the generic code generation functions for all the shaders
@@ -540,7 +542,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     {
         mpm.add(createPruneUnusedArgumentsPass());
 
-        if (!ctx.enableFunctionCall())
+        if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT)
         {
             // Don't run IPConstantProp when debugging function calls, to avoid folding function arg/ret constants
             mpm.add(createIPConstantPropagationPass());
@@ -687,7 +689,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         ctx.m_hasEmu64BitInsts = true;
     }
 
-    mpm.add(IGCLLVM::createInstSimplifyLegacyPass());
+    mpm.add(createInstSimplifyLegacyPass());
     // This pass inserts bitcasts for vector loads/stores.
     // This pass could be moved further toward EmitPass.
     mpm.add(createVectorProcessPass());
@@ -748,6 +750,17 @@ static void AddCodeGenPasses(
     COMPILER_TIME_START(&ctx, TIME_CG_Add_CodeGen_Passes);
     Passes.add(new EmitPass(shaders, simdMode, canAbortOnSpill, shaderMode, pSignature));
     COMPILER_TIME_END(&ctx, TIME_CG_Add_CodeGen_Passes);
+}
+
+static void DumpHasNonKernelArgLoadStore(CodeGenContext& ctx) {
+    if(IGC_IS_FLAG_ENABLED(DumpHasNonKernelArgLdSt)) {
+        // print out the information if context has non-kernel-arg load/store
+        auto get_tf_str = [](bool val) { return val ? "true" : "false"; };
+        std::cerr << "HasNonKernelArgLoad: " << get_tf_str(ctx.m_hasNonKernelArgLoad) << "\n"
+                  << "HasNonKernelArgStore: " << get_tf_str(ctx.m_hasNonKernelArgStore) << "\n"
+                  << "HasNonKernelArgAtomic: " << get_tf_str(ctx.m_hasNonKernelArgAtomic) << "\n";
+
+    }
 }
 
 template<typename ContextType>
@@ -1181,6 +1194,9 @@ void CodeGen(OpenCLProgramContext* ctx, CShaderProgram::KernelShaderMap& kernels
     Passes.run(*(ctx->getModule()));
     COMPILER_TIME_END(ctx, TIME_CodeGen);
     DumpLLVMIR(ctx, "codegen");
+
+    DumpHasNonKernelArgLoadStore(*ctx);
+
 } // CodeGen(OpenCLProgramContext*
 
 static void destroyShaderMap(CShaderProgram::KernelShaderMap& shaders)
@@ -1364,11 +1380,14 @@ void OptimizeIR(CodeGenContext* const pContext)
     // Remove inline attribute if subroutine is enabled.
     purgeInlineAttribute(pContext, NoOpt);
 
-    if (pContext->getModuleMetaData()->compOpt.DashGSpecified)
+    if (pContext->type == ShaderType::OPENCL_SHADER)
     {
-        IGCPassManager mpm(pContext, "CleanImplicitId");
-        IF_DEBUG_INFO(mpm.add(new CleanImplicitIds()));
-        mpm.run(*pContext->getModule());
+        if (((OpenCLProgramContext*)pContext)->m_InternalOptions.KernelDebugEnable)
+        {
+            IGCPassManager mpm(pContext, "CleanImplicitId");
+            IF_DEBUG_INFO(mpm.add(new CleanImplicitIds()));
+            mpm.run(*pContext->getModule());
+        }
     }
     if (NoOpt)
     {
@@ -1424,7 +1443,6 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(createConstantPropagationPass());
             mpm.add(createIPConstantPropagationPass());
         }
-
 
         // enable this only when Pooled EU is not supported
         if ((IGC_IS_FLAG_ENABLED(EnableThreadCombiningOpt) ||

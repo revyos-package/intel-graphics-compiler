@@ -52,6 +52,7 @@ DECLARE_IGC_REGKEY(bool, EnableVISADotAll,              false, "Enable VISA DotA
 DECLARE_IGC_REGKEY(bool, EnableVISADebug,               false, "Runs VISA in debug mode, all optimizations disabled", false)
 DECLARE_IGC_REGKEY(DWORD, EnableVISAStructurizer,       1,     "Enable/Disable VISA structurizer. See value defs in igc_flags.hpp.", false)
 DECLARE_IGC_REGKEY(bool, EnableVISAJmpi,                true,  "Enable/Disable VISA generating jmpi (scalar jump).", false)
+DECLARE_IGC_REGKEY(bool, ForceVISAStructurizer,         false, "Force VISA structurizer for testing. Used on platforms in which we turns off SCF and use UCF by default", false)
 DECLARE_IGC_REGKEY(DWORD, NoMaskWA,                     2,     "Add NoMask WA using software-computed emask flag. Valid value: (two groups) \
                                                                    valid value:  bit[1:0] : which BB to insert - 0(off), 1(divergent BB), \
                                                                                             2 (nested divergent BB), 3 (=2). \
@@ -223,6 +224,7 @@ DECLARE_IGC_REGKEY(debugString, DisablePassToggles,     0,     "Disable each IGC
 DECLARE_IGC_REGKEY(bool, ForceStatelessForQueueT,       true,  "In OCL, force to use stateless memory to hold queue_t*. This is a legacy feature to be removed.", false)
 DECLARE_IGC_REGKEY(bool, ForceMemoryFenceBeforeEOT,     false, "Forces inserting SLM or gloabal memory fence before EOT if shader writes to SLM or goblam memory respectively.", false)
 DECLARE_IGC_REGKEY(bool, EnableRTmaskPso,               true,  "Enable render target mask optimization in PSO opt", false)
+DECLARE_IGC_REGKEY(DWORD, MSAAClearedKernel,            0,     "Insert the discard code for MSAA_MSC_Cleared kernels. 2/4/8/16", false)
 
 DECLARE_IGC_GROUP("Shader dumping")
 DECLARE_IGC_REGKEY(bool, EnableCosDump, false, "Enable cos dump", true)
@@ -250,6 +252,7 @@ DECLARE_IGC_REGKEY(bool, EnableScalarizerDebugLog,      false, "print step by st
 DECLARE_IGC_REGKEY(bool, DumpTimeStats,                 false, "Timing of translation, code generation, finalizer, etc", true)
 DECLARE_IGC_REGKEY(bool, DumpTimeStatsCoarse,           false, "Only collect/dump coarse level time stats, i.e. skip opt detail timer for now", true)
 DECLARE_IGC_REGKEY(bool, DumpTimeStatsPerPass,          false, "Collect Timing of IGC/LLVM passes", true)
+DECLARE_IGC_REGKEY(bool, DumpHasNonKernelArgLdSt,       false, "Print if hasNonKernelArg load/store to stderr", true)
 
 DECLARE_IGC_GROUP("Debugging features")
 DECLARE_IGC_REGKEY(bool, InitializeUndefValueEnable,    false, "Setting this to 1/true initializes all undefs in URB payload to 0", false)
@@ -258,7 +261,7 @@ DECLARE_IGC_REGKEY(bool, InitializeAddressRegistersBeforeUse,     false, "Settin
 DECLARE_IGC_REGKEY(bool, EnableSIMDLaneDebugging,       true,  "Setting this to 1 (true) enables SIMD lane location expression emmitions for GPU debugger", true)
 DECLARE_IGC_REGKEY(bool, EnableGTLocationDebugging,     false, "Setting this to 1 (true) enables GT location expression emmitions for GPU debugger", true)
 DECLARE_IGC_REGKEY(bool, EnableWriteOldFPToStack,       true,  "Setting this to 1 (true) writes the caller frame's frame-pointer to the start of callee's frame on stack, to support stack walk", false)
-DECLARE_IGC_REGKEY(debugString, ExtraOCLOptions,        0,     "Extra options for OpenCL", false)
+DECLARE_IGC_REGKEY(debugString, ExtraOCLOptions,        0,     "Extra options for OpenCL", true)
 
 DECLARE_IGC_GROUP("IGC Features")
 DECLARE_IGC_REGKEY(bool, EnableOCLSIMD16,               true,  "Enable OCL SIMD16 mode", true)
@@ -377,6 +380,7 @@ DECLARE_IGC_REGKEY(bool, cl_khr_srgb_image_writes,      false, "Enable cl_khr_sr
 DECLARE_IGC_REGKEY(bool, MSAA16BitPayloadEnable,        true,  "Enable support for MSAA 16 bit payload , a hardware DCN supporting this from ICL+ to improve perf on MSAA workloads", false)
 DECLARE_IGC_REGKEY(bool, EnableInsertElementScalarCoalescing, false,  "Enable coalescing on the scalar operand of insertelement", false)
 DECLARE_IGC_REGKEY(bool, EnableMixIntOperands,          true,  "Enable generating mix-sized operands for int ALU", false)
+DECLARE_IGC_REGKEY(bool, EnableMixInt8Operands,         true,  "Enable generating bytes in mix-sized operands for int ALU", false)
 DECLARE_IGC_REGKEY(bool, PixelShaderDoNotAbortOnSpill,  false, "Do not abort on a spill", false)
 DECLARE_IGC_REGKEY(DWORD, ForcePixelShaderSIMDMode,     0,     "Setting it to values def in igc.h will force SIMD mode compilation for pixel shaders. Note that only SIMD8 is compiled unless other ForcePixelShaderSIMD* are also selected", false)
 DECLARE_IGC_REGKEY(DWORD, StagedCompilationExperiments, 0,     "Experiment with staged compilation when != 0", false)
@@ -384,7 +388,7 @@ DECLARE_IGC_REGKEY(bool, StagedCompilation,             false, "Enable staged co
 DECLARE_IGC_REGKEY(bool, EnableTrackPtr,                false, "Track Staging Context alloc/dealloc", false)
 DECLARE_IGC_REGKEY(bool, ExtraRetrySIMD16,              false,  "Enable extra simd16 with retry for STAGE1_BEST_PREF", false)
 DECLARE_IGC_REGKEY(bool, SaveRestoreIR,                 true,  "Save/Restore IR for staged compilation to avoid duplicated compilations", false)
-DECLARE_IGC_REGKEY(DWORD, FirstStagedSIMD,              1,      "Force Pixel shader to be 1: BestSIMD (SIMD16 or SIMD8), 2: FastSIMD (SIMD8), 3: FatestSIMD (SIMD8 opt off)", false)
+DECLARE_IGC_REGKEY(DWORD, FirstStagedSIMD,              0,      "Force Pixel shader to be 1: FastSIMD (SIMD8), 2: BestSIMD (SIMD16 or SIMD8), 3: FatestSIMD (SIMD8 opt off)", false)
 DECLARE_IGC_REGKEY(bool, ForceBestSIMD, false,  "Force pixel shader to return the best SIMD, either SIMD16 or SIMD8.", false)
 DECLARE_IGC_REGKEY(bool, SkipTREarlyExitCheck, false, "Skip SIMD16 early exit check in ShaderCodeGen", false)
 DECLARE_IGC_REGKEY(bool, EnableTCSHWBarriers, false,  "Enable TCS pass with HW barriers support. Default TCS pass is TCS pass with multiple continuation functions.", false)
@@ -430,3 +434,4 @@ DECLARE_IGC_GROUP("OGL Frontend")
 
 DECLARE_IGC_GROUP("VectorCompiler Options")
     DECLARE_IGC_REGKEY(bool, VCOptimizeNone, false, "Same as -optimize=none in vector compiler options", true)
+    DECLARE_IGC_REGKEY(bool, VCStrictOptionParser, false, "Produce error on unknown API options in vector compiler", true)

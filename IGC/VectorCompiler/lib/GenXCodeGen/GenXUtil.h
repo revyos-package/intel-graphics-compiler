@@ -301,6 +301,9 @@ public:
   LoHiSplit splitOperandLoHi(unsigned SourceIdx);
   HalfSplit splitOperandHalf(unsigned SourceIdx);
 
+  LoHiSplit splitValueLoHi(Value &V);
+  HalfSplit splitValueHalf(Value &V);
+
   // Combined values are expected to be a vector of i32 of the same size
   Value *combineLoHiSplit(const LoHiSplit &Split, const Twine &Name,
                           bool Scalarize);
@@ -486,7 +489,7 @@ unsigned getLogAlignment(VISA_Align Align, unsigned GRFWidth);
 VISA_Align getVISA_Align(unsigned LogAlignment, unsigned GRFWidth);
 // Some log alignments cannot be transparently transformed to VISA_Align. This
 // chooses suitable log alignment which is convertible to VISA_Align.
-unsigned CeilAlignment(unsigned LogAlignment, unsigned GRFWidth);
+unsigned ceilLogAlignment(unsigned LogAlignment, unsigned GRFWidth);
 
 // If \p Ty is degenerate vector type <1 x ElTy>,
 // ElTy is returned, otherwise original type \p Ty is returned.
@@ -521,6 +524,9 @@ bool breakConstantExprs(Instruction *I);
 // breakConstantExprs : break constant expressions in function F.
 // Return true if any modifications have been made, false otherwise.
 bool breakConstantExprs(Function *F);
+// Get possible number of GRFs for indirect region
+unsigned getNumGRFsPerIndirectForRegion(const genx::Region &R,
+                                        const GenXSubtarget *ST, bool Allow2D);
 
 // BinaryDataAccumulator: it's a helper class to accumulate binary data
 // in one buffer.

@@ -35,6 +35,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 #include "LLVM3DBuilder/BuiltinsFrontend.hpp"
 #include "Probe/Assertion.h"
+#include "IGC/common/StringMacros.hpp"
 
 using namespace llvm;
 using namespace IGC;
@@ -430,6 +431,52 @@ Value* CImagesBI::CImagesUtils::traceImageOrSamplerArgument(CallInst* pCallInst,
                         IGC_ASSERT_MESSAGE(0, "dynamic index");
                         return nullptr;
                     }
+                }
+                else if (auto * inst = dyn_cast<BitCastInst>(baseValue))
+                {
+                    auto srcVT = dyn_cast<IGCLLVM::FixedVectorType>(inst->getSrcTy());
+                    auto dstVT = dyn_cast<IGCLLVM::FixedVectorType>(inst->getDestTy());
+
+                    if (!srcVT || !dstVT) {
+                        // If any of the two types is not a vector type then it is an unknown situation.
+                        // Such a bitcast may have not been thought of and needs implementation or code may have been corrupted.
+                        IGC_ASSERT_MESSAGE(0, "unknown construct!");
+                        return nullptr;
+                    }
+
+                    auto srcNElts = srcVT->getNumElements();
+                    auto dstNElts = dstVT->getNumElements();
+
+                    if(srcNElts * 2 != dstNElts) {
+                        IGC_ASSERT_MESSAGE(0, "Can't handle vector bitcast with given sizes");
+                        return nullptr;
+                    }
+
+                    // Destination vector is twice as long.
+                    // Check if the dstType is twice as narrow.
+
+                    auto srcVEltType = srcVT->getElementType();
+                    auto dstVEltType = dstVT->getElementType();
+
+                    auto srcVEltTypeSize = srcVEltType->getPrimitiveSizeInBits();
+                    auto dstVEltTypeSize = dstVEltType->getPrimitiveSizeInBits();
+
+                    if(srcVEltTypeSize != dstVEltTypeSize * 2) {
+                        IGC_ASSERT_MESSAGE(0, "Can't handle vector bitcast with given types and sizes");
+                        return nullptr;
+                    }
+
+                    // Destination type is twice as narrow.
+                    // Shift the element index and continue.
+
+                    idx /= 2;
+                    baseValue = inst->getOperand(0);
+                    continue;
+                }
+                else if (auto * inst = dyn_cast<PtrToIntInst>(baseValue))
+                {
+                    baseValue = inst->getOperand(0);
+                    continue;
                 }
                 else if (auto * inst = dyn_cast<ShuffleVectorInst>(baseValue))
                 {
@@ -1736,6 +1783,9 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_memfence"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_memoryfence, false);
     m_CommandMap["__builtin_IB_flush_sampler_cache"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_flushsampler, false);
     m_CommandMap["__builtin_IB_typedmemfence"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_typedmemoryfence, false);
+    // internal hint builtin
+    m_CommandMap["__builtin_IB_assume_uniform"] = CSimpleIntrinMapping::create( GenISAIntrinsic::GenISA_assume_uniform, true );
+
     // helper built-ins
     m_CommandMap["__builtin_IB_simd_lane_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_simdLaneId, false);
 

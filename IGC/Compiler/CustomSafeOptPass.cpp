@@ -1632,6 +1632,14 @@ bool TrivialLocalMemoryOpsElimination::runOnFunction(Function& F)
 {
     bool change = false;
 
+    IGCMD::MetaDataUtils* pMdUtil = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    if (!isEntryFunc(pMdUtil, &F))
+    {
+        // Skip if it is non-entry function.  For example, a subroutine
+        //   foo ( local int* p) { ...... store v, p; ......}
+        // in which no localMemoptimization will be performed.
+        return change;
+    }
 
     visit(F);
     if (!abortPass && (m_LocalLoadsToRemove.empty() ^ m_LocalStoresToRemove.empty()))
@@ -2265,7 +2273,114 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         {
             createBitcastExtractInsertPattern(I, nullptr, I.getOperand(0), 0, 1);
         }
+        else
+        {
+
+            Instruction* AndSrc = nullptr;
+            ConstantInt* CI;
+
+            /*
+            From:
+              %28 = and i32 %24, 255
+              %29 = lshr i32 %24, 8
+              %30 = and i32 %29, 255
+              %31 = lshr i32 %24, 16
+              %32 = and i32 %31, 255
+
+            To:
+              %temp = bitcast i32 %24 to <4 x i8>
+              %ee1 = extractelement <4 x i8> %temp, i32 0
+              %ee2 = extractelement <4 x i8> %temp, i32 1
+              %ee3 = extractelement <4 x i8> %temp, i32 2
+              %28 = zext i8 %ee1 to i32
+              %30 = zext i8 %ee2 to i32
+              %32 = zext i8 %ee3 to i32
+
+
+            */
+            auto pattern_And_0xFF = m_And(m_Instruction(AndSrc), m_SpecificInt(0xFF));
+
+            CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+            bool bytesAllowed = IGC_IS_FLAG_ENABLED(EnableMixInt8Operands) && ctx->platform.supportByteALUOperation();
+
+            if (bytesAllowed && match(&I, pattern_And_0xFF) && I.getType()->isIntegerTy(32) && AndSrc->getType()->isIntegerTy(32))
+            {
+                Instruction* LhsSrc = nullptr;
+
+                auto LShr_Pattern = m_LShr(m_Instruction(LhsSrc), m_ConstantInt(CI));
+                bool LShrMatch = match(AndSrc, LShr_Pattern) && LhsSrc->getType()->isIntegerTy(32) && (CI->getZExtValue() % 8 == 0);
+
+                // in case there's no shr, it will be 0
+                uint32_t newIndex = 0;
+
+                if (LShrMatch) // extract inner
+                {
+                    AndSrc = LhsSrc;
+                    newIndex = (uint32_t)CI->getZExtValue() / 8;
+                }
+
+                llvm::IRBuilder<> builder(&I);
+                VectorType* vec4 = VectorType::get(builder.getInt8Ty(), 4);
+                Value* BC = builder.CreateBitCast(AndSrc, vec4);
+                Value* EE = builder.CreateExtractElement(BC, builder.getInt32(newIndex));
+                Value* Zext = builder.CreateZExt(EE, builder.getInt32Ty());
+                I.replaceAllUsesWith(Zext);
+                I.eraseFromParent();
+
+            }
+
+        }
     }
+    else if (I.getOpcode() == Instruction::AShr)
+    {
+        /*
+            From:
+            %129 = i32...
+            %Temp = shl i32 %129, 16
+            %132 = ashr exact i32 %Temp, 16
+            %133 = ashr i32 %129, 16
+
+            To:
+            %129 = i32...
+            %temp = bitcast i32 %129 to <2 x i16>
+            %ee1 = extractelement <2 x i16> %temp, i32 0
+            %ee2 = extractelement <2 x i16> %temp, i32 1
+            %132 = sext i8 %ee1 to i32
+            %133 = sext i8 %ee2 to i32
+            Which will end up as regioning instead of 2 isntr.
+        */
+        using namespace llvm::PatternMatch;
+
+        Instruction* AShrSrc = nullptr;
+        auto pattern_1 = m_AShr(m_Instruction(AShrSrc), m_SpecificInt(16));
+
+        if (match(&I, pattern_1) && I.getType()->isIntegerTy(32) && AShrSrc->getType()->isIntegerTy(32))
+        {
+            Instruction* ShlSrc = nullptr;
+
+            auto Shl_Pattern = m_Shl(m_Instruction(ShlSrc), m_SpecificInt(16));
+            bool submatch = match(AShrSrc, Shl_Pattern) && ShlSrc->getType()->isIntegerTy(32);
+
+            // in case there's no shr, we take upper half
+            uint32_t newIndex = 1;
+
+            // if there was Shl, we take lower half
+            if (submatch)
+            {
+                AShrSrc = ShlSrc;
+                newIndex = 0;
+            }
+
+            llvm::IRBuilder<> builder(&I);
+            VectorType* vec2 = VectorType::get(builder.getInt16Ty(), 2);
+            Value* BC = builder.CreateBitCast(AShrSrc, vec2);
+            Value* EE = builder.CreateExtractElement(BC, builder.getInt32(newIndex));
+            Value* Sext = builder.CreateSExt(EE, builder.getInt32Ty());
+            I.replaceAllUsesWith(Sext);
+            I.eraseFromParent();
+        }
+    }
+
 }
 
 void GenSpecificPattern::visitCmpInst(CmpInst& I)
@@ -4926,10 +5041,10 @@ bool LogicalAndToBranch::runOnFunction(Function& F)
                     }
 
                     smallvector<Instruction*, 8> moveInsts;
-                    if (isSafeToConvert(s0, s1, moveInsts))
+                    if (isSafeToConvert(s0, inst, moveInsts))
                     {
-                        // if values defined between s0 & s1 are referenced
-                        // outside of (s0, s1), they need to be moved before
+                        // if values defined between s0 & inst(branch) are referenced
+                        // outside of (s0, inst), they need to be moved before
                         // s0 to keep SSA form.
                         for (auto inst : moveInsts)
                             scheduleUp(bb, inst, s0);

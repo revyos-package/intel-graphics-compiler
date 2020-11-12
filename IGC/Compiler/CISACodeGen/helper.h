@@ -175,6 +175,10 @@ namespace IGC
     bool IsSIMDBlockIntrinsic(llvm::Instruction* inst);
     bool isSubGroupIntrinsic(const llvm::Instruction* I);
 
+    bool IsStatelessMemLoadIntrinsic(const llvm::GenIntrinsicInst& inst);
+    bool IsStatelessMemStoreIntrinsic(const llvm::GenIntrinsicInst& inst);
+    bool IsStatelessMemAtomicIntrinsic(const llvm::GenIntrinsicInst& inst);
+
     bool isURBWriteIntrinsic(const llvm::Instruction* inst);
 
     llvm::Instruction* AdjustSystemValueCall(llvm::GenIntrinsicInst* inst);
@@ -197,7 +201,7 @@ namespace IGC
 
     inline bool IsBindless(BufferType t)
     {
-        return t == BINDLESS || t == BINDLESS_READONLY;
+        return t == BINDLESS || t == BINDLESS_CONSTANT_BUFFER || t == BINDLESS_TEXTURE;
     }
 
     bool IsUnsignedCmp(const llvm::CmpInst::Predicate Pred);

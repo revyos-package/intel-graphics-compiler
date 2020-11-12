@@ -102,6 +102,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ///
 //===----------------------------------------------------------------------===//
 
+#include "IGC/common/debug/DebugMacros.hpp"
 #include "GenX.h"
 #include "GenXGotoJoin.h"
 #include "GenXIntrinsics.h"
@@ -122,7 +123,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
@@ -131,6 +131,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/Support/TypeSize.h"
 
 #include <algorithm>
@@ -289,7 +290,7 @@ bool GenXLowering::processTwoAddressOpnd(CallInst *CI) {
   // Skip write regions whose OpNum is 0.
   if (OpNum > 0) {
     Type *Ty = CI->getArgOperand(OpNum)->getType();
-    IGC_ASSERT(Ty == CI->getType() && "two address op type out of sync");
+    IGC_ASSERT_MESSAGE(Ty == CI->getType(), "two address op type out of sync");
 
     for (unsigned i = 0; i < CI->getNumArgOperands(); ++i) {
       auto Op = dyn_cast<Constant>(CI->getArgOperand(i));
@@ -325,7 +326,7 @@ static bool isNewLoadInst(CallInst *Inst) {
 // Find single wrregion user of load instruction.
 // Returns nullptr on failure.
 static CallInst *getLoadWrregion(CallInst *Inst) {
-  IGC_ASSERT(isNewLoadInst(Inst) && "Expected new load intrinsics");
+  IGC_ASSERT_MESSAGE(isNewLoadInst(Inst), "Expected new load intrinsics");
   if (Inst->getNumUses() != 1)
     return nullptr;
 
@@ -339,7 +340,7 @@ static CallInst *getLoadWrregion(CallInst *Inst) {
 // Returns nullptr on failure.
 // TODO: maybe just lower every select to wrregion in lowerSelect?
 static SelectInst *getLoadSelect(CallInst *Inst) {
-  IGC_ASSERT(isNewLoadInst(Inst) && "Expected new load intrinsics");
+  IGC_ASSERT_MESSAGE(isNewLoadInst(Inst), "Expected new load intrinsics");
   if (Inst->getNumUses() != 1)
     return nullptr;
 
@@ -376,6 +377,7 @@ static Value *generatePredicateForLoadWrregion(
 
   // Replicate mask across channels.
   SmallVector<Constant *, 16> NewMaskVals(Width);
+  IGC_ASSERT(NumChannels);
   unsigned ChannelWidth = Width / NumChannels;
   Type *Int32Ty = IntegerType::getInt32Ty(Pred->getContext());
   for (unsigned i = 0; i < NumChannels; ++i)
@@ -492,6 +494,7 @@ static Value *generateNChannelWrregion(Value *Target, unsigned InitialOffset,
   const DebugLoc &DL = Load->getDebugLoc();
   Type *LoadType = Load->getType();
   unsigned LoadWidth = cast<VectorType>(LoadType)->getNumElements();
+  IGC_ASSERT(NumChannels);
   unsigned ChannelWidth = LoadWidth / NumChannels;
   unsigned MaskOffset = ChannelWidth * SplitNum;
 
@@ -773,6 +776,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   unsigned TargetWidth = IsTyped ? 8 : 16;
   if (Width <= TargetWidth)
     return false;
+  IGC_ASSERT(TargetWidth);
   IGC_ASSERT((Width % TargetWidth) == 0);
   auto NumSplits = Width / TargetWidth;
   IGC_ASSERT(NumSplits == 2 || NumSplits == 4);
@@ -865,7 +869,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
       }
       Args[DataIdx] = NewVec;
     }
-	// atomic source operands
+    // atomic source operands
     if (AtomicSrcIdx != NONEED) {
       for (int SrcI = 0; SrcI < AtomicNumSrc; ++SrcI) {
         Value *V = CI->getArgOperand(AtomicSrcIdx + SrcI);
@@ -873,7 +877,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
         R.Width = R.NumElements = TargetWidth;
         R.Offset = i * TargetWidth * V->getType()->getScalarSizeInBits()/8; // in bytes
         Args[AtomicSrcIdx + SrcI] = R.createRdRegion(V, "addrsplit", CI, DL);
-	    }
+        }
     }
     // now create the new narrower instruction
     if (NewResult) {
@@ -1390,6 +1394,7 @@ bool GenXLowering::lowerExtractElement(Instruction *Inst) {
 Value *GenXLowering::scaleInsertExtractElementIndex(Value *IdxVal, Type *ElTy,
                                                     Instruction *InsertBefore) {
   // Do the cast and multiply.
+  static_assert(genx::ByteBits);
   unsigned ElementBytes = DL->getTypeSizeInBits(ElTy) / genx::ByteBits;
   IntegerType *I16Ty = Type::getInt16Ty(IdxVal->getContext());
   if (ConstantInt *CI = dyn_cast<ConstantInt>(IdxVal))
@@ -1521,7 +1526,7 @@ bool GenXLowering::lowerCast(Instruction *Inst) {
       OneVal = 1;
       break;
     default:
-      IGC_ASSERT(0 && "unknown opcode in lowerCast");
+      IGC_ASSERT_MESSAGE(0, "unknown opcode in lowerCast");
     }
 
     Instruction *NewInst;
@@ -1829,7 +1834,7 @@ bool GenXLowering::lowerBoolShuffle(ShuffleVectorInst *SI) {
                                           B.getInt16(0));
   Value *V1 = B.CreateSelect(SI->getOperand(0), C1, C0);
   Value *V2 = B.CreateSelect(SI->getOperand(1), C1, C0);
-  Value *SI1 = B.CreateShuffleVector(V1, V2, SI->getMask(), SI->getName());
+  Value *SI1 = B.CreateShuffleVector(V1, V2, IGCLLVM::getShuffleMaskForBitcode(SI), SI->getName());
   Constant *C2 = ConstantVector::getSplat(IGCLLVM::getElementCount(WidthResult),
                                           B.getInt16(0));
   Value *Result = B.CreateICmpNE(SI1, C2);
@@ -2062,8 +2067,8 @@ void GenXLowering::lowerShuffleToMove(ShuffleVectorInst *SI) {
                        MaskVals.end())) {
     int Idx = It - MaskVals.begin();
     auto OpRegion = Analyzer.getMaskRegionPrefix(Idx);
-    IGC_ASSERT(OpRegion.R.NumElements > 0 &&
-           "should've match at least 1 element region");
+    IGC_ASSERT_MESSAGE(OpRegion.R.NumElements > 0,
+      "should've match at least 1 element region");
     Region WrRegion(SI);
     WrRegion.Offset = Idx * WrRegion.ElementBytes;
     WrRegion.NumElements = WrRegion.Width = OpRegion.R.NumElements;
@@ -2528,7 +2533,8 @@ bool GenXLowering::lowerUnorderedFCmpInst(FCmpInst *Inst) {
     return false;
 
   // For UNO and UEQ we have replacement in lowerFCmpInst.
-  IGC_ASSERT(Pred != CmpInst::FCMP_UNO && Pred != CmpInst::FCMP_UEQ);
+  IGC_ASSERT(Pred != CmpInst::FCMP_UNO);
+  IGC_ASSERT(Pred != CmpInst::FCMP_UEQ);
 
   CmpInst *InverseFCmp = CmpInst::Create(
       Inst->getOpcode(), CmpInst::getInversePredicate(Pred),
@@ -3015,7 +3021,7 @@ bool LoadStoreResolver::emitScatter() {
 //
 static unsigned getBlockCount(Type *Ty) {
   unsigned NumBytes = Ty->getPrimitiveSizeInBits() / 8;
-  IGC_ASSERT(NumBytes <= 8 && "out of sync");
+  IGC_ASSERT_MESSAGE(NumBytes <= 8, "out of sync");
 
   // If this is N = 2 byte data, use 2 blocks;
   // otherwise, use 1 block of N bytes.

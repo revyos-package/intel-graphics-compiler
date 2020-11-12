@@ -24,24 +24,21 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-#ifndef IGCLLVM_ASMPARSER_PARSER_H
-#define IGCLLVM_ASMPARSER_PARSER_H
+#ifndef VC_IGCDEPS_TRANSLATIONINTERFACE_H
+#define VC_IGCDEPS_TRANSLATIONINTERFACE_H
 
-#include "llvm/Config/llvm-config.h"
-#include "llvm/AsmParser/Parser.h"
+#include <AdaptorOCL/OCL/TB/igc_tb.h>
 
-namespace IGCLLVM
-{
-#if LLVM_VERSION_MAJOR == 4
-using llvm::parseAssemblyInto;
-#elif LLVM_VERSION_MAJOR >= 7
-    inline bool parseAssemblyInto(llvm::MemoryBufferRef F, llvm::Module &M, llvm::SMDiagnostic &Err,
-                       llvm::SlotMapping *Slots = nullptr)
-    {
-        return llvm::parseAssemblyInto(F, &(M), nullptr, Err, Slots);
-    }
-#endif
+#include <system_error>
 
-}
+namespace vc {
+
+std::error_code translateBuild(const TC::STB_TranslateInputArgs *InputArgs,
+                               TC::STB_TranslateOutputArgs *OutputArgs,
+                               TC::TB_DATA_FORMAT InputDataFormatTemp,
+                               const IGC::CPlatform &IGCPlatform,
+                               float ProfilingTimerResolution);
+
+} // namespace vc
 
 #endif

@@ -108,8 +108,14 @@ static bool hasSamePredicator(G4_INST* inst1, G4_INST* inst2)
 
     if (pred1 && pred2)
     {
-        if (pred1->getRegOff() == pred2->getRegOff() &&
-            pred1->getSubRegOff() == pred2->getSubRegOff())
+        bool flagRegNumValid = true;
+        unsigned short refOff1 = pred1->getBase()->ExRegNum(flagRegNumValid);
+        unsigned short subRefOff1 = pred1->getBase()->asRegVar()->getPhyRegOff();;
+        unsigned short refOff2 = pred2->getBase()->ExRegNum(flagRegNumValid);
+        unsigned short subRefOff2 = pred2->getBase()->asRegVar()->getPhyRegOff();;
+
+        if (refOff1 == refOff2 &&
+            subRefOff1 == subRefOff2)
         {
             return true;
         }
@@ -2435,7 +2441,8 @@ unsigned short SWSB::reuseTokenSelectionGlobal(SBNode* node, G4_BB* bb, SBNode*&
             //What about the global send come back to current BB?
             //Shouldn't be assgined
             if ((liveNode->globalID != -1) &&
-                (BBVector[bb->getId()]->tokenLiveInDist[liveNode->globalID] != -1))
+                (BBVector[bb->getId()]->tokenLiveInDist[liveNode->globalID] != -1) &&
+                (liveNode->getBBID() != bb->getId() || liveNode->getNodeID() > node->getNodeID()) )
             {
                 nodeDist = BBVector[bb->getId()]->tokenLiveInDist[liveNode->globalID] + (node->getNodeID() - BBVector[bb->getId()]->first_node);
             }
@@ -2468,7 +2475,8 @@ unsigned short SWSB::reuseTokenSelectionGlobal(SBNode* node, G4_BB* bb, SBNode*&
                 //What about the global send come back to current BB?
                 //Shouldn't be assgined
                 if ((node->globalID != -1) &&
-                    (BBVector[useNode->getBBID()]->tokenLiveInDist[node->globalID] != -1))
+                    (BBVector[useNode->getBBID()]->tokenLiveInDist[node->globalID] != -1) &&
+                    (useNode->getBBID() != bb->getId() || useNode->getNodeID() > node->getNodeID()))
                 {
                     nodeDist = BBVector[useNode->getBBID()]->tokenLiveInDist[node->globalID] + (useNode->getNodeID() - BBVector[useNode->getBBID()]->first_node);
                 }
@@ -2491,7 +2499,7 @@ unsigned short SWSB::reuseTokenSelectionGlobal(SBNode* node, G4_BB* bb, SBNode*&
             }
         }
 
-        if (tokenReuseOverhead < nodeReuseOverhead)
+        if (candidateTokenNode && (tokenReuseOverhead < nodeReuseOverhead))
         {
             nodeReuseOverhead = tokenReuseOverhead;
             candidateNode = candidateTokenNode;
@@ -2670,6 +2678,7 @@ void SWSB::allocateToken(G4_BB* bb)
         {
             continue;
         }
+
 
         send_live = *node->reachingSends; //The tokens will reach current node
 

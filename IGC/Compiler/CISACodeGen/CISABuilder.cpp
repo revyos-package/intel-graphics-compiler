@@ -494,7 +494,7 @@ namespace IGC
 
         // Fix types for dword atomics
         VISA_Type type = ISA_TYPE_UD;
-        if (atomic_op == EATOMIC_IMAX || atomic_op == EATOMIC_IMIN || atomic_op == EATOMIC_PREDEC)
+        if (atomic_op == EATOMIC_IMAX || atomic_op == EATOMIC_IMIN)
         {
             type = ISA_TYPE_D;
         }
@@ -548,6 +548,10 @@ namespace IGC
             pSrc0,
             pSrc1,
             pDst));
+        if (ESURFACE_STATELESS == resource.m_surfaceType)
+        {
+            this->m_program->IncStatelessWritesCount();
+        }
     }
 
     void CEncoder::Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* src1)
@@ -1448,6 +1452,12 @@ namespace IGC
             bool Need64BitEmu =
                 m_program->GetContext()->platform.hasNoInt64Inst() &&
                 (Is64BitDst || Is64BitSrc);
+            if (dst->GetVarType() != EVARTYPE_GENERAL || src->GetVarType() != EVARTYPE_GENERAL)
+            {
+                // code can't handle indirect operands, let vISA do it
+                // ToDo: disable int64b copy emu entirely?
+                Need64BitEmu = false;
+            }
             // If DP is not supported, need to split mov as well.
             if (IGC_IS_FLAG_ENABLED(ForceDPEmulation) ||
                 m_program->GetContext()->platform.hasNoFP64Inst())
@@ -2424,6 +2434,10 @@ namespace IGC
         bool feedbackEnable,
         bool nonUniformState)
     {
+
+        if (!m_program->m_Platform->hasSamplerSupport())
+            return;
+
         int numMsgSpecificOpnds = numSources;
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         bool isIdxLT16;
@@ -2474,6 +2488,10 @@ namespace IGC
         bool zeroLOD,
         bool feedbackEnable)
     {
+
+        if (!m_program->m_Platform->hasSamplerSupport())
+            return;
+
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
         VISA_RawOpnd* dstVar = GetRawDestination(dst);
@@ -2527,6 +2545,10 @@ namespace IGC
         uint channel,
         bool feedbackEnable)
     {
+
+        if (!m_program->m_Platform->hasSamplerSupport())
+            return;
+
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         bool isIdxLT16;
         VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler, isIdxLT16);
@@ -2955,6 +2977,10 @@ namespace IGC
             ConvertSizeToVisaType(size),
             offset,
             dataVar));
+        if (ESURFACE_STATELESS == surfaceType)
+        {
+            this->m_program->IncStatelessWritesCount();
+        }
     }
 
     void CEncoder::OWStoreA64(CVariable* data, CVariable* src0, uint bytesToBeRead, uint srcOffset)
@@ -3114,6 +3140,10 @@ namespace IGC
             globalOffsetOpnd,
             elementOffset,
             dstVar));
+        if (ISA_SCATTER == opcode && ESURFACE_STATELESS == surface)
+        {
+            this->m_program->IncStatelessWritesCount();
+        }
     }
 
     void CEncoder::GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
@@ -3733,7 +3763,7 @@ namespace IGC
         {
             unsigned int ffid[unsigned(ShaderType::END)] = {
                 0,
-                context->isPOSH() ? FFID_VSR : FFID_VS,
+                static_cast<unsigned>(context->isPOSH() ? FFID_VSR : FFID_VS),
                 FFID_HS,
                 FFID_DS,
                 FFID_GS,
@@ -3900,13 +3930,16 @@ namespace IGC
             SaveOption(vISA_ifCvt, false);
         }
 
-        if (IGC_IS_FLAG_DISABLED(EnableVISAStructurizer))
+        if (IGC_IS_FLAG_ENABLED(EnableVISAStructurizer) &&
+            (m_program->m_Platform->hasSCF() || IGC_IS_FLAG_ENABLED(ForceVISAStructurizer)))
         {
-            SaveOption(vISA_EnableStructurizer, false);
-        }
-        else if (IGC_GET_FLAG_VALUE(EnableVISAStructurizer) == FLAG_SCF_UCFOnly)
-        {
-            SaveOption(vISA_StructurizeCF, false);
+            SaveOption(vISA_EnableStructurizer, true);
+
+            if (IGC_GET_FLAG_VALUE(EnableVISAStructurizer) == FLAG_SCF_UCFOnly)
+            {
+                // visa structurizer will generate UCF only.
+                SaveOption(vISA_StructurizerCF, false);
+            }
         }
 
         if (IGC_IS_FLAG_DISABLED(EnableVISAJmpi))
@@ -4135,6 +4168,12 @@ namespace IGC
             SaveOption(vISA_EnableGroupScheduleForBC, true);
         }
 
+
+
+        if (m_program->m_Platform->hasEarlyGRFRead())
+        {
+            SaveOption(vISA_HasEarlyGRFRead, true);
+        }
 
         if (IGC_GET_FLAG_VALUE(SWSBTokenNum) != 0)
         {
@@ -4461,6 +4500,7 @@ namespace IGC
     {
         vKernel->GetPredefinedVar(pVar->visaGenVariable[0], var);
         switch (var) {
+        case PREDEFINED_NULL:
         case PREDEFINED_TSC:
         case PREDEFINED_SR0:
         case PREDEFINED_CR0:
@@ -5430,6 +5470,7 @@ namespace IGC
             visaBlockType(elemSize),
             visaBlockNum(numElems),
             addressOpnd, srcOpnd));
+        this->m_program->IncStatelessWritesCount();
     }
 
     void CEncoder::ByteGather(
@@ -5650,6 +5691,10 @@ namespace IGC
             surfaceOpnd,
             globalOffsetOpnd,
             addressOpnd, srcOpnd));
+        if (ESURFACE_STATELESS == resource.m_surfaceType)
+        {
+            this->m_program->IncStatelessWritesCount();
+        }
     }
 
     void CEncoder::Gather4A64(CVariable* dst, CVariable* offset) {
@@ -5910,6 +5955,7 @@ namespace IGC
                     SplitEMask(fromExecSize, toExecSize, thePart, execMask),
                     toExecSize, atomicOpcode, bitwidth,
                     addressOpnd, src0Opnd, src1Opnd, dstOpnd));
+                this->m_program->IncStatelessWritesCount();
 
                 if (needsTmpDst)
                 {
@@ -5945,6 +5991,7 @@ namespace IGC
             src0Opnd,
             src1Opnd,
             dstOpnd));
+        this->m_program->IncStatelessWritesCount();
     }
 
     void CEncoder::Wait()
@@ -6193,6 +6240,7 @@ namespace IGC
     {
         V(vKernel->AppendVISALLVMInst(inst));
     }
+
 
 
 

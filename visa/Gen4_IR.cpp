@@ -24,6 +24,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#include "IGC/common/StringMacros.hpp"
 #include "visa_igc_common_header.h"
 #include "Common_ISA.h"
 #include "Common_ISA_util.h"
@@ -2573,9 +2574,9 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
 {
     bool indirect_dst = (dst->getRegAccess() != Direct);
 
-    G4_Operand *def_dst = defInst->getDst();
+    auto def_dst = defInst->getDst();
 
-    if (def_dst == NULL)
+    if (!def_dst)
     {
         // can this actually happen?
         return false;
@@ -7342,11 +7343,6 @@ void associateOpndWithInst(G4_Operand* opnd, G4_INST* inst)
     }
 }
 
-const std::vector<std::pair<uint32_t, uint32_t>>& LiveIntervalInfo::getSaveRestore()
-{
-    return saveRestore;
-}
-
 void LiveIntervalInfo:: getLiveIntervals(std::vector<std::pair<uint32_t, uint32_t>>& intervals)
 {
     for (auto&& it : liveIntervals)
@@ -7962,7 +7958,7 @@ G4_INST* G4_INST::cloneInst()
     else
     {
         newInst = nonConstBuilder->createInternalInst(prd, op, condMod, getSaturate(), getExecSize(),
-            dst, src0, src1, option, getLineNo(), getCISAOff(), getSrcFilename());
+            dst, src0, src1, option);
 
         if (src2)
             newInst->setSrc(src2, 2);
@@ -7987,7 +7983,7 @@ G4_INST* G4_InstIntrinsic::cloneInst()
     auto src2 = nonConstBuilder->duplicateOperand(getSrc(2));
 
     return nonConstBuilder->createInternalIntrinsicInst(prd, getIntrinsicId(), getExecSize(), dst,
-        src0, src1, src2, option, getLineNo(), getCISAOff(), getSrcFilename());
+        src0, src1, src2, option);
 }
 
 bool RegionDesc::isLegal(unsigned vs, unsigned w, unsigned hs)
@@ -8096,8 +8092,7 @@ G4_INST* G4_InstMath::cloneInst()
 
     return nonConstBuilder->createInternalMathInst(
         prd, getSaturate(), getExecSize(),
-        dst, src0, src1, getMathCtrl(), option,
-        getLineNo(), getCISAOff(), getSrcFilename());
+        dst, src0, src1, getMathCtrl(), option);
 }
 
 

@@ -49,6 +49,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
+#include "llvmWrapper/IR/InstrTypes.h"
+
 #include "Probe/Assertion.h"
 #include <iterator>
 
@@ -874,21 +876,25 @@ std::pair<Value*, Value*> IVSplitter::splitValue(Value& Val, RegionType RT1,
 IVSplitter::LoHiSplit IVSplitter::splitOperandLoHi(unsigned SourceIdx) {
 
   IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
-  auto Splitted =  splitValue(*Inst.getOperand(SourceIdx),
-                              RegionType::LoRegion, ".LoSplit",
-                              RegionType::HiRegion, ".HiSplit");
-
-  return {Splitted.first, Splitted.second};
+  return splitValueLoHi(*Inst.getOperand(SourceIdx));
 }
 IVSplitter::HalfSplit IVSplitter::splitOperandHalf(unsigned SourceIdx) {
 
   IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
-  auto Splitted =  splitValue(*Inst.getOperand(SourceIdx),
-                              RegionType::FirstHalf, ".FirstHalf",
-                              RegionType::SecondHalf, ".SecondHalf");
+  return splitValueHalf(*Inst.getOperand(SourceIdx));
+}
 
+IVSplitter::LoHiSplit IVSplitter::splitValueLoHi(Value &V) {
+  auto Splitted = splitValue(V, RegionType::LoRegion, ".LoSplit",
+                             RegionType::HiRegion, ".HiSplit");
   return {Splitted.first, Splitted.second};
 }
+IVSplitter::HalfSplit IVSplitter::splitValueHalf(Value &V) {
+  auto Splitted = splitValue(V, RegionType::FirstHalf, ".FirstHalf",
+                             RegionType::SecondHalf, ".SecondHalf");
+  return {Splitted.first, Splitted.second};
+}
+
 Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
                                 RegionType RT2, const Twine& Name,
                                 bool Scalarize) {
@@ -900,10 +906,10 @@ Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
   // create the write-regions
   auto R1 = createSplitRegion(VI32Ty, RT1);
   auto *UndefV = UndefValue::get(VI32Ty);
-  auto *W1 = R1.createWrRegion(UndefV, &V1, Name + ".partial_join", &Inst, DL);
+  auto *W1 = R1.createWrRegion(UndefV, &V1, Name + "partial_join", &Inst, DL);
 
   auto R2 = createSplitRegion(VI32Ty, RT2);
-  auto *W2 = R2.createWrRegion(W1, &V2, Name + ".joined", &Inst, DL);
+  auto *W2 = R2.createWrRegion(W1, &V2, Name + "joined", &Inst, DL);
 
   auto *V64Ty =
       IGCLLVM::FixedVectorType::get(ETy->getInt64Ty(Inst.getContext()), Len);
@@ -913,7 +919,7 @@ Value* IVSplitter::combineSplit(Value &V1, Value &V2, RegionType RT1,
   if (Scalarize) {
     IGC_ASSERT(cast<VectorType>(Result->getType())->getNumElements() == 1);
     Result = new BitCastInst(Result, ETy->getInt64Ty(Inst.getContext()),
-                             Name + ".recast", &Inst);
+                             Name + "recast", &Inst);
   }
   return Result;
 
@@ -1663,7 +1669,7 @@ VISA_Align genx::getVISA_Align(unsigned LogAlignment, unsigned GRFWidth) {
     report_fatal_error("Unknown log alignment");
 }
 
-unsigned genx::CeilAlignment(unsigned LogAlignment, unsigned GRFWidth) {
+unsigned genx::ceilLogAlignment(unsigned LogAlignment, unsigned GRFWidth) {
   if (LogAlignment <= Log2_32(ByteBytes))
     return Log2_32(ByteBytes);
   else if (LogAlignment <= Log2_32(WordBytes))
@@ -1800,4 +1806,17 @@ bool genx::breakConstantExprs(Function *F) {
     }
   }
   return Modified;
+}
+
+unsigned genx::getNumGRFsPerIndirectForRegion(const genx::Region &R,
+                                              const GenXSubtarget *ST,
+                                              bool Allow2D) {
+  IGC_ASSERT(R.Indirect && "Indirect region expected");
+  IGC_ASSERT(ST);
+  if (ST->hasIndirectGRFCrossing() &&
+      // SKL+. See if we can allow GRF crossing.
+      (Allow2D || !R.is2D())) {
+    return 2;
+  }
+  return 1;
 }

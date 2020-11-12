@@ -372,6 +372,12 @@ private:
     // function call related declares
     G4_Declare* be_sp = nullptr;
     G4_Declare* be_fp = nullptr;
+    // Part FDE inst is the move that stores r125.[0-3] to a temp.
+    // This is used to restore ret %ip, ret EM, and BE ptrs.
+    G4_INST* savePartFDInst = nullptr;
+    // FDE spill inst is first spill instruction that writes frame
+    // descriptor to stack.
+    G4_INST* FDSpillInst = nullptr;
     G4_Declare* tmpFCRet = nullptr;
 
     unsigned short arg_size;
@@ -482,12 +488,23 @@ public:
 
     const USE_DEF_ALLOCATOR& getAllocator() const { return useDefAllocator; }
 
-    enum SubRegs_SP_FP
+    // Following enum describes layout of r125 on entry to a function.
+    // Ret_IP and Ret_EM may be altered due to callees. They'll be
+    // restored right before fret.
+    enum SubRegs_Stackcall
     {
-        FE_SP = 0, // Can be either :ud or :uq
-        FE_FP = 1, // Can be either :ud or :uq
-        BE_SP = 6, // :ud
-        BE_FP = 7 // :ud
+        Ret_IP = 0, // :ud
+        Ret_EM = 1, // :ud
+        BE_SP = 2, // :ud
+        BE_FP = 3, // :ud
+        FE_FP = 2, // :uq
+        FE_SP = 3, // :uq
+    };
+
+    enum ArgRet_Stackcall
+    {
+        Arg = 26,
+        Ret = 26
     };
 
     // Getter/setter for be_sp and be_fp
@@ -496,7 +513,7 @@ public:
         if (be_sp == NULL)
         {
             be_sp = createDeclareNoLookup("be_sp", G4_GRF, 1, 1, Type_UD);
-            be_sp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getFPSPGRF()), SubRegs_SP_FP::BE_SP);
+            be_sp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getFPSPGRF()), SubRegs_Stackcall::BE_SP);
         }
 
         return be_sp;
@@ -507,11 +524,17 @@ public:
         if (be_fp == NULL)
         {
             be_fp = createDeclareNoLookup("be_fp", G4_GRF, 1, 1, Type_UD);
-            be_fp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getFPSPGRF()), SubRegs_SP_FP::BE_FP);
+            be_fp->getRegVar()->setPhyReg(phyregpool.getGreg(kernel.getFPSPGRF()), SubRegs_Stackcall::BE_FP);
         }
 
         return be_fp;
     }
+
+    G4_INST* getPartFDSaveInst() const { return savePartFDInst; }
+    void setPartFDSaveInst(G4_INST* i) { savePartFDInst = i; }
+
+    G4_INST* getFDSpillInst() const { return FDSpillInst; }
+    void setFDSpillInst(G4_INST* i) { FDSpillInst = i; }
 
     G4_Declare* getStackCallArg() const {
         return preDefVars.getPreDefinedVar(PreDefinedVarsInternal::ARG);
@@ -939,22 +962,6 @@ public:
         return rgn;
     }
 
-    // create a new dstregregion allocated in mem
-    // TODO: Avoid calling this directly since direct dst and indirect dst
-    // have different parameters. Will make it private in the future.
-    G4_DstRegRegion* createDstRegRegion(
-        G4_RegAccess a,
-        G4_VarBase* b,
-        short roff,
-        short sroff,
-        unsigned short hstride,
-        G4_Type        ty,
-        G4_AccRegSel regSel = ACC_UNDEFINED)
-    {
-        G4_DstRegRegion* rgn = new (mem) G4_DstRegRegion(a, b, roff, sroff, hstride, ty, regSel);
-        return rgn;
-    }
-
     // create a direct DstRegRegion
     G4_DstRegRegion* createDst(
         G4_VarBase* b,
@@ -1105,21 +1112,30 @@ public:
     }
 
  private:
+
+    // Avoid calling this directly, use createDst and createIndirectDst instead
+    G4_DstRegRegion* createDstRegRegion(
+        G4_RegAccess a,
+        G4_VarBase* b,
+        short roff,
+        short sroff,
+        unsigned short hstride,
+        G4_Type        ty,
+        G4_AccRegSel regSel = ACC_UNDEFINED)
+    {
+        G4_DstRegRegion* rgn = new (mem) G4_DstRegRegion(a, b, roff, sroff, hstride, ty, regSel);
+        return rgn;
+    }
+
     // please leave all createInst() as private and use the public wrappers below
-     // cond+sat+binary
-     G4_INST* createInst(
-         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-         G4_ExecSize size,
-         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
-         G4_InstOpts options,
-         bool addToInstList = true);
+
      // cond+sat+binary+line
      G4_INST* createInst(
          G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
          G4_ExecSize size,
          G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
          G4_InstOpts options,
-         int lineno, bool addToInstList = true);
+         bool addToInstList);
 
      // TODO: remove
      // old template:
@@ -1129,24 +1145,10 @@ public:
          int execSize,
          G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
          G4_InstOpts options,
-         int lineno, bool addToInstList = true)
+          bool addToInstList)
      {
          G4_ExecSize sz((unsigned char)execSize);
-         return createInst(prd, op, mod, sat, sz, dst, src0, src1, options, lineno);
-     }
-
-     // TODO: remove
-     // old template:
-     // cond+sat+binary
-     G4_INST* createInst(
-         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-         int execSize,
-         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
-         G4_InstOpts options,
-         bool addToInstList = true)
-     {
-         G4_ExecSize sz((unsigned char)execSize);
-         return createInst(prd, op, mod, sat, sz, dst, src0, src1, options);
+         return createInst(prd, op, mod, sat, sz, dst, src0, src1, options, addToInstList);
      }
 
      // cond+sat+ternary
@@ -1155,41 +1157,7 @@ public:
          G4_ExecSize execSize,
          G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
          G4_InstOpts options,
-         bool addToInstList = true);
-     // cond+sat+ternary+line
-     G4_INST* createInst(
-         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-         G4_ExecSize execSize,
-         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-         G4_InstOpts options,
-         int lineno, bool addToInstList = true);
-
-     // TODO: remove
-     // old template:
-     // cond+sat+ternary
-     G4_INST* createInst(
-         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-         int execSize,
-         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-         G4_InstOpts option,
-         bool addToInstList = true)
-     {
-         G4_ExecSize sz((unsigned char)execSize);
-         return createInst(prd, op, mod, sat, sz, dst, src0, src1, src2, option);
-     }
-
-     // old template:
-     // cond+sat+ternary+line
-     G4_INST* createInst(
-         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-         int execSize,
-         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-         G4_InstOpts option,
-         int lineno, bool addToInstList = true)
-     {
-         G4_ExecSize sz((unsigned char)execSize);
-         return createInst(prd, op, mod, sat, sz, dst, src0, src1, src2, option, lineno);
-     }
+         bool addToInstList);
 
 public:
 
@@ -1206,36 +1174,23 @@ public:
         G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
         G4_InstOpts options);
-    G4_INST* createInternalInst(
-        G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-        G4_ExecSize execSize,
-        G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1,
-        G4_InstOpts options,
-        int lineno, int CISAoff, const char* srcFilename);
 
     G4_INST* createInternalInst(
         G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
         G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
         G4_InstOpts options);
-    G4_INST* createInternalInst(
-        G4_Predicate* prd, G4_opcode op, G4_CondMod* mod, G4_Sat sat,
-        G4_ExecSize execSize,
-        G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-        G4_InstOpts options,
-        int lineno, int CISAoff, const char* srcFilename);
 
     G4_INST* createCFInst(
         G4_Predicate* prd, G4_opcode op, G4_ExecSize execSize,
         G4_Label* jip, G4_Label* uip,
         G4_InstOpts options,
-        int lineno = 0,
-        bool addToInstList= true);
+        bool addToInstList);
+
     G4_INST* createInternalCFInst(
         G4_Predicate* prd, G4_opcode op, G4_ExecSize execSize,
         G4_Label* jip, G4_Label* uip,
-        G4_InstOpts options,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = NULL);
+        G4_InstOpts options);
 
     G4_InstSend* createSendInst(
         G4_Predicate* prd, G4_opcode op, G4_ExecSize execSize,
@@ -1243,15 +1198,14 @@ public:
         G4_Operand* msg,
         G4_InstOpts options, // FIXME: re-order options to follow all operands
         G4_SendMsgDescriptor *msgDesc,
-        int lineno = 0, bool addToInstList = true);
+        bool addToInstList);
     G4_InstSend* createInternalSendInst(
         G4_Predicate* prd, G4_opcode op,
         G4_ExecSize execSize,
         G4_DstRegRegion* postDst, G4_SrcRegRegion* payload,
         G4_Operand* msg,
         G4_InstOpts options, // FIXME: re-order options to follow all operands
-        G4_SendMsgDescriptor *msgDesc,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = NULL);
+        G4_SendMsgDescriptor *msgDescs);
 
     G4_InstSend* createSplitSendInst(
         G4_Predicate* prd, G4_opcode op,
@@ -1260,41 +1214,35 @@ public:
         G4_Operand* msg, G4_InstOpts options,
         G4_SendMsgDescriptor *msgDesc,
         G4_Operand* src3,
-        int lineno = 0,
-        bool addToInstList = true);
+        bool addToInstList);
 
     G4_InstSend* createInternalSplitSendInst(
-        G4_Predicate* prd, G4_opcode op,
         G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_SrcRegRegion* src1, G4_SrcRegRegion* src2,
         // TODO: reorder parameters to put options last
         G4_Operand* msg, G4_InstOpts options,
         G4_SendMsgDescriptor *msgDesc,
-        G4_Operand* src3,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = NULL);
+        G4_Operand* src3);
 
     G4_INST* createMathInst(
         G4_Predicate* prd, G4_Sat sat, G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_MathOp mathOp,
-        G4_InstOpts options, int lineno = 0, bool addToInstList = true);
+        G4_InstOpts options, bool addToInstList);
 
     G4_INST* createInternalMathInst(
         G4_Predicate* prd, G4_Sat sat, G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_MathOp mathOp,
-        G4_InstOpts options,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = NULL);
+        G4_InstOpts options);
 
     G4_INST* createIntrinsicInst(
         G4_Predicate* prd, Intrinsic intrinId, G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-        G4_InstOpts options,
-        int lineno = 0, bool addToInstList = true);
+        G4_InstOpts options, bool addToInstList);
 
     G4_INST* createInternalIntrinsicInst(
         G4_Predicate* prd, Intrinsic intrinId, G4_ExecSize execSize,
         G4_DstRegRegion* dst, G4_Operand* src0, G4_Operand* src1, G4_Operand* src2,
-        G4_InstOpts options,
-        int lineno = 0, int CISAoff = -1, const char* srcFilename = nullptr);
+        G4_InstOpts options);
 
     G4_INST* createNop(G4_InstOpts options);
     G4_INST* createSync(G4_opcode syncOp, G4_Operand* src);
@@ -1330,6 +1278,22 @@ public:
         G4_ExecSize execSize,
         G4_DstRegRegion* dst,
         G4_Operand* src0, G4_Operand* src1, G4_InstOpts options, G4_Type accType);
+
+    G4_INST* createMadm(
+        G4_ExecSize execSize,
+        G4_DstRegRegion* dst,
+        G4_SrcRegRegion* src0, G4_SrcRegRegion* src1, G4_SrcRegRegion* src2,
+        G4_InstOpts options)
+    {
+        return createMadm(nullptr, execSize, dst, src0, src1, src2, options);
+    }
+
+    G4_INST* createMadm(
+        G4_Predicate* pred,
+        G4_ExecSize execSize,
+        G4_DstRegRegion* dst,
+        G4_SrcRegRegion* src0, G4_SrcRegRegion* src1, G4_SrcRegRegion* src2,
+        G4_InstOpts options);
 
     static G4_MathOp Get_MathFuncCtrl(ISA_Opcode op, G4_Type type);
 
@@ -1418,7 +1382,8 @@ public:
         G4_Predicate* pred,
         G4_CondMod* condMod,
         G4_Operand* src_opnd,
-        bool use_nomask = false);
+        bool use_nomask = false,
+        G4_InstOpts options = InstOpt_NoOpt);
     void Create_ADD_Inst(
         G4_Declare* dcl,
         short         regOff,

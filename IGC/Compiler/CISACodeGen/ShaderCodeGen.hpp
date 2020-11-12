@@ -196,8 +196,6 @@ public:
     void InitializeStackVariables();
     void SaveStackState();
     void RestoreStackState();
-    /// Get the max private mem size based on simd width
-    uint32_t GetMaxPrivateMem();
 
     void        AllocateInput(CVariable* var, uint offset, uint instance = 0);
     void        AllocateOutput(CVariable* var, uint offset, uint instance = 0);
@@ -462,6 +460,8 @@ public:
     bool GetHasConstantStatelessAccess() const { return m_HasConstantStatelessMemoryAccess; }
     void SetHasGlobalAtomics() { m_HasGlobalAtomics = true; }
     bool GetHasGlobalAtomics() const { return m_HasGlobalAtomics; }
+    void IncStatelessWritesCount() { ++m_StatelessWritesCount; }
+    uint32_t GetStatelessWritesCount() { return m_StatelessWritesCount; }
     calignmentSize as;
 
     // In bytes
@@ -574,6 +574,7 @@ protected:
 
     bool m_HasGlobalAtomics = false;
 
+    uint32_t m_StatelessWritesCount = 0;
 
 };
 

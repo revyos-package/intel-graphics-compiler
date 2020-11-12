@@ -42,6 +42,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GenXUtil.h"
 #include "vc/GenXOpts/Utils/RegCategory.h"
 
+#include "llvm/GenXIntrinsics/GenXMetadata.h"
+
 #include "Probe/Assertion.h"
 #include "llvmWrapper/IR/InstrTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
@@ -89,6 +91,7 @@ bool GenXLiveness::runOnFunctionGroup(FunctionGroup &ArgFG)
   Subtarget = &getAnalysis<TargetPassConfig>()
                    .getTM<GenXTargetMachine>()
                    .getGenXSubtarget();
+  DL = &ArgFG.getModule()->getDataLayout();
   return false;
 }
 
@@ -124,31 +127,52 @@ void GenXLiveness::clear()
  */
 void GenXLiveness::setLiveRange(SimpleValue V, LiveRange *LR)
 {
-  IGC_ASSERT(LiveRangeMap.find(V) == LiveRangeMap.end() && "Attempting to set LiveRange for Value that already has one");
+  IGC_ASSERT_MESSAGE(LiveRangeMap.find(V) == LiveRangeMap.end(),
+    "Attempting to set LiveRange for Value that already has one");
   LR->addValue(V);
   LiveRangeMap[V] = LR;
-  LR->setAlignmentFromValue(V, Subtarget ? Subtarget->getGRFWidth()
-                                         : defaultGRFWidth);
+  LR->setAlignmentFromValue(
+      *DL, V, Subtarget ? Subtarget->getGRFWidth() : defaultGRFWidth);
+}
+
+// Get logical size of given simple value.
+// Every simple value has size of its type except for
+// volatile globals. Volatile globals are pointer types in IR
+// but their logical type is pointee type.
+// TODO: move this logic to SimpleValue::getType and remove
+// all the code in other parts that checks for volatiles.
+static unsigned getValueSizeInBits(const SimpleValue SV, const DataLayout &DL) {
+  const Value *Val = SV.getValue();
+  IGC_ASSERT_MESSAGE(Val, "Unexpected null simple value");
+
+  // If this is a volatile global, then its pointer
+  // actually means nothing and pointee type should be
+  // used instead.
+  auto *GV = dyn_cast<GlobalVariable>(Val);
+  if (GV && GV->hasAttribute(genx::FunctionMD::GenXVolatile)) {
+    return DL.getTypeSizeInBits(GV->getValueType());
+  }
+
+  Type *SimpleTy = SV.getType();
+  return DL.getTypeSizeInBits(SimpleTy);
 }
 
 /***********************************************************************
  * setAlignmentFromValue : set a live range's alignment from a value
  */
-void LiveRange::setAlignmentFromValue(SimpleValue V, unsigned GRFWidth) {
-  Type *Ty = IndexFlattener::getElementType(
-        V.getValue()->getType(), V.getIndex());
-  if (Ty->isPointerTy())
-    Ty = Ty->getPointerElementType();
-  unsigned SizeInBits = Ty->getScalarType()->getPrimitiveSizeInBits();
-  if (auto VT = dyn_cast<VectorType>(Ty))
-    SizeInBits *= VT->getNumElements();
-  unsigned LogAlign = Log2_32(SizeInBits) - 3;
-  // Set max alignment to GRF
-  unsigned MaxLogAlignment =
+void LiveRange::setAlignmentFromValue(const DataLayout &DL, const SimpleValue V,
+                                      const unsigned GRFWidth) {
+  // FIXME: this quite contradicts CMKernelArgOffset logic
+  // regarding arguments alignment though it works. Need to recheck.
+  const unsigned SizeInBits = getValueSizeInBits(V, DL);
+  const auto SizeInBytes =
+      static_cast<unsigned>(divideCeil(SizeInBits, genx::ByteBits));
+  const unsigned LogByteAlign = Log2_32(SizeInBytes);
+  // Set max alignment to GRF.
+  const unsigned MaxLogAlign =
       genx::getLogAlignment(VISA_Align::ALIGN_GRF, GRFWidth);
-  LogAlign = (LogAlign > MaxLogAlignment) ? MaxLogAlignment : LogAlign;
-  LogAlign = CeilAlignment(LogAlign, GRFWidth);
-  setLogAlignment(LogAlign);
+  const unsigned SaturatedLogAlign = std::clamp(LogByteAlign, 0u, MaxLogAlign);
+  setLogAlignment(ceilLogAlignment(SaturatedLogAlign, GRFWidth));
 }
 
 /***********************************************************************
@@ -597,8 +621,8 @@ LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V)
     LR = new LiveRange;
     LR->Values.push_back(V);
     i->second = LR;
-    LR->setAlignmentFromValue(V, Subtarget ? Subtarget->getGRFWidth()
-                                           : defaultGRFWidth);
+    LR->setAlignmentFromValue(
+        *DL, V, Subtarget ? Subtarget->getGRFWidth() : defaultGRFWidth);
   }
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   // Give the Value a name if it doesn't already have one.
@@ -695,7 +719,7 @@ LiveRange *GenXLiveness::getLiveRangeOrNull(SimpleValue V)
 LiveRange *GenXLiveness::getLiveRange(SimpleValue V)
 {
   LiveRange *LR = getLiveRangeOrNull(V);
-  IGC_ASSERT(LR && "no live range found");
+  IGC_ASSERT_MESSAGE(LR, "no live range found");
   return LR;
 }
 
@@ -727,9 +751,9 @@ Value *GenXLiveness::getUnifiedRet(Function *F)
  * one of the return instructions.
  */
 Value *GenXLiveness::createUnifiedRet(Function *F) {
-  IGC_ASSERT(!F->isDeclaration() && "must be a function definition");
-  IGC_ASSERT(UnifiedRets.find(F) == UnifiedRets.end() &&
-         "Unified ret must not have been already created");
+  IGC_ASSERT_MESSAGE(!F->isDeclaration(), "must be a function definition");
+  IGC_ASSERT_MESSAGE(UnifiedRets.find(F) == UnifiedRets.end(),
+    "Unified ret must not have been already created");
   Type *Ty = F->getReturnType();
   IGC_ASSERT(!Ty->isVoidTy());
   auto URet = genx::createUnifiedRet(Ty, "", F->getParent());
@@ -738,7 +762,7 @@ Value *GenXLiveness::createUnifiedRet(Function *F) {
   for (auto fi = F->begin(), fe = F->end(); fi != fe; ++fi)
     if ((Ret = dyn_cast<ReturnInst>(fi->getTerminator())))
       break;
-  IGC_ASSERT(Ret && "must find return instruction");
+  IGC_ASSERT_MESSAGE(Ret, "must find return instruction");
   Value *RetVal = Ret->getOperand(0);
   // Use the categories of its operand to set the categories of the unified
   // return value.
@@ -1037,7 +1061,7 @@ bool GenXLiveness::checkIfOverlappingSegmentsInterfere(
   // S1 is phicpy. If its corresponding phi cpy insertion point is for a phi
   // node in LR1 and an incoming in LR2, then this does not cause interference.
   auto PhiIncoming = Numbering->getPhiIncomingFromNumber(S1->getStart());
-  IGC_ASSERT(PhiIncoming.first && "phi incoming not found");
+  IGC_ASSERT_MESSAGE(PhiIncoming.first, "phi incoming not found");
   if (getLiveRange(PhiIncoming.first) != LR1)
     return true; // phi not in LR1, interferes
   if (getLiveRangeOrNull(
@@ -1060,8 +1084,9 @@ bool GenXLiveness::checkIfOverlappingSegmentsInterfere(
 LiveRange *GenXLiveness::coalesce(LiveRange *LR1, LiveRange *LR2,
     bool DisallowCASC)
 {
-  IGC_ASSERT(LR1 != LR2 && "cannot coalesce an LR to itself");
-  IGC_ASSERT(LR1->Category == LR2->Category && "cannot coalesce two LRs with different categories");
+  IGC_ASSERT_MESSAGE(LR1 != LR2, "cannot coalesce an LR to itself");
+  IGC_ASSERT_MESSAGE(LR1->Category == LR2->Category,
+    "cannot coalesce two LRs with different categories");
   // Make LR1 the one with the longer list of segments.
   if (LR2->Segments.size() > LR1->Segments.size()) {
     LiveRange *temp = LR1;
@@ -1413,7 +1438,7 @@ Value *GenXLiveness::getAddressBase(Value *Addr)
     if (Head && isa<StoreInst>(Head)) {
       Value *V = Head->getOperand(1);
       V = getUnderlyingGlobalVariable(V);
-      IGC_ASSERT(V && "null base not expected");
+      IGC_ASSERT_MESSAGE(V, "null base not expected");
       return V;
     }
     return user;
@@ -1421,7 +1446,8 @@ Value *GenXLiveness::getAddressBase(Value *Addr)
   // The above scheme does not work for an address conversion added by
   // GenXArgIndirection. Instead we have AddressBaseMap to provide the mapping.
   auto i = ArgAddressBaseMap.find(Addr);
-  IGC_ASSERT(i != ArgAddressBaseMap.end() && "base register not found for address");
+  IGC_ASSERT_MESSAGE(i != ArgAddressBaseMap.end(),
+    "base register not found for address");
   Value *BaseV = i->second;
   LiveRange *LR = getLiveRange(BaseV);
   // Find a SimpleValue in the live range that is not a struct member.
@@ -1473,22 +1499,29 @@ void GenXLiveness::print(raw_ostream &OS) const
   OS << "\n";
 }
 
-#ifndef NDEBUG
 /***********************************************************************
- * LiveRange::assertOk : assertion test that if no segments abut or overlap or are
- *                       in the wrong order
+ * LiveRange::testLiveRanges : tests if no segments abut or overlap or are
+ * in the wrong order. Live range's segments should be well formed.
  */
-void LiveRange::assertOk()
+bool LiveRange::testLiveRanges() const
 {
-  // Assert that no segments abut or overlap or are in the wrong order.
-  iterator Idx1 = begin(), End1 = end();
-  Idx1++;
-  for (; Idx1 != End1; ++Idx1)
-    IGC_ASSERT(((Idx1 - 1)->Strength != Idx1->Strength ||
-            (Idx1 - 1)->getEnd() < Idx1->getStart()) &&
-           "invalid live range");
+  auto testAdjacentSegments = [](const Segment& A, const Segment& B)
+  {
+    const bool P1 = (A.Strength != B.Strength);
+    const bool P2 = (A.getEnd() < B.getStart());
+    const bool SegmentIsGood = (P1 || P2);
+    IGC_ASSERT(SegmentIsGood);
+    const bool StopSearch = !SegmentIsGood;
+    return StopSearch;
+  };
+
+  const_iterator Begin = begin();
+  const_iterator End = end();
+  const_iterator Failed = std::adjacent_find(Begin, End, testAdjacentSegments);
+
+  const bool Result = (Failed == End);
+  return Result;
 }
-#endif
 
 /***********************************************************************
  * LiveRange::addSegment : add a segment to a live range
@@ -1531,7 +1564,7 @@ void LiveRange::addSegment(Segment Seg)
     // New segment is completely in a hole just before i.
     Segments.insert(i, Seg);
   }
-  assertOk();
+  IGC_ASSERT(testLiveRanges());
 }
 
 /***********************************************************************
@@ -1832,8 +1865,7 @@ unsigned IndexFlattener::flattenArg(FunctionType *FT, unsigned ArgIndex)
 /***********************************************************************
  * SimpleValue::getType : get the type of the SimpleValue
  */
-Type *SimpleValue::getType()
-{
+Type *SimpleValue::getType() const {
   return IndexFlattener::getElementType(V->getType(), Index);
 }
 

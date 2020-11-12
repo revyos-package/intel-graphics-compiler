@@ -127,9 +127,15 @@ namespace IGC
         temp.u32Val = addressSpaceOfPtr;
 
         // Mark buffer as it is bindless for further processing
-        if (bufferType == BufferType::RESOURCE ||
-            bufferType == BufferType::CONSTANT_BUFFER ||
-            bufferType == BufferType::UAV)
+        if (bufferType == BufferType::RESOURCE)
+        {
+            temp.bits.bufType = IGC::BINDLESS_TEXTURE + 1;
+        }
+        if (bufferType == BufferType::CONSTANT_BUFFER)
+        {
+            temp.bits.bufType = IGC::BINDLESS_CONSTANT_BUFFER + 1;
+        }
+        if(bufferType == BufferType::UAV)
         {
             temp.bits.bufType = IGC::BINDLESS + 1;
         }
@@ -247,7 +253,7 @@ namespace IGC
         LI->setAlignment(IGCLLVM::getAlign(Orig->getAlignment()));
         if (LI->isAtomic())
         {
-            LI->setAtomic(Orig->getOrdering(), IGCLLVM::getSyncScopeID(Orig));
+            LI->setAtomic(Orig->getOrdering(), Orig->getSyncScopeID());
         }
         // Clone metadata
         llvm::SmallVector<std::pair<unsigned, llvm::MDNode*>, 4> MDs;
@@ -267,7 +273,7 @@ namespace IGC
         SI->setAlignment(IGCLLVM::getAlign(Orig->getAlignment()));
         if (SI->isAtomic())
         {
-            SI->setAtomic(Orig->getOrdering(), IGCLLVM::getSyncScopeID(Orig));
+            SI->setAtomic(Orig->getOrdering(), Orig->getSyncScopeID());
         }
         // Clone metadata
         llvm::SmallVector<std::pair<unsigned, llvm::MDNode*>, 4> MDs;
@@ -524,7 +530,8 @@ namespace IGC
         {
         case BufferType::CONSTANT_BUFFER:
         case BufferType::RESOURCE:
-        case BufferType::BINDLESS_READONLY:
+        case BufferType::BINDLESS_TEXTURE:
+        case BufferType::BINDLESS_CONSTANT_BUFFER:
         case BufferType::STATELESS_READONLY:
         case BufferType::SAMPLER:
             return BufferAccessType::ACCESS_READ;
@@ -1369,6 +1376,46 @@ namespace IGC
             opcode == llvm_gradientY ||
             opcode == llvm_gradientXfine ||
             opcode == llvm_gradientYfine);
+    }
+
+    bool IsStatelessMemLoadIntrinsic(const llvm::GenIntrinsicInst& inst)
+    {
+        switch(inst.getIntrinsicID())
+        {
+        case GenISAIntrinsic::GenISA_simdBlockRead:
+                return true;
+            default:
+                break;
+        }
+        return false;
+    }
+
+    bool IsStatelessMemStoreIntrinsic(const llvm::GenIntrinsicInst& inst)
+    {
+        switch (inst.getIntrinsicID()) {
+        case GenISAIntrinsic::GenISA_simdBlockWrite:
+            return true;
+        default:
+            break;
+        }
+        return false;
+    }
+
+    bool IsStatelessMemAtomicIntrinsic(const llvm::GenIntrinsicInst& inst)
+    {
+        // This includes:
+        // GenISA_intatomicraw
+        // GenISA_floatatomicraw
+        // GenISA_intatomicrawA64
+        // GenISA_floatatomicrawA64
+        // GenISA_icmpxchgatomicraw
+        // GenISA_fcmpxchgatomicraw
+        // GenISA_icmpxchgatomicrawA64
+        // GenISA_fcmpxchgatomicrawA64
+        if (IsAtomicIntrinsic(GetOpCode(&inst)))
+            return true;
+
+        return false;
     }
 
     bool ComputesGradient(llvm::Instruction* inst)

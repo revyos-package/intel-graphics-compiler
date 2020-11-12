@@ -49,6 +49,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "FlowGraph.h"
 #include "DebugInfo.h"
 #include "IsaVerification.h"
+#include "IGC/common/StringMacros.hpp"
 
 using namespace std;
 using namespace vISA;
@@ -463,6 +464,8 @@ static void Stitch_Compiled_Units(
         if (!callee->getRelocationTable().empty())
             mainFunc->getRelocationTable().insert(mainFunc->getRelocationTable().end(),
                 callee->getRelocationTable().begin(), callee->getRelocationTable().end());
+
+        ASSERT_USER(mainFunc->getNumRegTotal() == callee->getNumRegTotal(), "caller and callee cannot have different GRF modes");
     }
 
     mainFunc->fg.reassignBlockIDs();
@@ -476,10 +479,6 @@ static void Stitch_Compiled_Units(
         {
             // Setup successor/predecessor
             G4_INST* fcall = cur->back();
-            if (mainFunc->getOption(vISA_GenerateDebugInfo))
-            {
-                mainFunc->getKernelDebugInfo()->setFCallInst(fcall);
-            }
 
             if (!fcall->asCFInst()->isIndirectCall())
             {
@@ -508,6 +507,7 @@ static void Stitch_Compiled_Units(
                 auto callInst = builder->createInternalInst(
                     fcall->getPredicate(), G4_call, nullptr, g4::NOSAT, fcall->getExecSize(),
                     fcall->getDst(), calleeLabel->getSrc(0), fcall->getSrc(0), fcall->getOption());
+                callInst->inheritDIFrom(fcall);
                 cur->pop_back();
                 cur->push_back(callInst);
             }
@@ -517,6 +517,7 @@ static void Stitch_Compiled_Units(
                 auto callInst = builder->createInternalInst(
                     fcall->getPredicate(), G4_call, nullptr, g4::NOSAT, fcall->getExecSize(),
                     fcall->getDst(), fcall->getSrc(0), fcall->getSrc(0), fcall->getOption());
+                callInst->inheritDIFrom(fcall);
                 cur->pop_back();
                 cur->push_back(callInst);
             }
@@ -533,6 +534,7 @@ static void Stitch_Compiled_Units(
             auto retInst = builder->createInternalInst(
                 fret->getPredicate(), G4_return, nullptr, g4::NOSAT, fret->getExecSize(),
                 builder->createNullDst(Type_UD), fret->getSrc(0), fret->getSrc(1), fret->getOption());
+            retInst->inheritDIFrom(fret);
             cur->pop_back();
             cur->push_back(retInst);
             FCallRetMap[cur] = fret;
@@ -1064,7 +1066,7 @@ bool CISA_IR_Builder::CISA_eval_sizeof_decl(int lineNum, const char *var, int64_
     do { \
         int __status = m_kernel->FUNC(__VA_ARGS__); \
         if (__status != VISA_SUCCESS) { \
-            RecordParseError(lineNum, #FUNC, ": unknown error (internal line: ", __LINE__, ")"); \
+            RecordParseError(lineNum, IGC_MANGLE(#FUNC), ": unknown error (internal line: ", __LINE__, ")"); \
             return false; \
         } \
     } while (0)
@@ -1073,7 +1075,7 @@ bool CISA_IR_Builder::CISA_eval_sizeof_decl(int lineNum, const char *var, int64_
     do { \
         int __status = m_kernel->FUNC(__VA_ARGS__); \
         if (__status != VISA_SUCCESS) { \
-            RecordParseError(lineNum, #FUNC, ": unknown error (internal line: ", __LINE__, ")"); \
+            RecordParseError(lineNum, IGC_MANGLE(#FUNC), ": unknown error (internal line: ", __LINE__, ")"); \
             return nullptr; \
         } \
     } while (0)

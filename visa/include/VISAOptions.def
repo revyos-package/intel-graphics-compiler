@@ -51,8 +51,8 @@ DEF_VISA_OPTION(vISA_EnableMACOpt,          ET_BOOL, "-nomac",           UNUSED,
 DEF_VISA_OPTION(vISA_EnableDCE,             ET_BOOL, "-dce",             UNUSED, false)
 DEF_VISA_OPTION(vISA_DisableleHFOpt,        ET_BOOL, "-disableHFOpt",    UNUSED, false)
 DEF_VISA_OPTION(vISA_enableUnsafeCP_DF,     ET_BOOL, "-enableUnsafeCP_DF", UNUSED, false)
-DEF_VISA_OPTION(vISA_EnableStructurizer,    ET_BOOL, "-disableStructurizer",  UNUSED, true)
-DEF_VISA_OPTION(vISA_StructurizeCF,         ET_BOOL, "-noStructurize",   UNUSED, true)
+DEF_VISA_OPTION(vISA_EnableStructurizer,    ET_BOOL, "-enableStructurizer",  UNUSED, false)
+DEF_VISA_OPTION(vISA_StructurizerCF,        ET_BOOL, "-noSCF",           "-noSCF: structurizer generates UCF only", true)
 DEF_VISA_OPTION(vISA_EnableScalarJmp,       ET_BOOL, "-noScalarJmp",     UNUSED, true)
 DEF_VISA_OPTION(vISA_enableCleanupBindless, ET_BOOL, NULLSTR,            UNUSED, true)
 DEF_VISA_OPTION(vISA_EnableSplitVariables,  ET_BOOL, "-noSplitVariables", UNUSED, false)
@@ -105,7 +105,7 @@ DEF_VISA_OPTION(vISA_LocalBankConflictReduction, ET_BOOL, "-nolocalBCR",   UNUSE
 DEF_VISA_OPTION(vISA_FailSafeRA,            ET_BOOL, "-nofailsafera",    UNUSED, true)
 DEF_VISA_OPTION(vISA_FlagSpillCodeCleanup,  ET_BOOL, "-disableFlagSpillClean",            UNUSED, true)
 DEF_VISA_OPTION(vISA_GRFSpillCodeCleanup,   ET_BOOL, NULLSTR,            UNUSED, true)
-DEF_VISA_OPTION(vISA_SpillSpaceCompression, ET_BOOL, NULLSTR,            UNUSED, true)
+DEF_VISA_OPTION(vISA_SpillSpaceCompression, ET_BOOL, "-nospillcompression",            UNUSED, true)
 DEF_VISA_OPTION(vISA_ConsiderLoopInfoInRA,  ET_BOOL, "-noloopra",        UNUSED, true)
 DEF_VISA_OPTION(vISA_ReserveR0,             ET_BOOL, "-reserveR0",       UNUSED, false)
 DEF_VISA_OPTION(vISA_SpiltLLR,              ET_BOOL, "-nosplitllr",      UNUSED, true)
@@ -132,6 +132,7 @@ DEF_VISA_OPTION(vISA_VerifyExplicitSplit,   ET_BOOL, "-verifysplit", UNUSED, fal
 DEF_VISA_OPTION(vISA_DumpRegChart,          ET_BOOL, "-dumpregchart", UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpAllBCInfo,          ET_BOOL, "-dumpAllBCInfo", UNUSED, false)
 DEF_VISA_OPTION(vISA_LinearScan,               ET_BOOL, "-linearScan",       UNUSED, false)
+DEF_VISA_OPTION(vISA_LSFristFit,               ET_BOOL, "-lsFirstFit",       UNUSED, false)
 DEF_VISA_OPTION(vISA_verifyLinearScan,               ET_BOOL, "-verifyLinearScan",       UNUSED, false)
 
 //=== scheduler options ===

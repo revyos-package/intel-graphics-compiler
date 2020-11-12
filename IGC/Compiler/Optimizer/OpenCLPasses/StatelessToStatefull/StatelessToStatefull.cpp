@@ -24,16 +24,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
+#include "Compiler/CISACodeGen/helper.h"
+#include "Compiler/IGCPassSupport.h"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/Optimizer/CodeAssumption.hpp"
-#include "Compiler/IGCPassSupport.h"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStatefull/StatelessToStatefull.hpp"
 #include "common/Stats.hpp"
 #include "common/secure_string.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/Support/Alignment.h"
-#include <llvmWrapper/IR/Function.h>
+#include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/GetElementPtrTypeIterator.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -202,7 +203,7 @@ bool StatelessToStatefull::runOnFunction(llvm::Function& F)
 Argument* StatelessToStatefull::getBufferOffsetArg(Function* F, uint32_t ArgNumber)
 {
     uint32_t nImplicitArgs = m_pImplicitArgs->size();
-    uint32_t totalArgs = (uint32_t)IGCLLVM::GetFuncArgSize(F);
+    uint32_t totalArgs = (uint32_t)F->arg_size();
     uint32_t nExplicitArgs = (totalArgs - nImplicitArgs);
     uint32_t implicit_ix = m_pImplicitArgs->getNumberedArgIndex(ImplicitArg::BUFFER_OFFSET, ArgNumber);
     uint32_t arg_ix = nExplicitArgs + implicit_ix;
@@ -330,6 +331,44 @@ bool StatelessToStatefull::getOffsetFromGEP(
     return true;
 }
 
+const KernelArg* StatelessToStatefull::gepIsFromKernelArgument(const PointerType& ptrType, GetElementPtrInst* gep)
+{
+    // skip if no gep at all
+    if (gep == nullptr)
+        return nullptr;
+
+    Value* base = gep->getPointerOperand()->stripPointerCasts();
+
+    // stripPointerCasts might skip addrSpaceCast, thus check if AS is still
+    // the original one.
+    unsigned int ptrAS = ptrType.getAddressSpace();
+    if (cast<PointerType>(base->getType())->getAddressSpace() == ptrAS && !isa<Instruction>(base))
+    {
+        if (const KernelArg* arg = getKernelArg(base))
+            return arg;
+    }
+    return nullptr;
+}
+
+bool StatelessToStatefull::pointerIsFromKernelArgument(Value& ptr)
+{
+    // find the last gep
+    Value* base = ptr.stripPointerCasts();
+    // gep : the last gep of pointer address, null if no GEP at all.
+    GetElementPtrInst* gep = nullptr;
+    while (isa<GetElementPtrInst>(base)) {
+        gep = static_cast<GetElementPtrInst*>(base);
+        base = gep->getPointerOperand()->stripPointerCasts();
+    }
+
+    if (gep == nullptr)
+        return false;
+
+    if (gepIsFromKernelArgument(*dyn_cast<PointerType>(ptr.getType()), gep) != nullptr)
+        return true;
+    return false;
+}
+
 bool StatelessToStatefull::pointerIsPositiveOffsetFromKernelArgument(
     Function* F, Value* V, Value*& offset, unsigned int& argNumber)
 {
@@ -356,11 +395,9 @@ bool StatelessToStatefull::pointerIsPositiveOffsetFromKernelArgument(
     {
         return false;
     }
-    unsigned int ptrAS = ptrType->getAddressSpace();
 
     SmallVector<GetElementPtrInst*, 4> GEPs;
     Value* base = V->stripPointerCasts();
-
     // gep : the last gep of pointer address, null if no GEP at all.
     GetElementPtrInst* gep = nullptr;
     while (isa<GetElementPtrInst>(base)) {
@@ -369,70 +406,66 @@ bool StatelessToStatefull::pointerIsPositiveOffsetFromKernelArgument(
         base = gep->getPointerOperand()->stripPointerCasts();
     }
 
-    // stripPointerCasts might skip addrSpaceCast, thus check if AS is still
-    // the original one. Also, if base is still instruction, skip.
-    if (gep && cast<PointerType>(base->getType())->getAddressSpace() == ptrAS && !isa<Instruction>(base))
+    // if the last gep is from kerenl argument
+    if (const KernelArg * arg = gepIsFromKernelArgument(*ptrType, gep))
     {
-        if (const KernelArg * arg = getKernelArg(base))
+        // base is the argument!
+        argNumber = arg->getAssociatedArgNo();
+        bool gepProducesPositivePointer = true;
+
+        // An address needs to be DW-aligned in order to be a base
+        // in a surface state.  In another word, a unaligned argument
+        // cannot be used as a surface base unless buffer_offset is
+        // used, in which "argument + buffer_offset" is instead used
+        // as a surface base. (argument + buffer_offset is the original
+        // base of buffer created on host side, the original buffer is
+        // guarantted to be DW-aligned.)
+        //
+        // Note that implicit arg is always aligned.
+        bool isAlignedPointee =
+            (IGC_IS_FLAG_DISABLED(UseSubDWAlignedPtrArg) || arg->isImplicitArg())
+            ? true
+            : (getPointeeAlign(DL, base) >= 4);
+
+        // If m_hasBufferOffsetArg is true, the offset argument is added to
+        // the final offset to make it definitely positive. Thus skip checking
+        // if an offset is positive.
+        //
+        // Howerver, if m_hasoptionalBufferOffsetArg is true, the buffer offset
+        // is not generated if all offsets can be proven positive (this has
+        // performance benefit as adding buffer offset is an additional add).
+        // Also, if an argument is unaligned, buffer offset must be ON and used;
+        // otherwise, no stateful conversion for the argument can be carried out.
+        //
+        // Note that offset should be positive for any implicit ptr argument,
+        // so no need to prove it!
+        if (!arg->isImplicitArg() &&
+            isAlignedPointee &&
+            (!m_hasBufferOffsetArg || m_hasOptionalBufferOffsetArg) &&
+            IGC_IS_FLAG_DISABLED(SToSProducesPositivePointer))
         {
-            // base is the argument!
-            argNumber = arg->getAssociatedArgNo();
-            bool gepProducesPositivePointer = true;
-
-            // An address needs to be DW-aligned in order to be a base
-            // in a surface state.  In another word, a unaligned argument
-            // cannot be used as a surface base unless buffer_offset is
-            // used, in which "argument + buffer_offset" is instead used
-            // as a surface base. (argument + buffer_offset is the original
-            // base of buffer created on host side, the original buffer is
-            // guarantted to be DW-aligned.)
-            //
-            // Note that implicit arg is always aligned.
-            bool isAlignedPointee =
-                (IGC_IS_FLAG_DISABLED(UseSubDWAlignedPtrArg) || arg->isImplicitArg())
-                ? true
-                : (getPointeeAlign(DL, base) >= 4);
-
-            // If m_hasBufferOffsetArg is true, the offset argument is added to
-            // the final offset to make it definitely positive. Thus skip checking
-            // if an offset is positive.
-            //
-            // Howerver, if m_hasoptionalBufferOffsetArg is true, the buffer offset
-            // is not generated if all offsets can be proven positive (this has
-            // performance benefit as adding buffer offset is an additional add).
-            // Also, if an argument is unaligned, buffer offset must be ON and used;
-            // otherwise, no stateful conversion for the argument can be carried out.
-            //
-            // Note that offset should be positive for any implicit ptr argument,
-            // so no need to prove it!
-            if (!arg->isImplicitArg() &&
-                isAlignedPointee &&
-                (!m_hasBufferOffsetArg || m_hasOptionalBufferOffsetArg) &&
-                IGC_IS_FLAG_DISABLED(SToSProducesPositivePointer))
+            // This is for proving that the offset is positive.
+            for (int i = 0, sz = GEPs.size(); i < sz; ++i)
             {
-                // This is for proving that the offset is positive.
-                for (int i = 0, sz = GEPs.size(); i < sz; ++i)
+                GetElementPtrInst* tgep = GEPs[i];
+                for (auto U = tgep->idx_begin(), E = tgep->idx_end(); U != E; ++U)
                 {
-                    GetElementPtrInst* tgep = GEPs[i];
-                    for (auto U = tgep->idx_begin(), E = tgep->idx_end(); U != E; ++U)
-                    {
-                        Value* Idx = U->get();
-                        gepProducesPositivePointer &=
-                            valueIsPositive(Idx, &(F->getParent()->getDataLayout()), AC);
-                    }
-                }
-
-                if (m_hasOptionalBufferOffsetArg)
-                {
-                    updateArgInfo(arg, gepProducesPositivePointer);
+                    Value* Idx = U->get();
+                    gepProducesPositivePointer &=
+                        valueIsPositive(Idx, &(F->getParent()->getDataLayout()), AC);
                 }
             }
-            if ((m_hasBufferOffsetArg ||
-                 (gepProducesPositivePointer && isAlignedPointee)) &&
-                getOffsetFromGEP(F, GEPs, argNumber, arg->isImplicitArg(), offset))
+
+            if (m_hasOptionalBufferOffsetArg)
             {
-                return true;
+                updateArgInfo(arg, gepProducesPositivePointer);
             }
+        }
+        if ((m_hasBufferOffsetArg ||
+             (gepProducesPositivePointer && isAlignedPointee)) &&
+            getOffsetFromGEP(F, GEPs, argNumber, arg->isImplicitArg(), offset))
+        {
+            return true;
         }
     }
 
@@ -572,7 +605,6 @@ void StatelessToStatefull::visitCallInst(CallInst& I)
             }
         }
     }
-
 }
 
 void StatelessToStatefull::visitLoadInst(LoadInst& I)
@@ -603,7 +635,7 @@ void StatelessToStatefull::visitLoadInst(LoadInst& I)
         Instruction* pPtrToInt = IntToPtrInst::Create(Instruction::IntToPtr, offset, pTy, "", &I);
         pPtrToInt->setDebugLoc(DL);
 
-        Instruction* pLoad = new LoadInst(pPtrToInt->getType()->getPointerElementType(), pPtrToInt, "", I.isVolatile(), IGCLLVM::getCorrectAlign(I.getAlignment()), I.getOrdering(), IGCLLVM::getSyncScopeID(&I), &I);
+        Instruction* pLoad = new LoadInst(pPtrToInt->getType()->getPointerElementType(), pPtrToInt, "", I.isVolatile(), IGCLLVM::getCorrectAlign(I.getAlignment()), I.getOrdering(), I.getSyncScopeID(), &I);
         pLoad->setDebugLoc(DL);
 
         PointerType* ptrType = dyn_cast<PointerType>(ptr->getType());
@@ -653,7 +685,7 @@ void StatelessToStatefull::visitStoreInst(StoreInst& I)
             Instruction* pPtrToInt = IntToPtrInst::Create(Instruction::IntToPtr, offset, pTy, "", &I);
             pPtrToInt->setDebugLoc(DL);
 
-            Instruction* pStore = new StoreInst(dataVal, pPtrToInt, I.isVolatile(), IGCLLVM::getCorrectAlign(I.getAlignment()), I.getOrdering(), IGCLLVM::getSyncScopeID(&I), &I);
+            Instruction* pStore = new StoreInst(dataVal, pPtrToInt, I.isVolatile(), IGCLLVM::getCorrectAlign(I.getAlignment()), I.getOrdering(), I.getSyncScopeID(), &I);
             pStore->setDebugLoc(DL);
 
             I.eraseFromParent();

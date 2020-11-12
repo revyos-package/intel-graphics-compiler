@@ -395,6 +395,11 @@ bool hasEarlyGRFRead() const
     return m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP && m_platformInfo.usRevId == REVISION_A0;
 }
 
+bool hasSamplerSupport() const
+{
+    return true;
+}
+
 bool supportsSIMD16TypedRW() const
 {
     return false;
@@ -619,6 +624,13 @@ bool WaEnableA64WA() const
 bool enableMultiGRFAccessWA() const
 {
     return (m_platformInfo.eProductFamily >= IGFX_TIGERLAKE_LP);
+}
+
+// Return true if platform has structured control-flow instructions and IGC wants to use them.
+bool hasSCF() const
+{
+    bool doscf = true;
+    return doscf;
 }
 
 const SCompilerHwCaps& GetCaps() { return m_caps; }

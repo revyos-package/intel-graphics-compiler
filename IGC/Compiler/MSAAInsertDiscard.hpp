@@ -24,24 +24,49 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ======================= end_copyright_notice ==================================*/
 
-#ifndef IGCLLVM_MC_MCASMBACKEND_H
-#define IGCLLVM_MC_MCASMBACKEND_H
+#ifndef __MSAA_INSERT_DISCARD__
+#define __MSAA_INSERT_DISCARD__
 
-#include "llvm/Config/llvm-config.h"
-#include "llvm/MC/MCAsmBackend.h"
+#include "Compiler/CodeGenContextWrapper.hpp"
 
-namespace IGCLLVM
+#include "common/LLVMWarningsPush.hpp"
+#include <llvm/Pass.h>
+#include <llvm/IR/InstVisitor.h>
+#include "common/LLVMWarningsPop.hpp"
+
+namespace IGC
 {
-#if LLVM_VERSION_MAJOR == 4
-using llvm::MCAsmBackend;
-#elif LLVM_VERSION_MAJOR >= 7
-class MCAsmBackend : public llvm::MCAsmBackend
-{
-public:
-    MCAsmBackend() :
-        llvm::MCAsmBackend(llvm::support::endianness::little) {}
-};
-#endif
+    class MSAAInsertDiscard : public llvm::FunctionPass, public llvm::InstVisitor<MSAAInsertDiscard>
+    {
+    private:
+        bool done;
+        llvm::IRBuilder<>* m_builder;
+        CodeGenContextWrapper* m_pCtxWrapper;
+        unsigned int m_kernelSize;
+
+        int getiCMPValue();
+
+    public:
+
+        static char ID;
+        MSAAInsertDiscard();
+
+        ~MSAAInsertDiscard() {}
+
+        virtual bool runOnFunction(llvm::Function& F) override;
+
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "MSAAInsertDiscard";
+        }
+
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.addRequired<CodeGenContextWrapper>();
+        }
+
+        void visitCallInst(llvm::CallInst& I);
+    };
 }
 
 #endif

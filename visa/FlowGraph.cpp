@@ -230,7 +230,7 @@ G4_INST* FlowGraph::createNewLabelInst(G4_Label* label, int lineNo, int CISAOff)
     //srcFileName is NULL
     // TODO: remove this (use createLabelInst)
     return builder->createInternalInst(NULL, G4_label,
-        NULL, g4::NOSAT, g4::SIMD1, NULL, label, NULL, 0, lineNo, CISAOff, NULL);
+        NULL, g4::NOSAT, g4::SIMD1, NULL, label, NULL, 0);
 }
 
 G4_BB* FlowGraph::createNewBB(bool insertInFG)
@@ -1038,7 +1038,7 @@ void G4_BB::addSamplerFlushBeforeEOT()
         nullptr, G4_send, g4::SIMD8,
         builder->createNullDst(Type_UD), sendMsgOpnd,
         builder->createImm(desc, Type_UD),
-        0, msgDesc, 0);
+        0, msgDesc, true);
     auto iter = std::prev(this->end());
     this->insert(iter, samplerFlushInst);
 }
@@ -3211,8 +3211,7 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
         }
         else
         {
-            G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt,
-                secondInst->getLineNo(), secondInst->getCISAOff(), secondInst->getSrcFilename());
+            G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt);
             bb->insertBefore(iter, jInst);
         }
     }
@@ -3373,6 +3372,45 @@ void FlowGraph::setJIPForEndif(G4_INST* endif, G4_INST* target, G4_BB* targetBB)
 */
 void FlowGraph::processGoto(bool HasSIMDCF)
 {
+    // For all BBs in [StartBB, EndBB) (including StartBB, but not including EndBB) that
+    // jump after EndBB (forward jump), return the earlist (closed to EndBB). If no such
+    // BB, return nullptr.
+    // Assumption:  1. BB's id is in the increasing order; and 2) physical succ has been set.
+    auto getEarliestJmpOutBB = [](const G4_BB* StartBB, const G4_BB* EndBB) -> G4_BB*
+    {
+        G4_BB* earliestBB = nullptr;
+        const G4_BB* bb = StartBB;
+        while (bb != EndBB)
+        {
+            const G4_BB* currBB = bb;
+            bb = bb->getPhysicalSucc();
+            if (currBB->empty())
+            {
+                continue;
+            }
+
+            G4_INST* lastInst = currBB->back();
+            if (lastInst->opcode() != G4_goto ||
+                lastInst->asCFInst()->isBackward() ||
+                lastInst->asCFInst()->isUniform())
+            {
+                continue;
+            }
+
+            for (auto SuccBB : currBB->Succs)
+            {
+                G4_BB* tb = SuccBB;
+                uint32_t tb_id = tb->getId();
+                if (tb_id > EndBB->getId() &&
+                    (earliestBB == nullptr || earliestBB->getId() > tb_id))
+                {
+                    earliestBB = tb;
+                }
+            }
+        }
+        return earliestBB;
+    };
+
     // list of active blocks where a join needs to be inserted, sorted in lexical order
     std::list<BlockSizePair> activeJoinBlocks;
     bool doScalarJmp = !builder->noScalarJmp();
@@ -3417,14 +3455,13 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 lastInst->asCFInst()->getUip() == bb->getLabel())
             {
                 // backward goto
+                G4_ExecSize eSize = lastInst->getExecSize() > g4::SIMD1 ?
+                    lastInst->getExecSize() : pKernel->getSimdSize();
                 bool isUniform = lastInst->getExecSize() == g4::SIMD1 || lastInst->getPredicate() == NULL;
                 if (isUniform && doScalarJmp)
                 {
                     // can always convert a uniform backward goto into a jmp
                     convertGotoToJmpi(lastInst);
-
-                    // No need to do the following for scalar jump. If there are gotos inside loop,
-                    // the join point will be updated when handling gotos.
 
                     // we still have to add a join point at the BB immediately after the back edge,
                     // since there may be subsequent loop breaks that are waiting there.
@@ -3433,25 +3470,22 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // (P1) goto exit
                     // (P2) goto L2
                     // goto L1
-                    // L2:
+                    // L2:                <-- earliest after-loop goto target
                     // ...
                     // exit:
                     //
-                    // In this case the goto exit's JIP should be set to L2 as there may be channels
-                    // waiting there due to "goto L2"
-                    G4_BB* loopExitBB = predBB->getPhysicalSucc();
-                    // loop exit may be null if the loop is the outer-most one
-                    // (i.e., the loop has no breaks but only EOT sends)
-                    if (loopExitBB != NULL)
+                    // In this case, L2 shall be the 1st after-loop join (not necessarily the one immediately
+                    // after the backward BB). The goto exit's JIP should be set to L2.
+                    //
+                    // Here, we will add the 1st after-loop join so that any out-loop JIP (either goto or
+                    // join) within the loop body will has its JIP set to this join.
+                    if (G4_BB* afterLoopJoinBB = getEarliestJmpOutBB(bb, predBB))
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, loopExitBB, lastInst->getExecSize());
+                        addBBToActiveJoinList(activeJoinBlocks, afterLoopJoinBB, eSize);
                     }
-
                 }
                 else
                 {
-                    G4_ExecSize eSize = lastInst->getExecSize() > g4::SIMD1 ?
-                        lastInst->getExecSize() : pKernel->getSimdSize();
                     if (lastInst->getExecSize() == g4::SIMD1)
                     {   // For simd1 goto, convert it to a goto with the right execSize.
                         lastInst->setExecSize(eSize);
@@ -3914,6 +3948,23 @@ void G4_Kernel::setKernelParameters()
             }
         }
     }
+}
+
+//
+// Updates kernel's related structures based on number of threads.
+//
+void G4_Kernel::updateKernelByNumThreads(int nThreads)
+{
+    if (numThreads == nThreads)
+        return;
+
+    numThreads = nThreads;
+
+    // Scale number of GRFs, Acc, SWSB tokens.
+    setKernelParameters();
+
+    // Update physical register pool
+    fg.builder->rebuildPhyRegPool(getNumRegTotal());
 }
 
 //
@@ -4815,7 +4866,7 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
         builder->createImm(desc, Type_UD),
         InstOpt_WriteEnable,
         msgDesc,
-        0);
+        true);
     // need to make sure builder list is empty since later phases do a splice on the entire list
     builder->instList.pop_back();
     // createSendInst incorrectly sets its cisa offset to the last value of the counter.

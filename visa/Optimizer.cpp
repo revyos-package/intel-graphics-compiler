@@ -566,13 +566,14 @@ void replaceAllSpilledRegions(G4_Kernel& kernel, G4_Declare* oldDcl, G4_Declare*
         for (auto inst : *bb)
         {
             auto dst = inst->getDst();
-            if (dst &&
-                !dst->isNullReg())
+            if (dst && !dst->isNullReg())
             {
                 if (dst->getTopDcl() == oldDcl)
                 {
-                    G4_DstRegRegion* newDstRgn = kernel.fg.builder->createDstRegRegion(
-                        dst->getRegAccess(), newDcl->getRegVar(), dst->getRegOff(),
+                    // code does not appear to handle indirect
+                    assert(!dst->isIndirect());
+                    G4_DstRegRegion* newDstRgn = kernel.fg.builder->createDst(
+                        newDcl->getRegVar(), dst->getRegOff(),
                         dst->getSubRegOff(), dst->getHorzStride(), dst->getType());
                     inst->setDest(newDstRgn);
                 }
@@ -1957,14 +1958,22 @@ static G4_DstRegRegion *buildNewDstOperand(FlowGraph &fg, G4_INST *inst, G4_INST
             }
 
             unsigned short defDstHS = defDstRegion->getHorzStride();
-            newDstOpnd = fg.builder->createDstRegRegion(
-                dst->getRegAccess(),
-                dst->getBase(),
-                indirectDst ? dst->getRegOff() : regOff,
-                indirectDst ? dst->getSubRegOff() : subRegOff,
-                dstHS * defDstHS, defDstRegion->getType());
-            newDstOpnd->setImmAddrOff(dst->getAddrImm() +
-                (indirectDst ? (short)tempLen : 0));
+            if (!indirectDst)
+            {
+                newDstOpnd = fg.builder->createDst(
+                    dst->getBase(),
+                    regOff,
+                    subRegOff,
+                    dstHS * defDstHS, defDstRegion->getType());
+            }
+            else
+            {
+                newDstOpnd = fg.builder->createIndirectDst(
+                    dst->getBase(),
+                    dst->getSubRegOff(),
+                    dstHS * defDstHS, defDstRegion->getType(),
+                    (int16_t)dst->getAddrImm() + tempLen);
+            }
         }
         else
         {
@@ -1978,28 +1987,41 @@ static G4_DstRegRegion *buildNewDstOperand(FlowGraph &fg, G4_INST *inst, G4_INST
             // mov (8) V58(0,0)[1]:w  V59(0,0)[8;8,1]:w [Align1, Q1] %22
             if (dst->getType() == src->getType())
             {
-                newDstOpnd = fg.builder->createDstRegRegion(
-                    dst->getRegAccess(),
-                    dst->getBase(),
-                    dst->getRegOff(),
-                    indirectDst
-                    ? dst->getSubRegOff()
-                    : (scale == 0
-                    ? dst->getSubRegOff() /
-                    (defDstElSize / dstElSize)
-                    : dst->getSubRegOff() * scale),
-                    dstHS, defDstRegion->getType());
-                newDstOpnd->setImmAddrOff(dst->getAddrImm());
+                if (!indirectDst)
+                {
+                    newDstOpnd = fg.builder->createDst(
+                        dst->getBase(),
+                        dst->getRegOff(),
+                        (scale == 0 ?
+                        dst->getSubRegOff() / (defDstElSize / dstElSize) :
+                        dst->getSubRegOff() * scale),
+                        dstHS, defDstRegion->getType());
+                }
+                else
+                {
+                    newDstOpnd = fg.builder->createIndirectDst(
+                        dst->getBase(),
+                        dst->getSubRegOff(),
+                        dstHS, defDstRegion->getType(), dst->getAddrImm());
+                }
             }
             else
             {
-                newDstOpnd = fg.builder->createDstRegRegion(dst->getRegAccess(),
+                if (!indirectDst)
+                {
+                    newDstOpnd = fg.builder->createDst(
+                        dst->getBase(),
+                        dst->getRegOff(),
+                        dst->getSubRegOff(), dstHS,
+                        dst->getType());
+                }
+                else
+                {
+                    newDstOpnd = fg.builder->createIndirectDst(
                     dst->getBase(),
-                    dst->getRegOff(),
                     dst->getSubRegOff(), dstHS,
-                    dst->getType());
-                newDstOpnd->setImmAddrOff(dst->getAddrImm());
-
+                    dst->getType(), dst->getAddrImm());
+                }
             }
         }
     }
@@ -3450,10 +3472,7 @@ static void expandPseudoLogic(IR_Builder& builder,
                     newDst,
                     builder.createImm(1, Type_UW),
                     builder.createImm(0, Type_UW),
-                    inst->getOption(),
-                    inst->getLineNo(),
-                    inst->getCISAOff(),
-                    inst->getSrcFilename());
+                    inst->getOption());
                 inst->transferDef(newSel, opNum, Gen4_Operand_Number::Opnd_pred);
                 bb->insertBefore(newIter, newSel);
                 SI = newSel;
@@ -3512,10 +3531,8 @@ static void expandPseudoLogic(IR_Builder& builder,
             nullDst,
             logicSrc0,
             logicSrc1,
-            inst->getOption(),  // keep the original instruction emask
-            inst->getLineNo(),
-            inst->getCISAOff(),
-            inst->getSrcFilename());
+            inst->getOption()  // keep the original instruction emask
+            );
 
         // Fix def-use
         if (Sel0 != nullptr)
@@ -6434,24 +6451,22 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         {
             newInst = createMathInst(NULL, inst->getSaturate(), ExSize,
                 NULL, NULL, NULL, inst->asMathInst()->getMathCtrl(),
-                inst->getOption());
-            newInst->setCISAOff(inst->getCISAOff());
-            newInst->setLocation(inst->getLocation());
+                inst->getOption(), true);
         }
         else if (inst->getNumSrc() < 3)
         {
             newInst = createInternalInst(
                 NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
-                inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
-                inst->getSrcFilename());
+                inst->getOption());
         }
         else
         {
             newInst = createInternalInst(
                 NULL, op, NULL, inst->getSaturate(), ExSize, NULL, NULL, NULL,
-                NULL, inst->getOption(), inst->getLineNo(), inst->getCISAOff(),
-                inst->getSrcFilename());
+                NULL, inst->getOption());
         }
+
+        newInst->inheritDIFrom(inst);
 
         return newInst;
     }
@@ -6884,7 +6899,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
 
             G4_INST* sendInst = kernel.fg.builder->createSplitSendInst(
                 nullptr, G4_sends, g4::SIMD16, dstOpnd, headerOpnd, srcOpnd,
-                kernel.fg.builder->createImm(msgDescImm, Type_UD), InstOpt_WriteEnable, desc, nullptr, 0);
+                kernel.fg.builder->createImm(msgDescImm, Type_UD), InstOpt_WriteEnable, desc, nullptr, true);
             bb->insertBefore(iter, sendInst);
         }
     }
@@ -7361,7 +7376,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(builder.getBuiltinR0(), 1);
                     G4_INST* inst = builder.createSendInst(
                         nullptr, G4_send, g4::SIMD8, dst, src,
-                        builder.createImm(fenceDesc, Type_UD), InstOpt_WriteEnable, msgDesc);
+                        builder.createImm(fenceDesc, Type_UD), InstOpt_WriteEnable, msgDesc, true);
                     bb->insertBefore(iter, inst);
                 }
                 else
@@ -7374,7 +7389,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(dstDcl, 1);
                     G4_INST* sendInst = builder.createSendInst(
                         nullptr, G4_send, g4::SIMD8, dst, src,
-                        builder.createImm(desc.value, Type_UD), InstOpt_WriteEnable, msgDesc);
+                        builder.createImm(desc.value, Type_UD), InstOpt_WriteEnable, msgDesc, true);
                     bb->insertBefore(iter, sendInst);
                 }
 
@@ -7429,15 +7444,20 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         //       add  r2.0  -IP   call_target
         //       add  r2.0  r2.0  adjust_off
 
-        // call's dst must be r1.0, which is reserved at
-        // GlobalRA::setABIForStackCallFunctionCalls. It must not be overlapped with
-        // r2.0, that is hardcoded as the new jump target
+        // call's dst must be r125.0, which is reserved at
+        // GlobalRA::setABIForStackCallFunctionCalls.
         assert(fcall->getDst()->isGreg());
+        // call dst must not be overlapped with r2 which is hardcoded as the new jump target
         assert((fcall->getDst()->getLinearizedStart() / numEltPerGRF(Type_UB)) != 2);
 
-        // hardcoded add's dst to r2.0
+
+        // hardcoded add's dst to r2
+        // the reg offset must be the same as call's dst reg, and must be 0 (HW restriction)
+        uint32_t reg_off = fcall->getDst()->getLinearizedStart() % numEltPerGRF(Type_UB)
+            / getTypeSize(fcall->getDst()->getType());
+
         G4_Declare* add_dst_decl =
-            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), 2, 0);
+            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), 2, reg_off);
 
         // create the first add instruction
         // add  r2.0  -IP   call_target
@@ -7470,25 +7490,27 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     void Optimizer::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
     {
         // SKL workaround for indirect call
-        // r1.0 is the return IP (the instruction right after jmpi)
-        // r1.1 is the return mask. While we'll replace the ret in calee to jmpi as well,
+        // r125.0 is the return IP (the instruction right after jmpi)
+        // r125.1 is the return mask. While we'll replace the ret in calee to jmpi as well,
         // we do not need to consider the return mask here.
 
         // Do not allow predicate call on jmpi WA
         assert(fcall->getPredicate() == nullptr);
 
-        // calculate the reserved register's num from fcall's dst register (shoud be r1)
+        // calculate the reserved register's num and offset from fcall's dst register (shoud be r125.0)
         assert(fcall->getDst()->isGreg());
         uint32_t reg_num = fcall->getDst()->getLinearizedStart() / numEltPerGRF(Type_UB);
+        uint32_t reg_off = fcall->getDst()->getLinearizedStart() % numEltPerGRF(Type_UB)
+            / getTypeSize(fcall->getDst()->getType());
 
         G4_Declare* new_target_decl = createInstsForCallTargetOffset(insts, fcall, -64);
 
-        // add  r1.0   IP   32
-        G4_Declare* r1_0_decl =
-            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, 0);
+        // add  r125.0   IP   32
+        G4_Declare* ret_decl =
+            builder.createHardwiredDeclare(1, fcall->getDst()->getType(), reg_num, reg_off);
         insts.push_back(builder.createBinOp(
             G4_add, g4::SIMD1,
-            builder.Create_Dst_Opnd_From_Dcl(r1_0_decl, 1),
+            builder.Create_Dst_Opnd_From_Dcl(ret_decl, 1),
             builder.createSrcRegRegion(
                 Mod_src_undef, Direct, builder.phyregpool.getIpReg(), 0, 0,
                 builder.getRegionScalar(), Type_UD),
@@ -7508,34 +7530,30 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         // check every fcall
         for (auto bb : kernel.fg)
         {
-            // At this point G4_pseudo_fcall may be converted to G4_call,
-            // check all call (???)
-            if (bb->back()->isFCall()) //|| bb->back()->isCall())
+            if (bb->back()->isFCall())
             {
                 G4_INST* fcall = bb->back();
                 if (fcall->getSrc(0)->isGreg() || fcall->getSrc(0)->isA0()) {
                     // at this point the call instruction's src0 has the target_address
-                    // and the call dst is the reserved register for ret
-                    // All the caller save register should be saved. We usd r2.0 directly
-                    // here to calculate the new call's target. We picked r2.0 due to the
-                    // HW's limitation that call/calla's src and dst offset (the subreg num)
-                    // must be 0.
+                    // and the call dst is the reserved register (r125.0) for ret
+                    // All the caller save register should be saved. We usd r2 directly
+                    // here to calculate the new call's target.
                     //
                     // expand call
                     // From:
-                    //       call r1.0 call_target
+                    //       call r125.0 call_target
                     // To:
                     //       add  r2.0  -IP   call_target
                     //       add  r2.0  r2.0  -32
-                    //       call r1.0  r2.0
+                    //       call r125.0  r2.0
 
                     // For SKL workaround, expand call
                     // From:
-                    //       call r1.0 call_target
+                    //       call r125.0 call_target
                     // To:
-                    //       add  r2.0   -IP    call_target
-                    //       add  r2.0   r2.0   -64
-                    //       add  r1.0   IP   32              // set the return IP
+                    //       add  r2.0     -IP    call_target
+                    //       add  r2.0     r2.0   -64
+                    //       add  r125.0   IP     32          // set the return IP
                     //       jmpi r2.0
 
                     InstListType expanded_insts;
@@ -7583,42 +7601,42 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 G4_INST* ret_inst = bb->back();
 
                 // ret dst's decl
-                G4_Declare* r_1_0 = ret_inst->getSrc(0)->getTopDcl();
+                G4_Declare* ret_reg = ret_inst->getSrc(0)->getTopDcl();
 
                 // calculate the jmpi target offset
                 // expand the original ret from:
-                //     ret r1.0
+                //     ret r125.0
                 // To:
-                //     add   r1.0  -ip   r1.0
-                //     add   r1.0  r1.0  -48
-                //     jmpi  r1.0
+                //     add   r125.0  -ip   r125.0
+                //     add   r125.0  r125.0  -48
+                //     jmpi  r125.0
 
-                // add   r1.0  -ip   r1.0
+                // add   r125.0  -ip   r125.0
                 G4_INST* add0 = builder.createBinOp(
                     G4_add, g4::SIMD1,
-                    builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
+                    builder.Create_Dst_Opnd_From_Dcl(ret_reg, 1),
                     builder.createSrcRegRegion(
                         Mod_Minus, Direct, builder.phyregpool.getIpReg(), 0, 0,
                         builder.getRegionScalar(), Type_UD),
-                    builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
+                    builder.Create_Src_Opnd_From_Dcl(ret_reg, builder.getRegionScalar()),
                     InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
-                // add   r1.0  r1.0  -48
+                // add   r125.0  r125.0  -48
                 G4_INST* add1 = builder.createBinOp(
                     G4_add, g4::SIMD1,
-                    builder.Create_Dst_Opnd_From_Dcl(r_1_0, 1),
-                    builder.Create_Src_Opnd_From_Dcl(r_1_0, builder.getRegionScalar()),
+                    builder.Create_Dst_Opnd_From_Dcl(ret_reg, 1),
+                    builder.Create_Src_Opnd_From_Dcl(ret_reg, builder.getRegionScalar()),
                     builder.createImm(-48, Type_D), InstOpt_WriteEnable | InstOpt_NoCompact, false);
 
-                // jmpi r1.0
+                // jmpi r125.0
                 G4_SrcRegRegion* jmpi_target = builder.Create_Src_Opnd_From_Dcl(
-                    r_1_0, builder.getRegionScalar());
+                    ret_reg, builder.getRegionScalar());
                 jmpi_target->setType(Type_D);
                 G4_INST* jmpi = builder.createJmp(nullptr, jmpi_target, InstOpt_NoCompact, false);
 
                 // remove the ret
                 bb->pop_back();
-                // add the ret
+                // add the jmpi
                 bb->push_back(add0);
                 bb->push_back(add1);
                 bb->push_back(jmpi);
@@ -9323,9 +9341,8 @@ void Optimizer::legalizeType()
                         inst->getDst()->setType(Type_UQ);
                         inst->getSrc(0)->asSrcRegRegion()->setType(Type_UQ);
                     }
-                    if (hasInt64 && builder.noInt64())
+                    if (hasInt64 && builder.noInt64() && !builder.noFP64())
                     {
-                        assert(!builder.noFP64() && "can't change Q/UQ to DF");
                         inst->getDst()->setType(Type_DF);
                         inst->getSrc(0)->asSrcRegRegion()->setType(Type_DF);
                     }

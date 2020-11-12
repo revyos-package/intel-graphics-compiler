@@ -26,7 +26,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
-#include "llvmWrapper/IR/Attributes.h"
+#include "llvm/IR/Attributes.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
@@ -255,10 +255,10 @@ Value* ImplicitGlobalId::CreateGetId(IRBuilder<>& B, GlobalOrLocal wi)
         IGC_ASSERT_MESSAGE(pNewFunc, "Failed to create new function declaration");
 
         // Set function attributes
-        IGCLLVM::AttributeSet funcAttrs;
+        AttributeList funcAttrs;
         AttrBuilder attBuilder;
         attBuilder.addAttribute(Attribute::NoUnwind).addAttribute(Attribute::ReadNone);
-        funcAttrs = IGCLLVM::AttributeSet::get(pNewFunc->getContext(), IGCLLVM::AttributeSet::FunctionIndex, attBuilder);
+        funcAttrs = AttributeList::get(pNewFunc->getContext(), AttributeList::FunctionIndex, attBuilder);
         pNewFunc->setAttributes(funcAttrs);
 
         getFunc = pNewFunc;
@@ -350,7 +350,9 @@ bool CleanImplicitIds::processFunc(Function& F)
         auto OldVar = DbgVal->getValue();
 
         SmallVector<Instruction*, 5> WorkList;
-        WorkList.push_back(cast<Instruction>(OldVar));
+        if (isa<Instruction>(OldVar)) {
+            WorkList.push_back(cast<Instruction>(OldVar));
+        }
 
         DbgVal->eraseFromParent();
         while (WorkList.size() > 0)

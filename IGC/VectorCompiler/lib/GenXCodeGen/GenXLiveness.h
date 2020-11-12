@@ -269,7 +269,7 @@ public:
   Value *getValue() const { return V; }
   unsigned getIndex() const { return Index; }
   // getType : get the type of the (element) value
-  Type *getType();
+  Type *getType() const;
   // Comparisons
   bool operator==(SimpleValue Rhs) const { return V == Rhs.V && Index == Rhs.Index; }
   bool operator!=(SimpleValue Rhs) const { return !(*this == Rhs); }
@@ -383,7 +383,7 @@ public:
   iterator end() { return Segments.end(); }
   const_iterator begin() const { return Segments.begin(); }
   const_iterator end() const { return Segments.end(); }
-  unsigned size() { return Segments.size(); }
+  unsigned size() const { return Segments.size(); }
   void resize(unsigned len) { Segments.resize(len); }
   // Iterator forwarders for Values.
   // This is complicated by the Values vector containing AssertingSV, but the
@@ -425,7 +425,8 @@ public:
   // getLogAlignment : get log alignment
   unsigned getLogAlignment() const { return LogAlignment; }
   // setAlignmentFromValue : increase alignment if necessary from a value
-  void setAlignmentFromValue(SimpleValue V, unsigned GRFWidth);
+  void setAlignmentFromValue(const DataLayout &DL, const SimpleValue V,
+                             const unsigned GRFWidth);
   // setLogAlignment : set log alignment to greater than implied by the LR's values
   void setLogAlignment(unsigned Align) { LogAlignment = std::max(LogAlignment, Align); }
   // addSegment : add a segment to a live range
@@ -449,12 +450,7 @@ public:
   void printSegments(raw_ostream &OS) const;
 private:
   void value_clear() { Values.clear(); }
-#ifndef NDEBUG
-  // assertOk : assertion tests that live range's segments are well formed
-  void assertOk();
-#else
-  void assertOk() {}
-#endif
+  bool testLiveRanges() const;
 };
 
 inline raw_ostream &operator<<(raw_ostream &OS, const LiveRange &LR) {
@@ -508,7 +504,8 @@ class GenXLiveness : public FunctionGroupPass {
   genx::CallGraph *CG;
   GenXBaling *Baling;
   GenXNumbering *Numbering;
-  const GenXSubtarget *Subtarget;
+  const GenXSubtarget *Subtarget = nullptr;
+  const DataLayout *DL = nullptr;
   std::map<Function *, Value *> UnifiedRets;
   std::map<Value *, Function *> UnifiedRetToFunc;
   std::map<AssertingVH<Value>, Value *> ArgAddressBaseMap;

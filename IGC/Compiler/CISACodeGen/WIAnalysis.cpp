@@ -34,7 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "common/igc_regkeys.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "common/LLVMWarningsPush.hpp"
-#include <llvmWrapper/IR/Function.h>
+#include <llvm/IR/Function.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Debug.h>
@@ -446,7 +446,7 @@ void WIAnalysisRunner::updateArgsDependency(llvm::Function* pF)
     bool IsSubroutine = !isEntryFunc(m_pMdUtils, pF) || isNonEntryMultirateShader(pF);
 
     ImplicitArgs implicitArgs(*pF, m_pMdUtils);
-    int implicitArgStart = (unsigned)(IGCLLVM::GetFuncArgSize(pF)
+    int implicitArgStart = (unsigned)(pF->arg_size()
         - implicitArgs.size()
         - (IsSubroutine ? 0 : m_ModMD->pushInfo.pushAnalysisWIInfos.size()));
     IGC_ASSERT(implicitArgStart >= 0 && "Function arg size does not match meta data and push args.");
@@ -814,6 +814,17 @@ void WIAnalysisRunner::update_cf_dep(const IGCLLVM::TerminatorInst* inst)
             {
                 continue;
             }
+
+            if (const auto* st = dyn_cast<StoreInst>(defi))
+            {
+                // If we encounter a store in divergent control flow,
+                // we need to process the associated alloca (if any) again
+                // because it might need to be RANDOM.
+                auto it = m_storeDepMap.find(st);
+                if (it != m_storeDepMap.end())
+                    m_pChangedNew->push_back(it->second);
+            }
+
             if (isRegionInvariant(defi, &br_info, 0))
             {
                 continue;
@@ -1140,13 +1151,14 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         intrinsic_name == llvm_ptr_to_pair ||
         intrinsic_name == llvm_pair_to_ptr ||
         intrinsic_name == llvm_fma ||
-        GII_id == GenISAIntrinsic::GenISA_getSR0 ||
-        GII_id == GenISAIntrinsic::GenISA_mul_rtz ||
-        GII_id == GenISAIntrinsic::GenISA_fma_rtz ||
-        GII_id == GenISAIntrinsic::GenISA_add_rtz ||
+        GII_id == GenISAIntrinsic::GenISA_getSR0   ||
+        GII_id == GenISAIntrinsic::GenISA_getSR0_0 ||
+        GII_id == GenISAIntrinsic::GenISA_mul_rtz  ||
+        GII_id == GenISAIntrinsic::GenISA_fma_rtz  ||
+        GII_id == GenISAIntrinsic::GenISA_add_rtz  ||
         GII_id == GenISAIntrinsic::GenISA_slice_id ||
-        GII_id == GenISAIntrinsic::GenISA_subslice_id ||
-        GII_id == GenISAIntrinsic::GenISA_eu_id ||
+        GII_id == GenISAIntrinsic::GenISA_subslice_id  ||
+        GII_id == GenISAIntrinsic::GenISA_eu_id        ||
         GII_id == GenISAIntrinsic::GenISA_eu_thread_id ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id_alloca)
@@ -1372,56 +1384,65 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const SelectInst* inst)
 
 bool WIAnalysisRunner::TrackAllocaDep(const Value* I, AllocaDep& dep)
 {
+    bool trackable = true;
+    SmallVector<Instruction*, 4> AssumeToErase;
     for (Value::const_user_iterator use_it = I->user_begin(), use_e = I->user_end(); use_it != use_e; ++use_it)
     {
         if (const GetElementPtrInst * gep = dyn_cast<GetElementPtrInst>(*use_it))
         {
-            if (TrackAllocaDep(gep, dep))
-                continue;
+            trackable &= TrackAllocaDep(gep, dep);
         }
-        if (const llvm::LoadInst * pLoad = llvm::dyn_cast<llvm::LoadInst>(*use_it))
+        else if (const llvm::LoadInst * pLoad = llvm::dyn_cast<llvm::LoadInst>(*use_it))
         {
-            if (!pLoad->isSimple())
-                return false;
+            trackable &= (pLoad->isSimple());
         }
         else if (const llvm::StoreInst * pStore = llvm::dyn_cast<llvm::StoreInst>(*use_it))
         {
-            if (!pStore->isSimple())
-                return false;
-            const llvm::Value* pValueOp = pStore->getValueOperand();
-            if (pValueOp == I)
-            {
-                // GEP instruction is the stored value of the StoreInst (not supported case)
-                return false;
-            }
+            trackable &= (pStore->isSimple());
+            // Not supported case: GEP instruction is the stored value of the StoreInst
+            trackable &= (pStore->getValueOperand() != I);
             dep.stores.push_back(pStore);
         }
         else if (const llvm::BitCastInst * pBitCast = llvm::dyn_cast<llvm::BitCastInst>(*use_it))
         {
-            if (TrackAllocaDep(pBitCast, dep))
+            trackable &= TrackAllocaDep(pBitCast, dep);
+        }
+        else if (const llvm::AddrSpaceCastInst* pAddrCast = llvm::dyn_cast<llvm::AddrSpaceCastInst>(*use_it))
+        {
+            trackable &= TrackAllocaDep(pAddrCast, dep);
+        }
+        else if (const GenIntrinsicInst* intr = dyn_cast<GenIntrinsicInst>(*use_it))
+        {
+            GenISAIntrinsic::ID IID = intr->getIntrinsicID();
+            if (IID == GenISAIntrinsic::GenISA_assume_uniform)
             {
-                continue;
+                dep.assume_uniform = true;
+                // remove this assume-uniform so it will not affect later pass
+                AssumeToErase.push_back((GenIntrinsicInst*)intr);
             }
-            // Not a candidate.
-            return false;
+            else
+                trackable = false;
         }
         else if (const IntrinsicInst * intr = dyn_cast<IntrinsicInst>(*use_it))
         {
             llvm::Intrinsic::ID  IID = intr->getIntrinsicID();
-            if (IID == llvm::Intrinsic::lifetime_start ||
-                IID == llvm::Intrinsic::lifetime_end)
+            if (IID != llvm::Intrinsic::lifetime_start &&
+                IID != llvm::Intrinsic::lifetime_end)
             {
-                continue;
+                trackable = false;
             }
-            return false;
         }
         else
         {
             // This is some other instruction. Right now we don't want to handle these
-            return false;
+            trackable = false;
         }
     }
-    return true;
+    for (auto* inst : AssumeToErase)
+    {
+        inst->eraseFromParent();
+    }
+    return trackable;
 }
 
 
@@ -1435,6 +1456,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const AllocaInst* inst)
     if (!hasDependency(inst))
     {
         AllocaDep dep;
+        dep.assume_uniform = false;
         if (TrackAllocaDep(inst, dep))
         {
             m_allocaDepMap.insert(std::make_pair(inst, dep));
@@ -1450,37 +1472,43 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const AllocaInst* inst)
         // If we haven't been able to track the dependency of the alloca make it random
         return WIAnalysis::RANDOM;
     }
+    // find assume-uniform
+    if (depIt->second.assume_uniform)
+    {
+        return WIAnalysis::UNIFORM;
+    }
     // find the common dominator block among all the stores
     // that can be considered as the nearest logical location for alloca.
-    const BasicBlock* CommonDomB = nullptr;
-    for (auto it : depIt->second.stores)
+    const BasicBlock* CommonDomBB = nullptr;
+    for (auto *SI : depIt->second.stores)
     {
-        auto BB = (*it).getParent();
+        auto BB = SI->getParent();
         IGC_ASSERT(BB);
-        if (!CommonDomB)
-            CommonDomB = BB;
+        if (!CommonDomBB)
+            CommonDomBB = BB;
         else
-            CommonDomB = DT->findNearestCommonDominator(CommonDomB, BB);
+            CommonDomBB = DT->findNearestCommonDominator(CommonDomBB, BB);
     }
     // if any store is not uniform, then alloca is not uniform
     // if any store is affected by a divergent branch after alloca,
     // then alloca is also not uniform
-    for (auto it : depIt->second.stores)
+    for (auto *SI : depIt->second.stores)
     {
-        if (hasDependency(&(*it)))
+        if (hasDependency(SI))
         {
-            WIAnalysis::WIDependancy dep2 = getDependency(&(*it));
-            if (dep2 != WIAnalysis::UNIFORM)
+            if (getDependency(SI) != WIAnalysis::UNIFORM)
             {
                 return WIAnalysis::RANDOM;
             }
-            if (m_ctrlBranches.find((*it).getParent()) != m_ctrlBranches.end())
+
+            if (auto I = m_ctrlBranches.find(SI->getParent());
+                I != m_ctrlBranches.end())
             {
-                auto Branches = m_ctrlBranches[(*it).getParent()];
-                for (auto BrI = Branches.begin(), BrE = Branches.end();
-                    BrI != BrE; ++BrI) {
+                auto& Branches = I->second;
+                for (auto *BrI : Branches)
+                {
                     // exclude those branches that dominates alloca
-                    if (!DT->dominates((*BrI), CommonDomB))
+                    if (!DT->dominates(BrI, CommonDomBB))
                         return WIAnalysis::RANDOM;
                 }
             }

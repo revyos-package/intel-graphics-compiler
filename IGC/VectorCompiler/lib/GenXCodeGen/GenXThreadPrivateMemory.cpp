@@ -85,7 +85,6 @@ public:
   bool runOnFunction(Function &F);
 
   void visitAllocaInst(AllocaInst &I);
-  void visitFunction(Function &F);
 
 private:
   bool replacePhi(PHINode *Phi);
@@ -207,6 +206,7 @@ GenXThreadPrivateMemory::NormalizeVector(Value *From, Type *To,
   Type *FromTy = From->getType();
   IGC_ASSERT(isa<VectorType>(FromTy));
   unsigned NumElts = cast<VectorType>(FromTy)->getNumElements();
+  static_assert(genx::ByteBits);
   unsigned EltSz =
       m_DL->getTypeSizeInBits(FromTy->getScalarType()) / genx::ByteBits;
   IGC_ASSERT(EltSz > 0);
@@ -217,7 +217,7 @@ GenXThreadPrivateMemory::NormalizeVector(Value *From, Type *To,
     IGC_ASSERT(From);
     To = From->getType();
     IGC_ASSERT(To);
-    NumElts = To->getVectorNumElements();
+    NumElts = cast<VectorType>(To)->getNumElements();
   }
   if (To->getScalarType()->isPointerTy() &&
       To->getScalarType()->getPointerElementType()->isFunctionTy()) {
@@ -261,8 +261,8 @@ GenXThreadPrivateMemory::RestoreVectorAfterNormalization(Instruction *From,
     if (From->getType()->isVectorTy() &&
         From->getType()->getScalarType()->isIntegerTy(genx::DWordBits)) {
       auto *NewTy =
-          VectorType::get(Type::getInt64Ty(*m_ctx),
-                          From->getType()->getVectorNumElements() / 2);
+          IGCLLVM::FixedVectorType::get(Type::getInt64Ty(*m_ctx),
+                          cast<VectorType>(From->getType())->getNumElements() / 2);
       NewFrom = CastInst::CreateBitOrPointerCast(From, NewTy);
       NewFrom->insertAfter(From);
       From = NewFrom;
@@ -331,27 +331,20 @@ static Value *FormEltsOffsetVector(unsigned NumElts, unsigned TySz,
   return EltsOffset;
 }
 
-static Value *FormEltsOffsetVectorForSVM(unsigned NumElts,
-                                         Instruction *InsertBefore,
-                                         Value *Offset,
-                                         Type *OffsetTy = nullptr) {
-  IRBuilder<> Builder(InsertBefore);
-  Type *I32Ty = Type::getInt32Ty(InsertBefore->getContext());
-  if (!OffsetTy)
-    OffsetTy = Type::getInt64Ty(InsertBefore->getContext());
-  Value *EltsOffset =
-      UndefValue::get(IGCLLVM::FixedVectorType::get(OffsetTy, NumElts));
-  if (Offset->getType()->isVectorTy()) {
-    IGC_ASSERT(cast<VectorType>(Offset->getType())->getNumElements() == 1);
-    Offset = CastInst::CreateZExtOrBitCast(Offset, OffsetTy, "", InsertBefore);
-  }
-  // FIXME: replace with shufflevector
-  for (unsigned CurElt = 0; CurElt < NumElts; ++CurElt) {
-    Value *Idx = ConstantInt::get(I32Ty, CurElt);
-    EltsOffset = Builder.CreateInsertElement(EltsOffset, Offset, Idx);
-  }
+static Value *FormEltsOffsetVectorForSVM(Value *BaseOffset,
+                                         Value *Offsets,
+                                         Instruction *InsertBefore) {
+  IGC_ASSERT(BaseOffset->getType()->isIntegerTy(64));
+  IGC_ASSERT(Offsets->getType()->isVectorTy());
 
-  return EltsOffset;
+  IRBuilder<> Builder(InsertBefore);
+  Type *I64Ty = Type::getInt64Ty(InsertBefore->getContext());
+  unsigned NumElts = cast<VectorType>(Offsets->getType())->getNumElements();
+  Value *BaseOffsets = Builder.CreateVectorSplat(NumElts, BaseOffset);
+  if (!Offsets->getType()->getScalarType()->isIntegerTy(64))
+    Offsets = Builder.CreateZExtOrBitCast(Offsets,
+        IGCLLVM::FixedVectorType::get(I64Ty, NumElts));
+  return Builder.CreateAdd(BaseOffsets, Offsets);
 }
 
 Value *GenXThreadPrivateMemory::lookForPtrReplacement(Value *Ptr) const {
@@ -363,8 +356,8 @@ Value *GenXThreadPrivateMemory::lookForPtrReplacement(Value *Ptr) const {
     return ITP->getOperand(0);
   else if (auto AI = dyn_cast<AllocaInst>(Ptr)) {
     auto AllocaIntr = m_allocaToIntrinsic.find(AI);
-    IGC_ASSERT(AllocaIntr != m_allocaToIntrinsic.end() &&
-           "Each alloca must be here");
+    IGC_ASSERT_MESSAGE(AllocaIntr != m_allocaToIntrinsic.end(),
+      "Each alloca must be here");
     return AllocaIntr->second;
   } else if (isa<Argument>(Ptr)) {
     if (Ptr->getType()->isPointerTy()) {
@@ -391,13 +384,13 @@ Value *GenXThreadPrivateMemory::lookForPtrReplacement(Value *Ptr) const {
       return Ptr;
     } else {
       // FIXME: unify the return paths for failure cases
-      IGC_ASSERT(0 && "Cannot find pointer replacement");
+      IGC_ASSERT_MESSAGE(0, "Cannot find pointer replacement");
       return nullptr;
     }
   } else if (isa<ConstantPointerNull>(Ptr))
     return ConstantInt::get(Type::getInt32Ty(*m_ctx), 0);
   else {
-    IGC_ASSERT(0 && "Cannot find pointer replacement");
+    IGC_ASSERT_MESSAGE(0, "Cannot find pointer replacement");
     return nullptr;
   }
 }
@@ -468,16 +461,8 @@ bool GenXThreadPrivateMemory::replaceLoad(LoadInst *LdI) {
   Value *Scale = ConstantInt::get(Type::getInt16Ty(*m_ctx), 0);
   Value *Surface = ConstantInt::get(I32Ty,
                                     visa::getReservedSurfaceIndex(m_stack));
-  if (m_useGlobalMem && NumEltsToLoad > 1) {
-    IGC_ASSERT(Offset->getType()->getScalarType()->isIntegerTy(64));
-    auto *BaseOff = FormEltsOffsetVectorForSVM(NumEltsToLoad, LdI, Offset);
-    auto *ZextOff = CastInst::CreateZExtOrBitCast(
-        EltsOffset,
-        IGCLLVM::FixedVectorType::get(
-            I64Ty, cast<VectorType>(EltsOffset->getType())->getNumElements()),
-        "", LdI);
-    Offset = BinaryOperator::CreateAdd(BaseOff, ZextOff, "", LdI);
-  }
+  if (m_useGlobalMem)
+    Offset = FormEltsOffsetVectorForSVM(Offset, EltsOffset, LdI);
   Function *F = GenXIntrinsic::getGenXDeclaration(
       LdI->getModule(), IID,
       {OldValOfTheDataRead->getType(),
@@ -529,7 +514,7 @@ bool GenXThreadPrivateMemory::replaceStore(StoreInst *StI) {
     ValueOp = Builder.CreateVectorSplat(1, ValueOp);
     ValueOpTy = ValueOp->getType();
   }
-  IGC_ASSERT(ValueOp->getType()->isVectorTy());
+  IGC_ASSERT(ValueOpTy->isVectorTy());
 
   unsigned ValueEltSz = 0;
   std::tie(ValueOp, ValueEltSz) = NormalizeVector(ValueOp, ValueOpTy, StI);
@@ -551,16 +536,8 @@ bool GenXThreadPrivateMemory::replaceStore(StoreInst *StI) {
   Value *Pred = Builder.CreateVectorSplat(ValueNumElts, PredVal);
   Value *EltsOffset = FormEltsOffsetVector(ValueNumElts, ValueEltSz, StI);
 
-  if (m_useGlobalMem && ValueNumElts > 1) {
-    IGC_ASSERT(Offset->getType()->getScalarType()->isIntegerTy(64));
-    auto *BaseOff = FormEltsOffsetVectorForSVM(ValueNumElts, StI, Offset);
-    auto *ZextOff = CastInst::CreateZExtOrBitCast(
-        EltsOffset,
-        IGCLLVM::FixedVectorType::get(
-            I64Ty, cast<VectorType>(EltsOffset->getType())->getNumElements()),
-        "", StI);
-    Offset = BinaryOperator::CreateAdd(BaseOff, ZextOff, "", StI);
-  }
+  if (m_useGlobalMem)
+    Offset = FormEltsOffsetVectorForSVM(Offset, EltsOffset, StI);
 
   Function *F = GenXIntrinsic::getGenXDeclaration(
       StI->getModule(), IID,
@@ -668,19 +645,10 @@ bool GenXThreadPrivateMemory::replaceGatherPrivate(CallInst *CI) {
   Type *I64Ty = Type::getInt64Ty(*m_ctx);
   Value *PointerOp = CI->getOperand(1);
   Value *Offset = lookForPtrReplacement(PointerOp);
-  Offset = ZExtOrTruncIfNeeded(Offset, I32Ty, CI);
+  Offset = ZExtOrTruncIfNeeded(Offset, m_useGlobalMem ? I64Ty : I32Ty, CI);
 
-  if (m_useGlobalMem && ValueNumElts > 1) {
-    Offset = FormEltsOffsetVectorForSVM(ValueNumElts, CI,
-                                        lookForTruncOffset(Offset));
-    if (!EltsOffset->getType()->getScalarType()->isIntegerTy(64))
-      EltsOffset = CastInst::CreateZExtOrBitCast(
-          EltsOffset,
-          IGCLLVM::FixedVectorType::get(
-              I64Ty, cast<VectorType>(EltsOffset->getType())->getNumElements()),
-          "", CI);
-    Offset = BinaryOperator::CreateAdd(Offset, EltsOffset, "", CI);
-  }
+  if (m_useGlobalMem)
+    Offset = FormEltsOffsetVectorForSVM(lookForTruncOffset(Offset), EltsOffset, CI);
 
   Function *F = GenXIntrinsic::getGenXDeclaration(
       CI->getModule(), IID,
@@ -752,13 +720,17 @@ bool GenXThreadPrivateMemory::replaceScatterPrivate(CallInst *CI) {
   }
 
   Value *ScatterPtr = CI->getArgOperand(1);
-  Type *I32Ty = Type::getInt32Ty(*m_ctx);
+  Type *I32Ty = Type::getInt32Ty(*m_ctx),
+       *I64Ty = Type::getInt64Ty(*m_ctx);
   Value *Offset = lookForPtrReplacement(ScatterPtr);
-  Offset = ZExtOrTruncIfNeeded(Offset, I32Ty, CI);
+  Offset = ZExtOrTruncIfNeeded(Offset, m_useGlobalMem ? I64Ty : I32Ty, CI);
+
+  if (m_useGlobalMem)
+    EltsOffset = FormEltsOffsetVectorForSVM(Offset, EltsOffset, CI);
 
   Function *F = GenXIntrinsic::getGenXDeclaration(
       CI->getModule(), IID,
-      {Pred->getType(), (m_useGlobalMem ? Offset : EltsOffset)->getType(),
+      {Pred->getType(), EltsOffset->getType(),
        ValueOp->getType()});
 
   unsigned logNumBlocks = genx::log2(EltSz);
@@ -769,7 +741,7 @@ bool GenXThreadPrivateMemory::replaceScatterPrivate(CallInst *CI) {
       m_useGlobalMem
           ? IntrinsicInst::Create(
                 F,
-                {Pred, ConstantInt::get(I32Ty, logNumBlocks), Offset, ValueOp})
+                {Pred, ConstantInt::get(I32Ty, logNumBlocks), EltsOffset, ValueOp})
           : IntrinsicInst::Create(
                 F, {Pred, ConstantInt::get(I32Ty, logNumBlocks),
                     ConstantInt::get(Type::getInt16Ty(*m_ctx), Scale), Surface,
@@ -810,7 +782,7 @@ bool GenXThreadPrivateMemory::replacePhi(PHINode *Phi) {
           V = VCast;
         }
       } else {
-        IGC_ASSERT(0 && "New phi types mismatch");
+        IGC_ASSERT_MESSAGE(0, "New phi types mismatch");
       }
     };
     std::for_each(PhiOps.begin(), PhiOps.end(), TypeFixer);
@@ -967,6 +939,7 @@ void SplitScatter(CallInst *CI) {
     EltOffsets = CI->getArgOperand(2);
     OldVal = CI->getArgOperand(3);
   }
+  IGC_ASSERT(Pred && EltOffsets && OldVal);
 
   std::pair<Value *, Value *> NewPreds = SplitVec(Pred, NumElts, CI, Splitters);
 
@@ -1003,6 +976,7 @@ void SplitScatter(CallInst *CI) {
         IntrinsicInst::Create(F, {NewPreds.second, LogNumBlock,
                                   NewEltOffsets.second, OldVals.second});
   }
+  IGC_ASSERT(FirstScatter && SecondScatter);
 
   FirstScatter->insertAfter(CI);
   SecondScatter->insertAfter(FirstScatter);
@@ -1036,6 +1010,7 @@ void SplitGather(CallInst *CI) {
     EltOffsets = CI->getArgOperand(2);
     OldVal = CI->getArgOperand(3);
   }
+  IGC_ASSERT(Pred && EltOffsets && OldVal);
 
   std::pair<Value *, Value *> NewPreds = SplitVec(Pred, NumElts, CI, Splitters);
 
@@ -1070,6 +1045,7 @@ void SplitGather(CallInst *CI) {
         IntrinsicInst::Create(F, {NewPreds.second, LogNumBlock,
                                   NewEltOffsets.second, OldVals.second});
   }
+  IGC_ASSERT(FirstGather && SecondGather);
 
   FirstGather->insertAfter(CI);
   SecondGather->insertAfter(FirstGather);
@@ -1310,8 +1286,8 @@ bool GenXThreadPrivateMemory::runOnFunction(Function &F) {
 
   for (auto AllocaPair : m_allocaToIntrinsic) {
     EraseUsers(AllocaPair.first);
-    IGC_ASSERT(AllocaPair.first->use_empty() &&
-           "uses of replaced alloca aren't empty");
+    IGC_ASSERT_MESSAGE(AllocaPair.first->use_empty(),
+      "uses of replaced alloca aren't empty");
     AllocaPair.first->eraseFromParent();
   }
 
@@ -1345,17 +1321,4 @@ bool GenXThreadPrivateMemory::runOnFunction(Function &F) {
 
 void GenXThreadPrivateMemory::visitAllocaInst(AllocaInst &I) {
   m_alloca.push_back(&I);
-}
-
-void GenXThreadPrivateMemory::visitFunction(Function &F) {
-  for (auto &Arg : F.args())
-    if (Arg.getType()->isPointerTy() && SVMChecker()(&Arg)) {
-      LLVM_DEBUG(dbgs() << "Switching TPM to SVM: svm arg\n");
-      // TODO: move the name string to vc-intrinsics *MD::useGlobalMem
-      if (!m_useGlobalMem)
-        F.getParent()->addModuleFlag(Module::ModFlagBehavior::Error,
-                                     "genx.useGlobalMem", 1);
-      m_useGlobalMem = true;
-      m_args.push_back(&Arg);
-    }
 }

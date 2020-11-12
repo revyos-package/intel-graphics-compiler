@@ -471,8 +471,9 @@ void VarSplitPass::split()
     unsigned int numIntrinsicsInserted = 0;
 #endif
     // Do actual splitting
-    for (auto curDcl : kernel.Declares)
+    for(unsigned int i = 0; i != kernel.Declares.size(); ++i)
     {
+        auto curDcl = kernel.Declares[i];
         auto isCandidate = splitVars.find(curDcl);
         if (isCandidate == splitVars.end())
             continue;
@@ -523,8 +524,7 @@ void VarSplitPass::split()
             G4_ExecSize execSize {(getGRFSize() / G4_Type_Table[Type_UD].byteSize) * numRows};
             auto intrin = kernel.fg.builder->createIntrinsicInst(
                 nullptr, Intrinsic::Split, execSize, dstRgn, srcRgn, nullptr, nullptr,
-                item.second.def.first->getInst()->getOption() | G4_InstOption::InstOpt_WriteEnable,
-                item.second.def.first->getInst()->getLineNo());
+                item.second.def.first->getInst()->getOption() | G4_InstOption::InstOpt_WriteEnable, true);
             intrin->setCISAOff(item.second.def.first->getInst()->getCISAOff());
             item.second.def.second->insertBefore(it, intrin);
             splitDcls.push_back(std::make_tuple(lb, rb, splitDcl));

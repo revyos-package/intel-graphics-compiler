@@ -692,66 +692,6 @@ void KernelDebugInfo::generateByteOffsetMapping(std::list<G4_BB*>& stackCallEntr
     mapCISAIndexGenOffset.push_back(std::make_pair(++maxVISAIndex, (unsigned int)maxGenIsaOffset));
 }
 
-void KernelDebugInfo::computeGRFToStackOffset()
-{
-    if (!kernel->fg.getHasStackCalls())
-        return;
-
-    // Store VISA index of each fcall and list of GRFs stored in stack with stack offset
-    // <CISA Index, vector<pair<GRF#, be_fp slot#>>
-    using GRFToStackCallSlot = std::unordered_map<unsigned int, std::vector<std::pair<unsigned int, unsigned int>>>;
-    GRFToStackCallSlot frameGRFStoreLocs;
-
-    bool hasSaveRestore = (callerSaveRestore.size() > 0);
-
-    if (hasSaveRestore)
-    {
-        for (auto& item : callerSaveRestore)
-        {
-            auto& sr = item.second;
-            for (auto& fill : sr.second)
-            {
-                if (fill->isFillIntrinsic())
-                {
-                    unsigned int firstGRF = fill->getDst()->getBase()->asRegVar()->getPhyReg()->asGreg()->getRegNum();
-                    for (unsigned int row = 0; row != fill->asFillIntrinsic()->getNumRows(); ++row)
-                    {
-                        unsigned int grf = (firstGRF + row);
-                        unsigned int slot = fill->asFillIntrinsic()->getOffset() + row;
-                        // fill intrinsic stores offset in hword units
-                        auto other = std::make_pair(grf, slot*(BYTES_PER_OWORD*2));
-                        frameGRFStoreLocs[item.first->getCISAOff()].push_back(other);
-                    }
-                }
-            }
-        }
-    }
-
-    // Now associate store/restore with respective live-intervals
-    for (auto lr : debugInfoLiveIntervalMap)
-    {
-        if (lr.first->getRegVar()->getPhyReg() &&
-            lr.first->getRegVar()->getPhyReg()->isGreg())
-        {
-            auto grf = lr.first->getRegVar()->getPhyReg()->asGreg()->getRegNum();
-            for (auto& sr : frameGRFStoreLocs)
-            {
-                if (!lr.second->isLiveAt(sr.first))
-                {
-                    continue;
-                }
-                for (auto& grfSlotPair : sr.second)
-                {
-                    if (grf == grfSlotPair.first)
-                    {
-                        lr.second->addGRFSave(sr.first, grfSlotPair.second);
-                    }
-                }
-            }
-        }
-    }
-}
-
 void KernelDebugInfo::emitRegisterMapping()
 {
     // Emit out mapping between
@@ -1048,71 +988,24 @@ void emitDataUInt8(uint8_t data, T& t)
 }
 
 template<class T>
-void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInfo, uint32_t i, uint16_t size, T& t, bool lrHasGenISAOff = false)
+void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInfo, uint32_t i, uint16_t size, T& t)
 {
     // given lrs and saverestore, prepare assembled list of ranges to write out
     KernelDebugInfo* dbgInfo = visaKernel->getKernel()->getKernelDebugInfo();
 
-    // When lrHasGenISAOff = true, it means lrInfo contains offsets that are Gen offsets, rather than VISA index
-    auto assembleAll = [lrHasGenISAOff, dbgInfo](const std::vector<std::pair<uint32_t, uint32_t>>& lrs,
-        std::vector<std::pair<uint32_t, uint32_t>>& saveRestore)
-    {
-        // Return count of total LRs to emit including
-        // save/restore
-        // <is save/restore, start, end, stack slot>
-        std::vector<std::tuple<bool, uint32_t, uint32_t, uint32_t>> assembled;
-        for (auto& lr : lrs)
-        {
-            assembled.push_back(std::make_tuple(false, lr.first, lr.second, 0));
-            for (auto& sr : saveRestore)
-            {
-                uint32_t srFirst = sr.first;
-                if (lrHasGenISAOff)
-                {
-                    srFirst = dbgInfo->getGenOffsetFromVISAIndex(srFirst) - dbgInfo->getRelocOffset();
-                }
-                // check whether lr overlaps save/restore
-                if (srFirst >= lr.first &&
-                    srFirst < lr.second)
-                {
-                    unsigned int e1 = sr.first - 1;
-                    unsigned int e2 = sr.first + 2;
-                    if (lrHasGenISAOff)
-                    {
-                        e1 = dbgInfo->getGenOffsetFromVISAIndex(e1) - dbgInfo->getRelocOffset();
-                        e2 = dbgInfo->getGenOffsetFromVISAIndex(e2) - dbgInfo->getRelocOffset();
-                    }
-                    // break original LR
-                    assembled.back() = std::make_tuple(false, std::get<1>(assembled.back()), e1, 0);
-                    // insert stack LR
-                    assembled.push_back(std::make_tuple(true, srFirst, e2, sr.second));
-                    // restore original LR
-                    assembled.push_back(std::make_tuple(false, e2, lr.second, 0));
-                }
-            }
-        }
-
-        return assembled;
-    };
-
     // start cisa index, end cisa index
     std::vector<std::pair<uint32_t, uint32_t>> lrs;
-    std::vector<std::pair<uint32_t, uint32_t>> saveRestore;
-    // at cisa index, stack slot off
-    if (lrInfo != NULL)
+    if (lrInfo)
     {
         lrInfo->getLiveIntervals(lrs);
-        saveRestore = lrInfo->getSaveRestore();
     }
+    uint16_t numLRs = (uint16_t)lrs.size();
     std::sort(lrs.begin(), lrs.end(), [](std::pair<uint32_t, uint32_t>& a, std::pair<uint32_t, uint32_t>& b) { return a.first < b.first; });
-    std::sort(saveRestore.begin(), saveRestore.end(), [](std::pair<uint32_t, uint32_t>& a, std::pair<uint32_t, uint32_t>& b) { return a.first < b.first; });
-    auto assembledLRs = assembleAll(lrs, saveRestore);
-    uint16_t numLRs = (uint16_t)assembledLRs.size();
     emitDataUInt16(numLRs, t);
-    for (auto& it : assembledLRs)
+    for (auto& it : lrs)
     {
-        const uint32_t start = std::get<1>(it);
-        const uint32_t end = std::get<2>(it);
+        const uint32_t start = (uint32_t)it.first;
+        const uint32_t end = (uint32_t)it.second;
 
         if (size == 2)
         {
@@ -1130,13 +1023,7 @@ void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInf
         // Write virtual register type
         emitDataUInt8((uint8_t)virtualType, t);
 
-        unsigned char physicalType = varsMap[i]->physicalType;
-        if (std::get<0>(it))
-        {
-            // save restore
-            physicalType = VARMAP_PREG_FILE_MEMORY;
-        }
-
+        const unsigned char physicalType = varsMap[i]->physicalType;
         // Write physical register type
         emitDataUInt8((uint8_t)physicalType, t);
 
@@ -1145,10 +1032,6 @@ void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInf
         if (physicalType == VARMAP_PREG_FILE_MEMORY)
         {
             unsigned int memOffset = (unsigned int)varsMap[i]->Mapping.Memory.memoryOffset;
-            if (std::get<0>(it))
-            {
-                memOffset = std::get<3>(it);
-            }
             if (visaKernel->getKernel()->fg.getHasStackCalls() == false)
             {
                 memOffset |= 0x80000000;
@@ -1171,38 +1054,69 @@ void emitDataVarLiveInterval(VISAKernelImpl* visaKernel, LiveIntervalInfo* lrInf
 }
 
 template<class T>
+void emitFrameDescriptorOffsetLiveInterval(LiveIntervalInfo* lrInfo, StackCall::FrameDescriptorOfsets memOffset, T& t)
+{
+    // Used to emit fields of Frame Descriptor
+    // location = [start, end) @ BE_FP+offset
+    std::vector<std::pair<uint32_t, uint32_t>> lrs;
+    if (lrInfo)
+        lrInfo->getLiveIntervals(lrs);
+    else
+        return;
+
+    uint32_t start = 0, end = 0;
+    if (lrs.size() > 0)
+    {
+        start = lrs.front().first;
+        end = lrs.back().second;
+    }
+
+    std::sort(lrs.begin(), lrs.end(), [](std::pair<uint32_t, uint32_t>& a, std::pair<uint32_t, uint32_t>& b) { return a.first < b.first; });
+
+    emitDataUInt16(1, t);
+
+    emitDataUInt32(start, t);
+    emitDataUInt32(end, t);
+
+    emitDataUInt8((uint8_t)VARMAP_PREG_FILE_GRF, t);
+
+    emitDataUInt8((uint8_t)VARMAP_PREG_FILE_MEMORY, t);
+
+    emitDataUInt32((uint32_t)memOffset, t);
+}
+
+void populateUniqueSubs(G4_Kernel* kernel, std::unordered_map<G4_BB*, bool>& uniqueSubs)
+{
+    // Traverse kernel and populate all unique subs.
+    // Iterating over all BBs of kernel visits all
+    // subroutine call sites.
+    auto isStackObj = kernel->fg.getHasStackCalls() || kernel->fg.getIsStackCallFunc();
+    for (auto bb : kernel->fg)
+    {
+        if (&bb->getParent() != &kernel->fg)
+            continue;
+
+        if (bb->isEndWithCall())
+        {
+            if (!isStackObj || // definitely a subroutine since kernel has no stack calls
+                (isStackObj && // a subroutine iff call dst != pre-defined reg as per ABI
+                    bb->back()->getDst()->getTopDcl()->getRegVar()->getPhyReg()->asGreg()->getRegNum() != kernel->getFPSPGRF()))
+            {
+                // This is a subroutine call
+                uniqueSubs[bb->Succs.front()] = false;
+            }
+        }
+    }
+}
+
+template<class T>
 void emitDataSubroutines(VISAKernelImpl* visaKernel, T& t)
 {
     auto kernel = visaKernel->getKernel();
     // map<Label, Written to t>
-    std::map<G4_BB*, bool> uniqueSubs;
+    std::unordered_map<G4_BB*, bool> uniqueSubs;
 
-    G4_BB* stopAt = nullptr;
-    // Detect number of sub-routines
-    for (auto bb : kernel->fg)
-    {
-        if (bb != kernel->fg.getEntryBB() &&
-            bb->size() > 0 &&
-            bb->front()->isLabel() &&
-            bb->front()->getLabel()->isFuncLabel())
-        {
-            // This is required for kernels because callees are
-            // stitched together in its flowgraph and BBs of
-            // callees shouldnt be analyzed here.
-            // TODO: This is not correct and should be fixed for
-            // stack call. Callee sub-routines have to be
-            // recursively traversed. Code layout doesnt guarantee
-            // if a sub-routine is part of current compilation unit.
-            //stopAt = bb;
-            //break;
-        }
-
-        if (bb->isEndWithCall() &&
-            !kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bb->back()))
-        {
-            uniqueSubs.insert(std::make_pair(bb->Succs.front(), false));
-        }
-    }
+    populateUniqueSubs(kernel, uniqueSubs);
 
     emitDataUInt16((uint16_t) uniqueSubs.size(), t);
 
@@ -1213,9 +1127,6 @@ void emitDataSubroutines(VISAKernelImpl* visaKernel, T& t)
         unsigned int start = 0, end = 0;
         G4_Declare* retval = nullptr;
         G4_Label* subLabel = nullptr;
-
-        if (bb == stopAt)
-            break;
 
         if (bb->isEndWithCall())
         {
@@ -1331,8 +1242,8 @@ void SaveRestoreManager::sieveInstructions(CallerOrCallee c)
                 // Remove temp movs emitted for send header
                 // creation since they are not technically
                 // caller save
-                if (entry.first < CALLEE_SAVE_START &&
-                    entry.first >= CALLER_SAVE_START &&
+                if (entry.first < visaKernel->getKernel()->calleeSaveStart() &&
+                    entry.first >= 0 &&
                     entry.second.first == SaveRestoreInfo::RegOrMem::MemOffBEFP)
                 {
                     removeEntry = false;
@@ -1340,7 +1251,7 @@ void SaveRestoreManager::sieveInstructions(CallerOrCallee c)
             }
             else if (c == CallerOrCallee::Callee)
             {
-                if (entry.first >= CALLEE_SAVE_START &&
+                if (entry.first >= visaKernel->getKernel()->calleeSaveStart() &&
                     entry.second.first == SaveRestoreInfo::RegOrMem::MemOffBEFP)
                 {
                     removeEntry = false;
@@ -1421,10 +1332,10 @@ void emitDataCallerSave(VISAKernelImpl* visaKernel, T& t)
     for (auto bbs : kernel->fg)
     {
         if (bbs->size() > 0 &&
-            kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
+            kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs))
         {
-            auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs->back());
-            auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs->back());
+            auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs);
+            auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs);
 
             SaveRestoreManager mgr(visaKernel);
             for (auto callerSave : callerSaveInsts)
@@ -1459,10 +1370,10 @@ void emitDataCallerSave(VISAKernelImpl* visaKernel, T& t)
         for (auto bbs : kernel->fg)
         {
             if (bbs->size() > 0 &&
-                kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
+                kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs))
             {
-                auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs->back());
-                auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs->back());
+                auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs);
+                auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs);
 
                 SaveRestoreManager mgr(visaKernel);
                 for (auto callerSave : callerSaveInsts)
@@ -1534,7 +1445,7 @@ void emitDataCallFrameInfo(VISAKernelImpl* visaKernel, T& t)
         if (befpLIInfo)
         {
             emitDataUInt8((uint8_t)1, t);
-            uint32_t idx = kernel->getKernelDebugInfo()->getVarIndex(befpDcl);
+            uint32_t idx = kernel->getKernelDebugInfo()->getVarIndex(kernel->fg.framePtrDcl);
             emitDataVarLiveInterval(visaKernel, befpLIInfo, idx, sizeof(uint32_t), t);
         }
         else
@@ -1554,8 +1465,8 @@ void emitDataCallFrameInfo(VISAKernelImpl* visaKernel, T& t)
         if (callerfpLIInfo)
         {
             emitDataUInt8((uint8_t)1, t);
-            uint32_t idx = kernel->getKernelDebugInfo()->getVarIndex(callerfpdcl);
-            emitDataVarLiveInterval(visaKernel, callerfpLIInfo, idx, sizeof(uint32_t), t, true);
+            // Caller's be_fp is stored in frame descriptor
+            emitFrameDescriptorOffsetLiveInterval(callerfpLIInfo, StackCall::FrameDescriptorOfsets::BE_FP, t);
         }
         else
         {
@@ -1574,8 +1485,7 @@ void emitDataCallFrameInfo(VISAKernelImpl* visaKernel, T& t)
         if (fretVarLIInfo)
         {
             emitDataUInt8((uint8_t)1, t);
-            uint32_t idx = kernel->getKernelDebugInfo()->getVarIndex(fretVar);
-            emitDataVarLiveInterval(visaKernel, fretVarLIInfo, idx, sizeof(uint32_t), t, true);
+            emitFrameDescriptorOffsetLiveInterval(fretVarLIInfo, StackCall::FrameDescriptorOfsets::Ret_IP, t);
         }
         else
         {
@@ -2060,6 +1970,29 @@ void KernelDebugInfo::computeDebugInfo(std::list<G4_BB*>& stackCallEntryBBs)
     {
         updateCallStackLiveIntervals();
     }
+    else
+    {
+        updateCallStackMain();
+    }
+}
+
+void KernelDebugInfo::updateCallStackMain()
+{
+    if (!getKernel().fg.getHasStackCalls())
+        return;
+
+    // Set live-interval for BE_FP
+    auto befp = getBEFP();
+    if (befp)
+    {
+        uint32_t start = 0;
+        if (getBEFPSetupInst())
+        {
+            start = (uint32_t)getBEFPSetupInst()->getGenOffset() +
+                (uint32_t)getBinInstSize(getBEFPSetupInst());
+        }
+        updateDebugInfo(getKernel(), befp, start, mapCISAIndexGenOffset.back().second);
+    }
 }
 
 void KernelDebugInfo::updateCallStackLiveIntervals()
@@ -2090,24 +2023,30 @@ void KernelDebugInfo::updateCallStackLiveIntervals()
                 {
                     reloc_offset = (reloc_offset == 0) ?
                         (uint32_t)insts->getGenOffset() : reloc_offset;
-                }
-
-                if ((insts->isReturn() || insts->opcode() == G4_jmpi) &&
-                    insts->getSrc(0)->asSrcRegRegion()->getBase()->asRegVar()->getDeclare()->getRootDeclare()
-                    == fretVar)
-                {
-                    end = (uint32_t)insts->getGenOffset();
                     break;
                 }
             }
-            if (end > 0)
-            {
+            if (reloc_offset > 0)
                 break;
-            }
+        }
+
+        uint32_t start = 0;
+        if (getBEFPSetupInst())
+        {
+            // Frame descriptor can be addressed once once BE_FP is defined
+            start = (uint32_t)getBEFPSetupInst()->getGenOffset() +
+                getBinInstSize(getBEFPSetupInst());
+        }
+
+        if (getCallerBEFPRestoreInst())
+        {
+            end = (uint32_t)getCallerBEFPRestoreInst()->getGenOffset();
         }
 
         MUST_BE_TRUE(end >= reloc_offset, "Failed to update live-interval for retval");
-        for (uint32_t i = 0; i <= end - reloc_offset; i++)
+        MUST_BE_TRUE(start >= reloc_offset, "Failed to update start for retval");
+        MUST_BE_TRUE(end >= start, "end less then start for retval");
+        for (uint32_t i = start - reloc_offset; i <= end - reloc_offset; i++)
         {
             updateDebugInfo(*kernel, fretVar, i);
         }
@@ -2210,30 +2149,14 @@ void KernelDebugInfo::updateExpandedIntrinsic(G4_InstIntrinsic* spillOrFill, G4_
     }
 }
 
-void KernelDebugInfo::addCallerSaveInst(G4_INST* fcall, G4_INST* inst)
+void KernelDebugInfo::addCallerSaveInst(G4_BB* fcallBB, G4_INST* inst)
 {
-    auto it = callerSaveRestore.find(fcall);
-    if (it == callerSaveRestore.end())
-    {
-        SaveRestore empty;
-        callerSaveRestore.insert(std::make_pair(fcall, empty));
-        it = callerSaveRestore.find(fcall);
-    }
-
-    (*it).second.first.push_back(inst);
+    callerSaveRestore[fcallBB].first.push_back(inst);
 }
 
-void KernelDebugInfo::addCallerRestoreInst(G4_INST* fcall, G4_INST* inst)
+void KernelDebugInfo::addCallerRestoreInst(G4_BB* fcallBB, G4_INST* inst)
 {
-    auto it = callerSaveRestore.find(fcall);
-    if (it == callerSaveRestore.end())
-    {
-        SaveRestore empty;
-        callerSaveRestore.insert(std::make_pair(fcall, empty));
-        it = callerSaveRestore.find(fcall);
-    }
-
-    (*it).second.second.push_back(inst);
+    callerSaveRestore[fcallBB].second.push_back(inst);
 }
 
 void KernelDebugInfo::addCalleeSaveInst(G4_INST* inst)
@@ -2246,16 +2169,14 @@ void KernelDebugInfo::addCalleeRestoreInst(G4_INST* inst)
     calleeSaveRestore.second.push_back(inst);
 }
 
-std::vector<G4_INST*>& KernelDebugInfo::getCallerSaveInsts(G4_INST* fcall)
+std::vector<G4_INST*>& KernelDebugInfo::getCallerSaveInsts(G4_BB* fcallBB)
 {
-    auto it = callerSaveRestore.find(fcall);
-    return it->second.first;
+    return callerSaveRestore[fcallBB].first;
 }
 
-std::vector<G4_INST*>& KernelDebugInfo::getCallerRestoreInsts(G4_INST* fcall)
+std::vector<G4_INST*>& KernelDebugInfo::getCallerRestoreInsts(G4_BB* fcallBB)
 {
-    auto it = callerSaveRestore.find(fcall);
-    return it->second.second;
+    return callerSaveRestore[fcallBB].second;
 }
 
 std::vector<G4_INST*>& KernelDebugInfo::getCalleeSaveInsts()
@@ -2268,36 +2189,20 @@ std::vector<G4_INST*>& KernelDebugInfo::getCalleeRestoreInsts()
     return calleeSaveRestore.second;
 }
 
-bool KernelDebugInfo::isFcallWithSaveRestore(G4_INST* inst)
+bool KernelDebugInfo::isFcallWithSaveRestore(G4_BB* bb)
 {
     // Debug emission happens after binary encoding
     // at which point all fcalls are converted to
     // calls. So G4_INST::isFCall() will always
     // be false
     bool retval = false;
-    auto it = callerSaveRestore.find(inst);
+    auto it = callerSaveRestore.find(bb);
     if (it != callerSaveRestore.end())
     {
         retval = true;
     }
 
     return retval;
-}
-
-bool KernelDebugInfo::isFCallInst(G4_INST* inst)
-{
-    if (!inst)
-        return false;
-
-    if (callerSaveRestore.find(inst) == callerSaveRestore.end())
-        return false;
-    return true;
-}
-
-void KernelDebugInfo::setFCallInst(G4_INST* fcall)
-{
-    SaveRestore sr;
-    callerSaveRestore.insert(std::make_pair(fcall, sr));
 }
 
 // Compute extra instructions in insts over oldInsts list and
@@ -2647,10 +2552,10 @@ void emitCallerSaveInfo(VISAKernelImpl* visaKernel)
     for (auto bbs : kernel->fg)
     {
         if (bbs->size() > 0 &&
-            kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs->back()))
+            kernel->getKernelDebugInfo()->isFcallWithSaveRestore(bbs))
         {
-            auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs->back());
-            auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs->back());
+            auto& callerSaveInsts = kernel->getKernelDebugInfo()->getCallerSaveInsts(bbs);
+            auto& callerRestoreInsts = kernel->getKernelDebugInfo()->getCallerRestoreInsts(bbs);
 
             std::cerr << "Caller save for ";
             bbs->back()->emit(std::cerr);

@@ -34,8 +34,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "GraphColor.h"
 #include <unordered_map>
 
-#define CALLER_SAVE_START 1
-#define CALLEE_SAVE_START 60
 namespace vISA
 {
 class G4_Declare;
@@ -159,10 +157,10 @@ private:
     G4_Declare* fretVar;
 
     // Caller save/restore
-    // std::vector<std::pair<fcall inst, std::pair<first caller save, last caller restore>>>
+    // std::vector<std::pair<fcall inst BB, std::pair<first caller save, last caller restore>>>
     // One entry per fcall inst in current compilation unit
     typedef std::pair<std::vector<G4_INST*>, std::vector<G4_INST*> > SaveRestore;
-    std::map<G4_INST*, SaveRestore> callerSaveRestore;
+    std::unordered_map<G4_BB*, SaveRestore> callerSaveRestore;
     SaveRestore calleeSaveRestore;
 
     INST_LIST oldInsts;
@@ -251,16 +249,14 @@ public:
     void setFretVar(G4_Declare* dcl) { fretVar = dcl; }
 
     void updateExpandedIntrinsic(G4_InstIntrinsic* spillOrFill, G4_INST* inst);
-    void addCallerSaveInst(G4_INST* fcall, G4_INST* inst);
-    void addCallerRestoreInst(G4_INST* fcall, G4_INST* inst);
+    void addCallerSaveInst(G4_BB* fcallBB, G4_INST* inst);
+    void addCallerRestoreInst(G4_BB* fcallBB, G4_INST* inst);
     void addCalleeSaveInst(G4_INST* inst);
     void addCalleeRestoreInst(G4_INST* inst);
-    bool isFcallWithSaveRestore(G4_INST* inst);
-    void setFCallInst(G4_INST* fcall);
-    bool isFCallInst(G4_INST* inst);
+    bool isFcallWithSaveRestore(G4_BB* bb);
 
-    std::vector<G4_INST*>& getCallerSaveInsts(G4_INST* fcall);
-    std::vector<G4_INST*>& getCallerRestoreInsts(G4_INST* fcall);
+    std::vector<G4_INST*>& getCallerSaveInsts(G4_BB* fcallBB);
+    std::vector<G4_INST*>& getCallerRestoreInsts(G4_BB* fcallBB);
     std::vector<G4_INST*>& getCalleeSaveInsts();
     std::vector<G4_INST*>& getCalleeRestoreInsts();
 
@@ -281,6 +277,7 @@ public:
     void generateCISAByteOffsetFromOffset();
     void updateRelocOffset();
     void updateCallStackLiveIntervals();
+    void updateCallStackMain();
     void generateGenISAToVISAIndex();
 
     void computeDebugInfo(std::list<G4_BB*>& stackCallEntryBBs);
@@ -311,8 +308,6 @@ public:
 
     void computeMissingVISAIds();
     bool isMissingVISAId(unsigned int);
-
-    void computeGRFToStackOffset();
 };
 
 class SaveRestoreInfo

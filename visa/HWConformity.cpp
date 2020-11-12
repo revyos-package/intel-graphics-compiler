@@ -2355,8 +2355,7 @@ bool HWConformity::fixMULInst(INST_LIST_ITER& i, G4_BB* bb)
         G4_SrcRegRegion* tmp_src_opnd = builder.createSrcRegRegion(Mod_src_undef, Direct, dcl->getRegVar(), 0, 0, rd, tmp_type);
 
         G4_INST* newInst2 = builder.createInternalInst(
-            pred, G4_mov, condmod, satMod, execSize, dst, tmp_src_opnd, NULL, inst_opt,
-            inst->getLineNo(), inst->getCISAOff(), inst->getSrcFilename());
+            pred, G4_mov, condmod, satMod, execSize, dst, tmp_src_opnd, NULL, inst_opt);
 
         newInst->transferUse(newInst2);
         newInst->addDefUse(movInst, Opnd_src0);
@@ -2689,7 +2688,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB* bb)
 
     auto incrementVar = [&](G4_Operand* var, unsigned int width, unsigned int regOff, unsigned int sregOff, G4_INST* inst, short increment)
     {
-        auto addrDst = builder.createDstRegRegion(Direct, var->getBase(), regOff, sregOff, 1, Type_UW);
+        auto addrDst = builder.createDst(var->getBase(), regOff, sregOff, 1, Type_UW);
         auto addrSrc = builder.createSrcRegRegion(Mod_src_undef, Direct, var->getBase(), regOff, sregOff,
             builder.getRegionStride1(), Type_UW);
         auto incrementImm = builder.createImm(increment, Type_W);
@@ -3937,6 +3936,7 @@ bool HWConformity::generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter)
     MUST_BE_TRUE(inst->opcode() == G4_pseudo_mad, "expect pseudo mad");
     bool mustDoMad = IS_TYPE_FLOAT_ALL(inst->getDst()->getType());
 
+
     // try swapping src0 (really src2) and src1 to see if we can save a move
     // some conditions where swap may help:
     // -- if src0 is D, as MAD only supports D + D * W
@@ -3945,9 +3945,8 @@ bool HWConformity::generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter)
     // -- if src1 is scalar, as MAD src2 has more region restrictions
     // We perform the swapping before the dst checks as some platforms require dst and src2 to have the same subreg
     {
-        auto src0 = inst->getSrc(0);
-        auto src1 = inst->getSrc(1);
-
+        G4_Operand* src0 = inst->getSrc(0);
+        G4_Operand* src1 = inst->getSrc(1);
         if (IS_DTYPE(src0->getType()) && src0->isSrcRegRegion() && !IS_DTYPE(src1->getType()))
         {
             inst->swapSrc(0, 1);
@@ -3957,21 +3956,17 @@ bool HWConformity::generateAlign1Mad(G4_BB* bb, INST_LIST_ITER iter)
             //swap src0 and src1 as src0 supports imm
             inst->swapSrc(0, 1);
         }
+        else if (src0->isSrcRegRegion() && !src0->asSrcRegRegion()->isScalar() &&
+            src1->isSrcRegRegion() &&
+            src1->asSrcRegRegion()->isScalar())
+        {
+            // Swap src0 and src1 if src1 is scalar but src0 is not, as src2 regioning support is quite limited.
+            inst->swapSrc(0, 1);
+        }
         else if (isLowPrecisionFloatTy(src0->getType()) && src1->getType() == Type_F)
         {
             inst->swapSrc(0, 1);
         }
-        else if (src1->isSrcRegRegion() && src1->asSrcRegRegion()->isScalar())
-        {
-            bool src0NeedMove = !isGoodAlign1TernarySrc(inst, 0, true) ||
-                (src0->isSrcRegRegion() && inst->getExecSize() * getTypeSize(src0->getType()) < getGRFSize());
-            // Swap src0 and src1 if src1 is scalar but src0 may need a move due to limited src2 regioning support.
-            if (src0NeedMove)
-            {
-                inst->swapSrc(0, 1);
-            }
-        }
-
     }
 
     if (!isGoodAlign1TernaryDst(inst))
@@ -4377,10 +4372,7 @@ void HWConformity::convertMAD2MulAdd(INST_LIST_ITER iter, G4_BB* bb)
         addOpnd1,
         addOpnd2,
         nullptr,
-        inst->getOption(),
-        inst->getLineNo(),
-        inst->getCISAOff(),
-        inst->getSrcFilename());
+        inst->getOption());
 
     bb->insertBefore(tIter, addOp);
 
@@ -4640,10 +4632,7 @@ void HWConformity::fixSADA2Inst(G4_BB* bb)
                 addSrc0Opnd,
                 src2,
                 NULL,
-                inst->getOption(),
-                inst->getLineNo(),
-                inst->getCISAOff(),
-                inst->getSrcFilename());
+                inst->getOption());
 
             INST_LIST_ITER addLoc = i;
             ++addLoc;
@@ -5598,10 +5587,7 @@ G4_INST* HWConformity::splitInstWithByteDst(G4_INST* expand_op)
         NULL,
         NULL,
         NULL,
-        expand_op->getOption(),
-        expand_op->getLineNo(),
-        expand_op->getCISAOff(),
-        expand_op->getSrcFilename());
+        expand_op->getOption());
     MUST_BE_TRUE(expand_sec_half_op != NULL, ERROR_MEM_ALLOC);
 
     expand_op->setExecSize(newExecSize);
@@ -5611,32 +5597,49 @@ G4_INST* HWConformity::splitInstWithByteDst(G4_INST* expand_op)
         G4_DstRegRegion* old_dst = expand_op->getDst();
         short secondSubRegOff = old_dst->getSubRegOff() + 1;
 
-        G4_DstRegRegion* newDstOpnd = builder.createDstRegRegion(
-            old_dst->getRegAccess(),
-            old_dst->getBase(),
-            old_dst->getRegOff(),
-            old_dst->getSubRegOff(),
-            old_dst->getHorzStride() * 2,
-            old_dst->getType());
-        if (old_dst->getRegAccess() != Direct)
+        G4_DstRegRegion* newDstOpnd = nullptr;
+
+        if (!old_dst->isIndirect())
         {
-            newDstOpnd->setImmAddrOff(old_dst->getAddrImm());
+            newDstOpnd = builder.createDst(
+                old_dst->getBase(),
+                old_dst->getRegOff(),
+                old_dst->getSubRegOff(),
+                old_dst->getHorzStride() * 2,
+                old_dst->getType());
+        }
+        else
+        {
+            newDstOpnd = builder.createIndirectDst(
+                old_dst->getBase(),
+                old_dst->getSubRegOff(),
+                old_dst->getHorzStride() * 2,
+                old_dst->getType(),
+                old_dst->getAddrImm());
             secondSubRegOff -= 1;
         }
 
         expand_op->setDest(newDstOpnd);
 
-        G4_DstRegRegion* secondDstOpnd = builder.createDstRegRegion(
-            old_dst->getRegAccess(),
-            old_dst->getBase(),
-            old_dst->getRegOff(),
-            secondSubRegOff,
-            old_dst->getHorzStride() * 2,
-            old_dst->getType());
+        G4_DstRegRegion* secondDstOpnd = nullptr;
 
-        if (old_dst->getRegAccess() != Direct)
+        if (!old_dst->isIndirect())
         {
-            secondDstOpnd->setImmAddrOff(old_dst->getAddrImm() + 1);
+            secondDstOpnd = builder.createDst(
+                old_dst->getBase(),
+                old_dst->getRegOff(),
+                secondSubRegOff,
+                old_dst->getHorzStride() * 2,
+                old_dst->getType());
+        }
+        else
+        {
+            secondDstOpnd = builder.createIndirectDst(
+                old_dst->getBase(),
+                secondSubRegOff,
+                old_dst->getHorzStride() * 2,
+                old_dst->getType(),
+                old_dst->getAddrImm() + 1);
         }
 
         expand_sec_half_op->setDest(secondDstOpnd);

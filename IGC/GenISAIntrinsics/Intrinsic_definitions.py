@@ -47,8 +47,18 @@
 # {int} - LLVMMatchType<{int}>
 # See Intrinsics.json file for entries
 
+#### Update helper functions in Source/IGC/Compiler/CISACodeGen/helper.h when adding a new intrinsic
+#    if required.
+#    For example: Update IsStatelessMemLoadIntrinsic, IsStatelessMemStoreIntrinsic and
+#    IsStatelessMemAtomicIntrinsic if it is a stateless memory read/write intrinsic.
+
 Imported_Intrinsics = \
 {
+####################################################################################################
+"GenISA_assume_uniform": ["",
+    [("void",                          "return nothing"),
+    [("anyptr",                        "ptr")],
+    "None"]],
 ####################################################################################################
 "GenISA_CatchAllDebugLine": ["",
     [("void",                          ""),
@@ -582,12 +592,14 @@ Imported_Intrinsics = \
 "GenISA_URBRead": ["",
     [("float8",                        "result"),
     [("int",                           "vertex index"),
-     ("int",                           "URB owordOffset")],
+     ("int",                           "URB owordOffset"
+     )],
     "NoMem"]],
 ####################################################################################################
 "GenISA_URBReadOutput": ["In-place data read using URB Write Handle",
     [("float8",                        ""),
-    [("int",                           "owordOffset")],
+    [("int",                           "owordOffset"
+     )],
     "NoMem"]],
 ####################################################################################################
 "GenISA_URBWrite": ["",
@@ -1059,10 +1071,18 @@ Imported_Intrinsics = \
      ("int",                           "id of DW of the message phase")],
     "None"]],
 ####################################################################################################
-"GenISA_getSR0": ["",
-    [("int",                           ""),
-    [("int",                           "")],
+"GenISA_getSR0": ["sr0.# the state register",
+    [("int",                           "result"),
+    [("int",                           "index/offset of the subregister within sr0")],
     "None"]],
+####################################################################################################
+# This is separated from GenISA_getSR0 in order to get the first dword by itself
+# because we want to assumes that sr0.0 is fully Read-Only because we want to perform
+# CSE optimization on the calls.
+"GenISA_getSR0_0": ["sr0.0 the first dword state register",
+    [("int",                           "result"),
+    [],
+    "NoMem"]],
 ####################################################################################################
 "GenISA_globalSync": ["",
     [("void",                          ""),
