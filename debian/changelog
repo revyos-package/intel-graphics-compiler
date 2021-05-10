@@ -1,0 +1,70 @@
+intel-graphics-compiler (1.0.5353.1-2) unstable; urgency=medium
+
+  * fix-ftbfs.diff: Fix build with llvm 11.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 13 Nov 2020 10:37:53 +0200
+
+intel-graphics-compiler (1.0.5353.1-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 12 Nov 2020 13:26:59 +0200
+
+intel-graphics-compiler (1.0.5186-1) unstable; urgency=medium
+
+  * New upstream release.
+  * patches: Dropped, upstream.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 20 Oct 2020 11:55:27 +0300
+
+intel-graphics-compiler (1.0.5064-2) unstable; urgency=medium
+
+  * Migrate to llvm 11.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 01 Oct 2020 16:06:37 +0300
+
+intel-graphics-compiler (1.0.5064-1) unstable; urgency=medium
+
+  * New upstream release. (Closes: #966851)
+  * rules: Disable Vector Compute for now.
+  * rules: Remove misplaced license documentation before dh_missing.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 22 Sep 2020 11:44:06 +0300
+
+intel-graphics-compiler (1.0.3627-2) unstable; urgency=medium
+
+  * control, rules: Build with clang-10, bump libopencl-clang-dev build-dep.
+    (LP: #1871345)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 08 Apr 2020 18:50:39 +0300
+
+intel-graphics-compiler (1.0.3627-1) unstable; urgency=medium
+
+  * New upstream release.
+  * control: Use debhelper-compat, bump to 12.
+  * control: Bump policy to 4.5.0.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 06 Apr 2020 11:18:55 +0300
+
+intel-graphics-compiler (1.0.3151-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 22 Jan 2020 15:31:00 +0200
+
+intel-graphics-compiler (1.0.3032-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Build with llvm9.
+  * fix-opencl-clang-soname.diff: Dropped, upstream.
+  * rules: Update clean target.
+  * control: Bump build-dep on libopencl-clang-dev.
+  * control: Migrate to python3.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 13 Dec 2019 10:37:49 +0200
+
+intel-graphics-compiler (1.0.9-1) unstable; urgency=medium
+
+  * Initial release (Closes: #923945)
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 01 Aug 2019 11:43:42 +0300
