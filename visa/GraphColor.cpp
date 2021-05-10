@@ -805,7 +805,7 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST* inst)
         if (!src || !src->isSrcRegRegion() || src->isAccReg())
         {
             // bank conflict not possible
-            return;
+            continue;
         }
 
         dcls[i] = GetTopDclFromRegRegion(src);
@@ -850,7 +850,8 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST* inst)
             }
 
             LocalLiveRange* lr = gra.getLocalLR(dcls[i]);
-            if (k == 0  && !lr->isLiveRangeLocal())
+            if (!lr ||
+                (k == 0  && !lr->isLiveRangeLocal()))
             {
                 continue;
             }
@@ -943,7 +944,6 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST* inst)
     return;
 }
 
-
 void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
     unsigned &threeSourceInstNum,
     unsigned &sendInstNum,
@@ -968,15 +968,7 @@ void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
         if (inst->getNumSrc() == 3 && !inst->isSend())
         {
             threeSourceInstNum++;
-            if (gra.kernel.fg.builder->lowHighBundle())
-            {
-                setupBankConflictsOneGRFOld(inst, bank1RegNum, bank2RegNum, GRFRatio, internalConflict);
-            }
-            else
-            {
-                setupBankConflictsforTwoGRFs(inst);
-            }
-
+            setupBankConflictsOneGRFOld(inst, bank1RegNum, bank2RegNum, GRFRatio, internalConflict);
         }
         if (inst->isSend() && !inst->isEOT())
         {
@@ -985,6 +977,65 @@ void BankConflictPass::setupBankConflictsForBB(G4_BB* bb,
             {
                 sendInstNum++;
             }
+        }
+    }
+
+    if ((float)threeSourceInstNum / bb->size() > 0.1)
+    {
+        if (!gra.kernel.fg.builder->lowHighBundle() && gra.kernel.fg.builder->hasEarlyGRFRead())
+        {
+            for (G4_INST* inst : *bb)
+            {
+                if (prevInst && inst->getNumSrc() == 3 && !inst->isSend())
+                {
+                    setupBankForSrc0(inst, prevInst);
+                }
+                prevInst = inst;
+            }
+        }
+    }
+}
+
+void BankConflictPass::setupBankConflictsForBBTGL(G4_BB* bb,
+    unsigned& threeSourceInstNum,
+    unsigned& sendInstNum,
+    unsigned numRegLRA,
+    unsigned& internalConflict)
+{
+    float GRFRatio = 0;
+    G4_INST* prevInst = nullptr;
+
+    if (numRegLRA)
+    {
+        GRFRatio = ((float)(numRegLRA - SECOND_HALF_BANK_START_GRF)) / SECOND_HALF_BANK_START_GRF;
+    }
+
+    for (auto i = bb->rbegin(), rend = bb->rend();
+        i != rend;
+        i++)
+    {
+        G4_INST* inst = (*i);
+        if (inst->isSend() || inst->isCFInst() || inst->isLabel() || inst->isOptBarrier())
+        {
+            if (inst->isSend() && !inst->isEOT())
+            {
+                //Why only data port read causes issue?
+                if (inst->getMsgDesc()->isDataPortRead())
+                {
+                    sendInstNum++;
+                }
+            }
+            continue;
+        }
+        if (inst->getNumSrc() == 3)
+        {
+            threeSourceInstNum++;
+            setupBankConflictsforTwoGRFs(inst);
+        }
+        else if (gra.kernel.getOption(vISA_forceBCR) && inst->getNumSrc() == 2)
+        {
+            threeSourceInstNum++;
+            setupBankConflictsforMad(inst);
         }
     }
 
@@ -1043,7 +1094,15 @@ bool BankConflictPass::setupBankConflictsForKernel(bool doLocalRR, bool &threeSo
 
         unsigned loopNestLevel = 0;
 
-        setupBankConflictsForBB(bb, threeSourceInstNum, sendInstNum, numRegLRA, conflicts);
+        if (gra.kernel.fg.builder->lowHighBundle())
+        {
+            setupBankConflictsForBB(bb, threeSourceInstNum, sendInstNum, numRegLRA, conflicts);
+        }
+        else
+        {
+            setupBankConflictsForBBTGL(bb, threeSourceInstNum, sendInstNum, numRegLRA, conflicts);
+        }
+
         loopNestLevel = bb->getNestLevel() + 1;
 
         if (threeSourceInstNum)
@@ -1723,6 +1782,45 @@ void Interference::addCalleeSaveBias(const BitSet& live)
     }
 }
 
+void Interference::buildInterferenceAmongLiveOuts()
+{
+    // Mark interference between dcls marked as Output.
+    //
+    // Interference computation marks interference for a
+    // variable only when definition for that variable is
+    // seen, not otherwise.
+    //
+    // This method is useful when definition of such
+    // "Output" variables are emitted to program post RA.
+    //
+    // It is safe to mark interference between all "Output"
+    // dcls even when their definition is present in the program.
+
+    // First gather all Output dcls in a vector to avoid an O(N^2)
+    // lookup. Number of OutputDcls should be small.
+    std::vector<G4_Declare*> OutputDcls;
+    for (auto dcl : kernel.Declares)
+    {
+        if (!dcl->getRegVar()->isRegAllocPartaker() ||
+            !dcl->isOutput())
+            continue;
+
+        OutputDcls.push_back(dcl);
+    }
+
+    for (auto dcl1 : OutputDcls)
+    {
+        // dcl1 is RA partaker iter and is marked as Output
+        for (auto dcl2 : OutputDcls)
+        {
+            if (dcl1 == dcl2)
+                continue;
+
+            checkAndSetIntf(dcl1->getRegVar()->getId(), dcl2->getRegVar()->getId());
+        }
+    }
+}
+
 void Interference::buildInterferenceAmongLiveIns()
 {
     //
@@ -2388,6 +2486,8 @@ void Interference::computeInterference()
     // create bool vector, live, to track live ranges that are currently live
     //
     BitSet live(maxId, false);
+
+    buildInterferenceAmongLiveOuts();
 
     for (G4_BB *bb : kernel.fg)
     {
@@ -3418,7 +3518,7 @@ bool Augmentation::markNonDefaultMaskDef()
                 nonDefaultMaskDefFound = true;
             }
 
-            if(kernel.getOption(vISA_enableBCR) && gra.getBankConflict(dcl) != BANK_CONFLICT_NONE)
+            if(kernel.getOption(vISA_forceBCR) && gra.getBankConflict(dcl) != BANK_CONFLICT_NONE)
             {
                 gra.setAugmentationMask(dcl, AugmentationMasks::NonDefault);
                 nonDefaultMaskDefFound = true;
@@ -6090,7 +6190,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                 //
                 // for GRF register assignment, if we are performing round-robin (1st pass) then abort on spill
                 //
-                if ((heuristic == ROUND_ROBIN || (doBankConflict && !kernel.getOption(vISA_enableBCR))) &&
+                if ((heuristic == ROUND_ROBIN || (doBankConflict && !kernel.getOption(vISA_forceBCR))) &&
                     (lr->getRegKind() == G4_GRF || lr->getRegKind() == G4_FLAG))
                 {
                     return false;
@@ -6665,12 +6765,14 @@ bool GraphColor::regAlloc(
                     return false;
                 }
 
-                if (!kernel.getOption(vISA_enableBCR))
+                if (!kernel.getOption(vISA_forceBCR))
                 {
                     if (!success && doBankConflictReduction)
                     {
                         resetTemporaryRegisterAssignments();
+                        kernel.getOptions()->setOption(vISA_enableBundleCR, false);
                         assignColors(FIRST_FIT, false, false);
+                        kernel.getOptions()->setOption(vISA_enableBundleCR, true);
                     }
                 }
             }

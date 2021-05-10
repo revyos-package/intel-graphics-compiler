@@ -64,6 +64,7 @@ namespace vISA
         void setupBankConflictsforMad(G4_INST* inst);
         void setupBankConflictsForBB(G4_BB* bb, unsigned &threeSourceInstNum, unsigned &sendInstNum,
             unsigned numRegLRA, unsigned & internalConflict);
+        void setupBankConflictsForBBTGL(G4_BB* bb, unsigned& threeSourceInstNum, unsigned& sendInstNum, unsigned numRegLRA, unsigned& internalConflict);
         bool hasInternalConflict3Srcs(BankConflict *srcBC);
         void setupBankForSrc0(G4_INST* inst, G4_INST* prevInst);
         void getBanks(G4_INST* inst, BankConflict *srcBC, G4_Declare **dcls, G4_Declare **opndDcls, unsigned *offset);
@@ -445,6 +446,7 @@ namespace vISA
 
         void buildInterferenceWithLocalRA(G4_BB* bb);
 
+        void buildInterferenceAmongLiveOuts();
         void buildInterferenceAmongLiveIns();
 
         void markInterferenceToAvoidDstSrcOverlap(G4_BB* bb, G4_INST* inst);

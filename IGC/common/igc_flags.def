@@ -68,6 +68,7 @@ DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve regsiter
 DECLARE_IGC_REGKEY(DWORD, GRFNumToUse,                  0,     "Set the number of general registers to use (64 to totalGRFNum)", false)
 DECLARE_IGC_REGKEY(bool, ExpandPlane,                   false, "Enable pln to mad macro expansion.", false)
 DECLARE_IGC_REGKEY(bool, EnableBCR,                     false, "Enable bank conflict reduction.", true)
+DECLARE_IGC_REGKEY(bool, ForceBCR,                     false, "Force bank conflict reduction, no matter spill or not.", true)
 DECLARE_IGC_REGKEY(bool, EnableForceDebugSWSB,          false, "Enable force debugging functionality for software scoreboard generation", true)
 DECLARE_IGC_REGKEY(DWORD,EnableSWSBInstStall,           0,     "Enable force stall to specific(start) instruction start for software scoreboard generation", true)
 DECLARE_IGC_REGKEY(DWORD,EnableSWSBInstStallEnd,        0,     "Enable force stall to end instruction for software scoreboard generation", true)
@@ -197,6 +198,7 @@ DECLARE_IGC_REGKEY(bool, EnableUnmaskedFunctions,    true,    "Enable unmaksed f
 DECLARE_IGC_REGKEY(bool, EnableStatefulAtomic,       false,   "Enable promoting stateless atomic to stateful atomic.", false)
 
 DECLARE_IGC_GROUP("Shader debugging")
+DECLARE_IGC_REGKEY(bool, ForceDisableShaderDebugHashCodeInKernel,   false,  "Disable hash code addition to the binary after EOT", false)
 DECLARE_IGC_REGKEY(bool, ShaderDebugHashCodeInKernel,   false, "Append hash code to the binary", false)
 DECLARE_IGC_REGKEY(int,  ShaderDebugHashCode,           0,     "The driver will set a breakpoint in the first instruction of the shader which has the provided hash code.\
                                                                 It works only when the value is different then 0 and SystemThreadEnable is set to TRUE.\
