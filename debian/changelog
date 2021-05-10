@@ -1,3 +1,9 @@
+intel-graphics-compiler (1.0.7152-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 May 2021 18:39:29 +0300
+
 intel-graphics-compiler (1.0.5353.1-2) unstable; urgency=medium
 
   * fix-ftbfs.diff: Fix build with llvm 11.
