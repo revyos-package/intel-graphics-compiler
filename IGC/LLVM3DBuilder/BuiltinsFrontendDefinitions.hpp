@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -39,9 +23,9 @@ typedef union _gfxResourceAddressSpace
     struct _bits
     {
         unsigned int  bufId    : 16;
-        unsigned int  bufType  : 4;
+        unsigned int  bufType  : 5;
         unsigned int  indirect : 1;     // bool
-        unsigned int  reserved : 11;
+        unsigned int  reserved : 10;
     } bits;
     unsigned int   u32Val;
 } GFXResourceAddressSpace;
@@ -67,7 +51,7 @@ unsigned LLVM3DBuilder<preserveNames, T, Inserter>::EncodeASForGFXResource(
     static_assert(sizeof(temp) == 4, "Code below may need and update.");
 
     temp.u32Val = 0;
-    IGC_ASSERT((bufType + 1) < 16);
+    IGC_ASSERT((bufType + 1) < IGC::BUFFER_TYPE_UNKNOWN + 1);
     temp.bits.bufType = bufType + 1;
     if (bufType == IGC::BufferType::SLM)
     {
@@ -4989,7 +4973,7 @@ void LLVM3DBuilder<preserveNames, T, Inserter>::VectorToScalars(
     IGC_ASSERT(nullptr != vector->getType());
     IGC_ASSERT(vector->getType()->isVectorTy());
 
-    const unsigned count = (unsigned)llvm::cast<IGCLLVM::FixedVectorType>(vector->getType())->getNumElements();
+    const unsigned count = (unsigned)llvm::cast<llvm::VectorType>(vector->getType())->getNumElements();
     IGC_ASSERT(1 < count);
     IGC_ASSERT(count <= 4);
     IGC_ASSERT(count <= maxSize);

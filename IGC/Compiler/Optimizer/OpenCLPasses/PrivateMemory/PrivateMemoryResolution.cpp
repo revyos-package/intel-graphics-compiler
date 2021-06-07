@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -29,7 +13,6 @@ IN THE SOFTWARE.
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
 #include "Compiler/CISACodeGen/LowerGEPForPrivMem.hpp"
-#include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/DataLayout.h"
@@ -615,7 +598,7 @@ public:
             Type* scalarptrTy = PointerType::get(scalarType, pLoad->getPointerAddressSpace());
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = UndefValue::get(pLoad->getType());
-            auto pLoadVT = cast<IGCLLVM::FixedVectorType>(pLoad->getType());
+            auto pLoadVT = cast<VectorType>(pLoad->getType());
             for (unsigned i = 0, e = (unsigned)pLoadVT->getNumElements(); i < e; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
@@ -654,7 +637,7 @@ public:
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = pStore->getValueOperand();
 
-            unsigned vecNumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+            unsigned vecNumElts = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
             for (unsigned i = 0; i < vecNumElts; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
@@ -718,7 +701,7 @@ bool PrivateMemoryResolution::testTransposedMemory(const Type* pTmpType, const T
         }
         else if(pTmpType->isVectorTy())
         {
-            auto pTmpVType = cast<IGCLLVM::FixedVectorType>(pTmpType);
+            auto pTmpVType = cast<VectorType>(pTmpType);
             tmpAllocaSize *= pTmpVType->getNumElements();
             pTmpType = pTmpType->getContainedType(0);
             ok = (nullptr != pTmpType);
@@ -826,8 +809,6 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
 
     // Construct an empty DebugLoc.
     IF_DEBUG_INFO(DebugLoc entryDebugLoc);
-    // Assign with the function location if available.
-    IF_DEBUG_INFO_IF(DISubprogram *subprogram = m_currFunction->getSubprogram(), entryDebugLoc = DILocation::get(subprogram->getContext(), subprogram->getLine(), 0, subprogram););
     IF_DEBUG_INFO(entryBuilder.SetCurrentDebugLocation(entryDebugLoc));
 
     if (privateOnStack)
@@ -962,7 +943,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
             Value* totalOffset = builder.CreateAdd(bufferOffset, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
             totalOffset = builder.CreateZExt(totalOffset, privateBase->getType());
             Value* threadOffset = builder.CreateAdd(privateBase, totalOffset, VALUE_NAME(pAI->getName() + ".threadOffset"));
-            Value* privateBufferPTR = builder.CreateIntToPtr(threadOffset, Type::getInt8Ty(C)->getPointerTo(scratchMemoryAddressSpace), VALUE_NAME(pAI->getName() + ".privateBufferPTR"));
+            Value* privateBufferPTR = builder.CreateIntToPtr(threadOffset, pAI->getAllocatedType()->getPointerTo(scratchMemoryAddressSpace), VALUE_NAME(pAI->getName() + ".privateBufferPTR"));
             Value* privateBuffer = builder.CreatePointerCast(privateBufferPTR, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
 
             if (TransposeMemLayout)
@@ -976,6 +957,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
             // Replace all uses of original alloca with the bitcast
             pAI->replaceAllUsesWith(privateBuffer);
             pAI->eraseFromParent();
+
         }
 
         return true;

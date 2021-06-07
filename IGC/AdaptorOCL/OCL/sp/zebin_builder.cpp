@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2020-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -432,7 +416,7 @@ void ZEBinaryBuilder::addKernelRelocations(
     // Take the value directly
     if (!relocs.empty())
         for (auto reloc : relocs)
-            mBuilder.addRelocation(reloc.r_offset, reloc.r_symbol, (zebin::R_TYPE_ZEBIN)reloc.r_type, targetId);
+            mBuilder.addRelRelocation(reloc.r_offset, reloc.r_symbol, (zebin::R_TYPE_ZEBIN)reloc.r_type, targetId);
 }
 
 void ZEBinaryBuilder::addKernelExperimentalProperties(const SOpenCLKernelInfo& annotations,
@@ -516,18 +500,18 @@ void ZEBinaryBuilder::addLocalIds(uint32_t simdSize, uint32_t grfSize,
 // Calculate correct (pure) size of ELF binary, because debugDataSize taken from pOutput->m_debugDataVISASize
 // contains something else.
 // If ELF is validated successfully then return a calculated size. Othwerwise, return 0.
-size_t ZEBinaryBuilder::calcElfSize(void* elfBin, size_t debugDataSize)
+size_t ZEBinaryBuilder::calcElfSize(void* elfBin, size_t elfSize)
 {
     SElf64Header* elf64Header = (SElf64Header*)elfBin;
     size_t elfBinSize = 0; // Correct (pure) size of ELF binary to be calculated
 
-    if (debugDataSize == 0)
+    if (elfSize == 0)
     {
         IGC_ASSERT_MESSAGE(false, "Empty ELF file - nothing to be transfered to zeBinary");
         return 0; // ELF binary incorrect
     }
 
-    if ((debugDataSize < ID_IDX_NUM_BYTES) ||
+    if ((elfSize < ID_IDX_NUM_BYTES) ||
         (elf64Header->Identity[ID_IDX_MAGIC0] != ELF_MAG0) || (elf64Header->Identity[ID_IDX_MAGIC1] != ELF_MAG1) ||
         (elf64Header->Identity[ID_IDX_MAGIC2] != ELF_MAG2) || (elf64Header->Identity[ID_IDX_MAGIC3] != ELF_MAG3) ||
         (elf64Header->Identity[ID_IDX_CLASS] != EH_CLASS_64))
@@ -606,11 +590,11 @@ void ZEBinaryBuilder::getElfSymbol(CElfReader* elfReader, const unsigned int sym
 }
 
 // Copy every section of ELF file (a buffer in memory) to zeBinary
-void ZEBinaryBuilder::addElfSections(void* elfBin, size_t debugDataSize)
+void ZEBinaryBuilder::addElfSections(void* elfBin, size_t elfSize)
 {
     // Correct (pure) size of ELF binary to be calculated
-    size_t elfBinSize = calcElfSize(elfBin, debugDataSize);
-    if (!elfBinSize)
+    size_t pureElfBinSize = calcElfSize(elfBin, elfSize);
+    if (!pureElfBinSize)
     {
         return; // ELF file incorrect
     }
@@ -618,10 +602,10 @@ void ZEBinaryBuilder::addElfSections(void* elfBin, size_t debugDataSize)
     SElf64Header* elf64Header = (SElf64Header*)elfBin;
     size_t entrySize = elf64Header->SectionHeaderEntrySize;  // Get the section header entry size
 
-    CElfReader* elfReader = CElfReader::Create((char*)elfBin, elfBinSize);
+    CElfReader* elfReader = CElfReader::Create((char*)elfBin, pureElfBinSize);
     RAIIElf ElfObj(elfReader);
 
-    if (!elfReader || !elfReader->IsValidElf64(elfBin, elfBinSize))
+    if (!elfReader || !elfReader->IsValidElf64(elfBin, pureElfBinSize))
     {
         IGC_ASSERT_MESSAGE(false, "ELF file invalid - nothing to be transfered to zeBinary");
         return;
@@ -707,7 +691,7 @@ void ZEBinaryBuilder::addElfSections(void* elfBin, size_t debugDataSize)
 
                                 mBuilder.addSymbol(zeSym.s_name, zeSym.s_offset, zeSym.s_size, getSymbolElfBinding(zeSym),
                                     getSymbolElfType(zeSym), nonRelaSectionID);
-                                mBuilder.addRelocation(relocEntry.r_offset, zeSym.s_name, R_TYPE_ZEBIN::R_ZE_SYM_ADDR, nonRelaSectionID);
+                                mBuilder.addRelRelocation(relocEntry.r_offset, zeSym.s_name, R_TYPE_ZEBIN::R_ZE_SYM_ADDR, nonRelaSectionID);
                             }
                         }
                     }

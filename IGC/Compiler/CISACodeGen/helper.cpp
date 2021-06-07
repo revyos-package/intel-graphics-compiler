@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -59,9 +43,9 @@ namespace IGC
         struct _bits
         {
             unsigned int       bufId : 16;
-            unsigned int       bufType : 4;
+            unsigned int       bufType : 5;
             unsigned int       indirect : 1;     // bool
-            unsigned int       reserved : 11;
+            unsigned int       reserved : 10;
         } bits;
         uint32_t u32Val;
     } GFXResourceAddrSpace;
@@ -77,8 +61,9 @@ namespace IGC
         GFXResourceAddrSpace temp;
         static_assert(sizeof(temp) == 4, "Code below may need and update.");
         temp.u32Val = 0;
-        IGC_ASSERT((bufType + 1) < 16);
+        IGC_ASSERT((bufType + 1) < BUFFER_TYPE_UNKNOWN + 1);
         temp.bits.bufType = bufType + 1;
+
         if (bufType == SLM)
         {
             return ADDRESS_SPACE_LOCAL;
@@ -718,13 +703,18 @@ namespace IGC
         return false;
     }
 
-    bool EvalConstantAddress(Value* address, int& offset, const llvm::DataLayout* pDL, Value* ptrSrc)
+    bool EvalConstantAddress(Value* address, unsigned int& offset, const llvm::DataLayout* pDL, Value* ptrSrc)
     {
 
         if ((ptrSrc == nullptr && isa<ConstantPointerNull>(address)) ||
             (ptrSrc == address))
         {
             offset = 0;
+            return true;
+        }
+        else if(ConstantInt* eltIdx = dyn_cast<ConstantInt>(address))
+        {
+            offset = int_cast<int>(eltIdx->getZExtValue());
             return true;
         }
         else if (ConstantExpr * ptrExpr = dyn_cast<ConstantExpr>(address))
@@ -753,6 +743,15 @@ namespace IGC
                 if (!eltIdx)
                     return false;
                 offset = int_cast<int>(eltIdx->getZExtValue());
+                return true;
+            }
+            if (ptrExpr->getOpcode() == Instruction::PtrToInt)
+            {
+                offset = 0;
+                if (!EvalConstantAddress(ptrExpr->getOperand(0), offset, pDL, ptrSrc))
+                {
+                    return false;
+                }
                 return true;
             }
             else if (ptrExpr->getOpcode() == Instruction::GetElementPtr)
@@ -790,6 +789,82 @@ namespace IGC
             }
         }
         return false;
+    }
+
+    // Get constant address from load/ldraw instruction
+    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf)
+    {
+        // Check if the load instruction is with constant buffer address
+        unsigned as;
+        Value* ptrVal;
+        Value* offsetVal;
+        directBuf = false;
+        statelessBuf = false;
+        bindlessBuf = false;
+        bool isPushableAddr = false;
+        unsigned int& bufIdOrGRFOffset = cl.bufId;
+        unsigned int& eltId = cl.eltId;
+        unsigned int& size_in_bytes = cl.size;
+        const llvm::DataLayout DL = pContext->getModule()->getDataLayout();
+
+        // Only load and ldRaw instructions handled, rest should return
+        if (LoadInst* load = llvm::dyn_cast<LoadInst> (&I))
+        {
+            as = load->getPointerAddressSpace();
+            ptrVal = load->getPointerOperand();
+            offsetVal = ptrVal;
+            statelessBuf = (as == ADDRESS_SPACE_CONSTANT);
+        }
+        else
+            return false;
+
+        size_in_bytes = 0;
+        BufferType bufType;
+        Value* pointerSrc = nullptr;
+
+        if (statelessBuf || bindlessBuf)
+        {
+            // If the buffer info is not encoded in the address space, we can still find it by
+            // tracing the pointer to where it's created.
+            if (!GetStatelessBufferInfo(ptrVal, bufIdOrGRFOffset, bufType, pointerSrc, directBuf))
+            {
+                return false;
+            }
+            if (!directBuf)
+            {
+                // Make sure constant folding is safe by looking up in pushableAddresses
+                PushInfo& pushInfo = pContext->getModuleMetaData()->pushInfo;
+
+                for (auto it : pushInfo.pushableAddresses)
+                {
+                    if ((bufIdOrGRFOffset * 4 == it.addressOffset) && (IGC_IS_FLAG_ENABLED(DisableStaticCheckForConstantFolding) || it.isStatic))
+                    {
+                        isPushableAddr = true;
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            bufType = IGC::DecodeAS4GFXResource(as, directBuf, bufIdOrGRFOffset);
+        }
+        // If it is statelessBuf, we made sure it is a constant buffer by finding it in pushableAddresses
+        if ((directBuf && (bufType == CONSTANT_BUFFER)) ||
+            (isPushableAddr && (statelessBuf || bindlessBuf)))
+        {
+            eltId = 0;
+            if (!EvalConstantAddress(offsetVal, eltId, &DL, pointerSrc))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+        size_in_bytes = (unsigned int)I.getType()->getPrimitiveSizeInBits() / 8;
+        return true;
     }
 
 
@@ -1647,7 +1722,7 @@ namespace IGC
             {
                 instList[i] = builder.CreateExtractElement(val, static_cast<uint64_t>(0));
                 size_t iOld = i;
-                for (unsigned j = 1; j < cast<IGCLLVM::FixedVectorType>(val->getType())->getNumElements(); j++)
+                for (unsigned j = 1; j < cast<VectorType>(val->getType())->getNumElements(); j++)
                 {
                     instList.insert(instList.begin()+ iOld +j, builder.CreateExtractElement(val, j));
                     i++;
@@ -1680,7 +1755,7 @@ namespace IGC
             }
             break;
         case IGCLLVM::VectorTyID:
-            num = (unsigned)cast<IGCLLVM::FixedVectorType>(type)->getNumElements();
+            num = (unsigned)cast<VectorType>(type)->getNumElements();
             for (unsigned i = 0; i < num; i++)
             {
                 ScalarizeAggregateMembers(builder, builder.CreateExtractElement(val, i), instList);
@@ -1720,7 +1795,7 @@ namespace IGC
             }
             break;
         case IGCLLVM::VectorTyID:
-            num = (unsigned)cast<IGCLLVM::FixedVectorType>(type)->getNumElements();
+            num = (unsigned)cast<VectorType>(type)->getNumElements();
             for (unsigned i = 0; i < num; i++)
             {
                 indices.push_back(builder.getInt32(i));
@@ -1985,8 +2060,8 @@ namespace IGC
                 return false;
             }
 
-            IGCLLVM::FixedVectorType* dVTy = dyn_cast<IGCLLVM::FixedVectorType>(dTy);
-            IGCLLVM::FixedVectorType* sVTy = dyn_cast<IGCLLVM::FixedVectorType>(sTy);
+            VectorType* dVTy = dyn_cast<VectorType>(dTy);
+            VectorType* sVTy = dyn_cast<VectorType>(sTy);
             int d_nelts = dVTy ? (int)dVTy->getNumElements() : 1;
             int s_nelts = sVTy ? (int)sVTy->getNumElements() : 1;
             if (d_nelts != s_nelts) {
@@ -2380,4 +2455,30 @@ namespace IGC
 
         return ProcessedType;
     }
+
+    // Function modifies address space in selected uses of given input value
+    void FixAddressSpaceInAllUses(llvm::Value* ptr, uint newAS, uint oldAS)
+    {
+        IGC_ASSERT(newAS != oldAS);
+
+        for (auto UI = ptr->user_begin(), E = ptr->user_end(); UI != E; ++UI)
+        {
+            Instruction* inst = dyn_cast<Instruction>(*UI);
+            PointerType* instType = nullptr;
+            if (isa<BitCastInst>(inst) || isa<GetElementPtrInst>(inst) ||
+                isa<AddrSpaceCastInst>(inst) || isa<PHINode>(inst))
+            {
+                instType = dyn_cast<PointerType>(inst->getType());
+            }
+
+            if (instType && instType->getAddressSpace() == oldAS)
+            {
+                Type* eltType = instType->getElementType();
+                PointerType* ptrType = PointerType::get(eltType, newAS);
+                inst->mutateType(ptrType);
+                FixAddressSpaceInAllUses(inst, newAS, oldAS);
+            }
+        }
+    }
+
 } // namespace IGC

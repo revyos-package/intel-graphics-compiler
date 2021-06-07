@@ -89,6 +89,10 @@ static cl::opt<bool> ForceGlobalsLocalizationOpt(
     "vc-force-globals-localization",
     cl::desc("all global variables must be localized"), cl::init(true));
 
+static cl::opt<bool> ForceVectorGlobalsLocalizationOpt(
+    "vc-force-vector-globals-localization",
+    cl::desc("vector global variables must be localized"), cl::init(true));
+
 static cl::opt<GlobalsLocalizationConfig::LimitT> GlobalsLocalizationLimitOpt(
     "vc-globals-localization-limit",
     cl::desc("maximum size (in bytes) used to localize global variables"),
@@ -106,6 +110,11 @@ static cl::opt<bool>
     UseNewStackBuilderOpt("vc-use-new-stack-builder",
                           cl::desc("Use prolog/epilog insertion pass"),
                           cl::init(true));
+
+static cl::opt<unsigned>
+    StatelessPrivateMemSizeOpt("dbgonly-enforce-privmem-stateless",
+                               cl::desc("Enforce stateless privmem size"),
+                               cl::init(8192));
 
 static cl::opt<FunctionControl> FunctionControlOpt(
     "vc-function-control", cl::desc("Force special calls (see supported enum)"),
@@ -129,10 +138,12 @@ GenXBackendOptions::GenXBackendOptions()
       DebugInfoDumpsNameOverride(DebugInfoDumpNameOverride),
       UseNewStackBuilder(UseNewStackBuilderOpt),
       GlobalsLocalization{ForceGlobalsLocalizationOpt.getValue(),
+                          ForceVectorGlobalsLocalizationOpt.getValue(),
                           GlobalsLocalizationLimitOpt.getValue()},
       LocalizeLRsForAccUsage(LocalizeLRsForAccUsageOpt),
       DisableNonOverlappingRegionOpt(DisableNonOverlappingRegionOptOpt),
-      FCtrl(FunctionControlOpt) {}
+      FCtrl(FunctionControlOpt),
+      StatelessPrivateMemSize(StatelessPrivateMemSizeOpt) {}
 
 static std::unique_ptr<MemoryBuffer>
 readBiFModuleFromFile(const cl::opt<std::string> &File) {

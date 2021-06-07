@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -181,7 +165,8 @@ public:
     uint16_t    AdjustExtractIndex(llvm::Value* value, uint16_t elemIndex);
     WIBaseClass::WIDependancy GetDependency(llvm::Value* v) const;
     bool        GetIsUniform(llvm::Value* v) const;
-    bool        InsideDivergentCF(llvm::Instruction* inst);
+    bool        InsideDivergentCF(const llvm::Instruction* inst) const;
+    bool        InsideThreadDivergentCF(const llvm::Instruction* inst) const;
     CEncoder& GetEncoder();
     CVariable* GetR0();
     CVariable* GetNULL();
@@ -197,6 +182,9 @@ public:
     CVariable* GetARGV();
     CVariable* GetRETV();
     CVariable* GetPrivateBase();
+
+    void SaveSRet(CVariable* sretPtr);
+    CVariable* GetAndResetSRet();
 
     bool hasSP() const { return m_SP != nullptr; }
     bool hasFP() const { return m_FP != nullptr; }
@@ -563,6 +551,7 @@ protected:
     CVariable* m_SavedFP;
     CVariable* m_ARGV;
     CVariable* m_RETV;
+    CVariable* m_SavedSRetPtr;
 
     std::vector<USC::SConstantGatherEntry> gatherMap;
     uint     m_ConstantBufferLength;

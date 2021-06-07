@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -32,7 +16,6 @@ IN THE SOFTWARE.
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/Pass.h>
-#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "Probe/Assertion.h"
@@ -289,7 +272,7 @@ bool TypeDemote::demoteOnBasicBlock(BasicBlock* BB) const {
             CastInst* CI = dyn_cast<CastInst>(Index);
             if (CI && (CI->getOpcode() == Instruction::ZExt ||
                 CI->getOpcode() == Instruction::SExt)) {
-                unsigned VS = (unsigned)cast<IGCLLVM::FixedVectorType>(EEI->getVectorOperandType())->getNumElements();
+                unsigned VS = (unsigned)cast<VectorType>(EEI->getVectorOperandType())->getNumElements();
                 unsigned N = (unsigned int)CI->getSrcTy()->getPrimitiveSizeInBits();
                 unsigned Bound = (N < 32) ? (1U << N) : UINT32_MAX;
                 if (VS <= Bound) {

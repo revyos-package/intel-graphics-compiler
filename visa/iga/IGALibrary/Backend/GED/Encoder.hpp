@@ -44,28 +44,40 @@ namespace iga
 #define GED_ENCODE(FUNC, ARG) \
     GED_ENCODE_TO(FUNC, ARG, &m_gedInst)
 #if defined(GED_TIMER) || defined(_DEBUG)
-#define START_GED_TIMER() startIGATimer(TIMER_GED);
-#define STOP_GED_TIMER()  stopIGATimer(TIMER_GED);
+#define START_GED_TIMER() startIGATimer(TIMER_GED)
+#define STOP_GED_TIMER()  stopIGATimer(TIMER_GED)
 #else
 #define START_GED_TIMER()
 #define STOP_GED_TIMER()
 #endif
 
 #if defined(TOTAL_ENCODE_TIMER) || defined (_DEBUG)
-#define START_ENCODER_TIMER() startIGATimer(TIMER_TOTAL);
-#define STOP_ENCODER_TIMER()  stopIGATimer(TIMER_TOTAL);
+#define START_ENCODER_TIMER() startIGATimer(TIMER_TOTAL)
+#define STOP_ENCODER_TIMER()  stopIGATimer(TIMER_TOTAL)
 #else
 #define START_ENCODER_TIMER()
 #define STOP_ENCODER_TIMER()
+#endif
+
+// uncomment to emit all the GED calls
+// #define TRACE_GED_CALLS
+
+#ifdef TRACE_GED_CALLS
+#define TRACE_GED_SETTER(FIELD, ARG, STATUS) \
+     std::cout << "Encoder.cpp:" << __LINE__ << ": GED_Set" << #FIELD << \
+        "(..," << (ARG) << ") results in " << (STATUS) << "\n"
+#else
+#define TRACE_GED_SETTER(FIELD, ARG, STATUS)
 #endif
 
 
 #define GED_ENCODE_TO(FIELD, ARG, GED) \
     do { \
         GED_RETURN_VALUE _status; \
-        START_GED_TIMER() \
+        START_GED_TIMER(); \
         _status = GED_Set ## FIELD (GED, ARG); \
-        STOP_GED_TIMER() \
+        STOP_GED_TIMER(); \
+        TRACE_GED_SETTER(FIELD, ARG, _status); \
         if (_status != GED_RETURN_VALUE_SUCCESS) { \
             handleGedError(__LINE__, #FIELD, _status); \
         } \
@@ -104,7 +116,6 @@ namespace iga
         void encodeTernaryInstruction(const Instruction& inst, GED_ACCESS_MODE accessMode);
         void encodeTernaryAlign1Instruction(const Instruction& inst);
         void encodeTernaryAlign16Instruction(const Instruction& inst);
-        void encodeSendInstructionProcessSFID(const Instruction& inst);
         void encodeSendDirectDestination(const Operand& dst);
         void encodeSendDestinationDataType(const Operand& dst);
         void encodeOptionsThreadControl(const Instruction& inst);
@@ -119,8 +130,7 @@ namespace iga
         template <SourceIndex S> void encodeSrcType(Type t);
         template <SourceIndex S> void encodeSrcAddrMode(GED_ADDR_MODE x);
         template <SourceIndex S> void encodeSrcModifier(SrcModifier x);
-        template <SourceIndex S> void encodeSrcSubRegNum(
-            std::pair<bool, uint32_t> subReg, bool isTernaryOrBranch);
+        template <SourceIndex S> void encodeSrcSubRegNum(uint32_t subRegInByte);
 
         template <SourceIndex S> void encodeSrcMathMacroReg(MathMacroExt a);
 
@@ -200,6 +210,10 @@ namespace iga
         void encodeSendsSource1(const Operand& src);
         void encodeSendsDestination(const Operand& dst);
 
+        void encodeSendDescs(const Instruction& inst);
+        void encodeSendDescsPreXe(const Instruction& inst);
+        void encodeSendDescsXe(const Instruction& inst);
+
         ///////////////////////////////////////////////////////////////////////
         // SYNC INSTRUCTIONS
         ///////////////////////////////////////////////////////////////////////
@@ -222,12 +236,6 @@ namespace iga
 
         void applyGedWorkarounds(const Kernel &k, size_t bitsLen);
         void encodeOptions(const Instruction& inst);
-
-        // Translate from subRegNum to num represented in binary encoding.
-        // Return std::pair<bool, uint32_t> the bool denotes if the given sub reg num is
-        // aligned to binary offset representation
-        std::pair<bool, uint32_t> subRegNumToBinNum(int subRegNum, RegName regName, Type type);
-        void encodeDstSubRegNum(std::pair<bool, uint32_t> subReg, bool isTernaryOrBranch);
 
         //////////////////////////////////////////////////////////////////////
         // platform specific queries *but sometimes need the instruction too)
@@ -380,14 +388,13 @@ namespace iga
         }
     }
 
-    template <SourceIndex S> void Encoder::encodeSrcSubRegNum(
-        std::pair<bool, uint32_t> subReg, bool isTernaryOrBranch) {
+    template <SourceIndex S> void Encoder::encodeSrcSubRegNum(uint32_t subRegInByte) {
         if (S == SourceIndex::SRC0) {
-            GED_ENCODE(Src0SubRegNum, subReg.second);
+            GED_ENCODE(Src0SubRegNum, subRegInByte);
         } else if (S == SourceIndex::SRC1) {
-            GED_ENCODE(Src1SubRegNum, subReg.second);
+            GED_ENCODE(Src1SubRegNum, subRegInByte);
         } else {
-            GED_ENCODE(Src2SubRegNum, subReg.second);
+            GED_ENCODE(Src2SubRegNum, subRegInByte);
         }
     }
 

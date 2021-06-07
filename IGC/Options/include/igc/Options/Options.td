@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2020-2021 Intel Corporation
+Copyright (C) 2020-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -97,6 +81,11 @@ def fno_jump_tables : Flag<["-"], "fno-jump-tables">,
 def ftranslate_legacy_memory_intrinsics : Flag<["-"], "ftranslate-legacy-memory-intrinsics">,
   HelpText<"Legalize old memory intrinsics">;
 
+// this option controls stateless memory per thread
+// also alias stack-mem-size= is available (see below)
+def fstateless_private_size : Joined<["-"], "stateless-stack-mem-size=">,
+  HelpText<"Stateless memory amount per thread">;
+
 def Xfinalizer : Separate<["-"], "Xfinalizer">,
   HelpText<"Pass <arg> to the visa finalizer">, MetaVarName<"<arg>">;
 
@@ -124,8 +113,8 @@ def igcmc_visaopts : Joined<["-"], "visaopts=">,
   HelpText<"Options for finalizer in form \"opt1 opt2 opt3...\"">;
 
 def igcmc_stack_size : Joined<["-"], "stack-mem-size=">,
+  Alias<fstateless_private_size>,
   HelpText<"Control stack memory size (in bytes)">;
-
 }
 // }} Igcmc compatibility
 
@@ -168,6 +157,15 @@ def runtime_eq : Joined<["-"], "runtime=">,
 
 def ftime_report : Flag<["-"], "ftime-report">,
   HelpText<"Print timing summary of each stage of compilation">;
+
+def globals_localization : Separate<["-"], "globals-localization">,
+  HelpText<"globals localization optimization configuration; values:\n"
+           "\t'all' - localize all globals,\n\t'no' - don't localize globals,\n"
+           "\t'vector' - localize all vector globals the rest is partially "
+           "localized,\n\t'partial' - compiler may localize some globals "
+           "according to its heuristics">;
+def globals_localization_eq : Joined<["-"], "globals-localization=">,
+  Alias<globals_localization>, HelpText<"Alias for -globals-localization <value>">;
 
 }
 // }} Internal options

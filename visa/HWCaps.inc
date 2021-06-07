@@ -359,14 +359,24 @@
         return getPlatform() >= GENX_TGLLP;
     }
 
+    bool hasRSForSpecificPlatform() const
+    {
+        return true;
+    }
+
     bool hasReadSuppression() const
     {
-        return getPlatform() >= GENX_TGLLP;
+        return getPlatform() >= GENX_TGLLP && hasRSForSpecificPlatform();
+    }
+
+    bool hasEOTReadSuppressionIssue() const
+    {
+        return false;
     }
 
     bool hasScalarReadSuppression() const
     {
-        return getPlatform() > GENX_TGLLP;
+        return getPlatform() > GENX_TGLLP && hasRSForSpecificPlatform();
     }
 
     bool alignBindlessSampler() const
@@ -688,6 +698,7 @@
     {
         return (getPlatform() == GENX_TGLLP);
     }
+
    bool hasEOTWait() const
    {
         return true;
@@ -700,4 +711,9 @@
    {
        return false;
    }
-    // end HW capabilities
+
+   bool hasFtoPackedHFMove() const
+   {
+      return false;
+   }
+   // end HW capabilities

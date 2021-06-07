@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -101,6 +85,7 @@ void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatc
     m_SavedFP = nullptr;
     m_ARGV = nullptr;
     m_RETV = nullptr;
+    m_SavedSRetPtr = nullptr;
 
     // SIMD32 is a SIMD16 shader with 2 instance of each instruction
     m_SIMDSize = (simdSize == SIMDMode::SIMD8 ? SIMDMode::SIMD8 : SIMDMode::SIMD16);
@@ -438,7 +423,7 @@ void CShader::CreateAliasVars()
                         continue;
 
                     Type* Ty = V->getType();
-                    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+                    VectorType* VTy = dyn_cast<VectorType>(Ty);
                     Type* BTy = VTy ? VTy->getElementType() : Ty;
                     int nelts = (VTy ? (int)VTy->getNumElements() : 1);
 
@@ -836,6 +821,19 @@ CEncoder& CShader::GetEncoder()
     return encoder;
 }
 
+void CShader::SaveSRet(CVariable* sretPtr)
+{
+    IGC_ASSERT(m_SavedSRetPtr == nullptr);
+    m_SavedSRetPtr = sretPtr;
+}
+
+CVariable* CShader::GetAndResetSRet()
+{
+    CVariable* temp = m_SavedSRetPtr;
+    m_SavedSRetPtr = nullptr;
+    return temp;
+}
+
 CShader::~CShader()
 {
     // free all the memory allocated
@@ -980,15 +978,20 @@ bool CShader::GetIsUniform(llvm::Value* v) const
     return m_WI ? (m_WI->isUniform(v)) : false;
 }
 
-bool CShader::InsideDivergentCF(llvm::Instruction* inst)
+bool CShader::InsideDivergentCF(const llvm::Instruction* inst) const
 {
     return m_WI ? m_WI->insideDivergentCF(inst) : true;
+}
+
+bool CShader::InsideThreadDivergentCF(const llvm::Instruction* inst) const
+{
+    return m_WI ? m_WI->insideThreadDivergentCF(inst) : true;
 }
 
 uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
 {
     llvm::Type* type = val->getType();
-    uint nbElement = int_cast<uint>(cast<IGCLLVM::FixedVectorType>(type)->getNumElements());
+    uint nbElement = int_cast<uint>(cast<VectorType>(type)->getNumElements());
     mask = 0;
     // we don't process vector bigger than 31 elements as the mask has only 32bits
     // If we want to support longer vectors we need to extend the mask size
@@ -1193,7 +1196,7 @@ uint32_t CShader::GetExtractMask(llvm::Value* vecVal)
     {
         return it->second;
     }
-    const unsigned int numChannels = vecVal->getType()->isVectorTy() ? (unsigned)cast<IGCLLVM::FixedVectorType>(vecVal->getType())->getNumElements() : 1;
+    const unsigned int numChannels = vecVal->getType()->isVectorTy() ? (unsigned)cast<VectorType>(vecVal->getType())->getNumElements() : 1;
     IGC_ASSERT_MESSAGE(numChannels <= 32, "Mask has 32 bits maximally!");
     return (1ULL << numChannels) - 1;
 }
@@ -1201,7 +1204,7 @@ uint32_t CShader::GetExtractMask(llvm::Value* vecVal)
 uint16_t CShader::AdjustExtractIndex(llvm::Value* vecVal, uint16_t index)
 {
     uint16_t result = index;
-    if (cast<IGCLLVM::FixedVectorType>(vecVal->getType())->getNumElements() < 32)
+    if (cast<VectorType>(vecVal->getType())->getNumElements() < 32)
     {
         uint32_t mask = GetExtractMask(vecVal);
         for (uint i = 0; i < index; ++i)
@@ -1618,7 +1621,7 @@ auto sizeToSIMDMode = [](uint32_t size)
 
 CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 {
-    IGCLLVM::FixedVectorType* VTy = llvm::dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
+    llvm::VectorType* VTy = llvm::dyn_cast<llvm::VectorType>(C->getType());
     if (C && VTy)
     {   // Vector constant
         llvm::Type* eTy = VTy->getElementType();
@@ -1843,7 +1846,7 @@ uint32_t CShader::GetNumElts(llvm::Type* type, bool isUniform)
     {
         IGC_ASSERT(type->getContainedType(0)->isIntegerTy() || type->getContainedType(0)->isFloatingPointTy());
 
-        auto VT = cast<IGCLLVM::FixedVectorType>(type);
+        auto VT = cast<VectorType>(type);
         numElts *= (uint16_t)VT->getNumElements();
     }
     return numElts;

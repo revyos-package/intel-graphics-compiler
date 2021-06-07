@@ -569,8 +569,8 @@ void Optimizer::insertDummyMov(G4_BB *bb, INST_LIST_ITER inst_it, G4_Operand *op
 
 void Optimizer::insertDummyMovForHWRSWA()
 {
-    if (!VISA_WA_CHECK(builder.getPWaTable(), Wa_16012061344) &&
-        !VISA_WA_CHECK(builder.getPWaTable(), Wa_16012292205))
+    if (!((VISA_WA_CHECK(builder.getPWaTable(), Wa_16012061344) ||
+        VISA_WA_CHECK(builder.getPWaTable(), Wa_16012292205)) && builder.hasRSForSpecificPlatform()))
     {
         return;
     }
@@ -589,6 +589,7 @@ void Optimizer::insertDummyMovForHWRSWA()
         }
 
         INST_LIST_ITER curr_iter = bb->begin();
+        INST_LIST_ITER pre_iter = curr_iter;
         while (curr_iter != bb->end())
         {
             G4_INST* inst = (*curr_iter);
@@ -605,6 +606,23 @@ void Optimizer::insertDummyMovForHWRSWA()
                 }
             }
 
+            if (builder.hasEOTReadSuppressionIssue() && inst->isEOT())
+            {
+                if (pre_iter != curr_iter)
+                {
+                    G4_INST* pre_inst = (*pre_iter);
+                    if (pre_inst->isAtomicInst())
+                    {
+                         insertDummyCsel(bb, pre_iter, false);
+                    }
+                    else
+                    {
+                         insertDummyCsel(bb, curr_iter, false);
+                    }
+                }
+            }
+
+            pre_iter = curr_iter;
             ++curr_iter;
         }
 
@@ -777,11 +795,14 @@ void Optimizer::cloneSampleInst()
         {
             auto Next = std::next(I);
             auto inst = *I;
-            if (inst->isSend() && inst->asSendInst()->getMsgDesc()->isSampler() && inst->getExecSize() >= builder.getNativeExecSize())
+            if (inst->isSend() &&
+                inst->getMsgDesc()->getSFID() == SFID::SAMPLER &&
+                inst->getMsgDescRaw() != nullptr &&
+                inst->getExecSize() >= builder.getNativeExecSize())
             {
                 G4_InstSend* sendInst = inst->asSendInst();
-                bool isEval = sendInst->getMsgDesc()->ResponseLength() == 0;
-                uint32_t messageType = sendInst->getMsgDesc()->getSamplerMessageType();
+                bool isEval = sendInst->getMsgDesc()->getDstLenRegs() == 0;
+                uint32_t messageType = sendInst->getMsgDescRaw()->getSamplerMessageType();
                 assert(!inst->getPredicate() && "do not handle predicated sampler inst for now");
                 if (!isEval && cloneSample)
                 {
@@ -797,7 +818,7 @@ void Optimizer::cloneSampleInst()
                     newInst->setPredicate(builder.createPredicate(PredState_Minus, tmpFlag->getRegVar(), 0));
                     auto newInstIt = bb->insertAfter(I, newInst);
 
-                    uint16_t rspLen = inst->asSendInst()->getMsgDesc()->ResponseLength();
+                    uint16_t rspLen = inst->asSendInst()->getMsgDescRaw()->ResponseLength();
                     // If Pixel Null Mask feedback is requested sampler message
                     // has header, all data channels enabled and an additional
                     // GRF of writeback payload with Pixel Null Mask.
@@ -809,9 +830,9 @@ void Optimizer::cloneSampleInst()
                     // if Pixel Null Mask feedback is enabled.
                     assert(inst->getExecSize() == g4::SIMD8 || inst->getExecSize() == g4::SIMD16);
                     uint16_t pixelNullMaskRspLen =
-                        (inst->getExecSize() == g4::SIMD16 && !sendInst->getMsgDesc()->is16BitReturn()) ? 9 : 5;
+                        (inst->getExecSize() == g4::SIMD16 && !sendInst->getMsgDescRaw()->is16BitReturn()) ? 9 : 5;
 
-                    if (sendInst->getMsgDesc()->isHeaderPresent() &&
+                    if (sendInst->getMsgDescRaw()->isHeaderPresent() &&
                         rspLen == pixelNullMaskRspLen)
                     {
                         // Pixel Null Mask is in the first word of the last GRF
@@ -917,10 +938,25 @@ void Optimizer::runPass(PassIndex Index)
     if (PI.Option != vISA_EnableAlways && !builder.getOption(PI.Option))
         return;
 
+    bool isImportantPass =
+        Index == PI_dce ||
+        Index == PI_regAlloc ||
+        Index == PI_preRA_Schedule ||
+        Index == PI_LVN ||
+        Index == PI_HWConformityChk ||
+        Index == PI_HWWorkaround;
+    bool shouldDumpG4 =
+        builder.getOption(vISA_DumpDotAll) ||
+        builder.getuint32Option(vISA_DumpPassesSubset) >= 2 ||
+        (builder.getuint32Option(vISA_DumpPassesSubset) == 1 && isImportantPass);
+
     std::string Name = PI.Name;
 
     if (PI.Timer != TimerID::NUM_TIMERS)
         startTimer(PI.Timer);
+
+    if (shouldDumpG4)
+        kernel.dumpDotFile(("before." + Name).c_str());
 
     // Execute pass.
     (this->*(PI.Pass))();
@@ -928,7 +964,7 @@ void Optimizer::runPass(PassIndex Index)
     if (PI.Timer != TimerID::NUM_TIMERS)
         stopTimer(PI.Timer);
 
-    if (builder.getOption(vISA_DumpDotAll))
+    if (shouldDumpG4)
         kernel.dumpDotFile(("after." + Name).c_str());
 
 #ifdef _DEBUG
@@ -975,7 +1011,7 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(FoldAddrImmediate,       vISA_FoldAddrImmed,           TimerID::MISC_OPTS);
     INITIALIZE_PASS(localSchedule,           vISA_LocalScheduling,         TimerID::SCHEDULING);
     INITIALIZE_PASS(HWWorkaround,            vISA_EnableAlways,            TimerID::MISC_OPTS);
-    INITIALIZE_PASS(insertInstLabels,        vISA_EnableAlways,            TimerID::NUM_TIMERS);
+    INITIALIZE_PASS(fixEndIfWhileLabels,        vISA_EnableAlways,            TimerID::NUM_TIMERS);
     INITIALIZE_PASS(insertHashMovs,          vISA_InsertHashMovs,          TimerID::NUM_TIMERS);
     INITIALIZE_PASS(insertDummyMovForHWRSWA, vISA_InsertDummyMovForHWRSWA, TimerID::NUM_TIMERS);
     INITIALIZE_PASS(insertDummyCompactInst,  vISA_InsertDummyCompactInst,  TimerID::NUM_TIMERS);
@@ -1498,7 +1534,7 @@ int Optimizer::optimization()
 
     // this must be the last step of the optimization so as to not violate
     // the CFG assumption
-    runPass(PI_insertInstLabels);
+    runPass(PI_fixEndIfWhileLabels);
 
     runPass(PI_insertHashMovs);
 
@@ -1572,7 +1608,7 @@ int Optimizer::optimization()
 //  (P) WHILE
 //  L2
 //
-void Optimizer::insertInstLabels()
+void Optimizer::fixEndIfWhileLabels()
 {
     for (BB_LIST_CITER iter = fg.cbegin(), bend = fg.cend(); iter != bend; ++iter)
     {
@@ -5748,7 +5784,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             dest->a0Dot0->markDead();
         }
 
-        payLoadSize = dest->send->getMsgDesc()->MessageLength();
+        payLoadSize = dest->send->getMsgDesc()->getSrc0LenRegs();
 
         isSameX = isHeaderOptReuse(dest->mDot0, source->mDot0)      &&
             !source->isXRedef ;
@@ -5953,13 +5989,15 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     *   send (1) null<1>:ud r1 0x3 0x2000004:ud{Align1}
     *   wait n0:ud {Align1}
     */
-    bool Optimizer::isBarrierPattern(G4_INST *sendInst,
-                                     G4_SrcRegRegion *& barrierSendSrc0)
+    bool Optimizer::isBarrierPattern(
+        G4_INST *sendInst, G4_SrcRegRegion *& barrierSendSrc0)
     {
         /*
          * check G4_send
          */
-        G4_SendMsgDescriptor *desc = sendInst->getMsgDesc();
+        G4_SendDescRaw *desc = sendInst->getMsgDescRaw();
+        if (!desc)
+            return false;
         uint32_t descVal = desc->getDesc();
         if ((desc->getFuncId() == SFID::GATEWAY) &&
             (descVal == (0x1 << 25) + 0x4) && // 0x2000004
@@ -6185,7 +6223,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 {
                     optMessageHeaders(msgList, bb, myA0);
                     if (msgList.front()->opt &&
-                        msgList.front()->send->getMsgDesc()->MessageLength() == 1)
+                        msgList.front()->send->getMsgDesc()->getSrc0LenRegs() == 1)
                     {
                         // keep the oldest send for subsequent read operations
                         // but the instruction to define a0.0 needs to be latest
@@ -6193,7 +6231,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         msgList.pop_front(); // delete first element
                     }
                     else if (msgList.front()->opt &&
-                        msgList.front()->send->getMsgDesc()->MessageLength() >= 1)
+                        msgList.front()->send->getMsgDesc()->getSrc0LenRegs() >= 1)
                     {
                         // keep the latest send for subsequent write operations
                         msgList.pop_back();
@@ -6941,7 +6979,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         G4_INST* inst = *ii;
         G4_InstSend* sendInst = inst->asSendInst();
         assert(sendInst);
-        if (sendInst && sendInst->getMsgDesc()->ResponseLength() > 0)
+        if (sendInst && sendInst->getMsgDesc()->getDstLenRegs() > 0)
         {
             // commit is enabled for the fence, need to generate a move after to make sure the fence is complete
             // mov (8) r1.0<1>:ud r1.0<8;8,1>:ud {NoMask}
@@ -7116,7 +7154,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 }
 
                 if (VISA_WA_CHECK(builder.getPWaTable(), WaResetN0BeforeGatewayMessage) &&
-                    inst->isSend() && inst->getMsgDesc()->isBarrierMsg())
+                    inst->isSend() && inst->getMsgDesc()->isBarrier())
                 {
                     // mov (1) n0.0 0x0 {Switch}
                     G4_DstRegRegion* n0Dst = builder.createDst(
@@ -7325,7 +7363,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         {
             uint16_t extFuncCtrl = 0;
             // both scratch and block read use DC
-            SFID funcID = SFID::DP_DC;
+            SFID funcID = SFID::DP_DC0;
 
             uint32_t headerPresent = 0x80000;
             uint32_t msgDescImm = headerPresent;
@@ -7339,7 +7377,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             msgDescImm |= (blocksizeEncoding << SCRATCH_MSG_DESC_BLOCK_SIZE);
             msgDescImm |= i;
 
-            G4_SendMsgDescriptor* desc = kernel.fg.builder->createSendMsgDesc(
+            G4_SendDesc* desc = kernel.fg.builder->createSendMsgDesc(
                 msgDescImm, 0, 1, funcID, msgSize, extFuncCtrl, SendAccess::WRITE_ONLY);
             const RegionDesc* region = kernel.fg.builder->getRegionStride1();
             G4_SrcRegRegion* headerOpnd = kernel.fg.builder->Create_Src_Opnd_From_Dcl(kernel.fg.builder->getBuiltinR0(), region);
@@ -7367,7 +7405,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 if (inst->isSend())
                 {
                     numSends++;
-                    if (inst->asSendInst()->getMsgDesc()->isBarrierMsg())
+                    if (inst->asSendInst()->getMsgDesc()->isBarrier())
                     {
                         // Propagate information about barriers presence back to IGC. It's safer to
                         // depend on vISA statistics as IGC is not able to detect barriers if they are
@@ -7685,15 +7723,16 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 if (inst->isSend())
                 {
                     auto msgDesc = inst->asSendInst()->getMsgDesc();
-                    if (msgDesc->isDataPortWrite())
+                    if (msgDesc->isWrite())
                     {
                         if (msgDesc->isHDC())
                         {
-                            if (msgDesc->isSLMMessage())
+                            if (msgDesc->isSLM())
                             {
                                 hasSLMWrites = true;
                             }
-                            else if (msgDesc->isHdcTypedSurfaceWrite())
+                            else if (msgDesc->isRaw() &&
+                                ((const G4_SendDescRaw *)msgDesc)->isHdcTypedSurfaceWrite())
                             {
                                 hasTypedWrites = true;
                             }
@@ -7820,8 +7859,8 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 {
                     // an HDC fence is more efficient in this case
                     // fence with commit enable
-                    int fenceDesc = G4_SendMsgDescriptor::createDesc((0x7 << 14) | (1 << 13), true, 1, 1);
-                    auto msgDesc = builder.createSyncMsgDesc(SFID::DP_DC, fenceDesc);
+                    int fenceDesc = G4_SendDescRaw::createDesc((0x7 << 14) | (1 << 13), true, 1, 1);
+                    auto msgDesc = builder.createSyncMsgDesc(SFID::DP_DC0, fenceDesc);
                     auto src = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionStride1());
                     auto dst = builder.Create_Dst_Opnd_From_Dcl(builder.getBuiltinR0(), 1);
                     G4_INST* inst = builder.createSendInst(
@@ -7832,7 +7871,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 else
                 {
                     // insert a dumy scratch read
-                    auto msgDesc = builder.createReadMsgDesc(SFID::DP_DC, desc.value);
+                    auto msgDesc = builder.createReadMsgDesc(SFID::DP_DC0, desc.value);
                     auto src = builder.Create_Src_Opnd_From_Dcl(builder.getBuiltinR0(), builder.getRegionStride1());
                     // We can use any dst that does not conflcit with EOT src, which must be between r112-r127
                     auto dstDcl = builder.createHardwiredDeclare(8, Type_UD, 1, 0);
@@ -8561,7 +8600,7 @@ void Optimizer::recomputeBound(std::unordered_set<G4_Declare*>& declares)
 }
 
 //
-// Given a sequence of simd1 instructions (max 8), try to merge them into a single instruction
+// Given a sequence of simd1 instructions (max 4), try to merge them into a single instruction
 // e.g.,
 // mul (1) r0.4<1>:f r0.0<0;1,0>:f r6.5<0;1,0>:f {NoMask}
 // mul (1) r0.5<1>:f r0.1<0;1,0>:f r6.5<0;1,0>:f {NoMask}
@@ -8579,7 +8618,7 @@ void Optimizer::mergeScalarInst()
     int bundleSizeLimit = BUNDLE_INFO::maxBundleSize;
     if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D)
     {
-        bundleSizeLimit = 8;
+        bundleSizeLimit = 4;
     }
 
     Mem_Manager mergeManager(1024);
@@ -10542,7 +10581,7 @@ void Optimizer::doNoMaskWA()
     //    flagVar : emask for this BB.
     //    Note that if 32-bit flag is used, flagVar and this instruction I's condMod
     //    take two flag registers, leaving no flag for temporary. In this case, we
-    //    will do manual spill, ie,  save and restore the original flag (case 1 and 3).
+    //    will do manual spill, ie,  save and restore the original flag (case 1.2 and 3).
     //
     //    Before:
     //       I:  (W)  cmp (16|M16) (ne)P  D ....   // 32-bit flag
@@ -10551,11 +10590,15 @@ void Optimizer::doNoMaskWA()
     //
     //    After:
     //      (1) D = null (common)
-    //           I0: (W)           mov (1|M0) save:ud  P<0;1,0>:ud
-    //           I:  (W)           cmp (16|M16) (ne)P  ....
-    //           I1: (W&-flagVar)  mov (1|M0)  P   save:ud
+    //          1.1) Not simd32 And P is 16-bit modifier (less chance to have flag spill)
+    //               I:  (W)           cmp (16|M0) (ne)nP  ....
+    //               I0: (W&flagVar)   mov (1|M0)   P   nP
+    //          1.2 general case (save flag into grf to avoid flag spill)
+    //               I0: (W)           mov (1|M0) save:ud  P<0;1,0>:ud
+    //               I:  (W)           cmp (16|M16) (ne)P  ....
+    //               I1: (W&-flagVar)  mov (1|M0)  P   save:ud
     //      (2) 'I' uses 16-bit flag (common)
-    //           I0: (W)           mov  (1)  nP<1>:uw    flagVar.0<0;1,0>:uw
+    //           I0: (W)           mov  (1)  nP<1>:uw    flagVar<0;1,0>:uw
     //           I:  (W&nP)        cmp (16|M0) (ne)nP  ....
     //           I1: (W&flagVar)   mov (1|M0)  P<1>:uw  nP<0;1,0>:uw
     //      (3) otherwise(less common)
@@ -10586,34 +10629,64 @@ void Optimizer::doNoMaskWA()
         G4_Type Ty = (modDcl->getWordSize() > 1) ? Type_UD : Type_UW;
         if (I->hasNULLDst())
         {   // case 1
-            G4_Declare* saveDecl = builder.createTempVar(1, Ty, Any, "saveTmp");
-            G4_RegVar* saveVar = saveDecl->getRegVar();
-            G4_SrcRegRegion* I0S0 = builder.createSrc(
-                modDcl->getRegVar(),
-                0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D0 = builder.createDst(saveVar, 0, 0, 1, Ty);
-            G4_INST* I0 = builder.createMov(g4::SIMD1, D0, I0S0, InstOpt_WriteEnable, false);
-            currBB->insertBefore(currII, I0);
+            if (flagVar->getDeclare()->getTotalElems() == 1 && Ty == Type_UW)
+            {   // case 1.1
+                assert(I->getExecSize() != g4::SIMD32);
 
-            auto nextII = currII;
-            ++nextII;
-            G4_SrcRegRegion* I1S0 = builder.createSrc(saveVar,
-                0, 0, builder.getRegionScalar(), Ty);
-            G4_DstRegRegion* D1 = builder.createDst(
-                modDcl->getRegVar(), 0, 0, 1, Ty);
-            G4_INST* I1 = builder.createMov(g4::SIMD1, D1, I1S0, InstOpt_WriteEnable, false);
-            G4_Predicate* flag = builder.createPredicate(
-                PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
-            I1->setPredicate(flag);
-            currBB->insertBefore(nextII, I1);
+                // Use 16-bit flag
+                G4_Declare* nPDecl = builder.createTempFlag(1, "nP");
+                G4_RegVar* nPVar = nPDecl->getRegVar();
 
-            flagVarDefInst->addDefUse(I1, Opnd_pred);
-            I0->addDefUse(I1, Opnd_src0);
+                G4_CondMod* nM = builder.createCondMod(P->getMod(), nPVar, 0);
+                I->setCondMod(nM);
 
-            if (!condModGlb)
-            {
-                // Copy condMod uses to I1.
-                I->copyUsesTo(I1, false);
+                auto nextII = currII;
+                ++nextII;
+
+                G4_SrcRegRegion* I0S0 = builder.createSrc(nPVar,
+                    0, 0, builder.getRegionScalar(), Ty);
+                G4_DstRegRegion* I0D0 = builder.createDst(
+                    modDcl->getRegVar(), 0, 0, 1, Ty);
+                G4_INST* I0 = builder.createMov(g4::SIMD1, I0D0, I0S0, InstOpt_WriteEnable, false);
+                G4_Predicate* flag = builder.createPredicate(
+                    PredState_Plus, flagVar, 0, getPredCtrl(useAnyh));
+                I0->setPredicate(flag);
+                currBB->insertBefore(nextII, I0);
+
+                flagVarDefInst->addDefUse(I0, Opnd_pred);
+                I->addDefUse(I0, Opnd_src0);
+            }
+            else
+            {   // case 1.2
+                G4_Declare* saveDecl = builder.createTempVar(1, Ty, Any, "saveTmp");
+                G4_RegVar* saveVar = saveDecl->getRegVar();
+                G4_SrcRegRegion* I0S0 = builder.createSrc(
+                    modDcl->getRegVar(),
+                    0, 0, builder.getRegionScalar(), Ty);
+                G4_DstRegRegion* D0 = builder.createDst(saveVar, 0, 0, 1, Ty);
+                G4_INST* I0 = builder.createMov(g4::SIMD1, D0, I0S0, InstOpt_WriteEnable, false);
+                currBB->insertBefore(currII, I0);
+
+                auto nextII = currII;
+                ++nextII;
+                G4_SrcRegRegion* I1S0 = builder.createSrc(saveVar,
+                    0, 0, builder.getRegionScalar(), Ty);
+                G4_DstRegRegion* D1 = builder.createDst(
+                    modDcl->getRegVar(), 0, 0, 1, Ty);
+                G4_INST* I1 = builder.createMov(g4::SIMD1, D1, I1S0, InstOpt_WriteEnable, false);
+                G4_Predicate* flag = builder.createPredicate(
+                    PredState_Minus, flagVar, 0, getPredCtrl(useAnyh));
+                I1->setPredicate(flag);
+                currBB->insertBefore(nextII, I1);
+
+                flagVarDefInst->addDefUse(I1, Opnd_pred);
+                I0->addDefUse(I1, Opnd_src0);
+
+                if (!condModGlb)
+                {
+                    // Copy condMod uses to I1.
+                    I->copyUsesTo(I1, false);
+                }
             }
             return;
         }

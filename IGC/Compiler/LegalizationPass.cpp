@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -671,7 +655,7 @@ void Legalization::visitBitCastInst(llvm::BitCastInst& I)
         if (!isa<TruncInst>(pZ->getOperand(0)))
             return;
 
-        auto* pVecTy = cast<IGCLLVM::FixedVectorType>(pZ->getDestTy());
+        auto* pVecTy = cast<VectorType>(pZ->getDestTy());
         if (pVecTy->getNumElements() != 3)
             return;
 
@@ -766,7 +750,7 @@ void Legalization::visitSelectInst(SelectInst& I)
     }
     else if (I.getType()->isVectorTy())
     {
-        unsigned int vecSize = (unsigned)cast<IGCLLVM::FixedVectorType>(I.getType())->getNumElements();
+        unsigned int vecSize = (unsigned)cast<VectorType>(I.getType())->getNumElements();
         Value* newVec = UndefValue::get(I.getType());
         m_builder->SetInsertPoint(&I);
         for (unsigned int i = 0; i < vecSize; i++)
@@ -1148,7 +1132,7 @@ void Legalization::visitStoreInst(StoreInst& I)
     if (ConstantDataVector * vec = dyn_cast<ConstantDataVector>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(vec->getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getElementAsConstant(i);
@@ -1163,13 +1147,12 @@ void Legalization::visitStoreInst(StoreInst& I)
             }
         }
 
-        IGC::cloneStore(&I, newVec, I.getPointerOperand());
-        I.eraseFromParent();
+        I.setOperand(0, newVec);
     }
     else if (ConstantVector * vec = dyn_cast<ConstantVector>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(vec->getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getOperand(i);
@@ -1184,13 +1167,12 @@ void Legalization::visitStoreInst(StoreInst& I)
             }
         }
 
-        IGC::cloneStore(&I, newVec, I.getPointerOperand());
-        I.eraseFromParent();
+        I.setOperand(0, newVec);
     }
     else if (ConstantAggregateZero * vec = dyn_cast<ConstantAggregateZero>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(vec->getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getElementValue(i);
@@ -1205,8 +1187,7 @@ void Legalization::visitStoreInst(StoreInst& I)
             }
         }
 
-        IGC::cloneStore(&I, newVec, I.getPointerOperand());
-        I.eraseFromParent();
+        I.setOperand(0, newVec);
     }
     else if (I.getOperand(0)->getType()->isIntegerTy(1))
     {
@@ -1341,7 +1322,7 @@ void Legalization::visitInsertElementInst(InsertElementInst& I)
     if (ConstantDataVector * vec = dyn_cast<ConstantDataVector>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(vec->getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getElementAsConstant(i);
@@ -1361,7 +1342,7 @@ void Legalization::visitInsertElementInst(InsertElementInst& I)
     else if (ConstantVector * vec = dyn_cast<ConstantVector>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(I.getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getOperand(i);
@@ -1381,7 +1362,7 @@ void Legalization::visitInsertElementInst(InsertElementInst& I)
     else if (ConstantAggregateZero * vec = dyn_cast<ConstantAggregateZero>(I.getOperand(0)))
     {
         Value* newVec = UndefValue::get(I.getType());
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
         for (unsigned int i = 0; i < nbElement; i++)
         {
             Constant* cst = vec->getElementValue(i);
@@ -1398,7 +1379,7 @@ void Legalization::visitInsertElementInst(InsertElementInst& I)
     else if (I.getOperand(1)->getType()->isIntegerTy(1))
     {
         // This promotes i1 insertelement to i32
-        unsigned int nbElement = (unsigned)cast<IGCLLVM::FixedVectorType>(I.getOperand(0)->getType())->getNumElements();
+        unsigned int nbElement = (unsigned)cast<VectorType>(I.getOperand(0)->getType())->getNumElements();
         Value* newVec = UndefValue::get(IGCLLVM::FixedVectorType::get(m_builder->getInt32Ty(), nbElement));
         PromoteInsertElement(&I, newVec);
     }
@@ -1411,7 +1392,7 @@ void Legalization::visitShuffleVectorInst(ShuffleVectorInst& I)
     // If the original vector is a constant, just use the scalar constant,
     // otherwise extract from the original vector.
 
-    IGCLLVM::FixedVectorType* resType = cast<IGCLLVM::FixedVectorType>(I.getType());
+    VectorType* resType = cast<VectorType>(I.getType());
     Value* newVec = UndefValue::get(resType);
     Value* src0 = I.getOperand(0);
     Value* src1 = I.getOperand(1);
@@ -1422,7 +1403,7 @@ void Legalization::visitShuffleVectorInst(ShuffleVectorInst& I)
     Constant* mask = I.getShuffleMaskForBitcode();
 #endif
     // The two inputs are guaranteed to be of the same type
-    IGCLLVM::FixedVectorType* inType = cast<IGCLLVM::FixedVectorType>(src0->getType());
+    VectorType* inType = cast<VectorType>(src0->getType());
     int inCount = int_cast<int>(inType->getNumElements());
     int inBase = 2;  // 2 means using undef
     // if inType == resType, use src0/src1 as the input
@@ -1638,7 +1619,7 @@ Type* Legalization::LegalAllocaType(Type* type) const
 #endif
         legalType = IGCLLVM::FixedVectorType::get(
             LegalAllocaType(cast<VectorType>(type)->getElementType()),
-            (unsigned)cast<IGCLLVM::FixedVectorType>(type)->getNumElements());
+            (unsigned)cast<VectorType>(type)->getNumElements());
         break;
     case Type::StructTyID:
         return LegalStructAllocaType(type);
@@ -1938,7 +1919,7 @@ void Legalization::visitIntrinsicInst(llvm::IntrinsicInst& I)
         Value* newValue = nullptr;
         if (srcType->isVectorTy())
         {
-            auto sourceVT = cast<IGCLLVM::FixedVectorType>(srcType);
+            auto sourceVT = cast<VectorType>(srcType);
             const unsigned int numElements = (uint32_t)sourceVT->getNumElements();
             Value* dstVec = UndefValue::get(srcType);
             for (unsigned int i = 0; i < numElements; ++i)
@@ -2081,7 +2062,7 @@ void Legalization::visitTruncInst(llvm::TruncInst& I) {
     }
 
     Src = BC->getOperand(0);
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Src->getType());
+    VectorType* VTy = dyn_cast<VectorType>(Src->getType());
     // Bail out if it's not bitcasted from <3 x i16>
     if (!VTy || VTy->getNumElements() != 3 || !VTy->getElementType()->isIntegerTy(16))
         return;

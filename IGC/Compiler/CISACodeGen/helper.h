@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -162,7 +146,8 @@ namespace IGC
     bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
     // try to evaluate the address if it is constant.
-    bool EvalConstantAddress(llvm::Value* address, int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
+    bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
+    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf);
 
 
     bool isSampleLoadGather4InfoInstruction(llvm::Instruction* inst);
@@ -486,4 +471,7 @@ namespace IGC
 
     // Return base type of complex type or nullptr if it cannot be processed
     llvm::Type* GetBaseType(llvm::Type* ProcessedType);
+
+    // Function modifies address space in selected uses of given input value
+    void FixAddressSpaceInAllUses(llvm::Value* ptr, uint newAS, uint oldAS);
 } // namespace IGC

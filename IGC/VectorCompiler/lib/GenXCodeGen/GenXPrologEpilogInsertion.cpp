@@ -49,6 +49,8 @@ IN THE SOFTWARE.
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -88,6 +90,23 @@ inline unsigned calcPadding(unsigned Val, unsigned Align) {
   return Align - Val % Align;
 }
 
+// Diagnostic information for error/warning relating prolog/epilog insertion.
+class DiagnosticInfoPrologEpilogInsertion : public DiagnosticInfo {
+private:
+  std::string Description;
+
+public:
+  // Initialize from description
+  DiagnosticInfoPrologEpilogInsertion(const Twine &Desc,
+                                      DiagnosticSeverity Severity = DS_Error)
+      : DiagnosticInfo(llvm::getNextAvailablePluginDiagnosticKind(), Severity),
+        Description(Desc.str()) {}
+
+  void print(DiagnosticPrinter &DP) const override {
+    DP << "GenXPrologEpilogInsertion: " << Description;
+  }
+};
+
 class GenXPrologEpilogInsertion
     : public FunctionPass,
       public InstVisitor<GenXPrologEpilogInsertion> {
@@ -101,6 +120,8 @@ class GenXPrologEpilogInsertion
 
   unsigned ArgRegSize = 0;
   unsigned RetRegSize = 0;
+
+  bool UseGlobalMem = true;
 
   void generateKernelProlog(Function &F);
   void generateFunctionProlog(Function &F);
@@ -212,9 +233,9 @@ bool GenXPrologEpilogInsertion::runOnFunction(Function &F) {
   RetRegSize = visa::RetRegSizeInGRFs * ST->getGRFWidth();
   if (!(BEConf->useNewStackBuilder() && ST->isOCLRuntime()))
     return false;
-  if (!F.getParent()->getModuleFlag(ModuleMD::UseSVMStack))
-    return false;
   NumCalls = CallsCalculator().getNumCalls(F);
+  UseGlobalMem =
+      F.getParent()->getModuleFlag(ModuleMD::UseSVMStack) != nullptr;
   visit(F);
   if (isKernel(&F)) {
     generateKernelProlog(F);
@@ -252,13 +273,16 @@ void GenXPrologEpilogInsertion::visitReturnInst(ReturnInst &I) {
     generateFunctionEpilog(*I.getFunction(), I);
 }
 
-// FE_SP = PrivateBase + HWTID * StackPerThread
+// FE_SP = PrivateBase + HWTID * PrivMemPerThread
 void GenXPrologEpilogInsertion::generateKernelProlog(Function &F) {
   IRBuilder<> IRB(&F.getEntryBlock().front());
   Function *HWID = GenXIntrinsic::getGenXDeclaration(
       F.getParent(), llvm::GenXIntrinsic::genx_get_hwid, {});
   auto *HWIDCall = IRB.CreateCall(HWID);
-  auto *ThreadOffset = IRB.getInt32(visa::StackPerThreadSVM);
+  // TODO: revisit offset for scratch if it will be needed.
+  auto *ThreadOffset =
+      IRB.getInt32(UseGlobalMem ? BEConf->getStatelessPrivateMemSize()
+                                : visa::StackPerThreadScratch);
   auto *Mul = IRB.CreateMul(HWIDCall, ThreadOffset);
   auto *MulCasted = IRB.CreateZExt(Mul, IRB.getInt64Ty());
 
@@ -306,7 +330,7 @@ void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
       Sp = ReadVal.second;
       Arg.replaceAllUsesWith(ReadVal.first);
     } else {
-      auto *ArgRegType = VectorType::get(
+      auto *ArgRegType = IGCLLVM::FixedVectorType::get(
           ArgScalarType,
           ArgRegSize / (DL->getTypeSizeInBits(ArgScalarType) / genx::ByteBits));
       auto *ArgRead = buildReadPredefReg(PreDefined_Vars::PREDEFINED_ARG, IRB,
@@ -315,7 +339,7 @@ void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
       if (Arg.getType()->getScalarType()->isIntegerTy(1)) {
         IGC_ASSERT(isa<VectorType>(Arg.getType()));
         ArgRead = cast<Instruction>(IRB.CreateTruncOrBitCast(
-            ArgRead, VectorType::get(
+            ArgRead, IGCLLVM::FixedVectorType::get(
                          IRB.getIntNTy(
                              cast<VectorType>(Arg.getType())->getNumElements()),
                          1)));
@@ -378,11 +402,16 @@ void GenXPrologEpilogInsertion::generateFunctionEpilog(Function &F,
           // FIXME: consider calculating offset manually to not waste
           // GRF space on struct padding
           Offset = DL->getStructLayout(StructTy)->getElementOffset(IdxVal);
-        else if (auto *SeqTy =
-                     dyn_cast<SequentialType>(InsVal->getOperand(0)->getType()))
+        else if (auto *ArrTy =
+                     dyn_cast<ArrayType>(InsVal->getOperand(0)->getType()))
           Offset =
-              (DL->getTypeSizeInBits(SeqTy->getScalarType()) / genx::ByteBits) *
+              (DL->getTypeSizeInBits(ArrTy->getScalarType()) / genx::ByteBits) *
               IdxVal;
+        else if (auto* VecTy =
+            dyn_cast<VectorType>(InsVal->getOperand(0)->getType()))
+            Offset =
+            (DL->getTypeSizeInBits(VecTy->getScalarType()) / genx::ByteBits) *
+            IdxVal;
         else
           IGC_ASSERT_MESSAGE(0, "Unsupported type to extract from stackcall");
       }
@@ -393,7 +422,7 @@ void GenXPrologEpilogInsertion::generateFunctionEpilog(Function &F,
               RetRegSize) {
         RetBase = push(Ins, IRB, RetBase);
       } else {
-        auto *RetRegType = VectorType::get(
+        auto *RetRegType = IGCLLVM::FixedVectorType::get(
             Ins->getType()->getScalarType(),
             RetRegSize /
                 (DL->getTypeSizeInBits(Ins->getType()->getScalarType()) /
@@ -426,13 +455,13 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
       IGC_ASSERT(isa<VectorType>(Arg->getType()));
       Arg = IRB.CreateBitOrPointerCast(
           Arg,
-          VectorType::get(
+          IGCLLVM::FixedVectorType::get(
               IRB.getIntNTy(cast<VectorType>(Arg->getType())->getNumElements()),
               1));
     }
     Offset += calcPadding(Offset, ST->getGRFWidth());
     auto ArgSize = DL->getTypeSizeInBits(Arg->getType()) / genx::ByteBits;
-    auto *ArgRegType = VectorType::get(
+    auto *ArgRegType = IGCLLVM::FixedVectorType::get(
         Arg->getType()->getScalarType(),
         ArgRegSize / (DL->getTypeSizeInBits(Arg->getType()->getScalarType()) /
                       genx::ByteBits));
@@ -518,17 +547,21 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
           // FIXME: consider calculating offset manually to not waste
           // GRF space on struct padding
           Offset = DL->getStructLayout(StructTy)->getElementOffset(IdxVal);
-        else if (auto *SeqTy = dyn_cast<SequentialType>(CI->getType()))
+        else if (auto *ArrTy = dyn_cast<ArrayType>(CI->getType()))
           Offset =
-              (DL->getTypeSizeInBits(SeqTy->getScalarType()) / genx::ByteBits) *
+              (DL->getTypeSizeInBits(ArrTy->getScalarType()) / genx::ByteBits) *
               IdxVal;
+        else if (auto* VecTy = dyn_cast<VectorType>(CI->getType()))
+            Offset =
+            (DL->getTypeSizeInBits(VecTy->getScalarType()) / genx::ByteBits) *
+            IdxVal;
         else
           IGC_ASSERT_MESSAGE(0, "Unsupported type to extract from stackcall");
       }
       unsigned NumElems = 1;
       if (auto *VT = dyn_cast<VectorType>(ActualRet->getType()))
         NumElems = VT->getNumElements();
-      auto *RetRegType = VectorType::get(
+      auto *RetRegType = IGCLLVM::FixedVectorType::get(
           ActualRet->getType()->getScalarType(),
           RetRegSize /
               (DL->getTypeSizeInBits(ActualRet->getType()->getScalarType()) /
@@ -578,6 +611,15 @@ void GenXPrologEpilogInsertion::generateAlloca(CallInst *CI) {
   IGC_ASSERT(AllocaOffset % visa::BytesPerSVMPtr == 0);
   PrivMemSize += AllocaOffset;
 
+  if (PrivMemSize > (UseGlobalMem ? BEConf->getStatelessPrivateMemSize()
+                                  : visa::StackPerThreadScratch)) {
+    DiagnosticInfoPrologEpilogInsertion Warn{
+        CI->getFunction()->getName() +
+            " frame allocation size is too big for TPM",
+        DS_Warning};
+    CI->getContext().diagnose(Warn);
+  }
+
   buildWritePredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB, Add);
   CI->replaceAllUsesWith(AllocaBase);
   CI->eraseFromParent();
@@ -585,11 +627,11 @@ void GenXPrologEpilogInsertion::generateAlloca(CallInst *CI) {
 
 Value *GenXPrologEpilogInsertion::push(Value *V, IRBuilder<> &IRB, Value *InitSP) {
   if (!isa<VectorType>(V->getType()))
-    V = IRB.CreateBitCast(V, VectorType::get(V->getType()->getScalarType(), 1));
+    V = IRB.CreateBitCast(V, IGCLLVM::FixedVectorType::get(V->getType()->getScalarType(), 1));
   if (V->getType()->getScalarType()->isIntegerTy(1)) {
     IGC_ASSERT(isa<VectorType>(V->getType()));
     V = IRB.CreateBitOrPointerCast(
-        V, VectorType::get(IRB.getInt8Ty(),
+        V, IGCLLVM::FixedVectorType::get(IRB.getInt8Ty(),
                            cast<VectorType>(V->getType())->getNumElements() /
                                genx::ByteBits));
   }
@@ -601,7 +643,7 @@ Value *GenXPrologEpilogInsertion::push(Value *V, IRBuilder<> &IRB, Value *InitSP
     if (ByteSize > BytesLeft && BytesLeft && Width == 1)
       ByteSize = BytesLeft;
     while (BytesLeft >= ByteSize) {
-      auto *CurReadType = VectorType::get(
+      auto *CurReadType = IGCLLVM::FixedVectorType::get(
           V->getType()->getScalarType(),
           ByteSize / (DL->getTypeSizeInBits(V->getType()->getScalarType()) /
                       genx::ByteBits));
@@ -632,12 +674,12 @@ std::pair<Instruction *, Value *>
 GenXPrologEpilogInsertion::pop(Type *Ty, IRBuilder<> &IRB, Value *InitSP) {
   auto *OrigTy = Ty;
   if (!isa<VectorType>(Ty))
-    Ty = VectorType::get(Ty, 1);
+    Ty = IGCLLVM::FixedVectorType::get(Ty, 1);
   unsigned BytesLeft = DL->getTypeSizeInBits(Ty) / genx::ByteBits;
   unsigned Offset = 0;
   if (Ty->getScalarType()->isIntegerTy(1)) {
     IGC_ASSERT(isa<VectorType>(Ty));
-    Ty = VectorType::get(IRB.getInt8Ty(),
+    Ty = IGCLLVM::FixedVectorType::get(IRB.getInt8Ty(),
                          cast<VectorType>(Ty)->getNumElements() /
                              genx::ByteBits);
   }
@@ -648,7 +690,7 @@ GenXPrologEpilogInsertion::pop(Type *Ty, IRBuilder<> &IRB, Value *InitSP) {
     if (ByteSize > BytesLeft && BytesLeft && Width == 1)
       ByteSize = BytesLeft;
     while (BytesLeft >= ByteSize) {
-      auto *CurLdType = VectorType::get(
+      auto *CurLdType = IGCLLVM::FixedVectorType::get(
           Ty->getScalarType(),
           ByteSize /
               (Ty->getScalarType()->getPrimitiveSizeInBits() / genx::ByteBits));
@@ -720,7 +762,7 @@ Instruction *GenXPrologEpilogInsertion::buildReadPredefRegNoRegion(
   Function *RegReadIntr = GenXIntrinsic::getGenXDeclaration(
       IRB.GetInsertPoint()->getModule(),
       llvm::GenXIntrinsic::genx_read_predef_reg,
-      {(isa<VectorType>(Ty) ? Ty : VectorType::get(Ty, 1)), Dep->getType()});
+      {(isa<VectorType>(Ty) ? Ty : IGCLLVM::FixedVectorType::get(Ty, 1)), Dep->getType()});
   auto *RegRead =
       IRB.CreateCall(RegReadIntr, {IRB.getInt32(RegID), Dep});
   return RegRead;

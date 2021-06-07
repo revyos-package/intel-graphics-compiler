@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -35,7 +19,6 @@ IN THE SOFTWARE.
 #include <llvm/IR/InstVisitor.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/Support/raw_ostream.h>
-#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
 
@@ -165,7 +148,7 @@ bool GenSimplification::simplifyVectorPHINodeCase2(PHINode& PN) const {
 
     Type* Ty = PN.getType();
     Type* EltTy = Ty->getScalarType();
-    unsigned NumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements();
+    unsigned NumElts = (unsigned)cast<VectorType>(Ty)->getNumElements();
 
     SmallVector<Value*, 8> Lanes;
     SmallVector<SmallVector<Value*, 8>, 4> Values;
@@ -239,7 +222,7 @@ void GenSimplification::visitPHINode(PHINode& PN) {
 void GenSimplification::visitExtractElement(ExtractElementInst& EEI) {
     // Skip non-2-element vector.
     Value* Vec = EEI.getVectorOperand();
-    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(Vec->getType());
+    VectorType* VTy = cast<VectorType>(Vec->getType());
     if (VTy->getNumElements() != 2)
         return;
 

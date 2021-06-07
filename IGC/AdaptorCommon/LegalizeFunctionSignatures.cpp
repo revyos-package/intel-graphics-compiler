@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2018-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -156,7 +140,7 @@ inline Type* LegalizedIntVectorType(Module& M, const Type* const oldTy)
     else if (size <= 64) newSize = 64;
     else IGC_ASSERT_MESSAGE(0, "Currently don't support upscaling int sizes > 64 bits");
 
-    return IGCLLVM::FixedVectorType::get(IntegerType::get(M.getContext(), newSize), (unsigned)cast<IGCLLVM::FixedVectorType>(oldTy)->getNumElements());
+    return IGCLLVM::FixedVectorType::get(IntegerType::get(M.getContext(), newSize), (unsigned)cast<VectorType>(oldTy)->getNumElements());
 }
 
 void LegalizeFunctionSignatures::FixFunctionSignatures()
@@ -426,8 +410,9 @@ void LegalizeFunctionSignatures::FixCallInstruction(CallInst* callInst)
         unsigned opIdx = 0;
         if (returnPtr)
         {
-            // Add "noalias" to return argument at callsite
+            // Add "noalias" and "sret" to return argument at callsite
             NewArgAttrs[opIdx] = AttributeSet().addAttribute(callInst->getContext(), llvm::Attribute::AttrKind::NoAlias);
+            NewArgAttrs[opIdx] = AttributeSet().addAttribute(callInst->getContext(), llvm::Attribute::AttrKind::StructRet);
             opIdx++;
         }
         for (unsigned i = 0; i < callInst->getNumArgOperands(); i++, opIdx++)
@@ -478,8 +463,9 @@ Function* LegalizeFunctionSignatures::CloneFunctionSignature(Type* ReturnType,
     if (changedRetVal)
     {
         newIter->setName("retval");
-        // Add "noalias" to the return argument
+        // Add "noalias" and "sret" to the return argument
         NewArgAttrs[newIter->getArgNo()] = AttributeSet().addAttribute(pNewFunc->getContext(), llvm::Attribute::AttrKind::NoAlias);
+        NewArgAttrs[newIter->getArgNo()] = AttributeSet().addAttribute(pNewFunc->getContext(), llvm::Attribute::AttrKind::StructRet);
         newIter++;
     }
     for (auto ai = pOldFunc->arg_begin(), ae = pOldFunc->arg_end(); ai != ae; ai++, newIter++)

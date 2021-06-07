@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -425,7 +409,7 @@ namespace IGC
         unsigned int numElements = 1;
         if (baseType->isVectorTy())
         {
-            numElements = (unsigned)cast<IGCLLVM::FixedVectorType>(baseType)->getNumElements();
+            numElements = (unsigned)cast<VectorType>(baseType)->getNumElements();
             baseType = cast<VectorType>(baseType)->getElementType();
         }
 
@@ -1732,6 +1716,13 @@ namespace IGC
         m_ConstantBufferLength = iSTD::Align(m_ConstantBufferLength, getGRFSize());
 
         CreateInlineSamplerAnnotations();
+        // Currently we can't support inline sampler in zebin
+        // assertion tests if we force to EnableZEBinary but encounter inline sampler
+        IGC_ASSERT_MESSAGE(!IGC_IS_FLAG_ENABLED(EnableZEBinary) || !m_kernelInfo.m_HasInlineVmeSamplers,
+            "ZEBin: Inline sampler unsupported");
+        // fall back to patch-token if ZEBinary is enabled by CodeGenContext::CompOptions
+        if (m_Context->getCompilerOption().EnableZEBinary && m_kernelInfo.m_HasInlineVmeSamplers)
+            m_Context->getCompilerOption().EnableZEBinary = false;
 
         // Handle kernel reflection
         CreateKernelArgInfo();

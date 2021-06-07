@@ -50,6 +50,7 @@ namespace vISA
             {
                 return std::abs((int)lastUse - (int)firstDef);
             };
+            bool isSendDst = false;
         };
 
         std::unordered_map<G4_Declare*, Data> dclData;
@@ -61,6 +62,9 @@ namespace vISA
         bool heuristic(G4_Declare* dcl, Data& d);
         bool isDclCandidate(G4_Declare* dcl);
         void gatherCandidates();
+
+        template<class T>
+        G4_Declare* getDclForRgn(T* rgn, G4_Declare* newTopDcl);
 
     public:
         SplitAlignedScalars(GlobalRA& g) : gra(g), kernel(g.kernel)

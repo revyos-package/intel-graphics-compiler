@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -224,7 +208,7 @@ static void checkInsertExtractMatch(InsertElementInst* insertInst, Value* base, 
 
 static bool canReplaceInsert(InsertElementInst* insertElt)
 {
-    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(insertElt->getOperand(0)->getType());
+    VectorType* VTy = cast<VectorType>(insertElt->getOperand(0)->getType());
     ConstantInt* index = dyn_cast<ConstantInt>(insertElt->getOperand(2));
     if (!index || index->getZExtValue() != VTy->getNumElements() - 1)
     {
@@ -312,7 +296,7 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
         {
             if (load->getType()->isVectorTy() && wiAns->isUniform(load))
             {
-                srcNElts = (uint32_t)cast<IGCLLVM::FixedVectorType>(load->getType())->getNumElements();
+                srcNElts = (uint32_t)cast<VectorType>(load->getType())->getNumElements();
                 DenseMap<uint64_t, Instruction*> extractElementMap;
 
                 for (auto iter = load->user_begin(); iter != load->user_end(); iter++)
@@ -396,7 +380,7 @@ bool ConstantCoalescing::isProfitableLoad(
             (isa<LoadInst>(I) && wiAns->isUniform(I)) ?
             16 : 4;
 
-        if (cast<IGCLLVM::FixedVectorType>(LoadTy)->getNumElements() > MaxVectorInput)
+        if (cast<VectorType>(LoadTy)->getNumElements() > MaxVectorInput)
             return false;
 
         MaxEltPlus = CheckVectorElementUses(I);
@@ -1843,7 +1827,7 @@ void ConstantCoalescing::AdjustChunk(BufChunk* cov_chunk, uint start_adj, uint s
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(originalType)->getNumElements(); i++)
+        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1907,7 +1891,7 @@ void ConstantCoalescing::MoveExtracts(BufChunk* cov_chunk, Instruction* load, ui
             irBuilder->SetInsertPoint(load->getNextNode());
             Type* vecType = load->getType();
             Value* vec = UndefValue::get(vecType);
-            for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(vecType)->getNumElements(); i++)
+            for (unsigned i = 0; i < cast<VectorType>(vecType)->getNumElements(); i++)
             {
                 Value* channel = irBuilder->CreateExtractElement(
                     cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -1971,7 +1955,7 @@ void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(originalType)->getNumElements(); i++)
+        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i));
@@ -2408,7 +2392,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
         if (dstTy->isVectorTy())
         {
             result = UndefValue::get(dstTy);
-            for (uint i = 0; i < cast<IGCLLVM::FixedVectorType>(dstTy)->getNumElements(); i++)
+            for (uint i = 0; i < cast<VectorType>(dstTy)->getNumElements(); i++)
             {
                 Value* tmpData = ExtractFromSamplerData(cast<VectorType>(dstTy)->getElementType(), i);
                 result = irBuilder->CreateInsertElement(result, tmpData, irBuilder->getInt32(i));

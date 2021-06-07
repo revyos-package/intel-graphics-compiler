@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -277,65 +261,40 @@ void GenericAddressDynamicResolution::resolveGAS(Instruction& I, Value* pointerO
     bool hasPrivate = !m_ctx->platform.canForcePrivateToGlobal();
     bool hasLocal = !m_ctx->hasNoLocalToGenericCast();
 
+    auto createBlock = [&](const Twine& BlockName, const Twine& LoadName, IGC::ADDRESS_SPACE addressSpace, Value*& load)
+    {
+        BasicBlock* BB = BasicBlock::Create(I.getContext(), BlockName, convergeBlock->getParent(), convergeBlock);
+        builder.SetInsertPoint(BB);
+        PointerType* ptrType = pointerType->getElementType()->getPointerTo(addressSpace);
+        Value* ptr = builder.CreateAddrSpaceCast(pointerOperand, ptrType);
+
+        if (LoadInst* LI = dyn_cast<LoadInst>(&I))
+        {
+            load = builder.CreateAlignedLoad(ptr, getAlign(LI->getAlignment()), LI->isVolatile(), LoadName);
+        }
+        else if (StoreInst* SI = dyn_cast<StoreInst>(&I))
+        {
+            builder.CreateAlignedStore(I.getOperand(0), ptr, getAlign(SI->getAlignment()), SI->isVolatile());
+        }
+
+        builder.CreateBr(convergeBlock);
+        return BB;
+    };
+
     // Private branch
     if (hasPrivate)
     {
-        privateBlock = BasicBlock::Create(I.getContext(), "PrivateBlock", convergeBlock->getParent(), convergeBlock);
-        {
-            IRBuilder<> privateBuilder(privateBlock);
-            PointerType* ptrType = pointerType->getElementType()->getPointerTo(ADDRESS_SPACE_PRIVATE);
-            Value* privatePtr = privateBuilder.CreateAddrSpaceCast(pointerOperand, ptrType);
-
-            if (LoadInst* LI = dyn_cast<LoadInst>(&I))
-            {
-                privateLoad = privateBuilder.CreateAlignedLoad(privatePtr, getAlign(LI->getAlignment()), LI->isVolatile(), "privateLoad");
-            }
-            else if (StoreInst* SI = dyn_cast<StoreInst>(&I))
-            {
-                privateBuilder.CreateAlignedStore(I.getOperand(0), privatePtr, getAlign(SI->getAlignment()), SI->isVolatile());
-            }
-            privateBuilder.CreateBr(convergeBlock);
-        }
+        privateBlock = createBlock("PrivateBlock", "privateLoad", ADDRESS_SPACE_PRIVATE, privateLoad);
     }
 
     // Local Branch
     if (hasLocal)
     {
-        localBlock = BasicBlock::Create(I.getContext(), "LocalBlock", convergeBlock->getParent(), convergeBlock);
-        // Local
-        {
-            IRBuilder<> localBuilder(localBlock);
-            PointerType* localPtrType = pointerType->getElementType()->getPointerTo(ADDRESS_SPACE_LOCAL);
-            Value* localPtr = localBuilder.CreateAddrSpaceCast(pointerOperand, localPtrType);
-            if (LoadInst* LI = dyn_cast<LoadInst>(&I))
-            {
-                localLoad = localBuilder.CreateAlignedLoad(localPtr, getAlign(LI->getAlignment()), LI->isVolatile(), "localLoad");
-            }
-            else if (StoreInst* SI = dyn_cast<StoreInst>(&I))
-            {
-                localBuilder.CreateAlignedStore(I.getOperand(0), localPtr, getAlign(SI->getAlignment()), SI->isVolatile());
-            }
-            localBuilder.CreateBr(convergeBlock);
-        }
+        localBlock = createBlock("LocalBlock", "localLoad", ADDRESS_SPACE_LOCAL, localLoad);
     }
 
     // Global Branch
-    globalBlock = BasicBlock::Create(I.getContext(), "GlobalBlock", convergeBlock->getParent(), convergeBlock);
-    {
-        IRBuilder<> globalBuilder(globalBlock);
-        PointerType* ptrType = pointerType->getElementType()->getPointerTo(ADDRESS_SPACE_GLOBAL);
-        Value* globalPtr = globalBuilder.CreateAddrSpaceCast(pointerOperand, ptrType);
-
-        if (LoadInst* LI = dyn_cast<LoadInst>(&I))
-        {
-            globalLoad = globalBuilder.CreateAlignedLoad(globalPtr, getAlign(LI->getAlignment()), LI->isVolatile(), "globalLoad");
-        }
-        else if (StoreInst* SI = dyn_cast<StoreInst>(&I))
-        {
-            globalBuilder.CreateAlignedStore(I.getOperand(0), globalPtr, getAlign(SI->getAlignment()), SI->isVolatile());
-        }
-        globalBuilder.CreateBr(convergeBlock);
-    }
+    globalBlock = createBlock("GlobalBlock", "globalLoad", ADDRESS_SPACE_GLOBAL, globalLoad);
 
     currentBlock->getTerminator()->eraseFromParent();
     builder.SetInsertPoint(currentBlock);

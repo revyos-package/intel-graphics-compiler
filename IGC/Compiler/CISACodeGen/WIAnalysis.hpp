@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -125,8 +109,8 @@ namespace IGC
         /// @brief Returns True if 'val' is uniform
         /// @param val llvm::Value to test
         bool isUniform(const llvm::Value* val) const;
-        bool isWorkGroupOrGlobalUniform(const llvm::Value* val);
-        bool isGlobalUniform(const llvm::Value* val);
+        bool isWorkGroupOrGlobalUniform(const llvm::Value* val) const;
+        bool isGlobalUniform(const llvm::Value* val) const;
 
         /// incremental update of the dep-map on individual value
         /// without propagation. Exposed for later pass.
@@ -136,10 +120,31 @@ namespace IGC
         }
 
         /// check if a value is defined inside divergent control-flow
-        bool insideDivergentCF(const llvm::Value* val)
+        bool insideDivergentCF(const llvm::Value* val) const
         {
             return(llvm::isa<llvm::Instruction>(val) &&
                 m_ctrlBranches.find(llvm::cast<llvm::Instruction>(val)->getParent()) != m_ctrlBranches.end());
+        }
+
+        /// check if a value is defined inside thread divergent control-flow.
+        /// This will return false if the value is in the influence region
+        /// of only global and workgroup uniform branches.
+        bool insideThreadDivergentCF(const llvm::Value* val) const
+        {
+            if (auto* I = llvm::dyn_cast<llvm::Instruction>(val))
+            {
+                auto II = m_ctrlBranches.find(I->getParent());
+                if (II == m_ctrlBranches.end())
+                    return false;
+
+                for (auto* BI : II->second)
+                {
+                    if (!isWorkGroupOrGlobalUniform(BI))
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         void releaseMemory()
@@ -363,7 +368,12 @@ namespace IGC
         void incUpdateDepend(const llvm::Value* val, WIDependancy dep);
 
         /// check if a value is defined inside divergent control-flow
-        bool insideDivergentCF(const llvm::Value* val);
+        bool insideDivergentCF(const llvm::Value* val) const;
+
+        /// check if a value is defined inside thread divergent control-flow
+        /// This will return false if the value is in the influence region
+        /// of only global and workgroup uniform branches.
+        bool insideThreadDivergentCF(const llvm::Value* val) const;
 
         void releaseMemory() override
         {

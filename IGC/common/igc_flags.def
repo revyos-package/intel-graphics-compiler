@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -105,10 +89,12 @@ DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing_RT,   false, "Setting this to 
 DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing_Sample, false, "Setting this to 1/true adds a compiler switch to disable payload coalescing optimization for Samplers only", false)
 DECLARE_IGC_REGKEY(bool, DisablePayloadCoalescing_URB,  false, "Setting this to 1/true adds a compiler switch to disable payload coalescing optimization for URB writes only", false)
 DECLARE_IGC_REGKEY(bool, DisableUniformAnalysis,        false, "Setting this to 1/true adds a compiler switch to disable uniform_analysis", false)
+DECLARE_IGC_REGKEY(bool, EnableWorkGroupUniformGoto,    false, "Setting to 1 enables generating uniform goto for work group uniform [eu fusion only]", false)
 DECLARE_IGC_REGKEY(DWORD, DisablePushConstant,           0, "Bit mask to disable push constant per shader stages. bit0 = All, Bit 1 = VS, Bit 2 = HS, Bit 3 = DS, Bit 4 = GS, Bit 5 = PS", false)
 DECLARE_IGC_REGKEY(DWORD, DisableAttributePush,          0, "Bit mask to disable push Attribute per shader stages. bit0 = All, Bit 1 = VS, Bit 2 = HS, Bit 3 = DS, Bit 4 = GS", false)
 DECLARE_IGC_REGKEY(bool, DisableSimplePushWithDynamicUniformBuffers, false,"Disable Simple Push Constants Optimization for dynamic uniform buffers.", false)
-DECLARE_IGC_REGKEY(bool, DisableStaticCheck,            false, "Disable static check to push or fold constants.", true)
+DECLARE_IGC_REGKEY(bool, DisableStaticCheck,            false, "Disable static check to push constants.", false)
+DECLARE_IGC_REGKEY(bool, DisableStaticCheckForConstantFolding,  true, "Disable static check to fold constants.", false)
 DECLARE_IGC_REGKEY(int, forcePushConstantMode,  0, "set the push constant mode, 0 is default behavior, 1 is simple push, 2 is gather constant, 3 is none/pull constants", false)
 DECLARE_IGC_REGKEY(bool, DisableConstantCoalescing,     false, "Setting this to 1/true adds a compiler switch to disable constant coalesing", false)
 DECLARE_IGC_REGKEY(bool, DisableConstantCoalescingOutOfBoundsCheck,     false, "Setting this to 1/true adds a compiler switch to disable constant coalesing out of bounds check", false)
@@ -164,7 +150,8 @@ DECLARE_IGC_REGKEY(bool, PSSIMD32HeuristicLoopAndDiscard, true, "enable PS SIMD3
 DECLARE_IGC_REGKEY(bool, EnableBlendToDiscard,          true,  "Enable blend to discard based on blend state.", false)
 DECLARE_IGC_REGKEY(bool, EnableBlendToFill,             true,  "Enable blend to fill based on blend state.", false)
 DECLARE_IGC_REGKEY(bool, UseTiledCSThreadOrder,         true,  "Use 4x4 disaptch for CS order when it seems beneficial", false)
-DECLARE_IGC_REGKEY(bool, EnableWaveForce32,             false,  "Force Wave to use simd32", false)
+DECLARE_IGC_REGKEY(bool, EnableWaveForce32,             false, "Force Wave to use simd32", false)
+DECLARE_IGC_REGKEY(bool, EnableMergeTransposeSLM,       false, "Transpose SLM float3 storage from 3 separate x,y,z buffers to 1 big buffer with xyz consecutively", false)
 DECLARE_IGC_REGKEY(bool, EnableSLMConstProp,            true,   "Enable SLM constant propagation (compute shader only).", false)
 DECLARE_IGC_REGKEY(bool, EnableStatelessToStatefull,    true,  "Enable Stateless To Statefull transformation for global and constant address space in OpenCL kernels", false)
 DECLARE_IGC_REGKEY(bool, EnableStatefulToken,           true,  "Enable generating patch token to indicate a ptr argument is fully converted to stateful (temporary)", false)
@@ -236,7 +223,7 @@ DECLARE_IGC_REGKEY(bool, EnableRTmaskPso,               true,  "Enable render ta
 DECLARE_IGC_REGKEY(DWORD, MSAAClearedKernel,            0,     "Insert the discard code for MSAA_MSC_Cleared kernels. 2/4/8/16", false)
 DECLARE_IGC_REGKEY(bool, EnablerReadSuppressionWA,    true, "Enable read suppression WA for the send and indirect access", false)
 DECLARE_IGC_REGKEY(DWORD, RSWARegNum,    0, "dummy register used for EnablerReadSuppressionWA", false)
-DECLARE_IGC_REGKEY(bool, EnableCleanupInputIR,          false, "Enable cleaning up input IR under -O0 by aggressively inlining wrapper functions", false)
+DECLARE_IGC_REGKEY(bool, EnableDivergentBarrierCheck,   false,  "Uses WIAnalysis to find barriers in divergent flow control. May have false positives.", false)
 
 DECLARE_IGC_GROUP("Shader dumping")
 DECLARE_IGC_REGKEY(bool, EnableCosDump, false, "Enable cos dump", true)
@@ -244,8 +231,9 @@ DECLARE_IGC_REGKEY(bool, EnableCisDump, false, "Enable cis dump", true)
 DECLARE_IGC_REGKEY(bool, DumpLLVMIR,                    false, "dump LLVM IR", true)
 DECLARE_IGC_REGKEY(bool, QualityMetricsEnable,          false, "Enable Quality Metrics for IGC", true)
 DECLARE_IGC_REGKEY(bool, ShaderDumpEnable,              false, "dump LLVM IR, visaasm, and GenISA", true)
-DECLARE_IGC_REGKEY(bool, ElfDumpEnable,                 false, "dump ELF file", true)
 DECLARE_IGC_REGKEY(bool, ShaderDumpEnableAll,           false, "dump all LLVM IR passes, visaasm, and GenISA", true)
+DECLARE_IGC_REGKEY(DWORD, ShaderDumpEnableG4,           false, "same as ShaderDumpEnable but adds G4 dumps (0 = off, 1 = some, 2 = all)", 0)
+DECLARE_IGC_REGKEY(bool, ElfDumpEnable,                 false, "dump ELF file", true)
 DECLARE_IGC_REGKEY(bool, ShowFullVectorsInShaderDumps,  false, "print all elements of vectors in ShaderDumps, can dramatically increase ShaderDumps size", true)
 DECLARE_IGC_REGKEY(debugString, PrintAfter,             0,     "Take either all or comma/semicolon-separated list of pass names. If set, enable print LLVM IR after the given pass is done (mimic llvm print-after)", true)
 DECLARE_IGC_REGKEY(debugString, PrintBefore,            0,     "Take either all or comma/semicolon-separated list of pass names. If set, enable print LLVM IR before the given pass is done (mimic llvm print-before)", true)
@@ -422,7 +410,7 @@ DECLARE_IGC_REGKEY(bool, SaveRestoreIR,                 true,  "Save/Restore IR 
 DECLARE_IGC_REGKEY(DWORD, CodePatch,                    2,     "Enable Pixel Shader code patching to directly emit code after stitching", false)
 DECLARE_IGC_REGKEY(DWORD, CodePatchLimit,               0,     "Debug CodePatch via limiting the number of shader been patched", false)
 DECLARE_IGC_REGKEY(DWORD, CodePatchExperiments,         0,      "Experiment with code patching when != 0", false)
-DECLARE_IGC_REGKEY(DWORD, CodePatchFilter,             0xF,     "Filter out unsupported patterns", false)
+DECLARE_IGC_REGKEY(DWORD, CodePatchFilter,             0x7,     "Filter out unsupported patterns", false)
 DECLARE_IGC_REGKEY(DWORD, FirstStagedSIMD,              0,      "Force Pixel shader to be 1: FastSIMD (SIMD8), 2: BestSIMD (SIMD16 or SIMD8), 3: FatestSIMD (SIMD8 opt off)", false)
 DECLARE_IGC_REGKEY(DWORD, FastestS1Experiments,         0,      "Select configs for fastest compilation by bits.", false)
 DECLARE_IGC_REGKEY(bool, ForceFastestSIMD, false,  "Force pixel shader to return SIMD8 as fast as possible.", false)
@@ -465,6 +453,7 @@ DECLARE_IGC_REGKEY(DWORD, AllocaRAPressureThreshold, 500, "The threshold for the
 DECLARE_IGC_REGKEY(bool, UseOldSubRoutineAugIntf, false, "Use the old subroutine augmentation code which is slower", false)
 DECLARE_IGC_REGKEY(bool, FastCompileRA, false, "Provide the fast compilatoin path for RA, fail safe at first iteration", false)
 DECLARE_IGC_REGKEY(bool, HybridRAWithSpill, false, "Did Hybrid RA with Spill", false)
+DECLARE_IGC_REGKEY(bool, StripDebugInfo, false, "Strip debug info from llvm IR lowered from input to IGC", false)
 
 DECLARE_IGC_REGKEY(bool, EnableZEBinary, false,  "Enable output in ZE binary format", true)
 DECLARE_IGC_REGKEY(bool, AllocateZeroInitializedVarsInBss, false,  "Allocate zero initialized global variables in .bss section in ZEBinary", true)

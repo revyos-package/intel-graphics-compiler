@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -47,10 +31,12 @@ IN THE SOFTWARE.
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "Probe/Assertion.h"
+#include <llvm/IR/PatternMatch.h>
 
 using namespace llvm;
 using namespace IGC;
 using namespace IGC::IGCMD;
+using namespace llvm::PatternMatch;
 
 namespace {
 
@@ -755,12 +741,9 @@ bool GASResolving::resolveMemoryFromHost(Function& F) const {
 
                 // currently recognize only these ones
                 // in fact intrinsics should be marked as read-only
-                // in general we should not get stacksave/restore intrinsics in input IR so they are rather a WA
                 if (auto II = dyn_cast<IntrinsicInst>(CI)) {
                     if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
-                        II->getIntrinsicID() == Intrinsic::lifetime_end ||
-                        II->getIntrinsicID() == Intrinsic::stacksave ||
-                        II->getIntrinsicID() == Intrinsic::stackrestore)
+                        II->getIntrinsicID() == Intrinsic::lifetime_end)
                         continue;
                 }
 
@@ -965,6 +948,7 @@ namespace IGC
         void updateFunctionArgs(Function* oldFunc, Function* newFunc, GenericPointerArgs& newArgs);
         void updateAllUsesWithNewFunction(FuncToUpdate& f);
         void FixAddressSpaceInAllUses(Value* ptr, uint newAS, uint oldAS, AddrSpaceCastInst* recoverASC);
+        void checkLocalToGenericCast(llvm::Module& M);
     };
 } // End anonymous namespace
 
@@ -983,6 +967,43 @@ namespace IGC
     IGC_INITIALIZE_PASS_DEPENDENCY(MetaDataUtilsWrapper)
     IGC_INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
     IGC_INITIALIZE_PASS_END(LowerGPCallArg, GP_PASS_FLAG, GP_PASS_DESC, GP_PASS_CFG_ONLY, GP_PASS_ANALYSIS)
+}
+
+void LowerGPCallArg::checkLocalToGenericCast(llvm::Module& M)
+{
+    for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
+    {
+        Function* func = &(*I);
+        // ToDo: replace with generic checks for extern functions
+        if (func->hasFnAttribute("IndirectlyCalled"))
+        {
+            for (auto& arg : func->args())
+            {
+                PointerType* argPointerType = dyn_cast<PointerType>(arg.getType());
+                if (argPointerType && argPointerType->getAddressSpace() == ADDRESS_SPACE_GENERIC)
+                {
+                    return;
+                }
+            }
+        }
+        for (auto FI = inst_begin(func), FE = inst_end(func); FI != FE; ++FI)
+        {
+            auto addrCast = dyn_cast<AddrSpaceCastInst>(&(*FI));
+            if (addrCast && addrCast->getDestAddressSpace() == ADDRESS_SPACE_GENERIC &&
+                addrCast->getSrcAddressSpace() == ADDRESS_SPACE_LOCAL)
+            {
+                return;
+            }
+            Value *Ptr = nullptr;
+            if (match(&(*FI), m_PtrToInt(m_Value(Ptr))) && Ptr->getType()->getPointerAddressSpace() == ADDRESS_SPACE_LOCAL)
+            {
+                return;
+            }
+        }
+    }
+
+    // ToDo: enable in separate check-in
+    //ctx->getModuleMetaData()->hasNoLocalToGenericCast = true;
 }
 
 
@@ -1045,7 +1066,10 @@ bool LowerGPCallArg::runOnModule(llvm::Module& M)
 
     // If there are no functions to update, finish
     if (funcsToUpdate.empty())
+    {
+        checkLocalToGenericCast(M);
         return false;
+    }
 
     // Step 2: update functions and lower their generic pointer arguments
     // to their non-generic address space.
@@ -1174,6 +1198,7 @@ bool LowerGPCallArg::runOnModule(llvm::Module& M)
         }
     }
 
+    checkLocalToGenericCast(M);
     return true;
 }
 
@@ -1225,6 +1250,19 @@ void LowerGPCallArg::FixAddressSpaceInAllUses(Value* ptr, uint newAS, uint oldAS
         nextUI++;
         Instruction* inst = dyn_cast<Instruction>(*UI);
         PointerType* instType = nullptr;
+
+        if (auto* asc = dyn_cast<AddrSpaceCastInst>(inst))
+        {
+            // When mutating AS cast and another AS cast is using mutated one,
+            // it may result in same space AS cast which is invalid,
+            // so we replace all uses of invalid cast with its operand as they have same AS
+            if (asc->getDestTy() == asc->getSrcTy())
+            {
+                asc->replaceAllUsesWith(ptr);
+                asc->eraseFromParent();
+                continue;
+            }
+        }
 
         if (StoreInst* storeInst = dyn_cast<StoreInst>(inst))
         {

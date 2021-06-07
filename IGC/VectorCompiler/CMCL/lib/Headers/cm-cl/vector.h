@@ -103,9 +103,16 @@ public:
     return *this;
   }
 
-  vector operator~() {
-    ~impl;
-    return *this;
+  vector operator~() const {
+    return ~impl;
+  }
+
+  vector operator-() const {
+    return -impl;
+  }
+
+  vector operator+() const {
+    return impl;
   }
 
   vector operator&=(vector rhs) {

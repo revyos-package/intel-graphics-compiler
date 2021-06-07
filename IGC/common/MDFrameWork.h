@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2015-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -306,8 +290,8 @@ namespace IGC
         bool forcedVISAPreRAScheduler = false;
         // disables dispatch along y and tiled order optimizations
         bool disableLocalIdOrderOptimizations = false;
-        // force enables dispatch along y optimization
-        bool dispatchAlongY = false;
+        // force disables dispatch along y optimization
+        bool disableDispatchAlongY = false;
         // If nullopt, then there is no requirement
         std::optional<ThreadIDLayout> neededThreadIdLayout;
     };
@@ -429,6 +413,13 @@ namespace IGC
         int PointeeBufferIndex;
     };
 
+    struct FunctionAddressRelocInfo
+    {
+        unsigned BufferOffset;
+        unsigned PointerSize;
+        std::string FunctionSymbol;
+    };
+
     struct ShaderData
     {
         unsigned int numReplicas = 0;
@@ -459,6 +450,8 @@ namespace IGC
         std::vector<InlineProgramScopeBuffer> inlineGlobalBuffers;
         std::vector<PointerProgramBinaryInfo> GlobalPointerProgramBinaryInfos;
         std::vector<PointerProgramBinaryInfo> ConstantPointerProgramBinaryInfos;
+        std::vector<FunctionAddressRelocInfo> GlobalBufferFunctionAddressRelocInfo;
+        std::vector<FunctionAddressRelocInfo> ConstantBufferFunctionAddressRelocInfo;
         unsigned int MinNOSPushConstantSize = 0;
         std::map<llvm::GlobalVariable*, int> inlineProgramScopeOffsets;
         ShaderData shaderData;
@@ -474,6 +467,7 @@ namespace IGC
         unsigned int privateMemoryPerWI = 0;
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};
         unsigned int computedDepthMode = 0; //Defaults to 0 meaning depth mode is off
+        bool hasNoLocalToGenericCast = false;  // This is programmed by ResolveGAS pass later.
     };
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
     void deserialize(IGC::ModuleMetaData &deserializedMD, const llvm::Module* module);

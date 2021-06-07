@@ -1,34 +1,17 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-//
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
+/*========================== begin_copyright_notice ============================
 
+This file is distributed under the University of Illinois Open Source License.
+See LICENSE.TXT for details.
+
+============================= end_copyright_notice ===========================*/
 
 ///////////////////////////////////////////////////////////////////////////////
 // This file is based on llvm-3.4\lib\CodeGen\AsmPrinter\DwarfDebug.cpp
@@ -2168,9 +2151,9 @@ static DebugLoc getFnDebugLoc(DebugLoc DL, const LLVMContext& Ctx)
         // Check for number of operands since the compatibility is cheap here.
         if (SP->getNumOperands() > 19)
         {
-            return DILocation::get(SP->getContext(), SP->getScopeLine(), 0, SP);
+            return DebugLoc::get(SP->getScopeLine(), 0, SP);
         }
-        return DILocation::get(SP->getContext(), SP->getLine(), 0, SP);
+        return DebugLoc::get(SP->getLine(), 0, SP);
     }
 
     return DebugLoc();
@@ -3401,6 +3384,8 @@ void DwarfDebug::writeFDEStackCall(VISAModule* m)
     write(data, ptrSize == 4 ? (uint32_t)(genOffEnd - genOffStart) :
         (uint64_t)(genOffEnd - genOffStart));
 
+    const unsigned int MovGenInstSizeInBytes = 16;
+
     // write CFA
     if (cfi.callerbefpValid)
     {
@@ -3418,7 +3403,7 @@ void DwarfDebug::writeFDEStackCall(VISAModule* m)
         writeULEB128(cfaOps[ip], GetEncodedRegNum<RegisterNumbering::GRFBase>(
             specialGRF, EmitSettings.UseNewRegisterEncoding));
         writeOffBEFP(cfaOps[ip], 0, false, false);
-        writeSameValue(cfaOps[callerFP.back().end], GetEncodedRegNum<RegisterNumbering::GRFBase>(
+        writeSameValue(cfaOps[callerFP.back().end + MovGenInstSizeInBytes], GetEncodedRegNum<RegisterNumbering::GRFBase>(
             specialGRF, EmitSettings.UseNewRegisterEncoding));
     }
 
@@ -3428,12 +3413,33 @@ void DwarfDebug::writeFDEStackCall(VISAModule* m)
         auto& retAddr = cfi.retAddr;
         for (auto& item : retAddr)
         {
+            // start live-range
             write(cfaOps[item.start], (uint8_t)llvm::dwarf::DW_CFA_expression);
             writeULEB128(cfaOps[item.start], GetEncodedRegNum<RegisterNumbering::GRFBase>(
                 numGRFs, EmitSettings.UseNewRegisterEncoding));
             writeLR(cfaOps[item.start], item, false, false);
-            writeSameValue(cfaOps[item.end], GetEncodedRegNum<RegisterNumbering::GRFBase>(
+
+            // end live-range
+            // VISA emits following:
+            // 624: ...
+            // 640: (W) mov (4|M0) r125.0<1>:ud  r59.4<4;4,1>:ud <-- restore ret %ip, and caller
+            // 656: ret (8|M0) r125.0:ud
+
+            // VISA dbg:
+            // Return addr saved at:
+            // Live intervals :
+            // (64, 640) @ Spilled(offset = 0 bytes) (off be_fp)
+
+            // As per VISA debug info, return %ip restore instruction is at offset 640 above.
+            // But when we stop at 640, we still want ret %ip to be read from frame descriptor
+            // in memory as current frame is still value. Only from offset 656 should we read
+            // ret %ip from r125 directly. This is achieved by taking offset 640 reported by
+            // VISA debug info and adding 16 to it which is size of the mov instruction.
+            write(cfaOps[item.end + MovGenInstSizeInBytes], (uint8_t)llvm::dwarf::DW_CFA_register);
+            writeULEB128(cfaOps[item.end + MovGenInstSizeInBytes], GetEncodedRegNum<RegisterNumbering::GRFBase>(
                 numGRFs, EmitSettings.UseNewRegisterEncoding));
+            writeULEB128(cfaOps[item.end + MovGenInstSizeInBytes], GetEncodedRegNum<RegisterNumbering::GRFBase>(
+                GetSpecialGRF(), EmitSettings.UseNewRegisterEncoding));
         }
     }
     else

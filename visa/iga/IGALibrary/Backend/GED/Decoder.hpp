@@ -250,6 +250,15 @@ namespace iga
         SendDesc decodeSendExDesc();
         SendDesc decodeSendDesc();
 
+        // facilitates internal decoding logic
+        struct SendDescodeInfo {
+            SFID sfid = SFID::INVALID;
+            int dstLen = -1, src0Len = -1, src1Len = -1;
+            SendDesc desc, exDesc;
+        };
+        void decodeSendInfoPreXe(SendDescodeInfo &sdi);
+        void decodeSendInfoXe(SendDescodeInfo &sdi);
+
         ///////////////////////////////////////////////////////////////////////
         // BRANCH INSTRUCTIONS
         ///////////////////////////////////////////////////////////////////////
@@ -376,10 +385,9 @@ namespace iga
                     scalingType = Type::D;
             }
 
-            dri.regRef.subRegNum = (uint16_t)binNumToSubRegNum(
+            dri.regRef.subRegNum = (uint16_t)BinaryOffsetToSubReg(
                 dri.regRef.subRegNum, dri.regName,
-                scalingType);
-
+                scalingType, m_model.platform);
 
             return dri;
         }
@@ -394,10 +402,6 @@ namespace iga
         template <SourceIndex S> bool isChanSelPacked();
 
         void decodeOptions(Instruction *inst);
-
-        // Translate Sub register from binary encoding number to asm number
-        uint32_t binNumToSubRegNum(
-            uint32_t binNum, RegName regName, Type type);
 
     protected:
         GED_MODEL                     m_gedModel;

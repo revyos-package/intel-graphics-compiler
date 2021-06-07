@@ -53,6 +53,7 @@ namespace vISA
     {
     private:
         GlobalRA& gra;
+        bool forGlobal;
 
         BankConflict setupBankAccordingToSiblingOperand(BankConflict assignedBank, unsigned offset, bool oneGRFBank);
         void setupEvenOddBankConflictsForDecls(G4_Declare * dcl_1, G4_Declare * dcl_2, unsigned offset1, unsigned offset2,
@@ -73,7 +74,7 @@ namespace vISA
     public:
         bool setupBankConflictsForKernel(bool doLocalRR, bool &threeSourceCandidate, unsigned numRegLRA, bool &highInternalConflict);
 
-        BankConflictPass(GlobalRA& g) : gra(g)
+        BankConflictPass(GlobalRA& g, bool global) : gra(g), forGlobal(global)
         {
 
         }
@@ -292,7 +293,9 @@ namespace vISA
         std::unordered_map <G4_Declare*, MaskDeclares> retDeclares;
         Mem_Manager& m;
 
-        bool updateDstMaskForScatter(G4_INST* inst, unsigned char* mask);
+        bool updateDstMaskForGather(G4_INST* inst, unsigned char* mask);
+        bool updateDstMaskForGatherRaw(G4_INST* inst, unsigned char* mask, const G4_SendDescRaw *raw);
+        bool updateDstMaskForGatherLdSt(G4_INST* inst, unsigned char* mask, const G4_SendDescLdSt *ldst);
         void updateDstMask(G4_INST* inst, bool checkCmodOnly);
         static unsigned getByteSizeFromMask(AugmentationMasks type);
         bool isDefaultMaskDcl(G4_Declare* dcl, unsigned simdSize, AugmentationMasks type);

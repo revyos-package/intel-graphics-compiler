@@ -69,16 +69,22 @@ struct GlobalsLocalizationConfig {
 private:
   // Whether every global variable must be localized.
   bool IsForced = true;
+  // Whether every vector global variable must be localized.
+  bool IsVectorForced = true;
   // How many GRF memory is allowed to be used for localization.
   LimitT Limit = NoLimit;
 
 public:
-  GlobalsLocalizationConfig(bool IsForcedIn, LimitT LimitIn)
-      : IsForced{IsForcedIn}, Limit{LimitIn} {
-    if (IsForced)
+  GlobalsLocalizationConfig(bool IsForcedIn, bool IsVectorForcedIn,
+                            LimitT LimitIn)
+      : IsForced{IsForcedIn}, IsVectorForced{IsVectorForcedIn}, Limit{LimitIn} {
+    if (IsForced || IsVectorForced)
       IGC_ASSERT_MESSAGE(
           Limit == NoLimit,
           "there can be no localization limit when localization is forced");
+    if (IsForced)
+      IGC_ASSERT_MESSAGE(IsVectorForced,
+                         "localizing every GV means localizing vectors too");
   }
 
   GlobalsLocalizationConfig() {}
@@ -86,14 +92,21 @@ public:
   // Every global variable must be localized.
   static GlobalsLocalizationConfig CreateForcedLocalization() { return {}; }
 
+  // Every global variable must be localized.
+  static GlobalsLocalizationConfig CreateForcedVectorLocalization() {
+    return {/* IsForced */ false, /* IsVectorForced */ true, NoLimit};
+  }
+
   // GlobalsLocalization is allowed to localize globals but it can use only
   // GlobalsLocalizationLimit bytes of GRF.
   static GlobalsLocalizationConfig
   CreateLocalizationWithLimit(LimitT GlobalsLocalizationLimitIn = NoLimit) {
-    return {false, GlobalsLocalizationLimitIn};
+    return {/* IsForced */ false, /* IsVectorForced */ false,
+            GlobalsLocalizationLimitIn};
   }
 
   bool isForced() const { return IsForced; }
+  bool isVectorForced() const { return IsVectorForced; }
 
   LimitT getLimit() const { return Limit; }
 };
@@ -140,6 +153,9 @@ struct GenXBackendOptions {
 
   // Non-owning pointer to workaround table.
   const WA_TABLE *WATable = nullptr;
+
+  // max private stateless memory size per thread
+  unsigned StatelessPrivateMemSize;
 
   GenXBackendOptions();
 };
@@ -230,6 +246,9 @@ public:
   bool isGlobalsLocalizationForced() const {
     return Options.GlobalsLocalization.isForced();
   }
+  bool isVectorGlobalsLocalizationForced() const {
+    return Options.GlobalsLocalization.isVectorForced();
+  }
   GlobalsLocalizationConfig::LimitT getGlobalsLocalizationLimit() const {
     return Options.GlobalsLocalization.getLimit();
   }
@@ -244,6 +263,10 @@ public:
   }
 
   bool useNewStackBuilder() const { return Options.UseNewStackBuilder; }
+
+  unsigned getStatelessPrivateMemSize() const {
+    return Options.StatelessPrivateMemSize;
+  }
 
   FunctionControl getFCtrl() const { return Options.FCtrl; }
 

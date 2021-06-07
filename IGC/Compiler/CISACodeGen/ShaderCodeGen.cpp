@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2013-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -284,12 +268,6 @@ static void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
     // need this before WIAnalysis:
     // insert phi to prevent changing of WIAnalysis result by later code-motion
     mpm.add(llvm::createLCSSAPass());
-        if (!isOptDisabled)
-    {
-        // If you want to clean up the dead-code after push optimization
-        // and IOCoalescing
-        //Passes.add(llvm::createDeadCodeEliminationPass());
-    }
     // Fixup extract value pairs.
     mpm.add(createExtractValuePairFixupPass());
 
@@ -301,8 +279,17 @@ static void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
         mpm.add(createReplaceUnsupportedIntrinsicsPass());
         // Split complex constant expression into 2 simple ones
         mpm.add(new BreakConstantExpr());
-        // Some clean up passes
+        // Expand newly created allocas
         mpm.add(createSROAPass());
+        // Run legalization pass to expand non-supported instructions
+        // like shufflevector. The code below is just copied and
+        // pasted as is.
+        bool preserveNan = !ctx.getCompilerOption().NoNaNs;
+        mpm.add(new Legalization(preserveNan));
+        // Some clean up passes.
+        mpm.add(llvm::createEarlyCSEPass());
+        mpm.add(new BreakConstantExpr());
+        mpm.add(llvm::createCFGSimplificationPass());
         mpm.add(createDeadCodeEliminationPass());
         // Create functions groups after unmasked functions inlining
         mpm.add(createGenXCodeGenModulePass());
@@ -635,17 +622,12 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     {
         mpm.add(createPruneUnusedArgumentsPass());
 
-#if LLVM_VERSION_MAJOR >= 9
-        mpm.add(createIPSCCPPass());
-#else
         if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT)
         {
             // Don't run IPConstantProp when debugging function calls, to avoid folding function arg/ret constants
             mpm.add(createIPConstantPropagationPass());
         }
         mpm.add(createConstantPropagationPass());
-#endif
-
         mpm.add(createDeadCodeEliminationPass());
         mpm.add(createCFGSimplificationPass());
     }
@@ -658,8 +640,6 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         mpm.add(createSplitIndirectEEtoSelPass());
     }
 
-    // Preprocess vector bitcasts to enable memory operations simplification.
-    mpm.add(createVectorBitCastOptPass());
     // Split big vector & 3-element load/store, etc.
     mpm.add(createVectorPreProcessPass());
 
@@ -809,7 +789,6 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     mpm.add(new BreakConstantExpr());
 
     mpm.add(new LowPrecisionOpt());
-
 
     // 3D input/output lowering
     switch (ctx.type)
@@ -1401,6 +1380,11 @@ void unify_opt_PreProcess(CodeGenContext* pContext)
         pContext->getModuleMetaData()->compOpt.OptDisable = true;
     }
 
+    if (IGC_IS_FLAG_ENABLED(StripDebugInfo))
+    {
+        StripDebugInfo(*pContext->getModule());
+    }
+
     IGCPassManager mpm(pContext, "OPTPre");
     mpm.add(new CheckInstrTypes(&(pContext->m_instrTypes)));
 
@@ -1538,13 +1522,8 @@ void OptimizeIR(CodeGenContext* const pContext)
             // possible which potentially allows late stage code sinking of
             // those calls by the instruction combiner.
             mpm.add(createPostOrderFunctionAttrsLegacyPass());
-
-#if LLVM_VERSION_MAJOR >= 9
-            mpm.add(createIPSCCPPass());
-#else
             mpm.add(createConstantPropagationPass());
             mpm.add(createIPConstantPropagationPass());
-#endif
         }
 
         // enable this only when Pooled EU is not supported

@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -500,7 +484,7 @@ void VectorPreProcess::replaceAllVectorUsesWithScalars(Instruction* VI, ValVecto
             I = VI->getParent()->getFirstNonPHI();
         }
         IRBuilder<> Builder(I);
-        IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(VI->getType());
+        VectorType* VTy = cast<VectorType>(VI->getType());
         Value* newVec = UndefValue::get(VTy);
         for (uint32_t i = 0, e = int_cast<uint32_t>(VTy->getNumElements()); i < e; ++i)
         {
@@ -619,7 +603,7 @@ bool VectorPreProcess::splitStore(
 {
     Instruction* SI = ASI.getInst();
     Value* StoredVal = ASI.getValueOperand();
-    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(StoredVal->getType());
+    VectorType* VTy = cast<VectorType>(StoredVal->getType());
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
@@ -705,7 +689,7 @@ bool VectorPreProcess::splitStore(
         {
             Type* Ty1 = splitInfo[i].first;
             uint32_t len1 = splitInfo[i].second;
-            IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
+            VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
             for (uint32_t j = 0; j < len1; ++j)
             {
                 Value* subVec;
@@ -742,7 +726,7 @@ bool VectorPreProcess::splitStore(
     {
         Type* Ty1 = splitInfo[i].first;
         uint32_t len1 = splitInfo[i].second;
-        IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
+        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
         for (uint32_t j = 0; j < len1; ++j)
         {
             uint32_t vAlign = (uint32_t)MinAlign(Align, (uint32_t)eOffset * EBytes);
@@ -786,7 +770,7 @@ bool VectorPreProcess::splitLoad(
 {
     Instruction* LI = ALI.getInst();
     bool isLdRaw = isa<LdRawIntrinsic>(LI);
-    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(LI->getType());
+    VectorType* VTy = cast<VectorType>(LI->getType());
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
@@ -848,7 +832,7 @@ bool VectorPreProcess::splitLoad(
     {
         Type* Ty1 = splitInfo[i].first;
         uint32_t len1 = splitInfo[i].second;
-        IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
+        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
         for (uint32_t j = 0; j < len1; ++j)
         {
             uint32_t vAlign = (uint32_t)MinAlign(Align, eOffset * EBytes);
@@ -916,7 +900,7 @@ bool VectorPreProcess::splitLoadStore(
     Optional<AbstractStoreInst> ASI = AbstractStoreInst::get(Inst);
     IGC_ASSERT_MESSAGE((ALI || ASI), "Inst should be either load or store");
     Type* Ty = ALI ? ALI->getInst()->getType() : ASI->getValueOperand()->getType();
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+    VectorType* VTy = dyn_cast<VectorType>(Ty);
     if (!VTy)
     {
         return false;
@@ -1147,7 +1131,7 @@ void VectorPreProcess::getOrGenScalarValues(
 {
     availBeforeInst = nullptr;
 
-    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(VecVal->getType());
+    VectorType* VTy = cast<VectorType>(VecVal->getType());
     if (!VTy)
     {
         scalars[0] = VecVal;
@@ -1298,7 +1282,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         //
         // TODO: further optimize this load into a message with channel masks
         // for cases in which use indices are sparse like {0, 2}.
-        unsigned N = (unsigned)cast<IGCLLVM::FixedVectorType>(Inst->getType())->getNumElements();
+        unsigned N = (unsigned)cast<VectorType>(Inst->getType())->getNumElements();
         if (N == MaxIndex + 1)
             return Inst;
 
@@ -1335,6 +1319,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
             Function* newLdRawFunction =
                 GenISAIntrinsic::getDeclaration(ldrawvec->getModule(), GenISAIntrinsic::GenISA_ldraw_indexed, types);
             NewLI = Builder.CreateCall(newLdRawFunction, args);
+            NewLI->setDebugLoc(EE_user->getDebugLoc());
             EE_user->replaceAllUsesWith(NewLI);
             EE_user->eraseFromParent();
         };
@@ -1365,6 +1350,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
                 {
                     NewEEI[Idx] = Builder.CreateExtractElement(NewLI, CI);
                 }
+                dyn_cast<ExtractElementInst>(NewEEI[Idx])->setDebugLoc(EEI->getDebugLoc());
                 EEI->replaceAllUsesWith(NewEEI[Idx]);
                 EEI->eraseFromParent();
             }
@@ -1404,7 +1390,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
     if (NBits < 32)
         return Inst;
 
-    unsigned N = (unsigned)cast<IGCLLVM::FixedVectorType>(Val->getType())->getNumElements();
+    unsigned N = (unsigned)cast<VectorType>(Val->getType())->getNumElements();
     if (auto CV = dyn_cast<ConstantVector>(Val))
     {
         unsigned MaxIndex = 0;
@@ -1573,7 +1559,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
                 for (uint32_t j = 0; j < svals.size(); ++j)
                 {
                     Type* Ty1 = svals[j]->getType();
-                    IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
+                    VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
                     if (VTy1) {
                         for (uint32_t k = 0; k < VTy1->getNumElements(); ++k)
                         {
@@ -1622,7 +1608,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
                     // If this is a 3-element vector load, remove it
                     // from m_Vector3List as well.
                     if (isAbstractLoadInst(tInst) && tInst->getType()->isVectorTy() &&
-                        cast<IGCLLVM::FixedVectorType>(tInst->getType())->getNumElements() == 3)
+                        cast<VectorType>(tInst->getType())->getNumElements() == 3)
                     {
                         InstWorkVector::iterator
                             tI = m_Vector3List.begin(),

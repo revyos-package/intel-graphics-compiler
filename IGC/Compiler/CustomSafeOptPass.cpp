@@ -1,35 +1,17 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-//===- ConstantProp.cpp - Code to perform Simple Constant Propagation -----===//
-//
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-//===----------------------------------------------------------------------===//
+/*========================== begin_copyright_notice ============================
+
+This file is distributed under the University of Illinois Open Source License.
+See LICENSE.TXT for details.
+
+============================= end_copyright_notice ===========================*/
 
 /*========================== CustomUnsafeOptPass.cpp ==========================
 
@@ -470,6 +452,12 @@ void CustomSafeOptPass::visitCallInst(CallInst& C)
         case GenISAIntrinsic::GenISA_ldptr:
         {
             visitLdptr(llvm::cast<llvm::SamplerLoadIntrinsic>(inst));
+            break;
+        }
+
+        case GenISAIntrinsic::GenISA_ldrawvector_indexed:
+        {
+            visitLdRawVec(inst);
             break;
         }
 
@@ -1339,6 +1327,56 @@ void IGC::CustomSafeOptPass::visitLdptr(llvm::SamplerLoadIntrinsic* inst)
     }
 }
 
+
+void IGC::CustomSafeOptPass::visitLdRawVec(llvm::CallInst* inst)
+{
+    //Try to optimize and remove vector ld raw and change to scalar ld raw
+
+    //%a = call <4 x float> @llvm.genx.GenISA.ldrawvector.indexed.v4f32.p1441792f32(
+    //.....float addrspace(1441792) * %243, i32 %offset, i32 4, i1 false), !dbg !216
+    //%b = extractelement <4 x float> % 245, i32 0, !dbg !216
+
+    //into
+
+    //%new_offset = add i32 %offset, 0, !dbg !216
+    //%b = call float @llvm.genx.GenISA.ldraw.indexed.f32.p1441792f32.i32.i32.i1(
+    //.....float addrspace(1441792) * %251, i32 %new_offset, i32 4, i1 false)
+
+    if (inst->hasOneUse() &&
+        isa<ExtractElementInst>(inst->user_back()))
+    {
+        auto EE = cast<ExtractElementInst>(inst->user_back());
+        if (auto constIndex = dyn_cast<ConstantInt>(EE->getIndexOperand()))
+        {
+            llvm::IRBuilder<> builder(inst);
+
+            llvm::SmallVector<llvm::Type*, 2> ovldtypes{
+                EE->getType(), //float type
+                inst->getOperand(0)->getType(),
+            };
+
+            // For new_offset we need to take into acount the index of the Extract
+            // and convert it to bytes and add it to the existing offset
+            auto new_offset = constIndex->getZExtValue() * 4;
+
+            llvm::SmallVector<llvm::Value*, 4> new_args{
+                inst->getOperand(0),
+                builder.CreateAdd(inst->getOperand(1),builder.getInt32((unsigned)new_offset)),
+                inst->getOperand(2),
+                inst->getOperand(3)
+            };
+
+            Function* pLdraw_indexed_intrinsic = llvm::GenISAIntrinsic::getDeclaration(
+                inst->getModule(),
+                GenISAIntrinsic::GenISA_ldraw_indexed,
+                ovldtypes);
+
+            llvm::Value* ldraw_indexed = builder.CreateCall(pLdraw_indexed_intrinsic, new_args, "");
+            EE->replaceAllUsesWith(ldraw_indexed);
+        }
+    }
+}
+
 void IGC::CustomSafeOptPass::visitSampleBptr(llvm::SampleIntrinsic* sampleInst)
 {
     // sampleB with bias_value==0 -> sample
@@ -1372,7 +1410,7 @@ void IGC::CustomSafeOptPass::visitSampleBptr(llvm::SampleIntrinsic* sampleInst)
 bool CustomSafeOptPass::isIdentityMatrix(ExtractElementInst& I)
 {
     bool found = false;
-    auto extractType = cast<IGCLLVM::FixedVectorType>(I.getVectorOperandType());
+    auto extractType = cast<VectorType>(I.getVectorOperandType());
     auto extractTypeVecSize = (uint32_t)extractType->getNumElements();
     if (extractTypeVecSize == 20 ||
         extractTypeVecSize == 16)
@@ -1601,7 +1639,7 @@ void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst& I)
                     int elOffset = (int)(bitShift / eltSize);
                     elOffset = rightShift ? elOffset : -elOffset;
                     unsigned int newIndex = (unsigned int)((int)cstIndex->getZExtValue() + elOffset);
-                    if (newIndex < cast<IGCLLVM::FixedVectorType>(vecType)->getNumElements())
+                    if (newIndex < cast<VectorType>(vecType)->getNumElements())
                     {
                         IRBuilder<> builder(&I);
                         Value* newBitCast = builder.CreateBitCast(binOp->getOperand(0), vecType);
@@ -2001,7 +2039,7 @@ void GenSpecificPattern::createBitcastExtractInsertPattern(BinaryOperator& I, Va
         else if (auto IEIInst = dyn_cast<InsertElementInst>(Op))
         {
             auto opType = IEIInst->getType();
-            if (opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<IGCLLVM::FixedVectorType>(opType)->getNumElements() == 2)
+            if (opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<VectorType>(opType)->getNumElements() == 2)
             {
                 elem = IEIInst->getOperand(1);
             }
@@ -2064,7 +2102,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         else if (match(&I, pattern2) && AndOp2->getType()->isIntegerTy(64))
         {
             ConstantVector* cVec = dyn_cast<ConstantVector>(VecOp);
-            IGCLLVM::FixedVectorType* vector_type = dyn_cast<IGCLLVM::FixedVectorType>(VecOp->getType());
+            VectorType* vector_type = dyn_cast<VectorType>(VecOp->getType());
             if (cVec && vector_type &&
                 isa<ConstantInt>(cVec->getOperand(0)) &&
                 cast<ConstantInt>(cVec->getOperand(0))->isZero() &&
@@ -2210,7 +2248,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
             BitCastInst* opBC = cast<BitCastInst>(op);
 
             auto opType = opBC->getType();
-            if (!(opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<IGCLLVM::FixedVectorType>(opType)->getNumElements() == 2))
+            if (!(opType->isVectorTy() && cast<VectorType>(opType)->getElementType()->isIntegerTy(32) && cast<VectorType>(opType)->getNumElements() == 2))
                 return nullptr;
 
             if (opBC->getSrcTy()->isDoubleTy())
@@ -2630,8 +2668,8 @@ void GenSpecificPattern::visitBitCastInst(BitCastInst& I)
                 if (zExtInst->getOperand(0)->getType()->isIntegerTy(32) &&
                     isa<InsertElementInst>(bitCastInst->getOperand(0)) &&
                     bitCastInst->getOperand(0)->getType()->isVectorTy() &&
-                    cast<IGCLLVM::FixedVectorType>(bitCastInst->getOperand(0)->getType())->getElementType()->isIntegerTy(32) &&
-                    cast<IGCLLVM::FixedVectorType>(bitCastInst->getOperand(0)->getType())->getNumElements() == 2)
+                    cast<VectorType>(bitCastInst->getOperand(0)->getType())->getElementType()->isIntegerTy(32) &&
+                    cast<VectorType>(bitCastInst->getOperand(0)->getType())->getNumElements() == 2)
                 {
                     InsertElementInst* insertElementInst = cast<InsertElementInst>(bitCastInst->getOperand(0));
 
@@ -2731,7 +2769,7 @@ void GenSpecificPattern::visitFNeg(llvm::UnaryOperator& I)
     }
     else
     {
-        uint32_t vectorSize = cast<IGCLLVM::FixedVectorType>(I.getType())->getNumElements();
+        uint32_t vectorSize = cast<VectorType>(I.getType())->getNumElements();
         fsub = llvm::UndefValue::get(I.getType());
 
         for (uint32_t i = 0; i < vectorSize; ++i)
@@ -2784,57 +2822,20 @@ static Constant* GetConstantValue(Type* type, char* rawData)
 }
 
 
-Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
+Constant* IGCConstProp::replaceShaderConstant(Instruction* inst)
 {
-    unsigned as = inst->getPointerAddressSpace();
-    bool directBuf = false;
-    bool statelessBuf = false;
-    unsigned bufIdOrGRFOffset = 0;
-    unsigned int size_in_bytes = 0;
     CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     ModuleMetaData* modMD = ctx->getModuleMetaData();
+    ConstantAddress cl;
+    unsigned int& bufIdOrGRFOffset = cl.bufId;
+    unsigned int& eltId = cl.eltId;
+    unsigned int& size_in_bytes = cl.size;
+    bool directBuf = false;
+    bool statelessBuf = false;
+    bool bindlessBuf = false;
 
-    BufferType bufType;
-    Value* pointerSrc = nullptr;
-
-    if (as == ADDRESS_SPACE_CONSTANT)
+    if (getConstantAddress(*inst, cl, ctx, directBuf, statelessBuf, bindlessBuf))
     {
-        if (!GetStatelessBufferInfo(inst->getPointerOperand(), bufIdOrGRFOffset, bufType, pointerSrc, directBuf))
-        {
-            return nullptr;
-        }
-        if (!directBuf)
-        {
-            // Make sure constant folding is safe by looking up in pushableAddresses
-            CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-            PushInfo& pushInfo = ctx->getModuleMetaData()->pushInfo;
-
-            for (auto it : pushInfo.pushableAddresses)
-            {
-                if ((bufIdOrGRFOffset * 4 == it.addressOffset) && (IGC_IS_FLAG_ENABLED(DisableStaticCheck) || it.isStatic))
-                {
-                    statelessBuf = true;
-                    break;
-                }
-            }
-        }
-    }
-    else
-    {
-        bufType = IGC::DecodeAS4GFXResource(as, directBuf, bufIdOrGRFOffset);
-    }
-
-    // If it is statelessBuf, we made sure it is a constant buffer by finding it in pushableAddresses
-    if (modMD && ((directBuf && (bufType == CONSTANT_BUFFER)) || statelessBuf))
-    {
-        Value* ptrVal = inst->getPointerOperand();
-        int eltId = 0;
-        size_in_bytes = (unsigned int)inst->getType()->getPrimitiveSizeInBits() / 8;
-        if (!EvalConstantAddress(ptrVal, eltId, m_TD, pointerSrc))
-        {
-            return nullptr;
-        }
-
         if (size_in_bytes)
         {
             if (modMD->immConstant.data.size() &&
@@ -2845,7 +2846,7 @@ Constant* IGCConstProp::replaceShaderConstant(LoadInst* inst)
                 if (inst->getType()->isVectorTy())
                 {
                     Type* srcEltTy = cast<VectorType>(inst->getType())->getElementType();
-                    uint32_t srcNElts = (uint32_t)cast<IGCLLVM::FixedVectorType>(inst->getType())->getNumElements();
+                    uint32_t srcNElts = (uint32_t)cast<VectorType>(inst->getType())->getNumElements();
                     uint32_t eltSize_in_bytes = (unsigned int)srcEltTy->getPrimitiveSizeInBits() / 8;
                     IRBuilder<> builder(inst);
                     Value* vectorValue = UndefValue::get(inst->getType());
@@ -3130,7 +3131,7 @@ Constant* IGCConstProp::ConstantFoldCmpInst(CmpInst* CI)
     {
         bool AllTrue = true, AllFalse = true;
         auto VecOpnd = cast<Constant>(EEI->getVectorOperand());
-        unsigned N = (unsigned)cast<IGCLLVM::FixedVectorType>(VecOpnd->getType())->getNumElements();
+        unsigned N = (unsigned)cast<VectorType>(VecOpnd->getType())->getNumElements();
         for (unsigned i = 0; i < N; ++i)
         {
             Constant* const Opnd = VecOpnd->getAggregateElement(i);
@@ -3926,8 +3927,8 @@ namespace IGC
                 BitCastInst* BC = dyn_cast<BitCastInst>(&*BI++);
                 if (!BC) continue;
                 // Skip non-element-wise bitcast.
-                IGCLLVM::FixedVectorType* DstVTy = dyn_cast<IGCLLVM::FixedVectorType>(BC->getType());
-                IGCLLVM::FixedVectorType* SrcVTy = dyn_cast<IGCLLVM::FixedVectorType>(BC->getOperand(0)->getType());
+                VectorType* DstVTy = dyn_cast<VectorType>(BC->getType());
+                VectorType* SrcVTy = dyn_cast<VectorType>(BC->getOperand(0)->getType());
                 if (!DstVTy || !SrcVTy || DstVTy->getNumElements() != SrcVTy->getNumElements())
                     continue;
                 // Skip if it's not used only all extractelement.
@@ -4697,7 +4698,7 @@ void SplitIndirectEEtoSel::visitExtractElementInst(llvm::ExtractElementInst& I)
 {
     using namespace llvm::PatternMatch;
 
-    IGCLLVM::FixedVectorType* vecTy = dyn_cast<IGCLLVM::FixedVectorType>(I.getVectorOperandType());
+    VectorType* vecTy = I.getVectorOperandType();
     uint64_t num = vecTy->getNumElements();
     Type* eleType = vecTy->getElementType();
 

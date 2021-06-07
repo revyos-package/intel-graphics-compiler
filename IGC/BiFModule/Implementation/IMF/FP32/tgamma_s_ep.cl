@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2021 Intel Corporation
+Copyright (C) 2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -123,58 +107,58 @@ IN THE SOFTWARE.
 // Static data section:
 //
 
-// negative values underflow range 
+// negative values underflow range
 static __constant float __stgamma_ep__neg_underflow[2] = { 43.0, -43.0 };
 
-// negative values "half" overflow range - multiply by 1/An 
+// negative values "half" overflow range - multiply by 1/An
 static __constant float __stgamma_ep__neg_half_overflow[2] = { 40.0, -40.0 };
 
-// overflow boundary (35.04010009765625) 
+// overflow boundary (35.04010009765625)
 static __constant unsigned int __stgamma_ep__overflowf_boundary[] = {
     0x420c2910, //       35.0401001
 };
 
-// point of local minium (0.461632144968362356785) 
+// point of local minium (0.461632144968362356785)
 static __constant unsigned int __stgamma_ep__local_minimumf[] = {
     0x3eec5b0c, //      0.461632133
 };
 
 static __constant unsigned int __stgamma_ep__tgammaf_A_table[] = {
-    0x404f7e8e, //       3.24209929                                                                                                                                             
-    0x3ffd9a9c, //        1.9812808                                                                                                                                             
-    0x3ece7348, //      0.403223276                                                                                                                                             
-    0xbfc61856, //      -1.54761767                                                                                                                                             
-    0xc0819138, //       -4.0489769                                                                                                                                             
-    0xc0f8b8d2, //      -7.77256107                                                                                                                                             
-    0x4070be98, //       3.76163292                                                                                                                                             
-    0x40834492, //        4.1021204                                                                                                                                             
-    0x40a47c71, //        5.1401906                                                                                                                                             
-    0x40e300cb, //        7.0938468                                                                                                                                             
-    0x412b18a4, //       10.6935158                                                                                                                                             
-    0x419a0368, //       19.2516632                                                                                                                                             
-    0x3710d6c4, //   8.63307287e-06                                                                                                                                             
-    //                                                                                                                                                                          
-    0x4031115d, //       2.76668477                                                                                                                                             
-    0x4012293a, //       2.28376627                                                                                                                                             
-    0x3faa2c14, //       1.32947016                                                                                                                                             
-    0xbdde9083, //     -0.108674072                                                                                                                                             
-    0xc008779a, //       -2.1322999                                                                                                                                             
-    0xc0a495c1, //      -5.14328051                                                                                                                                             
-    0x4002a105, //       2.04107785                                                                                                                                             
-    0x40196098, //       2.39652061                                                                                                                                             
-    0x404ce483, //       3.20144725                                                                                                                                             
-    0x4095cb95, //       4.68110132                                                                                                                                             
-    0x40eb998f, //       7.36249495                                                                                                                                             
-    0x41503404, //       13.0126991                                                                                                                                             
-    0x3f37b6dd, //      0.717634022                                                                                                                                             
-    //                                                                                                                                                                          
-    0x40009880, //       2.00930786                                                                                                                                             
-    0x3fd51b17, //       1.66488922                                                                                                                                             
-    0x3f758f9a, //      0.959222436                                                                                                                                             
-    0xbe1ddf37, //      -0.15417181                                                                                                                                             
-    0xbfe5b4c3, //      -1.79457891                                                                                                                                             
-    0xc08adf72, //      -4.33977604                                                                                                                                             
-    0x3f8a703f, //       1.08155048                                                                                                                                             
+    0x404f7e8e, //       3.24209929
+    0x3ffd9a9c, //        1.9812808
+    0x3ece7348, //      0.403223276
+    0xbfc61856, //      -1.54761767
+    0xc0819138, //       -4.0489769
+    0xc0f8b8d2, //      -7.77256107
+    0x4070be98, //       3.76163292
+    0x40834492, //        4.1021204
+    0x40a47c71, //        5.1401906
+    0x40e300cb, //        7.0938468
+    0x412b18a4, //       10.6935158
+    0x419a0368, //       19.2516632
+    0x3710d6c4, //   8.63307287e-06
+    //
+    0x4031115d, //       2.76668477
+    0x4012293a, //       2.28376627
+    0x3faa2c14, //       1.32947016
+    0xbdde9083, //     -0.108674072
+    0xc008779a, //       -2.1322999
+    0xc0a495c1, //      -5.14328051
+    0x4002a105, //       2.04107785
+    0x40196098, //       2.39652061
+    0x404ce483, //       3.20144725
+    0x4095cb95, //       4.68110132
+    0x40eb998f, //       7.36249495
+    0x41503404, //       13.0126991
+    0x3f37b6dd, //      0.717634022
+    //
+    0x40009880, //       2.00930786
+    0x3fd51b17, //       1.66488922
+    0x3f758f9a, //      0.959222436
+    0xbe1ddf37, //      -0.15417181
+    0xbfe5b4c3, //      -1.79457891
+    0xc08adf72, //      -4.33977604
+    0x3f8a703f, //       1.08155048
     0x3fa9dbb6, //       1.32701755
     0x3ff317fc, //       1.89916945
     0x403f19a4, //       2.98593998
@@ -225,7 +209,7 @@ static __constant unsigned int __stgamma_ep__tgammaf_A_table[] = {
     0x3f800000, //                1
 };
 
-// sin(pi*x)/pi 
+// sin(pi*x)/pi
 static __constant unsigned int __stgamma_ep__tgammaf_sin_table[] = {
     0xb60a2594, //  -2.05854758e-06
     0x3487e4c9, //   2.53121726e-07
@@ -281,17 +265,17 @@ static __constant unsigned int __stgamma_ep__tgammaf_A175_table[] = {
     0xbbba3543, //   -0.00568261882
 };
 
-// Right shifter 
+// Right shifter
 
-static __constant unsigned __stgamma_ep__two_23h[] = { 0x4b000000 };    // 2^23 
+static __constant unsigned __stgamma_ep__two_23h[] = { 0x4b000000 };    // 2^23
 
-// Special values 
+// Special values
 
-static __constant unsigned int __stgamma_ep__own_large_value_32[] = { 0x71800000, 0xf1800000 }; // +2^100,-2^100 
+static __constant unsigned int __stgamma_ep__own_large_value_32[] = { 0x71800000, 0xf1800000 }; // +2^100,-2^100
 
-static __constant unsigned int __stgamma_ep__own_small_value_32[] = { 0x0d800000, 0x8d800000 }; // +2^(-100),-2^(-100) 
+static __constant unsigned int __stgamma_ep__own_small_value_32[] = { 0x0d800000, 0x8d800000 }; // +2^(-100),-2^(-100)
 
-// constants 
+// constants
 
 static __constant unsigned int __stgamma_ep__zeros[] = { 0x00000000, 0x80000000 };
 static __constant unsigned int __stgamma_ep__ones[] = { 0x3f800000, 0xbf800000 };
@@ -324,20 +308,20 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
     absx = x;
     res = ((__constant float *) __stgamma_ep__zeros)[0];
 
-    // get arg sign 
+    // get arg sign
     ixsign = (((_iml_sp_union_t *) & x)->hex[0] >> 31);
-    // get arg exponent 
+    // get arg exponent
     ixexp = ((((_iml_sp_union_t *) & x)->hex[0] >> 23) & 0xFF);
 
-    // normal values 
+    // normal values
     if (ixexp != 0xFF)
     {
-        // create absolute value 
+        // create absolute value
         (((_iml_sp_union_t *) & absx)->hex[0] = (((_iml_sp_union_t *) & absx)->hex[0] & 0x7FFFFFFF) | ((_iml_uint32_t) (0) << 31));
 
         ix = *((int *) (&absx));
 
-        // if x == 0 - zero divide exception 
+        // if x == 0 - zero divide exception
         if (x == ((__constant float *) __stgamma_ep__zeros)[0])
         {
             *r = (((__constant float *) __stgamma_ep__ones)[(ixsign)] / ((__constant float *) __stgamma_ep__zeros)[0]);
@@ -345,20 +329,20 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
             return nRet;
         }
 
-        if (ix <= 0x00200000)   // if |x| < denorm_overflow 
+        if (ix <= 0x00200000)   // if |x| < denorm_overflow
         {
             {
                 float tz = ((__constant float *) __stgamma_ep__own_large_value_32)[0];
                 ((*r)) = (((__constant float *) __stgamma_ep__own_large_value_32)[(ixsign)] * tz);
-            };  // raise overflow 
+            };  // raise overflow
             nRet = 3;
             return nRet;
         }
 
-        // singularity at negative integer points 
+        // singularity at negative integer points
         if (ixsign)
         {
-            // if |x| >= 2^23 - only integer values 
+            // if |x| >= 2^23 - only integer values
             if (ixexp >= 0x00000096)
             {
                 {
@@ -370,7 +354,7 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
             }   // if(ixexp >= 0x00000096)
             else
             {
-                // get integer value of arg (truncated) 
+                // get integer value of arg (truncated)
                 tv = absx + (*(__constant float *) __stgamma_ep__two_23h);
                 diabsx_t = tv - (*(__constant float *) __stgamma_ep__two_23h);
                 iabsx_t = (0x000fffff) & (*((int *) (&tv)));
@@ -381,7 +365,7 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                 }
             }   // else if(ixexp >= 0x00000096)
 
-            // if arg - integer then singularity 
+            // if arg - integer then singularity
             if (absx == diabsx_t)
             {
                 {
@@ -392,42 +376,42 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                 return nRet;
             }
 
-            // if arg < -185.0 then underflow (values rounded to zero) 
+            // if arg < -185.0 then underflow (values rounded to zero)
             if (x < __stgamma_ep__neg_underflow[1])
             {
-                (*r) = (((__constant float *) __stgamma_ep__own_small_value_32)[((~iabsx_t) & 1)] * ((__constant float *) __stgamma_ep__own_small_value_32)[0]);    // raise underflow and inexact 
+                (*r) = (((__constant float *) __stgamma_ep__own_small_value_32)[((~iabsx_t) & 1)] * ((__constant float *) __stgamma_ep__own_small_value_32)[0]);    // raise underflow and inexact
                 nRet = 4;
                 return nRet;
             }
         }   // if(ixsign)
 
-        // big positive values overflow domain (res rounded to INF) 
+        // big positive values overflow domain (res rounded to INF)
         if (x >= (*((__constant float *) __stgamma_ep__overflowf_boundary)))
         {
             {
                 float tz = ((__constant float *) __stgamma_ep__own_large_value_32)[0];
                 ((*r)) = (((__constant float *) __stgamma_ep__own_large_value_32)[(0)] * tz);
-            };  // raise overflow and inexact 
+            };  // raise overflow and inexact
             nRet = 3;
             return nRet;
         }
 
-        // compute sin(Pi*x)/x for negative values 
+        // compute sin(Pi*x)/x for negative values
         if (ixsign)
         {
-            // get rounded to nearest abs arg 
+            // get rounded to nearest abs arg
             tv = absx + (*(__constant float *) __stgamma_ep__two_23h);
             diabsx_n = tv - (*(__constant float *) __stgamma_ep__two_23h);
             iabsx_n = (0x000fffff) & (*((int *) (&tv)));
 
-            rrr = absx - diabsx_n;  // reduced argument 
+            rrr = absx - diabsx_n;  // reduced argument
 
             if (rrr < 0)
-                rrr = (-rrr);   //IML_ABS_DP(rrr);  // remove sign 
+                rrr = (-rrr);   //IML_ABS_DP(rrr);  // remove sign
 
-            r2 = rrr * rrr; // rrr^2 
+            r2 = rrr * rrr; // rrr^2
 
-            // Tailor series 
+            // Tailor series
             s = rrr +
                 rrr *
                 ((r2 * (((__constant float *) __stgamma_ep__tgammaf_sin_table)[0] + r2 * ((__constant float *) __stgamma_ep__tgammaf_sin_table)[1])) *
@@ -440,7 +424,7 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                  (((__constant float *) __stgamma_ep__tgammaf_sin_table)[6] + r2 * (r2 + ((__constant float *) __stgamma_ep__tgammaf_sin_table)[7])));
         }   // if(ixsign)
 
-        // get truncated integer argument 
+        // get truncated integer argument
         tv = absx + (*(__constant float *) __stgamma_ep__two_23h);
         diabsx_t = tv - (*(__constant float *) __stgamma_ep__two_23h);
         iabsx_t = (0x000fffff) & (*((int *) (&tv)));
@@ -450,29 +434,29 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
             diabsx_t -= ((__constant float *) __stgamma_ep__ones)[0];
             iabsx_t -= 1;
         }
-        // get result sign 
+        // get result sign
         irsign = ((iabsx_t + 1) & 1);
-        // if x > 2.0 - simple polynomials 
+        // if x > 2.0 - simple polynomials
         if (absx >= __stgamma_ep_twos[0])
         {
-            t = iabsx_t & (~0x7);   // index of table of coefficient 
-            i = iabsx_t & (0x7);    // used in recursive formula 
-            // for 2 <= x < 8 - shift index 
+            t = iabsx_t & (~0x7);   // index of table of coefficient
+            i = iabsx_t & (0x7);    // used in recursive formula
+            // for 2 <= x < 8 - shift index
             if (iabsx_t < 8)
                 i = i - 2;
 
-            rrr = absx - diabsx_t;  // reduced argument 
-            A = &(((__constant float *) __stgamma_ep__tgammaf_A_table)[t + (t >> 1) + (t >> 3)]);   // table address 
-            r2 = rrr * rrr; // rrr^2 
+            rrr = absx - diabsx_t;  // reduced argument
+            A = &(((__constant float *) __stgamma_ep__tgammaf_A_table)[t + (t >> 1) + (t >> 3)]);   // table address
+            r2 = rrr * rrr; // rrr^2
 
-            // factorized polynomial 
+            // factorized polynomial
             p = A[12] * (r2 + A[0] * rrr + A[6 + 0]) *
                 (r2 + A[1] * rrr + A[6 + 1]) *
                 (r2 + A[2] * rrr + A[6 + 2]) * (r2 + A[3] * rrr + A[6 + 3]) * (r2 + A[4] * rrr + A[6 + 4]) * (r2 + A[5] * rrr + A[6 + 5]);
 
-            // if no recursion - p = 1.0 
+            // if no recursion - p = 1.0
             pr = ((__constant float *) __stgamma_ep__ones)[0];
-            // if i > 0 - recursies 
+            // if i > 0 - recursies
             if (i)
             {
                 for (j = 1; j <= i; j++)
@@ -481,12 +465,12 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                 }
             }
 
-            if (ixsign) // for negatives rrr = 1/(x*s*gamma*recursies) 
+            if (ixsign) // for negatives rrr = 1/(x*s*gamma*recursies)
             {
-                //[40; 48] for negatives 
+                //[40; 48] for negatives
 
                 unsigned int __stgamma_ep__tgamma_A40_inv[] = {
-                    0xEDBCC440, 0x368954EA  // 1/An 
+                    0xEDBCC440, 0x368954EA  // 1/An
                 };
 
                 double resd = (double) ((__constant float *) __stgamma_ep__ones)[0] / ((double) absx * s * p * pr);
@@ -494,12 +478,12 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                 {
                     resd *= (*((double *) __stgamma_ep__tgamma_A40_inv));
                 }
-                // set sign 
+                // set sign
                 if (irsign)
                     resd = -resd;
                 (*r) = (float) resd;
             }
-            else    // for positives rrr = gamma*recursies 
+            else    // for positives rrr = gamma*recursies
             {
                 (*r) = p * pr;
             }
@@ -508,7 +492,7 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
         }   // if(absx >= _VSTATIC(twos)[0])
         else
         {
-            // if |x| < 1 - calculate gamma(x+1) 
+            // if |x| < 1 - calculate gamma(x+1)
             if (absx < ((__constant float *) __stgamma_ep__ones)[0])
             {
                 curabsx = absx + (((__constant float *) __stgamma_ep__ones)[0]);
@@ -518,70 +502,70 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
                 curabsx = absx;
             }
 
-            // splitted intervals: 
-            // x >= 1.75 
+            // splitted intervals:
+            // x >= 1.75
             if (curabsx >= __stgamma_ep_ones_75[0])
             {
                 rrr = curabsx - (((__constant float *) __stgamma_ep__ones)[0]);
                 A = ((__constant float *) __stgamma_ep__tgammaf_A175_table);
             }
-            else if (curabsx >= __stgamma_ep_ones_5[0]) // x >= 1.5 
+            else if (curabsx >= __stgamma_ep_ones_5[0]) // x >= 1.5
             {
                 rrr = curabsx - (((__constant float *) __stgamma_ep__ones)[0]);
                 A = ((__constant float *) __stgamma_ep__tgammaf_A150_table);
             }
-            else if (curabsx >= __stgamma_ep_ones_25[0])    // 1.5 > x >= 1.25 
+            else if (curabsx >= __stgamma_ep_ones_25[0])    // 1.5 > x >= 1.25
             {
                 rrr = curabsx - ((((__constant float *) __stgamma_ep__ones)[0]) + (*((__constant float *) __stgamma_ep__local_minimumf)));
                 A = ((__constant float *) __stgamma_ep__tgammaf_A125_table);
             }
-            else if (curabsx < __stgamma_ep_ones_25[0]) // 0 < x < 1.25 
+            else if (curabsx < __stgamma_ep_ones_25[0]) // 0 < x < 1.25
             {
                 rrr = curabsx - (((__constant float *) __stgamma_ep__ones)[0]);
                 A = ((__constant float *) __stgamma_ep__tgammaf_A100_table);
             }
 
-            if (ixexp)  // for normal values - compute whole polynomial 
+            if (ixexp)  // for normal values - compute whole polynomial
             {
                 p = A[0] + rrr * (A[1] + rrr * (A[2] + rrr * (A[3] + rrr * (A[4] + rrr * (A[5] + rrr * (A[6] + rrr * (A[7])))))));
             }
-            else    // for denormal - return just A[0] 
+            else    // for denormal - return just A[0]
             {
                 p = A[0];
             }
 
-            if (absx < ((__constant float *) __stgamma_ep__ones)[0])    // |x| < 1.0 
+            if (absx < ((__constant float *) __stgamma_ep__ones)[0])    // |x| < 1.0
             {
-                if (ixsign) // if x < 0 then rrr = 1/(s*p) 
+                if (ixsign) // if x < 0 then rrr = 1/(s*p)
                 {
                     resf = (((__constant float *) __stgamma_ep__ones)[0]) / (s * p);
                     if (irsign)
                         resf = -resf;
                 }
-                else    // if x > 0 then rrr = p/x 
+                else    // if x > 0 then rrr = p/x
                 {
                     resf = p / (absx);
                 }
-            }   // if(absx < ones[0]) // |x| < 1.0 
-            else    // |x| > 1.0 
+            }   // if(absx < ones[0]) // |x| < 1.0
+            else    // |x| > 1.0
             {
-                if (ixsign) // rrr = 1/(x*s*p); 
+                if (ixsign) // rrr = 1/(x*s*p);
                 {
                     resf = (((__constant float *) __stgamma_ep__ones)[0]) / ((absx) * s * p);
                 }
-                else    // rrr = p 
+                else    // rrr = p
                 {
                     resf = p;
                 }
-            }   // else if(absx < ones[0]) // |x| < 1.0 
+            }   // else if(absx < ones[0]) // |x| < 1.0
 
             (*r) = (float) resf;
             return nRet;
         }   // else if(absx >= _VSTATIC(twos)[0])
     }   // if (ixexp != IML_EXPINF_32)
-    else    // INF or NAN 
+    else    // INF or NAN
     {
-        // Singularity at negative INF 
+        // Singularity at negative INF
         if (ixsign && (!((((_iml_sp_union_t *) & x)->hex[0] & 0x007FFFFF) != 0)))
         {
             {
@@ -593,7 +577,7 @@ inline int __internal_stgamma_ep_cout (float *a, float *r)
         }
         else
         {
-            (*r) = x + x;   // raise invalid on SNaN 
+            (*r) = x + x;   // raise invalid on SNaN
             return nRet;
         }
     }   // else if (ixexp != IML_EXPINF_32)

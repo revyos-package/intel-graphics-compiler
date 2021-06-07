@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -254,7 +238,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertLoop(Instruction* Loc, Value* L
 Value* ReplaceUnsupportedIntrinsics::replicateScalar(
     Value* ScalarVal, Type* Ty, Instruction* InsertBefore)
 {
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+    VectorType* VTy = dyn_cast<VectorType>(Ty);
     Type* ETy = VTy ? VTy->getElementType() : Ty;
     uint32_t sBits = (unsigned int)ScalarVal->getType()->getPrimitiveSizeInBits();
     uint32_t nBits = (unsigned int)ETy->getPrimitiveSizeInBits();
@@ -915,7 +899,7 @@ void ReplaceUnsupportedIntrinsics::replaceFunnelShift(IntrinsicInst* I) {
     }
 
     Value* numBits = Builder.getIntN(sizeInBits, sizeInBits);
-    if (auto IVT = dyn_cast<IGCLLVM::FixedVectorType>(I->getType())) {
+    if (auto IVT = dyn_cast<VectorType>(I->getType())) {
         numBits = ConstantVector::getSplat(IGCLLVM::getElementCount((uint32_t)IVT->getNumElements()), cast<Constant>(numBits));
     }
     auto shiftModulo = Builder.CreateURem(I->getArgOperand(2), numBits);

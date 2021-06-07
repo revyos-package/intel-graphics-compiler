@@ -1,65 +1,48 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-//===- SPIRVReader.cpp - Converts SPIR-V to LLVM -----------------*- C++ -*-===//
-//
-//                     The LLVM/SPIR-V Translator
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-// Copyright (c) 2014 Advanced Micro Devices, Inc. All rights reserved.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
-// to deal with the Software without restriction, including without limitation
-// the rights to use, copy, modify, merge, publish, distribute, sublicense,
-// and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
-//
-// Redistributions of source code must retain the above copyright notice,
-// this list of conditions and the following disclaimers.
-// Redistributions in binary form must reproduce the above copyright notice,
-// this list of conditions and the following disclaimers in the documentation
-// and/or other materials provided with the distribution.
-// Neither the names of Advanced Micro Devices, Inc., nor the names of its
-// contributors may be used to endorse or promote products derived from this
-// Software without specific prior written permission.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH
-// THE SOFTWARE.
-//
-//===----------------------------------------------------------------------===//
-/// \file
-///
-/// This file implements conversion of SPIR-V binary to LLVM IR.
-///
-//===----------------------------------------------------------------------===//
+/*========================== begin_copyright_notice ============================
+
+This file is distributed under the University of Illinois Open Source License.
+See LICENSE.TXT for details.
+
+============================= end_copyright_notice ===========================*/
+
+/*========================== begin_copyright_notice ============================
+
+Copyright (C) 2014 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal with the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimers.
+Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimers in the documentation
+and/or other materials provided with the distribution.
+Neither the names of Advanced Micro Devices, Inc., nor the names of its
+contributors may be used to endorse or promote products derived from this
+Software without specific prior written permission.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH
+THE SOFTWARE.
+
+============================= end_copyright_notice ===========================*/
+
+// This file implements conversion of SPIR-V binary to LLVM IR.
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
@@ -463,6 +446,8 @@ public:
           flags |= llvm::DINode::FlagPrivate;
       if (spirvFlags & SPIRVDebug::FlagIsObjectPointer)
           flags |= llvm::DINode::FlagObjectPointer;
+      if (spirvFlags & SPIRVDebug::FlagIsStaticMember)
+          flags |= llvm::DINode::FlagStaticMember;
 
       return flags;
   }
@@ -588,6 +573,8 @@ public:
       return 0;
   }
 
+  DIType* createMember(SPIRVExtInst* inst);
+
   DIType* createTypeArray(SPIRVExtInst* inst)
   {
       if (auto n = getExistingNode<DIType*>(inst))
@@ -673,28 +660,6 @@ public:
       return addMDNode(inst, Builder.createEnumerationType(scope, name, file, line, size, 0, nodeArray, type));
   }
 
-  DIType* createMember(SPIRVExtInst* inst)
-  {
-      if (auto n = getExistingNode<DIType*>(inst))
-          return n;
-
-      OpDebugTypeMember typeMember(inst);
-
-      // scope is not clear from SPIRV spec
-      auto scope = getCompileUnit();
-      auto& name = typeMember.getName()->getStr();
-      auto file = getDIFile(BM->get<SPIRVExtInst>(typeMember.getSource()));
-      auto line = typeMember.getLine();
-      auto size = typeMember.getSize();
-      auto offset = typeMember.getOffset();
-      auto flagRaw = typeMember.getFlags();
-      auto type = createType(BM->get<SPIRVExtInst>(typeMember.getType()));
-
-      auto flags = decodeFlag(flagRaw);
-
-      return addMDNode(inst, Builder.createMemberType(scope, name, file, line, size, 0, offset, flags, type));
-  }
-
   DIType* createCompositeType(SPIRVExtInst* inst)
   {
       if (auto n = getExistingNode<DIType*>(inst))
@@ -746,8 +711,14 @@ public:
       }
       else if (tag == SPIRVDebug::CompositeTypeTag::Class)
       {
-          newNode = addMDNode(inst, Builder.createClassType(scope, name,
-              file, line, size, 0, 0, flags, derivedFrom, DINodeArray()));
+          // TODO: should be replaced with createClassType, when bug with creating
+          // ClassType with llvm::dwarf::DW_TAG_struct_type tag will be fixed
+          auto CT = Builder.createReplaceableCompositeType(
+              llvm::dwarf::DW_TAG_class_type, name, scope, file, line, 0,
+              size, 0, flags);
+          CT = llvm::MDNode::replaceWithDistinct(llvm::TempDICompositeType(CT));
+
+          newNode = addMDNode(inst, CT);
       }
 
       SmallVector<Metadata*, 6> elements;
@@ -1577,9 +1548,38 @@ void SPIRVToLLVMDbgTran::transDbgInfo(SPIRVValue *SV, Value *V) {
             Line->getColumn(), scope, iat);
 
         if(scope && !isa<DIFile>(scope))
-            I->setDebugLoc(DILocation::get(scope->getContext(), Line->getLine(), Line->getColumn(),
+            I->setDebugLoc(DebugLoc::get(Line->getLine(), Line->getColumn(),
                 scope, iat));
     }
+}
+
+DIType* SPIRVToLLVMDbgTran::createMember(SPIRVExtInst* inst)
+{
+    if (auto n = getExistingNode<DIType*>(inst))
+        return n;
+
+    OpDebugTypeMember typeMember(inst);
+
+    auto scope = createType(BM->get<SPIRVExtInst>(typeMember.getParent()));
+    auto& name = typeMember.getName()->getStr();
+    auto file = getDIFile(BM->get<SPIRVExtInst>(typeMember.getSource()));
+    auto line = typeMember.getLine();
+    auto size = typeMember.getSize();
+    auto offset = typeMember.getOffset();
+    auto flagRaw = typeMember.getFlags();
+    auto type = createType(BM->get<SPIRVExtInst>(typeMember.getType()));
+
+    auto flags = decodeFlag(flagRaw);
+
+    if (flags & DINode::FlagStaticMember && typeMember.hasInitConst())
+    {
+        SPIRVValue* constVal = (SPIRVValue*)BM->getEntry(typeMember.getInitConstId());
+        auto val = SPIRVTranslator->transValue(constVal, nullptr, nullptr);
+        return addMDNode(inst, Builder.createStaticMemberType(scope, name, file, line, type, flags,
+            llvm::cast<llvm::Constant>(val)));
+    }
+
+    return addMDNode(inst, Builder.createMemberType(scope, name, file, line, size, 0, offset, flags, type));
 }
 
 Type *
@@ -1921,6 +1921,11 @@ SPIRVToLLVM::transType(SPIRVType *T) {
   {
     return mapType(T, getNamedBarrierType());
   }
+  case OpTypeBufferSurfaceINTEL: {
+    return mapType(T,
+                   getOrCreateOpaquePtrType(M, "intel.buffer_rw_t",
+                                            SPIRAddressSpace::SPIRAS_Global));
+  }
   default: {
     auto OC = T->getOpCode();
     if (isOpaqueGenericTypeOpCode(OC) ||
@@ -1929,7 +1934,7 @@ SPIRVToLLVM::transType(SPIRVType *T) {
         auto name = isSubgroupAvcINTELTypeOpCode(OC) ?
             OCLSubgroupINTELTypeOpCodeMap::rmap(OC) :
             BuiltinOpaqueGenericTypeOpCodeMap::rmap(OC);
-        auto *pST = IGCLLVM::getTypeByName(M, name);
+        auto *pST = M->getTypeByName(name);
         pST = pST ? pST : StructType::create(*Context, name);
 
         return mapType(T, PointerType::get(pST, getOCLOpaqueTypeAddrSpace(OC)));
@@ -2407,7 +2412,7 @@ Value *SPIRVToLLVM::promoteBool(Value *pVal, BasicBlock *BB)
 
     auto *PromoType = isa<VectorType>(pVal->getType()) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt8Ty(pVal->getContext()),
-        (unsigned)cast<IGCLLVM::FixedVectorType>(pVal->getType())->getNumElements())) :
+        (unsigned)cast<VectorType>(pVal->getType())->getNumElements())) :
         Type::getInt8Ty(pVal->getContext());
 
     if (auto *C = dyn_cast<Constant>(pVal))
@@ -2449,7 +2454,7 @@ Value *SPIRVToLLVM::truncBool(Value *pVal, BasicBlock *BB)
 
     auto *TruncType = isa<VectorType>(pVal->getType()) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt1Ty(pVal->getContext()),
-            (unsigned)cast<IGCLLVM::FixedVectorType>(pVal->getType())->getNumElements())) :
+            (unsigned)cast<VectorType>(pVal->getType())->getNumElements())) :
         Type::getInt1Ty(pVal->getContext());
 
     if (auto *C = dyn_cast<Constant>(pVal))
@@ -2495,7 +2500,7 @@ Type *SPIRVToLLVM::truncBoolType(SPIRVType *SPVType, Type *LLType)
 
     return isa<VectorType>(LLType) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt1Ty(LLType->getContext()),
-                                   (unsigned)cast<IGCLLVM::FixedVectorType>(LLType)->getNumElements())) :
+                                   (unsigned)cast<VectorType>(LLType)->getNumElements())) :
         Type::getInt1Ty(LLType->getContext());
 }
 
@@ -2652,7 +2657,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       {
         if(CV[i]->getType()->isVectorTy())
         {
-          for(uint32_t j = 0; j < cast<IGCLLVM::FixedVectorType>(CV[i]->getType())->getNumElements(); j++)
+          for(uint32_t j = 0; j < cast<VectorType>(CV[i]->getType())->getNumElements(); j++)
           {
             Value *v = ExtractElementInst::Create( CV[i],ConstantInt::get( *Context,APInt( 32,j ) ),BCC->getName(),BB );
             elm1 = CreateCompositeConstruct( elm1,v,pos++ );
@@ -3216,17 +3221,17 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     }
     break;
 
-  case OpAssumeTrueINTEL: {
+  case OpAssumeTrueKHR: {
     IRBuilder<> Builder(BB);
-    SPIRVAssumeTrueINTEL* BC = static_cast<SPIRVAssumeTrueINTEL*>(BV);
+    SPIRVAssumeTrueKHR* BC = static_cast<SPIRVAssumeTrueKHR*>(BV);
     Value* Condition = transValue(BC->getCondition(), F, BB);
     Condition = Builder.CreateTrunc(Condition, Type::getInt1Ty(*Context));
     return mapValue(BV, Builder.CreateAssumption(Condition));
   }
 
-  case OpExpectINTEL: {
+  case OpExpectKHR: {
     IRBuilder<> Builder(BB);
-    SPIRVExpectINTELInstBase* BC = static_cast<SPIRVExpectINTELInstBase*>(BV);
+    SPIRVExpectKHRInstBase* BC = static_cast<SPIRVExpectKHRInstBase*>(BV);
     Value* Val = transValue(BC->getOperand(0), F, BB);
     Value* ExpVal = transValue(BC->getOperand(1), F, BB);
     Function* ExpectFn = Intrinsic::getDeclaration(M, Intrinsic::expect, Val->getType());
@@ -3346,7 +3351,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       auto Vector = transValue(BI->getOperand(0), F, BB);
       auto Scalar = transValue(BI->getOperand(1), F, BB);
 
-      auto VecType = cast<IGCLLVM::FixedVectorType>(Vector->getType());
+      auto VecType = cast<VectorType>(Vector->getType());
       auto Undef   = UndefValue::get(VecType);
 
       auto ScalarVec = InsertElementInst::Create(Undef, Scalar,
@@ -3371,7 +3376,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
           a->getType()->getScalarSizeInBits() - 1);
       auto *ShiftOp = isa<VectorType>(a->getType()) ?
           ConstantVector::getSplat(
-              IGCLLVM::getElementCount((unsigned)cast<IGCLLVM::FixedVectorType>(a->getType())->getNumElements()), ShiftAmt) :
+              IGCLLVM::getElementCount((unsigned)cast<VectorType>(a->getType())->getNumElements()), ShiftAmt) :
           ShiftAmt;
 
       // OCL C:
@@ -3715,15 +3720,15 @@ SPIRVToLLVM::transSPIRVBuiltinFromInst(SPIRVInstruction *BI, BasicBlock *BB) {
               "",
               BB);
       }
-      else if (cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements() != 4)
+      else if (cast<VectorType>(coordType)->getNumElements() != 4)
       {
           Value *undef = UndefValue::get(coordType);
 
           SmallVector<Constant*, 4> shuffleIdx;
-          for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements(); i++)
+          for (unsigned i = 0; i < cast<VectorType>(coordType)->getNumElements(); i++)
               shuffleIdx.push_back(ConstantInt::get(Type::getInt32Ty(*Context), i));
 
-          for (uint64_t i = (unsigned)cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements(); i < 4; i++)
+          for (uint64_t i = (unsigned)cast<VectorType>(coordType)->getNumElements(); i < 4; i++)
               shuffleIdx.push_back(ConstantInt::get(Type::getInt32Ty(*Context), 0));
 
           imageCoordinateWiden = new ShuffleVectorInst(
@@ -4425,24 +4430,27 @@ bool ReadSPIRV(LLVMContext &C, std::istream &IS, Module *&M,
   std::unique_ptr<SPIRVModule> BM( SPIRVModule::createSPIRVModule() );
   BM->setSpecConstantMap(specConstants);
   IS >> *BM;
-  BM->resolveUnknownStructFields();
-  M = new Module( "",C );
-  SPIRVToLLVM BTL( M,BM.get() );
-  bool Succeed = true;
-  if(!BTL.translate()) {
-    BM->getError( ErrMsg );
-    Succeed = false;
-  }
+  bool Succeed = BM->getError(ErrMsg) == SPIRVEC_Success;
+  if (Succeed) {
+    BM->resolveUnknownStructFields();
+    M = new Module("", C);
+    SPIRVToLLVM BTL(M, BM.get());
 
-  llvm::legacy::PassManager PM;
-  PM.add( new TypesLegalizationPass() );
-  PM.add( createDeadCodeEliminationPass() );
-  PM.run( *M );
+    if (!BTL.translate()) {
+      BM->getError(ErrMsg);
+      Succeed = false;
+    }
+
+    llvm::legacy::PassManager PM;
+    PM.add(new TypesLegalizationPass());
+    PM.add(createDeadCodeEliminationPass());
+    PM.run(*M);
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-  if (DbgSaveTmpLLVM)
-    dumpLLVM(M, DbgTmpLLVMFileName);
+    if (DbgSaveTmpLLVM)
+      dumpLLVM(M, DbgTmpLLVMFileName);
 #endif
+  }
   if (!Succeed) {
     delete M;
     M = nullptr;

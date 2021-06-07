@@ -42,19 +42,19 @@ static bool hasSameFunctionID(const G4_INST* inst1, const G4_INST* inst2)
 {
     if (inst1->isSend() && inst2->isSend())
     {
-        G4_SendMsgDescriptor* msgDesc1 = inst1->getMsgDesc();
-        G4_SendMsgDescriptor* msgDesc2 = inst2->getMsgDesc();
+        G4_SendDesc* msgDesc1 = inst1->getMsgDesc();
+        G4_SendDesc* msgDesc2 = inst2->getMsgDesc();
 
-        if (msgDesc1->isSLMMessage() && msgDesc2->isSLMMessage())
+        if (msgDesc1->isSLM() && msgDesc2->isSLM())
         {
-            return (msgDesc1->getFuncId() == msgDesc2->getFuncId());
+            return (msgDesc1->getSFID() == msgDesc2->getSFID());
         }
-        else if (msgDesc1->isSLMMessage() || msgDesc2->isSLMMessage())
+        else if (msgDesc1->isSLM() || msgDesc2->isSLM())
         {
             return false;
         }
 
-        return (msgDesc1->getFuncId() == msgDesc2->getFuncId());
+        return (msgDesc1->getSFID() == msgDesc2->getSFID());
     }
     else if (inst1->isSend() || inst2->isSend())
     {
@@ -77,8 +77,8 @@ static bool hasSameFunctionID(const G4_INST* inst1, const G4_INST* inst2)
 static bool isSLMMsg(const G4_INST* inst)
 {
     assert(inst->isSend());
-    const G4_SendMsgDescriptor* msgDesc = inst->getMsgDesc();
-    if (msgDesc->isSLMMessage())
+    const G4_SendDesc* msgDesc = inst->getMsgDesc();
+    if (msgDesc->isSLM())
     {
         return true;
     }
@@ -88,16 +88,13 @@ static bool isSLMMsg(const G4_INST* inst)
 static bool isFence(const G4_INST* inst)
 {
     assert(inst->isSend());
-    const G4_SendMsgDescriptor* msgDesc = inst->getMsgDesc();
+    const G4_SendDesc* msgDesc = inst->getMsgDesc();
     if (msgDesc->isFence())
     {
         return true;
     }
     return false;
 }
-
-
-
 
 static bool hasSamePredicator(const G4_INST* inst1, const G4_INST* inst2)
 {
@@ -230,7 +227,8 @@ static bool operandOverlap(G4_Operand* opnd1, G4_Operand* opnd2)
 }
 
 // Compute the range of registers touched by OPND.
-SBFootprint* G4_BB_SB::getFootprintForGRF(G4_Operand* opnd,
+SBFootprint* G4_BB_SB::getFootprintForGRF(
+    G4_Operand* opnd,
     Gen4_Operand_Number opnd_num,
     G4_INST* inst,
     int startingBucket,
@@ -257,19 +255,20 @@ SBFootprint* G4_BB_SB::getFootprintForGRF(G4_Operand* opnd,
             //
             if (opnd_num == Opnd_src0)
             {
-                RB = LB + numEltPerGRF<Type_UB>() * inst->getMsgDesc()->MessageLength() - 1;
+                RB = LB + numEltPerGRF<Type_UB>() * inst->getMsgDesc()->getSrc0LenRegs() - 1;
             }
 
             if (inst->isSplitSend() &&
                 opnd_num == Opnd_src1)
             {
-                RB = LB + numEltPerGRF<Type_UB>() * inst->getMsgDesc()->extMessageLength() - 1;
+                RB = LB + numEltPerGRF<Type_UB>() * inst->getMsgDesc()->getSrc1LenRegs() - 1;
             }
 
             if (opnd_num == Opnd_dst)
             {
-                int dstSize = inst->getMsgDesc()->ResponseLength();
-                if (!inst->getMsgDesc()->isOwordLoad())
+                int dstSize = inst->getMsgDesc()->getDstLenRegs();
+                if (inst->getMsgDescRaw() == nullptr ||
+                    !inst->getMsgDescRaw()->isOwordLoad())
                 {
                     if ((LB / numEltPerGRF<Type_UB>()) < (unsigned short)(totalGRFNum - 1))
                     {
@@ -280,6 +279,7 @@ SBFootprint* G4_BB_SB::getFootprintForGRF(G4_Operand* opnd,
 
             assert(RB < (numEltPerGRF<Type_UB>() * aregOffset) && "Out of register bound");
         }
+
         break;
     default:
         assert(0 && "Bad opnd");
@@ -865,7 +865,7 @@ static unsigned getRegAccessPipe(G4_INST* Inst) {
     if (Inst->isSend())
     {
         Pipe = FCPatchingInfo::Pipe_Send;
-        SFID = SFIDtoInt(Inst->getMsgDesc()->getFuncId()) & 0xF; // 4-bit SFID
+        SFID = SFIDtoInt(Inst->getMsgDesc()->getSFID()) & 0xF; // 4-bit SFID
     }
     else if (Inst->isMathPipeInst())
     {
@@ -1118,7 +1118,7 @@ void SWSB::genSWSBPatchInfo() {
 #endif
 }
 
-void SWSB::getDominators(Dom* dom)
+void SWSB::getDominators(Dominator* dom)
 {
     //BBVector[bb->getId()]->tokenAssigned = true;
     bool changed = true;
@@ -1130,9 +1130,9 @@ void SWSB::getDominators(Dom* dom)
         for (size_t i = 0; i < BBVector.size(); i++)
         {
             BitSet currDoms = BBVector[i]->dominators;
-            if (dom->iDoms[i] != BBVector[i]->getBB())
+            if (dom->getIDoms()[i] != BBVector[i]->getBB())
             {
-                currDoms |= BBVector[dom->iDoms[i]->getId()]->dominators;
+                currDoms |= BBVector[dom->getIDoms()[i]->getId()]->dominators;
             }
 
             if (currDoms != BBVector[i]->dominators)
@@ -1170,8 +1170,7 @@ void SWSB::SWSBGenerator()
     if (fg.builder->getOptions()->getOption(vISA_GlobalTokenAllocation) ||
         fg.builder->getOptions()->getOption(vISA_DistPropTokenAllocation))
     {
-        Dom dom(kernel, mem);
-        dom.runIDOM();  //We can use dom.runDOM() as well, which compute the dominance first. However, it has issue with function call.
+        auto& dom = fg.getDominator();
 
         //Build dom tree
         for (size_t i = 0; i < BBVector.size(); i++)
@@ -1180,10 +1179,10 @@ void SWSB::SWSBGenerator()
             BBVector[i]->dominators = BitSet(BBVector.size(), false);
             BBVector[i]->dominators.set(i, true);
 
-            if (dom.iDoms[bb->getId()] != bb)
+            if (dom.getIDoms()[bb->getId()] != bb)
             {
-                BBVector[dom.iDoms[bb->getId()]->getId()]->domSuccs.push_back(BBVector[i]);
-                BBVector[i]->domPreds.push_back(BBVector[dom.iDoms[bb->getId()]->getId()]);
+                BBVector[dom.getIDoms()[bb->getId()]->getId()]->domSuccs.push_back(BBVector[i]);
+                BBVector[i]->domPreds.push_back(BBVector[dom.getIDoms()[bb->getId()]->getId()]);
             }
         }
 
@@ -1255,8 +1254,8 @@ unsigned SWSB::getDepDelay(const SBNode* curNode) const
             return TOKEN_AFTER_READ_CYCLE;
         }
 
-        const G4_SendMsgDescriptor* msgDesc = inst->getMsgDesc();
-        if (msgDesc->isSLMMessage())
+        const G4_SendDesc* msgDesc = inst->getMsgDesc();
+        if (msgDesc->isSLM())
         {
             reuseDelay = tokenAfterWriteSendSlmCycle;
         }
@@ -1395,9 +1394,9 @@ bool SWSB::cycleExpired(const SBNode* node, int currentID) const
 {
     if (node->GetInstruction()->isSend())
     {
-        const G4_SendMsgDescriptor* msgDesc = node->GetInstruction()->getMsgDesc();
+        const G4_SendDesc* msgDesc = node->GetInstruction()->getMsgDesc();
 
-        if (msgDesc->isSLMMessage())
+        if (msgDesc->isSLM())
         {
             return tokenAfterWriteSendSlmCycle <= (currentID - node->getLiveStartID());
         }
@@ -4220,7 +4219,7 @@ bool G4_BB_SB::getGRFFootPrint(SBNode* node, PointsToAnalysis& p)
     for (G4_INST* inst : node->instVec)
     {
         hasDistOneAReg |= getGRFFootPrintOperands(node, inst, Opnd_src0, Opnd_src3, p);
-        hasDistOneAReg |= getGRFFootPrintOperands(node, inst, Opnd_condMod, Opnd_implAccDst, p);
+        hasDistOneAReg |= getGRFFootPrintOperands(node, inst, Opnd_pred, Opnd_implAccDst, p);
         hasDistOneAReg |= getGRFFootPrintOperands(node, inst, Opnd_dst, Opnd_dst, p);
     }
 
@@ -4233,7 +4232,7 @@ void G4_BB_SB::getGRFBucketDescrs(SBNode* node, std::vector<SBBucketDescr>& BDve
     getGRFBucketsForOperands(node, Opnd_src0, Opnd_src3, BDvec, GRFOnly);
     if (!GRFOnly)
     {
-        getGRFBucketsForOperands(node, Opnd_condMod, Opnd_implAccDst, BDvec, GRFOnly);
+        getGRFBucketsForOperands(node, Opnd_pred, Opnd_implAccDst, BDvec, GRFOnly);
     }
     getGRFBucketsForOperands(node, Opnd_dst, Opnd_dst, BDvec, GRFOnly);
 
@@ -4275,6 +4274,7 @@ void G4_BB_SB::clearKilledBucketNodeXeLP(LiveGRFBuckets* LB, int ALUID)
         }
     }
 }
+
 
 
 void G4_BB_SB::setDistance(const SBFootprint* footprint, SBNode* node, SBNode* liveNode, bool dstDep)
@@ -4483,6 +4483,7 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                 if (!hasOverlap &&
                     dep == RAW &&
                     liveInst->isMath() &&
+                    builder.hasRSForSpecificPlatform() &&
                     (!hasSamePredicator(liveInst, curInst)))
                 {
                     hasOverlap = curFootprint->hasGRFGrainOverlap(liveFootprint);
@@ -4493,7 +4494,6 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                     ++bn_it;
                     continue;
                 }
-
 
                 if (tokenHonourInstruction(liveInst))
                 {
@@ -4658,6 +4658,7 @@ void G4_BB_SB::SBDDD(G4_BB* bb,
                 clearKilledBucketNodeXeLP(LB, ALUID);
             }
         }
+
 
         // Add buckets of current instruction to bucket list
         std::vector<SBBucketNode*>  bucketNodes(Opnd_total_num, nullptr);  //The coarse grained footprint of operands
@@ -5178,7 +5179,6 @@ void SWSB::addGlobalDependence(unsigned globalSendNum, SBBUCKET_VECTOR* globalSe
                     DepType dep = DEPTYPE_MAX;
                     dep = getDepForOpnd(liveOpnd, curOpnd);
 
-
                     //RAW:                     R kill W    R-->live       explict dependence
                     //WAW:                     W2 kill W1  W2-->live      explict dependence
                     //WAW: same pipeline/inorder W2 kill W1  W2-->live      implicit dependence
@@ -5479,7 +5479,6 @@ void SWSB::addGlobalDependenceWithReachingDef(unsigned globalSendNum, SBBUCKET_V
 
                     //Find DEP type
                     DepType dep = getDepForOpnd(liveOpnd, curOpnd);
-
 
                     //RAW:                     R kill W    R-->live       explict dependence
                     //WAW:                     W2 kill W1  W2-->live      explict dependence
@@ -5982,246 +5981,7 @@ void vISA::singleInstStallSWSB(G4_Kernel* kernel, uint32_t instID, uint32_t endI
     }
 }
 
-G4_BB* Dom::InterSect(G4_BB* bb, int i, int k)
-{
-    G4_BB* finger1 = immDoms[bb->getId()][i];
-    G4_BB* finger2 = immDoms[bb->getId()][k];
-
-    while ((finger1 != finger2) &&
-        (finger1 != nullptr) &&
-        (finger2 != nullptr))
-    {
-        if (finger1->getPreId() == finger2->getPreId())
-        {
-            assert(finger1 == kernel.fg.getEntryBB() || finger2 == kernel.fg.getEntryBB());
-            return kernel.fg.getEntryBB();
-        }
-
-        while ((iDoms[finger1->getId()] != nullptr) &&
-            (finger1->getPreId() > finger2->getPreId()))
-        {
-            finger1 = iDoms[finger1->getId()];
-            immDoms[bb->getId()][i] = finger1;
-        }
-
-        while ((iDoms[finger2->getId()] != nullptr) &&
-            (finger2->getPreId() > finger1->getPreId()))
-        {
-            finger2 = iDoms[finger2->getId()];
-            immDoms[bb->getId()][k] = finger2;
-        }
-
-        if ((iDoms[finger2->getId()] == nullptr) ||
-            (iDoms[finger1->getId()] == nullptr))
-        {
-            break;
-        }
-    }
-
-    if (finger1 == finger2)
-    {
-        return finger1;
-    }
-    else if (finger1->getPreId() > finger2->getPreId())
-    {
-        return finger2;
-    }
-    else
-    {
-        return finger1;
-    }
-}
-
-/*
-* An improvement on the algorithm from "A Simple, Fast Dominance Algorithm"
-* 1. Single pred assginment.
-* 2. To reduce the back trace in the intersect function, a temp buffer for predictor of each nodes is used to record the back trace result.
-*/
-void Dom::runIDOM()
-{
-    iDoms.resize(kernel.fg.size());
-    immDoms.resize(kernel.fg.size());
-
-    for (auto I = kernel.fg.cbegin(), E = kernel.fg.cend(); I != E; ++I)
-    {
-        auto bb = *I;
-        iDoms[bb->getId()] = nullptr;
-        immDoms[bb->getId()].resize(bb->Preds.size());
-
-        size_t i = 0;
-        for (auto pred : bb->Preds)
-        {
-            immDoms[bb->getId()][i] = pred;
-            i++;
-        }
-    }
-
-    entryBB = kernel.fg.getEntryBB();
-    iDoms[entryBB->getId()] = { entryBB };
-
-    // Actual dom computation
-    bool change = true;
-    while (change)
-    {
-        change = false;
-        for (auto I = kernel.fg.cbegin(), E = kernel.fg.cend(); I != E; ++I)
-        {
-            auto bb = *I;
-            if (bb == entryBB)
-                continue;
-
-            if (bb->Preds.size() == 1)
-            {
-                if (iDoms[bb->getId()] == nullptr)
-                {
-                    iDoms[bb->getId()] = (*bb->Preds.begin());
-                    change = true;
-                }
-                else
-                {
-                    assert(iDoms[bb->getId()] == (*bb->Preds.begin()));
-                }
-            }
-            else
-            {
-                G4_BB* tmpIdom = nullptr;
-                int i = 0;
-                for (auto pred : bb->Preds)
-                {
-                    if (iDoms[pred->getId()] != nullptr)
-                    {
-                        tmpIdom = pred;
-                        break;
-                    }
-                    i++;
-                }
-
-                if (tmpIdom != nullptr)
-                {
-                    int k = 0;
-                    for (auto pred : bb->Preds)
-                    {
-                        if (k == i)
-                        {
-                            k++;
-                            continue;
-                        }
-
-                        if (iDoms[pred->getId()] != nullptr)
-                        {
-                            tmpIdom = InterSect(bb, i, k);
-                        }
-                        k++;
-                    }
-
-                    if (iDoms[bb->getId()] == nullptr ||
-                        iDoms[bb->getId()] != tmpIdom)
-                    {
-                        iDoms[bb->getId()] = tmpIdom;
-                        change = true;
-                    }
-                }
-            }
-        }
-    }
-}
-
-void Dom::runDOM()
-{
-    Doms.resize(kernel.fg.size());
-    entryBB = kernel.fg.getEntryBB();
-
-    MUST_BE_TRUE(entryBB != nullptr, "Entry BB not found!");
-
-    Doms[entryBB->getId()] = { entryBB };
-    std::unordered_set<G4_BB*> allBBs;
-    for (auto I = kernel.fg.cbegin(), E = kernel.fg.cend(); I != E; ++I)
-    {
-        auto bb = *I;
-        allBBs.insert(bb);
-    }
-
-    for (auto I = kernel.fg.cbegin(), E = kernel.fg.cend(); I != E; ++I)
-    {
-        auto bb = *I;
-        if (bb != entryBB)
-        {
-            Doms[bb->getId()] = allBBs;
-        }
-    }
-
-    // Actual dom computation
-    bool change = true;
-    while (change)
-    {
-        change = false;
-        for (auto I = kernel.fg.cbegin(), E = kernel.fg.cend(); I != E; ++I)
-        {
-            auto bb = *I;
-            if (bb == entryBB)
-                continue;
-
-            std::unordered_set<G4_BB*> tmp = { bb };
-
-            // Compute intersection of dom of preds
-            std::unordered_map<G4_BB*, unsigned int> numInstances;
-
-            //
-            for (auto preds : bb->Preds)
-            {
-                auto& domPred = Doms[preds->getId()];
-                for (auto domPredBB : domPred)
-                {
-                    auto it = numInstances.find(domPredBB);
-                    if (it == numInstances.end())  //Not found
-                        numInstances.insert(std::make_pair(domPredBB, 1));
-                    else
-                        it->second = it->second + 1;
-                }
-            }
-
-            // Common BBs appear in numInstances map with second value == bb->Preds count
-            for (auto commonBBs : numInstances)
-            {
-                if (commonBBs.second == bb->Preds.size()) //same size means the bb from all preds.
-                    tmp.insert(commonBBs.first);
-            }
-
-            // Check if Dom set changed for bb in current iter
-            if (tmp.size() != Doms[bb->getId()].size())  //Same size
-            {
-                Doms[bb->getId()] = tmp;
-                change = true;
-                continue;
-            }
-            else //Same
-            {
-                auto& domBB = Doms[bb->getId()];
-                for (auto tmpBB : tmp)
-                {
-                    if (domBB.find(tmpBB) == domBB.end()) //Same BB
-                    {
-                        Doms[bb->getId()] = tmp;
-                        change = true;
-                        break;
-                    }
-                    if (change)
-                        break;
-                }
-            }
-        }
-    }
-
-    updateImmDom();
-}
-
-
-std::unordered_set<G4_BB*>& Dom::getDom(G4_BB* bb)
-{
-    return Doms[bb->getId()];
-}
-
-void SWSB::dumpImmDom(Dom* dom) const
+void SWSB::dumpImmDom(Dominator* dom) const
 {
     for (auto bb : fg)
     {
@@ -6235,97 +5995,13 @@ void SWSB::dumpImmDom(Dom* dom) const
         {
             printf("BB%d, ", pred->getId());
         }
-        auto& idomBB = dom->iDoms[bb->getId()];
+        auto& idomBB = dom->getIDoms()[bb->getId()];
         assert(idomBB != nullptr);
-        printf("\n\t iDOM: BB%d -- DOM SUCC: ", dom->iDoms[bb->getId()]->getId());
-        for (const G4_BB_SB *succ : BBVector[bb->getId()]->domSuccs)
+        printf("\n\t iDOM: BB%d -- DOM SUCC: ", dom->getIDoms()[bb->getId()]->getId());
+        for (const G4_BB_SB* succ : BBVector[bb->getId()]->domSuccs)
         {
             printf("BB%d, ", succ->getBB()->getId());
         }
         printf("\n");
     }
-}
-
-std::vector<G4_BB*>& Dom::getImmDom(G4_BB* bb)
-{
-    return immDoms[bb->getId()];
-}
-
-void Dom::updateImmDom()
-{
-    std::vector<BitSet> domBits(kernel.fg.size());
-
-    for (size_t i = 0; i < kernel.fg.size(); i++)
-    {
-        domBits[i] = BitSet(unsigned(kernel.fg.size()), false);
-    }
-
-    // Update immDom vector with correct ordering
-    for (auto bb : kernel.fg)
-    {
-        auto& DomBBs = Doms[bb->getId()];
-
-        for (auto domBB : DomBBs)
-        {
-            domBits[bb->getId()].set(domBB->getId(), true);
-        }
-    }
-
-    iDoms.resize(kernel.fg.size());
-    for (auto bb : kernel.fg)
-    {
-        auto& DomBBs = Doms[bb->getId()];
-        BitSet tmpBits = domBits[bb->getId()];
-        tmpBits.set(bb->getId(), false);
-        iDoms[bb->getId()] = bb;
-
-        for (auto domBB : DomBBs)
-        {
-            if (domBB == bb)
-                continue;
-
-            if (tmpBits == domBits[domBB->getId()])
-            {
-                iDoms[bb->getId()] = domBB;
-            }
-        }
-    }
-}
-
-G4_BB* Dom::getCommonImmDom(const std::unordered_set<G4_BB*>& bbs)
-{
-    if (bbs.size() == 0)
-        return nullptr;
-
-    unsigned int maxId = (*bbs.begin())->getId();
-
-    auto commonImmDoms = getImmDom(*bbs.begin());
-    for (auto bb : bbs)
-    {
-        maxId = std::max(maxId, bb->getId());
-
-        const auto& DomBB = Doms[bb->getId()];
-        for (G4_BB*& dom : commonImmDoms)
-        {
-            if (dom != nullptr && DomBB.find(dom) == DomBB.end())
-            {
-                dom = nullptr;
-            }
-        }
-    }
-
-    // Return first imm dom that is not a BB from bbs set
-    for (G4_BB* dom : commonImmDoms)
-    {
-        if (dom &&
-            // Common imm pdom must be lexically last BB
-            dom->getId() >= maxId &&
-            ((dom->size() > 1 && dom->front()->isLabel()) ||
-            (dom->size() > 0 && !dom->front()->isLabel())))
-        {
-            return dom;
-        }
-    }
-
-    return entryBB;
 }

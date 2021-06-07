@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -952,7 +936,7 @@ namespace //Anonymous
         {
             auto ndrangeStructName = "struct.ndrange_t";
             auto module = _deviceExecCall->getModule();
-            auto ndrangeTy = IGCLLVM::getTypeByName(module, ndrangeStructName);
+            auto ndrangeTy = module->getTypeByName(ndrangeStructName);
             if (ndrangeTy == nullptr)
             {
                 //create struct type
@@ -1635,7 +1619,10 @@ namespace //Anonymous
                 }
             }
 
-            // remove function pointers
+            // Remove function pointer from instructions
+            // FIXME: Allowing function pointer calls directly passed by FE will cause regressions due to implicit args
+            // not being supported by indirect calls. When runtime turns on support, we should remove the following code
+            // to allow function pointer usage in all cases.
             auto nullPtrConst = llvm::ConstantPointerNull::get(Type::getInt8PtrTy(M.getContext()));
             for (auto& func : M.functions())
             {
@@ -1645,11 +1632,8 @@ namespace //Anonymous
                     {
                         if (!isa<llvm::Constant>(user)) {
                             user->replaceUsesOfWith(&func, nullPtrConst);
+                            changed = true;
                         }
-                        else {
-                            user->replaceAllUsesWith(llvm::Constant::getNullValue(user->getType()));
-                        }
-                        changed = true;
                     }
                 }
             }
@@ -1697,7 +1681,7 @@ namespace //Anonymous
                     // this generates <element_type><num_elements> string. Ie for char2 element_type is char and num_elements is 2
                     // that is done by callin BaseTypeName on vector element type, this recursive call has only a depth of one since
                     // there are no compound vectors in OpenCL.
-                    auto vType = llvm::dyn_cast<IGCLLVM::FixedVectorType>(type);
+                    auto vType = llvm::dyn_cast<VectorType>(type);
                     return BaseTypeName(type->getContainedType(0), os) << vType->getNumElements();
                 }
                 default:
@@ -2153,7 +2137,7 @@ namespace //Anonymous
         {
             return std::unique_ptr<StructValue>(new NullStructValue(sourceValue));
         }
-        IGC_ASSERT_MESSAGE(0, "should not be here");
+        // Not a block description struct
         return nullptr;
     }
 

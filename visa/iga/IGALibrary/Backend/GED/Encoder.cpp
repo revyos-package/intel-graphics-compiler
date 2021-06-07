@@ -138,16 +138,16 @@ void Encoder::encodeKernel(
         }
 
         for (auto blk : k.getBlockList()) {
-            START_ENCODER_TIMER()
+            START_ENCODER_TIMER();
             encodeBlock(blk);
             STOP_ENCODER_TIMER();
             if (hasFatalError()) {
                 return;
             }
         }
-        START_ENCODER_TIMER()
+        START_ENCODER_TIMER();
         patchJumpOffsets();
-        STOP_ENCODER_TIMER()
+        STOP_ENCODER_TIMER();
 
         // setting actual size
         bitsLen = currentPc();
@@ -445,8 +445,8 @@ void Encoder::encodeTernaryDestinationAlign1(const Instruction& inst)
         GED_ENCODE(DstMathMacroExt, lowerMathMacroReg(dst.getMathMacroExt()));
         // GED_ENCODE(DstHorzStride, 1);
     } else {
-        encodeDstSubRegNum(subRegNumToBinNum(
-            dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()), true);
+        GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+            dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType(), m_model.platform));
         bool hasDstRgnHz = true;
         if (hasDstRgnHz) {
             GED_ENCODE(DstHorzStride, static_cast<int>(dst.getRegion().getHz()));
@@ -516,9 +516,9 @@ void Encoder::encodeTernarySourceAlign1(const Instruction& inst)
             encodeSrcRegionHorz<S>(Region::Horz::HZ_1);
 
         } else {
-            auto subReg = subRegNumToBinNum(
-                src.getDirRegRef().subRegNum, src.getDirRegName(), src.getType());
-            encodeSrcSubRegNum<S>(subReg, true);
+            auto subReg = SubRegToBinaryOffset(
+                src.getDirRegRef().subRegNum, src.getDirRegName(), src.getType(), m_model.platform);
+            encodeSrcSubRegNum<S>(subReg);
         }
         break;
     }
@@ -761,82 +761,99 @@ void Encoder::encodeBranchingInstructionSimplified(const Instruction& inst)
     }
 }
 
-void Encoder::encodeSendInstruction(const Instruction& inst)
+void Encoder::encodeSendInstruction(const Instruction& i)
 {
-    const OpSpec& os = inst.getOpSpec();
+    ////////////////////////////////////////////
+    // send operands
+    const OpSpec& os = i.getOpSpec();
     if (os.isSendFamily()) {
-        encodeSendDestination(inst.getDestination());
-        encodeSendSource0(inst.getSource(0));
+        encodeSendDestination(i.getDestination());
+        encodeSendSource0(i.getSource(0));
         if (m_model.supportsUnifiedSend()) {
-            encodeSendsSource1(inst.getSource(1));
+            encodeSendsSource1(i.getSource(1));
         }
     } else if (os.isSendsFamily()) {
-        encodeSendDestination(inst.getDestination());
-        encodeSendsSource0(inst.getSource(0));
-        encodeSendsSource1(inst.getSource(1));
+        encodeSendDestination(i.getDestination());
+        encodeSendsSource0(i.getSource(0));
+        encodeSendsSource1(i.getSource(1));
     }
 
-    const bool supportsExDescReg =
-        os.isSendsFamily() ||
-        m_model.supportsUnifiedSend();
+    ////////////////////////////////////////////
+    // send descriptors and other gunk
+    encodeSendDescs(i);
 
-    // ex_desc
-    SendDesc extMsgDesc = inst.getExtMsgDescriptor();
-    if (extMsgDesc.isImm()) { // Exdesc.IsReg == false
-        if (supportsExDescReg) {
-            GED_ENCODE(ExDescRegFile, GED_REG_FILE_IMM);
-        }
-        bool stripEOT = m_model.supportsUnifiedSend();
-        if (stripEOT) {
-            extMsgDesc.imm = extMsgDesc.imm & ~(1 << 5);
-        }
-
-        GED_ENCODE(ExMsgDesc, extMsgDesc.imm);
-
-    } else {  // ExDesc.IsReg == true
-        if (!supportsExDescReg) {
-            errorT("ex_desc register not supported on this platform for "
-                "this instruction");
-        }
-
-        // Underneath GED API converts ExDescRegFile to
-        // SetSelReg32ExDesc for sends
-        GED_ENCODE(ExDescRegFile, GED_REG_FILE_ARF);
-        // double the subregister because it's encoded as [3:1]
-        GED_ENCODE(ExDescAddrSubRegNum, 2 * extMsgDesc.reg.subRegNum);
-
+    ////////////////////////////////////////////
+    // send options
+    bool hasFusion = platform() >= Platform::XE;
+    if (hasFusion) {
+        GED_ENCODE(FusionCtrl,
+            i.hasInstOpt(InstOpt::SERIALIZE) ?
+                GED_FUSION_CTRL_Serialized : GED_FUSION_CTRL_Normal);
     }
 
-    // desc
-    bool hasImmDescRegFile = true;
-    SendDesc msgDesc = inst.getMsgDescriptor();
-    if (msgDesc.isImm()) {
-        if (hasImmDescRegFile)
-            GED_ENCODE(DescRegFile, GED_REG_FILE_IMM);
-        GED_ENCODE(MsgDesc, msgDesc.imm);
+    if (i.hasInstOpt(InstOpt::EOT)) {
+        GED_ENCODE(EOT, GED_EOT_EOT);
+    }
+} //end: encodeSendInstruction
+
+
+void Encoder::encodeSendDescs(const Instruction& i)
+{
+    if (platform() < Platform::XE) {
+        encodeSendDescsPreXe(i);
+    } else if (platform() == Platform::XE) {
+        encodeSendDescsXe(i);
     } else {
+        errorT("unsupported platform");
+    }
+
+    bool noEOTinExDesc = m_model.supportsUnifiedSend();
+    if (noEOTinExDesc &&
+        i.getExtMsgDescriptor().isImm() &&
+        (i.getExtMsgDescriptor().imm & 1 << 5))
+        errorT("Encoder: Send exDesc[5] must not be set (the legacy EOT bit)");
+}
+
+void Encoder::encodeSendDescsPreXe(const Instruction& i)
+{
+    SendDesc exDesc = i.getExtMsgDescriptor();
+    const OpSpec& os = i.getOpSpec();
+    if (exDesc.isReg()) {
+        if (os.isSendFamily()) {
+            errorT("unary send forbids register ExDesc");
+        }
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_ARF);
+        GED_ENCODE(ExDescAddrSubRegNum, 2 * exDesc.reg.subRegNum);
+    } else {
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(ExMsgDesc, exDesc.imm);
+    }
+
+    SendDesc desc = i.getMsgDescriptor();
+    if (desc.isReg()) {
         if (platform() == Platform::GEN9) {
             uint32_t msgDescriptor = 0;
-            // There is a HW bug on SKL where HW will only copy bits 0-28 from the
-            // address register (descriptor register) and will miss bit 30 of
-            // the descriptor.  Hence, even in the case of an register descriptor
-            // we must program bit 30 as immediate (it will be taken from the
-            // encoding and OR'd in correctly)
+            // There is a HW bug on SKL where HW will only copy bits 0-28 from
+            // the address register (descriptor register) and will miss bit 30
+            // of the descriptor.  Hence, even in the case of an register
+            // descriptor we must program bit 30 as immediate (it will be
+            // taken from the encoding and OR'd in correctly)
+            //
             // E.g. (old syntax)
             //   sends (8) r74:hf r16 r73 0x42:ud a0.0 {Align1, Q1, NoMask}
-            //   // #??:$10:%13 // sampler, resLen=3, msgLen=1, extMsgLen=1
-            // On SKL, HW will copy bits 29-31 from the actual immediate descriptor
-            // Bits.  Hence, we must set immediate descriptor bit 30 even in the case
-            // of a register descriptor! (For SKL).
+            //       // sampler, resLen=3, msgLen=1, extMsgLen=1
+            // On SKL, HW will copy bits 29-31 from the actual immediate
+            // descriptor bits.  Hence, we must set immediate descriptor
+            // bit 30 even in the case of a register descriptor. (For SKL).
             //
             // For 3D sampler bit 30 indicates HF/F return format.
             // For render target write bit 30 indicates HF/F input...
-            // "Thankfully" for SKL 3D sampler doesn't support HF input.
+            // Thankfully for SKL the 3D sampler doesn't support HF input.
             // For CNL it does, and that will be bit 29.
             // But this bug should be fixed in CNL.
-            if (platform() == Platform::GEN9 && msgDesc.isReg()) {
-                if (inst.getDestination().getType() == Type::HF ||
-                    inst.getSource(0).getType() == Type::HF)
+            if (platform() == Platform::GEN9 && desc.isReg()) {
+                if (i.getDestination().getType() == Type::HF ||
+                    i.getSource(0).getType() == Type::HF)
                 {
                     msgDescriptor |= (1 << 30);
                 }
@@ -844,27 +861,45 @@ void Encoder::encodeSendInstruction(const Instruction& inst)
             GED_ENCODE(DescRegFile, GED_REG_FILE_IMM);
             GED_ENCODE(MsgDesc, msgDescriptor);
         }
-        // underneath GED API converts this to SetSelReg32Desc for sends
-        if (hasImmDescRegFile)
-            GED_ENCODE(DescRegFile, GED_REG_FILE_ARF);
-        // only send/sendc support a register here
-        if (m_model.supportsUnarySend()) {
-            uint8_t regNumBits;
-            const RegInfo *ri = m_model.lookupRegInfoByRegName(RegName::ARF_A);
-            IGA_ASSERT(ri, "failed to find a0 register");
-            ri->encode((int)msgDesc.reg.regNum, regNumBits);
-            GED_ENCODE(DescRegNum, regNumBits);
-        }
-    } // end else: desc
-
-
-    bool hasFusion = platform() >= Platform::XE;
-    if (hasFusion) {
-        GED_ENCODE(FusionCtrl,
-            inst.hasInstOpt(InstOpt::SERIALIZE) ?
-                GED_FUSION_CTRL_Serialized : GED_FUSION_CTRL_Normal);
+        GED_ENCODE(DescRegFile, GED_REG_FILE_ARF);
+        uint8_t regNumBits;
+        const RegInfo *ri = m_model.lookupRegInfoByRegName(RegName::ARF_A);
+        IGA_ASSERT(ri, "failed to find a0 register");
+        ri->encode((int)desc.reg.regNum, regNumBits);
+        GED_ENCODE(DescRegNum, regNumBits);
+    } else if (desc.isImm()) {
+        GED_ENCODE(DescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(MsgDesc, desc.imm);
     }
-} //end: encodeSendInstruction
+}
+void Encoder::encodeSendDescsXe(const Instruction& i)
+{
+    SendDesc exDesc = i.getExtMsgDescriptor();
+    if (exDesc.isReg()) {
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_ARF);
+        GED_ENCODE(ExDescAddrSubRegNum, 2 * exDesc.reg.subRegNum);
+    } else {
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(ExMsgDesc, exDesc.imm);
+    }
+
+    SendDesc desc = i.getMsgDescriptor();
+    if (desc.isReg()) {
+        GED_ENCODE(DescRegFile, GED_REG_FILE_ARF);
+        // a0.0 is implied (there's no field)
+        if (desc.reg.subRegNum != 0) {
+            errorT("send with reg desc must be a0.0");
+        }
+    } else {
+        GED_ENCODE(DescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(MsgDesc, desc.imm);
+    }
+}
+
+
+
+
+
 
 void Encoder::encodeSyncInstruction(const Instruction& inst)
 {
@@ -885,11 +920,8 @@ void Encoder::encodeBranchDestination(const Operand& dst) {
     GED_ENCODE(DstRegFile,
         lowerRegFile(dst.getDirRegName()));
     encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
-    encodeDstSubRegNum(subRegNumToBinNum(
-                         dst.getDirRegRef().subRegNum,
-                         dst.getDirRegName(),
-                         dst.getType()),
-                       true);
+    GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+        dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType(), m_model.platform));
 }
 
 void Encoder::encodeBasicDestination(
@@ -955,14 +987,12 @@ void Encoder::encodeBasicDestination(
                 encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
                 GED_ENCODE(DstChanEn, GED_DST_CHAN_EN_xyzw);
             }
-            encodeDstSubRegNum(
-                subRegNumToBinNum(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()),
-                inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
+            GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+                dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType(), m_model.platform));
         } else { // Align1
             encodeDstReg(dst.getDirRegName(), dst.getDirRegRef().regNum);
-            encodeDstSubRegNum(
-                subRegNumToBinNum(dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType()),
-                inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
+            GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+                dst.getDirRegRef().subRegNum, dst.getDirRegName(), dst.getType(), m_model.platform));
         }
         break;
     case Operand::Kind::MACRO:
@@ -984,6 +1014,7 @@ void Encoder::encodeBasicDestination(
             GED_ENCODE(Saturate,
                 lowerSaturate(dst.getDstModifier()));
         }
+
         GED_ENCODE(DstAddrImm, dst.getIndImmAddr());
         GED_ENCODE(DstAddrSubRegNum, dst.getIndAddrReg().subRegNum);
         break;
@@ -1020,9 +1051,9 @@ void Encoder::encodeBranchSource(const Operand& src)
 {
     encodeSrcRegFile<SourceIndex::SRC0>(lowerRegFile(src.getDirRegName()));
     encodeSrcReg<SourceIndex::SRC0>(src.getDirRegName(),src.getDirRegRef().regNum);
-    auto subReg = subRegNumToBinNum(
-        src.getDirRegRef().subRegNum, src.getDirRegName(), Type::D);
-    encodeSrcSubRegNum<SourceIndex::SRC0>(subReg, true);
+    auto subReg = SubRegToBinaryOffset(
+        src.getDirRegRef().subRegNum, src.getDirRegName(), Type::D, m_model.platform);
+    encodeSrcSubRegNum<SourceIndex::SRC0>(subReg);
 }
 
 template <SourceIndex S>
@@ -1066,12 +1097,12 @@ void Encoder::encodeBasicSource(
                 encodeSrcReg<S>(RegName::ARF_MME, 0);
             } else {
                 encodeSrcReg<S>(src.getDirRegName(), src.getDirRegRef().regNum);
-                auto subReg = subRegNumToBinNum(
+                auto subReg = SubRegToBinaryOffset(
                     src.getDirRegRef().subRegNum,
                     src.getDirRegName(),
-                    src.getType());
-                encodeSrcSubRegNum<S>(subReg,
-                    inst.getOpSpec().isTernary() || inst.getOpSpec().isBranching());
+                    src.getType(),
+                    m_model.platform);
+                encodeSrcSubRegNum<S>(subReg);
             }
         } else { // (src.getKind() == Operand::Kind::MACRO)
             encodeSrcReg<S>(RegName::GRF_R,src.getDirRegRef().regNum);
@@ -1204,7 +1235,7 @@ void Encoder::encodeSendDirectDestination(const Operand& dst)
 
         GED_ENCODE(DstRegNum, dst.getDirRegRef().regNum);
         // GED_ENCODE(DstSubRegNum,
-        //    SubRegToBytesOffset(dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType()));
+        //    SubRegToBinaryOffset(dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType(), m_model.platform));
     }
 }
 
@@ -1350,9 +1381,8 @@ void Encoder::encodeSendsDestination(const Operand& dst)
 
     GED_ENCODE(DstRegNum, dst.getDirRegRef().regNum);
     // TODO: set correct regType
-    encodeDstSubRegNum(
-        subRegNumToBinNum(
-            dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType()), true);
+    GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+        dst.getDirRegRef().subRegNum, RegName::GRF_R, dst.getType(), m_model.platform));
 }
 
 template <SourceIndex S>
@@ -1443,9 +1473,8 @@ void Encoder::encodeTernarySourceAlign16(const Instruction& inst)
         }
         uint32_t regNum = reg.regNum;
         encodeSrcReg<S>(RegName::GRF_R, (uint16_t)regNum);
-        auto subReg =
-            subRegNumToBinNum(subRegNumber, src.getDirRegName(), src.getType());
-        encodeSrcSubRegNum<S>(subReg, true);
+        auto subReg = SubRegToBinaryOffset(subRegNumber, src.getDirRegName(), src.getType(), m_model.platform);
+        encodeSrcSubRegNum<S>(subReg);
     } else {
         // implicit operand accumulator
         // e.g. madm (4) ... -r14.acc3
@@ -1523,8 +1552,8 @@ void Encoder::encodeTernaryDestinationAlign16(const Instruction& inst)
             }
         }
         GED_ENCODE(DstChanEn, chanEn);
-        encodeDstSubRegNum(subRegNumToBinNum(
-            reg.subRegNum, dst.getDirRegName(), dst.getType()), true);
+        GED_ENCODE(DstSubRegNum, SubRegToBinaryOffset(
+            reg.subRegNum, dst.getDirRegName(), dst.getType(), m_model.platform));
     }
 }
 
@@ -1644,29 +1673,11 @@ void Encoder::encodeOptionsThreadControl(const Instruction& inst)
     }
 }
 
-// Translate from subRegNum to num represented in binary encoding
-std::pair<bool, uint32_t> Encoder::subRegNumToBinNum(
-    int subRegNum, RegName regName, Type type)
-{
-    return std::make_pair(true, SubRegToBytesOffset(subRegNum, regName, type));
-}
-
-void Encoder::encodeDstSubRegNum(
-    std::pair<bool, uint32_t> subReg, bool isTernaryOrBranch)
-{
-    GED_ENCODE(DstSubRegNum, subReg.second);
-}
-
 void Encoder::encodeOptions(const Instruction& inst)
 {
     GED_ENCODE(DebugCtrl,
         inst.hasInstOpt(InstOpt::BREAKPOINT) ?
             GED_DEBUG_CTRL_Breakpoint : GED_DEBUG_CTRL_Normal);
-
-    if (inst.hasInstOpt(InstOpt::EOT))
-    {
-        GED_ENCODE(EOT, GED_EOT_EOT);
-    }
 
     auto &os = inst.getOpSpec();
     if (os.supportsDepCtrl()) {
@@ -1807,12 +1818,12 @@ void Encoder::patchJumpOffsets()
         }
 
         // re-encode branch
-        START_GED_TIMER()
+        START_GED_TIMER();
         GED_RETURN_VALUE status = GED_EncodeIns(&jp.gedInst,
             inst->hasInstOpt(InstOpt::COMPACTED) ?
                 GED_INS_TYPE_COMPACT : GED_INS_TYPE_NATIVE,
             jp.bits);
-        STOP_GED_TIMER()
+        STOP_GED_TIMER();
         if (status != GED_RETURN_VALUE_SUCCESS) {
             fatalAtT(inst->getLoc(),
                 "GED_EncodeIns failed: ", gedReturnValueToString(status));

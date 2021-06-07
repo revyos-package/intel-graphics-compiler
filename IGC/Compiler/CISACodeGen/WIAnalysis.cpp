@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2019-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -598,9 +582,14 @@ bool WIAnalysis::isWorkGroupOrGlobalUniform(const Value* val)
     return Runner.isWorkGroupOrGlobalUniform(val);
 }
 
-bool WIAnalysis::insideDivergentCF(const llvm::Value* val)
+bool WIAnalysis::insideDivergentCF(const Value* val) const
 {
     return Runner.insideDivergentCF(val);
+}
+
+bool WIAnalysis::insideThreadDivergentCF(const Value* val) const
+{
+    return Runner.insideThreadDivergentCF(val);
 }
 
 WIAnalysis::WIDependancy WIAnalysisRunner::whichDepend(const Value* val) const
@@ -631,15 +620,16 @@ bool WIAnalysisRunner::isUniform(const Value* val) const
     return WIAnalysis::isDepUniform(whichDepend(val));
 }
 
-bool WIAnalysisRunner::isWorkGroupOrGlobalUniform(const Value* val)
+bool WIAnalysisRunner::isWorkGroupOrGlobalUniform(const Value* val) const
 {
     if (!hasDependency(val))
         return false;
     WIAnalysis::WIDependancy dep = whichDepend(val);
-    return dep == WIAnalysis::UNIFORM_GLOBAL || WIAnalysis::UNIFORM_WORKGROUP;
+    return dep == WIAnalysis::UNIFORM_GLOBAL ||
+           dep == WIAnalysis::UNIFORM_WORKGROUP;
 }
 
-bool WIAnalysisRunner::isGlobalUniform(const Value* val)
+bool WIAnalysisRunner::isGlobalUniform(const Value* val) const
 {
     if (!hasDependency(val))
         return false;

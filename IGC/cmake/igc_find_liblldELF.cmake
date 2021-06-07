@@ -1,6 +1,6 @@
 #=========================== begin_copyright_notice ============================
 #
-# Copyright (c) 2020-2021 Intel Corporation
+# Copyright (c) 2021 Intel Corporation
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"),
@@ -22,4 +22,38 @@
 #
 #============================ end_copyright_notice =============================
 
-add_subdirectory(Options)
+#   IGC_OPTION__LLDELF_LIB_DIR - Specify additional directories for searching lldELF library
+#   IGC_OPTION__LLDELF_H_DIR - Specify additional directories for searching lldELF headers
+
+if(IGC_BUILD__LLVM_SOURCES)
+  get_target_property(lldELF_SRC_DIR lldELF SOURCE_DIR)
+  set(LLD_INCLUDE_DIR "${lldELF_SRC_DIR}/../include")
+elseif(IGC_BUILD__LLVM_PREBUILDS)
+  find_library(lldELF
+    lldELF
+    PATHS "${IGC_OPTION__LLDELF_LIB_DIR}"
+    PATH_SUFFIXES "llvm-${LLVM_VERSION_MAJOR}/lib")
+
+  if(lldELF-NOTFOUND)
+    message(FATAL_ERROR
+    "Cannot find lldELF library, please install missing library or provide the path by IGC_OPTION__LLDELF_LIB_DIR")
+  endif()
+
+  find_path(
+    LLD_INCLUDE_DIR
+    NAMES "Driver.h"
+    PATHS "${IGC_OPTION__LLDELF_H_DIR}"
+    PATH_SUFFIXES "llvm-${LLVM_VERSION_MAJOR}/include/lld/Common/"
+  )
+
+  if(LLD_INCLUDE_DIR-NOTFOUND)
+    message(FATAL_ERROR
+    "Cannot find 'lld/Common/Driver.h' header, please install missing header or provide the path by IGC_OPTION__LLDELF_H_DIR")
+  endif()
+  set(LLD_INCLUDE_DIR "${LLD_INCLUDE_DIR}/../../")
+endif()
+
+list(APPEND IGC_BUILD__LLVM_LIBS_TO_LINK
+  lldELF)
+
+include_directories(${LLD_INCLUDE_DIR})

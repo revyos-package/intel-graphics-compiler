@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2020-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -78,7 +62,7 @@ public:
         char*& symName);
 
     /// addElfSections - copy every section of ELF file (a buffer in memory) to zeBinary
-    void addElfSections(void* elfBin, size_t debugDataSize);
+    void addElfSections(void* elfBin, size_t elfSize);
 
     /// getBinaryObject - get the final ze object
     void getBinaryObject(llvm::raw_pwrite_stream& os);
@@ -122,7 +106,7 @@ private:
     void addKernelExperimentalProperties(const IGC::SOpenCLKernelInfo& annotations,
         zebin::zeInfoKernel& zeinfoKernel);
 
-    /// add symbols of this kernel corresponding to kernek binary
+    /// add symbols of this kernel corresponding to kernel binary
     /// added by addKernelBinary
     void addSymbols(
         zebin::ZEELFObjectBuilder::SectionID kernelSectId,
@@ -171,7 +155,7 @@ private:
 
     /// Calculate correct (pure) size of ELF binary, because m_debugDataVISASize in kernel output
     /// contains something else.
-    size_t calcElfSize(void* elfBin, size_t debugDataSize);
+    size_t calcElfSize(void* elfBin, size_t elfSize);
 
 private:
     // mBuilder - Builder of a ZE ELF object

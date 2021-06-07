@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -239,6 +223,24 @@ namespace IGC
         unsigned m_flushToZero = 0;
 
         llvm::SmallVector<llvm::CallInst*, 16> m_CallRemDiv;
+
+        // Calling convention:
+        //    LLVM requires a call and its callee have the same calling convention;
+        //    otherwise, the call would be deleted (for example, instcombine would
+        //    delete it).
+        //
+        // The functions in lib could have a dfferent calling conventions than default
+        // (for example, spirv_func or default). Before linking lib functions, we do
+        // not know which calling convention to use. We first create a call with default
+        // calling convention, then link libs (So far, LLVM linking does not check mismatch
+        // of calling convention). To make sure a call and its callee have the same calling
+        // convention, we will set the call's calling convention to its callee's once we
+        // finish linking.
+        //
+        // This vector keeps all new calls whose calling convention will need to be set.
+        llvm::SmallVector<llvm::CallInst*, 32> m_allNewCallInsts;
+        void addCallInst(llvm::CallInst* CI) { m_allNewCallInsts.push_back(CI); }
+        void eraseCallInst(llvm::CallInst* CI);
     };
 
 } // namespace IGC

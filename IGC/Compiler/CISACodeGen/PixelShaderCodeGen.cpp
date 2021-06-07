@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -49,14 +33,14 @@ CVariable* CPixelShader::GetR1()
     return m_R1;
 }
 
-CVariable* CPixelShader::GetR1Lo()
+std::vector<CVariable*>& CPixelShader::GetR1Lo()
 {
     return m_R1Lo;
 }
 
-void CPixelShader::SetR1Lo(CVariable* var)
+void CPixelShader::AppendR1Lo(CVariable* var)
 {
-    m_R1Lo = var;
+    m_R1Lo.push_back(var);
 }
 
 CVariable* CPixelShader::GetCoarseR1()
@@ -161,10 +145,10 @@ void CPixelShader::AllocatePSPayload()
         for (uint i = 0; i < GetR1()->GetNumberInstance(); i++)
         {
             AllocateInput(GetR1(), offset, i, forceLiveOut);
-            if (GetR1Lo())
-            {
-                AllocateInput(GetR1Lo(), offset, i, forceLiveOut);
+            for (auto R1Lo: GetR1Lo()) {
+                AllocateInput(R1Lo, offset, i, forceLiveOut);
             }
+
             offset += getGRFSize();
         }
     }
@@ -340,7 +324,7 @@ void CPixelShader::AllocatePSPayload()
     for (auto& var : payloadLiveOutSetup)
     {
         IGC_ASSERT(offset% getGRFSize() == 0);
-        AllocateInput(var, offset);
+        AllocateInput(var, offset, 0, true);
         offset += var->GetSize();
     }
 
@@ -472,12 +456,7 @@ CVariable* CPixelShader::GetBaryReg(e_interpolation mode)
 
 CVariable* CPixelShader::GetBaryRegLoweredHalf(e_interpolation mode)
 {
-    IGC_ASSERT(mode == EINTERPOLATION_LINEAR ||
-        mode == EINTERPOLATION_LINEARCENTROID ||
-        mode == EINTERPOLATION_LINEARSAMPLE ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVE ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVECENTROID ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVESAMPLE);
+    IGC_ASSERT(IsInterpolationLinear(mode));
 
     const char* const name =
         mode == EINTERPOLATION_LINEAR ? "PerspectivePixelLoweredHalf" :
@@ -503,12 +482,7 @@ CVariable* CPixelShader::GetBaryRegLoweredHalf(e_interpolation mode)
 
 CVariable* CPixelShader::GetBaryRegLoweredFloat(e_interpolation mode)
 {
-    IGC_ASSERT(mode == EINTERPOLATION_LINEAR ||
-        mode == EINTERPOLATION_LINEARCENTROID ||
-        mode == EINTERPOLATION_LINEARSAMPLE ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVE ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVECENTROID ||
-        mode == EINTERPOLATION_LINEARNOPERSPECTIVESAMPLE);
+    IGC_ASSERT(IsInterpolationLinear(mode));
 
     const char* const name =
         mode == EINTERPOLATION_LINEAR ? "PerspectivePixelLoweredFloat" :
@@ -760,7 +734,6 @@ CPixelShader::~CPixelShader()
 void CPixelShader::InitEncoder(SIMDMode simdMode, bool canAbortOnSpill, ShaderDispatchMode shaderMode)
 {
     m_R1 = NULL;
-    m_R1Lo = NULL;
     m_PerspectiveBaryPlanes = nullptr;
     m_NonPerspectiveBaryPlanes = nullptr;
     m_PerspectivePixel = NULL;
@@ -910,6 +883,7 @@ void CPixelShader::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
     pKernelProgram->NOSBufferSize = m_NOSBufferSize / getMinPushConstantBufferAlignmentInBytes();
     pKernelProgram->isMessageTargetDataCacheDataPort = isMessageTargetDataCacheDataPort;
 
+
     CreateGatherMap();
     CreateConstantBufferOutput(pKernelProgram);
 
@@ -1014,14 +988,16 @@ void CPixelShader::ParseShaderSpecificOpcode(llvm::Instruction* inst)
             e_interpolation mode = static_cast<e_interpolation>(llvm::cast<llvm::ConstantInt>(inst->getOperand(1))->getZExtValue());
             if (mode != EINTERPOLATION_CONSTANT)
             {
-                if (inst->getType()->isHalfTy())
                 {
-                    loweredSetupIndexes.insert(setupIndex);
-                    m_ModeUsedHalf.set(mode);
-                }
-                else
-                {
-                    m_ModeUsedFloat.set(mode);
+                    if (inst->getType()->isHalfTy())
+                    {
+                        loweredSetupIndexes.insert(setupIndex);
+                        m_ModeUsedHalf.set(mode);
+                    }
+                    else
+                    {
+                        m_ModeUsedFloat.set(mode);
+                    }
                 }
             }
             break;
@@ -1669,6 +1645,16 @@ bool CPixelShader::IsLastRTWrite(llvm::GenIntrinsicInst* inst)
 bool CPixelShader::LowerPSInput()
 {
     return (m_SIMDSize == SIMDMode::SIMD16 || !m_Platform->supportMixMode());
+}
+
+bool CPixelShader::IsInterpolationLinear(e_interpolation mode)
+{
+    return mode == EINTERPOLATION_LINEAR ||
+        mode == EINTERPOLATION_LINEARCENTROID ||
+        mode == EINTERPOLATION_LINEARSAMPLE ||
+        mode == EINTERPOLATION_LINEARNOPERSPECTIVE ||
+        mode == EINTERPOLATION_LINEARNOPERSPECTIVECENTROID ||
+        mode == EINTERPOLATION_LINEARNOPERSPECTIVESAMPLE;
 }
 
 void CPixelShader::emitPSInputLowering()

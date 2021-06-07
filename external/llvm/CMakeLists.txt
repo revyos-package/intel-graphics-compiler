@@ -52,8 +52,6 @@ else()
   set(IGC_LLVM_SOURCE_DIR ${IGC_OPTION__LLVM_SOURCES_DIR}/llvm)
 endif()
 
-include(llvm_spirv.cmake)
-
 if(CMAKE_CONFIGURATION_TYPES)
     # Multi-configuration generator.
     set(CMAKE_CONFIGURATION_TYPES "Debug" "Release")
@@ -63,23 +61,18 @@ else()
     message(STATUS "[LLVM_PATCHER] : LLVM_BUILD_TYPE   = ${CMAKE_BUILD_TYPE}")
 endif()
 
-# Do not alter LLVM compilation flags -- clear them all.
-llvm_utils_push_build_flags()
-llvm_utils_python_set()
-# project() command sets global <project>_SOURCE_DIR and <project>_BINARY_DIR and we can use it later.
-add_subdirectory(${IGC_LLVM_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/src EXCLUDE_FROM_ALL)
-llvm_utils_python_restore()
-# No need to restore build flags since they are local to this subdirectory.
+# project() command sets global <project>_SOURCE_DIR and <project>_BINARY_DIR
+# and we can use it later.
+build_llvm_project(LLVM ${IGC_LLVM_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/src)
 
 # Sanity check for version matching.
 get_directory_property(LLVM_VERSION  DIRECTORY ${LLVM_SOURCE_DIR} DEFINITION "LLVM_VERSION")
 if(NOT ("${LLVM_VERSION}" VERSION_EQUAL "${IGC_OPTION__LLVM_PREFERRED_VERSION}"))
   message(FATAL_ERROR "Found LLVM version: ${LLVM_VERSION};"
     " however preferred was: ${IGC_OPTION__LLVM_PREFERRED_VERSION}\n"
-    "Please set IGC_OPTION__PREFERRED_LLVM_VERSION to ${LLVM_VERSION}"
+    "Please set IGC_OPTION__LLVM_PREFERRED_VERSION to ${LLVM_VERSION}"
     " or pass IGC_OPTION__LLVM_SOURCES_DIR with preferred version")
 endif()
-
 
 # Get version of LLVM that we are currently using.
 get_directory_property(LLVM_VERSION_MAJOR  DIRECTORY ${LLVM_SOURCE_DIR} DEFINITION "LLVM_VERSION_MAJOR")

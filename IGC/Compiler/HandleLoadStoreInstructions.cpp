@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -77,7 +61,7 @@ void HandleLoadStoreInstructions::visitLoadInst(llvm::LoadInst& I)
 
         if (I.getType()->isVectorTy())
         {
-            numVectorElements = (uint32_t)cast<IGCLLVM::FixedVectorType>(I.getType())->getNumElements();
+            numVectorElements = (uint32_t)cast<VectorType>(I.getType())->getNumElements();
             doubleDstType = IGCLLVM::FixedVectorType::get(builder.getDoubleTy(), numVectorElements);
         }
         uint as = ptrv->getType()->getPointerAddressSpace();
@@ -163,7 +147,7 @@ void HandleLoadStoreInstructions::visitStoreInst(llvm::StoreInst& I)
 
         if (I.getValueOperand()->getType()->isVectorTy())
         {
-            numVectorElements = (uint32_t)cast<IGCLLVM::FixedVectorType>(I.getValueOperand()->getType())->getNumElements();
+            numVectorElements = (uint32_t)cast<VectorType>(I.getValueOperand()->getType())->getNumElements();
         }
 
 
@@ -171,10 +155,11 @@ void HandleLoadStoreInstructions::visitStoreInst(llvm::StoreInst& I)
         llvm::Type* floatDatType = IGCLLVM::FixedVectorType::get(builder.getFloatTy(), numVectorElements * 2);
         llvm::PointerType* floatPtrType = llvm::PointerType::get(floatDatType, ptrv->getType()->getPointerAddressSpace());
         ptrv = mutatePtrType(ptrv, floatPtrType, builder);
+        I.setOperand(I.getPointerOperandIndex(), ptrv);
 
         // %10 = bitcast double %4 to <2 x float>
         llvm::Value* srcFloatInst = builder.CreateBitCast(I.getValueOperand(), floatDatType);
-        llvm::cast<llvm::StoreInst>(I).setOperand(0, srcFloatInst);
+        I.setOperand(0, srcFloatInst);
         m_changed = true;
     }
 }

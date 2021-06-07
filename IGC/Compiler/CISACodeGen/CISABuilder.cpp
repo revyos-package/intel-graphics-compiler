@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -460,15 +444,17 @@ namespace IGC
         VISA_EMask_Ctrl emask = m_encoderState.m_noMask ? vISA_EMASK_M1_NM : vISA_EMASK_M1;
         VISA_Exec_Size execSize = visaExecSize(m_program->m_dispatchSize);
 
-        // As uniform maybe thread-uniform, it will not work for scalar jump
-        // for two threads whose flags are different. Once we improve uniform
-        // analysis to have global (uniform among all threads), not just local
-        // uniform (within a thread), we can still generate scalar jump when flag
-        // is a global uniform.
-        //
-        // For now, just disable uniform goto if EU fusion is on.
+        // visa and igc agreement.
+        //    goto (1) is used to tell visa the goto is uniform.
+        // Goto(1) is generated if
+        //   1. jump is unconditional, or
+        //   2. jump is uniform (thread uniform or above) and no EU fusion, or
+        //   3. jump is either workgroup or global uniform under EU fusion
+        //      (it is temporarily under key control for ease of debugging)
         if (flag == nullptr ||
-            (!m_program->m_Platform->hasFusedEU() && flag->IsUniform()))
+            (!m_program->m_Platform->hasFusedEU() && flag->IsUniform()) ||
+            (IGC_IS_FLAG_ENABLED(EnableWorkGroupUniformGoto) &&
+             m_program->m_Platform->hasFusedEU() && flag->IsWorkGroupOrGlobalUniform()))
         {
             execSize = EXEC_SIZE_1;
         }
@@ -1488,7 +1474,7 @@ namespace IGC
             VISA_VectorOpnd* srcImmLo = nullptr;
             VISA_VectorOpnd* srcImmHi = nullptr;
             if (Need64BitEmu) {
-                if (Is64BitDst)
+                if (Is64BitDst && dst->GetVarType() == EVARTYPE_GENERAL)
                     dstAlias = m_program->GetNewAlias(dst, ISA_TYPE_UD, 0, 0);
                 else
                     dstAlias = dst;
@@ -1500,7 +1486,7 @@ namespace IGC
                     V(vKernel->CreateVISAImmediate(srcImmHi, &ImmHi, ISA_TYPE_UD));
                 }
                 else {
-                    if (Is64BitSrc)
+                    if (Is64BitSrc && src->GetVarType() == EVARTYPE_GENERAL)
                         srcAlias = m_program->GetNewAlias(src, ISA_TYPE_UD, 0, 0);
                     else
                         srcAlias = src;
@@ -4036,7 +4022,14 @@ namespace IGC
             SaveOption(vISA_GRFNumToUse, IGC_GET_FLAG_VALUE(GRFNumToUse));
         }
 
-        SaveOption(vISA_TotalGRFNum, context->getNumGRFPerThread());
+        if (IGC_GET_FLAG_VALUE(TotalGRFNum) != 0)
+        {
+            SaveOption(vISA_TotalGRFNum, IGC_GET_FLAG_VALUE(TotalGRFNum));
+        }
+        else
+        {
+            SaveOption(vISA_TotalGRFNum, context->getNumGRFPerThread());
+        }
 
 
 
@@ -4055,6 +4048,10 @@ namespace IGC
             SaveOption(vISA_AddKernelID, true);
             SaveOption(vISA_setStartBreakPoint, true);
         }
+
+        auto g4Subset = (uint32_t)IGC_GET_FLAG_VALUE(ShaderDumpEnableG4);
+        if (g4Subset != 0)
+            SaveOption(vISA_DumpPassesSubset, g4Subset);
 
         if (EnableBarrierInstCounterBits)
         {
@@ -4261,6 +4258,11 @@ namespace IGC
             SaveOption(vISA_noSendSrcDstOverlap, true);
         }
 
+        if (m_program->m_Platform->WaDisableSendSrcDstOverlap())
+        {
+            SaveOption(vISA_noSendSrcDstOverlap, true);
+        }
+
         // Set to stitch all functions to all kernels in a VISABuidler
         SaveOption(vISA_noStitchExternFunc, false);
 
@@ -4271,7 +4273,8 @@ namespace IGC
             if( IGC_GET_FLAG_VALUE( FastestS1Experiments ) == FCEXP_NO_EXPRIMENT )
             {
                 SaveOption( vISA_LocalScheduling, false );
-                SaveOption( vISA_preRA_Schedule, false );
+                // temporarily enabling preRA_schedule due to the ACOdyssey regression in IGC-4149.  May be re-disenabled later
+                // SaveOption( vISA_preRA_Schedule, false );
                 SaveOption( vISA_SpillSpaceCompression, false );
                 SaveOption( vISA_LVN, false );
                 SaveOption( vISA_QuickTokenAllocation, true );

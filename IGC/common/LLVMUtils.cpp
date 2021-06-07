@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -63,6 +47,28 @@ bool getPassToggles(std::bitset<1024>& toggles)
     }
 
     return false;
+}
+
+llvm::Pass* createFlushPass(llvm::Pass* pass, Dump& dump)
+{
+    // Choose an appropriate pass to preserve the original order of pass execution in the pass manager
+    switch (pass->getPassKind())
+    {
+    case PT_Function:
+        return new FunctionFlushDumpPass(dump);
+    case PT_Module:
+        return new ModuleFlushDumpPass(dump);
+    case PT_Region:
+    case PT_Loop:
+    case PT_CallGraphSCC:
+        // flushing for analysis passes is not required
+        break;
+    case PT_PassManager:
+    default:
+        // internal pass managers are not considered in the context
+        break;
+    }
+    return nullptr;
 }
 
 void IGCPassManager::add(Pass *P)
@@ -139,9 +145,18 @@ bool IGCPassManager::isPrintBefore(Pass* P)
 {
     if (IGC_IS_FLAG_ENABLED(PrintBefore))
     {
+        // PrintBefore=N0,N1,N2  : comma-separate list of pass names
+        //                         or pass command args registered in passInfo.
         StringRef  passNameList(IGC_GET_REGKEYSTRING(PrintBefore));
         StringRef PN = P->getPassName();
-        return (passNameList.equals_lower("all") || isInList(PN, passNameList));
+        if (passNameList.equals_lower("all") || isInList(PN, passNameList))
+            return true;
+
+        // further check passInfo
+        if (const PassInfo* PI = Pass::lookupPassInfo(P->getPassID()))
+        {
+            return isInList(PI->getPassArgument(), passNameList);
+        }
     }
     return false;
 }
@@ -154,10 +169,18 @@ bool IGCPassManager::isPrintAfter(Pass* P)
     }
     if (IGC_IS_FLAG_ENABLED(PrintAfter))
     {
-        // PrintAfter=N0,N1,N2  : comma-separate list of pass names.
+        // PrintAfter=N0,N1,N2  : comma-separate list of pass names or
+        //                         or pass command args registered in passInfo.
         StringRef  passNameList(IGC_GET_REGKEYSTRING(PrintAfter));
         StringRef PN = P->getPassName();
-        return (passNameList.equals_lower("all") || isInList(PN, passNameList));
+        if (passNameList.equals_lower("all") || isInList(PN, passNameList))
+            return true;
+
+        // further check passInfo
+        if (const PassInfo* PI = Pass::lookupPassInfo(P->getPassID()))
+        {
+            return isInList(PI->getPassArgument(), passNameList);
+        }
     }
     return false;
 }
@@ -177,19 +200,13 @@ void IGCPassManager::addPrintPass(Pass* P, bool isBefore)
     // is taken by reference into the printer pass. If the Dump object had been on the
     // stack, then that reference would go bad as soon as we exit this scope, and then
     // the printer pass would access an invalid pointer later on when we call PassManager::run()
-    IGC::Debug::Dump* pDump = new IGC::Debug::Dump(name, IGC::Debug::DumpType::PASS_IR_TEXT);
-    PassManager::add(P->createPrinterPass(pDump->stream(), ""));
-    m_irDumps.push_back(pDump);
-}
+    m_irDumps.emplace_front(name, IGC::Debug::DumpType::PASS_IR_TEXT);
+    PassManager::add(P->createPrinterPass(m_irDumps.front().stream(), ""));
 
-IGCPassManager::~IGCPassManager()
-{
-    if (!m_irDumps.empty())
+    llvm::Pass* flushPass = createFlushPass(P, m_irDumps.front());
+    if (nullptr != flushPass)
     {
-        for(auto it : m_irDumps)
-        {
-            delete it;
-        }
+        PassManager::add(flushPass);
     }
 }
 

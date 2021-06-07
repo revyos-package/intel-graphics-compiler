@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -28,10 +12,8 @@ IN THE SOFTWARE.
 #include "Compiler/CISACodeGen/Platform.hpp"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvmWrapper/IR/DerivedTypes.h>
-#include <llvmWrapper/Transforms/Utils/LoopUtils.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Operator.h>
-#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
@@ -579,7 +561,7 @@ static bool isPayloadHeader(Value* V) {
     Argument* Arg = dyn_cast<Argument>(V);
     if (!Arg || !Arg->hasName())
         return false;
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Arg->getType());
+    VectorType* VTy = dyn_cast<VectorType>(Arg->getType());
     if (!VTy || VTy->getNumElements() != 8 ||
         !VTy->getElementType()->isIntegerTy(32))
         return false;
@@ -590,7 +572,7 @@ static bool isR0(Value* V) {
     Argument* Arg = dyn_cast<Argument>(V);
     if (!Arg || !Arg->hasName())
         return false;
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Arg->getType());
+    VectorType* VTy = dyn_cast<VectorType>(Arg->getType());
     if (!VTy || VTy->getNumElements() != 8 ||
         !VTy->getElementType()->isIntegerTy(32))
         return false;
@@ -601,7 +583,7 @@ static bool isEnqueuedLocalSize(Value* V) {
     Argument* Arg = dyn_cast<Argument>(V);
     if (!Arg || !Arg->hasName())
         return false;
-    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Arg->getType());
+    VectorType* VTy = dyn_cast<VectorType>(Arg->getType());
     if (!VTy || VTy->getNumElements() != 3 ||
         !VTy->getElementType()->isIntegerTy(32))
         return false;
@@ -1000,7 +982,7 @@ static bool hasLongStridedLdStInLoop(Function* F, LoopInfo* LI, WIAnalysis* WI) 
     // Collect innermost simple loop.
     for (auto I = LI->begin(), E = LI->end(); I != E; ++I) {
         auto L = *I;
-        if (!IGCLLVM::isInnermost(L))
+        if (!L->empty())
             continue;
         if (L->getNumBlocks() != 2)
             continue;

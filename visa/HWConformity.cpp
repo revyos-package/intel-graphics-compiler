@@ -442,7 +442,7 @@ G4_Operand* HWConformity::insertMovBefore(INST_LIST_ITER it, uint32_t srcNum, G4
         dcl->getElemType());
 }
 
-void HWConformity::fixPackedSource(INST_LIST_ITER it, G4_BB* bb, G4_Type extype)
+void HWConformity::fixPackedSource(INST_LIST_ITER it, G4_BB* bb)
 {
     G4_INST* inst = *it;
 
@@ -450,32 +450,29 @@ void HWConformity::fixPackedSource(INST_LIST_ITER it, G4_BB* bb, G4_Type extype)
 
     for (int i = 0; i < inst->getNumSrc(); i++)
     {
-        G4_Operand* src = inst->getSrc(i);
-        if (!src || !(IS_VTYPE(src->getType())))
+        auto src = inst->getSrc(i);
+        if (!src)
+        {
+            continue;
+        }
+        if (!IS_VTYPE(src->getType()))
         {
             // Make sure other src operands are of word type only as this is a HW requirement
-            if (src &&
-                (src->getType() != Type_W &&
-                    src->getType() != Type_UW))
+            if (src->getType() != Type_W && src->getType() != Type_UW)
             {
                 nonTypeWFound = true;
             }
-            if (src &&
-                (src->getType() != Type_F))
+            if (src->getType() != Type_F)
             {
                 nonTypeFFound = true;
             }
             continue;
         }
-        G4_Type target_type = Type_W;
-        if (src->getType() == Type_VF)
-        {
-            target_type = Type_F;
-        }
-
-        if (target_type == Type_W && nonTypeWFound == true)
+        G4_Type target_type = src->getType() == Type_VF ? Type_F : Type_W;
+        if (target_type == Type_W && (nonTypeWFound || !builder.hasByteALU()))
         {
             // non-word type src is not allowed to co-exist with :v src
+            // also if platform lacks byte regioning :v src may be incompatible with later legalization
             incompatibleTypeFound = true;
         }
         else if (target_type == Type_F && nonTypeFFound == true)
@@ -484,10 +481,8 @@ void HWConformity::fixPackedSource(INST_LIST_ITER it, G4_BB* bb, G4_Type extype)
             incompatibleTypeFound = true;
         }
 
-        // Insert a move only if immediate operand is not
-        // last src operand
-        if (i != inst->getNumSrc() - 1 ||
-            incompatibleTypeFound == true)
+        // Insert a move only if immediate operand is not last src operand
+        if (i != inst->getNumSrc() - 1 || incompatibleTypeFound == true)
         {
             inst->setSrc(insertMovBefore(it, i, target_type, bb), i);
         }
@@ -1674,8 +1669,10 @@ bool HWConformity::fixDstAlignment(INST_LIST_ITER i, G4_BB* bb, G4_Type extype, 
             {
                 intHFConversion = true;
             }
-            // we allow packed destination for F to HF.
-            if (builder.getPlatform() >= GENX_CHV && !intHFConversion && inst->isMixedMode())
+            // F to packed HF operations are handled specially later
+            bool FtoHFMov = dst->getType() == Type_HF && src0->getType() == Type_F;
+            if (builder.getPlatform() >= GENX_CHV && !intHFConversion &&
+                (inst->isMixedMode() || (builder.hasFtoPackedHFMove() && FtoHFMov && inst->getExecSize() >= builder.getNativeExecSize())))
             {
                 return insertMOV;
             }
@@ -4868,7 +4865,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
             // we have to ensure they are all 2GRF-aligned
             G4_Declare* src0Dcl = inst->getSrc(0)->getTopDcl();
             // ToDo: check if dst/src1 may also exhibit such size mismatch
-            bool sizeMismatch = inst->getMsgDesc()->MessageLength() == 2 &&
+            bool sizeMismatch = inst->getMsgDesc()->getSrc0LenRegs() == 2 &&
                 (src0Dcl && src0Dcl->getRootDeclare()->getByteSize() < 2u * numEltPerGRF<Type_UB>());
             auto doEvenAlign = [](G4_Declare* dcl)
             {
@@ -4919,7 +4916,7 @@ void HWConformity::fixSendInst(G4_BB* bb)
         auto fixSrc = [&](G4_INST* inst, bool isSrc0)
         {
             auto sendSrc = isSrc0 ? inst->getSrc(0)->asSrcRegRegion() : inst->getSrc(1)->asSrcRegRegion();
-            uint16_t rows = isSrc0 ? inst->getMsgDesc()->MessageLength() : inst->getMsgDesc()->extMessageLength();
+            uint16_t rows = isSrc0 ? inst->getMsgDesc()->getSrc0LenRegs() : inst->getMsgDesc()->getSrc1LenRegs();
             G4_Type type = sendSrc->getType();
             G4_Declare* dcl = builder.createTempVar(rows * builder.getNativeExecSize(), type, GRFALIGN);
 
@@ -4983,9 +4980,9 @@ void HWConformity::fixSendInst(G4_BB* bb)
             bool src1Overlap = inst->isSplitSend() && inst->getDst()->compareOperand(inst->getSrc(1)) != Rel_disjoint;
             if (src0Overlap || src1Overlap)
             {
-                int dstSize = inst->getMsgDesc()->ResponseLength();
-                int src0Size = src0Overlap ? inst->getMsgDesc()->MessageLength() : 0;
-                int src1Size = src1Overlap ? inst->getMsgDesc()->extMessageLength() : 0;
+                int dstSize = inst->getMsgDesc()->getDstLenRegs();
+                int src0Size = src0Overlap ? inst->getMsgDesc()->getSrc0LenRegs() : 0;
+                int src1Size = src1Overlap ? inst->getMsgDesc()->getSrc1LenRegs() : 0;
                 if (inst->getPredicate() || (bb->isDivergent() && !inst->isWriteEnableInst()) || dstSize > src0Size + src1Size)
                 {
                     //copy src0/src1 if inst does not update all channels

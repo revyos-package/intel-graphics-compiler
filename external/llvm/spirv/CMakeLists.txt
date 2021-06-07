@@ -1,6 +1,6 @@
 #=========================== begin_copyright_notice ============================
 #
-# Copyright (c) 2020-2021 Intel Corporation
+# Copyright (c) 2021-2021 Intel Corporation
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"),
@@ -22,6 +22,22 @@
 #
 #============================ end_copyright_notice =============================
 
-set(LLVM_TARGET_DEFINITIONS Options.td)
-tablegen(LLVM Options.inc -gen-opt-parser-defs)
-add_public_tablegen_target(VectorCompilerOptions)
+# SPIRV source build with prebuilt LLVM.
+
+cmake_minimum_required(VERSION 3.13.4)
+
+project(IGC_SPIRVTranslator)
+
+# Set up LLVM project dependency for translator build.
+find_package(LLVM ${IGC_OPTION__LLVM_PREFERRED_VERSION} REQUIRED)
+
+message(STATUS "[SPIRV] Found LLVM: ${LLVM_DIR}")
+
+set(CMAKE_MODULE_PATH ${LLVM_CMAKE_DIR} ${CMAKE_MODULE_PATH})
+
+include(AddLLVM)
+include(HandleLLVMOptions)
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+build_llvm_project(SPIRV ${IGC_OPTION__SPIRV_TRANSLATOR_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/build)

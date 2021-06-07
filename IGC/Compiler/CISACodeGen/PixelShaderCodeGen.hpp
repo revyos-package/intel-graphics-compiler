@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -52,8 +36,8 @@ public:
     CPixelShader(llvm::Function* pFunc, CShaderProgram* pProgram);
     ~CPixelShader();
     CVariable* GetR1();
-    CVariable* GetR1Lo();
-    void SetR1Lo(CVariable* var);
+    std::vector<CVariable*>& GetR1Lo();
+    void AppendR1Lo(CVariable* var);
     CVariable* GetCoarseR1();
     CVariable* GetBaryReg(e_interpolation mode);
     CVariable* GetBaryRegLoweredHalf(e_interpolation mode);
@@ -129,6 +113,8 @@ public:
     std::bitset<NUMBER_EINTERPOLATION> m_ModeUsedHalf;
     std::bitset<NUMBER_EINTERPOLATION> m_ModeUsedFloat;
     bool LowerPSInput();
+    static bool IsInterpolationLinear(e_interpolation mode);
+
 protected:
     void CreatePassThroughVar();
     bool IsReturnBlock(llvm::BasicBlock* bb);
@@ -138,7 +124,7 @@ private:
     USC::GFX3DSTATE_SF_ATTRIBUTE_ACTIVE_COMPONENT GetActiveComponents(uint attribute) const;
 
     CVariable* m_R1;
-    CVariable* m_R1Lo;
+    std::vector<CVariable*> m_R1Lo;
     CVariable* m_PerspectiveBaryPlanes;
     CVariable* m_NonPerspectiveBaryPlanes;
     CVariable* m_CoarseR1;

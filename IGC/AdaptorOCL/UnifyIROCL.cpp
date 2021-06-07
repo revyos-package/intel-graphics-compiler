@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -44,7 +28,6 @@ IN THE SOFTWARE.
 
 #include "common/LLVMWarningsPop.hpp"
 
-#include "CleanupInputIR.hpp"
 #include "AdaptorCommon/AddImplicitArgs.hpp"
 #include "AdaptorCommon/ProcessFuncAttributes.h"
 #include "AdaptorCommon/LegalizeFunctionSignatures.h"
@@ -282,13 +265,6 @@ static void CommonOCLBasedPasses(
     mpmSPIR.run(*pContext->getModule());
 
     bool isOptDisabled = CompilerOpts.OptDisable;
-    if (IGC_IS_FLAG_ENABLED(EnableCleanupInputIR) && isOptDisabled)
-    {
-        // Do input IR cleanup under -O0 for now.
-        CleanupInputIR(pContext);
-        //DumpLLVMIR(pContext, "AfterCleanupInputIR");
-    }
-
     IGCPassManager mpm(pContext, "Unify");
 
     // right now we don't support any standard function in the code gen
@@ -512,6 +488,11 @@ static void CommonOCLBasedPasses(
     // TODO: Run CheckInstrTypes after builtin import to determine if builtins have allocas.
     mpm.add(createSROAPass());
     mpm.add(createIGCInstructionCombiningPass());
+    // See the comment above (it's copied as is).
+    // Instcombine can create constant expressions, which are not handled by the program scope constant resolution pass.
+    // For example, in InsertDummyKernelForSymbolTablePass addresses of indirectly called functions
+    // should be processed and without BreakConstantExpr the addresses are not found.
+    mpm.add(new BreakConstantExpr());
 
     // true means selective scalarization
     mpm.add(createScalarizerPass(IGC_IS_FLAG_ENABLED(EnableSelectiveScalarizer)));

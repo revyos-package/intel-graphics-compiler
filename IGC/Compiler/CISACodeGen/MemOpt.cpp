@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2014-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -125,7 +109,7 @@ namespace {
             MemRefListTy& MemRefs, TrivialMemRefListTy& ToOpt);
 
         unsigned getNumElements(Type* Ty) const {
-            return Ty->isVectorTy() ? (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements() : 1;
+            return Ty->isVectorTy() ? (unsigned)cast<VectorType>(Ty)->getNumElements() : 1;
         }
 
         MemoryLocation getLocation(Instruction* I) const {
@@ -194,7 +178,7 @@ namespace {
         bool isSafeToMergeLoad(const LoadInst* Ld,
             const SmallVectorImpl<Instruction*>& checkList) const;
         bool isSafeToMergeStores(
-            const SmallVectorImpl<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator>>& Stores,
+            const SmallVectorImpl<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator, uint32_t>>& Stores,
             const SmallVectorImpl<Instruction*>& checkList) const;
 
         bool shouldSkip(const Value* Ptr) const {
@@ -233,7 +217,7 @@ namespace {
 
         template <typename AccessInstruction>
         bool checkAlignmentBeforeMerge(const AccessInstruction* inst,
-            SmallVector<std::tuple<AccessInstruction*, int64_t, MemRefListTy::iterator>, 8> & AccessIntrs,
+            SmallVector<std::tuple<AccessInstruction*, int64_t, MemRefListTy::iterator, uint32_t>, 8> & AccessIntrs,
             unsigned& NumElts)
         {
             if (inst->getAlignment() < 4 && !WI->isUniform(inst))
@@ -343,9 +327,19 @@ namespace {
 
         // getConstantOffset - Return the constant offset between two memory
         // locations.
-        bool getConstantOffset(const SymbolicPointer& Other, int64_t& Off) {
+        bool getConstantOffset(const SymbolicPointer& Other, int64_t& Off, int64_t &ArrayElem) {
             if (!BasePtr || !Other.BasePtr)
                 return true;
+
+            ArrayElem = 1;
+            // look up ArrayElem=144 in this example
+            //   getelementptr [144 x float], [144 x float] addrspace(3)* %1184, ...
+            if (BasePtr->getType()->isPointerTy())
+            {
+                llvm::Type* BaseType = BasePtr->getType()->getPointerElementType();
+                if (BaseType->isArrayTy())
+                    ArrayElem = BaseType->getArrayNumElements();
+            }
 
             if (BasePtr != Other.BasePtr &&
                 (!isa<ConstantPointerNull>(BasePtr) ||
@@ -548,7 +542,6 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
 
     unsigned LdSize = unsigned(DL->getTypeStoreSize(LeadingLoadType));
     unsigned LdScalarSize = unsigned(DL->getTypeStoreSize(LeadingLoadScalarType));
-
     NumElts += getNumElements(LeadingLoadType);
     if (NumElts > profitVec[0])
         return false;
@@ -557,9 +550,10 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
     if (isa<SCEVCouldNotCompute>(LeadingPtr))
         return false;
 
-    SmallVector<std::tuple<LoadInst*, int64_t, MemRefListTy::iterator>, 8>
+    // LoadInst, Offset, MemRefListTy::iterator, LeadingLoad's int2PtrOffset
+    SmallVector<std::tuple<LoadInst*, int64_t, MemRefListTy::iterator, uint32_t>, 8>
         LoadsToMerge;
-    LoadsToMerge.push_back(std::make_tuple(LeadingLoad, 0, MI));
+    LoadsToMerge.push_back(std::make_tuple(LeadingLoad, 0, MI, 0));
 
     // Loads to be merged is scanned in the program order and will be merged into
     // the leading load. So two edges of that consecutive region are checked
@@ -577,8 +571,10 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
     // list.
 
     // Two edges of the region where loads are merged into.
-    int64_t HighestOffset = LdSize;
+    int64_t HighestOffset = LdSize, HighestOffset4Transpose = 0;
     int64_t LowestOffset = 0;
+
+    bool bCheckNext = true;
 
     // List of instructions need dependency check.
     SmallVector<Instruction*, 8> CheckList;
@@ -629,6 +625,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
             continue;
 
         int64_t Off = 0;
+        int64_t ArrayElem = 1;
         const SCEVConstant* Offset
             = dyn_cast<SCEVConstant>(SE->getMinusSCEV(NextPtr, LeadingPtr));
         // Skip load with non-constant distance.
@@ -640,7 +637,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
                 LeadingSymPtr, CGC) ||
                 SymbolicPointer::decomposePointer(NextLoad->getPointerOperand(),
                     NextSymPtr, CGC) ||
-                NextSymPtr.getConstantOffset(LeadingSymPtr, Off)) {
+                NextSymPtr.getConstantOffset(LeadingSymPtr, Off, ArrayElem)) {
                 continue;
             }
             else {
@@ -654,31 +651,123 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
 
         unsigned NextLoadSize = unsigned(DL->getTypeStoreSize(NextLoadType));
 
+        bool enableTransposeSLM = false;
+        uint32_t LeadInt2PtrOffset = 0;
+
+        // detect if we can merge non-sequential SLM loads
+        // Example
+        //   %1184 = inttoptr i32 4608 to[144 x float] addrspace(3) *
+        //   %1185 = getelementptr[144 x float], [144 x float] addrspace(3) * %1184, i32 0, i32 % 1179
+        //   %1186 = inttoptr i32 5184 to[144 x float] addrspace(3) *
+        //   %1187 = getelementptr[144 x float], [144 x float] addrspace(3) * %1186, i32 0, i32 % 1179
+        //   %1188 = inttoptr i32 5760 to[144 x float] addrspace(3) *
+        //   %1189 = getelementptr[144 x float], [144 x float] addrspace(3) * %1188, i32 0, i32 % 1179
+        //   %1190 = load float, float addrspace(3) * %1185, align 4
+        //   %1191 = load float, float addrspace(3) * %1187, align 4
+        //   %1192 = load float, float addrspace(3) * %1189, align 4
+        if (IGC_IS_FLAG_ENABLED(EnableMergeTransposeSLM)) {
+            unsigned int resourceIndex = 0;
+            bool direct = false;
+            BufferType bufType = IGC::DecodeAS4GFXResource(
+                LeadingLoad->getPointerAddressSpace(), direct, resourceIndex);
+
+            // initialize for first check in the loop
+            if (!HighestOffset4Transpose)
+                HighestOffset4Transpose = NextLoadSize * ArrayElem;
+
+            if (SLM == bufType &&
+                (Off > ArrayElem) && !(Off % ArrayElem))
+            {
+                GetElementPtrInst* LeadGEP = dyn_cast<GetElementPtrInst>(LeadingLoad->getOperand(0));
+                GetElementPtrInst* NextGEP = dyn_cast<GetElementPtrInst>(NextLoad->getOperand(0));
+
+                if (LeadGEP && NextGEP &&
+                    (LeadGEP->getOperand(1) == NextGEP->getOperand(1)) &&
+                    (LeadGEP->getOperand(2) == NextGEP->getOperand(2)) &&
+                    isa<IntToPtrInst>(LeadGEP->getPointerOperand()))
+                {
+                    IntToPtrInst* Int2Ptr = dyn_cast<IntToPtrInst>(LeadGEP->getPointerOperand());
+                    if (const ConstantInt* CI =
+                        dyn_cast<ConstantInt>(Int2Ptr->getOperand(0)))
+                    {
+                        if (CI->getType()->isIntegerTy())
+                        {
+                            LeadInt2PtrOffset = (uint32_t)CI->getZExtValue();
+                            enableTransposeSLM = true;
+                        }
+                    } //  if (const ConstantInt* CI = ..
+                } // if (LeadGEP && NextGEP ...
+
+            } //if (SLM == bufType && ..
+        } // if (IGC_IS_FLAG_ENABLED(EnableMergeTransposeSLM)
+
         // By assuming dead load elimination always works correctly, if the load on
         // the same location is observed again, that is probably because there is
         // an instruction with global effect between them. Bail out directly.
         if (Off == 0 && LdSize == NextLoadSize)
             break;
 
-        int64_t newHighestOffset = std::max(Off + NextLoadSize, HighestOffset);
-        int64_t newLowestOffset = std::min(Off, LowestOffset);
+        int64_t newHighestOffset;
+        int64_t newLowestOffset;
+        uint64_t newNumElts;
 
-        // Ensure that the total size read evenly divides the element type.
-        // For example, we could have a packed struct <{i64, i32, i64}> that
-        // would compute a size of 20 but, without this guard, would set
-        // 'NumElts' to 2 as if the i32 wasn't present.
-        if (uint64_t(newHighestOffset - newLowestOffset) % LdScalarSize != 0)
-            continue;
+        if (IGC_IS_FLAG_ENABLED(EnableMergeTransposeSLM) && enableTransposeSLM) {
+            if (!bCheckNext)
+                continue;
 
-        uint64_t newNumElts = uint64_t((newHighestOffset - newLowestOffset) /
-            LdScalarSize);
+            newHighestOffset = std::max(Off + ArrayElem * NextLoadSize, HighestOffset4Transpose);
+            newLowestOffset = std::min(Off, LowestOffset);
+            newNumElts = uint64_t((newHighestOffset - newLowestOffset) /
+                LdScalarSize) / ArrayElem;
 
-        // Bail out if the resulting vector load is already not profitable.
-        if (newNumElts > profitVec[0])
-            continue;
+            // Update HighestOffset4Transpose for each iteration and
+            // check against the next expected in the sequence
+            // Example: Off = 576 when checking 'i32 5184' entry
+            //   (Offset   0)  %1184 = inttoptr i32 4608 to[144 x float] addrspace(3) *
+            //                 %1185 = getelementptr[144 x float], [144 x float] addrspace(3) * %1184, i32 0, i32 % 1179
+            //   (Offset 576)  %1186 = inttoptr i32 5184 to[144 x float] addrspace(3) *
+            if (Off != HighestOffset4Transpose) {
+                bCheckNext = false; // abort enableTransposeSLM checking
+                continue;
+            }
 
-        HighestOffset = newHighestOffset;
+            // Ensure that the total size read evenly divides the element type.
+            // For example, we could have a packed struct <{i64, i32, i64}> that
+            // would compute a size of 20 but, without this guard, would set
+            // 'NumElts' to 2 as if the i32 wasn't present.
+            if (uint64_t(newHighestOffset - newLowestOffset) % (LdScalarSize * ArrayElem) != 0)
+                continue;
+
+            // Limit to 3 entries for merging
+            if (newNumElts > 3)
+                continue;
+        }
+        else {
+            newHighestOffset = std::max(Off + NextLoadSize, HighestOffset);
+            newLowestOffset = std::min(Off, LowestOffset);
+            newNumElts = uint64_t((newHighestOffset - newLowestOffset) /
+                LdScalarSize);
+
+            // Ensure that the total size read evenly divides the element type.
+            // For example, we could have a packed struct <{i64, i32, i64}> that
+            // would compute a size of 20 but, without this guard, would set
+            // 'NumElts' to 2 as if the i32 wasn't present.
+            if (uint64_t(newHighestOffset - newLowestOffset) % LdScalarSize != 0)
+                continue;
+
+            // Bail out if the resulting vector load is already not profitable.
+            if (newNumElts > profitVec[0])
+                continue;
+        }
+
+        if (enableTransposeSLM) {
+            HighestOffset4Transpose = newHighestOffset;
+        }
+        else {
+            HighestOffset = newHighestOffset;
+        }
         LowestOffset = newLowestOffset;
+
         NumElts = static_cast<unsigned>(newNumElts);
 
         // This load is to be merged. Remove it from check list.
@@ -689,7 +778,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
         if (!isSafeToMergeLoad(NextLoad, CheckList))
             break;
 
-        LoadsToMerge.push_back(std::make_tuple(NextLoad, Off, MI));
+        LoadsToMerge.push_back(std::make_tuple(NextLoad, Off, MI, LeadInt2PtrOffset));
     }
 
     if (LoadsToMerge.size() < 2)
@@ -770,6 +859,42 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
             Ptr = Builder.CreateGEP(Ptr, Idx);
     }
 
+    uint32_t ArrayElem = 1;
+    uint32_t newInt2PtrOffset = std::get<3>(LoadsToMerge.back());
+
+    // lookup 144
+    //   %55 = getelementptr [144 x float], [144 x float] addrspace(3)* %54, i32 0, i32 %36
+    if (GetElementPtrInst* GEP =
+        dyn_cast<GetElementPtrInst>(FirstLoad->getPointerOperand())) {
+        Value* GEPptr = GEP->getPointerOperand();
+        if (GEPptr->getType()->isPointerTy()) {
+            Type* GEPElemType = GEPptr->getType()->getPointerElementType();
+            if (GEPElemType->isArrayTy())
+                ArrayElem = (uint32_t)GEPElemType->getArrayNumElements();
+        }
+    }
+    // If newInt2PtrOffset is non-zero, that means enableTransposeSLM is set
+    // Prepare new instructions
+    if (newInt2PtrOffset && ArrayElem) {
+        Type* newArrayType = PointerType::get(
+            ArrayType::get(LeadingLoadScalarType, ArrayElem * NumElts),
+            LeadingLoad->getPointerAddressSpace());
+
+        Value* NewInt2Ptr = Builder.getInt32(std::get<3>(LoadsToMerge.back()));
+
+        NewInt2Ptr = createBitOrPointerCast(NewInt2Ptr, newArrayType, Builder);
+        GetElementPtrInst* LeadGEP =
+            dyn_cast<GetElementPtrInst>(FirstLoad->getPointerOperand());
+
+        // We need to adjust the buffer index by multiply by 3
+        // From x0, x1, ... y0, y1, ... z0, z1, ...
+        // To   x0, y0, z0, x1, y1, z1, ....
+        Value* NewGEPOffset =
+            Builder.CreateMul(LeadGEP->getOperand(2), Builder.getInt32(3));
+        Value* GEPArg[] = { LeadGEP->getOperand(1), NewGEPOffset };
+        Ptr = Builder.CreateGEP(NewInt2Ptr, GEPArg);
+    } // if (newInt2PtrOffset && ArrayElem)
+
     Type* NewLoadType = IGCLLVM::FixedVectorType::get(LeadingLoadScalarType, NumElts);
     Type* NewPointerType =
         PointerType::get(NewLoadType, LeadingLoad->getPointerAddressSpace());
@@ -784,9 +909,11 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
     unsigned Pos = 0;
     MDNode* mdLoadInv = nullptr;
     bool allInvariantLoads = true;
+
     for (auto& I : LoadsToMerge) {
         Type* Ty = std::get<0>(I)->getType();
         Type* ScalarTy = Ty->getScalarType();
+        uint32_t newInt2PtrOffset = std::get<3>(LoadsToMerge.back());
         IGC_ASSERT(hasSameSize(ScalarTy, LeadingLoadScalarType));
 
         mdLoadInv = std::get<0>(I)->getMetadata(LLVMContext::MD_invariant_load);
@@ -795,10 +922,13 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
             allInvariantLoads = false;
         }
 
-        Pos = unsigned((std::get<1>(I) - FirstOffset) / LdScalarSize);
+        if (IGC_IS_FLAG_ENABLED(EnableMergeTransposeSLM) && newInt2PtrOffset)
+            Pos = unsigned((std::get<1>(I) - FirstOffset) / LdScalarSize / ArrayElem);
+        else
+            Pos = unsigned((std::get<1>(I) - FirstOffset) / LdScalarSize);
 
         if (Ty->isVectorTy()) {
-            if (Pos + cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements() > NumElts) {
+            if (Pos + cast<VectorType>(Ty)->getNumElements() > NumElts) {
                 // This implies we're trying to extract an element from our new load
                 // with an index > the size of the new load.  If this happens,
                 // we'll generate correct code if it does since we don't remove the
@@ -806,7 +936,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
                 continue;
             }
             Value* Val = UndefValue::get(Ty);
-            for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(NewLoad, Builder.getInt32(Pos + i));
                 Ex = createBitOrPointerCast(Ex, ScalarTy, Builder);
                 Val = Builder.CreateInsertElement(Val, Ex, Builder.getInt32(i));
@@ -873,7 +1003,6 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
             return false;
         }
     }
-
     unsigned NumElts = 0;
     Value* LeadingStoreVal = LeadingStore->getValueOperand();
     Type* LeadingStoreType = LeadingStoreVal->getType();
@@ -893,9 +1022,11 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     if (isa<SCEVCouldNotCompute>(LeadingPtr))
         return false;
 
-    SmallVector<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator>, 8>
+    // StoreInst, Offset, MemRefListTy::iterator, LeadingStore's int2PtrOffset
+    SmallVector<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator, uint32_t>, 8>
         StoresToMerge;
-    StoresToMerge.push_back(std::make_tuple(LeadingStore, 0, MI));
+
+    StoresToMerge.push_back(std::make_tuple(LeadingStore, 0, MI, 0));
 
     // Stores to be merged are scanned in the program order from the leading store
     // but need to be merged into the tailing store. So two edges of that
@@ -913,7 +1044,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     // be merged into the "previous" tailing store.
 
     // Two edges of the region where stores are merged into.
-    int64_t LastToLeading = StSize;
+    int64_t LastToLeading = StSize, LastToLeading4Transpose = 0;
     int64_t LeadingToFirst = 0;
 
     // List of instructions need dependency check.
@@ -965,6 +1096,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
             continue;
 
         int64_t Off = 0;
+        int64_t ArrayElem = 1; // default gap between elements is 1 entry
         const SCEVConstant* Offset
             = dyn_cast<SCEVConstant>(SE->getMinusSCEV(NextPtr, LeadingPtr));
         // Skip store with non-constant distance.
@@ -976,7 +1108,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
                 LeadingStore->getPointerOperand(), LeadingSymPtr, CGC) ||
                 SymbolicPointer::decomposePointer(NextStore->getPointerOperand(),
                     NextSymPtr, CGC) ||
-                NextSymPtr.getConstantOffset(LeadingSymPtr, Off))
+                NextSymPtr.getConstantOffset(LeadingSymPtr, Off, ArrayElem))
                 continue;
         }
         else
@@ -990,15 +1122,76 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
 
         unsigned NextStoreSize = unsigned(DL->getTypeStoreSize(NextStoreType));
 
-        // Check it's consecutive to the current stores to be merged.
-        if ((Off > 0 && Off != LastToLeading) ||
-            (Off < 0 && (-Off) != (LeadingToFirst + NextStoreSize)))
-            continue;
+        bool enableTransposeSLM = false;
+        // LeadInt2PtrOffset is non-zero for enableTransposeSLM case so we can re-create
+        // new inttoptr inst.
+        uint32_t LeadInt2PtrOffset = 0;
 
-        NumElts += getNumElements(NextStoreType);
-        // Bail out if the resulting vector store is already not profitable.
-        if (NumElts > profitVec[0])
-            break;
+        // detect if we can merge non-sequential SLM stores
+        // Example
+        //   %54 = inttoptr i32 4608 to[144 x float] addrspace(3) *
+        //   %55 = getelementptr[144 x float], [144 x float] addrspace(3) * %54, i32 0, i32 % 36
+        //   %56 = inttoptr i32 5184 to[144 x float] addrspace(3) *
+        //   %57 = getelementptr[144 x float], [144 x float] addrspace(3) * %56, i32 0, i32 % 36
+        //   %58 = inttoptr i32 5760 to[144 x float] addrspace(3) *
+        //   %59 = getelementptr[144 x float], [144 x float] addrspace(3) * %58, i32 0, i32 % 36
+        //   store float% 51, float addrspace(3)*% 55, align 4
+        //   store float% 52, float addrspace(3)*% 57, align 4
+        //   store float% 53, float addrspace(3)*% 59, align 4
+        if (IGC_IS_FLAG_ENABLED(EnableMergeTransposeSLM)) {
+            unsigned int resourceIndex = 0;
+            bool direct = false;
+            BufferType bufType = IGC::DecodeAS4GFXResource(
+                LeadingStore->getPointerAddressSpace(), direct, resourceIndex);
+            if (SLM == bufType && (abs(Off) > ArrayElem)) {
+
+                if ((Off > 0 && Off != LastToLeading4Transpose + ArrayElem * NextStoreSize) ||
+                    (Off < 0 && (-Off) != (LeadingToFirst + ArrayElem * NextStoreSize)))
+                    continue;
+                else { // check if it matches the pattern for enableTransposeSLM
+                    GetElementPtrInst* LeadGEP = dyn_cast<GetElementPtrInst>(LeadingStore->getOperand(1));
+                    GetElementPtrInst* NextGEP = dyn_cast<GetElementPtrInst>(NextStore->getOperand(1));
+                    if (!LeadGEP || !NextGEP)
+                        continue;
+
+                    if ((LeadGEP->getOperand(1) != NextGEP->getOperand(1)) ||
+                        (LeadGEP->getOperand(2) != NextGEP->getOperand(2)))
+                        continue;
+
+                    if (!isa<IntToPtrInst>(LeadGEP->getPointerOperand()))
+                        continue;
+
+                    if (IntToPtrInst* Int2Ptr =
+                        dyn_cast<IntToPtrInst>(LeadGEP->getPointerOperand())) {
+                        if (const ConstantInt* CI =
+                            dyn_cast<ConstantInt>(Int2Ptr->getOperand(0))) {
+                            if (CI->getType()->isIntegerTy()) {
+                                LeadInt2PtrOffset = (uint32_t)CI->getZExtValue();
+                                enableTransposeSLM = true;
+                            }
+                        }
+                    } //  if (IntToPtrInst* Int2Ptr
+
+                    if (!enableTransposeSLM)
+                        continue;
+
+                    NumElts += getNumElements(NextStoreType);
+
+                    // Limit to 3 entries for merging
+                    if (NumElts > 3)
+                        break;
+                } // else { // check if it matches the pattern for enableTransposeSLM
+            } // if (SLM == bufType && ...
+        } else if ((Off > 0 && Off != LastToLeading) ||
+                   (Off < 0 && (-Off) != (LeadingToFirst + NextStoreSize)))
+            // Check it's consecutive to the current stores to be merged.
+            continue;
+        else {
+            NumElts += getNumElements(NextStoreType);
+            // Bail out if the resulting vector store is already not profitable.
+            if (NumElts > profitVec[0])
+                break;
+        }
 
         // This store is to be merged. Remove it from check list.
         CheckList.pop_back();
@@ -1011,9 +1204,12 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         // Clear check list.
         CheckList.clear();
 
-        StoresToMerge.push_back(std::make_tuple(NextStore, Off, MI));
-        if (Off > 0)
+        StoresToMerge.push_back(std::make_tuple(NextStore, Off, MI, LeadInt2PtrOffset));
+
+        if (Off > 0) {
             LastToLeading = Off + NextStoreSize;
+            LastToLeading4Transpose = Off;
+        }
         else
             LeadingToFirst = (-Off);
 
@@ -1077,6 +1273,44 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     // store values, extracting and inserting is necessary to avoid tracking uses
     // of each element in the original vector store value.
     unsigned Pos = 0;
+
+    Value* BitCastPtr = FirstStore->getPointerOperand();
+    uint32_t newInt2PtrOffset = std::get<3>(StoresToMerge.back());
+
+    // lookup 144
+    //   %55 = getelementptr [144 x float], [144 x float] addrspace(3)* %54, i32 0, i32 %36
+    uint32_t ArrayElem = 1;
+    if (GetElementPtrInst* GEP =
+        dyn_cast<GetElementPtrInst>(FirstStore->getPointerOperand())) {
+        Value* GEPptr = GEP->getPointerOperand();
+        if (GEPptr->getType()->isPointerTy()) {
+            Type* GEPElemType = GEPptr->getType()->getPointerElementType();
+            if (GEPElemType->isArrayTy())
+                ArrayElem = (uint32_t)GEPElemType->getArrayNumElements();
+        }
+    }
+
+    // If newInt2PtrOffset is non-zero, that means enableTransposeSLM is set
+    // Prepare new instructions
+    if (newInt2PtrOffset && ArrayElem) {
+        Type* newArrayType = PointerType::get(
+            ArrayType::get(LeadingStoreScalarType, ArrayElem * NumElts),
+            LeadingStore->getPointerAddressSpace());
+
+        Value* NewInt2Ptr = Builder.getInt32(newInt2PtrOffset);
+        NewInt2Ptr = createBitOrPointerCast(NewInt2Ptr, newArrayType, Builder);
+        GetElementPtrInst* LeadGEP =
+            dyn_cast<GetElementPtrInst>(FirstStore->getOperand(1));
+
+        // We need to adjust the buffer index by multiply by 3
+        // From x0, x1, ... y0, y1, ... z0, z1, ...
+        // To   x0, y0, z0, x1, y1, z1, ....
+        Value* NewGEPOffset =
+            Builder.CreateMul(LeadGEP->getOperand(2), Builder.getInt32(3));
+        Value* GEPArg[] = { LeadGEP->getOperand(1), NewGEPOffset };
+        BitCastPtr = Builder.CreateGEP(NewInt2Ptr, GEPArg);
+    }
+
     for (auto& I : StoresToMerge) {
         Value* Val = std::get<0>(I)->getValueOperand();
         Type* Ty = Val->getType();
@@ -1084,7 +1318,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         IGC_ASSERT(hasSameSize(ScalarTy, LeadingStoreScalarType));
 
         if (Ty->isVectorTy()) {
-            for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(Val, Builder.getInt32(i));
                 Ex = createBitOrPointerCast(Ex, LeadingStoreScalarType, Builder);
                 NewStoreVal = Builder.CreateInsertElement(NewStoreVal, Ex,
@@ -1127,7 +1361,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
     Type* NewPointerType =
         PointerType::get(NewStoreType, LeadingStore->getPointerAddressSpace());
     Value* NewPointer =
-        Builder.CreateBitCast(FirstStore->getPointerOperand(), NewPointerType);
+        Builder.CreateBitCast(BitCastPtr, NewPointerType);
     StoreInst* NewStore =
         Builder.CreateAlignedStore(NewStoreVal, NewPointer,
             IGCLLVM::getAlign(FirstStore->getAlignment()));
@@ -1163,7 +1397,6 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         }
 
     }
-
     return true;
 }
 
@@ -1191,7 +1424,7 @@ bool MemOpt::isSafeToMergeLoad(const LoadInst* Ld,
 /// specified store set to any one in the check list, which may read/write to
 /// that location.
 bool MemOpt::isSafeToMergeStores(
-    const SmallVectorImpl<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator> >& Stores,
+    const SmallVectorImpl<std::tuple<StoreInst*, int64_t, MemRefListTy::iterator, uint32_t> >& Stores,
     const SmallVectorImpl<Instruction*>& CheckList) const {
     // Arrange CheckList as the outer loop to favor the case where there are
     // back-to-back stores only.

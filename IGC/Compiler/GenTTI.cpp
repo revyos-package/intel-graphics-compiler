@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -37,7 +21,6 @@ IN THE SOFTWARE.
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvmWrapper/Transforms/Utils/LoopUtils.h"
 #include "common/LLVMWarningsPop.hpp"
 
 using namespace llvm;
@@ -169,13 +152,6 @@ namespace llvm {
         if (ExitingBlock)
             TripCount = IGCLLVM::getref(SE).getSmallConstantTripCount(L, ExitingBlock);
 
-        if (TripCount >= 128 && !L->empty())
-        {
-            uint32_t NewThreshold = (TripCount >= 512) ? 300 : 1200;
-            UP.Threshold        = MIN(LoopUnrollThreshold, NewThreshold);
-            UP.PartialThreshold = UP.Threshold;
-        }
-
         // Do not enable partial unrolling if the loop counter is float. It can cause precision issue.
         if (ExitingBlock) {
             if (UP.Partial) {
@@ -225,7 +201,7 @@ namespace llvm {
 
         // Skip non-simple loop.
         if (L->getNumBlocks() != 1) {
-            if (IGC_IS_FLAG_ENABLED(EnableAdvRuntimeUnroll) && IGCLLVM::isInnermost(L)) {
+            if (IGC_IS_FLAG_ENABLED(EnableAdvRuntimeUnroll) && L->empty()) {
                 auto countNonPHI = [](BasicBlock* BB) {
                     unsigned Total = BB->size();
                     unsigned PHIs = 0;

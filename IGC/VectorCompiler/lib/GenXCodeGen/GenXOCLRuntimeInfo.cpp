@@ -23,7 +23,6 @@ IN THE SOFTWARE.
 ============================= end_copyright_notice ===========================*/
 
 #include "vc/GenXCodeGen/GenXOCLRuntimeInfo.h"
-#include "vc/GenXCodeGen/GenXInternalMetadata.h"
 
 #include "ConstantEncoder.h"
 #include "GenX.h"
@@ -31,6 +30,8 @@ IN THE SOFTWARE.
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
+
+#include "vc/GenXOpts/Utils/InternalMetadata.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 
@@ -115,9 +116,9 @@ void GenXOCLRuntimeInfo::KernelInfo::setMetadataProperties(
     genx::KernelMetadata &KM, const GenXSubtarget &ST) {
   Name = KM.getName();
   SLMSize = KM.getSLMSize();
-  // NOTE: this is a per-thread value
-  if (KM.getFunction()->getParent()->getModuleFlag(genx::ModuleMD::UseSVMStack))
-    StatelessPrivateMemSize = 16*8192;
+  // NOTE: if UseSVMStack is set, we are using default value from StatelessPrivateMemSizeOpt
+  if (!KM.getFunction()->getParent()->getModuleFlag(genx::ModuleMD::UseSVMStack))
+    StatelessPrivateMemSize = 0;
 
 }
 
@@ -165,6 +166,7 @@ GenXOCLRuntimeInfo::KernelInfo::KernelInfo(const FunctionGroup &FG,
   setInstructionUsageProperties(FG, BC);
 
   GRFSizeInBytes = ST.getGRFWidth();
+  StatelessPrivateMemSize = BC.getStatelessPrivateMemSize();
 
   genx::KernelMetadata KM{FG.getHead()};
   IGC_ASSERT_MESSAGE(KM.isKernel(), "Expected kernel as head of function group");

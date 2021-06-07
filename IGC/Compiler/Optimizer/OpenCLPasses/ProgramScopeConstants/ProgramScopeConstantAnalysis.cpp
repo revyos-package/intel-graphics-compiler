@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -67,7 +51,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     m_DL = &M.getDataLayout();
 
     MetaDataUtils* mdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
-    ModuleMetaData* modMd = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+    m_pModuleMd = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
 
     SmallVector<GlobalVariable*, 32> zeroInitializedGlobals;
 
@@ -111,7 +95,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         if (globalVar->use_empty())
         {
             // If compiler requests global symbol for external/common linkage, add it reguardless if it is used
-            bool requireGlobalSymbol = modMd->compOpt.EnableTakeGlobalAddress &&
+            bool requireGlobalSymbol = m_pModuleMd->compOpt.EnableTakeGlobalAddress &&
                 (globalVar->hasCommonLinkage() || globalVar->hasExternalLinkage());
 
             if (!requireGlobalSymbol)
@@ -126,10 +110,10 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 InlineProgramScopeBuffer ilpsb;
                 ilpsb.alignment = 0;
                 ilpsb.allocSize = 0;
-                modMd->inlineGlobalBuffers.push_back(ilpsb);
+                m_pModuleMd->inlineGlobalBuffers.push_back(ilpsb);
                 hasInlineGlobalBuffer = true;
             }
-            inlineProgramScopeBuffer = &modMd->inlineGlobalBuffers.back().Buffer;
+            inlineProgramScopeBuffer = &m_pModuleMd->inlineGlobalBuffers.back().Buffer;
         }
         else
         {
@@ -139,13 +123,13 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 InlineProgramScopeBuffer ilpsb;
                 ilpsb.alignment = 0;
                 ilpsb.allocSize = 0;
-                modMd->inlineConstantBuffers.push_back(ilpsb);
+                m_pModuleMd->inlineConstantBuffers.push_back(ilpsb);
 
                 // String literals
                 InlineProgramScopeBuffer ilpsbString;
                 ilpsbString.alignment = 0;
                 ilpsbString.allocSize = 0;
-                modMd->inlineConstantBuffers.push_back(ilpsbString);
+                m_pModuleMd->inlineConstantBuffers.push_back(ilpsbString);
                 hasInlineConstantBuffer = true;
             }
 
@@ -153,14 +137,14 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
             // will be stored in the seconf const buffer
             ConstantDataSequential* cds = dyn_cast<ConstantDataSequential>(initializer);
             bool isStringConst = cds && (cds->isCString() || cds->isString());
-            if ((IGC_IS_FLAG_ENABLED(EnableZEBinary) || modMd->compOpt.EnableZEBinary) &&
+            if ((IGC_IS_FLAG_ENABLED(EnableZEBinary) || m_pModuleMd->compOpt.EnableZEBinary) &&
                 isStringConst)
             {
-                inlineProgramScopeBuffer = &modMd->inlineConstantBuffers[1].Buffer;
+                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[1].Buffer;
             }
             else
             {
-                inlineProgramScopeBuffer = &modMd->inlineConstantBuffers[0].Buffer;
+                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
             }
         }
 
@@ -203,18 +187,18 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
 
     // Set the needed allocation size to the actual buffer size
     if (hasInlineGlobalBuffer)
-        modMd->inlineGlobalBuffers.back().allocSize = modMd->inlineGlobalBuffers.back().Buffer.size();
+        m_pModuleMd->inlineGlobalBuffers.back().allocSize = m_pModuleMd->inlineGlobalBuffers.back().Buffer.size();
     if (hasInlineConstantBuffer)
     {
-        modMd->inlineConstantBuffers[0].allocSize = modMd->inlineConstantBuffers[0].Buffer.size();
-        modMd->inlineConstantBuffers[1].allocSize = modMd->inlineConstantBuffers[1].Buffer.size();
+        m_pModuleMd->inlineConstantBuffers[0].allocSize = m_pModuleMd->inlineConstantBuffers[0].Buffer.size();
+        m_pModuleMd->inlineConstantBuffers[1].allocSize = m_pModuleMd->inlineConstantBuffers[1].Buffer.size();
     }
     // Calculate the correct offsets for zero-initialized globals/constants
     // Total allocation size in runtime needs to include zero-init values, but data copied to compiler output can ignore them
     for (auto globalVar : zeroInitializedGlobals)
     {
         unsigned AS = cast<PointerType>(globalVar->getType())->getAddressSpace();
-        unsigned &offset = (AS == ADDRESS_SPACE_GLOBAL) ? modMd->inlineGlobalBuffers.back().allocSize : modMd->inlineConstantBuffers[0].allocSize;
+        unsigned &offset = (AS == ADDRESS_SPACE_GLOBAL) ? m_pModuleMd->inlineGlobalBuffers.back().allocSize : m_pModuleMd->inlineConstantBuffers[0].allocSize;
 #if LLVM_VERSION_MAJOR < 11
         offset = iSTD::Align(offset, m_DL->getPreferredAlignment(globalVar));
 #else
@@ -239,7 +223,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     // Always rely on relocation for ZEBinary, so only need to generate these
     // implcit args when disabling ZEBinary
     if (IGC_IS_FLAG_DISABLED(EnableZEBinary) &&
-        !modMd->compOpt.EnableZEBinary)
+        !m_pModuleMd->compOpt.EnableZEBinary)
     {
         if (hasInlineConstantBuffer)
         {
@@ -294,7 +278,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
                 ppbi.PointeeBufferIndex = 0;
                 ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
-                modMd->GlobalPointerProgramBinaryInfos.push_back(ppbi);
+                m_pModuleMd->GlobalPointerProgramBinaryInfos.push_back(ppbi);
             }
             else if (info.AddressSpaceWherePointerResides == ADDRESS_SPACE_CONSTANT)
             {
@@ -303,7 +287,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 ppbi.PointerOffset = int_cast<int32_t>(info.PointerOffsetFromBufferBase);
                 ppbi.PointeeBufferIndex = 0;
                 ppbi.PointeeAddressSpace = info.AddressSpacePointedTo;
-                modMd->ConstantPointerProgramBinaryInfos.push_back(ppbi);
+                m_pModuleMd->ConstantPointerProgramBinaryInfos.push_back(ppbi);
             }
             else
             {
@@ -315,7 +299,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     const bool changed = !inlineProgramScopeOffsets.empty();
     for (auto offset : inlineProgramScopeOffsets)
     {
-        modMd->inlineProgramScopeOffsets[offset.first] = offset.second;
+        m_pModuleMd->inlineProgramScopeOffsets[offset.first] = offset.second;
     }
 
     // Update LLVM metadata based on IGC MetadataUtils
@@ -446,7 +430,23 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
         }
         else if (isa<FunctionType>(ptrType->getElementType()))
         {
-            // function pointers may be resolved anyway by the time we get to this pass?
+            // Save patch info for function pointer to be patched later by runtime
+            // The initializer value must be a function pointer and has the "referenced-indirectly" attribute
+            Function* F = dyn_cast<Function>(initializer);
+            if (F && F->hasFnAttribute("referenced-indirectly"))
+            {
+                IGC_ASSERT(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
+                IGC_ASSERT(pointerSize == 8 || pointerSize == 4);
+                auto relocInfo = (addressSpace == ADDRESS_SPACE_GLOBAL) ?
+                    &m_pModuleMd->GlobalBufferFunctionAddressRelocInfo :
+                    &m_pModuleMd->ConstantBufferFunctionAddressRelocInfo;
+
+                FunctionAddressRelocInfo finfo;
+                finfo.BufferOffset = inlineProgramScopeBuffer.size();
+                finfo.PointerSize = pointerSize;
+                finfo.FunctionSymbol = F->getName().str();
+                relocInfo->push_back(finfo);
+            }
             inlineProgramScopeBuffer.insert(inlineProgramScopeBuffer.end(), pointerSize, 0);
         }
         else if (ConstantExpr * ce = dyn_cast<ConstantExpr>(initializer))
@@ -469,7 +469,8 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
                     if (Constant * C = dyn_cast<Constant>(&Op))
                         addData(C, inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace);
             }
-            else if (ce->getOpcode() == Instruction::AddrSpaceCast)
+            else if (ce->getOpcode() == Instruction::AddrSpaceCast ||
+                ce->getOpcode() == Instruction::BitCast)
             {
                 if (Constant * C = dyn_cast<Constant>(ce->getOperand(0)))
                     addData(C, inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace);

@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -153,15 +137,15 @@ void ConvertMSAAPayloadTo16Bit::visitCallInst(CallInst& I)
             // There are uses of ldmcs other then ldms, using vector of int32 type.
             // Fix them to use newly created 16bit ldmcs.
             if (ldmcs->getType()->isVectorTy() &&
-                cast<IGCLLVM::FixedVectorType>(ldmcs->getType())->getElementType()->isFloatTy())
+                ldmcs->getType()->getVectorElementType() == m_builder->getInt32Ty())
             {
                 m_builder->SetInsertPoint(ldmcs);
 
-                uint ldmcsNumOfElements = (uint)cast<IGCLLVM::FixedVectorType>(ldmcs->getType())->getNumElements();
-                uint newLdmcsNumOfElements = (uint)cast<IGCLLVM::FixedVectorType>(new_mcs_call->getType())->getNumElements();
+                uint ldmcsNumOfElements = ldmcs->getType()->getVectorNumElements();
+                uint newLdmcsNumOfElements = new_mcs_call->getType()->getVectorNumElements();
 
                 // vec of 16bit ints to vec of 32bit ints
-                Type* newLdmcsVecType = IGCLLVM::FixedVectorType::get(m_builder->getInt32Ty(), newLdmcsNumOfElements);
+                Type* newLdmcsVecType = VectorType::get(m_builder->getInt32Ty(), newLdmcsNumOfElements);
                 Value* ldmcsExtendedToInt32 = m_builder->CreateSExt(new_mcs_call, newLdmcsVecType);
 
                 // if ldmcs has fewer elements than new ldmcs, extend vector
@@ -175,7 +159,7 @@ void ConvertMSAAPayloadTo16Bit::visitCallInst(CallInst& I)
                     }
                     auto* pMask = ConstantDataVector::get(I.getContext(), maskVals);
 
-                    ldmcsInt32CorrectlySized = m_builder->CreateShuffleVector(ldmcsExtendedToInt32, UndefValue::get(IGCLLVM::FixedVectorType::get(m_builder->getInt32Ty(), ldmcsNumOfElements)), pMask);
+                    ldmcsInt32CorrectlySized = m_builder->CreateShuffleVector(ldmcsExtendedToInt32, UndefValue::get(VectorType::get(m_builder->getInt32Ty(), ldmcsNumOfElements)), pMask);
                 }
                 else
                 {

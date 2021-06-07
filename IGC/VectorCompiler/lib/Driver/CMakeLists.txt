@@ -39,12 +39,16 @@ igc_get_llvm_targets(LLVM_LIBS
 
 target_link_libraries(VCDriver
   LLVMGenXIntrinsics
+  IGCOptions
   VCCodeGen
-  VCOptions
   VCSupport
 
   ${LLVM_LIBS}
   )
+
+if(LLVM_ON_UNIX)
+  target_link_libraries(VCDriver dl)
+endif()
 
 if(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR)
   target_link_libraries(VCDriver LLVMSPIRVLib)

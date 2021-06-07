@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -33,7 +17,6 @@ IN THE SOFTWARE.
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Verifier.h>
-#include <llvmWrapper/IR/DerivedTypes.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/InitializePasses.h"
 #include "Probe/Assertion.h"
@@ -116,7 +99,7 @@ namespace {
 
         /// Returns URB offset at which attribute with the given 'usage' and 'attributeIndex'
         /// needs to be written.
-        QuadEltUnit GetURBWriteOffset(ShaderOutputType usage, unsigned int attributeIndex);
+        QuadEltUnit GetURBWriteOffset(ShaderOutputType usage);
 
         /// Based on the output semantics of the OUTPUTGS instruction in 'inst'
         /// sets the mask of meaningful values in 'data' and updates the array 'data' with values taken
@@ -360,93 +343,38 @@ void GeometryShaderLowering::lowerOutputGS(
     //Set this to true when both vertex index and attribute index are immediates
     immediateAccess = false;
 
-    // We need to get the correct write urb offset...
-    Value* offsetVal = nullptr;
     //globalOffset is always aligned to 32 byte since it is in OctElm size
     const QuadEltUnit globalOffset = m_gsProps->GetProperties().Output().GlobalHeaderSize();
     QuadEltUnit outputVertexSize = m_gsProps->GetProperties().Output().PerVertex().Size();
-        if (llvm::isa<llvm::ConstantInt>(pVertexIndex) &&
-            llvm::isa<llvm::ConstantInt>(pAttributeIndex))
-        {
-            // both vertex index and attribute index are immediates
-            // for immediate attribute index, get its integer value
-            const uint attributeIndex =
-                static_cast<uint>(llvm::cast<llvm::ConstantInt>(pAttributeIndex)->getZExtValue());
-            const uint vertexIndex =
-                static_cast<uint>(llvm::cast<llvm::ConstantInt>(pVertexIndex)->getZExtValue());
 
-            // Depending on the usage and attribute index, find the exact position where to write.
-            const QuadEltUnit usageOffset = GetURBWriteOffset(usage, attributeIndex);
+    IRBuilder<> builder(inst);
+    llvm::Value* offsetVal = builder.getInt32(globalOffset.Count());
 
-            // The offset at which each attribute is written depends on the global header size,
-            // number of vertices already emitted and the offset within each vertex entry.
+    bool isZeroAttributeIndex =
+        usage != ShaderOutputType::SHADER_OUTPUT_TYPE_DEFAULT;
+    if (isZeroAttributeIndex)
+    {
+        // In this case attribute indices only play an informative role to identify corresponding copies of the value which
+        // are defined in user-defined URB space.
+        pAttributeIndex = builder.getInt32(0);
+    }
 
-            // outputVertexSize is always already padded and aligned to 32B
-            const QuadEltUnit offset = globalOffset + outputVertexSize * vertexIndex + usageOffset;
-            offsetVal = ConstantInt::get(Type::getInt32Ty(m_pModule->getContext()), offset.Count());
+    // Depending on the usage and attribute index, find the exact position where to write.
+    const QuadEltUnit usageOffset = GetURBWriteOffset(usage);
+    llvm::Value* pAttributeOffset = builder.CreateAdd(pAttributeIndex, builder.getInt32(usageOffset.Count()));
+    llvm::Value* pVertexOffset = builder.CreateMul(builder.getInt32(outputVertexSize.Count()), pVertexIndex);
+    offsetVal = builder.CreateAdd(offsetVal, pAttributeOffset);
+    offsetVal = builder.CreateAdd(offsetVal, pVertexOffset);
 
-            //For URB padding to 32 byte offset
-            //Being conservative and doing it only when vertex index
-            //and attribute index are immediates
-            offsetInst[offset.Count()] = inst;
-            immediateAccess = true;
-        }
-        else if (auto pConstAttrIdx = llvm::dyn_cast<llvm::ConstantInt>(pAttributeIndex))
-        {
-            // Vertex index is a runtime value and attribute index is a constant.
-            const uint attributeIndex = int_cast<uint>(pConstAttrIdx->getZExtValue());
-            // Depending on the usage and attribute index, find the exact position where to write.
-            const QuadEltUnit usageOffset = GetURBWriteOffset(usage, attributeIndex);
-            const QuadEltUnit staticOffset = globalOffset + usageOffset;
-            Value* staticOffsetVal = ConstantInt::get(
-                Type::getInt32Ty(m_pModule->getContext()), staticOffset.Count());
-            Value* vertexSizeVal = ConstantInt::get(
-                Type::getInt32Ty(m_pModule->getContext()), outputVertexSize.Count());
-            Instruction* product = BinaryOperator::CreateMul(pVertexIndex, vertexSizeVal);
-            product->insertBefore(inst);
-            Instruction* sum = BinaryOperator::CreateAdd(product, staticOffsetVal);
-            sum->insertBefore(inst);
-            // offset is the sum
-            // outputVertexSize*vertexIndex + (globalOfset + usageOffset)
-            offsetVal = sum;
-        }
-        else
-        {
-            // Attribute index is a runtime value.
-            // Vertex index may be static or runtime value.
-
-            // Attribute index is a runtime value due to output indexing via register.
-            // We can only index on normal output not on SGV
-            IGC_ASSERT(usage == SHADER_OUTPUT_TYPE_DEFAULT);
-
-            Value* staticOffsetVal = ConstantInt::get(
-                Type::getInt32Ty(m_pModule->getContext()), globalOffset.Count());
-            Value* product = nullptr;
-            // Optimize for the case when vertex index is a static value.
-            if (auto pConstVertexIndex = llvm::dyn_cast<ConstantInt>(pVertexIndex))
-            {
-                unsigned int vertexIdx = int_cast<unsigned int>(pConstVertexIndex->getZExtValue());
-                product = ConstantInt::get(
-                    Type::getInt32Ty(m_pModule->getContext()),
-                    (outputVertexSize * vertexIdx).Count());
-            }
-            else
-            {
-                Value* vertexSizeVal = ConstantInt::get(
-                    Type::getInt32Ty(m_pModule->getContext()), outputVertexSize.Count());
-                Instruction* prod = BinaryOperator::CreateMul(pVertexIndex, vertexSizeVal);
-                prod->insertBefore(inst);
-                product = prod;
-            }
-            Instruction* sum = BinaryOperator::CreateAdd(product, staticOffsetVal);
-            sum->insertBefore(inst);
-            Instruction* sum2 = BinaryOperator::CreateAdd(sum, pAttributeIndex);
-            sum2->insertBefore(inst);
-
-            // offsetVal is the sum:
-            // outputVertexSize*vertexIndex + globalOfset + usageOffset
-            offsetVal = sum2;
-        }
+    if (llvm::isa<llvm::ConstantInt>(offsetVal))
+    {
+        //For URB padding to 32 byte offset
+        //Being conservative and doing it only when vertex index
+        //and attribute index are immediates
+        const QuadEltUnit offset = QuadEltUnit(int_cast<uint32_t>(llvm::cast<ConstantInt>(offsetVal)->getZExtValue()));
+        offsetInst[offset.Count()] = inst;
+        immediateAccess = true;
+    }
     AddURBWrite(offsetVal, mask, data, inst);
     m_instructionToRemove.push_back(inst);
 }
@@ -508,7 +436,7 @@ void GeometryShaderLowering::AddURBRead(
     {
         Value* vec = UndefValue::get(inst->getType());
         IRBuilder<> builder(inst);
-        for (unsigned int i = 0; i < cast<IGCLLVM::FixedVectorType>(inst->getType())->getNumElements(); i++)
+        for (unsigned int i = 0; i < cast<VectorType>(inst->getType())->getNumElements(); i++)
         {
             Value* vecElement = builder.CreateExtractElement(urbRead, builder.getInt32(i));
             vec = builder.CreateInsertElement(vec, vecElement, builder.getInt32(i));
@@ -603,8 +531,7 @@ Unit<Element> GeometryShaderLowering::GetChannel(SGVUsage usage)
 /// Returns URB offset where attribute with the given 'usage' and 'attributeIndex'
 /// needs to be written.
 QuadEltUnit GeometryShaderLowering::GetURBWriteOffset(
-    ShaderOutputType usage,
-    unsigned int attributeIndex)
+    ShaderOutputType usage)
 {
     switch (usage)
     {
@@ -621,8 +548,8 @@ QuadEltUnit GeometryShaderLowering::GetURBWriteOffset(
     case SHADER_OUTPUT_TYPE_DEFAULT:
     {
         // sum of vertex header size and the size of all preceding attributes
-        return (QuadEltUnit(attributeIndex) +
-            m_gsProps->GetProperties().Output().PerVertex().HeaderSize());
+        return
+            m_gsProps->GetProperties().Output().PerVertex().HeaderSize();
     }
     default:
         IGC_ASSERT_MESSAGE(0, "Unknown GS output type");

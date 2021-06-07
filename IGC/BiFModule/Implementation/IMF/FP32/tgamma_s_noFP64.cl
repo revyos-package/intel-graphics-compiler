@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2021 Intel Corporation
+Copyright (C) 2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -148,41 +132,41 @@ static __constant unsigned int __stgamma_ep__local_minimumf[] = {
 };
 
 static __constant unsigned int __stgamma_ep__tgammaf_A_table[] = {
-    0x404f7e8e, //       3.24209929                                                                                                                                             
-    0x3ffd9a9c, //        1.9812808                                                                                                                                             
-    0x3ece7348, //      0.403223276                                                                                                                                             
-    0xbfc61856, //      -1.54761767                                                                                                                                             
-    0xc0819138, //       -4.0489769                                                                                                                                             
-    0xc0f8b8d2, //      -7.77256107                                                                                                                                             
-    0x4070be98, //       3.76163292                                                                                                                                             
-    0x40834492, //        4.1021204                                                                                                                                             
-    0x40a47c71, //        5.1401906                                                                                                                                             
-    0x40e300cb, //        7.0938468                                                                                                                                             
-    0x412b18a4, //       10.6935158                                                                                                                                             
-    0x419a0368, //       19.2516632                                                                                                                                             
-    0x3710d6c4, //   8.63307287e-06                                                                                                                                             
-    //                                                                                                                                                                          
-    0x4031115d, //       2.76668477                                                                                                                                             
-    0x4012293a, //       2.28376627                                                                                                                                             
-    0x3faa2c14, //       1.32947016                                                                                                                                             
-    0xbdde9083, //     -0.108674072                                                                                                                                             
-    0xc008779a, //       -2.1322999                                                                                                                                             
-    0xc0a495c1, //      -5.14328051                                                                                                                                             
-    0x4002a105, //       2.04107785                                                                                                                                             
-    0x40196098, //       2.39652061                                                                                                                                             
-    0x404ce483, //       3.20144725                                                                                                                                             
-    0x4095cb95, //       4.68110132                                                                                                                                             
-    0x40eb998f, //       7.36249495                                                                                                                                             
-    0x41503404, //       13.0126991                                                                                                                                             
-    0x3f37b6dd, //      0.717634022                                                                                                                                             
-    //                                                                                                                                                                          
-    0x40009880, //       2.00930786                                                                                                                                             
-    0x3fd51b17, //       1.66488922                                                                                                                                             
-    0x3f758f9a, //      0.959222436                                                                                                                                             
-    0xbe1ddf37, //      -0.15417181                                                                                                                                             
-    0xbfe5b4c3, //      -1.79457891                                                                                                                                             
-    0xc08adf72, //      -4.33977604                                                                                                                                             
-    0x3f8a703f, //       1.08155048                                                                                                                                             
+    0x404f7e8e, //       3.24209929
+    0x3ffd9a9c, //        1.9812808
+    0x3ece7348, //      0.403223276
+    0xbfc61856, //      -1.54761767
+    0xc0819138, //       -4.0489769
+    0xc0f8b8d2, //      -7.77256107
+    0x4070be98, //       3.76163292
+    0x40834492, //        4.1021204
+    0x40a47c71, //        5.1401906
+    0x40e300cb, //        7.0938468
+    0x412b18a4, //       10.6935158
+    0x419a0368, //       19.2516632
+    0x3710d6c4, //   8.63307287e-06
+    //
+    0x4031115d, //       2.76668477
+    0x4012293a, //       2.28376627
+    0x3faa2c14, //       1.32947016
+    0xbdde9083, //     -0.108674072
+    0xc008779a, //       -2.1322999
+    0xc0a495c1, //      -5.14328051
+    0x4002a105, //       2.04107785
+    0x40196098, //       2.39652061
+    0x404ce483, //       3.20144725
+    0x4095cb95, //       4.68110132
+    0x40eb998f, //       7.36249495
+    0x41503404, //       13.0126991
+    0x3f37b6dd, //      0.717634022
+    //
+    0x40009880, //       2.00930786
+    0x3fd51b17, //       1.66488922
+    0x3f758f9a, //      0.959222436
+    0xbe1ddf37, //      -0.15417181
+    0xbfe5b4c3, //      -1.79457891
+    0xc08adf72, //      -4.33977604
+    0x3f8a703f, //       1.08155048
     0x3fa9dbb6, //       1.32701755
     0x3ff317fc, //       1.89916945
     0x403f19a4, //       2.98593998

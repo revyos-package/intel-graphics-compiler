@@ -1,24 +1,8 @@
 #=========================== begin_copyright_notice ============================
 #
-# Copyright (c) 2014-2021 Intel Corporation
+# Copyright (C) 2017-2021 Intel Corporation
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom
-# the Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included
-# in all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-# IN THE SOFTWARE.
+# SPDX-License-Identifier: MIT
 #
 #============================ end_copyright_notice =============================
 
@@ -66,6 +50,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 # ======================================================================================================
 # ================================================ UTILS ===============================================
 # ======================================================================================================
+
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules)
@@ -239,7 +224,6 @@ unset(_debugConfigs)
 # ======================================================================================================
 
 
-
 # ======================================================================================================
 # ========================================= BUILD CMAKE OPTIONS ========================================
 # ======================================================================================================
@@ -278,7 +262,7 @@ unset(_allowBifLink)
 # Remove this condition after transition period is over
 option(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR "[Experimental] Enable link against Khronos SPIRV-LLVM-Translator, instead of legacy versions" OFF)
 
-
+option(IGC_OPTION__ENABLE_LIT_TESTS "Enable lit testing for IGC compiler. May require additional tools like llvm lit and opt" OFF)
 
 set(IGC_OPTION__BIF_SRC_OCL_DIR "${IGC_SOURCE_DIR}/BiFModule"
     CACHE PATH "Built-in Functions: Root directory where sources for OpenCL builtins are located.")
@@ -361,7 +345,6 @@ message(STATUS "================================================================
 # ======================================================================================================
 
 # =========================================== Helper variables =========================================
-
 
 # We are building IGC.
 set(IGC_BUILD YES)
@@ -1259,6 +1242,12 @@ endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/../external/llvm/llvm_deps.cmake")
 include(igc_llvm)
 
+# ==================================== LLD package ====================================================
+
+if(IGC_OPTION__LLVM_LLD)
+  include(igc_find_liblldELF)
+endif()
+
 # ==================================== WrapperLLVM package =============================================
 
 add_subdirectory(WrapperLLVM)
@@ -1306,10 +1295,6 @@ include_directories(
 )
 include_directories(
   "${CIF_INCLUDE_DIR}"
-)
-
-include_directories(
-    "${LLVM_INCLUDE_DIRS}"
 )
 
 if(LLVM_ON_WIN32)
@@ -1372,6 +1357,8 @@ if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
 endif()
 
 add_subdirectory(GenISAIntrinsics)
+
+add_subdirectory(Options)
 
 if(LLVM_ON_WIN32)
   add_subdirectory(AdaptorOCL)
@@ -1485,6 +1472,16 @@ add_library("${IGC_BUILD__PROJ__igc_dll}" SHARED
   )
 
 add_dependencies("${IGC_BUILD__PROJ__fcl_dll}" opencl-clang-lib)
+
+if(IGC_BUILD__LLVM_SOURCES AND IGC_OPTION__LLVM_LLD)
+  if(UNIX)
+    if(NOT ${CMAKE_BUILD_TYPE} EQUAL "Release")
+      add_dependencies("${IGC_BUILD__PROJ__igc_dll}" lld)
+    endif()
+  else()
+    add_dependencies("${IGC_BUILD__PROJ__igc_dll}" lld)
+  endif()
+endif()
 
 
 target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
@@ -1693,7 +1690,6 @@ list(APPEND _targetLinkLineCommon zebinlib)
         "${_targetLinkLineCommon}"
         "${CMAKE_DL_LIBS}"
       )
-    target_include_directories("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE ${LLVM_INCLUDE_DIRS})
     else()
     target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
         "${_targetLinkLineCommon}"
@@ -1844,6 +1840,13 @@ if(UNIX)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/cif DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
 
+  if(IGC_BUILD__LLVM_SOURCES AND IGC_OPTION__LLVM_LLD)
+    # For now lld could be included only via building from LLVM sources
+    if(NOT ${CMAKE_BUILD_TYPE} EQUAL "Release")
+      install(TARGETS lld RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT igc-opencl-devel)
+    endif()
+  endif()
+
   install(
     CODE "file( WRITE ${CMAKE_CURRENT_BINARY_DIR}/tmp/postinst \"/sbin/ldconfig\n\" )"
     CODE "file( WRITE ${CMAKE_CURRENT_BINARY_DIR}/tmp/postrm \"/sbin/ldconfig\n\" )"
@@ -1871,6 +1874,15 @@ elseif (WIN32)
           DESTINATION Debug/lh64/pdb                CONFIGURATIONS Debug)
 
   if(CMAKE_SIZEOF_VOID_P EQUAL 8) # Only copy 64 build
+
+    if(IGC_BUILD__LLVM_SOURCES AND IGC_OPTION__LLVM_LLD)
+      # For now lld could be included only via building from LLVM sources
+      install(TARGETS lld RUNTIME
+              DESTINATION ../Test_Tools/Release/x64/Standalones CONFIGURATIONS Release)
+      install(TARGETS lld RUNTIME
+              DESTINATION ../Test_Tools/Debug/x64/Standalones            CONFIGURATIONS Debug)
+    endif()
+
     install(TARGETS ${IGC_BUILD__PROJ__igc_dll} RUNTIME
             DESTINATION ../Test_Tools/Release/x64/Standalones          CONFIGURATIONS Release)
     install(TARGETS ${IGC_BUILD__PROJ__igc_dll} RUNTIME

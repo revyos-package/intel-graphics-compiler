@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -258,11 +242,6 @@ static void GetAllocaLiverange(Instruction* I, unsigned int& liverangeStart, uns
 
 bool LowerGEPForPrivMem::IsNativeType(Type* type)
 {
-    if ((type->isDoubleTy() && m_ctx->platform.hasNoFP64Inst()) ||
-        (type->isIntegerTy(64) && m_ctx->platform.hasNoFullI64Support()))
-    {
-        return false;
-    }
     return true;
 }
 
@@ -617,7 +596,7 @@ void TransposeHelper::handleGEPInst(
             }
             else
             {
-                arr_sz = (unsigned)cast<IGCLLVM::FixedVectorType>(T)->getNumElements();
+                arr_sz = (unsigned)cast<VectorType>(T)->getNumElements();
             }
             T = cast<VectorType>(T)->getElementType();
         }
@@ -639,7 +618,7 @@ void TransposeHelper::handleGEPInst(
         }
         else if (T->isVectorTy())
         {
-            arr_sz = (unsigned)cast<IGCLLVM::FixedVectorType>(T)->getNumElements();
+            arr_sz = (unsigned)cast<VectorType>(T)->getNumElements();
             T = cast<VectorType>(T)->getElementType();
         }
         else
@@ -699,7 +678,7 @@ void TransposeHelperPromote::handleLoadInst(
     IRBuilder<> IRB(pLoad);
     IGC_ASSERT(nullptr != pLoad->getType());
     unsigned N = pLoad->getType()->isVectorTy()
-        ? (unsigned)cast<IGCLLVM::FixedVectorType>(pLoad->getType())->getNumElements()
+        ? (unsigned)cast<VectorType>(pLoad->getType())->getNumElements()
         : 1;
     Value* Val = loadEltsFromVecAlloca(N, pVecAlloca, pScalarizedIdx, IRB, pLoad->getType()->getScalarType());
     pLoad->replaceAllUsesWith(Val);
@@ -731,7 +710,7 @@ void TransposeHelperPromote::handleStoreInst(
         // %v1 = extractelement <2 x float> %v, i32 1
         // %w1 = insertelement <32 x float> %w0, float %v1, i32 %idx+1
         // store <32 x float> %w1, <32 x float>* %ptr1
-        for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(pStoreVal->getType())->getNumElements(); i < e; ++i)
+        for (unsigned i = 0, e = (unsigned)cast<VectorType>(pStoreVal->getType())->getNumElements(); i < e; ++i)
         {
             Value* VectorIdx = ConstantInt::get(pScalarizedIdx->getType(), i);
             auto Val = IRB.CreateExtractElement(pStoreVal, VectorIdx);

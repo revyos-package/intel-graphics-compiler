@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -240,7 +224,7 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
     IGC_ASSERT(nullptr != Ptr);
     IGC_ASSERT(nullptr != Ty);
 
-    IGCLLVM::FixedVectorType* const VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+    VectorType* const VTy = dyn_cast<VectorType>(Ty);
 
     // Treat a scalar as 1-element vector
     uint32_t nelts = VTy ? int_cast<uint32_t>(VTy->getNumElements()) : 1;
@@ -654,7 +638,7 @@ void VectorMessage::getInfo(Type* Ty, uint32_t Align, bool useA32,
     VectorType* VTy = dyn_cast<VectorType>(Ty);
     Type* eTy = VTy ? cast<VectorType>(VTy)->getElementType() : Ty;
     unsigned eltSize = m_emitter->GetScalarTypeSizeInRegister(eTy);
-    unsigned nElts = VTy ? (unsigned)cast<IGCLLVM::FixedVectorType>(VTy)->getNumElements() : 1;
+    unsigned nElts = VTy ? (unsigned)cast<VectorType>(VTy)->getNumElements() : 1;
     // total bytes
     const unsigned TBytes = nElts * eltSize;
 

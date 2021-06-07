@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -381,8 +365,8 @@ _SPIRV_OP(AsmCallINTEL, 5611)
 _SPIRV_OP(AtomicFMinEXT, 5614)
 _SPIRV_OP(AtomicFMaxEXT, 5615)
 // optimization_hints
-_SPIRV_OP(AssumeTrueINTEL, 5630)
-_SPIRV_OP(ExpectINTEL, 5631)
+_SPIRV_OP(AssumeTrueKHR, 5630)
+_SPIRV_OP(ExpectKHR, 5631)
 // Function pointers
 _SPIRV_OP(ConstFunctionPointerINTEL, 5600)
 _SPIRV_OP(FunctionPointerCallINTEL, 5601)
@@ -512,6 +496,7 @@ _SPIRV_OP(LoopControlINTEL, 5887)
 // SPV_EXT_shader_atomic_float_add
 _SPIRV_OP(AtomicFAddEXT, 6035)
 // SPV_INTEL_long_constant_composite
+_SPIRV_OP(TypeBufferSurfaceINTEL, 6086)
 _SPIRV_OP(TypeStructContinuedINTEL, 6090)
 _SPIRV_OP(ConstantCompositeContinuedINTEL, 6091)
 _SPIRV_OP(SpecConstantCompositeContinuedINTEL, 6092)

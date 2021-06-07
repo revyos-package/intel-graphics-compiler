@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -162,7 +146,7 @@ void PeepholeTypeLegalizer::legalizePhiInstruction(Instruction& I)
 
     if (quotient > 1)
     {
-        unsigned numElements = I.getType()->isVectorTy() ? (unsigned)cast<IGCLLVM::FixedVectorType>(I.getType())->getNumElements() : 1;
+        unsigned numElements = I.getType()->isVectorTy() ? (unsigned)cast<VectorType>(I.getType())->getNumElements() : 1;
         Type* newType = IGCLLVM::FixedVectorType::get(Type::getIntNTy(I.getContext(), promoteToInt), quotient * numElements);
 
         PHINode* newPhi = m_builder->CreatePHI(newType, oldPhi->getNumIncomingValues());
@@ -223,7 +207,7 @@ void PeepholeTypeLegalizer::legalizeExtractElement(Instruction& I)
     unsigned elementWidth = extract->getType()->getScalarSizeInBits();
     if (!isLegalInteger(elementWidth) && extract->getType()->isIntOrIntVectorTy())
     {
-        unsigned numElements = (unsigned)cast<IGCLLVM::FixedVectorType>(extract->getOperand(0)->getType())->getNumElements();
+        unsigned numElements = (unsigned)cast<VectorType>(extract->getOperand(0)->getType())->getNumElements();
         unsigned quotient, promoteToInt;
         promoteInt(elementWidth, quotient, promoteToInt, DL->getLargestLegalIntTypeSizeInBits());
 
@@ -850,7 +834,7 @@ void PeepholeTypeLegalizer::cleanupZExtInst(Instruction& I) {
         }
 
         unsigned ipElmtSize = prevInst->getOperand(0)->getType()->getScalarSizeInBits();
-        unsigned ipVecSize = (unsigned)cast<IGCLLVM::FixedVectorType>(prevInst->getOperand(0)->getType())->getNumElements();
+        unsigned ipVecSize = (unsigned)cast<VectorType>(prevInst->getOperand(0)->getType())->getNumElements();
         unsigned convFactor = promoteToInt / ipElmtSize;
 
         Value* vecRes = UndefValue::get(IGCLLVM::FixedVectorType::get(llvm::Type::getIntNTy(I.getContext(), promoteToInt), quotient));

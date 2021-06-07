@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2015-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -194,7 +178,14 @@ MDNode* CreateNode(const std::vector<val> &vec, Module* module, StringRef name)
                 + " elements. Including first " + std::to_string(MAX_VECTOR_SIZE_TO_PRINT_IN_SHADER_DUMPS)
                 + " items in ShaderDumps. To print all elements set ShowFullVectorsInShaderDumps register flag to True. "
                 + "ShaderOverride flag may not work properly without ShowFullVectorsInShaderDumps enabled.";
-            printf("%s\n\n", warningMessage.c_str());
+
+            //Print warning once in console, print every time in LLVM ShaderDump
+            static bool printWarningFirstTime = true;
+            if (printWarningFirstTime)
+            {
+                printf("\n%s\n\n", warningMessage.c_str());
+                printWarningFirstTime = false;
+            }
             nodes.push_back(CreateNode(false, module, warningMessage + " ShowFullVectorsInShaderDumps currently equals"));
             break;
         }

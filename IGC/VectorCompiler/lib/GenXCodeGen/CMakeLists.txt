@@ -105,10 +105,27 @@ add_dependencies(VCCodeGen
   )
 target_include_directories(VCCodeGen
   PRIVATE
-  ${VISA_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}
   )
+
+igc_get_llvm_targets(LLVM_LIBS
+  Analysis
+  BitReader
+  Core
+  CodeGen
+  Demangle
+  InstCombine
+  Linker
+  Support
+  Target
+  TransformUtils
+  ScalarOpts
+  ipo
+  )
+
 target_link_libraries(VCCodeGen
+  ${LLVM_LIBS}
+
   LLVMGenXIntrinsics
 
   VCHeaders
@@ -116,4 +133,5 @@ target_link_libraries(VCCodeGen
   VCTargetInfo
   VCSupport
   GenXDebugInfo
+  GenX_IR
   )
