@@ -6,6 +6,7 @@ intel-graphics-compiler (1.0.8279-1) UNRELEASED; urgency=medium
   * control, rules: Build with llvm 12.
   * fix-build-with-llvm-12.diff: Fix build with llvm-12.
   * control: Add liblld-12-dev to build-depends.
+  * add-missing-include.diff: Add a missing include to fix build.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 May 2021 18:39:29 +0300
 
