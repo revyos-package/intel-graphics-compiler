@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2018-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -42,9 +26,9 @@ IN THE SOFTWARE.
 #include "llvmWrapper/IR/DerivedTypes.h"
 
 #include "vc/BiF/Tools.h"
-#include "vc/GenXOpts/Utils/BiFTools.h"
 #include "vc/GenXOpts/Utils/InternalMetadata.h"
 #include "vc/Support/BackendConfig.h"
+#include "vc/Utils/General/BiF.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
@@ -124,6 +108,8 @@ class GenXEmulate : public ModulePass {
     Instruction &Inst;
 
     Value *expandBitwiseOp(BinaryOperator &);
+    Value *expandBitLogicOp(BinaryOperator &);
+
     Value *visitAdd(BinaryOperator &);
     Value *visitSub(BinaryOperator &);
     Value *visitAnd(BinaryOperator &);
@@ -155,6 +141,8 @@ class GenXEmulate : public ModulePass {
     Value *visitGenxAbsi(CallInst &CI);
     // handles genx_{XX}add_sat cases
     Value *visitGenxAddSat(CallInst &CI);
+    // handles genx_fpto{X}i_sat cases
+    Value *visitGenxFPToISat(CallInst &CI);
 
     // [+] bitcast
     // [-] genx.constanti ?
@@ -175,7 +163,7 @@ class GenXEmulate : public ModulePass {
 
     struct VectorInfo {
       Value *V;
-      VectorType *VTy;
+      IGCLLVM::FixedVectorType *VTy;
     };
     static VectorInfo toVector(IRBuilder &Builder, Value *In);
     static bool getConstantUI32Values(Value *V,
@@ -205,7 +193,8 @@ class GenXEmulate : public ModulePass {
     class ConstantEmitter {
     public:
       ConstantEmitter(Value *V)
-          : ElNum(cast<VectorType>(V->getType())->getNumElements()),
+          : ElNum(
+                cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements()),
             Ty32(Type::getInt32Ty(V->getContext())) {}
       Constant *getSplat(unsigned Val) const {
         auto *KV = Constant::getIntegerValue(Ty32, APInt(32, Val));
@@ -372,6 +361,63 @@ Value *GenXEmulate::Emu64Expander::detectBitwiseNot(BinaryOperator &Op) {
 
   return nullptr;
 }
+
+// changes vector/scalar i64 type so it now uses scalar type i32
+// <2 x i64> -> <4 x i32>
+// i64 -> <2 x i32>
+static Type *convertI64TypeToI32(const Type *OldType) {
+  IGC_ASSERT_MESSAGE(OldType, "Error: nullptr input");
+  IGC_ASSERT_MESSAGE(OldType->isIntOrIntVectorTy(),
+                     "Error: OldType not int or int vector type");
+  IGC_ASSERT_MESSAGE(OldType->getScalarType()->isIntegerTy(64),
+                     "Error: OldType Scalar type not i64");
+
+  bool OldTypeIsVec = isa<IGCLLVM::FixedVectorType>(OldType);
+
+  Type *Int32Ty = Type::getInt32Ty(OldType->getContext());
+
+  unsigned OldWidth =
+      OldTypeIsVec ? cast<IGCLLVM::FixedVectorType>(OldType)->getNumElements()
+                   : 1;
+
+  constexpr unsigned Multiplier = 2;
+  unsigned NewWidth = OldWidth * Multiplier;
+  return IGCLLVM::FixedVectorType::get(Int32Ty, NewWidth);
+}
+
+// Change type and exec size, like
+// or <2 x i64> -> or <4 x i32>
+// or i64 -> or < 2 x i32>
+//
+// So, resulted llvm IR:
+// From:
+// %res = or <2 x i64> %val1, %val2
+// To:
+// %val1.cast = bitcast %val1 to <4 x i32>
+// %val2.cast = bitcast %val2 to <4 x i32>
+// %res.tmp = or <4 x i32> %val1.cast, %val2.cast
+// %res = bitcast %res.tmp to <2 x i64>
+Value *GenXEmulate::Emu64Expander::expandBitLogicOp(BinaryOperator &Op) {
+  auto Builder = getIRBuilder();
+
+  Type *PrevBinOpTy = Op.getType();
+  Type *NextBinOpTy = convertI64TypeToI32(PrevBinOpTy);
+  IGC_ASSERT(NextBinOpTy);
+
+  Value *Op0 = Op.getOperand(0);
+  Value *Op1 = Op.getOperand(1);
+
+  Value *Op0Cast =
+      Builder.CreateBitCast(Op0, NextBinOpTy, Op0->getName() + ".cast");
+  Value *Op1Cast =
+      Builder.CreateBitCast(Op1, NextBinOpTy, Op1->getName() + ".cast");
+
+  Value *BinOp = Builder.CreateBinOp(Op.getOpcode(), Op0Cast, Op1Cast,
+                                     Twine("int_emu.") + Inst.getName());
+
+  return Builder.CreateBitCast(BinOp, PrevBinOpTy, Op.getName() + ".cast");
+}
+
 Value *GenXEmulate::Emu64Expander::expandBitwiseOp(BinaryOperator &Op) {
   auto Src0 = SplitBuilder.splitOperandHalf(0);
   auto Src1 = SplitBuilder.splitOperandHalf(1);
@@ -431,10 +477,10 @@ Value *GenXEmulate::Emu64Expander::visitSub(BinaryOperator &Op) {
       Inst.getType()->isIntegerTy());
 }
 Value *GenXEmulate::Emu64Expander::visitAnd(BinaryOperator &Op) {
-  return expandBitwiseOp(Op);
+  return expandBitLogicOp(Op);
 }
 Value *GenXEmulate::Emu64Expander::visitOr(BinaryOperator &Op) {
-  return expandBitwiseOp(Op);
+  return expandBitLogicOp(Op);
 }
 Value *GenXEmulate::Emu64Expander::visitXor(BinaryOperator &Op) {
   if (auto *NotOperand = detectBitwiseNot(Op)) {
@@ -445,17 +491,18 @@ Value *GenXEmulate::Emu64Expander::visitXor(BinaryOperator &Op) {
     return SplitBuilder.combineHalfSplit({Part1, Part2}, "int_emu.not.",
                                          Op.getType()->isIntegerTy());
   }
-  return expandBitwiseOp(Op);
+  return expandBitLogicOp(Op);
 }
 GenXEmulate::Emu64Expander::VectorInfo
 GenXEmulate::Emu64Expander::toVector(IRBuilder &Builder, Value *In) {
   if (In->getType()->isVectorTy())
-    return {In, cast<VectorType>(In->getType())};
+    return {In, cast<IGCLLVM::FixedVectorType>(In->getType())};
 
   if (auto *CIn = dyn_cast<ConstantInt>(In)) {
     uint64_t CVals[] = {CIn->getZExtValue()};
     auto *VectorValue = ConstantDataVector::get(In->getContext(), CVals);
-    return {VectorValue, cast<VectorType>(VectorValue->getType())};
+    return {VectorValue,
+            cast<IGCLLVM::FixedVectorType>(VectorValue->getType())};
   }
   auto *VTy = IGCLLVM::FixedVectorType::get(In->getType(), 1);
   auto *VectorValue = Builder.CreateBitCast(In, VTy);
@@ -526,7 +573,8 @@ Value *GenXEmulate::Emu64Expander::visitICmp(ICmpInst &Cmp) {
 
     Type *Ty64 = Builder.getInt64Ty();
     if (Cmp.getType()->isVectorTy()) {
-      auto NumElements = cast<VectorType>(Cmp.getType())->getNumElements();
+      auto NumElements =
+          cast<IGCLLVM::FixedVectorType>(Cmp.getType())->getNumElements();
       Ty64 = IGCLLVM::FixedVectorType::get(Ty64, NumElements);
     }
     auto *IL = Builder.CreatePtrToInt(Cmp.getOperand(0), Ty64);
@@ -536,17 +584,19 @@ Value *GenXEmulate::Emu64Expander::visitICmp(ICmpInst &Cmp) {
     return ensureEmulated(NewICMP);
   }
 
-  unsigned BaseOperand = 0;
-  IVSplitter Splitter(Cmp, &BaseOperand);
-  auto Src0 = Splitter.splitOperandLoHi(0);
-  auto Src1 = Splitter.splitOperandLoHi(1);
-
-  bool PartialPredicate =
+  const bool PartialPredicate =
       std::any_of(Cmp.user_begin(), Cmp.user_end(), [](const User *U) {
         auto IID = GenXIntrinsic::getAnyIntrinsicID(U);
         return IID == GenXIntrinsic::genx_wrpredregion ||
                IID == GenXIntrinsic::genx_wrpredpredregion;
       });
+
+  unsigned BaseOperand = 0;
+  const bool FoldConstants = !(PartialPredicate && OptConvertPartialPredicates);
+  IVSplitter Splitter(Cmp, &BaseOperand);
+  auto Src0 = Splitter.splitOperandLoHi(0, FoldConstants);
+  auto Src1 = Splitter.splitOperandLoHi(1, FoldConstants);
+
   Value *Result = buildGeneralICmp(Builder, Cmp.getPredicate(),
                                    PartialPredicate, Src0, Src1);
 
@@ -730,29 +780,17 @@ Value *GenXEmulate::Emu64Expander::visitSIToFP(SIToFPInst &Op) {
   auto *VOprnd = toVector(Builder, Op.getOperand(0)).V;
   // This would be a 64-bit operation on a vector types
   auto *NegatedOpnd = Builder.CreateNeg(VOprnd);
-  // this could be a constexpr - in this case, no emulation necessary
-  if (auto *NegOp64 = dyn_cast<Instruction>(NegatedOpnd)) {
-    Value *NewInst = Emu64Expander(ST, *NegOp64).tryExpand();
-    IGC_ASSERT(NewInst);
-    NegOp64->eraseFromParent();
-    NegatedOpnd = NewInst;
-  }
+  NegatedOpnd = ensureEmulated(NegatedOpnd);
 
-  auto *AbsOp64 =
-      cast<Instruction>(Builder.CreateSelect(PredSigned, NegatedOpnd, VOprnd));
-  auto *AbsVal = Emu64Expander(ST, *AbsOp64).tryExpand();
-  IGC_ASSERT(AbsVal);
-  AbsOp64->eraseFromParent();
+  auto *AbsVal = Builder.CreateSelect(PredSigned, NegatedOpnd, VOprnd);
+  AbsVal = ensureEmulated(AbsVal);
 
   Type *CnvType = Op.getType();
   if (!Op.getType()->isVectorTy()) {
     CnvType = IGCLLVM::FixedVectorType::get(Builder.getFloatTy(), 1);
   }
-  auto *Cnv64 = cast<Instruction>(Builder.CreateUIToFP(AbsVal, CnvType));
-  // Now the convert holds the <N x float> vector
-  auto *Cnv = Emu64Expander(ST, *Cnv64).tryExpand();
-  IGC_ASSERT(Cnv);
-  Cnv64->eraseFromParent();
+  auto *Cnv = Builder.CreateUIToFP(AbsVal, CnvType);
+  Cnv = ensureEmulated(Cnv);
 
   // we want to set a proper sign, so we cast it to <N x int>,
   // set sign bit and cast-away to the final result
@@ -765,8 +803,8 @@ Value *GenXEmulate::Emu64Expander::visitZExtInst(ZExtInst &I) {
   auto VOp = toVector(Builder, I.getOperand(0));
   Value *LoPart = VOp.V;
   if (VOp.VTy->getScalarType()->getPrimitiveSizeInBits() < 32) {
-    auto *ExtendedType =
-        IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), VOp.VTy->getNumElements());
+    auto *ExtendedType = IGCLLVM::FixedVectorType::get(
+        Builder.getInt32Ty(), VOp.VTy->getNumElements());
     LoPart = Builder.CreateZExt(LoPart, ExtendedType, ".zext32");
   }
   auto *ZeroValue = Constant::getNullValue(LoPart->getType());
@@ -778,8 +816,8 @@ Value *GenXEmulate::Emu64Expander::visitSExtInst(SExtInst &I) {
   auto VOp = toVector(Builder, I.getOperand(0));
   auto *LoPart = VOp.V;
   if (VOp.VTy->getScalarType()->getPrimitiveSizeInBits() < 32) {
-    auto *ExtendedType =
-        IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), VOp.VTy->getNumElements());
+    auto *ExtendedType = IGCLLVM::FixedVectorType::get(
+        Builder.getInt32Ty(), VOp.VTy->getNumElements());
     LoPart = Builder.CreateSExt(LoPart, ExtendedType, ".sext32");
   }
   auto *HiPart = Builder.CreateAShr(LoPart, 31u, ".sign_hi");
@@ -892,9 +930,10 @@ Value *GenXEmulate::Emu64Expander::visitGenxTrunc(CallInst &CI) {
   auto Builder = getIRBuilder();
   auto VOp = toVector(Builder, CI.getOperand(0));
 
-  auto MakeConstantSplat64 = [](IRBuilder &B, VectorType *VTy, uint64_t Value) {
-     auto* KV = Constant::getIntegerValue(B.getInt64Ty(), APInt(64, Value));
-     return ConstantDataVector::getSplat(VTy->getNumElements(), KV);
+  auto MakeConstantSplat64 = [](IRBuilder &B, IGCLLVM::FixedVectorType *VTy,
+                                uint64_t Value) {
+    auto *KV = Constant::getIntegerValue(B.getInt64Ty(), APInt(64, Value));
+    return ConstantDataVector::getSplat(VTy->getNumElements(), KV);
   };
   auto MaxDstSigned   = [&](unsigned DstSize) {
      uint64_t MaxVal = (1ull << (DstSize - 1)) - 1;
@@ -1016,13 +1055,8 @@ Value *GenXEmulate::Emu64Expander::visitGenxAbsi(CallInst &CI) {
   auto *VOprnd = toVector(Builder, CI.getOperand(0)).V;
   // This would be a 64-bit operation on a vector types
   auto *NegatedOpnd = Builder.CreateNeg(VOprnd);
-  // this could be a constexpr - in this case, no emulation necessary
-  if (auto *NegOp64 = dyn_cast<Instruction>(NegatedOpnd)) {
-    Value *NewInst = Emu64Expander(ST, *NegOp64).tryExpand();
-    IGC_ASSERT(NewInst);
-    NegOp64->eraseFromParent();
-    NegatedOpnd = NewInst;
-  }
+  NegatedOpnd = ensureEmulated(NegatedOpnd);
+
   auto NegSplit = SplitBuilder.splitValueLoHi(*NegatedOpnd);
 
   auto *FlagSignSet = Builder.CreateICmpSLT(Src.Hi, K.getZero());
@@ -1106,6 +1140,23 @@ Value *GenXEmulate::Emu64Expander::visitGenxAddSat(CallInst &CI) {
   }
   return nullptr;
 }
+
+Value *GenXEmulate::Emu64Expander::visitGenxFPToISat(CallInst &CI) {
+  if (CI.getType()->getScalarType() == Type::getDoubleTy(CI.getContext()))
+    report_fatal_error("int_emu: double->UI conversions are not supported");
+
+  auto IID = GenXIntrinsic::getAnyIntrinsicID(&Inst);
+  IGC_ASSERT_MESSAGE(IID == GenXIntrinsic::genx_fptosi_sat ||
+                         IID == GenXIntrinsic::genx_fptoui_sat,
+                     "unknown intrinsic passed to fptoi_sat emu");
+  const bool IsSigned = (IID == GenXIntrinsic::genx_fptosi_sat) ? true : false;
+
+  auto Builder = getIRBuilder();
+  auto *V = buildFPToI64(*CI.getModule(), Builder, SplitBuilder,
+                         CI.getOperand(0), IsSigned);
+  return Builder.CreateBitCast(V, CI.getType(), Twine(CI.getName()) + ".emu");
+}
+
 Value *GenXEmulate::Emu64Expander::visitCallInst(CallInst &CI) {
   switch (GenXIntrinsic::getAnyIntrinsicID(&Inst)) {
   case GenXIntrinsic::genx_uutrunc_sat:
@@ -1125,6 +1176,9 @@ Value *GenXEmulate::Emu64Expander::visitCallInst(CallInst &CI) {
   case GenXIntrinsic::genx_uuadd_sat:
   case GenXIntrinsic::genx_ssadd_sat:
     return visitGenxAddSat(CI);
+  case GenXIntrinsic::genx_fptosi_sat:
+  case GenXIntrinsic::genx_fptoui_sat:
+    return visitGenxFPToISat(CI);
   }
   return nullptr;
 }
@@ -1820,7 +1874,7 @@ private:
     if (!EmulationBiFBuffer.getBufferSize())
       return nullptr;
 
-    auto BiFModule = getBiFModuleOrReportError(EmulationBiFBuffer, Ctx);
+    auto BiFModule = vc::getBiFModuleOrReportError(EmulationBiFBuffer, Ctx);
 
     BiFModule->setDataLayout(DL);
     BiFModule->setTargetTriple(Triple);

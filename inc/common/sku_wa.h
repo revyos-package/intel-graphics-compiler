@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2019-2021 Intel Corporation
+Copyright (C) 2019-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -2912,6 +2896,12 @@ typedef struct _WA_TABLE
         "Workaround",
         WA_BUG_TYPE_FUNCTIONAL,
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_D3D)
+
+        WA_DECLARE(
+        Wa_1406609750,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_GMM)
 
         WA_DECLARE(
         WaBlcOutputHighInverterPWMFreq,
@@ -8386,6 +8376,18 @@ typedef struct _WA_TABLE
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
 
         WA_DECLARE(
+        Wa_1407917427,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
+        Wa_1409600907,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
         Wa_1606931601,
         "Workaround",
         WA_BUG_TYPE_UNKNOWN,
@@ -8458,6 +8460,12 @@ typedef struct _WA_TABLE
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
 
         WA_DECLARE(
+        Wa_16011879768,
+        "Workaround",
+        WA_BUG_TYPE_CORRUPTION,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
         Wa_1807084924,
         "Workaround",
         WA_BUG_TYPE_UNKNOWN,
@@ -8491,6 +8499,18 @@ typedef struct _WA_TABLE
         "Workaround",
         WA_BUG_TYPE_UNKNOWN,
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
+        Wa_14010013414,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
+        Wa_14010840176,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_D3D)
 
         WA_DECLARE(
         Wa_22011157800,
@@ -8548,6 +8568,12 @@ typedef struct _WA_TABLE
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
 
         WA_DECLARE(
+        Wa_1406337848,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
         Wa_18013852970,
         "Workaround",
         WA_BUG_TYPE_UNKNOWN,
@@ -8585,6 +8611,12 @@ typedef struct _WA_TABLE
 
         WA_DECLARE(
         Wa_22010811838,
+        "Workaround",
+        WA_BUG_TYPE_UNKNOWN,
+        WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)
+
+        WA_DECLARE(
+        Wa_14012437816,
         "Workaround",
         WA_BUG_TYPE_UNKNOWN,
         WA_BUG_PERF_IMPACT_UNKNOWN, WA_COMPONENT_UNKNOWN)

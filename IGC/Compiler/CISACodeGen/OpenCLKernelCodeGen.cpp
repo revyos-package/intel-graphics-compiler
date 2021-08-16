@@ -533,6 +533,12 @@ namespace IGC
                  payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
              break;
 
+         case KernelArg::ArgType::IMPLICIT_WORK_DIM:
+             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                 zebin::PreDefinedAttrGetter::ArgType::work_dimensions,
+                 payloadPosition, iOpenCL::DATA_PARAMETER_DATA_SIZE);
+             break;
+
         // pointer args
         case KernelArg::ArgType::PTR_GLOBAL:
         case KernelArg::ArgType::PTR_CONSTANT: {
@@ -660,7 +666,7 @@ namespace IGC
             IGC_ASSERT_MESSAGE(resInfo.Type == SOpenCLKernelInfo::SResourceInfo::RES_UAV ||
                 resInfo.Type == SOpenCLKernelInfo::SResourceInfo::RES_SRV, "Unknown resource type");
 
-            // the image arg is either bindless of stateful. check from "kernelArg->needsAllocation()"
+            // the image arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
             // For statefull image argument, the arg has 0 offset and 0 size
             zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode =
                 zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
@@ -690,6 +696,34 @@ namespace IGC
         }
         break;
 
+        // sampler
+        case KernelArg::ArgType::SAMPLER:
+        case KernelArg::ArgType::BINDLESS_SAMPLER:
+        {
+            // the sampler arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
+            // For statefull image argument, the arg has 0 offset and 0 size
+            // NOTE: we only have statefull sampler now
+            zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode =
+                zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
+            uint arg_off = 0;
+            uint arg_size = 0;
+            if (kernelArg->needsAllocation()) {
+                // set to bindless
+                arg_addrmode =
+                    zebin::PreDefinedAttrGetter::ArgAddrMode::bindless;
+                arg_off = payloadPosition;
+                arg_size = kernelArg->getAllocateSize();
+            }
+
+            int arg_idx = kernelArg->getAssociatedArgNo();
+            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(arg_idx);
+            // add the payload argument
+            zebin::ZEInfoBuilder::addPayloadArgumentSampler(m_kernelInfo.m_zePayloadArgs,
+                arg_off, arg_size, arg_idx, resInfo.Index, arg_addrmode,
+                zebin::PreDefinedAttrGetter::ArgAccessType::readwrite);
+        }
+        break;
+
         case KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET:
         {
             zebin::zeInfoPayloadArgument& arg = zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
@@ -700,9 +734,6 @@ namespace IGC
         break;
 
         case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
-            // disable printf support so that it'll fallback to legacy format
-            if (IGC_IS_FLAG_ENABLED(DisablePrintfOnZEBinary))
-                return false;
             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
                 zebin::PreDefinedAttrGetter::ArgType::printf_buffer,
                 payloadPosition, kernelArg->getAllocateSize());
@@ -712,6 +743,8 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_R0:
         case KernelArg::ArgType::R1:
         case KernelArg::ArgType::STRUCT:
+        // FIXME: this implicit arg is not used nowadays, should remove it completely
+        case KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA:
             break;
 
         // FIXME: should these be supported?
@@ -819,6 +852,14 @@ namespace IGC
             }
             break;
 
+        case KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET:
+            {
+                int argNo = kernelArg->getAssociatedArgNo();
+                std::shared_ptr<iOpenCL::PointerArgumentAnnotation> ptrAnnotation = m_kernelInfo.m_argOffsetMap[argNo];
+                ptrAnnotation->BindingTableIndex = payloadPosition;
+            }
+            break;
+
         case KernelArg::ArgType::PTR_GLOBAL:
             if (addressSpace == iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID) {
                 addressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_GLOBAL;
@@ -842,7 +883,7 @@ namespace IGC
                 IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() > 0, "ArgAllocMDList is empty.");
                 ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[argNo];
 
-                auto ptrAnnotation = std::make_unique<iOpenCL::PointerArgumentAnnotation>();
+                auto ptrAnnotation = std::make_shared<iOpenCL::PointerArgumentAnnotation>();
 
                 if (argAlloc->type == ResourceTypeEnum::BindlessUAVResourceType)
                 {
@@ -855,6 +896,8 @@ namespace IGC
                     ptrAnnotation->IsBindlessAccess = false;
                 }
 
+                m_kernelInfo.m_argOffsetMap[argNo] = ptrAnnotation;
+
                 ptrAnnotation->AddressSpace = addressSpace;
                 ptrAnnotation->ArgumentNumber = argNo;
                 ptrAnnotation->BindingTableIndex = getBTI(resInfo);
@@ -863,7 +906,7 @@ namespace IGC
                 ptrAnnotation->LocationIndex = kernelArg->getLocationIndex();
                 ptrAnnotation->LocationCount = kernelArg->getLocationCount();
                 ptrAnnotation->IsEmulationArgument = kernelArg->isEmulationArgument();
-                m_kernelInfo.m_pointerArgument.push_back(std::move(ptrAnnotation));
+                m_kernelInfo.m_pointerArgument.push_back(ptrAnnotation);
             }
             break;
 
@@ -888,7 +931,7 @@ namespace IGC
             SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
             m_kernelInfo.m_argIndexMap[argNo] = getBTI(resInfo);
 
-            auto ptrAnnotation = std::make_unique<iOpenCL::PointerArgumentAnnotation>();
+            auto ptrAnnotation = std::make_shared<iOpenCL::PointerArgumentAnnotation>();
 
             ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_DEVICE_QUEUE;
             ptrAnnotation->ArgumentNumber = argNo;
@@ -896,7 +939,7 @@ namespace IGC
             ptrAnnotation->IsStateless = true;
             ptrAnnotation->PayloadPosition = payloadPosition;
             ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            m_kernelInfo.m_pointerArgument.push_back(std::move(ptrAnnotation));
+            m_kernelInfo.m_pointerArgument.push_back(ptrAnnotation);
         }
         break;
         case KernelArg::ArgType::CONSTANT_REG:
@@ -1486,6 +1529,10 @@ namespace IGC
                 {
                 default:
                     break;
+                case GenISAIntrinsic::GenISA_dpas:
+                case GenISAIntrinsic::GenISA_sub_group_dpas:
+                    SetHasDPAS();
+                    break;
                 case GenISAIntrinsic::GenISA_ptr_to_pair:
                 case GenISAIntrinsic::GenISA_pair_to_ptr:
                     mayHasMemoryAccess = false;
@@ -1523,6 +1570,7 @@ namespace IGC
 
         bool loadThreadPayload = false;
 
+        loadThreadPayload = m_Platform->supportLoadThreadPayloadForCompute();
 
         // SKL defaults to indirect thread payload storage.
         // BDW needs CURBE payload. Spec says:
@@ -1718,10 +1766,11 @@ namespace IGC
         CreateInlineSamplerAnnotations();
         // Currently we can't support inline sampler in zebin
         // assertion tests if we force to EnableZEBinary but encounter inline sampler
-        IGC_ASSERT_MESSAGE(!IGC_IS_FLAG_ENABLED(EnableZEBinary) || !m_kernelInfo.m_HasInlineVmeSamplers,
+        bool hasInlineSampler = m_kernelInfo.m_HasInlineVmeSamplers || !m_kernelInfo.m_samplerInput.empty();
+        IGC_ASSERT_MESSAGE(!IGC_IS_FLAG_ENABLED(EnableZEBinary) || !hasInlineSampler,
             "ZEBin: Inline sampler unsupported");
         // fall back to patch-token if ZEBinary is enabled by CodeGenContext::CompOptions
-        if (m_Context->getCompilerOption().EnableZEBinary && m_kernelInfo.m_HasInlineVmeSamplers)
+        if (m_Context->getCompilerOption().EnableZEBinary && hasInlineSampler)
             m_Context->getCompilerOption().EnableZEBinary = false;
 
         // Handle kernel reflection
@@ -1776,7 +1825,7 @@ namespace IGC
         m_kernelInfo.m_executionEnivronment.PerThreadPrivateOnStatelessSize = m_perWIStatelessPrivateMemSize;
         m_kernelInfo.m_kernelProgram.NOSBufferSize = m_NOSBufferSize / getGRFSize(); // in 256 bits
         m_kernelInfo.m_kernelProgram.ConstantBufferLength = m_ConstantBufferLength / getGRFSize(); // in 256 bits
-        m_kernelInfo.m_kernelProgram.MaxNumberOfThreads = m_Platform->getMaxGPGPUShaderThreads();
+        m_kernelInfo.m_kernelProgram.MaxNumberOfThreads = m_Platform->getMaxGPGPUShaderThreads() / GetShaderThreadUsageRate();
 
         m_kernelInfo.m_executionEnivronment.SumFixedTGSMSizes = getSumFixedTGSMSizes(entry);
         m_kernelInfo.m_executionEnivronment.HasBarriers = this->GetHasBarrier();
@@ -1949,10 +1998,6 @@ namespace IGC
 
         if (!modMD->inlineConstantBuffers.empty())
         {
-            // For ZeBin, constants are mantained in two separate buffers
-            // the first is for general constants, and the second for string literals
-
-            // General constants
             auto ipsbMDHandle = modMD->inlineConstantBuffers[0];
             std::unique_ptr<iOpenCL::InitConstantAnnotation> initConstant(new iOpenCL::InitConstantAnnotation());
             initConstant->Alignment = ipsbMDHandle.alignment;
@@ -1962,23 +2007,7 @@ namespace IGC
             initConstant->InlineData.resize(bufferSize);
             memcpy_s(initConstant->InlineData.data(), bufferSize, ipsbMDHandle.Buffer.data(), bufferSize);
 
-            ctx->m_programInfo.m_initConstantAnnotation.push_back(std::move(initConstant));
-
-            if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
-                modMD->compOpt.EnableZEBinary)
-            {
-                // String literals
-                auto ipsbStringMDHandle = modMD->inlineConstantBuffers[1];
-                std::unique_ptr<iOpenCL::InitConstantAnnotation> initStringConstant(new iOpenCL::InitConstantAnnotation());
-                initStringConstant->Alignment = ipsbStringMDHandle.alignment;
-                initStringConstant->AllocSize = ipsbStringMDHandle.allocSize;
-
-                bufferSize = (ipsbStringMDHandle.Buffer).size();
-                initStringConstant->InlineData.resize(bufferSize);
-                memcpy_s(initStringConstant->InlineData.data(), bufferSize, ipsbStringMDHandle.Buffer.data(), bufferSize);
-
-                ctx->m_programInfo.m_initConstantAnnotation.push_back(std::move(initStringConstant));
-            }
+            ctx->m_programInfo.m_initConstantAnnotation = std::move(initConstant);
         }
 
         if (!modMD->inlineGlobalBuffers.empty())
@@ -2036,6 +2065,23 @@ namespace IGC
             initConstantPointer->PointerOffset = constPtrInfo.PointerOffset;
 
             ctx->m_programInfo.m_initConstantPointerAnnotation.push_back(std::move(initConstantPointer));
+        }
+
+        // Pointer address relocation table data for GLOBAL buffer
+        for (const auto& globalRelocEntry : modMD->GlobalBufferAddressRelocInfo)
+        {
+            ctx->m_programInfo.m_GlobalPointerAddressRelocAnnotation.globalReloc.emplace_back(
+                (globalRelocEntry.PointerSize == 8) ? vISA::GenRelocType::R_SYM_ADDR : vISA::GenRelocType::R_SYM_ADDR_32,
+                (uint32_t)globalRelocEntry.BufferOffset,
+                globalRelocEntry.Symbol);
+        }
+        // Pointer address relocation table data for CONST buffer
+        for (const auto& constRelocEntry : modMD->ConstantBufferAddressRelocInfo)
+        {
+            ctx->m_programInfo.m_GlobalPointerAddressRelocAnnotation.globalConstReloc.emplace_back(
+                (constRelocEntry.PointerSize == 8) ? vISA::GenRelocType::R_SYM_ADDR : vISA::GenRelocType::R_SYM_ADDR_32,
+                (uint32_t)constRelocEntry.BufferOffset,
+                constRelocEntry.Symbol);
         }
     }
 

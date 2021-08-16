@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -32,7 +16,8 @@ IN THE SOFTWARE.
 #include "GenXIntrinsics.h"
 #include "GenXRegion.h"
 
-#include "vc/GenXOpts/Utils/Printf.h"
+#include "vc/GenXOpts/Utils/InternalMetadata.h"
+#include "vc/Utils/GenX/Printf.h"
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -290,30 +275,31 @@ Instruction *genx::findClosestCommonDominator(DominatorTree *DT,
  *
  * If an intrinsic has a "two address operand", then that operand must be
  * in the same register as the result. This function returns the operand number
- * of the two address operand if any, or -1 if not.
+ * of the two address operand if any, or None if not.
  */
-int genx::getTwoAddressOperandNum(CallInst *CI)
+llvm::Optional<unsigned> genx::getTwoAddressOperandNum(CallInst *CI)
 {
   auto IntrinsicID = GenXIntrinsic::getAnyIntrinsicID(CI);
   if (IntrinsicID == GenXIntrinsic::not_any_intrinsic)
-    return -1; // not intrinsic
+    return None; // not intrinsic
+  // wr(pred(pred))region has operand 0 as two address operand
   if (GenXIntrinsic::isWrRegion(IntrinsicID) ||
       IntrinsicID == GenXIntrinsic::genx_wrpredregion ||
       IntrinsicID == GenXIntrinsic::genx_wrpredpredregion)
-    return 0; // wr(pred(pred))region has operand 0 as two address operand
+    return GenXIntrinsic::GenXRegion::OldValueOperandNum;
   if (CI->getType()->isVoidTy())
-    return -1; // no return value
+    return None; // no return value
   GenXIntrinsicInfo II(IntrinsicID);
   unsigned Num = CI->getNumArgOperands();
   if (!Num)
-    return -1; // no args
+    return None; // no args
   --Num; // Num = last arg number, could be two address operand
   if (isa<UndefValue>(CI->getOperand(Num)))
-    return -1; // operand is undef, must be RAW_NULLALLOWED
+    return None; // operand is undef, must be RAW_NULLALLOWED
   if (II.getArgInfo(Num).getCategory() != GenXIntrinsicInfo::TWOADDR)
-    return -1; // not two addr operand
+    return None; // not two addr operand
   if (CI->use_empty() && II.getRetInfo().rawNullAllowed())
-    return -1; // unused result will be V0
+    return None; // unused result will be V0
   return Num; // it is two addr
 }
 
@@ -1058,38 +1044,111 @@ IVSplitter::IVSplitter(Instruction &Inst, const unsigned *BaseOpIdx)
                                          Len * 2);
 }
 
-Region IVSplitter::createSplitRegion(Type *Ty, IVSplitter::RegionType RT) {
-  Region R(Ty);
+IVSplitter::RegionTrait IVSplitter::describeSplit(RegionType RT, size_t ElNum) {
+  RegionTrait Result;
+  if (RT == RegionType::LoRegion || RT == RegionType::HiRegion) {
+    // take every second element;
+    Result.ElStride = 2;
+    Result.ElOffset = (RT == RegionType::LoRegion) ? 0 : 1;
+  }
+  else if (RT == RegionType::FirstHalf || RT == RegionType::SecondHalf) {
+    // take every element, sequentially
+    Result.ElStride = 1;
+    Result.ElOffset = (RT == RegionType::FirstHalf) ? 0 : ElNum;
+  } else {
+    IGC_ASSERT_EXIT_MESSAGE(0, "incorrect region type");
+  }
+  return Result;
+}
+
+Constant *
+IVSplitter::splitConstantVector(const SmallVectorImpl<Constant *> &KV32,
+                                RegionType RT) {
+  IGC_ASSERT(KV32.size() % 2 == 0);
+  SmallVector<Constant *, 16> Result;
+  size_t ElNum = KV32.size() / 2;
+  Result.reserve(ElNum);
+  auto Split = describeSplit(RT, ElNum);
+  for (size_t i = 0; i < ElNum; ++i) {
+    size_t Offset = Split.ElOffset + i * Split.ElStride;
+    IGC_ASSERT(Offset < KV32.size());
+    Result.push_back(KV32[Offset]);
+  }
+  return ConstantVector::get(Result);
+}
+
+Region IVSplitter::createSplitRegion(Type *SrcTy, IVSplitter::RegionType RT) {
+  IGC_ASSERT(SrcTy->isVectorTy());
+  IGC_ASSERT(SrcTy->getScalarType()->isIntegerTy(32));
+  IGC_ASSERT(cast<VectorType>(SrcTy)->getNumElements() % 2 == 0);
+
+  size_t Len = cast<VectorType>(SrcTy)->getNumElements() / 2;
+
+  auto Split = describeSplit(RT, Len);
+
+  Region R(SrcTy);
   R.Width = Len;
   R.NumElements = Len;
   R.VStride = 0;
+  R.Stride = Split.ElStride;
+  // offset is encoded in bytes
+  R.Offset = Split.ElOffset * 4;
 
-  if (RT == RegionType::LoRegion || RT == RegionType::HiRegion) {
-    // take every second element;
-    R.Stride = 2;
-    // offset is encoded in bytes
-    R.Offset = (RT == RegionType::LoRegion) ? 0 : 4;
-  }
-  else if (RT == RegionType::FirstHalf || RT == RegionType::SecondHalf) {
-    // take every element
-    R.Stride = 1;
-    // offset is encoded in bytes
-    R.Offset = (RT == RegionType::FirstHalf) ? 0 : 4 * Len;
-  }
-  else {
-    IGC_ASSERT_EXIT_MESSAGE(0, "incorrect region type");
-  }
   return R;
 }
 
-std::pair<Value*, Value*> IVSplitter::splitValue(Value& Val, RegionType RT1,
-                                                 const Twine& Name1,
-                                                 RegionType RT2,
-                                                 const Twine& Name2) {
+// function takes 64-bit constant value (vector or scalar) and splits it
+// into an equivalent vector of 32-bit constant (as if it was Bitcast-ed)
+static void convertI64ToI32(Constant &K, SmallVectorImpl<Constant *> &K32) {
+  auto I64To32 = [](const Constant &K) {
+    // we expect only scalar types here
+    IGC_ASSERT(!isa<VectorType>(K.getType()));
+    IGC_ASSERT(K.getType()->isIntegerTy(64));
+    auto *Ty32 = K.getType()->getInt32Ty(K.getContext());
+    if (isa<UndefValue>(K)) {
+      Constant *Undef = UndefValue::get(Ty32);
+      return std::make_pair(Undef, Undef);
+    }
+    auto *KI = cast<ConstantInt>(&K);
+    uint64_t Val64 = KI->getZExtValue();
+    const auto UI32ValueMask = std::numeric_limits<uint32_t>::max();
+    Constant *VLo =
+        ConstantInt::get(Ty32, static_cast<uint32_t>(Val64 & UI32ValueMask));
+    Constant *VHi = ConstantInt::get(Ty32, static_cast<uint32_t>(Val64 >> 32));
+    return std::make_pair(VLo, VHi);
+  };
+
+  IGC_ASSERT(K32.empty());
+  if (!isa<VectorType>(K.getType())) {
+    auto V32 = I64To32(K);
+    K32.push_back(V32.first);
+    K32.push_back(V32.second);
+    return;
+  }
+  unsigned ElNum = cast<VectorType>(K.getType())->getNumElements();
+  K32.reserve(2 * ElNum);
+  for (unsigned i = 0; i < ElNum; ++i) {
+    auto V32 = I64To32(*K.getAggregateElement(i));
+    K32.push_back(V32.first);
+    K32.push_back(V32.second);
+  }
+}
+
+std::pair<Value *, Value *>
+IVSplitter::splitValue(Value &Val, RegionType RT1, const Twine &Name1,
+                       RegionType RT2, const Twine &Name2, bool FoldConstants) {
   const auto &DL = Inst.getDebugLoc();
   auto BaseName = Inst.getName();
 
   IGC_ASSERT(Val.getType()->getScalarType()->isIntegerTy(64));
+
+  if (FoldConstants && isa<Constant>(Val)) {
+    SmallVector<Constant *, 32> KV32;
+    convertI64ToI32(cast<Constant>(Val), KV32);
+    Value *V1 = splitConstantVector(KV32, RT1);
+    Value *V2 = splitConstantVector(KV32, RT2);
+    return {V1, V2};
+  }
   auto *ShreddedVal = new BitCastInst(&Val, VI32Ty, BaseName + ".iv32cast", &Inst);
   ShreddedVal->setDebugLoc(DL);
 
@@ -1101,25 +1160,28 @@ std::pair<Value*, Value*> IVSplitter::splitValue(Value& Val, RegionType RT1,
   return { V1, V2 };
 }
 
-IVSplitter::LoHiSplit IVSplitter::splitOperandLoHi(unsigned SourceIdx) {
+IVSplitter::LoHiSplit IVSplitter::splitOperandLoHi(unsigned SourceIdx,
+                                                   bool FoldConstants) {
 
   IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
-  return splitValueLoHi(*Inst.getOperand(SourceIdx));
+  return splitValueLoHi(*Inst.getOperand(SourceIdx), FoldConstants);
 }
-IVSplitter::HalfSplit IVSplitter::splitOperandHalf(unsigned SourceIdx) {
+IVSplitter::HalfSplit IVSplitter::splitOperandHalf(unsigned SourceIdx,
+                                                   bool FoldConstants) {
 
   IGC_ASSERT(Inst.getNumOperands() > SourceIdx);
-  return splitValueHalf(*Inst.getOperand(SourceIdx));
+  return splitValueHalf(*Inst.getOperand(SourceIdx), FoldConstants);
 }
 
-IVSplitter::LoHiSplit IVSplitter::splitValueLoHi(Value &V) {
+IVSplitter::LoHiSplit IVSplitter::splitValueLoHi(Value &V, bool FoldConstants) {
   auto Splitted = splitValue(V, RegionType::LoRegion, ".LoSplit",
-                             RegionType::HiRegion, ".HiSplit");
+                             RegionType::HiRegion, ".HiSplit", FoldConstants);
   return {Splitted.first, Splitted.second};
 }
-IVSplitter::HalfSplit IVSplitter::splitValueHalf(Value &V) {
-  auto Splitted = splitValue(V, RegionType::FirstHalf, ".FirstHalf",
-                             RegionType::SecondHalf, ".SecondHalf");
+IVSplitter::HalfSplit IVSplitter::splitValueHalf(Value &V, bool FoldConstants) {
+  auto Splitted =
+      splitValue(V, RegionType::FirstHalf, ".FirstHalf", RegionType::SecondHalf,
+                 ".SecondHalf", FoldConstants);
   return {Splitted.first, Splitted.second};
 }
 
@@ -1589,9 +1651,31 @@ GlobalVariable *genx::getUnderlyingGlobalVariable(Value *V) {
       getUnderlyingGlobalVariable(const_cast<const Value *>(V)));
 }
 
+const GlobalVariable *genx::getUnderlyingGlobalVariable(const LoadInst *LI) {
+  return getUnderlyingGlobalVariable(LI->getPointerOperand());
+}
+
+GlobalVariable *genx::getUnderlyingGlobalVariable(LoadInst *LI) {
+  return getUnderlyingGlobalVariable(LI->getPointerOperand());
+}
+
+bool genx::isGlobalStore(Instruction *I) {
+  IGC_ASSERT(I);
+  if (auto *SI = dyn_cast<StoreInst>(I))
+    return isGlobalStore(SI);
+  return false;
+}
+
 bool genx::isGlobalStore(StoreInst *ST) {
   IGC_ASSERT(ST);
   return getUnderlyingGlobalVariable(ST->getPointerOperand()) != nullptr;
+}
+
+bool genx::isGlobalLoad(Instruction *I) {
+  IGC_ASSERT(I);
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    return isGlobalLoad(LI);
+  return false;
 }
 
 bool genx::isGlobalLoad(LoadInst *LI) {
@@ -1820,20 +1904,6 @@ CastInst *genx::scalarizeOrVectorizeIfNeeded(Instruction *Inst,
   return scalarizeOrVectorizeIfNeeded(Inst, &InstToReplace, std::next(&InstToReplace));
 }
 
-const Type &genx::fixDegenerateVectorType(const Type &Ty) {
-  if (!isa<VectorType>(Ty))
-    return Ty;
-  auto &VecTy = cast<VectorType>(Ty);
-  if (VecTy.getNumElements() != 1)
-    return Ty;
-  return *VecTy.getElementType();
-}
-
-Type &genx::fixDegenerateVectorType(Type &Ty) {
-  return const_cast<Type &>(
-      fixDegenerateVectorType(static_cast<const Type &>(Ty)));
-}
-
 Function *genx::getFunctionPointerFunc(Value *V) {
   Instruction *I = nullptr;
   for (; (I = dyn_cast<CastInst>(V)); V = I->getOperand(0))
@@ -1947,100 +2017,6 @@ CallInst *genx::checkFunctionCall(Value *V, Function *F) {
   return nullptr;
 }
 
-Value *genx::breakConstantVector(ConstantVector *CV, Instruction *CurInst,
-                                 Instruction *InsertPt) {
-  IGC_ASSERT(CurInst);
-  IGC_ASSERT(InsertPt);
-  if (!CV)
-    return nullptr;
-  // Splat case.
-  if (auto S = dyn_cast_or_null<ConstantExpr>(CV->getSplatValue())) {
-    // Turn element into an instruction
-    auto Inst = S->getAsInstruction();
-    Inst->setDebugLoc(CurInst->getDebugLoc());
-    Inst->insertBefore(InsertPt);
-
-    // Splat this value.
-    IRBuilder<> Builder(InsertPt);
-    Value *NewVal = Builder.CreateVectorSplat(CV->getNumOperands(), Inst);
-
-    // Update i-th operand with newly created splat.
-    CurInst->replaceUsesOfWith(CV, NewVal);
-    return NewVal;
-  }
-
-  SmallVector<Value *, 8> Vals;
-  bool HasConstExpr = false;
-  for (unsigned j = 0, N = CV->getNumOperands(); j < N; ++j) {
-    Value *Elt = CV->getOperand(j);
-    if (auto CE = dyn_cast<ConstantExpr>(Elt)) {
-      auto Inst = CE->getAsInstruction();
-      Inst->setDebugLoc(CurInst->getDebugLoc());
-      Inst->insertBefore(InsertPt);
-      Vals.push_back(Inst);
-      HasConstExpr = true;
-    } else
-      Vals.push_back(Elt);
-  }
-
-  if (HasConstExpr) {
-    Value *Val = UndefValue::get(CV->getType());
-    IRBuilder<> Builder(InsertPt);
-    for (unsigned j = 0, N = CV->getNumOperands(); j < N; ++j)
-      Val = Builder.CreateInsertElement(Val, Vals[j], j);
-    CurInst->replaceUsesOfWith(CV, Val);
-    return Val;
-  }
-  return nullptr;
-}
-
-bool genx::breakConstantExprs(Instruction *I) {
-  if (!I)
-    return false;
-  bool Modified = false;
-  std::list<Instruction *> Worklist = {I};
-  while (!Worklist.empty()) {
-    auto *CurInst = Worklist.front();
-    Worklist.pop_front();
-    PHINode *PN = dyn_cast<PHINode>(CurInst);
-    for (unsigned i = 0, e = CurInst->getNumOperands(); i < e; ++i) {
-      auto *InsertPt = PN ? PN->getIncomingBlock(i)->getTerminator() : CurInst;
-      Value *Op = CurInst->getOperand(i);
-      if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Op)) {
-        Instruction *NewInst = CE->getAsInstruction();
-        NewInst->setDebugLoc(CurInst->getDebugLoc());
-        NewInst->insertBefore(CurInst);
-        CurInst->setOperand(i, NewInst);
-        Worklist.push_back(NewInst);
-        Modified = true;
-      } else if (auto *CV = dyn_cast<ConstantVector>(Op)) {
-        if (auto *CVInst = breakConstantVector(CV, CurInst, InsertPt)) {
-          Worklist.push_back(cast<Instruction>(CVInst));
-          Modified = true;
-        }
-      }
-    }
-  }
-  return Modified;
-}
-
-bool genx::breakConstantExprs(Function *F) {
-  bool Modified = false;
-  for (po_iterator<BasicBlock *> i = po_begin(&F->getEntryBlock()),
-                                 e = po_end(&F->getEntryBlock());
-       i != e; ++i) {
-    BasicBlock *BB = *i;
-    // The effect of this loop is that we process the instructions in reverse
-    // order, and we re-process anything inserted before the instruction
-    // being processed.
-    for (Instruction *CurInst = BB->getTerminator(); CurInst;) {
-      Modified |= breakConstantExprs(CurInst);
-      CurInst = CurInst == &BB->front() ? nullptr : CurInst->getPrevNode();
-    }
-  }
-  return Modified;
-}
-
 unsigned genx::getNumGRFsPerIndirectForRegion(const genx::Region &R,
                                               const GenXSubtarget *ST,
                                               bool Allow2D) {
@@ -2057,14 +2033,17 @@ unsigned genx::getNumGRFsPerIndirectForRegion(const genx::Region &R,
 bool genx::isRealGlobalVariable(const GlobalVariable &GV) {
   if (GV.hasAttribute("genx_volatile"))
     return false;
+  if (GV.hasAttribute(genx::VariableMD::VCPredefinedVariable))
+    return false;
   bool IsIndexedString =
       std::any_of(GV.user_begin(), GV.user_end(), [](const User *Usr) {
-        return isLegalPrintFormatIndexGEP(*Usr);
+        return vc::isLegalPrintFormatIndexGEP(*Usr);
       });
   if (IsIndexedString) {
     IGC_ASSERT_MESSAGE(std::all_of(GV.user_begin(), GV.user_end(),
                                    [](const User *Usr) {
-                                     return isLegalPrintFormatIndexGEP(*Usr);
+                                     return vc::isLegalPrintFormatIndexGEP(
+                                         *Usr);
                                    }),
                        "when global is an indexed string, its users can only "
                        "be print format index GEPs");
@@ -2140,3 +2119,98 @@ bool genx::splitStructPhis(Function *F) {
   }
   return Modified;
 }
+
+bool genx::hasMemoryDeps(Instruction *L1, Instruction *L2, Value *Addr,
+                         DominatorTree *DT) {
+  // Return false for non global loads
+  if (!(GenXIntrinsic::isVLoad(L1) && GenXIntrinsic::isVLoad(L2)) &&
+      !(isGlobalLoad(L1) && isGlobalLoad(L2)))
+    return false;
+
+  auto isKill = [=](Instruction &I) {
+    Instruction *Inst = &I;
+    if ((GenXIntrinsic::isVStore(Inst) || genx::isGlobalStore(Inst)) &&
+        (Addr == Inst->getOperand(1) ||
+         Addr == getUnderlyingGlobalVariable(Inst->getOperand(1))))
+      return true;
+    // OK.
+    return false;
+  };
+
+  // global loads from the same block.
+  if (L1->getParent() == L2->getParent()) {
+    BasicBlock::iterator I = L1->getParent()->begin();
+    for (; &*I != L1 && &*I != L2; ++I)
+      /*empty*/;
+    IGC_ASSERT(&*I == L1 || &*I == L2);
+    auto IEnd = (&*I == L1) ? L2->getIterator() : L1->getIterator();
+    return std::any_of(I->getIterator(), IEnd, isKill);
+  }
+
+  // global loads are from different blocks.
+  //
+  //       BB1 (L1)
+  //      /   \
+  //   BB3    BB2 (L2)
+  //     \     /
+  //       BB4
+  //
+  auto BB1 = L1->getParent();
+  auto BB2 = L2->getParent();
+  if (!DT->properlyDominates(BB1, BB2)) {
+    std::swap(BB1, BB2);
+    std::swap(L1, L2);
+  }
+  if (DT->properlyDominates(BB1, BB2)) {
+    // As BB1 dominates BB2, we can recursively check BB2's predecessors, until
+    // reaching BB1.
+    //
+    // check BB1 && BB2
+    if (std::any_of(BB2->begin(), L2->getIterator(), isKill))
+      return true;
+    if (std::any_of(L1->getIterator(), BB1->end(), isKill))
+      return true;
+    std::set<BasicBlock *> Visited{BB1, BB2};
+    std::vector<BasicBlock *> BBs;
+    std::copy_if(pred_begin(BB2), pred_end(BB2), std::back_inserter(BBs),
+                 [Visited](BasicBlock *BB) { return !Visited.count(BB); });
+
+    // This visits the subgraph dominated by BB1, originated from BB2.
+    while (!BBs.empty()) {
+      BasicBlock *BB = BBs.back();
+      BBs.pop_back();
+      Visited.insert(BB);
+
+      // check if there is any store kill in this block.
+      if (std::any_of(BB->begin(), BB->end(), isKill))
+        return true;
+
+      // Populate not visited predecessors.
+      std::copy_if(pred_begin(BB), pred_end(BB), std::back_inserter(BBs),
+                   [Visited](BasicBlock *BB) { return !Visited.count(BB); });
+    }
+
+    // no mem deps.
+    return false;
+  }
+
+  return true;
+}
+
+bool genx::isRdRFromGlobalLoad(Value *V) {
+  if (!GenXIntrinsic::isRdRegion(V))
+    return false;
+  auto *RdR = cast<CallInst>(V);
+  auto *I = dyn_cast<Instruction>(
+      RdR->getArgOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
+  return I && isGlobalLoad(I);
+};
+
+bool genx::isWrRToGlobalLoad(Value *V) {
+  if (!GenXIntrinsic::isWrRegion(V))
+    return false;
+  auto *WrR = cast<CallInst>(V);
+  auto *I = dyn_cast<Instruction>(
+      WrR->getArgOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
+  return I && isGlobalLoad(I);
+};

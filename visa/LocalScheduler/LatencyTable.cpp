@@ -1,6 +1,14 @@
+/*========================== begin_copyright_notice ============================
+
+Copyright (C) 2019-2021 Intel Corporation
+
+SPDX-License-Identifier: MIT
+
+============================= end_copyright_notice ===========================*/
+
 #include "LatencyTable.h"
 #include "LocalScheduler_G4IR.h"
-#include "../Gen4_IR.hpp"
+#include "../G4_IR.hpp"
 
 using namespace vISA;
 
@@ -129,6 +137,10 @@ uint16_t LatencyTable::getLatencyG12(const G4_INST* Inst) const
     if (Inst->isFlowControl())
     {
         return LatenciesXe::BRANCH;
+    }
+    if (Inst->isDpas()) {
+        G4_InstDpas *dpas = Inst->asDpasInst();
+        return uint16_t(LatenciesXe::DPAS + dpas->getRepeatCount() - 1);
     }
     if (Inst->writesFlag() || (Dst && Dst->isA0()))
     {

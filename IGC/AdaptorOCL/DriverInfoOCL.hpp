@@ -38,7 +38,6 @@ namespace TC
         bool enableVISAPreRAScheduler() const override { return true; }
 
         bool NeedWAToTransformA32MessagesToA64() const override{ return true; }
-        bool WALoadStorePatternMatch() const override { return true; }
         bool WADisableCustomPass() const override { return true; }
         bool WAEnableMemOpt2ForOCL() const override { return true; }
 
@@ -71,6 +70,8 @@ namespace TC
         unsigned getVISAPreRASchedulerCtrl() const override { return 6; }
         bool SupportStatefulToken() const override { return true; }
         bool SupportInlineAssembly() const override { return true; }
+        /// Enables the use of inline data on XeHP_SDV+
+        virtual bool UseInlineData() const override { return true; }
     };
 
 }//namespace TC

@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -40,6 +24,7 @@ IN THE SOFTWARE.
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
 #include "vc/GenXOpts/GenXAnalysis.h"
+#include "vc/GenXOpts/Utils/InternalMetadata.h"
 #include "vc/GenXOpts/Utils/RegCategory.h"
 
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
@@ -113,8 +98,7 @@ void GenXLiveness::clear()
     delete LR;
   }
   FG = 0;
-  delete CG;
-  CG = 0;
+  CG.reset();
   for (auto i = UnifiedRets.begin(), e = UnifiedRets.end(); i != e; ++i)
     i->second->deleteValue();
   UnifiedRets.clear();
@@ -160,8 +144,7 @@ void LiveRange::setAlignmentFromValue(const DataLayout &DL, const SimpleValue V,
  */
 void GenXLiveness::rebuildCallGraph()
 {
-  delete CG;
-  CG = new genx::CallGraph(FG);
+  CG = std::make_unique<genx::CallGraph>(FG);
   CG->build(this);
 }
 
@@ -331,7 +314,7 @@ void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
       }
     }
     EndNum = StartNum + 1;
-    if (CI && getTwoAddressOperandNum(CI) >= 0) {
+    if (CI && getTwoAddressOperandNum(CI)) {
       // Two address op. Move the definition point one earlier, to where
       // GenXCoalescing will need to insert a copy if coalescing fails.
       --StartNum;
@@ -373,7 +356,8 @@ void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
                                                  SV.getIndex());
             break;
           default:
-            if (getTwoAddressOperandNum(CI) == (int)i->getOperandNo()) {
+            if (auto OpndNum = getTwoAddressOperandNum(CI);
+                OpndNum && *OpndNum == i->getOperandNo()) {
               // The use is the two address operand in a two address op. Move
               // the use point one earlier, to where GenXCoalescing will need
               // to insert a copy if coalescing fails. If there is any other
@@ -814,6 +798,27 @@ LiveRange::iterator LiveRange::find(unsigned Pos)
   return I;
 }
 
+static unsigned getCategoryForPredefinedVariable(SimpleValue SV) {
+  const unsigned Category =
+      llvm::StringSwitch<unsigned>(SV.getValue()->getName())
+          .Case(genx::BSSVariableName, RegCategory::SURFACE)
+          .Default(RegCategory::NUMCATEGORIES);
+  IGC_ASSERT_MESSAGE(Category != RegCategory::NUMCATEGORIES,
+                     "Unhandled predefined variable");
+  return Category;
+}
+
+static bool isPredefinedVariable(SimpleValue SV) {
+  Value *V = SV.getValue();
+  IGC_ASSERT_MESSAGE(V, "Expected value");
+  if (!isa<GlobalVariable>(V))
+    return false;
+  IGC_ASSERT_MESSAGE(SV.getIndex() == 0,
+                     "Expected single simple value for predefined variable");
+  auto *GV = cast<GlobalVariable>(V);
+  return GV->hasAttribute(genx::VariableMD::VCPredefinedVariable);
+}
+
 /***********************************************************************
  * getOrDefaultCategory : get category; if none, set default
  *
@@ -827,6 +832,11 @@ unsigned LiveRange::getOrDefaultCategory()
     return Cat;
   IGC_ASSERT(!value_empty());
   SimpleValue SV = *value_begin();
+  if (isPredefinedVariable(SV)) {
+    Cat = getCategoryForPredefinedVariable(SV);
+    setCategory(Cat);
+    return Cat;
+  }
   Type *Ty = IndexFlattener::getElementType(
       SV.getValue()->getType(), SV.getIndex());
   if (Ty->getScalarType()->isIntegerTy(1))
@@ -921,12 +931,12 @@ bool GenXLiveness::twoAddrInterfere(LiveRange *LR1, LiveRange *LR2)
       auto CI = dyn_cast<CallInst>(vi->getValue());
       if (!CI)
         continue;
-      int OperandNum = getTwoAddressOperandNum(CI);
-      if (OperandNum < 0)
+      auto OperandNum = getTwoAddressOperandNum(CI);
+      if (!OperandNum)
         continue;
       // Got a two addr op. Check whether the two addr operand is in the other
       // LR.
-      if (getLiveRangeOrNull(CI->getOperand(OperandNum)) != OtherLR)
+      if (getLiveRangeOrNull(CI->getOperand(*OperandNum)) != OtherLR)
         continue;
       // Discount the single number interference site here, if there is one.
       SitesSet.erase(getNumbering()->getNumber(CI) - 1);

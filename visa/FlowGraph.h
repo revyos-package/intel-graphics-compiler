@@ -1,34 +1,17 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
+============================= end_copyright_notice ===========================*/
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
 #ifndef FLOWGRAPH_H
 #define FLOWGRAPH_H
 
 #include "VISADefines.h"
 #include "G4_BB.hpp"
-#include "Gen4_IR.hpp"
+#include "G4_IR.hpp"
 #include "RelocationInfo.h"
 #include "LoopAnalysis.h"
 
@@ -233,7 +216,9 @@ class FlowGraph
     std::unordered_map<G4_Label*, std::vector<G4_BB*>> subroutines;
 
     vISA::Dominator dom;
+    vISA::ImmDominator immDom;
     vISA::PostDom pDom;
+    vISA::LoopDetection loops;
 
 public:
     typedef std::pair<G4_BB*, G4_BB*> Edge;
@@ -464,7 +449,7 @@ public:
       pKernel(kernel), mem(m), instListAlloc(alloc),
       kernelInfo(NULL), builder(NULL), globalOpndHT(m), framePtrDcl(NULL),
       stackPtrDcl(NULL), scratchRegDcl(NULL), pseudoVCEDcl(NULL),
-      dom(*kernel), pDom(*kernel) {}
+      dom(*kernel), immDom(*kernel), pDom(*kernel), loops(*kernel) {}
 
     ~FlowGraph();
 
@@ -651,10 +636,11 @@ public:
 
     void print(std::ostream& OS) const;
     void dump() const;  // used in debugger
-    void dumptofile(const char* Filename) const; // used in debugger
 
     Dominator& getDominator() { return dom; }
+    ImmDominator& getImmDominator() { return immDom; }
     PostDom& getPostDominator() { return pDom; }
+    LoopDetection& getLoops() { return loops; }
     void markStale();
 
 private:

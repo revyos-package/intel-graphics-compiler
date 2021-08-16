@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -32,7 +16,26 @@ IN THE SOFTWARE.
 /// VISA regalloc makes sure that dests & sources of the generated instructions
 /// are allocated to the proper predefined VISA regs
 ///
+/// Lets say before transformation we have call with arg loaded from surface:
+/// %arg = call <8 x float> @llvm.genx.oword.ld.v8f32(i32 0, i32 1, i32 %addr)
+/// %ret = call spir_func <8 x float> @foo(<8 x float> %arg)
+///
+/// Then after we will see something like this:
+/// %arg = call <8 x float> @llvm.genx.oword.ld.v8f32(i32 0, i32 1, i32 %addr)
+/// %R8 = call <256 x float> read.predef.reg(i32 PREDEFINED_ARG, undef)
+/// %NEWR8 = <256 x float> wrregion(<256 x float> %R8, <8 x float> %arg,
+///                                 i32 0, i32 8, i32 1, OFFSET, ...)
+/// ; Here OFFSET starts from 0 and is argument offset in predef register
+/// %newarg = call <8 x float> write.predef.reg(i32 PREDEFINED_ARG,
+///                                             <256 x float> %NEWR8)
+/// %ret = call spir_func <8 x float> @foo(<8 x float> %newarg)
+///
+/// So we have explicit stack layout relatively early to use 64-bit splitting
+/// on later stages if 64-bit pointers are used as SP/FP
+///
 //===----------------------------------------------------------------------===//
+
+#define DEBUG_TYPE "GENX_PROLOGUE"
 
 #include "GenX.h"
 #include "GenXIntrinsics.h"
@@ -49,8 +52,6 @@ IN THE SOFTWARE.
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -58,6 +59,8 @@ IN THE SOFTWARE.
 #include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -90,23 +93,6 @@ inline unsigned calcPadding(unsigned Val, unsigned Align) {
   return Align - Val % Align;
 }
 
-// Diagnostic information for error/warning relating prolog/epilog insertion.
-class DiagnosticInfoPrologEpilogInsertion : public DiagnosticInfo {
-private:
-  std::string Description;
-
-public:
-  // Initialize from description
-  DiagnosticInfoPrologEpilogInsertion(const Twine &Desc,
-                                      DiagnosticSeverity Severity = DS_Error)
-      : DiagnosticInfo(llvm::getNextAvailablePluginDiagnosticKind(), Severity),
-        Description(Desc.str()) {}
-
-  void print(DiagnosticPrinter &DP) const override {
-    DP << "GenXPrologEpilogInsertion: " << Description;
-  }
-};
-
 class GenXPrologEpilogInsertion
     : public FunctionPass,
       public InstVisitor<GenXPrologEpilogInsertion> {
@@ -126,7 +112,16 @@ class GenXPrologEpilogInsertion
   void generateKernelProlog(Function &F);
   void generateFunctionProlog(Function &F);
   void generateFunctionEpilog(Function &F, ReturnInst &I);
+
+  // caller side argument layout
   void generateStackCall(CallInst *CI);
+
+  // generateStackCall subroutines: writing args, extracting args
+  unsigned writeArgs(CallInst *CI, Value *SpArgs, IRBuilder<> &IRB);
+  std::vector<std::pair<Instruction *, Instruction *>>
+  buildWorkList(CallInst *CI, Value *OrigSp, bool UseMemForRet);
+  void extractResults(CallInst *CI, Value *OrigSp, IRBuilder<> &IRB);
+
   void generateAlloca(CallInst *CI);
 
   Value *push(Value *V, IRBuilder<> &IRB, Value *InitSP);
@@ -231,16 +226,20 @@ bool GenXPrologEpilogInsertion::runOnFunction(Function &F) {
             .getGenXSubtarget();
   ArgRegSize = visa::ArgRegSizeInGRFs * ST->getGRFWidth();
   RetRegSize = visa::RetRegSizeInGRFs * ST->getGRFWidth();
-  if (!(BEConf->useNewStackBuilder() && ST->isOCLRuntime()))
+  if (!(BEConf->useNewStackBuilder() && ST->isOCLRuntime())) {
+    LLVM_DEBUG(dbgs() << "Old builder or CMRT used in " << F.getName() << "\n");
     return false;
+  }
   NumCalls = CallsCalculator().getNumCalls(F);
   UseGlobalMem =
       F.getParent()->getModuleFlag(ModuleMD::UseSVMStack) != nullptr;
+  LLVM_DEBUG(dbgs() << "Visiting all calls in " << F.getName() << "\n");
   visit(F);
-  if (isKernel(&F)) {
+  LLVM_DEBUG(dbgs() << "Visiting finished\n");
+  if (genx::isKernel(&F)) {
     generateKernelProlog(F);
     // no epilog is required for kernels
-  } else if (F.hasFnAttribute(genx::FunctionMD::CMStackCall)) {
+  } else if (genx::requiresStackCall(&F)) {
     generateFunctionProlog(F);
     // function epilog is generated when RetInst is met
   }
@@ -252,8 +251,8 @@ void GenXPrologEpilogInsertion::visitCallInst(CallInst &I) {
   if (I.isInlineAsm())
     return;
   bool IsIndirectCall = IGCLLVM::isIndirectCall(I);
-  bool IsStackCall = IsIndirectCall || I.getCalledFunction()->hasFnAttribute(
-                                           genx::FunctionMD::CMStackCall);
+  bool IsStackCall =
+      IsIndirectCall || genx::requiresStackCall(I.getCalledFunction());
   if (IsStackCall)
     generateStackCall(&I);
   if (!IsIndirectCall) {
@@ -269,12 +268,14 @@ void GenXPrologEpilogInsertion::visitCallInst(CallInst &I) {
 }
 
 void GenXPrologEpilogInsertion::visitReturnInst(ReturnInst &I) {
-  if (I.getFunction()->hasFnAttribute(genx::FunctionMD::CMStackCall))
+  if (genx::requiresStackCall(I.getFunction()))
     generateFunctionEpilog(*I.getFunction(), I);
 }
 
 // FE_SP = PrivateBase + HWTID * PrivMemPerThread
 void GenXPrologEpilogInsertion::generateKernelProlog(Function &F) {
+  LLVM_DEBUG(dbgs() << "Generating kernel prologue for " << F.getName()
+                    << "\n");
   IRBuilder<> IRB(&F.getEntryBlock().front());
   Function *HWID = GenXIntrinsic::getGenXDeclaration(
       F.getParent(), llvm::GenXIntrinsic::genx_get_hwid, {});
@@ -304,13 +305,13 @@ void GenXPrologEpilogInsertion::generateKernelProlog(Function &F) {
 //  else:
 //    read from stackmem
 void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
+  LLVM_DEBUG(dbgs() << "Generating function prologue for " << F.getName()
+                    << "\n");
   IRBuilder<> IRB(&F.getEntryBlock().front());
   unsigned Offset = 0;
   Value *Sp = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
                                  IRB.getInt64Ty(), true);
   for (auto &Arg : F.args()) {
-    if (Arg.use_empty())
-      continue;
     auto *ArgScalarType = Arg.getType()->getScalarType();
     auto NumElements = 1;
     bool AllowScalar = true;
@@ -363,6 +364,8 @@ void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
 //    write to stackmem
 void GenXPrologEpilogInsertion::generateFunctionEpilog(Function &F,
                                                        ReturnInst &I) {
+  LLVM_DEBUG(dbgs() << "Generating function epilogue for " << F.getName()
+                    << "\n");
   IRBuilder<> IRB(&I);
   unsigned RetSize = 0;
   if (!F.getReturnType()->isVoidTy()) {
@@ -436,18 +439,24 @@ void GenXPrologEpilogInsertion::generateFunctionEpilog(Function &F,
   }
   F.setMetadata(InstMD::FuncRetSize,
                 MDNode::get(F.getContext(),
-                            ConstantAsMetadata::get(
-                                IRB.getInt32(RetSize / ST->getGRFWidth()))));
+                            ConstantAsMetadata::get(IRB.getInt32(
+                                divideCeil(RetSize, ST->getGRFWidth())))));
 }
 
-void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
-  IRBuilder<> IRB(CI);
+// write stack call args
+// returns total offset
+unsigned GenXPrologEpilogInsertion::writeArgs(CallInst *CI, Value *SpArgs,
+                                              IRBuilder<> &IRB) {
   unsigned Offset = 0;
-  Value *OrigSp = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
-                                     IRB.getInt64Ty(), true);
-  auto *SpArgs = OrigSp;
-  // write args
+  std::vector<std::pair<int, Value *>> ReplaceArgs; // ArgNo, Arg
+  ReplaceArgs.reserve(CI->getNumArgOperands());
+
   for (auto &Arg : CI->arg_operands()) {
+    // it is tempting to skip here if Arg already is in ReplaceArgs map
+    // but it will be wrong to do so, because consider:
+    // foo(x, x, y, y, x, y)
+    // on callee side we are expecting 6 positions in predef args
+    // we can not optimize these out on caller side
     auto *OrigTy = Arg->getType();
     if (OrigTy->getScalarType()->isIntegerTy(1)) {
       if (!HandleMaskArgs)
@@ -477,35 +486,28 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
       if (OrigTy->getScalarType()->isIntegerTy(1))
         ArgRegWrite = cast<Instruction>(
             IRB.CreateBitOrPointerCast(ArgRegWrite,OrigTy));
-      CI->replaceUsesOfWith(Arg, ArgRegWrite);
+      ReplaceArgs.emplace_back(Arg.getOperandNo(), ArgRegWrite);
       Offset += ArgSize;
     }
   }
 
-  CI->setMetadata(
-      InstMD::FuncArgSize,
-      MDNode::get(CI->getContext(),
-                  ConstantAsMetadata::get(IRB.getInt32(
-                      (Offset + ST->getGRFWidth() - 1) / ST->getGRFWidth()))));
-  bool isVoidCall = CI->getType()->isVoidTy();
-  CI->setMetadata(
-      InstMD::FuncRetSize,
-      MDNode::get(CI->getContext(),
-                  ConstantAsMetadata::get(IRB.getInt32(
-                      (isVoidCall ? 0
-                                  : (DL->getTypeSizeInBits(CI->getType())) /
-                                        genx::ByteBits) /
-                      ST->getGRFWidth()))));
-  if (isVoidCall)
-    return;
-  IRB.SetInsertPoint(CI->getNextNode());
-  bool UseMemForRet =
-      ForceRetMemPassing ||
-      DL->getTypeSizeInBits(CI->getType()) / genx::ByteBits > RetRegSize;
-  if (UseMemForRet)
-    OrigSp = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
-                                IRB.getInt64Ty(), CI, true);
-  // read retvalue
+  // here ">=" used to account for memory-passing of argument tail
+  IGC_ASSERT_MESSAGE(CI->getNumArgOperands() >= ReplaceArgs.size(),
+                     "ReplaceArgs too large");
+  for (auto &&NewArg : ReplaceArgs)
+    CI->setArgOperand(NewArg.first, NewArg.second);
+  return Offset;
+}
+
+// build worklist for extraction
+// worklist entry format:
+//   first: actual return
+//   second: return insertion point
+// this might be critical for structure return due to odd agreement of
+// returning structures
+std::vector<std::pair<Instruction *, Instruction *>>
+GenXPrologEpilogInsertion::buildWorkList(CallInst *CI, Value *OrigSp,
+                                         bool UseMemForRet) {
   std::vector<std::pair<Instruction *, Instruction *>> Worklist;
   if (isa<StructType>(CI->getType())) {
     for (auto *U : CI->users()) {
@@ -515,7 +517,26 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
         Worklist.push_back({cast<Instruction>(U), cast<Instruction>(U)});
     }
   } else
+    // OrigSP as instruction is read.predef.reg
     Worklist.push_back({CI, UseMemForRet ? cast<Instruction>(OrigSp) : CI});
+  return Worklist;
+}
+
+// extract results from stack call return
+void GenXPrologEpilogInsertion::extractResults(CallInst *CI, Value *OrigSp,
+                                               IRBuilder<> &IRB) {
+  IRB.SetInsertPoint(CI->getNextNode());
+  bool UseMemForRet =
+      ForceRetMemPassing ||
+      DL->getTypeSizeInBits(CI->getType()) / genx::ByteBits > RetRegSize;
+  if (UseMemForRet)
+    OrigSp = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
+                                IRB.getInt64Ty(), CI, true);
+
+  // collect return slots
+  auto Worklist = buildWorkList(CI, OrigSp, UseMemForRet);
+
+  // process return slots
   for (auto &I : Worklist) {
     auto *ActualRet = I.first;
     IRB.SetInsertPoint(I.second->getNextNode());
@@ -587,6 +608,38 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
   }
 }
 
+// generate caller site of stack call
+void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
+  LLVM_DEBUG(dbgs() << "Generating stack call for:\n");
+  LLVM_DEBUG(CI->dump());
+  LLVM_DEBUG(dbgs() << "\n");
+  IRBuilder<> IRB(CI);
+  Value *OrigSp = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
+                                     IRB.getInt64Ty(), true);
+  // write args, return total offset in arg register
+  unsigned Offset = writeArgs(CI, OrigSp, IRB);
+
+  CI->setMetadata(
+      InstMD::FuncArgSize,
+      MDNode::get(CI->getContext(),
+                  ConstantAsMetadata::get(IRB.getInt32(
+                      (Offset + ST->getGRFWidth() - 1) / ST->getGRFWidth()))));
+  bool isVoidCall = CI->getType()->isVoidTy();
+  CI->setMetadata(
+      InstMD::FuncRetSize,
+      MDNode::get(CI->getContext(),
+                  ConstantAsMetadata::get(IRB.getInt32(divideCeil(
+                      (isVoidCall ? 0
+                                  : (DL->getTypeSizeInBits(CI->getType())) /
+                                        genx::ByteBits),
+                      ST->getGRFWidth())))));
+  if (isVoidCall)
+    return;
+
+  // read retvalue
+  extractResults(CI, OrigSp, IRB);
+}
+
 // alloca_base = FE_SP
 // FE_SP += sizeof(alloca)
 void GenXPrologEpilogInsertion::generateAlloca(CallInst *CI) {
@@ -610,15 +663,6 @@ void GenXPrologEpilogInsertion::generateAlloca(CallInst *CI) {
       IRB.CreateAdd(AllocaBase, ConstantInt::get(CI->getType(), AllocaOffset));
   IGC_ASSERT(AllocaOffset % visa::BytesPerSVMPtr == 0);
   PrivMemSize += AllocaOffset;
-
-  if (PrivMemSize > (UseGlobalMem ? BEConf->getStatelessPrivateMemSize()
-                                  : visa::StackPerThreadScratch)) {
-    DiagnosticInfoPrologEpilogInsertion Warn{
-        CI->getFunction()->getName() +
-            " frame allocation size is too big for TPM",
-        DS_Warning};
-    CI->getContext().diagnose(Warn);
-  }
 
   buildWritePredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB, Add);
   CI->replaceAllUsesWith(AllocaBase);

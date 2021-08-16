@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "AdaptorCommon/ImplicitArgs.hpp"
+#include "AdaptorCommon/AddImplicitArgs.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
@@ -124,28 +125,9 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 ilpsb.alignment = 0;
                 ilpsb.allocSize = 0;
                 m_pModuleMd->inlineConstantBuffers.push_back(ilpsb);
-
-                // String literals
-                InlineProgramScopeBuffer ilpsbString;
-                ilpsbString.alignment = 0;
-                ilpsbString.allocSize = 0;
-                m_pModuleMd->inlineConstantBuffers.push_back(ilpsbString);
                 hasInlineConstantBuffer = true;
             }
-
-            // When ZeBin is enabled, constant variables that are string literals
-            // will be stored in the seconf const buffer
-            ConstantDataSequential* cds = dyn_cast<ConstantDataSequential>(initializer);
-            bool isStringConst = cds && (cds->isCString() || cds->isString());
-            if ((IGC_IS_FLAG_ENABLED(EnableZEBinary) || m_pModuleMd->compOpt.EnableZEBinary) &&
-                isStringConst)
-            {
-                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[1].Buffer;
-            }
-            else
-            {
-                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
-            }
+            inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
         }
 
         if (initializer->isZeroValue())
@@ -191,7 +173,6 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     if (hasInlineConstantBuffer)
     {
         m_pModuleMd->inlineConstantBuffers[0].allocSize = m_pModuleMd->inlineConstantBuffers[0].Buffer.size();
-        m_pModuleMd->inlineConstantBuffers[1].allocSize = m_pModuleMd->inlineConstantBuffers[1].Buffer.size();
     }
     // Calculate the correct offsets for zero-initialized globals/constants
     // Total allocation size in runtime needs to include zero-init values, but data copied to compiler output can ignore them
@@ -239,6 +220,8 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 if (pFunc.isDeclaration()) continue;
                 // Don't add implicit arg if doing relocation
                 if (pFunc.hasFnAttribute("visaStackCall")) continue;
+                // Skip functions called from function marked with IndirectlyCalled attribute
+                if (AddImplicitArgs::hasIndirectlyCalledParent(&pFunc)) continue;
 
                 SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
                 implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
@@ -253,6 +236,8 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 if (pFunc.isDeclaration()) continue;
                 // Don't add implicit arg if doing relocation
                 if (pFunc.hasFnAttribute("visaStackCall")) continue;
+                // Skip functions called from function marked with IndirectlyCalled attribute
+                if (AddImplicitArgs::hasIndirectlyCalledParent(&pFunc)) continue;
 
                 SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
                 implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
@@ -394,28 +379,47 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
             const unsigned pointedToAddrSpace = WalkCastsToFindNamedAddrSpace(initializer);
 
             IGC_ASSERT(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
+            IGC_ASSERT_MESSAGE(pointerSize == 8, "Can global var pointer ever be 32bits?");
 
             // We can only patch global and constant pointers.
-            if ((pointedToAddrSpace == ADDRESS_SPACE_GLOBAL ||
-                pointedToAddrSpace == ADDRESS_SPACE_CONSTANT) &&
-                (addressSpace == ADDRESS_SPACE_GLOBAL ||
-                    addressSpace == ADDRESS_SPACE_CONSTANT))
+            if (pointedToAddrSpace == ADDRESS_SPACE_GLOBAL || pointedToAddrSpace == ADDRESS_SPACE_CONSTANT)
             {
-                auto iter = inlineProgramScopeOffsets.find(ptrBase);
-                IGC_ASSERT(iter != inlineProgramScopeOffsets.end());
+                if (IGC_IS_FLAG_ENABLED(EnableZEBinary) || m_pModuleMd->compOpt.EnableZEBinary)
+                {
+                    // For zebin, instead of relying on the old patching logic, we can let RT directly patch the
+                    // physical address of the previously defined global into the current buffer that uses it.
+                    // TODO: Remove old patch logic when zebin is enabled
+                    auto relocInfo = (addressSpace == ADDRESS_SPACE_GLOBAL) ?
+                        &m_pModuleMd->GlobalBufferAddressRelocInfo :
+                        &m_pModuleMd->ConstantBufferAddressRelocInfo;
 
-                const uint64_t pointeeOffset = iter->second + offset;
+                    PointerAddressRelocInfo ginfo;
+                    ginfo.BufferOffset = inlineProgramScopeBuffer.size();
+                    ginfo.PointerSize = pointerSize;
+                    ginfo.Symbol = ptrBase->getName().str();
+                    relocInfo->push_back(ginfo);
 
-                pointerOffsetInfoList.push_back(
-                    PointerOffsetInfo(
-                        addressSpace,
-                        inlineProgramScopeBuffer.size(),
-                        pointedToAddrSpace));
+                    // Here, we write the offset relative to the start of the base global var.
+                    // Runtime will add the base global's absolute address to the offset.
+                    inlineProgramScopeBuffer.insert(inlineProgramScopeBuffer.end(), (char*)&offset, ((char*)&offset) + pointerSize);
+                }
+                else
+                {
+                    auto iter = inlineProgramScopeOffsets.find(ptrBase);
+                    IGC_ASSERT(iter != inlineProgramScopeOffsets.end());
 
-                // Insert just the offset of the pointer.  The base address of the buffer it points
-                // to will be added to it at runtime.
-                inlineProgramScopeBuffer.insert(
-                    inlineProgramScopeBuffer.end(), (char*)& pointeeOffset, ((char*)& pointeeOffset) + pointerSize);
+                    const uint64_t pointeeOffset = iter->second + offset;
+
+                    pointerOffsetInfoList.push_back(
+                        PointerOffsetInfo(
+                            addressSpace,
+                            inlineProgramScopeBuffer.size(),
+                            pointedToAddrSpace));
+
+                    // For old patching logic, write the offset relative to the entire global/constant buffer where the base global resides.
+                    // The base address of the buffer will be added to it at runtime.
+                    inlineProgramScopeBuffer.insert(inlineProgramScopeBuffer.end(), (char*)&pointeeOffset, ((char*)&pointeeOffset) + pointerSize);
+                }
             }
             else
             {
@@ -438,13 +442,13 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
                 IGC_ASSERT(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
                 IGC_ASSERT(pointerSize == 8 || pointerSize == 4);
                 auto relocInfo = (addressSpace == ADDRESS_SPACE_GLOBAL) ?
-                    &m_pModuleMd->GlobalBufferFunctionAddressRelocInfo :
-                    &m_pModuleMd->ConstantBufferFunctionAddressRelocInfo;
+                    &m_pModuleMd->GlobalBufferAddressRelocInfo :
+                    &m_pModuleMd->ConstantBufferAddressRelocInfo;
 
-                FunctionAddressRelocInfo finfo;
+                PointerAddressRelocInfo finfo;
                 finfo.BufferOffset = inlineProgramScopeBuffer.size();
                 finfo.PointerSize = pointerSize;
-                finfo.FunctionSymbol = F->getName().str();
+                finfo.Symbol = F->getName().str();
                 relocInfo->push_back(finfo);
             }
             inlineProgramScopeBuffer.insert(inlineProgramScopeBuffer.end(), pointerSize, 0);

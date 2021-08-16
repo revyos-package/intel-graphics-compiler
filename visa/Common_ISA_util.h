@@ -1,28 +1,10 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
+============================= end_copyright_notice ===========================*/
 
 #ifndef COMMON_ISA_UTIL_INCLUDED
 #define COMMON_ISA_UTIL_INCLUDED
@@ -32,26 +14,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "visa_igc_common_header.h"
 #include "Common_ISA.h"
-#include "Gen4_IR.hpp"
+#include "G4_IR.hpp"
 
- const char* Common_ISA_Get_Align_Name( VISA_Align );
+ const char* Common_ISA_Get_Align_Name(VISA_Align);
  uint32_t getAlignInBytes(VISA_Align A);
  VISA_Align getCISAAlign(uint32_t AlignInBytes);
- const char* Common_ISA_Get_Modifier_Name( VISA_Modifier );
- G4_opcode GetGenOpcodeFromVISAOpcode( ISA_Opcode );
- VISA_Type Get_Common_ISA_Type_From_G4_Type( G4_Type );
- G4_Type GetGenTypeFromVISAType( VISA_Type );
- G4_SrcModifier GetGenSrcModFromVISAMod( VISA_Modifier );
- G4_CondModifier Get_G4_CondModifier_From_Common_ISA_CondModifier( VISA_Cond_Mod );
+ const char* Common_ISA_Get_Modifier_Name(VISA_Modifier);
+ G4_opcode GetGenOpcodeFromVISAOpcode(ISA_Opcode);
+ VISA_Type Get_Common_ISA_Type_From_G4_Type(G4_Type);
+ G4_Type GetGenTypeFromVISAType(VISA_Type);
+ G4_SrcModifier GetGenSrcModFromVISAMod(VISA_Modifier);
+ G4_CondModifier Get_G4_CondModifier_From_Common_ISA_CondModifier(VISA_Cond_Mod);
  bool hasPredicate(ISA_Opcode op);
  bool hasExecSize(ISA_Opcode op, uint8_t subOp = 0);
  bool hasLabelSrc(ISA_Opcode op);
- unsigned Get_Common_ISA_SVM_Block_Num (VISA_SVM_Block_Num );
+ unsigned Get_Common_ISA_SVM_Block_Num (VISA_SVM_Block_Num);
  VISA_SVM_Block_Num valueToVISASVMBlockNum(unsigned int);
  unsigned Get_Common_ISA_SVM_Block_Size(VISA_SVM_Block_Type);
  VISA_SVM_Block_Type valueToVISASVMBlockType(unsigned int);
- unsigned Get_VISA_Oword_Num( VISA_Oword_Num );
- unsigned Get_VISA_Exec_Size( VISA_Exec_Size );
+ unsigned Get_VISA_Oword_Num(VISA_Oword_Num);
+ unsigned Get_VISA_Exec_Size(VISA_Exec_Size);
  bool IsMathInst(ISA_Opcode op);
  bool IsIntType(VISA_Type);
  bool IsIntOrIntVecType(VISA_Type);
@@ -66,12 +48,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  G4_InstOpts Get_Gen4_Emask(VISA_EMask_Ctrl cisa_emask, G4_ExecSize exec_size);
  unsigned Get_Atomic_Op(VISAAtomicOps op);
  uint16_t Get_VISA_Type_Size(VISA_Type type);
- Common_ISA_Region_Val Get_CISA_Region_Val( short val );
- short Common_ISA_Get_Region_Value( Common_ISA_Region_Val val );
- VISA_Cond_Mod Get_Common_ISA_CondModifier_From_G4_CondModifier(G4_CondModifier  cmod );
- VISA_Exec_Size Get_VISA_Exec_Size_From_Raw_Size( unsigned int size );
- VISA_Oword_Num Get_VISA_Oword_Num_From_Number( unsigned num );
- VISA_Modifier Get_Common_ISA_SrcMod_From_G4_Mod(G4_SrcModifier mod );
+ Common_ISA_Region_Val Get_CISA_Region_Val(short val);
+ short Common_ISA_Get_Region_Value(Common_ISA_Region_Val val);
+ VISA_Cond_Mod Get_Common_ISA_CondModifier_From_G4_CondModifier(G4_CondModifier  cmod);
+ VISA_Exec_Size Get_VISA_Exec_Size_From_Raw_Size(unsigned int size);
+ VISA_Oword_Num Get_VISA_Oword_Num_From_Number(unsigned num);
+ VISA_Modifier Get_Common_ISA_SrcMod_From_G4_Mod(G4_SrcModifier mod);
 
 inline uint32_t getVersionAsInt(uint32_t major, uint32_t minor)
 {
@@ -95,7 +77,7 @@ inline unsigned int Get_CISA_PreDefined_Surf_Count()
 }
 
 inline unsigned
-getSendRspLengthBitOffset ()
+getSendRspLengthBitOffset()
 {
     return SEND_GT_RSP_LENGTH_BIT_OFFSET;
 }
@@ -103,13 +85,13 @@ getSendRspLengthBitOffset ()
 // Send message information query
 
 inline unsigned
-getSendMsgLengthBitOffset ()
+getSendMsgLengthBitOffset()
 {
     return SEND_GT_MSG_LENGTH_BIT_OFFSET;
 }
 
 inline unsigned
-getSendHeaderPresentBitOffset ()
+getSendHeaderPresentBitOffset()
 {
     return SEND_GT_MSG_HEADER_PRESENT_BIT_OFFSET;
 }
@@ -131,7 +113,7 @@ CISA_opnd_type getOperandType(const CISA_INST* inst, unsigned i);
 
 int64_t typecastVals(const void *value, VISA_Type isaType);
 
-int Get_PreDefined_Surf_Index( int index );
+int Get_PreDefined_Surf_Index(int index);
 
 inline bool isShiftOp(ISA_Opcode op)
 {
@@ -172,6 +154,25 @@ inline uint32_t getvISAMaskOffset(VISA_EMask_Ctrl emask)
     }
 }
 
+const char* toString(GenPrecision P);
+
+inline uint32_t DpasInfoToUI32(GenPrecision A, GenPrecision W, uint8_t D, uint8_t C)
+{
+    uint32_t info = (C & 0xFF);
+    info = (info << 8) | ((uint32_t)D & 0xFF);
+    info = (info << 8) | ((uint32_t)A & 0xFF);
+    info = (info << 8) | ((uint32_t)W & 0xFF);
+    return info;
+}
+
+inline void UI32ToDpasInfo(const uint32_t dpasInfo,
+    GenPrecision& A, GenPrecision& W, uint8_t& D, uint8_t& C)
+{
+    W = (GenPrecision)(dpasInfo & 0xFF);
+    A = (GenPrecision)((dpasInfo >> 8) & 0xFF);
+    D = ((dpasInfo >> 16) & 0xFF);
+    C = ((dpasInfo >> 24) & 0xFF);
+}
 
 inline bool isPerSampleSet(uint16_t mode)
 {

@@ -1,31 +1,14 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
+============================= end_copyright_notice ===========================*/
 
 #include <sstream>
 #include <fstream>
+#include <regex>
 #include "visa_igc_common_header.h"
 #include "Common_ISA.h"
 #include "Common_ISA_util.h"
@@ -103,7 +86,7 @@ int CisaInst::createCisaInstruction(
     m_cisa_instruction.modifier   = modifier;
     m_cisa_instruction.pred       = pred;
     m_cisa_instruction.opnd_array = (VISA_opnd**)m_mem.alloc(sizeof(VISA_opnd*) * numOpnds);
-    memcpy_s(m_cisa_instruction.opnd_array, sizeof(VISA_opnd*)* numOpnds, opnd, sizeof(VISA_opnd*)* numOpnds);
+    std::copy_n(opnd, numOpnds, m_cisa_instruction.opnd_array);
     m_cisa_instruction.isa_type = inst_desc->type;
 
     // FIXME: this is a mess and needs to be cleaned up
@@ -477,15 +460,10 @@ int CisaBinary::isaDump(
         }
     }
 
-    std::list< VISAKernelImpl *>::iterator iter = m_kernels.begin();
-    std::list< VISAKernelImpl *>::iterator end = m_kernels.end();
-
     std::vector<std::string> failedFiles;
-    VISAKernelImpl* mainKernel = nullptr;
-    for (; iter != end; iter++)
+    VISAKernelImpl* mainKernel = m_kernels.front();
+    for (VISAKernelImpl* kTemp : m_kernels)
     {
-        VISAKernelImpl * kTemp = *iter;
-
         std::list<CisaFramework::CisaInst *>::iterator inst_iter = kTemp->getInstructionListBegin();
         std::list<CisaFramework::CisaInst *>::iterator inst_iter_end = kTemp->getInstructionListEnd();
 
@@ -504,7 +482,13 @@ int CisaBinary::isaDump(
             {
                 //function 0 has kernel_f0.visaasm
                 kTemp->GetFunctionId(funcId);
-                asmName << mainKernel->getOutputAsmPath();
+                if (mainKernel) {
+                    asmName << mainKernel->getOutputAsmPath();
+                } else {
+                    // No mainKernel, use the function name instead
+                    asmName << kTemp->getName();
+                }
+
                 asmName << "_f";
                 asmName << funcId;
             }
@@ -524,7 +508,7 @@ int CisaBinary::isaDump(
             for (; inst_iter != inst_iter_end; inst_iter++)
             {
                 CisaFramework::CisaInst * cisa_inst = *inst_iter;
-                CISA_INST * inst = cisa_inst->getCISAInst();
+                const CISA_INST * inst = cisa_inst->getCISAInst();
                 sstr << printInstruction(&fmt, inst, kTemp->getOptions()) << "\n";
             }
 
@@ -532,18 +516,33 @@ int CisaBinary::isaDump(
             // fallback to a default file name in the current working directory
             // for that case
             std::string asmFileName = asmName.str();
-            FILE *f = fopen(asmFileName.c_str(), "w");
-            if (f) {
-                fclose(f);
-            } else {
-                asmFileName = "default.visaasm";
+            if (allowDump(*m_options, asmFileName))
+            {
+                FILE* f = fopen(asmFileName.c_str(), "w");
+                if (f) {
+                    fclose(f);
+                }
+                else {
+                    asmFileName = "default.visaasm";
+                }
+                writeIsaAsmFile(asmFileName, sstr.str());
             }
-            writeIsaAsmFile(asmFileName, sstr.str());
         }
     }
 
     return VISA_SUCCESS;
 #endif // IS_RELEASE_DLL
+}
+
+bool allowDump(const Options& options, const std::string &fileName)
+{
+    const char* regex = options.getOptionCstr(vISA_ShaderDumpFilter);
+    if (!regex || *regex == '\0')
+        return true;
+
+    std::regex fileRegex(regex);
+
+    return std::regex_search(fileName, fileRegex);
 }
 
 }

@@ -63,7 +63,9 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     // set this to ture if there is any stateless access.
     m_HasGlobalStatelessMemoryAccess = false;
     m_HasConstantStatelessMemoryAccess = false;
+    m_HasDPAS = false;
 
+    m_simdProgram.init(!m_ctx->platform.hasScratchSurface(), m_ctx->platform.maxPerThreadScratchSpace(), GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory);
 }
 
 void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatchMode shaderMode)
@@ -98,6 +100,7 @@ void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatc
     ConstantPool.clear();
     setup.clear();
     patchConstantSetup.clear();
+    kernelArgToPayloadOffsetMap.clear();
     encoder.SetProgram(this);
 }
 
@@ -112,6 +115,7 @@ void CShader::PreAnalysisPass()
         if (funcMDItr->second.privateMemoryPerWI != 0)
         {
             if (GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory
+                || GetContext()->getModuleMetaData()->compOpt.UseStatelessforPrivateMemory
                 )
             {
                 const uint32_t GRFSize = getGRFSize();
@@ -487,6 +491,7 @@ void CShader::AllocateInput(CVariable* var, uint offset, uint instance, bool for
     IGC_ASSERT(nullptr != var);
     IGC_ASSERT(offset % (1u << var->GetAlign()) == 0);
     encoder.DeclareInput(var, offset, instance);
+    kernelArgToPayloadOffsetMap[var] = offset;
     // For the payload section, we need to mark inputs to be outputs
     // so that inputs will be alive across the entire payload section
     if (forceLiveOut)
@@ -666,18 +671,12 @@ void CShader::CacheArgumentsList()
         m_argListCache.push_back(&(*arg));
 }
 
+// Pixel shader has dedicated implementation of this function
 void CShader::MapPushedInputs()
 {
     for (auto I = pushInfo.inputs.begin(), E = pushInfo.inputs.end(); I != E; I++)
     {
         // We need to map the value associated with the value pushed to a physical register
-        if (I->second.interpolationMode == EINTERPOLATION_CONSTANT)
-        {
-            if (GetShaderType() == ShaderType::PIXEL_SHADER)
-            {
-                static_cast<CPixelShader*>(this)->MarkConstantInterpolation(I->second.index);
-            }
-        }
         CVariable* var = GetSymbol(m_argListCache[I->second.argIndex]);
         AddSetup(I->second.index, var);
     }
@@ -708,7 +707,7 @@ CVariable* CShader::GetTSC()
 {
     if (!m_TSC)
     {
-        m_TSC = new (Allocator) CVariable(2, true, ISA_TYPE_D, EVARTYPE_GENERAL, EALIGN_DWORD, false, 1, CName::NONE);
+        m_TSC = new (Allocator) CVariable(2, true, ISA_TYPE_UD, EVARTYPE_GENERAL, EALIGN_DWORD, false, 1, CName::NONE);
         encoder.GetVISAPredefinedVar(m_TSC, PREDEFINED_TSC);
     }
     return m_TSC;
@@ -759,6 +758,49 @@ CVariable* CShader::GetHWTID()
 {
     if (!m_HW_TID)
     {
+        if (m_Platform->getHWTIDFromSR0())
+        {
+            auto RemoveBitRange = [this](CVariable* &src, unsigned removebit, unsigned range)->void
+            {
+                CVariable* leftHalf = GetNewVariable(src);
+                CVariable* rightHalf = GetNewVariable(src);
+                uint32_t mask = BITMASK(removebit);
+                // src = (src & mask) | ((src >> range) & ~mask)
+                encoder.And(rightHalf, src, ImmToVariable(mask, ISA_TYPE_D));
+                encoder.Push();
+                encoder.IShr(leftHalf, src, ImmToVariable(range, ISA_TYPE_D));
+                encoder.Push();
+                encoder.And(leftHalf, leftHalf, ImmToVariable(~mask, ISA_TYPE_D));
+                encoder.Push();
+                encoder.Or(src, rightHalf, leftHalf);
+                encoder.Push();
+            };
+
+            // XeHP_SDV
+            // [13:11] Slice ID.
+            // [10:9] Dual - SubSlice ID
+            // [8] SubSlice ID.
+            // [7] : EUID[2]
+            // [6] : Reserved
+            // [5:4] EUID[1:0]
+            // [3] : Reserved MBZ
+            // [2:0] : TID
+            //
+            // HWTID is calculated using a concatenation of TID:EUID:SubSliceID:SliceID
+
+            uint32_t bitmask = BITMASK(14);
+            m_HW_TID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, "HWTID");
+            encoder.SetNoMask();
+            encoder.SetSrcSubReg(0, 0);
+            encoder.And(m_HW_TID, GetSR0(), ImmToVariable(bitmask, ISA_TYPE_D));
+            encoder.Push();
+
+            // Remove bit [6]
+            RemoveBitRange(m_HW_TID, 6, 1);
+            // Remove bit [3]
+            RemoveBitRange(m_HW_TID, 3, 1);
+        }
+        else
         {
             m_HW_TID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, "HWTID");
             encoder.GetVISAPredefinedVar(m_HW_TID, PREDEFINED_HW_TID);
@@ -772,6 +814,7 @@ CVariable* CShader::GetPrivateBase()
     ImplicitArgs implicitArgs(*entry, m_pMdUtils);
     unsigned numPushArgs = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
     unsigned numImplicitArgs = implicitArgs.size();
+    IGC_ASSERT_MESSAGE(entry->arg_size() >= (numImplicitArgs + numPushArgs), "Function arg size does not match meta data and push args.");
     unsigned numFuncArgs = entry->arg_size() - numImplicitArgs - numPushArgs;
 
     Argument* kerArg = nullptr;
@@ -971,6 +1014,11 @@ CVariable* CShader::GetNewAddressVariable(
 WIBaseClass::WIDependancy CShader::GetDependency(Value* v) const
 {
     return m_WI ? (m_WI->whichDepend(v)) : WIBaseClass::RANDOM;
+}
+
+void CShader::SetDependency(llvm::Value* v, WIBaseClass::WIDependancy dep)
+{
+    if (m_WI) m_WI->incUpdateDepend(v, dep);
 }
 
 bool CShader::GetIsUniform(llvm::Value* v) const
@@ -1187,26 +1235,38 @@ uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
     return nbElement;
 }
 
-
-
-uint32_t CShader::GetExtractMask(llvm::Value* vecVal)
+CShader::ExtractMaskWrapper::ExtractMaskWrapper(CShader* pS, Value* VecVal)
 {
-    auto it = extractMasks.find(vecVal);
-    if (it != extractMasks.end())
+    auto it = pS->extractMasks.find(VecVal);
+    if (it != pS->extractMasks.end())
     {
-        return it->second;
+        m_hasEM = true;
+        m_EM = it->second;
+        return;
     }
-    const unsigned int numChannels = vecVal->getType()->isVectorTy() ? (unsigned)cast<VectorType>(vecVal->getType())->getNumElements() : 1;
-    IGC_ASSERT_MESSAGE(numChannels <= 32, "Mask has 32 bits maximally!");
-    return (1ULL << numChannels) - 1;
+    VectorType* VTy = dyn_cast<VectorType>(VecVal->getType());
+    const unsigned int numChannels = VTy ? (unsigned)VTy->getNumElements() : 1;
+    if (numChannels <= 32)
+    {
+        m_hasEM = true;
+        m_EM = (uint32_t)((1ULL << numChannels) - 1);
+    }
+    else
+    {
+        m_hasEM = false;
+        m_EM = 0;
+    }
 }
 
 uint16_t CShader::AdjustExtractIndex(llvm::Value* vecVal, uint16_t index)
 {
+    const ExtractMaskWrapper EMW(this, vecVal);
+
     uint16_t result = index;
-    if (cast<VectorType>(vecVal->getType())->getNumElements() < 32)
+    if (EMW.hasEM())
     {
-        uint32_t mask = GetExtractMask(vecVal);
+        IGC_ASSERT(index < 32);
+        uint32_t mask = EMW.getEM();
         for (uint i = 0; i < index; ++i)
         {
             if ((mask & (1 << i)) == 0)
@@ -1619,6 +1679,93 @@ auto sizeToSIMDMode = [](uint32_t size)
     }
 };
 
+CVariable* CShader::GetStructVariable(llvm::Value* v, bool forceVectorInit)
+{
+    IGC_ASSERT(v->getType()->isStructTy());
+
+    auto isConstBase = [](Value* v)->bool
+    {
+        return isa<Constant>(v) || v->getValueID() == Value::UndefValueVal;
+    };
+
+    IGC_ASSERT_MESSAGE(isConstBase(v) ||
+        isa<InsertValueInst>(v) ||
+        isa<CallInst>(v) ||
+        isa<Argument>(v),
+        "Invalid struct symbol usage! Struct symbol should only come from const, insertvalue, call, or function arg");
+
+    if (isa<InsertValueInst>(v))
+    {
+        // Walk up all the `insertvalue` instructions until we get to the constant base struct.
+        // All `insertvalue` instructions that operate on the same struct should be mapped to the same CVar,
+        // so just use the first instruction to do all the mapping.
+        Value* baseV = v;
+        InsertValueInst* FirstInsertValueInst = nullptr;
+        while (InsertValueInst* II = dyn_cast<InsertValueInst>(baseV))
+        {
+            baseV = II->getOperand(0);
+            FirstInsertValueInst = II;
+        }
+        if (FirstInsertValueInst)
+        {
+            // Check if it's already created
+            auto it = symbolMapping.find(FirstInsertValueInst);
+            if (it != symbolMapping.end())
+            {
+                return it->second;
+            }
+            v = FirstInsertValueInst;
+        }
+    }
+    else if (isa<CallInst>(v) || isa<Argument>(v))
+    {
+        // Check for function argument symbols, and return value from calls
+        auto it = symbolMapping.find(v);
+        if (it != symbolMapping.end())
+        {
+            return it->second;
+        }
+    }
+    else
+    {
+        // Const cannot be mapped
+        IGC_ASSERT(isConstBase(v) && symbolMapping.find(v) == symbolMapping.end());
+    }
+
+    bool isUniform = forceVectorInit ? false : m_WI->isUniform(v);
+    StructType* sTy = cast<StructType>(v->getType());
+    auto& DL = entry->getParent()->getDataLayout();
+    const StructLayout* SL = DL.getStructLayout(sTy);
+
+    // Represent the struct as a vector of BYTES
+    unsigned structSizeInBytes = (unsigned)SL->getSizeInBytes();
+    unsigned lanes = isUniform ? 1 : numLanes(m_dispatchSize);
+    CVariable* cVar = GetNewVariable(structSizeInBytes * lanes, ISA_TYPE_B, EALIGN_GRF, isUniform, "StructV");
+
+    // Initialize the struct default value if it has one
+    if (Constant* C = dyn_cast<Constant>(v))
+    {
+        for (unsigned i = 0; i < sTy->getNumElements(); i++)
+        {
+            CVariable* elementSrc = GetSymbol(C->getAggregateElement(i));
+            if (!elementSrc->IsUndef())
+            {
+                unsigned elementOffset = (unsigned)SL->getElementOffset(i);
+                CVariable* elementDst = GetNewAlias(cVar, elementSrc->GetType(), elementOffset * lanes, elementSrc->GetNumberElement() * lanes);
+                GetEncoder().Copy(elementDst, elementSrc);
+                GetEncoder().Push();
+            }
+        }
+    }
+
+    // Map the original llvm value to this new CVar.
+    // The original value cannot be const, since we cannot map them. They will need to be initialized each time.
+    if (!isConstBase(v))
+        symbolMapping[v] = cVar;
+
+    return cVar;
+}
+
 CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 {
     llvm::VectorType* VTy = llvm::dyn_cast<llvm::VectorType>(C->getType());
@@ -1650,7 +1797,7 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
             }
             else
             {
-                auto input_size = eTy->getScalarSizeInBits() / 8;
+                auto input_size = GetScalarTypeSizeInRegister(eTy);
                 Var = GetNewAlias(Var, Var->GetType(), k * input_size * numLanes(m_SIMDSize), 0);
             }
             GetEncoder().Copy(Var, eVal);
@@ -1825,6 +1972,9 @@ VISA_Type IGC::GetType(llvm::Type* type, CodeGenContext* pContext)
         return ISA_TYPE_DF;
     case llvm::Type::HalfTyID:
         return ISA_TYPE_HF;
+    case llvm::Type::StructTyID:
+        // Structs are always internally represented as BYTES
+        return ISA_TYPE_B;
     default:
         IGC_ASSERT(0);
         break;
@@ -1848,6 +1998,12 @@ uint32_t CShader::GetNumElts(llvm::Type* type, bool isUniform)
 
         auto VT = cast<VectorType>(type);
         numElts *= (uint16_t)VT->getNumElements();
+    }
+    else if (type->isStructTy())
+    {
+        auto& DL = entry->getParent()->getDataLayout();
+        const StructLayout* SL = DL.getStructLayout(cast<StructType>(type));
+        numElts *= (uint16_t)SL->getSizeInBytes();
     }
     return numElts;
 }
@@ -2009,6 +2165,10 @@ e_alignment IGC::GetPreferredAlignment(llvm::Value* V, WIAnalysis* WIA,
         if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pContext))
             Align = GetPreferredAlignmentOnUse(V, WIA, pContext);
         return (Align == EALIGN_AUTO) ? (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD : Align;
+    }
+    else if (isa<LdRawIntrinsic>(V))
+    {
+        return (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
     }
 
     // If uniform variables are results from uniform atomic ops, they need
@@ -2205,6 +2365,7 @@ CVariable* CShader::getOrCreateArgumentSymbol(
         unsigned numImplicitArgs = implicitArgs.size();
         unsigned numPushArgsEntry = m_ModuleMetadata->pushInfo.pushAnalysisWIInfos.size();
         unsigned numPushArgs = (isEntryFunc(m_pMdUtils, F) && !isNonEntryMultirateShader(F) ? numPushArgsEntry : 0);
+        IGC_ASSERT_MESSAGE(F->arg_size() >= (numImplicitArgs + numPushArgs), "Function arg size does not match meta data and push args.");
         unsigned numFuncArgs = F->arg_size() - numImplicitArgs - numPushArgs;
 
         llvm::Function::arg_iterator arg = F->arg_begin();
@@ -2446,8 +2607,8 @@ CVariable* CShader::GetSymbolFromSource(Instruction* UseInst,
         //
         if (CI->getOpcode() == Instruction::BitCast)
         {
-            if (CI->getSrcTy()->getScalarSizeInBits() !=
-                CI->getDestTy()->getScalarSizeInBits())
+            if (GetScalarTypeSizeInRegisterInBits(CI->getSrcTy()) !=
+                GetScalarTypeSizeInRegisterInBits(CI->getDestTy()))
                 return nullptr;
         }
 
@@ -2495,6 +2656,12 @@ unsigned int CShader::EvaluateSIMDConstExpr(Value* C)
 CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
 {
     CVariable* var = nullptr;
+
+    // Symbol mappings for struct types
+    if (value->getType()->isStructTy())
+    {
+        return GetStructVariable(value);
+    }
 
     if (Constant * C = llvm::dyn_cast<llvm::Constant>(value))
     {
@@ -2786,7 +2953,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
 
     if (IGC_IS_FLAG_ENABLED(EnableVariableReuse))
     {
-        // Only for instrunctions and do not reuse flag variables.
+        // Only for instructions and do not reuse flag variables.
         if (!value->getType()->getScalarType()->isIntegerTy(1))
         {
             if (auto Inst = dyn_cast<Instruction>(value))
@@ -3295,9 +3462,18 @@ void CShader::PackAndCopyVariable(
 bool CShader::CompileSIMDSizeInCommon(SIMDMode simdMode)
 {
     bool ret = (m_ScratchSpaceSize <= m_ctx->platform.maxPerThreadScratchSpace());
+    m_simdProgram.setScratchSpaceUsedByShader(m_ScratchSpaceSize);
+    if (m_ctx->platform.hasScratchSurface() && m_ctx->m_DriverInfo.supportsSeparatingSpillAndPrivateScratchMemorySpace()) {
+        ret = (m_simdProgram.getScratchSpaceUsageInSlot0() <= m_ctx->platform.maxPerThreadScratchSpace());
+    }
 
 
     return ret;
+}
+
+uint32_t CShader::GetShaderThreadUsageRate()
+{
+    return 1;
 }
 
 CShader* CShaderProgram::GetShader(SIMDMode simd, ShaderDispatchMode mode)
@@ -3439,3 +3615,40 @@ CShaderProgram::~CShaderProgram()
     }
     m_context = nullptr;
 }
+
+unsigned int CShader::GetPrimitiveTypeSizeInRegisterInBits(const Type* Ty) const
+{
+    unsigned int sizeInBits = Ty->getPrimitiveSizeInBits();
+    if (Ty->isPtrOrPtrVectorTy())
+    {
+        sizeInBits =
+            GetContext()->getRegisterPointerSizeInBits(Ty->getPointerAddressSpace());
+        if (auto* VTy = dyn_cast<VectorType>(Ty))
+        {
+            sizeInBits *= (unsigned)VTy->getNumElements();
+        }
+    }
+    return sizeInBits;
+}
+
+unsigned int CShader::GetPrimitiveTypeSizeInRegister(const Type* Ty) const
+{
+    return GetPrimitiveTypeSizeInRegisterInBits(Ty) / 8;
+}
+
+unsigned int CShader::GetScalarTypeSizeInRegisterInBits(const Type* Ty) const
+{
+    unsigned int sizeInBits = Ty->getScalarSizeInBits();
+    if (Ty->isPtrOrPtrVectorTy())
+    {
+        sizeInBits =
+            GetContext()->getRegisterPointerSizeInBits(Ty->getPointerAddressSpace());
+    }
+    return sizeInBits;
+}
+
+unsigned int CShader::GetScalarTypeSizeInRegister(const Type* Ty) const
+{
+    return GetScalarTypeSizeInRegisterInBits(Ty) / 8;
+}
+

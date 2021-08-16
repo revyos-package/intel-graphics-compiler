@@ -1,28 +1,11 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
+============================= end_copyright_notice ===========================*/
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
 #include "BitSet.h"
 #include "BuildIR.h"
 #include "CFGStructurizer.h"
@@ -297,8 +280,26 @@ G4_BB* FlowGraph::getLabelBB(Label_BB_Map& map, G4_Label* label)
 G4_BB* FlowGraph::beginBB(Label_BB_Map& map, G4_INST* first)
 {
     if (first == NULL) return NULL;
-    G4_BB* bb = (first->isLabel()) ? getLabelBB(map, first->getSrc(0)->asLabel()) : createNewBB();
+    G4_INST* labelInst;
+    bool newLabelInst = false;
+    if (first->isLabel())
+    {
+        labelInst = first;
+    }
+    else
+    {
+        // no label for this BB, create one!
+        std::string name = "_auto_" + std::to_string(autoLabelId++);
+        G4_Label* label = builder->createLabel(name, LABEL_BLOCK);
+        labelInst = createNewLabelInst(label);
+        newLabelInst = true;
+    }
+    G4_BB* bb = getLabelBB(map, labelInst->getLabel());
     push_back(bb); // append to BBs list
+    if (newLabelInst)
+    {
+        bb->push_front(labelInst);
+    }
     return bb;
 }
 
@@ -656,6 +657,12 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
 {
     MUST_BE_TRUE(!instlist.empty(), ERROR_SYNTAX("empty instruction list"));
 
+    if (builder->hasScratchSurface() && (isStackCallFunc || hasStackCalls))
+    {
+        // unfortunately we can't put this in stack call prolog since this has to be done before RA
+        // ToDo: just hard-wire the scratch-surface offset register?
+        builder->initScratchSurfaceOffset();
+    }
     if (builder->hasFusedEU() &&
         getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
@@ -775,6 +782,10 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
                         // and only remove the link when it is not a conditional call
                         //
                         addPredSuccEdges(curr_BB, next_BB);
+                        if (i->getSrc(0)->isLabel())
+                        {
+                            i->getSrc(0)->asLabel()->setFuncLabel(true);
+                        }
                     }
                     else if (i->getPredicate())
                     {
@@ -907,27 +918,11 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         hasGoto |= convertJmpiToGoto();
     }
 
-    pKernel->dumpDotFile("after.CFGConstruction");
+    pKernel->dumpToFile("after.CFGConstruction");
 
     removeRedundantLabels();
 
-    pKernel->dumpDotFile("after.RemoveRedundantLabels");
-
-    // Ensure each block starts with a label.
-    for (auto bb : BBs)
-    {
-        if (!bb->empty())
-        {
-            G4_INST *inst = bb->front();
-            if (inst->isLabel())
-                continue;
-
-            std::string name = "_AUTO_LABEL_" + std::to_string(autoLabelId++);
-            G4_Label *label = builder->createLabel(name, LABEL_BLOCK);
-            auto labelInst = createNewLabelInst(label);
-            bb->push_front(labelInst);
-        }
-    }
+    pKernel->dumpToFile("after.RemoveRedundantLabels");
 
     handleExit(subroutineStartBB.size() > 1 ? subroutineStartBB[1] : nullptr);
 
@@ -945,7 +940,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
     setPhysicalPredSucc();
     removeUnreachableBlocks(funcInfoHashTable);
 
-    pKernel->dumpDotFile("after.RemoveUnreachableBlocks");
+    pKernel->dumpToFile("after.RemoveUnreachableBlocks");
 
     //
     // build the table of function info nodes
@@ -966,12 +961,15 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
             !endWithGotoInLastBB())
         {
             doCFGStructurize(this);
-            pKernel->dumpDotFile("after.CFGStructurizer");
+            pKernel->dumpToFile("after.CFGStructurizer");
+
+            removeRedundantLabels();
+            pKernel->dumpToFile("after.PostStructurizerRedundantLabels");
         }
         else
         {
             processGoto(hasSIMDCF);
-            pKernel->dumpDotFile("after.ProcessGoto");
+            pKernel->dumpToFile("after.ProcessGoto");
         }
     }
 
@@ -1048,7 +1046,7 @@ void IR_Builder::materializeGlobalImm(G4_BB* entryBB)
         auto dcl = immPool.getImmDcl(i);
         G4_INST* inst = createMov(
             G4_ExecSize((unsigned)immVal.numElt),
-            Create_Dst_Opnd_From_Dcl(dcl, 1), immVal.imm, InstOpt_WriteEnable, false);
+            createDstRegRegion(dcl, 1), immVal.imm, InstOpt_WriteEnable, false);
         auto iter = std::find_if(entryBB->begin(), entryBB->end(),
             [](G4_INST* inst) { return !inst->isLabel(); });
         INST_LIST_ITER newMov = entryBB->insertBefore(iter, inst);
@@ -1866,13 +1864,13 @@ void FlowGraph::removeRedundantLabels()
         }
     }
 
-
-    for (BB_LIST_ITER it = BBs.begin(); it != BBs.end();)
+    for (BB_LIST_ITER nextit = BBs.begin(), ite = BBs.end(); nextit != ite; )
     {
+        BB_LIST_ITER it = nextit++;
         G4_BB* bb = *it;
+
         if (bb == getEntryBB())
         {
-            it++;
             continue;
         }
         if (bb->Succs.size() == 0 && bb->Preds.size() == 0) {
@@ -1881,106 +1879,41 @@ void FlowGraph::removeRedundantLabels()
             //for example return after infinite loop.
             if (bb->isEndWithFRet() || (bb->size() > 0 && ((G4_INST*)bb->back())->isReturn()))
             {
-                it++;
                 continue;
             }
 
             bb->clear();
-            BB_LIST_ITER rt = it++;
-            erase(rt);
+            erase(it);
 
             continue;
         }
 
-        // Remove empty blocks
-        if (bb->size() == 0)
+        assert(bb->size() > 0 && bb->front()->isLabel() &&
+               "Every BB should at least have a label inst!");
+
+        // Possible kernel's entry, don't delete.
+        if (strcmp(bb->front()->getLabelStr(), "per-thread-prolog") == 0)
         {
-            // Handle this case by connecting Pred to Succ and delete bb!
-            //   Pred:
-            //   bb:
-            //     <empty>
-            //   Succ:
-            assert(bb->Preds.size() < 2 && "Empty BB has at most 1 pred!");
-            assert(bb->Succs.size() < 2 && "Empty BB has at most 1 succ!");
-            G4_BB* Pred = bb->Preds.size() == 1 ? bb->Preds.back() : nullptr;
-            G4_BB* Succ = bb->Succs.size() == 1 ? bb->Succs.back() : nullptr;
-            if (Pred)
-            {
-                removePredSuccEdges(Pred, bb);
-            }
-            if (Succ)
-            {
-                removePredSuccEdges(bb, Succ);
-            }
-            if (Pred && Succ)
-            {
-                addPredSuccEdges(Pred, Succ);
-            }
-
-            BB_LIST_ITER rt = it++;
-            erase(rt);
-
             continue;
         }
+
+        if (bb->getBBType() &
+            (G4_BB_CALL_TYPE | G4_BB_EXIT_TYPE | G4_BB_INIT_TYPE | G4_BB_RETURN_TYPE))
+        {
+            // Keep those BBs
+            continue;
+        }
+
         //
         // The removal candidates will have a single successor and a single inst
         //
         if (bb->Succs.size() == 1 && bb->size() == 1)
         {
             G4_INST* removedBlockInst = bb->front();
-            if (removedBlockInst->isLabel() == false ||
+            if (removedBlockInst->getLabel()->isFuncLabel() ||
                 strncmp(removedBlockInst->getLabelStr(), "LABEL__EMPTYBB", 14) == 0 ||
                 strncmp(removedBlockInst->getLabelStr(), "__AUTO_GENERATED_DUMMY_LAST_BB", 30) == 0)
             {
-                ++it;
-                continue;
-            }
-
-            // check if the label is a function label
-            unsigned numNonCallerPreds = 0;
-            bool isFuncLabel = true;
-            G4_BB* pred_bb = NULL;
-            for (auto pred : bb->Preds)
-            {
-                if (!pred->isEndWithCall())
-                {
-                    if (numNonCallerPreds > 0)
-                    {
-                        isFuncLabel = false;
-                        break;
-                    }
-                    numNonCallerPreds++;
-                    pred_bb = pred;
-                }
-                else
-                {
-                    G4_INST *i = pred->back();
-                    if (i->getSrc(0)->isLabel())
-                    {
-                        if (i->getSrc(0) != removedBlockInst->getLabel())
-                        {
-                            if (numNonCallerPreds > 0)
-                            {
-                                isFuncLabel = false;
-                                break;
-                            }
-                            numNonCallerPreds++;
-                            pred_bb = pred;
-                        }
-                    }
-                }
-            }
-
-            // keep the function label there such that we have an empty init BB for this subroutine.
-            if (isFuncLabel && numNonCallerPreds < bb->Preds.size())
-            {
-                // remove fall through edge.
-                if (pred_bb)
-                {
-                    removePredSuccEdges(pred_bb, bb);
-                }
-                removedBlockInst->getLabel()->setFuncLabel(true);
-                ++it;
                 continue;
             }
 
@@ -2138,12 +2071,74 @@ void FlowGraph::removeRedundantLabels()
             bb->Preds.clear();
             bb->clear();
 
-            BB_LIST_ITER rt = it++;
-            erase(rt);
+            erase(it);
         }
-        else
+        else if (bb->Preds.size() == 1 && bb->Preds.front()->Succs.size() == 1)
         {
-            ++it;
+            // Merge bb into singlePred and delete bb if all the following are true:
+            //   1. singlePred has no control-flow inst (at the end),
+            //   2. bb's label is not used at all.
+            //
+            //     singlePred:
+            //        ....
+            //     bb:
+            //        ....
+            //
+            // If singlePred does not end with a control-flow inst, bb's label is not used except
+            // bb ends with while. For while bb, we need further to check if any break uses label.
+            // As break should jump to while bb's fall-thru (not while bb), we need to follow all
+            // preds of while's fall-thru BB to see if any pred has a break.
+            //
+            G4_BB* singlePred = bb->Preds.front();
+            G4_INST* labelInst = bb->front();
+            assert(labelInst->isLabel());
+            if (!singlePred->back()->isFlowControl() &&
+                singlePred->getPhysicalSucc() == bb /* sanity */ &&
+                !labelInst->getLabel()->isFuncLabel() /* skip special bb */ &&
+                bb != singlePred /* [special] skip dead single-BB loop */)
+            {
+                bool doMerging = true;
+                G4_INST* whileInst = bb->back();
+                if (whileInst->opcode() == G4_while)
+                {
+                    // If there is any break inst for this while, the break uses the label. No merging.
+                    // Note that any break inst of this while will jump to the BB right after while BB
+                    // (this BB is the fall-thru BB of while if while BB has fall-thru, or just its physical
+                    // succ if it has no fall-thru).
+                    G4_BB* whilePhySucc = bb->getPhysicalSucc();
+                    if (whilePhySucc)
+                    {
+                        for (auto breakPred : whilePhySucc->Preds)
+                        {
+                            if (breakPred->getLastOpcode() == G4_break) {
+                                doMerging = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (doMerging)
+                {
+                    removePredSuccEdges(singlePred, bb);
+                    assert(singlePred->Succs.size() == 0);
+                    std::vector<G4_BB*> allSuccBBs(bb->Succs.begin(), bb->Succs.end());
+                    for (auto S : allSuccBBs)
+                    {
+                        removePredSuccEdges(bb, S);
+                        addPredSuccEdges(singlePred, S, false);
+                    }
+
+                    // remove bb's label before splice
+                    bb->remove(labelInst);
+                    singlePred->getInstList().splice(singlePred->end(), bb->getInstList());
+
+                    bb->Succs.clear();
+                    bb->Preds.clear();
+
+                    erase(it);
+                }
+            }
         }
     }
 
@@ -3134,7 +3129,7 @@ G4_Label* FlowGraph::insertEndif(G4_BB* bb, G4_ExecSize execSize, bool createLab
     // endifs a new label will be created for each of them.
     if (createLabel)
     {
-        std::string name = "_AUTO_LABEL_%d" + std::to_string(autoLabelId++);
+        std::string name = "_auto" + std::to_string(autoLabelId++);
         G4_Label* label = builder->createLabel(name, LABEL_BLOCK);
         endifWithLabels.emplace(endifInst, label);
         return label;
@@ -3187,7 +3182,7 @@ void FlowGraph::setJIPForEndif(G4_INST* endif, G4_INST* target, G4_BB* targetBB)
 
         if (label == NULL)
         {
-            std::string name = "_AUTO_LABEL_" + std::to_string(autoLabelId++);
+            std::string name = "_auto" + std::to_string(autoLabelId++);
             label = builder->createLabel(name, LABEL_BLOCK);
             endifWithLabels.emplace(target, label);
         }
@@ -3574,6 +3569,85 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
         }
     };
 
+    // For loop with backedge Tail->Head, if Tail is divergent, its divergence should be
+    // propagated to the entire loop as Tail jumps to head, which could go all BBs in the loop.
+    //
+    // In another word, the whole loop's divergence level is the same as Tail's. Once the
+    // entire loop has been handled and Tail's divergence is known, invoking this lambda func
+    // to carry out propagation.
+    //
+    // An example to show WA is needed (nested divergence for Tail):
+    //      Head:                   // initial fuseMask = 11;  2nd iter: fuseMask = 11 (should be 10)
+    //         if (...) goto Tail;  // fuseMask = 11
+    //                              // After if, fusedMask = 01 (bigEU is Off)
+    //         ...
+    //         goto out             // fuseMask = 01 (BigEU off, SmallEU on)
+    //                              // after goto, fuseMask = 00, but HW remains 01
+    //      Tail:
+    //           goto Head          // fuseMask should 10, but HW remains 11, and jump to Head at 2nd iter
+    //      out:
+    auto propLoopDivergence = [&](G4_BB* LoopTail)
+    {
+        // LoopTail must be divergent.
+        std::vector<G4_BB*> workset;
+        workset.push_back(LoopTail);
+        while (!workset.empty())
+        {
+            std::vector<G4_BB*> newWorkset;
+            for (auto iter : workset)
+            {
+                G4_BB* Tail = iter;
+                G4_InstCF* cfInst = Tail->back()->asCFInst();
+
+                assert(nestedDivergentBBs.count(Tail) > 0 &&
+                       "Only divergent Tail shall invoke this func!");
+
+                // Find loop head
+                G4_BB* Head = nullptr;
+                for (G4_BB* succBB : Tail->Succs)
+                {
+                    if ((cfInst->opcode() == G4_goto && cfInst->getUip() == succBB->getLabel()) ||
+                        (cfInst->opcode() == G4_while && cfInst->getJip() == succBB->getLabel()) ||
+                        (cfInst->opcode() == G4_jmpi && cfInst->getSrc(0) == succBB->getLabel()))
+                    {
+                        Head = succBB;
+                        break;
+                    }
+                }
+                assert(Head != nullptr);
+
+                // If Head's divergence level is already higher than Tail, no propagation needed
+                // as Head's divergence has been propagated already.
+                if (nestedDivergentBBs.count(Head) > 0 &&
+                    nestedDivergentBBs[Head] >= nestedDivergentBBs[Tail])
+                {
+                    continue;
+                }
+
+                // Follow physical succs to visit all BBs in this loop
+                for (G4_BB* tBB = Head; tBB != nullptr && tBB != Tail; tBB = tBB->getPhysicalSucc())
+                {
+                    auto miter = nestedDivergentBBs.find(tBB);
+                    if (miter == nestedDivergentBBs.end() || miter->second < nestedDivergentBBs[Tail])
+                    {
+                        // Propagate Tail's divergence. If the new BB is a tail (another loop),
+                        // add it to workset for the further propagation.
+                        nestedDivergentBBs[tBB] = nestedDivergentBBs[Tail];
+                        auto lastOp = tBB->getLastOpcode();
+                        if (lastOp == G4_while ||
+                            ((lastOp == G4_goto || lastOp == G4_jmpi) &&
+                             tBB->back()->asCFInst()->isBackward()))
+                        {
+                            newWorkset.push_back(tBB);
+                        }
+                    }
+                }
+            }
+
+            workset = newWorkset;
+        }
+    };
+
     if (BBs.empty())
     {
         // Sanity check
@@ -3692,6 +3766,22 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
             }
 
             G4_INST* lastInst = BB->back();
+
+            // Need to check whether to propagate WA marking to entire loop!
+            //
+            // Do it for CM now, need to apply to all!
+            // if (nestedDivergentBBs.count(BB) > 0 && nestedDivergentBBs[BB] >= 2 &&
+            //    getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
+            if (nestedDivergentBBs.count(BB) > 0 && nestedDivergentBBs[BB] >= 2)
+            {
+                if (lastInst->opcode() == G4_while ||
+                    ((lastInst->opcode() == G4_goto || lastInst->opcode() == G4_jmpi) &&
+                     lastInst->asCFInst()->isBackward()))
+                {
+                    propLoopDivergence(BB);
+                }
+            }
+
             if ((lastInst->opcode() == G4_goto && !lastInst->asCFInst()->isBackward()) ||
                 lastInst->opcode() == G4_break)
             {
@@ -3728,6 +3818,15 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
         // Once all BBs are precessed, cfs should be clear
         assert((!cfs.isInDivergentBranch()) &&
                "ICE(vISA): there is an error in divergence tracking!");
+    }
+
+    for (auto MI : nestedDivergentBBs)
+    {
+        G4_BB* bb = MI.first;
+        if (MI.second >= 2)
+        {
+            bb->setBBType(G4_BB_NM_WA_TYPE);
+        }
     }
     return;
 }
@@ -3789,9 +3888,9 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
     unsigned i = 0;
     for (auto callSite : callSites)
     {
-        const char* nameBase = "VCA_SAVE";
+        const char* nameBase = "VCA_SAVE";  // sizeof(nameBase) = 9, including ending 0
         const int maxIdLen = 3;
-        const char* name = builder.getNameString(mem, strlen(nameBase) + maxIdLen + 1, "%s_%d", nameBase, i);
+        const char* name = builder.getNameString(mem, sizeof(nameBase) + maxIdLen, "%s_%d", nameBase, i);
         G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, numEltPerGRF<Type_UD>(), builder.kernel.getCallerSaveLastGRF(), Type_UD);
         name = builder.getNameString(mem, 50, "SA0_%d", i);
         G4_Declare* saveA0 = builder.createDeclareNoLookup(name, G4_ADDRESS, (uint16_t)getNumAddrRegisters(), 1, Type_UW);
@@ -3962,7 +4061,9 @@ void vISA::FlowGraph::markStale()
     // mark analysis passes as stale so getters lazily re-run
     // analysis when queried.
     dom.setStale();
+    immDom.setStale();
     pDom.setStale();
+    loops.setStale();
 
     // any other analysis that becomes stale when FlowGraph changes
     // should be marked as stale here.
@@ -4614,12 +4715,6 @@ void FlowGraph::dump() const
     print(std::cerr);
 }
 
-void FlowGraph::dumptofile(const char* Filename) const
-{
-    std::fstream ofile(Filename, std::ios::out);
-    print(ofile);
-}
-
 FlowGraph::~FlowGraph()
 {
     // even though G4_BBs are allocated in a mem pool and freed in one shot,
@@ -4653,62 +4748,6 @@ RelocationEntry& RelocationEntry::createRelocation(
     kernel.getRelocationTable().emplace_back(
         RelocationEntry(&inst, opndPos, type, symbolName));
     return kernel.getRelocationTable().back();
-}
-
-
-G4_Kernel::~G4_Kernel()
-{
-    if (kernelDbgInfo)
-    {
-        kernelDbgInfo->~KernelDebugInfo();
-    }
-
-    if (gtPinInfo)
-    {
-        gtPinInfo->~gtPinData();
-    }
-
-    if (varSplitPass)
-    {
-        delete varSplitPass;
-        varSplitPass = nullptr;
-    }
-
-    Declares.clear();
-}
-
-std::string G4_Kernel::getDebugSrcLine(const std::string& fileName, int srcLine)
-{
-    auto iter = debugSrcLineMap.find(fileName);
-    if (iter == debugSrcLineMap.end())
-    {
-        std::ifstream ifs(fileName);
-        if (!ifs)
-        {
-            // file doesnt exist
-            debugSrcLineMap[fileName] = std::make_pair<bool, std::vector<std::string>>(false, {});
-            return "can't find src file";
-        }
-        std::string line;
-        std::vector<std::string> srcLines;
-        while (std::getline(ifs, line))
-        {
-            srcLines.push_back(line);
-        }
-        debugSrcLineMap[fileName] = std::make_pair(true, std::move(srcLines));
-    }
-    iter = debugSrcLineMap.find(fileName);
-    if (iter == debugSrcLineMap.end() ||
-        !iter->second.first)
-    {
-        return "can't find src file";
-    }
-    auto& lines = iter->second.second;
-    if (srcLine > (int) lines.size() || srcLine <= 0)
-    {
-        return "invalid line number";
-    }
-    return lines[srcLine - 1];
 }
 
 void RelocationEntry::doRelocation(

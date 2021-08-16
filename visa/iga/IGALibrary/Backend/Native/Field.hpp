@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -431,11 +415,11 @@ namespace iga
 //
 // utilizes all of the following:
 //
-//   constexpr static Field    iga::g12::CMP_CTRLIX_2SRC_TGL {...}
-//   std::string               iga::g12::Format_CTRLIX_2SRC_TGL (Op, uint64_t)
-//   const const Field         iga::g12::CTRLIX_2SRC_MAPPINGS_TGL  [M] {...}
-//   const const uint64_t      iga::g12::CTRLIX_2SRC_VALUES_TGL    [N] {...}
-//   const const const char *  iga::g12::CTRLIX_2SRC_MEANINGS_TGL  [N] {...}
+//   constexpr static Field    iga::xe::CMP_CTRLIX_2SRC_TGL {...}
+//   std::string               iga::xe::Format_CTRLIX_2SRC_TGL (Op, uint64_t)
+//   const const Field         iga::xe::CTRLIX_2SRC_MAPPINGS_TGL  [M] {...}
+//   const const uint64_t      iga::xe::CTRLIX_2SRC_VALUES_TGL    [N] {...}
+//   const const const char *  iga::xe::CTRLIX_2SRC_MEANINGS_TGL  [N] {...}
 #define MAKE_COMPACTION_MAPPING(SYM, PLATFORM)\
     extern std::string Format_ ## SYM ## _ ## PLATFORM (Op, uint64_t);\
     \

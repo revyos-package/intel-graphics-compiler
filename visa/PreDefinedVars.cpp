@@ -1,9 +1,17 @@
+/*========================== begin_copyright_notice ============================
+
+Copyright (C) 2017-2021 Intel Corporation
+
+SPDX-License-Identifier: MIT
+
+============================= end_copyright_notice ===========================*/
+
 #include "visa_igc_common_header.h"
 #include "VISADefines.h"
 #include "PreDefinedVars.h"
 #include "common.h"
 
-PreDefinedVarInfo preDefinedVarTable[static_cast<int>(PreDefinedVarsInternal::VAR_LAST)] =
+static const PreDefinedVarInfo preDefinedVarTable[static_cast<int>(PreDefinedVarsInternal::VAR_LAST)] =
 {
     { PreDefinedVarsInternal::VAR_NULL,      ISA_TYPE_UD, 1, true,  false,  0, 1,   "%null" },
     { PreDefinedVarsInternal::X,             ISA_TYPE_UW, 1, true,  false,  4,  1,   "%thread_x" },

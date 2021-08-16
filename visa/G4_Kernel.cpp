@@ -1,28 +1,10 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
+============================= end_copyright_notice ===========================*/
 
 #include "BuildIR.h"
 #include "DebugInfo.h"
@@ -102,18 +84,17 @@ void* gtPinData::getFreeGRFInfo(unsigned& size)
     //
     //    freeBytes data[numItems];
     //};
-    typedef struct freeBytes
+    struct freeBytes
     {
         unsigned short startByte;
         unsigned short numConsecutiveBytes;
-    } freeBytes;
+    };
 
-    typedef struct freeGRFInfo
+    struct freeGRFInfo
     {
         unsigned int magicStart;
         unsigned int numItems;
-        freeBytes* data;
-    } freeGRFInfo;
+    };
 
     // Compute free register information using vector for efficiency,
     // then convert to POS for passing back to gtpin.
@@ -160,7 +141,7 @@ void* gtPinData::getFreeGRFInfo(unsigned& size)
         size = sizeof(unsigned int) + sizeof(unsigned int) + sizeof(unsigned int) + (numItems * sizeof(freeBytes));
     }
 
-    return (void*)buffer;
+    return buffer;
 }
 
 void gtPinData::setGTPinInit(void* buffer)
@@ -318,7 +299,7 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
 
     void* gtpinBuffer = allocCodeBlock(bufferSize);
 
-    memcpy_s(gtpinBuffer, bufferSize, (const void*)(buffer.data()), bufferSize);
+    memcpy_s(gtpinBuffer, bufferSize, buffer.data(), bufferSize);
 
     // Dump buffer with shader dumps
     if (kernel.getOption(vISA_outputToFile))
@@ -398,6 +379,79 @@ unsigned gtPinData::getPerThreadNextOff() const
 }
 
 
+
+G4_Kernel::G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
+    Mem_Manager& m, Options* options, Attributes* anAttr,
+    unsigned char major, unsigned char minor)
+    : m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
+    asmInstCount(0), kernelID(0), fg(alloc, this, m),
+    major_version(major), minor_version(minor)
+{
+    ASSERT_USER(
+        major < COMMON_ISA_MAJOR_VER ||
+        (major == COMMON_ISA_MAJOR_VER && minor <= COMMON_ISA_MINOR_VER),
+        "CISA version not supported by this JIT-compiler");
+
+
+    name = NULL;
+    numThreads = 0;
+    hasAddrTaken = false;
+    kernelDbgInfo = nullptr;
+    sharedDebugInfo = false;
+    sharedGTPinInfo = false;
+    if (options->getOption(vISAOptions::vISA_ReRAPostSchedule) ||
+        options->getOption(vISAOptions::vISA_GetFreeGRFInfo) ||
+        options->getuInt32Option(vISAOptions::vISA_GTPinScratchAreaSize))
+    {
+        allocGTPinData();
+    } else {
+        gtPinInfo = nullptr;
+    }
+
+    setKernelParameters();
+}
+
+G4_Kernel::~G4_Kernel()
+{
+    if (kernelDbgInfo && !sharedDebugInfo)
+    {
+        kernelDbgInfo->~KernelDebugInfo();
+    }
+
+    if (gtPinInfo && !sharedGTPinInfo)
+    {
+        gtPinInfo->~gtPinData();
+    }
+
+    if (varSplitPass)
+    {
+        delete varSplitPass;
+        varSplitPass = nullptr;
+    }
+
+    Declares.clear();
+}
+
+void G4_Kernel::setKernelDebugInfo(KernelDebugInfo* k)
+{
+    assert(k);
+    if (kernelDbgInfo)
+    {
+        kernelDbgInfo->~KernelDebugInfo();
+    }
+    kernelDbgInfo = k;
+    sharedDebugInfo = true;
+}
+
+void G4_Kernel::setGTPinData(gtPinData* p) {
+    assert(p);
+    if (gtPinInfo == nullptr)
+    {
+        gtPinInfo->~gtPinData();
+    }
+    gtPinInfo = p;
+    sharedGTPinInfo = true;
+}
 
 void G4_Kernel::computeChannelSlicing()
 {
@@ -577,32 +631,6 @@ void G4_Kernel::evalAddrExp()
     }
 }
 
-void G4_Kernel::dump() const
-{
-    fg.print(std::cerr);
-}
-
-void G4_Kernel::dumptofile(const char* Filename) const
-{
-    fg.dumptofile(Filename);
-}
-
-void G4_Kernel::dumpDotFileImportant(const char* suffix)
-{
-    if (m_options->getOption(vISA_DumpDot))
-        dumpDotFileInternal(suffix);
-    if (m_options->getOption(vISA_DumpPasses) || m_options->getuInt32Option(vISA_DumpPassesSubset) >= 1)
-        dumpPassInternal(suffix);
-}
-
-void G4_Kernel::dumpDotFile(const char* suffix)
-{
-    if (m_options->getOption(vISA_DumpDot))
-        dumpDotFileInternal(suffix);
-    if (m_options->getOption(vISA_DumpPasses) || m_options->getuInt32Option(vISA_DumpPassesSubset) >= 2)
-        dumpPassInternal(suffix);
-}
-
 // FIX: this needs to here because of the above static thread-local variable
 extern _THREAD const char* g4_prevFilename;
 extern _THREAD int g4_prevSrcLineNo;
@@ -639,504 +667,12 @@ static iga_gen_t getIGAPlatform()
     case GENX_BXT: platform = IGA_GEN9lp; break;
     case GENX_ICLLP: platform = IGA_GEN11; break;
     case GENX_TGLLP:platform = IGA_GEN12p1; break;
+    case XeHP_SDV: platform = IGA_XE_HP; break;
     default:
         break;
     }
 
     return platform;
-}
-
-void G4_Kernel::emit_asm(
-    std::ostream& output, bool beforeRegAlloc,
-    void * binary, uint32_t binarySize)
-{
-    static const char* const RATypeString[] {
-        RA_TYPE(STRINGIFY)
-    };
-
-    //
-    // for GTGPU lib release, don't dump out asm
-    //
-#ifdef NDEBUG
-#ifdef GTGPU_LIB
-    return;
-#endif
-#endif
-    bool newAsm = false;
-    if (m_options->getOption(vISA_dumpNewSyntax) && !(binary == NULL || binarySize == 0))
-    {
-        newAsm = true;
-    }
-
-    if (!m_options->getOption(vISA_StripComments))
-    {
-        output << "//.kernel ";
-        if (name != NULL)
-        {
-            // some 3D kernels do not have name
-            output << name;
-        }
-
-        output << "\n" << "//.platform " << getGenxPlatformString(getGenxPlatform());
-        output << "\n" << "//.thread_config " << "numGRF=" << numRegTotal << ", numAcc=" << numAcc;
-        if (fg.builder->hasSWSB())
-        {
-            output << ", numSWSB=" << numSWSBTokens;
-        }
-        output << "\n" << "//.options_string \"" << m_options->getUserArgString().str() << "\"";
-        output << "\n" << "//.full_options \"" << m_options->getFullArgString() << "\"";
-        output << "\n" << "//.instCount " << asmInstCount;
-        output << "\n//.RA type\t" << RATypeString[RAType];
-
-        if (auto jitInfo = fg.builder->getJitInfo())
-        {
-            if (jitInfo->numGRFUsed != 0)
-            {
-                output << "\n" << "//.GRF count " << jitInfo->numGRFUsed;
-            }
-            if (jitInfo->spillMemUsed > 0)
-            {
-                output << "\n" << "//.spill size " << jitInfo->spillMemUsed;
-            }
-            if (jitInfo->numGRFSpillFill > 0)
-            {
-                output << "\n" << "//.spill GRF ref count " << jitInfo->numGRFSpillFill;
-            }
-            if (jitInfo->numFlagSpillStore > 0)
-            {
-                output << "\n//.spill flag store " << jitInfo->numFlagSpillStore;
-                output << "\n//.spill flag load " << jitInfo->numFlagSpillLoad;
-            }
-        }
-
-        auto privateMemSize = getInt32KernelAttr(Attributes::ATTR_SpillMemOffset);
-        if (privateMemSize != 0)
-        {
-            output << "\n.//.private memory size " << privateMemSize;
-        }
-        output << "\n\n";
-
-        //Step2: emit declares (as needed)
-        //
-        // firstly, emit RA declare as comments or code depends on Options::symbolReg
-        // we check if the register allocation is successful here
-        //
-
-        for (auto dcl : Declares)
-        {
-            dcl->emit(output);
-        }
-        output << std::endl;
-
-        auto fmtHex = [](int i) {
-            std::stringstream ss;
-            ss << "0x" << std::hex << std::uppercase << i;
-            return ss.str();
-        };
-
-        const unsigned inputCount = fg.builder->getInputCount();
-        std::vector<std::string> argNames;
-        size_t maxNameLen = 8;
-        for (unsigned id = 0; id < inputCount; id++)
-        {
-            const input_info_t* ii = fg.builder->getInputArg(id);
-            std::stringstream ss;
-            if (ii->dcl && ii->dcl->getName()) {
-                ss << ii->dcl->getName();
-            } else {
-                ss << "__unnamed" << (id + 1);
-            }
-            argNames.push_back(ss.str());
-            maxNameLen = std::max(maxNameLen, argNames.back().size());
-        }
-
-        // emit input location and size
-        output << "// .inputs" << std::endl;
-        const size_t COLW_IDENT = maxNameLen;
-        static const size_t COLW_TYPE = 8;
-        static const size_t COLW_SIZE = 6;
-        static const size_t COLW_AT = 8;
-        static const size_t COLW_CLASS = 10;
-
-        std::stringstream bordss;
-        bordss << "// ";
-        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_IDENT + 2) << "";
-        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_TYPE + 2) << "";
-        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_SIZE + 2) << "";
-        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_AT + 2) << "";
-        bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_CLASS + 2) << "";
-        bordss << '+' << std::endl;
-        std::string border = bordss.str();
-
-        output << border;
-        output <<
-            "//" <<
-            " | " << std::left << std::setw(COLW_IDENT) << "id" <<
-            " | " << std::left << std::setw(COLW_TYPE) << "type" <<
-            " | " << std::right << std::setw(COLW_SIZE) << "bytes" <<
-            " | " << std::left << std::setw(COLW_AT) << "at" <<
-            " | " << std::left << std::setw(COLW_CLASS) << "class" <<
-            " |" << std::endl;
-        output << border;
-
-        const unsigned grfSize = getGRFSize();
-        for (unsigned id = 0; id < inputCount; id++)
-        {
-            const input_info_t* input_info = fg.builder->getInputArg(id);
-            //
-            output << "//";
-            //
-            // id
-            output <<
-                " | " << std::left << std::setw(COLW_IDENT) << argNames[id];
-            //
-            // type and length
-            //   e.g. :uq x 16
-            const G4_Declare *dcl = input_info->dcl;
-            std::stringstream sstype;
-            if (dcl) {
-                switch (dcl->getElemType()) {
-                case Type_B: sstype << ":b"; break;
-                case Type_W: sstype << ":w"; break;
-                case Type_D: sstype << ":d"; break;
-                case Type_Q: sstype << ":q"; break;
-                case Type_V: sstype << ":v"; break;
-                case Type_UB: sstype << ":ub"; break;
-                case Type_UW: sstype << ":uw"; break;
-                case Type_UD: sstype << ":ud"; break;
-                case Type_UQ: sstype << ":uq"; break;
-                case Type_UV: sstype << ":uv"; break;
-                    //
-                case Type_F:  sstype << ":f"; break;
-                case Type_HF: sstype << ":hf"; break;
-                case Type_DF: sstype << ":df"; break;
-                case Type_NF: sstype << ":nf"; break;
-                default:
-                    sstype << fmtHex((int)dcl->getElemType()) << "?";
-                    break;
-                }
-                if (dcl->getTotalElems() != 1)
-                    sstype << " x " << dcl->getTotalElems();
-            } else {
-                sstype << "?";
-            }
-            output << " | " << std::left << std::setw(COLW_TYPE) << sstype.str();
-            //
-            // size
-            output << " | " << std::right << std::setw(COLW_SIZE) << std::dec << input_info->size;
-
-            // location
-            unsigned reg = input_info->offset / grfSize,
-                subRegBytes = input_info->offset % grfSize;
-            std::stringstream ssloc;
-            ssloc << "r" << reg;
-            if (subRegBytes != 0)
-                ssloc << "+" << subRegBytes;
-            output << " | " << std::left << std::setw(COLW_AT) << ssloc.str();
-
-            // class
-            std::string inpcls;
-            switch (input_info->getInputClass()) {
-            case INPUT_GENERAL: inpcls = "general"; break;
-            case INPUT_SAMPLER: inpcls = "sampler"; break;
-            case INPUT_SURFACE: inpcls = "surface"; break;
-            default: inpcls = fmtHex((int)input_info->getInputClass()); break;
-            }
-            output << " | " << std::left << std::setw(COLW_CLASS) << inpcls;
-            //
-            output << " |" << std::endl;
-        }
-        output << border;
-        output << std::endl;
-
-        if (getPlatformGeneration(getGenxPlatform()) < PlatformGen::XE)
-        {
-            fg.BCStats.clear();
-        }
-        else
-        {
-            fg.XeBCStats.clear();
-        }
-        fg.numRMWs = 0;
-    }
-
-
-    // Set this to NULL to always print filename for each kernel
-    g4_prevFilename = nullptr;
-    g4_prevSrcLineNo = 0;
-
-    if (!newAsm)
-    {
-        //Step3: emit code and subroutines
-        output << std::endl << ".code";
-    }
-
-    if (newAsm)
-    {
-        char stringBuffer[512];
-        uint32_t pc = 0;
-        output << std::endl;
-        bool dissasemblyFailed = false;
-#define ERROR_STRING_MAX_LENGTH 1024*16
-        char* errBuf = new char[ERROR_STRING_MAX_LENGTH];
-
-        KernelView kView(
-            getIGAPlatform(), binary, binarySize,
-            GetIGASWSBEncodeMode(*fg.builder),
-            errBuf, ERROR_STRING_MAX_LENGTH);
-        dissasemblyFailed = !kView.decodeSucceeded();
-
-        std::string igaErrMsgs;
-        std::vector<std::string> igaErrMsgsVector;
-        std::map<int, std::string> errorToStringMap;
-        if (dissasemblyFailed)
-        {
-            std::cerr << "Failed to decode binary for asm output. Please report the issue and try disabling IGA disassembler for now." << std::endl;
-            igaErrMsgs = std::string(errBuf);
-            igaErrMsgsVector = split(igaErrMsgs, "\n");
-            for (auto msg : igaErrMsgsVector)
-            {
-                auto pos = msg.find("ERROR");
-                if (pos != std::string::npos)
-                {
-                    std::cerr << msg.c_str() << std::endl;
-                    std::vector<std::string> aString = split(msg, " ");
-                    for (auto token : aString)
-                    {
-                        if (token.find_first_of("0123456789") != std::string::npos)
-                        {
-                            int errorPC = std::atoi(token.c_str());
-                            errorToStringMap[errorPC] = msg;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        //
-        // For label, generate a label with uniqueLabel as prefix (required by some tools).
-        // We do so by using labeler callback.  If uniqueLabels is not present, use iga's
-        // default label.  For example,
-        //   Without option -uniqueLabels:
-        //      generating default label,   L1234
-        //   With option -uniqueLabels <sth>:
-        //      generating label with <sth> as prefix, <sth>_L1234
-        //
-        const char* labelPrefix = nullptr;
-        if (m_options->getOption(vISA_UniqueLabels))
-        {
-            m_options->getOption(vISA_LabelStr, labelPrefix);
-        }
-        typedef struct {
-            char m_labelString[128]; // label string for uniqueLabels
-            char* m_labelPrefix;    // label prefix
-            char m_tmpString[64];   // tmp storage, default label
-            KernelView *m_pkView;   // handle to KernelView object.
-        } lambdaArg_t;
-        lambdaArg_t lambdaArg;
-        lambdaArg.m_labelPrefix = const_cast<char*>(labelPrefix);
-        lambdaArg.m_pkView = &kView;
-
-        // Labeler callback function.
-        auto labelerLambda = [](int32_t pc, void *data) -> const char*
-        {
-            lambdaArg_t *pArg = (lambdaArg_t *)data;
-            char* tmpString = pArg->m_tmpString;
-            char* labelString = pArg->m_labelString;
-
-            pArg->m_pkView->getDefaultLabelName(pc, tmpString, 64);
-            const char *retString;
-            if (pArg->m_labelPrefix)
-            {
-                SNPRINTF(labelString, 128, "%s_%s", (const char*)pArg->m_labelPrefix, tmpString);
-                retString = labelString;
-            }
-            else
-            {
-                retString = tmpString;
-            }
-            return retString;
-        };
-
-        int suppressRegs[5];
-        int lastRegs[3];
-        for (int i = 0; i < 3; i++)
-        {
-            suppressRegs[i] = -1;
-            lastRegs[i] = -1;
-        }
-
-        suppressRegs[4] = 0;
-
-        uint32_t lastLabelPC = 0;
-        for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB)
-        {
-            for (INST_LIST_ITER itInst = (*itBB)->begin(); itInst != (*itBB)->end(); ++itInst)
-            {
-
-                bool isInstTarget = kView.isInstTarget(pc);
-                if (isInstTarget)
-                {
-                    const char* stringLabel = labelerLambda(pc, (void *)&lambdaArg);
-
-                    if ((*itInst)->isLabel())
-                    {
-                        output << "\n\n//" << (*itInst)->getLabelStr() << ":";
-                        //handling the case where there is an empty block with just label.
-                        //this way we don't print IGA label twice
-                        if ((*itBB)->size() == 1)
-                        {
-                            break;
-                        }
-                    }
-
-                    //preventing the case where there are two labels in G4 IR so duplicate IGA labels are printed
-                    //then parser asserts.
-                    /*
-                    //label_cf_20_particle:
-                    L3152:
-
-                    //label12_particle:
-                    L3152:
-
-                    endif (32|M0)                        L3168                            // [3152]: #218 //:$239:%332
-                    */
-                    if (pc != lastLabelPC || pc == 0)
-                    {
-                        output << "\n" << stringLabel << ":" << std::endl;
-                        lastLabelPC = pc;
-                    }
-
-                    if ((*itInst)->isLabel())
-                    {
-                        ++itInst;
-                        //G4_IR has instruction for label.
-                        if (itInst == (*itBB)->end())
-                        {
-                            break;
-                        }
-                    }
-                }
-                else if ((*itInst)->isLabel())
-                {
-                    output << "\n\n//" << (*itInst)->getLabelStr() << ":";
-                    continue;
-                }
-
-                if (!(getOptions()->getOption(vISA_disableInstDebugInfo)))
-                {
-                    (*itBB)->emitInstructionInfo(output, itInst);
-                }
-                output << std::endl;
-
-                auto errString = errorToStringMap.find(pc);
-                if (errString != errorToStringMap.end())
-                {
-                    output << "// " << errString->second.c_str() << std::endl;
-                    output << "// Text representation might not be correct" << std::endl;
-                }
-
-                static const uint32_t IGA_FMT_OPTS =
-                    IGA_FORMATTING_OPT_PRINT_LDST
-                    // | IGA_FORMATTING_OPT_SYNTAX_EXTS
-                    ;
-                kView.getInstSyntax(
-                    pc,
-                    stringBuffer, 512,
-                    IGA_FMT_OPTS,
-                    labelerLambda, (void*)&lambdaArg);
-                pc += kView.getInstSize(pc);
-
-                (*itBB)->emitBasicInstructionIga(stringBuffer, output, itInst, suppressRegs, lastRegs);
-            }
-        }
-
-        delete [] errBuf;
-    }
-    else
-    {
-        for (BB_LIST_ITER it = fg.begin(); it != fg.end(); ++it)
-        {
-            output << std::endl;
-            (*it)->emit(output);
-
-        }
-    }
-
-    if (!newAsm)
-    {
-        //Step4: emit clean-up.
-        output << std::endl;
-        output << ".end_code" << std::endl;
-        output << ".end_kernel" << std::endl;
-        output << std::endl;
-    }
-    if (newAsm)
-    {
-        if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::XE)
-        {
-            output << "\n\n//.BankConflicts: " <<  fg.XeBCStats.BCNum << "\n";
-            output << "//.sameBankConflicts: " <<  fg.XeBCStats.sameBankConflicts << "\n";
-            output << "//.simd16ReadSuppression: " <<  fg.XeBCStats.simd16ReadSuppression << "\n";
-            output << "//.twoSrcBankConflicts: " <<  fg.XeBCStats.twoSrcBC << "\n";
-            output << "//.SIMD8s: " <<  fg.XeBCStats.simd8 << "\n//\n";
-            output << "//.RMWs: " << fg.numRMWs << "\n//\n";
-        }
-        else
-        {
-            output << "// Bank Conflict Statistics: \n";
-            output << "// -- GOOD: " << fg.BCStats.NumOfGoodInsts << "\n";
-            output << "// --  BAD: " << fg.BCStats.NumOfBadInsts << "\n";
-            output << "// --   OK: " << fg.BCStats.NumOfOKInsts << "\n";
-        }
-    }
-}
-
-void G4_Kernel::emit_RegInfo()
-{
-    const char* asmName = nullptr;
-    getOptions()->getOption(VISA_AsmFileName, asmName);
-    const char* asmNameEmpty = "";
-    if( !asmName )
-    {
-        asmName = asmNameEmpty;
-    }
-
-    std::string dumpFileName = std::string(asmName) + ".reginfo";
-    std::fstream ofile(dumpFileName, std::ios::out);
-
-    emit_RegInfoKernel(ofile);
-
-    ofile.close();
-}
-
-void G4_Kernel::emit_RegInfoKernel(std::ostream& output)
-{
-    output << "//.platform " << getGenxPlatformString(fg.builder->getPlatform());
-    output << "\n" << "//.kernel ID 0x" << std::hex << getKernelID() << "\n";
-    output << std::dec << "\n";
-    int instOffset = 0;
-
-    for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB)
-    {
-        for (INST_LIST_ITER itInst = (*itBB)->begin(); itInst != (*itBB)->end(); ++itInst)
-        {
-            G4_INST* inst = (*itInst);
-            if (inst->isLabel())
-            {
-                continue;
-            }
-            if (inst->getLexicalId() == -1)
-            {
-                continue;
-            }
-
-            (*itBB)->emitRegInfo(output, inst, instOffset);
-            instOffset += inst->isCompactedInst() ? 8 : 16;
-        }
-    }
-    return;
 }
 
 KernelDebugInfo* G4_Kernel::getKernelDebugInfo()
@@ -1221,6 +757,40 @@ G4_INST* G4_Kernel::getFirstNonLabelInst() const
     return nullptr;
 }
 
+std::string G4_Kernel::getDebugSrcLine(const std::string& fileName, int srcLine)
+{
+    auto iter = debugSrcLineMap.find(fileName);
+    if (iter == debugSrcLineMap.end())
+    {
+        std::ifstream ifs(fileName);
+        if (!ifs)
+        {
+            // file doesn't exist
+            debugSrcLineMap[fileName] = std::make_pair<bool, std::vector<std::string>>(false, {});
+            return "";
+        }
+        std::string line;
+        std::vector<std::string> srcLines;
+        while (std::getline(ifs, line))
+        {
+            srcLines.push_back(line);
+        }
+        debugSrcLineMap[fileName] = std::make_pair(true, std::move(srcLines));
+    }
+    iter = debugSrcLineMap.find(fileName);
+    if (iter == debugSrcLineMap.end() ||
+        !iter->second.first)
+    {
+        return "";
+    }
+    auto& lines = iter->second.second;
+    if (srcLine > (int) lines.size() || srcLine <= 0)
+    {
+        return "invalid line number";
+    }
+    return lines[srcLine - 1];
+}
+
 VarSplitPass* G4_Kernel::getVarSplitPass()
 {
     if (varSplitPass)
@@ -1239,6 +809,29 @@ void G4_Kernel::setKernelParameters()
     TARGET_PLATFORM platform = getGenxPlatform();
     overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
 
+    overrideNumThreads = m_options->getuInt32Option(vISA_HWThreadNumberPerEU);
+
+    //
+    // Number of threads/GRF can currently be set by:
+    // 1.- IGC flag (reg key)
+    // 2.- Compiler option entered by user for
+    //      2.1 entire module
+    //      2.2 kernel function
+    // 3.- Compiler heuristics
+    //
+    if (m_options->getuInt32Option(vISA_ForceHWThreadNumberPerEU))
+    {
+        numThreads = m_options->getuInt32Option(vISA_ForceHWThreadNumberPerEU);
+    }
+    regSharingHeuristics = m_options->getOption(vISA_RegSharingHeuristics);
+    if (overrideNumThreads || regSharingHeuristics)
+    {
+        overrideGRFNum = 0;
+        if (numThreads > 0)
+        {
+            overrideNumThreads = numThreads;
+        }
+    }
 
     // Set the number of GRFs
     if (overrideGRFNum > 0)
@@ -1255,10 +848,30 @@ void G4_Kernel::setKernelParameters()
         }
         callerSaveLastGRF = ((overrideGRFNum - 8) / 2) - 1;
     }
+    else if (overrideNumThreads > 0)
+    {
+        switch (platform)
+        {
+        case XeHP_SDV:
+            switch (overrideNumThreads)
+            {
+            case 4:
+                numRegTotal = 256;
+                break;
+            default:
+                numRegTotal = 128;
+            }
+            break;
+        default:
+            numRegTotal = 128;
+        }
+        callerSaveLastGRF = ((numRegTotal - 8) / 2) - 1;
+    }
     else
     {
         // Default value for all other platforms
-        numRegTotal = 128;
+        unsigned Val = m_options->getuInt32Option(vISA_GRFNumToUse);
+        numRegTotal = Val ? Val : 128;
         callerSaveLastGRF = ((numRegTotal - 8) / 2) - 1;
     }
     // For safety update TotalGRFNum, there may be some uses for this vISA option
@@ -1289,11 +902,36 @@ void G4_Kernel::setKernelParameters()
         // User-provided number of Acc
         numAcc = overrideNumAcc;
     }
+    else if (overrideNumThreads > 0)
+    {
+        switch (platform)
+        {
+        case XeHP_SDV:
+            switch (overrideNumThreads)
+            {
+            case 4:
+                numAcc = 8;
+                break;
+            default:
+                numAcc = 4;
+            }
+            break;
+        default:
+            numAcc = 4;
+        }
+    }
     else
     {
         // Default value based on platform
         switch (platform)
         {
+        case XeHP_SDV:
+            numAcc = 4;
+            if (numRegTotal == 256)
+            {
+                numAcc *= 2;
+            }
+            break;
         default:
             numAcc = 2;
         }
@@ -1310,6 +948,16 @@ void G4_Kernel::setKernelParameters()
         {
             switch (platform)
             {
+            case XeHP_SDV:
+                switch (numRegTotal)
+                {
+                case 256:
+                    numThreads = 4;
+                    break;
+                default:
+                    numThreads = 8;
+                }
+                break;
             default:
                 numThreads = 7;
             }
@@ -1317,64 +965,140 @@ void G4_Kernel::setKernelParameters()
     }
 }
 
-G4_Kernel::G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
-    Mem_Manager& m, Options* options, Attributes* anAttr,
-    unsigned char major, unsigned char minor)
-    : m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
-    asmInstCount(0), kernelID(0), fg(alloc, this, m),
-    major_version(major), minor_version(minor)
+void G4_Kernel::dump(std::ostream &os) const
 {
-    ASSERT_USER(
-        major < COMMON_ISA_MAJOR_VER ||
-        (major == COMMON_ISA_MAJOR_VER && minor <= COMMON_ISA_MINOR_VER),
-        "CISA version not supported by this JIT-compiler");
-
-
-    name = NULL;
-    numThreads = 0;
-    hasAddrTaken = false;
-    kernelDbgInfo = nullptr;
-    if (options->getOption(vISAOptions::vISA_ReRAPostSchedule) ||
-        options->getOption(vISAOptions::vISA_GetFreeGRFInfo) ||
-        options->getuInt32Option(vISAOptions::vISA_GTPinScratchAreaSize))
-    {
-        allocGTPinData();
-    } else {
-        gtPinInfo = nullptr;
-    }
-
-    setKernelParameters();
+    fg.print(os);
 }
 
+void G4_Kernel::dumpToFile(const std::string &suffixIn)
+{
+    bool dumpDot = m_options->getOption(vISA_DumpDot);
+    bool dumpG4 =
+        m_options->getOption(vISA_DumpPasses) ||
+        m_options->getuInt32Option(vISA_DumpPassesSubset) >= 1;
+    if (!dumpDot && !dumpG4)
+        return;
 
+    // calls to this will produce a sequence of dumps
+    // [kernel-name].000.[suffix].{dot,g4}
+    // [kernel-name].001.[suffix].{dot,g4}
+    // ...
+    // If vISA_DumpPassesSubset == 1 then we omit any files that don't change
+    // the string representation of the kernel (i.e. skip passes that don't do anything).
+    std::stringstream ss;
+    ss << (name ? name : "UnknownKernel");
+    ss << "." << std::setfill('0') << std::setw(3) << nextDumpIndex++ << "." << suffixIn;
+    std::string baseName = sanitizePathString(ss.str());
 
-// prevent overwriting dump file and indicate compilation order with dump serial number
-static _THREAD int dotDumpCount = 0;
+    if (dumpDot)
+        dumpDotFileInternal(baseName);
+
+    if (dumpG4)
+        dumpG4Internal(baseName);
+}
+
+void G4_Kernel::emitDeviceAsm(
+    std::ostream& os, const void * binary, uint32_t binarySize)
+{
+    //
+    // for GTGPU lib release, don't dump out asm
+    //
+#ifdef NDEBUG
+#ifdef GTGPU_LIB
+    return;
+#endif
+#endif
+    const bool newAsm =
+        m_options->getOption(vISA_dumpNewSyntax) && !(binary == NULL || binarySize == 0);
+
+    if (!m_options->getOption(vISA_StripComments)) {
+        emitDeviceAsmHeaderComment(os);
+    }
+
+    // Set this to NULL to always print filename for each kernel
+    g4_prevFilename = nullptr;
+    g4_prevSrcLineNo = 0;
+
+    if (!newAsm) {
+        emitDeviceAsmInstructionsOldAsm(os);
+        return;
+    }
+
+    emitDeviceAsmInstructionsIga(os, binary, binarySize);
+
+    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::XE) {
+        os << "\n\n";
+        os << "//.BankConflicts: " <<  fg.XeBCStats.BCNum << "\n";
+        os << "//.BankConflicts.SameBank: " <<  fg.XeBCStats.sameBankConflicts << "\n";
+        os << "//.BankConflicts.TwoSrc: " <<  fg.XeBCStats.twoSrcBC << "\n";
+        int nativeSimdSize = 8;
+        os << "//.SIMD" << 2*nativeSimdSize << "ReadSuppressions: " <<  fg.XeBCStats.simd16ReadSuppression << "\n";
+        os << "//.SIMD" << nativeSimdSize << "s: " <<  fg.XeBCStats.simd8 << "\n//\n";
+        os << "//.RMWs: " << fg.numRMWs << "\n//\n";
+    }
+    else
+    {
+        os << "// Bank Conflict Statistics: \n";
+        os << "// -- GOOD: " << fg.BCStats.NumOfGoodInsts << "\n";
+        os << "// --  BAD: " << fg.BCStats.NumOfBadInsts << "\n";
+        os << "// --   OK: " << fg.BCStats.NumOfOKInsts << "\n";
+    }
+}
+
+void G4_Kernel::emitRegInfo()
+{
+    const char* asmName = nullptr;
+    getOptions()->getOption(VISA_AsmFileName, asmName);
+    const char* asmNameEmpty = "";
+    if (!asmName)
+    {
+        asmName = asmNameEmpty;
+    }
+
+    std::string dumpFileName = std::string(asmName) + ".reginfo";
+    std::fstream ofile(dumpFileName, std::ios::out);
+
+    emitRegInfoKernel(ofile);
+
+    ofile.close();
+}
+
+void G4_Kernel::emitRegInfoKernel(std::ostream& output)
+{
+    output << "//.platform " << getGenxPlatformString(fg.builder->getPlatform());
+    output << "\n" << "//.kernel ID 0x" << std::hex << getKernelID() << "\n";
+    output << std::dec << "\n";
+    int instOffset = 0;
+
+    for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB)
+    {
+        for (INST_LIST_ITER itInst = (*itBB)->begin(); itInst != (*itBB)->end(); ++itInst)
+        {
+            G4_INST* inst = (*itInst);
+            if (inst->isLabel())
+            {
+                continue;
+            }
+            if (inst->getLexicalId() == -1)
+            {
+                continue;
+            }
+
+            (*itBB)->emitRegInfo(output, inst, instOffset);
+            instOffset += inst->isCompactedInst() ? 8 : 16;
+        }
+    }
+    return;
+}
 
 //
 // This routine dumps out the dot file of the control flow graph along with instructions.
 // dot is drawing graph tool from AT&T.
 //
-void G4_Kernel::dumpDotFileInternal(const char* appendix)
+void G4_Kernel::dumpDotFileInternal(const std::string &baseName)
 {
-
-    MUST_BE_TRUE(appendix != NULL, ERROR_INTERNAL_ARGUMENT);
-    if (!m_options->getOption(vISA_DumpDot))  // skip dumping dot files
-        return;
-
-    std::stringstream ss;
-    ss << (name ? name : "UnknownKernel") <<
-        "." << std::setfill('0') << std::setw(3) <<
-        dotDumpCount++ << "." << appendix << ".dot";
-
-    std::string fname(ss.str());
-    fname = sanitizePathString(fname);
-
-    std::fstream ofile(fname, std::ios::out);
-    if (!ofile)
-    {
-        MUST_BE_TRUE(false, ERROR_FILE_READ(fname));
-    }
+    std::fstream ofile(baseName + ".dot", std::ios::out);
+    assert(ofile);
     //
     // write digraph KernelName {"
     //          size = "8, 10";
@@ -1505,36 +1229,33 @@ void G4_Kernel::dumpDotFileInternal(const char* appendix)
     ofile.close();
 }
 
-
-// Dump the instructions into a file
-void G4_Kernel::dumpPassInternal(const char* suffix)
+// Dump the instructions into a .g4 file
+void G4_Kernel::dumpG4Internal(const std::string &file)
 {
-    MUST_BE_TRUE(suffix != NULL, ERROR_INTERNAL_ARGUMENT);
-    if (!m_options->getOption(vISA_DumpPasses) && !m_options->getuInt32Option(vISA_DumpPassesSubset)) {
+    std::stringstream g4asm;
+    dumpG4InternalTo(g4asm);
+    std::string g4asms = g4asm.str();
+    if (m_options->getuInt32Option(vISA_DumpPassesSubset) == 1 && g4asms == lastG4Asm) {
         return;
     }
-    std::stringstream ss;
-    ss << (name ? name : "UnknownKernel") << "." << std::setfill('0') << std::setw(3) <<
-        dotDumpCount++ << "." << suffix << ".g4";
-    std::string fname = ss.str();
-    fname = sanitizePathString(fname);
+    lastG4Asm = std::move(g4asms);
 
-    std::fstream ofile(fname, std::ios::out);
+    std::fstream ofile(file + ".g4", std::ios::out);
     assert(ofile);
+    dumpG4InternalTo(ofile);
+}
 
+void G4_Kernel::dumpG4InternalTo(std::ostream &os)
+{
     const char* asmFileName = nullptr;
     m_options->getOption(VISA_AsmFileName, asmFileName);
-    if (!asmFileName)
-        ofile << "UnknownKernel" << std::endl << std::endl;
-    else
-        ofile << asmFileName << std::endl << std::endl;
+    os << ".kernel " << name << "\n";
 
     for (const G4_Declare *d : Declares) {
-        // stuff below this is usually builtin-type stuff?
-        static const int MIN_DECL = 34;
+        static const int MIN_DECL = 34; // skip the built-in decls
         if (d->getDeclId() > MIN_DECL) {
-            // ofile << d->getDeclId() << "\n";
-            d->emit(ofile);
+            // os << d->getDeclId() << "\n";
+            d->emit(os);
         }
     }
 
@@ -1543,31 +1264,505 @@ void G4_Kernel::dumpPassInternal(const char* suffix)
     {
         // Emit BB number
         G4_BB* bb = (*it);
-        bb->writeBBId(ofile);
+        bb->writeBBId(os);
 
         // Emit BB type
         if (bb->getBBType())
         {
-            ofile << " [" << bb->getBBTypeStr() << "] ";
+            os << " [" << bb->getBBTypeStr() << "] ";
         }
 
-        ofile << "\tPreds: ";
+        os << "\tPreds: ";
         for (auto pred : bb->Preds)
         {
-            pred->writeBBId(ofile);
-            ofile << " ";
+            pred->writeBBId(os);
+            os << " ";
         }
-        ofile << "\tSuccs: ";
+        os << "\tSuccs: ";
         for (auto succ : bb->Succs)
         {
-            succ->writeBBId(ofile);
-            ofile << " ";
+            succ->writeBBId(os);
+            os << " ";
         }
-        ofile << "\n";
+        os << "\n";
 
-        bb->emit(ofile);
-        ofile << "\n\n";
+        bb->emit(os);
+        os << "\n\n";
     } // bbs
+}
 
-    ofile.close();
+void G4_Kernel::emitDeviceAsmHeaderComment(std::ostream& os)
+{
+    os << "//.kernel ";
+    if (name != NULL)
+    {
+        // some 3D kernels do not have a name
+        os << name;
+    }
+
+    os << "\n" << "//.platform " << getGenxPlatformString(getGenxPlatform());
+    os << "\n" << "//.thread_config " << "numGRF=" << numRegTotal << ", numAcc=" << numAcc;
+    if (fg.builder->hasSWSB())
+    {
+        os << ", numSWSB=" << numSWSBTokens;
+    }
+    os << "\n" << "//.options_string \"" << m_options->getUserArgString().str() << "\"";
+    os << "\n" << "//.full_options \"" << m_options->getFullArgString() << "\"";
+    os << "\n" << "//.instCount " << asmInstCount;
+    static const char* const RATypeString[] {
+        RA_TYPE(STRINGIFY)
+    };
+    os << "\n//.RA type\t" << RATypeString[RAType];
+
+    if (auto jitInfo = fg.builder->getJitInfo())
+    {
+        if (jitInfo->numGRFUsed != 0)
+        {
+            os << "\n" << "//.GRF count " << jitInfo->numGRFUsed;
+        }
+        if (jitInfo->spillMemUsed > 0)
+        {
+            os << "\n" << "//.spill size " << jitInfo->spillMemUsed;
+        }
+        if (jitInfo->numGRFSpillFill > 0)
+        {
+            os << "\n" << "//.spill GRF est. ref count " << jitInfo->numGRFSpillFill;
+        }
+        if (jitInfo->numFlagSpillStore > 0)
+        {
+            os << "\n//.spill flag store " << jitInfo->numFlagSpillStore;
+            os << "\n//.spill flag load " << jitInfo->numFlagSpillLoad;
+        }
+    }
+
+    auto privateMemSize = getInt32KernelAttr(Attributes::ATTR_SpillMemOffset);
+    if (privateMemSize != 0)
+    {
+        os << "\n//.private memory size " << privateMemSize;
+    }
+    os << "\n\n";
+
+    //Step2: emit declares (as needed)
+    //
+    // firstly, emit RA declare as comments or code depends on Options::symbolReg
+    // we check if the register allocation is successful here
+    //
+
+    for (auto dcl : Declares)
+    {
+        dcl->emit(os);
+    }
+    os << "\n";
+
+    auto fmtHex = [](int i) {
+        std::stringstream ss;
+        ss << "0x" << std::hex << std::uppercase << i;
+        return ss.str();
+    };
+
+    const unsigned inputCount = fg.builder->getInputCount();
+    std::vector<std::string> argNames;
+    size_t maxNameLen = 8;
+    for (unsigned id = 0; id < inputCount; id++)
+    {
+        const input_info_t* ii = fg.builder->getInputArg(id);
+        std::stringstream ss;
+        if (ii->dcl && ii->dcl->getName()) {
+            ss << ii->dcl->getName();
+        } else {
+            ss << "__unnamed" << (id + 1);
+        }
+        argNames.push_back(ss.str());
+        maxNameLen = std::max(maxNameLen, argNames.back().size());
+    }
+
+    // emit input location and size
+    os << "// .inputs\n";
+    const size_t COLW_IDENT = maxNameLen;
+    static const size_t COLW_TYPE = 8;
+    static const size_t COLW_SIZE = 6;
+    static const size_t COLW_AT = 8;
+    static const size_t COLW_CLASS = 10;
+
+    std::stringstream bordss;
+    bordss << "// ";
+    bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_IDENT + 2) << "";
+    bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_TYPE + 2) << "";
+    bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_SIZE + 2) << "";
+    bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_AT + 2) << "";
+    bordss << '+'; bordss << std::setfill('-') << std::setw(COLW_CLASS + 2) << "";
+    bordss << '+' << "\n";
+    std::string border = bordss.str();
+
+    os << border;
+    os <<
+        "//" <<
+        " | " << std::left << std::setw(COLW_IDENT) << "id" <<
+        " | " << std::left << std::setw(COLW_TYPE) << "type" <<
+        " | " << std::right << std::setw(COLW_SIZE) << "bytes" <<
+        " | " << std::left << std::setw(COLW_AT) << "at" <<
+        " | " << std::left << std::setw(COLW_CLASS) << "class" <<
+        " |" << "\n";
+    os << border;
+
+    const unsigned grfSize = getGRFSize();
+    for (unsigned id = 0; id < inputCount; id++)
+    {
+        const input_info_t* input_info = fg.builder->getInputArg(id);
+        //
+        os << "//";
+        //
+        // id
+        os <<
+            " | " << std::left << std::setw(COLW_IDENT) << argNames[id];
+        //
+        // type and length
+        //   e.g. :uq x 16
+        const G4_Declare *dcl = input_info->dcl;
+        std::stringstream sstype;
+        if (dcl) {
+            switch (dcl->getElemType()) {
+            case Type_B: sstype << ":b"; break;
+            case Type_W: sstype << ":w"; break;
+            case Type_D: sstype << ":d"; break;
+            case Type_Q: sstype << ":q"; break;
+            case Type_V: sstype << ":v"; break;
+            case Type_UB: sstype << ":ub"; break;
+            case Type_UW: sstype << ":uw"; break;
+            case Type_UD: sstype << ":ud"; break;
+            case Type_UQ: sstype << ":uq"; break;
+            case Type_UV: sstype << ":uv"; break;
+                //
+            case Type_F:  sstype << ":f"; break;
+            case Type_HF: sstype << ":hf"; break;
+            case Type_DF: sstype << ":df"; break;
+            case Type_NF: sstype << ":nf"; break;
+            case Type_BF: sstype << ":bf"; break;
+            default:
+                sstype << fmtHex((int)dcl->getElemType()) << "?";
+                break;
+            }
+            if (dcl->getTotalElems() != 1)
+                sstype << " x " << dcl->getTotalElems();
+        } else {
+            sstype << "?";
+        }
+        os << " | " << std::left << std::setw(COLW_TYPE) << sstype.str();
+        //
+        // size
+        os << " | " << std::right << std::setw(COLW_SIZE) << std::dec << input_info->size;
+
+        // location
+        unsigned reg = input_info->offset / grfSize,
+            subRegBytes = input_info->offset % grfSize;
+        std::stringstream ssloc;
+        ssloc << "r" << reg;
+        if (subRegBytes != 0)
+            ssloc << "+" << subRegBytes;
+        os << " | " << std::left << std::setw(COLW_AT) << ssloc.str();
+
+        // class
+        std::string inpcls;
+        switch (input_info->getInputClass()) {
+        case INPUT_GENERAL: inpcls = "general"; break;
+        case INPUT_SAMPLER: inpcls = "sampler"; break;
+        case INPUT_SURFACE: inpcls = "surface"; break;
+        default: inpcls = fmtHex((int)input_info->getInputClass()); break;
+        }
+        os << " | " << std::left << std::setw(COLW_CLASS) << inpcls;
+        //
+        os << " |\n";
+    }
+    os << border << "\n";
+
+    if (getPlatformGeneration(getGenxPlatform()) < PlatformGen::XE)
+    {
+        fg.BCStats.clear();
+    }
+    else
+    {
+        fg.XeBCStats.clear();
+    }
+    fg.numRMWs = 0;
+}
+
+
+static std::map<int, std::string> parseDecodeErrors(
+    KernelView &kView, const char *errBuf, size_t errBufSize)
+{
+    // FIXME: IGA KernelView should be refactored to just return PC's
+    // paired with diagnostic strings for each
+    // (automatically allocate in IGA and cleanup when KV is deleted)
+    bool dissasemblyFailed = !kView.decodeSucceeded();
+    std::string igaErrMsgs;
+    std::vector<std::string> igaErrMsgsVector;
+    std::map<int, std::string> errorToStringMap;
+    if (dissasemblyFailed)
+    {
+        std::cerr << "failed to decode binary for asm output";
+        igaErrMsgs = errBuf;
+        igaErrMsgsVector = split(igaErrMsgs, "\n");
+        for (auto msg : igaErrMsgsVector)
+        {
+            auto pos = msg.find("ERROR");
+            if (pos != std::string::npos)
+            {
+                std::cerr << msg << "\n";
+                std::vector<std::string> aString = split(msg, " ");
+                for (auto token : aString)
+                {
+                    if (token.find_first_of("0123456789") != std::string::npos)
+                    {
+                        int errorPC = std::atoi(token.c_str());
+                        errorToStringMap[errorPC] = msg;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return errorToStringMap;
+}
+
+using BlockOffsets = std::map<int32_t,std::vector<std::string>>;
+
+static BlockOffsets precomputeBlockOffsets(
+    std::ostream& os, G4_Kernel &g4k, const KernelView &kv)
+{
+    // pre-compute the PCs of each basic block
+    int32_t currPc = 0, lastInstSize = -1;
+    std::map<int32_t,std::vector<std::string>> blockOffsets;
+    for (BB_LIST_ITER itBB = g4k.fg.begin(); itBB != g4k.fg.end(); ++itBB) {
+        for (INST_LIST_ITER itInst = (*itBB)->begin(); itInst != (*itBB)->end(); ++itInst) {
+            if ((*itInst)->isLabel()) {
+                // G4 treats labels as special instructions
+                const char *lbl = (*itInst)->getLabelStr();
+                if (lbl && *lbl) {
+                    blockOffsets[currPc].emplace_back(lbl);
+                }
+            } else {
+                // we are looking at the next G4 instruction,
+                // but reached the end of the decode stream
+                if (lastInstSize == 0) {
+                    os << "// ERROR: deducing G4 block PCs "
+                        "(IGA decoded stream ends early); falling back to IGA labels\n";
+                    blockOffsets.clear(); // fallback to IGA default labels
+                    return blockOffsets;
+                }
+                lastInstSize = kv.getInstSize(currPc);
+                currPc += lastInstSize;
+            }
+        }
+    }
+    if (kv.getInstSize(currPc) != 0) {
+        // we are looking at the next G4 instruction,
+        // but reached the end of the decode stream
+        os << "// ERROR: deducing G4 block PCs "
+            "(G4_INST stream ends early); falling back to IGA labels\n";
+        blockOffsets.clear(); // fallback to IGA default labels
+    }
+    return blockOffsets;
+}
+
+
+// needs further cleanup (confirm label prefixes are gone, newAsm == true)
+void G4_Kernel::emitDeviceAsmInstructionsIga(
+    std::ostream& os, const void * binary, uint32_t binarySize)
+{
+    os << "\n";
+
+    const size_t ERROR_STRING_MAX_LENGTH = 16 * 1024;
+    char* errBuf = new char[ERROR_STRING_MAX_LENGTH];
+    assert(errBuf);
+    if (!errBuf)
+        return;
+    KernelView kv(
+        getIGAPlatform(), binary, binarySize,
+        GetIGASWSBEncodeMode(*fg.builder),
+        errBuf, ERROR_STRING_MAX_LENGTH);
+    const auto errorMap =
+        parseDecodeErrors(kv, errBuf, ERROR_STRING_MAX_LENGTH);
+    delete [] errBuf;
+
+    const auto blockOffsets = precomputeBlockOffsets(os, *this, kv);
+
+    //
+    // Generate a label with uniqueLabel as prefix (required by some tools).
+    // We do so by using labeler callback.  If uniqueLabels is not present, use iga's
+    // default label.  For example,
+    //   Without option -uniqueLabels:
+    //      generating default label,   L1234
+    //   With option -uniqueLabels <sth>:
+    //      generating label with <sth> as prefix, <sth>_L1234
+    //
+    std::string labelPrefix;
+    if (m_options->getOption(vISA_UniqueLabels))
+    {
+        const char* labelPrefixC = nullptr;
+        m_options->getOption(vISA_LabelStr, labelPrefixC);
+        labelPrefix = labelPrefixC;
+        if (!labelPrefix.empty())
+            labelPrefix += '_';
+    }
+
+    struct LabelerState {
+        const KernelView *kv;
+        const BlockOffsets &blockOffsets;
+        const std::string labelPrefix;
+        std::string labelStorage;
+        LabelerState(
+            const KernelView *_kv,
+            const BlockOffsets &offs,
+            const std::string &lblPfx)
+            : kv(_kv), blockOffsets(offs), labelPrefix(lblPfx)
+        {
+        }
+    };
+    LabelerState ls(&kv, blockOffsets, labelPrefix);
+
+    // storage for the IGA labeler
+    auto labeler = [](int32_t pc, void *data) -> const char * {
+        LabelerState &ls = *(LabelerState *)data;
+        ls.labelStorage = ls.labelPrefix;
+        auto itr = ls.blockOffsets.find(pc);
+        if (itr == ls.blockOffsets.end()) {
+            // let IGA choose the label name, but we still have to prefix
+            // our user provided prefix
+            char igaDefaultLabel[128];
+            ls.kv->getDefaultLabelName(pc, igaDefaultLabel, sizeof(igaDefaultLabel));
+            ls.labelStorage += igaDefaultLabel;
+            return ls.labelStorage.c_str();
+        }
+        std::string g4Label = itr->second.front().c_str();
+        ls.labelStorage += g4Label;
+        return ls.labelStorage.c_str();
+    };
+
+
+    // initialize register suppression info
+    int suppressRegs[5] = {};
+    int lastRegs[3] = {};
+    for (int i = 0; i < 3; i++)
+    {
+        suppressRegs[i] = -1;
+        lastRegs[i] = -1;
+    }
+
+    ////////////////////////////////////////
+    // emit the program text (instructions) iteratively
+    // this is a little tricky because G4 treats labels as instructions
+    // thus we need to do a little checking to keep the two streams in sync
+    int32_t pc = 0;
+    std::vector<char> igaStringBuffer;
+    igaStringBuffer.resize(512); // TODO: expand default after testing
+    for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB) {
+        os << "// "; (*itBB)->emitBbInfo(os); os << "\n";
+        for (INST_LIST_ITER itInst = (*itBB)->begin();
+            itInst != (*itBB)->end(); ++itInst)
+        {
+            G4_INST *i = (*itInst);
+
+            // walk to next non-label in this block;
+            // return true if we find one, else fails if at end of block
+            auto findNextNonLabel = [&](bool print) {
+                while ((*itInst)->isLabel()) {
+                    if (print)
+                        os << "// " << (*itInst)->getLabelStr() << ":\n";
+                    itInst++;
+                    if (itInst == (*itBB)->end())
+                        break;
+                }
+                if (itInst == (*itBB)->end())
+                    return false;
+                i = (*itInst);
+                return true;
+            };
+
+            bool isInstTarget = kv.isInstTarget(pc);
+            if (isInstTarget) {
+                auto itr = ls.blockOffsets.find(pc);
+                if (itr == ls.blockOffsets.end()) {
+                    os << labeler(pc, &ls) << ":\n";
+                } else {
+                    // there can be multiple labels per PC
+                    for (const std::string &lbl : itr->second) {
+                        os << ls.labelPrefix << lbl << ":\n";
+                    }
+                }
+                if (!findNextNonLabel(false)) {
+                    break; // at end of block
+                }
+            } else if (i->isLabel()) {
+                // IGA doesn't consider this PC to be a label but G4 does
+                //
+                // move forward until we find the next non-label
+                if (!findNextNonLabel(true)) {
+                    break; // at end of block
+                }
+            }
+
+            ///////////////////////////////////////////////////////////////////
+            // we are looking at a non-label G4_INST at the next valid IGA PC
+            // (same instruction)
+            if (!getOptions()->getOption(vISA_disableInstDebugInfo)) {
+                (*itBB)->emitInstructionSourceLineMapping(os, itInst);
+            }
+
+            auto eitr = errorMap.find(pc);
+            if (eitr != errorMap.end()) {
+                os << "// " << eitr->second << "\n";
+                os << "// text representation might not be correct";
+            }
+
+            static const uint32_t IGA_FMT_OPTS =
+                IGA_FORMATTING_OPT_PRINT_LDST
+                | IGA_FORMATTING_OPT_PRINT_BFNEXPRS;
+            while (true) {
+                size_t nw = kv.getInstSyntax(
+                    pc,
+                    igaStringBuffer.data(), igaStringBuffer.size(),
+                    IGA_FMT_OPTS,
+                    labeler, &ls);
+                if (nw == 0) {
+                    os << "<<error formatting instruction at PC " << pc << ">>\n";
+                    break;
+                } else if (nw <= igaStringBuffer.size()) {
+                    // print it (pad it out so comments line up on most instructions)
+                    std::string line =igaStringBuffer.data();
+                    while (line.size() < 100)
+                        line += ' ';
+                    os << line;
+                    break;
+                } else {
+                    igaStringBuffer.resize(igaStringBuffer.size() + 512);
+                    // try again
+                }
+            }
+
+            (*itBB)->emitBasicInstructionComment(os, itInst, suppressRegs, lastRegs);
+            os << "\n";
+
+            pc += kv.getInstSize(pc);
+        } // for insts in block
+    } // for blocks
+} // emitDeviceAsmInstructionsIga
+
+
+// Should be removed once we can confirm no one uses it
+// the output comes from G4_INST::... and almost certainly won't be
+// parsable by IGA
+void G4_Kernel::emitDeviceAsmInstructionsOldAsm(std::ostream& os)
+{
+    os << std::endl << ".code";
+    for (BB_LIST_ITER it = fg.begin(); it != fg.end(); ++it)
+    {
+        os << "\n";
+        (*it)->emit(os);
+    }
+    //Step4: emit clean-up.
+    os << std::endl;
+    os << ".end_code" << std::endl;
+    os << ".end_kernel" << std::endl;
+    os << std::endl;
 }

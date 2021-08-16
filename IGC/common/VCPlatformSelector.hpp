@@ -41,6 +41,18 @@ inline const char *getPlatformStr(PLATFORM Platform, unsigned &RevId) {
   case IGFX_GEN12LP_CORE:
     if (Product == IGFX_TIGERLAKE_LP)
       return "TGLLP";
+    if (Product == IGFX_DG1)
+      return "DG1";
+    if (Product == IGFX_ROCKETLAKE)
+      return IGC_MANGLE("RKL");
+    if (Product == IGFX_ALDERLAKE_S)
+      return IGC_MANGLE("ADLS");
+    if (Product == IGFX_ALDERLAKE_P)
+        return IGC_MANGLE("ADLP");
+    else if (Product == IGFX_XE_HP_SDV)
+      return "XEHP";
+    else if (Product == IGFX_XE_HP_SDV)
+      return IGC_MANGLE("TGL"); // alias to XeHP_SDV
   default:
     IGC_ASSERT_MESSAGE(0, "unsupported platform");
     break;

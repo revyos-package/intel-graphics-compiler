@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 //===- ZEELFObjectBuilder.hpp -----------------------------------*- C++ -*-===//
-// ZE Binary Utilitis
+// ZE Binary Utilities
 //
 // \file
 // This file declares ZEELFObjectBuilder for building an ZE Binary object
@@ -30,6 +30,7 @@ SPDX-License-Identifier: MIT
 #endif
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -65,10 +66,7 @@ public:
         m_flags.packed = 0;
     }
 
-    ~ZEELFObjectBuilder() {
-        if (m_zeInfoSection != nullptr)
-            delete m_zeInfoSection;
-    }
+    ~ZEELFObjectBuilder() {}
 
     /// Set elfFileHeader::e_type value
     void setFileType(ELF_TYPE_ZEBIN fileType)
@@ -137,7 +135,7 @@ public:
     // add .gtpin_info section
     // - name: section name. Do not includes leading .gtpin_info in the given
     //         name. For example, giving "func", the section name will be
-    //         ".gtpin_info.func". The defualt name is .gtpin_fino. It'll be apply
+    //         ".gtpin_info.func". The default name is .gtpin_fino. It'll be apply
     //         if the given name is empty.
     // - size in byte
     // - Note that the alignment requirement of the section should be satisfied
@@ -145,6 +143,28 @@ public:
     // - Note that the given data buffer have to be alive through
     //   ZEELFObjectBuilder
     void addSectionGTPinInfo(std::string name, const uint8_t* data, uint64_t size);
+
+    // add .visaasm section
+    // - name: section name. Do not includes leading .visaasm in the given
+    //         name. For example, giving "func", the section name will be
+    //         ".visaasm.func". The default name is .visaasm. It'll be apply
+    //         if the given name is empty.
+    // - size in byte
+    // - Note that the alignment requirement of the section should be satisfied
+    //   by the given data and size
+    // - Note that the given data buffer have to be alive through ZEELFObjectBuilder
+    void addSectionVISAAsm(std::string name, const uint8_t* data, uint64_t size);
+
+    // add .misc section
+    // - name: section name. Do not includes leading .misc in the given
+    //         name. For example, giving "func", the section name will be
+    //         ".misc.func". The default name is .misc. It'll be apply
+    //         if the given name is empty.
+    // - size in byte
+    // - Note that the alignment requirement of the section should be satisfied
+    //   by the given data and size
+    // - Note that the given data buffer have to be alive through ZEELFObjectBuilder
+    void addSectionMisc(std::string name, const uint8_t* data, uint64_t size);
 
     // .debug_info section in DWARF format
     // - name: section name. The default name is .debug_info
@@ -343,9 +363,11 @@ private:
     const std::string m_RelName       = ".rel";
     const std::string m_RelaName      = ".rela";
     const std::string m_SpvName       = ".spv";
+    const std::string m_VISAAsmName   = ".visaasm";
     const std::string m_DebugName     = ".debug_info";
     const std::string m_ZEInfoName    = ".ze_info";
     const std::string m_GTPinInfoName = ".gtpin_info";
+    const std::string m_MiscName      = ".misc";
     const std::string m_StrTabName    = ".strtab";
 
 private:
@@ -365,8 +387,8 @@ private:
     // current section id
     SectionID m_sectionIdCount = 0;
 
-    // every ze object contains only one ze_info section
-    ZEInfoSection* m_zeInfoSection = nullptr;
+    // every ze object contains at most one ze_info section
+    std::unique_ptr<ZEInfoSection> m_zeInfoSection;
     SymbolListTy m_localSymbols;
     SymbolListTy m_globalSymbols;
 
@@ -383,12 +405,15 @@ public:
     zeInfoContainer& getZEInfoContainer()             { return mContainer; }
     const zeInfoContainer& getZEInfoContainer() const { return mContainer; }
 
+    // empty - return true if there is no kernel/function info in it
+    bool empty() const;
+
     /// --------- Helper functions for setup zeinfo contents -------------- ///
     // createKernel - create a zeInfoKernel and add it into zeInfoContainer
     zeInfoKernel& createKernel(const std::string& name);
 
     // addPayloadArgumentByPointer - add explicit kernel argument with pointer
-    // type into given zeKernel
+    // type into given arg_list
     static zeInfoPayloadArgument& addPayloadArgumentByPointer(
         PayloadArgumentsTy& arg_list,
         int32_t offset,
@@ -399,15 +424,27 @@ public:
         PreDefinedAttrGetter::ArgAccessType access_type);
 
     // addPayloadArgumentByValue - add explicit kernel argument with pass by
-    // value type into given zeKernel
+    // value type into given arg_list
     static zeInfoPayloadArgument& addPayloadArgumentByValue(
         PayloadArgumentsTy& arg_list,
         int32_t offset,
         int32_t size,
         int32_t arg_index);
 
+    // addPayloadArgumentSampler - add explicit kernel argument for sampler
+    // into given arg_list
+    // The argument type will be set to by_pointer, and addr_space will be set to sampler
+    static zeInfoPayloadArgument& addPayloadArgumentSampler(
+        PayloadArgumentsTy& arg_list,
+        int32_t offset,
+        int32_t size,
+        int32_t arg_index,
+        int32_t sampler_index,
+        PreDefinedAttrGetter::ArgAddrMode addrmode,
+        PreDefinedAttrGetter::ArgAccessType access_type);
+
     // addPayloadArgumentImplicit - add non-user argument (implicit argument)
-    // into given zeKernel. The type must be local_size, group_size,
+    // into given arg_list. The type must be local_size, group_size,
     // global_id_offset or private_base_stateless
     static zeInfoPayloadArgument& addPayloadArgumentImplicit(
         PayloadArgumentsTy& arg_list,
@@ -416,7 +453,7 @@ public:
         int32_t size);
 
     // addPerThreadPayloadArgument - add a per-thread payload argument into
-    // given kernel. Currently we only support local id as per-thread argument.
+    // arg_list. Currently we only support local id as per-thread argument.
     // The given type must be packed_local_ids or local_id
     static zeInfoPerThreadPayloadArgument& addPerThreadPayloadArgument(
         PerThreadPayloadArgumentsTy& arg_list,
@@ -424,7 +461,7 @@ public:
         int32_t offset,
         int32_t size);
 
-    // addBindingTableIndex - add a binding table index into kernel, with
+    // addBindingTableIndex - add a binding table index into given bti_list, with
     // corresponding kernel argument index
     static zeInfoBindingTableIndex& addBindingTableIndex(
         BindingTableIndicesTy& bti_list,
@@ -461,9 +498,9 @@ public:
     // addExpPropertiesHasNonKernelArgLdSt - add experimental_properties for has-non-kernel-arg-load-store analysis
     // add experimental_properties::has_non_kernel_arg_load, experimental_properties::has_non_kernel_arg_store
     // and experimental_properties::has_non_kernel_arg_atomic
-    // Note that zeInfoExperimentalProperties is made as a vector under kernel in the spec, becuase we want it only
+    // Note that zeInfoExperimentalProperties is made as a vector under kernel in the spec, because we want it only
     // present when needed. If it's not a vector, the attribute name will always present in final output even if
-    // all of its sub-attributes are defualt and are not shown.
+    // all of its sub-attributes are default and are not shown.
     static void addExpPropertiesHasNonKernelArgLdSt(zeInfoKernel& zekernel,
         bool hasNonKernelArgLoad, bool hasNonKernelArgStore, bool hasNonKernelArgAtomic);
 

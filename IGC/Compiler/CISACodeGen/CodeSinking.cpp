@@ -214,12 +214,6 @@ namespace IGC {
             return false;
         }
 
-        // Keep track of fat BB. Might need to reverse LICM if
-        // the fat BB is inside loop and there are a lot of
-        // loop-invariant insts that have been moved out of the loop.
-        m_fatBBPressure = 0;
-        m_fatBB = nullptr;
-
         DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
         PDT = &getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
         LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -254,6 +248,20 @@ namespace IGC {
         localInstSet.clear();
         CTX->m_numGradientSinked = totalGradientMoved;
 
+        uint32_t GRFThresholdDelta = IGC_GET_FLAG_VALUE(LoopSinkThresholdDelta);
+        uint32_t ngrf = CTX->getNumGRFPerThread();
+        for (unsigned i = 0, n = m_fatLoops.size(); i < n; ++i)
+        {
+            auto FatLoop = m_fatLoops[i];
+            auto Pressure = m_fatLoopPressures[i];
+            // Enable multiple-level loop sink if pressure is high enough
+            bool sinkMultiLevel = (Pressure > (2*ngrf + 2 * GRFThresholdDelta));
+            if (loopSink(FatLoop, sinkMultiLevel)) {
+                changed = true;
+            }
+        }
+        m_fatLoopPressures.clear();
+        m_fatLoops.clear();
 
         // diagnosis code: printf("%d:%d:%x\n", sinkCounter, sinkLimit, CTX->hash.getAsmHash());
         //F.viewCFG();
@@ -320,6 +328,18 @@ namespace IGC {
         return pressure;
     }
 
+    Loop* CodeSinking::findLoopAsPreheader(BasicBlock& blk)
+    {
+        // look through the successors
+        for (BasicBlock* succ : successors(&blk))
+        {
+            Loop* L = LI->getLoopFor(succ);
+            if (L && L->getLoopPreheader() == &blk)
+                return L;
+        }
+        return nullptr;
+    }
+
     bool CodeSinking::ProcessBlock(BasicBlock& blk)
     {
         if (blk.empty())
@@ -332,11 +352,16 @@ namespace IGC {
         {
             // estimate live-out register pressure for this blk
             pressure0 = EstimateLiveOutPressure(&blk, DL);
-
-            // Track the highest-pressure BB within a loop
-            if (pressure0 > m_fatBBPressure && LI->getLoopFor(&blk)) {
-                m_fatBBPressure = pressure0;
-                m_fatBB = &blk;
+            uint32_t GRFThresholdDelta = IGC_GET_FLAG_VALUE(LoopSinkThresholdDelta);
+            uint32_t ngrf = CTX->getNumGRFPerThread();
+            if (pressure0 > (2*ngrf + GRFThresholdDelta) &&
+                CTX->type == ShaderType::OPENCL_SHADER)
+            {
+                if (auto L = findLoopAsPreheader(blk))
+                {
+                    m_fatLoopPressures.push_back(pressure0);
+                    m_fatLoops.push_back(L);
+                }
             }
         }
 
@@ -424,12 +449,6 @@ namespace IGC {
 
     static bool reduceRP(Instruction* Inst)
     {
-        // igc specific: to make the flag-register lifetime short
-        if (isa<CmpInst>(Inst))
-        {
-            return true;
-        }
-
         if (auto CI = dyn_cast<CastInst>(Inst))
         {
             unsigned SrcSize = (unsigned int)CI->getSrcTy()->getPrimitiveSizeInBits();
@@ -486,7 +505,8 @@ namespace IGC {
                 isa<BinaryOperator>(inst))
             {
                 hasAliasConcern = false;
-                reducePressure = reduceRP(inst);
+                // sink CmpInst to make the flag-register lifetime short
+                reducePressure = (reduceRP(inst) || isa<CmpInst>(inst));
                 return true;
             }
         }
@@ -1031,15 +1051,14 @@ namespace IGC {
         return changed;
     }
 
-    bool CodeSinking::loopSink(BasicBlock* BBWithPressure, bool SinkMultipleLevel)
+    bool CodeSinking::loopSink(Loop* LoopWithPressure, bool SinkMultipleLevel)
     {
         // Sink loop invariants back into the loop body if register
         // pressure can be reduced.
 
         // L0 is inner loop
-        Loop* L0 = LI->getLoopFor(BBWithPressure);
-        if (!L0)
-            return false;
+        Loop* L0 = LoopWithPressure;
+        assert(L0);
 
         // L1 is parent loop
         Loop* L1 = nullptr;
@@ -1086,11 +1105,11 @@ namespace IGC {
                 if (I->mayWriteToMemory()) {
                     stores.insert(I);
                 }
-                if (!canLoopSink(I, L, BBWithPressure))
+                if (!canLoopSink(I, L))
                     continue;
 
                 // Sink noOp instruction.
-                if (isNoOpInst(I, CTX)) {
+                if (isNoOpInst(I, CTX) || reduceRP(I)) {
                     if (SinkInstruction(I, stores, true)) {
                         changed = true;
                     }
@@ -1127,19 +1146,19 @@ namespace IGC {
         return changed;
     }
 
-    bool CodeSinking::canLoopSink(Instruction* I, Loop* L, BasicBlock* FatBB)
+    bool CodeSinking::canLoopSink(Instruction* I, Loop* L)
     {
         // Limit sinking for the following case for now.
-        if (!isNoOpInst(I, CTX) && !isa<BinaryOperator>(I))
-            return false;
-
-        if (!I->hasOneUse())
-            return false;
-        Instruction* UserInst = I->user_back();
-        if (!L->contains(UserInst))
-            return false;
-        return true;
-    };
+        for (const User* UserInst : I->users())
+        {
+            if (!isa<Instruction>(UserInst))
+                return false;
+            if (!L->contains(cast<Instruction>(UserInst)))
+                return false;
+        }
+        return (isNoOpInst(I, CTX) || reduceRP(I) ||
+            isa<BinaryOperator>(I) /*|| isa<GetElementPtrInst>(I)*/);
+    }
 
     bool CodeSinking::LoopSinkInstructions(
         SmallVector<Instruction*, 64> sinkCandidates,

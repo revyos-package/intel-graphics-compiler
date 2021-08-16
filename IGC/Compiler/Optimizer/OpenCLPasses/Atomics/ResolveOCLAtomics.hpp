@@ -22,14 +22,11 @@ SPDX-License-Identifier: MIT
 namespace IGC
 {
     // Attributes for each __builtin_IB_atomic function.
-    //
-    //              bufType
-    //                 |
-    //       not used  V   op
-    //       |-------|---|---|
-    //    0 x 0 0 0 0 0 0 0 0
-    //
-    typedef unsigned int OCLAtomicAttrs;
+    struct OCLAtomicAttrs
+    {
+        AtomicOp op;
+        BufferType bufType;
+    };
 
     // A pass that walks over call instructions and replaces all __builtin_IB_atomic calls
     // with corresponding GenISA intrinsics.
@@ -52,40 +49,27 @@ namespace IGC
         return "ResolveOCLAtomics";
     }
 
+    virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+    {
+        AU.addRequired<CodeGenContextWrapper>();
+    }
+
     // Entry point of the pass.
-        virtual bool runOnModule(llvm::Module& M) override;
+    virtual bool runOnModule(llvm::Module& M) override;
 
     // Call instructions visitor.
-        void visitCallInst(llvm::CallInst& callInst);
-
-    static const unsigned int ATTR_BUFFER_TYPE_SHIFT = 8;
+    void visitCallInst(llvm::CallInst& callInst);
 
     protected:
-        IGCLLVM::Module* m_pModule;
-        llvm::IGCIRBuilder<>* m_builder;
-        llvm::IntegerType* m_Int32Ty;
-        bool               m_64bitPointer;
+        CodeGenContext* m_CGCtx = nullptr;
+        IGCLLVM::Module* m_pModule = nullptr;
+        llvm::IGCIRBuilder<>* m_builder = nullptr;
+        llvm::IntegerType* m_Int32Ty = nullptr;
 
         // A map that keeps attributes for each "__builtin_IB_atomic_*" function name.
         std::map<llvm::StringRef, OCLAtomicAttrs>  m_AtomicDescMap;
 
         void initResolveOCLAtomics();
-
-        /// @brief    Packs the given atomic operation and buffer type into "attributes" integer.
-        /// @param    op        Atomic operation
-        /// @param    bufType   Buffer Type
-        /// @returns  Computed "attributes" integer.
-        OCLAtomicAttrs genAtomicAttrs(AtomicOp op, BufferType bufType);
-
-        /// @brief  Get the atomic operation for atomic function name.
-        /// @param    name    The name of atomic intrinsic.
-        /// @returns  The atomic operation.
-        AtomicOp       getAtomicOp(llvm::StringRef name);
-
-        /// @brief  Get the buffer type for atomic function name.
-        /// @param    name    The name of atomic intrinsic.
-        /// @returns  The buffer type.
-        BufferType     getBufType(llvm::StringRef name);
 
         /// @brief  Initialize the "atomic name <--> attributes" map.
         void           initOCLAtomicsMap();

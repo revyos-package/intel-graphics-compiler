@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2018-2021 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -32,7 +32,7 @@ SPDX-License-Identifier: MIT
 // to include this file only.
 
 // Definition of integer Registry-key Values
-// (may merge this into igc_flags.def's macro)
+// (may merge this into igc_flags.h's macro)
 enum {
     // ForcePixelShaderSIMDMode
     FLAG_PS_SIMD_MODE_DEFAULT = 0,                 // default is SIMD8 compilation + heuristics to determine if we want to compile SIMD32/SIMD16
@@ -95,6 +95,7 @@ typedef enum {
     FLAG_CG_STAGE1_FASTEST_COMPILE = 3,
 } CG_FLAG_t;
 
+#define IsSupportedForStagedCompilation(platform) (true)
 #define RequestStage2(flag, ctx_ptr) (ctx_ptr != nullptr || flag == FLAG_CG_STAGE1_FASTEST_COMPILE)
 
 #define IsStage2RestSIMDs(prev_ctx_ptr) (prev_ctx_ptr != nullptr)

@@ -1,28 +1,10 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2019-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
+============================= end_copyright_notice ===========================*/
 
 //
 // Intel extension buffer structure, generic interface for
@@ -63,7 +45,16 @@ struct IntelExtensionStruct
 
 // Define RW buffer for Intel extensions.
 // Application should bind null resource, operations will be ignored.
+// If application needs to use slot other than u63, it needs to
+// define INTEL_SHADER_EXT_UAV_SLOT as a unused slot. This should be
+// defined before including this file in shader as:
+// #define INTEL_SHADER_EXT_UAV_SLOT u8
+
+#ifdef INTEL_SHADER_EXT_UAV_SLOT
+RWStructuredBuffer<IntelExtensionStruct> g_IntelExt : register( INTEL_SHADER_EXT_UAV_SLOT );
+#else
 RWStructuredBuffer<IntelExtensionStruct> g_IntelExt : register( u63 );
+#endif
 
 
 //

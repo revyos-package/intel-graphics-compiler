@@ -136,6 +136,7 @@ uint      __builtin_IB_movcr(uint reg) __attribute__((const));
 uint      __builtin_IB_hw_thread_id(void) __attribute__((const));
 uint      __builtin_IB_slice_id(void) __attribute__((const));
 uint      __builtin_IB_subslice_id(void) __attribute__((const));
+uint      __builtin_IB_dual_subslice_id(void) __attribute__((const));
 uint      __builtin_IB_eu_id(void) __attribute__((const));
 uint      __builtin_IB_get_sr0(uint DWNumber); // DWNumber=0|1|2|3
 uint      __builtin_IB_eu_thread_id(void) __attribute__((const));
@@ -236,6 +237,11 @@ float    __builtin_IB_atomic_cmpxchg_global_f32(__global float*, float, float);
 int      __builtin_IB_atomic_cmpxchg_local_i32(__local int*, int, int);
 float    __builtin_IB_atomic_cmpxchg_local_f32(__local float*, float, float);
 
+// Float Atomics
+#if defined(cl_intel_global_float_atomics)
+float    __builtin_IB_atomic_add_global_f32(__global float*, float);
+float    __builtin_IB_atomic_sub_global_f32(__global float*, float);
+#endif // defined(cl_intel_global_float_atomics)
 // 64bit Atomic operations
 #if defined(cl_intel_64bit_global_atomics_placeholder)
 long     __builtin_IB_atomic_add_global_i64(__global long*, long);
@@ -808,15 +814,20 @@ DECL_LOGICAL_OPERATIONS(bool, i1)
 // x * y, using round-to-zero
 double __builtin_IB_mul_rtz_f64(double x, double y) __attribute__((const));
 float __builtin_IB_mul_rtz_f32(float x, float y) __attribute__((const));
-// x * y + z, using round-to-zero
-double __builtin_IB_fma_rtz_f64(double x, double y, double z) __attribute__((const));
-float __builtin_IB_fma_rtz_f32(float x, float y, float z) __attribute__((const));
 // x + y, using round-to-zero
 double __builtin_IB_add_rtz_f64(double x, double y) __attribute__((const));
 float __builtin_IB_add_rtz_f32(float x, float y) __attribute__((const));
+// x * y + z, using round-to-zero
+double __builtin_IB_fma_rtz_f64(double x, double y, double z) __attribute__((const));
+float __builtin_IB_fma_rtz_f32(float x, float y, float z) __attribute__((const));
+// x * y + z, using round-to-positive-infinity
+double __builtin_IB_fma_rtp_f64(double x, double y, double z) __attribute__((const));
+// x * y + z, using round-to-negative-infinity
+double __builtin_IB_fma_rtn_f64(double x, double y, double z) __attribute__((const));
 
 
 
+#include "IGCBiF_Intrinsics_Dpas.cl"
 
 
 

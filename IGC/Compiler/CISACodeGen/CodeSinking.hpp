@@ -77,10 +77,12 @@ namespace IGC {
         bool generalCodeSinking;
         // diagnosis variable: int numChanges;
 
-        // fat BB is the BB with the largest register pressure
-        // Currently, used it for BB inside a loop only.
-        llvm::BasicBlock* m_fatBB;
-        uint32_t m_fatBBPressure;
+        // Keep track of fat loop. Might need to reverse LICM if
+        // a loop has excessive register-pressure at its preheader because
+        // there are a lot of loop-invariant insts that have been moved
+        // out of the loop.
+        std::vector<llvm::Loop*> m_fatLoops;
+        std::vector<uint32_t> m_fatLoopPressures;
 
         // try to hoist phi nodes with congruent incoming values
         typedef std::pair<llvm::Instruction*, llvm::Instruction*> InstPair;
@@ -120,9 +122,11 @@ namespace IGC {
         bool hoistCongruentPhi(llvm::PHINode* phi);
         bool hoistCongruentPhi(llvm::Function& F);
 
-        // Move LI back into loops
-        bool loopSink(llvm::BasicBlock* BBWithPressure, bool SinkMultipleLevel);
-        bool canLoopSink(llvm::Instruction* I, llvm::Loop* L, llvm::BasicBlock* BB);
+        llvm::Loop* findLoopAsPreheader(llvm::BasicBlock& blk);
+        // move LI back into loops
+        bool loopSink(llvm::Loop* LoopWithPressure, bool SinkMultipleLevel);
+        // pre-condition to sink an instruction into a loop
+        bool canLoopSink(llvm::Instruction* I, llvm::Loop* L);
         bool LoopSinkInstructions(
             llvm::SmallVector<llvm::Instruction*, 64> sinkCandidates, llvm::Loop* L);
 

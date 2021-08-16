@@ -7,10 +7,12 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "AdaptorCommon/ImplicitArgs.hpp"
+#include "AdaptorCommon/AddImplicitArgs.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantResolution.hpp"
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
+#include <llvm/ADT/MapVector.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -147,7 +149,7 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
         // Now, go over the users of this constant.
         // First, copy use list, because we will be removing uses.
         std::vector<User*> useVector(pGlobalVar->user_begin(), pGlobalVar->user_end());
-        std::map<Function*, std::map<GlobalVariable*, Value*> > funcToVarSet;
+        llvm::MapVector<Function*, llvm::MapVector<GlobalVariable*, Value*>> funcToVarSet;
 
         for (std::vector<User*>::iterator U = useVector.begin(), UE = useVector.end(); U != UE; ++U)
         {
@@ -162,6 +164,9 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
             // Don't have implicit arg if doing relocation
             if (userFunc->hasFnAttribute("visaStackCall"))
                 continue;
+            // Skip functions called from function marked with IndirectlyCalled attribute
+            if (AddImplicitArgs::hasIndirectlyCalledParent(userFunc))
+                continue;
 
             // Skip unused internal functions.
             if (mdUtils->findFunctionsInfoItem(userFunc) == mdUtils->end_FunctionsInfo())
@@ -173,6 +178,7 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
             ImplicitArgs implicitArgs(*userFunc, mdUtils);
 
             // Find the implicit argument representing this constant.
+            IGC_ASSERT_MESSAGE(userFunc->arg_size() >= implicitArgs.size(), "Function arg size does not match meta data args.");
             unsigned int ImplicitArgsBaseIndex = userFunc->arg_size() - implicitArgs.size();
             unsigned int implicitArgIndex = implicitArgs.getArgIndex(argType);
             unsigned int implicitArgIndexInFunc = ImplicitArgsBaseIndex + implicitArgIndex;

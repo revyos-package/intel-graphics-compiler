@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2020-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -155,11 +139,15 @@ Instruction *foldBitCastInst(Instruction *Inst);
 // Return the underlying global variable. Return nullptr if it does not exist.
 GlobalVariable *getUnderlyingGlobalVariable(Value *V);
 const GlobalVariable *getUnderlyingGlobalVariable(const Value *V);
+GlobalVariable *getUnderlyingGlobalVariable(LoadInst *LI);
+const GlobalVariable *getUnderlyingGlobalVariable(const LoadInst *LI);
 
 class Bale;
 
+bool isGlobalStore(Instruction *I);
 bool isGlobalStore(StoreInst *ST);
 
+bool isGlobalLoad(Instruction *I);
 bool isGlobalLoad(LoadInst* LI);
 
 // Check that V is correct as value for global store to StorePtr.
@@ -199,7 +187,7 @@ inline bool skipOptWithLargeBlock(const Function &F) {
 bool skipOptWithLargeBlock(FunctionGroup &FG);
 
 // getTwoAddressOperandNum : get operand number of two address operand
-int getTwoAddressOperandNum(CallInst *CI);
+llvm::Optional<unsigned> getTwoAddressOperandNum(CallInst *II);
 
 // isNot : test whether an instruction is a "not" instruction (an xor with
 //    constant all ones)
@@ -316,11 +304,40 @@ class IVSplitter {
   size_t Len = 0;
 
   enum class RegionType { LoRegion, HiRegion, FirstHalf, SecondHalf };
-  Region createSplitRegion(Type *Ty, RegionType RT);
 
-  std::pair<Value*, Value*> splitValue(Value& Val, RegionType RT1,
-                                       const Twine& Name1, RegionType RT2,
-                                       const Twine& Name2);
+  // Description of a RegionType in terms of initial offset and stride.
+  // Both ELOffset and ElStride are in elements.
+  struct RegionTrait {
+    size_t ElOffset = 0;
+    size_t ElStride = 0;
+  };
+
+  // describeSplit: given a requested RegionType and a number of source elements
+  // returns the detailed descripton of how to form such a split (in terms of
+  // an initial offset and stride).
+  // Example:
+  //    describeSplit(SecondHalf, 10) should return RegionTrait{ 5, 1 }
+  static RegionTrait describeSplit(RegionType RT, size_t ElNum);
+
+  // splitConstantVector: given a vector of constant values create
+  // a new constant vector containing only values corresponding to the
+  // desired RegionType
+  // Example:
+  //    splitConstantVector({ 1, 2, 3, 4}, HiRegion) -> {2, 4}
+  // Note: since every RegionType needs half of the original elements, the
+  // size of the input vector is expected to be even.
+  static Constant *splitConstantVector(const SmallVectorImpl<Constant *> &KV,
+                                       RegionType RT);
+  // createSplitRegion: given a type of the source vector (expected to be
+  // vector of i32 with even number of elements) and the desired RegionType
+  // returns genx::Region that can be used to construct an equivalent
+  // rdregion intrinsic
+  static genx::Region createSplitRegion(Type *SrcTy, RegionType RT);
+
+  std::pair<Value *, Value *> splitValue(Value &Val, RegionType RT1,
+                                         const Twine &Name1, RegionType RT2,
+                                         const Twine &Name2,
+                                         bool FoldConstants);
   Value* combineSplit(Value &V1, Value &V2, RegionType RT1, RegionType RT2,
                       const Twine& Name, bool Scalarize);
 
@@ -343,11 +360,11 @@ public:
   IVSplitter(Instruction &Inst, const unsigned *BaseOpIdx = nullptr);
 
   // Splitted Operand is expected to be a scalar/vector of i64 type
-  LoHiSplit splitOperandLoHi(unsigned SourceIdx);
-  HalfSplit splitOperandHalf(unsigned SourceIdx);
+  LoHiSplit splitOperandLoHi(unsigned SourceIdx, bool FoldConstants = true);
+  HalfSplit splitOperandHalf(unsigned SourceIdx, bool FoldConstants = true);
 
-  LoHiSplit splitValueLoHi(Value &V);
-  HalfSplit splitValueHalf(Value &V);
+  LoHiSplit splitValueLoHi(Value &V, bool FoldConstants = true);
+  HalfSplit splitValueHalf(Value &V, bool FoldConstants = true);
 
   // Combined values are expected to be a vector of i32 of the same size
   Value *combineLoHiSplit(const LoHiSplit &Split, const Twine &Name,
@@ -536,11 +553,6 @@ VISA_Align getVISA_Align(unsigned LogAlignment, unsigned GRFWidth);
 // chooses suitable log alignment which is convertible to VISA_Align.
 unsigned ceilLogAlignment(unsigned LogAlignment, unsigned GRFWidth);
 
-// If \p Ty is degenerate vector type <1 x ElTy>,
-// ElTy is returned, otherwise original type \p Ty is returned.
-const Type &fixDegenerateVectorType(const Type &Ty);
-Type &fixDegenerateVectorType(Type &Ty);
-
 // Checks whether provided wrpredregion intrinsic can be encoded
 // as legal SETP instruction.
 bool isWrPredRegionLegalSetP(const CallInst &WrPredRegion);
@@ -554,21 +566,6 @@ bool isWrPredRegionLegalSetP(const CallInst &WrPredRegion);
 // nullptr otherwise.
 CallInst *checkFunctionCall(Value *V, Function *F);
 
-// breakConstantVector : break vector of constexprs into a sequence of
-//                       InsertElementInsts.
-// CV - vector to break
-// CurInst - Instruction CV is a part of
-// InsertPt - point to insert new instructions at
-// Return the last InsertElementInst in the resulting chain,
-// or nullptr if there're no constexprs in CV.
-Value *breakConstantVector(ConstantVector *CV, Instruction *CurInst,
-                           Instruction *InsertPt);
-// breakConstantExprs : break constant expressions in instruction I.
-// Return true if any modifications have been made, false otherwise.
-bool breakConstantExprs(Instruction *I);
-// breakConstantExprs : break constant expressions in function F.
-// Return true if any modifications have been made, false otherwise.
-bool breakConstantExprs(Function *F);
 // Get possible number of GRFs for indirect region
 unsigned getNumGRFsPerIndirectForRegion(const genx::Region &R,
                                         const GenXSubtarget *ST, bool Allow2D);
@@ -704,6 +701,17 @@ bool isRealGlobalVariable(const GlobalVariable &GV);
 // Returns the size in bytes.
 std::size_t getStructElementPaddedSize(unsigned ElemIdx, unsigned NumOperands,
                                        const StructLayout &Layout);
+
+// Determine if there is a store to global variable Addr in between of L1 and
+// L2. L1 and L2 can be either vloads or regular stores.
+bool hasMemoryDeps(Instruction *L1, Instruction *L2, Value *Addr,
+                   DominatorTree *DT);
+
+// Return true if V is rdregion from a load result.
+bool isRdRFromGlobalLoad(Value *V);
+
+// Return true if wrregion has result of load as old value.
+bool isWrRToGlobalLoad(Value *V);
 
 } // namespace genx
 } // namespace llvm

@@ -61,6 +61,35 @@ class CShader
 {
 public:
     friend class CShaderProgram;
+
+    class ExtractMaskWrapper
+    {
+        // To enable ExtractMask of any vector size. Currently, only vector
+        // whose size is no larger than 32 has its extractMask calculated.
+    private:
+        uint32_t m_EM;     // 32 bit extractMask;
+        bool     m_hasEM;  // If true, m_EM is valid; otherwise, not valid.
+    public:
+        ExtractMaskWrapper(CShader* pS, llvm::Value* VecVal);
+
+        ExtractMaskWrapper() = delete;
+        ExtractMaskWrapper(const ExtractMaskWrapper&) = delete;
+        ExtractMaskWrapper& operator=(const ExtractMaskWrapper&) = delete;
+
+        // b: bit position, from 0 to 31.
+        bool isSet(uint32_t b) const
+        {
+            if (m_hasEM) {
+                IGC_ASSERT(b < 32);
+                return (1 << (b)) & m_EM;
+            }
+            return true;
+        }
+
+        uint32_t getEM() const { return m_EM; }
+        uint16_t hasEM() const { return m_hasEM; }
+    };
+
     CShader(llvm::Function*, CShaderProgram* pProgram);
     virtual ~CShader();
     void        Destroy();
@@ -86,6 +115,9 @@ public:
         IGC_ASSERT_MESSAGE(0, "Should be overridden in a derived class!");
         return nullptr;
     }
+    virtual bool passNOSInlineData() { return false; }
+    virtual bool loadThreadPayload() { return false; }
+    virtual unsigned getAnnotatedNumThreads() { return 0; }
     virtual bool hasReadWriteImage(llvm::Function& F) { return false; }
     virtual bool CompileSIMDSize(SIMDMode simdMode, EmitPass& EP, llvm::Function& F)
     {
@@ -161,9 +193,9 @@ public:
     uint        GetNbElementAndMask(llvm::Value* value, uint32_t& mask);
     void        CreatePayload(uint regCount, uint idxOffset, CVariable*& payload, llvm::Instruction* inst, uint paramOffset, uint8_t hfFactor);
     uint        GetNbVectorElementAndMask(llvm::Value* value, uint32_t& mask);
-    uint32_t    GetExtractMask(llvm::Value* value);
     uint16_t    AdjustExtractIndex(llvm::Value* value, uint16_t elemIndex);
     WIBaseClass::WIDependancy GetDependency(llvm::Value* v) const;
+    void        SetDependency(llvm::Value* v, WIBaseClass::WIDependancy dep);
     bool        GetIsUniform(llvm::Value* v) const;
     bool        InsideDivergentCF(const llvm::Instruction* inst) const;
     bool        InsideThreadDivergentCF(const llvm::Instruction* inst) const;
@@ -205,11 +237,13 @@ public:
     CVariable* BitCast(CVariable* var, VISA_Type newType);
     void        ResolveAlias(CVariable* var);
     void        CacheArgumentsList();
-    void        MapPushedInputs();
+    virtual void MapPushedInputs();
     void        CreateGatherMap();
     void        CreateConstantBufferOutput(SKernelProgram* pKernelProgram);
     void        CreateFunctionSymbol(llvm::Function* pFunc);
     void        CreateGlobalSymbol(llvm::GlobalVariable* pGlobal);
+
+    CVariable*  GetStructVariable(llvm::Value* v, bool forceVectorInit = false);
 
     void        CreateImplicitArgs();
     void        CreateAliasVars();
@@ -452,6 +486,8 @@ public:
     bool GetHasConstantStatelessAccess() const { return m_HasConstantStatelessMemoryAccess; }
     void SetHasGlobalAtomics() { m_HasGlobalAtomics = true; }
     bool GetHasGlobalAtomics() const { return m_HasGlobalAtomics; }
+    bool GetHasDPAS() const { return m_HasDPAS; }
+    void SetHasDPAS() { m_HasDPAS = true; }
     void IncStatelessWritesCount() { ++m_StatelessWritesCount; }
     void IncIndirectStatelessCount() { ++m_IndirectStatelessCount; }
     uint32_t GetStatelessWritesCount() const { return m_StatelessWritesCount; }
@@ -475,11 +511,23 @@ public:
         return globalSymbolMapping;
     }
 
+    int64_t GetKernelArgOffset(CVariable* argV)
+    {
+        auto it = kernelArgToPayloadOffsetMap.find(argV);
+        return it != kernelArgToPayloadOffsetMap.end() ? (int64_t) it->second : -1;
+    }
+
     DebugInfoData& GetDebugInfoData();
+
+    unsigned int GetPrimitiveTypeSizeInRegisterInBits(const llvm::Type* Ty) const;
+    unsigned int GetPrimitiveTypeSizeInRegister(const llvm::Type* Ty) const;
+    unsigned int GetScalarTypeSizeInRegisterInBits(const llvm::Type* Ty) const;
+    unsigned int GetScalarTypeSizeInRegister(const llvm::Type* Ty) const;
 
 protected:
     void GetPrintfStrings(std::vector<std::pair<unsigned int, std::string>>& printfStrings);
     bool CompileSIMDSizeInCommon(SIMDMode simdMode);
+    uint32_t GetShaderThreadUsageRate();
 private:
     // Return DefInst's CVariable if it could be reused for UseInst, and return
     // nullptr otherwise.
@@ -529,6 +577,9 @@ protected:
     // keep a map when we generate accurate mask for vector value
     // in order to reduce register usage
     llvm::DenseMap<llvm::Value*, uint32_t> extractMasks;
+
+    // keep a map for each kernel argument to its allocated payload offset
+    llvm::DenseMap<CVariable*, uint32_t> kernelArgToPayloadOffsetMap;
 
     CEncoder encoder;
     std::vector<CVariable*> setup;
@@ -589,6 +640,7 @@ protected:
 
     bool m_HasGlobalAtomics = false;
 
+    bool m_HasDPAS = false;
 
     uint32_t m_StatelessWritesCount = 0;
     uint32_t m_IndirectStatelessCount = 0;

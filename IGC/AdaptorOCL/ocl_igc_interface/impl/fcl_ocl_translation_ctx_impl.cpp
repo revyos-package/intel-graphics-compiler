@@ -174,13 +174,52 @@ void finalizeFEOutput(const IGC::AdaptorCM::Frontend::IOutputArgs& FEOutput,
     }
 }
 
+static llvm::Optional<std::string> MakeTemporaryCMSource(
+    CIF::Builtins::BufferSimple* Src,
+    std::string tmpFilename,
+    OclTranslationOutputBase& outI);
+
+static bool processCmSrcOptions(
+    llvm::SmallVectorImpl<const char*> &userArgs,
+    std::string optname,
+    std::string &inputFile) {
+
+    auto toErase = std::find_if(userArgs.begin(), userArgs.end(),
+        [&optname](const auto& Item) { return std::strcmp(Item, optname.c_str()) == 0; });
+    if (toErase != userArgs.end()) {
+        auto itFilename = toErase + 1;
+        if (itFilename != userArgs.end() && *itFilename != "--") {
+            inputFile = *itFilename;
+            userArgs.erase(toErase, toErase + 2);
+            return true;
+        }
+    }
+
+    optname += "=";
+    toErase = std::find_if(userArgs.begin(), userArgs.end(),
+        [&optname](const auto& Item) {
+          llvm::StringRef S = Item;
+          return S.startswith(optname);
+        });
+    if (toErase != userArgs.end()) {
+        inputFile = *toErase;
+        inputFile = inputFile.substr(optname.length());
+        userArgs.erase(toErase);
+        return true;
+    }
+
+    return false;
+}
+
 static std::vector<const char*>
     processFeOptions(llvm::sys::DynamicLibrary &LibInfo,
-                     const std::string& inputFile,
+                     CIF::Builtins::BufferSimple* Src,
+                     OclTranslationOutputBase& outI,
                      CIF::Builtins::BufferSimple* options,
                      llvm::StringSaver& stringSaver,
                      const char *platform,
-                     unsigned stepping) {
+                     unsigned stepping,
+                     bool &isMemFile) {
 
     llvm::SmallVector<const char*, 20> userArgs;
 
@@ -199,6 +238,16 @@ static std::vector<const char*>
     auto cmfeDefaultArchOpt = llvm::sys::Process::GetEnv("IGC_CMFE_DEFAULT_ARCH");
     const std::string& cmfeDefaultArch =
         cmfeDefaultArchOpt ? cmfeDefaultArchOpt.getValue() : "SKL";
+
+    std::string inputFile = "src.cm";
+    isMemFile = processCmSrcOptions(userArgs, "-cm-src", inputFile) ||
+                processCmSrcOptions(userArgs, "-s", inputFile);
+    if (!isMemFile) {
+        auto OptSrc = MakeTemporaryCMSource(Src, inputFile, outI);
+        if (!OptSrc)
+            return {};
+        inputFile = OptSrc.getValue();
+    }
 
     std::vector<const char*> result = {
         "-emit-spirv",
@@ -239,6 +288,7 @@ static std::vector<const char*>
 // is capable to handle in-memory objects properly
 static llvm::Optional<std::string> MakeTemporaryCMSource(
     CIF::Builtins::BufferSimple* Src,
+    std::string tmpFilename,
     OclTranslationOutputBase& outI) {
 
     auto& outputInterface = *outI.GetImpl();
@@ -276,7 +326,7 @@ static llvm::Optional<std::string> MakeTemporaryCMSource(
 
     // Dump Src
     PathT srcPath{ workDir.begin(), workDir.end() };
-    llvm::sys::path::append(srcPath, "src.cm");
+    llvm::sys::path::append(srcPath, tmpFilename);
 
     std::string strPath(srcPath.begin(), srcPath.end());
     std::ofstream TmpSrc(strPath, std::ios::out);
@@ -419,15 +469,15 @@ OclTranslationOutputBase* CIF_PIMPL(FclOclTranslationCtx)::TranslateCM(
     if (!MaybeFE)
         return outputInterface;
 
-    auto OptSrc = MakeTemporaryCMSource(src, Out);
-    if (!OptSrc)
-        return outputInterface; // proper error message is already set
-
     llvm::BumpPtrAllocator A;
     llvm::StringSaver Saver(A);
     auto& FE = MaybeFE.getValue();
-    auto FeArgs = processFeOptions(FE.LibInfo(), OptSrc.getValue(),
-                                   options, Saver, platformStr, stepping);
+    bool isMemFile = false;
+    auto FeArgs = processFeOptions(FE.LibInfo(), src, Out,
+                                   options, Saver, platformStr,
+                                   stepping, isMemFile);
+    if (FeArgs.empty())
+        return outputInterface; // proper error message is already set
 
     auto Drv = FE.buildDriverInvocation(FeArgs.size(), FeArgs.data());
     if (!Drv)
@@ -443,6 +493,11 @@ OclTranslationOutputBase* CIF_PIMPL(FclOclTranslationCtx)::TranslateCM(
 
     IGC::AdaptorCM::Frontend::InputArgs InputArgs;
     InputArgs.CompilationOpts = Drv->getFEArgs();
+    // if real file is used, then don't fill InputArgs.InputText
+    // with content of source to avoid compilation from
+    // both memory and real temporary files
+    if (isMemFile)
+        InputArgs.InputText = src->GetMemory<char>();
     auto FEOutput = FE.translate(InputArgs);
     if (!FEOutput)
     {

@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -230,14 +214,15 @@ IN THE SOFTWARE.
 
 #include "FunctionGroup.h"
 #include "GenX.h"
-#include "GenXRegion.h"
 #include "GenXAlignmentInfo.h"
+#include "GenXRegion.h"
 #include "GenXSubtarget.h"
 #include "IgnoreRAUWValueMap.h"
+#include "Probe/Assertion.h"
 #include "llvm/ADT/Hashing.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Pass.h"
 #include <string>
-#include "Probe/Assertion.h"
 
 namespace llvm {
   class BranchInst;
@@ -379,7 +364,6 @@ inline raw_ostream &operator<<(raw_ostream &OS, const Bale &B) {
 // GenXBaling : the baling information for a Function or FunctionGroup (depending
 // on whether GenXFuncBaling or GenXGroupBaling created it)
 class GenXBaling {
-  BalingKind Kind;
   typedef llvm::ValueMap<const Value*, genx::BaleInfo,
                          IgnoreRAUWValueMapConfig<const Value *>>
       InstMap_t;
@@ -398,6 +382,8 @@ class GenXBaling {
   NeedCloneStack_t NeedCloneStack;
   SmallVector<CallInst *, 4> TwoAddrSends;
 protected:
+  BalingKind Kind;
+  DominatorTree *DT;
   GenXLiveness *Liveness; // only in group baling
 public:
   genx::AlignmentInfo AlignInfo;
@@ -407,8 +393,6 @@ public:
         Liveness(nullptr) {}
   // clear : clear out the analysis
   void clear() { InstMap.clear(); }
-  // processFunctionGroup : process all the Functions in a FunctionGroup
-  bool processFunctionGroup(FunctionGroup *FG);
   // processFunction : process one Function
   bool processFunction(Function *F);
   // processInst : recalculate the baling info for an instruction
@@ -508,6 +492,7 @@ public:
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   bool runOnFunction(Function &F) override {
     clear();
+    DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     return processFunction(&F);
   }
   // createPrinterPass : get a pass to print the IR, together with the GenX
@@ -533,7 +518,7 @@ public:
   virtual StringRef getPassName() const {
     return "GenX instruction baling analysis for a function group";
   }
-  void getAnalysisUsage(AnalysisUsage &AU) const;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
   bool runOnFunctionGroup(FunctionGroup &FG);
   // createPrinterPass : get a pass to print the IR, together with the GenX
   // specific analyses
@@ -541,6 +526,8 @@ public:
                                   const std::string &Banner) const {
     return createGenXGroupPrinterPass(O, Banner);
   }
+  // processFunctionGroup : process all the Functions in a FunctionGroup
+  bool processFunctionGroup(FunctionGroup *FG);
 };
 void initializeGenXGroupBalingPass(PassRegistry &);
 

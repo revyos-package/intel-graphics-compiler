@@ -1,34 +1,16 @@
-/*===================== begin_copyright_notice ==================================
+/*========================== begin_copyright_notice ============================
 
-Copyright (c) 2017 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+SPDX-License-Identifier: MIT
 
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-======================= end_copyright_notice ==================================*/
+============================= end_copyright_notice ===========================*/
 
 #ifndef __GRAPHCOLOR_H__
 #define __GRAPHCOLOR_H__
 
 #include "BitSet.h"
-#include "Gen4_IR.hpp"
+#include "G4_IR.hpp"
 #include "RegAlloc.h"
 #include "RPE.h"
 #include "SpillManagerGMRF.h"
@@ -60,6 +42,8 @@ namespace vISA
             BankConflict &srcBC1, BankConflict &srcBC2);
         void setupBankConflictsOneGRFOld(G4_INST* inst, int &bank1RegNum, int &bank2RegNum, float GRFRatio, unsigned &internalConflict);
         bool isOddOffset(unsigned offset) const;
+        void setupBankConflictsforDPAS(G4_INST* inst);
+        bool hasDpasInst = false;
 
         void setupBankConflictsforTwoGRFs(G4_INST* inst);
         void setupBankConflictsforMad(G4_INST* inst);
@@ -721,6 +705,7 @@ namespace vISA
         static bool owordAligned(unsigned offset) { return offset % 16 == 0; }
         template <class REGION_TYPE> bool isUnalignedRegion(REGION_TYPE * region, unsigned execSize);
         bool shouldPreloadDst(G4_INST* instContext, G4_BB* curBB);
+        bool livenessCandidate(const G4_Declare* decl) const;
         void updateDefSet(std::set<G4_Declare*>& defs, G4_Declare* referencedDcl);
         void detectUndefinedUses(LivenessAnalysis& liveAnalysis, G4_Kernel& kernel);
         void markBlockLocalVar(G4_RegVar* var, unsigned bbId);
@@ -730,6 +715,7 @@ namespace vISA
         void expandSpillIntrinsic(G4_BB*);
         void expandFillIntrinsic(G4_BB*);
         void expandSpillFillIntrinsics(unsigned);
+        void saveRestoreA0(G4_BB*);
 
         static const RAVarInfo defaultValues;
         std::vector<RAVarInfo> vars;
@@ -750,6 +736,9 @@ namespace vISA
         std::unordered_map<const G4_BB*, unsigned> subretloc;
         // map ret location to declare for call/ret
         std::map<uint32_t, G4_Declare*> retDecls;
+
+        // store instructions that shouldnt be rematerialized.
+        std::unordered_set<G4_INST*> dontRemat;
 
         RAVarInfo &allocVar(const G4_Declare* dcl)
         {
@@ -772,6 +761,9 @@ namespace vISA
         // instruction to save/restore vISA FP, only present in functions
         G4_INST* saveBE_FPInst = nullptr;
         G4_INST* restoreBE_FPInst = nullptr;
+
+        // instruction go update BE_FP, only present in functions
+        G4_INST* setupBE_FP = nullptr;
 
         // new temps for each reference of spilled address/flag decls
         std::unordered_set<G4_Declare*> addrFlagSpillDcls;
@@ -853,6 +845,9 @@ namespace vISA
 
         G4_INST* getSaveBE_FPInst() const { return saveBE_FPInst; };
         G4_INST* getRestoreBE_FPInst() const { return restoreBE_FPInst; };
+
+        G4_INST* getBEFPSetupInst() { return setupBE_FP; }
+        void setBEFPSetupInst(G4_INST* i) { setupBE_FP = i; }
 
         static unsigned owordToGRFSize(unsigned numOwords);
         static unsigned hwordToGRFSize(unsigned numHwords);
@@ -968,6 +963,14 @@ namespace vISA
             for (auto dcl : kernel.Declares)
             {
                 setBBId(dcl, UINT_MAX);
+                resetLocalLR(dcl);
+            }
+        }
+
+        void clearLocalLiveRanges()
+        {
+            for (auto dcl : kernel.Declares)
+            {
                 resetLocalLR(dcl);
             }
         }
@@ -1243,6 +1246,16 @@ namespace vISA
                 setSubRegAlign(dcl, dcl->getSubRegAlign());
                 setEvenAligned(dcl, dcl->isEvenAlign());
             }
+        }
+
+        bool isNoRemat(G4_INST* inst)
+        {
+            return dontRemat.find(inst) != dontRemat.end();
+        }
+
+        void addNoRemat(G4_INST* inst)
+        {
+            dontRemat.insert(inst);
         }
     };
 

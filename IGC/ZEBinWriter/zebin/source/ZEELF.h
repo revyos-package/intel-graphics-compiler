@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 //===- ZEELF.hpp ------------------------------------------------*- C++ -*-===//
-// ZE Binary Utilitis
+// ZE Binary Utilities
 //
 // \file
 // The file define the special enum value for ZE binary
@@ -33,9 +33,11 @@ enum ELF_TYPE_ZEBIN
 // ELF section type for ELF32_Shdr::sh_type
 enum SHT_ZEBIN : uint32_t
 {
-    SHT_ZEBIN_SPIRV      = 0xff000009, // .spv.kernel section, value the same as SHT_OPENCL_SPIRV
+    SHT_ZEBIN_SPIRV      = 0xff000009, // .spv section, value the same as SHT_OPENCL_SPIRV
     SHT_ZEBIN_ZEINFO     = 0xff000011, // .ze.info section
-    SHT_ZEBIN_GTPIN_INFO = 0xff000012  // .gtpin_info section
+    SHT_ZEBIN_GTPIN_INFO = 0xff000012, // .gtpin_info section
+    SHT_ZEBIN_VISAASM    = 0xff000013, // .visaasm section
+    SHT_ZEBIN_MISC       = 0xff000014  // .misc section
 };
 
 // ELF relocation type for ELF32_Rel::ELF32_R_TYPE
@@ -78,7 +80,7 @@ struct TargetFlags {
             // 0 - elfFileHeader::machine is PRODUCT_FAMILY
             // 1 - elfFileHeader::machine is GFXCORE_FAMILY
             bool machineEntryUsesGfxCoreInsteadOfProductFamily : 1;
-            // bit[20:16]:  max compatbile device revision Id (stepping)
+            // bit[20:16]:  max compatible device revision Id (stepping)
             uint8_t maxHwRevisionId : 5;
             // bit[23:21]: generator of this device binary. Value defined in above GeneratorId
             uint8_t generatorId : 3;

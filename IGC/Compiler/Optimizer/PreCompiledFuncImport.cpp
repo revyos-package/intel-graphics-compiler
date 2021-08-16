@@ -37,7 +37,8 @@ SPDX-License-Identifier: MIT
 #include "AdaptorOCL/OCL/BuiltinResource.h"
 #include "AdaptorOCL/OCL/LoadBuffer.h"
 
-#include <unordered_map>
+#include <vector>
+#include <utility>
 
 using namespace llvm;
 using namespace IGC;
@@ -497,10 +498,52 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
     FuncNeedIA.clear();
     NewFuncWithIA.clear();
 
+    std::vector<std::pair<CallInst*,CallInst*>> replaceInsts;
+    auto createIntrinsicCall = [&](CallInst* CI, GenISAIntrinsic::ID GISAIntr) {
+        IRBuilder<> builder(CI);
+        std::vector<Value*> args;
+        std::vector<Type*> types;
+
+        types.push_back(CI->getType());
+
+        for (unsigned i = 0; i < CI->getNumArgOperands(); i++)
+        {
+            types.push_back(CI->getArgOperand(i)->getType());
+            args.push_back(CI->getArgOperand(i));
+        }
+        Function* pFunc = GenISAIntrinsic::getDeclaration(&M, GISAIntr, types);
+        CallInst* pCall = builder.CreateCall(pFunc, args);
+        replaceInsts.emplace_back(CI, pCall);
+    };
+
+    for (auto& F : M) {
+        if (isPrecompiledEmulationFunction(&F)) {
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    if (CallInst* CI = dyn_cast<CallInst>(&I)) {
+                        if (Function* calledFunc = CI->getCalledFunction()) {
+                            if (calledFunc->getName().equals("GenISA_fma_rtz"))
+                            {
+                                createIntrinsicCall(CI, GenISAIntrinsic::GenISA_fma_rtz);
+                            }
+                            else if (calledFunc->getName().equals("GenISA_fma_rtp"))
+                            {
+                                createIntrinsicCall(CI, GenISAIntrinsic::GenISA_fma_rtp);
+                            }
+                            else if (calledFunc->getName().equals("GenISA_fma_rtn"))
+                            {
+                                createIntrinsicCall(CI, GenISAIntrinsic::GenISA_fma_rtn);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     //post-process the Int32 precompiled emulation function for div/rem
     if (isI32DivRem() || isI32DivRemSP() || isSPDiv())
     {
-        std::unordered_map<CallInst*, CallInst*> replaceInsts;
         for (auto FI = M.begin(), FE = M.end(); FI != FE; )
         {
             llvm::Function* func = &(*FI);
@@ -515,52 +558,32 @@ bool PreCompiledFuncImport::runOnModule(Module& M)
                     {
                         if (CallInst * CI = dyn_cast<CallInst>(I))
                         {
-                            Function* pFunc = nullptr;
-                            GenISAIntrinsic::ID GISAIntr = GenISAIntrinsic::no_intrinsic;
-                            //ATTN: This can be made generic/cleaned up through an enum or something
-                            if (CI->getCalledFunction()->getName().equals("GenISA_fma_rtz"))
+                            if (Function* calledFunc = CI->getCalledFunction())
                             {
-                                GISAIntr = GenISAIntrinsic::GenISA_fma_rtz;
-                            }
-                            else if (CI->getCalledFunction()->getName().equals("GenISA_mul_rtz"))
-                            {
-                                GISAIntr = GenISAIntrinsic::GenISA_mul_rtz;
-                            }
-                            else if (CI->getCalledFunction()->getName().equals("GenISA_add_rtz"))
-                            {
-                                GISAIntr = GenISAIntrinsic::GenISA_add_rtz;
-                            }
-                            else if (CI->getCalledFunction()->getName().equals("GenISA_uitof_rtz"))
-                            {
-                                GISAIntr = GenISAIntrinsic::GenISA_uitof_rtz;
-                            }
-                            if (GISAIntr != GenISAIntrinsic::no_intrinsic)
-                            {
-                                IRBuilder<> builder(CI);
-                                std::vector<Value*> args;
-                                std::vector<Type*> types;
-
-                                types.push_back(CI->getType());
-
-                                for (unsigned int i = 0; i < CI->getNumArgOperands(); i++)
+                                if (calledFunc->getName().equals("GenISA_mul_rtz"))
                                 {
-                                    types.push_back(CI->getArgOperand(i)->getType());
-                                    args.push_back(CI->getArgOperand(i));
+                                    createIntrinsicCall(CI, GenISAIntrinsic::GenISA_mul_rtz);
                                 }
-                                pFunc = GenISAIntrinsic::getDeclaration(&M, GISAIntr, types);
-                                CallInst* pCall = builder.CreateCall(pFunc, args);
-                                replaceInsts.insert(std::make_pair(CI, pCall));
+                                else if (calledFunc->getName().equals("GenISA_add_rtz"))
+                                {
+                                    createIntrinsicCall(CI, GenISAIntrinsic::GenISA_add_rtz);
+                                }
+                                else if (calledFunc->getName().equals("GenISA_uitof_rtz"))
+                                {
+                                    createIntrinsicCall(CI, GenISAIntrinsic::GenISA_uitof_rtz);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        for (auto p : replaceInsts)
-        {
-            p.first->replaceAllUsesWith(p.second);
-            p.first->eraseFromParent();
-        }
+    }
+
+    for (auto p : replaceInsts)
+    {
+        p.first->replaceAllUsesWith(p.second);
+        p.first->eraseFromParent();
     }
 
     // Set new call inst's calling convention to its callee's

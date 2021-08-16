@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -82,7 +66,8 @@ void FunctionGroupAnalysis::clear() {
   M = nullptr;
 }
 
-FunctionGroup *FunctionGroupAnalysis::getGroup(Function *F, FGType Type) {
+FunctionGroup *FunctionGroupAnalysis::getGroup(const Function *F,
+                                               FGType Type) const {
   auto i = GroupMap[Type].find(F);
   if (i == GroupMap[Type].end())
     return nullptr;
@@ -90,18 +75,18 @@ FunctionGroup *FunctionGroupAnalysis::getGroup(Function *F, FGType Type) {
 }
 
 // getGroup : get the FunctionGroup containing Function F, else 0
-FunctionGroup *FunctionGroupAnalysis::getGroup(Function *F) {
+FunctionGroup *FunctionGroupAnalysis::getGroup(const Function *F) const {
   return getGroup(F, FGType::GROUP);
 }
 
-FunctionGroup *FunctionGroupAnalysis::getSubGroup(Function *F) {
+FunctionGroup *FunctionGroupAnalysis::getSubGroup(const Function *F) const {
   return getGroup(F, FGType::SUBGROUP);
 }
 
 // getGroupForHead : get the FunctionGroup for which Function F is the
 // head, else 0
-FunctionGroup *FunctionGroupAnalysis::getGroupForHead(Function *F) {
-  auto FG = getGroup(F);
+FunctionGroup *FunctionGroupAnalysis::getGroupForHead(const Function *F) const {
+  auto *FG = getGroup(F);
   IGC_ASSERT(FG->size());
   if (*FG->begin() == F)
     return FG;
@@ -383,6 +368,7 @@ bool FGPassManager::doFGInitialization(unsigned Begin, unsigned End,
       // TODO: SCC PassManager?
       IGC_ASSERT_MESSAGE(PM->getPassManagerType() == PMT_FunctionPassManager,
         "Invalid FGPassManager member");
+      IGC_ASSERT(FGA.getModule());
       Changed |= ((FPPassManager*)PM)->doInitialization(*FGA.getModule());
     } else {
       Changed |=
@@ -423,6 +409,12 @@ bool FGPassManager::runFGPassSequence(unsigned &Pass) {
   // module passes so we will need to query it every time we
   // execute sequence of passes.
   FunctionGroupAnalysis &FGA = getAnalysis<FunctionGroupAnalysis>();
+  if (!FGA.getModule()) {
+#ifndef NDEBUG
+    llvm::errs() << "warning, trying to access stale FGA!\n";
+#endif
+    return false;
+  }
   bool Changed = false;
 
   Changed |= doFGInitialization(BeginPass, Pass, FGA);

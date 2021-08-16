@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2017-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -35,6 +19,7 @@ IN THE SOFTWARE.
 #include "GenXLiveness.h"
 #include "GenXRegion.h"
 #include "GenXUtil.h"
+#include "Probe/Assertion.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/InstructionSimplify.h"
@@ -42,16 +27,17 @@ IN THE SOFTWARE.
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Local.h"
-#include "Probe/Assertion.h"
 
 // Part of the bodge to allow abs to bale in to sext/zext. This needs to be set
 // to some arbitrary value that does not clash with any
@@ -82,7 +68,12 @@ static cl::opt<bool> BaleFNeg("bale-fneg", cl::init(true), cl::Hidden,
 // Administrivia for GenXFuncBaling pass
 //
 char GenXFuncBaling::ID = 0;
-INITIALIZE_PASS(GenXFuncBaling, "GenXFuncBaling", "GenXFuncBaling", false, false)
+
+INITIALIZE_PASS_BEGIN(GenXFuncBaling, "GenXFuncBaling", "GenXFuncBaling", false,
+                      false)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(GenXFuncBaling, "GenXFuncBaling", "GenXFuncBaling", false,
+                    false)
 
 FunctionPass *llvm::createGenXFuncBalingPass(BalingKind Kind, GenXSubtarget *ST)
 {
@@ -93,6 +84,7 @@ FunctionPass *llvm::createGenXFuncBalingPass(BalingKind Kind, GenXSubtarget *ST)
 void GenXFuncBaling::getAnalysisUsage(AnalysisUsage &AU) const
 {
   FunctionPass::getAnalysisUsage(AU);
+  AU.addRequired<DominatorTreeWrapperPass>();
   AU.setPreservesCFG();
 }
 
@@ -102,6 +94,7 @@ void GenXFuncBaling::getAnalysisUsage(AnalysisUsage &AU) const
 char GenXGroupBaling::ID = 0;
 INITIALIZE_PASS_BEGIN(GenXGroupBaling, "GenXGroupBaling", "GenXGroupBaling", false, false)
 INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
 INITIALIZE_PASS_END(GenXGroupBaling, "GenXGroupBaling", "GenXGroupBaling", false, false)
 
 FunctionGroupPass *llvm::createGenXGroupBalingPass(BalingKind Kind, GenXSubtarget *ST)
@@ -113,7 +106,9 @@ FunctionGroupPass *llvm::createGenXGroupBalingPass(BalingKind Kind, GenXSubtarge
 void GenXGroupBaling::getAnalysisUsage(AnalysisUsage &AU) const
 {
   FunctionGroupPass::getAnalysisUsage(AU);
-  AU.addRequired<GenXLiveness>();
+  if (GenXBaling::Kind == BK_CodeGen)
+    AU.addRequired<GenXLiveness>();
+  AU.addRequired<DominatorTreeGroupWrapperPass>();
   AU.setPreservesCFG();
   AU.addPreserved<GenXModule>();
   AU.addPreserved<GenXLiveness>();
@@ -126,7 +121,7 @@ void GenXGroupBaling::getAnalysisUsage(AnalysisUsage &AU) const
 bool GenXGroupBaling::runOnFunctionGroup(FunctionGroup &FG)
 {
   clear();
-  Liveness = &getAnalysis<GenXLiveness>();
+  Liveness = getAnalysisIfAvailable<GenXLiveness>();
   return processFunctionGroup(&FG);
 }
 
@@ -134,10 +129,10 @@ bool GenXGroupBaling::runOnFunctionGroup(FunctionGroup &FG)
  * processFunctionGroup : run instruction baling analysis on one
  *  function group
  */
-bool GenXBaling::processFunctionGroup(FunctionGroup *FG)
-{
+bool GenXGroupBaling::processFunctionGroup(FunctionGroup *FG) {
   bool Modified = false;
   for (auto i = FG->begin(), e = FG->end(); i != e; ++i) {
+    DT = getAnalysis<DominatorTreeGroupWrapperPass>().getDomTree(*i);
     Modified |= processFunction(*i);
   }
   return Modified;
@@ -439,6 +434,12 @@ bool GenXBaling::operandCanBeBaled(
     // intrinsic, since in that case AI is initialized to a state
     // where there are no region restrictions.)
     bool CanSplitBale = true;
+    auto IID = GenXIntrinsic::getGenXIntrinsicID(Inst);
+    CanSplitBale = ((IID != GenXIntrinsic::genx_dpas) &&
+                    (IID != GenXIntrinsic::genx_dpas2) &&
+                    (IID != GenXIntrinsic::genx_dpasw) &&
+                    (IID != GenXIntrinsic::genx_dpas_nosrc0) &&
+                    (IID != GenXIntrinsic::genx_dpasw_nosrc0));
     Region RdR(Opnd, BaleInfo());
     if (!isRegionOKForIntrinsic(AI.Info, RdR, CanSplitBale))
       return false;
@@ -519,17 +520,7 @@ void GenXBaling::processWrRegion(Instruction *Inst)
     // The instruction has multiple uses.
     // We don't want to bale in the following cases, as they seem to make the
     // code worse, unless this is load from a global variable.
-    if (V->getParent() != Inst->getParent()) {
-      auto isRegionFromGlobalLoad = [](Value *V) {
-        if (!GenXIntrinsic::isRdRegion(V))
-          return false;
-        auto LI = dyn_cast<LoadInst>(cast<CallInst>(V)->getArgOperand(0));
-        return LI && getUnderlyingGlobalVariable(LI->getPointerOperand());
-      };
-      // 0. It is in a different basic block to the wrregion.
-      if (!isRegionFromGlobalLoad(V))
-        V = nullptr;
-    } else {
+    if (V->getParent() == Inst->getParent()) {
       // 1. The maininst is a select.
       Bale B;
       buildBale(V, &B);
@@ -552,12 +543,30 @@ void GenXBaling::processWrRegion(Instruction *Inst)
           }
         }
       }
+    } else {
+      // 3. It is in a different basic block to the wrregion.
+      if (!genx::isRdRFromGlobalLoad(V))
+        V = nullptr;
     }
     // FIXME: Baling on WRREGION is not the right way to reduce the overhead
     // from `wrregion`. Instead, register coalescing should be applied to
     // enable direct defining of the WRREGION and minimize the value
     // duplication.
   }
+
+  // Do not bale rdregion into wrregion if they access the same global
+  // and there is a store in between
+  if (V && genx::isRdRFromGlobalLoad(V) && genx::isWrRToGlobalLoad(Inst)) {
+    auto *LI1 = cast<LoadInst>(
+        Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
+    auto *LI2 = cast<LoadInst>(cast<Instruction>(V)->getOperand(
+        GenXIntrinsic::GenXRegion::OldValueOperandNum));
+    auto *GV1 = getUnderlyingGlobalVariable(LI1);
+    auto *GV2 = getUnderlyingGlobalVariable(LI2);
+    if ((GV1 == GV2) && genx::hasMemoryDeps(LI1, LI2, GV1, DT))
+      V = nullptr;
+  }
+
   if (V && isBalableNewValueIntoWrr(V, Region(Inst, BaleInfo()))) {
     LLVM_DEBUG(llvm::dbgs()
                << __FUNCTION__ << " setting operand #" << OperandNum
@@ -1177,6 +1186,10 @@ bool GenXBaling::isBalableNewValueIntoWrr(Value *V, const Region &WrrR) {
       switch (AI.getCategory()) {
       case GenXIntrinsicInfo::GENERAL: {
         bool CanSplitBale = true;
+        CanSplitBale = ((ValIntrinID != GenXIntrinsic::genx_dpas) &&
+                        (ValIntrinID != GenXIntrinsic::genx_dpasw) &&
+                        (ValIntrinID != GenXIntrinsic::genx_dpas_nosrc0) &&
+                        (ValIntrinID != GenXIntrinsic::genx_dpasw_nosrc0));
         if (isRegionOKForIntrinsic(AI.Info, WrrR, CanSplitBale))
           return true;
       } break;

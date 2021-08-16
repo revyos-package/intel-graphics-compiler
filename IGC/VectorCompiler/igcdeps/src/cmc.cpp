@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2019-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -54,6 +38,8 @@ CMKernel::CMKernel(const PLATFORM& platform)
 
 CMKernel::~CMKernel()
 {
+    // TODO: refactor memory managment.
+    m_kernelInfo.m_kernelProgram.simd1.Destroy();
     delete m_btiLayout.getModifiableLayout();
 }
 
@@ -139,6 +125,7 @@ class KernelArgInfoBuilder
                 case ArgKind::Image1D:
                 case ArgKind::Image2D:
                 case ArgKind::Image3D:
+                case ArgKind::BindlessBuffer:
                     return Global;
                 case ArgKind::Sampler:
                     return Constant;
@@ -298,11 +285,11 @@ void CMKernel::createImplicitArgumentsAnnotation(unsigned payloadPosition)
 
 void CMKernel::createPointerGlobalAnnotation(unsigned index, unsigned offset,
                                              unsigned sizeInBytes, unsigned BTI,
-                                             ArgAccessKind access)
+                                             ArgAccessKind access, bool isBindless)
 {
     auto ptrAnnotation = std::make_unique<iOpenCL::PointerArgumentAnnotation>();
-    ptrAnnotation->IsStateless = true;
-    ptrAnnotation->IsBindlessAccess = false;
+    ptrAnnotation->IsStateless = !isBindless;
+    ptrAnnotation->IsBindlessAccess = isBindless;
     ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_GLOBAL;
     ptrAnnotation->ArgumentNumber = index;
     ptrAnnotation->BindingTableIndex = BTI;
@@ -313,11 +300,14 @@ void CMKernel::createPointerGlobalAnnotation(unsigned index, unsigned offset,
     ptrAnnotation->IsEmulationArgument = false;
     m_kernelInfo.m_pointerArgument.push_back(std::move(ptrAnnotation));
 
+    const auto zeAddrMode = isBindless ?
+      zebin::PreDefinedAttrGetter::ArgAddrMode::bindless :
+      zebin::PreDefinedAttrGetter::ArgAddrMode::stateless;
+
     // EnableZEBinary: ZEBinary related code
     zebin::ZEInfoBuilder::addPayloadArgumentByPointer(
         m_kernelInfo.m_zePayloadArgs, offset, sizeInBytes, index,
-        zebin::PreDefinedAttrGetter::ArgAddrMode::stateless,
-        zebin::PreDefinedAttrGetter::ArgAddrSpace::global,
+        zeAddrMode, zebin::PreDefinedAttrGetter::ArgAddrSpace::global,
         getZEArgAccessType(access));
     zebin::ZEInfoBuilder::addBindingTableIndex(m_kernelInfo.m_zeBTIArgs, BTI,
                                                index);
@@ -391,6 +381,23 @@ void CMKernel::createSizeAnnotation(unsigned initPayloadPosition,
         iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
 }
 
+void CMKernel::createPrintfBufferArgAnnotation(unsigned Index, unsigned BTI,
+                                               unsigned Size,
+                                               unsigned ArgOffset) {
+  m_kernelInfo.m_printfBufferAnnotation =
+      std::make_unique<iOpenCL::PrintfBufferAnnotation>();
+  m_kernelInfo.m_argIndexMap[Index] = BTI;
+  m_kernelInfo.m_printfBufferAnnotation->ArgumentNumber = Index;
+  m_kernelInfo.m_printfBufferAnnotation->PayloadPosition = ArgOffset;
+  m_kernelInfo.m_printfBufferAnnotation->Index = 0;
+  m_kernelInfo.m_printfBufferAnnotation->DataSize = Size;
+
+  // EnableZEBinary: ZEBinary related code
+  zebin::ZEInfoBuilder::addPayloadArgumentImplicit(
+      m_kernelInfo.m_zePayloadArgs,
+      zebin::PreDefinedAttrGetter::ArgType::printf_buffer, ArgOffset, Size);
+}
+
 // TODO: refactor this function with the OCL part.
 void CMKernel::RecomputeBTLayout(int numUAVs, int numResources)
 {
@@ -460,8 +467,6 @@ static void setSymbolsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
     KernelProgram.m_funcSymbolTableEntries = Info.getSymbolTable().Entries;
     // EnableZEBinary: ZEBinary related code
     KernelProgram.m_symbols.function = Info.ZEBinInfo.Symbols.Functions;
-    KernelProgram.m_symbols.global = Info.ZEBinInfo.Symbols.Globals;
-    KernelProgram.m_symbols.globalConst = Info.ZEBinInfo.Symbols.Constants;
   }
   // EnableZEBinary: ZEBinary related code
   KernelProgram.m_symbols.local = Info.ZEBinInfo.Symbols.Local;
@@ -481,6 +486,7 @@ static void generateKernelArgInfo(
     case KindType::Image1D:
     case KindType::Image2D:
     case KindType::Image3D:
+    case KindType::BindlessBuffer:
       ArgsAnnotationBuilder.insert(Arg.getIndex(), Arg.getKind(),
                                    Arg.getAccessKind());
       break;
@@ -542,15 +548,21 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
     case ArgKind::Buffer:
       Kernel.createPointerGlobalAnnotation(Arg.getIndex(), ArgOffset,
                                            Arg.getSizeInBytes(), Arg.getBTI(),
-                                           Arg.getAccessKind());
+                                           Arg.getAccessKind(), /*isBindless=*/false);
       Kernel.createBufferStatefulAnnotation(Arg.getIndex(),
                                             Arg.getAccessKind());
+      Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
+      break;
+    case ArgKind::BindlessBuffer:
+      Kernel.createPointerGlobalAnnotation(Arg.getIndex(), ArgOffset,
+                                           Arg.getSizeInBytes(), Arg.getBTI(),
+                                           Arg.getAccessKind(), /*isBindless=*/true);
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::SVM:
       Kernel.createPointerGlobalAnnotation(Arg.getIndex(), ArgOffset,
                                            Arg.getSizeInBytes(), Arg.getBTI(),
-                                           Arg.getAccessKind());
+                                           Arg.getAccessKind(), /*isBindless=*/false);
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::Sampler:
@@ -573,14 +585,8 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::PrintBuffer:
-      Kernel.m_kernelInfo.m_printfBufferAnnotation =
-          std::make_unique<iOpenCL::PrintfBufferAnnotation>();
-      Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
-      Kernel.m_kernelInfo.m_printfBufferAnnotation->ArgumentNumber =
-          Arg.getIndex();
-      Kernel.m_kernelInfo.m_printfBufferAnnotation->PayloadPosition = ArgOffset;
-      Kernel.m_kernelInfo.m_printfBufferAnnotation->Index = 0;
-      Kernel.m_kernelInfo.m_printfBufferAnnotation->DataSize = 8;
+      Kernel.createPrintfBufferArgAnnotation(Arg.getIndex(), Arg.getBTI(),
+                                             Arg.getSizeInBytes(), ArgOffset);
       break;
     case ArgKind::PrivateBase:
       if (Info.getStatelessPrivMemSize() != 0) {
@@ -624,6 +630,7 @@ static void setExecutionInfo(const GenXOCLRuntimeInfo::KernelInfo &BackendInfo,
   // SLM size in bytes, align to 1KB.
   ExecEnv.SumFixedTGSMSizes = iSTD::Align(BackendInfo.getSLMSize(), 1024);
   ExecEnv.HasBarriers = BackendInfo.usesBarriers();
+  ExecEnv.HasDPAS = BackendInfo.usesDPAS();
   ExecEnv.HasReadWriteImages = BackendInfo.usesReadWriteImages();
   ExecEnv.SubgroupIndependentForwardProgressRequired = true;
   ExecEnv.NumGRFRequired = JitterInfo.numGRFTotal;
@@ -696,8 +703,8 @@ static void setDebugInfo(const std::vector<char> &DebugInfo, CMKernel &Kernel) {
   const size_t DebugInfoSize = DebugInfo.size();
   void *DebugInfoBuf = IGC::aligned_malloc(DebugInfoSize, sizeof(void *));
   memcpy_s(DebugInfoBuf, DebugInfoSize, DebugInfo.data(), DebugInfoSize);
-  Kernel.getProgramOutput().m_debugDataVISA = DebugInfoBuf;
-  Kernel.getProgramOutput().m_debugDataVISASize = DebugInfoSize;
+  Kernel.getProgramOutput().m_debugData = DebugInfoBuf;
+  Kernel.getProgramOutput().m_debugDataSize = DebugInfoSize;
 }
 
 static void setGtpinInfo(const FINALIZER_INFO &JitterInfo,
@@ -758,12 +765,20 @@ fillOCLProgramInfo(IGC::SOpenCLProgramInfo &ProgramInfo,
   auto ConstantAnnotation = getDataAnnotation<iOpenCL::InitConstantAnnotation>(
       ModuleInfo.ConstantData);
   if (ConstantAnnotation)
-    ProgramInfo.m_initConstantAnnotation.push_back(
-        std::move(ConstantAnnotation));
+    ProgramInfo.m_initConstantAnnotation = std::move(ConstantAnnotation);
   auto GlobalAnnotation =
       getDataAnnotation<iOpenCL::InitGlobalAnnotation>(ModuleInfo.GlobalData);
   if (GlobalAnnotation)
     ProgramInfo.m_initGlobalAnnotation.push_back(std::move(GlobalAnnotation));
+
+  // Symbols.
+  if (ModuleInfo.SymbolTable.Size != 0) {
+    ProgramInfo.m_legacySymbolTable.m_buffer = ModuleInfo.SymbolTable.Buffer;
+    ProgramInfo.m_legacySymbolTable.m_size = ModuleInfo.SymbolTable.Size;
+    ProgramInfo.m_legacySymbolTable.m_entries = ModuleInfo.SymbolTable.Entries;
+  }
+  ProgramInfo.m_zebinSymbolTable.global = ModuleInfo.ZEBinInfo.Symbols.Globals;
+  ProgramInfo.m_zebinSymbolTable.globalConst = ModuleInfo.ZEBinInfo.Symbols.Constants;
 };
 
 void vc::createBinary(
@@ -773,10 +788,10 @@ void vc::createBinary(
   fillOCLProgramInfo(*CMProgram.m_programInfo, CompiledModule.ModuleInfo);
   for (const GenXOCLRuntimeInfo::CompiledKernel &CompKernel :
        CompiledModule.Kernels) {
-    CMKernel *K = new CMKernel(CMProgram.getPlatform());
-    CMProgram.m_kernels.push_back(K);
+    auto K = std::make_unique<CMKernel>(CMProgram.getPlatform());
     fillKernelInfo(CompKernel, *K);
     ProgramIsDebuggable |= !CompKernel.getDebugInfo().empty();
+    CMProgram.m_kernels.push_back(std::move(K));
   }
   CMProgram.m_ContextProvider.updateDebuggableStatus(ProgramIsDebuggable);
 }

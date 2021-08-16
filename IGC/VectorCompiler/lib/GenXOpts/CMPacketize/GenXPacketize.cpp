@@ -1,24 +1,8 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (c) 2000-2021 Intel Corporation
+Copyright (C) 2018-2021 Intel Corporation
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom
-the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
+SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
@@ -166,6 +150,52 @@ private:
   const DataLayout *DL = nullptr;
 };
 
+// Adapted from llvm::UnifyFunctionExitNodes.cpp
+// Loop over all of the blocks in a function, tracking all of the blocks
+// that return.
+static bool GenXUnifyReturnBlocks(Function& F) {
+  std::vector<BasicBlock*> ReturningBlocks;
+
+  for (BasicBlock& I : F)
+    if (isa<ReturnInst>(I.getTerminator()))
+      ReturningBlocks.push_back(&I);
+
+  if (ReturningBlocks.size() <= 1)
+    return false;
+
+  // Insert a new basic block into the function, add PHI nodes (if the function
+  // returns values), and convert all of the return instructions into
+  // unconditional branches.
+  BasicBlock* NewRetBlock = BasicBlock::Create(F.getContext(),
+                                               "UnifiedReturnBlock", &F);
+
+  PHINode* PN = nullptr;
+  if (F.getReturnType()->isVoidTy()) {
+    ReturnInst::Create(F.getContext(), nullptr, NewRetBlock);
+  }
+  else {
+    // If the function doesn't return void... add a PHI node to the block...
+    PN = PHINode::Create(F.getReturnType(), ReturningBlocks.size(),
+                         "UnifiedRetVal");
+    NewRetBlock->getInstList().push_back(PN);
+        ReturnInst::Create(F.getContext(), PN, NewRetBlock);
+  }
+
+  // Loop over all of the blocks, replacing the return instruction with an
+  // unconditional branch.
+  for (BasicBlock* BB : ReturningBlocks) {
+    // Add an incoming element to the PHI node for every return instruction that
+    // is merging into this new block...
+    if (PN)
+      PN->addIncoming(BB->getTerminator()->getOperand(0), BB);
+
+    BB->getInstList().pop_back();  // Remove the return insn
+    BranchInst::Create(NewRetBlock, BB);
+  }
+
+  return true;
+}
+
 bool GenXPacketize::runOnModule(Module &Module) {
   M = &Module;
   // find all the SIMT enntry-functions
@@ -193,14 +223,6 @@ bool GenXPacketize::runOnModule(Module &Module) {
   for (unsigned i = 0; i < NumFunc; ++i) {
     auto F = FuncOrder[i];
     findUniformArgs(*F);
-  }
-
-  // perform reg-to-mem to remove phi before packetization
-  // because we need to generate simd-control-flow after packetization
-  // we then perform mem-to-reg after generating simd-control-flow.
-  std::unique_ptr<FunctionPass> DemotePass(createDemoteRegisterToMemoryPass());
-  for (auto &F : M->getFunctionList()) {
-    DemotePass->runOnFunction(F);
   }
 
   UniformInsts.clear();
@@ -233,6 +255,13 @@ bool GenXPacketize::runOnModule(Module &Module) {
 
   delete B;
 
+  // perform reg-to-mem in order to generate simd-control-flow without phi
+  // we then perform mem-to-reg after generating simd-control-flow.
+  std::unique_ptr<FunctionPass> DemotePass(createDemoteRegisterToMemoryPass());
+  for (auto F : SIMTFuncs) {
+    GenXUnifyReturnBlocks(*F);
+    DemotePass->runOnFunction(*F);
+  }
   // lower the SIMD control-flow
   lowerControlFlowAfter(SIMTFuncs);
 
@@ -258,7 +287,8 @@ Function *GenXPacketize::vectorizeSIMTFunction(Function *F, unsigned Width) {
           B->GetVectorType(I.getType()->getPointerElementType()),
           I.getType()->getPointerAddressSpace());
       ArgTypes.push_back(VTy);
-    } else {
+    }
+    else {
       ArgTypes.push_back(B->GetVectorType(I.getType()));
     }
   }
@@ -299,8 +329,11 @@ Function *GenXPacketize::vectorizeSIMTFunction(Function *F, unsigned Width) {
   findUniformInsts(*ClonedFunc);
 
   // vectorize instructions in the fork-regions
-  for (auto I = ClonedFunc->begin(), E = ClonedFunc->end(); I != E; ++I) {
-    BasicBlock *BB = &*I;
+  std::vector<PHINode*> PhiRound;
+  DominatorTree DT(*ClonedFunc);
+  for (df_iterator<DomTreeNode*> DI = df_begin(DT.getRootNode()),
+      DE = df_end(DT.getRootNode()); DI != DE; ++DI) {
+    BasicBlock *BB = DI->getBlock();
     for (auto &I : BB->getInstList()) {
       if (!UniformInsts.count(&I)) {
         Value *pPacketizedInst = packetizeInstruction(&I);
@@ -313,6 +346,17 @@ Function *GenXPacketize::vectorizeSIMTFunction(Function *F, unsigned Width) {
             I.setOperand(i, iter->second);
           }
         }
+      }
+      if (isa<PHINode>(&I))
+        PhiRound.push_back(dyn_cast<PHINode>(&I));
+    }
+  }
+  for (auto Phi : PhiRound) {
+    for (int i = 0, n = Phi->getNumOperands(); i < n; ++i) {
+      Value* OrigValue = Phi->getOperand(i);
+      auto iter = ReplaceMap.find(OrigValue);
+      if (iter != ReplaceMap.end() && iter->second != OrigValue) {
+        Phi->setOperand(i, iter->second);
       }
     }
   }
@@ -341,8 +385,11 @@ bool GenXPacketize::vectorizeSIMTEntry(Function &F) {
   B->IRB()->SetInsertPoint(&F.getEntryBlock(), F.getEntryBlock().begin());
 
   // vectorize instructions in the fork-regions
-  for (auto I = F.begin(), E = F.end(); I != E; ++I) {
-    BasicBlock *BB = &*I;
+  std::vector<PHINode*> PhiRound;
+  DominatorTree DT(F);
+  for (df_iterator<DomTreeNode*> DI = df_begin(DT.getRootNode()),
+      DE = df_end(DT.getRootNode()); DI != DE; ++DI) {
+    BasicBlock *BB = DI->getBlock();
     for (auto &I : BB->getInstList()) {
       if (!UniformInsts.count(&I)) {
         Value *pPacketizedInst = packetizeInstruction(&I);
@@ -356,9 +403,19 @@ bool GenXPacketize::vectorizeSIMTEntry(Function &F) {
           }
         }
       }
+      if (auto Phi = dyn_cast<PHINode>(&I))
+        PhiRound.push_back(Phi);
     }
   }
-
+  for (auto Phi : PhiRound) {
+    for (int i = 0, n = Phi->getNumOperands(); i < n; ++i) {
+      Value* OrigValue = Phi->getOperand(i);
+      auto iter = ReplaceMap.find(OrigValue);
+      if (iter != ReplaceMap.end() && iter->second != OrigValue) {
+        Phi->setOperand(i, iter->second);
+      }
+    }
+  }
   removeDeadInstructions(F);
   // a SIMT entry is always inlined after vectorization
   // This is required in order to handle structure argument,
@@ -671,8 +728,6 @@ Value *GenXPacketize::getPacketizeValue(Value *OrigValue) {
     }
   }
 
-  report_fatal_error("Could not find packetized value!");
-
   return nullptr;
 }
 
@@ -822,11 +877,26 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
         uint32_t numElems =
             cast<VectorType>(pPacketizedSrcTy)->getNumElements();
         pReturnTy = IGCLLVM::FixedVectorType::get(pDstPtrTy, numElems);
-      } else {
+      }
+      else {
         // <N x Ty>*
-        pReturnTy =
-            PointerType::get(B->GetVectorType(pDstScalarTy),
-                             pInst->getType()->getPointerAddressSpace());
+        if (VectorType::isValidElementType(pDstScalarTy))
+          // Map <N x OldTy>* to <N x NewTy>*
+          pReturnTy = PointerType::get(B->GetVectorType(pDstScalarTy),
+                          pInst->getType()->getPointerAddressSpace());
+        else {
+          // Map <N x OldTy>* to <N x NewTy*> using cast then GEP
+          auto* pTmpTy = PointerType::get(
+                            llvm::ArrayType::get(pDstScalarTy, B->mVWidth),
+                            pInst->getType()->getPointerAddressSpace());
+          auto* pTmpInst =
+              B->CAST((Instruction::CastOps)opcode, pPacketizedSrc, pTmpTy);
+          SmallVector<Value*, 2> vecIndices;
+          vecIndices.push_back(B->C(0));
+          vecIndices.push_back(B->CInc<uint32_t>(0, B->mVWidth));
+          pReplacedInst = B->GEPA(pTmpInst, vecIndices);
+          break;
+        }
       }
     } else {
       pReturnTy = B->GetVectorType(pInst->getType());
@@ -875,17 +945,8 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
         for (uint32_t i = 0; i < pGepInst->getNumIndices(); ++i) {
           vecIndices.push_back(getPacketizeValue(pGepInst->getOperand(1 + i)));
         }
-
         // Step to the SIMD lane
-        if (B->mVWidth == 8) {
-          vecIndices.push_back(B->C({0, 1, 2, 3, 4, 5, 6, 7}));
-        } else if (B->mVWidth == 16) {
-          vecIndices.push_back(
-              B->C({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}));
-        } else {
-          report_fatal_error("Unsupported SIMD width.");
-        }
-
+        vecIndices.push_back(B->CInc<uint32_t>(0, B->mVWidth));
         pReplacedInst = B->GEPA(pVecSrc, vecIndices);
       }
     }
@@ -897,9 +958,7 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
     Value *pSrc = pLoadInst->getPointerOperand();
     Value *pVecSrc = getPacketizeValue(pSrc);
     auto LI = cast<LoadInst>(pInst);
-    if (pVecSrc == pSrc)
-      pReplacedInst = pInst;
-    else if (pVecSrc->getType()->isVectorTy()) {
+    if (pVecSrc->getType()->isVectorTy()) {
       IGC_ASSERT(cast<VectorType>(pVecSrc->getType())
                      ->getElementType()
                      ->isPointerTy());
@@ -940,10 +999,14 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
       R.Indirect = nullptr;
     } else {
       R.Offset = 0;
-      auto NBits = Idx->getType()->getIntegerBitWidth() / 8;
-      auto MulCType = IntegerType::getIntNTy(M->getContext(), NBits);
+      auto MulCType = IntegerType::getInt16Ty(M->getContext());
       auto MulC =
           ConstantInt::get(MulCType, ElemType->getPrimitiveSizeInBits() / 8);
+      auto NBits = Idx->getType()->getIntegerBitWidth();
+      if (NBits > 16)
+          Idx = B->TRUNC(Idx, MulCType);
+      else if (NBits < 16)
+          Idx = B->S_EXT(Idx, MulCType);
       R.Indirect = B->MUL(Idx, MulC);
     }
     R.NumElements = B->mVWidth;
@@ -966,14 +1029,24 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
     // create an write-region
     CMRegion R(Vec->getType());
     if (ConstantInt *CI = dyn_cast<ConstantInt>(Idx)) {
+      // special case, this is really just like a bitcast
+      if (CI->getZExtValue() == 0 && N == 1 && isa<UndefValue>(OldVec)) {
+        auto pRetTy = B->GetVectorType(pInst->getType());
+        pReplacedInst = B->BITCAST(ElmVec, pRetTy);
+        break;
+      }
       R.Offset = CI->getSExtValue() * ElemType->getPrimitiveSizeInBits() / 8;
       R.Indirect = nullptr;
     } else {
       R.Offset = 0;
-      auto NBits = Idx->getType()->getIntegerBitWidth() / 8;
-      auto MulCType = IntegerType::getIntNTy(M->getContext(), NBits);
+      auto MulCType = IntegerType::getInt16Ty(M->getContext());
       auto MulC =
           ConstantInt::get(MulCType, ElemType->getPrimitiveSizeInBits() / 8);
+      auto NBits = Idx->getType()->getIntegerBitWidth();
+      if (NBits > 16)
+          Idx = B->TRUNC(Idx, MulCType);
+      else if (NBits < 16)
+          Idx = B->S_EXT(Idx, MulCType);
       R.Indirect = B->MUL(Idx, MulC);
     }
     R.NumElements = B->mVWidth;
@@ -1001,13 +1074,6 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
       pBranch->setCondition(NewTest);
     }
     pReplacedInst = pBranch;
-    break;
-  }
-
-  case Instruction::PHI: {
-    Type *vecType = B->GetVectorType(pInst->getType());
-    pInst->mutateType(vecType);
-    pReplacedInst = pInst;
     break;
   }
 
@@ -1088,15 +1154,17 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *pInst) {
 
     break;
   }
-
   default: {
-    // for the rest of the instructions, vectorize the instruction type as
-    // well as its args
+    // for the rest of the instructions includingi phi, vectorize
+    // the instruction type as well as its args
     Type *vecType = B->GetVectorType(pInst->getType());
     pInst->mutateType(vecType);
-
     for (Use &op : pInst->operands()) {
-      op.set(getPacketizeValue(op.get()));
+      auto v = getPacketizeValue(op.get());
+      if (v)
+        op.set(v);
+      else if (!isa<PHINode>(pInst))
+        report_fatal_error("Cannot find packetized value!");
     }
     pReplacedInst = pInst;
   }
@@ -1128,6 +1196,11 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
       case GenXIntrinsic::genx_sudp4a_sat:
       case GenXIntrinsic::genx_usdp4a_sat:
       case GenXIntrinsic::genx_uudp4a_sat:
+      case GenXIntrinsic::genx_dpas:
+      case GenXIntrinsic::genx_dpas2:
+      case GenXIntrinsic::genx_dpasw:
+      case GenXIntrinsic::genx_dpas_nosrc0:
+      case GenXIntrinsic::genx_dpasw_nosrc0:
       case GenXIntrinsic::genx_dph:
       case GenXIntrinsic::genx_transpose_ld:
       case GenXIntrinsic::genx_oword_ld:
@@ -1246,6 +1319,19 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
         Value *Src4 = getPacketizeValue(CI->getOperand(4));
         Value *Src5 = getPacketizeValue(CI->getOperand(5));
         Value *Args[] = {Src0, BTI, Src2, Src3, Src4, Src5};
+        auto RetTy = B->GetVectorType(CI->getType());
+        Type *Tys[] = {RetTy, Src0->getType()};
+        auto Decl = GenXIntrinsic::getGenXDeclaration(M, IID, Tys);
+        replacement = CallInst::Create(Decl, Args, CI->getName(), CI);
+        cast<CallInst>(replacement)->setDebugLoc(CI->getDebugLoc());
+        return replacement;
+      } break;
+      case GenXIntrinsic::genx_bfn: {
+        Value *Src0 = getPacketizeValue(CI->getOperand(0));
+        Value *Src1 = getPacketizeValue(CI->getOperand(1));
+        Value *Src2 = getPacketizeValue(CI->getOperand(2));
+        Value *BFN = getUniformValue(CI->getOperand(4));
+        Value *Args[] = {Src0, Src1, Src2, BFN};
         auto RetTy = B->GetVectorType(CI->getType());
         Type *Tys[] = {RetTy, Src0->getType()};
         auto Decl = GenXIntrinsic::getGenXDeclaration(M, IID, Tys);
@@ -1420,20 +1506,7 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
       case GenXIntrinsic::genx_lane_id: {
         IGC_ASSERT_MESSAGE((CI->getType()->getIntegerBitWidth() == 32),
           "Expected to return 32-bit integer.");
-        if (B->mVWidth == 8) {
-          std::initializer_list<uint32_t> l = {0, 1, 2, 3, 4, 5, 6, 7};
-          replacement = B->C(l);
-        } else if (B->mVWidth == 16) {
-          std::initializer_list<uint32_t> l = {0, 1, 2,  3,  4,  5,  6,  7,
-                                               8, 9, 10, 11, 12, 13, 14, 15};
-          replacement = B->C(l);
-        } else if (B->mVWidth == 32) {
-          std::initializer_list<uint32_t> l = {
-              0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
-              16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
-          replacement = B->C(l);
-        } else
-          IGC_ASSERT(0);
+        replacement = B->CInc<uint32_t>(0, B->mVWidth);
         return replacement;
       } break;
       case GenXIntrinsic::genx_rdregionf:

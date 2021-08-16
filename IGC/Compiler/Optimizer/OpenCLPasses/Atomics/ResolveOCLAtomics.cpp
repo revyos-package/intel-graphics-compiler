@@ -26,6 +26,7 @@ using namespace IGC;
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(ResolveOCLAtomics, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_END(ResolveOCLAtomics, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char ResolveOCLAtomics::ID = 0;
@@ -39,29 +40,6 @@ ResolveOCLAtomics::ResolveOCLAtomics() : ModulePass(ID)
     initResolveOCLAtomics();
 }
 
-OCLAtomicAttrs ResolveOCLAtomics::genAtomicAttrs(AtomicOp   op,
-                                                 BufferType bufType)
-{
-    //              bufType
-    //                 |
-    //       not used  V   op
-    //       |-------|---|---|
-    //    0 x 0 0 0 0 0 0 0 0
-    return op | (bufType << ATTR_BUFFER_TYPE_SHIFT);
-}
-
-AtomicOp ResolveOCLAtomics::getAtomicOp(StringRef name)
-{
-    OCLAtomicAttrs  attrs = m_AtomicDescMap[name];
-    return (AtomicOp)(attrs & 0xFF);
-}
-
-BufferType ResolveOCLAtomics::getBufType(StringRef name)
-{
-    OCLAtomicAttrs  attrs = m_AtomicDescMap[name];
-    return (BufferType)((attrs >> ATTR_BUFFER_TYPE_SHIFT) & 0xFF);
-}
-
 void ResolveOCLAtomics::initResolveOCLAtomics()
 {
     initOCLAtomicsMap();
@@ -70,30 +48,19 @@ void ResolveOCLAtomics::initResolveOCLAtomics()
 void ResolveOCLAtomics::initOCLAtomicsMap()
 {
 #define DEF_OCL_IGC_ATOMIC(name, op, buf_type) \
-    m_AtomicDescMap[StringRef(name)] = genAtomicAttrs(op, buf_type);
+    m_AtomicDescMap[StringRef(name)] = OCLAtomicAttrs{op, buf_type};
 #include "OCLAtomicsDef.hpp"
 #undef DEF_OCL_IGC_ATOMIC
 }
 
 bool ResolveOCLAtomics::runOnModule(Module& M)
 {
-    m_pModule  = (IGCLLVM::Module*)&M;
+    m_CGCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    m_pModule  = static_cast<IGCLLVM::Module*>(&M);
     m_Int32Ty = Type::getInt32Ty(m_pModule->getContext());
 
     llvm::IGCIRBuilder<> builder(M.getContext());
     m_builder = &builder;
-
-    int pointerSize = M.getDataLayout().getPointerSizeInBits();
-    IGC_ASSERT(pointerSize == 64 || pointerSize == 32);
-
-    if (pointerSize == 64)
-    {
-        m_64bitPointer = true;
-    }
-    else
-    {
-        m_64bitPointer = false;
-    }
 
     m_changed = false;
 
@@ -125,7 +92,8 @@ void ResolveOCLAtomics::visitCallInst(CallInst& callInst)
     if (funcName.startswith("__builtin_IB_atomic"))
     {
         IGC_ASSERT_MESSAGE(m_AtomicDescMap.count(funcName), "Unexpected IGC atomic function name.");
-        processOCLAtomic(callInst, getAtomicOp(funcName), getBufType(funcName));
+        const OCLAtomicAttrs& attrs = m_AtomicDescMap[funcName];
+        processOCLAtomic(callInst, attrs.op, attrs.bufType);
         m_changed = true;
     }
 }
@@ -147,7 +115,10 @@ void ResolveOCLAtomics::processOCLAtomic(CallInst& callInst, AtomicOp op, Buffer
         callInst.getOperand(1);
 
     const bool floatArgs = !noSources && src0->getType()->isFloatingPointTy();
-    const bool is64bit = m_64bitPointer && bufType != SLM;
+
+    Value* dstBuffer = callInst.getOperand(0);
+    PointerType* PtrTy = dyn_cast<PointerType>(dstBuffer->getType());
+    const bool is64bit = PtrTy && isA64Ptr(PtrTy, m_CGCtx) && bufType != SLM;
 
     // Cmpxchg intrinsic has 2 sources.
     if (op == EATOMIC_CMPXCHG ||
@@ -188,7 +159,6 @@ void ResolveOCLAtomics::processOCLAtomic(CallInst& callInst, AtomicOp op, Buffer
         }
     }
 
-    Value* dstBuffer = callInst.getOperand(0);
     Value* dst = callInst.getOperand(0);
 
     // We will use 64-bit dst only for 64-bit global pointers.

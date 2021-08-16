@@ -22,7 +22,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/Support/Debug.h>
 #include <llvm/IR/Constants.h>
 #include "common/LLVMWarningsPop.hpp"
-#include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include <string>
 #include <stack>
 #include <sstream>
@@ -935,7 +934,21 @@ void WIAnalysisRunner::update_cf_dep(const IGCLLVM::TerminatorInst* inst)
                     // phi-move will be placed on the blocks created on those
                     user_blk = phi->getIncomingBlock(*use_it);
                 }
-                if (user_blk == def_blk)
+                auto canUserBeHoistedToDefBlock = [](Instruction* UI, Instruction* DI)->bool {
+                    for (auto& uo : UI->operands())
+                    {
+                        Value* V = uo.get();
+                        if (V == DI)
+                            continue;
+                        else if (dyn_cast<Constant>(V))
+                            continue;
+                        else
+                            return false;
+                    }
+                    return true;
+                };
+                if ((user_blk == def_blk) ||
+                    (canUserBeHoistedToDefBlock(user, defi) && !phi))
                 {
                     // local def-use, not related to control-dependence
                     continue; // skip
@@ -1249,13 +1262,21 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         intrinsic_name == llvm_ptr_to_pair ||
         intrinsic_name == llvm_pair_to_ptr ||
         intrinsic_name == llvm_fma ||
+        GII_id == GenISAIntrinsic::GenISA_uitof_rtz ||
+        GII_id == GenISAIntrinsic::GenISA_ftobf ||
+        GII_id == GenISAIntrinsic::GenISA_bftof ||
+        GII_id == GenISAIntrinsic::GenISA_2fto2bf ||
+        GII_id == GenISAIntrinsic::GenISA_dual_subslice_id ||
         GII_id == GenISAIntrinsic::GenISA_getSR0   ||
         GII_id == GenISAIntrinsic::GenISA_getSR0_0 ||
         GII_id == GenISAIntrinsic::GenISA_mul_rtz  ||
         GII_id == GenISAIntrinsic::GenISA_fma_rtz  ||
+        GII_id == GenISAIntrinsic::GenISA_fma_rtp ||
+        GII_id == GenISAIntrinsic::GenISA_fma_rtn ||
         GII_id == GenISAIntrinsic::GenISA_add_rtz  ||
         GII_id == GenISAIntrinsic::GenISA_slice_id ||
         GII_id == GenISAIntrinsic::GenISA_subslice_id  ||
+        GII_id == GenISAIntrinsic::GenISA_dual_subslice_id ||
         GII_id == GenISAIntrinsic::GenISA_eu_id        ||
         GII_id == GenISAIntrinsic::GenISA_eu_thread_id ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id ||
@@ -1280,6 +1301,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             return WIAnalysis::UNIFORM_THREAD;
         case GenISAIntrinsic::GenISA_slice_id:
         case GenISAIntrinsic::GenISA_subslice_id:
+        case GenISAIntrinsic::GenISA_dual_subslice_id:
             // Make sure they are UNIFORM_WORKGROUP
             //return WIAnalysis::UNIFORM_WORKGROUP;
             return WIAnalysis::UNIFORM_THREAD;
@@ -1558,6 +1580,8 @@ bool WIAnalysisRunner::TrackAllocaDep(const Value* I, AllocaDep& dep)
             {
                 trackable = false;
             }
+            else if (IID == llvm::Intrinsic::lifetime_start)
+              dep.lifetimes.push_back(intr);
         }
         else
         {
@@ -1602,10 +1626,10 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const AllocaInst* inst)
     {
         return WIAnalysis::UNIFORM_THREAD;
     }
-    // find the common dominator block among all the stores
+    // find the common dominator block among all the life-time starts
     // that can be considered as the nearest logical location for alloca.
     const BasicBlock* CommonDomBB = nullptr;
-    for (auto *SI : depIt->second.stores)
+    for (auto *SI : depIt->second.lifetimes)
     {
         auto BB = SI->getParent();
         IGC_ASSERT(BB);
@@ -1613,6 +1637,10 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const AllocaInst* inst)
             CommonDomBB = BB;
         else
             CommonDomBB = DT->findNearestCommonDominator(CommonDomBB, BB);
+    }
+    if (!CommonDomBB)
+    {
+        CommonDomBB = inst->getParent();
     }
     // if any store is not uniform, then alloca is not uniform
     // if any store is affected by a divergent branch after alloca,

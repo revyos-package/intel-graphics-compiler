@@ -66,6 +66,8 @@ bool ResourceAllocator::runOnModule(Module& M)
         runOnFunction(*(i->first));
     }
 
+    pMdUtils->save(M.getContext());
+
     return true;
 }
 
@@ -160,6 +162,7 @@ static AllocationType getAllocationType(KernelArg::ArgType argType, BindlessAllo
     case KernelArg::ArgType::IMPLICIT_SYNC_BUFFER:
     case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_EVENT_POOL:
     case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DEFAULT_DEVICE_QUEUE:
+    case KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET:
         return AllocationType::Other;
 
     default:
@@ -341,7 +344,6 @@ bool ResourceAllocator::runOnFunction(llvm::Function& F)
     }
 
     // Param allocations must be inserted to the Metadata Utils in order.
-    MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     for (auto i : paramAllocations)
     {
         resAllocMD->argAllocMDList.push_back(i);
@@ -350,8 +352,6 @@ bool ResourceAllocator::runOnFunction(llvm::Function& F)
     resAllocMD->uavsNumType = numUAVs;
     resAllocMD->srvsNumType = numResources;
     resAllocMD->samplersNumType = numSamplers;
-
-    pMdUtils->save(F.getContext());
 
     return true;
 }

@@ -41,6 +41,7 @@ SPDX-License-Identifier: MIT
 #include "../../../visa/include/visaBuilder_interface.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include "Probe/Assertion.h"
 
@@ -293,6 +294,32 @@ void CGen8OpenCLStateProcessor::CreateKernelBinary(
     }
 }
 
+static bool CreateSymbolTable(void* buffer, uint32_t size, uint32_t entries, Util::BinaryStream& membuf,
+                              std::string &debugOut)
+{
+    IGC_ASSERT_MESSAGE(buffer && size != 0 && entries != 0, "wrong arguments");
+    iOpenCL::SPatchFunctionTableInfo patch;
+    memset(&patch, 0, sizeof(patch));
+
+    patch.Token = PATCH_TOKEN_PROGRAM_SYMBOL_TABLE;
+
+    patch.Size = sizeof(patch) + size;
+    patch.NumEntries = entries;
+
+    std::streamsize tokenStart = membuf.Size();
+    if (!membuf.Write(patch))
+        return false;
+    if (!membuf.Write((const char*)buffer, size))
+        return false;
+    free(buffer);
+
+#if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)  || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX)
+    DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, debugOut);
+#endif
+    (void)debugOut;
+    return true;
+}
+
 void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& annotations,
                                                               Util::BinaryStream& membuf)
 {
@@ -303,24 +330,24 @@ void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCL
     ICBE_DPF_STR(output, GFXDBG_HARDWARE, "** Program Scope patch lists **\n");
     ICBE_DPF_STR(output, GFXDBG_HARDWARE, "\n");
 
-    for (const auto &iter : annotations.m_initConstantAnnotation)
-    {
-        iOpenCL::SPatchAllocateConstantMemorySurfaceProgramBinaryInfo   patch;
+    if (annotations.m_initConstantAnnotation != nullptr) {
+        const auto& constBuffer = annotations.m_initConstantAnnotation;
+        iOpenCL::SPatchAllocateConstantMemorySurfaceProgramBinaryInfo patch;
         memset( &patch, 0, sizeof( patch ) );
 
         patch.Token = iOpenCL::PATCH_TOKEN_ALLOCATE_CONSTANT_MEMORY_SURFACE_PROGRAM_BINARY_INFO;
         patch.Size = sizeof( patch );
         patch.ConstantBufferIndex = DEFAULT_CONSTANT_BUFFER_INDEX;
-        patch.InlineDataSize = (DWORD)iter->AllocSize;
+        patch.InlineDataSize = (DWORD)constBuffer->AllocSize;
 
         retValue = AddPatchItem(
             patch,
             membuf );
 
         // And now write the actual data
-        membuf.Write((char*)iter->InlineData.data(), iter->InlineData.size());
+        membuf.Write((char*)constBuffer->InlineData.data(), constBuffer->InlineData.size());
         // Pad the end with zeros
-        unsigned zeroPadding = iter->AllocSize - iter->InlineData.size();
+        unsigned zeroPadding = constBuffer->AllocSize - constBuffer->InlineData.size();
         membuf.AddPadding(zeroPadding);
     }
 
@@ -401,6 +428,11 @@ void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCL
             patch,
             membuf );
     }
+
+    auto &SymbolTable = annotations.m_legacySymbolTable;
+    if (SymbolTable.m_size != 0)
+        CreateSymbolTable(SymbolTable.m_buffer, SymbolTable.m_size, SymbolTable.m_entries,
+                          membuf, m_oclStateDebugMessagePrintOut);
 }
 
 void CGen8OpenCLStateProcessor::CreateKernelDebugData(
@@ -467,7 +499,7 @@ void CGen8OpenCLStateProcessor::CreateKernelDebugData(
 
     if (rawDebugDataVISA)
     {
-        kernelDebugDataHeader.dbgInfoBuffer = (uint8_t*)rawDebugDataVISA;
+        kernelDebugDataHeader.dbgInfoBuffer = (const uint8_t*)rawDebugDataVISA;
         kernelDebugDataHeader.dbgInfoBufferSize = rawDebugDataVISASize;
         kernelDebugDataHeader.extraAlignBytes = (sizeof(DWORD) - rawDebugDataVISASize % sizeof(DWORD)) % sizeof(DWORD);
         rawDebugDataVISASize += kernelDebugDataHeader.extraAlignBytes;
@@ -1077,7 +1109,7 @@ DWORD CGen8OpenCLStateProcessor::AllocateSamplerIndirectState(
 #if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL ) )
     {
         G6HWC::DebugSamplerIndirectStateCommand(
-            &samplerIndirectStateOffset,
+            membuf.GetLinearPointer() + samplerIndirectStateOffset,
             m_Platform,
             m_oclStateDebugMessagePrintOut );
     }
@@ -1478,7 +1510,15 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
                     patch.Token = iOpenCL::PATCH_TOKEN_STATELESS_GLOBAL_MEMORY_OBJECT_KERNEL_ARGUMENT;
                     patch.Size = sizeof( patch );
                     patch.ArgumentNumber = ptrArg->ArgumentNumber;
-                    patch.SurfaceStateHeapOffset = context.Surface.SurfaceOffset[ bti ];
+                    if (m_Context.useBindlessMode() && !m_Context.useBindlessLegacyMode())
+                    {
+                        IGC_ASSERT(ptrArg->BindingTableIndex != bti);
+                        patch.SurfaceStateHeapOffset = ptrArg->BindingTableIndex;
+                    }
+                    else
+                    {
+                       patch.SurfaceStateHeapOffset = context.Surface.SurfaceOffset[bti];
+                    }
                     patch.DataParamOffset = ptrArg->PayloadPosition;
                     patch.DataParamSize = ptrArg->PayloadSizeInBytes;
                     patch.LocationIndex = ptrArg->LocationIndex;
@@ -1951,6 +1991,7 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
 
         patch.HasGlobalAtomics = annotations.m_executionEnivronment.HasGlobalAtomics;
 
+        patch.HasDPAS = annotations.m_executionEnivronment.HasDPAS;
 
         patch.UseBindlessMode = annotations.m_executionEnivronment.UseBindlessMode;
         patch.SIMDInfo = annotations.m_executionEnivronment.SIMDInfo;
@@ -2006,7 +2047,7 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             patch.Size += alignedStringSize;
             membuf.WriteAt( patch, tokenStart );
 
-#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL ) )
+#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL )  || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX) )
             DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
 #endif
         }
@@ -2062,10 +2103,6 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
     // Patch for symbol table
     if (retValue.Success)
     {
-        iOpenCL::SPatchFunctionTableInfo patch;
-        memset(&patch, 0, sizeof(patch));
-
-        patch.Token = PATCH_TOKEN_PROGRAM_SYMBOL_TABLE;
         uint32_t size = 0;
         uint32_t entries = 0;
         void* buffer = nullptr;
@@ -2097,25 +2134,12 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
 
         if (size > 0)
         {
-            patch.Size = sizeof(patch) + size;
-            patch.NumEntries = entries;
-
-            std::streamsize tokenStart = membuf.Size();
-            if (!membuf.Write(patch))
+            bool isOK = CreateSymbolTable(buffer, size, entries, membuf, m_oclStateDebugMessagePrintOut);
+            if (!isOK)
             {
                 retValue.Success = false;
                 return retValue;
             }
-            if (!membuf.Write((const char*)buffer, size))
-            {
-                retValue.Success = false;
-                return retValue;
-            }
-            free(buffer);
-
-#if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)
-            DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
-#endif
         }
     }
 
@@ -2175,7 +2199,7 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             }
             freeBlock(buffer);
 
-#if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)
+#if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)   || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX)
             DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
 #endif
         }
@@ -2274,7 +2298,7 @@ RETVAL CGen8OpenCLStateProcessor::AddKernelAttributePatchItems(
         return retValue;
     }
 
-#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL ) )
+#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL )  || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX) )
     DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
 #endif
 
@@ -2366,7 +2390,7 @@ RETVAL CGen8OpenCLStateProcessor::AddKernelArgumentPatchItems(
             return retValue;
         }
 
-#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL ) )
+#if ( defined( _DEBUG ) || defined( _INTERNAL ) || defined( _RELEASE_INTERNAL )  || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX) )
         DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
 #endif
          index++;

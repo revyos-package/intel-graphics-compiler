@@ -240,6 +240,8 @@ namespace IGC
         static bool CompareBufferBase(const llvm::Value* bufIdxV1, uint bufid1, const llvm::Value* bufIdxV2, uint bufid2);
         /// find element base and element imm-offset
         llvm::Value* SimpleBaseOffset(llvm::Value* elt_idxv, uint& offset);
+        /// finds the minimum power-of-2 alignment for an offset in buffer
+        uint GetOffsetAlignment(llvm::Value* val) const;
         /// used along ocl path, based upon int2ptr
         bool   DecomposePtrExp(llvm::Value* ptr_val, llvm::Value*& buf_idxv, llvm::Value*& elt_idxv, uint& eltid);
         static uint CheckVectorElementUses(const llvm::Instruction* load);
@@ -272,8 +274,6 @@ namespace IGC
             llvm::Value* bufIdxV, uint bufid,
             llvm::Value* eltIdxV, uint eltid,
             std::vector<BufChunk*>& chunk_vec);
-        /// change IntToPtr to oword-ptr for oword-aligned load in order to avoid SHL
-        void ChangePTRtoOWordBased(BufChunk* chunk);
 
         bool CleanupExtract(llvm::BasicBlock* bb);
         void VectorizePrep(llvm::BasicBlock* bb);
