@@ -3,6 +3,7 @@ intel-graphics-compiler (1.0.8279-1) UNRELEASED; urgency=medium
   * New upstream release.
   * fix-ftbfs.diff: Dropped, upstream.
   * rules: Fix config option to select the llvm version.
+  * control, rules: Build with llvm 12.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 May 2021 18:39:29 +0300
 

@@ -6,11 +6,11 @@ Uploaders:
  Timo Aaltonen <tjaalton@debian.org>
 Build-Depends: debhelper-compat (= 12),
  bison,
- clang-11,
+ clang-12,
  cmake,
  flex,
- llvm-11-dev,
- libopencl-clang-dev (>= 11.0~),
+ llvm-12-dev,
+ libopencl-clang-dev (>= 12.0~),
  python3,
  spirv-tools,
 Standards-Version: 4.5.0
