@@ -61,6 +61,7 @@ public:
   Instruction *load(Instruction *InsertBefore);
   Instruction *loadBig(Instruction *InsertBefore);
   Instruction *loadNonSimple(Instruction *InsertBefore);
+  Instruction *loadNonPackedIntConst(Instruction *InsertBefore);
   bool needFixingSimple() const { return NewC; }
   void fixSimple(int OperandIdx);
   bool isBigSimple();
@@ -93,6 +94,9 @@ inline bool opMustBeConstant(Instruction *I, unsigned OpNum) {
 // then check constants' contents. Most part of implementation is taken
 // from FunctionComparator::cmpConstants
 bool areConstantsEqual(const Constant *C1, const Constant *C2);
+
+// Remove all genx.constant* intrinsics that have non-constant source
+bool cleanupConstantLoads(Function *F);
 
 // Load a constant using the llvm.genx.constant intrinsic.
 inline Instruction *

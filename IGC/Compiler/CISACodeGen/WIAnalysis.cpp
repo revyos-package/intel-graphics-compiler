@@ -212,6 +212,10 @@ void WIAnalysisRunner::print(raw_ostream& OS, const Module*) const
                 OS << pred->getName();
             isFirst = false;
         }
+        {
+            auto dep = getCFDependency(BB);
+            OS << "[ " << dep_str[dep] << " ]";
+        }
         OS << "\n";
         for (BasicBlock::iterator it = BB->begin(), ie = BB->end(); it != ie; ++it) {
             Instruction* I = &*it;
@@ -586,9 +590,9 @@ bool WIAnalysis::insideDivergentCF(const Value* val) const
     return Runner.insideDivergentCF(val);
 }
 
-bool WIAnalysis::insideThreadDivergentCF(const Value* val) const
+bool WIAnalysis::insideWorkgroupDivergentCF(const Value* val) const
 {
-    return Runner.insideThreadDivergentCF(val);
+    return Runner.insideWorkgroupDivergentCF(val);
 }
 
 WIAnalysis::WIDependancy WIAnalysisRunner::whichDepend(const Value* val) const
@@ -634,6 +638,34 @@ bool WIAnalysisRunner::isGlobalUniform(const Value* val) const
         return false;
     WIAnalysis::WIDependancy dep = whichDepend(val);
     return dep == WIAnalysis::UNIFORM_GLOBAL;
+}
+
+WIAnalysis::WIDependancy WIAnalysisRunner::getCFDependency(const BasicBlock* BB) const
+{
+    auto II = m_ctrlBranches.find(BB);
+    if (II == m_ctrlBranches.end())
+        return WIAnalysis::UNIFORM_GLOBAL;
+
+    WIAnalysis::WIDependancy dep = WIAnalysis::UNIFORM_GLOBAL;
+    for (auto* BI : II->second)
+    {
+        auto newDep = whichDepend(BI);
+        if (depRank(dep) < depRank(newDep))
+            dep = newDep;
+    }
+
+    return dep;
+}
+
+bool WIAnalysisRunner::insideWorkgroupDivergentCF(const Value* val) const
+{
+    if (auto* I = dyn_cast<Instruction>(val))
+    {
+        auto dep = getCFDependency(I->getParent());
+        return depRank(dep) > WIAnalysis::UNIFORM_WORKGROUP;
+    }
+
+    return false;
 }
 
 WIAnalysis::WIDependancy WIAnalysisRunner::getDependency(const Value* val)
@@ -777,23 +809,26 @@ void WIAnalysisRunner::calculate_dep(const Value* val)
         // LLVM does not have compile time polymorphisms
         // TODO: to make things faster we may want to sort the list below according
         // to the order of their probability of appearance.
-        if (const BinaryOperator * BI = dyn_cast<BinaryOperator>(inst))         dep = calculate_dep(BI);
-        else if (const CallInst * CI = dyn_cast<CallInst>(inst))                     dep = calculate_dep(CI);
+        if (const BinaryOperator* BI = dyn_cast<BinaryOperator>(inst))              dep = calculate_dep(BI);
+        else if (const CallInst* CI = dyn_cast<CallInst>(inst))                     dep = calculate_dep(CI);
         else if (isa<CmpInst>(inst))                                                dep = calculate_dep_simple(inst);
         else if (isa<ExtractElementInst>(inst))                                     dep = calculate_dep_simple(inst);
-        else if (const GetElementPtrInst * GEP = dyn_cast<GetElementPtrInst>(inst))  dep = calculate_dep(GEP);
+        else if (const GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(inst))  dep = calculate_dep(GEP);
         else if (isa<InsertElementInst>(inst))                                      dep = calculate_dep_simple(inst);
         else if (isa<InsertValueInst>(inst))                                        dep = calculate_dep_simple(inst);
-        else if (const PHINode * Phi = dyn_cast<PHINode>(inst))                      dep = calculate_dep(Phi);
+        else if (const PHINode* Phi = dyn_cast<PHINode>(inst))                      dep = calculate_dep(Phi);
         else if (isa<ShuffleVectorInst>(inst))                                      dep = calculate_dep_simple(inst);
         else if (isa<StoreInst>(inst))                                              dep = calculate_dep_simple(inst);
         else if (inst->isTerminator())                                              dep = calculate_dep_terminator(dyn_cast<IGCLLVM::TerminatorInst>(inst));
-        else if (const SelectInst * SI = dyn_cast<SelectInst>(inst))                 dep = calculate_dep(SI);
-        else if (const AllocaInst * AI = dyn_cast<AllocaInst>(inst))                 dep = calculate_dep(AI);
-        else if (const CastInst * CI = dyn_cast<CastInst>(inst))                     dep = calculate_dep(CI);
+        else if (const SelectInst* SI = dyn_cast<SelectInst>(inst))                 dep = calculate_dep(SI);
+        else if (const AllocaInst* AI = dyn_cast<AllocaInst>(inst))                 dep = calculate_dep(AI);
+        else if (const CastInst* CI = dyn_cast<CastInst>(inst))                     dep = calculate_dep(CI);
         else if (isa<ExtractValueInst>(inst))                                       dep = calculate_dep_simple(inst);
-        else if (const LoadInst * LI = dyn_cast<LoadInst>(inst))                     dep = calculate_dep(LI);
-        else if (const VAArgInst * VAI = dyn_cast<VAArgInst>(inst))                  dep = calculate_dep(VAI);
+        else if (const LoadInst* LI = dyn_cast<LoadInst>(inst))                     dep = calculate_dep(LI);
+        else if (const VAArgInst* VAI = dyn_cast<VAArgInst>(inst))                  dep = calculate_dep(VAI);
+#if LLVM_VERSION_MAJOR >= 10
+        else if (inst->getOpcode() == Instruction::FNeg)                            dep = calculate_dep_simple(inst);
+#endif
 
         if (m_func->hasFnAttribute("KMPLOCK"))
         {
@@ -914,14 +949,23 @@ void WIAnalysisRunner::update_cf_dep(const IGCLLVM::TerminatorInst* inst)
                     m_pChangedNew->push_back(it->second);
             }
 
+            // This is an optimization that tries to detect instruction
+            // not really affected by control-flow divergency because
+            // all the sources are outside the region.
+            // However this is only as good as we can get because we
+            // only search limited depth
             if (isRegionInvariant(defi, &br_info, 0))
             {
                 continue;
             }
-            // look at the uses
+            // We need to look at where the use is in order to decide
+            // we should make def to be "random" when loop is not in
+            // LCSSA form because we do not have LCSSA phi-nodes.
+            // 1) if use is in the full-join
+            // 2) if use is even outside the full-join
+            // 3) if use is in partial-join but def is not in partial-join
             Value::use_iterator use_it = defi->use_begin();
             Value::use_iterator use_e = defi->use_end();
-
             for (; use_it != use_e; ++use_it)
             {
                 Instruction* user = dyn_cast<Instruction>((*use_it).getUser());
@@ -930,32 +974,20 @@ void WIAnalysisRunner::update_cf_dep(const IGCLLVM::TerminatorInst* inst)
                 PHINode* phi = dyn_cast<PHINode>(user);
                 if (phi)
                 {
-                    // another place we assume all critical edges have been split and
-                    // phi-move will be placed on the blocks created on those
+                    // another place we assume all critical edges have been
+                    // split and phi-move will be placed on those splitters
                     user_blk = phi->getIncomingBlock(*use_it);
                 }
-                auto canUserBeHoistedToDefBlock = [](Instruction* UI, Instruction* DI)->bool {
-                    for (auto& uo : UI->operands())
-                    {
-                        Value* V = uo.get();
-                        if (V == DI)
-                            continue;
-                        else if (dyn_cast<Constant>(V))
-                            continue;
-                        else
-                            return false;
-                    }
-                    return true;
-                };
-                if ((user_blk == def_blk) ||
-                    (canUserBeHoistedToDefBlock(user, defi) && !phi))
+                if (user_blk == def_blk)
                 {
                     // local def-use, not related to control-dependence
                     continue; // skip
                 }
                 if (user_blk == br_info.full_join ||
-                    br_info.partial_joins.count(user_blk) ||
-                    !br_info.influence_region.count(user_blk))
+                    !br_info.influence_region.count(user_blk) ||
+                    (br_info.partial_joins.count(user_blk) &&
+                     !br_info.partial_joins.count(def_blk))
+                   )
                 {
                     updateDepMap(defi, instDep);
                     // break out of the use loop
@@ -1282,8 +1314,17 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id_alloca ||
         GII_id == GenISAIntrinsic::GenISA_StackAlloca ||
+        GII_id == GenISAIntrinsic::GenISA_vectorUniform ||
         GII_id == GenISAIntrinsic::GenISA_getR0 ||
-        GII_id == GenISAIntrinsic::GenISA_vectorUniform)
+        GII_id == GenISAIntrinsic::GenISA_getPayloadHeader ||
+        GII_id == GenISAIntrinsic::GenISA_getWorkDim ||
+        GII_id == GenISAIntrinsic::GenISA_getNumWorkGroups ||
+        GII_id == GenISAIntrinsic::GenISA_getLocalSize ||
+        GII_id == GenISAIntrinsic::GenISA_getGlobalSize ||
+        GII_id == GenISAIntrinsic::GenISA_getEnqueuedLocalSize ||
+        GII_id == GenISAIntrinsic::GenISA_getLocalID_X ||
+        GII_id == GenISAIntrinsic::GenISA_getLocalID_Y ||
+        GII_id == GenISAIntrinsic::GenISA_getLocalID_Z)
     {
         switch (GII_id)
         {
@@ -1293,7 +1334,6 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             // collect the seeds for forcing uniform vectors
             m_forcedUniforms.push_back(inst);
             return WIAnalysis::UNIFORM_THREAD;
-        case GenISAIntrinsic::GenISA_getR0:
         case GenISAIntrinsic::GenISA_getSR0:
         case GenISAIntrinsic::GenISA_getSR0_0:
         case GenISAIntrinsic::GenISA_eu_id:
@@ -1305,6 +1345,19 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             // Make sure they are UNIFORM_WORKGROUP
             //return WIAnalysis::UNIFORM_WORKGROUP;
             return WIAnalysis::UNIFORM_THREAD;
+        case GenISAIntrinsic::GenISA_getR0:
+        case GenISAIntrinsic::GenISA_getPayloadHeader:
+        case GenISAIntrinsic::GenISA_getWorkDim:
+        case GenISAIntrinsic::GenISA_getNumWorkGroups:
+        case GenISAIntrinsic::GenISA_getLocalSize:
+        case GenISAIntrinsic::GenISA_getGlobalSize:
+        case GenISAIntrinsic::GenISA_getEnqueuedLocalSize:
+        case GenISAIntrinsic::GenISA_getLocalID_X:
+        case GenISAIntrinsic::GenISA_getLocalID_Y:
+        case GenISAIntrinsic::GenISA_getLocalID_Z:
+        {
+            return ImplicitArgs::getArgDep(GII_id);
+        }
         }
 
         if (intrinsic_name == llvm_input ||

@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/WIFuncs/WIFuncsAnalysis.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
+#include <llvmWrapper/IR/IRBuilder.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include "common/LLVMWarningsPop.hpp"
@@ -50,6 +51,7 @@ Constant* WIFuncResolution::getKnownWorkGroupSize(
 bool WIFuncResolution::runOnFunction(Function& F)
 {
     m_changed = false;
+    m_pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     auto* MDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     m_implicitArgs = ImplicitArgs(F, getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils());
     visit(F);
@@ -277,14 +279,14 @@ static Value* BuildLoadInst(CallInst& CI, unsigned int Offset, Type* DataType)
     // It Offset is aligned, it returns result of LoadInst of type DataType.
     auto ElemByteSize = DataType->getScalarSizeInBits() / 8;
     auto Size = ElemByteSize;
-    if (auto DataVecType = dyn_cast<VectorType>(DataType))
+    if (auto DataVecType = dyn_cast<IGCLLVM::FixedVectorType>(DataType))
     {
         Size *= (unsigned int)DataVecType->getNumElements();
     }
     unsigned int AlignedOffset = (Offset / ElemByteSize) * ElemByteSize;
     unsigned int LoadByteSize = (Offset == AlignedOffset) ? Size : Size * 2;
 
-    llvm::IRBuilder<> Builder(&CI);
+    IGCLLVM::IRBuilder<> Builder(&CI);
     auto F = CI.getFunction();
     auto Int32Ptr = PointerType::get(Type::getInt32Ty(F->getParent()->getContext()), ADDRESS_SPACE_A32);
     auto ElemType = DataType->getScalarType();
@@ -321,7 +323,7 @@ Value* WIFuncResolution::getLocalId(CallInst& CI, ImplicitArg::ArgType argType)
     // %localIdX
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
         // LocalIDBase = oword_ld
@@ -331,7 +333,7 @@ Value* WIFuncResolution::getLocalId(CallInst& CI, ImplicitArg::ArgType argType)
         // BaseOffset_Y = ThreadBaseOffset + 1 * (SimdSize * 2) + (SimdLaneId * 2) OR
         // BaseOffset_Z = ThreadBaseOffset + 2 * (SimdSize * 2) + (SimdLaneId * 2)
         // Load from BaseOffset_[X|Y|Z]
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
 
         // Get Local ID Base Ptr
         auto DataTypeI64 = Type::getInt64Ty(F->getParent()->getContext());
@@ -348,11 +350,9 @@ Value* WIFuncResolution::getLocalId(CallInst& CI, ImplicitArg::ArgType argType)
         SimdSize = Builder.CreateSelect(CmpInst, SimdSize, ConstantInt::get(SimdSize->getType(), (uint64_t)16));
 
         // Get local thread id
-        auto Ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        VectorType* Tys = IGCLLVM::FixedVectorType::get(DataTypeI32, Ctx->platform.getGRFSize() / SIZE_DWORD);
-        Function* R0Dcl = GenISAIntrinsic::getDeclaration(F->getParent(), GenISAIntrinsic::ID::GenISA_getR0, Tys);
-        auto IntCall = Builder.CreateCall(R0Dcl);
-        auto LocalThreadId = Builder.CreateExtractElement(IntCall, ConstantInt::get(Type::getInt32Ty(CI.getContext()), 2));
+        auto R0Val = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, m_pCtx);
+        auto LocalThreadId = Builder.CreateExtractElement(R0Val, ConstantInt::get(Type::getInt32Ty(CI.getContext()), 2));
+        LocalThreadId = Builder.CreateAnd(LocalThreadId, (uint16_t)255);
 
         // Get SIMD lane id
         auto DataTypeI16 = Type::getInt16Ty(F->getParent()->getContext());
@@ -396,8 +396,7 @@ Value* WIFuncResolution::getLocalId(CallInst& CI, ImplicitArg::ArgType argType)
     }
     else
     {
-        Argument* localId = getImplicitArg(CI, argType);
-        V = localId;
+        V = m_implicitArgs.getImplicitArgValue(*F, argType, m_pCtx);
     }
 
     return V;
@@ -420,22 +419,8 @@ Value* WIFuncResolution::getGroupId(CallInst& CI)
     // if dim = 2 then we need to access R0.7
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
-    if (hasStackCallAttr(*F))
-    {
-        auto Ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        llvm::IRBuilder<> Builder(&CI);
-        Type* Int32Ty = Type::getInt32Ty(F->getParent()->getContext());
-        VectorType* Tys = IGCLLVM::FixedVectorType::get(Int32Ty, Ctx->platform.getGRFSize() / SIZE_DWORD);
-        Function* R0Dcl = GenISAIntrinsic::getDeclaration(F->getParent(), GenISAIntrinsic::ID::GenISA_getR0, Tys);
-        auto IntCall = Builder.CreateCall(R0Dcl);
-        V = IntCall;
-    }
-    else
-    {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::R0);
-        V = arg;
-    }
+    auto F = CI.getParent()->getParent();
+    V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, m_pCtx);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* cmpDim = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, dim, ConstantInt::get(Type::getInt32Ty(CI.getContext()), 0), "cmpDim", &CI);
@@ -461,22 +446,8 @@ Value* WIFuncResolution::getLocalThreadId(CallInst &CI)
     // we need to access R0.2 bits 0 to 7, which contain HW local thread ID on XeHP_SDV+
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
-    if (hasStackCallAttr(*F))
-    {
-        auto Ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        llvm::IRBuilder<> Builder(&CI);
-        Type* Int32Ty = Type::getInt32Ty(F->getParent()->getContext());
-        VectorType* Tys = IGCLLVM::FixedVectorType::get(Int32Ty, Ctx->platform.getGRFSize() / SIZE_DWORD);
-        Function* R0Dcl = GenISAIntrinsic::getDeclaration(F->getParent(), GenISAIntrinsic::ID::GenISA_getR0, Tys);
-        auto IntCall = Builder.CreateCall(R0Dcl);
-        V = IntCall;
-    }
-    else
-    {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::R0);
-        V = arg;
-    }
+    auto F = CI.getParent()->getParent();
+    V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, m_pCtx);
 
     Instruction* r0second = ExtractElementInst::Create(V, ConstantInt::get(Type::getInt32Ty(CI.getContext()), 2), "r0second", &CI);
     Instruction* localThreadId = TruncInst::Create(Instruction::CastOps::Trunc, r0second, Type::getInt8Ty(CI.getContext()), "localThreadId", &CI);
@@ -495,10 +466,10 @@ Value* WIFuncResolution::getGlobalSize(CallInst& CI)
     // %globalSize1 = extractelement <3 x i32> %globalSize, i32 %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeQ = Type::getInt64Ty(F->getParent()->getContext());
         auto VecTyQ = IGCLLVM::FixedVectorType::get(ElemTypeQ, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::GLOBAL_SIZE_X;
@@ -516,9 +487,9 @@ Value* WIFuncResolution::getGlobalSize(CallInst& CI)
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::GLOBAL_SIZE);
-        V = arg;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::GLOBAL_SIZE, m_pCtx);
     }
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* globalSize = ExtractElementInst::Create(V, dim, "globalSize", &CI);
@@ -536,10 +507,10 @@ Value* WIFuncResolution::getLocalSize(CallInst& CI)
     // %localSize = extractelement <3 x i32> %localSize, i32 %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeD = Type::getInt32Ty(F->getParent()->getContext());
         auto VecTyD = IGCLLVM::FixedVectorType::get(ElemTypeD, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::LOCAL_SIZE_X;
@@ -548,9 +519,9 @@ Value* WIFuncResolution::getLocalSize(CallInst& CI)
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::LOCAL_SIZE);
-        V = arg;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::LOCAL_SIZE, m_pCtx);
     }
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* localSize = ExtractElementInst::Create(V, dim, "localSize", &CI);
@@ -567,11 +538,11 @@ Value* WIFuncResolution::getEnqueuedLocalSize(CallInst& CI) {
     // %enqueuedLocalSize1 = extractelement <3 x i32> %enqueuedLocalSize, %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
         // Assume that enqueued local size is same as local size
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeD = Type::getInt32Ty(F->getParent()->getContext());
         auto VecTyD = IGCLLVM::FixedVectorType::get(ElemTypeD, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::LOCAL_SIZE_X;
@@ -580,9 +551,9 @@ Value* WIFuncResolution::getEnqueuedLocalSize(CallInst& CI) {
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::ENQUEUED_LOCAL_WORK_SIZE);
-        V = arg;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::ENQUEUED_LOCAL_WORK_SIZE, m_pCtx);
     }
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* enqueuedLocalSize = ExtractElementInst::Create(V, dim, "enqueuedLocalSize", &CI);
@@ -600,10 +571,10 @@ Value* WIFuncResolution::getGlobalOffset(CallInst& CI)
     // %globalOffset = extractelement <8 x i32> %payloadHeader, i32 %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeQ = Type::getInt64Ty(F->getParent()->getContext());
         auto VecTyQ = IGCLLVM::FixedVectorType::get(ElemTypeQ, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::GLOBAL_OFFSET_X;
@@ -621,9 +592,9 @@ Value* WIFuncResolution::getGlobalOffset(CallInst& CI)
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::PAYLOAD_HEADER);
-        V = arg;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::PAYLOAD_HEADER, m_pCtx);
     }
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     auto globalOffset = ExtractElementInst::Create(V, dim, "globalOffset", &CI);
@@ -641,21 +612,21 @@ Value* WIFuncResolution::getWorkDim(CallInst& CI)
     // %workDim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         unsigned int Size = 4;
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::NUM_WORK_DIM / Size;
         auto TypeUD = Type::getInt32Ty(F->getParent()->getContext());
         auto LoadInst = BuildLoadInst(CI, Offset, TypeUD);
-        auto LShr = Builder.CreateLShr(LoadInst, (uint64_t)24);
-        V = LShr;
+        auto LShr = Builder.CreateLShr(LoadInst, (uint64_t)16);
+        auto And = Builder.CreateAnd(LShr, (uint16_t)255);
+        V = And;
     }
     else
     {
-        Argument* workDim = getImplicitArg(CI, ImplicitArg::WORK_DIM);
-        V = workDim;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::WORK_DIM, m_pCtx);
     }
 
     return V;
@@ -670,10 +641,10 @@ Value* WIFuncResolution::getNumGroups(CallInst& CI)
     // %numGroups1 = extractelement <3 x i32> %numGroups, i32 %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeUD = Type::getInt32Ty(F->getParent()->getContext());
         auto VecTyUD = IGCLLVM::FixedVectorType::get(ElemTypeUD, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::GROUP_COUNT_X;
@@ -682,9 +653,9 @@ Value* WIFuncResolution::getNumGroups(CallInst& CI)
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::NUM_GROUPS);
-        V = arg;
+        V = m_implicitArgs.getImplicitArgValue(*F, ImplicitArg::NUM_GROUPS, m_pCtx);
     }
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* numGroups = ExtractElementInst::Create(V, dim, "numGroups", &CI);
@@ -700,8 +671,9 @@ Value* WIFuncResolution::getStageInGridOrigin(CallInst& CI)
 
     // Creates:
     // %grid_origin1 = extractelement <3 x i32> %globalSize, i32 %dim
-
-    Argument* arg = getImplicitArg(CI, ImplicitArg::STAGE_IN_GRID_ORIGIN);
+    auto F = CI.getParent()->getParent();
+    Argument* arg = m_implicitArgs.getImplicitArg(*F, ImplicitArg::STAGE_IN_GRID_ORIGIN);
+    IGC_ASSERT(arg != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* globalSize = ExtractElementInst::Create(arg, dim, "grid_origin", &CI);
@@ -719,10 +691,10 @@ Value* WIFuncResolution::getStageInGridSize(CallInst& CI)
     // %grid_size1 = extractelement <3 x i32> %globalSize, i32 %dim
 
     Value* V = nullptr;
-    auto F = CI.getFunction();
+    auto F = CI.getParent()->getParent();
     if (hasStackCallAttr(*F))
     {
-        llvm::IRBuilder<> Builder(&CI);
+        IGCLLVM::IRBuilder<> Builder(&CI);
         auto ElemTypeQ = Type::getInt64Ty(F->getParent()->getContext());
         auto VecTyQ = IGCLLVM::FixedVectorType::get(ElemTypeQ, 3);
         unsigned int Offset = GLOBAL_STATE_FIELD_OFFSETS::GLOBAL_SIZE_X;
@@ -740,9 +712,11 @@ Value* WIFuncResolution::getStageInGridSize(CallInst& CI)
     }
     else
     {
-        Argument* arg = getImplicitArg(CI, ImplicitArg::STAGE_IN_GRID_SIZE);
+        Argument* arg = m_implicitArgs.getImplicitArg(*F, ImplicitArg::STAGE_IN_GRID_SIZE);
         V = arg;
     }
+
+    IGC_ASSERT(V != nullptr);
 
     Value* dim = CI.getArgOperand(0);
     Instruction* globalSize = ExtractElementInst::Create(V, dim, "grid_size", &CI);
@@ -758,23 +732,9 @@ Value* WIFuncResolution::getSyncBufferPtr(CallInst& CI)
 
     // Creates:
     // i8 addrspace(1)* %syncBuffer
-
-    Argument* syncBuffer = getImplicitArg(CI, ImplicitArg::SYNC_BUFFER);
+    auto F = CI.getParent()->getParent();
+    Argument* syncBuffer = m_implicitArgs.getImplicitArg(*F, ImplicitArg::SYNC_BUFFER);
 
     return syncBuffer;
 }
 
-Argument* WIFuncResolution::getImplicitArg(CallInst& CI, ImplicitArg::ArgType argType)
-{
-    unsigned int numImplicitArgs = m_implicitArgs.size();
-    unsigned int implicitArgIndex = m_implicitArgs.getArgIndex(argType);
-
-    Function* pFunc = CI.getParent()->getParent();
-    IGC_ASSERT_MESSAGE(pFunc->arg_size() >= numImplicitArgs, "Function arg size does not match meta data args.");
-    unsigned int implicitArgIndexInFunc = pFunc->arg_size() - numImplicitArgs + implicitArgIndex;
-
-    Function::arg_iterator arg = pFunc->arg_begin();
-    for (unsigned int i = 0; i < implicitArgIndexInFunc; ++i, ++arg);
-
-    return &(*arg);
-}

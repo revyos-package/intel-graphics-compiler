@@ -39,6 +39,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Local.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+
 // Part of the bodge to allow abs to bale in to sext/zext. This needs to be set
 // to some arbitrary value that does not clash with any
 // GenXIntrinsicInfo::MODIFIER_* value.
@@ -63,6 +65,10 @@ static cl::opt<bool> BaleSelect("bale-select", cl::init(true), cl::Hidden,
 
 static cl::opt<bool> BaleFNeg("bale-fneg", cl::init(true), cl::Hidden,
                               cl::desc("Bale fneg"));
+
+static cl::opt<bool>
+DisableMemOrderCheck("dbgonly-disable-mem-order-check", cl::init(false),
+                     cl::Hidden, cl::desc("Disable checking of memory ordering"));
 
 //----------------------------------------------------------------------
 // Administrivia for GenXFuncBaling pass
@@ -299,6 +305,55 @@ bool GenXBaling::isRegionOKForIntrinsic(unsigned ArgInfoBits, const Region &R,
   default:
     break;
   }
+  return true;
+}
+
+/***********************************************************************
+ * isSafeToMove : check if operation Op can be safely moved if it's placed
+ * on position From on position To
+ * If operation can write to memory, it's considered unsafe to sink it across
+ * any memory-related operation
+ * I operation is load-like, we don't sink it only through store-like operations
+ */
+bool GenXBaling::isSafeToMove(Instruction *Op, Instruction *From, Instruction *To) {
+  if (DisableMemOrderCheck || !Op->mayReadOrWriteMemory())
+    return true;
+
+  SmallVector<BasicBlock *, 4> Worklist;
+  SmallPtrSet<BasicBlock *, 4> Visited;
+  auto *FirstBB = From->getParent(),
+       *LastBB = To->getParent();
+  Worklist.push_back(LastBB);
+
+  // Do DFS traversal from LastBB until FirstBB is not reached.
+  while (!Worklist.empty()) {
+    auto *CurBB = Worklist.pop_back_val();
+
+    auto II = CurBB == FirstBB ? From->getNextNode()->getIterator() : CurBB->begin(),
+         EI = CurBB == LastBB ? To->getIterator() : CurBB->end();
+
+    for (; II != EI; ++II) {
+      auto *CurInst = &*II;
+      // Loads and stores to globals are not generated in any real memory operation
+      // so can be safely skipped.
+      if (genx::isGlobalLoad(CurInst) || genx::isGlobalStore(CurInst))
+        continue;
+      if (CurInst->mayWriteToMemory() ||
+          (Op->mayWriteToMemory() && CurInst->mayReadFromMemory())) {
+        LLVM_DEBUG(llvm::dbgs() << "Operation " << *Op << " can't be sinked through "
+                                << *CurInst << "\n");
+        return false;
+      }
+    }
+
+    if (CurBB != FirstBB) {
+      Visited.insert(CurBB);
+      for (auto *PredBB : predecessors(CurBB))
+        if (!Visited.count(PredBB))
+          Worklist.push_back(PredBB);
+    }
+  }
+
   return true;
 }
 
@@ -567,7 +622,8 @@ void GenXBaling::processWrRegion(Instruction *Inst)
       V = nullptr;
   }
 
-  if (V && isBalableNewValueIntoWrr(V, Region(Inst, BaleInfo()))) {
+  if (V && isBalableNewValueIntoWrr(V, Region(Inst, BaleInfo())) &&
+      isSafeToMove(V, V, Inst)) {
     LLVM_DEBUG(llvm::dbgs()
                << __FUNCTION__ << " setting operand #" << OperandNum
                << " to bale in instruction " << *Inst << "\n");
@@ -644,6 +700,13 @@ void GenXBaling::processStore(StoreInst *Inst) {
   unsigned OperandNum = 0;
   Instruction *V = dyn_cast<Instruction>(Inst->getOperand(OperandNum));
   if (GenXIntrinsic::isWrRegion(V)) {
+    constexpr unsigned NewValOpNum = GenXIntrinsic::GenXRegion::NewValueOperandNum;
+    if (getBaleInfo(V).isOperandBaled(NewValOpNum)) {
+      Instruction *MainInst = cast<Instruction>(V->getOperand(NewValOpNum));
+      if (getBaleInfo(MainInst).Type == BaleInfo::MAININST &&
+          !isSafeToMove(MainInst, V, Inst))
+        return;
+    }
     LLVM_DEBUG(llvm::dbgs()
                << __FUNCTION__ << " setting operand #" << OperandNum
                << " to bale in instruction " << *Inst << "\n");
@@ -726,7 +789,9 @@ bool GenXBaling::processPredicate(Instruction *Inst, unsigned OperandNum) {
         IGC_ASSERT((MinSize = Inst->getType()->getScalarType()->getPrimitiveSizeInBits() == 64 ? 4 : 8, 1));
 
         unsigned NElems = 0; // it will be assigned inside assertion statament
-        IGC_ASSERT((NElems = cast<VectorType>(Mask->getType())->getNumElements(), 1));
+        IGC_ASSERT((NElems = cast<IGCLLVM::FixedVectorType>(Mask->getType())
+                                 ->getNumElements(),
+                    1));
 
         unsigned Offset = 0; // it will be assigned inside assertion statament
         IGC_ASSERT((Offset = dyn_cast<ConstantInt>(Mask->getOperand(1))->getZExtValue(), 1));
@@ -1155,9 +1220,11 @@ bool GenXBaling::isBalableNewValueIntoWrr(Value *V, const Region &WrrR) {
       GenXIntrinsic::isRdRegion(ValIntrinID))
     return true;
   else if (ValIntrinID == GenXIntrinsic::not_any_intrinsic) {
-    if (isa<BinaryOperator>(Inst) ||
-        (isa<CastInst>(Inst) && !isa<BitCastInst>(Inst)))
+    if (isa<BinaryOperator>(Inst))
       return true;
+    if (auto *CI = dyn_cast<CastInst>(Inst);
+        CI && !genx::isNoopCast(CI))
+        return true;
     else if (isMaskPacking(Inst))
       return true;
     else if (isa<CallInst>(Inst) && cast<CallInst>(Inst)->isInlineAsm())
@@ -1215,102 +1282,12 @@ bool GenXBaling::isBalableNewValueIntoWrr(Value *V, const Region &WrrR) {
 }
 
 bool GenXBaling::isHighCostBaling(uint16_t Type, Instruction *Inst) {
-  switch (Type) {
-  case BaleInfo::WRREGION:
-    switch (GenXIntrinsic::getGenXIntrinsicID(Inst)) {
-    case GenXIntrinsic::genx_dword_atomic_add:
-    case GenXIntrinsic::genx_dword_atomic_sub:
-    case GenXIntrinsic::genx_dword_atomic_min:
-    case GenXIntrinsic::genx_dword_atomic_max:
-    case GenXIntrinsic::genx_dword_atomic_xchg:
-    case GenXIntrinsic::genx_dword_atomic_or:
-    case GenXIntrinsic::genx_dword_atomic_xor:
-    case GenXIntrinsic::genx_dword_atomic_imin:
-    case GenXIntrinsic::genx_dword_atomic_imax:
-    case GenXIntrinsic::genx_dword_atomic_fmin:
-    case GenXIntrinsic::genx_dword_atomic_fmax:
-    case GenXIntrinsic::genx_dword_atomic_inc:
-    case GenXIntrinsic::genx_dword_atomic_dec:
-    case GenXIntrinsic::genx_dword_atomic_cmpxchg:
-    case GenXIntrinsic::genx_dword_atomic_fcmpwr:
-    case GenXIntrinsic::genx_typed_atomic_add:
-    case GenXIntrinsic::genx_typed_atomic_sub:
-    case GenXIntrinsic::genx_typed_atomic_min:
-    case GenXIntrinsic::genx_typed_atomic_max:
-    case GenXIntrinsic::genx_typed_atomic_xchg:
-    case GenXIntrinsic::genx_typed_atomic_and:
-    case GenXIntrinsic::genx_typed_atomic_or:
-    case GenXIntrinsic::genx_typed_atomic_xor:
-    case GenXIntrinsic::genx_typed_atomic_imin:
-    case GenXIntrinsic::genx_typed_atomic_imax:
-    case GenXIntrinsic::genx_typed_atomic_fmin:
-    case GenXIntrinsic::genx_typed_atomic_fmax:
-    case GenXIntrinsic::genx_typed_atomic_inc:
-    case GenXIntrinsic::genx_typed_atomic_dec:
-    case GenXIntrinsic::genx_typed_atomic_cmpxchg:
-    case GenXIntrinsic::genx_typed_atomic_fcmpwr:
-    case GenXIntrinsic::genx_gather_scaled:
-    case GenXIntrinsic::genx_gather4_scaled:
-    case GenXIntrinsic::genx_gather4_typed:
-    case GenXIntrinsic::genx_media_ld:
-    case GenXIntrinsic::genx_oword_ld:
-    case GenXIntrinsic::genx_oword_ld_unaligned:
-    case GenXIntrinsic::genx_svm_block_ld:
-    case GenXIntrinsic::genx_svm_block_ld_unaligned:
-    case GenXIntrinsic::genx_svm_gather:
-    case GenXIntrinsic::genx_svm_gather4_scaled:
-    case GenXIntrinsic::genx_svm_atomic_add:
-    case GenXIntrinsic::genx_svm_atomic_sub:
-    case GenXIntrinsic::genx_svm_atomic_min:
-    case GenXIntrinsic::genx_svm_atomic_max:
-    case GenXIntrinsic::genx_svm_atomic_xchg:
-    case GenXIntrinsic::genx_svm_atomic_and:
-    case GenXIntrinsic::genx_svm_atomic_or:
-    case GenXIntrinsic::genx_svm_atomic_xor:
-    case GenXIntrinsic::genx_svm_atomic_imin:
-    case GenXIntrinsic::genx_svm_atomic_imax:
-    case GenXIntrinsic::genx_svm_atomic_inc:
-    case GenXIntrinsic::genx_svm_atomic_dec:
-    case GenXIntrinsic::genx_svm_atomic_cmpxchg:
-    case GenXIntrinsic::genx_load:
-    case GenXIntrinsic::genx_sample:
-    case GenXIntrinsic::genx_sample_unorm:
-    case GenXIntrinsic::genx_3d_sample:
-    case GenXIntrinsic::genx_3d_load:
-    case GenXIntrinsic::genx_avs:
-    case GenXIntrinsic::genx_raw_send:
-    case GenXIntrinsic::genx_raw_sends:
-    case GenXIntrinsic::genx_va_convolve2d:
-    case GenXIntrinsic::genx_va_hdc_convolve2d:
-    case GenXIntrinsic::genx_va_erode:
-    case GenXIntrinsic::genx_va_hdc_erode:
-    case GenXIntrinsic::genx_va_dilate:
-    case GenXIntrinsic::genx_va_hdc_dilate:
-    case GenXIntrinsic::genx_va_minmax:
-    case GenXIntrinsic::genx_va_minmax_filter:
-    case GenXIntrinsic::genx_va_hdc_minmax_filter:
-    case GenXIntrinsic::genx_va_bool_centroid:
-    case GenXIntrinsic::genx_va_centroid:
-    case GenXIntrinsic::genx_va_1d_convolve_horizontal:
-    case GenXIntrinsic::genx_va_hdc_1d_convolve_horizontal:
-    case GenXIntrinsic::genx_va_1d_convolve_vertical:
-    case GenXIntrinsic::genx_va_hdc_1d_convolve_vertical:
-    case GenXIntrinsic::genx_va_1pixel_convolve:
-    case GenXIntrinsic::genx_va_hdc_1pixel_convolve:
-    case GenXIntrinsic::genx_va_1pixel_convolve_1x1mode:
-    case GenXIntrinsic::genx_va_lbp_creation:
-    case GenXIntrinsic::genx_va_hdc_lbp_creation:
-    case GenXIntrinsic::genx_va_lbp_correlation:
-    case GenXIntrinsic::genx_va_hdc_lbp_correlation:
-    case GenXIntrinsic::genx_va_correlation_search:
-    case GenXIntrinsic::genx_va_flood_fill:
-      return true;
-    default:
-      break;
-    }
-    break;
-  }
-  return false;
+  if (Type != BaleInfo::WRREGION)
+    return false;
+  auto *CI = dyn_cast<CallInst>(Inst);
+  if (!CI)
+    return false;
+  return !CI->doesNotAccessMemory();
 }
 
 /***********************************************************************
@@ -1343,7 +1320,7 @@ void GenXBaling::processMainInst(Instruction *Inst, int IntrinID)
   if (IntrinID == GenXIntrinsic::not_any_intrinsic) {
     if (!acceptableMainInst(Inst))
       return;
-    if (isa<BitCastInst>(Inst))
+    if (auto *CI = dyn_cast<CastInst>(Inst); CI && genx::isNoopCast(CI))
       return;
     BI.Type = checkModifier(Inst);
     // Work out whether the instruction accepts arithmetic, logic or no

@@ -63,7 +63,7 @@ typedef unsigned int Id;
 #define SPV_REVISION 1
 
 static const unsigned int MagicNumber = 0x07230203;
-static const unsigned int Version     = 0x00010300;
+static const unsigned int Version     = 0x00010400;
 static const unsigned int Revision    = 1;
 static const unsigned int OpCodeMask  = 0xffff;
 
@@ -612,9 +612,19 @@ enum Capability {
     CapabilityUnstructuredLoopControlsINTEL = 5886,
     CapabilityMemoryAccessAliasingINTEL = 5910,
     CapabilityLongConstantCompositeINTEL = 6089,
+    CapabilityDotProductInputAllKHR = 6016,
+    CapabilityDotProductInput4x8BitKHR = 6017,
+    CapabilityDotProductInput4x8BitPackedKHR = 6018,
+    CapabilityDotProductKHR = 6019,
     CapabilityOptNoneINTEL = 6094,
     CapabilityTokenTypeINTEL = 6112,
     CapabilityDebugInfoModuleINTEL = 6114,
+    CapabilityMatrixINTEL = 6118,
+};
+
+enum PackedVectorFormat {
+    PackedVectorFormatPackedVectorFormat4x8BitKHR = 0,
+    PackedVectorFormatMax = 0x7fffffff,
 };
 
 enum Op {

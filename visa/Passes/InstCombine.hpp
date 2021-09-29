@@ -6,16 +6,16 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-#ifndef _SENDFUSION_H_
-#define _SENDFUSION_H_
+#ifndef G4_PASSES_INST_COMBINE_HPP
+#define G4_PASSES_INST_COMBINE_HPP
+
+#include "BuildIR.h"
+#include "FlowGraph.h"
 
 namespace vISA
 {
-    class FlowGraph;
-    class G4_BB;
-    class Mem_Manager;
-
-    bool doSendFusion(FlowGraph* CFG, vISA::Mem_Manager* MMgr);
+    void InstCombine(IR_Builder& builder, FlowGraph&  fg);
 }
 
-#endif
+
+#endif // G4_PASSES_INST_COMBINE_HPP

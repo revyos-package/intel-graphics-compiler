@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include "vc/Driver/Driver.h"
 #include "vc/Support/Status.h"
 #include "vc/igcdeps/cmc.h"
 
@@ -146,7 +147,7 @@ CGen8CMProgram::CGen8CMProgram(PLATFORM platform, const WA_TABLE& WATable)
     : CGen8OpenCLProgramBase(platform, m_ContextProvider, WATable),
       m_programInfo(new IGC::SOpenCLProgramInfo) {}
 
-void CGen8CMProgram::CreateKernelBinaries() {
+void CGen8CMProgram::CreateKernelBinaries(CompileOptions& Opts) {
   CreateProgramScopePatchStream(*m_programInfo);
   for (const auto &kernel : m_kernels) {
     // Create the kernel binary streams.
@@ -160,6 +161,10 @@ void CGen8CMProgram::CreateKernelBinaries() {
         m_pSystemThreadKernelOutput,
         kernel->getProgramOutput().m_unpaddedProgramSize);
 
+    if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
+      Opts.Dumper->dumpCos(m_StateProcessor.m_oclStateDebugMessagePrintOut,
+                           kernel->m_kernelInfo.m_kernelName + ".cos");
+
     if (kernel->getProgramOutput().m_debugDataSize) {
       data.vcKernelDebugData = std::make_unique<Util::BinaryStream>();
       m_StateProcessor.CreateKernelDebugData(
@@ -171,6 +176,7 @@ void CGen8CMProgram::CreateKernelBinaries() {
           kernel->getProgramOutput().m_debugDataGenISASize,
           kernel->m_kernelInfo.m_kernelName, *data.vcKernelDebugData);
     }
+    m_StateProcessor.m_oclStateDebugMessagePrintOut.clear();
     m_KernelBinaries.push_back(std::move(data));
   }
 }
@@ -178,23 +184,28 @@ void CGen8CMProgram::CreateKernelBinaries() {
 void CGen8CMProgram::GetZEBinary(llvm::raw_pwrite_stream &programBinary,
                                  unsigned pointerSizeInBytes) {
   llvm::raw_string_ostream ErrLog{m_ErrorLog};
+  // Contains buffer to an optional debug info. Should exists till zebuilder
+  // is destroyed.
+  std::unique_ptr<llvm::MemoryBuffer> DebugInfoHolder;
   iOpenCL::ZEBinaryBuilder zebuilder{m_Platform, pointerSizeInBytes == 8,
                                      *m_programInfo, nullptr, 0};
-  zebuilder.setGfxCoreFamilyToELFMachine(m_Platform.eRenderCoreFamily);
+  zebuilder.setGfxCoreFamily(m_Platform.eRenderCoreFamily);
 
   for (const auto &kernel : m_kernels) {
     zebuilder.createKernel(
         reinterpret_cast<const char *>(kernel->getProgramOutput().m_programBin),
         kernel->getProgramOutput().m_programSize, kernel->m_kernelInfo,
-        kernel->m_GRFSizeInBytes);
+        kernel->m_GRFSizeInBytes, kernel->m_btiLayout,
+        m_ContextProvider.isProgramDebuggable());
   }
+
   if (m_ContextProvider.isProgramDebuggable()) {
-    auto Buff = buildZeDebugInfo(m_kernels, ErrLog);
-    if (Buff) {
+    DebugInfoHolder = buildZeDebugInfo(m_kernels, ErrLog);
+    if (DebugInfoHolder) {
       // Unfortunately, we do need const_cast here, since API requires void*
       void *BufferStart = const_cast<void *>(
-          reinterpret_cast<const void *>(Buff->getBufferStart()));
-      zebuilder.addElfSections(BufferStart, Buff->getBufferSize());
+          reinterpret_cast<const void *>(DebugInfoHolder->getBufferStart()));
+      zebuilder.addElfSections(BufferStart, DebugInfoHolder->getBufferSize());
     }
   }
   zebuilder.getBinaryObject(programBinary);

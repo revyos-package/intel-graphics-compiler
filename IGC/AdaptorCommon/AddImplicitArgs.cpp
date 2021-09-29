@@ -187,7 +187,7 @@ bool AddImplicitArgs::hasIndirectlyCalledParent(const Function* F)
         if (const CallInst* call = dyn_cast<CallInst>(*u))
         {
             const Function* parent = call->getParent()->getParent();
-            if (parent->hasFnAttribute("referenced-indirectly"))
+            if (parent->hasFnAttribute("referenced-indirectly") || hasIndirectlyCalledParent(parent))
                 return true;
         }
     }
@@ -216,9 +216,9 @@ void AddImplicitArgs::updateNewFuncArgs(llvm::Function* pFunc, llvm::Function* p
     // the new arguments, also transferring over the names as well.
     std::vector<std::pair<llvm::Instruction*, unsigned int>> newAddr;
     bool fullDebugInfo = false;
-    IF_DEBUG_INFO(bool lineNumbersOnly = false;)
-    IF_DEBUG_INFO(CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();)
-    IF_DEBUG_INFO(DebugMetadataInfo::hasAnyDebugInfo(ctx, fullDebugInfo, lineNumbersOnly);)
+    bool lineNumbersOnly = false;
+    CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    DebugMetadataInfo::hasAnyDebugInfo(ctx, fullDebugInfo, lineNumbersOnly);
 
     if (fullDebugInfo)
     {
@@ -271,16 +271,16 @@ void AddImplicitArgs::updateNewFuncArgs(llvm::Function* pFunc, llvm::Function* p
     // storage location for the variable.
     for (auto toReplace : newAddr)
     {
-        IF_DEBUG_INFO(auto d = dyn_cast<DbgDeclareInst>(toReplace.first);)
+        auto d = dyn_cast<DbgDeclareInst>(toReplace.first);
 
-        IF_DEBUG_INFO(llvm::DIBuilder Builder(*pNewFunc->getParent()));
-        IF_DEBUG_INFO(auto DIVar = d->getVariable();)
-        IF_DEBUG_INFO(auto DIExpr = d->getExpression();)
+        llvm::DIBuilder Builder(*pNewFunc->getParent());
+        auto DIVar = d->getVariable();
+        auto DIExpr = d->getExpression();
 
         IGC_ASSERT(toReplace.second < pNewFunc->arg_size());
-        IF_DEBUG_INFO(Value* v = pNewFunc->arg_begin() + toReplace.second);
-        IF_DEBUG_INFO(Builder.insertDeclare(v, DIVar, DIExpr, d->getDebugLoc().get(), d);)
-        IF_DEBUG_INFO(d->eraseFromParent();)
+        Value* v = pNewFunc->arg_begin() + toReplace.second;
+        Builder.insertDeclare(v, DIVar, DIExpr, d->getDebugLoc().get(), d);
+        d->eraseFromParent();
     }
 
     // Set implicit argument names
@@ -725,13 +725,22 @@ void BuiltinCallGraphAnalysis::writeBackAllIntoMetaData(const ImplicitArgumentDe
     FunctionInfoMetaDataHandle funcInfo = m_pMdUtils->getFunctionsInfoItem(f);
     funcInfo->clearImplicitArgInfoList();
 
+    bool isEntry = isEntryFunc(m_pMdUtils, f);
+    bool isStackCall = f->hasFnAttribute("visaStackCall");
+
     for (const auto& A : data.ArgsMaps)
     {
         ImplicitArg::ArgType argId = A.first;
+        if (!isEntry && !isStackCall && IGC_IS_FLAG_ENABLED(EnableImplicitArgAsIntrinsic))
+        {
+            // The following implicit args have GenISAIntrinsic support.
+            // They do not require to be added as explicit arguments other than in the caller kernel.
+            if (ImplicitArgs::hasIntrinsicSupport(argId))
+                continue;
+        }
         if (argId < ImplicitArg::ArgType::STRUCT_START)
         {
             // unique implicit argument, add it on metadata
-
             ArgInfoMetaDataHandle argMD = ArgInfoMetaDataHandle(ArgInfoMetaData::get());
             argMD->setArgId(argId);
             funcInfo->addImplicitArgInfoListItem(argMD);

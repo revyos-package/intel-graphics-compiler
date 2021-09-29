@@ -75,7 +75,7 @@ FunctionPass *createGenXLegalizationPass();
 ModulePass *createGenXEmulatePass();
 ModulePass *createGenXEmulationImportPass();
 FunctionPass *createGenXDeadVectorRemovalPass();
-FunctionPass *createGenXPatternMatchPass(const TargetOptions *Options);
+FunctionPass *createGenXPatternMatchPass();
 FunctionPass *createGenXPostLegalizationPass();
 FunctionPass *createTransformPrivMemPass();
 ModulePass *createGenXThreadPrivateMemoryPass();
@@ -85,6 +85,7 @@ FunctionPass *createGenXAggregatePseudoLoweringPass();
 ModulePass *createGenXModulePass();
 FunctionGroupPass *createGenXLateSimdCFConformancePass();
 FunctionGroupPass *createGenXLivenessPass();
+FunctionPass *createGenXLoadStoreLoweringPass();
 ModulePass *createGenXFunctionPointersLoweringPass();
 FunctionGroupPass *createGenXCategoryPass();
 FunctionGroupPass *createGenXGroupBalingPass(BalingKind Kind, GenXSubtarget *ST);
@@ -103,6 +104,8 @@ FunctionGroupPass *createGenXCisaBuilderPass();
 ModulePass *createGenXFinalizerPass(raw_pwrite_stream &o);
 ModulePass *createGenXDebugInfoPass();
 ModulePass *createGenXGlobalValueLoweringPass();
+ModulePass *createGenXPromoteStatefulToBindlessPass();
+ModulePass *createGenXStackUsagePass();
 
 namespace genx {
 

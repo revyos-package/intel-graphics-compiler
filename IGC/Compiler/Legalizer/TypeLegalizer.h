@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/Analysis/InlineCost.h"
 #include "llvmWrapper/IR/InstrTypes.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -20,7 +21,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
+#include "llvmWrapper/IR/IRBuilder.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -30,6 +31,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Pass.h"
 #include "llvm/Analysis/TargetFolder.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "Compiler/CISACodeGen/RegisterPressureEstimate.hpp"
 #include "common/Types.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Probe/Assertion.h"
@@ -49,7 +51,7 @@ namespace IGC {
             Elementize
         };
 
-        typedef IRBuilder<TargetFolder> BuilderType;
+        typedef IGCLLVM::IRBuilder<TargetFolder> BuilderType;
 
         typedef TinyPtrVector<Type*> TypeSeq;
         typedef TinyPtrVector<Value*> ValueSeq;
@@ -70,6 +72,7 @@ namespace IGC {
             friend class InstElementizer;
 
             const DataLayout* DL;
+            DominatorTree* DT;
             BuilderType* IRB;
 
             InstLegalChecker* ILC;
@@ -103,6 +106,7 @@ namespace IGC {
             void getAnalysisUsage(AnalysisUsage& AU) const override;
 
             LLVMContext& getContext() const { return TheModule->getContext(); }
+            DominatorTree& getDominatorTree() const { return *DT; }
             Module* getModule() const { return TheModule; }
             Function* getFunction() const { return TheFunction; }
 
@@ -271,7 +275,7 @@ namespace IGC {
                 if (!Ty->isVectorTy())
                     return false;
 
-                unsigned NumElts = (unsigned)cast<VectorType>(Ty)->getNumElements();
+                unsigned NumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements();
                 Type* EltTy = cast<VectorType>(Ty)->getElementType();
                 const auto& ProfitLengths = getProfitLoadVectorLength(EltTy);
 

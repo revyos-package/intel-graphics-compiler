@@ -27,18 +27,13 @@ ZEBinaryBuilder::ZEBinaryBuilder(
 {
     G6HWC::InitializeCapsGen8(&mHWCaps);
 
-    // IGC only generates executable
-    mBuilder.setFileType(ELF_TYPE_ZEBIN::ET_ZEBIN_EXE);
-
-    mBuilder.setMachine(plat.eProductFamily);
-
     // FIXME: Most fields leaves as 0
-    TargetFlags tf;
-    tf.generatorSpecificFlags = TargetFlags::GeneratorSpecificFlags::NONE;
-    tf.minHwRevisionId = plat.usRevId;
-    tf.maxHwRevisionId = plat.usRevId;
-    tf.generatorId = TargetFlags::GeneratorId::IGC;
-    mBuilder.setTargetFlag(tf);
+    TargetMetadata metadata;
+    metadata.generatorSpecificFlags = TargetMetadata::GeneratorSpecificFlags::NONE;
+    metadata.minHwRevisionId = plat.usRevId;
+    metadata.maxHwRevisionId = plat.usRevId;
+    metadata.generatorId = TargetMetadata::GeneratorId::IGC;
+    mBuilder.setTargetMetadata(metadata);
 
     addProgramScopeInfo(programInfo);
 
@@ -46,19 +41,23 @@ ZEBinaryBuilder::ZEBinaryBuilder(
         addSPIRV(spvData, spvSize);
 }
 
-void ZEBinaryBuilder::setGfxCoreFamilyToELFMachine(uint32_t value)
+void ZEBinaryBuilder::setProductFamily(PRODUCT_FAMILY value)
 {
-    TargetFlags tf = mBuilder.getTargetFlag();
-    tf.machineEntryUsesGfxCoreInsteadOfProductFamily = true;
-    mBuilder.setTargetFlag(tf);
-    mBuilder.setMachine(value);
+    mBuilder.setProductFamily(value);
+}
+
+void ZEBinaryBuilder::setGfxCoreFamily(GFXCORE_FAMILY value)
+{
+    mBuilder.setGfxCoreFamily(value);
 }
 
 void ZEBinaryBuilder::createKernel(
     const char*  rawIsaBinary,
     unsigned int rawIsaBinarySize,
     const SOpenCLKernelInfo& annotations,
-    const uint32_t grfSize)
+    const uint32_t grfSize,
+    const CBTILayout& layout,
+    bool isProgramDebuggable)
 {
     ZEELFObjectBuilder::SectionID textID =
         addKernelBinary(annotations.m_kernelName, rawIsaBinary, rawIsaBinarySize);
@@ -81,6 +80,8 @@ void ZEBinaryBuilder::createKernel(
     addPayloadArgsAndBTI(annotations, zeKernel);
     addMemoryBuffer(annotations, zeKernel);
     addGTPinInfo(annotations);
+    if (isProgramDebuggable)
+        addKernelDebugEnv(annotations, layout, zeKernel);
 }
 
 void ZEBinaryBuilder::addGTPinInfo(const IGC::SOpenCLKernelInfo& annotations)
@@ -439,9 +440,6 @@ void ZEBinaryBuilder::addKernelExecEnv(const SOpenCLKernelInfo& annotations,
 {
     zeInfoExecutionEnv& env = zeinfoKernel.execution_env;
 
-    // FIXME: compiler did not provide this information
-    env.actual_kernel_start_offset = 0;
-
     env.barrier_count = annotations.m_executionEnivronment.HasBarriers;
     env.disable_mid_thread_preemption = annotations.m_executionEnivronment.DisableMidThreadPreemption;
     env.grf_count = annotations.m_executionEnivronment.NumGRFRequired;
@@ -634,7 +632,7 @@ void ZEBinaryBuilder::addElfSections(void* elfBin, size_t elfSize)
 
     char* secData = NULL;
     size_t secDataSize = 0;
-    std::vector<std::string> zeBinSymbols;      // ELF symbols added to zeBinary; to avoid duplicated symbols.
+    std::vector<std::string> zeBinSymbols;      // ELF symbols added to zeBinary for a given section; to avoid duplicated symbols.
 
     // ELF binary scanning sections with copying whole sections one by one to zeBinary, except:
     // - empty sections
@@ -670,6 +668,12 @@ void ZEBinaryBuilder::addElfSections(void* elfBin, size_t elfSize)
                     IGC_ASSERT_MESSAGE((secDataSize % relocEntrySize) == 0, "Incorrect relocation section size");
                     IGC_ASSERT_MESSAGE((entrySize == 64) || (entrySize == 32), "Incorrect relocation entry size");
 
+                    // If .rela.foo is being processed then find zeBinary section ID of previously added .foo section
+                    ZEELFObjectBuilder::SectionID nonRelaSectionID =
+                        mBuilder.getSectionIDBySectionName(elfReader->GetSectionName(elfSectionIdx) + sizeof(".rela") - 1);
+                    // Local symbols with the same name are allowed in zebinary if defined in different sections.
+                    zeBinSymbols.clear();
+
                     if (entrySize == 64)
                     {
                         uint64_t relocEntryNum = secDataSize / relocEntrySize;
@@ -695,9 +699,6 @@ void ZEBinaryBuilder::addElfSections(void* elfBin, size_t elfSize)
                                     (uint32_t)symtabEntry.st_size,
                                     symName);  // Symbol's name
 
-                                // If .rela.foo is being processed then find zeBinary section ID of previously added .foo section
-                                ZEELFObjectBuilder::SectionID nonRelaSectionID =
-                                    mBuilder.getSectionIDBySectionName(elfReader->GetSectionName(elfSectionIdx) + sizeof(".rela") - 1);
                                 // Avoid symbol duplications - check whether a current symbol has been previously added.
                                 bool isSymbolAdded = false;
                                 for (auto zeBinSym : zeBinSymbols)
@@ -773,4 +774,15 @@ void ZEBinaryBuilder::printBinaryObject(const std::string& filename)
     llvm::raw_fd_ostream os(filename, EC);
     mBuilder.finalize(os);
     os.close();
+}
+
+void ZEBinaryBuilder::addKernelDebugEnv(const SOpenCLKernelInfo& annotations,
+                                        const CBTILayout& layout,
+                                        zeInfoKernel& zeinfoKernel)
+{
+    zeInfoDebugEnv& env = zeinfoKernel.debug_env;
+    env.sip_surface_bti = layout.GetSystemThreadBindingTableIndex();
+    // Now set the sip surface offset to 0 directly. Currently the surface offset
+    // is computed locally when creating patch tokens.
+    env.sip_surface_offset = 0;
 }

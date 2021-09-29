@@ -289,6 +289,7 @@ namespace IGC
         inline void Inv(CVariable* dst, CVariable* src0);
         inline void Not(CVariable* dst, CVariable* src0);
         // src0 * src1 + src2
+        inline void Madw(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         inline void Mad(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         inline void Lrp(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         inline void Xor(CVariable* dst, CVariable* src0, CVariable* src1);
@@ -546,7 +547,8 @@ namespace IGC
         void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries,
             SProgramOutput::ZEBinFuncSymbolTable& funcSyms, SOpenCLProgramInfo::ZEBinProgramSymbolTable& programSyms);
         // Create function symbols for kernels. This is ZEBinary foramt only.
-        void CreateKernelSymbol(const std::string& kernelName, const VISAKernel& visaKernel, SProgramOutput::ZEBinFuncSymbolTable& symbols);
+        void CreateKernelSymbol(const std::string& kernelName, unsigned offset, unsigned size,
+            SProgramOutput::ZEBinFuncSymbolTable& symbols);
 
         // CreateRelocationTable
         // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
@@ -863,6 +865,12 @@ namespace IGC
     inline void CEncoder::Cast(CVariable* dst, CVariable* src)
     {
         DataMov(ISA_MOV, dst, src);
+    }
+
+    // src0 * src1 + src2
+    inline void CEncoder::Madw(CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2)
+    {
+        Arithmetic(ISA_MADW, dst, src0, src1, src2);
     }
 
     // src0 * src1 + src2

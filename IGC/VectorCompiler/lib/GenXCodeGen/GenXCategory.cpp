@@ -131,6 +131,7 @@ SPDX-License-Identifier: MIT
 #include "vc/GenXOpts/Utils/RegCategory.h"
 
 #include "Probe/Assertion.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/InstrTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
 
@@ -185,13 +186,17 @@ namespace {
   public:
     static char ID;
     explicit GenXCategory() : FunctionGroupPass(ID) { }
-    virtual StringRef getPassName() const { return "GenX category conversion"; }
-    void getAnalysisUsage(AnalysisUsage &AU) const;
-    bool runOnFunctionGroup(FunctionGroup &FG);
+    StringRef getPassName() const override {
+      return "GenX category conversion";
+    }
+    void getAnalysisUsage(AnalysisUsage &AU) const override;
+    bool runOnFunctionGroup(FunctionGroup &FG) override;
     // createPrinterPass : get a pass to print the IR, together with the GenX
     // specific analyses
-    virtual Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const
-    { return createGenXGroupPrinterPass(O, Banner); }
+    Pass *createPrinterPass(raw_ostream &O,
+                            const std::string &Banner) const override {
+      return createGenXGroupPrinterPass(O, Banner);
+    }
     unsigned getCategoryForPhiIncomings(PHINode *Phi) const;
     unsigned getCategoryForCallArg(Function *Callee, unsigned ArgNo) const;
     unsigned getCategoryForInlasmConstraintedOp(CallInst *CI, unsigned ArgNo,
@@ -453,22 +458,24 @@ bool GenXCategory::handleLeftover() {
 static bool commonUpPredicate(BasicBlock *BB) {
   bool Changed = false;
   // Map from flatten predicate value to its constpred calls.
-  SmallDenseMap<uint64_t, SmallVector<Instruction *, 8>> ValMap;
+  using key_type = std::pair<char, uint64_t>;
+  SmallDenseMap<key_type, SmallVector<Instruction *, 8>> ValMap;
 
   for (auto &Inst : BB->getInstList()) {
     if (GenXIntrinsic::getGenXIntrinsicID(&Inst) == GenXIntrinsic::genx_constantpred) {
       Constant *V = cast<Constant>(Inst.getOperand(0));
-      if (auto VT = dyn_cast<VectorType>(V->getType())) {
-        unsigned NElts = cast<VectorType>(VT)->getNumElements();
+      if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(V->getType())) {
+        unsigned NElts = VT->getNumElements();
         if (NElts > 64)
           continue;
         uint64_t Bits = 0;
         for (unsigned i = 0; i != NElts; ++i)
           if (!V->getAggregateElement(i)->isNullValue())
             Bits |= ((uint64_t)1 << i);
-        auto Iter = ValMap.find(Bits);
+        key_type Key{NElts, Bits};
+        auto Iter = ValMap.find(Key);
         if (Iter == ValMap.end())
-          ValMap[Bits].push_back(&Inst);
+          ValMap[Key].push_back(&Inst);
         else if (Inst.hasOneUse() && Inst.user_back()->getParent() == BB)
           // Just in case constpred is not from constant predicate loading. This
           // ensures the first instruction dominates others in the same vector.
@@ -780,8 +787,6 @@ static unsigned intrinsicCategoryToRegCategory(unsigned ICat)
       return RegCategory::SAMPLER;
     case GenXIntrinsicInfo::SURFACE:
       return RegCategory::SURFACE;
-    case GenXIntrinsicInfo::VME:
-      return RegCategory::VME;
     default:
       return RegCategory::GENERAL;
   }
@@ -798,13 +803,14 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
   if (V->getType()->getScalarType()->getPrimitiveSizeInBits() == 1)
     return RegCategory::PREDICATE;
   if (Argument *Arg = dyn_cast<Argument>(V)) {
+    auto *F = Arg->getParent();
     // This is a function Argument.
     if (!InFGHead) {
       // It is an arg in a subroutine.  Get the category from the corresponding
       // arg at some call site.  (We should not have disagreement among the
       // call sites and the function arg, since whichever one gets a category
       // first forces the category of all the others.)
-      return getCategoryForCallArg(Arg->getParent(), Arg->getArgNo());
+      return getCategoryForCallArg(F, Arg->getArgNo());
     }
     unsigned ArgNo = Arg->getArgNo();
     if (KM.getNumArgs() > ArgNo) {
@@ -817,7 +823,12 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
     // determine the category. This is the fallback for compatibility with
     // hand coded LLVM IR from before this metadata was added. (If we only
     // had to cope with non-kernel functions, we could just return GENERAL.)
-    return RegCategory::NONE;
+    // FIXME: temporary fix for stack calls. We need to figure out how to
+    // determine arguments category if it cannot be deduced from the arg uses.
+    // * calls from another function groups might help (but we do not have
+    // liveness -> category for them). What about standalone stack calls?
+    IGC_ASSERT(genx::requiresStackCall(F));
+    return getCategoryForCallArg(F, Arg->getArgNo());
   }
   // The def is a phi-instruction.
   if (PHINode *Phi = dyn_cast<PHINode>(V)) {
@@ -1068,22 +1079,19 @@ unsigned GenXCategory::getCategoryForCallArg(Function *Callee, unsigned ArgNo) c
       return Cat;
   }
   // Then try the arg at each call site.
-  bool UseUndef = true;
   for (auto *U: Callee->users()) {
     if (auto *CI = checkFunctionCall(U, Callee)) {
       auto ArgV = CI->getArgOperand(ArgNo);
-      if (!isa<UndefValue>(ArgV)) {
-        UseUndef = false;
         if (auto LR = Liveness->getLiveRangeOrNull(ArgV)) {
           unsigned Cat = LR->getCategory();
           if (Cat != RegCategory::NONE)
             return Cat;
         }
-      }
     }
   }
-  // special case handling to break deadlock when all uses are undef,
-  // force the argument to be GENERAL
-  return(UseUndef ? RegCategory::GENERAL : RegCategory::NONE);
+  // special case handling to break deadlock when all uses are undef or stack
+  // call arg category cannot be deduced from the uses in the function, force
+  // the argument to be GENERAL
+  return EnforceCategoryPromotion ? RegCategory::GENERAL : RegCategory::NONE;
 }
 

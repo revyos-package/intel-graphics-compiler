@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 #include "common/debug/Debug.hpp"
 #include "llvmWrapper/IR/DataLayout.h"
 #include "llvmWrapper/Support/Alignment.h"
+#include "llvmWrapper/IR/IRBuilder.h"
 
 #include <fstream>
 #include <sstream>
@@ -217,7 +218,7 @@ namespace IGC
 
             // This declaration will invoke constructor of DebugLoc class
             // and result in an empty DebugLoc instance, ie with line and scope set to 0.
-            IF_DEBUG_INFO(DebugLoc emptyDebugLoc);
+            DebugLoc emptyDebugLoc;
 
             LLVMContext& llvmCtx = F->getContext();
             IntegerType* typeInt32 = Type::getInt32Ty(llvmCtx);
@@ -290,9 +291,9 @@ namespace IGC
                     slmVar->setSection("localSLM");
 
                     // TODO: optimize on x-y-z values
-                    llvm::IRBuilder<> builder(pAI);
+                    IGCLLVM::IRBuilder<> builder(pAI);
 
-                    IF_DEBUG_INFO(builder.SetCurrentDebugLocation(emptyDebugLoc));
+                    builder.SetCurrentDebugLocation(emptyDebugLoc);
 
                     // totalOffset = localIdX +
                     //               localIdY * dimX +
@@ -309,21 +310,21 @@ namespace IGC
                     {
                         localIdX =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getArgInFunc(*F, ImplicitArg::LOCAL_ID_X),
+                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_X),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdX"),
                                 pEntryPoint);
                         localIdY =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getArgInFunc(*F, ImplicitArg::LOCAL_ID_Y),
+                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_Y),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdY"),
                                 pEntryPoint);
                         localIdZ =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getArgInFunc(*F, ImplicitArg::LOCAL_ID_Z),
+                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_Z),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdZ"),
@@ -336,20 +337,20 @@ namespace IGC
                         //    R0.1  31:0    Thread Group ID X
                         //    R0.6  31:0    Thread Group ID Y
                         //    R0.7  31:0    Thread Group ID Z
-                        Argument* r0Arg = implicitArgs.getArgInFunc(*F, ImplicitArg::R0);
+                        Value* r0Val = implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, CodeGenCtx);
                         localIdX =
                             builder.CreateExtractElement(
-                                r0Arg,
+                                r0Val,
                                 ConstantInt::get(typeInt32, 1),
                                 VALUE_NAME("localIdX"));
                         localIdY =
                             builder.CreateExtractElement(
-                                r0Arg,
+                                r0Val,
                                 ConstantInt::get(typeInt32, 6),
                                 VALUE_NAME("localIdY"));
                         localIdZ =
                             builder.CreateExtractElement(
-                                r0Arg,
+                                r0Val,
                                 ConstantInt::get(typeInt32, 7),
                                 VALUE_NAME("localIdZ"));
                     }

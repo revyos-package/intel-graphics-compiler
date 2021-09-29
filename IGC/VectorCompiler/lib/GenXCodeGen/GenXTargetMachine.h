@@ -52,9 +52,7 @@ public:
 
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
 
-  virtual const DataLayout *getDataLayout() const { return &DL; }
-
-  virtual const TargetSubtargetInfo *getSubtargetImpl(const Function &) const override {
+  const TargetSubtargetInfo *getSubtargetImpl(const Function &) const override {
     return &Subtarget;
   }
   TargetTransformInfo getTargetTransformInfo(const Function &F) override;
@@ -63,8 +61,6 @@ public:
 };
 
 class GenXTargetMachine32 : public GenXTargetMachine {
-  virtual void anchor();
-
 public:
   GenXTargetMachine32(const Target &T, const Triple &TT, StringRef CPU,
                       StringRef FS, const TargetOptions &Options,
@@ -73,8 +69,6 @@ public:
 };
 
 class GenXTargetMachine64 : public GenXTargetMachine {
-  virtual void anchor();
-
 public:
   GenXTargetMachine64(const Target &T, const Triple &TT, StringRef CPU,
                       StringRef FS, const TargetOptions &Options,
@@ -97,7 +91,12 @@ public:
   bool shouldBuildLookupTables() { return false; }
   unsigned getFlatAddressSpace() { return 4; }
 
-  int getUserCost(const User *U, ArrayRef<const Value *> Operands
+#if LLVM_VERSION_MAJOR >= 13
+  InstructionCost
+#else
+  int
+#endif
+  getUserCost(const User *U, ArrayRef<const Value *> Operands
 #if LLVM_VERSION_MAJOR >= 11
                   ,
                   TTI::TargetCostKind CostKind
@@ -157,6 +156,7 @@ void initializeGenXLateSimdCFConformancePass(PassRegistry &);
 void initializeGenXLegalizationPass(PassRegistry &);
 void initializeGenXLiveRangesPass(PassRegistry &);
 void initializeGenXLivenessPass(PassRegistry &);
+void initializeGenXLoadStoreLoweringPass(PassRegistry &);
 void initializeGenXLowerAggrCopiesPass(PassRegistry &);
 void initializeGenXLoweringPass(PassRegistry &);
 void initializeGenXModulePass(PassRegistry &);
@@ -180,6 +180,8 @@ void initializeGenXLowerJmpTableSwitchPass(PassRegistry &);
 void initializeGenXGlobalValueLoweringPass(PassRegistry &);
 void initializeGenXAggregatePseudoLoweringPass(PassRegistry &);
 void initializeGenXVectorCombinerPass(PassRegistry &);
+void initializeGenXPromoteStatefulToBindlessPass(PassRegistry &);
+void initializeGenXStackUsagePass(PassRegistry &);
 } // End llvm namespace
 
 #endif

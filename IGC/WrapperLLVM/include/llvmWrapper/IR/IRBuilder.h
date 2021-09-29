@@ -12,6 +12,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/IRBuilder.h"
 
+#include "llvmWrapper/Support/Alignment.h"
+
 namespace IGCLLVM
 {
 
@@ -60,15 +62,9 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, Align, Src, Align, Size,
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, getCorrectAlign(Align), Src, getCorrectAlign(Align), Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag,
                 NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, llvm::Align(Align), Src, llvm::Align(Align), Size,
-                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
-                NoAliasTag);
-#endif
         }
 
         inline llvm::CallInst *CreateMemCpy(llvm::Value *Dst, llvm::Value *Src, llvm::Value *Size, unsigned Align,
@@ -77,15 +73,9 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, Align, Src, Align, Size,
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, getCorrectAlign(Align), Src, getCorrectAlign(Align), Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag,
                 NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, llvm::Align(Align), Src, llvm::Align(Align), Size,
-                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
-                NoAliasTag);
-#endif
         }
 
         inline llvm::CallInst *CreateMemCpy(llvm::Value *Dst, unsigned DstAlign, llvm::Value *Src, unsigned SrcAlign,
@@ -94,15 +84,9 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, DstAlign, Src, SrcAlign, Size,
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, getCorrectAlign(DstAlign), Src, getCorrectAlign(SrcAlign), Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag,
                 NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(Dst, llvm::Align(DstAlign), Src, llvm::Align(SrcAlign), Size,
-                isVolatile, TBAATag, TBAAStructTag, ScopeTag,
-                NoAliasTag);
-#endif
         }
 
         inline llvm::CallInst *CreateMemCpy(llvm::Value *Dst, unsigned DstAlign, llvm::Value *Src, unsigned SrcAlign,
@@ -111,15 +95,9 @@ namespace IGCLLVM
             llvm::MDNode *ScopeTag = nullptr,
             llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(
-                Dst, DstAlign, Src, SrcAlign, Size, isVolatile, TBAATag,
-                TBAAStructTag, ScopeTag, NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemCpy(
-                Dst, llvm::Align(DstAlign), Src, llvm::Align(SrcAlign), Size,
+                Dst, getCorrectAlign(DstAlign), Src, getCorrectAlign(SrcAlign), Size,
                 isVolatile, TBAATag, TBAAStructTag, ScopeTag, NoAliasTag);
-#endif
         }
 
         using llvm::IRBuilder<T, InserterTyDef()>::CreateMemSet;
@@ -128,30 +106,18 @@ namespace IGCLLVM
             unsigned Alignment, bool isVolatile = false, llvm::MDNode *TBAATag = nullptr,
             llvm::MDNode *ScopeTag = nullptr, llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, InserterTyDef()>::CreateMemSet(
-                Ptr, Val, Size, Alignment, isVolatile, TBAATag, ScopeTag,
-                NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemSet(
-                Ptr, Val, Size, llvm::Align(Alignment), isVolatile, TBAATag,
+                Ptr, Val, Size, getCorrectAlign(Alignment), isVolatile, TBAATag,
                 ScopeTag, NoAliasTag);
-#endif
         }
 
         inline llvm::CallInst *CreateMemSet(llvm::Value *Ptr, llvm::Value *Val, llvm::Value *Size,
             unsigned Alignment, bool isVolatile = false, llvm::MDNode *TBAATag = nullptr,
             llvm::MDNode *ScopeTag = nullptr, llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, InserterTyDef()>::CreateMemSet(
-                Ptr, Val, Size, Alignment, isVolatile, TBAATag, ScopeTag,
-                NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemSet(
-                Ptr, Val, Size, llvm::Align(Alignment), isVolatile, TBAATag,
+                Ptr, Val, Size, getCorrectAlign(Alignment), isVolatile, TBAATag,
                 ScopeTag, NoAliasTag);
-#endif
         }
 
         using llvm::IRBuilder<T, InserterTyDef()>::CreateMemMove;
@@ -160,30 +126,18 @@ namespace IGCLLVM
             unsigned SrcAlign, uint64_t Size, bool isVolatile = false, llvm::MDNode *TBAATag = nullptr,
             llvm::MDNode *ScopeTag = nullptr, llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, InserterTyDef()>::CreateMemMove(
-                Dst, DstAlign, Src, SrcAlign, Size, isVolatile, TBAATag,
-                ScopeTag, NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemMove(
-                Dst, llvm::Align(DstAlign), Src, llvm::Align(SrcAlign), Size,
+                Dst, getCorrectAlign(DstAlign), Src, getCorrectAlign(SrcAlign), Size,
                 isVolatile, TBAATag, ScopeTag, NoAliasTag);
-#endif
         }
 
         inline llvm::CallInst *CreateMemMove(llvm::Value *Dst, unsigned DstAlign, llvm::Value *Src,
             unsigned SrcAlign, llvm::Value *Size, bool isVolatile = false, llvm::MDNode *TBAATag = nullptr,
             llvm::MDNode *ScopeTag = nullptr, llvm::MDNode *NoAliasTag = nullptr)
         {
-#if LLVM_VERSION_MAJOR < 10
             return llvm::IRBuilder<T, InserterTyDef()>::CreateMemMove(
-                Dst, DstAlign, Src, SrcAlign, Size, isVolatile, TBAATag,
-                ScopeTag, NoAliasTag);
-#else
-            return llvm::IRBuilder<T, InserterTyDef()>::CreateMemMove(
-                Dst, llvm::Align(DstAlign), Src, llvm::Align(SrcAlign), Size,
+                Dst, getCorrectAlign(DstAlign), Src, getCorrectAlign(SrcAlign), Size,
                 isVolatile, TBAATag, ScopeTag, NoAliasTag);
-#endif
         }
 
         inline llvm::AllocaInst *CreateAlloca(llvm::Type *Ty, llvm::Value *ArraySize = nullptr, const llvm::Twine &Name = "", unsigned AddrSpace = 0)
@@ -234,6 +188,102 @@ namespace IGCLLVM
         }
 #endif
 
+#if LLVM_VERSION_MAJOR >= 13
+        inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, const char *Name)
+        {
+            Type* ptrType = Ptr->getType()->getPointerElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, Name);
+        }
+
+        inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, const Twine &Name = "")
+        {
+            Type* ptrType = Ptr->getType()->getPointerElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, Name);
+        }
+
+        inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, bool isVolatile, const Twine &Name = "")
+        {
+            Type* ptrType = Ptr->getType()->getPointerElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, isVolatile, Name);
+        }
+
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateLoad;
+
+        inline llvm::LoadInst* CreateAlignedLoad(llvm::Value* Ptr, IGCLLVM::Align Align, const llvm::Twine& Name = "")
+        {
+            Type* ptrType = Ptr->getType()->getPointerElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateAlignedLoad(ptrType, Ptr, Align, Name);
+        }
+
+        inline llvm::LoadInst* CreateAlignedLoad(llvm::Value* Ptr, IGCLLVM::Align Align, bool isVolatile, const llvm::Twine& Name = "")
+        {
+            Type* ptrType = Ptr->getType()->getPointerElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateAlignedLoad(ptrType, Ptr, Align, isVolatile, Name);
+        }
+
+        inline llvm::Value* CreateConstGEP1_32(
+            llvm::Value* Ptr,
+            unsigned Idx0,
+            const llvm::Twine& Name = "")
+        {
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateConstGEP1_32(Ptr->getType()->getPointerElementType(), Ptr, Idx0, Name);
+        }
+
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateConstGEP1_32;
+
+        inline llvm::Value* CreateInBoundsGEP(llvm::Value *Ptr, llvm::ArrayRef<llvm::Value*> IdxList,
+                           const llvm::Twine &Name = "") {
+            Type *Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateInBoundsGEP(Ty, Ptr, IdxList, Name);
+        }
+
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateInBoundsGEP;
+
+        inline llvm::Value* CreateGEP(llvm::Value* Ptr, llvm::ArrayRef<llvm::Value*> IdxList,
+            const llvm::Twine& Name = "") {
+            Type* Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateGEP(Ty, Ptr, IdxList, Name);
+        }
+
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateGEP;
+
+        CallInst *CreateMaskedGather(Value *Ptrs, Align Alignment, Value *Mask,
+                                     Value *PassThru, const Twine &Name) {
+          auto *PtrsTy = cast<FixedVectorType>(Ptrs->getType());
+          auto *PtrTy = cast<PointerType>(PtrsTy->getElementType());
+          unsigned NumElts = PtrsTy->getNumElements();
+          auto *Ty = FixedVectorType::get(PtrTy->getElementType(), NumElts);
+          return llvm::IRBuilder<T, InserterTyDef()>::CreateMaskedGather(
+              Ty, Ptrs, Alignment, Mask, PassThru, Name);
+        }
+
+        AtomicCmpXchgInst *
+        CreateAtomicCmpXchg(Value *Ptr, Value *Cmp, Value *New,
+                            AtomicOrdering SuccessOrdering,
+                            AtomicOrdering FailureOrdering,
+                            SyncScope::ID SSID = SyncScope::System) {
+          return llvm::IRBuilder<T, InserterTyDef()>::CreateAtomicCmpXchg(
+              Ptr, Cmp, New, MaybeAlign(), SuccessOrdering, FailureOrdering,
+              SSID);
+        }
+
+        AtomicRMWInst *CreateAtomicRMW(AtomicRMWInst::BinOp Op, Value *Ptr,
+                                       Value *Val, AtomicOrdering Ordering,
+                                       SyncScope::ID SSID = SyncScope::System) {
+          return llvm::IRBuilder<T, InserterTyDef()>::CreateAtomicRMW(
+              Op, Ptr, Val, MaybeAlign(), Ordering, SSID);
+        }
+
+        CallInst *CreateMaskedLoad(Value *Ptr, Align Alignment, Value *Mask,
+                                   Value *PassThru, const Twine &Name) {
+          auto *PtrTy = cast<PointerType>(Ptr->getType());
+          Type *Ty = PtrTy->getElementType();
+          return llvm::IRBuilder<T, InserterTyDef()>::CreateMaskedLoad(
+              Ty, Ptr, Alignment, Mask, PassThru, Name);
+        }
+
+#endif
+
         inline llvm::Value* CreateConstInBoundsGEP2_64(
             llvm::Value* Ptr,
             uint64_t Idx0,
@@ -246,6 +296,8 @@ namespace IGCLLVM
             return llvm::IRBuilder<T, InserterTyDef()>::CreateConstInBoundsGEP2_64(Ptr->getType()->getPointerElementType(), Ptr, Idx0, Idx1, Name);
 #endif
         }
+
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateConstInBoundsGEP2_64;
 
         inline static llvm::CallInst* Create(llvm::Value* Func, llvm::ArrayRef<llvm::Value*> Args,
             llvm::ArrayRef<llvm::OperandBundleDef> Bundles = llvm::None,
@@ -261,7 +313,6 @@ namespace IGCLLVM
                 Func, Args, Bundles, NameStr, InsertBefore);
 #endif
         }
-
     };
 }
 

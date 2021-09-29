@@ -60,10 +60,12 @@ include(igc_arch_utils)
 include(igc_resource_utils)
 include(igc_source_group_utils)
 include(igc_llvm_utils)
+include(igc_imported_tools)
 
 # ======================================================================================================
 # ======================================================================================================
 # ======================================================================================================
+
 
 
 
@@ -1180,11 +1182,16 @@ add_compile_definitions(
     $<$<EQUAL:${CMAKE_SIZEOF_VOID_P},8>:_AMD64_>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:ICBE_LINUX>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:LINUX>
-    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:USE_MMX>
-    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:USE_SSE>
-    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:USE_SSE2>
-    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:USE_SSE3>
-    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:USE_SSSE3>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux32>:USE_MMX>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux32>:USE_SSE>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux32>:USE_SSE2>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux32>:USE_SSE3>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux32>:USE_SSSE3>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_MMX>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSE>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSE2>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSE3>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSSE3>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:ICBE_LHDM>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:_WIN32>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:"WIN32">
@@ -1290,6 +1297,7 @@ include_directories(
 
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL/ocl_igc_shared/executable_format"
     "${IGC_BUILD__IGC_SRC_DIR}/AdaptorOCL"
+    "${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/ocl_igc_interface/impl"
     )
 
 
@@ -1705,6 +1713,11 @@ list(APPEND _targetLinkLineCommon zebinlib)
         "${CMAKE_DL_LIBS}"
       )
     endif()
+    # Android binary needs to link static libstdc++ and liblog
+    if(ANDROID)
+        find_package(Threads REQUIRED)
+        target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE Threads::Threads -static-libstdc++ -llog)
+    endif()
     # Link line for shared / dynamic library requires only library project (all static libs are linked inside).
     set_property(TARGET "${IGC_BUILD__PROJ${_libBuildSuffix}}" PROPERTY LINK_INTERFACE_LIBRARIES "")
     set("IGC_BUILD__LINK_LINE${_libBuildSuffix}"
@@ -1836,8 +1849,10 @@ set(IGC_PC_PACKAGE_RELEASE "")
 if(DEFINED IGC_PACKAGE_RELEASE)
   set(IGC_PC_PACKAGE_RELEASE "-${IGC_PACKAGE_RELEASE}")
 endif()
+include(cmake/igc_version.cmake)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc.opencl.h.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc-opencl.pc.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface/impl/version_in.h ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/ocl_igc_interface/impl/version.h)
 
 if(UNIX)
   install(TARGETS ${IGC_BUILD__PROJ__igc_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-core)

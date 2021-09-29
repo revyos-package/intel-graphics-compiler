@@ -368,7 +368,7 @@ void Options::showUsage(std::ostream& output)
 void Options::initialize_vISAOptionsToStr(void) {
    #undef DEF_VISA_OPTION
    #define DEF_VISA_OPTION(ENUM, TYPE, STR, ERROR_MSG, DEFAULT_VAL) \
-    vISAOptionsToStr[ENUM] = IGC_MANGLE(#ENUM);
+    vISAOptionsToStr[ENUM] = #ENUM;
    #include "VISAOptionsDefs.h"
 }
 
@@ -531,7 +531,7 @@ void Options::setOption(vISAOptions option, const char* str)
 // return full set of arguments ever set by user, either through
 // string options or the various setOptions()
 //
-std::string Options::getFullArgString()
+std::string Options::getFullArgString() const
 {
     std::stringstream args;
     // Collect all user-set options.
@@ -573,9 +573,32 @@ std::string Options::getFullArgString()
             }
             break;
             case ET_CSTR:
-                args << m_vISAOptions.getArgStr(o) << " "
-                    << m_vISAOptions.getCstr(o) << " ";
+            {
+                args << m_vISAOptions.getArgStr(o) << " ";
+                const char *sval = m_vISAOptions.getCstr(o);
+                // Careful not to emit empty strings
+                // ... -string_opt   -next_opt
+                //                 ^ empty string value for -string_opt
+                // We need to put something so poor fool (me) that comes along
+                // and tries to parse the .full_options line doesn't get
+                // -string_opt parsing -next_opt as the value
+                // Instead produce:
+                // ... -string_opt ""  -next_opt"
+                if (sval == nullptr || *sval == 0) {
+                    args << "\"\""; // emit escaped so tokenization in next parse works
+                } else {
+                    std::string s = sval;
+                    if (s.find(' ') != std::string::npos) {
+                        // if there's spaces escape them
+                        //   -string_opt "foo bar" -next_opt
+                        args << "\"" << s << "\"";
+                    } else {
+                        args << s;
+                    }
+                }
+                args << " ";
                 break;
+            }
             default:
                 assert(false && "Invalid vISA option type!");
                 args << "UNDEFINED ";
@@ -594,7 +617,7 @@ std::stringstream& Options::getUserArgString()
     return argString;
 }
 
-std::string Options::getEncoderOutputFile()
+std::string Options::getEncoderOutputFile() const
 {
     const char * encoderOutputFile = m_vISAOptions.getCstr(vISA_encoderFile);
     if (encoderOutputFile != nullptr)
@@ -605,6 +628,76 @@ std::string Options::getEncoderOutputFile()
     {
         return std::string("");
     }
+}
+
+//
+// This is to read visa options from environment variable: VISA_OPTIONS
+// Options string is blank-seperated, just like ones used in genx_ir.
+// For example,
+//    VISA_OPTIONS=-dotAll -noAccSub
+//  or
+//    VISA_OPTIONS="-dotAll -noAccSub"
+//
+// The option in this environment variable overrides the previous one!
+// This is intended for non visa standalone use only (not via genx_ir).
+//
+void Options::getOptionsFromEV()
+{
+#if defined(_DEBUG) || defined(_INTERNAL)
+    const char* visaOptionsEV = "VISA_OPTIONS";
+    const char* pVisaEV = getenv(visaOptionsEV);
+    if (!pVisaEV)
+    {
+        return;
+    }
+
+    std::cerr << "VISA Environment Variable in effect:\n"
+        << visaOptionsEV << " = " << pVisaEV << "\n";
+
+    std::string ostr(pVisaEV);
+    // Remove leading/trailing quote if present
+    size_t pos = ostr.find_first_not_of(' ');
+    char firstC = ostr.at(pos);
+    if (firstC == '"' || firstC == '\'')
+    {
+        ostr.at(pos) = ' ';
+        size_t p0 = ostr.find_last_not_of(" ");
+        if (firstC == ostr.at(p0))
+        {
+            ostr.at(p0) = ' ';
+        }
+        else
+        {
+            std::cerr << "    Environment variable's leading and trailing quote ("
+                << firstC << ", " << ostr.at(p0) << ") : not matched!  Ignored!\n";
+            return;
+        }
+        // pos to the fist non-blank valid char
+        pos = ostr.find_first_not_of(' ', pos + 1);
+    }
+    std::vector<std::string> flags;
+    size_t currPos = pos;
+    while (currPos != std::string::npos)
+    {
+        pos = ostr.find_first_of(' ', currPos);
+        flags.emplace_back(ostr.substr(currPos, pos - currPos));
+        currPos = ostr.find_first_not_of(' ', pos);  // pos can be npos!
+    }
+
+    int sz = (int)flags.size();
+    if (sz <= 0) {
+        return;
+    }
+    char** argvars = new char* [sz];
+    const char** pargs = (const char**)argvars;
+    for (int i = 0; i < sz; ++i)
+    {
+        pargs[i] = flags[i].c_str();
+    }
+    parseOptions(sz, pargs);
+    delete [] argvars;
+    return;
+#endif
 }
 
 void Options::dump(void) const {

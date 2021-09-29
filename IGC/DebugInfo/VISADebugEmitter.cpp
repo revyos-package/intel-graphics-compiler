@@ -23,7 +23,6 @@ See LICENSE.TXT for details.
 #include "llvm/BinaryFormat/ELF.h"
 #include "common/LLVMWarningsPop.hpp"
 
-#include "DebugInfoUtils.hpp"
 #include "VISADebugEmitter.hpp"
 #include "DwarfDebug.hpp"
 #include "StreamEmitter.hpp"
@@ -34,7 +33,7 @@ See LICENSE.TXT for details.
 
 #include "CLElfLib/CLElfTypes.h"
 
-#define DEBUG_TYPE "GENX_DEBUG_INFO"
+#define DEBUG_TYPE "dwarfdebug"
 
 using namespace llvm;
 using namespace IGC;
@@ -70,9 +69,11 @@ void DebugEmitter::Reset()
 }
 
 
-void DebugEmitter::Initialize(std::unique_ptr<VISAModule> VM, const DebugEmitterOpts& Opts)
+void DebugEmitter::Initialize(std::unique_ptr<VISAModule> VM,
+                              const DebugEmitterOpts& Opts)
 {
     IGC_ASSERT_MESSAGE(false == m_initialized, "DebugEmitter is already initialized!");
+    // IGC_ASSERT(!doneOnce);
     m_initialized = true;
 
     m_pVISAModule = VM.get();
@@ -255,8 +256,12 @@ void DebugEmitter::processCurrentFunction(bool finalize, DbgDecoder* decodedDbg)
     m_pDwarfDebug->highPc = lastGenOff;
 }
 
-std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg,
-    const std::vector<llvm::DISubprogram*>& DISubprogramNodes)
+void DebugEmitter::SetDISPCache(DwarfDISubprogramCache *DISPCache) {
+    IGC_ASSERT(m_pDwarfDebug);
+    m_pDwarfDebug->setDISPCache(DISPCache);
+}
+
+std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg)
 {
     if (!m_debugEnabled)
     {
@@ -264,11 +269,11 @@ std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg,
     }
 
     IGC_ASSERT_MESSAGE(m_pVISAModule, "active visa object must be selected before finalization");
+    IGC_ASSERT(m_pDwarfDebug);
     m_pDwarfDebug->setDecodedDbg(decodedDbg);
 
     if (!doneOnce)
     {
-        m_pDwarfDebug->setDISPNodes(&DISubprogramNodes);
         m_pDwarfDebug->beginModule();
         doneOnce = true;
     }
@@ -276,21 +281,33 @@ std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg,
     const Function* pFunc = m_pVISAModule->GetEntryFunction();
     // Collect debug information for given function.
     m_pStreamEmitter->SwitchSection(m_pStreamEmitter->GetTextSection());
+
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] beginFunction called for <" <<
+               pFunc->getName() << "> ---\n");
     m_pDwarfDebug->beginFunction(pFunc, m_pVISAModule);
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] beginFunction end ***\n");
+
     processCurrentFunction(finalize, decodedDbg);
-    // Emit post-function debug information.
+
+    // Emit post-function debug information
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] endFunction start ---\n");
     m_pDwarfDebug->endFunction(pFunc);
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] endFunction done ***\n");
 
     if (!finalize)
+    {
+        LLVM_DEBUG(dbgs() << "[DwarfDebug] non-finalized exit ***\n");
         return {};
+    }
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] starting finalization ---\n");
 
-    // Make sure we wrote out everything we need.
-    //m_pMCStreamer->Flush();
+    IGC_ASSERT(doneOnce);
 
     // Finalize debug information.
     m_pDwarfDebug->endModule();
 
     m_pStreamEmitter->Finalize();
+    LLVM_DEBUG(dbgs() << "[DwarfDebug] finalized***\n");
 
     LLVM_DEBUG(dbgs() << "Finalized Visa Module:\n");
     LLVM_DEBUG(m_pVISAModule->dump());
@@ -338,7 +355,7 @@ std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg,
     writeProgramHeaderTable(is64Bit, Result.data(), m_str.size() + kernelNameSizeWithDot);
     setElfType(is64Bit, Result.data());
 
-    // Reset all members and prepare for next beginModule() call.
+    m_errs = m_pStreamEmitter->getErrors();
     Reset();
 
     return std::move(Result);
@@ -569,4 +586,8 @@ void DebugEmitter::setCurrentVISA(IGC::VISAModule* VM) {
 void DebugEmitter::resetModule(std::unique_ptr<IGC::VISAModule> VM) {
     m_pVISAModule = VM.get();
     toFree.push_back(std::move(VM));
+}
+
+const std::string& DebugEmitter::getErrors() const {
+    return m_errs;
 }

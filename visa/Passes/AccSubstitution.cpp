@@ -6,8 +6,9 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include "AccSubstitution.hpp"
+
 #include <cmath>
-#include "AccSubstitution.h"
 
 using namespace vISA;
 
@@ -635,14 +636,12 @@ bool AccSubPass::replaceDstWithAcc(G4_INST* inst, int accNum)
         {
             // mul/mac can't have both sources be acc
             // Note that we only need to check for explicit mac here since we will not change mad to mac
-            if (!builder.relaxedACCRestrictions_1())
+            if (useInst->opcode() == G4_mul || useInst->opcode() == G4_mac)
             {
-                if (useInst->opcode() == G4_mul || useInst->opcode() == G4_mac)
+                if (useInst->getSrc(0)->isAccReg() || useInst->getSrc(1)->isAccReg() ||
+                    useInst->getSrc(0)->compareOperand(useInst->getSrc(1)) == G4_CmpRelation::Rel_eq)
                 {
-                    if (useInst->getSrc(0)->isAccReg() || useInst->getSrc(1)->isAccReg())
-                    {
-                        return false;
-                    }
+                    return false;
                 }
             }
         }
@@ -1069,7 +1068,7 @@ void AccSubPass::multiAccSub(G4_BB* bb)
 // substitute local operands with acc when possible
 void AccSubPass::accSub(G4_BB* bb)
 {
-    bb->resetLocalId();
+    bb->resetLocalIds();
 
     if (builder.doMultiAccSub())
     {

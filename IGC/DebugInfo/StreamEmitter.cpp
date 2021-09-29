@@ -37,9 +37,11 @@ See LICENSE.TXT for details.
 
 #include "DIE.hpp"
 #include "StreamEmitter.hpp"
-#include "Version.hpp"
+#include "DwarfDebug.hpp"
 
 #include "Probe/Assertion.h"
+
+#define DEBUG_TYPE "dwarfdebug"
 
 using namespace llvm;
 using namespace IGC;
@@ -387,15 +389,15 @@ StreamEmitter::StreamEmitter(raw_pwrite_stream& outStream,
     m_pDataLayout = new DataLayout(dataLayout);
     m_pSrcMgr = new SourceMgr();
     m_pAsmInfo = new VISAMCAsmInfo(GetPointerSize());
-    m_pObjFileInfo = new MCObjectFileInfo();
+    m_pObjFileInfo = new IGCLLVM::MCObjectFileInfo();
 
     MCRegisterInfo* regInfo = nullptr;
+    Triple triple = Triple(GetTargetTriple());
 
     // Create new MC context
-    m_pContext = new MCContext((const llvm::MCAsmInfo*)m_pAsmInfo, regInfo, m_pObjFileInfo, m_pSrcMgr);
+    m_pContext = IGCLLVM::CreateMCContext(triple, (const llvm::MCAsmInfo*)m_pAsmInfo, regInfo, m_pObjFileInfo, m_pSrcMgr);
 
-    Triple triple = Triple(GetTargetTriple());
-    m_pObjFileInfo->InitMCObjectFileInfo(Triple(GetTargetTriple()), false, *m_pContext);
+    m_pObjFileInfo->InitMCObjectFileInfo(triple, false, *m_pContext);
 
     bool is64Bit = GetPointerSize() == 8;
     uint8_t osABI = MCELFObjectTargetWriter::getOSABI(triple.getOS());
@@ -745,8 +747,7 @@ void StreamEmitter::EmitSectionOffset(const MCSymbol* pLabel, const MCSymbol* pS
 
 void StreamEmitter::EmitDwarfRegOp(unsigned reg, unsigned offset, bool indirect) const
 {
-    auto regEncoded = GetEncodedRegNum<RegisterNumbering::GRFBase>(
-        reg, StreamOptions.UseNewRegisterEncoding);
+    auto regEncoded = GetEncodedRegNum<RegisterNumbering::GRFBase>(reg);
     if (indirect)
     {
         if (regEncoded < 32)
@@ -812,7 +813,82 @@ const MCObjectFileInfo& StreamEmitter::GetObjFileLowering() const
     return *m_pObjFileInfo;
 }
 
-const std::string& StreamEmitter::GetTargetTriple() const
+void StreamEmitter::verifyRegisterLocationSize(const IGC::DbgVariable& VarVal,
+                                               const IGC::DwarfDebug& DD,
+                                               unsigned MaxGRFSpaceInBits,
+                                               uint64_t ExpectedSize)
 {
-    return m_targetTriple;
+    if (!GetEmitterSettings().EnableDebugInfoValidation)
+        return;
+
+    auto* DbgInst = VarVal.getDbgInst();
+    IGC_ASSERT(DbgInst);
+    Value* IRLoc = IGCLLVM::getVariableLocation(DbgInst);
+    auto* Ty = IRLoc->getType();
+    IGC_ASSERT(Ty->isSingleValueType());
+
+    if (Ty->isPointerTy())
+        return; // no validation for pointers (for now)
+
+    auto* Expr = DbgInst->getExpression();
+    if (Expr->isFragment() || Expr->isImplicit())
+    {
+        // TODO: implement some sanity checks
+        return;
+    }
+    DiagnosticBuff Diag;
+    auto DwarfTypeSize = VarVal.getBasicSize(&DD);
+    if (DwarfTypeSize != ExpectedSize) {
+        Diag.out() << "ValidationFailure [regLocSize] -- DWARF Type Size: " <<
+            DwarfTypeSize << ", expected: " << ExpectedSize << "\n";
+    }
+    if (ExpectedSize > MaxGRFSpaceInBits) {
+        Diag.out() << "ValidationFailure [GRFSpace] -- Available GRF space: " <<
+            MaxGRFSpaceInBits << ", while expected value size: " <<
+            ExpectedSize << "\n";
+    }
+
+    // Dump DbgVariable if errors were reported
+    verificationReport(VarVal, Diag);
+}
+
+void StreamEmitter::verifyRegisterLocationExpr(const DbgVariable& DV,
+                                               const DwarfDebug& DD)
+{
+    if (!GetEmitterSettings().EnableDebugInfoValidation)
+        return;
+
+    // TODO: add checks for locations other than llvm.dbg.value
+    if (DV.currentLocationIsMemoryAddress())
+        return;
+
+    auto* DbgInst = DV.getDbgInst();
+    if (!isa<llvm::DbgValueInst>(DbgInst))
+        return;
+
+    DiagnosticBuff Diag;
+    if (!DV.currentLocationIsImplicit() &&
+        !DV.currentLocationIsSimpleIndirectValue())
+    {
+        if (DbgInst->getExpression()->isComplex())
+        {
+            Diag.out() << "ValidationFailure [UnexpectedComlexExpression]" <<
+               " for a simple register location\n";
+        }
+    }
+    verificationReport(DV, Diag);
+}
+
+void StreamEmitter::verificationReport(const DbgVariable& VarVal,
+                                       DiagnosticBuff& Diag)
+{
+    if (Diag.out().tell() == 0)
+        return;
+
+    VarVal.print(Diag.out());
+    Diag.out() << "==============\n";
+    const auto& ErrMsg = Diag.out().str();
+
+    ErrorLog.append(ErrMsg);
+    LLVM_DEBUG(dbgs() << ErrMsg);
 }

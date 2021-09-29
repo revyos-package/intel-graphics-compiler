@@ -1,0 +1,241 @@
+{
+  "copyright": [
+    "============================ begin_copyright_notice ============================",
+    "",
+    "Copyright (C) 2021 Intel Corporation",
+    "",
+    "SPDX-License-Identifier: MIT",
+    "",
+    "============================= end_copyright_notice ============================="
+  ],
+  "FileDescription": [
+    "Description of CMCL builtins and rules of their translation into VC",
+    "intrinsics. More details can be found in GenerateTranslationCode.py"
+  ],
+  "HelperStructures": {
+    "OperandKind": ["VectorIn", "VectorOut", "VectorInOut", "ScalarIn", "ScalarConst", "PointerIn"]
+  },
+  "BuiltinDescriptions": {
+    "Select": {
+      "Name": "select",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorOut"},
+        {"Name": "Condition", "Kind": "VectorIn"},
+        {"Name": "TrueValue", "Kind": "VectorIn"},
+        {"Name": "FalseValue", "Kind": "VectorIn"}
+      ],
+      "TranslateInto": {
+        "Instruction": "SelectInst",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Condition"]},
+          {"GetBuiltinOperand": ["TrueValue"]},
+          {"GetBuiltinOperand": ["FalseValue"]}
+        ]
+      }
+    },
+    "RdRegionInt": {
+      "Name": "rdregion_int",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorOut"},
+        {"Name": "Source", "Kind": "VectorIn"},
+        {"Name": "VStride", "Kind": "ScalarConst"},
+        {"Name": "Width", "Kind": "ScalarConst"},
+        {"Name": "Stride", "Kind": "ScalarConst"},
+        {"Name": "Offset", "Kind": "ScalarIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_rdregioni",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["VStride"]},
+          {"GetBuiltinOperand": ["Width"]},
+          {"GetBuiltinOperand": ["Stride"]},
+          {"GetBuiltinOperand": ["Offset"]},
+          {"Code": ["*UndefValue::get(IRB.getInt32Ty())"]}
+        ]
+      }
+    },
+    "RdRegionFloat": {
+      "Name": "rdregion_float",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorOut"},
+        {"Name": "Source", "Kind": "VectorIn"},
+        {"Name": "VStride", "Kind": "ScalarConst"},
+        {"Name": "Width", "Kind": "ScalarConst"},
+        {"Name": "Stride", "Kind": "ScalarConst"},
+        {"Name": "Offset", "Kind": "ScalarIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_rdregionf",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["VStride"]},
+          {"GetBuiltinOperand": ["Width"]},
+          {"GetBuiltinOperand": ["Stride"]},
+          {"GetBuiltinOperand": ["Offset"]},
+          {"Code": ["*UndefValue::get(IRB.getInt32Ty())"]}
+        ]
+      }
+    },
+    "WrRegionInt": {
+      "Name": "wrregion_int",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorInOut"},
+        {"Name": "Source", "Kind": "VectorIn"},
+        {"Name": "VStride", "Kind": "ScalarConst"},
+        {"Name": "Width", "Kind": "ScalarConst"},
+        {"Name": "Stride", "Kind": "ScalarConst"},
+        {"Name": "Offset", "Kind": "ScalarIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_wrregioni",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Destination"]},
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["VStride"]},
+          {"GetBuiltinOperand": ["Width"]},
+          {"GetBuiltinOperand": ["Stride"]},
+          {"GetBuiltinOperand": ["Offset"]},
+          {"Code": ["*UndefValue::get(IRB.getInt32Ty())"]},
+          {"Code": ["*IRB.getTrue()"]}
+        ]
+      }
+    },
+    "WrRegionFloat": {
+      "Name": "wrregion_float",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorInOut"},
+        {"Name": "Source", "Kind": "VectorIn"},
+        {"Name": "VStride", "Kind": "ScalarConst"},
+        {"Name": "Width", "Kind": "ScalarConst"},
+        {"Name": "Stride", "Kind": "ScalarConst"},
+        {"Name": "Offset", "Kind": "ScalarIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_wrregionf",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Destination"]},
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["VStride"]},
+          {"GetBuiltinOperand": ["Width"]},
+          {"GetBuiltinOperand": ["Stride"]},
+          {"GetBuiltinOperand": ["Offset"]},
+          {"Code": ["*UndefValue::get(IRB.getInt32Ty())"]},
+          {"Code": ["*IRB.getTrue()"]}
+        ]
+      }
+    },
+    "PrintfBuffer": {
+      "Name": "printf_buffer",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_print_buffer",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "PrintfFormatIndex": {
+      "Name": "printf_format_index",
+      "Operands": [
+        {"Name": "Source", "Kind": "PointerIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_print_format_index",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "PrintfFormatIndexLegacy": {
+      "Name": "printf_format_index_legacy",
+      "Operands": [
+        {"Name": "Source", "Kind": "PointerIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_print_format_index",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "SVMScatter": {
+      "Name": "svm_scatter",
+      "Operands": [
+        {"Name": "NumBlocks", "Kind": "ScalarConst"},
+        {"Name": "Address", "Kind": "VectorIn"},
+        {"Name": "Source", "Kind": "VectorIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_svm_scatter",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"Code": [
+            "*IRB.CreateVectorSplat(getVectorWidth({}), IRB.getTrue())",
+            {"GetBuiltinOperandType": ["Address"]}
+          ]},
+          {"GetBuiltinOperand": ["NumBlocks"]},
+          {"GetBuiltinOperand": ["Address"]},
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "SVMAtomicAdd": {
+      "Name": "svm_atomic_add",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorOut"},
+        {"Name": "Address", "Kind": "VectorIn"},
+        {"Name": "Source", "Kind": "VectorIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_svm_atomic_add",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"Code": [
+            "*IRB.CreateVectorSplat(getVectorWidth({}), IRB.getTrue())",
+            {"GetBuiltinOperandType": ["Address"]}
+          ]},
+          {"GetBuiltinOperand": ["Address"]},
+          {"GetBuiltinOperand": ["Source"]},
+          {"Code": [
+            "*UndefValue::get(&{})",
+            {"GetBuiltinOperandType": ["Source"]}
+          ]}
+        ]
+      }
+    },
+    "LZDScalar": {
+      "Name": "lzd_scalar",
+      "Operands": [
+        {"Name": "Source", "Kind": "ScalarIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_lzd",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "LZDVector": {
+      "Name": "lzd_vector",
+      "Operands": [
+        {"Name": "Destination", "Kind": "VectorOut"},
+        {"Name": "Source", "Kind": "VectorIn"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_lzd",
+        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    }
+  }
+}

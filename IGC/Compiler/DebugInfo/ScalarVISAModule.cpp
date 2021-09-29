@@ -7,12 +7,11 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "Compiler/DebugInfo/ScalarVISAModule.h"
+#include "Compiler/DebugInfo/Utils.h"
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "common/debug/Debug.hpp"
-
-#include "DebugInfo/DebugInfoUtils.hpp"
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Function.h"
@@ -37,7 +36,7 @@ namespace IGC {
     fullDebugInfo = false;
     lineNumbersOnly = false;
 
-    if (DebugInfoUtils::HasDebugInfo(*ctx->getModule()))
+    if (Utils::HasDebugInfo(*ctx->getModule()))
     {
         bool hasDbgIntrinsic = false;
         bool hasDbgLoc = false;
@@ -169,6 +168,16 @@ uint64_t ScalarVisaModule::getFPOffset() const {
 }
 unsigned ScalarVisaModule::getPointerSize() const {
     return IGC::getPointerSize((llvm::Module &)(*GetModule()));
+}
+
+uint64_t ScalarVisaModule::getTypeSizeInBits(Type* Ty) const
+{
+    IGC_ASSERT(getFunction());
+    // TODO: looks like data layout for function pointers is not set
+    // correctly. According to the current data layout all pointers are of
+    // 64 bits, while vISA/genIsa function pointers are deemed to be 32 bits.
+    // Double-check if this is an issue.
+    return getFunction()->getParent()->getDataLayout().getTypeSizeInBits(Ty);
 }
 
 void ScalarVisaModule::UpdateVisaId()
@@ -428,6 +437,16 @@ ScalarVisaModule::GetVariableLocation(const llvm::Instruction* pInst) const
             {
                 const std::string typeStr = modMD->FuncMD[const_cast<Function*>(curFunc)].m_OpenCLArgBaseTypes[pArgument->getArgNo()];
                 KernelArg::ArgType argType = KernelArg::calcArgType(pArgument, typeStr);
+                if (argType == KernelArg::ArgType::SAMPLER)
+                {
+                    // SAMPLER and NOT_TO_ALLOCATE have same enum values so disambiguate these
+                    auto pr = KernelArg::getBufferType(pArgument, typeStr);
+                    if(!pr.isSampler)
+                    {
+                        // type is actually NOT_TO_ALLOCATE
+                        argType = KernelArg::ArgType::End;
+                    }
+                }
                 FunctionMetaData* funcMD = &modMD->FuncMD[const_cast<Function*>(curFunc)];
                 ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
                 IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() == curFunc->arg_size(), "Invalid ArgAllocMDList");
@@ -565,7 +584,7 @@ ScalarVisaModule::GetVariableLocation(const llvm::Instruction* pInst) const
 
         if (pType->isVectorTy())
         {
-            vectorNumElements = (unsigned)cast<VectorType>(pType)->getNumElements();
+            vectorNumElements = (unsigned)cast<IGCLLVM::FixedVectorType>(pType)->getNumElements();
         }
         else if (!pVar->IsUniform())
         {
@@ -663,7 +682,7 @@ void insertOCLMissingDebugConstMetadata(CodeGenContext* ctx)
 
                 if (!GlobalValue::isLocalLinkage(g->getLinkage()) || isConstForThisFunc)
                 {
-                    DebugInfoUtils::UpdateGlobalVarDebugInfo(g, init, &func.getEntryBlock().getInstList().front(), false);
+                    Utils::UpdateGlobalVarDebugInfo(g, init, &func.getEntryBlock().getInstList().front(), false);
                 }
             }
         }

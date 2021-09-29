@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalAlias.h>
-#include <llvm/IR/IRBuilder.h>
+#include <llvmWrapper/IR/IRBuilder.h>
 #include <llvm/Pass.h>
 #include <llvmWrapper/Support/Alignment.h>
 #include <llvmWrapper/IR/DerivedTypes.h>
@@ -108,7 +108,7 @@ namespace {
             MemRefListTy& MemRefs, TrivialMemRefListTy& ToOpt);
 
         unsigned getNumElements(Type* Ty) const {
-            return Ty->isVectorTy() ? (unsigned)cast<VectorType>(Ty)->getNumElements() : 1;
+            return Ty->isVectorTy() ? (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements() : 1;
         }
 
         MemoryLocation getLocation(Instruction* I) const {
@@ -626,18 +626,23 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
         const SCEVConstant* Offset
             = dyn_cast<SCEVConstant>(SE->getMinusSCEV(NextPtr, LeadingPtr));
         // Skip load with non-constant distance.
-        if (!Offset) {
+        SymbolicPointer LeadingSymPtr;
+        SymbolicPointer NextSymPtr;
+        bool isLeadingSymPointer = SymbolicPointer::decomposePointer(LeadingLoad->getPointerOperand(),
+            LeadingSymPtr, CGC);
+        bool isNextSymPointer = SymbolicPointer::decomposePointer(NextLoad->getPointerOperand(),
+            NextSymPtr, CGC);
+        bool isconstoffset = NextSymPtr.getConstantOffset(LeadingSymPtr, Off, ArrayElem);
 
-            SymbolicPointer LeadingSymPtr;
-            SymbolicPointer NextSymPtr;
-            if (SymbolicPointer::decomposePointer(LeadingLoad->getPointerOperand(),
-                LeadingSymPtr, CGC) ||
-                SymbolicPointer::decomposePointer(NextLoad->getPointerOperand(),
-                    NextSymPtr, CGC) ||
-                NextSymPtr.getConstantOffset(LeadingSymPtr, Off, ArrayElem)) {
+
+        if (!Offset) {
+            if ( isLeadingSymPointer ||
+                 isNextSymPointer ||
+                isconstoffset) {
                 continue;
             }
-            else {
+            else
+            {
                 if (!AllowNegativeSymPtrsForLoad && LeadingSymPtr.Offset < 0)
                     continue;
             }
@@ -782,7 +787,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
     if (s < 2)
         return false;
 
-    IRBuilder<> Builder(LeadingLoad);
+    IGCLLVM::IRBuilder<> Builder(LeadingLoad);
 
     // Start to merge loads.
     IGC_ASSERT_MESSAGE(1 < NumElts, "It's expected to merge into at least 2-element vector!");
@@ -922,7 +927,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
             Pos = unsigned((std::get<1>(I) - FirstOffset) / LdScalarSize);
 
         if (Ty->isVectorTy()) {
-            if (Pos + cast<VectorType>(Ty)->getNumElements() > NumElts) {
+            if (Pos + cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements() > NumElts) {
                 // This implies we're trying to extract an element from our new load
                 // with an index > the size of the new load.  If this happens,
                 // we'll generate correct code if it does since we don't remove the
@@ -930,7 +935,7 @@ bool MemOpt::mergeLoad(LoadInst* LeadingLoad,
                 continue;
             }
             Value* Val = UndefValue::get(Ty);
-            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(NewLoad, Builder.getInt32(Pos + i));
                 Ex = createBitOrPointerCast(Ex, ScalarTy, Builder);
                 Val = Builder.CreateInsertElement(Val, Ex, Builder.getInt32(i));
@@ -1218,7 +1223,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
 
     // Tailing store is always the last one in the program order.
     StoreInst* TailingStore = std::get<0>(StoresToMerge.back());
-    IRBuilder<> Builder(TailingStore);
+    IGCLLVM::IRBuilder<> Builder(TailingStore);
 
     // Start to merge stores.
     NumElts = 0;
@@ -1312,7 +1317,7 @@ bool MemOpt::mergeStore(StoreInst* LeadingStore,
         IGC_ASSERT(hasSameSize(ScalarTy, LeadingStoreScalarType));
 
         if (Ty->isVectorTy()) {
-            for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i) {
+            for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements(); i != e; ++i) {
                 Value* Ex = Builder.CreateExtractElement(Val, Builder.getInt32(i));
                 Ex = createBitOrPointerCast(Ex, LeadingStoreScalarType, Builder);
                 NewStoreVal = Builder.CreateInsertElement(NewStoreVal, Ex,

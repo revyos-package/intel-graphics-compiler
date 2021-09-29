@@ -101,13 +101,13 @@ public:
     }
 
     void setHasFCCalls(bool hasFC) { hasFCCalls = hasFC; }
-    bool getHasFCCalls() { return hasFCCalls; }
+    bool getHasFCCalls() const { return hasFCCalls; }
     void setIsCallableKernel(bool value) { isFCCallableKernel = value; }
-    bool getIsCallableKernel() { return isFCCallableKernel; }
+    bool getIsCallableKernel() const { return isFCCallableKernel; }
     void setFCComposableKernel(bool value) { isFCComposableKernel = value; }
-    bool getFCComposableKernel() { return isFCComposableKernel; }
+    bool getFCComposableKernel() const { return isFCComposableKernel; }
     void setIsEntryKernel(bool value) { isFCEntryKernel = value; }
-    bool getIsEntryKernel() { return isFCEntryKernel; }
+    bool getIsEntryKernel() const { return isFCEntryKernel; }
     std::vector<FCCalls*>& getFCCallsToPatch() { return FCCallsToPatch; }
     std::vector<unsigned int>& getFCReturnsToPatch() { return FCReturnOffsetsToPatch; }
 
@@ -364,6 +364,11 @@ private:
     G4_INST* FDSpillInst = nullptr;
     G4_Declare* tmpFCRet = nullptr;
 
+
+    // input declare of R1.
+    // Used to initialize header payload of render target read message
+    G4_Declare* inputR1 = nullptr;
+
     unsigned short arg_size;
     unsigned short return_var_size;
 
@@ -388,7 +393,7 @@ private:
     // map of all stack functioncs ever invoked by this builder's kernel/function
     std::map<std::string, G4_Label*> m_fcallLabels;
 
-    G4_Label* getFcallLabel(std::string str)
+    G4_Label* getFcallLabel(const std::string &str)
     {
         auto it = m_fcallLabels.find(str);
         if (it == m_fcallLabels.end())
@@ -429,9 +434,6 @@ private:
     };
 
     bool hasNullReturnSampler = false;
-    bool hasPerThreadProlog = false;
-    // Have inserted two entires prolog for setting FFID for compute shaders
-    bool hasComputeFFIDProlog = false;
 
     const CISA_IR_Builder* parentBuilder = nullptr;
 
@@ -464,9 +466,9 @@ public:
     uint32_t       getuint32Option(vISAOptions opt) const { return m_options->getuInt32Option(opt); }
     void           getOption(vISAOptions opt, const char *&str) const {return m_options->getOption(opt, str); }
     void           addInputArg(input_info_t * inpt);
-    input_info_t * getInputArg(unsigned int index);
-    unsigned int   getInputCount();
-    input_info_t * getRetIPArg();
+    input_info_t * getInputArg(unsigned int index) const;
+    unsigned int   getInputCount() const;
+    input_info_t * getRetIPArg() const;
 
     const CISA_IR_Builder* getParent() const { return parentBuilder; }
 
@@ -570,12 +572,6 @@ public:
         return kernel.getInt32KernelAttr(Attributes::ATTR_CrossThreadInputSize);
     }
 
-    bool getHasPerThreadProlog() const { return hasPerThreadProlog; }
-    void setHasPerThreadProlog() { hasPerThreadProlog = true; }
-
-    bool getHasComputeFFIDProlog() const { return hasComputeFFIDProlog; }
-    void setHasComputeFFIDProlog() { hasComputeFFIDProlog = true; }
-
     //
     // Check if opnd is or can be made "alignByte"-byte aligned.
     // These functions will change the underlying variable's alignment
@@ -675,6 +671,9 @@ public:
     G4_Declare* getBuiltinBindlessSampler() const {return builtinBindlessSampler; }
     G4_Declare* getBuiltinSamplerHeader() const { return builtinSamplerHeader; }
     G4_Declare* getOldA0Dot2Temp() const { return oldA0Dot2Temp; }
+
+    G4_Declare* getInputR1() { return inputR1; }
+    void setInputR1(G4_Declare* r1) { inputR1 = r1; }
 
     bool isBindlessSampler(const G4_Operand* sampler) const {
         return sampler->isSrcRegRegion() && sampler->getTopDcl() == getBuiltinBindlessSampler();
@@ -1080,12 +1079,12 @@ public:
     // a new null-terminated copy of "lab" is created for the new label, so
     // caller does not have to allocate memory for lab
     //
-    G4_Label* createLabel(std::string lab, VISA_Label_Kind kind)
+    G4_Label* createLabel(const std::string &lab, VISA_Label_Kind kind)
     {
         auto labStr = lab.c_str();
         size_t len = strlen(labStr) + 1;
         char* new_str = (char*)mem.alloc(len);  // +1 for null that ends the string
-        strcpy_s(new_str, len, labStr);
+        memcpy_s(new_str, len, labStr, len);
         return new (mem) G4_Label(new_str);
     }
 
@@ -2469,6 +2468,16 @@ public:
         return newNode;
     }
 
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    // Generic IR simplification tasks
+    G4_Imm* foldConstVal(G4_Imm* const1, G4_Imm* const2, G4_opcode op);
+    void doConsFolding(G4_INST *inst);
+    void doSimplification(G4_INST *inst);
+
+    static G4_Type findConstFoldCommonType(G4_Type type1, G4_Type type2);
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
 
     void materializeGlobalImm(G4_BB* entryBB); // why is in FlowGraph.cpp???
 

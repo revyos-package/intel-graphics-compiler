@@ -157,7 +157,7 @@ public:
       : DiagnosticInfoOptimizationBase((DiagnosticKind)getKindID(), Severity,
                                        /*PassName=*/nullptr, Msg, Fn, DLoc) {}
   // This kind of message is always enabled, and not affected by -rpass.
-  virtual bool isEnabled() const override { return true; }
+  bool isEnabled() const override { return true; }
   static bool classof(const DiagnosticInfo *DI) {
     return DI->getKind() == getKindID();
   }
@@ -181,9 +181,9 @@ public:
     GrfStartOffset = GrfByteSize;
     GrfEndOffset = 128 * GrfByteSize;
   }
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {}
-  virtual StringRef getPassName() const { return "CM kernel arg offset"; }
-  virtual bool runOnModule(Module &M);
+  void getAnalysisUsage(AnalysisUsage &AU) const override {}
+  StringRef getPassName() const override { return "CM kernel arg offset"; }
+  bool runOnModule(Module &M) override;
 
 private:
   void processKernel(MDNode *Node);
@@ -500,7 +500,9 @@ void CMKernelArgOffset::resolveByValArgs(Function *F) const {
     Value *BaseAsI8Ptr = Builder.CreateBitCast(Base, Builder.getInt8PtrTy(),
                                                Base->getName() + ".i8");
     for (const auto &Info : KM->arg_lin(&Arg)) {
-      Value *StoreAddrUntyped = Builder.CreateGEP(BaseAsI8Ptr, Info.Offset);
+      Type *Ty = cast<PointerType>(BaseAsI8Ptr->getType()->getScalarType())
+                     ->getElementType();
+      Value *StoreAddrUntyped = Builder.CreateGEP(Ty, BaseAsI8Ptr, Info.Offset);
       Value *StoreAddrTyped = Builder.CreateBitCast(
           StoreAddrUntyped, Info.Arg->getType()->getPointerTo());
       Builder.CreateStore(Info.Arg, StoreAddrTyped);

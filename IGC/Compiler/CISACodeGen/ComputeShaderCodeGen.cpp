@@ -442,6 +442,12 @@ namespace IGC
         bool hasSimd16 = simd16Program && simd16Program->ProgramOutput()->m_programSize > 0;
         bool hasSimd32 = simd32Program && simd32Program->ProgramOutput()->m_programSize > 0;
 
+        if (ctx->m_ForceOneSIMD)
+            return true;
+
+        if (simdMode == SIMDMode::SIMD8 && !hasSimd16 && !hasSimd32)
+            return true;
+
         ////////
         // dynamic rules
         ////////
@@ -473,6 +479,7 @@ namespace IGC
             {
                 uint sendStallCycle = simd16Program->m_sendStallCycle;
                 uint staticCycle = simd16Program->m_staticCycle;
+
 
                 if ((sendStallCycle / (float)staticCycle > 0.2) ||
                     (m_Platform->AOComputeShadersSIMD32Mode() &&
@@ -526,6 +533,38 @@ namespace IGC
                 !ctx->m_threadCombiningOptDone && !ctx->m_IsPingPongSecond)
             {
                 return true;
+            }
+        }
+
+        //Check if we should switch to SIMD16 based on number of load instr
+
+        int sum = 0;
+        int loadStoreCount = 0;
+        for (auto BBI = F.getBasicBlockList().begin(); BBI != F.getBasicBlockList().end(); BBI++)
+        {
+            llvm::BasicBlock* BB = const_cast<llvm::BasicBlock*>(&*BBI);
+            for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI)
+            {
+                if (isa<LoadInst>(&*BI) || isa<StoreInst>(&*BI))
+                {
+                    loadStoreCount++;
+                }
+            }
+            sum += BB->size();
+        }
+        float denom = float(sum - loadStoreCount * 4);
+        float loadThreshold = 0;
+        if (denom > 0.0)
+        {
+            loadThreshold = ((float(loadStoreCount)) / denom);
+        }
+        if (loadThreshold > 0.15 && loadStoreCount > 10)
+        {
+            if (simdMode == SIMDMode::SIMD32 && hasSimd16)
+            {
+                SIMDMode changeSIMD = SIMDMode::SIMD16;
+                ctx->SetSIMDInfo(SIMD_SKIP_PERF, changeSIMD, ShaderDispatchMode::NOT_APPLICABLE);
+                return false;
             }
         }
 

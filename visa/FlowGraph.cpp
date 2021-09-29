@@ -289,7 +289,8 @@ G4_BB* FlowGraph::beginBB(Label_BB_Map& map, G4_INST* first)
     else
     {
         // no label for this BB, create one!
-        std::string name = "_auto_" + std::to_string(autoLabelId++);
+        std::string prefix = builder->kernel.getName();
+        std::string name = prefix + "_auto_" + std::to_string(autoLabelId++);
         G4_Label* label = builder->createLabel(name, LABEL_BLOCK);
         labelInst = createNewLabelInst(label);
         newLabelInst = true;
@@ -1354,6 +1355,13 @@ void FlowGraph::handleReturn(Label_BB_Map& labelMap, FuncInfoHashTable& funcInfo
                 }
                 retAddr->setBBType(G4_BB_RETURN_TYPE);
             }
+        }
+
+        if (bb->isEndWithFCall())
+        {
+            // normalizeFlowGraph() process FCALL BB. (Maybe should be processed here?)
+            // Here just set BB type
+            bb->setBBType(G4_BB_FCALL_TYPE);
         }
     }
     //
@@ -4567,6 +4575,23 @@ static G4_Predicate_Control getPredCtrl(unsigned simdSize,
         ? PRED_ANY8H
         : (simdSize == 16) ? PRED_ANY16H
         : G4_Predicate_Control::PRED_ANY32H;
+}
+
+// If BB has only one predecessor, return it;
+// if BB has two predecessors and one is ExcludedPred, return the other predecessor;
+// otherwise, return nullptr.
+G4_BB* FlowGraph::getSinglePredecessor(G4_BB* BB, G4_BB* ExcludedPred) const
+{
+    if (BB->Preds.size() != 1) {
+        if (BB->Preds.size() == 2) {
+            if (BB->Preds.front() == ExcludedPred)
+                return BB->Preds.back();
+            if (BB->Preds.back() == ExcludedPred)
+                return BB->Preds.front();
+        }
+        return nullptr;
+    }
+    return BB->Preds.front();
 }
 
 // Convert jmpi to goto. E.g.

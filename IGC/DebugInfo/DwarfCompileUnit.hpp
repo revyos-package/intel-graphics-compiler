@@ -22,16 +22,17 @@ See LICENSE.TXT for details.
 #include "llvm/Config/llvm-config.h"
 
 #include "common/LLVMWarningsPush.hpp"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/GlobalValue.h"
 #include "common/LLVMWarningsPop.hpp"
 
 #include "DIE.hpp"
 #include "DwarfDebug.hpp"
-#include "Version.hpp"
 
 #include "EmitterOpts.hpp"
 
@@ -102,6 +103,11 @@ namespace IGC
         CompileUnit(unsigned UID, DIE* D, llvm::DICompileUnit* CU,
             StreamEmitter* A, IGC::DwarfDebug* DW);
         ~CompileUnit();
+
+        using ImportedEntityList = llvm::SmallVector<const llvm::MDNode*, 8>;
+        using ImportedEntityMap = llvm::DenseMap<const llvm::MDNode*, ImportedEntityList>;
+
+        ImportedEntityMap ImportedEntities;
 
         // Accessors.
         unsigned getUniqueID() const { return UniqueID; }
@@ -206,6 +212,7 @@ namespace IGC
         /// addSourceLine - Add location information to specified debug information
         /// entry.
         void addSourceLine(DIE* Die, llvm::DIScope* S, unsigned Line);
+        void addSourceLine(DIE* Die, llvm::DIImportedEntity* IE, unsigned Line);
         void addSourceLine(DIE* Die, llvm::DIVariable* V);
         void addSourceLine(DIE* Die, llvm::DISubprogram* SP);
         void addSourceLine(DIE* Die, llvm::DIType* Ty);
@@ -283,23 +290,40 @@ namespace IGC
 
         // addSimdLane - add a sequence of attributes to calculate location of variable
         // among SIMD lanes, e.g. a GRF subregister.
-        void addSimdLane(DIEBlock* Block, DbgVariable& DV, const VISAVariableLocation *Loc, DbgDecoder::LiveIntervalsVISA * lr,
-            uint16_t regOffset, bool isPacked, bool isSecondHalf);
+        void addSimdLane(DIEBlock* Block, const DbgVariable& DV,
+                         const VISAVariableLocation *Loc,
+                         DbgDecoder::LiveIntervalsVISA * lr,
+                         uint16_t regOffset, bool isPacked, bool isSecondHalf);
 
         // addSimdLaneScalar - add a sequence of attributes to calculate location of scalar variable
         // e.g. a GRF subregister.
-        void addSimdLaneScalar(DIEBlock* Block, DbgVariable& DV, const VISAVariableLocation* Loc, DbgDecoder::LiveIntervalsVISA* lr, uint16_t subRegInBytes);
+        void addSimdLaneScalar(DIEBlock* Block, const DbgVariable& DV,
+                               const VISAVariableLocation* Loc, DbgDecoder::LiveIntervalsVISA* lr,
+                               uint16_t subRegInBytes);
 
         bool emitBitPiecesForRegVal(IGC::DIEBlock* Block, const VISAModule& VM,
-                                    DbgVariable& DV,
+                                    const DbgVariable& DV,
                                     const DbgDecoder::LiveIntervalsVISA& lr,
                                     uint64_t varSizeInBits, uint64_t offsetInBits);
+
+        // Decode line number, file name and location from a string, where a line no. and file name
+        // (including directory) are separated by '-' character: lineNumber-fileNameIncludingDirectory
+        // There is a workaround for DIModule creation in earlier LLVM versions, where a line and a file
+        // parameters are not supported in DIBuilder.
+        void decodeLineAndFileForISysRoot(llvm::StringRef& lineAndFile, unsigned int* line, std::string* file,
+            std::string* directory);
+
+        /// Construct import_module DIE.
+        IGC::DIE* constructImportedEntityDIE(llvm::DIImportedEntity* Module);
 
         /// getOrCreateNameSpace - Create a DIE for DINameSpace.
         DIE* getOrCreateNameSpace(llvm::DINamespace* NS);
 
         /// getOrCreateSubprogramDIE - Create new DIE using SP.
         DIE* getOrCreateSubprogramDIE(llvm::DISubprogram* SP);
+
+        /// getOrCreateModuleDIE - Create new DIE for DIModule.
+        DIE* getOrCreateModuleDIE(llvm::DIModule* MD);
 
         /// getOrCreateTypeDIE - Find existing DIE or create new DIE for the
         /// given llvm::DIType.
@@ -318,6 +342,20 @@ namespace IGC
         /// Create a DIE with the given Tag, add the DIE to its parent, and
         /// call insertDIE if MD is not null.
         DIE* createAndAddDIE(unsigned Tag, DIE& Parent, llvm::DINode* N = nullptr);
+
+        void addImportedEntity(const llvm::DIImportedEntity* IE)
+        {
+            llvm::DIScope* Scope = IE->getScope();
+            assert(Scope && "Invalid Scope encoding!");
+            if (!llvm::isa<llvm::DILocalScope>(Scope))
+            {
+                // No need to add imported enities that are not local declaration.
+                return;
+            }
+
+            auto* LocalScope = llvm::cast<llvm::DILocalScope>(Scope)->getNonLexicalBlockFileScope();
+            ImportedEntities[LocalScope].push_back(IE);
+        }
 
         /// Compute the size of a header for this unit, not including the initial
         /// length field.
@@ -412,10 +450,11 @@ namespace IGC
      public:
         // Added for 1-step elf
         void buildLocation(const llvm::Instruction*, IGC::DbgVariable&, IGC::DIE*);
-        DIEBlock* buildPointer(DbgVariable&, const VISAVariableLocation*);
-        DIEBlock* buildSampler(DbgVariable&, const VISAVariableLocation*);
-        DIEBlock* buildSLM(DbgVariable&, const VISAVariableLocation*);
-        DIEBlock* buildGeneral(DbgVariable&, std::vector<VISAVariableLocation>*, std::vector<DbgDecoder::LiveIntervalsVISA>*);
+        DIEBlock* buildPointer(const DbgVariable&, const VISAVariableLocation*);
+        DIEBlock* buildSampler(const DbgVariable&, const VISAVariableLocation*);
+        DIEBlock* buildSLM(const DbgVariable&, const VISAVariableLocation*);
+        DIEBlock* buildGeneral(const DbgVariable&, std::vector<VISAVariableLocation>*,
+                               std::vector<DbgDecoder::LiveIntervalsVISA>*);
     };
 
 } // namespace IGC

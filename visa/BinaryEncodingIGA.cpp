@@ -824,8 +824,7 @@ void BinaryEncodingIGA::Encode()
 
     // Make the size of the first BB be multiple of 4 instructions, and do not compact
     // any instructions in it, so that the size of the first BB is multiple of 64 bytes
-    if (kernel.fg.builder->getHasPerThreadProlog() ||
-        kernel.fg.builder->getHasComputeFFIDProlog())
+    if (kernel.hasPerThreadPayloadBB() || kernel.hasComputeFFIDProlog())
     {
         G4_BB* first_bb = *kernel.fg.begin();
         size_t num_inst = first_bb->size();
@@ -884,7 +883,7 @@ void BinaryEncodingIGA::Encode()
                 SetSWSB(inst, sw);
 
                 SWSB::InstType instTy = SWSB::InstType::UNKNOWN;
-                if (inst->isMath())
+                if (inst->isMathPipeInst())
                     instTy = SWSB::InstType::MATH;
                 else if (inst->isDpas())
                     instTy = SWSB::InstType::DPAS;
@@ -953,29 +952,24 @@ void BinaryEncodingIGA::Encode()
     {
         inst.second->setGenOffset(inst.first->getPC());
     }
-    if (kernel.fg.builder->getHasPerThreadProlog())
+    if (kernel.hasPerThreadPayloadBB())
     {
-        // per thread data load is in the first BB
-        assert(kernel.fg.getNumBB() > 1 && "expect at least one prolog BB");
-        auto secondBB = *(std::next(kernel.fg.begin()));
-        auto iter = std::find_if(secondBB->begin(), secondBB->end(),
-            [](G4_INST* inst) { return !inst->isLabel();});
-        assert(iter != secondBB->end() && "expect at least one non-label inst in second BB");
         kernel.fg.builder->getJitInfo()->offsetToSkipPerThreadDataLoad =
-            (uint32_t)(*iter)->getGenOffset();
+            kernel.getPerThreadNextOff();
     }
-    if (kernel.fg.builder->getHasComputeFFIDProlog())
+    if (kernel.hasCrossThreadPayloadBB())
     {
-        // something weird will happen if both HasPerThreadProlog and HasComputeFFIDProlog
-        assert(!kernel.fg.builder->getHasPerThreadProlog());
-
-        // set offsetToSkipSetFFIDGP to the second entry's offset
-        // the first instruction in the second BB is the start of the sencond entry
-        assert(kernel.fg.getNumBB() > 1 && "expect at least one prolog BB");
-        auto secondBB = *(std::next(kernel.fg.begin()));
-        assert(!secondBB->empty() && !secondBB->front()->isLabel());
+        kernel.fg.builder->getJitInfo()->offsetToSkipCrossThreadDataLoad =
+            kernel.getCrossThreadNextOff();
+    }
+    if (kernel.hasComputeFFIDProlog())
+    {
+        // something weird will happen if kernel has both PerThreadProlog and ComputeFFIDProlog
+        assert(!kernel.hasPerThreadPayloadBB() && !kernel.hasCrossThreadPayloadBB());
         kernel.fg.builder->getJitInfo()->offsetToSkipSetFFIDGP =
-            (uint32_t)secondBB->front()->getGenOffset();
+            kernel.getComputeFFIDGPNextOff();
+        kernel.fg.builder->getJitInfo()->offsetToSkipSetFFIDGP1 =
+            kernel.getComputeFFIDGP1NextOff();
     }
 }
 
@@ -1441,12 +1435,11 @@ SendDesc BinaryEncodingIGA::encodeExDescImm(
 SendDesc BinaryEncodingIGA::encodeExDescRegA0(
     G4_INST* sendInst, SendExDescOpts &sdos) const
 {
-    SendDesc exDescIga;
-
     G4_Operand* exDescG4 = sendInst->getSrc(3);
     const G4_SendDescRaw* descG4 = sendInst->getMsgDescRaw();
     assert(descG4 != nullptr && "expected raw descriptor");
 
+    SendDesc exDescIga;
     exDescIga.type = SendDesc::Kind::REG32A;
     exDescIga.reg.regNum = 0; // must be a0
     bool valid = false;

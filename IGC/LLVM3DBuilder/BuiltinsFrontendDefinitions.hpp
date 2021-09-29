@@ -4993,7 +4993,7 @@ void LLVM3DBuilder<preserveNames, T, Inserter>::VectorToScalars(
     IGC_ASSERT(nullptr != vector->getType());
     IGC_ASSERT(vector->getType()->isVectorTy());
 
-    const unsigned count = (unsigned)llvm::cast<llvm::VectorType>(vector->getType())->getNumElements();
+    const unsigned count = (unsigned)llvm::cast<IGCLLVM::FixedVectorType>(vector->getType())->getNumElements();
     IGC_ASSERT(1 < count);
     IGC_ASSERT(count <= 4);
     IGC_ASSERT(count <= maxSize);
@@ -5028,7 +5028,7 @@ llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::ScalarsToVector(
     IGC_ASSERT(nullptr != resultType);
     llvm::Value* result = llvm::UndefValue::get(resultType);
 
-    for (unsigned i = 0; i < llvm::cast<llvm::VectorType>(resultType)->getNumElements(); i++)
+    for (unsigned i = 0; i < llvm::cast<IGCLLVM::FixedVectorType>(resultType)->getNumElements(); i++)
     {
         IGC_ASSERT(nullptr != scalars[i]);
         IGC_ASSERT(llvm::cast<llvm::VectorType>(resultType)->getElementType() == scalars[i]->getType());

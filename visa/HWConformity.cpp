@@ -546,15 +546,39 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB* bb)
         newType = src->getType();
         if (isIntDivide)
         {
-            //   cases:
-            //     math.quot  r10:w   r20:ub   -r30:ub
-            //       Make sure newType is D, not UD. The correct code is:
-            //          mov  r22:d  r20:ub
-            //          mov  r32:d  -r30:ub
-            //          math.quot r10:w  r22:d  r32:d
-            bool src0Unsigned = IS_UNSIGNED_INT(inst->getSrc(0)->getType()) && !hasModMinus(inst->getSrc(0));
-            bool src1Unsigned = IS_UNSIGNED_INT(inst->getSrc(1)->getType()) && !hasModMinus(inst->getSrc(1));
-            G4_Type divType = (src0Unsigned && src1Unsigned) ? Type_UD : Type_D;
+            // case 1: Perform a signed division if there's any minus src modifier.
+            //   math.quot  r10:w   r20:ub   -r30:ub
+            // Make sure newType is D, not UD. The correct code is:
+            //   mov  r22:d  r20:ub
+            //   mov  r32:d  -r30:ub
+            //   math.quot r10:w  r22:d  r32:d
+            // case 2: Perform an appropriate type conversion based on the type ranks of both sources.
+            //   math.quot  r6:ud  r3:b  r4:ud
+            // Make sure it's still an unsigned division.
+            //   mov  r11:ud  r3:b
+            //   math.quot  r6:ud  r11:ud  r4:ud
+            G4_Type src0Type = inst->getSrc(0)->getType();
+            G4_Type src1Type = inst->getSrc(1)->getType();
+            G4_Type divType = Type_UNDEF;
+            if (hasModMinus(inst->getSrc(0)) || hasModMinus(inst->getSrc(1)))
+            {
+                // If there's any minus source modifier, do a signed division.
+                divType = Type_D;
+            }
+            else if (TypeSize(src0Type) != TypeSize(src1Type))
+            {
+                // If src0 and src1 have different ranks, get the signedness of the
+                // division from the higher rank src.
+                G4_Type higherRankType = TypeSize(src0Type) > TypeSize(src1Type) ? src0Type : src1Type;
+                divType = IS_SIGNED_INT(higherRankType) ? Type_D : Type_UD;
+            }
+            else
+            {
+                // If both sources have the same rank, do a signed division only
+                // when both are signed. Otherwise, do an unsigned division.
+                divType = IS_SIGNED_INT(src0Type) && IS_SIGNED_INT(src1Type) ? Type_D : Type_UD;
+            }
+            assert(divType == Type_D || divType == Type_UD);
             if (newType != divType)
             {
                 newType = divType;
@@ -694,35 +718,6 @@ bool HWConformity::fixMathInst(INST_LIST_ITER it, G4_BB* bb)
 
     return mov_dst;
 }
-
-//  find a common (integer) type for constant folding.  The rules are:
-//  -- both types must be int
-//  -- Q and UQ are not folded
-//  -- UD if one of the type is UD
-//  -- D otherwise
-//
-//  returns Type_UNDEF if no appropriate type can be found
-//
-static G4_Type findConstFoldCommonType(G4_Type type1, G4_Type type2)
-{
-    if (IS_TYPE_INT(type1) && IS_TYPE_INT(type2))
-    {
-        if (TypeSize(type1) == 8 || TypeSize(type2) == 8)
-        {
-            return Type_UNDEF;
-        }
-        if (type1 == Type_UD || type2 == Type_UD)
-        {
-            return Type_UD;
-        }
-        else
-        {
-            return Type_D;
-        }
-    }
-    return Type_UNDEF;
-}
-
 
 bool HWConformity::hasSameSubregOffset(G4_INST* inst) const
 {
@@ -4367,7 +4362,7 @@ bool HWConformity::generateFPMad(G4_BB* bb, INST_LIST_ITER iter)
 void HWConformity::fixMADInst(G4_BB* bb)
 {
     bool doAlign1Mad = builder.hasAlign1Ternary();
-    bb->resetLocalId();
+    bb->resetLocalIds();
     INST_LIST_ITER i = bb->begin();
 
     for (auto iterEnd = bb->end(); i != iterEnd; ++i)
@@ -7977,23 +7972,50 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB* bb)
     // sat cannot be used at all in the macro sequence
     // make the dst GRF-aligned before expanding to macro
     if (madwInst->getSaturate() ||
+        dst->getHorzStride() != 1 ||
         isPreAssignedRegOffsetNonZero<G4_DstRegRegion>(dst) ||
         !builder.isOpndAligned(dst, getGRFSize()))
     {
-        // add a tmp mov
-        madwInst->setDest(insertMovAfter(it, dst, dst->getType(), bb, GRFALIGN));
-        dst = madwInst->getDst();
+        // add tmp mov instructions
+        int dstLowGRFNum = (int)std::ceil((float)(execSize * dst->getExecTypeSize()) / getGRFSize());
+        int dstTotalGRFNum = dstLowGRFNum * 2;
+
+        G4_Declare* newDstDcl = builder.createTempVar(numEltPerGRF(dst->getType()) * dstTotalGRFNum, dst->getType(), GRFALIGN);
+
+        // add a tmp mov for low results in dst
+        G4_Declare* lowMovSrcDcl = builder.createTempVar(numEltPerGRF(dst->getType()) * dstLowGRFNum, dst->getType(), GRFALIGN);
+        lowMovSrcDcl->setAliasDeclare(newDstDcl, 0);
+        G4_SrcRegRegion* lowMovSrc = builder.createSrcRegRegion(lowMovSrcDcl, builder.getRegionStride1());
+        auto dstLow = builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff(), dst->getHorzStride(), dst->getType());
+        G4_INST* lowMovInst = builder.createMov(execSize, dstLow, lowMovSrc, madwInst->getMaskOption(), false);
+        lowMovInst->setPredicate(madwInst->getPredicate());
+        lowMovInst->setSaturate(madwInst->getSaturate());
+        auto insertIter = bb->insertAfter(it, lowMovInst);
+        maintainDU4TempMov(madwInst, lowMovInst);
+
+        // add a tmp mov for high results in dst
+        G4_Declare* hiMovSrcDcl = builder.createTempVar(numEltPerGRF(dst->getType()) * dstLowGRFNum, dst->getType(), GRFALIGN);
+        hiMovSrcDcl->setAliasDeclare(newDstDcl, dstLowGRFNum * getGRFSize());
+        G4_SrcRegRegion* hiMovSrc = builder.createSrcRegRegion(hiMovSrcDcl, builder.getRegionStride1());
+        auto dstHi = builder.createDst(dst->getBase(), dst->getRegOff() + dstLowGRFNum, dst->getSubRegOff(), dst->getHorzStride(), dst->getType());
+        G4_INST* hiMovInst = builder.createMov(execSize, dstHi, hiMovSrc, madwInst->getMaskOption(), false);
+        hiMovInst->setPredicate(madwInst->getPredicate());
+        hiMovInst->setSaturate(madwInst->getSaturate());
+        bb->insertAfter(insertIter, hiMovInst);
+        maintainDU4TempMov(madwInst, hiMovInst);
+
+        G4_DstRegRegion* newDst = builder.createDstRegRegion(newDstDcl, 1);
+        madwInst->setDest(newDst);
+        madwInst->setPredicate(nullptr);
+        madwInst->setSaturate(g4::NOSAT);
+        dst = newDst;
     }
 
-    //G4_Type tmpType = (IS_UNSIGNED_INT(src0->getType()) && IS_UNSIGNED_INT(src1->getType()) && IS_UNSIGNED_INT(src2->getType())) ? Type_UD : Type_D;
     INST_LIST_ITER retIter = it;
     if (builder.noMulOrMadwExpandingBeforeScheduler() && builder.getOption(vISA_expandMadwPostSchedule))
     {
         // Here just create tmp variables to fix srcMod, cond modifier, saturate, etc. And Madw->Mul+Mach+Addc+Add expanding
         // will be done in expandMadwPostSchedule pass.
-
-        // sat has bee resolved above, here just set it as NOSAT
-        madwInst->setSaturate(g4::NOSAT);
 
         // need extra mov if dst is acc and src0 is indirect
         if (!builder.accDstforIndirectSrc())

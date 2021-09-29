@@ -53,6 +53,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Scalar.h"
 
+#include "llvmWrapper/Option/OptTable.h"
 #include "llvmWrapper/Target/TargetMachine.h"
 
 #include "Probe/Assertion.h"
@@ -178,6 +179,12 @@ static CodeGenOpt::Level getCodeGenOptLevel(const vc::CompileOptions &Opts) {
   return CodeGenOpt::Default;
 }
 
+static TargetOptions getTargetOptions(const vc::CompileOptions &Opts) {
+  TargetOptions Options;
+  Options.AllowFPOpFusion = Opts.AllowFPOpFusion;
+  return Options;
+}
+
 static Expected<std::unique_ptr<TargetMachine>>
 createTargetMachine(const vc::CompileOptions &Opts, Triple &TheTriple) {
   std::string Error;
@@ -186,9 +193,9 @@ createTargetMachine(const vc::CompileOptions &Opts, Triple &TheTriple) {
   IGC_ASSERT_MESSAGE(TheTarget, "vc target was not registered");
 
   const std::string FeaturesStr = getSubtargetFeatureString(Opts);
-  // These ones do not look useful for now. Maybe will be adjusted
-  // later to account for fp model.
-  const TargetOptions Options;
+
+  const TargetOptions Options = getTargetOptions(Opts);
+
   CodeGenOpt::Level OptLevel = getCodeGenOptLevel(Opts);
   std::unique_ptr<TargetMachine> TM{
       TheTarget->createTargetMachine(TheTriple.getTriple(), Opts.CPUStr,
@@ -210,6 +217,7 @@ static GenXBackendOptions createBackendOptions(const vc::CompileOptions &Opts) {
   BackendOpts.EmitDebugInformation = Opts.EmitDebugInformation;
   BackendOpts.EmitDebuggableKernels = Opts.EmitDebuggableKernels;
   BackendOpts.DebugInfoForZeBin = (Opts.Binary == vc::BinaryKind::ZE);
+  BackendOpts.DebugInfoValidationEnable = Opts.ForceDebugInfoValidation;
   BackendOpts.EnableAsmDumps = Opts.DumpAsm;
   BackendOpts.EnableDebugInfoDumps = Opts.DumpDebugInfo;
   BackendOpts.Dumper = Opts.Dumper.get();
@@ -219,10 +227,15 @@ static GenXBackendOptions createBackendOptions(const vc::CompileOptions &Opts) {
     BackendOpts.LocalizeLRsForAccUsage = true;
   if (Opts.ForceDisableNonOverlappingRegionOpt)
     BackendOpts.DisableNonOverlappingRegionOpt = true;
+  BackendOpts.PassDebugToFinalizer =
+      Opts.ForcePassDebugToFinalizer ||
+      (Opts.OptLevel == vc::OptimizerLevel::None && Opts.EmitDebugInformation);
   BackendOpts.FCtrl = Opts.FCtrl;
   BackendOpts.WATable = Opts.WATable;
   BackendOpts.IsLargeGRFMode = Opts.IsLargeGRFMode;
   BackendOpts.UseBindlessBuffers = Opts.UseBindlessBuffers;
+  if (Opts.SaveStackCallLinkage)
+    BackendOpts.SaveStackCallLinkage = true;
   return BackendOpts;
 }
 
@@ -235,6 +248,8 @@ static GenXBackendData createBackendData(const vc::ExternalData &Data,
       IGCLLVM::makeMemoryBufferRef(*Data.OCLGenericBIFModule);
   BackendData.BiFModule[BiFKind::VCEmulation] =
       IGCLLVM::makeMemoryBufferRef(*Data.VCEmulationBIFModule);
+  BackendData.BiFModule[BiFKind::VCSPIRVBuiltins] =
+      IGCLLVM::makeMemoryBufferRef(*Data.VCSPIRVBuiltinsBIFModule);
   if (PointerSizeInBits == 64)
     BackendData.BiFModule[BiFKind::VCPrintf] =
         IGCLLVM::makeMemoryBufferRef(*Data.VCPrintf64BIFModule);
@@ -574,15 +589,34 @@ static Error fillApiOptions(const opt::ArgList &ApiOptions,
   if (ApiOptions.hasArg(OPT_large_GRF))
     Opts.IsLargeGRFMode = true;
 
-  if (opt::Arg *A = ApiOptions.getLastArg(OPT_vc_optimize)) {
+  if (opt::Arg *A = ApiOptions.getLastArg(OPT_fp_contract)) {
     StringRef Val = A->getValue();
-    auto MaybeLevel = StringSwitch<Optional<vc::OptimizerLevel>>(Val)
-                          .Case("none", vc::OptimizerLevel::None)
-                          .Case("full", vc::OptimizerLevel::Full)
-                          .Default(None);
-    if (!MaybeLevel)
+    auto MayBeAllowFPOPFusion =
+        StringSwitch<Optional<FPOpFusion::FPOpFusionMode>>(Val)
+            .Case("on", FPOpFusion::Standard)
+            .Case("fast", FPOpFusion::Fast)
+            .Case("off", FPOpFusion::Strict)
+            .Default(None);
+    if (!MayBeAllowFPOPFusion)
       return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
-    Opts.OptLevel = MaybeLevel.getValue();
+    Opts.AllowFPOpFusion = MayBeAllowFPOPFusion.getValue();
+  }
+
+  if (opt::Arg *A =
+          ApiOptions.getLastArg(OPT_vc_optimize, OPT_opt_disable_ze)) {
+    if (A->getOption().matches(OPT_vc_optimize)) {
+      StringRef Val = A->getValue();
+      auto MaybeLevel = StringSwitch<Optional<vc::OptimizerLevel>>(Val)
+                            .Case("none", vc::OptimizerLevel::None)
+                            .Case("full", vc::OptimizerLevel::Full)
+                            .Default(None);
+      if (!MaybeLevel)
+        return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
+      Opts.OptLevel = MaybeLevel.getValue();
+    } else {
+      IGC_ASSERT(A->getOption().matches(OPT_opt_disable_ze));
+      Opts.OptLevel = vc::OptimizerLevel::None;
+    }
   }
 
   if (opt::Arg *A = ApiOptions.getLastArg(OPT_vc_stateless_private_size)) {
@@ -635,8 +669,8 @@ static Error fillInternalOptions(const opt::ArgList &InternalOptions,
     constexpr unsigned FlagsToInclude = IGC::options::VCApiOption;
     constexpr unsigned FlagsToExclude = 0;
     constexpr bool ShowAllAliases = false;
-    IGC::getApiOptTable().PrintHelp(llvm::errs(), Usage, Title, FlagsToInclude,
-                                    FlagsToExclude, ShowAllAliases);
+    IGCLLVM::printHelp(IGC::getApiOptTable(), llvm::errs(), Usage, Title,
+                       FlagsToInclude, FlagsToExclude, ShowAllAliases);
   }
   if (InternalOptions.hasArg(OPT_help_internal)) {
     constexpr const char *Usage =
@@ -645,9 +679,8 @@ static Error fillInternalOptions(const opt::ArgList &InternalOptions,
     constexpr unsigned FlagsToInclude = IGC::options::VCInternalOption;
     constexpr unsigned FlagsToExclude = 0;
     constexpr bool ShowAllAliases = false;
-    IGC::getInternalOptTable().PrintHelp(llvm::errs(), Usage, Title,
-                                         FlagsToInclude, FlagsToExclude,
-                                         ShowAllAliases);
+    IGCLLVM::printHelp(IGC::getInternalOptTable(), llvm::errs(), Usage, Title,
+                       FlagsToInclude, FlagsToExclude, ShowAllAliases);
   }
 
   return Error::success();

@@ -3252,7 +3252,7 @@ namespace IGC
     VISA_StateOpndHandle* CEncoder::GetVISASurfaceOpnd(e_predefSurface surfaceType, CVariable* bti)
     {
         VISA_StateOpndHandle* surfOpnd = nullptr;
-        if (surfaceType == ESURFACE_NORMAL || surfaceType == ESURFACE_BINDLESS)
+        if (surfaceType == ESURFACE_NORMAL || surfaceType == ESURFACE_BINDLESS || surfaceType == ESURFACE_SSHBINDLESS)
         {
             VISA_SurfaceVar* surfacevar = nullptr;
             if (surfaceType == ESURFACE_BINDLESS)
@@ -3650,7 +3650,7 @@ namespace IGC
     {
         CodeGenContext* context = m_program->GetContext();
         bool isOptDisabled = context->getModuleMetaData()->compOpt.OptDisable;
-        typedef std::unique_ptr< char, std::function<void(char*)>> param_uptr;
+        using param_uptr = std::unique_ptr<char, std::function<void(char*)>>;
         auto literal_deleter = [](char* val) {};
         auto dup_deleter = [](char* val) {free(val); };
         // create vbuilder->Compile() params
@@ -3702,30 +3702,26 @@ namespace IGC
             }
         }
         if (IGC_IS_FLAG_DISABLED(ForceDisableShaderDebugHashCodeInKernel) &&
-          (context->m_DriverInfo.EnableShaderDebugHashCodeInKernel() ||
-            IGC_IS_FLAG_ENABLED(ShaderDebugHashCodeInKernel)))
+            (context->m_DriverInfo.EnableShaderDebugHashCodeInKernel() ||
+             IGC_IS_FLAG_ENABLED(ShaderDebugHashCodeInKernel)))
         {
-            QWORD AssemblyHash = { 0 };
-            AssemblyHash = context->hash.getAsmHash();
-            params.push_back(param_uptr("-hashmovs", literal_deleter));
-            std::string Low = std::to_string((DWORD)AssemblyHash);
-            std::string High = std::to_string((DWORD)(AssemblyHash >> 32));
-            params.push_back(param_uptr(_strdup(Low.c_str()), dup_deleter));
-            params.push_back(param_uptr(_strdup(High.c_str()), dup_deleter));
-
-            QWORD NosHash = { 0 };
-            NosHash = context->hash.getNosHash();
-            QWORD PsoHash = { 0 };
-            PsoHash = context->hash.getPsoHash();
-            QWORD hashToUse = NosHash != 0 ? NosHash : PsoHash;
-            if (hashToUse)
+            auto addHash = [&](char* OptName, QWORD Hash)
             {
-                params.push_back(param_uptr("-hashmovs1", literal_deleter));
-                std::string Low = std::to_string((DWORD)hashToUse);
-                std::string High = std::to_string((DWORD)(hashToUse >> 32));
+                params.push_back(param_uptr(OptName, literal_deleter));
+                std::string Low = std::to_string((DWORD)Hash);
+                std::string High = std::to_string((DWORD)(Hash >> 32));
                 params.push_back(param_uptr(_strdup(Low.c_str()), dup_deleter));
                 params.push_back(param_uptr(_strdup(High.c_str()), dup_deleter));
-            }
+            };
+
+            QWORD AssemblyHash = context->hash.getAsmHash();
+            addHash("-hashmovs", AssemblyHash);
+
+            QWORD NosHash = context->hash.getNosHash();
+            QWORD PsoHash = context->hash.getPsoHash();
+            QWORD hashToUse = NosHash != 0 ? NosHash : PsoHash;
+            if (hashToUse)
+                addHash("-hashmovs1", hashToUse);
         }
     }
     void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR)
@@ -3741,23 +3737,18 @@ namespace IGC
             ForceNonCoherentStatelessBti = ClContext->m_ShouldUseNonCoherentStatelessBTI;
             AllowSpill = !ClContext->m_InternalOptions.NoSpill;
 
-            if (ClContext->m_InternalOptions.DoReRA &&
-                !ClContext->gtpin_init)
-            {
-                SaveOption(vISA_ReRAPostSchedule, true);
-            }
-            if (ClContext->m_Options.GTPinReRA)
+            if (ClContext->m_InternalOptions.GTPinReRA)
             {
                 SaveOption(vISA_GTPinReRA, true);
                 SaveOption(vISA_ReRAPostSchedule, true);
             }
-            if (ClContext->m_Options.GTPinGRFInfo)
+            if (ClContext->m_InternalOptions.GTPinGRFInfo)
             {
                 SaveOption(vISA_GetFreeGRFInfo, true);
             }
-            if (ClContext->m_Options.GTPinScratchAreaSize)
+            if (ClContext->m_InternalOptions.GTPinScratchAreaSize)
             {
-                SaveOption(vISA_GTPinScratchAreaSize, ClContext->m_Options.GTPinScratchAreaSizeValue);
+                SaveOption(vISA_GTPinScratchAreaSize, ClContext->m_InternalOptions.GTPinScratchAreaSizeValue);
             }
         }
 
@@ -3785,7 +3776,7 @@ namespace IGC
             SaveOption(vISA_EnableCompilerStats, true);
         }
 
-        if (m_program->m_Platform->getWATable().Wa_22011494591 && IGC_IS_FLAG_ENABLED(EnableSamplerSplit))
+        if (m_program->m_Platform->getWATable().Wa_14014414195 && IGC_IS_FLAG_ENABLED(EnableSamplerSplit))
         {
             SaveOption(vISA_cloneSampleInst, true);
         }
@@ -3864,8 +3855,12 @@ namespace IGC
                 return true;
 
             // API check.
+            bool enableForRetey = m_program->m_DriverInfo->enableVISAPreRASchedulerForRetry() ||
+                context->m_retryManager.AllowVISAPreRAScheduler();
+
             if (IGC_IS_FLAG_ENABLED(EnableVISAPreSched) &&
-                m_program->m_DriverInfo->enableVISAPreRAScheduler())
+                m_program->m_DriverInfo->enableVISAPreRAScheduler() &&
+                enableForRetey)
                 return true;
 
             return false;
@@ -3891,6 +3886,16 @@ namespace IGC
             if (uint32_t Val = IGC_GET_FLAG_VALUE(VISAPreSchedRPThreshold))
             {
                 SaveOption(vISA_preRA_ScheduleRPThreshold, Val);
+            }
+
+            if (uint32_t Val = IGC_GET_FLAG_VALUE(VISAScheduleStartBBID))
+            {
+                SaveOption(vISA_ScheduleStartBBID, Val);
+            }
+
+            if (uint32_t Val = IGC_GET_FLAG_VALUE(VISAScheduleEndBBID))
+            {
+                SaveOption(vISA_ScheduleEndBBID, Val);
             }
         }
         else
@@ -4008,11 +4013,6 @@ namespace IGC
             SaveOption(vISA_EnableScalarJmp, false);
         }
 
-        if (IGC_IS_FLAG_ENABLED(EnableVISADCE))
-        {
-            SaveOption(vISA_EnableDCE, true);
-        }
-
         if (IGC_IS_FLAG_ENABLED(DisableCSEL))
         {
             SaveOption(vISA_enableCSEL, false);
@@ -4112,6 +4112,10 @@ namespace IGC
         if (IGC_GET_FLAG_VALUE(TotalGRFNum) != 0)
         {
             SaveOption(vISA_TotalGRFNum, IGC_GET_FLAG_VALUE(TotalGRFNum));
+        }
+        else if (context->type == ShaderType::COMPUTE_SHADER && IGC_GET_FLAG_VALUE(TotalGRFNum4CS) != 0)
+        {
+            SaveOption(vISA_TotalGRFNum, IGC_GET_FLAG_VALUE(TotalGRFNum4CS));
         }
         else
         {
@@ -4341,8 +4345,8 @@ namespace IGC
             SaveOption(vISA_accSubstitution, true);
             uint32_t numAcc = IGC_GET_FLAG_VALUE(NumGeneralAcc);
 
-            IGC_ASSERT_MESSAGE(0 <= numAcc, "number of general acc should be [1-8] if set");
-            IGC_ASSERT_MESSAGE(numAcc <= 8, "number of general acc should be [1-8] if set");
+            IGC_ASSERT_MESSAGE(0 <= numAcc, "number of general acc should be [1-16] if set");
+            IGC_ASSERT_MESSAGE(numAcc <= 16, "number of general acc should be [1-16] if set");
 
             if (numAcc > 0)
             {
@@ -4415,8 +4419,9 @@ namespace IGC
         SaveOption(vISA_noStitchExternFunc, false);
 
         // Turning off optimizations as much as possible to have the fastest compilation
-        if (IsStage1FastestCompile(context->m_CgFlag, context->m_StagingCtx) ||
-            IGC_GET_FLAG_VALUE(ForceFastestSIMD))
+        if ((IsStage1FastestCompile(context->m_CgFlag, context->m_StagingCtx) ||
+             IGC_GET_FLAG_VALUE(ForceFastestSIMD)) &&
+            m_program->m_DriverInfo->SupportFastestStage1())
         {
             if (IGC_GET_FLAG_VALUE(FastestS1Experiments) == FCEXP_NO_EXPRIMENT)
             {
@@ -4951,15 +4956,15 @@ namespace IGC
     {
         CodeGenContext* context = m_program->GetContext();
         return context->type == ShaderType::PIXEL_SHADER &&
-            m_program->m_dispatchSize == SIMDMode::SIMD8 &&
+            (m_program->m_dispatchSize == SIMDMode::SIMD8 || m_program->m_dispatchSize == SIMDMode::SIMD16) &&
             context->m_retryManager.IsFirstTry();
     }
 
-    void CEncoder::CreateKernelSymbol(const std::string& kernelName, const VISAKernel& visaKernel,
-        SProgramOutput::ZEBinFuncSymbolTable& symbols)
+    void CEncoder::CreateKernelSymbol(const std::string& kernelName, unsigned offset,
+        unsigned size, SProgramOutput::ZEBinFuncSymbolTable& symbols)
     {
-        // kernel symbols are local symbols, and point to the offset 0 of this kernel binary
-        symbols.local.emplace_back(vISA::GenSymType::S_KERNEL, 0, visaKernel.getGenSize(), kernelName);
+        // kernel symbols are local symbols
+        symbols.local.emplace_back(vISA::GenSymType::S_KERNEL, offset, size, kernelName);
     }
 
     void CEncoder::CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries,
@@ -5427,6 +5432,7 @@ namespace IGC
                 COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_EARLYEXIT32, 1);
             }
 #endif
+            context->SetSIMDInfo(SIMD_SKIP_SPILL, m_program->m_dispatchSize, m_program->m_ShaderDispatchMode);
             return;
         }
 
@@ -5593,10 +5599,24 @@ namespace IGC
         if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
             context->getCompilerOption().EnableZEBinary)
         {
-            // cretae symbols for kernel. Symbols have name the same as the kernels, and offset to the
-            // start of that kernel
-            CreateKernelSymbol(m_program->entry->getName().str(), *pMainKernel, pOutput->m_symbols);
+            // create symbols for kernel.
+            // The kernel Symbol has the same name as the kernel, and offset
+            // pointed to 0.
+            CreateKernelSymbol(m_program->entry->getName().str(), 0,
+                (unsigned)pMainKernel->getGenSize(), pOutput->m_symbols);
+
+            // Emit symbol "_entry' as the actual kernel start. Maybe we can
+            // consider to use the value of the _main label in this case. Now
+            // set the symbol value as the max offset next to the per-thread
+            // prolog, the cross-thread prolog, or the compute-FFID prolog.
+            unsigned actual_kernel_start_off =
+                std::max(std::max(jitInfo->offsetToSkipPerThreadDataLoad,
+                                  jitInfo->offsetToSkipCrossThreadDataLoad),
+                         jitInfo->offsetToSkipSetFFIDGP1);
+            CreateKernelSymbol("_entry", actual_kernel_start_off,
+                (unsigned)pMainKernel->getGenSize() - actual_kernel_start_off, pOutput->m_symbols);
         }
+
         CreateRelocationTable(pOutput->m_funcRelocationTable,
             pOutput->m_funcRelocationTableSize,
             pOutput->m_funcRelocationTableEntries,

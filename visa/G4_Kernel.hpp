@@ -85,6 +85,7 @@ public:
     unsigned getNumFreeGlobalRegs() const { return (unsigned)globalFreeRegs.size(); }
     unsigned getFreeGlobalReg(unsigned n) const { return globalFreeRegs[n]; }
     void addFreeGlobalReg(unsigned n) { globalFreeRegs.push_back(n); }
+    void setFreeGlobalRegs(std::vector<unsigned>& vec) {globalFreeRegs = vec;}
 
     // This function internally mallocs memory to hold buffer
     // of free GRFs. It is meant to be freed by caller after
@@ -102,12 +103,6 @@ public:
     }
     uint32_t getNumBytesScratchUse() const;
 
-    void setPerThreadPayloadBB(G4_BB* bb) { perThreadPayloadBB = bb; }
-    void setCrossThreadPayloadBB(G4_BB* bb) { crossThreadPayloadBB = bb; }
-
-    unsigned getCrossThreadNextOff() const;
-    unsigned getPerThreadNextOff() const;
-
     void setGTPinInitFromL0(bool val) { gtpinInitFromL0 = val; }
     bool isGTPinInitFromL0() const { return gtpinInitFromL0; }
 
@@ -124,9 +119,6 @@ private:
 
     bool gtpinInitFromL0 = false;
     gtpin::igc::igc_init_t* gtpin_init = nullptr;
-
-    G4_BB* perThreadPayloadBB = nullptr;
-    G4_BB* crossThreadPayloadBB = nullptr;
 }; // class gtPinData
 
 class G4_BB;
@@ -184,6 +176,11 @@ private:
     bool sharedDebugInfo = false;
     bool sharedGTPinInfo = false;
 
+    G4_BB* perThreadPayloadBB = nullptr;
+    G4_BB* crossThreadPayloadBB = nullptr;
+    // There's two entires prolog for setting FFID for compute shaders.
+    G4_BB* computeFFIDGP = nullptr;
+    G4_BB* computeFFIDGP1 = nullptr;
 public:
     FlowGraph              fg;
     DECLARE_LIST           Declares;
@@ -231,7 +228,7 @@ public:
     void computeChannelSlicing();
     void calculateSimdSize();
     G4_ExecSize getSimdSize() { return simdSize; }
-    bool getChannelSlicing() { return channelSliced; }
+    bool getChannelSlicing() const { return channelSliced; }
     unsigned getSimdSizeWithSlicing() { return channelSliced ? simdSize/2 : simdSize; }
 
     void setHasAddrTaken(bool val) { hasAddrTaken = val; }
@@ -241,16 +238,16 @@ public:
     unsigned getNumRegTotal() const { return numRegTotal; }
 
     void setName(const char* n) { name = n; }
-    const char* getName() { return name; }
+    const char* getName() const { return name; }
 
     void updateKernelByNumThreads(int nThreads);
 
     void evalAddrExp();
 
     void setRAType(RA_Type type) { RAType = type; }
-    RA_Type getRAType() { return RAType; }
+    RA_Type getRAType() const { return RAType; }
 
-    bool hasKernelDebugInfo() {return kernelDbgInfo;}
+    bool hasKernelDebugInfo() const {return kernelDbgInfo;}
     void setKernelDebugInfo(KernelDebugInfo* k);
     KernelDebugInfo* getKernelDebugInfo();
 
@@ -331,7 +328,25 @@ public:
     void emitRegInfo();
     void emitRegInfoKernel(std::ostream& output);
 
+    bool hasPerThreadPayloadBB() const { return perThreadPayloadBB != nullptr; }
+    void setPerThreadPayloadBB(G4_BB* bb) { perThreadPayloadBB = bb; }
+    bool hasCrossThreadPayloadBB() const { return crossThreadPayloadBB != nullptr; }
+    void setCrossThreadPayloadBB(G4_BB* bb) { crossThreadPayloadBB = bb; }
+    bool hasComputeFFIDProlog() const {
+        return computeFFIDGP != nullptr && computeFFIDGP1 != nullptr;
+    }
+    void setComputeFFIDGPBB(G4_BB* bb) { computeFFIDGP = bb; }
+    void setComputeFFIDGP1BB(G4_BB* bb) { computeFFIDGP1 = bb; }
+
+    unsigned getCrossThreadNextOff() const;
+    unsigned getPerThreadNextOff() const;
+    unsigned getComputeFFIDGPNextOff() const;
+    unsigned getComputeFFIDGP1NextOff() const;
+
 private:
+    G4_BB* getNextBB(G4_BB* bb) const;
+    unsigned getBinOffsetOfBB(G4_BB* bb) const;
+
     void setKernelParameters();
 
     void dumpDotFileInternal(const std::string &baseName);

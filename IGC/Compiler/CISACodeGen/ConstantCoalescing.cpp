@@ -206,7 +206,7 @@ static void checkInsertExtractMatch(InsertElementInst* insertInst, Value* base, 
 
 static bool canReplaceInsert(InsertElementInst* insertElt)
 {
-    VectorType* VTy = cast<VectorType>(insertElt->getOperand(0)->getType());
+    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(insertElt->getOperand(0)->getType());
     ConstantInt* index = dyn_cast<ConstantInt>(insertElt->getOperand(2));
     if (!index || index->getZExtValue() != VTy->getNumElements() - 1)
     {
@@ -294,7 +294,7 @@ void ConstantCoalescing::VectorizePrep(llvm::BasicBlock* bb)
         {
             if (load->getType()->isVectorTy() && wiAns->isUniform(load))
             {
-                srcNElts = (uint32_t)cast<VectorType>(load->getType())->getNumElements();
+                srcNElts = (uint32_t)cast<IGCLLVM::FixedVectorType>(load->getType())->getNumElements();
                 DenseMap<uint64_t, Instruction*> extractElementMap;
 
                 for (auto iter = load->user_begin(); iter != load->user_end(); iter++)
@@ -378,7 +378,7 @@ bool ConstantCoalescing::isProfitableLoad(
             (isa<LoadInst>(I) && wiAns->isUniform(I)) ?
             16 : 4;
 
-        if (cast<VectorType>(LoadTy)->getNumElements() > MaxVectorInput)
+        if (cast<IGCLLVM::FixedVectorType>(LoadTy)->getNumElements() > MaxVectorInput)
             return false;
 
         MaxEltPlus = CheckVectorElementUses(I);
@@ -851,7 +851,8 @@ void ConstantCoalescing::MergeScatterLoad(Instruction* load,
             cov_chunk->elementSize = scalarSizeInBytes;
             cov_chunk->chunkStart = eltid;
             cov_chunk->chunkSize = maxEltPlus;
-            cov_chunk->chunkIO = load;
+            const uint chunkAlignment = std::max<uint>(alignment, 4);
+            cov_chunk->chunkIO = CreateChunkLoad(load, cov_chunk, eltid, chunkAlignment);
 
             // Update load alignment if needed, set it to DWORD aligned
             if (alignment < 4)
@@ -1957,7 +1958,7 @@ void ConstantCoalescing::AdjustChunk(BufChunk* cov_chunk, uint start_adj, uint s
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
+        for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -2021,7 +2022,7 @@ void ConstantCoalescing::MoveExtracts(BufChunk* cov_chunk, Instruction* load, ui
             irBuilder->SetInsertPoint(load->getNextNode());
             Type* vecType = load->getType();
             Value* vec = UndefValue::get(vecType);
-            for (unsigned i = 0; i < cast<VectorType>(vecType)->getNumElements(); i++)
+            for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(vecType)->getNumElements(); i++)
             {
                 Value* channel = irBuilder->CreateExtractElement(
                     cov_chunk->chunkIO, irBuilder->getInt32(i + start_adj));
@@ -2085,7 +2086,7 @@ void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
         WIAnalysis::WIDependancy loadDep = wiAns->whichDepend(cov_chunk->chunkIO);
         irBuilder->SetInsertPoint(cov_chunk->chunkIO->getNextNode());
         Value* vec = UndefValue::get(originalType);
-        for (unsigned i = 0; i < cast<VectorType>(originalType)->getNumElements(); i++)
+        for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(originalType)->getNumElements(); i++)
         {
             Value* channel = irBuilder->CreateExtractElement(
                 cov_chunk->chunkIO, irBuilder->getInt32(i));
@@ -2264,7 +2265,9 @@ void ConstantCoalescing::ScatterToSampler(
     const uint loadSizeInBytes = (unsigned int)load->getType()->getPrimitiveSizeInBits() / 8;
 
     IGC_ASSERT(nullptr != (load->getType()));
-    IGC_ASSERT((!load->getType()->isVectorTy()) || (cast<VectorType>(load->getType())->getNumElements() <= 4));
+    IGC_ASSERT(
+        (!load->getType()->isVectorTy()) ||
+        (cast<IGCLLVM::FixedVectorType>(load->getType())->getNumElements() <= 4));
 
     const bool useByteAddress = m_ctx->m_DriverInfo.UsesTypedConstantBuffersWithByteAddress();
 
@@ -2522,7 +2525,7 @@ void ConstantCoalescing::ReplaceLoadWithSamplerLoad(
         if (dstTy->isVectorTy())
         {
             result = UndefValue::get(dstTy);
-            for (uint i = 0; i < cast<VectorType>(dstTy)->getNumElements(); i++)
+            for (uint i = 0; i < cast<IGCLLVM::FixedVectorType>(dstTy)->getNumElements(); i++)
             {
                 Value* tmpData = ExtractFromSamplerData(cast<VectorType>(dstTy)->getElementType(), i);
                 result = irBuilder->CreateInsertElement(result, tmpData, irBuilder->getInt32(i));

@@ -19,13 +19,16 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Casting.h>
+#include <llvm/Support/ErrorHandling.h>
 
 #include "llvmWrapper/IR/DerivedTypes.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <functional>
 #include <iterator>
+#include <type_traits>
 #include <utility>
 
 using namespace llvm;
@@ -34,128 +37,90 @@ using FunctionRef = std::reference_wrapper<Function>;
 using ValueRef = std::reference_wrapper<Value>;
 using InstructionRef = std::reference_wrapper<Instruction>;
 using BuiltinSeq = std::vector<FunctionRef>;
-
-namespace cmcl {
+using BuiltinCallHandler = std::add_pointer_t<void(CallInst &)>;
 
 constexpr const char BuiltinPrefix[] = "__cm_cl_";
 
-// FIXME: autogenerate the most of the boilerplate below.
-
-namespace BuiltinID {
-enum Enum {
-  Select,
-  RdRegion,
-  WrRegion,
-  PrintfBuffer,
-  PrintfFormatIndex,
-  PrintfFormatIndexLegacy,
-  SVMScatter,
-  SVMAtomicAdd,
-  Size
-};
-} // namespace BuiltinID
-
-constexpr const char *BuiltinNames[BuiltinID::Size] = {
-    "__cm_cl_select",
-    "__cm_cl_rdregion",
-    "__cm_cl_wrregion",
-    "__cm_cl_printf_buffer",
-    "__cm_cl_printf_format_index",
-    "__cm_cl_printf_format_index_legacy",
-    "__cm_cl_svm_scatter",
-    "__cm_cl_svm_atomic_add"};
-
-namespace OperandKind {
-enum Enum {
-  VectorIn,
-  VectorOut,
-  VectorInOut,
-  ScalarIn,
-  ScalarConst,
-  PointerIn
-};
-} // namespace OperandKind
+// Imports:
+//
+// Posible builtin operand kinds:
+// namespace OperandKind { enum Enum {.....};}
+//
+// CMCL builtin IDs. This ID will be used in all other structures to define
+// a builtin, e.g. BuiltinID::Select:
+// namespace BuiltinID { enum Enum {.....};}
+//
+// Names of builtin functions:
+// constexpr const char* BuiltinNames[] = {.....};
+//
+// Operand indices for each builtin. 'BuiltinName'Operand::Size holds the
+// number of 'BuiltinName' builtin, e.g. SelectOperand::Size:
+// namespace 'BuiltinName'Operand { enum Enum {.....};}
+//
+// Maps builtin ID to builtin operand size:
+// constexpr int BuiltinOperandSize[] = {.....};
+//
+// Maps operand index to its kind for every builtin:
+// constexpr OperandKind::Enum 'BuiltinName'OperandKind[] = {.....};
+//
+// Maps BuiltinID to pointer to corresponding 'BuiltinName'OperandKind array.
+// BuiltinOperandKind[BiID][Idx] will return the kind of Idx operand of the
+// builtin with BiID ID:
+// constexpr const OperandKind::Enum* BuiltinOperandKind[] = {.....};
+#define CMCL_AUTOGEN_BUILTIN_DESCS
+#include "TranslationInfo.inc"
+#undef CMCL_AUTOGEN_BUILTIN_DESCS
 
 static bool isOutputOperand(OperandKind::Enum OpKind) {
   return OpKind == OperandKind::VectorInOut || OpKind == OperandKind::VectorOut;
 }
 
-namespace SelectOperand {
-enum Enum { Destination, Condition, TrueValue, FalseValue, Size };
-} // namespace SelectOperand
+template <BuiltinID::Enum BiID>
+static void handleBuiltinCall(CallInst &BiCall);
 
-namespace RdRegionOperand {
-enum Enum { Destination, Source, VStride, Width, Stride, Offset, Size };
-} // namespace RdRegionOperand
+// Imports:
+//
+// Maps builtin ID to builtin handler. Builtin handler is a function that will
+// translate this builtin:
+// constexpr BuiltinCallHandler BuiltinCallHandlers[] = {.....};
+//
+// Maps builtin ID to ID of intrinsic which this builtin should be translated
+// into. Holds ~0u for cases when builtin should be translated not in an
+// intrinsic:
+// constexpr unsigned IntrinsicForBuiltin[] = {.....};
+#define CMCL_AUTOGEN_TRANSLATION_DESCS
+#include "TranslationInfo.inc"
+#undef CMCL_AUTOGEN_TRANSLATION_DESCS
 
-namespace WrRegionOperand {
-enum Enum { Destination, Source, VStride, Width, Stride, Offset, Size };
-} // namespace WrRegionOperand
+// Return declaration for intrinsics with provided parameters.
+// This is helper function to get genx intrinsic declaration for given
+// intrinsic ID, return type and arguments.
+// RetTy -- return type of new intrinsic.
+// Args -- range of Value * representing new intrinsic arguments. Each value
+// must be non-null.
+// Id -- new genx intrinsic ID.
+// M -- module where to insert function declaration.
+//
+// NOTE: It was copied from "vc/Utils/GenX/Intrinsics.h" with some changes.
+// Cannot link it here because CMCL is a separate independent project.
+template <typename Range>
+Function *getGenXDeclarationForIdFromArgs(Type &RetTy, Range &&Args,
+                                          GenXIntrinsic::ID Id, Module &M) {
+  assert(GenXIntrinsic::isGenXIntrinsic(Id) && "Expected genx intrinsic id");
 
-namespace PrintfBufferOperand {
-enum Enum { Size };
-} // namespace PrintfBufferOperand
+  SmallVector<Type *, 4> Types;
+  if (GenXIntrinsic::isOverloadedRet(Id))
+    Types.push_back(&RetTy);
+  for (auto &&EnumArg : llvm::enumerate(Args)) {
+    if (GenXIntrinsic::isOverloadedArg(Id, EnumArg.index()))
+      Types.push_back(EnumArg.value()->getType());
+  }
 
-namespace PrintfFormatIndexOperand {
-enum Enum { Source, Size };
-} // namespace PrintfFormatIndexOperand
-
-namespace SVMScatterOperand {
-enum Enum { NumBlocks, Address, Source, Size };
-} // namespace SVMScatterOperand
-
-namespace SVMAtomicAddOperand {
-enum Enum { Destination, Address, Source, Size };
-} // namespace SVMAtomicAddOperand
-
-constexpr OperandKind::Enum SelectOperandKind[SelectOperand::Size] = {
-    OperandKind::VectorOut, OperandKind::VectorIn, OperandKind::VectorIn,
-    OperandKind::VectorIn};
-
-constexpr OperandKind::Enum RdRegionOperandKind[RdRegionOperand::Size] = {
-    OperandKind::VectorOut,   OperandKind::VectorIn,
-    OperandKind::ScalarConst, OperandKind::ScalarConst,
-    OperandKind::ScalarConst, OperandKind::ScalarIn};
-
-constexpr OperandKind::Enum WrRegionOperandKind[WrRegionOperand::Size] = {
-    OperandKind::VectorInOut, OperandKind::VectorIn,
-    OperandKind::ScalarConst, OperandKind::ScalarConst,
-    OperandKind::ScalarConst, OperandKind::ScalarIn};
-
-constexpr OperandKind::Enum
-    PrintfFormatIndexOperandKind[PrintfFormatIndexOperand::Size] = {
-        OperandKind::PointerIn};
-
-constexpr OperandKind::Enum SVMScatterOperandKind[SVMScatterOperand::Size] = {
-    OperandKind::ScalarConst, OperandKind::VectorIn, OperandKind::VectorIn};
-
-constexpr OperandKind::Enum SVMAtomicAddOperandKind[SVMAtomicAddOperand::Size] =
-    {OperandKind::VectorOut, OperandKind::VectorIn, OperandKind::VectorIn};
-
-constexpr const OperandKind::Enum *BuiltinOperandKind[BuiltinID::Size] = {
-    SelectOperandKind,
-    RdRegionOperandKind,
-    WrRegionOperandKind,
-    nullptr,
-    PrintfFormatIndexOperandKind,
-    PrintfFormatIndexOperandKind, // Legacy
-    SVMScatterOperandKind,
-    SVMAtomicAddOperandKind};
-
-constexpr int BuiltinOperandSize[BuiltinID::Size] = {
-    SelectOperand::Size,
-    RdRegionOperand::Size,
-    WrRegionOperand::Size,
-    PrintfBufferOperand::Size,
-    PrintfFormatIndexOperand::Size,
-    PrintfFormatIndexOperand::Size, // Legacy
-    SVMScatterOperand::Size,
-    SVMAtomicAddOperand::Size};
-
-} // namespace cmcl
+  return GenXIntrinsic::getGenXDeclaration(&M, Id, Types);
+}
 
 static bool isCMCLBuiltin(const Function &F) {
-  return F.getName().startswith(cmcl::BuiltinPrefix);
+  return F.getName().startswith(BuiltinPrefix);
 }
 
 static BuiltinSeq collectBuiltins(Module &M) {
@@ -184,12 +149,11 @@ static void cleanUpBuiltins(iterator_range<BuiltinSeq::iterator> Builtins) {
                 [](Function &F) { cleanUpBuiltin(F); });
 }
 
-static cmcl::BuiltinID::Enum decodeBuiltin(StringRef BiName) {
-  auto BiIt = std::find(std::begin(cmcl::BuiltinNames),
-                        std::end(cmcl::BuiltinNames), BiName);
-  assert(BiIt != std::end(cmcl::BuiltinNames) && "unknown CM-CL builtin");
-  return static_cast<cmcl::BuiltinID::Enum>(BiIt -
-                                            std::begin(cmcl::BuiltinNames));
+static BuiltinID::Enum decodeBuiltin(StringRef BiName) {
+  auto BiIt =
+      std::find(std::begin(BuiltinNames), std::end(BuiltinNames), BiName);
+  assert(BiIt != std::end(BuiltinNames) && "unknown CM-CL builtin");
+  return static_cast<BuiltinID::Enum>(BiIt - std::begin(BuiltinNames));
 }
 
 static bool isPointerToVector(Type &Ty) {
@@ -219,7 +183,8 @@ static Value &searchForVectorPointer(Value &V) {
 // pointer to vector first and then load the vector.
 static Value &readVectorFromBuiltinOp(Value &BiOp, IRBuilder<> &IRB) {
   auto &Ptr = searchForVectorPointer(BiOp);
-  return *IRB.CreateLoad(&Ptr, Ptr.getName() + ".ld.arg");
+  Type *Ty = Ptr.getType()->getPointerElementType();
+  return *IRB.CreateLoad(Ty, &Ptr, Ptr.getName() + ".ld.arg");
 }
 
 // Output vector operands is also passed as void*.
@@ -231,216 +196,134 @@ static void writeVectorFromBuiltinOp(Value &ToWrite, Value &BiOp,
 
 // Getting vc-intrinsic (or llvm instruction/intrinsic) operand based on cm-cl
 // builtin operand.
-template <cmcl::BuiltinID::Enum BiID>
-Value &readValueFromBuiltinOp(Use &BiOp, IRBuilder<> &IRB) {
-  int OpIdx = BiOp.getOperandNo();
-  assert(OpIdx < cmcl::BuiltinOperandSize[BiID] && "operand index is illegal");
-  switch (cmcl::BuiltinOperandKind[BiID][OpIdx]) {
-  case cmcl::OperandKind::VectorOut:
-    // Need to know the real vector type to mangle some intrinsics,
-    // so we pass this info through operands to createMainInst.
-    // FIXME: don't look at output operands here at all.
-    return searchForVectorPointer(*BiOp.get());
-  case cmcl::OperandKind::VectorIn:
-  case cmcl::OperandKind::VectorInOut:
-    return readVectorFromBuiltinOp(*BiOp.get(), IRB);
-  case cmcl::OperandKind::ScalarConst:
-    assert((BiOp.get()->getType()->isIntegerTy() ||
-            BiOp.get()->getType()->isFloatingPointTy()) &&
+template <BuiltinID::Enum BiID>
+Value &readValueFromBuiltinOp(CallInst &BiCall, int OpIdx, IRBuilder<> &IRB) {
+  Value &BiOp = *BiCall.getArgOperand(OpIdx);
+  assert(OpIdx < BuiltinOperandSize[BiID] && "operand index is illegal");
+  switch (BuiltinOperandKind[BiID][OpIdx]) {
+  case OperandKind::VectorOut:
+    llvm_unreachable("cannot read value from an output operand");
+  case OperandKind::VectorIn:
+  case OperandKind::VectorInOut:
+    return readVectorFromBuiltinOp(BiOp, IRB);
+  case OperandKind::ScalarConst:
+    assert((BiOp.getType()->isIntegerTy() ||
+            BiOp.getType()->isFloatingPointTy()) &&
            "scalar operand is expected");
-    assert(isa<Constant>(BiOp.get()) && "constant operand is expected");
-    return *BiOp.get();
-  case cmcl::OperandKind::ScalarIn:
-    assert((BiOp.get()->getType()->isIntegerTy() ||
-            BiOp.get()->getType()->isFloatingPointTy()) &&
+    assert(isa<Constant>(BiOp) && "constant operand is expected");
+    return BiOp;
+  case OperandKind::ScalarIn:
+    assert((BiOp.getType()->isIntegerTy() ||
+            BiOp.getType()->isFloatingPointTy()) &&
            "scalar operand is expected");
-    return *BiOp.get();
-  case cmcl::OperandKind::PointerIn:
-    assert(BiOp.get()->getType()->isPointerTy() && "pointer type is expected");
-    return *BiOp.get();
+    return BiOp;
+  case OperandKind::PointerIn:
+    assert(BiOp.getType()->isPointerTy() && "pointer type is expected");
+    return BiOp;
   default:
-    assert(0 && "Unexpected operand kind");
-    return *BiOp.get();
+    llvm_unreachable("Unexpected operand kind");
   }
 }
 
-// Prepare vc-intrinsic (or llvm instruction/intrinsic) operands based on
-// cm-cl builtin operands.
-template <cmcl::BuiltinID::Enum BiID>
-static std::vector<ValueRef> readOperands(CallInst &BiCall, IRBuilder<> &IRB) {
-  assert(BiCall.getNumArgOperands() == cmcl::BuiltinOperandSize[BiID] &&
-         "wrong number of operands for select");
-  std::vector<ValueRef> LegalOps;
-  std::transform(BiCall.arg_begin(), BiCall.arg_end(),
-                 std::back_inserter(LegalOps), [&IRB](Use &U) -> Value & {
-                   return readValueFromBuiltinOp<BiID>(U, IRB);
-                 });
-  return LegalOps;
+// Returns a intended builtin operand type.
+// Vector operands are passed through pointer, intended type in this case is
+// the vector type, not pointer to vector type.
+template <BuiltinID::Enum BiID>
+Type &getTypeFromBuiltinOperand(CallInst &BiCall, int OpIdx) {
+  assert(OpIdx < BuiltinOperandSize[BiID] && "operand index is illegal");
+  Value &BiOp = *BiCall.getArgOperand(OpIdx);
+  switch (BuiltinOperandKind[BiID][OpIdx]) {
+  case OperandKind::VectorOut:
+  case OperandKind::VectorIn:
+  case OperandKind::VectorInOut:
+    return *searchForVectorPointer(BiOp).getType()->getPointerElementType();
+  case OperandKind::ScalarConst:
+  case OperandKind::ScalarIn:
+  case OperandKind::PointerIn:
+    return *BiOp.getType();
+  default:
+    llvm_unreachable("Unexpected operand kind");
+  }
 }
 
-using BuiltinCallHandler = std::function<void(CallInst &)>;
-using BuiltinCallHandlerSeq = std::vector<BuiltinCallHandler>;
+// A helper function to get vector type width.
+// \p Ty must be a fixed vector type.
+static int getVectorWidth(Type &Ty) {
+  return cast<IGCLLVM::FixedVectorType>(Ty).getNumElements();
+}
+
+// Returns the type wich instruction that a builtin is translated into will
+// have.
+template <BuiltinID::Enum BiID>
+Type &getTranslatedBuiltinType(CallInst &BiCall);
+
+// Prepare vc-intrinsic (or llvm instruction/intrinsic) operands based on
+// cm-cl builtin operands.
+template <BuiltinID::Enum BiID>
+std::vector<Value *> getTranslatedBuiltinOperands(CallInst &BiCall,
+                                                  IRBuilder<> &IRB);
+
+// Imports:
+//
+// getTranslatedBuiltinType specialization for every builtin.
+// template <>
+// Type &getTranslatedBuiltinType<BuiltinID::'BuiltinName'>(CallInst &BiCall) {
+//   return .....;
+// }
+//
+// getTranslatedBuiltinOperands specialization for every builtin.
+// template <>
+// std::vector<Value *>
+// getTranslatedBuiltinOperands<BuiltinID::'BuiltinName'>(CallInst &BiCall,
+//                                                        IRBuilder<> &IRB) {
+//   return {.....};
+// }
+#define CMCL_AUTOGEN_TRANSLATION_IMPL
+#include "TranslationInfo.inc"
+#undef CMCL_AUTOGEN_TRANSLATION_IMPL
 
 // Generates instruction/instructions that represent cm-cl builtin semantics,
 // output values (if any) a written into output vector.
 // The order of output values are covered in the comment to
 // writeBuiltinResults.
-// FIXME: find a way to autogenerate it.
-template <cmcl::BuiltinID::Enum BiID>
-std::vector<ValueRef> createMainInst(const std::vector<ValueRef> &Operands,
-                                     Type &BiTy, IRBuilder<> &IRB);
+// Args:
+//    RetTy - type of generated instruction
+template <BuiltinID::Enum BiID>
+std::vector<ValueRef> createMainInst(const std::vector<Value *> &Operands,
+                                     Type &RetTy, IRBuilder<> &IRB) {
+  auto *Decl = getGenXDeclarationForIdFromArgs(
+      RetTy, Operands,
+      static_cast<GenXIntrinsic::ID>(IntrinsicForBuiltin[BiID]),
+      *IRB.GetInsertBlock()->getModule());
+  auto *CI =
+      IRB.CreateCall(Decl, Operands, RetTy.isVoidTy() ? "" : "cmcl.builtin");
+  return {*CI};
+}
 
 template <>
 std::vector<ValueRef>
-createMainInst<cmcl::BuiltinID::Select>(const std::vector<ValueRef> &Operands,
-                                        Type &, IRBuilder<> &IRB) {
-
+createMainInst<BuiltinID::Select>(const std::vector<Value *> &Operands, Type &,
+                                  IRBuilder<> &IRB) {
+  // LLVM select instruction operand indices.
+  enum LLVMSelectOperand { Condition, TrueValue, FalseValue };
   // trunc <iW x N> to <i1 x N> for mask
-  auto &WrongTypeCond = Operands[cmcl::SelectOperand::Condition].get();
+  auto &WrongTypeCond = *Operands[LLVMSelectOperand::Condition];
   auto Width =
       cast<IGCLLVM::FixedVectorType>(WrongTypeCond.getType())->getNumElements();
   auto *CondTy = IGCLLVM::FixedVectorType::get(IRB.getInt1Ty(), Width);
   auto *RightTypeCond = IRB.CreateTrunc(&WrongTypeCond, CondTy,
                                         WrongTypeCond.getName() + ".trunc");
-  auto *SelectResult = IRB.CreateSelect(
-      RightTypeCond, &Operands[cmcl::SelectOperand::TrueValue].get(),
-      &Operands[cmcl::SelectOperand::FalseValue].get(), "cmcl.sel");
+  auto *SelectResult =
+      IRB.CreateSelect(RightTypeCond, Operands[LLVMSelectOperand::TrueValue],
+                       Operands[LLVMSelectOperand::FalseValue], "cmcl.sel");
   return {*SelectResult};
-}
-
-template <>
-std::vector<ValueRef>
-createMainInst<cmcl::BuiltinID::RdRegion>(const std::vector<ValueRef> &Operands,
-                                          Type &, IRBuilder<> &IRB) {
-  auto IID = Operands[cmcl::RdRegionOperand::Source]
-                     .get()
-                     .getType()
-                     ->getScalarType()
-                     ->isFloatingPointTy()
-                 ? GenXIntrinsic::genx_rdregionf
-                 : GenXIntrinsic::genx_rdregioni;
-  Type *Tys[] = {Operands[cmcl::RdRegionOperand::Destination]
-                     .get()
-                     .getType()
-                     ->getPointerElementType(),
-                 Operands[cmcl::RdRegionOperand::Source].get().getType(),
-                 Operands[cmcl::RdRegionOperand::Offset].get().getType()};
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(), IID, Tys);
-  Value *Args[] = {&Operands[cmcl::RdRegionOperand::Source].get(),
-                   &Operands[cmcl::RdRegionOperand::VStride].get(),
-                   &Operands[cmcl::RdRegionOperand::Width].get(),
-                   &Operands[cmcl::RdRegionOperand::Stride].get(),
-                   &Operands[cmcl::RdRegionOperand::Offset].get(),
-                   UndefValue::get(IRB.getInt32Ty())};
-  auto *RdR = IRB.CreateCall(Decl, Args, "cmcl.rdr");
-  return {*RdR};
-}
-
-template <>
-std::vector<ValueRef>
-createMainInst<cmcl::BuiltinID::WrRegion>(const std::vector<ValueRef> &Operands,
-                                          Type &, IRBuilder<> &IRB) {
-  auto IID = Operands[cmcl::WrRegionOperand::Source]
-                     .get()
-                     .getType()
-                     ->getScalarType()
-                     ->isFloatingPointTy()
-                 ? GenXIntrinsic::genx_wrregionf
-                 : GenXIntrinsic::genx_wrregioni;
-  Type *Tys[] = {Operands[cmcl::WrRegionOperand::Destination].get().getType(),
-                 Operands[cmcl::WrRegionOperand::Source].get().getType(),
-                 Operands[cmcl::WrRegionOperand::Offset].get().getType(),
-                 IRB.getInt1Ty()};
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(), IID, Tys);
-  Value *Args[] = {&Operands[cmcl::WrRegionOperand::Destination].get(),
-                   &Operands[cmcl::WrRegionOperand::Source].get(),
-                   &Operands[cmcl::WrRegionOperand::VStride].get(),
-                   &Operands[cmcl::WrRegionOperand::Width].get(),
-                   &Operands[cmcl::WrRegionOperand::Stride].get(),
-                   &Operands[cmcl::WrRegionOperand::Offset].get(),
-                   UndefValue::get(IRB.getInt32Ty()),
-                   IRB.getTrue()};
-  auto *WrR = IRB.CreateCall(Decl, Args, "cmcl.wrr");
-  return {*WrR};
-}
-
-template <>
-std::vector<ValueRef>
-createMainInst<cmcl::BuiltinID::PrintfBuffer>(const std::vector<ValueRef> &,
-                                              Type &BiTy, IRBuilder<> &IRB) {
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(),
-      GenXIntrinsic::genx_print_buffer, {});
-  auto *IntPtr = IRB.CreateCall(Decl, {}, "cmcl.print.buffer");
-  auto *Ptr = IRB.CreateIntToPtr(IntPtr, &BiTy);
-  return {*Ptr};
-}
-
-template <>
-std::vector<ValueRef> createMainInst<cmcl::BuiltinID::PrintfFormatIndex>(
-    const std::vector<ValueRef> &Operands, Type &BiTy, IRBuilder<> &IRB) {
-  auto &StrPtr = Operands[cmcl::PrintfFormatIndexOperand::Source].get();
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(),
-      GenXIntrinsic::genx_print_format_index, StrPtr.getType());
-  auto *Idx = IRB.CreateCall(Decl, &StrPtr);
-  return {*Idx};
-}
-
-template <>
-std::vector<ValueRef> createMainInst<cmcl::BuiltinID::PrintfFormatIndexLegacy>(
-    const std::vector<ValueRef> &Operands, Type &BiTy, IRBuilder<> &IRB) {
-  return createMainInst<cmcl::BuiltinID::PrintfFormatIndex>(Operands, BiTy,
-                                                            IRB);
-}
-
-template <>
-std::vector<ValueRef> createMainInst<cmcl::BuiltinID::SVMScatter>(
-    const std::vector<ValueRef> &Operands, Type &BiTy, IRBuilder<> &IRB) {
-  auto Width = cast<IGCLLVM::FixedVectorType>(
-                   Operands[cmcl::SVMScatterOperand::Address].get().getType())
-                   ->getNumElements();
-  Type *Tys[] = {IGCLLVM::FixedVectorType::get(IRB.getInt1Ty(), Width),
-                 Operands[cmcl::SVMScatterOperand::Address].get().getType(),
-                 Operands[cmcl::SVMScatterOperand::Source].get().getType()};
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(),
-      GenXIntrinsic::genx_svm_scatter, Tys);
-  Value *Args[] = {IRB.CreateVectorSplat(Width, IRB.getInt1(true)),
-                   &Operands[cmcl::SVMScatterOperand::NumBlocks].get(),
-                   &Operands[cmcl::SVMScatterOperand::Address].get(),
-                   &Operands[cmcl::SVMScatterOperand::Source].get()};
-  IRB.CreateCall(Decl, Args);
-  return {};
-}
-
-template <>
-std::vector<ValueRef> createMainInst<cmcl::BuiltinID::SVMAtomicAdd>(
-    const std::vector<ValueRef> &Operands, Type &, IRBuilder<> &IRB) {
-  auto Width = cast<IGCLLVM::FixedVectorType>(
-                   Operands[cmcl::SVMAtomicAddOperand::Address].get().getType())
-                   ->getNumElements();
-  auto *SrcTy = Operands[cmcl::SVMAtomicAddOperand::Source].get().getType();
-  Type *Tys[] = {SrcTy, IGCLLVM::FixedVectorType::get(IRB.getInt1Ty(), Width),
-                 Operands[cmcl::SVMAtomicAddOperand::Address].get().getType()};
-  auto *Decl = GenXIntrinsic::getGenXDeclaration(
-      IRB.GetInsertBlock()->getParent()->getParent(),
-      GenXIntrinsic::genx_svm_atomic_add, Tys);
-  Value *Args[] = {IRB.CreateVectorSplat(Width, IRB.getInt1(true)),
-                   &Operands[cmcl::SVMAtomicAddOperand::Address].get(),
-                   &Operands[cmcl::SVMAtomicAddOperand::Source].get(),
-                   UndefValue::get(SrcTy)};
-  auto *Result = IRB.CreateCall(Decl, Args, "cmcl.svm.atomic.add");
-  return {*Result};
 }
 
 // Writes output values of created "MainInst".
 // The order of output values in \p Results:
 //    builtin return value if any, output operands in order of builtin
 //    arguments (VectorOut, VectorInOut, etc.) if any.
-template <cmcl::BuiltinID::Enum BiID>
+template <BuiltinID::Enum BiID>
 void writeBuiltinResults(const std::vector<ValueRef> &Results, CallInst &BiCall,
                          IRBuilder<> &IRB) {
   int ResultIdx = 0;
@@ -452,55 +335,33 @@ void writeBuiltinResults(const std::vector<ValueRef> &Results, CallInst &BiCall,
   }
 
   // Handle output operands.
-  for (int BiOpIdx = 0; BiOpIdx != cmcl::BuiltinOperandSize[BiID]; ++BiOpIdx)
-    if (cmcl::isOutputOperand(cmcl::BuiltinOperandKind[BiID][BiOpIdx]))
+  for (int BiOpIdx = 0; BiOpIdx != BuiltinOperandSize[BiID]; ++BiOpIdx)
+    if (isOutputOperand(BuiltinOperandKind[BiID][BiOpIdx]))
       writeVectorFromBuiltinOp(Results[ResultIdx++],
                                *BiCall.getArgOperand(BiOpIdx), IRB);
 }
 
-template <cmcl::BuiltinID::Enum BiID>
+template <BuiltinID::Enum BiID>
 static void handleBuiltinCall(CallInst &BiCall) {
   IRBuilder<> IRB{&BiCall};
 
-  auto Operands = readOperands<BiID>(BiCall, IRB);
-  auto Result = createMainInst<BiID>(Operands, *BiCall.getType(), IRB);
+  auto Operands = getTranslatedBuiltinOperands<BiID>(BiCall, IRB);
+  auto &RetTy = getTranslatedBuiltinType<BiID>(BiCall);
+  auto Result = createMainInst<BiID>(Operands, RetTy, IRB);
   writeBuiltinResults<BiID>(Result, BiCall, IRB);
 }
 
-// FIXME: autogenerate it.
-static BuiltinCallHandlerSeq getBuiltinCallHandlers() {
-  BuiltinCallHandlerSeq Handlers{cmcl::BuiltinID::Size};
-  Handlers[cmcl::BuiltinID::Select] =
-      handleBuiltinCall<cmcl::BuiltinID::Select>;
-  Handlers[cmcl::BuiltinID::RdRegion] =
-      handleBuiltinCall<cmcl::BuiltinID::RdRegion>;
-  Handlers[cmcl::BuiltinID::WrRegion] =
-      handleBuiltinCall<cmcl::BuiltinID::WrRegion>;
-  Handlers[cmcl::BuiltinID::PrintfBuffer] =
-      handleBuiltinCall<cmcl::BuiltinID::PrintfBuffer>;
-  Handlers[cmcl::BuiltinID::PrintfFormatIndex] =
-      handleBuiltinCall<cmcl::BuiltinID::PrintfFormatIndex>;
-  Handlers[cmcl::BuiltinID::PrintfFormatIndexLegacy] =
-      handleBuiltinCall<cmcl::BuiltinID::PrintfFormatIndexLegacy>;
-  Handlers[cmcl::BuiltinID::SVMScatter] =
-      handleBuiltinCall<cmcl::BuiltinID::SVMScatter>;
-  Handlers[cmcl::BuiltinID::SVMAtomicAdd] =
-      handleBuiltinCall<cmcl::BuiltinID::SVMAtomicAdd>;
-  return Handlers;
-}
-
-static bool handleBuiltin(Function &Builtin,
-                          const BuiltinCallHandlerSeq &BiCallHandlers) {
+static bool handleBuiltin(Function &Builtin) {
   assert(isCMCLBuiltin(Builtin) &&
          "wrong argument: CM-CL builtin was expected");
   if (Builtin.use_empty())
     return false;
   auto BiID = decodeBuiltin(Builtin.getName());
   for (User *Usr : Builtin.users()) {
-    assert((BiID >= 0 && BiID < static_cast<int>(BiCallHandlers.size()) &&
-            BiCallHandlers[BiID]) &&
+    assert((BiID >= 0 && BiID < BuiltinID::Size &&
+            BuiltinCallHandlers[BiID]) &&
            "no handler for such builtin ID");
-    BiCallHandlers[BiID](*cast<CallInst>(Usr));
+    BuiltinCallHandlers[BiID](*cast<CallInst>(Usr));
   }
   return true;
 }
@@ -509,9 +370,8 @@ bool cmcl::translateBuiltins(Module &M) {
   auto Builtins = collectBuiltins(M);
   if (Builtins.empty())
     return false;
-  auto BiCallHandlers = getBuiltinCallHandlers();
   for (Function &Builtin : Builtins)
-    handleBuiltin(Builtin, BiCallHandlers);
+    handleBuiltin(Builtin);
   cleanUpBuiltins(Builtins);
   return true;
 }

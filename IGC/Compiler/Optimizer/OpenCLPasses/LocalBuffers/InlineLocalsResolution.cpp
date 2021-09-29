@@ -11,7 +11,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/helper.h"
-#include "DebugInfo/DebugInfoUtils.hpp"
+#include "Compiler/DebugInfo/Utils.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -77,9 +77,8 @@ static bool useAsPointerOnly(Value* V) {
             case Instruction::PHI:
                 PN = cast<PHINode>(U);
                 // Skip if it's already visited.
-                if (VisitedPHIs.count(PN))
+                if (!VisitedPHIs.insert(PN).second)
                     continue;
-                VisitedPHIs.insert(PN);
                 // FALL THROUGH
             case Instruction::BitCast:
             case Instruction::Select:
@@ -449,14 +448,14 @@ void InlineLocalsResolution::collectInfoOnSharedLocalMem(Module& M)
     }
 
     // set debugging info, and insert mov inst.
-    IF_DEBUG_INFO(for (const auto& I : m_FuncToVarsMap))
+    for (const auto& I : m_FuncToVarsMap)
     {
-        IF_DEBUG_INFO(Function * userFunc = I.first;)
-            IF_DEBUG_INFO(for (auto G : I.second))
+        Function* userFunc = I.first;
+        for (auto* G : I.second)
         {
-            IF_DEBUG_INFO(Instruction * pInsertBefore = &(*userFunc->begin()->getFirstInsertionPt());)
-                TODO("Should inline local buffer points to origin offset 'globalVar' or to fixed offset 'pMovedPtr'?");
-            IF_DEBUG_INFO(DebugInfoUtils::UpdateGlobalVarDebugInfo(G, G, pInsertBefore, true););
+            Instruction * pInsertBefore = &(*userFunc->begin()->getFirstInsertionPt());
+            TODO("Should inline local buffer points to origin offset 'globalVar' or to fixed offset 'pMovedPtr'?");
+            Utils::UpdateGlobalVarDebugInfo(G, G, pInsertBefore, true);
         }
     }
 }

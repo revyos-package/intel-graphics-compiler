@@ -57,7 +57,7 @@ THE SOFTWARE.
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/Analysis/CFG.h>
 #include "libSPIRV/SPIRVDebugInfoExt.h"
-#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvmWrapper/Transforms/Utils/Cloning.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "libSPIRV/SPIRVAsm.h"
 #include "llvm/IR/InlineAsm.h"
@@ -97,7 +97,7 @@ isOpenCLKernel(SPIRVFunction *BF) {
 __attr_unused static void
 dumpLLVM(Module *M, const std::string &FName) {
   std::error_code EC;
-  raw_fd_ostream FS(FName, EC, sys::fs::F_None);
+  raw_fd_ostream FS(FName, EC, sys::fs::OF_None);
   if (!FS.has_error()) {
     FS << *M;
   }
@@ -944,7 +944,7 @@ public:
       DINodeArray TParams = Builder.getOrCreateArray(Elts);
       llvm::DITemplateParameterArray TParamsArray = TParams.get();
 
-      if (isa<DICompositeType>(scope) || isa<DINamespace>(scope))
+      if (isa<DICompositeType>(scope) || isa<DINamespace>(scope) || isa<DIModule>(scope))
           return addMDNode(inst, Builder.createMethod(scope, name, linkageName, file, line, type,
               isLocal, isDefinition, 0, 0, 0, nullptr, flags, isOptimized, TParamsArray));
       else
@@ -1024,7 +1024,7 @@ public:
       DINodeArray TParams = Builder.getOrCreateArray(Elts);
       llvm::DITemplateParameterArray TParamsArray = TParams.get();
       DISubprogram* diSP = nullptr;
-      if ((isa<DICompositeType>(scope) || isa<DINamespace>(scope)) && !isDefinition)
+      if ((isa<DICompositeType>(scope) || isa<DINamespace>(scope) || isa<DIModule>(scope)) && !isDefinition)
       {
           diSP = Builder.createMethod(scope, name, linkageName, file, sp.getLine(), spType, isLocal, isDefinition,
               0, 0, 0, nullptr, flags, isOptimized, TParamsArray);
@@ -1089,6 +1089,24 @@ public:
       return addMDNode(inst, createLocation(line, 0, scope, iat));
   }
 
+  // Encode a line number, a file name and a directory to a string, where a line no., file name
+  // and directory are separated by '?' character: lineNumber?fileName?directory
+  // There is a workaround for DIModule creation in earlier LLVM versions, where a line and a file
+  // parameters are not supported in DIBuilder.
+  void encodeLineAndFileForISysRoot(unsigned int line, llvm::DIFile* file, std::string& lineAndFile)
+  {
+#if LLVM_VERSION_MAJOR < 11
+      lineAndFile.append(std::to_string(line));
+      lineAndFile.append("?");
+      if (file)
+      {
+          lineAndFile.append(file->getDirectory().str());
+          lineAndFile.append("?");
+          lineAndFile.append(file->getFilename().str());
+      }
+#endif  // LLVM_VERSION_MAJOR < 11.
+  }
+
   DIModule* createModuleINTEL(SPIRVExtInst* inst)
   {
       if (auto n = getExistingNode<DIModule*>(inst))
@@ -1100,22 +1118,53 @@ public:
       auto& name = BM->get<SPIRVString>(moduleINTEL.getName())->getStr();
       auto cfgMacros = BM->get<SPIRVString>(moduleINTEL.getConfigurationMacros())->getStr();
       auto inclPath = BM->get<SPIRVString>(moduleINTEL.getIncludePath())->getStr();
-
-      ///ModuleINTELIDToDISP[funcSPIRVId] = diSP;
-#if LLVM_VERSION_MAJOR <= 10
-      llvm::StringRef iSysRoot = StringRef();  // Empty string
-      return Builder.createModule(scope, name, cfgMacros, inclPath, iSysRoot);
-#else  // LLVM_VERSION_MAJOR >= 11
       auto file = getDIFile(BM->get<SPIRVExtInst>(moduleINTEL.getSource()));
       auto line = moduleINTEL.getLine();
       auto apiNotesFile = BM->get<SPIRVString>(moduleINTEL.getAPINotesFile())->getStr();
-#if LLVM_VERSION_MAJOR == 11
-      return Builder.createModule(scope, name, cfgMacros, inclPath, apiNotesFile, file, line);
-#elif LLVM_VERSION_MAJOR >= 12
       bool isDecl = moduleINTEL.getIsDecl() ? true : false;
-      return Builder.createModule(scope, name, cfgMacros, inclPath, apiNotesFile, file, line, isDecl);
-#endif
-#endif  // LLVM_VERSION_MAJOR >= 11
+
+      std::string encodedLineAndFile = "";
+      encodeLineAndFileForISysRoot(line, file, encodedLineAndFile);
+      llvm::StringRef iSysRoot = StringRef(encodedLineAndFile);
+
+      DIModule* diModule = addMDNode(inst, Builder.createModule(scope, name, cfgMacros, inclPath, apiNotesFile, file, line, isDecl, iSysRoot));
+
+      return diModule;
+  }
+
+  DINode* createImportedEntity(SPIRVExtInst* inst, SmallVector<TrackingMDNodeRef, 4>& allImportedModules)
+  {
+      if (auto n = getExistingNode<DINode*>(inst))
+          return n;
+
+      OpDebugImportedEntity importedEntity(inst);
+
+      auto scope = createScope(BM->get<SPIRVExtInst>(importedEntity.getParent()));
+      auto file = getDIFile(BM->get<SPIRVExtInst>(importedEntity.getSource()));
+      auto line = importedEntity.getLine();
+      auto entity = importedEntity.getEntity();
+
+      DINode* diNode = nullptr;
+
+      if (BM->get<SPIRVExtInst>(entity)->getExtOp() == OCLExtOpDbgKind::ModuleINTEL)
+      {
+          auto* diModule = createModuleINTEL(BM->get<SPIRVExtInst>(entity));
+          IGC_ASSERT(diModule);
+          DIImportedEntity* IE = Builder.createImportedModule(scope, diModule, file, line);
+          diNode = addMDNode(inst, IE);
+
+          IGC_ASSERT_MESSAGE(scope, "Invalid Scope encoding!");
+          if (isa<DILocalScope>(scope))
+          {
+              allImportedModules.emplace_back(IE);
+          }
+          else
+          {
+              // TODO? ReplaceImportedEntities = true;
+          }
+      }
+
+      return diNode;
   }
 
   DIScope* createScope(SPIRVExtInst* inst)
@@ -1278,12 +1327,27 @@ public:
       {
           (void)createGlobalVar(gvar);
       }
+  }
 
-      auto moduleINTELInstructions = BM->getModuleINTELInstructions();
-      for (auto& moduleInstruction : moduleINTELInstructions)
-      {
-          (void)createModuleINTEL(moduleInstruction);
-      }
+  void transImportedEntities()
+  {
+      if (!Enable)
+          return;
+
+      DICompileUnit* CU = getCompileUnit();
+
+      auto importedEntities = BM->getImportedEntities();
+
+      SmallVector<TrackingMDNodeRef, 4> AllImportedModules;
+      for (auto& importedEntity : importedEntities)
+          (void)createImportedEntity(importedEntity, AllImportedModules);
+
+
+      if (!AllImportedModules.empty())
+          CU->replaceImportedEntities(
+              MDTuple::get(CU->getContext(), SmallVector<Metadata*, 16>(AllImportedModules.begin(), AllImportedModules.end())));
+      else
+          CU->replaceImportedEntities(nullptr);  // If there were no local scope imported entities, we can map the whole list to nullptr.
   }
 
   void transDbgInfo(SPIRVValue *SV, Value *V);
@@ -1568,8 +1632,10 @@ DIGlobalVariableExpression* SPIRVToLLVMDbgTran::createGlobalVar(SPIRVExtInst* in
     auto file = getDIFile(BM->get<SPIRVExtInst>(var.getSource()));
     auto type = createType(BM->get<SPIRVExtInst>(var.getType()));
     auto varValue = static_cast<SPIRVValue*>(BM->getEntry(var.getVariable()));
+    auto flags = var.getFlags();
+    bool isLocal = (flags & SPIRVDebug::Flag::FlagIsLocal) ? true : false;
 
-    auto globalVarMD = addMDNode(inst, Builder.createGlobalVariableExpression(ctxt, name, linkageName, file, var.getLine(), type, true));
+    auto globalVarMD = addMDNode(inst, Builder.createGlobalVariableExpression(ctxt, name, linkageName, file, var.getLine(), type, isLocal));
 
     llvm::Value* llvmValue = nullptr;
     if (varValue)
@@ -1610,7 +1676,7 @@ void SPIRVToLLVMDbgTran::transDbgInfo(SPIRVValue *SV, Value *V) {
             Line->getColumn(), scope, iat);
 
         if(scope && !isa<DIFile>(scope))
-            I->setDebugLoc(DebugLoc::get(Line->getLine(), Line->getColumn(),
+            I->setDebugLoc(DILocation::get(scope->getContext(), Line->getLine(), Line->getColumn(),
                 scope, iat));
     }
 }
@@ -1808,10 +1874,14 @@ SPIRVToLLVM::transFPType(SPIRVType* T) {
 
 std::string
 SPIRVToLLVM::transOCLImageTypeName(igc_spv::SPIRVTypeImage* ST) {
-  return std::string(kSPR2TypeName::OCLPrefix)
-       + rmap<std::string>(ST->getDescriptor())
-       + kSPR2TypeName::Delimiter
-       + rmap<std::string>(ST->getAccessQualifier());
+  return getSPIRVTypeName(
+    kSPIRVTypeName::Image,
+    getSPIRVImageTypePostfixes(
+      getSPIRVImageSampledTypeName(ST->getSampledType()),
+      ST->getDescriptor(),
+      ST->hasAccessQualifier()
+      ? ST->getAccessQualifier()
+      : AccessQualifierReadOnly));
 }
 
 std::string
@@ -1947,6 +2017,9 @@ void SPIRVToLLVM::transLLVMLoopMetadata(const Function *F) {
 
 GlobalValue::LinkageTypes
 SPIRVToLLVM::transLinkageType(const SPIRVValue* V) {
+  std::string ValueName = V->getName();
+  if (ValueName == "llvm.used" || ValueName == "llvm.compiler.used")
+    return GlobalValue::AppendingLinkage;
   if (V->getLinkageType() == LinkageTypeInternal) {
     return GlobalValue::InternalLinkage;
   }
@@ -2055,6 +2128,25 @@ SPIRVToLLVM::transType(SPIRVType *T) {
                    getOrCreateOpaquePtrType(M, "intel.buffer_rw_t",
                                             SPIRAddressSpace::SPIRAS_Global));
   }
+  case OpTypeMatrixINTEL:
+  {
+    SPIRVTypeMatrixINTEL *MT = static_cast<SPIRVTypeMatrixINTEL *>(T);
+    const char *typeName = nullptr;
+    switch (MT->getLayout()) {
+      case SPIRVTypeMatrixINTEL::LayoutPackedA:
+        typeName = "intel.joint_matrix_packedA_t";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutPackedB:
+        typeName = "intel.joint_matrix_packedB_t";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutRowMajor:
+      case SPIRVTypeMatrixINTEL::LayoutColumnMajor:
+        typeName = "intel.joint_matrix_acc_t";
+        break;
+    }
+    IGC_ASSERT_EXIT_MESSAGE(typeName, "Unsupported layout of INTEL Joint Matrix.");
+    return mapType(T, getOrCreateOpaquePtrType(M, typeName, SPIRAddressSpace::SPIRAS_Global));
+  }
   default: {
     auto OC = T->getOpCode();
     if (isOpaqueGenericTypeOpCode(OC) ||
@@ -2063,7 +2155,7 @@ SPIRVToLLVM::transType(SPIRVType *T) {
         auto name = isSubgroupAvcINTELTypeOpCode(OC) ?
             OCLSubgroupINTELTypeOpCodeMap::rmap(OC) :
             BuiltinOpaqueGenericTypeOpCodeMap::rmap(OC);
-        auto *pST = M->getTypeByName(name);
+        auto *pST = IGCLLVM::getTypeByName(M, name);
         pST = pST ? pST : StructType::create(*Context, name);
 
         return mapType(T, PointerType::get(pST, getOCLOpaqueTypeAddrSpace(OC)));
@@ -2413,7 +2505,7 @@ SPIRVToLLVM::postProcessFunctionsReturnStruct(Function *F) {
           NewArgIt->setName(OldArgIt->getName());
           VMap[&*OldArgIt] = &*NewArgIt;
       }
-      CloneFunctionInto(NewF, F, VMap, true, Returns);
+      IGCLLVM::CloneFunctionInto(NewF, F, VMap, true, Returns);
       auto DL = M->getDataLayout();
       const auto ptrSize = DL.getPointerSize();
 
@@ -2541,7 +2633,7 @@ Value *SPIRVToLLVM::promoteBool(Value *pVal, BasicBlock *BB)
 
     auto *PromoType = isa<VectorType>(pVal->getType()) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt8Ty(pVal->getContext()),
-        (unsigned)cast<VectorType>(pVal->getType())->getNumElements())) :
+        (unsigned)cast<IGCLLVM::FixedVectorType>(pVal->getType())->getNumElements())) :
         Type::getInt8Ty(pVal->getContext());
 
     if (auto *C = dyn_cast<Constant>(pVal))
@@ -2583,7 +2675,7 @@ Value *SPIRVToLLVM::truncBool(Value *pVal, BasicBlock *BB)
 
     auto *TruncType = isa<VectorType>(pVal->getType()) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt1Ty(pVal->getContext()),
-            (unsigned)cast<VectorType>(pVal->getType())->getNumElements())) :
+            (unsigned)cast<IGCLLVM::FixedVectorType>(pVal->getType())->getNumElements())) :
         Type::getInt1Ty(pVal->getContext());
 
     if (auto *C = dyn_cast<Constant>(pVal))
@@ -2629,7 +2721,7 @@ Type *SPIRVToLLVM::truncBoolType(SPIRVType *SPVType, Type *LLType)
 
     return isa<VectorType>(LLType) ?
         cast<Type>(IGCLLVM::FixedVectorType::get(Type::getInt1Ty(LLType->getContext()),
-                                   (unsigned)cast<VectorType>(LLType)->getNumElements())) :
+                                   (unsigned)cast<IGCLLVM::FixedVectorType>(LLType)->getNumElements())) :
         Type::getInt1Ty(LLType->getContext());
 }
 
@@ -2837,7 +2929,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       {
         if(CV[i]->getType()->isVectorTy())
         {
-          for(uint32_t j = 0; j < cast<VectorType>(CV[i]->getType())->getNumElements(); j++)
+          for(uint32_t j = 0; j < cast<IGCLLVM::FixedVectorType>(CV[i]->getType())->getNumElements(); j++)
           {
             Value *v = ExtractElementInst::Create( CV[i],ConstantInt::get( *Context,APInt( 32,j ) ),BCC->getName(),BB );
             elm1 = CreateCompositeConstruct( elm1,v,pos++ );
@@ -3508,7 +3600,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
       auto Vector = transValue(BI->getOperand(0), F, BB);
       auto Scalar = transValue(BI->getOperand(1), F, BB);
 
-      auto VecType = cast<VectorType>(Vector->getType());
+      auto VecType = cast<IGCLLVM::FixedVectorType>(Vector->getType());
       auto Undef   = UndefValue::get(VecType);
 
       auto ScalarVec = InsertElementInst::Create(Undef, Scalar,
@@ -3533,7 +3625,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
           a->getType()->getScalarSizeInBits() - 1);
       auto *ShiftOp = isa<VectorType>(a->getType()) ?
           ConstantVector::getSplat(
-              IGCLLVM::getElementCount((unsigned)cast<VectorType>(a->getType())->getNumElements()), ShiftAmt) :
+              IGCLLVM::getElementCount((unsigned)cast<IGCLLVM::FixedVectorType>(a->getType())->getNumElements()), ShiftAmt) :
           ShiftAmt;
 
       // OCL C:
@@ -3577,6 +3669,199 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     // It is planned to be translated into @llvm.arithmetic.fence.f64 in the future.
     auto* BC = static_cast<SPIRVUnary*>(BV);
     return mapValue(BV, transValue(BC->getOperand(0), F, BB));
+  }
+  case OpMatrixLoadINTEL: {
+    SPIRVMatrixLoadINTEL *ML = static_cast<SPIRVMatrixLoadINTEL *>(BV);
+    std::vector<SPIRVValue *> BArgs = ML->getOperands();
+    enum SPVIdx { Pointer, Stride, Layout, Scope, MemOp };
+
+    SPIRVTypeMatrixINTEL *MatTy = static_cast<SPIRVTypeMatrixINTEL *>(ML->getType());
+    const unsigned loadLayout = (unsigned)BM->get<SPIRVConstant>(BArgs[Layout]->getId())->getZExtIntValue();
+
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
+
+    /* Get arugment values for the intrinsic call */
+    Value *PtrVal = transValue(BArgs[Pointer], F, BB);
+    Value *StrideVal = transValue(BArgs[Stride], F, BB);
+
+    unsigned AS = static_cast<PointerType *>(PtrVal->getType())->getAddressSpace();
+    /* Prepare types for the call: */
+    Type *RetTy      = transType(MatTy);
+    Type *PtrTy      = PointerType::get(Type::getInt8Ty(*Context), AS);
+    Type *StrideTy   = Type::getInt32Ty(*Context);
+    Type *ElemTypeTy = Type::getInt32Ty(*Context);
+    Type *LayoutTy   = Type::getInt32Ty(*Context);
+    Type *SizeTy     = Type::getInt32Ty(*Context);
+
+    std::vector<Type *> ArgTys = {
+      PtrTy, StrideTy, LayoutTy, ElemTypeTy, SizeTy, SizeTy
+    };
+    FunctionType *builtinTy = FunctionType::get(RetTy, ArgTys, false);
+
+    /* Cast if necessary and prepare rest of the arguments: */
+    CastInst *Ptr = CastInst::CreatePointerCast(PtrVal, PtrTy, "", BB);
+    if (StrideVal->getType() != StrideTy) {
+      IGC_ASSERT_MESSAGE(StrideVal->getType()->isIntegerTy(), 
+          "Unspupported matrix stide type in load instruction.");
+      StrideVal = CastInst::CreateIntegerCast(StrideVal, StrideTy, false, "stride", Ptr);
+    }
+    
+    Value *LoadLayoutVal  = ConstantInt::get(LayoutTy, loadLayout);
+    Value *ElementTypeVal = ConstantInt::get(ElemTypeTy, MatTy->getElementTypeFlags());
+    Value *RowsVal        = ConstantInt::get(SizeTy, MatTy->getRows());
+    Value *ColumnsVal     = ConstantInt::get(SizeTy, MatTy->getColumns());
+
+    /* Get function to call */
+    const char *suffix = nullptr;
+    switch (MatTy->getLayout()) {
+      case SPIRVTypeMatrixINTEL::LayoutPackedA:
+        suffix = "_PackedA";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutPackedB:
+        suffix = "_PackedB";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutRowMajor:
+      case SPIRVTypeMatrixINTEL::LayoutColumnMajor:
+        suffix = "_Accumulator";
+        break;
+    }
+    IGC_ASSERT_MESSAGE(suffix, "Unsupported layout type for INTEL Joint Matrix.");
+    auto BI = static_cast<SPIRVInstruction *>(BV);
+    std::string builtinName(getSPIRVBuiltinName(BV->getOpCode(), BI, ArgTys, suffix));
+    Function *Func = cast<Function>(M->getOrInsertFunction(builtinName, builtinTy));
+
+    std::vector<Value *> Args = {
+      Ptr, StrideVal, LoadLayoutVal, ElementTypeVal, RowsVal, ColumnsVal 
+    };
+    CallInst *CI = CallInst::Create(Func, Args, "matrix", BB);
+    return mapValue(BV, CI);
+  }
+  case OpMatrixStoreINTEL: {
+    SPIRVMatrixStoreINTEL *MS = static_cast<SPIRVMatrixStoreINTEL *>(BV);
+    std::vector<SPIRVValue *> BArgs = MS->getOperands();
+    enum SPVIdx { Pointer, Object, Stride, Layout, Scope, MemOp };
+
+    SPIRVTypeMatrixINTEL *MatTy = static_cast<SPIRVTypeMatrixINTEL *>(BArgs[Object]->getType());
+    const unsigned storeLayout = (unsigned)BM->get<SPIRVConstant>(BArgs[Layout]->getId())->getZExtIntValue();
+
+    IGC_ASSERT_MESSAGE(BB, "Invalid BB");
+
+    /* Get arugment values for the intrinsic call */
+    Value *MatrixVal = transValue(BArgs[Object], F, BB);
+    Value *PtrVal    = transValue(BArgs[Pointer], F, BB);
+    Value *StrideVal = transValue(BArgs[Stride], F, BB);
+
+    unsigned AS = static_cast<PointerType *>(PtrVal->getType())->getAddressSpace();
+    /* Prepare types for the call: */
+    Type *MatrixTy   = transType(MatTy);
+    Type *PtrTy      = PointerType::get(Type::getInt8Ty(*Context), AS);
+    Type *StrideTy   = Type::getInt32Ty(*Context);
+    Type *ElemTypeTy = Type::getInt32Ty(*Context);
+    Type *LayoutTy   = Type::getInt32Ty(*Context);
+    Type *SizeTy     = Type::getInt32Ty(*Context);
+
+    std::vector<Type *> ArgTys = {
+      PtrTy, MatrixTy, StrideTy, LayoutTy, ElemTypeTy, SizeTy, SizeTy
+    };
+    FunctionType *builtinTy = FunctionType::get(Type::getVoidTy(*Context), ArgTys, false);
+
+    /* Cast if necessary and prepare rest of the arguments: */
+    CastInst *Ptr = CastInst::CreatePointerCast(PtrVal, PtrTy, "", BB);
+    if (StrideVal->getType() != StrideTy) {
+      IGC_ASSERT_MESSAGE(StrideVal->getType()->isIntegerTy(), 
+          "Unspupported matrix stide type in store instruction.");
+      StrideVal = CastInst::CreateIntegerCast(StrideVal, StrideTy, false, "stride", Ptr);
+    }
+
+    Value *StoreLayoutVal = ConstantInt::get(LayoutTy, storeLayout);
+    Value *ElementTypeVal = ConstantInt::get(ElemTypeTy, MatTy->getElementTypeFlags());
+    Value *RowsVal        = ConstantInt::get(SizeTy, MatTy->getRows());
+    Value *ColumnsVal     = ConstantInt::get(SizeTy, MatTy->getColumns());
+
+    /* Get function to call */
+    const char *suffix = nullptr;
+    switch (MatTy->getLayout()) {
+      case SPIRVTypeMatrixINTEL::LayoutPackedA:
+        suffix = "_PackedA";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutPackedB:
+        suffix = "_PackedB";
+        break;
+      case SPIRVTypeMatrixINTEL::LayoutRowMajor:
+      case SPIRVTypeMatrixINTEL::LayoutColumnMajor:
+        suffix = "_Accumulator";
+        break;
+    }
+    IGC_ASSERT_MESSAGE(suffix, "Unsupported layout type for INTEL Joint Matrix.");
+    auto BI = static_cast<SPIRVInstruction *>(BV);
+    std::string builtinName(getSPIRVBuiltinName(BV->getOpCode(), BI, ArgTys, suffix));
+    Function *Func = cast<Function>(M->getOrInsertFunction(builtinName, builtinTy));
+
+    std::vector<Value *> Args = {
+      Ptr, MatrixVal, StrideVal, StoreLayoutVal, ElementTypeVal, RowsVal, ColumnsVal
+    };
+    CallInst *CI = CallInst::Create(Func, Args, "", BB);
+    return mapValue(BV, CI);
+  }
+  case OpMatrixMadINTEL: {
+    SPIRVMatrixMadINTEL *MM = static_cast<SPIRVMatrixMadINTEL *>(BV);
+    std::vector<SPIRVValue *> BArgs = MM->getOperands();
+    enum SPVIdx { A, B, C, Scope };
+
+    auto *MatATy = static_cast<SPIRVTypeMatrixINTEL *>(BArgs[A]->getType());
+    auto *MatBTy = static_cast<SPIRVTypeMatrixINTEL *>(BArgs[B]->getType());
+    auto *MatCTy = static_cast<SPIRVTypeMatrixINTEL *>(BArgs[C]->getType());
+
+    auto *ResMatTy = static_cast<SPIRVTypeMatrixINTEL *>(MM->getType());
+
+    const unsigned sizeM = MatATy->getRows();
+    const unsigned sizeK = MatATy->getColumns();
+    const unsigned sizeN = MatBTy->getColumns();
+
+    IGC_ASSERT(sizeM == MatCTy->getRows());
+    IGC_ASSERT(sizeN == MatCTy->getColumns());
+    IGC_ASSERT(sizeK == MatBTy->getRows());
+
+    IGC_ASSERT(ResMatTy->getRows()    == MatCTy->getRows());
+    IGC_ASSERT(ResMatTy->getColumns() == MatCTy->getColumns());
+
+    Type *RetTy  = transType(ResMatTy);
+    Type *ATy    = transType(MatATy);
+    Type *BTy    = transType(MatBTy);
+    Type *CTy    = transType(MatCTy);
+    Type *ElemTypeTy = Type::getInt32Ty(*Context);
+    Type *SizeTy = Type::getInt32Ty(*Context);
+
+    std::vector<Type *> ArgTys = {
+      ATy, ElemTypeTy, SizeTy, SizeTy,
+      BTy, ElemTypeTy, SizeTy, SizeTy,
+      CTy, ElemTypeTy, SizeTy, SizeTy
+    };
+    FunctionType *builtinTy = FunctionType::get(RetTy, ArgTys, false);
+
+    auto BI = static_cast<SPIRVInstruction *>(BV);
+    std::string builtinName(getSPIRVBuiltinName(BV->getOpCode(), BI, ArgTys, ""));
+    Function *Func = cast<Function>(M->getOrInsertFunction(builtinName, builtinTy));
+
+    std::vector<Value *> Args = {
+      /* Matrix A */
+      transValue(BArgs[A], F, BB),
+      ConstantInt::get(ElemTypeTy, MatATy->getElementTypeFlags()),
+      ConstantInt::get(SizeTy, MatATy->getRows()),
+      ConstantInt::get(SizeTy, MatATy->getColumns()),
+      /* Matrix B */
+      transValue(BArgs[B], F, BB),
+      ConstantInt::get(ElemTypeTy, MatBTy->getElementTypeFlags()),
+      ConstantInt::get(SizeTy, MatBTy->getRows()),
+      ConstantInt::get(SizeTy, MatBTy->getColumns()),
+      /* Matrix C */
+      transValue(BArgs[C], F, BB),
+      ConstantInt::get(ElemTypeTy, MatCTy->getElementTypeFlags()),
+      ConstantInt::get(SizeTy, MatCTy->getRows()),
+      ConstantInt::get(SizeTy, MatCTy->getColumns()),
+    };
+    CallInst *CI = CallInst::Create(Func, Args, "matrix", BB);
+    return mapValue(BV, CI);
   }
   default: {
     auto OC = BV->getOpCode();
@@ -3823,7 +4108,6 @@ SPIRVToLLVM::transSPIRVBuiltinFromInst(SPIRVInstruction *BI, BasicBlock *BB) {
       }
       suffix += rounding_string;
   }
-
   std::vector<Type*> ArgTys;
   for (auto &v : operands)
   {
@@ -3840,27 +4124,31 @@ SPIRVToLLVM::transSPIRVBuiltinFromInst(SPIRVInstruction *BI, BasicBlock *BB) {
   // OpImageRead:              Image  | Image Type | Coordinate
 
   // Look for opaque image pointer operands and convert it with an i64 type
-  for (auto i = 0U; i < BI->getOperands().size(); i++) {
+  bool convertImageToI64 = (OC != OpSubgroupImageBlockReadINTEL && OC != OpSubgroupImageBlockWriteINTEL);
 
-      SPIRVValue* imagePtr = BI->getOperands()[i];
+  if (convertImageToI64)
+  {
+      for (auto i = 0U; i < BI->getOperands().size(); i++) {
 
-      if (imagePtr->getType()->isTypeImage())
-      {
-          IGC_ASSERT(isa<PointerType>(transType(imagePtr->getType())));
+          SPIRVValue* imagePtr = BI->getOperands()[i];
 
-          Value *ImageArgVal = llvm::PtrToIntInst::Create(
-              Instruction::PtrToInt,
-              transValue(imagePtr, BB->getParent(), BB),
-              Type::getInt64Ty(*Context),
-              "ImageArgVal",
-              BB);
+          if (imagePtr->getType()->isTypeImage())
+          {
+              IGC_ASSERT(isa<PointerType>(transType(imagePtr->getType())));
 
-          // replace opaque pointer type with i64 type
-          IGC_ASSERT(ArgTys[i] == transType(imagePtr->getType()));
-          ArgTys[i] = ImageArgVal->getType();
-          operands[i] = ImageArgVal;
+              Value* ImageArgVal = llvm::PtrToIntInst::Create(
+                  Instruction::PtrToInt,
+                  transValue(imagePtr, BB->getParent(), BB),
+                  Type::getInt64Ty(*Context),
+                  "ImageArgVal",
+                  BB);
+
+              // replace opaque pointer type with i64 type
+              IGC_ASSERT(ArgTys[i] == transType(imagePtr->getType()));
+              ArgTys[i] = ImageArgVal->getType();
+              operands[i] = ImageArgVal;
+          }
       }
-
   }
 
   if (isImageOpCode(OC))
@@ -3887,15 +4175,15 @@ SPIRVToLLVM::transSPIRVBuiltinFromInst(SPIRVInstruction *BI, BasicBlock *BB) {
               "",
               BB);
       }
-      else if (cast<VectorType>(coordType)->getNumElements() != 4)
+      else if (cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements() != 4)
       {
           Value *undef = UndefValue::get(coordType);
 
           SmallVector<Constant*, 4> shuffleIdx;
-          for (unsigned i = 0; i < cast<VectorType>(coordType)->getNumElements(); i++)
+          for (unsigned i = 0; i < cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements(); i++)
               shuffleIdx.push_back(ConstantInt::get(Type::getInt32Ty(*Context), i));
 
-          for (uint64_t i = (unsigned)cast<VectorType>(coordType)->getNumElements(); i < 4; i++)
+          for (uint64_t i = (unsigned)cast<IGCLLVM::FixedVectorType>(coordType)->getNumElements(); i < 4; i++)
               shuffleIdx.push_back(ConstantInt::get(Type::getInt32Ty(*Context), 0));
 
           imageCoordinateWiden = new ShuffleVectorInst(
@@ -3914,8 +4202,10 @@ SPIRVToLLVM::transSPIRVBuiltinFromInst(SPIRVInstruction *BI, BasicBlock *BB) {
       }
   }
 
-  if ((OC == OpImageQuerySizeLod) ||
-      (OC == OpImageQuerySize))
+  if (OC == OpImageQuerySizeLod ||
+      OC == OpImageQuerySize ||
+      OC == OpSubgroupBlockReadINTEL ||
+      OC == OpSubgroupImageBlockReadINTEL)
   {
       hasReturnTypeInTypeList = true;
   }
@@ -4020,6 +4310,8 @@ SPIRVToLLVM::translate() {
     return false;
 
   DbgTran.transGlobals();
+
+  DbgTran.transImportedEntities();
 
   DbgTran.finalize();
   return true;
@@ -4391,9 +4683,7 @@ SPIRVToLLVM::transOCLVectorLoadStore(std::string& UnmangledName,
   if (UnmangledName.find("vload") == 0 &&
       UnmangledName.find("n") != std::string::npos) {
     if (BArgs.back() > 1) {
-      std::stringstream SS;
-      SS << BArgs.back();
-      UnmangledName.replace(UnmangledName.find("n"), 1, SS.str());
+      UnmangledName.replace(UnmangledName.find("n"), 1, std::to_string(BArgs.back()));
     } else {
       UnmangledName.erase(UnmangledName.find("n"), 1);
     }
@@ -4402,9 +4692,7 @@ SPIRVToLLVM::transOCLVectorLoadStore(std::string& UnmangledName,
       auto T = BM->getValueType(BArgs[0]);
       if (T->isTypeVector()) {
         auto W = T->getVectorComponentCount();
-        std::stringstream SS;
-        SS << W;
-        UnmangledName.replace(UnmangledName.find("n"), 1, SS.str());
+        UnmangledName.replace(UnmangledName.find("n"), 1, std::to_string(W));
       } else {
         UnmangledName.erase(UnmangledName.find("n"), 1);
       }

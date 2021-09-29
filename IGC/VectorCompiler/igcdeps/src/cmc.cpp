@@ -217,26 +217,33 @@ void CMKernel::createConstArgumentAnnotation(unsigned argNo,
         payloadPosition, sizeInBytes, argNo);
 }
 
-// TODO: this is incomplete.
-void CMKernel::createSamplerAnnotation(unsigned argNo)
+// TODO: this is incomplete. Media sampler types are not supported now.
+void CMKernel::createSamplerAnnotation(unsigned argNo, unsigned BTI)
 {
     iOpenCL::SAMPLER_OBJECT_TYPE samplerType;
     samplerType = iOpenCL::SAMPLER_OBJECT_TEXTURE;
 
+    // No bindless support yet.
+    constexpr int PayloadPosition = 0;
+    constexpr int ArgSize = 0;
+
     auto samplerArg = std::make_unique<iOpenCL::SamplerArgumentAnnotation>();
     samplerArg->SamplerType = samplerType;
     samplerArg->ArgumentNumber = argNo;
-    samplerArg->SamplerTableIndex = 0;
+    samplerArg->SamplerTableIndex = BTI;
     samplerArg->LocationIndex = 0;
     samplerArg->LocationCount = 0;
     samplerArg->IsBindlessAccess = false;
     samplerArg->IsEmulationArgument = false;
-    samplerArg->PayloadPosition = 0;
+    samplerArg->PayloadPosition = PayloadPosition;
 
     m_kernelInfo.m_samplerArgument.push_back(std::move(samplerArg));
 
-    if (IGC_IS_FLAG_ENABLED(EnableZEBinary))
-        IGC_ASSERT_MESSAGE(0, "not yet supported for L0 binary");
+    constexpr auto ZeAddrMode = zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
+    constexpr auto ZeAccessType = zebin::PreDefinedAttrGetter::ArgAccessType::readwrite;
+
+    zebin::ZEInfoBuilder::addPayloadArgumentSampler(m_kernelInfo.m_zePayloadArgs,
+       PayloadPosition, ArgSize, argNo, BTI, ZeAddrMode, ZeAccessType);
 }
 
 void CMKernel::createImageAnnotation(unsigned argNo, unsigned BTI,
@@ -566,7 +573,7 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::Sampler:
-      Kernel.createSamplerAnnotation(Arg.getIndex());
+      Kernel.createSamplerAnnotation(Arg.getIndex(), Arg.getBTI());
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::Image1D:
@@ -590,11 +597,12 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       break;
     case ArgKind::PrivateBase:
       if (Info.getStatelessPrivMemSize() != 0) {
+        auto PrivMemSize = Info.getStatelessPrivMemSize();
         Kernel.createPrivateBaseAnnotation(Arg.getIndex(), Arg.getSizeInBytes(),
                                            ArgOffset, Arg.getBTI(),
-                                           Info.getStatelessPrivMemSize());
+                                           PrivMemSize);
         Kernel.m_kernelInfo.m_executionEnivronment
-            .PerThreadPrivateOnStatelessSize = Info.getStatelessPrivMemSize();
+            .PerThreadPrivateOnStatelessSize = PrivMemSize;
         Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       }
       break;

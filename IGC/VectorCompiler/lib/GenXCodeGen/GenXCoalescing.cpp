@@ -197,6 +197,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/Debug.h"
 
 #include <algorithm>
+#include <map>
 #include <vector>
 
 using namespace llvm;
@@ -317,13 +318,16 @@ namespace {
     std::vector<Candidate> NormalCandidates;
     std::vector<CallInst*> Callables;
     std::vector<CopyData> ToCopy;
+    std::map<SimpleValue, Value*> CallToRetVal;
     std::unordered_map<Instruction *, Value *> CopyCoalesced;
 
   public:
     static char ID;
     explicit GenXCoalescing() : FunctionGroupPass(ID) {}
-    virtual StringRef getPassName() const { return "GenX coalescing and copy insertion"; }
-    void getAnalysisUsage(AnalysisUsage &AU) const {
+    StringRef getPassName() const override {
+      return "GenX coalescing and copy insertion";
+    }
+    void getAnalysisUsage(AnalysisUsage &AU) const override {
       FunctionGroupPass::getAnalysisUsage(AU);
       AU.addRequired<GenXLiveness>();
       AU.addRequired<GenXGroupBaling>();
@@ -340,11 +344,13 @@ namespace {
       AU.addPreserved<FunctionGroupAnalysis>();
       AU.setPreservesCFG();
     }
-    bool runOnFunctionGroup(FunctionGroup &FG);
+    bool runOnFunctionGroup(FunctionGroup &FG) override;
     // createPrinterPass : get a pass to print the IR, together with the GenX
     // specific analyses
-    virtual Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const
-    { return createGenXGroupPrinterPass(O, Banner); }
+    Pass *createPrinterPass(raw_ostream &O,
+                            const std::string &Banner) const override {
+      return createGenXGroupPrinterPass(O, Banner);
+    }
 
     void visitPHINode(PHINode &Phi);
     void visitCallInst(CallInst &CI);
@@ -508,6 +514,7 @@ bool GenXCoalescing::runOnFunctionGroup(FunctionGroup &FG)
   CopyCandidates.clear();
   NormalCandidates.clear();
   Callables.clear();
+  CallToRetVal.clear();
   ToCopy.clear();
   CopyCoalesced.clear();
   return true;
@@ -620,11 +627,10 @@ void GenXCoalescing::visitGenXIntrinsicInst(GenXIntrinsicInst &II) {
  * participate in load/store only, so no coalescing is possible anyway.
  */
 void GenXCoalescing::visitCastInst(CastInst &CI) {
-  // TODO: replace with no-op cast check
-  if (!isa<BitCastInst>(CI))
+  if (!genx::isNoopCast(&CI))
     return;
-  IGC_ASSERT_MESSAGE(!isa<StructType>(CI.getDestTy()), "not expecting bitcast to struct");
-  IGC_ASSERT_MESSAGE(!isa<StructType>(CI.getSrcTy()), "not expecting bitcast from struct");
+  IGC_ASSERT_MESSAGE(!isa<StructType>(CI.getDestTy()), "not expecting cast to struct");
+  IGC_ASSERT_MESSAGE(!isa<StructType>(CI.getSrcTy()), "not expecting cast from struct");
   if (GenXLiveness::wrapsAround(CI.getOperand(0), &CI))
     recordNormalCandidate(&CI, 0);
   else {
@@ -932,8 +938,9 @@ void GenXCoalescing::processCandidate(const Candidate &Cand, bool IsCopy)
       // def of SourceLR but after it.
       if (!Liveness->copyInterfere(SourceLR, DestLR)) {
         Liveness->coalesce(DestLR, SourceLR, /*DisallowCASC=*/ false);
-        if (auto *BCI = dyn_cast<BitCastInst>(Dest.getValue())) {
-          CopyCoalesced[BCI] = Source.getValue();
+        if (auto *CI = dyn_cast<CastInst>(Dest.getValue());
+            CI && genx::isNoopCast(CI)) {
+          CopyCoalesced[CI] = Source.getValue();
         }
         return;
       }
@@ -1025,7 +1032,8 @@ void GenXCoalescing::processCandidate(const Candidate &Cand, bool IsCopy)
     return; // Return value pre-copy, defer copy insertion
   if (!Cand.UseInDest)
     return; // Return value post-copy, defer copy insertion
-  if (isa<BitCastInst>(Dest.getValue()) || isa<AddrSpaceCastInst>(Dest.getValue())) {
+  if (auto *CI = dyn_cast<CastInst>(Dest.getValue());
+      CI && genx::isNoopCast(CI)) {
     // A bitcast is normally copy coalesced, which means it cannot fail to
     // coalesce. However, if the source is a phi node and the destination
     // wraps round the loop and is used in another phi node in the same
@@ -1033,8 +1041,8 @@ void GenXCoalescing::processCandidate(const Candidate &Cand, bool IsCopy)
     // try to normal coalesce, which fails because they interfere.
     // This happens with a bitcast inserted in GenXLiveRanges to resolve
     // an overlapping circular phi, but can happen in other cases too.
-    if ((int)genx::exactLog2(
-          Dest.getValue()->getType()->getPrimitiveSizeInBits()) <= 8) {
+    unsigned TySz = genx::getTypeSize<genx::ByteBits>(Dest.getValue()->getType(), DL);
+    if (isPowerOf2_32(TySz) && TySz <= ST->getGRFWidth()) {
       // This is a bitcast with a legal size for a single copy. We do not
       // insert a copy, because GenXCisaBuilder will generate one.
       // (GenXLegalization does not legalize a bitcast, so it can be
@@ -1399,9 +1407,10 @@ void GenXCoalescing::processCalls(FunctionGroup *FG)
           showCoalesceFail(SimpleValue(CI, StructIdx), CI->getDebugLoc(),
                            "ret postcopy", DestLR, SourceLR);
           unsigned Num = Numbering->getRetPostCopyNumber(CI, StructIdx);
+          SimpleValue Source(CI, StructIdx);
           Instruction *NewCopy =
-              insertCopy(SimpleValue(CI, StructIdx), DestLR, InsertBefore,
-                         "retval.postcopy", Num);
+              insertCopy(Source, DestLR, InsertBefore, "retval.postcopy", Num);
+          CallToRetVal[Source] = NewCopy;
           IGC_ASSERT(NewCopy);
           if (AllUsesAreExtract) {
             // For a struct ret value where all the uses are non-struct
@@ -2038,6 +2047,9 @@ SortedCopies GenXCoalescing::getSortedCopyData() {
 Instruction *GenXCoalescing::createCopy(const CopyData &CD) {
   LiveRange *DestLR = Liveness->getLiveRange(CD.Dest);
   LiveRange *SourceLR = Liveness->getLiveRange(CD.Source);
+  SimpleValue Source = CD.Source;
+  if (auto It = CallToRetVal.find(Source); It != CallToRetVal.end())
+    Source = SimpleValue{It->second};
   Instruction *NewCopy = nullptr;
   switch (CD.CopyT) {
   case PHICOPY:
@@ -2051,7 +2063,7 @@ Instruction *GenXCoalescing::createCopy(const CopyData &CD) {
             : Numbering->getNumber(CD.InsertPoint);
     showCoalesceFail(CD.Dest, CD.InsertPoint->getDebugLoc(), "phi", DestLR,
                      SourceLR);
-    NewCopy = insertCopy(CD.Source, DestLR, CD.InsertPoint, "phicopy", Num);
+    NewCopy = insertCopy(Source, DestLR, CD.InsertPoint, "phicopy", Num);
     Phi->setIncomingValue(CD.UseInDest->getOperandNo(), NewCopy);
     break;
   }
@@ -2062,7 +2074,7 @@ Instruction *GenXCoalescing::createCopy(const CopyData &CD) {
     Instruction *DestInst = cast<Instruction>(CD.Dest.getValue());
     showCoalesceFail(CD.Dest, DestInst->getDebugLoc(), "two address", DestLR,
                      SourceLR);
-    NewCopy = insertCopy(CD.Source, DestLR, DestInst, "twoaddr",
+    NewCopy = insertCopy(Source, DestLR, DestInst, "twoaddr",
                          Numbering->getNumber(DestInst) - 1);
     NewCopy =
         insertIntoStruct(CD.Dest.getValue()->getType(), CD.Dest.getIndex(),

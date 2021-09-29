@@ -38,6 +38,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+
 #include "Probe/Assertion.h"
 
 using namespace llvm;
@@ -155,8 +157,6 @@ bool GenXVisaRegAlloc::runOnFunctionGroup(FunctionGroup &FGArg)
     report_fatal_error("Too many vISA sampler registers");
   if (CurrentRegId[RegCategory::SURFACE] > VISA_MAX_SURFACE_REGS)
     report_fatal_error("Too many vISA surface registers");
-  if (CurrentRegId[RegCategory::VME] > VISA_MAX_VME_REGS)
-    report_fatal_error("Too many vISA VME registers");
   return false;
 }
 
@@ -536,13 +536,17 @@ void GenXVisaRegAlloc::extraCoalescing()
             continue;
           if (Operand->getType() != Inst->getType())
             continue;
-          // Do not coalesce with kernel arguments as they are input variables.
-          if (FG->getHead() == F && isa<Argument>(Operand))
-            continue;
           if (isRestrictedByVisa(GenXIntrinsic::getGenXIntrinsicID(Inst), oi))
             continue;
           auto OperandLR = Liveness->getLiveRangeOrNull(Operand);
           if (!OperandLR || OperandLR->Category != RegCategory::GENERAL)
+            continue;
+          // Do not coalesce with kernel arguments as they are input variables
+          // (after coalescing alignment requirements can become stricter, and
+          // kernel arguments have already fixed alignment).
+          if (FG->getHead() == F &&
+              std::any_of(OperandLR->value_begin(), OperandLR->value_end(),
+                [](AssertingSV SV) { return isa<Argument>(SV.getValue()); }))
             continue;
           if (Liveness->interfere(LR, OperandLR))
             continue;
@@ -580,7 +584,7 @@ void GenXVisaRegAlloc::allocReg(LiveRange *LR) {
   }
   IGC_ASSERT(!Ty->isVoidTy());
   if (LR->Category == RegCategory::PREDICATE) {
-    VectorType *VT = dyn_cast<VectorType>(Ty);
+    auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
     IGC_ASSERT_MESSAGE((!VT || genx::exactLog2(VT->getNumElements()) >= 0),
       "invalid predicate width");
     (void)VT;
@@ -593,7 +597,7 @@ void GenXVisaRegAlloc::allocReg(LiveRange *LR) {
   for (LiveRange::value_iterator vi = LR->value_begin(), ve = LR->value_end();
        vi != ve; ++vi) {
     for (auto &F : LR->Funcs) {
-      if (FGA->getGroup(F) == FG) {
+      if (FGA->getAnyGroup(F) == FG) {
         IGC_ASSERT(RegMap.count(F) > 0);
         LLVM_DEBUG(dbgs() << "Allocating reg " << NewReg->Num << " for "
                           << *(vi->getValue()) << " in func " << F->getName()
@@ -734,7 +738,7 @@ TypeDetails::TypeDetails(const DataLayout &DL, Type *Ty, Signedness Signed)
     : DL(DL) {
   Type *ElementTy = Ty;
   NumElements = 1;
-  if (VectorType *VT = dyn_cast<VectorType>(ElementTy)) {
+  if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(ElementTy)) {
     ElementTy = VT->getElementType();
     NumElements = VT->getNumElements();
   }
@@ -947,7 +951,6 @@ void GenXVisaRegAlloc::Reg::print(raw_ostream &OS) const
     case RegCategory::PREDICATE: OS << "p"; break;
     case RegCategory::SAMPLER: OS << "s"; break;
     case RegCategory::SURFACE: OS << "t"; break;
-    case RegCategory::VME: OS << "vme"; break;
     default: OS << "?"; break;
   }
   OS << Num;

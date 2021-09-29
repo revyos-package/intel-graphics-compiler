@@ -145,10 +145,6 @@ void CPixelShader::AllocatePSPayload()
         for (uint i = 0; i < GetR1()->GetNumberInstance(); i++)
         {
             AllocateInput(GetR1(), offset, i, forceLiveOut);
-            for (auto R1Lo: GetR1Lo()) {
-                AllocateInput(R1Lo, offset, i, forceLiveOut);
-            }
-
             offset += getGRFSize();
         }
     }
@@ -285,7 +281,7 @@ void CPixelShader::AllocatePSPayload()
                 }
             }
 
-            AllocateInput(setup[i], offset + subRegOffset);
+            AllocateInput(setup[i], offset + subRegOffset, 0, forceLiveOut);
 
             if (m_Signature)
             {
@@ -1486,23 +1482,22 @@ void CodeGen(PixelShaderContext* ctx)
         pMdUtils = ctx->getMetaDataUtils();
     }
 
-    if (coarsePhase && pixelPhase)
-   {
-        CShaderProgram::KernelShaderMap coarseShaders;
-        CShaderProgram::KernelShaderMap pixelShaders;
+    bool codegenDone = false;
 
+    CShaderProgram::KernelShaderMap coarseShaders;
+    CShaderProgram::KernelShaderMap pixelShaders;
+
+    if (coarsePhase && pixelPhase)
+    {
         // Cancelling staged compilation for multi stage PS.
         ctx->m_CgFlag = FLAG_CG_ALL_SIMDS;
 
         //Multi stage PS, need to do separate compiler and link them
         unsigned int numStage = 2;
         PSSignature signature;
-        SPixelShaderKernelProgram outputs[2];
         FunctionInfoMetaDataHandle coarseFI, pixelFI;
         coarseFI = pMdUtils->getFunctionsInfoItem(coarsePhase);
         pixelFI = pMdUtils->getFunctionsInfoItem(pixelPhase);
-
-        memset(&outputs, 0, 2 * sizeof(SPixelShaderKernelProgram));
 
         for (unsigned int i = 0; i < numStage; i++)
         {
@@ -1526,6 +1521,8 @@ void CodeGen(PixelShaderContext* ctx)
             }
         }
 
+        codegenDone = true;
+
 
         for (unsigned int i = 0; i < numStage; i++)
         {
@@ -1534,35 +1531,82 @@ void CodeGen(PixelShaderContext* ctx)
                 mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
 
             CShaderProgram::KernelShaderMap& shaders = (i == 0) ? coarseShaders : pixelShaders;
-
-            shaders[phaseFunc]->FillProgram(&outputs[i]);
-            COMPILER_SHADER_STATS_PRINT(shaders[phaseFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");
-            COMPILER_SHADER_STATS_SUM(ctx->m_sumShaderStats, shaders[phaseFunc]->m_shaderStats, ShaderType::PIXEL_SHADER);
-            COMPILER_SHADER_STATS_DEL(shaders[phaseFunc]->m_shaderStats);
-            delete shaders[phaseFunc];
+            CPixelShader* simd8Shader = static_cast<CPixelShader*>(shaders[phaseFunc]->GetShader(SIMDMode::SIMD8));
+            CPixelShader* simd16Shader = static_cast<CPixelShader*>(shaders[phaseFunc]->GetShader(SIMDMode::SIMD16));
+            CPixelShader* simd32Shader = static_cast<CPixelShader*>(shaders[phaseFunc]->GetShader(SIMDMode::SIMD32));
+            if (!((simd8Shader && simd8Shader->ProgramOutput()->m_programBin) ||
+                (simd16Shader && simd16Shader->ProgramOutput()->m_programBin) ||
+                (simd32Shader && simd32Shader->ProgramOutput()->m_programBin)
+                ))
+            {
+                shaders[phaseFunc]->DeleteShader(SIMDMode::SIMD8);
+                shaders[phaseFunc]->DeleteShader(SIMDMode::SIMD16);
+                shaders[phaseFunc]->DeleteShader(SIMDMode::SIMD32);
+                if (i == 0)
+                {
+                    delete shaders[coarsePhase];
+                    coarsePhase = nullptr;
+                }
+                else
+                {
+                    delete shaders[pixelPhase];
+                    pixelPhase = nullptr;
+                }
+            }
         }
 
-        linkCPS(outputs, ctx->programOutput, numStage);
-        // Kernels allocated in CISABuilder.cpp (Compile())
-        // are freed in CompilerOutputOGL.hpp (DeleteShaderCompilerOutputOGL())
-        // in case of CPS multistage PS they are separated.
-        // Need to free original kernels here as DeleteShaderCompilerOutputOGL()
-        // will clear new allocations for separated phases in this case.
-        for (unsigned int i = 0; i < numStage; i++)
+        if (coarsePhase && pixelPhase)
         {
-            outputs[i].simd8.Destroy();
-            outputs[i].simd16.Destroy();
-            outputs[i].simd32.Destroy();
+            SPixelShaderKernelProgram outputs[2];
+            memset(&outputs, 0, 2 * sizeof(SPixelShaderKernelProgram));
+
+            for (unsigned int i = 0; i < numStage; i++)
+            {
+                Function* phaseFunc = (i == 0) ?
+                    mdconst::dyn_extract<Function>(coarseNode->getOperand(0)->getOperand(0)) :
+                    mdconst::dyn_extract<Function>(pixelNode->getOperand(0)->getOperand(0));
+
+                CShaderProgram::KernelShaderMap& shaders = (i == 0) ? coarseShaders : pixelShaders;
+
+                shaders[phaseFunc]->FillProgram(&outputs[i]);
+                COMPILER_SHADER_STATS_PRINT(shaders[phaseFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");
+                COMPILER_SHADER_STATS_SUM(ctx->m_sumShaderStats, shaders[phaseFunc]->m_shaderStats, ShaderType::PIXEL_SHADER);
+                COMPILER_SHADER_STATS_DEL(shaders[phaseFunc]->m_shaderStats);
+                delete shaders[phaseFunc];
+            }
+
+            linkCPS(outputs, ctx->programOutput, numStage);
+            // Kernels allocated in CISABuilder.cpp (Compile())
+            // are freed in CompilerOutputOGL.hpp (DeleteShaderCompilerOutputOGL())
+            // in case of CPS multistage PS they are separated.
+            // Need to free original kernels here as DeleteShaderCompilerOutputOGL()
+            // will clear new allocations for separated phases in this case.
+            for (unsigned int i = 0; i < numStage; i++)
+            {
+                outputs[i].simd8.Destroy();
+                outputs[i].simd16.Destroy();
+                outputs[i].simd32.Destroy();
+            }
         }
     }
-    else
+
+    if (!(coarsePhase && pixelPhase))
     {
         CShaderProgram::KernelShaderMap shaders;
+        Function* pFunc = nullptr;
 
-        // Single PS
-        CodeGen(ctx, shaders);
-        // Assuming single shader information in metadata
-        Function* pFunc = getUniqueEntryFunc(ctx->getMetaDataUtils(), ctx->getModuleMetaData());
+        if (!codegenDone)
+        {
+            // Single PS
+            CodeGen(ctx, shaders);
+            pFunc = getUniqueEntryFunc(ctx->getMetaDataUtils(), ctx->getModuleMetaData());
+        }
+        else
+        {
+            shaders = coarsePhase ? coarseShaders : pixelShaders;
+            pFunc = coarsePhase ? coarsePhase : pixelPhase;
+        }
+
         // gather data to send back to the driver
         shaders[pFunc]->FillProgram(&ctx->programOutput);
         COMPILER_SHADER_STATS_PRINT(shaders[pFunc]->m_shaderStats, ShaderType::PIXEL_SHADER, ctx->hash, "");

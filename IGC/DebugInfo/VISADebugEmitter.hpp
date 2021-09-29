@@ -38,6 +38,7 @@ namespace IGC
     class StreamEmitter;
     class VISAModule;
     class DwarfDebug;
+    class DwarfDISubprogramCache;
     class CodeGenContext;
 
     class DebugEmitter : public IDebugEmitter
@@ -47,9 +48,13 @@ namespace IGC
         ~DebugEmitter();
 
         // IDebugEmitter interface methods
-        void Initialize(std::unique_ptr<VISAModule> VM, const DebugEmitterOpts& Opts) override;
-        std::vector<char> Finalize(bool finalize, DbgDecoder* decodedDbg,
-                                   const std::vector<llvm::DISubprogram*>&) override;
+        void Initialize(std::unique_ptr<VISAModule> VM,
+                        const DebugEmitterOpts& Opts) override;
+
+        void SetDISPCache(DwarfDISubprogramCache *DISPCache) override;
+
+        std::vector<char> Finalize(bool finalize, DbgDecoder* decodedDbg) override;
+
         void BeginInstruction(llvm::Instruction* pInst) override;
         void EndInstruction(llvm::Instruction* pInst) override;
         void BeginEncodingMark() override;
@@ -60,6 +65,8 @@ namespace IGC
         void registerVISA(IGC::VISAModule*) override;
 
         void resetModule(std::unique_ptr<IGC::VISAModule> VM) override;
+
+        const std::string& getErrors() const override;
 
     private:
         /// @brief Reset Debug Emitter instance.
@@ -73,6 +80,7 @@ namespace IGC
 
         llvm::SmallVector<char, 1000> m_str;
         llvm::raw_svector_ostream m_outStream;
+        std::string m_errs;
 
         VISAModule* m_pVISAModule = nullptr;
         /// m_pDwarfDebug - dwarf debug info processor.

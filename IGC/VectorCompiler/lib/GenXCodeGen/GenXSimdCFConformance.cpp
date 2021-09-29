@@ -195,6 +195,7 @@ SPDX-License-Identifier: MIT
 #include "GenXRegion.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
+#include "vc/GenXOpts/Utils/KernelInfo.h"
 #include "vc/GenXOpts/Utils/RegCategory.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -244,7 +245,7 @@ public:
       : DiagnosticInfoOptimizationBase((DiagnosticKind)getKindID(), Severity,
           /*PassName=*/nullptr, Msg, Fn, DLoc) {}
   // This kind of message is always enabled, and not affected by -rpass.
-  virtual bool isEnabled() const override { return true; }
+  bool isEnabled() const override { return true; }
   static bool classof(const DiagnosticInfo *DI) {
     return DI->getKind() == getKindID();
   }
@@ -412,11 +413,13 @@ class GenXEarlySimdCFConformance
 public:
   static char ID;
   explicit GenXEarlySimdCFConformance() : ModulePass(ID) { }
-  virtual StringRef getPassName() const { return "GenX early SIMD control flow conformance"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override {
+    return "GenX early SIMD control flow conformance";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     ModulePass::getAnalysisUsage(AU);
   }
-  bool runOnModule(Module &M);
+  bool runOnModule(Module &M) override;
 };
 
 // GenX late SIMD control flow conformance pass
@@ -425,8 +428,10 @@ class GenXLateSimdCFConformance
 public:
   static char ID;
   explicit GenXLateSimdCFConformance() : FunctionGroupPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX late SIMD control flow conformance"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override {
+    return "GenX late SIMD control flow conformance";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     FunctionGroupPass::getAnalysisUsage(AU);
     AU.addRequired<DominatorTreeGroupWrapperPass>();
     AU.addRequired<GenXLiveness>();
@@ -435,11 +440,14 @@ public:
     AU.addPreserved<GenXLiveness>();
     AU.addPreserved<FunctionGroupAnalysis>();
   }
-  bool runOnFunctionGroup(FunctionGroup &FG);
+  bool runOnFunctionGroup(FunctionGroup &FG) override;
   // createPrinterPass : get a pass to print the IR, together with the GenX
   // specific analyses
-  virtual Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const
-  { return createGenXGroupPrinterPass(O, Banner); }
+  Pass *createPrinterPass(raw_ostream &O,
+                          const std::string &Banner) const override {
+    return createGenXGroupPrinterPass(O, Banner);
+  }
+
 private:
   void setCategories();
   void modifyEMUses(Value *EM);
@@ -584,6 +592,11 @@ FunctionGroupPass *llvm::createGenXLateSimdCFConformancePass()
   return new GenXLateSimdCFConformance();
 }
 
+static bool hasStackCall(const Module &M) {
+  return std::any_of(M.begin(), M.end(),
+                     [](const auto &F) { return genx::requiresStackCall(&F); });
+}
+
 /***********************************************************************
  * runOnModule : run the early SIMD control flow conformance pass for this
  *  module
@@ -597,6 +610,7 @@ bool GenXEarlySimdCFConformance::runOnModule(Module &ArgM)
   FG = nullptr;
   FGA = nullptr;
   DTWrapper = nullptr;
+  lowerSimdCF = hasStackCall(ArgM);
   // Perform actions to create correct DF for EM
   canonicalizeEM();
   // Gather the EM values, both from goto/join and phi nodes.
@@ -616,11 +630,12 @@ bool GenXEarlySimdCFConformance::runOnModule(Module &ArgM)
   // an unmask construction in module. It is very suboptimal.
   if (lowerSimdCF)
     lowerAllSimdCF();
-  else
+  else {
     // Repeatedly check the code for conformance and lower non-conformant gotos
     // and joins until the code stabilizes.
     ensureConformance();
-  optimizeRestoredSIMDCF();
+    optimizeRestoredSIMDCF();
+  }
   // Perform check for genx_simdcf_get_em intrinsics and remove redundant ones.
   lowerUnsuitableGetEMs();
   clear();
@@ -2383,7 +2398,8 @@ static bool checkAllUsesAreSelectOrWrRegion(Value *V)
       // Turn zext/sext to select.
       if (CI->getOpcode() == Instruction::CastOps::ZExt ||
           CI->getOpcode() == Instruction::CastOps::SExt) {
-        unsigned NElts = cast<VectorType>(V->getType())->getNumElements();
+        unsigned NElts =
+            cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements();
         unsigned NBits = CI->getType()->getScalarSizeInBits();
         int Val = (CI->getOpcode() == Instruction::CastOps::ZExt) ? 1 : -1;
         APInt One(NBits, Val);
@@ -3458,8 +3474,10 @@ void GenXSimdCFConformance::checkInterference(SetVector<SimpleValue> *Vals,
 Value *GenXSimdCFConformance::insertCond(Value *OldVal, Value *NewVal,
     const Twine &Name, Instruction *InsertBefore, const DebugLoc &DL)
 {
-  unsigned OldWidth = cast<VectorType>(OldVal->getType())->getNumElements();
-  unsigned NewWidth = cast<VectorType>(NewVal->getType())->getNumElements();
+  unsigned OldWidth =
+      cast<IGCLLVM::FixedVectorType>(OldVal->getType())->getNumElements();
+  unsigned NewWidth =
+      cast<IGCLLVM::FixedVectorType>(NewVal->getType())->getNumElements();
   if (OldWidth == NewWidth)
     return NewVal;
   // Do the insert with shufflevector. We need two shufflevectors, one to extend
@@ -3504,8 +3522,9 @@ Value *GenXSimdCFConformance::insertCond(Value *OldVal, Value *NewVal,
 Value *GenXSimdCFConformance::truncateCond(Value *In, Type *Ty,
     const Twine &Name, Instruction *InsertBefore, const DebugLoc &DL)
 {
-  unsigned InWidth = cast<VectorType>(In->getType())->getNumElements();
-  unsigned TruncWidth = cast<VectorType>(Ty)->getNumElements();
+  unsigned InWidth =
+      cast<IGCLLVM::FixedVectorType>(In->getType())->getNumElements();
+  unsigned TruncWidth = cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements();
   if (InWidth == TruncWidth)
     return In;
   // Do the truncate with shufflevector. GenXLowering lowers it to rdpredregion.

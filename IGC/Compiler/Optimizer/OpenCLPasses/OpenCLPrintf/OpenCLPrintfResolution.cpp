@@ -405,7 +405,7 @@ bool OpenCLPrintfResolution::argIsString(Value* printfArg)
     {
         auto& curr_e = *curr_i;
         formatString = dyn_cast_or_null<GlobalVariable>(&curr_e);
-        if (nullptr == formatString)
+        if (nullptr == formatString || !formatString->hasInitializer())
         {
             return false;
         }
@@ -496,7 +496,7 @@ void OpenCLPrintfResolution::expandPrintfCall(CallInst& printfCall, Function& F)
     preprocessPrintfArgs(printfCall);
 
     // writeOffset = atomic_add(bufferPtr, dataSize)
-    Value* basebufferPtr = implicitArgs.getArgInFunc(F, ImplicitArg::PRINTF_BUFFER);
+    Value* basebufferPtr = implicitArgs.getImplicitArg(F, ImplicitArg::PRINTF_BUFFER);
     Value* dataSizeVal = ConstantInt::get(m_int32Type, getTotalDataSize());
     Instruction* writeOffsetStart = genAtomicAdd(basebufferPtr, dataSizeVal, printfCall, "write_offset");
     writeOffsetStart->setDebugLoc(m_DL);
@@ -723,7 +723,7 @@ Value* OpenCLPrintfResolution::fixupPrintfArg(CallInst& printfCall, Value* arg, 
             }
 
             Type* newType = Type::getFloatTy(arg->getContext());
-            if (auto argVT = dyn_cast<VectorType>(arg->getType()))
+            if (auto argVT = dyn_cast<IGCLLVM::FixedVectorType>(arg->getType()))
             {
                 newType = IGCLLVM::FixedVectorType::get(newType, (unsigned)argVT->getNumElements());
             }
@@ -753,7 +753,7 @@ void OpenCLPrintfResolution::preprocessPrintfArgs(CallInst& printfCall)
         IGC::SHADER_PRINTF_TYPE argDataType = getPrintfArgDataType(arg);
         arg = fixupPrintfArg(printfCall, arg, argDataType);
         uint vecSize = 0;
-        if (auto argVType = dyn_cast<VectorType>(argType)) {
+        if (auto argVType = dyn_cast<IGCLLVM::FixedVectorType>(argType)) {
             vecSize = (uint)argVType->getNumElements();
         }
         m_argDescriptors.push_back(SPrintfArgDescriptor(argDataType, arg, vecSize));

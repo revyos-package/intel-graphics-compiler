@@ -36,11 +36,11 @@ public:
   static char ID;
   explicit GenXPrinter(raw_ostream &OS, const std::string &Banner)
     : FunctionPass(ID), OS(OS), Banner(Banner) { }
-  virtual StringRef getPassName() const { return "GenX printer pass"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override { return "GenX printer pass"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesAll();
   }
-  bool runOnFunction(Function &F);
+  bool runOnFunction(Function &F) override;
 };
 
 // GenXGroupPrinter : an analysis to print a FunctionGroup, with GenX specific analyses
@@ -51,12 +51,14 @@ public:
   static char ID;
   explicit GenXGroupPrinter(raw_ostream &OS, const std::string &Banner)
     : FunctionGroupPass(ID), OS(OS), Banner(Banner) { }
-  virtual StringRef getPassName() const { return "GenX FunctionGroup printer pass"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override {
+    return "GenX FunctionGroup printer pass";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     FunctionGroupPass::getAnalysisUsage(AU);
     AU.setPreservesAll();
   }
-  bool runOnFunctionGroup(FunctionGroup &FG);
+  bool runOnFunctionGroup(FunctionGroup &FG) override;
 };
 
 } // end namespace llvm
@@ -97,7 +99,7 @@ static void printFunction(raw_ostream &OS, Function &F, GenXBaling *Baling,
     // Only show register number if there is a register allocator.
     GenXVisaRegAlloc::Reg* Reg = nullptr;
     if (RA)
-      Reg = RA->getRegForValueOrNull(&F, SimpleValue(Arg));
+      Reg = RA->getRegForValueUntyped(&F, SimpleValue(Arg));
     if (Reg) {
       OS << "[";
       Reg->print(OS);
@@ -120,7 +122,7 @@ static void printFunction(raw_ostream &OS, Function &F, GenXBaling *Baling,
           for (unsigned i = 0,
               e = IndexFlattener::getNumElements(Inst->getType());
               i != e; ++i) {
-            auto Reg = RA->getRegForValueOrNull(&F, SimpleValue(Inst, i));
+            auto Reg = RA->getRegForValueUntyped(&F, SimpleValue(Inst, i));
             if (Reg && Reg->Category) {
               OS << (!i ? "[" : ",");
               Reg->print(OS);

@@ -55,7 +55,7 @@ namespace {
         GASPropagator* Propagator;
 
         // Phi node being able to be resolved from its initial value.
-        DenseSet<PHINode*> ResolvableLoopPHIs;
+        DenseSet<PHINode*>* ResolvableLoopPHIs;
 
     public:
         static char ID;
@@ -74,7 +74,7 @@ namespace {
         }
 
         bool isResolvableLoopPHI(PHINode* PN) const {
-            return ResolvableLoopPHIs.count(PN) != 0;
+            return ResolvableLoopPHIs->count(PN) != 0;
         }
 
     private:
@@ -156,8 +156,10 @@ namespace IGC {
 bool GASResolving::runOnFunction(Function& F) {
     BuilderType TheBuilder(F.getContext());
     GASPropagator ThePropagator(this, &TheBuilder);
+    DenseSet<PHINode*> TheResolvableLoopPHIsSet;
     IRB = &TheBuilder;
     Propagator = &ThePropagator;
+    ResolvableLoopPHIs = &TheResolvableLoopPHIsSet;
 
     resolveMemoryFromHost(F);
 
@@ -254,19 +256,17 @@ bool GASResolving::resolveOnBasicBlock(BasicBlock* BB) const {
         // %56 = phi %"class.someclass" addrspace(4)* [ %49, %53 ], [ %49, %742 ]
         // the use iterator was handling such phi instructions twice.
         // This was causing a crash since propagate function might erase instructions.
-        DenseSet<Instruction*> instructionSet;
-        DenseSet<Use*> useSet;
+        SmallPtrSet<Instruction*, 8> InstSet;
+        SmallVector<Use*, 8> Uses;
         for (auto UI = CI->use_begin(), UE = CI->use_end(); UI != UE; ++UI) {
             Use* U = &(*UI);
             Instruction* I = cast<Instruction>(U->getUser());
-            if (instructionSet.find(I) == instructionSet.end())
-            {
-                instructionSet.insert(I);
-                useSet.insert(U);
+            if (InstSet.insert(I).second) {
+                Uses.push_back(U);
             }
         }
         // Propagate that source through all users of this cast.
-        for (auto it = useSet.begin(); it != useSet.end(); ++it) {
+        for (auto it = Uses.begin(); it != Uses.end(); ++it) {
             Use* U = *it;
             Changed |= Propagator->propagate(U, Src);
         }
@@ -317,7 +317,7 @@ void GASResolving::populateResolvableLoopPHIsForLoop(const Loop* L) {
         PHINode* PN = cast<PHINode>(I);
         if (!isAddrSpaceResolvable(PN, L, BackEdge))
             continue;
-        ResolvableLoopPHIs.insert(PN);
+        ResolvableLoopPHIs->insert(PN);
     }
 }
 

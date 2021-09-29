@@ -295,7 +295,7 @@ bool supportsThreadCombining() const
     return (!(!m_WaTable.WaEnablePooledEuFor2x6 &&
         m_platformInfo.eProductFamily == IGFX_BROXTON &&
         m_GTSystemInfo.SubSliceCount == 2))
-        ;
+        && (m_platformInfo.eRenderCoreFamily < IGFX_GEN12_CORE);
 }
 
 bool enableMaxWorkGroupSizeCalculation() const
@@ -834,7 +834,26 @@ bool preemptionSupported() const
 {
 
     return GetPlatformFamily() >= IGFX_GEN9_CORE;
-};
+}
+
+// platform natively not support DW-DW multiply
+bool noNativeDwordMulSupport() const
+{
+    return m_platformInfo.eProductFamily == IGFX_BROXTON ||
+        m_platformInfo.eProductFamily == IGFX_GEMINILAKE ||
+        GetPlatformFamily() == IGFX_GEN11_CORE ||
+        GetPlatformFamily() == IGFX_GEN12LP_CORE;
+}
+
+unsigned getURBFullWriteMinGranularity() const
+{
+    unsigned overrideValue = IGC_GET_FLAG_VALUE(SetURBFullWriteGranularity);
+    if (overrideValue == 16 || overrideValue == 32)
+    {
+        return overrideValue;
+    }
+    return isXeHPSDVPlus() ? 16 : 32; // in bytes
+}
 
 };
 

@@ -16,10 +16,12 @@ SPDX-License-Identifier: MIT
 #include "InstScalarizer.h"
 #include "InstElementizer.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Probe/Assertion.h"
@@ -36,10 +38,11 @@ TheModule(nullptr), TheFunction(nullptr) {
     initializeTypeLegalizerPass(*PassRegistry::getPassRegistry());
 }
 
-
 void TypeLegalizer::getAnalysisUsage(AnalysisUsage& AU) const {
+    AU.addRequired<DominatorTreeWrapperPass>();
     AU.setPreservesCFG();
 }
+
 
 FunctionPass* createTypeLegalizerPass() { return new TypeLegalizer(); }
 
@@ -55,6 +58,7 @@ IGC_INITIALIZE_PASS_END(TypeLegalizer, PASS_FLAG, PASS_DESC, PASS_CFG_ONLY, PASS
 
 bool TypeLegalizer::runOnFunction(Function & F) {
     DL = &F.getParent()->getDataLayout();
+    DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
     IGC_ASSERT_MESSAGE(DL->isLittleEndian(), "ONLY SUPPORT LITTLE ENDIANNESS!");
 
@@ -96,6 +100,7 @@ bool TypeLegalizer::runOnFunction(Function & F) {
     eraseIllegalInsts();
 
     DL = nullptr;
+    DT = nullptr;
 
     IRB = nullptr;
 
@@ -195,7 +200,7 @@ TypeLegalizer::getLegalizedTypes(Type* Ty) {
 }
 
 TypeSeq* TypeLegalizer::getPromotedTypeSeq(Type* Ty) {
-    IGC_ASSERT(Ty->isIntegerTy());
+    IGC_ASSERT(Ty->isIntOrIntVectorTy());
     IGC_ASSERT(getTypeLegalizeAction(Ty) == Promote);
 
     TypeMapTy::iterator TMI; bool New;
@@ -269,12 +274,13 @@ TypeSeq* TypeLegalizer::getScalarizedTypeSeq(Type* Ty) {
     TypeMapTy::iterator TMI; bool New;
     std::tie(TMI, New) = TypeMap.insert(std::make_pair(Ty, TypeSeq()));
     if (!New) {
-        IGC_ASSERT(TMI->second.size() == cast<VectorType>(Ty)->getNumElements());
-        return &TMI->second;
+      IGC_ASSERT(TMI->second.size() ==
+                 cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements());
+      return &TMI->second;
     }
 
     Type* EltTy = cast<VectorType>(Ty)->getElementType();
-    for (unsigned i = 0, e = (unsigned)cast<VectorType>(Ty)->getNumElements(); i != e; ++i)
+    for (unsigned i = 0, e = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements(); i != e; ++i)
         TMI->second.push_back(EltTy);
 
     return &TMI->second;
@@ -556,6 +562,8 @@ bool TypeLegalizer::preparePHIs(Function& F) {
                 PHINode* Promoted =
                     PHINode::Create(PromotedTy, PN->getNumIncomingValues(),
                         Twine(Name, getSuffix(Act)), &(*BI));
+                Promoted->setDebugLoc(PN->getDebugLoc());
+                replaceAllDbgUsesWith(*PN, *Promoted, *PN, *DT);
                 setLegalizedValues(PN, Promoted);
                 BI = BasicBlock::iterator(Promoted);
                 break;

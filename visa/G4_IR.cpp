@@ -1326,19 +1326,19 @@ void G4_INST::addDefUse(G4_INST* inst, Gen4_Operand_Number srcPos)
 }
 
 // exchange def/use info of src0 and src1 after they are swapped.
-void G4_INST::swapDefUse()
+void G4_INST::swapDefUse(Gen4_Operand_Number srcIxA, Gen4_Operand_Number srcIxB)
 {
     DEF_EDGE_LIST_ITER iter = defInstList.begin();
     // since ACC is only exposed in ARCTAN intrinsic translation, there is no instruction split with ACC
     while (iter != defInstList.end())
     {
-        if ((*iter).second == Opnd_src1)
+        if ((*iter).second == srcIxB)
         {
-            (*iter).second = Opnd_src0;
+            (*iter).second = srcIxA;
         }
-        else if ((*iter).second == Opnd_src0)
+        else if ((*iter).second == srcIxA)
         {
-            (*iter).second = Opnd_src1;
+            (*iter).second = srcIxB;
         }
         else
         {
@@ -1351,13 +1351,13 @@ void G4_INST::swapDefUse()
         {
             if ((*useIter).first == this)
             {
-                if ((*useIter).second == Opnd_src1)
+                if ((*useIter).second == srcIxB)
                 {
-                    (*useIter).second = Opnd_src0;
+                    (*useIter).second = srcIxA;
                 }
-                else if ((*useIter).second == Opnd_src0)
+                else if ((*useIter).second == srcIxA)
                 {
-                    (*useIter).second = Opnd_src1;
+                    (*useIter).second = srcIxB;
                 }
             }
         }
@@ -1748,6 +1748,73 @@ G4_INST::MovType G4_INST::canPropagate() const
     return MT;
 }
 
+bool G4_INST::canPropagateBinaryToTernary() const
+{
+    if (opcode() != G4_add && opcode() != G4_mul)
+        return false; // constrain just to a few ops for the moment
+    else if (dst == nullptr)
+        return false;
+    else if (!dst->getBase()->isRegVar() && !dst->getBase()->isPhyGreg())
+        return false; // must be GRF dst
+    else if (dst->isIndirect())
+        return false; // must not be indirect
+    else if (dst->getHorzStride() != 1)
+        return false; // must be <1>
+    else if (
+        dst->getType() != Type_D && dst->getType() != Type_UD &&
+        dst->getType() != Type_Q && dst->getType() != Type_UQ)
+        return false; // dst has to be :d or :ud (for now)
+    else if (builder.kernel.fg.globalOpndHT.isOpndGlobal(dst))
+        return false; // writes to globals must be visible
+    else if (getNumSrc() != 2)
+        return false; // must be binary
+    else if (getPredicate())
+        return false; // no predicates
+    else if (getExecSize() != 1 && dst->getSubRegOff() != 0)
+        return false; // must be dst.0 or SIMD1 to any subreg
+    else if (getImplAccDst() || getImplAccSrc())
+        return false; // no {AccWrEn}
+    else if (getSaturate() || getCondMod())
+        return false; // do not eliminate if either sat or condMod is present.
+    else if (useInstList.size() == 0)
+        return false; // do not eliminate if there's no use (dead or side-effect code?)
+
+    G4_Declare* topDcl = dst->getTopDcl();
+    if (topDcl) {
+        // Do not eliminate stack call return value passing instructions.
+        // Do not eliminate vars marked with Output attribute.
+        if (topDcl->isOutput())
+            return false;
+        G4_Declare* rootDcl = topDcl->getRootDeclare();
+        if (builder.isPreDefFEStackVar(rootDcl) || builder.isPreDefArg(rootDcl) ||
+            builder.isPreDefRet(rootDcl))
+        {
+            // can't propagate stack call related variables (Arg, Retval, SP, FP)
+            return false;
+        }
+    }
+
+    for (int srcIx = 0; srcIx < getNumSrc(); srcIx++) {
+        G4_Operand *src = srcs[srcIx];
+
+        if (!src->isSrcRegRegion() && !src->isImm()) {
+            return false; // only GRF
+        } else if (src->isRelocImm()) {
+            return false;
+        }
+        if (src->isSrcRegRegion()) {
+            const G4_SrcRegRegion *srr = src->asSrcRegRegion();
+            if (!srr->getBase()->isRegVar() && !srr->getBase()->isPhyGreg()) {
+                return false; // has to be GRF
+            } else if (srr->isIndirect()) {
+                return false; // has to be direct
+            }
+        }
+    }
+
+    return true;
+}
+
 // Check to see whether the given type is supported by this opcode + operand. Mainly focus on integer ops
 // This is used by copy propagation and def-hoisting to determine if the resulting instruction is legal
 bool G4_INST::isLegalType(G4_Type type, Gen4_Operand_Number opndNum) const
@@ -1993,6 +2060,15 @@ bool G4_INST::canPropagateTo(
     G4_Operand *use = useInst->getOperand(opndNum);
     G4_Type useType = use->getType();
 
+    //If the operand to be copied is acc register, need to check if the use operand can use acc register
+    if (src->isAccReg())
+    {
+        if (!useInst->canSrcBeAccBeforeHWConform(opndNum))
+        {
+            return false;
+        }
+    }
+
     if (useInst->is2SrcAlign16())
     {
         // don't copy propagate for the legacy dp* instructions,
@@ -2213,10 +2289,15 @@ bool G4_INST::canPropagateTo(
         return false;
     }
 
+    // bfloat specific checks
     if (propType == Type_BF)
     {
-        // bfloat specific checks
-        if (use->asSrcRegRegion()->hasModifier() && useInst->isMov())
+        // If the useInst is G4_pseudo_mad and the use operand has source modifier, a invalid bf->bf mov with source modifier
+        // may be inserted in fixMADInst(). So avoid propagating to G4_pseudo_mad source with source modifier.
+        // TODO: a mov is not always inserted for G4_pseudo_mad source with source modifier since gen mad inst supports source
+        // modifier. So for the no mov inserted case, avoid propagating may miss this opotimize. So, do we need to check if a mov
+        // is really needed for G4_pseudo_mad source here? But the same check code in fixMADInst() seems very complicated?
+        if (use->asSrcRegRegion()->hasModifier() && (useInst->isMov() || useInst->opcode() == G4_pseudo_mad))
         {
             // BF_CVT does not like source modifier
             return false;
@@ -2240,7 +2321,7 @@ bool G4_INST::canPropagateTo(
         return false;
     }
 
-    // TODO: Revisit this later as IntToFp could be folded on specific insns,
+    // TODO: Revisit this later as IntToFp could be folded on specific insts,
     // such as add, cmp, and mul, when types of all source operands could be
     // consistent.
     if (!(useInst->isRawMov() && dstType == useType) &&
@@ -2394,6 +2475,7 @@ bool G4_INST::canPropagateTo(
 // assume only MOV inst is checked
 bool G4_INST::canHoist(bool simdBB, const Options *opt) const
 {
+    assert(op == G4_mov && "defHoisting only handles mov");
     if (dst == NULL)
     {
         return false;
@@ -2452,6 +2534,7 @@ bool G4_INST::canHoist(bool simdBB, const Options *opt) const
 // check if this instruction can be hoisted to defInst
 bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
 {
+    assert(op == G4_mov && "defHoisting only handles mov");
     bool indirect_dst = (dst->getRegAccess() != Direct);
 
     auto def_dst = defInst->getDst();
@@ -2483,7 +2566,6 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
         (defInst->opcode() == G4_pseudo_mad &&
             !(IS_TYPE_FLOAT_ALL(dstType) && IS_TYPE_FLOAT_ALL(defDstType)));
     if ((defInst->useInstList.size() != 1) ||
-        (defInst->opcode() == G4_madw) ||
         (defInst->opcode() == G4_sad2) ||
         (defInst->opcode() == G4_sada2) ||
         (defInst->opcode() == G4_cbit && dstType != defDstType) ||
@@ -2720,16 +2802,8 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
         }
     }
 
-    bool hasSrcModifier = false;
-    for (int i = 0, numSrc = defInst->getNumSrc(); i < numSrc; ++i)
-    {
-        if (defInst->getSrc(i)->isSrcRegRegion() && defInst->getSrc(i)->asSrcRegRegion()->hasModifier())
-        {
-            hasSrcModifier = true;
-            break;
-        }
-    }
-    if (hasSrcModifier && !canSupportSrcModifier())
+    // Cannot do hoisting if the use inst has src modifier.
+    if (getSrc(0)->asSrcRegRegion()->hasModifier())
     {
         return false;
     }
@@ -3326,6 +3400,9 @@ static void emitInstructionStartColumn(std::ostream& output, G4_INST &inst)
     else if (inst.opcode() == G4_goto)
     {
         oupPfx << (inst.asCFInst()->isBackward() ? ".bwd" : ".fwd");
+    }
+    else if (inst.isBfn()) {
+        oupPfx << "." << fmtHex(inst.asBfnInst()->getBooleanFuncCtrl(), 2);
     }
     else if (inst.isMath() && inst.asMathInst()->getMathCtrl() != MATH_RESERVED)
     {
@@ -4731,8 +4808,8 @@ unsigned G4_DstRegRegion::computeRightBound(uint8_t exec_size)
             unsigned short s_size = horzStride * type_size;
             unsigned totalBytes = (exec_size - 1) * s_size + type_size;
 
-            // For madw opcode, the dst(SOA layout) size should be double as it has both low and high results
-            if (inst->opcode() == G4_madw)
+            // For wide dst instructions like madw opcode, the dst(SOA layout) size should be double as it has both low and high results
+            if (INST_WIDE_DST(inst->opcode()))
             {
                 totalBytes *= 2;
             }
@@ -5907,7 +5984,7 @@ void G4_Imm::emit(std::ostream& output, bool symbolreg)
     else if (type == Type_D || type == Type_UD)
     {
         // 32-bit int
-        output << (int) imm.num;
+        output << (int)imm.num;
     }
     else
     {
@@ -6046,7 +6123,7 @@ int G4_AddrExp::eval()
         // address taken range is spilled
         G4_Declare* addrTakenSpillFillDcl = m_addressedReg->getDeclare()->getAddrTakenSpillFill();
         MUST_BE_TRUE(addrTakenSpillFillDcl != NULL, "No addr taken spill fill register found!");
-        byteAddr = addrTakenSpillFillDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum() * 32;
+        byteAddr = addrTakenSpillFillDcl->getGRFBaseOffset();
     }
     else
     {
@@ -7805,10 +7882,16 @@ bool G4_INST::canDstBeAcc() const
 // in addition to opcode-specific checks, we require
 // -- contiguous regions
 // -- simd8 for D/UD, simd8/16 for F, simd16 for HF/W, other types not allowed
-bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
+bool G4_INST::canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const
 {
     int srcId = getSrcNum(opndNum);
-    assert((srcId == 0 || srcId == 1 || (builder.hasSrc2Acc() && srcId == 2)) && "must be either src0 or src1");
+    assert((srcId == 0 || srcId == 1 || srcId == 2) && "must be either src0, src1 or src2");
+
+    if (!builder.hasSrc2Acc() && srcId == 2)
+    {
+        return false;
+    }
+
     if (getSrc(srcId) == nullptr || !getSrc(srcId)->isSrcRegRegion())
     {
         return false;
@@ -7835,8 +7918,8 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
     }
 
     if (builder.relaxedACCRestrictions() &&
-         isMixedMode() &&
-         isLowPrecisionFloatTy(src->getType()))
+        isMixedMode() &&
+        isLowPrecisionFloatTy(src->getType()))
     {
         return false;
     }
@@ -7846,40 +7929,8 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
         return false;
     }
 
-    // dst must be GRF-aligned
-    if ((getDst()->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
-    {
-        if (!(isMixedMode() && builder.getPlatform() == XeHP_SDV))
-            return false;
-    }
-
-    // check that src0 and dst have the same type/alignment
-    auto dstEltSize = getDst()->getHorzStride() * getDst()->getTypeSize();
-    if (dstEltSize > TypeSize(src->getType()))
-    {
-        return false;
-    }
-    else if (isLowPrecisionFloatTy(getDst()->getType()) && src->getType() == Type_F &&
-        dstEltSize == 2)
-    {
-        if (builder.relaxedACCRestrictions())
-        {
-            //When source is float or half float from accumulator register and destination is half float with a stride of 1,
-            //the source must register aligned. i.e., source must have offset zero.
-            if ((src->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
-            {
-                return false;
-            }
-        }
-        else
-        {
-            // no acc for mix mode inst with packed HF dst
-            return false;
-        }
-    }
-
     if (opcode() == G4_mad && srcId == 0 &&
-         !builder.canMadHaveSrc0Acc())
+        !builder.canMadHaveSrc0Acc())
     {
         // mac's implicit acc gets its region from dst, so we have to check src and
         // dst have the same type
@@ -7942,7 +7993,7 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
             ((srcId == 1 && (IS_FTYPE(src->getType()) || (src->getType() == Type_DF))) ||
                 (srcId == 0 && src->getModifier() == Mod_src_undef) ||
                 (srcId == 0 && builder.relaxedACCRestrictions_1()) ||
-                (builder.hasSrc2Acc() && srcId == 2 && (IS_FTYPE(src->getType()) || (src->getType() == Type_DF))));
+                (srcId == 2 && (IS_FTYPE(src->getType()) || (src->getType() == Type_DF))));
     case G4_csel:
         return builder.canMadHaveAcc();
     case G4_mul:
@@ -7962,6 +8013,51 @@ bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
     default:
         return false;
     }
+}
+
+bool G4_INST::canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const
+{
+    int srcId = getSrcNum(opndNum);
+    G4_SrcRegRegion* src = getSrc(srcId)->asSrcRegRegion();
+
+    // dst must be GRF-aligned
+    if ((getDst()->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
+    {
+        if (!(isMixedMode() && builder.getPlatform() == XeHP_SDV))
+            return false;
+    }
+
+    // check that src0 and dst have the same type/alignment
+    auto dstEltSize = getDst()->getHorzStride() * getDst()->getTypeSize();
+    if (dstEltSize > TypeSize(src->getType()))
+    {
+        return false;
+    }
+    else if (isLowPrecisionFloatTy(getDst()->getType()) && src->getType() == Type_F &&
+        dstEltSize == 2)
+    {
+        if (builder.relaxedACCRestrictions())
+        {
+            //When source is float or half float from accumulator register and destination is half float with a stride of 1,
+            //the source must register aligned. i.e., source must have offset zero.
+            if ((src->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            // no acc for mix mode inst with packed HF dst
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
+{
+    return canSrcBeAccBeforeHWConform(opndNum) && canSrcBeAccAfterHWConform(opndNum);
 }
 
 TARGET_PLATFORM G4_INST::getPlatform() const

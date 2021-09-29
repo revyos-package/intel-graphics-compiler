@@ -136,13 +136,6 @@
       "dst": [ "GENERAL", 0 ],
       "src0": "CreateOpndPredefinedSrc(PREDEFINED_COLOR, 0, 0, 1, 1, 0)"
     },
-    "genx_get_hwid": {
-      "opc": "ISA_MOV",
-      "exec_size": [ "EXECSIZE" ],
-      "pred": [ "IMPLICITPRED" ],
-      "dst": [ "GENERAL", 0 ],
-      "src0": "CreateOpndPredefinedSrc(PREDEFINED_HW_TID, 0, 0, 0, 1, 0)"
-    },
     "genx_set_pause": {
       "opc": "ISA_MOV",
       "exec_size": [ "EXECSIZE" ],
@@ -1625,6 +1618,8 @@
       "opc": "ISA_ADDC",
       "exec_size": [ "EXECSIZE" ],
       "pred": [ "IMPLICITPRED" ],
+      "dst0": "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxAddc_Add)",
+      "dst1": "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxAddc_Carry)",
       "src0": [ "GENERAL", "UNSIGNED", "MODIFIER_ARITH", 1 ],
       "src1": [ "GENERAL", "UNSIGNED", "MODIFIER_ARITH", 2 ]
     },
@@ -1632,6 +1627,8 @@
       "opc": "ISA_SUBB",
       "exec_size": [ "EXECSIZE" ],
       "pred": [ "IMPLICITPRED" ],
+      "dst0": "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxSubb_Sub)",
+      "dst1": "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxSubb_Borrow)",
       "src0": [ "GENERAL", "UNSIGNED", "MODIFIER_ARITH", 1 ],
       "src1": [ "GENERAL", "UNSIGNED",  "MODIFIER_ARITH", 2 ]
     },
@@ -3482,8 +3479,8 @@
           "pred",
           "exec_mask",
           "exec_size",
-          "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxAddc_Add)",
-          "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxAddc_Carry)",
+          "dst0",
+          "dst1",
           "src0",
           "src1"
         ]
@@ -3496,8 +3493,8 @@
           "pred",
           "exec_mask",
           "exec_size",
-          "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxSubb_Sub)",
-          "MakeSubbAddcDestination(GenXIntrinsic::GenXResult::IdxSubb_Borrow)",
+          "dst0",
+          "dst1",
           "src0",
           "src1"
         ]

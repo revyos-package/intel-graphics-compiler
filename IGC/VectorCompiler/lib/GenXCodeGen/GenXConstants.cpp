@@ -102,6 +102,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/Debug.h"
 
 #include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/MathExtras.h"
 #include "llvmWrapper/Support/TypeSize.h"
 
@@ -536,8 +538,10 @@ bool genx::areConstantsEqual(const Constant *C1, const Constant *C2) {
   case Value::ConstantVectorVal: {
     const ConstantVector *C1CV = cast<ConstantVector>(C1);
     const ConstantVector *C2CV = cast<ConstantVector>(C2);
-    unsigned NumElementsC1 = cast<VectorType>(C1Ty)->getNumElements();
-    unsigned NumElementsC2 = cast<VectorType>(C2Ty)->getNumElements();
+    unsigned NumElementsC1 =
+        cast<IGCLLVM::FixedVectorType>(C1Ty)->getNumElements();
+    unsigned NumElementsC2 =
+        cast<IGCLLVM::FixedVectorType>(C2Ty)->getNumElements();
     if (NumElementsC1 != NumElementsC2)
       return false;
     for (uint64_t i = 0; i < NumElementsC1; ++i)
@@ -560,6 +564,30 @@ bool genx::areConstantsEqual(const Constant *C1, const Constant *C2) {
     return true;
   }
   }
+}
+
+/***********************************************************************
+ * cleanupConstantLoads : remove all genx.constant* intrinsics that have
+ * non-constant source operand
+ */
+bool genx::cleanupConstantLoads(Function *F) {
+  bool Modified = false;
+  for (auto I = inst_begin(F), E = inst_end(F); I != E;) {
+    auto *CI = dyn_cast<CallInst>(&*I++);
+    if (!CI)
+      continue;
+    auto IID = GenXIntrinsic::getAnyIntrinsicID(CI);
+    if (IID != GenXIntrinsic::genx_constanti &&
+        IID != GenXIntrinsic::genx_constantf &&
+        IID != GenXIntrinsic::genx_constantpred)
+      continue;
+    if (isa<Constant>(CI->getOperand(0)))
+      continue;
+    CI->replaceAllUsesWith(CI->getOperand(0));
+    CI->eraseFromParent();
+    Modified = true;
+  }
+  return Modified;
 }
 
 /***********************************************************************
@@ -848,7 +876,8 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
   if (!isLegalSize())
     return loadBig(Inst);
   if (PackedFloat) {
-    unsigned NumElts = cast<VectorType>(C->getType())->getNumElements();
+    unsigned NumElts =
+        cast<IGCLLVM::FixedVectorType>(C->getType())->getNumElements();
     SmallVector<Instruction *, 4> Quads;
     for (unsigned i = 0, e = NumElts; i != e; i += 4) {
       SmallVector<Constant *, 4> Quad;
@@ -861,7 +890,7 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
     unsigned Offset = 0;
     auto DbgLoc = Inst->getDebugLoc();
     for (auto &Q : Quads) {
-      VectorType *VTy = cast<VectorType>(Q->getType());
+      auto *VTy = cast<IGCLLVM::FixedVectorType>(Q->getType());
       Region R(V, &DL);
       R.getSubregion(Offset, VTy->getNumElements());
       V = R.createWrRegion(V, Q, "constant.quad" + Twine(Offset), Inst, DbgLoc);
@@ -875,8 +904,10 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
     if (DL.getTypeSizeInBits(PackTy) > 32)
       PackTy = Type::getInt32Ty(Inst->getContext());
     // Load as a packed int vector with scale and/or adjust.
-    SmallVector<Constant *, 8> PackedVals;
-    for (unsigned i = 0, e = cast<VectorType>(C->getType())->getNumElements();
+    SmallVector<Constant *, 32> PackedVals;
+    for (unsigned
+             i = 0,
+             e = cast<IGCLLVM::FixedVectorType>(C->getType())->getNumElements();
          i != e; ++i) {
       int64_t Val = 0;
       if (auto CI = dyn_cast<ConstantInt>(C->getAggregateElement(i))) {
@@ -888,26 +919,27 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
       IGC_ASSERT(cast<ConstantInt>(PackedVals.back())->getSExtValue() >= -8
           && cast<ConstantInt>(PackedVals.back())->getSExtValue() <= 15);
     }
+
     ConstantLoader Packed(ConstantVector::get(PackedVals), Subtarget, DL);
-    auto LoadPacked = Packed.load(Inst);
-    if (PackedIntScale != 1)
-      LoadPacked = BinaryOperator::Create(
-          Instruction::Mul, LoadPacked,
-          ConstantVector::getSplat(
-              IGCLLVM::getElementCount(
-                  cast<VectorType>(C->getType())->getNumElements()),
-              ConstantInt::get(PackTy, PackedIntScale,
-                               /*isSigned=*/true)),
-          "constantscale", Inst);
-    if (PackedIntAdjust)
-      LoadPacked = BinaryOperator::Create(
-          Instruction::Add, LoadPacked,
-          ConstantVector::getSplat(
-              IGCLLVM::getElementCount(
-                  cast<VectorType>(C->getType())->getNumElements()),
-              ConstantInt::get(PackTy, PackedIntAdjust,
-                               /*isSigned=*/true)),
-          "constantadjust", Inst);
+    auto *LoadPacked = Packed.loadNonPackedIntConst(Inst);
+    if (PackedIntScale != 1) {
+      auto *SplatVal =
+          ConstantInt::get(PackTy, PackedIntScale, /*isSigned=*/true);
+      auto *CVTy = cast<IGCLLVM::FixedVectorType>(C->getType());
+      auto ElemCount = IGCLLVM::getElementCount(CVTy->getNumElements());
+      auto *Op1 = ConstantVector::getSplat(ElemCount, SplatVal);
+      LoadPacked = BinaryOperator::Create(Instruction::Mul, LoadPacked, Op1,
+                                          "constantscale", Inst);
+    }
+    if (PackedIntAdjust) {
+      auto *SplatVal =
+          ConstantInt::get(PackTy, PackedIntAdjust, /*isSigned=*/true);
+      auto *CVTy = cast<IGCLLVM::FixedVectorType>(C->getType());
+      auto ElemCount = IGCLLVM::getElementCount(CVTy->getNumElements());
+      auto *Op1 = ConstantVector::getSplat(ElemCount, SplatVal);
+      LoadPacked = BinaryOperator::Create(Instruction::Add, LoadPacked, Op1,
+                                          "constantadjust", Inst);
+    }
     if (DL.getTypeSizeInBits(PackTy) <
         DL.getTypeSizeInBits(C->getType()->getScalarType())) {
       LoadPacked = CastInst::CreateSExtOrBitCast(LoadPacked, C->getType(),
@@ -940,7 +972,7 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
       AddedInstructions->push_back(NewInst);
     return NewInst;
   }
-  VectorType *VT = dyn_cast<VectorType>(C->getType());
+  auto *VT = cast<IGCLLVM::FixedVectorType>(C->getType());
   unsigned NumElements = VT->getNumElements();
   SmallVector<Constant *, 32> Elements;
   unsigned UndefBits = 0;
@@ -1187,7 +1219,7 @@ unsigned ConstantLoader::getRegionBits(unsigned NeededBits,
 
 Instruction *ConstantLoader::loadSplatConstant(Instruction *InsertPos) {
   // Skip scalar types, vector type with just one element, or boolean vector.
-  VectorType *VTy = dyn_cast<VectorType>(C->getType());
+  auto *VTy = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VTy ||
       VTy->getNumElements() == 1 ||
       VTy->getScalarType()->isIntegerTy(1))
@@ -1265,6 +1297,41 @@ Instruction *ConstantLoader::load(Instruction *InsertBefore)
 }
 
 /***********************************************************************
+ * ConstantLoader::loadNonPackedIntConst : insert instruction to load a constant
+ *                               that are not packed because they have width > 8.
+ *
+ * Enter:   C = constant to load
+ *          InsertBefore = insert new instruction before here
+ *
+ * Return:  new instruction
+ */
+Instruction *ConstantLoader::loadNonPackedIntConst(Instruction *InsertBefore) {
+  auto *CTy = cast<IGCLLVM::FixedVectorType>(C->getType());
+  IGC_ASSERT(CTy->isIntOrIntVectorTy());
+  // Simple vectors are already the correct size <= 8, process common load
+  if (isSimple())
+    return load(InsertBefore);
+
+  unsigned NumElements = CTy->getNumElements();
+  Instruction *Result = nullptr;
+  for (unsigned Idx = 0; Idx != NumElements;) {
+    unsigned Size =
+        std::min(PowerOf2Floor(NumElements - Idx), (uint64_t)ImmIntVec::Width);
+    Constant *SubC = getConstantSubvector(C, Idx, Size);
+    Value *SubV = SubC;
+    ConstantLoader SubLoader(SubC, Subtarget, DL);
+    SubV = SubLoader.load(InsertBefore);
+
+    Region R(C, &DL);
+    R.getSubregion(Idx, Size);
+    Result = R.createWrRegion(
+        Result ? (Value *)Result : (Value *)UndefValue::get(C->getType()), SubV,
+        "constant.split" + Twine(Idx), InsertBefore, DebugLoc());
+    Idx += Size;
+  }
+  return Result;
+}
+/***********************************************************************
  * ConstantLoader::loadBig : insert instruction to load a constant that might
  *      be illegally sized
  */
@@ -1290,7 +1357,7 @@ Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
       AddedInstructions->push_back(Load);
     return Load;
   }
-  auto VT = cast<VectorType>(C->getType());
+  auto VT = cast<IGCLLVM::FixedVectorType>(C->getType());
   const unsigned NumElements = VT->getNumElements();
   const unsigned GRFWidthInBits = Subtarget.getGRFWidth() * genx::ByteBits;
   const unsigned ElementBits = DL.getTypeSizeInBits(VT->getElementType());
@@ -1323,7 +1390,7 @@ Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
  */
 bool ConstantLoader::isLegalSize()
 {
-  auto VT = dyn_cast<VectorType>(C->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return true;
   const int NumBits = DL.getTypeSizeInBits(C->getType());
@@ -1403,6 +1470,9 @@ bool ConstantLoader::isPackedIntVector()
   // Check for a packed int vector. Either the element type must be i16, or
   // the user (instruction using the constant) must be genx.constanti or
   // wrregion or wrconstregion. Not allowed if the user is a logic op.
+  if (cast<IGCLLVM::FixedVectorType>(C->getType())->getNumElements() >
+      ImmIntVec::Width)
+    return false; // wrong width for packed vector
   if (PackedIntScale == 1 && (PackedIntAdjust == 0 || PackedIntAdjust == -8)) {
     if (!User)
       return true; // user not specified -- assume it is a mov, so wrong element
@@ -1429,7 +1499,7 @@ bool ConstantLoader::isPackedIntVector()
  *    (having already done the analysis in the ConstantLoader constructor)
  */
 bool ConstantLoader::isPackedFloatVector() {
-  VectorType *VT = dyn_cast<VectorType>(C->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return false;
   if (VT->getNumElements() > 4)
@@ -1448,7 +1518,7 @@ Constant *ConstantLoader::getConsolidatedConstant(Constant *C)
 {
   if (isa<UndefValue>(C))
     return nullptr;
-  VectorType *VT = dyn_cast<VectorType>(C->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return nullptr;
   const unsigned BytesPerElement =
@@ -1505,15 +1575,21 @@ Constant *ConstantLoader::getConsolidatedConstant(Constant *C)
  */
 void ConstantLoader::analyze()
 {
-  auto VT = dyn_cast<VectorType>(C->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return;
   if (C->getSplatValue())
     return; // don't analyze if already a splat
   unsigned NumElements = VT->getNumElements();
-  if (NumElements <= 8 && VT->getElementType()->isIntegerTy())
-    analyzeForPackedInt(NumElements);
-  else if (NumElements <= 8 && VT->getElementType()->isFloatingPointTy())
+  if (VT->getElementType()->isIntegerTy()) {
+    unsigned MaxSize = 2 * Subtarget.getGRFWidth(); // element type is boolean
+    if (!VT->getElementType()->isIntegerTy(1)) {
+      unsigned ElmSz = VT->getScalarSizeInBits() / genx::ByteBits;
+      MaxSize = 2 * Subtarget.getGRFWidth() / ElmSz;
+    }
+    if (NumElements <= MaxSize)
+      analyzeForPackedInt(NumElements);
+  } else if (NumElements <= 8 && VT->getElementType()->isFloatingPointTy())
     analyzeForPackedFloat(NumElements);
 }
 
@@ -1522,7 +1598,7 @@ void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
   // Get element values.
   int64_t Min = INT64_MAX;
   int64_t Max = INT64_MIN;
-  SmallVector<int64_t, 8> Elements;
+  SmallVector<int64_t, 32> Elements;
   Constant *SomeDefinedElement = nullptr;
   for (unsigned i = 0; i != NumElements; ++i) {
     auto El = C->getAggregateElement(i);
@@ -1545,7 +1621,10 @@ void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
     // (constant materilization expects that NewC is cleared)
     if (!User)
       return;
-    // All but one element undef. Turn into a splat constant.
+    // All but one element undef. If num elements equal 8
+    // then turn it into a splat constant
+    if (NumElements != ImmIntVec::Width)
+      return;
     NewC = ConstantVector::getSplat(IGCLLVM::getElementCount(NumElements),
                                     SomeDefinedElement);
     return;
@@ -1580,8 +1659,8 @@ void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
   // Get unique absolute differences, so we can detect if we have a valid
   // packed int vector that is then scaled and has a splatted constant
   // added/subtracted.
-  SmallVector<uint64_t, 7> Diffs;
-  SmallSet<uint64_t, 7> DiffsSet;
+  SmallVector<uint64_t, 31> Diffs;
+  SmallSet<uint64_t, 31> DiffsSet;
   for (unsigned i = 0, e = Elements.size() - 1; i != e; ++i) {
     int64_t Diff;
     if (IGCLLVM::SubOverflow(Elements[i + 1], Elements[i], Diff))

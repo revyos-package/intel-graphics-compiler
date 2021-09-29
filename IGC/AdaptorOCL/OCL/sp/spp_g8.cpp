@@ -197,6 +197,8 @@ RETVAL CGen8OpenCLProgramBase::GetProgramDebugDataSize(size_t& totalDbgInfoBuffe
         totalDbgInfoBufferSize += sizeof(iOpenCL::SProgramDebugDataHeaderIGC);
         for (auto& data : m_KernelBinaries)
         {
+            if (!data.dbgInfo.header)
+                continue;
             totalDbgInfoBufferSize += (size_t)data.dbgInfo.header->Size() +
                 (size_t)(data.dbgInfo.dbgInfoBufferSize +
                 data.dbgInfo.extraAlignBytes);
@@ -330,13 +332,33 @@ void overrideOCLKernelBinary(
     KernBin->Write(Buf.get(), newBinarySize);
 }
 
-void dumpOCLCos(const IGC::CShader *Kernel, const std::string &stateDebugMsg) {
-      auto name = IGC::Debug::GetDumpNameObj(Kernel, "cos");
-      auto dump = IGC::Debug::Dump(name, IGC::Debug::DumpType::COS_TEXT);
+void dumpOCLCos(const IGC::COpenCLKernel *Kernel, const std::string &stateDebugMsg) {
+    IGC::CodeGenContext* context = Kernel->GetContext();
 
-      IGC::Debug::DumpLock();
-      dump.stream() << stateDebugMsg;
-      IGC::Debug::DumpUnlock();
+    auto dumpName =
+        IGC::Debug::DumpName(IGC::Debug::GetShaderOutputName())
+        .Type(ShaderType::OPENCL_SHADER)
+        .Hash(context->hash)
+        .StagedInfo(context);
+
+    std::string kernelName = Kernel->m_kernelInfo.m_kernelName;
+    const int MAX_KERNEL_NAME = 180;
+
+    // Shorten kernel name to avoid issues with too long file name
+    if (kernelName.size() > MAX_KERNEL_NAME)
+    {
+        kernelName.resize(MAX_KERNEL_NAME);
+    }
+    dumpName = dumpName.PostFix(kernelName);
+
+    dumpName = dumpName.DispatchMode(Kernel->m_ShaderDispatchMode);
+    dumpName = dumpName.SIMDSize(Kernel->m_dispatchSize).Retry(context->m_retryManager.GetRetryId()).Extension("cos");
+
+    auto dump = IGC::Debug::Dump(dumpName, IGC::Debug::DumpType::COS_TEXT);
+
+    IGC::Debug::DumpLock();
+    dump.stream() << stateDebugMsg;
+    IGC::Debug::DumpUnlock();
 }
 
 // Build a name for an ELF temporary file. If uniqueLockFileName contains any % characters then
@@ -384,10 +406,9 @@ bool createElfFileName(std::string &name, unsigned int maxNameLen, SIMDMode simd
     if (uniqueLockFileNameStr.find('%') < uniqueLockFileNameStr.size())
     {
         int uniqueLockFileID = 0;
-        unsigned int mode = sys::fs::perms::all_read | sys::fs::perms::all_write;
         // Every '%' will be replaced with a random character (0-9 or a-f), taking care of multithreaded compilations
         if (std::error_code EC = sys::fs::createUniqueFile(
-            uniqueLockFileName, uniqueLockFileID, resultUniqueLockFileName, mode))
+            uniqueLockFileName, uniqueLockFileID, resultUniqueLockFileName))
         {
             IGC_ASSERT_MESSAGE(false, "A uniquely named file not created");
             retValue = false;
@@ -417,7 +438,7 @@ void CGen8OpenCLProgram::GetZEBinary(
 
     ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8,
         m_Context.m_programInfo, (const uint8_t*)spv, spvSize);
-
+    zebuilder.setProductFamily(m_Platform.eProductFamily);
 
     std::vector<string> elfVecNames;      // Vector of parameters for the linker, contains in/out ELF file names and params
     std::vector<char*> elfVecPtrs;        // Vector of pointers to the elfVecNames vector elements
@@ -498,7 +519,9 @@ void CGen8OpenCLProgram::GetZEBinary(
                 (const char*)pOutput->m_programBin,
                 pOutput->m_programSize,
                 kernel->m_kernelInfo,
-                kernel->getGRFSize());
+                kernel->getGRFSize(),
+                m_Context.btiLayout,
+                m_ContextProvider.isProgramDebuggable());
 
             // FIXME: Handle IGC_IS_FLAG_ENABLED(ShaderDumpEnable) and
             // IGC_IS_FLAG_ENABLED(ShaderOverride)

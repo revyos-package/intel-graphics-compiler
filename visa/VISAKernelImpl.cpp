@@ -162,14 +162,8 @@ int VISAKernelImpl::compileFastPath()
 
 void replaceFCOpcodes(IR_Builder& builder)
 {
-    BB_LIST_ITER bbEnd = builder.kernel.fg.end();
-
-    for (BB_LIST_ITER bb_it = builder.kernel.fg.begin();
-        bb_it != bbEnd;
-        bb_it++)
+    for (G4_BB* bb : builder.kernel.fg)
     {
-        G4_BB* bb = (*bb_it);
-
         if (bb->size() > 0)
         {
             // pseudo_fc_call/ret would always be last
@@ -331,7 +325,7 @@ void VISAKernelImpl::compilePostOptimize()
         auto getFirstNonLabelInst = [this]()
         {
             unsigned int skip = 0, skipCount = 0;
-            if (m_kernel->fg.builder->getHasPerThreadProlog())
+            if (m_kernel->fg.builder->needsToLoadLocalID())
                 ++skip;
             if (m_kernel->fg.builder->needsToLoadCrossThreadConstantData())
                 ++skip;
@@ -570,7 +564,10 @@ int VISAKernelImpl::InitializeFastPath()
 
 void VISAKernelImpl::CopyVars(VISAKernelImpl* from)
 {
-    m_builder->dclpool.getDeclareList() = from->m_builder->dclpool.getDeclareList();
+    m_builder->dclpool.getDeclareList().insert(
+            m_builder->dclpool.getDeclareList().end(),
+            from->m_builder->dclpool.getDeclareList().begin(),
+            from->m_builder->dclpool.getDeclareList().end());
 }
 
 int VISAKernelImpl::InitializeKernel(const char *kernel_name)
@@ -1760,6 +1757,12 @@ int VISAKernelImpl::CreateVISAInputVar(
                 m_CISABuilder->m_ssIsaAsm << printFuncInput(&fmt, m_printDeclIndex.input_index++, getIsKernel(), getOptions()) << "\n";
             }
         }
+    }
+
+    // save the G4_declare of "R1" input in builder
+    if (offset == getGRFSize() && size == getGRFSize())
+    {
+        m_builder->setInputR1(input->dcl);
     }
 
     return status;
@@ -7960,7 +7963,7 @@ unsigned long VISAKernelImpl::writeInToCisaBinaryBuffer(const void * value, int 
     return m_bytes_written_cisa_buffer;
 }
 
-VISA_LabelOpnd* VISAKernelImpl::getLabelOperandFromFunctionName(std::string name)
+VISA_LabelOpnd* VISAKernelImpl::getLabelOperandFromFunctionName(const std::string &name)
 {
     auto it = m_funcName_to_labelID_map.find(name);
     if (m_funcName_to_labelID_map.end() == it) {
@@ -7969,7 +7972,7 @@ VISA_LabelOpnd* VISAKernelImpl::getLabelOperandFromFunctionName(std::string name
         return it->second;
     }
 }
-unsigned int VISAKernelImpl::getLabelIdFromFunctionName(std::string name)
+unsigned int VISAKernelImpl::getLabelIdFromFunctionName(const std::string &name)
 {
     auto it = m_funcName_to_labelID_map.find(name);
     if (m_funcName_to_labelID_map.end() == it) {
@@ -8062,7 +8065,7 @@ unsigned int VISAKernelImpl::getIndexFromLabelName(const std::string &name)
     }
 }
 
-VISA_LabelOpnd* VISAKernelImpl::getLabelOpndFromLabelName(std::string name)
+VISA_LabelOpnd* VISAKernelImpl::getLabelOpndFromLabelName(const std::string &name)
 {
     auto it = m_label_name_to_index_map.find(name);
     if (m_label_name_to_index_map.end() == it) {

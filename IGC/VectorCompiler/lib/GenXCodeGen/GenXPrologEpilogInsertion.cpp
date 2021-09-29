@@ -86,7 +86,7 @@ static cl::opt<bool> HandleMaskArgs("vc-stack-handle-mask-args",
 
 namespace {
 
-inline unsigned calcPadding(unsigned Val, unsigned Align) {
+inline unsigned calcPadding(uint64_t Val, unsigned Align) {
   IGC_ASSERT(Align);
   if (Val % Align == 0)
     return 0;
@@ -107,8 +107,6 @@ class GenXPrologEpilogInsertion
   unsigned ArgRegSize = 0;
   unsigned RetRegSize = 0;
 
-  bool UseGlobalMem = true;
-
   void generateKernelProlog(Function &F);
   void generateFunctionProlog(Function &F);
   void generateFunctionEpilog(Function &F, ReturnInst &I);
@@ -121,8 +119,6 @@ class GenXPrologEpilogInsertion
   std::vector<std::pair<Instruction *, Instruction *>>
   buildWorkList(CallInst *CI, Value *OrigSp, bool UseMemForRet);
   void extractResults(CallInst *CI, Value *OrigSp, IRBuilder<> &IRB);
-
-  void generateAlloca(CallInst *CI);
 
   Value *push(Value *V, IRBuilder<> &IRB, Value *InitSP);
   std::pair<Instruction *, Value*> pop(Type *T, IRBuilder<> &IRB, Value *InitSP);
@@ -167,6 +163,7 @@ public:
   }
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   bool runOnFunction(Function &F) override;
+  void visitAllocaInst(AllocaInst &I);
   void visitCallInst(CallInst &I);
   void visitReturnInst(ReturnInst &I);
 };
@@ -231,8 +228,6 @@ bool GenXPrologEpilogInsertion::runOnFunction(Function &F) {
     return false;
   }
   NumCalls = CallsCalculator().getNumCalls(F);
-  UseGlobalMem =
-      F.getParent()->getModuleFlag(ModuleMD::UseSVMStack) != nullptr;
   LLVM_DEBUG(dbgs() << "Visiting all calls in " << F.getName() << "\n");
   visit(F);
   LLVM_DEBUG(dbgs() << "Visiting finished\n");
@@ -247,6 +242,30 @@ bool GenXPrologEpilogInsertion::runOnFunction(Function &F) {
   return true;
 }
 
+// AllocaPtr = SP + AllocaPadding
+// SP = AllocaPtr + AllocaSize
+void GenXPrologEpilogInsertion::visitAllocaInst(AllocaInst &I) {
+  LLVM_DEBUG(dbgs() << "Visiting alloca " << I << "\n");
+  IGC_ASSERT_MESSAGE(I.isStaticAlloca(), "Non-static alloca is not supported");
+  uint64_t AllocaSize = llvm::divideCeil(*I.getAllocationSizeInBits(*DL),
+                                         genx::ByteBits);
+  unsigned AllocaAlignment = std::max(I.getAlignment(), visa::BytesPerSVMPtr);
+  unsigned AllocaPadding = calcPadding(PrivMemSize, AllocaAlignment);
+
+  IRBuilder<> IRB(&I);
+  auto *SP = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
+                                DL->getIntPtrType(I.getType()), true);
+  auto *AllocaAddr = IRB.CreateAdd(SP,
+      ConstantInt::get(SP->getType(), AllocaPadding));
+  auto *AllocaPtr = IRB.CreateIntToPtr(AllocaAddr, I.getType());
+  auto *NewSP = IRB.CreateAdd(AllocaAddr,
+      ConstantInt::get(SP->getType(), AllocaSize));
+  buildWritePredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB, NewSP);
+  PrivMemSize += (AllocaPadding + AllocaSize);
+  I.replaceAllUsesWith(AllocaPtr);
+  I.eraseFromParent();
+}
+
 void GenXPrologEpilogInsertion::visitCallInst(CallInst &I) {
   if (I.isInlineAsm())
     return;
@@ -257,12 +276,10 @@ void GenXPrologEpilogInsertion::visitCallInst(CallInst &I) {
     generateStackCall(&I);
   if (!IsIndirectCall) {
     auto IID = GenXIntrinsic::getAnyIntrinsicID(I.getCalledFunction());
-    if (IID == GenXIntrinsic::genx_alloca)
-      generateAlloca(&I);
     // TODO: conformance fails when we pass i1 args in presence of SIMDCF. Funny
     // thing is that ISPC doesn't use goto/join in its recursion tests so
     // they're fine (i.e. they're not affected by this option) unlike CM
-    else if (IID == GenXIntrinsic::genx_simdcf_goto)
+    if (IID == GenXIntrinsic::genx_simdcf_goto)
       HandleMaskArgs = false;
   }
 }
@@ -280,10 +297,12 @@ void GenXPrologEpilogInsertion::generateKernelProlog(Function &F) {
   Function *HWID = GenXIntrinsic::getGenXDeclaration(
       F.getParent(), llvm::GenXIntrinsic::genx_get_hwid, {});
   auto *HWIDCall = IRB.CreateCall(HWID);
-  // TODO: revisit offset for scratch if it will be needed.
-  auto *ThreadOffset =
-      IRB.getInt32(UseGlobalMem ? BEConf->getStatelessPrivateMemSize()
-                                : visa::StackPerThreadScratch);
+
+  int StackAmount = genx::getStackAmount(&F);
+  if (StackAmount == genx::VC_STACK_USAGE_UNKNOWN)
+    StackAmount = BEConf->getStatelessPrivateMemSize();
+
+  auto *ThreadOffset = IRB.getInt32(StackAmount);
   auto *Mul = IRB.CreateMul(HWIDCall, ThreadOffset);
   auto *MulCasted = IRB.CreateZExt(Mul, IRB.getInt64Ty());
 
@@ -315,7 +334,7 @@ void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
     auto *ArgScalarType = Arg.getType()->getScalarType();
     auto NumElements = 1;
     bool AllowScalar = true;
-    if (auto *VT = dyn_cast<VectorType>(Arg.getType()))
+    if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Arg.getType()))
       NumElements = VT->getNumElements();
     if (ArgScalarType->isIntegerTy(1)) {
       if (!HandleMaskArgs)
@@ -340,10 +359,11 @@ void GenXPrologEpilogInsertion::generateFunctionProlog(Function &F) {
       if (Arg.getType()->getScalarType()->isIntegerTy(1)) {
         IGC_ASSERT(isa<VectorType>(Arg.getType()));
         ArgRead = cast<Instruction>(IRB.CreateTruncOrBitCast(
-            ArgRead, IGCLLVM::FixedVectorType::get(
-                         IRB.getIntNTy(
-                             cast<VectorType>(Arg.getType())->getNumElements()),
-                         1)));
+            ArgRead,
+            IGCLLVM::FixedVectorType::get(
+                IRB.getIntNTy(cast<IGCLLVM::FixedVectorType>(Arg.getType())
+                                  ->getNumElements()),
+                1)));
         ArgRead = cast<Instruction>(IRB.CreateBitCast(ArgRead, Arg.getType()));
       }
       Offset += ArgSize;
@@ -463,10 +483,10 @@ unsigned GenXPrologEpilogInsertion::writeArgs(CallInst *CI, Value *SpArgs,
         continue;
       IGC_ASSERT(isa<VectorType>(Arg->getType()));
       Arg = IRB.CreateBitOrPointerCast(
-          Arg,
-          IGCLLVM::FixedVectorType::get(
-              IRB.getIntNTy(cast<VectorType>(Arg->getType())->getNumElements()),
-              1));
+          Arg, IGCLLVM::FixedVectorType::get(
+                   IRB.getIntNTy(cast<IGCLLVM::FixedVectorType>(Arg->getType())
+                                     ->getNumElements()),
+                   1));
     }
     Offset += calcPadding(Offset, ST->getGRFWidth());
     auto ArgSize = DL->getTypeSizeInBits(Arg->getType()) / genx::ByteBits;
@@ -580,7 +600,7 @@ void GenXPrologEpilogInsertion::extractResults(CallInst *CI, Value *OrigSp,
           IGC_ASSERT_MESSAGE(0, "Unsupported type to extract from stackcall");
       }
       unsigned NumElems = 1;
-      if (auto *VT = dyn_cast<VectorType>(ActualRet->getType()))
+      if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(ActualRet->getType()))
         NumElems = VT->getNumElements();
       auto *RetRegType = IGCLLVM::FixedVectorType::get(
           ActualRet->getType()->getScalarType(),
@@ -640,44 +660,16 @@ void GenXPrologEpilogInsertion::generateStackCall(CallInst *CI) {
   extractResults(CI, OrigSp, IRB);
 }
 
-// alloca_base = FE_SP
-// FE_SP += sizeof(alloca)
-void GenXPrologEpilogInsertion::generateAlloca(CallInst *CI) {
-  IRBuilder<> IRB(CI);
-
-  auto *AllocaBase = buildReadPredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB,
-                                        CI->getType(), true);
-
-  auto *AllocaOff = CI->getOperand(0);
-  auto *AllocaOffTy = AllocaOff->getType();
-
-  unsigned AllocaOffset = DL->getTypeSizeInBits(AllocaOffTy) / genx::ByteBits;
-
-  // padd the current alloca the comply with gather/scatter alignment rules
-  auto *AllocaEltTy = AllocaOffTy->getScalarType();
-  if (AllocaOffTy->isArrayTy())
-    AllocaEltTy = AllocaOffTy->getArrayElementType();
-  AllocaOffset += calcPadding(AllocaOffset, visa::BytesPerSVMPtr);
-
-  auto *Add =
-      IRB.CreateAdd(AllocaBase, ConstantInt::get(CI->getType(), AllocaOffset));
-  IGC_ASSERT(AllocaOffset % visa::BytesPerSVMPtr == 0);
-  PrivMemSize += AllocaOffset;
-
-  buildWritePredefReg(PreDefined_Vars::PREDEFINED_FE_SP, IRB, Add);
-  CI->replaceAllUsesWith(AllocaBase);
-  CI->eraseFromParent();
-}
-
 Value *GenXPrologEpilogInsertion::push(Value *V, IRBuilder<> &IRB, Value *InitSP) {
   if (!isa<VectorType>(V->getType()))
     V = IRB.CreateBitCast(V, IGCLLVM::FixedVectorType::get(V->getType()->getScalarType(), 1));
   if (V->getType()->getScalarType()->isIntegerTy(1)) {
     IGC_ASSERT(isa<VectorType>(V->getType()));
     V = IRB.CreateBitOrPointerCast(
-        V, IGCLLVM::FixedVectorType::get(IRB.getInt8Ty(),
-                           cast<VectorType>(V->getType())->getNumElements() /
-                               genx::ByteBits));
+        V, IGCLLVM::FixedVectorType::get(
+               IRB.getInt8Ty(),
+               cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements() /
+                   genx::ByteBits));
   }
   unsigned BytesLeft = DL->getTypeSizeInBits(V->getType()) / genx::ByteBits;
   unsigned Offset = 0;
@@ -723,9 +715,9 @@ GenXPrologEpilogInsertion::pop(Type *Ty, IRBuilder<> &IRB, Value *InitSP) {
   unsigned Offset = 0;
   if (Ty->getScalarType()->isIntegerTy(1)) {
     IGC_ASSERT(isa<VectorType>(Ty));
-    Ty = IGCLLVM::FixedVectorType::get(IRB.getInt8Ty(),
-                         cast<VectorType>(Ty)->getNumElements() /
-                             genx::ByteBits);
+    Ty = IGCLLVM::FixedVectorType::get(
+        IRB.getInt8Ty(),
+        cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements() / genx::ByteBits);
   }
   auto *SP = InitSP;
   Value *RetVal = UndefValue::get(Ty);
@@ -823,7 +815,7 @@ GenXPrologEpilogInsertion::buildWritePredefReg(PreDefined_Vars RegID,
 Instruction *GenXPrologEpilogInsertion::buildWritePredefReg(
     PreDefined_Vars RegID, IRBuilder<> &IRB, Value *Input, Value *Dep,
     Instruction *InsPoint, unsigned Offset) {
-  Region RWrite(Input);
+  Region RWrite(Input, DL);
   RWrite.Offset = Offset;
   auto *Wrr = RWrite.createWrRegion(Dep, Input, "", InsPoint, DebugLoc());
   Function *RegWriteIntr = GenXIntrinsic::getGenXDeclaration(

@@ -138,7 +138,7 @@ namespace
         }
         Instruction* Create(Type* returnType, Value* ptr, unsigned int alignment, bool isVolatile)
         {
-            IRBuilder<> builder(m_inst);
+            IGCLLVM::IRBuilder<> builder(m_inst);
             if (isa<LoadInst>(m_inst))
             {
                 Type* newPtrType = PointerType::get(returnType, ptr->getType()->getPointerAddressSpace());
@@ -161,7 +161,7 @@ namespace
         // Emulates a GEP on a pointer of the scalar type of returnType.
         Value* CreateConstScalarGEP(Type* returnType, Value* ptr, uint32_t offset)
         {
-            IRBuilder<> builder(m_inst);
+            IGCLLVM::IRBuilder<> builder(m_inst);
             if (isa<LoadInst>(m_inst))
             {
                 Type* ePtrType = PointerType::get(returnType->getScalarType(), ptr->getType()->getPointerAddressSpace());
@@ -266,7 +266,7 @@ namespace
         // Emulates a GEP on a pointer of the scalar type of storedType.
         Value* CreateConstScalarGEP(Type* storedType, Value* ptr, uint32_t offset)
         {
-            IRBuilder<> builder(m_inst);
+            IGCLLVM::IRBuilder<> builder(m_inst);
             if (isa<StoreInst>(m_inst))
             {
                 Type* ePtrType = PointerType::get(storedType->getScalarType(), ptr->getType()->getPointerAddressSpace());
@@ -485,7 +485,7 @@ void VectorPreProcess::replaceAllVectorUsesWithScalars(Instruction* VI, ValVecto
             I = VI->getParent()->getFirstNonPHI();
         }
         IRBuilder<> Builder(I);
-        VectorType* VTy = cast<VectorType>(VI->getType());
+        IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(VI->getType());
         Value* newVec = UndefValue::get(VTy);
         for (uint32_t i = 0, e = int_cast<uint32_t>(VTy->getNumElements()); i < e; ++i)
         {
@@ -626,7 +626,7 @@ bool VectorPreProcess::splitStore(
 {
     Instruction* SI = ASI.getInst();
     Value* StoredVal = ASI.getValueOperand();
-    VectorType* VTy = cast<VectorType>(StoredVal->getType());
+    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(StoredVal->getType());
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
@@ -712,7 +712,7 @@ bool VectorPreProcess::splitStore(
         {
             Type* Ty1 = splitInfo[i].first;
             uint32_t len1 = splitInfo[i].second;
-            VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+            IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
             for (uint32_t j = 0; j < len1; ++j)
             {
                 Value* subVec;
@@ -749,7 +749,7 @@ bool VectorPreProcess::splitStore(
     {
         Type* Ty1 = splitInfo[i].first;
         uint32_t len1 = splitInfo[i].second;
-        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+        IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
         for (uint32_t j = 0; j < len1; ++j)
         {
             uint32_t vAlign = (uint32_t)MinAlign(Align, (uint32_t)eOffset * EBytes);
@@ -793,7 +793,7 @@ bool VectorPreProcess::splitLoad(
 {
     Instruction* LI = ALI.getInst();
     bool isLdRaw = isa<LdRawIntrinsic>(LI);
-    VectorType* VTy = cast<VectorType>(LI->getType());
+    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(LI->getType());
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
 
@@ -855,7 +855,7 @@ bool VectorPreProcess::splitLoad(
     {
         Type* Ty1 = splitInfo[i].first;
         uint32_t len1 = splitInfo[i].second;
-        VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+        IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
         for (uint32_t j = 0; j < len1; ++j)
         {
             uint32_t vAlign = (uint32_t)MinAlign(Align, eOffset * EBytes);
@@ -923,7 +923,7 @@ bool VectorPreProcess::splitLoadStore(
     Optional<AbstractStoreInst> ASI = AbstractStoreInst::get(Inst);
     IGC_ASSERT_MESSAGE((ALI || ASI), "Inst should be either load or store");
     Type* Ty = ALI ? ALI->getInst()->getType() : ASI->getValueOperand()->getType();
-    VectorType* VTy = dyn_cast<VectorType>(Ty);
+    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
     if (!VTy)
     {
         return false;
@@ -981,7 +981,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
     AbstractStoreInst* ASI = optionalASI ? optionalASI.getPointer() : nullptr;
     IGC_ASSERT_MESSAGE((optionalALI || optionalASI), "Inst should be either load or store");
     Type* Ty = ALI ? ALI->getInst()->getType() : ASI->getValueOperand()->getType();
-    VectorType* VTy = dyn_cast<VectorType>(Ty);
+    IGCLLVM::FixedVectorType *VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
     IGC_ASSERT_MESSAGE(nullptr != VTy, "Inst should be a 3-element vector load/store!");
     IGC_ASSERT_MESSAGE(VTy->getNumElements() == 3, "Inst should be a 3-element vector load/store!");
 
@@ -1154,7 +1154,7 @@ void VectorPreProcess::getOrGenScalarValues(
 {
     availBeforeInst = nullptr;
 
-    VectorType* VTy = cast<VectorType>(VecVal->getType());
+    IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(VecVal->getType());
     if (!VTy)
     {
         scalars[0] = VecVal;
@@ -1305,7 +1305,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         //
         // TODO: further optimize this load into a message with channel masks
         // for cases in which use indices are sparse like {0, 2}.
-        unsigned N = (unsigned)cast<VectorType>(Inst->getType())->getNumElements();
+        unsigned N = (unsigned)cast<IGCLLVM::FixedVectorType>(Inst->getType())->getNumElements();
         if (N == MaxIndex + 1)
             return Inst;
 
@@ -1420,7 +1420,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
     if (NBits < 32)
         return Inst;
 
-    unsigned N = (unsigned)cast<VectorType>(Val->getType())->getNumElements();
+    unsigned N = (unsigned)cast<IGCLLVM::FixedVectorType>(Val->getType())->getNumElements();
     if (auto CV = dyn_cast<ConstantVector>(Val))
     {
         unsigned MaxIndex = 0;
@@ -1589,7 +1589,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
                 for (uint32_t j = 0; j < svals.size(); ++j)
                 {
                     Type* Ty1 = svals[j]->getType();
-                    VectorType* VTy1 = dyn_cast<VectorType>(Ty1);
+                    IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
                     if (VTy1) {
                         for (uint32_t k = 0; k < VTy1->getNumElements(); ++k)
                         {
@@ -1638,7 +1638,7 @@ bool VectorPreProcess::runOnFunction(Function& F)
                     // If this is a 3-element vector load, remove it
                     // from m_Vector3List as well.
                     if (isAbstractLoadInst(tInst) && tInst->getType()->isVectorTy() &&
-                        cast<VectorType>(tInst->getType())->getNumElements() == 3)
+                        cast<IGCLLVM::FixedVectorType>(tInst->getType())->getNumElements() == 3)
                     {
                         InstWorkVector::iterator
                             tI = m_Vector3List.begin(),

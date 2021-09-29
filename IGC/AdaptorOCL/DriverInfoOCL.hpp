@@ -20,6 +20,8 @@ namespace TC
 
         bool AllowSendFusion() const override { return false; }
 
+        bool SupportFastestStage1() const override { return true; }
+
         bool SupportsIEEEMinMax() const override { return true; }
 
         bool NeedCheckContractionAllowed() const override { return true; }
@@ -36,6 +38,7 @@ namespace TC
 
         bool NeedExtraPassesAfterAlwaysInlinerPass() const override { return true; }
         bool enableVISAPreRAScheduler() const override { return true; }
+        bool enableVISAPreRASchedulerForRetry() const override { return true; }
 
         bool NeedWAToTransformA32MessagesToA64() const override{ return true; }
         bool WADisableCustomPass() const override { return true; }

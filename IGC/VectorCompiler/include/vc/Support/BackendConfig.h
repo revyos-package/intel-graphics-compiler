@@ -55,6 +55,9 @@ struct GenXBackendOptions {
   bool EmitDebugInformation = false;
   // Generate Debug Info in a format compatible with zebin
   bool DebugInfoForZeBin = false;
+  // Enable strict debug info validation
+  bool DebugInfoValidationEnable = false;
+
   // Enable/disable regalloc dump.
   bool DumpRegAlloc;
   // Maximum available memory for stack (in bytes).
@@ -80,6 +83,9 @@ struct GenXBackendOptions {
   // value in two-address operand)
   bool DisableNonOverlappingRegionOpt;
 
+  // Force passing "-debug" option to finalizer
+  bool PassDebugToFinalizer = false;
+
   // use new Prolog/Epilog Insertion pass vs old CisaBuilder machinery
   bool UseNewStackBuilder = true;
 
@@ -96,6 +102,11 @@ struct GenXBackendOptions {
   // max private stateless memory size per thread
   unsigned StatelessPrivateMemSize;
 
+  // Historically stack calls linkage is changed to internal in CMABI. This
+  // option allows saving the original linkage type for such functions. This is
+  // required for linking (e.g. invoke_simd).
+  bool SaveStackCallLinkage = false;
+
   GenXBackendOptions();
 };
 
@@ -103,6 +114,7 @@ enum BiFKind {
   OCLGeneric,
   VCPrintf,
   VCEmulation,
+  VCSPIRVBuiltins,
   Size
 };
 
@@ -157,6 +169,7 @@ public:
   bool emitDebugInformation() const { return Options.EmitDebugInformation; }
   bool emitDebuggableKernels() const { return Options.EmitDebuggableKernels; }
   bool emitDebugInfoForZeBin() const { return Options.DebugInfoForZeBin; }
+  bool enableDebugInfoValidation() const { return Options.DebugInfoValidationEnable; }
   // Return whether shader dumper is installed.
   bool hasShaderDumper() const { return Options.Dumper; }
 
@@ -193,6 +206,10 @@ public:
     return Options.DisableNonOverlappingRegionOpt;
   }
 
+  bool passDebugToFinalizer() const {
+    return Options.PassDebugToFinalizer;
+  }
+
   bool useNewStackBuilder() const { return Options.UseNewStackBuilder; }
 
   unsigned getStatelessPrivateMemSize() const {
@@ -209,6 +226,8 @@ public:
   }
 
   bool useBindlessBuffers() const { return Options.UseBindlessBuffers; }
+
+  bool saveStackCallLinkage() const { return Options.SaveStackCallLinkage; }
 };
 } // namespace llvm
 

@@ -1489,14 +1489,15 @@ std::vector<Value *> GenXLiveness::getAddressWithBase(Value *Base) {
 }
 
 /***********************************************************************
- * isBitCastCoalesced : see if the bitcast has been coalesced away
+ * isNoopCastCoalesced : see if the no-op cast has been coalesced away
  *
- * This handles the case that the input and result of the bitcast are coalesced
+ * This handles the case that the input and result of the no-op cast are coalesced
  * in to the same live range.
  */
-bool GenXLiveness::isBitCastCoalesced(BitCastInst *BCI)
+bool GenXLiveness::isNoopCastCoalesced(CastInst *CI)
 {
-  return getLiveRangeOrNull(BCI) == getLiveRangeOrNull(BCI->getOperand(0));
+  IGC_ASSERT(genx::isNoopCast(CI));
+  return getLiveRangeOrNull(CI) == getLiveRangeOrNull(CI->getOperand(0));
 }
 
 /***********************************************************************
@@ -1732,16 +1733,18 @@ void LiveRange::prepareFuncs(FunctionGroupAnalysis *FGA) {
     else if (auto Arg = dyn_cast<Argument>(Val.getValue()))
       DefFunc = Arg->getParent();
 
-    if (DefFunc)
-      Funcs.insert(FGA->getSubGroup(DefFunc)
-        ? FGA->getSubGroup(DefFunc)->getHead()
-        : FGA->getGroup(DefFunc)->getHead());
+    if (DefFunc) {
+      auto *DefFuncFG = FGA->getAnyGroup(DefFunc);
+      IGC_ASSERT_MESSAGE(DefFuncFG, "Cannot find the function group");
+      Funcs.insert(DefFuncFG->getHead());
+    }
 
     for (auto U : Val.getValue()->users())
       if (Instruction *UserInst = dyn_cast<Instruction>(U)) {
         auto F = UserInst->getFunction();
-        Funcs.insert(FGA->getSubGroup(F) ? FGA->getSubGroup(F)->getHead()
-                                         : FGA->getGroup(F)->getHead());
+        auto *FG = FGA->getAnyGroup(F);
+        IGC_ASSERT_MESSAGE(FG, "Cannot find the function group");
+        Funcs.insert(FG->getHead());
       }
   }
 }
@@ -1781,11 +1784,10 @@ void LiveRange::print(raw_ostream &OS) const
     case RegCategory::GENERAL: Cat = "general"; break;
     case RegCategory::ADDRESS: Cat = "address"; break;
     case RegCategory::PREDICATE: Cat = "predicate"; break;
-    case RegCategory::EM: Cat = "em"; break;
-    case RegCategory::RM: Cat = "rm"; break;
     case RegCategory::SAMPLER: Cat = "sampler"; break;
     case RegCategory::SURFACE: Cat = "surface"; break;
-    case RegCategory::VME: Cat = "vme"; break;
+    case RegCategory::EM: Cat = "em"; break;
+    case RegCategory::RM: Cat = "rm"; break;
   }
   OS << "{" << Cat << ",align" << (1U << LogAlignment);
   if (Offset)

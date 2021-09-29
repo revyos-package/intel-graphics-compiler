@@ -12,7 +12,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
-#include <llvm/IR/IRBuilder.h>
+#include <llvmWrapper/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -46,7 +46,7 @@ bool HandleLoadStoreInstructions::runOnFunction(llvm::Function& F)
 
 void HandleLoadStoreInstructions::visitLoadInst(llvm::LoadInst& I)
 {
-    llvm::IRBuilder<> builder(&I);
+    IGCLLVM::IRBuilder<> builder(&I);
     llvm::Value* ptrv = llvm::cast<llvm::LoadInst>(I).getPointerOperand();
 
     if (I.getType()->isDoubleTy() ||
@@ -61,7 +61,7 @@ void HandleLoadStoreInstructions::visitLoadInst(llvm::LoadInst& I)
 
         if (I.getType()->isVectorTy())
         {
-            numVectorElements = (uint32_t)cast<VectorType>(I.getType())->getNumElements();
+            numVectorElements = (uint32_t)cast<IGCLLVM::FixedVectorType>(I.getType())->getNumElements();
             doubleDstType = IGCLLVM::FixedVectorType::get(builder.getDoubleTy(), numVectorElements);
         }
         uint as = ptrv->getType()->getPointerAddressSpace();
@@ -123,7 +123,7 @@ void HandleLoadStoreInstructions::visitLoadInst(llvm::LoadInst& I)
 
 void HandleLoadStoreInstructions::visitStoreInst(llvm::StoreInst& I)
 {
-    llvm::IRBuilder<> builder(&I);
+    IGCLLVM::IRBuilder<> builder(&I);
     llvm::Value* ptrv = llvm::cast<llvm::StoreInst>(I).getPointerOperand();
     if (I.getValueOperand()->getType()->isDoubleTy() ||
         (I.getValueOperand()->getType()->isVectorTy() &&
@@ -134,7 +134,7 @@ void HandleLoadStoreInstructions::visitStoreInst(llvm::StoreInst& I)
 
         if (I.getValueOperand()->getType()->isVectorTy())
         {
-            numVectorElements = (uint32_t)cast<VectorType>(I.getValueOperand()->getType())->getNumElements();
+            numVectorElements = (uint32_t)cast<IGCLLVM::FixedVectorType>(I.getValueOperand()->getType())->getNumElements();
         }
 
 

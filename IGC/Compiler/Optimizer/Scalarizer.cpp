@@ -403,7 +403,7 @@ void ScalarizeFunction::scalarizeInstruction(BinaryOperator* BI)
 {
     V_PRINT(scalarizer, "\t\tBinary instruction\n");
     IGC_ASSERT_MESSAGE(BI, "instruction type dynamic cast failed");
-    VectorType* instType = dyn_cast<VectorType>(BI->getType());
+    IGCLLVM::FixedVectorType* instType = dyn_cast<IGCLLVM::FixedVectorType>(BI->getType());
     // Only need handling for vector binary ops
     if (!instType) return;
 
@@ -463,7 +463,7 @@ void ScalarizeFunction::scalarizeInstruction(CmpInst* CI)
 {
     V_PRINT(scalarizer, "\t\tCompare instruction\n");
     IGC_ASSERT_MESSAGE(CI, "instruction type dynamic cast failed");
-    VectorType* instType = dyn_cast<VectorType>(CI->getType());
+    IGCLLVM::FixedVectorType* instType = dyn_cast<IGCLLVM::FixedVectorType>(CI->getType());
     // Only need handling for vector compares
     if (!instType) return;
 
@@ -511,13 +511,13 @@ void ScalarizeFunction::scalarizeInstruction(CastInst* CI)
 {
     V_PRINT(scalarizer, "\t\tCast instruction\n");
     IGC_ASSERT_MESSAGE(CI, "instruction type dynamic cast failed");
-    VectorType* instType = dyn_cast<VectorType>(CI->getType());
+    IGCLLVM::FixedVectorType* instType = dyn_cast<IGCLLVM::FixedVectorType>(CI->getType());
 
     // For BitCast - we only scalarize if src and dst types have same vector length
     if (isa<BitCastInst>(CI))
     {
         if (!instType) return recoverNonScalarizableInst(CI);
-        VectorType* srcType = dyn_cast<VectorType>(CI->getOperand(0)->getType());
+        IGCLLVM::FixedVectorType* srcType = dyn_cast<IGCLLVM::FixedVectorType>(CI->getOperand(0)->getType());
         if (!srcType || (instType->getNumElements() != srcType->getNumElements()))
         {
             return recoverNonScalarizableInst(CI);
@@ -532,8 +532,13 @@ void ScalarizeFunction::scalarizeInstruction(CastInst* CI)
 
     // Get additional info from instruction
     unsigned numElements = int_cast<unsigned>(instType->getNumElements());
-    IGC_ASSERT_MESSAGE(isa<VectorType>(CI->getOperand(0)->getType()), "unexpected type!");
-    IGC_ASSERT_MESSAGE(cast<VectorType>(CI->getOperand(0)->getType())->getNumElements() == numElements, "unexpected vector width");
+    IGC_ASSERT_MESSAGE(
+        isa<IGCLLVM::FixedVectorType>(CI->getOperand(0)->getType()),
+        "unexpected type!");
+    IGC_ASSERT_MESSAGE(
+        cast<IGCLLVM::FixedVectorType>(CI->getOperand(0)->getType())
+                ->getNumElements() == numElements,
+        "unexpected vector width");
 
     // Obtain scalarized argument
     SmallVector<Value*, MAX_INPUT_VECTOR_WIDTH>operand0;
@@ -572,7 +577,7 @@ void ScalarizeFunction::scalarizeInstruction(PHINode* PI)
 {
     V_PRINT(scalarizer, "\t\tPHI instruction\n");
     IGC_ASSERT_MESSAGE(PI, "instruction type dynamic cast failed");
-    VectorType* instType = dyn_cast<VectorType>(PI->getType());
+    IGCLLVM::FixedVectorType* instType = dyn_cast<IGCLLVM::FixedVectorType>(PI->getType());
     // Only need handling for vector PHI
     if (!instType) return;
 
@@ -683,7 +688,7 @@ void ScalarizeFunction::scalarizeInstruction(SelectInst* SI)
 {
     V_PRINT(scalarizer, "\t\tSelect instruction\n");
     IGC_ASSERT_MESSAGE(SI, "instruction type dynamic cast failed");
-    VectorType* instType = dyn_cast<VectorType>(SI->getType());
+    IGCLLVM::FixedVectorType* instType = dyn_cast<IGCLLVM::FixedVectorType>(SI->getType());
     // Only need handling for vector select
     if (!instType) return;
 
@@ -765,7 +770,7 @@ void ScalarizeFunction::scalarizeInstruction(ExtractElementInst* EI)
 
     // Connect the "extracted" value to all its consumers
     uint64_t scalarIndex = cast<ConstantInt>(scalarIndexVal)->getZExtValue();
-    auto valueVType = cast<VectorType>(vectorValue->getType());
+    auto valueVType = cast<IGCLLVM::FixedVectorType>(vectorValue->getType());
     if (static_cast<unsigned int>(scalarIndex) < (unsigned)valueVType->getNumElements())
     {
         IGC_ASSERT_MESSAGE(NULL != operand[static_cast<unsigned int>(scalarIndex)], "SCM error");
@@ -822,14 +827,17 @@ void ScalarizeFunction::scalarizeInstruction(InsertElementInst* II)
 
     IGC_ASSERT_MESSAGE(isa<ConstantInt>(scalarIndexVal), "inst arguments error");
     uint64_t scalarIndex = cast<ConstantInt>(scalarIndexVal)->getZExtValue();
-    IGC_ASSERT_MESSAGE(scalarIndex < dyn_cast<VectorType>(II->getType())->getNumElements(), "index error");
+    IGC_ASSERT_MESSAGE(
+        scalarIndex <
+            dyn_cast<IGCLLVM::FixedVectorType>(II->getType())->getNumElements(),
+        "index error");
 
     // Obtain breakdown of input vector
     SmallVector<Value*, MAX_INPUT_VECTOR_WIDTH>scalarValues;
     if (isa<UndefValue>(sourceVectorValue))
     {
         // Scalarize the undef value (generate a scalar undef)
-        VectorType* inputVectorType = dyn_cast<VectorType>(sourceVectorValue->getType());
+        IGCLLVM::FixedVectorType* inputVectorType = dyn_cast<IGCLLVM::FixedVectorType>(sourceVectorValue->getType());
         IGC_ASSERT_MESSAGE(inputVectorType, "expected vector argument");
 
         UndefValue* undefVal = UndefValue::get(inputVectorType->getElementType());
@@ -870,7 +878,7 @@ void ScalarizeFunction::scalarizeInstruction(ShuffleVectorInst* SI)
     IGC_ASSERT(nullptr != sourceVector0Value);
     Value* sourceVector1Value = SI->getOperand(1);
     IGC_ASSERT(nullptr != sourceVector1Value);
-    VectorType* const inputType = dyn_cast<VectorType>(sourceVector0Value->getType());
+    IGCLLVM::FixedVectorType* const inputType = dyn_cast<IGCLLVM::FixedVectorType>(sourceVector0Value->getType());
     IGC_ASSERT_MESSAGE(nullptr != inputType, "vector input error");
     IGC_ASSERT_MESSAGE(inputType == sourceVector1Value->getType(), "vector input error");
     unsigned sourceVectorWidth = int_cast<unsigned>(inputType->getNumElements());
@@ -892,7 +900,7 @@ void ScalarizeFunction::scalarizeInstruction(ShuffleVectorInst* SI)
 
     // Generate array for shuffled scalar values
     SmallVector<Value*, MAX_INPUT_VECTOR_WIDTH>newVector;
-    unsigned width = int_cast<unsigned>(SI->getType()->getNumElements());
+    unsigned width = int_cast<unsigned>(cast<IGCLLVM::FixedVectorType>(SI->getType())->getNumElements());
 
     // Generate undef value, which may be needed as some scalar elements
     UndefValue* undef = UndefValue::get(inputType->getElementType());
@@ -961,7 +969,7 @@ void ScalarizeFunction::scalarizeInstruction(GetElementPtrInst* GI)
 
     if (baseValue->getType()->isVectorTy())
     {
-        width = int_cast<unsigned>(dyn_cast<VectorType>(baseValue->getType())->getNumElements());
+        width = int_cast<unsigned>(dyn_cast<IGCLLVM::FixedVectorType>(baseValue->getType())->getNumElements());
         // Obtain the scalarized operands
         obtainScalarizedValues(operand1, NULL, baseValue, GI);
         ptrTy = dyn_cast<VectorType>(baseValue->getType())->getElementType();
@@ -972,7 +980,7 @@ void ScalarizeFunction::scalarizeInstruction(GetElementPtrInst* GI)
     }
     if (indexValue->getType()->isVectorTy())
     {
-        width = int_cast<unsigned>(dyn_cast<VectorType>(indexValue->getType())->getNumElements());
+        width = int_cast<unsigned>(dyn_cast<IGCLLVM::FixedVectorType>(indexValue->getType())->getNumElements());
         // Obtain the scalarized operands
         obtainScalarizedValues(operand2, NULL, indexValue, GI);
     }
@@ -1011,7 +1019,7 @@ void ScalarizeFunction::obtainScalarizedValues(SmallVectorImpl<Value*>& retValue
 {
     V_PRINT(scalarizer, "\t\t\tObtaining scalar value... " << *origValue << "\n");
 
-    VectorType* origType = dyn_cast<VectorType>(origValue->getType());
+    IGCLLVM::FixedVectorType* origType = dyn_cast<IGCLLVM::FixedVectorType>(origValue->getType());
     IGC_ASSERT_MESSAGE(origType, "Value must have a vector type!");
     unsigned width = int_cast<unsigned>(origType->getNumElements());
 
@@ -1170,7 +1178,7 @@ void ScalarizeFunction::obtainVectorValueWhichMightBeScalarizedImpl(Value* vecto
     }
 
     Value* assembledVector = UndefValue::get(vectorVal->getType());
-    unsigned width = int_cast<unsigned>(dyn_cast<VectorType>(vectorVal->getType())->getNumElements());
+    unsigned width = int_cast<unsigned>(dyn_cast<IGCLLVM::FixedVectorType>(vectorVal->getType())->getNumElements());
     for (unsigned i = 0; i < width; i++)
     {
         IGC_ASSERT_MESSAGE(NULL != valueEntry->scalarValues[i], "SCM entry has NULL value");
@@ -1230,7 +1238,7 @@ void ScalarizeFunction::updateSCMEntryWithValues(ScalarizeFunction::SCMEntry* en
     bool matchDbgLoc)
 {
     IGC_ASSERT_MESSAGE((origValue->getType()->isArrayTy() || origValue->getType()->isVectorTy()), "only Vector values are supported");
-    unsigned width = int_cast<unsigned>(dyn_cast<VectorType>(origValue->getType())->getNumElements());
+    unsigned width = int_cast<unsigned>(dyn_cast<IGCLLVM::FixedVectorType>(origValue->getType())->getNumElements());
 
     entry->isOriginalVectorRemoved = isOrigValueRemoved;
 
@@ -1301,7 +1309,7 @@ void ScalarizeFunction::resolveDeferredInstructions()
         Instruction* vectorInst = dyn_cast<Instruction>(current.unresolvedInst);
         IGC_ASSERT_MESSAGE(vectorInst, "DRL only handles unresolved instructions");
 
-        VectorType* currType = dyn_cast<VectorType>(vectorInst->getType());
+        IGCLLVM::FixedVectorType* currType = dyn_cast<IGCLLVM::FixedVectorType>(vectorInst->getType());
         IGC_ASSERT_MESSAGE(currType, "Cannot have DRL of non-vector value");
         unsigned width = int_cast<unsigned>(currType->getNumElements());
 

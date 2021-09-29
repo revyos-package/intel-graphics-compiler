@@ -13,7 +13,6 @@ namespace IGC
 {
   struct DebugEmitterOpts {
     bool DebugEnabled = false;
-    bool UseNewRegisterEncoding = true;
     bool EnableSIMDLaneDebugging = true;
     bool EnableGTLocationDebugging = false;
     bool UseOffsetInLocation = false;
@@ -26,6 +25,7 @@ namespace IGC
     bool EmitPrologueEnd = true;
     bool ScratchOffsetInOW = true;
     bool EmitATLinkageName = true;
+    bool EnableDebugInfoValidation = false;
   };
 }
 

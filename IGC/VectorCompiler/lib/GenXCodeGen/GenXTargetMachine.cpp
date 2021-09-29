@@ -137,6 +137,10 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXPrintfLegalizationPass(registry);
   initializeGenXAggregatePseudoLoweringPass(registry);
   initializeGenXBTIAssignmentPass(registry);
+  initializeGenXPromoteStatefulToBindlessPass(registry);
+  initializeGenXTranslateSPIRVBuiltinsPass(registry);
+  initializeGenXLoadStoreLoweringPass(registry);
+  initializeGenXStackUsagePass(registry);
 
   // WRITE HERE MORE PASSES IF IT'S NEEDED;
 }
@@ -168,7 +172,7 @@ public:
   // addPassesToEmitFile, opt creates it manually before adding other
   // passes. BackendConfig will be either created manually with
   // options structure or default-constructed using cl::opt values.
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<GenXBackendConfig>();
     TargetPassConfig::getAnalysisUsage(AU);
   }
@@ -205,8 +209,6 @@ TargetPassConfig *GenXTargetMachine::createPassConfig(PassManagerBase &PM) {
   return createGenXPassConfig(*this, PM);
 }
 
-void GenXTargetMachine32::anchor() {}
-
 GenXTargetMachine32::GenXTargetMachine32(const Target &T, const Triple &TT,
                                          StringRef CPU, StringRef FS,
                                          const TargetOptions &Options,
@@ -214,8 +216,6 @@ GenXTargetMachine32::GenXTargetMachine32(const Target &T, const Triple &TT,
                                          Optional<CodeModel::Model> CM,
                                          CodeGenOpt::Level OL, bool JIT)
     : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, false) {}
-
-void GenXTargetMachine64::anchor() {}
 
 GenXTargetMachine64::GenXTargetMachine64(const Target &T, const Triple &TT,
                                          StringRef CPU, StringRef FS,
@@ -290,6 +290,10 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
 
   /// .. include:: GenXGEPLowering.cpp
   PM.add(createGenXGEPLoweringPass());
+  /// .. include:: GenXStackUsage.cpp
+  PM.add(createGenXStackUsagePass());
+  /// .. include:: GenXLoadStoreLowering.cpp
+  PM.add(createGenXLoadStoreLoweringPass());
   PM.add(createGenXThreadPrivateMemoryPass());
 
   /// BasicAliasAnalysis
@@ -375,7 +379,7 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   ///
   PM.add(createBreakCriticalEdgesPass());
   /// .. include:: GenXPatternMatch.cpp
-  PM.add(createGenXPatternMatchPass(&Options));
+  PM.add(createGenXPatternMatchPass());
   if (!DisableVerify) PM.add(createVerifierPass());
   /// .. include:: GenXExtractVectorizer.cpp
   PM.add(createGenXExtractVectorizerPass());
@@ -398,6 +402,8 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
     PM.add(createGenXEmulationImportPass());
   /// .. include:: GenXEmulate.cpp
   PM.add(createGenXEmulatePass());
+  /// .. include:: GenXPromoteStatefulToBindless.cpp
+  PM.add(createGenXPromoteStatefulToBindlessPass());
   /// .. include:: GenXDeadVectorRemoval.cpp
   PM.add(createGenXDeadVectorRemovalPass());
   /// DeadCodeElimination
@@ -522,6 +528,7 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
   // Packetize.
   auto AddPacketize = [](const PassManagerBuilder &Builder,
                          PassManagerBase &PM) {
+    PM.add(createGenXTranslateSPIRVBuiltinsPass());
     PM.add(createGenXPrintfResolutionPass());
     PM.add(createGenXImportOCLBiFPass());
     PM.add(createGenXPacketizePass());

@@ -72,12 +72,13 @@ class GenXExtractVectorizer : public FunctionPass {
 public:
   static char ID;
   explicit GenXExtractVectorizer() : FunctionPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX Extract Vectorizer"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override { return "GenX Extract Vectorizer"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.setPreservesCFG();
   }
-  bool runOnFunction(Function &F);
+  bool runOnFunction(Function &F) override;
+
 private:
   void processExtracted(Value *V);
   void processBucket(const BucketIndex *BIdx, SmallVectorImpl<Extract> *B);
@@ -227,8 +228,8 @@ void GenXExtractVectorizer::processBucket(const BucketIndex *BIdx,
   Value *NewRdRegion = OrigVector;
   // Need to splat if Diff is 0, otherwise elements extracted are wrong.
   if (Diff == 0 || R.Indirect || R.Offset ||
-      R.NumElements !=
-          cast<VectorType>(OrigVector->getType())->getNumElements()) {
+      R.NumElements != cast<IGCLLVM::FixedVectorType>(OrigVector->getType())
+                           ->getNumElements()) {
     // Not identity region.
     NewRdRegion = R.createRdRegion(OrigVector,
         Extract0->Inst->getName() + ".histogrammed", InsertBefore,

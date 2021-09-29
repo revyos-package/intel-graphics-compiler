@@ -1425,18 +1425,9 @@ bool InstExpander::visitFPToSI(FPToSIInst& F2S) {
     return true;
 }
 
-// Note: This method uses splitBasciBlock() which moves Pos (and all
-// instructions following it till the end of basic block) to a new basic block.
-// If IRB's insert point is set to Pos or an instruction after Pos in the same
-// basic block than the insert basic block value in IRB will be invalid after
-// this method completes. A correct insert point should be set in IRB after this
-// method is called.
-//
 Value* InstExpander::convertUIToFP32(Type* DstTy, Value* Lo, Value* Hi, Instruction* Pos) {
     IGC_ASSERT(nullptr != Pos);
     IGC_ASSERT(nullptr != IRB);
-    BuilderType::InsertPointGuard Guard(*IRB);
-    IRB->SetInsertPoint(Pos);
 
     IGCLLVM::Intrinsic IID;
     IID = Intrinsic::ctlz;
@@ -1449,6 +1440,10 @@ Value* InstExpander::convertUIToFP32(Type* DstTy, Value* Lo, Value* Hi, Instruct
     BasicBlock* OldBB = Pos->getParent();
     IGC_ASSERT(nullptr != OldBB);
     BasicBlock* JointBB = OldBB->splitBasicBlock(Pos);
+
+    // Set insert point to Pos in the new block JointBB
+    IRB->SetInsertPoint(Pos);
+
     PHINode* Res = PHINode::Create(IRB->getInt32Ty(), 2, ".u2f.outer.merge", Pos);
 
     {
@@ -1497,7 +1492,7 @@ Value* InstExpander::convertUIToFP32(Type* DstTy, Value* Lo, Value* Hi, Instruct
         BasicBlock* RoundingJBB = InnerJBB->splitBasicBlock(InnerJmp);
         PHINode* RoundingRes = PHINode::Create(IRB->getInt32Ty(), 2, ".u2f.rounding.merge.hi", InnerJmp);
 
-        BasicBlock* RoundingBB = BasicBlock::Create(*Emu->getContext(), ".u2f.roudning.branch");
+        BasicBlock* RoundingBB = BasicBlock::Create(*Emu->getContext(), ".u2f.rounding.branch");
         RoundingBB->insertInto(Emu->getFunction(), RoundingJBB);
         BranchInst::Create(RoundingJBB, RoundingBB);
 
@@ -1555,7 +1550,6 @@ bool InstExpander::visitUIToFP(UIToFPInst& U2F) {
     }
     else {
         NewVal = convertUIToFP32(IRB->getFloatTy(), Lo, Hi, &U2F);
-        IRB->SetInsertPoint(&U2F);
         // It's OK to apply the same approach in `convertUIToFP32` to convert 64-bit
         // integer into half. But, it would introduce a little more instructions to
         // properly round the remaining 48 bits into the high 16 bits. Instead, that
@@ -1617,7 +1611,6 @@ bool InstExpander::visitSIToFP(SIToFPInst& S2F) {
         Hi = IRB->CreateExtractValue(V, 1);
 
         NewVal = convertUIToFP32(IRB->getFloatTy(), Lo, Hi, &S2F);
-        IRB->SetInsertPoint(&S2F);
         NewVal = IRB->CreateBitCast(NewVal, IRB->getInt32Ty());
         Sign = IRB->CreateAnd(Sign, IRB->getInt32(0x80000000));
         NewVal = IRB->CreateOr(NewVal, Sign);
@@ -1945,7 +1938,7 @@ bool InstExpander::visitExtractElement(ExtractElementInst& EEI) {
     // later.
 
     Value* V = EEI.getVectorOperand();
-    unsigned NumElts = (unsigned)cast<VectorType>(V->getType())->getNumElements();
+    unsigned NumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements();
     V = IRB->CreateBitCast(V, Emu->getV2Int32Ty(NumElts));
     // Re-calculate indices to Lo and Hi parts.
     Value* Idx = EEI.getIndexOperand();
@@ -1982,7 +1975,7 @@ bool InstExpander::visitInsertElement(InsertElementInst& IEI) {
 
     // Create the emulated vector.
     Value* NewVal = IEI.getOperand(0);
-    unsigned NumElts = (unsigned)cast<VectorType>(NewVal->getType())->getNumElements();
+    unsigned NumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(NewVal->getType())->getNumElements();
     NewVal = IRB->CreateBitCast(NewVal, Emu->getV2Int32Ty(NumElts));
     // Re-calculate indices to Lo and Hi parts.
     Value* Idx = IEI.getOperand(2);
@@ -2008,7 +2001,7 @@ bool InstExpander::visitExtractValue(ExtractValueInst& EVI) {
 bool InstExpander::visitInsertValue(InsertValueInst& IVI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
-    IGC_ASSERT(0 < IVI.getNumOperands());
+    IGC_ASSERT(1 < IVI.getNumOperands());
     IGC_ASSERT_MESSAGE(false == Emu->isInt64(IVI.getOperand(1)), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }
@@ -2016,7 +2009,7 @@ bool InstExpander::visitInsertValue(InsertValueInst& IVI) {
 bool InstExpander::visitLandingPad(LandingPadInst& LPI) {
     // TODO: Add i64 emulation support.
     IGC_ASSERT(nullptr != Emu);
-    IGC_ASSERT(0 < LPI.getNumOperands());
+    IGC_ASSERT(1 < LPI.getNumOperands());
     IGC_ASSERT_MESSAGE(false == Emu->isInt64(LPI.getOperand(1)), "TODO: NOT IMPLEMENTED YET!");
     return false;
 }

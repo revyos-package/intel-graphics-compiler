@@ -55,6 +55,8 @@ void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
   HasSwitchjmp = false;
   WaNoMaskFusedEU = false;
   HasIntDivRem32 = false;
+  HasBitRotate = false;
+  GetsHWTIDFromPredef = false;
 
   if (StackScratchMem)
     StackSurf = PreDefined_Surface::PREDEFINED_SURFACE_T255;
@@ -80,13 +82,21 @@ void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
   if (CPUName.empty())
     CPUName = "generic";
 
-  ParseSubtargetFeatures(CPUName, FS);
+  ParseSubtargetFeatures(CPUName,
+#if LLVM_VERSION_MAJOR >= 12
+                         /*TuneCPU=*/CPUName,
+#endif
+                         FS);
 }
 
 GenXSubtarget::GenXSubtarget(const Triple &TT, const std::string &CPU,
                              const std::string &FS)
-    : GenXGenSubtargetInfo(TT, CPU, FS), TargetTriple(TT) {
+    : GenXGenSubtargetInfo(TT, CPU,
+#if LLVM_VERSION_MAJOR >= 12
+                           /*TuneCPU=*/CPU,
+#endif
+                           FS),
+      TargetTriple(TT) {
 
   resetSubtargetFeatures(CPU, FS);
 }
-

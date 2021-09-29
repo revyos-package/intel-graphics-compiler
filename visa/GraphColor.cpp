@@ -2151,6 +2151,8 @@ void Interference::markInterferenceToAvoidDstSrcOverlap(G4_BB* bb,
         {
             for (unsigned j = 0; j < G4_MAX_SRCS; j++)
             {
+                if (inst->isDpas() && j != 1)
+                    continue;
                 G4_Operand* src = inst->getSrc(j);
                 if (src != NULL &&
                     src->isSrcRegRegion() &&
@@ -3690,7 +3692,7 @@ bool Augmentation::markNonDefaultMaskDef()
 
         if (dclRegFile == G4_GRF || dclRegFile == G4_INPUT || dclRegFile == G4_ADDRESS)
         {
-            if (dcl->getTotalElems() < 8)
+            if (dcl->getTotalElems() < 8 || dclRegFile == G4_INPUT)
             {
                 gra.setAugmentationMask(dcl, AugmentationMasks::NonDefault);
             }
@@ -9765,13 +9767,13 @@ int GlobalRA::coloringRegAlloc()
     }
 
 
-    if (builder.hasFusedEUWA())
+    if (builder.hasFusedEUWA() && !builder.getIsPayload())
     {
-        G4_BB* entryBB = (*kernel.fg.begin());
-        if (entryBB->getInstList().size() > 1)
+        if (G4_BB* entryBB = (*kernel.fg.begin()))
         {
             INST_LIST_ITER inst_it = entryBB->begin();
-            while ((*inst_it)->isLabel() && inst_it != entryBB->end())
+            const INST_LIST_ITER inst_ie = entryBB->end();
+            while (inst_it != inst_ie && (*inst_it)->isLabel())
             {
                 inst_it++;
             }
@@ -10349,7 +10351,8 @@ int GlobalRA::coloringRegAlloc()
     // this includes vISA's scratch space use only and does not include whatever IGC may use for private memory
     uint32_t spillMemUsed = ROUND(nextSpillOffset, numEltPerGRF<Type_UB>());
 
-    if (spillMemUsed)
+    if (spillMemUsed &&
+        !(kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc()))
     {
         builder.criticalMsgStream() << "Spill memory used = " << spillMemUsed << " bytes for kernel " <<
             kernel.getName() << "\n Compiling kernel with spill code may degrade performance." <<

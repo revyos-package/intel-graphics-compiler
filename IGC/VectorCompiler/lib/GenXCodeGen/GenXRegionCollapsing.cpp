@@ -68,12 +68,13 @@ class GenXRegionCollapsing : public FunctionPass {
 public:
   static char ID;
   explicit GenXRegionCollapsing() : FunctionPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX Region Collapsing"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override { return "GenX Region Collapsing"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.setPreservesCFG();
   }
-  bool runOnFunction(Function &F);
+  bool runOnFunction(Function &F) override;
+
 private:
   void runOnBasicBlock(BasicBlock *BB);
   void processBitCast(BitCastInst *BC);
@@ -155,7 +156,7 @@ static bool lowerTrunc(TruncInst *Inst) {
   Type *InElementTy = InValue->getType();
   Type *OutElementTy = Inst->getType();
   unsigned NumElements = 1;
-  if (VectorType *VT = dyn_cast<VectorType>(InElementTy)) {
+  if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(InElementTy)) {
     InElementTy = VT->getElementType();
     OutElementTy = cast<VectorType>(OutElementTy)->getElementType();
     NumElements = VT->getNumElements();
@@ -213,7 +214,8 @@ void GenXRegionCollapsing::runOnBasicBlock(BasicBlock *BB) {
     if (auto EEI = dyn_cast<ExtractElementInst>(Inst)) {
       Value *Src = EEI->getVectorOperand();
       if (GenXIntrinsic::isRdRegion(Src) &&
-          cast<VectorType>(Src->getType())->getNumElements() == 1) {
+          cast<IGCLLVM::FixedVectorType>(Src->getType())->getNumElements() ==
+              1) {
         // Create a new region with scalar output.
         Region R(Inst);
         Instruction *NewInst =

@@ -381,8 +381,8 @@ private:
 public:
   static char ID;
   explicit GenXArgIndirection() : FunctionGroupPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX arg indirection"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const {
+  StringRef getPassName() const override { return "GenX arg indirection"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     FunctionGroupPass::getAnalysisUsage(AU);
     AU.addRequired<FunctionGroupAnalysis>();
     AU.addRequired<GenXNumbering>();
@@ -395,11 +395,14 @@ public:
     AU.addPreserved<GenXModule>();
     AU.addPreserved<FunctionGroupAnalysis>();
   }
-  bool runOnFunctionGroup(FunctionGroup &FG);
+  bool runOnFunctionGroup(FunctionGroup &FG) override;
   // createPrinterPass : get a pass to print the IR, together with the GenX
   // specific analyses
-  virtual Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const
-  { return createGenXGroupPrinterPass(O, Banner); }
+  Pass *createPrinterPass(raw_ostream &O,
+                          const std::string &Banner) const override {
+    return createGenXGroupPrinterPass(O, Banner);
+  }
+
 private:
   void gatherArgLRs();
   bool processArgLR(LiveRange *ArgLR);
@@ -773,8 +776,8 @@ Indirectability SubroutineArg::checkIndirectability()
         continue;
       if (Pass->FuncMap.find(Func) == Pass->FuncMap.end())
         continue; // value not in one of the subroutines where the arg is indirected
-      auto BC = dyn_cast<BitCastInst>(Inst);
-      if (!BC || !Pass->Liveness->isBitCastCoalesced(BC)) {
+      auto *CI = dyn_cast<CastInst>(Inst);
+      if (!CI || !genx::isNoopCast(CI) || !Pass->Liveness->isNoopCastCoalesced(CI)) {
         CanCoalesceWithoutKill = false;
         break;
       }
@@ -1095,9 +1098,14 @@ void SubroutineArg::gatherBalesToModify(Alignment Align)
       auto User = cast<Instruction>(ui->getUser());
       if (auto CI = dyn_cast<CallInst>(User)) {
         Function *CF = CI->getCalledFunction();
-        if (!GenXIntrinsic::isAnyNonTrivialIntrinsic(CF)) {
+        if (!GenXIntrinsic::isAnyNonTrivialIntrinsic(CF) &&
+            !genx::requiresStackCall(CF)) {
           // Non-intrinsic call. Ignore. (A call site using an arg being
           // indirected gets handled differently.)
+          // Cannot indirect if there is a stack call. Do not ignore stack
+          // calls here and add them to BalesToModify. In checkIndirectBale
+          // report that such bale cannot be indirected. This method is
+          // confusing, must be improved.
           continue;
         }
       } else {
@@ -1165,6 +1173,13 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
                           << "\n\tintrinsic with raw return value\n");
         return false;
       }
+    } else if (auto *CI = dyn_cast<CallInst>(MainInst->Inst)) {
+      auto *Callee = CI->getCalledFunction();
+      IGC_ASSERT_MESSAGE(genx::requiresStackCall(Callee),
+                         "Expect a stack call to stop indirection. See "
+                         "SubroutineArg::gatherBalesToModify");
+      LLVM_DEBUG(dbgs() << *CI << "\n\tcalls stack call function\n");
+      return false;
     }
   }
   // Check the rdregion(s) and wrregion.

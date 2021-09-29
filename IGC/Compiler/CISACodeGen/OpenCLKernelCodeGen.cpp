@@ -262,6 +262,7 @@ namespace IGC
                 kernelArgInfo->AddressQualifier = "__private";
                 break;
             default:
+                m_Context->EmitError("Generic pointers are not allowed as kernel argument storage class!", nullptr);
                 IGC_ASSERT_MESSAGE(0, "Unexpected address space");
                 break;
             }
@@ -409,7 +410,7 @@ namespace IGC
         unsigned int numElements = 1;
         if (baseType->isVectorTy())
         {
-            numElements = (unsigned)cast<VectorType>(baseType)->getNumElements();
+            numElements = (unsigned)cast<IGCLLVM::FixedVectorType>(baseType)->getNumElements();
             baseType = cast<VectorType>(baseType)->getElementType();
         }
 

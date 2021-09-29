@@ -68,6 +68,17 @@ def FeatureInstrAdd64: SubtargetFeature<"add64",
                                        "true",
                                        "enable support for native add64 intruction">;
 
+def FeatureInstrBitRotate: SubtargetFeature<"bitrotate",
+                                           "HasBitRotate",
+                                           "true",
+                                           "support of rol/ror instructions">;
+
+
+def FeatureHWTIDFromPredef: SubtargetFeature<"hwtidfrompredef",
+                                             "GetsHWTIDFromPredef",
+                                             "true",
+                                             "hwtid is obtained from predefined variable">;
+
 def WarnCallable : SubtargetFeature<"warn_callable", "WarnCallable",
                                     "true", "warn instead of error on callable violation">;
 
@@ -84,54 +95,66 @@ class Proc<string Name, list<SubtargetFeature> Features>
 
 def : Proc<"generic",         []>;
 def : Proc<"HSW",             [FeatureLongLongEmulation, FeatureSwitchjmp,
-                               FeatureIntDivRem32]>;
+                               FeatureIntDivRem32, FeatureHWTIDFromPredef]>;
 def : Proc<"BDW",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"CHV",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"SKL",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"BXT",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"KBL",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"GLK",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"CNL",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"ICL",             [FeatureLongLong, FeatureSwitchjmp,
                                FeatureIntDivRem32,
                                FeatureUseMulDDQ,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"ICLLP",           [FeatureLongLongEmulation, FeatureSwitchjmp,
-                               FeatureIntDivRem32]>;
+                               FeatureIntDivRem32, FeatureInstrBitRotate,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"TGLLP",           [FeatureLongLongEmulation, FeatureIntDivRem32,
-                               FeatureWAFusedEUNoMask]>;
+                               FeatureInstrBitRotate, FeatureWAFusedEUNoMask,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"DG1",             [FeatureLongLongEmulation, FeatureIntDivRem32,
-                               FeatureWAFusedEUNoMask]>;
+                               FeatureInstrBitRotate, FeatureWAFusedEUNoMask,
+                               FeatureHWTIDFromPredef]>;
 def : Proc<"XEHP",            [FeatureLongLong,
                                FeatureInstrAdd64,
-                               FeatureFP64]>;
+                               FeatureFP64,
+                               FeatureInstrBitRotate]>;
 
 def GenX : Target {
   // Nothing here (yet?)

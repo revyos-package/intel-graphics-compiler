@@ -16,6 +16,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Config/llvm-config.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
+#include "llvmWrapper/IR/IRBuilder.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include "llvmWrapper/Support/TypeSize.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -71,6 +72,12 @@ namespace
         // if the value comes from a bitcast, return the source, otherwise return itself
         Value* SkipBitCast(Value* v) {
             if (BitCastInst* bc = dyn_cast<BitCastInst>(v)) {
+                // Don't skip if this is a pointer cast and the addrspace changed
+                if (v->getType()->isPointerTy() &&
+                    bc->getOperand(0)->getType()->isPointerTy() &&
+                    v->getType()->getPointerAddressSpace() != bc->getOperand(0)->getType()->getPointerAddressSpace()) {
+                    return v;
+                }
                 v = bc->getOperand(0);
             }
             return v;
@@ -165,7 +172,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertReverseLoop(
     {
         // Remove the unconditional 'br' instruction which will be replaced by a conditional 'br'
         Pre->getTerminator()->eraseFromParent();
-        IRBuilder<> B(Pre);
+        IGCLLVM::IRBuilder<> B(Pre);
         B.SetCurrentDebugLocation(DL);
         // Init the IV
         auto* Init = B.CreateSub(Length, One);
@@ -177,7 +184,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertReverseLoop(
     Instruction* IV;
     {
         // Loop body's Basic Block
-        IRBuilder<> B(Body);
+        IGCLLVM::IRBuilder<> B(Body);
         B.SetCurrentDebugLocation(DL);
         IV = B.CreateLoad(pIV, "IV");
         // User of function will add more instructions at this point ...
@@ -210,7 +217,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertLoop(Instruction* Loc, Value* L
     {
         // Remove the unconditional 'br' instruction which will be replaced by a conditional 'br'
         Pre->getTerminator()->eraseFromParent();
-        IRBuilder<> B(Pre);
+        IGCLLVM::IRBuilder<> B(Pre);
         B.SetCurrentDebugLocation(DL);
         ConstantInt* Zero = ConstantInt::get(LengthType, 0);
         // Init the IV
@@ -222,7 +229,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertLoop(Instruction* Loc, Value* L
     Instruction* IV;
     {
         // Loop body's Basic Block
-        IRBuilder<> B(Body);
+        IGCLLVM::IRBuilder<> B(Body);
         B.SetCurrentDebugLocation(DL);
         IV = B.CreateLoad(pIV, "IV");
         // User of function will add more instructions at this point ...
@@ -238,7 +245,7 @@ Instruction* ReplaceUnsupportedIntrinsics::insertLoop(Instruction* Loc, Value* L
 Value* ReplaceUnsupportedIntrinsics::replicateScalar(
     Value* ScalarVal, Type* Ty, Instruction* InsertBefore)
 {
-    VectorType* VTy = dyn_cast<VectorType>(Ty);
+    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
     Type* ETy = VTy ? VTy->getElementType() : Ty;
     uint32_t sBits = (unsigned int)ScalarVal->getType()->getPrimitiveSizeInBits();
     uint32_t nBits = (unsigned int)ETy->getPrimitiveSizeInBits();
@@ -247,7 +254,7 @@ Value* ReplaceUnsupportedIntrinsics::replicateScalar(
     IGC_ASSERT_MESSAGE(nBits <= 64, "Type mismatch in replicateScalar!");
     uint32_t ratio = nBits / sBits;
 
-    IRBuilder<> Builder(InsertBefore);
+    IGCLLVM::IRBuilder<> Builder(InsertBefore);
     Value* NewVal;
     if (ratio > 1)
     {
@@ -466,7 +473,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemcpy(IntrinsicInst* I)
     Type* TySrcPtrI8 = Type::getInt8PtrTy(C, SrcAS);
     Type* TyDstPtrI8 = Type::getInt8PtrTy(C, DstAS);
 
-    IRBuilder<> Builder(MC);
+    IGCLLVM::IRBuilder<> Builder(MC);
 
     // BaseSize is flag if we want to handle algorithm in general way
     // or want to keep size of base type to further optimizations
@@ -524,7 +531,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemcpy(IntrinsicInst* I)
                 Value* NewLPCount = ConstantInt::get(LPCount->getType(), NewCount);
                 Instruction* IV = insertLoop(MC, NewLPCount, "memcpy");
                 {
-                    IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+                    IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
                     Value* tSrc = B.CreateGEP(vSrc, IV);
                     Value* tDst = B.CreateGEP(vDst, IV);
                     LoadInst* L = B.CreateAlignedLoad(tSrc, getAlign(Align), IsVolatile);
@@ -565,7 +572,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemcpy(IntrinsicInst* I)
         // Fall back to i8 copy
         Instruction* IV = insertLoop(MC, LPCount, "memcpy");
         {
-            IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+            IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
             Value* tSrc = B.CreateGEP(Src, IV);
             Value* tDst = B.CreateGEP(Dst, IV);
             LoadInst* L = B.CreateAlignedLoad(tSrc, getAlign(Align), IsVolatile);
@@ -610,7 +617,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemMove(IntrinsicInst* I)
 
     auto* F = MM->getParent()->getParent();
 
-    IRBuilder<> B(MM);
+    IGCLLVM::IRBuilder<> B(MM);
 
     auto* i8Src = B.CreateBitCast(SkipBitCast(Src), TySrcPtrI8, "memcpy_src");
     auto* i8Dst = B.CreateBitCast(SkipBitCast(Dst), TyDstPtrI8, "memcpy_dst");
@@ -720,7 +727,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemMove(IntrinsicInst* I)
                 auto* NewLPCount = ConstantInt::get(LPCount->getType(), NewCount);
                 Instruction* IV = insertReverseLoop(BBTrue, Post, NewLPCount, "memmmove");
                 {
-                    IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+                    IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
                     Value* tSrc = B.CreateGEP(vSrc, IV);
                     Value* tDst = B.CreateGEP(vDst, IV);
                     LoadInst* L = B.CreateAlignedLoad(tSrc, getAlign(newAlign), IsVolatile);
@@ -744,7 +751,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemMove(IntrinsicInst* I)
             // Fall back to i8 copy
             Instruction* IV = insertReverseLoop(BBTrue, Post, LPCount, "memmove");
             {
-                IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+                IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
                 Value* tSrc = B.CreateGEP(i8Src, IV);
                 Value* tDst = B.CreateGEP(i8Dst, IV);
                 LoadInst* L = B.CreateAlignedLoad(tSrc, getAlign(1), IsVolatile);
@@ -777,7 +784,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemset(IntrinsicInst* I)
     LLVMContext& C = MS->getContext();
     Type* TyPtrI8 = Type::getInt8PtrTy(C, AS);
 
-    IRBuilder<> Builder(MS);
+    IGCLLVM::IRBuilder<> Builder(MS);
 
     ConstantInt* CI = dyn_cast<ConstantInt>(LPCount);
     if (CI)
@@ -821,7 +828,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemset(IntrinsicInst* I)
                 Value* NewLPCount = ConstantInt::get(LPCount->getType(), NewCount);
                 Instruction* IV = insertLoop(MS, NewLPCount, "memset");
                 {
-                    IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+                    IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
                     Value* tDst = B.CreateGEP(vDst, IV);
                     (void)B.CreateAlignedStore(vSrc, tDst, getAlign(Align), IsVolatile);
                 }
@@ -858,7 +865,7 @@ void ReplaceUnsupportedIntrinsics::replaceMemset(IntrinsicInst* I)
         // Fall back to i8 copy
         Instruction* IV = insertLoop(MS, LPCount, "memset");
         {
-            IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
+            IGCLLVM::IRBuilder<> B(&(*++BasicBlock::iterator(IV)));
             Value* tDst = B.CreateGEP(Dst, IV);
             (void)B.CreateAlignedStore(Src, tDst, getAlign(Align), IsVolatile);
         }
@@ -886,7 +893,7 @@ void ReplaceUnsupportedIntrinsics::replaceExpect(IntrinsicInst* MS)
 void ReplaceUnsupportedIntrinsics::replaceFunnelShift(IntrinsicInst* I) {
     IGC_ASSERT(I->getIntrinsicID() == Intrinsic::fshl ||
         I->getIntrinsicID() == Intrinsic::fshr);
-    IRBuilder<> Builder(I);
+    IGCLLVM::IRBuilder<> Builder(I);
     unsigned sizeInBits = I->getArgOperand(0)->getType()->getScalarSizeInBits();
 
     // Don't replace rotate
@@ -899,7 +906,7 @@ void ReplaceUnsupportedIntrinsics::replaceFunnelShift(IntrinsicInst* I) {
     }
 
     Value* numBits = Builder.getIntN(sizeInBits, sizeInBits);
-    if (auto IVT = dyn_cast<VectorType>(I->getType())) {
+    if (auto IVT = dyn_cast<IGCLLVM::FixedVectorType>(I->getType())) {
         numBits = ConstantVector::getSplat(IGCLLVM::getElementCount((uint32_t)IVT->getNumElements()), cast<Constant>(numBits));
     }
     auto shiftModulo = Builder.CreateURem(I->getArgOperand(2), numBits);

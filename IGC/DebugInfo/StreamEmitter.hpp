@@ -19,6 +19,8 @@ See LICENSE.TXT for details.
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvmWrapper/MC/MCContext.h"
+#include "llvmWrapper/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/IR/GlobalValue.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -30,14 +32,16 @@ See LICENSE.TXT for details.
 namespace llvm
 {
     class MCStreamer;
-    class MCContext;
-    class MCObjectFileInfo;
     class SourceMgr;
     class MCAsmInfo;
 }
 
 namespace IGC
 {
+    class DbgVariable;
+    class DwarfDebug;
+    struct VISAVariableLocation;
+
     /// @brief StreamEmitter provides API methods for emitting elf object.
     ///        It will be used to emit the debug info sections in dwarf format.
     class StreamEmitter
@@ -192,12 +196,33 @@ namespace IGC
         /// @brief Finalize the streamer, flush all written bytes.
         void Finalize() const;
 
+        const std::string& getErrors() const { return ErrorLog; }
+        void verifyRegisterLocationSize(const DbgVariable& VarVal,
+                                        const DwarfDebug& DD,
+                                        unsigned MaxGRFSpaceInBits,
+                                        uint64_t ExpectedSize);
+        void verifyRegisterLocationExpr(const DbgVariable& VarVal,
+                                        const DwarfDebug& DD);
+
     private:
+
+        class DiagnosticBuff
+        {
+            std::string Buff;
+            llvm::raw_string_ostream OS;
+        public:
+            DiagnosticBuff(): OS(Buff) {}
+            llvm::raw_string_ostream &out() { return OS; }
+        };
+
+        void verificationReport(const DbgVariable& VarVal,
+                                DiagnosticBuff& DiagBuff);
+
         /// @brief Return information about object file lowering.
         const llvm::MCObjectFileInfo& GetObjFileLowering() const;
 
         /// @brief Return the target triple string.
-        const std::string& GetTargetTriple() const;
+        const std::string& GetTargetTriple() const { return m_targetTriple; }
 
     private:
 
@@ -205,10 +230,11 @@ namespace IGC
         llvm::MCContext* m_pContext;
         llvm::SourceMgr* m_pSrcMgr;
         llvm::MCAsmInfo* m_pAsmInfo;
-        llvm::MCObjectFileInfo* m_pObjFileInfo;
+        IGCLLVM::MCObjectFileInfo* m_pObjFileInfo;
         const llvm::DataLayout* m_pDataLayout;
         const std::string& m_targetTriple;
         Settings StreamOptions;
+        std::string ErrorLog;
 
         mutable unsigned int m_setCounter;
     };

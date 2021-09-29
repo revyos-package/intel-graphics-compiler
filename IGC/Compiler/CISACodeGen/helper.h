@@ -20,7 +20,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/CFG.h>
-#include <llvm/IR/IRBuilder.h>
+#include <llvmWrapper/IR/IRBuilder.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/DenseSet.h>
@@ -126,7 +126,7 @@ namespace IGC
     //scalarize aggregate into flattened members
     void ScalarizeAggregateMembers(llvm::IRBuilder<>& builder, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*>& instList);
     //scalarize aggregate into flattened member addresses
-    void ScalarizeAggregateMemberAddresses(llvm::IRBuilder<>& builder, llvm::Type* type, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*>& instList, llvm::SmallVector<llvm::Value*, 16> indices);
+    void ScalarizeAggregateMemberAddresses(IGCLLVM::IRBuilder<>& builder, llvm::Type* type, llvm::Value* val, llvm::SmallVectorImpl<llvm::Value*>& instList, llvm::SmallVector<llvm::Value*, 16> indices);
 
     /// return true if pLLVMInst is load from constant-buffer with immediate constant-buffer index
     bool IsLoadFromDirectCB(llvm::Instruction* pLLVMInst, uint& cbId, llvm::Value*& eltPtrVal);
@@ -149,6 +149,7 @@ namespace IGC
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList, std::vector<llvm::Value*>& instList);
     llvm::Value* TracePointerSource(llvm::Value* resourcePtr, bool hasBranching, bool enablePhiLoops, bool fillList, std::vector<llvm::Value*>& instList, llvm::SmallSet<llvm::PHINode*, 8> & visitedPHIs);
     bool GetResourcePointerInfo(llvm::Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, IGC::BufferAccessType& accessTy, bool& needBufferOffset);
+    BufferAccessType getDefaultAccessType(BufferType bufTy);
     bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
     // try to evaluate the address if it is constant.
@@ -198,7 +199,7 @@ namespace IGC
     }
     inline bool IsSSHbindless(BufferType t)
     {
-        return t == SSH_BINDLESS || t == SSH_BINDLESS_CONSTANT_BUFFER;
+        return t == SSH_BINDLESS || t == SSH_BINDLESS_CONSTANT_BUFFER || t == SSH_BINDLESS_TEXTURE;
     }
 
     bool IsUnsignedCmp(const llvm::CmpInst::Predicate Pred);
@@ -485,4 +486,12 @@ namespace IGC
     // Function modifies address space in selected uses of given input value
     void FixAddressSpaceInAllUses(llvm::Value* ptr, uint newAS, uint oldAS);
 
+
+    // Returns the dynamic URB base offset and an immediate const offset
+    // from the dynamic base. The function calculates the result by walking
+    // the use-def chain of pUrbOffset.
+    // If pUrbOffset is an immediate constant (==offset) then
+    // <nullptr, offset> is returned.
+    // In all other cases <pUrbOffset, 0> is returned.
+    std::pair<llvm::Value*, unsigned int> GetURBBaseAndOffset(llvm::Value* pUrbOffset);
 } // namespace IGC

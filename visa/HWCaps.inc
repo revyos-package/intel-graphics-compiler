@@ -25,6 +25,9 @@ SPDX-License-Identifier: MIT
             getPlatformGeneration(getPlatform()) != PlatformGen::GEN11;
     }
 
+    // True if it has bfloat16 mixed mode support.
+    bool hasBFMixMode() const { return hasDPAS();}
+
     bool forceSamplerHeader() const
     {
         return m_options->getOption(vISA_forceSamplerHeader) ||
@@ -785,7 +788,7 @@ SPDX-License-Identifier: MIT
     bool hasFusedEUWA() const
     {
         return ((getuint32Option(vISA_noMaskWA) & 0x3) > 0 ||
-                getOption(vISA_forceNoMaskWA)) && !getOption(vISA_LinearScan);
+                getOption(vISA_forceNoMaskWA)) && !getOption(vISA_LinearScan) && hasFusedEU();
     }
 
     bool hasFusedEU() const
@@ -850,4 +853,9 @@ SPDX-License-Identifier: MIT
    {
        return getPlatform() <= GENX_TGLLP;
    }
+
+    bool needBreakpointWAForEOT() const
+    {
+       return (getPlatform() == GENX_TGLLP || getPlatform() == XeHP_SDV);
+    }
    // end HW capabilities

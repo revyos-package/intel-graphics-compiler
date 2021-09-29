@@ -427,6 +427,28 @@ void GenXUnbaling::processFunc(Function *F) {
   shortenLiveRanges(F);
 }
 
+/* Checks whether Inst can be placed before InsertBefore without invalidating
+ * dominance relations in IR.
+ * InsertBefore must come before Inst in IR */
+bool canBeSafelyHoisted(Instruction *Inst, Instruction *InsertBefore) {
+  if (Inst->getParent() != InsertBefore->getParent())
+    return false;
+#if LLVM_VERSION_MAJOR <= 10
+  // There is no simple way to check order of instructions before llvm 11. Thus
+  // handling only cases, where U is a Constant/Declaration/etc
+  auto IsDefinedAtInsertPoint = [](Value *V) { return !isa<Instruction>(V); };
+#else
+  IGC_ASSERT_MESSAGE(InsertBefore->comesBefore(Inst),
+                     "InsertBefore must come before Inst in IR");
+  auto IsDefinedAtInsertPoint = [InsertBefore](Value *V) {
+    return !isa<Instruction>(V) ||
+           cast<Instruction>(V)->comesBefore(InsertBefore);
+  };
+#endif
+  return std::all_of(Inst->value_op_begin(), Inst->value_op_end(),
+                     IsDefinedAtInsertPoint);
+}
+
 /***********************************************************************
  * shortenLiveRanges : hoist rdregions if this helps to avoid copy coalescing.
  *
@@ -466,9 +488,11 @@ void GenXUnbaling::shortenLiveRanges(Function *F) {
                      [DstNumber, N = Numbering](User *U) {
                        return DstNumber < N->getNumber(U);
                      });
-        bool CanHoist =
-            std::all_of(ToHoist.begin(), ToHoist.end(), [BB](User *U) {
-              return U->isUsedInBasicBlock(BB) && GenXIntrinsic::isRdRegion(U);
+        bool CanHoist = std::all_of(
+            ToHoist.begin(), ToHoist.end(), [BB, DstRegion](User *U) {
+              return U->isUsedInBasicBlock(BB) &&
+                     GenXIntrinsic::isRdRegion(U) &&
+                     canBeSafelyHoisted(cast<Instruction>(U), DstRegion);
             });
         if (!CanHoist || ToHoist.empty())
           continue;
@@ -484,7 +508,8 @@ void GenXUnbaling::shortenLiveRanges(Function *F) {
               return Init + NumElts;
             });
         if (NumEltsToCopy >=
-            cast<VectorType>(SrcRegion->getType())->getNumElements())
+            cast<IGCLLVM::FixedVectorType>(SrcRegion->getType())
+                ->getNumElements())
           continue;
 
         // Unbale and hoist
@@ -731,7 +756,7 @@ bool GenXUnbaling::scanUsesForUnbaleAndMove(Instruction *Inst,
       // more than 2 GRFs), we cannot unbale it. This happens with an rdregion
       // baled in to a raw operand of a shared function intrinsic. Unbaling it
       // would result in an illegally wide instruction.
-      if (auto VT = dyn_cast<VectorType>(User->getType())) {
+      if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(User->getType())) {
         if (VT->getNumElements() > 32U
             || VT->getPrimitiveSizeInBits() > 512U) {
           LLVM_DEBUG(dbgs() << User->getName() << " is too wide to unbale\n");

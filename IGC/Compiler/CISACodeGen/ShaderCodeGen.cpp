@@ -25,7 +25,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/PushAnalysis.hpp"
 #include "Compiler/CISACodeGen/ScalarizerCodeGen.hpp"
 #include "Compiler/CISACodeGen/CodeSinking.hpp"
-#include "Compiler/CISACodeGen/CodeHoisting.hpp"
+#include "Compiler/CISACodeGen/HoistURBWrites.hpp"
 #include "Compiler/CISACodeGen/ConstantCoalescing.hpp"
 #include "Compiler/CISACodeGen/CheckInstrTypes.hpp"
 #include "Compiler/CISACodeGen/EstimateFunctionSize.h"
@@ -51,6 +51,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/UniformAssumptions.hpp"
 #include "Compiler/Optimizer/LinkMultiRateShaders.hpp"
 #include "Compiler/CISACodeGen/MergeURBWrites.hpp"
+#include "Compiler/CISACodeGen/URBPartialWrites.hpp"
 #include "Compiler/CISACodeGen/VectorProcess.hpp"
 #include "Compiler/CISACodeGen/LowerGEPForPrivMem.hpp"
 #include "Compiler/CISACodeGen/POSH_RemoveNonPositionOutput.h"
@@ -92,6 +93,7 @@ SPDX-License-Identifier: MIT
 #if defined(_DEBUG) && !defined(ANDROID)
 #include "Compiler/VerificationPass.hpp"
 #endif
+#include "Compiler/FixInvalidFuncNamePass.hpp"
 #include "Compiler/LegalizationPass.hpp"
 #include "Compiler/LowPrecisionOptPass.hpp"
 #include "Compiler/WorkaroundAnalysisPass.h"
@@ -184,16 +186,26 @@ static void AddURBWriteRelatedPass(CodeGenContext& ctx, IGCPassManager& mpm)
     case ShaderType::DOMAIN_SHADER:
         if (IGC_IS_FLAG_DISABLED(DisableURBWriteMerge))
         {
+            // Run EarlyCSE to remove redundant calculations of per-vertex or
+            // per-primitive URB offsets created in lowering.
+            mpm.add(llvm::createEarlyCSEPass());
+
             mpm.add(createMergeURBWritesPass());
 
             if (IGC_IS_FLAG_ENABLED(EnableTEFactorsClear) && (ctx.type == ShaderType::HULL_SHADER))
             {
                 mpm.add(createClearTessFactorsPass());
             }
+            const bool enablePartialURBWritesPass =
+                IGC_IS_FLAG_DISABLED(DisableURBPartialWritesPass);
+            if (enablePartialURBWritesPass)
+            {
+                mpm.add(createURBPartialWritesPass());
+            }
         }
         if (IGC_IS_FLAG_DISABLED(DisableCodeHoisting))
         {
-            mpm.add(new CodeHoisting());
+            mpm.add(new HoistURBWrites());
         }
         break;
     default:
@@ -317,6 +329,7 @@ static void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
     }
 
     mpm.add(new Layout());
+    mpm.add(createFixInvalidFuncNamePass());
 
     mpm.add(createTimeStatsCounterPass(&ctx, TIME_CG_Analysis, STATS_COUNTER_END));
 
@@ -637,12 +650,17 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     {
         mpm.add(createPruneUnusedArgumentsPass());
 
+#if LLVM_VERSION_MAJOR >= 12
+        mpm.add(createIPSCCPPass());
+#else
         if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT)
         {
             // Don't run IPConstantProp when debugging function calls, to avoid folding function arg/ret constants
             mpm.add(createIPConstantPropagationPass());
         }
         mpm.add(createConstantPropagationPass());
+#endif
+
         mpm.add(createDeadCodeEliminationPass());
         mpm.add(createCFGSimplificationPass());
     }
@@ -1170,11 +1188,13 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
     if (IGC_IS_FLAG_ENABLED(ForceCSSIMD32) || waveSize == 32 || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 32)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD32, false);
+        ctx->m_ForceOneSIMD = true;
     }
     else if (((IGC_IS_FLAG_ENABLED(ForceCSSIMD16) || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 16) && simdModeAllowed <= SIMDMode::SIMD16) ||
         waveSize == 16)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, SIMDMode::SIMD16, false);
+        ctx->m_ForceOneSIMD = true;
     }
     // csInfo.forcedSIMDSize == 8 means force least SIMD.
     // If the SIMD8 is not allowed, it will return higher SIMD
@@ -1182,6 +1202,7 @@ void CodeGen(ComputeShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders
         || ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 8 || waveSize == 8)
     {
         AddCodeGenPasses(*ctx, shaders, PassMgr, simdModeAllowed, false);
+        ctx->m_ForceOneSIMD = true;
     }
     else
     {
@@ -1489,7 +1510,7 @@ void OptimizeIR(CodeGenContext* const pContext)
         if (((OpenCLProgramContext*)pContext)->m_InternalOptions.KernelDebugEnable)
         {
             IGCPassManager mpm(pContext, "CleanImplicitId");
-            IF_DEBUG_INFO(mpm.add(new CleanImplicitIds()));
+            mpm.add(new CleanImplicitIds());
             mpm.run(*pContext->getModule());
         }
     }
@@ -1531,7 +1552,7 @@ void OptimizeIR(CodeGenContext* const pContext)
         });
 
         mpm.add(new TargetTransformInfoWrapperPass(GenTTgetIIRAnalysis));
-#if defined(_DEBUG) && !defined(ANDROID)
+#if defined(_DEBUG) && !defined(__ANDROID__)
         // IGC IR Verification pass checks that we get a correct IR after the Unification.
         mpm.add(new VerificationPass());
 #endif
@@ -1547,8 +1568,12 @@ void OptimizeIR(CodeGenContext* const pContext)
             // possible which potentially allows late stage code sinking of
             // those calls by the instruction combiner.
             mpm.add(createPostOrderFunctionAttrsLegacyPass());
+#if LLVM_VERSION_MAJOR >= 12
+            mpm.add(createIPSCCPPass());
+#else
             mpm.add(createConstantPropagationPass());
             mpm.add(createIPConstantPropagationPass());
+#endif
         }
 
         // enable this only when Pooled EU is not supported
@@ -1634,7 +1659,7 @@ void OptimizeIR(CodeGenContext* const pContext)
                 mpm.add(new SampleMultiversioning(pContext));
         }
 
-        bool disableGOPT = ((IsStage1FastestCompile(pContext->m_CgFlag, pContext->m_StagingCtx) ||
+        bool disableGOPT = ( (IsStage1FastestCompile(pContext->m_CgFlag, pContext->m_StagingCtx) ||
                                IGC_GET_FLAG_VALUE(ForceFastestSIMD)) &&
                              (IGC_GET_FLAG_VALUE(FastestS1Experiments) & FCEXP_DISABLE_GOPT));
 
@@ -1763,6 +1788,9 @@ void OptimizeIR(CodeGenContext* const pContext)
 
             if (!pContext->m_instrTypes.hasAtomics && !extensiveShader(pContext))
             {
+                // Add CFGSimplification for clean-up before JumpThreading.
+                mpm.add(llvm::createCFGSimplificationPass());
+
                 // jump threading currently causes the atomic_flag test from c11 conformance to fail.  Right now,
                 // only do jump threading if we don't have atomics as using atomics as locks seems to be the most common
                 // case of violating the no independent forward progress clause from the spec.

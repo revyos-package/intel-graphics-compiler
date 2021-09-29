@@ -54,7 +54,6 @@ namespace IGC
         /// @brief Default Constructor. Creates empty location.
         VISAVariableLocation(const VISAModule* m)
         {
-            Reset();
             m_pVISAModule = m;
         }
 
@@ -63,7 +62,6 @@ namespace IGC
         /// @param m points to VISAModule corresponding to this location
         VISAVariableLocation(const llvm::Constant* pConstVal, const VISAModule* m)
         {
-            Reset();
             m_isImmediate = true;
             m_pConstVal = pConstVal;
             m_pVISAModule = m;
@@ -74,7 +72,6 @@ namespace IGC
         /// @param m points to VISAModule corresponding to this location
         VISAVariableLocation(unsigned int surfaceReg, const VISAModule* m)
         {
-            Reset();
             m_hasSurface = true;
             m_surfaceReg = surfaceReg;
             m_pVISAModule = m;
@@ -90,7 +87,6 @@ namespace IGC
         VISAVariableLocation(unsigned int surfaceReg, unsigned int locationValue, bool isRegister,
             bool isInMemory, unsigned int vectorNumElements, bool isVectorized, const VISAModule* m)
         {
-            Reset();
             m_hasSurface = true;
             m_surfaceReg = surfaceReg;
             m_hasLocation = true;
@@ -113,7 +109,6 @@ namespace IGC
         VISAVariableLocation(unsigned int locationValue, bool isRegister, bool isInMemory,
              unsigned int vectorNumElements, bool isVectorized, bool isGlobalAddrSpace, const VISAModule* m)
         {
-            Reset();
             m_hasLocation = true;
             m_isInMemory = isInMemory;
             m_isRegister = isRegister;
@@ -145,38 +140,26 @@ namespace IGC
         bool IsTexture() const;
         bool IsSLM() const;
 
-    private:
-        /// @brief Initialize all class members to default (empty location).
-        void Reset()
-        {
-            m_isImmediate = false;
-            m_hasSurface = false;
-            m_hasLocation = false;
-            m_isInMemory = false;
-            m_isRegister = false;
-            m_pConstVal = nullptr;
-            m_surfaceReg = (~0);
-            m_locationReg = (~0);
-            m_locationOffset = (~0);
-            m_isVectorized = false;
-            m_isGlobalAddrSpace = false;
-            m_pVISAModule = nullptr;
-        }
+        void dump() const;
+        void print (llvm::raw_ostream &OS) const;
 
+        static void print(llvm::raw_ostream &OS,
+                          const std::vector<VISAVariableLocation> &Locs);
     private:
-        bool m_isImmediate;
-        bool m_hasSurface;
-        bool m_hasLocation;
-        bool m_isInMemory;
-        bool m_isRegister;
-        bool m_isVectorized;
-        bool m_isGlobalAddrSpace;
 
-        const llvm::Constant* m_pConstVal;
-        unsigned int m_surfaceReg;
-        unsigned int m_locationReg;
-        unsigned int m_locationOffset;
-        unsigned int m_vectorNumElements;
+        bool m_isImmediate = false;
+        bool m_hasSurface = false;
+        bool m_hasLocation = false;
+        bool m_isInMemory = false;
+        bool m_isRegister = false;
+        bool m_isVectorized = false;
+        bool m_isGlobalAddrSpace = false;
+
+        const llvm::Constant* m_pConstVal = nullptr;
+        unsigned int m_surfaceReg = ~0;
+        unsigned int m_locationReg = ~0;
+        unsigned int m_locationOffset = ~0;
+        unsigned int m_vectorNumElements = ~0;
         const VISAModule* m_pVISAModule = nullptr;
     };
 
@@ -365,16 +348,6 @@ namespace IGC
         /// @return VISA code size (in instructions)
         unsigned int GetVisaSize(const llvm::Instruction*) const;
 
-        /// @brief Return true if given instruction represents a debug info intrinsic.
-        /// @param Instruction to query.
-        /// @return true if given instruction is a debug info intrinsic, false otherwise.
-        bool IsDebugValue(const llvm::Instruction*) const;
-
-        /// @brief Return debug info variable from given debug info instruction.
-        /// @param Instruction to query.
-        /// @return debug info variable.
-        const llvm::MDNode* GetDebugVariable(const llvm::Instruction*) const;
-
         /// @brief Return raw data of given LLVM constant value.
         /// @param pConstVal constant value to process.
         /// @param rawData output buffer to append processed raw data to.
@@ -480,9 +453,12 @@ namespace IGC
         virtual unsigned getUnpaddedProgramSize() const = 0;
         virtual bool isLineTableOnly() const = 0;
         virtual unsigned getPrivateBaseReg() const = 0;
-        virtual unsigned getGRFSize() const = 0;
+        unsigned getGRFSizeInBits() const { return getGRFSizeInBytes() * 8; }
+        virtual unsigned getGRFSizeInBytes() const = 0;
         virtual unsigned getNumGRFs() const = 0;
+        // TODO: deprecate usage of this method, since it does not respect ASI
         virtual unsigned getPointerSize() const = 0;
+        virtual uint64_t getTypeSizeInBits(llvm::Type*) const = 0;
 
         virtual void* getPrivateBase() const = 0;
         virtual void setPrivateBase(void*) = 0;

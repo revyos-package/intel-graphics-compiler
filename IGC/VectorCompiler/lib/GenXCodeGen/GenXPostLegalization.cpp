@@ -66,9 +66,11 @@ class GenXPostLegalization : public FunctionPass {
 public:
   static char ID;
   explicit GenXPostLegalization() : FunctionPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX post-legalization pass"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const;
-  bool runOnFunction(Function &F);
+  StringRef getPassName() const override {
+    return "GenX post-legalization pass";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnFunction(Function &F) override;
 };
 
 } // end namespace llvm
@@ -140,6 +142,8 @@ bool GenXPostLegalization::runOnFunction(Function &F)
   Modified |= simplifyRegionInsts(&F, DL);
   // Cleanup redundant global loads.
   Modified |= cleanupLoads(&F);
+  // Cleanup constant loads.
+  Modified |= cleanupConstantLoads(&F);
   // Legalize constants in return.
   for (auto FI = F.begin(), FE = F.end(); FI != FE; ++FI) {
     BasicBlock *BB = &*FI;

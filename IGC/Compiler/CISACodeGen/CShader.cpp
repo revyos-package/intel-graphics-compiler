@@ -427,7 +427,7 @@ void CShader::CreateAliasVars()
                         continue;
 
                     Type* Ty = V->getType();
-                    VectorType* VTy = dyn_cast<VectorType>(Ty);
+                    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
                     Type* BTy = VTy ? VTy->getElementType() : Ty;
                     int nelts = (VTy ? (int)VTy->getNumElements() : 1);
 
@@ -1031,15 +1031,15 @@ bool CShader::InsideDivergentCF(const llvm::Instruction* inst) const
     return m_WI ? m_WI->insideDivergentCF(inst) : true;
 }
 
-bool CShader::InsideThreadDivergentCF(const llvm::Instruction* inst) const
+bool CShader::InsideWorkgroupDivergentCF(const llvm::Instruction* inst) const
 {
-    return m_WI ? m_WI->insideThreadDivergentCF(inst) : true;
+    return m_WI ? m_WI->insideWorkgroupDivergentCF(inst) : true;
 }
 
 uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
 {
     llvm::Type* type = val->getType();
-    uint nbElement = int_cast<uint>(cast<VectorType>(type)->getNumElements());
+    uint nbElement = int_cast<uint>(cast<IGCLLVM::FixedVectorType>(type)->getNumElements());
     mask = 0;
     // we don't process vector bigger than 31 elements as the mask has only 32bits
     // If we want to support longer vectors we need to extend the mask size
@@ -1244,7 +1244,7 @@ CShader::ExtractMaskWrapper::ExtractMaskWrapper(CShader* pS, Value* VecVal)
         m_EM = it->second;
         return;
     }
-    VectorType* VTy = dyn_cast<VectorType>(VecVal->getType());
+    IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(VecVal->getType());
     const unsigned int numChannels = VTy ? (unsigned)VTy->getNumElements() : 1;
     if (numChannels <= 32)
     {
@@ -1768,7 +1768,7 @@ CVariable* CShader::GetStructVariable(llvm::Value* v, bool forceVectorInit)
 
 CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
 {
-    llvm::VectorType* VTy = llvm::dyn_cast<llvm::VectorType>(C->getType());
+    IGCLLVM::FixedVectorType* VTy = llvm::dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
     if (C && VTy)
     {   // Vector constant
         llvm::Type* eTy = VTy->getElementType();
@@ -1996,7 +1996,7 @@ uint32_t CShader::GetNumElts(llvm::Type* type, bool isUniform)
     {
         IGC_ASSERT(type->getContainedType(0)->isIntegerTy() || type->getContainedType(0)->isFloatingPointTy());
 
-        auto VT = cast<VectorType>(type);
+        auto VT = cast<IGCLLVM::FixedVectorType>(type);
         numElts *= (uint16_t)VT->getNumElements();
     }
     else if (type->isStructTy())
@@ -2165,10 +2165,6 @@ e_alignment IGC::GetPreferredAlignment(llvm::Value* V, WIAnalysis* WIA,
         if (IGC::isA64Ptr(cast<PointerType>(Ptr->getType()), pContext))
             Align = GetPreferredAlignmentOnUse(V, WIA, pContext);
         return (Align == EALIGN_AUTO) ? (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD : Align;
-    }
-    else if (isa<LdRawIntrinsic>(V))
-    {
-        return (pContext->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
     }
 
     // If uniform variables are results from uniform atomic ops, they need
@@ -2713,7 +2709,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
                 if (isVecType)
                 {
                     // Map the entire vector value to the CVar
-                    unsigned numElements = (unsigned)cast<VectorType>(value->getType())->getNumElements();
+                    unsigned numElements = (unsigned)cast<IGCLLVM::FixedVectorType>(value->getType())->getNumElements();
                     var = GetNewVariable(numElements, ISA_TYPE_UQ,
                         (GetContext()->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD,
                         WIBaseClass::UNIFORM_GLOBAL, 1, valName);
@@ -2912,7 +2908,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
         }
     }
 
-    // If we use a value which is not marked has needed by the pattern matching something went wrong
+    // If we use a value which is not marked as needed by the pattern matching, then something went wrong
     IGC_ASSERT(!isa<Instruction>(value) || isa<PHINode>(value) || m_CG->NeedInstruction(cast<Instruction>(*value)));
 
     e_alignment preferredAlign = GetPreferredAlignment(value, m_WI, GetContext());
@@ -3623,7 +3619,7 @@ unsigned int CShader::GetPrimitiveTypeSizeInRegisterInBits(const Type* Ty) const
     {
         sizeInBits =
             GetContext()->getRegisterPointerSizeInBits(Ty->getPointerAddressSpace());
-        if (auto* VTy = dyn_cast<VectorType>(Ty))
+        if (auto* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty))
         {
             sizeInBits *= (unsigned)VTy->getNumElements();
         }

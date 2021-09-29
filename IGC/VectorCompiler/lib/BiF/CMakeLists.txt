@@ -9,6 +9,7 @@
 add_subdirectory(Utils)
 
 set(RESOURCE_EMBEDDER_SCRIPT ${IGC_SOURCE_DIR}/BiFModule/resource_embedder.py)
+set(LLVM_OPT_EXE "opt" CACHE STRING "")
 
 # Args:
 #   RES_LIST - generated list
@@ -56,7 +57,7 @@ function(vc_embed_bif RES_FILE CMCL_SRC_PATH BIF_NAME PTR_BIT_SIZE)
   cmake_parse_arguments(PARSE_ARGV 4
                         EXTRA
                         ""
-                        ""
+                        "CLANG_INCLUDES"
                         "DEPENDS")
 
   if(EXTRA_DEPENDS)
@@ -74,7 +75,7 @@ function(vc_embed_bif RES_FILE CMCL_SRC_PATH BIF_NAME PTR_BIT_SIZE)
   endif()
 
   add_custom_command(OUTPUT ${BIF_CLANG_BC_PATH}
-    COMMAND clang-tool -cc1 ${CMCL_INCLUDES} ${VC_INCLUDES} ${UTILS_HEADERS}
+    COMMAND clang-tool -cc1 ${CMCL_INCLUDES} ${VC_INCLUDES} ${UTILS_HEADERS} ${EXTRA_CLANG_INCLUDES}
     -x cl -cl-std=clc++ -triple=${SPIR_TARGET}
     -O2 -disable-llvm-passes -emit-llvm-bc -o ${BIF_CLANG_BC_NAME} ${CMCL_SRC_PATH}
     COMMENT "vc_embed_bif: Compiling CMCL source ${CMCL_SRC_PATH} to BC ${BIF_CLANG_BC_NAME}"
@@ -85,7 +86,7 @@ function(vc_embed_bif RES_FILE CMCL_SRC_PATH BIF_NAME PTR_BIT_SIZE)
     COMMENT "vc_embed_bif: Translating CMCL builtins: ${BIF_CLANG_BC_NAME} -> ${BIF_CMCL_BC_NAME}"
     DEPENDS CMCLTranslatorTool ${BIF_CLANG_BC_PATH})
   add_custom_command(OUTPUT ${BIF_OPT_BC_PATH}
-    COMMAND opt --O2 -o ${BIF_OPT_BC_NAME} ${BIF_CMCL_BC_NAME}
+    COMMAND ${LLVM_OPT_EXE} --O2 -o ${BIF_OPT_BC_NAME} ${BIF_CMCL_BC_NAME}
     COMMENT "vc_embed_bif: running opt with O2: ${BIF_CMCL_BC_NAME} -> ${BIF_OPT_BC_NAME}"
     DEPENDS opt ${BIF_CMCL_BC_PATH})
   add_custom_command(
@@ -108,6 +109,7 @@ else()
   set(PRINTF_OCL_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/printf_ocl_genx.cpp)
   set(PRINTF_ZE_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/printf_ze_genx.cpp)
   set(EMU_DIVREM_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/emulation_divrem.cpp)
+  set(SPIRV_BUILTINS_SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/spirv_builtins_genx.cpp)
 
   vc_embed_bif(PRINTF_OCL_32_CPP_PATH ${PRINTF_OCL_SRC_PATH} VCBiFPrintfOCL 32
                DEPENDS ${PRINTF_NOT_CM_COMMON_H_PATH})
@@ -122,21 +124,28 @@ else()
   vc_embed_bif(EMU_DIVREM_CPP_PATH ${EMU_DIVREM_SRC_PATH} VCEmulation 64
                DEPENDS "${DIVREM_EXTRA_SOURCES}")
 
+  get_target_include_opt_list(IGC_SPIRV_HEADERS_INCLUDES IGCSPIRVHeaders)
+  vc_embed_bif(SPIRV_BUILTINS_CPP_PATH ${SPIRV_BUILTINS_SRC_PATH} VCSPIRVBuiltins 64
+               CLANG_INCLUDES ${IGC_SPIRV_HEADERS_INCLUDES})
+
   add_custom_target(VCBiFPreparation
     DEPENDS ${PRINTF_OCL_32_CPP_PATH}
             ${PRINTF_OCL_64_CPP_PATH}
             ${PRINTF_ZE_32_CPP_PATH}
             ${PRINTF_ZE_64_CPP_PATH}
             ${EMU_DIVREM_CPP_PATH}
+            ${SPIRV_BUILTINS_CPP_PATH}
     SOURCES ${PRINTF_OCL_SRC_PATH}
-            ${EMU_DIVREM_SRC_PATH})
+            ${EMU_DIVREM_SRC_PATH}
+            ${SPIRV_BUILTINS_SRC_PATH})
 
   add_library(VCEmbeddedBiF
     ${PRINTF_OCL_32_CPP_PATH}
     ${PRINTF_OCL_64_CPP_PATH}
     ${PRINTF_ZE_32_CPP_PATH}
     ${PRINTF_ZE_64_CPP_PATH}
-    ${EMU_DIVREM_CPP_PATH})
+    ${EMU_DIVREM_CPP_PATH}
+    ${SPIRV_BUILTINS_CPP_PATH})
 
   add_dependencies(VCBiFPreparation VCBifUtils)
   add_dependencies(VCEmbeddedBiF VCBiFPreparation)

@@ -39,6 +39,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/ADT/StringRef.h>
 #include <llvm/IR/IRBuilder.h>
 #include "llvm/IR/Function.h"
 #include "llvm/IR/ValueMap.h"
@@ -779,6 +780,7 @@ namespace IGC
         bool AllowLICM();
         bool AllowPromotePrivateMemory();
         bool AllowPreRAScheduler();
+        bool AllowVISAPreRAScheduler();
         bool AllowCodeSinking();
         bool AllowSimd32Slicing();
         bool AllowLargeURBWrite();
@@ -1087,6 +1089,10 @@ namespace IGC
 
         uint64_t GetSIMDInfo() { return m_SIMDInfo; }
 
+        virtual llvm::Optional<SIMDMode> knownSIMDSize() const {
+            return llvm::None;
+        }
+
         // This can be paired with `EncodeAS4GFXResource()` to get a unique
         // index.
         uint32_t getUniqueIndirectIdx()
@@ -1183,6 +1189,8 @@ namespace IGC
         bool isSecondCompile;
         bool m_IsPingPongSecond;
         unsigned m_slmSize;
+        bool numWorkGroupsUsed;
+        bool m_ForceOneSIMD = false;
 
         ComputeShaderContext(
             const CBTILayout& btiLayout, ///< binding table layout to be used in code gen
@@ -1196,10 +1204,17 @@ namespace IGC
             isSecondCompile = false;
             m_IsPingPongSecond = false;
             m_slmSize = 0;
+            numWorkGroupsUsed = false;
+            m_threadGroupSize_X = 0;
+            m_threadGroupSize_Y = 0;
+            m_threadGroupSize_Z = 0;
         }
 
         /** get shader's thread group size */
         unsigned GetThreadGroupSize();
+        unsigned GetThreadGroupSizeX() { return m_threadGroupSize_X; }
+        unsigned GetThreadGroupSizeY() { return m_threadGroupSize_Y; }
+        unsigned GetThreadGroupSizeZ() { return m_threadGroupSize_Z; }
         unsigned GetSlmSizePerSubslice();
         unsigned GetSlmSize() const;
         float GetThreadOccupancy(SIMDMode simdMode);
@@ -1209,6 +1224,10 @@ namespace IGC
         SIMDMode GetMaxSIMDMode();
 
         float GetSpillThreshold() const;
+    private:
+        unsigned m_threadGroupSize_X;
+        unsigned m_threadGroupSize_Y;
+        unsigned m_threadGroupSize_Z;
     };
 
     class HullShaderContext : public CodeGenContext
@@ -1259,7 +1278,6 @@ namespace IGC
                 IntelGreaterThan4GBBufferRequired(false),
                 Use32BitPtrArith(false),
                 IncludeSIPKernelDebugWithLocalMemory(false),
-                DoReRA(false),
                 IntelHasPositivePointerOffset(false),
                 IntelHasBufferOffsetArg(false),
                 IntelBufferOffsetArgOptional(true),
@@ -1268,164 +1286,17 @@ namespace IGC
                 if (pInputArgs == nullptr)
                     return;
 
-                if (pInputArgs->pInternalOptions == nullptr)
-                    return;
-
-                // Build options are of the form -cl-xxxx and -ze-xxxx
-                // So we skip these prefixes when reading the options to be agnostic of their source
-
-                const char* options = pInputArgs->pInternalOptions;
-                if (strstr(options, "-replace-global-offsets-by-zero"))
+                if (pInputArgs->pInternalOptions != nullptr)
                 {
-                    replaceGlobalOffsetsByZero = true;
-                }
-                if (strstr(options, "-kernel-debug-enable"))
-                {
-                    KernelDebugEnable = true;
+                    parseOptions(pInputArgs->pInternalOptions);
                 }
 
-                if (strstr(options, "-include-sip-csr"))
+                // Internal options are passed in via pOptions as well.
+                if (pInputArgs->pOptions != nullptr)
                 {
-                    IncludeSIPCSR = true;
-                }
-
-                if (strstr(options, "-include-sip-kernel-debug"))
-                {
-                    IncludeSIPKernelDebug = true;
-                }
-                else if (strstr(options, "-include-sip-kernel-local-debug"))
-                {
-                    IncludeSIPKernelDebugWithLocalMemory = true;
-                }
-
-                if (strstr(options, "-intel-use-32bit-ptr-arith"))
-                {
-                    Use32BitPtrArith = true;
-                }
-
-                // -cl-intel-greater-than-4GB-buffer-required, -ze-opt-greater-than-4GB-buffer-required
-                if (strstr(options, "-greater-than-4GB-buffer-required"))
-                {
-                    IntelGreaterThan4GBBufferRequired = true;
-                }
-
-                // -cl-intel-has-buffer-offset-arg, -ze-opt-has-buffer-offset-arg
-                if (strstr(options, "-has-buffer-offset-arg"))
-                {
-                    IntelHasBufferOffsetArg = true;
-                }
-
-                // -cl-intel-buffer-offset-arg-required, -ze-opt-buffer-offset-arg-required
-                if (strstr(options, "-buffer-offset-arg-required"))
-                {
-                    IntelBufferOffsetArgOptional = false;
-                }
-
-                // -cl-intel-has-positive-pointer-offset, -ze-opt-has-positive-pointer-offset
-                if (strstr(options, "-has-positive-pointer-offset"))
-                {
-                    IntelHasPositivePointerOffset = true;
-                }
-
-                // -cl-intel-has-subDW-aligned-ptr-arg, -ze-opt-has-subDW-aligned-ptr-arg
-                if (strstr(options, "-has-subDW-aligned-ptr-arg"))
-                {
-                    IntelHasSubDWAlignedPtrArg = true;
-                }
-
-                if (strstr(options, "-intel-disable-a64WA"))
-                {
-                    IntelDisableA64WA = true;
-                }
-
-                if (strstr(options, "-intel-force-enable-a64WA"))
-                {
-                    IntelForceEnableA64WA = true;
-                }
-
-                if (strstr(options, "-intel-gtpin-rera"))
-                {
-                    DoReRA = true;
-                }
-                if (strstr(options, "-intel-no-prera-scheduling"))
-                {
-                    IntelEnablePreRAScheduling = false;
-                }
-                //
-                // Options to set the number of GRF and threads
-                //
-                if (strstr(options, IGC_MANGLE("-intel-128-GRF-per-thread")))
-                {
-                    Intel128GRFPerThread = true;
-                    numThreadsPerEU = 8;
-                }
-                if (strstr(options, IGC_MANGLE("-intel-256-GRF-per-thread")) ||
-                    strstr(options, IGC_MANGLE("-opt-large-register-file")))
-                {
-                    Intel256GRFPerThread = true;
-                    numThreadsPerEU = 4;
-                }
-                if (const char* op = strstr(options, IGC_MANGLE("-intel-num-thread-per-eu")))
-                {
-                    IntelNumThreadPerEU = true;
-                    // Take an integer value after this option
-                    // atoi(..) ignores leading white spaces and characters after the actual number
-                    numThreadsPerEU = atoi(op + strlen(IGC_MANGLE("-intel-num-thread-per-eu")));
-                }
-                if (strstr(options, "-intel-use-bindless-buffers"))
-                {
-                    PromoteStatelessToBindless = true;
-                }
-                if (strstr(options, "-intel-use-bindless-images"))
-                {
-                    PreferBindlessImages = true;
-                }
-                if (strstr(options, "-intel-use-bindless-mode"))
-                {
-                    // This is a new option that combines bindless generation for buffers
-                    // and images. Keep the old internal options to have compatibility
-                    // for existing tests. Those (old) options could be removed in future.
-                    UseBindlessMode = true;
-                    PreferBindlessImages = true;
-                    PromoteStatelessToBindless = true;
-                }
-                if (strstr(options, "-intel-use-bindless-printf"))
-                {
-                    UseBindlessPrintf = true;
-                }
-                if (strstr(options, "-intel-use-bindless-legacy-mode"))
-                {
-                    UseBindlessLegacyMode = true;
-                }
-                if (const char* O = strstr(options, "-intel-vector-coalesing"))
-                {
-                    // -cl-intel-vector-coalescing=<0-5>.
-                    const char* optionVal = O + strlen("-intel-vector-coalesing");
-                    if (*optionVal != 0 && *optionVal == '=' && isdigit(*(optionVal+1)))
-                    {
-                        ++optionVal;
-                        int16_t val = (int16_t)atoi(optionVal);
-                        if (val >= 0 && val <= 5)
-                        {
-                            VectorCoalescingControl = val;
-                        }
-                    }
-                }
-                if (strstr(options, "-allow-zebin"))
-                {
-                    EnableZEBinary = true;
-                }
-                if (strstr(options, "-intel-no-spill"))
-                {
-                    // This is an option to avoid spill/fill instructions in scheduler kernel.
-                    // OpenCL Runtime triggers scheduler kernel offline compilation while driver building,
-                    // since scratch space is not supported in this specific case, we cannot end up with
-                    // spilling kernel. If this option is set, then IGC will recompile the kernel with
-                    // some some optimizations disabled to avoid spill/fill instructions.
-                    NoSpill = true;
+                    parseOptions(pInputArgs->pOptions);
                 }
             }
-
 
             bool KernelDebugEnable;
             bool IncludeSIPCSR;
@@ -1435,7 +1306,11 @@ namespace IGC
             bool IntelForceEnableA64WA = false;
             bool Use32BitPtrArith = false;
             bool IncludeSIPKernelDebugWithLocalMemory;
-            bool DoReRA;
+
+            bool GTPinReRA = false;
+            bool GTPinGRFInfo = false;
+            bool GTPinScratchAreaSize = false;
+            uint32_t GTPinScratchAreaSizeValue = 0;
 
             // stateless to stateful optimization
             bool IntelHasPositivePointerOffset; // default: false
@@ -1456,6 +1331,10 @@ namespace IGC
             bool EnableZEBinary = false;
             bool NoSpill = false;
 
+            // Generic address related
+            bool HasNoLocalToGeneric = false;
+            bool ForceGlobalMemoryAllocation = false;
+
             // -1 : initial value that means it is not set from cmdline
             // 0-5: valid values set from the cmdline
             int16_t VectorCoalescingControl = -1;
@@ -1464,6 +1343,9 @@ namespace IGC
             bool Intel256GRFPerThread = false;
             bool IntelNumThreadPerEU = false;
             uint32_t numThreadsPerEU = 0;
+
+            private:
+                void parseOptions(const char* IntOptStr);
         };
 
         class Options
@@ -1483,6 +1365,10 @@ namespace IGC
                 // Build options are of the form -cl-xxxx and -ze-xxxx
                 // So we skip these prefixes when reading the options to be agnostic of their source
 
+                // Runtime passes internal options via pOptions as well, and those
+                // internal options will be handled by InternalOptions class (parseOptions).
+                // !!! When adding a new internal option, please add it into internalOptions class!!!
+                // (Might combine both Options and InternalOptions into a single class!)
                 const char* options = pInputArgs->pOptions;
                 if (strstr(options, "-fp32-correctly-rounded-divide-sqrt"))
                 {
@@ -1509,35 +1395,7 @@ namespace IGC
                 {
                     IsLibraryCompilation = true;
                 }
-                if (strstr(options, "-no-local-to-generic"))
-                {
-                    HasNoLocalToGeneric = true;
-                }
-                if (strstr(options, "-force-global-mem-allocation"))
-                {
-                    ForceGlobalMemoryAllocation = true;
-                }
-
-                // GTPin flags used by L0 driver runtime
-                if (strstr(options, "-gtpin-rera"))
-                {
-                    GTPinReRA = true;
-                }
-                if (strstr(options, "-gtpin-grf-info"))
-                {
-                    GTPinGRFInfo = true;
-                }
-                if (const char* op = strstr(options, "-gtpin-scratch-area-size"))
-                {
-                    GTPinScratchAreaSize = true;
-                    const char* optionVal = op + strlen("-gtpin-scratch-area-size");
-                    if ((*optionVal == '=' || *optionVal == ' ') && isdigit(*(optionVal + 1)))
-                    {
-                        ++optionVal;
-                        GTPinScratchAreaSizeValue = atoi(optionVal);
-                    }
-                }
-                if (const char* op = strstr(options, IGC_MANGLE("-intel-reqd-eu-thread-count")))
+                if (const char* op = strstr(options, "-intel-reqd-eu-thread-count"))
                 {
                     IntelRequiredEUThreadCount = true;
                     // Take an integer value after this option
@@ -1551,12 +1409,6 @@ namespace IGC
             bool UniformWGS;
             bool EnableTakeGlobalAddress = false;
             bool IsLibraryCompilation = false;
-            bool HasNoLocalToGeneric = false;
-            bool ForceGlobalMemoryAllocation = false;
-            bool GTPinReRA = false;
-            bool GTPinGRFInfo = false;
-            bool GTPinScratchAreaSize = false;
-            uint32_t GTPinScratchAreaSizeValue = 0;
             bool IntelRequiredEUThreadCount = false;
             uint32_t requiredEUThreadCount = 0;
         };

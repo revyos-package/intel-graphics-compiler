@@ -159,7 +159,10 @@ void LocalRA::preLocalRAAnalysis()
     unsigned int numRowsReserved = numRowsEOT;
 
     // Remove unreferenced dcls
-    gra.removeUnreferencedDcls();
+    if (!builder.getOptions()->getuInt32Option(vISA_CodePatch))
+    {
+        gra.removeUnreferencedDcls();
+    }
 
     if (builder.getOption(vISA_HybridRAWithSpill) || builder.getOption(vISA_FastCompileRA))
     {
@@ -2343,7 +2346,7 @@ void PhyRegsLocalRA::markPhyRegs(G4_Declare* topdcl)
     unsigned numwords = 0;
     unsigned int regnum = 0;
 
-    if (rvar->getPhyReg() == nullptr)
+    if (builder->hasFusedEUWA() && rvar->getPhyReg() == nullptr)
     {
         return;
     }

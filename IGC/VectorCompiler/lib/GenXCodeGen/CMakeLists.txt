@@ -46,6 +46,7 @@ set(CODEGEN_SOURCES
   GenXLegalization.cpp
   GenXLiveRanges.cpp
   GenXLiveness.cpp
+  GenXLoadStoreLowering.cpp
   GenXLowering.cpp
   GenXLowerAggrCopies.cpp
   GenXLowerJmpTableSwitch.cpp
@@ -61,6 +62,7 @@ set(CODEGEN_SOURCES
   GenXPressureTracker.cpp
   GenXPrologEpilogInsertion.cpp
   GenXPromoteArray.cpp
+  GenXPromoteStatefulToBindless.cpp
   GenXThreadPrivateMemory.cpp
   GenXPromotePredicate.cpp
   GenXRawSendRipper.cpp
@@ -70,6 +72,7 @@ set(CODEGEN_SOURCES
   GenXRegionCollapsing.cpp
   GenXRematerialization.cpp
   GenXSimdCFConformance.cpp
+  GenXStackUsage.cpp
   GenXSubtarget.cpp
   GenXTargetMachine.cpp
   GenXTidyControlFlow.cpp

@@ -54,6 +54,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+
 #include <queue>
 #include <set>
 #include "Probe/Assertion.h"
@@ -163,9 +165,12 @@ class GenXDeadVectorRemoval : public FunctionPass {
 public:
   static char ID;
   explicit GenXDeadVectorRemoval() : FunctionPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX dead vector element removal pass"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const;
-  bool runOnFunction(Function &F);
+  StringRef getPassName() const override {
+    return "GenX dead vector element removal pass";
+  }
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnFunction(Function &F) override;
+
 private:
   void clear() {
     InstMap.clear();
@@ -554,10 +559,8 @@ void GenXDeadVectorRemoval::processBitCast(Instruction *Inst, LiveBits LB)
   if (auto InInst = dyn_cast<Instruction>(InVal))
     InLB = createLiveBits(InInst);
   else if (isa<Constant>(InVal)) {
-    unsigned NumElems =
-        isa<VectorType>(InVal->getType())
-            ? cast<VectorType>(InVal->getType())->getNumElements()
-            : 1;
+    auto *VTy = dyn_cast<IGCLLVM::FixedVectorType>(InVal->getType());
+    unsigned NumElems = VTy ? VTy->getNumElements() : 1;
     ConstVecLBS.setNumElements(NumElems);
     InLB = LiveBits(&ConstVecLBS, NumElems);
   } else
@@ -658,7 +661,7 @@ void GenXDeadVectorRemoval::addToWorkList(Instruction *Inst)
 LiveBits GenXDeadVectorRemoval::createLiveBits(Instruction *Inst)
 {
   unsigned NumElements = 1;
-  if (auto VT = dyn_cast<VectorType>(Inst->getType()))
+  if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Inst->getType()))
     NumElements = VT->getNumElements();
   decltype(InstMap)::iterator Iter;
   bool WasAnInsertion;
@@ -681,7 +684,7 @@ LiveBits GenXDeadVectorRemoval::createLiveBits(Instruction *Inst)
 LiveBits GenXDeadVectorRemoval::getLiveBits(Instruction *Inst)
 {
   unsigned NumElements = 1;
-  if (auto VT = dyn_cast<VectorType>(Inst->getType()))
+  if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Inst->getType()))
     NumElements = VT->getNumElements();
   auto i = InstMap.find(Inst);
   if (i == InstMap.end())

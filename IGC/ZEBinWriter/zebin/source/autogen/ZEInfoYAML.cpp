@@ -28,15 +28,15 @@ void MappingTraits<zeInfoKernel>::mapping(IO& io, zeInfoKernel& info)
 {
     io.mapRequired("name", info.name);
     io.mapRequired("execution_env", info.execution_env);
-    io.mapOptional("payload_arguments", info.payload_arguments);
-    io.mapOptional("per_thread_payload_arguments", info.per_thread_payload_arguments);
-    io.mapOptional("binding_table_indices", info.binding_table_indices);
-    io.mapOptional("per_thread_memory_buffers", info.per_thread_memory_buffers);
-    io.mapOptional("experimental_properties", info.experimental_properties);
+    io.mapOptional("payload_arguments", info.payload_arguments, PayloadArgumentsTy());
+    io.mapOptional("per_thread_payload_arguments", info.per_thread_payload_arguments, PerThreadPayloadArgumentsTy());
+    io.mapOptional("binding_table_indices", info.binding_table_indices, BindingTableIndicesTy());
+    io.mapOptional("per_thread_memory_buffers", info.per_thread_memory_buffers, PerThreadMemoryBuffersTy());
+    io.mapOptional("experimental_properties", info.experimental_properties, zeInfoExperimentalProperties());
+    io.mapOptional("debug_env", info.debug_env, zeInfoDebugEnv());
 }
 void MappingTraits<zeInfoExecutionEnv>::mapping(IO& io, zeInfoExecutionEnv& info)
 {
-    io.mapRequired("actual_kernel_start_offset", info.actual_kernel_start_offset);
     io.mapOptional("barrier_count", info.barrier_count, 0);
     io.mapOptional("disable_mid_thread_preemption", info.disable_mid_thread_preemption, false);
     io.mapRequired("grf_count", info.grf_count);
@@ -91,4 +91,9 @@ void MappingTraits<zeInfoExperimentalProperties>::mapping(IO& io, zeInfoExperime
     io.mapOptional("has_non_kernel_arg_load", info.has_non_kernel_arg_load, -1);
     io.mapOptional("has_non_kernel_arg_store", info.has_non_kernel_arg_store, -1);
     io.mapOptional("has_non_kernel_arg_atomic", info.has_non_kernel_arg_atomic, -1);
+}
+void MappingTraits<zeInfoDebugEnv>::mapping(IO& io, zeInfoDebugEnv& info)
+{
+    io.mapOptional("sip_surface_bti", info.sip_surface_bti, -1);
+    io.mapOptional("sip_surface_offset", info.sip_surface_offset, -1);
 }

@@ -9,7 +9,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/Optimizer/ValueTracker.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
-#include "DebugInfo/DebugInfoUtils.hpp"
+#include "Compiler/DebugInfo/Utils.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -162,7 +162,7 @@ Value* ValueTracker::handleExtractElement(ExtractElementInst* E)
         {
             auto mask = I->getShuffleMask();
             uint shuffleidx = int_cast<uint>(mask[(uint)idx]);
-            auto vType = dyn_cast<VectorType>(I->getOperand(0)->getType());
+            auto vType = dyn_cast<IGCLLVM::FixedVectorType>(I->getOperand(0)->getType());
             baseValue = (shuffleidx < vType->getNumElements()) ?
                 I->getOperand(0) : I->getOperand(1);
         }
@@ -182,9 +182,9 @@ Value* ValueTracker::handleGlobalVariable(GlobalVariable* G)
     Constant* pSamplerVal = G->getInitializer();
     // Add debug info intrinsic for this variable inside the function using this sampler.
     Instruction* pEntryPoint = &(*m_Function->getEntryBlock().getFirstInsertionPt());
-    IF_DEBUG_INFO(DebugInfoUtils::UpdateGlobalVarDebugInfo(G, pSamplerVal, pEntryPoint, false);)
-        // Found a global sampler, return it.
-        return isa<ConstantStruct>(pSamplerVal) ?
+    Utils::UpdateGlobalVarDebugInfo(G, pSamplerVal, pEntryPoint, false);
+    // Found a global sampler, return it.
+    return isa<ConstantStruct>(pSamplerVal) ?
         pSamplerVal->getAggregateElement(0U) : pSamplerVal;
 }
 

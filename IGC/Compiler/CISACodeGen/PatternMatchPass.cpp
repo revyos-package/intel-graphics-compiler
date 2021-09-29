@@ -1184,6 +1184,11 @@ namespace IGC
         case Instruction::ExtractValue:
             match = MatchSingleInstruction(I);
             break;
+#if LLVM_VERSION_MAJOR >= 10
+        case Instruction::FNeg:
+            match = MatchAbsNeg(I);
+            break;
+#endif
         }
         IGC_ASSERT(match);
     }
@@ -2117,17 +2122,10 @@ namespace IGC
         }
 
         using namespace llvm::PatternMatch;
-        Value* LHS = NULL, * RHS = NULL, * Op1 = NULL, * Op0 = NULL;
         if (m_ctx->type == ShaderType::VERTEX_SHADER &&
-            m_ctx->m_DriverInfo.PreventZFighting() &&
-            (match(&I,m_BinOp(m_FMul(m_Value(LHS), m_Value(RHS)), m_Value(Op1))) ||
-             match(&I,m_BinOp(m_Value(Op0), m_FMul(m_Value(LHS), m_Value(RHS))))) &&
-            I.hasOneUse() && isa<IntrinsicInst>(I.user_back()))
+            m_ctx->m_DriverInfo.PreventZFighting())
         {
-            auto fmul_val = Op0 != NULL ? I.getOperand(1) : I.getOperand(0);
-            auto fmul = cast<BinaryOperator>(fmul_val);
-            if (cast<IntrinsicInst>(I.user_back())->getIntrinsicID() == llvm::Intrinsic::sin &&
-                m_PosDep->PositionDependsOnInst(fmul) && NeedInstruction(*fmul))
+            if (m_PosDep->PositionDependsOnInst(&I))
                 return false;
         }
         if (IGC_IS_FLAG_ENABLED(DisableMatchMad))
@@ -2438,7 +2436,7 @@ namespace IGC
         // Store3d supports only types equal or less than 128 bits.
         if (auto* storeInst = dyn_cast<StoreInst>(&I))
         {
-            llvm::VectorType* vectorToStore = dyn_cast<llvm::VectorType>(storeInst->getValueOperand()->getType());
+            IGCLLVM::FixedVectorType* vectorToStore = dyn_cast<IGCLLVM::FixedVectorType>(storeInst->getValueOperand()->getType());
 
             // If stored value is a vector of pointers, the size must be calculated manually,
             // because getPrimitiveSizeInBits returns 0 for pointers.
@@ -3072,8 +3070,8 @@ namespace IGC
                 llvm::Type* srcTy = bTInst->getOperand(0)->getType();
                 llvm::Type* dstTy = bTInst->getType();
 
-                srcNElts = (srcTy->isVectorTy()) ? (uint32_t)cast<VectorType>(srcTy)->getNumElements() : 1;
-                dstNElts = (dstTy->isVectorTy()) ? (uint32_t)cast<VectorType>(dstTy)->getNumElements() : 1;
+                srcNElts = (srcTy->isVectorTy()) ? (uint32_t)cast<IGCLLVM::FixedVectorType>(srcTy)->getNumElements() : 1;
+                dstNElts = (dstTy->isVectorTy()) ? (uint32_t)cast<IGCLLVM::FixedVectorType>(dstTy)->getNumElements() : 1;
 
                 if (srcNElts < dstNElts && srcTy->getScalarSizeInBits() < 64)
                 {

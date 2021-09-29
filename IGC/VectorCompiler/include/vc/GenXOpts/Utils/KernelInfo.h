@@ -19,10 +19,28 @@ SPDX-License-Identifier: MIT
 
 #include <unordered_map>
 
+#include "llvmWrapper/ADT/StringRef.h"
+
 namespace llvm {
 namespace genx {
 
 enum { VISA_MAJOR_VERSION = 3, VISA_MINOR_VERSION = 6 };
+
+enum { VC_STACK_USAGE_UNKNOWN = -1 };
+
+// Utility function to tell how much stack required
+// returns VC_STACK_USAGE_UNKNOWN if no attribute found
+inline int getStackAmount(const Function *F) {
+  IGC_ASSERT(F);
+  if (!F->hasFnAttribute(genx::FunctionMD::VCStackAmount))
+    return VC_STACK_USAGE_UNKNOWN;
+  StringRef Val =
+      F->getFnAttribute(genx::FunctionMD::VCStackAmount).getValueAsString();
+  int Result;
+  bool HaveParseError = Val.getAsInteger<int>(10, Result);
+  IGC_ASSERT(!HaveParseError);
+  return Result;
+}
 
 // Utility function to tell if a Function needs to be called using
 // vISA stack call ABI.
@@ -69,8 +87,8 @@ using ArgToImplicitLinearization =
     std::unordered_map<Argument *, LinearizedArgInfo>;
 
 inline bool isDescBufferType(StringRef TypeDesc) {
-  return (TypeDesc.find_lower("buffer_t") != StringRef::npos &&
-          TypeDesc.find_lower("image1d_buffer_t") == StringRef::npos);
+  return (IGCLLVM::contains_insensitive(TypeDesc, "buffer_t") &&
+          !IGCLLVM::contains_insensitive(TypeDesc, "image1d_buffer_t"));
 }
 
 /// KernelMetadata : class to parse and update kernel metadata
@@ -161,15 +179,13 @@ public:
     return ArgTypeDescs[Idx];
   }
 
-  enum { AK_NORMAL, AK_SAMPLER, AK_SURFACE, AK_VME };
+  enum { AK_NORMAL, AK_SAMPLER, AK_SURFACE };
   unsigned getArgCategory(unsigned Idx) const {
     switch (getArgKind(Idx) & 7) {
     case AK_SAMPLER:
       return RegCategory::SAMPLER;
     case AK_SURFACE:
       return RegCategory::SURFACE;
-    case AK_VME:
-      return RegCategory::VME;
     default:
       return RegCategory::GENERAL;
     }

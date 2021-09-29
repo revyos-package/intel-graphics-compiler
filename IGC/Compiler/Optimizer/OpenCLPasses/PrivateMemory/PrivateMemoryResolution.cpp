@@ -13,10 +13,13 @@ SPDX-License-Identifier: MIT
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
 #include "Compiler/CISACodeGen/LowerGEPForPrivMem.hpp"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/IRBuilder.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Dominators.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -291,6 +294,16 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
                     const ADDRESS_SPACE targetAS = (ADDRESS_SPACE)(cast<PointerType>(CI->getType()))->getAddressSpace();
                     if (targetAS == ADDRESS_SPACE_GLOBAL_OR_PRIVATE || targetAS == ADDRESS_SPACE_PRIVATE) {
                         return false;
+                    }
+                }
+                if (Ctx.type == ShaderType::OPENCL_SHADER) {
+                    // PtrToInt may be used to test if pointer is null, then we cannot
+                    // distinguish nullptr versus zero offset. This causes a problem
+                    // with an OpenCL3.0 test. see cassian/oclc_address_space_qualifiers
+                    if (PtrToIntInst* IPI = dyn_cast<PtrToIntInst>(&I)) {
+                        if (IPI->getPointerAddressSpace() == ADDRESS_SPACE_PRIVATE) {
+                            return false;
+                        }
                     }
                 }
             }
@@ -601,7 +614,7 @@ public:
     {
         IGC_ASSERT(nullptr != pLoad);
         IGC_ASSERT(pLoad->isSimple());
-        IRBuilder<> IRB(pLoad);
+        IGCLLVM::IRBuilder<> IRB(pLoad);
         if (isa<Instruction>(pLoad->getPointerOperand()))
         {
             IRB.SetInsertPoint(cast<Instruction>(pLoad->getPointerOperand()));
@@ -618,7 +631,7 @@ public:
             Type* scalarptrTy = PointerType::get(scalarType, pLoad->getPointerAddressSpace());
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = UndefValue::get(pLoad->getType());
-            auto pLoadVT = cast<VectorType>(pLoad->getType());
+            auto pLoadVT = cast<IGCLLVM::FixedVectorType>(pLoad->getType());
             for (unsigned i = 0, e = (unsigned)pLoadVT->getNumElements(); i < e; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
@@ -639,7 +652,7 @@ public:
     {
         IGC_ASSERT(nullptr != pStore);
         IGC_ASSERT(pStore->isSimple());
-        IRBuilder<> IRB(pStore);
+        IGCLLVM::IRBuilder<> IRB(pStore);
         if (isa<Instruction>(pStore->getPointerOperand()))
         {
             IRB.SetInsertPoint(cast<Instruction>(pStore->getPointerOperand()));
@@ -657,7 +670,7 @@ public:
             IGC_ASSERT(scalarType->getPrimitiveSizeInBits() / 8 == elementSize);
             Value* vec = pStore->getValueOperand();
 
-            unsigned vecNumElts = (unsigned)cast<VectorType>(vec->getType())->getNumElements();
+            unsigned vecNumElts = (unsigned)cast<IGCLLVM::FixedVectorType>(vec->getType())->getNumElements();
             for (unsigned i = 0; i < vecNumElts; ++i)
             {
                 Value* ptr = IRB.CreateIntToPtr(address, scalarptrTy);
@@ -728,7 +741,7 @@ bool PrivateMemoryResolution::testTransposedMemory(const Type* pTmpType, const T
         }
         else if(pTmpType->isVectorTy())
         {
-            auto pTmpVType = cast<VectorType>(pTmpType);
+            auto pTmpVType = cast<IGCLLVM::FixedVectorType>(pTmpType);
             tmpAllocaSize *= pTmpVType->getNumElements();
             pTmpType = pTmpType->getContainedType(0);
             ok = (nullptr != pTmpType);
@@ -828,12 +841,12 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
     // Creates intrinsics that will be lowered in the CodeGen and will handle the simd size
     Function* simdSizeFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_simdSize);
 
-    llvm::IRBuilder<> entryBuilder(&*m_currFunction->getEntryBlock().getFirstInsertionPt());
+    IGCLLVM::IRBuilder<> entryBuilder(&*m_currFunction->getEntryBlock().getFirstInsertionPt());
     ImplicitArgs implicitArgs(*m_currFunction, m_pMdUtils);
 
     // Construct an empty DebugLoc.
-    IF_DEBUG_INFO(DebugLoc entryDebugLoc);
-    IF_DEBUG_INFO(entryBuilder.SetCurrentDebugLocation(entryDebugLoc));
+    DebugLoc entryDebugLoc;
+    entryBuilder.SetCurrentDebugLocation(entryDebugLoc);
 
     if (privateOnStack)
     {
@@ -844,8 +857,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         for (auto pAI : allocaInsts)
         {
             bool isUniform = pAI->getMetadata("uniform") != nullptr;
-            llvm::IRBuilder<> builder(pAI);
-            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
+            IGCLLVM::IRBuilder<> builder(pAI);
+            builder.SetCurrentDebugLocation(entryDebugLoc);
 
             // buffer of this private var
             Value* privateBuffer = nullptr;
@@ -920,8 +933,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         Value* privateBase = nullptr;
         if (modMD->compOpt.UseScratchSpacePrivateMemory)
         {
-            Argument* r0Arg = implicitArgs.getArgInFunc(*m_currFunction, ImplicitArg::R0);
-            Value* r0_5 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
+            Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, &Ctx);
+            Value* r0_5 = entryBuilder.CreateExtractElement(r0Val, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
             privateBase = entryBuilder.CreateAnd(r0_5, ConstantInt::get(typeInt32, 0xFFFFFC00), VALUE_NAME("privateBase"));
         }
 
@@ -969,7 +982,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         for (auto pAI : allocaInsts)
         {
             bool isUniform = pAI->getMetadata("uniform") != nullptr;
-            llvm::IRBuilder<> builder(pAI);
+            IGCLLVM::IRBuilder<> builder(pAI);
             // Post upgrade to LLVM 3.5.1, it was found that inliner propagates debug info of callee
             // in to the alloca. Further, those allocas are somehow hoisted to the top of program.
             // When those allocas are lowered to below sequence, they result in prologue instructions
@@ -978,7 +991,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
             // correctly. So instead, we set DebugLoc for the instructions generated by lowering
             // alloca to mark that they are part of the prologue.
             // Note: As per Amjad, later LLVM version has a fix for this in llvm/lib/Transforms/Utils/InlineFunction.cpp.
-            IF_DEBUG_INFO(builder.SetCurrentDebugLocation(pAI->getDebugLoc()));
+            builder.SetCurrentDebugLocation(pAI->getDebugLoc());
 
             // Get buffer information from the analysis
             unsigned int scalarBufferOffset = m_ModAllocaInfo->getConstBufferOffset(pAI);
@@ -1040,8 +1053,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
     }
 
     // Find the implicit argument representing r0 and the private memory base.
-    Argument* r0Arg = implicitArgs.getArgInFunc(*m_currFunction, ImplicitArg::R0);
-    Argument* privateMemArg = implicitArgs.getArgInFunc(*m_currFunction, ImplicitArg::PRIVATE_BASE);
+    Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, &Ctx);
+    Argument* privateMemArg = implicitArgs.getImplicitArg(*m_currFunction, ImplicitArg::PRIVATE_BASE);
     // Note: for debugging purposes privateMemArg will be marked as Output to keep its liveness all time
 
     // Resolve the call
@@ -1076,7 +1089,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         Value* shlThreadID = entryBuilder.CreateShl(threadId, ConstantInt::get(typeInt32, 1), VALUE_NAME("shlThreadID"));
 
         // FFSID - r0.0 bit 16
-        Value* r0_0 = entryBuilder.CreateExtractElement(r0Arg, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"));
+        Value* r0_0 = entryBuilder.CreateExtractElement(r0Val, ConstantInt::get(typeInt32, 0), VALUE_NAME("r0.0"));
         Value* FFSIDbit = entryBuilder.CreateLShr(r0_0, ConstantInt::get(typeInt32, 16), VALUE_NAME("FFSIDbit"));
         Value* FFSID = entryBuilder.CreateAnd(FFSIDbit, ConstantInt::get(typeInt32, 1), VALUE_NAME("FFSID"));
 
@@ -1109,8 +1122,8 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         // %privateBufferGEP            = getelementptr i8* %privateBase, i32 %totalOffset
         // %privateBuffer               = bitcast i8* %offsettmp1 to <buffer type>
 
-        llvm::IRBuilder<> builder(pAI);
-        IF_DEBUG_INFO(builder.SetCurrentDebugLocation(entryDebugLoc));
+        IGCLLVM::IRBuilder<> builder(pAI);
+        builder.SetCurrentDebugLocation(entryDebugLoc);
         bool isUniform = pAI->getMetadata("uniform") != nullptr;
         // Get buffer information from the analysis
         unsigned int scalarBufferOffset = m_ModAllocaInfo->getConstBufferOffset(pAI);

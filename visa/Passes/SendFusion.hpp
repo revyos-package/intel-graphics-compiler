@@ -6,9 +6,16 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-#pragma once
+#ifndef VISA_PASSES_SENDFUSION_HPP
+#define VISA_PASSES_SENDFUSION_HPP
 
-// Once moved to LLVM3.4 version the following line should be un-commented out
-// Once the code is stabilized, this defined macro and all relevant code/files
-// can and should be removed.
-#define LLVM_3400
+namespace vISA
+{
+    class FlowGraph;
+    class G4_BB;
+    class Mem_Manager;
+
+    bool doSendFusion(FlowGraph* CFG, vISA::Mem_Manager* MMgr);
+}
+
+#endif

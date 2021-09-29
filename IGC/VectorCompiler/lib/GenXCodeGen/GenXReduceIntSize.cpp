@@ -66,6 +66,7 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Instructions.h"
 
 using namespace llvm;
 using namespace llvm::PatternMatch;
@@ -86,9 +87,10 @@ class GenXReduceIntSize : public FunctionPass {
 public:
   static char ID;
   explicit GenXReduceIntSize() : FunctionPass(ID) { }
-  virtual StringRef getPassName() const { return "GenX reduce integer size"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const;
-  bool runOnFunction(Function &F);
+  StringRef getPassName() const override { return "GenX reduce integer size"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnFunction(Function &F) override;
+
 private:
   Instruction *reverseProcessInst(Instruction *Inst);
   Value *truncValue(Value *V, unsigned NumBits, Instruction *InsertBefore,
@@ -305,13 +307,13 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
   case Instruction::Add:
   case Instruction::Sub:
   case Instruction::Mul:
-  case Instruction::Shl:
-    // These binary operators can just truncate.
-    NewInst = BinaryOperator::Create(
-        (Instruction::BinaryOps)Inst->getOpcode(),
-        truncValue(Inst->getOperand(0), TruncBits, InsertBefore, DL),
-        truncValue(Inst->getOperand(1), TruncBits, InsertBefore, DL),
-        "", InsertBefore);
+  case Instruction::Shl: {
+      // These binary operators can just truncate.
+      Value *Fst = truncValue(Inst->getOperand(0), TruncBits, InsertBefore, DL),
+            *Snd = truncValue(Inst->getOperand(1), TruncBits, InsertBefore, DL);
+      NewInst = BinaryOperator::Create(
+          (Instruction::BinaryOps)Inst->getOpcode(), Fst, Snd, "", InsertBefore);
+    }
     break;
   case Instruction::ZExt:
   case Instruction::SExt: {
@@ -321,8 +323,8 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
       if (TruncBits != NewBits) {
         // The value still needs extending, just not as much as before. Or it
         // might need to be truncated.
-        unsigned NumElements = cast<VectorType>(Inst->getType())
-            ->getNumElements();
+        unsigned NumElements =
+            cast<IGCLLVM::FixedVectorType>(Inst->getType())->getNumElements();
         int Opcode = Instruction::Trunc;
         if (TruncBits > NewBits)
           Opcode = Inst->getOpcode();
@@ -333,16 +335,17 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
       }
     }
     break;
-  case Instruction::ShuffleVector:
-    if (!cast<Constant>(Inst->getOperand(2))->isNullValue())
+  case Instruction::ShuffleVector: {
+    auto *Shuffle = cast<ShuffleVectorInst>(Inst);
+    if (!Shuffle->isZeroEltSplat())
       return Prev;
-    if (cast<VectorType>(Inst->getOperand(0)->getType())
-        ->getNumElements() == 1) {
+    if (cast<IGCLLVM::FixedVectorType>(Shuffle->getOperand(0)->getType())
+            ->getNumElements() == 1) {
       // This shufflevector is a splat from a 1-vector.
-      auto TruncatedInput = truncValue(Inst->getOperand(0), TruncBits,
+      auto TruncatedInput = truncValue(Shuffle->getOperand(0), TruncBits,
           InsertBefore, DL);
       NewInst = new ShuffleVectorInst(TruncatedInput,
-          UndefValue::get(TruncatedInput->getType()), Inst->getOperand(2), "",
+          UndefValue::get(TruncatedInput->getType()), IGCLLVM::getShuffleMaskForBitcode(Shuffle), "",
           InsertBefore);
       break;
     }
@@ -351,14 +354,15 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
     // a splat (and the insertelement has no other use). For example:
     //  %splat.splatinsert.i = insertelement <16 x i32> undef, i32 %direction, i32 0, !dbg !355
     //  %splat.splat.i = shufflevector <16 x i32> %splat.splatinsert.i, <16 x i32> undef, <16 x i32> zeroinitializer, !dbg !355
-    if (auto IE = dyn_cast<InsertElementInst>(Inst->getOperand(0))) {
+    if (auto IE = dyn_cast<InsertElementInst>(Shuffle->getOperand(0))) {
       if (IE->hasOneUse()) {
         if (auto C = dyn_cast<Constant>(IE->getOperand(2))) {
           if (C->isNullValue()) {
             // This is a splat, and we can truncate it by creating new
             // insertelement and shufflevector instructions.
-            unsigned NumElements = cast<VectorType>(Inst->getType())
-                ->getNumElements();
+            unsigned NumElements =
+                cast<IGCLLVM::FixedVectorType>(Shuffle->getType())
+                    ->getNumElements();
             auto ElTy = Type::getIntNTy(InsertBefore->getContext(),
                   TruncBits);
             auto Ty = IGCLLVM::FixedVectorType::get(ElTy, NumElements);
@@ -371,13 +375,14 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
             NewIE->setDebugLoc(IE->getDebugLoc());
             NewIE->takeName(IE);
             NewInst = new ShuffleVectorInst(NewIE, UndefValue::get(Ty),
-                Inst->getOperand(2), "", InsertBefore);
+                IGCLLVM::getShuffleMaskForBitcode(Shuffle), "", InsertBefore);
             break;
           }
         }
       }
     }
     return Prev;
+  }
   default:
     return Prev;
   }
@@ -481,7 +486,8 @@ Instruction *GenXReduceIntSize::reverseProcessInst(Instruction *Inst)
 Value *GenXReduceIntSize::truncValue(Value *V, unsigned NumBits,
     Instruction *InsertBefore, const DebugLoc &DL)
 {
-  unsigned NumElements = cast<VectorType>(V->getType())->getNumElements();
+  unsigned NumElements =
+      cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements();
   auto ElTy = Type::getIntNTy(InsertBefore->getContext(), NumBits);
   auto Ty = IGCLLVM::FixedVectorType::get(ElTy, NumElements);
   if (Ty == V->getType())
@@ -624,7 +630,8 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
     if (Value *V = getSplatValue(cast<ShuffleVectorInst>(Inst))) {
       // Transform "splat (ext v)" to "ext (splat v)".
       if (auto Ext = dyn_cast<ExtOperator>(V)) {
-        unsigned NumElts = cast<VectorType>(Inst->getType())->getNumElements();
+        unsigned NumElts =
+            cast<IGCLLVM::FixedVectorType>(Inst->getType())->getNumElements();
         IntegerType *I32Ty = Type::getInt32Ty(Inst->getContext());
         VectorType *MaskTy = IGCLLVM::FixedVectorType::get(I32Ty, NumElts);
         Value *Mask = Constant::getNullValue(MaskTy);
@@ -796,7 +803,7 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
         // use the original size as the result type.
         Type *ResTy = Opnd0->getType();
         bool IsOneEltVecTy = false;
-        if (auto VTy = dyn_cast<VectorType>(ResTy))
+        if (auto *VTy = dyn_cast<IGCLLVM::FixedVectorType>(ResTy))
           IsOneEltVecTy = VTy->getNumElements() == 1;
         for (auto ui = Inst->use_begin(), ue = Inst->use_end();
             ui != ue; ++ui) {
@@ -1005,7 +1012,7 @@ Value *GenXReduceIntSize::getSplatValue(ShuffleVectorInst *SVI) const {
       return IEI->getOperand(1);
   }
 
-  if (cast<VectorType>(Src->getType())->getNumElements() == 1)
+  if (cast<IGCLLVM::FixedVectorType>(Src->getType())->getNumElements() == 1)
     return Src;
 
   return nullptr;

@@ -120,14 +120,14 @@ CallInst* INT_MIN_REDUCE(Value *Src, bool IsSigned = false)
     return IRB()->CreateIntMinReduce(Src, IsSigned);
 }
 
-CallInst* FP_MAX_REDUCE(Value *Src, bool NoNaN = false)
+CallInst* FP_MAX_REDUCE(Value *Src)
 {
-    return IRB()->CreateFPMaxReduce(Src, NoNaN);
+    return IRB()->CreateFPMaxReduce(Src);
 }
 
-CallInst* FP_MIN_REDUCE(Value *Src, bool NoNaN = false)
+CallInst* FP_MIN_REDUCE(Value *Src)
 {
-    return IRB()->CreateFPMinReduce(Src, NoNaN);
+    return IRB()->CreateFPMinReduce(Src);
 }
 
 CallInst* LIFETIME_START(Value *Ptr, ConstantInt *Size = nullptr)
@@ -163,46 +163,6 @@ CallInst* MASKED_SCATTER(Value *Val, Value *Ptrs, unsigned Align, Value *Mask = 
 CallInst* ASSUMPTION(Value *Cond)
 {
     return IRB()->CreateAssumption(Cond);
-}
-
-CallInst* GC_STATEPOINT_CALL(uint64_t ID, uint32_t NumPatchBytes, Value *ActualCallee, ArrayRef<Value *> CallArgs, ArrayRef<Value *> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointCall(ID, NumPatchBytes, ActualCallee, CallArgs, DeoptArgs, GCArgs, Name);
-}
-
-CallInst* GC_STATEPOINT_CALL(uint64_t ID, uint32_t NumPatchBytes, Value *ActualCallee, uint32_t Flags, ArrayRef<Use> CallArgs, ArrayRef<Use> TransitionArgs, ArrayRef<Use> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointCall(ID, NumPatchBytes, ActualCallee, Flags, CallArgs, TransitionArgs, DeoptArgs, GCArgs, Name);
-}
-
-CallInst* GC_STATEPOINT_CALL(uint64_t ID, uint32_t NumPatchBytes, Value *ActualCallee, ArrayRef<Use> CallArgs, ArrayRef<Value *> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointCall(ID, NumPatchBytes, ActualCallee, CallArgs, DeoptArgs, GCArgs, Name);
-}
-
-InvokeInst* GC_STATEPOINT_INVOKE(uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee, BasicBlock *NormalDest, BasicBlock *UnwindDest, ArrayRef<Value *> InvokeArgs, ArrayRef<Value *> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointInvoke(ID, NumPatchBytes, ActualInvokee, NormalDest, UnwindDest, InvokeArgs, DeoptArgs, GCArgs, Name);
-}
-
-InvokeInst* GC_STATEPOINT_INVOKE(uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee, BasicBlock *NormalDest, BasicBlock *UnwindDest, uint32_t Flags, ArrayRef<Use> InvokeArgs, ArrayRef<Use> TransitionArgs, ArrayRef<Use> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointInvoke(ID, NumPatchBytes, ActualInvokee, NormalDest, UnwindDest, Flags, InvokeArgs, TransitionArgs, DeoptArgs, GCArgs, Name);
-}
-
-InvokeInst* GC_STATEPOINT_INVOKE(uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee, BasicBlock *NormalDest, BasicBlock *UnwindDest, ArrayRef<Use> InvokeArgs, ArrayRef<Value *> DeoptArgs, ArrayRef<Value *> GCArgs, const Twine &Name = "")
-{
-    return IRB()->CreateGCStatepointInvoke(ID, NumPatchBytes, ActualInvokee, NormalDest, UnwindDest, InvokeArgs, DeoptArgs, GCArgs, Name);
-}
-
-CallInst* GC_RESULT(Instruction *Statepoint, Type *ResultType, const Twine &Name = "")
-{
-    return IRB()->CreateGCResult(Statepoint, ResultType, Name);
-}
-
-CallInst* GC_RELOCATE(Instruction *Statepoint, int BaseOffset, int DerivedOffset, Type *ResultType, const Twine &Name = "")
-{
-    return IRB()->CreateGCRelocate(Statepoint, BaseOffset, DerivedOffset, ResultType, Name);
 }
 
 CallInst* BINARY_INTRINSIC(Intrinsic::ID ID, Value *LHS, Value *RHS, const Twine &Name = "")
@@ -606,11 +566,6 @@ Value* IN_BOUNDS_GEP(Type *Ty, Value *Ptr, Value *Idx, const Twine &Name = "")
     return IRB()->CreateInBoundsGEP(Ty, Ptr, Idx, Name);
 }
 
-Value* CONST_GEP1_32(Value *Ptr, unsigned Idx0, const Twine &Name = "")
-{
-    return IRB()->CreateConstGEP1_32(Ptr, Idx0, Name);
-}
-
 Value* CONST_GEP1_32(Type *Ty, Value *Ptr, unsigned Idx0, const Twine &Name = "")
 {
     return IRB()->CreateConstGEP1_32(Ty, Ptr, Idx0, Name);
@@ -631,24 +586,24 @@ Value* CONST_IN_BOUNDS_GEP2_32(Type *Ty, Value *Ptr, unsigned Idx0, unsigned Idx
     return IRB()->CreateConstInBoundsGEP2_32(Ty, Ptr, Idx0, Idx1, Name);
 }
 
-Value* CONST_GEP1_64(Value *Ptr, uint64_t Idx0, const Twine &Name = "")
+Value* CONST_GEP1_64(Type *Ty, Value *Ptr, uint64_t Idx0, const Twine &Name = "")
 {
-    return IRB()->CreateConstGEP1_64(Ptr, Idx0, Name);
+    return IRB()->CreateConstGEP1_64(Ty, Ptr, Idx0, Name);
 }
 
-Value* CONST_IN_BOUNDS_GEP1_64(Value *Ptr, uint64_t Idx0, const Twine &Name = "")
+Value* CONST_IN_BOUNDS_GEP1_64(Type *Ty, Value *Ptr, uint64_t Idx0, const Twine &Name = "")
 {
-    return IRB()->CreateConstInBoundsGEP1_64(Ptr, Idx0, Name);
+    return IRB()->CreateConstInBoundsGEP1_64(Ty, Ptr, Idx0, Name);
 }
 
-Value* CONST_GEP2_64(Value *Ptr, uint64_t Idx0, uint64_t Idx1, const Twine &Name = "")
+Value* CONST_GEP2_64(Type *Ty, Value *Ptr, uint64_t Idx0, uint64_t Idx1, const Twine &Name = "")
 {
-    return IRB()->CreateConstGEP2_64(Ptr, Idx0, Idx1, Name);
+    return IRB()->CreateConstGEP2_64(Ty, Ptr, Idx0, Idx1, Name);
 }
 
-Value* CONST_IN_BOUNDS_GEP2_64(Value *Ptr, uint64_t Idx0, uint64_t Idx1, const Twine &Name = "")
+Value* CONST_IN_BOUNDS_GEP2_64(Type *Ty, Value *Ptr, uint64_t Idx0, uint64_t Idx1, const Twine &Name = "")
 {
-    return IRB()->CreateConstInBoundsGEP2_64(Ptr, Idx0, Idx1, Name);
+    return IRB()->CreateConstInBoundsGEP2_64(Ty, Ptr, Idx0, Idx1, Name);
 }
 
 Value* STRUCT_GEP(Type *Ty, Value *Ptr, unsigned Idx, const Twine &Name = "")

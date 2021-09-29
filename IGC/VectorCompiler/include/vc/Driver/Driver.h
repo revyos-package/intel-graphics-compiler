@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/ADT/Optional.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Target/TargetOptions.h>
 
 #include <memory>
 #include <string>
@@ -77,6 +78,10 @@ struct CompileOptions {
   bool ForceLiveRangesLocalizationForAccUsage = false;
   bool ForceDisableNonOverlappingRegionOpt = false;
   bool IsLargeGRFMode = false;
+  bool ForcePassDebugToFinalizer = false;
+  bool ForceDebugInfoValidation = false;
+
+  llvm::FPOpFusion::FPOpFusionMode AllowFPOpFusion = llvm::FPOpFusion::Standard;
 
   // Internal options.
   std::string FeaturesString; // format is: [+-]<feature1>,[+-]<feature2>,...
@@ -93,6 +98,7 @@ struct CompileOptions {
 
   // from IGC_XXX env
   FunctionControl FCtrl = FunctionControl::Default;
+  bool SaveStackCallLinkage = false;
 };
 
 struct ExternalData {
@@ -100,6 +106,7 @@ struct ExternalData {
   std::unique_ptr<llvm::MemoryBuffer> VCPrintf32BIFModule;
   std::unique_ptr<llvm::MemoryBuffer> VCPrintf64BIFModule;
   std::unique_ptr<llvm::MemoryBuffer> VCEmulationBIFModule;
+  std::unique_ptr<llvm::MemoryBuffer> VCSPIRVBuiltinsBIFModule;
 };
 
 llvm::Expected<CompileOutput> Compile(llvm::ArrayRef<char> Input,

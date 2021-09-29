@@ -57,6 +57,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
@@ -239,6 +240,7 @@ int DiagnosticInfoOverlappingArgs::KindID = 0;
 class CMABIAnalysis : public ModulePass {
   // This map captures all global variables to be localized.
   std::vector<LocalizationInfo *> LocalizationInfoObjs;
+  bool SaveStackCallLinkage = false;
 
 public:
   static char ID;
@@ -312,8 +314,6 @@ struct CMABI : public CallGraphSCCPass {
 
   bool runOnSCC(CallGraphSCC &SCC) override;
 
-  bool doFinalization(CallGraph &CG) override;
-
 private:
 
   CallGraphNode *ProcessNode(CallGraphNode *CGN);
@@ -356,6 +356,7 @@ INITIALIZE_PASS_END(CMABIAnalysis, "cmabi-analysis",
 bool CMABIAnalysis::runOnModule(Module &M) {
   auto &&BCfg = getAnalysis<GenXBackendConfig>();
   FCtrl = BCfg.getFCtrl();
+  SaveStackCallLinkage = BCfg.saveStackCallLinkage();
 
   runOnCallGraph(getAnalysis<CallGraphWrapperPass>().getCallGraph());
   return false;
@@ -386,21 +387,6 @@ bool CMABIAnalysis::runOnCallGraph(CallGraph &CG) {
 
   // no change.
   return false;
-}
-
-bool CMABI::doFinalization(CallGraph &CG) {
-  bool Changed = false;
-  for (Module::global_iterator I = CG.getModule().global_begin();
-       I != CG.getModule().global_end();
-       /*empty*/) {
-    GlobalVariable *GV = &*I++;
-    if (GV->use_empty()) {
-      GV->eraseFromParent();
-      Changed = true;
-    }
-  }
-
-  return Changed;
 }
 
 bool CMABI::runOnSCC(CallGraphSCC &SCC) {
@@ -512,13 +498,6 @@ CallGraphNode *CMABI::ProcessNode(CallGraphNode *CGN) {
 
     // No changes to this kernel's prototype.
     return 0;
-  }
-
-  // Convert non-kernel to stack call if applicable
-  if (Info->FCtrl == FunctionControl::StackCall &&
-      !genx::requiresStackCall(F)) {
-    LLVM_DEBUG(dbgs() << "Adding stack call to: " << F->getName() << "\n");
-    F->addFnAttr(genx::FunctionMD::CMStackCall);
   }
 
   // Non-kernels, only transforms module locals.
@@ -643,7 +622,7 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
       Type *Ty = IntegerType::get(F->getContext(), 8);
       if (ArgTy->isVectorTy())
         ArgTys.push_back(IGCLLVM::FixedVectorType::get(
-            Ty, cast<VectorType>(ArgTy)->getNumElements()));
+            Ty, dyn_cast<IGCLLVM::FixedVectorType>(ArgTy)->getNumElements()));
       else
         ArgTys.push_back(Ty);
     } else {
@@ -1054,7 +1033,8 @@ appendTransformedFuncRetPortion(Value &NewRetVal, int RetIdx, int ArgIdx,
                          NewFuncInfo.getGlobalArgsInfo().FirstGlobalArgIdx];
     IGC_ASSERT_MESSAGE(isa<AllocaInst>(LocalizedGlobal),
         "an alloca is expected when pass localized global by value");
-    Value *LocalizedGlobalVal = Builder.CreateLoad(LocalizedGlobal);
+    Value *LocalizedGlobalVal = Builder.CreateLoad(
+        LocalizedGlobal->getType()->getPointerElementType(), LocalizedGlobal);
     return Builder.CreateInsertValue(&NewRetVal, LocalizedGlobalVal, RetIdx);
   }
   IGC_ASSERT_MESSAGE(NewFuncInfo.getArgKinds()[ArgIdx] == ArgKind::CopyInOut,
@@ -1066,7 +1046,8 @@ appendTransformedFuncRetPortion(Value &NewRetVal, int RetIdx, int ArgIdx,
     CurRetByPtr = cast<AddrSpaceCastInst>(CurRetByPtr)->getOperand(0);
   IGC_ASSERT_MESSAGE(isa<AllocaInst>(CurRetByPtr),
                      "corresponding alloca is expected");
-  Value *CurRetByVal = Builder.CreateLoad(CurRetByPtr);
+  Value *CurRetByVal = Builder.CreateLoad(
+      CurRetByPtr->getType()->getPointerElementType(), CurRetByPtr);
   return Builder.CreateInsertValue(&NewRetVal, CurRetByVal, RetIdx);
 }
 
@@ -1388,21 +1369,28 @@ void CMABIAnalysis::defineGVDirectUsers(GlobalVariable &GV) {
 // copy-in and copy-out arguments.
 void CMABIAnalysis::analyzeGlobals(CallGraph &CG) {
   Module &M = CG.getModule();
-  // assuming the device module is self-contained,
-  // set internal-linkage for global variables
-  // and functions so globla-DCE can remove them
-  // if there is no use in the module.
-  for (auto& Global : M.getGlobalList()) {
-    if (!Global.isDeclaration())
-      Global.setLinkage(GlobalValue::InternalLinkage);
-  }
   for (auto& F : M.getFunctionList()) {
+    if (F.isDeclaration() || F.hasDLLExportStorageClass())
+      continue;
+    if (GenXIntrinsic::getAnyIntrinsicID(&F) !=
+        GenXIntrinsic::not_any_intrinsic)
+      continue;
     // __cm_intrinsic_impl_* could be used for emulation mul/div etc
-    if (GenXIntrinsic::getAnyIntrinsicID(&F) ==
-      GenXIntrinsic::not_any_intrinsic &&
-      !F.getName().contains("__cm_intrinsic_impl_") &&
-      !F.isDeclaration() && !F.hasDLLExportStorageClass())
-      F.setLinkage(GlobalValue::InternalLinkage);
+    if (F.getName().contains("__cm_intrinsic_impl_"))
+      continue;
+
+    // Convert non-kernel to stack call if applicable
+    if (FCtrl == FunctionControl::StackCall && !genx::requiresStackCall(&F)) {
+      LLVM_DEBUG(dbgs() << "Adding stack call to: " << F.getName() << "\n");
+      F.addFnAttr(genx::FunctionMD::CMStackCall);
+    }
+
+    // Do not change stack calls linkage as we may have both types of stack
+    // calls.
+    if (genx::requiresStackCall(&F) && SaveStackCallLinkage)
+      continue;
+
+    F.setLinkage(GlobalValue::InternalLinkage);
   }
   // No global variables.
   if (M.global_empty())
@@ -1473,7 +1461,7 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
       // For a load, create a map entry that says that every vector element
       // comes from this arg.
       unsigned NumElements = 1;
-      if (auto VT = dyn_cast<VectorType>(LI->getType()))
+      if (auto VT = dyn_cast<IGCLLVM::FixedVectorType>(LI->getType()))
         NumElements = VT->getNumElements();
       auto Entry = &ValMap[LI];
       Entry->resize(NumElements, ArgIndex);
@@ -1567,7 +1555,7 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
               Entry->insert(Entry->begin(), OpndEntry->begin(), OpndEntry->end());
               // Then copy the "new value" elements according to the region.
               TempVector.resize(
-                  cast<VectorType>(CI->getType())->getNumElements(), 0);
+                  dyn_cast<IGCLLVM::FixedVectorType>(CI->getType())->getNumElements(), 0);
               int VStride = cast<ConstantInt>(CI->getOperand(
                     GenXIntrinsic::GenXRegion::WrVStrideOperandNum))->getSExtValue();
               unsigned Width = cast<ConstantInt>(CI->getOperand(
@@ -1736,13 +1724,13 @@ struct CMLowerVLoadVStore : public FunctionPass {
   CMLowerVLoadVStore() : FunctionPass(ID) {
     initializeCMLowerVLoadVStorePass(*PassRegistry::getPassRegistry());
   }
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const override {
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<PostDominatorTreeWrapperPass>();
     AU.setPreservesCFG();
   }
 
-  virtual bool runOnFunction(Function &F) override;
+  bool runOnFunction(Function &F) override;
 
 private:
   bool promoteAllocas(Function &F);
@@ -1834,7 +1822,9 @@ bool CMLowerVLoadVStore::lowerLoadStore(Function &F) {
         if (GenXIntrinsic::isVStore(&Inst))
           Builder.CreateStore(Inst.getOperand(0), Inst.getOperand(1));
         else {
-          auto LI = Builder.CreateLoad(Inst.getOperand(0), Inst.getName());
+          Value *Op0 = Inst.getOperand(0);
+          auto LI = Builder.CreateLoad(Op0->getType()->getPointerElementType(),
+                                       Op0, Inst.getName());
           LI->setDebugLoc(Inst.getDebugLoc());
           Inst.replaceAllUsesWith(LI);
         }
@@ -2048,13 +2038,16 @@ void ArgRefPattern::process() {
 
   if (CopyOutRegion) {
     Builder.SetInsertPoint(CopyOutRegion);
-    CopyOutRegion->setArgOperand(0, Builder.CreateLoad(BaseAlloca));
+    CopyOutRegion->setArgOperand(
+        0, Builder.CreateLoad(BaseAlloca->getType()->getPointerElementType(),
+                              BaseAlloca));
   }
 
   // Rewrite all stores.
   for (auto ST : VStores) {
     Builder.SetInsertPoint(ST);
-    Value *OldVal = Builder.CreateLoad(BaseAlloca);
+    Value *OldVal = Builder.CreateLoad(
+        BaseAlloca->getType()->getPointerElementType(), BaseAlloca);
     // Always use copy-in region arguments as copy-out region
     // arguments do not dominate this store.
     auto M = ST->getParent()->getParent()->getParent();
@@ -2082,7 +2075,8 @@ void ArgRefPattern::process() {
       continue;
 
     Builder.SetInsertPoint(LI);
-    Value *SrcVal = Builder.CreateLoad(BaseAlloca);
+    Value *SrcVal = Builder.CreateLoad(
+        BaseAlloca->getType()->getPointerElementType(), BaseAlloca);
     SmallVector<Value *, 8> Args(CopyInRegion->arg_operands());
     Args[0] = SrcVal;
     Value *Val = Builder.CreateCall(RdFn, Args);

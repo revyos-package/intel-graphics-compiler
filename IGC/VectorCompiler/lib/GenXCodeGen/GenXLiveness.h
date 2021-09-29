@@ -173,7 +173,7 @@ SPDX-License-Identifier: MIT
 namespace llvm {
 
 class BasicBlock;
-class BitCastInst;
+class CastInst;
 class CallInst;
 class Function;
 class FunctionPass;
@@ -496,7 +496,7 @@ public:
       : FunctionGroupPass(ID), CG(nullptr), Baling(nullptr),
         Numbering(nullptr) {}
   ~GenXLiveness() { clear(); }
-  virtual StringRef getPassName() const override { return "GenX liveness analysis"; }
+  StringRef getPassName() const override { return "GenX liveness analysis"; }
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   bool runOnFunctionGroup(FunctionGroup &FG) override;
   // setBaling : tell GenXLiveness where GenXBaling is
@@ -601,17 +601,19 @@ public:
   Value *getAddressBase(Value *Addr);
   // getAddressWithBase : get addresses that base register is a Base
   std::vector<Value *> getAddressWithBase(Value *Base);
-  // isBitCastCoalesced : see if the bitcast has been coalesced away
-  bool isBitCastCoalesced(BitCastInst *BCI);
+  // isNoopCastCoalesced : see if the no-op cast has been coalesced away
+  bool isNoopCastCoalesced(CastInst *CI);
   // createPrinterPass : get a pass to print the IR, together with the GenX
   // specific analyses
-  virtual Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const override
-  { return createGenXGroupPrinterPass(O, Banner); }
+  Pass *createPrinterPass(raw_ostream &O,
+                          const std::string &Banner) const override {
+    return createGenXGroupPrinterPass(O, Banner);
+  }
   // Debug dump
   void dump();
   using Pass::print; // Indicates we aren't replacing base class version of print
-  virtual void print(raw_ostream &OS) const;
-  virtual void releaseMemory() override { clear(); }
+  void print(raw_ostream &OS) const;
+  void releaseMemory() override { clear(); }
 
 private:
   void clear();

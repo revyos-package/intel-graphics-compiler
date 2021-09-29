@@ -145,10 +145,12 @@ public:
     static void showUsage(std::ostream& output);
 
     std::stringstream& getUserArgString();
-    std::string getFullArgString();
-    std::string getEncoderOutputFile();
+    std::string getFullArgString() const;
+    std::string getEncoderOutputFile() const;
 
     Stepping GetStepping() const { return stepping; }
+
+    void getOptionsFromEV();
 
     void dump() const;
 

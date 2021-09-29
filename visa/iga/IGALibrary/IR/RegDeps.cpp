@@ -10,8 +10,9 @@ SPDX-License-Identifier: MIT
 #include "../asserts.hpp"
 #include "../bits.hpp"
 
-#include <sstream>
 #include <cstring>
+#include <limits>
+#include <sstream>
 
 using namespace iga;
 

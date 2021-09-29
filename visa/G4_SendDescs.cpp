@@ -451,6 +451,8 @@ uint32_t G4_SendDescRaw::getHdcMessageType() const
     return (desc.value >> 14) & 0x1F;
 }
 
+
+
 void G4_SendDescRaw::setEOT() {
     eotAfterMessage = true;
 
@@ -1040,7 +1042,8 @@ size_t G4_SendDescRaw::getDstLenBytes() const
         return 32 * getScratchRWSize(); // HWords
     } else if (isOwordLoad()) {
         return 16 * getOwordsAccessed(); // OWords
-#if 1
+#if 0
+    // Due to VMIT-9224, comment this out!
     // Use macro fo easy testing.
     } else if (isByteScatterRW() && isDataPortRead()) {
         assert(getExecSize() != g4::SIMD_UNDEFINED);

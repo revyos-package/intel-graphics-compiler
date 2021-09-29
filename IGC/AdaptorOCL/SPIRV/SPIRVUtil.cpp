@@ -54,7 +54,8 @@ THE SOFTWARE.
 
 #include <llvm/Support/ScaledNumber.h>
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvmWrapper/IR/IRBuilder.h"
+#include "llvmWrapper/Transforms/Utils/Cloning.h"
 #include "common/LLVMWarningsPop.hpp"
 
 #include "libSPIRV/SPIRVInstruction.h"
@@ -67,7 +68,7 @@ namespace igc_spv{
 void
 saveLLVMModule(Module *M, const std::string &OutputFile) {
   std::error_code EC;
-  llvm::ToolOutputFile Out(OutputFile.c_str(), EC, sys::fs::F_None);
+  llvm::ToolOutputFile Out(OutputFile.c_str(), EC, sys::fs::OF_None);
   IGC_ASSERT_EXIT_MESSAGE((!EC), "Failed to open file");
   IGCLLVM::WriteBitcodeToFile(M, Out.os());
   Out.keep();
@@ -76,7 +77,7 @@ saveLLVMModule(Module *M, const std::string &OutputFile) {
 PointerType*
 getOrCreateOpaquePtrType(Module *M, const std::string &Name,
     unsigned AddrSpace) {
-  auto OpaqueType = M->getTypeByName(Name);
+  auto OpaqueType = IGCLLVM::getTypeByName(M, Name);
   if (!OpaqueType)
     OpaqueType = StructType::create(M->getContext(), Name);
   return PointerType::get(OpaqueType, AddrSpace);
@@ -142,7 +143,7 @@ std::string recursive_mangle(const Type* pType)
             return "i" + utostr(pType->getIntegerBitWidth());
         case IGCLLVM::VectorTyID:
         {
-            unsigned vecLen = (unsigned)cast<VectorType>(pType)->getNumElements();
+            unsigned vecLen = (unsigned)cast<IGCLLVM::FixedVectorType>(pType)->getNumElements();
             Type* pEltType = cast<VectorType>(pType)->getElementType();
             return "v" + utostr(vecLen) + recursive_mangle(pEltType);
         }
@@ -151,8 +152,50 @@ std::string recursive_mangle(const Type* pType)
             unsigned int AS = pType->getPointerAddressSpace();
             Type* pPointeeType = pType->getPointerElementType();
 
-            if (isa<StructType>(pPointeeType) && cast<StructType>(pPointeeType)->isOpaque())
+            StructType* ST = dyn_cast<StructType>(pPointeeType);
+            if (ST && ST->isOpaque())
             {
+                StringRef structName = ST->getName();
+                bool isImage = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::Image));
+                if (isImage)
+                {
+                    SmallVector<StringRef, 8> matches;
+                    Regex regex("([0-6])_([0-2])_([0-1])_([0-1])_([0-2])_([0-9]+)_([0-2])");
+                    SPIRVTypeImageDescriptor Desc;
+                    if (regex.match(structName, &matches))
+                    {
+                        uint8_t dimension;
+                        matches[1].getAsInteger(0, dimension);
+                        Desc.Dim = static_cast<SPIRVImageDimKind>(dimension);
+                        matches[2].getAsInteger(0, Desc.Depth);
+                        matches[3].getAsInteger(0, Desc.Arrayed);
+                        matches[4].getAsInteger(0, Desc.MS);
+                        matches[5].getAsInteger(0, Desc.Sampled);
+                        matches[6].getAsInteger(0, Desc.Format);
+
+                        uint8_t spirvAccess;
+                        matches[7].getAsInteger(0, spirvAccess);
+                        SPIRVAccessQualifierKind Acc = static_cast<SPIRVAccessQualifierKind>(spirvAccess);
+
+                        std::string typeMangling = SPIRVImageManglingMap::map(Desc);
+                        switch (Acc)
+                        {
+                        case AccessQualifierReadOnly:
+                            typeMangling += "_ro";
+                            break;
+                        case AccessQualifierWriteOnly:
+                            typeMangling += "_wo";
+                            break;
+                        case AccessQualifierReadWrite:
+                            typeMangling += "_rw";
+                            break;
+                        default:
+                            IGC_ASSERT_MESSAGE(0, "Unsupported access qualifier!");
+                        }
+                        return typeMangling;
+                    }
+                    IGC_ASSERT_MESSAGE(0, "Inconsistent SPIRV image!");
+                }
                 return "i64";
             }
 
@@ -217,24 +260,10 @@ getSPIRVBuiltinName(Op OC, SPIRVInstruction *BI, std::vector<Type*> ArgTypes, st
   std::string name = "";
   bool hasI32Postfix = false;
 
-  if (isIntelSubgroupOpCode(OC) && OC != OpSubgroupShuffleINTEL && OC != OpSubgroupShuffleDownINTEL
-      && OC != OpSubgroupShuffleUpINTEL && OC != OpSubgroupShuffleXorINTEL) {
+  if (OC == OpSubgroupImageMediaBlockReadINTEL || OC == OpSubgroupImageMediaBlockWriteINTEL) {
     std::stringstream tmpName;
     SPIRVType *DataTy = nullptr;
     switch (OC) {
-    case OpSubgroupBlockReadINTEL:
-    case OpSubgroupImageBlockReadINTEL:
-      tmpName << "intel_sub_group_block_read";
-      DataTy = BI->getType();
-      break;
-    case OpSubgroupBlockWriteINTEL:
-      tmpName << "intel_sub_group_block_write";
-      DataTy = BI->getOperands()[1]->getType();
-      break;
-    case OpSubgroupImageBlockWriteINTEL:
-      tmpName << "intel_sub_group_block_write";
-      DataTy = BI->getOperands()[2]->getType();
-      break;
     case OpSubgroupImageMediaBlockReadINTEL:
       tmpName << OCLSPIRVBuiltinMap::map(OC);
       DataTy = BI->getType();
@@ -312,7 +341,7 @@ mutateCallInst(Module *M, CallInst *CI,
     ValueToValueMapTy VMap;
     llvm::SmallVector<llvm::ReturnInst*, 8> Returns;
     BasicBlock* EntryBB = BasicBlock::Create(M->getContext(), "", NewF);
-    IRBuilder<> builder(EntryBB);
+    IGCLLVM::IRBuilder<> builder(EntryBB);
 
     for (auto OldArgIt = OldF->arg_begin(), NewArgIt = NewF->arg_begin(); OldArgIt != OldF->arg_end(); ++OldArgIt, ++NewArgIt) {
       NewArgIt->setName(OldArgIt->getName().str());
@@ -326,7 +355,7 @@ mutateCallInst(Module *M, CallInst *CI,
       }
     }
 
-    CloneFunctionInto(NewF, OldF, VMap, true, Returns);
+    IGCLLVM::CloneFunctionInto(NewF, OldF, VMap, true, Returns);
 
     // Merge the basic block with Load instruction with the original entry basic block.
     BasicBlock* ClonedEntryBB = cast<BasicBlock>(VMap[&*OldF->begin()]);
@@ -381,6 +410,57 @@ decodeOCLVer(unsigned Ver) {
   unsigned char Minor = (Ver % 100000) / 1000;
   unsigned char Rev = Ver % 1000;
   return std::make_tuple(Major, Minor, Rev);
+}
+
+std::string getSPIRVTypeName(StringRef BaseName, StringRef Postfixes) {
+    assert(!BaseName.empty() && "Invalid SPIR-V type Name");
+    auto TN = std::string(kSPIRVTypeName::PrefixAndDelim) + BaseName.str();
+    if (Postfixes.empty())
+        return TN;
+    return TN + kSPIRVTypeName::Delimiter + Postfixes.str();
+}
+
+std::string getSPIRVImageTypePostfixes(StringRef SampledType,
+    SPIRVTypeImageDescriptor Desc,
+    SPIRVAccessQualifierKind Acc) {
+    std::string S;
+    raw_string_ostream OS(S);
+    OS << kSPIRVTypeName::PostfixDelim << SampledType
+        << kSPIRVTypeName::PostfixDelim << Desc.Dim << kSPIRVTypeName::PostfixDelim
+        << Desc.Depth << kSPIRVTypeName::PostfixDelim << Desc.Arrayed
+        << kSPIRVTypeName::PostfixDelim << Desc.MS << kSPIRVTypeName::PostfixDelim
+        << Desc.Sampled << kSPIRVTypeName::PostfixDelim << Desc.Format
+        << kSPIRVTypeName::PostfixDelim << Acc;
+    return OS.str();
+}
+
+std::string getSPIRVImageSampledTypeName(SPIRVType* Ty) {
+    switch (Ty->getOpCode()) {
+    case OpTypeVoid:
+        return kSPIRVImageSampledTypeName::Void;
+    case OpTypeInt:
+        if (Ty->getIntegerBitWidth() == 32) {
+            if (static_cast<SPIRVTypeInt*>(Ty)->isSigned())
+                return kSPIRVImageSampledTypeName::Int;
+            else
+                return kSPIRVImageSampledTypeName::UInt;
+        }
+        break;
+    case OpTypeFloat:
+        switch (Ty->getFloatBitWidth()) {
+        case 16:
+            return kSPIRVImageSampledTypeName::Half;
+        case 32:
+            return kSPIRVImageSampledTypeName::Float;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+    llvm_unreachable("Invalid sampled type for image");
+    return std::string();
 }
 
 }

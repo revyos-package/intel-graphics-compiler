@@ -40,13 +40,13 @@ public:
     ZEBinaryBuilder(const PLATFORM plat, bool is64BitPointer,
         const IGC::SOpenCLProgramInfo& programInfo, const uint8_t* spvData, uint32_t spvSize);
 
-    // Set the given GfxCoreFamily value to elfFileHeader::e_machine. Also set the flag
-    // TargetFlags::machineEntryUsesGfxCoreInsteadOfProductFamily.
-    // The default value of e_machine is ProductFamily. This API will set e_machine to
-    // given value which is supposed to be GfxCoreFamily.
-    void setGfxCoreFamilyToELFMachine(uint32_t value);
+    // Set the ProductFamily as the specified value.
+    void setProductFamily(PRODUCT_FAMILY value);
 
-    /// add kernel information. Also create kernel metadata inforamtion for .ze_info
+    // Set the GfxCoreFamily as the specified value.
+    void setGfxCoreFamily(GFXCORE_FAMILY value);
+
+    /// add kernel information. Also create kernel metadata information for .ze_info
     /// This function can be called several times for adding different kernel information
     /// into this ZEObject
     /// The given rawIsaBinary must be lived through the entire ZEBinaryBuilder life
@@ -54,7 +54,9 @@ public:
         const char*  rawIsaBinary,
         unsigned int rawIsaBinarySize,
         const IGC::SOpenCLKernelInfo& annotations,
-        const uint32_t grfSize);
+        const uint32_t grfSize,
+        const IGC::CBTILayout& layout,
+        bool isProgramDebuggable);
 
     // getElfSymbol - find a symbol name in ELF binary and return a symbol entry
     // that will later be transformed to ZE binary format
@@ -164,6 +166,11 @@ private:
     /// Calculate correct (pure) size of ELF binary, because m_debugDataSize in kernel output
     /// contains something else.
     size_t calcElfSize(void* elfBin, size_t elfSize);
+
+    /// add debug environment
+    void addKernelDebugEnv(const IGC::SOpenCLKernelInfo& annotations,
+                           const IGC::CBTILayout& layout,
+                           zebin::zeInfoKernel& zeinfoKernel);
 
 private:
     // mBuilder - Builder of a ZE ELF object

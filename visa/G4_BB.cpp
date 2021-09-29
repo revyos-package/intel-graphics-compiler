@@ -1464,6 +1464,8 @@ const char* G4_BB::getBBTypeStr() const
         return "EXIT";
     case G4_BB_NM_WA_TYPE:
         return "NoMaskWA";
+    case G4_BB_FCALL_TYPE:
+        return "FCALL";
     }
     return " ";
 }
@@ -1534,7 +1536,7 @@ void G4_BB::dumpDefUse(std::ostream& os) const
     }
 }
 
-void G4_BB::resetLocalId()
+void G4_BB::resetLocalIds()
 {
     int i = 0;
 

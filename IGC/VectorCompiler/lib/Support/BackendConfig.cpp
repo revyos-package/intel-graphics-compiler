@@ -64,6 +64,12 @@ static cl::opt<std::string>
                        cl::init(""));
 
 static cl::opt<std::string>
+    VCSPIRVBuiltinsBiFPath("vc-spirv-builtins-bif-path",
+                           cl::desc("full name (with path) of a BiF file with "
+                                    "precompiled SPIR-V builtins"),
+                           cl::init(""));
+
+static cl::opt<std::string>
     VCPrintfBiFPath("vc-printf-bif-path",
                     cl::desc("full name (with path) of a BiF file with "
                              "precompiled printf implementation"),
@@ -76,6 +82,10 @@ static cl::opt<bool> LocalizeLRsForAccUsageOpt(
 static cl::opt<bool> DisableNonOverlappingRegionOptOpt(
     "vc-disable-non-overlapping-region-opt", cl::init(false), cl::Hidden,
     cl::desc("Disable non-overlapping region optimization"));
+
+static cl::opt<bool> PassDebugToFinalizerOpt(
+    "vc-pass-debug-to-finalizer", cl::init(false), cl::Hidden,
+    cl::desc("Pass -debug option to finalizer"));
 
 static cl::opt<bool>
     UseNewStackBuilderOpt("vc-use-new-stack-builder",
@@ -101,6 +111,10 @@ static cl::opt<bool> UseBindlessBuffersOpt("vc-use-bindless-buffers",
                                            cl::desc("Use bindless buffers"),
                                            cl::init(false));
 
+static cl::opt<bool> SaveStackCallLinkageOpt(
+    "save-stack-call-linkage", cl::init(false), cl::Hidden,
+    cl::desc("Do not override stack calls linkage as internal"));
+
 //===----------------------------------------------------------------------===//
 //
 // Backend config related stuff.
@@ -118,9 +132,11 @@ GenXBackendOptions::GenXBackendOptions()
       UseNewStackBuilder(UseNewStackBuilderOpt),
       LocalizeLRsForAccUsage(LocalizeLRsForAccUsageOpt),
       DisableNonOverlappingRegionOpt(DisableNonOverlappingRegionOptOpt),
+      PassDebugToFinalizer(PassDebugToFinalizerOpt),
       FCtrl(FunctionControlOpt), IsLargeGRFMode(LargeGRFModeOpt),
       UseBindlessBuffers(UseBindlessBuffersOpt),
-      StatelessPrivateMemSize(StatelessPrivateMemSizeOpt) {}
+      StatelessPrivateMemSize(StatelessPrivateMemSizeOpt),
+      SaveStackCallLinkage(SaveStackCallLinkageOpt) {}
 
 static std::unique_ptr<MemoryBuffer>
 readBiFModuleFromFile(const cl::opt<std::string> &File) {
@@ -139,6 +155,8 @@ GenXBackendData::GenXBackendData(InitFromLLMVOpts) {
                        readBiFModuleFromFile(OCLGenericBiFPath));
   setOwningBiFModuleIf(BiFKind::VCEmulation,
                        readBiFModuleFromFile(VCEmulationBiFPath));
+  setOwningBiFModuleIf(BiFKind::VCSPIRVBuiltins,
+                       readBiFModuleFromFile(VCSPIRVBuiltinsBiFPath));
   setOwningBiFModuleIf(BiFKind::VCPrintf, readBiFModuleFromFile(VCPrintfBiFPath));
 }
 

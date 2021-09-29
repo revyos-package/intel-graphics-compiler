@@ -90,6 +90,9 @@ namespace IGC
         /// The driver doesn't clear the vertex header so it needs to be done in the compiler
         virtual bool NeedClearVertexHeader() const { return false; }
 
+        /// Do Fastest Stage1 only for 3D
+        virtual bool SupportFastestStage1() const { return true; }
+
         /// do code sinking before CFGSimplification, helps some workloads
         virtual bool CodeSinkingBeforeCFGSimplification() const { return false; }
 
@@ -154,6 +157,9 @@ namespace IGC
 
         /// Turn on vISA pre-RA scheduler. Not tested on all APIs
         virtual bool enableVISAPreRAScheduler() const { return false; }
+
+        /// Turn on vISA pre-RA scheduler for retry
+        virtual bool enableVISAPreRASchedulerForRetry() const { return false; }
 
         /// Configure vISA pre-RA scheduler. Not tested on all APIs
         virtual unsigned getVISAPreRASchedulerCtrl() const { return 4; }

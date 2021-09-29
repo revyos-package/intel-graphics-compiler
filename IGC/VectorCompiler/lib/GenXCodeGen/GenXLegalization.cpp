@@ -167,7 +167,10 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -306,15 +309,15 @@ class GenXLegalization : public FunctionPass {
 public:
   static char ID;
   explicit GenXLegalization() : FunctionPass(ID) { clearBale(); }
-  virtual StringRef getPassName() const {
+  StringRef getPassName() const override {
     return "GenX execution width and GRF crossing legalization";
   }
-  void getAnalysisUsage(AnalysisUsage &AU) const;
-  bool runOnFunction(Function &F);
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnFunction(Function &F) override;
   // createPrinterPass : get a pass to print the IR, together with the GenX
   // specific analyses
-  virtual Pass *createPrinterPass(raw_ostream &O,
-                                  const std::string &Banner) const {
+  Pass *createPrinterPass(raw_ostream &O,
+                          const std::string &Banner) const override {
     return createGenXPrinterPass(O, Banner);
   }
 
@@ -379,6 +382,46 @@ private:
 
 static const unsigned MaxPredSize = 32;
 
+class DiagnosticInfoLegalization : public DiagnosticInfoWithLocationBase {
+private:
+  const Instruction *Inst;
+  std::string Description;
+  static int KindID;
+  static int getKindID() {
+    if (KindID == 0)
+      KindID = llvm::getNextAvailablePluginDiagnosticKind();
+    return KindID;
+  }
+
+public:
+  DiagnosticInfoLegalization(const Instruction *Inst, const Twine &Desc,
+                             DiagnosticSeverity Severity = DS_Error);
+
+  void print(DiagnosticPrinter &DP) const override;
+  std::string getDescription() const;
+};
+int DiagnosticInfoLegalization::KindID = 0;
+
+DiagnosticInfoLegalization::DiagnosticInfoLegalization(const Instruction *I,
+                                                       const Twine &Desc,
+                                                       DiagnosticSeverity Severity):
+    DiagnosticInfoWithLocationBase(static_cast<DiagnosticKind>(getKindID()),
+                                   Severity,
+                                   *I->getFunction(), I->getDebugLoc()),
+    Inst(I),
+    Description(Desc.str()) {}
+
+std::string DiagnosticInfoLegalization::getDescription() const {
+  std::string str;
+  llvm::raw_string_ostream(str) << *Inst;
+  return (Twine("GenXLegalization failed for instruction \"") +
+          StringRef(str).ltrim() + "\": " + Description).str();
+}
+
+void DiagnosticInfoLegalization::print(DiagnosticPrinter &DP) const {
+  DP << getLocationStr() << ": " << getDescription();
+}
+
 } // end anonymous namespace
 
 char GenXLegalization::ID = 0;
@@ -418,7 +461,7 @@ bool GenXLegalization::runOnFunction(Function &F) {
   for (Function::arg_iterator fi = F.arg_begin(), fe = F.arg_end(); fi != fe;
        ++fi) {
     Argument *Arg = &*fi;
-    if (auto VT = dyn_cast<VectorType>(Arg->getType()))
+    if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Arg->getType()))
       if (VT->getElementType()->isIntegerTy(1))
         IGC_ASSERT_MESSAGE(getPredPart(Arg, 0).Size == VT->getNumElements(),
           "function arg not allowed to be illegally sized predicate");
@@ -720,25 +763,29 @@ bool GenXLegalization::processInst(Instruction *Inst) {
   auto *I8Ty = Type::getInt8Ty(Inst->getContext());
   auto *I16Ty = Type::getInt16Ty(Inst->getContext());
   auto *I32Ty = Type::getInt32Ty(Inst->getContext());
-  if (transformMoveType(&B, I8Ty, I32Ty) ||
-      transformMoveType(&B, I8Ty, I16Ty)) {
+  if (Instruction *MoveHead = nullptr;
+      (MoveHead = transformMoveType(&B, I8Ty, I32Ty)) ||
+      (MoveHead = transformMoveType(&B, I8Ty, I16Ty))) {
     // Successfully transformed. Run legalization on the new instruction
     // (which got inserted before the existing one, so will be processed
     // next).
     LLVM_DEBUG(dbgs() << "done transform of byte move\n");
-    return false;
+    clearBale();
+    Baling->buildBale(MoveHead, &B);
+    return processBale(MoveHead->getNextNode());
   }
 
   // Check if it is a 64-bit move that we want to transform into 32-bit move.
+  auto *I64Ty = Type::getInt64Ty(Inst->getContext());
   if (ST->emulateLongLong()) {
-    auto *I32Ty = Type::getInt32Ty(Inst->getContext());
-    auto *I64Ty = Type::getInt64Ty(Inst->getContext());
-    if (transformMoveType(&B, I64Ty, I32Ty)) {
+    if (Instruction *MoveHead = transformMoveType(&B, I64Ty, I32Ty)) {
       // Successfully transformed. Run legalization on the new instruction
       // (which got inserted before the existing one, so will be processed
       // next).
       LLVM_DEBUG(dbgs() << "done transform of long long move\n");
-      return false;
+      clearBale();
+      Baling->buildBale(MoveHead, &B);
+      return processBale(MoveHead->getNextNode());
     }
   }
 
@@ -852,7 +899,8 @@ bool GenXLegalization::processAllAny(Instruction *Inst,
                                      Instruction *InsertBefore) {
   // See if the all/any is already legally sized.
   Value *Pred = Inst->getOperand(0);
-  unsigned WholeSize = cast<VectorType>(Pred->getType())->getNumElements();
+  unsigned WholeSize =
+      cast<IGCLLVM::FixedVectorType>(Pred->getType())->getNumElements();
   if (getPredPart(Pred, 0).Size == WholeSize) {
     // Already legally sized. We need to check whether it is used just in a
     // branch or select, possibly via a not; if not we need to convert the
@@ -955,7 +1003,10 @@ bool GenXLegalization::processBitCastFromPredicate(Instruction *Inst,
 
   {
     unsigned WholeWidth = 0; // it will be assigned inside assertion statament
-    IGC_ASSERT((WholeWidth = cast<VectorType>(Pred->getType())->getNumElements(), 1));
+    IGC_ASSERT(
+        (WholeWidth =
+             cast<IGCLLVM::FixedVectorType>(Pred->getType())->getNumElements(),
+         1));
     IGC_ASSERT(SplitWidth);
     IGC_ASSERT_MESSAGE(!(WholeWidth % SplitWidth), "does not handle odd predicate sizes");
     (void) WholeWidth;
@@ -1004,7 +1055,8 @@ bool GenXLegalization::processBitCastFromPredicate(Instruction *Inst,
  */
 bool GenXLegalization::processBitCastToPredicate(Instruction *Inst,
                                                  Instruction *InsertBefore) {
-  unsigned WholeWidth = cast<VectorType>(Inst->getType())->getNumElements();
+  unsigned WholeWidth =
+      cast<IGCLLVM::FixedVectorType>(Inst->getType())->getNumElements();
   unsigned SplitWidth = getPredPart(Inst, 0).Size;
   IGC_ASSERT(SplitWidth);
   IGC_ASSERT_MESSAGE(!(WholeWidth % SplitWidth), "does not handle odd predicate sizes");
@@ -1064,7 +1116,7 @@ unsigned GenXLegalization::getExecutionWidth() {
       Head->Info.Type == BaleInfo::WRPREDREGION ||
       Head->Info.Type == BaleInfo::WRPREDPREDREGION)
     Dest = Head->Inst->getOperand(1);
-  VectorType *VT = dyn_cast<VectorType>(Dest->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Dest->getType());
   if (!VT)
     return 1;
   return VT->getNumElements();
@@ -1127,12 +1179,12 @@ unsigned GenXLegalization::determineWidth(unsigned WholeWidth,
         Unbale = true;
       }
       // Get the max legal size for the wrregion.
-      ThisWidth = std::min(
-          ThisWidth,
-          R.getLegalSize(StartIdx, false /*Allow2D*/,
-                         cast<VectorType>(i->Inst->getOperand(0)->getType())
-                             ->getNumElements(),
-                         ST, &(Baling->AlignInfo)));
+      ThisWidth = std::min(ThisWidth,
+                           R.getLegalSize(StartIdx, false /*Allow2D*/,
+                                          cast<IGCLLVM::FixedVectorType>(
+                                              i->Inst->getOperand(0)->getType())
+                                              ->getNumElements(),
+                                          ST, &(Baling->AlignInfo)));
       if (!Unbale && R.Mask && PredMinWidth > ThisWidth) {
         // The min predicate size (from this wrregion) is bigger than the
         // legal size for this wrregion. We have to rewrite the wrregion as:
@@ -1194,7 +1246,8 @@ unsigned GenXLegalization::determineWidth(unsigned WholeWidth,
         ModifiedStartIdx = 0;
       ThisWidth = R.getLegalSize(
           ModifiedStartIdx, true /*Allow2D*/,
-          cast<VectorType>(i->Inst->getOperand(0)->getType())->getNumElements(),
+          cast<IGCLLVM::FixedVectorType>(i->Inst->getOperand(0)->getType())
+              ->getNumElements(),
           ST, &(Baling->AlignInfo));
       if (ThisWidth == 1 &&
           R.Indirect && !R.isMultiIndirect()) {
@@ -1396,7 +1449,7 @@ unsigned GenXLegalization::determineWidth(unsigned WholeWidth,
     auto Head = B.getHeadIgnoreGStore();
     if (Head->Info.Type != BaleInfo::WRREGION &&
         Head->Info.Type != BaleInfo::WRPREDPREDREGION) {
-      auto VT = cast<VectorType>(Head->Inst->getType());
+      auto *VT = cast<IGCLLVM::FixedVectorType>(Head->Inst->getType());
       unsigned VecSize = VT->getNumElements();
       if (VecSize != Width) {
         if (!VT->getElementType()->isIntegerTy(1)) {
@@ -1427,7 +1480,7 @@ unsigned GenXLegalization::determineWidth(unsigned WholeWidth,
  */
 unsigned GenXLegalization::determineNonRegionWidth(Instruction *Inst,
                                                    unsigned StartIdx) {
-  VectorType *VT = dyn_cast<VectorType>(Inst->getType());
+  auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Inst->getType());
   if (!VT)
     return 1;
   unsigned Width = VT->getNumElements() - StartIdx;
@@ -1530,7 +1583,8 @@ LegalPredSize GenXLegalization::getLegalPredSize(Value *Pred, Type *ElementTy,
  * predicate registers P1,P2,P3 (for example).
  */
 PredPart GenXLegalization::getPredPart(Value *V, unsigned Offset) {
-  unsigned WholeSize = cast<VectorType>(V->getType())->getNumElements();
+  unsigned WholeSize =
+      cast<IGCLLVM::FixedVectorType>(V->getType())->getNumElements();
   PredPart Ret;
   if (Offset == WholeSize && !(WholeSize & (MaxPredSize - 1))) {
     Ret.Offset = Offset;
@@ -1636,7 +1690,7 @@ Value *GenXLegalization::joinBaleResult(Value *PrevSliceRes,
   IGC_ASSERT_MESSAGE(LastSplitInst, "wrong argument");
   IGC_ASSERT_MESSAGE(InsertBefore, "wrong argument");
   auto Head = B.getHeadIgnoreGStore()->Inst;
-  auto VT = cast<VectorType>(Head->getType());
+  auto *VT = cast<IGCLLVM::FixedVectorType>(Head->getType());
   IGC_ASSERT_MESSAGE(VT->getNumElements() != Width,
     "there's no need to join results if they have the proper type");
   if (VT->getElementType()->isIntegerTy(1)) {
@@ -1650,7 +1704,8 @@ Value *GenXLegalization::joinBaleResult(Value *PrevSliceRes,
     // wrpredregion trees need to be in IllegalPredicates.)
     if (!StartIdx) {
       auto PredSize = getLegalPredSize(NewWr, nullptr, 0);
-      if (PredSize.Max != cast<VectorType>(NewWr->getType())->getNumElements())
+      if (PredSize.Max !=
+          cast<IGCLLVM::FixedVectorType>(NewWr->getType())->getNumElements())
         IllegalPredicates.insert(NewWr);
     }
     return NewWr;
@@ -1691,7 +1746,8 @@ Value *GenXLegalization::splitBale(Value *PrevSliceRes, unsigned StartIdx,
   else {
     IGC_ASSERT_MESSAGE(LastCreatedInst, "must have at least some split inst");
     auto Head = B.getHeadIgnoreGStore()->Inst;
-    if (cast<VectorType>(Head->getType())->getNumElements() != Width)
+    if (cast<IGCLLVM::FixedVectorType>(Head->getType())->getNumElements() !=
+        Width)
       LastCreatedInst = joinBaleResult(PrevSliceRes, LastCreatedInst, StartIdx,
                                        Width, InsertBefore);
   }
@@ -1718,11 +1774,6 @@ Value *GenXLegalization::joinWrRegion(Value *PrevSliceRes, BaleInst BInst,
                                       Instruction *InsertBefore) {
   IGC_ASSERT_MESSAGE(BInst.Info.Type == BaleInfo::WRREGION, "wrong argument");
   Region R(BInst.Inst, BInst.Info);
-  R.getSubregion(StartIdx, Width);
-  if (R.Mask && isa<VectorType>(R.Mask->getType()))
-    R.Mask = getSplitOperand(
-        BInst.Inst, GenXIntrinsic::GenXRegion::PredicateOperandNum, StartIdx,
-        Width, InsertBefore, BInst.Inst->getDebugLoc());
   // For SplitIdx==0, the old vector value comes from the original
   // wrregion. Otherwise it comes from the split wrregion created
   // last time round.
@@ -1734,13 +1785,16 @@ Value *GenXLegalization::joinWrRegion(Value *PrevSliceRes, BaleInst BInst,
     In = new LoadInst(GV->getType()->getPointerElementType(), GV, ".gload",
                       /*volatile*/ true, InsertBefore);
   }
-  Value *NewWrRegion =
-      R.createWrRegion(In,
-                       getSplitOperand(BInst.Inst, 1, StartIdx, Width,
-                                       InsertBefore, BInst.Inst->getDebugLoc()),
-                       BInst.Inst->getName() + ".join" + Twine(StartIdx),
-                       InsertBefore, BInst.Inst->getDebugLoc());
-  return NewWrRegion;
+  R.getSubregion(StartIdx, Width);
+  if (R.Mask && isa<VectorType>(R.Mask->getType()))
+    R.Mask = getSplitOperand(
+        BInst.Inst, GenXIntrinsic::GenXRegion::PredicateOperandNum, StartIdx,
+        Width, InsertBefore, BInst.Inst->getDebugLoc());
+  Value *WriteValue = getSplitOperand(BInst.Inst, 1, StartIdx, Width,
+                                      InsertBefore, BInst.Inst->getDebugLoc());
+  return R.createWrRegion(In, WriteValue,
+                          BInst.Inst->getName() + ".join" + Twine(StartIdx),
+                          InsertBefore, BInst.Inst->getDebugLoc());
 }
 
 // specialized join function for wrpredpredregion instruction
@@ -1835,12 +1889,11 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
     // indirect.
     bool ConvertToMulti =
         R.Indirect && Width != 1 &&
-        R.getLegalSize(StartIdx, true /*Allow2D*/,
-                       cast<VectorType>(BInst.Inst->getOperand(0)->getType())
-                           ->getNumElements(),
-                       ST, &(Baling->AlignInfo)) == 1;
-
-    R.getSubregion(StartIdx, Width);
+        R.getLegalSize(
+            StartIdx, true /*Allow2D*/,
+            cast<IGCLLVM::FixedVectorType>(BInst.Inst->getOperand(0)->getType())
+                ->getNumElements(),
+            ST, &(Baling->AlignInfo)) == 1;
     // The region to read from. This is normally from the input region baled
     // in. If this is reading from and writing to the same region and
     // split progapation is on, then just reading from the last joined value
@@ -1856,6 +1909,7 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
           OldVal = PrevSliceRes;
       }
     }
+    R.getSubregion(StartIdx, Width);
     if (!ConvertToMulti) {
       // Not converting to multi indirect.
       return R.createRdRegion(
@@ -1899,10 +1953,10 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
     return NewInst;
   }
   if (BinaryOperator *BO = dyn_cast<BinaryOperator>(BInst.Inst)) {
+    auto Split1 = getSplitOperand(BO, 0, StartIdx, Width, InsertBefore, DL),
+         Split2 = getSplitOperand(BO, 1, StartIdx, Width, InsertBefore, DL);
     Instruction *NewInst = BinaryOperator::Create(
-        BO->getOpcode(),
-        getSplitOperand(BO, 0, StartIdx, Width, InsertBefore, DL),
-        getSplitOperand(BO, 1, StartIdx, Width, InsertBefore, DL),
+        BO->getOpcode(), Split1, Split2,
         BO->getName() + ".split" + Twine(StartIdx), InsertBefore);
     NewInst->setDebugLoc(DL);
     return NewInst;
@@ -1918,10 +1972,10 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
   }
 #endif
   if (CmpInst *CI = dyn_cast<CmpInst>(BInst.Inst)) {
+    auto Split1 = getSplitOperand(CI, 0, StartIdx, Width, InsertBefore, DL),
+         Split2 = getSplitOperand(CI, 1, StartIdx, Width, InsertBefore, DL);
     Instruction *NewInst = CmpInst::Create(
-        CI->getOpcode(), CI->getPredicate(),
-        getSplitOperand(CI, 0, StartIdx, Width, InsertBefore, DL),
-        getSplitOperand(CI, 1, StartIdx, Width, InsertBefore, DL),
+        CI->getOpcode(), CI->getPredicate(), Split1, Split2,
         CI->getName() + ".split" + Twine(StartIdx), InsertBefore);
     NewInst->setDebugLoc(DL);
     return NewInst;
@@ -1976,8 +2030,8 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
   Module *M = InsertBefore->getParent()->getParent()->getParent();
   Function *Decl =
       GenXIntrinsic::getAnyDeclaration(M, IntrinID, OverloadedTypes);
-  Instruction *NewInst = CallInst::Create(
-      Decl, Args, CI->getName() + ".split" + Twine(StartIdx), InsertBefore);
+  auto Name = ".split" + Twine(StartIdx);
+  Instruction *NewInst = CallInst::Create(Decl, Args, Name, InsertBefore);
   NewInst->setDebugLoc(DL);
   return NewInst;
 }
@@ -2113,10 +2167,9 @@ static Value *createBitCastIfNeeded(Value *V, Type *NewTy,
 // Get type that represents OldTy as vector of NewScalarType.
 static Type *getNewVectorType(Type *OldTy, IntegerType *NewScalarType) {
   IGC_ASSERT(OldTy->isIntOrIntVectorTy());
-  unsigned OldElemSize = OldTy->getScalarSizeInBits(),
-           OldNumElems = isa<VectorType>(OldTy)
-                             ? cast<VectorType>(OldTy)->getNumElements()
-                             : 1;
+  unsigned OldElemSize = OldTy->getScalarSizeInBits();
+  auto *VTy = dyn_cast<IGCLLVM::FixedVectorType>(OldTy);
+  unsigned OldNumElems = VTy ? VTy->getNumElements() : 1;
   unsigned NewElemSize = NewScalarType->getBitWidth();
   if (OldElemSize * OldNumElems % NewElemSize)
     return nullptr;
@@ -2245,7 +2298,7 @@ Value *GenXLegalization::splatPredicateIfNecessary(Value *V,
                                                    Type *ValueToWriteTy,
                                                    Instruction *InsertBefore,
                                                    const DebugLoc &DL) {
-  if (auto VT = dyn_cast<VectorType>(ValueToWriteTy))
+  if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(ValueToWriteTy))
     return splatPredicateIfNecessary(V, VT->getNumElements(), InsertBefore, DL);
   return V;
 }
@@ -2328,7 +2381,7 @@ void GenXLegalization::fixIllegalPredicates(Function *F) {
         continue;
       // We have a predicate phi. Get the first part of it, which might show
       // that we do not need to split it at all.
-      auto VT = dyn_cast<VectorType>(Phi->getType());
+      auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Phi->getType());
       if (!VT)
         continue;
       unsigned WholeSize = VT->getNumElements();
@@ -2391,7 +2444,7 @@ void GenXLegalization::fixIllegalPredicates(Function *F) {
       "expecting undef input to root of tree");
     // See if it really is illegally sized.
     if (getPredPart(Root, 0).Size ==
-        cast<VectorType>(Root->getType())->getNumElements())
+        cast<IGCLLVM::FixedVectorType>(Root->getType())->getNumElements())
       continue;
     // For traversing the tree, create a stack where each entry represents a
     // value in the tree, and contains the values of the parts.  Create an
@@ -2413,7 +2466,8 @@ void GenXLegalization::fixIllegalPredicates(Function *F) {
       if (!Entry->Parent) {
         // No parent. All parts are undef.
         auto Ty = Entry->Wr->getType();
-        unsigned WholeSize = cast<VectorType>(Ty)->getNumElements();
+        unsigned WholeSize =
+            cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements();
         for (unsigned Offset = 0; Offset != WholeSize;) {
           auto PP = getPredPart(Entry->Wr, Offset);
           Entry->Parts.push_back(UndefValue::get(
@@ -2431,8 +2485,9 @@ void GenXLegalization::fixIllegalPredicates(Function *F) {
       // because getLegalPredSize ensured that all splits were within parts.)
       unsigned WrOffset =
           cast<ConstantInt>(Entry->Wr->getOperand(2))->getZExtValue();
-      unsigned WrSize = cast<VectorType>(Entry->Wr->getOperand(1)->getType())
-                            ->getNumElements();
+      unsigned WrSize =
+          cast<IGCLLVM::FixedVectorType>(Entry->Wr->getOperand(1)->getType())
+              ->getNumElements();
       auto PP = getPredPart(Entry->Wr, WrOffset);
       IGC_ASSERT_MESSAGE(WrOffset + WrSize <= PP.Offset + PP.Size,
         "overlaps multiple parts");
@@ -2464,7 +2519,8 @@ void GenXLegalization::fixIllegalPredicates(Function *F) {
         Instruction *Rd = *ri;
         unsigned RdOffset =
             cast<ConstantInt>(Rd->getOperand(1))->getZExtValue();
-        unsigned RdSize = cast<VectorType>(Rd->getType())->getNumElements();
+        unsigned RdSize =
+            cast<IGCLLVM::FixedVectorType>(Rd->getType())->getNumElements();
         auto PP = getPredPart(Entry->Wr, RdOffset);
         IGC_ASSERT_MESSAGE(RdOffset + RdSize <= PP.Offset + PP.Size,
           "overlaps multiple parts");

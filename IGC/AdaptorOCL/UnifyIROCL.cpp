@@ -91,6 +91,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/SPIRMetaDataTranslation.h"
 #include "Compiler/Optimizer/OpenCLPasses/ErrorCheckPass.h"
+#include "Compiler/Optimizer/OpenCLPasses/JointMatrixFuncsResolutionPass.h"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/FixResourcePtr.hpp"
@@ -111,8 +112,8 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
 #include "Compiler/CISACodeGen/TimeStatsCounter.h"
 #include "Compiler/DebugInfo/ScalarVISAModule.h"
+#include "Compiler/DebugInfo/Utils.h"
 #include "DebugInfo/VISADebugEmitter.hpp"
-#include "DebugInfo/DebugInfoUtils.hpp"
 
 #include <string>
 #include <algorithm>
@@ -268,6 +269,7 @@ static void CommonOCLBasedPasses(
     mpmSPIR.add(new PreprocessSPVIR());
 #endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new TypesLegalizationPass());
+    mpmSPIR.add(new TargetLibraryInfoWrapperPass());
     mpmSPIR.add(createDeadCodeEliminationPass());
     mpmSPIR.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
     mpmSPIR.add(new CodeGenContextWrapper(pContext));
@@ -317,7 +319,7 @@ static void CommonOCLBasedPasses(
 
     if(pContext->m_InternalOptions.KernelDebugEnable)
     {
-        IF_DEBUG_INFO(mpm.add(new ImplicitGlobalId());)
+        mpm.add(new ImplicitGlobalId());
     }
 
     if (IGC_IS_FLAG_ENABLED(EnableCodeAssumption))
@@ -329,6 +331,8 @@ static void CommonOCLBasedPasses(
     {
         mpm.add(new HandleFRemInstructions());
     }
+
+    mpm.add(new JointMatrixFuncsResolutionPass(pContext));
 
     mpm.add(new PreBIImportAnalysis());
     mpm.add(createTimeStatsCounterPass(pContext, TIME_Unify_BuiltinImport, STATS_COUNTER_START));
@@ -540,7 +544,7 @@ static void CommonOCLBasedPasses(
     // this function here, as opposed to beginning of this function,
     // is that unreferenced constants will be eliminated. So
     // debugger will not be able to query those variables.
-    IF_DEBUG_INFO(insertOCLMissingDebugConstMetadata(pContext);)
+    insertOCLMissingDebugConstMetadata(pContext);
 
     COMPILER_TIME_END(pContext, TIME_UnificationPasses);
 
