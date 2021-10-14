@@ -2,13 +2,15 @@
 
 include /usr/share/dpkg/pkg-info.mk
 
+LLVM_VERSION	 = $(shell sed -n -r '/^Build/,/^$$/s/.*llvm-([0-9]+)-dev.*/\1/p' debian/control)
+
 %:
 	dh $@ --builddir build/
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DIGC_OPTION__LLVM_PREFERRED_VERSION=12.0.0 \
+		-DIGC_OPTION__LLVM_PREFERRED_VERSION=$(LLVM_VERSION).0.0 \
 		-DIGC_BUILD__VC_ENABLED=FALSE \
 		-Wno-dev
 
