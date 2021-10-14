@@ -24,6 +24,8 @@ Architecture: amd64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+Provides:
+ libigc1-llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- core libs
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
@@ -58,6 +60,8 @@ Architecture: amd64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+Provides:
+ libigdfcl1-llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- OpenCL library
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
