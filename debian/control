@@ -24,6 +24,8 @@ Architecture: amd64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+Breaks:
+ intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
  libigc1-llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- core libs
@@ -60,6 +62,8 @@ Architecture: amd64
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+Breaks:
+ intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
  libigdfcl1-llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- OpenCL library
