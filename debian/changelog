@@ -2,6 +2,8 @@ intel-graphics-compiler (1.0.8744-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * Drop patches, upstream.
+  * drop-libunwind-search.diff: Don't try to search for libunwind
+    headers, we have prebuilt lld.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 19 Aug 2021 10:43:59 +0300
 
