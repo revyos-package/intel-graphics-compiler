@@ -2,8 +2,8 @@ intel-graphics-compiler (1.0.8744-2) unstable; urgency=medium
 
   [ Andreas Beckmann ]
   * rules: Parse llvm version from Build-Depends.
-  * control, rules: Provide virtual packages libigc1-llvm<version>,
-    libigdfcl1-llvm<version> to declare the supported llvm ABI.
+  * control, rules: Provide virtual packages libigc1+llvm<version>,
+    libigdfcl1+llvm<version> to declare the supported llvm ABI.
   * control: Add Breaks against intel-opencl-icd versions not depending on the
     virtual llvm ABI packages.  (Closes: #994833)
 
