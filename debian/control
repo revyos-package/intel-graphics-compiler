@@ -14,6 +14,7 @@ Build-Depends: debhelper-compat (= 13),
  libopencl-clang-dev (>= 12.0~),
  python3,
  spirv-tools,
+Rules-Requires-Root: no
 Standards-Version: 4.6.0
 Homepage: https://github.com/intel/intel-graphics-compiler
 Vcs-Browser: https://salsa.debian.org/opencl-team/intel-graphics-compiler
