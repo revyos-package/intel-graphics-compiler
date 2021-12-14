@@ -21,6 +21,7 @@ Vcs-Git: https://salsa.debian.org/opencl-team/intel-graphics-compiler.git
 
 Package: libigc1
 Architecture: amd64
+Multi-Arch: same
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
@@ -36,6 +37,8 @@ Description: Intel graphics compiler for OpenCL -- core libs
 
 Package: libigc-dev
 Architecture: amd64
+Multi-Arch: same
+Section: libdevel
 Depends:
  libigc1 (= ${binary:Version}),
  ${misc:Depends},
@@ -59,6 +62,7 @@ Description: Intel graphics compiler for OpenCL -- media tools
 
 Package: libigdfcl1
 Architecture: amd64
+Multi-Arch: same
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
@@ -74,6 +78,7 @@ Description: Intel graphics compiler for OpenCL -- OpenCL library
 
 Package: libigdfcl-dev
 Architecture: amd64
+Multi-Arch: same
 Section: libdevel
 Depends:
  libigdfcl1 (= ${binary:Version}),

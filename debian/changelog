@@ -1,3 +1,9 @@
+intel-graphics-compiler (1.0.8744-3) UNRELEASED; urgency=medium
+
+  * control: Mark library and libdevel packages as Multi-Arch: same.
+
+ -- Andreas Beckmann <anbe@debian.org>  Wed, 15 Dec 2021 00:22:32 +0100
+
 intel-graphics-compiler (1.0.8744-2) unstable; urgency=medium
 
   [ Andreas Beckmann ]
