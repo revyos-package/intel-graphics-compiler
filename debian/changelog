@@ -3,6 +3,7 @@ intel-graphics-compiler (1.0.8744-3) UNRELEASED; urgency=medium
   * control: Mark library and libdevel packages as Multi-Arch: same.
   * control: Set Architecture: any-amd64 any-i386.
   * control: Set Rules-Requires-Root: no.
+  * control: Build-depend on libopencl-clang-12-dev.
   * upstream/metadata: Add.
   * copyright: Add missing copyright information.
 
