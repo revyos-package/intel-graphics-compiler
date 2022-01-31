@@ -2,14 +2,15 @@
 
 include /usr/share/dpkg/pkg-info.mk
 
-LLVM_VERSION	 = $(shell sed -n -r '/^Build/,/^$$/s/.*llvm-([0-9]+)-dev.*/\1/p' debian/control)
+LLVM_VERSION		 = $(shell sed -n -r '/^Build/,/^$$/s/.*llvm-([0-9]+)-dev.*/\1/p' debian/control)
+LLVM_UPSTREAM_VERSION	 = $(shell dpkg-query -f '$${source:Upstream-Version}' -W llvm-$(LLVM_VERSION)-dev)
 
 %:
 	dh $@ --builddir build/
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
-		-DIGC_OPTION__LLVM_PREFERRED_VERSION=$(LLVM_VERSION).0.0 \
+		-DIGC_OPTION__LLVM_PREFERRED_VERSION=$(LLVM_UPSTREAM_VERSION) \
 		-DIGC_BUILD__VC_ENABLED=FALSE \
 		-Wno-dev
 
