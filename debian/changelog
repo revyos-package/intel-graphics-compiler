@@ -8,6 +8,7 @@ intel-graphics-compiler (1.0.8744-3) UNRELEASED; urgency=medium
   * copyright: Add missing copyright information.
   * rules: Do not ship /usr/include/*/*.txt.
   * Add Lintian overrides.
+  * Add myself to Uploaders.
 
  -- Andreas Beckmann <anbe@debian.org>  Wed, 15 Dec 2021 00:22:32 +0100
 

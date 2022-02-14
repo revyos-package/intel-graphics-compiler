@@ -3,7 +3,8 @@ Section: libs
 Priority: optional
 Maintainer: Debian OpenCL team <pkg-opencl-devel@lists.alioth.debian.org>
 Uploaders:
- Timo Aaltonen <tjaalton@debian.org>
+ Timo Aaltonen <tjaalton@debian.org>,
+ Andreas Beckmann <anbe@debian.org>,
 Build-Depends: debhelper-compat (= 13),
  bison,
  clang-12,
