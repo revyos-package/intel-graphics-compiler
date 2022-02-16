@@ -1,4 +1,4 @@
-intel-graphics-compiler (1.0.8744-3) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.8744-3) unstable; urgency=medium
 
   * control: Mark library and libdevel packages as Multi-Arch: same.
   * control: Set Architecture: any-amd64 any-i386.
@@ -10,7 +10,7 @@ intel-graphics-compiler (1.0.8744-3) UNRELEASED; urgency=medium
   * Add Lintian overrides.
   * Add myself to Uploaders.
 
- -- Andreas Beckmann <anbe@debian.org>  Wed, 15 Dec 2021 00:22:32 +0100
+ -- Andreas Beckmann <anbe@debian.org>  Wed, 16 Feb 2022 17:22:00 +0100
 
 intel-graphics-compiler (1.0.8744-2) unstable; urgency=medium
 
