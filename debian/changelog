@@ -5,6 +5,7 @@ intel-graphics-compiler (1.0.10778-1) UNRELEASED; urgency=medium
   * control: Add libllvmspirvlib-12-dev to build-depends.
   * control, patches, rules: Add spirv-headers and -tools to build-
     depends, and add patches so they can be found.
+  * rules: Set the build type as Release.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 05 Apr 2022 14:25:47 +0300
 

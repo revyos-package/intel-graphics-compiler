@@ -10,6 +10,7 @@ LLVM_UPSTREAM_VERSION	 = $(shell dpkg-query -f '$${source:Upstream-Version}' -W 
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=Release \
 		-DIGC_OPTION__LLVM_PREFERRED_VERSION=$(LLVM_UPSTREAM_VERSION) \
 		-DIGC_BUILD__VC_ENABLED=FALSE \
 		-DIGC_OPTION__SPIRV_TOOLS_MODE=Prebuilds \
