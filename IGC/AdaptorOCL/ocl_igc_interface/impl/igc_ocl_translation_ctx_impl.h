@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "ocl_igc_interface/impl/igc_ocl_device_ctx_impl.h"
 
 #include <memory>
+#include <iomanip>
 
 #include "cif/builtins/memory/buffer/impl/buffer_impl.h"
 #include "cif/helpers/error.h"
@@ -23,6 +24,7 @@ SPDX-License-Identifier: MIT
 #include "common/debug/Debug.hpp"
 
 #include "cif/macros/enable.h"
+#include <spirv-tools/libspirv.h>
 
 namespace TC{
 
@@ -31,7 +33,9 @@ extern bool ProcessElfInput(
   STB_TranslateInputArgs &InputArgs,
   STB_TranslateOutputArgs &OutputArgs,
   IGC::OpenCLProgramContext &Context,
-  PLATFORM &platform, bool isOutputLlvmBinary);
+  PLATFORM &platform,
+  const TB_DATA_FORMAT& outType,
+  float profilingTimerResolution);
 
 extern bool ParseInput(
   llvm::Module*& pKernelModule,
@@ -47,10 +51,38 @@ bool TranslateBuild(
   const IGC::CPlatform &platform,
   float profilingTimerResolution);
 
+bool TranslateBuildSPMD(
+  const STB_TranslateInputArgs* pInputArgs,
+  STB_TranslateOutputArgs* pOutputArgs,
+  TB_DATA_FORMAT inputDataFormatTemp,
+  const IGC::CPlatform &platform,
+  float profilingTimerResolution,
+  const ShaderHash& inputShHash);
+
+bool TranslateBuildVC(
+  const STB_TranslateInputArgs* pInputArgs,
+  STB_TranslateOutputArgs* pOutputArgs,
+  TB_DATA_FORMAT inputDataFormatTemp,
+  const IGC::CPlatform &platform,
+  float profilingTimerResolution,
+  const ShaderHash& inputShHash);
+
 bool ReadSpecConstantsFromSPIRV(
     std::istream &IS,
     std::vector<std::pair<uint32_t, uint32_t>> &OutSCInfo);
 
+void DumpShaderFile(
+    const std::string& dstDir,
+    const char* pBuffer,
+    const UINT bufferSize,
+    const QWORD hash,
+    const std::string& ext,
+    std::string* fileName);
+
+spv_result_t DisassembleSPIRV(
+    const char* pBuffer,
+    UINT bufferSize,
+    spv_text* outSpirvAsm);
 }
 
 bool enableSrcLine(void*);
@@ -99,6 +131,7 @@ CIF_DECLARE_INTERFACE_PIMPL(IgcOclTranslationCtx) : CIF::PimplBase
             {
                   // from                 // to
                 { CodeType::elf,      CodeType::llvmBc },
+                { CodeType::elf,      CodeType::oclGenBin },
                 { CodeType::llvmLl,   CodeType::oclGenBin },
                 { CodeType::llvmBc,   CodeType::oclGenBin },
                 { CodeType::spirV,    CodeType::oclGenBin },
@@ -123,6 +156,24 @@ CIF_DECLARE_INTERFACE_PIMPL(IgcOclTranslationCtx) : CIF::PimplBase
         uint32_t inputSize = static_cast<uint32_t>(src->GetSizeRaw());
 
         if(this->inType == CodeType::spirV){
+            // load registry keys to make sure that flags can be read correctly
+            LoadRegistryKeys();
+            if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
+            {
+                // dump SPIRV input if flag is enabled
+                const char* pOutputFolder = Debug::GetShaderOutputFolder();
+                QWORD hash = Debug::ShaderHashOCL(reinterpret_cast<const UINT*>(pInput), inputSize / 4).getAsmHash();
+
+                TC::DumpShaderFile(pOutputFolder, pInput, inputSize, hash, ".spv", nullptr);
+#if defined(IGC_SPIRV_TOOLS_ENABLED)
+                spv_text spirvAsm = nullptr;
+                if (TC::DisassembleSPIRV(pInput, inputSize, &spirvAsm) == SPV_SUCCESS)
+                {
+                    TC::DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, ".spvasm", nullptr);
+                }
+                spvTextDestroy(spirvAsm);
+#endif // defined(IGC_SPIRV_TOOLS_ENABLED)
+            }
             llvm::StringRef strInput = llvm::StringRef(pInput, inputSize);
             std::istringstream IS(strInput.str());
 
@@ -271,7 +322,10 @@ CIF_DECLARE_INTERFACE_PIMPL(IgcOclTranslationCtx) : CIF::PimplBase
             CDriverInfo dummyDriverInfo;
             IGC::OpenCLProgramContext oclContextTemp(oclLayout, igcPlatform, &inputArgs, dummyDriverInfo, nullptr, false);
             IGC::Debug::RegisterComputeErrHandlers(*oclContextTemp.getLLVMContext());
-            success = TC::ProcessElfInput(inputArgs, output, oclContextTemp, platform, this->outType == CodeType::llvmBc);
+            success = TC::ProcessElfInput(
+                inputArgs, output, oclContextTemp, platform,
+                toLegacyFormat(this->outType),
+                this->globalState.MiscOptions.ProfilingTimerResolution);
         }else
         {
             if ((this->inType == CodeType::llvmLl) ||

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -10,9 +10,13 @@ SPDX-License-Identifier: MIT
 
 #include "../../../Compiler/CodeGenPublic.h"
 
+#include "common/LLVMWarningsPush.hpp"
 #include "llvm/ADT/SmallVector.h"
-#include "Probe/Assertion.h"
 #include "llvm/MC/MCELFObjectWriter.h"
+#include "common/LLVMWarningsPop.hpp"
+#include "Probe/Assertion.h"
+
+#include <string>
 
 using namespace IGC;
 using namespace iOpenCL;
@@ -57,6 +61,7 @@ void ZEBinaryBuilder::createKernel(
     const SOpenCLKernelInfo& annotations,
     const uint32_t grfSize,
     const CBTILayout& layout,
+    const std::string& visaasm,
     bool isProgramDebuggable)
 {
     ZEELFObjectBuilder::SectionID textID =
@@ -80,56 +85,60 @@ void ZEBinaryBuilder::createKernel(
     addPayloadArgsAndBTI(annotations, zeKernel);
     addMemoryBuffer(annotations, zeKernel);
     addGTPinInfo(annotations);
+    if (!visaasm.empty())
+        addKernelVISAAsm(annotations.m_kernelName, visaasm);
     if (isProgramDebuggable)
         addKernelDebugEnv(annotations, layout, zeKernel);
+}
+
+void ZEBinaryBuilder::addGlobalHostAccessInfo(const SOpenCLProgramInfo& annotations)
+{
+    for (auto& info : annotations.m_zebinGlobalHostAccessTable)
+    {
+        mZEInfoBuilder.addGlobalHostAccessSymbol(info.device_name, info.host_name);
+    }
 }
 
 void ZEBinaryBuilder::addGTPinInfo(const IGC::SOpenCLKernelInfo& annotations)
 {
     const IGC::SKernelProgram* program = &(annotations.m_kernelProgram);
-    uint8_t* buffer = nullptr;
-    uint32_t size = 0;
+    const SProgramOutput* output = nullptr;
     switch (annotations.m_executionEnivronment.CompiledSIMDSize) {
-    case 1:
-        buffer = (uint8_t*)program->simd1.m_gtpinBuffer;
-        size = program->simd1.m_gtpinBufferSize;
-        break;
-    case 8:
-        buffer = (uint8_t*)program->simd8.m_gtpinBuffer;
-        size = program->simd8.m_gtpinBufferSize;
-        break;
-    case 16:
-        buffer = (uint8_t*)program->simd16.m_gtpinBuffer;
-        size = program->simd16.m_gtpinBufferSize;
-        break;
-    case 32:
-        buffer = (uint8_t*)program->simd32.m_gtpinBuffer;
-        size = program->simd32.m_gtpinBufferSize;
-        break;
+    case 1:  output = &(program->simd1); break;
+    case 8:  output = &(program->simd8); break;
+    case 16: output = &(program->simd16); break;
+    case 32: output = &(program->simd32); break;
+    default: IGC_ASSERT(output != nullptr); break;
     }
 
+    uint8_t* buffer = (uint8_t*)output->m_gtpinBuffer;
+    uint32_t size = output->m_gtpinBufferSize;
     if (buffer != nullptr && size)
         mBuilder.addSectionGTPinInfo(annotations.m_kernelName, buffer, size);
+    for (auto& funcGTPin : output->m_FuncGTPinInfoList) {
+        buffer = (uint8_t*)funcGTPin.buffer;
+        size = funcGTPin.bufferSize;
+        if (buffer != nullptr && size)
+            mBuilder.addSectionGTPinInfo(funcGTPin.name, buffer, size);
+    }
 }
 
 void ZEBinaryBuilder::addProgramScopeInfo(const IGC::SOpenCLProgramInfo& programInfo)
 {
     addGlobalConstants(programInfo);
     addGlobals(programInfo);
+    addRuntimeSymbols();
     addProgramSymbols(programInfo);
     addProgramRelocations(programInfo);
+    addGlobalHostAccessInfo(programInfo);
 }
 
 void ZEBinaryBuilder::addGlobalConstants(const IGC::SOpenCLProgramInfo& annotations)
 {
-    if (annotations.m_initConstantAnnotation == nullptr)
-        return;
-
+    // General constants: .data.const and .bss.const
     // create a data section for global constant variables
-    // Global constants are: normal global constant variables, const strings (for printf)
-    // and zero-initialized global constants
-    auto& ca = annotations.m_initConstantAnnotation;
-    if (ca->AllocSize) {
+    if (annotations.m_initConstantAnnotation && annotations.m_initConstantAnnotation->AllocSize) {
+        auto& ca = annotations.m_initConstantAnnotation;
         // the normal .data.const size
         uint32_t dataSize = ca->InlineData.size();
         // the zero-initialize variables size, the .bss.const size
@@ -145,7 +154,7 @@ void ZEBinaryBuilder::addGlobalConstants(const IGC::SOpenCLProgramInfo& annotati
                 // Alos set the padding size to 0 that we always put the padding into bss section
                 uint32_t normal_alignment = bssSize ? 0 : alignment;
                 normal_id = mBuilder.addSectionData("const", (const uint8_t*)ca->InlineData.data(),
-                    dataSize, 0, normal_alignment);
+                    dataSize, 0, normal_alignment, /*rodata*/true);
             }
             if (bssSize) {
                 bss_id = mBuilder.addSectionBss("const", bssSize, alignment);
@@ -159,20 +168,29 @@ void ZEBinaryBuilder::addGlobalConstants(const IGC::SOpenCLProgramInfo& annotati
             // before runtime can support bss section, we create all 0s in .const.data section by adding
             // bssSize of padding
             mGlobalConstSectID = mBuilder.addSectionData("const", (const uint8_t*)ca->InlineData.data(),
-                dataSize, bssSize, alignment);
+                dataSize, bssSize, alignment, /*rodata*/true);
         }
+    }
+
+    // String literals for printf: .data.const.string
+    if (annotations.m_initConstantStringAnnotation &&
+        annotations.m_initConstantStringAnnotation->AllocSize) {
+        auto& caString = annotations.m_initConstantStringAnnotation;
+        uint32_t dataSize = caString->InlineData.size();
+        uint32_t paddingSize = caString->AllocSize - dataSize;
+        uint32_t alignment = caString->Alignment;
+        mConstStringSectID = mBuilder.addSectionData("const.string", (const uint8_t*)caString->InlineData.data(),
+            dataSize, paddingSize, alignment, /*rodata*/true);
     }
 }
 
 void ZEBinaryBuilder::addGlobals(const IGC::SOpenCLProgramInfo& annotations)
 {
-    if (annotations.m_initGlobalAnnotation.empty())
+    if (annotations.m_initGlobalAnnotation == nullptr)
         return;
 
     // create a data section for global variables
-    // FIXME: not sure in what cases there will be more than one global buffer
-    IGC_ASSERT(annotations.m_initGlobalAnnotation.size() == 1);
-    auto& ca = annotations.m_initGlobalAnnotation.front();
+    auto& ca = annotations.m_initGlobalAnnotation;
 
     if (!ca->AllocSize)
         return;
@@ -188,7 +206,7 @@ void ZEBinaryBuilder::addGlobals(const IGC::SOpenCLProgramInfo& annotations)
         if (dataSize) {
             uint32_t normal_alignment = bssSize ? 0 : alignment;
             normal_id = mBuilder.addSectionData("global", (const uint8_t*)ca->InlineData.data(),
-                dataSize, 0, normal_alignment);
+                dataSize, 0, normal_alignment, /*rodata*/false);
         }
         if (bssSize) {
             bss_id = mBuilder.addSectionBss("global", bssSize, alignment);
@@ -201,7 +219,7 @@ void ZEBinaryBuilder::addGlobals(const IGC::SOpenCLProgramInfo& annotations)
         // before runtime can support bss section, we create all 0s in .global.data section by adding
         // bssSize of padding
         mGlobalSectID = mBuilder.addSectionData("global", (const uint8_t*)ca->InlineData.data(),
-            dataSize, bssSize, alignment);
+            dataSize, bssSize, alignment, /*rodata*/false);
     }
 }
 
@@ -305,33 +323,20 @@ uint8_t ZEBinaryBuilder::getSymbolElfType(const vISA::ZESymEntry& sym)
     return llvm::ELF::STT_NOTYPE;
 }
 
-uint8_t ZEBinaryBuilder::getSymbolElfBinding(const vISA::ZESymEntry& sym)
+void ZEBinaryBuilder::addSymbol(const vISA::ZESymEntry& sym, uint8_t binding,
+    ZEELFObjectBuilder::SectionID targetSect)
 {
-    // all symbols we have now that could be exposed must have
-    // global binding
-    switch (sym.s_type) {
-    case vISA::GenSymType::S_KERNEL:
-        return llvm::ELF::STB_LOCAL;
-
-    case vISA::GenSymType::S_NOTYPE:
-    case vISA::GenSymType::S_UNDEF:
-    case vISA::GenSymType::S_FUNC:
-    case vISA::GenSymType::S_GLOBAL_VAR:
-    case vISA::GenSymType::S_GLOBAL_VAR_CONST:
-    case vISA::GenSymType::S_CONST_SAMPLER:
-        return llvm::ELF::STB_GLOBAL;
-    default:
-        break;
-    }
-    IGC_ASSERT(0);
-    return llvm::ELF::STB_GLOBAL;
+    if (sym.s_type == vISA::GenSymType::S_UNDEF)
+        targetSect = -1;
+    mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size, binding,
+        getSymbolElfType(sym), targetSect);
 }
 
-void ZEBinaryBuilder::addSymbol(const vISA::ZESymEntry& sym, ZEELFObjectBuilder::SectionID targetSect)
+void ZEBinaryBuilder::addRuntimeSymbols()
 {
-    mBuilder.addSymbol(sym.s_name, sym.s_offset, sym.s_size,
-        getSymbolElfBinding(sym), getSymbolElfType(sym),
-        (sym.s_type == vISA::GenSymType::S_UNDEF) ? -1 : targetSect);
+    if (IGC_IS_FLAG_ENABLED(EnableGlobalStateBuffer))
+        mBuilder.addSymbol("__INTEL_PATCH_CROSS_THREAD_OFFSET_OFF_R0", /*addr*/0, /*size*/0,
+            llvm::ELF::STB_GLOBAL, llvm::ELF::STT_NOTYPE, /*sectionId*/-1);
 }
 
 void ZEBinaryBuilder::addProgramSymbols(const IGC::SOpenCLProgramInfo& annotations)
@@ -341,17 +346,18 @@ void ZEBinaryBuilder::addProgramSymbols(const IGC::SOpenCLProgramInfo& annotatio
     // add symbols defined in global constant section
     IGC_ASSERT(symbols.globalConst.empty() || mGlobalConstSectID != -1);
     for (auto sym : symbols.globalConst)
-        addSymbol(sym, mGlobalConstSectID);
+        addSymbol(sym, llvm::ELF::STB_GLOBAL, mGlobalConstSectID);
 
-    // add symbols defined for const string defined in global constant section
-    IGC_ASSERT(symbols.globalStringConst.empty() || mGlobalConstSectID != -1);
+    // add symbols defined in global string constant section
+    IGC_ASSERT(symbols.globalStringConst.empty() || mConstStringSectID != -1);
     for (auto sym : symbols.globalStringConst)
-        addSymbol(sym, mGlobalConstSectID);
+        addSymbol(sym, llvm::ELF::STB_GLOBAL, mConstStringSectID);
 
     // add symbols defined in global section
     IGC_ASSERT(symbols.global.empty() || mGlobalSectID != -1);
     for (auto sym : symbols.global)
-        addSymbol(sym, mGlobalSectID);
+        addSymbol(sym, llvm::ELF::STB_GLOBAL, mGlobalSectID);
+
 }
 
 void ZEBinaryBuilder::addKernelSymbols(
@@ -374,12 +380,12 @@ void ZEBinaryBuilder::addKernelSymbols(
     // add local symbols of this kernel binary
     for (auto sym : symbols.local) {
         IGC_ASSERT(sym.s_type != vISA::GenSymType::S_UNDEF);
-        addSymbol(sym, kernelSectId);
+        addSymbol(sym, llvm::ELF::STB_LOCAL, kernelSectId);
     }
 
     // add function symbols defined in kernel text
     for (auto sym : symbols.function)
-        addSymbol(sym, kernelSectId);
+        addSymbol(sym, llvm::ELF::STB_GLOBAL, kernelSectId);
 
     // we do not support sampler symbols now
     IGC_ASSERT(symbols.sampler.empty());
@@ -445,11 +451,29 @@ void ZEBinaryBuilder::addKernelExecEnv(const SOpenCLKernelInfo& annotations,
     env.grf_count = annotations.m_executionEnivronment.NumGRFRequired;
     env.has_4gb_buffers = annotations.m_executionEnivronment.CompiledForGreaterThan4GBBuffers;
     env.has_device_enqueue = annotations.m_executionEnivronment.HasDeviceEnqueue;
+    env.has_dpas = annotations.m_executionEnivronment.HasDPAS;
     env.has_fence_for_image_access = annotations.m_executionEnivronment.HasReadWriteImages;
     env.has_global_atomics = annotations.m_executionEnivronment.HasGlobalAtomics;
+    env.has_multi_scratch_spaces = CPlatform(mPlatform).hasScratchSurface() && IGC_IS_FLAG_ENABLED(SeparateSpillPvtScratchSpace);
+    env.has_no_stateless_write = (annotations.m_executionEnivronment.StatelessWritesCount == 0);
+    env.has_stack_calls = annotations.m_executionEnivronment.HasStackCalls;
+    env.require_disable_eufusion = annotations.m_executionEnivronment.RequireDisableEUFusion;
+    env.inline_data_payload_size = annotations.m_threadPayload.PassInlineDataSize;
     env.offset_to_skip_per_thread_data_load = annotations.m_threadPayload.OffsetToSkipPerThreadDataLoad;;
-    env.offset_to_skip_set_ffid_gp = annotations.m_threadPayload.OffsetToSkipSetFFIDGP;;
-    env.required_sub_group_size = annotations.m_executionEnivronment.CompiledSubGroupsNumber;
+    env.offset_to_skip_set_ffid_gp = annotations.m_threadPayload.OffsetToSkipSetFFIDGP;
+
+    // extract required_sub_group_size from kernel attribute list
+    // it will be in the format of "intel_reqd_sub_group_size(16)"
+    const std::string pat = "intel_reqd_sub_group_size(";
+    const std::string& attrs = annotations.m_kernelAttributeInfo;
+    size_t p1 = attrs.find(pat);
+    if (p1 != std::string::npos) {
+        p1 += pat.size();
+        size_t p2 = attrs.find(')', p1);
+        IGC_ASSERT(p2 != std::string::npos && p1 < p2);
+        env.required_sub_group_size = std::stoul(attrs.substr(p1, p2 - p1));
+    }
+
     if(annotations.m_executionEnivronment.HasFixedWorkGroupSize)
     {
         env.required_work_group_size.push_back(annotations.m_executionEnivronment.FixedWorkgroupSize[0]);
@@ -785,4 +809,14 @@ void ZEBinaryBuilder::addKernelDebugEnv(const SOpenCLKernelInfo& annotations,
     // Now set the sip surface offset to 0 directly. Currently the surface offset
     // is computed locally when creating patch tokens.
     env.sip_surface_offset = 0;
+}
+
+void ZEBinaryBuilder::addKernelVISAAsm(const std::string& kernel,
+                                       const std::string& visaasm)
+{
+    IGC_ASSERT(!visaasm.empty());
+    mBuilder.addSectionVISAAsm(
+        kernel,
+        reinterpret_cast<const uint8_t*>(visaasm.data()),
+        visaasm.size());
 }

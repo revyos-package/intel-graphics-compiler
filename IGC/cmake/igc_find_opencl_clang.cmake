@@ -11,6 +11,10 @@
 #2. CCLANG_BUILD_PREBUILDS - use prebuilded opencl-clang toolchain
 #   CCLANG_BUILD_PREBUILDS_DIR - set path to prebuilt cclang folder
 #3. CCLANG_BUILD_INTREE_LLVM - use sources of opencl-clang toolchain
+#
+# If defined CCLANG_INSTALL_PREBUILDS_DIR, opencl-clang will be force
+# installed from the given location. BiF compilation still follows
+# scheme above
 
 if(NOT DEFINED COMMON_CLANG_LIBRARY_NAME)
   set(COMMON_CLANG_LIBRARY_NAME opencl-clang)
@@ -81,7 +85,11 @@ if(CCLANG_FROM_SYSTEM)
   find_library(SYSTEM_COMMON_CLANG ${COMMON_CLANG_LIBRARY_NAME})
 
   add_library(opencl-clang-lib SHARED IMPORTED GLOBAL)
-  set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${SYSTEM_COMMON_CLANG}")
+  if(DEFINED CCLANG_INSTALL_PREBUILDS_DIR)
+    set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${CCLANG_INSTALL_PREBUILDS_DIR}/${COMMON_CLANG_LIB_FULL_NAME}")
+  else()
+    set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${SYSTEM_COMMON_CLANG}")
+  endif()
   find_program(CLANG_GE7 clang-${LLVM_VERSION_MAJOR})
   if(CLANG_GE7)
     message(STATUS "[IGC] Found clang-${LLVM_VERSION_MAJOR} executable: ${CLANG_GE7}")
@@ -103,23 +111,37 @@ elseif(${CCLANG_BUILD_PREBUILDS})
   set(CLANG_TOOL_PATH "${CCLANG_BUILD_PREBUILDS_DIR}/clang${CMAKE_EXECUTABLE_SUFFIX}")
   set(LLVM_PACKAGE_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}${LLVM_VERSION_SUFFIX}")
 
-  # Get clang-tool version
-  execute_process(
-    COMMAND ${CLANG_TOOL_PATH} -v
-    ERROR_VARIABLE CLANG_TOOL_V_CALL)
-  string(REGEX MATCH "clang version ([0-9]*\\.[0-9]*\\.[0-9]*[a-zA-Z0-9]*)" CLANG_TOOL_VERSION "${CLANG_TOOL_V_CALL}")
-  set(CLANG_TOOL_VERSION "${CMAKE_MATCH_1}")
+  if(CMAKE_CROSSCOMPILING)
+    # In case of cross compilation we could not execute prebuilt opencl library,
+    # so we trust version number provided externally or assume it's the same as
+    # LLVM version
+    if(NOT DEFINED CLANG_TOOL_VERSION)
+      set(CLANG_TOOL_VERSION "${LLVM_PACKAGE_VERSION}")
+    endif()
+  else(CMAKE_CROSSCOMPILING)
+    # Get clang-tool version
+    execute_process(
+      COMMAND ${CLANG_TOOL_PATH} -v
+      ERROR_VARIABLE CLANG_TOOL_V_CALL)
+    string(REGEX MATCH "clang version ([0-9]*\\.[0-9]*\\.[0-9]*[a-zA-Z0-9]*)" CLANG_TOOL_VERSION "${CLANG_TOOL_V_CALL}")
+    set(CLANG_TOOL_VERSION "${CMAKE_MATCH_1}")
 
-  # Check if we parse clang tool version correctly
-  if(NOT CLANG_TOOL_VERSION)
-    message(FATAL_ERROR "[IGC] : Cannot read version of clang tool, please check the output of execution `clang -v` : ${CLANG_TOOL_V_CALL}")
-  endif()
+    # Check if we parse clang tool version correctly
+    if(NOT CLANG_TOOL_VERSION)
+      message(FATAL_ERROR "[IGC] : Cannot read version of clang tool, please check the output of execution `clang -v` : ${CLANG_TOOL_V_CALL}")
+    endif()
+  endif(CMAKE_CROSSCOMPILING)
 
   # Check if llvm version for IGC is newer or equal with the clang-tool version
   if(${LLVM_PACKAGE_VERSION} VERSION_GREATER ${CLANG_TOOL_VERSION} OR
      ${LLVM_PACKAGE_VERSION} EQUAL ${CLANG_TOOL_VERSION})
     add_library(opencl-clang-lib SHARED IMPORTED GLOBAL)
-    set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${CCLANG_BUILD_PREBUILDS_DIR}/${COMMON_CLANG_LIB_FULL_NAME}")
+
+    if(DEFINED CCLANG_INSTALL_PREBUILDS_DIR)
+      set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${CCLANG_INSTALL_PREBUILDS_DIR}/${COMMON_CLANG_LIB_FULL_NAME}")
+    else()
+      set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${CCLANG_BUILD_PREBUILDS_DIR}/${COMMON_CLANG_LIB_FULL_NAME}")
+    endif()
 
     add_executable(clang-tool IMPORTED GLOBAL)
     set_property(TARGET clang-tool PROPERTY "IMPORTED_LOCATION" "${CLANG_TOOL_PATH}")
@@ -132,8 +154,12 @@ elseif(${CCLANG_BUILD_PREBUILDS})
 #3. CCLANG_BUILD_INTREE_LLVM - use sources of opencl-clang toolchain
 elseif(${CCLANG_BUILD_INTREE_LLVM})
   message(STATUS "[IGC] : opencl-clang will be taken from sources")
-
-  add_library(opencl-clang-lib ALIAS ${COMMON_CLANG_LIBRARY_NAME})
+  if(DEFINED CCLANG_INSTALL_PREBUILDS_DIR)
+    add_library(opencl-clang-lib SHARED IMPORTED GLOBAL)
+    set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_LOCATION" "${CCLANG_INSTALL_PREBUILDS_DIR}/${COMMON_CLANG_LIB_FULL_NAME}")
+  else()
+    add_library(opencl-clang-lib ALIAS ${COMMON_CLANG_LIBRARY_NAME})
+  endif()
   add_executable(clang-tool ALIAS clang)
   get_target_property(CLANG_SOURCE_DIR clang SOURCE_DIR)
   set(opencl-header "${CLANG_SOURCE_DIR}/../../lib/Headers/opencl-c.h")

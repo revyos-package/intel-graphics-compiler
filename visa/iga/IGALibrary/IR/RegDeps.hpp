@@ -44,6 +44,9 @@ enum class DEP_PIPE
     INTEGER,
     LONG64,
     DPAS,
+    SEND_SLM,     // XeHPG LSC SLM message
+    SEND_UNKNOWN, // XeHPG LSC desc is indirect, not sure if it's SLM
+    MATH_INORDER // XeHPC
 };
 
 enum class DEP_CLASS
@@ -95,14 +98,15 @@ public:
                 uint32_t in_order_id,
                 uint32_t float_pipe_id,
                 uint32_t int_pipe_id,
-                uint32_t long_pipe_id
-        )
+                uint32_t long_pipe_id,
+                uint32_t math_pipe_id)
           : global(global_id),
             inOrder(in_order_id),
             floatPipe(float_pipe_id),
             intPipe(int_pipe_id),
-            longPipe(long_pipe_id)
-        {}
+            longPipe(long_pipe_id),
+            mathPipe(math_pipe_id)
+        { }
 
         // unique id for all instructions
         uint32_t global = 0;
@@ -114,6 +118,8 @@ public:
         uint32_t intPipe = 0;
         // id counter for Long pipe
         uint32_t longPipe = 0;
+        // id counter for in-order math pipe
+        uint32_t mathPipe = 0;
     };
 
 private:
@@ -189,8 +195,12 @@ private:
     void setInputsSrcDep();
 
     void setOutputsFlagDep();
-    void setOutputsDstcDep();
-    void setMathWAOutputsDstcDep();
+    void setOutputsDstDep();
+    // set the register footpring on full registers for all register
+    // the given dst has touched. For example, consider the entire r2 as
+    // its footpring for a dst register "r2.2:d"
+    // This is a helper setter for some Workarounds
+    void setOutputsDstDepFullGrf();
 
     typedef std::pair<uint32_t, uint32_t> RegRangeType;
     typedef std::vector<RegRangeType> RegRangeListType;
@@ -286,9 +296,12 @@ public:
     /// mathDstWA - this will return the DepSet with math's dst region, and force to occupy the
     /// entire registers no matter what the region and channel are. e.g. if dst is r1.3, it'll
     /// occupy the entire r1
+    /// @input setFlagDep - True if this is a full DepSet creation and would like to set the dep
+    ///                     for flag registers. False if the DepSet is an additional dependecny for
+    ///                     an instruction which already has DepSet created (e.g. for MathWA)
     /// This is the WA to fix the HW read suppression issue
-    DepSet* createMathDstWADepSet(const Instruction &i, const InstIDs& inst_id_counter,
-        SWSB_ENCODE_MODE enc_mode);
+    DepSet* createDstDepSetFullGrf(const Instruction &i, const InstIDs& inst_id_counter,
+        SWSB_ENCODE_MODE enc_mode, bool setFlagDep);
 
 
     // Register File Size Info

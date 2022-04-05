@@ -23,6 +23,7 @@ SPDX-License-Identifier: MIT
 class VISAKernel;
 class VISABuilder;
 class ModuleToVisaTransformInfo;
+struct ProgramInfo;
 
 namespace IGC {
   struct DebugEmitterOpts;
@@ -42,6 +43,9 @@ struct VisaMapping {
   struct Mapping {
     unsigned VisaIdx = 0;
     const Instruction *Inst = nullptr;
+    // Count of VISA instruction for this llvm Inst
+    unsigned VisaCount = 0;
+    bool IsDbgInst = false;
   };
   std::vector<Mapping> V2I;
 };
@@ -50,29 +54,12 @@ struct VisaMapping {
 
 //--------------------------------------------------------------------
 // Builds and holds the debug information for the current module
-class GenXDebugInfo : public ModulePass {
-
-  // NOTE: the term "program" is used to avoid a potential confusion
-  // since the term "kernel" may introduce some ambiguity.
-  // Here a "program" represents a kind of wrapper over a standalone vISA
-  // object (which currently is produced by function groups and
-  // visa-external functions) that finally gets compiled into a stand-alone
-  // gen entity (binary gen kernel) with some auxiliary information
-  struct ProgramInfo {
-    struct FunctionInfo {
-      const genx::di::VisaMapping &VisaMapping;
-      VISAKernel &CompiledKernel;
-      const Function &F;
-    };
-
-    const ModuleToVisaTransformInfo &MVTI;
-    std::vector<FunctionInfo> FIs;
-  };
-
-  std::vector<llvm::DISubprogram*> DISubprogramNodes;
+struct GenXDebugInfo : public ModulePass {
 
   using ElfBin = std::vector<char>;
   using DbgInfoStorage = std::unordered_map<const Function *, ElfBin>;
+
+private:
   DbgInfoStorage ElfOutputs;
 
   void cleanup();

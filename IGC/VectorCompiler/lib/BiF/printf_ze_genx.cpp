@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-#include <cm-cl/svm.h>
 #include <cm-cl/vector.h>
 #include <opencl_def.h>
 
@@ -29,9 +28,8 @@ printf_fmt_impl(vector<BufferElementTy, TransferDataSize> TransferData,
   if (TransferData[TransferDataLayout::ReturnValue])
     // Just skip.
     return TransferData;
-  uintptr_t CurAddress = getCurAddress(TransferData);
-  auto StrAddress =
-      castPointerToVector(reinterpret_cast<uintptr_t>(FormatString));
+  __global BufferElementTy *CurAddress = getCurAddress(TransferData);
+  auto StrAddress = castPointerToVector(FormatString);
   for (int Idx = 0; Idx != StringDWordSize; ++Idx)
     CurAddress = writeElementToBuffer(CurAddress, StrAddress[Idx]);
   setCurAddress(TransferData, CurAddress);
@@ -44,9 +42,8 @@ template <typename T>
 vector<BufferElementTy, TransferDataSize>
 printf_arg_str_impl(vector<BufferElementTy, TransferDataSize> TransferData,
                     T *String) {
-  return printf_arg_impl<StringDWordSize>(
-      TransferData, ArgKind::String,
-      castPointerToVector(reinterpret_cast<uintptr_t>(String)));
+  return printf_arg_impl<StringDWordSize>(TransferData, ArgKind::String,
+                                          castPointerToVector(String));
 }
 
 extern "C" cl_vector<BufferElementTy, TransferDataSize>
@@ -57,6 +54,12 @@ __vc_printf_init(cl_vector<int, ArgsInfoVector::Size> ArgsInfo) {
 extern "C" cl_vector<BufferElementTy, TransferDataSize>
 __vc_printf_fmt(cl_vector<BufferElementTy, TransferDataSize> TransferData,
                 __constant char *FormatString) {
+  return printf_fmt_impl(TransferData, FormatString).cl_vector();
+}
+
+extern "C" cl_vector<BufferElementTy, TransferDataSize> __vc_printf_fmt_global(
+    cl_vector<BufferElementTy, TransferDataSize> TransferData,
+    __global char *FormatString) {
   return printf_fmt_impl(TransferData, FormatString).cl_vector();
 }
 
@@ -77,6 +80,13 @@ __vc_printf_arg(cl_vector<BufferElementTy, TransferDataSize> TransferData,
 extern "C" cl_vector<BufferElementTy, TransferDataSize>
 __vc_printf_arg_str(cl_vector<BufferElementTy, TransferDataSize> TransferData,
                     __constant char *String) {
+  return printf_arg_str_impl(TransferData, String).cl_vector();
+}
+
+extern "C" cl_vector<BufferElementTy, TransferDataSize>
+__vc_printf_arg_str_global(
+    cl_vector<BufferElementTy, TransferDataSize> TransferData,
+    __global char *String) {
   return printf_arg_str_impl(TransferData, String).cl_vector();
 }
 

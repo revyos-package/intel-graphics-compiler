@@ -161,6 +161,7 @@ class G4_VarBase;
 
 class G4_SpillIntrinsic;
 class G4_FillIntrinsic;
+class G4_PseudoAddrMovIntrinsic;
 
 
 }
@@ -225,10 +226,23 @@ typedef enum  _SB_INST_PIPE
     PIPE_FLOAT = 2,
     PIPE_LONG = 3,
     PIPE_MATH = 4,
-    PIPE_DPAS = 5,
-    PIPE_SEND = 6
+    PIPE_DPAS = 6,
+    PIPE_SEND = 7,
 } SB_INST_PIPE;
 
+struct lsc_descriptor {
+    uint32_t opcode     : 6; // [5:0]
+    uint32_t reserved6  : 1; // [6]
+    uint32_t addr_size  : 2; // [8:7]
+    uint32_t data_size  : 3; // [11:9]
+    uint32_t data_vec   : 3; // [14:12]
+    uint32_t data_order : 1; // [15]
+    uint32_t reserved16 : 1; // [16]
+    uint32_t cache_opts : 3; // [19:17]
+    uint32_t rlen       : 5; // [24:20]
+    uint32_t mlen       : 5; // [29:25]
+    uint32_t addr_type  : 2; // [31:30]
+};
 
 typedef vISA::std_arena_based_allocator<vISA::G4_INST*> INST_LIST_NODE_ALLOCATOR;
 
@@ -272,6 +286,7 @@ public:
 class G4_InstMath;
 class G4_InstCF;
 class G4_InstIntrinsic;
+class G4_PseudoAddrMovIntrinsic;
 class G4_InstSend;
 class G4_InstBfn;
 class G4_InstDpas;
@@ -317,7 +332,8 @@ protected:
     // during optimization, an inst may become redundant and be marked dead
     unsigned short dead : 1;
     unsigned short evenlySplitInst : 1;
-    unsigned short createdPreRA : 1;  // for NoMaskWA
+    unsigned short skipPostRA : 1;  // for NoMaskWA; to be deleted
+    unsigned short doPostRA : 1;  // for NoMaskWA
     G4_ExecSize    execSize;
 
     BinInst *bin;
@@ -332,6 +348,7 @@ public:
     enum SWSBTokenType {
         TOKEN_NONE,
         SB_SET,
+        NoACCSBSet,
         AFTER_READ,
         AFTER_WRITE,
         READ_ALL,
@@ -389,6 +406,8 @@ public:
     void setSetToken(unsigned short token) {swsb.SBToken = token; swsb.tokenType = SB_SET;}
     unsigned short getSetToken() const { if (swsb.tokenType == SB_SET) return swsb.SBToken; else return -1; }
 
+    void setNoACCSBSet() { swsb.tokenType = NoACCSBSet;}
+    bool hasNoACCSBSet() { return swsb.tokenType == NoACCSBSet;}
 
     void setOperandTypeIndicated(bool indicated) { operandTypeIndicated = indicated; }
     void setIsClosestALUType(bool indicated) { isClosestALUType_ = indicated; }
@@ -482,6 +501,7 @@ public:
     G4_SpillIntrinsic* asSpillIntrinsic() const;
     bool isFillIntrinsic() const;
     G4_FillIntrinsic* asFillIntrinsic() const;
+    bool isPseudoAddrMovIntrinsic() const;
     bool isSplitIntrinsic() const;
     bool isCallerSave() const;
     bool isCallerRestore() const;
@@ -585,6 +605,12 @@ public:
         return (G4_InstIntrinsic*) this;
     }
 
+    G4_PseudoAddrMovIntrinsic* asPseudoAddrMovIntrinsic() const
+    {
+        MUST_BE_TRUE(isPseudoAddrMovIntrinsic(), "not a fill intrinsic");
+        return const_cast<G4_PseudoAddrMovIntrinsic*>(reinterpret_cast<const G4_PseudoAddrMovIntrinsic*>(this));
+    }
+
     const G4_InstSend* asSendInst() const
     {
         if (!isSend())
@@ -617,11 +643,9 @@ public:
     }
     bool isComprInvariantSrcRegion(G4_SrcRegRegion* src, int srcPos);
 
-    G4_Operand* getSrc(unsigned i) const
-    {
-        MUST_BE_TRUE(i < G4_MAX_SRCS, ERROR_INTERNAL_ARGUMENT);
-        return srcs[i];
-    }
+    G4_Operand* getOperand(Gen4_Operand_Number opnd_num);
+
+    G4_Operand* getSrc(unsigned i) const;
     void setSrc(G4_Operand* opnd, unsigned i);
     int getNumSrc() const;
     int getNumDst() const;
@@ -714,6 +738,7 @@ public:
     void emitDefUse(std::ostream& output) const;
     void emitInstIds(std::ostream& output) const;
     void print(std::ostream& OS) const;
+    void dump(std::ostream& OS) const;
     void dump() const;
     bool isValidSymbolOperand(bool &dst_valid, bool *srcs_valid) const;
     const char *getLabelStr() const;
@@ -805,13 +830,16 @@ public:
     static bool isSrcNum(Gen4_Operand_Number opndNum)
     {
         return opndNum == Opnd_src0 || opndNum == Opnd_src1 ||
-               opndNum == Opnd_src2 || opndNum == Opnd_src3;
+               opndNum == Opnd_src2 || opndNum == Opnd_src3 ||
+               opndNum == Opnd_src4 || opndNum == Opnd_src5 ||
+               opndNum == Opnd_src6 || opndNum == Opnd_src7;
+    }
+    static bool isInstrinsicOnlySrcNum(Gen4_Operand_Number opndNum)
+    {
+        return opndNum == Opnd_src4 || opndNum == Opnd_src5 ||
+            opndNum == Opnd_src6 || opndNum == Opnd_src7;
     }
     const G4_Operand* getOperand(Gen4_Operand_Number opnd_num) const;
-          G4_Operand* getOperand(Gen4_Operand_Number opnd_num)
-    {
-        return const_cast<G4_Operand*>(((const G4_INST *)this)->getOperand(opnd_num));
-    }
 
     /// Remove all definitons that contribute to this[opndNum] and remove all
     /// uses from their corresponding definitions. To maintain def-use's, this
@@ -1059,8 +1087,10 @@ public:
 
     // For NoMaskWA. Set in PreRA WA for all instructions. PostRA WA will
     // apply on new instructions created by RA only.
-    bool getCreatedPreRA() const { return createdPreRA; }
-    void setCreatedPreRA(bool V) { createdPreRA = V; }
+    bool getSkipPostRA() const { return skipPostRA; }
+    void setSkipPostRA(bool V) { skipPostRA = V; }
+    bool getNeedPostRA() const { return doPostRA; }
+    void setNeedPostRA(bool V) { doPostRA = V; }
 
     std::string getComments() const
     {
@@ -1090,7 +1120,7 @@ public:
 
     void inheritSWSBFrom(const G4_INST* inst);
 
-    const IR_Builder& getBuilder() { return builder; }
+    const IR_Builder& getBuilder() const { return builder; }
 
 private:
 
@@ -1181,6 +1211,7 @@ class G4_InstDpas : public G4_INST
         // Check if this is int dpas or half-float dpas
         bool isBF16() const { return Src1Precision == GenPrecision::BF16; }
         bool isFP16() const { return Src1Precision == GenPrecision::FP16; }
+        bool isTF32() const { return Src1Precision == GenPrecision::TF32; }
         bool isInt() const;
         bool is2xInt8() const; // true if it is 2xint8 dpas
 
@@ -1526,6 +1557,7 @@ enum class Intrinsic
     CalleeSave,
     CalleeRestore,
     FlagSpill,
+    PseudoAddrMov,
     NumIntrinsics
 };
 
@@ -1571,6 +1603,7 @@ static const IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] =
     {Intrinsic::CalleeSave,     "callee_save",  1,      0,      Phase::RA,              { 0, 0, 0, false, false } },
     {Intrinsic::CalleeRestore,  "callee_restore", 0,    1,      Phase::RA,              { 0, 0, 0, false, false } },
     {Intrinsic::FlagSpill,            "flagSpill",          0,      1,      Phase::RA,       { 0, 0, 0, false, false } },
+    {Intrinsic::PseudoAddrMov,            "pseudo_addr_mov",          1,      8,      Phase::Optimizer,       { 0, 0, 0, false, false } },
 };
 
 namespace vISA
@@ -1578,6 +1611,7 @@ namespace vISA
 class G4_InstIntrinsic : public G4_INST
 {
     const Intrinsic intrinsicId;
+    std::array<G4_Operand*, G4_MAX_INTRINSIC_SRCS> srcs;
 
     // these should be set by RA if intrinsic requires tmp GRF/addr/flag
     int tmpGRFStart;
@@ -1601,6 +1635,27 @@ public:
     {
 
     }
+
+    G4_InstIntrinsic(
+        const IR_Builder& builder,
+        G4_Predicate* prd,
+        Intrinsic intrinId,
+        G4_ExecSize execSize,
+        G4_DstRegRegion* d,
+        G4_Operand* s0,
+        G4_Operand* s1,
+        G4_Operand* s2,
+        G4_Operand* s3,
+        G4_Operand* s4,
+        G4_Operand* s5,
+        G4_Operand* s6,
+        G4_Operand* s7,
+        G4_InstOpts opt);
+
+    G4_Operand* getIntrinsicSrc(unsigned i) const;
+    G4_Operand* getOperand(Gen4_Operand_Number opnd_num) const;
+
+    void setIntrinsicSrc(G4_Operand* opnd, unsigned i);
 
     G4_INST* cloneInst() override;
 
@@ -1757,38 +1812,34 @@ typedef enum class AugmentationMasks
 namespace vISA
 {
 
-template <G4_Type T>
-unsigned int numEltPerGRF() {return getGRFSize() / TypeSize(T);}
-template unsigned int numEltPerGRF<Type_UD>();
-template unsigned int numEltPerGRF<Type_D>();
-template unsigned int numEltPerGRF<Type_UW>();
-template unsigned int numEltPerGRF<Type_W>();
-template unsigned int numEltPerGRF<Type_UB>();
-template unsigned int numEltPerGRF<Type_B>();
-template unsigned int numEltPerGRF<Type_F>();
-template unsigned int numEltPerGRF<Type_VF>();
-template unsigned int numEltPerGRF<Type_V>();
-template unsigned int numEltPerGRF<Type_DF>();
-template unsigned int numEltPerGRF<Type_BOOL>();
-template unsigned int numEltPerGRF<Type_UV>();
-template unsigned int numEltPerGRF<Type_Q>();
-template unsigned int numEltPerGRF<Type_UQ>();
-template unsigned int numEltPerGRF<Type_HF>();
-template unsigned int numEltPerGRF<Type_NF>();
-template unsigned int numEltPerGRF<Type_BF>();
-
-inline unsigned int numEltPerGRF(G4_Type t)
-{
-    return getGRFSize() / TypeSize(t);
-}
-
 class G4_Declare
 {
     friend class IR_Builder;
 
+    class ElemInfo {
+        G4_Type type;                  // element type
+        unsigned numElements;          // total elements
+        unsigned short numRows;
+        unsigned short numElemsPerRow; // number of elements per row
+    public:
+        ElemInfo() = delete;
+        ElemInfo(G4_Type t, unsigned n, const IR_Builder& irb)
+          : type(t) {
+            reset(n, irb);
+        }
+        G4_Type getType() const { return type; }
+        unsigned short getElemSize() const { return TypeSize(type); }
+        unsigned short getNumElems() const { return numElements; }
+        unsigned short getNumRows() const { return numRows; }
+        unsigned short getNumElemsPerRow() const { return numElemsPerRow; }
+        unsigned getByteSize() const { return numElements * getElemSize(); }
+        void reset(unsigned numElems, const IR_Builder& irb);
+    };
+
+    const IR_Builder& irb;
     const char*        name;        // Var_Name
     G4_RegFileKind     regFile;     // from which reg file
-    G4_Type            elemType;    // element type
+    ElemInfo           elemInfo;
 
     G4_RegVar*        regVar;        // corresponding reg var
 
@@ -1802,9 +1853,10 @@ class G4_Declare
 
     uint16_t doNotSpill : 1;    // indicates that this declare should never be spilled
 
-    uint16_t liveIn : 1;   // indicate if this varaible has "Input" or "Input_Output" attribute
-    uint16_t liveOut : 1;  // indicate if this varaible has "Output" or "Input_Output" attribute
-    uint16_t payloadLiveOut : 1;  // indicate if this varaible has "Output" attribute for the payload section
+    uint16_t builtin : 1;  // indicate if this variable is a builtin
+    uint16_t liveIn : 1;   // indicate if this variable has "Input" or "Input_Output" attribute
+    uint16_t liveOut : 1;  // indicate if this variable has "Output" or "Input_Output" attribute
+    uint16_t payloadLiveOut : 1;  // indicate if this variable has "Output" attribute for the payload section
 
     // This is an optimization *hint* to indicate if optimizer should skip
     // widening this variable or not (e.g. byte to word).
@@ -1815,17 +1867,17 @@ class G4_Declare
     uint16_t isPartialDcl : 1;
     uint16_t refInSend : 1;
     uint16_t PreDefinedVar : 1;  // indicate if this dcl is created from preDefinedVars.
+    uint16_t addrSpillFill : 1;
 
     unsigned declId;     // global decl id for this builder
 
-    uint32_t numElements;
     unsigned numFlagElements;
 
     // byte offset of this declare from the base declare.  For top-level declares this value is 0
     int offsetFromBase;
 
     // if set to nonzero, indicates the declare is only used by subroutine "scopeID".
-    // it is used to prevent a subroutin-local declare from escaping its subroutine when doing liveness
+    // it is used to prevent a subroutine-local declare from escaping its subroutine when doing liveness
     unsigned scopeID;
 
     // For GRFs, store byte offset of allocated GRF
@@ -1835,8 +1887,6 @@ class G4_Declare
     // ToDo: they should be moved out of G4_Declare and stored as maps in RA/spill
     G4_Declare* spillDCL;  // if an addr/flag var is spilled, SpillDCL is the location (GRF) holding spilled value
 
-    G4_Declare* addrTakenSpillFillDcl; // dcl to use for address taken spill/fill temp
-
     // this should only be called by builder
     void setNumberFlagElements(uint8_t numEl)
     {
@@ -1845,14 +1895,15 @@ class G4_Declare
     }
 
 public:
-    G4_Declare(const char*    n,
+    G4_Declare(const IR_Builder& builder,
+               const char*    n,
                G4_RegFileKind k,
                uint32_t numElems,
                G4_Type        ty,
                std::vector<G4_Declare*>& dcllist) :
-      name(n), regFile(k), elemType(ty), addressed(false), liveIn(false),
-      liveOut(false), payloadLiveOut(false), noWidening(false), isSplittedDcl(false), isPartialDcl(false),
-      refInSend(false), PreDefinedVar(false), numElements(numElems), offsetFromBase(-1)
+      irb(builder), name(n), regFile(k), elemInfo(ty, numElems, builder), addressed(false), builtin(false),
+      liveIn(false), liveOut(false), payloadLiveOut(false), noWidening(false), isSplittedDcl(false),
+      isPartialDcl(false), refInSend(false), PreDefinedVar(false), offsetFromBase(-1)
     {
         //
         // set the rest values to default uninitialized values
@@ -1875,12 +1926,11 @@ public:
         spillFlag = false;
         spillDCL = NULL;
 
-        addrTakenSpillFillDcl = NULL;
-
         startID = 0;
 
         doNotSpill = false;
         capableOfReuse = false;
+        addrSpillFill = false;
 
         scopeID = 0;
 
@@ -1894,6 +1944,8 @@ public:
     void setGRFBaseOffset(unsigned int offset) { GRFBaseOffset = offset; }
     unsigned int getGRFBaseOffset() const { return GRFBaseOffset; }
 
+    void setBuiltin() { builtin = true; }
+    bool isBuiltin() const { return builtin; }
     void setLiveIn() { liveIn = true; }
     bool isLiveIn() const { return liveIn; }
     void setLiveOut() { liveOut = true; }
@@ -1921,23 +1973,11 @@ public:
         name = newName;
     }
 
-    unsigned int getByteSize() const { return numElements * getElemSize(); }
+    unsigned int getByteSize() const { return elemInfo.getByteSize(); }
 
     unsigned int getWordSize() const {return (getByteSize() + 1)/2;}
 
-    void resizeNumRows(unsigned int numrows)
-    {
-        int byteSize = numrows * numEltPerGRF<Type_UB>();
-        setTotalElems(byteSize / getElemSize());
-    }
-
-    void setAddrTakenSpillFill(G4_Declare* dcl)
-    {
-        addrTakenSpillFillDcl = dcl;
-    }
-
-    const G4_Declare* getAddrTakenSpillFill() const { return addrTakenSpillFillDcl; }
-          G4_Declare* getAddrTakenSpillFill()       { return addrTakenSpillFillDcl; }
+    void resizeNumRows(unsigned int numrows);
 
     // declare this to be aliased to dcl+offset
     // This is an error if dcl+offset is not aligned to the type of this dcl
@@ -1986,8 +2026,7 @@ public:
     {
         // we only consider subalign here
         unsigned byteAlign = getSubRegAlign() * TypeSize(Type_UW);
-        return byteAlign < TypeSize(elemType) ?
-            TypeSize(elemType) : byteAlign;
+        return byteAlign < getElemSize() ? getElemSize() : byteAlign;
     }
 
     void setRegFile(G4_RegFileKind rfile) { regFile = rfile; }
@@ -2036,28 +2075,19 @@ public:
     G4_RegFileKind getRegFile() const {return regFile;}
 
     // returns number of elements per row
-    unsigned short getNumElems() const
-    {
-        return getNumRows() > 1 ? numEltPerGRF<Type_UB>() / getElemSize() : numElements;
-    }
-    unsigned short getNumRows() const
-    {
-        return (getByteSize() + (numEltPerGRF<Type_UB>() - 1))/numEltPerGRF<Type_UB>();
-    }
-    unsigned short getTotalElems() const
-    {
-        return (unsigned short)numElements;
-    }
+    unsigned short getNumElems() const { return elemInfo.getNumElemsPerRow(); }
+    unsigned short getNumRows() const { return elemInfo.getNumRows(); }
+    unsigned short getTotalElems() const { return elemInfo.getNumElems(); }
 
-    void setTotalElems(uint32_t numElems) { numElements = numElems; }
+    void setTotalElems(uint32_t numElems) { elemInfo.reset(numElems, irb); }
     unsigned short getNumberFlagElements() const
     {
         assert(regFile == G4_FLAG && "should only be called for flag vars");
         return numFlagElements;
     }
 
-    G4_Type          getElemType() const {return elemType;}
-    uint16_t         getElemSize() const {return TypeSize(elemType);}
+    G4_Type          getElemType() const {return elemInfo.getType();}
+    uint16_t         getElemSize() const {return elemInfo.getElemSize();}
     const G4_RegVar *getRegVar() const {return regVar;}
           G4_RegVar *getRegVar()       {return regVar;}
 
@@ -2078,6 +2108,7 @@ public:
     const G4_Declare* getSpilledDeclare() const {return spillDCL;}
           G4_Declare* getSpilledDeclare()  {return spillDCL;}
 
+    void setDeclId(unsigned id) { declId = id; }
     unsigned getDeclId() const { return declId; }
 
     void setIsSplittedDcl(bool b) { isSplittedDcl = b; }
@@ -2095,7 +2126,10 @@ public:
     void setDoNotSpill()      { doNotSpill = true; }
     bool isDoNotSpill() const { return doNotSpill; }
 
-    bool isMsgDesc() const { return regFile == G4_ADDRESS && elemType == Type_UD; }
+    void setAddrSpillFill()      { addrSpillFill = true; }
+    bool isAddrSpillFill() const { return addrSpillFill; }
+
+    bool isMsgDesc() const { return regFile == G4_ADDRESS && elemInfo.getType() == Type_UD; }
 
     void setCapableOfReuse()       { capableOfReuse = true; }
     bool getCapableOfReuse() const { return capableOfReuse; }
@@ -2139,6 +2173,7 @@ class G4_Operand
     friend class G4_InstSend;
     friend class G4_FillIntrinsic;
     friend class G4_SpillIntrinsic;
+    friend class G4_PseudoMovInstrinsic;
     friend class G4_InstDpas;
 
 public:
@@ -2217,6 +2252,7 @@ public:
 
     const G4_Declare *getTopDcl() const { return top_dcl; }
           G4_Declare* getTopDcl() { return top_dcl; }
+    void setTopDcl(G4_Declare* dcl) { top_dcl = dcl; }
 
     const G4_VarBase *getBase() const { return base; }
           G4_VarBase *getBase() { return base; }
@@ -2246,6 +2282,7 @@ public:
     bool isTDRReg() const;
     bool isA0() const;
     bool isAddress() const;
+    bool isScalarAddr() const;
 
     const G4_AddrExp* asAddrExp() const
     {
@@ -2354,11 +2391,7 @@ public:
 
     bool isScalarSrc() const;
 
-    bool crossGRF()
-    {
-        return getRightBound() / numEltPerGRF<Type_UB>() !=
-               getLeftBound() / numEltPerGRF<Type_UB>();
-    }
+    bool crossGRF(const IR_Builder& builder);
 
     unsigned getLeftBound()
     {
@@ -2395,7 +2428,7 @@ public:
             // computeRightBound also computes bitVec
             inst->computeRightBound(this);
         }
-        if (getGRFSize() == 32)
+        if (::getGRFSize() == 32)
         {
             assert(bitVec[1] == 0 && "upper bits should be 0");
         }
@@ -2526,7 +2559,7 @@ public:
     bool isRegAllocPartaker() const;
 
     bool noScoreBoard() const;
-
+    bool isScalarAddr() const;
     G4_Areg* getAreg() const;
 
     virtual unsigned short ExRegNum(bool &valid)
@@ -2588,6 +2621,8 @@ public:
         {
             case AREG_F0:
             case AREG_F1:
+            case AREG_F2:
+            case AREG_F3:
                 return true;
             default:
                 return false;
@@ -2653,6 +2688,10 @@ public:
             return 0;
         case AREG_F1:
             return 1;
+        case AREG_F2:
+            return 2;
+        case AREG_F3:
+            return 3;
         default:
             assert(false && "should only be called on flag ARF");
             return -1;
@@ -2851,9 +2890,10 @@ namespace vISA
         bool        isRegAllocPartaker() const { return id != UNDEFINED_VAL; }
         unsigned    getRegAllocPartaker() const { return id;  }
         bool        isAddress()  const { return decl->getRegFile() == G4_ADDRESS; }
+        bool        isScalarAddr()  const { return decl->getRegFile() == G4_SCALAR; }
         const G4_VarBase* getPhyReg() const { return reg.phyReg; }
               G4_VarBase* getPhyReg()       { return reg.phyReg; }
-        unsigned    getByteAddr() const;
+        unsigned    getByteAddr(const IR_Builder& builder) const;
         unsigned    getPhyRegOff() const { return reg.subRegOff; }
         void        setPhyReg(G4_VarBase* pr, unsigned off)
         {
@@ -3006,7 +3046,9 @@ namespace vISA
         const short    subRegOff;    // sub reg offset related to the regVar in "base"
         short          immAddrOff;    // imm addr offset
 
-        G4_SrcRegRegion(G4_SrcModifier m,
+        G4_SrcRegRegion(
+            const IR_Builder& builder,
+            G4_SrcModifier m,
             G4_RegAccess   a,
             G4_VarBase*    b,
             short roff,
@@ -3021,7 +3063,7 @@ namespace vISA
             swizzle[0] = '\0';
             accRegSel = regSel;
 
-            computeLeftBound();
+            computeLeftBound(builder);
             right_bound = 0;
         }
 
@@ -3050,7 +3092,7 @@ namespace vISA
             return true;
         }
 
-        void computeLeftBound();
+        void computeLeftBound(const IR_Builder& builder);
         short getRegOff() const { return regOff; }
         short getSubRegOff() const { return subRegOff; }
 
@@ -3089,20 +3131,21 @@ namespace vISA
         bool isWithSwizzle() const {return (swizzle[0] != '\0');}
         bool isScalar() const;
         bool isAddress() const {return base->isAddress();}
+        bool isScalarAddr() const { return base->isScalarAddr(); }
 
         unsigned short             ExRegNum(bool&) const;
         unsigned short             ExSubRegNum(bool&);
         unsigned short             ExIndSubRegNum(bool&);
         short                      ExIndImmVal(void);
 
-        void                       computePReg();
+        void                       computePReg(const IR_Builder& builder);
 
         bool isIndirect() const { return acc != Direct; }
 
         unsigned computeRightBound(uint8_t exec_size) override;
         G4_CmpRelation compareOperand(G4_Operand *opnd) override;
 
-        void setType(G4_Type ty)
+        void setType(const IR_Builder& builder, G4_Type ty)
         {
             // FIXME: we should forbid setType() where ty has a different size than old type
             bool recomputeLeftBound = false;
@@ -3117,17 +3160,17 @@ namespace vISA
 
             if (recomputeLeftBound)
             {
-                computeLeftBound();
+                computeLeftBound(builder);
             }
         }
 
-        void setRegion(const RegionDesc* rd, bool isInvariant = false)
+        void setRegion(const IR_Builder& builder, const RegionDesc* rd, bool isInvariant = false)
         {
             if (!isInvariant && !desc->isEqual(rd))
             {
                 unsetRightBound();
                 desc = rd;
-                computeLeftBound();
+                computeLeftBound(builder);
             }
             else
             {
@@ -3138,13 +3181,13 @@ namespace vISA
         bool isNativeType() const;
         bool isNativePackedRowRegion() const;
         bool isNativePackedRegion() const;
-        bool evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff, bool &vertCrossGRF, bool &contRegion, uint8_t &eleInFirstGRF);
-        bool evenlySplitCrossGRF(uint8_t execSize);
-        bool coverTwoGRF();
-        bool checkGRFAlign();
-        bool hasFixedSubregOffset(uint32_t& offset);
+        bool evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize, bool &sameSubRegOff, bool &vertCrossGRF, bool &contRegion, uint8_t &eleInFirstGRF);
+        bool evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize);
+        bool coverTwoGRF(const IR_Builder& builder);
+        bool checkGRFAlign(const IR_Builder& builder);
+        bool hasFixedSubregOffset(const IR_Builder& builder, uint32_t& offset);
         bool isNativePackedSrcRegion();
-        uint8_t getMaxExecSize(int pos, uint8_t maxExSize, bool allowCrossGRF, uint16_t &vs, uint16_t &wd, bool &twoGRFsrc);
+        uint8_t getMaxExecSize(const IR_Builder& builder, int pos, uint8_t maxExSize, bool allowCrossGRF, uint16_t &vs, uint16_t &wd, bool &twoGRFsrc);
 
         bool isSpilled() const
         {
@@ -3193,7 +3236,9 @@ class G4_DstRegRegion final : public G4_Operand
     short          immAddrOff;    // imm addr offset for indirect dst
     unsigned short horzStride;    // <DstRegion> has only horzStride
 
-    G4_DstRegRegion(G4_RegAccess a,
+    G4_DstRegRegion(
+        const IR_Builder& builder,
+        G4_RegAccess a,
         G4_VarBase* b,
         short roff,
         short sroff,
@@ -3209,7 +3254,7 @@ class G4_DstRegRegion final : public G4_Operand
         regOff = (roff == ((short)UNDEFINED_SHORT)) ? 0 : roff;
         subRegOff = sroff;
 
-        computeLeftBound();
+        computeLeftBound(builder);
         right_bound = 0;
     }
 
@@ -3218,29 +3263,15 @@ class G4_DstRegRegion final : public G4_Operand
 
 public:
     G4_DstRegRegion(G4_DstRegRegion& rgn);
-    G4_DstRegRegion(G4_DstRegRegion& rgn, G4_VarBase* new_base);
+    G4_DstRegRegion(const IR_Builder& builder, G4_DstRegRegion& rgn, G4_VarBase* new_base);
 
-    void computeLeftBound();
+    void computeLeftBound(const IR_Builder& builder);
 
     G4_RegAccess   getRegAccess() const { return acc; }
     short          getRegOff() const { return regOff; }
     short          getSubRegOff() const { return subRegOff; }
 
-    bool isCrossGRFDst()
-    {
-        if (isNullReg())
-        {
-            return inst != NULL &&
-                (unsigned)inst->getExecSize() * getTypeSize() * horzStride > numEltPerGRF<Type_UB>();
-        }
-        if (isRightBoundSet() == false)
-        {
-            // computeRightBound populates crossGRFDst field
-            getInst()->computeRightBound(this);
-        }
-
-        return (left_bound / numEltPerGRF<Type_UB>()) != right_bound / numEltPerGRF<Type_UB>();
-    }
+    bool isCrossGRFDst(const IR_Builder& builder);
     unsigned short getHorzStride() const { return horzStride; }
     ChannelEnable  getWriteMask() const { return writeMask; }
     void           setWriteMask(ChannelEnable channels);
@@ -3269,16 +3300,17 @@ public:
     bool isA0()      const { return base->isA0(); }
     bool isGreg()    const { return base->isGreg(); }
     bool isAddress() const { return base->isAddress(); }
+    bool isScalarAddr() const { return base->isScalarAddr(); }
 
     unsigned short             ExRegNum(bool&);
     unsigned short             ExSubRegNum(bool&);
     unsigned short             ExIndSubRegNum(bool&);
     short                      ExIndImmVal(void);
-    void                       computePReg();
+    void                       computePReg(const IR_Builder& builder);
 
     bool isIndirect() const { return acc != Direct; }
 
-    void setType(G4_Type ty)
+    void setType(const IR_Builder& builder, G4_Type ty)
     {
         bool recomputeLeftBound = false;
 
@@ -3292,7 +3324,7 @@ public:
 
         if (recomputeLeftBound)
         {
-            computeLeftBound();
+            computeLeftBound(builder);
 
             if (getInst())
             {
@@ -3317,13 +3349,13 @@ public:
     bool isNativeType() const;
     bool isNativePackedRowRegion() const;
     bool isNativePackedRegion() const;
-    bool coverGRF(uint16_t numGRF, uint8_t execSize);
-    bool goodOneGRFDst(uint8_t execSize);
-    bool goodtwoGRFDst(uint8_t execSize);
-    bool evenlySplitCrossGRF(uint8_t execSize);
-    bool checkGRFAlign() const;
-    bool hasFixedSubregOffset(uint32_t& offset);
-    uint8_t getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFsrc);
+    bool coverGRF(const IR_Builder& builder, uint16_t numGRF, uint8_t execSize);
+    bool goodOneGRFDst(const IR_Builder& builder, uint8_t execSize);
+    bool goodtwoGRFDst(const IR_Builder& builder, uint8_t execSize);
+    bool evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize);
+    bool checkGRFAlign(const IR_Builder& builder) const;
+    bool hasFixedSubregOffset(const IR_Builder& builder, uint32_t& offset);
+    uint8_t getMaxExecSize(const IR_Builder& builder, int pos, uint8_t maxExSize, bool twoGRFsrc);
     bool isSpilled() const
     {
         if (getBase() && getBase()->isRegVar())
@@ -3569,22 +3601,29 @@ public:
 
 class G4_AddrExp final : public G4_Operand
 {
-    G4_RegVar* const m_addressedReg;
+    G4_RegVar* m_addressedReg;
     int m_offset;  //current implementation: byte offset
+    G4_AddrExp* addrTakenSpillFill; // dcl to use for address taken spill/fill temp
 
 public:
     G4_AddrExp(G4_RegVar *reg, int offset, G4_Type ty)
-      : G4_Operand(G4_Operand::addrExp, ty), m_addressedReg(reg),
+      : G4_Operand(G4_Operand::addrExp, ty), m_addressedReg(reg), addrTakenSpillFill(nullptr),
         m_offset(offset) {}
 
     void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
 
     const G4_RegVar* getRegVar() const { return m_addressedReg; }
-          G4_RegVar* getRegVar()       { return m_addressedReg; }
+          G4_RegVar* getRegVar() { return m_addressedReg; }
+    void setRegVar(G4_RegVar* var) { m_addressedReg = var; }
     int getOffset() const { return m_offset; }
     void setOffset(int tOffset) { m_offset = tOffset; }
+    G4_AddrExp* getAddrTakenSpillFill() { return addrTakenSpillFill; }
+    void setAddrTakenSpillFill(G4_AddrExp* addrExp)
+    {
+        addrTakenSpillFill = addrExp;
+    }
 
-    int eval();
+    int eval(const IR_Builder& builder);
     bool isRegAllocPartaker() const { return m_addressedReg->isRegAllocPartaker(); }
 
     void emit(std::ostream& output, bool symbolreg = false);
@@ -3664,6 +3703,10 @@ inline bool G4_Operand::isA0() const
 inline bool G4_Operand::isAddress() const
 {
     return isRegRegion() && const_cast<G4_VarBase *>(getBase())->isAddress();
+}
+inline bool G4_Operand::isScalarAddr() const
+{
+    return isRegRegion() && const_cast<G4_VarBase*>(getBase())->isScalarAddr();
 }
 
 // Inlined members of G4_VarBase
@@ -3762,6 +3805,12 @@ inline bool G4_VarBase::isAddress() const
     if (isRegVar())
         return asRegVar()->isAddress();
     return isPhyAreg() && asAreg()->isA0();
+}
+inline bool G4_VarBase::isScalarAddr() const
+{
+    if (isRegVar())
+        return asRegVar()->isScalarAddr();
+    return false;
 }
 inline bool G4_VarBase::isSpReg() const
 {
@@ -3926,6 +3975,8 @@ public:
     G4_Areg* getF1Reg() { return ARF_Table[AREG_F1]; }
     G4_Areg* getTDRReg() { return ARF_Table[AREG_TDR0]; }
     G4_Areg* getSPReg() { return ARF_Table[AREG_SP]; }
+    G4_Areg* getF2Reg() { return ARF_Table[AREG_F2]; }
+    G4_Areg* getF3Reg() { return ARF_Table[AREG_F3]; }
 
     // map int to flag areg
     G4_Areg* getFlagAreg(int flagNum)
@@ -3936,12 +3987,36 @@ public:
                 return getF0Reg();
             case 1:
                 return getF1Reg();
+            case 2:
+                return getF2Reg();
+            case 3:
+                return getF3Reg();
             default:
                 assert(false && "unexpected flag register value");
                 return nullptr;
         }
     }
 };
+
+inline G4_Operand* G4_INST::getOperand(Gen4_Operand_Number opnd_num)
+{
+    if (isPseudoAddrMovIntrinsic() && isSrcNum(opnd_num))
+        return asIntrinsicInst()->getOperand(opnd_num);
+    if (isInstrinsicOnlySrcNum(opnd_num))
+        return NULL;
+    return const_cast<G4_Operand*>(((const G4_INST*)this)->getOperand(opnd_num));
+}
+
+inline G4_Operand* G4_INST::getSrc(unsigned i) const
+{
+    if (isPseudoAddrMovIntrinsic())
+        return asIntrinsicInst()->getIntrinsicSrc(i);
+    else
+    {
+        MUST_BE_TRUE(i < G4_MAX_SRCS, ERROR_INTERNAL_ARGUMENT);
+        return srcs[i];
+    }
+}
 
 inline int G4_INST::getNumSrc() const
 {
@@ -3990,6 +4065,11 @@ inline G4_FillIntrinsic* G4_INST::asFillIntrinsic() const
 {
     MUST_BE_TRUE(isFillIntrinsic(), "not a fill intrinsic");
     return const_cast<G4_FillIntrinsic*>(reinterpret_cast<const G4_FillIntrinsic*>(this));
+}
+
+inline bool G4_INST::isPseudoAddrMovIntrinsic() const
+{
+    return isIntrinsic() && asIntrinsicInst()->getIntrinsicId() == Intrinsic::PseudoAddrMov;
 }
 
 inline bool G4_INST::isSplitIntrinsic() const
@@ -4061,22 +4141,6 @@ inline bool G4_InstCF::isIndirectCall() const
     return op == G4_pseudo_fcall && !getSrc(0)->isLabel();
 }
 
-static void computeSpillFillOperandBound(G4_Operand* opnd, unsigned int LB, int numReg)
-{
-    if (numReg == 0)
-    {
-        return;
-    }
-
-    // read/write in units of GRF.
-    unsigned RB = std::min(opnd->getTopDcl()->getByteSize(),
-        LB + numReg * numEltPerGRF<Type_UB>()) - 1;
-
-    unsigned NBytes = RB - LB + 1;
-    opnd->setBitVecFromSize(NBytes);
-    opnd->setRightBound(RB);
-}
-
 class G4_SpillIntrinsic : public G4_InstIntrinsic
 {
 public:
@@ -4101,7 +4165,7 @@ public:
 
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
-    uint32_t getOffsetInBytes() const { return offset * getGRFSize(); }
+    uint32_t getOffsetInBytes() const;
     G4_Declare* getFP() const { return fp; }
     G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
     G4_SrcRegRegion* getPayload() const { return getSrc(1)->asSrcRegRegion(); }
@@ -4112,24 +4176,32 @@ public:
 
     bool isOffsetValid() const { return offset != InvalidOffset; }
 
-    void computeRightBound(G4_Operand* opnd)
-    {
-        uint16_t numReg = 0;
-        if (opnd == getSrc(1))
-        {
-            numReg = asSpillIntrinsic()->getNumRows();
-        }
-        else if (opnd->isSrcRegRegion() && opnd == getSrc(0))
-        {
-            numReg = 1;
-        }
-        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg);
-    }
+    void computeRightBound(G4_Operand* opnd);
 
 private:
     G4_Declare* fp = nullptr;
     uint32_t numRows = 0;
     uint32_t offset = InvalidOffset;
+};
+
+class G4_PseudoAddrMovIntrinsic : public G4_InstIntrinsic
+{
+public:
+    G4_PseudoAddrMovIntrinsic(
+        const IR_Builder& builder,
+        Intrinsic intrinId,
+        G4_DstRegRegion* d,
+        G4_Operand* s0,
+        G4_Operand* s1,
+        G4_Operand* s2,
+        G4_Operand* s3,
+        G4_Operand* s4,
+        G4_Operand* s5,
+        G4_Operand* s6,
+        G4_Operand* s7) :
+        G4_InstIntrinsic(builder, nullptr, intrinId, G4_ExecSize(1), d, s0, s1, s2, s3, s4, s5, s6, s7, InstOpt_NoOpt)
+    {
+    }
 };
 
 class G4_FillIntrinsic : public G4_InstIntrinsic
@@ -4156,7 +4228,7 @@ public:
 
     uint32_t getNumRows() const { return numRows; }
     uint32_t getOffset() const { return offset; }
-    uint32_t getOffsetInBytes() const { return offset * getGRFSize(); }
+    uint32_t getOffsetInBytes() const;
     G4_Declare* getFP() const { return fp; }
     G4_SrcRegRegion* getHeader() const { return getSrc(0)->asSrcRegRegion(); }
 
@@ -4166,20 +4238,7 @@ public:
 
     bool isOffsetValid() { return offset != InvalidOffset; }
 
-    void computeRightBound(G4_Operand* opnd)
-    {
-        uint16_t numReg = 0;
-        if (opnd == getDst())
-        {
-            numReg = asFillIntrinsic()->getNumRows();
-        }
-        else if (opnd->isSrcRegRegion() &&
-            (opnd == getSrc(0) || opnd == getSrc(1)))
-        {
-            numReg = 1;
-        }
-        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg);
-    }
+    void computeRightBound(G4_Operand* opnd);
 
 private:
     G4_Declare* fp = nullptr;

@@ -38,8 +38,8 @@ static const std::vector<ImplicitArg> IMPLICIT_ARGS = {
 
     ImplicitArg(ImplicitArg::CONSTANT_BASE, "constBase", ImplicitArg::CONSTPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true),
     ImplicitArg(ImplicitArg::GLOBAL_BASE, "globalBase", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true),
-    ImplicitArg(ImplicitArg::PRIVATE_BASE, "privateBase", ImplicitArg::PRIVATEPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true),
-    ImplicitArg(ImplicitArg::PRINTF_BUFFER, "printfBuffer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true),
+    ImplicitArg(ImplicitArg::PRIVATE_BASE, "privateBase", ImplicitArg::PRIVATEPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true, GenISAIntrinsic::GenISA_getPrivateBase),
+    ImplicitArg(ImplicitArg::PRINTF_BUFFER, "printfBuffer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true, GenISAIntrinsic::GenISA_getPrintfBuffer),
 
     ImplicitArg(ImplicitArg::BUFFER_OFFSET, "bufferOffset", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_DWORD, true),
 
@@ -84,12 +84,21 @@ static const std::vector<ImplicitArg> IMPLICIT_ARGS = {
     ImplicitArg(ImplicitArg::LOCAL_MEMORY_STATELESS_WINDOW_SIZE, "localMemStatelessWindowSize", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_DWORD, true),
     ImplicitArg(ImplicitArg::PRIVATE_MEMORY_STATELESS_SIZE, "PrivateMemStatelessSize", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_DWORD, true),
 
-    ImplicitArg(ImplicitArg::STAGE_IN_GRID_ORIGIN, "stageInGridOrigin", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 3, ImplicitArg::ALIGN_GRF, true),
-    ImplicitArg(ImplicitArg::STAGE_IN_GRID_SIZE, "stageInGridSize", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 3, ImplicitArg::ALIGN_GRF, true),
+    ImplicitArg(ImplicitArg::STAGE_IN_GRID_ORIGIN, "stageInGridOrigin", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 3, ImplicitArg::ALIGN_GRF, true, GenISAIntrinsic::GenISA_getStageInGridOrigin),
+    ImplicitArg(ImplicitArg::STAGE_IN_GRID_SIZE, "stageInGridSize", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 3, ImplicitArg::ALIGN_GRF, true, GenISAIntrinsic::GenISA_getStageInGridSize),
 
-    ImplicitArg(ImplicitArg::SYNC_BUFFER, "syncBuffer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, false),
+    ImplicitArg(ImplicitArg::SYNC_BUFFER, "syncBuffer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, false, GenISAIntrinsic::GenISA_getSyncBuffer),
+
+    // raytracing
+    ImplicitArg(ImplicitArg::RT_GLOBAL_BUFFER_POINTER, "globalPointer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_GRF, false),
+    ImplicitArg(ImplicitArg::RT_LOCAL_BUFFER_POINTER, "localPointer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_QWORD, false),
+    ImplicitArg(ImplicitArg::RT_INLINED_DATA, "inlinedData", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 2, ImplicitArg::ALIGN_GRF, false),
+    ImplicitArg(ImplicitArg::RT_STACK_ID, "stackID", ImplicitArg::SHORT, WIAnalysis::RANDOM, 16, ImplicitArg::ALIGN_GRF, false),
 
     ImplicitArg(ImplicitArg::BINDLESS_OFFSET, "bindlessOffset", ImplicitArg::INT, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_DWORD, true),
+
+    ImplicitArg(ImplicitArg::IMPLICIT_ARG_BUFFER_PTR, "implicitArgBuffer", ImplicitArg::GLOBALPTR, WIAnalysis::UNIFORM_GLOBAL, 1, ImplicitArg::ALIGN_PTR, true),
+
 };
 
 ImplicitArg::ImplicitArg(
@@ -480,7 +489,7 @@ void ImplicitArgs::addBufferOffsetArgs(llvm::Function& F, const IGCMD::MetaDataU
 
     IGC_ASSERT(modMD->FuncMD.find(&F) != modMD->FuncMD.end());
 
-    // StatelessToStatefull optimization is not applied on non-kernel functions.
+    // StatelessToStateful optimization is not applied on non-kernel functions.
     if (!isEntryFunc(pMdUtils, &F))
         return;
 
@@ -527,7 +536,7 @@ void ImplicitArgs::addBindlessOffsetArgs(llvm::Function& F, const IGCMD::MetaDat
 
     IGC_ASSERT(modMD->FuncMD.find(&F) != modMD->FuncMD.end());
 
-    // StatelessToStatefull optimization is not applied on non-kernel functions.
+    // StatelessToStateful optimization is not applied on non-kernel functions.
     if (!isEntryFunc(pMdUtils, &F))
         return;
 
@@ -594,7 +603,6 @@ ImplicitArg::ArgType ImplicitArgs::getArgType(GenISAIntrinsic::ID id) {
             return arg.getArgType();
         }
     }
-    IGC_ASSERT_MESSAGE(0, "Intrinsic not supported!");
     return ImplicitArg::ArgType::NUM_IMPLICIT_ARGS;
 }
 
@@ -607,7 +615,6 @@ IGC::WIAnalysis::WIDependancy ImplicitArgs::getArgDep(GenISAIntrinsic::ID id) {
             return arg.getDependency();
         }
     }
-    IGC_ASSERT_MESSAGE(0, "Intrinsic not supported!");
     return IGC::WIAnalysis::WIDependancy::RANDOM;
 }
 
@@ -651,10 +658,17 @@ Argument* ImplicitArgs::getImplicitArg(llvm::Function& F, ImplicitArg::ArgType a
     return F.arg_begin() + implicitArgIndexInFunc;
 }
 
-Value* ImplicitArgs::getImplicitArgValue(llvm::Function& F, ImplicitArg::ArgType argType, const IGC::CodeGenContext* pCtx)
+Value* ImplicitArgs::getImplicitArgValue(llvm::Function& F, ImplicitArg::ArgType argType, const IGCMD::MetaDataUtils* pMdUtils)
 {
-    auto pMdUtils = pCtx->getMetaDataUtils();
-    if (!isEntryFunc(pMdUtils, &F) && IGC_IS_FLAG_ENABLED(EnableImplicitArgAsIntrinsic))
+    Value* funcArg = getImplicitArg(F, argType);
+
+    if (funcArg)
+    {
+        // If the function argument already exists, just return it
+        return funcArg;
+    }
+
+    if (!isEntryFunc(pMdUtils, &F))
     {
         ImplicitArg iArg = IMPLICIT_ARGS[argType];
         GenISAIntrinsic::ID genID = iArg.getGenIntrinsicID();
@@ -680,8 +694,7 @@ Value* ImplicitArgs::getImplicitArgValue(llvm::Function& F, ImplicitArg::ArgType
             return inst;
         }
     }
-    // By default, get it from function arguments list
-    return getImplicitArg(F, argType);
+    return nullptr;
 }
 
 Argument* ImplicitArgs::getNumberedImplicitArg(llvm::Function& F, ImplicitArg::ArgType argType, int argNum) const

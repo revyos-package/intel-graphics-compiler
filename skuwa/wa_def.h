@@ -331,6 +331,34 @@ void InitXeHPSDVHwWaTable(
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
+void InitXeHPSDVSwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitAcm_G10HwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitAcm_G11HwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitAcm_G11SwWaTable(
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitAcm_G10SwWaTable(
+       PWA_TABLE                       pWaTable,
+       PSKU_FEATURE_TABLE              pSkuTable,
+       PWA_INIT_PARAM                  pWaParam);
+void InitPvcHwWaTable(
+       PWA_TABLE                       pWaTable,
+       PSKU_FEATURE_TABLE              pSkuTable,
+       PWA_INIT_PARAM                  pWaParam);
+void InitPvc_XtHwWaTable(
+       PWA_TABLE                       pWaTable,
+       PSKU_FEATURE_TABLE              pSkuTable,
+       PWA_INIT_PARAM                  pWaParam);
 #ifdef __cplusplus
 } // extern "C"
 #endif
@@ -437,6 +465,16 @@ void InitAdlpHASWaTable(
         PSKU_FEATURE_TABLE              pSkuTable,
         PWA_INIT_PARAM                  pWaParam);
 void InitXeHPSDVHASWaTable(
+        PHW_DEVICE_EXTENSION            pKchContext,
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitDg1HASWaTable(
+        PHW_DEVICE_EXTENSION            pKchContext,
+        PWA_TABLE                       pWaTable,
+        PSKU_FEATURE_TABLE              pSkuTable,
+        PWA_INIT_PARAM                  pWaParam);
+void InitAcm_G10HASWaTable(
         PHW_DEVICE_EXTENSION            pKchContext,
         PWA_TABLE                       pWaTable,
         PSKU_FEATURE_TABLE              pSkuTable,

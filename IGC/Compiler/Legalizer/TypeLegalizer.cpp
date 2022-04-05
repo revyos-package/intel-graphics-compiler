@@ -55,6 +55,8 @@ IGC_INITIALIZE_PASS_BEGIN(TypeLegalizer, PASS_FLAG, PASS_DESC, PASS_CFG_ONLY, PA
 IGC_INITIALIZE_PASS_END(TypeLegalizer, PASS_FLAG, PASS_DESC, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 #define LEGALIZE_ALL 0
+// IGC supports type i64 natively or by emulation
+const unsigned int MAX_LEGAL_INT_SIZE_IN_BITS = 64;
 
 bool TypeLegalizer::runOnFunction(Function & F) {
     DL = &F.getParent()->getDataLayout();
@@ -153,7 +155,7 @@ TypeLegalizer::getTypeLegalizeAction(Type* Ty) const {
     if (isLegalInteger(Width))
         return Legal;
 
-    if (DL->fitsInLegalInteger(Width))
+    if (DL->fitsInLegalInteger(Width) || Width <= MAX_LEGAL_INT_SIZE_IN_BITS)
         return Promote;
 
     return Expand;
@@ -172,7 +174,7 @@ TypeLegalizer::getLegalizeAction(Instruction* I) const {
 }
 
 std::pair<TypeSeq*, LegalizeAction>
-TypeLegalizer::getLegalizedTypes(Type* Ty) {
+TypeLegalizer::getLegalizedTypes(Type* Ty, bool legalizeToScalar) {
     LegalizeAction Act = getTypeLegalizeAction(Ty);
     TypeSeq* TySeq = nullptr;
 
@@ -180,7 +182,7 @@ TypeLegalizer::getLegalizedTypes(Type* Ty) {
     case Legal:
         break;
     case Promote:
-        TySeq = getPromotedTypeSeq(Ty);
+        TySeq = getPromotedTypeSeq(Ty, legalizeToScalar);
         break;
     case Expand:
         TySeq = getExpandedTypeSeq(Ty);
@@ -199,7 +201,7 @@ TypeLegalizer::getLegalizedTypes(Type* Ty) {
     return std::make_pair(TySeq, Act);
 }
 
-TypeSeq* TypeLegalizer::getPromotedTypeSeq(Type* Ty) {
+TypeSeq* TypeLegalizer::getPromotedTypeSeq(Type* Ty, bool legalizeToScalar) {
     IGC_ASSERT(Ty->isIntOrIntVectorTy());
     IGC_ASSERT(getTypeLegalizeAction(Ty) == Promote);
 
@@ -211,7 +213,20 @@ TypeSeq* TypeLegalizer::getPromotedTypeSeq(Type* Ty) {
     }
 
     Type* PromotedTy =
-        DL->getSmallestLegalIntType(Ty->getContext(), getTypeSizeInBits(Ty));
+        DL->getSmallestLegalIntType(Ty->getContext(),
+            getTypeSizeInBits(legalizeToScalar ? Ty : Ty->getScalarType()));
+
+    if (!PromotedTy && getTypeSizeInBits(Ty) < MAX_LEGAL_INT_SIZE_IN_BITS)
+    {
+        PromotedTy = Type::getIntNTy(Ty->getContext(), MAX_LEGAL_INT_SIZE_IN_BITS);
+    }
+
+    if (!legalizeToScalar && Ty->isVectorTy())
+    {
+        unsigned Elems = (unsigned)cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements();
+        PromotedTy = IGCLLVM::FixedVectorType::get(PromotedTy, Elems);
+    }
+
     TMI->second.push_back(PromotedTy);
 
     return &TMI->second;
@@ -314,8 +329,6 @@ TypeSeq* TypeLegalizer::getElementizedTypeSeq(Type* Ty) {
 
 std::pair<ValueSeq*, LegalizeAction>
 TypeLegalizer::getLegalizedValues(Value* V, bool isSigned) {
-    IGC_ASSERT(!V->getType()->isVoidTy());
-
     LegalizeAction Act = getTypeLegalizeAction(V->getType());
 
     if (Act == Legal)
@@ -369,8 +382,6 @@ TypeLegalizer::getLegalizedValues(Value* V, bool isSigned) {
 void
 TypeLegalizer::setLegalizedValues(Value* OVal,
     ArrayRef<Value*> LegalizedVals) {
-    IGC_ASSERT(!OVal->getType()->isVoidTy());
-
     ValueMapTy::iterator VMI; bool New;
     std::tie(VMI, New) = ValueMap.insert(std::make_pair(OVal, ValueSeq()));
     IGC_ASSERT(New);

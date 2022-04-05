@@ -16,9 +16,12 @@ SPDX-License-Identifier: MIT
 #ifndef SPIRVDEBUGINFOEXT_HPP_
 #define SPIRVDEBUGINFOEXT_HPP_
 
+#include <llvm/BinaryFormat/Dwarf.h>
+
 #include "SPIRVEntry.h"
 #include "SPIRVInstruction.h"
 #include "SPIRVExtInst.h"
+#include "spirv.hpp"
 
 namespace igc_spv {
 
@@ -44,8 +47,8 @@ namespace igc_spv {
             TypePtrToMember = 13,
             TypeTemplate = 14,
             TypeTemplateParameter = 15,
-            TypeTemplateParameterPack = 16,
-            TypeTemplateTemplateParameter = 17,
+            TypeTemplateTemplateParameter = 16,
+            TypeTemplateParameterPack = 17,
             GlobalVariable = 18,
             FunctionDecl = 19,
             Function = 20,
@@ -821,20 +824,18 @@ namespace igc_spv {
     class OpDebugInfoBase
     {
     public:
-        OpDebugInfoBase(SPIRVExtInst* i)
+        OpDebugInfoBase(SPIRVExtInst* i) : extInst(i)
         {
-            extInst = i;
         }
-        bool isOpDebugInfo() { return true; }
 
     protected:
-        SPIRVExtInst* extInst = nullptr;
+        SPIRVExtInst* const extInst;
         template <typename T>
-        T arg(unsigned int id)
+        T arg(unsigned int id) const
         {
             return static_cast<T>(extInst->getArguments()[id]);
         }
-        SPIRVString* str(SPIRVId id)
+        SPIRVString* str(SPIRVId id) const
         {
             auto item = extInst->getModule()->getEntry(arg<SPIRVId>(id));
             if (item->isString())
@@ -842,7 +843,7 @@ namespace igc_spv {
             else
                 return nullptr;
         }
-        uint64_t const_val(SPIRVId id)
+        uint64_t const_val(SPIRVId id) const
         {
             auto item = extInst->getModule()->getEntry(arg<SPIRVId>(id));
             if (item->isConstant())
@@ -850,7 +851,7 @@ namespace igc_spv {
             else
                 return (uint64_t)-1;
         }
-        unsigned int getNumArgs() { return extInst->getArguments().size(); }
+        unsigned int getNumArgs() const { return extInst->getArguments().size(); }
     };
 
     class OpCompilationUnit : OpDebugInfoBase
@@ -985,9 +986,24 @@ namespace igc_spv {
     {
     public:
         OpDebugTypeArray(SPIRVExtInst* extInst) : OpDebugInfoBase(extInst) {}
-        SPIRVId getBaseType() { return arg<SPIRVId>(SPIRVDebug::Operand::TypeArray::BaseTypeIdx); }
-        SPIRVWord getNumDims() { return (getNumArgs() - SPIRVDebug::Operand::TypeArray::ComponentCountIdx); }
-        SPIRVId getComponentCount(unsigned int i) { return arg<SPIRVId>(i + SPIRVDebug::Operand::TypeArray::ComponentCountIdx); }
+        SPIRVId getBaseType() const { return arg<SPIRVId>(SPIRVDebug::Operand::TypeArray::BaseTypeIdx); }
+        bool hasLowerBounds() const
+        {
+            return (getNumArgs() - SPIRVDebug::Operand::TypeArray::ComponentCountIdx) % 2 == 0;
+        }
+        SPIRVWord getNumDims() const
+        {
+            unsigned int n = getNumArgs() - SPIRVDebug::Operand::TypeArray::ComponentCountIdx;
+            return hasLowerBounds() ? n / 2 : n;
+        }
+        SPIRVId getDimCount(unsigned int i) const { return arg<SPIRVId>(SPIRVDebug::Operand::TypeArray::ComponentCountIdx + i); }
+        SPIRVId getDimLowerBound(unsigned int i) const
+        {
+            if (hasLowerBounds()) {
+                return arg<SPIRVId>(SPIRVDebug::Operand::TypeArray::ComponentCountIdx + getNumDims() + i);
+            }
+            return SPIRVID_INVALID;
+        }
     };
 
     class OpDebugTypeVector : OpDebugInfoBase
@@ -1240,4 +1256,47 @@ namespace igc_spv {
         SPIRVId getParent() { return arg<SPIRVId>(SPIRVDebug::Operand::ImportedEntity::ParentIdx); }
     };
 }
+
+using namespace llvm;
+
+inline igc_spv::SpvSourceLanguage convertDWARFSourceLangToSPIRV(dwarf::SourceLanguage DwarfLang) {
+    switch (DwarfLang) {
+        // When updating this function, make sure to also
+        // update convertSPIRVSourceLangToDWARF()
+
+        // LLVM does not yet define DW_LANG_C_plus_plus_17
+        // case dwarf::SourceLanguage::DW_LANG_C_plus_plus_17:
+    case dwarf::SourceLanguage::DW_LANG_C_plus_plus_14:
+    case dwarf::SourceLanguage::DW_LANG_C_plus_plus:
+        return igc_spv::SpvSourceLanguage::SpvSourceLanguageCPP_for_OpenCL;
+    case dwarf::SourceLanguage::DW_LANG_C99:
+    case dwarf::SourceLanguage::DW_LANG_OpenCL:
+        return igc_spv::SpvSourceLanguage::SpvSourceLanguageOpenCL_C;
+    default:
+        return igc_spv::SpvSourceLanguage::SpvSourceLanguageUnknown;
+    }
+}
+
+inline dwarf::SourceLanguage convertSPIRVSourceLangToDWARF(unsigned SourceLang) {
+    switch (SourceLang) {
+        // When updating this function, make sure to also
+        // update convertDWARFSourceLangToSPIRV()
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageOpenCL_CPP:
+        return dwarf::SourceLanguage::DW_LANG_C_plus_plus_14;
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageCPP_for_OpenCL:
+        // LLVM does not yet define DW_LANG_C_plus_plus_17
+        // SourceLang = dwarf::SourceLanguage::DW_LANG_C_plus_plus_17;
+        return dwarf::SourceLanguage::DW_LANG_C_plus_plus_14;
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageOpenCL_C:
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageESSL:
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageGLSL:
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageHLSL:
+    case igc_spv::SpvSourceLanguage::SpvSourceLanguageUnknown:
+        return dwarf::DW_LANG_OpenCL;
+    default:
+        // Workaround on frontends generating SPIR-V out of SpvSourceLanguage scope.
+        return (dwarf::SourceLanguage)SourceLang;
+    }
+}
+
 #endif

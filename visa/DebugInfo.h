@@ -34,7 +34,7 @@ class DebugInfoState;
 #define DEBUG_RELEASE_INTERNAL_DLL_EXPORT_ONLY
 #endif
 
-DEBUG_RELEASE_INTERNAL_DLL_EXPORT_ONLY int decodeAndDumpDebugInfo(char* filename);
+DEBUG_RELEASE_INTERNAL_DLL_EXPORT_ONLY int decodeAndDumpDebugInfo(char* filename, TARGET_PLATFORM platform);
 void emitDebugInfo(CISA_IR_Builder* builder, std::string filename);
 void emitDebugInfo(VISAKernelImpl* curKernel, std::string filename);
 void emitDebugInfo(VISAKernelImpl* kernel, std::list<VISAKernelImpl*>& functions, std::string filename);
@@ -66,11 +66,16 @@ void addCallFrameInfo(VISAKernelImpl* kernel);
 
 // For ranges colored during graph coloring
 void updateDebugInfo(vISA::G4_Kernel& kernel, vISA::G4_INST* inst,
-    const vISA::LivenessAnalysis& liveAnalysis, vISA::LiveRange* lrs[], BitSet& live,
+    const vISA::LivenessAnalysis& liveAnalysis, vISA::LiveRange* lrs[], SparseBitSet& live,
     vISA::DebugInfoState* state, bool closeAllOpenIntervals);
 // For ranges allocated by local RA
 void updateDebugInfo(vISA::G4_Kernel& kernel,
     std::vector<vISA::LocalLiveRange*>& liveIntervals);
+// For ranges allocated by global linear scan
+void updateDebugInfo(vISA::G4_Kernel& kernel,
+    std::vector<vISA::LSLiveRange*>& liveIntervals);
+
+
 // For ranges updated by augmentation
 void updateDebugInfo(vISA::G4_Kernel& kernel,
     std::vector<std::tuple<vISA::G4_Declare*, vISA::G4_INST*, vISA::G4_INST*>> augmentationLiveIntervals);
@@ -399,13 +404,17 @@ class DbgDecoder
 private:
     const char* const filename;
     std::FILE* dbgFile = nullptr;
+    const PlatformInfo* platInfo = nullptr;
 
     void ddName();
     template<class T> void ddLiveInterval();
     void ddCalleeCallerSave(uint32_t relocOffset);
 
 public:
-    DbgDecoder(const char* f) : filename(f) {}
+    DbgDecoder(const char* f, TARGET_PLATFORM platform) : filename(f) {
+        platInfo = PlatformInfo::LookupPlatformInfo(platform);
+        ASSERT_USER(platInfo != nullptr, "failed to look up platform");
+    }
 
     int ddDbg();
 };
@@ -414,7 +423,7 @@ class DebugInfoState
 {
     // Class used to store state during RA.
 public:
-    void setPrevBitset(const BitSet& b)
+    void setPrevBitset(const SparseBitSet& b)
     {
         prevBitset = b;
     }
@@ -426,7 +435,7 @@ public:
         }
     }
 
-    BitSet* getPrevBitset()
+    SparseBitSet* getPrevBitset()
     {
         if (prevBitset.getSize() == 0)
             return nullptr;
@@ -435,7 +444,7 @@ public:
     G4_INST* getPrevInst() { return prevInst; }
 
 private:
-    BitSet prevBitset;
+    SparseBitSet prevBitset;
     G4_INST* prevInst = nullptr;
 };
 }

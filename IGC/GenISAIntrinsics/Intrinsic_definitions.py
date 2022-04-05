@@ -10,7 +10,7 @@
 #PointerTypes = ["ptr_private","ptr_global","ptr_constant","ptr_local","ptr_generic"]
 #FloatingPointTypes = ["half","float","double"]
 #IntegerTypes = ["bool","char","short","int","long"]
-#IntrinsicsProperties = ["None","NoMem","ReadArgMem","ReadMem","ReadWriteArgMem",
+#IntrinsicsProperties = ["None","NoMem","ReadArgMem","WriteArgMem","ReadMem","ReadWriteArgMem",
 #                        "WriteMem", "NoReturn","NoDuplicate", "Convergent"]
 #IntrinsicsProperties may be specified as a comma separated list (e.g., "Convergent,NoMem")
 
@@ -159,6 +159,16 @@ Imported_Intrinsics = \
     [("int",                           "Resource index"),
      ("int",                           "Resource Type (CB, UAV, etc")],
     "NoMem"]],
+####################################################################################################
+"GenISA_GetImplicitBufferPtr": ["",
+    [("anyptr",                        "implicit buffer pointer for use in stack call"),
+    [],
+    "InaccessibleMemOnly"]],
+####################################################################################################
+"GenISA_GetLocalIdBufferPtr": ["",
+    [("anyptr",                        "pointer to local id buffer for use in stack call"),
+    [],
+    "InaccessibleMemOnly"]],
 ####################################################################################################
 "GenISA_GetPixelMask": ["Get live pixel mask from dmask",
     [("bool",                          ""),
@@ -563,10 +573,20 @@ Imported_Intrinsics = \
     [("int",                           "sample index")],
     "NoMem"]],
 ####################################################################################################
+"GenISA_SetImplicitBufferPtr": ["",
+    [("void",                          "result"),
+    [("anyptr",                        "buffer pointer passed by runtime")],
+    "InaccessibleMemOnly"]],
+####################################################################################################
 "GenISA_SetDebugReg": ["",
     [("int",                           "result (dbg0.1:ud)"),
     [("int",                           "dbg0.0:ud")],
     "None"]],
+####################################################################################################
+"GenISA_SetLocalIdBufferPtr": ["",
+    [("void",                        "result"),
+    [("anyptr",                      "local id buffer pointer passed by runtime")],
+    "InaccessibleMemOnly"]],
 ####################################################################################################
 "GenISA_SetStream": ["",
     [("void",                          ""),
@@ -812,6 +832,13 @@ Imported_Intrinsics = \
 "GenISA_dummyInst": ["",
     [("void",                          ""),
     [],
+    "None"]],
+####################################################################################################
+# This is for generating a dummy instruction that won't be optimized away and can be used in cases
+# where no-op calls need to preserve their debug info.
+"GenISA_dummyInstID": ["used by compiler to preserve thread ID debug info",
+    [("void",                          "return thread ID"),
+    [("anyint",                        "thread ID")],
     "None"]],
 ####################################################################################################
 "GenISA_dwordatomicstructured": ["",
@@ -1106,47 +1133,72 @@ Imported_Intrinsics = \
 "GenISA_getPayloadHeader": ["",
     [("anyvector",                        "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getWorkDim": ["",
     [("anyint",                           "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getNumWorkGroups": ["",
     [("anyvector",                        "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getGlobalSize": ["",
     [("anyvector",                        "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getLocalSize": ["",
     [("anyvector",                        "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getEnqueuedLocalSize": ["",
     [("anyvector",                        "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getLocalID_X": ["",
     [("short",                            "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getLocalID_Y": ["",
     [("short",                            "result"),
     [],
-    "NoMem"]],
+    "None"]],
 ####################################################################################################
 "GenISA_getLocalID_Z": ["",
     [("short",                            "result"),
     [],
-    "NoMem"]],
+    "None"]],
+####################################################################################################
+"GenISA_getPrivateBase": ["",
+    [("anyptr",                           "result"),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_getPrintfBuffer": ["",
+    [("anyptr",                           "result"),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_getStageInGridOrigin": ["",
+    [("anyvector",                        "result"),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_getStageInGridSize": ["",
+    [("anyvector",                        "result"),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_getSyncBuffer": ["",
+    [("anyptr",                           "result"),
+    [],
+    "None"]],
 ####################################################################################################
 "GenISA_getSR0": ["sr0.# the state register",
     [("int",                           "result"),
@@ -1741,7 +1793,7 @@ Imported_Intrinsics = \
      ("any:float",                     "value to store"),
      ("int",                           "aligment in bytes"),
      ("bool",                          "volatile, must be an immediate")],
-    "None"]],
+    "WriteArgMem"]],
 ####################################################################################################
 "GenISA_storerawvector_indexed": ["Write a vector to a buffer pointer at byte offset",
     [("void",                          ""),
@@ -1750,7 +1802,7 @@ Imported_Intrinsics = \
      ("anyvector",                     "value to store"),
      ("int",                           "aligment in bytes"),
      ("bool",                          "volatile, must be an immediate")],
-    "None"]],
+    "WriteArgMem"]],
 ####################################################################################################
 "GenISA_storestructured1": ["",
     [("void",                          ""),
@@ -1862,7 +1914,7 @@ Imported_Intrinsics = \
      ("float",                         "z"),
      ("float",                         "w (4 elements since uav_typed will always write "+\
                                        "4 destinations)")],
-    "None"]],
+    "WriteArgMem"]],
 ####################################################################################################
 "GenISA_uaddc": ["",
     [("anyvector",                     "result"),
@@ -2067,5 +2119,575 @@ Imported_Intrinsics = \
 "GenISA_frc": ["GENISA_frc for emitting HW Frc",
     [("float",                        "output"),
     [("float",                        "src0")],
-    "NoMem"]]
+    "NoMem"]],
+####################################################################################################
+"GenISA_staticConstantPatchValue": ["GenISA_staticConstantPatchValue returns a static constant patch value as an integer.",
+    [("anyint",                       "symbol value"),
+    [("any",                          "symbol name")],
+    "None"]],
+####################################################################################################
+"GenISA_HDCCCSFastClear": ["Fast Clearing CCS Surface using HDC Send",
+    [("void",                          ""),
+    [("anyvector",                     "")],
+    "None"]],
+####################################################################################################
+"GenISA_LSC2DBlockRead": ["LSC 2d block read",
+    [("anyint",                        ""),
+    [("long",                          "flat image base offset"),
+     ("int",                           "flat image base width"),
+     ("int",                           "flat image base height"),
+     ("int",                           "flat image base pitch"),
+     ("int",                           "offset x"),
+     ("int",                           "offset y"),
+     ("int",                           "elemSize"),
+     ("int",                           "tile width"),
+     ("int",                           "tile height"),
+     ("int",                           "V - num blocks (2 for simple 2d block read)"),
+     ("bool",                          "transpose"),
+     ("bool",                          "vnni transform (for transpose+transform use transpose "+\
+                                       "only and elemSize 32)")],
+    "None"]],
+####################################################################################################
+"GenISA_LSCAtomicFP32": ["LSC atomic FP32 add,sub,min,max,fcas",
+    [("float",                         "return old value"),
+    [("anyptr",                        "memory pointer: ugm, ugml, tgm, slm"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("float",                         "[src1] atomic store the result of operation with src1 "+\
+                                       "and memory data and return the old value"),
+     ("float",                         "[fcas] atomic compare src1_X and memory data and replace "+\
+                                       "if equal with src1_Y. Returns the old value."),
+     ("int",                           "operation (add,sub,min,max,fcas)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadWriteArgMem"]],
+####################################################################################################
+"GenISA_LSCAtomicFP64": ["LSC atomic FP64 add,sub,fcas",
+    [("double",                        "return old value"),
+    [("anyptr",                        "only a global memory pointer"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("double",                        "[src1] atomic store the result of operation with src1 "+\
+                                       "and memory data and return the old value"),
+     ("double",                        "[fcas] atomic compare src1_X and memory data and replace "+\
+                                       "if equal with src1_Y. Returns the old value."),
+     ("int",                           "operation (add,sub,fcas)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadWriteArgMem"]],
+####################################################################################################
+"GenISA_LSCAtomicInts": ["LSC atomic I16,U16,I32,U32,I64,U64 add,sub,min,max,cas,inc,dec,and,"+\
+                         "or,xor,load,store",
+    [("anyint",                        "return old value"),
+    [("anyptr",                        "memory pointer: ugm, ugml, tgm, slm (not for i64,u64)"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("anyint",                        "[src1] atomic store the result of operation with src1 "+\
+                                       "and memory data and return the old value"),
+     ("anyint",                        "[cas] atomic compare src1_X and memory data and replace "+\
+                                       "if equal with src1_Y. Returns the old value."),
+     ("int",                           "operation (add,sub,min,max,cas,inc,dec,and,or,xor,load,"+\
+                                                  "store,umin,umax)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadWriteArgMem"]],
+####################################################################################################
+"GenISA_LSCFence": ["LSC fence operation",
+    [("void",                          ""),
+    [("int",                           "memory port: ugm, ugml, tgm, slm"),
+     ("int",                           "scope of the fence: threadgroup, local, tile, GPU, "+\
+                                       "all GPUs, system Release, system Acquire"),
+     ("int",                           "flush type: evict, invalidate, discard, clean, flushl3")],
+    "Convergent"]],
+####################################################################################################
+"GenISA_LSCLoad": ["LSC gathering load instruction",
+    [("anyint",                        "value loaded"),
+    [("anyptr",                        "address of value to load"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("int",                           "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_LSCLoadBlock": ["LSC one-dimensional block load instruction",
+    [("anyint",                        "value loaded"),
+    [("anyptr",                        "base address of value to load from (must be uniform)"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("int",                           "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_LSCLoadStatus": ["LSC load-status of address",
+    [("bool",                          "result is a bit per lane"),
+    [("anyptr",                        "address of value to load"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("anyint",                        "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadWriteArgMem"]],
+####################################################################################################
+"GenISA_LSCPrefetch": ["LSC prefetch (loads to cache)",
+    [("void",                          "no data is returned"),
+    [("anyptr",                        "memory address"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("int",                           "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "ReadWriteArgMem"]],
+####################################################################################################
+"GenISA_LSCStore": ["LSC store instruction",
+    [("void",                          "nothing is returned"),
+    [("anyptr",                        "address to store to"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("anyint",                        "value to be stored"),
+     ("int",                           "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "None"]],
+####################################################################################################
+"GenISA_LSCStoreBlock": ["LSC one-dimensional block store instruction",
+    [("void",                          "nothing is returned"),
+    [("anyptr",                        "base address to store to (must be uniform)"),
+     ("int",                           "immediate offset (in bytes)"),
+     ("anyint",                        "value to be stored"),
+     ("int",                           "data size (LSC_DATA_SIZE)"),
+     ("int",                           "vector size (LSC_DATA_ELEMS)"),
+     ("int",                           "cache controls options (LSC_CACHE_OPTS)")],
+    "None"]],
+####################################################################################################
+"GenISA_bf8tohf": ["bf8 to half conversion",
+    [("anyfloat",                      "half result"),
+    [("anyint",                        "bf8 source (as char)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_tf32tof": ["tf32 to float conversion",
+    [("anyfloat",                      "float result"),
+    [("anyint",                        "tf32 source (as int)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_HDCuncompressedwrite": ["XeHP SDV surface compression - HDC flat CCS builtin",
+    [("void",                          "nothing to return"),
+    [("anyptr",                        "ptr location where the value is stored to"),
+     ("anyint",                        "value to be stored")],
+    "None"]],
+####################################################################################################
+"GenISA_systemmemoryfence": ["PVC system memory fence",
+    [("void",                          ""),
+    [("bool",                          "indicates whether a fence to typed memory is also necessary")],
+    "Convergent"]],
+####################################################################################################
+"GenISA_urbfence": ["Certain DG2 B0+ configurations, for read-after-write urb accesses",
+    [("void",                          ""),
+    [],
+    "Convergent"]],
+####################################################################################################
+"GenISA_threadgroupnamedbarriers_signal": ["Named Barriers Init",
+    [("void",                          ""),
+    [("int",                           "thread group named barrier ID"),
+     ("int",                           "thread group count")],
+    "Convergent"]],
+####################################################################################################
+"GenISA_threadgroupnamedbarriers_wait": ["Named Barriers barrier",
+    [("void",                          ""),
+    [("int",                           "thread group named barrier ID")],
+    "Convergent"]],
+####################################################################################################
+"GenISA_hftobf8": ["half to bf8 conversion",
+    [("anyint",                        "bf8 result (as char)"),
+    [("anyfloat",                      "half source"),
+     ("int",                           "Rounding mode(ERoundingMode)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_bf8tohf": ["bf8 to half conversion",
+    [("anyfloat",                      "half result"),
+    [("anyint",                        "bf8 source (as char)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_ftotf32": ["float to tf32 conversion",
+    [("anyint",                        "tf32 result (as int)"),
+    [("anyfloat",                      "float source"),
+     ("int",                           "Rounding mode(ERoundingMode)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_tf32tof": ["tf32 to float conversion",
+    [("anyfloat",                      "float result"),
+    [("anyint",                        "tf32 source (as int)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_srnd": ["stochastic rounding:  srnd dst  src0  src1",
+    [("anyvector",                     "dst: hf or bf8 (as ub)"),
+    [("anyvector",                     "src0: F or HF"),
+     ("anyvector",                     "src1: random number. F or HF(the same as src0's)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_OutputMeshPrimitiveData": ["",
+    [("void",                          ""),
+    [("float",                         "x"),
+     ("float",                         "y"),
+     ("float",                         "z"),
+     ("float",                         "w"),
+     ("int",                           "usage"),
+     ("int",                           "owordOffset :  ignored for output types other than " +\
+                                       "SHADER_OUTPUT_TYPE_DEFAULT (may be undef) "),
+     ("int",                           "primitiveIndex"),
+     ("int",                           "mask")],
+    "None"]],
+####################################################################################################
+"GenISA_OutputMeshPrimitiveDataInput": ["Load data from mesh per-primitive output",
+    [("float4",                        ""),
+    [("int",                           "usage"),
+     ("int",                           "owordOffset (see GenISA_OutputMeshPrimitiveData"),
+     ("int",                           "primitiveIndex")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_OutputMeshSivDataInput": ["Load data from mesh siv output",
+    [("float4",                        ""),
+    [("int",                           "usage"),
+     ("int",                           "primitiveIndex : ignored for PrimitiveCount")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_OutputMeshVertexData": ["",
+    [("void",                          ""),
+    [("float",                         "x"),
+     ("float",                         "y"),
+     ("float",                         "z"),
+     ("float",                         "w"),
+     ("int",                           "usage"),
+     ("int",                           "owordOffset : for SHADER_OUTPUT_TYPE_CLIPDISTANCE_LO "+\
+                                           "or SHADER_OUTPUT_TYPE_CLIPDISTANCE_HI "+\
+                                           "it refers to either low (=0) or high (=1) "+\
+                                           "half of the Vertex Header's clipCullDistanceArray[8] "+\
+                                           "for SHADER_OUTPUT_TYPE_REPLICATED_POSITION it is viewId "+\
+                                           "for remained output types other than "+\
+                                           "SHADER_OUTPUT_TYPE_DEFAULT it is ignored (may be undef)"),
+     ("int",                           "vertexIndex"),
+     ("int",                           "mask")],
+    "None"]],
+####################################################################################################
+"GenISA_OutputMeshVertexDataInput": ["Load data from mesh per-vertex output",
+    [("float4",                        ""),
+    [("int",                           "usage"),
+     ("int",                           "owordOffset (see GenISA_OutputMeshVertexData)"),
+     ("int",                           "vertexIndex")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_OutputTaskData": ["",
+    [("void",                          ""),
+    [("float",                         ""),
+     ("float",                         ""),
+     ("float",                         ""),
+     ("float",                         ""),
+     ("int",                           ""),
+     ("int",                           ""),
+     ("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_OutputTaskDataInput": ["Load from task output",
+    [("float4",                        ""),
+    [("int",                           "usage"),
+     ("int",                           "owordOffset")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_AcceptHitAndEndSearchHL": ["Raytracing: equivalent to DXR AcceptHitAndEndSearch()",
+    [("void",                          ""),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_AllocaNumber": ["Raytracing: Temporary marker that will be lowered to an RTStack offset.",
+    [("anyptr",                        ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_AllocateRayQuery": ["Raytracing: Allocation for RayQuery Object",
+    [("int",                           ""),
+    [("int",                           "rayFlags")],
+    "None"]],
+####################################################################################################
+"GenISA_AsyncStackID": ["Raytracing: lane Async stack id",
+    [("short",                         ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_AsyncStackPtr": ["Raytracing: Intrinsic used as marker in later passes to find per lane " +
+                         "async stack base. It is just a cast and will be lowered prior to codegen",
+    [("anyptr",                         ""),
+    [("anyint",                         "")],
+    "NoMem,NoDuplicate"]],
+####################################################################################################
+"GenISA_SyncStackPtr": ["Raytracing: Intrinsic used as marker in later passes to find per lane " +
+                         "sync stack base. It is just a cast and will be lowered prior to codegen",
+    [("anyptr",                         ""),
+    [("anyint",                         "")],
+    "NoMem,NoDuplicate"]],
+####################################################################################################
+"GenISA_BindlessThreadDispatch": ["Raytracing: codegens to send.btd",
+    [("void",                          ""),
+    [("anyptr",                        "global buffer pointer"),
+     ("short",                         "stack id"),
+     ("long",                          "shader record address")],
+    "None"]],
+####################################################################################################
+"GenISA_CallShaderHL": ["Raytracing: equivalent to DXR CallShader() (HL = high level)",
+    [("void",                          ""),
+    [("int",                           "continuation ID"),
+     ("anyptr",                        "continuation fn"),
+     ("int",                           "ShaderIndex"),
+     ("anyptr",                        "User defined attributes struct")],
+    "None"]],
+####################################################################################################
+"GenISA_DispatchDimensions": ["Raytracing: Dispatch Dimensions",
+    [("int",                           ""),
+    [("int",                           "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_DispatchRayIndex": ["Raytracing: Dispatch Ray Index - input: 'Dimension'",
+    [("int",                           ""),
+    [("int",                           "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_FillValue": ["Raytracing: Fill value from the stack",
+    [("anyint",                        ""),
+    [("long",                          "")],
+    "None"]],
+####################################################################################################
+"GenISA_GetShaderRecordPtr": ["Raytracing: Get the shader record pointer for the given continuation",
+    [("ptr_global",                    ""),
+    [("ptr_private",                   "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_GlobalBufferPointer": ["Raytracing: per lane stack size",
+    [("anyptr",                        ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_GlobalRootSignatureValue": ["Raytracing: ephemeral intrinsic later lowered to GlobalBufferPointer + offset",
+    [("any:float",                     "the value at that address"),
+    [
+        ("int",                        "dword offset in the global root signature from the base"),
+        ("bool",                       "true if the root signature value is a constant buffer pointer"),
+    ],
+    "NoMem"]],
+####################################################################################################
+"GenISA_HitKind": ["Raytracing: equivalent to DXR HitKind()",
+    [("int",                           ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_IgnoreHitHL": ["Raytracing: equivalent to DXR IgnoreHit()",
+    [("void",                          ""),
+    [],
+    "None"]],
+####################################################################################################
+"GenISA_InlinedData": ["Raytracing: Used in raygen shaders data loaded inline directly to register",
+    [("anyptr",                        ""),
+    [("int",                           "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_LocalBufferPointer": ["Raytracing: Pointer to local args in shader record",
+    [("anyptr",                        ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_LocalRootSignatureValue": ["Raytracing: ephemeral intrinsic later lowered to LocalBufferPointer/InlinedData",
+    [("any:float",                     "the value at that address"),
+    [
+        ("int",                           "byte offset in the local root signature from the base"),
+        ("int",                           "size of local root signature dereferenceable data")
+    ],
+    "NoMem"]],
+####################################################################################################
+"GenISA_PayloadPtr": ["Raytracing: Temporary used to mark payload pointer after intrinsic lowering",
+    [("anyptr",                     "Returns the first argument"),
+    [(0,                            "The payload pointer")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_ContinuationSignpost": ["Raytracing: Temporary used to mark continuation entry points",
+    [("anyptr",                     "Returns the first argument"),
+    [(0,                            "The SWStack base pointer"),
+     ("int",                        "Offset from continuation stack frame pointer to payload address")],
+    "None"]],
+####################################################################################################
+"GenISA_RTStatefulBTIAndOffset": ["Raytracing: Used for indirect stateful accesses",
+    [("anyptr",                     "Just returns the second argument (the pointer)"),
+    [("int",                        "Binding table index for the memory region"),
+     (0,                            "The pointer itself (which is just an offset from the surface state base address)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_RayInfo": ["Raytracing: Query for different ray info. Input is query type, and dimension which " +\
+                   "is used for certain types - used for Async Raytracing",
+    [("any:float",                     ""),
+    [("int",                           ""),
+     ("int",                           "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_RayTCurrent": ["Raytracing: Signature retained so it is processed the same as the RayInfo intrinsic.",
+    [("any:float",                     ""),
+    [("int",                           ""),
+     ("int",                           "")],
+    "ReadMem"]],
+####################################################################################################
+"GenISA_ReportHitHL": ["Raytracing: equivalent to DXR ReportHit()",
+    [("bool",                          ""),
+    [("float",                         "THit - Parametric distance of the intersection"),
+     ("int",                           "HitKind"),
+     ("anyptr",                        "User defined intersection attributes struct")],
+    "None"]],
+####################################################################################################
+"GenISA_TileXOffset": ["Raytracing: returns the X-offset within a raytracing tile",
+    [("short",                        "The offset"),
+    [("short",                        "TID (r0.4:uw & 0xff)"),
+     ("short",                        "X Dimension Size (Tile)"),
+     ("short",                        "X Dimension Size (Subtile) (0 == no subtile)"),
+     ("short",                        "Y Dimension Size (Subtile) (0 == no subtile)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_TileYOffset": ["Raytracing: returns the Y-offset within a raytracing tile",
+    [("short",                        "The offset"),
+    [("short",                        "TID (r0.4:uw & 0xff)"),
+     ("short",                        "X Dimension Size (Tile)"),
+     ("short",                        "X Dimension Size (Subtile) (0 == no subtile)"),
+     ("short",                        "Y Dimension Size (Subtile) (0 == no subtile)")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_SpillValue": ["Raytracing: Spill a value onto the stack",
+    [("void",                          ""),
+    [("anyint",                        ""),
+     ("long",                          "")],
+    "None"]],
+####################################################################################################
+"GenISA_StackIDRelease": ["Raytracing: codegens to send.btd and sets stack id release bit",
+    [("void",                          ""),
+    [("short",                         "stack id")],
+    "WriteMem"]],
+####################################################################################################
+"GenISA_StackSize": ["Raytracing: per lane stack size in bytes",
+    [("short",                         ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_SWHotZonePtr": ["Raytracing: Intrinsic used as marker in later passes to find hot zone base address." +
+                        " It is just a cast and will be lowered prior to codegen",
+    [("anyptr",                         ""),
+    [("anyint",                         "")],
+    "NoMem,NoDuplicate"]],
+####################################################################################################
+"GenISA_SWStackPtr": ["Raytracing: Intrinsic used as marker in later passes to find SWStack base address." +
+                         " It is just a cast and will be lowered prior to codegen",
+    [("anyptr",                         ""),
+    [(0,                                "")],
+    "NoMem"]],
+####################################################################################################
+"GenISA_SyncStackID": ["Raytracing: lane Syncstack id",
+    [("short",                         ""),
+    [],
+    "NoMem"]],
+####################################################################################################
+"GenISA_TraceRayAsync": ["Raytracing: codegens to send.rta (sync bit not set)",
+    [("void",                          ""),
+    [("anyptr",                        "global buffer pointer"),
+     ("int",                           "Trace data: bitfield containg bvhLevel, stackID and trcCtrl")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRaySync": ["Raytracing: codegens to send.rta (with the sync bit set)",
+    [("int",                           "dst is used to sync the message"),
+    [("anyptr",                        "global buffer pointer"),
+     ("int",                           "Trace data: bitfield containg bvhLevel, stackID and trcCtrl")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRaySyncProceed": ["Raytracing: codegens to ShadowMemoryToSyncStack AND send.rta (sync bit set)",
+    [("int",                          ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_ShadowMemoryToSyncStack": ["Raytracing: Read sync RTStack to shadowmemory.",
+    [("void",                          ""),
+    [("int",                           "RayQuery object index")],
+    "None"]],
+####################################################################################################
+"GenISA_SyncStackToShadowMemory": ["Raytracing: Read sync RTStack to shadowmemory.",
+    [("bool",                          ""),
+    [("int",                           "RayQuery object index"),
+    ("int",                            "return value of TraceRaySyncProceed")],
+    "None"]],
+####################################################################################################
+"GenISA_ReadTraceRaySync": ["Raytracing: Intrinsic used as a marker in later passes to find where to read return value of GenISA_TraceRaySync",
+    [("void",                          ""),
+    [("int",                           "return value of TraceRaySyncProceed")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayAsyncHL": ["Raytracing: equivalent to DXR TraceRay(), lowers to GenISA_TraceRayAsync and RTStack IO operations",
+    [("void",                          ""),
+    [("int",                           "continuation id"),
+     ("anyptr",                        "continuation fn"),
+     ("anyptr",                        "BVH ptr"),
+     ("int",                           "flag"),
+     ("int",                           "mask"),
+     ("int",                           "RayContributionToHitGroupIndex"),
+     ("int",                           "hitgroup index multiplier"),
+     ("int",                           "miss shader index"),
+     ("float",                         "rayOrig x"),
+     ("float",                         "rayOrig y"),
+     ("float",                         "rayOrig z"),
+     ("float",                         "rayDir  x"),
+     ("float",                         "rayDir  y"),
+     ("float",                         "rayDir  z"),
+     ("float",                         "ray     Tmin"),
+     ("float",                         "ray     Tmax"),
+     ("anyptr",                        "payload"),
+     ("int",                           "reserved")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineAbort": ["Raytracing: Abort operation for RayQuery object at index taken in the input",
+    [("void",                          ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineCandidateType": ["Raytracing: Candidate Type Query for RayQuery object at index "+\
+                                       "taken in the input",
+    [("int",                           ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineCommitNonOpaqueTriangleHit": ["Raytracing: Commit Non Opaque Triangle Hit For "+\
+                                                    "RayQuery object at index taken in the input",
+    [("void",                          ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineCommitProceduralPrimitiveHit": ["Raytracing: Commit procedural primitive Hit For "+\
+                                                      "RayQuery object at index taken in the input",
+    [("void",                          ""),
+    [("int",                           ""),
+     ("float",                         "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineCommittedStatus": ["Raytracing: Commited status Query for RayQuery object at index "+\
+                                         "taken in the input",
+    [("int",                           ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineHL": ["Raytracing: equivalent to DXR TraceRayInline",
+    [("void",                          ""),
+    [("int",                           "Query Object Index"),
+     ("anyptr",                        "BVH ptr"),
+     ("int",                           "flag"),
+     ("int",                           "mask"),
+     ("float",                         "rayOrig x"),
+     ("float",                         "rayOrig y"),
+     ("float",                         "rayOrig z"),
+     ("float",                         "rayDir  x"),
+     ("float",                         "rayDir  y"),
+     ("float",                         "rayDir  z"),
+     ("float",                         "ray     Tmin"),
+     ("float",                         "ray     Tmax"),
+     ("int",                           "reserved")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRaySyncProceedHL": ["Raytracing: Proceed operation for RayQuery object at index taken in the input",
+    [("bool",                          ""),
+    [("int",                           "")],
+    "None"]],
+####################################################################################################
+"GenISA_TraceRayInlineRayInfo": ["Raytracing: Query for different ray info.",
+    [("any:float",                     ""),
+    [("int",                           "Query Object Index"),
+     ("int",                           "Info Type"),
+     ("int",                           "Dimension used for certain types")],
+    "None"]]
 }

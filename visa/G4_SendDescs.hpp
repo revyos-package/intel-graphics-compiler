@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 
 #include <string>
 #include <ostream>
+#include <utility>
 
 namespace vISA
 {
@@ -35,11 +36,13 @@ enum class LdStOp {
     LOAD = LDST_LOAD_GROUP + 1,
     LOAD_QUAD, // e.g. untyped load (loading XYZW)
     LOAD_STRIDED, // same as load, but 1 address (obeys exec mask)
+    LOAD_BLOCK2D,
     //
     STORE_GROUP = LDST_STORE_GROUP + 1,
     STORE,
     STORE_QUAD,
     STORE_STRIDED,
+    STORE_BLOCK2D,
     //
     // atomics
     ATOMIC_GROUP = LDST_ATOMIC_GROUP + 1,
@@ -79,6 +82,7 @@ enum class AddrType {
     INVALID = 0,
     //
     FLAT,
+    SS, BSS,
     BTI
 };
 
@@ -93,6 +97,8 @@ enum class Caching {
     RI, // read-invalidate (load)
     WB, // writeback (store)
     UC, // uncached (load)
+    ST, // streaming (load/store)
+    WT, // writethrough (store)
 };
 std::string ToSymbol(Caching);
 // default, default returns ""
@@ -178,6 +184,7 @@ static inline ElemsPerAddr::Chs operator|(
 
 
 class G4_Operand;
+class IR_Builder;
 
 // Base class for all send descriptors.
 // (Note that G4_SendDesc could be reused by more than one instruction.)
@@ -199,11 +206,18 @@ public:
 
     SFID        sfid;
 
-    G4_SendDesc(Kind k, SFID _sfid) : kind(k), sfid(_sfid), execSize(g4::SIMD_UNDEFINED) { }
-    G4_SendDesc(Kind k, SFID _sfid, G4_ExecSize _execSize)
+    const IR_Builder& irb;
+
+    G4_SendDesc(Kind k, SFID _sfid, const IR_Builder& builder)
         : kind(k),
           sfid(_sfid),
-          execSize(_execSize)
+          execSize(g4::SIMD_UNDEFINED),
+          irb(builder) { }
+    G4_SendDesc(Kind k, SFID _sfid, G4_ExecSize _execSize, const IR_Builder& builder)
+        : kind(k),
+          sfid(_sfid),
+          execSize(_execSize),
+          irb(builder)
     {}
 
     SFID getSFID() const {return sfid;}
@@ -215,6 +229,7 @@ public:
     bool isLdSt() const {return kind == Kind::LDST;}
     //
     bool isHDC() const;
+    bool isLSC() const;
     bool isSampler() const {return getSFID() == SFID::SAMPLER;}
     //
     virtual bool isEOT() const = 0;
@@ -243,8 +258,10 @@ public:
     // Returns the caching behavior of this message if known.
     // Returns Caching::INVALID if the message doesn't support caching
     // controls.
-    virtual Caching getCachingL1() const = 0;
-    virtual Caching getCachingL3() const = 0;
+    virtual std::pair<Caching,Caching> getCaching() const = 0;
+    Caching getCachingL1() const {return getCaching().first;}
+    Caching getCachingL3() const {return getCaching().second;}
+    virtual void setCaching(Caching l1, Caching l3) = 0;
     //
     // generally in multiples of full GRFs, but a few exceptions such
     // as OWord and HWord operations may make this different
@@ -337,6 +354,7 @@ struct G4_SendDescLdSt : G4_SendDesc {
     //    - nullptr for FLAT messages such as stateless global memory or SLM
     //    - reference to an a0.# register
     //    - an immediate value (for an immediate BTI)
+    //    - for BSS/SS this is a reference to an a0 register
     G4_Operand *surface = nullptr;
 
     // Other miscellaneous attributes that cannot be deduced from the
@@ -344,6 +362,8 @@ struct G4_SendDescLdSt : G4_SendDesc {
     LdStAttrs attrs;
 
     // In some rare cases we must explicitly override message payload sizes.
+    //    1. prefetches use a null dst and set rLen = 0
+    //    2. e.g. block2d puts block sizes in a header
     short overrideDstLengthBytesValue = -1;
     short overrideSrc0LengthBytesValue = -1;
     short overrideSrc1LengthBytesValue = -1;
@@ -364,7 +384,8 @@ struct G4_SendDescLdSt : G4_SendDesc {
         Caching _l1, Caching _l3,
         G4_Operand *surf,
         ImmOff _immOff,
-        LdStAttrs _attrs);
+        LdStAttrs _attrs,
+        const IR_Builder& builder);
 
     void *operator new(size_t sz, Mem_Manager &m) { return m.alloc(sz); }
 
@@ -384,8 +405,8 @@ struct G4_SendDescLdSt : G4_SendDesc {
     virtual size_t getDstLenBytes() const override;
 
     virtual SendAccess getAccessType() const override;
-    virtual Caching getCachingL1() const override {return l1;}
-    virtual Caching getCachingL3() const override {return l3;}
+    virtual std::pair<Caching,Caching> getCaching() const override {return std::make_pair(l1, l3);}
+    virtual void setCaching(Caching l1, Caching l3) override;
     //
     virtual int getOffset() const override {return immOff.immOff;}
     virtual G4_Operand *getSurface() const override {return surface;}
@@ -423,8 +444,6 @@ struct G4_SendDescLdSt : G4_SendDesc {
 
 
 ////////////////////////////////////////////////////////////////////////////
-class IR_Builder;
-
 class G4_SendDescRaw : public G4_SendDesc
 {
 private:
@@ -480,6 +499,10 @@ private:
     G4_Operand *m_sti;
     G4_Operand *m_bti; // BTI or other surface pointer
 
+    /// indicates this message is an LSC message
+    bool        isLscDescriptor = false;
+    // sfid now stored separately from the ExDesc[4:0] since the new LSC format
+    // no longer uses ExDesc for that information
     int         src1Len;
     bool        eotAfterMessage = false;
 
@@ -489,13 +512,13 @@ public:
     G4_SendDescRaw(
         uint32_t fCtrl, uint32_t regs2rcv, uint32_t regs2snd,
         SFID fID, uint16_t extMsgLength, uint32_t extFCtrl,
-        SendAccess access, G4_Operand* bti, G4_Operand* sti, IR_Builder& builder);
+        SendAccess access, G4_Operand* bti, G4_Operand* sti, const IR_Builder& builder);
 
     /// Construct a object with descriptor and extended descriptor values.
     /// used in IR_Builder::createSendMsgDesc(uint32_t desc, uint32_t extDesc, SendAccess access)
     G4_SendDescRaw(
         uint32_t desc, uint32_t extDesc, SendAccess access,
-        G4_Operand* bti, G4_Operand* sti);
+        G4_Operand* bti, G4_Operand* sti, const IR_Builder& builder);
 
     /// Preferred constructor takes an explicit SFID and src1 length
     G4_SendDescRaw(
@@ -505,7 +528,8 @@ public:
         int src1Len,
         SendAccess access,
         G4_Operand *bti,
-        bool isValidFuncCtrl);
+        bool isValidFuncCtrl,
+        const IR_Builder& builder);
 
     // Preferred constructor takes an explicit SFID and src1 length
     // Need execSize, so it is created for a particular send.
@@ -517,7 +541,8 @@ public:
         SendAccess access,
         G4_Operand* bti,
         G4_ExecSize execSize,
-        bool isValidFuncCtrl);
+        bool isValidFuncCtrl,
+        const IR_Builder& builder);
 
     void *operator new(size_t sz, Mem_Manager &m) { return m.alloc(sz); }
 
@@ -570,6 +595,16 @@ public:
         return desc.layout.funcCtrl;
     }
 
+    ////////////////////////////////////////////////////////////////////////
+    // LSC-related operations
+    bool isLscOp() const {return isLscDescriptor;}
+    LSC_OP getLscOp() const {
+        assert(isLscOp());
+        return static_cast<LSC_OP>(desc.value & 0x3F);
+    }
+    LSC_ADDR_TYPE getLscAddrType() const;
+    int getLscAddrSizeBytes() const; // e.g. a64 => 8
+    LSC_DATA_ORDER getLscDataOrder() const;
 
     bool isEOTInst() const { return eotAfterMessage; }
     void setEOT();
@@ -656,6 +691,7 @@ public:
     }
 
 
+    bool isLSCTyped() const {return isTyped() && isLSC();}
     // atomic write or explicit barrier
     bool isBarrierOrAtomic() const {
         return isAtomicMessage() || isBarrier();
@@ -687,8 +723,8 @@ public:
     virtual size_t getSrc1LenBytes() const override;
     //
     virtual SendAccess getAccessType() const override {return accessType;}
-    virtual Caching getCachingL1() const override;
-    virtual Caching getCachingL3() const override;
+    virtual std::pair<Caching,Caching> getCaching() const override;
+    virtual void setCaching(Caching l1, Caching l3) override;
     //
     virtual int getOffset() const override;
     virtual G4_Operand *getSurface() const override {return m_bti;}

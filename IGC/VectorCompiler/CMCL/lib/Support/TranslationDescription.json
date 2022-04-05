@@ -13,20 +13,19 @@
     "intrinsics. More details can be found in GenerateTranslationCode.py"
   ],
   "HelperStructures": {
-    "OperandKind": ["VectorIn", "VectorOut", "VectorInOut", "ScalarIn", "ScalarConst", "PointerIn"]
+    "OperandKind": ["Constant", "Input", "Output"]
   },
   "BuiltinDescriptions": {
     "Select": {
       "Name": "select",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorOut"},
-        {"Name": "Condition", "Kind": "VectorIn"},
-        {"Name": "TrueValue", "Kind": "VectorIn"},
-        {"Name": "FalseValue", "Kind": "VectorIn"}
+        {"Name": "Condition", "Kind": "Input"},
+        {"Name": "TrueValue", "Kind": "Input"},
+        {"Name": "FalseValue", "Kind": "Input"}
       ],
       "TranslateInto": {
         "Instruction": "SelectInst",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Condition"]},
           {"GetBuiltinOperand": ["TrueValue"]},
@@ -37,16 +36,15 @@
     "RdRegionInt": {
       "Name": "rdregion_int",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorOut"},
-        {"Name": "Source", "Kind": "VectorIn"},
-        {"Name": "VStride", "Kind": "ScalarConst"},
-        {"Name": "Width", "Kind": "ScalarConst"},
-        {"Name": "Stride", "Kind": "ScalarConst"},
-        {"Name": "Offset", "Kind": "ScalarIn"}
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "VStride", "Kind": "Constant"},
+        {"Name": "Width", "Kind": "Constant"},
+        {"Name": "Stride", "Kind": "Constant"},
+        {"Name": "Offset", "Kind": "Input"}
       ],
       "TranslateInto": {
         "VC-Intrinsic": "genx_rdregioni",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Source"]},
           {"GetBuiltinOperand": ["VStride"]},
@@ -60,16 +58,15 @@
     "RdRegionFloat": {
       "Name": "rdregion_float",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorOut"},
-        {"Name": "Source", "Kind": "VectorIn"},
-        {"Name": "VStride", "Kind": "ScalarConst"},
-        {"Name": "Width", "Kind": "ScalarConst"},
-        {"Name": "Stride", "Kind": "ScalarConst"},
-        {"Name": "Offset", "Kind": "ScalarIn"}
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "VStride", "Kind": "Constant"},
+        {"Name": "Width", "Kind": "Constant"},
+        {"Name": "Stride", "Kind": "Constant"},
+        {"Name": "Offset", "Kind": "Input"}
       ],
       "TranslateInto": {
         "VC-Intrinsic": "genx_rdregionf",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Source"]},
           {"GetBuiltinOperand": ["VStride"]},
@@ -83,16 +80,16 @@
     "WrRegionInt": {
       "Name": "wrregion_int",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorInOut"},
-        {"Name": "Source", "Kind": "VectorIn"},
-        {"Name": "VStride", "Kind": "ScalarConst"},
-        {"Name": "Width", "Kind": "ScalarConst"},
-        {"Name": "Stride", "Kind": "ScalarConst"},
-        {"Name": "Offset", "Kind": "ScalarIn"}
+        {"Name": "Destination", "Kind": "Input"},
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "VStride", "Kind": "Constant"},
+        {"Name": "Width", "Kind": "Constant"},
+        {"Name": "Stride", "Kind": "Constant"},
+        {"Name": "Offset", "Kind": "Input"}
       ],
       "TranslateInto": {
         "VC-Intrinsic": "genx_wrregioni",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Destination"]},
           {"GetBuiltinOperand": ["Source"]},
@@ -108,16 +105,16 @@
     "WrRegionFloat": {
       "Name": "wrregion_float",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorInOut"},
-        {"Name": "Source", "Kind": "VectorIn"},
-        {"Name": "VStride", "Kind": "ScalarConst"},
-        {"Name": "Width", "Kind": "ScalarConst"},
-        {"Name": "Stride", "Kind": "ScalarConst"},
-        {"Name": "Offset", "Kind": "ScalarIn"}
+        {"Name": "Destination", "Kind": "Input"},
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "VStride", "Kind": "Constant"},
+        {"Name": "Width", "Kind": "Constant"},
+        {"Name": "Stride", "Kind": "Constant"},
+        {"Name": "Offset", "Kind": "Input"}
       ],
       "TranslateInto": {
         "VC-Intrinsic": "genx_wrregionf",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Destination"]},
           {"GetBuiltinOperand": ["Source"]},
@@ -142,7 +139,7 @@
     "PrintfFormatIndex": {
       "Name": "printf_format_index",
       "Operands": [
-        {"Name": "Source", "Kind": "PointerIn"}
+        {"Name": "Source", "Kind": "Input"}
       ],
       "TranslateInto": {
         "VC-Intrinsic": "genx_print_format_index",
@@ -152,88 +149,366 @@
         ]
       }
     },
-    "PrintfFormatIndexLegacy": {
-      "Name": "printf_format_index_legacy",
+    "LZD": {
+      "Name": "lzd",
       "Operands": [
-        {"Name": "Source", "Kind": "PointerIn"}
+        {"Name": "Source", "Kind": "Input"}
       ],
       "TranslateInto": {
-        "VC-Intrinsic": "genx_print_format_index",
+        "VC-Intrinsic": "genx_lzd",
         "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
           {"GetBuiltinOperand": ["Source"]}
         ]
       }
     },
-    "SVMScatter": {
-      "Name": "svm_scatter",
+    "AddCarry": {
+      "Name": "addc",
       "Operands": [
-        {"Name": "NumBlocks", "Kind": "ScalarConst"},
-        {"Name": "Address", "Kind": "VectorIn"},
-        {"Name": "Source", "Kind": "VectorIn"}
+        {"Name": "Sum", "Kind": "Output"},
+        {"Name": "FirstSrc", "Kind": "Input"},
+        {"Name": "SecondSrc", "Kind": "Input"}
       ],
       "TranslateInto": {
-        "VC-Intrinsic": "genx_svm_scatter",
+        "VC-Intrinsic": "genx_addc",
+        "ReturnType": {
+          "Code": [
+            "getStructureOf({}, {})",
+            {"GetBuiltinReturnType": []},
+            {"GetBuiltinOperandType": ["Sum"]}
+          ]
+        },
+        "Operands": [
+          {"GetBuiltinOperand": ["FirstSrc"]},
+          {"GetBuiltinOperand": ["SecondSrc"]}
+        ]
+      }
+    },
+    "LocalID": {
+      "Name": "local_id",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_local_id",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "LocalSize": {
+      "Name": "local_size",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_local_size",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "GroupCount": {
+      "Name": "group_count",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_group_count",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "GroupIDX": {
+      "Name": "group_id_x",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_group_id_x",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "GroupIDY": {
+      "Name": "group_id_y",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_group_id_y",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "GroupIDZ": {
+      "Name": "group_id_z",
+      "Operands": [],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_group_id_z",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": []
+      }
+    },
+    "CBit": {
+      "Name": "cbit",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_cbit",
         "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
-          {"Code": [
-            "*IRB.CreateVectorSplat(getVectorWidth({}), IRB.getTrue())",
-            {"GetBuiltinOperandType": ["Address"]}
-          ]},
-          {"GetBuiltinOperand": ["NumBlocks"]},
-          {"GetBuiltinOperand": ["Address"]},
           {"GetBuiltinOperand": ["Source"]}
         ]
       }
     },
-    "SVMAtomicAdd": {
-      "Name": "svm_atomic_add",
+    "BFRev": {
+      "Name": "bfrev",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorOut"},
-        {"Name": "Address", "Kind": "VectorIn"},
-        {"Name": "Source", "Kind": "VectorIn"}
+        {"Name": "Source", "Kind": "Input"}
       ],
       "TranslateInto": {
-        "VC-Intrinsic": "genx_svm_atomic_add",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "VC-Intrinsic": "genx_bfrev",
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
-          {"Code": [
-            "*IRB.CreateVectorSplat(getVectorWidth({}), IRB.getTrue())",
-            {"GetBuiltinOperandType": ["Address"]}
-          ]},
-          {"GetBuiltinOperand": ["Address"]},
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "Fma": {
+      "Name": "fma",
+      "Operands": [
+        {"Name": "Factor0", "Kind": "Input"},
+        {"Name": "Factor1", "Kind": "Input"},
+        {"Name": "Addend", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "fma",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Factor0"]},
+          {"GetBuiltinOperand": ["Factor1"]},
+          {"GetBuiltinOperand": ["Addend"]}
+        ]
+      }
+    },
+    "AbsInt": {
+      "Name": "abs_int",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "VC-Intrinsic": "genx_absi",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "AbsFloat": {
+      "Name": "abs_float",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "fabs",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "Ceil": {
+      "Name": "ceil",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "ceil",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "Floor": {
+      "Name": "floor",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "floor",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "Trunc": {
+      "Name": "trunc",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "trunc",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]}
+        ]
+      }
+    },
+    "Sqrt": {
+      "Name": "sqrt",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "sqrt",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
           {"GetBuiltinOperand": ["Source"]},
-          {"Code": [
-            "*UndefValue::get(&{})",
-            {"GetBuiltinOperandType": ["Source"]}
-          ]}
+          {"GetBuiltinOperand": ["IsFast"]}
         ]
       }
     },
-    "LZDScalar": {
-      "Name": "lzd_scalar",
+    "MinNum": {
+      "Name": "minnum",
       "Operands": [
-        {"Name": "Source", "Kind": "ScalarIn"}
+        {"Name": "Source0", "Kind": "Input"},
+        {"Name": "Source1", "Kind": "Input"}
       ],
       "TranslateInto": {
-        "VC-Intrinsic": "genx_lzd",
+        "LLVM-Intrinsic": "minnum",
         "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
-          {"GetBuiltinOperand": ["Source"]}
+          {"GetBuiltinOperand": ["Source0"]},
+          {"GetBuiltinOperand": ["Source1"]}
         ]
       }
     },
-    "LZDVector": {
-      "Name": "lzd_vector",
+    "MaxNum": {
+      "Name": "maxnum",
       "Operands": [
-        {"Name": "Destination", "Kind": "VectorOut"},
-        {"Name": "Source", "Kind": "VectorIn"}
+        {"Name": "Source0", "Kind": "Input"},
+        {"Name": "Source1", "Kind": "Input"}
       ],
       "TranslateInto": {
-        "VC-Intrinsic": "genx_lzd",
-        "ReturnType": {"GetBuiltinOperandType": ["Destination"]},
+        "LLVM-Intrinsic": "maxnum",
+        "ReturnType": {"GetBuiltinReturnType": []},
         "Operands": [
-          {"GetBuiltinOperand": ["Source"]}
+          {"GetBuiltinOperand": ["Source0"]},
+          {"GetBuiltinOperand": ["Source1"]}
+        ]
+      }
+    },
+    "Log2": {
+      "Name": "log2",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "log2",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["IsFast"]}
+        ]
+      }
+    },
+    "Exp2": {
+      "Name": "exp2",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "exp2",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["IsFast"]}
+        ]
+      }
+    },
+    "Powr": {
+      "Name": "powr",
+      "Operands": [
+        {"Name": "Base", "Kind": "Input"},
+        {"Name": "Exponent", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "pow",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Base"]},
+          {"GetBuiltinOperand": ["Exponent"]},
+          {"GetBuiltinOperand": ["IsFast"]}
+        ]
+      }
+    },
+    "Sin": {
+      "Name": "sin",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "sin",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["IsFast"]}
+        ]
+      }
+    },
+    "Cos": {
+      "Name": "cos",
+      "Operands": [
+        {"Name": "Source", "Kind": "Input"},
+        {"Name": "IsFast", "Kind": "Constant"}
+      ],
+      "TranslateInto": {
+        "LLVM-Intrinsic": "cos",
+        "ReturnType": {"GetBuiltinReturnType": []},
+        "Operands": [
+          {"GetBuiltinOperand": ["Source"]},
+          {"GetBuiltinOperand": ["IsFast"]}
+        ]
+      }
+    },
+    "AtomicRMW": {
+        "Name": "atomicrmw",
+        "Operands": [
+          {"Name": "Ptr", "Kind": "Input"},
+          {"Name": "Operation", "Kind": "Input"},
+          {"Name": "Operand", "Kind": "Input"},
+          {"Name": "Semantics", "Kind": "Input"},
+          {"Name": "Scope", "Kind": "Input"}
+        ],
+        "TranslateInto": {
+          "Instruction": "AtomicRMWInst",
+          "ReturnType": {"GetBuiltinReturnType": []},
+          "Operands": [
+            {"GetBuiltinOperand": ["Ptr"]},
+            {"GetBuiltinOperand": ["Operation"]},
+            {"GetBuiltinOperand": ["Operand"]},
+            {"GetBuiltinOperand": ["Semantics"]},
+            {"GetBuiltinOperand": ["Scope"]}
+        ]
+      }
+    },
+    "CmpXchg": {
+        "Name": "cmpxchg",
+        "Operands": [
+          {"Name": "Ptr", "Kind": "Input"},
+          {"Name": "Operand0", "Kind": "Input"},
+          {"Name": "Operand1", "Kind": "Input"},
+          {"Name": "SemanticsSuccess", "Kind": "Input"},
+          {"Name": "SemanticsFailure", "Kind": "Input"},
+          {"Name": "Scope", "Kind": "Input"}
+        ],
+        "TranslateInto": {
+          "Instruction": "CmpXchgInst",
+          "ReturnType": {"GetBuiltinReturnType": []},
+          "Operands": [
+            {"GetBuiltinOperand": ["Ptr"]},
+            {"GetBuiltinOperand": ["Operand0"]},
+            {"GetBuiltinOperand": ["Operand1"]},
+            {"GetBuiltinOperand": ["SemanticsSuccess"]},
+            {"GetBuiltinOperand": ["SemanticsFailure"]},
+            {"GetBuiltinOperand": ["Scope"]}
         ]
       }
     }

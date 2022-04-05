@@ -19,13 +19,15 @@ SPDX-License-Identifier: MIT
 #include "GenXBaling.h"
 #include "GenXIntrinsics.h"
 #include "GenXNumbering.h"
-#include "GenXRegion.h"
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
+
 #include "vc/GenXOpts/GenXAnalysis.h"
-#include "vc/GenXOpts/Utils/InternalMetadata.h"
-#include "vc/GenXOpts/Utils/RegCategory.h"
+#include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/InternalMetadata.h"
+#include "vc/Utils/GenX/PredefinedVariable.h"
+#include "vc/Utils/GenX/RegCategory.h"
 
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 
@@ -50,22 +52,7 @@ SPDX-License-Identifier: MIT
 using namespace llvm;
 using namespace genx;
 
-SimpleValue::SimpleValue(const AssertingSV &ASV)
-    : SimpleValue(ASV.getValue(), ASV.getIndex()) {}
-
-char GenXLiveness::ID = 0;
-INITIALIZE_PASS_BEGIN(GenXLiveness, "GenXLiveness", "GenXLiveness", false, false)
-INITIALIZE_PASS_END(GenXLiveness, "GenXLiveness", "GenXLiveness", false, false)
-
-FunctionGroupPass *llvm::createGenXLivenessPass()
-{
-  initializeGenXLivenessPass(*PassRegistry::getPassRegistry());
-  return new GenXLiveness();
-}
-
-void GenXLiveness::getAnalysisUsage(AnalysisUsage &AU) const
-{
-  FunctionGroupPass::getAnalysisUsage(AU);
+void GenXLiveness::getAnalysisUsage(AnalysisUsage &AU) {
   AU.addRequired<TargetPassConfig>();
   AU.setPreservesAll();
 }
@@ -75,7 +62,7 @@ void GenXLiveness::getAnalysisUsage(AnalysisUsage &AU) const
  */
 bool GenXLiveness::runOnFunctionGroup(FunctionGroup &ArgFG)
 {
-  clear();
+  LLVM_DEBUG(dbgs() << "init GenXLiveness\n");
   FG = &ArgFG;
   Subtarget = &getAnalysis<TargetPassConfig>()
                    .getTM<GenXTargetMachine>()
@@ -85,10 +72,10 @@ bool GenXLiveness::runOnFunctionGroup(FunctionGroup &ArgFG)
 }
 
 /***********************************************************************
- * clear : clear the GenXLiveness
+ * releaseMemory: clear the GenXLiveness
  */
-void GenXLiveness::clear()
-{
+void GenXLiveness::releaseMemory() {
+  LLVM_DEBUG(dbgs() << "releaseMemory for GenXLivness\n");
   while (!LiveRangeMap.empty()) {
     LiveRange *LR = begin()->second;
     for (auto i = LR->value_begin(), e = LR->value_end(); i != e; ++i) {
@@ -107,6 +94,44 @@ void GenXLiveness::clear()
   BaseToArgAddrMap.clear();
 }
 
+static vc::RegCategory getCategoryForPredefinedVariable(SimpleValue SV) {
+  const vc::RegCategory Category =
+      llvm::StringSwitch<vc::RegCategory>(SV.getValue()->getName())
+          .Case(vc::PredefVar::BSSName, vc::RegCategory::Surface)
+          .Case(vc::PredefVar::ImplicitArgsBufferName, vc::RegCategory::General)
+          .Case(vc::PredefVar::LocalIDBufferName, vc::RegCategory::General)
+          .Default(vc::RegCategory::None);
+  IGC_ASSERT_MESSAGE(Category != vc::RegCategory::None,
+                     "Unhandled predefined variable");
+  return Category;
+}
+
+static bool isPredefinedVariable(SimpleValue SV) {
+  Value *V = SV.getValue();
+  IGC_ASSERT_MESSAGE(V, "Expected value");
+  bool Result = vc::PredefVar::isPV(*V);
+  if (Result)
+    IGC_ASSERT_MESSAGE(SV.getIndex() == 0,
+                       "Expected single simple value for predefined variable");
+  return Result;
+}
+
+/***********************************************************************
+ * getDefaultCategory: get default category based on SimpleValue
+ *
+ * The default category is PREDICATE for i1 or a vector of i1,
+ * Surface for BSSName predefined variable or GENERAL for anything else.
+ */
+static vc::RegCategory getDefaultCategory(SimpleValue SV) {
+  if (isPredefinedVariable(SV))
+    return getCategoryForPredefinedVariable(SV);
+  Type *Ty =
+      IndexFlattener::getElementType(SV.getValue()->getType(), SV.getIndex());
+  if (Ty->getScalarType()->isIntegerTy(1))
+    return vc::RegCategory::Predicate;
+  return vc::RegCategory::General;
+}
+
 /***********************************************************************
  * setLiveRange : add a SimpleValue to a LiveRange
  *
@@ -119,10 +144,11 @@ void GenXLiveness::setLiveRange(SimpleValue V, LiveRange *LR)
   IGC_ASSERT_MESSAGE(
       LiveRangeMap.find(V) == end(),
       "Attempting to set LiveRange for Value that already has one");
+  LLVM_DEBUG(dbgs() << "Setting LiveRange " << *LR << " for SV: " << V << "\n");
   LR->addValue(V);
   LiveRangeMap[V] = LR;
   LR->setAlignmentFromValue(
-      *DL, V, Subtarget ? Subtarget->getGRFWidth() : defaultGRFWidth);
+      *DL, V, Subtarget ? Subtarget->getGRFByteSize() : defaultGRFByteSize);
 }
 
 /***********************************************************************
@@ -130,13 +156,16 @@ void GenXLiveness::setLiveRange(SimpleValue V, LiveRange *LR)
  */
 void LiveRange::setAlignmentFromValue(const DataLayout &DL, const SimpleValue V,
                                       const unsigned GRFWidth) {
+  LLVM_DEBUG(dbgs() << "Setting Alignment for value " << V);
   const unsigned AlignInBytes = getValueAlignmentInBytes(*(V.getValue()), DL);
   const unsigned LogByteAlign = Log2_32(AlignInBytes);
   // Set max alignment to GRF.
   const unsigned MaxLogAlign =
       genx::getLogAlignment(VISA_Align::ALIGN_GRF, GRFWidth);
   const unsigned SaturatedLogAlign = std::clamp(LogByteAlign, 0u, MaxLogAlign);
-  setLogAlignment(ceilLogAlignment(SaturatedLogAlign, GRFWidth));
+  unsigned ResultAlign = ceilLogAlignment(SaturatedLogAlign, GRFWidth);
+  LLVM_DEBUG(dbgs() << " result: " << ResultAlign << "\n");
+  setLogAlignment(ResultAlign);
 }
 
 /***********************************************************************
@@ -144,6 +173,7 @@ void LiveRange::setAlignmentFromValue(const DataLayout &DL, const SimpleValue V,
  */
 void GenXLiveness::rebuildCallGraph()
 {
+  LLVM_DEBUG(dbgs() << "Rebuilding CallGraph\n");
   CG = std::make_unique<genx::CallGraph>(FG);
   CG->build(this);
 }
@@ -162,8 +192,11 @@ void GenXLiveness::rebuildCallGraph()
  */
 void GenXLiveness::buildSubroutineLRs()
 {
-  if (FG->size() == 1)
+  LLVM_DEBUG(dbgs() << "BuildingSubroutineLRs\n");
+  if (FG->size() == 1) {
+    LLVM_DEBUG(dbgs() << "No subroutines\n");
     return; // no subroutines
+  }
   // Build a call graph for the FunctionGroup. It is acyclic because there is
   // no recursion.
   rebuildCallGraph();
@@ -178,6 +211,7 @@ void GenXLiveness::buildSubroutineLRs()
  */
 LiveRange *GenXLiveness::visitPropagateSLRs(Function *F)
 {
+  LLVM_DEBUG(dbgs() << "VisitPropagateSLRs begin\n");
   LiveRange *LR = getOrCreateLiveRange(F);
   // Add a segment for just this function.
   LR->push_back(Segment(Numbering->getNumber(F),
@@ -191,26 +225,32 @@ LiveRange *GenXLiveness::visitPropagateSLRs(Function *F)
     LR->addSegments(ChildLR);
   }
   LR->sortAndMerge();
+  LLVM_DEBUG(dbgs() << "VisitPropagateSLRs return: " << *LR << "\n");
   return LR;
 }
 
 /***********************************************************************
  * buildLiveRange : build live range for one value (arg or non-baled inst)
  *
- * For a struct value, each element's live range is built separately, even
+ * For an aggregate value, each element's live range is built separately, even
  * though they are almost identical. They are not exactly identical,
  * differing at the def if it is the return value of a call, and at a use
  * that is a call arg.
  */
 void GenXLiveness::buildLiveRange(Value *V)
 {
-  auto ST = dyn_cast<StructType>(V->getType());
-  if (!ST) {
+  LLVM_DEBUG(dbgs() << "Building LiveRange for :" << *V << "\n");
+  Type *Ty = V->getType();
+  if (!Ty->isAggregateType()) {
+    LLVM_DEBUG(dbgs() << "It is not aggregate, build for one\n");
     buildLiveRange(SimpleValue(V));
     return;
   }
-  for (unsigned i = 0, e = IndexFlattener::getNumElements(ST); i != e; ++i)
+  for (unsigned i = 0, e = IndexFlattener::getNumElements(Ty); i != e; ++i) {
+    LLVM_DEBUG(dbgs() << "Bulding for aggregate Index " << i << " from " << e
+                      << "\n");
     buildLiveRange(SimpleValue(V, i));
+  }
 }
 
 /***********************************************************************
@@ -238,28 +278,35 @@ void GenXLiveness::buildLiveRange(Value *V)
  */
 LiveRange *GenXLiveness::buildLiveRange(SimpleValue V)
 {
+  LLVM_DEBUG(dbgs() << "Building LiveRange for SimpleValue: " << V << "\n");
   LiveRange *LR = getOrCreateLiveRange(V);
   rebuildLiveRange(LR);
+  LLVM_DEBUG(dbgs() << "Building LiveRange for SimpleValue return: " << *LR
+                    << "\n");
   return LR;
 }
 
 void GenXLiveness::rebuildLiveRange(LiveRange *LR)
 {
+  LLVM_DEBUG(dbgs() << "Rebuilding LiveRange: " << *LR << "\n");
   LR->getOrDefaultCategory();
   LR->Segments.clear();
   for (auto vi = LR->value_begin(), ve = LR->value_end(); vi != ve; ++vi)
     rebuildLiveRangeForValue(LR, *vi);
   LR->sortAndMerge();
+  LLVM_DEBUG(dbgs() << "Rebuilding LiveRange result: " << *LR << "\n");
 }
 
 void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
 {
+  LLVM_DEBUG(dbgs() << "rebuilding LiveRange: " << *LR
+                    << " for SimpleValue: " << SV << "\n");
   Value *V = SV.getValue();
 
   // This value is a global variable. Its live range is the entire kernel.
-  if (auto GV = getUnderlyingGlobalVariable(V)) {
-    (void)GV;
+  if (vc::getUnderlyingGlobalVariable(V)) {
     LR->push_back(0, Numbering->getLastNumber());
+    LLVM_DEBUG(dbgs() << "It is global value, rebuilded LR: " << *LR << "\n");
     return;
   }
 
@@ -269,15 +316,22 @@ void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
     // range is from the call to where its post-copy would go just afterwards
     // for each call site, also from the site of the pre-copy to the return
     // instruction.
+    LLVM_DEBUG(dbgs() << "It is UnifiedRet\n");
     for (auto *U: Func->users()) {
-      if (auto *CI = genx::checkFunctionCall(U, Func))
+      if (auto *CI = genx::checkFunctionCall(U, Func)) {
         LR->push_back(Numbering->getNumber(CI),
                       Numbering->getRetPostCopyNumber(CI, SV.getIndex()));
+        LLVM_DEBUG(dbgs() << "Adding Segment: " << *LR << "\n");
+      }
     }
     for (auto fi = Func->begin(), fe = Func->end(); fi != fe; ++fi)
-      if (auto RI = dyn_cast<ReturnInst>(fi->getTerminator()))
+      if (auto RI = dyn_cast<ReturnInst>(fi->getTerminator())) {
         LR->push_back(Numbering->getRetPreCopyNumber(RI, SV.getIndex()),
             Numbering->getNumber(RI));
+        LLVM_DEBUG(dbgs() << "It is ReturnInst, Adding Segment: " << *LR
+                          << "\n");
+      }
+    LLVM_DEBUG(dbgs() << "It is UnifiedRet, return LR: " << *LR << "\n");
     return;
   }
 
@@ -346,7 +400,7 @@ void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
         if (CI->isInlineAsm() || IGCLLVM::isIndirectCall(*CI))
           Num = Numbering->getNumber(UserHead);
         else {
-        switch (GenXIntrinsic::getAnyIntrinsicID(CI)) {
+        switch (vc::getAnyIntrinsicID(CI)) {
           case GenXIntrinsic::not_any_intrinsic:
             // Use as a call arg. We say that the use is at the arg pre-copy
             // slot, where the arg copy will be inserted in coalescing. This
@@ -473,6 +527,7 @@ void GenXLiveness::rebuildLiveRangeForValue(LiveRange *LR, SimpleValue SV)
 }
 
 void GenXLiveness::removeBale(Bale &B) {
+  LLVM_DEBUG(dbgs() << "Removing Bale: " << B << "\n");
   for (auto bi = B.begin(), be = B.end(); bi != be; ++bi)
     removeValue(bi->Inst);
 }
@@ -489,12 +544,14 @@ void GenXLiveness::removeBale(Bale &B) {
  */
 void GenXLiveness::removeValue(Value *V)
 {
+  LLVM_DEBUG(dbgs() << "Removing Value: " << *V << "\n");
   for (unsigned i = 0, e = IndexFlattener::getNumElements(V->getType()); i != e; ++i)
     removeValue(SimpleValue(V, i));
 }
 
 void GenXLiveness::removeValue(SimpleValue V)
 {
+  LLVM_DEBUG(dbgs() << "Removing SimpleValue: " << V << "\n");
   LiveRange *LR = removeValueNoDelete(V);
   if (LR && !LR->Values.size()) {
     // V was the only value in LR. Remove LR completely.
@@ -526,6 +583,7 @@ LiveRange *GenXLiveness::removeValueNoDelete(SimpleValue V)
  */
 void GenXLiveness::removeValuesNoDelete(LiveRange *LR)
 {
+  LLVM_DEBUG(dbgs() << "Removing all Values in LR, not delete " << *LR << "\n");
   for (auto vi = LR->value_begin(), ve = LR->value_end(); vi != ve; ++vi)
     LiveRangeMap.erase(*vi);
   LR->value_clear();
@@ -537,6 +595,8 @@ void GenXLiveness::removeValuesNoDelete(LiveRange *LR)
  */
 void GenXLiveness::replaceValue(Value *OldVal, Value *NewVal)
 {
+  LLVM_DEBUG(dbgs() << "Replace Values: from " << *OldVal << " to " << *NewVal
+                    << "\n");
   for (unsigned i = 0, e = IndexFlattener::getNumElements(OldVal->getType());
       i != e; ++i)
     replaceValue(SimpleValue(OldVal, i), SimpleValue(NewVal, i));
@@ -544,6 +604,8 @@ void GenXLiveness::replaceValue(Value *OldVal, Value *NewVal)
 
 void GenXLiveness::replaceValue(SimpleValue OldVal, SimpleValue NewVal)
 {
+  LLVM_DEBUG(dbgs() << "Replace SimpleValues: from " << OldVal << " to "
+                    << NewVal << "\n");
   LiveRangeMap_t::iterator i = LiveRangeMap.find(OldVal);
   IGC_ASSERT(i != end());
   LiveRange *LR = i->second;
@@ -561,8 +623,9 @@ void GenXLiveness::replaceValue(SimpleValue OldVal, SimpleValue NewVal)
  */
 LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V)
 {
-  LiveRangeMap_t::iterator i = LiveRangeMap.insert(
-      LiveRangeMap_t::value_type(V, 0)).first;
+  auto [i, isInserted] = LiveRangeMap.emplace(V, nullptr);
+  LLVM_DEBUG(dbgs() << "getOrCreateLiveRange for SimpleValue: " << V << " "
+                    << (isInserted ? "Inserted" : "Not inserted") << "\n");
   LiveRange *LR = i->second;
   if (!LR) {
     // Newly created map entry. Create the LiveRange for it.
@@ -570,7 +633,7 @@ LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V)
     LR->Values.push_back(V);
     i->second = LR;
     LR->setAlignmentFromValue(
-        *DL, V, Subtarget ? Subtarget->getGRFWidth() : defaultGRFWidth);
+        *DL, V, Subtarget ? Subtarget->getGRFByteSize() : defaultGRFByteSize);
   }
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   // Give the Value a name if it doesn't already have one.
@@ -578,7 +641,7 @@ LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V)
     std::string NameBuf;
     StringRef Name = "arg";
     if (auto Inst = dyn_cast<Instruction>(V.getValue())) {
-      unsigned IID = GenXIntrinsic::getAnyIntrinsicID(V.getValue());
+      unsigned IID = vc::getAnyIntrinsicID(V.getValue());
       if (GenXIntrinsic::isAnyNonTrivialIntrinsic(IID)) {
         // For an intrinsic call, use the intrinsic name after the
         // final period.
@@ -593,28 +656,36 @@ LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V)
     V.getValue()->setName(Name);
   }
 #endif
+  LLVM_DEBUG(dbgs() << "Resulted LR: " << *LR << "\n");
   return LR;
 }
 
-LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V, unsigned Cat, unsigned LogAlign) {
+LiveRange *GenXLiveness::getOrCreateLiveRange(SimpleValue V,
+                                              vc::RegCategory Cat,
+                                              unsigned LogAlign) {
+  LLVM_DEBUG(dbgs() << "getOrCreateLiveRange with SimpleValue: " << V
+                    << " Category: " << vc::getRegCategoryName(Cat)
+                    << " LogAlign: " << LogAlign << "\n");
   auto LR = getOrCreateLiveRange(V);
   LR->setCategory(Cat);
   LR->setLogAlignment(LogAlign);
+  LLVM_DEBUG(dbgs() << "getOrCreateLiveRange return: " << *LR << "\n");
   return LR;
 }
 
 /***********************************************************************
  * eraseLiveRange : get rid of live range for a Value, possibly multiple
- *  ones if it is a struct value
+ *  ones if it is an aggregate value
  */
 void GenXLiveness::eraseLiveRange(Value *V)
 {
-  auto ST = dyn_cast<StructType>(V->getType());
-  if (!ST) {
+  LLVM_DEBUG(dbgs() << "Erasing LiveRange for Value: " << *V << "\n");
+  Type *Ty = V->getType();
+  if (!Ty->isAggregateType()) {
     eraseLiveRange(SimpleValue(V));
     return;
   }
-  for (unsigned i = 0, e = IndexFlattener::getNumElements(ST); i != e; ++i)
+  for (unsigned i = 0, e = IndexFlattener::getNumElements(Ty); i != e; ++i)
     eraseLiveRange(SimpleValue(V, i));
 }
 
@@ -623,6 +694,7 @@ void GenXLiveness::eraseLiveRange(Value *V)
  */
 void GenXLiveness::eraseLiveRange(SimpleValue V)
 {
+  LLVM_DEBUG(dbgs() << "Erasing LiveRange for SimpleValue: " << V << "\n");
   auto LR = getLiveRangeOrNull(V);
   if (LR)
     eraseLiveRange(LR);
@@ -634,6 +706,7 @@ void GenXLiveness::eraseLiveRange(SimpleValue V)
  */
 void GenXLiveness::eraseLiveRange(LiveRange *LR)
 {
+  LLVM_DEBUG(dbgs() << "Erasing LiveRange: " << *LR << "\n");
   for (auto vi = LR->value_begin(), ve = LR->value_end(); vi != ve; ++vi)
     LiveRangeMap.erase(*vi);
   delete LR;
@@ -647,9 +720,13 @@ void GenXLiveness::eraseLiveRange(LiveRange *LR)
  */
 const LiveRange *GenXLiveness::getLiveRangeOrNull(SimpleValue V) const
 {
+  LLVM_DEBUG(dbgs() << "Getting LiveRangeOrNull for: " << V);
   auto i = LiveRangeMap.find(V);
-  if (i == end())
+  if (i == end()) {
+    LLVM_DEBUG(dbgs() << " Not found, nullptr return\n");
     return nullptr;
+  }
+  LLVM_DEBUG(dbgs() << " Found: " << *(i->second) << "\n");
   return i->second;
 }
 
@@ -701,8 +778,8 @@ Value *GenXLiveness::getUnifiedRetIfExist(Function *F) const {
  * Cannot be called on a function with void return type.
  *
  * This also creates the LiveRange for the unified return value, or
- * multiple ones if it is struct type, and sets the category to the same as in
- * one of the return instructions.
+ * multiple ones if it is aggregate type, and sets the category to the same as
+ * in one of the return instructions.
  */
 Value *GenXLiveness::createUnifiedRet(Function *F) {
   IGC_ASSERT_MESSAGE(!F->isDeclaration(), "must be a function definition");
@@ -720,12 +797,14 @@ Value *GenXLiveness::createUnifiedRet(Function *F) {
   Value *RetVal = Ret->getOperand(0);
   // Use the categories of its operand to set the categories of the unified
   // return value.
-  for (unsigned StructIdx = 0, NumElements = IndexFlattener::getNumElements(Ty);
-       StructIdx != NumElements; ++StructIdx) {
-    int Cat = getOrCreateLiveRange(SimpleValue(RetVal, StructIdx))
-                  ->getOrDefaultCategory();
-    SimpleValue SV(URet, StructIdx);
-    getOrCreateLiveRange(SV)->setCategory(Cat);
+  for (unsigned AggrIdx = 0, NumElements = IndexFlattener::getNumElements(Ty);
+       AggrIdx != NumElements; ++AggrIdx) {
+    auto RetValSV = SimpleValue(RetVal, AggrIdx);
+    auto *RetValLR = getLiveRangeOrNull(RetValSV);
+    auto URetSV = SimpleValue(URet, AggrIdx);
+    auto Cat = RetValLR ? RetValLR->getOrDefaultCategory()
+                        : getDefaultCategory(RetValSV);
+    getOrCreateLiveRange(URetSV)->setCategory(Cat);
   }
 
   UnifiedRets[F] = URet;
@@ -798,51 +877,18 @@ LiveRange::iterator LiveRange::find(unsigned Pos)
   return I;
 }
 
-static unsigned getCategoryForPredefinedVariable(SimpleValue SV) {
-  const unsigned Category =
-      llvm::StringSwitch<unsigned>(SV.getValue()->getName())
-          .Case(genx::BSSVariableName, RegCategory::SURFACE)
-          .Default(RegCategory::NUMCATEGORIES);
-  IGC_ASSERT_MESSAGE(Category != RegCategory::NUMCATEGORIES,
-                     "Unhandled predefined variable");
-  return Category;
-}
-
-static bool isPredefinedVariable(SimpleValue SV) {
-  Value *V = SV.getValue();
-  IGC_ASSERT_MESSAGE(V, "Expected value");
-  if (!isa<GlobalVariable>(V))
-    return false;
-  IGC_ASSERT_MESSAGE(SV.getIndex() == 0,
-                     "Expected single simple value for predefined variable");
-  auto *GV = cast<GlobalVariable>(V);
-  return GV->hasAttribute(genx::VariableMD::VCPredefinedVariable);
-}
-
 /***********************************************************************
  * getOrDefaultCategory : get category; if none, set default
  *
  * The default category is PREDICATE for i1 or a vector of i1, or GENERAL
  * for anything else.
  */
-unsigned LiveRange::getOrDefaultCategory()
-{
-  unsigned Cat = getCategory();
-  if (Cat != RegCategory::NONE)
+vc::RegCategory LiveRange::getOrDefaultCategory() {
+  vc::RegCategory Cat = getCategory();
+  if (Cat != vc::RegCategory::None)
     return Cat;
   IGC_ASSERT(!value_empty());
-  SimpleValue SV = *value_begin();
-  if (isPredefinedVariable(SV)) {
-    Cat = getCategoryForPredefinedVariable(SV);
-    setCategory(Cat);
-    return Cat;
-  }
-  Type *Ty = IndexFlattener::getElementType(
-      SV.getValue()->getType(), SV.getIndex());
-  if (Ty->getScalarType()->isIntegerTy(1))
-    Cat = RegCategory::PREDICATE;
-  else
-    Cat = RegCategory::GENERAL;
+  Cat = getDefaultCategory(*value_begin());
   setCategory(Cat);
   return Cat;
 }
@@ -854,8 +900,9 @@ unsigned LiveRange::getOrDefaultCategory()
  * and they are considered to cause interference by
  * checkIfOverlappingSegmentsInterfere below.
  */
-bool GenXLiveness::interfere(LiveRange *LR1, LiveRange *LR2)
-{
+bool GenXLiveness::interfere(LiveRange *LR1, LiveRange *LR2) {
+  if (CoalescingDisabled)
+    return true;
   return getSingleInterferenceSites(LR1, LR2, nullptr);
 }
 
@@ -907,8 +954,9 @@ bool GenXLiveness::interfere(LiveRange *LR1, LiveRange *LR2)
  * of multiple two address results being already coalesced together through phi
  * nodes.
  */
-bool GenXLiveness::twoAddrInterfere(LiveRange *LR1, LiveRange *LR2)
-{
+bool GenXLiveness::twoAddrInterfere(LiveRange *LR1, LiveRange *LR2) {
+  if (CoalescingDisabled)
+    return true;
   SmallVector<unsigned, 4> Sites;
   if (getSingleInterferenceSites(LR1, LR2, &Sites))
     return true; // interferes, not just single number sites
@@ -1115,8 +1163,9 @@ LiveRange *GenXLiveness::coalesce(LiveRange *LR1, LiveRange *LR2,
  * if LR1 includes a value that is a phi node whose definition is within
  * LR2.
  */
-bool GenXLiveness::copyInterfere(LiveRange *LR1, LiveRange *LR2)
-{
+bool GenXLiveness::copyInterfere(LiveRange *LR1, LiveRange *LR2) {
+  if (CoalescingDisabled)
+    return true;
   // Find a phi node value in LR1. It can have at most one, because only
   // copy coalescing has occurred up to now, and copy coalescing does not
   // occur at a phi node.
@@ -1161,7 +1210,7 @@ bool GenXLiveness::wrapsAround(Value *V1, Value *V2)
 }
 
 /***********************************************************************
- * insertCopy : insert a copy of a non-struct value
+ * insertCopy : insert a copy of a non-aggregate value
  *
  * Enter:   InputVal = value to copy
  *          LR = live range to add the new value to (0 to avoid adjusting
@@ -1232,14 +1281,15 @@ Instruction *GenXLiveness::insertCopy(Value *InputVal, LiveRange *LR,
   }
 
   Region R(InputVal);
-  unsigned MaxNum =
-      R.getLegalSize(/* StartIdx */ 0, /* Allow2D */ false, R.NumElements, ST);
+  IGC_ASSERT(ST);
+  unsigned MaxNum = getLegalRegionSizeForTarget(
+      *ST, R, /* StartIdx */ 0, /* Allow2D */ false, R.NumElements);
   // Adjust size to Exec size
   MaxNum = std::min(MaxNum, TotalEMSize);
   if (exactLog2(R.NumElements) >= 0 && R.NumElements <= MaxNum) {
     // Can be done with a single copy.
-    if (SourceLR && (SourceLR->Category != RegCategory::GENERAL
-        || (LR && LR->Category != RegCategory::GENERAL))) {
+    if (SourceLR && (SourceLR->Category != vc::RegCategory::General ||
+                     (LR && LR->Category != vc::RegCategory::General))) {
       // Need a category conversion (including the case that the two
       // categories are the same but not GENERAL).
       NewInst = createConvert(InputVal, Name, InsertBefore);
@@ -1262,12 +1312,12 @@ Instruction *GenXLiveness::insertCopy(Value *InputVal, LiveRange *LR,
       if (!GenXIntrinsic::isWrRegion(V))
         return true;
       IntrinsicInst *WII = cast<IntrinsicInst>(V);
-      Region R(WII, BaleInfo());
+      Region R = makeRegionFromBaleInfo(WII, BaleInfo());
       if (R.Indirect || !R.isContiguous() || !R.isWholeNumRows())
         return true;
       if ((R.Offset % R.ElementBytes) != 0)
         return true;
-      unsigned Base = R.Offset / R.ElementBytes;
+      unsigned Base = R.getOffsetInElements();
       for (unsigned Offset = 0; Offset < R.NumElements; /*EMPTY*/) {
         unsigned NumElts = std::min(MaxElt, R.NumElements - Offset);
         // Round NumElts down to power of 2. That is how many elements we
@@ -1450,7 +1500,7 @@ Value *GenXLiveness::getAddressBase(Value *Addr)
     auto Head = Baling->getBaleHead(user);
     if (Head && isa<StoreInst>(Head)) {
       Value *V = Head->getOperand(1);
-      V = getUnderlyingGlobalVariable(V);
+      V = vc::getUnderlyingGlobalVariable(V);
       IGC_ASSERT_MESSAGE(V, "null base not expected");
       return V;
     }
@@ -1463,13 +1513,13 @@ Value *GenXLiveness::getAddressBase(Value *Addr)
     "base register not found for address");
   Value *BaseV = i->second;
   LiveRange *LR = getLiveRange(BaseV);
-  // Find a SimpleValue in the live range that is not a struct member.
+  // Find a SimpleValue in the live range that is not an aggregate member.
   for (auto vi = LR->value_begin(), ve = LR->value_end(); vi != ve; ++vi) {
     Value *V = vi->getValue();
-    if (!isa<StructType>(V->getType()))
+    if (!V->getType()->isAggregateType())
       return V;
   }
-  IGC_ASSERT_EXIT_MESSAGE(0, "non-struct value not found");
+  IGC_ASSERT_EXIT_MESSAGE(0, "non-aggregate value not found");
 }
 
 /***********************************************************************
@@ -1514,21 +1564,22 @@ void LiveRange::dump() const
 }
 #endif
 
-void GenXLiveness::printValueLiveness(Value *V, raw_ostream &OS) const {
-  const LiveRange *LR = getLiveRangeOrNull(V);
+void GenXLiveness::printValueLiveness(SimpleValue SV, raw_ostream &OS) const {
+  const LiveRange *LR = getLiveRangeOrNull(SV);
   if (!LR)
     return;
   // Only show an LR if the map iterator is on the value that appears first
   // in the LR. That avoids printing the same LR multiple times.
-  if (V != LR->value_begin()->getValue())
+  IGC_ASSERT(!LR->value_empty());
+  auto &&ASV = *(LR->value_begin());
+  if (SV.getValue() != ASV.getValue() || SV.getIndex() != ASV.getIndex())
     return;
 
   LR->print(OS);
   OS << "\n";
 }
 
-void GenXLiveness::print(raw_ostream &OS) const
-{
+void GenXLiveness::print(raw_ostream &OS, const FunctionGroup *dummy) const {
   OS << "GenXLiveness for FunctionGroup " << FG->getName() << "\n";
   // Print live ranges for global variables;
   for (auto &G : FG->getModule()->globals())
@@ -1539,14 +1590,24 @@ void GenXLiveness::print(raw_ostream &OS) const
     for (auto fi = Func->arg_begin(), fe = Func->arg_end(); fi != fe; ++fi)
       printValueLiveness(&*fi, OS);
     // Print live range(s) for unified return value.
-    if (i != FG->begin() && !Func->getReturnType()->isVoidTy()) {
+    if (!Func->getReturnType()->isVoidTy()) {
       auto Ret = getUnifiedRetIfExist(Func);
       if (Ret)
         printValueLiveness(Ret, OS);
     }
     // Print live ranges for code.
-    for (auto &Inst : instructions(Func))
-      printValueLiveness(&Inst, OS);
+    for (auto &Inst : instructions(Func)) {
+      auto *InstStructType = dyn_cast<StructType>(Inst.getType());
+      if (!InstStructType) {
+        printValueLiveness(&Inst, OS);
+        continue;
+      }
+      for (unsigned i = 0, e = IndexFlattener::getNumElements(InstStructType);
+           i != e; ++i) {
+        auto SV = SimpleValue(&Inst, i);
+        printValueLiveness(SV, OS);
+      }
+    }
   }
   OS << "\n";
 }
@@ -1713,47 +1774,9 @@ void LiveRange::sortAndMerge() {
 }
 
 /***********************************************************************
- * LiveRange::prepareFuncs : fill the Funcs set with kernel or stack functions
- * which this LR is alive in
- *
- * To support RegAlloc for function groups that consist of kernel and stack
- * functions we have to track which kernel/stack functions the LR spans across.
- *
- */
-void LiveRange::prepareFuncs(FunctionGroupAnalysis *FGA) {
-  // Funcs must be empty as it's being filled immediately
-  // before it's required in VisaRegAlloc (because most of the passes
-  // invalidate this set) once for every LR
-  IGC_ASSERT(Funcs.empty());
-  for (auto &Val : getValues()) {
-    auto Inst = dyn_cast<Instruction>(Val.getValue());
-    Function *DefFunc = nullptr;
-    if (Inst && Inst->getParent())
-      DefFunc = Inst->getFunction();
-    else if (auto Arg = dyn_cast<Argument>(Val.getValue()))
-      DefFunc = Arg->getParent();
-
-    if (DefFunc) {
-      auto *DefFuncFG = FGA->getAnyGroup(DefFunc);
-      IGC_ASSERT_MESSAGE(DefFuncFG, "Cannot find the function group");
-      Funcs.insert(DefFuncFG->getHead());
-    }
-
-    for (auto U : Val.getValue()->users())
-      if (Instruction *UserInst = dyn_cast<Instruction>(U)) {
-        auto F = UserInst->getFunction();
-        auto *FG = FGA->getAnyGroup(F);
-        IGC_ASSERT_MESSAGE(FG, "Cannot find the function group");
-        Funcs.insert(FG->getHead());
-      }
-  }
-}
-
-/***********************************************************************
  * LiveRange::getLength : add up the number of instructions covered by this LR
  */
-unsigned LiveRange::getLength(bool WithWeak)
-{
+unsigned LiveRange::getLength(bool WithWeak) const {
   unsigned Length = 0;
   for (auto i = begin(), e = end(); i != e; ++i) {
     if (i->isWeak() && !WithWeak)
@@ -1765,30 +1788,36 @@ unsigned LiveRange::getLength(bool WithWeak)
 
 /***********************************************************************
  * LiveRange::print : print the live range
+ * Simplevalues of LR : segments { details }
+ * Detailed mode exists to print LLVM values
  */
-void LiveRange::print(raw_ostream &OS) const
-{
-  auto vi = Values.begin(), ve = Values.end();
-  IGC_ASSERT(vi != ve);
-  for (;;) {
-    vi->printName(OS);
-    if (++vi == ve)
-      break;
-    OS << ",";
+void LiveRange::print(raw_ostream &OS, bool Details) const {
+  if (Details)
+    OS << "LR values:\n";
+
+  if (Values.empty()) {
+    OS << "<Empty LR>";
+    return;
   }
-  OS << ":";
-  printSegments(OS);
-  const char *Cat = "???";
-  switch (Category) {
-    case RegCategory::NONE: Cat = "none"; break;
-    case RegCategory::GENERAL: Cat = "general"; break;
-    case RegCategory::ADDRESS: Cat = "address"; break;
-    case RegCategory::PREDICATE: Cat = "predicate"; break;
-    case RegCategory::SAMPLER: Cat = "sampler"; break;
-    case RegCategory::SURFACE: Cat = "surface"; break;
-    case RegCategory::EM: Cat = "em"; break;
-    case RegCategory::RM: Cat = "rm"; break;
+
+  for (auto &&V : Values) {
+    if (!Details)
+      OS << V << "; ";
+    else
+      OS << *V.getValue() << "\n";
   }
+
+  if (!Details)
+    OS << ":";
+  else
+    OS << "LR Segments and details: ";
+
+  if (Segments.empty())
+    OS << "<Empty Segments>";
+  else
+    printSegments(OS);
+
+  StringRef Cat = vc::getRegCategoryName(Category);
   OS << "{" << Cat << ",align" << (1U << LogAlignment);
   if (Offset)
     OS << ",offset" << Offset;
@@ -1806,142 +1835,10 @@ void LiveRange::printSegments(raw_ostream &OS) const
     switch (ri->Strength) {
       case Segment::WEAK: OS << "w"; break;
       case Segment::PHICPY: OS << "ph"; break;
+      case Segment::STRONG: /* do nothing */ break;
     }
     OS << ri->getStart() << "," << ri->getEnd() << ")";
   }
-}
-
-/***********************************************************************
- * IndexFlattener::flatten : convert struct indices into a flattened index
- *
- * This has a special case of Indices having a single element that is the
- * number of elements in ST, which returns the total number of flattened
- * indices in the struct.
- *
- * This involves scanning through the struct layout each time it is called.
- * If it is used a lot, it might benefit from some cacheing of the results.
- */
-unsigned IndexFlattener::flatten(StructType *ST, ArrayRef<unsigned> Indices)
-{
-  if (!Indices.size())
-    return 0;
-  unsigned Flattened = 0;
-  unsigned i = 0;
-  for (; i != Indices[0]; ++i) {
-    Type *ElTy = ST->getElementType(i);
-    if (auto ElST = dyn_cast<StructType>(ElTy))
-      Flattened += flatten(ElST, ElST->getNumElements());
-    else
-      ++Flattened;
-  }
-  if (i == ST->getNumElements())
-    return Flattened; // handle special case noted at the top
-  Type *ElTy = ST->getElementType(i);
-  if (auto ElST = dyn_cast<StructType>(ElTy))
-    Flattened += flatten(ElST, Indices.slice(1));
-  return Flattened;
-}
-
-/***********************************************************************
- * IndexFlattener::unflatten : convert flattened index into struct indices
- *
- * Enter:   Indices = vector to put unflattened indices into
- *
- * Return:  number left over from flattened index if it goes off the end
- *          of the struct (used internally when recursing). If this is
- *          non-zero, nothing has been pushed into Indices
- *
- * This involves scanning through the struct layout each time it is called.
- * If it is used a lot, it might benefit from some cacheing of the results.
- */
-unsigned IndexFlattener::unflatten(StructType *ST, unsigned Flattened,
-    SmallVectorImpl<unsigned> *Indices)
-{
-  for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i) {
-    Type *ElTy = ST->getElementType(i);
-    if (auto ElST = dyn_cast<StructType>(ElTy)) {
-      Indices->push_back(i);
-      Flattened = unflatten(ElST, Flattened, Indices);
-      if (!Flattened)
-        return 0;
-      Indices->pop_back();
-    } else if (!Flattened--) {
-      Indices->push_back(i);
-      return 0;
-    }
-  }
-  return Flattened;
-}
-
-/***********************************************************************
- * IndexFlattener::getElementType : get type of struct element from
- *    flattened index
- *
- * Enter:   Ty = type, possibly struct type
- *          FlattenedIndex = flattened index in the struct, 0 if not struct
- *
- * Return:  type of that element
- */
-Type *IndexFlattener::getElementType(Type *Ty, unsigned FlattenedIndex)
-{
-  auto ST = dyn_cast<StructType>(Ty);
-  if (!ST)
-    return Ty;
-  SmallVector<unsigned, 4> Indices;
-  IndexFlattener::unflatten(ST, FlattenedIndex, &Indices);
-  Type *T = 0;
-  for (unsigned i = 0;;) {
-    T = ST->getElementType(Indices[i]);
-    if (++i == Indices.size())
-      return T;
-    ST = cast<StructType>(T);
-  }
-}
-
-/***********************************************************************
- * IndexFlattener::flattenArg : flatten an arg in a function or call
- *
- * This calculates the total number of flattened indices used up by previous
- * args. If all previous args are not struct type, then this just returns the
- * arg index.
- */
-unsigned IndexFlattener::flattenArg(FunctionType *FT, unsigned ArgIndex)
-{
-  unsigned FlattenedIndex = 0;
-  while (ArgIndex--) {
-    Type *ArgTy = FT->getParamType(ArgIndex);
-    FlattenedIndex += getNumElements(ArgTy);
-  }
-  return FlattenedIndex;
-}
-
-/***********************************************************************
- * SimpleValue::getType : get the type of the SimpleValue
- */
-Type *SimpleValue::getType() const {
-  return IndexFlattener::getElementType(V->getType(), Index);
-}
-
-/***********************************************************************
- * dump, print : debug print a SimpleValue
- */
-#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-void SimpleValue::dump() const
-{
-  print(errs()); errs() << '\n';
-}
-#endif
-void SimpleValue::print(raw_ostream &OS) const
-{
-  OS << V->getName();
-  if (Index || isa<StructType>(V->getType()))
-    OS << "#" << Index;
-}
-void SimpleValue::printName(raw_ostream &OS) const
-{
-  OS << V->getName();
-  if (Index || isa<StructType>(V->getType()))
-    OS << "#" << Index;
 }
 
 /***********************************************************************
@@ -1975,4 +1872,14 @@ void genx::CallGraph::build(GenXLiveness *Liveness) {
       }
     }
   }
+}
+
+INITIALIZE_PASS_BEGIN(GenXLivenessWrapper, "GenXLivenessWrapper",
+                      "GenXLivenessWrapper", false, false)
+INITIALIZE_PASS_END(GenXLivenessWrapper, "GenXLivenessWrapper",
+                    "GenXLivenessWrapper", false, false)
+
+ModulePass *llvm::createGenXLivenessWrapperPass() {
+  initializeGenXLivenessWrapperPass(*PassRegistry::getPassRegistry());
+  return new GenXLivenessWrapper();
 }

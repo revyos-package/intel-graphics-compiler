@@ -677,27 +677,27 @@ protected:
         }
 };
 
-class SPIRVTypeMatrixINTEL : public SPIRVType {
+class SPIRVTypeJointMatrixINTEL : public SPIRVType {
 public:
-    const static Op OC = OpTypeMatrixINTEL;
+    const static Op OC = OpTypeJointMatrixINTEL;
     const static SPIRVWord FixedWC = 7;
     // Complete constructor
-    SPIRVTypeMatrixINTEL(SPIRVModule *M, SPIRVId TheId, SPIRVType *ElemType,
-                         SPIRVId Rows, SPIRVId Columns,
-                         SPIRVId Layout, SPIRVId Scope)
+    SPIRVTypeJointMatrixINTEL(SPIRVModule *M, SPIRVId TheId, SPIRVType *ElemType,
+                              SPIRVId Rows, SPIRVId Columns,
+                              SPIRVId Layout, SPIRVId Scope)
         : SPIRVType(M, FixedWC, OC, TheId), ElemType(ElemType),
           Rows(Rows), Columns(Columns), Layout(Layout), Scope(Scope) {
         validate();
     }
 
     // Incomplete constructor
-    SPIRVTypeMatrixINTEL()
+    SPIRVTypeJointMatrixINTEL()
         : SPIRVType(OC), ElemType(0), Rows(0), Columns(0),
           Layout(0), Scope(0) {
     }
 
     CapVec getRequiredCapability() const override {
-        return getVec(SPIRVCapabilityKind::CapabilityMatrixINTEL);
+        return getVec(SPIRVCapabilityKind::CapabilityJointMatrixINTEL);
     }
 
     SPIRVType *getElemType() const { return ElemType; }
@@ -706,8 +706,7 @@ public:
     unsigned getRows() const;
     unsigned getColumns() const;
     unsigned getScope() const;
-
-    uint32_t getElementTypeFlags() const;
+    std::string getMangledName() const;
 
     enum {
         LayoutColumnMajor = 0,
@@ -783,24 +782,24 @@ protected:
 class SPIRVTypeSubgroupINTEL;
 template<> inline void
 SPIRVMap<std::string, Op, SPIRVTypeSubgroupINTEL>::init() {
-#define _SPIRV_OP(x,y) \
-  add("struct.intel_sub_group_avc_"#x, OpTypeAvc##y##INTEL);
-_SPIRV_OP(mce_payload_t, McePayload)
-_SPIRV_OP(mce_result_t, MceResult)
-_SPIRV_OP(sic_payload_t, SicPayload)
-_SPIRV_OP(sic_result_t, SicResult)
-_SPIRV_OP(ime_result_single_reference_streamout_t, ImeResultSingleReferenceStreamout)
-_SPIRV_OP(ime_result_dual_reference_streamout_t, ImeResultDualReferenceStreamout)
-_SPIRV_OP(ime_single_reference_streamin_t, ImeSingleReferenceStreamin)
-_SPIRV_OP(ime_dual_reference_streamin_t, ImeDualReferenceStreamin)
-_SPIRV_OP(ime_payload_t, ImePayload)
-_SPIRV_OP(ime_result_t, ImeResult)
-_SPIRV_OP(ref_payload_t, RefPayload)
-_SPIRV_OP(ref_result_t, RefResult);
+#define _SPIRV_OP(x) \
+  add("spirv.Avc"#x, OpTypeAvc##x##INTEL);
+_SPIRV_OP(McePayload)
+_SPIRV_OP(MceResult)
+_SPIRV_OP(SicPayload)
+_SPIRV_OP(SicResult)
+_SPIRV_OP(ImeResultSingleReferenceStreamout)
+_SPIRV_OP(ImeResultDualReferenceStreamout)
+_SPIRV_OP(ImeSingleReferenceStreamin)
+_SPIRV_OP(ImeDualReferenceStreamin)
+_SPIRV_OP(ImePayload)
+_SPIRV_OP(ImeResult)
+_SPIRV_OP(RefPayload)
+_SPIRV_OP(RefResult);
 #undef _SPIRV_OP
 }
 typedef SPIRVMap<std::string, Op, SPIRVTypeSubgroupINTEL>
-OCLSubgroupINTELTypeOpCodeMap;
+SPIRVSubgroupINTELTypeOpCodeMap;
 
 class SPIRVTypeSubgroupAvcINTEL : public SPIRVType {
 public:

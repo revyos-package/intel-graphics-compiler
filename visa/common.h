@@ -19,6 +19,8 @@ SPDX-License-Identifier: MIT
 #include <errno.h>
 #include "common/secure_string.h"
 
+#ifndef MEMCPY_S
+#define MEMCPY_S
 typedef int errno_t;
 static errno_t memcpy_s(void* dst, size_t numberOfElements, const void* src, size_t count)
 {
@@ -36,6 +38,7 @@ static errno_t memcpy_s(void* dst, size_t numberOfElements, const void* src, siz
 
     return 0;
 }
+#endif
 #endif
 
 /* stdio.h portability code end */
@@ -189,48 +192,20 @@ extern std::stringstream errorMsgs;
 #endif
 
 
-#define MAX_OPTION_STR_LENGTH 256
-
+/*************** internal jitter functions ********************/
 // sets the platform by enum value
 int SetVisaPlatform(TARGET_PLATFORM vPlatform);
-
-// currently the supported arguments are listed in the common.cpp table
-// generally the symbol suffix is the preferred name:
-//   e.g. GENX_SKL  means "SKL"
-//             ^^^
-int SetVisaPlatform(const char *platformName);
-
-/*************** internal jitter functions ********************/
-// returns the HW platform for this jitter invocation
-TARGET_PLATFORM getGenxPlatform();
-
-// returns an array of all supported platforms
-const TARGET_PLATFORM *getGenxAllPlatforms(int *num);
-
-const char *getGenxPlatformString(TARGET_PLATFORM);
-
-// returns nullptr terminated array of strings that can be parsed
-// for the platform name; these will be accepted by SetPlatform()
-const char * const* getGenxPlatformStrings(TARGET_PLATFORM);
+unsigned char getGRFSize();
 
 enum class PlatformGen
 {
     GEN_UNKNOWN = 0,
-    GEN8 = 8,
-    GEN9 = 9,
-    GEN10 = 10,
-    GEN11 = 11,
-    XE = 12,
+    GEN8   = 8,
+    GEN9   = 9,
+    GEN10  = 10,
+    GEN11  = 11,
+    XE     = 12,
 };
-
-unsigned char getGRFSize();
-
-// return the platform generation that can be used for comparison
-PlatformGen getPlatformGeneration(TARGET_PLATFORM platform);
-
-// returns the vISA encoding bits for encoding
-// NOTE: encoding values are not necessarily in order
-int getGenxPlatformEncoding();
 
 // Error types
 #define ERROR_UNKNOWN               "ERROR: Unknown fatal internal error"
@@ -256,5 +231,13 @@ typedef enum {
     VISA_CM = 0,
     VISA_3D = 1
 } VISATarget;
+
+
+template<typename Type>
+constexpr Type AlignUp(const Type value, const size_t alignment)
+{
+    Type common = value + alignment - 1;
+    return common - (common % alignment);
+}
 
 #endif //_COMMON_H_

@@ -14,6 +14,8 @@ SPDX-License-Identifier: MIT
 // #include "iga/IGALibrary/api/igaEncoderWrapper.hpp"
 #include "iga/IGALibrary/api/kv.hpp"
 #include "BinaryEncodingIGA.h"
+#include "Common_ISA_framework.h"
+#include "VISAKernel.h"
 
 #include <list>
 #include <fstream>
@@ -155,6 +157,124 @@ void gtPinData::setGTPinInit(void* buffer)
         kernel.getOptions()->setOption(vISA_GetFreeGRFInfo, true);
 }
 
+template<class T>
+void write(void* buffer, const T& data, unsigned int& offset)
+{
+    memcpy_s((char*)buffer+offset, sizeof(T), &data, sizeof(T));
+    offset += sizeof(T);
+}
+
+void* gtPinData::getIndirRefs(unsigned int& size)
+{
+    // Store indirect access per %ip
+    // %ip -> vector[start byte, size]
+    std::map<unsigned int, std::vector<std::pair<unsigned int, unsigned int>>> indirRefMap;
+
+    // return %ip of first executable instruction in kernel
+    auto getIpOfFirstInst = [&]()
+    {
+        unsigned int startIp = 0;
+        if (kernel.fg.getIsStackCallFunc())
+        {
+            for (auto bb : kernel.fg.getBBList())
+            {
+                if (startIp > 0)
+                    break;
+                for (auto inst : bb->getInstList())
+                {
+                    startIp = (unsigned int)inst->getGenOffset();
+
+                    // verify truncation is still legal
+                    MUST_BE_TRUE(inst->getGenOffset() == (uint32_t)inst->getGenOffset(),
+                        "%ip out of bounds");
+
+                    if (startIp > 0)
+                        break;
+                }
+            }
+        }
+        return startIp;
+    };
+
+    unsigned int startIp = getIpOfFirstInst();
+
+    auto getIndirRefData = [&](G4_Declare* addr)
+    {
+        // for given addr, return std::vector<std::pair<start byte, size>>
+        std::vector<std::pair<unsigned int, unsigned int>> indirs;
+
+        auto it = indirRefs.find(addr);
+        if (it == indirRefs.end())
+            return indirs;
+
+        for (auto target : (*it).second)
+        {
+            auto start = target->getGRFBaseOffset();
+            auto size = target->getByteSize();
+            indirs.push_back(std::make_pair(start, size));
+        }
+        return std::move(indirs);
+    };
+
+    for (auto bb : kernel.fg.getBBList())
+    {
+        for (auto inst : bb->getInstList())
+        {
+            auto dst = inst->getDst();
+            if (dst && dst->isIndirect())
+            {
+                // encode dst indirect reference
+                auto indirs = getIndirRefData(dst->getTopDcl());
+                auto& mapEntry = indirRefMap[(uint32_t)-inst->getGenOffset() - startIp];
+                mapEntry.insert(mapEntry.end(),
+                    indirs.begin(), indirs.end());
+            }
+
+            for (unsigned int i = 0; i != inst->getNumSrc(); ++i)
+            {
+                auto src = inst->getSrc(i);
+                if (src && src->isSrcRegRegion() &&
+                    src->asSrcRegRegion()->isIndirect())
+                {
+                    // encode src indirect reference
+                    auto indirs = getIndirRefData(src->asSrcRegRegion()->getTopDcl());
+                    auto& mapEntry = indirRefMap[(uint32_t)inst->getGenOffset() - startIp];
+                    mapEntry.insert(mapEntry.end(),
+                        indirs.begin(), indirs.end());
+                }
+            }
+        }
+    }
+
+    unsigned int numRanges = 0;
+    for (auto& item : indirRefMap)
+    {
+        numRanges += item.second.size();
+    }
+
+    // see gtpin_IGC_interface.h for format of igc_token_indirect_access_info_t
+    size = sizeof(gtpin::igc::igc_token_indirect_access_info_t::num_ranges) + numRanges * sizeof(gtpin::igc::ins_reg_range_t);
+    auto buffer = malloc(size);
+    unsigned int offset = 0;
+    write<uint32_t>(buffer, numRanges, offset);
+    for (auto& item : indirRefMap)
+    {
+        MUST_BE_TRUE(offset < size, "Out of bounds");
+        write<uint32_t>(buffer, item.first, offset);
+        for (const auto& arg : item.second)
+        {
+            MUST_BE_TRUE(offset < size, "Out of bounds");
+            write<uint16_t>(buffer, arg.first, offset);
+            MUST_BE_TRUE(offset < size, "Out of bounds");
+            write<uint16_t>(buffer, arg.second, offset);
+        }
+    }
+
+    MUST_BE_TRUE(offset == size, "Unexpected bounds");
+
+    return buffer;
+}
+
 template<typename T>
 static void writeBuffer(
     std::vector<unsigned char>& buffer,
@@ -189,17 +309,29 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
     t.igc_init_size = sizeof(t);
     if (gtpinInitFromL0)
     {
-        if (kernel.getOption(vISA_GetFreeGRFInfo))
+        if (!stackABI)
         {
-            if (!stackABI)
+            if (kernel.getOption(vISA_GetFreeGRFInfo))
+            {
                 t.grf_info = 1;
-            numTokens++;
-        }
+                numTokens++;
+                // indirect info
+                numTokens++;
+            }
 
-        if (kernel.getOption(vISA_GTPinReRA))
-        {
-            if (!stackABI)
+            if (kernel.getOption(vISA_GTPinReRA))
+            {
                 t.re_ra = 1;
+            }
+        }
+        else
+        {
+            // provide only indirect info for stack calls
+            if (kernel.getOption(vISA_GetFreeGRFInfo))
+            {
+                t.grf_info = 1;
+                numTokens++;
+            }
         }
 
         if (kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
@@ -210,21 +342,42 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
             t.scratch_area_size = getNumBytesScratchUse();
             numTokens++;
         }
+
+        if (!t.grf_info &&
+            kernel.getOptions()->getOption(vISA_GetFreeGRFInfo))
+        {
+            // this check is to report out indir references, irrespective of
+            // whether stack call is present.
+            t.grf_info = 1;
+            numTokens++;
+        }
     }
     else
     {
         t.version = std::min(gtpin_init->version, gtpin::igc::GTPIN_IGC_INTERFACE_VERSION);
-        if (gtpin_init->grf_info)
+        if (!stackABI)
         {
-            if (!stackABI)
+            if (gtpin_init->grf_info)
+            {
                 t.grf_info = 1;
-            numTokens++;
-        }
+                numTokens++;
+                // indirect info
+                numTokens++;
+            }
 
-        if (gtpin_init->re_ra)
-        {
-            if (!stackABI)
+            if (gtpin_init->re_ra)
+            {
                 t.re_ra = 1;
+            }
+        }
+        else
+        {
+            // provide only indirect info for stack calls
+            if (gtpin_init->grf_info)
+            {
+                t.grf_info = 1;
+                numTokens++;
+            }
         }
 
         if (gtpin_init->srcline_mapping && kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
@@ -233,6 +386,13 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
         if (gtpin_init->scratch_area_size > 0)
         {
             t.scratch_area_size = gtpin_init->scratch_area_size;
+            numTokens++;
+        }
+
+        if (!t.grf_info &&
+            gtpin_init->grf_info)
+        {
+            t.grf_info = 1;
             numTokens++;
         }
     }
@@ -248,21 +408,39 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
 
     if (t.grf_info)
     {
-        // create token
-        void* rerabuffer = nullptr;
-        unsigned rerasize = 0;
+        if (!stackABI)
+        {
+            // create token
+            void* rerabuffer = nullptr;
+            unsigned rerasize = 0;
 
-        rerabuffer = getFreeGRFInfo(rerasize);
+            rerabuffer = getFreeGRFInfo(rerasize);
+
+            gtpin::igc::igc_token_header_t th;
+            th.token = gtpin::igc::GTPIN_IGC_TOKEN::GTPIN_IGC_TOKEN_GRF_INFO;
+            th.token_size = sizeof(gtpin::igc::igc_token_header_t) + rerasize;
+
+            // write token and data to buffer
+            writeBuffer(buffer, bufferSize, &th, sizeof(th));
+            writeBuffer(buffer, bufferSize, rerabuffer, rerasize);
+
+            free(rerabuffer);
+        }
+        // report indir refs
+        void* indirRefs = nullptr;
+        unsigned int indirRefsSize = 0;
+
+        indirRefs = getIndirRefs(indirRefsSize);
 
         gtpin::igc::igc_token_header_t th;
-        th.token = gtpin::igc::GTPIN_IGC_TOKEN::GTPIN_IGC_TOKEN_GRF_INFO;
-        th.token_size = sizeof(gtpin::igc::igc_token_header_t) + rerasize;
+        th.token = gtpin::igc::GTPIN_IGC_TOKEN::GTPIN_IGC_TOKEN_INDIRECT_ACCESS_INFO;
+        th.token_size = sizeof(gtpin::igc::igc_token_header_t) + indirRefsSize;
 
         // write token and data to buffer
         writeBuffer(buffer, bufferSize, &th, sizeof(th));
-        writeBuffer(buffer, bufferSize, rerabuffer, rerasize);
+        writeBuffer(buffer, bufferSize, indirRefs, indirRefsSize);
 
-        free(rerabuffer);
+        free(indirRefs);
     }
 
     if (t.scratch_area_size)
@@ -304,12 +482,20 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
     // Dump buffer with shader dumps
     if (kernel.getOption(vISA_outputToFile))
     {
-        auto asmName = kernel.getOptions()->getOptionCstr(VISA_AsmFileName);
-        if (asmName)
+        std::string asmName = kernel.getOptions()->getOptionCstr(VISA_AsmFileName);
+        if (!asmName.empty())
         {
+            const VISAKernelImpl* vKernel = kernel.fg.builder->getParent()->getKernel(kernel.getName());
+            if (vKernel && vKernel->getIsFunction())
+            {
+                unsigned funcID = -1;
+                vKernel->GetFunctionId(funcID);
+                asmName += "_f" + std::to_string(funcID);
+            }
+
             std::ofstream ofInit;
             std::stringstream ssInit;
-            ssInit << std::string(asmName) << ".gtpin_igc_init";
+            ssInit << asmName << ".gtpin_igc_init";
             ofInit.open(ssInit.str(), std::ofstream::binary);
             if (gtpin_init)
             {
@@ -332,6 +518,10 @@ void* gtPinData::getGTPinInfoBuffer(unsigned &bufferSize)
     return gtpinBuffer;
 }
 
+void gtPinData::setScratchNextFree(unsigned next) {
+    nextScratchFree = ((next + kernel.numEltPerGRF<Type_UB>() - 1) / kernel.numEltPerGRF<Type_UB>()) * kernel.numEltPerGRF<Type_UB>();
+}
+
 uint32_t gtPinData::getNumBytesScratchUse() const
 {
     if (gtpin_init)
@@ -346,10 +536,10 @@ uint32_t gtPinData::getNumBytesScratchUse() const
 }
 
 
-G4_Kernel::G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
+G4_Kernel::G4_Kernel(const PlatformInfo& pInfo, INST_LIST_NODE_ALLOCATOR& alloc,
     Mem_Manager& m, Options* options, Attributes* anAttr,
     unsigned char major, unsigned char minor)
-    : m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
+    : platformInfo(pInfo), m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
     asmInstCount(0), kernelID(0), fg(alloc, this, m),
     major_version(major), minor_version(minor)
 {
@@ -357,7 +547,6 @@ G4_Kernel::G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
         major < COMMON_ISA_MAJOR_VER ||
         (major == COMMON_ISA_MAJOR_VER && minor <= COMMON_ISA_MINOR_VER),
         "CISA version not supported by this JIT-compiler");
-
 
     name = NULL;
     numThreads = 0;
@@ -431,6 +620,12 @@ void G4_Kernel::computeChannelSlicing()
         return;
     }
 
+    if (simdSize == g4::SIMD32 && numEltPerGRF<Type_UB>() >= 64)
+    {
+        // For 64 bytes GRF, simd32 kernel, there is no slicing
+        channelSliced = false;
+        return;
+    }
     // .dcl V1 size = 128 bytes
     // op (16|M0) V1(0,0)     ..
     // op (16|M16) V1(2,0)    ..
@@ -540,7 +735,7 @@ void G4_Kernel::calculateSimdSize()
         }
     }
 
-    if (GlobalRA::useGenericAugAlign())
+    if (GlobalRA::useGenericAugAlign(getPlatformGeneration()))
         computeChannelSlicing();
 }
 
@@ -586,7 +781,7 @@ void G4_Kernel::evalAddrExp()
 
                 if (opnd->isAddrExp())
                 {
-                    int val = opnd->asAddrExp()->eval();
+                    int val = opnd->asAddrExp()->eval(*fg.builder);
                     G4_Type ty = opnd->asAddrExp()->getType();
 
                     G4_Imm* imm = fg.builder->createImm(val, ty);
@@ -622,10 +817,10 @@ static std::vector<std::string> split(
     return v;
 }
 
-static iga_gen_t getIGAPlatform()
+static iga_gen_t getIGAPlatform(TARGET_PLATFORM genPlatform)
 {
     iga_gen_t platform = IGA_GEN_INVALID;
-    switch (getGenxPlatform())
+    switch (genPlatform)
     {
     case GENX_BDW: platform = IGA_GEN8; break;
     case GENX_CHV: platform = IGA_GEN8lp; break;
@@ -633,7 +828,14 @@ static iga_gen_t getIGAPlatform()
     case GENX_BXT: platform = IGA_GEN9lp; break;
     case GENX_ICLLP: platform = IGA_GEN11; break;
     case GENX_TGLLP:platform = IGA_GEN12p1; break;
-    case XeHP_SDV: platform = IGA_XE_HP; break;
+    case Xe_XeHPSDV: platform = IGA_XE_HP; break;
+    case Xe_DG2:
+        platform = IGA_XE_HPG;
+        break;
+    case Xe_PVC:
+    case Xe_PVCXT:
+        platform = IGA_XE_HPC;
+        break;
     default:
         break;
     }
@@ -772,7 +974,7 @@ void G4_Kernel::setKernelParameters()
     unsigned overrideGRFNum = 0;
     unsigned overrideNumThreads = 0;
 
-    TARGET_PLATFORM platform = getGenxPlatform();
+    TARGET_PLATFORM platform = getPlatform();
     overrideGRFNum = m_options->getuInt32Option(vISA_TotalGRFNum);
 
     overrideNumThreads = m_options->getuInt32Option(vISA_HWThreadNumberPerEU);
@@ -818,11 +1020,38 @@ void G4_Kernel::setKernelParameters()
     {
         switch (platform)
         {
-        case XeHP_SDV:
+        case Xe_XeHPSDV:
+        case Xe_DG2:
             switch (overrideNumThreads)
             {
             case 4:
                 numRegTotal = 256;
+                break;
+            default:
+                numRegTotal = 128;
+            }
+            break;
+        case Xe_PVC:
+        case Xe_PVCXT:
+            switch (overrideNumThreads)
+            {
+            case 4:
+                numRegTotal = 256;
+                break;
+            case 5:
+                numRegTotal = 192;
+                break;
+            case 6:
+                numRegTotal = 160;
+                break;
+            case 8:
+                numRegTotal = 128;
+                break;
+            case 10:
+                numRegTotal = 96;
+                break;
+            case 12:
+                numRegTotal = 64;
                 break;
             default:
                 numRegTotal = 128;
@@ -850,11 +1079,53 @@ void G4_Kernel::setKernelParameters()
         // User-provided number of SWSB tokens
         numSWSBTokens = overrideNumSWSB;
     }
+    else if (overrideNumThreads > 0)
+    {
+        switch (platform)
+        {
+        case Xe_PVC:
+        case Xe_PVCXT:
+            switch (overrideNumThreads)
+            {
+            case 4:
+                numSWSBTokens = 32;
+                break;
+            case 5:
+                numSWSBTokens = 24;
+                break;
+            case 6:
+                numSWSBTokens = 20;
+                break;
+            case 8:
+                numSWSBTokens = 16;
+                break;
+            case 10:
+                numSWSBTokens = 12;
+                break;
+            case 12:
+                numSWSBTokens = 8;
+                break;
+            default:
+                numSWSBTokens = 16;
+            }
+            break;
+        default:
+            numSWSBTokens = 16;
+        }
+    }
     else
     {
         // Default value based on platform
         switch (platform)
         {
+        case Xe_PVC:
+        case Xe_PVCXT:
+            numSWSBTokens = 16;
+            if (numRegTotal == 256)
+            {
+                numSWSBTokens *= 2;
+            }
+            break;
         default:
             numSWSBTokens = 16;
         }
@@ -872,7 +1143,8 @@ void G4_Kernel::setKernelParameters()
     {
         switch (platform)
         {
-        case XeHP_SDV:
+        case Xe_XeHPSDV:
+        case Xe_DG2:
             switch (overrideNumThreads)
             {
             case 4:
@@ -880,6 +1152,28 @@ void G4_Kernel::setKernelParameters()
                 break;
             default:
                 numAcc = 4;
+            }
+            break;
+        case Xe_PVC:
+        case Xe_PVCXT:
+            switch (overrideNumThreads)
+            {
+            case 4:
+                numAcc = 8;
+                break;
+            case 5:
+                numAcc = 6;
+                break;
+            case 6:
+            case 8:
+                numAcc = 4;
+                break;
+            case 10:
+            case 12:
+                numAcc = 2;
+                break;
+            default:
+                numAcc = 8;
             }
             break;
         default:
@@ -891,7 +1185,10 @@ void G4_Kernel::setKernelParameters()
         // Default value based on platform
         switch (platform)
         {
-        case XeHP_SDV:
+        case Xe_XeHPSDV:
+        case Xe_DG2:
+        case Xe_PVC:
+        case Xe_PVCXT:
             numAcc = 4;
             if (numRegTotal == 256)
             {
@@ -914,7 +1211,8 @@ void G4_Kernel::setKernelParameters()
         {
             switch (platform)
             {
-            case XeHP_SDV:
+            case Xe_XeHPSDV:
+            case Xe_DG2:
                 switch (numRegTotal)
                 {
                 case 256:
@@ -924,10 +1222,41 @@ void G4_Kernel::setKernelParameters()
                     numThreads = 8;
                 }
                 break;
+            case Xe_PVC:
+            case Xe_PVCXT:
+                switch (numRegTotal)
+                {
+                case 256:
+                    numThreads = 4;
+                    break;
+                case 192:
+                    numThreads = 5;
+                    break;
+                case 160:
+                    numThreads = 6;
+                    break;
+                case 128:
+                    numThreads = 8;
+                    break;
+                case 96:
+                    numThreads = 10;
+                    break;
+                case 64:
+                    numThreads = 12;
+                    break;
+                default:
+                    numThreads = 8;
+                }
+                break;
             default:
                 numThreads = 7;
             }
         }
+    }
+
+    if (m_options->getOption(vISA_hasDoubleAcc))
+    {
+        numAcc = 16;
     }
 }
 
@@ -992,12 +1321,14 @@ void G4_Kernel::emitDeviceAsm(
 
     emitDeviceAsmInstructionsIga(os, binary, binarySize);
 
-    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::XE) {
+    if (getPlatformGeneration() >= PlatformGen::XE) {
         os << "\n\n";
         os << "//.BankConflicts: " <<  fg.XeBCStats.BCNum << "\n";
         os << "//.BankConflicts.SameBank: " <<  fg.XeBCStats.sameBankConflicts << "\n";
         os << "//.BankConflicts.TwoSrc: " <<  fg.XeBCStats.twoSrcBC << "\n";
         int nativeSimdSize = 8;
+        if (getPlatform() >= Xe_PVC)
+            nativeSimdSize = 16;
         os << "//.SIMD" << 2*nativeSimdSize << "ReadSuppressions: " <<  fg.XeBCStats.simd16ReadSuppression << "\n";
         os << "//.SIMD" << nativeSimdSize << "s: " <<  fg.XeBCStats.simd8 << "\n//\n";
         os << "//.RMWs: " << fg.numRMWs << "\n//\n";
@@ -1031,7 +1362,7 @@ void G4_Kernel::emitRegInfo()
 
 void G4_Kernel::emitRegInfoKernel(std::ostream& output)
 {
-    output << "//.platform " << getGenxPlatformString(fg.builder->getPlatform());
+    output << "//.platform " << getGenxPlatformString();
     output << "\n" << "//.kernel ID 0x" << std::hex << getKernelID() << "\n";
     output << std::dec << "\n";
     int instOffset = 0;
@@ -1266,7 +1597,7 @@ void G4_Kernel::emitDeviceAsmHeaderComment(std::ostream& os)
         os << name;
     }
 
-    os << "\n" << "//.platform " << getGenxPlatformString(getGenxPlatform());
+    os << "\n" << "//.platform " << getGenxPlatformString();
     os << "\n" << "//.thread_config " << "numGRF=" << numRegTotal << ", numAcc=" << numAcc;
     if (fg.builder->hasSWSB())
     {
@@ -1441,7 +1772,7 @@ void G4_Kernel::emitDeviceAsmHeaderComment(std::ostream& os)
     }
     os << border << "\n";
 
-    if (getPlatformGeneration(getGenxPlatform()) < PlatformGen::XE)
+    if (getPlatformGeneration() < PlatformGen::XE)
     {
         fg.BCStats.clear();
     }
@@ -1544,7 +1875,7 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(
     if (!errBuf)
         return;
     KernelView kv(
-        getIGAPlatform(), binary, binarySize,
+        getIGAPlatform(getPlatform()), binary, binarySize,
         GetIGASWSBEncodeMode(*fg.builder),
         errBuf, ERROR_STRING_MAX_LENGTH);
     const auto errorMap =

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -51,10 +51,18 @@ enum class BinaryKind { CM, OpenCL, ZE };
 
 enum class GlobalsLocalizationMode { All, No, Vector, Partial };
 
+enum class DisableLRCoalescingControl { Default, Disable, Enable };
+
+enum class DisableExtraCoalescingControl { Default, Disable, Enable };
+
+enum class NoOptFinalizerControl { Default, Disable, Enable };
+
+enum class DebugInfoStripControl { None, All, NonLine };
+
 struct CompileOptions {
   FileType FType = FileType::SPIRV;
   std::string CPUStr;
-  int RevId;
+  int RevId = -1;
   // Non-owning pointer to WA table.
   const WA_TABLE *WATable = nullptr;
   // Optional shader dumper.
@@ -66,22 +74,42 @@ struct CompileOptions {
   // -ze-no-vector-decomposition
   bool NoVecDecomp = false;
   // -g
-  bool EmitDebugInformation = false;
-  bool EmitDebuggableKernels = false;
+  bool ExtendedDebuggingSupport = false;
+  // emit kernels that can interact with debugger, can be disabled by
+  // -vc-disable-debuggable-kernels internal option
+  bool EmitDebuggableKernels = true;
   // -fno-jump-tables
   bool NoJumpTables = false;
   // -ftranslate-legacy-memory-intrinsics
   bool TranslateLegacyMemoryIntrinsics = false;
+  // -disable-finalizer-msg
+  bool DisableFinalizerMsg = false;
+  // -fno-struct-splitting
+  bool DisableStructSplitting = false;
+  // IGC_DisableEuFusion
+  bool DisableEUFusion = false;
 
-  OptimizerLevel OptLevel = OptimizerLevel::Full;
+  OptimizerLevel IROptLevel = OptimizerLevel::Full;
+  OptimizerLevel CodegenOptLevel = OptimizerLevel::Full;
+
   llvm::Optional<unsigned> StackMemSize;
   bool ForceLiveRangesLocalizationForAccUsage = false;
   bool ForceDisableNonOverlappingRegionOpt = false;
   bool IsLargeGRFMode = false;
-  bool ForcePassDebugToFinalizer = false;
+
+  DisableLRCoalescingControl DisableLRCoalescingMode =
+      DisableLRCoalescingControl::Default;
+  DisableExtraCoalescingControl DisableExtraCoalescingMode =
+      DisableExtraCoalescingControl::Default;
+
+  NoOptFinalizerControl NoOptFinalizerMode = NoOptFinalizerControl::Default;
   bool ForceDebugInfoValidation = false;
 
+  bool EnablePreemption = false;
+
   llvm::FPOpFusion::FPOpFusionMode AllowFPOpFusion = llvm::FPOpFusion::Standard;
+
+  bool UsePlain2DImages = false;
 
   // Internal options.
   std::string FeaturesString; // format is: [+-]<feature1>,[+-]<feature2>,...
@@ -90,15 +118,30 @@ struct CompileOptions {
   bool DumpIR = false;
   bool DumpAsm = false;
   bool DumpDebugInfo = false;
+
   bool TimePasses = false;
   bool ShowStats = false;
+  bool ResetTimePasses = false;
+  bool ResetLLVMStats = false;
+
   std::string StatsFile;
   std::string LLVMOptions;
   bool UseBindlessBuffers = false;
-
+  bool EmitZebinVisaSections = false;
+  bool HasL1ReadOnlyCache = false;
+  bool HasLocalMemFenceSupress = false;
+  bool HasMultiTile = false;
+  bool HasL3CacheCoherentCrossTiles = false;
+  bool HasL3FlushOnGPUScopeInvalidate = false;
+  bool HasL3FlushForGlobal = false;
+  bool HasGPUFenceScopeOnSingleTileGPUs = false;
+  bool HasHalfSIMDLSC = false;
   // from IGC_XXX env
   FunctionControl FCtrl = FunctionControl::Default;
   bool SaveStackCallLinkage = false;
+  bool DirectCallsOnly = false;
+  DebugInfoStripControl StripDebugInfoCtrl = DebugInfoStripControl::None;
+  unsigned ForceLoopUnrollThreshold = 0;
 };
 
 struct ExternalData {

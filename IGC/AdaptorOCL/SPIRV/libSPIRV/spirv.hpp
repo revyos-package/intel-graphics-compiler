@@ -75,6 +75,9 @@ enum SpvSourceLanguage {
     SpvSourceLanguageGLSL = 2,
     SpvSourceLanguageOpenCL_C = 3,
     SpvSourceLanguageOpenCL_CPP = 4,
+    SpvSourceLanguageHLSL = 5,
+    SpvSourceLanguageCPP_for_OpenCL = 6,
+    SpvSourceLanguageMax = 0x7fffffff,
 };
 
 enum ExecutionModel {
@@ -397,6 +400,8 @@ enum Decoration {
     DecorationUserSemantic = 5635,
     DecorationAliasScopeINTEL = 5914,
     DecorationNoAliasINTEL = 5915,
+    DecorationArgumentAttributeINTEL = 6409,
+    DecorationHostAccessINTEL = 6147,
 };
 
 enum BuiltIn {
@@ -619,7 +624,9 @@ enum Capability {
     CapabilityOptNoneINTEL = 6094,
     CapabilityTokenTypeINTEL = 6112,
     CapabilityDebugInfoModuleINTEL = 6114,
-    CapabilityMatrixINTEL = 6118,
+    CapabilityJointMatrixINTEL = 6118,
+    CapabilityHWThreadQueryINTEL = 6134,
+    CapabilityGlobalVariableDecorationsINTEL = 6146,
 };
 
 enum PackedVectorFormat {

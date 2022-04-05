@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -19,8 +19,14 @@ namespace IGC {
     llvm::FunctionPass* createResolveGASPass();
     void initializeGASResolvingPass(llvm::PassRegistry&);
 
+    llvm::ModulePass* createGASRetValuePropagatorPass();
+    void initializeGASRetValuePropagatorPass(llvm::PassRegistry&);
+
     llvm::ModulePass* createLowerGPCallArg();
     void initializeLowerGPCallArgPass(llvm::PassRegistry&);
+
+    llvm::ModulePass* createCastToGASAnalysisPass();
+    void initializeCastToGASAnalysisPass(llvm::PassRegistry&);
 } // End namespace IGC
 
 #endif // _CISA_RESOLVEGAS_H_

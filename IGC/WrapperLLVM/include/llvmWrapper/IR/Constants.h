@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2019-2021 Intel Corporation
+Copyright (C) 2021 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -31,6 +31,23 @@ namespace IGCLLVM
     return C.getElementCount();
 #endif
   }
+
+    namespace ConstantFixedVector
+    {
+        inline llvm::Constant *getSplat(unsigned NumElements, llvm::Constant *V)
+        {
+#if LLVM_VERSION_MAJOR < 11
+            return llvm::ConstantVector::getSplat(NumElements, V);
+#elif LLVM_VERSION_MAJOR == 11
+            return llvm::ConstantVector::getSplat(
+                llvm::ElementCount{NumElements, /* IsScalable=*/false}, V);
+#else
+            return llvm::ConstantVector::getSplat(
+                llvm::ElementCount::getFixed(NumElements), V);
+#endif
+        }
+    }
+
 }
 
 #endif

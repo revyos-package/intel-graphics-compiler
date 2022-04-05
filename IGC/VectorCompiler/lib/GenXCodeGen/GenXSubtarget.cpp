@@ -37,56 +37,53 @@ static cl::opt<bool>
     StackScratchMem("stack-scratch-mem",
                     cl::desc("Specify what surface should be used for stack"),
                     cl::init(true));
+static cl::opt<bool>
+  EnforceLongLongEmulation("dbgonly-enforce-i64-emulation",
+                           cl::desc("Enforce i64 emulation"),
+                           cl::init(false));
+static cl::opt<bool>
+    EnforceDivRem32Emulation("dbgonly-enforce-divrem32-emulation",
+                             cl::desc("Enforce divrem32 emulation"),
+                             cl::init(false));
 
-void GenXSubtarget::resetSubtargetFeatures(StringRef CPU, StringRef FS) {
-
-  DumpRegAlloc = false;
-  EmitCisa = false;
-  HasLongLong = false;
-  HasFP64 = false;
-  DisableJmpi = false;
-  DisableVectorDecomposition = false;
-  DisableJumpTables = false;
-  WarnCallable = false;
-  EmulateLongLong = false;
-  HasAdd64 = false;
-  UseMulDDQ = false;
-  OCLRuntime = false;
-  HasSwitchjmp = false;
-  WaNoMaskFusedEU = false;
-  HasIntDivRem32 = false;
-  HasBitRotate = false;
-  GetsHWTIDFromPredef = false;
-
+void GenXSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
   if (StackScratchMem)
     StackSurf = PreDefined_Surface::PREDEFINED_SURFACE_T255;
   else
     StackSurf = PreDefined_Surface::PREDEFINED_SURFACE_STACK;
 
   GenXVariant = llvm::StringSwitch<GenXTag>(CPU)
-    .Case("HSW", GENX_HSW)
+    .Case("generic", GENERIC_ARCH)
     .Case("BDW", GENX_BDW)
-    .Case("CHV", GENX_CHV)
     .Case("SKL", GENX_SKL)
     .Case("BXT", GENX_BXT)
     .Case("KBL", GENX_KBL)
     .Case("GLK", GENX_GLK)
-    .Case("CNL", GENX_CNL)
     .Case("ICLLP", GENX_ICLLP)
     .Case("TGLLP", GENX_TGLLP)
+    .Case("RKL", GENX_RKL)
     .Case("DG1", GENX_DG1)
-    .Case("XEHP", XE_HP_SDV)
-    .Default(GENX_SKL);
+    .Case("ADLS", GENX_ADLS)
+    .Case("ADLP", GENX_ADLP)
+    .Cases("XEHP", "XEHP_SDV", XE_HP_SDV)
+    .Case("DG2", XE_DG2)
+    .Case("PVC", XE_PVC)
+    .Case("PVCXT", XE_PVCXT)
+    .Default(UNDEFINED_ARCH);
 
   std::string CPUName(CPU);
-  if (CPUName.empty())
-    CPUName = "generic";
+  if (CPUName.empty() || GenXVariant == UNDEFINED_ARCH)
+    report_fatal_error("Undefined or blank arch passed");
 
   ParseSubtargetFeatures(CPUName,
 #if LLVM_VERSION_MAJOR >= 12
                          /*TuneCPU=*/CPUName,
 #endif
                          FS);
+  if (EnforceLongLongEmulation)
+    EmulateLongLong = true;
+  if (EnforceDivRem32Emulation)
+    HasIntDivRem32 = false;
 }
 
 GenXSubtarget::GenXSubtarget(const Triple &TT, const std::string &CPU,
@@ -98,5 +95,5 @@ GenXSubtarget::GenXSubtarget(const Triple &TT, const std::string &CPU,
                            FS),
       TargetTriple(TT) {
 
-  resetSubtargetFeatures(CPU, FS);
+  initSubtargetFeatures(CPU, FS);
 }

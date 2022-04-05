@@ -32,6 +32,11 @@ SPDX-License-Identifier: MIT
 #include "common/SIPKernels/Gen12LPSIPCSRDebug.h"
 #include "common/SIPKernels/Gen12LPSIPCSRDebugBindless.h"
 #include "Probe/Assertion.h"
+#include "common/SIPKernels/XeHPSIPCSR.h"
+#include "common/SIPKernels/XeHPSIPCSRDebug.h"
+#include "common/SIPKernels/XeHPSIPCSRDebugBindless.h"
+#include "common/SIPKernels/XeHPGSIPCSRDebug.h"
+#include "common/SIPKernels/XeHPGSIPCSRDebugBindless.h"
 
 using namespace llvm;
 using namespace USC;
@@ -117,7 +122,12 @@ struct DebugSurfaceLayout
     static constexpr size_t VERSION_COUNT = 1;
     static constexpr size_t VERSION_ELEMENTS = 1;
     static constexpr size_t VERSION_ELEMENT_SIZE = 20;
-    static constexpr size_t VERSION_ALIGN = 0;
+    static constexpr size_t VERSION_ALIGN = 8;
+
+    static constexpr size_t SIP_CMD_COUNT = 1;
+    static constexpr size_t SIP_CMD_ELEMENTS = 1;
+    static constexpr size_t SIP_CMD_ELEMENT_SIZE = 128;
+    static constexpr size_t SIP_CMD_ALIGN = 0;
 
     uint8_t grf[GR_COUNT * GR_ELEMENTS * GR_ELEMENT_SIZE + GR_ALIGN];
     uint8_t a0[A0_COUNT * A0_ELEMENTS * A0_ELEMENT_SIZE + A0_ALIGN];
@@ -134,11 +144,12 @@ struct DebugSurfaceLayout
     uint8_t sp[SP_COUNT * SP_ELEMENTS * SP_ELEMENT_SIZE + SP_ALIGN];
     uint8_t dbg[DBG_COUNT * DBG_ELEMENTS * DBG_ELEMENT_SIZE + DBG_ALIGN];
     uint8_t version[VERSION_COUNT * VERSION_ELEMENTS * VERSION_ELEMENT_SIZE + VERSION_ALIGN];
+    uint8_t sip_cmd[SIP_CMD_COUNT * SIP_CMD_ELEMENTS * SIP_CMD_ELEMENT_SIZE + SIP_CMD_ALIGN];
 };
 
-static struct StateSaveAreaHeader Gen12LPSIPCSRDebugBindlessDebugHeader =
+static struct StateSaveAreaHeader Gen12SIPCSRDebugBindlessDebugHeader =
 {
-    {"tssarea", 0, {1, 0, 0}, sizeof(StateSaveAreaHeader) / 8, {0, 0, 0}},  // versionHeader
+    {"tssarea", 0, {2, 0, 0}, sizeof(StateSaveAreaHeader) / 8, {0, 0, 0}},  // versionHeader
     {
         // regHeader
         0,                               // num_slices
@@ -185,7 +196,9 @@ static struct StateSaveAreaHeader Gen12LPSIPCSRDebugBindlessDebugHeader =
         {offsetof(struct DebugSurfaceLayout, sp), DebugSurfaceLayout::SP_COUNT,
          DebugSurfaceLayout::SP_ELEMENTS* DebugSurfaceLayout::SP_ELEMENT_SIZE * 8,
          DebugSurfaceLayout::SP_ELEMENTS* DebugSurfaceLayout::SP_ELEMENT_SIZE},  // sp
-        {0, 0, 0, 0},                                // cmd
+        {offsetof(struct DebugSurfaceLayout, sip_cmd), DebugSurfaceLayout::SIP_CMD_COUNT,
+         DebugSurfaceLayout::SIP_CMD_ELEMENTS* DebugSurfaceLayout::SIP_CMD_ELEMENT_SIZE * 8,
+         DebugSurfaceLayout::SIP_CMD_ELEMENTS* DebugSurfaceLayout::SIP_CMD_ELEMENT_SIZE},  // cmd
         {offsetof(struct DebugSurfaceLayout, tm), DebugSurfaceLayout::TM_COUNT,
          DebugSurfaceLayout::TM_ELEMENTS* DebugSurfaceLayout::TM_ELEMENT_SIZE * 8,
          DebugSurfaceLayout::TM_ELEMENTS* DebugSurfaceLayout::TM_ELEMENT_SIZE},  // tm
@@ -195,6 +208,25 @@ static struct StateSaveAreaHeader Gen12LPSIPCSRDebugBindlessDebugHeader =
          DebugSurfaceLayout::DBG_ELEMENTS* DebugSurfaceLayout::DBG_ELEMENT_SIZE}  // dbg
     }
 };
+
+bool SIPSuppoertedOnPlatformFamily(const GFXCORE_FAMILY& family)
+{
+    switch (family)
+    {
+    case IGFX_GEN9_CORE:
+    case IGFX_GENNEXT_CORE:
+    case IGFX_GEN10_CORE:
+    case IGFX_GEN11_CORE:
+    case IGFX_GEN12_CORE:
+    case IGFX_GEN12LP_CORE:
+    case IGFX_XE_HP_CORE:
+    case IGFX_XE_HPG_CORE:
+    case IGFX_XE_HPC_CORE:
+        return true;
+    default:
+        return false;
+    }
+}
 
 MemoryBuffer* LoadFile(const std::string &FileName)
 {
@@ -208,6 +240,11 @@ bool CSystemThread::CreateSystemThreadKernel(
     USC::SSystemThreadKernelOutput* &pSystemThreadKernelOutput,
     bool bindlessMode)
 {
+    if (!SIPSuppoertedOnPlatformFamily(platform.getPlatformInfo().eRenderCoreFamily))
+    {
+        return false;
+    }
+
     bool success = true;
 
     // Check if the System Thread mode in the correct range.
@@ -370,29 +407,42 @@ void populateSIPKernelInfo(const IGC::CPlatform &platform,
 
     SIPKernelInfo[GEN12_LP_CSR_DEBUG_BINDLESS] = std::make_tuple((void*)&Gen12LPSIPCSRDebugBindless,
             (int)sizeof(Gen12LPSIPCSRDebugBindless),
-            (void*)&Gen12LPSIPCSRDebugBindlessDebugHeader,
-            (int)sizeof(Gen12LPSIPCSRDebugBindlessDebugHeader));
+            (void*)&Gen12SIPCSRDebugBindlessDebugHeader,
+            (int)sizeof(Gen12SIPCSRDebugBindlessDebugHeader));
+
+    SIPKernelInfo[XE_HP_CSR_DEBUG_BINDLESS] = std::make_tuple((void*)&XeHPSIPCSRDebugBindless,
+        (int)sizeof(XeHPSIPCSRDebugBindless),
+        (void*)&Gen12SIPCSRDebugBindlessDebugHeader,
+        (int)sizeof(Gen12SIPCSRDebugBindlessDebugHeader));
+
+    SIPKernelInfo[XE_HPG_CSR_DEBUG_BINDLESS] = std::make_tuple((void*)&XeHPGSIPCSRDebugBindless,
+            (int)sizeof(XeHPGSIPCSRDebugBindless),
+            (void*)&Gen12SIPCSRDebugBindlessDebugHeader,
+            (int)sizeof(Gen12SIPCSRDebugBindlessDebugHeader));
 
     GT_SYSTEM_INFO sysInfo = platform.GetGTSystemInfo();
-    Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.num_slices = sysInfo.MaxSlicesSupported;
-    Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.num_subslices_per_slice = sysInfo.MaxSubSlicesSupported;
-    Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.num_eus_per_subslice = sysInfo.MaxEuPerSubSlice;
-    Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.num_threads_per_eu = 0;
+    Gen12SIPCSRDebugBindlessDebugHeader.regHeader.num_slices = sysInfo.MaxSlicesSupported;
+    IGC_ASSERT(sysInfo.MaxSlicesSupported > 0);
+    Gen12SIPCSRDebugBindlessDebugHeader.regHeader.num_subslices_per_slice =
+            (sysInfo.MaxSlicesSupported > 0 ? (sysInfo.MaxSubSlicesSupported / sysInfo.MaxSlicesSupported) : sysInfo.MaxSubSlicesSupported);
+    Gen12SIPCSRDebugBindlessDebugHeader.regHeader.num_eus_per_subslice = sysInfo.MaxEuPerSubSlice;
+    Gen12SIPCSRDebugBindlessDebugHeader.regHeader.num_threads_per_eu = 0;
 
     // Avoid division by zero error in case if any of the sysInfo parameter is zero.
-    if ((sysInfo.MaxEuPerSubSlice * sysInfo.MaxSubSlicesSupported * sysInfo.MaxSlicesSupported) != 0)
-        Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.num_threads_per_eu =
-            sysInfo.ThreadCount / (sysInfo.MaxEuPerSubSlice * sysInfo.MaxSubSlicesSupported * sysInfo.MaxSlicesSupported);
+    if (sysInfo.EUCount != 0)
+        Gen12SIPCSRDebugBindlessDebugHeader.regHeader.num_threads_per_eu = (sysInfo.ThreadCount / sysInfo.EUCount);
 
     if (sizeof(StateSaveAreaHeader) % 16)
-        Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.state_area_offset =
+        Gen12SIPCSRDebugBindlessDebugHeader.regHeader.state_area_offset =
             16 - sizeof(StateSaveAreaHeader) % 16;
 
     // Match SIP alignment of debug surface
-    IGC_ASSERT_MESSAGE(((Gen12LPSIPCSRDebugBindlessDebugHeader.regHeader.state_area_offset +
-        Gen12LPSIPCSRDebugBindlessDebugHeader.versionHeader.size * 8) / 16 == 0x14),
+    IGC_ASSERT_MESSAGE(((Gen12SIPCSRDebugBindlessDebugHeader.regHeader.state_area_offset +
+        Gen12SIPCSRDebugBindlessDebugHeader.versionHeader.size * 8) / 16 == 0x14),
         "Gen12 Bindless SIP header size alignment mismatch.");
 
+    SIPKernelInfo[XE_HP_CSR] = std::make_tuple((void*)&XeHPSIPCSR, (int)sizeof(XeHPSIPCSR), nullptr, 0);
+    SIPKernelInfo[XE_HP_CSR_DEBUG] = std::make_tuple((void*)&XeHPSIPCSRDebug, (int)sizeof(XeHPSIPCSRDebug), nullptr, 0);
 }
 
 CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
@@ -486,6 +536,9 @@ CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
     }
     case IGFX_GEN12_CORE:
     case IGFX_GEN12LP_CORE:
+    case IGFX_XE_HP_CORE:
+    case IGFX_XE_HPG_CORE:
+    case IGFX_XE_HPC_CORE:
     {
         if (mode & SYSTEM_THREAD_MODE_DEBUG)
         {
@@ -497,7 +550,11 @@ CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
             case IGFX_ALDERLAKE_S:
                 SIPIndex = bindlessMode ? GEN12_LP_CSR_DEBUG_BINDLESS : GEN12_LP_CSR_DEBUG;
                 break;
-
+            case IGFX_XE_HP_SDV:
+                SIPIndex = bindlessMode ? XE_HP_CSR_DEBUG_BINDLESS : XE_HP_CSR_DEBUG;
+                break;
+            case IGFX_DG2:
+            case IGFX_PVC:
 
             default:
                 break;
@@ -518,7 +575,10 @@ CGenSystemInstructionKernelProgram* CGenSystemInstructionKernelProgram::Create(
             case IGFX_ALDERLAKE_P:
                 SIPIndex = GEN12_LP_CSR;
                 break;
-
+            case IGFX_XE_HP_SDV:
+                SIPIndex = XE_HP_CSR;
+            case IGFX_DG2:
+            case IGFX_PVC:
 
             default:
                 break;

@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/Scalarizer.h"
 #include "Compiler/IGCPassSupport.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
+#include "Compiler/CISACodeGen/helper.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
@@ -79,7 +80,7 @@ ScalarizeFunction::~ScalarizeFunction()
 bool ScalarizeFunction::runOnFunction(Function& F)
 {
 
-    if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
+    if (!IGC::ForceAlwaysInline())
     {
         if (F.isDeclaration()) return false;
     }
@@ -150,6 +151,21 @@ bool ScalarizeFunction::runOnFunction(Function& F)
         if (Value * val = dyn_cast<Value>(*index))
         {
             UndefValue* undefVal = UndefValue::get((*index)->getType());
+
+            if (MDNode* pEIMD = (*index)->getMetadata("implicitGlobalID"))
+            {
+                // Compute thread and group identification instructions must have 'Output' attribute
+                // added later during compilation. The implicitGlobalID metadata attached to this
+                // instruction must be assigned to a new instruction, which replaces this instruction.
+                // Unfortunatelly, replaceAllUsesWith() will not ensure such propagation.
+                Instruction* pNewInst = dyn_cast_or_null<llvm::Instruction>(undefVal);
+                if (pNewInst)
+                {
+                    IGC_ASSERT_MESSAGE(pNewInst, "Missing implicit global ID instruction");
+                    Instruction* instr = dyn_cast<Instruction>(*index);
+                    pNewInst->copyMetadata(*instr);
+                }
+            }
             (val)->replaceAllUsesWith(undefVal);
         }
         IGC_ASSERT_MESSAGE((*index)->use_empty(), "Unable to remove used instruction");
@@ -628,6 +644,8 @@ void ScalarizeFunction::scalarizeInstruction(PHINode* PI)
                     {
                     default:
                         break;
+                    case GenISAIntrinsic::GenISA_sub_group_dpas:
+                    case GenISAIntrinsic::GenISA_dpas:
                     case GenISAIntrinsic::GenISA_simdBlockWrite:
                         recoverNonScalarizableInst(PI);
                         return;

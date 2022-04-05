@@ -436,6 +436,7 @@ static void InitializeBIFlags(Module &M) {
   initializeVarWithValue("__FlushDenormals", 1);
   initializeVarWithValue("__DashGSpecified", 0);
   initializeVarWithValue("__FastRelaxedMath", 0);
+  initializeVarWithValue("__MadEnable", 0);
   initializeVarWithValue("__UseNative64BitIntSubgroupBuiltin", 1);
   initializeVarWithValue("__UseNative64BitFloatSubgroupBuiltin", 1);
   initializeVarWithValue("__CRMacros", 1);
@@ -448,6 +449,8 @@ static void InitializeBIFlags(Module &M) {
   initializeVarWithValue("__ProfilingTimerResolution",
                          *reinterpret_cast<int *>(&profilingTimerResolution));
   initializeVarWithValue("__UseMathWithLUT", 0);
+  // FIXME: target specific, but subtarget cannot be reached in middle-end.
+  initializeVarWithValue("__HasInt64SLMAtomicCAS", 0);
 }
 
 static bool isOCLBuiltinDecl(const Function &F) {

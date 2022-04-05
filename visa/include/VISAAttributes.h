@@ -38,6 +38,7 @@ DEF_ATTR_BOOL(ATTR_Input_Output,           "Input_Output",  AK_VAR,    false, "T
 DEF_ATTR_BOOL(ATTR_NoWidening,             "NoWidening",    AK_VAR,    false, "")
 DEF_ATTR_BOOL(ATTR_DoNotSpill,             "DoNotSpill",    AK_VAR,    false, "True if var should not be spilled")
 DEF_ATTR_BOOL(ATTR_SepSpillPvtSS,          "SepSpillPvtSS", AK_KERNEL, false, "")
+DEF_ATTR_BOOL(ATTR_LTOInvokeOptTarget,     "LTO_InvokeOptTarget",   AK_KERNEL, 0, "")
 
 
 // int32 attributes
@@ -53,6 +54,7 @@ DEF_ATTR_INT32(ATTR_SimdSize,              "SimdSize",      AK_KERNEL, 0, "Dispa
 DEF_ATTR_INT32(ATTR_Scope,                 "Scope",         AK_VAR,    0, "")
 DEF_ATTR_INT32(ATTR_SurfaceUsage,          "SurfaceUsage",  AK_VAR,    0, "")
 DEF_ATTR_INT32(ATTR_CrossThreadInputSize,  "CrossThreadInputSize",AK_KERNEL, -1, "cross-thread payload size in bytes")
+DEF_ATTR_INT32(ATTR_NBarrierCnt,           "NBarrierCnt",   AK_KERNEL, 0, "")
 
 
 // C String Attributes

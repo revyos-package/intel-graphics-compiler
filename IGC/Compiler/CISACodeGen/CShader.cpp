@@ -23,6 +23,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/HullShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/DomainShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
+#include "Compiler/CISACodeGen/BindlessShaderCodeGen.hpp"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/secure_mem.h"
 #include "Probe/Assertion.h"
@@ -35,7 +36,7 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     : entry(pFunc)
     , m_parent(pProgram)
     , encoder()
-    , m_HasBarrier(false)
+    , m_BarrierNumber(0)
 {
     m_ctx = m_parent->GetContext();
     m_WI = nullptr;
@@ -65,7 +66,12 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     m_HasConstantStatelessMemoryAccess = false;
     m_HasDPAS = false;
 
-    m_simdProgram.init(!m_ctx->platform.hasScratchSurface(), m_ctx->platform.maxPerThreadScratchSpace(), GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory);
+    bool SepSpillPvtSS = m_ctx->platform.hasScratchSurface() &&
+        m_ctx->m_DriverInfo.supportsSeparatingSpillAndPrivateScratchMemorySpace();
+    m_simdProgram.init(!m_ctx->platform.hasScratchSurface(),
+        m_ctx->platform.maxPerThreadScratchSpace(),
+        GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory,
+        SepSpillPvtSS);
 }
 
 void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatchMode shaderMode)
@@ -88,11 +94,18 @@ void CShader::InitEncoder(SIMDMode simdSize, bool canAbortOnSpill, ShaderDispatc
     m_ARGV = nullptr;
     m_RETV = nullptr;
     m_SavedSRetPtr = nullptr;
+    m_ImplArgBufPtr = nullptr;
+    m_LocalIdBufPtr = nullptr;
 
     // SIMD32 is a SIMD16 shader with 2 instance of each instruction
     m_SIMDSize = (simdSize == SIMDMode::SIMD8 ? SIMDMode::SIMD8 : SIMDMode::SIMD16);
     m_ShaderDispatchMode = shaderMode;
     m_numberInstance = simdSize == SIMDMode::SIMD32 ? 2 : 1;
+    if (PVCLSCEnabled())
+    {
+        m_SIMDSize = simdSize;
+        m_numberInstance = 1;
+    }
     m_dispatchSize = simdSize;
     globalSymbolMapping.clear();
     symbolMapping.clear();
@@ -208,6 +221,56 @@ void CShader::EOTRenderTarget(CVariable* r1, bool isPerCoarse)
     encoder.Push();
 }
 
+// Creates a URB Fence message.
+// If return value is not a nullptr, the returned variable is a send message
+// writeback variable that must be read in order to wait for URB Fence
+// completion, e.g. the variable may be used as payload to EOTGateway.
+CVariable* CShader::URBFence()
+{
+    {
+        // A legacy HDC URB fence message issued by a thread causes further
+        // messages issued by the thread to be blocked until all previous URB
+        // messages have completed, or the results can be globally observed from
+        // the point of view of other threads in the system. The execution mask
+        // is ignored.No bounds checking is performed. The URB fence message
+        // signals completion by returning data into the writeback register. The
+        // data returned in the writeback register is undefined. When an
+        // instruction reads the writeback register value, then this thread is
+        // blocked until all previous URB messages are globally observable. The
+        // writeback register must be read before this thread sends another data
+        // port message.
+        const uint desc = ::IGC::URBFence();
+        constexpr uint exDesc = EU_MESSAGE_TARGET_URB;
+
+        // Message length is of size 1, and is ignored (thus it is left uninitialized).
+        CVariable* payload = GetNewVariable(1 * numLanes(SIMDMode::SIMD8), ISA_TYPE_D, EALIGN_GRF, "URBPayload");
+        // Message response length is of size 1.
+        CVariable* dst = GetNewVariable(1 * numLanes(SIMDMode::SIMD8), ISA_TYPE_D, EALIGN_GRF, "URBReturnValue");
+
+        encoder.SetSimdSize(SIMDMode::SIMD1);
+        encoder.Send(dst, payload, exDesc, ImmToVariable(desc, ISA_TYPE_D));
+        encoder.Push();
+        return dst;
+    }
+}
+
+// Payload may be non-nullptr if it is e.g. a response payload from fence.
+void CShader::EOTGateway(CVariable* payload)
+{
+    const uint desc = ::IGC::EOTGateway(EU_GW_FENCE_PORTS_None);
+    constexpr uint exDesc = EU_MESSAGE_TARGET_GATEWAY | cMessageExtendedDescriptorEOTBit;
+
+    // Message length is of size 1, and is ignored.
+    if (!payload)
+    {
+        // Message length is of size 1, and is ignored (thus it is left uninitialized).
+        payload = GetNewVariable(getGRFSize(), ISA_TYPE_D, EALIGN_GRF, "EOTPayload");
+    }
+
+    encoder.SetSimdSize(SIMDMode::SIMD1);
+    encoder.Send(nullptr, payload, exDesc, ImmToVariable(desc, ISA_TYPE_D));
+    encoder.Push();
+}
 
 void CShader::AddEpilogue(llvm::ReturnInst* ret)
 {
@@ -229,6 +292,15 @@ void CShader::InitializeStackVariables()
     // create frame-pointer register
     m_FP = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1, "FP");
     encoder.GetVISAPredefinedVar(m_FP, PREDEFINED_FE_FP);
+    // create pointers locations to buffers
+    if (!m_ctx->platform.isProductChildOf(IGFX_XE_HP_SDV) &&
+        IGC_IS_FLAG_DISABLED(ForceInlineStackCallWithImplArg))
+    {
+        m_ImplArgBufPtr = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1, "ImplArgPtr");
+        encoder.GetVISAPredefinedVar(m_ImplArgBufPtr, PREDEFINED_IMPL_ARG_BUF_PTR);
+        m_LocalIdBufPtr = GetNewVariable(1, ISA_TYPE_UQ, EALIGN_QWORD, true, 1, "LocalIdPtr");
+        encoder.GetVISAPredefinedVar(m_LocalIdBufPtr, PREDEFINED_LOCAL_ID_BUF_PTR);
+    }
 }
 
 /// save FP of previous frame when entering a stack-call function
@@ -324,6 +396,11 @@ void CShader::CreateImplicitArgs()
         bool isUniform = WIAnalysis::isDepUniform(implictArg.getDependency());
         uint16_t nbElements = (uint16_t)implictArg.getNumberElements();
 
+        if (implictArg.isLocalIDs() &&
+            PVCLSCEnabled() && (m_SIMDSize == SIMDMode::SIMD32))
+        {
+            nbElements = getGRFSize() / 2;
+        }
         CVariable* var = GetNewVariable(
             nbElements,
             implictArg.getVISAType(*m_DL),
@@ -366,25 +443,6 @@ DebugInfoData& IGC::CShader::GetDebugInfoData()
     return diData;
 }
 
-void CShader::GetPrintfStrings(std::vector<std::pair<unsigned int, std::string>>& printfStrings)
-{
-    std::string MDNodeName = "printf.strings";
-    NamedMDNode* printfMDNode = entry->getParent()->getOrInsertNamedMetadata(MDNodeName);
-
-    for (uint i = 0, NumStrings = printfMDNode->getNumOperands();
-        i < NumStrings;
-        i++)
-    {
-        llvm::MDNode* argMDNode = printfMDNode->getOperand(i);
-        llvm::ConstantInt* indexOpndVal =
-            mdconst::dyn_extract<llvm::ConstantInt>(argMDNode->getOperand(0));
-        llvm::MDString* stringOpndVal =
-            dyn_cast<llvm::MDString>(argMDNode->getOperand(1));
-
-        printfStrings.push_back(
-            std::pair<unsigned int, std::string>(int_cast<unsigned int>(indexOpndVal->getZExtValue()), stringOpndVal->getString().data()));
-    }
-}
 // For sub-vector aliasing, pre-allocating cvariables for those
 // valeus that have sub-vector aliasing before emit instructions.
 // (The sub-vector aliasing is done in VariableReuseAnalysis.)
@@ -561,7 +619,8 @@ void CShader::AllocateNOSConstants(uint& offset)
     for (auto I = pushInfo.constantReg.begin(), E = pushInfo.constantReg.end(); I != E; I++) {
         CVariable* var = GetSymbol(m_argListCache[I->second]);
         AllocateInput(var, offset + I->first * SIZE_DWORD, 0, encoder.IsCodePatchCandidate());
-        maxConstantPushed = std::max(maxConstantPushed, I->first + 1);
+        uint numConstantsPushed = int_cast<uint>(llvm::divideCeil(var->GetSize(), SIZE_DWORD));
+        maxConstantPushed = std::max(maxConstantPushed, I->first + numConstantsPushed);
     }
     maxConstantPushed = iSTD::Max(maxConstantPushed, static_cast<uint>(m_ModuleMetadata->MinNOSPushConstantSize));
     m_NOSBufferSize = iSTD::Align(maxConstantPushed * SIZE_DWORD, getGRFSize());
@@ -776,6 +835,34 @@ CVariable* CShader::GetHWTID()
                 encoder.Push();
             };
 
+            if (m_Platform->getPlatformInfo().eProductFamily == IGFX_PVC)
+            {
+                // [14:12] Slice ID.
+                // [11:9] SubSlice ID
+                // [8] : EUID[2]
+                // [7:6] : Reserved
+                // [5:4] EUID[1:0]
+                // [3] : Reserved MBZ
+                // [2:0] : TID
+                //
+                // HWTID is calculated using a concatenation of TID:EUID:SubSliceID:SliceID
+
+                uint32_t bitmask = BITMASK(15);
+                m_HW_TID = GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, 1, "HWTID");
+                encoder.SetNoMask();
+                encoder.SetSrcSubReg(0, 0);
+                encoder.And(m_HW_TID, GetSR0(), ImmToVariable(bitmask, ISA_TYPE_D));
+                encoder.Push();
+
+                // Remove bit [7:6]
+                RemoveBitRange(m_HW_TID, 6, 2);
+                // Remove bit [3]
+                RemoveBitRange(m_HW_TID, 3, 1);
+
+                return m_HW_TID;
+            }
+
+
             // XeHP_SDV
             // [13:11] Slice ID.
             // [10:9] Dual - SubSlice ID
@@ -830,6 +917,18 @@ CVariable* CShader::GetPrivateBase()
     }
     IGC_ASSERT(kerArg);
     return GetSymbol(kerArg);
+}
+
+CVariable* CShader::GetImplArgBufPtr()
+{
+    IGC_ASSERT(m_ImplArgBufPtr);
+    return m_ImplArgBufPtr;
+}
+
+CVariable* CShader::GetLocalIdBufPtr()
+{
+    IGC_ASSERT(m_LocalIdBufPtr);
+    return m_LocalIdBufPtr;
 }
 
 CVariable* CShader::GetFP()
@@ -1282,7 +1381,7 @@ uint16_t CShader::AdjustExtractIndex(llvm::Value* vecVal, uint16_t index)
     }
 }
 
-void CShader::GetSimdOffsetBase(CVariable*& pVar)
+void CShader::GetSimdOffsetBase(CVariable*& pVar, bool dup)
 {
     encoder.SetSimdSize(SIMDMode::SIMD8);
     encoder.SetNoMask();
@@ -1300,9 +1399,12 @@ void CShader::GetSimdOffsetBase(CVariable*& pVar)
 
     if (encoder.IsSecondHalf())
     {
-        encoder.SetNoMask();
-        encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
-        encoder.Push();
+        if (!dup)
+        {
+            encoder.SetNoMask();
+            encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
+            encoder.Push();
+        }
     }
     else if (m_SIMDSize == SIMDMode::SIMD32)
     {
@@ -1310,7 +1412,10 @@ void CShader::GetSimdOffsetBase(CVariable*& pVar)
         encoder.SetSimdSize(SIMDMode::SIMD16);
         encoder.SetNoMask();
         encoder.SetDstSubReg(16);
-        encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
+        if (dup)
+            encoder.Copy(pVar, pVar);
+        else
+            encoder.Add(pVar, pVar, ImmToVariable(16, ISA_TYPE_W));
         encoder.Push();
     }
 }
@@ -1610,7 +1715,7 @@ llvm::Constant* CShader::findCommonConstant(llvm::Constant* C, uint elts, uint c
     llvm::MapVector<llvm::Constant*, int> constMap;
     constMap.clear();
     Constant* constC = nullptr;
-    bool cannotPackVF = false;
+    bool cannotPackVF = !m_ctx->platform.hasPackedRestrictedFloatVector();
     for (uint32_t i = currentEmitElts; i < currentEmitElts + elts; i++)
     {
         constC = C->getAggregateElement(i);
@@ -1624,10 +1729,11 @@ llvm::Constant* CShader::findCommonConstant(llvm::Constant* C, uint elts, uint c
         if (!isa<UndefValue>(constC) && elts >= 4)
         {
             llvm::VectorType* VTy = llvm::dyn_cast<llvm::VectorType>(C->getType());
-            if (VTy->getScalarType()->isFloatTy())
+            uint8_t encoding = 0;
+            if (VTy->getScalarType()->isFloatTy() &&
+                !getByteFloatEncoding(cast<ConstantFP>(constC), encoding))
             {
-                uint8_t encoding = 0;
-                cannotPackVF = !getByteFloatEncoding(cast<ConstantFP>(constC), encoding);
+                cannotPackVF = true;
             }
         }
     }
@@ -1876,8 +1982,8 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
                 {
                     // pack into vf if possible.
                     uint32_t vfimm = 0;
-                    bool canUseVF = true;
-                    for (unsigned j = 0; j < Step; ++j)
+                    bool canUseVF = m_ctx->platform.hasPackedRestrictedFloatVector();
+                    for (unsigned j = 0; j < Step && canUseVF; ++j)
                     {
                         Constant* EC = C->getAggregateElement(i + j);
                         // Treat undef as 0.0f.
@@ -2098,6 +2204,35 @@ static e_alignment GetPreferredAlignmentOnUse(llvm::Value* V, WIAnalysis* WIA,
                             return (pCtx->platform.getGRFSize() == 64) ? EALIGN_64WORD : EALIGN_32WORD;
                     }
                     return (pCtx->platform.getGRFSize() == 64) ? EALIGN_32WORD : EALIGN_HWORD;
+                }
+            }
+            GenISAIntrinsic::ID gid = GII->getIntrinsicID();
+            if (GII && (gid == GenISAIntrinsic::GenISA_dpas ||
+                gid == GenISAIntrinsic::GenISA_sub_group_dpas))
+            {
+                // Only oprd1 could be uniform and its alignment could
+                // be less than GRF. All the others are GRF-aligned.
+                if (aV == GII->getArgOperand(1)) {
+                    ConstantInt* pa = dyn_cast<ConstantInt>(GII->getOperand(3)); // oprd1's precision
+                    ConstantInt* sdepth = dyn_cast<ConstantInt>(GII->getOperand(5));
+
+                    int PA = (int)pa->getSExtValue();
+                    int SD = (int)sdepth->getSExtValue();
+                    uint32_t bits = getPrecisionInBits((PrecisionType)PA);
+                    uint32_t OPS_PER_CHAN = (GII->getType()->isFloatTy() ? 2 : 4);
+                    bits = bits * OPS_PER_CHAN;
+                    bits = bits * SD;
+                    uint32_t NDWs = bits / 32;
+                    switch (NDWs) {
+                    default:
+                        break;
+                    case 2:
+                        return EALIGN_QWORD;
+                    case 4:
+                        return EALIGN_OWORD;
+                    case 8:
+                        return EALIGN_HWORD;
+                    }
                 }
             }
         }
@@ -2324,7 +2459,7 @@ CVariable* CShader::getOrCreateReturnSymbol(llvm::Function* F)
     if (F->isDeclaration() || retType->isVoidTy())
         return nullptr;
 
-    IGC_ASSERT(retType->isSingleValueType());
+    IGC_ASSERT(retType->isSingleValueType() || retType->isStructTy());
     VISA_Type type = GetType(retType);
     uint16_t nElts = (uint16_t)GetNumElts(retType, false);
     e_alignment align = getGRFAlignment();
@@ -2410,6 +2545,11 @@ CVariable* CShader::getOrCreateArgumentSymbol(
                     bool isUniform = WIAnalysis::isDepUniform(implictArg.getDependency());
                     uint16_t nbElements = (uint16_t)implictArg.getNumberElements();
 
+                    if (implictArg.isLocalIDs() &&
+                        PVCLSCEnabled() && (m_SIMDSize == SIMDMode::SIMD32))
+                    {
+                        nbElements = getGRFSize() / 2;
+                    }
 
                     var = GetNewVariable(nbElements,
                         implictArg.getVISAType(*m_DL),
@@ -2962,7 +3102,17 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
     // need to create a new mapping
     if (!var)
     {
-        var = GetNewVector(value, preferredAlign);
+        // for @llvm.stacksave returned var must be created based on SP instead of LLVM value
+        llvm::IntrinsicInst* IntrinsicInstruction = dyn_cast<llvm::IntrinsicInst>(value);
+        if (IntrinsicInstruction && IntrinsicInstruction->getIntrinsicID() == Intrinsic::stacksave && hasSP())
+        {
+            auto pSP = GetSP();
+            var = GetNewVariable(pSP->GetNumberElement(), pSP->GetType(), pSP->GetAlign(), pSP->IsUniform(), value->getName());
+        }
+        else
+        {
+            var = GetNewVector(value, preferredAlign);
+        }
     }
 
     symbolMapping.insert(std::pair<llvm::Value*, CVariable*>(value, var));
@@ -3455,21 +3605,109 @@ void CShader::PackAndCopyVariable(
     encoder.Push();
 }
 
+// Copies entire variable using simd16, UD type and NoMask
+void CShader::CopyVariableRaw(
+    CVariable* dst,
+    CVariable* src)
+{
+    VISA_Type dataType = ISA_TYPE_UD;
+    uint dataTypeSizeInBytes = CEncoder::GetCISADataTypeSize(dataType);
+    uint offset = 0;
+    uint bytesToCopy = src->GetSize() * src->GetNumberInstance();
+    while (bytesToCopy > 0)
+    {
+        bool dstSeconfHalf = offset >= dst->GetSize();
+        bool srcSeconfHalf = offset >= src->GetSize();
+        encoder.SetSecondHalf(dstSeconfHalf || srcSeconfHalf);
+        SIMDMode simdMode = SIMDMode::SIMD16;
+        uint movSize = numLanes(simdMode) * dataTypeSizeInBytes;
+        while (movSize > bytesToCopy ||
+            (!srcSeconfHalf && ((offset + movSize) > src->GetSize())) ||
+            (!dstSeconfHalf && ((offset + movSize) > dst->GetSize())))
+        {
+            simdMode = lanesToSIMDMode(numLanes(simdMode) / 2);
+            movSize = numLanes(simdMode) * dataTypeSizeInBytes;
+        }
+        CVariable* dst0 = GetNewAlias(
+            dst,
+            dataType,
+            dstSeconfHalf ? (offset - dst->GetSize()) : offset,
+            numLanes(simdMode));
+        CVariable* src0 = GetNewAlias(
+            src,
+            dataType,
+            srcSeconfHalf ? (offset - src->GetSize()) : offset,
+            numLanes(simdMode));
+        encoder.SetSimdSize(simdMode);
+        encoder.SetNoMask();
+        encoder.Copy(dst0, src0);
+        encoder.Push();
+        encoder.SetSecondHalf(false);
+        bytesToCopy -= movSize;
+        offset += movSize;
+    }
+}
+
+// Creates a new variable and copies entire src using simd16, UD type and
+// NoMask. If `singleInstancde` is true the new variable is a single-instance
+// variable.
+CVariable* CShader::CopyVariableRaw(CVariable* src, bool singleInstance)
+{
+    uint numInstance = src->GetNumberInstance();
+    uint numElements = src->GetNumberElement();
+    CName name(src->getName(), singleInstance ? "SingleInstanceCopy" : "Copy");
+    CVariable* dst = GetNewVariable(
+        singleInstance ? numElements * numInstance : numElements,
+        src->GetType(),
+        src->GetAlign(),
+        src->IsUniform(),
+        singleInstance ? 1 : numInstance,
+        name);
+    CopyVariableRaw(dst, src);
+    return dst;
+}
+
 bool CShader::CompileSIMDSizeInCommon(SIMDMode simdMode)
 {
     bool ret = (m_ScratchSpaceSize <= m_ctx->platform.maxPerThreadScratchSpace());
     m_simdProgram.setScratchSpaceUsedByShader(m_ScratchSpaceSize);
-    if (m_ctx->platform.hasScratchSurface() && m_ctx->m_DriverInfo.supportsSeparatingSpillAndPrivateScratchMemorySpace()) {
+
+    if (m_ctx->platform.hasScratchSurface() &&
+        m_ctx->m_DriverInfo.supportsSeparatingSpillAndPrivateScratchMemorySpace())
+    {
+        ret = ((m_simdProgram.getScratchSpaceUsageInSlot0() <= m_ctx->platform.maxPerThreadScratchSpace()) &&
+            (m_simdProgram.getScratchSpaceUsageInSlot1() <= m_ctx->platform.maxPerThreadScratchSpace()));
+    }
+    else
+    {
         ret = (m_simdProgram.getScratchSpaceUsageInSlot0() <= m_ctx->platform.maxPerThreadScratchSpace());
     }
 
+    if (ret && m_ctx->hasSyncRTCalls(entry))
+    {
+        ret = (m_Platform->getMaxRayQuerySIMDSize() >= simdMode);
+    }
 
     return ret;
 }
 
 uint32_t CShader::GetShaderThreadUsageRate()
 {
-    return 1;
+    uint32_t grfNum = GRF_TOTAL_NUM;
+    if (IGC_GET_FLAG_VALUE(TotalGRFNum) != 0)
+    {
+        grfNum = IGC_GET_FLAG_VALUE(TotalGRFNum);
+    }
+    else if (GetContext()->hasSyncRTCalls() && IGC_GET_FLAG_VALUE(TotalGRFNum4RQ) != 0)
+    {
+        grfNum = IGC_GET_FLAG_VALUE(TotalGRFNum4RQ);
+    }
+    else if (GetContext()->type == ShaderType::COMPUTE_SHADER && IGC_GET_FLAG_VALUE(TotalGRFNum4CS) != 0)
+    {
+        grfNum = IGC_GET_FLAG_VALUE(TotalGRFNum4CS);
+    }
+    // prevent callee divide by zero
+    return std::max<uint32_t>(1, grfNum / GRF_TOTAL_NUM);
 }
 
 CShader* CShaderProgram::GetShader(SIMDMode simd, ShaderDispatchMode mode)
@@ -3552,6 +3790,9 @@ CShader* CShaderProgram::CreateNewShader(SIMDMode simd)
         case ShaderType::COMPUTE_SHADER:
             pShader = new CComputeShader(m_kernel, this);
             break;
+        case ShaderType::RAYTRACING_SHADER:
+            pShader = new CBindlessShader(m_kernel, this);
+            break;
         default:
             IGC_ASSERT_MESSAGE(0, "wrong shader type");
             break;
@@ -3614,7 +3855,7 @@ CShaderProgram::~CShaderProgram()
 
 unsigned int CShader::GetPrimitiveTypeSizeInRegisterInBits(const Type* Ty) const
 {
-    unsigned int sizeInBits = Ty->getPrimitiveSizeInBits();
+    unsigned int sizeInBits = (unsigned int)Ty->getPrimitiveSizeInBits();
     if (Ty->isPtrOrPtrVectorTy())
     {
         sizeInBits =
@@ -3648,3 +3889,22 @@ unsigned int CShader::GetScalarTypeSizeInRegister(const Type* Ty) const
     return GetScalarTypeSizeInRegisterInBits(Ty) / 8;
 }
 
+bool CShader::needsEntryFence() const
+{
+    if (IGC_IS_FLAG_ENABLED(DisableEntryFences))
+        return false;
+
+    // Only RayTracing related shaders require the UGM fences at the beginning
+    // of each shader for the A0 WA.
+    if (!m_Platform->WaEnableLSCBackupMode())
+        return false;
+
+    auto* Ctx = GetContext();
+    if (Ctx->type == ShaderType::RAYTRACING_SHADER) {
+       auto* ModuleMD = Ctx->getModuleMetaData();
+       auto FI = ModuleMD->FuncMD.find(entry);
+       IGC_ASSERT_MESSAGE(FI != ModuleMD->FuncMD.end(), "Missing shader info!");
+       return FI->second.functionType == IGC::CallableShader;
+    }
+    return false;
+}

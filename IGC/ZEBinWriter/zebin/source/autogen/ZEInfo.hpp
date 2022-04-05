@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -32,7 +32,7 @@ struct zeInfoExecutionEnv
 {
     bool operator==(const zeInfoExecutionEnv& other) const
     {
-        return barrier_count == other.barrier_count && disable_mid_thread_preemption == other.disable_mid_thread_preemption && grf_count == other.grf_count && has_4gb_buffers == other.has_4gb_buffers && has_device_enqueue == other.has_device_enqueue && has_dpas == other.has_dpas && has_fence_for_image_access == other.has_fence_for_image_access && has_global_atomics == other.has_global_atomics && has_multi_scratch_spaces == other.has_multi_scratch_spaces && has_no_stateless_write == other.has_no_stateless_write && offset_to_skip_per_thread_data_load == other.offset_to_skip_per_thread_data_load && offset_to_skip_set_ffid_gp == other.offset_to_skip_set_ffid_gp && required_sub_group_size == other.required_sub_group_size && required_work_group_size == other.required_work_group_size && simd_size == other.simd_size && slm_size == other.slm_size && subgroup_independent_forward_progress == other.subgroup_independent_forward_progress && work_group_walk_order_dimensions == other.work_group_walk_order_dimensions;
+        return barrier_count == other.barrier_count && disable_mid_thread_preemption == other.disable_mid_thread_preemption && grf_count == other.grf_count && has_4gb_buffers == other.has_4gb_buffers && has_device_enqueue == other.has_device_enqueue && has_dpas == other.has_dpas && has_fence_for_image_access == other.has_fence_for_image_access && has_global_atomics == other.has_global_atomics && has_multi_scratch_spaces == other.has_multi_scratch_spaces && has_no_stateless_write == other.has_no_stateless_write && has_stack_calls == other.has_stack_calls && require_disable_eufusion == other.require_disable_eufusion && inline_data_payload_size == other.inline_data_payload_size && offset_to_skip_per_thread_data_load == other.offset_to_skip_per_thread_data_load && offset_to_skip_set_ffid_gp == other.offset_to_skip_set_ffid_gp && required_sub_group_size == other.required_sub_group_size && required_work_group_size == other.required_work_group_size && simd_size == other.simd_size && slm_size == other.slm_size && subgroup_independent_forward_progress == other.subgroup_independent_forward_progress && thread_scheduling_mode == other.thread_scheduling_mode && work_group_walk_order_dimensions == other.work_group_walk_order_dimensions;
     }
     zeinfo_int32_t barrier_count = 0;
     zeinfo_bool_t disable_mid_thread_preemption = false;
@@ -44,6 +44,9 @@ struct zeInfoExecutionEnv
     zeinfo_bool_t has_global_atomics = false;
     zeinfo_bool_t has_multi_scratch_spaces = false;
     zeinfo_bool_t has_no_stateless_write = false;
+    zeinfo_bool_t has_stack_calls = false;
+    zeinfo_bool_t require_disable_eufusion = false;
+    zeinfo_int32_t inline_data_payload_size = 0;
     zeinfo_int32_t offset_to_skip_per_thread_data_load = 0;
     zeinfo_int32_t offset_to_skip_set_ffid_gp = 0;
     zeinfo_int32_t required_sub_group_size = 0;
@@ -51,13 +54,14 @@ struct zeInfoExecutionEnv
     zeinfo_int32_t simd_size = 0;
     zeinfo_int32_t slm_size = 0;
     zeinfo_bool_t subgroup_independent_forward_progress = false;
+    zeinfo_str_t thread_scheduling_mode;
     std::vector<zeinfo_int32_t> work_group_walk_order_dimensions;
 };
 struct zeInfoPayloadArgument
 {
     bool operator==(const zeInfoPayloadArgument& other) const
     {
-        return arg_type == other.arg_type && offset == other.offset && size == other.size && arg_index == other.arg_index && addrmode == other.addrmode && addrspace == other.addrspace && access_type == other.access_type && sampler_index == other.sampler_index;
+        return arg_type == other.arg_type && offset == other.offset && size == other.size && arg_index == other.arg_index && addrmode == other.addrmode && addrspace == other.addrspace && access_type == other.access_type && sampler_index == other.sampler_index && source_offset == other.source_offset;
     }
     zeinfo_str_t arg_type;
     zeinfo_int32_t offset = 0;
@@ -67,6 +71,7 @@ struct zeInfoPayloadArgument
     zeinfo_str_t addrspace;
     zeinfo_str_t access_type;
     zeinfo_int32_t sampler_index = -1;
+    zeinfo_int32_t source_offset = -1;
 };
 struct zeInfoPerThreadPayloadArgument
 {
@@ -118,6 +123,15 @@ struct zeInfoDebugEnv
     zeinfo_int32_t sip_surface_bti = -1;
     zeinfo_int32_t sip_surface_offset = -1;
 };
+struct zeInfoHostAccess
+{
+    bool operator==(const zeInfoHostAccess& other) const
+    {
+        return device_name == other.device_name && host_name == other.host_name;
+    }
+    zeinfo_str_t device_name;
+    zeinfo_str_t host_name;
+};
 typedef std::vector<zeInfoPayloadArgument> PayloadArgumentsTy;
 typedef std::vector<zeInfoPerThreadPayloadArgument> PerThreadPayloadArgumentsTy;
 typedef std::vector<zeInfoBindingTableIndex> BindingTableIndicesTy;
@@ -134,14 +148,21 @@ struct zeInfoKernel
     zeInfoDebugEnv debug_env;
 };
 typedef std::vector<zeInfoKernel> KernelsTy;
+typedef std::vector<zeInfoHostAccess> HostAccessesTy;
 struct zeInfoContainer
 {
     zeinfo_str_t version;
     KernelsTy kernels;
+    HostAccessesTy global_host_access_table;
 };
 struct PreDefinedAttrGetter{
-    static zeinfo_str_t getVersionNumber() { return "1.7"; }
+    static zeinfo_str_t getVersionNumber() { return "1.12"; }
 
+    enum class ArgThreadSchedulingMode {
+        age_based,
+        round_robin,
+        round_robin_stall
+    };
     enum class ArgType {
         packed_local_ids,
         local_id,
@@ -154,6 +175,7 @@ struct PreDefinedAttrGetter{
         private_base_stateless,
         buffer_offset,
         printf_buffer,
+        implicit_arg_buffer,
         arg_byvalue,
         arg_bypointer
     };
@@ -185,6 +207,19 @@ struct PreDefinedAttrGetter{
         spill_fill_space,
         single_space
     };
+    static zeinfo_str_t get(ArgThreadSchedulingMode val) {
+        switch(val) {
+        case ArgThreadSchedulingMode::age_based:
+            return "age_based";
+        case ArgThreadSchedulingMode::round_robin:
+            return "round_robin";
+        case ArgThreadSchedulingMode::round_robin_stall:
+            return "round_robin_stall";
+        default:
+            break;
+        }
+        return "";
+    }
     static zeinfo_str_t get(ArgType val) {
         switch(val) {
         case ArgType::packed_local_ids:
@@ -209,6 +244,8 @@ struct PreDefinedAttrGetter{
             return "buffer_offset";
         case ArgType::printf_buffer:
             return "printf_buffer";
+        case ArgType::implicit_arg_buffer:
+            return "implicit_arg_buffer";
         case ArgType::arg_byvalue:
             return "arg_byvalue";
         case ArgType::arg_bypointer:

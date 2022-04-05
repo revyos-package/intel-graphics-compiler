@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/DebugInfo.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "AdaptorCommon/RayTracing/RayTracingConstantsEnums.h"
 #include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/CodeGenPublic.h"
@@ -23,17 +24,19 @@ namespace IGC
     typedef struct RetryState {
         bool allowLICM;
         bool allowCodeSinking;
+        bool allowAddressArithmeticSinking;
         bool allowSimd32Slicing;
         bool allowPromotePrivateMemory;
         bool allowPreRAScheduler;
         bool allowVISAPreRAScheduler;
         bool allowLargeURBWrite;
+        bool allowConstantCoalescing;
         unsigned nextState;
     } RetryState;
 
     static const RetryState RetryTable[] = {
-        { true, true, false, true, true, true, true, 1 },
-        { false, true, true, false, false, false, false, 500 }
+        { true, true, false, false, true, true, true, true, true, 1 },
+        { false, true, true, true, false, false, false, false, false, 500 }
     };
 
     RetryManager::RetryManager() : enabled(false)
@@ -56,6 +59,10 @@ namespace IGC
     bool RetryManager::AllowLICM() {
         IGC_ASSERT(stateId < getStateCnt());
         return RetryTable[stateId].allowLICM;
+    }
+    bool RetryManager::AllowAddressArithmeticSinking() {
+        IGC_ASSERT(stateId < getStateCnt());
+        return RetryTable[stateId].allowAddressArithmeticSinking;
     }
     bool RetryManager::AllowPromotePrivateMemory() {
         IGC_ASSERT(stateId < getStateCnt());
@@ -80,6 +87,10 @@ namespace IGC
     bool RetryManager::AllowLargeURBWrite() {
         IGC_ASSERT(stateId < getStateCnt());
         return RetryTable[stateId].allowLargeURBWrite;
+    }
+    bool RetryManager::AllowConstantCoalescing() {
+        IGC_ASSERT(stateId < getStateCnt());
+        return RetryTable[stateId].allowConstantCoalescing;
     }
     void RetryManager::SetFirstStateId(int id) {
         firstStateId = id;
@@ -414,7 +425,6 @@ namespace IGC
             shader->FillProgram(pKernelProgram);
             pKernelProgram->SIMDInfo = cgCtx->GetSIMDInfo();
 
-
             // free allocated memory for the remaining kernels
             FreeAllocatedMemForNotPickedCS(simdMode);
 
@@ -506,8 +516,10 @@ namespace IGC
 
     float ComputeShaderContext::GetSpillThreshold() const
     {
-        float spillThresholdSLM =
-            float(IGC_GET_FLAG_VALUE(CSSpillThresholdSLM)) / 100.0f;
+        float spillThresholdSLM = platform.adjustedSpillThreshold() / 100.0f;
+        //enable CSSpillThresholdSLM with desired value to override the default value.
+        if(IGC_IS_FLAG_ENABLED(CSSpillThresholdSLM))
+            spillThresholdSLM = float(IGC_GET_FLAG_VALUE(CSSpillThresholdSLM)) / 100.0f;
         float spillThresholdNoSLM =
             float(IGC_GET_FLAG_VALUE(CSSpillThresholdNoSLM)) / 100.0f;
         return m_slmSize ? spillThresholdSLM : spillThresholdNoSLM;
@@ -575,6 +587,11 @@ namespace IGC
     bool OpenCLProgramContext::hasNoPrivateToGenericCast() const
     {
         return getModuleMetaData()->hasNoPrivateToGenericCast;
+    }
+
+    bool OpenCLProgramContext::enableTakeGlobalAddress() const
+    {
+        return m_Options.EnableTakeGlobalAddress || getModuleMetaData()->capabilities.globalVariableDecorationsINTEL;
     }
 
     int16_t OpenCLProgramContext::getVectorCoalescingControl() const
@@ -718,10 +735,14 @@ namespace IGC
                 llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
                 if (valStr.getAsInteger(10, GTPinScratchAreaSizeValue))
                 {
-                    IGC_ASSERT(false);
+                    IGC_ASSERT(0);
                 }
                 Pos = valEnd;
                 continue;
+            }
+            else if (suffix.equals("-gtpin-indir-ref"))
+            {
+                GTPinIndirRef = true;
             }
 
             // -cl-intel-no-prera-scheduling
@@ -765,12 +786,37 @@ namespace IGC
                 llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
                 if (valStr.getAsInteger(10, numThreadsPerEU))
                 {
-                    IGC_ASSERT(false);
+                    IGC_ASSERT(0);
                 }
                 Pos = valEnd;
                 continue;
             }
+            else if (suffix.equals("-large-grf-kernel"))
+            {
+                size_t valStart = opts.find_first_not_of(' ', ePos + 1);
+                size_t valEnd = opts.find_first_of(' ', valStart);
+                llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
 
+                LargeGRFKernels.push_back(valStr.str());
+                Pos = valEnd;
+                continue;
+            }
+            else if (suffix.equals("-regular-grf-kernel"))
+            {
+                size_t valStart = opts.find_first_not_of(' ', ePos + 1);
+                size_t valEnd = opts.find_first_of(' ', valStart);
+                llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
+
+                RegularGRFKernels.push_back(valStr.str());
+                Pos = valEnd;
+                continue;
+            }
+
+            // -cl-intel-force-disable-4GB-buffer
+            else if (suffix.equals("-force-disable-4GB-buffer"))
+            {
+                IntelForceDisable4GBBuffer = true;
+            }
             // -cl-intel-use-bindless-buffers
             else if (suffix.equals("-use-bindless-buffers"))
             {
@@ -801,6 +847,11 @@ namespace IGC
             {
                 UseBindlessLegacyMode = true;
             }
+            // -cl-intel-use-bindless-advanced-mode
+            else if (suffix.equals("-use-bindless-advanced-mode"))
+            {
+                UseBindlessLegacyMode = false;
+            }
             // -cl-intel-vector-coalesing
             else if (suffix.equals("-vector-coalescing"))
             {
@@ -826,6 +877,11 @@ namespace IGC
             {
                 EnableZEBinary = true;
             }
+            // -cl-intel-exclude-ir-from-zebin
+            else if (suffix.equals("-exclude-ir-from-zebin"))
+            {
+                ExcludeIRFromZEBinary = true;
+            }
             // -cl-intel-no-spill
             else if (suffix.equals("-no-spill"))
             {
@@ -836,9 +892,39 @@ namespace IGC
                 // some some optimizations disabled to avoid spill/fill instructions.
                 NoSpill = true;
             }
+            // -cl-intel-disable-noMaskWA, -ze-intel-disable-noMaskWA
+            else if (suffix.equals("-disable-noMaskWA"))
+            {
+                DisableNoMaskWA = true;
+            }
+            // -cl-intel-ignoreBFRounding, -ze-intel-ignoreBFRounding
+            else if (suffix.equals("-ignoreBFRounding"))
+            {
+                IgnoreBFRounding = true;
+            }
+            // -cl-compile-one-at-time
+            else if (suffix.equals("-compile-one-at-time"))
+            {
+                CompileOneKernelAtTime = true;
+            }
+            // -cl-skip-reloc-add
+            else if (suffix.equals("-skip-reloc-add"))
+            {
+                AllowRelocAdd = false;
+            }
+            // -cl-intel-disableEUFusion
+            // -ze-intel-disableEUFusion
+            else if (suffix.equals("-disableEUFusion"))
+            {
+                DisableEUFusion = true;
+            }
 
             // advance to the next flag
             Pos = opts.find_first_of(' ', Pos);
+        }
+        if (IntelForceDisable4GBBuffer)
+        {
+            IntelGreaterThan4GBBufferRequired = false;
         }
     }
 
@@ -862,6 +948,8 @@ namespace IGC
 
     static void initCompOptionFromRegkey(CodeGenContext* ctx)
     {
+        SetCurrentDebugHash(ctx->hash.asmHash);
+
         CompOptions& opt = ctx->getModuleMetaData()->compOpt;
 
         opt.pixelShaderDoNotAbortOnSpill =
@@ -913,7 +1001,7 @@ namespace IGC
                 getModule()->getDataLayout().getPointerSizeInBits(AS);
             break;
         case ADDRESS_SPACE_LOCAL:
-        case ADDRESS_SPACE_A32:
+        case ADDRESS_SPACE_THREAD_ARG:
             pointerSizeInRegister = 32;
             break;
         case ADDRESS_SPACE_PRIVATE:
@@ -985,6 +1073,14 @@ namespace IGC
         llvmCtxWrapper->Release();
         module = nullptr;
         llvmCtxWrapper = nullptr;
+    }
+
+    void CodeGenContext::clearMD()
+    {
+        delete modMD;
+        delete m_pMdUtils;
+        modMD = nullptr;
+        m_pMdUtils = nullptr;
     }
 
     static const llvm::Function *getRelatedFunction(const llvm::Value *value)
@@ -1211,6 +1307,11 @@ namespace IGC
         return false;
     }
 
+    bool CodeGenContext::enableTakeGlobalAddress() const
+    {
+        return false;
+    }
+
     int16_t CodeGenContext::getVectorCoalescingControl() const
     {
         return 0;
@@ -1232,5 +1333,301 @@ namespace IGC
         }
     }
 
+    unsigned MeshShaderContext::GetThreadGroupSize()
+    {
+        unsigned int threadGroupSize = ((type == ShaderType::MESH_SHADER) ?
+            getModuleMetaData()->msInfo.WorkGroupSize : getModuleMetaData()->taskInfo.WorkGroupSize);
+
+        return threadGroupSize;
+    }
+
+    unsigned MeshShaderContext::GetHwThreadPerWorkgroup()
+    {
+        unsigned hwThreadPerWorkgroup = platform.getMaxNumberHWThreadForEachWG();
+
+        if (platform.supportPooledEU())
+        {
+            hwThreadPerWorkgroup = platform.getMaxNumberThreadPerWorkgroupPooledMax();
+        }
+        return hwThreadPerWorkgroup;
+    }
+
+    unsigned int MeshShaderContext::GetSlmSize() const
+    {
+        unsigned int slmSize = ((type == ShaderType::MESH_SHADER) ?
+            getModuleMetaData()->msInfo.WorkGroupMemorySizeInBytes :
+            getModuleMetaData()->taskInfo.WorkGroupMemorySizeInBytes);
+        return slmSize;
+    }
+
+    // Use compute shader thresholds.
+    float MeshShaderContext::GetSpillThreshold() const
+    {
+        float spillThresholdSLM =
+            float(IGC_GET_FLAG_VALUE(CSSpillThresholdSLM)) / 100.0f;
+        float spillThresholdNoSLM =
+            float(IGC_GET_FLAG_VALUE(CSSpillThresholdNoSLM)) / 100.0f;
+        return GetSlmSize() > 0 ? spillThresholdSLM : spillThresholdNoSLM;
+    }
+
+    // Calculates thread occupancy for given simd size.
+    float MeshShaderContext::GetThreadOccupancy(SIMDMode simdMode)
+    {
+        return GetThreadOccupancyPerSubslice(
+            simdMode,
+            GetThreadGroupSize(),
+            GetHwThreadsPerWG(platform),
+            GetSlmSize(),
+            platform.getSlmSizePerSsOrDss());
+    }
+
+    SIMDMode MeshShaderContext::GetLeastSIMDModeAllowed()
+    {
+        unsigned threadGroupSize = GetThreadGroupSize();
+        unsigned hwThreadPerWorkgroup = GetHwThreadPerWorkgroup();
+
+        if ((threadGroupSize <= hwThreadPerWorkgroup * 8) &&
+            threadGroupSize <= 512)
+        {
+            return platform.getMinDispatchMode();
+        }
+        else
+        {
+            if (threadGroupSize <= hwThreadPerWorkgroup * 16)
+            {
+                return SIMDMode::SIMD16;
+            }
+            else
+            {
+                return SIMDMode::SIMD32;
+            }
+        }
+    }
+
+    SIMDMode MeshShaderContext::GetMaxSIMDMode()
+    {
+        unsigned threadGroupSize = GetThreadGroupSize();
+
+        if (threadGroupSize <= 8)
+        {
+            return platform.getMinDispatchMode();
+        }
+        else if (threadGroupSize <= 16)
+        {
+            return SIMDMode::SIMD16;
+        }
+        else
+        {
+            return SIMDMode::SIMD32;
+        }
+    }
+
+    SIMDMode MeshShaderContext::GetBestSIMDMode()
+    {
+        const SIMDMode minMode = GetLeastSIMDModeAllowed();
+        const SIMDMode maxMode = GetMaxSIMDMode();
+
+        SIMDMode bestMode = SIMDMode::SIMD16;
+
+        if (bestMode < minMode)
+        {
+            bestMode = minMode;
+        }
+
+        if (bestMode > maxMode)
+        {
+            bestMode = maxMode;
+        }
+
+        return bestMode;
+    }
+
+    void RayDispatchShaderContext::setShaderHash(llvm::Function* F) const
+    {
+        auto* MD = getModuleMetaData();
+        auto I = MD->FuncMD.find(F);
+        if (I == MD->FuncMD.end())
+            return;
+
+        auto& rtInfo = I->second.rtInfo;
+        StringRef Name = F->getName();
+
+        uint64_t Hashes[] = {
+            BitcodeHash,
+            iSTD::HashFromBuffer(Name.data(), Name.size())
+        };
+
+        rtInfo.ShaderHash = iSTD::Hash((DWORD*)Hashes, std::size(Hashes) * 2);
+    }
+
+    Optional<RTStackFormat::HIT_GROUP_TYPE> RayDispatchShaderContext::getHitGroupType(
+        const std::string &Name) const
+    {
+        auto I = HitGroupRefs.find(Name);
+        if (I == HitGroupRefs.end())
+            return None;
+
+        auto &Refs = I->second;
+        IGC_ASSERT(!Refs.empty());
+
+        auto HitTy = Refs[0]->Type;
+
+        IGC_ASSERT(llvm::all_of(Refs, [&](auto &HG) { return HG->Type == HitTy; }));
+
+        return HitTy;
+    }
+
+    llvm::Optional<SIMDMode> RayDispatchShaderContext::knownSIMDSize() const
+    {
+        uint32_t ForcedSIMDSize = IGC_GET_FLAG_VALUE(ForceRayTracingSIMDWidth);
+
+        switch (ForcedSIMDSize)
+        {
+        case 0: // default
+            return platform.getPreferredRayTracingSIMDSize();
+        case 8:
+            return SIMDMode::SIMD8;
+        case 16:
+            return SIMDMode::SIMD16;
+        default:
+            IGC_ASSERT_MESSAGE(0, "not an option!");
+            return llvm::None;
+        }
+    }
+
+    bool RayDispatchShaderContext::canEfficientTile() const
+    {
+        auto canDo = [](uint32_t XDim) {
+            return iSTD::IsPowerOfTwo(XDim) && XDim > 1;
+        };
+
+        uint32_t XDim1D = opts().TileXDim1D;
+        uint32_t XDim2D = opts().TileXDim2D;
+
+        return canDo(XDim1D) && canDo(XDim2D);
+    }
+
+    Optional<std::string> RayDispatchShaderContext::getIntersectionAnyHit(
+        const std::string& IntersectionName) const
+    {
+        auto I = HitGroupRefs.find(IntersectionName);
+        IGC_ASSERT(I != HitGroupRefs.end());
+
+        auto& Refs = I->second;
+        IGC_ASSERT(!Refs.empty());
+
+        auto AnyHit = Refs[0]->AnyHit;
+
+        IGC_ASSERT(llvm::all_of(Refs, [&](auto &HG) { return HG->AnyHit == AnyHit; }));
+
+        return AnyHit;
+    }
+
+    const std::vector<HitGroupInfo*>*
+    RayDispatchShaderContext::hitgroupRefs(const std::string& Name) const
+    {
+        auto I = HitGroupRefs.find(Name);
+        if (I == HitGroupRefs.end())
+            return nullptr;
+
+        auto& Refs = I->second;
+        return &Refs;
+    }
+
+    const std::vector<HitGroupInfo>&
+    RayDispatchShaderContext::hitgroups() const
+    {
+        return HitGroups;
+    }
+
+    void RayDispatchShaderContext::takeHitGroupTable(std::vector<HitGroupInfo>&& Table)
+    {
+        HitGroupRefs.clear();
+        HitGroups = std::move(Table);
+
+        for (auto& HG : HitGroups)
+        {
+            if (HG.AnyHit)
+                HitGroupRefs[*HG.AnyHit].push_back(&HG);
+            if (HG.Intersection)
+                HitGroupRefs[*HG.Intersection].push_back(&HG);
+            if (HG.ClosestHit)
+                HitGroupRefs[*HG.ClosestHit].push_back(&HG);
+        }
+    }
+
+    bool RayDispatchShaderContext::requiresIndirectContinuationHandling() const
+    {
+        IGC_ASSERT_MESSAGE(modMD->rtInfo.NumContinuations != UINT_MAX,
+            "not computed yet!");
+
+        if (IGC_IS_FLAG_ENABLED(EnableInlinedContinuations) &&
+            canWholeProgramCompile())
+        {
+            return false;
+        }
+
+        uint32_t Threshold = IGC_GET_FLAG_VALUE(ContinuationInlineThreshold);
+        return forcedIndirectContinuations() ||
+               !canWholeProgramCompile()     ||
+               modMD->rtInfo.NumContinuations > Threshold;
+    }
+
+    bool RayDispatchShaderContext::forcedIndirectContinuations() const
+    {
+        return IGC_IS_FLAG_ENABLED(EnableIndirectContinuations) || forceIndirectContinuations;
+    }
+
+    bool RayDispatchShaderContext::canWholeProgramCompile() const
+    {
+        if (IGC_GET_FLAG_VALUE(ForceWholeProgramCompile))
+            return true;
+
+        return canWholeShaderCompile() && canWholeFunctionCompile();
+    }
+
+    bool RayDispatchShaderContext::canWholeShaderCompile() const
+    {
+        if (forceIndirectContinuations)
+            return false;
+
+        return config == CompileConfig::IMMUTABLE_RTPSO && !hasPrecompiledObjects;
+    }
+
+    bool RayDispatchShaderContext::canWholeFunctionCompile() const
+    {
+        // This will have more logic once dynamic shader linking is in place.
+        return true;
+    }
+
+    bool RayDispatchShaderContext::tryPayloadSinking() const
+    {
+        return pipelineConfig.maxTraceRecursionDepth == 1 &&
+               IGC_IS_FLAG_DISABLED(DisablePayloadSinking);
+    }
+
+    bool RayDispatchShaderContext::isRTPSO() const
+    {
+        switch (config)
+        {
+        case CompileConfig::MUTABLE_RTPSO:
+        case CompileConfig::IMMUTABLE_RTPSO:
+            return true;
+        case CompileConfig::CSO:
+            return false;
+        }
+
+        return false;
+    }
+
+    uint64_t RayDispatchShaderContext::getShaderHash(const CShader* Prog) const
+    {
+        auto* MD = getModuleMetaData();
+        auto I = MD->FuncMD.find(Prog->entry);
+        if (I != MD->FuncMD.end())
+            return I->second.rtInfo.ShaderHash;
+        else
+            return 0;
+    }
 
 }

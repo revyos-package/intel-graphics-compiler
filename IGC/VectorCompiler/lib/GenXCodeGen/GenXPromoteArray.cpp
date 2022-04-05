@@ -19,7 +19,6 @@ SPDX-License-Identifier: MIT
 
 #include "GenX.h"
 #include "GenXModule.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
 #include "GenXVisa.h"
 
@@ -52,12 +51,12 @@ using namespace genx;
 static cl::opt<std::size_t> SingleAllocaLimitOpt(
     "vc-promote-array-single-alloca-limit",
     cl::desc("max size of a sindle promoted alloca in bytes"),
-    cl::init(96 * defaultGRFWidth), cl::Hidden);
+    cl::init(96 * defaultGRFByteSize), cl::Hidden);
 
 static cl::opt<std::size_t>
     TotalAllocaLimitOpt("vc-promote-array-total-alloca-limit",
                         cl::desc("max total size of promoted allocas in bytes"),
-                        cl::init(256 * defaultGRFWidth), cl::Hidden);
+                        cl::init(256 * defaultGRFByteSize), cl::Hidden);
 
 namespace {
 
@@ -81,17 +80,23 @@ class DiagnosticInfoPromoteArray : public DiagnosticInfo {
 private:
   std::string Description;
 
+  static const int KindID;
+
+  static int getKindID() { return KindID; }
+
 public:
   // Initialize from description
   DiagnosticInfoPromoteArray(const Twine &Desc,
                              DiagnosticSeverity Severity = DS_Error)
-      : DiagnosticInfo(llvm::getNextAvailablePluginDiagnosticKind(), Severity),
-        Description(Desc.str()) {}
+      : DiagnosticInfo(getKindID(), Severity), Description(Desc.str()) {}
 
   void print(DiagnosticPrinter &DP) const override {
     DP << "GenXPromoteArray: " << Description;
   }
 };
+
+const int DiagnosticInfoPromoteArray::KindID =
+    llvm::getNextAvailablePluginDiagnosticKind();
 
 class TransposeHelper {
 public:
@@ -419,7 +424,7 @@ static bool CheckPtrToIntCandidate(PtrToIntInst *PTI) {
   for (auto *MemOp : BinOp->users()) {
     if (!isa<CallInst>(MemOp))
       return false;
-    auto IID = GenXIntrinsic::getAnyIntrinsicID(MemOp);
+    auto IID = vc::getAnyIntrinsicID(MemOp);
     if (IID != GenXIntrinsic::genx_svm_gather &&
         IID != GenXIntrinsic::genx_svm_scatter)
       return false;
@@ -510,7 +515,7 @@ static bool CheckAllocaUsesInternal(Instruction *I) {
       // Not a candidate.
       return false;
     } else if (IntrinsicInst *intr = dyn_cast<IntrinsicInst>(*use_it)) {
-      auto IID = GenXIntrinsic::getAnyIntrinsicID(intr);
+      auto IID = vc::getAnyIntrinsicID(intr);
       if (IID == llvm::Intrinsic::lifetime_start ||
           IID == llvm::Intrinsic::lifetime_end ||
           IID == GenXIntrinsic::genx_gather_private ||
@@ -724,7 +729,7 @@ void TransposeHelper::handleAllocaSources(Instruction &Inst,
     } else if (PHINode *pPhi = llvm::dyn_cast<PHINode>(User)) {
       handlePHINode(pPhi, Idx, Inst.getParent());
     } else if (IntrinsicInst *IntrInst = dyn_cast<IntrinsicInst>(User)) {
-      auto IID = GenXIntrinsic::getAnyIntrinsicID(IntrInst);
+      auto IID = vc::getAnyIntrinsicID(IntrInst);
       if (IID == llvm::Intrinsic::lifetime_start ||
           IID == llvm::Intrinsic::lifetime_end)
         IntrInst->eraseFromParent();

@@ -25,6 +25,7 @@ SPDX-License-Identifier: MIT
 #include "common/secure_mem.h"
 #include <stack>
 #include "Probe/Assertion.h"
+#include "helper.h"
 
 using namespace llvm;
 using namespace GenISAIntrinsic;
@@ -78,7 +79,7 @@ namespace IGC
         }
         else if (bufType == STATELESS_A32)
         {
-            return ADDRESS_SPACE_A32;
+            return ADDRESS_SPACE_THREAD_ARG;
         }
         else if (auto *CI = dyn_cast<ConstantInt>(&bufIdx))
         {
@@ -109,7 +110,7 @@ namespace IGC
         {
             return SLM;
         }
-        else if (addrSpace == ADDRESS_SPACE_A32)
+        else if (addrSpace == ADDRESS_SPACE_THREAD_ARG)
         {
             return STATELESS_A32;
         }
@@ -206,7 +207,7 @@ namespace IGC
             return SLM;
         case ADDRESS_SPACE_GLOBAL:
             return STATELESS;
-        case ADDRESS_SPACE_A32:
+        case ADDRESS_SPACE_THREAD_ARG:
             return STATELESS_A32;
         default:
             break;
@@ -418,10 +419,10 @@ namespace IGC
             }
             if (a->getType()->isPointerTy() && b->getType()->isPointerTy())
             {
-                unsigned idxA, idxB;
+                unsigned idxA = 0, idxB = 0;
                 BufferType bufA, bufB;
                 BufferAccessType accessA, accessB;
-                bool needBufferOffsetA, needBufferOffsetB;
+                bool needBufferOffsetA = false, needBufferOffsetB = false;
 
                 if (GetResourcePointerInfo(a, idxA, bufA, accessA, needBufferOffsetA) &&
                     GetResourcePointerInfo(b, idxB, bufB, accessB, needBufferOffsetB) &&
@@ -446,6 +447,7 @@ namespace IGC
             {
                 // For bindless pointers
                 if ((inst->getIntrinsicID() == GenISAIntrinsic::GenISA_RuntimeValue) ||
+                    (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_GlobalRootSignatureValue) ||
                     (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_GetBufferPtr))
                 {
                     srcPtr = baseValue;
@@ -686,6 +688,22 @@ namespace IGC
         return false;
     }
 
+    bool GetGRFOffsetFromGlobalRootSignatureValue(
+        Value* pointerSrc, unsigned& GRFOffset)
+    {
+        if (auto* inst = dyn_cast<GenIntrinsicInst>(pointerSrc))
+        {
+            if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_GlobalRootSignatureValue)
+            {
+                GRFOffset = (unsigned)cast<ConstantInt>(inst->getOperand(0))->getZExtValue();
+                bool isConstant =
+                    cast<ConstantInt>(inst->getOperand(1))->getZExtValue();
+                return isConstant;
+            }
+        }
+        return false;
+    }
+
     bool GetStatelessBufferInfo(Value* pointer, unsigned& bufIdOrGRFOffset,
             BufferType & bufferTy, Value*& bufferSrcPtr, bool& isDirectBuf)
     {
@@ -708,6 +726,14 @@ namespace IGC
             bufferTy = BUFFER_TYPE_UNKNOWN;
             return true;
         }
+        else if (GetGRFOffsetFromGlobalRootSignatureValue(src, bufIdOrGRFOffset))
+        {
+            bufferSrcPtr = src;
+            bufferTy = CONSTANT_BUFFER;
+            isDirectBuf = true;
+            return true;
+        }
+
         return false;
     }
 
@@ -1201,7 +1227,7 @@ namespace IGC
     }
 
     /// this is texture-load not buffer-load
-    bool isLdInstruction(llvm::Instruction* inst)
+    bool isLdInstruction(const llvm::Instruction* inst)
     {
         return isa<SamplerLoadIntrinsic>(inst);
     }
@@ -1258,7 +1284,7 @@ namespace IGC
         return textureIdx;
     }
 
-    bool isSampleLoadGather4InfoInstruction(llvm::Instruction* inst)
+    bool isSampleLoadGather4InfoInstruction(const llvm::Instruction* inst)
     {
         if (isa<GenIntrinsicInst>(inst))
         {
@@ -1292,22 +1318,22 @@ namespace IGC
         return false;
     }
 
-    bool isSampleInstruction(llvm::Instruction* inst)
+    bool isSampleInstruction(const llvm::Instruction* inst)
     {
         return isa<SampleIntrinsic>(inst);
     }
 
-    bool isInfoInstruction(llvm::Instruction* inst)
+    bool isInfoInstruction(const llvm::Instruction* inst)
     {
         return isa<InfoIntrinsic>(inst);
     }
 
-    bool isGather4Instruction(llvm::Instruction* inst)
+    bool isGather4Instruction(const llvm::Instruction* inst)
     {
         return isa<SamplerGatherIntrinsic>(inst);
     }
 
-    bool IsMediaIOIntrinsic(llvm::Instruction* inst)
+    bool IsMediaIOIntrinsic(const llvm::Instruction* inst)
     {
         if (auto * pGI = dyn_cast<llvm::GenIntrinsicInst>(inst))
         {
@@ -1320,7 +1346,7 @@ namespace IGC
         return false;
     }
 
-    bool IsSIMDBlockIntrinsic(llvm::Instruction* inst)
+    bool IsSIMDBlockIntrinsic(const llvm::Instruction* inst)
     {
         if (auto * pGI = dyn_cast<llvm::GenIntrinsicInst>(inst))
         {
@@ -1353,6 +1379,38 @@ namespace IGC
         default:
             return false;
         }
+    }
+
+    bool isSubGroupIntrinsicPVC(const llvm::Instruction* I)
+    {
+        const GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(I);
+        if (!GII)
+            return false;
+
+        switch (GII->getIntrinsicID())
+        {
+        case GenISAIntrinsic::GenISA_simdMediaBlockRead:
+        case GenISAIntrinsic::GenISA_simdMediaBlockWrite:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool hasSubGroupIntrinsicPVC(llvm::Function& F)
+    {
+        for (auto& BB : F)
+        {
+            for (auto& I : BB)
+            {
+                if (isSubGroupIntrinsicPVC(&I))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     bool isURBWriteIntrinsic(const llvm::Instruction* I)
@@ -1574,6 +1632,10 @@ namespace IGC
         switch(id)
         {
         case GenISAIntrinsic::GenISA_simdBlockRead:
+        case GenISAIntrinsic::GenISA_LSC2DBlockRead:
+        case GenISAIntrinsic::GenISA_LSCLoad:
+        case GenISAIntrinsic::GenISA_LSCLoadBlock:
+        case GenISAIntrinsic::GenISA_LSCPrefetch:
                 return true;
             default:
                 break;
@@ -1584,6 +1646,9 @@ namespace IGC
     bool IsStatelessMemStoreIntrinsic(llvm::GenISAIntrinsic::ID id)
     {
         switch (id) {
+        case GenISAIntrinsic::GenISA_HDCuncompressedwrite:
+        case GenISAIntrinsic::GenISA_LSCStore:
+        case GenISAIntrinsic::GenISA_LSCStoreBlock:
         case GenISAIntrinsic::GenISA_simdBlockWrite:
             return true;
         default:
@@ -1606,6 +1671,15 @@ namespace IGC
         if (IsAtomicIntrinsic(GetOpCode(&inst)))
             return true;
 
+        switch (id)
+        {
+        case GenISAIntrinsic::GenISA_LSCAtomicFP32:
+        case GenISAIntrinsic::GenISA_LSCAtomicFP64:
+        case GenISAIntrinsic::GenISA_LSCAtomicInts:
+            return true;
+        default:
+            break;
+        }
         return false;
     }
 
@@ -1631,6 +1705,15 @@ namespace IGC
 
         uint ival = int_cast<uint>(cval->getZExtValue());
         return ival;
+    }
+
+    bool getImmValueBool(const llvm::Value* value)
+    {
+        const llvm::ConstantInt* cval = llvm::cast<llvm::ConstantInt>(value);
+        IGC_ASSERT(nullptr != cval);
+        IGC_ASSERT(cval->getBitWidth() == 1);
+
+        return cval->getValue().getBoolValue();
     }
 
     llvm::Value* ExtractElementFromInsertChain(llvm::Value* inst, int pos)
@@ -1979,10 +2062,20 @@ namespace IGC
 
     unsigned int AppendConservativeRastWAHeader(IGC::SProgramOutput* program, SIMDMode simdmode)
     {
+        uint32_t headerSize = 0;
+        if (program && (program->m_programSize > 0))
+        {
+            headerSize = AppendConservativeRastWAHeader(program->m_programBin, program->m_programSize, simdmode);
+        }
+        return headerSize;
+    }
+
+    unsigned int AppendConservativeRastWAHeader(void*& pBinary, unsigned int& binarySize, SIMDMode simdmode)
+    {
         unsigned int headerSize = 0;
         const unsigned int* pHeader = nullptr;
 
-        if (program && (program->m_programSize > 0))
+        if (pBinary && (binarySize > 0))
         {
             switch (simdmode)
             {
@@ -2006,13 +2099,13 @@ namespace IGC
                 break;
             }
 
-            unsigned int newSize = program->m_programSize + headerSize;
+            unsigned int newSize = binarySize + headerSize;
             void* newBinary = IGC::aligned_malloc(newSize, 16);
             memcpy_s(newBinary, newSize, pHeader, headerSize);
-            memcpy_s((char*)newBinary + headerSize, newSize, program->m_programBin, program->m_programSize);
-            IGC::aligned_free(program->m_programBin);
-            program->m_programBin = newBinary;
-            program->m_programSize = newSize;
+            memcpy_s((char*)newBinary + headerSize, newSize, pBinary, binarySize);
+            IGC::aligned_free(pBinary);
+            pBinary = newBinary;
+            binarySize = newSize;
         }
         return headerSize;
     }
@@ -2029,7 +2122,6 @@ namespace IGC
     Function* getUniqueEntryFunc(const IGCMD::MetaDataUtils* pM, IGC::ModuleMetaData* pModMD)
     {
         Function* entryFunc = nullptr;
-        auto& FuncMD = pModMD->FuncMD;
         for (auto i = pM->begin_FunctionsInfo(), e = pM->end_FunctionsInfo(); i != e; ++i)
         {
             IGCMD::FunctionInfoMetaDataHandle Info = i->second;
@@ -2043,17 +2135,12 @@ namespace IGC
             {
                 entryFunc = F;
             }
-
-            auto fi = FuncMD.find(F);
-            if (fi != FuncMD.end() && fi->second.isUniqueEntry)
+            else
             {
-                return F;
+                // Multiple entries found, return null since there is no unique entry
+                return nullptr;
             }
         }
-        IGC_ASSERT_MESSAGE(nullptr != entryFunc, "No entry func!");
-        auto ei = FuncMD.find(entryFunc);
-        IGC_ASSERT(ei != FuncMD.end());
-        ei->second.isUniqueEntry = true;
         return entryFunc;
     }
 
@@ -2503,6 +2590,52 @@ namespace IGC
         }
     }
 
+    // This function generates code for sample or gather parameters combining.
+    // The first parameter is converted to unsigned integer value and copied
+    // into the `numBits` LSB of second param's mantissa.
+    // The function is used to combine:
+    // - LOD and AI params in sample_l and sample_l_c
+    // - BIAS and AI params in sample_b and sample_b_c
+    Value* CombineSampleOrGather4Params(
+        IRBuilder<>& builder,
+        Value* param1, // first param to be copied into the second param
+        Value* param2, // second parameter
+        uint numBits, // number of bits to use to for the second param
+        const std::string& param1Name, // debug name for the first param
+        const std::string& param2Name) // debug name for the second param
+    {
+        Value* maskLo = builder.getInt32(BITMASK(numBits));
+        Value* maskHi = builder.getInt32((~(BITMASK(numBits))));
+
+        Function* rdneFunc = GenISAIntrinsic::getDeclaration(
+            builder.GetInsertBlock()->getModule(),
+            GenISAIntrinsic::GenISA_ROUNDNE);
+        Value* intParam1 = builder.CreateFPToUI(
+            builder.CreateCall(rdneFunc, param1),
+            builder.getInt32Ty(),
+            VALUE_NAME(std::string("_int") + param1Name));
+        Value* intParam1Lsb = builder.CreateAnd(
+            intParam1,
+            maskLo,
+            VALUE_NAME(intParam1->getName() + "LSB"));
+        intParam1Lsb = builder.CreateSelect(
+            builder.CreateICmp(CmpInst::Predicate::ICMP_EQ, intParam1, intParam1Lsb),
+            intParam1Lsb,
+            maskLo,
+            VALUE_NAME(intParam1->getName() + "ClampedLSB"));
+        Value* param2Int = builder.CreateBitCast(
+            param2,
+            builder.getInt32Ty(),
+            VALUE_NAME(param2Name + "Int"));
+        Value* param2IntMsb = builder.CreateAnd(
+            param2Int,
+            maskHi,
+            VALUE_NAME(intParam1->getName() + "MSB"));
+        return builder.CreateBitCast(
+            builder.CreateOr(intParam1Lsb, param2IntMsb),
+            builder.getFloatTy(),
+            VALUE_NAME(param1Name + param2Name + "Combined"));
+    };
 
 std::pair<Value*, unsigned int> GetURBBaseAndOffset(Value* pUrbOffset)
 {
@@ -2638,6 +2771,56 @@ std::pair<Value*, unsigned int> GetURBBaseAndOffset(Value* pUrbOffset)
     }
 
     return std::make_pair(pBase, offset);
+}
+
+std::vector<std::pair<unsigned int, std::string>> GetPrintfStrings(Module &M)
+{
+    std::vector<std::pair<unsigned int, std::string>> printfStrings;
+    std::string MDNodeName = "printf.strings";
+    NamedMDNode* printfMDNode = M.getOrInsertNamedMetadata(MDNodeName);
+
+    for (uint i = 0, NumStrings = printfMDNode->getNumOperands();
+         i < NumStrings;
+         i++)
+    {
+        MDNode* argMDNode = printfMDNode->getOperand(i);
+        ConstantInt* indexOpndVal =
+            mdconst::dyn_extract<ConstantInt>(argMDNode->getOperand(0));
+        MDString* stringOpndVal =
+            dyn_cast<MDString>(argMDNode->getOperand(1));
+
+        printfStrings.push_back({
+            int_cast<unsigned int>(indexOpndVal->getZExtValue()),
+            stringOpndVal->getString().data()
+        });
+    }
+
+    return printfStrings;
+}
+
+bool PDT_dominates(llvm::PostDominatorTree& PTD,
+    const Instruction* I1,
+    const Instruction* I2)
+{
+    IGC_ASSERT_MESSAGE(I1, "Expecting valid I1 and I2");
+    IGC_ASSERT_MESSAGE(I2, "Expecting valid I1 and I2");
+
+    const BasicBlock* BB1 = I1->getParent();
+    const BasicBlock* BB2 = I2->getParent();
+
+    if (BB1 != BB2)
+        return PTD.dominates(BB1, BB2);
+
+    // PHINodes in a block are unordered.
+    if (isa<PHINode>(I1) && isa<PHINode>(I2))
+        return false;
+
+    // Loop through the basic block until we find I1 or I2.
+    BasicBlock::const_iterator I = BB1->begin();
+    for (; &*I != I1 && &*I != I2; ++I)
+        /*empty*/;
+
+    return &*I == I2;
 }
 
 } // namespace IGC

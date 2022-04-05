@@ -105,7 +105,6 @@ char OpenCLPrintfResolution::ID = 0;
 // |      < vec_element_3 >       |
 // |------------------------------|
 
-
 // Looks for a GlobalVariable related with given value.
 // Returns nullptr if on the way to the global variable
 // found anything that is not :
@@ -496,7 +495,8 @@ void OpenCLPrintfResolution::expandPrintfCall(CallInst& printfCall, Function& F)
     preprocessPrintfArgs(printfCall);
 
     // writeOffset = atomic_add(bufferPtr, dataSize)
-    Value* basebufferPtr = implicitArgs.getImplicitArg(F, ImplicitArg::PRINTF_BUFFER);
+    Value* basebufferPtr = implicitArgs.getImplicitArgValue(F, ImplicitArg::PRINTF_BUFFER, MdUtils);
+
     Value* dataSizeVal = ConstantInt::get(m_int32Type, getTotalDataSize());
     Instruction* writeOffsetStart = genAtomicAdd(basebufferPtr, dataSizeVal, printfCall, "write_offset");
     writeOffsetStart->setDebugLoc(m_DL);

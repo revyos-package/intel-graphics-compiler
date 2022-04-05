@@ -26,7 +26,7 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXIntrinsics.h"
 #include "GenXModule.h"
-#include "vc/GenXOpts/Utils/CMRegion.h"
+#include "vc/Utils/GenX/Region.h"
 #include "vc/Utils/General/InstRebuilder.h"
 
 #include "IGC/common/debug/DebugMacros.hpp"
@@ -134,7 +134,7 @@ bool GenXVectorCombiner::isSupportedGenXIntrinsic(GenXIntrinsic::ID IdCode) {
   case GenXIntrinsic::genx_absi:
     return true;
   }
-  IGC_ASSERT(false);
+  IGC_ASSERT(0);
   return false;
 }
 

@@ -305,8 +305,9 @@ namespace
     public:
         typedef SmallVector<Instruction*, 32> InstWorkVector;
         typedef SmallVector<Value*, 16> ValVector;
-        // map from Vector value to its Component Values
-        typedef DenseMap<Value*, ValVector> V2SMap;
+
+        // vector value -> (split size in bytes -> vector's component values)
+        typedef DenseMap<Value*, DenseMap<uint32_t, ValVector>> V2SMap;
 
         enum class VPConst {
             // If a vector's size is bigger than SPLIT_SIZE, split it into multiple
@@ -314,6 +315,8 @@ namespace
             // With SPLIT_SIZE=32, we have the max vectors as below after this pass:
             //     <32 x i8>, 16xi16, 8xi32, or 4xi64!
             SPLIT_SIZE = 32,              // default, 32 bytes
+            LSC_D64_UNIFORM_SPLIT_SIZE = 512, // LSC transpose 64 x D64
+            LSC_D32_UNIFORM_SPLIT_SIZE = 256, // LSC transpose 64 x D32
             RAW_SPLIT_SIZE = 16
         };
 
@@ -583,14 +586,50 @@ uint32_t VectorPreProcess::getSplitByteSize(Instruction* I, WIAnalysisRunner& WI
     if (LoadInst* LI = dyn_cast<LoadInst>(I))
     {
         bytes = (uint32_t)VPConst::SPLIT_SIZE;
+        if (WI.isUniform(LI->getPointerOperand()) &&
+            (m_CGCtx->platform.LSCEnabled() || IGC_GET_FLAG_VALUE(UniformMemOpt4OW)))
+        {
+            if (LI->getAlignment() >= 8)
+                bytes = (uint32_t)VPConst::LSC_D64_UNIFORM_SPLIT_SIZE;
+            else if (LI->getAlignment() >= 4)
+                bytes = (uint32_t)VPConst::LSC_D32_UNIFORM_SPLIT_SIZE;
+        }
     }
     else if (StoreInst* SI = dyn_cast<StoreInst>(I))
     {
         bytes = (uint32_t)VPConst::SPLIT_SIZE;
+        Value* Addr = SI->getPointerOperand();
+        Value* Data = SI->getValueOperand();
+        if (m_CGCtx->platform.LSCEnabled() && WI.isUniform(Addr) && WI.isUniform(Data))
+        {
+            if (SI->getAlignment() >= 8)
+                bytes = (uint32_t)VPConst::LSC_D64_UNIFORM_SPLIT_SIZE;
+            else if (SI->getAlignment() >= 4)
+                bytes = (uint32_t)VPConst::LSC_D32_UNIFORM_SPLIT_SIZE;
+        }
     }
     else if (isa<LdRawIntrinsic>(I) || isa<StoreRawIntrinsic>(I))
     {
         bytes = (uint32_t)VPConst::RAW_SPLIT_SIZE;
+        if (EmitPass::shouldGenerateLSCQuery(*m_CGCtx, I) == Tristate::True)
+            bytes = (uint32_t)VPConst::SPLIT_SIZE;
+        else
+        {
+            Type* ValueTy = nullptr;
+            if (StoreRawIntrinsic* SRI = dyn_cast<StoreRawIntrinsic>(I))
+            {
+                ValueTy = SRI->getArgOperand(2)->getType();
+            }
+            else
+            {
+                ValueTy = I->getType();
+            }
+            IGCLLVM::FixedVectorType* vecType = dyn_cast_or_null<IGCLLVM::FixedVectorType>(ValueTy);
+            if (vecType && vecType->getScalarType()->getPrimitiveSizeInBits() == 64)
+            {
+                bytes = 8;  // use QW load/store
+            }
+        }
     }
     else
     {
@@ -671,7 +710,7 @@ bool VectorPreProcess::splitStore(
         return false;
     }
 
-    ValVector& svals = vecToSubVec[StoredVal];
+    ValVector& svals = vecToSubVec[StoredVal][splitSize];
     if (svals.size() == 0)
     {
         // Need to create splitted values.
@@ -849,7 +888,7 @@ bool VectorPreProcess::splitLoad(
     uint32_t EBytes = int_cast<unsigned int>(m_DL->getTypeAllocSize(ETy));
 
     // Create a map entry for LI
-    ValVector& svals = vecToSubVec[LI];
+    ValVector& svals = vecToSubVec[LI][splitSize];
 
     for (uint32_t i = 0; i < len; ++i)
     {
@@ -1279,9 +1318,35 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         if (NBits < 32)
             return Inst;
 
+        BitCastInst* BC = nullptr;
+        Type* DstEltTy = nullptr;
+        // Handle bitcasts patterns like:
+        //
+        // %41 = call <4 x i32> @llvm.genx.GenISA.ldrawvector.indexed.v4i32.p1v4f32(...)
+        // %bc = bitcast <4 x i32> %41 to <4 x float>
+        // %42 = extractelement <4 x float> %bc, i32 0
+        if (Inst->hasOneUse())
+        {
+            BC = dyn_cast<BitCastInst>(*Inst->users().begin());
+            if (BC)
+            {
+                IGCLLVM::FixedVectorType* DstVTy = dyn_cast<IGCLLVM::FixedVectorType>(BC->getType());
+                IGCLLVM::FixedVectorType* SrcVTy = dyn_cast<IGCLLVM::FixedVectorType>(BC->getOperand(0)->getType());
+                if (IGC_IS_FLAG_DISABLED(EnableBitcastedLoadNarrowing) ||
+                    !DstVTy || !SrcVTy || DstVTy->getNumElements() != SrcVTy->getNumElements())
+                {
+                    BC = nullptr;
+                }
+                else
+                {
+                    DstEltTy = DstVTy->getElementType();
+                }
+            }
+        }
+
         SmallVector<ExtractElementInst*, 8> ConstEEIUses;
         unsigned MaxIndex = 0;
-        for (auto U : Inst->users())
+        for (auto U : (BC ? BC : Inst)->users())
         {
             auto EEI = dyn_cast<ExtractElementInst>(U);
             if (!EEI || !isa<ConstantInt>(EEI->getIndexOperand()))
@@ -1293,7 +1358,7 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         }
 
         // All uses are constant EEI.
-        IGC_ASSERT_MESSAGE(ConstEEIUses.size() == Inst->getNumUses(), "out of sync");
+        IGC_ASSERT_MESSAGE(ConstEEIUses.size() == (BC ? BC : Inst)->getNumUses(), "out of sync");
 
         // FIXME: this is to WA an issue that splitLoadStore does not split
         // vectors of size 5, 6, 7.
@@ -1314,11 +1379,19 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
         IRBuilder<> Builder(Inst);
         auto ldrawvec = dyn_cast<LdRawIntrinsic>(Inst);
         bool canSimplifyOneUse = ldrawvec && isa<VectorType>(ldrawvec->getType()) &&
-            ldrawvec->hasOneUse() &&
+            (BC ? BC : Inst)->hasOneUse() &&
             !ConstEEIUses.empty();
 
         bool canSimplifyOneUseZeroIndex = canSimplifyOneUse &&
             cast<ConstantInt>(ConstEEIUses.front()->getIndexOperand())->getZExtValue() == 0;
+
+        // There is a known case where narrowing bitcasted ldrawvector to ldraw
+        // leads to a corruption. We can still simplify a vector load to
+        // a narrow one (e.g. <4 x i32> to <2 x i32> when only 0th elt is used
+        // as a float).
+        // TODO: remove WA when issue is resolved.
+        bool skipSimplifyBitcastedOneUse = canSimplifyOneUse &&
+            BC && IGC_IS_FLAG_DISABLED(EnableBitcastedLoadNarrowingToScalar);
 
         auto simplifyLDVecToLDRaw = [&](bool calc_offset)
         {
@@ -1350,28 +1423,44 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
                 GenISAIntrinsic::getDeclaration(ldrawvec->getModule(), GenISAIntrinsic::GenISA_ldraw_indexed, types);
             NewLI = Builder.CreateCall(newLdRawFunction, args);
             NewLI->setDebugLoc(EE_user->getDebugLoc());
-            EE_user->replaceAllUsesWith(NewLI);
+            Value* NewBC = nullptr;
+            if (BC)
+            {
+                NewBC = Builder.CreateBitCast(NewLI, DstEltTy);
+            }
+            EE_user->replaceAllUsesWith(BC ? NewBC : NewLI);
             EE_user->eraseFromParent();
+            if (BC) {
+                BC->eraseFromParent();
+            }
         };
 
-        if (canSimplifyOneUseZeroIndex)
+        if (canSimplifyOneUseZeroIndex && !skipSimplifyBitcastedOneUse)
         {
             simplifyLDVecToLDRaw(false);
             return NewLI;
         }
-        else if (canSimplifyOneUse)
+        else if (canSimplifyOneUse && !skipSimplifyBitcastedOneUse)
         {
             simplifyLDVecToLDRaw(true);
             return NewLI;
         }
         else
         {
+            // WA: Do not narrow a bitcasted vector load to 1 elt vector load,
+            // choose at least 2 elts vector.
+            if (canSimplifyOneUseZeroIndex && skipSimplifyBitcastedOneUse)
+            {
+                MaxIndex = 1;
+            }
+
             Type* NewVecTy = FixedVectorType::get(cast<VectorType>(Inst->getType())->getElementType(),
                 MaxIndex + 1);
             NewLI = ALI.Create(NewVecTy);
 
             // Loop and replace all uses.
             SmallVector<Value*, 8> NewEEI(MaxIndex + 1, nullptr);
+            SmallVector<Value*, 8> NewBC(MaxIndex + 1, nullptr);
             for (auto EEI : ConstEEIUses)
             {
                 auto CI = cast<ConstantInt>(EEI->getIndexOperand());
@@ -1379,10 +1468,18 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
                 if (NewEEI[Idx] == nullptr)
                 {
                     NewEEI[Idx] = Builder.CreateExtractElement(NewLI, CI);
+                    if (BC)
+                    {
+                        NewBC[Idx] = Builder.CreateBitCast(NewEEI[Idx], DstEltTy);
+                        dyn_cast<BitCastInst>(NewBC[Idx])->setDebugLoc(BC->getDebugLoc());
+                    }
                 }
                 dyn_cast<ExtractElementInst>(NewEEI[Idx])->setDebugLoc(EEI->getDebugLoc());
-                EEI->replaceAllUsesWith(NewEEI[Idx]);
+                EEI->replaceAllUsesWith(BC ? NewBC[Idx] : NewEEI[Idx]);
                 EEI->eraseFromParent();
+            }
+            if (BC) {
+                BC->eraseFromParent();
             }
             IGC_ASSERT_MESSAGE(Inst->use_empty(), "out of sync");
             Inst->eraseFromParent();
@@ -1581,83 +1678,85 @@ bool VectorPreProcess::runOnFunction(Function& F)
                 continue;
             }
             Instruction* LI = ALI.getValue().getInst();
-            ValVector& svals = vecToSubVec[V];
-            if (!LI->use_empty())
-            {
-                ValVector Scalars;
-                IRBuilder<> Builder(LI);
-                for (uint32_t j = 0; j < svals.size(); ++j)
+            for (auto& it : vecToSubVec[V]) {
+                ValVector& svals = it.second;
+                if (!LI->use_empty())
                 {
-                    Type* Ty1 = svals[j]->getType();
-                    IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
-                    if (VTy1) {
-                        for (uint32_t k = 0; k < VTy1->getNumElements(); ++k)
-                        {
-                            Value* S = Builder.CreateExtractElement(
-                                svals[j], Builder.getInt32(k), "split");
-                            Scalars.push_back(S);
-                        }
-                    }
-                    else
+                    ValVector Scalars;
+                    IRBuilder<> Builder(LI);
+                    for (uint32_t j = 0; j < svals.size(); ++j)
                     {
-                        Scalars.push_back(svals[j]);
-
-                        // svals[j] will be no long needed, set it to null
-                        // to prevent double-deleting later
-                        svals[j] = nullptr;
-                    }
-                }
-                // Replace LI and erase LI.
-                replaceAllVectorUsesWithScalars(LI, Scalars);
-
-                // Remove any dead scalars
-                for (uint32_t j = 0; j < Scalars.size(); ++j)
-                {
-                    if (Scalars[j]->use_empty())
-                    {
-                        Instruction* tInst = cast<Instruction>(Scalars[j]);
-                        tInst->eraseFromParent();
-                    }
-                }
-            }
-            else
-            {
-                LI->eraseFromParent();
-            }
-
-            // Remove any dead sub vectors
-            for (uint32_t j = 0; j < svals.size(); ++j)
-            {
-                if (svals[j] == nullptr)
-                {
-                    continue;
-                }
-                Instruction* tInst = cast<Instruction>(svals[j]);
-                if (tInst->use_empty())
-                {
-                    // If this is a 3-element vector load, remove it
-                    // from m_Vector3List as well.
-                    if (isAbstractLoadInst(tInst) && tInst->getType()->isVectorTy() &&
-                        cast<IGCLLVM::FixedVectorType>(tInst->getType())->getNumElements() == 3)
-                    {
-                        InstWorkVector::iterator
-                            tI = m_Vector3List.begin(),
-                            tE = m_Vector3List.end();
-                        for (; tI != tE; ++tI)
-                        {
-                            Instruction* tmp = *tI;
-                            if (tmp == tInst)
+                        Type* Ty1 = svals[j]->getType();
+                        IGCLLVM::FixedVectorType* VTy1 = dyn_cast<IGCLLVM::FixedVectorType>(Ty1);
+                        if (VTy1) {
+                            for (uint32_t k = 0; k < VTy1->getNumElements(); ++k)
                             {
-                                break;
+                                Value* S = Builder.CreateExtractElement(
+                                    svals[j], Builder.getInt32(k), "split");
+                                Scalars.push_back(S);
                             }
                         }
-                        if (tI != m_Vector3List.end())
+                        else
                         {
-                            m_Vector3List.erase(tI);
+                            Scalars.push_back(svals[j]);
+
+                            // svals[j] will be no long needed, set it to null
+                            // to prevent double-deleting later
+                            svals[j] = nullptr;
                         }
                     }
+                    // Replace LI and erase LI.
+                    replaceAllVectorUsesWithScalars(LI, Scalars);
 
-                    tInst->eraseFromParent();
+                    // Remove any dead scalars
+                    for (uint32_t j = 0; j < Scalars.size(); ++j)
+                    {
+                        if (Scalars[j]->use_empty())
+                        {
+                            Instruction* tInst = cast<Instruction>(Scalars[j]);
+                            tInst->eraseFromParent();
+                        }
+                    }
+                }
+                else
+                {
+                    LI->eraseFromParent();
+                }
+
+                // Remove any dead sub vectors
+                for (uint32_t j = 0; j < svals.size(); ++j)
+                {
+                    if (svals[j] == nullptr)
+                    {
+                        continue;
+                    }
+                    Instruction* tInst = cast<Instruction>(svals[j]);
+                    if (tInst->use_empty())
+                    {
+                        // If this is a 3-element vector load, remove it
+                        // from m_Vector3List as well.
+                        if (isAbstractLoadInst(tInst) && tInst->getType()->isVectorTy() &&
+                            cast<IGCLLVM::FixedVectorType>(tInst->getType())->getNumElements() == 3)
+                        {
+                            InstWorkVector::iterator
+                                tI = m_Vector3List.begin(),
+                                tE = m_Vector3List.end();
+                            for (; tI != tE; ++tI)
+                            {
+                                Instruction* tmp = *tI;
+                                if (tmp == tInst)
+                                {
+                                    break;
+                                }
+                            }
+                            if (tI != m_Vector3List.end())
+                            {
+                                m_Vector3List.erase(tI);
+                            }
+                        }
+
+                        tInst->eraseFromParent();
+                    }
                 }
             }
         }

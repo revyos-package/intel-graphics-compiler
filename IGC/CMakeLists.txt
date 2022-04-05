@@ -67,8 +67,6 @@ include(igc_imported_tools)
 # ======================================================================================================
 
 
-
-
 # ======================================================================================================
 # ==================================== BUILD CONFIGURATIONS (part 1) ===================================
 # ======================================================================================================
@@ -227,6 +225,7 @@ unset(_debugConfigs)
 # ======================================================================================================
 
 
+
 # ======================================================================================================
 # ========================================= BUILD CMAKE OPTIONS ========================================
 # ======================================================================================================
@@ -238,33 +237,31 @@ else()
 endif()
 set(IGC_LIBRARY_NAME ${IGC_LIBRARY_NAME} PARENT_SCOPE)
 
-#FCL
+set(FCL_ENABLED ON)
 
-if(DEFINED FCL_OPTION__LIBRARY_NAME)
-  set(FCL_LIBRARY_NAME "${FCL_OPTION__LIBRARY_NAME}")
-else()
-  set(FCL_LIBRARY_NAME "igdfcl")
+
+if (FCL_ENABLED)
+  #FCL
+  if(DEFINED FCL_OPTION__LIBRARY_NAME)
+    set(FCL_LIBRARY_NAME "${FCL_OPTION__LIBRARY_NAME}")
+  else()
+    set(FCL_LIBRARY_NAME "igdfcl")
+  endif()
+  set(FCL_LIBRARY_NAME ${FCL_LIBRARY_NAME} PARENT_SCOPE)
+
+  set(_allowBifLink ON)
+  set(IGC_OPTION__BIF_LINK_BC ${_allowBifLink} CACHE BOOL "Built-in Functions: Link .bc files into final shared libraries.")
+  mark_as_advanced(IGC_OPTION__BIF_LINK_BC)
+  unset(_allowBifLink)
 endif()
-set(FCL_LIBRARY_NAME ${FCL_LIBRARY_NAME} PARENT_SCOPE)
 
 
-set(_allowBifLink ON)
-
-
-set(IGC_OPTION__BIF_LINK_BC ${_allowBifLink} CACHE BOOL "Built-in Functions: Link .bc files into final shared libraries.")
-mark_as_advanced(IGC_OPTION__BIF_LINK_BC)
-unset(_allowBifLink)
-
-
-# Currently IGC uses 2 legacy SPIRV-LLVM-Translators
-# First one is located at gfx-driver/Source/IGC/AdaptorOCL/SPIRV
-# Second one is taken as prebuilt shared library called SPIRVDLL
-# These translators will be replaced with vanilla Khronos translator.
+# Currently IGC uses legacy SPIRV-LLVM-Translator
+# that is located at gfx-driver/Source/IGC/AdaptorOCL/SPIRV
+# This translator will be replaced with vanilla Khronos translator.
 # The following cmake code perfoms search for the such translator.
 # But, until the transition is not completed, this code is under IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR condition
 # Remove this condition after transition period is over
-option(IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR "[Experimental] Enable link against Khronos SPIRV-LLVM-Translator, instead of legacy versions" OFF)
-option(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_VC "[Experimental] Enable usage of Khronos SPIRV-LLVM-Translator in Vector Compiler" OFF)
 option(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_SC "[Experimental] Enable usage of Khronos SPIRV-LLVM-Translator in Scalar Compiler" OFF)
 
 option(IGC_OPTION__ENABLE_LIT_TESTS "Enable lit testing for IGC compiler. May require additional tools like llvm lit and opt" OFF)
@@ -322,7 +319,6 @@ else()
     message(STATUS "Build type:  ${CMAKE_BUILD_TYPE} (single-configuration generator)")
 endif()
 message(STATUS "Build tools: ${IGC_OPTION__INCLUDE_IGC_COMPILER_TOOLS}")
-message(STATUS "LLVM dir:    ${IGC_OPTION__LLVM_DUMP_DIR}")
 message(STATUS "")
 message(STATUS "Output directory:")
 message(STATUS "   \"${IGC_OPTION__OUTPUT_DIR}\"")
@@ -343,7 +339,6 @@ message(STATUS "================================================================
 # ======================================================================================================
 # ======================================================================================================
 # ======================================================================================================
-
 
 # ======================================================================================================
 # ======================================== COMPILE/LINK SETTINGS =======================================
@@ -853,6 +848,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -msse4.2
           -Wno-unknown-pragmas
           -fPIC
+          -Bsymbolic
     )
     if(_igc_compiler_is_gnu)
       igc_config_flag_apply_settings(
@@ -875,6 +871,40 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
     endif()
 
   elseif(_igc_compiler_is_gnu_or_clang)
+    if("${IGC_OPTION__ARCHITECTURE_TARGET}" STREQUAL "LinuxARM")
+      igc_config_flag_apply_settings(
+          CompilerOptions
+          "${_compilerFlagName}"
+          ALL_PATTERN ""
+          SET_RAW
+            -pipe
+            -fmessage-length=0
+            #-march=armv8.2-a+fp+simd+sve2
+            -march=armv8-a+fp+simd
+            -fms-extensions
+            -Werror
+            -Wno-unused-parameter
+            -Wno-missing-field-initializers
+            -Wwrite-strings
+            -Wno-long-long
+            -Wswitch
+            -Wno-sign-compare
+            -Wno-unused-result
+            -Wno-enum-compare
+            -Wno-type-limits
+            -Wno-ignored-qualifiers
+            -Wno-shadow
+            -Wformat
+            -Wformat-security
+            -Wno-extra
+            -Wno-write-strings
+            -finline
+            -fno-strict-aliasing
+            -Wno-unknown-pragmas
+            -fPIC
+            -Bsymbolic
+      )
+    else()
     igc_config_flag_apply_settings(
         CompilerOptions
         "${_compilerFlagName}"
@@ -912,7 +942,9 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           -msse4.2
           -Wno-unknown-pragmas
           -fPIC
+          -Bsymbolic
     )
+    endif()
     igc_config_flag_apply_settings(
         CompilerOptions
         "${_compilerFlagName}"
@@ -1088,6 +1120,11 @@ else()
         "/ignore:4197"
       )
 endif()
+
+set(IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS_DEBUG
+  "${IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS_DEBUG}"
+  "/ignore:4099")
+
   # Disable LTCG due to release build time increase
   #igc_config_flag_apply_settings(
   #    LinkerOptions
@@ -1122,6 +1159,7 @@ if(_igc_compiler_is_clang)
         -Wl,-headerpad_max_install_names
     )
 endif()
+
 
 
 # ================================== Compiler preprocessor definitions =================================
@@ -1192,6 +1230,9 @@ add_compile_definitions(
     $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSE2>
     $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSE3>
     $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},Linux64>:USE_SSSE3>
+    $<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},LinuxARM>:USE_NEON>
+    #$<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},LinuxARM>:USE_SVE>
+    #$<$<STREQUAL:${IGC_OPTION__ARCHITECTURE_TARGET},LinuxARM>:USE_SVE2>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:ICBE_LHDM>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:_WIN32>
     $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>:"WIN32">
@@ -1355,16 +1396,21 @@ igc_sg_define(IGC__common)
 igc_sg_define(IGC__Common_CLElfLib)
 
 
-if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    set(IGC_BUILD__SPIRV_TOOLS_ENABLED ON)
-endif()
+# Add protobuf
+include(igc_find_protobuf)
+
+set(IGC_BUILD__SPIRV_TOOLS_ENABLED ON)
 
 if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
-    add_subdirectory("${IGC_SOURCE_DIR}/../external/SPIRV-Tools" "${IGC_OPTION__OUTPUT_DIR}/external/SPIRV-Tools/config" EXCLUDE_FROM_ALL)
+    include("${IGC_SOURCE_DIR}/../external/SPIRV-Tools/CMakeLists.txt")
     include_directories("${IGC_BUILD__SPIRV-Headers_DIR}/include")
     include_directories("${IGC_BUILD__SPIRV-Tools_DIR}/include")
     add_compile_definitions("$<$<CONFIG:Debug>:IGC_SPIRV_TOOLS_ENABLED>")
+    add_compile_definitions("$<$<CONFIG:Release>:IGC_SPIRV_TOOLS_ENABLED>")
     igc_sg_define(IGC__SPIRV-Tools)
+    if(NOT TARGET ${IGC_BUILD__PROJ__SPIRV-Tools})
+        message(FATAL_ERROR "Error while adding SPIR-V Tools project. Please make sure ${IGC_BUILD__SPIRV-Tools_DIR} is present.")
+    endif()
 endif()
 
 add_subdirectory(GenISAIntrinsics)
@@ -1379,7 +1425,9 @@ endif()
 
 
 
-include(igc_find_opencl_clang)
+if(FCL_ENABLED)
+  include(igc_find_opencl_clang)
+endif()
 
 if(IGC_BUILD__VC_ENABLED)
   add_subdirectory(CMFE)
@@ -1394,13 +1442,18 @@ add_subdirectory(DebugInfo)
 add_subdirectory(DriverInterface)
 igc_sg_define(IGC__DriverInterface)
 
-# Built-in Functions (and resources).
-if(IGC_OPTION__BIF_LINK_BC)
-  add_subdirectory(BiFModule)
-  add_subdirectory(ElfPackager)
+if (FCL_ENABLED)
+  # Built-in Functions (and resources).
+  if(IGC_OPTION__BIF_LINK_BC)
+      add_subdirectory(BiFModule)
+      add_subdirectory(ElfPackager)
+  endif()
+
+  add_subdirectory(OCLFE)
 endif()
 
-add_subdirectory(OCLFE)
+add_subdirectory(VISALinkerDriver)
+igc_sg_define(IGC__VISALinkerDriver)
 
 if(MSVC)
   set(IGC_BUILD__RES__IGC__igc_common
@@ -1417,6 +1470,8 @@ if(MSVC)
   )
 endif()
 
+#Metrcis
+include(Metrics/protobuf_metrics.cmake)
 
 # Sources/headers for main libraries.
 set(IGC_BUILD__SRC__IGC__igc_common
@@ -1431,11 +1486,6 @@ set(IGC_BUILD__SRC__IGC__igc_dll
     ${IGC_BUILD__SRC__IGC_DriverInterface__igc_dll}
   )
 
-
-#FCL
-set(IGC_BUILD__SRC__IGC__fcl_dll
-    ${IGC_BUILD__SRC__FCL}
-  )
 
 set(IGC_BUILD__SRC__IGC__igc_lib
     ${IGC_BUILD__SRC__IGC__igc_dll})
@@ -1452,18 +1502,32 @@ set(IGC_BUILD__HDR__IGC__igc_dll
     ${IGC_WrapperLLVM_HDR}
   )
 
-#FCL
-set(IGC_BUILD__HDR__IGC__fcl_dll
-    ${IGC_BUILD__HDR__FCL}
+
+if (FCL_ENABLED)
+  #FCL
+  set(IGC_BUILD__SRC__IGC__fcl_dll
+      ${IGC_BUILD__SRC__FCL}
+    )
+
+  set(IGC_BUILD__HDR__IGC__fcl_dll
+      ${IGC_BUILD__HDR__FCL}
+    )
+
+  set(IGC_BUILD__RES__IGC__fcl_dll
+    ${IGC_BUILD__RES__FCL}
   )
+
+  add_library("${IGC_BUILD__PROJ__fcl_dll}" SHARED
+        ${IGC_BUILD__SRC__IGC__fcl_dll}
+        ${IGC_BUILD__HDR__IGC__fcl_dll}
+        ${IGC_BUILD__RES__IGC__fcl_dll}
+      )
+
+  add_dependencies("${IGC_BUILD__PROJ__fcl_dll}" opencl-clang-lib)
+endif()
 
 set(IGC_BUILD__HDR__IGC__igc_lib
     ${IGC_BUILD__HDR__IGC__igc_dll}
-  )
-
-#FCL
-set(IGC_BUILD__RES__IGC__fcl_dll
-    ${IGC_BUILD__RES__FCL}
   )
 
 # Main library targets (library names).
@@ -1473,14 +1537,9 @@ add_library("${IGC_BUILD__PROJ__igc_dll}" SHARED
     ${IGC_BUILD__RES__IGC__igc_dll}
   )
 
-#FCL
-  add_library("${IGC_BUILD__PROJ__fcl_dll}" SHARED
-    ${IGC_BUILD__SRC__IGC__fcl_dll}
-    ${IGC_BUILD__HDR__IGC__fcl_dll}
-    ${IGC_BUILD__RES__IGC__fcl_dll}
-  )
-
-add_dependencies("${IGC_BUILD__PROJ__fcl_dll}" opencl-clang-lib)
+if(IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR)
+  target_link_libraries("${IGC_BUILD__PROJ__igc_dll}" PRIVATE LLVMSPIRVLib)
+endif()
 
 if(IGC_BUILD__LLVM_SOURCES AND IGC_OPTION__LLVM_LLD)
   if(UNIX)
@@ -1499,6 +1558,7 @@ target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared/executable_format"
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/cif"
   "${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/"
+  "${CMAKE_CURRENT_SOURCE_DIR}/"
   "${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/"
 )
 
@@ -1507,10 +1567,11 @@ target_include_directories(${IGC_BUILD__PROJ__igc_dll} INTERFACE
 igc_target_flag_property_add_once_config_var("${IGC_BUILD__PROJ__igc_dll}" LINK_FLAGS IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS)
 set_property(TARGET "${IGC_BUILD__PROJ__igc_dll}" PROPERTY PROJECT_LABEL "${IGC_BUILD__PROJ_LABEL__igc_dll}")
 
-#FCL
-#igc_target_flag_property_add_once_config_var("${IGC_BUILD__PROJ__fcl_dll}" LINK_FLAGS IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS)
-set_property(TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY PROJECT_LABEL "${IGC_BUILD__PROJ_LABEL__fcl_dll}")
-
+if (FCL_ENABLED)
+  #FCL
+  #igc_target_flag_property_add_once_config_var("${IGC_BUILD__PROJ__fcl_dll}" LINK_FLAGS IGC_BUILD__EXPORT_SYMBOLS_LINK_FLAGS)
+  set_property(TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY PROJECT_LABEL "${IGC_BUILD__PROJ_LABEL__fcl_dll}")
+endif()
 
 #Set Universal properties if this is universal build
 if(MSVC AND IGC_OPTION__UNIVERSAL_DRIVER)
@@ -1563,17 +1624,19 @@ set_target_properties("${IGC_BUILD__PROJ__igc_dll}" PROPERTIES
                       SOVERSION "${IGC_API_MAJOR_VERSION}")
 unset(_cpuSuffix)
 
-#FCL
-if(LLVM_ON_UNIX)
-  set(_cpuSuffix "")
-else()
-  igc_arch_get_cpu(_cpuSuffix)
+if (FCL_ENABLED)
+  #FCL
+  if(LLVM_ON_UNIX)
+    set(_cpuSuffix "")
+  else()
+    igc_arch_get_cpu(_cpuSuffix)
+  endif()
+  set_target_properties("${IGC_BUILD__PROJ__fcl_dll}" PROPERTIES OUTPUT_NAME "${FCL_LIBRARY_NAME}${_cpuSuffix}")
+  set_target_properties("${IGC_BUILD__PROJ__fcl_dll}" PROPERTIES
+                        VERSION "${IGC_API_MAJOR_VERSION}.${IGC_API_MINOR_VERSION}.${IGC_API_PATCH_VERSION}"
+                        SOVERSION "${IGC_API_MAJOR_VERSION}")
+  unset(_cpuSuffix)
 endif()
-set_target_properties("${IGC_BUILD__PROJ__fcl_dll}" PROPERTIES OUTPUT_NAME "${FCL_LIBRARY_NAME}${_cpuSuffix}")
-set_target_properties("${IGC_BUILD__PROJ__fcl_dll}" PROPERTIES
-                      VERSION "${IGC_API_MAJOR_VERSION}.${IGC_API_MINOR_VERSION}.${IGC_API_PATCH_VERSION}"
-                      SOVERSION "${IGC_API_MAJOR_VERSION}")
-unset(_cpuSuffix)
 
 # Injecting external vISA project.
 add_subdirectory("${IGC_BUILD__VISA_DIR}" visa)
@@ -1595,13 +1658,10 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
   endif()
 endforeach()
 
-#FCL
-add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__BiFModule_OCL}")
-if (NOT CMAKE_WDDM_LINUX)
-add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__ElfPackager}")
-endif()
-
-if(LLVM_ON_WIN32)
+if (FCL_ENABLED)
+  #FCL
+  add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__BiFModule_OCL}")
+  add_dependencies("${IGC_BUILD__PROJ__fcl_dll}"     "${IGC_BUILD__PROJ__ElfPackager}")
 endif()
 
 
@@ -1630,7 +1690,15 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
     )
   endif()
 
+  #Metrics
+  list(APPEND _targetLinkLineCommon
+      igc_metric
+  )
+
 list(APPEND _targetLinkLineCommon zebinlib)
+
+list(APPEND _targetLinkLineCommon "${IGC_BUILD__PROJ__VISALinkerDriver}")
+
 
 
 
@@ -1638,6 +1706,7 @@ list(APPEND _targetLinkLineCommon zebinlib)
   if(IGC_BUILD__SPIRV_TOOLS_ENABLED)
     list(APPEND _targetLinkLineCommon
         "$<$<CONFIG:Debug>:${IGC_BUILD__PROJ__SPIRV-Tools}>"
+        "$<$<CONFIG:Release>:${IGC_BUILD__PROJ__SPIRV-Tools}>"
     )
   endif()
 
@@ -1701,18 +1770,10 @@ list(APPEND _targetLinkLineCommon zebinlib)
         ${_targetLinkLineCommon}
       )
   else()
-    if(CMAKE_WDDM_LINUX)
-    target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
-        "${}"
-        "${_targetLinkLineCommon}"
-        "${CMAKE_DL_LIBS}"
-      )
-    else()
     target_link_libraries("${IGC_BUILD__PROJ${_libBuildSuffix}}" PRIVATE
         "${_targetLinkLineCommon}"
         "${CMAKE_DL_LIBS}"
       )
-    endif()
     # Android binary needs to link static libstdc++ and liblog
     if(ANDROID)
         find_package(Threads REQUIRED)
@@ -1726,6 +1787,7 @@ list(APPEND _targetLinkLineCommon zebinlib)
   endif()
 endforeach()
 
+if (FCL_ENABLED)
 #FCL
   get_property(_targetType TARGET "${IGC_BUILD__PROJ__fcl_dll}" PROPERTY TYPE)
   if(_targetType MATCHES "^STATIC_LIBRARY$")
@@ -1798,6 +1860,7 @@ if(_targetIsStatic)
 
 unset(_targetIsStatic)
 unset(_targetLinkLine)
+endif() #FCL_ENABLED
 
 
 
@@ -1814,7 +1877,7 @@ if(IGC_OPTION__INCLUDE_IGC_COMPILER_TOOLS)
   endif()
 endif()
 
-if(MSVC)
+if(MSVC AND IGC_OPTION__INCLUDE_IGC_COMPILER_TOOLS AND IGC_OPTION__BUILD_IGC_OPT)
   add_custom_command( TARGET ${IGC_BUILD__PROJ__igc_dll}
     POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:${IGC_BUILD__PROJ__igc_dll}>" "$<TARGET_FILE_DIR:${IGC_BUILD__PROJ__igc_opt}>"
@@ -1850,17 +1913,21 @@ if(DEFINED IGC_PACKAGE_RELEASE)
   set(IGC_PC_PACKAGE_RELEASE "-${IGC_PACKAGE_RELEASE}")
 endif()
 include(cmake/igc_version.cmake)
+
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc.opencl.h.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc.opencl.h)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/igc-opencl.pc.in ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/igc-opencl.pc @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface/impl/version_in.h ${IGC_BUILD__IGC_BIN_DIR}/AdaptorOCL/ocl_igc_interface/impl/version.h)
 
 if(UNIX)
   install(TARGETS ${IGC_BUILD__PROJ__igc_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-core)
-  install(TARGETS ${IGC_BUILD__PROJ__fcl_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl)
+  if (FCL_ENABLED)
+    install(TARGETS ${IGC_BUILD__PROJ__fcl_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl)
+  endif()
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/cif DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/common/StateSaveAreaHeader.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc/common COMPONENT igc-opencl-devel)
+
 
   if(IGC_BUILD__LLVM_SOURCES AND IGC_OPTION__LLVM_LLD)
     # For now lld could be included only via building from LLVM sources
@@ -1914,17 +1981,21 @@ elseif (WIN32)
             DESTINATION ../Test_Tools/Release/x64/Standalones          CONFIGURATIONS Release)
     install(FILES $<TARGET_PDB_FILE:${IGC_BUILD__PROJ__igc_dll}>
             DESTINATION ../Test_Tools/Debug/x64/Standalones            CONFIGURATIONS Debug)
+
+
   endif(CMAKE_SIZEOF_VOID_P EQUAL 8)
 
-  install(TARGETS ${IGC_BUILD__PROJ__fcl_dll}
-          RUNTIME DESTINATION Release/lh64          CONFIGURATIONS Release)
-  install(TARGETS ${IGC_BUILD__PROJ__fcl_dll}
-          RUNTIME DESTINATION Debug/lh64            CONFIGURATIONS Debug)
+  if (FCL_ENABLED)
+    install(TARGETS ${IGC_BUILD__PROJ__fcl_dll}
+            RUNTIME DESTINATION Release/lh64          CONFIGURATIONS Release)
+    install(TARGETS ${IGC_BUILD__PROJ__fcl_dll}
+            RUNTIME DESTINATION Debug/lh64            CONFIGURATIONS Debug)
 
-  install(FILES $<TARGET_PDB_FILE:${IGC_BUILD__PROJ__fcl_dll}>
-          DESTINATION Release/lh64/pdb              CONFIGURATIONS Release)
-  install(FILES $<TARGET_PDB_FILE:${IGC_BUILD__PROJ__fcl_dll}>
-          DESTINATION Debug/lh64/pdb                CONFIGURATIONS Debug)
+    install(FILES $<TARGET_PDB_FILE:${IGC_BUILD__PROJ__fcl_dll}>
+            DESTINATION Release/lh64/pdb              CONFIGURATIONS Release)
+    install(FILES $<TARGET_PDB_FILE:${IGC_BUILD__PROJ__fcl_dll}>
+            DESTINATION Debug/lh64/pdb                CONFIGURATIONS Debug)
+  endif()
 endif()
 
 if(UNIX)
@@ -1942,8 +2013,18 @@ if(UNIX)
     endif()
   endif()
 
+  # Architecture-related options
+  if("${IGC_OPTION__ARCHITECTURE_TARGET}" STREQUAL "LinuxARM")
+    set(CPACK_PACKAGE_ARCHITECTURE "arm64")
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")
+    set(CPACK_RPM_PACKAGE_ARCHITECTURE "arm64")
+  else()
+    set(CPACK_PACKAGE_ARCHITECTURE "x86_64")
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+    set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
+  endif()
+
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "intel")
-  set(CPACK_PACKAGE_ARCHITECTURE "x86_64")
   set(CPACK_PACKAGE_NAME "intel")
   set(CPACK_PACKAGE_VERSION_MAJOR ${IGC_API_MAJOR_VERSION})
   set(CPACK_PACKAGE_VERSION_MINOR ${IGC_API_MINOR_VERSION})
@@ -1953,9 +2034,7 @@ if(UNIX)
   set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "postinst;postrm")
   set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)")
   set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-  set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
   set(CPACK_RPM_PACKAGE_RELOCATABLE TRUE)
-  set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
 
   set(CPACK_DEBIAN_IGC-CORE_FILE_NAME "intel-igc-core_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
   set(CPACK_DEBIAN_IGC-MEDIA_FILE_NAME "intel-igc-media_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")

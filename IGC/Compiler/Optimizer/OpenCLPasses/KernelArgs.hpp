@@ -59,6 +59,7 @@ namespace IGC
 
             IMPLICIT_PRINTF_BUFFER,
             IMPLICIT_SYNC_BUFFER,
+            IMPLICIT_RT_GLOBAL_BUFFER,
 
             IMPLICIT_BUFFER_OFFSET,
 
@@ -107,11 +108,16 @@ namespace IGC
 
             IMPLICIT_LOCAL_IDS,
 
+            // Raytracing args
+            RT_STACK_ID,
+
             // STAGE_IN_GRID runtime values
             IMPLICIT_STAGE_IN_GRID_ORIGIN,
             IMPLICIT_STAGE_IN_GRID_SIZE,
 
             IMPLICIT_BINDLESS_OFFSET,
+
+            IMPLICIT_ARG_BUFFER,
 
             // Argument types that shouldn't be allocated
             NOT_TO_ALLOCATE,

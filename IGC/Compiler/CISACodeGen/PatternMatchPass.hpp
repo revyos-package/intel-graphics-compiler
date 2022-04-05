@@ -70,6 +70,9 @@ namespace IGC
     {
         virtual void Emit(EmitPass* pass, const DstModifier& modifier) = 0;
         virtual ~Pattern() {}
+
+        // Does the pattern allow destination saturation?
+        virtual bool supportsSaturate() { return true; }
     };
 
     struct SDAG
@@ -197,6 +200,7 @@ namespace IGC
         bool MatchCondModifier(llvm::CmpInst& I);
         bool MatchBoolOp(llvm::BinaryOperator& I);
         bool MatchFunnelShiftRotate(llvm::IntrinsicInst& I);
+        bool MatchImmOffsetLSC(llvm::Instruction& I);
         bool MatchBfn(llvm::Instruction& I);
         bool MatchCmpSelect(llvm::SelectInst& I);
         bool MatchAdd3(llvm::Instruction& I);

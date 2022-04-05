@@ -36,8 +36,10 @@ SPDX-License-Identifier: MIT
 
 #include "GenX.h"
 #include "GenXBaling.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
+
+#include "vc/Utils/GenX/GlobalVariable.h"
+
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/InstructionSimplify.h"
@@ -63,7 +65,7 @@ namespace {
 // GenX region collapsing pass
 class GenXRegionCollapsing : public FunctionPass {
   const DataLayout *DL = nullptr;
-  DominatorTree *DT = nullptr;
+  const DominatorTree *DT = nullptr;
   bool Modified = false;
 public:
   static char ID;
@@ -335,23 +337,10 @@ static Value *createBitCast(Value *Input, Type *Ty, const Twine &Name,
 static Value *createBitCastToElementType(Value *Input, Type *ElementTy,
                                          const Twine &Name,
                                          Instruction *InsertBefore,
-                                         const DataLayout *DL,
+                                         const DataLayout &DL,
                                          const DebugLoc &DbgLoc) {
-  unsigned ElBytes = ElementTy->getPrimitiveSizeInBits() / 8U;
-  if (!ElBytes) {
-    IGC_ASSERT(ElementTy->isPointerTy());
-    IGC_ASSERT(ElementTy->getPointerElementType()->isFunctionTy());
-    ElBytes = DL->getTypeSizeInBits(ElementTy) / 8;
-  }
-  unsigned InputBytes = Input->getType()->getPrimitiveSizeInBits() / 8U;
-  if (!InputBytes) {
-    Type *T = Input->getType();
-    if (T->isVectorTy())
-      T = cast<VectorType>(T)->getElementType();
-    IGC_ASSERT(T->isPointerTy());
-    IGC_ASSERT(T->getPointerElementType()->isFunctionTy());
-    InputBytes = DL->getTypeSizeInBits(T) / 8;
-  }
+  unsigned ElBytes = vc::getTypeSize(ElementTy, &DL).inBytes();
+  unsigned InputBytes = vc::getTypeSize(Input->getType(), &DL).inBytes();
   IGC_ASSERT_MESSAGE(!(InputBytes & (ElBytes - 1)), "non-integral number of elements");
   auto Ty = IGCLLVM::FixedVectorType::get(ElementTy, InputBytes / ElBytes);
   return createBitCast(Input, Ty, Name, InsertBefore, DbgLoc);
@@ -385,6 +374,21 @@ static void combineBitCastWithUser(Value *PossibleBC)
 }
 
 /***********************************************************************
+ * debugPrintInnerOuter : debug print inner/outer of region with debug-locations
+ */
+static void debugPrintInnerOuter(std::string FuncName, Instruction *Inner,
+                                 Instruction *Outer) {
+  std::string OuterLine = Outer->getDebugLoc()
+                              ? std::to_string(Outer->getDebugLoc().getLine())
+                              : "not-defined";
+  std::string InnerLine = Inner->getDebugLoc()
+                              ? std::to_string(Inner->getDebugLoc().getLine())
+                              : "not-defined";
+  dbgs() << FuncName << "  Outer (line " << OuterLine << "): " << *Outer
+         << "\n  Inner (line " << InnerLine << "): " << *Inner << "\n";
+}
+
+/***********************************************************************
  * processBitCast : process a bitcast whose input is rdregion
  *
  * We put the bitcast before the rdregion, in the hope that it will enable
@@ -402,17 +406,20 @@ void GenXRegionCollapsing::processBitCast(BitCastInst *BC)
     if (!Rd || !GenXIntrinsic::isRdRegion(Rd))
       return true;
 
+    Value *OldValue = Rd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
+    if (GenXIntrinsic::isReadWritePredefReg(OldValue))
+      return true;
+
     // Single use, do optimization.
     if (Rd->hasOneUse())
       return false;
 
     // More than one uses, we check if rdr is reading from a global.
     // If yes, still do such conversion, as bitcast could be folded into g_load.
-    Value *Op0 = Rd->getOperand(0);
-    while (auto CI = dyn_cast<BitCastInst>(Op0))
-      Op0 = CI->getOperand(0);
-    auto LI = dyn_cast<LoadInst>(Op0);
-    if (LI && getUnderlyingGlobalVariable(LI->getPointerOperand()))
+    while (auto CI = dyn_cast<BitCastInst>(OldValue))
+      OldValue = CI->getOperand(0);
+    auto LI = dyn_cast<LoadInst>(OldValue);
+    if (LI && vc::getUnderlyingGlobalVariable(LI->getPointerOperand()))
       return false;
 
     // skip otherwise;
@@ -429,10 +436,11 @@ void GenXRegionCollapsing::processBitCast(BitCastInst *BC)
   // We have a single use rdregion as the input to the bitcast.
   // Adjust the region parameters if possible so the element type is that of
   // the result of the bitcast, instead of the input.
-  Region ROrig(Rd, BaleInfo());
-  Region R(Rd, BaleInfo());
+  Region ROrig = makeRegionFromBaleInfo(Rd, BaleInfo());
+  Region R = makeRegionFromBaleInfo(Rd, BaleInfo());
   auto ElTy = BC->getType()->getScalarType();
-  if (!R.changeElementType(ElTy))
+  IGC_ASSERT(DL);
+  if (!R.changeElementType(ElTy, DL))
     return;
 
   // we do not want this optimization to be applied if resulting indirect
@@ -444,11 +452,11 @@ void GenXRegionCollapsing::processBitCast(BitCastInst *BC)
     return;
 
   // Create the new bitcast.
-  IGC_ASSERT(ElTy->getPrimitiveSizeInBits());
+  IGC_ASSERT(vc::getTypeSize(ElTy, DL).inBits());
   auto Input = Rd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
   auto NewBCTy = IGCLLVM::FixedVectorType::get(
-      ElTy, Input->getType()->getPrimitiveSizeInBits() /
-                ElTy->getPrimitiveSizeInBits());
+      ElTy, vc::getTypeSize(Input->getType(), DL).inBits() /
+                vc::getTypeSize(ElTy, DL).inBits());
   auto NewBC = CastInst::Create(Instruction::BitCast, Input, NewBCTy, "", Rd);
   NewBC->takeName(BC);
   NewBC->setDebugLoc(BC->getDebugLoc());
@@ -481,12 +489,14 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
     return;
   }
 
-  // We use Region::getWithOffset to get a Region object for a rdregion/wrregion
-  // throughout this pass, in order to ensure that, with an index that is
-  // V+const, we get the V and const separately (in Region::Indirect and
-  // Region::Offset). Then our index calculations can ensure that the constant
-  // add remains the last thing that happens in the calculation.
-  Region InnerR = Region::getWithOffset(InnerRd, /*WantParentWidth=*/true);
+  // We use genx::makeRegionWithOffset to get a Region object for a
+  // rdregion/wrregion throughout this pass, in order to ensure that, with an
+  // index that is V+const, we get the V and const separately
+  // (in Region::Indirect and Region::Offset).
+  // Then our index calculations can ensure that the constant add remains th
+  // last thing that happens in the calculation.
+  Region InnerR = genx::makeRegionWithOffset(InnerRd,
+                                             /*WantParentWidth=*/true);
 
   // Prevent region collapsing for specific src replication pattern,
   // in order to enable swizzle optimization for Align16 instruction
@@ -515,8 +525,14 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
     for (;;) {
       if (!OuterRd)
         break; // input not result of earlier rdregion
-      if (GenXIntrinsic::isRdRegion(OuterRd))
+      if (GenXIntrinsic::isRdRegion(OuterRd)) {
+        Value *OldValue =
+            OuterRd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
+        // Do not optimize predefined register regions.
+        if (GenXIntrinsic::isReadWritePredefReg(OldValue))
+          OuterRd = nullptr;
         break; // found the outer rdregion
+      }
       if (isa<SExtInst>(OuterRd) || isa<ZExtInst>(OuterRd)) {
         if (OuterRd->getOperand(0)->getType()->getScalarType()->isIntegerTy(1)) {
           OuterRd = nullptr;
@@ -542,7 +558,7 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
     }
     if (!OuterRd)
       break; // no outer rdregion that we can combine with
-    Region OuterR = Region::getWithOffset(OuterRd);
+    Region OuterR = genx::makeRegionWithOffset(OuterRd);
     // There was a sext/zext. Because we are going to put that after the
     // collapsed region, we want to modify the inner region to the
     // extend's input element type without changing the region parameters
@@ -554,16 +570,15 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
       InnerR.ElementTy = Extend->getOperand(0)->getType()->getScalarType();
       unsigned ExtInputElementBytes
             = InnerR.ElementTy->getPrimitiveSizeInBits() / 8U;
-      InnerR.Offset = InnerR.Offset / InnerR.ElementBytes * ExtInputElementBytes;
+      InnerR.Offset = InnerR.getOffsetInElements() * ExtInputElementBytes;
       InnerR.ElementBytes = ExtInputElementBytes;
     }
     // See if the regions can be combined. We call normalizeElementType with
     // InnerR as the first arg so it prefers to normalize to that region's
     // element type if possible. That can avoid a bitcast being put after the
     // combined rdregion, which can help baling later on.
-    LLVM_DEBUG(dbgs() << "GenXRegionCollapsing::processRdRegion:\n"
-        "  OuterRd (line " << OuterRd->getDebugLoc().getLine() << "): " << *OuterRd << "\n"
-        "  InnerRd (line " << InnerRd->getDebugLoc().getLine() << "): " << *InnerRd << "\n");
+    LLVM_DEBUG(debugPrintInnerOuter("GenXRegionCollapsing::processRdRegion:\n",
+                                    InnerRd, OuterRd));
     if (!normalizeElementType(&InnerR, &OuterR, /*PreferFirst=*/true)) {
       LLVM_DEBUG(dbgs() << "Cannot normalize element type\n");
       return;
@@ -610,6 +625,7 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
           InnerRd->getName() + ".indexcollapsed",
           InnerRd, InnerRd->getDebugLoc());
     }
+    IGC_ASSERT(DL);
     // If the element type of the combined region does not match that of the
     // outer region, we need to do a bitcast first.
     Value *Input = OuterRd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
@@ -618,7 +634,7 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
       Input = createBitCastToElementType(Input, InnerR.ElementTy,
                                          Input->getName() +
                                              ".bitcast_before_collapse",
-                                         OuterRd, DL, OuterRd->getDebugLoc());
+                                         OuterRd, *DL, OuterRd->getDebugLoc());
     // Create the combined rdregion.
     Instruction *CombinedRd = CombinedR.createRdRegion(Input,
         InnerRd->getName() + ".regioncollapsed", InnerRd, InnerRd->getDebugLoc(),
@@ -646,7 +662,7 @@ void GenXRegionCollapsing::processRdRegion(Instruction *InnerRd)
     // user. If so, combine them.
     combineBitCastWithUser(NewVal);
     InnerRd = CombinedRd;
-    InnerR = Region::getWithOffset(InnerRd, /*WantParentWidth=*/true);
+    InnerR = genx::makeRegionWithOffset(InnerRd, /*WantParentWidth=*/true);
     // Because the loop in runOnFunction does not re-process the new rdregion,
     // loop back here to re-process it.
   }
@@ -729,8 +745,10 @@ void GenXRegionCollapsing::processWrRegionElim(Instruction *OuterWr)
   IGC_ASSERT(InnerWr);
   if (!InnerWr->hasOneUse())
     return;
-  Region InnerR(InnerWr, BaleInfo(), /*WantParentWidth=*/true);
-  Region OuterR(OuterWr, BaleInfo());
+
+  Region InnerR = genx::makeRegionFromBaleInfo(InnerWr, BaleInfo(),
+                                               /*WantParentWidth=*/true);
+  Region OuterR = genx::makeRegionFromBaleInfo(OuterWr, BaleInfo());
   if (OuterR != InnerR)
     return;
   // Create the combined wrregion.
@@ -766,7 +784,7 @@ Instruction *GenXRegionCollapsing::processWrRegionBitCast(Instruction *WrRegion)
     if (BC->getType()->getScalarType()
         == BC->getOperand(0)->getType()->getScalarType()) {
       // The bitcast is from scalar to 1-vector, or vice versa.
-      Region R(WrRegion, BaleInfo());
+      Region R = makeRegionFromBaleInfo(WrRegion, BaleInfo());
       auto NewInst =
           R.createWrRegion(WrRegion->getOperand(0), BC->getOperand(0), "",
                            WrRegion, WrRegion->getDebugLoc());
@@ -802,16 +820,21 @@ void GenXRegionCollapsing::processWrRegionBitCast2(Instruction *WrRegion)
   Type *BCInputElementType = BC->getOperand(0)->getType()->getScalarType();
   if (BCInputElementType->isIntegerTy(1))
     return;
+
+  Value *OldValue = WrRegion->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
+  if (GenXIntrinsic::isReadWritePredefReg(OldValue))
+    return;
+
   // Get the region params for the replacement wrregion, checking if that
   // fails.
-  Region R(WrRegion, BaleInfo());
-  if (!R.changeElementType(BCInputElementType))
+  Region R = makeRegionFromBaleInfo(WrRegion, BaleInfo());
+  if (!R.changeElementType(BCInputElementType, DL))
     return;
+  IGC_ASSERT(DL);
   // Bitcast the "old value" input.
   Value *OldVal = createBitCastToElementType(
-      WrRegion->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum),
-      BCInputElementType, WrRegion->getName() + ".precast", WrRegion, DL,
-      WrRegion->getDebugLoc());
+      OldValue, BCInputElementType, WrRegion->getName() + ".precast", WrRegion,
+      *DL, WrRegion->getDebugLoc());
   // Create the replacement wrregion.
   auto NewInst = R.createWrRegion(OldVal, BC->getOperand(0), "", WrRegion,
                                   WrRegion->getDebugLoc());
@@ -823,7 +846,7 @@ void GenXRegionCollapsing::processWrRegionBitCast2(Instruction *WrRegion)
 }
 
 // Check whether two values are bitwise identical.
-static bool isBitwiseIdentical(Value *V1, Value *V2, DominatorTree *DT) {
+static bool isBitwiseIdentical(Value *V1, Value *V2, const DominatorTree *DT) {
   IGC_ASSERT_MESSAGE(V1, "null value");
   IGC_ASSERT_MESSAGE(V2, "null value");
   if (V1 == V2)
@@ -839,8 +862,8 @@ static bool isBitwiseIdentical(Value *V1, Value *V2, DominatorTree *DT) {
     auto L2 = cast<CallInst>(V2);
 
     // Loads from global variables.
-    auto GV1 = getUnderlyingGlobalVariable(L1->getOperand(0));
-    auto GV2 = getUnderlyingGlobalVariable(L2->getOperand(0));
+    auto *GV1 = vc::getUnderlyingGlobalVariable(L1->getOperand(0));
+    auto *GV2 = vc::getUnderlyingGlobalVariable(L2->getOperand(0));
     Value *Addr = L1->getOperand(0);
     if (GV1 && GV1 == GV2)
       // OK.
@@ -908,14 +931,15 @@ Instruction *GenXRegionCollapsing::processWrRegion(Instruction *OuterWr)
   IGC_ASSERT(OuterRd);
   if (!isBitwiseIdentical(OuterRd->getOperand(0), OuterWr->getOperand(0), DT))
     return OuterWr;
-  Region InnerR = Region::getWithOffset(InnerWr, /*WantParentWidth=*/true);
-  Region OuterR = Region::getWithOffset(OuterWr);
-  if (OuterR != Region::getWithOffset(OuterRd))
+  if (GenXIntrinsic::isReadPredefReg(OuterRd->getOperand(0)))
+    return OuterWr;
+  Region InnerR = genx::makeRegionWithOffset(InnerWr, /*WantParentWidth=*/true);
+  Region OuterR = genx::makeRegionWithOffset(OuterWr);
+  if (OuterR != genx::makeRegionWithOffset(OuterRd))
     return OuterWr;
   // See if the regions can be combined.
-  LLVM_DEBUG(dbgs() << "GenXRegionCollapsing::processWrRegion:\n"
-      "  OuterWr (line " << OuterWr->getDebugLoc().getLine() << "): " << *OuterWr << "\n"
-      "  InnerWr (line " << InnerWr->getDebugLoc().getLine() << "): " << *InnerWr << "\n");
+  LLVM_DEBUG(debugPrintInnerOuter("GenXRegionCollapsing::processWrRegion\n",
+                                  InnerWr, OuterWr));
   if (!normalizeElementType(&OuterR, &InnerR)) {
     LLVM_DEBUG(dbgs() << "Cannot normalize element type\n");
     return OuterWr;
@@ -929,13 +953,18 @@ Instruction *GenXRegionCollapsing::processWrRegion(Instruction *OuterWr)
         InnerWr->getOperand(GenXIntrinsic::GenXRegion::WrIndexOperandNum),
         InnerWr->getName() + ".indexcollapsed", OuterWr, InnerWr->getDebugLoc());
   }
+  IGC_ASSERT(DL);
   // Bitcast inputs if necessary.
   Value *OldValInput = OuterRd->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
-  OldValInput = createBitCastToElementType(OldValInput, InnerR.ElementTy,
-      OldValInput->getName() + ".bitcast_before_collapse", OuterWr, DL, OuterWr->getDebugLoc());
+  OldValInput = createBitCastToElementType(
+      OldValInput, InnerR.ElementTy,
+      OldValInput->getName() + ".bitcast_before_collapse", OuterWr, *DL,
+      OuterWr->getDebugLoc());
   Value *NewValInput = InnerWr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum);
-  NewValInput = createBitCastToElementType(NewValInput, InnerR.ElementTy,
-      NewValInput->getName() + ".bitcast_before_collapse", OuterWr, DL, OuterWr->getDebugLoc());
+  NewValInput = createBitCastToElementType(
+      NewValInput, InnerR.ElementTy,
+      NewValInput->getName() + ".bitcast_before_collapse", OuterWr, *DL,
+      OuterWr->getDebugLoc());
   // Create the combined wrregion.
   Instruction *CombinedWr = CombinedR.createWrRegion(
       OldValInput, NewValInput, InnerWr->getName() + ".regioncollapsed",
@@ -1012,11 +1041,14 @@ Instruction *GenXRegionCollapsing::processWrRegionSplat(Instruction *OuterWr)
       return OuterWr;
   }
 
-  Region InnerR = Region::getWithOffset(InnerWr, /*WantParentWidth=*/true);
-  Region OuterR = Region::getWithOffset(OuterWr);
+  Region InnerR = genx::makeRegionWithOffset(InnerWr, /*WantParentWidth=*/true);
+  Region OuterR = genx::makeRegionWithOffset(OuterWr);
   Region CombinedR;
   if (!combineRegions(&OuterR, &InnerR, &CombinedR))
     return OuterWr; // cannot combine
+  if (genx::isPredefRegSource(
+          InnerWr->getOperand(GenXIntrinsic::GenXRegion::NewValueOperandNum)))
+    return OuterWr;
   // Calculate index if necessary.
   if (InnerR.Indirect) {
     calculateIndex(&OuterR, &InnerR, &CombinedR,
@@ -1026,8 +1058,11 @@ Instruction *GenXRegionCollapsing::processWrRegionSplat(Instruction *OuterWr)
   // Bitcast inputs if necessary.
   Value *OldValInput = OuterSrc;
   Value *NewValInput = InnerWr->getOperand(1);
-  NewValInput = createBitCastToElementType(NewValInput, OuterWr->getType()->getScalarType(),
-      NewValInput->getName() + ".bitcast_before_collapse", OuterWr, DL, OuterWr->getDebugLoc());
+  IGC_ASSERT(DL);
+  NewValInput = createBitCastToElementType(
+      NewValInput, OuterWr->getType()->getScalarType(),
+      NewValInput->getName() + ".bitcast_before_collapse", OuterWr, *DL,
+      OuterWr->getDebugLoc());
   // Create the combined wrregion.
   Instruction *CombinedWr = CombinedR.createWrRegion(
       OldValInput, NewValInput, InnerWr->getName() + ".regioncollapsed",
@@ -1087,16 +1122,16 @@ bool GenXRegionCollapsing::normalizeElementType(Region *R1, Region *R2,
   // Try the smaller element size first if it is preferred by the caller.
   if (PreferSmall)
     if (!BigR->Indirect) // big region not indirect
-      if (BigR->changeElementType(SmallR->ElementTy))
+      if (BigR->changeElementType(SmallR->ElementTy, DL))
         return true;
   // Then try the bigger element size.
   if (!SmallR->Indirect) // small region not indirect
-    if (SmallR->changeElementType(BigR->ElementTy))
+    if (SmallR->changeElementType(BigR->ElementTy, DL))
       return true;
   // Then try the smaller element size.
   if (!PreferSmall)
     if (!BigR->Indirect) // big region not indirect
-      if (BigR->changeElementType(SmallR->ElementTy))
+      if (BigR->changeElementType(SmallR->ElementTy, DL))
         return true;
   return false;
 }
@@ -1124,9 +1159,9 @@ bool GenXRegionCollapsing::combineRegions(const Region *OuterR,
   LLVM_DEBUG(dbgs() << "GenXRegionCollapsing::combineRegions\n"
       "  OuterR: " << *OuterR << "\n"
       "  InnerR: " << *InnerR << "\n");
-  if (InnerR->Indirect && isa<VectorType>(InnerR->Indirect->getType()))
+  if (InnerR->isMultiIndirect())
     return false; // multi indirect not supported
-  if (OuterR->Indirect && isa<VectorType>(OuterR->Indirect->getType()))
+  if (OuterR->isMultiIndirect())
     return false; // multi indirect not supported
   if (OuterR->Mask)
     return false; // outer region predicated, cannot combine
@@ -1134,7 +1169,7 @@ bool GenXRegionCollapsing::combineRegions(const Region *OuterR,
   CombinedR->Indirect = OuterR->Indirect;
   CombinedR->Stride *= OuterR->Stride;
   CombinedR->VStride *= OuterR->Stride;
-  unsigned ElOffset = InnerR->Offset / InnerR->ElementBytes;
+  unsigned ElOffset = InnerR->getOffsetInElements();
   if (OuterR->is2D()) {
     // Outer region is 2D: create the combined offset. For outer 2D
     // and inner indirect, what CombinedR->Offset is set to here is
@@ -1172,7 +1207,7 @@ bool GenXRegionCollapsing::combineRegions(const Region *OuterR,
     return false;
   }
   // Inner region is not indirect.
-  unsigned StartEl = InnerR->Offset / InnerR->ElementBytes;
+  unsigned StartEl = InnerR->getOffsetInElements();
   unsigned StartRow = StartEl / OuterR->Width;
   if (!InnerR->is2D()) {
     // Inner region is 1D but outer region is 2D.
@@ -1214,7 +1249,7 @@ bool GenXRegionCollapsing::combineRegions(const Region *OuterR,
     CombinedR->VStride = OuterR->VStride * InnerR->VStride / (int)OuterR->Width;
     if (!InnerR->Indirect) {
       // For a direct inner region, calculate whether we can combine.
-      unsigned StartEl = InnerR->Offset / InnerR->ElementBytes;
+      unsigned StartEl = InnerR->getOffsetInElements();
       unsigned StartRow = StartEl / OuterR->Width;
       unsigned EndRowOfFirstRow = (StartEl + (InnerR->Width - 1) * InnerR->Stride)
             / OuterR->Width;
@@ -1390,6 +1425,6 @@ Value *GenXRegionCollapsing::insertOp(Instruction::BinaryOps Opcode, Value *Lhs,
 bool GenXRegionCollapsing::isSingleElementRdRExtract(Instruction *I) {
   if (!GenXIntrinsic::isRdRegion(I))
     return false;
-  Region R = Region::getWithOffset(I, /*WantParentWidth=*/true);
+  Region R = genx::makeRegionWithOffset(I, /*WantParentWidth=*/true);
   return R.NumElements == 1 && !R.Indirect;
 }

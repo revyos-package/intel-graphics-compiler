@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 #include "DebugInfo/ScalarVISAModule.h"
 #include "DebugInfo/DwarfDebug.hpp"
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
+#include "llvm/IR/IntrinsicInst.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -226,11 +227,18 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         }
 
         // set VISA dbg info to nullptr to indicate 1-step debug is enabled
+        if (currShader->ProgramOutput()->m_debugDataGenISA)
+        {
+            IGC::aligned_free(currShader->ProgramOutput()->m_debugDataGenISA);
+        }
         currShader->ProgramOutput()->m_debugDataGenISASize = 0;
         currShader->ProgramOutput()->m_debugDataGenISA = nullptr;
 
         if (finalize)
         {
+            m_currShader->GetContext()->metrics.CollectDataFromDebugInfo(
+                &m_currShader->GetDebugInfoData(), &decodedDbg);
+
             IDebugEmitter::Release(m_pDebugEmitter);
         }
     }
@@ -276,6 +284,73 @@ void DebugInfoPass::EmitDebugInfo(bool finalize, DbgDecoder* decodedDbg)
     pOutput->m_debugDataSize = dbgInfo ? buffer.size() : 0;
 }
 
+
+// Detect instructions with an address class pattern. Then remove all opcodes of this pattern from
+// this instruction's last operand (metadata of DIExpression).
+// Pattern 1: !DIExpression(DW_OP_constu, 4, DW_OP_swap, DW_OP_xderef)
+void DebugInfoData::extractAddressClass(llvm::Function& F, CShader* pShader, IDebugEmitter* pDebugEmitter)
+{
+    IGC_ASSERT_MESSAGE(pDebugEmitter, "Missing debug emitter");
+    VISAModule* visaModule = pDebugEmitter->getCurrentVISA();
+    IGC_ASSERT_MESSAGE(visaModule, "Missing visa module");
+
+    llvm::IRBuilder<> Builder(F.getParent()->getContext());
+    DIBuilder di(*F.getParent());
+
+    for (auto& bb : F)
+    {
+        for (auto& pInst : bb)
+        {
+            if (isa<CallInst>(&pInst))
+            {
+                CallInst* CI = cast<CallInst>(&pInst);
+                IGC_ASSERT_MESSAGE(CI, "Missing call instruction");
+                if (!CI->arg_empty() &&
+                    CI->arg_size() >= 3 &&
+                    (CI->getIntrinsicID() == Intrinsic::dbg_declare || CI->getIntrinsicID() == Intrinsic::dbg_value))
+                {
+                    DIExpression* DIExpr = nullptr;
+                    if (auto* DDI = dyn_cast<DbgDeclareInst>(&pInst))
+                    {
+                        DIExpr = DDI->getExpression();
+                    }
+                    else if (auto* DVI = dyn_cast<DbgValueInst>(&pInst))
+                    {
+                        DIExpr = DVI->getExpression();
+                    }
+
+                    llvm::SmallVector<uint64_t, 5> Exprs;
+                    if (DIExpr)
+                    {
+                        auto numElements = DIExpr->getNumElements();
+                        // If DWARF opcodes in this call instruction's last operand,
+                        // which is metadata of DIExpression, match the pattern,
+                        // then prepare a new DIExpression with the same content
+                        // except the pattern's DWARF opcodes. The currently processed
+                        // instruction's last operand will be replaced with
+                        // this new DIExpression.
+                        if (numElements >= 4 &&
+                            DIExpr->getElement(numElements - 4) == dwarf::DW_OP_constu &&
+                            DIExpr->getElement(numElements - 2) == dwarf::DW_OP_swap &&
+                            DIExpr->getElement(numElements - 1) == dwarf::DW_OP_xderef)
+                        {
+                            for (unsigned int j = 0; j != numElements - 4; ++j)
+                            {
+                                Exprs.push_back(DIExpr->getElement(j));
+                            }
+
+                            DIExpression* newDIExpr = di.createExpression(Exprs);
+                            Value* newMD = MetadataAsValue::get(F.getContext(), newDIExpr);
+
+                            CI->setArgOperand(CI->getNumArgOperands() - 1, newMD);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Mark privateBase aka ImplicitArg::PRIVATE_BASE as Output for debugging
 void DebugInfoData::markOutputPrivateBase(CShader* pShader, IDebugEmitter* pDebugEmitter)
 {
@@ -306,6 +381,10 @@ void DebugInfoData::markOutputVar(CShader* pShader, IDebugEmitter* pDebugEmitter
     IGC_ASSERT_MESSAGE(IGC_IS_FLAG_ENABLED(UseOffsetInLocation), "UseOffsetInLocation not enabled");
     IGC_ASSERT_MESSAGE(pInst, "Missing instruction");
 
+    // No dummy instruction needs to be marked with "Output"
+    if (dyn_cast<GenIntrinsicInst>(pValue))
+        return;
+
     CVariable* pVar = pShader->GetSymbol(pValue);
     if (pVar->GetVarType() == EVARTYPE_GENERAL)
     {
@@ -316,7 +395,8 @@ void DebugInfoData::markOutputVar(CShader* pShader, IDebugEmitter* pDebugEmitter
         // This will help debugger examine their values anywhere in the code till they
         // are in scope. However, emit "Output" attribute when -g and -cl-opt-disable
         // are both passed -g by itself shouldnt alter generated code.
-        if (pShader->GetContext()->getModuleMetaData()->compOpt.OptDisable)
+        if (static_cast<OpenCLProgramContext*>(pShader->GetContext())->m_InternalOptions.KernelDebugEnable ||
+            pShader->GetContext()->getModuleMetaData()->compOpt.OptDisable)
         {
             // If "Output" attribute is emitted for perThreadOffset variable(s)
             // then debug info emission is preserved for this:

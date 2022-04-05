@@ -110,8 +110,8 @@ SPDX-License-Identifier: MIT
 #include "GenXIntrinsics.h"
 #include "GenXLiveness.h"
 #include "GenXModule.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
+
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -327,7 +327,8 @@ struct SinkCandidate {
 };
 
 // GenX depressurizer pass
-class GenXDepressurizer : public FunctionGroupPass {
+class GenXDepressurizer : public FGPassImplInterface,
+                          public IDMixin<GenXDepressurizer> {
   enum { FlagThreshold = 6, AddrThreshold = 32, GRFThreshold = 2560,
          FlagGRFTolerance = 3840 };
   bool Modified;
@@ -346,21 +347,13 @@ class GenXDepressurizer : public FunctionGroupPass {
   // loop backedge. The converse is not necessarily true.
   std::map<Instruction *, unsigned> InstNumbers;
   std::map<Value *, CallInst *> TwoAddrValueMap;
+  unsigned SunkCount = 0;
 
 public:
-  static char ID;
-  explicit GenXDepressurizer() : FunctionGroupPass(ID) {}
-  StringRef getPassName() const override {
-    return "GenX register pressure reducer";
-  }
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  explicit GenXDepressurizer() {}
+  static StringRef getPassName() { return "GenX register pressure reducer"; }
+  static void getAnalysisUsage(AnalysisUsage &AU);
   bool runOnFunctionGroup(FunctionGroup &FG) override;
-  // createPrinterPass : get a pass to print the IR, together with the GenX
-  // specific analyses
-  Pass *createPrinterPass(raw_ostream &O,
-                          const std::string &Banner) const override {
-    return createGenXGroupPrinterPass(O, Banner);
-  }
 
 private:
   void processFunction(Function *F);
@@ -383,24 +376,24 @@ private:
 
 } // end anonymous namespace
 
-char GenXDepressurizer::ID = 0;
 namespace llvm {
-void initializeGenXDepressurizerPass(PassRegistry &);
+void initializeGenXDepressurizerWrapperPass(PassRegistry &);
+using GenXDepressurizerWrapper = FunctionGroupWrapperPass<GenXDepressurizer>;
 }
-INITIALIZE_PASS_BEGIN(GenXDepressurizer, "GenXDepressurizer", "GenXDepressurizer", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
-INITIALIZE_PASS_DEPENDENCY(GenXGroupBaling)
-INITIALIZE_PASS_END(GenXDepressurizer, "GenXDepressurizer", "GenXDepressurizer", false, false)
+INITIALIZE_PASS_BEGIN(GenXDepressurizerWrapper, "GenXDepressurizerWrapper",
+                      "GenXDepressurizerWrapper", false, false)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPassWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXLivenessWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXGroupBalingWrapper)
+INITIALIZE_PASS_END(GenXDepressurizerWrapper, "GenXDepressurizerWrapper",
+                    "GenXDepressurizerWrapper", false, false)
 
-FunctionGroupPass *llvm::createGenXDepressurizerPass()
-{
-  initializeGenXDepressurizerPass(*PassRegistry::getPassRegistry());
-  return new GenXDepressurizer();
+ModulePass *llvm::createGenXDepressurizerWrapperPass() {
+  initializeGenXDepressurizerWrapperPass(*PassRegistry::getPassRegistry());
+  return new GenXDepressurizerWrapper();
 }
 
-void GenXDepressurizer::getAnalysisUsage(AnalysisUsage &AU) const {
-  FunctionGroupPass::getAnalysisUsage(AU);
+void GenXDepressurizer::getAnalysisUsage(AnalysisUsage &AU) {
   AU.addRequired<DominatorTreeGroupWrapperPass>();
   AU.addRequired<GenXGroupBaling>();
   AU.addPreserved<DominatorTreeGroupWrapperPass>();
@@ -420,6 +413,7 @@ bool GenXDepressurizer::runOnFunctionGroup(FunctionGroup &FG) {
     return false;
 
   Modified = false;
+  SunkCount = 0;
   Baling = &getAnalysis<GenXGroupBaling>();
   // Process functions in the function group in reverse order, so we know the
   // max pressure in a subroutine when we see a call to it.
@@ -666,6 +660,8 @@ void GenXDepressurizer::processInstruction(Instruction *Inst) {
     return;
   if (Baling->isBaled(Inst))
     return; // Not head of bale, ignore
+  if (isa<DbgInfoIntrinsic>(Inst))
+    return; // debug info intrinsics are ignored
   if (isa<ExtractValueInst>(Inst))
     return; // Too confusing to consider sinking when we get to an extractvalue
             // out of a goto/join, so ignore.
@@ -1035,11 +1031,10 @@ void GenXDepressurizer::fillTwoAddrValueMap(BasicBlock *BB) {
  */
 bool GenXDepressurizer::sink(Instruction *InsertBefore, Superbale *SB,
                              bool AllowClone) {
-  static unsigned Count = 0;
-  if (++Count > LimitGenXDepressurizer)
+  if (++SunkCount > LimitGenXDepressurizer)
     return false;
   if (LimitGenXDepressurizer != UINT_MAX)
-    dbgs() << "genx depressurizer " << Count << '\n';
+    dbgs() << "genx depressurizer " << SunkCount << '\n';
   unsigned CurNumber = InstNumbers[InsertBefore];
   LLVM_DEBUG(dbgs() << "sink(" << SB->getHead()->getName() << ")\n");
   // Gather the uses that we are going to modify.

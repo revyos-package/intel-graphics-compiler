@@ -77,9 +77,11 @@ SPDX-License-Identifier: MIT
 #include "GenXLiveness.h"
 #include "GenXModule.h"
 #include "GenXNumbering.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
-#include "vc/GenXOpts/Utils/RegCategory.h"
+
+#include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/RegCategory.h"
+
 #include "llvm-c/Core.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/MapVector.h"
@@ -92,8 +94,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
-#include "Probe/Assertion.h"
 
+#include "Probe/Assertion.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/TypeSize.h"
 
@@ -170,7 +172,8 @@ struct Extract {
 };
 
 // GenX address conversion pass
-class GenXAddressCommoning : public FunctionGroupPass {
+class GenXAddressCommoning : public FGPassImplInterface,
+                             public IDMixin<GenXAddressCommoning> {
   GenXBaling *Baling = nullptr;
   GenXLiveness *Liveness = nullptr;
   GenXNumbering *Numbering = nullptr;
@@ -204,12 +207,10 @@ class GenXAddressCommoning : public FunctionGroupPass {
           bool (*)(BaseRegAndBaleHash, BaseRegAndBaleHash)> OuterMap_t;
   OuterMap_t OuterMap;
 public:
-  static char ID;
-  explicit GenXAddressCommoning() : FunctionGroupPass(ID),
-      OuterMap(OuterMap_t(BaseRegAndBaleHash::less)) { }
-  StringRef getPassName() const override { return "GenX address commoning"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    FunctionGroupPass::getAnalysisUsage(AU);
+  explicit GenXAddressCommoning()
+      : OuterMap(OuterMap_t(BaseRegAndBaleHash::less)) {}
+  static StringRef getPassName() { return "GenX address commoning"; }
+  static void getAnalysisUsage(AnalysisUsage &AU) {
     AU.addRequired<DominatorTreeGroupWrapperPass>();
     AU.addRequired<GenXModule>();
     AU.addRequired<GenXGroupBaling>();
@@ -224,12 +225,6 @@ public:
     AU.setPreservesCFG();
   }
   bool runOnFunctionGroup(FunctionGroup &FG) override;
-  // createPrinterPass : get a pass to print the IR, together with the GenX
-  // specific analyses
-  Pass *createPrinterPass(raw_ostream &O,
-                          const std::string &Banner) const override {
-    return createGenXGroupPrinterPass(O, Banner);
-  }
 
 private:
   bool processFunction(Function *F);
@@ -244,25 +239,32 @@ private:
   DominatorTree *getDominatorTree();
   bool isValueInCurrentFunc(Value *V);
   unsigned getNumberElementsInAddrReg() const {
+    if (ST)
+      return ST->getNumElementsInAddrReg();
     return 8;
   }
 };
 
 } // end anonymous namespace
 
-char GenXAddressCommoning::ID = 0;
-namespace llvm { void initializeGenXAddressCommoningPass(PassRegistry &); }
-INITIALIZE_PASS_BEGIN(GenXAddressCommoning, "GenXAddressCommoning", "GenXAddressCommoning", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(GenXGroupBaling)
-INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
-INITIALIZE_PASS_DEPENDENCY(GenXNumbering)
-INITIALIZE_PASS_END(GenXAddressCommoning, "GenXAddressCommoning", "GenXAddressCommoning", false, false)
+namespace llvm {
+void initializeGenXAddressCommoningWrapperPass(PassRegistry &);
+using GenXAddressCommoningWrapper =
+    FunctionGroupWrapperPass<GenXAddressCommoning>;
+} // namespace llvm
+INITIALIZE_PASS_BEGIN(GenXAddressCommoningWrapper,
+                      "GenXAddressCommoningWrapper",
+                      "GenXAddressCommoningWrapper", false, false)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPassWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXGroupBalingWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXLivenessWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXNumberingWrapper)
+INITIALIZE_PASS_END(GenXAddressCommoningWrapper, "GenXAddressCommoningWrapper",
+                    "GenXAddressCommoningWrapper", false, false)
 
-FunctionGroupPass *llvm::createGenXAddressCommoningPass()
-{
-  initializeGenXAddressCommoningPass(*PassRegistry::getPassRegistry());
-  return new GenXAddressCommoning();
+ModulePass *llvm::createGenXAddressCommoningWrapperPass() {
+  initializeGenXAddressCommoningWrapperPass(*PassRegistry::getPassRegistry());
+  return new GenXAddressCommoningWrapper();
 }
 
 /***********************************************************************
@@ -324,7 +326,8 @@ bool GenXAddressCommoning::processFunction(Function *F)
             auto SI = dyn_cast<StoreInst>(Inst->user_back());
             if (!SI)
               continue;
-            Value *GV = getUnderlyingGlobalVariable(SI->getPointerOperand());
+            Value *GV =
+                vc::getUnderlyingGlobalVariable(SI->getPointerOperand());
             if (!GV)
               continue;
             LR = Liveness->getLiveRange(GV);
@@ -398,7 +401,8 @@ bool GenXAddressCommoning::processBaseReg(LiveRange *LR)
           return false;
         StoreInst *SI = dyn_cast<StoreInst>(user->user_back());
         GlobalVariable *GV =
-            SI ? getUnderlyingGlobalVariable(SI->getPointerOperand()) : nullptr;
+            SI ? vc::getUnderlyingGlobalVariable(SI->getPointerOperand())
+               : nullptr;
         if (!GV)
           return false;
         // make sure the base is the right global variable.
@@ -772,7 +776,7 @@ bool GenXAddressCommoning::tryConvertWholeRegion(SmallVector<Extract, 4> &Extrac
   // check every extract
   for (unsigned Idx = 0, End = Extracts.size(); Idx < End; ++Idx) {
     Instruction *RdR = cast<Instruction>(Extracts[Idx].Addr->getOperand(0));
-    Region R(RdR, BaleInfo());
+    Region R = makeRegionFromBaleInfo(RdR, BaleInfo());
     if (R.NumElements > 1 && R.Stride > 1)
       return false;
     // all address-conv must be in the same basic block
@@ -808,7 +812,7 @@ bool GenXAddressCommoning::tryConvertWholeRegion(SmallVector<Extract, 4> &Extrac
   for (unsigned Idx2 = 0, End2 = Extracts.size(); Idx2 < End2; ++Idx2) {
     auto OldConv = Extracts[Idx2].Addr;
     Instruction *OldExtract = cast<Instruction>(OldConv->getOperand(0));
-    Region R2(OldExtract, BaleInfo());
+    Region R2 = makeRegionFromBaleInfo(OldExtract, BaleInfo());
     while (!OldConv->use_empty()) {
       auto ui = OldConv->use_begin();
       auto user = cast<Instruction>(ui->getUser());
@@ -832,7 +836,7 @@ bool GenXAddressCommoning::tryConvertWholeRegion(SmallVector<Extract, 4> &Extrac
   }
   // Give the new vectorized address conversion a live range.
   auto LR = Liveness->getOrCreateLiveRange(NewConv);
-  LR->setCategory(RegCategory::ADDRESS);
+  LR->setCategory(vc::RegCategory::Address);
   Liveness->rebuildLiveRange(LR);
   return true;
 }
@@ -862,7 +866,8 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
     Instruction *Addr = *i;
     LLVM_DEBUG(Addr->dump());
 
-    Region R(cast<Instruction>(Addr->getOperand(0)), BaleInfo());
+    Region R = makeRegionFromBaleInfo(cast<Instruction>(Addr->getOperand(0)),
+                                      BaleInfo());
     LLVM_DEBUG(dbgs() << " [" << R.Offset << "]\n");
 
     Extracts.push_back(Extract(Addr, R.Offset));
@@ -936,14 +941,16 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
     LLVM_DEBUG(dbgs() << "Sequence of " << Num << " instructions found. First one is:\n");
     LLVM_DEBUG(FirstRdR->dump());
     LLVM_DEBUG(dbgs() << "\n");
-    Region R(FirstRdR, BaleInfo());
+    Region R = makeRegionFromBaleInfo(FirstRdR, BaleInfo());
     R.NumElements = R.Width = Num;
     R.Stride = Diff / R.ElementBytes;
     // See how big we can legally make the region.
     unsigned InputNumElements =
         cast<IGCLLVM::FixedVectorType>(FirstRdR->getOperand(0)->getType())
             ->getNumElements();
-    Num = R.getLegalSize(0, /*Allow2D=*/true, InputNumElements, ST);
+    IGC_ASSERT(ST);
+    Num = getLegalRegionSizeForTarget(*ST, R, 0, true /*Allow2D*/,
+                                      InputNumElements);
     if (Num == 1)
       continue;
     // Even after legalizing the region, we can still vectorize to more than
@@ -1017,7 +1024,7 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
     }
     // Give the new vectorized address conversion a live range.
     auto LR = Liveness->getOrCreateLiveRange(NewConv);
-    LR->setCategory(RegCategory::ADDRESS);
+    LR->setCategory(vc::RegCategory::Address);
     Liveness->rebuildLiveRange(LR);
     Modified = true;
   }

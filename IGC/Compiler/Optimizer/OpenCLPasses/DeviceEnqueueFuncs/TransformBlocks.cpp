@@ -122,7 +122,11 @@ namespace //Anonymous
         { DeviceEnqueueFunction::PREFERRED_WORK_GROUP_MULTIPLE_IMPL, "__get_kernel_preferred_work_group_multiple_impl" },
         { DeviceEnqueueFunction::MAX_SUB_GROUP_SIZE_FOR_NDRANGE, "_Z41get_kernel_max_sub_group_size_for_ndrange" },
         { DeviceEnqueueFunction::SUB_GROUP_COUNT_FOR_NDRANGE, "_Z38get_kernel_sub_group_count_for_ndrange" },
+#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
+        { DeviceEnqueueFunction::SPIRV_ENQUEUE_KERNEL, "_Z21__spirv_EnqueueKernel" },
+#else
         { DeviceEnqueueFunction::SPIRV_ENQUEUE_KERNEL, "__builtin_spirv_OpEnqueueKernel" },
+#endif
         { DeviceEnqueueFunction::SPIRV_SUB_GROUP_COUNT_FOR_NDRANGE, "__builtin_spirv_OpGetKernelNDrangeSubGroupCount" },
         { DeviceEnqueueFunction::SPIRV_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, "__builtin_spirv_OpGetKernelNDrangeMaxSubGroupSize" },
         { DeviceEnqueueFunction::SPIRV_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, "__builtin_spirv_OpGetKernelPreferredWorkGroupSizeMultiple" },
@@ -315,7 +319,7 @@ namespace //Anonymous
             return false;
         }
 
-        /// Check if type is OCL event_t
+        /// Check if type is OCL or SPIRV event type
         static bool isEventType(llvm::Type* type)
         {
             if (auto * sType = toStructType(type))
@@ -323,13 +327,29 @@ namespace //Anonymous
                 if (sType->isOpaque())
                 {
                     auto typeName = sType->getName();
-                    return typeName.equals("opencl.clk_event_t") || typeName.equals("opencl.event_t");
+                    bool isOpenCLEvent = typeName.equals("opencl.clk_event_t") || typeName.equals("opencl.event_t");
+                    bool isSPIRVEvent = typeName.equals("spirv.DeviceEvent") || typeName.equals("spirv.Event");
+                    return isOpenCLEvent || isSPIRVEvent;
                 }
             }
             return false;
         }
 
-        /// Check if type is OCL queue_t
+        /// Check if type is OCL or SPIRV sampler type
+        static bool isSamplerType(llvm::Type* type)
+        {
+            if (auto* sType = toStructType(type))
+            {
+                if (sType->isOpaque())
+                {
+                    auto typeName = sType->getName();
+                    return typeName.equals("opencl.sampler_t") || typeName.equals("spirv.Sampler");
+                }
+            }
+            return false;
+        }
+
+        /// Check if type is OCL or SPIRV queue type
         static bool isQueueType(llvm::Type* type)
         {
             if (auto * sType = toStructType(type))
@@ -337,7 +357,7 @@ namespace //Anonymous
                 if (sType->isOpaque())
                 {
                     auto typeName = sType->getName();
-                    return typeName.equals("opencl.queue_t");
+                    return typeName.equals("opencl.queue_t") || typeName.equals("spirv.Queue");
                 }
             }
             return false;
@@ -361,9 +381,6 @@ namespace //Anonymous
 
         /// Lookup in metadata if the function arg is a "sampler_t"
         bool isSamplerArg(const llvm::Argument* arg) const;
-
-        /// Check if dispatcher's capture argument has to be a "sampler_t"
-        bool isSampleCaptured(const llvm::Function* dispatchFunc, unsigned captureNum) const;
 
         // IsKernel(function* func) - checks if the function is a OCL kernel
         bool isKernel(const llvm::Function* func) const;
@@ -1594,15 +1611,19 @@ namespace //Anonymous
                                 unsigned blockArgIdx = callInst->hasStructRetAttr() ? 1 : 0;
                                 if (callInst->getNumArgOperands() > blockArgIdx)
                                 {
-                                    if (auto blockDescrStruct = StructValue::get(callInst->getArgOperand(blockArgIdx)->stripPointerCasts()))
+                                    Value* spc = callInst->getArgOperand(blockArgIdx)->stripPointerCasts();
+                                    if (KindQuery::isBlockStructType(spc->getType()))
                                     {
-                                        if (auto blockInvokeFunc = dyn_cast_or_null<llvm::Function>(blockDescrStruct->getValueStoredAtIndex(BLOCK_INDEX_INVOKE_FUNC)))
+                                        if (auto blockDescrStruct = StructValue::get(spc))
                                         {
-                                            callInst->setCalledFunction(blockInvokeFunc);
-                                            changed = true;
-                                            llvm::InlineFunctionInfo IFI;
-                                            inlined = IGCLLVM::InlineFunction(callInst, IFI, nullptr, false);
-                                            IGC_ASSERT_MESSAGE(inlined, "failed inlining block invoke function");
+                                            if (auto blockInvokeFunc = dyn_cast_or_null<llvm::Function>(blockDescrStruct->getValueStoredAtIndex(BLOCK_INDEX_INVOKE_FUNC)))
+                                            {
+                                                callInst->setCalledFunction(blockInvokeFunc);
+                                                changed = true;
+                                                llvm::InlineFunctionInfo IFI;
+                                                inlined = IGCLLVM::InlineFunction(callInst, IFI, nullptr, false);
+                                                IGC_ASSERT_MESSAGE(inlined, "failed inlining block invoke function");
+                                            }
                                         }
                                     }
                                 }
@@ -1660,25 +1681,6 @@ namespace //Anonymous
                     changed = true;
                 }
             }
-
-            // Remove function pointer from instructions
-            // FIXME: Allowing function pointer calls directly passed by FE will cause regressions due to implicit args
-            // not being supported by indirect calls. When runtime turns on support, we should remove the following code
-            // to allow function pointer usage in all cases.
-            auto nullPtrConst = llvm::ConstantPointerNull::get(Type::getInt8PtrTy(M.getContext()));
-            for (auto& func : M.functions())
-            {
-                for (auto user : func.users())
-                {
-                    if (!isa<llvm::CallInst>(user))
-                    {
-                        if (!isa<llvm::Constant>(user)) {
-                            user->replaceUsesOfWith(&func, nullPtrConst);
-                            changed = true;
-                        }
-                    }
-                }
-            }
             return changed;
         }
     };
@@ -1713,7 +1715,7 @@ namespace //Anonymous
                 if (prefix.equals("opencl"))
                 {
                     IGC_ASSERT(nameFractions.size() >= 2);
-                    imageMetadata.TypeName = nameFractions[1];
+                    imageMetadata.TypeName = nameFractions[1].str();
                     imageMetadata.AccessQual = nameFractions.size() > 2 ? nameFractions[2].str() : "read_write";
                 }
                 else if(prefix.equals("spirv"))
@@ -1855,9 +1857,13 @@ namespace //Anonymous
 
             std::string typeName;
             llvm::SmallVector<llvm::StringRef, 3> nameFractions;
-            if (argType->isIntegerTy() && _dataContext.getKindQuery().isSampleCaptured(kernelFunc, arg.getArgNo()))
+            if (KindQuery::isSamplerType(argType))
             {
                 typeName = "sampler_t";
+            }
+            else if (KindQuery::isQueueType(argType))
+            {
+                typeName = "queue_t";
             }
             else if (KindQuery::isImageType(argType))
             {
@@ -1902,42 +1908,6 @@ namespace //Anonymous
             return true;
         }
         return false;
-    }
-
-    // check if dispatcher's argument is sampler.
-    bool KindQuery::isSampleCaptured(const llvm::Function* dispatchFunc, unsigned captureNum) const
-    {
-        auto dispatcher = _dataContext.getDispatcherForDispatchFunc(dispatchFunc);
-        if (dispatcher == nullptr) return false;
-
-        auto invokeFunc = dispatcher->getBlockInvokeFunc();
-
-        // get list of calls which "enqueue" this dispatcher
-        auto parentCalls = _dataContext.getCallHandlersFor(invokeFunc);
-        IGC_ASSERT_EXIT_MESSAGE(parentCalls.size(), "parent calls for invoke are not set");
-
-        // lookup for a call which located in a "__kernel"
-        // if __kernel call will not found, use the one which is not self
-        CallHandler* parentCallHandler = nullptr;
-        for (auto callHandler : parentCalls)
-        {
-            const llvm::Function* callerFunc = callHandler->getArgs()->getCallerFunc();
-            if (isKernel(callerFunc))
-            {
-                parentCallHandler = callHandler;
-                break;
-            }
-            if (callerFunc != invokeFunc)
-            {
-                parentCallHandler = callHandler;
-            }
-        }
-
-        IGC_ASSERT_EXIT_MESSAGE(nullptr != parentCallHandler, "Fail parent call lookup: possible closed self-enqueue");
-
-        auto capturedValues = parentCallHandler->getArgs()->getParamValue()->getCapturedValues(_dataContext.getDispatcherForInvokeFunc(invokeFunc)->getCaptureIndicies());
-        auto& capture = capturedValues[captureNum];
-        return (capture.kind == CaptureKind::SAMPLER);
     }
 
     bool KindQuery::isKernel(const llvm::Function* func) const

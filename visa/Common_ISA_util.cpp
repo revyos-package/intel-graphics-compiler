@@ -49,12 +49,12 @@ const char* Common_ISA_Get_Align_Name(VISA_Align align)
     return CISAAlignTable[align].AlignName;
 }
 
-uint32_t getAlignInBytes(VISA_Align A)
+uint32_t getAlignInBytes(VISA_Align A, unsigned grfSize)
 {
     switch (A)
     {
-    case ALIGN_GRF:   return getGRFSize();
-    case ALIGN_2_GRF: return 2 * getGRFSize();
+    case ALIGN_GRF:   return grfSize;
+    case ALIGN_2_GRF: return 2 * grfSize;
     default:
         break;
     }
@@ -92,6 +92,8 @@ GenPrecision_Info_t GenPrecisionTable[] = {
     /*  8 */ { GenPrecision::S8,      8, "s8"    },
     /*  9 */ { GenPrecision::BF16,   16, "bf"    },
     /* 10 */ { GenPrecision::FP16,   16, "hf"    },
+    /* 11 */ { GenPrecision::INVALID, 0, nullptr },  // unused
+    /* 12 */ { GenPrecision::TF32,   32, "tf32"  },
 };
 static_assert((int)GenPrecision::INVALID == 0);
 static_assert((int)GenPrecision::U1 == 1);
@@ -104,7 +106,8 @@ static_assert((int)GenPrecision::U8 == 7);
 static_assert((int)GenPrecision::S8 == 8);
 static_assert((int)GenPrecision::BF16 == 9);
 static_assert((int)GenPrecision::FP16 == 10);
-static_assert((int)GenPrecision::TOTAL_NUM == 11);
+static_assert((int)GenPrecision::TF32 == 12);
+static_assert((int)GenPrecision::TOTAL_NUM == 13);
 
 
 const char* Common_ISA_Get_Modifier_Name(VISA_Modifier modifier)
@@ -175,10 +178,15 @@ G4_opcode GetGenOpcodeFromVISAOpcode(ISA_Opcode opcode)
         case ISA_DPASW:
             return G4_dpasw;
         case ISA_ADD3:
+        case ISA_ADD3O:
             return G4_add3;
         case ISA_BFN:
             return G4_bfn;
         case ISA_BF_CVT:
+        case ISA_FCVT:
+            return G4_fcvt;
+        case ISA_SRND:
+            return G4_srnd;
         case ISA_EXP:
             return G4_math;
         case ISA_FRC:
@@ -339,6 +347,8 @@ G4_Type GetGenTypeFromVISAType(VISA_Type type)
         return Type_UQ;
     case ISA_TYPE_HF:
         return Type_HF;
+    case ISA_TYPE_BF:
+        return Type_BF;
     default:
         return Type_UNDEF;
     }
@@ -378,6 +388,8 @@ VISA_Type Get_Common_ISA_Type_From_G4_Type(G4_Type type)
         return ISA_TYPE_UQ;
     case Type_HF:
         return ISA_TYPE_HF;
+    case Type_BF:
+        return ISA_TYPE_BF;
     default:
         return ISA_TYPE_NUM;
     }
@@ -431,10 +443,14 @@ bool hasPredicate(ISA_Opcode op)
     switch (ISA_Inst_Table[op].type)
     {
     case ISA_Inst_Mov:
-        return !(op == ISA_SETP || op == ISA_MOVS || op == ISA_FMINMAX || op == ISA_BF_CVT);
+        return !(op == ISA_SETP || op == ISA_MOVS || op == ISA_FMINMAX || op == ISA_BF_CVT || op == ISA_FCVT);
     case ISA_Inst_Arith:
     case ISA_Inst_Logic:
     {
+        if (op == ISA_SRND)
+        {
+            return false;
+        }
         return true;
     }
     case ISA_Inst_Compare:
@@ -454,8 +470,12 @@ bool hasPredicate(ISA_Opcode op)
                 );
     case ISA_Inst_Flow:
         return !(op == ISA_SUBROUTINE || op == ISA_LABEL || op == ISA_SWITCHJMP);
+    case ISA_Inst_LSC:
+        return true;
     case ISA_Inst_SIMD_Flow:
         return op == ISA_GOTO;
+    case ISA_Inst_SVM:
+        return true;
     default:
         return false;
     }
@@ -481,6 +501,8 @@ bool hasExecSize(ISA_Opcode op, uint8_t subOp)
                 return false;
             } else
                 return true;
+        case ISA_Inst_LSC:
+            return true;
         case ISA_Inst_Sampler:
         case ISA_Inst_Misc:
             if (op == ISA_RAW_SEND || op == ISA_RAW_SENDS || op == ISA_3D_SAMPLE ||
@@ -1345,6 +1367,19 @@ VISA_Modifier Get_Common_ISA_SrcMod_From_G4_Mod(G4_SrcModifier mod)
     }
 }
 
+VISA_Type getRawOperandType(const print_format_provider_t* header, const raw_opnd& opnd)
+{
+    unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
+    if (opnd.index < numPreDefinedVars)
+    {
+        // One of the pre-defined variables
+        return getPredefinedVarType(mapExternalToInternalPreDefVar(opnd.index));
+    }
+
+    uint32_t opnd_index = opnd.index - numPreDefinedVars;
+    const var_info_t* currVar = header->getVar(opnd_index);
+    return currVar->getType();
+}
 
 VISA_Type getVectorOperandType(const print_format_provider_t* header, const vector_opnd& opnd)
 {
@@ -1455,9 +1490,9 @@ int64_t typecastVals(const void* value, VISA_Type isaType)
 }
 
 // convert binary vISA surface id to GEN surface index
-int Get_PreDefined_Surf_Index(int index)
+int Get_PreDefined_Surf_Index(int index, TARGET_PLATFORM platform)
 {
-    if (getGenxPlatform() < GENX_SKL)
+    if (platform < GENX_SKL)
     {
         switch (index)
         {

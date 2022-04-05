@@ -41,7 +41,7 @@ namespace TC
         bool enableVISAPreRASchedulerForRetry() const override { return true; }
 
         bool NeedWAToTransformA32MessagesToA64() const override{ return true; }
-        bool WADisableCustomPass() const override { return true; }
+        bool WADisableCustomPass() const override { return false; }
         bool WAEnableMemOpt2ForOCL() const override { return true; }
 
         unsigned int GetLoopUnrollThreshold() const override { return  1280; }
@@ -69,12 +69,13 @@ namespace TC
     class CDriverInfoOCLNEO : public CDriverInfoOCLCommon
     {
     public:
-        bool SupportsStatelessToStatefullBufferTransformation() const override { return true; }
+        bool SupportsStatelessToStatefulBufferTransformation() const override { return true; }
         unsigned getVISAPreRASchedulerCtrl() const override { return 6; }
         bool SupportStatefulToken() const override { return true; }
         bool SupportInlineAssembly() const override { return true; }
         /// Enables the use of inline data on XeHP_SDV+
         virtual bool UseInlineData() const override { return true; }
+        bool supportsAutoGRFSelection() const override { return true; }
     };
 
 }//namespace TC

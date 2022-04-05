@@ -24,9 +24,11 @@ std::string vISA::ToSymbol(LdStOp op)
     case LdStOp::LOAD:         return "load";
     case LdStOp::LOAD_QUAD:    return "load_quad";
     case LdStOp::LOAD_STRIDED: return "load_strided";
+    case LdStOp::LOAD_BLOCK2D: return "load_block2d";
     case LdStOp::STORE:         return "store";
     case LdStOp::STORE_QUAD:    return "store_quad";
     case LdStOp::STORE_STRIDED: return "store_strided";
+    case LdStOp::STORE_BLOCK2D: return "store_block2d";
     // general atomics
     case LdStOp::ATOMIC_LOAD:   return "atomic_load";
     case LdStOp::ATOMIC_STORE:  return "atomic_store";
@@ -63,7 +65,9 @@ std::string vISA::ToSymbol(Caching c)
     case Caching::CA: return ".ca";
     case Caching::DF: return ".df";
     case Caching::RI: return ".ri";
+    case Caching::ST: return ".st";
     case Caching::WB: return ".wb";
+    case Caching::WT: return ".wt";
     case Caching::UC: return ".uc";
     default: return "?";
     }
@@ -119,20 +123,20 @@ std::string ElemsPerAddr::str() const
 ///////////////////////////////////////////////////////////////////////////////
 // G4_SendDesc implementations
 ///////////////////////////////////////////////////////////////////////////////
-static inline int roundUpToGrf(int bytes) {
-    return g4::alignUp((int)getGRFSize(), bytes) / (int)getGRFSize();
+static inline int roundUpToGrf(int bytes, int grfSize) {
+    return g4::alignUp(grfSize, bytes) / grfSize;
 }
 
 size_t G4_SendDesc::getSrc0LenRegs() const {
-    return roundUpToGrf(getSrc0LenBytes());
+    return roundUpToGrf(getSrc0LenBytes(), irb.getGRFSize());
 }
 
 size_t G4_SendDesc::getDstLenRegs() const {
-    return roundUpToGrf(getDstLenBytes());
+    return roundUpToGrf(getDstLenBytes(), irb.getGRFSize());
 }
 
 size_t G4_SendDesc::getSrc1LenRegs() const {
-    return roundUpToGrf(getSrc1LenBytes());
+    return roundUpToGrf(getSrc1LenBytes(), irb.getGRFSize());
 }
 
 bool G4_SendDesc::isHDC() const
@@ -145,6 +149,19 @@ bool G4_SendDesc::isHDC() const
         funcID == SFID::DP_CC;
 }
 
+bool G4_SendDesc::isLSC() const
+{
+    switch (getSFID()) {
+    case SFID::UGM:
+    case SFID::UGML:
+    case SFID::TGM:
+    case SFID::SLM:
+        return true;
+    default:
+        break;
+    }
+    return false;
+}
 
 
 
@@ -167,8 +184,9 @@ G4_SendDescLdSt::G4_SendDescLdSt(
     Caching _l1, Caching _l3,
     G4_Operand *surf,
     ImmOff _immOff,
-    LdStAttrs _attrs)
-    : G4_SendDesc(G4_SendDesc::Kind::LDST, sfid, _execSize),
+    LdStAttrs _attrs,
+    const IR_Builder& builder)
+    : G4_SendDesc(G4_SendDesc::Kind::LDST, sfid, _execSize, builder),
     op(_op),
     //
     addrType(at), addrBits(_addrBits), addrDims(_addrDims),
@@ -181,9 +199,17 @@ G4_SendDescLdSt::G4_SendDescLdSt(
 {
 }
 
-static size_t toExecSlots(const G4_SendDescLdSt &d)
+static size_t toExecSlots(const G4_SendDescLdSt &d, TARGET_PLATFORM platform)
 {
     int minExecSize = 8;
+    if (platform >= TARGET_PLATFORM::Xe_PVC)
+        minExecSize = 16;
+    MUST_BE_TRUE(false, "TODO: needs to deal with half size LSC messages");
+    MUST_BE_TRUE(false, "TODO: need to deal with varying typed message sizes");
+    // e.g. deal with
+    //   SIMD4 typed ...
+    //   SIMD4 untyped...
+    // (or we make the descriptor creator just pass the right exec size in)
     int execSlots = std::max((int)d.getExecSize(), minExecSize);
     return (size_t)execSlots;
 }
@@ -197,6 +223,10 @@ size_t G4_SendDescLdSt::getSrc0LenBytes() const
     case LdStOp::LOAD_STRIDED:
     case LdStOp::STORE_STRIDED:
         return 8 + 4;  // address field is 64b (even for A32) + pitch is 32b
+    case LdStOp::LOAD_BLOCK2D:
+    case LdStOp::STORE_BLOCK2D:
+        // [243:0] ~ 256b = 32B
+        return 32;
     default:
         break; // fallthrough to other logic
     }
@@ -220,7 +250,7 @@ size_t G4_SendDescLdSt::getSrc1LenBytes() const
         // transpose messages send one address only
         return elemPerAddr / 8;
     } else {
-        return toExecSlots(*this) * elemBitsReg;
+        return toExecSlots(*this, irb.getPlatform()) * elemBitsReg;
     }
     MUST_BE_TRUE(false, "TODO: compute data bytes sent");
     return (size_t)-1;
@@ -234,9 +264,15 @@ size_t G4_SendDescLdSt::getDstLenBytes() const
     MUST_BE_TRUE(false, "TODO: compute bytes received");
     return (size_t)-1;
 }
-
+void G4_SendDescLdSt::setCaching(Caching _l1, Caching _l3)
+{
+    l1 = _l1;
+    l3 = _l3;
+}
 bool G4_SendDescLdSt::isSLM() const
 {
+    if (getSFID() == SFID::SLM)
+        return true;
     MUST_BE_TRUE(!isHDC(), "HDC SLM not supported (yet)");
     return false;
 }
@@ -262,12 +298,18 @@ bool G4_SendDescLdSt::isAtomic() const
 
 bool G4_SendDescLdSt::isTyped() const
 {
+    if (getSFID() == SFID::TGM)
+        return true;
     return false;
 }
 
 static std::string ToSymbol(vISA::SFID sfid)
 {
     switch (sfid) {
+    case SFID::UGM:  return ".ugm";
+    case SFID::UGML: return ".ugml";
+    case SFID::SLM:  return ".slm";
+    case SFID::TGM:  return ".tgm";
         // these aren't necessarily supported yet
     case SFID::DP_DC0:  return ".dc0";
     case SFID::DP_DC1:  return ".dc1";
@@ -291,6 +333,8 @@ static std::string ToSymbol(AddrType at)
 {
     switch (at) {
     case AddrType::FLAT: return "";
+    case AddrType::BSS:  return "bss";
+    case AddrType::SS:   return "ss";
     case AddrType::BTI:  return "bti";
     default: break;
     }
@@ -351,8 +395,8 @@ G4_SendDescRaw::G4_SendDescRaw(
     uint32_t regs2snd, SFID fID, uint16_t extMsgLen,
     uint32_t extFCtrl, SendAccess access,
     G4_Operand *bti, G4_Operand *sti,
-    IR_Builder& builder)
-    : G4_SendDesc(G4_SendDesc::Kind::RAW, fID)
+    const IR_Builder& builder)
+    : G4_SendDesc(G4_SendDesc::Kind::RAW, fID, builder)
 {
     // All unnamed bits should be passed with those control bits.
     // Otherwise, need to be set individually.
@@ -394,9 +438,10 @@ G4_SendDescRaw::G4_SendDescRaw(
     uint32_t descBits, uint32_t extDescBits,
     SendAccess access,
     G4_Operand *bti,
-    G4_Operand *sti)
+    G4_Operand *sti,
+    const IR_Builder& builder)
     : G4_SendDesc(G4_SendDesc::Kind::RAW,
-        intToSFID(extDescBits & 0xF)), // [3:0]
+        intToSFID(extDescBits & 0xF, builder.getPlatform()), builder), // [3:0]
     accessType(access), m_sti(sti), m_bti(bti), funcCtrlValid(true)
 {
     desc.value = descBits;
@@ -422,9 +467,10 @@ G4_SendDescRaw::G4_SendDescRaw(
     int _src1Len,
     SendAccess access,
     G4_Operand* bti,
-    bool isValidFuncCtrl)
+    bool isValidFuncCtrl,
+    const IR_Builder& builder)
     : G4_SendDescRaw(_sfid, _desc, _extDesc, _src1Len, access, bti,
-                     g4::SIMD_UNDEFINED, isValidFuncCtrl)
+                     g4::SIMD_UNDEFINED, isValidFuncCtrl, builder)
 {}
 
 G4_SendDescRaw::G4_SendDescRaw(
@@ -435,10 +481,22 @@ G4_SendDescRaw::G4_SendDescRaw(
     SendAccess access,
     G4_Operand *bti,
     G4_ExecSize execSize,
-    bool isValidFuncCtrl)
-    : G4_SendDesc(G4_SendDesc::Kind::RAW, _sfid, execSize),
+    bool isValidFuncCtrl,
+    const IR_Builder& builder)
+    : G4_SendDesc(G4_SendDesc::Kind::RAW, _sfid, execSize, builder),
     accessType(access), m_sti(nullptr), m_bti(bti), funcCtrlValid(isValidFuncCtrl)
 {
+    isLscDescriptor =
+        _sfid == SFID::UGM || _sfid == SFID::UGML ||
+        _sfid == SFID::SLM || _sfid == SFID::TGM;
+
+    if (!isLscDescriptor && bti && bti->isImm()) {
+        setBindingTableIdx((unsigned)bti->asImm()->getInt());
+    }
+    // ensure ExDesc[10:6] also holds src1Len
+    // see the note above (other constructor) about DG2 descriptors and
+    // ExDesc[10:6]
+    _extDesc |= ((_src1Len & 0x1F) << 6);
     desc.value = _desc;
     extDesc.value = _extDesc;
     src1Len = _src1Len;
@@ -451,16 +509,70 @@ uint32_t G4_SendDescRaw::getHdcMessageType() const
     return (desc.value >> 14) & 0x1F;
 }
 
+LSC_ADDR_TYPE G4_SendDescRaw::getLscAddrType() const
+{
+    MUST_BE_TRUE(isLscOp(), "must be LSC op");
+    const int LSC_ADDR_TYPE_OFFSET = 29;
+    const uint32_t LSC_ADDR_TYPE_MASK = 0x3;
+    const uint32_t rawDescBits = getDesc();
+    auto addrTypeBits = ((rawDescBits >> LSC_ADDR_TYPE_OFFSET) & LSC_ADDR_TYPE_MASK);
+    return LSC_ADDR_TYPE(addrTypeBits + 1);
+}
+
+int G4_SendDescRaw::getLscAddrSizeBytes() const
+{
+    MUST_BE_TRUE(isLscOp(), "must be LSC op");
+    auto op = getLscOp();
+    switch (op) {
+    case LSC_LOAD:
+    case LSC_LOAD_STRIDED:
+    case LSC_LOAD_QUAD:
+    case LSC_STORE:
+    case LSC_STORE_STRIDED:
+    case LSC_STORE_QUAD:
+        break;
+    case LSC_LOAD_BLOCK2D:
+    case LSC_STORE_BLOCK2D:
+        return getSFID() == SFID::TGM ? 4 : 8;
+    default:
+        if (op < LSC_ATOMIC_IINC && op > LSC_ATOMIC_XOR) {
+            return 0;
+        }
+    }
+    // it's a good op with an AddrType field in [8:7]
+    switch ((getDesc() >> 7) & 0x3) {
+    case 1: return 2;
+    case 2: return 4;
+    case 3: return 8;
+    default: break;
+    }
+    return 0;
+}
+
+LSC_DATA_ORDER G4_SendDescRaw::getLscDataOrder() const
+{
+    MUST_BE_TRUE(isLscOp(), "must be LSC op");
+    auto op = getLscOp();
+    if (op == LSC_LOAD_QUAD || op == LSC_STORE_QUAD)
+        return LSC_DATA_ORDER_NONTRANSPOSE;
+    if ((getDesc() >> 15) & 0x1) {
+        return LSC_DATA_ORDER_TRANSPOSE;
+    } else {
+        return LSC_DATA_ORDER_NONTRANSPOSE;
+    }
+}
 
 
 void G4_SendDescRaw::setEOT() {
     eotAfterMessage = true;
 
+    if (isLscOp())
+        return;
 
     extDesc.layout.eot = true;
 }
 
-static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType)
+static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType, const IR_Builder& irb)
 {
     if (funcID != SFID::DP_DC1)
         return false;
@@ -469,12 +581,12 @@ static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType)
     {
         return true;
     }
-    if (getGenxPlatform() >= GENX_SKL)
+    if (irb.getPlatform() >= GENX_SKL)
     {
         if (msgType == DC1_TYPED_ATOMIC)
             return true;
     }
-    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::XE)
+    if (irb.getPlatformGeneration() >= PlatformGen::XE)
     {
         if (msgType == DC1_TYPED_HALF_INTEGER_ATOMIC ||
             msgType == DC1_TYPED_HALF_COUNTER_ATOMIC ||
@@ -485,18 +597,18 @@ static bool isHdcIntAtomicMessage(SFID funcID, uint16_t msgType)
     return false;
 }
 
-static bool isHdcFloatAtomicMessage(SFID funcID, uint16_t msgType)
+static bool isHdcFloatAtomicMessage(SFID funcID, uint16_t msgType, const IR_Builder& irb)
 {
     if (funcID != SFID::DP_DC1)
         return false;
 
-    if (getGenxPlatform() >= GENX_SKL)
+    if (irb.getPlatform() >= GENX_SKL)
     {
         if (msgType == DC1_UNTYPED_FLOAT_ATOMIC ||
             msgType == DC1_A64_UNTYPED_FLOAT_ATOMIC)
             return true;
     }
-    if (getPlatformGeneration(getGenxPlatform()) >= PlatformGen::XE)
+    if (irb.getPlatformGeneration() >= PlatformGen::XE)
     {
         if (msgType == DC1_UNTYPED_HALF_FLOAT_ATOMIC ||
             msgType == DC1_A64_UNTYPED_HALF_FLOAT_ATOMIC)
@@ -507,13 +619,19 @@ static bool isHdcFloatAtomicMessage(SFID funcID, uint16_t msgType)
 
 bool G4_SendDescRaw::isAtomicMessage() const
 {
+    if (isLscOp() &&
+        (desc.value & 0x3F) >= LSC_ATOMIC_IINC &&
+        (desc.value & 0x3F) <= LSC_ATOMIC_XOR)
+    {
+        return true;
+    }
 
     auto funcID = getSFID();
     if (!isHDC())
         return false; // guard getMessageType() on SFID without a message type
     uint16_t msgType = getHdcMessageType();
-    return isHdcIntAtomicMessage(funcID,msgType) ||
-        isHdcFloatAtomicMessage(funcID,msgType);
+    return isHdcIntAtomicMessage(funcID, msgType, irb) ||
+        isHdcFloatAtomicMessage(funcID, msgType, irb);
 }
 
 uint16_t G4_SendDescRaw::getHdcAtomicOp() const
@@ -521,7 +639,7 @@ uint16_t G4_SendDescRaw::getHdcAtomicOp() const
     MUST_BE_TRUE(isHDC(), "must be HDC message");
     MUST_BE_TRUE(isAtomicMessage(), "getting atomicOp from non-atomic message!");
     uint32_t funcCtrl = getFuncCtrl();
-    if (isHdcIntAtomicMessage(getSFID(), getHdcMessageType()))
+    if (isHdcIntAtomicMessage(getSFID(), getHdcMessageType(), irb))
     {
         // bits: 11:8
         return (uint16_t)((funcCtrl >> 8) & 0xF);
@@ -559,28 +677,44 @@ bool G4_SendDescRaw::isSLMMessage() const
         return true;
     }
 
-    return false;
+    return getSFID() == SFID::SLM;
 }
 
 
 uint16_t G4_SendDescRaw::ResponseLength() const
 {
+    // the loadblock2DArray message may return up to 32 GRF.
+    // Since we don't have enough bits to encode 32, block2d creates an exception where 31 means 31 or 32 (HW detects).
+    // SW must know the actual size is 32 for data-flow/RA/SWSB to function correctly though.
+    // fortunately it doesn't look like 31 is a valid value for this message, we just treat 31 as 32
+    bool isLoadBlock2DArray = isLscOp() && getLscOp() == LSC_LOAD_BLOCK2D;
+    if (desc.layout.rspLength == 31 && isLoadBlock2DArray)
+    {
+        return 32;
+    }
     return desc.layout.rspLength;
 }
 
 
 bool G4_SendDescRaw::isHeaderPresent() const {
+    if (isLscOp())
+        return false;
 
     return desc.layout.headerPresent == 1;
 }
 
 void G4_SendDescRaw::setHeaderPresent(bool val)
 {
+    MUST_BE_TRUE(!isLscOp(), "LSC ops don't have headers");
     desc.layout.headerPresent = val;
 }
 
 void G4_SendDescRaw::setBindingTableIdx(unsigned idx)
 {
+    if (isLscOp()) {
+        extDesc.value |= (idx << 24);
+        return;
+    }
     desc.value |= idx;
 }
 
@@ -592,11 +726,14 @@ uint32_t G4_SendDescRaw::getSamplerMessageType() const
 
 bool G4_SendDescRaw::is16BitInput() const
 {
+    MUST_BE_TRUE(!isLscOp(), "wrong descriptor type for method");
+    // TODO: could use this for LSC messages too potentially
     return desc.layout.simdMode2 == 1;
 }
 
 bool G4_SendDescRaw::is16BitReturn() const
 {
+    MUST_BE_TRUE(!isLscOp(), "wrong descriptor type for method");
     return desc.layout.returnFormat == 1;
 }
 
@@ -1026,6 +1163,19 @@ std::string G4_SendDescRaw::getDescription() const
         }
         break;
     case SFID::CRE: return "cre";
+    case SFID::SLM:
+    case SFID::TGM:
+    case SFID::UGM:
+    case SFID::UGML:
+    {
+        LscOpInfo opInfo { };
+        if (LscOpInfoFind((LSC_OP)(desc.value & 0x3F), opInfo)) { // Desc[5:0]
+            return opInfo.mnemonic;
+        } else {
+            const char* invalid = "lsc (invalid operation)";
+            return invalid;
+        }
+    }
     default: return "--";
     }
     return NULL;
@@ -1033,7 +1183,7 @@ std::string G4_SendDescRaw::getDescription() const
 
 size_t G4_SendDescRaw::getSrc0LenBytes() const
 {
-    return MessageLength() * (size_t)getGRFSize();
+    return MessageLength() * (size_t)irb.getGRFSize();
 }
 
 size_t G4_SendDescRaw::getDstLenBytes() const
@@ -1067,7 +1217,7 @@ size_t G4_SendDescRaw::getDstLenBytes() const
 #endif
     } else {
         // fallback to the raw GRF count
-        return ResponseLength() * (size_t)getGRFSize();
+        return ResponseLength() * (size_t)irb.getGRFSize();
     }
 }
 
@@ -1079,11 +1229,13 @@ size_t G4_SendDescRaw::getSrc1LenBytes() const
     // we could support OW store here, but no one seems to need that and
     // we are phasing this class out; so ignore it for now
 
-    return extMessageLength() * (size_t)getGRFSize();
+    return extMessageLength() * (size_t)irb.getGRFSize();
 }
 
 bool G4_SendDescRaw::isFence() const
 {
+    if (isLscOp())
+        return (desc.value & 0x3F) == LSC_FENCE;
 
     SFID sfid = getSFID();
     unsigned FC = getFuncCtrl();
@@ -1111,15 +1263,130 @@ bool G4_SendDescRaw::isBarrier() const
 
 int G4_SendDescRaw::getOffset() const
 {
+    if (isLscOp()) {
+        MUST_BE_TRUE(false, "need to do some work here...");
+    }
     if (isScratchRW())
         return getScratchRWOffset() * 32;
     return 0;
 }
 
+static Caching cachingToG4(LSC_CACHE_OPT co)
+{
+    switch (co) {
+    case LSC_CACHING_DEFAULT:        return Caching::DF;
+    case LSC_CACHING_CACHED:         return Caching::CA;
+    case LSC_CACHING_READINVALIDATE: return Caching::RI;
+    case LSC_CACHING_WRITEBACK:      return Caching::WB;
+    case LSC_CACHING_UNCACHED:       return Caching::UC;
+    case LSC_CACHING_STREAMING:      return Caching::ST;
+    case LSC_CACHING_WRITETHROUGH:   return Caching::WT;
+    default: break;
+    }
+    return Caching::INVALID;
+}
+
+// decode caching from Desc[19:17]
+static std::pair<Caching,Caching> decodeCaching3(
+    bool isLoad, uint32_t descBits)
+{
+    auto mk = [&](Caching l1IfLd, Caching l3IfLd,
+        Caching l1IfStAt, Caching l3IfStAt)
+    {
+        return isLoad ?
+            std::make_pair(l1IfLd, l3IfLd) :
+            std::make_pair(l1IfStAt, l3IfStAt);
+    };
+
+    // Decode caching field from in [19:17]
+    uint32_t ccBits = (descBits >> 17) & 0x7;
+    switch (ccBits) {
+    case 0: return mk(
+        Caching::DF, Caching::DF,
+        Caching::DF, Caching::DF);
+    case 1: return mk(
+        Caching::UC, Caching::UC,
+        Caching::UC, Caching::UC);
+    case 2: return mk(
+        Caching::UC, Caching::CA,
+        Caching::UC, Caching::WB);
+    case 3: return mk(
+        Caching::CA, Caching::UC,
+        Caching::WT, Caching::UC);
+    case 4: return mk(
+        Caching::CA, Caching::CA,
+        Caching::WT, Caching::WB);
+    case 5: return mk(
+        Caching::ST, Caching::UC,
+        Caching::ST, Caching::UC);
+    case 6: return mk(
+        Caching::ST, Caching::CA,
+        Caching::ST, Caching::WB);
+    case 7: return mk(
+        Caching::RI, Caching::CA,
+        Caching::WB, Caching::WB);
+    }
+    return std::make_pair(Caching::INVALID,Caching::INVALID);
+}
 
 
-Caching G4_SendDescRaw::getCachingL1() const {return Caching::INVALID;}
-Caching G4_SendDescRaw::getCachingL3() const {return Caching::INVALID;}
+std::pair<Caching,Caching> G4_SendDescRaw::getCaching() const {
+    if (!isLscOp()) {
+        return std::make_pair(Caching::INVALID, Caching::INVALID);
+    }
+    const auto opInfo = LscOpInfoGet(getLscOp());
+    if (opInfo.isOther()) {
+        return std::make_pair(Caching::INVALID, Caching::INVALID);
+    }
+
+    auto ccPair =
+        decodeCaching3(opInfo.isLoad(), getDesc());
+    MUST_BE_TRUE(
+        ccPair.first != Caching::INVALID &&
+        ccPair.second != Caching::INVALID,
+        "unexpected invalid caching options (corrupt descriptor?)");
+    return ccPair;
+}
+
+
+static LSC_CACHE_OPT toVisaCachingOpt(Caching c) {
+    switch (c) {
+    case Caching::DF: return LSC_CACHING_DEFAULT;
+    case Caching::UC: return LSC_CACHING_UNCACHED;
+    case Caching::CA: return LSC_CACHING_CACHED;
+    case Caching::WB: return LSC_CACHING_WRITEBACK;
+    case Caching::WT: return LSC_CACHING_WRITETHROUGH;
+    case Caching::ST: return LSC_CACHING_STREAMING;
+    case Caching::RI: return LSC_CACHING_READINVALIDATE;
+    default:
+        MUST_BE_TRUE(false, "invalid cache option");
+        return (LSC_CACHE_OPT)-1;
+    }
+}
+
+void G4_SendDescRaw::setCaching(Caching l1, Caching l3)
+{
+    if (!isLscOp()) {
+        MUST_BE_TRUE(
+            (l1 == Caching::INVALID && l3 == Caching::INVALID) ||
+            (l1 == Caching::DF && l3 == Caching::DF),
+            "invalid caching options for platform*SFID");
+    }
+    const auto opInfo = LscOpInfoGet(getLscOp());
+    MUST_BE_TRUE(!opInfo.isOther(), "invalid LSC message kind for caching op");
+    LSC_CACHE_OPTS visaCopts { };
+    visaCopts.l1 = toVisaCachingOpt(l1);
+    visaCopts.l3 = toVisaCachingOpt(l3);
+
+    uint32_t cacheEnc = 0;
+    uint32_t fieldMask = (0x7 << 17);
+    bool isBits17_19 = true;
+    bool success =
+        LscTryEncodeCacheOpts(opInfo, visaCopts, cacheEnc, isBits17_19);
+    MUST_BE_TRUE(success, "failed to set caching options");
+    desc.value &= ~fieldMask;
+    desc.value |= cacheEnc;
+}
 
 static bool isDc1OpTyped(uint32_t desc)
 {

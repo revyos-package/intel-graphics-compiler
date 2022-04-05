@@ -39,23 +39,6 @@ void VISAVariableLocation::dump() const
     print(llvm::dbgs());
 }
 
-void VISAVariableLocation::print(llvm::raw_ostream &OS,
-                                 const std::vector<VISAVariableLocation> &Locs)
-{
-    IGC_ASSERT(!Locs.empty());
-    if (Locs.size() == 1)
-    {
-        Locs.front().print(OS);
-    }
-    else
-    {
-        for (size_t i = 0; i < Locs.size(); ++i)
-        {
-            OS << "    Loc[" << i << "]";
-            Locs[i].print(OS);
-        }
-    }
-}
 void VISAVariableLocation::print(raw_ostream &OS) const
 {
     OS << "   - VarLoc = { ";
@@ -91,9 +74,17 @@ void VISAVariableLocation::print(raw_ostream &OS) const
             // Simple surface entry
             OS << "Type: SimpleSurface, " << "SurfaceReg: " << m_surfaceReg;
             if (m_isRegister)
+            {
                 OS << ", Offset: [VReg=" << m_locationReg << "]";
+                if (HasLocationSecondReg())
+                {
+                  OS << ", [VReg2=" << m_locationSecondReg << "]";
+                }
+            }
             else
+            {
                 OS << ", Offset: " << m_locationOffset;
+            }
             OS << ", IsMem: " << m_isInMemory;
             OS << ", Vectorized: ";
             if (m_isVectorized)
@@ -154,27 +145,6 @@ void VISAVariableLocation::print(raw_ostream &OS) const
     OS << " }\n";
 }
 
-
-VISAModule::VISAModule(llvm::Function * Entry)
-{
-    m_pEntryFunc = Entry;
-    m_pModule = m_pEntryFunc->getParent();
-}
-
-VISAModule::~VISAModule()
-{
-}
-
-VISAModule::const_iterator VISAModule::begin() const
-{
-    return m_instList.begin();
-}
-
-VISAModule::const_iterator VISAModule::end() const
-{
-    return m_instList.end();
-}
-
 void VISAModule::BeginInstruction(Instruction* pInst)
 {
     IGC_ASSERT_MESSAGE(!m_instInfoMap.count(pInst), "Instruction emitted twice!");
@@ -230,92 +200,24 @@ unsigned int VISAModule::GetVisaSize(const llvm::Instruction* pInst) const
     return itr->second.m_size;
 }
 
-void VISAModule::GetConstantData(const Constant* pConstVal, DataVector& rawData) const
-{
-    if (dyn_cast<ConstantPointerNull>(pConstVal))
-    {
-        DataLayout DL(GetDataLayout());
-        rawData.insert(rawData.end(), DL.getPointerSize(), 0);
-    }
-    else if (const ConstantDataSequential * cds = dyn_cast<ConstantDataSequential>(pConstVal))
-    {
-        for (unsigned i = 0; i < cds->getNumElements(); i++) {
-            GetConstantData(cds->getElementAsConstant(i), rawData);
-        }
-    }
-    else if (const ConstantAggregateZero * cag = dyn_cast<ConstantAggregateZero>(pConstVal))
-    {
-        // Zero aggregates are filled with, well, zeroes.
-        DataLayout DL(GetDataLayout());
-        const unsigned int zeroSize = (unsigned int)(DL.getTypeAllocSize(cag->getType()));
-        rawData.insert(rawData.end(), zeroSize, 0);
-    }
-    // If this is an sequential type which is not a CDS or zero, have to collect the values
-    // element by element. Note that this is not exclusive with the two cases above, so the
-    // order of ifs is meaningful.
-    else if (
-        pConstVal->getType()->isVectorTy() ||
-        pConstVal->getType()->isArrayTy() ||
-        pConstVal->getType()->isStructTy())
-    {
-        const int numElts = pConstVal->getNumOperands();
-        for (int i = 0; i < numElts; ++i)
-        {
-            Constant* C = pConstVal->getAggregateElement(i);
-            IGC_ASSERT_MESSAGE(C, "getAggregateElement returned null, unsupported constant");
-            // Since the type may not be primitive, extra alignment is required.
-            GetConstantData(C, rawData);
-        }
-    }
-    // And, finally, we have to handle base types - ints and floats.
-    else
-    {
-        APInt intVal(32, 0, false);
-        if (const ConstantInt * ci = dyn_cast<ConstantInt>(pConstVal))
-        {
-            intVal = ci->getValue();
-        }
-        else if (const ConstantFP * cfp = dyn_cast<ConstantFP>(pConstVal))
-        {
-            intVal = cfp->getValueAPF().bitcastToAPInt();
-        }
-        else if (const UndefValue* undefVal = dyn_cast<UndefValue>(pConstVal))
-        {
-            // use zero instead of undef value
-        }
-        else
-        {
-            IGC_ASSERT_MESSAGE(0, "Unsupported constant type");
-        }
-
-        const int bitWidth = intVal.getBitWidth();
-        IGC_ASSERT_MESSAGE((0 < bitWidth), "Unsupported bitwidth");
-        IGC_ASSERT_MESSAGE((bitWidth % 8 == 0), "Unsupported bitwidth");
-        IGC_ASSERT_MESSAGE((bitWidth <= 64), "Unsupported bitwidth");
-
-        const uint64_t* val = intVal.getRawData();
-        rawData.insert(rawData.end(), (char*)val, ((char*)val) + (bitWidth / 8));
-    }
-}
-
 const Module* VISAModule::GetModule() const
 {
-    return m_pModule;
+    return m_Func->getParent();
 }
 
 const Function* VISAModule::GetEntryFunction() const
 {
-    return m_pEntryFunc;
+    return m_Func;
 }
 
 const LLVMContext& VISAModule::GetContext() const
 {
-    return m_pModule->getContext();
+    return GetModule()->getContext();
 }
 
 const std::string VISAModule::GetDataLayout() const
 {
-    return m_pModule->getDataLayout().getStringRepresentation();
+    return GetModule()->getDataLayout().getStringRepresentation();
 }
 
 const std::string& VISAModule::GetTargetTriple() const
@@ -531,16 +433,12 @@ void VISAModule::coalesceRanges(std::vector<std::pair<unsigned int, unsigned int
         }
     }
 
-
-    for (auto it = GenISARange.begin(); it != GenISARange.end();)
-    {
-        if ((*it).first == (unsigned int)-1 && (*it).second == (unsigned int)-1)
-        {
-            it = GenISARange.erase(it);
-            continue;
-        }
-        it++;
-    }
+    GenISARange.erase(
+        std::remove_if(GenISARange.begin(), GenISARange.end(),
+                        [](const auto& Range) {
+                            return Range.first == -1 && Range.second == -1;
+                        }),
+        GenISARange.end());
 }
 
 template<class ContainerType, class BinaryFunction>
@@ -677,30 +575,36 @@ std::vector<std::pair<unsigned int, unsigned int>> VISAModule::getGenISARange(co
 
     return std::move(GenISARange);
 }
-bool VISAModule::getVarInfo(const IGC::DbgDecoder& VD, std::string prefix, unsigned int vreg, DbgDecoder::VarInfo& var) const
+
+const DbgDecoder::VarInfo*
+VISAModule::getVarInfo(const IGC::DbgDecoder& VD, unsigned int vreg) const
 {
-    std::string name = prefix + std::to_string(vreg);
-    if (VirToPhyMap.size() == 0)
+    auto& Cache = *VICache.get();
+    if (Cache.empty())
     {
-        // populate map one time
         const auto* co = getCompileUnit(VD);
-        if (co)
+        if (!co)
+            return nullptr;
+        for (const auto& VarInfo : co->Vars)
         {
-            for (auto& v : co->Vars)
+            StringRef Name = VarInfo.name;
+            // TODO: what to do with variables starting with "T"?
+            if (Name.startswith("V"))
             {
-                VirToPhyMap.insert(std::make_pair(v.name, v));
+                Name = Name.drop_front();
+                unsigned RegNum = 0;
+                if (!Name.getAsInteger(10, RegNum))
+                    Cache.insert(std::make_pair(RegNum, &VarInfo));
             }
         }
     }
 
-    auto it = VirToPhyMap.find(name);
-    if (it == VirToPhyMap.end())
-        return false;
-
-    var = (*it).second;
-    // Note: vISA variables can be optimized out,
-    // In such case we'll end up with an empty live range
-    return !var.lrs.empty();
+    auto FoundIt = Cache.find(vreg);
+    if (FoundIt == Cache.end())
+        return nullptr;
+    if (FoundIt->second->lrs.empty())
+        return nullptr;
+    return FoundIt->second;
 }
 
 bool VISAModule::hasOrIsStackCall(const IGC::DbgDecoder& VD) const
@@ -728,11 +632,11 @@ VISAModule::getSubroutines(const IGC::DbgDecoder& VD) const
 const DbgDecoder::DbgInfoFormat*
 VISAModule::getCompileUnit(const IGC::DbgDecoder& VD) const
 {
+    auto EntryFuncName = m_Func->getName();
+    EntryFuncName = GetVISAFuncName(EntryFuncName);
+
     for (const auto& co : VD.compiledObjs)
     {
-        auto EntryFuncName = m_pEntryFunc->getName();
-        EntryFuncName = GetVISAFuncName(EntryFuncName);
-
         if (VD.compiledObjs.size() == 1 ||
             co.kernelName.compare(EntryFuncName.str()) == 0)
         {

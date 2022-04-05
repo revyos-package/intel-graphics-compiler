@@ -24,13 +24,14 @@ SPDX-License-Identifier: MIT
 /// this pass knows nothing about it.
 //===----------------------------------------------------------------------===//
 
+#include "vc/BiF/PrintfIface.h"
 #include "vc/GenXOpts/GenXOpts.h"
+#include "vc/Support/BackendConfig.h"
+#include "vc/Support/GenXDiagnostic.h"
 #include "vc/Utils/GenX/Printf.h"
 #include "vc/Utils/General/BiF.h"
-
-#include "vc/BiF/PrintfIface.h"
-#include "vc/BiF/Tools.h"
-#include "vc/Support/BackendConfig.h"
+#include "vc/Utils/General/IRBuilder.h"
+#include "vc/Utils/General/Types.h"
 
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/iterator_range.h>
@@ -45,6 +46,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/Support/ErrorHandling.h>
 
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Operator.h"
 
 #include <algorithm>
 #include <functional>
@@ -57,15 +59,28 @@ using namespace vc;
 using namespace vc::bif::printf;
 
 namespace PrintfImplFunc {
-enum Enum { Init, Fmt, FmtLegacy, Arg, ArgStr, ArgStrLegacy, Ret, Size };
-static constexpr const char *Name[Size] = {
-    "__vc_printf_init", "__vc_printf_fmt",     "__vc_printf_fmt_legacy",
-    "__vc_printf_arg",  "__vc_printf_arg_str", "__vc_printf_arg_str_legacy",
-    "__vc_printf_ret"};
+enum Enum {
+  Init,
+  Fmt,
+  FmtGlobal,
+  FmtLegacy,
+  Arg,
+  ArgStr,
+  ArgStrGlobal,
+  ArgStrLegacy,
+  Ret,
+  Size
+};
+static constexpr const char *Name[Size] = {"__vc_printf_init",
+                                           "__vc_printf_fmt",
+                                           "__vc_printf_fmt_global",
+                                           "__vc_printf_fmt_legacy",
+                                           "__vc_printf_arg",
+                                           "__vc_printf_arg_str",
+                                           "__vc_printf_arg_str_global",
+                                           "__vc_printf_arg_str_legacy",
+                                           "__vc_printf_ret"};
 } // namespace PrintfImplFunc
-
-static constexpr int FormatStringAddrSpace = 2;
-static constexpr int LegacyFormatStringAddrSpace = 0;
 
 namespace {
 class GenXPrintfResolution final : public ModulePass {
@@ -93,6 +108,10 @@ private:
   CallInst &createPrintfArgStrCall(CallInst &OrigPrintf, CallInst &PrevCall,
                                    Value &Arg);
   CallInst &createPrintfRetCall(CallInst &OrigPrintf, CallInst &PrevCall);
+
+  template <PrintfImplFunc::Enum DefaulDeclID>
+  CallInst &createCallWithStringArg(CallInst &OrigPrintf, Value &StrArg,
+                                    Value &AuxArg);
 };
 } // namespace
 
@@ -145,12 +164,36 @@ static std::vector<CallInstRef> collectWorkload(Module &M) {
   return Workload;
 }
 
+// \p Workload must be a range of objects convertible to CallInst &. The range
+// must not be empty. The set of called by \p Workload elements functions is
+// returned. For the most case there should be only one printf declaration.
+// Though considering that some frontends tend to place strings in different
+// address spaces and that SPIR-V level linking is possible there may be cases
+// where more that one printf declaration is present.
+template <typename Range>
+static SmallPtrSet<Function *, 1> getPrintfDeclarations(const Range &Workload) {
+  IGC_ASSERT_MESSAGE(Workload.begin() != Workload.end(),
+                     "wrong argument: the input range must not be empty");
+  SmallPtrSet<Function *, 1> Declarations;
+  for (CallInst &CI : Workload)
+    Declarations.insert(CI.getCalledFunction());
+  IGC_ASSERT_MESSAGE(!Declarations.empty(),
+                     "must be at least 1 printf declaration");
+  IGC_ASSERT_MESSAGE(
+      llvm::all_of(Declarations,
+                   [](Function *F) { return F && F->isDeclaration(); }),
+      "printf must be a declaration");
+  return Declarations;
+}
+
 bool GenXPrintfResolution::runOnModule(Module &M) {
   DL = &M.getDataLayout();
 
   std::vector<CallInstRef> Workload = collectWorkload(M);
   if (Workload.empty())
     return false;
+  auto PrintfDecls = getPrintfDeclarations(Workload);
+
   addPrintfImplDeclarations(M);
   for (CallInst &CI : Workload)
     handlePrintfCall(CI);
@@ -164,6 +207,12 @@ bool GenXPrintfResolution::runOnModule(Module &M) {
   }
   updatePrintfImplDeclarations(M);
   preparePrintfImplForInlining();
+
+  IGC_ASSERT_MESSAGE(
+      llvm::all_of(PrintfDecls, [](Function *F) { return F->use_empty(); }),
+      "no users of printf function must be left");
+  for (Function *PrintfDecl : PrintfDecls)
+    PrintfDecl->eraseFromParent();
   return true;
 }
 
@@ -171,10 +220,7 @@ std::unique_ptr<Module> GenXPrintfResolution::getBiFModule(LLVMContext &Ctx) {
   MemoryBufferRef PrintfBiFModuleBuffer =
       getAnalysis<GenXBackendConfig>().getBiFModule(BiFKind::VCPrintf);
   if (!PrintfBiFModuleBuffer.getBufferSize()) {
-    IGC_ASSERT_MESSAGE(
-        vc::bif::disabled(),
-        "printf bif module can be empty only if vc bif was disabled");
-    report_fatal_error("printf implementation module is absent");
+    IGC_ASSERT_MESSAGE(0, "printf implementation module is absent");
   }
   return vc::getBiFModuleOrReportError(PrintfBiFModuleBuffer, Ctx);
 }
@@ -191,9 +237,55 @@ static std::pair<int, PrintfArgInfoSeq>
 analyzeFormatString(const Value &FmtStrOp) {
   auto FmtStr = getConstStringFromOperandOptional(FmtStrOp);
   if (!FmtStr)
-    report_fatal_error(
-        "printf resolution cannot access format string during compile time");
+    diagnose(FmtStrOp.getContext(), "GenXPrintfResolution",
+             PrintfStringAccessError);
   return {FmtStr.getValue().size() + 1, parseFormatString(FmtStr.getValue())};
+}
+
+// Marks strings passed as "%s" arguments in printf.
+// Recursive function, long instruction chains aren't expected.
+static void markStringArgument(Value &Arg) {
+  if (isa<GEPOperator>(Arg)) {
+    auto *String = getConstStringGVFromOperandOptional(Arg);
+    if (!String)
+      diagnose(Arg.getContext(), "GenXPrintfResolution",
+               PrintfStringAccessError);
+    String->addAttribute(PrintfStringVariable);
+    return;
+  }
+  if (isa<SelectInst>(Arg)) {
+    auto &SI = cast<SelectInst>(Arg);
+    // The same value can be potentially accessed by different paths. Though
+    // it is probably OK, since the same string can be marked several times
+    // and the most of the time cases would be simple so it is not that
+    // critical to pass same values several times in some rare complicated
+    // cases.
+    markStringArgument(*SI.getFalseValue());
+    markStringArgument(*SI.getTrueValue());
+    return;
+  }
+  if (isCastToGenericAS(Arg))
+    return markStringArgument(
+        *cast<IGCLLVM::AddrSpaceCastOperator>(Arg).getPointerOperand());
+  // An unsupported instruction or instruction sequence was met.
+  diagnose(Arg.getContext(), "GenXPrintfResolution", PrintfStringAccessError);
+}
+
+// Marks printf strings: format strings, strings passed as "%s" arguments.
+static void markPrintfStrings(CallInst &OrigPrintf,
+                              const PrintfArgInfoSeq &ArgsInfo) {
+  auto &FormatString =
+      getConstStringGVFromOperand(*OrigPrintf.getArgOperand(0));
+  FormatString.addAttribute(PrintfStringVariable);
+
+  // Handle string arguments (%s).
+  auto StringArgs = make_filter_range(
+      zip(drop_begin(OrigPrintf.args(), 1), ArgsInfo), [](auto &&ArgWithInfo) {
+        return std::get<const PrintfArgInfo &>(ArgWithInfo).Type ==
+               PrintfArgInfo::String;
+      });
+  for (auto &&[Arg, ArgInfo] : StringArgs)
+    markStringArgument(*Arg.get());
 }
 
 void GenXPrintfResolution::handlePrintfCall(CallInst &OrigPrintf) {
@@ -201,7 +293,10 @@ void GenXPrintfResolution::handlePrintfCall(CallInst &OrigPrintf) {
   auto [FmtStrSize, ArgsInfo] =
       analyzeFormatString(*OrigPrintf.getArgOperand(0));
   if (ArgsInfo.size() != OrigPrintf.getNumArgOperands() - 1)
-    report_fatal_error("printf format string and arguments don't correspond");
+    diagnose(OrigPrintf.getContext(), "GenXPrintfResolution",
+             "printf format string and arguments don't correspond");
+
+  markPrintfStrings(OrigPrintf, ArgsInfo);
 
   auto &InitCall = createPrintfInitCall(OrigPrintf, FmtStrSize, ArgsInfo);
   auto &FmtCall = createPrintfFmtCall(OrigPrintf, InitCall);
@@ -236,20 +331,26 @@ static PrintfImplTypeStorage getPrintfImplTypes(LLVMContext &Ctx) {
   PrintfImplTypeStorage FuncTys;
   FuncTys[PrintfImplFunc::Init] =
       FunctionType::get(TransferDataTy, ArgsInfoTy, IsVarArg);
-  FuncTys[PrintfImplFunc::Fmt] = FunctionType::get(
-      TransferDataTy,
-      {TransferDataTy,
-       PointerType::get(Type::getInt8Ty(Ctx), FormatStringAddrSpace)},
-      IsVarArg);
-  FuncTys[PrintfImplFunc::FmtLegacy] = FunctionType::get(
-      TransferDataTy,
-      {TransferDataTy,
-       PointerType::get(Type::getInt8Ty(Ctx), LegacyFormatStringAddrSpace)},
-      IsVarArg);
+  FuncTys[PrintfImplFunc::Fmt] =
+      FunctionType::get(TransferDataTy,
+                        {TransferDataTy, PointerType::get(Type::getInt8Ty(Ctx),
+                                                          AddrSpace::Constant)},
+                        IsVarArg);
+  FuncTys[PrintfImplFunc::FmtGlobal] =
+      FunctionType::get(TransferDataTy,
+                        {TransferDataTy, PointerType::get(Type::getInt8Ty(Ctx),
+                                                          AddrSpace::Global)},
+                        IsVarArg);
+  FuncTys[PrintfImplFunc::FmtLegacy] =
+      FunctionType::get(TransferDataTy,
+                        {TransferDataTy, PointerType::get(Type::getInt8Ty(Ctx),
+                                                          AddrSpace::Private)},
+                        IsVarArg);
   FuncTys[PrintfImplFunc::Arg] = FunctionType::get(
       TransferDataTy, {TransferDataTy, Type::getInt32Ty(Ctx), ArgDataTy},
       IsVarArg);
   FuncTys[PrintfImplFunc::ArgStr] = FuncTys[PrintfImplFunc::Fmt];
+  FuncTys[PrintfImplFunc::ArgStrGlobal] = FuncTys[PrintfImplFunc::FmtGlobal];
   FuncTys[PrintfImplFunc::ArgStrLegacy] = FuncTys[PrintfImplFunc::FmtLegacy];
   FuncTys[PrintfImplFunc::Ret] =
       FunctionType::get(Type::getInt32Ty(Ctx), TransferDataTy, IsVarArg);
@@ -325,21 +426,107 @@ CallInst &GenXPrintfResolution::createPrintfInitCall(
                          OrigPrintf.getName() + ".printf.init");
 }
 
-CallInst &GenXPrintfResolution::createPrintfFmtCall(CallInst &OrigPrintf,
-                                                    CallInst &InitCall) {
+template <PrintfImplFunc::Enum DefaulDeclID, unsigned StrAS>
+static PrintfImplFunc::Enum mutateDeclIDImpl();
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::Fmt, AddrSpace::Constant>() {
+  return PrintfImplFunc::Fmt;
+}
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::Fmt, AddrSpace::Global>() {
+  return PrintfImplFunc::FmtGlobal;
+}
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::Fmt, AddrSpace::Private>() {
+  return PrintfImplFunc::FmtLegacy;
+}
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::ArgStr, AddrSpace::Constant>() {
+  return PrintfImplFunc::ArgStr;
+}
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::ArgStr, AddrSpace::Global>() {
+  return PrintfImplFunc::ArgStrGlobal;
+}
+
+template <>
+PrintfImplFunc::Enum
+mutateDeclIDImpl<PrintfImplFunc::ArgStr, AddrSpace::Private>() {
+  return PrintfImplFunc::ArgStrLegacy;
+}
+
+// Transforms the provided declaration ID depending on the string address space
+// \p StrAS. Only PrintfImplFunc::Fmt and PrintfImplFunc::ArgStr can be passed
+// as \p DefaulDeclID.
+template <PrintfImplFunc::Enum DefaulDeclID>
+static PrintfImplFunc::Enum mutateDeclID(unsigned StrAS) {
+  switch (StrAS) {
+  default:
+    IGC_ASSERT_MESSAGE(0, "unexpected address space for a string argument");
+  case AddrSpace::Constant:
+    return mutateDeclIDImpl<DefaulDeclID, AddrSpace::Constant>();
+  case AddrSpace::Global:
+    return mutateDeclIDImpl<DefaulDeclID, AddrSpace::Global>();
+  case AddrSpace::Private:
+    return mutateDeclIDImpl<DefaulDeclID, AddrSpace::Private>();
+  }
+}
+
+// If \p StrArg is a generic pointer this function returns the resolved
+// pointer - a non-generic pointer to the same object generic pointer was
+// pointing to. When \p StrArg is already an non-generic pointer it is returned
+// unchanged.
+// \p StrArg must have a i8 pointer type.
+static Value &resolveStringInGenericASIf(Value &StrArg) {
+  auto StrAS = StrArg.getType()->getPointerAddressSpace();
+  if (StrAS != AddrSpace::Generic)
+    return StrArg;
+  auto *GV = getConstStringGVFromOperandOptional(StrArg);
+  if (!GV)
+    // FIXME: String marking should already exclude too entangled string
+    //        accesses. Though it is still possible to have series of switch
+    //        instructions mixed with addrspace casts. This case is not
+    //        supported here, but the string marking won't exclude it.
+    //        Select instructions should be supported for consistancy.
+    diagnose(StrArg.getContext(), "GenXPrintfResolution", &StrArg,
+             "The pass cannot resolve generic address space "
+             "to access the provided string");
+  return castArrayToFirstElemPtr(*GV);
+}
+
+// Common interface to generate call for format string or "%s" string argument
+// handler.
+// PrintfImplFunc::Fmt should be provided in template parameter to handle format
+// string, PrintfImplFunc::ArgStr - for "%s" argument. Only those 2 declaration
+// IDs can be passed. The function itself will consider string address space and
+// mutate the provided declaration ID.
+template <PrintfImplFunc::Enum DefaulDeclID>
+CallInst &GenXPrintfResolution::createCallWithStringArg(CallInst &OrigPrintf,
+                                                        Value &StrArg,
+                                                        Value &AuxArg) {
   assertPrintfCall(OrigPrintf);
   IRBuilder<> IRB{&OrigPrintf};
-  auto FmtAS =
-      cast<PointerType>(OrigPrintf.getOperand(0)->getType())->getAddressSpace();
-  if (FmtAS == FormatStringAddrSpace)
-    return *IRB.CreateCall(PrintfImplDecl[PrintfImplFunc::Fmt],
-                           {&InitCall, OrigPrintf.getOperand(0)},
-                           OrigPrintf.getName() + ".printf.fmt");
-  IGC_ASSERT_MESSAGE(FmtAS == LegacyFormatStringAddrSpace,
-                     "unexpected address space for format string");
-  return *IRB.CreateCall(PrintfImplDecl[PrintfImplFunc::FmtLegacy],
-                         {&InitCall, OrigPrintf.getOperand(0)},
-                         OrigPrintf.getName() + ".printf.fmt");
+  auto &ResolvedStrArg = resolveStringInGenericASIf(StrArg);
+  auto StrAS = ResolvedStrArg.getType()->getPointerAddressSpace();
+  PrintfImplFunc::Enum DeclID = mutateDeclID<DefaulDeclID>(StrAS);
+  return *IRB.CreateCall(PrintfImplDecl[DeclID], {&AuxArg, &ResolvedStrArg},
+                         OrigPrintf.getName() + ".printf.str.arg");
+}
+
+CallInst &GenXPrintfResolution::createPrintfFmtCall(CallInst &OrigPrintf,
+                                                    CallInst &InitCall) {
+  return createCallWithStringArg<PrintfImplFunc::Fmt>(
+      OrigPrintf, *OrigPrintf.getOperand(0), InitCall);
 }
 
 static ArgKind::Enum getIntegerArgKind(Type &ArgTy) {
@@ -467,18 +654,8 @@ static Value &getArgAsVector(Value &Arg, IRBuilder<> &IRB,
 CallInst &GenXPrintfResolution::createPrintfArgStrCall(CallInst &OrigPrintf,
                                                        CallInst &PrevCall,
                                                        Value &Arg) {
-  assertPrintfCall(OrigPrintf);
-  IRBuilder<> IRB{&OrigPrintf};
-  auto StrAS = cast<PointerType>(Arg.getType())->getAddressSpace();
-  if (StrAS == FormatStringAddrSpace)
-    return *IRB.CreateCall(PrintfImplDecl[PrintfImplFunc::ArgStr],
-                           {&PrevCall, &Arg},
-                           OrigPrintf.getName() + ".printf.arg");
-  IGC_ASSERT_MESSAGE(StrAS == LegacyFormatStringAddrSpace,
-                     "unexpected address space for a string argument");
-  return *IRB.CreateCall(PrintfImplDecl[PrintfImplFunc::ArgStrLegacy],
-                         {&PrevCall, &Arg},
-                         OrigPrintf.getName() + ".printf.arg");
+  return createCallWithStringArg<PrintfImplFunc::ArgStr>(OrigPrintf, Arg,
+                                                         PrevCall);
 }
 
 CallInst &GenXPrintfResolution::createPrintfArgCall(CallInst &OrigPrintf,

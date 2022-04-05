@@ -85,8 +85,8 @@ SPDX-License-Identifier: MIT
 #include "GenXConstants.h"
 #include "GenXGotoJoin.h"
 #include "GenXIntrinsics.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
+
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/BasicBlock.h"
@@ -113,9 +113,10 @@ using namespace genx;
 /***********************************************************************
  * loadConstantStruct : insert instructions to load a constant struct
  */
-static Value *loadConstantStruct(Constant *C, Instruction *InsertBefore,
-                                 const GenXSubtarget &Subtarget,
-                                 const DataLayout &DL) {
+static Value *loadConstantStruct(
+    Constant *C, Instruction *InsertPt, const GenXSubtarget &Subtarget,
+    const DataLayout &DL,
+    SmallVectorImpl<Instruction *> *AddedInstructions = nullptr) {
   auto ST = cast<StructType>(C->getType());
   Value *Agg = UndefValue::get(ST);
   for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i) {
@@ -124,10 +125,17 @@ static Value *loadConstantStruct(Constant *C, Instruction *InsertBefore,
       continue;
     Value *LoadedEl = nullptr;
     if (isa<StructType>(El->getType()))
-      LoadedEl = loadConstantStruct(El, InsertBefore, Subtarget, DL);
-    else
-      LoadedEl = ConstantLoader(El, Subtarget, DL).load(InsertBefore);
-    Agg = InsertValueInst::Create(Agg, LoadedEl, i, "loadstruct", InsertBefore);
+      LoadedEl =
+          loadConstantStruct(El, InsertPt, Subtarget, DL, AddedInstructions);
+    else {
+      LoadedEl = ConstantLoader(El, Subtarget, DL, nullptr, AddedInstructions)
+                     .loadBig(InsertPt);
+    }
+    auto *InsertInst =
+        InsertValueInst::Create(Agg, LoadedEl, i, "loadstruct", InsertPt);
+    Agg = InsertInst;
+    if (AddedInstructions)
+      AddedInstructions->push_back(InsertInst);
   }
   return Agg;
 }
@@ -155,7 +163,7 @@ bool genx::loadNonSimpleConstants(
   auto CI = dyn_cast<CallInst>(Inst);
   if (CI)
     NumArgs = CI->getNumArgOperands();
-  unsigned IID = GenXIntrinsic::getAnyIntrinsicID(Inst);
+  unsigned IID = vc::getAnyIntrinsicID(Inst);
   // Do not proceed loading of genx.alloca argument since its value doesn't
   // needed (only type matters) and always null.
   if (IID == GenXIntrinsic::genx_alloca)
@@ -170,8 +178,15 @@ bool genx::loadNonSimpleConstants(
         continue;
       if (opMustBeConstant(Inst, i))
         continue;
+      if (C->getType()->isStructTy()) {
+        *U = loadConstantStruct(C, Inst, Subtarget, DL, AddedInstructions);
+        Modified = true;
+        continue;
+      }
+
       ConstantLoader CL(C, Subtarget, DL, Inst, AddedInstructions);
       if (CL.needFixingSimple()) {
+        Modified = true;
         CL.fixSimple(i);
         continue;
       }
@@ -306,8 +321,10 @@ bool genx::loadConstants(Instruction *Inst, const GenXSubtarget &Subtarget,
     if (Ret->getNumOperands() && Ret->getParent()->getParent()->getLinkage()
           == GlobalValue::InternalLinkage) {
       if (auto C = dyn_cast<Constant>(Ret->getOperand(0))) {
-        if (!C->getType()->isVoidTy())
+        if (!C->getType()->isVoidTy() && !isa<UndefValue>(C)) {
           Ret->setOperand(0, ConstantLoader(C, Subtarget, DL).load(Ret));
+          Modified = true;
+        }
       }
     }
     return Modified;
@@ -317,7 +334,7 @@ bool genx::loadConstants(Instruction *Inst, const GenXSubtarget &Subtarget,
     return Modified;
   if (CI->isInlineAsm())
     return loadConstantsForInlineAsm(CI, Subtarget, DL, nullptr);
-  int IntrinsicID = GenXIntrinsic::getAnyIntrinsicID(CI);
+  int IntrinsicID = vc::getAnyIntrinsicID(CI);
   switch (IntrinsicID) {
     case GenXIntrinsic::not_any_intrinsic:
     case Intrinsic::fma:
@@ -436,8 +453,7 @@ bool genx::loadConstants(Instruction *Inst, const GenXSubtarget &Subtarget,
       if (II.isNull())
         return Modified;
       unsigned MaxRawOperands = II.getTrailingNullZoneStart(CI);
-      for (GenXIntrinsicInfo::iterator i = II.begin(), e = II.end(); i != e; ++i) {
-        GenXIntrinsicInfo::ArgInfo AI = *i;
+      for (auto AI : II.getInstDesc()) {
         if (!AI.isArgOrRet() || AI.isRet())
           continue;
         // This field relates to an operand.
@@ -576,7 +592,7 @@ bool genx::cleanupConstantLoads(Function *F) {
     auto *CI = dyn_cast<CallInst>(&*I++);
     if (!CI)
       continue;
-    auto IID = GenXIntrinsic::getAnyIntrinsicID(CI);
+    auto IID = vc::getAnyIntrinsicID(CI);
     if (IID != GenXIntrinsic::genx_constanti &&
         IID != GenXIntrinsic::genx_constantf &&
         IID != GenXIntrinsic::genx_constantpred)
@@ -773,7 +789,7 @@ bool genx::loadPhiConstants(Function &F, DominatorTree *DT,
         Value *Load = nullptr;
         Instruction *InsertBefore = InsertBB->getTerminator();
         if (!CL.isSimple())
-          Load = CL.loadNonSimple(InsertBefore);
+          Load = CL.loadBig(InsertBefore);
         else
           Load = CL.load(InsertBefore);
         Modified = true;
@@ -852,6 +868,7 @@ bool genx::isReplicatedConstantVector(
 }
 
 void ConstantLoader::fixSimple(int OperandIdx) {
+  IGC_ASSERT_MESSAGE(User, "user must be provided");
   IGC_ASSERT_MESSAGE(NewC, "no need to fix simple case");
   IGC_ASSERT_MESSAGE(User->getOperand(OperandIdx) == C,
     "wrong arguments: wrong operand index was provided");
@@ -870,8 +887,7 @@ void ConstantLoader::fixSimple(int OperandIdx) {
  *
  * Return:  new instruction
  */
-Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
-{
+Instruction *ConstantLoader::loadNonSimple(Instruction *Inst) {
   IGC_ASSERT(!isSimple());
   if (!isLegalSize())
     return loadBig(Inst);
@@ -1153,8 +1169,7 @@ Instruction *ConstantLoader::loadNonSimple(Instruction *Inst)
  *          maximizing how many of NeededBits are set
  */
 unsigned ConstantLoader::getRegionBits(unsigned NeededBits,
-    unsigned OptionalBits, unsigned VecWidth)
-{
+    unsigned OptionalBits, unsigned VecWidth) {
   if (!NeededBits)
     return 0;
   // Get the first and last element numbers in NeededBits.
@@ -1257,8 +1272,7 @@ Instruction *ConstantLoader::loadSplatConstant(Instruction *InsertPos) {
  *
  * Return:  new instruction
  */
-Instruction *ConstantLoader::load(Instruction *InsertBefore)
-{
+Instruction *ConstantLoader::load(Instruction *InsertBefore) {
   IGC_ASSERT(isSimple());
   // Do not splat load on byte data as HW does not support byte imm source.
   if (!C->getType()->getScalarType()->isIntegerTy(8))
@@ -1335,8 +1349,7 @@ Instruction *ConstantLoader::loadNonPackedIntConst(Instruction *InsertBefore) {
  * ConstantLoader::loadBig : insert instruction to load a constant that might
  *      be illegally sized
  */
-Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
-{
+Instruction *ConstantLoader::loadBig(Instruction *InsertBefore) {
   if (isLegalSize() || isa<UndefValue>(C)) {
     // Does not need legalizing.
     if (!isSimple())
@@ -1359,7 +1372,7 @@ Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
   }
   auto VT = cast<IGCLLVM::FixedVectorType>(C->getType());
   const unsigned NumElements = VT->getNumElements();
-  const unsigned GRFWidthInBits = Subtarget.getGRFWidth() * genx::ByteBits;
+  const unsigned GRFWidthInBits = Subtarget.getGRFByteSize() * genx::ByteBits;
   const unsigned ElementBits = DL.getTypeSizeInBits(VT->getElementType());
   unsigned MaxSize = 2 * GRFWidthInBits / ElementBits;
   MaxSize = std::min(MaxSize, 32U);
@@ -1388,15 +1401,14 @@ Instruction *ConstantLoader::loadBig(Instruction *InsertBefore)
 /***********************************************************************
  * ConstantLoader::isLegalSize : detect if a constant is a legal size
  */
-bool ConstantLoader::isLegalSize()
-{
+bool ConstantLoader::isLegalSize() const {
   auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return true;
-  const int NumBits = DL.getTypeSizeInBits(C->getType());
+  const int NumBits = DL.getTypeSizeInBits(VT);
   if (!llvm::isPowerOf2_32(NumBits))
     return false;
-  const int GRFSizeInBits = Subtarget.getGRFWidth() * genx::ByteBits;
+  const int GRFSizeInBits = Subtarget.getGRFByteSize() * genx::ByteBits;
   if (NumBits > GRFSizeInBits * 2)
     return false; // bigger than 2 GRFs
   if (VT->getNumElements() > 32)
@@ -1411,8 +1423,7 @@ bool ConstantLoader::isLegalSize()
  * This does not do a thorough check so it misses some cases of a constant
  * that would split into simple constants.
  */
-bool ConstantLoader::isBigSimple()
-{
+bool ConstantLoader::isBigSimple() const {
   IGC_ASSERT_MESSAGE(!needFixingSimple(),
     "simple case shall be fixed first before this call");
   if (isa<UndefValue>(C))
@@ -1432,8 +1443,7 @@ bool ConstantLoader::isBigSimple()
  *
  * A simple constant is one we know can be a constant operand in an instruction.
  */
-bool ConstantLoader::isSimple()
-{
+bool ConstantLoader::isSimple() const {
   IGC_ASSERT_MESSAGE(!needFixingSimple(),
     "simple case shall be fixed first before this call");
   if (isa<UndefValue>(C))
@@ -1459,14 +1469,15 @@ bool ConstantLoader::isSimple()
 bool ConstantLoader::allowI64Ops() const {
   if (!Subtarget.hasLongLong())
     return false;
+  if (Subtarget.partialI64Emulation())
+    return false;
   return true;
 }
 /***********************************************************************
  * ConstantLoader::isPackedIntVector : check for a packed int vector
  *    (having already done the analysis in the ConstantLoader constructor)
  */
-bool ConstantLoader::isPackedIntVector()
-{
+bool ConstantLoader::isPackedIntVector() const {
   // Check for a packed int vector. Either the element type must be i16, or
   // the user (instruction using the constant) must be genx.constanti or
   // wrregion or wrconstregion. Not allowed if the user is a logic op.
@@ -1498,7 +1509,7 @@ bool ConstantLoader::isPackedIntVector()
  * ConstantLoader::isPackedFloatVector : check for a packed float vector
  *    (having already done the analysis in the ConstantLoader constructor)
  */
-bool ConstantLoader::isPackedFloatVector() {
+bool ConstantLoader::isPackedFloatVector() const {
   auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return false;
@@ -1514,8 +1525,7 @@ bool ConstantLoader::isPackedFloatVector() {
  * A "consolidated constant" is one where a vector of byte or short is
  * turned into the equivalent (as if by bitcast) vector of int.
  */
-Constant *ConstantLoader::getConsolidatedConstant(Constant *C)
-{
+Constant *ConstantLoader::getConsolidatedConstant(Constant *C) {
   if (isa<UndefValue>(C))
     return nullptr;
   auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
@@ -1573,8 +1583,7 @@ Constant *ConstantLoader::getConsolidatedConstant(Constant *C)
  * (integer 8 or fp 4) can be loaded as a packed vector, possibly scaled
  * and adjusted.
  */
-void ConstantLoader::analyze()
-{
+void ConstantLoader::analyze() {
   auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(C->getType());
   if (!VT)
     return;
@@ -1582,10 +1591,10 @@ void ConstantLoader::analyze()
     return; // don't analyze if already a splat
   unsigned NumElements = VT->getNumElements();
   if (VT->getElementType()->isIntegerTy()) {
-    unsigned MaxSize = 2 * Subtarget.getGRFWidth(); // element type is boolean
+    unsigned MaxSize = 2 * Subtarget.getGRFByteSize(); // element type is boolean
     if (!VT->getElementType()->isIntegerTy(1)) {
       unsigned ElmSz = VT->getScalarSizeInBits() / genx::ByteBits;
-      MaxSize = 2 * Subtarget.getGRFWidth() / ElmSz;
+      MaxSize = 2 * Subtarget.getGRFByteSize() / ElmSz;
     }
     if (NumElements <= MaxSize)
       analyzeForPackedInt(NumElements);
@@ -1593,8 +1602,7 @@ void ConstantLoader::analyze()
     analyzeForPackedFloat(NumElements);
 }
 
-void ConstantLoader::analyzeForPackedInt(unsigned NumElements)
-{
+void ConstantLoader::analyzeForPackedInt(unsigned NumElements) {
   // Get element values.
   int64_t Min = INT64_MAX;
   int64_t Max = INT64_MIN;
@@ -1741,6 +1749,9 @@ static bool is8bitPackedFloat(float f) {
 }
 
 void ConstantLoader::analyzeForPackedFloat(unsigned NumElements) {
+  if (!Subtarget.hasPackedFloat())
+    return;
+
   for (unsigned i = 0; i != NumElements; ++i) {
     auto Elt = C->getAggregateElement(i);
     if (isa<UndefValue>(Elt))

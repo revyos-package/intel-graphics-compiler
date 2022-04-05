@@ -14,7 +14,7 @@ SPDX-License-Identifier: MIT
 
 namespace vISA
 {
-    RPE::RPE(const GlobalRA& g, const LivenessAnalysis* l) : m(1024), gra(g), liveAnalysis(l), live(l->getNumSelectedVar(), false),
+    RPE::RPE(const GlobalRA& g, const LivenessAnalysis* l) : m(1024), gra(g), liveAnalysis(l), live(l->getNumSelectedVar()),
         vars(l->vars)
     {
         options = g.kernel.getOptions();
@@ -112,11 +112,11 @@ namespace vISA
                 {
                     // make every var in points-to set live
                     const REGVAR_VECTOR& pointsToSet = liveAnalysis->getPointsToAnalysis().getAllInPointsToOrIndrUse(src, bb);
-                    for (auto var : pointsToSet)
+                    for (auto pt : pointsToSet)
                     {
-                        if (var->isRegAllocPartaker())
+                        if (pt.var->isRegAllocPartaker())
                         {
-                            updateLiveness(live, var->getId(), true);
+                            updateLiveness(live, pt.var->getId(), true);
                         }
                     }
                 }
@@ -134,9 +134,8 @@ namespace vISA
         // for each. For scalar variables, add them up separately.
         regPressure = 0;
         unsigned int numScalars = 0;
-        for (unsigned int i = 0, size = live.getSize(); i < size; i++)
-        {
-            if (live.isSet(i))
+        for (auto LI = live.begin(), LE = live.end(); LI != LE; ++LI) {
+            unsigned i = *LI;
             {
                 auto range = vars[i];
                 G4_Declare* rootDcl = range->getDeclare()->getRootDeclare();
@@ -154,7 +153,7 @@ namespace vISA
         regPressure += numScalars / 8.0;
     }
 
-    void RPE::updateLiveness(BitSet& live, uint32_t id, bool val)
+    void RPE::updateLiveness(SparseBitSet& live, uint32_t id, bool val)
     {
         auto oldVal = live.getElt(id / NUM_BITS_PER_ELT);
         live.set(id, val);
@@ -172,13 +171,13 @@ namespace vISA
             // Alternative is to simply take the alignment as the size, but it might cause performance regressions
             // due to being too conservative (i.e., a GRF-aligned variable may share physical GRF with several other
             auto dclSize = vars[id]->getDeclare()->getByteSize();
-            if (dclSize < getGRFSize() && dclSize < static_cast<uint32_t>(vars[id]->getDeclare()->getSubRegAlign()) * 2)
+            if (dclSize < gra.builder.getGRFSize() && dclSize < static_cast<uint32_t>(vars[id]->getDeclare()->getSubRegAlign()) * 2)
             {
                 dclSize *= 2;
             }
 
-            double delta = dclSize < getGRFSize() ?
-                dclSize / (double) getGRFSize() : (double) vars[id]->getDeclare()->getNumRows();
+            double delta = dclSize < gra.builder.getGRFSize() ?
+                dclSize / (double) gra.builder.getGRFSize() : (double) vars[id]->getDeclare()->getNumRows();
             if (before & change)
             {
                 if (regPressure < delta)

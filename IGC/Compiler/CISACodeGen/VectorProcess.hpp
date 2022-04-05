@@ -35,6 +35,9 @@ namespace IGC
             MESSAGE_A32_BYTE_SCATTERED_RW,
             MESSAGE_A64_UNTYPED_SURFACE_RW,
             MESSAGE_A64_SCATTERED_RW,
+            MESSAGE_A32_QWORD_SCATTERED_RW,
+            MESSAGE_A32_LSC_RW,
+            MESSAGE_A64_LSC_RW
         };
 
         // VECMESSAGEINFO_MAX_LEN:
@@ -49,6 +52,8 @@ namespace IGC
             // SKL+
             // Exception
             //    BDW : use A64_BYTE_SCATTERED_MAX_BYTES_8B
+            //    TGL : no 8DW scattered message.
+            //          use A64_SCATTERED_MAX_BYTES_4DW
             A32_UNTYPED_MAX_BYTES = 16,
             A32_BYTE_SCATTERED_MAX_BYTES = 4,
             A64_UNTYPED_MAX_BYTES = 16,
@@ -56,6 +61,10 @@ namespace IGC
             A64_SCATTERED_MAX_BYTES_4DW = 16,
             A64_BYTE_SCATTERED_MAX_BYTES_8B = 8,
             A64_BYTE_SCATTERED_MAX_BYTES = 4,
+            A32_A64_BYTE_LSC_LOAD_STORE_MAX_BYTES_SIMD32 = 16,
+            A32_A64_BYTE_LSC_LOAD_STORE_MAX_BYTES_SIMD16 = 32,
+            A32_A64_BYTE_LSC_LOAD_STORE_MAX_BYTES = 64,
+            A32_A64_DATA_SIZE_LSC_LOAD_STORE_MAX_BYTES = 64
         };
 
         // Calculated by getInfo().
@@ -74,6 +83,7 @@ namespace IGC
             bool forceByteScatteredRW = false);
 
 
+        void getLSCInfo(llvm::Type* Ty, uint32_t Align, CodeGenContext* ctx, bool useA32, bool transpose);
 
     private:
         const EmitPass* m_emitter;

@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT
 
 #include "G4_IR.hpp"
 #include "FlowGraph.h"
+#include "PlatformInfo.h"
 #include "RelocationEntry.hpp"
 #include "include/gtpin_IGC_interface.h"
 
@@ -93,18 +94,27 @@ public:
     void* getFreeGRFInfo(unsigned& size);
     void  setGTPinInit(void* buffer);
 
+    // This function internally mallocs memory to hold buffer
+    // of indirect references. It is meant to be freed by caller
+    // after last use of buffer.
+    void* getIndirRefs(unsigned int& size);
+
     gtpin::igc::igc_init_t* getGTPinInit() { return gtpin_init; }
 
     // return igc_info_t format buffer. caller casts it to igc_info_t.
     void* getGTPinInfoBuffer(unsigned &bufferSize);
 
-    void setScratchNextFree(unsigned next) {
-        nextScratchFree = ((next + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>()) * numEltPerGRF<Type_UB>();
-    }
+    void setScratchNextFree(unsigned next);
+
     uint32_t getNumBytesScratchUse() const;
 
     void setGTPinInitFromL0(bool val) { gtpinInitFromL0 = val; }
     bool isGTPinInitFromL0() const { return gtpinInitFromL0; }
+
+    void addIndirRef(G4_Declare* addr, G4_Declare* target)
+    {
+        indirRefs[addr].push_back(target);
+    }
 
 private:
     G4_Kernel& kernel;
@@ -119,6 +129,9 @@ private:
 
     bool gtpinInitFromL0 = false;
     gtpin::igc::igc_init_t* gtpin_init = nullptr;
+
+    // Store Addr Var -> Array of targets
+    std::unordered_map<G4_Declare*, std::vector<G4_Declare*>> indirRefs;
 }; // class gtPinData
 
 class G4_BB;
@@ -126,12 +139,27 @@ class KernelDebugInfo;
 class VarSplitPass;
 
 
+// NoMask WA info : about WA applied in a BB.
+class NoMaskWA_info_t
+{
+public:
+    G4_INST* Inst_kill;        // (W) pseudoKill p  2
+    G4_INST* Inst_save;        // (W) mov (1|M0)  t  P
+    G4_INST* WAFlag_mov0;      // (W) mov (1|M0)  P  0
+    G4_INST* WAFlag_cmp;       //     cmp (simdsize|M0)  r0.0:uw r0.0:uw
+    G4_INST* WAFlag_allOne;    // (W&P.anyh) mov  P  0xFFFFFFFF
+    G4_INST* Inst_restore;     // (W) mov (1|M0)  P  t
+    // G4_INST* WAFlag_spill;  // (W) mov (1|M0)  DW1  P  [used by postRA]
+    G4_INST* getWAFlagDefInst() const { return WAFlag_allOne ? WAFlag_allOne : WAFlag_cmp; }
+};
+
 class G4_Kernel
 {
 public:
     using RelocationTableTy = std::vector<RelocationEntry>;
 
 private:
+    const PlatformInfo& platformInfo;
     const char* name;
     unsigned numRegTotal;
     unsigned numThreads;
@@ -181,17 +209,34 @@ private:
     // There's two entires prolog for setting FFID for compute shaders.
     G4_BB* computeFFIDGP = nullptr;
     G4_BB* computeFFIDGP1 = nullptr;
+
+    // For debug purpose: kernel is local-scheduled or not according to options.
+    bool isLocalSchedulable = true;
 public:
     FlowGraph              fg;
     DECLARE_LIST           Declares;
+    DECLARE_LIST           callerRestoreDecls;
 
     unsigned char major_version;
     unsigned char minor_version;
 
-    G4_Kernel(INST_LIST_NODE_ALLOCATOR& alloc,
+    G4_Kernel(const PlatformInfo& pInfo, INST_LIST_NODE_ALLOCATOR& alloc,
         Mem_Manager& m, Options* options, Attributes* anAttr,
         unsigned char major, unsigned char minor);
     ~G4_Kernel();
+
+    TARGET_PLATFORM getPlatform() const {return platformInfo.platform;}
+    PlatformGen getPlatformGeneration() const {return platformInfo.family;}
+    const char* getGenxPlatformString() const {return platformInfo.getGenxPlatformString();}
+    unsigned char getGRFSize() const {return platformInfo.grfSize;}
+    template <G4_Type T>
+    unsigned numEltPerGRF() const {return platformInfo.numEltPerGRF<T>();}
+    unsigned numEltPerGRF(G4_Type t) const {return platformInfo.numEltPerGRF(t);}
+    unsigned getMaxVariableSize() const {return platformInfo.getMaxVariableSize();}
+    G4_SubReg_Align getGRFAlign() const {return platformInfo.getGRFAlign();}
+    G4_SubReg_Align getHalfGRFAlign() const {return platformInfo.getHalfGRFAlign();}
+    unsigned getGenxDataportIOSize() const {return platformInfo.getGenxDataportIOSize();}
+    unsigned getGenxSamplerIOSize() const {return platformInfo.getGenxSamplerIOSize();}
 
     void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
 
@@ -322,6 +367,7 @@ public:
 
     // dumps .dot files (if enabled) and .g4 (if enabled)
     void dumpToFile(const std::string &suffix);
+    void dumpToFile(char* file) {dumpToFile(std::string(file));}
 
     void emitDeviceAsm(std::ostream& output, const void * binary, uint32_t binarySize);
 
@@ -329,8 +375,10 @@ public:
     void emitRegInfoKernel(std::ostream& output);
 
     bool hasPerThreadPayloadBB() const { return perThreadPayloadBB != nullptr; }
+    G4_BB* getPerThreadPayloadBB() const { return perThreadPayloadBB; }
     void setPerThreadPayloadBB(G4_BB* bb) { perThreadPayloadBB = bb; }
     bool hasCrossThreadPayloadBB() const { return crossThreadPayloadBB != nullptr; }
+    G4_BB* getCrossThreadPayloadBB() const { return crossThreadPayloadBB; }
     void setCrossThreadPayloadBB(G4_BB* bb) { crossThreadPayloadBB = bb; }
     bool hasComputeFFIDProlog() const {
         return computeFFIDGP != nullptr && computeFFIDGP1 != nullptr;
@@ -342,6 +390,9 @@ public:
     unsigned getPerThreadNextOff() const;
     unsigned getComputeFFIDGPNextOff() const;
     unsigned getComputeFFIDGP1NextOff() const;
+
+    bool isLocalSheduleable() const { return isLocalSchedulable; }
+    void setLocalSheduleable(bool value) { isLocalSchedulable = value; }
 
 private:
     G4_BB* getNextBB(G4_BB* bb) const;
@@ -357,6 +408,66 @@ private:
     void emitDeviceAsmHeaderComment(std::ostream& os);
     void emitDeviceAsmInstructionsIga(std::ostream& os, const void * binary, uint32_t binarySize);
     void emitDeviceAsmInstructionsOldAsm(std::ostream& os);
+
+    // WA related
+private:
+    // NoMaskWA under EU Fusion
+    //   PreRA WA creates WA flag and applies WA. This map keeps info around.
+    //   storage used will be freed after postRA WA is done.
+    std::unordered_map<G4_BB*, NoMaskWA_info_t*> m_noMaskWAInfo;
+public:
+    void addNoMaskWAInfo(G4_BB* aBB,
+        G4_INST* aInstKill, G4_INST* aInstSave, G4_INST* aInstRestore,
+        G4_INST* aWAFlag_mov0, G4_INST* aWAFlag_cmp, G4_INST* aWAFlag_allOne)
+    {
+        NoMaskWA_info_t* pinfo = new NoMaskWA_info_t();
+        pinfo->Inst_kill = aInstKill;
+        pinfo->Inst_save = aInstSave;
+        pinfo->WAFlag_mov0 = aWAFlag_mov0;
+        pinfo->WAFlag_cmp = aWAFlag_cmp;
+        pinfo->WAFlag_allOne = aWAFlag_allOne;
+        pinfo->Inst_restore = aInstRestore;
+        //pinfo->WAFlag_spill = nullptr;
+        m_noMaskWAInfo.insert(std::make_pair(aBB, pinfo));
+    }
+    NoMaskWA_info_t* getNoMaskWAInfo(G4_BB* BB) const
+    {
+        auto iter = m_noMaskWAInfo.find(BB);
+        return iter != m_noMaskWAInfo.end() ? iter->second : nullptr;
+    }
+    void clearNoMaskInfo()
+    {
+        for (auto iter : m_noMaskWAInfo)
+        {
+            NoMaskWA_info_t* pinfo = iter.second;
+            delete pinfo;
+        }
+        m_noMaskWAInfo.clear();
+    }
+
+    // Call WA under EU fusion
+    //     add  v10  -ip,  v20                    // ip_start_inst
+    //     add  v11   v10, 0x33 (-label_patch)    // patch inst
+    //     ...
+    //     call v11                               // ip_end_inst
+    // This map keeps  patch inst --> <ip_start_inst, ip_end_inst>
+    // Once encoding is decided, label_path = IP(ip_end_inst) - IP(ip_start_inst)
+    //
+    // m_labelPatchInsts: keep the info described above
+    // m_instToBBs:  convenient map to BBs that those insts belong to
+    // m_waCallInsts: call insts whose targets should be defined outside the smallEU branch.
+    // m_maskOffWAInsts: insts whose MaskOff needs to be changed for this WA.
+    std::unordered_map<G4_INST*, std::pair<G4_INST*, G4_INST*>> m_labelPatchInsts;
+    std::unordered_map<G4_INST*, G4_BB*> m_instToBBs;
+    std::list<G4_INST*> m_waCallInsts;
+    std::unordered_map <G4_INST*, G4_BB*> m_maskOffWAInsts;
+    void setMaskOffset(G4_INST* I, G4_InstOption MO) {
+        // For call WA
+        assert((I->getMaskOffset() + I->getExecSize()) <= 16);
+        assert(I->getPredicate() == nullptr && I->getCondMod() == nullptr);
+        I->setMaskOption(MO);
+    }
+    // end of WA related
 
 }; // G4_Kernel
 }

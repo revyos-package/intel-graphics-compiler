@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -23,6 +23,7 @@ void MappingTraits<zeInfoContainer>::mapping(IO& io, zeInfoContainer& info)
 {
     io.mapRequired("version", info.version);
     io.mapRequired("kernels", info.kernels);
+    io.mapOptional("global_host_access_table", info.global_host_access_table, HostAccessesTy());
 }
 void MappingTraits<zeInfoKernel>::mapping(IO& io, zeInfoKernel& info)
 {
@@ -47,6 +48,9 @@ void MappingTraits<zeInfoExecutionEnv>::mapping(IO& io, zeInfoExecutionEnv& info
     io.mapOptional("has_global_atomics", info.has_global_atomics, false);
     io.mapOptional("has_multi_scratch_spaces", info.has_multi_scratch_spaces, false);
     io.mapOptional("has_no_stateless_write", info.has_no_stateless_write, false);
+    io.mapOptional("has_stack_calls", info.has_stack_calls, false);
+    io.mapOptional("require_disable_eufusion", info.require_disable_eufusion, false);
+    io.mapOptional("inline_data_payload_size", info.inline_data_payload_size, 0);
     io.mapOptional("offset_to_skip_per_thread_data_load", info.offset_to_skip_per_thread_data_load, 0);
     io.mapOptional("offset_to_skip_set_ffid_gp", info.offset_to_skip_set_ffid_gp, 0);
     io.mapOptional("required_sub_group_size", info.required_sub_group_size, 0);
@@ -54,6 +58,7 @@ void MappingTraits<zeInfoExecutionEnv>::mapping(IO& io, zeInfoExecutionEnv& info
     io.mapRequired("simd_size", info.simd_size);
     io.mapOptional("slm_size", info.slm_size, 0);
     io.mapOptional("subgroup_independent_forward_progress", info.subgroup_independent_forward_progress, false);
+    io.mapOptional("thread_scheduling_mode", info.thread_scheduling_mode, std::string());
     io.mapOptional("work_group_walk_order_dimensions", info.work_group_walk_order_dimensions);
 }
 void MappingTraits<zeInfoPayloadArgument>::mapping(IO& io, zeInfoPayloadArgument& info)
@@ -66,6 +71,7 @@ void MappingTraits<zeInfoPayloadArgument>::mapping(IO& io, zeInfoPayloadArgument
     io.mapOptional("addrspace", info.addrspace, std::string());
     io.mapOptional("access_type", info.access_type, std::string());
     io.mapOptional("sampler_index", info.sampler_index, -1);
+    io.mapOptional("source_offset", info.source_offset, -1);
 }
 void MappingTraits<zeInfoPerThreadPayloadArgument>::mapping(IO& io, zeInfoPerThreadPayloadArgument& info)
 {
@@ -96,4 +102,9 @@ void MappingTraits<zeInfoDebugEnv>::mapping(IO& io, zeInfoDebugEnv& info)
 {
     io.mapOptional("sip_surface_bti", info.sip_surface_bti, -1);
     io.mapOptional("sip_surface_offset", info.sip_surface_offset, -1);
+}
+void MappingTraits<zeInfoHostAccess>::mapping(IO& io, zeInfoHostAccess& info)
+{
+    io.mapRequired("device_name", info.device_name);
+    io.mapRequired("host_name", info.host_name);
 }

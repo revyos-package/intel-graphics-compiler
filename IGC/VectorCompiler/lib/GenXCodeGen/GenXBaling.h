@@ -215,8 +215,10 @@ SPDX-License-Identifier: MIT
 #include "FunctionGroup.h"
 #include "GenX.h"
 #include "GenXAlignmentInfo.h"
-#include "GenXRegion.h"
 #include "GenXSubtarget.h"
+
+#include "vc/Utils/GenX/Region.h"
+
 #include "IgnoreRAUWValueMap.h"
 #include "Probe/Assertion.h"
 #include "llvm/ADT/Hashing.h"
@@ -370,7 +372,7 @@ class GenXBaling {
   typedef llvm::ValueMap<const Value*, genx::BaleInfo,
                          IgnoreRAUWValueMapConfig<const Value *>>
       InstMap_t;
-  GenXSubtarget *ST;
+  const GenXSubtarget *ST;
   InstMap_t InstMap;
   struct NeedClone {
     Instruction *Inst;
@@ -386,14 +388,13 @@ class GenXBaling {
   SmallVector<CallInst *, 4> TwoAddrSends;
 protected:
   BalingKind Kind;
-  DominatorTree *DT;
+  const DominatorTree *DT;
   GenXLiveness *Liveness; // only in group baling
 public:
   genx::AlignmentInfo AlignInfo;
 public:
-  explicit GenXBaling(BalingKind BKind, GenXSubtarget *Subtarget)
-      : Kind(BKind), ST(Subtarget),
-        Liveness(nullptr), DT(nullptr) {}
+  explicit GenXBaling(BalingKind BKind, const GenXSubtarget *Subtarget)
+      : Kind(BKind), ST(Subtarget), Liveness(nullptr), DT(nullptr) {}
   // clear : clear out the analysis
   void clear() { InstMap.clear(); }
   // processFunction : process one Function
@@ -409,13 +410,13 @@ public:
   void setBaleInfo(const Instruction *Inst, genx::BaleInfo BI);
   // isBaled : test whether all uses of an instruction would be baled in to
   // users
-  bool isBaled(Instruction *Inst) { return getBaleParent(Inst); }
+  bool isBaled(const Instruction *Inst) const { return getBaleParent(Inst); }
   // getBaleParent : return the instruction baled into, 0 if none
-  Instruction *getBaleParent(Instruction *Inst);
+  Instruction *getBaleParent(const Instruction *Inst) const;
   // unbale : unbale an instruction from its bale parent
   void unbale(Instruction *Inst);
   // getBaleHead : return the head of the bale containing this instruction
-  Instruction *getBaleHead(Instruction *Inst);
+  Instruction *getBaleHead(Instruction *Inst) const;
   // buildBale : build Bale from head instruction. B assumed empty on entry
   void buildBale(Instruction *Inst, genx::Bale *B, bool IncludeAddr = false) const;
   // store : store updated BaleInfo for Instruction (used to unbale by
@@ -437,7 +438,7 @@ public:
   static bool isBalableIndexOr(Value *V);
   // isBalableNewValueIntoWrr: check whether the new val operand can
   // be baled into wrr instruction
-  bool isBalableNewValueIntoWrr(Value *V, const genx::Region &WrrR);
+  bool isBalableNewValueIntoWrr(Value *V, const Region &WrrR);
 
   static bool isHighCostBaling(uint16_t Type, Instruction *Inst);
   // Debug dump/print
@@ -455,6 +456,7 @@ private:
   bool processPredicate(Instruction *Inst, unsigned OperandNum);
   void processSat(Instruction *Inst);
   void processRdRegion(Instruction *Inst);
+  void processRdPredRegion(Instruction *Inst);
   void processInlineAsm(Instruction *Inst);
   void processExtractValue(ExtractValueInst *EV);
   void processFuncPointer(Instruction *Inst);
@@ -474,7 +476,7 @@ private:
   bool operandCanBeBaled(Instruction *Inst, unsigned OperandNum, int ModType,
                          unsigned ArgInfoBits);
 
-  bool  isRegionOKForIntrinsic(unsigned ArgInfoBits, const genx::Region &R,
+  bool  isRegionOKForIntrinsic(unsigned ArgInfoBits, const Region &R,
                          bool CanSplitBale);
   bool isSafeToMove(Instruction *Op, Instruction *From, Instruction *To);
 
@@ -488,7 +490,8 @@ private:
 class GenXFuncBaling : public FunctionPass, public GenXBaling {
 public:
   static char ID;
-  explicit GenXFuncBaling(BalingKind Kind = BalingKind::BK_Legalization, GenXSubtarget *ST = nullptr)
+  explicit GenXFuncBaling(BalingKind Kind = BalingKind::BK_Legalization,
+                          const GenXSubtarget *ST = nullptr)
       : FunctionPass(ID), GenXBaling(Kind, ST) {}
   StringRef getPassName() const override {
     return "GenX instruction baling analysis for a function";
@@ -514,26 +517,24 @@ void initializeGenXFuncBalingPass(PassRegistry &);
 //----------------------------------------------------------------------
 // The GenXGroupBaling analysis pass
 // (used for the second baling just before GenXLiveRanges)
-class GenXGroupBaling : public FunctionGroupPass, public GenXBaling {
+class GenXGroupBaling : public FGPassImplInterface,
+                        public IDMixin<GenXGroupBaling>,
+                        public GenXBaling {
 public:
-  static char ID;
-  explicit GenXGroupBaling(BalingKind Kind = BalingKind::BK_Legalization, GenXSubtarget *ST = nullptr)
-      : FunctionGroupPass(ID), GenXBaling(Kind, ST) {}
-  StringRef getPassName() const override {
+  explicit GenXGroupBaling(BalingKind Kind = BalingKind::BK_Legalization,
+                           const GenXSubtarget *ST = nullptr)
+      : GenXBaling(Kind, ST) {}
+  static StringRef getPassName() {
     return "GenX instruction baling analysis for a function group";
   }
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  void releaseMemory() override { clear(); }
+  static void getAnalysisUsage(AnalysisUsage &AU);
   bool runOnFunctionGroup(FunctionGroup &FG) override;
-  // createPrinterPass : get a pass to print the IR, together with the GenX
-  // specific analyses
-  Pass *createPrinterPass(raw_ostream &O,
-                          const std::string &Banner) const override {
-    return createGenXGroupPrinterPass(O, Banner);
-  }
   // processFunctionGroup : process all the Functions in a FunctionGroup
   bool processFunctionGroup(FunctionGroup *FG);
 };
-void initializeGenXGroupBalingPass(PassRegistry &);
+void initializeGenXGroupBalingWrapperPass(PassRegistry &);
+using GenXGroupBalingWrapper = FunctionGroupWrapperPass<GenXGroupBaling>;
 
 } // end namespace llvm
 

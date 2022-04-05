@@ -389,54 +389,57 @@ public:
 
 class SPIRVMemoryAccess {
 public:
-  SPIRVMemoryAccess(const std::vector<SPIRVWord> &TheMemoryAccess):
-    TheMemoryAccessMask(0), Alignment(0), AliasInstID(0) {
+  SPIRVMemoryAccess(const std::vector<SPIRVWord>& TheMemoryAccess)
+    : TheMemoryAccessMask(0), Alignment(0), AliasScopeInstID(0),
+      NoAliasInstID(0) {
     MemoryAccessUpdate(TheMemoryAccess);
   }
 
-  SPIRVMemoryAccess() : TheMemoryAccessMask(0), Alignment(0), AliasInstID(0) {}
+  SPIRVMemoryAccess()
+    : TheMemoryAccessMask(0), Alignment(0), AliasScopeInstID(0),
+      NoAliasInstID(0) {}
 
   void MemoryAccessUpdate(const std::vector<SPIRVWord> &MemoryAccess) {
     if (!MemoryAccess.size())
       return;
-    IGC_ASSERT_MESSAGE((MemoryAccess.size() == 1 || MemoryAccess.size() == 2 ||
-        MemoryAccess.size() == 3), "Invalid memory access operand size");
+    IGC_ASSERT_MESSAGE(MemoryAccess.size() > 0, "Invalid memory access operand size");
+    IGC_ASSERT_MESSAGE(MemoryAccess.size() < 5, "Invalid memory access operand size");
     TheMemoryAccessMask = MemoryAccess[0];
     size_t MemAccessNumParam = 1;
     if (MemoryAccess[0] & MemoryAccessAlignedMask) {
-        IGC_ASSERT_MESSAGE(MemoryAccess.size() > 1, "Alignment operand is missing");
-        Alignment = MemoryAccess[MemAccessNumParam++];
+      IGC_ASSERT_MESSAGE(MemoryAccess.size() > 1, "Alignment operand is missing");
+      Alignment = MemoryAccess[MemAccessNumParam++];
     }
     if (MemoryAccess[0] & MemoryAccessAliasScopeINTELMask) {
-        IGC_ASSERT_MESSAGE(MemoryAccess.size() > MemAccessNumParam,
-            "Aliasing operand is missing");
-        IGC_ASSERT_MESSAGE(!(MemoryAccess[0] & MemoryAccessNoAliasINTELMask),
-            "AliasScopeINTELMask and NoAliasINTELMask are mutually exclusive");
-        AliasInstID = MemoryAccess[MemAccessNumParam];
+      IGC_ASSERT_MESSAGE(MemoryAccess.size() > MemAccessNumParam,
+        "Aliasing operand is missing");
+      AliasScopeInstID = MemoryAccess[MemAccessNumParam++];
     }
-    else if (MemoryAccess[0] & MemoryAccessNoAliasINTELMask) {
-        IGC_ASSERT_MESSAGE(MemoryAccess.size() > MemAccessNumParam,
-            "Aliasing operand is missing");
-        AliasInstID = MemoryAccess[MemAccessNumParam];
+    if (MemoryAccess[0] & MemoryAccessNoAliasINTELMask) {
+      IGC_ASSERT_MESSAGE(MemoryAccess.size() > MemAccessNumParam,
+        "Aliasing operand is missing");
+      NoAliasInstID = MemoryAccess[MemAccessNumParam];
     }
   }
 
   SPIRVWord isVolatile() const { return getMemoryAccessMask() & MemoryAccessVolatileMask; }
   SPIRVWord isNonTemporal() const { return getMemoryAccessMask() & MemoryAccessNontemporalMask; }
   SPIRVWord isAliasScope() const {
-      return getMemoryAccessMask() & MemoryAccessAliasScopeINTELMask;
+    return getMemoryAccessMask() & MemoryAccessAliasScopeINTELMask;
   }
   SPIRVWord isNoAlias() const {
-      return getMemoryAccessMask() & MemoryAccessNoAliasINTELMask;
+    return getMemoryAccessMask() & MemoryAccessNoAliasINTELMask;
   }
   SPIRVWord getMemoryAccessMask() const { return TheMemoryAccessMask; }
   SPIRVWord getAlignment() const { return Alignment; }
-  SPIRVWord getAliasing() const { return AliasInstID; }
+  SPIRVWord getAliasScopeInstID() const { return AliasScopeInstID; }
+  SPIRVWord getNoAliasInstID() const { return NoAliasInstID; }
 
 protected:
   SPIRVWord TheMemoryAccessMask;
   SPIRVWord Alignment;
-  SPIRVId AliasInstID;
+  SPIRVId AliasScopeInstID;
+  SPIRVId NoAliasInstID;
 };
 
 class SPIRVVariable : public SPIRVInstruction {
@@ -1055,6 +1058,7 @@ _SPIRV_OP(All)
 _SPIRV_OP(ConvertFToBF16INTEL)
 _SPIRV_OP(ConvertBF16ToFINTEL)
 _SPIRV_OP(ArithmeticFenceINTEL)
+_SPIRV_OP(BitReverse)
 #undef _SPIRV_OP
 
 class SPIRVAccessChainBase :public SPIRVInstTemplateBase {
@@ -1495,7 +1499,8 @@ protected:
     SPIRVInstruction::validate();
     if (getValue(VectorId)->isForward())
       return;
-    IGC_ASSERT(getValueType(VectorId)->isTypeVector());
+    IGC_ASSERT(getValueType(VectorId)->isTypeVector()
+        || getValue(VectorId)->getType()->getOpCode() == OpTypeJointMatrixINTEL);
   }
   SPIRVId VectorId;
   SPIRVId IndexId;
@@ -1517,7 +1522,8 @@ protected:
     SPIRVInstruction::validate();
     if (getValue(VectorId)->isForward())
       return;
-    IGC_ASSERT(getValueType(VectorId)->isTypeVector());
+    IGC_ASSERT(getValueType(VectorId)->isTypeVector()
+        || getValue(VectorId)->getType()->getOpCode() == OpTypeJointMatrixINTEL);
   }
   SPIRVId VectorId;
   SPIRVId IndexId;
@@ -1715,6 +1721,15 @@ _SPIRV_OP(GroupSMin, true, 6, false, 1)
 _SPIRV_OP(GroupFMax, true, 6, false, 1)
 _SPIRV_OP(GroupUMax, true, 6, false, 1)
 _SPIRV_OP(GroupSMax, true, 6, false, 1)
+// SPV_KHR_uniform_group_instructions
+_SPIRV_OP(GroupIMul, true, 6, false, 1)
+_SPIRV_OP(GroupFMul, true, 6, false, 1)
+_SPIRV_OP(GroupBitwiseAnd, true, 6, false, 1)
+_SPIRV_OP(GroupBitwiseOr, true, 6, false, 1)
+_SPIRV_OP(GroupBitwiseXor, true, 6, false, 1)
+_SPIRV_OP(GroupLogicalAnd, true, 6, false, 1)
+_SPIRV_OP(GroupLogicalOr, true, 6, false, 1)
+_SPIRV_OP(GroupLogicalXor, true, 6, false, 1)
 _SPIRV_OP(GroupReserveReadPipePackets, true, 8)
 _SPIRV_OP(GroupReserveWritePipePackets, true, 8)
 _SPIRV_OP(GroupCommitReadPipe, false, 6)
@@ -1893,9 +1908,10 @@ _SPIRV_OP(MemoryNamedBarrier, false /*HasId*/, 4 /*WC*/, false /*VariWC*/)
       SPIRV##x;
 _SPIRV_OP(MemoryBarrier, false /*HasId*/, 3 /*WC*/, false /*VariWC*/)
 _SPIRV_OP(ControlBarrier, false /*HasId*/, 4 /*WC*/, false /*VariWC*/)
+_SPIRV_OP(ControlBarrierArriveINTEL, false /*HasId*/, 4 /*WC*/, false /*VariWC*/)
+_SPIRV_OP(ControlBarrierWaitINTEL, false /*HasId*/, 4 /*WC*/, false /*VariWC*/)
 _SPIRV_OP(UMulExtended, true, 5)
 _SPIRV_OP(SMulExtended, true, 5)
-_SPIRV_OP(BitReverse, true, 4)
 _SPIRV_OP(BitCount, true, 4)
 #undef _SPIRV_OP
 
@@ -2306,20 +2322,24 @@ _SPIRV_OP(VariableLengthArray, true, 4)
 _SPIRV_OP(SaveMemory, true, 3)
 _SPIRV_OP(RestoreMemory, false, 2)
 #undef _SPIRV_OP
-class SPIRVMatrixINTELInst: public SPIRVInstTemplateBase {
+class SPIRVJointMatrixINTELInst: public SPIRVInstTemplateBase {
   CapVec getRequiredCapability() const override {
-    return getVec(CapabilityMatrixINTEL);
+    return getVec(CapabilityJointMatrixINTEL);
   }
 };
 
 #define _SPIRV_OP(x, ...)                                                      \
-  typedef SPIRVInstTemplate<SPIRVMatrixINTELInst,                              \
+  typedef SPIRVInstTemplate<SPIRVJointMatrixINTELInst,                         \
                             Op##x##INTEL, __VA_ARGS__>                         \
       SPIRV##x##INTEL;
 
-_SPIRV_OP(MatrixLoad, true, 6, true)
-_SPIRV_OP(MatrixStore, false, 5, true)
-_SPIRV_OP(MatrixMad, true, 7)
+_SPIRV_OP(JointMatrixLoad, true, 6, true)
+_SPIRV_OP(JointMatrixStore, false, 5, true)
+_SPIRV_OP(JointMatrixMad, true, 7)
+_SPIRV_OP(JointMatrixSUMad, true, 7)
+_SPIRV_OP(JointMatrixUSMad, true, 7)
+_SPIRV_OP(JointMatrixUUMad, true, 7)
+_SPIRV_OP(JointMatrixWorkItemLength, true, 4)
 #undef _SPIRV_OP
 }
 #endif // SPIRVINSTRUCTION_HPP_

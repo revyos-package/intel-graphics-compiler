@@ -7,38 +7,22 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 //
-// Currently VectorCompiler uses a special type of LLVM-SPIRV-Translator
-// in a form of shared library called "SPIRVDLL"
-// It is expected to move from this solution in favour of original Khronos
-// LLVMSPIRVLib library.
-// This file was created for the purpose of smooth transit between these two
-// library versions.
+// Legacy SPIRVDLL-like interface for translation of SPIRV to LLVM IR.
 //
 //===----------------------------------------------------------------------===//
 
-#include <sstream>
-
 #include "SPIRVWrapper.h"
 
-#include "Probe/Assertion.h"
 #include "vc/Support/Status.h"
+
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Verifier.h"
 
-#ifdef IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
 #include "LLVMSPIRVLib.h"
-#include "llvm/Bitcode/BitcodeWriter.h"
-#else // IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
-#include "llvm/Support/DynamicLibrary.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/Process.h"
-#if defined(__linux__)
-#include <dlfcn.h>
-#endif // __linux__
-#if defined(_WIN32)
-#include <Windows.h>
-#include "inc/common/DriverStore.h"
-#endif // _WIN32
-#endif // IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
+
+#include "Probe/Assertion.h"
+
+#include <sstream>
 
 using namespace llvm;
 
@@ -50,8 +34,6 @@ using SpirvReadVerifyType = int(
     void (*OutSaver)(const char *pOut, size_t OutSize, void *OutUserData),
     void *OutUserData, void (*ErrSaver)(const char *pErrMsg, void *ErrUserData),
     void *ErrUserData);
-
-#ifdef IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
 
 int spirvReadVerify(const char *pIn, size_t InSz, const uint32_t *SpecConstIds,
                     const uint64_t *SpecConstVals, unsigned SpecConstSz,
@@ -67,7 +49,6 @@ int spirvReadVerify(const char *pIn, size_t InSz, const uint32_t *SpecConstIds,
   {
     llvm::Module *SpirM;
     std::string ErrMsg;
-#if LLVM_VERSION_MAJOR > 7
     SPIRV::TranslatorOpts Opts;
     Opts.enableAllExtensions();
     Opts.setFPContractMode(SPIRV::FPContractMode::On);
@@ -78,18 +59,6 @@ int spirvReadVerify(const char *pIn, size_t InSz, const uint32_t *SpecConstIds,
 
     // This returns true on success...
     bool Status = llvm::readSpirv(Context, Opts, IS, SpirM, ErrMsg);
-#else
-    if (SpecConstSz != 0) {
-      std::ostringstream OSS;
-      OSS << "spirv_read_verify: Specialization constants are not supported in "
-             "this translator version (700) "
-          << ErrMsg;
-      ErrSaver(OSS.str().c_str(), ErrUserData);
-      return -1;
-    }
-    // This returns true on success...
-    bool Status = llvm::readSpirv(Context, IS, SpirM, ErrMsg);
-#endif
     if (!Status) {
       std::ostringstream OSS;
       OSS << "spirv_read_verify: readSpirv failed: " << ErrMsg;
@@ -116,65 +85,6 @@ int spirvReadVerify(const char *pIn, size_t InSz, const uint32_t *SpecConstIds,
 Expected<SpirvReadVerifyType *> getSpirvReadVerifyFunction() {
   return &spirvReadVerify;
 }
-
-#else // IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
-
-// Get appropriate path to SPIRV DLL library for subsequent loading.
-std::string findSpirvDLL() {
-#if defined(_WIN64)
-  // TODO: rename to SPIRVDLL64.dll when binary components are fixed.
-  static constexpr char *SpirvLibName = "SPIRVDLL.dll";
-#elif defined(_WIN32)
-  static constexpr char *SpirvLibName = "SPIRVDLL32.dll";
-#else
-  static constexpr char *SpirvLibName = "libSPIRVDLL.so";
-#endif
-
-  auto EnvSpirv = llvm::sys::Process::GetEnv("VC_SPIRVDLL_DIR");
-  if (EnvSpirv) {
-    SmallString<32> Path;
-    llvm::sys::path::append(Path, EnvSpirv.getValue(), SpirvLibName);
-    return std::string{Path.str()};
-  }
-
-// Return standard path for SPIRVDLL for current build.
-// Linux: plain library name.
-// Windows: library name prefixed with current module
-// location (installed driver location).
-#if defined(_WIN32)
-  // Expand libname to full driver path on windows.
-  char TmpPath[MAX_PATH] = {};
-  GetDependencyPath(TmpPath, SpirvLibName);
-  return TmpPath;
-#else
-  return SpirvLibName;
-#endif
-}
-
-Expected<SpirvReadVerifyType *> getSpirvReadVerifyFunction() {
-  constexpr char *SpirvReadVerifyName = "spirv_read_verify_module";
-
-  const std::string SpirvLibPath = findSpirvDLL();
-#if defined(__linux__)
-  // Hack to workaround cmoc crashes during loading of SPIRV library
-  static auto DeepBindHack =
-      dlopen(SpirvLibPath.c_str(), RTLD_NOW | RTLD_DEEPBIND);
-#endif // __linux__
-
-  std::string ErrMsg;
-  using DL = sys::DynamicLibrary;
-  DL DyLib = DL::getPermanentLibrary(SpirvLibPath.c_str(), &ErrMsg);
-  if (!DyLib.isValid())
-    return make_error<vc::DynLoadError>(ErrMsg);
-
-  auto *SpirvReadVerify = reinterpret_cast<SpirvReadVerifyType *>(
-      DyLib.getAddressOfSymbol(SpirvReadVerifyName));
-  if (!SpirvReadVerify)
-    return make_error<vc::SymbolLookupError>(SpirvLibPath, SpirvReadVerifyName);
-  return SpirvReadVerify;
-}
-
-#endif // IGC_VECTOR_USE_KHRONOS_SPIRV_TRANSLATOR
 
 } // namespace
 

@@ -112,7 +112,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         if (globalVar->use_empty())
         {
             // If compiler requests global symbol for external/common linkage, add it reguardless if it is used
-            bool requireGlobalSymbol = m_pModuleMd->compOpt.EnableTakeGlobalAddress &&
+            bool requireGlobalSymbol = Ctx->enableTakeGlobalAddress() &&
                 (globalVar->hasCommonLinkage() || globalVar->hasExternalLinkage());
 
             if (!requireGlobalSymbol)
@@ -141,9 +141,28 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
                 ilpsb.alignment = 0;
                 ilpsb.allocSize = 0;
                 m_pModuleMd->inlineConstantBuffers.push_back(ilpsb);
+
+                // String literals
+                InlineProgramScopeBuffer ilpsbString;
+                ilpsbString.alignment = 0;
+                ilpsbString.allocSize = 0;
+                m_pModuleMd->inlineConstantBuffers.push_back(ilpsbString);
                 hasInlineConstantBuffer = true;
             }
-            inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
+
+            // When ZeBin is enabled, constant variables that are string literals
+            // will be stored in the second const buffer
+            ConstantDataSequential* cds = dyn_cast<ConstantDataSequential>(initializer);
+            bool isStringConst = cds && (cds->isCString() || cds->isString());
+            if ((IGC_IS_FLAG_ENABLED(EnableZEBinary) || m_pModuleMd->compOpt.EnableZEBinary) &&
+                isStringConst)
+            {
+                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[1].Buffer;
+            }
+            else
+            {
+                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
+            }
         }
 
         if (initializer->isZeroValue())
@@ -172,7 +191,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
 #if LLVM_VERSION_MAJOR < 11
             alignBuffer(*inlineProgramScopeBuffer, m_DL->getPreferredAlignment(globalVar));
 #else
-            alignBuffer(*inlineProgramScopeBuffer, m_DL->getPreferredAlign(globalVar).value());
+            alignBuffer(*inlineProgramScopeBuffer, (unsigned int)m_DL->getPreferredAlign(globalVar).value());
 #endif
         }
 
@@ -189,6 +208,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     if (hasInlineConstantBuffer)
     {
         m_pModuleMd->inlineConstantBuffers[0].allocSize = m_pModuleMd->inlineConstantBuffers[0].Buffer.size();
+        m_pModuleMd->inlineConstantBuffers[1].allocSize = m_pModuleMd->inlineConstantBuffers[1].Buffer.size();
     }
     // Calculate the correct offsets for zero-initialized globals/constants
     // Total allocation size in runtime needs to include zero-init values, but data copied to compiler output can ignore them
@@ -217,48 +237,48 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         IGC::appendToUsed(M, globalArray);
     }
 
-    // Always rely on relocation for ZEBinary, so only need to generate these
-    // implcit args when disabling ZEBinary
-    if (IGC_IS_FLAG_DISABLED(EnableZEBinary) &&
-        !m_pModuleMd->compOpt.EnableZEBinary)
+    // Check if zebin is enabled
+    bool zebinEnable = IGC_IS_FLAG_ENABLED(EnableZEBinary) || m_pModuleMd->compOpt.EnableZEBinary;
+
+    // patch-token-path:
+    //     Just add the implicit argument to each function if a constant
+    //     buffer has been created.  This will technically burn a patch
+    //     token on kernels that don't actually use the buffer but it saves
+    //     us having to walk the def-use chain (we can't just check if a
+    //     constant is used in the kernel; for example, a global buffer
+    //     may contain pointers that in turn point into the constant
+    //     address space).
+    // zebinary path:
+    //     Don't add the implicit arguments and rely solely on relocations
+    //     for global variable reference since the implicit arguments were
+    //     removed from zebinary.
+    if (!zebinEnable && hasInlineConstantBuffer)
     {
-        if (hasInlineConstantBuffer)
+        for (auto& pFunc : M)
         {
-            // Just add the implicit argument to each function if a constant
-            // buffer has been created.  This will technically burn a patch
-            // token on kernels that don't actually use the buffer but it saves
-            // us having to walk the def-use chain (we can't just check if a
-            // constant is used in the kernel; for example, a global buffer
-            // may contain pointers that in turn point into the constant
-            // address space).
-            for (auto& pFunc : M)
-            {
-                if (pFunc.isDeclaration()) continue;
-                // Don't add implicit arg if doing relocation
-                if (pFunc.hasFnAttribute("visaStackCall")) continue;
-                // Skip functions called from function marked with IndirectlyCalled attribute
-                if (AddImplicitArgs::hasIndirectlyCalledParent(&pFunc)) continue;
+            if (pFunc.isDeclaration()) continue;
+            // Skip functions called from function marked with stackcall attribute
+            if (AddImplicitArgs::hasStackCallInCG(&pFunc)) continue;
 
-                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-                implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
-                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
-            }
+            // Always add for kernels and subroutines
+            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+            implicitArgs.push_back(ImplicitArg::CONSTANT_BASE);
+            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
         }
+    }
 
-        if (hasInlineGlobalBuffer)
+    if (!zebinEnable && hasInlineGlobalBuffer)
+    {
+        for (auto& pFunc : M)
         {
-            for (auto& pFunc : M)
-            {
-                if (pFunc.isDeclaration()) continue;
-                // Don't add implicit arg if doing relocation
-                if (pFunc.hasFnAttribute("visaStackCall")) continue;
-                // Skip functions called from function marked with IndirectlyCalled attribute
-                if (AddImplicitArgs::hasIndirectlyCalledParent(&pFunc)) continue;
+            if (pFunc.isDeclaration()) continue;
+            // Skip functions called from function marked with stackcall attribute
+            if (AddImplicitArgs::hasStackCallInCG(&pFunc)) continue;
 
-                SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
-                implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
-                ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
-            }
+            // Always add for kernels and subroutines
+            SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
+            implicitArgs.push_back(ImplicitArg::GLOBAL_BASE);
+            ImplicitArgs::addImplicitArgs(pFunc, implicitArgs, mdUtils);
         }
     }
 

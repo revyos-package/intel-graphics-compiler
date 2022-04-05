@@ -182,6 +182,7 @@ set(GenX_Common_Sources_VisaToG4
   VisaToG4/TranslateMisc.cpp
   VisaToG4/TranslateSend3D.cpp
   VisaToG4/TranslateSendLdStLegacy.cpp
+  VisaToG4/TranslateSendLdStLsc.cpp
   VisaToG4/TranslateSendMedia.cpp
   VisaToG4/TranslateSendRaw.cpp
   VisaToG4/TranslateSendSync.cpp
@@ -335,6 +336,7 @@ set(GenX_Common_Headers
   VISAKernel.h
   VarSplit.h
   include/JitterDataStruct.h
+  include/KernelInfo.h
   include/RT_Jitter_Interface.h
   include/VISABuilderAPIDefinition.h
   include/VISADefines.h
@@ -350,6 +352,7 @@ set(GenX_CISA_dis_Common_Headers
   IsaDisassembly.h
   IsaVerification.h
   Option.h
+  PlatformInfo.h
 )
 
 set(Jitter_Common_Headers
@@ -516,4 +519,5 @@ set(headers_to_copy
   include/VISABuilderAPIDefinition.h
   include/visa_igc_common_header.h
   include/JitterDataStruct.h
+  include/KernelInfo.h
 )

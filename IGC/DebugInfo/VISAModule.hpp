@@ -48,9 +48,13 @@ namespace IGC
     ///        location with respect to the VISA virtual machine.
     ///        Also holds attribute to state whether the variable was
     ///        vectorized or is uniform.
-    struct VISAVariableLocation
+    class VISAVariableLocation
     {
     public:
+        // @brief Default Constructor. Creates empty location.
+        VISAVariableLocation() = default;
+
+
         /// @brief Default Constructor. Creates empty location.
         VISAVariableLocation(const VISAModule* m)
         {
@@ -120,6 +124,32 @@ namespace IGC
             m_pVISAModule = m;
         }
 
+        /// @brief Constructor. Creates register location with possible region-based addressing.
+        ///        VC-backend specific constructor.
+        /// @param locationValue value indicates the address/register of the location.
+        /// @param offsets list of offsets for each piece of location
+        /// @param m points to VISAModule corresponding to this location
+        VISAVariableLocation(unsigned int locationValue, llvm::SmallVector<unsigned, 0> &&offsets,
+             const VISAModule* m) : m_offsets(std::move(offsets))
+        {
+            m_hasLocation = true;
+            m_isRegister = true;
+            m_locationReg = locationValue;
+            m_vectorNumElements = offsets.size();
+            m_pVISAModule = m;
+        }
+
+        /// @brief Copy Constructor.
+        /// @param copied value.
+        VISAVariableLocation(const VISAVariableLocation&) = default;
+
+        /// @brief Move Constructor. Creates constant value location.
+        /// @param copied value.
+        VISAVariableLocation& operator=(const VISAVariableLocation&) = default;
+
+        /// @brief Destructor
+        ~VISAVariableLocation() {};
+
         // Getter methods
         bool IsImmediate() const { return m_isImmediate; }
         bool HasSurface() const { return m_hasSurface; }
@@ -131,20 +161,31 @@ namespace IGC
 
         const llvm::Constant* GetImmediate() { return m_pConstVal; }
         unsigned int GetSurface() const { return m_surfaceReg; }
+        void SetRegister(unsigned int locationReg) { m_locationReg = locationReg; }
         unsigned int GetRegister() const { return m_locationReg; }
         unsigned int GetOffset() const { return m_locationOffset; }
         unsigned int GetVectorNumElements() const { return m_vectorNumElements; }
-        const VISAModule* GetVISAModule() const { return m_pVISAModule; }
+        const VISAModule* GetVISAModule() const { IGC_ASSERT(m_pVISAModule); return m_pVISAModule; }
 
         bool IsSampler() const;
         bool IsTexture() const;
         bool IsSLM() const;
 
+        void AddSecondReg(unsigned int locationValue) {
+            IGC_ASSERT_MESSAGE(m_isRegister, "Second location must be filled only for regs");
+            m_locationSecondReg = locationValue;
+        }
+        bool HasLocationSecondReg() const { return m_locationSecondReg != ~0; }
+        unsigned int GetSecondReg() const { IGC_ASSERT(HasLocationSecondReg()); return m_locationSecondReg; }
+
+        // Regon-base addressing data (vc-backend specific)
+        bool isRegionBasedAddress() const { return m_offsets.size() > 0; }
+        unsigned GetRegionOffset(size_t i) const { IGC_ASSERT(m_offsets.size() > i); return m_offsets[i];}
+        size_t GetRegionOffsetsCount() const { return m_offsets.size(); }
+
         void dump() const;
         void print (llvm::raw_ostream &OS) const;
 
-        static void print(llvm::raw_ostream &OS,
-                          const std::vector<VISAVariableLocation> &Locs);
     private:
 
         bool m_isImmediate = false;
@@ -158,9 +199,14 @@ namespace IGC
         const llvm::Constant* m_pConstVal = nullptr;
         unsigned int m_surfaceReg = ~0;
         unsigned int m_locationReg = ~0;
+        // In case of SIMD 32, each register is treated to be one half of SIMD16.
+        // Next variable is used to save second half in SIMD32-mode(first in m_locationReg):
+        unsigned int m_locationSecondReg = ~0;
         unsigned int m_locationOffset = ~0;
         unsigned int m_vectorNumElements = ~0;
         const VISAModule* m_pVISAModule = nullptr;
+        // Regon-base addressing info (vc-backend specific)
+        llvm::SmallVector<unsigned, 0> m_offsets;
     };
 
     typedef uint64_t GfxAddress;
@@ -307,22 +353,93 @@ namespace IGC
     class VISAModule
     {
     public:
-        typedef std::vector<const llvm::Instruction*> InstList;
-        typedef InstList::iterator iterator;
-        typedef InstList::const_iterator const_iterator;
-        typedef std::vector<unsigned char> DataVector;
+        enum class ObjectType
+        {
+            UNKNOWN = 0,
+            KERNEL = 1,
+            STACKCALL_FUNC = 2,
+            SUBROUTINE = 3
+        };
+
+        using InstList = std::vector<const llvm::Instruction*>;
+        using iterator = InstList::iterator;
+        using const_iterator = InstList::const_iterator;
+
+        /// Constants represents VISA register encoding in DWARF
+        static constexpr unsigned int LOCAL_SURFACE_BTI = (254);
+        static constexpr unsigned int GENERAL_REGISTER_NUM = (65536);
+        static constexpr unsigned int SAMPLER_REGISTER_BEGIN = (73728);
+        static constexpr unsigned int SAMPLER_REGISTER_NUM = (16);
+        static constexpr unsigned int TEXTURE_REGISTER_BEGIN = (74744);
+        static constexpr unsigned int TEXTURE_REGISTER_NUM = (255);
+
+        // Store VISA index->[header VISA index, #VISA instructions] corresponding
+        // to same llvm::Instruction. If llvm inst A generates VISA 3,4,5 then
+        // this structure will have 3 entries:
+        // 3 -> [3,3]
+        // 4 -> [3,3]
+        // 5 -> [3,3]
+        struct VisaInterval {
+            unsigned VisaOffset;
+            unsigned VisaInstrNum;
+        };
+        struct IDX_Gen2Visa {
+            unsigned GenOffset;
+            unsigned VisaOffset;
+        };
+        // Store first VISA index->llvm::Instruction mapping
+        llvm::DenseMap<unsigned, const llvm::Instruction*> VISAIndexToInst;
+        llvm::DenseMap<unsigned, VisaInterval> VISAIndexToSize;
+        llvm::DenseMap<unsigned, unsigned> GenISAInstSizeBytes;
+        std::map<unsigned, std::vector<unsigned>> VISAIndexToAllGenISAOff;
+        std::vector<IDX_Gen2Visa> GenISAToVISAIndex;
+
+    private:
+        using VarInfoCache =
+            std::unordered_map<unsigned, const DbgDecoder::VarInfo*>;
+
+        std::string m_triple = "vISA_64";
+        bool IsPrimaryFunc = false;
+        // m_Func points to llvm::Function that resulted in this VISAModule instance.
+        // There is a 1:1 mapping between the two.
+        // Its value is setup in DebugInfo pass, prior to it this is undefined.
+        llvm::Function* m_Func = nullptr;
+        InstList m_instList;
+
+        unsigned int m_currentVisaId = 0;
+        unsigned int m_catchAllVisaId = 0;
+
+        InstInfoMap m_instInfoMap;
+
+        ObjectType m_objectType = ObjectType::UNKNOWN;
+
+        std::unique_ptr<VarInfoCache> VICache = std::make_unique<VarInfoCache>();
+
     public:
-        VISAModule(llvm::Function * Entry);
-        /// @brief Destructor.
-        virtual ~VISAModule();
+        /// @brief Constructor.
+        /// @param AssociatedFunc holds llvm IR function associated with
+        /// this vISA object
+        /// @param IsPrimary indicates if the associated IR function can be
+        /// classified as a "primary entry point"
+        /// "Primary entry point" is a function that spawns a separate
+        /// gen object (compiled gen isa code). Currently, such functions
+        /// correspond to kernel functions or indirectly called functions.
+        VISAModule(llvm::Function* AssociatedFunc, bool IsPrimary)
+            : m_Func(AssociatedFunc), IsPrimaryFunc(IsPrimary) {}
+
+        virtual ~VISAModule() {}
+
+        /// @brief true if the underlying function correspond to the
+        /// "primary entry point".
+        bool isPrimaryFunc() const { return IsPrimaryFunc; }
 
         /// @brief Return first instruction to process.
         /// @return iterator to first instruction in the entry point function.
-        const_iterator begin() const;
+        const_iterator begin() const { return m_instList.begin(); }
 
         /// @brief Return after last instruction to process.
         /// @return iterator to after last instruction in the entry point function.
-        const_iterator end() const;
+        const_iterator end() const { return m_instList.end(); }
 
         /// @brief Process instruction before emitting its VISA code.
         /// @param Instruction to process.
@@ -348,11 +465,6 @@ namespace IGC
         /// @return VISA code size (in instructions)
         unsigned int GetVisaSize(const llvm::Instruction*) const;
 
-        /// @brief Return raw data of given LLVM constant value.
-        /// @param pConstVal constant value to process.
-        /// @param rawData output buffer to append processed raw data to.
-        void GetConstantData(const llvm::Constant* pConstVal, DataVector& rawData) const;
-
         /// @brief Return LLVM module.
         /// @return LLVM module.
         const llvm::Module* GetModule() const;
@@ -374,12 +486,9 @@ namespace IGC
         const std::string& GetTargetTriple() const;
 
         /// @brief Return variable location in VISA for from given debug info instruction.
-        /// Return type is a vector since for SIMD32 a single src variable may map to 2
-        /// VISA variables. In case of SIMD32, each entry is treated to be one half of SIMD16.
         /// @param Instruction to query.
         /// @return variable location in VISA.
-        virtual std::vector<VISAVariableLocation>
-            GetVariableLocation(const llvm::Instruction* pInst) const = 0;
+        virtual VISAVariableLocation GetVariableLocation(const llvm::Instruction* pInst) const = 0;
 
         /// @brief Updates VISA instruction id to current instruction number.
         virtual void UpdateVisaId() = 0;
@@ -398,39 +507,7 @@ namespace IGC
 
         ///  @brief return false if inst is a placeholder instruction
         bool IsExecutableInst(const llvm::Instruction& inst);
-
-        // Store VISA index->[header VISA index, #VISA instructions] corresponding
-        // to same llvm::Instruction. If llvm inst A generates VISA 3,4,5 then
-        // this structure will have 3 entries:
-        // 3 -> [3,3]
-        // 4 -> [3,3]
-        // 5 -> [3,3]
-        struct VisaInterval {
-            unsigned VisaOffset;
-            unsigned VisaInstrNum;
-        };
-        struct IDX_Gen2Visa {
-            unsigned GenOffset;
-            unsigned VisaOffset;
-        };
-        // Store first VISA index->llvm::Instruction mapping
-        llvm::DenseMap<unsigned, const llvm::Instruction*> VISAIndexToInst;
-        llvm::DenseMap<unsigned, VisaInterval> VISAIndexToSize;
-        llvm::DenseMap<unsigned, unsigned> GenISAInstSizeBytes;
-        llvm::DenseMap<unsigned, std::vector<unsigned>> VISAIndexToAllGenISAOff;
-        std::vector<IDX_Gen2Visa> GenISAToVISAIndex;
-
-        class comparer
-        {
-        public:
-            bool operator()(const std::string& v1, const std::string& v2) const
-            {
-                return v1.compare(v2) < 0;
-            }
-        };
-        mutable std::map<std::string, DbgDecoder::VarInfo, comparer> VirToPhyMap;
-
-        bool getVarInfo(const IGC::DbgDecoder& VD, std::string prefix, unsigned int vreg, DbgDecoder::VarInfo& var) const;
+        const DbgDecoder::VarInfo* getVarInfo(const IGC::DbgDecoder& VD, unsigned int vreg) const;
 
         bool hasOrIsStackCall(const IGC::DbgDecoder& VD) const;
         const std::vector<DbgDecoder::SubroutineInfo>* getSubroutines(const IGC::DbgDecoder& VD) const;
@@ -476,18 +553,10 @@ namespace IGC
 
         const InstInfoMap* GetInstInfoMap() { return &m_instInfoMap; }
 
-        VISAModule& operator=(VISAModule& other) = default;
+        VISAModule& operator=(VISAModule& other) = delete;
 
         unsigned int GetCurrentVISAId() { return m_currentVisaId; }
         void SetVISAId(unsigned ID) { m_currentVisaId = ID; }
-
-        enum class ObjectType
-        {
-            UNKNOWN = 0,
-            KERNEL = 1,
-            STACKCALL_FUNC = 2,
-            SUBROUTINE = 3
-        };
 
         ObjectType GetType() const { return m_objectType; }
         void SetType(ObjectType t) { m_objectType = t; }
@@ -495,37 +564,10 @@ namespace IGC
         // This function coalesces GenISARange which is a vector of <start ip, end ip>
         static void coalesceRanges(std::vector<std::pair<unsigned int, unsigned int>>& GenISARange);
 
-        llvm::Function* getFunction() const  { return m_pEntryFunc; }
-        uint64_t GetFuncId() const { return (uint64_t)m_pEntryFunc; }
+        llvm::Function* getFunction() const  { return m_Func; }
+        uint64_t GetFuncId() const { return (uint64_t)m_Func; }
 
         void dump() const { print(llvm::dbgs()); }
         void print (llvm::raw_ostream &OS) const;
-
-    private:
-        std::string m_triple = "vISA_64";
-        const llvm::Module* m_pModule = nullptr;
-        // m_pEntryFunction points to llvm::Function that resulted in this VISAModule instance.
-        // There is a 1:1 mapping between the two.
-        // Its value is setup in DebugInfo pass, prior to it this is undefined.
-        llvm::Function* m_pEntryFunc = nullptr;
-        InstList m_instList;
-
-        unsigned int m_currentVisaId = 0;
-        unsigned int m_catchAllVisaId = 0;
-
-        InstInfoMap m_instInfoMap;
-
-        ObjectType m_objectType = ObjectType::UNKNOWN;
-
-    public:
-        /// Constants represents VISA register encoding in DWARF
-        static const unsigned int LOCAL_SURFACE_BTI = (254);
-        static const unsigned int GENERAL_REGISTER_BEGIN = (0);
-        static const unsigned int GENERAL_REGISTER_NUM = (65536);
-        static const unsigned int SAMPLER_REGISTER_BEGIN = (73728);
-        static const unsigned int SAMPLER_REGISTER_NUM = (16);
-        static const unsigned int TEXTURE_REGISTER_BEGIN = (74744);
-        static const unsigned int TEXTURE_REGISTER_NUM = (255);
     };
-
 } // namespace IGC

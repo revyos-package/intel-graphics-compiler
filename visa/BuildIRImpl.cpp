@@ -31,6 +31,39 @@ DeclarePool::~DeclarePool()
     dcllist.clear();
 }
 
+G4_Declare* DeclarePool::cloneDeclare(G4_Kernel& kernel, std::map<G4_Declare*, G4_Declare*>& dclMap, const char* newDclName, G4_Declare* dcl)
+{
+    if (dclMap.find(dcl) != dclMap.end())
+    {
+        return dclMap[dcl];
+    }
+    G4_Declare* topDcl = dcl->getAliasDeclare();
+    G4_Declare* cloneTopDcl;
+    G4_Declare* cloneDcl = new (mem) G4_Declare(
+            irb,
+            newDclName,
+            dcl->getRegFile(),
+            dcl->getTotalElems(),
+            dcl->getElemType(),
+            dcllist);
+    cloneDcl->setName(newDclName);
+    G4_RegVar* regVar = new (mem) G4_RegVar(cloneDcl, G4_RegVar::RegVarType::Default);
+    cloneDcl->setRegVar(regVar);
+    cloneDcl->setSubRegAlign(dcl->getSubRegAlign());
+    if (topDcl)
+    {
+        assert(dcl != topDcl);
+        cloneTopDcl =
+            (dclMap.find(topDcl) == dclMap.end()) ?
+            cloneDeclare(kernel, dclMap, dcl->getName(), topDcl) :
+            dclMap[topDcl];
+        cloneDcl->setAliasDeclare(cloneTopDcl, dcl->getAliasOffset());
+    }
+    kernel.Declares.push_back(cloneDcl);
+    dclMap[dcl] = cloneDcl;
+    return cloneDcl;
+}
+
 G4_Declare* DeclarePool::createDeclare(
     const char*    name,
     G4_RegFileKind regFile,
@@ -42,7 +75,7 @@ G4_Declare* DeclarePool::createDeclare(
     G4_Operand *   repRegion,
     G4_ExecSize    execSize)
 {
-    G4_Declare* dcl = new (mem) G4_Declare(name, regFile, nElems * nRows, ty, dcllist);
+    G4_Declare* dcl = new (mem) G4_Declare(irb, name, regFile, nElems * nRows, ty, dcllist);
     G4_RegVar * regVar;
     if (kind == DeclareType::Regular)
         regVar = new (mem) G4_RegVar(dcl, G4_RegVar::RegVarType::Default);
@@ -63,15 +96,15 @@ G4_Declare* DeclarePool::createDeclare(
     }
     dcl->setRegVar(regVar);
 
-    if (regFile == G4_ADDRESS)
+    if (regFile == G4_ADDRESS || regFile == G4_SCALAR)
     {
         dcl->setSubRegAlign(Any);
     }
     else if (regFile != G4_FLAG)
     {
-        if ((unsigned int)nElems * nRows * TypeSize(ty) >= numEltPerGRF<Type_UB>())
+        if ((unsigned int)nElems * nRows * TypeSize(ty) >= irb.numEltPerGRF<Type_UB>())
         {
-            dcl->setSubRegAlign(GRFALIGN);
+            dcl->setSubRegAlign(irb.getGRFAlign());
         }
         else
         {
@@ -185,7 +218,7 @@ bool IR_Builder::isOpndAligned(
 
             if (dcl && dcl->getRegVar() && dcl->getRegVar()->isPhyRegAssigned())
             {
-                offset += static_cast<unsigned short>(dcl->getRegVar()->getByteAddr());
+                offset += static_cast<unsigned short>(dcl->getRegVar()->getByteAddr(*this));
             }
         }
         if (!isAligned)
@@ -229,7 +262,7 @@ bool IR_Builder::isOpndAligned(
         else if (opnd->getKind() == G4_Operand::dstRegRegion &&
             // Only care about GRF or half-GRF alignment.
             (align_byte == numEltPerGRF<Type_UB>() || align_byte == numEltPerGRF<Type_UB>() / 2) &&
-            dcl && dcl->getRegFile() == G4_ADDRESS)
+            dcl && (dcl->getRegFile() == G4_ADDRESS))
         {
 
             // Get the single definition of the specified operand from the use
@@ -304,7 +337,7 @@ bool IR_Builder::isOpndAligned(
                         // component wise and may need to consider checking
                         // the accumulated result.
                         if ((AliasOffset % align_byte) != 0 ||
-                            (Dcl && Dcl->getSubRegAlign() != GRFALIGN &&
+                            (Dcl && Dcl->getSubRegAlign() != getGRFAlign() &&
                                 Dcl->getSubRegAlign() != Sixteen_Word &&
                                 Dcl->getSubRegAlign() != Eight_Word) ||
                             AE->getOffset() % align_byte != 0) {
@@ -644,6 +677,22 @@ void IR_Builder::createPreDefinedVars()
                     GetGenTypeFromVISAType(getPredefinedVarType(i)));
                 break;
             }
+            case PreDefinedVarsInternal::IMPL_ARG_BUF_PTR:
+            {
+                dcl = createDeclareNoLookup("implBufPtr", G4_GRF, 1, 1, Type_UQ);
+                auto phyReg = phyregpool.getGreg(kernel.getSpillHeaderGRF());
+                dcl->getRegVar()->setPhyReg(phyReg, SubRegs_ImplPtrs::ImplBufPtr);
+                break;
+            }
+
+            case PreDefinedVarsInternal::LOCAL_ID_BUF_PTR:
+            {
+                dcl = createDeclareNoLookup("localIdBufPtr", G4_GRF, 1, 1, Type_UQ);
+                auto phyReg = phyregpool.getGreg(kernel.getSpillHeaderGRF());
+                dcl->getRegVar()->setPhyReg(phyReg, SubRegs_ImplPtrs::LocalIdBufPtr);
+                break;
+            }
+
             default:
             {
                 break;
@@ -666,11 +715,13 @@ void IR_Builder::createBuiltinDecls()
         1,
         Type_UD);
     realR0->getRegVar()->setPhyReg(phyregpool.getGreg(0), 0);
+    realR0->setBuiltin();
 
     // builtinR0 either gets allocated to r0 or to a different
     // register depending on conditions in RA.
-    builtinR0 = createTempVar(numR0DW, Type_UD, GRFALIGN, "R0_Copy");
+    builtinR0 = createTempVar(numR0DW, Type_UD, getGRFAlign(), "R0_Copy");
     builtinR0->setDoNotSpill();
+    builtinR0->setBuiltin();
 
     builtinA0 = createDeclareNoLookup(
         "BuiltinA0",
@@ -679,6 +730,8 @@ void IR_Builder::createBuiltinDecls()
         1,
         Type_UD);
     builtinA0->getRegVar()->setPhyReg(phyregpool.getAddrReg(), 0);
+    builtinA0->setBuiltin();
+
     builtinA0Dot2 = createDeclareNoLookup(
         "BuiltinA0Dot2",  //a0.2
         G4_ADDRESS,
@@ -686,15 +739,22 @@ void IR_Builder::createBuiltinDecls()
         1,
         Type_UD);
     builtinA0Dot2->getRegVar()->setPhyReg(phyregpool.getAddrReg(), 2);
+    builtinA0Dot2->setBuiltin();
 
     builtinHWTID = createDeclareNoLookup("hw_tid", G4_GRF, 1, 1, Type_UD);
+    builtinHWTID->setBuiltin();
+
 
     builtinT252 = createDeclareNoLookup(vISAPreDefSurf[PREDEFINED_SURFACE_T252].name, G4_GRF, 1, 1, Type_UD);
+    builtinT252->setBuiltin();
     builtinBindlessSampler = createDeclareNoLookup("B_S", G4_GRF, 1, 1, Type_UD);
+    builtinBindlessSampler->setBuiltin();
 
     builtinSamplerHeader = createDeclareNoLookup("samplerHeader", G4_GRF, numEltPerGRF<Type_UD>(), 1, Type_UD);
+    builtinSamplerHeader->setBuiltin();
 
     builtinScratchSurface = createDeclareNoLookup(vISAPreDefSurf[PREDEFINED_SURFACE_SCRATCH].name, G4_GRF, 1, 1, Type_UD);
+    builtinScratchSurface->setBuiltin();
 }
 
 
@@ -702,7 +762,7 @@ G4_Declare* IR_Builder::getSpillFillHeader()
 {
     if (!spillFillHeader)
     {
-        spillFillHeader = createTempVar(1, Type_UD, GRFALIGN, "spillHeader");
+        spillFillHeader = createTempVar(1, Type_UD, getGRFAlign(), "spillHeader");
         spillFillHeader->setLiveOut();
         spillFillHeader->setLiveIn();
         spillFillHeader->setDoNotSpill();
@@ -735,24 +795,24 @@ G4_Declare* IR_Builder::getOldA0Dot2Temp()
 }
 
 IR_Builder::IR_Builder(
-    TARGET_PLATFORM genPlatform,
-    INST_LIST_NODE_ALLOCATOR &alloc,
-    G4_Kernel &k,
-    Mem_Manager &m,
-    Options *options,
+    INST_LIST_NODE_ALLOCATOR& alloc,
+    G4_Kernel& k,
+    Mem_Manager& m,
+    Options* options,
     CISA_IR_Builder* parent,
-    FINALIZER_INFO *jitInfo,
-    const WA_TABLE *pWaTable)
-    : platform(genPlatform), curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), metaData(jitInfo),
+    FINALIZER_INFO* jitInfo,
+    const WA_TABLE* pWaTable)
+    : curFile(NULL), curLine(0), curCISAOffset(-1), immPool(*this), metaData(jitInfo),
     type(VISA_BUILD_TYPE::KERNEL), parentBuilder(parent),
     builtinSamplerHeaderInitialized(false), m_pWaTable(pWaTable), m_options(options), CanonicalRegionStride0(0, 1, 0),
     CanonicalRegionStride1(1, 1, 0), CanonicalRegionStride2(2, 1, 0), CanonicalRegionStride4(4, 1, 0),
-    mem(m), phyregpool(m, k.getNumRegTotal()), hashtable(m), rgnpool(m), dclpool(m),
+    mem(m), phyregpool(m, k.getNumRegTotal()), hashtable(m), rgnpool(m), dclpool(m, *this),
     instList(alloc), kernel(k), metadataMem(4096)
 {
     num_temp_dcl = 0;
     kernel.setBuilder(this); // kernel needs pointer to the builder
-    createBuiltinDecls();
+    if (!getIsPayload())
+        createBuiltinDecls();
 
     sampler8x8_group_id = 0;
 
@@ -768,7 +828,8 @@ IR_Builder::IR_Builder(
 
     fcPatchInfo = NULL;
 
-    createPreDefinedVars();
+    if (!getIsPayload())
+        createPreDefinedVars();
 }
 
 
@@ -799,6 +860,13 @@ IR_Builder::~IR_Builder()
     {
         fcPatchInfo->~FCPatchingInfo();
     }
+}
+
+G4_Declare* IR_Builder::cloneDeclare(std::map<G4_Declare*, G4_Declare*>& dclMap, G4_Declare* dcl)
+{
+    static int uid = 0;
+    const char* newDclName = getNameString(mem, 16, "copy_%d_%s", uid++, dcl->getName());
+    return dclpool.cloneDeclare(kernel, dclMap, newDclName, dcl);
 }
 
 G4_Declare* IR_Builder::createDeclareNoLookup(
@@ -874,7 +942,8 @@ void IR_Builder::initScratchSurfaceOffset()
             auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
             instList.insert(iter, andInst);
 
-            //scratchSurfaceOffset is reserved for spillfill, pvtmem should use r0.5+1
+            // scratchSurfaceOffset (r0.5+0x400)>>4 is reserved for spillfill, pvtmem should use r0.5>>4
+            // shift-right by 4 is done before send-msg when setting a0
             G4_DstRegRegion* dst = createDstRegRegion(scratchSurfaceOffset, 1);
             createBinOp(G4_add, g4::SIMD1, dst, createSrcRegRegion(slot0SSO, getRegionScalar()),
                 createImm(0x400, Type_UD), InstOpt_WriteEnable, true);
@@ -1069,6 +1138,19 @@ G4_Declare* IR_Builder::createFlag(uint16_t numFlagElements, const char* name)
     uint32_t numWords = (numFlagElements + 15) / 16;
     G4_Declare* dcl = createDeclareNoLookup(name, G4_FLAG, numWords, 1, Type_UW);
     dcl->setNumberFlagElements((uint8_t)numFlagElements);
+    return dcl;
+}
+
+G4_Declare* IR_Builder::createTempScalar(uint16_t numFlagElements, const char* prefix)
+{
+    const char* name = getNameString(mem, 20, "%s%d", prefix, num_temp_dcl++);
+    G4_Declare* dcl = createDeclareNoLookup(name, G4_SCALAR, numFlagElements, 1, Type_UB);
+    return dcl;
+}
+
+G4_Declare* IR_Builder::createScalar(uint16_t numFlagElements, const char* name)
+{
+    G4_Declare* dcl = createDeclareNoLookup(name, G4_SCALAR, numFlagElements, 1, Type_UB);
     return dcl;
 }
 
@@ -1311,7 +1393,7 @@ G4_SendDescRaw * IR_Builder::createGeneralMsgDesc(
     G4_Operand* bti,
     G4_Operand* sti)
 {
-    return new (mem) G4_SendDescRaw(desc, extDesc, access, bti, sti);
+    return new (mem) G4_SendDescRaw(desc, extDesc, access, bti, sti, *this);
 }
 
 G4_SendDescRaw * IR_Builder::createSendMsgDesc(
@@ -1324,7 +1406,7 @@ G4_SendDescRaw * IR_Builder::createSendMsgDesc(
     G4_ExecSize execSize,
     bool isValidFuncCtrl)
 {
-    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, access, bti, execSize, isValidFuncCtrl);
+    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, access, bti, execSize, isValidFuncCtrl, *this);
 }
 
 G4_SendDescRaw* IR_Builder::createSendMsgDesc(
@@ -1336,7 +1418,7 @@ G4_SendDescRaw* IR_Builder::createSendMsgDesc(
     G4_Operand* bti,
     bool isValidFuncCtrl)
 {
-    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, access, bti, isValidFuncCtrl);
+    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, access, bti, isValidFuncCtrl, *this);
 }
 
 G4_SendDescRaw * IR_Builder::createSendMsgDesc(
@@ -1351,7 +1433,7 @@ G4_SendDescRaw * IR_Builder::createSendMsgDesc(
     G4_Operand *sti)
 {
     G4_SendDescRaw* msgDesc = new (mem) G4_SendDescRaw(
-        funcCtrl, regs2rcv, regs2snd, funcID, (uint16_t) extMsgLength,
+        funcCtrl, regs2rcv, regs2snd, funcID, (uint16_t)extMsgLength,
         extFuncCtrl, access, bti, sti, *this);
     return msgDesc;
 }
@@ -1365,7 +1447,7 @@ G4_SendDescRaw* IR_Builder::createReadMsgDesc(
 {
     //ToDo: move extDesc into SendMsgDesc ctor
     uint32_t extDesc = G4_SendDescRaw::createExtDesc(sfid);
-    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, 0, SendAccess::READ_ONLY, bti, true);
+    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, 0, SendAccess::READ_ONLY, bti, true, *this);
 }
 
 G4_SendDescRaw* IR_Builder::createWriteMsgDesc(
@@ -1376,14 +1458,14 @@ G4_SendDescRaw* IR_Builder::createWriteMsgDesc(
 {
     //ToDo: move extDesc into SendMsgDesc ctor
     uint32_t extDesc = G4_SendDescRaw::createExtDesc(sfid, false, src1Len);
-    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, SendAccess::WRITE_ONLY, bti, true);
+    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, SendAccess::WRITE_ONLY, bti, true, *this);
 }
 
 G4_SendDescRaw* IR_Builder::createSyncMsgDesc(SFID sfid, uint32_t desc)
 {
     //ToDo: move extDesc into SendMsgDesc ctor
     uint32_t extDesc = G4_SendDescRaw::createExtDesc(sfid);
-    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, 0, SendAccess::READ_WRITE, nullptr, true);
+    return new (mem) G4_SendDescRaw(sfid, desc, extDesc, 0, SendAccess::READ_WRITE, nullptr, true, *this);
 }
 
 G4_SendDescRaw* IR_Builder::createSampleMsgDesc(
@@ -1400,7 +1482,7 @@ G4_SendDescRaw* IR_Builder::createSampleMsgDesc(
     {
         extDesc |= 1 << CPS_LOD_COMPENSATION_ENABLE;
     }
-    return new (mem) G4_SendDescRaw(desc, extDesc, SendAccess::READ_ONLY, bti, sti);
+    return new (mem) G4_SendDescRaw(desc, extDesc, SendAccess::READ_ONLY, bti, sti, *this);
 }
 
 G4_Operand* IR_Builder::emitSampleIndexGE16(
@@ -1452,9 +1534,17 @@ G4_Operand* IR_Builder::emitSampleIndexGE16(
     G4_DstRegRegion* stateBaseRgn
         = createDst(headerDecl->getRegVar(),
             0, 3, 1, Type_UD);
-    G4_SrcRegRegion* src0
-        = createSrc(
+    G4_SrcRegRegion* src0 = nullptr;
+    if (hasBindlessSampler() && !isBindlessSampler(sampler))
+    {
+        src0 = createSrc(
+            builtinSamplerHeader->getRegVar(), 0, 3, getRegionScalar(), Type_UD);
+    }
+    else
+    {
+        src0 = createSrc(
             builtinR0->getRegVar(), 0, 3, getRegionScalar(), Type_UD);
+    }
     createBinOp(G4_add, g4::SIMD1, stateBaseRgn,
         src0, baseAdjSrc, InstOpt_WriteEnable, true);
 
@@ -1820,41 +1910,26 @@ G4_INST* IR_Builder::createInternalBfnInst(
     return ii;
 }
 
-//scratch surfaces, write r0.5 to message descriptor
-//exdesc holds the value of the extended message descriptor for bit [0:11]
-// kernel entry:
-//      and (1) tmp<1>:ud r0.5<0;1,0>:ud 0xFFFFFC00:ud {NoMask}
-// before send message:
-//  shl (1) a0.0<1>:ud tmp<1>:ud 0x2 {NoMask}
-//  (for old exDesc format) add (1) a0.0<1>:ud tmp<1>:ud exDesc:ud {NoMask}
-// returns a0.0<0;1,0>:ud
+// scratch surfaces, write the content of T251 to extended message descriptor
+// exdesc holds the value of the extended message descriptor for bit [0:11]
+// add (1) a0.2<1>:ud T251<1>:ud exDesc:ud {NoMask}
+// returns a0.2<0;1,0>:ud
 G4_SrcRegRegion* IR_Builder::createScratchExDesc(uint32_t exdesc)
 {
+    // virtual var for each exdesc
+    G4_SrcRegRegion* T251 = createSrcRegRegion(builtinScratchSurface, getRegionScalar());
     const char* buf = getNameString(mem, 20, "ExDesc%d", num_temp_dcl++);
     G4_Declare* exDescDecl = createDeclareNoLookup(buf, G4_ADDRESS, 1, 1, Type_UD);
     exDescDecl->setSubRegAlign(Four_Word);
 
-    // copy r0.5[10:31] to a0[12:31] or a0[6:31] for the new format
-    initScratchSurfaceOffset();
-
-    if (!useNewExtDescFormat())
+    G4_DstRegRegion* dst = createDstRegRegion(exDescDecl, 1);
+    if (useNewExtDescFormat())
     {
-
-        // (W) shl (1) a0.0 sso 0x2
-        auto shlSrc0 = createSrcRegRegion(scratchSurfaceOffset, getRegionScalar());
-        auto shlDst = createDstRegRegion(exDescDecl, 1);
-        createBinOp(G4_shl, g4::SIMD1, shlDst, shlSrc0, createImm(0x2, Type_UW), InstOpt_WriteEnable, true);
-
-        G4_DstRegRegion* dst = createDstRegRegion(exDescDecl, 1);
-        createBinOp(G4_add, g4::SIMD1, dst, createSrcRegRegion(exDescDecl, getRegionScalar()),
-            createImm(exdesc, Type_UD), InstOpt_WriteEnable, true);
+        createMov(g4::SIMD1, dst, T251, InstOpt_WriteEnable, true);
     }
     else
     {
-        // (W) shr (1) a0.0 ss0 0x4
-        auto shrSrc0 = createSrcRegRegion(scratchSurfaceOffset, getRegionScalar());
-        auto shrDst = createDstRegRegion(exDescDecl, 1);
-        createBinOp(G4_shr, g4::SIMD1, shrDst, shrSrc0, createImm(0x4, Type_UW), InstOpt_WriteEnable, true);
+        createBinOp(G4_add, g4::SIMD1, dst, T251, createImm(exdesc, Type_UD), InstOpt_WriteEnable, true);
     }
     return createSrcRegRegion(exDescDecl, getRegionScalar());
 }
@@ -1877,7 +1952,7 @@ G4_INST* IR_Builder::createInst(
 
     if (op == G4_madw)
     {
-        MUST_BE_TRUE(execSize != g4::SIMD32, "SIMD32 is not supported for madw");
+        MUST_BE_TRUE(getPlatform() >= Xe_PVC || execSize != g4::SIMD32, "SIMD32 is not supported on this platform for madw");
     }
 
     G4_INST* i = NULL;
@@ -2128,6 +2203,35 @@ G4_INST* IR_Builder::createInternalIntrinsicInst(
     return ii;
 }
 
+G4_INST* IR_Builder::createIntrinsicAddrMovInst(
+    Intrinsic intrinId,
+    G4_DstRegRegion* dst,
+    G4_Operand* src0, G4_Operand* src1, G4_Operand* src2, G4_Operand* src3,
+    G4_Operand* src4, G4_Operand* src5, G4_Operand* src6, G4_Operand* src7,
+    bool addToInstList)
+{
+    G4_INST* i = nullptr;
+    assert(intrinId == Intrinsic::PseudoAddrMov && "expect pseudo_mov op");
+
+    i = new (mem) G4_PseudoAddrMovIntrinsic(*this, intrinId, dst, src0, src1, src2, src3, src4, src5, src6, src7);
+
+    if (addToInstList)
+    {
+        i->setCISAOff(curCISAOffset);
+
+        if (m_options->getOption(vISA_EmitLocation))
+        {
+            i->setLocation(allocateMDLocation(curLine, curFile));
+        }
+
+        instList.push_back(i);
+    }
+
+    instAllocList.push_back(i);
+
+    return i;
+}
+
 G4_MathOp IR_Builder::Get_MathFuncCtrl(ISA_Opcode op, G4_Type type)
 {
     switch (op)
@@ -2225,6 +2329,7 @@ G4_InstSend* IR_Builder::createSendInst(
 // returns a0.2<0;1,0>:ud
 G4_SrcRegRegion* IR_Builder::createBindlessExDesc(uint32_t exdesc)
 {
+    G4_InstOpts dbgOpt = m_options->getOption(vISA_markSamplerMoves) ? InstOpt_BreakPoint : InstOpt_NoOpt;
     // virtual var for each exdesc
     G4_SrcRegRegion* T252 = createSrcRegRegion(builtinT252, getRegionScalar());
     const char* buf = getNameString(mem, 20, "ExDesc%d", num_temp_dcl++);
@@ -2233,7 +2338,7 @@ G4_SrcRegRegion* IR_Builder::createBindlessExDesc(uint32_t exdesc)
     G4_DstRegRegion* dst = createDstRegRegion(exDescDecl, 1);
     if (useNewExtDescFormat())
     {
-        createMov(g4::SIMD1, dst, T252, InstOpt_WriteEnable, true);
+        createMov(g4::SIMD1, dst, T252, InstOpt_WriteEnable | dbgOpt, true);
     }
     else
     {
@@ -2249,7 +2354,7 @@ G4_SrcRegRegion* IR_Builder::createBindlessExDesc(uint32_t exdesc)
  *  -- If send has exec size 16, its destination must have Type W.
  *  -- avoid using Q/UQ type on CHV/BXT
  */
-static void fixSendDstType(G4_DstRegRegion* dst, G4_ExecSize execSize)
+static void fixSendDstType(G4_DstRegRegion* dst, G4_ExecSize execSize, const IR_Builder& builder)
 {
     MUST_BE_TRUE(dst->getRegAccess() == Direct, "Send dst must be a direct operand");
 
@@ -2259,12 +2364,12 @@ static void fixSendDstType(G4_DstRegRegion* dst, G4_ExecSize execSize)
     // type mismatch between operand and decl should not matter
     if (execSize == g4::SIMD16 && dst->getType() != Type_W && dst->getType() != Type_UW)
     {
-        dst->setType(Type_W);
+        dst->setType(builder, Type_W);
     }
 
     if (dst->getType() == Type_HF)
     {
-        dst->setType(Type_W);
+        dst->setType(builder, Type_W);
     }
 }
 
@@ -2280,7 +2385,7 @@ G4_InstSend *IR_Builder::createSendInst(
 {
     G4_opcode send_opcode= is_sendc ? G4_sendc : G4_send;
 
-    fixSendDstType(postDst, execsize);
+    fixSendDstType(postDst, execsize, *this);
 
     uint32_t desc = msgDesc->getDesc();
     G4_Operand *bti = msgDesc->getSurface();
@@ -2416,7 +2521,7 @@ G4_InstSend *IR_Builder::createSplitSendInst(
 {
     G4_opcode send_opcode = is_sendc ? G4_sendsc : G4_sends;
 
-    fixSendDstType(dst, execsize);
+    fixSendDstType(dst, execsize, *this);
 
     uint32_t desc = msgDesc->getDesc();
     uint32_t exdesc = msgDesc->getExtendedDesc();
@@ -2533,7 +2638,324 @@ G4_InstSend *IR_Builder::createSplitSendInst(
         option, msgDesc, extDescOpnd, true);
 }
 
+G4_SendDescRaw* IR_Builder::createLscMsgDesc(
+    LSC_OP                      op,
+    LSC_SFID                    lscSfid,
+    VISA_Exec_Size              execSizeEnum,
+    LSC_CACHE_OPTS              cacheOpts,
+    LSC_ADDR                    addr,
+    LSC_DATA_SHAPE              shape,
+    G4_Operand                 *surface,
+    uint32_t                    dstLen,
+    uint32_t                    addrRegs)
+{
+    //   Desc[5:0] = OPCODE {LOAD{_BLOCK,_QUAD},STORE{_BLOCK,_QUAD},ATOMIC*}
+    //   Desc[8:7] = addr size
+    //   Desc[11:9] = data size
+    //   Desc[15:12] = data vector size (or cmask if *_QUAD)
+    //   Desc[19:17] = caching controls (see the table for allowable combinations)
+    //   Desc[30:29] = addr model (BTI = 3, SS = 2, BSS = 1, FLAT = 0)
+    int status = VISA_SUCCESS;
+    uint32_t desc = 0;
+    uint32_t exDesc = 0;
+    const auto opInfo = LscOpInfoGet(op);
+    MUST_BE_TRUE(!opInfo.isBlock2D(), "block2d has a different layout");
+    desc |= opInfo.encoding; // Desc[5:0]
 
+    lscEncodeAddrSize(addr.size, desc, status); // Desc[8:7]
+
+    int dataSizeBits = lscEncodeDataSize(shape.size, desc, status); // Desc[11:9]
+
+    // Desc[15:12]
+    int vecSize; // definitely assigned
+    if (!opInfo.hasChMask())
+    {
+        vecSize = lscEncodeDataElems(shape.elems, desc, status);
+        lscEncodeDataOrder(shape.order, desc, status);
+    }
+    else
+    {
+        MUST_BE_TRUE(shape.chmask, "channel mask must not be empty");
+        vecSize = 0;
+        if (shape.chmask & LSC_DATA_CHMASK_X)
+        {
+            desc |= 1 << 12;
+            vecSize++;
+        }
+        if (shape.chmask & LSC_DATA_CHMASK_Y)
+        {
+            desc |= 1 << 13;
+            vecSize++;
+        }
+        if (shape.chmask & LSC_DATA_CHMASK_Z)
+        {
+            desc |= 1 << 14;
+            vecSize++;
+        }
+        if (shape.chmask & LSC_DATA_CHMASK_W)
+        {
+            desc |= 1 << 15;
+            vecSize++;
+        }
+    }
+
+    lscEncodeCachingOpts(opInfo, cacheOpts, desc, status); // Desc[19:17]
+    lscEncodeAddrType(addr.type, desc, status);  // Desc[30:29]
+
+    desc |= dstLen << 20;   // Desc[24:20]  dst len
+    desc |= addrRegs << 25; // Desc[29:25]  src0 len
+
+    // promote any immediate surface to the extended descriptor
+    // ExDesc[31:12]
+    if (surface && surface->isImm()) {
+        auto surfaceImm = (uint32_t)surface->asImm()->getImm();
+        if (addr.type == LSC_ADDR_TYPE_BTI) {
+            // promote the immediate BTI to the descriptor
+            exDesc |= surfaceImm << 24;
+            surface = nullptr;
+        } else if (addr.type == LSC_ADDR_TYPE_ARG) {
+            MUST_BE_TRUE(false, "caller should have converted LSC_ADDR_TYPE_ARG to ...BTI");
+        } else if (
+            addr.type == LSC_ADDR_TYPE_BSS ||
+            addr.type == LSC_ADDR_TYPE_SS)
+        {
+            if ((surfaceImm & 0x3FF) == 0) {
+                exDesc |= surfaceImm;
+                surface = nullptr;
+            }
+        }
+        else {
+            // flat address type
+            MUST_BE_TRUE(surface->isNullReg() ||
+                surfaceImm == PREDEFINED_SURFACE_SLM ||
+                surfaceImm == PREDEFINED_SURFACE_T255, // not sure what's up here
+                "flat address type must have null reg (or 0)");
+            surface = nullptr;
+        }
+    }
+
+    MUST_BE_TRUE(addr.immOffset == 0,
+        "invalid address immediate offset");
+
+    SFID sfid = LSC_SFID_To_SFID(lscSfid);
+
+    const unsigned execSize = Get_VISA_Exec_Size(execSizeEnum);
+    int src1Len = 0;
+    uint32_t dataRegs = 1;
+    bool isBlock2D =
+        op == LSC_OP::LSC_LOAD_BLOCK2D ||
+        op == LSC_OP::LSC_STORE_BLOCK2D;
+    MUST_BE_TRUE(!isBlock2D, "block2d not implemented yet");
+
+    if (shape.order == LSC_DATA_ORDER_NONTRANSPOSE) {
+        // Non-transpose case is the typical case.
+        //
+        // ceil[ SIMT32*dataSize(b)/512(b/REG) ] * vecSize
+        //   units = (b/b*REG) = REG
+        dataRegs = std::max<uint32_t>(1,
+            execSize*dataSizeBits / 8 / getGRFSize())*vecSize;
+    }
+    else
+    { // if (shape.transpose == LSC_DATA_TRANSPOSE) {
+           // The transpose case is a little odder
+           // So the data size is the SIMD size (ExecSize) times the number of
+           // registers consumed by each vector sequence (always a full
+           // register number per seq).
+        uint32_t regsPerVec = vecSize * dataSizeBits / 8 / getGRFSize();
+        if (vecSize*dataSizeBits / 8 % getGRFSize())
+            regsPerVec++; // pad out to full reg
+        dataRegs = regsPerVec * execSize;
+    }
+
+    // override sizes for special cases
+    if (op == LSC_OP::LSC_LOAD_STATUS)
+    {
+        dataRegs = 1; // just returns a bitset
+    }
+
+    if (opInfo.isLoad())
+    {
+        src1Len = 0;
+    }
+    else if (opInfo.isStore())
+    {
+        src1Len = (int)dataRegs;
+    }
+
+    SendAccess access = opInfo.isLoad() && opInfo.isStore() ?
+        SendAccess::READ_WRITE : (opInfo.isLoad() ? SendAccess::READ_ONLY : SendAccess::WRITE_ONLY);
+
+    G4_SendDescRaw *g4desc = createSendMsgDesc(
+        sfid,
+        desc,
+        exDesc,
+        src1Len,
+        access,
+        surface);
+    return g4desc;
+}
+
+G4_SendDescRaw * IR_Builder::createLscDesc(
+    SFID sfid,
+    uint32_t desc,
+    uint32_t extDesc,
+    int src1Len,
+    SendAccess access,
+    G4_Operand* bti)
+{
+    auto msgDesc = new (mem) G4_SendDescRaw(sfid, desc, extDesc, src1Len, access, bti, true, *this);
+    return msgDesc;
+}
+
+G4_InstSend *IR_Builder::createLscSendInst(
+    G4_Predicate *pred,
+    G4_DstRegRegion *dst,
+    G4_SrcRegRegion *src0,
+    G4_SrcRegRegion *src1,
+    G4_ExecSize execSize,
+    G4_SendDescRaw *msgDesc,
+    G4_InstOpts option,
+    LSC_ADDR_TYPE addrType,
+    bool emitA0RegDef)
+{
+    uint32_t exDesc = msgDesc->getExtendedDesc();
+    G4_Operand *surface = msgDesc->getSurface();   // BTI or SS/BSS
+    G4_Operand *exDescOpnd = nullptr;
+
+    if (surface && surface->isSrcRegRegion()) {
+        if (emitA0RegDef)
+        {
+            // This path is taken when caller hasn't defined a0.2 register for use
+            // as ext msg descriptor of lsc. Currently, spill module defines a0.2
+            // once per BB and reuses it in all spill msgs for that BB. Without this
+            // check, each spill/fill msg would get its own computation of a0.2
+            // which is wasteful.
+            if (addrType == LSC_ADDR_TYPE_BTI) {
+                // .declare shifted_bti v_type=T num_elts=1
+                // ...
+                // (surface is the BTI)
+                //   shl    tmp        surface      24
+                G4_Declare* tmpDecl = createTempVar(1, Type_UD, Any);
+                G4_DstRegRegion* tmpDst = createDstRegRegion(tmpDecl, 1);
+                createBinOp(G4_shl, g4::SIMD1, tmpDst, surface,
+                    createImm(24, Type_UD), InstOpt_WriteEnable, true);
+                auto tmpSrc = createSrcRegRegion(tmpDecl, getRegionScalar());
+                // set src1.length into exDesc. BTI message is required to be on ExBSO=0
+                // mode, so the src.length is part of exDesc
+                exDesc = (exDesc & (~0x7FF)) | (msgDesc->extMessageLength() << 6);
+                G4_DstRegRegion* addrDstOpnd = createDstRegRegion(builtinA0Dot2, 1);
+                // add a0.2 tmpSrc exdesc
+                createBinOp(G4_add, g4::SIMD1, addrDstOpnd, tmpSrc,
+                    createImm(exDesc, Type_UD), InstOpt_WriteEnable, true);
+            }
+            else {
+                // SS or BSS
+                G4_DstRegRegion* addrDstOpnd = createDstRegRegion(builtinA0Dot2, 1);
+                if ((addrType == LSC_ADDR_TYPE_BSS) || (addrType == LSC_ADDR_TYPE_SS))
+                {
+                    //   mov    a0.2  surface
+                    createMov(g4::SIMD1, addrDstOpnd, surface, InstOpt_WriteEnable, true);
+                }
+                else
+                {
+                    assert(false && "FLAT have surface == nullptr here");
+                }
+            }
+        }
+
+        exDescOpnd = createSrcRegRegion(builtinA0Dot2, getRegionScalar());
+        msgDesc->setSurface(exDescOpnd); // link a0.2 to the send descriptor
+    } else if (surface && surface->isImm()) {
+        // If by some chance the surface is an immediate value that didn't fold
+        // to ExDesc (c.f. lscTryPromoteSurfaceImmToExDesc),
+        // we can still possibly move it to a0.2 and use that way.
+        // This enables us to access the full ExDesc[31:5] rather than
+        // ExDesc[31:12] (the send instruction lacks room encode [11:6])
+        // This can happen for BSS/SS, for example, with a small
+        // surface state offset.
+        //
+        // Callers that fold the ExDesc value into an immediate descriptor
+        // should pass nullptr as the surface.
+        G4_DstRegRegion* addrDstOpnd = createDstRegRegion(builtinA0Dot2, 1);
+        if (addrType == LSC_ADDR_TYPE_BSS || addrType == LSC_ADDR_TYPE_SS) {
+            //   mov    a0.2   SurfaceAddrImm
+            auto imm = surface->asImm()->getImm();
+            assert(
+                (imm & 0x1F) == 0 &&
+                (imm & 0xFFFFFFFF00000000LL) == 0 && "ExDesc can only access [31:5]");
+            createMov(g4::SIMD1, addrDstOpnd,
+                createImm(imm, Type_UD), InstOpt_WriteEnable, true);
+
+            exDescOpnd = createSrcRegRegion(builtinA0Dot2, getRegionScalar());
+            msgDesc->setSurface(exDescOpnd); // link a0.2 to the send descriptor
+        }
+        else
+        {
+            // BTI is in ExDesc[31:24] and that is always available.
+            assert(false && "BTI/FLAT should not reach this. "
+                "FLAT should have surface == nullptr and"
+                "BTI should either use a register for a variable BTI or have "
+                "folded the immediate vlaue into ExDesc"
+                " (and thus surface==nullptr here)");
+        }
+    } else {
+        exDescOpnd = createImm(exDesc, Type_UD);
+    }
+
+    return createSplitSendInst(
+        pred, G4_sends, execSize, dst, src0, src1,
+        createImm(msgDesc->getDesc(), Type_UD),
+        option, msgDesc, exDescOpnd, true);
+}
+
+//Using r0.8:ud to save and restore a0.2
+G4_SrcRegRegion* IR_Builder::getScratchSurfaceStatusIndex()
+{
+    auto dst = createDst(builtinR0->getRegVar(), 0, 8, 1, Type_UD);
+    auto src0 = createSrcRegRegion(builtinA0Dot2, getRegionScalar());
+    createMov(g4::SIMD1, dst, src0, InstOpt_WriteEnable, true);
+
+    G4_SrcRegRegion* R0_5 = createSrc(builtinR0->getRegVar(), 0, 5, getRegionScalar(), Type_UD);
+    G4_DstRegRegion* A02Dst = createDstRegRegion(builtinA0Dot2, 1);
+    createMov(g4::SIMD1, A02Dst, R0_5, InstOpt_WriteEnable, true);
+    return createSrcRegRegion(builtinA0Dot2, getRegionScalar());
+}
+
+void IR_Builder::RestoreA0()
+{
+    auto dst = createDstRegRegion(builtinA0Dot2, 1);
+    auto src0 = createSrc(builtinR0->getRegVar(), 0, 8, getRegionStride1(), Type_UD);
+    createMov(g4::SIMD1, dst, src0, InstOpt_WriteEnable, true);
+}
+
+G4_InstSend *IR_Builder::createLscSendInstToScratch(
+    G4_Predicate *pred,
+    G4_DstRegRegion *dst,
+    G4_SrcRegRegion *src0,
+    G4_SrcRegRegion *src1,
+    G4_ExecSize execSize,
+    G4_SendDescRaw *msgDesc,
+    G4_InstOpts options,
+    bool usesBti)
+{
+    uint32_t desc = msgDesc->getDesc();
+    G4_Operand *surface = msgDesc->getSurface();   // BTI or SS/BSS
+    G4_Operand *exDescOpnd = nullptr;
+
+    if (isScratchSpace(surface))
+    {
+        desc = (desc & ~0xFF) | 251;
+    }
+    exDescOpnd = getScratchSurfaceStatusIndex();
+
+    G4_InstSend* inst = createSplitSendInst(
+        pred, G4_sends, execSize, dst, src0, src1,
+        createImm(desc, Type_UD),
+        options, msgDesc, exDescOpnd, true);
+    RestoreA0();
+
+    return inst;
+}
 
 // for reder target messages,
 // desc has a constant BTI value (i.e., no bindless) and no STI
@@ -2550,7 +2972,7 @@ G4_InstSend *IR_Builder::createSplitSendToRenderTarget(
 {
     G4_opcode send_opcode = G4_sendsc;
 
-    fixSendDstType(dst, execSize);
+    fixSendDstType(dst, execSize, *this);
 
     uint32_t desc = msgDesc->getDesc();
     G4_Operand* descOpnd = nullptr;
@@ -2590,7 +3012,7 @@ G4_Declare* IR_Builder::createSendPayloadDcl(unsigned num_elt, G4_Type type)
     return dcl;
 }
 
-void IR_Builder::createMovR0Inst(G4_Declare* dcl, short regOff, short subregOff, bool use_nomask)
+void IR_Builder::createMovR0Inst(G4_Declare* dcl, short regOff, short subregOff, bool use_nomask, G4_InstOpts options)
 {
     G4_DstRegRegion* dst1_opnd = createDst(
         dcl->getRegVar(),
@@ -2603,10 +3025,10 @@ void IR_Builder::createMovR0Inst(G4_Declare* dcl, short regOff, short subregOff,
     G4_SrcRegRegion* r0_src_opnd = createSrcRegRegion(builtinR0, getRegionStride1());
     // create inst
     createMov(
-        G4_ExecSize(GENX_DATAPORT_IO_SZ),
+        G4_ExecSize(getGenxDataportIOSize()),
         dst1_opnd,
         r0_src_opnd,
-        (use_nomask ? InstOpt_WriteEnable : 0),
+        (use_nomask ? InstOpt_WriteEnable | options : options),
         true);
 }
 
@@ -2914,6 +3336,7 @@ G4_DstRegRegion* IR_Builder::checkSendDst(G4_DstRegRegion *dst_opnd)
             new_SubRegOff = dst_opnd->getSubRegOff() / SIZEOF_DW;
         }
         G4_DstRegRegion new_dst(
+            *this,
             dst_opnd->getRegAccess(),
             dst_opnd->getBase(),
             dst_opnd->getRegOff(),
@@ -3198,7 +3621,7 @@ void IR_Builder::doSimplification(G4_INST *inst)
     // - destination stride in bytes must be equal to the source element size in bytes.
     bool canConvertMovToMovi = inst->opcode() == G4_mov && inst->getExecSize() == g4::SIMD8 &&
         inst->isRawMov() && inst->getDst() &&
-        !inst->getDst()->asDstRegRegion()->isCrossGRFDst() &&
+        !inst->getDst()->asDstRegRegion()->isCrossGRFDst(*this) &&
         inst->getSrc(0) && inst->getSrc(0)->isSrcRegRegion() &&
         inst->getSrc(0)->asSrcRegRegion()->isIndirect() &&
         inst->getSrc(0)->asSrcRegRegion()->getRegion()->isRegionWH() &&
@@ -3246,16 +3669,16 @@ void IR_Builder::doSimplification(G4_INST *inst)
                     Op1->isImm() && Op1->getType() == Type_UV) {
                     // Immeidates in 'uv' ensures each element is a
                     // byte-offset within half-GRF.
-                    G4_SubReg_Align SubAlign = GRFALIGN;
+                    G4_SubReg_Align SubAlign = getGRFAlign();
                     if (SrcSizeInBytes <= numEltPerGRF<Type_UB>()/2u)
                         SubAlign = (G4_SubReg_Align)(numEltPerGRF<Type_UW>()/2);
                     inst->setOpcode(G4_movi);
-                    if (!Dcl->isEvenAlign() && Dcl->getSubRegAlign() != GRFALIGN)
+                    if (!Dcl->isEvenAlign() && Dcl->getSubRegAlign() != getGRFAlign())
                     {
                         Dcl->setSubRegAlign(SubAlign);
                     }
                     const RegionDesc *rd = getRegionStride1();
-                    inst->getSrc(0)->asSrcRegRegion()->setRegion(rd);
+                    inst->getSrc(0)->asSrcRegRegion()->setRegion(*this, rd);
                     // Set subreg alignment for the address variable.
                     Dcl =
                         LEA->getDst()->getBase()->asRegVar()->getDeclare();

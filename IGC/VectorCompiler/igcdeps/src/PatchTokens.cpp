@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "vc/Driver/Driver.h"
+#include "vc/Support/ShaderDump.h"
 #include "vc/Support/Status.h"
 #include "vc/igcdeps/cmc.h"
 
@@ -154,6 +155,7 @@ void CGen8CMProgram::CreateKernelBinaries(CompileOptions& Opts) {
     iOpenCL::KernelData data;
     data.kernelBinary = std::make_unique<Util::BinaryStream>();
 
+    m_ContextProvider.KernelIsDebuggable = kernel->m_SupportsDebugging;
     m_StateProcessor.CreateKernelBinary(
         reinterpret_cast<const char *>(kernel->getProgramOutput().m_programBin),
         kernel->getProgramOutput().m_programSize, kernel->m_kernelInfo,
@@ -163,7 +165,8 @@ void CGen8CMProgram::CreateKernelBinaries(CompileOptions& Opts) {
 
     if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
       Opts.Dumper->dumpCos(m_StateProcessor.m_oclStateDebugMessagePrintOut,
-                           kernel->m_kernelInfo.m_kernelName + ".cos");
+                           vc::legalizeShaderDumpName(
+                               kernel->m_kernelInfo.m_kernelName + ".cos"));
 
     if (kernel->getProgramOutput().m_debugDataSize) {
       data.vcKernelDebugData = std::make_unique<Util::BinaryStream>();
@@ -196,10 +199,16 @@ void CGen8CMProgram::GetZEBinary(llvm::raw_pwrite_stream &programBinary,
         reinterpret_cast<const char *>(kernel->getProgramOutput().m_programBin),
         kernel->getProgramOutput().m_programSize, kernel->m_kernelInfo,
         kernel->m_GRFSizeInBytes, kernel->m_btiLayout,
-        m_ContextProvider.isProgramDebuggable());
+        kernel->getProgramOutput().m_VISAAsm,
+        kernel->m_SupportsDebugging);
   }
 
-  if (m_ContextProvider.isProgramDebuggable()) {
+  bool HasDebugInformation =
+      std::any_of(m_kernels.begin(), m_kernels.end(),
+                  [](const auto& kernel) {
+                    return kernel->getProgramOutput().m_debugDataSize > 0;
+                  });
+  if (HasDebugInformation) {
     DebugInfoHolder = buildZeDebugInfo(m_kernels, ErrLog);
     if (DebugInfoHolder) {
       // Unfortunately, we do need const_cast here, since API requires void*

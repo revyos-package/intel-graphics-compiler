@@ -47,14 +47,30 @@ def : PlainJoined<"runtime=">, Alias<binary_format>,
 
 def ftime_report : PlainFlag<"ftime-report">,
   HelpText<"Print timing summary of each stage of compilation">;
+def freset_time_report : PlainFlag<"freset-time-report">,
+  HelpText<"Reset timing summary before compilation">;
 
 def print_stats : PlainFlag<"print-stats">,
   HelpText<"Print performance metrics and statistics">;
+def freset_llvm_stats : PlainFlag<"freset-llvm-stats">,
+  HelpText<"Reset perfomance metrics before compilation">;
 
 def stats_file : PlainSeparate<"stats-file">,
   HelpText<"Filename to write statistics to">;
 def : PlainJoined<"stats-file=">, Alias<stats_file>,
   HelpText<"Alias for -stats-file">;
 
+def fdisable_debuggable_kernels : PlainFlag<"vc-disable-debuggable-kernels">,
+  HelpText<"Disable emission of debuggable kernels for legacy path">;
+
+def gpu_scope_fence : PlainFlag<"gpu-scope-fence-on-single-tile">,
+  HelpText<"Allow the use of \"GPU\" fence scope on single-tile GPUs">;
+def flush_l3_for_global : PlainFlag<"flush-l3-for-global">,
+  HelpText<"Enable flushing L3 cache for globals">;
+
+def vc_loop_unroll_threshold : PlainSeparate<"vc-loop-unroll-threshold">,
+  HelpText<"Loop unroll threhsold for VC">;
+def : PlainJoined<"vc-loop-unroll-threshold=">, Alias<vc_loop_unroll_threshold>,
+  HelpText<"Alias for -vc-loop-unroll-threshold <value>">;
 }
 // }} VC internal options

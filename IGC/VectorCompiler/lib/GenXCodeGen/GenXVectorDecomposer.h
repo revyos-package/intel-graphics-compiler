@@ -33,28 +33,25 @@ SPDX-License-Identifier: MIT
 
 #pragma once
 
-#include "GenXRegion.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Instructions.h"
+
 #include <map>
 #include <set>
 
 namespace llvm {
 
 class Constant;
-class DominatorTree;
 class Instruction;
 class PHINode;
 class Type;
 class Use;
 
-namespace gen {
+class GenXSubtarget;
 class Region;
-}
 
 // VectorDecomposer : decomposes vectors in a function
 class VectorDecomposer {
-  DominatorTree *DT = nullptr;
   const DataLayout *DL = nullptr;
   SmallVector<Instruction *, 16> StartWrRegions;
   std::set<Instruction *> Seen;
@@ -66,6 +63,8 @@ class VectorDecomposer {
   SmallVector<unsigned, 8> Offsets;
   std::map<PHINode *, SmallVector<Value *, 8>> PhiParts;
   SmallVector<Instruction *, 8> NewInsts;
+  unsigned DecomposedCount = 0;
+
 public:
   // clear : clear anything stored
   void clear() {
@@ -73,11 +72,13 @@ public:
     StartWrRegions.clear();
     Seen.clear();
     ToDelete.clear();
+    DecomposedCount = 0;
   }
   // addStartWrRegion : add a wrregion with undef input to the list
   void addStartWrRegion(Instruction *Inst) { StartWrRegions.push_back(Inst); }
   // run : run the vector decomposer on the stored StartWrRegions
-  bool run(DominatorTree *DT);
+  bool run(const DataLayout &ArgDL);
+
 private:
   // clearOne : clear from processing one web
   void clearOne() {
@@ -100,7 +101,7 @@ private:
                          const SmallVectorImpl<Value *> *PartsIn);
   void decomposeWrRegion(Instruction *WrRegion, SmallVectorImpl<Value *> *Parts);
   void decomposeBitCast(Instruction *Inst, SmallVectorImpl<Value *> *Parts);
-  unsigned getPartIndex(genx::Region *R);
+  unsigned getPartIndex(Region *R);
   unsigned getPartOffset(unsigned PartIndex);
   unsigned getPartNumBytes(Type *WholeTy, unsigned PartIndex);
   unsigned getPartNumElements(Type *WholeTy, unsigned PartIndex);

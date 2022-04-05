@@ -120,6 +120,7 @@ const char* PreCompiledFuncImport::m_Int32EmuFunctionNames[NUM_INT32_EMU_FUNCTIO
     "precompiled_s32divrem_sp"
 };
 
+// The entry order must match to FunctionIDs enum!
 const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_IDS] =
 {
     { "__igcbuiltin_dp_add",        LIBMOD_DP_ADD_SUB },
@@ -135,9 +136,14 @@ const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_ID
     { "__igcbuiltin_dp_to_sp",      LIBMOD_DP_CONV_SP },
     { "__igcbuiltin_sp_to_dp",      LIBMOD_DP_CONV_SP },
     { "__igcbuiltin_dp_sqrt",       LIBMOD_DP_SQRT },
-    { "__igcbuiltin_sp_div",        LIBMOD_SP_DIV }
+    { "__igcbuiltin_sp_div",        LIBMOD_SP_DIV },
+    { "__igcbuiltin_dp_to_int64",   LIBMOD_DP_CONV_I64 },
+    { "__igcbuiltin_dp_to_uint64",  LIBMOD_DP_CONV_I64 },
+    { "__igcbuiltin_int64_to_dp",   LIBMOD_DP_CONV_I64 },
+    { "__igcbuiltin_uint64_to_dp",  LIBMOD_DP_CONV_I64 }
 };
 
+// The entry order must match to LibraryModules enum!
 const LibraryModuleInfo PreCompiledFuncImport::m_libModInfos[NUM_LIBMODS] =
 {
     /* LIBMOD_INT_DIV_REM */   { preCompiledFunctionLibrary, sizeof(preCompiledFunctionLibrary) },
@@ -152,7 +158,8 @@ const LibraryModuleInfo PreCompiledFuncImport::m_libModInfos[NUM_LIBMODS] =
     /* LIBMOD_DP_CONV_I32 */   { igcbuiltin_emu_dp_conv_i32, sizeof(igcbuiltin_emu_dp_conv_i32) },
     /* LIBMOD_DP_CONV_SP  */   { igcbuiltin_emu_dp_conv_sp, sizeof(igcbuiltin_emu_dp_conv_sp) },
     /* LIBMOD_DP_SQRT     */   { igcbuiltin_emu_dp_sqrt, sizeof(igcbuiltin_emu_dp_sqrt) },
-    /* LIBMOD_SP_DIV      */   { igcbuiltin_emu_sp_div, sizeof(igcbuiltin_emu_sp_div) }
+    /* LIBMOD_SP_DIV      */   { igcbuiltin_emu_sp_div, sizeof(igcbuiltin_emu_sp_div) },
+    /* LIBMOD_DP_CONV_I64 */   { igcbuiltin_emu_dp_conv_i64, sizeof(igcbuiltin_emu_dp_conv_i64) },
 };
 
 void PreCompiledFuncImport::eraseCallInst(CallInst * CI)
@@ -1001,6 +1008,7 @@ void PreCompiledFuncImport::processInt32Divide(BinaryOperator& inst, Int32Emulat
 //64 bit emulation for divide
 void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunctions function)
 {
+    m_pCtx->metrics.StatBeginEmuFunc(&inst);
     unsigned int numElements = 1;
     unsigned int elementIndex = 0;
 
@@ -1075,10 +1083,12 @@ void PreCompiledFuncImport::processDivide(BinaryOperator& inst, EmulatedFunction
 
     m_libModuleToBeImported[LIBMOD_INT_DIV_REM] = true;
     m_changed = true;
+    m_pCtx->metrics.StatEndEmuFunc(funcCall);
 }
 
 void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst& inst)
 {
+    m_pCtx->metrics.StatBeginEmuFunc(&inst);
     if ((isI64DivRem() || isDPEmu()) &&
         inst.getDestTy()->isHalfTy() && inst.getSrcTy()->isDoubleTy())
     {
@@ -1116,6 +1126,7 @@ void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst& inst)
 
         m_libModuleToBeImported[LIBMOD_INT_DIV_REM] = true;
         m_changed = true;
+        m_pCtx->metrics.StatEndEmuFunc(funcCall);
         return;
     }
 
@@ -1140,6 +1151,7 @@ void PreCompiledFuncImport::visitFPTruncInst(llvm::FPTruncInst& inst)
         inst.eraseFromParent();
 
         m_changed = true;
+        m_pCtx->metrics.StatEndEmuFunc(funcCall);
         return;
     }
 }
@@ -1163,28 +1175,35 @@ void PreCompiledFuncImport::processFPBinaryOperator(Instruction& I, FunctionIDs 
 
         Instruction* twoI32 = CastInst::Create(
             Instruction::BitCast, I.getOperand(1), vec2Ty, "", &I);
+        twoI32->setDebugLoc(I.getDebugLoc());
         Instruction* topI32 = ExtractElementInst::Create(
             twoI32, ConstantInt::get(intTy, 1), "", &I);
+        topI32->setDebugLoc(I.getDebugLoc());
 
         //Isolate and flip sign bit
         Instruction* Inst2 = BinaryOperator::CreateAnd(
             topI32, ConstantInt::get(intTy, 0x80000000), "", &I);
+        Inst2->setDebugLoc(I.getDebugLoc());
         Instruction* Inst3 = BinaryOperator::CreateXor(
             Inst2, ConstantInt::get(intTy, 0x80000000), "", &I);
+        Inst3->setDebugLoc(I.getDebugLoc());
 
         //Change sign bit and pack back new value
         Instruction* Inst4 = BinaryOperator::CreateAnd(
             topI32, ConstantInt::get(intTy, 0x7FFFFFFF), "", &I);
+        Inst4->setDebugLoc(I.getDebugLoc());
         Instruction* newTopI32 = BinaryOperator::CreateOr(
             Inst4, Inst3, "", &I);
+        newTopI32->setDebugLoc(I.getDebugLoc());
         Instruction* finalVal = InsertElementInst::Create(
             twoI32, newTopI32, ConstantInt::get(intTy, 1), "", &I);
+        finalVal->setDebugLoc(I.getDebugLoc());
         Instruction* finalValDouble = CastInst::Create(
             Instruction::BitCast, finalVal, DoubleTy, "", &I);
+        finalValDouble->setDebugLoc(I.getDebugLoc());
 
         I.replaceAllUsesWith(finalValDouble);
         I.eraseFromParent();
-
         m_changed = true;
     }
     else
@@ -1207,7 +1226,6 @@ void PreCompiledFuncImport::processFPBinaryOperator(Instruction& I, FunctionIDs 
 
         I.replaceAllUsesWith(funcCall);
         I.eraseFromParent();
-
         m_changed = true;
     }
 }
@@ -1256,6 +1274,7 @@ Function* PreCompiledFuncImport::getOrCreateFunction(FunctionIDs FID)
 
     SmallVector<Type*, 8> argTypes;
     Type* intTy = Type::getInt32Ty(m_pModule->getContext());
+    Type* int64Ty = Type::getInt64Ty(m_pModule->getContext());
     Type* dpTy = Type::getDoubleTy(m_pModule->getContext());
     Type* spTy = Type::getFloatTy(m_pModule->getContext());
     Type* intPtrTy = intTy->getPointerTo(ADDRESS_SPACE_PRIVATE);
@@ -1312,6 +1331,29 @@ Function* PreCompiledFuncImport::getOrCreateFunction(FunctionIDs FID)
         // double int32_to_dp (int32 in)
         // double uint32_to_dp (uint32 in)
         argTypes.push_back(intTy);
+
+        retTy = dpTy;
+        break;
+
+    case FUNCTION_DP_TO_I64:
+    case FUNCTION_DP_TO_UI64:
+        // [u]int64 dp_to_[u]int64
+        //     (double xin, int rmode, int daz, int* pflags)
+        argTypes.push_back(dpTy);
+        argTypes.push_back(intTy);
+        argTypes.push_back(intTy);
+        argTypes.push_back(intPtrTy);
+
+        retTy = int64Ty;
+        break;
+
+    case FUNCTION_I64_TO_DP:
+    case FUNCTION_UI64_TO_DP:
+        // double int64_to_dp (int64 in, int rmode, int* pflags)
+        // double uint64_to_dp (uint64 in, int rmode, int* pflags)
+        argTypes.push_back(int64Ty);
+        argTypes.push_back(intTy);
+        argTypes.push_back(intPtrTy);
 
         retTy = dpTy;
         break;
@@ -1387,6 +1429,7 @@ void PreCompiledFuncImport::visitFPExtInst(llvm::FPExtInst& I)
     if (isDPEmu() && I.getDestTy()->isDoubleTy() &&
         (I.getSrcTy()->isFloatTy() || I.getSrcTy()->isHalfTy()))
     {
+        m_pCtx->metrics.StatBeginEmuFunc(&I);
         Function* newFunc = getOrCreateFunction(FUNCTION_SP_TO_DP);
         Type* intTy = Type::getInt32Ty(m_pModule->getContext());
         Function* CurrFunc = I.getParent()->getParent();
@@ -1413,13 +1456,14 @@ void PreCompiledFuncImport::visitFPExtInst(llvm::FPExtInst& I)
 
         I.replaceAllUsesWith(funcCall);
         I.eraseFromParent();
-
+        m_pCtx->metrics.StatEndEmuFunc(funcCall);
         m_changed = true;
     }
 }
 
 void PreCompiledFuncImport::visitCastInst(llvm::CastInst& I)
 {
+    m_pCtx->metrics.StatBeginEmuFunc(&I);
     if (!isDPEmu()) {
         return;
     }
@@ -1435,44 +1479,63 @@ void PreCompiledFuncImport::visitCastInst(llvm::CastInst& I)
     Type* dstTy = I.getType();
     Type* srcTy = I.getOperand(0)->getType();
     uint32_t opc = I.getOpcode();
-    uint32_t intBits;
+    uint32_t intBits = 0;
     Value* oprd0 = I.getOperand(0);
     switch (opc)
     {
     case Instruction::FPToSI:
     case Instruction::FPToUI:
         intBits = dstTy->getIntegerBitWidth();
-        if (!srcTy->isDoubleTy() || intBits > 32) {
+        if (!srcTy->isDoubleTy()) {
             return;
         }
 
-        FID = ((opc == Instruction::FPToSI) ? FUNCTION_DP_TO_I32
-            : FUNCTION_DP_TO_UI32);
+        if (intBits > 32)
+        {
+            FID = ((opc == Instruction::FPToSI) ? FUNCTION_DP_TO_I64
+                : FUNCTION_DP_TO_UI64);
+        }
+        else
+        {
+            FID = ((opc == Instruction::FPToSI) ? FUNCTION_DP_TO_I32
+                : FUNCTION_DP_TO_UI32);
+        }
         break;
 
     case Instruction::SIToFP:
     case Instruction::UIToFP:
         intBits = srcTy->getIntegerBitWidth();
-        if (!dstTy->isDoubleTy() || intBits > 32) {
+        if (!dstTy->isDoubleTy()) {
             return;
         }
-        if (intBits < 32)
+        if (intBits != 32 && intBits != 64)
         {
+            // If not 32/64 int, up-cvt to 32/64 first.
             Instruction* newInst;
+            Type* int64Ty = Type::getInt64Ty(m_pModule->getContext());
+            Type* dTy = intBits < 32 ? intTy : int64Ty;
             if (opc == Instruction::SIToFP)
             {
-                newInst = new SExtInst(oprd0, intTy, "DPEmusext", &I);
+                newInst = new SExtInst(oprd0, dTy, "DPEmusext", &I);
             }
             else
             {
-                newInst = new ZExtInst(oprd0, intTy, "DPEmuzext", &I);
+                newInst = new ZExtInst(oprd0, dTy, "DPEmuzext", &I);
             }
             newInst->setDebugLoc(I.getDebugLoc());
             oprd0 = newInst;
         }
 
-        FID = ((opc == Instruction::SIToFP) ? FUNCTION_I32_TO_DP
-            : FUNCTION_UI32_TO_DP);
+        if (intBits > 32)
+        {
+            FID = ((opc == Instruction::SIToFP) ? FUNCTION_I64_TO_DP
+                : FUNCTION_UI64_TO_DP);
+        }
+        else
+        {
+            FID = ((opc == Instruction::SIToFP) ? FUNCTION_I32_TO_DP
+                : FUNCTION_UI32_TO_DP);
+        }
         break;
 
     default:
@@ -1489,22 +1552,30 @@ void PreCompiledFuncImport::visitCastInst(llvm::CastInst& I)
         args.push_back(ConstantInt::get(intTy, m_flushDenorm));   // flush denorm
         args.push_back(createFlagValue(CurrFunc));  // FP flags, ignored
     }
+    else if ((opc == Instruction::SIToFP || opc == Instruction::UIToFP)
+        && intBits > 32)
+    {
+        // [u]int64_to_dp ([S|U]INT64 ix, int rmode, int* pflags)
+        args.push_back(ConstantInt::get(intTy, 0));  // rounding mode RN
+        args.push_back(createFlagValue(CurrFunc));   // FP flags, ignored
+    }
 
     CallInst* funcCall = CallInst::Create(newFunc, args, I.getName(), &I);
     addCallInst(funcCall);
     funcCall->setDebugLoc(I.getDebugLoc());
 
     Instruction* newVal = funcCall;
-    if ((intBits < 32) &&
+    if ((intBits != 32 && intBits != 64) &&
         (opc == Instruction::FPToSI || opc == Instruction::FPToUI))
     {
+        // If not 32/64, down-cvt from 32/64 int.
         newVal = new TruncInst(newVal, I.getType(), "DPEmuTrunc", &I);
         newVal->setDebugLoc(I.getDebugLoc());
     }
 
     I.replaceAllUsesWith(newVal);
     I.eraseFromParent();
-
+    m_pCtx->metrics.StatEndEmuFunc(newVal);
     m_changed = true;
     return;
 }
@@ -1582,6 +1653,7 @@ uint32_t PreCompiledFuncImport::getFCmpMask(CmpInst::Predicate Pred)
 
 void PreCompiledFuncImport::visitFCmpInst(FCmpInst& I)
 {
+    m_pCtx->metrics.StatBeginEmuFunc(&I);
     if (!isDPEmu() || !I.getOperand(0)->getType()->isDoubleTy()) {
         return;
     }
@@ -1627,12 +1699,13 @@ void PreCompiledFuncImport::visitFCmpInst(FCmpInst& I)
 
     I.replaceAllUsesWith(intcmp);
     I.eraseFromParent();
-
+    m_pCtx->metrics.StatEndEmuFunc(funcCall);
     m_changed = true;
 }
 
 void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
 {
+    m_pCtx->metrics.StatBeginEmuFunc(&I);
     if (IGC_IS_FLAG_ENABLED(EnableTestIGCBuiltin))
     {
         // This is to test if an emulated function is the same
@@ -1759,10 +1832,12 @@ As a result, we reduce 2x necessary work
 
                 if (auto* AI = dyn_cast<AllocaInst>(remValue))
                     AI->eraseFromParent();
+                InstCompare->setDebugLoc(I.getDebugLoc());
 
                 eraseCallInst(&I);
                 I.replaceAllUsesWith(InstCompare);
                 I.eraseFromParent();
+                m_pCtx->metrics.StatEndEmuFunc(InstCompare);
                 m_changed = true;
                 return;
             }
@@ -1792,7 +1867,7 @@ As a result, we reduce 2x necessary work
 
         I.replaceAllUsesWith(newVal);
         I.eraseFromParent();
-
+        m_pCtx->metrics.StatEndEmuFunc(newVal);
         m_changed = true;
         return;
     }
@@ -1821,7 +1896,7 @@ As a result, we reduce 2x necessary work
 
         I.replaceAllUsesWith(newVal);
         I.eraseFromParent();
-
+        m_pCtx->metrics.StatEndEmuFunc(newVal);
         m_changed = true;
         return;
     }
@@ -1849,7 +1924,7 @@ As a result, we reduce 2x necessary work
 
         I.replaceAllUsesWith(fabsVal);
         I.eraseFromParent();
-
+        m_pCtx->metrics.StatEndEmuFunc(fabsVal);
         m_changed = true;
         return;
     }
@@ -2117,6 +2192,7 @@ void PreCompiledFuncImport::checkAndSetEnableSubroutine()
                 if (DPDivSqrtEmu && I->getOperand(0)->getType()->isDoubleTy())
                 {
                     m_enableSubroutineCallForEmulation = true;
+                    m_pCtx->m_hasDPDivSqrtEmu = true;
                 }
             case Instruction::FMul:
             case Instruction::FAdd:
@@ -2152,6 +2228,7 @@ void PreCompiledFuncImport::checkAndSetEnableSubroutine()
                 IInst && IInst->getIntrinsicID() == Intrinsic::sqrt)
             {
                 m_enableSubroutineCallForEmulation = true;
+                m_pCtx->m_hasDPDivSqrtEmu = true;
             }
             else
             if (DPEmu && I->getType()->isDoubleTy() &&

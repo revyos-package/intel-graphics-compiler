@@ -139,11 +139,16 @@ bool HWConformity::fixInstOpndTypeAlign(INST_LIST_ITER i, G4_BB* bb)
     G4_INST *inst = *i;
     bool insertedInst = false;
 
+    if (inst->opcode() == G4_srnd)
+    {
+        // Operands can be packed.
+        return false;
+    }
 
     int extypesize = 0;
     G4_Type extype = inst->getOpExecType(extypesize);
 
-    if (extypesize == numEltPerGRF<Type_UB>()/2 && inst->opcode() != G4_mov)
+    if (extypesize == kernel.numEltPerGRF<Type_UB>()/2 && inst->opcode() != G4_mov)
     {
         fixPackedSource(i, bb);
         extype = inst->getOpExecType(extypesize);
@@ -156,7 +161,7 @@ bool HWConformity::fixInstOpndTypeAlign(INST_LIST_ITER i, G4_BB* bb)
     extype = inst->getOpExecType(extypesize);
     if (inst->getDst() && !(inst->isSend()) && !(inst->isRawMov()))
     {
-        if (extypesize < (int)numEltPerGRF<Type_UB>()/2)
+        if (extypesize < (int)kernel.numEltPerGRF<Type_UB>()/2)
         {
             uint32_t dst_elsize = inst->getDst()->getTypeSize();
             if (dst_elsize < (unsigned int)extypesize)
@@ -219,14 +224,14 @@ bool HWConformity::checkSrcCrossGRF(INST_LIST_ITER& iter, G4_BB* bb)
             const RegionDesc* srcRegion = src->getRegion();
             uint16_t vs = srcRegion->vertStride, wd = srcRegion->width, hs = srcRegion->horzStride;
             uint8_t exSize = inst->getExecSize();
-            if (src->getRegAccess() == Direct && src->crossGRF())
+            if (src->getRegAccess() == Direct && src->crossGRF(builder))
             {
                 int elementSize = src->getTypeSize();
-                int startOffset = src->getLeftBound() % numEltPerGRF<Type_UB>();
+                int startOffset = src->getLeftBound() % kernel.numEltPerGRF<Type_UB>();
                 for (int row = 0; row < exSize / wd; row++)
                 {
-                    int rowOffset = (startOffset + row * vs * elementSize) % numEltPerGRF<Type_UB>();
-                    if (rowOffset + (wd - 1) * hs * elementSize >= (int)numEltPerGRF<Type_UB>())
+                    int rowOffset = (startOffset + row * vs * elementSize) % kernel.numEltPerGRF<Type_UB>();
+                    if (rowOffset + (wd - 1) * hs * elementSize >= (int)kernel.numEltPerGRF<Type_UB>())
                     {
                         widthCrossingGRF = true;
                         break;
@@ -260,7 +265,7 @@ bool HWConformity::checkSrcCrossGRF(INST_LIST_ITER& iter, G4_BB* bb)
                 if (srcRegion->isSingleStride(exSize, stride))
                 {
                     // replace <v;w,h> with <h;1,0>
-                    src->setRegion(builder.createRegionDesc(stride, 1, 0), true);
+                    src->setRegion(builder, builder.createRegionDesc(stride, 1, 0), true);
                 }
                 else
                 {
@@ -275,7 +280,7 @@ bool HWConformity::checkSrcCrossGRF(INST_LIST_ITER& iter, G4_BB* bb)
                 // may be not equipped to deal with them later
                 const RegionDesc* region = src->getRegion();
                 if (!region->isScalar() && !region->isContiguous(inst->getExecSize()) &&
-                    src->crossGRF())
+                    src->crossGRF(builder))
                 {
                     doSplit(false);
                     return true;
@@ -348,7 +353,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
 
     unsigned char execSize = inst->getExecSize();
     bool splitOp = false, goodOneGRFDst = false;
-    bool crossGRFDst = dst && dst->isCrossGRFDst();
+    bool crossGRFDst = dst && dst->isCrossGRFDst(builder);
     bool goodTwoGRFDst = false;
     // for all platforms, if execution size is 8 or less and the destination register is 2, flag updates are not supported.
     bool specialCondForComprInst = (execSize < 8 && dst && dst->getHorzStride() != 1 &&
@@ -429,7 +434,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                         continue;
                     }
 
-                    if (srcs[i]->crossGRF())
+                    if (srcs[i]->crossGRF(builder))
                     {
                         twoGRFSrc[i] = true;
 
@@ -449,7 +454,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                                 {
                                     // If we can align dst to its size, it must fit in one OWord
                                     // if we can't, it may still be in OWord (e.g., for size < 16)
-                                    dstOffset %= numEltPerGRF<Type_UB>();
+                                    dstOffset %= kernel.numEltPerGRF<Type_UB>();
                                     bool fitInOword = !(dstOffset < 16 && (dstOffset + dstRegionSize) > 16);
                                     if (!fitInOword)
                                     {
@@ -469,8 +474,8 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                                 // check if src is evenly split across the two GRFs
                                 bool sameSubregOff, vertCrossGRF, contRegion;
                                 evenTwoGRFSrc[i] = srcs[i]->asSrcRegRegion()->evenlySplitCrossGRF(
-                                    execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i]);
-                                bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF();
+                                    builder, execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i]);
+                                bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF(builder);
                                 const RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
                                 uint16_t stride = 0;
                                 fullTwoGRFSrc[i] = coverTwoGRF && rd->isSingleStride(inst->getExecSize(), stride) && (stride == 1);
@@ -571,13 +576,13 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                         splitOp = true;
                     }
                 }
-                else if (srcs[i]->crossGRF())
+                else if (srcs[i]->crossGRF(builder))
                 {
                     twoGRFSrc[i] = true;
                     bool sameSubregOff, vertCrossGRF, contRegion;
                     evenTwoGRFSrc[i] = srcs[i]->asSrcRegRegion()->evenlySplitCrossGRF(
-                        execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i]);
-                    bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF();
+                        builder, execSize, sameSubregOff, vertCrossGRF, contRegion, eleInFirstGRF[i]);
+                    bool coverTwoGRF = srcs[i]->asSrcRegRegion()->coverTwoGRF(builder);
                     const RegionDesc *rd = srcs[i]->asSrcRegRegion()->getRegion();
                     uint16_t stride = 0;
                     fullTwoGRFSrc[i] = coverTwoGRF && rd->isSingleStride(inst->getExecSize(), stride) && (stride == 1);
@@ -603,7 +608,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                         else
                         {
                             // if we can't, it may still be in one OWord or evenly split
-                            goodOneGRFDst = dst->goodOneGRFDst(execSize);
+                            goodOneGRFDst = dst->goodOneGRFDst(builder, execSize);
                         }
                     }
 
@@ -615,7 +620,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
                     // 2. Same subregister number in the two GRFs(occupy whole two GRFs) if dst is two-GRF.
                     if (!evenTwoGRFSrc[i] ||
                         (((goodTwoGRFDst || (goodOneGRFDst && !contRegion)) && !sameSubregOff) ||
-                        (goodTwoGRFDst && IS_WTYPE(srcs[i]->getType()) && !(srcs[i]->asSrcRegRegion()->checkGRFAlign() && coverTwoGRF))))
+                        (goodTwoGRFDst && IS_WTYPE(srcs[i]->getType()) && !(srcs[i]->asSrcRegRegion()->checkGRFAlign(builder) && coverTwoGRF))))
                     {
                         splitOp = true;
                         // compensation OPT
@@ -752,9 +757,9 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
             uint8_t scale = TypeSize(instExecType) / dst->getTypeSize();
 
             if (scale > 1 &&
-                TypeSize(instExecType) * (unsigned)execSize > numEltPerGRF<Type_UB>())
+                TypeSize(instExecType) * (unsigned)execSize > kernel.numEltPerGRF<Type_UB>())
             {
-                scale = numEltPerGRF<Type_UB>() / dst->getTypeSize() / execSize;
+                scale = kernel.numEltPerGRF<Type_UB>() / dst->getTypeSize() / execSize;
             }
             else if (scale == 0)
             {
@@ -853,7 +858,12 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB* bb)
 }
 
 // split a SIMD32 inst into two SIMD16.
-// there is predicate/conditional modifier used in this inst
+// there is predicate/conditional modifier used in this inst.
+//
+// Result:
+//    Inst refered to by 'iter' is split into two simd16 instrcutions.
+//    One is inserted right before 'iter', the other is to reuse 'iter'.
+// And the caller of this function can access two new instructions via '--iter' and 'iter' !
 void HWConformity::splitSIMD32Inst(INST_LIST_ITER iter, G4_BB* bb)
 {
     G4_INST *inst = *iter;
@@ -906,6 +916,7 @@ void HWConformity::splitSIMD32Inst(INST_LIST_ITER iter, G4_BB* bb)
         G4_INST* newInst;
         if ((i + currExSize) < instExSize)
         {
+            // 1st simd16 (M0)
             newInst = builder.makeSplittingInst(inst, currExSize);
             newInst->setDest(newDst);
             newInst->setPredicate(newPredOpnd);
@@ -914,7 +925,11 @@ void HWConformity::splitSIMD32Inst(INST_LIST_ITER iter, G4_BB* bb)
         }
         else
         {
-            // reuse the original inst
+            // 2nd simd16 (M16). reuse the original inst and may need to reset mask offset.
+            if (!inst->isWriteEnableInst() || newPredOpnd || newCondMod)
+            {
+                inst->setMaskOption(InstOpt_M16);
+            }
             newInst = inst;
             newInst->setExecSize(currExSize);
             newInst->setDest(newDst);
@@ -1049,7 +1064,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
                 continue;
             }
             bool twoGRFsrc = false;
-            opndExSize[j+1] = srcs[j]->asSrcRegRegion()->getMaxExecSize(i, currExSize, canSrcCrossGRF, vs[j], wd[j], twoGRFsrc);
+            opndExSize[j+1] = srcs[j]->asSrcRegRegion()->getMaxExecSize(builder, i, currExSize, canSrcCrossGRF, vs[j], wd[j], twoGRFsrc);
 
             if (opndExSize[j + 1] > 8 && rule4_11)
             {
@@ -1065,7 +1080,7 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
 
         if (dst && !nullDst)
         {
-            opndExSize[0] = dst->getMaxExecSize(i, currExSize, crossGRFsrc);
+            opndExSize[0] = dst->getMaxExecSize(builder, i, currExSize, crossGRFsrc);
 
             if (opndExSize[0] > 8 && rule4_11)
                 opndExSize[0] = 8;
@@ -1254,6 +1269,9 @@ void HWConformity::splitInstruction(INST_LIST_ITER iter, G4_BB* bb, bool compOpt
 
 // evenly split an inst into two instructions with half execution size.
 // this is used to split a simd16 math into two simd8 before other reducing exeuction size actions
+//
+// This will has two instructions: one is right before "iter", the other is to re-use "iter". The
+// caller is safe to use "--iter" and "iter" to refer those two instructions.
 bool HWConformity::evenlySplitInst(INST_LIST_ITER iter, G4_BB* bb, bool checkOverlap)
 {
     G4_INST* inst = *iter;
@@ -1499,7 +1517,7 @@ void HWConformity::moveSrcToGRF(INST_LIST_ITER it, uint32_t srcNum, uint16_t num
 
     G4_Operand *src = inst->getSrc(srcNum);
     uint32_t srcTypeSize = src->getTypeSize();
-    uint16_t dclSize = (numEltPerGRF<Type_UB>() * numGRF) / srcTypeSize;
+    uint16_t dclSize = (kernel.numEltPerGRF<Type_UB>() * numGRF) / srcTypeSize;
     uint16_t hs = dclSize / execSize;
     uint16_t wd = execSize;
     uint16_t vs = hs * wd;
@@ -1513,8 +1531,8 @@ void HWConformity::moveSrcToGRF(INST_LIST_ITER it, uint32_t srcNum, uint16_t num
 
     if (def_inst && def_inst->getDst()->getType() == tmpType &&
         (def_inst->getExecSize() == execSize) &&
-        def_inst->getDst()->coverGRF(numGRF, execSize) &&
-        def_inst->getDst()->checkGRFAlign() &&
+        def_inst->getDst()->coverGRF(builder, numGRF, execSize) &&
+        def_inst->getDst()->checkGRFAlign(builder) &&
         (bb->isAllLaneActive() || def_inst->isWriteEnableInst()))
     {
 
@@ -1532,7 +1550,7 @@ void HWConformity::moveSrcToGRF(INST_LIST_ITER it, uint32_t srcNum, uint16_t num
         inst->setSrc(newSrc, srcNum);
     }
 
-    G4_Declare* dcl = builder.createTempVar(dclSize, src->getType(), GRFALIGN);
+    G4_Declare* dcl = builder.createTempVar(dclSize, src->getType(), builder.getGRFAlign());
     G4_DstRegRegion *dstRegion = builder.createDst(
                         dcl->getRegVar(),
                         0,

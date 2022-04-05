@@ -314,6 +314,14 @@ extern "C" int iga_main(int argc, const char **argv)
         opts::OptAttrs::ALLOW_UNSET,
         baseOpts.autoCompact);
     xGrp.defineFlag(
+        "force-no-compact",
+        nullptr,
+        "forcely uncompact any instruction",
+        "Forcely un-compact any instruction even if 'Compacted' is set in instruction option."
+        "This will override the effect by -Xautocompact",
+        opts::OptAttrs::ALLOW_UNSET,
+        baseOpts.forceNoCompact);
+    xGrp.defineFlag(
         "dcmp",
         nullptr,
         "debug compaction",
@@ -339,16 +347,22 @@ extern "C" int iga_main(int argc, const char **argv)
         "   If ExecSize is absent, then we guess based on the platform (e.g. 16 on SKL)\n"
         "   (typed is half the default untyped size)"
         "\n"
-        "SFIDS are: DC0, DC1, DC2, DCRO, GTWY, RC, SMPL, TS, URB, VME"
+        "SFIDS are: BTD, DC0, DC1, DC2, DCRO, GTWY, RTA, RC, "
+        "SLM, SMPL, TGM, TS, UGML, UGM, URB, VME"
         "\n"
         "\n"
         "EXAMPLES:\n"
         "  % iga -p=11 -Xdsd     0x0000010C  0x04025C01\n"
         "    decodes message info for a GEN11 descriptor on SFID (DC1)\n"
-        "  % iga -p=12p1 -Xdsd dc1     0x0  0x04025C01\n"
-        "  % iga -p=12p1 -Xdsd dc1 (8) a0.2 0x04025C01\n"
+        "  % iga -p=xe -Xdsd dc1     0x0  0x04025C01\n"
+        "  % iga -p=xe -Xdsd dc1 (8) a0.2 0x04025C01\n"
         "    decodes message info for a XE descriptor on SFID (DC1)\n"
         "    the latter illustrates with ExecSize of 8 and ExDesc of a0.2\n"
+        "  % iga -p=xehpg -Xdsd  ugm       0x0  0x08200580\n"
+        "  % iga -p=xehpg -Xdsd  ugm  (8) a0.2  0x620A3484\n"
+        "  % iga -p=xehpg -Xdsd  ugm       0x0  0x30607502\n"
+        "  % iga -p=xehpg -Xdsd  ugm  (1)  0x0  0x0200D504\n"
+        "  % iga -p=xehpc -Xdsd  ugm       0x0  0x30607502\n"
         "",
         opts::OptAttrs::ALLOW_UNSET,
         [] (const char *, const opts::ErrorHandler &, Opts &baseOpts) {

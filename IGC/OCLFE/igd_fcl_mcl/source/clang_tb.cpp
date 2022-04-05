@@ -470,6 +470,7 @@ typedef unique_ptr<IOCLFEBinaryResult, decltype(&ReleaseDP) > IOCLFEBinaryResult
 
 namespace TC
 {
+    constexpr bool is64bit = sizeof(void*) == sizeof(uint64_t);
     //Misc utility functions used only in the current module
     namespace Utils
     {
@@ -543,11 +544,7 @@ namespace TC
             pszProgramSource(NULL),
             pPCHBuffer(NULL),
             uiPCHBufferSize(0),
-#if !defined(_WIN64) && !defined(__x86_64__)
-            b32bit(true)
-#else
-            b32bit(false)
-#endif
+            b32bit(!is64bit)
         {
         }
 
@@ -838,11 +835,7 @@ namespace TC
             }
         }
 
-#if !defined(_WIN64) && !defined(__x86_64__)
-        return true;
-#else
-        return false;
-#endif
+        return !is64bit;
     }
 
   /*****************************************************************************\
@@ -1076,7 +1069,7 @@ namespace TC
             // This is because clang will not allow declarations of extension's functions which use avc types otherwise.
             if (!(oclStd >= 120 || oclStd == 0)) continue;
           }
-          definesStr.append(" -D").append(ext);
+          definesStr.append(" -D").append(ext.str());
         }
       }
 
@@ -1328,6 +1321,18 @@ namespace TC
                             (strcmp(pParam, "-dwarf-column-info") == 0) ||
                             (strcmp(pParam, "-cl-intel-no-prera-scheduling") == 0) || //temporary options
                             (strcmp(pParam, "-igc_opts") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-intel-gtpin-rera") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-intel-256-GRF-per-thread") == 0) || //temporary options
+                            (strcmp(pParam, "-ze-opt-large-register-file") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-intel-num-thread-per-eu") == 0) || //temporary options
+                            (strncmp(pParam, "-cl-intel-reqd-eu-thread-count", 30) == 0) ||
+                            (strcmp(pParam, "-cl-replace-global-offsets-by-zero") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-kernel-debug-enable") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-include-sip-csr") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-include-sip-kernel-debug") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-include-sip-kernel-local-debug") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-intel-use-32bit-ptr-arith") == 0) || //temporary options
+                            (strcmp(pParam, "-cl-intel-force-disable-4GB-buffer") == 0) || //temporary options
                             (strcmp(pParam, "-cl-intel-greater-than-4GB-buffer-required") == 0) || //temporary options
                             (strcmp(pParam, "-ze-opt-greater-than-4GB-buffer-required") == 0) || //temporary options
                             (strcmp(pParam, "-cl-intel-has-buffer-offset-arg") == 0) || //temporary options
@@ -1371,6 +1376,16 @@ namespace TC
                             else if (strcmp(pParam, "-triple") == 0)
                             {
                                 checkBinaryType = true;
+                            }
+                            else if (strcmp(pParam, "-cl-intel-num-thread-per-eu") == 0)
+                            {
+                                // Next token is N, so ignore it
+                                ignoreNextToken = true;
+                            }
+                            else if (strcmp(pParam, "-cl-intel-reqd-eu-thread-count") == 0)
+                            {
+                                // Next token is N, so ignore it
+                                ignoreNextToken = true;
                             }
                             else if (strcmp(pParam, "-ze-gtpin-scratch-area-size") == 0)
                             {

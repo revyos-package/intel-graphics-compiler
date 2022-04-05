@@ -198,6 +198,87 @@ static std::string createIsaError(
     return sstr.str();
 }
 
+// If region/offset is available, return true; otherwise, return false.
+bool vISAVerifier::getRegion(const vector_opnd& VecOpnd,
+    uint16_t& row_offset, uint16_t& col_offset,
+    uint16_t& v_stride, uint16_t& width, uint16_t& h_stride) const
+{
+    Common_ISA_Operand_Class operand_class = VecOpnd.getOperandClass();
+
+    uint16_t region = 0;
+    row_offset = 0;
+    col_offset = 0;
+
+    switch (operand_class)
+    {
+    case OPERAND_GENERAL:
+        region = VecOpnd.opnd_val.gen_opnd.region;
+        row_offset = VecOpnd.opnd_val.gen_opnd.row_offset;
+        col_offset = VecOpnd.opnd_val.gen_opnd.col_offset;
+        break;
+    case OPERAND_INDIRECT:
+        region = VecOpnd.opnd_val.indirect_opnd.region;
+        break;
+    default:
+        return false;
+    }
+
+    Common_ISA_Region_Val w = (Common_ISA_Region_Val)((region >> 4) & 0xF);
+    Common_ISA_Region_Val h = (Common_ISA_Region_Val)((region >> 8) & 0xF);
+    Common_ISA_Region_Val v = (Common_ISA_Region_Val)((region) & 0xF);
+
+    v_stride = Common_ISA_Get_Region_Value(v);
+    h_stride = Common_ISA_Get_Region_Value(h);
+    width = Common_ISA_Get_Region_Value(w);
+    return true;
+}
+
+VISA_Type vISAVerifier::getOperandVISAType(const CISA_INST* I, unsigned Ix) const
+{
+    switch (getOperandType(I, Ix))
+    {
+    case CISA_OPND_VECTOR:
+    {
+        const vector_opnd& vec_opnd = getVectorOperand(I, Ix);
+        return getVectorOperandType(header, vec_opnd);
+    }
+    case CISA_OPND_RAW:
+    {
+        const raw_opnd& raw_opnd = getRawOperand(I, Ix);
+        return getRawOperandType(header, raw_opnd);
+    }
+    default:
+        break;
+    }
+    return ISA_TYPE_NUM;
+}
+
+// If any of I's operands uses the GivenType, return true; otherwise, return false.
+bool vISAVerifier::useGivenVISAType(const CISA_INST* I, VISA_Type GivenType) const
+{
+    ISA_Opcode opc = (ISA_Opcode)I->opcode;
+    int ndst = (int)ISA_Inst_Table[opc].n_dsts;
+    if (opc == ISA_CMP)
+    {
+        // cmp's 1st opnd is cmp relop, which returns ISA_TYPE_NUM as its type.
+        // Thus, it is ignored as expected.
+        ++ndst;
+    }
+    for (int j = 0; j < ndst; j++)
+    {
+        VISA_Type dstType = getOperandVISAType(I, j);
+        if (dstType == GivenType)
+            return true;
+    }
+    for (int j = 0; j < ISA_Inst_Table[opc].n_srcs; j++)
+    {
+        VISA_Type srcType = getOperandVISAType(I, j + ndst);
+        if (srcType == GivenType)
+            return true;
+    }
+    return false;
+}
+
 void vISAVerifier::verifyPredicateDecl(unsigned declID)
 {
     std::string declError =
@@ -271,7 +352,7 @@ void vISAVerifier::verifyVariableDecl(
             break; // Prevent gcc warning
     }
 
-    REPORT_HEADER(options, var->num_elements != 0 && var->num_elements <= COMMON_ISA_MAX_VARIABLE_SIZE,
+    REPORT_HEADER(options, var->num_elements != 0 && var->num_elements <= irBuilder->getMaxVariableSize(),
                   "V%d's number of elements(%d) is out of range: %s",
                   declID + numPreDefinedVars, var->num_elements,
                   declError.c_str());
@@ -310,8 +391,8 @@ void vISAVerifier::verifyVariableDecl(
         {
             REPORT_HEADER(options,totalOffset < (currAliasVar->num_elements * (unsigned)CISATypeTable[currAliasVar->getType()].typeSize),
                               "Variable decl's alias offset exceeds the bounds of the aliased variable decl allocation size: %s", declError.c_str());
-            VISA_Align baseAlign = std::max(currAliasVar->getAlignment(), currAliasVar->getTypeAlignment());
-            REPORT_HEADER(options, baseAlign >= var->getTypeAlignment(),
+            VISA_Align baseAlign = std::max(currAliasVar->getAlignment(), currAliasVar->getTypeAlignment(irBuilder->getGRFSize()));
+            REPORT_HEADER(options, baseAlign >= var->getTypeAlignment(irBuilder->getGRFSize()),
                 "base variable must be at least type-aligned to this variable: %s", declError.c_str());
         }
     }
@@ -543,24 +624,24 @@ void vISAVerifier::verifyRegion(
                 ISA_Inst_Table[opcode].type != ISA_Inst_Compare &&
                 ISA_Inst_Table[opcode].type != ISA_Inst_Arith)
             {
-                REPORT_INSTRUCTION(options, (COMMON_ISA_GRF_REG_SIZE * 2u) > last_region_elt_byte,
+                REPORT_INSTRUCTION(options, (irBuilder->getGRFSize() * 2u) > last_region_elt_byte,
                     "CISA operand region access out of 2 GRF boundary (within %d bytes): %d",
-                    (COMMON_ISA_GRF_REG_SIZE * 2),
+                    (irBuilder->getGRFSize() * 2),
                     last_region_elt_byte);
 
                 // check if the operand may touch more than 2 GRFs due to bad alignment
                 unsigned startByte = getStartByteOffset(header, var, numPreDefinedVars) +
-                    row_offset * COMMON_ISA_GRF_REG_SIZE +
+                    row_offset * irBuilder->getGRFSize() +
                     col_offset * CISATypeTable[var->getType()].typeSize;
                 unsigned endByte = startByte + last_region_elt_byte;
-                unsigned startGRF = startByte / COMMON_ISA_GRF_REG_SIZE;
-                unsigned endGRF = endByte / COMMON_ISA_GRF_REG_SIZE;
+                unsigned startGRF = startByte / irBuilder->getGRFSize();
+                unsigned endGRF = endByte / irBuilder->getGRFSize();
                 REPORT_INSTRUCTION(options, endGRF == startGRF || endGRF == (startGRF + 1),
                     "CISA operand accesses more than 2 GRF due to mis-alignment: start byte offset = %d, end byte offset = %d",
                     startByte, endByte);
             }
 
-            unsigned firstElementIndex = row_offset * COMMON_ISA_GRF_REG_SIZE + col_offset;
+            unsigned firstElementIndex = row_offset * irBuilder->getGRFSize() + col_offset;
 
             for (int i = 0; i < exec_sz / width_val; i++)
             {
@@ -576,7 +657,7 @@ void vISAVerifier::verifyRegion(
                         std::cout << "An access should not exceed the declared allocation size: " << var_size << "\n";
                         std::cout << "  The access fails the following check to determine correct bounds (see CISA manual section 5.1 Region-based Addressing):\n";
                         std::cout << "  (row_offset * GRF_SIZE + col_offset) + (((i * v_stride) + (j * h_stride)) * type_size) <= type_size * num_elements:\n";
-                        std::cout << "(" << (int)row_offset << " * "<< COMMON_ISA_GRF_REG_SIZE << " + "<< (int)col_offset << ") + (((" <<
+                        std::cout << "(" << (int)row_offset << " * "<< irBuilder->getGRFSize() << " + "<< (int)col_offset << ") + (((" <<
                             i << " * " << v_stride_val <<") + (" << j <<" * " << h_stride_val << ")) * " << VN_size <<
                             ") <= " << VN_size << " * " << num_elements << "\n";
                         std::cout << "Violating Instruction: " <<
@@ -613,27 +694,6 @@ void vISAVerifier::verifyRawOperandType(
         REPORT_INSTRUCTION(options,typeFunc(currVar->getType()), "Raw Operand %s has incorrect type %s",
             opnd.toString().c_str(), CISATypeTable[currVar->getType()].typeName);
     }
-}
-
-static VISA_Type getRawOperandType(
-    const common_isa_header& isaHeader,
-    const print_format_provider_t* header,
-    const CISA_INST* inst,
-    const raw_opnd& opnd)
-{
-    unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
-    uint32_t variable_count = header->getVarCount();
-
-    uint32_t opnd_index = opnd.index;
-
-    if (opnd_index < variable_count + numPreDefinedVars &&
-        numPreDefinedVars <= opnd_index)
-    {
-        const var_info_t* currVar = header->getVar(opnd_index - numPreDefinedVars);
-        return currVar->getType();
-    }
-
-    return ISA_TYPE_NUM;
 }
 
 void vISAVerifier::verifyRawOperand(
@@ -684,7 +744,7 @@ void vISAVerifier::verifyRawOperand(
             currVar = header->getVar(currVar->alias_index-numPreDefinedVars);
         }
 
-        if (currVar->getSize() >= numEltPerGRF<Type_UB>() && totalOffset % numEltPerGRF<Type_UB>() != 0)
+        if (currVar->getSize() >= irBuilder->numEltPerGRF<Type_UB>() && totalOffset % irBuilder->numEltPerGRF<Type_UB>() != 0)
         {
             // raw operand must be GRF-aligned if it's >= 1GRF
             REPORT_INSTRUCTION(options,false, "Raw operand should be GRF-aligned: Raw offset is %d", totalOffset);
@@ -815,7 +875,7 @@ void vISAVerifier::verifyVectorOperand(
         {
             if (operand_index < numPreDefinedVars)
             {
-                uint32_t byteOffset = opnd.opnd_val.gen_opnd.row_offset * COMMON_ISA_GRF_REG_SIZE +
+                uint32_t byteOffset = opnd.opnd_val.gen_opnd.row_offset * irBuilder->getGRFSize() +
                     opnd.opnd_val.gen_opnd.col_offset *
                     Get_VISA_Type_Size(getPredefinedVarType(mapExternalToInternalPreDefVar(operand_index)));
                 REPORT_INSTRUCTION(options, isReadWritePreDefinedVar(isaHeader, operand_index, byteOffset), "Not allowed to write to a read only variable");
@@ -928,7 +988,7 @@ void vISAVerifier::verifyInstructionMove(
         }
         case ISA_BF_CVT:
         {
-            REPORT_INSTRUCTION(options, getGenxPlatform() >= XeHP_SDV,
+            REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= Xe_XeHPSDV,
                 "BF_CVT is only supported on this platform");
             REPORT_INSTRUCTION(options, operand_class_dst == OPERAND_GENERAL,
                 "Destination operand of BF_CVT instruction only "
@@ -965,6 +1025,57 @@ void vISAVerifier::verifyInstructionMove(
             VISA_Modifier srcModifier = src0.getOperandModifier();
             REPORT_INSTRUCTION(options, srcModifier == MODIFIER_NONE,
                 "source modifier not supported for BF conversion");
+            break;
+
+        }
+        case ISA_FCVT:
+        {
+            REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= Xe_PVC,
+                "fcvt is not supported on the selected platform");
+
+            REPORT_INSTRUCTION(options, operand_class_dst == OPERAND_GENERAL,
+                "Destination operand of fcvt instruction only "
+                "supports general and operands.");
+
+            REPORT_INSTRUCTION(options, operand_class_src0 == OPERAND_GENERAL,
+                "Source0 operand of fcvt instruction only "
+                "supports general,  operands.");
+
+            VISA_Type     dstType = getVectorOperandType(header, dst);
+            VISA_Type     src0Type = getVectorOperandType(header, src0);
+
+            if (dstType == ISA_TYPE_UB)
+            {
+                REPORT_INSTRUCTION(options, src0Type == ISA_TYPE_HF,
+                    "F_CVT with UB(actually BF8) dst must have HF src");
+            }
+            else if (src0Type == ISA_TYPE_UB)
+            {
+                REPORT_INSTRUCTION(options, dstType == ISA_TYPE_HF,
+                    "F_CVT with UB(actually BF8) src must have HF dst");
+            }
+            else if (dstType == ISA_TYPE_UD)
+            {
+                REPORT_INSTRUCTION(options, src0Type == ISA_TYPE_F,
+                    "F_CVT with UD(actually TF32) dst must have F src");
+            }
+            else if (src0Type == ISA_TYPE_UD)
+            {
+                REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F,
+                    "F_CVT with UD(actually TF32) src0 must have F dst");
+            }
+            else
+            {
+                REPORT_INSTRUCTION(options, false,
+                    "F_CVT must have either UB(actually BF8) dst or src");
+            }
+
+            VISA_Modifier dstModifier = dst.getOperandModifier();
+            VISA_Modifier srcModifier = src0.getOperandModifier();
+            REPORT_INSTRUCTION(options, dstModifier == MODIFIER_NONE,
+                "destination modifier not supported for BF8/TF32 conversion");
+            REPORT_INSTRUCTION(options, srcModifier == MODIFIER_NONE,
+                "source modifier not supported for BF8/TF32 conversion");
             break;
 
         }
@@ -1023,6 +1134,7 @@ void vISAVerifier::verifyInstructionSync(
         case ISA_FENCE              : return;
         case ISA_YIELD              : return;
         case ISA_SBARRIER           : return;
+        case ISA_NBARRIER           : return;
         default: REPORT_INSTRUCTION(options,false, "Illegal Synchronization Instruction Opcode: %d, %s.", opcode, ISA_Inst_Table[opcode].str);
     }
 }
@@ -1084,7 +1196,7 @@ void vISAVerifier::verifyInstructionControlFlow(
         }
         case ISA_SWITCHJMP:
         {
-            REPORT_INSTRUCTION(options, !hasFusedEU(), "switchjmp is not supported on this platform");
+            REPORT_INSTRUCTION(options, !irBuilder->hasFusedEU(), "switchjmp is not supported on this platform");
             break;
         }
         default: REPORT_INSTRUCTION(options,false, "Illegal Scalar Control Flow Instruction Opcode: %d, %s.", opcode, ISA_Inst_Table[opcode].str);
@@ -1289,40 +1401,76 @@ void vISAVerifier::verifyInstructionMisc(
                 return (Ty == ISA_TYPE_UD || Ty == ISA_TYPE_D);
             };
             auto FNIsIntOrFloat = [](VISA_Type Ty) -> bool {
-                bool isHFOrBF = false;
+                return (Ty == ISA_TYPE_UD || Ty == ISA_TYPE_D || Ty == ISA_TYPE_F);
+            };
+            auto FNIsIntOrFloatXePVC = [](VISA_Type Ty) -> bool {
+                // W or UW means BF
+                bool isHFOrBF = (Ty == ISA_TYPE_HF || Ty == ISA_TYPE_UW || Ty == ISA_TYPE_W);
                 return (Ty == ISA_TYPE_UD || Ty == ISA_TYPE_D || Ty == ISA_TYPE_F || isHFOrBF);
             };
-
             // No predicate
             REPORT_INSTRUCTION(options, inst->pred.isNullPred(), "%s inst does not support predicate", ISA_Inst_Table[opcode].str);
-
-            {
-                REPORT_INSTRUCTION(options, inst->getExecSize() == EXEC_SIZE_8,
-                    "Only execution size of 8 is supported for %s on platform %s",
-                    ISA_Inst_Table[opcode].str, getGenxPlatformString(getGenxPlatform()));
-            }
 
             // dst
             verifyRawOperand(inst, i);
             const raw_opnd&  dst = getRawOperand(inst, i);
-            verifyRawOperandType(inst, dst, FNIsIntOrFloat);
+            if (irBuilder->getPlatform() < Xe_PVC)
+            {
+                verifyRawOperandType(inst, dst, FNIsIntOrFloat);
+            }
+            else
+            {
+                verifyRawOperandType(inst, dst, FNIsIntOrFloatXePVC);
+            }
 
             // src0
             verifyRawOperand(inst, ++i);
             const raw_opnd&  src0 = getRawOperand(inst, i);
-            verifyRawOperandType(inst, src0, FNIsIntOrFloat);
+            if (irBuilder->getPlatform() < Xe_PVC)
+            {
+                verifyRawOperandType(inst, src0, FNIsIntOrFloat);
+            }
+            else
+            {
+                verifyRawOperandType(inst, src0, FNIsIntOrFloatXePVC);
+            }
 
             // src1
             verifyRawOperand(inst, ++i);
             const raw_opnd&  src1 = getRawOperand(inst, i);
-            verifyRawOperandType(inst, src1, FNIsInt);
+            {
+                verifyRawOperandType(inst, src1, FNIsInt);
+            }
 
             // src2
             const vector_opnd&  src2 = getVectorOperand(inst, ++i);
             VISA_Type  src2Ty = getVectorOperandType(header, src2);
             VISA_Modifier src2Mod = src2.getOperandModifier();
             REPORT_INSTRUCTION(options, src2Mod == MODIFIER_NONE,  "Modifier not allowed for %s", ISA_Inst_Table[opcode].str);
-            REPORT_INSTRUCTION(options, FNIsInt(src2Ty), "Only U/UD allowed for %s", ISA_Inst_Table[opcode].str);
+            {
+                REPORT_INSTRUCTION(options, FNIsInt(src2Ty), "Only U/UD allowed for %s", ISA_Inst_Table[opcode].str);
+            }
+
+
+            if (irBuilder->getPlatform() >= Xe_PVC)
+            {
+                REPORT_INSTRUCTION(options, opcode != ISA_DPASW,
+                    "%s instuction is not supported on selected platform", ISA_Inst_Table[opcode].str);
+
+                {
+                    // execsize must be simd16 for PVC
+                    REPORT_INSTRUCTION(options, inst->getExecSize() == EXEC_SIZE_16,
+                        "Only execution size of 16 is supported for %s on platform %s",
+                        ISA_Inst_Table[opcode].str, irBuilder->getGenxPlatformString());
+                }
+            }
+            else
+            {
+                // execsize must be simd8 for XeHP_SDV
+                REPORT_INSTRUCTION(options, inst->getExecSize() == EXEC_SIZE_8,
+                    "Only execution size of 8 is supported for %s on platform %s",
+                    ISA_Inst_Table[opcode].str, irBuilder->getGenxPlatformString());
+            }
 
             break;
         }
@@ -1439,12 +1587,22 @@ void vISAVerifier::verifyInstructionArith(
 {
     ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
 
+    if (opcode == ISA_SRND)
+    {
+        verifyInstructionSrnd(inst);
+        return;
+    }
+    if (useGivenVISAType(inst, ISA_TYPE_BF))
+    {
+        // Let bfmode verifier to verify it.
+        return;
+    }
 
     unsigned i = 0;
     const vector_opnd& dst = getVectorOperand(inst, i);
     VISA_Type         dstType = getVectorOperandType(header, dst);
     VISA_Modifier dstModifier = dst.getOperandModifier();
-    auto platform = getGenxPlatform();
+    auto platform = irBuilder->getPlatform();
 
     REPORT_INSTRUCTION(options, dst.getOperandClass() == OPERAND_GENERAL ||
         dst.getOperandClass() == OPERAND_INDIRECT,
@@ -1489,7 +1647,7 @@ void vISAVerifier::verifyInstructionArith(
 
     if ((opcode == ISA_DIV && IsIntType(dstType)) || opcode == ISA_MOD)
     {
-        REPORT_INSTRUCTION(options, platform < XeHP_SDV, "int divide/remainder is not supported for this platform");
+        REPORT_INSTRUCTION(options, platform < Xe_XeHPSDV, "int divide/remainder is not supported for this platform");
     }
 
     /// check dst type is supported by the instruction
@@ -1549,13 +1707,14 @@ void vISAVerifier::verifyInstructionArith(
     case ISA_SAD2ADD:
         /// dst must be w or uw
         REPORT_INSTRUCTION(options, dstType == ISA_TYPE_W || dstType == ISA_TYPE_UW, "sad2/sad2add only supports W/UW dst type.");
-        REPORT_INSTRUCTION(options, getPlatformGeneration(getGenxPlatform()) != PlatformGen::XE, "sad2/sad2add is not supported on Xe.");
+        REPORT_INSTRUCTION(options, irBuilder->getPlatformGeneration() < PlatformGen::XE, "sad2/sad2add is not supported on Xe.");
         break;
     case ISA_ADDC:
     case ISA_SUBB:
         REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD, "%s only supports single UD type", ISA_Inst_Table[opcode].str);
         break;
     case ISA_ADD3:
+    case ISA_ADD3O:
         REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD || dstType == ISA_TYPE_D ||
             dstType == ISA_TYPE_UW || dstType == ISA_TYPE_W,
             "%s only supports interger D/W type", ISA_Inst_Table[opcode].str);
@@ -1662,6 +1821,7 @@ void vISAVerifier::verifyInstructionArith(
                 ISA_Inst_Table[opcode].str);
             break;
         case ISA_ADD3:
+        case ISA_ADD3O:
             REPORT_INSTRUCTION(options,
                 srcType == ISA_TYPE_D || srcType == ISA_TYPE_UD ||
                 srcType == ISA_TYPE_W || srcType == ISA_TYPE_UW,
@@ -1675,6 +1835,7 @@ void vISAVerifier::verifyInstructionArith(
     // check for IEEE macros support
     // !hasMadm() check
     bool noMadm = (platform == GENX_ICLLP || platform == GENX_TGLLP);
+    noMadm |= platform == Xe_DG2;
     if (noMadm)
     {
         bool fOpcodeIEEE = (opcode == ISA_DIVM) || (opcode == ISA_SQRTM);
@@ -1683,7 +1844,7 @@ void vISAVerifier::verifyInstructionArith(
             !(dstType == ISA_TYPE_DF && dfOpcodeIEEE) &&
                 !(dstType == ISA_TYPE_F && fOpcodeIEEE),
             "IEEE instruction %s is not supported on %s platform",
-            ISA_Inst_Table[opcode].str, getGenxPlatformString(platform));
+            ISA_Inst_Table[opcode].str, irBuilder->getGenxPlatformString());
     }
 }
 
@@ -1723,10 +1884,15 @@ void vISAVerifier::verifyInstructionLogic(
             {
             case ISA_TYPE_B:
             case ISA_TYPE_UB:
+                REPORT_INSTRUCTION(options, false,
+                    "ror/rol does not support i8 types");
+                break;
             case ISA_TYPE_UQ:
             case ISA_TYPE_Q:
-                REPORT_INSTRUCTION(options, false,
-                    "ror/rol does not support i8/i64 types");
+                // This string was changed from "ror/rol only support i64 types on PVC+" due to IP leak concers.
+                REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= Xe_PVC,
+                    "ror/rol does not support i64 types on the selected platform");
+                break;
             default:
                 break;
             }
@@ -1949,14 +2115,14 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST* inst)
         }
         case ISA_3D_SAMPLE:
         {
-            uint8_t value = getPrimitiveOperand<uint8_t>(inst, i++);
-            bool pixelNullMask = (value & (1<<5)) != 0;
-            bool cpsEnable = (value & (1<<6)) != 0;
-            VISASampler3DSubOpCode subOp = VISASampler3DSubOpCode(value & 0x1F);
+            uint16_t value = getPrimitiveOperand<uint16_t>(inst, i++);
+            bool pixelNullMask = (value & (1<<8)) != 0;
+            bool cpsEnable = (value & (1<<9)) != 0;
+            VISASampler3DSubOpCode subOp = VISASampler3DSubOpCode(value & 0xFF);
 
             if (pixelNullMask)
             {
-                REPORT_INSTRUCTION(options, getGenxPlatform() >= GENX_SKL,
+                REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= GENX_SKL,
                                    "Pixel Null Mask Enable only valid for SKL+");
             }
 
@@ -1984,12 +2150,12 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST* inst)
         case ISA_3D_LOAD:
         case ISA_3D_GATHER4:
         {
-            uint8_t value = getPrimitiveOperand<uint8_t>(inst, i++);
-            bool pixelNullMask = (value >> 5) != 0;
+            uint16_t value = getPrimitiveOperand<uint16_t>(inst, i++);
+            bool pixelNullMask = (value >> 8) != 0;
 
             if (pixelNullMask)
             {
-                REPORT_INSTRUCTION(options, getGenxPlatform() >= GENX_SKL,
+                REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= GENX_SKL,
                                    "Pixel Null Mask Enable only valid for SKL+");
             }
             break;
@@ -2743,7 +2909,7 @@ void vISAVerifier::verifyInstructionDataport(
              }
 
              surface = getPrimitiveOperand<uint8_t>(inst, i++);
-             if (getGenxPlatform() < GENX_ICLLP)
+             if (irBuilder->getPlatform() < GENX_ICLLP)
              {
                  REPORT_INSTRUCTION(options, 0 != surface, "Surface T0 (the SLM surface) is not allowed for OWORD_LD*/OWORD_ST");
              }
@@ -2946,13 +3112,852 @@ void vISAVerifier::verifyInstructionDataport(
     }
 }
 
+void vISAVerifier::verifyBFMixedMode(const CISA_INST* inst)
+{
+    // Only verify inst type: Mov/Compare/Arith for BF mixed mode
+    ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
+    switch (ISA_Inst_Table[opcode].type)
+    {
+    case ISA_Inst_Mov:
+    case ISA_Inst_Arith:
+    case ISA_Inst_Compare:
+        break;
+    default:
+        return;
+    }
+
+    if (!useGivenVISAType(inst, ISA_TYPE_BF))
+    {
+        // Skip if inst does not use BF
+        return;
+    }
+
+    if (!irBuilder->hasBFMixMode())
+    {
+        REPORT_INSTRUCTION(options, false, "BF type is not allowed on this platform");
+        return;
+    }
+
+    switch (opcode)
+    {
+    case ISA_MUL:
+    case ISA_MAD:
+    case ISA_MOV:
+    case ISA_ADD:
+    case ISA_SEL:
+    case ISA_CMP:
+        break;
+    default:
+        REPORT_INSTRUCTION(options, false, "BF opnd is not allowed on this instruction");
+        return;
+    }
+
+    // Only F or BF are allowed
+    // opernads: 0 : srcStart-1        --> dst
+    //           srcStart : n_srcs-1   --> src
+    int srcStart = (int)ISA_Inst_Table[opcode].n_dsts;
+
+    // CMP's target must be bool, skip checking cmp's dst
+    if (opcode != ISA_CMP)
+    {
+        for (int j = 0; j < srcStart; j++)
+        {
+            VISA_Type dstType = getOperandVISAType(inst, j);
+            REPORT_INSTRUCTION(options,
+                (dstType == ISA_TYPE_F || dstType == ISA_TYPE_BF),
+                "Dst opnd in BF mixed mode should be either BF or F");
+        }
+    }
+    else {
+        // cmp's 1st opnd is cmp relop
+        ++srcStart;
+    }
+    for (int j = 0; j < ISA_Inst_Table[opcode].n_srcs; j++)
+    {
+        VISA_Type srcType = getOperandVISAType(inst, j + srcStart);
+        REPORT_INSTRUCTION(options,
+            (srcType == ISA_TYPE_F || srcType == ISA_TYPE_BF),
+            "Src opnd in BF mixed mode should be either BF or F");
+    }
+    return;
+}
+
+struct LscInstVerifier {
+    const common_isa_header          &isaHeader;
+    const print_format_provider_t*    header;
+    const CISA_INST*                  inst;
+    const IR_Builder&                 builder;
+    std::stringstream                 errorStream;
+    Options                          *options;
+    int                               execSize;
+
+    LscOpInfo                         opInfo;
+    LSC_OP                            subOp;
+    LSC_SFID                          sfid;
+
+    int                               currOpIx = 0;
+
+    LscInstVerifier(
+        const common_isa_header& _isaHeader,
+        const print_format_provider_t* _header,
+        const CISA_INST* _inst,
+        const IR_Builder& _builder,
+        Options *_options)
+        : isaHeader(_isaHeader)
+        , header(_header)
+        , inst(_inst)
+        , builder(_builder)
+        , options(_options)
+    {
+        if (_inst->opcode == ISA_LSC_FENCE) {
+            subOp = LSC_FENCE;
+            sfid = getNextEnumU8<LSC_SFID>();
+        } else if (_inst->opcode == ISA_LSC_TYPED) {
+            subOp = getNextEnumU8<LSC_OP>();
+            sfid = LSC_TGM;
+        } else {
+            subOp = getNextEnumU8<LSC_OP>();
+            sfid = getNextEnumU8<LSC_SFID>();
+        }
+        (void)LscOpInfoFind(subOp, opInfo);
+        execSize = 1;
+        switch (inst->execsize & 0xF) {
+        case EXEC_SIZE_1:  execSize =  1; break;
+        case EXEC_SIZE_2:  execSize =  2; break;
+        case EXEC_SIZE_4:  execSize =  4; break;
+        case EXEC_SIZE_8:  execSize =  8; break;
+        case EXEC_SIZE_16: execSize = 16; break;
+        case EXEC_SIZE_32: execSize = 32; break;
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    template <typename T>
+    T getPrimitive(int absOpIx) {
+        return getPrimitiveOperand<T>(inst, absOpIx);
+    }
+
+    template <typename T>
+    T getNextEnumU8() {
+        return (T)getPrimitive<uint8_t>(currOpIx++);
+    }
+    template <typename T>
+    T getNext() {
+        return getPrimitive<T>(currOpIx++);
+    }
+
+    // LSC_TYPED and non-block2d LSC_UNTYPED
+    // "next" because it advances the operand pointer
+    LSC_DATA_SHAPE getNextDataShape() {
+        // chmask only valid on LSC_LOAD_QUAD/LSC_STORE_QUAD
+        // but retained in the binary format
+        LSC_DATA_SHAPE dataShape { };
+        dataShape.size = getNextEnumU8<LSC_DATA_SIZE>();
+        dataShape.order = getNextEnumU8<LSC_DATA_ORDER>();
+        // untyped and typed have both data elems and chmask
+        // (even though the IR only uses one)
+        auto dataElems = getNextEnumU8<LSC_DATA_ELEMS>();
+        int chMask = (int)getNextEnumU8<int>();
+        if (opInfo.hasChMask()) {
+            dataShape.chmask = chMask;
+        } else {
+            (void)chMask; // not used
+            dataShape.elems = dataElems;
+        }
+        return dataShape;
+    }
+    LSC_DATA_SHAPE_BLOCK2D getNextDataShape2D() {
+        LSC_DATA_SHAPE_BLOCK2D dataShape2D { };
+        dataShape2D.size = getNextEnumU8<LSC_DATA_SIZE>();
+        dataShape2D.order = getNextEnumU8<LSC_DATA_ORDER>();
+        dataShape2D.blocks = (int)getNext<uint8_t>();
+        dataShape2D.width = (int)getNext<uint16_t>();
+        dataShape2D.height = (int)getNext<uint16_t>();
+        dataShape2D.vnni = getNext<uint8_t>() != 0;
+        return dataShape2D;
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+
+    template <typename T1, typename T2 = const char *, typename T3 = const char *>
+    bool verify(bool z, T1 t1, T2 t2 = "", T3 t3 = "") {
+        if (!z)
+            error(t1, t2, t3);
+        return z;
+    }
+    template <typename T1, typename T2 = const char *, typename T3 = const char *>
+    void error(T1 t1,  T2 t2 = "", T3 t3 = "") {
+        std::stringstream ss;
+        ss << " * ";
+        ss << t1;
+        ss << t2;
+        ss << t3;
+        ss << "\n";
+        errorStream << ss.str();
+    }
+    void badEnum(const char *which, int value) {
+        std::stringstream ss;
+        ss << "0x" << std::hex << std::uppercase << value << ": ";
+        ss << which;
+        error(ss.str());
+    }
+
+    int verifyDataSize(LSC_DATA_SIZE dataSize) {
+        int dataSizeBytes = 0;
+        switch (dataSize) {
+        case LSC_DATA_SIZE_8b: dataSizeBytes = 1; break;
+        case LSC_DATA_SIZE_16b: dataSizeBytes = 2; break;
+        case LSC_DATA_SIZE_32b: dataSizeBytes = 4; break;
+        case LSC_DATA_SIZE_64b: dataSizeBytes = 8; break;
+        case LSC_DATA_SIZE_8c32b: dataSizeBytes = 4; break;
+        case LSC_DATA_SIZE_16c32b: dataSizeBytes = 4; break;
+        case LSC_DATA_SIZE_16c32bH: dataSizeBytes = 4; break;
+        default: badEnum("invalid LSC_DATA_SIZE", dataSize);
+        }
+        return dataSizeBytes;
+    }
+
+    bool verifyDataOrder(LSC_DATA_ORDER dataOrder) {
+        bool transposed = false;
+        switch (dataOrder) {
+        case LSC_DATA_ORDER_NONTRANSPOSE: transposed = false; break;
+        case LSC_DATA_ORDER_TRANSPOSE:    transposed = true; break;
+        default: badEnum("invalid LSC_DATA_ORDER", dataOrder);
+        }
+        return transposed;
+    }
+
+    int verifyDataElems(LSC_DATA_ELEMS dataElems) {
+        int vecSize = 0;
+        switch (dataElems) {
+        case LSC_DATA_ELEMS_1: vecSize = 1; break;
+        case LSC_DATA_ELEMS_2: vecSize = 2; break;
+        case LSC_DATA_ELEMS_3: vecSize = 3; break;
+        case LSC_DATA_ELEMS_4: vecSize = 4; break;
+        case LSC_DATA_ELEMS_8: vecSize = 8; break;
+        case LSC_DATA_ELEMS_16: vecSize = 16; break;
+        case LSC_DATA_ELEMS_32: vecSize = 32; break;
+        case LSC_DATA_ELEMS_64: vecSize = 64; break;
+            break;
+        default: badEnum("LSC_DATA_ELEMS", dataElems);
+        }
+        return vecSize;
+    }
+
+    void verifyDataShape(LSC_DATA_SHAPE dataShape) {
+        int dataSizeBytes = verifyDataSize(dataShape.size);
+        if (dataSizeBytes == 0)
+            return; // verifyDataSize reported error
 
 
+        bool transposed = verifyDataOrder(dataShape.order);
+        if (transposed) {
+            verify(!opInfo.hasChMask(),
+                "LSC_DATA_ORDER_TRANSPOSE on ", opInfo.mnemonic);
+            verify(execSize == 1,
+                "LSC_DATA_ORDER_TRANSPOSE requires ExecSize of 1");
+            verify(!opInfo.isAtomic(),
+                "LSC atomics do not support transpose mode");
+        } else if (opInfo.hasChMask()) {
+            // quad store (store_cmask) can only support X, XY, XYZ, XYZW
+            if (opInfo.op == LSC_STORE_QUAD) {
+                verify(
+                    dataShape.chmask == LSC_DATA_CHMASK_X ||
+                    dataShape.chmask ==
+                       (LSC_DATA_CHMASK_X|LSC_DATA_CHMASK_Y) ||
+                    dataShape.chmask ==
+                        (LSC_DATA_CHMASK_X|LSC_DATA_CHMASK_Y|
+                            LSC_DATA_CHMASK_Z) ||
+                    dataShape.chmask == (LSC_DATA_CHMASK_X|LSC_DATA_CHMASK_Y
+                        |LSC_DATA_CHMASK_Z|LSC_DATA_CHMASK_W),
+                    "lsc_store_quad channel mask must be contiguous "
+                    "(.x, .xy, .xyz, or .xyzw)");
+            }
+        } else if (!opInfo.isBlock2D()) {
+            // SIMT access not block2d
+            verify(
+                (dataShape.elems == LSC_DATA_ELEMS_1) ||
+                (dataShape.size == LSC_DATA_SIZE_32b ||
+                    dataShape.size == LSC_DATA_SIZE_64b),
+                "only D32 and D64 support vector load");
+            if (sfid == LSC_UGML) {
+                verify(
+                  dataShape.elems == LSC_DATA_ELEMS_1 ||
+                  dataShape.elems == LSC_DATA_ELEMS_2 ||
+                  dataShape.elems == LSC_DATA_ELEMS_4,
+                  "UGML only supports vector sizes 1, 2, and 4");
+            } else if (sfid == LSC_SLM || sfid == LSC_UGM) {
+                verify(
+                  dataShape.elems == LSC_DATA_ELEMS_1 ||
+                  dataShape.elems == LSC_DATA_ELEMS_2 ||
+                  dataShape.elems == LSC_DATA_ELEMS_3 ||
+                  dataShape.elems == LSC_DATA_ELEMS_4 ||
+                  dataShape.elems == LSC_DATA_ELEMS_8,
+                  "SLM/UGM only supports vector sizes 1, 2, 3, 4, and 8");
+            }
+            if (opInfo.isAtomic()) {
+                verify(
+                    dataShape.size == LSC_DATA_SIZE_16c32b ||
+                    dataShape.size == LSC_DATA_SIZE_32b ||
+                    dataShape.size == LSC_DATA_SIZE_64b,
+                    "LSC atomics only support D16U32, D32, or D64");
+                // TODO: opInfo.op == LSC_ATOMIC_ICAS only in B0+ (none in A0)
+                verify(
+                    sfid != LSC_SLM ||
+                    dataShape.size != LSC_DATA_SIZE_64b ||
+                    opInfo.op == LSC_ATOMIC_ICAS,
+                    "LSC SLM D64 atomics only support icas");
+                {
+                    verify(
+                        (opInfo.op != LSC_ATOMIC_FADD && opInfo.op != LSC_ATOMIC_FSUB) ||
+                        (sfid == LSC_UGM || sfid == LSC_UGML),
+                        "LSC atomic fadd/fsub only support UGM and UGML");
+                }
+            }
+        }
+
+        int vecSize = 0;
+        if (!opInfo.hasChMask()) {
+            vecSize = verifyDataElems(dataShape.elems);
+            if (vecSize != 1) {
+                if (opInfo.isAtomic()) {
+                    error("LSC_DATA_ELEMS must be 1 for atomic operations");
+                }
+                switch (dataShape.size) {
+                case LSC_DATA_SIZE_8c32b:
+                case LSC_DATA_SIZE_16c32b:
+                case LSC_DATA_SIZE_16c32bH:
+                    error("LSC_DATA_SIZE: conversion types may not use vector");
+                    break;
+                default: break;
+                }
+            }
+        } else if (dataShape.chmask == 0) {
+            error("LSC_DATA_SHAPE::chmask: must not be 0");
+        } else if (dataShape.chmask & ~0xF) {
+            error("LSC_DATA_SHAPE::chmask: has high bits set");
+        } else {
+            vecSize = 0;
+            for (int i = 0; i < 4; i++)
+                if (dataShape.chmask & (1<<i))
+                    vecSize++;
+        }
+        if (vecSize == 0)
+            return;
+
+        // data payloads cannot be more than 8 registers
+        const uint32_t BYTES_PER_REG = builder.getGRFSize();
+        int dataRegs = 0;
+        if (transposed) {
+            // must be SIMD1 (whether they had that right or not, it will be)
+            // (and we've already complained about it if not)
+            dataRegs = std::max<int>(1, vecSize*dataSizeBytes/BYTES_PER_REG);
+        } else {
+            //
+            // int execSize = BYTES_PER_REG/2;
+            // apparently :d32x8 and :d64x4 are permissible if SIMD16, so
+            // we'll pull the real ExecSize
+            //
+            // TODO: we need to recheck with HW that they indeed put this
+            // optimization in
+            int regPerVecElem =
+                std::max<int>(1,dataSizeBytes*execSize/BYTES_PER_REG);
+            dataRegs = vecSize*regPerVecElem;
+        }
+        if (opInfo.op != LSC_LOAD_BLOCK2D)
+            verify(dataRegs <= 8, "this message accesses more than 8 registers");
+    }
+
+    void verifyCachingOpts() {
+        auto l1 = getNextEnumU8<LSC_CACHE_OPT>();
+        auto l3 = getNextEnumU8<LSC_CACHE_OPT>();
+        if (sfid == LSC_TGM || sfid == LSC_UGML) {
+            verify(l1 == LSC_CACHING_DEFAULT && l3 == LSC_CACHING_DEFAULT,
+                "Messages to UGML and TGM require default cache settings"
+                " (#53561)");
+            return;
+        }
+        uint32_t enc = 0;
+        LSC_CACHE_OPTS cacheOpts {l1, l3};
+        // set isBits17_19 to false to check for all cases
+        if (!LscTryEncodeCacheOpts(opInfo, cacheOpts, enc, false)) {
+            if (opInfo.isLoad()) {
+                error("invalid cache-control options for load (#53560)");
+            } else if (opInfo.isAtomic()) {
+                if (cacheOpts.l1 != LSC_CACHE_OPT::LSC_CACHING_UNCACHED) {
+                    error("atomics must use options with uncached L1"
+                        " (#53561 & #53542 [19:17])");
+                } else {
+                    error("invalid cache-control options for atomic (#53561)");
+                }
+            } else {
+                error("invalid cache-control options for store (#53561)");
+            }
+        }
+        // TODO: we should proscribe default/default if prefetch
+    }
+
+    void verifyAddrSize(LSC_ADDR_SIZE addrSize) {
+        // ADDR payloads limited to 4 registers
+        //
+        // SIMD32 64b will fit in PVC (as will SIMD16 64b on DG2)
+        //  ==> nothing to check
+        switch (addrSize) {
+        case LSC_ADDR_SIZE_16b:
+            verify(
+                sfid == LSC_SLM,
+                ":a16 (LSC_ADDR_SIZE_16b) only allowed on .slm SFID");
+            break;
+        case LSC_ADDR_SIZE_32b:
+            break;
+        case LSC_ADDR_SIZE_64b:
+            if (sfid == LSC_TGM || sfid == LSC_SLM)
+                error(".tgm not allowed on :a64 (LSC_ADDR_SIZE_64b)");
+            if (subOp == LSC_LOAD_BLOCK2D || subOp == LSC_STORE_BLOCK2D)
+                error("block2d does not allow 64b address types");
+            break;
+        default:
+            break;
+        }
+    }
+
+    void verifyAddressType(LSC_ADDR_TYPE addrType, int surfIxAbs) {
+        if (!verifyVectorOperand("Surface", surfIxAbs)) {
+            return;
+        }
+        const auto &vo = getVectorOperand(inst, surfIxAbs);
+
+        switch (addrType) {
+        case LSC_ADDR_TYPE_FLAT:
+        case LSC_ADDR_TYPE_ARG:
+            verify(sfid != LSC_TGM, ".tgm may not use flat address model");
+            switch (vo.tag & 0x7) {
+            case OPERAND_IMMEDIATE:
+                verify(
+                    vo.opnd_val.const_opnd._val.ival == 0,
+                    "Surface: for LSC_ADDR_TYPE_FLAT only imm 0 or V0 allowed");
+                break; // okay
+            case OPERAND_GENERAL:
+                verify(
+                    vo.opnd_val.gen_opnd.index == 0,
+                    "Surface: must be null (V0) reg for LSC_ADDR_TYPE_FLAT");
+                break;
+            default:
+                error("Surface: invalid operand type");
+            }
+            break;
+        case LSC_ADDR_TYPE_BSS:
+        case LSC_ADDR_TYPE_SS:
+        case LSC_ADDR_TYPE_BTI:
+            verify(sfid != LSC_SLM, "slm must use flat address model");
+            switch (vo.tag & 0x7) {
+            case OPERAND_IMMEDIATE:
+                break;
+            case OPERAND_GENERAL:
+                verify(vo.opnd_val.gen_opnd.index != 0,
+                    "Surface: must not be null (V0) reg for non-FLAT AddrType");
+                break;
+            default:
+                error("Surface: invalid operand type");
+            }
+            break;
+        default: badEnum("LSC_ADDR_TYPE is invalid", addrType); break;
+        }
+    }
+
+    bool verifyRawOperand(const char *which, int absIx) {
+        if (getOperandType(inst, absIx) != CISA_OPND_RAW) {
+            error(which, ": expected vISA RawOperand");
+            return false;
+        }
+        return true;
+    }
+
+    bool verifyRawOperandNull(const char *which, int absIx) {
+        if (!verifyRawOperand(which, absIx)) {
+            return false;
+        } else {
+            const raw_opnd &ro = getRawOperand(inst, absIx);
+            if (ro.index != 0) {
+                error(which, "; operand must be null");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    bool verifyRawOperandNonNull(const char *which, int absIx) {
+        if (!verifyRawOperand(which, absIx)) {
+            return false;
+        } else {
+            const raw_opnd &ro = getRawOperand(inst, absIx);
+            if (ro.index == 0) {
+                error(which, ": operand must not be null");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    bool verifyVectorOperand(const char *which, int absIx) {
+        if (getOperandType(inst, absIx) != CISA_OPND_VECTOR) {
+            error(which, ": expected vISA vector operand");
+            return false;
+        }
+        return true;
+    }
+    bool verifyVectorOperandNotNull(const char *which, int absIx) {
+        if (!verifyVectorOperand(which, absIx)) {
+            return false;
+        }
+        const vector_opnd &vo = getVectorOperand(inst, absIx);
+        if (!vo.isImmediate() && vo.getOperandIndex() == 0) {
+            error(which, ": vector operand must not be null");
+            return false;
+        }
+        return true;
+    }
+
+    // check dst and src1 and src2
+    void verifyDataOperands(int dstOpIx, int src1DataIx) {
+        if (opInfo.isStore()) {
+            verifyRawOperandNull("DstData", dstOpIx);
+        } else {
+            // atomics and loads can have either null or non-null
+            verifyRawOperand("DstData", dstOpIx);  // DstData
+        }
+
+        if (opInfo.isLoad()) {
+            verifyRawOperandNull("Src1Data", src1DataIx);
+            if (!opInfo.isStrided() && !opInfo.isBlock2D())
+                verifyRawOperandNull("Src2Data", src1DataIx+1);
+        } else if (opInfo.isStore()) {
+            verifyRawOperandNonNull("Src1Data", src1DataIx);
+            if (!opInfo.isStrided() && !opInfo.isBlock2D())
+                verifyRawOperandNull("Src2Data", src1DataIx+1);
+        } else if (opInfo.isAtomic()) {
+            if (opInfo.extraOperands > 0) {
+                verifyRawOperandNonNull(
+                    "Src1Data (in binary atomic)", src1DataIx);
+            } else {
+                verifyRawOperandNull(
+                    "Src1Data (in binary atomic)", src1DataIx);
+            }
+            if (opInfo.extraOperands == 2) {
+                verifyRawOperandNonNull(
+                    "Src2Data (in ternary atomic)", src1DataIx+1);
+            } else {
+                verifyRawOperandNull(
+                    "Src2Data (in ternary atomic)", src1DataIx+1);
+            }
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    void verifyFence() {
+        // SLM only gets .group and .none
+        // c.f. ASpec 5.4.1.12.9 "Fence Message Handling" (pg 62)
+        auto fenceOp = getNextEnumU8<LSC_FENCE_OP>();
+        auto scope = getNextEnumU8<LSC_SCOPE>();
+        switch (fenceOp) {
+        case LSC_FENCE_OP_NONE:
+            break;
+        case LSC_FENCE_OP_EVICT:
+        case LSC_FENCE_OP_INVALIDATE:
+        case LSC_FENCE_OP_DISCARD:
+        case LSC_FENCE_OP_CLEAN:
+        case LSC_FENCE_OP_FLUSHL3:
+        case LSC_FENCE_OP_TYPE6:
+          verify(sfid != LSC_SLM, "lsc_fence.slm fence op must be .none");
+          break;
+        default:
+            badEnum("invalid LSC_FENCE",fenceOp);
+            break;
+        }
+        switch (scope) {
+        case LSC_SCOPE_GROUP:
+            break;
+        case LSC_SCOPE_LOCAL:
+        case LSC_SCOPE_TILE:
+        case LSC_SCOPE_GPU:
+        case LSC_SCOPE_GPUS:
+        case LSC_SCOPE_SYSREL:
+        case LSC_SCOPE_SYSACQ:
+            verify(sfid != LSC_SLM, "lsc_fence.slm must use .group scope");
+            break;
+        default:
+            badEnum("invalid LSC_SCOPE",scope);
+            break;
+        }
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    void verifyUntypedBlock2D() {
+        bool valid = true;
+
+        verifyCachingOpts();
+        //
+        const auto dataShape2D = getNextDataShape2D();
+        int dataSizeBytes = verifyDataSize(dataShape2D.size);
+        verifyDataOrder(dataShape2D.order);
+        valid &= verify(dataShape2D.blocks > 0,
+            "block2d blocks (vec_len) must be >= 1");
+        valid &= verify(dataShape2D.height > 0, "blocks2d height must be > 0");
+        valid &= verify(dataShape2D.width > 0, "blocks2d width must be > 0");
+        valid &= verify(
+            opInfo.op != LSC_STORE_BLOCK2D || !dataShape2D.vnni,
+            "block2d stores may not use VNNI transform");
+        valid &= verify(
+            opInfo.op != LSC_STORE_BLOCK2D || dataShape2D.blocks == 1,
+            "block2d stores must have block count==1");
+
+        if (!valid)
+            return;
+
+        bool transpose = dataShape2D.order == LSC_DATA_ORDER_TRANSPOSE;
+        bool transform = dataShape2D.vnni;
+        int cols = !transpose ?  dataShape2D.width : dataShape2D.height;
+        valid &= verify(cols*dataSizeBytes <= 64,
+            cols*dataSizeBytes, ": block2d cols * data size must be <= 64");
+        int rows = !transpose ?  dataShape2D.height : dataShape2D.width;
+        valid &= verify(rows <= 32,
+            rows, ": block2d row count must be less than <= 32");
+        //
+        // HAS constraints on valid block dimensions
+        //   c.f. HAS 5.1.2.1 Allowed Sizes (pg 6)  - NN
+        //   c.f. HAS 5.1.3.1 Allowed Sizes (pg 9)  - TN
+        //   c.f. HAS 5.1.1.1 Allowed Sizes (pg 12) - TN
+        //   c.f. HAS 5.2.1.1 Allowed Sizes (pg 15) - TT
+        //
+        // in general all but (TN) can use block counts as follows
+        //    data size    block count (vec_len)
+        //    u8/u16:      1, 2, and 4
+        //    u32:         1 and 2
+        //    u64:         1
+        //
+        // TN must use a block size of vec len of 1
+        if (!transpose || transform) {
+            switch (dataShape2D.size) {
+            case LSC_DATA_SIZE_8b:
+                valid &= verify(
+                    dataShape2D.blocks == 1 || dataShape2D.blocks == 2 ||
+                        dataShape2D.blocks == 4,
+                    dataShape2D.blocks,
+                    ": block2d count (vec_len) must be 1, 2, or 4 for u8");
+                break;
+            case LSC_DATA_SIZE_16b:
+                valid &= verify(
+                    dataShape2D.blocks == 1 || dataShape2D.blocks == 2 ||
+                        dataShape2D.blocks == 4,
+                    dataShape2D.blocks,
+                    ": block2d count (vec_len) must be 1, 2, or 4 for u16");
+                break;
+            case LSC_DATA_SIZE_32b:
+                valid &= verify(
+                    dataShape2D.blocks == 1 || dataShape2D.blocks == 2,
+                    dataShape2D.blocks,
+                    ": block2d count (vec_len) must be 1 or 2 for u32");
+                break;
+            case LSC_DATA_SIZE_64b:
+                valid &= verify(
+                    dataShape2D.blocks == 1,
+                    dataShape2D.blocks,
+                    ": block2d count (vec_len) must be 1 for u64");
+                break;
+            default:
+                error("invalid data type size for block2d load");
+                return;
+            }
+        } else {
+            valid &= verify(
+                dataShape2D.blocks == 1,
+                "block2d count (vec_len) must be 1 for block2d transposed");
+        }
+        if (!valid)
+            return;
+
+        //
+        if (dataShape2D.blocks > 16) {
+            // this constrains us to the encoding space; specific hardware
+            // may have additional constraints (e.g. only 1, 2, and 4)
+            error("block2d data shape block count (array/vec len) > 16");
+        }
+
+        //
+        /////////////////////////////////////////
+        // now we're at the register operands
+        //
+        verifyVectorOperandNotNull("SurfaceBase", currOpIx+1);
+        verifyVectorOperandNotNull("SurfaceWidth", currOpIx+2);
+        verifyVectorOperandNotNull("SurfaceHeight", currOpIx+3);
+        verifyVectorOperandNotNull("SurfacePitch", currOpIx+4);
+        verifyVectorOperandNotNull("OffsetX", currOpIx+5);
+        verifyVectorOperandNotNull("OffsetY", currOpIx+6);
+        //
+        verifyDataOperands(currOpIx, currOpIx+1+6);
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    void verifyUntypedBasic() {
+        verifyCachingOpts();
+
+        //
+        auto addrType = getNextEnumU8<LSC_ADDR_TYPE>();
+        uint16_t immediateScale = getNext<uint16_t>();
+        if ((immediateScale & (immediateScale-1)) != 0) {
+            error("immediate scale must be power of two "
+                "(someone could enable this though)");
+        }
+        int32_t immediateOffset = getNext<int32_t>();
+
+        auto addrSize = getNextEnumU8<LSC_ADDR_SIZE>();
+        verifyAddrSize(addrSize);
+        if (addrSize == LSC_ADDR_SIZE_16b) {
+            if (immediateOffset > 0x7FFF || immediateOffset < -0x7FFF) {
+                error("immediate offset overflows A16 address arithmetic");
+            }
+        }
+
+        auto dataShape = getNextDataShape();
+        verifyDataShape(dataShape);
+
+        // now we are at the registers
+        verifyAddressType(addrType, currOpIx); // Surface
+
+        const char *src0Name = opInfo.isStrided() ? "Src0AddrBase" : "Src0Addr";
+        int src1DataIx = !opInfo.isStrided() ? currOpIx+3 : currOpIx+4;
+        verifyRawOperand(src0Name, currOpIx+2);  // Src0Addr
+        if (opInfo.isStrided()) {
+            if (verifyVectorOperand("Src0AddrStride", currOpIx+3)) {
+                const auto &vo = getVectorOperand(inst, currOpIx+3);
+                switch (vo.tag & 0x7) {
+                case OPERAND_IMMEDIATE:
+                    if (vo.opnd_val.const_opnd._val.ival > 0xFFFF) {
+                        error("Src0AddrStride: pitch exceeds 16 bits");
+                    }
+                    break; // okay
+                case OPERAND_GENERAL:
+                    if (vo.opnd_val.gen_opnd.index == 0) {
+                        error("Src0AddrStride",
+                            "VectorOperand must be immediate or non-null");
+                    }
+                    break;
+                default:
+                    error("Src0AddrStride", "invalid operand type");
+                }
+            }
+        }
+
+        verifyDataOperands(currOpIx+1, src1DataIx);
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    void verifyTyped() {
+        verifyCachingOpts();
+
+        auto addrType = getNextEnumU8<LSC_ADDR_TYPE>();
+        auto addrSize = getNextEnumU8<LSC_ADDR_SIZE>();
+        verifyAddrSize(addrSize);
+
+        auto dataShape = getNextDataShape();
+        verifyDataShape(dataShape);
+
+        verifyAddressType(addrType, currOpIx);
+
+        // check all the Src0Addr fields (U, V, R, LOD)
+        if (opInfo.op == LSC_READ_STATE_INFO) {
+            verifyRawOperandNull("Src0Addr_Us", currOpIx+2); // U's
+            verifyRawOperandNull("Src0Addr_Vs", currOpIx+3); // V's
+            verifyRawOperandNull("Src0Addr_Rs", currOpIx+4); // R's
+            verifyRawOperandNull("Src0Addr_LODs", currOpIx+5); // LOD's
+        } else {
+            verifyRawOperandNonNull("Src0Addr_Us", currOpIx+2); // U's
+            verifyRawOperand("Src0Addr_Vs", currOpIx+3);        // V's
+            verifyRawOperand("Src0Addr_Rs", currOpIx+4);        // R's
+            verifyRawOperand("Src0Addr_LODs", currOpIx+5);      // LOD's
+        }
+
+        // check Dst, Src1, and Src2
+        verifyDataOperands(currOpIx+1, currOpIx+6);
+    }
+
+    void verify() {
+        if (opInfo.mnemonic == nullptr || opInfo.op == LSC_INVALID) {
+            error("invalid LSC subop");
+            return;
+        }
+        if (inst->opcode == ISA_LSC_FENCE) {
+            verifyFence();
+        } else if (inst->opcode == ISA_LSC_UNTYPED) {
+            if (subOp == LSC_LOAD_BLOCK2D || subOp == LSC_STORE_BLOCK2D) {
+                verifyUntypedBlock2D();
+            } else {
+                verifyUntypedBasic();
+            }
+        } else if (inst->opcode == ISA_LSC_TYPED) {
+            verifyTyped();
+        } else {
+            badEnum("invalid LSC op code", inst->opcode);
+        }
+    }
+}; // LscInstVerifier
+
+void vISAVerifier::verifyInstructionLsc(const CISA_INST *inst)
+{
+    // This mostly comes from: https://gfxspecs.intel.com/Predator/Home/Index/53578
+    // But there's also a spreadsheet floating around
+    LscInstVerifier verifier(isaHeader, header, inst, *irBuilder, options);
+    verifier.verify();
+    if (verifier.errorStream.tellp() > 0) {
+        std::stringstream ss;
+        ss << "in instruction " << printInstruction(header, inst, options) << "\n";
+        ss << verifier.errorStream.str();
+        error_list.push_back(ss.str());
+    }
+}
+
+void vISAVerifier::verifyInstructionSrnd(const CISA_INST* inst)
+{
+    const vector_opnd&    dst = getVectorOperand(inst, 0);
+    VISA_Type         dstType = getVectorOperandType(header, dst);
+    VISA_Modifier dstModifier = dst.getOperandModifier();
+
+    // dst
+    REPORT_INSTRUCTION(options, dst.getOperandClass() == OPERAND_GENERAL,
+        "Destination of this CISA instruction should be general operand.");
+
+    REPORT_INSTRUCTION(options, dstModifier == MODIFIER_NONE,
+        "Destination modifier for this CISA instruction is not allowed.");
+
+    // src
+    const vector_opnd& src0    = getVectorOperand(inst, 1);
+    VISA_Type         src0Type = getVectorOperandType(header, src0);
+    VISA_Modifier src0Modifier = src0.getOperandModifier();
+    const vector_opnd& src1 = getVectorOperand(inst, 2);
+    VISA_Type         src1Type = getVectorOperandType(header, src1);
+    VISA_Modifier src1Modifier = src1.getOperandModifier();
+
+    REPORT_INSTRUCTION(options, src0Modifier == MODIFIER_NONE && src1Modifier == MODIFIER_NONE,
+        "Source modifiers for this instruction are not allowed");
+    REPORT_INSTRUCTION(options,
+        (src0.getOperandClass() == OPERAND_GENERAL || src0.getOperandClass() == OPERAND_IMMEDIATE) &&
+            (src1.getOperandClass() == OPERAND_GENERAL || src1.getOperandClass() == OPERAND_IMMEDIATE),
+        "Sources in this instruction must be general or immediate");
+
+    // Verify types
+    REPORT_INSTRUCTION(options, src0Type == src1Type,
+        "Src0 and src1 should have the same type for this instruction");
+    REPORT_INSTRUCTION(options,
+        (dstType == ISA_TYPE_UB && src0Type == ISA_TYPE_HF) ||
+            (dstType == ISA_TYPE_HF && src0Type == ISA_TYPE_F),
+        "Src and Dst types mismatch. Only (dst=ub, src=hf) or (dst=hf, src=f) supported.");
+}
 
 void vISAVerifier::verifyKernelAttributes()
 {
     /// Verify SLMSize, if present, shows up only once
     unsigned int numSLMSize = 0;
+    unsigned int numNamedBarrierCnt = 0;
     for (unsigned int i = 0; i < header->getAttrCount(); i++)
     {
         auto attr = header->getAttr(i);
@@ -2962,12 +3967,19 @@ void vISAVerifier::verifyKernelAttributes()
         {
             numSLMSize++;
         }
+        else if (aID == Attributes::ATTR_NBarrierCnt)
+        {
+            numNamedBarrierCnt++;
+        }
     }
 
     REPORT_HEADER(options, numSLMSize <= 1,
         "More than 1 kernel attribute defined %s",
         Attributes::getAttributeName(Attributes::ATTR_SLMSize));
 
+    REPORT_HEADER(options, numNamedBarrierCnt <= 1,
+        "More than 1 kernel attribute defined %s",
+        Attributes::getAttributeName(Attributes::ATTR_NBarrierCnt));
 }
 
 void vISAVerifier::verifyKernelHeader()
@@ -3044,7 +4056,7 @@ void vISAVerifier::verifyKernelHeader()
             auto pi = header->getInput(i);
             unsigned Begin = pi->offset;
             unsigned End = Begin + pi->size;
-            if (End >= (uint32_t) (getGRFSize() * (256 - 1)))
+            if (End >= (uint32_t) (irBuilder->getGRFSize() * (256 - 1)))
             {
                 REPORT_HEADER(options, false, "Input V%d is out of bound [%d, %d)", pi->index, Begin, End);
             }
@@ -3081,11 +4093,11 @@ void vISAVerifier::verifyKernelHeader()
                      int varSize = header->getVar(varId)->num_elements * CISATypeTable[header->getVar(varId)->getType()].typeSize;
                      REPORT_HEADER(options,varSize == header->getInput(i)->size,
                          "Input %d's size(%d) does not agree with its variable (V%d)'s", i, header->getInput(i)->size, varId + numPreDefinedVars);
-                     if (header->getInput(i)->size < getGRFSize())
+                     if (header->getInput(i)->size < irBuilder->getGRFSize())
                      {
                          // check that input does not straddle GRF boundary
-                         auto beginGRF = header->getInput(i)->offset / getGRFSize();
-                         auto endGRF = (header->getInput(i)->offset + header->getInput(i)->size - 1) / getGRFSize();
+                         auto beginGRF = header->getInput(i)->offset / irBuilder->getGRFSize();
+                         auto endGRF = (header->getInput(i)->offset + header->getInput(i)->size - 1) / irBuilder->getGRFSize();
                          REPORT_HEADER(options, beginGRF == endGRF, "Input %s is <1 GRF but straddles GRF boundary", header->getInput(i)->dcl->getName());
                      }
                  }
@@ -3147,7 +4159,7 @@ void vISAVerifier::verifyInstruction(
     {
         // We assume instructions are backward compatible
         // instructions that are not should have their own checks elsewhere
-        REPORT_INSTRUCTION(options, getGenxPlatform() >= instPlatform, "vISA instruction not supported on this platform");
+        REPORT_INSTRUCTION(options, irBuilder->getPlatform() >= instPlatform, "vISA instruction not supported on this platform");
     }
 
     for (unsigned i = 0; i < inst->opnd_count; i++)
@@ -3182,6 +4194,7 @@ void vISAVerifier::verifyInstruction(
         case ISA_Inst_Sampler:   verifyInstructionSampler     (inst); break;
         case ISA_Inst_SIMD_Flow: verifyInstructionSIMDFlow    (inst); break;
         case ISA_Inst_Data_Port: verifyInstructionDataport    (inst); break;
+        case ISA_Inst_LSC:       verifyInstructionLsc         (inst); break;
         default:
         {
             std::stringstream sstr;
@@ -3190,6 +4203,9 @@ void vISAVerifier::verifyInstruction(
             ASSERT_USER(false, sstr.str());
         }
     }
+
+    // Verify particular features
+    verifyBFMixedMode(inst);
 }
 
 #endif // IS_RELEASE_DLL

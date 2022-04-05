@@ -16,13 +16,14 @@ SPDX-License-Identifier: MIT
 #include "GenXVectorDecomposer.h"
 #include "GenX.h"
 #include "GenXBaling.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
+
+#include "vc/Utils/GenX/GlobalVariable.h"
+
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -32,6 +33,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+
 #include "Probe/Assertion.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -63,12 +65,9 @@ private:
   const Twine &Description;
   Instruction *Inst;
 
-  static int KindID;
-  static int getKindID() {
-    if (KindID == 0)
-      KindID = llvm::getNextAvailablePluginDiagnosticKind();
-    return KindID;
-  }
+  static const int KindID;
+
+  static int getKindID() { return KindID; }
 
 public:
   DiagnosticVectorDecomposition(Instruction *I, const Twine &Desc,
@@ -93,7 +92,8 @@ public:
   }
 };
 
-int DiagnosticVectorDecomposition::KindID = 0;
+const int DiagnosticVectorDecomposition::KindID =
+    llvm::getNextAvailablePluginDiagnosticKind();
 
 } // end anonymous namespace
 
@@ -103,13 +103,9 @@ int DiagnosticVectorDecomposition::KindID = 0;
  *
  * Return:  true if code modified
  */
-bool VectorDecomposer::run(DominatorTree *ArgDT)
-{
-  DT = ArgDT;
-  DL = &DT->
-        getRoot()
-            ->getModule()
-            ->getDataLayout();
+bool VectorDecomposer::run(const DataLayout &ArgDL) {
+  DL = &ArgDL;
+
   bool Modified = false;
   // Process each start wrregion added with addStartWrRegion().
   for (auto swi = StartWrRegions.begin(), swe = StartWrRegions.end();
@@ -143,11 +139,10 @@ bool VectorDecomposer::processStartWrRegion(Instruction *Inst)
   // and determine the decomposition that we can do to the web.
   if (!determineDecomposition(Inst))
     return false;
-  static unsigned Count = 0;
-  if (++Count > LimitGenXVectorDecomposer)
+  if (++DecomposedCount > LimitGenXVectorDecomposer)
     return false;
   if (LimitGenXVectorDecomposer != UINT_MAX)
-    dbgs() << "genx vector decomposer " << Count << "\n";
+    dbgs() << "genx vector decomposer " << DecomposedCount << "\n";
   decompose();
   clearOne();
   return true;
@@ -339,7 +334,7 @@ void VectorDecomposer::adjustDecomposition(Instruction *Inst)
 {
   if (Decomposition.empty())
     return; // Decomposition[] not set up yet
-  Region R(Inst, BaleInfo());
+  Region R = makeRegionFromBaleInfo(Inst, BaleInfo());
   if (R.Indirect) {
     setNotDecomposing(Inst, "indirect region");
     return; // cannot decompose if indirect
@@ -589,7 +584,7 @@ void VectorDecomposer::decomposePhiIncoming(PHINode *Phi, unsigned OperandNum,
 void VectorDecomposer::decomposeRdRegion(Instruction *RdRegion,
     const SmallVectorImpl<Value *> *PartsIn)
 {
-  Region RdR(RdRegion, BaleInfo());
+  Region RdR = makeRegionFromBaleInfo(RdRegion, BaleInfo());
   unsigned PartIndex = getPartIndex(&RdR);
   Value *Part = (*PartsIn)[PartIndex];
   if (isa<UndefValue>(Part)) {
@@ -647,7 +642,7 @@ void VectorDecomposer::decomposeRdRegion(Instruction *RdRegion,
 void VectorDecomposer::decomposeWrRegion(Instruction *WrRegion,
     SmallVectorImpl<Value *> *Parts)
 {
-  Region WrR(WrRegion, BaleInfo());
+  Region WrR = makeRegionFromBaleInfo(WrRegion, BaleInfo());
   unsigned PartIndex = getPartIndex(&WrR);
   Value *Part = (*Parts)[PartIndex];
   if (WrRegion->getOperand(NewValueOperandNum)->getType() == Part->getType()
@@ -925,7 +920,7 @@ bool SelectDecomposer::processStartSelect(Instruction *Inst) {
 template <typename T> bool isGlobalVarOperand(const Value *V) {
   const T *Inst = dyn_cast<T>(V);
   return Inst &&
-         getUnderlyingGlobalVariable(Inst->getPointerOperand()) != nullptr;
+         vc::getUnderlyingGlobalVariable(Inst->getPointerOperand()) != nullptr;
 }
 
 bool SelectDecomposer::determineDecomposition(Instruction *Inst) {
@@ -979,12 +974,12 @@ bool SelectDecomposer::determineDecomposition(Instruction *Inst) {
     // simd 32. Otherwise it makes difficult to bale in this region read.
     if (Width == 32 && GenXIntrinsic::isRdRegion(V)) {
       CallInst *CI = cast<CallInst>(V);
-      Region R(CI, BaleInfo());
-      unsigned LegalSize = R.getLegalSize(
-          0, true /*Allow2D*/,
+      Region R = makeRegionFromBaleInfo(CI, BaleInfo());
+      IGC_ASSERT(ST);
+      unsigned LegalSize = getLegalRegionSizeForTarget(
+          *ST, R, 0 /*idx*/, true /*Allow2D*/,
           cast<IGCLLVM::FixedVectorType>(CI->getOperand(0)->getType())
-              ->getNumElements(),
-          ST);
+              ->getNumElements());
       if (LegalSize < 32)
         Width = 16;
     }

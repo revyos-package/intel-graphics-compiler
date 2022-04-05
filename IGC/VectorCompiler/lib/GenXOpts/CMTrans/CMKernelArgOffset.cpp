@@ -89,13 +89,12 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/Support/Alignment.h"
 
 #include "vc/GenXOpts/GenXOpts.h"
-#include "vc/GenXOpts/Utils/KernelInfo.h"
+#include "vc/Utils/GenX/KernelInfo.h"
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
@@ -104,6 +103,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+
 #include "Probe/Assertion.h"
 
 using namespace llvm;
@@ -138,35 +138,9 @@ struct GrfParamZone {
   GrfParamZone(unsigned s, unsigned e) : Start(s), End(e){};
 };
 
-// Diagnostic information for error/warning from this pass.
-class DiagnosticInfoCMKernelArgOffset : public DiagnosticInfoOptimizationBase {
-private:
-  static int KindID;
-  static int getKindID() {
-    if (KindID == 0)
-      KindID = llvm::getNextAvailablePluginDiagnosticKind();
-    return KindID;
-  }
-
-public:
-  static void emit(Instruction *Inst, StringRef Msg,
-                   DiagnosticSeverity Severity = DS_Error);
-  DiagnosticInfoCMKernelArgOffset(DiagnosticSeverity Severity,
-                                  const Function &Fn, const DebugLoc &DLoc,
-                                  StringRef Msg)
-      : DiagnosticInfoOptimizationBase((DiagnosticKind)getKindID(), Severity,
-                                       /*PassName=*/nullptr, Msg, Fn, DLoc) {}
-  // This kind of message is always enabled, and not affected by -rpass.
-  bool isEnabled() const override { return true; }
-  static bool classof(const DiagnosticInfo *DI) {
-    return DI->getKind() == getKindID();
-  }
-};
-int DiagnosticInfoCMKernelArgOffset::KindID = 0;
-
 // CMKernelArgOffset pass
 class CMKernelArgOffset : public ModulePass {
-  genx::KernelMetadata *KM = nullptr;
+  vc::KernelMetadata *KM = nullptr;
 
   // Emit code for OCL runtime.
   bool OCLCodeGen = false;
@@ -186,7 +160,7 @@ public:
   bool runOnModule(Module &M) override;
 
 private:
-  void processKernel(MDNode *Node);
+  void processKernel(Function &Kernel);
   void processKernelOnOCLRT(Function *F);
   void resolveByValArgs(Function *F) const;
 
@@ -219,8 +193,8 @@ Pass *llvm::createCMKernelArgOffsetPass(unsigned GrfByteSize, bool OCLCodeGen) {
 }
 
 // Check whether there is an input/output argument attribute.
-static bool canReorderArguments(const genx::KernelMetadata &KM) {
-  using ArgIOKind = genx::KernelMetadata::ArgIOKind;
+static bool canReorderArguments(const vc::KernelMetadata &KM) {
+  using ArgIOKind = vc::KernelMetadata::ArgIOKind;
   return llvm::all_of(KM.getArgIOKinds(),
                       [](ArgIOKind K) { return K == ArgIOKind::Normal; });
 }
@@ -229,16 +203,12 @@ static bool canReorderArguments(const genx::KernelMetadata &KM) {
  * runOnModule : run the CM kernel arg offset pass
  */
 bool CMKernelArgOffset::runOnModule(Module &M) {
-  NamedMDNode *Named = M.getNamedMetadata(genx::FunctionMD::GenXKernels);
-  if (!Named)
-    return 0;
+  if (!vc::hasKernel(M))
+    return false;
 
   // Process each kernel in the CM kernel metadata.
-  for (unsigned i = 0, e = Named->getNumOperands(); i != e; ++i) {
-    MDNode *KernelNode = Named->getOperand(i);
-    if (KernelNode)
-      processKernel(KernelNode);
-  }
+  for (Function &Kernel : vc::kernels(M))
+    processKernel(Kernel);
 
   return true;
 }
@@ -246,30 +216,25 @@ bool CMKernelArgOffset::runOnModule(Module &M) {
 /***********************************************************************
  * processKernel : process one kernel
  *
- * Enter:   Node = metadata node for one kernel
+ * Enter:   Kernel = reference for a kernel function
  *
  * See GenXMetadata.h for complete list of kernel metadata
  */
-void CMKernelArgOffset::processKernel(MDNode *Node) {
-  Function *F = dyn_cast_or_null<Function>(
-      getValue(Node->getOperand(genx::KernelMDOp::FunctionRef)));
-  if (!F)
-    return;
-
+void CMKernelArgOffset::processKernel(Function &Kernel) {
   // change the linkage attribute for the kernel
-  F->setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
+  Kernel.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
 
-  genx::KernelMetadata KM(F);
+  vc::KernelMetadata KM{&Kernel};
   this->KM = &KM;
 
   // Layout kernel arguments differently if to run on OpenCL runtime.
   if (enableOCLCodeGen()) {
-    resolveByValArgs(F);
-    return processKernelOnOCLRT(F);
+    resolveByValArgs(&Kernel);
+    return processKernelOnOCLRT(&Kernel);
   }
 
-  auto getTypeSizeInBytes = [=](Type *Ty) {
-    const DataLayout &DL = F->getParent()->getDataLayout();
+  auto getTypeSizeInBytes = [&Kernel](Type *Ty) {
+    const DataLayout &DL = Kernel.getParent()->getDataLayout();
     if (auto PT = dyn_cast<PointerType>(Ty))
       return DL.getPointerTypeSize(Ty);
     return static_cast<unsigned>(Ty->getPrimitiveSizeInBits() / 8);
@@ -310,8 +275,8 @@ void CMKernelArgOffset::processKernel(MDNode *Node) {
 
       auto ArgKinds = KM.getArgKinds();
       auto Kind = ArgKinds.begin();
-      for (Function::arg_iterator i = F->arg_begin(), e = F->arg_end(); i != e;
-           ++i, ++Kind) {
+      for (Function::arg_iterator i = Kernel.arg_begin(), e = Kernel.arg_end();
+           i != e; ++i, ++Kind) {
         Argument *Arg = &*i;
         if (*Kind & 0xf8)
           continue; // implicit arg
@@ -396,8 +361,8 @@ void CMKernelArgOffset::processKernel(MDNode *Node) {
       bool FirstThreadImplicit = WantThreadImplicit;
       auto ArgKinds = KM.getArgKinds();
       auto Kind = ArgKinds.begin();
-      for (Function::arg_iterator i = F->arg_begin(), e = F->arg_end(); i != e;
-           ++i, ++Kind) {
+      for (Function::arg_iterator i = Kernel.arg_begin(), e = Kernel.arg_end();
+           i != e; ++i, ++Kind) {
         Argument *Arg = &*i;
         if (!(*Kind & 0xf8))
           continue;                               // not implicit arg
@@ -429,7 +394,7 @@ void CMKernelArgOffset::processKernel(MDNode *Node) {
     // boundary.
 
     // kernel input start offset
-    auto &DL = F->getParent()->getDataLayout();
+    auto &DL = Kernel.getParent()->getDataLayout();
     Offset = GrfStartOffset;
 
     // Place an argument and update offset.
@@ -446,7 +411,7 @@ void CMKernelArgOffset::processKernel(MDNode *Node) {
       Offset += ByteSize;
     };
 
-    for (auto &Arg : F->args()) {
+    for (auto &Arg : Kernel.args()) {
       unsigned Alignment = getValueAlignmentInBytes(Arg, DL);
       Type *Ty = Arg.getType();
       unsigned Bytes = DL.getTypeSizeInBits(Ty) / 8;
@@ -456,29 +421,20 @@ void CMKernelArgOffset::processKernel(MDNode *Node) {
 
   SmallVector<unsigned, 8> ArgOffsets;
   std::transform(
-      F->arg_begin(), F->arg_end(), std::back_inserter(ArgOffsets),
+      Kernel.arg_begin(), Kernel.arg_end(), std::back_inserter(ArgOffsets),
       [&PlacedArgs](const Argument &Arg) { return PlacedArgs[&Arg]; });
   KM.updateArgOffsetsMD(std::move(ArgOffsets));
 
-  SmallVector<unsigned, 8> OffsetInArgs(F->arg_size(), 0);
+  SmallVector<unsigned, 8> OffsetInArgs(Kernel.arg_size(), 0);
   KM.updateOffsetInArgsMD(std::move(OffsetInArgs));
 
   SmallVector<unsigned, 8> Indexes;
-  std::transform(F->arg_begin(), F->arg_end(), std::back_inserter(Indexes),
+  std::transform(Kernel.arg_begin(), Kernel.arg_end(),
+                 std::back_inserter(Indexes),
                  [](const Argument &Arg) { return Arg.getArgNo(); });
   KM.updateArgIndexesMD(std::move(Indexes));
 
   this->KM = nullptr;
-}
-
-/***********************************************************************
- * DiagnosticInfoCMKernelArgOffset::emit : emit an error or warning
- */
-void DiagnosticInfoCMKernelArgOffset::emit(Instruction *Inst, StringRef Msg,
-                                           DiagnosticSeverity Severity) {
-  DiagnosticInfoCMKernelArgOffset Err(Severity, *Inst->getParent()->getParent(),
-                                      Inst->getDebugLoc(), Msg);
-  Inst->getContext().diagnose(Err);
 }
 
 // CMImpParam generated byval aggregate arguments linearization metadata and
@@ -518,11 +474,11 @@ void CMKernelArgOffset::resolveByValArgs(Function *F) const {
 // ArgOffset = offset of Arg
 template <typename OutIterT>
 void setImplicitLinearizationOffset(Argument &Arg, unsigned ArgOffset,
-                                    const genx::KernelMetadata &KM,
+                                    const vc::KernelMetadata &KM,
                                     OutIterT OutIt) {
   IGC_ASSERT(KM.hasArgLinearization(&Arg));
   std::transform(KM.arg_lin_begin(&Arg), KM.arg_lin_end(&Arg), OutIt,
-                 [ArgOffset](const genx::ImplicitLinearizationInfo &Lin) {
+                 [ArgOffset](const vc::ImplicitLinearizationInfo &Lin) {
                    return std::make_pair(Lin.Arg, Lin.Offset->getZExtValue() +
                                                       ArgOffset);
                  });
@@ -544,7 +500,7 @@ void CMKernelArgOffset::processKernelOnOCLRT(Function *F) {
     unsigned ThreadPayloads[] = {
         Offset // R1, local_id_x, local_id_y, local_id_z
     };
-    auto getImpOffset = [&](genx::KernelArgInfo AI) -> int {
+    auto getImpOffset = [&](vc::KernelArgInfo AI) -> int {
       if (AI.isLocalIDs())
         return ThreadPayloads[0];
       return -1;
@@ -569,7 +525,7 @@ void CMKernelArgOffset::processKernelOnOCLRT(Function *F) {
       if (StartGRF != EndGRF)
         Offset = alignTo(Offset, GrfByteSize);
       if (Arg->hasByValAttr()) {
-        PlacedArgs[Arg] = genx::KernelMetadata::SKIP_OFFSET_VAL;
+        PlacedArgs[Arg] = vc::KernelMetadata::SKIP_OFFSET_VAL;
         auto InsertIt = std::inserter(ImplicitLinearizationArgToOffset,
                                       ImplicitLinearizationArgToOffset.end());
         setImplicitLinearizationOffset(*Arg, Offset, *KM, InsertIt);
@@ -588,7 +544,7 @@ void CMKernelArgOffset::processKernelOnOCLRT(Function *F) {
     auto ArgKinds = KM->getArgKinds();
     auto Kind = ArgKinds.begin();
     for (auto &Arg : F->args()) {
-      genx::KernelArgInfo AI(*Kind++);
+      vc::KernelArgInfo AI{*Kind++};
       int ImpOffset = getImpOffset(AI);
       if (ImpOffset > 0) {
         PlacedArgs[&Arg] = ImpOffset;
@@ -607,7 +563,7 @@ void CMKernelArgOffset::processKernelOnOCLRT(Function *F) {
     Kind = ArgKinds.begin();
     unsigned Idx = 0;
     for (auto &Arg : F->args()) {
-      genx::KernelArgInfo AI(*Kind++);
+      vc::KernelArgInfo AI{*Kind++};
       bool IsBuffer = KM->isBufferType(Idx++);
 
       // Skip alaready assigned arguments.
@@ -617,7 +573,7 @@ void CMKernelArgOffset::processKernelOnOCLRT(Function *F) {
       // image/sampler arguments do not allocate vISA inputs
       // buffer arguments do allocate unused vISA inputs
       if (!AI.isNormalCategory() && !IsBuffer) {
-        PlacedArgs[&Arg] = genx::KernelMetadata::SKIP_OFFSET_VAL;
+        PlacedArgs[&Arg] = vc::KernelMetadata::SKIP_OFFSET_VAL;
         continue;
       }
 

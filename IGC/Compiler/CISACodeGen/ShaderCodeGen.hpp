@@ -55,6 +55,7 @@ uint64_t GetImmediateVal(llvm::Value* Const);
 e_alignment GetPreferredAlignment(llvm::Value* Val, WIAnalysis* WIA, CodeGenContext* pContext);
 
 class CShaderProgram;
+class CBindlessShader;
 
 ///--------------------------------------------------------------------------------------------------------
 class CShader
@@ -103,6 +104,8 @@ public:
     virtual void ExtractGlobalVariables() {}
     void         EOTURBWrite();
     void         EOTRenderTarget(CVariable* r1, bool isPerCoarse);
+    CVariable* URBFence();
+    void         EOTGateway(CVariable* payload = nullptr);
     virtual void AddEpilogue(llvm::ReturnInst* ret);
 
     virtual CVariable* GetURBOutputHandle()
@@ -115,6 +118,13 @@ public:
         IGC_ASSERT_MESSAGE(0, "Should be overridden in a derived class!");
         return nullptr;
     }
+
+    virtual CVariable* GetGlobalBufferPtr() { IGC_ASSERT(0); return nullptr; }
+    virtual CVariable* GetLocalBufferPtr() { IGC_ASSERT(0); return nullptr; }
+    virtual CVariable* GetStackID() { IGC_ASSERT(0); return nullptr; }
+    virtual CVariable* GetInlinedDataPtr() { IGC_ASSERT(0); return nullptr; }
+    // if true, HW will pass one GRF NOS of inlinedata to payload, (compute only right now)
+
     virtual bool passNOSInlineData() { return false; }
     virtual bool loadThreadPayload() { return false; }
     virtual unsigned getAnnotatedNumThreads() { return 0; }
@@ -188,6 +198,8 @@ public:
 
     void        CopyVariable(CVariable* dst, CVariable* src, uint dstSubVar = 0, uint srcSubVar = 0);
     void        PackAndCopyVariable(CVariable* dst, CVariable* src, uint subVar = 0);
+    void        CopyVariableRaw(CVariable* dst, CVariable* src);
+    CVariable*  CopyVariableRaw(CVariable* src, bool singleInstance = true);
     bool        IsValueUsed(llvm::Value* value);
     CVariable*  GetGlobalCVar(llvm::Value* value);
     uint        GetNbElementAndMask(llvm::Value* value, uint32_t& mask);
@@ -214,6 +226,8 @@ public:
     CVariable* GetARGV();
     CVariable* GetRETV();
     CVariable* GetPrivateBase();
+    CVariable* GetImplArgBufPtr();
+    CVariable* GetLocalIdBufPtr();
 
     void SaveSRet(CVariable* sretPtr);
     CVariable* GetAndResetSRet();
@@ -274,10 +288,12 @@ public:
     bool        IsPatchablePS();
     bool        IsValueCoalesced(llvm::Value* v);
 
-    bool        GetHasBarrier() const { return m_HasBarrier; }
-    void        SetHasBarrier() { m_HasBarrier = true; }
+    bool        GetHasBarrier() const { return m_BarrierNumber > 0; }
+    void        SetHasBarrier() { if (m_BarrierNumber == 0) m_BarrierNumber = 1; }
+    void        SetBarrierNumber(int BarrierNumber) { m_BarrierNumber = BarrierNumber; }
+    int         GetBarrierNumber() const { return m_BarrierNumber; }
 
-    void        GetSimdOffsetBase(CVariable*& pVar);
+    void        GetSimdOffsetBase(CVariable*& pVar, bool dup = false);
     /// Returns a simd8 register filled with values [24, 20, 16, 12, 8, 4, 0]
     /// that are used to index subregisters of a GRF when counting offsets in bytes.
     /// Used e.g. for indirect addressing via a0 register.
@@ -305,6 +321,7 @@ public:
 
     /// Return true if we are sure that all lanes are active at the begging of the thread
     virtual bool HasFullDispatchMask() { return false; }
+    bool needsEntryFence() const;
 
     llvm::Function* entry;
     const CBTILayout* m_pBtiLayout;
@@ -430,7 +447,7 @@ public:
                 m_BindingTableEntryCount = m_pBtiLayout->GetBindingTableEntryCount();
                 m_BindingTableUsedEntriesBitmap |= BITMASK_RANGE(0, (m_BindingTableEntryCount / cBTEntriesPerCacheLine));
 
-                if (bufType == RESOURCE)
+                if (bufType == RESOURCE || bufType == BINDLESS_TEXTURE)
                 {
                     unsigned int MaxArray = m_pBtiLayout->GetTextureIndexSize() / 32;
                     for (unsigned int i = 0; i < MaxArray; i++)
@@ -443,11 +460,11 @@ public:
                         m_shaderResourceLoaded[MaxArray] = BIT(i % 32);
                     }
                 }
-                else if (bufType == CONSTANT_BUFFER)
+                else if (bufType == CONSTANT_BUFFER || bufType == BINDLESS_CONSTANT_BUFFER)
                 {
                     m_constantBufferLoaded |= BITMASK_RANGE(0, m_pBtiLayout->GetConstantBufferIndexSize());
                 }
-                else if (bufType == UAV)
+                else if (bufType == UAV || bufType == BINDLESS)
                 {
                     m_uavLoaded |= QWBITMASK_RANGE(0, m_pBtiLayout->GetUavIndexSize());
                 }
@@ -488,6 +505,8 @@ public:
     bool GetHasGlobalAtomics() const { return m_HasGlobalAtomics; }
     bool GetHasDPAS() const { return m_HasDPAS; }
     void SetHasDPAS() { m_HasDPAS = true; }
+    bool GetHasEval() const { return m_HasEval; }
+    void SetHasEval() { m_HasEval = true; }
     void IncStatelessWritesCount() { ++m_StatelessWritesCount; }
     void IncIndirectStatelessCount() { ++m_IndirectStatelessCount; }
     uint32_t GetStatelessWritesCount() const { return m_StatelessWritesCount; }
@@ -498,6 +517,11 @@ public:
     // in DWORDs
     uint32_t getMinPushConstantBufferAlignmentInBytes() const { return m_Platform->getMinPushConstantBufferAlignment() * sizeof(DWORD); }
 
+    // Note that for PVC A0 simd16, PVCLSCEnabled() returns true
+    // but no LSC is generated!
+    bool PVCLSCEnabled() const {
+        return m_Platform->getPlatformInfo().eProductFamily == IGFX_PVC && m_Platform->hasLSC();
+    }
 
     e_alignment getGRFAlignment() const { return CVariable::getAlignment(getGRFSize()); }
 
@@ -509,6 +533,11 @@ public:
     llvm::DenseMap<llvm::Value*, CVariable*>& GetGlobalMapping()
     {
         return globalSymbolMapping;
+    }
+
+    llvm::DenseMap<llvm::Constant*, CVariable*>& GetConstantMapping()
+    {
+        return ConstantPool;
     }
 
     int64_t GetKernelArgOffset(CVariable* argV)
@@ -524,8 +553,12 @@ public:
     unsigned int GetScalarTypeSizeInRegisterInBits(const llvm::Type* Ty) const;
     unsigned int GetScalarTypeSizeInRegister(const llvm::Type* Ty) const;
 
+    bool HasStackCalls() const { return m_HasStackCalls; }
+    void SetHasStackCalls() { m_HasStackCalls = true; }
+    bool IsIntelSymbolTableVoidProgram() const { return m_isIntelSymbolTableVoidProgram; }
+    void SetIsIntelSymbolTableVoidProgram() { m_isIntelSymbolTableVoidProgram = true; }
+
 protected:
-    void GetPrintfStrings(std::vector<std::pair<unsigned int, std::string>>& printfStrings);
     bool CompileSIMDSizeInCommon(SIMDMode simdMode);
     uint32_t GetShaderThreadUsageRate();
 private:
@@ -586,6 +619,7 @@ protected:
     std::vector<CVariable*> payloadLiveOutSetup;
     std::vector<CVariable*> payloadTempSetup;
     std::vector<CVariable*> patchConstantSetup;
+    std::vector<CVariable*> perPrimitiveSetup;
 
     uint m_maxBlockId;
 
@@ -603,6 +637,8 @@ protected:
     CVariable* m_ARGV;
     CVariable* m_RETV;
     CVariable* m_SavedSRetPtr;
+    CVariable* m_ImplArgBufPtr;
+    CVariable* m_LocalIdBufPtr;
 
     std::vector<USC::SConstantGatherEntry> gatherMap;
     uint     m_ConstantBufferLength;
@@ -619,7 +655,7 @@ protected:
     /// holds max number of inputs that can be pushed for this shader unit
     static const uint32_t m_pMaxNumOfPushedInputs;
 
-    bool m_HasBarrier;
+    int m_BarrierNumber;
     SProgramOutput m_simdProgram;
 
     // Holds max used binding table entry index.
@@ -641,11 +677,16 @@ protected:
     bool m_HasGlobalAtomics = false;
 
     bool m_HasDPAS = false;
+    bool m_HasEval = false;
+    bool m_passNOSInlinedata = false;
 
     uint32_t m_StatelessWritesCount = 0;
     uint32_t m_IndirectStatelessCount = 0;
 
     DebugInfoData diData;
+
+    bool m_HasStackCalls = false;
+    bool m_isIntelSymbolTableVoidProgram = false;
 };
 
 /// This class contains the information for the different SIMD version
@@ -667,6 +708,7 @@ public:
     void FillProgram(SPixelShaderKernelProgram* pKernelProgram);
     void FillProgram(SComputeShaderKernelProgram* pKernelProgram);
     void FillProgram(SOpenCLProgramInfo* pKernelProgram);
+    CBindlessShader* FillProgram(SBindlessProgram* pKernelProgram);
     ShaderStats* m_shaderStats;
 
 protected:

@@ -129,6 +129,14 @@ getGenericModuleBuffer(int ResourceID) {
 }
 
 template <enum vc::bif::RawKind Kind>
+std::unique_ptr<llvm::MemoryBuffer>
+getVCModuleBufferForArch(llvm::StringRef CPUStr = "") {
+  return llvm::MemoryBuffer::getMemBuffer(
+      vc::bif::getRawDataForArch<Kind>(CPUStr), "",
+      false /* RequiresNullTerminator */);
+}
+
+template <enum vc::bif::RawKind Kind>
 std::unique_ptr<llvm::MemoryBuffer> getVCModuleBuffer() {
   return llvm::MemoryBuffer::getMemBuffer(vc::bif::getRawData<Kind>(), "",
                                           false /* RequiresNullTerminator */);
@@ -138,8 +146,17 @@ static void adjustPlatform(const IGC::CPlatform &IGCPlatform,
                            vc::CompileOptions &Opts) {
   auto &PlatformInfo = IGCPlatform.getPlatformInfo();
   unsigned RevId = PlatformInfo.usRevId;
-  Opts.CPUStr = cmc::getPlatformStr(PlatformInfo, /* inout */ RevId);
+  const char *PlatformStr =
+      cmc::getPlatformStr(PlatformInfo, /* inout */ RevId);
+  Opts.CPUStr = PlatformStr ? PlatformStr : "";
   Opts.RevId = RevId;
+  Opts.HasL1ReadOnlyCache = IGCPlatform.hasL1ReadOnlyCache();
+  Opts.HasLocalMemFenceSupress = IGCPlatform.localMemFenceSupress();
+  Opts.HasMultiTile = IGCPlatform.hasMultiTile();
+  Opts.HasL3CacheCoherentCrossTiles = IGCPlatform.L3CacheCoherentCrossTiles();
+  Opts.HasL3FlushOnGPUScopeInvalidate =
+      IGCPlatform.hasL3FlushOnGPUScopeInvalidate();
+  Opts.HasHalfSIMDLSC = IGCPlatform.hasHalfSIMDLSC();
   Opts.WATable = &IGCPlatform.getWATable();
 }
 
@@ -162,7 +179,7 @@ static void adjustFileType(TC::TB_DATA_FORMAT DataFormat,
 
 static void adjustOptLevel(vc::CompileOptions &Opts) {
   if (IGC_IS_FLAG_ENABLED(VCOptimizeNone))
-    Opts.OptLevel = vc::OptimizerLevel::None;
+    Opts.IROptLevel = vc::OptimizerLevel::None;
 }
 
 static void adjustStackCalls(vc::CompileOptions &Opts, BuildDiag &Diag) {
@@ -186,6 +203,21 @@ static void adjustStackCalls(vc::CompileOptions &Opts, BuildDiag &Diag) {
   }
 }
 
+static void adjustDebugStrippingPolicy(vc::CompileOptions &Opts) {
+  int DebugStripFlag = IGC_GET_FLAG_VALUE(StripDebugInfo);
+  switch (DebugStripFlag) {
+  default:
+    Opts.StripDebugInfoCtrl = vc::DebugInfoStripControl::None;
+    break;
+  case FLAG_DEBUG_INFO_STRIP_ALL:
+    Opts.StripDebugInfoCtrl = vc::DebugInfoStripControl::All;
+    break;
+  case FLAG_DEBUG_INFO_STRIP_NONLINE:
+    Opts.StripDebugInfoCtrl = vc::DebugInfoStripControl::NonLine;
+    break;
+  }
+}
+
 // Overwrite binary format option for backward compatibility with
 // environment variable approach.
 static void adjustBinaryFormat(vc::BinaryKind &Binary) {
@@ -193,17 +225,48 @@ static void adjustBinaryFormat(vc::BinaryKind &Binary) {
     Binary = vc::BinaryKind::ZE;
 }
 
+template <typename T> T deriveDefaultableFlagValue(int Flag) {
+  switch (Flag) {
+  default:
+    return T::Default;
+  case DEFAULTABLE_FLAG_ENABLE:
+    return T::Enable;
+  case DEFAULTABLE_FLAG_DISABLE:
+    return T::Disable;
+  }
+}
+
 static void adjustTransformationsAndOptimizations(vc::CompileOptions &Opts) {
   if (IGC_IS_FLAG_ENABLED(VCLocalizeAccUsage))
     Opts.ForceLiveRangesLocalizationForAccUsage = true;
   if (IGC_IS_FLAG_ENABLED(VCDisableNonOverlappingRegionOpt))
     Opts.ForceDisableNonOverlappingRegionOpt = true;
-  if (IGC_IS_FLAG_ENABLED(VCPassDebugToFinalizer))
-    Opts.ForcePassDebugToFinalizer = true;
   if (IGC_IS_FLAG_ENABLED(VCSaveStackCallLinkage))
     Opts.SaveStackCallLinkage = true;
+  if (IGC_IS_FLAG_ENABLED(VCDirectCallsOnly))
+    Opts.DirectCallsOnly = true;
+  if (IGC_IS_FLAG_ENABLED(DisableEuFusion))
+    Opts.DisableEUFusion = true;
   if (IGC_IS_FLAG_ENABLED(DebugInfoValidation))
     Opts.ForceDebugInfoValidation = true;
+  if (IGC_IS_FLAG_ENABLED(EnableL3FlushForGlobal))
+    Opts.HasL3FlushForGlobal = true;
+  if (IGC_IS_FLAG_ENABLED(EnableGPUFenceScopeOnSingleTileGPUs))
+    Opts.HasGPUFenceScopeOnSingleTileGPUs = true;
+
+  if (unsigned LoopUnrollThreshold = IGC_GET_FLAG_VALUE(VCLoopUnrollThreshold))
+    Opts.ForceLoopUnrollThreshold = LoopUnrollThreshold;
+
+  Opts.NoOptFinalizerMode =
+      deriveDefaultableFlagValue<vc::NoOptFinalizerControl>(
+          IGC_GET_FLAG_VALUE(VCNoOptFinalizerControl));
+
+  Opts.DisableLRCoalescingMode =
+      deriveDefaultableFlagValue<vc::DisableLRCoalescingControl>(
+          IGC_GET_FLAG_VALUE(VCDisableLRCoalescingControl));
+  Opts.DisableExtraCoalescingMode =
+      deriveDefaultableFlagValue<vc::DisableExtraCoalescingControl>(
+          IGC_GET_FLAG_VALUE(VCDisableExtraCoalescing));
 }
 
 static void adjustDumpOptions(vc::CompileOptions &Opts) {
@@ -224,6 +287,7 @@ static void adjustOptions(const IGC::CPlatform &IGCPlatform,
   adjustBinaryFormat(Opts.Binary);
   adjustDumpOptions(Opts);
   adjustStackCalls(Opts, Diag);
+  adjustDebugStrippingPolicy(Opts);
 
   adjustTransformationsAndOptimizations(Opts);
 }
@@ -331,12 +395,12 @@ parseOptions(vc::ShaderDumper &Dumper, llvm::StringRef ApiOptions,
   if (LegacyPayload.IsValid) {
     ApiOptionsHolder = "-vc-codegen";
     ApiOptionsHolder.append(" ");
-    ApiOptionsHolder.append(LegacyPayload.VCApiOpts);
+    ApiOptionsHolder.append(LegacyPayload.VCApiOpts.str());
     ApiOptions = ApiOptionsHolder;
 
     InternalOptionsHolder = InternalOptions.str();
     InternalOptionsHolder.append(" ");
-    InternalOptionsHolder.append(LegacyPayload.VCInternalOpts);
+    InternalOptionsHolder.append(LegacyPayload.VCInternalOpts.str());
     InternalOptions = InternalOptionsHolder;
 
     Input = Input.take_front(static_cast<size_t>(LegacyPayload.IRSize));
@@ -376,7 +440,7 @@ bool fillPrintfData(vc::ExternalData &ExtData) {
 }
 
 static llvm::Optional<vc::ExternalData>
-fillExternalData(vc::BinaryKind Binary) {
+fillExternalData(vc::BinaryKind Binary, llvm::StringRef CPUStr) {
   vc::ExternalData ExtData;
   ExtData.OCLGenericBIFModule =
       getGenericModuleBuffer(OCL_BC);
@@ -400,7 +464,7 @@ fillExternalData(vc::BinaryKind Binary) {
     break;
   }
   ExtData.VCEmulationBIFModule =
-      getVCModuleBuffer<vc::bif::RawKind::Emulation>();
+      getVCModuleBufferForArch<vc::bif::RawKind::Emulation>(CPUStr);
   if (!ExtData.VCEmulationBIFModule)
     return {};
   ExtData.VCSPIRVBuiltinsBIFModule =
@@ -424,10 +488,41 @@ static void dumpPlatform(const vc::CompileOptions &Opts, PLATFORM Platform,
 
   Os << "NEO passed: DisplayCore = " << Core << ", RenderCore = " << RenderCore
      << ", Product = " << Product << ", Revision = " << RevId << "\n";
-  Os << "IGC translated into: " << Opts.CPUStr << ", " << Opts.RevId << "\n";
+  Os << "IGC translated into: "
+     << (Opts.CPUStr.empty() ? "(empty)" : Opts.CPUStr) << ", " << Opts.RevId
+     << "\n";
 
   Dumper.dumpText(Os.str(), "platform.be.txt");
 #endif
+}
+
+static bool textRelocationsMatch(const vc::CMKernel &K) {
+  auto &Info = K.getProgramOutput();
+  return Info.m_relocs.size() == Info.m_funcRelocationTableEntries;
+}
+
+static void validateCMProgramForOCLBin(const vc::CGen8CMProgram &CMProgram) {
+  IGC_ASSERT_MESSAGE(
+      CMProgram.m_programInfo->m_GlobalPointerAddressRelocAnnotation.globalReloc
+          .empty(),
+      "global section relocations aren't supported for oclbin");
+  IGC_ASSERT_MESSAGE(
+      CMProgram.m_programInfo->m_GlobalPointerAddressRelocAnnotation
+          .globalConstReloc.empty(),
+      "constant section relocations aren't supported for oclbin");
+  // FIXME: Relocations in indirect functions are unsupported for oclbin. They
+  // are supported for zebin. So zebin and oclbin data is compared here to
+  // diagnose the issue.
+  // FIXME: It is possible to have a legal case where the number of relocations
+  // for zebin and oclbin differs in future. The check must be updated in
+  // this case. For now number of relocations is expected to match or to be 0
+  // for oclbin and not 0 for zebin in case of relocations in indirect
+  // functions.
+  IGC_ASSERT_MESSAGE(llvm::all_of(CMProgram.m_kernels,
+                                  [](const std::unique_ptr<vc::CMKernel> &K) {
+                                    return textRelocationsMatch(*K);
+                                  }),
+                     "some text relocations are lost for oclbin");
 }
 
 std::error_code vc::translateBuild(const TC::STB_TranslateInputArgs *InputArgs,
@@ -464,8 +559,11 @@ std::error_code vc::translateBuild(const TC::STB_TranslateInputArgs *InputArgs,
   adjustOptions(IGCPlatform, InputDataFormatTemp, Opts, Diag);
 
   // here we have Opts set and can dump what we got from runtime and how
-  // we understood it
+  // we understood it. We need to do it before output error on unknown platform
   dumpPlatform(Opts, IGCPlatform.getPlatformInfo(), *Dumper);
+
+  if (Opts.CPUStr.empty())
+    llvm::report_fatal_error("vc::translateBuild: unsupported platform");
 
   if (IGC_IS_FLAG_ENABLED(ShaderOverride))
     Opts.ShaderOverrider =
@@ -473,7 +571,7 @@ std::error_code vc::translateBuild(const TC::STB_TranslateInputArgs *InputArgs,
 
   Opts.Dumper = std::move(Dumper);
 
-  auto ExtData = fillExternalData(Opts.Binary);
+  auto ExtData = fillExternalData(Opts.Binary, Opts.CPUStr);
   if (!ExtData)
     return getError(vc::make_error_code(vc::errc::bif_load_fail),
                     OutputArgs);
@@ -497,6 +595,7 @@ std::error_code vc::translateBuild(const TC::STB_TranslateInputArgs *InputArgs,
     auto &CompileResult = std::get<vc::ocl::CompileOutput>(Res);
     vc::CGen8CMProgram CMProgram{IGCPlatform.getPlatformInfo(), IGCPlatform.getWATable()};
     vc::createBinary(CMProgram, CompileResult);
+    validateCMProgramForOCLBin(CMProgram);
     CMProgram.CreateKernelBinaries(Opts);
     Util::BinaryStream ProgramBinary;
     CMProgram.GetProgramBinary(ProgramBinary, CompileResult.PointerSizeInBytes);

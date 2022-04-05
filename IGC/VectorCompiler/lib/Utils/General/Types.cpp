@@ -45,13 +45,17 @@ int vc::getAddrSpace(Type *PtrOrPtrVec) {
   return cast<VectorType>(PtrOrPtrVec)->getElementType()->getPointerAddressSpace();
 }
 
-const Type &vc::fixDegenerateVectorType(const Type &Ty) {
+bool vc::isDegenerateVectorType(llvm::Type const &Ty) {
   if (!isa<IGCLLVM::FixedVectorType>(Ty))
-    return Ty;
+    return false;
   auto &VecTy = cast<IGCLLVM::FixedVectorType>(Ty);
-  if (VecTy.getNumElements() != 1)
+  return VecTy.getNumElements() == 1;
+}
+
+const Type &vc::fixDegenerateVectorType(const Type &Ty) {
+  if (!isDegenerateVectorType(Ty))
     return Ty;
-  return *VecTy.getElementType();
+  return *(cast<IGCLLVM::FixedVectorType>(Ty).getElementType());
 }
 
 Type &vc::fixDegenerateVectorType(Type &Ty) {
@@ -119,4 +123,25 @@ Type *vc::getNewTypeForCast(Type *OldOutType, Type *OldInType,
   IGC_ASSERT_MESSAGE(OldInType->getScalarType() == NewInType->getScalarType(),
                      "Error: unexpected type change");
   return NewOutType;
+}
+
+IGCLLVM::FixedVectorType &vc::getVectorType(Type &Ty) {
+  if (isa<IGCLLVM::FixedVectorType>(Ty))
+    return cast<IGCLLVM::FixedVectorType>(Ty);
+  return *IGCLLVM::FixedVectorType::get(&Ty, 1);
+}
+
+Type *vc::setScalarType(Type &OrigTy, Type &ScalarTy) {
+  IGC_ASSERT_MESSAGE(OrigTy.isFPOrFPVectorTy() || OrigTy.isIntOrIntVectorTy() ||
+                         OrigTy.isPtrOrPtrVectorTy(),
+                     "wrong argument: OrigType must be an int, float, pointer "
+                     "or vector of those");
+  IGC_ASSERT_MESSAGE(
+      ScalarTy.isFloatingPointTy() || ScalarTy.isIntegerTy() ||
+          ScalarTy.isPointerTy(),
+      "wrong argument: ScalarTy must be an int, float or pointer");
+  if (!isa<IGCLLVM::FixedVectorType>(OrigTy))
+    return &ScalarTy;
+  return IGCLLVM::FixedVectorType::get(
+      &ScalarTy, cast<IGCLLVM::FixedVectorType>(OrigTy).getNumElements());
 }

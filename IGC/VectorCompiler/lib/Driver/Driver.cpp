@@ -1,25 +1,24 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
 #include "SPIRVWrapper.h"
-#include "VCPassManager.h"
+#include "vc/Support/PassManager.h"
 
 #include "vc/Driver/Driver.h"
 
 #include "igc/Options/Options.h"
 #include "vc/GenXCodeGen/GenXOCLRuntimeInfo.h"
 #include "vc/GenXCodeGen/GenXTarget.h"
-#include "vc/GenXOpts/GenXOpts.h"
-#include "vc/GenXOpts/Utils/KernelInfo.h"
+#include "vc/GenXCodeGen/TargetMachine.h"
 #include "vc/Support/BackendConfig.h"
 #include "vc/Support/Status.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 #include "llvm/GenXIntrinsics/GenXIntrOpts.h"
-#include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXSPIRVReaderAdaptor.h"
 
 #include "llvm/ADT/ScopeExit.h"
@@ -31,11 +30,10 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
-#include "llvm/InitializePasses.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/CommandLine.h"
@@ -45,7 +43,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/TargetRegistry.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetOptions.h"
@@ -58,13 +55,8 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 
-#include <cctype>
 #include <memory>
-#include <new>
-#include <set>
-#include <sstream>
 #include <string>
-#include <vector>
 
 using namespace llvm;
 
@@ -159,7 +151,16 @@ static std::string getSubtargetFeatureString(const vc::CompileOptions &Opts) {
       Features.AddFeature(Feature.str(), Enabled);
     }
   }
-
+  if (Opts.HasL1ReadOnlyCache)
+    Features.AddFeature("has_l1_read_only_cache");
+  if (Opts.HasLocalMemFenceSupress)
+    Features.AddFeature("supress_local_mem_fence");
+  if (Opts.HasMultiTile)
+    Features.AddFeature("multi_tile");
+  if (Opts.HasL3CacheCoherentCrossTiles)
+    Features.AddFeature("l3_cache_coherent_cross_tiles");
+  if (Opts.HasL3FlushOnGPUScopeInvalidate)
+    Features.AddFeature("l3_flush_on_gpu_scope_invalidate");
   if (Opts.NoVecDecomp)
     Features.AddFeature("disable_vec_decomp");
   if (Opts.NoJumpTables)
@@ -169,12 +170,14 @@ static std::string getSubtargetFeatureString(const vc::CompileOptions &Opts) {
   if (Opts.Binary == vc::BinaryKind::OpenCL ||
       Opts.Binary == vc::BinaryKind::ZE)
     Features.AddFeature("ocl_runtime");
+  if (Opts.HasHalfSIMDLSC)
+    Features.AddFeature("feature_has_half_simd_lsc");
 
   return Features.getString();
 }
 
 static CodeGenOpt::Level getCodeGenOptLevel(const vc::CompileOptions &Opts) {
-  if (Opts.OptLevel == vc::OptimizerLevel::None)
+  if (Opts.CodegenOptLevel == vc::OptimizerLevel::None)
     return CodeGenOpt::None;
   return CodeGenOpt::Default;
 }
@@ -185,25 +188,15 @@ static TargetOptions getTargetOptions(const vc::CompileOptions &Opts) {
   return Options;
 }
 
-static Expected<std::unique_ptr<TargetMachine>>
-createTargetMachine(const vc::CompileOptions &Opts, Triple &TheTriple) {
-  std::string Error;
-  const Target *TheTarget = TargetRegistry::lookupTarget(
-      TheTriple.getArchName().str(), TheTriple, Error);
-  IGC_ASSERT_MESSAGE(TheTarget, "vc target was not registered");
-
-  const std::string FeaturesStr = getSubtargetFeatureString(Opts);
-
-  const TargetOptions Options = getTargetOptions(Opts);
-
-  CodeGenOpt::Level OptLevel = getCodeGenOptLevel(Opts);
-  std::unique_ptr<TargetMachine> TM{
-      TheTarget->createTargetMachine(TheTriple.getTriple(), Opts.CPUStr,
-                                     FeaturesStr, Options, /*RelocModel=*/None,
-                                     /*CodeModel=*/None, OptLevel)};
-  if (!TM)
-    return make_error<vc::TargetMachineError>();
-  return {std::move(TM)};
+template <typename T> bool getDefaultOverridableFlag(T OptFlag, bool Default) {
+  switch (OptFlag) {
+  default:
+    return Default;
+  case T::Enable:
+    return true;
+  case T::Disable:
+    return false;
+  }
 }
 
 // Create backend options for immutable config pass. Override default
@@ -214,28 +207,53 @@ static GenXBackendOptions createBackendOptions(const vc::CompileOptions &Opts) {
     BackendOpts.StackSurfaceMaxSize = Opts.StackMemSize.getValue();
     BackendOpts.StatelessPrivateMemSize = Opts.StackMemSize.getValue();
   }
-  BackendOpts.EmitDebugInformation = Opts.EmitDebugInformation;
-  BackendOpts.EmitDebuggableKernels = Opts.EmitDebuggableKernels;
-  BackendOpts.DebugInfoForZeBin = (Opts.Binary == vc::BinaryKind::ZE);
-  BackendOpts.DebugInfoValidationEnable = Opts.ForceDebugInfoValidation;
+
+  BackendOpts.DebuggabilityEmitDebuggableKernels = Opts.EmitDebuggableKernels;
+  BackendOpts.DebuggabilityForLegacyPath =
+      (Opts.Binary != vc::BinaryKind::CM) && Opts.EmitDebuggableKernels;
+  BackendOpts.DebuggabilityZeBinCompatibleDWARF =
+      (Opts.Binary == vc::BinaryKind::ZE);
+  BackendOpts.DebuggabilityEmitBreakpoints = Opts.ExtendedDebuggingSupport;
+
+  BackendOpts.DebuggabilityValidateDWARF = Opts.ForceDebugInfoValidation;
+
+  BackendOpts.DisableFinalizerMsg = Opts.DisableFinalizerMsg;
   BackendOpts.EnableAsmDumps = Opts.DumpAsm;
   BackendOpts.EnableDebugInfoDumps = Opts.DumpDebugInfo;
   BackendOpts.Dumper = Opts.Dumper.get();
   BackendOpts.ShaderOverrider = Opts.ShaderOverrider.get();
+  BackendOpts.DisableStructSplitting = Opts.DisableStructSplitting;
+  BackendOpts.DisableEUFusion = Opts.DisableEUFusion;
+  BackendOpts.EmitZebinVisaSections = Opts.EmitZebinVisaSections;
   BackendOpts.ForceArrayPromotion = (Opts.Binary == vc::BinaryKind::CM);
   if (Opts.ForceLiveRangesLocalizationForAccUsage)
     BackendOpts.LocalizeLRsForAccUsage = true;
   if (Opts.ForceDisableNonOverlappingRegionOpt)
     BackendOpts.DisableNonOverlappingRegionOpt = true;
-  BackendOpts.PassDebugToFinalizer =
-      Opts.ForcePassDebugToFinalizer ||
-      (Opts.OptLevel == vc::OptimizerLevel::None && Opts.EmitDebugInformation);
   BackendOpts.FCtrl = Opts.FCtrl;
   BackendOpts.WATable = Opts.WATable;
   BackendOpts.IsLargeGRFMode = Opts.IsLargeGRFMode;
   BackendOpts.UseBindlessBuffers = Opts.UseBindlessBuffers;
   if (Opts.SaveStackCallLinkage)
     BackendOpts.SaveStackCallLinkage = true;
+  BackendOpts.UsePlain2DImages = Opts.UsePlain2DImages;
+  BackendOpts.EnablePreemption = Opts.EnablePreemption;
+  if (Opts.HasL3FlushForGlobal)
+    BackendOpts.L3FlushForGlobal = true;
+  if (Opts.HasGPUFenceScopeOnSingleTileGPUs)
+    BackendOpts.GPUFenceScopeOnSingleTileGPUs = true;
+  BackendOpts.LoopUnrollThreshold = Opts.ForceLoopUnrollThreshold;
+
+  BackendOpts.DisableLiveRangesCoalescing =
+      getDefaultOverridableFlag(Opts.DisableLRCoalescingMode, false);
+  BackendOpts.DisableExtraCoalescing =
+      getDefaultOverridableFlag(Opts.DisableExtraCoalescingMode, false);
+
+  if (Opts.DirectCallsOnly)
+    BackendOpts.DirectCallsOnly = true;
+
+  BackendOpts.enforceLLVMOptions();
+
   return BackendOpts;
 }
 
@@ -259,10 +277,34 @@ static GenXBackendData createBackendData(const vc::ExternalData &Data,
   return std::move(BackendData);
 }
 
+static Expected<std::unique_ptr<TargetMachine>>
+createTargetMachine(const vc::CompileOptions &Opts,
+                    const vc::ExternalData &ExtData, Triple &TheTriple) {
+  std::string Error;
+  const Target *TheTarget = TargetRegistry::lookupTarget(
+      TheTriple.getArchName().str(), TheTriple, Error);
+  IGC_ASSERT_MESSAGE(TheTarget, "vc target was not registered");
+
+  const std::string FeaturesStr = getSubtargetFeatureString(Opts);
+
+  const TargetOptions Options = getTargetOptions(Opts);
+
+  CodeGenOpt::Level OptLevel = getCodeGenOptLevel(Opts);
+  auto BC = std::make_unique<GenXBackendConfig>(
+      createBackendOptions(Opts),
+      createBackendData(ExtData, vc::is32BitArch(TheTriple) ? 32 : 64));
+  std::unique_ptr<TargetMachine> TM{vc::createGenXTargetMachine(
+      *TheTarget, TheTriple, Opts.CPUStr, FeaturesStr, Options,
+      /*RelocModel=*/None, /*CodeModel=*/None, OptLevel, std::move(BC))};
+  if (!TM)
+    return make_error<vc::TargetMachineError>();
+  return {std::move(TM)};
+}
+
 static void optimizeIR(const vc::CompileOptions &Opts,
                        const vc::ExternalData &ExtData, TargetMachine &TM,
                        Module &M) {
-  VCPassManager PerModulePasses;
+  vc::PassManager PerModulePasses;
   legacy::FunctionPassManager PerFunctionPasses(&M);
 
   PerModulePasses.add(
@@ -274,7 +316,7 @@ static void optimizeIR(const vc::CompileOptions &Opts,
       createTargetTransformInfoWrapperPass(TM.getTargetIRAnalysis()));
 
   unsigned OptLevel;
-  if (Opts.OptLevel == vc::OptimizerLevel::None)
+  if (Opts.IROptLevel == vc::OptimizerLevel::None)
     OptLevel = 0;
   else
     OptLevel = 2;
@@ -342,7 +384,7 @@ static void populateCodeGenPassManager(const vc::CompileOptions &Opts,
 static vc::ocl::CompileOutput runOclCodeGen(const vc::CompileOptions &Opts,
                                             const vc::ExternalData &ExtData,
                                             TargetMachine &TM, Module &M) {
-  VCPassManager PM;
+  vc::PassManager PM;
 
   SmallString<32> IsaBinary;
   raw_svector_ostream OS(IsaBinary);
@@ -364,7 +406,7 @@ static vc::ocl::CompileOutput runOclCodeGen(const vc::CompileOptions &Opts,
 static vc::cm::CompileOutput runCmCodeGen(const vc::CompileOptions &Opts,
                                           const vc::ExternalData &ExtData,
                                           TargetMachine &TM, Module &M) {
-  VCPassManager PM;
+  vc::PassManager PM;
 
   SmallString<32> IsaBinary;
   raw_svector_ostream OS(IsaBinary);
@@ -403,6 +445,43 @@ static void parseLLVMOptions(const std::string &Args) {
   cl::ParseCommandLineOptions(Argv.size(), Argv.data());
 }
 
+static void printLLVMStats(const vc::CompileOptions &Opts) {
+  // Print LLVM statistics if required.
+  if (Opts.ShowStats)
+    llvm::PrintStatistics(llvm::errs());
+
+  if (Opts.StatsFile.empty())
+    return;
+
+  // FIXME: it's not quite clear why we need StatsFile since we can
+  // just use shader dumper
+  std::error_code EC;
+  auto StatS = std::make_unique<llvm::raw_fd_ostream>(Opts.StatsFile, EC,
+                                                      llvm::sys::fs::OF_Text);
+  if (EC)
+    llvm::errs() << Opts.StatsFile << ": " << EC.message();
+  else
+    llvm::PrintStatisticsJSON(*StatS);
+}
+
+static void printLLVMTimers(const vc::CompileOptions &Opts) {
+  // Print timers if any and restore old TimePassesIsEnabled value.
+  std::string OutStr;
+  llvm::raw_string_ostream OS(OutStr);
+  TimerGroup::printAll(OS);
+  OS.flush();
+
+  if (OutStr.empty())
+    return;
+
+  if (Opts.Dumper)
+    Opts.Dumper->dumpText(OutStr, "time_passes.txt");
+
+  // FIXME: it's not quite clear why we need to print stats to errs(),
+  // if we have shader dumper
+  llvm::errs() << OutStr;
+}
+
 Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
                                         const vc::CompileOptions &Opts,
                                         const vc::ExternalData &ExtData,
@@ -414,14 +493,9 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   const auto ClOptGuard =
       llvm::make_scope_exit([]() { cl::ResetAllOptionOccurrences(); });
 
-  if (Opts.DumpIR && Opts.Dumper)
-    Opts.Dumper->dumpBinary(Input, "input.spv");
-
   LLVMContext Context;
   LLVMInitializeGenXTarget();
   LLVMInitializeGenXTargetInfo();
-  llvm::PassRegistry &Registry = *llvm::PassRegistry::getPassRegistry();
-  llvm::initializeTarget(Registry);
 
   Expected<std::unique_ptr<llvm::Module>> ExpModule =
       getModule(Input, Opts.FType, SpecConstIds, SpecConstValues, Context);
@@ -432,7 +506,12 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   if (Opts.DumpIR && Opts.Dumper)
     Opts.Dumper->dumpModule(M, "after_spirv_reader.ll");
 
-  VCPassManager PerModulePasses;
+  if (Opts.StripDebugInfoCtrl == DebugInfoStripControl::All)
+    llvm::StripDebugInfo(M);
+  else if (Opts.StripDebugInfoCtrl == DebugInfoStripControl::NonLine)
+    llvm::stripNonLineTableDebugInfo(M);
+
+  vc::PassManager PerModulePasses;
   PerModulePasses.add(createGenXSPIRVReaderAdaptorPass());
   PerModulePasses.add(createGenXRestoreIntrAttrPass());
   PerModulePasses.run(M);
@@ -440,20 +519,31 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
   Triple TheTriple = overrideTripleWithVC(M.getTargetTriple());
   M.setTargetTriple(TheTriple.getTriple());
 
-  auto ExpTargetMachine = createTargetMachine(Opts, TheTriple);
+  auto ExpTargetMachine = createTargetMachine(Opts, ExtData, TheTriple);
   if (!ExpTargetMachine)
     return ExpTargetMachine.takeError();
   TargetMachine &TM = *ExpTargetMachine.get();
   M.setDataLayout(TM.createDataLayout());
 
-  // Save old value and restore at the end.
-  bool TimePassesIsEnabledLocal = TimePassesIsEnabled;
+  // Save the old value (to restore it once compilation process is finished)
+  const bool TimePassesIsEnabledOld = llvm::TimePassesIsEnabled;
+  const auto TimePassesReenableGuard =
+      llvm::make_scope_exit([TimePassesIsEnabledOld]() {
+        // WARNING (FIXME): we modify global variable here
+        llvm::TimePassesIsEnabled = TimePassesIsEnabledOld;
+      });
+
+  // Enable tracking of time needed for LLVM passes to run
+  if (Opts.ResetTimePasses)
+    TimerGroup::clearAll();
   if (Opts.TimePasses)
     TimePassesIsEnabled = true;
 
   // Enable LLVM statistics recording if required.
+  if (Opts.ResetLLVMStats)
+    llvm::ResetStatistics();
   if (Opts.ShowStats || !Opts.StatsFile.empty())
-    llvm::EnableStatistics(false);
+    llvm::EnableStatistics(false /*DoPrintOnExit = false */);
 
   if (Opts.DumpIR && Opts.Dumper)
     Opts.Dumper->dumpModule(M, "after_ir_adaptors.ll");
@@ -465,22 +555,8 @@ Expected<vc::CompileOutput> vc::Compile(ArrayRef<char> Input,
 
   vc::CompileOutput Output = runCodeGen(Opts, ExtData, TM, M);
 
-  // Print timers if any and restore old TimePassesIsEnabled value.
-  TimerGroup::printAll(llvm::errs());
-  TimePassesIsEnabled = TimePassesIsEnabledLocal;
-
-  // Print LLVM statistics if required.
-  if (Opts.ShowStats)
-    llvm::PrintStatistics(llvm::errs());
-  if (!Opts.StatsFile.empty()) {
-    std::error_code EC;
-    auto StatS = std::make_unique<llvm::raw_fd_ostream>(
-        Opts.StatsFile, EC, llvm::sys::fs::OF_Text);
-    if (EC)
-      llvm::errs() << Opts.StatsFile << ": " << EC.message();
-    else
-      llvm::PrintStatisticsJSON(*StatS);
-  }
+  printLLVMStats(Opts);
+  printLLVMTimers(Opts);
   return Output;
 }
 
@@ -571,23 +647,49 @@ static Error makeOptionError(const opt::Arg &A, const opt::ArgList &Opts,
   return make_error<vc::OptionError>(BadOpt, IsInternal);
 }
 
+static Optional<vc::OptimizerLevel>
+parseOptimizationLevelString(StringRef Val) {
+  return StringSwitch<Optional<vc::OptimizerLevel>>(Val)
+      .Case("none", vc::OptimizerLevel::None)
+      .Case("full", vc::OptimizerLevel::Full)
+      .Default(None);
+}
+
+template <typename OptSpecifier>
+static Optional<vc::OptimizerLevel>
+deriveOptimizationLevel(opt::Arg *A, OptSpecifier PrimaryOpt) {
+  using namespace IGC::options::api;
+  if (A->getOption().matches(PrimaryOpt)) {
+    StringRef Val = A->getValue();
+    return parseOptimizationLevelString(Val);
+  } else {
+    IGC_ASSERT(A->getOption().matches(OPT_opt_disable_ze));
+    return vc::OptimizerLevel::None;
+  }
+}
+
 static Error fillApiOptions(const opt::ArgList &ApiOptions,
                             vc::CompileOptions &Opts) {
   using namespace IGC::options::api;
 
   if (ApiOptions.hasArg(OPT_no_vector_decomposition))
     Opts.NoVecDecomp = true;
-
-  if (ApiOptions.hasArg(OPT_emit_debug)) {
-    Opts.EmitDebugInformation = true;
-    Opts.EmitDebuggableKernels = true;
-  }
+  if (ApiOptions.hasArg(OPT_emit_debug))
+    Opts.ExtendedDebuggingSupport = true;
+  if (ApiOptions.hasArg(OPT_vc_fno_struct_splitting))
+    Opts.DisableStructSplitting = true;
   if (ApiOptions.hasArg(OPT_vc_fno_jump_tables))
     Opts.NoJumpTables = true;
   if (ApiOptions.hasArg(OPT_vc_ftranslate_legacy_memory_intrinsics))
     Opts.TranslateLegacyMemoryIntrinsics = true;
+  if (ApiOptions.hasArg(OPT_vc_disable_finalizer_msg))
+    Opts.DisableFinalizerMsg = true;
   if (ApiOptions.hasArg(OPT_large_GRF))
     Opts.IsLargeGRFMode = true;
+  if (ApiOptions.hasArg(OPT_vc_use_plain_2d_images))
+    Opts.UsePlain2DImages = true;
+  if (ApiOptions.hasArg(OPT_vc_enable_preemption))
+    Opts.EnablePreemption = true;
 
   if (opt::Arg *A = ApiOptions.getLastArg(OPT_fp_contract)) {
     StringRef Val = A->getValue();
@@ -604,19 +706,22 @@ static Error fillApiOptions(const opt::ArgList &ApiOptions,
 
   if (opt::Arg *A =
           ApiOptions.getLastArg(OPT_vc_optimize, OPT_opt_disable_ze)) {
-    if (A->getOption().matches(OPT_vc_optimize)) {
-      StringRef Val = A->getValue();
-      auto MaybeLevel = StringSwitch<Optional<vc::OptimizerLevel>>(Val)
-                            .Case("none", vc::OptimizerLevel::None)
-                            .Case("full", vc::OptimizerLevel::Full)
-                            .Default(None);
-      if (!MaybeLevel)
-        return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
-      Opts.OptLevel = MaybeLevel.getValue();
-    } else {
-      IGC_ASSERT(A->getOption().matches(OPT_opt_disable_ze));
-      Opts.OptLevel = vc::OptimizerLevel::None;
-    }
+    auto MaybeLevel = deriveOptimizationLevel(A, OPT_vc_optimize);
+    if (!MaybeLevel)
+      return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
+    Opts.IROptLevel = MaybeLevel.getValue();
+
+    if (ApiOptions.hasArg(OPT_emit_debug) &&
+        MaybeLevel.getValue() == vc::OptimizerLevel::None)
+      Opts.CodegenOptLevel = vc::OptimizerLevel::None;
+  }
+
+  if (opt::Arg *A =
+          ApiOptions.getLastArg(OPT_vc_codegen_optimize, OPT_opt_disable_ze)) {
+    auto MaybeLevel = deriveOptimizationLevel(A, OPT_vc_codegen_optimize);
+    if (!MaybeLevel)
+      return makeOptionError(*A, ApiOptions, /*IsInternal=*/false);
+    Opts.CodegenOptLevel = MaybeLevel.getValue();
   }
 
   if (opt::Arg *A = ApiOptions.getLastArg(OPT_vc_stateless_private_size)) {
@@ -642,11 +747,23 @@ static Error fillInternalOptions(const opt::ArgList &InternalOptions,
     Opts.DumpAsm = true;
   if (InternalOptions.hasArg(OPT_ftime_report))
     Opts.TimePasses = true;
+  if (InternalOptions.hasArg(OPT_freset_time_report))
+    Opts.ResetTimePasses = true;
   if (InternalOptions.hasArg(OPT_print_stats))
     Opts.ShowStats = true;
-  Opts.StatsFile = InternalOptions.getLastArgValue(OPT_stats_file);
+  if (InternalOptions.hasArg(OPT_freset_llvm_stats))
+    Opts.ResetLLVMStats = true;
+  Opts.StatsFile = InternalOptions.getLastArgValue(OPT_stats_file).str();
   if (InternalOptions.hasArg(OPT_intel_use_bindless_buffers_ze))
     Opts.UseBindlessBuffers = true;
+  if (InternalOptions.hasArg(OPT_emit_zebin_visa_sections))
+    Opts.EmitZebinVisaSections = true;
+  if (InternalOptions.hasArg(OPT_fdisable_debuggable_kernels))
+    Opts.EmitDebuggableKernels = false;
+  if (InternalOptions.hasArg(OPT_gpu_scope_fence))
+    Opts.HasGPUFenceScopeOnSingleTileGPUs = true;
+  if (InternalOptions.hasArg(OPT_flush_l3_for_global))
+    Opts.HasL3FlushForGlobal = true;
 
   if (opt::Arg *A = InternalOptions.getLastArg(OPT_binary_format)) {
     StringRef Val = A->getValue();
@@ -658,6 +775,11 @@ static Error fillInternalOptions(const opt::ArgList &InternalOptions,
     if (!MaybeBinary)
       return makeOptionError(*A, InternalOptions, /*IsInternal=*/true);
     Opts.Binary = MaybeBinary.getValue();
+  }
+
+  if (opt::Arg *A = InternalOptions.getLastArg(OPT_vc_loop_unroll_threshold)) {
+    StringRef Val = A->getValue();
+    Val.getAsInteger(/*Radix=*/0, Opts.ForceLoopUnrollThreshold);
   }
 
   Opts.FeaturesString =

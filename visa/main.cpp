@@ -18,25 +18,24 @@ SPDX-License-Identifier: MIT
 #include "Common_ISA.h"
 #include "BinaryCISAEmission.h"
 #include "Timer.h"
-
 #include "DebugInfo.h"
+#include "PlatformInfo.h"
 
 #ifndef DLL_MODE
 #include "EnumFiles.hpp"
 #endif
 
-using namespace std;
 
 ///
 /// Reads byte code and calls the builder API as it does so.
 ///
 extern bool readIsaBinaryNG(const char *buf, CISA_IR_Builder *builder,
-                            vector<VISAKernel *> &kernels,
+                            std::vector<VISAKernel *> &kernels,
                             const char *kernelName, unsigned int majorVersion,
                             unsigned int minorVersion);
 
 #ifndef DLL_MODE
-void parseText(
+int parseText(
     std::string fileName,
     int argc, const char *argv[], Options &opt);
 #endif
@@ -53,7 +52,7 @@ void parseText(
 #define JIT_INVALID_PLATFORM            5
 
 #ifndef DLL_MODE
-void parseBinary(
+int parseBinary(
     std::string fileName,
     int argc, const char *argv[], Options &opt)
 {
@@ -70,7 +69,7 @@ void parseBinary(
     if ((commonISAInput = fopen(fileName.c_str(), "rb")) == NULL)
     {
         std::cerr << fileName << ": cannot open file\n";
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     fseek(commonISAInput, 0, SEEK_END);
@@ -92,7 +91,7 @@ void parseBinary(
     FILE* isafile = fopen(fileName.c_str(), "rb");
     if (!isafile) {
         std::cerr << fileName << ": cannot open file\n";
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     /// Calculate file size.
@@ -104,12 +103,12 @@ void parseBinary(
     char* isafilebuf = (char*)mem.alloc(isafilesize);
     if (isafilesize != fread(isafilebuf, 1, isafilesize, isafile))
     {
-        cerr << "Unable to read entire file into buffer." << endl;
-        exit(EXIT_FAILURE);
+        std::cerr << fileName << ": Unable to read entire file into buffer.\n";
+        return EXIT_FAILURE;
     }
     fclose(isafile);
 
-    TARGET_PLATFORM platform = getGenxPlatform();
+    TARGET_PLATFORM platform = static_cast<TARGET_PLATFORM>(opt.getuInt32Option(vISA_PlatformSet));
     VISA_BUILDER_OPTION builderOption =
         (platform == GENX_NONE) ? VISA_BUILDER_VISA : VISA_BUILDER_BOTH;
     CISA_IR_Builder* cisa_builder = NULL;
@@ -117,8 +116,11 @@ void parseBinary(
     CISA_IR_Builder::CreateBuilder(cisa_builder, vISA_DEFAULT, builderOption, platform, argc, argv);
     MUST_BE_TRUE(cisa_builder, "cisa_builder is NULL.");
 
-    vector<VISAKernel*> kernels;
-    readIsaBinaryNG(isafilebuf, cisa_builder, kernels, NULL, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER);
+    std::vector<VISAKernel*> kernels;
+    bool success = readIsaBinaryNG(
+        isafilebuf, cisa_builder, kernels, NULL, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER);
+    if (!success)
+        return EXIT_FAILURE;
     std::string binFileName;
 
     if (cisa_builder->m_options.getOption(vISA_OutputvISABinaryName))
@@ -128,12 +130,13 @@ void parseBinary(
         binFileName = cisaBinaryName;
     }
 
-    int result = cisa_builder->Compile((char*)binFileName.c_str());
-    CISA_IR_Builder::DestroyBuilder(cisa_builder);
+    auto result = cisa_builder->Compile((char*)binFileName.c_str());
     if (result != VISA_SUCCESS)
     {
-        exit(1);
+        return result;
     }
+    result = CISA_IR_Builder::DestroyBuilder(cisa_builder);
+    return result;
 }
 #endif
 
@@ -142,7 +145,7 @@ int JITCompileAllOptions(const char* kernelName,
     unsigned int kernelIsaSize,
     void* &genBinary,
     unsigned int& genBinarySize,
-    const char* platform,
+    const char* platformStr,
     int majorVersion,
     int minorVersion,
     int numArgs,
@@ -158,7 +161,8 @@ int JITCompileAllOptions(const char* kernelName,
     }
     // This must be done before processing the options,
     // as some options depend on the platform
-    if (SetVisaPlatform(platform) != 0)
+    TARGET_PLATFORM platform = vISA::PlatformInfo::getVisaPlatformFromStr(platformStr);
+    if (platform == GENX_NONE)
     {
         return JIT_INVALID_PLATFORM;
     }
@@ -171,7 +175,7 @@ int JITCompileAllOptions(const char* kernelName,
     // HW mode: default: GEN path; if dump/verify: Both path
     VISA_BUILDER_OPTION builderOption = VISA_BUILDER_GEN;
 
-    CISA_IR_Builder::CreateBuilder(cisa_builder, vISA_DEFAULT, builderOption, getGenxPlatform(), numArgs, args);
+    CISA_IR_Builder::CreateBuilder(cisa_builder, vISA_DEFAULT, builderOption, platform, numArgs, args);
     cisa_builder->setGtpinInit(gtpin_init);
 
     if (!cisa_builder)
@@ -179,7 +183,7 @@ int JITCompileAllOptions(const char* kernelName,
         return JIT_CISA_ERROR;
     }
 
-    vector<VISAKernel*> kernels;
+    std::vector<VISAKernel*> kernels;
     bool passed = readIsaBinaryNG(isafilebuf, cisa_builder, kernels, kernelName, majorVersion, minorVersion);
 
     if (!passed)
@@ -280,10 +284,10 @@ static bool endsWith(const std::string &str, const std::string &suf)
 int main(int argc, const char *argv[])
 {
     char fileName[256];
-    cout << argv[0];
+    std::cout << argv[0];
     for (int i = 1; i < argc; i++)
-        cout << " " << argv[i];
-    cout << std::endl;
+        std::cout << " " << argv[i];
+    std::cout << std::endl;
 
 #if 0
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -317,30 +321,33 @@ int main(int argc, const char *argv[])
     {
         return 1;
     }
-    if (opt.getOptionCstr(vISA_DecodeDbg))
-    {
-        const char* dbgName;
-        opt.getOption(vISA_DecodeDbg, dbgName);
-        decodeAndDumpDebugInfo((char*)dbgName);
-        exit(0);
-    }
 
-    bool platformIsSet = false;
+    TARGET_PLATFORM platform = static_cast<TARGET_PLATFORM>(opt.getuInt32Option(vISA_PlatformSet));
     bool dumpCommonIsa = false;
     bool generateBinary = false;
-    opt.getOption(vISA_PlatformIsSet, platformIsSet);
     opt.getOption(vISA_GenerateISAASM, dumpCommonIsa);
 
     if (opt.getOption(vISA_isParseMode))
         parserMode = true;
 
     opt.getOption(vISA_GenerateBinary, generateBinary);
-    if (!platformIsSet && ((!dumpCommonIsa && !parserMode) || generateBinary))
+    if (platform == GENX_NONE && ((!dumpCommonIsa && !parserMode) || generateBinary))
     {
         std::cerr << "USAGE: must specify platform\n";
         Options::showUsage(COUT_ERROR);
-        return 1;
+        return EXIT_FAILURE;
     }
+
+    if (opt.getOptionCstr(vISA_DecodeDbg))
+    {
+        const char* dbgName;
+        opt.getOption(vISA_DecodeDbg, dbgName);
+        decodeAndDumpDebugInfo((char*)dbgName, platform);
+        return EXIT_SUCCESS;
+    }
+
+    // TODO: Will need to adjust the platform from option for parseBinary() and
+    // parseText() if not specifying platform is allowed at this point.
 
     //
     // for debug print lex results to stdout (default)
@@ -379,6 +386,7 @@ int main(int argc, const char *argv[])
     // below; memory can be deallocated later
     std::vector<std::string> asmFileRoots;
 
+    int err = VISA_SUCCESS;
     for (auto fName : filesList)
     {
         // If the file name is not set by the user, then use the same
@@ -407,12 +415,14 @@ int main(int argc, const char *argv[])
 
         if (parserMode)
         {
-            parseText(fName, argc - startPos, &argv[startPos], opt);
+            err = parseText(fName, argc - startPos, &argv[startPos], opt);
         }
         else
         {
-            parseBinary(fName, argc - startPos, &argv[startPos], opt);
+            err = parseBinary(fName, argc - startPos, &argv[startPos], opt);
         }
+        if (err)
+            break;
     }
 
 
@@ -430,7 +440,7 @@ int main(int argc, const char *argv[])
         "\t" << maxArenaLength << endl;
 #endif
 #endif
-    return 0;
+    return err;
 }
 #endif
 
@@ -453,7 +463,7 @@ void* allocCodeBlock(size_t sz)
 
 extern int CISAparse(CISA_IR_Builder* builder);
 
-void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
+int parseText(std::string fileName, int argc, const char *argv[], Options &opt)
 {
     int num_kernels = 0;
     std::string testName;
@@ -466,8 +476,8 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
         std::ifstream os;
         os.open(fileName, std::ios::in);
         if (!os.is_open()) {
-            std::cerr << "could not open an isaasm names input file.\n";
-            exit(1);
+            std::cerr << fileName << ": could not open an isaasm names input file.\n";
+            return EXIT_FAILURE;
         }
 
         std::string line;
@@ -479,8 +489,7 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
             num_kernels++;
         }
         os.close();
-    }
-    else {
+    } else {
         num_kernels = 1;
         file_names.push_back(fileName);
     }
@@ -488,13 +497,16 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
     //used to ignore duplicate file names
     std::map<std::string, bool> files_parsed;
 
-    TARGET_PLATFORM platform = getGenxPlatform();
+    TARGET_PLATFORM platform = static_cast<TARGET_PLATFORM>(opt.getuInt32Option(vISA_PlatformSet));
     VISA_BUILDER_OPTION builderOption =
         (platform == GENX_NONE) ? VISA_BUILDER_VISA : VISA_BUILDER_BOTH;
 
     CISA_IR_Builder *cisa_builder = nullptr;
 
-    CISA_IR_Builder::CreateBuilder(cisa_builder, vISA_ASM_READER, builderOption, getGenxPlatform(), argc, argv);
+    auto err = CISA_IR_Builder::CreateBuilder(
+        cisa_builder, vISA_ASM_READER, builderOption, platform, argc, argv);
+    if (err)
+        return EXIT_FAILURE;
 
     for (int i = 0; i < num_kernels; i++)
     {
@@ -513,7 +525,7 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
         if (!CISAin)
         {
             std::cerr <<  vISAFileName << ": cannot open vISA assembly file\n";
-            exit(1);
+            return EXIT_FAILURE;
         }
 
         std::string::size_type testNameEnd = vISAFileName.find_last_of('.');
@@ -539,7 +551,7 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
             } else {
                 std::cerr << "error during parsing: CISAparse() returned " << fail << "\n";
             }
-            exit(1);
+            return EXIT_FAILURE;
         }
 
         // If the input text lacks "OutputAsmPath" (and it should),
@@ -548,6 +560,7 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
         if (k->getOutputAsmPath().empty()) {
             const char *outputPrefix = opt.getOptionCstr(VISA_AsmFileName);
             k->setOutputAsmPath(outputPrefix);
+            cisa_builder->getOptions()->setOptionInternally(VISA_AsmFileName, outputPrefix);
         }
 
         file_names.pop_front();
@@ -564,7 +577,12 @@ void parseText(std::string fileName, int argc, const char *argv[], Options &opt)
         binFileName = cisaBinaryName;
     }
 
-    cisa_builder->Compile(binFileName.c_str());
-    CISA_IR_Builder::DestroyBuilder(cisa_builder);
+    auto compErr = cisa_builder->Compile(binFileName.c_str());
+    if (compErr) {
+        std::cerr << cisa_builder->GetCriticalMsg() << "\n";
+        return EXIT_FAILURE;
+    }
+    auto dstbErr = CISA_IR_Builder::DestroyBuilder(cisa_builder);
+    return dstbErr ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 #endif

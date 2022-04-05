@@ -80,14 +80,16 @@ bool AddImplicitArgs::runOnModule(Module &M)
         if (func.isDeclaration()) continue;
         // skip non-entry functions
         if (m_pMdUtils->findFunctionsInfoItem(&func) == m_pMdUtils->end_FunctionsInfo()) continue;
-        // Skip functions called from function marked with IndirectlyCalled attribute
-        // TODO: This function verifies only parent caller, in the future we may need to
-        //       also verify all the callers up to the tree.
-        if (hasIndirectlyCalledParent(&func)) continue;
-        // No implicit arg support for stack calls
-        if (func.hasFnAttribute("visaStackCall")) continue;
+        // Skip functions called from functions marked with stackcall attribute
+        // Also skip the dummy kernel if one was created
+        if (hasStackCallInCG(&func) || IGC::isIntelSymbolTableVoidProgram(&func))
+        {
+            FunctionInfoMetaDataHandle funcInfo = m_pMdUtils->getFunctionsInfoItem(&func);
+            funcInfo->clearImplicitArgInfoList();
+            continue;
+        }
 
-        // see the detail in StatelessToStatefull.cpp.
+        // see the detail in StatelessToStateful.cpp.
         // If SToSProducesPositivePointer is true, do not generate implicit arguments.
         if (IGC_IS_FLAG_DISABLED(SToSProducesPositivePointer) &&
             (ctx->getModuleMetaData()->compOpt.HasBufferOffsetArg ||
@@ -129,7 +131,7 @@ bool AddImplicitArgs::runOnModule(Module &M)
         }
     }
 
-    if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
+    if (!IGC::ForceAlwaysInline())
     {
         for (auto I : funcsMappingForReplacement)
         {
@@ -180,14 +182,17 @@ bool AddImplicitArgs::runOnModule(Module &M)
     return true;
 }
 
-bool AddImplicitArgs::hasIndirectlyCalledParent(const Function* F)
+bool AddImplicitArgs::hasStackCallInCG(const Function* F)
 {
+    if (F->hasFnAttribute("visaStackCall") || F->hasFnAttribute("referenced-indirectly"))
+        return true;
+
     for (auto u = F->user_begin(), e = F->user_end(); u != e; u++)
     {
         if (const CallInst* call = dyn_cast<CallInst>(*u))
         {
             const Function* parent = call->getParent()->getParent();
-            if (parent->hasFnAttribute("referenced-indirectly") || hasIndirectlyCalledParent(parent))
+            if (hasStackCallInCG(parent))
                 return true;
         }
     }
@@ -493,7 +498,7 @@ bool BuiltinCallGraphAnalysis::runOnModule(Module &M)
     m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
-    if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_FORCE_INLINE)
+    if (IGC::ForceAlwaysInline())
     {
         return false;
     }
@@ -533,13 +538,12 @@ bool BuiltinCallGraphAnalysis::pruneCallGraphForStackCalls(CallGraph& CG)
                     Function* pFuncOnPath = IT.getPath(i)->getFunction();
                     if (pFuncOnPath)
                     {
-                        if (pFuncOnPath->hasFnAttribute("forceRecurse"))
+                        if (pFuncOnPath->hasFnAttribute("hasRecursion"))
                         {
                             IGC_ASSERT_MESSAGE(0, "Cannot inline for recursion!");
                             return false;
                         }
                         PrunedFuncs.insert(pFuncOnPath);
-                        changed = true;
                     }
                 }
             }
@@ -547,9 +551,18 @@ bool BuiltinCallGraphAnalysis::pruneCallGraphForStackCalls(CallGraph& CG)
     }
     for (auto pF : PrunedFuncs)
     {
+        // We can only remove the "visaStackCall" attribute if the function isn't called indirectly,
+        // since these attributes are always coupled together.
+        if (pF->hasFnAttribute("referenced-indirectly"))
+        {
+            IGC_ASSERT_MESSAGE(0, "Cannot force inline indirect calls! Requires ForceInlineStackCallWithImplArg=0 and IA buffer support.");
+            continue;
+        }
+
         pF->removeFnAttr("visaStackCall");
         pF->removeFnAttr(llvm::Attribute::NoInline);
         pF->addFnAttr(llvm::Attribute::AlwaysInline);
+        changed = true;
     }
     return changed;
 }
@@ -719,24 +732,25 @@ void BuiltinCallGraphAnalysis::combineTwoArgDetail(
 
 void BuiltinCallGraphAnalysis::writeBackAllIntoMetaData(const ImplicitArgumentDetail& data, Function * f)
 {
-    if (f->hasFnAttribute("referenced-indirectly"))
-        return;
-
     FunctionInfoMetaDataHandle funcInfo = m_pMdUtils->getFunctionsInfoItem(f);
     funcInfo->clearImplicitArgInfoList();
 
     bool isEntry = isEntryFunc(m_pMdUtils, f);
-    bool isStackCall = f->hasFnAttribute("visaStackCall");
 
     for (const auto& A : data.ArgsMaps)
     {
+        // For the implicit args that have GenISAIntrinsic support used in subroutines,
+        // they do not require to be added as explicit arguments other than in the caller kernel.
+        // Always add metadata for stackcalls to provide info for inlining. They won't be added
+        // to function argument list.
         ImplicitArg::ArgType argId = A.first;
-        if (!isEntry && !isStackCall && IGC_IS_FLAG_ENABLED(EnableImplicitArgAsIntrinsic))
+        if (!isEntry && ImplicitArgs::hasIntrinsicSupport(argId))
         {
-            // The following implicit args have GenISAIntrinsic support.
-            // They do not require to be added as explicit arguments other than in the caller kernel.
-            if (ImplicitArgs::hasIntrinsicSupport(argId))
+            bool isStackCall = f->hasFnAttribute("visaStackCall");
+            if (!isStackCall && IGC_IS_FLAG_ENABLED(EnableImplicitArgAsIntrinsic))
+            {
                 continue;
+            }
         }
         if (argId < ImplicitArg::ArgType::STRUCT_START)
         {

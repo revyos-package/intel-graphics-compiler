@@ -930,12 +930,23 @@ void BIImport::InitializeBIFlags(Module& M)
         gv->setInitializer(ConstantInt::get(Type::getInt32Ty(M.getContext()), value));
     };
 
+    /// @brief Set global variable linkage to extrnal. This is needed for
+    ///        variables that will become relocations.
+    auto makeVarExternal = [&M](StringRef varName)
+    {
+        GlobalVariable *gv = M.getGlobalVariable(varName);
+        if (gv == nullptr)
+            return;
+        gv->setLinkage(GlobalValue::ExternalLinkage);
+    };
+
     bool isFlushDenormToZero =
         ((pCtx->m_floatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
             MD.compOpt.DenormsAreZero);
     initializeVarWithValue("__FlushDenormals", isFlushDenormToZero ? 1 : 0);
     initializeVarWithValue("__DashGSpecified", MD.compOpt.DashGSpecified ? 1 : 0);
     initializeVarWithValue("__FastRelaxedMath", MD.compOpt.RelaxedBuiltins ? 1 : 0);
+    initializeVarWithValue("__MadEnable", MD.compOpt.MadEnable ? 1 : 0);
     initializeVarWithValue("__OptDisable", MD.compOpt.OptDisable ? 1 : 0);
     bool isUseMathWithLUTEnabled = false;
     if (IGC_IS_FLAG_ENABLED(UseMathWithLUT))
@@ -945,6 +956,8 @@ void BIImport::InitializeBIFlags(Module& M)
     initializeVarWithValue("__UseMathWithLUT", isUseMathWithLUTEnabled ? 1 : 0);
     initializeVarWithValue("__UseNativeFP32GlobalAtomicAdd", pCtx->platform.hasFP32GlobalAtomicAdd() ? 1 : 0);
     initializeVarWithValue("__UseNativeFP16AtomicMinMax", pCtx->platform.hasFP16AtomicMinMax() ? 1 : 0);
+    initializeVarWithValue("__HasInt64SLMAtomicCAS", pCtx->platform.hasInt64SLMAtomicCAS() ? 1 : 0);
+    initializeVarWithValue("__UseNativeFP64GlobalAtomicAdd", pCtx->platform.hasFP64GlobalAtomicAdd() ? 1 : 0);
     initializeVarWithValue("__UseNative64BitIntBuiltin", pCtx->platform.hasNoFullI64Support() ? 0 : 1);
     initializeVarWithValue("__UseNative64BitFloatBuiltin", pCtx->platform.hasNoFP64Inst() ? 0 : 1);
     initializeVarWithValue("__CRMacros",
@@ -968,6 +981,9 @@ void BIImport::InitializeBIFlags(Module& M)
         float profilingTimerResolution = static_cast<OpenCLProgramContext*>(pCtx)->getProfilingTimerResolution();
         initializeVarWithValue("__ProfilingTimerResolution", *reinterpret_cast<int*>(&profilingTimerResolution));
     }
+
+    makeVarExternal("__SubDeviceID");
+    initializeVarWithValue("__MaxHWThreadIDPerSubDevice", pCtx->platform.GetGTSystemInfo().ThreadCount);
 }
 
 extern "C" llvm::ModulePass* createBuiltInImportPass(
@@ -1015,12 +1031,13 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
         Function* pFunc = &(*I);
 
         StringRef funcName = pFunc->getName();
-        if (funcName == OCL_GET_GLOBAL_OFFSET ||
+        bool isFuncNameToSearch = (funcName == OCL_GET_GLOBAL_OFFSET ||
             funcName == OCL_GET_LOCAL_ID ||
             funcName == OCL_GET_GROUP_ID ||
             funcName == OCL_GET_SUBGROUP_ID_IGC_SPVIR ||
             funcName == OCL_GET_SUBGROUP_ID_KHR_SPVIR ||
-            funcName == OCL_GET_SUBGROUP_ID)
+            funcName == OCL_GET_SUBGROUP_ID);
+        if (isFuncNameToSearch)
         {
             MetaDataUtils* pMdUtil = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
             ModuleMetaData* modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
@@ -1102,11 +1119,22 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
             }
         }
 
+#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
+        std::string sinBuiltinName = "_Z15__spirv_ocl_sinf";
+        std::string cosBuiltinName = "_Z15__spirv_ocl_cosf";
+        std::string sinPiBuiltinName = "_Z17__spirv_ocl_sinpif";
+        std::string cosPiBuiltinName = "_Z17__spirv_ocl_cospif";
+#else // IGC Legacy SPIRV Translator
+        std::string sinBuiltinName = "__builtin_spirv_OpenCL_sin_f32";
+        std::string cosBuiltinName = "__builtin_spirv_OpenCL_cos_f32";
+        std::string sinPiBuiltinName = "__builtin_spirv_OpenCL_sinpi_f32";
+        std::string cosPiBuiltinName = "__builtin_spirv_OpenCL_cospi_f32";
+#endif
         auto modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
         if ((modMD->compOpt.MatchSinCosPi) &&
             !(modMD->compOpt.FastRelaxedMath) &&
-            (funcName.startswith("__builtin_spirv_OpenCL_cos_f32") ||
-             funcName.startswith("__builtin_spirv_OpenCL_sin_f32"))) {
+            (funcName.startswith(cosBuiltinName) ||
+             funcName.startswith(sinBuiltinName))) {
           for (auto Users : pFunc->users()) {
             if (auto CI = dyn_cast<CallInst>(Users)) {
               IRBuilder<> builder(CI);
@@ -1155,8 +1183,8 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                   if (CallInst* useInst =
                     dyn_cast<CallInst>(fmulUse->getUser())) {
                     StringRef funcName = useInst->getCalledFunction()->getName();
-                    if (!funcName.startswith("__builtin_spirv_OpenCL_cos_f32") &&
-                      !funcName.startswith("__builtin_spirv_OpenCL_sin_f32")) {
+                    if (!funcName.startswith(cosBuiltinName) &&
+                      !funcName.startswith(sinBuiltinName)) {
                       isCandidate = false;
                       break;
                     }
@@ -1192,11 +1220,10 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                       std::pair<Instruction *, double>(fmulInst, intValue));
 
                   std::string newName;
-                  if (funcName.startswith("__builtin_spirv_OpenCL_cos_f32")) {
-                    newName = "__builtin_spirv_OpenCL_cospi_f32";
-                  } else if (funcName.startswith(
-                                 "__builtin_spirv_OpenCL_sin_f32")) {
-                    newName = "__builtin_spirv_OpenCL_sinpi_f32";
+                  if (funcName.startswith(cosBuiltinName)) {
+                    newName = cosPiBuiltinName;
+                  } else if (funcName.startswith(sinBuiltinName)) {
+                    newName = sinPiBuiltinName;
                   }
 
                   if (Function *newFunc = M.getFunction(newName)) {

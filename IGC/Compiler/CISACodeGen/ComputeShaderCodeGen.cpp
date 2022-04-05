@@ -48,8 +48,9 @@ namespace IGC
             if (bufType == SLM)
             {
                 m_hasSLM = true;
+                m_numSLMAccesses++;
             }
-            if (bufType == RESOURCE || bufType == UAV)
+            else if (bufType == RESOURCE || bufType == UAV)
             {
                 m_num1DAccesses++;
             }
@@ -63,7 +64,12 @@ namespace IGC
             }
             if (bufType == SLM)
             {
+                m_numSLMAccesses++;
                 m_hasSLM = true;
+            }
+            else if (bufType == RESOURCE || bufType == UAV)
+            {
+                m_num1DAccesses++;
             }
         }
         else if (GenIntrinsicInst * intr = dyn_cast<GenIntrinsicInst>(inst))
@@ -75,18 +81,14 @@ namespace IGC
             case GenISAIntrinsic::GenISA_ldrawvector_indexed:
             case GenISAIntrinsic::GenISA_ldraw_indexed:
             {
-                BufferType bufType = DecodeBufferType(
-                    intr->getArgOperand(0)->getType()->getPointerAddressSpace());
-                if (bufType == BINDLESS) // UAV buffer
-                {
-                    m_num1DAccesses++;
-                }
+                m_num1DAccesses++;
                 break;
             }
 
             case GenISAIntrinsic::GenISA_typedwrite:
             case GenISAIntrinsic::GenISA_typedread:
                 m_numberOfTypedAccess++;
+                m_num2DAccesses++;
                 break;
             case GenISAIntrinsic::GenISA_storestructured1:
             case GenISAIntrinsic::GenISA_storestructured2:
@@ -109,6 +111,34 @@ namespace IGC
                     m_num2DAccesses++;
                 }
                 break;
+            case GenISAIntrinsic::GenISA_sampleptr:
+            case GenISAIntrinsic::GenISA_sampleBptr:
+            case GenISAIntrinsic::GenISA_sampleCptr:
+            case GenISAIntrinsic::GenISA_sampleDptr:
+            case GenISAIntrinsic::GenISA_sampleDCptr:
+            case GenISAIntrinsic::GenISA_sampleLptr:
+            case GenISAIntrinsic::GenISA_sampleLCptr:
+            case GenISAIntrinsic::GenISA_sampleBCptr:
+
+            case GenISAIntrinsic::GenISA_gather4ptr:
+            case GenISAIntrinsic::GenISA_gather4Cptr:
+            case GenISAIntrinsic::GenISA_gather4POptr:
+            case GenISAIntrinsic::GenISA_gather4POCptr:
+                if (llvm::ConstantInt* pInt = llvm::dyn_cast<llvm::ConstantInt>(intr->getOperand(2)))
+                {
+                    int index = int_cast<int>(pInt->getZExtValue());
+                    index == 0 ? m_num1DAccesses++ : m_num2DAccesses++;
+                }
+                else
+                {
+                    m_num2DAccesses++;
+                }
+                break;
+            case GenISAIntrinsic::GenISA_DCL_SystemValue:
+                //emitLocal mask has to be set before real compile
+                if (m_Platform->supportHWGenerateTID() && m_DriverInfo->SupportHWGenerateTID())
+                    setEmitLocalMask(static_cast<SGVUsage>(llvm::cast<llvm::ConstantInt>(inst->getOperand(0))->getZExtValue()));
+                break;
             default:
                 break;
             }
@@ -117,6 +147,29 @@ namespace IGC
 
     void CComputeShader::CreateThreadPayloadData(void*& pThreadPayload, uint& curbeTotalDataLength, uint& curbeReadLength)
     {
+        if (m_Platform->supportLoadThreadPayloadForCompute())
+        {
+            if (m_enableHWGenerateLID)
+            {
+                curbeTotalDataLength = m_NOSBufferSize;
+                curbeReadLength = 0;
+                if (!curbeTotalDataLength)
+                {
+                    return;
+                }
+
+                //todo: this is to follow legacy behavior, but I do not know any API using below memory.
+                //Not sure why legacy behavior allocates memory for nosdata at IGC side even though IGC never fills it.
+                //when inline data is used, IGC assumes UMD is aware of m_NOSBufferSize includes inlinedata.size.
+                typedef uint32_t ThreadPayloadEntry;
+                unsigned threadPayloadEntries = curbeTotalDataLength / sizeof(ThreadPayloadEntry);
+                ThreadPayloadEntry* pThreadPayloadMem =
+                    (ThreadPayloadEntry*)IGC::aligned_malloc(threadPayloadEntries * sizeof(ThreadPayloadEntry), getGRFSize());
+                std::fill(pThreadPayloadMem, pThreadPayloadMem + threadPayloadEntries, 0);
+                pThreadPayload = pThreadPayloadMem;
+                return;
+            }
+        }
 
         CComputeShaderCommon::CreateThreadPayloadData(
             pThreadPayload,
@@ -134,11 +187,32 @@ namespace IGC
         m_numberOfUntypedAccess = 0;
         m_num1DAccesses = 0;
         m_num2DAccesses = 0;
+        m_numSLMAccesses = 0;
         CShader::InitEncoder(simdMode, canAbortOnSpill, shaderMode);
     }
 
     CVariable* CComputeShader::CreateThreadIDsinGroup(SGVUsage channelNum)
     {
+        switch (m_emitMask)
+        {
+        case IGC::CComputeShader::NONE:
+            break;
+        case IGC::CComputeShader::X:
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_X);
+            break;
+        case IGC::CComputeShader::XY:
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_X);
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_Y);
+            break;
+        case IGC::CComputeShader::XYZ:
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_X);
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_Y);
+            CreateThreadIDinGroup(THREAD_ID_IN_GROUP_Z);
+            break;
+        default:
+            break;
+        }
+
         return CreateThreadIDinGroup(channelNum);
     }
 
@@ -223,6 +297,30 @@ namespace IGC
         }
     }
 
+    // Returns true when vISA_useInlineData option must set.
+    // The vISA_useInlineData must be set when per-thread payload is loaded from
+    // memory and there is inline data to pass.
+    bool CComputeShader::passNOSInlineData()
+    {
+        // Currently we cannot support InlineData in ZEBinary so always disable it
+        auto modMD = static_cast<const ComputeShaderContext*>(GetContext())->getModuleMetaData();
+        if (IGC_IS_FLAG_ENABLED(EnableZEBinary) || modMD->compOpt.EnableZEBinary)
+            return false;
+
+        const bool loadThreadPayload = m_Platform->supportLoadThreadPayloadForCompute();
+        const bool hasConstants = pushInfo.constantReg.size() > 0 || modMD->MinNOSPushConstantSize > 0;
+        const bool inlineDataSupportEnabled =
+            (m_Platform->supportInlineData() &&
+            (m_DriverInfo->UseInlineData() || IGC_IS_FLAG_ENABLED(EnablePassInlineData)));
+
+        const bool passInlineData = inlineDataSupportEnabled && loadThreadPayload && hasConstants;
+        return passInlineData;
+    }
+
+    bool CComputeShader::loadThreadPayload()
+    {
+        return true;
+    }
 
     void CShaderProgram::FillProgram(SComputeShaderKernelProgram* pKernelProgram)
     {
@@ -253,6 +351,10 @@ namespace IGC
                     IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
             }
+            else
+            {
+                simd32Shader->ProgramOutput()->Destroy();
+            }
         }
 
         if (hasShaderOutput(simd16Shader))
@@ -270,6 +372,10 @@ namespace IGC
                 {
                     IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
+            }
+            else
+            {
+                simd16Shader->ProgramOutput()->Destroy();
             }
         }
 
@@ -289,6 +395,10 @@ namespace IGC
                     IGC_ASSERT_MESSAGE(0, "should not compile again if already got a non spill kernel");
                 }
             }
+            else
+            {
+                simd8Shader->ProgramOutput()->Destroy();
+            }
         }
     }
 
@@ -300,6 +410,8 @@ namespace IGC
         CreateGatherMap();
         CreateConstantBufferOutput(pKernelProgram);
 
+        pKernelProgram->m_StagingCtx = pctx->m_StagingCtx;
+        pKernelProgram->m_RequestStage2 = RequestStage2(pctx->m_CgFlag, pctx->m_StagingCtx);
         pKernelProgram->ConstantBufferLoaded = m_constantBufferLoaded;
         pKernelProgram->UavLoaded = m_uavLoaded;
         for (int i = 0; i < 4; i++)
@@ -356,6 +468,26 @@ namespace IGC
 
         pKernelProgram->BindingTableEntryCount = this->GetMaxUsedBindingTableEntryCount();
 
+        if (m_enableHWGenerateLID) {
+            pKernelProgram->generateLocalID = true;
+            pKernelProgram->emitLocalMask = m_emitMask;
+            pKernelProgram->walkOrder = m_walkOrder;
+            pKernelProgram->emitInlineParameter = passNOSInlineData();
+            pKernelProgram->localXMaximum = m_threadGroupSize_X - 1;
+            pKernelProgram->localYMaximum = m_threadGroupSize_Y - 1;
+            pKernelProgram->localZMaximum = m_threadGroupSize_Z - 1;
+            pKernelProgram->tileY = (m_ThreadIDLayout == ThreadIDLayout::TileY);
+        }
+        //else
+        //{     //use default values
+        //    pKernelProgram->generateLocalID = false;
+        //    pKernelProgram->emitLocalMask = static_cast<uint>(EMIT_LOCAL_MASK::NONE);
+        //    pKernelProgram->walkOrder = static_cast<uint>(WALK_ORDER::WO_XYZ);
+        //    pKernelProgram->localXMaximum = 0;
+        //    pKernelProgram->localYMaximum = 0;
+        //    pKernelProgram->localZMaximum = 0;
+        //}
+        pKernelProgram->hasEvalSampler = GetHasEval();
     }
 
     void CComputeShader::ExtractGlobalVariables()
@@ -390,6 +522,14 @@ namespace IGC
         const ComputeShaderContext* pCtx =
             static_cast<const ComputeShaderContext*>(GetContext());
 
+        if (m_Platform->supportHWGenerateTID() && m_DriverInfo->SupportHWGenerateTID()) {
+            if (IGC_GET_FLAG_VALUE(DispatchGPGPUWalkerAlongYFirst) == 1 &&
+                !pCtx->getModuleMetaData()->csInfo.disableDispatchAlongY) {
+                m_dispatchAlongY = true;
+            } else
+                m_dispatchAlongY = false;
+        }
+        else
         // Assume DispatchGPGPUWalkerAlongYFirst is on here unless off explicitly
         if (IGC_GET_FLAG_VALUE(DispatchGPGPUWalkerAlongYFirst) == 0)
             m_dispatchAlongY = false;
@@ -400,13 +540,17 @@ namespace IGC
             m_dispatchAlongY = true;
         }
         selectWalkOrder(
-            false,
+            pCtx->m_UseLinearWalk,
             m_numberOfTypedAccess,
             m_numberOfUntypedAccess,
             m_num1DAccesses,
+            m_num2DAccesses,
+            m_numSLMAccesses,
             m_threadGroupSize_X,
             m_threadGroupSize_Y,
             m_threadGroupSize_Z);
+
+        encoder.GetVISABuilder()->SetOption(vISA_autoLoadLocalID, m_enableHWGenerateLID);
     }
 
     void CComputeShader::AddPrologue()
@@ -426,13 +570,20 @@ namespace IGC
     //   simd16, simd32, simd8
     bool CComputeShader::CompileSIMDSize(SIMDMode simdMode, EmitPass& EP, llvm::Function& F)
     {
+        ComputeShaderContext* ctx = (ComputeShaderContext*)GetContext();
+
         if (!CompileSIMDSizeInCommon(simdMode))
-            return false;
+        {
+            // Even if the determination is that we shouldn't compile this
+            // SIMD, if it's forced then that must be honored.
+            return ctx->m_ForceOneSIMD;
+        }
+
+        if (ctx->m_ForceOneSIMD)
+            return true;
 
         // this can be changed to SIMD32 if that is better after testing on HW
-        static const SIMDMode BestSimdMode = SIMDMode::SIMD16;
-
-        ComputeShaderContext* ctx = (ComputeShaderContext*)GetContext();
+        SIMDMode DefaultSimdMode = SIMDMode::SIMD16;
 
         CShader* simd8Program = getSIMDEntry(ctx, SIMDMode::SIMD8);
         CShader* simd16Program = getSIMDEntry(ctx, SIMDMode::SIMD16);
@@ -441,9 +592,6 @@ namespace IGC
         bool hasSimd8 = simd8Program && simd8Program->ProgramOutput()->m_programSize > 0;
         bool hasSimd16 = simd16Program && simd16Program->ProgramOutput()->m_programSize > 0;
         bool hasSimd32 = simd32Program && simd32Program->ProgramOutput()->m_programSize > 0;
-
-        if (ctx->m_ForceOneSIMD)
-            return true;
 
         if (simdMode == SIMDMode::SIMD8 && !hasSimd16 && !hasSimd32)
             return true;
@@ -464,6 +612,40 @@ namespace IGC
             ctx->SetSIMDInfo(SIMD_RETRY, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
         }
 
+        // check if SLM fits in DG2 DSS
+        if (IGC_IS_FLAG_ENABLED(CheckCSSLMLimit) &&
+            ctx->getModuleMetaData()->csInfo.waveSize == 0 &&
+            ctx->platform.getPlatformInfo().eProductFamily == IGFX_DG2 &&
+            m_DriverInfo->SupportCSSLMLimit() &&
+            ctx->m_slmSize > 0)
+        {
+            unsigned int slmPerDSS = 0; // in kB
+            switch (simdMode)
+            {
+                // # Unfused EU = 16
+                // # HW threads/EU = 8
+                // SIMD16: 16*8*16 = 2048 pixelsPerDSS
+                // SIMD32: 16*8*32 = 4096 pixelsPerDSS
+                //
+                // To calculate SLM/DSS in kB
+                // ThreadGroupSize (TGSize) is # pixels in Thread Group
+                // (m_slmSize * pixelsPerDSS / TGSize) / 1024
+            case SIMDMode::SIMD16:
+                slmPerDSS = ctx->m_slmSize * 2 / ctx->GetThreadGroupSize();
+                break;
+            case SIMDMode::SIMD32:
+                slmPerDSS = ctx->m_slmSize * 4 / ctx->GetThreadGroupSize();
+                break;
+            default:
+                break;
+            }
+
+            if (slmPerDSS > 128) {
+                ctx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                return false;
+            }
+
+        }
 
         // skip simd32 if simd16 spills
         if (simdMode == SIMDMode::SIMD32 && simd16Program &&
@@ -494,7 +676,8 @@ namespace IGC
                 float occu32 = ctx->GetThreadOccupancy(SIMDMode::SIMD32);
                 if (!ctx->isSecondCompile &&
                     (occu32 > occu16 ||
-                    (occu32 == occu16 && ctx->m_instrTypes.hasBarrier)))
+                    (occu32 == occu16 && m_Platform->loosenSimd32occu()) ||
+                    (occu32 == occu16 && ctx->m_instrTypes.numBarrier)))
                 {
                     return true;
                 }
@@ -525,7 +708,7 @@ namespace IGC
 
         if (simdMode == SIMDMode::SIMD32)
         {
-            if (IGC_IS_FLAG_ENABLED(EnableCSSIMD32) || BestSimdMode == SIMDMode::SIMD32)
+            if (IGC_IS_FLAG_ENABLED(EnableCSSIMD32) || DefaultSimdMode == SIMDMode::SIMD32)
             {
                 return true;
             }
@@ -584,7 +767,7 @@ namespace IGC
                     return false;
                 }
 
-                if ((hasSimd8 || hasSimd16) && BestSimdMode != SIMDMode::SIMD32)
+                if ((hasSimd8 || hasSimd16) && DefaultSimdMode != SIMDMode::SIMD32)
                 {
                     return false;
                 }

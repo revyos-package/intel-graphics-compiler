@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -9,8 +9,8 @@ SPDX-License-Identifier: MIT
 #ifndef VCOPT_LIB_GENXCODEGEN_GENXOCLRUNTIMEINFO_H
 #define VCOPT_LIB_GENXCODEGEN_GENXOCLRUNTIMEINFO_H
 
-#include "vc/GenXOpts/Utils/KernelInfo.h"
 #include "vc/Support/BackendConfig.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 
 #include "llvm/ADT/Optional.h"
 #include "llvm/Pass.h"
@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 #include "JitterDataStruct.h"
 #include "RelocationInfo.h"
 
+#include <cstdint>
 #include <map>
 
 #include "Probe/Assertion.h"
@@ -28,11 +29,15 @@ class Function;
 class FunctionGroup;
 class GenXSubtarget;
 
+class KernelArgBuilder;
+
 void initializeGenXOCLRuntimeInfoPass(PassRegistry &PR);
 
 class GenXOCLRuntimeInfo : public ModulePass {
 public:
   class KernelArgInfo {
+    friend class KernelArgBuilder;
+
   public:
     enum class KindType {
       General,
@@ -42,7 +47,10 @@ public:
       SVM,
       Sampler,
       Image1D,
+      Image1DArray,
       Image2D,
+      Image2DArray,
+      Image2DMediaBlock,
       Image3D,
       PrintBuffer,
       PrivateBase,
@@ -64,12 +72,9 @@ public:
     unsigned BTI;
 
   private:
-    void translateArgDesc(genx::KernelMetadata &KM, unsigned ArgNo);
+    KernelArgInfo() = default;
 
   public:
-    KernelArgInfo(const Argument &Arg, genx::KernelMetadata &KM,
-                  const DataLayout &DL);
-
     unsigned getIndex() const { return Index; }
     KindType getKind() const { return Kind; }
     AccessKindType getAccessKind() const { return AccessKind; }
@@ -81,7 +86,10 @@ public:
     bool isImage() const {
       switch (Kind) {
       case KindType::Image1D:
+      case KindType::Image1DArray:
       case KindType::Image2D:
+      case KindType::Image2DArray:
+      case KindType::Image2DMediaBlock:
       case KindType::Image3D:
         return true;
       default:
@@ -108,48 +116,65 @@ public:
     unsigned Entries = 0;
   };
 
-  // This data partially duplicates KernelInfo data.
-  // It exists due to OCLBinary to ZEBinary transition period.
-  struct ZEBinKernelInfo {
-    struct SymbolsInfo {
-      using ZESymEntrySeq = std::vector<vISA::ZESymEntry>;
-      ZESymEntrySeq Functions;
-      ZESymEntrySeq Local;
-    };
-    using ZERelocEntrySeq = std::vector<vISA::ZERelocEntry>;
-    ZERelocEntrySeq Relocations;
-    SymbolsInfo Symbols;
+  // Symbols and reloacations are collected in zebin format. Later they are
+  // translated into legacy format for patch token generation.
+  using SymbolSeq = std::vector<vISA::ZESymEntry>;
+  using RelocationSeq = std::vector<vISA::ZERelocEntry>;
+
+  struct DataInfo {
+    std::vector<uint8_t> Buffer;
+    int Alignment = 0;
+    // Runtime can allocate bigger zeroed out buffer, and fill only
+    // the first part of it with the data from Buffer field. So there's no
+    // need to fill Buffer with zero, one can just set AdditionalZeroedSpace,
+    // and it will be additionally allocated. The size is in bytes.
+    std::size_t AdditionalZeroedSpace = 0;
+
+    void clear() {
+      Buffer.clear();
+      Alignment = 0;
+      AdditionalZeroedSpace = 0;
+    }
   };
 
-  struct ZEBinModuleInfo {
-    struct SymbolsInfo {
-      using ZESymEntrySeq = std::vector<vISA::ZESymEntry>;
-      ZESymEntrySeq Globals;
-      ZESymEntrySeq Constants;
-    };
-    SymbolsInfo Symbols;
+  struct SectionInfo {
+    DataInfo Data;
+    // Symbols inside this section. Symbol offsets must be in bounds of
+    // \p Data.
+    SymbolSeq Symbols;
+    // Relocations inside this section. "Inside" means that relocation/patching
+    // happens inside this section a relocated symbol itself may refer to any
+    // section, including the current one.
+    RelocationSeq Relocations;
+
+    void clear() {
+      Data.clear();
+      Symbols.clear();
+      Relocations.clear();
+    }
   };
 
   // Additional kernel info that are not provided by finalizer
   // but still required for runtime.
   struct KernelInfo {
-    ZEBinKernelInfo ZEBinInfo;
+    SectionInfo Func;
+    // Duplicates Func.Relocations. Cannot unify it on VC side since the
+    // duplication happens on Finalizer side.
+    TableInfo LegacyFuncRelocations;
+    std::string VISAAsm;
 
   private:
     std::string Name;
 
     bool UsesGroupId = false;
     bool UsesDPAS = false;
-
-    // Jitter info contains similar field.
-    // Whom should we believe?
-    bool UsesBarriers = false;
-
+    int NumBarriers = 0;
     bool UsesReadWriteImages = false;
-
+    bool SupportsDebugging = false;
     unsigned SLMSize = 0;
     unsigned ThreadPrivateMemSize = 0;
-    unsigned StatelessPrivateMemSize;
+    unsigned StatelessPrivateMemSize = 0;
+    bool DisableEUFusion = false;
 
     unsigned GRFSizeInBytes;
 
@@ -158,16 +183,14 @@ public:
     ArgInfoStorageTy ArgInfos;
     PrintStringStorageTy PrintStrings;
 
-    TableInfo ReloTable;
-    TableInfo SymbolTable;
-
   private:
     void setInstructionUsageProperties(const FunctionGroup &FG,
                                        const GenXBackendConfig &BC);
-    void setMetadataProperties(genx::KernelMetadata &KM,
-                               const GenXSubtarget &ST);
+    void setMetadataProperties(vc::KernelMetadata &KM, const GenXSubtarget &ST);
     void setArgumentProperties(const Function &Kernel,
-                               genx::KernelMetadata &KM);
+                               const vc::KernelMetadata &KM,
+                               const GenXSubtarget &ST,
+                               const GenXBackendConfig &BC);
     void setPrintStrings(const Module &KernelModule);
 
   public:
@@ -176,6 +199,8 @@ public:
     using arg_size_type = ArgInfoStorageTy::size_type;
 
   public:
+    // Creates kernel info for empty kernel.
+    KernelInfo(const GenXSubtarget &ST);
     // Creates kernel info for given function group.
     KernelInfo(const FunctionGroup &FG, const GenXSubtarget &ST,
                const GenXBackendConfig &BC);
@@ -191,6 +216,8 @@ public:
     // Deduced from actual function instructions.
     bool usesGroupId() const { return UsesGroupId; }
 
+    bool supportsDebugging() const { return SupportsDebugging; }
+
     // SIMD size is always set by igcmc to one. Preserve this here.
     unsigned getSIMDSize() const { return 1; }
     unsigned getSLMSize() const { return SLMSize; }
@@ -203,9 +230,12 @@ public:
 
     // Deduced from actual function instructions.
     bool usesDPAS() const { return UsesDPAS; }
+    // igcmc always sets this to zero. Preserve this here.
+    unsigned getNumThreads() const { return 0; }
 
-    bool usesBarriers() const { return UsesBarriers; }
+    int getNumBarriers() const { return NumBarriers; }
     bool usesReadWriteImages() const { return UsesReadWriteImages; }
+    bool requireDisableEUFusion() const { return DisableEUFusion; }
 
     // Arguments accessors.
     arg_iterator arg_begin() { return ArgInfos.begin(); }
@@ -219,68 +249,43 @@ public:
     arg_size_type arg_size() const { return ArgInfos.size(); }
     bool arg_empty() const { return ArgInfos.empty(); }
     const PrintStringStorageTy &getPrintStrings() const { return PrintStrings; }
-    TableInfo &getRelocationTable() { return ReloTable; }
-    const TableInfo &getRelocationTable() const { return ReloTable; }
-    TableInfo &getSymbolTable() { return SymbolTable; }
-    const TableInfo &getSymbolTable() const { return SymbolTable; }
   };
 
-  class GTPinInfo {
-    std::vector<char> gtpinBuffer;
-  public:
-    GTPinInfo(std::vector<char>&& buf): gtpinBuffer(std::move(buf)) {}
-    unsigned getGTPinBufferSize() const { return gtpinBuffer.size(); }
-    const std::vector<char> &getGTPinBuffer() const { return gtpinBuffer; }
-  };
+  using GTPinInfo = std::vector<char>;
 
   class CompiledKernel {
     KernelInfo CompilerInfo;
     FINALIZER_INFO JitterInfo;
     GTPinInfo GtpinInfo;
-    std::vector<char> GenBinary;
     std::vector<char> DebugInfo;
 
   public:
     CompiledKernel(KernelInfo &&KI, const FINALIZER_INFO &JI,
-                   const GTPinInfo &GI,
-                   std::vector<char> GenBin,
-                   std::vector<char> DebugInfo);
+                   const GTPinInfo &GI, std::vector<char> DebugInfo);
 
     const KernelInfo &getKernelInfo() const { return CompilerInfo; }
     const FINALIZER_INFO &getJitterInfo() const { return JitterInfo; }
     const GTPinInfo &getGTPinInfo() const { return GtpinInfo; }
-    const std::vector<char> &getGenBinary() const { return GenBinary; }
+    const std::vector<uint8_t> &getGenBinary() const {
+      return CompilerInfo.Func.Data.Buffer;
+    }
     const std::vector<char> &getDebugInfo() const { return DebugInfo; }
   };
 
-  struct DataInfoT {
-    std::vector<char> Buffer;
-    int Alignment = 0;
-    // Runtime can allocate bigger zeroed out buffer, and fill only
-    // the first part of it with the data from Buffer field. So there's no
-    // need to fill Buffer with zero, one can just set AdditionalZeroedSpace,
-    // and it will be additionally allocated. The size is in bytes.
-    std::size_t AdditionalZeroedSpace = 0;
-
-    void clear() {
-      Buffer.clear();
-      Alignment = 0;
-      AdditionalZeroedSpace = 0;
-    }
-  };
-
   struct ModuleInfoT {
-    DataInfoT ConstantData;
-    DataInfoT GlobalData;
-    ZEBinModuleInfo ZEBinInfo;
-    // This table must contain only global and constant symbols.
-    TableInfo SymbolTable;
+    SectionInfo Constant;
+    SectionInfo Global;
+    // Real global string variables that are used in printf.
+    // By design this can be filled only for zebin flow for now.
+    // It should be possible to put all string variables into this section.
+    // Though it would require merging \p Constant and \p ConstString for
+    // oclbin on patch token generation side. So for now it isn't done this
+    // way.
+    SectionInfo ConstString;
 
     void clear() {
-      ConstantData.clear();
-      GlobalData.clear();
-      ZEBinInfo.Symbols.Constants.clear();
-      ZEBinInfo.Symbols.Globals.clear();
+      Constant.clear();
+      Global.clear();
     }
   };
 
@@ -320,6 +325,7 @@ public:
   bool runOnModule(Module &M) override;
 
   void releaseMemory() override { CompiledModule.clear(); }
+  void print(raw_ostream &OS, const Module *M) const override;
 
   // Move compiled kernels out of this pass.
   CompiledModuleT stealCompiledModule() { return std::move(CompiledModule); }

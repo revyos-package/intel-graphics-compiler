@@ -72,7 +72,6 @@ namespace IGC
         bool isIdentityMatrix(llvm::ExtractElementInst& I);
         void visitAnd(llvm::BinaryOperator& I);
         void visitXor(llvm::Instruction& XorInstr);
-
         //
         // IEEE Floating point arithmetic is not associative.  Any pattern
         // match that changes the order or paramters is unsafe.
@@ -92,10 +91,14 @@ namespace IGC
         void visitBitCast(llvm::BitCastInst& BC);
 
         void matchDp4a(llvm::BinaryOperator& I);
+        void hoistDp3(llvm::BinaryOperator& I);
 
         template <typename MaskType> void matchReverse(llvm::BinaryOperator& I);
     private:
         bool psHasSideEffect;
+
+        bool lower64bto32b(llvm::BinaryOperator& AndInst);
+        llvm::Value* analyzeTreeForTrunc64bto32b(const llvm::Use& OperandUse, llvm::SmallVector<llvm::BinaryOperator*, 8>& OpsToDelete);
     };
 
 #if LLVM_VERSION_MAJOR >= 7
@@ -245,5 +248,8 @@ namespace IGC
     llvm::FunctionPass* createBlendToDiscardPass();
     llvm::FunctionPass* createMarkReadOnlyLoadPass();
     llvm::FunctionPass* createLogicalAndToBranchPass();
+    llvm::FunctionPass* createCleanPHINodePass();
+    llvm::FunctionPass* createMergeMemFromBranchOptPass();
+    llvm::FunctionPass* createInsertBranchOptPass();
 
 } // namespace IGC

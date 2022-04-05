@@ -122,7 +122,8 @@ namespace IGC
     {
         const uint outputControlPointCount = GetNumberOfOutputControlPoints(mod);
 
-        IGC::CodeGenContext* pCodeGenContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+        IGC::CodeGenContext* pCodeGenContext = nullptr;
+        pCodeGenContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
 
         /* Instance Count
         **         This field determines the number of threads(minus one) spawned per input patch.
@@ -296,8 +297,10 @@ namespace IGC
 
     bool LinkTessControlShader::runOnModule(llvm::Module& M)
     {
-        CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+        CodeGenContext* ctx = nullptr;
+        ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+        MetaDataUtils* pMdUtils = nullptr;
+        pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
         if (pMdUtils->size_FunctionsInfo() != 1)
         {
             return false;
@@ -330,6 +333,9 @@ namespace IGC
         if (threadCount == 1 && hasBarrier)
         {
             // With a single thread, there is no need for thread barriers.
+            // This optimization is always required on DG2+. Unified barrier
+            // programming requires that InstanceCount be at least 2 if TCS has
+            // barrier instructions.
 
             RemoveBarrierInstructions(pNewTCSFunction);
             hasBarrier = false;

@@ -58,8 +58,8 @@ namespace IGC
         EALIGN_AUTO
     };
 
-#define EALIGN_GRF EALIGN_HWORD
-#define EALIGN_2GRF EALIGN_32WORD
+#define EALIGN_GRF (getGRFSize() == 64 ? EALIGN_32WORD : EALIGN_HWORD)
+#define EALIGN_2GRF (getGRFSize() == 64 ? EALIGN_64WORD : EALIGN_32WORD)
 
     // XMACRO defining the CISA opCode
     // need to move to the CISA encoding file when breaking down code
@@ -167,7 +167,12 @@ namespace IGC
     {
         CVariable* m_resource;
         e_predefSurface m_surfaceType;
-        ResourceDescriptor() : m_resource(nullptr), m_surfaceType(ESURFACE_NORMAL) {}
+        // this flag is set whenever addrspace is set to ADDRESS_SPACE_THREAD_ARG
+        // to access thread arguments. we need to lower such messages
+        // using special addressing mode.
+        bool m_isThreadArg = false;
+        ResourceDescriptor() : m_resource(nullptr), m_surfaceType(ESURFACE_NORMAL),
+            m_isThreadArg(false) {}
     };
 
     struct SamplerDescriptor

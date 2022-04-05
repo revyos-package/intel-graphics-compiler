@@ -239,6 +239,7 @@ void G4_BB::emitBasicInstructionComment(
     const G4_INST* inst = *it;
 
     auto platform = inst->getPlatform();
+    unsigned grfSize = parent->builder->getGRFSize();
 
     if (!inst->isLabel() && inst->opcode() < G4_NUM_OPCODE)
     {
@@ -267,7 +268,7 @@ void G4_BB::emitBasicInstructionComment(
             output << ":%" << inst->getGenOffset();
         }
 
-        if (getPlatformGeneration(platform) < PlatformGen::XE)
+        if (inst->getBuilder().getPlatformGeneration() < PlatformGen::XE)
         {
             emitBankConflict(output, inst);
         }
@@ -285,9 +286,11 @@ void G4_BB::emitBasicInstructionComment(
             }
             else
             {
-                BCNum = emitBankConflictXe(output, inst, suppressRegs,
+                BCNum = emitBankConflictXe(
+                    output, inst, suppressRegs,
                     sameBankConflicts, twoSrcConflicts, simd16SuppressionConflicts,
-                    false, true, false);
+                    parent->builder->hasOneGRFBank16Bundles(),
+                    platform == GENX_TGLLP, parent->builder->has64bundleSize());
             }
             parent->XeBCStats.addBC(BCNum);
             parent->XeBCStats.addSameBankBC(sameBankConflicts);
@@ -381,7 +384,7 @@ void G4_BB::emitBankConflict(std::ostream& output, const G4_INST *inst)
                     if (baseVar->isGreg()) {
                         uint32_t byteAddress = srcOpnd->getLinearizedStart();
                         if (byteAddress != 0) {
-                            regNum[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                            regNum[0][i] = byteAddress / parent->builder->numEltPerGRF<Type_UB>();
                         }
                         else {
                             // before RA, use the value in Greg directly
@@ -425,10 +428,11 @@ void G4_BB::emitBankConflict(std::ostream& output, const G4_INST *inst)
         }
         else
         { //EVEN EVEN/ODD ODD
+            const IR_Builder* builder = parent->builder;
             for (int i = 0; i < 3; i++)
             {
                 output << i << "=";
-                for (int j = 0; j < (execSize[i] + (int)numEltPerGRF<Type_UB>() - 1) / (int)numEltPerGRF<Type_UB>(); j++)
+                for (int j = 0; j < (execSize[i] + (int)builder->numEltPerGRF<Type_UB>() - 1) / (int)builder->numEltPerGRF<Type_UB>(); j++)
                 {
                     int reg_num = regNum[0][i] + j;
                     if (!(reg_num & 0x02) && reg_num < SECOND_HALF_BANK_START_GRF)
@@ -452,8 +456,8 @@ void G4_BB::emitBankConflict(std::ostream& output, const G4_INST *inst)
                         regNum[1][i] = reg_num;
                     }
                 }
-                maxGRFNum = ((execSize[i] + (int)numEltPerGRF<Type_UB>() - 1) / (int)numEltPerGRF<Type_UB>()) > maxGRFNum ?
-                    ((execSize[i] + (int)numEltPerGRF<Type_UB>() - 1) / (int)numEltPerGRF<Type_UB>()) : maxGRFNum;
+                maxGRFNum = ((execSize[i] + (int)builder->numEltPerGRF<Type_UB>() - 1) / (int)builder->numEltPerGRF<Type_UB>()) > maxGRFNum ?
+                    ((execSize[i] + (int)builder->numEltPerGRF<Type_UB>() - 1) / (int)builder->numEltPerGRF<Type_UB>()) : maxGRFNum;
             }
         }
         output << "BC=";
@@ -651,7 +655,7 @@ static int getConflictTimesForTGLLP(
     return conflictTimes;
 }
 
-static int getConflictTimesForTGL(
+int G4_BB::getConflictTimesForTGL(
     std::ostream& output, int *firstRegCandidate,
     int &sameBankConflicts, bool zeroOne, bool isTGLLP, bool reducedBundles)
 {
@@ -810,6 +814,8 @@ uint32_t G4_BB::emitBankConflictXe(
     bool isFDFSrc1 = false;
     bool isSrc1Suppressed = false;
 
+    const IR_Builder* builder = parent->builder;
+    auto grfSize = builder->getGRFSize();
     //Get Dst
     G4_DstRegRegion* dstOpnd = inst->getDst();
     if (dstOpnd &&
@@ -818,10 +824,10 @@ uint32_t G4_BB::emitBankConflictXe(
     {
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstRegs[0] = byteAddress / numEltPerGRF<Type_UB>();
-        if (dstExecSize > getGRFSize())
+        dstRegs[0] = byteAddress / builder->numEltPerGRF<Type_UB>();
+        if (dstExecSize > grfSize)
         {
-            dstRegs[1] = dstRegs[0] + (dstExecSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstRegs[1] = dstRegs[0] + (dstExecSize + builder->numEltPerGRF<Type_UB>() - 1) / builder->numEltPerGRF<Type_UB>() - 1;
             isCompressedInst = true;
         }
     }
@@ -842,12 +848,12 @@ uint32_t G4_BB::emitBankConflictXe(
                 currInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    currInstRegs[0][i] = byteAddress / builder->numEltPerGRF<Type_UB>();
                     if (i == 1)
                     {
                         isFDFSrc1 = IS_TYPE_F32_F64(srcOpnd->getType());
                     }
-                    if (currInstExecSize[i] > getGRFSize())
+                    if (currInstExecSize[i] > grfSize)
                     {
                         currInstRegs[1][i] = currInstRegs[0][i] + 1;
                         isCompressedInst = true;
@@ -1056,6 +1062,21 @@ static bool hasInternalConflict(IR_Builder *builder, int reg1, int reg2)
     int bundleID2 = (reg2 % 16) / 2;
     int bankID2 = reg2 % 2;
 
+    if (builder->hasTwoGRFBank16Bundles())
+    {
+        bundleID1 = (reg1 % 64) / 4;
+        bankID1 = (reg1 % 4) / 2;
+        bundleID2 = (reg2 % 64) / 4;
+        bankID2 = (reg2 % 4) / 2;
+    }
+
+    if (builder->hasOneGRFBank16Bundles())
+    {
+        bundleID1 = (reg1 % 64) / 4;
+        bankID1 = reg1 % 2;
+        bundleID2 = (reg2 % 64) / 4;
+        bankID2 = reg2 % 2;
+    }
 
     return ((bankID1 == bankID2) && (bundleID1 == bundleID2));
 }
@@ -1138,6 +1159,8 @@ uint32_t G4_BB::emitBankConflictXeLP(
     }
 
     bool instSplit = false;
+    const IR_Builder* builder = parent->builder;
+    auto grfSize = builder->getGRFSize();
 
     //Get Dst
     G4_DstRegRegion* dstOpnd = inst->getDst();
@@ -1147,10 +1170,10 @@ uint32_t G4_BB::emitBankConflictXeLP(
     {
         dstExecSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstRegs[0] = byteAddress / numEltPerGRF<Type_UB>();
-        if (dstExecSize > getGRFSize())
+        dstRegs[0] = byteAddress / builder->numEltPerGRF<Type_UB>();
+        if (dstExecSize > grfSize)
         {
-            dstRegs[1] = dstRegs[0] + (dstExecSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstRegs[1] = dstRegs[0] + (dstExecSize + builder->numEltPerGRF<Type_UB>() - 1) / builder->numEltPerGRF<Type_UB>() - 1;
             instSplit = true;
 
         }
@@ -1171,11 +1194,11 @@ uint32_t G4_BB::emitBankConflictXeLP(
                 currInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    currInstRegs[0][i] = byteAddress / builder->numEltPerGRF<Type_UB>();
 
-                    if (currInstExecSize[i] > getGRFSize())
+                    if (currInstExecSize[i] > grfSize)
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (currInstExecSize[i] + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (currInstExecSize[i] + builder->numEltPerGRF<Type_UB>() - 1) / builder->numEltPerGRF<Type_UB>() - 1;
                         instSplit = true;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
@@ -1398,6 +1421,24 @@ G4_INST * G4_BB::getFirstInst()
     return firstInst;
 }
 
+INST_LIST_ITER G4_BB::getFirstInsertPos()
+{
+    INST_LIST_ITER II = begin();
+    for(INST_LIST_ITER IB = end(); II != IB; ++II)
+    {
+        G4_INST* tI = (*II);
+        if (tI->isLabel()
+            || tI->opcode() == G4_join
+            || tI->opcode() == G4_endif
+            || tI->opcode() == G4_while)
+        {
+            continue;
+        }
+        break;
+    }
+    return II;
+}
+
 //
 //  Add an EOT send to the end of this BB.
 //
@@ -1406,12 +1447,12 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     // mov (8) r1.0<1>:ud r0.0<8;8,1>:ud {NoMask}
     // send (8) null r1 0x27 desc
     IR_Builder* builder = parent->builder;
-    G4_Declare *dcl = builder->createSendPayloadDcl(numEltPerGRF<Type_UD>(), Type_UD);
+    G4_Declare *dcl = builder->createSendPayloadDcl(builder->numEltPerGRF<Type_UD>(), Type_UD);
     G4_DstRegRegion* movDst = builder->createDstRegRegion(dcl, 1);
     G4_SrcRegRegion* r0Src = builder->createSrcRegRegion(
         builder->getBuiltinR0(), builder->getRegionStride1());
     G4_INST *movInst = builder->createMov(
-        G4_ExecSize(numEltPerGRF<Type_UD>()), movDst, r0Src, InstOpt_WriteEnable, false);
+        G4_ExecSize(builder->numEltPerGRF<Type_UD>()), movDst, r0Src, InstOpt_WriteEnable, false);
     if (lastInst)
     {
         movInst->inheritDIFrom(lastInst);
@@ -1449,25 +1490,35 @@ void G4_BB::addEOTSend(G4_INST* lastInst)
     }
 }
 
-const char* G4_BB::getBBTypeStr() const
+std::string G4_BB::getBBTypeStr() const
 {
-    switch (getBBType()) {
-    default:
-        break;
-    case G4_BB_CALL_TYPE:
-        return "CALL";
-    case G4_BB_RETURN_TYPE:
-        return "RETURN";
-    case G4_BB_INIT_TYPE:
-        return "INIT";
-    case G4_BB_EXIT_TYPE:
-        return "EXIT";
-    case G4_BB_NM_WA_TYPE:
-        return "NoMaskWA";
-    case G4_BB_FCALL_TYPE:
-        return "FCALL";
-    }
-    return " ";
+    std::stringstream ss;
+    bool isFirst = true;
+    auto addTyString = [&ss, &isFirst](const char* aS) {
+        if (!isFirst) {
+            ss << ",";
+        }
+        isFirst = false;
+        ss << aS;
+    };
+
+    uint32_t bbTy = getBBType();
+    if (bbTy == 0)
+        return " ";
+
+    if ((bbTy & G4_BB_CALL_TYPE) != 0)
+        addTyString("CALL");
+    if ((bbTy & G4_BB_RETURN_TYPE) != 0)
+        addTyString("RETURN");
+    if ((bbTy & G4_BB_INIT_TYPE) != 0)
+        addTyString("INIT");
+    if ((bbTy & G4_BB_EXIT_TYPE) != 0)
+        addTyString("EXIT");
+    if ((bbTy & G4_BB_FCALL_TYPE) != 0)
+        addTyString("FCALL");
+    if ((bbTy & G4_BB_NM_WA_TYPE) != 0)
+        addTyString("NoMaskWA");
+    return ss.str();
 }
 
 void G4_BB::dump() const
@@ -1590,7 +1641,7 @@ void G4_BB::addSamplerFlushBeforeEOT()
         G4_SrcRegRegion* sendMsgOpnd = builder->createSrcRegRegion(
             builder->getBuiltinR0(),
             builder->getRegionStride1());
-        G4_Declare *tmpDest = builder->createTempVar(g4::SIMD8, Type_UD, GRFALIGN);
+        G4_Declare *tmpDest = builder->createTempVar(g4::SIMD8, Type_UD, builder->getGRFAlign());
         tmpDest->setDoNotSpill();
         G4_DstRegRegion* sendMsgDst = builder->createDstRegRegion(tmpDest, 1);
         auto msgDesc = builder->createSyncMsgDesc(SFID::SAMPLER, desc);
@@ -1606,5 +1657,5 @@ void G4_BB::addSamplerFlushBeforeEOT()
 
 bool G4_BB::dominates(G4_BB* other)
 {
-    return getParent().getDominator().dominates(this, other);
+    return getParent().getImmDominator().dominates(this, other);
 }

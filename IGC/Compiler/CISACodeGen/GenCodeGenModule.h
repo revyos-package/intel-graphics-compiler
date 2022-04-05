@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Pass.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "common/LLVMWarningsPop.hpp"
+#include "common/Types.hpp"
 #include "Probe/Assertion.h"
 
 namespace IGC {
@@ -144,6 +145,22 @@ namespace IGC {
         bool hasVariableLengthAlloca() {
             return m_hasVaribleLengthAlloca;
         }
+        /// \brief Function group has indirect calls
+        bool hasIndirectCall() {
+            return m_hasIndirectCall;
+        }
+        /// \brief Function group has recursion
+        bool hasRecursion() {
+            return m_hasRecursion;
+        }
+        /// Set and Get the max private memory used by FG give then call depth
+        /// This is calculated in PrivateMemoryResolution.cpp
+        void setMaxPrivateMemOnStack(unsigned size) {
+            m_MaxPrivateMemOnStack = size;
+        }
+        unsigned getMaxPrivateMemOnStack() {
+            return m_MaxPrivateMemOnStack;
+        }
 
         void replaceGroupHead(llvm::Function* OH, llvm::Function* NH) {
             auto headSG = Functions[0];
@@ -152,10 +169,19 @@ namespace IGC {
             HVH = NH;
         }
 
+        // For a single FG, an SIMD mode is valid only if SIMD modes of all
+        // functions in that group are valid.
+        bool checkSimdModeValid(SIMDMode Mode) const;
+        void setSimdModeInvalid(SIMDMode Mode);
+
     private:
         bool m_hasStackCall = false;
         bool m_hasInlineAsm = false;
         bool m_hasVaribleLengthAlloca = false;
+        bool m_hasIndirectCall = false;
+        bool m_hasRecursion = false;
+        unsigned m_MaxPrivateMemOnStack = 0;
+        bool SIMDModeValid[3] = {true, true, true};
     };
 
     class GenXFunctionGroupAnalysis : public llvm::ImmutablePass {
@@ -178,7 +204,7 @@ namespace IGC {
         /// \brief Properties for each function
         llvm::DenseMap<const llvm::Function*, uint32_t> FuncProperties;
 
-        /// \brief Special group that contains indirect call functions and the dummy kernel
+        /// \brief Special group that contains all indirect call functions
         FunctionGroup* IndirectCallGroup = nullptr;
 
     public:
@@ -277,17 +303,14 @@ namespace IGC {
             }
         }
 
+        /// get or create the function group that holds all indirectly-called functions
+        FunctionGroup* getOrCreateIndirectCallGroup(llvm::Module* pModule);
+
         /// check if function is stack-called
         bool useStackCall(llvm::Function* F);
 
-        /// sets the stackcall flag for each function group that has stackcalls
-        void setGroupStackCall();
-
-        /// set whether a group contains variable length alloca
-        void setHasVariableLengthAlloca();
-
-        /// set flag for function groups that uses the inline asm instruction
-        void setGroupHasInlineAsm();
+        /// sets function group attribute flags
+        void setGroupAttributes();
 
         typedef llvm::SmallVectorImpl<FunctionGroup*>::iterator iterator;
         iterator begin() { return iterator(Groups.begin()); }

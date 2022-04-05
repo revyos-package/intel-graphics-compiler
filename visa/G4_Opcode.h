@@ -12,7 +12,7 @@ SPDX-License-Identifier: MIT
 #include "common.h"
 
 #define G4_MAX_SRCS       4
-
+#define G4_MAX_INTRINSIC_SRCS       8
 #define UNDEFINED_VAL   0xFFFFFFFF
 #define UNDEFINED_SHORT 0x8000
 #define UNDEFINED_EXEC_SIZE 0xFF
@@ -35,11 +35,9 @@ SPDX-License-Identifier: MIT
 #define IS_TYPE_INT(type)        (IS_SIGNED_INT(type) || IS_UNSIGNED_INT(type))
 #define IS_TYPE_F32_F64(type)         (type == Type_F ||type == Type_DF || type == Type_NF)
 #define IS_TYPE_FLOAT_ALL(type)     (type == Type_F ||type == Type_DF || type == Type_HF || type == Type_NF || type == Type_BF)
+#define IS_TYPE_FLOAT_FOR_ACC(type)     (type == Type_F ||type == Type_DF || type == Type_HF)
 #define IS_TYPE_LONG(type)            (type == Type_DF || type == Type_UQ || type == Type_Q)
 #define IS_TYPE_INTEGER(type)         (type == Type_UW ||type == Type_W ||type == Type_B ||type == Type_UB ||type == Type_V ||type == Type_UV ||type == Type_UD ||type == Type_D)
-
-#define GENX_DATAPORT_IO_SZ       8   // # of dwords in read/write control area
-#define GENX_SAMPLER_IO_SZ        8   // # of control dwords for Sampling Engine unit
 
 #define ADDR_REG_TYPE        Type_UW
 
@@ -280,6 +278,7 @@ enum G4_RegFileKind
     G4_ADDRESS     = 0x2,   // architectural register file
     G4_INPUT       = 0x4,   // input payload register
     G4_FLAG        = 0x20,
+    G4_SCALAR      = 0x40,
 };
 
 //
@@ -401,6 +400,10 @@ enum G4_CmpRelation
     DO(Opnd_src1) \
     DO(Opnd_src2) \
     DO(Opnd_src3) \
+    DO(Opnd_src4) \
+    DO(Opnd_src5) \
+    DO(Opnd_src6) \
+    DO(Opnd_src7) \
     DO(Opnd_pred) \
     DO(Opnd_condMod) \
     DO(Opnd_implAccSrc) \
@@ -432,6 +435,8 @@ enum G4_ArchRegKind {
     AREG_TM0,         // timestamp register
     AREG_TDR0,        // TDR register
     AREG_SP,          // SP register
+    AREG_F2,          // flag register (PVC+)
+    AREG_F3,          // flag register (PVC+)
     AREG_LAST
 };
 
@@ -448,9 +453,6 @@ enum G4_AccRegSel
     NOACC,
     ACC_UNDEFINED = 0xff
 };
-
-#define GRFALIGN (Sixteen_Word)
-#define HALFGRFALIGN (Eight_Word)
 
 // global functions
 inline unsigned int getNumAddrRegisters(void) { return 16; }
@@ -482,7 +484,8 @@ inline G4_Type floatToSameWidthIntType(G4_Type floatTy)
 }
 
 // size is the number of byte
-inline G4_SubReg_Align Get_G4_SubRegAlign_From_Size(uint16_t size)
+inline G4_SubReg_Align Get_G4_SubRegAlign_From_Size(
+    uint16_t size, TARGET_PLATFORM platform, G4_SubReg_Align GRFAlign)
 {
     switch (size)
     {
@@ -492,7 +495,7 @@ inline G4_SubReg_Align Get_G4_SubRegAlign_From_Size(uint16_t size)
     case 4:
         return Even_Word;
     case 8:
-        if (getGenxPlatform() != GENX_BXT)
+        if (platform != GENX_BXT)
             return Four_Word;
         // FALL THROUGH
         // WA: It's a workaround where a potential HW issue needs
@@ -504,7 +507,7 @@ inline G4_SubReg_Align Get_G4_SubRegAlign_From_Size(uint16_t size)
     case 64:
         return ThirtyTwo_Word;
     default:
-        return GRFALIGN;
+        return GRFAlign;
     }
 }
 

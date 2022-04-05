@@ -96,7 +96,7 @@ void DebugEmitter::Initialize(std::unique_ptr<VISAModule> VM,
     registerVISA(m_pVISAModule);
 }
 
-void DebugEmitter::processCurrentFunction(bool finalize, DbgDecoder* decodedDbg) {
+void DebugEmitter::processCurrentFunction(bool finalize, const DbgDecoder* decodedDbg) {
 
     auto EmitIpLabel = [&](unsigned int ip)
     {
@@ -121,11 +121,8 @@ void DebugEmitter::processCurrentFunction(bool finalize, DbgDecoder* decodedDbg)
     unsigned int prevLastGenOff = lastGenOff;
     m_pDwarfDebug->lowPc = lastGenOff;
 
-    if (m_pStreamEmitter->GetEmitterSettings().EnableSIMDLaneDebugging)
-    {
-        // SIMD width
-        m_pDwarfDebug->simdWidth = m_pVISAModule->GetSIMDSize();
-    }
+    // SIMD width
+    m_pDwarfDebug->simdWidth = m_pVISAModule->GetSIMDSize();
 
     if (co->subs.size() == 0)
     {
@@ -218,10 +215,7 @@ void DebugEmitter::processCurrentFunction(bool finalize, DbgDecoder* decodedDbg)
         if (!m_pDwarfDebug->prologueEndExists(loc.get()->getScope()->getSubprogram(),
                                               loc.getInlinedAt(), true))
         {
-            if (m_pStreamEmitter->GetEmitterSettings().EmitPrologueEnd)
-            {
-                Flags |= DWARF2_FLAG_PROLOGUE_END;
-            }
+            Flags |= DWARF2_FLAG_PROLOGUE_END;
         }
         m_pStreamEmitter->EmitDwarfLocDirective(src, loc.getLine(), loc.getCol(), Flags, 0, 0, scope->getFilename());
 
@@ -261,7 +255,8 @@ void DebugEmitter::SetDISPCache(DwarfDISubprogramCache *DISPCache) {
     m_pDwarfDebug->setDISPCache(DISPCache);
 }
 
-std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg)
+std::vector<char> DebugEmitter::Finalize(bool finalize,
+                                         const DbgDecoder* decodedDbg)
 {
     if (!m_debugEnabled)
     {
@@ -318,12 +313,13 @@ std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg)
     if (is64Bit)
         phtSize = sizeof(llvm::ELF::Elf64_Phdr);
 
-    unsigned int kernelNameSizeWithDot = 0;
+    const Function* PrimaryEntry = m_pDwarfDebug->GetPrimaryEntry();
+    std::string EntryNameWithDot = ("." + PrimaryEntry->getName()).str();
+    size_t ContentSize = m_str.size();
     if (m_pStreamEmitter->GetEmitterSettings().ZeBinCompatible)
-    {
-        kernelNameSizeWithDot = sizeof('.') + pFunc->getName().size();
-    }
-    size_t elfWithProgramHeaderSize = m_str.size() + phtSize + kernelNameSizeWithDot;
+        ContentSize += EntryNameWithDot.size();
+
+    size_t elfWithProgramHeaderSize = phtSize + ContentSize;
     std::vector<char> Result(elfWithProgramHeaderSize);
 
     if (!m_pStreamEmitter->GetEmitterSettings().ZeBinCompatible)
@@ -334,25 +330,21 @@ std::vector<char> DebugEmitter::Finalize(bool finalize, DbgDecoder* decodedDbg)
     else
     {
         // Text section's name to be extended by a kernel name.
-
-        // How each elf section gets its name? Find the answer in the following function.
-
         size_t endOfDotTextNameOffset = 0;
-        std::string entryFunctionNameWithDot = "." + pFunc->getName().str();
-        unsigned int kernelNameSizeWithDot = entryFunctionNameWithDot.size();
-        prepareElfForZeBinary(is64Bit, m_str.begin(), m_str.size(), kernelNameSizeWithDot, &endOfDotTextNameOffset);
+        prepareElfForZeBinary(is64Bit, m_str.begin(), m_str.size(),
+                              EntryNameWithDot.size(), &endOfDotTextNameOffset);
 
         // First copy ELF binary from the beginning to the .text name (included) located in the .str.tab
         std::copy(m_str.begin(), m_str.begin() + endOfDotTextNameOffset, Result.begin());
         // Next concatenate .text with a kernel name (a dot joining both names also added).
-        std::copy(entryFunctionNameWithDot.data(), entryFunctionNameWithDot.data() + kernelNameSizeWithDot,
-            Result.begin() + endOfDotTextNameOffset);
+        std::copy(EntryNameWithDot.begin(), EntryNameWithDot.end(),
+                  Result.begin() + endOfDotTextNameOffset);
         // Finally copy remaining part of ELF binary.
         std::copy(m_str.begin() + endOfDotTextNameOffset + 1, m_str.end(),
-            Result.begin() + endOfDotTextNameOffset + 1 + kernelNameSizeWithDot);
+                  Result.begin() + endOfDotTextNameOffset + 1 + EntryNameWithDot.size());
     }
 
-    writeProgramHeaderTable(is64Bit, Result.data(), m_str.size() + kernelNameSizeWithDot);
+    writeProgramHeaderTable(is64Bit, Result.data(), ContentSize);
     setElfType(is64Bit, Result.data());
 
     m_errs = m_pStreamEmitter->getErrors();
@@ -451,7 +443,7 @@ void DebugEmitter::prepareElfForZeBinary(bool is64Bit, char* pElfBuffer, size_t 
                 // If location of this section changes in the future, then a copy (or move) of this section content
                 // will be required. This future need must be verified if the assertion below hits (then
                 // assertion below must be changed based on results of such verification).
-                IGC_ASSERT(false);
+                IGC_ASSERT(0);
             }
         }
 
@@ -580,7 +572,7 @@ void DebugEmitter::registerVISA(IGC::VISAModule* VM)
     m_pDwarfDebug->registerVISA(VM);
 }
 void DebugEmitter::setCurrentVISA(IGC::VISAModule* VM) {
-    // TODO: add assert to check that this module is registered/owned
+    // TODO: add assertion statement to check that this module is registered/owned
     m_pVISAModule = VM;
 }
 void DebugEmitter::resetModule(std::unique_ptr<IGC::VISAModule> VM) {

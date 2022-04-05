@@ -80,6 +80,9 @@ public:
   SPIRVWord WordCount;
   Op OpCode;
   SPIRVEntry *Scope; // A function or basic block
+
+  std::vector<SPIRVEntry*>
+      getContinuedInstructions(const Op ContinuedOpCode);
 };
 
 template<typename T>
@@ -114,6 +117,14 @@ const SPIRVDecoder&
 operator>>(const SPIRVDecoder& I, std::vector<T> &V) {
   for (size_t i = 0, e = V.size(); i != e; ++i)
     I >> V[i];
+  return I;
+}
+
+template <typename T>
+const SPIRVDecoder&
+operator>>(const SPIRVDecoder& I, llvm::Optional<T>& V) {
+  if (V)
+    I >> V.getValue();
   return I;
 }
 

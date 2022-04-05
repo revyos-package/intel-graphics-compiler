@@ -14,10 +14,12 @@ SPDX-License-Identifier: MIT
 #include "FunctionGroup.h"
 #include "GenX.h"
 #include "GenXIntrinsics.h"
-#include "GenXRegion.h"
 
-#include "vc/GenXOpts/Utils/InternalMetadata.h"
+#include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/InternalMetadata.h"
+#include "vc/Utils/GenX/PredefinedVariable.h"
 #include "vc/Utils/GenX/Printf.h"
+#include "vc/Utils/General/Types.h"
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -280,7 +282,7 @@ Instruction *genx::findClosestCommonDominator(DominatorTree *DT,
  */
 llvm::Optional<unsigned> genx::getTwoAddressOperandNum(CallInst *CI)
 {
-  auto IntrinsicID = GenXIntrinsic::getAnyIntrinsicID(CI);
+  auto IntrinsicID = vc::getAnyIntrinsicID(CI);
   if (IntrinsicID == GenXIntrinsic::not_any_intrinsic)
     return None; // not intrinsic
   // wr(pred(pred))region has operand 0 as two address operand
@@ -305,6 +307,14 @@ llvm::Optional<unsigned> genx::getTwoAddressOperandNum(CallInst *CI)
 }
 
 /***********************************************************************
+ * isPredicate : test whether an instruction has predicate (i1 or vector of i1)
+ * type
+ */
+bool genx::isPredicate(Instruction *Inst) {
+  return Inst->getType()->isIntOrIntVectorTy(1);
+}
+
+/***********************************************************************
  * isNot : test whether an instruction is a "not" instruction (an xor with
  *    constant all ones)
  */
@@ -323,11 +333,7 @@ bool genx::isNot(Instruction *Inst)
  */
 bool genx::isPredNot(Instruction *Inst)
 {
-  if (Inst->getOpcode() == Instruction::Xor)
-    if (auto C = dyn_cast<Constant>(Inst->getOperand(1)))
-      if (C->isAllOnesValue() && C->getType()->getScalarType()->isIntegerTy(1))
-        return true;
-  return false;
+  return isPredicate(Inst) && isNot(Inst);
 }
 
 /***********************************************************************
@@ -336,11 +342,7 @@ bool genx::isPredNot(Instruction *Inst)
  */
 bool genx::isIntNot(Instruction *Inst)
 {
-  if (Inst->getOpcode() == Instruction::Xor)
-    if (auto C = dyn_cast<Constant>(Inst->getOperand(1)))
-      if (C->isAllOnesValue() && !C->getType()->getScalarType()->isIntegerTy(1))
-        return true;
-  return false;
+  return !isPredicate(Inst) && isNot(Inst);
 }
 
 /***********************************************************************
@@ -392,8 +394,8 @@ bool genx::isNoopCast(const CastInst *CI) {
   case Instruction::PtrToInt:
   case Instruction::IntToPtr:
   case Instruction::AddrSpaceCast:
-    return getTypeSize(CI->getDestTy(), &DL) ==
-           getTypeSize(CI->getSrcTy(), &DL);
+    return vc::getTypeSize(CI->getDestTy(), &DL) ==
+           vc::getTypeSize(CI->getSrcTy(), &DL);
   default:
     return false;
   }
@@ -1566,13 +1568,19 @@ void genx::LayoutBlocks(Function &func)
   }
 }
 
+Value *genx::getBitCastedValue(Value *V) {
+  while (auto *BCI = dyn_cast<BitCastInst>(V))
+    V = BCI->getOperand(0);
+  return V;
+}
+
 // normalize g_load with bitcasts.
 //
 // When a single g_load is being bitcast'ed to different types, clone g_loads.
 bool genx::normalizeGloads(Instruction *Inst) {
   IGC_ASSERT(isa<LoadInst>(Inst));
   auto LI = cast<LoadInst>(Inst);
-  if (getUnderlyingGlobalVariable(LI->getPointerOperand()) == nullptr)
+  if (vc::getUnderlyingGlobalVariable(LI->getPointerOperand()) == nullptr)
     return false;
 
   // collect all uses connected by bitcasts.
@@ -1635,8 +1643,11 @@ Instruction *genx::foldBitCastInst(Instruction *Inst) {
   auto SI = dyn_cast<StoreInst>(Inst);
 
   Value *Ptr = LI ? LI->getPointerOperand() : SI->getPointerOperand();
-  GlobalVariable *GV = getUnderlyingGlobalVariable(Ptr);
-  if (!GV)
+  GlobalVariable *GV = vc::getUnderlyingGlobalVariable(Ptr);
+
+  // Folding bitcast of SEV can produce getelementptr instructions
+  // which must be avoided.
+  if (!GV || vc::isDegenerateVectorType(*GV->getValueType()))
     return nullptr;
 
   if (SI) {
@@ -1670,31 +1681,6 @@ Instruction *genx::foldBitCastInst(Instruction *Inst) {
   return nullptr;
 }
 
-const GlobalVariable *genx::getUnderlyingGlobalVariable(const Value *V) {
-  while (auto *BI = dyn_cast<BitCastInst>(V))
-    V = BI->getOperand(0);
-  while (auto *CE = dyn_cast_or_null<ConstantExpr>(V)) {
-    if (CE->getOpcode() == CastInst::BitCast)
-      V = CE->getOperand(0);
-    else
-      break;
-  }
-  return dyn_cast_or_null<GlobalVariable>(V);
-}
-
-GlobalVariable *genx::getUnderlyingGlobalVariable(Value *V) {
-  return const_cast<GlobalVariable *>(
-      getUnderlyingGlobalVariable(const_cast<const Value *>(V)));
-}
-
-const GlobalVariable *genx::getUnderlyingGlobalVariable(const LoadInst *LI) {
-  return getUnderlyingGlobalVariable(LI->getPointerOperand());
-}
-
-GlobalVariable *genx::getUnderlyingGlobalVariable(LoadInst *LI) {
-  return getUnderlyingGlobalVariable(LI->getPointerOperand());
-}
-
 bool genx::isGlobalStore(Instruction *I) {
   IGC_ASSERT(I);
   if (auto *SI = dyn_cast<StoreInst>(I))
@@ -1704,7 +1690,7 @@ bool genx::isGlobalStore(Instruction *I) {
 
 bool genx::isGlobalStore(StoreInst *ST) {
   IGC_ASSERT(ST);
-  return getUnderlyingGlobalVariable(ST->getPointerOperand()) != nullptr;
+  return vc::getUnderlyingGlobalVariable(ST->getPointerOperand()) != nullptr;
 }
 
 bool genx::isGlobalLoad(Instruction *I) {
@@ -1716,21 +1702,21 @@ bool genx::isGlobalLoad(Instruction *I) {
 
 bool genx::isGlobalLoad(LoadInst *LI) {
   IGC_ASSERT(LI);
-  return getUnderlyingGlobalVariable(LI->getPointerOperand()) != nullptr;
+  return vc::getUnderlyingGlobalVariable(LI->getPointerOperand()) != nullptr;
 }
 
 bool genx::isLegalValueForGlobalStore(Value *V, Value *StorePtr) {
   // Value should be wrregion.
-  auto *Wrr = dyn_cast<CallInst>(V);
+  auto *Wrr = dyn_cast<CallInst>(getBitCastedValue(V));
   if (!Wrr || !GenXIntrinsic::isWrRegion(Wrr))
     return false;
 
   // With old value obtained from load instruction with StorePtr.
   Value *OldVal =
       Wrr->getArgOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
-  auto *LI = dyn_cast<LoadInst>(OldVal);
-  return LI && (getUnderlyingGlobalVariable(LI->getPointerOperand()) ==
-                getUnderlyingGlobalVariable(StorePtr));
+  auto *LI = dyn_cast<LoadInst>(getBitCastedValue(OldVal));
+  return LI && (vc::getUnderlyingGlobalVariable(LI->getPointerOperand()) ==
+                vc::getUnderlyingGlobalVariable(StorePtr));
 }
 
 bool genx::isGlobalStoreLegal(StoreInst *ST) {
@@ -1756,19 +1742,19 @@ bool genx::isIdentityBale(const Bale &B) {
   if (B.size() == 1) {
     // The value to be stored should be a load from the same global.
     auto LI = dyn_cast<LoadInst>(ST->getOperand(0));
-    return LI && getUnderlyingGlobalVariable(LI->getOperand(0)) ==
-                     getUnderlyingGlobalVariable(ST->getOperand(1));
+    return LI && vc::getUnderlyingGlobalVariable(LI->getOperand(0)) ==
+                     vc::getUnderlyingGlobalVariable(ST->getOperand(1));
   }
   if (B.size() != 3)
     return false;
 
   CallInst *B1 = dyn_cast<CallInst>(ST->getValueOperand());
-  GlobalVariable *GV = getUnderlyingGlobalVariable(ST->getPointerOperand());
+  GlobalVariable *GV = vc::getUnderlyingGlobalVariable(ST->getPointerOperand());
   if (!GenXIntrinsic::isWrRegion(B1) || !GV)
     return false;
   IGC_ASSERT(B1);
   auto B0 = dyn_cast<LoadInst>(B1->getArgOperand(0));
-  if (!B0 || GV != getUnderlyingGlobalVariable(B0->getPointerOperand()))
+  if (!B0 || GV != vc::getUnderlyingGlobalVariable(B0->getPointerOperand()))
     return false;
 
   CallInst *A1 = dyn_cast<CallInst>(B1->getArgOperand(1));
@@ -1776,11 +1762,11 @@ bool genx::isIdentityBale(const Bale &B) {
     return false;
   IGC_ASSERT(A1);
   LoadInst *A0 = dyn_cast<LoadInst>(A1->getArgOperand(0));
-  if (!A0 || GV != getUnderlyingGlobalVariable(A0->getPointerOperand()))
+  if (!A0 || GV != vc::getUnderlyingGlobalVariable(A0->getPointerOperand()))
     return false;
 
-  Region R1(A1, BaleInfo());
-  Region R2(B1, BaleInfo());
+  Region R1 = makeRegionFromBaleInfo(A1, BaleInfo());
+  Region R2 = makeRegionFromBaleInfo(B1, BaleInfo());
   return R1 == R2;
 }
 
@@ -1793,6 +1779,9 @@ bool genx::isValueRegionOKForRaw(Value *V, bool IsWrite,
   case GenXIntrinsic::genx_rdregionf:
     if (IsWrite)
       return false;
+    if (GenXIntrinsic::isReadPredefReg(cast<Instruction>(V)->getOperand(
+            GenXIntrinsic::GenXRegion::OldValueOperandNum)))
+      return false;
     break;
   case GenXIntrinsic::genx_wrregioni:
   case GenXIntrinsic::genx_wrregionf:
@@ -1802,12 +1791,12 @@ bool genx::isValueRegionOKForRaw(Value *V, bool IsWrite,
   default:
     return false;
   }
-  Region R(cast<Instruction>(V), BaleInfo());
+  Region R = makeRegionFromBaleInfo(cast<Instruction>(V), BaleInfo());
   return isRegionOKForRaw(R, ST);
 }
 
 bool genx::isRegionOKForRaw(const genx::Region &R, const GenXSubtarget *ST) {
-  unsigned GRFWidth = ST ? ST->getGRFWidth() : 32;
+  unsigned GRFWidth = ST ? ST->getGRFByteSize() : 32;
   if (R.Indirect)
     return false;
   else if (R.Offset & (GRFWidth - 1)) // GRF boundary check
@@ -1930,6 +1919,100 @@ Type *genx::getCorrespondingVectorOrScalar(Type *Ty) {
   return IGCLLVM::FixedVectorType::get(Ty, 1);
 }
 
+/***********************************************************************
+ * getExecSizeAllowedBits : get bitmap of allowed execution sizes
+ *
+ * Enter:   Inst = main instruction of bale
+ *
+ * Return:  bit N set if execution size 1<<N is allowed
+ *
+ * Most instructions have a minimum width of 1. But some instructions,
+ * such as dp4 and lrp, have a minimum width of 4, and legalization cannot
+ * allow such an instruction to be split to a smaller width.
+ */
+unsigned genx::getExecSizeAllowedBits(const Instruction *Inst,
+                                      const GenXSubtarget *ST) {
+  IGC_ASSERT(Inst);
+  IGC_ASSERT(ST);
+  switch (Inst->getOpcode()) {
+  default:
+    break;
+  case BinaryOperator::SDiv:
+  case BinaryOperator::UDiv:
+  case BinaryOperator::SRem:
+  case BinaryOperator::URem:
+    // If integer division IS supported.
+    //   Set maximum SIMD width to 16:
+    //      Recent HW does not support SIMD16/SIMD32 division, however,
+    //      finalizer splits such SIMD16 operations and we piggy-back
+    //      on this behavior.
+    // If integer division IS NOT supported.
+    //   The expectation is for GenXEmulate pass to replace such operations
+    //   with emulation routines (which has no restriction on SIMD width)
+    return ST->hasIntDivRem32() ? 0x1f : 0x3f;
+  }
+
+  unsigned ID = vc::getAnyIntrinsicID(Inst);
+  switch (ID) {
+  case GenXIntrinsic::genx_ssmad:
+  case GenXIntrinsic::genx_sumad:
+  case GenXIntrinsic::genx_usmad:
+  case GenXIntrinsic::genx_uumad:
+  case GenXIntrinsic::genx_ssmad_sat:
+  case GenXIntrinsic::genx_sumad_sat:
+  case GenXIntrinsic::genx_usmad_sat:
+  case GenXIntrinsic::genx_uumad_sat:
+  case Intrinsic::fma:
+    // Do not emit simd32 mad for pre-ICLLP.
+    return ST->isICLLPplus() ? 0x3f : 0x1f;
+  default:
+    return GenXIntrinsic::isGenXIntrinsic(ID)
+               ? GenXIntrinsicInfo(ID).getExecSizeAllowedBits()
+               : 0x3f;
+  }
+}
+
+bool genx::isSupportedFloatingPointType(const Type *Ty) {
+  IGC_ASSERT(Ty);
+  auto *ScalarTy = Ty->getScalarType();
+  return ScalarTy->isFloatTy() || ScalarTy->isHalfTy() ||
+         ScalarTy->isDoubleTy();
+}
+
+// Get type that represents OldType as vector of NewScalarType, e.g.
+// <4 x i16> -> <2 x i32>, returns nullptr if it's impossible.
+IGCLLVM::FixedVectorType *genx::changeVectorType(Type *OldType,
+                                                 Type *NewScalarType,
+                                                 const DataLayout *DL) {
+  IGC_ASSERT(DL && OldType && NewScalarType);
+  IGC_ASSERT(!NewScalarType->isVectorTy());
+  IGC_ASSERT(isSupportedFloatingPointType(NewScalarType) ||
+             NewScalarType->isIntegerTy() || NewScalarType->isPointerTy());
+  auto OldTypeSize = vc::getTypeSize(OldType, DL).inBits();
+  auto NewScalarTypeSize = vc::getTypeSize(NewScalarType, DL).inBits();
+  if (OldTypeSize % NewScalarTypeSize)
+    return nullptr;
+  return IGCLLVM::FixedVectorType::get(NewScalarType,
+                                       OldTypeSize / NewScalarTypeSize);
+}
+
+// Check if V is reading form predfined register.
+bool genx::isPredefRegSource(const Value *V) {
+  if (GenXIntrinsic::isRdRegion(V))
+    return GenXIntrinsic::isReadPredefReg(cast<Instruction>(V)->getOperand(
+        GenXIntrinsic::GenXRegion::OldValueOperandNum));
+  return GenXIntrinsic::isReadPredefReg(V);
+}
+
+// Check if V is writing to predefined register.
+bool genx::isPredefRegDestination(const Value *V) {
+  if (GenXIntrinsic::isWrRegion(V))
+    return std::any_of(V->user_begin(), V->user_end(), [](auto *U) {
+      return GenXIntrinsic::isWritePredefReg(U);
+    });
+  return GenXIntrinsic::isWritePredefReg(V);
+}
+
 // info is at main template function
 CastInst *genx::scalarizeOrVectorizeIfNeeded(Instruction *Inst, Type *RefType) {
   return scalarizeOrVectorizeIfNeeded(Inst, &RefType, std::next(&RefType));
@@ -2046,13 +2129,18 @@ bool genx::isWrPredRegionLegalSetP(const CallInst &WrPredRegion) {
   return Offset == 0 || Offset == 16;
 }
 
-CallInst *genx::checkFunctionCall(Value *V, Function *F) {
+const CallInst *genx::checkFunctionCall(const Value *V, const Function *F) {
   if (!V || !F)
     return nullptr;
-  auto *CI = dyn_cast<CallInst>(V);
+  const auto *CI = dyn_cast<CallInst>(V);
   if (CI && CI->getCalledFunction() == F)
     return CI;
   return nullptr;
+}
+
+CallInst *genx::checkFunctionCall(Value *V, const Function *F) {
+  return const_cast<CallInst *>(
+      genx::checkFunctionCall(static_cast<const Value *>(V), F));
 }
 
 unsigned genx::getNumGRFsPerIndirectForRegion(const genx::Region &R,
@@ -2061,33 +2149,12 @@ unsigned genx::getNumGRFsPerIndirectForRegion(const genx::Region &R,
   IGC_ASSERT_MESSAGE(R.Indirect, "Indirect region expected");
   IGC_ASSERT(ST);
   if (ST->hasIndirectGRFCrossing() &&
+      (R.ElementBytes != genx::ByteBytes || ST->hasIndirectByteGRFCrossing()) &&
       // SKL+. See if we can allow GRF crossing.
       (Allow2D || !R.is2D())) {
     return 2;
   }
   return 1;
-}
-
-bool genx::isRealGlobalVariable(const GlobalVariable &GV) {
-  if (GV.hasAttribute("genx_volatile"))
-    return false;
-  if (GV.hasAttribute(genx::VariableMD::VCPredefinedVariable))
-    return false;
-  bool IsIndexedString =
-      std::any_of(GV.user_begin(), GV.user_end(), [](const User *Usr) {
-        return vc::isLegalPrintFormatIndexGEP(*Usr);
-      });
-  if (IsIndexedString) {
-    IGC_ASSERT_MESSAGE(std::all_of(GV.user_begin(), GV.user_end(),
-                                   [](const User *Usr) {
-                                     return vc::isLegalPrintFormatIndexGEP(
-                                         *Usr);
-                                   }),
-                       "when global is an indexed string, its users can only "
-                       "be print format index GEPs");
-    return false;
-  }
-  return true;
 }
 
 std::size_t genx::getStructElementPaddedSize(unsigned ElemIdx,
@@ -2159,7 +2226,7 @@ bool genx::splitStructPhis(Function *F) {
 }
 
 bool genx::hasMemoryDeps(Instruction *L1, Instruction *L2, Value *Addr,
-                         DominatorTree *DT) {
+                         const DominatorTree *DT) {
   // Return false for non global loads
   if (!(GenXIntrinsic::isVLoad(L1) && GenXIntrinsic::isVLoad(L2)) &&
       !(isGlobalLoad(L1) && isGlobalLoad(L2)))
@@ -2169,7 +2236,7 @@ bool genx::hasMemoryDeps(Instruction *L1, Instruction *L2, Value *Addr,
     Instruction *Inst = &I;
     if ((GenXIntrinsic::isVStore(Inst) || genx::isGlobalStore(Inst)) &&
         (Addr == Inst->getOperand(1) ||
-         Addr == getUnderlyingGlobalVariable(Inst->getOperand(1))))
+         Addr == vc::getUnderlyingGlobalVariable(Inst->getOperand(1))))
       return true;
     // OK.
     return false;

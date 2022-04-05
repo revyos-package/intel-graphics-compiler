@@ -495,7 +495,7 @@ void WIAnalysisRunner::updateArgsDependency(llvm::Function* pF)
     int implicitArgStart = (unsigned)(pF->arg_size()
         - implicitArgs.size()
         - (IsSubroutine ? 0 : m_ModMD->pushInfo.pushAnalysisWIInfos.size()));
-    IGC_ASSERT(implicitArgStart >= 0 && "Function arg size does not match meta data and push args.");
+    IGC_ASSERT_MESSAGE(implicitArgStart >= 0, "Function arg size does not match meta data and push args.");
 
     llvm::Function::arg_iterator ai, ae;
     ai = pF->arg_begin();
@@ -600,6 +600,10 @@ WIAnalysis::WIDependancy WIAnalysisRunner::whichDepend(const Value* val) const
     IGC_ASSERT_MESSAGE(m_pChangedNew->empty(), "set should be empty before query");
     IGC_ASSERT_MESSAGE(nullptr != val, "Bad value");
     if (isa<Constant>(val))
+    {
+        return WIAnalysis::UNIFORM_GLOBAL;
+    }
+    else if (isa<StaticConstantPatchIntrinsic>(val))
     {
         return WIAnalysis::UNIFORM_GLOBAL;
     }
@@ -1299,6 +1303,19 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_bftof ||
         GII_id == GenISAIntrinsic::GenISA_2fto2bf ||
         GII_id == GenISAIntrinsic::GenISA_dual_subslice_id ||
+        GII_id == GenISAIntrinsic::GenISA_hftobf8 ||
+        GII_id == GenISAIntrinsic::GenISA_bf8tohf ||
+        GII_id == GenISAIntrinsic::GenISA_srnd ||
+        GII_id == GenISAIntrinsic::GenISA_ftotf32 ||
+        GII_id == GenISAIntrinsic::GenISA_tf32tof ||
+        GII_id == GenISAIntrinsic::GenISA_GlobalBufferPointer ||
+        GII_id == GenISAIntrinsic::GenISA_LocalBufferPointer ||
+        GII_id == GenISAIntrinsic::GenISA_InlinedData ||
+        GII_id == GenISAIntrinsic::GenISA_TileYOffset ||
+        GII_id == GenISAIntrinsic::GenISA_GetShaderRecordPtr ||
+        GII_id == GenISAIntrinsic::GenISA_URBWrite ||
+        GII_id == GenISAIntrinsic::GenISA_URBRead ||
+        GII_id == GenISAIntrinsic::GenISA_URBReadOutput ||
         GII_id == GenISAIntrinsic::GenISA_getSR0   ||
         GII_id == GenISAIntrinsic::GenISA_getSR0_0 ||
         GII_id == GenISAIntrinsic::GenISA_mul_rtz  ||
@@ -1324,7 +1341,14 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_getEnqueuedLocalSize ||
         GII_id == GenISAIntrinsic::GenISA_getLocalID_X ||
         GII_id == GenISAIntrinsic::GenISA_getLocalID_Y ||
-        GII_id == GenISAIntrinsic::GenISA_getLocalID_Z)
+        GII_id == GenISAIntrinsic::GenISA_getLocalID_Z ||
+        GII_id == GenISAIntrinsic::GenISA_getPrivateBase ||
+        GII_id == GenISAIntrinsic::GenISA_getPrintfBuffer ||
+        GII_id == GenISAIntrinsic::GenISA_getStageInGridOrigin ||
+        GII_id == GenISAIntrinsic::GenISA_getStageInGridSize ||
+        GII_id == GenISAIntrinsic::GenISA_getSyncBuffer ||
+        GII_id == GenISAIntrinsic::GenISA_GetImplicitBufferPtr ||
+        GII_id == GenISAIntrinsic::GenISA_GetLocalIdBufferPtr)
     {
         switch (GII_id)
         {
@@ -1345,6 +1369,9 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             // Make sure they are UNIFORM_WORKGROUP
             //return WIAnalysis::UNIFORM_WORKGROUP;
             return WIAnalysis::UNIFORM_THREAD;
+        case GenISAIntrinsic::GenISA_GetImplicitBufferPtr:
+        case GenISAIntrinsic::GenISA_GetLocalIdBufferPtr:
+            return WIAnalysis::UNIFORM_THREAD;
         case GenISAIntrinsic::GenISA_getR0:
         case GenISAIntrinsic::GenISA_getPayloadHeader:
         case GenISAIntrinsic::GenISA_getWorkDim:
@@ -1355,9 +1382,12 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         case GenISAIntrinsic::GenISA_getLocalID_X:
         case GenISAIntrinsic::GenISA_getLocalID_Y:
         case GenISAIntrinsic::GenISA_getLocalID_Z:
-        {
+        case GenISAIntrinsic::GenISA_getPrivateBase:
+        case GenISAIntrinsic::GenISA_getPrintfBuffer:
+        case GenISAIntrinsic::GenISA_getStageInGridOrigin:
+        case GenISAIntrinsic::GenISA_getStageInGridSize:
+        case GenISAIntrinsic::GenISA_getSyncBuffer:
             return ImplicitArgs::getArgDep(GII_id);
-        }
         }
 
         if (intrinsic_name == llvm_input ||
@@ -1371,20 +1401,119 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             }
         }
 
+        if (GII_id == GenISAIntrinsic::GenISA_TileYOffset)
+        {
+            IGC_ASSERT(m_CGCtx->type == ShaderType::RAYTRACING_SHADER);
+            auto* Ctx = static_cast<RayDispatchShaderContext*>(m_CGCtx);
+            if (auto Mode = Ctx->knownSIMDSize())
+            {
+                auto* TYI = cast<TileYIntrinsic>(inst);
+                uint32_t TileXDim = TYI->getTileXDim();
+                uint32_t SubtileXDim = TYI->getSubtileXDim();
+                const uint32_t Lanes = numLanes(*Mode);
+                // We currently tile along the x-dim first. If the SIMD size
+                // perfectly divides the x-dim, then the y-dim must be uniform.
+                return (TileXDim % Lanes == 0 &&
+                        (SubtileXDim == 0 || SubtileXDim % Lanes == 0)) ?
+                    WIAnalysis::UNIFORM_THREAD :
+                    WIAnalysis::RANDOM;
+            }
+            else
+            {
+                return WIAnalysis::RANDOM;
+            }
+        }
 
         if (intrinsic_name == llvm_sgv)
         {
-            SGVUsage usage = (SGVUsage)cast<ConstantInt>(inst->getOperand(0))->getZExtValue();
-            if ((usage != VFACE
-                ) &&
-                usage != ACTUAL_COARSE_SIZE_X &&
-                usage != ACTUAL_COARSE_SIZE_Y &&
-                usage != THREAD_GROUP_ID_X &&
-                usage != THREAD_GROUP_ID_Y &&
-                usage != THREAD_GROUP_ID_Z
-                )
+            IGC_ASSERT(isa<SGVIntrinsic>(inst));
+            const SGVIntrinsic* systemValueIntr = cast<SGVIntrinsic>(inst);
+            switch (systemValueIntr->getUsage())
+            {
+            case VFACE: // palygon front/back facing from PS payload
+            case RENDER_TARGET_ARRAY_INDEX: // render target array index from PS payload
+            case VIEWPORT_INDEX: // viewport index from PS payload
+            {
+                IGC_ASSERT(m_CGCtx->type == ShaderType::PIXEL_SHADER);
+                const bool hasMultipolyDispatch =
+                    m_CGCtx->platform.supportDualSimd8PS();
+                return hasMultipolyDispatch ? WIAnalysis::RANDOM : WIAnalysis::UNIFORM_THREAD;
+            }
+            case POSITION_X: // position from VUE header in GS or pixel position X in PS
+            case POSITION_Y: // position from VUE header in GS or pixel position Y in PS
+            case POSITION_Z: // position from VUE header in GS or source depth in PS
+            case POSITION_W: // position from VUE header in GS or source W in PS
+            case PRIMITIVEID: // primitive id payload phase in GS
+            case GS_INSTANCEID: // GS instance id, calculated from URB handles
+            case POINT_WIDTH: // point width in VUE header in GS
+            case INPUT_COVERAGE_MASK: // pixel coverage mask payload phase in PS
+            case SAMPLEINDEX:  // sample index from PS payload
+            case CLIP_DISTANCE: // unused
+            case THREAD_ID_X: // global invocation id X in CS or OCL Kernel
+            case THREAD_ID_Y: // global invocation id Y in CS or OCL Kernel
+            case THREAD_ID_Z: // global invocation id Z in CS or OCL Kernel
+            case THREAD_ID_IN_GROUP_X: // local invocation id X in CS or OCL Kernel
+            case THREAD_ID_IN_GROUP_Y: // local invocation id Y in CS or OCL Kernel
+            case THREAD_ID_IN_GROUP_Z: // local invocation id Z in CS or OCL Kernel
+            case OUTPUT_CONTROL_POINT_ID: // unused
+            case DOMAIN_POINT_ID_X: // domain point U from DS payload
+            case DOMAIN_POINT_ID_Y: // domain point V from DS payload
+            case DOMAIN_POINT_ID_Z: // domain point W from DS payload
+            case VERTEX_ID: // vertex id in VS, delivered as an attribute
+            case REQUESTED_COARSE_SIZE_X: // requested per-subspan coarse pixel size X from PS payload
+            case REQUESTED_COARSE_SIZE_Y: // requested per-subspan coarse pixel size Y from PS payload
+            case CLIP_DISTANCE_X: // DX10 clip distance X from VUE header in GS
+            case CLIP_DISTANCE_Y: // DX10 clip distance Y from VUE header in GS
+            case CLIP_DISTANCE_Z: // DX10 clip distance Z from VUE header in GS
+            case CLIP_DISTANCE_W: // DX10 clip distance W from VUE header in GS
+            case POSITION_X_OFFSET: // pixel position offset X in PS
+            case POSITION_Y_OFFSET: // pixel position offset Y in PS
+            case POINT_COORD_X: // point-sprite coordinate X from PS attributes
+            case POINT_COORD_Y: // point-sprite coordinate Y from PS attributes
             {
                 return WIAnalysis::RANDOM;
+            }
+            case MSAA_RATE: // multisample rate from PS payload
+            case DISPATCH_DIMENSION_X: // dispatch size X from MS payload
+            case DISPATCH_DIMENSION_Y: // dispatch size Y from MS payload
+            case DISPATCH_DIMENSION_Z: // dispatch size Z from MS payload
+            case INDIRECT_DATA_ADDRESS: // indirect data address from MS payload
+            case SHADER_TYPE:
+            {
+                return WIAnalysis::UNIFORM_GLOBAL;
+            }
+            case THREAD_GROUP_ID_X: // workgroup id X in CS or OCL Kernel
+            case THREAD_GROUP_ID_Y: // workgroup id Y in CS or OCL Kernel
+            case THREAD_GROUP_ID_Z: // workgroup id Z in CS or OCL Kernel
+            {
+                return WIAnalysis::UNIFORM_WORKGROUP;
+            }
+            case ACTUAL_COARSE_SIZE_X: // actual coarse pixel size X from PS payload
+            case ACTUAL_COARSE_SIZE_Y: // actual coarse pixel size Y from PS payload
+            case THREAD_ID_WITHIN_THREAD_GROUP: // (physical) thread id in thread group from CS payload
+            {
+                return WIAnalysis::UNIFORM_THREAD;
+            }
+            case XP0: // base vertex from VS attributes
+            case XP1: // base instance from VS attributes
+            case XP2: // draw index from VS attributes
+            {
+                if (m_CGCtx->type == ShaderType::TASK_SHADER ||
+                    m_CGCtx->type == ShaderType::MESH_SHADER)
+                {
+                    // XP0 is used for draw index in mesh and task
+                    return WIAnalysis::UNIFORM_GLOBAL;
+                }
+                // Extended parameters are delivered in VS as attributes. Values
+                // are uniform but delivered per-vertex, frontends can use
+                // subgroup operations to get the uniform value.
+                return WIAnalysis::RANDOM;
+            }
+            case NUM_SGV:
+                IGC_ASSERT_MESSAGE(0, "Unexpected value");
+                break;
+            // This switch intentionally has no `default:` case. Whenever a new
+            // SGV type is added this code must be updated.
             }
         }
         if (intrinsic_name == llvm_getMessagePhaseX ||
@@ -1446,6 +1575,33 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             }
         }
 
+        if (intrinsic_name == llvm_URBRead ||
+            intrinsic_name == llvm_URBReadOutput)
+        {
+            if (!m_CGCtx->platform.isProductChildOf(IGFX_DG2))
+            {
+                return WIAnalysis::RANDOM;
+            }
+            if (m_CGCtx->type != ShaderType::TASK_SHADER &&
+                m_CGCtx->type != ShaderType::MESH_SHADER)
+            {
+                return WIAnalysis::RANDOM;
+            }
+        }
+
+        if (intrinsic_name == llvm_URBWrite)
+        {
+            // TODO: enable this for other platforms/shader types if needed
+            if (!m_CGCtx->platform.isProductChildOf(IGFX_DG2))
+            {
+                return WIAnalysis::RANDOM;
+            }
+            if (m_CGCtx->type != ShaderType::TASK_SHADER &&
+                m_CGCtx->type != ShaderType::MESH_SHADER)
+            {
+                return WIAnalysis::RANDOM;
+            }
+        }
 
         // Iterate over all input dependencies. If all are uniform - propagate it.
         // otherwise - return RANDOM

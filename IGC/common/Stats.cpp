@@ -640,10 +640,20 @@ void TimeStats::sumWith( const TimeStats* pOther )
 
 void TimeStats::printTime( ShaderType type, ShaderHash hash) const
 {
-    printTime(type, hash, nullptr);
+    printTime(type, hash, nullptr, 0);
 }
 
-void TimeStats::printTime( ShaderType type, ShaderHash hash, void* context ) const
+void TimeStats::printTime(ShaderType type, ShaderHash hash, void* context) const
+{
+    printTime(type, hash, context , 0);
+}
+
+void TimeStats::printTime(ShaderType type, ShaderHash hash, UINT64 psoDDIHash) const
+{
+    printTime(type, hash, nullptr, psoDDIHash);
+}
+
+void TimeStats::printTime(ShaderType type, ShaderHash hash, void* context, UINT64 psoDDIHash) const
 {
     TimeStats pp = postProcess();
 
@@ -653,7 +663,7 @@ void TimeStats::printTime( ShaderType type, ShaderHash hash, void* context ) con
         shaderName = shaderName.substr(shaderName.find_last_of("\\") + 1, shaderName.size());
     }
 
-    pp.printTimeCSV( shaderName );
+    pp.printTimeCSV( shaderName, psoDDIHash);
 
     // Skip printing PerPass info to CSV for now
     //pp.printPerPassTimeCSV( shaderName );
@@ -664,7 +674,7 @@ void TimeStats::printTime( ShaderType type, ShaderHash hash, void* context ) con
 void TimeStats::printSumTime() const
 {
     // If using regkey to turn on timestats, CorpusName is not initialized properly
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
+    if (strnlen_s(IGC::Debug::GetShaderCorpusName(), 1) == 0)
     {
         std::stringstream corpusName;
         corpusName << m_totalShaderCount << " shaders";
@@ -1035,16 +1045,16 @@ void TimeStats::printPerPassSumTime(llvm::raw_ostream& OS) const
     OS.flush();
 }
 
-void TimeStats::printTimeCSV( std::string const& corpusName ) const
+void TimeStats::printTimeCSV( std::string const& corpusName, UINT64 psoDDIHash ) const
 {
     IGC_ASSERT_MESSAGE(m_isPostProcessed, "Print functions should only be called on a Post-Processed TimeStats object");
 
     std::string subFile = "TimeStat_";
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
+    if (strnlen_s(IGC::Debug::GetShaderCorpusName(), 1) == 0)
         subFile += "Shaders";
     else
         subFile += IGC::Debug::GetShaderCorpusName();
-    const std::string outputFilePath = 
+    const std::string outputFilePath =
 #if defined(__linux__)
     subFile + ".csv";
 #else
@@ -1066,6 +1076,10 @@ void TimeStats::printTimeCSV( std::string const& corpusName ) const
     if( !fileExist && fileName)
     {
         fprintf(fileName, "Frequency:%ju,", m_freq);
+
+        if (IGC_IS_FLAG_ENABLED(PrintPsoDdiHash))
+            fprintf(fileName, "psoDDIHash,");
+
         for (int i=0;i<MAX_COMPILE_TIME_INTERVALS;i++)
         {
             if( !skipTimer(i) )
@@ -1079,6 +1093,10 @@ void TimeStats::printTimeCSV( std::string const& corpusName ) const
     if (fileName)
     {
         fprintf(fileName, "%s.isa,", corpusName.c_str());
+
+        if (IGC_IS_FLAG_ENABLED(PrintPsoDdiHash))
+            fprintf(fileName, "%#jx,", psoDDIHash);
+
         for (int i = 0; i < MAX_COMPILE_TIME_INTERVALS; i++)
         {
             if (!skipTimer(i))
@@ -1104,7 +1122,7 @@ void TimeStats::printPerPassTimeCSV(std::string const& corpusName) const
     }
 
     std::string subFile = "TimeStatPerPass_";
-    if (strlen(IGC::Debug::GetShaderCorpusName()) == 0)
+    if (strnlen_s(IGC::Debug::GetShaderCorpusName(), 1) == 0)
         subFile += "Shaders";
     else
         subFile += IGC::Debug::GetShaderCorpusName();
@@ -1267,7 +1285,8 @@ void CMemoryReport::DumpMemoryStats( ShaderType type, ShaderHash hash )
             shaderName = shaderName.substr(shaderName.find_last_of("\\") + 1, shaderName.size());
         }
 
-        sprintf(m_DumpMemoryStatsFileName, "%s", shaderName.c_str());
+        sprintf_s(m_DumpMemoryStatsFileName, sizeof(m_DumpMemoryStatsFileName),
+            "%s", shaderName.c_str());
 
         iSTD::FileWrite(  csvFileGlobal, "%s,%u", m_DumpMemoryStatsFileName, g_MemoryReport.m_Stat.HeapUsedPeak/1024 );
         iSTD::FileWrite(  csvFileAllocs, "%s,%u", m_DumpMemoryStatsFileName, g_MemoryReport.m_Stat.NumAllocations );

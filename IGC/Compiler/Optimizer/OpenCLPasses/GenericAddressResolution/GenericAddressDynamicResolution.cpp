@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
 
@@ -118,7 +119,6 @@ namespace {
         Type* getPointerAsIntType(LLVMContext& Ctx, unsigned AS);
         void resolveGAS(Instruction& I, Value* pointerOperand);
         void resolveGASWithoutBranches(Instruction& I, Value* pointerOperand);
-        bool allowArithmeticOnGenericAddressSpace(Function& F);
     };
 } // namespace
 
@@ -140,8 +140,6 @@ bool GenericAddressDynamicResolution::runOnFunction(Function& F)
     m_ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     bool modified = false;
     bool changed = false;
-
-    modified = allowArithmeticOnGenericAddressSpace(F);
 
     // iterate for all the intrinisics used by to_local, to_global, and to_private
     do {
@@ -227,8 +225,32 @@ bool GenericAddressDynamicResolution::visitLoadStoreInst(Instruction& I)
 
 void GenericAddressDynamicResolution::resolveGAS(Instruction& I, Value* pointerOperand)
 {
-    getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->EmitWarning(
-        "Adding additional control flow due to presence of generic address space operations");
+    std::stringstream warningInfo;
+    if (m_ctx->m_instrTypes.hasDebugInfo)
+    {
+        llvm::DILocation* dbInfo = I.getDebugLoc();
+        llvm::Instruction* prevInst = I.getPrevNode();
+
+        while (dbInfo == nullptr)
+        {
+            if (prevInst == nullptr)
+            {
+                break;
+            }
+            dbInfo = prevInst->getDebugLoc();
+            prevInst = prevInst->getPrevNode();
+        }
+        if (dbInfo != nullptr)
+        {
+            warningInfo << "from dir:" << dbInfo->getDirectory().str();
+            warningInfo << " from file:" << dbInfo->getFilename().str();
+            warningInfo << " line:" << dbInfo->getLine();
+            warningInfo << " :";
+        }
+    }
+    warningInfo << "Adding additional control flow due to presence of generic address space operations";
+    getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->EmitWarning(warningInfo.str().c_str());
+
     // Every time there is a load/store from/to a generic pointer, we have to resolve
     // its corresponding address space by looking at its tag on bits[61:63].
     // First, the generic pointer's tag is obtained to then perform the load/store
@@ -301,8 +323,8 @@ void GenericAddressDynamicResolution::resolveGAS(Instruction& I, Value* pointerO
     currentBlock->getTerminator()->eraseFromParent();
     builder.SetInsertPoint(currentBlock);
 
-    int numPrivateLocal = (hasPrivate && hasLocal) ? 2 : ((hasPrivate || hasLocal) ? 1 : 0);
-    assert(numPrivateLocal > 0);
+    const int numPrivateLocal = (hasPrivate && hasLocal) ? 2 : ((hasPrivate || hasLocal) ? 1 : 0);
+    IGC_ASSERT(0 < numPrivateLocal);
 
     {
         SwitchInst* switchTag = builder.CreateSwitch(tag, globalBlock, numPrivateLocal);
@@ -451,74 +473,6 @@ bool GenericAddressDynamicResolution::visitIntrinsicCall(CallInst& I)
     }
 
     return changed;
-}
-
-// Add metadata to skip tagging generic pointers that are used for pointer arithmetic
-// We identify dependency of addrspacecast->inttoptr to recover the corresponding tag
-// after the arithmetic is done.
-bool GenericAddressDynamicResolution::allowArithmeticOnGenericAddressSpace(Function& F)
-{
-    LLVMContext& C = F.getContext();
-    bool modified = false;
-
-    // iterate for all addrspacecast to generic pointers
-    for (inst_iterator i = inst_begin(F); i != inst_end(F); ++i)
-    {
-        AddrSpaceCastInst* addrSpaceCastInst = dyn_cast<AddrSpaceCastInst>(&*i);
-        unsigned totalNumUses = 0;
-        unsigned numUsesArith = 0;
-
-        if (addrSpaceCastInst && addrSpaceCastInst->getDestAddressSpace() == ADDRESS_SPACE_GENERIC)
-        {
-            totalNumUses = addrSpaceCastInst->getNumUses();
-            for (auto ui : addrSpaceCastInst->users())
-            {
-                Instruction* useInst = dyn_cast<Instruction>(ui);
-                PHINode* phi = dyn_cast<PHINode>(useInst);
-                GetElementPtrInst* gepInst = dyn_cast<GetElementPtrInst>(useInst);
-
-                if (phi)
-                {
-                    useInst = useInst->user_back();
-                    gepInst = dyn_cast<GetElementPtrInst>(useInst);
-                    if (gepInst)
-                        useInst = useInst->user_back();
-                }
-                else if (gepInst)
-                {
-                    useInst = useInst->user_back();
-                    phi = dyn_cast<PHINode>(useInst);
-                    if (phi)
-                        useInst = useInst->user_back();
-                }
-
-                PtrToIntInst* ptiInst = dyn_cast<PtrToIntInst>(useInst);
-                if (ptiInst && ptiInst->getPointerAddressSpace() == ADDRESS_SPACE_GENERIC)
-                {
-                    if (!ptiInst->use_empty())
-                    {
-                        Instruction* ptiUser = ptiInst->user_back();
-                        // We only skip tags on generic pointers if there is an arithmetic operation
-                        // after the addrspacecast->ptrtoint.
-                        if (ptiUser->isBinaryOp() || ptiUser->isShift() || ptiUser->isBitwiseLogicOp())
-                        {
-                            numUsesArith++;
-                        }
-                    }
-                }
-            }
-
-            if (numUsesArith > 0 && numUsesArith == totalNumUses)
-            {
-                // Add metadata to avoid tagging when emitting addrspacecast
-                MDNode* N = MDNode::get(C, MDString::get(C, "generic.arith"));
-                addrSpaceCastInst->setMetadata("generic.arith", N);
-                modified = true;
-            }
-        }
-    }
-
-    return modified;
 }
 
 namespace IGC {

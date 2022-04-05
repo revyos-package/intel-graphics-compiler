@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 namespace vISA
 {
     class Mem_Manager;
+    class PlatformInfo;
 }
 class CisaKernel;
 class CisaBinary;
@@ -29,6 +30,7 @@ extern int CISAdebug;
 
 #include "VISABuilderAPIDefinition.h"
 #include "inc/common/sku_wa.h"
+#include "PlatformInfo.h"
 
 class Options;
 
@@ -36,10 +38,12 @@ class CISA_IR_Builder : public VISABuilder
 {
 public:
     CISA_IR_Builder(
-        VISA_BUILDER_OPTION buildOption, vISABuilderMode mode,
+        TARGET_PLATFORM platform, VISA_BUILDER_OPTION buildOption, vISABuilderMode mode,
         int majorVersion, int minorVersion, const WA_TABLE *pWaTable)
         : mBuildOption(buildOption), m_builderMode(mode), m_mem(4096), m_pWaTable(pWaTable)
     {
+        m_platformInfo = vISA::PlatformInfo::LookupPlatformInfo(platform);
+        assert(m_platformInfo != nullptr);
         m_header.major_version = majorVersion;
         m_header.minor_version = minorVersion;
         m_header.magic_number = COMMON_ISA_MAGIC_NUM;
@@ -74,7 +78,7 @@ public:
     VISA_BUILDER_API int ParseVISAText(const std::string& visaText, const std::string& visaTextFile) override;
     VISA_BUILDER_API int ParseVISAText(const std::string& visaFile) override;
     VISA_BUILDER_API std::stringstream& GetAsmTextStream() override { return m_ssIsaAsm; }
-    VISA_BUILDER_API VISAKernel* GetVISAKernel(const std::string& kernelName) override;
+    VISA_BUILDER_API VISAKernel* GetVISAKernel(const std::string& kernelName) const override;
     VISA_BUILDER_API int ClearAsmTextStreams() override;
 
     /**************END VISA BUILDER API*************************/
@@ -803,12 +807,16 @@ public:
     // getKernels - get all kernels and functions added into this builder
     std::list<VISAKernelImpl*>& getKernels() { return m_kernelsAndFunctions; }
 
+    const VISAKernelImpl* getKernel(const std::string& name) const;
+
     Options m_options;
     std::stringstream m_ssIsaAsm;
 
     void setGtpinInit(void* buf) { gtpin_init = buf; }
     void* getGtpinInit() { return gtpin_init; }
 
+    const vISA::PlatformInfo* getPlatformInfo() const { return m_platformInfo; }
+    TARGET_PLATFORM getPlatform() const { return m_platformInfo->platform; }
     Options* getOptions() { return &m_options; }
     VISA_BUILDER_OPTION getBuilderOption() const { return mBuildOption; }
     vISABuilderMode getBuilderMode() const { return m_builderMode; }
@@ -857,10 +865,86 @@ public:
         VISA_opnd *src0,
         int lineNum);
 
+    bool CISA_create_lsc_untyped_inst(
+        VISA_opnd               *pred,
+        LSC_OP                   opcode,
+        LSC_SFID                 sfid,
+        LSC_CACHE_OPTS           caching,
+        VISA_Exec_Size           execSize,
+        VISA_EMask_Ctrl          emask,
+        LSC_ADDR                 addr,
+        LSC_DATA_SHAPE           dataShape,
+        VISA_opnd               *surface,
+        VISA_opnd               *dst,
+        VISA_opnd               *src0,
+        VISA_opnd               *src1,
+        VISA_opnd               *src2,
+        int                      lineNum);
+    bool CISA_create_lsc_untyped_strided_inst(
+        VISA_opnd               *pred,
+        LSC_OP                   opcode,
+        LSC_SFID                 sfid,
+        LSC_CACHE_OPTS           caching,
+        VISA_Exec_Size           execSize,
+        VISA_EMask_Ctrl          emask,
+        LSC_ADDR                 addr,
+        LSC_DATA_SHAPE           dataShape,
+        VISA_opnd               *surface,
+        VISA_opnd               *dstData,
+        VISA_opnd               *src0AddrBase,
+        VISA_opnd               *src0AddrPitch,
+        VISA_opnd               *src1Data,
+        int                      lineNum);
+    bool CISA_create_lsc_untyped_block2d_inst(
+        VISA_opnd               *pred,
+        LSC_OP                   opcode,
+        LSC_SFID                 sfid,
+        LSC_CACHE_OPTS           caching,
+        VISA_Exec_Size           execSize,
+        VISA_EMask_Ctrl          emask,
+        LSC_DATA_SHAPE_BLOCK2D   dataShape,
+        VISA_opnd               *dstData,
+        VISA_opnd               *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS], // {base,surfW,surfH,surfP,x,y}
+        VISA_opnd               *src1Data,
+        int                      lineNum);
+    bool CISA_create_lsc_typed_inst(
+        VISA_opnd               *pred,
+        LSC_OP                   opcode,
+        LSC_SFID                 sfid,
+        LSC_CACHE_OPTS           caching,
+        VISA_Exec_Size           execSize,
+        VISA_EMask_Ctrl          emask,
+        LSC_ADDR_TYPE            addrModel,
+        LSC_ADDR_SIZE            addrSize,
+        LSC_DATA_SHAPE           dataShape,
+        VISA_opnd               *surface,
+        VISA_opnd               *dst_data,
+        VISA_opnd               *src0_Us,
+        VISA_opnd               *src0_Vs,
+        VISA_opnd               *src0_Rs,
+        VISA_opnd               *src0_LODs,
+        VISA_opnd               *src1_data,
+        VISA_opnd               *src2_data,
+        int                      lineNum);
+    bool CISA_create_lsc_fence(
+        LSC_SFID                 lscSfid,
+        LSC_FENCE_OP             fence,
+        LSC_SCOPE                scope,
+        int                      lineNum);
 
+    bool CISA_create_fcvt_instruction(
+        VISA_EMask_Ctrl emask,
+        unsigned exec_size,
+        VISA_opnd* dst,
+        VISA_opnd* src0,
+        int lineNum);
+
+    bool CISA_create_nbarrier(
+        bool isWait, VISA_opnd *barrierId, VISA_opnd *threadCount, int lineNum);
 
 
 private:
+    const vISA::PlatformInfo* m_platformInfo;
 
     vISA::Mem_Manager m_mem;
     const VISA_BUILDER_OPTION mBuildOption;
@@ -884,7 +968,8 @@ private:
     // To collect call related info for LinkTimeOptimization
     void CollectCallSites(
             std::list<VISAKernelImpl *>& functions,
-            std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callSites);
+            std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callSites,
+            std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList);
 
     // Sanity check to see if sg.invoke list is properly added from front-end
     // We don't support:
@@ -894,16 +979,25 @@ private:
             std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
             std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callSites);
 
+    // Reset hasStackCalls if all calls in a function are converted to subroutine calls or inlined
+    void ResetHasStackCall(
+            std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
+            std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callSites);
+
     // Remove sgInvoke functions out of function list to avoid redundant compilation
     void RemoveOptimizingFunction(
             std::list<VISAKernelImpl *>& functions,
             const std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList);
 
+    // Create callee to a set of callsites map
+    void ProcessSgInvokeList(
+            const std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
+            std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callee2Callers);
+
     // Perform LinkTimeOptimization for call related transformations
     void LinkTimeOptimization(
-            std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
-            bool call2jump,
-            bool inlining);
+            std::unordered_map<vISA::G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callee2Callers,
+            uint32_t options);
 
     void emitFCPatchFile();
 

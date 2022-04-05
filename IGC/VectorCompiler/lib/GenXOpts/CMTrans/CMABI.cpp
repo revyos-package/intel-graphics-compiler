@@ -32,10 +32,11 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include "vc/GenXOpts/GenXOpts.h"
-#include "vc/GenXOpts/Utils/KernelInfo.h"
-#include "vc/Support/BackendConfig.h"
+#include "vc/Utils/GenX/BreakConst.h"
+#include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 #include "vc/Utils/GenX/Printf.h"
-#include "vc/Utils/General/BreakConst.h"
+#include "vc/Utils/General/DebugInfo.h"
 #include "vc/Utils/General/FunctionAttrs.h"
 #include "vc/Utils/General/InstRebuilder.h"
 #include "vc/Utils/General/STLExtras.h"
@@ -71,6 +72,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include <algorithm>
 #include <functional>
@@ -84,9 +86,6 @@ SPDX-License-Identifier: MIT
 using namespace llvm;
 
 STATISTIC(NumArgumentsTransformed, "Number of pointer arguments transformed");
-
-// FIXME: find a propper place for addrspace enum, agree on addrspace politics
-static constexpr int PrivateAddrSpace = 0;
 
 namespace llvm {
 void initializeCMABIAnalysisPass(PassRegistry &);
@@ -219,12 +218,11 @@ private:
   StringRef Filename;
   unsigned Line;
   unsigned Col;
-  static int KindID;
-  static int getKindID() {
-    if (KindID == 0)
-      KindID = llvm::getNextAvailablePluginDiagnosticKind();
-    return KindID;
-  }
+
+  static const int KindID;
+
+  static int getKindID() { return KindID; }
+
 public:
   // Initialize from an Instruction and an Argument.
   DiagnosticInfoOverlappingArgs(Instruction *Inst,
@@ -235,12 +233,13 @@ public:
     return DI->getKind() == getKindID();
   }
 };
-int DiagnosticInfoOverlappingArgs::KindID = 0;
+
+const int DiagnosticInfoOverlappingArgs::KindID =
+    llvm::getNextAvailablePluginDiagnosticKind();
 
 class CMABIAnalysis : public ModulePass {
   // This map captures all global variables to be localized.
   std::vector<LocalizationInfo *> LocalizationInfoObjs;
-  bool SaveStackCallLinkage = false;
 
 public:
   static char ID;
@@ -251,14 +250,10 @@ public:
   // Map from function to the index of its LI in LI storage
   SmallDenseMap<Function *, LocalizationInfo *> GlobalInfo;
 
-  // Function control option if any
-  FunctionControl FCtrl;
-
   CMABIAnalysis() : ModulePass{ID} {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<CallGraphWrapperPass>();
-    AU.addRequired<GenXBackendConfig>();
     AU.setPreservesAll();
   }
 
@@ -349,15 +344,10 @@ char CMABIAnalysis::ID = 0;
 INITIALIZE_PASS_BEGIN(CMABIAnalysis, "cmabi-analysis",
                       "helper analysis pass to get info for CMABI", false, true)
 INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(GenXBackendConfig)
 INITIALIZE_PASS_END(CMABIAnalysis, "cmabi-analysis",
                     "Fix ABI issues for the genx backend", false, true)
 
 bool CMABIAnalysis::runOnModule(Module &M) {
-  auto &&BCfg = getAnalysis<GenXBackendConfig>();
-  FCtrl = BCfg.getFCtrl();
-  SaveStackCallLinkage = BCfg.saveStackCallLinkage();
-
   runOnCallGraph(getAnalysis<CallGraphWrapperPass>().getCallGraph());
   return false;
 }
@@ -456,15 +446,20 @@ void CMABI::LocalizeGlobals(LocalizationInfo &LI) {
   Function *Fn = LI.getFunction();
   for (IteratorTy I = Globals.begin(), E = Globals.end(); I != E; ++I) {
     GlobalVariable *GV = (*I);
-    LLVM_DEBUG(dbgs() << "Localizing global: " << *GV);
+    LLVM_DEBUG(dbgs() << "Localizing global: " << *GV << "\n  ");
 
     Instruction &FirstI = *Fn->getEntryBlock().begin();
     Type *ElemTy = GV->getType()->getElementType();
-    AllocaInst *Alloca = new AllocaInst(ElemTy, 0 /*AddressSpace*/,
+    AllocaInst *Alloca = new AllocaInst(ElemTy, vc::AddrSpace::Private,
                                         GV->getName() + ".local", &FirstI);
-    Alloca->setAlignment(IGCLLVM::getCorrectAlign(GV->getAlignment()));
+
+    if (GV->getAlignment())
+      Alloca->setAlignment(IGCLLVM::getCorrectAlign(GV->getAlignment()));
+
     if (!isa<UndefValue>(GV->getInitializer()))
       new StoreInst(GV->getInitializer(), Alloca, &FirstI);
+
+    vc::DIBuilder::createDbgDeclareForLocalizedGlobal(*Alloca, *GV, FirstI);
 
     GlobalsToReplace.insert(std::make_pair(GV, Alloca));
   }
@@ -480,7 +475,7 @@ CallGraphNode *CMABI::ProcessNode(CallGraphNode *CGN) {
   if (!F || F->isDeclaration() || AlreadyVisited.count(F))
     return 0;
 
-  vc::breakConstantExprs(F);
+  vc::breakConstantExprs(F, vc::LegalizationStage::NotLegalized);
 
   // Variables to be localized.
   LocalizationInfo &LI = Info->getLocalizationInfo(F);
@@ -500,13 +495,15 @@ CallGraphNode *CMABI::ProcessNode(CallGraphNode *CGN) {
     return 0;
   }
 
-  // Non-kernels, only transforms module locals.
-  if (!F->hasLocalLinkage())
-    return 0;
-
-  // Indirectly called functions cannot be transformed in general case.
-  if (F->hasAddressTaken())
+  // Have to localize implicit arg globals in functions with fixed signature.
+  // FIXME: There's no verification that globals are for implicit args. General
+  //        private globals may be localized here, but it is not possible to
+  //        use them in such functions at all. A nice place for diagnostics.
+  if (vc::isFixedSignatureFunc(*F)) {
+    if (!LI.getGlobals().empty())
+      LocalizeGlobals(LI);
     return nullptr;
+  }
 
   SmallVector<Argument*, 16> PointerArgs;
   for (auto &Arg: F->args())
@@ -533,41 +530,37 @@ CallGraphNode *CMABI::ProcessNode(CallGraphNode *CGN) {
   return TransformNode(*F, ArgsToTransform, LI);
 }
 
-// check for typical inst sequences passing arg as a base
-// of store-like intrinsics
-static bool checkSinkToMemIntrinsic(const Instruction *Inst) {
-  auto *CI = dyn_cast<CallInst>(Inst);
-  if (CI && (GenXIntrinsic::getAnyIntrinsicID(CI->getCalledFunction()) ==
-                 GenXIntrinsic::genx_svm_scatter ||
-             GenXIntrinsic::getAnyIntrinsicID(CI->getCalledFunction()) ==
-                 GenXIntrinsic::genx_scatter_scaled))
-    return true;
-  for (auto *U : Inst->users()) {
+// Returns true if data is only read using load-like intrinsics. The result may
+// be false negative.
+static bool isSinkedToLoadIntrinsics(const Instruction *Inst) {
+  if (isa<CallInst>(Inst)) {
+    auto *CI = cast<CallInst>(Inst);
+    auto IID = GenXIntrinsic::getAnyIntrinsicID(CI->getCalledFunction());
+    return IID == GenXIntrinsic::genx_svm_gather ||
+           IID == GenXIntrinsic::genx_gather_scaled;
+  }
+  return std::all_of(Inst->user_begin(), Inst->user_end(), [](const User *U) {
     if (isa<InsertElementInst>(U) || isa<ShuffleVectorInst>(U) ||
         isa<BinaryOperator>(U) || isa<CallInst>(U))
-      return checkSinkToMemIntrinsic(cast<Instruction>(U));
-  }
-  return false;
+      return isSinkedToLoadIntrinsics(cast<Instruction>(U));
+    return false;
+  });
 }
 
-// Arg is a ptr to a vector type. If data is written using a
-// store, then return true. This means copy-in/copy-out are
-// needed as caller may use the updated value. If no data is
-// ever stored in Arg then return false. It is safe to
-// convert the parameter to pass-by-value in GRF.
-// This is a recursive function.
-static bool IsPtrArgModified(const Value &Arg) {
-  // user iterator returns pointer both for star and arrow operators, because...
+// Arg is a ptr to a vector type. If data is only read using load, then false is
+// returned. Otherwise, or if it is not clear, true is returned. This is a
+// recursive function. The result may be false positive.
+static bool isPtrArgModified(const Value &Arg) {
+  // User iterator returns pointer both for star and arrow operators, because...
   return std::any_of(Arg.user_begin(), Arg.user_end(), [](const User *U) {
-    if (!isa<Instruction>(U))
+    if (isa<LoadInst>(U))
       return false;
-    if (isa<StoreInst>(U))
-      return true;
-    if (isa<AddrSpaceCastInst>(U) || isa<GetElementPtrInst>(U))
-      return IsPtrArgModified(*U);
+    if (isa<AddrSpaceCastInst>(U) || isa<BitCastInst>(U) ||
+        isa<GetElementPtrInst>(U))
+      return isPtrArgModified(*U);
     if (isa<PtrToIntInst>(U))
-      return checkSinkToMemIntrinsic(cast<Instruction>(U));
-    return false;
+      return !isSinkedToLoadIntrinsics(cast<Instruction>(U));
+    return true;
   });
 }
 
@@ -684,7 +677,7 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
   if (F->hasDLLExportStorageClass())
     NF->setDLLStorageClass(F->getDLLStorageClass());
 
-  genx::replaceFunctionRefMD(*F, *NF);
+  vc::replaceFunctionRefMD(*F, *NF);
 
   // Now that the old function is dead, delete it. If there is a dangling
   // reference to the CallgraphNode, just leave the dead function around.
@@ -743,6 +736,11 @@ static bool passLocalizedGlobalByPointer(const GlobalValue &GV) {
   return Type->isAggregateType();
 }
 
+struct ParameterAttrInfo {
+  unsigned ArgIndex;
+  Attribute::AttrKind Attr;
+};
+
 // Computing a new prototype for the function. E.g.
 //
 // i32 @foo(i32, <8 x i32>*) becomes {i32, <8 x i32>} @bar(i32, <8 x i32>)
@@ -750,8 +748,8 @@ static bool passLocalizedGlobalByPointer(const GlobalValue &GV) {
 class TransformedFuncInfo {
   TransformedFuncType NewFuncType;
   AttributeList Attrs;
-  using ArgIdxSet = std::unordered_set<int>;
   std::vector<ArgKind> ArgKinds;
+  std::vector<ParameterAttrInfo> DiscardedParameterAttrs;
   RetToArgInfo RetToArg;
   GlobalArgsInfo GlobalArgs;
 
@@ -766,6 +764,11 @@ public:
           return Arg.getType();
         });
     InheritAttributes(OrigFunc);
+
+    // struct-returns are not supported for transformed functions,
+    // so we need to discard the attribute
+    if (OrigFunc.hasStructRetAttr() && OrigFunc.hasLocalLinkage())
+      DiscardStructRetAttr(OrigFunc.getContext());
 
     auto *OrigRetTy = OrigFunc.getFunctionType()->getReturnType();
     if (!OrigRetTy->isVoidTy()) {
@@ -782,7 +785,7 @@ public:
     for (auto *GV : LI.getGlobals()) {
       if (passLocalizedGlobalByPointer(*GV)) {
         NewFuncType.Args.push_back(vc::changeAddrSpace(
-            cast<PointerType>(GV->getType()), PrivateAddrSpace));
+            cast<PointerType>(GV->getType()), vc::AddrSpace::Private));
         GlobalArgs.Globals.push_back({GV, GlobalArgKind::ByPointer});
       } else {
         int ArgIdx = NewFuncType.Args.size();
@@ -802,6 +805,9 @@ public:
   const TransformedFuncType &getType() const { return NewFuncType; }
   AttributeList getAttributes() const { return Attrs; }
   const std::vector<ArgKind> &getArgKinds() const { return ArgKinds; }
+  const std::vector<ParameterAttrInfo> &getDiscardedParameterAttrs() const {
+    return DiscardedParameterAttrs;
+  }
   const GlobalArgsInfo &getGlobalArgsInfo() const { return GlobalArgs; }
   const RetToArgInfo &getRetToArgInfo() const { return RetToArg; }
 
@@ -814,7 +820,7 @@ private:
                     [&ArgsToTransform](Argument &Arg) {
                       if (!ArgsToTransform.count(&Arg))
                         return ArgKind::General;
-                      if (IsPtrArgModified(Arg))
+                      if (isPtrArgModified(Arg))
                         return ArgKind::CopyInOut;
                       return ArgKind::CopyIn;
                     });
@@ -839,6 +845,17 @@ private:
     if (FnAttrs.hasAttributes()) {
       AttrBuilder B(FnAttrs);
       Attrs = Attrs.addAttributes(Context, AttributeList::FunctionIndex, B);
+    }
+  }
+
+  void DiscardStructRetAttr(LLVMContext &Context) {
+    constexpr auto SretAttr = Attribute::StructRet;
+    for (auto ArgInfo : enumerate(ArgKinds)) {
+      unsigned ParamIndex = ArgInfo.index();
+      if (Attrs.hasParamAttr(ParamIndex, SretAttr)) {
+        Attrs = Attrs.removeParamAttribute(Context, ParamIndex, SretAttr);
+        DiscardedParameterAttrs.push_back({ParamIndex, SretAttr});
+      }
     }
   }
 
@@ -934,6 +951,11 @@ inheritCallAttributes(CallInst &OrigCall, int NumOrigFuncArgs,
     }
   }
 
+  for (auto DiscardInfo : NewFuncInfo.getDiscardedParameterAttrs()) {
+    NewCallAttrs = NewCallAttrs.removeParamAttribute(
+        Context, DiscardInfo.ArgIndex, DiscardInfo.Attr);
+  }
+
   // Add any function attributes.
   if (CallPAL.hasAttributes(AttributeList::FunctionIndex)) {
     AttrBuilder B(CallPAL.getFnAttributes());
@@ -982,11 +1004,11 @@ static std::vector<Value *> handleGlobalArgs(Function &NewFunc,
                     if (GVArg.getType()->isPointerTy())
                       return &GVArg;
                     AllocaInst *Alloca = new AllocaInst(
-                        GVArg.getType(), PrivateAddrSpace, "", InsertPt);
+                        GVArg.getType(), vc::AddrSpace::Private, "", InsertPt);
                     new StoreInst(&GVArg, Alloca, InsertPt);
                     return Alloca;
                   });
-  // Fancy naming.
+  // Fancy naming and debug info.
   for (auto &&[GAI, GVArg, MaybeAlloca] :
        zip(GlobalArgs.Globals,
            drop_begin(NewFunc.args(), GlobalArgs.FirstGlobalArgIdx),
@@ -996,6 +1018,9 @@ static std::vector<Value *> handleGlobalArgs(Function &NewFunc,
       IGC_ASSERT_MESSAGE(isa<AllocaInst>(MaybeAlloca),
           "an alloca is expected when pass localized global by value");
       MaybeAlloca->setName(GAI.GV->getName() + ".local");
+
+      vc::DIBuilder::createDbgDeclareForLocalizedGlobal(
+          *cast<AllocaInst>(MaybeAlloca), *GAI.GV, *InsertPt);
     }
   }
 
@@ -1065,13 +1090,13 @@ static Value *passGlobalAsCallArg(GlobalArgInfo GAI, CallInst &OrigCall) {
       "localized global can be passed only by value or by pointer");
   auto *GVTy = cast<PointerType>(GAI.GV->getType());
   // No additional work when addrspaces match
-  if (GVTy->getAddressSpace() == PrivateAddrSpace)
+  if (GVTy->getAddressSpace() == vc::AddrSpace::Private)
     return GAI.GV;
   // Need to add a temprorary cast inst to match types.
   // When this switch to the caller, it'll remove this cast.
-  return new AddrSpaceCastInst{GAI.GV,
-                               vc::changeAddrSpace(GVTy, PrivateAddrSpace),
-                               GAI.GV->getName() + ".tmp", &OrigCall};
+  return new AddrSpaceCastInst{
+      GAI.GV, vc::changeAddrSpace(GVTy, vc::AddrSpace::Private),
+      GAI.GV->getName() + ".tmp", &OrigCall};
 }
 
 namespace {
@@ -1196,8 +1221,8 @@ private:
           switch (Kind) {
           case ArgKind::CopyIn:
           case ArgKind::CopyInOut: {
-            auto *Alloca = new AllocaInst(NewArg.getType(), PrivateAddrSpace,
-                                          "", InsertPt);
+            auto *Alloca = new AllocaInst(NewArg.getType(),
+                                          vc::AddrSpace::Private, "", InsertPt);
             new StoreInst{&NewArg, Alloca, InsertPt};
             return Alloca;
           }
@@ -1369,29 +1394,7 @@ void CMABIAnalysis::defineGVDirectUsers(GlobalVariable &GV) {
 // copy-in and copy-out arguments.
 void CMABIAnalysis::analyzeGlobals(CallGraph &CG) {
   Module &M = CG.getModule();
-  for (auto& F : M.getFunctionList()) {
-    if (F.isDeclaration() || F.hasDLLExportStorageClass())
-      continue;
-    if (GenXIntrinsic::getAnyIntrinsicID(&F) !=
-        GenXIntrinsic::not_any_intrinsic)
-      continue;
-    // __cm_intrinsic_impl_* could be used for emulation mul/div etc
-    if (F.getName().contains("__cm_intrinsic_impl_"))
-      continue;
 
-    // Convert non-kernel to stack call if applicable
-    if (FCtrl == FunctionControl::StackCall && !genx::requiresStackCall(&F)) {
-      LLVM_DEBUG(dbgs() << "Adding stack call to: " << F.getName() << "\n");
-      F.addFnAttr(genx::FunctionMD::CMStackCall);
-    }
-
-    // Do not change stack calls linkage as we may have both types of stack
-    // calls.
-    if (genx::requiresStackCall(&F) && SaveStackCallLinkage)
-      continue;
-
-    F.setLinkage(GlobalValue::InternalLinkage);
-  }
   // No global variables.
   if (M.global_empty())
     return;
@@ -1401,9 +1404,8 @@ void CMABIAnalysis::analyzeGlobals(CallGraph &CG) {
   //        not in constant addrspace in legacy printf).
   auto ToLocalize =
       make_filter_range(M.globals(), [](const GlobalVariable &GV) {
-        return GV.getAddressSpace() == PrivateAddrSpace &&
-               !GV.hasAttribute(genx::FunctionMD::GenXVolatile) &&
-               !vc::isConstantString(GV);
+        return GV.getAddressSpace() == vc::AddrSpace::Private &&
+               vc::isRealGlobalVariable(GV) && !vc::isConstantString(GV);
       });
 
   // Collect direct and indirect (GV is used in a called function)
@@ -1413,8 +1415,11 @@ void CMABIAnalysis::analyzeGlobals(CallGraph &CG) {
   for (const std::vector<CallGraphNode *> &SCCNodes :
        make_range(scc_begin(&CG), scc_end(&CG)))
     for (const CallGraphNode *Caller : SCCNodes)
-      for (const IGCLLVM::CallGraphNode::CallRecord &Callee : *Caller)
-        addIndirectGlobal(Caller->getFunction(), Callee.second->getFunction());
+      for (const IGCLLVM::CallGraphNode::CallRecord &Callee : *Caller) {
+        Function *CalleeF = Callee.second->getFunction();
+        if (CalleeF && !vc::isFixedSignatureFunc(*CalleeF))
+          addIndirectGlobal(Caller->getFunction(), CalleeF);
+      }
 }
 
 /***********************************************************************
@@ -1716,7 +1721,7 @@ struct ArgRefPattern {
 
   // Match a copy-in and copy-out pattern. Return true on success.
   bool match(DominatorTree &DT, PostDominatorTree &PDT);
-  void process();
+  void process(DominatorTree &DT);
 };
 
 struct CMLowerVLoadVStore : public FunctionPass {
@@ -2024,7 +2029,7 @@ bool ArgRefPattern::match(DominatorTree &DT, PostDominatorTree &PDT) {
   return true;
 }
 
-void ArgRefPattern::process() {
+void ArgRefPattern::process(DominatorTree &DT) {
   // 'Spill' the base region into memory during rewriting.
   IRBuilder<> Builder(Alloca);
   Function *RdFn = CopyInRegion->getCalledFunction();
@@ -2083,6 +2088,8 @@ void ArgRefPattern::process() {
     LI->replaceAllUsesWith(Val);
     LI->eraseFromParent();
   }
+  // BaseAlloca created manually, w/o RAUW, need fix debug-info for it
+  llvm::replaceAllDbgUsesWith(*Alloca, *BaseAlloca, *BaseAlloca, DT);
 }
 
 // Allocas that are used in reference argument passing may be promoted into the
@@ -2096,14 +2103,12 @@ bool CMLowerVLoadVStore::promoteAllocas(Function &F) {
   for (auto &Inst : F.front().getInstList()) {
     if (auto AI = dyn_cast<AllocaInst>(&Inst))
       Allocas.push_back(AI);
-    else
-      break;
   }
 
   for (auto AI : Allocas) {
     ArgRefPattern ArgRef(AI);
     if (ArgRef.match(DT, PDT)) {
-      ArgRef.process();
+      ArgRef.process(DT);
       Modified = true;
     }
   }

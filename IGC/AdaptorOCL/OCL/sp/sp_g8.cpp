@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -311,6 +311,32 @@ static bool CreateSymbolTable(void* buffer, uint32_t size, uint32_t entries, Uti
     return true;
 }
 
+static bool CreateGlobalHostAccessTable(void* buffer, uint32_t size, uint32_t entries, Util::BinaryStream& membuf,
+    std::string& debugOut)
+{
+    IGC_ASSERT_MESSAGE(buffer && size != 0 && entries != 0, "wrong arguments");
+    iOpenCL::SPatchGlobalHostAccessTableInfo patch;
+    memset(&patch, 0, sizeof(patch));
+
+    patch.Token = PATCH_TOKEN_GLOBAL_HOST_ACCESS_TABLE;
+
+    patch.Size = sizeof(patch) + size;
+    patch.NumEntries = entries;
+
+    std::streamsize tokenStart = membuf.Size();
+    if (!membuf.Write(patch))
+        return false;
+    if (!membuf.Write((const char*)buffer, size))
+        return false;
+    free(buffer);
+
+#if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)  || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX)
+    DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, debugOut);
+#endif
+    (void)debugOut;
+    return true;
+}
+
 void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCLProgramInfo& annotations,
                                                               Util::BinaryStream& membuf)
 {
@@ -321,46 +347,52 @@ void CGen8OpenCLStateProcessor::CreateProgramScopePatchStream(const IGC::SOpenCL
     ICBE_DPF_STR(output, GFXDBG_HARDWARE, "** Program Scope patch lists **\n");
     ICBE_DPF_STR(output, GFXDBG_HARDWARE, "\n");
 
-    if (annotations.m_initConstantAnnotation != nullptr) {
-        const auto& constBuffer = annotations.m_initConstantAnnotation;
-        iOpenCL::SPatchAllocateConstantMemorySurfaceProgramBinaryInfo patch;
+    // patch-token path should not have separated buffer for printf string
+    IGC_ASSERT(annotations.m_initConstantStringAnnotation == nullptr);
+    if (annotations.m_initConstantAnnotation)
+    {
+        iOpenCL::SPatchAllocateConstantMemorySurfaceProgramBinaryInfo   patch;
         memset( &patch, 0, sizeof( patch ) );
 
         patch.Token = iOpenCL::PATCH_TOKEN_ALLOCATE_CONSTANT_MEMORY_SURFACE_PROGRAM_BINARY_INFO;
         patch.Size = sizeof( patch );
         patch.ConstantBufferIndex = DEFAULT_CONSTANT_BUFFER_INDEX;
-        patch.InlineDataSize = (DWORD)constBuffer->AllocSize;
+        patch.InlineDataSize = (DWORD)annotations.m_initConstantAnnotation->AllocSize;
 
         retValue = AddPatchItem(
             patch,
             membuf );
 
         // And now write the actual data
-        membuf.Write((char*)constBuffer->InlineData.data(), constBuffer->InlineData.size());
+        membuf.Write((char*)annotations.m_initConstantAnnotation->InlineData.data(),
+            annotations.m_initConstantAnnotation->InlineData.size());
         // Pad the end with zeros
-        unsigned zeroPadding = constBuffer->AllocSize - constBuffer->InlineData.size();
+        unsigned zeroPadding = annotations.m_initConstantAnnotation->AllocSize -
+            annotations.m_initConstantAnnotation->InlineData.size();
         membuf.AddPadding(zeroPadding);
     }
 
-    for (const auto& iter : annotations.m_initGlobalAnnotation)
+    if (annotations.m_initGlobalAnnotation)
     {
-        iOpenCL::SPatchAllocateGlobalMemorySurfaceProgramBinaryInfo   patch;
+        iOpenCL::SPatchAllocateGlobalMemorySurfaceProgramBinaryInfo patch;
         memset( &patch, 0, sizeof( patch ) );
 
         patch.Token = iOpenCL::PATCH_TOKEN_ALLOCATE_GLOBAL_MEMORY_SURFACE_PROGRAM_BINARY_INFO;
         patch.Size = sizeof( patch );
         patch.Type = iOpenCL::GLOBAL_BUFFER_TYPE_INLINE;
         patch.GlobalBufferIndex = 0;
-        patch.InlineDataSize = (DWORD)iter->AllocSize;
+        patch.InlineDataSize = (DWORD)annotations.m_initGlobalAnnotation->AllocSize;
 
         retValue = AddPatchItem(
             patch,
             membuf );
 
         // And now write the actual data
-        membuf.Write((char*)iter->InlineData.data(), iter->InlineData.size());
+        membuf.Write((char*)annotations.m_initGlobalAnnotation->InlineData.data(),
+            annotations.m_initGlobalAnnotation->InlineData.size());
         // Pad the end with zeros
-        unsigned zeroPadding = iter->AllocSize - iter->InlineData.size();
+        unsigned zeroPadding = annotations.m_initGlobalAnnotation->AllocSize -
+            annotations.m_initGlobalAnnotation->InlineData.size();
         membuf.AddPadding(zeroPadding);
     }
 
@@ -774,6 +806,21 @@ RETVAL CGen8OpenCLStateProcessor::CreateSurfaceStateHeap(
     if (annotations.m_syncBufferAnnotation != NULL)
     {
         unsigned int bti = annotations.m_argIndexMap.at(annotations.m_syncBufferAnnotation->ArgumentNumber);
+        context.Surface.SurfaceOffset[bti] = (DWORD)membuf.Size();
+
+        SurfaceStates.insert(
+            std::make_pair(
+                bti,
+                SurfaceState(
+                    SURFACE_BUFFER,
+                    SURFACE_FORMAT_RAW,
+                    0,
+                    false)));
+    }
+
+    if (annotations.m_rtGlobalBufferAnnotation != NULL)
+    {
+        unsigned int bti = annotations.m_argIndexMap.at(annotations.m_rtGlobalBufferAnnotation->ArgumentNumber);
         context.Surface.SurfaceOffset[bti] = (DWORD)membuf.Size();
 
         SurfaceStates.insert(
@@ -1505,6 +1552,11 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
                     {
                         IGC_ASSERT(ptrArg->BindingTableIndex != bti);
                         patch.SurfaceStateHeapOffset = ptrArg->BindingTableIndex;
+                        dataParameterStreamSize = std::max(
+                            dataParameterStreamSize,
+                            ptrArg->BindingTableIndex + ptrArg->SecondPayloadSizeInBytes
+                            );
+
                     }
                     else
                     {
@@ -1639,6 +1691,32 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             dataParameterStreamSize = std::max(
                 dataParameterStreamSize,
                 syncBufAnn->PayloadPosition + syncBufAnn->DataSize);
+
+            retValue = AddPatchItem(patch, membuf);
+        }
+    }
+
+    // Patch for Raytracing Global Buffer
+    if (retValue.Success)
+    {
+        if (annotations.m_rtGlobalBufferAnnotation != nullptr)
+        {
+            const auto& rtGlobalBufAnn = annotations.m_rtGlobalBufferAnnotation;
+
+            iOpenCL::SPatchAllocateRTGlobalBuffer patch;
+            memset(&patch, 0, sizeof(patch));
+
+            unsigned int bti = annotations.m_argIndexMap.at(rtGlobalBufAnn->ArgumentNumber);
+
+            patch.Token = iOpenCL::PATCH_TOKEN_ALLOCATE_RT_GLOBAL_BUFFER;
+            patch.Size = sizeof(patch);
+            patch.SurfaceStateHeapOffset = context.Surface.SurfaceOffset[bti];
+            patch.DataParamOffset = rtGlobalBufAnn->PayloadPosition;
+            patch.DataParamSize = rtGlobalBufAnn->DataSize;
+
+            dataParameterStreamSize = std::max(
+                dataParameterStreamSize,
+                rtGlobalBufAnn->PayloadPosition + rtGlobalBufAnn->DataSize);
 
             retValue = AddPatchItem(patch, membuf);
         }
@@ -1914,7 +1992,12 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
         patch.UnusedPerThreadConstantPresent = annotations.m_threadPayload.UnusedPerThreadConstantPresent;
         patch.OffsetToSkipPerThreadDataLoad = annotations.m_threadPayload.OffsetToSkipPerThreadDataLoad;
         patch.OffsetToSkipSetFFIDGP = annotations.m_threadPayload.OffsetToSkipSetFFIDGP;
-        patch.PassInlineData = annotations.m_threadPayload.PassInlineData;
+        patch.PassInlineData = annotations.m_threadPayload.PassInlineDataSize ? true : false;
+        patch.RTStackIDPresent = annotations.m_threadPayload.HasRTStackID;
+        patch.generateLocalID = annotations.m_threadPayload.generateLocalID;
+        patch.emitLocalMask   = annotations.m_threadPayload.emitLocalMask;
+        patch.walkOrder       = annotations.m_threadPayload.walkOrder;
+        patch.tileY           = annotations.m_threadPayload.tileY;
 
         retValue = AddPatchItem(
             patch,
@@ -1959,11 +2042,17 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
             patch.LargestCompiledSIMDSize = patch.CompiledSIMD32 ? 32 : patch.LargestCompiledSIMDSize;
         }
 
-        patch.HasBarriers                       = annotations.m_executionEnivronment.HasBarriers;
+        patch.HasBarriers                       = iOpenCL::EncodeNumBarriers(annotations.m_executionEnivronment.HasBarriers);
         patch.DisableMidThreadPreemption        = annotations.m_executionEnivronment.DisableMidThreadPreemption;
 
         patch.UsesStatelessSpillFill = (annotations.m_executionEnivronment.PerThreadScratchSpace > 0);
         patch.UsesMultiScratchSpaces = false;
+        if (CPlatform(m_Platform).hasScratchSurface() && IGC_IS_FLAG_ENABLED(SeparateSpillPvtScratchSpace))
+        {
+            //we don't support stateless anymore, will error out if >256k.
+            patch.UsesStatelessSpillFill = false;
+            patch.UsesMultiScratchSpaces = true;
+        }
 
         patch.HasDeviceEnqueue = (bool)hasDeviceEnqueue;
 
@@ -1984,8 +2073,16 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
 
         patch.HasDPAS = annotations.m_executionEnivronment.HasDPAS;
 
+        patch.HasRTCalls = annotations.m_executionEnivronment.HasRTCalls;
+
+        patch.NumThreadsRequired = annotations.m_executionEnivronment.numThreads;
+        patch.StatelessWritesCount = annotations.m_executionEnivronment.StatelessWritesCount;
+        patch.IndirectStatelessCount = annotations.m_executionEnivronment.IndirectStatelessCount;
+
         patch.UseBindlessMode = annotations.m_executionEnivronment.UseBindlessMode;
+        patch.HasStackCalls = annotations.m_executionEnivronment.HasStackCalls;
         patch.SIMDInfo = annotations.m_executionEnivronment.SIMDInfo;
+        patch.RequireDisableEUFusion = annotations.m_executionEnivronment.RequireDisableEUFusion;
 
         retValue = AddPatchItem(
             patch,
@@ -2193,6 +2290,48 @@ RETVAL CGen8OpenCLStateProcessor::CreatePatchList(
 #if defined(_DEBUG) || defined(_INTERNAL) || defined(_RELEASE_INTERNAL)   || defined(ICBE_LINUX) || defined(_LINUX) || defined(LINUX)
             DebugPatchList(membuf.GetLinearPointer() + tokenStart, patch.Size, m_oclStateDebugMessagePrintOut);
 #endif
+        }
+    }
+
+    // Patch for global host access table
+    if (retValue.Success)
+    {
+        uint32_t size = 0;
+        uint32_t entries = 0;
+        void* buffer = nullptr;
+        const IGC::SKernelProgram* program = &(annotations.m_kernelProgram);
+        if (annotations.m_executionEnivronment.CompiledSIMDSize == 8)
+        {
+            buffer = program->simd8.m_globalHostAccessTable;
+            size = program->simd8.m_globalHostAccessTableSize;
+            entries = program->simd8.m_globalHostAccessTableEntries;
+        }
+        else if (annotations.m_executionEnivronment.CompiledSIMDSize == 16)
+        {
+            buffer = program->simd16.m_globalHostAccessTable;
+            size = program->simd16.m_globalHostAccessTableSize;
+            entries = program->simd16.m_globalHostAccessTableEntries;
+        }
+        else if (annotations.m_executionEnivronment.CompiledSIMDSize == 32)
+        {
+            buffer = program->simd32.m_globalHostAccessTable;
+            size = program->simd32.m_globalHostAccessTableSize;
+            entries = program->simd32.m_globalHostAccessTableEntries;
+        }
+        else if (annotations.m_executionEnivronment.CompiledSIMDSize == 1)
+        {
+            buffer = program->simd1.m_globalHostAccessTable;
+            size = program->simd1.m_globalHostAccessTableSize;
+            entries = program->simd1.m_globalHostAccessTableEntries;
+        }
+
+        if (size > 0)
+        {
+            if (!CreateGlobalHostAccessTable(buffer, size, entries, membuf, m_oclStateDebugMessagePrintOut))
+            {
+                retValue.Success = false;
+                return retValue;
+            }
         }
     }
 
@@ -2549,6 +2688,15 @@ RETVAL CGen8OpenCLStateProcessor::AddSamplerState(
         else
         {
             samplerState.DW0.Gen7.SamplerDisable = true;
+        }
+        if (m_WATable.Wa_22012532006)
+        {
+            if (samplerState.DW3.Gen7.TCXAddressControlMode == G6HWC::GFXSHAREDSTATE_TEXCOORDMODE_MIRROR &&
+                samplerState.DW0.Gen7.MinModeFilter == G6HWC::GFXSHAREDSTATE_MAPFILTER_NEAREST)
+            {
+                samplerState.DW3.Gen7.RAddressMinFilterAddressRoundingEnable = true;
+                samplerState.DW3.Gen7.RAddressMagFilterAddressRoundingEnable = true;
+            }
         }
 
         if( membuf.Write( samplerState ) == false )

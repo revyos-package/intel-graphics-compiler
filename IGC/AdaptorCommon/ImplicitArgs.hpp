@@ -112,8 +112,17 @@ namespace IGC
 
             SYNC_BUFFER,
 
+            // Raytracing args
+            RT_GLOBAL_BUFFER_POINTER,
+            RT_LOCAL_BUFFER_POINTER,
+            RT_INLINED_DATA,
+            RT_STACK_ID,
+
             // Bindless buffer (for stateless to bindless optim)
             BINDLESS_OFFSET,
+
+            // Pointer to implicit arguments prepared by runtime
+            IMPLICIT_ARG_BUFFER_PTR,
 
             NUM_IMPLICIT_ARGS
         };
@@ -334,7 +343,7 @@ namespace IGC
         /// @param  argType The argument type to check.
         static bool isImplicitStruct(ImplicitArg::ArgType argType);
 
-        llvm::Value* getImplicitArgValue(llvm::Function& F, ImplicitArg::ArgType argType, const IGC::CodeGenContext* pCtx);
+        llvm::Value* getImplicitArgValue(llvm::Function& F, ImplicitArg::ArgType argType, const IGCMD::MetaDataUtils* pMdUtils);
 
     private:
         /// @brief The function's metadata information.

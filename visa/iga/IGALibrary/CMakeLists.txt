@@ -302,7 +302,21 @@ target_compile_definitions(IGA_ENC_LIB PUBLIC IGA_DISABLE_ENCODER_EXCEPTIONS)
 ##############################################################################
 # iga##.dll
 ##############################################################################
-    add_library(IGA_DLL SHARED $<TARGET_OBJECTS:GEDLibrary> $<TARGET_OBJECTS:IGA_OLIB> ${IGA_API})
+if(IGC_BUILD AND MSVC)
+  set(IGA_BUILD__RES__IGC__igc_common
+      "${CMAKE_CURRENT_SOURCE_DIR}/iga.rc"
+    )
+  igc_rc_register_resource(IGA_DLL FILE "${IGA_BUILD__RES__IGC__igc_common}") # [WA#2]
+
+  igc_rc_get_resource(IGC_BUILD__RES__IGC__iga_dll IGA_DLL)
+  # Static libraries on Windows cannot pass resources to final libraries.
+  set(IGC_BUILD__RES__IGC__iga_lib)
+  source_group("Resources" FILES
+    ${IGC_BUILD__RES__IGC__iga_dll}
+  )
+endif()
+
+    add_library(IGA_DLL SHARED $<TARGET_OBJECTS:GEDLibrary> $<TARGET_OBJECTS:IGA_OLIB> ${IGA_API} ${IGC_BUILD__RES__IGC__iga_dll})
 
 set(IGA_DLL_DEFINITIONS ${IGA_DEFINITIONS} IGA_BUILDING_DLL)
 if (WIN32)
@@ -406,20 +420,4 @@ endif(ANDROID AND MEDIA_IGA)
               DESTINATION Release-Internal/lh64/pdb CONFIGURATIONS ReleaseInternal)
       install(FILES $<TARGET_PDB_FILE:IGA_DLL>
               DESTINATION Debug/lh64/pdb            CONFIGURATIONS Debug)
-
-      if(CMAKE_SIZEOF_VOID_P EQUAL 8) # Only copy 64 build
-          install(TARGETS IGA_DLL RUNTIME
-                  DESTINATION ../Test_Tools/Release/x64/Standalones          CONFIGURATIONS Release)
-          install(TARGETS IGA_DLL RUNTIME
-                  DESTINATION ../Test_Tools/Release-Internal/x64/Standalones CONFIGURATIONS ReleaseInternal)
-          install(TARGETS IGA_DLL RUNTIME
-                  DESTINATION ../Test_Tools/Debug/x64/Standalones            CONFIGURATIONS Debug)
-
-          install(FILES $<TARGET_PDB_FILE:IGA_DLL>
-                  DESTINATION ../Test_Tools/Release/x64/Standalones          CONFIGURATIONS Release)
-          install(FILES $<TARGET_PDB_FILE:IGA_DLL>
-                  DESTINATION ../Test_Tools/Release-Internal/x64/Standalones CONFIGURATIONS ReleaseInternal)
-          install(FILES $<TARGET_PDB_FILE:IGA_DLL>
-                  DESTINATION ../Test_Tools/Debug/x64/Standalones            CONFIGURATIONS Debug)
-      endif(CMAKE_SIZEOF_VOID_P EQUAL 8)
   endif()

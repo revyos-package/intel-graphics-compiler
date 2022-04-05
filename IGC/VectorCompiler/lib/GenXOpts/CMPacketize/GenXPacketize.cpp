@@ -25,7 +25,7 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/Transforms/Utils/Cloning.h"
 
-#include "vc/GenXOpts/Utils/CMRegion.h"
+#include "vc/Utils/GenX/Region.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXSimdCFLowering.h"
@@ -215,6 +215,9 @@ bool GenXPacketize::runOnModule(Module &Module) {
   if (ForkFuncs.empty())
     return false;
 
+  DL = &(M->getDataLayout());
+  B = new PacketBuilder(M);
+
   // sort functions in order, also find those functions that are used in
   // the SIMT mode, therefore need whole-function vectorization.
   findFunctionVectorizationOrder(M);
@@ -229,8 +232,6 @@ bool GenXPacketize::runOnModule(Module &Module) {
 
   UniformInsts.clear();
 
-  DL = &(M->getDataLayout());
-  B = new PacketBuilder(M);
   std::vector<Function *> SIMTFuncs;
   // Process those functions called in the SIMT mode
   for (int i = NumFunc - 1; i >= 0; --i) {
@@ -584,6 +585,7 @@ bool GenXPacketize::isUniformIntrinsic(unsigned id) {
   case GenXIntrinsic::genx_predefined_surface:
   case GenXIntrinsic::genx_barrier:
   case GenXIntrinsic::genx_sbarrier:
+  case GenXIntrinsic::genx_nbarrier:
   case GenXIntrinsic::genx_cache_flush:
   case GenXIntrinsic::genx_fence:
   case GenXIntrinsic::genx_wait:
@@ -807,6 +809,10 @@ Value *GenXPacketize::packetizeLLVMIntrinsic(Instruction *pInst) {
   Function *f = pCall->getCalledFunction();
   IGC_ASSERT(f);
   IGC_ASSERT(f->isIntrinsic());
+  // not sure how to handle debug intrinsics, just return
+  if (isa<DbgInfoIntrinsic>(pInst))
+    return pInst;
+
   auto id = GenXIntrinsic::getAnyIntrinsicID(f);
 
   // packetize intrinsic operands
@@ -1274,6 +1280,8 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
       case GenXIntrinsic::genx_dword_atomic_imax:
       case GenXIntrinsic::genx_dword_atomic_fmin:
       case GenXIntrinsic::genx_dword_atomic_fmax:
+      case GenXIntrinsic::genx_dword_atomic_fadd:
+      case GenXIntrinsic::genx_dword_atomic_fsub:
       {
         Value *Src0 = getPacketizeValue(CI->getOperand(0));
         Value *BTI = getUniformValue(CI->getOperand(1));
@@ -1336,7 +1344,7 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
         Value *Src0 = getPacketizeValue(CI->getOperand(0));
         Value *Src1 = getPacketizeValue(CI->getOperand(1));
         Value *Src2 = getPacketizeValue(CI->getOperand(2));
-        Value *BFN = getUniformValue(CI->getOperand(4));
+        Value *BFN = getUniformValue(CI->getOperand(3));
         Value *Args[] = {Src0, Src1, Src2, BFN};
         auto RetTy = B->GetVectorType(CI->getType());
         Type *Tys[] = {RetTy, Src0->getType()};
@@ -1620,6 +1628,8 @@ Value *GenXPacketize::packetizeGenXIntrinsic(Instruction *inst) {
       case GenXIntrinsic::genx_typed_atomic_imax:
       case GenXIntrinsic::genx_typed_atomic_fmin:
       case GenXIntrinsic::genx_typed_atomic_fmax:
+      case GenXIntrinsic::genx_typed_atomic_fadd:
+      case GenXIntrinsic::genx_typed_atomic_fsub:
       {
         Value *Src0 = getPacketizeValue(CI->getOperand(0));
         Value *BTI = getUniformValue(CI->getOperand(1));

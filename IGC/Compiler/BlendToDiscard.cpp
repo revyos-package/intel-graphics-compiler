@@ -97,20 +97,21 @@ bool BlendToDiscard::runOnFunction(Function& F)
     const int MAX_NUM_OUTPUTS = 4;
     const int MAX_NUM_OUTPUT_VALUES = 6;
 
-    if (!IGC_IS_FLAG_ENABLED(EnableBlendToDiscard))
+    m_cgCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    if (!IGC_IS_FLAG_ENABLED(EnableBlendToDiscard) || !m_cgCtx->platform.enableBlendToDiscardAndFill())
     {
         return false;
     }
 
 
     // Skip non-kernel function.
-    IGCMD::MetaDataUtils* mdu =
-        getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    IGCMD::MetaDataUtils* mdu = nullptr;
+    mdu = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     auto FII = mdu->findFunctionsInfoItem(&F);
     if (FII == mdu->end_FunctionsInfo())
         return false;
 
-    m_cgCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     m_modMD = m_cgCtx->getModuleMetaData();
     m_module = F.getParent();
 

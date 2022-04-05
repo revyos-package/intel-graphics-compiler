@@ -125,7 +125,8 @@ const char* emask_str[vISA_NUM_EMASK+1] =
     "NoMask"
 };
 
-const char* getSampleOp3DName(int opcode)
+
+static const char* getSampleOp3DNameOrNull(VISASampler3DSubOpCode opcode, TARGET_PLATFORM platform)
 {
     switch (opcode)
     {
@@ -174,9 +175,25 @@ const char* getSampleOp3DName(int opcode)
     case VISA_3D_LD_MCS:        // 0x1D
         return "load_mcs";
     default:
-        assert(!"Unknown VISA sample opcode");
-        return "sample_unknown";
+        return nullptr;
     }
+}
+const char* getSampleOp3DName(VISASampler3DSubOpCode opcode, TARGET_PLATFORM platform)
+{
+    const char *name = getSampleOp3DNameOrNull(opcode, platform);
+    assert(name && "invalid sampler opcode");
+    if (!name)
+        return "sampler_unknown";
+    return name;
+}
+VISASampler3DSubOpCode getSampleOpFromName(const char *str, TARGET_PLATFORM platform)
+{
+    for (int i = 0; i < ISA_NUM_OPCODE; i++) {
+        const char *symI = getSampleOp3DNameOrNull((VISASampler3DSubOpCode)i, platform);
+        if (symI && strcmp(symI, str) == 0)
+            return (VISASampler3DSubOpCode)i;
+    }
+    return (VISASampler3DSubOpCode)-1;
 }
 
 const char * va_sub_names[26] =
@@ -357,7 +374,8 @@ CISATypeInfo CISATypeTable[ISA_TYPE_NUM] =
     { ISA_TYPE_UQ,  "uq",   8 },
     { ISA_TYPE_UV,  "uv",   4 },
     { ISA_TYPE_Q,   "q",    8 },
-    { ISA_TYPE_HF,  "hf",   2 }
+    { ISA_TYPE_HF,  "hf",   2 },
+    { ISA_TYPE_BF,  "bf",   2 }
 };
 
 int processCommonISAHeader(

@@ -113,6 +113,7 @@ namespace vISA
         void fixSADA2Inst(G4_BB* bb);
         void fixMixedHFInst(G4_BB* bb);
         void fixSendInst(G4_BB* bb);
+        void fixsrc1src2Overlap(G4_BB* bb);
         void fixOverlapInst(G4_BB* bb);
         bool canSplitByteDst(G4_opcode op);
         bool fixInstOpndTypeAlign(INST_LIST_ITER i, G4_BB* bb);
@@ -141,6 +142,7 @@ namespace vISA
         void expandPlaneInst(INST_LIST_ITER i, G4_BB* bb);
         bool fixAddcSubb(G4_BB* bb);
         void fixDataLayout();
+        void fixBFMixedMode();
         bool fixMov(INST_LIST_ITER i, G4_BB* bb);
         bool fixRotate(INST_LIST_ITER i, G4_BB* bb);
         bool fixIntToHFMove(G4_BB* bb);
@@ -150,6 +152,11 @@ namespace vISA
         void change64bStride2CopyToUD(INST_LIST_ITER it, G4_BB* bb);
         bool fixBFMove(INST_LIST_ITER i, G4_BB* bb);
         void fixUnalignedRegions(INST_LIST_ITER it, G4_BB* bb);
+        bool fixFcvt(INST_LIST_ITER i, G4_BB* bb);
+        void fixByteXBarRestriction(INST_LIST_ITER it, G4_BB* bb);
+        void fixDPAS(INST_LIST_ITER it, G4_BB* bb);
+        bool fixSrnd(INST_LIST_ITER i, G4_BB* bb);
+        void fixShiftInsts(INST_LIST_ITER i, G4_BB* bb);
 
         void helperGenerateTempDst(
             G4_BB *bb,

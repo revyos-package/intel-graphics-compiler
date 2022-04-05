@@ -23,6 +23,9 @@ SPDX-License-Identifier: MIT
 #include "GenXSubtarget.h"
 #include "TargetInfo/GenXTargetInfo.h"
 
+#include "vc/Support/BackendConfig.h"
+#include "vc/Utils/General/Types.h"
+
 #include "llvm/IR/DataLayout.h"
 #include "llvm/CodeGen/BasicTTIImpl.h"
 
@@ -32,14 +35,25 @@ class raw_pwrite_stream;
 class MachineModuleInfo;
 
 class GenXTargetMachine : public IGCLLVM::LLVMTargetMachine {
+  // FIXME: regarding backend config: target machine shouldn't include a pass.
+  // Should split current GenXBackendConfig into an implementation and a
+  // pass-wrapper.
+  std::unique_ptr<GenXBackendConfig> BC;
   bool Is64Bit;
   GenXSubtarget Subtarget;
-
 public:
   GenXTargetMachine(const Target &T, const Triple &TT, StringRef CPU,
                     StringRef FS, const TargetOptions &Options,
                     Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
-                    CodeGenOpt::Level OL, bool Is64Bit);
+                    CodeGenOpt::Level OL, bool Is64Bit)
+      : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, Is64Bit,
+                          std::make_unique<GenXBackendConfig>()) {}
+
+  GenXTargetMachine(const Target &T, const Triple &TT, StringRef CPU,
+                    StringRef FS, const TargetOptions &Options,
+                    Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
+                    CodeGenOpt::Level OL, bool Is64Bit,
+                    std::unique_ptr<GenXBackendConfig> BC);
 
   ~GenXTargetMachine() override;
 
@@ -65,7 +79,15 @@ public:
   GenXTargetMachine32(const Target &T, const Triple &TT, StringRef CPU,
                       StringRef FS, const TargetOptions &Options,
                       Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
-                      CodeGenOpt::Level OL, bool JIT);
+                      CodeGenOpt::Level OL, bool JIT)
+      : GenXTargetMachine32(T, TT, CPU, FS, Options, RM, CM, OL, JIT,
+                            std::make_unique<GenXBackendConfig>()) {}
+
+  GenXTargetMachine32(const Target &T, const Triple &TT, StringRef CPU,
+                      StringRef FS, const TargetOptions &Options,
+                      Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
+                      CodeGenOpt::Level OL, bool JIT,
+                      std::unique_ptr<GenXBackendConfig> BC);
 };
 
 class GenXTargetMachine64 : public GenXTargetMachine {
@@ -73,23 +95,35 @@ public:
   GenXTargetMachine64(const Target &T, const Triple &TT, StringRef CPU,
                       StringRef FS, const TargetOptions &Options,
                       Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
-                      CodeGenOpt::Level OL, bool JIT);
+                      CodeGenOpt::Level OL, bool JIT)
+      : GenXTargetMachine64(T, TT, CPU, FS, Options, RM, CM, OL, JIT,
+                            std::make_unique<GenXBackendConfig>()) {}
+
+  GenXTargetMachine64(const Target &T, const Triple &TT, StringRef CPU,
+                      StringRef FS, const TargetOptions &Options,
+                      Optional<Reloc::Model> RM, Optional<CodeModel::Model> CM,
+                      CodeGenOpt::Level OL, bool JIT,
+                      std::unique_ptr<GenXBackendConfig> BC);
 };
 
 // This implementation allows us to define our own costs for
-// the GenX backend. Did not use BasicTTIImplBase because the overloaded
-// constructors have TragetMachine as an argument, so I inherited from
-// its parent which has only DL as its arguments
+// the GenX backend.
+// FIXME: inherit from BasicTTImpl. This requires introducing
+// TargetLowering in VC.
 class GenXTTIImpl : public TargetTransformInfoImplCRTPBase<GenXTTIImpl>
 {
-  typedef TargetTransformInfoImplCRTPBase<GenXTTIImpl> BaseT;
-  typedef TargetTransformInfo TTI;
+  using BaseT = TargetTransformInfoImplCRTPBase<GenXTTIImpl>;
+  using TTI = TargetTransformInfo;
   friend BaseT;
+
+  const GenXBackendConfig &BC;
+
 public:
-  GenXTTIImpl(const DataLayout& DL) : BaseT(DL) {}
+  GenXTTIImpl(const DataLayout &DL, const GenXBackendConfig &BC)
+      : BaseT(DL), BC(BC) {}
 
   bool shouldBuildLookupTables() { return false; }
-  unsigned getFlatAddressSpace() { return 4; }
+  unsigned getFlatAddressSpace() { return vc::AddrSpace::Generic; }
 
 #if LLVM_VERSION_MAJOR >= 13
   InstructionCost
@@ -129,38 +163,47 @@ public:
     return IntrinsicID != GenXIntrinsic::genx_vload &&
            IntrinsicID != GenXIntrinsic::genx_vstore;
   }
+
+  void getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
+                               TTI::UnrollingPreferences &UP) {
+    if (unsigned VCUnrollThreshold = BC.getLoopUnrollThreshold()) {
+      UP.Threshold = VCUnrollThreshold;
+      UP.PartialThreshold = VCUnrollThreshold;
+      UP.Partial = true;
+    }
+  }
 };
 
 /// Initialize all GenX passes for opt tool.
 void initializeGenXPasses(PassRegistry &);
 
 void initializeFunctionGroupAnalysisPass(PassRegistry &);
-void initializeGenXAddressCommoningPass(PassRegistry &);
-void initializeGenXArgIndirectionPass(PassRegistry &);
-void initializeGenXCategoryPass(PassRegistry &);
+void initializeGenXAddressCommoningWrapperPass(PassRegistry &);
+void initializeGenXArgIndirectionWrapperPass(PassRegistry &);
+void initializeGenXCategoryWrapperPass(PassRegistry &);
 void initializeGenXCFSimplificationPass(PassRegistry &);
-void initializeGenXCisaBuilderPass(PassRegistry &);
-void initializeGenXCoalescingPass(PassRegistry &);
+void initializeGenXCisaBuilderWrapperPass(PassRegistry &);
+void initializeGenXCoalescingWrapperPass(PassRegistry &);
 void initializeGenXDeadVectorRemovalPass(PassRegistry &);
-void initializeGenXDepressurizerPass(PassRegistry &);
+void initializeGenXDepressurizerWrapperPass(PassRegistry &);
 void initializeGenXEarlySimdCFConformancePass(PassRegistry &);
 void initializeGenXEmulationImportPass(PassRegistry &);
 void initializeGenXEmulatePass(PassRegistry &);
 void initializeGenXExtractVectorizerPass(PassRegistry &);
 void initializeGenXFuncBalingPass(PassRegistry &);
 void initializeGenXGEPLoweringPass(PassRegistry &);
-void initializeGenXGroupBalingPass(PassRegistry &);
-void initializeGenXInstCombineCleanup(PassRegistry &);
+void initializeGenXGroupBalingWrapperPass(PassRegistry &);
 void initializeGenXIMadPostLegalizationPass(PassRegistry &);
-void initializeGenXLateSimdCFConformancePass(PassRegistry &);
+void initializeGenXLateSimdCFConformanceWrapperPass(PassRegistry &);
 void initializeGenXLegalizationPass(PassRegistry &);
-void initializeGenXLiveRangesPass(PassRegistry &);
-void initializeGenXLivenessPass(PassRegistry &);
+void initializeGenXLiveRangesWrapperPass(PassRegistry &);
+void initializeGenXLivenessWrapperPass(PassRegistry &);
 void initializeGenXLoadStoreLoweringPass(PassRegistry &);
 void initializeGenXLowerAggrCopiesPass(PassRegistry &);
 void initializeGenXLoweringPass(PassRegistry &);
 void initializeGenXModulePass(PassRegistry &);
-void initializeGenXNumberingPass(PassRegistry &);
+void initializeGenXNumberingWrapperPass(PassRegistry &);
+void initializeGenXPacketizePass(PassRegistry &);
 void initializeGenXPatternMatchPass(PassRegistry &);
 void initializeGenXPostLegalizationPass(PassRegistry &);
 void initializeGenXPostLegalizationPass(PassRegistry &);
@@ -169,19 +212,21 @@ void initializeGenXPromotePredicatePass(PassRegistry &);
 void initializeGenXRawSendRipperPass(PassRegistry &);
 void initializeGenXReduceIntSizePass(PassRegistry &);
 void initializeGenXRegionCollapsingPass(PassRegistry &);
-void initializeGenXRematerializationPass(PassRegistry &);
+void initializeGenXRematerializationWrapperPass(PassRegistry &);
 void initializeGenXThreadPrivateMemoryPass(PassRegistry &);
 void initializeGenXTidyControlFlowPass(PassRegistry &);
-void initializeGenXUnbalingPass(PassRegistry &);
-void initializeGenXVisaRegAllocPass(PassRegistry &);
+void initializeGenXUnbalingWrapperPass(PassRegistry &);
+void initializeGenXVisaRegAllocWrapperPass(PassRegistry &);
 void initializeTransformPrivMemPass(PassRegistry &);
-void initializeGenXFunctionPointersLoweringPass(PassRegistry &);
 void initializeGenXLowerJmpTableSwitchPass(PassRegistry &);
 void initializeGenXGlobalValueLoweringPass(PassRegistry &);
 void initializeGenXAggregatePseudoLoweringPass(PassRegistry &);
 void initializeGenXVectorCombinerPass(PassRegistry &);
 void initializeGenXPromoteStatefulToBindlessPass(PassRegistry &);
 void initializeGenXStackUsagePass(PassRegistry &);
+void initializeCMLowerVLoadVStorePass(PassRegistry &);
+void initializeGenXStructSplitterPass(PassRegistry &);
+void initializeGenXPredRegionLoweringPass(PassRegistry &);
 } // End llvm namespace
 
 #endif

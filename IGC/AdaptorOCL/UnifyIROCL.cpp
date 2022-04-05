@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -47,11 +47,13 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/CodeAssumption.hpp"
 #include "Compiler/Optimizer/Scalarizer.h"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDRestoring.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionArgAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionFuncsAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionFuncResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncsAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncResolution.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ResolveSampledImageBuiltins.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.hpp"
@@ -81,7 +83,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/BIFTransforms/BIFTransforms.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/BreakdownIntrinsic.h"
 #include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass.h"
-#include "Compiler/Optimizer/OpenCLPasses/StatelessToStatefull/StatelessToStatefull.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/StatelessToStateful/StatelessToStateful.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/KernelFunctionCloning.h"
 #include "Compiler/Legalizer/TypeLegalizerPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/ClampLoopUnroll/ClampLoopUnroll.hpp"
@@ -91,15 +93,26 @@ SPDX-License-Identifier: MIT
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/SPIRMetaDataTranslation.h"
 #include "Compiler/Optimizer/OpenCLPasses/ErrorCheckPass.h"
+#include "Compiler/Optimizer/OpenCLPasses/DpasFuncs/DpasFuncsResolution.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/LSCFuncs/LSCFuncsResolution.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/NamedBarriers/NamedBarriersResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/JointMatrixFuncsResolutionPass.h"
+#include "Compiler/Optimizer/OpenCLPasses/ResolvePointersComparison.h"
+#include "Compiler/Optimizer/OpenCLPasses/RayTracing/ResolveOCLRaytracingBuiltins.hpp"
+#include "AdaptorCommon/RayTracing/RayTracingPasses.hpp"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/FixResourcePtr.hpp"
 #include "Compiler/InitializePasses.h"
 #include "Compiler/MetaDataApi/SpirMetaDataApi.h"
 #include "Compiler/Optimizer/FixFastMathFlags.hpp"
+#include "Compiler/CustomUnsafeOptPass.hpp"
 #include "MoveStaticAllocas.h"
-#include "PreprocessSPVIR.h"
+#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
+#include "preprocess_spvir/PreprocessSPVIR.h"
+#include "preprocess_spvir/ConvertUserSemanticDecoratorOnFunctions.h"
+#endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
+#include "LowerInvokeSIMD.hpp"
 #include "Compiler/Optimizer/IGCInstCombiner/IGCInstructionCombining.hpp"
 
 #include "common/debug/Debug.hpp"
@@ -117,6 +130,9 @@ SPDX-License-Identifier: MIT
 
 #include <string>
 #include <algorithm>
+
+
+#include <Metrics/IGCMetric.h>
 
 
 
@@ -160,7 +176,6 @@ namespace IGC
         return oclMajor;
     }
 
-
 static void CommonOCLBasedPasses(
     OpenCLProgramContext* pContext,
     std::unique_ptr<llvm::Module> BuiltinGenericModule,
@@ -171,6 +186,10 @@ static void CommonOCLBasedPasses(
 #endif
 
     COMPILER_TIME_START(pContext, TIME_UnificationPasses);
+
+    pContext->metrics.Init(&pContext->hash,
+        pContext->getModule()->getNamedMetadata("llvm.dbg.cu") != nullptr);
+    pContext->metrics.CollectFunctions(pContext->getModule());
 
     unify_opt_PreProcess(pContext);
 
@@ -264,16 +283,23 @@ static void CommonOCLBasedPasses(
     CompilerOpts.EnableZEBinary =
         pContext->m_InternalOptions.EnableZEBinary;
 
+    CompilerOpts.ExcludeIRFromZEBinary =
+        pContext->m_InternalOptions.ExcludeIRFromZEBinary;
+
     IGCPassManager mpmSPIR(pContext, "Unify");
 #ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new PreprocessSPVIR());
 #endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new TypesLegalizationPass());
+    mpmSPIR.add(new ResolvePointersComparison());
     mpmSPIR.add(new TargetLibraryInfoWrapperPass());
     mpmSPIR.add(createDeadCodeEliminationPass());
     mpmSPIR.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
     mpmSPIR.add(new CodeGenContextWrapper(pContext));
     mpmSPIR.add(new SPIRMetaDataTranslation());
+#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
+    mpmSPIR.add(new ConvertUserSemanticDecoratorOnFunctions());
+#endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.run(*pContext->getModule());
 
     bool isOptDisabled = CompilerOpts.OptDisable;
@@ -332,8 +358,9 @@ static void CommonOCLBasedPasses(
         mpm.add(new HandleFRemInstructions());
     }
 
-    mpm.add(new JointMatrixFuncsResolutionPass(pContext));
+    mpm.add(new JointMatrixFuncsResolutionPass());
 
+    mpm.add(new NamedBarriersResolution(pContext->platform.getPlatformInfo().eProductFamily));
     mpm.add(new PreBIImportAnalysis());
     mpm.add(createTimeStatsCounterPass(pContext, TIME_Unify_BuiltinImport, STATS_COUNTER_START));
     mpm.add(createBuiltInImportPass(std::move(BuiltinGenericModule), std::move(BuiltinSizeModule)));
@@ -360,7 +387,7 @@ static void CommonOCLBasedPasses(
         // Report undef references after setting func attribs for import linking
         mpm.add(new UndefinedReferencesPass());
 
-        if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
+        if (!IGC::ForceAlwaysInline())
         {
             int Threshold = IGC_GET_FLAG_VALUE(OCLInlineThreshold);
             mpm.add(createFunctionInliningPass(Threshold));
@@ -375,6 +402,8 @@ static void CommonOCLBasedPasses(
         // Check after GlobalDCE in case of doubles in dead functions
         mpm.add(new ErrorCheck());
 
+        mpm.add(new LowerInvokeSIMD());
+
         // Fix illegal argument/return types in function calls not already inlined.
         // Structs/arrays are not allowed to be passed by value.
         // Return types are not allowed to be more than 64-bits.
@@ -385,10 +414,7 @@ static void CommonOCLBasedPasses(
             mpm.add(new LegalizeFunctionSignatures());
         }
 
-        if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
-        {
-            mpm.add(createProcessBuiltinMetaDataPass());
-        }
+        mpm.add(createProcessBuiltinMetaDataPass());
         mpm.add(new PurgeMetaDataUtils());
     }
 
@@ -414,7 +440,13 @@ static void CommonOCLBasedPasses(
         mpm.add(createResolveGASPass());
 
         if (IGC_IS_FLAG_ENABLED(EnableLowerGPCallArg))
+        {
+            if (IGC_IS_FLAG_ENABLED(DetectCastToGAS))
+                mpm.add(createCastToGASAnalysisPass());
             mpm.add(createLowerGPCallArg());
+        }
+
+        mpm.add(createGASRetValuePropagatorPass());
 
         // Run another round of constant breaking as GAS resolving may generate constants (constant address)
         mpm.add(new BreakConstantExpr());
@@ -427,6 +459,8 @@ static void CommonOCLBasedPasses(
     mpm.add(new BreakConstantExpr());
 
     mpm.add(CreateFoldKnownWorkGroupSizes());
+
+    mpm.add(new ResolveSampledImageBuiltins());
 
     // 64-bit atomics have to be resolved before AddImplicitArgs pass as it uses
     // local ids for spin lock initialization
@@ -448,12 +482,14 @@ static void CommonOCLBasedPasses(
     mpm.add(new ExtensionArgAnalysis());
     mpm.add(new DeviceEnqueueFuncsAnalysis());
     mpm.add(createGenericAddressAnalysisPass());
-    if (IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE)
-    {
-        mpm.add(new BuiltinCallGraphAnalysis());
-    }
+
+    mpm.add(new BuiltinCallGraphAnalysis());
+
+    mpm.add(new ResolveOCLRaytracingBuiltins());
+    mpm.add(createRayTracingIntrinsicAnalysisPass());
     // Adding implicit args based on Analysis passes
     mpm.add(new AddImplicitArgs());
+    mpm.add(createRayTracingIntrinsicResolutionPass());
 
     // Resolution passes
     mpm.add(new WIFuncResolution());
@@ -461,6 +497,8 @@ static void CommonOCLBasedPasses(
     mpm.add(new ResolveOCLAtomics());
     mpm.add(new ResourceAllocator());
     mpm.add(new SubGroupFuncsResolution());
+    mpm.add(createDpasFuncsResolutionPass());
+    mpm.add(createLSCFuncsResolutionPass());
 
     // Run InlineLocals and GenericAddressDynamic together
     mpm.add(new InlineLocalsResolution());
@@ -508,6 +546,10 @@ static void CommonOCLBasedPasses(
     // TODO: Run CheckInstrTypes after builtin import to determine if builtins have allocas.
     mpm.add(createSROAPass());
     mpm.add(createIGCInstructionCombiningPass());
+    if (pContext->m_InternalOptions.KernelDebugEnable)
+    {
+        mpm.add(new ImplicitGIDRestoring());
+    }
     // See the comment above (it's copied as is).
     // Instcombine can create constant expressions, which are not handled by the program scope constant resolution pass.
     // For example, in InsertDummyKernelForSymbolTablePass addresses of indirectly called functions
@@ -535,7 +577,6 @@ static void CommonOCLBasedPasses(
 
     mpm.add(createLowerSwitchPass());
     mpm.add(createTypeLegalizerPass());
-
     mpm.run(*pContext->getModule());
 
     // Following functions checks whether -g option is specified.

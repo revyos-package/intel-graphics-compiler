@@ -72,14 +72,7 @@ void PromoteStatelessToBindless::CheckPrintfBuffer(Function& F)
     MetaDataUtils* MdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     ImplicitArgs implicitArgs(F, MdUtils);
 
-    if (implicitArgs.isImplicitArgExist(ImplicitArg::PRINTF_BUFFER))
-    {
-        m_PrintfBuffer = implicitArgs.getImplicitArg(F, ImplicitArg::PRINTF_BUFFER);
-    }
-    else
-    {
-        m_PrintfBuffer = nullptr;
-    }
+    m_PrintfBuffer = implicitArgs.getImplicitArgValue(F, ImplicitArg::PRINTF_BUFFER, MdUtils);
 }
 
 void PromoteStatelessToBindless::GetAccessInstToSrcPointerMap(Instruction* inst, Value* resourcePtr)
@@ -122,7 +115,6 @@ void PromoteStatelessToBindless::GetAccessInstToSrcPointerMap(Instruction* inst,
         !isa<Argument>(srcPtr))
     {
         // Cannot trace the resource pointer back to it's source, cannot promote
-        IGC_ASSERT_MESSAGE(0, "Stateless buffer pointer not traceable, cannot promote stateless to bindless");
         return;
     }
 
@@ -162,11 +154,6 @@ void PromoteStatelessToBindless::PromoteStatelessToBindlessBuffers(Function& F) 
         Instruction* accessInst = cast<Instruction>(inst.first);
         Argument* srcPtr = cast<Argument>(inst.second);
 
-        if (!modMD->compOpt.UseLegacyBindlessMode)
-        {
-            srcPtr = implicitArgs.getNumberedImplicitArg(F, ImplicitArg::BINDLESS_OFFSET, srcPtr->getArgNo());
-        }
-
         Value* nullSrcPtr = ConstantPointerNull::get(cast<PointerType>(srcPtr->getType()));
         accessInst->replaceUsesOfWith(srcPtr, nullSrcPtr);
         if (modMD->FuncMD.find(&F) != modMD->FuncMD.end())
@@ -188,18 +175,20 @@ void PromoteStatelessToBindless::PromoteStatelessToBindlessBuffers(Function& F) 
         Instruction* accessInst = cast<Instruction>(inst.first);
         Argument* srcPtr = cast<Argument>(inst.second);
 
-        if (!modMD->compOpt.UseLegacyBindlessMode)
-        {
-            srcPtr = implicitArgs.getNumberedImplicitArg(F, ImplicitArg::BINDLESS_OFFSET, srcPtr->getArgNo());
-        }
-
         // Get the base bindless pointer
         IGCIRBuilder<> builder(accessInst);
         Value* resourcePtr = IGC::GetBufferOperand(accessInst);
         unsigned bindlessAS = IGC::EncodeAS4GFXResource(*UndefValue::get(builder.getInt32Ty()), IGC::BINDLESS);
         PointerType* basePointerType = PointerType::get(resourcePtr->getType()->getPointerElementType(), bindlessAS);
-        Value* basePointer = builder.CreatePointerCast(srcPtr, basePointerType);
         Value* bufferOffset = builder.CreatePtrToInt(resourcePtr, builder.getInt32Ty());
+
+        Value* basePointer = nullptr;
+        if (!modMD->compOpt.UseLegacyBindlessMode) {
+            Argument * srcOffset = implicitArgs.getNumberedImplicitArg(F, ImplicitArg::BINDLESS_OFFSET, srcPtr->getArgNo());
+            basePointer = builder.CreateIntToPtr(srcOffset, basePointerType);
+        } else {
+            basePointer = builder.CreatePointerCast(srcPtr, basePointerType);
+        }
 
         if (LoadInst * load = dyn_cast<LoadInst>(accessInst))
         {

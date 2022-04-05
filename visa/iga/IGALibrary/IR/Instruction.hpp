@@ -123,6 +123,7 @@ namespace iga
         void setInidirectSource(
             SourceIndex srcIx,
             SrcModifier srcMod,
+            RegName regName,
             RegRef reg,
             int16_t m_immOffset,
             Region rgn,
@@ -205,6 +206,8 @@ namespace iga
 
         // true for madm or math.invm and math.rsqrtm
         bool               isMacro()           const;
+        // true if any of dst or src uses DF type
+        bool               isDF()              const;
         // execution width info
         ExecSize           getExecSize()       const {return m_execSize;}
         ChannelOffset      getChannelOffset()  const {return m_chOff;}
@@ -248,6 +251,7 @@ namespace iga
         bool               isBranching() const {return getOpSpec().isBranching();}
 
         bool               isMovWithLabel() const;
+
 
         SWSB::InstType     getSWSBInstType(SWSB_ENCODE_MODE mode) const;
 

@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 #ifndef TARGET_GENX_H
 #define TARGET_GENX_H
+
 #include "visa_igc_common_header.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
@@ -20,6 +21,10 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/LoopInfo.h"
+
+#include "vc/Utils/GenX/TypeSize.h"
+#include "vc/Utils/GenX/IntrinsicsWrapper.h"
+
 #include <string>
 
 namespace llvm {
@@ -32,7 +37,6 @@ class DominatorTree;
 class formatted_raw_ostream;
 class Function;
 class FunctionGroup;
-class FunctionGroupPass;
 class FunctionPass;
 class GenXSubtarget;
 class Instruction;
@@ -52,14 +56,18 @@ enum BalingKind {
 };
 
 FunctionPass *createGenXPrinterPass(raw_ostream &O, const std::string &Banner);
-FunctionGroupPass *createGenXGroupPrinterPass(raw_ostream &O, const std::string &Banner);
-FunctionPass *createGenXAnalysisDumperPass(FunctionPass *Analysis, const char *Suffix);
-FunctionGroupPass *createGenXGroupAnalysisDumperPass(FunctionGroupPass *Analysis, const char *Suffix);
+ModulePass *createGenXGroupPrinterPass(raw_ostream &O,
+                                       const std::string &Banner);
+FunctionPass *createGenXAnalysisDumperPass(FunctionPass *Analysis,
+                                           StringRef DumpNamePrefix,
+                                           StringRef DumpNameSuffix);
+ModulePass *createGenXModuleAnalysisDumperPass(ModulePass *Analysis,
+                                               StringRef DumpNamePrefix,
+                                               StringRef DumpNameSuffix);
 
 FunctionPass *createGenXCFSimplificationPass();
 ModulePass *createGenXEarlySimdCFConformancePass();
 FunctionPass *createGenXReduceIntSizePass();
-FunctionPass *createGenXInstCombineCleanup();
 FunctionPass *createGenXInlineAsmLoweringPass();
 FunctionPass *createGenXLoweringPass();
 FunctionPass *createGenXVectorCombinerPass();
@@ -74,6 +82,7 @@ FunctionPass *createGenXPrologEpilogInsertionPass();
 FunctionPass *createGenXLegalizationPass();
 ModulePass *createGenXEmulatePass();
 ModulePass *createGenXEmulationImportPass();
+ModulePass *createGenXEmulationModulePreparePass();
 FunctionPass *createGenXDeadVectorRemovalPass();
 FunctionPass *createGenXPatternMatchPass();
 FunctionPass *createGenXPostLegalizationPass();
@@ -83,29 +92,31 @@ FunctionPass *createGenXPromotePredicatePass();
 FunctionPass *createGenXIMadPostLegalizationPass();
 FunctionPass *createGenXAggregatePseudoLoweringPass();
 ModulePass *createGenXModulePass();
-FunctionGroupPass *createGenXLateSimdCFConformancePass();
-FunctionGroupPass *createGenXLivenessPass();
+ModulePass *createGenXLateSimdCFConformanceWrapperPass();
+ModulePass *createGenXLivenessWrapperPass();
 FunctionPass *createGenXLoadStoreLoweringPass();
-ModulePass *createGenXFunctionPointersLoweringPass();
-FunctionGroupPass *createGenXCategoryPass();
-FunctionGroupPass *createGenXGroupBalingPass(BalingKind Kind, GenXSubtarget *ST);
-FunctionGroupPass *createGenXUnbalingPass();
-FunctionGroupPass *createGenXDepressurizerPass();
-FunctionGroupPass *createGenXLateLegalizationPass();
-FunctionGroupPass *createGenXNumberingPass();
-FunctionGroupPass *createGenXLiveRangesPass();
-FunctionGroupPass *createGenXRematerializationPass();
-FunctionGroupPass *createGenXCoalescingPass();
-FunctionGroupPass *createGenXAddressCommoningPass();
-FunctionGroupPass *createGenXArgIndirectionPass();
+ModulePass *createGenXCategoryWrapperPass();
+ModulePass *createGenXGroupBalingWrapperPass(BalingKind Kind,
+                                             GenXSubtarget *ST);
+ModulePass *createGenXUnbalingWrapperPass();
+ModulePass *createGenXDepressurizerWrapperPass();
+ModulePass *createGenXLateLegalizationWrapperPass();
+ModulePass *createGenXNumberingWrapperPass();
+ModulePass *createGenXLiveRangesWrapperPass();
+ModulePass *createGenXRematerializationWrapperPass();
+ModulePass *createGenXCoalescingWrapperPass();
+ModulePass *createGenXAddressCommoningWrapperPass();
+ModulePass *createGenXArgIndirectionWrapperPass();
 FunctionPass *createGenXTidyControlFlowPass();
-FunctionGroupPass *createGenXVisaRegAllocPass();
-FunctionGroupPass *createGenXCisaBuilderPass();
+ModulePass *createGenXVisaRegAllocWrapperPass();
+ModulePass *createGenXCisaBuilderWrapperPass();
 ModulePass *createGenXFinalizerPass(raw_pwrite_stream &o);
 ModulePass *createGenXDebugInfoPass();
 ModulePass *createGenXGlobalValueLoweringPass();
 ModulePass *createGenXPromoteStatefulToBindlessPass();
 ModulePass *createGenXStackUsagePass();
+ModulePass *createGenXStructSplitterPass();
+FunctionPass *createGenXPredRegionLoweringPass();
 
 namespace genx {
 
@@ -113,13 +124,12 @@ namespace genx {
 enum Signedness {
   DONTCARESIGNED = 3, SIGNED = 1, UNSIGNED = 2
 };
-
-constexpr unsigned BoolBits  = 1;
-constexpr unsigned ByteBits  = 8;
-constexpr unsigned WordBits  = 16;
-constexpr unsigned DWordBits = 32;
-constexpr unsigned QWordBits = 64;
-constexpr unsigned OWordBits = 128;
+constexpr unsigned BoolBits = vc::BoolBits;
+constexpr unsigned ByteBits = vc::ByteBits;
+constexpr unsigned WordBits = vc::WordBits;
+constexpr unsigned DWordBits = vc::DWordBits;
+constexpr unsigned QWordBits = vc::QWordBits;
+constexpr unsigned OWordBits = vc::OWordBits;
 
 constexpr unsigned ByteBytes = ByteBits / ByteBits;
 constexpr unsigned WordBytes = WordBits / ByteBits;
@@ -141,7 +151,7 @@ constexpr int G4_MAX_ADDR_IMM = 511;
 constexpr int G4_MIN_ADDR_IMM = -512;
 
 // Default GRF Width if subtarget is not available
-constexpr unsigned defaultGRFWidth = 32;
+constexpr unsigned defaultGRFByteSize = 32;
 
 // describe integer vector immediate (V, UV)
 enum ImmIntVec : int8_t {
@@ -152,9 +162,6 @@ enum ImmIntVec : int8_t {
   MaxSInt = (1 << (ElemSize - 1)) - 1,
   MinSInt = -(1 << (ElemSize - 1))
 };
-
-// Name of BSS predefined VISA variable represented as a global.
-constexpr const char BSSVariableName[] = "llvm.genx.predefined.bss";
 
 } // End genx namespace
 } // End llvm namespace

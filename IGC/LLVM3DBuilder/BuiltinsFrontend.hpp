@@ -23,6 +23,8 @@ SPDX-License-Identifier: MIT
 #include "inc/common/igfxfmid.h"
 #include "common/IGCIRBuilder.h"
 #include "../common/EmUtils.h"
+#include "../../../skuwa/iacm_g10_rev_id.h"
+#include "../../../skuwa/iacm_g11_rev_id.h"
 
 struct genplatform
 {
@@ -34,6 +36,7 @@ public:
     GFXCORE_FAMILY GetPlatformFamily() const { return m_platformInfo->eRenderCoreFamily; }
     bool hasHDCSupportForTypedReads() const { return m_platformInfo->eRenderCoreFamily >= IGFX_GEN10_CORE; }
     bool hasHDCSupportForTypedReadsUnormSnormToFloatConversion() const;
+    bool hasSupportForAllOCLImageFormats() const;
 };
 
 inline bool genplatform::hasHDCSupportForTypedReadsUnormSnormToFloatConversion() const
@@ -41,6 +44,18 @@ inline bool genplatform::hasHDCSupportForTypedReadsUnormSnormToFloatConversion()
     return m_platformInfo->eRenderCoreFamily >= IGFX_GEN10_CORE;
 }
 
+inline bool genplatform::hasSupportForAllOCLImageFormats() const
+{
+    bool isDG2B0Plus = SI_WA_FROM(m_platformInfo->usRevId, ACM_G10_GT_REV_ID_B0);
+    bool isDG2C0Plus = SI_WA_FROM(m_platformInfo->usRevId, ACM_G10_GT_REV_ID_C0);
+    bool isDG2G11EUConfig = GFX_IS_DG2_G11_CONFIG(m_platformInfo->usDeviceID);
+    if ((m_platformInfo->eProductFamily == IGFX_DG2 && isDG2C0Plus) ||
+        (m_platformInfo->eProductFamily == IGFX_DG2 && isDG2G11EUConfig && isDG2B0Plus))
+    {
+        return true;
+    }
+    return m_platformInfo->eRenderCoreFamily >= IGFX_XE_HPC_CORE;
+}
 
 class SampleParamsFromCube
 {
@@ -348,6 +363,10 @@ public:
 
     llvm::Value* Create_SyncThreadGroup();
     llvm::Value* Create_FlushSampler();
+    llvm::Value* Create_LscFence(
+        llvm::Value* SFID,
+        llvm::Value* FenceOp,
+        llvm::Value* Scope);
     llvm::Value* Create_MemoryFence(
         bool commit,
         bool flushRWDataCache,
@@ -432,6 +451,7 @@ public:
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
         llvm::Value* int32_offsetW,
+        bool feedback_enabled = false,
         llvm::Type* returnType = nullptr);
 
     SampleD_DC_FromCubeParams Prepare_SAMPLE_D_DC_Cube_Params(SampleD_DC_FromCubeParams& params);
@@ -509,6 +529,7 @@ public:
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
         llvm::Value* int32_offsetW,
+        bool feedback_enabled = false,
         llvm::Type* returnType = nullptr);
 
     llvm::CallInst* Create_SAMPLEC_LZ(
@@ -532,6 +553,7 @@ public:
         llvm::Value* float_address_3,
         llvm::Value* int32_textureIdx_356,
         llvm::Value* int32_sampler_357,
+        bool feedback_enabled = false,
         llvm::Type* returnType = nullptr);
 
     llvm::CallInst* Create_gather4(
@@ -624,7 +646,8 @@ public:
         llvm::Value* int32_sampler_357,
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
-        llvm::Value* int32_srcChannel);
+        llvm::Value* int32_srcChannel,
+        bool feedback_enabled = false);
 
     llvm::Value* Create_gather4PositionOffsetsC(
         llvm::Value* float_reference_0,
@@ -636,7 +659,8 @@ public:
         llvm::Value* int32_sampler_357,
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
-        llvm::Value* int32_srcChannel);
+        llvm::Value* int32_srcChannel,
+        bool feedback_enabled = false);
 
     llvm::CallInst* Create_SAMPLEBC(
         llvm::Value* float_ref_value,
@@ -650,6 +674,7 @@ public:
         llvm::Value* int32_offsetU,
         llvm::Value* int32_offsetV,
         llvm::Value* int32_offsetW,
+        bool feedback_enabled = false,
         llvm::Type* returnType = nullptr);
 
     llvm::Value* create_indirectLoad(
@@ -674,21 +699,12 @@ public:
     llvm::Value* CreateF16TOF32(
         llvm::Value* f16_src);
 
-    // Remove once frontends switch to using CreateTypedImageDataConversion()
-    llvm::Value* Create_LdUAVTypedFormatConversion(
-        llvm::Value* pLdUAVTypedResult,
-        IGC::SURFACE_FORMAT format);
-
     IGC::SURFACE_FORMAT GetSubstituteImageFormat(
-        const IGC::SURFACE_FORMAT format) const;
-
-    bool SubstituteResourceRequiresDoubleUSize(
         const IGC::SURFACE_FORMAT format) const;
 
     llvm::Value* CreateImageDataConversion(
         IGC::SURFACE_FORMAT format,
-        llvm::Value* data,
-        llvm::Value* dataHi);
+        llvm::Value* data);
 
     llvm::Value* Create_UBFE(
         llvm::Value* int32_width,
@@ -793,23 +809,6 @@ private:
 
     llvm::Constant* GetSnormFactor(unsigned bits);
     llvm::Constant* GetUnormFactor(unsigned bits);
-
-    llvm::Value* CreateGen9PlusImageDataConversion(
-        IGC::SURFACE_FORMAT surfaceFormat,
-        llvm::Value* pLdUAVTypedResult);
-
-    llvm::Value* CreateGen8ImageDataConversion(
-        IGC::SURFACE_FORMAT format,
-        llvm::Value* data);
-
-    llvm::Value* CreateGen8ImageDataConversion(
-        IGC::SURFACE_FORMAT format,
-        llvm::Value* data,
-        llvm::Value* dataHi);
-
-    void GetGen8ImageFormatInfo(
-        const IGC::SURFACE_FORMAT format,
-        ImageFormatInfo&          info) const;
 
     bool NeedConversionFor128FormatRead(
         IGC::SURFACE_FORMAT format) const;

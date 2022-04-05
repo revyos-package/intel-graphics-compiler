@@ -644,23 +644,12 @@ namespace IGC
 
         void registerVISA(IGC::VISAModule* M);
 
-        llvm::Function* GetFunction(VISAModule* M)
-        {
-            auto it = VISAModToFunc.find(M);
-            if (it != VISAModToFunc.end())
-                return (*it).second;
-            return nullptr;
-        }
+        const llvm::Function* GetPrimaryEntry() const;
+        llvm::Function* GetFunction(const VISAModule* M) const;
+        VISAModule* GetVISAModule(const llvm::Function* F) const;
 
-        VISAModule* GetVISAModule(const llvm::Function* F)
-        {
-            for (auto& p : VISAModToFunc)
-            {
-                if (p.second == F)
-                    return p.first;
-            }
-            return nullptr;
-        }
+        using DataVector = std::vector<unsigned char>;
+        void ExtractConstantData(const llvm::Constant* ConstVal, DataVector &R) const;
 
         /// Construct imported_module or imported_declaration DIE.
         void constructThenAddImportedEntityDIE(CompileUnit* TheCU, llvm::DIImportedEntity* IE);
@@ -731,7 +720,7 @@ namespace IGC
         unsigned int lowPc = 0, highPc = 0;
 
         // SIMD width
-        unsigned short simdWidth = 0;   // Not set until IGC_IS_FLAG_ENABLED(EnableSIMDLaneDebugging)
+        unsigned short simdWidth = 0;
 
         const DbgDecoder* getDecodedDbg() { return decodedDbg; }
         void setDecodedDbg(const DbgDecoder* d) { decodedDbg = d; }

@@ -228,6 +228,7 @@ void PrivateMemoryResolution::getAnalysisUsage(llvm::AnalysisUsage& AU) const
     AU.setPreservesCFG();
     AU.addRequired<MetaDataUtilsWrapper>();
     AU.addRequired<CodeGenContextWrapper>();
+    AU.addRequired<llvm::CallGraphWrapperPass>();
 }
 
 bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
@@ -253,6 +254,16 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
     bool supportsScratchSpacePrivateMemory = Ctx.m_DriverInfo.supportsScratchSpacePrivateMemory();
     bool supportsStatelessSpacePrivateMemory = Ctx.m_DriverInfo.supportsStatelessSpacePrivateMemory();
     bool bOCLLegacyStatelessCheck = true;
+
+    if (supportsScratchSpacePrivateMemory) {
+        if (Ctx.type == ShaderType::OPENCL_SHADER) {
+            if (Ctx.platform.hasScratchSurface() && !Ctx.m_DriverInfo.UseScratchSpaceForATSPlus()) {
+                supportsScratchSpacePrivateMemory = Ctx.platform.useScratchSpaceForOCL();
+                //IGC has some legacy cases where stateless private memory must be used. This flag is to remove them. If regression happens, revert it.
+                bOCLLegacyStatelessCheck = !(Ctx.platform.hasScratchSurface() && IGC_IS_FLAG_ENABLED(RemoveLegacyOCLStatelessPrivateMemoryCases));
+            }
+        }
+    }
 
     if (Ctx.allocatePrivateAsGlobalBuffer())
     {
@@ -342,11 +353,12 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
             Ctx.type == ShaderType::DOMAIN_SHADER ||
             Ctx.type == ShaderType::GEOMETRY_SHADER;
 
-        // Start with simd16, which allows the medium size of space per WI
+        //FIXME: Below heuristics is not a clean design. Revisit this!
+        //Start with simd16 or simd32 correspondingly if MinDispatchMode() is 8 or 16, which allows the medium size of space per WI
         // (simd8: largest, simd32, smallest). In doing so, there will be
         // some space left for spilling in simd8 if spilling happens.
         int32_t simd_size = isGeometryStageShader ? numLanes(Ctx.platform.getMinDispatchMode()) :
-            numLanes(SIMDMode::SIMD16);
+            (Ctx.platform.getMinDispatchMode() == SIMDMode::SIMD8 ? numLanes(SIMDMode::SIMD16) : numLanes(SIMDMode::SIMD32));
         const int32_t subGrpSize = funcInfoMD->getSubGroupSize()->getSIMD_size();
         if (subGrpSize > simd_size)
             simd_size = std::min(subGrpSize, static_cast<int32_t>(numLanes(SIMDMode::SIMD32)));
@@ -355,6 +367,11 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
             groupSize = IGCMD::IGCMetaDataHelper::getThreadGroupSizeHint(*m_pMdUtils, &F);
         if (groupSize > simd_size)
             simd_size = std::min(groupSize, static_cast<int32_t>(numLanes(SIMDMode::SIMD32)));
+
+        // if one API doesn't support stateless, we should try to use smallest dispatch mode
+        // which can hold more pvt_data to avoid error out.
+        if (Ctx.platform.hasScratchSurface() && Ctx.m_DriverInfo.supportsSeparatingSpillAndPrivateScratchMemorySpace() && !supportsStatelessSpacePrivateMemory)
+            simd_size = numLanes(Ctx.platform.getMinDispatchMode());
 
         unsigned maxScratchSpaceBytes = Ctx.platform.maxPerThreadScratchSpace();
         unsigned scratchSpaceLimitPerWI = maxScratchSpaceBytes / simd_size;
@@ -366,6 +383,18 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
         const unsigned int totalPrivateMemPerWI = m_ModAllocaInfo->getTotalPrivateMemPerWI(&F);
 
         if (totalPrivateMemPerWI > scratchSpaceLimitPerWI) {
+            // IGC errors out when we are trying to remove statelesspvtmem of OCL (even though OCl still supports statelesspvtmem).
+            // This assertion tests a scenario where (pvt_mem_usage > 256k) while statelessprivatememory is not supported.
+            IGC_ASSERT_EXIT(bOCLLegacyStatelessCheck);
+
+            if (!supportsStatelessSpacePrivateMemory)
+            {
+                // For XeHP_SDV and above, if any API doesn't support statelesspvtmem, error it out if we find a case where (pvt_mem > 256k).
+                // This assertion found a scenario where (pvt_mem_usage > 256k) while statelessprivatememory is not supported.
+                IGC_ASSERT(0);
+                return true;
+            }
+
             return false;
         }
     }
@@ -429,6 +458,98 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
         }
         // Resolve collected alloca instructions for current function
         changed |= resolveAllocaInstructions(hasStackCall || hasVLA);
+    }
+
+    if (FGA)
+    {
+        auto DL = M.getDataLayout();
+        auto& CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+        // lambda to recursively calculate the max private memory usage for each call path
+        std::function<uint32_t(Function*)> AnalyzeCGPrivateMemUsage =
+            [&AnalyzeCGPrivateMemUsage, &modMD, &CG, &DL, &Ctx, &M](Function* F)->uint32_t
+        {
+            // Not a valid function, just return 0
+            if (!F || F->isDeclaration())
+                return 0;
+
+            // No function metadata found, return 0
+            auto funcIt = modMD.FuncMD.find(F);
+            if (funcIt == modMD.FuncMD.end())
+                return 0;
+
+            // Stack offsets should be OWORD aligned
+            uint32_t currFuncPrivateMem = (uint32_t)(funcIt->second.privateMemoryPerWI);
+            currFuncPrivateMem = iSTD::Align(currFuncPrivateMem, SIZE_OWORD);
+            CallGraphNode* Node = CG[F];
+
+            // Function has recursion, don't search CG further
+            if (F->hasFnAttribute("hasRecursion"))
+                return currFuncPrivateMem;
+
+            // Reached a leaf, return the private memory used by the current function
+            if (Node->empty())
+                return currFuncPrivateMem;
+
+            SmallSet<Function*, 16> childFuncs;
+            // Collect the list of all direct callees
+            for (auto FI = Node->begin(), FE = Node->end(); FI != FE; ++FI)
+            {
+                if (Function* childF = FI->second->getFunction())
+                {
+                    childFuncs.insert(childF);
+                }
+            }
+
+            // Recursively calculate the private mem usage of all callees
+            uint32_t maxSize = currFuncPrivateMem;
+            for (auto childF : childFuncs)
+            {
+                IGC_ASSERT(childF);
+                // As a conservative measure, assume all stackcall args are stored on private memory
+                uint32_t argSize = 0;
+                for (auto AI = childF->arg_begin(), AE = childF->arg_end(); AI != AE; ++AI)
+                {
+                    // Argument offsets are also OWORD aligned
+                    argSize += iSTD::Align(static_cast<DWORD>(DL.getTypeAllocSize(AI->getType())), SIZE_OWORD);
+                }
+                uint32_t stackFrameSize = currFuncPrivateMem + argSize + SIZE_OWORD;
+                uint32_t size = stackFrameSize + AnalyzeCGPrivateMemUsage(childF);
+                maxSize = std::max(maxSize, size);
+            }
+            return maxSize;
+        };
+
+        // Calculate the max private mem used by each function group
+        // by analyzing the call depth. Store this info in the FunctionGroup container.
+        // This info is needed in EmitVISAPass to determine how much private memory to allocate
+        // per SIMD per thread.
+        for (auto GI = FGA->begin(), GE = FGA->end(); GI != GE; ++GI)
+        {
+            FunctionGroup* FG = *GI;
+            Function* pKernel = FG->getHead();
+            uint32_t maxPrivateMem = modMD.FuncMD[pKernel].privateMemoryPerWI;
+
+            if (FG->hasStackCall())
+            {
+                // Analyze call depth for stack memory required
+                maxPrivateMem = AnalyzeCGPrivateMemUsage(pKernel);
+
+                // If indirect calls or recursions exist, add additional 4KB,
+                // and hope we don't run out.
+                if (FG->hasIndirectCall() || FG->hasRecursion())
+                {
+                    maxPrivateMem += (4 * 1024);
+                }
+            }
+            if (FG->hasVariableLengthAlloca())
+            {
+                // Add another 1KB if there are VLAs
+                maxPrivateMem += 1024;
+            }
+            maxPrivateMem = std::max(maxPrivateMem, (uint32_t)(IGC_GET_FLAG_VALUE(ForcePerThreadPrivateMemorySize)));
+            FG->setMaxPrivateMemOnStack((unsigned)maxPrivateMem);
+        }
     }
 
     if (changed)
@@ -550,6 +671,11 @@ static void sinkAllocaSingleUse(SmallVectorImpl<AllocaInst*>& Allocas) {
             bool Skip = false;
             SmallVector<Instruction*, 8> UInsts;
             auto UI = dyn_cast<Instruction>(A);
+            // can't sink phi nodes to other BBs
+            // can't sink loads since we don't check for stores on the way
+            if (isa<PHINode>(UI) || UI->mayReadFromMemory())
+                continue;
+
             for (auto U : UI->users()) {
                 auto UUI = dyn_cast<Instruction>(U);
                 //can't sink the use in the same BB where a PHI node exists
@@ -918,6 +1044,12 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
     // What is the size limit of this scratch memory? If we use >= 128 KB for private data, then we have
     // no space left for later spilling.
     bool useStateless = false;
+
+    if (Ctx.type != ShaderType::OPENCL_SHADER && Ctx.platform.hasScratchSurface()) {
+        useStateless = Ctx.m_DriverInfo.supportsStatelessSpacePrivateMemory();
+    }
+
+    //NOTE: Below if block logic is used either for SSS RW or non-OCL stateless RW
     if (modMD && (modMD->compOpt.UseScratchSpacePrivateMemory || useStateless)) {
         // We want to use this pass to lower alloca instruction
         // to remove some redundant instruction caused by alloca. For original approach,
@@ -931,52 +1063,54 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         Instruction* simdSize = entryBuilder.CreateCall(simdSizeFunc, llvm::None, VALUE_NAME("simdSize"));
 
         Value* privateBase = nullptr;
+        ADDRESS_SPACE scratchMemoryAddressSpace = ADDRESS_SPACE_PRIVATE;
         if (modMD->compOpt.UseScratchSpacePrivateMemory)
         {
-            Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, &Ctx);
-            Value* r0_5 = entryBuilder.CreateExtractElement(r0Val, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
-            privateBase = entryBuilder.CreateAnd(r0_5, ConstantInt::get(typeInt32, 0xFFFFFC00), VALUE_NAME("privateBase"));
-        }
-
-        ADDRESS_SPACE scratchMemoryAddressSpace = ADDRESS_SPACE_PRIVATE;
-        if (Ctx.platform.hasScratchSurface())
-        {
-            if (modMD->compOpt.UseScratchSpacePrivateMemory)
+            if (Ctx.platform.hasScratchSurface())
             {
+                // when we use per-thread scratch-surface with SSH bindless
+                // R0_5[32:10] is the offset of the surface-state for scratch
+                // surface slot#0, NOT the offset into the surface.
                 privateBase = entryBuilder.getInt32(0);
             }
-            else if (nullptr == privateBase)
-            {
-                scratchMemoryAddressSpace = ADDRESS_SPACE_GLOBAL;
-                modMD->compOpt.UseStatelessforPrivateMemory = true;
-
-                const uint32_t dwordSizeInBits = 32;
-                const uint32_t pointerSizeInDwords = Ctx.getRegisterPointerSizeInBits(scratchMemoryAddressSpace) / dwordSizeInBits;
-                IGC_ASSERT(pointerSizeInDwords <= 2);
-                llvm::Type* resultType = entryBuilder.getInt32Ty();
-                if (pointerSizeInDwords > 1)
-                {
-                    resultType = IGCLLVM::FixedVectorType::get(resultType, 2);
-                }
-                Function* pFunc = GenISAIntrinsic::getDeclaration(
-                    m_currFunction->getParent(),
-                    GenISAIntrinsic::GenISA_RuntimeValue,
-                    resultType);
-                privateBase = entryBuilder.CreateCall(pFunc, entryBuilder.getInt32(modMD->MinNOSPushConstantSize - pointerSizeInDwords));
-                if (privateBase->getType()->isVectorTy())
-                {
-                    privateBase = entryBuilder.CreateBitCast(privateBase, entryBuilder.getInt64Ty());
-                }
-
-                ConstantInt* totalPrivateMemPerWIValue = ConstantInt::get(typeInt32, totalPrivateMemPerWI);
-                Value* totalPrivateMemPerThread = entryBuilder.CreateMul(simdSize, totalPrivateMemPerWIValue, VALUE_NAME("totalPrivateMemPerThread"));
-
-                Function* pHWTIDFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_hw_thread_id_alloca, Type::getInt32Ty(C));
-                llvm::Value* threadId = entryBuilder.CreateCall(pHWTIDFunc);
-                llvm::Value* perThreadOffset = entryBuilder.CreateMul(threadId, totalPrivateMemPerThread, VALUE_NAME("perThreadOffset"));
-                perThreadOffset = entryBuilder.CreateZExt(perThreadOffset, privateBase->getType());
-                privateBase = entryBuilder.CreateAdd(privateBase, perThreadOffset);
+            else
+            {   // the old mechanism
+                Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, m_pMdUtils);
+                Value* r0_5 = entryBuilder.CreateExtractElement(r0Val, ConstantInt::get(typeInt32, 5), VALUE_NAME("r0.5"));
+                privateBase = entryBuilder.CreateAnd(r0_5, ConstantInt::get(typeInt32, 0xFFFFFC00), VALUE_NAME("privateBase"));
             }
+        }
+        else
+        {
+            scratchMemoryAddressSpace = ADDRESS_SPACE_GLOBAL;
+            modMD->compOpt.UseStatelessforPrivateMemory = true;
+
+            const uint32_t dwordSizeInBits = 32;
+            const uint32_t pointerSizeInDwords = Ctx.getRegisterPointerSizeInBits(scratchMemoryAddressSpace) / dwordSizeInBits;
+            IGC_ASSERT(pointerSizeInDwords <= 2);
+            llvm::Type* resultType = entryBuilder.getInt32Ty();
+            if (pointerSizeInDwords > 1)
+            {
+                resultType = IGCLLVM::FixedVectorType::get(resultType, 2);
+            }
+            Function* pFunc = GenISAIntrinsic::getDeclaration(
+                m_currFunction->getParent(),
+                GenISAIntrinsic::GenISA_RuntimeValue,
+                resultType);
+            privateBase = entryBuilder.CreateCall(pFunc, entryBuilder.getInt32(modMD->MinNOSPushConstantSize - pointerSizeInDwords));
+            if (privateBase->getType()->isVectorTy())
+            {
+                privateBase = entryBuilder.CreateBitCast(privateBase, entryBuilder.getInt64Ty());
+            }
+
+            ConstantInt* totalPrivateMemPerWIValue = ConstantInt::get(typeInt32, totalPrivateMemPerWI);
+            Value* totalPrivateMemPerThread = entryBuilder.CreateMul(simdSize, totalPrivateMemPerWIValue, VALUE_NAME("totalPrivateMemPerThread"));
+
+            Function* pHWTIDFunc = GenISAIntrinsic::getDeclaration(m_currFunction->getParent(), GenISAIntrinsic::GenISA_hw_thread_id_alloca, Type::getInt32Ty(C));
+            llvm::Value* threadId = entryBuilder.CreateCall(pHWTIDFunc);
+            llvm::Value* perThreadOffset = entryBuilder.CreateMul(threadId, totalPrivateMemPerThread, VALUE_NAME("perThreadOffset"));
+            perThreadOffset = entryBuilder.CreateZExt(perThreadOffset, privateBase->getType());
+            privateBase = entryBuilder.CreateAdd(privateBase, perThreadOffset);
         }
 
         for (auto pAI : allocaInsts)
@@ -1052,10 +1186,13 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         return true;
     }
 
+    // Only OCL is supposed to reach here.
+    IGC_ASSERT_EXIT(ShaderType::OPENCL_SHADER == Ctx.type);
+
     // Find the implicit argument representing r0 and the private memory base.
-    Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, &Ctx);
-    Argument* privateMemArg = implicitArgs.getImplicitArg(*m_currFunction, ImplicitArg::PRIVATE_BASE);
-    // Note: for debugging purposes privateMemArg will be marked as Output to keep its liveness all time
+    Value* r0Val = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::R0, m_pMdUtils);
+    Value* privateMemPtr = implicitArgs.getImplicitArgValue(*m_currFunction, ImplicitArg::PRIVATE_BASE, m_pMdUtils);
+    // Note: for debugging purposes privateMemPtr will be marked as Output to keep its liveness all time
 
     // Resolve the call
 
@@ -1101,7 +1238,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
 
     if (IGC_IS_FLAG_ENABLED(UseOffsetInLocation) &&
         (privateOnStack == false) &&
-        (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_FORCE_INLINE))
+        (IGC::ForceAlwaysInline()))
     {
         IGC_ASSERT_MESSAGE(perThreadOffsetInst, "perThreadOffset will not be marked as Output");
         if (perThreadOffsetInst)
@@ -1134,7 +1271,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         Value* perLaneOffset = isUniform ? builder.getInt32(0) : simdLaneId;
         perLaneOffset = builder.CreateMul(perLaneOffset, ConstantInt::get(typeInt32, bufferSize), VALUE_NAME("perLaneOffset"));
         Value* totalOffset = builder.CreateAdd(bufferOffsetForThread, perLaneOffset, VALUE_NAME(pAI->getName() + ".totalOffset"));
-        Value* privateBufferGEP = builder.CreateGEP(privateMemArg, totalOffset, VALUE_NAME(pAI->getName() + ".privateBufferGEP"));
+        Value* privateBufferGEP = builder.CreateGEP(privateMemPtr, totalOffset, VALUE_NAME(pAI->getName() + ".privateBufferGEP"));
         Value* privateBuffer = builder.CreatePointerCast(privateBufferGEP, pAI->getType(), VALUE_NAME(pAI->getName() + ".privateBuffer"));
 
         auto DbgUses = llvm::FindDbgAddrUses(pAI);

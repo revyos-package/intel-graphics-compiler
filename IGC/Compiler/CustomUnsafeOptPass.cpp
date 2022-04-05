@@ -2353,6 +2353,9 @@ void CustomUnsafeOptPass::reassociateMulAdd(Function& F)
         for (auto I = BB.begin(); I != BB.end(); /*Empty*/)
         {
             Instruction* Inst = &*I++;
+            BinaryOperator* BinOp = dyn_cast<BinaryOperator>(Inst);
+            if (!BinOp || !allowUnsafeMathOpt(m_ctx, *BinOp))
+                continue;
             Value* A, * B, * C, * D;
             // Match Exp = A * B + C * D with a single use so that
             // it is benefical to fold one FSub/FAdd with A * B.
@@ -2515,6 +2518,19 @@ private:
     CodeGenContext* m_ctx;
     unsigned int m_ShaderLength;
 };
+
+#undef PASS_FLAG
+#undef PASS_DESCRIPTION
+#undef PASS_CFG_ONLY
+#undef PASS_ANALYSIS
+
+#define PASS_FLAG "igc-early-out-patterns-pass"
+#define PASS_DESCRIPTION "Early out to avoid heavy computation"
+#define PASS_CFG_ONLY false
+#define PASS_ANALYSIS false
+IGC_INITIALIZE_PASS_BEGIN(EarlyOutPatterns, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
+IGC_INITIALIZE_PASS_END(EarlyOutPatterns, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char EarlyOutPatterns::ID = 0;
 

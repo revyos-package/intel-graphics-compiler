@@ -31,7 +31,7 @@ PointsToAnalysis::PointsToAnalysis(const DECLARE_LIST &declares, unsigned int nu
     for (auto decl : declares)
     {
         //add alias check, For Alias Dcl
-        if ((decl->getRegFile() == G4_ADDRESS) &&
+        if ((decl->getRegFile() == G4_ADDRESS || decl->getRegFile() == G4_SCALAR) &&
             decl->getAliasDeclare() == NULL)  // It is a base declaration, not alias
         {
             // participate liveness analysis
@@ -46,11 +46,11 @@ PointsToAnalysis::PointsToAnalysis(const DECLARE_LIST &declares, unsigned int nu
     // assign all addr aliases the same ID as its root
     for (auto decl : declares)
     {
-        if ((decl->getRegFile() == G4_ADDRESS) &&
+        if ((decl->getRegFile() == G4_ADDRESS || decl->getRegFile() == G4_SCALAR) &&
             decl->getAliasDeclare() != NULL)
         {
             // participate liveness analysis
-            decl->getRegVar()->setId(decl->getRegVar()->getId());
+            decl->getRegVar()->setId(decl->getRootDeclare()->getRegVar()->getId());
         }
     }
 
@@ -61,7 +61,7 @@ PointsToAnalysis::PointsToAnalysis(const DECLARE_LIST &declares, unsigned int nu
 
         for (auto decl : declares)
         {
-            if ((decl->getRegFile() == G4_ADDRESS) &&
+            if ((decl->getRegFile() == G4_ADDRESS || decl->getRegFile() == G4_SCALAR) &&
                 decl->getAliasDeclare() == NULL &&
                 decl->getRegVar()->getId() != UNDEFINED_VAL)
             {
@@ -70,6 +70,7 @@ PointsToAnalysis::PointsToAnalysis(const DECLARE_LIST &declares, unsigned int nu
         }
 
         pointsToSets.resize(numAddrs);
+        addrExpSets.resize(numAddrs);
         addrPointsToSetIndex.resize(numAddrs);
         // initially each address variable has its own points-to set
         for (unsigned i = 0; i < numAddrs; i++)
@@ -79,6 +80,47 @@ PointsToAnalysis::PointsToAnalysis(const DECLARE_LIST &declares, unsigned int nu
     }
 }
 
+// This function is intended to be invoked only in GRF RA. As that ensures points-to
+// data structures are well populated and no new entry would be added to points-to
+// table. If this condition is no longer true, then this function should be modified.
+const std::unordered_map<G4_Declare*, std::vector<G4_Declare*>>& PointsToAnalysis::getPointsToMap() {
+    // return map computed earlier
+    // assume no updates are made to points-to analysis table since first update
+    if (addrTakenMap.size() > 0)
+        return addrTakenMap;
+
+    unsigned idx = 0;
+
+    // populate map from each addr reg -> addr taken targets
+    for (auto& RV : regVars)
+    {
+        auto ptsToIdx = addrPointsToSetIndex[idx];
+        for(auto& item : pointsToSets[ptsToIdx])
+            addrTakenMap[RV->getDeclare()->getRootDeclare()].push_back(item.var->getDeclare()->getRootDeclare());
+        ++idx;
+    }
+
+    return addrTakenMap;
+}
+
+const std::unordered_map<G4_Declare*, std::vector<G4_Declare*>>& PointsToAnalysis::getRevPointsToMap()
+{
+    if (revAddrTakenMap.size() > 0)
+        return revAddrTakenMap;
+
+    // call the function instead of using direct member to guarantee the map is populated
+    auto& forwardMap = getPointsToMap();
+
+    for (auto& entry : forwardMap)
+    {
+        for (auto& var : entry.second)
+        {
+            revAddrTakenMap[var].push_back(entry.first);
+        }
+    }
+
+    return revAddrTakenMap;
+}
 
 //
 //  A flow-insensitive algroithm to compute the register usage for indirect accesses.
@@ -105,8 +147,8 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
 
     // keep a list of address taken variables
     std::vector<G4_RegVar*> addrTakenDsts;
-    std::map<G4_RegVar*, G4_RegVar*> addrTakenMapping;
-    std::vector<G4_RegVar*> addrTakenVariables;
+    std::map<G4_RegVar*, std::vector<std::pair<G4_AddrExp*, unsigned char>> > addrTakenMapping;
+    std::vector< std::pair<G4_AddrExp*, unsigned char>> addrTakenVariables;
 
     for (G4_BB* bb : fg)
     {
@@ -122,9 +164,14 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                     G4_Operand* src = inst->getSrc(i);
                     if (src != NULL && src->isAddrExp())
                     {
-                        addrTakenMapping[ptr->asRegVar()] = src->asAddrExp()->getRegVar();
+                        int offset = 0;
+                        if (dst && !dst->isNullReg() && dst->getBase()->asRegVar()->getDeclare()->getRegFile() == G4_SCALAR)
+                        {
+                            offset = src->asAddrExp()->getOffset();
+                        }
+                        addrTakenMapping[ptr->asRegVar()].push_back(std::make_pair(src->asAddrExp(), offset));
                         addrTakenDsts.push_back(ptr->asRegVar());
-                        addrTakenVariables.push_back(src->asAddrExp()->getRegVar());
+                        addrTakenVariables.push_back(std::make_pair(src->asAddrExp(), offset));
                     }
                 }
             }
@@ -146,61 +193,80 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
             if (dst != NULL && dst->getRegAccess() == Direct && dst->getType() != Type_UD)
             {
                 G4_VarBase* ptr = dst->getBase();
-                if (ptr->isRegVar() && ptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS &&
+                //Dst is address variable
+                if (ptr->isRegVar() && (ptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS || ptr->asRegVar()->getDeclare()->getRegFile() == G4_SCALAR) &&
                     !ptr->asRegVar()->getDeclare()->isMsgDesc())
                 {
 
                     // dst is an address variable.  ExDesc A0 may be ignored since they are never used in indirect access
-                    if (inst->isMov())
+                    if (inst->isMov() || inst->isPseudoAddrMovIntrinsic())
                     {
-                        G4_Operand* src = inst->getSrc(0);
-                        if (src->isAddrExp())
+                        for (int i = 0; i < inst->getNumSrc(); i++)
                         {
-                            // case 1:  mov A0 &GRF
-                            G4_RegVar* addrTaken = src->asAddrExp()->getRegVar();
-                            if (addrTaken != NULL)
+                            G4_Operand* src = inst->getSrc(i);
+                            if (!src || src->isNullReg())
                             {
-                                addToPointsToSet(ptr->asRegVar(), addrTaken);
+                                continue;
                             }
-                        }
-                        else
-                        {
-                            //G4_Operand* srcPtr = src->isSrcRegRegion() ? src->asSrcRegRegion()->getBase() : src;
-                            G4_VarBase* srcPtr = src->isSrcRegRegion() ? src->asSrcRegRegion()->getBase() : nullptr;
-
-                            if (srcPtr && srcPtr->isRegVar() && srcPtr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS)
+                            if (src->isAddrExp())
                             {
-                                // case 2:  mov A0 A1
-                                // merge the two addr's points-to set together
-                                if (ptr->asRegVar()->getId() != srcPtr->asRegVar()->getId())
+                                // case 1:  mov A0 &GRF
+                                G4_RegVar* addrTaken = src->asAddrExp()->getRegVar();
+
+                                if (addrTaken != NULL)
                                 {
-                                    mergePointsToSet(srcPtr->asRegVar(), ptr->asRegVar());
+                                    unsigned char offset = 0;
+                                    if (ptr->asRegVar()->getDeclare()->getRegFile() == G4_SCALAR)
+                                    {
+                                        offset = src->asAddrExp()->getOffset();
+                                    }
+                                    addToPointsToSet(ptr->asRegVar(), src->asAddrExp(), offset);
                                 }
                             }
                             else
                             {
-                                if (srcPtr &&
-                                    srcPtr->isRegVar() &&
-                                    addrTakenMapping[srcPtr->asRegVar()] != nullptr)
+                                //G4_Operand* srcPtr = src->isSrcRegRegion() ? src->asSrcRegRegion()->getBase() : src;
+                                G4_VarBase* srcPtr = src->isSrcRegRegion() ? src->asSrcRegRegion()->getBase() : nullptr;
+
+                                if (srcPtr && srcPtr->isRegVar() && (srcPtr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS))
                                 {
-                                    addToPointsToSet(ptr->asRegVar(), addrTakenMapping[srcPtr->asRegVar()]);
+                                    // case 2:  mov A0 A1
+                                    // merge the two addr's points-to set together
+                                    if (ptr->asRegVar()->getId() != srcPtr->asRegVar()->getId())
+                                    {
+                                        mergePointsToSet(srcPtr->asRegVar(), ptr->asRegVar());
+                                    }
                                 }
                                 else
                                 {
-                                    // case 3: mov A0 0
-                                    // Initial of address register, igore the point to analysis
-                                    // FIXME: currently, vISA don't expect mov imm value to the address register. So, 0 is treated as initialization.
-                                    // If support mov A0 imm in future, 0 may be R0.
-                                    if (!(src->isImm() && (src->asImm()->getImm() == 0)))
+                                    // case ?: mov v1 A0
+                                    // case ?: mov A0 v1
+                                    if (srcPtr &&
+                                        srcPtr->isRegVar() &&
+                                        addrTakenMapping[srcPtr->asRegVar()].size() != 0)
                                     {
-                                        // case 4:  mov A0 V2
-                                        // conservatively assume address can point to anything
-                                        DEBUG_MSG("unexpected addr move for pointer analysis:\n");
-                                        DEBUG_EMIT(inst);
-                                        DEBUG_MSG("\n");
-                                        for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
+                                        for (int i = 0; i < (int)addrTakenMapping[srcPtr->asRegVar()].size(); i++)
                                         {
-                                            addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i]);
+                                            addToPointsToSet(ptr->asRegVar(), addrTakenMapping[srcPtr->asRegVar()][i].first, addrTakenMapping[srcPtr->asRegVar()][i].second);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // case 3: mov A0 0
+                                        // Initial of address register, igore the point to analysis
+                                        // FIXME: currently, vISA don't expect mov imm value to the address register. So, 0 is treated as initialization.
+                                        // If support mov A0 imm in future, 0 may be R0.
+                                        if (!(src->isImm() && (src->asImm()->getImm() == 0)))
+                                        {
+                                            // case 4:  mov A0 V2
+                                            // conservatively assume address can point to anything
+                                            DEBUG_MSG("unexpected addr move for pointer analysis:\n");
+                                            DEBUG_EMIT(inst);
+                                            DEBUG_MSG("\n");
+                                            for (int i = 0, size = (int)addrTakenVariables.size(); i < size; i++)
+                                            {
+                                                addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i].first, addrTakenVariables[i].second);
+                                            }
                                         }
                                     }
                                 }
@@ -244,8 +310,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                             if (src->isAddrExp())
                             {
                                 // case 5:  add/mul A0 &GRF src1
-                                G4_RegVar* addrTaken = src->asAddrExp()->getRegVar();
-                                addToPointsToSet(ptr->asRegVar(), addrTaken);
+                                addToPointsToSet(ptr->asRegVar(), src->asAddrExp(), 0);
                             }
                             else
                             {
@@ -267,10 +332,10 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                             // case 7:  add/mul A0 V1 V2
                             DEBUG_MSG("unexpected addr add/mul for pointer analysis:\n");
                             DEBUG_EMIT(inst);
-                            DEBUG_MSG("\n")
-                            for (G4_RegVar *addrTakenVar : addrTakenVariables)
+                            DEBUG_MSG("\n");
+                            for (int i = 0; i < (int)addrTakenVariables.size(); i++)
                             {
-                                addToPointsToSet(ptr->asRegVar(), addrTakenVar);
+                                addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i].first, 0);
                             }
                         }
                     }
@@ -280,9 +345,9 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                         DEBUG_MSG("unexpected instruction with address destination:\n");
                         DEBUG_EMIT(inst);
                         DEBUG_MSG("\n");
-                        for (G4_RegVar *addrTakenVar : addrTakenVariables)
+                        for (int i = 0; i < (int)addrTakenVariables.size(); i++)
                         {
-                            addToPointsToSet(ptr->asRegVar(), addrTakenVar);
+                            addToPointsToSet(ptr->asRegVar(), addrTakenVariables[i].first, addrTakenVariables[i].second);
                         }
                     }
                 }
@@ -292,13 +357,21 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                     {
                         G4_Operand* src = inst->getSrc(i);
                         G4_VarBase* srcPtr = (src && src->isSrcRegRegion()) ? src->asSrcRegRegion()->getBase() : nullptr;
-                        if (srcPtr != nullptr && srcPtr->isRegVar())
+                        //We don't support using "r[a0.0]" as address expression.
+                        //For instructions like following, it's not point-to propagation for simdShuffle and add64_i_i_i_i.
+                        //(W) mov (1)              simdShuffle(0,0)<1>:d  r[A0(0,0), 0]<0;1,0>:d
+                        //    pseudo_mad (16)      add64_i_i_i_i(0,0)<1>:d  0x6:w  simdShuffle(0,0)<0;0>:d  rem_i_i_i_i(0,0)<1;0>:d // $470:
+                        //    shl (16)             add64_i_i_i_i(0,0)<1>:d  add64_i_i_i_i(0,0)<1;1,0>:d  0x2:w // $472:
+                        if (srcPtr != nullptr && srcPtr->isRegVar() && ptr != srcPtr && src->getRegAccess() != IndirGRF)
                         {
                             std::vector<G4_RegVar*>::iterator addrDst = std::find(addrTakenDsts.begin(), addrTakenDsts.end(), srcPtr->asRegVar());
                             if (addrDst != addrTakenDsts.end())
                             {
                                 addrTakenDsts.push_back(ptr->asRegVar());
-                                addrTakenMapping[ptr->asRegVar()] = addrTakenMapping[srcPtr->asRegVar()];
+                                for (int i = 0; i < (int)addrTakenMapping[srcPtr->asRegVar()].size(); i++)
+                                {
+                                    addrTakenMapping[ptr->asRegVar()].push_back(addrTakenMapping[srcPtr->asRegVar()][i]);
+                                }
                             }
                         }
                     }
@@ -333,7 +406,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                 dst->getRegAccess() == IndirGRF)
             {
                 G4_VarBase* dstptr = dst->getBase();
-                MUST_BE_TRUE(dstptr->isRegVar() && dstptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS,
+                MUST_BE_TRUE(dstptr->isRegVar() && (dstptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS || dstptr->asRegVar()->getDeclare()->getRegFile() == G4_SCALAR),
                     "base must be address");
                 addPointsToSetToBB(bb->getId(), dstptr->asRegVar());
             }
@@ -352,7 +425,7 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
                 if (src->getRegAccess() == IndirGRF)
                 {
                     G4_VarBase* srcptr = src->getBase();
-                    MUST_BE_TRUE(srcptr->isRegVar() && srcptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS,
+                    MUST_BE_TRUE(srcptr->isRegVar() && (srcptr->asRegVar()->getDeclare()->getRegFile() == G4_ADDRESS || srcptr->asRegVar()->getDeclare()->getRegFile() == G4_SCALAR),
                         "base must be address");
                     addPointsToSetToBB(bb->getId(), srcptr->asRegVar());
                 }
@@ -364,10 +437,10 @@ void PointsToAnalysis::doPointsToAnalysis(FlowGraph& fg)
     for (unsigned i = 0; i < numAddrs; i++)
     {
         REGVAR_VECTOR& vec = pointsToSets[addrPointsToSetIndex[i]];
-        for (const G4_RegVar* cur : vec)
+        for (const pointInfo cur : vec)
         {
-            unsigned indirectVarSize = cur->getDeclare()->getByteSize();
-            assert((indirectVarSize <= (unsigned)getGRFSize()* fg.getKernel()->getNumRegTotal()) && "indirected variables' size is larger than GRF file size");
+            unsigned indirectVarSize = cur.var->getDeclare()->getByteSize();
+            assert((indirectVarSize <= fg.builder->getGRFSize()* fg.getKernel()->getNumRegTotal()) && "indirected variables' size is larger than GRF file size");
         }
     }
 #endif
@@ -477,7 +550,7 @@ bool LivenessAnalysis::setLocalVarIDs(bool verifyRA, bool areAllPhyRegAssigned)
                 if (decl->getIsPartialDcl())
                 {
                     auto declSplitDcl = gra.getSplittedDeclare(decl);
-                    if (declSplitDcl->getIsSplittedDcl())
+                    if (declSplitDcl && declSplitDcl->getIsSplittedDcl())
                     {
                         if (numSplitStartID == 0)
                         {
@@ -666,13 +739,13 @@ LivenessAnalysis::LivenessAnalysis(
 
     for (unsigned i = 0; i < numBBId; i++)
     {
-        def_in[i]  = BitSet(numVarId, false);
-        def_out[i] = BitSet(numVarId, false);
-        use_in[i]  = BitSet(numVarId, false);
-        use_out[i] = BitSet(numVarId, false);
-        use_gen[i] = BitSet(numVarId, false);
-        use_kill[i]= BitSet(numVarId, false);
-        indr_use[i]= BitSet(numVarId, false);
+        def_in[i]  = SparseBitSet(numVarId);
+        def_out[i] = SparseBitSet(numVarId);
+        use_in[i]  = SparseBitSet(numVarId);
+        use_out[i] = SparseBitSet(numVarId);
+        use_gen[i] = SparseBitSet(numVarId);
+        use_kill[i]= SparseBitSet(numVarId);
+        indr_use[i]= SparseBitSet(numVarId);
     }
 }
 
@@ -736,7 +809,7 @@ bool LivenessAnalysis::livenessCandidate(const G4_Declare* decl, bool verifyRA) 
     }
 }
 
-void LivenessAnalysis::updateKillSetForDcl(G4_Declare* dcl, BitSet* curBBGen, BitSet* curBBKill, G4_BB* curBB, BitSet* entryBBGen, BitSet* entryBBKill, G4_BB* entryBB, unsigned scopeID)
+void LivenessAnalysis::updateKillSetForDcl(G4_Declare* dcl, SparseBitSet* curBBGen, SparseBitSet* curBBKill, G4_BB* curBB, SparseBitSet* entryBBGen, SparseBitSet* entryBBKill, G4_BB* entryBB, unsigned scopeID)
 {
     if (scopeID != 0 &&
         scopeID != UINT_MAX &&
@@ -757,7 +830,7 @@ void LivenessAnalysis::updateKillSetForDcl(G4_Declare* dcl, BitSet* curBBGen, Bi
 // and a sub-routine local variable is killed in entry block of the sub-routine. No
 // error check is performed currently so if variable scoping information is incorrect
 // then generated code will be so too.
-void LivenessAnalysis::performScoping(BitSet* curBBGen, BitSet* curBBKill, G4_BB* curBB, BitSet* entryBBGen, BitSet* entryBBKill, G4_BB* entryBB)
+void LivenessAnalysis::performScoping(SparseBitSet* curBBGen, SparseBitSet* curBBKill, G4_BB* curBB, SparseBitSet* entryBBGen, SparseBitSet* entryBBKill, G4_BB* entryBB)
 {
     unsigned scopeID = curBB->getScopeID();
     for (G4_INST* inst : *curBB)
@@ -826,7 +899,7 @@ void LivenessAnalysis::detectNeverDefinedVarRows()
     if (largeDefs.empty())
         return;
 
-    const unsigned bytesPerGRF = numEltPerGRF<Type_UB>();
+    const unsigned bytesPerGRF = fg.builder->numEltPerGRF<Type_UB>();
 
     // Update row usage of each dcl in largeDefs
     for (auto bb : gra.kernel.fg)
@@ -903,12 +976,14 @@ void LivenessAnalysis::computeLiveness()
     // mark input arguments live at the entry of kernel
     // mark output arguments live at the exit of kernel
     //
-    BitSet inputDefs(numVarId, false);
-    BitSet outputUses(numVarId, false);
+    SparseBitSet inputDefs(numVarId);
+    SparseBitSet outputUses(numVarId);
 
     for (unsigned i = 0; i < numVarId; i++)
     {
         bool setLiveIn = false;
+        if (!vars[i])
+            continue;
 
         G4_Declare *decl = vars[i]->getDeclare();
 
@@ -986,8 +1061,8 @@ void LivenessAnalysis::computeLiveness()
     }
 
     G4_BB* subEntryBB = NULL;
-    BitSet* subEntryKill = NULL;
-    BitSet* subEntryGen = NULL;
+    SparseBitSet* subEntryKill = NULL;
+    SparseBitSet* subEntryGen = NULL;
 
     if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
@@ -1026,10 +1101,10 @@ void LivenessAnalysis::computeLiveness()
         for (auto bb : fg)
         {
             const REGVAR_VECTOR& grfVec = pointsToAnalysis.getIndrUseVectorForBB(bb->getId());
-            for (const G4_RegVar* addrTaken : grfVec)
+            for (const pointInfo addrTaken : grfVec)
             {
-                indr_use[bb->getId()].set(addrTaken->getId(), true);
-                addr_taken.set(addrTaken->getId(), true);
+                indr_use[bb->getId()].set(addrTaken.var->getId(), true);
+                addr_taken.set(addrTaken.var->getId(), true);
             }
         }
     }
@@ -1065,56 +1140,55 @@ void LivenessAnalysis::computeLiveness()
 #endif
     }
 
+    auto getPostOrder = [](G4_BB *S, std::vector<G4_BB *> &PO) {
+      std::stack<std::pair<G4_BB *, BB_LIST_ITER>> Stack;
+      std::set<G4_BB *> Visited;
+
+      Stack.push({S, S->Succs.begin()});
+      Visited.insert(S);
+      while (!Stack.empty()) {
+        G4_BB *Curr = Stack.top().first;
+        BB_LIST_ITER It = Stack.top().second;
+
+        if (It != Curr->Succs.end()) {
+          G4_BB *Child = *Stack.top().second++;
+          if (Visited.insert(Child).second) {
+            Stack.push({Child, Child->Succs.begin()});
+          }
+          continue;
+        }
+        PO.push_back(Curr);
+        Stack.pop();
+      }
+    };
+
+    std::vector<G4_BB *> PO;
+    getPostOrder(fg.getEntryBB(), PO);
+
+    bool change;
+
     //
     // backward flow analysis to propagate uses (locate last uses)
     //
-
-    bool change = true;
-
-    while (change)
-    {
+    do {
         change = false;
-        BB_LIST::iterator rit = fg.end();
-        do
-        {
-            //
-            // use_out = use_in(s1) + use_in(s2) + ...
-            // where s1 s2 ... are the successors of bb
-            // use_in  = use_gen + (use_out - use_kill)
-            //
-            --rit;
-            if (contextFreeUseAnalyze((*rit), change))
-            {
-                change = true;
-            }
-
-        } while (rit != fg.begin());
-    }
-
-    //
-    // forward flow analysis to propagate defs (locate first defs)
-    //
+        for (auto I = PO.begin(), E = PO.end(); I != E; ++I)
+            change |= contextFreeUseAnalyze(*I, change);
+    } while (change);
 
     //
     // initialize entry block with payload input
     //
     def_in[fg.getEntryBB()->getId()] = inputDefs;
-    change = true;
-    while (change)
-    {
+
+    //
+    // forward flow analysis to propagate defs (locate first defs)
+    //
+    do {
         change = false;
-        for (auto bb : fg)
-        {
-            //
-            // def_in   = def_out(p1) + def_out(p2) + ... where p1 p2 ... are the predecessors of bb
-            // def_out |= def_in
-            //
-            if (contextFreeDefAnalyze(bb, change))
-            {
-                change = true;
-            }
-        }
-    }
+        for (auto I = PO.rbegin(), E = PO.rend(); I != E; ++I)
+            change |= contextFreeDefAnalyze(*I, change);
+    } while (change);
 
 #if 0
     // debug code to compare old v. new IPA
@@ -1281,7 +1355,7 @@ void LivenessAnalysis::useAnalysis(FuncInfo* subroutine)
             }
             else
             {
-                BitSet oldUseIn = use_in[bbid];
+                SparseBitSet oldUseIn = use_in[bbid];
 
                 use_in[bbid] = use_out[bbid];
                 use_in[bbid] -= use_kill[bbid];
@@ -1301,7 +1375,7 @@ void LivenessAnalysis::useAnalysis(FuncInfo* subroutine)
 // use_out[call-BB] = (use_in[ret-BB] | arg[callee]) - retval[callee]
 //
 void LivenessAnalysis::useAnalysisWithArgRetVal(FuncInfo* subroutine,
-    const std::unordered_map<FuncInfo*, BitSet>& args, const std::unordered_map<FuncInfo*, BitSet>& retVal)
+    const std::unordered_map<FuncInfo*, SparseBitSet>& args, const std::unordered_map<FuncInfo*, SparseBitSet>& retVal)
 {
     bool changed = false;
     do
@@ -1348,7 +1422,7 @@ void LivenessAnalysis::useAnalysisWithArgRetVal(FuncInfo* subroutine,
             }
             else
             {
-                BitSet oldUseIn = use_in[bbid];
+                SparseBitSet oldUseIn = use_in[bbid];
 
                 use_in[bbid] = use_out[bbid];
                 use_in[bbid] -= use_kill[bbid];
@@ -1381,7 +1455,7 @@ void LivenessAnalysis::defAnalysis(FuncInfo* subroutine)
         for (auto&& bb : subroutine->getBBList())
         {
             uint32_t bbid = bb->getId();
-            std::optional<BitSet> defInOrNull = std::nullopt;
+            std::optional<SparseBitSet> defInOrNull = std::nullopt;
             if (!changed)
             {
                 defInOrNull = def_in[bbid];
@@ -1421,12 +1495,25 @@ void LivenessAnalysis::defAnalysis(FuncInfo* subroutine)
     } while (changed);
 }
 
-void LivenessAnalysis::hierarchicalIPA(const BitSet& kernelInput, const BitSet& kernelOutput)
+void LivenessAnalysis::hierarchicalIPA(const SparseBitSet& kernelInput, const SparseBitSet& kernelOutput)
 {
 
     assert (fg.sortedFuncTable.size() > 0 && "topological sort must already be performed");
-    std::unordered_map<FuncInfo*, BitSet> args;
-    std::unordered_map<FuncInfo*, BitSet> retVal;
+    std::unordered_map<FuncInfo*, SparseBitSet> args;
+    std::unordered_map<FuncInfo*, SparseBitSet> retVal;
+
+#ifdef _DEBUG
+    auto verifyFuncTable = [&]()
+    {
+        auto accountedBBs = 0;
+        for (auto& sub : fg.sortedFuncTable)
+        {
+            accountedBBs += sub->getBBList().size();
+        }
+        MUST_BE_TRUE(fg.getBBList().size() == accountedBBs, "unaccounted bbs");
+    };
+    verifyFuncTable();
+#endif
 
     auto initKernelLiveOut = [this, &kernelOutput]()
     {
@@ -1628,6 +1715,11 @@ bool LivenessAnalysis::writeWholeRegion(const G4_BB* bb,
         return false;
     }
 
+    if (inst->getPredicate())
+    {
+        return false;
+    }
+
     if (inst->isFCall())
         return true;
 
@@ -1742,10 +1834,10 @@ void LivenessAnalysis::footprintSrc(const G4_INST* i,
 }
 
 void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
-                                                   BitSet& def_out,
-                                                   BitSet& use_in,
-                                                   BitSet& use_gen,
-                                                   BitSet& use_kill) const
+                                                   SparseBitSet& def_out,
+                                                   SparseBitSet& use_in,
+                                                   SparseBitSet& use_gen,
+                                                   SparseBitSet& use_kill) const
 {
     //
     // Mark each fcall as using all globals and arg pre-defined var
@@ -1779,7 +1871,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
         }
     }
 
-    std::vector<BitSet> footprints(numVarId);
+    std::map<unsigned, BitSet> footprints;
     std::vector<std::pair<G4_Declare*, INST_LIST_RITER>> pseudoKills;
 
     for (INST_LIST::reverse_iterator rit = bb->rbegin(), rend = bb->rend(); rit != rend; ++rit)
@@ -1878,11 +1970,11 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
             {
                 // conservatively add each variable potentially accessed by dst to gen
                 const REGVAR_VECTOR& pointsToSet = pointsToAnalysis.getAllInPointsToOrIndrUse(dst, bb);
-                for (auto var : pointsToSet)
+                for (auto pt : pointsToSet)
                 {
-                    if (var->isRegAllocPartaker())
+                    if (pt.var->isRegAllocPartaker())
                     {
-                        use_gen.set(var->getId(), true);
+                        use_gen.set(pt.var->getId(), true);
                     }
                 }
             }
@@ -1971,8 +2063,8 @@ void LivenessAnalysis::computeGenKillandPseudoKill(G4_BB* bb,
             //
             else if (src->isAddrExp())
             {
-                const G4_RegVar* reg = static_cast<const G4_AddrExp*>(src)->getRegVar();
-                if (reg->isRegAllocPartaker() && reg->isSpilled() == false)
+                G4_RegVar* reg = static_cast<G4_AddrExp*>(src)->getRegVar();
+                if (reg->isRegAllocPartaker() &&  !reg->isRegVarTmp())
                 {
                     unsigned srcId = reg->getId();
                     use_gen.set(srcId, true);
@@ -2233,7 +2325,7 @@ bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB* bb, bool isChanged)
     }
     else
     {
-        BitSet old = use_out[bbid];
+        SparseBitSet old = use_out[bbid];
         for (auto succBB : bb->Succs)
         {
             use_out[bbid] |= use_in[succBB->getId()];
@@ -2276,7 +2368,7 @@ bool LivenessAnalysis::contextFreeDefAnalyze(G4_BB* bb, bool isChanged)
     }
     else
     {
-        BitSet old = def_in[bbid];
+        SparseBitSet old = def_in[bbid];
         for (auto predBB : bb->Preds)
         {
             def_in[bbid] |= def_out[predBB->getId()];
@@ -2363,7 +2455,7 @@ void LivenessAnalysis::dump() const
                 dumpVar(var);
             }
         }
-        std::cerr << "\nBB" << bb->getId() << "'s live in size: " << total_size / numEltPerGRF<Type_UB>() << "\n\n";
+        std::cerr << "\nBB" << bb->getId() << "'s live in size: " << total_size / fg.builder->numEltPerGRF<Type_UB>() << "\n\n";
         std::cerr << "BB" << bb->getId() << "'s live out: ";
         total_size = 0;
         count = 0;
@@ -2375,7 +2467,7 @@ void LivenessAnalysis::dump() const
                 dumpVar(var);
             }
         }
-        std::cerr << "\nBB" << bb->getId() << "'s live out size: " << total_size / numEltPerGRF<Type_UB>()<< "\n\n";
+        std::cerr << "\nBB" << bb->getId() << "'s live out size: " << total_size / fg.builder->numEltPerGRF<Type_UB>()<< "\n\n";
     }
 }
 
@@ -2458,13 +2550,13 @@ void LivenessAnalysis::dumpLive(BitSet& live) const
 //
 void LivenessAnalysis::dumpGlobalVarNum() const
 {
-    BitSet global_def_out = BitSet(numVarId, false);
-    BitSet global_use_in = BitSet(numVarId, false);
+    SparseBitSet global_def_out(numVarId);
+    SparseBitSet global_use_in(numVarId);
 
     for (auto bb : fg)
     {
-        BitSet global_in = use_in[bb->getId()];
-        BitSet global_out = def_out[bb->getId()];
+        SparseBitSet global_in = use_in[bb->getId()];
+        SparseBitSet global_out = def_out[bb->getId()];
         global_in &= def_in[bb->getId()];
         global_use_in |= global_in;
         global_out &= use_out[bb->getId()];
@@ -2694,9 +2786,9 @@ void GlobalRA::markBlockLocalVars()
 
             // Track all indirect references.
             const REGVAR_VECTOR& grfVec = pointsToAnalysis.getIndrUseVectorForBB(bb->getId());
-            for (G4_RegVar* grf : grfVec)
+            for (pointInfo grf : grfVec)
             {
-                markBlockLocalVar(grf, bb->getId());
+                markBlockLocalVar(grf.var, bb->getId());
             }
         }
     }
@@ -2791,7 +2883,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
 
             G4_INST* fcall = bb->back();
             // Set call dst to r125.0
-            G4_Declare* r1_dst = builder->createDeclareNoLookup(n, G4_GRF, numEltPerGRF<Type_UD>(), 1, Type_UD);
+            G4_Declare* r1_dst = builder->createDeclareNoLookup(n, G4_GRF, builder->numEltPerGRF<Type_UD>(), 1, Type_UD);
             r1_dst->getRegVar()->setPhyReg(builder->phyregpool.getGreg(builder->kernel.getFPSPGRF()), IR_Builder::SubRegs_Stackcall::Ret_IP);
             G4_DstRegRegion* dstRgn = builder->createDst(r1_dst->getRegVar(), 0, 0, 1, Type_UD);
             fcall->setDest(dstRgn);
@@ -2802,7 +2894,7 @@ void FlowGraph::setABIForStackCallFunctionCalls()
             const char* n = builder->getNameString(mem, 25, "FRET_RET_LOC_%d", ret_id++);
             G4_INST* fret = bb->back();
             const RegionDesc* rd = builder->createRegionDesc(2, 2, 1);
-            G4_Declare* r1_src = builder->createDeclareNoLookup(n, G4_INPUT, numEltPerGRF<Type_UD>(), 1, Type_UD);
+            G4_Declare* r1_src = builder->createDeclareNoLookup(n, G4_INPUT, builder->numEltPerGRF<Type_UD>(), 1, Type_UD);
             r1_src->getRegVar()->setPhyReg(builder->phyregpool.getGreg(builder->kernel.getFPSPGRF()), IR_Builder::SubRegs_Stackcall::Ret_IP);
             G4_Operand* srcRgn = builder->createSrc(r1_src->getRegVar(), 0, 0, rd, Type_UD);
             fret->setSrc(srcRgn, 0);
@@ -2851,7 +2943,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
         // Verify Live-in
         std::map<uint32_t, G4_Declare*> LiveInRegMap;
         std::map<uint32_t, G4_Declare*>::iterator LiveInRegMapIt;
-        std::vector<uint32_t> liveInRegVec(numGRF * numEltPerGRF<Type_UW>(), UINT_MAX);
+        std::vector<uint32_t> liveInRegVec(numGRF * kernel.numEltPerGRF<Type_UW>(), UINT_MAX);
 
         for (G4_Declare* dcl : kernel.Declares)
         {
@@ -2869,7 +2961,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                    uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                         (regOff * dcl->getElemSize()) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -2908,7 +3000,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
         G4_Declare *ret = kernel.fg.builder->getStackCallRet();
         std::map<uint32_t, G4_Declare*> liveOutRegMap;
         std::map<uint32_t, G4_Declare*>::iterator liveOutRegMapIt;
-        std::vector<uint32_t> liveOutRegVec(numGRF * numEltPerGRF<Type_UW>(), UINT_MAX);
+        std::vector<uint32_t> liveOutRegVec(numGRF * kernel.numEltPerGRF<Type_UW>(), UINT_MAX);
 
         for (G4_Declare* dcl : kernel.Declares)
         {
@@ -2925,7 +3017,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                    uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                         (regOff * dcl->getElemSize()) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3008,7 +3100,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                    uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                         (regOff * dcl->getElemSize()) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3026,7 +3118,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                             MUST_BE_TRUE(liveOutRegMapIt != liveOutRegMap.end(), "RA verification error: Invalid entry in liveOutRegMap!");
                             if (liveOutRegVec[idx] != varID)
                             {
-                                const BitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
+                                const SparseBitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
 
                                 if (strstr(dcl->getName(), GlobalRA::StackCallStr) != NULL)
                                 {
@@ -3084,7 +3176,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                        uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                             (regOff * dcl->getElemSize()) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3099,7 +3191,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                                 MUST_BE_TRUE(liveOutRegMapIt != liveOutRegMap.end(), "RA verification error: Invalid entry in liveOutRegMap!");
                                 if (liveOutRegVec[idx] != varID)
                                 {
-                                    const BitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
+                                    const SparseBitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
 
                                     if (strstr(dcl->getName(), GlobalRA::StackCallStr) != NULL)
                                     {
@@ -3138,7 +3230,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                    uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                         regOff * ret->getElemSize() / G4_WSIZE;
                     for (uint32_t i = 0; i < ret->getWordSize(); ++i, ++idx)
                     {
@@ -3173,7 +3265,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                     uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                     uint32_t regOff = var->getPhyRegOff();
 
-                    uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                    uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                         (regOff * dcl->getElemSize()) / G4_WSIZE;
                     for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                     {
@@ -3188,7 +3280,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         {
                             if (liveOutRegVec[idx] != varID)
                             {
-                                const BitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
+                                const SparseBitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
 
                                 if (dcl->isInput())
                                 {
@@ -3250,7 +3342,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                        uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                             (regOff * dcl->getElemSize()) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3265,7 +3357,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                             {
                                 if (liveOutRegVec[idx] != varID)
                                 {
-                                    const BitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
+                                    const SparseBitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
 
                                     if (dcl->isInput())
                                     {
@@ -3317,7 +3409,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                        uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                             (regOff * dcl->getElemSize()) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3356,7 +3448,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                         uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
                         uint32_t regOff = var->getPhyRegOff();
 
-                        uint32_t idx = regNum * numEltPerGRF<Type_UW>() +
+                        uint32_t idx = regNum * kernel.numEltPerGRF<Type_UW>() +
                             (regOff * dcl->getElemSize()) / G4_WSIZE;
                         for (uint32_t i = 0; i < dcl->getWordSize(); ++i, ++idx)
                         {
@@ -3371,7 +3463,7 @@ void GlobalRA::verifyRA(LivenessAnalysis & liveAnalysis)
                             {
                                 if (liveOutRegVec[idx] != varID)
                                 {
-                                    const BitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
+                                    const SparseBitSet& indr_use = liveAnalysis.indr_use[bb->getId()];
 
                                     if (dcl->isInput())
                                     {
@@ -3452,7 +3544,7 @@ static void recordRAStats(IR_Builder& builder,
 
 static void replaceSSO(G4_Kernel& kernel)
 {
-    // Invoke function only for XeHP_SDV+
+    // Invoke function only for XeHP_SDV and later
     // Replace SSO with r126.7 (scratch reg)
 
     auto dst = kernel.fg.builder->createDst(
@@ -3482,6 +3574,7 @@ static void replaceSSO(G4_Kernel& kernel)
     }
 }
 
+
 int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
 {
     kernel.fg.callerSaveAreaOffset = kernel.fg.calleeSaveAreaOffset = kernel.fg.frameSizeInOWord = 0;
@@ -3492,8 +3585,16 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
         kernel.fg.setABIForStackCallFunctionCalls();
         kernel.fg.addFrameSetupDeclares(builder, regPool);
         kernel.fg.normalizeFlowGraph();
-        if (builder.getPlatform() >= XeHP_SDV)
+        if (builder.getPlatform() >= Xe_XeHPSDV)
             replaceSSO(kernel);
+    }
+
+    if (kernel.getOption(vISA_DoSplitOnSpill))
+    {
+        // loop computation is done here because we may need to add
+        // new preheader BBs. later parts of RA assume no change
+        // to CFG structure.
+        kernel.fg.getLoops().computePreheaders();
     }
 
     kernel.fg.reassignBlockIDs();
@@ -3522,7 +3623,6 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     //
     PointsToAnalysis pointsToAnalysis(kernel.Declares, kernel.fg.getNumBB());
     pointsToAnalysis.doPointsToAnalysis(kernel.fg);
-
     GlobalRA gra(kernel, regPool, pointsToAnalysis);
 
     //
@@ -3547,10 +3647,7 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
     gra.markGraphBlockLocalVars();
 
     //Remove the un-referenced declares
-    if (!builder.getOptions()->getuInt32Option(vISA_CodePatch))
-    {
-        gra.removeUnreferencedDcls();
-    }
+    gra.removeUnreferencedDcls();
 
     if (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
@@ -3574,6 +3671,18 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
         jitInfo->numBytesScratchGtpin = kernel.getGTPinData()->getNumBytesScratchUse();
     }
 
+    if (!gra.isReRAPass())
+    {
+        // propagate address takens to gtpin info
+        const auto& addrTakenMap = pointsToAnalysis.getPointsToMap();
+        auto gtpinData = kernel.getGTPinData();
+        for (auto& indirRef : addrTakenMap)
+        {
+            for (auto target : indirRef.second)
+                gtpinData->addIndirRef(indirRef.first, target);
+        }
+    }
+
     recordRAStats(builder, kernel, status);
     if (status != VISA_SUCCESS)
     {
@@ -3591,6 +3700,24 @@ int regAlloc(IR_Builder& builder, PhyRegPool& regPool, G4_Kernel& kernel)
         liveAnalysis.computeLiveness();
         gra.verifyRA(liveAnalysis);
     }
+
+    // printf("EU Fusion WA insts for func: %s\n", kernel.getName());
+    for (auto inst : gra.getEUFusionCallWAInsts())
+    {
+        kernel.setMaskOffset(inst, InstOpt_M16);
+        // inst->dump();
+    }
+
+#if defined(_DEBUG)
+    for (auto inst : gra.getEUFusionNoMaskWAInsts())
+    {
+        if (inst->getPredicate() != nullptr ||
+            inst->getCondMod() != nullptr)
+        {
+            assert(false && "Don't expect either predicate nor condmod for WA insts!");
+        }
+    }
+#endif
 
     return status;
 }

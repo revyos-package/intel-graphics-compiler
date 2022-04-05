@@ -102,6 +102,8 @@ SPIRVFunction::decode(std::istream &I) {
     }
     case OpLabel: {
       decodeBB(Decoder);
+      if(Decoder.M.getErrorLog().getErrorCode() == SPIRVEC_UnsupportedSPIRVOpcode)
+        return;
       break;
     }
     default:
@@ -148,6 +150,9 @@ SPIRVFunction::decodeBB(SPIRVDecoder &Decoder) {
           }
 
           auto newEntry = Decoder.getEntry();
+          if (!newEntry)
+            return;
+
           if (newEntry->isInst() && !newEntry->isScope())
           {
               SPIRVInstruction *Inst = static_cast<SPIRVInstruction *>(newEntry);

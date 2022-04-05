@@ -17,7 +17,7 @@ SPDX-License-Identifier: MIT
 #include "G4_IR.hpp"
 
  const char* Common_ISA_Get_Align_Name(VISA_Align);
- uint32_t getAlignInBytes(VISA_Align A);
+ uint32_t getAlignInBytes(VISA_Align A, unsigned grfSize);
  VISA_Align getCISAAlign(uint32_t AlignInBytes);
  const char* Common_ISA_Get_Modifier_Name(VISA_Modifier);
  G4_opcode GetGenOpcodeFromVISAOpcode(ISA_Opcode);
@@ -96,6 +96,7 @@ getSendHeaderPresentBitOffset()
     return SEND_GT_MSG_HEADER_PRESENT_BIT_OFFSET;
 }
 
+VISA_Type getRawOperandType(const print_format_provider_t* header, const raw_opnd& opnd);
 VISA_Type getVectorOperandType(const print_format_provider_t* header, const vector_opnd& opnd);
 
 template <typename T> T getPrimitiveOperand(const CISA_INST* inst, unsigned i)
@@ -113,7 +114,7 @@ CISA_opnd_type getOperandType(const CISA_INST* inst, unsigned i);
 
 int64_t typecastVals(const void *value, VISA_Type isaType);
 
-int Get_PreDefined_Surf_Index(int index);
+int Get_PreDefined_Surf_Index(int index, TARGET_PLATFORM platform);
 
 inline bool isShiftOp(ISA_Opcode op)
 {

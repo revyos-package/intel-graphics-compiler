@@ -21,7 +21,7 @@ namespace IGC
 {
 
 #define PASS_FLAG "igc-pixel-shader-addmask"
-#define PASS_DESCRIPTION "Pixel shader lowering pass"
+#define PASS_DESCRIPTION "Pixel shader add mask pass"
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS true
     IGC_INITIALIZE_PASS_BEGIN(PixelShaderAddMask, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
@@ -257,7 +257,7 @@ bool PixelShaderLowering::runOnFunction(llvm::Function& F)
         // Emitting a fence to ensure that the uav write is completed before an EOT is issued
         IRBuilder<> builder(F.getContext());
 
-        bool fenceFlushNone = 0;
+        bool fenceFlushNone = IGC_GET_FLAG_VALUE(RovOpt) & 1;
         EmitMemoryFence(builder, fenceFlushNone);
     }
 
@@ -299,6 +299,9 @@ void PixelShaderLowering::FindIntrinsicOutput(
     std::bitset<cMaxInputs> isLinearInterpolation;
 
     llvm::Instruction* primId = nullptr;
+    llvm::Instruction* pointCoordX = nullptr;
+    llvm::Instruction* pointCoordY = nullptr;
+    SmallVector<GenIntrinsicInst*, 4> outputInstructions;
     SmallVector<Instruction*, 4> instructionToRemove;
     Function& F = *m_ReturnBlock->getParent();
     Value* btrue = llvm::ConstantInt::get(Type::getInt1Ty(m_module->getContext()), true);
@@ -320,70 +323,13 @@ void PixelShaderLowering::FindIntrinsicOutput(
                 else if (IID == GenISAIntrinsic::GenISA_OUTPUT)
                 {
                     m_outputBlock = inst->getParent();
-
+                    outputInstructions.push_back(inst);
                     uint outputType = (uint)llvm::cast<llvm::ConstantInt>(inst->getOperand(4))->getZExtValue();
                     IGC_ASSERT(outputType == SHADER_OUTPUT_TYPE_DEFAULT ||
                         outputType == SHADER_OUTPUT_TYPE_DEPTHOUT ||
                         outputType == SHADER_OUTPUT_TYPE_STENCIL ||
                         outputType == SHADER_OUTPUT_TYPE_OMASK);
 
-                    if (outputType == SHADER_OUTPUT_TYPE_DEFAULT)
-                    {
-                        uint RTIndex = (uint)llvm::cast<llvm::ConstantInt>(inst->getOperand(5))->getZExtValue();
-
-                        unsigned mask = 0;
-                        // if any of the color channel is undef, initialize it
-                        // to 0 for color compression perf.
-                        for (int i = 0; i < 4; i++)
-                        {
-                            if (isa<UndefValue>(inst->getOperand(i)))
-                            {
-                                if (i == 3 &&
-                                    IGC_IS_FLAG_ENABLED(EnableUndefAlphaOutputAsRed))
-                                {
-                                    // if it's alpha, then set default value to
-                                    // color.r, see IGC-959.
-                                    inst->setOperand(i, inst->getOperand(0));
-                                }
-                                else
-                                {
-                                    inst->setOperand(i,
-                                        ConstantFP::get(inst->getOperand(i)->getType(), 0.0f));
-                                }
-                            }
-                            else
-                            {
-                                mask |= 1 << i;
-                            }
-                        }
-                        if (RTIndex == 0)
-                        {
-                            src0Alpha = inst->getOperand(3);
-                        }
-                        m_modMD->psInfo.colorOutputMask[RTIndex] = mask;
-                        ColorOutput data;
-                        data.RTindex = RTIndex;
-                        data.color[0] = inst->getOperand(0);
-                        data.color[1] = inst->getOperand(1);
-                        data.color[2] = inst->getOperand(2);
-                        data.color[3] = inst->getOperand(3);
-                        data.mask = btrue;
-                        data.blendStateIndex = nullptr;
-                        data.bb = inst->getParent();
-                        colors.push_back(data);
-                    }
-                    else if (outputType == SHADER_OUTPUT_TYPE_DEPTHOUT)
-                    {
-                        depth = inst->getOperand(0);
-                    }
-                    else if (outputType == SHADER_OUTPUT_TYPE_STENCIL)
-                    {
-                        stencil = inst->getOperand(0);
-                    }
-                    else if (outputType == SHADER_OUTPUT_TYPE_OMASK)
-                    {
-                        mask = inst->getOperand(0);
-                    }
                     //Need to save debug location
                     debugLocs.push_back(((Instruction*)inst)->getDebugLoc());
 
@@ -397,6 +343,14 @@ void PixelShaderLowering::FindIntrinsicOutput(
                     if (usage == PRIMITIVEID)
                     {
                         primId = inst;
+                    }
+                    else if (usage == POINT_COORD_X)
+                    {
+                        pointCoordX = inst;
+                    }
+                    else if (usage == POINT_COORD_Y)
+                    {
+                        pointCoordY = inst;
                     }
                     else if (usage == POSITION_X || usage == POSITION_Y)
                     {
@@ -481,6 +435,122 @@ void PixelShaderLowering::FindIntrinsicOutput(
             ConstantAsMetadata::get(cval));
         primIdMD->addOperand(locationNd);
     }
+    if (pointCoordX || pointCoordY)
+    {
+        // Although PointCoords needs only 2 DWORDs, IGC must allocate 4 additional input and returns
+        // information about the PointCoord input to UMD (to program SBE). These new input components
+        // are created with linear interpolation and must be placed in an empty attribute index (4 DWORDs).
+        unsigned int location;
+        for (location = 0; location < cMaxInputComponents; location += 4)
+        {
+            bool isAttributeIndexEmpty =
+                inputComponentsUsed.test(location) == false &&
+                inputComponentsUsed.test(location + 1) == false &&
+                inputComponentsUsed.test(location + 2) == false &&
+                inputComponentsUsed.test(location + 3) == false;
+            if (isAttributeIndexEmpty)
+            {
+                isLinearInterpolation.set(location / 4);
+                break;
+            }
+        }
+        IGC_ASSERT(location < cMaxInputComponents);
+
+        llvm::Instruction* inputPointCoords[] = { pointCoordX, pointCoordY };
+        for (unsigned int i = 0; i < sizeof(inputPointCoords) / sizeof(inputPointCoords[0]); i++)
+        {
+            if (inputPointCoords[i] == nullptr)
+            {
+                continue;
+            }
+            Value* arguments[] =
+            {
+                ConstantInt::get(Type::getInt32Ty(m_module->getContext()), location + i),
+                ConstantInt::get(Type::getInt32Ty(m_module->getContext()), EINTERPOLATION_LINEAR),
+            };
+            CallInst* in = GenIntrinsicInst::Create(
+                GenISAIntrinsic::getDeclaration(
+                    m_module,
+                    GenISAIntrinsic::GenISA_DCL_inputVec,
+                    Type::getFloatTy(m_module->getContext())),
+                arguments,
+                "",
+                inputPointCoords[i]);
+            in->setDebugLoc(inputPointCoords[i]->getDebugLoc());
+            inputPointCoords[i]->replaceAllUsesWith(in);
+            instructionToRemove.push_back(inputPointCoords[i]);
+        }
+
+        NamedMDNode* PointCoordMD = m_module->getOrInsertNamedMetadata("PointCoordLocation");
+        Constant* cval = ConstantInt::get(
+            Type::getInt32Ty(m_module->getContext()), location);
+        llvm::MDNode* locationNd = llvm::MDNode::get(
+            m_module->getContext(),
+            ConstantAsMetadata::get(cval));
+        PointCoordMD->addOperand(locationNd);
+
+    }
+    for (GenIntrinsicInst* pInst : outputInstructions)
+    {
+        uint outputType = (uint)llvm::cast<llvm::ConstantInt>(pInst->getOperand(4))->getZExtValue();
+        if (outputType == SHADER_OUTPUT_TYPE_DEFAULT)
+        {
+            uint RTIndex = (uint)llvm::cast<llvm::ConstantInt>(pInst->getOperand(5))->getZExtValue();
+
+            unsigned mask = 0;
+            // if any of the color channel is undef, initialize it
+            // to 0 for color compression perf.
+            for (int i = 0; i < 4; i++)
+            {
+                if (isa<UndefValue>(pInst->getOperand(i)))
+                {
+                    if (i == 3 &&
+                        IGC_IS_FLAG_ENABLED(EnableUndefAlphaOutputAsRed))
+                    {
+                        // if it's alpha, then set default value to
+                        // color.r, see IGC-959.
+                        pInst->setOperand(i, pInst->getOperand(0));
+                    }
+                    else
+                    {
+                        pInst->setOperand(i,
+                            ConstantFP::get(pInst->getOperand(i)->getType(), 0.0f));
+                    }
+                }
+                else
+                {
+                    mask |= 1 << i;
+                }
+            }
+            if (RTIndex == 0)
+            {
+                src0Alpha = pInst->getOperand(3);
+            }
+            m_modMD->psInfo.colorOutputMask[RTIndex] = mask;
+            ColorOutput data;
+            data.RTindex = RTIndex;
+            data.color[0] = pInst->getOperand(0);
+            data.color[1] = pInst->getOperand(1);
+            data.color[2] = pInst->getOperand(2);
+            data.color[3] = pInst->getOperand(3);
+            data.mask = btrue;
+            data.blendStateIndex = nullptr;
+            data.bb = pInst->getParent();
+            colors.push_back(data);
+        }
+        else if (outputType == SHADER_OUTPUT_TYPE_DEPTHOUT)
+        {
+            depth = pInst->getOperand(0);
+        }
+        else if (outputType == SHADER_OUTPUT_TYPE_STENCIL)
+        {
+            stencil = pInst->getOperand(0);
+        }
+        else if (outputType == SHADER_OUTPUT_TYPE_OMASK)
+        {
+            mask = pInst->getOperand(0);
+        }
+    }
     for (unsigned int i = 0; i < instructionToRemove.size(); i++)
     {
         instructionToRemove[i]->eraseFromParent();
@@ -507,6 +577,12 @@ void PixelShaderLowering::EmitMemoryFence(IRBuilder<>& builder, bool forceFlushN
         arguments,
         "",
         m_ReturnBlock->getTerminator());
+
+    if (forceFlushNone && m_cgCtx->platform.hasLSC() && (IGC_GET_FLAG_VALUE(RovOpt) & 1))
+    {
+        MDNode* indM = MDNode::get(memFence->getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(memFence->getContext()), 1)));
+        memFence->setMetadata("forceFlushNone", indM);
+    }
 }
 
 CallInst* PixelShaderLowering::addRTWrite(
@@ -761,22 +837,31 @@ void PixelShaderLowering::EmitRTWrite(
     if (RTindexVal != -1)
     {
         //dual source RTWrite first
-        colors[RTindexVal].inst = addDualBlendWrite(
+        CallInst* dualSourceRTW = addDualBlendWrite(
             colors[RTindexVal].bb,
             oMask,
             colors[RTindexVal],
             colors[1 - RTindexVal],
             depth, stencil, 0);
-        colors[RTindexVal].inst->setDebugLoc(debugLocs[RTindexVal]);
+        dualSourceRTW->setDebugLoc(debugLocs[RTindexVal]);
 
-        //Single source RTWrite
-        colors[1 - RTindexVal].inst = addRTWrite(
-            colors[1 - RTindexVal].bb,
-            src0Alpha,
-            oMask, colors[1 - RTindexVal],
-            depth,
-            stencil);
-        colors[1 - RTindexVal].inst->setDebugLoc(debugLocs[1 - RTindexVal]);
+        if (needsSingleSourceRTWWithDualSrcBlend())
+        {
+            //Single source RTWrite
+            CallInst* singleSourceRTW = addRTWrite(
+                colors[1 - RTindexVal].bb,
+                src0Alpha,
+                oMask, colors[1 - RTindexVal],
+                depth,
+                stencil);
+            singleSourceRTW->setDebugLoc(debugLocs[1 - RTindexVal]);
+            colors[RTindexVal].inst = dualSourceRTW;
+            colors[1 - RTindexVal].inst = singleSourceRTW;
+        }
+        else
+        {
+            colors[0].inst = dualSourceRTW;
+        }
     }
     else
     {
@@ -1263,7 +1348,8 @@ void PixelShaderLowering::moveRTWritesToReturnBlock(
             predBB.push_back(*PI);
         }
 
-        if (useDualSrcBlend(colors))
+        if (useDualSrcBlend(colors) &&
+            needsSingleSourceRTWWithDualSrcBlend())
         {
             // For SIMD16 PS thread with two output colors must send
             // messages in the following sequence for each RT: SIMD8 dual
@@ -1359,6 +1445,16 @@ void PixelShaderLowering::checkAndCreateNullRTWrite(
             oMask, color,
             depth, stencil);
     }
+}
+
+bool PixelShaderLowering::needsSingleSourceRTWWithDualSrcBlend() const
+{
+    bool needsSingleSourceMessage =
+        m_cgCtx->m_DriverInfo.sendSingleSourceRTWAfterDualSourceRTW() ||
+        m_cgCtx->getModuleMetaData()->psInfo.forceSingleSourceRTWAfterDualSourceRTW ||
+        m_hasDiscard ||
+        IGC_IS_FLAG_ENABLED(ForceSingleSourceRTWAfterDualSourceRTW);
+    return needsSingleSourceMessage;
 }
 
 ///////////////////////////////////////////////////////////////////////
@@ -1477,8 +1573,8 @@ bool DiscardLowering::lowerDiscards(Function& F)
 
 bool DiscardLowering::runOnFunction(Function& F)
 {
-    IGCMD::MetaDataUtils* pMdUtils =
-        getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    IGCMD::MetaDataUtils* pMdUtils = nullptr;
+    pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     if (pMdUtils->findFunctionsInfoItem(&F) == pMdUtils->end_FunctionsInfo())
     {
         return false;

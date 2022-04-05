@@ -33,6 +33,7 @@ SPDX-License-Identifier: MIT
 #include <string>
 #include <sstream>
 #include <functional>
+#include <mutex>
 
 using namespace vISA;
 extern "C" int64_t getTimerTicks(unsigned int idx);
@@ -205,15 +206,47 @@ static const WA_TABLE *CreateVisaWaTable(TARGET_PLATFORM platform, Stepping step
             break;
         case GENX_TGLLP:
             VISA_WA_ENABLE(pWaTable, Wa_1406950495);
+            VISA_WA_ENABLE(pWaTable, Wa_16013338947);
             break;
-        case XeHP_SDV:
+        case Xe_XeHPSDV:
             VISA_WA_ENABLE(pWaTable, Wa_1406950495);
+            VISA_WA_ENABLE(pWaTable, Wa_16013338947);
+            break;
+        case Xe_DG2:
+            VISA_WA_ENABLE(pWaTable, Wa_16013338947);
+            break;
+        case Xe_PVC:
+            VISA_WA_ENABLE(pWaTable, Wa_16013338947);
+            break;
+        case Xe_PVCXT:
+            VISA_WA_ENABLE(pWaTable, Wa_16013338947);
+            if (step == Step_A)
+            {
+                VISA_WA_ENABLE(pWaTable, Wa_16012725276);
+            }
             break;
         default:
             break;
     }
 
     return pWaTable;
+}
+
+// Change default values of some options according to WA_TABLE
+// The values are set before parsing any flags specified by client
+// (either within CreateVISABuilder() call or via VISABuilder interface)
+// and may be overriden by client flags
+static void AddWAOptions(Options &options, const WA_TABLE &waTable)
+{
+    if (waTable.Wa_1808850743 || waTable.Wa_1409909237)
+    {
+        options.setOptionInternally(vISA_noMaskWA, 2u);
+        // Turn off jmpi as there is no wa for jmpi
+        if (!options.getOption(vISA_KeepScalarJmp))
+        {
+            options.setOptionInternally(vISA_EnableScalarJmp, false);
+        }
+    }
 }
 
 int CISA_IR_Builder::CreateBuilder(
@@ -236,10 +269,17 @@ int CISA_IR_Builder::CreateBuilder(
 
     startTimer(TimerID::TOTAL);
     startTimer(TimerID::BUILDER);  // builder time ends with we call compile (i.e., it covers the IR construction time)
+    // TODO: Remove global APIs that get/set visa platform. Currently
+    // ::getGRFSize() still relies on this.
     //this must be called before any other API.
     SetVisaPlatform(platform);
 
-    builder = new CISA_IR_Builder(buildOption, mode, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER, pWaTable);
+    builder = new CISA_IR_Builder(platform, buildOption, mode, COMMON_ISA_MAJOR_VER, COMMON_ISA_MINOR_VER, pWaTable);
+
+    if (pWaTable)
+    {
+        AddWAOptions(builder->m_options, *pWaTable);
+    }
 
     if (!builder->m_options.parseOptions(numArgs, flags))
     {
@@ -247,6 +287,24 @@ int CISA_IR_Builder::CreateBuilder(
         assert(0);
         return VISA_FAILURE;
     }
+
+    // Set visa platform in the internal option for the case that IR_Builder or
+    // G4_Kernel object are not easily available. However, getting platform
+    // through options probably would be slower as it requires a hash table
+    // lookup, so it should be used with caution.
+    // Check if the given platform from function argument is valid.
+    assert(platform != GENX_NONE && platform < TARGET_PLATFORM::ALL);
+    TARGET_PLATFORM platformSet =
+        static_cast<TARGET_PLATFORM>(builder->m_options.getuInt32Option(vISA_PlatformSet));
+    // If the platform is specified in both the function argument and the
+    // cmdline argument, the 2 values probably should be same.
+    assert(platformSet == GENX_NONE || platformSet == platform);
+    if (platformSet == GENX_NONE)
+        builder->m_options.setOptionInternally(vISA_PlatformSet, static_cast<uint32_t>(platform));
+
+#if defined(_DEBUG) || defined(_INTERNAL)
+    builder->m_options.getOptionsFromEV();
+#endif
 
     // This should not matter anymore since each kernel should set its Target attribute to 3D/CM
     auto targetMode = VISA_3D;
@@ -299,7 +357,7 @@ int CISA_IR_Builder::DestroyBuilder(CISA_IR_Builder *builder)
     return VISA_SUCCESS;
 }
 
-VISAKernel* CISA_IR_Builder::GetVISAKernel(const std::string& kernelName)
+VISAKernel* CISA_IR_Builder::GetVISAKernel(const std::string& kernelName) const
 {
     if (kernelName.empty())
     {
@@ -464,6 +522,32 @@ G4_Kernel* CISA_IR_Builder::GetCalleeKernel(G4_INST* fcall)
     return iter->second;
 }
 
+void CISA_IR_Builder::ResetHasStackCall(
+    std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
+    std::unordered_map<G4_Kernel*, std::list<std::list<G4_INST*>::iterator>>& callSites)
+{
+    for (auto& [func, callsites] : callSites)
+    {
+        bool hasStackCall = false;
+        for (auto& it : callsites)
+        {
+            G4_INST* fcall = *it;
+            assert(fcall->opcode() == G4_pseudo_fcall);
+            bool isInSgInvokeList = std::find(sgInvokeList.begin(), sgInvokeList.end(), it) != sgInvokeList.end();
+            if (!isInSgInvokeList)
+            {
+                hasStackCall = true;
+                break;
+            }
+        }
+        if (!hasStackCall)
+        {
+            func->fg.resetHasStackCalls();
+        }
+    }
+}
+
+
 void CISA_IR_Builder::CheckHazardFeatures(
     std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
     std::unordered_map<G4_Kernel*, std::list<std::list<G4_INST*>::iterator>>& callSites)
@@ -505,7 +589,8 @@ void CISA_IR_Builder::CheckHazardFeatures(
 
 void CISA_IR_Builder::CollectCallSites(
     std::list<VISAKernelImpl *>& functions,
-    std::unordered_map<G4_Kernel*, std::list<std::list<G4_INST*>::iterator>>& callSites)
+    std::unordered_map<G4_Kernel*, std::list<std::list<G4_INST*>::iterator>>& callSites,
+    std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList)
 {
     auto IsFCall = [](G4_INST* inst)
     {
@@ -526,6 +611,21 @@ void CISA_IR_Builder::CollectCallSites(
             }
             callSites[func->getKernel()].push_back(it);
             it++;
+        }
+    }
+
+    // get sgInvokeList
+    for (auto& [func, callsites] : callSites)
+    {
+        for (auto& it : callsites)
+        {
+            G4_INST* fcall = *it;
+            assert(fcall->opcode() == G4_pseudo_fcall);
+            // When callee is a invoke_simd target
+            if (GetCalleeKernel(fcall)->getBoolKernelAttr(Attributes::ATTR_LTOInvokeOptTarget))
+            {
+                sgInvokeList.push_back(it);
+            }
         }
     }
 }
@@ -552,94 +652,519 @@ void CISA_IR_Builder::RemoveOptimizingFunction(
     }
 }
 
+void CISA_IR_Builder::ProcessSgInvokeList(
+    const std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
+    std::unordered_map<G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callee2Callers)
+{
+    for (auto& it : sgInvokeList)
+    {
+        G4_INST* fcall = *it;
+        G4_Kernel* callee = GetCalleeKernel(fcall);
+        callee2Callers[callee].push_back(it);
+    }
+}
+
+#define DEBUG_LTO
+#ifdef DEBUG_LTO
+#define DEBUG_PRINT(msg) \
+    std::cerr << __LINE__ << " " << msg;
+#define DEBUG_UTIL(stmt) \
+    stmt;
+#else
+#define DEBUG_PRINT(msg)
+#define DEBUG_UTIL(stmt)
+#endif
+
 // Perform LTO including transforming stack calls to subroutine calls, subroutine calls to jumps, and inlining
 void CISA_IR_Builder::LinkTimeOptimization(
-    std::list<std::list<vISA::G4_INST*>::iterator>& sgInvokeList,
-    bool call2jump,
-    bool inlining)
+    std::unordered_map<G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>>& callee2Callers,
+    uint32_t options)
 {
+    bool call2jump = options & (1U << Linker_Call2Jump);
     std::map<G4_INST*, std::list<G4_INST*>::iterator> callsite;
     std::map<G4_INST*, std::list<G4_INST*>> rets;
     std::set<G4_Kernel*> visited;
     std::list<G4_INST*> dummyContainer;
     unsigned int raUID = 0;
+
     // append instructions from callee to caller
-    for (auto& it : sgInvokeList)
+    for (auto& [callee, sgInvokeList] : callee2Callers)
     {
-        G4_INST* fcall = *it;
-        assert(fcall->opcode() == G4_pseudo_fcall);
+        G4_Declare *replacedArgDcl = nullptr;
+        G4_Declare *replacedRetDcl = nullptr;
 
-        G4_Kernel* caller = GetCallerKernel(fcall);
-        G4_Kernel* callee = GetCalleeKernel(fcall);
-        G4_INST* calleeLabel = *callee->fg.builder->instList.begin();
-        ASSERT_USER(calleeLabel->isLabel() == true, "Entry inst is not a label");
-
-        // Change fcall to call
-        fcall->setOpcode(G4_call);
-        fcall->setSrc(calleeLabel->getSrc(0), 0);
-        // we only record a single callsite to the target in order to convert to jumps
-        // note that we don't need call2jump when inlining kicks in
-        if ((!inlining) && callsite.find(calleeLabel) == callsite.end())
+        for (auto& it : sgInvokeList)
         {
-            callsite[calleeLabel] = it;
-        }
-        else
-        {
-            callsite[calleeLabel] = dummyContainer.end();
-        }
+            bool inlining =         ( options & (1U << Linker_Inline)           );
+            bool removeArgRet =     ( options & (1U << Linker_RemoveArgRet)     );
+            bool removeStackArg =   ( options & (1U << Linker_RemoveStackArg)   );
+            bool removeStackFrame = ( options & (1U << Linker_RemoveStackFrame) );
+            G4_INST* fcall = *it;
+            assert(fcall->opcode() == G4_pseudo_fcall);
 
-        auto& callerInsts = caller->fg.builder->instList;
-        auto calleeInsts = callee->fg.builder->instList;
+            G4_Kernel* caller = GetCallerKernel(fcall);
+            G4_Kernel* callee = GetCalleeKernel(fcall);
+            G4_INST* calleeLabel = *callee->fg.builder->instList.begin();
+            ASSERT_USER(calleeLabel->isLabel() == true, "Entry inst is not a label");
 
-        if (inlining)
-        {
-            auto& builder = caller->fg.builder;
-            std::string funcName = fcall->getSrc(0)->asLabel()->getLabel();
-            G4_Label *raLabel = builder->createLabel(funcName + "_ret" + std::to_string(raUID++), LABEL_BLOCK);
-            G4_INST* ra = caller->fg.createNewLabelInst(raLabel);
-            // We don't need calleeLabel (first instruction) anymore after inlining
-            calleeInsts.pop_front();
-            for (G4_INST* fret : calleeInsts)
+            // Change fcall to call
+            fcall->setOpcode(G4_call);
+            fcall->setSrc(calleeLabel->getSrc(0), 0);
+            // we only record a single callsite to the target in order to convert to jumps
+            // note that we don't need call2jump when inlining kicks in
+            if ((!inlining) && callsite.find(calleeLabel) == callsite.end())
             {
-                G4_INST* inst = fret->cloneInst();
-                callerInsts.insert(it, inst);
-                if (inst->opcode() != G4_pseudo_fret)
+                callsite[calleeLabel] = it;
+            }
+            else
+            {
+                callsite[calleeLabel] = dummyContainer.end();
+            }
+
+            auto& callerInsts = caller->fg.builder->instList;
+            auto calleeInsts = callee->fg.builder->instList;
+
+            if (removeArgRet)
+            {
+                auto& calleeBuilder = callee->fg.builder;
+                auto& callerBuilder = caller->fg.builder;
+                const RegionDesc *rDesc = callerBuilder->getRegionStride1();
+                replacedArgDcl = replacedArgDcl ?
+                    replacedArgDcl :
+                    callerBuilder->createDeclareNoLookup("newArg", G4_GRF, callerBuilder->numEltPerGRF<Type_UD>(), 32, Type_UD);
+                replacedRetDcl = replacedRetDcl ?
+                    replacedRetDcl :
+                    callerBuilder->createDeclareNoLookup("newRet", G4_GRF, callerBuilder->numEltPerGRF<Type_UD>(), 12, Type_UD);
+
+                for (G4_INST* inst : calleeInsts)
+                {
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        G4_Operand *src = inst->getSrc(i);
+                        if (!src) continue;
+                        G4_Declare* topDcl = src->getTopDcl();
+                        if (!topDcl) continue;
+                        G4_Declare* rootDcl = topDcl->getRootDeclare();
+                        if (calleeBuilder->isPreDefArg(rootDcl))
+                        {
+                            G4_Operand *replacedArgSrc = callerBuilder->createSrc(
+                                    replacedArgDcl->getRegVar(),
+                                    src->asSrcRegRegion()->getRegOff(),
+                                    src->asSrcRegRegion()->getSubRegOff(),
+                                    rDesc,
+                                    src->getType());
+                            inst->setSrc(replacedArgSrc, i);
+                        }
+                    }
+
+                    G4_Operand *dst = inst->getDst();
+                    if (!dst) continue;
+                    G4_Declare* topDcl = dst->getTopDcl();
+                    if (!topDcl) continue;
+                    G4_Declare* rootDcl = topDcl->getRootDeclare();
+                    if (calleeBuilder->isPreDefRet(rootDcl))
+                    {
+                        G4_DstRegRegion *replacedRetDst = callerBuilder->createDst(
+                                replacedRetDcl->getRegVar(),
+                                dst->asDstRegRegion()->getRegOff(),
+                                dst->asDstRegRegion()->getSubRegOff(),
+                                dst->asDstRegRegion()->getHorzStride(),
+                                dst->getType());
+                        inst->setDest(replacedRetDst);
+                    }
+
+                }
+                for (G4_INST* inst : callerInsts)
+                {
+                    G4_Operand *dst = inst->getDst();
+                    if (!dst) continue;
+                    G4_Declare* topDcl = dst->getTopDcl();
+                    if (!topDcl) continue;
+                    G4_Declare* rootDcl = topDcl->getRootDeclare();
+                    if (callerBuilder->isPreDefArg(rootDcl))
+                    {
+                        G4_DstRegRegion *replacedArgDst = callerBuilder->createDst(
+                                replacedArgDcl->getRegVar(),
+                                dst->asDstRegRegion()->getRegOff(),
+                                dst->asDstRegRegion()->getSubRegOff(),
+                                dst->asDstRegRegion()->getHorzStride(),
+                                dst->getType());
+                        inst->setDest(replacedArgDst);
+                    }
+
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        G4_Operand *src = inst->getSrc(i);
+                        if (!src) continue;
+                        G4_Declare* topDcl = src->getTopDcl();
+                        if (!topDcl) continue;
+                        G4_Declare* rootDcl = topDcl->getRootDeclare();
+                        if (callerBuilder->isPreDefRet(rootDcl))
+                        {
+                            G4_Operand *replacedRetSrc = callerBuilder->createSrc(
+                                    replacedRetDcl->getRegVar(),
+                                    src->asSrcRegRegion()->getRegOff(),
+                                    src->asSrcRegRegion()->getSubRegOff(),
+                                    rDesc,
+                                    src->getType());
+                            inst->setSrc(replacedRetSrc, i);
+                        }
+                    }
+                }
+            }
+
+            // A hash map to record how SP is populated from caller to callee
+            std::map<G4_Declare*, long long> stackPointers;
+            // A hash map to record where the instruction is on defs
+            std::map<G4_Declare*, std::list<vISA::G4_INST*>::iterator> defInst;
+
+            if (removeStackArg)
+            {
+                // collect instructions which store args to stack
+                auto& callerBuilder = caller->fg.builder;
+                auto& calleeBuilder = callee->fg.builder;
+                auto getPointerOffset = [&](G4_INST *inst, long long offset)
+                {
+                    auto execSize = static_cast<int>(inst->getExecSize());
+                    assert(execSize == 1);
+                    switch(inst->opcode())
+                    {
+                        case G4_mov:
+                            {
+                                return offset;
+                            }
+                        case G4_add:
+                            {
+                                assert(inst->getSrc(1)->isImm());
+                                return offset + inst->getSrc(1)->asImm()->getImm();
+                            }
+                        default:
+                            {
+                                assert(0);
+                                return 0LL;
+                            }
+                    }
+                };
+
+                auto getRootDeclare = [&](G4_Operand *opnd)
+                {
+                    if (!opnd)
+                        return (G4_Declare*) nullptr;
+                    G4_Declare* topDcl = opnd->getTopDcl();
+                    if (!topDcl)
+                        return (G4_Declare*) nullptr;
+                    return topDcl->getRootDeclare();
+
+                };
+
+                auto getBeginIt = [&](std::list<vISA::G4_INST*>::iterator it)
+                {
+                    // Trace backward until it reaches an update for SP
+                    // This is where we start to push spilled arguments onto stack
+                    auto beginIt = it;
+                    for (; beginIt != callerInsts.begin(); --beginIt)
+                    {
+                        G4_INST *inst = *beginIt;
+                        for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                        {
+                            G4_Declare* rootDcl = getRootDeclare(inst->getSrc(i));
+                            if (!rootDcl) continue;
+                            G4_Operand *dst = inst->getDst();
+                            if (rootDcl == callerBuilder->getFE_SP())
+                            {
+                                // the dst is updating SP
+                                if (dst->getTopDcl() == callerBuilder->getFE_SP())
+                                {
+                                    auto prevIt = beginIt;
+                                    prevIt --;
+                                    G4_INST *prevInst = *prevIt;
+                                    // It reaches the begining of function where it pushes a new frame.
+                                    // It is not where we are looking for.
+                                    if (prevInst->getDst()->getTopDcl() == callerBuilder->getFE_FP())
+                                    {
+                                        return it;
+                                    }
+                                    else
+                                    {
+                                        return beginIt;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return it;
+                };
+
+                // A list of store in order to perform store-to-load forwarding
+                std::list<std::list<vISA::G4_INST*>::iterator> storeList;
+
+                auto beginIt = getBeginIt(it);
+                bool noArgOnStack = (beginIt == it);
+                for (auto callerIt = beginIt; callerIt != it; callerIt ++)
+                {
+                    G4_INST *inst = *callerIt;
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        G4_Declare* rootDcl = getRootDeclare(inst->getSrc(i));
+                        if (!rootDcl) continue;
+                        G4_Operand *dst = inst->getDst();
+                        if (rootDcl == callerBuilder->getFE_SP())
+                        {
+                            stackPointers[dst->getTopDcl()] = getPointerOffset(inst, stackPointers[rootDcl]);
+                            defInst[dst->getTopDcl()] = callerIt;
+                            // beginIt is the update of SP before pushing arguments onto stack
+                            // We do not remove it immediately since we don't know if all S2L can be perform at this stage
+                            std::string prefix = (removeStackFrame && callerIt != beginIt) ? "removeFrame " : "";
+                            DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                            DEBUG_UTIL(inst->dump());
+                            if (removeStackFrame && callerIt != beginIt)
+                            {
+                                callerInsts.erase(callerIt);
+                            }
+                        }
+                        else if (stackPointers.find(rootDcl) != stackPointers.end())
+                        {
+                            long long offset = stackPointers[rootDcl];
+                            if (inst->opcode() == G4_mov ||
+                                inst->opcode() == G4_add)
+                            {
+                                auto execSize = static_cast<int>(inst->getExecSize());
+                                if (execSize != 1)
+                                {
+                                    // Currently only support scalar type of operations
+                                    DEBUG_PRINT("skip nonaddress calc\n");
+                                    DEBUG_UTIL(inst->dump());
+                                    continue;
+                                }
+                                stackPointers[dst->getTopDcl()] = getPointerOffset(inst, offset);
+                                defInst[dst->getTopDcl()] = callerIt;
+                                DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
+                                DEBUG_UTIL(inst->dump());
+                            }
+                            else if (inst->opcode() == G4_sends ||
+                                    inst->opcode() == G4_send)
+                            {
+                                assert(i == 0);
+                                // Start adding argument stores to the list
+                                storeList.push_back(callerIt);
+                                DEBUG_PRINT("[ ]");
+                                DEBUG_UTIL(inst->dump());
+                            }
+                            else
+                            {
+                                assert(0 && "not implemented");
+                            }
+                        }
+                    }
+                }
+                // passing SP offset from caller to callee
+                stackPointers[calleeBuilder->getFE_SP()] = stackPointers[callerBuilder->getFE_SP()];
+                stackPointers[calleeBuilder->getFE_FP()] = stackPointers[callerBuilder->getFE_FP()];
+
+                for (auto calleeIt = calleeInsts.begin(); calleeIt != calleeInsts.end(); calleeIt++)
+                {
+                    G4_INST *inst = *calleeIt;
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        G4_Declare* rootDcl = getRootDeclare(inst->getSrc(i));
+                        if (!rootDcl) continue;
+                        G4_Operand *dst = inst->getDst();
+                        if (rootDcl == calleeBuilder->getFE_SP())
+                        {
+                            stackPointers[dst->getTopDcl()] = getPointerOffset(inst, stackPointers[rootDcl]);
+                            defInst[dst->getTopDcl()] = calleeIt;
+                            std::string prefix = removeStackFrame ? "removeFrame " : "";
+                            DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                            DEBUG_UTIL(inst->dump());
+                            if (removeStackFrame)
+                            {
+                                calleeInsts.erase(calleeIt);
+                                break;
+                            }
+                        }
+                        else if (stackPointers.find(rootDcl) != stackPointers.end())
+                        {
+                            long long offset = stackPointers[rootDcl];
+                            if (inst->opcode() == G4_mov)
+                            {
+                                auto execSize = static_cast<int>(inst->getExecSize());
+                                assert(execSize == 1);
+                                stackPointers[dst->getTopDcl()] = getPointerOffset(inst, offset);
+                                defInst[dst->getTopDcl()] = calleeIt;
+                                std::string prefix = removeStackFrame ? "removeFrame " : "";
+                                DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                                DEBUG_UTIL(inst->dump());
+                                if (removeStackFrame)
+                                {
+                                    calleeInsts.erase(calleeIt);
+                                    break;
+                                }
+                            }
+                            else if (inst->opcode() == G4_sends ||
+                                    inst->opcode() == G4_send)
+                            {
+                                if (storeList.empty())
+                                {
+                                    // store prevFP to the callee's frame
+                                    if (stackPointers[callerBuilder->getFE_SP()] ==
+                                        stackPointers[getRootDeclare(inst->getSrc(0))])
+                                    {
+                                        DEBUG_PRINT("remove prevFP on callee's frame:\n");
+                                        DEBUG_UTIL(inst->dump());
+                                        calleeInsts.erase(calleeIt);
+                                        break;
+                                    }
+                                    DEBUG_PRINT("skip for now (private variable on the callee's frame):\n");
+                                    DEBUG_UTIL(inst->dump());
+                                    assert(0);
+                                }
+                                auto storeIt = storeList.front();
+                                G4_INST *storeInst = *storeIt;
+                                G4_INST  *loadInst = inst;
+                                storeList.pop_front();
+                                DEBUG_PRINT("store-to-load forwarding:\n");
+                                DEBUG_PRINT("\tstore:\t");
+                                DEBUG_UTIL(storeInst->dump());
+                                DEBUG_PRINT("\tload :\t");
+                                DEBUG_UTIL(loadInst->dump());
+                                assert(stackPointers[getRootDeclare(storeInst->getSrc(0))] ==
+                                       stackPointers[getRootDeclare( loadInst->getSrc(0))] &&
+                                       "Store and load have different SP offset");
+                                // promote the load into mov
+                                inst->setOpcode(G4_mov);
+                                loadInst->setSrc(storeInst->getSrc(1), 0);
+                                DEBUG_PRINT("\tforwarded:");
+                                DEBUG_UTIL(inst->dump());
+                                // erase the store
+                                callerInsts.erase(storeIt);
+                            }
+                            else
+                            {
+                                assert(0 && "not implemented");
+                            }
+                        }
+                    }
+                }
+
+                // All args has been removed on the stack
+                // Remove SP updating instruction
+                if (storeList.empty() && !noArgOnStack)
+                {
+                    DEBUG_PRINT("removed:");
+                    DEBUG_UTIL((*defInst[callerBuilder->getFE_SP()])->dump());
+                    callerInsts.erase(defInst[callerBuilder->getFE_SP()]);
+                }
+
+            }
+
+            if (inlining)
+            {
+                auto& builder = caller->fg.builder;
+                std::string funcName = fcall->getSrc(0)->asLabel()->getLabel();
+                G4_Label *raLabel = builder->createLabel(funcName + "_ret" + std::to_string(raUID++), LABEL_BLOCK);
+                G4_INST* ra = caller->fg.createNewLabelInst(raLabel);
+                // We don't need calleeLabel (first instruction) anymore after inlining
+                calleeInsts.pop_front();
+                std::map<G4_Declare*, G4_Declare*> newDclMap;
+                for (G4_INST* fret : calleeInsts)
+                {
+                    G4_INST* inst = fret->cloneInst();
+                    auto cloneDcl = [&](G4_Operand* opd)
+                    {
+                        if (opd)
+                        {
+                            G4_Declare* topDcl = opd->getTopDcl();
+                            G4_RegVar* var =
+                                opd->isAddrExp() ?
+                                opd->asAddrExp()->getRegVar() :
+                                opd->getBase() && opd->getBase()->isRegVar()?
+                                    opd->getBase()->asRegVar() :
+                                    nullptr;
+                            if (!var)
+                                return;
+                            G4_Declare* dcl = var->getDeclare();
+                            if (topDcl && topDcl == callee->fg.builder->getStackCallArg())
+                            {
+                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                                opd->setTopDcl(caller->fg.builder->getStackCallArg());
+                                opd->setBase(newDcl->getRegVar());
+                                newDcl->setAliasDeclare(caller->fg.builder->getStackCallArg(), newDcl->getAliasOffset());
+                            }
+                            else if (topDcl && topDcl == callee->fg.builder->getStackCallRet())
+                            {
+                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                                opd->setTopDcl(caller->fg.builder->getStackCallRet());
+                                opd->setBase(newDcl->getRegVar());
+                                newDcl->setAliasDeclare(caller->fg.builder->getStackCallRet(), newDcl->getAliasOffset());
+                            }
+                            else if (topDcl && (topDcl == replacedArgDcl || topDcl == replacedRetDcl))
+                            {
+                                G4_Declare* newDcl = caller->fg.builder->createTempVar(topDcl->getTotalElems(), topDcl->getElemType(), Any, topDcl->getName());
+                                newDcl->setAliasDeclare(topDcl, 0);
+                                caller->Declares.push_back(newDcl);
+                            }
+                            else
+                            {
+                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                                if (opd->isAddrExp())
+                                {
+                                    assert(topDcl == nullptr);
+                                    opd->asAddrExp()->setRegVar(newDcl->getRegVar());
+                                }
+                                else
+                                {
+                                    opd->setTopDcl(newDcl->getAliasDeclare() ? newDcl->getAliasDeclare() : newDcl);
+                                    opd->setBase(newDcl->getRegVar());
+                                }
+                            }
+                        }
+                    };
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        cloneDcl(inst->getSrc(i));
+                    }
+                    cloneDcl(inst->getDst());
+                    // add predicate into declaration list
+                    if (G4_VarBase* flag = inst->getCondModBase())
+                    {
+                        caller->Declares.push_back(flag->asRegVar()->getDeclare());
+                    }
+                    callerInsts.insert(it, inst);
+                    if (inst->opcode() != G4_pseudo_fret)
+                        continue;
+                    // Change inst to goto
+                    inst->setOpcode(G4_goto);
+                    inst->asCFInst()->setUip(raLabel);
+                }
+                // insert return label for goto
+                callerInsts.insert(it, ra);
+                // remove the call
+                callerInsts.erase(it);
+            }
+            else
+            {
+                // We only have to copy callee's instructions once for subrountine calls
+                if (visited.find(callee) != visited.end())
+                {
                     continue;
-                // Change inst to goto
-                inst->setOpcode(G4_goto);
-                inst->asCFInst()->setUip(raLabel);
-            }
-            // Append declarations from callee to caller
-            for (auto curDcl : callee->Declares)
-            {
-                caller->Declares.push_back(curDcl);
-            }
-            // insert return label for goto
-            callerInsts.insert(it, ra);
-            // remove the call
-            callerInsts.erase(it);
-        }
-        else
-        {
-            // We only have to copy callee's instructions once for subrountine calls
-            if (visited.find(callee) != visited.end())
-            {
-                continue;
-            }
-            visited.insert(callee);
-            for (G4_INST* fret : calleeInsts)
-            {
-                if (fret->opcode() != G4_pseudo_fret)
-                    continue;
-                // Change fret to ret
-                fret->setOpcode(G4_return);
-                rets[calleeLabel].push_back(fret);
-            }
-            callerInsts.insert(callerInsts.end(), calleeInsts.begin(), calleeInsts.end());
-            // Append declarations from callee to caller
-            for (auto curDcl : callee->Declares)
-            {
-                caller->Declares.push_back(curDcl);
+                }
+                visited.insert(callee);
+                for (G4_INST* fret : calleeInsts)
+                {
+                    if (fret->opcode() != G4_pseudo_fret)
+                        continue;
+                    // Change fret to ret
+                    fret->setOpcode(G4_return);
+                    rets[calleeLabel].push_back(fret);
+                }
+                callerInsts.insert(callerInsts.end(), calleeInsts.begin(), calleeInsts.end());
+                // Append declarations from callee to caller
+                auto callerDclCount = caller->Declares.size();
+                for (auto curDcl : callee->Declares)
+                {
+                    curDcl->setDeclId(curDcl->getDeclId() + callerDclCount);
+                    caller->Declares.push_back(curDcl);
+                }
             }
         }
     }
@@ -796,9 +1321,11 @@ typedef struct yy_buffer_state * YY_BUFFER_STATE;
 extern int CISAparse(CISA_IR_Builder *builder);
 extern YY_BUFFER_STATE CISA_scan_string(const char* yy_str);
 extern void CISA_delete_buffer(YY_BUFFER_STATE buf);
+static std::mutex mtx;
 
 int CISA_IR_Builder::ParseVISAText(const std::string& visaText, const std::string& visaTextFile)
 {
+    const std::lock_guard<std::mutex> lock(mtx);
 #if defined(__linux__) || defined(_WIN64) || defined(_WIN32)
     // Direct output of parser to null
 #if defined(_WIN64) || defined(_WIN32)
@@ -894,11 +1421,6 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
 {
     stopTimer(TimerID::BUILDER);   // TIMER_BUILDER is started when builder is created
     int status = VISA_SUCCESS;
-
-#if defined(_DEBUG) || defined(_INTERNAL)
-    m_options.getOptionsFromEV();
-#endif
-
     std::string name = std::string(nameInput);
 
     if (IS_VISA_BOTH_PATH)
@@ -968,28 +1490,30 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         return m_cisaBinary->dumpToStream(os);
     }
 
-    if (m_options.getuInt32Option(vISA_Linker) != Linker_Disabled)
+    if (m_options.getuInt32Option(vISA_Linker) & (1U << Linker_Subroutine))
     {
         std::map<std::string, G4_Kernel*> functionsNameMap;
         G4_Kernel* mainFunc = m_kernelsAndFunctions.front()->getKernel();
         assert(m_kernelsAndFunctions.front()->getIsKernel() && "mainFunc must be the kernel entry");
         std::unordered_map<G4_Kernel*, std::list<std::list<G4_INST*>::iterator>> callSites;
-        CollectCallSites(m_kernelsAndFunctions, callSites);
+        std::list<std::list<G4_INST*>::iterator> sgInvokeList;
+        CollectCallSites(m_kernelsAndFunctions, callSites, sgInvokeList);
 
-        // Assume sg.invoke callsite list is calls in the kernel for now for testing purposes
-        auto& sgInvokeList = callSites.begin()->second;
-        assert(callSites.begin()->first == mainFunc);
-
-        CheckHazardFeatures(sgInvokeList, callSites);
-
-        RemoveOptimizingFunction(m_kernelsAndFunctions, sgInvokeList);
-
-        // Copy callees' context to callers and convert to subroutine calls
-        if (m_options.getuInt32Option(vISA_Linker) & Linker_Subroutine)
+        if (sgInvokeList.size())
         {
-            LinkTimeOptimization(sgInvokeList,
-                    m_options.getuInt32Option(vISA_Linker) & Linker_Call2Jump,
-                    m_options.getuInt32Option(vISA_Linker) & Linker_Inline);
+            assert(callSites.begin()->first == mainFunc);
+            CheckHazardFeatures(sgInvokeList, callSites);
+
+            ResetHasStackCall(sgInvokeList, callSites);
+
+            RemoveOptimizingFunction(m_kernelsAndFunctions, sgInvokeList);
+
+            std::unordered_map<G4_Kernel*, std::list<std::list<vISA::G4_INST*>::iterator>> callee2Callers;
+            ProcessSgInvokeList(sgInvokeList, callee2Callers);
+
+            // Copy callees' context to callers and convert to subroutine calls
+            LinkTimeOptimization(callee2Callers,
+                    m_options.getuInt32Option(vISA_Linker));
         }
     }
 
@@ -1021,12 +1545,19 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
         int i;
         unsigned int k = 0;
         bool isInPatchingMode = m_options.getuInt32Option(vISA_CodePatch) >= CodePatch_Enable_NoLTO && m_prevKernel;
+        uint32_t localScheduleStartKernelId = m_options.getuInt32Option(vISA_LocalScheduleingStartKernel);
+        uint32_t localScheduleEndKernelId = m_options.getuInt32Option(vISA_LocalScheduleingEndKernel);
         VISAKernelImpl* mainKernel = nullptr;
         std::list<VISAKernelImpl*>::iterator iter = m_kernelsAndFunctions.begin();
         std::list<VISAKernelImpl*>::iterator end = m_kernelsAndFunctions.end();
         for (i = 0; iter != end; iter++, i++)
         {
             VISAKernelImpl* kernel = (*iter);
+            if ((uint32_t)i < localScheduleStartKernelId || (uint32_t)i > localScheduleEndKernelId)
+            {
+                kernel->setLocalSheduleable(false);
+            }
+
             mainKernel = (kernel->getIsKernel()) ? kernel : mainKernel;
             kernel->finalizeAttributes();
             kernel->getIRBuilder()->setType(kernel->getType());
@@ -1051,11 +1582,10 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
             {
                 // Copy main kernel's declarations (shader body) into payload section
                 kernel->CopyVars(mainKernel);
-                kernel->getKernel()->Declares.insert(
-                        kernel->getKernel()->Declares.end(),
-                        mainKernel->getKernel()->Declares.begin(),
-                        mainKernel->getKernel()->Declares.end());
-
+                kernel->getKernel()->Declares = mainKernel->getKernel()->Declares;
+                kernel->getIRBuilder()->setInputR1(mainKernel->getIRBuilder()->getInputR1());
+                kernel->getIRBuilder()->setRealR0(mainKernel->getIRBuilder()->getRealR0());
+                kernel->getIRBuilder()->setBuiltInR0(mainKernel->getIRBuilder()->getBuiltinR0());
                 // Set payload LiveOuts to be output
                 uint32_t inputCount = mainKernel->getIRBuilder()->getInputCount();
                 for (unsigned int id = 0; id < inputCount; id++)
@@ -1069,14 +1599,14 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
                     vISA::G4_Declare* dcl = input_info->dcl;
                     if (dcl->isPayloadLiveOut())
                     {
-                        dcl->setLiveOut();
+                        dcl->getRootDeclare()->setLiveOut();
                     }
                 }
                 mainKernel->getIRBuilder()->getRealR0()->setLiveOut();
             }
 
             if ((kernel->getIsKernel() && isInPatchingMode) ||
-                kernel->getvIsaInstCount() == 0)
+                (kernel->getvIsaInstCount() == 0 && kernel->getIsPayload()))
             {
                 continue;
             }
@@ -1171,7 +1701,12 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
                 }
                 payloadSection->kernel.setGTPinData(
                     shaderBody->kernel.getGTPinData());
-                payloadSection->kernel.getGTPinData()->setFreeGlobalRegs(globalFreeRegs);
+                // If the number of free regs in payload section is 0,
+                // it means the compilation is skipped and we don't have to do anything
+                if (payloadSectionGTPin->getNumFreeGlobalRegs())
+                {
+                    payloadSection->kernel.getGTPinData()->setFreeGlobalRegs(globalFreeRegs);
+                }
             }
         }
 
@@ -1265,7 +1800,6 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
             }
             restoreFCallState(func->getKernel(), origFCallFRet);
 
-
         }
 
 
@@ -1285,7 +1819,8 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
                 if (func->getIsKernel())
                 {
                     m_cisaBinary->patchKernel(
-                        kernelCount, func->getGenxBinarySize(), func->getGenxBinaryBuffer(), getGenxPlatformEncoding());
+                        kernelCount, func->getGenxBinarySize(), func->getGenxBinaryBuffer(),
+                        m_platformInfo->encoding);
                     kernelCount++;
                 } else {
                     // functions be treated as "mainFunctions" will have its own binary, will need to
@@ -1420,9 +1955,6 @@ int CISA_IR_Builder::verifyVISAIR()
             ss << "\t" << name << "\n";
         }
         ss << "for the exact error messages\n";
-#ifndef  DLL_MODE
-        std::cerr << ss.str();
-#endif //DLL_MODE
         criticalMsgStream() << ss.str();
         return VISA_FAILURE;
     }
@@ -1455,7 +1987,7 @@ bool CISA_IR_Builder::CISA_eval_sizeof_decl(int lineNum, const char *var, int64_
     auto *decl =  (VISA_GenVar*)m_kernel->getDeclFromName(var);
     if (!decl) {
         if (std::string(var) == "GRF") {
-            val = getGRFSize();
+            val = m_kernel->getIRBuilder()->getGRFSize();
             return true;
         }
         RecordParseError(lineNum, var, ": unbound variable");
@@ -1729,10 +2261,7 @@ bool CISA_IR_Builder::CISA_attr_directive(
         }
         input_name = "OutputAsmPath"; // normalize to new name
 
-        char asmFileName[MAX_OPTION_STR_LENGTH];
-
-        strncpy_s(asmFileName,
-            MAX_OPTION_STR_LENGTH, input_var, MAX_OPTION_STR_LENGTH - 1);
+        char *asmFileName = strdup(input_var);
         char *pos = strstr(asmFileName, ".asm");
         if (pos != NULL)
         {
@@ -1781,17 +2310,19 @@ bool CISA_IR_Builder::CISA_attr_directiveNum(
 
 bool CISA_IR_Builder::CISA_create_label(const char *label_name, int lineNum)
 {
-    VISA_LabelOpnd *opnd[1] = {NULL};
+    VISA_LabelOpnd *opnd[1] = {nullptr};
 
     //when we print out ./function from isa we also print out label.
     //if we don't skip it during re-parsing then we will have duplicate labels
-    if (m_kernel->getLabelOperandFromFunctionName(std::string(label_name)) == NULL)
+    if (!m_kernel->getLabelOperandFromFunctionName(std::string(label_name)))
     {
         opnd[0] = m_kernel->getLabelOpndFromLabelName(std::string(label_name));
         if (!opnd[0])
         {
             // forward jump
             VISA_CALL_TO_BOOL(CreateVISALabelVar, opnd[0], label_name, LABEL_BLOCK);
+            if (!m_kernel->setLabelOpndNameMap(label_name, opnd[0], LABEL_BLOCK))
+                return false;
         }
         VISA_CALL_TO_BOOL(AppendVISACFLabelInst, opnd[0]);
     }
@@ -1802,11 +2333,13 @@ bool CISA_IR_Builder::CISA_create_label(const char *label_name, int lineNum)
 
 bool CISA_IR_Builder::CISA_function_directive(const char* func_name, int lineNum)
 {
-    VISA_LabelOpnd *opnd[1] = {NULL};
+    VISA_LabelOpnd *opnd[1] = {nullptr};
     opnd[0] = m_kernel->getLabelOperandFromFunctionName(std::string(func_name));
-    if (opnd[0] == NULL)
+    if (!opnd[0])
     {
         VISA_CALL_TO_BOOL(CreateVISALabelVar, opnd[0], func_name, LABEL_SUBROUTINE);
+        if (!m_kernel->setLabelOpndNameMap(func_name, opnd[0], LABEL_SUBROUTINE))
+            return false;
     }
 
     VISA_CALL_TO_BOOL(AppendVISACFLabelInst, opnd[0]);
@@ -1918,12 +2451,13 @@ bool CISA_IR_Builder::CISA_create_branch_instruction(
             if (!opnd[i])
             {
                 VISA_CALL_TO_BOOL(CreateVISALabelVar, opnd[i], target_label, lblKind);
-                opnd[i]->tag = lblKind;
+                if (!m_kernel->setLabelOpndNameMap(target_label, opnd[0], lblKind))
+                    return false;
+                opnd[i]->tag = ISA_SUBROUTINE;
             }
             VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
             VISA_CALL_TO_BOOL(AppendVISACFCallInst,
                 (VISA_PredOpnd *)pred, emask, executionSize, opnd[i]);
-            VISA_CALL_TO_BOOL(patchLastInst, opnd[i]);
             return true;
         }
     case ISA_JMP:
@@ -1934,10 +2468,11 @@ bool CISA_IR_Builder::CISA_create_branch_instruction(
             if (!opnd[i])
             {
                 VISA_CALL_TO_BOOL(CreateVISALabelVar, opnd[i], target_label, LABEL_BLOCK);
+                if (!m_kernel->setLabelOpndNameMap(target_label, opnd[0], LABEL_BLOCK))
+                    return false;
             }
 
             VISA_CALL_TO_BOOL(AppendVISACFJmpInst, (VISA_PredOpnd *) pred, opnd[i]);
-            VISA_CALL_TO_BOOL(patchLastInst, opnd[i]);
             return true;
         }
     case ISA_GOTO:
@@ -1948,12 +2483,12 @@ bool CISA_IR_Builder::CISA_create_branch_instruction(
             if (!opnd[i])
             {
                 VISA_CALL_TO_BOOL(CreateVISALabelVar, opnd[i], target_label, LABEL_BLOCK);
+                if (!m_kernel->setLabelOpndNameMap(target_label, opnd[0], LABEL_BLOCK))
+                    return false;
             }
             VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
             VISA_CALL_TO_BOOL(AppendVISACFGotoInst,
                 (VISA_PredOpnd*)pred, emask, executionSize, opnd[i]);
-            VISA_CALL_TO_BOOL(patchLastInst,
-                opnd[i]);
             return true;
         }
     default:
@@ -3104,6 +3639,8 @@ bool CISA_IR_Builder::CISA_create_switch_instruction(
         if (!labelOpnd)
         {
             VISA_CALL_TO_BOOL(CreateVISALabelVar, labelOpnd, labels[i], LABEL_BLOCK);
+            if (!m_kernel->setLabelOpndNameMap(labels[i], labelOpnd, LABEL_BLOCK))
+                return false;
         }
         jmpTargets[i] = labelOpnd;
     }
@@ -3708,7 +4245,195 @@ bool CISA_IR_Builder::CISA_create_bf_cvt_instruction(
     return true;
 }
 
+bool CISA_IR_Builder::CISA_create_fcvt_instruction(
+    VISA_EMask_Ctrl emask,
+    unsigned exec_size,
+    VISA_opnd *dst,
+    VISA_opnd *src0,
+    int lineNum)
+{
+    VISA_Exec_Size executionSize = Get_VISA_Exec_Size_From_Raw_Size(exec_size);
+    VISA_CALL_TO_BOOL(AppendVISADataMovementInst,
+        ISA_FCVT, nullptr, false, emask, executionSize,
+        (VISA_VectorOpnd *)dst, (VISA_VectorOpnd *)src0);
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_lsc_untyped_inst(
+    VISA_opnd                *pred,
+    LSC_OP                    opcode,
+    LSC_SFID                  sfid,
+    LSC_CACHE_OPTS            caching,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_ADDR                  addr,
+    LSC_DATA_SHAPE            dataShape,
+    VISA_opnd                *surface,
+    VISA_opnd                *dstData,
+    VISA_opnd                *src0Addr,
+    VISA_opnd                *src1Data,
+    VISA_opnd                *src2Data,
+    int                       lineNum)
+{
+    VISA_CALL_TO_BOOL(AppendVISALscUntypedInst,
+        opcode,
+        sfid,
+        static_cast<VISA_PredOpnd *>(pred),
+        execSize,
+        emask,
+        caching,
+        addr,
+        dataShape,
+        static_cast<VISA_VectorOpnd *>(surface),
+        static_cast<VISA_RawOpnd *>(dstData),
+        static_cast<VISA_RawOpnd *>(src0Addr),
+        static_cast<VISA_RawOpnd *>(src1Data),
+        static_cast<VISA_RawOpnd *>(src2Data));
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_lsc_untyped_strided_inst(
+    VISA_opnd                *pred,
+    LSC_OP                    opcode,
+    LSC_SFID                  sfid,
+    LSC_CACHE_OPTS            caching,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_ADDR                  addr,
+    LSC_DATA_SHAPE            dataShape,
+    VISA_opnd                *surface,
+    VISA_opnd                *dst,
+    VISA_opnd                *src0Base,
+    VISA_opnd                *src0Stride,
+    VISA_opnd                *src1Data,
+    int                       lineNum)
+{
+    VISA_CALL_TO_BOOL(AppendVISALscUntypedStridedInst,
+        opcode,
+        sfid,
+        static_cast<VISA_PredOpnd *>(pred),
+        execSize,
+        emask,
+        caching,
+        addr,
+        dataShape,
+        static_cast<VISA_VectorOpnd *>(surface),
+        static_cast<VISA_RawOpnd *>(dst),
+        static_cast<VISA_RawOpnd *>(src0Base),
+        static_cast<VISA_VectorOpnd *>(src0Stride),
+        static_cast<VISA_RawOpnd *>(src1Data));
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_lsc_untyped_block2d_inst(
+    VISA_opnd               *pred,
+    LSC_OP                   opcode,
+    LSC_SFID                 sfid,
+    LSC_CACHE_OPTS           caching,
+    VISA_Exec_Size           execSize,
+    VISA_EMask_Ctrl          emask,
+    LSC_DATA_SHAPE_BLOCK2D   dataShape2d,
+    VISA_opnd               *dstData,
+    VISA_opnd               *src0AddrsOps[LSC_BLOCK2D_ADDR_PARAMS],
+    VISA_opnd               *src1Data,
+    int                      lineNum)
+{
+    VISA_VectorOpnd *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS] {
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[0]),
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[1]),
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[2]),
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[3]),
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[4]),
+        static_cast<VISA_VectorOpnd *>(src0AddrsOps[5]),
+    };
+    VISA_CALL_TO_BOOL(AppendVISALscUntypedBlock2DInst,
+        opcode,
+        sfid,
+        static_cast<VISA_PredOpnd *>(pred),
+        execSize,
+        emask,
+        caching,
+        dataShape2d,
+        static_cast<VISA_RawOpnd *>(dstData),
+        src0Addrs,
+        static_cast<VISA_RawOpnd *>(src1Data));
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_lsc_typed_inst(
+        VISA_opnd               *pred,
+        LSC_OP                   opcode,
+        LSC_SFID                 sfid,
+        LSC_CACHE_OPTS           caching,
+        VISA_Exec_Size           execSize,
+        VISA_EMask_Ctrl          emask,
+        LSC_ADDR_TYPE            addrModel,
+        LSC_ADDR_SIZE            addrSize,
+        LSC_DATA_SHAPE           dataShape,
+        VISA_opnd               *surface,
+        VISA_opnd               *dst_data,
+        VISA_opnd               *src0_Us,
+        VISA_opnd               *src0_Vs,
+        VISA_opnd               *src0_Rs,
+        VISA_opnd               *src0_LODs,
+        VISA_opnd               *src1_data,
+        VISA_opnd               *src2_data,
+        int                      lineNum)
+{
+    VISA_CALL_TO_BOOL(AppendVISALscTypedInst,
+        opcode,
+        static_cast<VISA_PredOpnd *>(pred),
+        execSize,
+        emask,
+        caching,
+        addrModel,
+        addrSize,
+        dataShape,
+        static_cast<VISA_VectorOpnd *>(surface),
+        static_cast<VISA_RawOpnd *>(dst_data),
+        static_cast<VISA_RawOpnd *>(src0_Us),
+        static_cast<VISA_RawOpnd *>(src0_Vs),
+        static_cast<VISA_RawOpnd *>(src0_Rs),
+        static_cast<VISA_RawOpnd *>(src0_LODs),
+        static_cast<VISA_RawOpnd *>(src1_data),
+        static_cast<VISA_RawOpnd *>(src2_data));
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_lsc_fence(
+    LSC_SFID                 sfid,
+    LSC_FENCE_OP             fence,
+    LSC_SCOPE                scope,
+    int                      lineNum)
+{
+    VISA_CALL_TO_BOOL(AppendVISALscFence,
+        sfid, fence, scope);
+
+    return true;
+}
+
+bool CISA_IR_Builder::CISA_create_nbarrier(
+    bool isWait,
+    VISA_opnd *barrierId,
+    VISA_opnd *threadCount,
+    int lineNum)
+{
+    if (isWait) {
+        VISA_CALL_TO_BOOL(AppendVISANamedBarrierWait,
+            static_cast<VISA_VectorOpnd*>(barrierId));
+    } else {
+        VISA_CALL_TO_BOOL(AppendVISANamedBarrierSignal,
+            static_cast<VISA_VectorOpnd*>(barrierId),
+            static_cast<VISA_VectorOpnd*>(threadCount));
+    }
+    return true;
+}
 
 
-
-
+const VISAKernelImpl* CISA_IR_Builder::getKernel(const std::string& name) const
+{
+    auto it = m_nameToKernel.find(name);
+    if (it == m_nameToKernel.end())
+        return nullptr;
+    return it->second;
+}

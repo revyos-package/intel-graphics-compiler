@@ -40,7 +40,6 @@ SPDX-License-Identifier: MIT
 
 #include "GenX.h"
 #include "GenXBaling.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
 #include "vc/GenXOpts/GenXAnalysis.h"
 
@@ -162,6 +161,8 @@ class GenXDeadVectorRemoval : public FunctionPass {
   std::queue<Instruction *> WorkList;
   std::set<Instruction *> WrRegionsWithUsedOldInput;
   bool WorkListPhase = false;
+  unsigned RemovedCount = 0;
+
 public:
   static char ID;
   explicit GenXDeadVectorRemoval() : FunctionPass(ID) { }
@@ -178,6 +179,7 @@ private:
     IGC_ASSERT(WorkList.empty());
     WrRegionsWithUsedOldInput.clear();
     WorkListPhase = false;
+    RemovedCount = 0;
   }
   bool nullOutInstructions(Function *F);
   void processInst(Instruction *Inst);
@@ -218,6 +220,15 @@ static bool isRootInst(Instruction *Inst) {
   if (isa<ReturnInst>(Inst) || isa<BranchInst>(Inst) ||
       Inst->isTerminator() || Inst->mayHaveSideEffects())
     return true;
+
+  // Even if the whole region is overwritten by a chain of wrregions, wrregions
+  // to predefined register must not be optimized as they are extremely
+  // specific.
+  if (GenXIntrinsic::isWrRegion(Inst) &&
+      GenXIntrinsic::isReadPredefReg(
+          Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum)))
+    return true;
+
   if (auto CI = dyn_cast<CallInst>(Inst))
     return !CI->onlyReadsMemory();
   return false;
@@ -277,9 +288,7 @@ bool GenXDeadVectorRemoval::runOnFunction(Function &F)
  * - when no elements in the "old value" input of a wrregion are used,
  *   then changes the input to undef.
  */
-bool GenXDeadVectorRemoval::nullOutInstructions(Function *F)
-{
-  static unsigned Count = 0;
+bool GenXDeadVectorRemoval::nullOutInstructions(Function *F) {
   bool Modified = false;
   for (auto fi = F->begin(), fe = F->end(); fi != fe; ++fi) {
     for (auto bi = fi->begin(), be = fi->end(); bi != be; ++bi) {
@@ -290,10 +299,10 @@ bool GenXDeadVectorRemoval::nullOutInstructions(Function *F)
       // See if the instruction has no used elements. If so, null out its uses.
       auto LB = getLiveBits(Inst);
       if (LB.isAllZero()) {
-        if (++Count > LimitGenXDeadVectorRemoval)
+        if (++RemovedCount > LimitGenXDeadVectorRemoval)
           return Modified;
         if (LimitGenXDeadVectorRemoval != UINT_MAX)
-          dbgs() << "-limit-genx-dead-vector-removal " << Count << "\n";
+          dbgs() << "-limit-genx-dead-vector-removal " << RemovedCount << "\n";
         LLVM_DEBUG(if (!Inst->use_empty())
           dbgs() << "nulled out uses of " << *Inst << "\n");
         while (!Inst->use_empty()) {
@@ -318,10 +327,11 @@ bool GenXDeadVectorRemoval::nullOutInstructions(Function *F)
         if (WrRegionsWithUsedOldInput.find(Inst)
           == WrRegionsWithUsedOldInput.end()) {
           if (!isa<UndefValue>(*U)) {
-            if (++Count > LimitGenXDeadVectorRemoval)
+            if (++RemovedCount > LimitGenXDeadVectorRemoval)
               return Modified;
             if (LimitGenXDeadVectorRemoval != UINT_MAX)
-              dbgs() << "-limit-genx-dead-vector-removal " << Count << "\n";
+              dbgs() << "-limit-genx-dead-vector-removal " << RemovedCount
+                     << "\n";
             *U = UndefValue::get((*U)->getType());
             LLVM_DEBUG(dbgs() << "null out old value input in " << *Inst << "\n");
             Modified = true;
@@ -330,13 +340,13 @@ bool GenXDeadVectorRemoval::nullOutInstructions(Function *F)
         // when no elements in the "new value" input of a wrregion are use,
         // then bypass the wrregion with the "old value".
         bool bypass = true;
-        Region R(Inst, BaleInfo());
+        Region R = makeRegionFromBaleInfo(Inst, BaleInfo());
         if (R.Mask || R.Indirect)
           bypass = false;
         else {
-          for (unsigned RowIdx = R.Offset / R.ElementBytes, Row = 0,
-            NumRows = R.NumElements / R.Width; Row != NumRows && bypass;
-            RowIdx += R.VStride, ++Row) {
+          for (unsigned RowIdx = R.getOffsetInElements(), Row = 0,
+                        NumRows = R.NumElements / R.Width;
+               Row != NumRows && bypass; RowIdx += R.VStride, ++Row) {
             for (unsigned Idx = RowIdx, Col = 0; Col != R.Width && bypass;
               Idx += R.Stride, ++Col) {
               if (Idx < LB.getNumElements() && LB.get(Idx))
@@ -414,7 +424,7 @@ void GenXDeadVectorRemoval::processRdRegion(Instruction *Inst, LiveBits LB)
 {
   auto InInst = dyn_cast<Instruction>(
       Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
-  Region R(Inst, BaleInfo());
+  Region R = makeRegionFromBaleInfo(Inst, BaleInfo());
   if (R.Indirect) {
     markWhollyLive(InInst);
     markWhollyLive(Inst->getOperand(GenXIntrinsic::GenXRegion::RdIndexOperandNum));
@@ -426,9 +436,9 @@ void GenXDeadVectorRemoval::processRdRegion(Instruction *Inst, LiveBits LB)
   // rdregion.
   bool Modified = false;
   LiveBits InLB = createLiveBits(InInst);
-  for (unsigned RowIdx = R.Offset / R.ElementBytes, Row = 0,
-      NumRows = R.NumElements / R.Width; Row != NumRows;
-      RowIdx += R.VStride, ++Row)
+  for (unsigned RowIdx = R.getOffsetInElements(), Row = 0,
+                NumRows = R.NumElements / R.Width;
+       Row != NumRows; RowIdx += R.VStride, ++Row)
     for (unsigned Idx = RowIdx, Col = 0; Col != R.Width; Idx += R.Stride, ++Col)
       if (LB.get(Row * R.Width + Col))
         if (Idx < InLB.getNumElements())
@@ -457,7 +467,7 @@ static Constant *undefDeadConstElements(Constant *C, LiveBits LB) {
  */
 void GenXDeadVectorRemoval::processWrRegion(Instruction *Inst, LiveBits LB)
 {
-  Region R(Inst, BaleInfo());
+  Region R = makeRegionFromBaleInfo(Inst, BaleInfo());
   if (R.Mask)
     markWhollyLive(Inst->getOperand(GenXIntrinsic::GenXRegion::PredicateOperandNum));
   auto NewInInst = dyn_cast<Instruction>(
@@ -470,9 +480,9 @@ void GenXDeadVectorRemoval::processWrRegion(Instruction *Inst, LiveBits LB)
     // the wrregion in the "new value" input.
     bool Modified = false;
     LiveBits NewInLB = createLiveBits(NewInInst);
-    for (unsigned RowIdx = R.Offset / R.ElementBytes, Row = 0,
-        NumRows = R.NumElements / R.Width; Row != NumRows;
-        RowIdx += R.VStride, ++Row)
+    for (unsigned RowIdx = R.getOffsetInElements(), Row = 0,
+                  NumRows = R.NumElements / R.Width;
+         Row != NumRows; RowIdx += R.VStride, ++Row)
       for (unsigned Idx = RowIdx, Col = 0; Col != R.Width;
           Idx += R.Stride, ++Col)
         if (Idx < LB.getNumElements() && LB.get(Idx))
@@ -503,7 +513,7 @@ void GenXDeadVectorRemoval::processWrRegion(Instruction *Inst, LiveBits LB)
     // Set bits in OldLB (OldInInst's livebits) for live elements read by the
     // wrregion in the "old value" input, excluding ones that come from the
     // "new value" input.
-    unsigned NextRow = 0, NextCol = 0, NextIdx = R.Offset / R.ElementBytes,
+    unsigned NextRow = 0, NextCol = 0, NextIdx = R.getOffsetInElements(),
              NextRowIdx = NextIdx, NumRows = R.NumElements / R.Width;
     for (unsigned Idx = 0, End = LB.getNumElements(); Idx != End; ++Idx) {
       if (Idx == NextIdx) {

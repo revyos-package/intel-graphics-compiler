@@ -265,7 +265,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
         if (useInst->isSend())
         {
             // send operand doesn't take subreg, so the operand has to be GRF-aligned
-            if (!builder.isOpndAligned(lvnDst, numEltPerGRF<Type_UB>()))
+            if (!builder.isOpndAligned(lvnDst, builder.numEltPerGRF<Type_UB>()))
             {
                 canReplace = false;
                 break;
@@ -436,7 +436,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList& uses, G4_INST* lvnInst
         //
         // In general, V3(0,0) src in op cannot be replaced by
         // V2(0,6).
-        if (lb % numEltPerGRF<Type_UB>() != lvnDst->getLeftBound() % numEltPerGRF<Type_UB>())
+        if (lb % builder.numEltPerGRF<Type_UB>() != lvnDst->getLeftBound() % builder.numEltPerGRF<Type_UB>())
         {
             canReplace = false;
         }
@@ -538,9 +538,9 @@ void LVN::replaceAllUses(G4_INST* defInst, bool negate, UseList& uses, G4_INST* 
             int offsetFromOrigDst = srcToReplace->getLeftBound() - defInst->getDst()->getLeftBound();
             // we can replace the regVar directly without changing the rest of the region
             auto typeSize = srcToReplace->getTypeSize();
-            int offset = regOff * numEltPerGRF<Type_UB>() + subRegOff * lvnInst->getDst()->getTypeSize() + offsetFromOrigDst;
-            short newRegOff = offset / numEltPerGRF<Type_UB>();
-            short newSubRegOff = (offset % numEltPerGRF<Type_UB>()) / typeSize;
+            int offset = regOff * builder.numEltPerGRF<Type_UB>() + subRegOff * lvnInst->getDst()->getTypeSize() + offsetFromOrigDst;
+            short newRegOff = offset / builder.numEltPerGRF<Type_UB>();
+            short newSubRegOff = (offset % builder.numEltPerGRF<Type_UB>()) / typeSize;
 
             srcRgn = builder.createSrcRegRegion(srcMod, Direct, lvnInst->getDst()->getBase()->asRegVar(),
                 newRegOff, newSubRegOff, srcToReplace->getRegion(), srcToReplace->getType());
@@ -752,7 +752,10 @@ bool LVN::checkIfInPointsTo(const G4_RegVar* addr, const G4_RegVar* var) const
     if (ptrToAllPointsTo)
     {
         const G4_RegVar* topRegVar = var->getDeclare()->getRootDeclare()->getRegVar();
-        return std::find(ptrToAllPointsTo->begin(), ptrToAllPointsTo->end(), topRegVar) != ptrToAllPointsTo->end();
+        auto it = std::find_if(ptrToAllPointsTo->begin(), ptrToAllPointsTo->end(),
+            [&topRegVar](const pointInfo& element) {return element.var == topRegVar && element.off == 0; });
+
+        return it != ptrToAllPointsTo->end();
     }
 
     return false;
@@ -769,7 +772,7 @@ void LVN::removeAliases(G4_INST* inst)
 
     for (auto item : *dstPointsToPtr)
     {
-        auto dcl = item->getDeclare()->getRootDeclare();
+        auto dcl = item.var->getDeclare()->getRootDeclare();
         auto it = dclValueTable.find(dcl);
         if (it == dclValueTable.end())
             continue;
@@ -1837,6 +1840,18 @@ void LVN::populateDuTable(INST_LIST_ITER inst_it)
     }
 }
 
+void LVN::invalidate()
+{
+    // invalidate all values cached in value table
+    for (auto& bucket : lvnTable)
+    {
+        for (auto& lvnItem : bucket.second)
+        {
+            lvnItem->active = false;
+        }
+    }
+}
+
 void LVN::doLVN()
 {
     bb->resetLocalIds();
@@ -1846,6 +1861,13 @@ void LVN::doLVN()
     {
         G4_INST* inst = (*inst_it);
         bool negMatch = false;
+
+        if (inst->isOptBarrier())
+        {
+            // disallow optimization across opt barrier
+            invalidate();
+            continue;
+        }
 
         if (inst->getDst() == NULL)
         {

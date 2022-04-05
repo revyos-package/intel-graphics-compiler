@@ -82,6 +82,7 @@ namespace vISA
         std::vector<LSLiveRange*> globalLiveIntervals;
         std::vector<LSLiveRange*> preAssignedLiveIntervals;
         std::vector<LSLiveRange*> liveThroughIntervals;
+        std::map<G4_BB*, std::vector<G4_BB*>> loopHeadExitMap;
         unsigned int numRegLRA = 0;
         unsigned int numRowsEOT = 0;
         unsigned int globalLRSize = 0;
@@ -122,10 +123,11 @@ namespace vISA
         void setDstReferences(G4_BB* bb, INST_LIST_ITER inst_it, G4_Declare* dcl, std::vector<LSLiveRange*>& liveIntervals, std::vector<LSLiveRange*>& eotLiveIntervals);
         void setSrcReferences(G4_BB* bb, INST_LIST_ITER inst_it, int srcIdx, G4_Declare* dcl, std::vector<LSLiveRange*>& liveIntervals, std::vector<LSLiveRange*>& eotLiveIntervals);
         void generateInputIntervals(G4_Declare* topdcl, G4_INST* inst, std::vector<uint32_t>& inputRegLastRef, PhyRegsLocalRA& initPregs, bool avoidSameInstOverlap);
-        void calculateInputIntervalsGlobal(PhyRegsLocalRA& initPregs, std::list<vISA::G4_BB*>& bbList);
+        void calculateInputIntervalsGlobal(PhyRegsLocalRA& initPregs);
         void calculateLiveInIntervals(G4_BB* bb, std::vector<LSLiveRange*>& liveIntervals);
         void calculateCurrentBBLiveIntervals(G4_BB* bb, std::vector<LSLiveRange*>& liveIntervals, std::vector<LSLiveRange*>& eotLiveIntervals);
         void calculateLiveOutIntervals(G4_BB* bb, std::vector<LSLiveRange*>& liveIntervals);
+        void calculateLiveThroughIntervals();
         void calculateLiveIntervalsGlobal(G4_BB* bb, std::vector<LSLiveRange*>& liveIntervals, std::vector<LSLiveRange*>& eotLiveIntervals);
         void printLiveIntervals(std::vector<LSLiveRange*>& liveIntervals);
         void printSpillLiveIntervals(std::list<LSLiveRange*>& liveIntervals);
@@ -139,7 +141,7 @@ namespace vISA
         uint32_t scratchOffset = 0;
 
     public:
-        static void getRowInfo(int size, int& nrows, int& lastRowSize);
+        static void getRowInfo(int size, int& nrows, int& lastRowSize, const IR_Builder& builder);
         static unsigned int convertSubRegOffFromWords(G4_Declare* dcl, int subregnuminwords);
 
         LinearScanRA(BankConflictPass&, GlobalRA&, LivenessAnalysis&);
@@ -157,7 +159,7 @@ private:
     G4_INST* firstRef;
     G4_INST* lastRef;
     unsigned int lrStartIdx, lrEndIdx;
-    int regionID;
+    bool pushed;
     G4_VarBase* preg;
     // pregoff is stored in word here
     // But subreg offset stored in regvar should be in units of dcl's element size
@@ -197,7 +199,7 @@ public:
         preAssigned = false;
         eot = false;
         useUnAvailableReg = false;
-        regionID = -1;
+        pushed = false;
         isActive = false;
         _isCall = false;
         _isCallSite = false;
@@ -211,8 +213,9 @@ public:
 
     void setUseUnAvailableReg(bool avail) { useUnAvailableReg = avail; }
     bool isUseUnAvailableReg() { return useUnAvailableReg; }
-    void setRegionID(int id) { regionID = id; }
-    int getRegionID() { return regionID; }
+    void setPushed(bool p) { pushed = p; }
+    bool isPushedToIntervalList() { return pushed; }
+
     // A reference to this live range exists in bb basic block, record it
     void markIndirectRef(bool indirectAccess) { isIndirectAccess = indirectAccess; }
 
@@ -237,8 +240,18 @@ public:
 
     void setFirstRef(G4_INST* inst, unsigned int idx)
     {
-        firstRef = inst;
-        lrStartIdx = idx;
+        if (!firstRef && lrStartIdx == 0)
+        {
+            firstRef = inst;
+            lrStartIdx = idx;
+            return;
+        }
+
+        if (idx < lrStartIdx)
+        {
+            firstRef = inst;
+            lrStartIdx = idx;
+        }
     }
 
     G4_INST* getFirstRef(unsigned int& idx)
@@ -266,7 +279,7 @@ public:
     G4_VarBase* getPhyReg(int& subreg) { subreg = pregoff; return preg; }
     void        resetPhyReg() { preg = NULL; pregoff = 0; }
 
-    unsigned int getSizeInWords();
+    unsigned int getSizeInWords(const IR_Builder& builder);
 
     bool isLiveRangeGlobal() const;
 

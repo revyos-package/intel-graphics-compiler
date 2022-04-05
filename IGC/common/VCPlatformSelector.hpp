@@ -15,12 +15,15 @@ SPDX-License-Identifier: MIT
 #ifndef VC_PLATFORM_SELECTOR_H
 #define VC_PLATFORM_SELECTOR_H
 
+#include "llvm/Support/ErrorHandling.h"
+
 #include "Probe/Assertion.h"
 #include "StringMacros.hpp"
 #include "igfxfmid.h"
 
 namespace cmc {
 
+constexpr int ComputeTileMaskPVC = 0x7;
 inline const char *getPlatformStr(PLATFORM Platform, unsigned &RevId) {
   // after some consultations with Wndows KMD folks,
   // only render core shall be used in all cases
@@ -31,14 +34,13 @@ inline const char *getPlatformStr(PLATFORM Platform, unsigned &RevId) {
   switch (Core) {
   case IGFX_GEN9_CORE:
     return "SKL";
-  case IGFX_GEN10_CORE:
-    return "CNL";
   case IGFX_GEN11_CORE:
-    if (Product == IGFX_ICELAKE_LP || Product == IGFX_LAKEFIELD)
-      return "ICLLP";
-    return "ICL";
+    return "ICLLP";
   case IGFX_GEN12_CORE:
   case IGFX_GEN12LP_CORE:
+  case IGFX_XE_HP_CORE:
+  case IGFX_XE_HPG_CORE:
+  case IGFX_XE_HPC_CORE:
     if (Product == IGFX_TIGERLAKE_LP)
       return "TGLLP";
     if (Product == IGFX_DG1)
@@ -51,13 +53,19 @@ inline const char *getPlatformStr(PLATFORM Platform, unsigned &RevId) {
       return "ADLP";
     else if (Product == IGFX_XE_HP_SDV)
       return "XEHP";
-    else if (Product == IGFX_XE_HP_SDV)
-      return "TGL"; // alias to XeHP_SDV
+    else if (Product == IGFX_DG2)
+      return "DG2";
+    else if (Product == IGFX_PVC) {
+      // fixing revision id for PVC to compute tile
+      RevId &= cmc::ComputeTileMaskPVC;
+      if (RevId < REVISION_B)
+        return "PVC";
+      return "PVCXT";
+    }
   default:
-    IGC_ASSERT_MESSAGE(0, "unsupported platform");
     break;
   }
-  return "SKL";
+  return nullptr;
 }
 
 } // namespace cmc

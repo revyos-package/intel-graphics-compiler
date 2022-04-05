@@ -123,12 +123,11 @@ SPDX-License-Identifier: MIT
 #include "GenXIntrinsics.h"
 #include "GenXLiveness.h"
 #include "GenXModule.h"
-#include "GenXRegion.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
 
-#include "vc/GenXOpts/Utils/KernelInfo.h"
-#include "vc/GenXOpts/Utils/RegCategory.h"
+#include "vc/Utils/GenX/KernelInfo.h"
+#include "vc/Utils/GenX/RegCategory.h"
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -158,17 +157,19 @@ namespace {
   // CategoryAndAlignment : values returned from getCategoryAndAlignment*
   // functions
   struct CategoryAndAlignment {
-    unsigned Cat;
+    vc::RegCategory Cat;
     unsigned Align;
-    CategoryAndAlignment(unsigned Cat, unsigned Align = 0) : Cat(Cat), Align(Align) {}
+    CategoryAndAlignment(vc::RegCategory Cat, unsigned Align = 0)
+        : Cat(Cat), Align(Align) {}
   };
 
   class UsesCatInfo;
 
   // GenX category pass
-  class GenXCategory : public FunctionGroupPass {
+  class GenXCategory : public FGPassImplInterface,
+                       public IDMixin<GenXCategory> {
     Function *Func = nullptr;
-    KernelMetadata KM;
+    vc::KernelMetadata KM;
     GenXLiveness *Liveness = nullptr;
     DominatorTreeGroupWrapperPass *DTs = nullptr;
     const GenXSubtarget *Subtarget = nullptr;
@@ -184,33 +185,27 @@ namespace {
     bool EnforceCategoryPromotion = false;
 
   public:
-    static char ID;
-    explicit GenXCategory() : FunctionGroupPass(ID) { }
-    StringRef getPassName() const override {
-      return "GenX category conversion";
-    }
-    void getAnalysisUsage(AnalysisUsage &AU) const override;
+    explicit GenXCategory() {}
+    static StringRef getPassName() { return "GenX category conversion"; }
+    static void getAnalysisUsage(AnalysisUsage &AU);
     bool runOnFunctionGroup(FunctionGroup &FG) override;
-    // createPrinterPass : get a pass to print the IR, together with the GenX
-    // specific analyses
-    Pass *createPrinterPass(raw_ostream &O,
-                            const std::string &Banner) const override {
-      return createGenXGroupPrinterPass(O, Banner);
-    }
-    unsigned getCategoryForPhiIncomings(PHINode *Phi) const;
-    unsigned getCategoryForCallArg(Function *Callee, unsigned ArgNo) const;
-    unsigned getCategoryForInlasmConstraintedOp(CallInst *CI, unsigned ArgNo,
-                                                bool IsOutput) const;
+    vc::RegCategory getCategoryForPhiIncomings(PHINode *Phi) const;
+    vc::RegCategory getCategoryForCallArg(Function *Callee,
+                                          unsigned ArgNo) const;
+    vc::RegCategory getCategoryForInlasmConstraintedOp(CallInst *CI,
+                                                       unsigned ArgNo,
+                                                       bool IsOutput) const;
     CategoryAndAlignment getCategoryAndAlignmentForDef(Value *V) const;
     CategoryAndAlignment getCategoryAndAlignmentForUse(Value::use_iterator U) const;
+
   private:
-    using ConvListT = std::array<llvm::Instruction *, RegCategory::NUMCATEGORIES>;
+    using ConvListT = std::array<llvm::Instruction *, vc::numRegCategories()>;
 
     bool processFunction(Function *F);
     bool fixCircularPhis(Function *F);
     bool processValue(Value *V);
     bool handleLeftover();
-    Instruction *createConversion(Value *V, unsigned Cat);
+    Instruction *createConversion(Value *V, vc::RegCategory Cat);
     ConvListT buildConversions(Value *Def, CategoryAndAlignment DefInfo, const UsesCatInfo &UsesInfo);
   };
 
@@ -218,37 +213,40 @@ namespace {
   struct AUse {
     Instruction *user;
     unsigned OperandNum;
-    unsigned Cat;
-    AUse(Value::use_iterator U, unsigned Cat)
-      : user(cast<Instruction>(U->getUser())),
-        OperandNum(U->getOperandNo()), Cat(Cat) {}
+    vc::RegCategory Cat;
+    AUse(Value::use_iterator U, vc::RegCategory Cat)
+        : user(cast<Instruction>(U->getUser())), OperandNum(U->getOperandNo()),
+          Cat(Cat) {}
   };
 
   // almost real input iterator, minimum for range for was implemented
   class Iterator final {
-    unsigned ShiftedMask_;
-    unsigned CurCat_;
+    unsigned ShiftedMask_ = 0;
+    vc::RegCategoryIterator CurCatIt_;
 
   public:
-    Iterator(unsigned Mask, unsigned Cat) : ShiftedMask_(Mask), CurCat_(Cat) {
+    Iterator() = default;
+
+    Iterator(unsigned Mask, vc::RegCategory Cat)
+        : ShiftedMask_(Mask), CurCatIt_(Cat) {
       validate();
     }
 
-    unsigned operator*() const {
+    vc::RegCategory operator*() const {
       validate();
-      return CurCat_;
+      return *CurCatIt_;
     }
 
     Iterator &operator++() {
       validate();
       ShiftedMask_ /= 2;
-      ++CurCat_;
+      ++CurCatIt_;
       if (ShiftedMask_ == 0) {
-        CurCat_ = RegCategory::NUMCATEGORIES;
+        CurCatIt_ = vc::end(vc::RegCategoryView{});
         validate();
         return *this;
       }
-      for (; ShiftedMask_ % 2 == 0; ShiftedMask_ /= 2, ++CurCat_)
+      for (; ShiftedMask_ % 2 == 0; ShiftedMask_ /= 2, ++CurCatIt_)
         ;
       validate();
       return *this;
@@ -256,7 +254,7 @@ namespace {
 
     friend bool operator==(const Iterator &lhs, const Iterator &rhs) {
       return (lhs.ShiftedMask_ == rhs.ShiftedMask_ &&
-              lhs.CurCat_ == rhs.CurCat_);
+              lhs.CurCatIt_ == rhs.CurCatIt_);
     }
 
     friend bool operator!=(const Iterator &lhs, const Iterator &rhs) {
@@ -265,8 +263,9 @@ namespace {
 
   private:
     void validate() const {
-      IGC_ASSERT_MESSAGE((ShiftedMask_ % 2 == 1 || CurCat_ == RegCategory::NUMCATEGORIES),
-        "invalid state");
+      IGC_ASSERT_MESSAGE((ShiftedMask_ % 2 == 1 ||
+                          CurCatIt_ == vc::end(vc::RegCategoryView{})),
+                         "invalid state");
     }
   };
 
@@ -284,14 +283,14 @@ namespace {
         return end();
       // we have NONE category
       if (Mask_ % 2 == 1)
-        return Iterator(Mask_, 0);
+        return Iterator(Mask_, vc::RegCategory::None);
       // we adding NONE category
-      Iterator FalseBegin(Mask_ + 1, 0);
+      Iterator FalseBegin(Mask_ + 1, vc::RegCategory::None);
       // and now we get the real first category
       return ++FalseBegin;
     }
 
-    Iterator end() const { return Iterator(0, RegCategory::NUMCATEGORIES); }
+    Iterator end() const { return {}; }
   };
 
   // Encapsulates Category'n'Alignment analysis of value uses.
@@ -300,28 +299,30 @@ namespace {
     UsesT Uses_;
     unsigned Mask_;
     unsigned MaxAlign_;
-    unsigned MostUsedCat_;
+    vc::RegCategory MostUsedCat_;
 
   public:
     UsesCatInfo() : Uses_(), Mask_(0), MaxAlign_(0) {}
 
     UsesCatInfo(const GenXCategory &PassInfo, Value *V) : UsesCatInfo() {
-      std::array<int, RegCategory::NUMCATEGORIES> Stat = {0};
+      std::array<int, vc::numRegCategories()> Stat = {0};
       for (auto ui = V->use_begin(), ue = V->use_end(); ui != ue; ++ui) {
         auto CatAlign = PassInfo.getCategoryAndAlignmentForUse(ui);
         MaxAlign_ = std::max(MaxAlign_, CatAlign.Align);
         Uses_.push_back(AUse(ui, CatAlign.Cat));
-        Mask_ |= 1 << CatAlign.Cat;
-        if (CatAlign.Cat != RegCategory::NONE)
-          ++Stat[CatAlign.Cat];
+        Mask_ |= 1 << static_cast<unsigned>(CatAlign.Cat);
+        if (CatAlign.Cat != vc::RegCategory::None)
+          ++vc::accessContainer(Stat, CatAlign.Cat);
       }
       auto MaxInStatIt = std::max_element(Stat.begin(), Stat.end());
-      MostUsedCat_ = MaxInStatIt - Stat.begin();
+      MostUsedCat_ = static_cast<vc::RegCategory>(MaxInStatIt - Stat.begin());
     }
 
     bool empty() const { return !Mask_; }
 
-    bool allHaveCat(unsigned cat) const { return !(Mask_ & ~(1 << cat)); }
+    bool allHaveCat(vc::RegCategory cat) const {
+      return !(Mask_ & ~(1 << static_cast<unsigned>(cat)));
+    }
 
     const UsesT &getUses() const { return Uses_; }
 
@@ -329,11 +330,12 @@ namespace {
 
     // When there's no real category uses (real is anything but NONE)
     // behavior is undefined.
-    unsigned getMostUsedCat() const {
+    vc::RegCategory getMostUsedCat() const {
       IGC_ASSERT_MESSAGE(!empty(),
         "works only for cases when there are uses with real categories");
-      IGC_ASSERT_MESSAGE(!allHaveCat(RegCategory::NONE),
-        "works only for cases when there are uses with real categories");
+      IGC_ASSERT_MESSAGE(
+          !allHaveCat(vc::RegCategory::None),
+          "works only for cases when there are uses with real categories");
       return MostUsedCat_;
     }
 
@@ -369,31 +371,32 @@ namespace {
 
   } // end anonymous namespace
 
-char GenXCategory::ID = 0;
-namespace llvm { void initializeGenXCategoryPass(PassRegistry &); }
-INITIALIZE_PASS_BEGIN(GenXCategory, "GenXCategory", "GenXCategory", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
-INITIALIZE_PASS_END(GenXCategory, "GenXCategory", "GenXCategory", false, false)
+  namespace llvm {
+  void initializeGenXCategoryWrapperPass(PassRegistry &);
+  using GenXCategoryWrapper = FunctionGroupWrapperPass<GenXCategory>;
+  } // namespace llvm
+  INITIALIZE_PASS_BEGIN(GenXCategoryWrapper, "GenXCategoryWrapper",
+                        "GenXCategoryWrapper", false, false)
+  INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPassWrapper)
+  INITIALIZE_PASS_DEPENDENCY(GenXLivenessWrapper)
+  INITIALIZE_PASS_END(GenXCategoryWrapper, "GenXCategoryWrapper",
+                      "GenXCategoryWrapper", false, false)
 
-FunctionGroupPass *llvm::createGenXCategoryPass()
-{
-  initializeGenXCategoryPass(*PassRegistry::getPassRegistry());
-  return new GenXCategory();
-}
+  ModulePass *llvm::createGenXCategoryWrapperPass() {
+    initializeGenXCategoryWrapperPass(*PassRegistry::getPassRegistry());
+    return new GenXCategoryWrapper();
+  }
 
-void GenXCategory::getAnalysisUsage(AnalysisUsage &AU) const
-{
-  FunctionGroupPass::getAnalysisUsage(AU);
-  AU.addRequired<DominatorTreeGroupWrapperPass>();
-  AU.addRequired<GenXLiveness>();
-  AU.addRequired<TargetPassConfig>();
-  AU.addPreserved<GenXModule>();
-  AU.addPreserved<GenXLiveness>();
-  AU.addPreserved<FunctionGroupAnalysis>();
-  AU.addPreserved<DominatorTreeGroupWrapperPass>();
-  AU.setPreservesCFG();
-}
+  void GenXCategory::getAnalysisUsage(AnalysisUsage &AU) {
+    AU.addRequired<DominatorTreeGroupWrapperPass>();
+    AU.addRequired<GenXLiveness>();
+    AU.addRequired<TargetPassConfig>();
+    AU.addPreserved<GenXModule>();
+    AU.addPreserved<GenXLiveness>();
+    AU.addPreserved<FunctionGroupAnalysis>();
+    AU.addPreserved<DominatorTreeGroupWrapperPass>();
+    AU.setPreservesCFG();
+  }
 
 /***********************************************************************
  * runOnFunctionGroup : run the category conversion pass for
@@ -401,7 +404,7 @@ void GenXCategory::getAnalysisUsage(AnalysisUsage &AU) const
  */
 bool GenXCategory::runOnFunctionGroup(FunctionGroup &FG)
 {
-  KM = KernelMetadata(FG.getHead());
+  KM = vc::KernelMetadata{FG.getHead()};
   DTs = &getAnalysis<DominatorTreeGroupWrapperPass>();
   Liveness = &getAnalysis<GenXLiveness>();
   Subtarget = &getAnalysis<TargetPassConfig>()
@@ -633,15 +636,14 @@ bool GenXCategory::processValue(Value *V)
     // Value not used: set its category and then ignore it. If the definition
     // did not give us a category (probably an unused function arg), then
     // arbitrarily make it general.
-    if (DefInfo.Cat == RegCategory::NONE)
-      Liveness->getOrCreateLiveRange(V, RegCategory::GENERAL, DefInfo.Align);
+    if (DefInfo.Cat == vc::RegCategory::None)
+      Liveness->getOrCreateLiveRange(V, vc::RegCategory::General,
+                                     DefInfo.Align);
     else
       Liveness->getOrCreateLiveRange(V, DefInfo.Cat, DefInfo.Align);
     return true;
-  }
-  else if (UsesInfo.allHaveCat(RegCategory::NONE))
-  {
-    if (DefInfo.Cat == RegCategory::NONE) {
+  } else if (UsesInfo.allHaveCat(vc::RegCategory::None)) {
+    if (DefInfo.Cat == vc::RegCategory::None) {
       // The "no categories at all" case can only happen for a value that is
       // defined by a function argument or a phi node and used only in phi
       // nodes or subroutine call args.
@@ -654,11 +656,11 @@ bool GenXCategory::processValue(Value *V)
   }
 
   // main case
-  if (DefInfo.Cat == RegCategory::NONE) {
+  if (DefInfo.Cat == vc::RegCategory::None) {
     // NONE means that we're free to choose the category
     if (isa<PHINode>(V))
       // currently we'd like to propogate general through phi
-      DefInfo.Cat = RegCategory::GENERAL;
+      DefInfo.Cat = vc::RegCategory::General;
     else
       DefInfo.Cat = UsesInfo.getMostUsedCat();
   }
@@ -666,9 +668,9 @@ bool GenXCategory::processValue(Value *V)
   Liveness->getOrCreateLiveRange(V, DefInfo.Cat, std::max(DefInfo.Align, UsesInfo.getMaxAlign()));
   auto Convs = buildConversions(V, DefInfo, UsesInfo);
   for (auto UseInfo : UsesInfo.getUses()) {
-    if (UseInfo.Cat != DefInfo.Cat && UseInfo.Cat != RegCategory::NONE) {
+    if (UseInfo.Cat != DefInfo.Cat && UseInfo.Cat != vc::RegCategory::None) {
       Instruction *Conv;
-      if (UseInfo.Cat == RegCategory::ADDRESS) {
+      if (UseInfo.Cat == vc::RegCategory::Address) {
         // Case of address category requires a separate conversion for each use, at least until we
         // get to GenXAddressCommoning where we decide whether we can common some of them up.
         Conv = createConversion(V, UseInfo.Cat);
@@ -676,7 +678,7 @@ bool GenXCategory::processValue(Value *V)
         Liveness->getOrCreateLiveRange(Conv)->setCategory(UseInfo.Cat);
       }
       else
-        Conv = Convs[UseInfo.Cat];
+        Conv = vc::accessContainer(Convs, UseInfo.Cat);
       IGC_ASSERT_MESSAGE(Conv, "must have such conversion");
       UseInfo.user->setOperand(UseInfo.OperandNum, Conv);
     }
@@ -698,11 +700,10 @@ bool GenXCategory::processValue(Value *V)
  * to an address, we instead create an llvm.genx.add.addr of the input
  * to the add/sub.
  */
-Instruction *GenXCategory::createConversion(Value *V, unsigned Cat)
-{
+Instruction *GenXCategory::createConversion(Value *V, vc::RegCategory Cat) {
   IGC_ASSERT_MESSAGE(V->getType()->getScalarType()->isIntegerTy(),
     "createConversion expects int type");
-  if (Cat == RegCategory::ADDRESS) {
+  if (Cat == vc::RegCategory::Address) {
     Value *Input = V;
     int Offset = 0;
     for (;;) {
@@ -731,7 +732,7 @@ Instruction *GenXCategory::createConversion(Value *V, unsigned Cat)
   // intrinsic call directly rather than using the result of the intrinsic.
   // This helps the jitter to generate better code when surface constants
   // are used in send intructions.
-  if (Cat != RegCategory::ADDRESS) {
+  if (Cat != vc::RegCategory::Address) {
     if (GenXIntrinsic::getGenXIntrinsicID(V) == GenXIntrinsic::genx_constanti)
       V = cast<CallInst>(V)->getArgOperand(0);
     return createConvert(V, V->getName() + ".categoryconv", nullptr,
@@ -756,12 +757,12 @@ GenXCategory::buildConversions(Value *Def, CategoryAndAlignment DefInfo,
   for (auto Cat : UsesInfo.getCategories()) {
     // NONE doesn't require conversion, ADDRESS requirs conversion before
     // every use (not after def, so we won't create it here)
-    if (Cat != DefInfo.Cat && Cat != RegCategory::NONE &&
-        Cat != RegCategory::ADDRESS) {
+    if (Cat != DefInfo.Cat && Cat != vc::RegCategory::None &&
+        Cat != vc::RegCategory::Address) {
       auto Conv = createConversion(Def, Cat);
       placeConvAfterDef(Func, Conv, Def);
       Liveness->getOrCreateLiveRange(Conv)->setCategory(Cat);
-      Convs[Cat] = Conv;
+      vc::accessContainer(Convs, Cat) = Conv;
     }
   }
   return Convs;
@@ -775,33 +776,32 @@ GenXCategory::buildConversions(Value *Def, CategoryAndAlignment DefInfo,
  * GenXIntrinsicInfo::ArgInfo::getCategory(), into a register category
  * as stored in a live range.
  */
-static unsigned intrinsicCategoryToRegCategory(unsigned ICat)
-{
+static vc::RegCategory intrinsicCategoryToRegCategory(unsigned ICat) {
   switch (ICat) {
     case GenXIntrinsicInfo::ADDRESS:
-      return RegCategory::ADDRESS;
+      return vc::RegCategory::Address;
     case GenXIntrinsicInfo::PREDICATION:
     case GenXIntrinsicInfo::PREDICATE:
-      return RegCategory::PREDICATE;
+      return vc::RegCategory::Predicate;
     case GenXIntrinsicInfo::SAMPLER:
-      return RegCategory::SAMPLER;
+      return vc::RegCategory::Sampler;
     case GenXIntrinsicInfo::SURFACE:
-      return RegCategory::SURFACE;
+      return vc::RegCategory::Surface;
     default:
-      return RegCategory::GENERAL;
+      return vc::RegCategory::General;
   }
 }
 
 /***********************************************************************
  * getCategoryAndAlignmentForDef : get register category and alignment for a def
  *
- * This returns RegCategory:: value, or RegCategory::NONE if no category
+ * This returns RegCategory:: value, or RegCategory::None if no category
  * is discernable.
  */
 CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
 {
   if (V->getType()->getScalarType()->getPrimitiveSizeInBits() == 1)
-    return RegCategory::PREDICATE;
+    return vc::RegCategory::Predicate;
   if (Argument *Arg = dyn_cast<Argument>(V)) {
     auto *F = Arg->getParent();
     // This is a function Argument.
@@ -827,7 +827,7 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
     // determine arguments category if it cannot be deduced from the arg uses.
     // * calls from another function groups might help (but we do not have
     // liveness -> category for them). What about standalone stack calls?
-    IGC_ASSERT(genx::requiresStackCall(F));
+    IGC_ASSERT(vc::requiresStackCall(F));
     return getCategoryForCallArg(F, Arg->getArgNo());
   }
   // The def is a phi-instruction.
@@ -849,12 +849,12 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
   // The def is a call-inst
   if (CallInst *CI = dyn_cast<CallInst>(V)) {
     if (Function *Callee = CI->getCalledFunction()) {
-      unsigned IntrinsicID = GenXIntrinsic::getAnyIntrinsicID(Callee);
+      unsigned IntrinsicID = vc::getAnyIntrinsicID(Callee);
       // We should not see genx_convert, as it is inserted into a value after
       // using this function to determine its category.
       IGC_ASSERT(IntrinsicID != GenXIntrinsic::genx_convert);
       if (IntrinsicID == GenXIntrinsic::genx_convert_addr)
-        return RegCategory::ADDRESS;
+        return vc::RegCategory::Address;
       if (GenXIntrinsic::isAnyNonTrivialIntrinsic(IntrinsicID) && !GenXIntrinsic::isRdRegion(IntrinsicID)
           && !GenXIntrinsic::isWrRegion(IntrinsicID) && !GenXIntrinsic::isAbs(IntrinsicID)) {
         // For any normal intrinsic, look up the argument class.
@@ -863,22 +863,22 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
         return CategoryAndAlignment(
             intrinsicCategoryToRegCategory(AI.getCategory()),
             getLogAlignment(AI.getAlignment(), Subtarget
-                                                   ? Subtarget->getGRFWidth()
-                                                   : defaultGRFWidth));
+                                                   ? Subtarget->getGRFByteSize()
+                                                   : defaultGRFByteSize));
       } else if (GenXIntrinsic::isRdRegion(IntrinsicID)) {
         // Add this to avoid conversion in case of read-region on SurfaceIndex
         // or SamplerIndex type
         auto RC = getCategoryAndAlignmentForDef(
             CI->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum));
-        if (RC.Cat == RegCategory::SURFACE ||
-            RC.Cat == RegCategory::SAMPLER)
+        if (RC.Cat == vc::RegCategory::Surface ||
+            RC.Cat == vc::RegCategory::Sampler)
           return RC.Cat;
       }
     } else if (CI->isInlineAsm()) {
       return getCategoryForInlasmConstraintedOp(CI, 0, true /*IsOutput*/);
     }
   }
-  return RegCategory::GENERAL;
+  return vc::RegCategory::General;
 }
 
 /***********************************************************************
@@ -888,9 +888,9 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForDef(Value *V) const
  *                            operand depends on its constraint.
  *
  */
-unsigned GenXCategory::getCategoryForInlasmConstraintedOp(CallInst *CI,
-                                                          unsigned ArgNo,
-                                                          bool IsOutput) const {
+vc::RegCategory
+GenXCategory::getCategoryForInlasmConstraintedOp(CallInst *CI, unsigned ArgNo,
+                                                 bool IsOutput) const {
   IGC_ASSERT_MESSAGE(CI->isInlineAsm(), "Inline asm expected");
   InlineAsm *IA = dyn_cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
   IGC_ASSERT_MESSAGE(!IA->getConstraintString().empty(), "Here should be constraints");
@@ -907,20 +907,20 @@ unsigned GenXCategory::getCategoryForInlasmConstraintedOp(CallInst *CI,
   case ConstraintType::Constraint_a:
   case ConstraintType::Constraint_rw:
   case ConstraintType::Constraint_r:
-    return RegCategory::GENERAL;
+    return vc::RegCategory::General;
   case ConstraintType::Constraint_n:
   case ConstraintType::Constraint_i:
   case ConstraintType::Constraint_F:
-    return RegCategory::NONE;
+    return vc::RegCategory::None;
   case ConstraintType::Constraint_cr:
-    return RegCategory::PREDICATE;
+    return vc::RegCategory::Predicate;
   }
 }
 
 /***********************************************************************
  * getCategoryAndAlignmentForUse : get register category for a use
  *
- * This returns RegCategory:: value, or RegCategory::NONE if no category
+ * This returns RegCategory:: value, or vc::RegCategory::None if no category
  * is discernable.
  */
 CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
@@ -928,7 +928,7 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
 {
   Value *V = U->get();
   if (V->getType()->getScalarType()->isIntegerTy(1))
-    return RegCategory::PREDICATE;
+    return vc::RegCategory::Predicate;
   auto user = cast<Instruction>(U->getUser());
   if (PHINode *Phi = dyn_cast<PHINode>(user)) {
     // This is a phi node. Get the category (if any) from the result, or from
@@ -937,23 +937,23 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
     // of all the others.)
     if (auto LR = Liveness->getLiveRangeOrNull(Phi)) {
       auto Cat = LR->getCategory();
-      if (Cat != RegCategory::NONE)
+      if (Cat != vc::RegCategory::None)
         return Cat;
     }
     return getCategoryForPhiIncomings(Phi);
   }
-  unsigned Category = RegCategory::GENERAL;
+  auto Category = vc::RegCategory::General;
   if (CallInst *CI = dyn_cast<CallInst>(user)) {
     if (CI->isInlineAsm())
       Category = getCategoryForInlasmConstraintedOp(CI, U->getOperandNo(),
                                                     false /*IsOutput*/);
     else if (IGCLLVM::isIndirectCall(*CI))
-      Category = RegCategory::GENERAL;
+      Category = vc::RegCategory::General;
     else {
       Function *Callee = CI->getCalledFunction();
       unsigned IntrinID = GenXIntrinsic::not_any_intrinsic;
       if (Callee)
-        IntrinID = GenXIntrinsic::getAnyIntrinsicID(Callee);
+        IntrinID = vc::getAnyIntrinsicID(Callee);
       // We should not see genx_convert, as it is inserted into a value after
       // using this function to determine its category.
       IGC_ASSERT(IntrinID != GenXIntrinsic::genx_convert);
@@ -968,19 +968,19 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
           Category = getCategoryForCallArg(Callee, U->getOperandNo());
           break;
         case GenXIntrinsic::genx_convert_addr:
-          Category = RegCategory::GENERAL;
+          Category = vc::RegCategory::General;
           break;
         case GenXIntrinsic::genx_rdregioni:
         case GenXIntrinsic::genx_rdregionf:
           if (U->getOperandNo() == 4) // is addr-operand
-            Category = RegCategory::ADDRESS;
+            Category = vc::RegCategory::Address;
           else if (GenXIntrinsic::GenXRegion::OldValueOperandNum == U->getOperandNo())
-            Category = RegCategory::NONE; // do not assign use-category
+            Category = vc::RegCategory::None; // do not assign use-category
           break;
         case GenXIntrinsic::genx_wrregioni:
         case GenXIntrinsic::genx_wrregionf:
           if (U->getOperandNo() == 5) // is addr-operand
-            Category = RegCategory::ADDRESS;
+            Category = vc::RegCategory::Address;
            break;
         case GenXIntrinsic::genx_absf:
         case GenXIntrinsic::genx_absi:
@@ -994,8 +994,8 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
             return CategoryAndAlignment(
                 intrinsicCategoryToRegCategory(AI.getCategory()),
                 getLogAlignment(AI.getAlignment(),
-                                Subtarget ? Subtarget->getGRFWidth()
-                                          : defaultGRFWidth));
+                                Subtarget ? Subtarget->getGRFByteSize()
+                                          : defaultGRFByteSize));
           }
           break;
           }
@@ -1014,19 +1014,19 @@ CategoryAndAlignment GenXCategory::getCategoryAndAlignmentForUse(
  * We will not have disagreement among the incomings, since whichever one gets
  * a category first forces the category of all the others.
  */
-unsigned GenXCategory::getCategoryForPhiIncomings(PHINode *Phi) const {
+vc::RegCategory GenXCategory::getCategoryForPhiIncomings(PHINode *Phi) const {
   IGC_ASSERT_MESSAGE(!Phi->getType()->isIntOrIntVectorTy(1),
                      "pregicate phis should've been already considered");
   if (llvm::all_of(Phi->incoming_values(),
                    [](const Use &Op) { return isa<Constant>(Op.get()); }))
     // All incomings are constant. Arbitrarily make the phi node value
     // general category.
-    return RegCategory::GENERAL;
+    return vc::RegCategory::General;
 
   auto IncomingWithCategory =
       llvm::find_if(Phi->incoming_values(), [this](const Use &Op) {
         auto *LR = Liveness->getLiveRangeOrNull(Op.get());
-        return LR && LR->getCategory() != RegCategory::NONE;
+        return LR && LR->getCategory() != vc::RegCategory::None;
       });
   if (IncomingWithCategory != Phi->incoming_values().end()) {
     auto PhiCategory =
@@ -1035,7 +1035,8 @@ unsigned GenXCategory::getCategoryForPhiIncomings(PHINode *Phi) const {
         llvm::all_of(Phi->incoming_values(),
                      [this, PhiCategory](const Use &Op) {
                        auto *LR = Liveness->getLiveRangeOrNull(Op.get());
-                       return !LR || LR->getCategory() == RegCategory::NONE ||
+                       return !LR ||
+                              LR->getCategory() == vc::RegCategory::None ||
                               LR->getCategory() == PhiCategory;
                      }),
         "Phi incoming values categories don't correspond");
@@ -1047,9 +1048,9 @@ unsigned GenXCategory::getCategoryForPhiIncomings(PHINode *Phi) const {
   if (EnforceCategoryPromotion &&
       llvm::any_of(Phi->incoming_values(),
                    [](const Use &Op) { return isa<Constant>(Op.get()); }))
-    return RegCategory::GENERAL;
+    return vc::RegCategory::General;
 
-  return RegCategory::NONE;
+  return vc::RegCategory::None;
 }
 
 /***********************************************************************
@@ -1066,16 +1067,16 @@ unsigned GenXCategory::getCategoryForPhiIncomings(PHINode *Phi) const {
  * call args, since whichever one gets a category first forces the category of
  * all the others.
  */
-unsigned GenXCategory::getCategoryForCallArg(Function *Callee, unsigned ArgNo) const
-{
+vc::RegCategory GenXCategory::getCategoryForCallArg(Function *Callee,
+                                                    unsigned ArgNo) const {
   IGC_ASSERT(Callee);
   // First try the subroutine arg.
   auto ai = Callee->arg_begin();
   for (unsigned i = 0; i != ArgNo; ++i, ++ai)
     ;
   if (auto LR = Liveness->getLiveRangeOrNull(&*ai)) {
-    unsigned Cat = LR->getCategory();
-    if (Cat != RegCategory::NONE)
+    auto Cat = LR->getCategory();
+    if (Cat != vc::RegCategory::None)
       return Cat;
   }
   // Then try the arg at each call site.
@@ -1083,8 +1084,8 @@ unsigned GenXCategory::getCategoryForCallArg(Function *Callee, unsigned ArgNo) c
     if (auto *CI = checkFunctionCall(U, Callee)) {
       auto ArgV = CI->getArgOperand(ArgNo);
         if (auto LR = Liveness->getLiveRangeOrNull(ArgV)) {
-          unsigned Cat = LR->getCategory();
-          if (Cat != RegCategory::NONE)
+          auto Cat = LR->getCategory();
+          if (Cat != vc::RegCategory::None)
             return Cat;
         }
     }
@@ -1092,6 +1093,6 @@ unsigned GenXCategory::getCategoryForCallArg(Function *Callee, unsigned ArgNo) c
   // special case handling to break deadlock when all uses are undef or stack
   // call arg category cannot be deduced from the uses in the function, force
   // the argument to be GENERAL
-  return EnforceCategoryPromotion ? RegCategory::GENERAL : RegCategory::NONE;
+  return EnforceCategoryPromotion ? vc::RegCategory::General
+                                  : vc::RegCategory::None;
 }
-

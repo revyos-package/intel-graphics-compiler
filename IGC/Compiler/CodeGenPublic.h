@@ -47,11 +47,15 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPop.hpp"
 #include "CodeGenPublicEnums.h"
 #include "AdaptorOCL/TranslationBlock.h"
+#include "AdaptorCommon/RayTracing/HitGroups.h"
+#include "AdaptorCommon/RayTracing/RTLoggingManager.h"
+#include "AdaptorCommon/RayTracing/RTCompileOptions.h"
 #include "common/MDFrameWork.h"
 #include "CompilerStats.h"
 #include <unordered_set>
 #include "Probe/Assertion.h"
 #include <optional>
+#include <Metrics/IGCMetric.h>
 
 /************************************************************************
 This file contains the interface structure and functions to communicate
@@ -85,6 +89,13 @@ namespace IGC
             SymbolListTy sampler;           // sampler symbols
             SymbolListTy local;             // local symbols
         };
+        // function scope gtpin info
+        struct ZEBinFuncGTPinInfo {
+            std::string name;
+            void* buffer = nullptr;
+            unsigned bufferSize = 0;
+        };
+        typedef std::vector<ZEBinFuncGTPinInfo> FuncGTPinInfoListTy;
 
     public:
         void* m_programBin = nullptr;     //<! Must be 16 byte aligned, and padded to a 64 byte boundary
@@ -104,6 +115,7 @@ namespace IGC
         unsigned int    m_BasicBlockCount = 0;
         void* m_gtpinBuffer = nullptr;              // Will be populated by VISA only when special switch is passed by gtpin
         unsigned int    m_gtpinBufferSize = 0;
+        FuncGTPinInfoListTy m_FuncGTPinInfoList;
         void* m_funcSymbolTable = nullptr;
         unsigned int    m_funcSymbolTableSize = 0;
         unsigned int    m_funcSymbolTableEntries = 0;
@@ -116,12 +128,17 @@ namespace IGC
         unsigned int    m_funcAttributeTableSize = 0;
         unsigned int    m_funcAttributeTableEntries = 0;
         FuncAttrListTy  m_funcAttrs;               // duplicated information of m_funcAttributeTable, for zebin
+        void* m_globalHostAccessTable = nullptr;
+        unsigned int    m_globalHostAccessTableSize = 0;
+        unsigned int    m_globalHostAccessTableEntries = 0;
         unsigned int    m_offsetToSkipPerThreadDataLoad = 0;
         uint32_t        m_offsetToSkipSetFFIDGP = 0;
         bool            m_roundPower2KBytes = false;
         bool            m_UseScratchSpacePrivateMemory = true;
+        bool            m_SeparatingSpillAndPrivateScratchMemorySpace = false;
         unsigned int m_scratchSpaceSizeLimit = 0;
         unsigned int m_numGRFTotal = 128;
+        std::string m_VISAAsm;
 
         // Optional statistics
         std::optional<uint64_t> m_NumGRFSpill;
@@ -130,6 +147,7 @@ namespace IGC
         std::optional<uint64_t> m_NumCycles;
         std::optional<uint64_t> m_NumSendStallCycles;
 
+        unsigned int m_numThreads = 0;
 
         void Destroy()
         {
@@ -151,29 +169,52 @@ namespace IGC
             }
         }
 
-        void init(bool roundPower2KBytes, unsigned int scratchSpaceSizeLimitT, bool useScratchSpacePrivateMemory)
+        void init(bool roundPower2KBytes, unsigned int scratchSpaceSizeLimitT, bool useScratchSpacePrivateMemory, bool SepSpillPvtSS)
         {
             m_roundPower2KBytes = roundPower2KBytes;
             m_scratchSpaceSizeLimit = scratchSpaceSizeLimitT;
             m_UseScratchSpacePrivateMemory = useScratchSpacePrivateMemory;
+            m_SeparatingSpillAndPrivateScratchMemorySpace = SepSpillPvtSS;
         }
 
-        //InSlot0
-        //Todo: rename later
+        // if IGC needs scratch for private memory, we use slot0 for private
+        // if IGC does not need scratch for private, slot0 is used for spill
+        // if we want to use both private and spill in single slot, we need
+        // to add them together
         unsigned int getScratchSpaceUsageInSlot0() const
         {
-            unsigned int privateMemoryScratchSpaceSize =
-                getScratchSpaceUsageInSlot1() > 0 || getScratchSpaceUsageInStateless() > 0 ? 0 : m_scratchSpaceUsedByShader;
-            unsigned int result = roundSize(m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin + privateMemoryScratchSpaceSize);
+            unsigned int result = (m_UseScratchSpacePrivateMemory ? m_scratchSpaceUsedByShader : 0);
+            if (result == 0)
+            {
+                result = (m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin);
+            }
+            else if (!m_SeparatingSpillAndPrivateScratchMemorySpace)
+            {
+                result += (m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin);
+            }
+            else
+            {
+                // \TODO: doubts about driver-compiler interface, conservatively set the size
+                // to the max of two slots
+                result = std::max(result, m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin);
+            }
+            result = roundSize(result);
             IGC_ASSERT(result <= m_scratchSpaceSizeLimit);
             return result;
         }
-
+        // slot1 is used for spilling only when m_SeparatingSpillAndPrivateScratchMemorySpace is on
+        // and Slot0 is used for IGC private memory
         unsigned int getScratchSpaceUsageInSlot1() const
         {
+            unsigned int slot0_offset = (m_UseScratchSpacePrivateMemory ? m_scratchSpaceUsedByShader : 0);
             unsigned int result = 0;
-            //FIXME: temporarily disable slot1, enable it again when IGC is ready to handle r0.5+1
-            // result = roundSize(m_UseScratchSpacePrivateMemory ? m_scratchSpaceUsedByShader : 0);
+            if (m_SeparatingSpillAndPrivateScratchMemorySpace && slot0_offset > 0)
+            {
+                // \TODO: doubts about driver-compiler interface, conservatively set the size
+                // to the max of two slots
+                result = std::max(slot0_offset, m_scratchSpaceUsedBySpills + m_scratchSpaceUsedByGtpin);
+            }
+            result = roundSize(result);
             IGC_ASSERT(result <= m_scratchSpaceSizeLimit);
             return result;
         }
@@ -193,6 +234,10 @@ namespace IGC
             if (m_roundPower2KBytes)
             {
                 size = roundPower2KBbyte(size);
+            }
+            else
+            {
+                size = roundPower2Byte(size);
             }
             return size;
         }
@@ -229,13 +274,11 @@ namespace IGC
     struct SInstrTypes
     {
         bool CorrelatedValuePropagationEnable;
-        bool hasLoop;
         bool hasMultipleBB;
         bool hasCmp;
         bool hasSwitch;
         bool hasPhi;
         bool hasLoadStore;
-        bool hasCall;
         bool hasIndirectCall;
         bool hasInlineAsm;
         bool hasInlineAsmPointerAccess;
@@ -258,7 +301,6 @@ namespace IGC
         bool hasGenericAddressSpacePointers;
         bool hasDebugInfo;        //<! true only if module contains debug info !llvm.dbg.cu
         bool hasAtomics;
-        bool hasBarrier;        //<! true if module has thread group barrier
         bool hasDiscard;
         bool hasTypedRead;
         bool hasTypedwrite;
@@ -267,9 +309,15 @@ namespace IGC
         // Note: does not check for indirect sampler
         bool mayHaveIndirectResources;
         bool hasUniformAssumptions;
-        bool hasWaveIntrinsics;
         bool hasPullBary;
         bool sampleCmpToDiscardOptimizationPossible;
+        unsigned int numCall;
+        unsigned int numBarrier;
+        unsigned int numLoadStore;
+        unsigned int numWaveIntrinsics;
+        unsigned int numAtomics;
+        unsigned int numTypedReadWrite;
+        unsigned int numAllInsts;
         unsigned int sampleCmpToDiscardOptimizationSlot;
         unsigned int numSample;
         unsigned int numBB;
@@ -385,6 +433,7 @@ namespace IGC
         unsigned int bufferSlot = 0;
         unsigned int statelessCBPushedSize = 0;
 
+        bool         hasEvalSampler = false;
         std::vector<SResInfoFoldingOutput> m_ResInfoFoldingOutput;
         // GenUpdateCB outputs
         void*       m_ConstantBufferReplaceShaderPatterns = nullptr;
@@ -395,6 +444,8 @@ namespace IGC
         SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
         uint64_t    SIMDInfo;
+        void* m_StagingCtx;
+        bool m_RequestStage2;
     };
 
     struct SPixelShaderKernelProgram : SKernelProgram
@@ -407,6 +458,7 @@ namespace IGC
         unsigned int renderTargetMask;
         unsigned int constantInterpolationEnableMask;
         unsigned int primIdLocation;
+        unsigned int pointCoordLocation;
         unsigned int samplerCount;
         unsigned int BindingTableEntryBitmap;
         unsigned int sampleCmpToDiscardOptimizationSlot;
@@ -431,6 +483,7 @@ namespace IGC
         bool VectorMask;
 
         bool hasPrimID;
+        bool hasPointCoord;
         bool isCoarsePS;
         bool hasCoarsePixelSize;
         bool hasSampleOffset;
@@ -578,6 +631,16 @@ namespace IGC
         unsigned int                        ThreadGroupModifier_X;
         unsigned int                        ThreadGroupModifier_Y;
 
+        bool                                generateLocalID;
+        unsigned int                        emitLocalMask;
+        unsigned int                        walkOrder;
+        unsigned int                        emitInlineParameter;
+        unsigned int                        localXMaximum;
+        unsigned int                        localYMaximum;
+        unsigned int                        localZMaximum;
+        //See HAS, no matter what bpe is chosen, tile block size is fixed for one specific simdmode.
+        //so, actually, HW only needs to know if tileY is needed or not, and bpe is NOT needed.
+        bool                                tileY;
         /* Output related to only the PingPong Textures */
         bool                                SecondCompile;
         bool                                IsRowMajor;
@@ -621,6 +684,117 @@ namespace IGC
         unsigned int                        BindingTableEntryBitmap;
     };
 
+    // XeHPC/XeHPG Task/Mesh Extended Parameters: XP0 (DrawID), XP1, XP2
+    struct SMeshExtendedParameters
+    {
+        static constexpr size_t             drawIdXPIndex = 0;
+        bool                                enabled[3] = {};
+    };
+
+    struct SMeshShaderKernelProgram : SKernelProgram
+    {
+        USC::GFXMEDIA_GPUWALKER_SIMD        SimdWidth;
+
+        USC::GFX3DSTATE_PROGRAM_FLOW        SingleProgramFlow;
+
+        bool                                BarrierUsed;
+
+        bool                                EmitLocalIDX;
+
+        SMeshExtendedParameters             ExtendedParameters;
+
+        OctEltUnit                          URBAllocationSize;
+        unsigned int                        URBEntriesNum;
+        unsigned int                        URBEntryAllocationSize;
+
+        /// Refer 3DSTATE_MESH_SHADER_BODY
+        OctEltUnit                          PerPrimitiveDataPitch;
+        OctEltUnit                          PerVertexDataPitch;
+
+        /// Refer 3DSTATE_SBE_MESH_BODY
+        OctEltUnit                          PerPrimitiveUrbEntryOutputReadOffset;
+        OctEltUnit                          PerPrimitiveUrbEntryOutputReadLength;
+        OctEltUnit                          PerVertexUrbEntryOutputReadOffset;
+        OctEltUnit                          PerVertexUrbEntryOutputReadLength;
+
+        bool                                DeclaresVPAIndex;
+        bool                                DeclaresRTAIndex;
+        bool                                DeclaresCullPrimitive;
+        bool                                DeclaresCPSize;  // indicates that the shader writes a value into the output header for Coarse Pixel Size (primitive shading rate)
+        bool                                isCPSizeRuntime; // indicates that the shader writes CPS a run-time value into the output header for Coarse Pixel Size (primitive shading rate)
+        unsigned char                       CPSizeX;         // stores a constant value written into the output header for Coarse Pixel Size (primitive shading rate) on the axis X
+        unsigned char                       CPSizeY;         // stores a constant value written into the output header for Coarse Pixel Size (primitive shading rate) on the axis Y
+
+        unsigned int                        ThreadGroupSize;
+        unsigned int                        WorkGroupMemorySizeInBytes;
+    };
+
+
+    struct SBindlessProgram : SKernelProgram
+    {
+        SProgramOutput simdProgram;
+        USC::GFXMEDIA_GPUWALKER_SIMD SimdWidth;
+        std::string name;
+        uint32_t ShaderStackSize = 0;
+        CallableShaderTypeMD ShaderType = NumberOfCallableShaderTypes;
+        bool isContinuation = false;
+        // if 'isContinuation' is true, this will contain the name of the
+        // original shader.
+        std::string ParentName;
+        // if 'isContinuation' is true, this may contain the slot num for the
+        // shader identifier it has been promoted to.
+        std::optional<uint32_t> SlotNum;
+        uint64_t ShaderHash = 0;
+
+        // raygen specific fields
+        // TODO: need to separate out bindless and raygen into two structs
+        // for both DX and Vulkan.
+
+        void*         ThreadPayloadData = nullptr;
+        unsigned int  TotalDataLength   = 0;
+        // dynamically select between the 1D and 2D layout at runtime based
+        // on the size of the dispatch.
+        uint32_t      DimX1D            = 0;
+        uint32_t      DimY1D            = 0;
+        uint32_t      DimX2D            = 0;
+        uint32_t      DimY2D            = 0;
+
+        // Shaders that satisfy `isPrimaryShaderIdentifier()` can also have
+        // a collection of other names that they go by.
+        std::vector<std::string> Aliases;
+
+        // We maintain this information to provide to GTPin. These are all
+        // offsets in bytes from the base of GRF.
+        uint32_t GlobalPtrOffset = 0; // pointer to RTGlobals
+        uint32_t LocalPtrOffset  = 0; // pointer to local root sig (except for raygen!)
+        uint32_t StackIDsOffset  = 0; // stack ID vector base
+    };
+
+    struct SRayTracingShadersGroup
+    {
+        // This is the default shader that is executed when the RTUnit
+        // encounters a null shader. It is optional because there is
+        // no need to compile it for collection state objects.
+        llvm::Optional<SBindlessProgram> callStackHandler;
+        // These are the raygen shaders
+        llvm::SmallVector<SBindlessProgram, 4> m_DispatchPrograms;
+        // Non raygen shaders
+        llvm::SmallVector<SBindlessProgram, 8> m_CallableShaders;
+        // Continuation shaders
+        llvm::SmallVector<SBindlessProgram, 8> m_Continuations;
+    };
+
+    struct SRayTracingPipelineConfig
+    {
+        unsigned int maxTraceRecursionDepth = 0;
+        unsigned int pipelineFlags = 0;
+    };
+
+    struct SRayTracingShaderConfig
+    {
+        unsigned MaxPayloadSizeInBytes = 0;
+        unsigned MaxAttributeSizeInBytes = 0;
+    };
 
     struct SOpenCLKernelInfo
     {
@@ -648,6 +822,7 @@ namespace IGC
 
         std::unique_ptr<iOpenCL::PrintfBufferAnnotation>    m_printfBufferAnnotation = nullptr;
         std::unique_ptr<iOpenCL::SyncBufferAnnotation>      m_syncBufferAnnotation = nullptr;
+        std::unique_ptr<iOpenCL::RTGlobalBufferAnnotation>  m_rtGlobalBufferAnnotation = nullptr;
         std::unique_ptr<iOpenCL::StartGASAnnotation>        m_startGAS = nullptr;
         std::unique_ptr<iOpenCL::WindowSizeGASAnnotation>   m_WindowSizeGAS = nullptr;
         std::unique_ptr<iOpenCL::PrivateMemSizeAnnotation>  m_PrivateMemSize = nullptr;
@@ -705,8 +880,11 @@ namespace IGC
             unsigned int m_entries = 0;
         };
 
+        typedef std::vector<vISA::ZEHostAccessEntry> ZEBinGlobalHostAccessTable;
+
         std::unique_ptr<iOpenCL::InitConstantAnnotation> m_initConstantAnnotation;
-        std::vector<std::unique_ptr<iOpenCL::InitGlobalAnnotation> > m_initGlobalAnnotation;
+        std::unique_ptr<iOpenCL::InitConstantAnnotation> m_initConstantStringAnnotation;
+        std::unique_ptr<iOpenCL::InitGlobalAnnotation> m_initGlobalAnnotation;
         std::vector<std::unique_ptr<iOpenCL::ConstantPointerAnnotation> > m_initConstantPointerAnnotation;
         std::vector<std::unique_ptr<iOpenCL::GlobalPointerAnnotation> > m_initGlobalPointerAnnotation;
         std::vector<std::unique_ptr<iOpenCL::KernelTypeProgramBinaryInfo> > m_initKernelTypeAnnotation;
@@ -714,6 +892,7 @@ namespace IGC
         ZEBinRelocTable m_GlobalPointerAddressRelocAnnotation;
         ZEBinProgramSymbolTable m_zebinSymbolTable;
         LegacySymbolTable m_legacySymbolTable;
+        ZEBinGlobalHostAccessTable m_zebinGlobalHostAccessTable;
     };
 
     class CBTILayout
@@ -782,8 +961,10 @@ namespace IGC
         bool AllowPreRAScheduler();
         bool AllowVISAPreRAScheduler();
         bool AllowCodeSinking();
+        bool AllowAddressArithmeticSinking();
         bool AllowSimd32Slicing();
         bool AllowLargeURBWrite();
+        bool AllowConstantCoalescing();
         void SetFirstStateId(int id);
         bool IsFirstTry();
         bool IsLastTry();
@@ -852,6 +1033,13 @@ namespace IGC
         void Release();
     };
 
+    struct RoutingIndex
+    {
+        unsigned int resourceRangeID;
+        unsigned int indexIntoRange;
+        unsigned int routeTo;
+        unsigned int lscCacheCtrl;
+    };
 
     class CodeGenContext
     {
@@ -879,6 +1067,7 @@ namespace IGC
         PushConstantMode m_pushConstantMode = PushConstantMode::DEFAULT;
 
         SInstrTypes m_instrTypes;
+        SInstrTypes m_instrTypesAfterOpts;
 
         /////  used for instruction statistic before/after pass
         int instrStat[TOTAL_TYPES][TOTAL_STAGE];
@@ -890,12 +1079,15 @@ namespace IGC
         // Module flag for when we need to compile multiple SIMD sizes to support SIMD variants
         bool m_enableSimdVariantCompilation = false;
 
-        /// Adding multiversioning to partially redundant samples, if AIL is on.
+        // Adding multiversioning to partially redundant samples, if AIL is on.
         bool m_enableSampleMultiversioning = false;
 
+        bool m_src1RemovedForBlendOpt = false;
         llvm::AssemblyAnnotationWriter* annotater = nullptr;
 
         RetryManager m_retryManager;
+
+        IGCMetrics::IGCMetric metrics;
 
         // shader stat for opt customization
         uint32_t     m_tempCount = 0;
@@ -925,6 +1117,7 @@ namespace IGC
         void* gtpin_init = nullptr;
         bool m_hasLegacyDebugInfo = false;
         bool m_hasEmu64BitInsts = false;
+        bool m_hasDPDivSqrtEmu = false;
 
         CompilerStats m_Stats;
         // Flag for staged compilation
@@ -952,6 +1145,14 @@ namespace IGC
         DWORD dsInSize = 0;
         DWORD LtoUsedMask = 0;
         uint64_t m_SIMDInfo;
+        uint32_t HdcEnableIndexSize = 0;
+        std::vector<RoutingIndex> HdcEnableIndexValues;
+
+        // Raytracing (any shader type)
+        // If provided, the BVH has been constructed such that the root node
+        // is at a constant offset from the start of the BVH. This allows
+        // us to skip loading the offset at BVH::rootNodeOffset.
+        std::optional<size_t> BVHFixedOffset;
     private:
         //For storing error message
         std::stringstream oclErrorMessage;
@@ -1023,6 +1224,7 @@ namespace IGC
         virtual void InitVarMetaData();
         virtual ~CodeGenContext();
         void clear();
+        void clearMD();
         void EmitError(std::ostream &OS, const char* errorstr, const llvm::Value *context) const;
         void EmitError(const char* errorstr, const llvm::Value *context);
         void EmitWarning(const char* warningstr);
@@ -1040,6 +1242,7 @@ namespace IGC
         virtual bool allocatePrivateAsGlobalBuffer() const;
         virtual bool hasNoLocalToGenericCast() const;
         virtual bool hasNoPrivateToGenericCast() const;
+        virtual bool enableTakeGlobalAddress() const;
         virtual int16_t getVectorCoalescingControl() const;
         bool isPOSH() const;
 
@@ -1108,6 +1311,24 @@ namespace IGC
         {
             uint32_t &CurVal = getModuleMetaData()->CurUniqueIndirectIdx;
             CurVal = std::max(CurVal, NewVal);
+        }
+
+        // Use this when you want to know about a particular function's
+        // rayquery usage.
+        bool hasSyncRTCalls(llvm::Function *F) const
+        {
+            auto* MMD = getModuleMetaData();
+            auto funcMDItr = MMD->FuncMD.find(F);
+            bool hasRQCall =
+                (funcMDItr != MMD->FuncMD.end() && funcMDItr->second.hasSyncRTCalls);
+
+            return hasRQCall;
+        }
+
+        // Use this to determine if any shaders in the module use rayquery.
+        bool hasSyncRTCalls() const
+        {
+            return (getModuleMetaData()->rtInfo.RayQueryAllocSizeInBytes != 0);
         }
     };
 
@@ -1191,6 +1412,8 @@ namespace IGC
         unsigned m_slmSize;
         bool numWorkGroupsUsed;
         bool m_ForceOneSIMD = false;
+        bool m_UseLinearWalk = false;
+        bool m_InlineDataPointerRequested = false;
 
         ComputeShaderContext(
             const CBTILayout& btiLayout, ///< binding table layout to be used in code gen
@@ -1263,6 +1486,175 @@ namespace IGC
         {
         }
     };
+
+    class MeshShaderContext : public CodeGenContext
+    {
+    public:
+        SMeshShaderKernelProgram programOutput;
+        MeshShaderContext(
+            const ShaderType shaderType,
+            const CBTILayout& btiLayout,
+            const CPlatform& platform,
+            const CDriverInfo& driverInfo,
+            const bool createResourceDimTypes = true,
+            LLVMContextWrapper* llvmCtxWrapper = nullptr)
+            : CodeGenContext(shaderType, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+            programOutput()
+        {
+            IGC_ASSERT(shaderType == ShaderType::TASK_SHADER || shaderType == ShaderType::MESH_SHADER);
+        }
+
+        SIMDMode     GetLeastSIMDModeAllowed();
+        SIMDMode     GetMaxSIMDMode();
+        SIMDMode     GetBestSIMDMode();
+        unsigned int GetThreadGroupSize();
+        unsigned int GetHwThreadPerWorkgroup();
+        unsigned int GetSlmSize() const;
+        float        GetSpillThreshold() const;
+        float        GetThreadOccupancy(SIMDMode simdMode);
+    };
+
+
+    class RayDispatchShaderContext : public CodeGenContext
+    {
+    private:
+        template <typename T>
+        using Identity = T;
+
+        using RTCompileOptionsKnown = RTCompileOptionsT<Identity>;
+
+        template <typename T, typename U>
+        T getOptVal(
+            const Interface::Optional<T> &InputVal, U RegkeyVal, bool IsSet)
+        {
+            if (IsSet)
+                return RegkeyVal;
+            else
+                return InputVal ? *InputVal : RegkeyVal;
+        }
+    public:
+        void setOptions(const IGC::RTCompileOptions& Opts)
+        {
+#define GET(Name, RegkeyName) \
+    getOptVal(Opts.Name, IGC_GET_FLAG_VALUE(RegkeyName), IGC_IS_FLAG_SET(RegkeyName))
+            CompOptions.TileXDim1D = GET(TileXDim1D, RayTracingCustomTileXDim1D);
+            CompOptions.TileYDim1D = GET(TileYDim1D, RayTracingCustomTileYDim1D);
+            CompOptions.TileXDim2D = GET(TileXDim2D, RayTracingCustomTileXDim2D);
+            CompOptions.TileYDim2D = GET(TileYDim2D, RayTracingCustomTileYDim2D);
+            CompOptions.RematThreshold = GET(RematThreshold, RematThreshold);
+            CompOptions.HoistRemat = GET(HoistRemat, EnableHoistRemat);
+#undef GET
+        }
+
+        const RTCompileOptionsKnown& opts() const { return CompOptions; }
+
+        SRayTracingShadersGroup programOutput;
+        SRayTracingPipelineConfig pipelineConfig;
+        SRayTracingShaderConfig shaderConfig;
+        // This hash can be mixed with the names of shaders to derive a per
+        // shader hash.
+        uint64_t BitcodeHash = 0;
+        RayDispatchShaderContext(
+            const CBTILayout& btiLayout,
+            const CPlatform& platform,
+            const CDriverInfo& driverInfo,
+            const bool createResourceDimTypes = true,
+            LLVMContextWrapper* llvmCtxWrapper = nullptr)
+            : CodeGenContext(ShaderType::RAYTRACING_SHADER, btiLayout, platform, driverInfo, createResourceDimTypes, llvmCtxWrapper),
+              LogMgr(driverInfo)
+        {
+            setOptions({});
+        }
+
+        void setShaderHash(llvm::Function* F) const;
+        // Returns the hash for the given shader.
+        uint64_t getShaderHash(const CShader *Prog) const;
+
+        void takeHitGroupTable(std::vector<HitGroupInfo>&& Table);
+        const std::vector<HitGroupInfo>& hitgroups() const;
+        const std::vector<HitGroupInfo*>* hitgroupRefs(const std::string &Name) const;
+        llvm::Optional<RTStackFormat::HIT_GROUP_TYPE>
+            getHitGroupType(const std::string &Name) const;
+        llvm::Optional<std::string> getIntersectionAnyHit(
+            const std::string &IntersectionName) const;
+
+        // Return the SIMD size that we known we will compile for upfront.
+        // This is optional in the event that we want to do late determination
+        // in the future. Right now, we always know that we will, e.g., compile
+        // for SIMD8 in DG2.
+        llvm::Optional<SIMDMode> knownSIMDSize() const override;
+
+        // Returns true if the tile dimensions can be computed rather than
+        // loaded from per thread constant data.
+        bool canEfficientTile() const;
+
+        // We can't inline continuations and switch on them because there are
+        // continuations that haven't been compiled yet that we could jump to
+        // in the case of a collection state object.
+        //
+        // Note: We may relax this by some pointer tagging mechanism that
+        // allows a hybrid approach of indirect and inlined continuations.
+        bool requiresIndirectContinuationHandling() const;
+
+        // Have indirect continuations been requested?
+        bool forcedIndirectContinuations() const;
+
+        // If this is true, you can assume that you can look inter-procedurally
+        // across shaders and functions knowing that you see everything that is
+        // possibly reachable in execution.
+        bool canWholeProgramCompile() const;
+
+        // Can we see all the shaders upfront?
+        bool canWholeShaderCompile() const;
+
+        // Can we see all the functions upfront?
+        bool canWholeFunctionCompile() const;
+
+        // If this is true, attempt to sink payload writes into inlined
+        // continuations for better IO coalescing.
+        bool tryPayloadSinking() const;
+
+        // Returns true if an RTPSO (i.e., not a collection state object).
+        bool isRTPSO() const;
+
+        enum class CompileConfig
+        {
+            // An RTPSO that could have shaders added to it later on
+            // (via AddToStateObject() in DXR).
+            MUTABLE_RTPSO,
+            // An RTPSO that can't be added to after it is created.
+            IMMUTABLE_RTPSO,
+            // A collection. Collection state objects limit some optimizations
+            // because we can't see all the shaders upfront.
+            CSO,
+        } config = CompileConfig::IMMUTABLE_RTPSO;
+
+        // This lets the compiler know that it must compile with code to handle
+        // indirect continuations.  This is true if any imported collections
+        // have compiled anything beforehand.
+        bool hasPrecompiledObjects = false;
+
+        // Vulkan only. Needed to support pipeline libraries.
+        // This instructs compiler to use indirect continuations. Aside from
+        // just meaning that continuations should be invoked via BTD, this
+        // implies that shaders were compiled separately (ala DXR collection
+        // state objects).
+        bool forceIndirectContinuations = false;
+
+        // see PayloadSinkingPass.cpp
+        bool hasUnsupportedPayloadSinkingCaseWAenabled = false;
+        bool hasUnsupportedPayloadSinkingCase = false;
+    public:
+        mutable RTLoggingManager LogMgr;
+    private:
+        std::vector<HitGroupInfo> HitGroups;
+        // Maps a given shader name to the collection of hitgroups it is
+        // referenced in.
+        std::unordered_map<std::string, std::vector<HitGroupInfo*>> HitGroupRefs;
+
+        RTCompileOptionsKnown CompOptions{};
+    };
+
     class OpenCLProgramContext : public CodeGenContext
     {
     public:
@@ -1281,7 +1673,9 @@ namespace IGC
                 IntelHasPositivePointerOffset(false),
                 IntelHasBufferOffsetArg(false),
                 IntelBufferOffsetArgOptional(true),
-                IntelHasSubDWAlignedPtrArg(false)
+                IntelHasSubDWAlignedPtrArg(false),
+                LargeGRFKernels(),
+                RegularGRFKernels()
             {
                 if (pInputArgs == nullptr)
                     return;
@@ -1310,6 +1704,7 @@ namespace IGC
             bool GTPinReRA = false;
             bool GTPinGRFInfo = false;
             bool GTPinScratchAreaSize = false;
+            bool GTPinIndirRef = false;
             uint32_t GTPinScratchAreaSizeValue = 0;
 
             // stateless to stateful optimization
@@ -1329,7 +1724,11 @@ namespace IGC
             bool UseBindlessPrintf = false;
             bool UseBindlessLegacyMode = true;
             bool EnableZEBinary = false;
+            bool ExcludeIRFromZEBinary = false;
             bool NoSpill = false;
+            bool DisableNoMaskWA = false;
+            bool IgnoreBFRounding = false;   // If true, ignore BFloat rounding when folding bf operations
+            bool CompileOneKernelAtTime = false;
 
             // Generic address related
             bool HasNoLocalToGeneric = false;
@@ -1343,6 +1742,18 @@ namespace IGC
             bool Intel256GRFPerThread = false;
             bool IntelNumThreadPerEU = false;
             uint32_t numThreadsPerEU = 0;
+            // IntelForceInt32DivRemEmu is used only if fp64 is supported natively.
+            // IntelForceInt32DivRemEmu wins if both are set and can be applied.
+            bool IntelForceInt32DivRemEmu = false;
+            bool IntelForceInt32DivRemEmuSP = false;
+            bool IntelForceDisable4GBBuffer = false;
+            // user-controled option to disable EU Fusion
+            bool DisableEUFusion = false;
+
+            std::vector<std::string> LargeGRFKernels;
+            std::vector<std::string> RegularGRFKernels;
+
+            bool AllowRelocAdd = true;
 
             private:
                 void parseOptions(const char* IntOptStr);
@@ -1423,6 +1834,9 @@ namespace IGC
         bool m_ShouldUseNonCoherentStatelessBTI;
         uint32_t m_numUAVs = 0;
 
+        // Additional text visaasm to link.
+        std::vector<const char*> m_VISAAsmToLink;
+
         OpenCLProgramContext(
             const COCLBTILayout& btiLayout,
             const CPlatform& platform,
@@ -1438,6 +1852,11 @@ namespace IGC
             isSpirV(false),
             m_ShouldUseNonCoherentStatelessBTI(shouldUseNonCoherentStatelessBTI)
         {
+            if (pInputArgs && pInputArgs->pVISAAsmToLinkArray) {
+                for (uint32_t i = 0; i < pInputArgs->NumVISAAsmsToLink; ++i) {
+                    m_VISAAsmToLink.push_back(pInputArgs->pVISAAsmToLinkArray[i]);
+                }
+            }
         }
         bool isSPIRV() const;
         void setAsSPIRV();
@@ -1448,6 +1867,7 @@ namespace IGC
         bool allocatePrivateAsGlobalBuffer() const override;
         bool hasNoLocalToGenericCast() const override;
         bool hasNoPrivateToGenericCast() const override;
+        bool enableTakeGlobalAddress() const override;
         int16_t getVectorCoalescingControl() const override;
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;
@@ -1460,6 +1880,8 @@ namespace IGC
     void CodeGen(VertexShaderContext* ctx);
     void CodeGen(GeometryShaderContext* ctx);
     void CodeGen(OpenCLProgramContext* ctx);
+    void CodeGen(MeshShaderContext* ctx);
+    void CodeGen(RayDispatchShaderContext* ctx);
 
     void OptimizeIR(CodeGenContext* ctx);
 

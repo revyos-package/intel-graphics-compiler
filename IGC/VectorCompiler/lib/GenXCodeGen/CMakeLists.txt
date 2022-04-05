@@ -20,6 +20,7 @@ list(APPEND GenXCommonTableGen_dependencies
 add_custom_target(GenXCommonTableGen_target DEPENDS ${GenXCommonTableGen_dependencies})
 
 set(CODEGEN_SOURCES
+  ConstantEncoder.cpp
   FunctionGroup.cpp
   GenXAddressCommoning.cpp
   GenXAggregatePseudoLowering.cpp
@@ -36,7 +37,6 @@ set(CODEGEN_SOURCES
   GenXDebugInfo.cpp
   GenXDepressurizer.cpp
   GenXExtractVectorizer.cpp
-  GenXFuncPtrsLowering.cpp
   GenXGotoJoin.cpp
   GenXGEPLowering.cpp
   GenXGlobalValueLowering.cpp
@@ -60,6 +60,7 @@ set(CODEGEN_SOURCES
   GenXPostLegalization.cpp
   GenXPrinter.cpp
   GenXPressureTracker.cpp
+  GenXPredRegionLowering.cpp
   GenXPrologEpilogInsertion.cpp
   GenXPromoteArray.cpp
   GenXPromoteStatefulToBindless.cpp
@@ -67,8 +68,7 @@ set(CODEGEN_SOURCES
   GenXPromotePredicate.cpp
   GenXRawSendRipper.cpp
   GenXReduceIntSize.cpp
-  GenXInstCombineCleanup.cpp
-  GenXRegion.cpp
+  GenXRegionUtils.cpp
   GenXRegionCollapsing.cpp
   GenXRematerialization.cpp
   GenXSimdCFConformance.cpp
@@ -81,6 +81,8 @@ set(CODEGEN_SOURCES
   GenXVectorDecomposer.cpp
   GenXVisaRegAlloc.cpp
   GenXVisa.cpp
+  OCLRuntimeInfoPrinter.cpp
+  GenXStructSplitter.cpp
 )
 
 add_library(VCCodeGen ${CODEGEN_SOURCES})
@@ -112,6 +114,8 @@ target_link_libraries(VCCodeGen
   ${LLVM_LIBS}
 
   LLVMGenXIntrinsics
+
+  VCInternalIntrinsics
 
   VCHeaders
   VCTransforms

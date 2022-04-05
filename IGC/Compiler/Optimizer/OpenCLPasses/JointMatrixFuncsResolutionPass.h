@@ -18,6 +18,8 @@ SPDX-License-Identifier: MIT
 
 namespace IGC
 {
+    struct JointMatrixTypeDescription;
+
     class JointMatrixFuncsResolutionPass final
         : public llvm::FunctionPass
         , public llvm::InstVisitor<JointMatrixFuncsResolutionPass>
@@ -25,7 +27,7 @@ namespace IGC
     public:
         static char ID;
 
-        JointMatrixFuncsResolutionPass(OpenCLProgramContext *Context);
+        JointMatrixFuncsResolutionPass();
         ~JointMatrixFuncsResolutionPass() {}
 
         virtual llvm::StringRef getPassName() const override
@@ -46,20 +48,25 @@ namespace IGC
     private:
         llvm::Instruction *ResolveLoad(llvm::CallInst *CI);
         llvm::Instruction *ResolveStore(llvm::CallInst *CI);
-        llvm::Instruction *ResolveMad(llvm::CallInst *CI);
-        llvm::Type *ResolveType(const llvm::Type *opaqueType, uint32_t elementTypeFlags, unsigned rows, unsigned *outLayout);
+        llvm::Instruction *ResolveMad(llvm::CallInst *CI, unsigned OperationType);
+        llvm::Value *ResolveFill(llvm::CallInst *CI);
+        llvm::Value *ResolveWILength(llvm::CallInst *CI);
+        llvm::Value *ResolveSliceInsert(llvm::CallInst *CI);
+        llvm::Value *ResolveSliceExtract(llvm::CallInst *CI);
+        llvm::Value *ResolveCall(llvm::CallInst *CI);
         llvm::Value *Resolve(llvm::Value *value);
 
+        llvm::Type *ResolveType(const llvm::Type *opaqueType, JointMatrixTypeDescription *outDesc);
+        void CacheResolvedValue(llvm::Value *oldValue, llvm::Value *newValue);
+
         std::string GetLoadStoreMatrixFuncName
-            (bool load, unsigned opLayout, unsigned matrixLayout, unsigned elemBitWidth, unsigned rows, unsigned cols);
-        std::string getMADMatrixFuncName
-            (uint32_t aTypeFlags, uint32_t bTypeFlags, uint32_t cTypeFlags, unsigned M, unsigned N);
+            (bool isLoad, unsigned operationLayout, const JointMatrixTypeDescription *desc);
 
         llvm::ValueMap<llvm::Value *, llvm::Value *> ResolvedValues;
         llvm::SmallPtrSet<llvm::Instruction *, 8> InstsToErase;
 
-        ModuleMetaData* MMD;
-        OpenCLProgramContext* Context;
-        bool Changed;
+        ModuleMetaData* MMD = nullptr;
+        CodeGenContext* m_Ctx = nullptr;
+        bool Changed = false;
     };
 };

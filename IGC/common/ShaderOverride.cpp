@@ -50,7 +50,7 @@ static void * GetProcAddress(
 #if defined(WIN32)
 #define CDECLATTRIBUTE __cdecl
 #elif __GNUC__
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__ARM_ARCH)
 #define CDECLATTRIBUTE
 #else
 #define CDECLATTRIBUTE                 __attribute__((__cdecl__))
@@ -124,6 +124,7 @@ iga_gen_t GetIGAPlatform(PLATFORM const & platform)
             return IGA_GEN11;
     case IGFX_GEN12_CORE:
     case IGFX_GEN12LP_CORE:
+    case IGFX_XE_HP_CORE:
         if (   ProductFamily == IGFX_TIGERLAKE_LP
             || ProductFamily == IGFX_DG1
             || ProductFamily == IGFX_ROCKETLAKE
@@ -132,6 +133,10 @@ iga_gen_t GetIGAPlatform(PLATFORM const & platform)
            )
         {
             return IGA_GEN12p1;
+        }
+        else if (ProductFamily == IGFX_XE_HP_SDV)
+        {
+            return IGA_XE_HP;
         }
     default:
         IGC_ASSERT_MESSAGE(0, "unsupported platform");

@@ -38,63 +38,41 @@ inline llvm::StringRef getPrintfCM64RawData() {
 }
 
 inline llvm::StringRef getPrintfOCL32RawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
   return {reinterpret_cast<char *>(VCBiFPrintfOCL32RawData),
           VCBiFPrintfOCL32RawData_size};
-#endif // IGC_VC_DISABLE_BIF
 }
 
 inline llvm::StringRef getPrintfOCL64RawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
   return {reinterpret_cast<char *>(VCBiFPrintfOCL64RawData),
           VCBiFPrintfOCL64RawData_size};
-#endif // IGC_VC_DISABLE_BIF
 }
 
 inline llvm::StringRef getPrintfZE32RawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
   return {reinterpret_cast<char *>(VCBiFPrintfZE32RawData),
           VCBiFPrintfZE32RawData_size};
-#endif // IGC_VC_DISABLE_BIF
 }
 
 inline llvm::StringRef getPrintfZE64RawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
   return {reinterpret_cast<char *>(VCBiFPrintfZE64RawData),
           VCBiFPrintfZE64RawData_size};
-#endif // IGC_VC_DISABLE_BIF
 }
 
-inline llvm::StringRef getVCEmulationRawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
-  return {reinterpret_cast<char *>(VCEmulation64RawData),
-          VCEmulation64RawData_size};
-#endif // IGC_VC_DISABLE_BIF
+inline llvm::StringRef getVCEmulationRawData(llvm::StringRef CPUStr) {
+  return getVCEmulation64RawDataImpl(CPUStr);
 }
 
 inline llvm::StringRef getSPIRVBuiltinsRawData() {
-#ifdef IGC_VC_DISABLE_BIF
-  return "";
-#else  // IGC_VC_DISABLE_BIF
   return {reinterpret_cast<char *>(VCSPIRVBuiltins64RawData),
           VCSPIRVBuiltins64RawData_size};
-#endif // IGC_VC_DISABLE_BIF
 }
 
 template <enum RawKind> llvm::StringRef getRawData();
+template <enum RawKind>
+llvm::StringRef getRawDataForArch(llvm::StringRef CPUStr);
 
-template <> llvm::StringRef getRawData<RawKind::Emulation>() {
-  return getVCEmulationRawData();
+template <>
+llvm::StringRef getRawDataForArch<RawKind::Emulation>(llvm::StringRef CPUStr) {
+  return getVCEmulationRawData(CPUStr);
 }
 
 template<>

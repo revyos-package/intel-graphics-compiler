@@ -46,7 +46,6 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXConstants.h"
 #include "GenXModule.h"
-#include "GenXRegion.h"
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
@@ -74,6 +73,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include "llvmWrapper/IR/Constants.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -108,6 +108,13 @@ static cl::opt<bool> EnableAdd3Matcher(IGC_STRDEBUG("enable-add3"), cl::init(tru
 STATISTIC(NumOfBfnMatched, "Number of BFN instructions matched");
 static cl::opt<bool> EnableBfnMatcher("enable-bfn", cl::init(true), cl::Hidden,
                                       cl::desc("Enable bfn matching."));
+static cl::opt<bool> EnableLscAddrFoldOffset("enable-lsc-addr-fold-offset",
+                                             cl::init(true), cl::Hidden,
+                                             cl::desc("Enable LSC offset folding"));
+// Currently not supported in Finalizer
+static cl::opt<bool> EnableLscAddrFoldScale("enable-lsc-addr-fold-scale",
+                                            cl::init(false), cl::Hidden,
+                                            cl::desc("Enable LSC scale folding"));
 
 namespace {
 
@@ -148,6 +155,10 @@ public:
 
   void visitSDiv(BinaryOperator &I);
 
+  void visitURem(BinaryOperator &I);
+
+  void visitUDiv(BinaryOperator &I);
+
 #if LLVM_VERSION_MAJOR >= 10
   void visitFreezeInst(FreezeInst &I);
 #endif
@@ -164,6 +175,7 @@ private:
   bool flipBoolNot(Instruction *Inst);
   // foldBoolAnd : fold a (vector) bool and into sel/wrregion if beneficial
   bool matchInverseSqrt(Instruction *I);
+  bool foldLscAddrCalculation(CallInst *Inst);
   bool foldBoolAnd(Instruction *Inst);
   bool simplifyPredRegion(CallInst *Inst);
   bool simplifyWrRegion(CallInst *Inst);
@@ -183,8 +195,6 @@ private:
   bool simplifyNullDst(CallInst *Inst);
   // Transform logic operation with a mask from <N x iM> to <N/(32/M) x i32>
   bool extendMask(BinaryOperator *BO);
-
-  bool clearDeadInstructions(Function &F);
 };
 
 } // namespace
@@ -227,11 +237,13 @@ bool GenXPatternMatch::runOnFunction(Function &F) {
 
   Changed |= simplifyVolatileGlobals(&F);
 
-  Changed |= clearDeadInstructions(F);
-
   Changed |= simplifySelect(&F);
   // Break big predicate variables and run after min/max pattern match.
   Changed |= decomposeSelect(&F);
+
+  // Simplify instructions after select decomposition and clear dead ones.
+  for (auto &BB : F)
+    Changed |= SimplifyInstructionsInBlock(&BB);
 
   return Changed;
 }
@@ -326,9 +338,6 @@ public:
   // Match integer mads that starts with binary operators.
   bool matchIntegerAdd3();
 
-  // Match integer mads that starts with genx_*add intrinsic calls.
-  bool matchIntegerAdd3(unsigned IID);
-
   bool isProfitable(Instruction *A2) const;
 
 private:
@@ -377,12 +386,8 @@ public:
 private:
   static bool checkBfnTypes(const Value *V) {
     IGC_ASSERT_MESSAGE(V, "Error: nullptr input");
-    if (!V->getType()->isIntOrIntVectorTy())
-      return false;
-    unsigned BitSize = V->getType()->getScalarSizeInBits();
-    if (BitSize != 32 && BitSize != 16)
-      return false;
-    return true;
+    return V->getType()->isIntOrIntVectorTy(16) ||
+           V->getType()->isIntOrIntVectorTy(32);
   }
   // These constants are from VISA docs for calculating bfn constant.
   // Combine these constants with any logical operations to get the function
@@ -495,21 +500,11 @@ void GenXPatternMatch::visitBinaryOperator(BinaryOperator &I) {
 }
 
 void GenXPatternMatch::visitCallInst(CallInst &I) {
-  const GenXSubtarget *ST = &getAnalysis<TargetPassConfig>()
-                                 .getTM<GenXTargetMachine>()
-                                 .getGenXSubtarget();
   switch (unsigned ID = GenXIntrinsic::getGenXIntrinsicID(&I)) {
   default:
     break;
   case GenXIntrinsic::genx_inv:
     Changed |= matchInverseSqrt(&I);
-    break;
-  case GenXIntrinsic::genx_ssadd_sat:
-  case GenXIntrinsic::genx_suadd_sat:
-  case GenXIntrinsic::genx_usadd_sat:
-  case GenXIntrinsic::genx_uuadd_sat:
-    if (ST && (ST->hasAdd3Bfn()))
-      Changed |= EnableAdd3Matcher && Add3Matcher(&I).matchIntegerAdd3(ID);
     break;
   case GenXIntrinsic::genx_rdpredregion:
     Changed |= simplifyPredRegion(&I);
@@ -528,6 +523,33 @@ void GenXPatternMatch::visitCallInst(CallInst &I) {
   case GenXIntrinsic::genx_uutrunc_sat:
     Changed |= simplifyTruncSat(&I);
     break;
+  case GenXIntrinsic::genx_lsc_load_slm:
+  case GenXIntrinsic::genx_lsc_load_stateless:
+  case GenXIntrinsic::genx_lsc_load_bindless:
+  case GenXIntrinsic::genx_lsc_load_bti:
+  case GenXIntrinsic::genx_lsc_prefetch_slm:
+  case GenXIntrinsic::genx_lsc_prefetch_bti:
+  case GenXIntrinsic::genx_lsc_prefetch_stateless:
+  case GenXIntrinsic::genx_lsc_prefetch_bindless:
+  case GenXIntrinsic::genx_lsc_load_quad_slm:
+  case GenXIntrinsic::genx_lsc_load_quad_stateless:
+  case GenXIntrinsic::genx_lsc_load_quad_bindless:
+  case GenXIntrinsic::genx_lsc_load_quad_bti:
+  case GenXIntrinsic::genx_lsc_store_slm:
+  case GenXIntrinsic::genx_lsc_store_stateless:
+  case GenXIntrinsic::genx_lsc_store_bindless:
+  case GenXIntrinsic::genx_lsc_store_bti:
+  case GenXIntrinsic::genx_lsc_store_quad_slm:
+  case GenXIntrinsic::genx_lsc_store_quad_stateless:
+  case GenXIntrinsic::genx_lsc_store_quad_bindless:
+  case GenXIntrinsic::genx_lsc_store_quad_bti:
+  case GenXIntrinsic::genx_lsc_xatomic_slm:
+  case GenXIntrinsic::genx_lsc_xatomic_stateless:
+  case GenXIntrinsic::genx_lsc_xatomic_bindless:
+  case GenXIntrinsic::genx_lsc_xatomic_bti:
+    Changed |= foldLscAddrCalculation(&I);
+  case GenXIntrinsic::genx_dword_atomic_fadd:
+  case GenXIntrinsic::genx_dword_atomic_fsub:
   case GenXIntrinsic::genx_dword_atomic_add:
   case GenXIntrinsic::genx_dword_atomic_and:
   case GenXIntrinsic::genx_dword_atomic_cmpxchg:
@@ -748,7 +770,7 @@ CmpInst *GenXPatternMatch::reduceCmpWidth(CmpInst *Cmp) {
   auto *VTy = cast<IGCLLVM::FixedVectorType>(V0->getType());
   unsigned NumElts = VTy->getNumElements();
 
-  Region R(WII, BaleInfo());
+  Region R = makeRegionFromBaleInfo(WII, BaleInfo());
   if (R.Indirect || R.Offset || R.VStride || R.Stride != 1 ||
       R.Width != NumElts)
     return nullptr;
@@ -898,7 +920,7 @@ bool GenXPatternMatch::matchInverseSqrt(Instruction *I) {
 
   // Generate inverse sqrt only if fast flag for llvm intrinsic is used or
   // genx sqrt intrinsics is specified
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(OpInst);
+  auto IID = vc::getAnyIntrinsicID(OpInst);
   if (!(IID == GenXIntrinsic::genx_sqrt ||
         (IID == Intrinsic::sqrt && OpInst->getFastMathFlags().isFast())))
     return false;
@@ -914,6 +936,102 @@ bool GenXPatternMatch::matchInverseSqrt(Instruction *I) {
 
   OpInst->eraseFromParent();
   return true;
+}
+
+/***********************************************************************
+ * applyLscAddrFolding : fold address calculation of LSC intriniscs
+ * Addr = ImmOffset + Offsets * Scale
+ * If Offsets is add-like operation (Offsets = Offsets0 + Imm0), it can be
+ * folded in new ImmOffset: (ImmOffset + Imm0 * Scale) + Offsets0 * Scale
+ * If Offsets is mul-like operation (Offsets = Offsets0 * Imm0), it can be
+ * folded in new Scale: ImmOffset + Offsets * (Scale * Imm0)
+ * This folding is done iteratively for chains of such operations.
+ */
+static bool
+applyLscAddrFolding(Value *Offsets, APInt& Scale, APInt& Offset) {
+  if (!Offsets->hasOneUse())
+    return false;
+  if (!isa<BinaryOperator>(Offsets))
+    return false;
+  auto *BinOp = cast<BinaryOperator>(Offsets);
+  unsigned ConstIdx;
+  if (isa<Constant>(BinOp->getOperand(0)))
+    ConstIdx = 0;
+  else if (isa<Constant>(BinOp->getOperand(1)))
+    ConstIdx = 1;
+  else
+    return false;
+  auto *ConstOp = cast<Constant>(BinOp->getOperand(ConstIdx));
+  if (!isa<ConstantInt>(ConstOp) &&
+      (!ConstOp->getType()->isVectorTy() || !ConstOp->getSplatValue()))
+    return false;
+  auto Imm = ConstOp->getUniqueInteger();
+
+  auto NewScale(Scale);
+  auto NewOffset(Offset);
+  bool Overflow = false;
+  switch (BinOp->getOpcode()) {
+    case Instruction::Add:
+    case Instruction::Sub:
+      if (!EnableLscAddrFoldOffset)
+        return false;
+      if (Imm.getMinSignedBits() > Offset.getBitWidth())
+        return false;
+      Imm = Imm.sextOrTrunc(Offset.getBitWidth())
+               .smul_ov(Scale.zext(Imm.getBitWidth()), Overflow);
+      if (Overflow)
+        return false;
+      if (BinOp->getOpcode() == Instruction::Add)
+        NewOffset = Offset.sadd_ov(Imm, Overflow);
+      else if (BinOp->getOpcode() == Instruction::Sub)
+        NewOffset = Offset.ssub_ov(Imm, Overflow);
+      break;
+    case Instruction::Mul:
+      if (!EnableLscAddrFoldScale)
+        return false;
+      if (!Imm.isIntN(Scale.getBitWidth()))
+        return false;
+      if (Imm.getBitWidth() > Scale.getBitWidth())
+        Imm = Imm.trunc(Scale.getBitWidth());
+      NewScale = Scale.umul_ov(Imm, Overflow);
+      break;
+    case Instruction::Shl:
+      if (!EnableLscAddrFoldScale)
+        return false;
+      NewScale = Scale.ushl_ov(Imm, Overflow);
+      break;
+    default:
+      return false;
+  }
+
+  if (Overflow)
+    return false;
+  Scale = NewScale;
+  Offset = NewOffset;
+  BinOp->replaceAllUsesWith(BinOp->getOperand(1 - ConstIdx));
+  BinOp->eraseFromParent();
+  return true;
+}
+
+bool GenXPatternMatch::foldLscAddrCalculation(CallInst *Inst) {
+  constexpr unsigned AddrScaleOpndNum = 4,
+                     ImmOffsetOpndNum = 5,
+                     OffsetsOpndNum = 10;
+  IGC_ASSERT_MESSAGE(isa<ConstantInt>(Inst->getOperand(AddrScaleOpndNum)) &&
+                     isa<ConstantInt>(Inst->getOperand(ImmOffsetOpndNum)),
+                     "Scale and ImmOffset should be constant");
+  auto Scale = cast<ConstantInt>(Inst->getOperand(AddrScaleOpndNum))->getValue();
+  auto Offset = cast<ConstantInt>(Inst->getOperand(ImmOffsetOpndNum))->getValue();
+  bool Changed = false;
+  while (applyLscAddrFolding(Inst->getOperand(OffsetsOpndNum), Scale, Offset))
+    Changed = true;
+  if (Changed) {
+    Inst->setOperand(AddrScaleOpndNum,
+        ConstantInt::get(Type::getInt16Ty(Inst->getContext()), Scale));
+    Inst->setOperand(ImmOffsetOpndNum,
+        ConstantInt::get(Type::getInt32Ty(Inst->getContext()), Offset));
+  }
+  return Changed;
 }
 
 /***********************************************************************
@@ -950,7 +1068,7 @@ bool GenXPatternMatch::foldBoolAnd(Instruction *Inst) {
     return false;
   // Fold and into wrregion, giving rdregion, select and wrregion, as long
   // as the original wrregion is not indirect.
-  Region R(user, BaleInfo());
+  Region R = makeRegionFromBaleInfo(user, BaleInfo());
   if (R.Indirect)
     return false;
   auto NewRdRegion =
@@ -1019,14 +1137,14 @@ bool MadMatcher::isProfitable() const {
   auto isIndirectRdRegion = [](Value *V) -> bool {
     if (!GenXIntrinsic::isRdRegion(V))
       return false;
-    Region R(cast<Instruction>(V), BaleInfo());
+    Region R = makeRegionFromBaleInfo(cast<Instruction>(V), BaleInfo());
     return R.Indirect;
   };
 
   auto isIndirectWrRegion = [](User *U) -> bool {
     if (!GenXIntrinsic::isWrRegion(U))
       return false;
-    Region R(cast<Instruction>(U), BaleInfo());
+    Region R = makeRegionFromBaleInfo(cast<Instruction>(U), BaleInfo());
     return R.Indirect;
   };
 
@@ -1083,7 +1201,7 @@ bool MadMatcher::isProfitable() const {
     if (!C) {
       if (!isa<Constant>(V))
         return false;
-      C = dyn_cast<ConstantInt>(cast<Constant>(V)->getSplatValue());
+      C = dyn_cast_or_null<ConstantInt>(cast<Constant>(V)->getSplatValue());
       if (!C)
         return false;
     }
@@ -1125,7 +1243,7 @@ static Value *getBroadcastFromScalar(Value *V) {
   if (!GenXIntrinsic::isRdRegion(V))
     return nullptr;
   GenXIntrinsicInst *RII = cast<GenXIntrinsicInst>(V);
-  Region R(RII, BaleInfo());
+  Region R = makeRegionFromBaleInfo(RII, BaleInfo());
   if (!R.isScalar() || R.Width != 1 || R.Offset != 0)
     return nullptr;
   Value *Src = RII->getArgOperand(0);
@@ -1587,62 +1705,6 @@ bool Add3Matcher::matchIntegerAdd3() {
   return emit();
 }
 
-bool Add3Matcher::matchIntegerAdd3(unsigned IID) {
-  IGC_ASSERT_MESSAGE(GenXIntrinsic::getAnyIntrinsicID(AInst) == IID,
-    "input out of sync");
-  Value *Ops[2] = {AInst->getOperand(0), AInst->getOperand(1)};
-
-  if (Instruction *BI = dyn_cast<Instruction>(Ops[0])) {
-    if (BI->getOpcode() == Instruction::Add ||
-        BI->getOpcode() == Instruction::Sub) {
-      // Case X +/- Y + Z
-      Srcs[2] = Ops[1];
-      Srcs[1] = BI->getOperand(1);
-      Srcs[0] = BI->getOperand(0);
-      if (isProfitable(BI)) {
-        setA2Inst(BI);
-        Negs[1] = (A2Inst->getOpcode() == Instruction::Sub);
-      }
-    }
-  }
-
-  if (!A2Inst) {
-    if (Instruction *BI = dyn_cast<Instruction>(Ops[1])) {
-      if (BI->getOpcode() == Instruction::Add ||
-          BI->getOpcode() == Instruction::Sub) {
-        // Case Z + (X +/- Y)
-        Srcs[0] = Ops[0];
-        Srcs[1] = BI->getOperand(0);
-        Srcs[2] = BI->getOperand(1);
-        if (isProfitable(BI)) {
-          setA2Inst(BI);
-          Negs[2] = (A2Inst->getOpcode() == Instruction::Sub);
-        }
-      }
-    }
-  }
-
-  switch (IID) {
-  default:
-    IGC_ASSERT_EXIT_MESSAGE(0, "unexpected intrinsic ID");
-  case GenXIntrinsic::genx_ssadd_sat:
-    ID = GenXIntrinsic::genx_ssadd3_sat;
-    break;
-  case GenXIntrinsic::genx_suadd_sat:
-    ID = GenXIntrinsic::genx_suadd3_sat;
-    break;
-  case GenXIntrinsic::genx_usadd_sat:
-    ID = GenXIntrinsic::genx_usadd3_sat;
-    break;
-  case GenXIntrinsic::genx_uuadd_sat:
-    ID = GenXIntrinsic::genx_uuadd3_sat;
-    break;
-  }
-
-  // Emit mad if matched and profitable.
-  return emit();
-}
-
 // If Value *V is scalar type, return new Value* - splat of a specific type
 // for example, if VTy is <2 x i32>, and V is i32 type constant i32 7, we return
 // pointer to new Value <7, 7>
@@ -1732,11 +1794,7 @@ bool BfnMatcher::match() {
           return false;
         if (!I->hasOneUse())
           return false;
-        unsigned Opcode = I->getOpcode();
-        if (Opcode == Instruction::And || Opcode == Instruction::Xor ||
-            Opcode == Instruction::Or)
-          return true;
-        return false;
+        return I->isBitwiseLogicOp();
       });
   if (U == MainBfnInst->op_end())
     return false;
@@ -1748,10 +1806,7 @@ bool BfnMatcher::match() {
 void BfnMatcher::growPattern(const Use *U) {
   IGC_ASSERT(U);
   Instruction *I = cast<Instruction>(U->get());
-  IGC_ASSERT(I);
-  IGC_ASSERT(I->getOpcode() == Instruction::And ||
-             I->getOpcode() == Instruction::Xor ||
-             I->getOpcode() == Instruction::Or);
+  IGC_ASSERT(I && I->isBitwiseLogicOp());
 
   unsigned SrcIdx = U->getOperandNo();
   // we do not work with this operand
@@ -2157,7 +2212,7 @@ void GenXPatternMatch::visitFDiv(BinaryOperator &I) {
   // TODO: This can be removed if pattern match is applied
   // incrementally: first match reciprocal, then generate rsqrt
   // when visiting it
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(Divisor);
+  auto IID = vc::getAnyIntrinsicID(Divisor);
   if ((IID == GenXIntrinsic::genx_sqrt ||
        (IID == Intrinsic::sqrt && Divisor->getFastMathFlags().isFast())) &&
       match(Op0, m_FPOne()) && Divisor->hasOneUse()) {
@@ -2200,7 +2255,7 @@ namespace {
 class MulLike {
 public:
   virtual ~MulLike() {}
-  static MulLike &get(Instruction *I);
+  static const MulLike &get(Instruction *I);
 
   virtual Instruction *getMul(Instruction *) const { return nullptr; }
   virtual bool isAdd(User *) const { return false; }
@@ -2244,17 +2299,17 @@ public:
   }
 };
 
-MulLike &MulLike::get(Instruction *I) {
+const MulLike &MulLike::get(Instruction *I) {
   Type *Ty = I->getType()->getScalarType();
   if (Ty->isFloatingPointTy()) {
-    static FPMulLike FPMul;
+    static const FPMulLike FPMul;
     return FPMul;
   }
   if (Ty->isIntegerTy()) {
-    static IntMulLike IntMul;
+    static const IntMulLike IntMul;
     return IntMul;
   }
-  static MulLike Null;
+  static const MulLike Null;
   return Null;
 }
 } // End anonymous namespace
@@ -2264,7 +2319,7 @@ bool GenXPatternMatch::propagateFoldableRegion(Function *F) {
   bool Changed = false;
   for (auto *BB : RPOT)
     for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
-      MulLike &Ring = MulLike::get(&*BI);
+      const MulLike &Ring = MulLike::get(&*BI);
       Instruction *Mul = Ring.getMul(&*BI);
       if (!Mul)
         continue;
@@ -2275,7 +2330,7 @@ bool GenXPatternMatch::propagateFoldableRegion(Function *F) {
         GenXIntrinsicInst *WII = cast<GenXIntrinsicInst>(User);
         if (WII->getOperand(1) != Mul)
           continue;
-        Region W(WII, BaleInfo());
+        Region W = makeRegionFromBaleInfo(WII, BaleInfo());
         Region V(Mul);
         // TODO: Consider the broadcast and similar cases.
         if (!W.isStrictlySimilar(V))
@@ -2291,7 +2346,7 @@ bool GenXPatternMatch::propagateFoldableRegion(Function *F) {
           for (auto *U : II->users()) {
             if (GenXIntrinsic::isRdRegion(U)) {
               GenXIntrinsicInst *RII = cast<GenXIntrinsicInst>(U);
-              Region R(RII, BaleInfo());
+              Region R = makeRegionFromBaleInfo(RII, BaleInfo());
               if (R == W) {
                 for (auto *U2 : RII->users())
                   if (!Ring.isAdd(U2)) {
@@ -2307,7 +2362,7 @@ bool GenXPatternMatch::propagateFoldableRegion(Function *F) {
               }
             } else if (GenXIntrinsic::isWrRegion(U)) {
               GenXIntrinsicInst *WII2 = cast<GenXIntrinsicInst>(U);
-              Region W2(WII2, BaleInfo());
+              Region W2 = makeRegionFromBaleInfo(WII2, BaleInfo());
               if (W2 == W) {
                 // No more wrregion needs tracing. DO NOTHING.
               } else if (W2.overlap(W)) {
@@ -2387,7 +2442,7 @@ bool GenXPatternMatch::simplifyRdRegion(CallInst* Inst) {
   IGC_ASSERT(GenXIntrinsic::isRdRegion(Inst));
   auto NewVTy = Inst->getType();
   // rewrite indirect rdregion with constant offsets
-  auto R = Region::getWithOffset(Inst, false /*ParentWidth*/);
+  auto R = genx::makeRegionWithOffset(Inst);
   if (R.Indirect && R.IndirectIdx == 0 && R.IndirectAddrOffset == 0) {
     int64_t starti = 0;
     int64_t diffi = 0;
@@ -2424,7 +2479,7 @@ bool GenXPatternMatch::simplifyWrRegion(CallInst *Inst) {
     auto *Parent = NewV;
     while (isa<BitCastInst>(Parent))
       Parent = cast<Instruction>(Parent)->getOperand(0);
-    if (GenXIntrinsic::getAnyIntrinsicID(Parent) == GenXIntrinsic::genx_faddr)
+    if (vc::getAnyIntrinsicID(Parent) == GenXIntrinsic::genx_faddr)
       return false;
 
     if (NewVTy->isVectorTy() &&
@@ -2443,6 +2498,9 @@ bool GenXPatternMatch::simplifyWrRegion(CallInst *Inst) {
 
       if (GenXIntrinsic::isWrRegion(U))
         return false;
+
+      if (GenXIntrinsic::isReadWritePredefReg(U))
+        return false;
     }
 
     // OK, rewrite it!
@@ -2457,13 +2515,14 @@ bool GenXPatternMatch::simplifyWrRegion(CallInst *Inst) {
     Region R(Inst->getType());
     R.Width = R.NumElements;
     R.Stride = 0;
-    NewV = R.createRdRegion(NewV, "splat", Inst, Inst->getDebugLoc(), false);
+    NewV = R.createRdRegion(NewV, "splat", Inst, Inst->getDebugLoc(),
+                            !Inst->getType()->isVectorTy());
     Inst->replaceAllUsesWith(NewV);
     return true;
   }
 
   // rewrite indirect wrregion with constant offsets
-  auto R = Region::getWithOffset(Inst, false/*ParentWidth*/);
+  auto R = genx::makeRegionWithOffset(Inst);
   if (R.Indirect && R.IndirectIdx == 0 && R.IndirectAddrOffset == 0) {
     int64_t starti = 0;
     int64_t diffi = 0;
@@ -2485,7 +2544,7 @@ bool GenXPatternMatch::simplifyWrRegion(CallInst *Inst) {
 
   // Convert WrRegion to a matching Select instruction
   // Also perform Min/Max optimization if enabled
-  if (R.isWhole(Inst->getType())) {
+  if (R.isWhole(Inst->getType(), DL)) {
     Value *OldV =
         Inst->getOperand(GenXIntrinsic::GenXRegion::OldValueOperandNum);
     Type *OldVTy = OldV->getType();
@@ -2602,12 +2661,23 @@ static bool canonizeSelect(SelectInst *SI) {
 }
 
 // Try to merge select condition to wrregion mask:
+//
+// Scenario 1
 // old_val = rdregion(x, R)
 // masked_val = select cond, new_val, old_val
 // wrregion(x, masked_val, R)
 // ===>
 // old_val = rdregion(x, R)
 // wrregion(x, new_val, R, cond)
+//
+// Scenario 2 (replace undef with x)
+// old_val = rdregion(x, R)
+// masked_val = select cond, new_val, old_val
+// wrregion(undef, masked_val, R)
+// ===>
+// old_val = rdregion(x, R)
+// wrregion(x, new_val, R, cond)
+//
 // Also generate cond inversion if select operands are swapped)
 //
 static bool mergeToWrRegion(SelectInst *SI) {
@@ -2622,7 +2692,7 @@ static bool mergeToWrRegion(SelectInst *SI) {
 
     Rd = cast<CallInst>(Val);
     Inverted = Val == SI->getTrueValue();
-    Region RdReg(Rd, BaleInfo());
+    Region RdReg = makeRegionFromBaleInfo(Rd, BaleInfo());
 
     auto CanMergeToWrRegion = [&](const Use &U) -> bool {
       if (!GenXIntrinsic::isWrRegion(U.getUser()))
@@ -2630,7 +2700,7 @@ static bool mergeToWrRegion(SelectInst *SI) {
       if (U.getOperandNo() != NewValueOperandNum)
         return false;
       CallInst *Wr = cast<CallInst>(U.getUser());
-      Region WrReg(Wr, BaleInfo());
+      Region WrReg = makeRegionFromBaleInfo(Wr, BaleInfo());
       if (WrReg.Mask) {
         // If wrregion already has mask, it should be all ones constant.
         auto *C = dyn_cast<Constant>(WrReg.Mask);
@@ -2642,9 +2712,14 @@ static bool mergeToWrRegion(SelectInst *SI) {
       WrReg.Mask = nullptr;
       if (WrReg != RdReg)
         return false;
-      return isa<UndefValue>(Wr->getOperand(OldValueOperandNum)) ||
-             (Wr->getOperand(OldValueOperandNum) ==
-              Rd->getOperand(OldValueOperandNum));
+
+      Value *WrOldValOp = Wr->getOperand(OldValueOperandNum);
+      Value *RdOldValOp = Rd->getOperand(OldValueOperandNum);
+
+      bool SameOrigin = (WrOldValOp == RdOldValOp);
+      bool CanReplaceUndef = isa<UndefValue>(WrOldValOp) &&
+                             (WrOldValOp->getType() == RdOldValOp->getType());
+      return SameOrigin || CanReplaceUndef;
     };
 
     auto DoMergeToWrRegion = [&](User *U) {
@@ -2655,9 +2730,9 @@ static bool mergeToWrRegion(SelectInst *SI) {
       if (Inverted)
         Mask = llvm::genx::invertCondition(Mask);
       // Create new wrregion.
-      Region WrReg(Wr, BaleInfo());
+      Region WrReg = makeRegionFromBaleInfo(Wr, BaleInfo());
       WrReg.Mask = Mask;
-      Value *NewWr = WrReg.createWrRegion(Wr->getOperand(OldValueOperandNum),
+      Value *NewWr = WrReg.createWrRegion(Rd->getOperand(OldValueOperandNum),
                                           Inverted ? SI->getFalseValue()
                                                    : SI->getTrueValue(),
                                           Wr->getName(), Wr, Wr->getDebugLoc());
@@ -2695,20 +2770,6 @@ bool GenXPatternMatch::simplifySelect(Function *F) {
   return Changed;
 }
 
-bool GenXPatternMatch::clearDeadInstructions(Function &F) {
-  bool Changed = false;
-  SmallVector<WeakTrackingVH, 8> ToErase;
-  for (auto &Inst : instructions(F))
-    if (isInstructionTriviallyDead(&Inst))
-      ToErase.push_back(WeakTrackingVH(&Inst));
-  if (!ToErase.empty()) {
-    Changed = true;
-
-    IGCLLVM::RecursivelyDeleteTriviallyDeadInstructions(ToErase);
-  }
-  return Changed;
-}
-
 // Perform volatile global related simplifications.
 bool GenXPatternMatch::simplifyVolatileGlobals(Function *F) {
   bool Changed = false;
@@ -2727,9 +2788,9 @@ bool GenXPatternMatch::simplifyVolatileGlobals(Function *F) {
 // of log2 of original vector;
 // input vector consists of only positive integer or only one positive integer
 static Constant *getFloorLog2(const Constant *C) {
-  IGC_ASSERT(C && "getFloorLog2 get nullptr");
-  IGC_ASSERT(C->getType()->isIntOrIntVectorTy() &&
-             "Error: getFloorLog2 get not int or vector of int type");
+  IGC_ASSERT_MESSAGE(C, "getFloorLog2 get nullptr");
+  IGC_ASSERT_MESSAGE(C->getType()->isIntOrIntVectorTy(),
+                     "Error: getFloorLog2 get not int or vector of int type");
   if (C->getType()->isVectorTy()) {
     VectorType *Ty = cast<VectorType>(C->getType());
     SmallVector<Constant *, 4> Elts;
@@ -2741,122 +2802,193 @@ static Constant *getFloorLog2(const Constant *C) {
       Elts.push_back(Log2);
     }
     return ConstantVector::get(Elts);
-  } else {
-    Type *Ty = C->getType();
-    const ConstantInt *Elt = cast<ConstantInt>(C);
-    const APInt Val = Elt->getValue();
-    return ConstantInt::get(Ty->getScalarType(), Val.logBase2());
   }
+  Type *Ty = C->getType();
+  const ConstantInt *Elt = cast<ConstantInt>(C);
+  const APInt Val = Elt->getValue();
+  return ConstantInt::get(Ty->getScalarType(), Val.logBase2());
 }
 
-// a helper routine for decomposeSdivPow2, decomposeSremPow2
-// return true if Value is constant data power 2 value
-// input operand - value
-bool isSuitableSdivSremPow2Operand(const Value *Operand) {
-  IGC_ASSERT(Operand && "nullptr in isSuitableSdivSremPow2Operand");
-  if (!isa<Constant>(Operand)) // constant data vector or constant
-    return false;
+enum class DivRemOptimize {
+  // No optimization can be applied.
+  Not,
+  // Power of 2 case optimization.
+  Pow2,
+};
+
+// Check if unsigned UDiv/URem can be optimized,
+// based on its divisor \p Operand.
+static DivRemOptimize isSuitableUDivURemOperand(Value *Operand) {
+  IGC_ASSERT(Operand);
+  // Constant data vector or constant.
+  if (!isa<Constant>(Operand))
+    return DivRemOptimize::Not;
+  Type *OperandTy = Operand->getType();
+  // TODO support i8, i16 & i64 cases
+  // for pow2 case just turning on the same pattern as i32 width
+  // Not int and not vector of int, or width wrong( not 32).
+  if (!OperandTy->isIntOrIntVectorTy(genx::DWordBits))
+    return DivRemOptimize::Not;
+  // TODO: Remove this as we have tests for this pattern.
   if (PatternMatch::match(Operand, PatternMatch::m_Negative()))
-    return false; // the second operand is negative
-
-  if (!Operand->getType()->isIntOrIntVectorTy(genx::DWordBits))
-    return false; // not int and not vector of int, or width wrong
-  Type *InstElementTy = Operand->getType()->getScalarType();
-  IGC_ASSERT(InstElementTy &&
-             "ERROR: logic error in is isSuitableSdivSremPow2DecomposeInst");
-  return PatternMatch::match(Operand, PatternMatch::m_Power2());
+    return DivRemOptimize::Not;
+  if (PatternMatch::match(Operand, PatternMatch::m_Power2()))
+    return DivRemOptimize::Pow2;
+  return DivRemOptimize::Not;
 }
 
-// optimization path if second operand of sdiv is power of 2
-// input:
-// Sdiv - only sdiv binary operator, second operand of which is ConstantVector
-//  or ConstantInt
-// Optimization for positive y:
+// Check if unsigned SDiv/URem can be optimized,
+// based on its divisor \p Operand.
+static DivRemOptimize isSuitableSDivSRemOperand(Value *Operand) {
+  IGC_ASSERT(Operand);
+  // Constant data vector or constant.
+  if (!isa<Constant>(Operand))
+    return DivRemOptimize::Not;
+  Type *OperandTy = Operand->getType();
+  // TODO support i8, i16 & i64 cases
+  // i8, i16 - by creating zext/sext to i32
+  // i64 - just turning on the same pattern as i32 width,
+  //  as emulation for shift and add much faster than emulation division.
+  // Not int and not vector of int, or width wrong( not 32).
+  if (!OperandTy->isIntOrIntVectorTy(genx::DWordBits))
+    return DivRemOptimize::Not;
+  if (PatternMatch::match(Operand, PatternMatch::m_Negative()))
+    return DivRemOptimize::Not;
+  if (!PatternMatch::match(Operand, PatternMatch::m_Power2()))
+    return DivRemOptimize::Not;
+  return DivRemOptimize::Pow2;
+}
+
+// Optimization for signed x / 2^p.
+// if 2^p positite value
 // intWidth = 32
 // x / y = ashr( x + lshr( ashr(x, intWidth - 1), intWidth - log2(y)), log2(y))
-static void decomposeSdivPow2(BinaryOperator &Sdiv) {
-  IGC_ASSERT(Sdiv.getOpcode() == Instruction::SDiv &&
-             "Error: try to decompose sdiv for not sdiv instruction");
-  IGC_ASSERT(isSuitableSdivSremPow2Operand(Sdiv.getOperand(1)) &&
-             "Error: try to decompose sdiv for not suitable instruction");
+static void decomposeSDivPow2(BinaryOperator &SDivOp) {
+  IGC_ASSERT(SDivOp.getOpcode() == Instruction::SDiv);
+  Value *Dividend = SDivOp.getOperand(0);
+  IGC_ASSERT(isSuitableSDivSRemOperand(SDivOp.getOperand(1)) ==
+             DivRemOptimize::Pow2);
+  Constant *Divisor = cast<Constant>(SDivOp.getOperand(1));
 
-  const Twine Name = "genxSdivOpt";
-  Value *Op0 = Sdiv.getOperand(0);
-  Constant *Op1 = cast<Constant>(Sdiv.getOperand(1));
+  IRBuilder<> Builder{&SDivOp};
 
-  Type *SdivTy = Sdiv.getType();
-  Type *ElementTy = SdivTy->getScalarType();
-  IGC_ASSERT(ElementTy && "ERROR: logic error in decomposeSdivPow2");
+  const char *Name = "genxSdivOpt";
+  Type *OperationTy = Dividend->getType();
+  Type *ElementTy = OperationTy->getScalarType();
+  IGC_ASSERT(ElementTy);
   unsigned ElementBitWidth = ElementTy->getIntegerBitWidth();
-  unsigned OperandWidth =
-      SdivTy->isVectorTy()
-          ? cast<IGCLLVM::FixedVectorType>(SdivTy)->getNumElements()
-          : 0;
-
-  IRBuilder<> Builder(&Sdiv);
-
-  auto createConstant = [](unsigned int OperandWidth, Type *Ty, int Value) {
-    return OperandWidth != 0 ?
-        ConstantDataVector::getSplat(OperandWidth, ConstantInt::get(Ty, Value)) :
-        ConstantInt::get(Ty, Value);
-  };
 
   Constant *VecSignBit =
-      createConstant(OperandWidth, ElementTy, ElementBitWidth - 1);
+      Constant::getIntegerValue(OperationTy, APInt{32, ElementBitWidth - 1});
   Constant *VecBitWidth =
-      createConstant(OperandWidth, ElementTy, ElementBitWidth);
+      Constant::getIntegerValue(OperationTy, APInt{32, ElementBitWidth});
 
-  Constant *Log2Op1 = getFloorLog2(Op1);
-  IGC_ASSERT(Log2Op1 != nullptr && "getLog2 return nullptr");
+  Constant *Log2Divisor = getFloorLog2(Divisor);
+  IGC_ASSERT(Log2Divisor != nullptr);
 
-  Value *ShiftSize = Builder.CreateSub(VecBitWidth, Log2Op1, Name);
+  Value *ShiftSize = Builder.CreateSub(VecBitWidth, Log2Divisor, Name);
   // if op0 is negative, Signdetect all ones, else all zeros
-  Value *SignDetect = Builder.CreateAShr(Op0, VecSignBit, Name);
+  Value *SignDetect = Builder.CreateAShr(Dividend, VecSignBit, Name);
   Value *Addition = Builder.CreateLShr(SignDetect, ShiftSize, Name);
-  Value *NewRhs = Builder.CreateAdd(Op0, Addition, Name);
-  Value *Answer = Builder.CreateAShr(NewRhs, Log2Op1, Name);
-  Sdiv.replaceAllUsesWith(Answer);
+  Value *NewRhs = Builder.CreateAdd(Dividend, Addition, Name);
+  Value *Res = Builder.CreateAShr(NewRhs, Log2Divisor);
+  SDivOp.replaceAllUsesWith(Res);
+  Res->takeName(&SDivOp);
 }
 
 void GenXPatternMatch::visitSDiv(BinaryOperator &I) {
-  if (isSuitableSdivSremPow2Operand(I.getOperand(1))) {
-    decomposeSdivPow2(I);
-    Changed = true;
-  }
+  auto CheckRes = isSuitableSDivSRemOperand(I.getOperand(1));
+  if (CheckRes == DivRemOptimize::Not)
+    return;
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
+  decomposeSDivPow2(I);
+  Changed = true;
 }
 
-// Srem - only srem binary operator
-// suppose that later sdiv operation will be optimized by decomposeSdivPow2
+// Optimization for unsigned x / 2^p.
+// p = log2(2^p)
+// x / 2 ^ p = x >> p (lshr)
+static void decomposeUDivPow2(BinaryOperator &UDivOp) {
+  IGC_ASSERT(UDivOp.getOpcode() == Instruction::UDiv);
+  Value *Dividend = UDivOp.getOperand(0);
+  IGC_ASSERT(isSuitableUDivURemOperand(UDivOp.getOperand(1)) ==
+             DivRemOptimize::Pow2);
+  Constant *Divisor = cast<Constant>(UDivOp.getOperand(1));
+  IRBuilder<> Builder{&UDivOp};
+  Constant *Log2Divisor = getFloorLog2(Divisor);
+  IGC_ASSERT(Log2Divisor);
+  Value *Res = Builder.CreateLShr(Dividend, Log2Divisor);
+  UDivOp.replaceAllUsesWith(Res);
+  Res->takeName(&UDivOp);
+}
+
+void GenXPatternMatch::visitUDiv(BinaryOperator &I) {
+  auto CheckRes = isSuitableUDivURemOperand(I.getOperand(1));
+  if (CheckRes == DivRemOptimize::Not)
+    return;
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
+  Changed = true;
+  return decomposeUDivPow2(I);
+}
+
+// Optimization for signed x % 2^p.
+// 2^p is positive value
 // x % y = x - y * (x / y)
-static void decomposeSremPow2(BinaryOperator &Srem) {
-  IGC_ASSERT(Srem.getOpcode() == Instruction::SRem &&
-             "Error: try to decomposeSrem not srem");
-  IGC_ASSERT(isSuitableSdivSremPow2Operand(Srem.getOperand(1)) &&
-             "Error: try to decomposeSrem for not suitable Operand 1");
-  const Twine Name = "genxSremOpt";
-  Value *Op0 = Srem.getOperand(0);
-  Constant *Op1 = cast<Constant>(Srem.getOperand(1));
+static void decomposeSRemPow2(BinaryOperator &SRemOp) {
+  IGC_ASSERT(SRemOp.getOpcode() == Instruction::SRem);
+  Value *Dividend = SRemOp.getOperand(0);
+  IGC_ASSERT(isSuitableSDivSRemOperand(SRemOp.getOperand(1)) ==
+             DivRemOptimize::Pow2);
+  Constant *Divisor = cast<Constant>(SRemOp.getOperand(1));
 
-  Type *SremTy = Srem.getType();
-  IGC_ASSERT(SremTy && "ERROR: logic error in decomposeSremPow2");
+  IRBuilder<> Builder{&SRemOp};
 
-  IRBuilder<> Builder(&Srem);
+  const char *Name = "genxSremOpt";
+  Value *Sdiv = Builder.CreateSDiv(Dividend, Divisor, Name);
+  Value *MulRes = Builder.CreateMul(Sdiv, Divisor, Name);
+  Value *Res = Builder.CreateSub(Dividend, MulRes);
 
-  Value *Sdiv = Builder.CreateSDiv(Op0, Op1, Name);
-  Value *MulRes = Builder.CreateMul(Sdiv, Op1, Name);
-  Value *Result = Builder.CreateSub(Op0, MulRes, Name);
+  decomposeSDivPow2(*cast<BinaryOperator>(Sdiv));
 
-  // optimize sdiv
-  decomposeSdivPow2(*cast<BinaryOperator>(Sdiv));
-
-  Srem.replaceAllUsesWith(Result);
+  SRemOp.replaceAllUsesWith(Res);
+  Res->takeName(&SRemOp);
 }
 
 void GenXPatternMatch::visitSRem(BinaryOperator &I) {
-  if (isSuitableSdivSremPow2Operand(I.getOperand(1))) {
-    decomposeSremPow2(I);
-    Changed = true;
-  }
+  auto CheckRes = isSuitableSDivSRemOperand(I.getOperand(1));
+  if (CheckRes == DivRemOptimize::Not)
+    return;
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
+  decomposeSRemPow2(I);
+  Changed = true;
+}
+
+// Optimization for unsigned x % 2^p.
+// p = log2(2^p)
+// x % 2^p = (x & ((1<<p)-1)) = x & (2^p - 1)
+static void decomposeURemPow2(BinaryOperator &URemOp) {
+  IGC_ASSERT(URemOp.getOpcode() == Instruction::URem);
+  Value *Dividend = URemOp.getOperand(0);
+  IGC_ASSERT(isSuitableUDivURemOperand(URemOp.getOperand(1)) ==
+             DivRemOptimize::Pow2);
+  Constant *Divisor = cast<Constant>(URemOp.getOperand(1));
+  Type *OperationTy = Dividend->getType();
+
+  IRBuilder<> Builder{&URemOp};
+
+  Constant *One = Constant::getIntegerValue(OperationTy, APInt{32, 1});
+  Value *Res = Builder.CreateAnd(Dividend, Builder.CreateSub(Divisor, One));
+  URemOp.replaceAllUsesWith(Res);
+  Res->takeName(&URemOp);
+}
+
+void GenXPatternMatch::visitURem(BinaryOperator &I) {
+  auto CheckRes = isSuitableUDivURemOperand(I.getOperand(1));
+  if (CheckRes == DivRemOptimize::Not)
+    return;
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
+  Changed = true;
+  return decomposeURemPow2(I);
 }
 
 #if LLVM_VERSION_MAJOR >= 10

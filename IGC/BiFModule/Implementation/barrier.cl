@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include "../Languages/OpenCL/IBiF_SPIRV_Utils.cl"
 
 extern __constant int __OptDisable;
 
@@ -23,18 +24,19 @@ void __attribute__((optnone)) __intel_memfence_optnone(bool flushRW, bool isGlob
 if (flushRW == V1 && isGlobal == V5 && invalidateL1 == V6)         \
 {                                                                  \
     __builtin_IB_memfence(true, V1, false, false, false, V5, V6);  \
-}
+} else
 
-    MEMFENCE_IF(false, false, false)
-    else MEMFENCE_IF(false, false, true)
-    else MEMFENCE_IF(false, true, false)
-    else MEMFENCE_IF(false, true, true)
-    else MEMFENCE_IF(true, false, false)
-    else MEMFENCE_IF(true, false, true)
-    else MEMFENCE_IF(true, true, false)
-    else MEMFENCE_IF(true, true, true)
+// Generate combinations for all MEMFENCE_IF cases, e.g.:
+// true, true, true
+// true, true, false etc.
+#define MF_L2(...) MF_L1(__VA_ARGS__,false) MF_L1(__VA_ARGS__,true)
+#define MF_L1(...) MEMFENCE_IF(__VA_ARGS__,false) MEMFENCE_IF(__VA_ARGS__,true)
+MF_L2(false)
+MF_L2(true) {}
 
 #undef MEMFENCE_IF
+#undef MF_L2
+#undef MF_L1
 }
 void __intel_memfence(bool flushRW, bool isGlobal, bool invalidateL1)
 {
@@ -121,6 +123,24 @@ void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ControlBarrier, _i32_i32_i32, )(int Execut
     {
         // nothing will be emited but we need to prevent optimization spliting control flow
         __builtin_IB_sub_group_barrier();
+    }
+}
+
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ControlBarrierArriveINTEL, _i32_i32_i32, )(int Execution, int Memory, int Semantics)
+{
+    if( Execution == Workgroup )
+    {
+        __intel_atomic_work_item_fence( Memory, Semantics );
+        __builtin_IB_thread_group_barrier_signal();
+    }
+}
+
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ControlBarrierWaitINTEL, _i32_i32_i32, )(int Execution, int Memory, int Semantics)
+{
+    if( Execution == Workgroup )
+    {
+        __intel_atomic_work_item_fence( Memory, Semantics );
+        __builtin_IB_thread_group_barrier_wait();
     }
 }
 
@@ -241,6 +261,45 @@ void __builtin_spirv_OpMemoryNamedBarrier_p3__namedBarrier_i32_i32(local __named
         AtomicStore(&NB->inc, Workgroup, AtomSema, 0);
         AtomicStore(&NB->count, Workgroup, AtomSema, NB->orig_count);
     }
+}
+void __builtin_spirv_OpMemoryNamedBarrierWrapperOCL_p3__namedBarrier_i32(local __namedBarrier* barrier, cl_mem_fence_flags flags)
+{
+    __builtin_spirv_OpMemoryNamedBarrier_p3__namedBarrier_i32_i32(barrier, Workgroup, AcquireRelease | get_spirv_mem_fence(flags));
+}
+
+void __builtin_spirv_OpMemoryNamedBarrierWrapperOCL_p3__namedBarrier_i32_i32(local __namedBarrier* barrier, cl_mem_fence_flags flags, memory_scope scope)
+{
+    __builtin_spirv_OpMemoryNamedBarrier_p3__namedBarrier_i32_i32(barrier, get_spirv_mem_scope(scope), AcquireRelease | get_spirv_mem_fence(flags));
+}
+
+__global volatile uchar* __builtin_IB_get_sync_buffer();
+
+void global_barrier()
+{
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    __global volatile int* syncBuffer = (__global volatile int*)__builtin_IB_get_sync_buffer();
+
+    bool firstThreadPerWg = (get_local_id(0) == 0) && (get_local_id(1) == 0) && (get_local_id(2) == 0);
+    size_t numGroups = get_num_groups(0) * get_num_groups(1) * get_num_groups(2);
+
+    if (firstThreadPerWg) {
+        if (get_global_linear_id() == 0) {
+            atomic_sub(syncBuffer, numGroups-1);
+        }
+        else {
+            atomic_inc(syncBuffer);
+        }
+
+        while(atomic_or(syncBuffer, 0) != 0) {}
+    }
+
+    barrier(CLK_GLOBAL_MEM_FENCE);
+}
+
+void system_memfence(char fence_typed_memory)
+{
+    return __builtin_IB_system_memfence(fence_typed_memory);
 }
 
 

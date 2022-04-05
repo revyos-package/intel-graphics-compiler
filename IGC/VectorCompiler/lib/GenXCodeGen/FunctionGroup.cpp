@@ -7,8 +7,8 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 //
-// This file implements FunctionGroup, FunctionGroupAnalysis and
-// FunctionGroupPass. See FunctionGroup.h for more details.
+// This file implements FunctionGroup, FunctionGroupAnalysis.
+// See FunctionGroup.h for more details.
 //
 // The FunctionGroupPass part was adapted from CallGraphSCCPass.cpp.
 //
@@ -18,7 +18,8 @@ SPDX-License-Identifier: MIT
 //===----------------------------------------------------------------------===//
 
 #include "FunctionGroup.h"
-#include "vc/GenXOpts/Utils/KernelInfo.h"
+#include "vc/Utils/GenX/KernelInfo.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 #include "llvm/IR/Dominators.h"
@@ -31,14 +32,73 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
-using namespace llvm;
+
+#include <algorithm>
+
+#include "GenXUtil.h"
 
 #include "llvmWrapper/IR/LegacyPassManagers.h"
 #include "llvmWrapper/IR/PassTimingInfo.h"
+#include "llvmWrapper/IR/Value.h"
+
 #include "Probe/Assertion.h"
 
-
 #define DEBUG_TYPE "functiongroup-passmgr"
+
+using namespace llvm;
+
+static cl::opt<bool> PrintFunctionsUsers(
+    "fga-print-functions-users", cl::init(true), cl::Hidden,
+    cl::desc("FunctionGroupAnalysis::print emits users of functions"));
+
+bool FunctionGroup::verify() const {
+  // TODO: ideally, we'd like to access call-graph here. However,
+  // we do not maintain it here.
+  for (auto I = Functions.begin(), E = Functions.end(); I != E; ++I) {
+    Function *F = &(**I);
+    // Note: we do not check FG heads here -
+    // users of FG heads can belong to different FG
+    if (F == getHead())
+      continue;
+    for (auto *U : F->users()) {
+      auto *CI = genx::checkFunctionCall(U, F);
+      if (!CI)
+        continue;
+
+      // Note: it is expected that all users of any function from
+      // Functions array belong to the same FG
+      const Function *Caller = CI->getFunction();
+      auto *OtherGroup = FGA->getAnyGroup(Caller);
+      IGC_ASSERT_MESSAGE(OtherGroup == this,
+                         "inconsistent function group detected!");
+      if (OtherGroup != this)
+        return false;
+    }
+  }
+  return true;
+}
+
+void FunctionGroup::print(raw_ostream &OS) const {
+  OS << "{" << getName() << "}\n";
+
+  std::vector<StringRef> FuncsNames;
+  llvm::transform(Functions, std::back_inserter(FuncsNames),
+                  [](const Function *F) { return F->getName(); });
+  // The head remains the first.
+  std::sort(std::next(FuncsNames.begin()), FuncsNames.end());
+  for (const auto &F : FuncsNames) {
+    OS << "  " << F << "\n";
+  }
+
+  for (const auto &EnItem : enumerate(Subgroups)) {
+    OS << "--SGR[" << EnItem.index() << "]: ";
+    OS << "<" << EnItem.value()->getHead()->getName() << ">\n";
+  }
+}
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void FunctionGroup::dump() const { print(dbgs()); }
+#endif // if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 
 /***********************************************************************
  * FunctionGroupAnalysis implementation
@@ -56,11 +116,6 @@ ModulePass *llvm::createFunctionGroupAnalysisPass() {
 void FunctionGroupAnalysis::clear() {
   for (auto T : TypesToProcess)
     GroupMap[T].clear();
-
-  for (auto i = begin(), e = end(); i != e; ++i)
-    delete *i;
-  for (auto i = NonMainGroups.begin(), e = NonMainGroups.end(); i != e; ++i)
-    delete *i;
 
   Groups.clear();
   NonMainGroups.clear();
@@ -140,11 +195,12 @@ void FunctionGroupAnalysis::addToFunctionGroup(FunctionGroup *FG, Function *F,
 // createFunctionGroup : create new FunctionGroup for which F is the head
 FunctionGroup *FunctionGroupAnalysis::createFunctionGroup(Function *F,
                                                           FGType Type) {
-  auto FG = new FunctionGroup(this);
+  auto *FG = new FunctionGroup(this);
+  auto FGOwner = std::unique_ptr<FunctionGroup>(FG);
   if (Type == FGType::GROUP)
-    Groups.push_back(FG);
+    Groups.push_back(std::move(FGOwner));
   else
-    NonMainGroups.push_back(FG);
+    NonMainGroups.push_back(std::move(FGOwner));
   addToFunctionGroup(FG, F, Type);
   return FG;
 }
@@ -170,481 +226,297 @@ static StringRef TypeToAttr(FunctionGroupAnalysis::FGType Type) {
   return "";
 }
 
-bool FunctionGroupAnalysis::buildGroup(CallGraph &Callees, Function *F,
-                                       FunctionGroup *curGr, FGType Type) {
-  bool result = false;
-  LLVM_DEBUG(dbgs() << "process function " << F->getName() << " from " << curGr
-                    << ", type = " << Type << "\n");
-  if (Visited.count(F) > 0) {
-    bool NeedCloning =
-        std::any_of(std::begin(TypesToProcess), std::end(TypesToProcess),
-                    [&GM = GroupMap, curGr, F](FGType CurType) {
-                      return GM[CurType].count(F) && GM[CurType][F] != curGr;
-                    });
-    if (NeedCloning && !F->hasFnAttribute(TypeToAttr(Type))) {
+static FunctionGroupAnalysis::CallGraphTy buildCallGraph(Module &M) {
+  FunctionGroupAnalysis::CallGraphTy CG;
+  std::unordered_map<Function *, std::unordered_set<Function *>> Visited;
+  for (auto &F : M) {
+    CG[&F];
+    for (auto *U : F.users()) {
+      auto *Inst = dyn_cast<Instruction>(U);
+      if (!Inst)
+        continue;
+      if (!F.empty() && Visited[Inst->getFunction()].count(&F) == 0) {
+        CG[Inst->getFunction()].push_back(&F);
+        Visited[Inst->getFunction()].insert(&F);
+      }
+      // Recursive functions must use stack.
+      if (Inst->getFunction() == &F) {
+        const bool UsesStack = vc::requiresStackCall(&F);
+        IGC_ASSERT_MESSAGE(
+            UsesStack,
+            "Found recursive function without CMStackCall attribute");
+        (void)UsesStack;
+      }
+    }
+  }
+
+  return CG;
+}
+
+// Depth-first traversal of all reachable functions from StartPoint in call
+// graph CG. Does not visit functions for which Pred(Function *) returns false.
+// Calls OnNode(Function *F) for each function F of the subgraph that is
+// traversed. Calls OnEdge(Function *F, Function *Callee) for each
+// function-callee pair of the subgraph that is traversed if both Pred(F) and
+// Pred(Callee) return true.
+template <typename CallbackOnNode, typename CallbackOnEdge,
+          typename UnaryPredicate>
+static void traverseCallGraph(const FunctionGroupAnalysis::CallGraphTy &CG,
+                              Function *StartPoint, CallbackOnNode OnNode,
+                              CallbackOnEdge OnEdge, UnaryPredicate Pred) {
+  if (!Pred(StartPoint))
+    return;
+  std::vector<Function *> Stack = {StartPoint};
+  std::unordered_set<Function *> Visited = {StartPoint};
+  while (!Stack.empty()) {
+    Function *F = Stack.back();
+    Stack.pop_back();
+    IGC_ASSERT_MESSAGE(CG.count(F), "Inconsistent call graph");
+
+    OnNode(F);
+    for (Function *Callee : CG.at(F)) {
+      if (!Pred(Callee))
+        continue;
+      OnEdge(F, Callee);
+      if (Visited.count(Callee))
+        continue;
+      Visited.insert(Callee);
+      Stack.push_back(Callee);
+    }
+  }
+}
+
+template <typename CallbackOnNode, typename UnaryPredicate>
+static void traverseCallGraphNodes(const FunctionGroupAnalysis::CallGraphTy &CG,
+                                   Function *StartPoint, CallbackOnNode OnNode,
+                                   UnaryPredicate Pred) {
+  traverseCallGraph(
+      CG, StartPoint, OnNode, [](Function *, Function *) {}, Pred);
+}
+
+template <typename CallbackOnEdge, typename UnaryPredicate>
+static void traverseCallGraphEdges(const FunctionGroupAnalysis::CallGraphTy &CG,
+                                   Function *StartPoint, CallbackOnEdge OnEdge,
+                                   UnaryPredicate Pred) {
+  traverseCallGraph(
+      CG, StartPoint, [](Function *) {}, OnEdge, Pred);
+}
+
+using FGHead = Function;
+// Maps the function to the heads of all function groups to which this function
+// belongs.
+using FuncToGroupsMapTy = std::unordered_map<Function *, std::vector<FGHead *>>;
+// Maps the original function to this function in a specific function group, it
+// can be the original function itself or its clone.
+using FuncToClonesMapTy =
+    std::unordered_map<Function *, std::unordered_map<FGHead *, Function *>>;
+
+static FuncToGroupsMapTy
+buildFuncToGroupsMap(const FunctionGroupAnalysis::CallGraphTy &CG,
+                     const std::vector<Function *> &Heads) {
+  FuncToGroupsMapTy FuncToGroupsMap;
+  for (Function *Head : Heads) {
+    traverseCallGraphNodes(
+        CG, Head,
+        [&FuncToGroupsMap, Head](Function *F) {
+          FuncToGroupsMap[F].push_back(Head);
+        },
+        // Do not process stack calls, except for heads of subgroups.
+        [Head](Function *F) { return F == Head || !vc::requiresStackCall(F); });
+  }
+  return FuncToGroupsMap;
+}
+
+// Clones each function for each function group (except for one) to which it
+// belongs. The second return value is whether the module has been changed.
+static std::pair<FuncToClonesMapTy, bool>
+cloneFunctions(const FuncToGroupsMapTy &FuncToGroupsMap) {
+  FuncToClonesMapTy FuncToClonesMap;
+  bool ModuleModified = false;
+  for (const auto &[F, FGs] : FuncToGroupsMap) {
+    IGC_ASSERT(!FGs.empty());
+    FuncToClonesMap[F][FGs.front()] = F;
+    for (Function *FG : drop_begin(FGs, 1)) {
+      ModuleModified = true;
       ValueToValueMapTy VMap;
       Function *ClonedFunc = CloneFunction(F, VMap);
-      LLVM_DEBUG(dbgs() << "Cloning: " << ClonedFunc->getName() << "\n");
-
-      result = true;
-
-      for (auto it = F->use_begin(); it != F->use_end();) {
-        Use *u = &*it++;
-        auto *CI = dyn_cast<CallInst>(u->getUser());
-        IGC_ASSERT(CI);
-        if (GroupMap[Type][CI->getFunction()] == curGr)
-          *u = ClonedFunc;
-      }
-      addToFunctionGroup(curGr, ClonedFunc, Type);
-
-      for (auto &Callee : Callees[F]) {
-        if (Callee == F)
-          continue;
-        if (genx::requiresStackCall(Callee)) {
-          LLVM_DEBUG(dbgs()
-                     << "\tDo not process next callee " << Callee->getName()
-                     << " because it's a stack call\n");
-          continue;
-        }
-        LLVM_DEBUG(dbgs() << "Next callee: " << Callee->getName() << "\n");
-        result |= buildGroup(Callees, Callee, curGr, Type);
-      }
+      FuncToClonesMap[F][FG] = ClonedFunc;
     }
-  } else if (!Visited.count(F)) {
-    Visited[F] = true;
-    // group is created either on a function with a corresponding attribute
-    // or on a root of a whole function tree that is kernel (genx_main)
-    if (F->hasFnAttribute(TypeToAttr(Type)) ||
-        F->hasFnAttribute(genx::FunctionMD::CMGenXMain)) {
-      LLVM_DEBUG(dbgs() << "Create new group of type " << Type << "\n");
-      curGr = createFunctionGroup(F, Type);
-    } else if (curGr) {
-      LLVM_DEBUG(dbgs() << "Add to group " << curGr->getHead()->getName()
-                        << " of type " << Type << "\n");
-      addToFunctionGroup(curGr, F, Type);
-    }
-    for (auto &Callee : Callees[F]) {
-      if (genx::requiresStackCall(Callee)) {
-        LLVM_DEBUG(dbgs() << "\tDo not process next callee "
-                          << Callee->getName()
-                          << " because it's a stack call\n");
-        continue;
-      }
-
-      LLVM_DEBUG(dbgs() << "Next callee: " << Callee->getName() << "\n");
-      result |= buildGroup(Callees, Callee, curGr, Type);
+    // Rename clones if the function belongs to several function groups
+    if (FGs.size() > 1) {
+      auto FuncName = F->getName();
+      for (auto [FG, ActualFunc] : FuncToClonesMap[F])
+        ActualFunc->setName(FuncName + "." + FG->getName());
     }
   }
-  LLVM_DEBUG(dbgs() << "finish processing function " << F->getName()
-                    << " on level " << Type << "\n");
-  return result;
+  return {std::move(FuncToClonesMap), ModuleModified};
 }
 
-//===----------------------------------------------------------------------===//
-// FGPassManager
+// Restores correct uses between functions clones. The CG itself is not
+// modified.
 //
-/// FGPassManager manages FPPassManagers and FunctionGroupPasses.
-/// It actually now imitates MPPassManager because there is no way
-/// to extend pass manager structure without modification of
-/// LLVM pass managers code.
-/// This pass is injected into pass manager stack instead of top-level
-/// MPPassManager when there is first time FunctionGroupPass is created.
-/// After this manager replaces MPPassManager, it handles all Module and
-/// FunctionGroup passes. This manager itself is module pass so it is
-/// actually contained in list of module passes of module pass manager
-/// as last pass that should be run. However, top-level pass manager do
-/// not know anything about this FGPassManager except that it is indirect
-/// pass manager, so it will not run it directly.
-
-namespace {
-
-class FGPassManager : public ModulePass, public IGCLLVM::PMDataManager {
-public:
-  static char ID;
-  explicit FGPassManager() : ModulePass(ID), IGCLLVM::PMDataManager() {}
-
-  /// run - Execute all of the passes scheduled for execution.  Keep track of
-  /// whether any of the passes modifies the module, and if so, return true.
-  bool runOnModule(Module &M) override;
-
-  bool doInitialization(Module &M) override;
-  bool doFinalization(Module &M) override;
-
-  /// Pass Manager itself does not invalidate any analysis info.
-  void getAnalysisUsage(AnalysisUsage &Info) const override {
-    // FGPassManager needs FunctionGroupAnalysis.
-    Info.addRequired<FunctionGroupAnalysis>();
-    Info.setPreservesAll();
+// Let's name actual clones of F and Callee in the current function group as
+// ActualF and ActualCallee. When the clones were created the uses remained the
+// same, so ActualF uses Callee. But we need to make ActualF use ActualCallee,
+// and so for each function-callee pair in the original CG and for each FG.
+// --------------------------------------
+// | Original CG |    Functions uses    |
+// --------------------------------------
+// |             |                      |
+// |   Callee    | Callee  ActualCallee |
+// |     ^       |      ^      ^        |
+// |     |       |       \     |        |
+// |     |       |        X    |        |
+// |     |       |         \   |        |
+// |     F       |         ActualF      |
+// |             |                      |
+// --------------------------------------
+// Callee may coincide with ActualCallee.
+static void recoverEdges(const FunctionGroupAnalysis::CallGraphTy &CG,
+                         const std::vector<Function *> &Heads,
+                         const FuncToClonesMapTy &FuncToClonesMap) {
+  for (Function *Head : Heads) {
+    // The original graph is traversed, but edges are constructed between the
+    // actual functions of the current function group.
+    traverseCallGraphEdges(
+        CG, Head,
+        [&FuncToClonesMap, Head](Function *F, Function *Callee) {
+          Function *ActualF = FuncToClonesMap.at(F).at(Head);
+          Function *ActualCallee = FuncToClonesMap.at(Callee).at(Head);
+          IGCLLVM::replaceUsesWithIf(Callee, ActualCallee, [ActualF](Use &U) {
+            auto *CI = dyn_cast<CallInst>(U.getUser());
+            IGC_ASSERT(CI);
+            // Callee use should be replaced only if it is called from ActualF,
+            // i.e. in the current function group.
+            return CI->getFunction() == ActualF;
+          });
+        },
+        // Do not process stack calls, except for heads of subgroups.
+        [Head](Function *F) { return F == Head || !vc::requiresStackCall(F); });
   }
-
-  StringRef getPassName() const override {
-    return "FunctionGroup Pass Manager";
-  }
-
-  PMDataManager *getAsPMDataManager() override { return this; }
-  Pass *getAsPass() override { return this; }
-
-  // Print passes managed by this manager
-  void dumpPassStructure(unsigned Offset) override {
-    errs().indent(Offset * 2) << "FunctionGroup Pass Manager\n";
-    for (unsigned Index = 0; Index < getNumContainedPasses(); ++Index) {
-      Pass *P = getContainedPass(Index);
-      unsigned DumpOffset = Offset + 1;
-      // Pretend that there is no FGPassManager when we need to dump
-      // module pass indentation.
-      if (isModulePass(P))
-        DumpOffset -= 1;
-      P->dumpPassStructure(DumpOffset);
-      dumpLastUses(P, DumpOffset);
-    }
-  }
-
-  Pass *getContainedPass(unsigned N) {
-    IGC_ASSERT_MESSAGE(N < PassVector.size(), "Pass number out of range!");
-    return static_cast<Pass *>(PassVector[N]);
-  }
-
-  PassManagerType getPassManagerType() const override {
-    return PMT_ModulePassManager;
-  }
-
-private:
-  bool runPassesOnFunctionGroup(unsigned Begin, unsigned End, FunctionGroup &FG);
-  bool runPassOnFunctionGroup(Pass *P, FunctionGroup &FG);
-  bool doFGInitialization(unsigned Begin, unsigned End, FunctionGroupAnalysis &FGA);
-  bool doFGFinalization(unsigned Begin, unsigned End, FunctionGroupAnalysis &FGA);
-  bool runFGPassSequence(unsigned &Pass);
-  bool runModulePassSequence(unsigned &Pass, Module &M);
-};
-
-} // end anonymous namespace.
-
-char FGPassManager::ID = 0;
-
-bool FGPassManager::runPassOnFunctionGroup(Pass *P, FunctionGroup &FG) {
-  bool Changed = false;
-  llvm::PMDataManager *PM = P->getAsPMDataManager();
-
-  if (!PM) {
-    FunctionGroupPass *CGSP = (FunctionGroupPass *)P;
-    {
-      TimeRegion PassTimer(getPassTimer(CGSP));
-      Changed = CGSP->runOnFunctionGroup(FG);
-    }
-    return Changed;
-  }
-
-  // TODO: there may be also SCC pass manager.
-  IGC_ASSERT_MESSAGE(PM->getPassManagerType() == PMT_FunctionPassManager,
-    "Invalid FGPassManager member");
-  FPPassManager *FPP = (FPPassManager *)P;
-
-  // Run pass P on all functions in the current FunctionGroup.
-  for (auto &F : FG) {
-    dumpPassInfo(P, EXECUTION_MSG, ON_FUNCTION_MSG, F->getName());
-    {
-      TimeRegion PassTimer(getPassTimer(FPP));
-      Changed |= FPP->runOnFunction(*F);
-    }
-    F->getContext().yield();
-  }
-  return Changed;
 }
 
+// Makes each function of the module belong to only one function group. If a
+// function belongs to several function groups, it is copied.
+bool FunctionGroupAnalysis::legalizeGroups() {
+  const CallGraphTy CG = buildCallGraph(*M);
 
-/// RunPassesOnFunctionGroup -  Execute sequential passes of pass manager
-/// on the specified FunctionGroup
-bool FGPassManager::runPassesOnFunctionGroup(unsigned Begin, unsigned End,
-                                             FunctionGroup &FG) {
-  bool Changed = false;
+  std::vector<Function *> Heads;
+  auto HeadsRange =
+      make_filter_range(*M, [](Function &F) { return genx::fg::isHead(F); });
+  transform(HeadsRange, std::back_inserter(Heads),
+            [](Function &F) { return &F; });
 
-  // Run selected passes on current FunctionGroup.
-  for (unsigned PassNo = Begin; PassNo != End; ++PassNo) {
-    Pass *P = getContainedPass(PassNo);
-    dumpRequiredSet(P);
-
-    initializeAnalysisImpl(P);
-
-    // Actually run this pass on the current FunctionGroup.
-    Changed |= runPassOnFunctionGroup(P, FG);
-    if (Changed)
-      dumpPassInfo(P, MODIFICATION_MSG, ON_MODULE_MSG, "");
-    dumpPreservedSet(P);
-
-    verifyPreservedAnalysis(P);
-    removeNotPreservedAnalysis(P);
-    recordAvailableAnalysis(P);
-    removeDeadPasses(P, "", ON_MODULE_MSG);
-  }
-
-  return Changed;
-}
-
-/// Initialize sequential FG passes
-bool FGPassManager::doFGInitialization(unsigned Begin, unsigned End,
-                                       FunctionGroupAnalysis &FGA) {
-  bool Changed = false;
-
-  for (unsigned i = Begin; i != End; ++i) {
-    if (llvm::PMDataManager *PM = getContainedPass(i)->getAsPMDataManager()) {
-      // TODO: SCC PassManager?
-      IGC_ASSERT_MESSAGE(PM->getPassManagerType() == PMT_FunctionPassManager,
-        "Invalid FGPassManager member");
-      IGC_ASSERT(FGA.getModule());
-      Changed |= ((FPPassManager*)PM)->doInitialization(*FGA.getModule());
-    } else {
-      Changed |=
-          ((FunctionGroupPass *)getContainedPass(i))->doInitialization(FGA);
-    }
-  }
-
-  return Changed;
-}
-
-/// Finalize sequential FG passes
-bool FGPassManager::doFGFinalization(unsigned Begin, unsigned End,
-                                     FunctionGroupAnalysis &FGA) {
-  bool Changed = false;
-
-  for (int i = End - 1; i >= static_cast<int>(Begin); --i) {
-    if (llvm::PMDataManager *PM = getContainedPass(i)->getAsPMDataManager()) {
-      // TODO: SCC PassManager?
-      IGC_ASSERT_MESSAGE(PM->getPassManagerType() == PMT_FunctionPassManager,
-        "Invalid FGPassManager member");
-      Changed |= ((FPPassManager*)PM)->doFinalization(*FGA.getModule());
-    } else {
-      Changed |=
-          ((FunctionGroupPass *)getContainedPass(i))->doFinalization(FGA);
-    }
-  }
-
-  return Changed;
-}
-
-bool FGPassManager::runFGPassSequence(unsigned &Pass) {
-  const unsigned BeginPass = Pass;
-  const unsigned NumPasses = getNumContainedPasses();
-  while (Pass < NumPasses && !isModulePass(getContainedPass(Pass)))
-    ++Pass;
-
-  // Function group analysis may be invalidated by previous
-  // module passes so we will need to query it every time we
-  // execute sequence of passes.
-  FunctionGroupAnalysis &FGA = getAnalysis<FunctionGroupAnalysis>();
-  if (!FGA.getModule()) {
-#ifndef NDEBUG
-    llvm::errs() << "warning, trying to access stale FGA!\n";
-#endif
+  auto FuncToGroupsMap = buildFuncToGroupsMap(CG, Heads);
+  auto [FuncToClonesMap, ModuleModified] = cloneFunctions(FuncToGroupsMap);
+  if (!ModuleModified)
     return false;
-  }
-  bool Changed = false;
-
-  Changed |= doFGInitialization(BeginPass, Pass, FGA);
-  for (auto *FG : FGA.AllGroups())
-    Changed |= runPassesOnFunctionGroup(BeginPass, Pass, *FG);
-  Changed |= doFGFinalization(BeginPass, Pass, FGA);
-
-  return Changed;
+  recoverEdges(CG, Heads, FuncToClonesMap);
+  return true;
 }
 
-bool FGPassManager::runModulePassSequence(unsigned &Pass, Module &M) {
-  const unsigned BeginPass = Pass;
-  const unsigned NumPasses = getNumContainedPasses();
-  while (Pass < NumPasses && isModulePass(getContainedPass(Pass)))
-    ++Pass;
+void FunctionGroupAnalysis::buildGroup(const CallGraphTy &CG, Function *Head,
+                                       FGType Type) {
+  FunctionGroup *FG = createFunctionGroup(Head, Type);
+  traverseCallGraphNodes(
+      CG, Head,
+      [this, Head, FG, Type](Function *F) {
+        if (F == Head)
+          return;
+        addToFunctionGroup(FG, F, Type);
+      },
+      [Head](Function *F) { return F == Head || !vc::requiresStackCall(F); });
+}
 
-  bool Changed = false;
+bool FunctionGroupAnalysis::verify() const {
+  return llvm::all_of(AllGroups(), [](const auto &GR) { return GR->verify(); });
+}
 
-  // Copied from MPPassManager in LegacyPassManager.cpp.
-  unsigned InstrCount, ModuleCount = 0;
-  StringMap<std::pair<unsigned, unsigned>> FunctionToInstrCount;
-  bool EmitICRemark = M.shouldEmitInstrCountChangedRemark();
-  // Collect the initial size of the module.
-  if (EmitICRemark) {
-    InstrCount = initSizeRemarkInfo(M, FunctionToInstrCount);
-    ModuleCount = InstrCount;
+// Fills in Groups and NonMainGroups. It is assumed that all function groups
+// have already been legalized, i.e. no function of a module is called from
+// two different heads.
+void FunctionGroupAnalysis::buildGroups() {
+  const CallGraphTy CG = buildCallGraph(*M);
+  for (auto T : TypesToProcess) {
+    for (auto &F : *M) {
+      if (F.isDeclaration())
+        continue;
+      if (!genx::fg::isHead(F))
+        continue;
+      // Do not process kernels at subgroup level.
+      if (genx::fg::isGroupHead(F) &&
+          T == FunctionGroupAnalysis::FGType::SUBGROUP)
+        continue;
+      // Do not process stack calls at group level.
+      if (genx::fg::isSubGroupHead(F) &&
+          T == FunctionGroupAnalysis::FGType::GROUP)
+        continue;
+      buildGroup(CG, &F, T);
+    }
   }
 
-  for (unsigned Index = BeginPass; Index < Pass; ++Index) {
-    auto *MP = static_cast<ModulePass *>(getContainedPass(Index));
-    bool LocalChanged = false;
+  for (auto SubFG : subgroups()) {
+    const Function *Head = SubFG->getHead();
+    IGC_ASSERT(Head);
 
-    dumpPassInfo(MP, EXECUTION_MSG, ON_MODULE_MSG, M.getModuleIdentifier());
-    dumpRequiredSet(MP);
+    for (auto U : Head->users()) {
+      const auto *UserInst = dyn_cast<CallInst>(U);
+      if (!UserInst)
+        continue;
 
-    initializeAnalysisImpl(MP);
+      const Function *UserFunction = UserInst->getFunction();
+      IGC_ASSERT(UserFunction);
+      FunctionGroup *UserFG = getAnyGroup(UserFunction);
+      IGC_ASSERT(UserFG);
 
-    {
-      PassManagerPrettyStackEntry X(MP, M);
-      TimeRegion PassTimer(getPassTimer(MP));
+      UserFG->addSubgroup(SubFG);
+    }
+  }
 
-      LocalChanged |= MP->runOnModule(M);
-      if (EmitICRemark) {
-        // Update the size of the module.
-        ModuleCount = M.getInstructionCount();
-        if (ModuleCount != InstrCount) {
-          int64_t Delta = static_cast<int64_t>(ModuleCount) -
-            static_cast<int64_t>(InstrCount);
-          emitInstrCountChangedRemark(MP, M, Delta, InstrCount,
-            FunctionToInstrCount);
-          InstrCount = ModuleCount;
-        }
+  IGC_ASSERT(verify());
+}
+
+void FunctionGroupAnalysis::print(raw_ostream &OS, const Module *) const {
+  OS << "Number of Groups = " << Groups.size() << "\n";
+  for (const auto &X : enumerate(Groups)) {
+    OS << "GR[" << X.index() << "] = <\n";
+    X.value()->print(OS);
+    OS << ">\n";
+  }
+  OS << "Number of SubGroups = " << NonMainGroups.size() << "\n";
+  for (const auto &X : enumerate(NonMainGroups)) {
+    OS << "SGR[" << X.index() << "] = <\n";
+    X.value()->print(OS);
+    OS << ">\n";
+  }
+  if (!PrintFunctionsUsers)
+    return;
+
+  for (auto T : TypesToProcess) {
+    std::map<StringRef, std::set<StringRef>> FuncUsers;
+    for (auto [F, FG] : GroupMap[T]) {
+      FuncUsers[F->getName()];
+      for (auto *U : F->users()) {
+        auto *CI = genx::checkFunctionCall(U, F);
+        if (!CI)
+          continue;
+        const Function *Caller = CI->getFunction();
+        FuncUsers[F->getName()].insert(Caller->getName());
       }
     }
-
-    Changed |= LocalChanged;
-    if (LocalChanged)
-      dumpPassInfo(MP, MODIFICATION_MSG, ON_MODULE_MSG,
-        M.getModuleIdentifier());
-    dumpPreservedSet(MP);
-    dumpUsedSet(MP);
-
-    verifyPreservedAnalysis(MP);
-    removeNotPreservedAnalysis(MP);
-    recordAvailableAnalysis(MP);
-    removeDeadPasses(MP, M.getModuleIdentifier(), ON_MODULE_MSG);
-  }
-
-  return Changed;
-}
-
-/// run - Execute all of the passes scheduled for execution.  Keep track of
-/// whether any of the passes modifies the module, and if so, return true.
-bool FGPassManager::runOnModule(Module &M) {
-  bool Changed = false;
-
-  unsigned CurPass = 0;
-  unsigned NumPasses = getNumContainedPasses();
-  while (CurPass != NumPasses) {
-    // We will always have chain of fg passes followed by
-    // module passes repeating until there are no passes.
-    Changed |= runFGPassSequence(CurPass);
-    Changed |= runModulePassSequence(CurPass, M);
-  }
-
-  return Changed;
-}
-
-bool FGPassManager::doInitialization(Module &M) {
-  bool Changed = false;
-
-  // Initialize module passes
-  for (unsigned Index = 0; Index < getNumContainedPasses(); ++Index) {
-    auto *P = getContainedPass(Index);
-    if (isModulePass(P))
-      Changed |= P->doInitialization(M);
-  }
-
-  return Changed;
-}
-
-bool FGPassManager::doFinalization(Module &M) {
-  bool Changed = false;
-
-  // Finalize module passes
-  for (int Index = getNumContainedPasses() - 1; Index >= 0; --Index) {
-    auto *P = getContainedPass(Index);
-    if (isModulePass(P))
-      Changed |= P->doFinalization(M);
-  }
-
-  return Changed;
-}
-
-//===----------------------------------------------------------------------===//
-// FunctionGroupPass Implementation
-//===----------------------------------------------------------------------===//
-
-/// Assign pass manager to manage this pass.
-void FunctionGroupPass::assignPassManager(PMStack &PMS,
-                                          PassManagerType PreferredType) {
-  // Find module pass manager.
-  while (!PMS.empty() &&
-         PMS.top()->getPassManagerType() > PMT_ModulePassManager)
-    PMS.pop();
-
-  IGC_ASSERT_MESSAGE(!PMS.empty(), "Unable to handle FunctionGroup Pass");
-  FGPassManager *GFP;
-
-  // Check whether this ModulePassManager is our injected function
-  // group pass manager. If not, replace old module pass manager
-  // with one for function groups.
-  auto *PM = PMS.top();
-  IGC_ASSERT_MESSAGE(PM->getPassManagerType() == PMT_ModulePassManager,
-    "Bad pass manager type for function group pass manager");
-  if (PM->getAsPass()->getPassID() == &FGPassManager::ID)
-    GFP = static_cast<FGPassManager *>(PM);
-  else {
-    // Create new FunctionGroup Pass Manager if it does not exist.
-
-    // [1] Create new FunctionGroup Pass Manager
-    GFP = new FGPassManager();
-
-    // [2] Set up new manager's top level manager
-    PMTopLevelManager *TPM = PM->getTopLevelManager();
-    TPM->addIndirectPassManager(GFP);
-    GFP->setTopLevelManager(TPM);
-
-    // [3] Assign manager to manage this new manager. This should not create
-    // and push new managers into PMS
-    TPM->schedulePass(GFP);
-    IGC_ASSERT_MESSAGE(PMS.top() == PM, "Pass manager unexpectedly changed");
-
-    // [4] Steal analysis info from module pass manager.
-    *GFP->getAvailableAnalysis() = std::move(*PM->getAvailableAnalysis());
-
-    // [5] Replace module pass manager with function group pass manager.
-    PMS.pop();
-    PMS.push(GFP);
-  }
-
-  GFP->add(this);
-}
-
-/// getAnalysisUsage - For this class, we declare that we require and preserve
-/// FunctionGroupAnalysis.  If the derived class implements this method, it
-/// should always explicitly call the implementation here.
-void FunctionGroupPass::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<FunctionGroupAnalysis>();
-  AU.addPreserved<FunctionGroupAnalysis>();
-}
-
-//===----------------------------------------------------------------------===//
-// PrintFunctionGroupPass Implementation
-//===----------------------------------------------------------------------===//
-
-namespace {
-/// PrintFunctionGroupPass - Print a FunctionGroup
-///
-class PrintFunctionGroupPass : public FunctionGroupPass {
-  std::string Banner;
-  raw_ostream &Out; // raw_ostream to print on.
-public:
-  static char ID;
-  PrintFunctionGroupPass(const std::string &B, raw_ostream &o)
-      : FunctionGroupPass(ID), Banner(B), Out(o) {}
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesAll();
-  }
-
-  bool runOnFunctionGroup(FunctionGroup &FG) override {
-    Out << Banner;
-    for (auto I = FG.begin(), E = FG.end(); I != E; ++I) {
-      Function *F = *I;
-      Out << Banner << static_cast<Value &>(*F);
+    for (const auto &[FuncName, UsersNames] : FuncUsers) {
+      OS << "Users of " << FuncName << ":";
+      for (const auto &UserName : UsersNames) {
+        OS << " " << UserName;
+      }
+      OS << "\n";
     }
-    return false;
   }
-};
-} // end anonymous namespace.
-
-char PrintFunctionGroupPass::ID = 0;
-
-Pass *FunctionGroupPass::createPrinterPass(raw_ostream &O,
-                                           const std::string &Banner) const {
-  return new PrintFunctionGroupPass(Banner, O);
 }
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void FunctionGroupAnalysis::dump() const { print(dbgs(), nullptr); }
+#endif // if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 
 //===----------------------------------------------------------------------===//
 //  DominatorTreeGroupWrapperPass Implementation
@@ -654,10 +526,10 @@ Pass *FunctionGroupPass::createPrinterPass(raw_ostream &O,
 // per Function in a FunctionGroup.
 //
 //===----------------------------------------------------------------------===//
-char DominatorTreeGroupWrapperPass::ID = 0;
-INITIALIZE_PASS_BEGIN(DominatorTreeGroupWrapperPass, "groupdomtree",
-                      "Group Dominator Tree Construction", true, true)
-INITIALIZE_PASS_END(DominatorTreeGroupWrapperPass, "groupdomtree",
+INITIALIZE_PASS_BEGIN(DominatorTreeGroupWrapperPassWrapper,
+                      "groupdomtreeWrapper",
+                      "Group Dominator Tree Construction Wrapper", true, true)
+INITIALIZE_PASS_END(DominatorTreeGroupWrapperPassWrapper, "groupdomtreeWrapper",
                     "Group Dominator Tree Construction", true, true)
 
 void DominatorTreeGroupWrapperPass::releaseMemory() {
@@ -682,7 +554,7 @@ void DominatorTreeGroupWrapperPass::verifyAnalysis() const {
 }
 
 void DominatorTreeGroupWrapperPass::print(raw_ostream &OS,
-                                          const Module *) const {
+                                          const FunctionGroup *) const {
   for (auto i = DTs.begin(), e = DTs.end(); i != e; ++i)
     i->second->print(OS);
 }
@@ -695,12 +567,11 @@ void DominatorTreeGroupWrapperPass::print(raw_ostream &OS,
 // per Function in a FunctionGroup.
 //
 //===----------------------------------------------------------------------===//
-char LoopInfoGroupWrapperPass::ID = 0;
-INITIALIZE_PASS_BEGIN(LoopInfoGroupWrapperPass, "grouploopinfo",
-                      "Group Loop Info Construction", true, true)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
-INITIALIZE_PASS_END(LoopInfoGroupWrapperPass, "grouploopinfo",
-                    "Group Loop Info Construction", true, true)
+INITIALIZE_PASS_BEGIN(LoopInfoGroupWrapperPassWrapper, "grouploopinfoWrapper",
+                      "Group Loop Info Construction Wrapper", true, true)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPassWrapper)
+INITIALIZE_PASS_END(LoopInfoGroupWrapperPassWrapper, "grouploopinfoWrapper",
+                    "Group Loop Info Construction Wrapper", true, true)
 
 void LoopInfoGroupWrapperPass::releaseMemory() {
   for (auto i = LIs.begin(), e = LIs.end(); i != e; ++i)
@@ -725,7 +596,8 @@ void LoopInfoGroupWrapperPass::verifyAnalysis() const {
     i->second->verify(*DTs.getDomTree(i->first));
 }
 
-void LoopInfoGroupWrapperPass::print(raw_ostream &OS, const Module *) const {
+void LoopInfoGroupWrapperPass::print(raw_ostream &OS,
+                                     const FunctionGroup *) const {
   for (auto i = LIs.begin(), e = LIs.end(); i != e; ++i)
     i->second->print(OS);
 }

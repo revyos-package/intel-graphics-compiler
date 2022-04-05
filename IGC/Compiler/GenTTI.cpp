@@ -71,7 +71,7 @@ namespace llvm {
 
         GenISAIntrinsic::ID ID = inst->getIntrinsicID();
         if (/*ID == llvm::GenISAIntrinsic::GenISA_typedwrite ||
-            ID == llvm::GenISAIntrinsic::GenISA_typedread ||*/
+        ID == llvm::GenISAIntrinsic::GenISA_typedread ||*/
             ID == llvm::GenISAIntrinsic::GenISA_URBRead ||
             isURBWriteIntrinsic(inst) ||
             ID == llvm::GenISAIntrinsic::GenISA_ldstructured)
@@ -89,7 +89,7 @@ namespace llvm {
             llvm::BasicBlock* BB = const_cast<llvm::BasicBlock*>(&*BBI);
             for (auto II = BB->begin(); II != BB->end(); II++)
             {
-                if (llvm::GenIntrinsicInst * pIntrinsic = llvm::dyn_cast<llvm::GenIntrinsicInst>(II))
+                if (llvm::GenIntrinsicInst* pIntrinsic = llvm::dyn_cast<llvm::GenIntrinsicInst>(II))
                 {
                     if (CheckSendMsg && isSendMessage(pIntrinsic))
                     {
@@ -106,11 +106,59 @@ namespace llvm {
         return ADDRESS_SPACE_PRIVATE;
     }
 
+    /// Returns true if load instruction source address calculation
+    /// depends only on base address, constants, and loop induction variables
+    bool canReplaceWithRegisters(const LoadInst* LI, const Loop* L, ScalarEvolution& SE) {
+        auto Pointer = LI->getPointerOperand();
+        auto Base = LI->getPointerOperand()->stripInBoundsOffsets();
+
+        // Start with load source address
+        SmallVector<const Value*, 16> WorkList = { Pointer };
+
+        // Traverse the source address calculation dependency tree
+        while (!WorkList.empty()) {
+            auto V = WorkList.pop_back_val();
+
+            if (V == Base || isa<Constant>(V)) {
+                // Do nothing if we meet base address or some constant
+            }
+            else if (isa<CallBase>(V)) {
+                // Stop at calls
+                return false;
+            }
+            else if (auto U = dyn_cast<User>(V)) {
+                // In case of Instuction/Operator append
+                // all the operands to the work list,
+                // skip PHI nodes to prevent infinite while-loop
+                for (unsigned i = 0; i < U->getNumOperands(); ++i) {
+                    auto O = U->getOperand(i);
+                    if (auto P = dyn_cast<PHINode>(O)) {
+                        if (!L->isAuxiliaryInductionVariable(*P, SE)) {
+                            // Stop at non-auxilary IV
+                            return false;
+                        }
+                    }
+                    else
+                        WorkList.push_back(O);
+                }
+            }
+            else {
+                // Stop if we meet something apart from
+                // base address, constant value, IV
+                return false;
+            }
+        }
+
+        // If nothing was found above, consider load instruction source
+        // being a candidate to be replaced by registers
+        return true;
+    }
+
     void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop* L,
 #if LLVM_VERSION_MAJOR >= 7
-        ScalarEvolution & SE,
+        ScalarEvolution& SE,
 #endif
-        TTI::UnrollingPreferences & UP)
+        TTI::UnrollingPreferences& UP)
     {
         unsigned LoopUnrollThreshold = ctx->m_DriverInfo.GetLoopUnrollThreshold();
 
@@ -118,6 +166,17 @@ namespace llvm {
         if (IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold) != 0)
         {
             LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
+        }
+        else
+        {
+            if (ctx->type == ShaderType::COMPUTE_SHADER && ctx->getModuleMetaData()->csInfo.SetLoopUnrollThreshold > 0)
+            {
+                LoopUnrollThreshold = ctx->getModuleMetaData()->csInfo.SetLoopUnrollThreshold;
+            }
+            else if (ctx->type == ShaderType::PIXEL_SHADER && ctx->getModuleMetaData()->compOpt.SetLoopUnrollThreshold > 0)
+            {
+                LoopUnrollThreshold = ctx->getModuleMetaData()->compOpt.SetLoopUnrollThreshold;
+            }
         }
         unsigned totalInstCountInShader = countTotalInstructions(L->getBlocks()[0]->getParent());
         uint32_t registerPressureEst = (uint32_t)(IGC_GET_FLAG_VALUE(SetRegisterPressureThresholdForLoopUnroll) * (ctx->getNumGRFPerThread() / 128.0));
@@ -131,16 +190,59 @@ namespace llvm {
             UP.PartialThreshold = LoopUnrollThreshold;
             UP.Partial = true;
         }
-        else  // for high registry pressure shaders, limit the unrolling to small loops and only fully unroll
+        else // for high registry pressure shaders, limit the unrolling to small loops and only fully unroll
         {
-            if(IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure) != 0)
+            if (IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure) != 0)
                 UP.Threshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure);
             else
                 UP.Threshold = 200;
         }
 
+        unsigned MaxTripCount = SE.getSmallConstantMaxTripCount(L);
+        const unsigned MaxTripCountToUseUpperBound = 4;
+        if (MaxTripCount && MaxTripCount <= MaxTripCountToUseUpperBound) {
+            UP.UpperBound = true;
+            UP.Force = true;
+        }
+
+        const unsigned MaxTripCountToUseUpperBoundForLoopWithLoads = 16;
+        if (MaxTripCount && MaxTripCount <= MaxTripCountToUseUpperBoundForLoopWithLoads) {
+            // Check if loop contains LoadInst from an array
+            // that can potentially be replaced by registers
+
+            // Group all load instructions by base address
+            // of the source posinter
+            DenseMap<Value*, SmallSet<LoadInst*, 4>> LoadInstructions;
+            for (auto BB : L->blocks()) {
+                for (auto& I : *BB) {
+                    if (auto LI = dyn_cast<LoadInst>(&I)) {
+                        auto Base = LI->getPointerOperand()->stripInBoundsOffsets();
+                        if (isa<AllocaInst>(Base)) {
+                            auto LIIterator = LoadInstructions.find(Base);
+                            if (LIIterator == LoadInstructions.end())
+                                LIIterator = LoadInstructions.insert(std::make_pair(Base, SmallSet<LoadInst*, 4>())).first;
+                            LIIterator->second.insert(LI);
+                        }
+                    }
+                }
+            }
+
+            // Find at least one base address, such that all loads
+            // from it can be replaced by registers
+            for (auto LIIterator : LoadInstructions) {
+                bool Found = true;
+                for (auto LI : LIIterator.second)
+                    Found &= canReplaceWithRegisters(LI, L, SE);
+                if (Found) {
+                    UP.UpperBound = true;
+                    UP.Force = true;
+                    break;
+                }
+            }
+        }
+
 #if LLVM_VERSION_MAJOR == 4
-        ScalarEvolution * SE = &dummyPass->getAnalysisIfAvailable<ScalarEvolutionWrapperPass>()->getSE();
+        ScalarEvolution* SE = &dummyPass->getAnalysisIfAvailable<ScalarEvolutionWrapperPass>()->getSE();
         if (!SE)
             return;
 #endif
@@ -157,7 +259,7 @@ namespace llvm {
         if (ExitingBlock) {
             if (UP.Partial) {
                 IGCLLVM::TerminatorInst* Term = ExitingBlock->getTerminator();
-                if (BranchInst * BI = dyn_cast<BranchInst>(Term))
+                if (BranchInst* BI = dyn_cast<BranchInst>(Term))
                 {
                     if (dyn_cast<FCmpInst>(BI->getCondition()))
                     {
@@ -295,7 +397,7 @@ namespace llvm {
 
         for (I = instructionList.begin(); I != instructionList.end(); I++)
         {
-            if (llvm::GenIntrinsicInst * pIntrinsic = llvm::dyn_cast<llvm::GenIntrinsicInst>(I))
+            if (llvm::GenIntrinsicInst* pIntrinsic = llvm::dyn_cast<llvm::GenIntrinsicInst>(I))
             {
                 if (isSendMessage(pIntrinsic))
                 {
@@ -307,8 +409,8 @@ namespace llvm {
         unsigned int estimateUnrolledInstCount = (instCount + sendMessage * 4) * TripCount;
         unsigned int unrollLimitInstCount = LoopUnrollThreshold > totalInstCountInShader ? LoopUnrollThreshold - totalInstCountInShader : 0;
         bool limitUnrolling = (estimateUnrolledInstCount > unrollLimitInstCount) ||
-                              (TripCount > unrollLimitInstCount) ||
-                              (instCount + sendMessage * 4 > unrollLimitInstCount);
+            (TripCount > unrollLimitInstCount) ||
+            (instCount + sendMessage * 4 > unrollLimitInstCount);
 
         // if the loop doesn't have sample, skip the unrolling parameter change
         if (!sendMessage)
@@ -349,7 +451,7 @@ namespace llvm {
         // The following is only available and required from LLVM 3.7+.
         UP.AllowExpensiveTripCount = true;
 
-        if (MDNode * LoopID = L->getLoopID())
+        if (MDNode* LoopID = L->getLoopID())
         {
             const llvm::StringRef maxIterMetadataNames = "spv.loop.iterations.max";
 #if LLVM_VERSION_MAJOR < 11
@@ -357,9 +459,9 @@ namespace llvm {
 #endif
             for (unsigned i = 0; i < LoopID->getNumOperands(); ++i)
             {
-                if (MDNode * MD = llvm::dyn_cast<MDNode>(LoopID->getOperand(i)))
+                if (MDNode* MD = llvm::dyn_cast<MDNode>(LoopID->getOperand(i)))
                 {
-                    if (MDString * S = llvm::dyn_cast<MDString>(MD->getOperand(0)))
+                    if (MDString* S = llvm::dyn_cast<MDString>(MD->getOperand(0)))
                     {
                         if (maxIterMetadataNames.equals(S->getString()))
                         {
@@ -381,21 +483,21 @@ namespace llvm {
     }
 
 #if LLVM_VERSION_MAJOR >= 11
-// [LLVM-UPGRADE] Peeling information was separated
-// https://github.com/llvm/llvm-project/commit/e541e1b757237172c247904b670c9894d6b3759d
+    // [LLVM-UPGRADE] Peeling information was separated
+    // https://github.com/llvm/llvm-project/commit/e541e1b757237172c247904b670c9894d6b3759d
 
-        void GenIntrinsicsTTIImpl::getPeelingPreferences(Loop* L, ScalarEvolution& SE,
-                                  llvm::TargetTransformInfo::PeelingPreferences& PP)
-       {
-        if (MDNode * LoopID = L->getLoopID())
+    void GenIntrinsicsTTIImpl::getPeelingPreferences(Loop* L, ScalarEvolution& SE,
+        llvm::TargetTransformInfo::PeelingPreferences& PP)
+    {
+        if (MDNode* LoopID = L->getLoopID())
         {
             const llvm::StringRef peelCountMetadataNames = "spv.loop.peel.count";
 
             for (unsigned i = 0; i < LoopID->getNumOperands(); ++i)
             {
-                if (MDNode * MD = llvm::dyn_cast<MDNode>(LoopID->getOperand(i)))
+                if (MDNode* MD = llvm::dyn_cast<MDNode>(LoopID->getOperand(i)))
                 {
-                    if (MDString * S = llvm::dyn_cast<MDString>(MD->getOperand(0)))
+                    if (MDString* S = llvm::dyn_cast<MDString>(MD->getOperand(0)))
                     {
                         if (peelCountMetadataNames.equals(S->getString()))
                         {
@@ -408,12 +510,12 @@ namespace llvm {
             }
         }
 
-       }
+    }
 #endif
 
     bool GenIntrinsicsTTIImpl::isProfitableToHoist(Instruction* I)
     {
-        if (auto * CI = dyn_cast<CallInst>(I))
+        if (auto* CI = dyn_cast<CallInst>(I))
         {
             if (CI->isConvergent() &&
 #if LLVM_VERSION_MAJOR >= 7
@@ -432,7 +534,7 @@ namespace llvm {
 #if LLVM_VERSION_MAJOR <= 10
     unsigned GenIntrinsicsTTIImpl::getCallCost(const Function* F, ArrayRef<const Value*> Arguments
 #if LLVM_VERSION_MAJOR >= 9
-        , const User * U
+        , const User* U
 #endif
     ) {
         IGC::CodeGenContext* CGC = this->ctx;
@@ -458,37 +560,37 @@ namespace llvm {
         );
     }
 #else
-  // [LLVM-UPGRADE] moved from getCallCost to getUserCost
-  // https://github.com/llvm/llvm-project/commit/2641a19981e71c887bece92074e00d1af3e716c9#diff-dd4bd65dc55d754674d9a945a0d22911
+    // [LLVM-UPGRADE] moved from getCallCost to getUserCost
+    // https://github.com/llvm/llvm-project/commit/2641a19981e71c887bece92074e00d1af3e716c9#diff-dd4bd65dc55d754674d9a945a0d22911
 
-#if LLVM_VERSION_MAJOR <= 12  
-  int GenIntrinsicsTTIImpl::getUserCost(const User *U, ArrayRef<const Value *> Operands, TTI::TargetCostKind CostKind)
+#if LLVM_VERSION_MAJOR <= 12
+    int GenIntrinsicsTTIImpl::getUserCost(const User* U, ArrayRef<const Value*> Operands, TTI::TargetCostKind CostKind)
 #else
-  llvm::InstructionCost GenIntrinsicsTTIImpl::getUserCost(const User* U, ArrayRef<const Value*> Operands, TTI::TargetCostKind CostKind)
+    llvm::InstructionCost GenIntrinsicsTTIImpl::getUserCost(const User* U, ArrayRef<const Value*> Operands, TTI::TargetCostKind CostKind)
 #endif
-  {
-      const Function* F = dyn_cast<Function>(U);
-      if(F != nullptr)
-      {
-       IGC::CodeGenContext* CGC = this->ctx;
-        if (!CGC->enableFunctionCall() && !GenISAIntrinsic::isIntrinsic(F) &&
-            !F->isIntrinsic()) {
-            // If subroutine call is not enabled but we have function call. They
-            // are not inlined. e.g. due to two-phase inlining. Return function
-            // size instead of to avoid under-estimating the cost of function call.
-            //
-            // FIXME: We need to collect the cost following calling graph. However,
-            // as LLVM's ininer only support bottom-up inlining currently. That's
-            // not a big issue so far.
-            //
-            // FIXME: We also need to consider the case where sub-routine call is
-            // enabled.
-            unsigned FuncSize = countTotalInstructions(F, false);
-            return TargetTransformInfo::TCC_Basic * FuncSize;
+    {
+        const Function* F = dyn_cast<Function>(U);
+        if (F != nullptr)
+        {
+            IGC::CodeGenContext* CGC = this->ctx;
+            if (!CGC->enableFunctionCall() && !GenISAIntrinsic::isIntrinsic(F) &&
+                !F->isIntrinsic()) {
+                // If subroutine call is not enabled but we have function call. They
+                // are not inlined. e.g. due to two-phase inlining. Return function
+                // size instead of to avoid under-estimating the cost of function call.
+                //
+                // FIXME: We need to collect the cost following calling graph. However,
+                // as LLVM's ininer only support bottom-up inlining currently. That's
+                // not a big issue so far.
+                //
+                // FIXME: We also need to consider the case where sub-routine call is
+                // enabled.
+                unsigned FuncSize = countTotalInstructions(F, false);
+                return TargetTransformInfo::TCC_Basic * FuncSize;
+            }
         }
-      }
-      return BaseT::getUserCost(U, Operands, CostKind);
-  }
+        return BaseT::getUserCost(U, Operands, CostKind);
+    }
 #endif
 
 } // namespace llvm

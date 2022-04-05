@@ -241,7 +241,8 @@ G4_INST::G4_INST(
     srcs[3] = s3;
 
     dead = false;
-    createdPreRA = false;
+    skipPostRA = false;
+    doPostRA = false;
     implAccSrc = nullptr;
     implAccDst = nullptr;
 
@@ -379,11 +380,29 @@ G4_Type G4_INST::getExecType() const
         return Type_D;
     }
 
+    if (opcode() == G4_fcvt)
+    {
+        // fcvt : cvt b/w standard type and other special float type.
+        //        execution type is the standard type.
+        G4_Type srcTy = srcs[0]->getType();
+        if (IS_TYPE_FLOAT_ALL(srcTy))
+        {
+            return srcTy;
+        }
+        // If src isn't standard float type, dst must be!
+        return dst->getType();
+    }
+    if (opcode() == G4_srnd)
+    {
+        // srnd: src0 is either hf or f
+        return srcs[0]->getType();
+    }
     for (unsigned i = 0; i < G4_MAX_SRCS; i++)
     {
-        if (srcs[i] != NULL)
+        G4_Operand* src = getSrc(i);
+        if (src != NULL)
         {
-            G4_Type srcType = srcs[i]->getType();
+            G4_Type srcType = src->getType();
             if (TypeSize(srcType) >= TypeSize(execType))
             {
                 if (IS_DTYPE(srcType))
@@ -435,12 +454,17 @@ G4_Type G4_INST::getExecType2() const
 
     for (unsigned i = 0; i < G4_MAX_SRCS; i++)
     {
-        if (srcs[i] == NULL)
+        G4_Operand* src = getSrc(i);
+        if (src == NULL)
         {
             continue;
         }
         G4_Type srcType = srcs[i]->getType();
-        if (isLowPrecisionFloatTy(srcType) &&
+        if (builder.hasBFMixMode() && srcType == Type_BF)
+        {
+            execType = Type_F;
+        }
+        else if (isLowPrecisionFloatTy(srcType) &&
             TypeSize(srcType) >= TypeSize(execType))
         {
             execType = srcType;
@@ -458,7 +482,7 @@ G4_Type G4_INST::getExecType2() const
         }
         else if (IS_DFTYPE(srcType) && !IS_DFTYPE(execType))
         {
-            execType = srcs[i]->getType();
+            execType = src->getType();
             break;
         }
         else if ((IS_FTYPE(srcType) || srcType == Type_VF) &&
@@ -645,7 +669,6 @@ const G4_Operand* G4_INST::getOperand(Gen4_Operand_Number opnd_num) const
     return NULL;
 }
 
-
 USE_EDGE_LIST_ITER G4_INST::eraseUse(USE_EDGE_LIST_ITER iter)
 {
     G4_INST *useInst = iter->first;
@@ -671,6 +694,21 @@ void G4_INST::transferDef(G4_INST *inst2, Gen4_Operand_Number opndNum1, Gen4_Ope
             defInst->useInstList.push_back(USE_DEF_NODE(inst2, opndNum2));
             DEF_EDGE_LIST_ITER curr_iter = iter++;
             defInstList.erase(curr_iter);
+
+            //Remove the redundant d/u node.
+            //Due to the instruction optimization, such as merge scalars, redundant d/u info may be generated.
+            //Such as the case:
+            //(W) shl (1) V3429(0,0)<1>:d V3380(0,0)<0;1,0>:d 0x17:w
+            //(W) shl (1) V3430(0,0)<1>:d V3381(0,0)<0;1,0>:d 0x17:w
+            //(W) add (1) V3432(0,0)<1>:d 0x43800000:d -V3429(0,0)<0;1,0>:d
+            //(W) add (1) V3433(0,0)<1>:d 0x43800000:d -V3430(0,0)<0;1,0>:d
+            //==>
+            //(W) shl (2) Merged138(0,0)<1>:d Merged139(0,0)<1;1,0>:d 0x17:w
+            //(W) add (2) Merged140(0,0)<1>:d 0x43800000:d -Merged138(0,0)<1;1,0>:d
+            inst2->defInstList.sort();
+            inst2->defInstList.unique();
+            defInst->useInstList.sort();
+            defInst->useInstList.unique();
         }
         else
         {
@@ -923,6 +961,10 @@ bool G4_INST::distanceHonourInstruction() const
     }
     if (isMathPipeInst())
     {
+        if (builder.getPlatform() >= Xe_PVC)
+        {
+            return true;
+        }
         return false;
     }
     return true;
@@ -938,6 +980,10 @@ bool G4_INST::tokenHonourInstruction() const
     {
         if (isMathPipeInst())
         {
+            if (builder.getPlatform() >= Xe_PVC)
+            {
+                return false;
+            }
             return true;
         }
         return false;
@@ -950,13 +996,18 @@ bool G4_INST::hasNoPipe()
     {
         return true;
     }
+    // PVC only
+    if (op == G4_sync_fence)
+    {
+        return true;
+    }
     return false;
 }
 
 
 bool G4_INST::isLongPipeType(G4_Type type) const
 {
-    if (builder.hasInt64Add())
+    if (builder.hasPartialInt64Support())
     {
         return type == Type_DF;
     }
@@ -970,7 +1021,7 @@ bool G4_INST::isIntegerPipeType(G4_Type type) const
         return true;
     }
 
-    if (builder.hasInt64Add())
+    if (builder.hasPartialInt64Support())
     {
         return type == Type_UQ || type == Type_Q;
     }
@@ -999,6 +1050,7 @@ bool G4_INST::isJEUPipeInstructionXe() const
     return false;
 }
 
+
 bool G4_INST::isLongPipeInstructionXe() const
 {
     if (isJEUPipeInstructionXe())
@@ -1017,13 +1069,14 @@ bool G4_INST::isLongPipeInstructionXe() const
         return false;
     }
 
+
     const G4_Operand* dst = getDst();
     if (dst && isLongPipeType(dst->getType()))
     {
         return true;
     }
 
-    if (!builder.hasInt64Add())
+    if (!builder.hasPartialInt64Support())
     {
         for (int i = 0; i < G4_MAX_SRCS; i++)
         {
@@ -1055,8 +1108,17 @@ bool G4_INST::isIntegerPipeInstructionXe() const
         return false;
     }
 
+
     if (builder.hasFixedCycleMathPipeline() &&
         isMath())
+    {
+        return false;
+    }
+    if (op == G4_fcvt)
+    {
+        return false;
+    }
+    if (op == G4_srnd)
     {
         return false;
     }
@@ -1065,6 +1127,15 @@ bool G4_INST::isIntegerPipeInstructionXe() const
     if (dst && isIntegerPipeType(dst->getType()))
     {
         return true;
+    }
+
+    if (builder.hasQ2FInIntegerPipe() && dst->getType() == Type_F)
+    {
+        const G4_Operand* src = getSrc(0);
+        if (src && (src->getType() == Type_Q || src->getType() == Type_UQ))
+        {
+            return true;
+        }
     }
 
     if (!dst)
@@ -1091,6 +1162,7 @@ bool G4_INST::isFloatPipeInstructionXe() const
         return false;
     }
 
+
     if (isLongPipeInstructionXe())
     {
         return false;
@@ -1101,6 +1173,14 @@ bool G4_INST::isFloatPipeInstructionXe() const
     {
         return false;
     }
+    if (opcode() == G4_fcvt)
+    {
+        return true;
+    }
+    if (opcode() == G4_srnd)
+    {
+        return true;
+    }
 
     const G4_Operand* dst = getDst();
     if (dst &&
@@ -1108,6 +1188,14 @@ bool G4_INST::isFloatPipeInstructionXe() const
             dst->getType() == Type_HF ||
             dst->getType() == Type_BF))
     {
+        if (builder.hasQ2FInIntegerPipe() && dst->getType() == Type_F)
+        {
+            const G4_Operand* src = getSrc(0);
+            if (src && (src->getType() == Type_Q || src->getType() == Type_UQ))
+            {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1142,7 +1230,7 @@ SB_INST_PIPE G4_INST::getDataTypePipeXe(G4_Type type)
 
     case Type_Q:
     case Type_UQ:
-        if (builder.hasInt64Add())
+        if (builder.hasPartialInt64Support())
         {
             return PIPE_INT;
         }
@@ -1167,6 +1255,7 @@ SB_INST_PIPE G4_INST::getDataTypePipeXe(G4_Type type)
 
 SB_INST_PIPE G4_INST::getInstructionPipeXe()
 {
+
     if (isLongPipeInstructionXe())
     {
         return PIPE_LONG;
@@ -1318,8 +1407,12 @@ G4_INST *G4_INST::getSingleDef(Gen4_Operand_Number opndNum, bool MakeUnique)
 // Note that this function does not check for duplicates
 void G4_INST::addDefUse(G4_INST* inst, Gen4_Operand_Number srcPos)
 {
-    MUST_BE_TRUE(srcPos == Opnd_dst || srcPos == Opnd_src0 || srcPos == Opnd_src1 ||
-        srcPos == Opnd_src2 || srcPos == Opnd_src3 || srcPos == Opnd_pred ||
+    MUST_BE_TRUE(srcPos == Opnd_dst ||
+        srcPos == Opnd_src0 || srcPos == Opnd_src1 ||
+        srcPos == Opnd_src2 || srcPos == Opnd_src3 ||
+        srcPos == Opnd_src4 || srcPos == Opnd_src5 ||
+        srcPos == Opnd_src6 || srcPos == Opnd_src7 ||
+        srcPos == Opnd_pred ||
         srcPos == Opnd_implAccSrc, "unexpected operand number");
     useInstList.emplace_back(inst, srcPos);
     inst->defInstList.emplace_back(this, srcPos);
@@ -1329,6 +1422,9 @@ void G4_INST::addDefUse(G4_INST* inst, Gen4_Operand_Number srcPos)
 void G4_INST::swapDefUse(Gen4_Operand_Number srcIxA, Gen4_Operand_Number srcIxB)
 {
     DEF_EDGE_LIST_ITER iter = defInstList.begin();
+    //To avoid redundant define and use items
+    INST_LIST handledDefInst;
+
     // since ACC is only exposed in ARCTAN intrinsic translation, there is no instruction split with ACC
     while (iter != defInstList.end())
     {
@@ -1345,6 +1441,12 @@ void G4_INST::swapDefUse(Gen4_Operand_Number srcIxA, Gen4_Operand_Number srcIxB)
             iter++;
             continue;
         }
+        if (std::find(handledDefInst.begin(), handledDefInst.end(), (*iter).first) != handledDefInst.end())
+        {
+            iter++;
+            continue;
+        }
+        handledDefInst.push_back((*iter).first);
         // change uselist of def inst
         USE_EDGE_LIST_ITER useIter = (*iter).first->useInstList.begin();
         for (; useIter != (*iter).first->useInstList.end(); useIter++)
@@ -1488,11 +1590,11 @@ G4_Type G4_INST::getOpExecType(int& extypesize)
     }
     if (IS_VINTTYPE(extype))
     {
-        extypesize = numEltPerGRF<Type_UB>()/2;
+        extypesize = getBuilder().numEltPerGRF<Type_UB>()/2;
     }
     else if (IS_VFTYPE(extype))
     {
-        extypesize = numEltPerGRF<Type_UB>();
+        extypesize = getBuilder().numEltPerGRF<Type_UB>();
     }
     else
     {
@@ -2173,6 +2275,27 @@ bool G4_INST::canPropagateTo(
         return false;
     }
 
+    if (useInst->opcode() == G4_fcvt)
+    {
+        // fcvt is not allowed to have immediate src.
+        if (src->isImm() ||
+            !src->isSrcRegRegion() ||
+            !(src->asSrcRegRegion()->getRegion()->isContiguous(useInst->getExecSize())))
+        {
+            return false;
+        }
+    }
+    if (useInst->opcode() == G4_srnd)
+    {
+        // srnd rZ.0<1>:ub  rX.0<1;1,0>:hf rY.0<1;1,0>:hf
+        //   operands should be packed.
+        if (useInst->getDst()->getType() == Type_UB &&
+            src->isSrcRegRegion() &&
+            !(src->asSrcRegRegion()->getRegion()->isContiguous(useInst->getExecSize())))
+        {
+            return false;
+        }
+    }
 
     if (src->isImm())
     {
@@ -2185,6 +2308,17 @@ bool G4_INST::canPropagateTo(
                (isFloatPseudoMAD(useInst) || useInst->opcode() == G4_math))
     {
         return false;
+    }
+    if (getBuilder().getGRFSize() == 64 &&
+        (useInst->opcode() == G4_dpas || useInst->opcode() == G4_dpasw) &&
+        (opndNum == Opnd_src0 || opndNum == Opnd_src1))
+    {
+        uint32_t leftBoundInBytes = src->getLeftBound() * src->getTypeSize();
+        // left bound should be 2grf aligned to propagate into dpas.
+        if (leftBoundInBytes % (getBuilder().numEltPerGRF<Type_UB>()*2))
+        {
+            return false;
+        }
     }
 
     // FIXME: to add specific checks for other instructions.
@@ -2808,7 +2942,24 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
         return false;
     }
 
-
+    if (getBuilder().getGRFSize() == 64 &&
+        (defInst->opcode() == G4_dpas || defInst->opcode() == G4_dpasw))
+    {
+        uint32_t leftBoundInBytes = dst->getLeftBound() * dst->getTypeSize();
+        // left bound should be 2grf aligned to hoist dst into dpas.
+        if (leftBoundInBytes % (getBuilder().numEltPerGRF<Type_UB>() * 2))
+        {
+            return false;
+        }
+    }
+    if (defInst->opcode() == G4_fcvt)
+    {
+        return false;
+    }
+    if (defInst->opcode() == G4_srnd)
+    {
+        return false;
+    }
 
     return true;
 }
@@ -2859,7 +3010,7 @@ bool G4_INST::goodTwoGRFDst(bool& evenSplitDst)
     }
     else
     {
-        evenSplitDst = dst->evenlySplitCrossGRF(execSize);
+        evenSplitDst = dst->evenlySplitCrossGRF(getBuilder(), execSize);
         // check if elements evenly split between two GRFs
         if (evenSplitDst)
         {
@@ -3040,7 +3191,7 @@ bool G4_INST::detectComprInst() const
              dst->getType() != Type_UNDEF)
     {
         if ((unsigned)execSize * dst->getTypeSize() * dst->getHorzStride() >
-            numEltPerGRF<Type_UB>())
+            getBuilder().numEltPerGRF<Type_UB>())
         {
             comprInst = ComprInstStates::T;
         }
@@ -3053,7 +3204,7 @@ bool G4_INST::detectComprInst() const
     // Uncompressed instructions can only operate on a max of 4 DFs or
     // 8 DF4/F/DWs or 16 W/Bs (the only exception being packed byte
     // moves which always have destinations).
-    else if ((unsigned)execSize * TypeSize(execType) > numEltPerGRF<Type_UB>())
+    else if ((unsigned)execSize * TypeSize(execType) > getBuilder().numEltPerGRF<Type_UB>())
     {
         comprInst = ComprInstStates::T;
     }
@@ -3154,7 +3305,7 @@ G4_INST::isComprInvariantSrcRegion(G4_SrcRegRegion* src, int srcPos)
                 return false;
             }
         }
-        if (byte_size == 2 * numEltPerGRF<Type_UB>()) {
+        if (byte_size == 2 * getBuilder().numEltPerGRF<Type_UB>()) {
             return true;
         }
         else {
@@ -3263,9 +3414,10 @@ bool G4_INST::isValidSymbolOperand(bool &dst_valid, bool *srcs_valid) const
 
     for (unsigned i = 0; i < G4_MAX_SRCS; i++)
     {
-        if (srcs[i] && srcs[i]->isSrcRegRegion() && srcs[i]->asSrcRegRegion()->getBase()->isRegVar())
+        G4_Operand* src = getSrc(i);
+        if (src && src->isSrcRegRegion() && src->asSrcRegRegion()->getBase()->isRegVar())
         {
-            srcs_valid[i] = srcs[i]->asSrcRegRegion()->obeySymbolRegRule();
+            srcs_valid[i] = src->asSrcRegRegion()->obeySymbolRegRule();
             if (!srcs_valid[i])
                 obeyRule = false;
         }
@@ -3315,15 +3467,15 @@ bool G4_INST::isOptBarrier() const
 
     for (int i = 0; i < getNumSrc(); i++)
     {
-        if (srcs[i])
+        if (getSrc(i))
         {
-            if (srcs[i]->isAreg())
+            if (getSrc(i)->isAreg())
             {
-                if (srcs[i]->isNReg() ||
-                    srcs[i]->isSrReg() ||
-                    srcs[i]->isCrReg() ||
-                    srcs[i]->isTmReg() ||
-                    srcs[i]->isTDRReg())
+                if (getSrc(i)->isNReg() ||
+                    getSrc(i)->isSrReg() ||
+                    getSrc(i)->isCrReg() ||
+                    getSrc(i)->isTmReg() ||
+                    getSrc(i)->isTDRReg())
                 {
                     return true;
                 }
@@ -3442,7 +3594,7 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         if (isSpillIntrinsic())
         {
             output << ' ';
-            output << "Scratch[" << asSpillIntrinsic()->getOffset() << "x" << numEltPerGRF<Type_UB>() << "]";
+            output << "Scratch[" << asSpillIntrinsic()->getOffset() << "x" << getBuilder().numEltPerGRF<Type_UB>() << "]";
         }
         else if (dst)
         {
@@ -3455,23 +3607,24 @@ void G4_INST::emit_inst(std::ostream& output, bool symbol_dst, bool *symbol_srcs
         auto numSrcOpnds = getNumSrc();
         for (int i = 0; i < numSrcOpnds; i++)
         {
-            if (srcs[i])
+            if (getSrc(i))
             {
                 output << "  ";
                 if (symbol_srcs != NULL)
                 {
-                    srcs[i]->emit(output, symbol_srcs[i]);  // emit symbolic/physical register depends on the flag
+                    getSrc(i)->emit(output, symbol_srcs[i]);  // emit symbolic/physical register depends on the flag
                 }
                 else
                 {
-                    srcs[i]->emit(output, false);   // emit physical register
+                    getSrc(i)->emit(output, false);   // emit physical register
                 }
             }
         }
+
         if (isFillIntrinsic())
         {
             output << "  ";
-            output << "Scratch[" << asFillIntrinsic()->getOffset() << "x" << numEltPerGRF<Type_UB>() << "] ";
+            output << "Scratch[" << asFillIntrinsic()->getOffset() << "x" << getBuilder().numEltPerGRF<Type_UB>() << "] ";
         }
 
         if (isFlowControl() && asCFInst()->getJip())
@@ -3594,7 +3747,7 @@ void G4_INST::emit_options(std::ostream& output) const
 
     ////////////////////////////////////////////////////////////
     // SWSB options
-    if (distanceHonourInstruction() && getDistance() != 0) {
+    if (getDistance() != 0) {
         std::stringstream dists;
         switch (getDistanceTypeXe()) {
         case DistanceType::DIST:                    break;
@@ -3616,6 +3769,7 @@ void G4_INST::emit_options(std::ostream& output) const
     switch (tkType) {
     case TOKEN_NONE:
     case SB_SET:      break;
+    case NoACCSBSet:  tks1 = "NoACC"; break;
     case AFTER_READ:  tks1 = ".R"; break;
     case AFTER_WRITE: tks1 = ".W"; break;
     case READ_ALL:    tks1 = ".R*"; break;
@@ -3624,6 +3778,7 @@ void G4_INST::emit_options(std::ostream& output) const
     }
     if (tkType != TOKEN_NONE)
     {
+        if (tkType != NoACCSBSet)
         {
             tks << '$' << (int)id << tks1;
         }
@@ -3760,8 +3915,8 @@ bool G4_InstSend::isDirectSplittableSend()
         case DC1_A64_UNTYPED_SURFACE_READ:  //SVM gather 4: emask can be reused if the per-channel data is larger than 1 GRF
         case DC1_UNTYPED_SURFACE_READ:   //VISA gather 4
         case DC1_TYPED_SURFACE_READ:   //Gather 4 typed
-            if (elemSize * execSize > (int)numEltPerGRF<Type_UB>() &&
-                elemSize * execSize % numEltPerGRF<Type_UB>() == 0)
+            if (elemSize * execSize > (int)getBuilder().numEltPerGRF<Type_UB>() &&
+                elemSize * execSize % getBuilder().numEltPerGRF<Type_UB>() == 0)
             {
                 return true;
             }
@@ -3777,8 +3932,8 @@ bool G4_InstSend::isDirectSplittableSend()
         {
         case DC2_UNTYPED_SURFACE_READ:   //gather 4 scaled :  emask can be reused if the per-channel data is larger than 1 GRF
         case DC2_A64_UNTYPED_SURFACE_READ: //SVM gather 4 scaled
-            if (elemSize * execSize > (int)numEltPerGRF<Type_UB>() &&
-                elemSize * execSize % numEltPerGRF<Type_UB>() == 0)
+            if (elemSize * execSize > (int)getBuilder().numEltPerGRF<Type_UB>() &&
+                elemSize * execSize % getBuilder().numEltPerGRF<Type_UB>() == 0)
             {
                 return true;
             }
@@ -3928,6 +4083,8 @@ void G4_Areg::emit(std::ostream& output, bool symbolreg)
     case AREG_F1:      output << "f1";    break;
     case AREG_TDR0:    output << "tdr0";  break;
     case AREG_SP:      output << "sp";    break;
+    case AREG_F2:      output << "f2";    break;
+    case AREG_F3:      output << "f3";    break;
     default:
         output << "unknown architecture reg";
         MUST_BE_TRUE(false, ERROR_UNKNOWN);
@@ -3982,7 +4139,7 @@ bool G4_SrcRegRegion::sameSrcRegRegion(G4_SrcRegRegion& rgn)
 // compute max execution size starting from the current pos.
 // power of two. cross-GRF boundary is allowed if the region is evenly split.
 // cross half-GRF should guaranttee evenly split
-uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCrossGRF, uint16_t &vs, uint16_t &wd, bool &twoGRFsrc)
+uint8_t G4_SrcRegRegion::getMaxExecSize(const IR_Builder& builder, int pos, uint8_t maxExSize, bool allowCrossGRF, uint16_t &vs, uint16_t &wd, bool &twoGRFsrc)
 {
     if (isRightBoundSet() == false)
     {
@@ -4022,7 +4179,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
         uint32_t prevPos = pos * elSize;
         uint8_t numEleInFristGRF = 0, numEleInSecondGRF = 0;
         uint32_t newLB = getLeftBound() + prevPos;
-        bool crossGRF = (newLB / numEltPerGRF<Type_UB>() != getRightBound() / numEltPerGRF<Type_UB>()),
+        bool crossGRF = (newLB / builder.numEltPerGRF<Type_UB>() != getRightBound() / builder.numEltPerGRF<Type_UB>()),
             inFirstGRF = true;
 
         for (int i = pos + 4; i < (pos + maxExSize); i += 4)
@@ -4033,7 +4190,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
             if (crossGRF && inFirstGRF)
             {
                 uint32_t newRB = getLeftBound() + currPos - 1;
-                uint32_t leftGRF = newLB / numEltPerGRF<Type_UB>(), rightGRF = newRB / numEltPerGRF<Type_UB>();
+                uint32_t leftGRF = newLB / builder.numEltPerGRF<Type_UB>(), rightGRF = newRB / builder.numEltPerGRF<Type_UB>();
                 if (leftGRF != rightGRF)
                 {
                     inFirstGRF = false;
@@ -4084,7 +4241,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
         // with pos 8 and maxExSize 8
         // the region is considered single stride in this case, but is not with the original exsize (16),
         // so we can't just multiply stride with type size to get starting offset
-        uint32_t startByte = (getLeftBound() + getByteOffset(pos)) % numEltPerGRF<Type_UB>();
+        uint32_t startByte = (getLeftBound() + getByteOffset(pos)) % builder.numEltPerGRF<Type_UB>();
         int retExecSize = 1;
         int execTypeSize = vStride * getElemSize();
         int exSizes[] = { 32, 16, 8, 4, 2 };
@@ -4095,7 +4252,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
             {
                 continue;
             }
-            if (startByte + (size - 1) * execTypeSize + getElemSize() <= numEltPerGRF<Type_UB>())
+            if (startByte + (size - 1) * execTypeSize + getElemSize() <= builder.numEltPerGRF<Type_UB>())
             {
                 // no GRF crossing (we don't count the padding bytes after the last element)
                 retExecSize = size;
@@ -4103,9 +4260,9 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
             }
             else if (allowCrossGRF)
             {
-                int numEltInFirstGRF = (numEltPerGRF<Type_UB>() - startByte) / execTypeSize;
+                int numEltInFirstGRF = (builder.numEltPerGRF<Type_UB>() - startByte) / execTypeSize;
                 // startByte may not be aligned to exec type size (e.g., r1.1<2;1,0>:b).  We need to increment by 1 in this case
-                if ((numEltPerGRF<Type_UB>() - startByte) % execTypeSize != 0)
+                if ((builder.numEltPerGRF<Type_UB>() - startByte) % execTypeSize != 0)
                 {
                     numEltInFirstGRF += 1;
                 }
@@ -4146,7 +4303,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
         // FIXME: fix other places with this logic.
         unsigned firstPos = getLeftBound() + computeOffset((unsigned)pos);
         unsigned lastPos = getLeftBound() + computeOffset((unsigned)(pos + wd - 1));
-        twoGRFsrc = firstPos / numEltPerGRF<Type_UB>() != lastPos / numEltPerGRF<Type_UB>();
+        twoGRFsrc = firstPos / builder.numEltPerGRF<Type_UB>() != lastPos / builder.numEltPerGRF<Type_UB>();
 
         return (uint8_t)wd;
     }
@@ -4165,7 +4322,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
     uint8_t numEleInFristGRF = 0, numEleInSecondGRF = 0;
     bool crossRow = false;
     uint32_t newLB = getLeftBound() + prevPos;
-    bool crossGRF = (newLB / numEltPerGRF<Type_UB>() != getRightBound() / numEltPerGRF<Type_UB>()),
+    bool crossGRF = (newLB / builder.numEltPerGRF<Type_UB>() != getRightBound() / builder.numEltPerGRF<Type_UB>()),
         inFirstGRF = true;
     bool negVS = (desc->vertStride < desc->horzStride * desc->width);
 
@@ -4207,7 +4364,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
         if (crossGRF && inFirstGRF)
         {
             uint32_t newRB = getLeftBound() + currPos + elSize - 1;
-            uint32_t leftGRF = newLB / numEltPerGRF<Type_UB>(), rightGRF = newRB / numEltPerGRF<Type_UB>();
+            uint32_t leftGRF = newLB / builder.numEltPerGRF<Type_UB>(), rightGRF = newRB / builder.numEltPerGRF<Type_UB>();
             if (leftGRF != rightGRF)
             {
                 inFirstGRF = false;
@@ -4216,7 +4373,7 @@ uint8_t G4_SrcRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool allowCr
                 // if number of element in first GRF is not power of 2, or
                 // subregister offset of two GRFs are different and not contiguous(too conservative?)
                 if (pow2Val != maxSize ||
-                    (!contRegion && !(alignToRow && maxSize <= desc->width) && newLB % numEltPerGRF<Type_UB>() != (getLeftBound() + currPos) % numEltPerGRF<Type_UB>()))
+                    (!contRegion && !(alignToRow && maxSize <= desc->width) && newLB % builder.numEltPerGRF<Type_UB>() != (getLeftBound() + currPos) % builder.numEltPerGRF<Type_UB>()))
                 {
                     maxSize = pow2Val;
                     if (wd == 0)
@@ -4323,11 +4480,11 @@ void printRegVarOff(std::ostream&  output,
                     {
                         // This is before RA and getLineariedStart() only contains the left bound
                         // we have to add the declare's phyreg
-                        byteAddress += baseVar->getPhyReg()->asGreg()->getRegNum() * getGRFSize() + baseVar->getPhyRegOff() * TypeSize(type);
+                        byteAddress += baseVar->getPhyReg()->asGreg()->getRegNum() * ::getGRFSize() + baseVar->getPhyRegOff() * TypeSize(type);
                     }
 
-                    regNum = byteAddress / getGRFSize();
-                    subRegNum = (byteAddress % getGRFSize()) / TypeSize(type);
+                    regNum = byteAddress / ::getGRFSize();
+                    subRegNum = (byteAddress % ::getGRFSize()) / TypeSize(type);
 
 
                      output << "r" << regNum;
@@ -4338,8 +4495,6 @@ void printRegVarOff(std::ostream&  output,
                 }
                 else if (baseVar->getPhyReg()->isAreg())
                 {
-                    MUST_BE_TRUE(regOff == 0, ERROR_INTERNAL_ARGUMENT);
-
                     (static_cast<G4_Areg*>(baseVar->getPhyReg()))->emit(output);
                     if (!baseVar->isNullReg())
                     {
@@ -4416,7 +4571,9 @@ void printRegVarOff(std::ostream&  output,
                 {
                     (static_cast<G4_Areg*>(baseVar->getPhyReg()))->emit(output);
                     output << '.' << (baseVar->getPhyRegOff() + subRegOffset);
-                    output << ", " << immAddrOff << ']';
+                    {
+                        output << ", " << immAddrOff << ']';
+                    }
                 }
             }
             else //No register assigned yet
@@ -4430,7 +4587,9 @@ void printRegVarOff(std::ostream&  output,
         {
             (static_cast<G4_Areg*>(base))->emit(output);
             output << '.' << subRegOffset;
-            output << ", " << immAddrOff << ']';
+            {
+                output << ", " << immAddrOff << ']';
+            }
         }
         else
         {
@@ -4628,7 +4787,7 @@ G4_DstRegRegion::G4_DstRegRegion(G4_DstRegRegion &rgn)
     rightBoundSet = rgn.rightBoundSet;
 }
 
-void G4_DstRegRegion::computeLeftBound()
+void G4_DstRegRegion::computeLeftBound(const IR_Builder& builder)
 {
     top_dcl = NULL;
     uint32_t newregoff = regOff, offset = 0;
@@ -4678,13 +4837,13 @@ void G4_DstRegRegion::computeLeftBound()
         left_bound = subRegOff * TypeSize(type);
         if (base->asAreg()->getArchRegType() == AREG_ACC1 || regOff == 1)
         {
-            left_bound += getGRFSize();
+            left_bound += ::getGRFSize();
         }
         byteOffset = left_bound;
     } else if (top_dcl) {
         if (acc == Direct) {
-            left_bound = offset + newregoff * numEltPerGRF<Type_UB>() + subRegOff * TypeSize(type);
-            if (top_dcl->getTotalElems() * top_dcl->getElemSize() >= (int)numEltPerGRF<Type_UB>()) {
+            left_bound = offset + newregoff * builder.numEltPerGRF<Type_UB>() + subRegOff * TypeSize(type);
+            if (top_dcl->getTotalElems() * top_dcl->getElemSize() >= (int)builder.numEltPerGRF<Type_UB>()) {
                 byteOffset = left_bound;
             }
             else {
@@ -4707,12 +4866,13 @@ void G4_DstRegRegion::computeLeftBound()
         byteOffset = left_bound;
     }
 }
+
 //
 // Initialize all values idential to rgn's, except for the base operand.
 // Caller is responsible for allocating base operand and making sure it doesn't
 // mess up the operands' hash table.
 //
-G4_DstRegRegion::G4_DstRegRegion(G4_DstRegRegion &rgn, G4_VarBase *new_base)
+G4_DstRegRegion::G4_DstRegRegion(const IR_Builder& builder, G4_DstRegRegion &rgn, G4_VarBase *new_base)
     : G4_Operand(G4_Operand::dstRegRegion)
 {
     acc = rgn.acc;
@@ -4724,8 +4884,24 @@ G4_DstRegRegion::G4_DstRegRegion(G4_DstRegRegion &rgn, G4_VarBase *new_base)
     writeMask = rgn.writeMask;
     base = new_base;
 
-    computeLeftBound();
+    computeLeftBound(builder);
     rightBoundSet = false;
+}
+
+bool G4_DstRegRegion::isCrossGRFDst(const IR_Builder& builder)
+{
+    if (isNullReg())
+    {
+        return inst != NULL &&
+            (unsigned)inst->getExecSize() * getTypeSize() * horzStride > builder.numEltPerGRF<Type_UB>();
+    }
+    if (isRightBoundSet() == false)
+    {
+        // computeRightBound populates crossGRFDst field
+        getInst()->computeRightBound(this);
+    }
+
+    return (left_bound / builder.numEltPerGRF<Type_UB>()) != right_bound / builder.numEltPerGRF<Type_UB>();
 }
 
 void G4_DstRegRegion::setDstBitVec(uint8_t exec_size)
@@ -4808,10 +4984,12 @@ unsigned G4_DstRegRegion::computeRightBound(uint8_t exec_size)
             unsigned short s_size = horzStride * type_size;
             unsigned totalBytes = (exec_size - 1) * s_size + type_size;
 
-            // For wide dst instructions like madw opcode, the dst(SOA layout) size should be double as it has both low and high results
+            // For wide dst instructions like madw opcode, the dst(SOA layout) size should be the sum of low result size and high
+            // result size, and also both low and high results are GRF-aligned.
             if (INST_WIDE_DST(inst->opcode()))
             {
-                totalBytes *= 2;
+                unsigned totalBytesDstLow = (totalBytes + ::getGRFSize() - 1) & (~(::getGRFSize() - 1)); // GRF-aligned
+                totalBytes = totalBytesDstLow * 2;
             }
 
             right_bound = left_bound + totalBytes - 1;
@@ -4834,13 +5012,24 @@ unsigned G4_DstRegRegion::computeRightBound(uint8_t exec_size)
 static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operand* opnd)
 {
     assert((regRegion->isSrcRegRegion() || regRegion->isDstRegRegion()) && "expect either src or dst regRegion");
-    bool legal_opnd = opnd->isSrcRegRegion() || opnd->isDstRegRegion() || opnd->isPredicate() || opnd->isCondMod();
+    bool legal_opnd = opnd->isSrcRegRegion() || opnd->isDstRegRegion() || opnd->isPredicate() || opnd->isCondMod() || opnd->isAddrExp();
     G4_VarBase* myBase = regRegion->getBase();
     G4_VarBase *opndBase = opnd->getBase();
     G4_RegAccess myAcc = regRegion->getRegAccess();
     G4_RegAccess opndAcc = opnd->getRegAccess();
     G4_Declare* myDcl = regRegion->getTopDcl();
     G4_Declare* opndDcl = opnd->getTopDcl();
+    if (opnd->isAddrExp())
+    {
+        opndBase = opnd->asAddrExp()->getRegVar()->getBaseRegVar();
+        opndDcl = opnd->asAddrExp()->getRegVar()->getDeclare();
+    }
+
+    if (regRegion->isAddrExp())
+    {
+        myBase = opnd->asAddrExp()->getRegVar()->getBaseRegVar();
+        myDcl = opnd->asAddrExp()->getRegVar()->getDeclare();
+    }
 
     if (!legal_opnd || myBase == nullptr || opndBase == nullptr)
     {
@@ -4859,6 +5048,11 @@ static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operan
         }
 
         if (opndInst && (opndInst->isPseudoKill() || opndInst->isLifeTimeEnd()))
+        {
+            return Rel_interfere;
+        }
+
+        if (opnd->isAddrExp() || regRegion->isAddrExp())
         {
             return Rel_interfere;
         }
@@ -4948,8 +5142,8 @@ static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operan
         {
             // First consider if any operand is > two GRFs. If so we just compare the bound
             // as such operands are assumed to touch every element within the bound.
-            bool meExceedTwoGRF = (myRightBound - myLeftBound) > 2u * getGRFSize();
-            bool opndExceedTwoGRF = (right_bound2 - left_bound2) > 2u * getGRFSize();
+            bool meExceedTwoGRF = (myRightBound - myLeftBound) > 2u * ::getGRFSize();
+            bool opndExceedTwoGRF = (right_bound2 - left_bound2) > 2u * ::getGRFSize();
             if (meExceedTwoGRF || opndExceedTwoGRF)
             {
                 if (left_bound2 >= myLeftBound && right_bound2 <= myRightBound)
@@ -4964,7 +5158,7 @@ static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operan
             }
 
             // Now both operands are within two GRFs, compare their footprint to get precise relations
-            int maskSize = 2 * getGRFSize();
+            int maskSize = 2 * ::getGRFSize();
             if (myDcl)
             {
                 maskSize = myDcl->getRegVar()->isFlag() ? myDcl->getNumberFlagElements()
@@ -5026,9 +5220,9 @@ bool G4_DstRegRegion::isNativePackedRegion() const
     return isNativePackedRowRegion();
 }
 
-bool G4_DstRegRegion::coverGRF(uint16_t numGRF, uint8_t execSize)
+bool G4_DstRegRegion::coverGRF(const IR_Builder& builder, uint16_t numGRF, uint8_t execSize)
 {
-    uint32_t size = numEltPerGRF<Type_UB>() * numGRF;
+    uint32_t size = builder.numEltPerGRF<Type_UB>() * numGRF;
     uint32_t range = getRightBound() - getLeftBound() + 1;
     if (acc == Direct)
     {
@@ -5059,31 +5253,31 @@ bool G4_DstRegRegion::coverGRF(uint16_t numGRF, uint8_t execSize)
 //The destination region is entirely contained in the upper OWord of a register.
 //The destination elements are evenly split between the two OWords of a register.
 
-bool G4_DstRegRegion::goodOneGRFDst(uint8_t execSize)
+bool G4_DstRegRegion::goodOneGRFDst(const IR_Builder& builder, uint8_t execSize)
 {
     if (acc != Direct)
     {
-        return horzStride * TypeSize(type) * execSize == numEltPerGRF<Type_UB>();
+        return horzStride * TypeSize(type) * execSize == builder.numEltPerGRF<Type_UB>();
     }
     uint32_t halfSize = (getRightBound() - getLeftBound() + 1 + (horzStride - 1) * getTypeSize()) / 2;
     uint32_t middle = getLeftBound() + halfSize;
-    if (getLeftBound()/(numEltPerGRF<Type_UB>()/2) == getRightBound()/(numEltPerGRF<Type_UB>()/2) ||
-        (getLeftBound()/(numEltPerGRF<Type_UB>()/2) == (getRightBound()/(numEltPerGRF<Type_UB>()/2) - 1) &&
-        getLeftBound()%(numEltPerGRF<Type_UB>()/2) == middle%(numEltPerGRF<Type_UB>()/2)))
+    if (getLeftBound() / (builder.numEltPerGRF<Type_UB>() / 2) == getRightBound() / (builder.numEltPerGRF<Type_UB>() / 2) ||
+        (getLeftBound() / (builder.numEltPerGRF<Type_UB>() / 2) == (getRightBound() / (builder.numEltPerGRF<Type_UB>() / 2) - 1) &&
+        getLeftBound() % (builder.numEltPerGRF<Type_UB>() / 2) == middle % (builder.numEltPerGRF<Type_UB>() / 2)))
     {
         return true;
     }
     return false;
 }
 
-bool G4_DstRegRegion::goodtwoGRFDst(uint8_t execSize)
+bool G4_DstRegRegion::goodtwoGRFDst(const IR_Builder& builder, uint8_t execSize)
 {
-    return evenlySplitCrossGRF(execSize);
+    return evenlySplitCrossGRF(builder, execSize);
 }
 
 // this is true if dst crosses GRF and has same number of elements in both GRFs
 // (i.e, the middle element has same GRF offset as the start element)
-bool G4_DstRegRegion::evenlySplitCrossGRF(uint8_t execSize)
+bool G4_DstRegRegion::evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize)
 {
     // check number of elements in first GRF.
     MUST_BE_TRUE(acc == Direct, "Indirect operand can not cross GRF boundary.");
@@ -5094,8 +5288,8 @@ bool G4_DstRegRegion::evenlySplitCrossGRF(uint8_t execSize)
     }
 
     int halfBytes = left_bound + horzStride * TypeSize(type) * (execSize / 2);
-    int halfOffset = halfBytes % numEltPerGRF<Type_UB>();
-    int startOffset = left_bound % numEltPerGRF<Type_UB>();
+    int halfOffset = halfBytes % builder.numEltPerGRF<Type_UB>();
+    int startOffset = left_bound % builder.numEltPerGRF<Type_UB>();
     return halfOffset == startOffset;
 }
 
@@ -5104,12 +5298,12 @@ bool G4_DstRegRegion::evenlySplitCrossGRF(uint8_t execSize)
  * if the first level dcl is not aligned to GRF or sub register offset of this opnd is not multiple GRFs, including 0,
  * return true.
  */
-bool G4_DstRegRegion::checkGRFAlign() const
+bool G4_DstRegRegion::checkGRFAlign(const IR_Builder& builder) const
 {
     bool GRF_aligned = false;
     unsigned byte_subregoff = subRegOff * TypeSize(type);
 
-    if (byte_subregoff  % numEltPerGRF<Type_UB>() != 0)
+    if (byte_subregoff % builder.numEltPerGRF<Type_UB>() != 0)
     {
         return false;
     }
@@ -5130,18 +5324,18 @@ bool G4_DstRegRegion::checkGRFAlign() const
                     aliasOffset += aliasdcl->getAliasOffset();
                     aliasdcl = aliasdcl->getAliasDeclare();
                 }
-                if (aliasOffset % numEltPerGRF<Type_UB>() != 0)
+                if (aliasOffset % builder.numEltPerGRF<Type_UB>() != 0)
                 {
                     return false;
                 }
 
-                if (aliasdcl->getSubRegAlign() >= GRFALIGN ||
-                    aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= (int)numEltPerGRF<Type_UB>()) {
-                        return true;
+                if (aliasdcl->getSubRegAlign() >= builder.getGRFAlign() ||
+                    aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= (int)builder.numEltPerGRF<Type_UB>()) {
+                    return true;
                 }
             }
             else if (base->asRegVar()->isPhyRegAssigned() &&
-                base->asRegVar()->getByteAddr() % numEltPerGRF<Type_UB>() == 0)
+                base->asRegVar()->getByteAddr(builder) % builder.numEltPerGRF<Type_UB>() == 0)
             {
                     return true;
             }
@@ -5160,7 +5354,7 @@ bool G4_DstRegRegion::checkGRFAlign() const
 // if true, the subreg offset is also returned via offset in bytes
 // Note this always returns false for ARFs (flag, addr, etc.)
 //
-static bool regionHasFixedSubreg(G4_Operand* opnd, uint32_t& offset)
+static bool regionHasFixedSubreg(const IR_Builder& builder, G4_Operand* opnd, uint32_t& offset)
 {
     assert(opnd->isSrcRegRegion() || opnd->isDstRegRegion());
     short subRegOff = 0;
@@ -5191,7 +5385,7 @@ static bool regionHasFixedSubreg(G4_Operand* opnd, uint32_t& offset)
     if (base->asRegVar()->isPhyRegAssigned())
     {
         offset = (subRegOff + base->asRegVar()->getPhyRegOff()) * TypeSize(opnd->getType());
-        offset %= getGRFSize();
+        offset %= ::getGRFSize();
         return true;
     }
 
@@ -5199,26 +5393,26 @@ static bool regionHasFixedSubreg(G4_Operand* opnd, uint32_t& offset)
     G4_Declare *rootDcl = base->asRegVar()->getDeclare()->getRootDeclare(subregByte);
     subregByte += subRegOff * TypeSize(opnd->getType());
 
-    if (rootDcl->getSubRegAlign() < GRFALIGN)
+    if (rootDcl->getSubRegAlign() < builder.getGRFAlign())
     {
         return false;
     }
-    offset = subregByte % numEltPerGRF<Type_UB>();
+    offset = subregByte % builder.numEltPerGRF<Type_UB>();
 
     return true;
 }
 
 
-bool G4_DstRegRegion::hasFixedSubregOffset(uint32_t& offset)
+bool G4_DstRegRegion::hasFixedSubregOffset(const IR_Builder& builder, uint32_t& offset)
 {
-    return regionHasFixedSubreg(this, offset);
+    return regionHasFixedSubreg(builder, this, offset);
 }
 
 // compute max execution size starting from the current pos.
 // power of two. no cross GRF boundary is allowed now.
 // TODO: cross GRF is allowed in BDW+.
 // cross half-GRF should guaranttee evenly split
-uint8_t G4_DstRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFsrc)
+uint8_t G4_DstRegRegion::getMaxExecSize(const IR_Builder& builder, int pos, uint8_t maxExSize, bool twoGRFsrc)
 {
     if (acc != Direct)
     {
@@ -5230,14 +5424,14 @@ uint8_t G4_DstRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFs
     uint8_t maxSize = roundDownPow2(maxExSize);
     uint32_t newLB = getLeftBound() + pos * exTypeSize,
         newRB = newLB + (maxExSize - 1) * exTypeSize + elSize - 1;
-    uint32_t leftGRF = newLB / numEltPerGRF<Type_UB>(), rightGRF = newRB / numEltPerGRF<Type_UB>();
+    uint32_t leftGRF = newLB / builder.numEltPerGRF<Type_UB>(), rightGRF = newRB / builder.numEltPerGRF<Type_UB>();
     // pre-BDW does not allow cross GRF dst except full 2-GRF dst.
     // BDW+ allows if elements are evenly split between two GRFs
     bool crossGRF = false;
-    if (isCrossGRFDst())
+    if (isCrossGRFDst(builder))
     {
         // check cross GRF boundary
-        uint8_t byteInFirstGRF = ((leftGRF + 1) * numEltPerGRF<Type_UB>() - newLB);
+        uint8_t byteInFirstGRF = ((leftGRF + 1) * builder.numEltPerGRF<Type_UB>() - newLB);
         uint8_t eleInFirstGRF = byteInFirstGRF / exTypeSize +
             // v20(0,17)<2>:ub and simd size is 16
             ((byteInFirstGRF % exTypeSize != 0) && (byteInFirstGRF % exTypeSize >= elSize) ? 1 : 0);
@@ -5255,7 +5449,7 @@ uint8_t G4_DstRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFs
                 // number of elements in first GRF is power of 2 and HS is not used to cross GRF
                 // search into second GRF
                 // if number of elements in second GRF >= numbr of elements in first GRF
-                uint8_t byteInSecondGRF = (newRB + 1) % numEltPerGRF<Type_UB>();
+                uint8_t byteInSecondGRF = (newRB + 1) % builder.numEltPerGRF<Type_UB>();
                 uint8_t eleInSecondGRF = byteInSecondGRF / exTypeSize + (horzStride > 1 ? 1 : 0);
                 if (eleInSecondGRF >= eleInFirstGRF)
                 {
@@ -5269,7 +5463,7 @@ uint8_t G4_DstRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFs
     // FIXME: if we know that the new srcs are all in one GRF, we do not have to do the following check.
     if (!crossGRF && twoGRFsrc)
     {
-        uint32_t halfGRFSize = numEltPerGRF<Type_UB>() / 2;
+        uint32_t halfGRFSize = builder.numEltPerGRF<Type_UB>() / 2;
         if (newLB / halfGRFSize != newRB / halfGRFSize)
         {
             uint32_t middlePoint = (newRB + (horzStride - 1) * elSize - newLB + 1) / 2;
@@ -5277,7 +5471,7 @@ uint8_t G4_DstRegRegion::getMaxExecSize(int pos, uint8_t maxExSize, bool twoGRFs
             if ((middlePoint + newLB) % halfGRFSize != 0)
             {
                 // check size before half-GRF
-                uint8_t sizeBeforeMidGRF = ((leftGRF * numEltPerGRF<Type_UB>() + halfGRFSize) - newLB + exTypeSize - 1) / exTypeSize;
+                uint8_t sizeBeforeMidGRF = ((leftGRF * builder.numEltPerGRF<Type_UB>() + halfGRFSize) - newLB + exTypeSize - 1) / exTypeSize;
                 uint8_t pow2Size = roundDownPow2(sizeBeforeMidGRF);
                 // V36(0,1)<4>:ud is slipt into 2x2
                 if (sizeBeforeMidGRF <= (maxSize >> 1) && pow2Size == sizeBeforeMidGRF)
@@ -5475,6 +5669,8 @@ PhyRegPool::PhyRegPool(Mem_Manager& m, unsigned int maxRegisterNumber)
     ARF_Table[AREG_F1]       = new (m) G4_Areg(AREG_F1);
     ARF_Table[AREG_TDR0]     = new (m) G4_Areg(AREG_TDR0);
     ARF_Table[AREG_SP]       = new (m)G4_Areg(AREG_SP);
+    ARF_Table[AREG_F2]       = new (m) G4_Areg(AREG_F2);
+    ARF_Table[AREG_F3]       = new (m) G4_Areg(AREG_F3);
 }
 
 void PhyRegPool::rebuildRegPool(Mem_Manager& m, unsigned int numRegisters)
@@ -5516,6 +5712,19 @@ void G4_Declare::copyAlign(G4_Declare* dcl)
     regVar->setSubRegAlignment(dcl->getSubRegAlign());
 }
 
+void G4_Declare::ElemInfo::reset(unsigned numElems, const IR_Builder& irb)
+{
+    numElements = numElems;
+    numRows = (getByteSize() + (irb.numEltPerGRF<Type_UB>() - 1)) / irb.numEltPerGRF<Type_UB>();
+    numElemsPerRow = numRows > 1 ? irb.numEltPerGRF<Type_UB>() / getElemSize() : numElements;
+}
+
+void G4_Declare::resizeNumRows(unsigned int numrows)
+{
+    unsigned byteSize = numrows * irb.numEltPerGRF<Type_UB>();
+    setTotalElems(byteSize / getElemSize());
+}
+
 void G4_Declare::emit(std::ostream &output) const
 {
 
@@ -5529,6 +5738,10 @@ void G4_Declare::emit(std::ostream &output) const
     {
         output << 'a';
     }
+    else if (regFile == G4_SCALAR)
+    {
+        output << 's';
+    }
     else if (regFile == G4_FLAG)
     {
         output << 'f';
@@ -5539,9 +5752,9 @@ void G4_Declare::emit(std::ostream &output) const
     }
 
     output << " size=" << getByteSize();
-    if (Type_UNDEF != elemType)
+    if (Type_UNDEF != elemInfo.getType())
     {
-        output << " type=" << TypeSymbol(elemType);
+        output << " type=" << TypeSymbol(elemInfo.getType());
     }
     if (AliasDCL)
     {
@@ -5575,10 +5788,10 @@ void G4_Declare::emit(std::ostream &output) const
         else
         {
             // GRF spill
-            auto GRFOffset = getRegVar()->getDisp() / getGRFSize();
+            auto GRFOffset = getRegVar()->getDisp() / irb.getGRFSize();
             if (!AliasDCL)
             {
-                output << " (spilled -> Scratch[" << GRFOffset << "x" << (int)getGRFSize() << "])";
+                output << " (spilled -> Scratch[" << GRFOffset << "x" << (int)irb.getGRFSize() << "])";
             }
             else
             {
@@ -6114,23 +6327,13 @@ G4_RegVar::emit(std::ostream& output, bool symbolreg)
             TypeSymbol(getDeclare()->getElemType()) << ")";
     }
 }
-int G4_AddrExp::eval()
+int G4_AddrExp::eval(const IR_Builder& builder)
 {
     int byteAddr = 0;
 
-    if (m_addressedReg->getPhyReg() == NULL)
-    {
-        // address taken range is spilled
-        G4_Declare* addrTakenSpillFillDcl = m_addressedReg->getDeclare()->getAddrTakenSpillFill();
-        MUST_BE_TRUE(addrTakenSpillFillDcl != NULL, "No addr taken spill fill register found!");
-        byteAddr = addrTakenSpillFillDcl->getGRFBaseOffset();
-    }
-    else
-    {
-        byteAddr = m_addressedReg->getByteAddr(); //let's assume the unsigned=>int won't overflow for now.
-    }
+    MUST_BE_TRUE(m_addressedReg->getPhyReg()  != NULL, "No addr takenregister found!");
 
-    // byteAddr += offsetInEle * addressedReg->getDeclare()->getElemSize();
+    byteAddr = m_addressedReg->getByteAddr(builder); //let's assume the unsigned=>int won't overflow for now.
     byteAddr += m_offset;
 
     return byteAddr;
@@ -6142,7 +6345,7 @@ void G4_AddrExp::emit(std::ostream& output, bool symbolreg)
     output << '+' << m_offset;
 }
 
-void G4_SrcRegRegion::computeLeftBound()
+void G4_SrcRegRegion::computeLeftBound(const IR_Builder& builder)
 {
     top_dcl = NULL;
     unsigned newregoff = regOff, offset = 0;
@@ -6204,8 +6407,8 @@ void G4_SrcRegRegion::computeLeftBound()
     {
         if (acc == Direct)
         {
-            left_bound = offset + newregoff * numEltPerGRF<Type_UB>() + subRegOff * TypeSize(type);
-            if (top_dcl->getTotalElems() * top_dcl->getElemSize() >= (int)numEltPerGRF<Type_UB>())
+            left_bound = offset + newregoff * builder.numEltPerGRF<Type_UB>() + subRegOff * TypeSize(type);
+            if (top_dcl->getTotalElems() * top_dcl->getElemSize() >= (int)builder.numEltPerGRF<Type_UB>())
             {
                 byteOffset = left_bound;
             }
@@ -6264,7 +6467,7 @@ void G4_SrcRegRegion::setSrcBitVec(uint8_t exec_size)
     {
         // fast path
         int totalBytes = exec_size * typeSize;
-        MUST_BE_TRUE(totalBytes <= 2 * getGRFSize(), "total bytes exceed 2 GRFs");
+        MUST_BE_TRUE(totalBytes <= 2 * ::getGRFSize(), "total bytes exceed 2 GRFs");
 
         footPrint0 = totalBytes < 64 ? (1ULL << totalBytes) - 1 : ULLONG_MAX;
         if (totalBytes > 64)
@@ -6424,16 +6627,16 @@ bool G4_SrcRegRegion::isNativePackedRegion() const
     return isNativePackedRowRegion() && desc->vertStride == desc->width;
 }
 
-bool G4_SrcRegRegion::coverTwoGRF()
+bool G4_SrcRegRegion::coverTwoGRF(const IR_Builder& builder)
 {
     uint16_t range = getRightBound() - getLeftBound() + 1;
-    if (range < numEltPerGRF<Type_UB>())
+    if (range < builder.numEltPerGRF<Type_UB>())
         return false;
     if (desc->horzStride > 1)
     {
         range += (desc->horzStride - 1) * TypeSize(type);
     }
-    if (range == numEltPerGRF<Type_UB>() * 2 &&
+    if (range == builder.numEltPerGRF<Type_UB>() * 2 &&
         (desc->vertStride == desc->horzStride * desc->width ||
          desc->isContiguous(getInst()->getExecSize())))
     {
@@ -6443,7 +6646,7 @@ bool G4_SrcRegRegion::coverTwoGRF()
 }
 // Assumption:
 // operand crosses GRF boundary
-bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
+bool G4_SrcRegRegion::evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize, bool &sameSubRegOff,
     bool &vertCrossGRF, bool &contRegion, uint8_t &eleInFirstGRF)
 {
     // always return true since all align16 instructions are generated by JIT
@@ -6460,7 +6663,7 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
     vertCrossGRF = true;
     contRegion = desc->isSingleStride(getInst()->getExecSize());
     MUST_BE_TRUE(acc == Direct, "Indirect operand can not cross GRF boundary.");
-    uint8_t firstSubRegOff = getLeftBound() % numEltPerGRF<Type_UB>();
+    uint8_t firstSubRegOff = getLeftBound() % builder.numEltPerGRF<Type_UB>();
     uint8_t left = firstSubRegOff;
     uint8_t typeSize = (uint8_t)TypeSize(type);
     uint8_t execTySize = (desc->horzStride == 0 ? 1 : desc->horzStride) * typeSize;
@@ -6468,9 +6671,9 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
     uint8_t realRowSize = lastEltEndByte;
     // check number of elements in first GRF.
     eleInFirstGRF = 0;
-    while (left < numEltPerGRF<Type_UB>())
+    while (left < builder.numEltPerGRF<Type_UB>())
     {
-        if (left + realRowSize  <= (int)numEltPerGRF<Type_UB>())
+        if (left + realRowSize  <= (int)builder.numEltPerGRF<Type_UB>())
         {
             // realRowSize is used to handle V12(0,17)<32;8,2>:b
             eleInFirstGRF += desc->width;
@@ -6483,12 +6686,12 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
             eleInFirstGRF++;
             uint8_t newLeft = left + typeSize;
             newLeft += execTySize;
-            while (newLeft < numEltPerGRF<Type_UB>())
+            while (newLeft < builder.numEltPerGRF<Type_UB>())
             {
                 eleInFirstGRF++;
                 newLeft += execTySize;
             }
-            if (newLeft == numEltPerGRF<Type_UB>())
+            if (newLeft == builder.numEltPerGRF<Type_UB>())
             {
                 eleInFirstGRF++;
                 if (eleInFirstGRF % desc->width == 0)
@@ -6514,7 +6717,7 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
             }
         }
     }
-    uint8_t secondSubRegOff = left % numEltPerGRF<Type_UB>();
+    uint8_t secondSubRegOff = left % builder.numEltPerGRF<Type_UB>();
 
     sameSubRegOff = (firstSubRegOff == secondSubRegOff);
     // TODO: this guaranttees that there are equal number fo elements in each GRF, but not the distribution of elements in each of them.
@@ -6525,11 +6728,11 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize, bool &sameSubRegOff,
     return false;
 }
 
-bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize)
+bool G4_SrcRegRegion::evenlySplitCrossGRF(const IR_Builder& builder, uint8_t execSize)
 {
     // check number of elements in first GRF.
     MUST_BE_TRUE(acc == Direct, "Indirect operand can not cross GRF boundary.");
-    uint16_t sizeInFirstGRF = numEltPerGRF<Type_UB>() - getLeftBound() % numEltPerGRF<Type_UB>();
+    uint16_t sizeInFirstGRF = builder.numEltPerGRF<Type_UB>() - getLeftBound() % builder.numEltPerGRF<Type_UB>();
     uint16_t vertSize = desc->vertStride * getElemSize();
     uint16_t execTypeSize = desc->horzStride == 0 ? getElemSize() : desc->horzStride * getElemSize();
     uint16_t numEle = (sizeInFirstGRF + execTypeSize - 1)/ execTypeSize;
@@ -6567,12 +6770,12 @@ bool G4_SrcRegRegion::evenlySplitCrossGRF(uint8_t execSize)
  * if the first level dcl is not aligned to GRF or sub register offset of this opnd is not multiple GRFs, including 0,
  * return true.
  */
-bool G4_SrcRegRegion::checkGRFAlign() {
+bool G4_SrcRegRegion::checkGRFAlign(const IR_Builder& builder) {
 
     bool GRF_aligned = false;
     uint32_t byte_subregoff = subRegOff * getTypeSize();
 
-    if (byte_subregoff  % numEltPerGRF<Type_UB>() != 0) {
+    if (byte_subregoff  % builder.numEltPerGRF<Type_UB>() != 0) {
         return false;
     }
 
@@ -6589,17 +6792,17 @@ bool G4_SrcRegRegion::checkGRFAlign() {
                     aliasOffset += aliasdcl->getAliasOffset();
                     aliasdcl = aliasdcl->getAliasDeclare();
                 }
-                if (aliasOffset % numEltPerGRF<Type_UB>() != 0)
+                if (aliasOffset % builder.numEltPerGRF<Type_UB>() != 0)
                 {
                     return false;
                 }
 
-                if (aliasdcl->getSubRegAlign() >= GRFALIGN ||
-                    aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= (int)numEltPerGRF<Type_UB>()) {
+                if (aliasdcl->getSubRegAlign() >= builder.getGRFAlign() ||
+                    aliasdcl->getNumRows() * aliasdcl->getElemSize() * aliasdcl->getElemSize() >= (int)builder.numEltPerGRF<Type_UB>()) {
                         return true;
                 }
-            }else if (base->asRegVar()->isPhyRegAssigned() &&
-                base->asRegVar()->getByteAddr() % numEltPerGRF<Type_UB>() == 0) {
+            } else if (base->asRegVar()->isPhyRegAssigned() &&
+                base->asRegVar()->getByteAddr(builder) % builder.numEltPerGRF<Type_UB>() == 0) {
                     return true;
             }
         }
@@ -6616,9 +6819,9 @@ bool G4_SrcRegRegion::checkGRFAlign() {
 // if true, the subreg offset is also returned via offset
 // Note this always returns false for ARFs (flag, addr, etc.)
 //
-bool G4_SrcRegRegion::hasFixedSubregOffset(uint32_t& offset)
+bool G4_SrcRegRegion::hasFixedSubregOffset(const IR_Builder& builder, uint32_t& offset)
 {
-    return regionHasFixedSubreg(this, offset);
+    return regionHasFixedSubreg(builder, this, offset);
 }
 
 /*
@@ -6652,12 +6855,12 @@ void G4_Label::emit(std::ostream& output, bool symbolreg)
     output << label;
 }
 
-unsigned G4_RegVar::getByteAddr() const
+unsigned G4_RegVar::getByteAddr(const IR_Builder& builder) const
 {
     MUST_BE_TRUE(reg.phyReg != NULL, ERROR_UNKNOWN);
     if (reg.phyReg->isGreg())
     {
-        return reg.phyReg->asGreg()->getRegNum() * numEltPerGRF<Type_UB>() +
+        return reg.phyReg->asGreg()->getRegNum() * builder.numEltPerGRF<Type_UB>() +
             reg.subRegOff * decl->getElemSize();
     }
     if (reg.phyReg->isA0())
@@ -6712,14 +6915,20 @@ void G4_INST::computeLeftBoundForImplAcc(G4_Operand* opnd)
         {
             if (opnd->isSrcRegRegion())
             {
-                opnd->asSrcRegRegion()->computeLeftBound();
+                opnd->asSrcRegRegion()->computeLeftBound(getBuilder());
             }
             else if (opnd->isDstRegRegion())
             {
-                opnd->asDstRegRegion()->computeLeftBound();
+                opnd->asDstRegRegion()->computeLeftBound(getBuilder());
             }
         }
     }
+}
+
+bool G4_Operand::crossGRF(const IR_Builder& builder)
+{
+    return getRightBound() / builder.numEltPerGRF<Type_UB>() !=
+           getLeftBound() / builder.numEltPerGRF<Type_UB>();
 }
 
 //
@@ -6754,6 +6963,22 @@ void G4_Operand::updateFootPrint(BitSet& footprint, bool isSet)
                 footprint.resetElt(idx, bitVal);
             }
         }
+        if (::getGRFSize() > 32)
+        {
+            for (int i = 0; i < 2 && idx <= endIdx; ++i, ++idx)
+            {
+                uint64_t bits = getBitVecH();
+                uint32_t bitVal = (uint32_t)(i % 2 ? bits >> N : bits);
+                if (isSet)
+                {
+                    footprint.setElt(idx, bitVal);
+                }
+                else
+                {
+                    footprint.resetElt(idx, bitVal);
+                }
+            }
+        }
 
         // beyond the first two GRF we assume every byte is touched
         while (idx <= endIdx)
@@ -6779,6 +7004,15 @@ void G4_Operand::updateFootPrint(BitSet& footprint, bool isSet)
             if (mask0 & (1ULL << i))
                 footprint.set(j, isSet);
         }
+        if (::getGRFSize() > 32)
+        {
+            uint64_t mask1 = getBitVecH();
+            for (unsigned i = 0; i < 64 && j <= rb; ++i, ++j)
+            {
+                if (mask1 & (1ULL << i))
+                    footprint.set(j, isSet);
+            }
+        }
         while (j++ <= rb)
             footprint.set(j, isSet);
     }
@@ -6790,6 +7024,10 @@ void G4_Operand::setBitVecFromSize(uint32_t NBytes)
 {
     bitVec[0] = NBytes < 64 ? (1ULL << NBytes) - 1 : ULLONG_MAX;
     bitVec[1] = 0;
+    if (::getGRFSize() > 32 && NBytes >= 64)
+    {
+        bitVec[1] = (NBytes < 64 * 2) ? (1ULL << (NBytes - 64)) - 1 : ULLONG_MAX;
+    }
 }
 
 // Left and right bound for every operand is based off
@@ -6899,7 +7137,7 @@ void G4_InstSend::computeRightBound(G4_Operand* opnd)
 
     if (opnd && !opnd->isImm() && !opnd->isNullReg())
     {
-        auto computeSendOperandBound = [](G4_Operand* opnd, int numReg)
+        auto computeSendOperandBound = [this](G4_Operand* opnd, int numReg)
         {
             if (numReg == 0)
             {
@@ -6912,7 +7150,7 @@ void G4_InstSend::computeRightBound(G4_Operand* opnd)
             // bound up to the variable size.
             unsigned LB = opnd->left_bound;
             unsigned RB = std::min(opnd->getTopDcl()->getByteSize(),
-                LB + numReg * numEltPerGRF<Type_UB>()) - 1;
+                LB + numReg * getBuilder().numEltPerGRF<Type_UB>()) - 1;
 
             unsigned NBytes = RB - LB + 1;
             opnd->setBitVecFromSize(NBytes);
@@ -6932,7 +7170,7 @@ void G4_InstSend::computeRightBound(G4_Operand* opnd)
             // Compute right bound for dst operand
             const auto *desc = getMsgDesc();
             uint32_t dstBytes = desc->getDstLenBytes();
-            if (dstBytes < getGRFSize()) {
+            if (dstBytes < getBuilder().getGRFSize()) {
                 // e.g. OWord block read x1
                 opnd->setBitVecL((1ULL << dstBytes) - 1);
                 opnd->setRightBound(opnd->left_bound + dstBytes - 1);
@@ -7019,6 +7257,12 @@ void G4_INST::setPredicate(G4_Predicate* p)
 
 void G4_INST::setSrc(G4_Operand* opnd, unsigned i)
 {
+    if (isPseudoAddrMovIntrinsic())
+    {
+        asIntrinsicInst()->setIntrinsicSrc(opnd, i);
+        return;
+    }
+
     MUST_BE_TRUE(i < G4_MAX_SRCS, ERROR_INTERNAL_ARGUMENT);
 
     if (srcs[i] != NULL)
@@ -7104,7 +7348,7 @@ void G4_INST::setImplAccDst(G4_DstRegRegion* opnd)
 // will have 0xFF00, which lane 8-15
 unsigned G4_INST::getExecLaneMask() const
 {
-    unsigned maskbits = (1 << getExecSize()) - 1;
+    unsigned maskbits = (unsigned)(((uint64_t)1 << getExecSize()) - 1);
     unsigned chanOffset = getMaskOffset();
     return (maskbits << chanOffset);
 }
@@ -7335,7 +7579,7 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
         return;
     }
     uint32_t eltSize = getTypeSize();
-    uint32_t subRegOffset = getLinearizedStart() % numEltPerGRF<Type_UB>();
+    uint32_t subRegOffset = getLinearizedStart() % builder.numEltPerGRF<Type_UB>();
     uint32_t endOffset = subRegOffset + inst->getExecSize() * eltSize;
 
     bool isAlign1Ternary = builder.hasAlign1Ternary() && inst->getNumSrc() == 3;
@@ -7344,7 +7588,7 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
     {
         // 2-src and 3-src src0/1: normalize region to <1;1,0>
         // 3-src src2: normalize region to <2;2,1> since it only supports horz stride
-        setRegion(isAlign1Ternary && opNum == 2 ? builder.createRegionDesc(2, 2, 1) : builder.getRegionStride1(), true);
+        setRegion(builder, isAlign1Ternary && opNum == 2 ? builder.createRegionDesc(2, 2, 1) : builder.getRegionStride1(), true);
         return;
     }
 
@@ -7353,13 +7597,13 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
         // do <16;16,1> for HF/W if possible
         if (subRegOff == 0 && execSize == 16 && eltSize == 2)
         {
-            setRegion(builder.createRegionDesc(16, 16, 1), true);
+            setRegion(builder, builder.createRegionDesc(16, 16, 1), true);
             return;
         }
     }
 
     // Find a width that does not cross GRF from <8;8,1>, <4;4,1>, to <2;2,1>
-    auto getWidth = [=](unsigned offset, unsigned eltSize) -> unsigned
+    auto getWidth = [=, &builder](unsigned offset, unsigned eltSize) -> unsigned
     {
         unsigned Widths[] = { 8, 4, 2 };
         for (auto w : Widths)
@@ -7367,13 +7611,13 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
             if (w > inst->getExecSize())
                 continue;
 
-            if (w * eltSize > numEltPerGRF<Type_UB>())
+            if (w * eltSize > builder.numEltPerGRF<Type_UB>())
             {
                 // <8;8,1> is not allowed for 64-bit type
                 continue;
             }
 
-            if (endOffset <= numEltPerGRF<Type_UB>() ||
+            if (endOffset <= builder.numEltPerGRF<Type_UB>() ||
                 subRegOffset % (w * eltSize) == 0)
             {
                 return w;
@@ -7388,18 +7632,18 @@ void G4_SrcRegRegion::rewriteContiguousRegion(IR_Builder& builder, uint16_t opNu
 
     if (builder.newTernaryStride() && isAlign1Ternary && (w == 2 || w == 0) && opNum != 2)
     {
-        setRegion(builder.getRegionStride1(), true);
+        setRegion(builder, builder.getRegionStride1(), true);
         return;
     }
 
     if (w)
     {
-        setRegion(builder.createRegionDesc(w, w, 1), true);
+        setRegion(builder, builder.createRegionDesc(w, w, 1), true);
     }
     else if (isAlign1Ternary)
     {
         // binary encoding asserts on <1;1,0> region for 3-src inst, so force change it to <2;2,1>
-        setRegion(builder.createRegionDesc(2, 2, 1), true);
+        setRegion(builder, builder.createRegionDesc(2, 2, 1), true);
     }
 }
 
@@ -7581,6 +7825,11 @@ bool G4_INST::supportsNullDst() const
     if (isSend())
     {
         return true;
+    }
+    if (builder.getPlatform() >= Xe_PVC && dst->getTypeSize() == 1)
+    {
+        // null:b not supported
+        return false;
     }
     return getNumSrc() != 3 && !(op == G4_pln && !builder.doPlane());
 }
@@ -7854,6 +8103,34 @@ bool G4_INST::canDstBeAcc() const
                 (dst->getType() == Type_F || dst->getType() == Type_HF);
             const bool allowedDFCombination = getSrc(0)->getType() == Type_DF &&
                 dst->getType() == Type_DF;
+
+            if (builder.restrictedACCRestrictions() && allowedFCombination)
+            {
+                uint16_t dstStride = dst->getHorzStride();
+                uint16_t srcStride = 0;
+                if (getSrc(0)->isSrcRegRegion())
+                {
+                    G4_SrcRegRegion* src = getSrc(0)->asSrcRegRegion();
+                    const RegionDesc* region = src->getRegion();
+
+                    if (!region->isSingleStride(execSize, srcStride))
+                    {
+                        return false;
+                    }
+
+                    //The bitmapping is model by the element size * element stride.
+                    // No matter dst is float or half float.
+                    // Pack and un-pack happen only in the destination register, so no matter dst is F or HF, it's not allowed to be replaced with ACC if bitmapping swizzles.
+                    // If both dst and src are HF type, swizzle is not allowed as well.
+                    //FIXME, mov (16|M0)   acc0.0<1>:f, r28<1;1,0>:hf can be passed in HW.
+                    if ((dst->getType() != src->getType() || dst->getType() == Type_HF) &&
+                        (dstStride * dst->getTypeSize() != srcStride * src->getTypeSize()))
+                    {
+                        return false;
+                    }
+                }
+            }
+
             if (!allowedICombination && !allowedFCombination && !allowedDFCombination)
             {
                 return false;
@@ -7887,7 +8164,7 @@ bool G4_INST::canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const
     int srcId = getSrcNum(opndNum);
     assert((srcId == 0 || srcId == 1 || srcId == 2) && "must be either src0, src1 or src2");
 
-    if (!builder.hasSrc2Acc() && srcId == 2)
+    if (!builder.relaxedACCRestrictions3() && srcId == 2)
     {
         return false;
     }
@@ -7979,6 +8256,31 @@ bool G4_INST::canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const
                 (dst->getType() == Type_F || dst->getType() == Type_HF);
             const bool allowedDFCombination = src->getType() == Type_DF &&
                 dst->getType() == Type_DF;
+
+            if (builder.restrictedACCRestrictions() && allowedFCombination)
+            {
+                uint16_t dstStride = dst->getHorzStride();
+                uint16_t srcStride = 0;
+                const RegionDesc* region = src->getRegion();
+
+                if (!region->isSingleStride(execSize, srcStride))
+                {
+                    return false;
+                }
+
+                //The bitmapping is model by the element size * element stride.
+                //When dst type is different with src type, or both are HF type.
+                //FIXME, currently, r35 in following case cannot be replaced with acc
+                // mov (16|M0) r35.0<1>:f r25.0<1;1,0>:f
+                // mov (16|M0) r36.0<1>:hf r35.0<1;1,0>:f
+                // the restriction may be relaxed after validation of HW team
+                if ((dst->getType() != src->getType() || dst->getType() == Type_HF) &&
+                    (dstStride * dst->getTypeSize() != srcStride * src->getTypeSize()))
+                {
+                    return false;
+                }
+            }
+
             if (!allowedICombination && !allowedFCombination && !allowedDFCombination)
             {
                 return false;
@@ -8006,6 +8308,10 @@ bool G4_INST::canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const
     case G4_pln:
         return builder.doPlane() && src->getModifier() == Mod_src_undef;
     case G4_dp4a:
+        if (builder.restrictedACCRestrictions())
+        {
+            return srcId == 0;
+        }
         return builder.relaxedACCRestrictions2();
     case G4_bfn:
     case G4_add3:
@@ -8021,9 +8327,9 @@ bool G4_INST::canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const
     G4_SrcRegRegion* src = getSrc(srcId)->asSrcRegRegion();
 
     // dst must be GRF-aligned
-    if ((getDst()->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
+    if ((getDst()->getLinearizedStart() % getBuilder().numEltPerGRF<Type_UB>()) != 0)
     {
-        if (!(isMixedMode() && builder.getPlatform() == XeHP_SDV))
+        if (!(isMixedMode() && builder.getPlatform() == Xe_XeHPSDV))
             return false;
     }
 
@@ -8040,7 +8346,7 @@ bool G4_INST::canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const
         {
             //When source is float or half float from accumulator register and destination is half float with a stride of 1,
             //the source must register aligned. i.e., source must have offset zero.
-            if ((src->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
+            if ((src->getLinearizedStart() % getBuilder().numEltPerGRF<Type_UB>()) != 0)
             {
                 return false;
             }
@@ -8141,6 +8447,93 @@ G4_INST* G4_InstSend::cloneInst()
     return newInst;
 }
 
+G4_InstIntrinsic::G4_InstIntrinsic(
+    const IR_Builder& builder,
+    G4_Predicate* prd,
+    Intrinsic intrinId,
+    G4_ExecSize execSize,
+    G4_DstRegRegion* d,
+    G4_Operand* s0,
+    G4_Operand* s1,
+    G4_Operand* s2,
+    G4_Operand* s3,
+    G4_Operand* s4,
+    G4_Operand* s5,
+    G4_Operand* s6,
+    G4_Operand* s7,
+    G4_InstOpts opt) :
+    G4_INST(builder, prd, G4_intrinsic, nullptr, g4::NOSAT, execSize, d, nullptr, nullptr, nullptr, opt),
+    intrinsicId(intrinId), tmpGRFStart(-1), tmpAddrStart(-1), tmpFlagStart(-1)
+{
+    srcs[0] = s0;
+    srcs[1] = s1;
+    srcs[2] = s2;
+    srcs[3] = s3;
+    srcs[4] = s4;
+    srcs[5] = s5;
+    srcs[6] = s6;
+    srcs[7] = s7;
+
+    resetRightBound(s0);
+    resetRightBound(s1);
+    resetRightBound(s2);
+    resetRightBound(s3);
+    resetRightBound(s4);
+    resetRightBound(s5);
+    resetRightBound(s6);
+    resetRightBound(s7);
+
+    associateOpndWithInst(s0, this);
+    associateOpndWithInst(s1, this);
+    associateOpndWithInst(s2, this);
+    associateOpndWithInst(s3, this);
+    associateOpndWithInst(s4, this);
+    associateOpndWithInst(s5, this);
+    associateOpndWithInst(s6, this);
+    associateOpndWithInst(s7, this);
+}
+
+G4_Operand* G4_InstIntrinsic::getIntrinsicSrc(unsigned i) const
+{
+    MUST_BE_TRUE(i < G4_MAX_INTRINSIC_SRCS, ERROR_INTERNAL_ARGUMENT);
+    return srcs[i];
+}
+
+G4_Operand* G4_InstIntrinsic::getOperand(Gen4_Operand_Number opnd_num) const
+{
+    switch (opnd_num) {
+    case Opnd_src0: return srcs[0];
+    case Opnd_src1: return srcs[1];
+    case Opnd_src2: return srcs[2];
+    case Opnd_src3: return srcs[3];
+    case Opnd_src4: return srcs[4];
+    case Opnd_src5: return srcs[5];
+    case Opnd_src6: return srcs[6];
+    case Opnd_src7: return srcs[7];
+    default:
+        MUST_BE_TRUE(0, "Operand number is out of range.");
+        break;
+    }
+    return NULL;
+}
+
+void G4_InstIntrinsic::setIntrinsicSrc(G4_Operand* opnd, unsigned i)
+{
+    MUST_BE_TRUE(i < G4_MAX_INTRINSIC_SRCS, ERROR_INTERNAL_ARGUMENT);
+
+    if (srcs[i] != NULL)
+    {
+        if (srcs[i]->getInst() == (G4_INST *)this)
+        {
+            srcs[i]->setInst(NULL);
+        }
+    }
+    srcs[i] = opnd;
+
+    associateOpndWithInst(opnd, (G4_INST*)this);
+    resetRightBound(opnd);
+}
+
 G4_INST* G4_InstIntrinsic::cloneInst()
 {
     auto nonConstBuilder = const_cast<IR_Builder*>(&builder);
@@ -8152,6 +8545,62 @@ G4_INST* G4_InstIntrinsic::cloneInst()
 
     return nonConstBuilder->createInternalIntrinsicInst(prd, getIntrinsicId(), getExecSize(), dst,
         src0, src1, src2, option);
+}
+
+static void computeSpillFillOperandBound(G4_Operand* opnd, unsigned int LB, int numReg, const IR_Builder& builder)
+{
+    if (numReg == 0)
+    {
+        return;
+    }
+
+    // read/write in units of GRF.
+    unsigned RB = std::min(opnd->getTopDcl()->getByteSize(),
+        LB + numReg * builder.numEltPerGRF<Type_UB>()) - 1;
+
+    unsigned NBytes = RB - LB + 1;
+    opnd->setBitVecFromSize(NBytes);
+    opnd->setRightBound(RB);
+}
+
+uint32_t G4_SpillIntrinsic::getOffsetInBytes() const
+{
+    return offset * getBuilder().getGRFSize();
+}
+
+void G4_SpillIntrinsic::computeRightBound(G4_Operand* opnd)
+{
+    if (opnd) {
+        uint16_t numReg = 0;
+        if (opnd == getSrc(1))
+        {
+            numReg = asSpillIntrinsic()->getNumRows();
+        }
+        else if (opnd->isSrcRegRegion() && opnd == getSrc(0))
+        {
+            numReg = 1;
+        }
+        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg, getBuilder());
+    }
+}
+
+uint32_t G4_FillIntrinsic::getOffsetInBytes() const
+{
+    return offset * getBuilder().getGRFSize();
+}
+
+void G4_FillIntrinsic::computeRightBound(G4_Operand* opnd)
+{
+    if (opnd) {
+        uint16_t numReg = 0;
+        if (opnd == getDst()) {
+            numReg = asFillIntrinsic()->getNumRows();
+        } else if (opnd->isSrcRegRegion() &&
+                   (opnd == getSrc(0) || opnd == getSrc(1))) {
+            numReg = 1;
+        }
+        computeSpillFillOperandBound(opnd, opnd->left_bound, numReg, getBuilder());
+    }
 }
 
 bool RegionDesc::isLegal(unsigned vs, unsigned w, unsigned hs)
@@ -8326,6 +8775,8 @@ uint8_t G4_InstDpas::getOpsPerChan() const
 {
     if (isBF16() || isFP16())
         return OPS_PER_CHAN_2;
+    else if (isTF32())
+        return OPS_PER_CHAN_1;
     else if (is2xInt8())
         return OPS_PER_CHAN_8;
     // int8
@@ -8351,7 +8802,7 @@ void G4_InstDpas::computeRightBound(G4_Operand* opnd)
         if (opnd == dst || (opnd == srcs[0] && !opnd->isNullReg()))
         {
             // dst and src0 are always packed, and RB is exec_size * type_size * rep_count
-            auto opndSize = builder.getNativeExecSize() * opnd->getTypeSize() * C;
+            auto opndSize = dpasInst->getExecSize() * opnd->getTypeSize() * C;
             computeDpasOperandBound(opnd, opnd->left_bound, opnd->left_bound + opndSize - 1);
         }
         else if (opnd == srcs[1])
@@ -8363,7 +8814,7 @@ void G4_InstDpas::computeRightBound(G4_Operand* opnd)
             uint32_t bytesPerLaneForAllDepth = bytesPerLane * src1_D;
             bytesPerLaneForAllDepth = ((bytesPerLaneForAllDepth + 3) / 4) * 4;
 
-            uint32_t bytes = bytesPerLaneForAllDepth * builder.getNativeExecSize();
+            uint32_t bytes = bytesPerLaneForAllDepth * dpasInst->getExecSize();
             computeDpasOperandBound(opnd, opnd->left_bound, opnd->left_bound + bytes - 1);
         }
         else if (opnd == srcs[2])
@@ -8398,3 +8849,4 @@ void G4_INST::inheritSWSBFrom(const G4_INST* inst)
     SWSBTokenType type = inst->getTokenType();
     setTokenType(type);
 }
+

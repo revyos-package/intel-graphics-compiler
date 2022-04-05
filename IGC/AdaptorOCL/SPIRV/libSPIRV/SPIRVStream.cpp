@@ -181,6 +181,9 @@ SPIRVDecoder::getEntry() {
     Entry->setWordCount(WordCount);
     IS >> *Entry;
 
+    if (M.getErrorLog().getErrorCode() == SPIRVEC_UnsupportedSPIRVOpcode)
+      return nullptr;
+
     if ((isModuleScopeAllowedOpCode(OpCode) && !Scope) ||
       // No need to attach scope to debug info extension operations
       (Entry->hasNoScope()))
@@ -204,6 +207,31 @@ SPIRVDecoder::validate()const {
   IGC_ASSERT_MESSAGE(OpCode != OpNop, "Invalid op code");
   IGC_ASSERT_MESSAGE(WordCount, "Invalid word count");
   IGC_ASSERT_MESSAGE(!IS.bad(), "Bad iInput stream");
+}
+
+// Read the next word from the stream and if OpCode matches the argument,
+// decode the whole instruction. Multiple such instructions are possible. If
+// OpCode doesn't match the argument, set position of the next character to be
+// extracted from the stream to the beginning of the non-matching instruction.
+// Returns vector of extracted instructions.
+// Used to decode SPIRVTypeStructContinuedINTEL,
+// SPIRVConstantCompositeContinuedINTEL and
+// SPIRVSpecConstantCompositeContinuedINTEL.
+std::vector<SPIRVEntry*>
+SPIRVDecoder::getContinuedInstructions(const Op ContinuedOpCode) {
+    std::vector<SPIRVEntry*> ContinuedInst;
+    std::streampos Pos = IS.tellg(); // remember position
+    getWordCountAndOpCode();
+    while (OpCode == ContinuedOpCode) {
+        SPIRVEntry* Entry = getEntry();
+        assert(Entry && "Failed to decode entry! Invalid instruction!");
+        M.add(Entry);
+        ContinuedInst.push_back(Entry);
+        Pos = IS.tellg();
+        getWordCountAndOpCode();
+    }
+    IS.seekg(Pos); // restore position
+    return ContinuedInst;
 }
 
 }

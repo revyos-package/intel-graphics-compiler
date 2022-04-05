@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -143,25 +143,30 @@ STRUCT: SPatchThreadPayload
 struct SPatchThreadPayload :
        SPatchItemHeader
 {
-    uint32_t    HeaderPresent;
-    uint32_t    LocalIDXPresent;
-    uint32_t    LocalIDYPresent;
-    uint32_t    LocalIDZPresent;
-    uint32_t    LocalIDFlattenedPresent;
-    uint32_t    IndirectPayloadStorage;
-    uint32_t    UnusedPerThreadConstantPresent;
-    uint32_t    GetLocalIDPresent;
-    uint32_t    GetGroupIDPresent;
-    uint32_t    GetGlobalOffsetPresent;
-    uint32_t    StageInGridOriginPresent;
-    uint32_t    StageInGridSizePresent;
-    uint32_t    OffsetToSkipPerThreadDataLoad;
-    uint32_t    OffsetToSkipSetFFIDGP;
-    uint32_t    PassInlineData;
+    uint32_t HeaderPresent;
+    uint32_t LocalIDXPresent;
+    uint32_t LocalIDYPresent;
+    uint32_t LocalIDZPresent;
+    uint32_t LocalIDFlattenedPresent;
+    uint32_t IndirectPayloadStorage;
+    uint32_t UnusedPerThreadConstantPresent;
+    uint32_t GetLocalIDPresent;
+    uint32_t GetGroupIDPresent;
+    uint32_t GetGlobalOffsetPresent;
+    uint32_t StageInGridOriginPresent;
+    uint32_t StageInGridSizePresent;
+    uint32_t OffsetToSkipPerThreadDataLoad;
+    uint32_t OffsetToSkipSetFFIDGP;
+    uint32_t PassInlineData;
+    uint32_t RTStackIDPresent;
+    uint32_t generateLocalID;
+    uint32_t emitLocalMask;
+    uint32_t walkOrder;
+    uint32_t tileY;
 };
 
 // Update CURRENT_ICBE_VERSION when modifying the patch list
-static_assert(sizeof(SPatchThreadPayload) == (60 + sizeof(SPatchItemHeader)), "The size of SPatchThreadPayload is not what is expected");
+static_assert(sizeof(SPatchThreadPayload) == (80 + sizeof(SPatchItemHeader)), "The size of SPatchThreadPayload is not what is expected");
 
 /*****************************************************************************\
 STRUCT: SPatchExecutionEnvironment
@@ -193,16 +198,18 @@ struct SPatchExecutionEnvironment :
     uint32_t    WorkgroupWalkOrderDims; // dim0 : [0 : 1]; dim1 : [2 : 3]; dim2 : [4 : 5]
     uint32_t    HasGlobalAtomics;
     uint32_t    HasDPAS;
-    uint32_t    reserved1;
-    uint32_t    reserved2;
+    uint32_t    HasRTCalls; // Raytracing extensions used in kernel.
+    uint32_t    NumThreadsRequired;
     uint32_t    StatelessWritesCount;
     uint32_t    IndirectStatelessCount;
     uint32_t    UseBindlessMode;
+    uint32_t    HasStackCalls;
     uint64_t    SIMDInfo;
+    uint32_t    RequireDisableEUFusion;
 };
 
 // Update CURRENT_ICBE_VERSION when modifying the patch list
-static_assert(sizeof(SPatchExecutionEnvironment) == (124 + sizeof(SPatchItemHeader)), "The size of SPatchExecutionEnvironment is not what is expected");
+static_assert(sizeof(SPatchExecutionEnvironment) == (132 + sizeof(SPatchItemHeader)), "The size of SPatchExecutionEnvironment is not what is expected");
 
 /*****************************************************************************\
 STRUCT: SPatchString
@@ -443,6 +450,18 @@ struct SPatchAllocateSyncBuffer :
 // Update CURRENT_ICBE_VERSION when modifying the patch list
 static_assert( sizeof( SPatchAllocateSyncBuffer ) == ( 12 + sizeof( SPatchItemHeader ) ), "The size of SPatchAllocateSyncBuffer is not what is expected" );
 
+// Raytracing
+struct SPatchAllocateRTGlobalBuffer :
+    SPatchItemHeader
+{
+    uint32_t   SurfaceStateHeapOffset;
+    uint32_t   DataParamOffset;
+    uint32_t   DataParamSize;
+};
+
+// Update CURRENT_ICBE_VERSION when modifying the patch list
+static_assert( sizeof( SPatchAllocateRTGlobalBuffer ) == ( 12 + sizeof( SPatchItemHeader ) ), "The size of SPatchAllocateRTGlobalBuffer is not what is expected" );
+
 /*****************************************************************************\
 STRUCT: SPatchAllocateStatelessPrivateSurface
 \*****************************************************************************/
@@ -557,6 +576,17 @@ struct SPatchFunctionTableInfo :
 // Update CURRENT_ICBE_VERSION when modifying the patch list
 static_assert(sizeof(SPatchFunctionTableInfo) == (4 + sizeof(SPatchItemHeader)), "The size of SPatchFunctionTableInfo is not what is expected");
 
+/*****************************************************************************\
+ STRUCT: SPatchGlobalHostAccessTableInfo
+ \*****************************************************************************/
+struct SPatchGlobalHostAccessTableInfo :
+    SPatchItemHeader
+{
+    uint32_t   NumEntries;
+};
+
+// Update CURRENT_ICBE_VERSION when modifying the patch list
+static_assert(sizeof(SPatchGlobalHostAccessTableInfo) == (4 + sizeof(SPatchItemHeader)), "The size of SPatchGlobalHostAccessTableInfo is not what is expected");
 
 } // namespace
 #pragma pack( pop )

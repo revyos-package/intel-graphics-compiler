@@ -53,6 +53,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -60,9 +61,11 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PatternMatch.h"
+#include <llvm/InitializePasses.h>
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "Probe/Assertion.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -83,6 +86,7 @@ class GenXReduceIntSize : public FunctionPass {
     ValueNumBits(unsigned NumBits, bool IsSignExtended)
         : NumBits(NumBits), IsSignExtended(IsSignExtended) {}
   };
+  DominatorTree *DT = nullptr;
   bool Modified = false;
 public:
   static char ID;
@@ -105,6 +109,7 @@ private:
 char GenXReduceIntSize::ID = 0;
 namespace llvm { void initializeGenXReduceIntSizePass(PassRegistry &); }
 INITIALIZE_PASS_BEGIN(GenXReduceIntSize, "GenXReduceIntSize", "GenXReduceIntSize", false, false)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(GenXReduceIntSize, "GenXReduceIntSize", "GenXReduceIntSize", false, false)
 
 class ExtOperator : public Operator {
@@ -132,6 +137,8 @@ FunctionPass *llvm::createGenXReduceIntSizePass()
 
 void GenXReduceIntSize::getAnalysisUsage(AnalysisUsage &AU) const
 {
+  AU.addRequired<DominatorTreeWrapperPass>();
+  AU.addPreserved<DominatorTreeWrapperPass>();
   AU.setPreservesCFG();
 }
 
@@ -141,6 +148,8 @@ void GenXReduceIntSize::getAnalysisUsage(AnalysisUsage &AU) const
  */
 bool GenXReduceIntSize::runOnFunction(Function &F)
 {
+  DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+
   // Reverse scan: This does a postordered depth first traversal of the CFG,
   // processing instructions within a basic block in reverse, to ensure that we
   // see a def after its uses (ignoring phi node uses).
@@ -711,15 +720,13 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
     goto binop;
   case Instruction::Sub: {
     Value *A;
-    const APInt *Val;
-    // Transforms (sub (zext A), (zext B)) to (zext (sub A, B)) if A is proved
-    // to be greater than B.
-    if (match(Inst, m_Sub(m_APInt(Val), m_ZExt(m_Value(A))))) {
+    Value *B;
+    // Transforms (sub nuw (zext A), (zext B)) to (zext (sub A, B))
+    if (match(Inst, m_NUWSub(m_ZExt(m_Value(A)), m_ZExt(m_Value(B))))) {
       unsigned ASize = A->getType()->getScalarSizeInBits();
-      if (ASize <= 16 && Val->trunc(ASize).isMaxValue()) {
-        TruncBits = 16;
-        goto binop;
-      }
+      unsigned BSize = B->getType()->getScalarSizeInBits();
+      TruncBits = std::max(ASize, BSize);
+      goto binop;
     }
     break;
   }
@@ -907,6 +914,7 @@ Instruction *GenXReduceIntSize::forwardProcessInst(Instruction *Inst) {
       Extended->setDebugLoc(Inst->getDebugLoc());
       LLVM_DEBUG(dbgs() << "GenXReduceIntSize::forward: Extended: "
           << *Extended << "\n");
+      replaceAllDbgUsesWith(*Inst, *Extended, *Inst, *DT);
     }
     *Inst->use_begin() = Extended;
   }
@@ -971,8 +979,9 @@ GenXReduceIntSize::ValueNumBits GenXReduceIntSize::getValueNumBits(
             + PreferSigned, /*IsSignExtended=*/PreferSigned);
       if (Val == std::numeric_limits<int64_t>::min())
         return ValueNumBits(64, /*isSignExtended=*/false);
-      return ValueNumBits(64 - countLeadingZeros((uint64_t)-Val, ZB_Undefined),
-            /*IsSignExtended=*/true);
+      unsigned const BitsWithSignBit =
+          64 - countLeadingOnes(static_cast<uint64_t>(Val), ZB_Undefined) + 1;
+      return ValueNumBits(BitsWithSignBit, true);
     }
     return NumBits;
   }

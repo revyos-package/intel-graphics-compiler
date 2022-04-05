@@ -314,11 +314,15 @@ namespace IGC {
             case ISA_TYPE_Q: return "q";
             case ISA_TYPE_UV: return "uv";
             case ISA_TYPE_HF: return "hf";
+            case ISA_TYPE_BF: return "bf";
             default: return "illegal";
             }
         }
         static uint GetCISADataTypeSize(VISA_Type type);
         static e_alignment GetCISADataTypeAlignment(VISA_Type type);
+
+        bool isQType() const { return (m_type == ISA_TYPE_UQ || m_type == ISA_TYPE_Q); }
+        VISA_Type GetDTypeFromQType() const { return (m_type == ISA_TYPE_UQ ? ISA_TYPE_UD : ISA_TYPE_D); }
 
     private:
         const uint64_t      m_immediateValue;

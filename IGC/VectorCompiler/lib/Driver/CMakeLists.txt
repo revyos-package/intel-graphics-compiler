@@ -9,7 +9,6 @@
 set(DRIVER_SOURCES
   Driver.cpp
   SPIRVWrapper.cpp
-  VCPassManager.cpp
   )
 
 add_library(VCDriver ${DRIVER_SOURCES})
@@ -35,6 +34,4 @@ if(LLVM_ON_UNIX)
   target_link_libraries(VCDriver dl)
 endif()
 
-if(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_VC)
-  target_link_libraries(VCDriver LLVMSPIRVLib)
-endif()
+target_link_libraries(VCDriver LLVMSPIRVLib)

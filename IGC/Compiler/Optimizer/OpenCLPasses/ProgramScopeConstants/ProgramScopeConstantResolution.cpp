@@ -58,6 +58,14 @@ static bool needRunConservatively(const Module& M) {
     return false;
 }
 
+static bool isLoweredToRelocation(const GlobalVariable *GV)
+{
+  StringRef name = GV->getName();
+  if (name == "__SubDeviceID" || name == "__MaxHWThreadIDPerSubDevice")
+      return true;
+  return false;
+}
+
 bool ProgramScopeConstantResolution::runOnModule(Module& M)
 {
     LLVMContext& C = M.getContext();
@@ -69,12 +77,13 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
         // There are no constants, or no constants are used, so we have nothing to do.
         return false;
     }
-    if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
-        modMD->compOpt.EnableZEBinary)
+
+    if (IGC_IS_FLAG_ENABLED(EnableZEBinary) || modMD->compOpt.EnableZEBinary)
     {
         // ZEBinary always relies on relocation, so we can ignore this pass
         return false;
     }
+
 
     if (RunCautiously) {
         if (!needRunConservatively(M))
@@ -100,6 +109,10 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
         GlobalVariable* pGlobalVar = &(*I);
         PointerType* ptrType = cast<PointerType>(pGlobalVar->getType());
         IGC_ASSERT_MESSAGE(ptrType, "The type of a global variable must be a pointer type");
+
+        // Do not convert future relocations to implict argument.
+        if (isLoweredToRelocation(pGlobalVar))
+            continue;
 
         // Pointer's address space should be either constant or global
         const unsigned AS = ptrType->getAddressSpace();
@@ -161,11 +174,8 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
 
             Function* userFunc = user->getParent()->getParent();
 
-            // Don't have implicit arg if doing relocation
-            if (userFunc->hasFnAttribute("visaStackCall"))
-                continue;
-            // Skip functions called from function marked with IndirectlyCalled attribute
-            if (AddImplicitArgs::hasIndirectlyCalledParent(userFunc))
+            // Skip functions called from function marked with stackcall attribute
+            if (AddImplicitArgs::hasStackCallInCG(userFunc))
                 continue;
 
             // Skip unused internal functions.
@@ -176,6 +186,10 @@ bool ProgramScopeConstantResolution::runOnModule(Module& M)
             }
 
             ImplicitArgs implicitArgs(*userFunc, mdUtils);
+
+            // Skip if this function does not have the implicit arg
+            if (!implicitArgs.isImplicitArgExist(argType))
+                continue;
 
             // Find the implicit argument representing this constant.
             IGC_ASSERT_MESSAGE(userFunc->arg_size() >= implicitArgs.size(), "Function arg size does not match meta data args.");

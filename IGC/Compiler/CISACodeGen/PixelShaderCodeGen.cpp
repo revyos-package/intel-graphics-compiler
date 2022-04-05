@@ -264,6 +264,24 @@ void CPixelShader::AllocatePSPayload()
     // allocate space for NOS constants and pushed constants
     AllocateConstants3DShader(offset);
 
+    // RPC0 and subsequent regs: per-primitive constant data
+    for (uint index = 0; index < perPrimitiveSetup.size(); index++)
+    {
+        CVariable* var = perPrimitiveSetup[index];
+        if (var && var->GetAlias() == NULL)
+        {
+            AllocateInput(var, offset);
+        }
+
+        if (IsDualSIMD8())
+        {
+            offset += 2 * getGRFSize();
+        }
+        else
+        {
+            offset += getGRFSize();
+        }
+    }
 
     // Allocate size for attributes coming from VS
     IGC_ASSERT(offset % getGRFSize() == 0);
@@ -338,7 +356,6 @@ void CPixelShader::AllocatePSPayload()
         return;
     }
 
-    offset = payloadEnd;
 
     // create output registers for coarse phase
     for (const auto& it : m_CoarseOutput)
@@ -503,6 +520,37 @@ CVariable* CPixelShader::GetBaryRegLoweredFloat(e_interpolation mode)
 }
 
 
+CVariable* CPixelShader::GetPerPrimitiveSetupVar(uint inputIndex)
+{
+
+    // A single setupVar holds up to GRF of per-primitive data.
+    const uint grfSizeInDwords = getGRFSize() / sizeof(DWORD);
+    const uint setupIndex = inputIndex / grfSizeInDwords;
+    if (setupIndex >= perPrimitiveSetup.size())
+    {
+        perPrimitiveSetup.resize(setupIndex + 1, nullptr);
+    }
+
+    CVariable* inputVar = perPrimitiveSetup[setupIndex];
+    if (inputVar == nullptr)
+    {
+        if (IsDualSIMD8())
+        {
+            // In dual-simd8 mode per-primitive data is interleaved.
+            // Each piece of 32 bytes of data for Primitive0 is followed by
+            // 32 bytes of data for Primitve1.
+
+            // Use 2 GRFs per 32 bytes of data.
+            inputVar = GetNewVariable(16, ISA_TYPE_F, EALIGN_GRF, CName::NONE);
+        }
+        else
+        {
+            inputVar = GetNewVariable(grfSizeInDwords, ISA_TYPE_F, EALIGN_GRF, CName::NONE);
+        }
+        perPrimitiveSetup[setupIndex] = inputVar;
+    }
+    return inputVar;
+}
 
 CVariable* CPixelShader::GetInputDelta(uint index, bool loweredInput)
 {
@@ -513,7 +561,7 @@ CVariable* CPixelShader::GetInputDelta(uint index, bool loweredInput)
         {
             if (index % 2 == 0)
             {
-                inputVar = GetNewVariable(8, ISA_TYPE_F, EALIGN_GRF, true, CName::NONE);
+                inputVar = GetNewVariable(8, ISA_TYPE_F, EALIGN_GRF, true, "InputDelta" + std::to_string(index));
                 setup[index + 1] = GetNewAlias(inputVar, ISA_TYPE_F, 16, 4);
             }
             else
@@ -523,7 +571,7 @@ CVariable* CPixelShader::GetInputDelta(uint index, bool loweredInput)
         }
         else
         {
-            inputVar = GetNewVariable(4, ISA_TYPE_F, EALIGN_OWORD, true, CName::NONE);
+            inputVar = GetNewVariable(4, ISA_TYPE_F, EALIGN_OWORD, true, "InputDelta" + std::to_string(index));
         }
         setup[index] = inputVar;
     }
@@ -827,6 +875,8 @@ void CPixelShader::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
 {
     const PixelShaderInfo& psInfo = GetContext()->getModuleMetaData()->psInfo;
 
+    pKernelProgram->m_StagingCtx = GetContext()->m_StagingCtx;
+    pKernelProgram->m_RequestStage2 = RequestStage2(GetContext()->m_CgFlag, GetContext()->m_StagingCtx);
     pKernelProgram->blendToFillEnabled = psInfo.blendToFillEnabled;
     pKernelProgram->forceEarlyZ = psInfo.forceEarlyZ;
 
@@ -869,6 +919,12 @@ void CPixelShader::FillProgram(SPixelShaderKernelProgram* pKernelProgram)
         pKernelProgram->primIdLocation = int_cast<uint>(
             mdconst::dyn_extract<ConstantInt>(primIdNod->getOperand(0)->getOperand(0))->getZExtValue());
         pKernelProgram->hasPrimID = true;
+    }
+    if (NamedMDNode* PointCoordNod = entry->getParent()->getNamedMetadata("PointCoordLocation"))
+    {
+        pKernelProgram->pointCoordLocation = int_cast<uint>(
+            mdconst::dyn_extract<ConstantInt>(PointCoordNod->getOperand(0)->getOperand(0))->getZExtValue());
+        pKernelProgram->hasPointCoord = true;
     }
 
     pKernelProgram->posXYOffsetEnable = m_pPositionXYOffset ? true : false;
@@ -1257,6 +1313,8 @@ bool CPixelShader::CompileSIMDSize(SIMDMode simdMode, EmitPass& EP, llvm::Functi
     {
         if (simdMode == SIMDMode::SIMD32)
             return false;
+        if (EP.m_ShaderDispatchMode == ShaderDispatchMode::DUAL_SIMD8)
+            return false;
     }
 
     if (m_HasoStencil && !ctx->platform.supportsStencil(simdMode))
@@ -1557,8 +1615,8 @@ void CodeGen(PixelShaderContext* ctx)
 
         if (coarsePhase && pixelPhase)
         {
-            SPixelShaderKernelProgram outputs[2];
-            memset(&outputs, 0, 2 * sizeof(SPixelShaderKernelProgram));
+            SPixelShaderKernelProgram outputs[2] = { SPixelShaderKernelProgram(), SPixelShaderKernelProgram() };
+            //memset(&outputs, 0, 2 * sizeof(SPixelShaderKernelProgram));
 
             for (unsigned int i = 0; i < numStage; i++)
             {
@@ -1614,7 +1672,6 @@ void CodeGen(PixelShaderContext* ctx)
         COMPILER_SHADER_STATS_DEL(shaders[pFunc]->m_shaderStats);
         delete shaders[pFunc];
     }
-
 }
 
 void CPixelShader::CreatePassThroughVar()

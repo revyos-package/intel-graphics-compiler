@@ -196,11 +196,14 @@ namespace IGC
 
         void IGC_DEBUG_API_CALL SetShaderOutputName( OutputName name );
 
+        void IGC_DEBUG_API_CALL SetShaderOverridePath(OutputFolderName pOutputFolderName);
         OutputFolderName IGC_DEBUG_API_CALL GetShaderOverridePath();
         /// Get the name for the output folder
         OutputFolderName IGC_DEBUG_API_CALL GetShaderOutputFolder();
 
         OutputName IGC_DEBUG_API_CALL GetShaderOutputName();
+
+        OutputName IGC_DEBUG_API_CALL GetFunctionDebugFile();
 
         /// Ask the build to identify itself
         VersionInfo IGC_DEBUG_API_CALL GetVersionInfo();

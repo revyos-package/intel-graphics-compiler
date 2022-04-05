@@ -27,6 +27,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/InstVisitor.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/Inliner.h"
 #include "llvmWrapper/Transforms/Utils/Cloning.h"
@@ -155,16 +156,17 @@ void GenXCodeGenModule::processFunction(Function& F)
     // its address for each caller. This greatly saves on compile time when there are many function
     // groups that all call the same function.
     auto cloneTheshold = IGC_GET_FLAG_VALUE(FunctionCloningThreshold);
-    if (F.hasFnAttribute("visaStackCall") &&
-        cloneTheshold > 0 && CallerFGs.size() > cloneTheshold)
+    if (F.hasFnAttribute("visaStackCall") && cloneTheshold > 0 && CallerFGs.size() > cloneTheshold)
     {
         auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        auto IFG = FGA->getIndirectCallGroup();
-        IGC_ASSERT(IFG);
-        F.addFnAttr("referenced-indirectly");
-        pCtx->m_enableFunctionPointer = true;
-        FGA->addToFunctionGroup(&F, IFG, &F);
-        return;
+        auto IFG = FGA->getOrCreateIndirectCallGroup(F.getParent());
+        if (IFG)
+        {
+            F.addFnAttr("referenced-indirectly");
+            pCtx->m_enableFunctionPointer = true;
+            FGA->addToFunctionGroup(&F, IFG, &F);
+            return;
+        }
     }
 
     bool FirstPair = true;
@@ -228,22 +230,25 @@ void GenXCodeGenModule::processSCC(std::vector<llvm::CallGraphNode*>* SCCNodes)
     }
     IGC_ASSERT(CallerFGs.size() >= 1);
 
-    // Use the same cloning threshold for single function SCCs, but making every stack function
+    // Use the same cloning threshold for single function SCCs, but making every function
     // in the SCC indirect calls to prevent cloning the entire SCC N times.
     auto cloneTheshold = IGC_GET_FLAG_VALUE(FunctionCloningThreshold);
     if (cloneTheshold > 0 && CallerFGs.size() > cloneTheshold)
     {
         auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        for (CallGraphNode* Node : (*SCCNodes))
+        auto Mod = (*SCCNodes).front()->getFunction()->getParent();
+        auto IFG = FGA->getOrCreateIndirectCallGroup(Mod);
+        if (IFG)
         {
-            Function* F = Node->getFunction();
-            auto IFG = FGA->getIndirectCallGroup();
-            IGC_ASSERT(IFG && F->hasFnAttribute("visaStackCall"));
-            F->addFnAttr("referenced-indirectly");
-            pCtx->m_enableFunctionPointer = true;
-            FGA->addToFunctionGroup(F, IFG, F);
+            for (CallGraphNode* Node : (*SCCNodes))
+            {
+                Function* F = Node->getFunction();
+                F->addFnAttr("referenced-indirectly");
+                pCtx->m_enableFunctionPointer = true;
+                FGA->addToFunctionGroup(F, IFG, F);
+            }
+            return;
         }
-        return;
     }
 
     bool FirstPair = true;
@@ -424,14 +429,8 @@ bool GenXCodeGenModule::runOnModule(Module& M)
 
     this->pMdUtils->save(M.getContext());
 
-    // Check and set stack call flag for each group
-    FGA->setGroupStackCall();
-
-    // Check and set VLA flag for each group
-    FGA->setHasVariableLengthAlloca();
-
-    // Check and set inline asm flag for each group
-    FGA->setGroupHasInlineAsm();
+    // Check and set FG attribute flags
+    FGA->setGroupAttributes();
 
     // By swapping, we sort the function list to ensure codegen order for
     // functions. This relies on llvm module pass manager's implementation detail.
@@ -465,6 +464,20 @@ bool GenXCodeGenModule::runOnModule(Module& M)
         {
             auto it = CurF->getIterator();
             CurF = &*(++it);
+        }
+    }
+
+    // Changing simd size from 32 to 16 for function groups with function calls due to slicing
+    for (auto GI = FGA->begin(), GE = FGA->end(); GI != GE; ++GI)
+    {
+        FunctionGroup* FG = *GI;
+        if (!FG->isSingle() || FG->hasStackCall())
+        {
+            Function* Kernel = FG->getHead();
+            IGC::IGCMD::FunctionInfoMetaDataHandle funcInfoMD = pMdUtils->getFunctionsInfoItem(Kernel);
+            int simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
+            if (simd_size == 32)
+                funcInfoMD->getSubGroupSize()->setSIMD_size(16);
         }
     }
 
@@ -542,79 +555,98 @@ bool GenXFunctionGroupAnalysis::verify()
     return true;
 }
 
+FunctionGroup* GenXFunctionGroupAnalysis::getOrCreateIndirectCallGroup(Module* pModule)
+{
+    if (IndirectCallGroup) return IndirectCallGroup;
+
+    auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    // Use the dummy kernel if it exists. Otherwise use the unique entry function.
+    // OCL shaders should always use the dummy kernel.
+    llvm::Function* defaultKernel = IGC::getIntelSymbolTableVoidProgram(pModule);
+    if (!defaultKernel && pCtx->type != ShaderType::OPENCL_SHADER)
+    {
+        defaultKernel = IGC::getUniqueEntryFunc(pCtx->getMetaDataUtils(), pCtx->getModuleMetaData());
+    }
+    // No default kernel found
+    if (!defaultKernel) return nullptr;
+
+    IndirectCallGroup = getGroup(defaultKernel);
+    if (!IndirectCallGroup)
+    {
+        setSubGroupMap(defaultKernel, defaultKernel);
+        IndirectCallGroup = createFunctionGroup(defaultKernel);
+    }
+    return IndirectCallGroup;
+}
+
 bool GenXFunctionGroupAnalysis::useStackCall(llvm::Function* F)
 {
     return (F->hasFnAttribute("visaStackCall"));
 }
 
-void GenXFunctionGroupAnalysis::setGroupStackCall()
+void GenXFunctionGroupAnalysis::setGroupAttributes()
 {
     for (auto FG : Groups)
-    {
-        // Ignore the indirect call group, as it's just a container for all indirect call
-        // functions and does not actually contain a call graph
-        if (FG == IndirectCallGroup) continue;
-
-        FG->m_hasStackCall = (FG->Functions.size() > 1);
-
-        // Traverse each function in the FG to check for indirect calls
-        if (!FG->m_hasStackCall)
-        {
-            for (auto FI = FG->begin(), FE = FG->end(); FI != FE; ++FI)
-            {
-                // Set hasStackCall if there are any indirect calls
-                for (auto ii = inst_begin(*FI), ei = inst_end(*FI); ii != ei; ii++)
-                {
-                    if (CallInst* call = dyn_cast<CallInst>(&*ii))
-                    {
-                        if (call->isInlineAsm()) continue;
-
-                        Function* calledF = call->getCalledFunction();
-                        if (!calledF || calledF->hasFnAttribute("referenced-indirectly"))
-                        {
-                            FG->m_hasStackCall = true;
-                            break;
-                        }
-                    }
-                }
-                if (FG->m_hasStackCall) break;
-            }
-        }
-    }
-}
-
-void GenXFunctionGroupAnalysis::setHasVariableLengthAlloca()
-{
-    // check all functions in the group to see if there's an vla alloca
-    // function attribute "hasVLA" should be set at ProcessFuncAttributes pass
-    for (auto FG: Groups)
     {
         for (auto FI = FG->begin(), FE = FG->end(); FI != FE; ++FI)
         {
             Function* F = *FI;
+
+            // Ignore indirect functions
+            if (F->hasFnAttribute("referenced-indirectly"))
+            {
+                continue;
+            }
+            else if (F->hasFnAttribute("visaStackCall"))
+            {
+                FG->m_hasStackCall = true;
+            }
+
+            // check all functions in the group to see if there's an vla alloca
+            // function attribute "hasVLA" should be set at ProcessFuncAttributes pass
             if (F->hasFnAttribute("hasVLA"))
             {
                 FG->m_hasVaribleLengthAlloca = true;
-                break;
             }
-        }
-    }
-}
 
-void GenXFunctionGroupAnalysis::setGroupHasInlineAsm()
-{
-    if (getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->m_instrTypes.hasInlineAsm)
-    {
-        // check all functions in the group to see it uses inline asm inst
-        for (auto FG : Groups)
-        {
-            for (auto FI = FG->begin(), FE = FG->end(); FI != FE; ++FI)
+            // check if FG uses recursion. The "hasRecursion" attribute is set in
+            // ProcessFuncAttributes pass by using Tarjan's algorithm to find recursion.
+            if (F->hasFnAttribute("hasRecursion"))
             {
-                Function* F = *FI;
-                if (IGC::hasInlineAsmInFunc(*F))
+                FG->m_hasRecursion = true;
+            }
+
+            // For the remaining attributes we need to loop through all the call instructions
+            for (auto ii = inst_begin(*FI), ei = inst_end(*FI); ii != ei; ii++)
+            {
+                if (CallInst* call = dyn_cast<CallInst>(&*ii))
                 {
-                    FG->m_hasInlineAsm = true;
-                    break;
+                    Function* calledF = call->getCalledFunction();
+                    if (call->isInlineAsm())
+                    {
+                        // Uses inline asm call
+                        FG->m_hasInlineAsm = true;
+                    }
+                    else if (calledF && calledF->hasFnAttribute("referenced-indirectly"))
+                    {
+                        // This is the case where the callee has the "referenced-indirectly" attribute, but we still
+                        // see the callgraph. The callee may not belong to the same FG as the caller, but it still
+                        // counts as a stackcall.
+                        FG->m_hasStackCall = true;
+                    }
+                    else if (!calledF || (calledF->isDeclaration() && calledF->hasFnAttribute("referenced-indirectly")))
+                    {
+                        // This is the true indirect call case, where either the callee's address is taken, or it belongs
+                        // to an external module. We do not know the callgraph in this case, so set the indirectcall flag.
+                        FG->m_hasStackCall = true;
+                        FG->m_hasIndirectCall = true;
+                    }
+                    else if (calledF && calledF->isDeclaration() && calledF->hasFnAttribute("invoke_simd_target"))
+                    {
+                        // Invoke_simd targets use stack call by convention.
+                        FG->m_hasStackCall = true;
+                    }
                 }
             }
         }
@@ -624,27 +656,20 @@ void GenXFunctionGroupAnalysis::setGroupHasInlineAsm()
 void GenXFunctionGroupAnalysis::addIndirectFuncsToKernelGroup(llvm::Module* pModule)
 {
     auto pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    auto IFG = getOrCreateIndirectCallGroup(pModule);
 
-    Function* defaultKernel = IGC::getIntelSymbolTableVoidProgram(pModule);
-    if (!defaultKernel)
-    {
-        return;
-    }
+    if (!IFG) return;
 
-    IGC_ASSERT(getGroup(defaultKernel) == nullptr);
-    setSubGroupMap(defaultKernel, defaultKernel);
-    IndirectCallGroup = createFunctionGroup(defaultKernel);
-
-    // Add all externally linked functions into the default kernel group
+    // Find all indirectly called functions that require a symbol
     for (auto I = pModule->begin(), E = pModule->end(); I != E; ++I)
     {
         Function* F = &(*I);
         if (F->isDeclaration() || isEntryFunc(pMdUtils, F)) continue;
 
-        if (F->hasFnAttribute("referenced-indirectly") || F->use_empty())
+        if (F->hasFnAttribute("referenced-indirectly"))
         {
             IGC_ASSERT(getGroup(F) == nullptr);
-            addToFunctionGroup(F, IndirectCallGroup, F);
+            addToFunctionGroup(F, IFG, F);
         }
     }
 }
@@ -694,14 +719,8 @@ bool GenXFunctionGroupAnalysis::rebuild(llvm::Module* Mod) {
         }
     }
 
-    // Reset stack call flag
-    setGroupStackCall();
-
-    // Once FGs are formed, set FG's HasVariableLengthAlloca
-    setHasVariableLengthAlloca();
-
-    // Set FGs flag for inline asm
-    setGroupHasInlineAsm();
+    // Reset attribute flags
+    setGroupAttributes();
 
     // Verification.
     if (!verify())
@@ -849,7 +868,7 @@ void GenXFunctionGroupAnalysis::dump() {
 namespace {
 
     /// \brief Custom inliner for subroutines.
-    class SubroutineInliner : public LegacyInlinerBase
+    class SubroutineInliner : public LegacyInlinerBase, public llvm::InstVisitor<SubroutineInliner>
     {
         EstimateFunctionSize* FSA;
     public:
@@ -864,6 +883,8 @@ namespace {
 
         void getAnalysisUsage(AnalysisUsage& AU) const override;
         bool runOnSCC(CallGraphSCC& SCC) override;
+        void verifyIfGEPIandLoadHasTheSameAS(CallGraphSCC& SCC);
+        void visitGetElementPtrInst(GetElementPtrInst& I);
 
         using llvm::Pass::doFinalization;
         bool doFinalization(CallGraph& CG) override {
@@ -887,10 +908,58 @@ void SubroutineInliner::getAnalysisUsage(AnalysisUsage& AU) const
     LegacyInlinerBase::getAnalysisUsage(AU);
 }
 
+
+void SubroutineInliner::visitGetElementPtrInst(GetElementPtrInst& GEPI)
+{
+    for (auto* useOfGEPI : GEPI.users())
+    {
+        if (LoadInst* loadInst = dyn_cast<LoadInst>(useOfGEPI))
+        {
+            auto GepReturnValueAS = GEPI.getPointerAddressSpace();
+            auto LoadOperandAS = loadInst->getPointerAddressSpace();
+            if (GepReturnValueAS != LoadOperandAS)
+            {
+                auto* GEPIPointerOperand = GEPI.getPointerOperand();
+                SmallVector<llvm::Value*, 8> Idx(GEPI.idx_begin(), GEPI.idx_end());
+                // we need to create a new GEPI because the old one has coded old AS,
+                // and we can not create new load instruction with the old GEPI with the correct AS
+                // This is WA for a bug in LLVM 11.
+                GetElementPtrInst* newGEPI = GetElementPtrInst::Create(GEPI.getSourceElementType(), GEPIPointerOperand, Idx, "", &GEPI);
+                newGEPI->setIsInBounds(GEPI.isInBounds());
+                newGEPI->setDebugLoc(GEPI.getDebugLoc());
+
+                auto* newLoad = new LoadInst(loadInst->getType(), newGEPI, "", loadInst);
+                newLoad->setAlignment(IGCLLVM::getAlign(loadInst->getAlignment()));
+                loadInst->replaceAllUsesWith(newLoad);
+                newLoad->setDebugLoc(loadInst->getDebugLoc());
+            }
+        }
+    }
+}
+
+// When this pass encounters a byVal argument, it creates an alloca to then copy the data from global memory to local memory.
+// When creating a new alloca, it replaces all occurrences of the argument in the function with that alloca.
+// The problem arises when the pointer operant (or more precisely its address space) is replaced in GetElementPtrInst.
+// Because from now on the resulting pointer of this instruction is in a different address space.
+// On the other hand, a load instruction that uses the returned GetElementPtrInst pointer still operates on the old address space.
+// By which we are referring to the wrong area of ​​memory. The resolution for this problem is to create new load instruction.
+// This is WA for a bug in LLVM 11.
+void SubroutineInliner::verifyIfGEPIandLoadHasTheSameAS(CallGraphSCC& SCC)
+{
+    for (CallGraphNode* Node : SCC)
+    {
+        Function* F = Node->getFunction();
+        if (F) visit(F);
+    }
+}
+
 bool SubroutineInliner::runOnSCC(CallGraphSCC& SCC)
 {
     FSA = &getAnalysis<EstimateFunctionSize>();
-    return LegacyInlinerBase::runOnSCC(SCC);
+    bool changed = LegacyInlinerBase::runOnSCC(SCC);
+    if (changed) verifyIfGEPIandLoadHasTheSameAS(SCC);
+
+    return changed;
 }
 
 /// \brief Get the inline cost for the subroutine-inliner.
@@ -914,7 +983,7 @@ InlineCost SubroutineInliner::getInlineCost(IGCLLVM::CallSiteRef CS)
 
         int FCtrl = IGC_GET_FLAG_VALUE(FunctionControl);
 
-        if (FCtrl == FLAG_FCALL_FORCE_INLINE)
+        if (IGC::ForceAlwaysInline())
             return IGCLLVM::InlineCost::getAlways();
 
         if (pCtx->m_enableSubroutine == false)
@@ -965,4 +1034,25 @@ Pass* IGC::createSubroutineInlinerPass()
 {
     initializeSubroutineInlinerPass(*PassRegistry::getPassRegistry());
     return new SubroutineInliner();
+}
+
+bool FunctionGroup::checkSimdModeValid(SIMDMode Mode) const {
+    switch (Mode) {
+    default:
+        break;
+    case SIMDMode::SIMD8: return SIMDModeValid[0];
+    case SIMDMode::SIMD16: return SIMDModeValid[1];
+    case SIMDMode::SIMD32: return SIMDModeValid[2];
+    }
+    return true;
+}
+
+void FunctionGroup::setSimdModeInvalid(SIMDMode Mode) {
+    switch (Mode) {
+    default:
+        break;
+    case SIMDMode::SIMD8: SIMDModeValid[0] = false; break;
+    case SIMDMode::SIMD16: SIMDModeValid[1] = false; break;
+    case SIMDMode::SIMD32: SIMDModeValid[2] = false; break;
+    }
 }

@@ -160,8 +160,19 @@ void Encoder::encodeBlock(Block *blk)
         setEncodedPC(inst, currentPc());
 
         GED_RETURN_VALUE status = GED_RETURN_VALUE_SIZE;
+
+        // If -Xforce-no-compact is set, do not compact any insruction
+        // Otherwise, if {NoCompact} is set, do not compact the instruction
+        // Otherwise, if {Copmacted} is set on the instructionm, try to compact it and throw error on fail
+        // Otherwise, if no compaction setting on the instruction, try to compact the instruction if -Xauto-compact
+        // Otherwise, do not compact the instruction
         bool mustCompact = inst->hasInstOpt(InstOpt::COMPACTED);
         bool mustNotCompact = inst->hasInstOpt(InstOpt::NOCOMPACT);
+        if (m_opts.forceNoCompact) {
+            mustCompact = false;
+            mustNotCompact = true;
+        }
+
         int32_t iLen = 16;
         if (mustCompact || (!mustNotCompact && m_opts.autoCompact)) {
             // try compact first
@@ -359,6 +370,15 @@ void Encoder::encodeInstruction(Instruction& inst)
     }
 
     bool hasFlagRegField = true;
+    // For >= XE_HPC, Some fields only exist when having CondCtrl or PredCtrl:
+    // PredInv, FlagRegNum, FlagSubRegNum
+    // In GED, either CondCtrl or PredCtrl have to be set to non-zero before
+    // these fields can be set
+    if (platform() >= Platform::XE_HPC) {
+        hasFlagRegField = (inst.getFlagModifier() != FlagModifier::NONE) ||
+                          (pred.function != PredCtrl::NONE) ||
+                          inst.isBranching();
+    }
 
     if (os.supportsPredication() && hasFlagRegField)
         GED_ENCODE(PredInv, pred.inverse ? GED_PRED_INV_Invert : GED_PRED_INV_Normal);
@@ -816,7 +836,10 @@ void Encoder::encodeSendInstruction(const Instruction& i)
 
     ////////////////////////////////////////////
     // send options
-    bool hasFusion = platform() >= Platform::XE;
+
+    // FusionCtrl is removed from XeHPC+
+    bool hasFusion =
+        platform() >= Platform::XE && platform() < Platform::XE_HPC;
     if (hasFusion) {
         GED_ENCODE(FusionCtrl,
             i.hasInstOpt(InstOpt::SERIALIZE) ?
@@ -837,6 +860,10 @@ void Encoder::encodeSendDescs(const Instruction& i)
         encodeSendDescsXe(i);
     } else if (platform() == Platform::XE_HP) {
         encodeSendDescsXeHP(i);
+    } else if (platform() == Platform::XE_HPG ||
+        platform() == Platform::XE_HPC)
+    {
+        encodeSendDescsXeHPG(i);
     } else {
         errorT("unsupported platform");
     }
@@ -967,6 +994,42 @@ void Encoder::encodeSendDescsXeHP(const Instruction& i)
     }
 }
 
+// Similar to XeHP, except
+//    * ExDesc.IsImm implies use of Src1Length (Src.Length is in EU bits)
+void Encoder::encodeSendDescsXeHPG(const Instruction& i)
+{
+    SendDesc exDesc = i.getExtMsgDescriptor();
+    if (exDesc.isReg()) {
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_ARF);
+        GED_ENCODE(ExDescAddrSubRegNum, 2 * exDesc.reg.subRegNum);
+        GED_ENCODE(ExBSO, i.hasInstOpt(InstOpt::EXBSO) ? 1 : 0);
+        if (i.hasInstOpt(InstOpt::EXBSO)) {
+            GED_ENCODE(CPS, i.hasInstOpt(InstOpt::CPS) ? 1 : 0);
+            GED_ENCODE(Src1Length, (uint32_t)i.getSrc1Length());
+        } else if (i.hasInstOpt(InstOpt::CPS)) {
+            errorT("{CPS} requires {ExBSO}");
+        }
+    } else {
+        if (i.hasInstOpt(InstOpt::CPS)) {
+            warningT("when ExDesc is immediate use ExDesc[11] rather than {CPS}");
+            exDesc.imm |= 1 << 11;
+        }
+        GED_ENCODE(ExDescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(ExMsgDesc, exDesc.imm);
+        GED_ENCODE(Src1Length, (uint32_t)i.getSrc1Length());
+    }
+
+    SendDesc desc = i.getMsgDescriptor();
+    if (desc.isReg()) {
+        GED_ENCODE(DescRegFile, GED_REG_FILE_ARF);
+        if (desc.reg.subRegNum != 0) { // a0.0 is implied (there's no field)
+            errorT("send with reg desc must be a0.0");
+        }
+    } else {
+        GED_ENCODE(DescRegFile, GED_REG_FILE_IMM);
+        GED_ENCODE(MsgDesc, desc.imm);
+    }
+}
 
 
 
@@ -982,7 +1045,25 @@ void Encoder::encodeSyncInstruction(const Instruction& inst)
         encodeSrcType<SourceIndex::SRC0>(src.getType());
         encodeImmVal(src.getImmediateValue(), src.getType());
     } else {
+        if (platform() <= Platform::XE_HPG) {
             encodeSrcRegFile<SourceIndex::SRC0>(GED_REG_FILE_ARF);
+        } else {
+            // XeHPC+ supports sync with reg32. For earlier platforms encode it to the null reg anyway.
+            // If not doing so we'll encounter some weird behavior on validation. Suspect it's
+            // becuase on some previous platforms' testcase there are reg32 those are not valid,
+            // but IGA workaround (set it to NULL) them
+            if (src.isNull()) {
+                encodeSrcRegFile<SourceIndex::SRC0>(GED_REG_FILE_ARF);
+            } else {
+                // currently only flag register is supported in sync.bar
+                encodeSrcRegFile<SourceIndex::SRC0>(lowerRegFile(src.getDirRegName()));
+                encodeSrcReg<SourceIndex::SRC0>(src.getDirRegName(), src.getDirRegRef().regNum);
+                encodeSrcType<SourceIndex::SRC0>(src.getType());
+                // must be flag register (otherwise GED will return error), encode the subreg directly.
+                GED_ENCODE(Src0SubRegNum, SubRegToBinaryOffset(
+                    src.getDirRegRef().subRegNum, src.getDirRegName(), src.getType(), m_model.platform));
+            }
+        }
     }
 }
 
@@ -1354,7 +1435,7 @@ void Encoder::encodeSendDestination(const Operand& dst)
 void Encoder::encodeSendSource0(const Operand& src)
 {
     if (m_model.supportsUnarySend()) {
-        switch( src.getKind() )
+        switch(src.getKind())
         {
         case Operand::Kind::DIRECT:
             GED_ENCODE(Src0AddrMode, GED_ADDR_MODE_Direct);
@@ -1387,9 +1468,18 @@ void Encoder::encodeSendSource0(const Operand& src)
     }
     else if (src.getKind() ==  Operand::Kind::INDIRECT)
     {
-        GED_ENCODE(Src0DataType, lowerDataType(t));
-        GED_ENCODE(Src0AddrSubRegNum, src.getIndAddrReg().subRegNum);
-        GED_ENCODE(Src0AddrImm, src.getIndImmAddr());
+        {
+            GED_ENCODE(Src0DataType, lowerDataType(t));
+            GED_ENCODE(Src0AddrSubRegNum, src.getIndAddrReg().subRegNum);
+            // For platform >= XeHPC, the ImmAddr is represented in Word Offset in bianry,
+            //     platform <  XeHPC, the ImmAddr is represented in Byte Offset in bianry
+            // And for all platforms, the ImmAddr is represented in Byet Offset in assembly
+            if (platform() >= Platform::XE_HPC) {
+                GED_ENCODE(Src0AddrImm, src.getIndImmAddr() / 2);
+            } else {
+                GED_ENCODE(Src0AddrImm, src.getIndImmAddr());
+            }
+        }
     }
 }
 
@@ -1424,6 +1514,12 @@ void Encoder::encodeSendsSource0(const Operand& src)
     else if (src.getKind() ==  Operand::Kind::INDIRECT)
     {
         auto immAddr = src.getIndImmAddr();
+        // For platforms >= XeHPC, ImmAddr is encoded as words,
+        //     platforms <  XeHPC, ImmAddr is encoded as bytes
+        // For all platforms, ImmAddr is represented in Byte Offset in syntax
+        if (platform() >= Platform::XE_HPC) {
+            immAddr /= 2;
+        }
         GED_ENCODE(Src0AddrImm, immAddr);
         GED_ENCODE(Src0AddrSubRegNum, src.getIndAddrReg().subRegNum);
     }
@@ -1809,7 +1905,8 @@ void Encoder::encodeOptions(const Instruction& inst)
     if (platform() >= Platform::XE && m_opcode != Op::ILLEGAL) {
         SWSB::InstType inst_type = inst.getSWSBInstType(m_opts.swsbEncodeMode);
         uint32_t swsbBinary = inst.getSWSB().encode(m_opts.swsbEncodeMode, inst_type);
-        assert(inst.getSWSB().verify(m_opts.swsbEncodeMode, inst_type));
+        IGA_ASSERT(inst.getSWSB().verify(m_opts.swsbEncodeMode, inst_type),
+            "INTERNAL ERROR: invalid SWSB (parser/IR-creator should have prevented this)");
 
         GED_ENCODE(SWSB, swsbBinary);
     }

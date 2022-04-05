@@ -313,7 +313,8 @@ bool DeSSA::runOnFunction(Function& MF)
 {
     m_F = &MF;
     CurrColor = 0;
-    MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    MetaDataUtils* pMdUtils = nullptr;
+    pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     if (pMdUtils->findFunctionsInfoItem(&MF) == pMdUtils->end_FunctionsInfo())
     {
         return false;
@@ -425,10 +426,10 @@ bool DeSSA::runOnFunction(Function& MF)
     //  so it is likely for the algorithm to coalesce the phi's dst and the
     //  other src that is used in the loop, and therefore remove mov instrutions
     //  in the loop.
-  //
-  //  Note that isolating a value introduce additional copy, thus a threshold
-  //  is used here as a heuristic to try to make sure that a benefit is more
-  //  than the cost.
+    //
+    //  Note that isolating a value introduce additional copy, thus a threshold
+    //  is used here as a heuristic to try to make sure that a benefit is more
+    //  than the cost.
     enum { PHI_SRC_USE_THRESHOLD = 3 };  // arbitrary number
     DenseMap<Value*, int> PHILoopPreHeaderSrcs;
 
@@ -1021,7 +1022,7 @@ int getPartialWriteSource(Value *Inst)
             SmallVector<StringRef, 8> constraints;
             constraintStr.split(constraints, ',');
             for (int i = 0; i < (int)constraints.size(); i++) {
-                unsigned destID;
+                unsigned destID = 0;
                 if (constraints[i].getAsInteger(10, destID) == 0) {
                     // constraint-string indicates that source(i-1) and
                     // destination should be the same vISA variable

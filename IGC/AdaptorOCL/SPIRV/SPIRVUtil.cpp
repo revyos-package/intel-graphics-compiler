@@ -156,7 +156,8 @@ std::string recursive_mangle(const Type* pType)
             if (ST && ST->isOpaque())
             {
                 StringRef structName = ST->getName();
-                bool isImage = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::Image));
+                bool isImage = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::Image)) ||
+                    structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::SampledImage));
                 if (isImage)
                 {
                     SmallVector<StringRef, 8> matches;
@@ -164,7 +165,7 @@ std::string recursive_mangle(const Type* pType)
                     SPIRVTypeImageDescriptor Desc;
                     if (regex.match(structName, &matches))
                     {
-                        uint8_t dimension;
+                        uint8_t dimension = 0;
                         matches[1].getAsInteger(0, dimension);
                         Desc.Dim = static_cast<SPIRVImageDimKind>(dimension);
                         matches[2].getAsInteger(0, Desc.Depth);
@@ -173,7 +174,7 @@ std::string recursive_mangle(const Type* pType)
                         matches[5].getAsInteger(0, Desc.Sampled);
                         matches[6].getAsInteger(0, Desc.Format);
 
-                        uint8_t spirvAccess;
+                        uint8_t spirvAccess = 0;
                         matches[7].getAsInteger(0, spirvAccess);
                         SPIRVAccessQualifierKind Acc = static_cast<SPIRVAccessQualifierKind>(spirvAccess);
 
@@ -196,6 +197,12 @@ std::string recursive_mangle(const Type* pType)
                     }
                     IGC_ASSERT_MESSAGE(0, "Inconsistent SPIRV image!");
                 }
+                bool isPipe_ro = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::Pipe) + "._0");
+                if (isPipe_ro) return "Pipe_ro";
+                bool isPipe_wo = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::Pipe) + "._1");
+                if (isPipe_wo) return "Pipe_wo";
+                bool isReserveId = structName.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + std::string(kSPIRVTypeName::ReserveId));
+                if (isReserveId) return "ReserveId";
                 return "i64";
             }
 
@@ -257,51 +264,7 @@ isFunctionBuiltin(llvm::Function* F) {
 
 std::string
 getSPIRVBuiltinName(Op OC, SPIRVInstruction *BI, std::vector<Type*> ArgTypes, std::string suffix) {
-  std::string name = "";
-  bool hasI32Postfix = false;
-
-  if (OC == OpSubgroupImageMediaBlockReadINTEL || OC == OpSubgroupImageMediaBlockWriteINTEL) {
-    std::stringstream tmpName;
-    SPIRVType *DataTy = nullptr;
-    switch (OC) {
-    case OpSubgroupImageMediaBlockReadINTEL:
-      tmpName << OCLSPIRVBuiltinMap::map(OC);
-      DataTy = BI->getType();
-      hasI32Postfix = true;
-      break;
-    case OpSubgroupImageMediaBlockWriteINTEL:
-      tmpName << OCLSPIRVBuiltinMap::map(OC);
-      DataTy = (*BI->getOperands().rbegin())->getType();
-      hasI32Postfix = true;
-      break;
-    default:
-      tmpName << OCLSPIRVBuiltinMap::map(OC);
-    }
-    if (DataTy) {
-      if (DataTy->getBitWidth() == 8) {
-        tmpName << "_uc";
-      }
-      else if (DataTy->getBitWidth() == 16) {
-        tmpName << "_us";
-      }
-      else if (DataTy->getBitWidth() == 32 && hasI32Postfix) {
-        tmpName << "_ui";
-      }
-      else if (DataTy->getBitWidth() == 64) {
-        tmpName << "_ul";
-      }
-
-      if (DataTy->isTypeVector()) {
-        if (unsigned ComponentCount = DataTy->getVectorComponentCount())
-          tmpName << ComponentCount;
-      }
-    }
-    name = tmpName.str();
-  }
-  else
-  {
-    name = OCLSPIRVBuiltinMap::map(OC);
-  }
+  std::string name = OCLSPIRVBuiltinMap::map(OC);
 
   if (!name.empty()) {
     name = name + suffix;
@@ -461,6 +424,18 @@ std::string getSPIRVImageSampledTypeName(SPIRVType* Ty) {
     }
     llvm_unreachable("Invalid sampled type for image");
     return std::string();
+}
+
+bool isSPIRVSamplerType(llvm::Type* Ty) {
+  if (auto PT = dyn_cast<PointerType>(Ty))
+    if (auto ST = dyn_cast<StructType>(PT->getElementType()))
+      if (ST->isOpaque()) {
+        auto Name = ST->getName();
+        if (Name.startswith(std::string(kSPIRVTypeName::PrefixAndDelim) + kSPIRVTypeName::Sampler)) {
+          return true;
+        }
+      }
+  return false;
 }
 
 }

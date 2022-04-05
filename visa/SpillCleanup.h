@@ -26,7 +26,6 @@ namespace vISA
         unsigned int iterNo;
         // Store declares spilled by sends like sampler
         std::set<G4_Declare*> sendDstDcl;
-        std::set<G4_Declare*> addrTakenSpillFillDcl;
         RPE& rpe;
 
         // Set window size to coalesce
@@ -36,9 +35,11 @@ namespace vISA
         const unsigned int cSpillFillCleanupWindowSize = 10;
         const unsigned int cFillWindowThreshold128GRF = 180;
         const unsigned int cSpillWindowThreshold128GRF = 120;
+        const unsigned int cHighRegPressureForCleanup = 100;
 
         unsigned int fillWindowSizeThreshold = 0;
         unsigned int spillWindowSizeThreshold = 0;
+        unsigned int highRegPressureForCleanup = 0;
 
         // <Old fill declare*, std::pair<Coalesced Decl*, Row Off>>
         // This data structure is used to replaced old spill/fill operands
@@ -81,7 +82,6 @@ namespace vISA
         void populateSendDstDcl();
         void spillFillCleanup();
         void removeRedundantWrites();
-        void computeAddressTakenDcls();
 
     public:
         CoalesceSpillFills(G4_Kernel& k, LivenessAnalysis& l, GraphColor& g,
@@ -95,8 +95,7 @@ namespace vISA
             };
             fillWindowSizeThreshold = scale(cFillWindowThreshold128GRF);
             spillWindowSizeThreshold = scale(cSpillWindowThreshold128GRF);
-
-            computeAddressTakenDcls();
+            highRegPressureForCleanup = scale(cHighRegPressureForCleanup);
         }
 
         void run();

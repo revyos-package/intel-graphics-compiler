@@ -37,19 +37,20 @@ It can be done either by using packaged releases or building those yourself:
 For **LLVM**, **LLD** and **Clang** packages please visit this [link](https://apt.llvm.org/) to download and install desired version.
 For `apt` package manager you can use this command:
 ```shell
-$ sudo apt-get install llvm-11 llvm-11-dev clang-11 liblld-11 liblld-11-dev
+$ sudo apt-get install llvm-11 llvm-11-dev clang-11 liblld-11 liblld-11-dev libllvmspirvlib11 libllvmspirvlib-dev
 ```
 As of now **OpenCL Clang** is still needed to be built and installed manually. Sources are available [here](https://github.com/intel/opencl-clang). You can use out-of-tree build method with LLVM and Clang preinstalled.
 **VC Intrinsics** is a lightweight library that is built from sources with IGC and there is no package for it.
-Currently, in this mode **SPIRV-LLVM Translator** sources should be present too.
 
 Installing LLVM, Clang, and OpenCL Clang components means you no longer have to download their sources alongside IGC, so the workspace tree in the next step may look like this:
 ```
 <workspace>
       |- igc                          https://github.com/intel/intel-graphics-compiler
       |- vc-intrinsics                https://github.com/intel/vc-intrinsics
-      |- llvm-spirv                   https://github.com/KhronosGroup/SPIRV-LLVM-Translator
+      |- SPIRV-Tools                  https://github.com/KhronosGroup/SPIRV-Tools
+      |- SPIRV-Headers                https://github.com/KhronosGroup/SPIRV-Headers
 ```
+Additionaly, you can use **SPIRV-Tools** prebuild pacakge. In order to do that be sure to pass to cmake command `IGC\_OPTION\_\_SPIRV\_TOOLS\_MODE=Prebuilds`.
 
 #### Build from sources
 
@@ -62,6 +63,8 @@ $ git clone https://github.com/intel/vc-intrinsics vc-intrinsics
 $ git clone -b llvmorg-11.1.0 https://github.com/llvm/llvm-project llvm-project
 $ git clone -b ocl-open-110 https://github.com/intel/opencl-clang llvm-project/llvm/projects/opencl-clang
 $ git clone -b llvm_release_110 https://github.com/KhronosGroup/SPIRV-LLVM-Translator llvm-project/llvm/projects/llvm-spirv
+$ git clone https://github.com/KhronosGroup/SPIRV-Tools.git SPIRV-Tools
+$ git clone https://github.com/KhronosGroup/SPIRV-Headers.git SPIRV-Headers
 ```
 These commands will set up a workspace with LLVM 11. If you wish to use any other version please refer to the [component revision table](#Revision-table)
 
@@ -70,6 +73,8 @@ Correct directory tree looks like this:
 <workspace>
     |- igc              https://github.com/intel/intel-graphics-compiler
     |- vc-intrinsics    https://github.com/intel/vc-intrinsics
+    |- SPIRV-Tools      https://github.com/KhronosGroup/SPIRV-Tools
+    |- SPIRV-Headers    https://github.com/KhronosGroup/SPIRV-Headers
     |- llvm-project     https://github.com/llvm/llvm-project
         |- llvm/projects/opencl-clang    https://github.com/intel/opencl-clang
         |- llvm/projects/llvm-spirv      https://github.com/KhronosGroup/SPIRV-LLVM-Translator

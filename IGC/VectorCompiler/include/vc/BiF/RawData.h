@@ -9,7 +9,8 @@ SPDX-License-Identifier: MIT
 #ifndef VC_BIF_RAW_DATA_H
 #define VC_BIF_RAW_DATA_H
 
-#ifndef IGC_VC_DISABLE_BIF
+#include <llvm/ADT/StringRef.h>
+
 extern unsigned char VCBiFPrintfOCL32RawData[];
 extern unsigned int VCBiFPrintfOCL32RawData_size;
 
@@ -22,11 +23,9 @@ extern unsigned int VCBiFPrintfZE32RawData_size;
 extern unsigned char VCBiFPrintfZE64RawData[];
 extern unsigned int VCBiFPrintfZE64RawData_size;
 
-extern unsigned char VCEmulation64RawData[];
-extern unsigned int VCEmulation64RawData_size;
-
 extern unsigned char VCSPIRVBuiltins64RawData[];
 extern unsigned int VCSPIRVBuiltins64RawData_size;
-#endif // IGC_VC_DISABLE_BIF
+
+extern llvm::StringRef getVCEmulation64RawDataImpl(llvm::StringRef CPUStr);
 
 #endif

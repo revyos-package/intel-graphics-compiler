@@ -9,16 +9,16 @@
 set(OPT_SOURCES
   CMAnalysis/InstructionSimplifyGenX.cpp
   CMAnalysis/ConstantFoldingGenX.cpp
-  CMTrans/KernelInfo.cpp
   CMTrans/CMABI.cpp
   CMTrans/CMImpParam.cpp
   CMTrans/CMKernelArgOffset.cpp
-  CMTrans/CMRegion.cpp
   CMTrans/GenXBTIAssignment.cpp
   CMTrans/GenXPrintfLegalization.cpp
   CMTrans/GenXPrintfResolution.cpp
   CMTrans/GenXImportOCLBiF.cpp
   CMTrans/GenXTranslateSPIRVBuiltins.cpp
+  CMTrans/GenXTrampolineInsertion.cpp
+  CMTrans/GenXLinkageCorruptor.cpp
   CMPacketize/GenXPacketize.cpp
   CMPacketize/PacketBuilder.cpp
   CMPacketize/PacketBuilder_math.cpp
@@ -46,4 +46,5 @@ target_link_libraries(VCTransforms
   VCGeneralUtils
   VCGenXUtils
   LLVMGenXIntrinsics
+  VCInternalIntrinsics
   )

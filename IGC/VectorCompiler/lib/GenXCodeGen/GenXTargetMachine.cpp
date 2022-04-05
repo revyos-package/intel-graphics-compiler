@@ -17,8 +17,6 @@ SPDX-License-Identifier: MIT
 ///
 /// .. include:: GenXAlignmentInfo.h
 ///
-/// .. include:: GenXRegion.h
-///
 /// .. include:: GenXSubtarget.h
 ///
 /// Pass documentation
@@ -41,8 +39,10 @@ SPDX-License-Identifier: MIT
 #include "GenXModule.h"
 
 #include "vc/GenXCodeGen/GenXOCLRuntimeInfo.h"
+#include "vc/GenXCodeGen/TargetMachine.h"
 #include "vc/GenXOpts/GenXOpts.h"
 #include "vc/Support/BackendConfig.h"
+#include "vc/Support/PassManager.h"
 
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/Passes.h"
@@ -65,9 +65,9 @@ SPDX-License-Identifier: MIT
 
 using namespace llvm;
 
-static cl::opt<bool> ExperimentalEnforceLateEmulationImports(
-    "vc-experimental-emulation-late-imports", cl::init(false), cl::Hidden,
-    cl::desc("Import of some emulation BiF shall be deferred (experimental)"));
+static cl::opt<std::string>
+    FGDumpsPrefix("vc-fg-dump-prefix", cl::init(""), cl::Hidden,
+                  cl::desc("prefix to use for FG dumps"));
 
 static cl::opt<bool> EmitVLoadStore(
     "genx-emit-vldst", cl::init(true), cl::Hidden,
@@ -75,7 +75,8 @@ static cl::opt<bool> EmitVLoadStore(
 
 // There's another copy of DL string in clang/lib/Basic/Targets.cpp
 static std::string getDL(bool Is64Bit) {
-  return Is64Bit ? "e-p:64:64-i64:64-n8:16:32:64" : "e-p:32:32-i64:64-n8:16:32";
+  return Is64Bit ? "e-p:64:64-p6:32:32-i64:64-n8:16:32:64"
+                 : "e-p:32:32-p6:32:32-i64:64-n8:16:32";
 }
 
 namespace llvm {
@@ -85,14 +86,14 @@ namespace llvm {
 //===----------------------------------------------------------------------===//
 void initializeGenXPasses(PassRegistry &registry) {
   initializeFunctionGroupAnalysisPass(registry);
-  initializeGenXAddressCommoningPass(registry);
-  initializeGenXArgIndirectionPass(registry);
-  initializeGenXCategoryPass(registry);
+  initializeGenXAddressCommoningWrapperPass(registry);
+  initializeGenXArgIndirectionWrapperPass(registry);
+  initializeGenXCategoryWrapperPass(registry);
   initializeGenXCFSimplificationPass(registry);
-  initializeGenXCisaBuilderPass(registry);
-  initializeGenXCoalescingPass(registry);
+  initializeGenXCisaBuilderWrapperPass(registry);
+  initializeGenXCoalescingWrapperPass(registry);
   initializeGenXDeadVectorRemovalPass(registry);
-  initializeGenXDepressurizerPass(registry);
+  initializeGenXDepressurizerWrapperPass(registry);
   initializeGenXEarlySimdCFConformancePass(registry);
   initializeGenXEmulationImportPass(registry);
   initializeGenXEmulatePass(registry);
@@ -100,17 +101,18 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXVectorCombinerPass(registry);
   initializeGenXFuncBalingPass(registry);
   initializeGenXGEPLoweringPass(registry);
-  initializeGenXGroupBalingPass(registry);
+  initializeGenXGroupBalingWrapperPass(registry);
   initializeGenXIMadPostLegalizationPass(registry);
-  initializeGenXLateSimdCFConformancePass(registry);
+  initializeGenXLateSimdCFConformanceWrapperPass(registry);
   initializeGenXLegalizationPass(registry);
-  initializeGenXLiveRangesPass(registry);
-  initializeGenXLivenessPass(registry);
-  initializeGenXLivenessPass(registry);
+  initializeGenXLiveRangesWrapperPass(registry);
+  // initializeGenXLivenessWrapperPass(registry);
+  initializeGenXLivenessWrapperPass(registry);
   initializeGenXLowerAggrCopiesPass(registry);
   initializeGenXLoweringPass(registry);
   initializeGenXModulePass(registry);
-  initializeGenXNumberingPass(registry);
+  initializeGenXNumberingWrapperPass(registry);
+  initializeGenXPacketizePass(registry);
   initializeGenXPatternMatchPass(registry);
   initializeGenXPostLegalizationPass(registry);
   initializeGenXPrologEpilogInsertionPass(registry);
@@ -118,17 +120,17 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXRawSendRipperPass(registry);
   initializeGenXReduceIntSizePass(registry);
   initializeGenXRegionCollapsingPass(registry);
-  initializeGenXRematerializationPass(registry);
+  initializeGenXRematerializationWrapperPass(registry);
   initializeGenXThreadPrivateMemoryPass(registry);
   initializeGenXTidyControlFlowPass(registry);
-  initializeGenXUnbalingPass(registry);
-  initializeGenXVisaRegAllocPass(registry);
+  initializeGenXUnbalingWrapperPass(registry);
+  initializeGenXVisaRegAllocWrapperPass(registry);
   initializeTransformPrivMemPass(registry);
-  initializeGenXFunctionPointersLoweringPass(registry);
   initializeGenXBackendConfigPass(registry);
   initializeGenXImportOCLBiFPass(registry);
   initializeGenXSimplifyPass(registry);
   initializeCMABIPass(registry);
+  initializeCMLowerVLoadVStorePass(registry);
   initializeGenXLowerJmpTableSwitchPass(registry);
   initializeGenXGlobalValueLoweringPass(registry);
   initializeCMImpParamPass(registry);
@@ -141,12 +143,17 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXTranslateSPIRVBuiltinsPass(registry);
   initializeGenXLoadStoreLoweringPass(registry);
   initializeGenXStackUsagePass(registry);
+  initializeGenXOCLRuntimeInfoPass(registry);
+  initializeGenXStructSplitterPass(registry);
+  initializeGenXTrampolineInsertionPass(registry);
+  initializeGenXPredRegionLoweringPass(registry);
+  initializeGenXLinkageCorruptorPass(registry);
 
   // WRITE HERE MORE PASSES IF IT'S NEEDED;
 }
 
 TargetTransformInfo GenXTargetMachine::getTargetTransformInfo(const Function &F) {
-  GenXTTIImpl GTTI(F.getParent()->getDataLayout());
+  GenXTTIImpl GTTI(F.getParent()->getDataLayout(), *BC);
   return TargetTransformInfo(GTTI);
 }
 
@@ -191,12 +198,13 @@ GenXTargetMachine::GenXTargetMachine(const Target &T, const Triple &TT,
                                      const TargetOptions &Options,
                                      Optional<Reloc::Model> RM,
                                      Optional<CodeModel::Model> CM,
-                                     CodeGenOpt::Level OL, bool Is64Bit)
+                                     CodeGenOpt::Level OL, bool Is64Bit,
+                                     std::unique_ptr<GenXBackendConfig> BC)
     : IGCLLVM::LLVMTargetMachine(T, getDL(Is64Bit), TT, CPU, FS, Options,
                                  RM ? RM.getValue() : Reloc::Model::Static,
                                  CM ? CM.getValue() : CodeModel::Model::Small,
                                  OL),
-      Is64Bit(Is64Bit), Subtarget(TT, CPU.str(), FS.str()) {}
+      BC(std::move(BC)), Is64Bit(Is64Bit), Subtarget(TT, CPU.str(), FS.str()) {}
 
 GenXTargetMachine::~GenXTargetMachine() = default;
 
@@ -214,16 +222,38 @@ GenXTargetMachine32::GenXTargetMachine32(const Target &T, const Triple &TT,
                                          const TargetOptions &Options,
                                          Optional<Reloc::Model> RM,
                                          Optional<CodeModel::Model> CM,
-                                         CodeGenOpt::Level OL, bool JIT)
-    : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, false) {}
+                                         CodeGenOpt::Level OL, bool JIT,
+                                         std::unique_ptr<GenXBackendConfig> BC)
+    : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, false,
+                        std::move(BC)) {}
 
 GenXTargetMachine64::GenXTargetMachine64(const Target &T, const Triple &TT,
                                          StringRef CPU, StringRef FS,
                                          const TargetOptions &Options,
                                          Optional<Reloc::Model> RM,
                                          Optional<CodeModel::Model> CM,
-                                         CodeGenOpt::Level OL, bool JIT)
-    : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, true) {}
+                                         CodeGenOpt::Level OL, bool JIT,
+                                         std::unique_ptr<GenXBackendConfig> BC)
+    : GenXTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL, true,
+                        std::move(BC)) {}
+
+namespace vc {
+std::unique_ptr<llvm::TargetMachine>
+createGenXTargetMachine(const Target &T, Triple TT, StringRef CPU,
+                        StringRef Features, const TargetOptions &Options,
+                        Optional<Reloc::Model> RM,
+                        Optional<CodeModel::Model> CM, CodeGenOpt::Level OL,
+                        std::unique_ptr<GenXBackendConfig> BC) {
+  if (is32BitArch(TT))
+    return std::make_unique<GenXTargetMachine32>(T, TT, CPU, Features, Options,
+                                                 RM, CM, OL, false /*JIT*/,
+                                                 std::move(BC));
+  else
+    return std::make_unique<GenXTargetMachine64>(T, TT, CPU, Features, Options,
+                                                 RM, CM, OL, false /*JIT*/,
+                                                 std::move(BC));
+}
+} // namespace vc
 
 //===----------------------------------------------------------------------===//
 //                       External Interface declaration
@@ -255,52 +285,56 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
     return true;
 
   GenXPassConfig *PassConfig = createGenXPassConfig(*this, PM);
-  PM.add(PassConfig);
+  vc::addPass(PM, PassConfig);
   const GenXBackendConfig &BackendConfig = PassConfig->getBackendConfig();
 
   // Install GenX-specific TargetTransformInfo for passes such as
   // LowerAggrCopies and InfoAddressSpace
-  PM.add(createTargetTransformInfoWrapperPass(getTargetIRAnalysis()));
+  vc::addPass(PM, createTargetTransformInfoWrapperPass(getTargetIRAnalysis()));
 
-  PM.add(createSROAPass());
-  PM.add(createEarlyCSEPass());
-  PM.add(createLowerExpectIntrinsicPass());
-  PM.add(createCFGSimplificationPass());
-  PM.add(createInstructionCombiningPass());
+  if (BackendConfig.isBiFEmulationCompilation())
+    vc::addPass(PM, createGenXEmulationModulePreparePass());
 
-  PM.add(createGlobalDCEPass());
-  PM.add(createGenXLowerAggrCopiesPass());
-  PM.add(createInferAddressSpacesPass());
-  PM.add(createTransformPrivMemPass());
-  PM.add(createPromoteMemoryToRegisterPass());
+  vc::addPass(PM, createSROAPass());
+  vc::addPass(PM, createEarlyCSEPass());
+  vc::addPass(PM, createLowerExpectIntrinsicPass());
+  vc::addPass(PM, createCFGSimplificationPass());
+  vc::addPass(PM, createInstructionCombiningPass());
+
+  vc::addPass(PM, createGlobalDCEPass());
+  vc::addPass(PM, createGenXLowerAggrCopiesPass());
+  vc::addPass(PM, createInferAddressSpacesPass());
+  /// .. include:: GenXStructSplitter.cpp
+  vc::addPass(PM, createGenXStructSplitterPass());
+  /// DeadCodeElimination
+  /// -------------------
+  /// This is a standard LLVM pass, run at this point in the GenX backend. It
+  /// removes code that has been made dead by other passes.
+  ///
+  vc::addPass(PM, createDeadCodeEliminationPass());
+  vc::addPass(PM, createTransformPrivMemPass());
+  vc::addPass(PM, createPromoteMemoryToRegisterPass());
   // All passes which modify the LLVM IR are now complete; run the verifier
   // to ensure that the IR is valid.
-  if (!DisableVerify) PM.add(createVerifierPass());
+  if (!DisableVerify)
+    vc::addPass(PM, createVerifierPass());
   // Run passes to generate vISA.
 
   /// .. include:: GenXAggregatePseudoLowering.cpp
-  PM.add(createGenXAggregatePseudoLoweringPass());
+  vc::addPass(PM, createGenXAggregatePseudoLoweringPass());
   /// InstructionCombining
   /// --------------------
   /// This is a standard LLVM pass, used at this point in the GenX backend.
   ///
-  PM.add(createInstructionCombiningPass());
+  vc::addPass(PM, createInstructionCombiningPass());
 
   // Aggregate pseudo lowering may create GEPs to be lowered before TPM
-
-  /// .. include:: GenXGEPLowering.cpp
-  PM.add(createGenXGEPLoweringPass());
-  /// .. include:: GenXStackUsage.cpp
-  PM.add(createGenXStackUsagePass());
-  /// .. include:: GenXLoadStoreLowering.cpp
-  PM.add(createGenXLoadStoreLoweringPass());
-  PM.add(createGenXThreadPrivateMemoryPass());
 
   /// BasicAliasAnalysis
   /// ------------------
   /// This is a standard LLVM analysis pass to provide basic AliasAnalysis
   /// support.
-  PM.add(createBasicAAWrapperPass());
+  vc::addPass(PM, createBasicAAWrapperPass());
   /// SROA
   /// ----
   /// This is a standard LLVM pass, used at this point in the GenX backend.
@@ -310,14 +344,9 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   ///
   /// **IR restriction**: alloca, load, store not supported after this pass.
   ///
-  PM.add(createSROAPass());
+  vc::addPass(PM, createSROAPass());
 
-  PM.add(createGenXInstCombineCleanup());
-
-  if (!ExperimentalEnforceLateEmulationImports)
-    PM.add(createGenXEmulationImportPass());
-
-  PM.add(createGenXLowerJmpTableSwitchPass());
+  vc::addPass(PM, createGenXLowerJmpTableSwitchPass());
   /// LowerSwitch
   /// -----------
   /// This is a standard LLVM pass to lower a switch instruction to a chain of
@@ -326,47 +355,42 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// **IR restriction**: switch not supported after this pass.
   ///
   // TODO: keep some switch instructions and lower them to JMPSWITCH vISA ops.
-  PM.add(createLowerSwitchPass());
+  vc::addPass(PM, createLowerSwitchPass());
   /// .. include:: GenXCFSimplification.cpp
-  PM.add(createGenXCFSimplificationPass());
+  vc::addPass(PM, createGenXCFSimplificationPass());
   /// CFGSimplification
   /// -----------------
   /// This is a standard LLVM pass, used at this point in the GenX backend.
   ///
-  PM.add(createCFGSimplificationPass());
+  vc::addPass(PM, createCFGSimplificationPass());
   /// .. include:: GenXInlineAsmLowering.cpp
-  PM.add(createGenXInlineAsmLoweringPass());
+  vc::addPass(PM, createGenXInlineAsmLoweringPass());
   /// .. include:: GenXReduceIntSize.cpp
-  PM.add(createGenXReduceIntSizePass());
+  vc::addPass(PM, createGenXReduceIntSizePass());
   /// .. include:: GenXGlobalValueLowering.cpp
-  PM.add(createGenXGlobalValueLoweringPass());
+  vc::addPass(PM, createGenXGlobalValueLoweringPass());
+
+  /// .. include:: GenXStackUsage.cpp
+  vc::addPass(PM, createGenXStackUsagePass());
+
+  // PrologEpilog may emit memory instructions of illegal width.
+  vc::addPass(PM, createGenXPrologEpilogInsertionPass());
+
+  /// .. include:: GenXGEPLowering.cpp
+  vc::addPass(PM, createGenXGEPLoweringPass());
+  /// .. include:: GenXLoadStoreLowering.cpp
+  vc::addPass(PM, createGenXLoadStoreLoweringPass());
+  vc::addPass(PM, createGenXThreadPrivateMemoryPass());
+
   /// InstructionCombining
   /// --------------------
   /// This is a standard LLVM pass, used at this point in the GenX backend.
-  ///
-  PM.add(createInstructionCombiningPass());
+  /// Run instcombine after some lowering passes (e.g. GenXLoadStoreLowering) to
+  /// make a cleanup.
+  vc::addPass(PM, createInstructionCombiningPass());
   // Run integer reduction again to revert some trunc/ext patterns transformed
   // by instcombine.
-  PM.add(createGenXReduceIntSizePass());
-  /// .. include:: GenXSimdCFConformance.cpp
-  PM.add(createGenXEarlySimdCFConformancePass());
-  /// .. include:: GenXPromotePredicate.cpp
-  PM.add(createGenXPromotePredicatePass());
-  // Run GEP lowering again to remove possible GEPs after instcombine.
-  PM.add(createGenXGEPLoweringPass());
-  /// .. include:: GenXLowering.cpp
-  PM.add(createGenXLoweringPass());
-  if (!DisableVerify) PM.add(createVerifierPass());
-  PM.add(createGenXFunctionPointersLoweringPass());
-  /// .. include:: GenXRegionCollapsing.cpp
-  PM.add(createGenXRegionCollapsingPass());
-  /// EarlyCSE
-  /// --------
-  /// This is a standard LLVM pass, run at this point in the GenX backend.
-  /// It commons up common subexpressions, but only in the case that two common
-  /// subexpressions are related by one dominating the other.
-  ///
-  PM.add(createEarlyCSEPass());
+  vc::addPass(PM, createGenXReduceIntSizePass());
   /// BreakCriticalEdges
   /// ------------------
   /// In the control flow graph, a critical edge is one from a basic block with
@@ -377,82 +401,113 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// constant loader and GenXCoalescing have somewhere to insert a phi copy if
   /// needed.
   ///
-  PM.add(createBreakCriticalEdgesPass());
-  /// .. include:: GenXPatternMatch.cpp
-  PM.add(createGenXPatternMatchPass());
-  if (!DisableVerify) PM.add(createVerifierPass());
-  /// .. include:: GenXExtractVectorizer.cpp
-  PM.add(createGenXExtractVectorizerPass());
-  /// .. include:: GenXVectorCombiner.cpp
-  PM.add(createGenXVectorCombinerPass());
-  /// .. include:: GenXRawSendRipper.cpp
-  PM.add(createGenXRawSendRipperPass());
-  /// DeadCodeElimination
-  /// -------------------
-  /// This is a standard LLVM pass, run at this point in the GenX backend. It
-  /// removes code that has been made dead by other passes.
-  ///
-  PM.add(createDeadCodeEliminationPass());
-  PM.add(createGenXPrologEpilogInsertionPass());
-  /// .. include:: GenXBaling.h
-  PM.add(createGenXFuncBalingPass(BalingKind::BK_Legalization, &Subtarget));
-  /// .. include:: GenXLegalization.cpp
-  PM.add(createGenXLegalizationPass());
-  if (ExperimentalEnforceLateEmulationImports)
-    PM.add(createGenXEmulationImportPass());
-  /// .. include:: GenXEmulate.cpp
-  PM.add(createGenXEmulatePass());
-  /// .. include:: GenXPromoteStatefulToBindless.cpp
-  PM.add(createGenXPromoteStatefulToBindlessPass());
-  /// .. include:: GenXDeadVectorRemoval.cpp
-  PM.add(createGenXDeadVectorRemovalPass());
-  /// DeadCodeElimination
-  /// -------------------
-  /// This is a standard LLVM pass, run at this point in the GenX backend. It
-  /// removes code that has been made dead by other passes.
-  ///
-  PM.add(createDeadCodeEliminationPass());
-  /// .. include:: GenXPostLegalization.cpp
-  /// .. include:: GenXConstants.cpp
-  /// .. include:: GenXVectorDecomposer.h
-  PM.add(createGenXPostLegalizationPass());
-  if (!DisableVerify) PM.add(createVerifierPass());
+  vc::addPass(PM, createBreakCriticalEdgesPass());
+  /// .. include:: GenXSimdCFConformance.cpp
+  vc::addPass(PM, createGenXEarlySimdCFConformancePass());
+  /// .. include:: GenXPromotePredicate.cpp
+  vc::addPass(PM, createGenXPromotePredicatePass());
+
+  // Run GEP lowering again to remove possible GEPs after instcombine.
+  vc::addPass(PM, createGenXGEPLoweringPass());
+  /// .. include:: GenXLowering.cpp
+  vc::addPass(PM, createGenXLoweringPass());
+  if (!DisableVerify)
+    vc::addPass(PM, createVerifierPass());
+  /// .. include:: GenXRegionCollapsing.cpp
+  vc::addPass(PM, createGenXRegionCollapsingPass());
   /// EarlyCSE
   /// --------
   /// This is a standard LLVM pass, run at this point in the GenX backend.
   /// It commons up common subexpressions, but only in the case that two common
   /// subexpressions are related by one dominating the other.
   ///
-  PM.add(createEarlyCSEPass());
-  /// LICM
-  /// ----
-  /// This is a standard LLVM pass to hoist/sink the loop invariant code after
-  /// legalization.
-  PM.add(createLICMPass());
+  vc::addPass(PM, createEarlyCSEPass());
+  /// .. include:: GenXPatternMatch.cpp
+  vc::addPass(PM, createGenXPatternMatchPass());
+  if (!DisableVerify)
+    vc::addPass(PM, createVerifierPass());
+  /// .. include:: GenXExtractVectorizer.cpp
+  vc::addPass(PM, createGenXExtractVectorizerPass());
+  /// .. include:: GenXVectorCombiner.cpp
+  vc::addPass(PM, createGenXVectorCombinerPass());
+  /// .. include:: GenXRawSendRipper.cpp
+  vc::addPass(PM, createGenXRawSendRipperPass());
   /// DeadCodeElimination
   /// -------------------
   /// This is a standard LLVM pass, run at this point in the GenX backend. It
   /// removes code that has been made dead by other passes.
   ///
-  PM.add(createDeadCodeEliminationPass());
-  PM.add(createGenXIMadPostLegalizationPass());
+  vc::addPass(PM, createDeadCodeEliminationPass());
+  /// .. include:: GenXBaling.h
+  vc::addPass(
+      PM, createGenXFuncBalingPass(BalingKind::BK_Legalization, &Subtarget));
+
+  /// .. include:: GenXLegalization.cpp
+  vc::addPass(PM, createGenXLegalizationPass());
+
+  // emulation BiF compilation mode stops here.
+  if (BackendConfig.isBiFEmulationCompilation())
+    return false;
+
+  vc::addPass(PM, createGenXEmulationImportPass());
+  /// .. include:: GenXEmulate.cpp
+  vc::addPass(PM, createGenXEmulatePass());
+  /// .. include:: GenXPromoteStatefulToBindless.cpp
+  vc::addPass(PM, createGenXPromoteStatefulToBindlessPass());
+  /// .. include:: GenXDeadVectorRemoval.cpp
+  vc::addPass(PM, createGenXDeadVectorRemovalPass());
+  /// DeadCodeElimination
+  /// -------------------
+  /// This is a standard LLVM pass, run at this point in the GenX backend. It
+  /// removes code that has been made dead by other passes.
+  ///
+  vc::addPass(PM, createDeadCodeEliminationPass());
+  /// .. include:: GenXPostLegalization.cpp
+  /// .. include:: GenXConstants.cpp
+  /// .. include:: GenXVectorDecomposer.h
+  vc::addPass(PM, createGenXPostLegalizationPass());
+  if (!DisableVerify)
+    vc::addPass(PM, createVerifierPass());
+  /// EarlyCSE
+  /// --------
+  /// This is a standard LLVM pass, run at this point in the GenX backend.
+  /// It commons up common subexpressions, but only in the case that two common
+  /// subexpressions are related by one dominating the other.
+  ///
+  vc::addPass(PM, createEarlyCSEPass());
+  /// LICM
+  /// ----
+  /// This is a standard LLVM pass to hoist/sink the loop invariant code after
+  /// legalization.
+  vc::addPass(PM, createLICMPass());
+  /// DeadCodeElimination
+  /// -------------------
+  /// This is a standard LLVM pass, run at this point in the GenX backend. It
+  /// removes code that has been made dead by other passes.
+  ///
+  vc::addPass(PM, createDeadCodeEliminationPass());
+  vc::addPass(PM, createGenXIMadPostLegalizationPass());
   /// GlobalDCE
   /// ---------
   /// This is a standard LLVM pass, run at this point in the GenX backend. It
   /// eliminates unreachable internal globals.
   ///
-  PM.add(createGlobalDCEPass());
+  vc::addPass(PM, createGlobalDCEPass());
   /// .. include:: GenXModule.h
-  PM.add(createGenXModulePass());
+  vc::addPass(PM, createGenXModulePass());
   /// .. include:: GenXLiveness.h
-  PM.add(createGenXGroupBalingPass(BalingKind::BK_Analysis, &Subtarget));
-  PM.add(createGenXLivenessPass());
-  PM.add(createGenXNumberingPass());
-  PM.add(createGenXLiveRangesPass());
+  vc::addPass(PM, createGenXGroupBalingWrapperPass(BalingKind::BK_Analysis,
+                                                   &Subtarget));
+  // GenXPredRegionLowering must be run after GenXLegalization and requires
+  // updated baling analysis (and preserves it).
+  vc::addPass(PM, createGenXPredRegionLoweringPass());
+  vc::addPass(PM, createGenXLivenessWrapperPass());
+  vc::addPass(PM, createGenXNumberingWrapperPass());
+  vc::addPass(PM, createGenXLiveRangesWrapperPass());
   /// .. include:: GenXRematerialization.cpp
-  PM.add(createGenXRematerializationPass());
+  vc::addPass(PM, createGenXRematerializationWrapperPass());
   /// .. include:: GenXCategory.cpp
-  PM.add(createGenXCategoryPass());
+  vc::addPass(PM, createGenXCategoryWrapperPass());
   /// Late SIMD CF conformance pass
   /// -----------------------------
   /// This is the same pass as GenXSimdCFConformance above, but run in a
@@ -462,7 +517,7 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// category. The RM values must have RM register category. The !any result of
   /// a goto/join must have NONE register category.
   ///
-  PM.add(createGenXLateSimdCFConformancePass());
+  vc::addPass(PM, createGenXLateSimdCFConformanceWrapperPass());
   /// CodeGen baling pass
   /// -------------------
   /// This is the same pass as GenXBaling above, but run in a slightly different
@@ -471,39 +526,41 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// **IR restriction**: Any pass after this needs to be careful when modifying
   /// code, as it also needs to update baling info.
   ///
-  PM.add(createGenXGroupBalingPass(BalingKind::BK_CodeGen, &Subtarget));
+  vc::addPass(
+      PM, createGenXGroupBalingWrapperPass(BalingKind::BK_CodeGen, &Subtarget));
 
   /// .. include:: GenXNumbering.h
-  PM.add(createGenXNumberingPass());
+  vc::addPass(PM, createGenXNumberingWrapperPass());
   /// .. include:: GenXLiveRanges.cpp
-  PM.add(createGenXLiveRangesPass());
+  vc::addPass(PM, createGenXLiveRangesWrapperPass());
   /// .. include:: GenXUnbaling.cpp
-  PM.add(createGenXUnbalingPass());
+  vc::addPass(PM, createGenXUnbalingWrapperPass());
   /// .. include:: GenXDepressurizer.cpp
-  PM.add(createGenXDepressurizerPass());
+  vc::addPass(PM, createGenXDepressurizerWrapperPass());
   /// .. include:: GenXNumbering.h
-  PM.add(createGenXNumberingPass());
+  vc::addPass(PM, createGenXNumberingWrapperPass());
   /// .. include:: GenXLiveRanges.cpp
-  PM.add(createGenXLiveRangesPass());
+  vc::addPass(PM, createGenXLiveRangesWrapperPass());
   /// .. include:: GenXCoalescing.cpp
-  PM.add(createGenXCoalescingPass());
+  vc::addPass(PM, createGenXCoalescingWrapperPass());
   /// .. include:: GenXAddressCommoning.cpp
-  PM.add(createGenXAddressCommoningPass());
+  vc::addPass(PM, createGenXAddressCommoningWrapperPass());
   /// .. include:: GenXArgIndirection.cpp
-  PM.add(createGenXArgIndirectionPass());
+  vc::addPass(PM, createGenXArgIndirectionWrapperPass());
   /// .. include:: GenXTidyControlFlow.cpp
-  PM.add(createGenXTidyControlFlowPass());
+  vc::addPass(PM, createGenXTidyControlFlowPass());
   /// .. include:: GenXVisaRegAlloc.h
-  auto RegAlloc = createGenXVisaRegAllocPass();
-  PM.add(RegAlloc);
-  if (BackendConfig.enableRegAllocDump() || Subtarget.dumpRegAlloc())
-    PM.add(createGenXGroupAnalysisDumperPass(RegAlloc, ".regalloc"));
-
-  if (!DisableVerify) PM.add(createVerifierPass());
+  auto RegAlloc = createGenXVisaRegAllocWrapperPass();
+  vc::addPass(PM, RegAlloc);
+  if (BackendConfig.enableRegAllocDump())
+    vc::addPass(PM, createGenXModuleAnalysisDumperPass(RegAlloc, FGDumpsPrefix,
+                                                       ".regalloc"));
+  if (!DisableVerify)
+    vc::addPass(PM, createVerifierPass());
   /// .. include:: GenXCisaBuilder.cpp
-  PM.add(createGenXCisaBuilderPass());
-  PM.add(createGenXFinalizerPass(o));
-  PM.add(createGenXDebugInfoPass());
+  vc::addPass(PM, createGenXCisaBuilderWrapperPass());
+  vc::addPass(PM, createGenXFinalizerPass(o));
+  vc::addPass(PM, createGenXDebugInfoPass());
 
   // Analysis for collecting information related to OCL runtime. Can
   // be used by external caller by adding extractor pass in the end of
@@ -512,7 +569,7 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   // pass will create runtime info analysis. Leaving it exlicit for
   // clarity.
   if (Subtarget.isOCLRuntime())
-    PM.add(new GenXOCLRuntimeInfo());
+    vc::addPass(PM, new GenXOCLRuntimeInfo());
 
   return false;
 }
@@ -529,6 +586,7 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
   auto AddPacketize = [](const PassManagerBuilder &Builder,
                          PassManagerBase &PM) {
     PM.add(createGenXTranslateSPIRVBuiltinsPass());
+    PM.add(createAlwaysInlinerLegacyPass());
     PM.add(createGenXPrintfResolutionPass());
     PM.add(createGenXImportOCLBiFPass());
     PM.add(createGenXPacketizePass());
@@ -593,6 +651,32 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
                            AddLowerLoadStore);
   }
 
+  // Trampoline insertion.
+  if (Subtarget.isOCLRuntime()) {
+    auto AddTrampolineInsertion = [](const PassManagerBuilder &Builder,
+                                     PassManagerBase &PM) {
+      PM.add(createGenXTrampolineInsertionPass());
+    };
+    PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                           AddTrampolineInsertion);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           AddTrampolineInsertion);
+  }
+
+  // Have to internalize functions before CM implicit parameters as all
+  // implicit parameters cannot be supported at once for external functions
+  // and some frontends already depend on them working as the linkage is
+  // internal.
+  // FIXME: move back to CMABI or better remove this pass.
+  auto AddLinkageCorruptor = [](const PassManagerBuilder &Builder,
+                                PassManagerBase &PM) {
+    PM.add(createGenXLinkageCorruptorPass());
+  };
+  PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                         AddLinkageCorruptor);
+  PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                         AddLinkageCorruptor);
+
   // CM implicit parameters.
   auto AddCMImpParam = [this](const PassManagerBuilder &Builder,
                               PassManagerBase &PM) {
@@ -605,7 +689,6 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
 
   // CM ABI.
   auto AddCMABI = [](const PassManagerBuilder &Builder, PassManagerBase &PM) {
-    PM.add(createIPSCCPPass());
     PM.add(createCMABIPass());
   };
   PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly, AddCMABI);
@@ -626,8 +709,8 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
   // CM kernel argument offset.
   auto AddCMKernelArgOffset = [this](const PassManagerBuilder &Builder,
                                      PassManagerBase &PM) {
-    unsigned Width = 32;
-    PM.add(createCMKernelArgOffsetPass(Width, Subtarget.isOCLRuntime()));
+    PM.add(createCMKernelArgOffsetPass(Subtarget.getGRFByteSize(),
+                                       Subtarget.isOCLRuntime()));
   };
   PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
                          AddCMKernelArgOffset);

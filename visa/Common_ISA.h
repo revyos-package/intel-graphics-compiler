@@ -26,13 +26,12 @@ class G4_Declare;
  */
 #define COMMON_ISA_MAGIC_NUM 0x41534943
 
-#define COMMON_ISA_MAJOR_VER 3
-#define COMMON_ISA_MINOR_VER 8
+#define COMMON_ISA_MAJOR_VER 4
+#define COMMON_ISA_MINOR_VER 0
 
 #define COMMON_ISA_MAX_ADDRESS_SIZE     16
 #define COMMON_ISA_MAX_SURFACE_SIZE     128
 #define COMMON_ISA_MAX_SAMPLER_SIZE     128
-#define COMMON_ISA_MAX_VARIABLE_SIZE    (256 * getGRFSize())
 #define COMMON_ISA_MAX_NUM_SURFACES     256
 #define COMMON_ISA_MAX_NUM_SAMPLERS     32
 #define COMMON_ISA_MAX_NUM_INPUTS       256
@@ -53,8 +52,6 @@ class G4_Declare;
 #define COMMON_ISA_MAX_MEDIA_BLOCK_WIDTH_BDW_PLUS 64
 #define COMMON_ISA_MAX_MEDIA_BLOCK_WIDTH 32
 #define COMMON_ISA_MAX_MEDIA_BLOCK_HEIGHT 64
-
-#define  COMMON_ISA_GRF_REG_SIZE (getGRFSize()) /// # of bytes in a CISA GRF register
 
 #define COMMON_ISA_MAX_FILENAME_LENGTH   1023
 
@@ -197,12 +194,12 @@ struct var_info_t {
         return (VISA_Align) ((bit_properties >> 4 ) & 0xF);
     }
 
-    VISA_Align getTypeAlignment() const
+    VISA_Align getTypeAlignment(unsigned grfSize) const
     {
         VISA_Align typeAlign = ALIGN_WORD;
-        if (getSize() >= getGRFSize())
+        if (getSize() >= grfSize)
         {
-            typeAlign = ALIGN_HWORD;
+            typeAlign = grfSize == 64 ? ALIGN_32WORD : ALIGN_HWORD;
         }
         else
         {
@@ -606,7 +603,7 @@ struct vector_opnd {
     int getSizeInBinary() const;
 };
 
-typedef struct {
+typedef struct _raw_opnd{
     uint32_t index;
     unsigned short offset;
 
@@ -829,16 +826,73 @@ namespace vISA
         DP_PI      = 11, //PIXEL INTERPOLATOR
         DP_DC1     = 12, //DATA CACHE DATAPORT1
         CRE        = 13, //CHECK & REFINEMENT ENGINE
+        BTD        = 16, // bindless thread dispatcher
+        RTHW       = 17, // ray trace HW accelerator
+        TGM        = 18, // typed global memory
+        SLM        = 19, // untyped shared local memory
+        UGM        = 20, // untyped global memory
+        UGML       = 21, // untyped global memory (low bandwidth)
     };
 
     inline int SFIDtoInt(SFID id)
     {
+        if (id == SFID::BTD)
+        {
+            return 0x7;
+        }
+        else if (id == SFID::RTHW)
+        {
+            return 0x8;
+        }
+        else if (id == SFID::TGM)
+        {
+            return 0xD;
+        }
+        else if (id == SFID::SLM)
+        {
+            return 0xE;
+        }
+        else if (id == SFID::UGM)
+        {
+            return 0xF;
+        }
         return static_cast<int>(id);
     };
 
-    inline SFID intToSFID(int id)
+    inline SFID intToSFID(int id, TARGET_PLATFORM platform)
     {
+        if (platform >= Xe_DG2)
+        {
+            switch (id)
+            {
+                case 0x7:
+                    return SFID::BTD;
+                case 0x8:
+                    return SFID::RTHW;
+                case 0xD:
+                    return SFID::TGM;
+                case 0xE:
+                    return SFID::SLM;
+                case 0xF:
+                    return SFID::UGM;
+                default:
+                    // fall through
+                    break;
+            }
+        }
         return static_cast<SFID>(id);
+    };
+    inline SFID LSC_SFID_To_SFID(LSC_SFID lscId)
+    {
+        switch (lscId) {
+        case LSC_UGM:  return SFID::UGM;
+        case LSC_UGML: return SFID::UGML;
+        case LSC_TGM:  return SFID::TGM;
+        case LSC_SLM:  return SFID::SLM;
+        default:
+            assert(false && "invalid SFID for untyped LSC message");
+            return SFID::NULL_SFID;
+        }
     };
 };
 
@@ -869,7 +923,8 @@ extern vISAPreDefinedSurface vISAPreDefSurf[COMMON_ISA_NUM_PREDEFINED_SURF_VER_3
 const int BINDLESS_SAMPLER_ID = 31;
 static const char* BINDLESS_SAMPLER_NAME = "S31";
 
-const char* getSampleOp3DName(int opcode);
+const char* getSampleOp3DName(VISASampler3DSubOpCode opcode, TARGET_PLATFORM platform);
+VISASampler3DSubOpCode getSampleOpFromName(const char *str, TARGET_PLATFORM platform);
 
 /// ChannelMask - Channel mask used in vISA builder.
 /// NOTE: This class is added to discourage developers to directly manipulate
@@ -1092,18 +1147,34 @@ struct VISA3DSamplerOp
     bool cpsEnable;
     bool nonUniformSampler;
 
-    // Bit 0-4: subOpcode
-    // Bit 5  : pixelNullMask
-    // Bit 6  : cpsEnable
-    // Bit 7  : non-uniform sampler
-    static VISA3DSamplerOp extractSamplerOp(uint8_t val)
+    template <class T>
+    static VISA3DSamplerOp extractSamplerOp(T val)
     {
+
+        if (std::is_same<T, uint8_t>::value) {
+            // Bit 0-4: subOpcode
+            // Bit 5  : pixelNullMask
+            // Bit 6  : cpsEnable
+            // Bit 7  : non-uniform sampler
+            VISA3DSamplerOp op;
+            op.pixelNullMask = (val & (1 << 5)) != 0;
+            op.cpsEnable = (val & (1 << 6)) != 0;
+            op.nonUniformSampler = (val & (1 << 7)) != 0;
+            // val & 0b00011111
+            op.opcode = static_cast<VISASampler3DSubOpCode>(val & 0x1F);
+            return op;
+        }
+
+        // Bit 0-7: subOpcode
+        // Bit 8  : pixelNullMask
+        // Bit 9  : cpsEnable
+        // Bit 10 : non-uniform sampler
         VISA3DSamplerOp op;
-        op.pixelNullMask = (val & (1 << 5)) != 0;
-        op.cpsEnable = (val & (1 << 6)) != 0;
-        op.nonUniformSampler = (val & (1 << 7)) != 0;
-        // val & 0b00011111
-        op.opcode = static_cast<VISASampler3DSubOpCode>(val & 0x1F);
+        op.pixelNullMask = (val & (1 << 8)) != 0;
+        op.cpsEnable = (val & (1 << 9)) != 0;
+        op.nonUniformSampler = (val & (1 << 10)) != 0;
+        // val & 0b01111111
+        op.opcode = static_cast<VISASampler3DSubOpCode>(val & 0xFF);
         return op;
     }
 };

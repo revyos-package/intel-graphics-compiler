@@ -179,19 +179,23 @@ MDNode* CreateNode(const std::vector<val> &vec, Module* module, StringRef name)
         nodes.push_back(CreateNode(*(it), module, name.str() + "Vec[" + std::to_string(i++) + "]"));
         if (IGC_IS_FLAG_DISABLED(ShowFullVectorsInShaderDumps) && i > MAX_VECTOR_SIZE_TO_PRINT_IN_SHADER_DUMPS)
         {
+            std::string flagName = "ShowFullVectorsInShaderDumps";
+            #ifndef _WIN32
+                flagName = "IGC_" + flagName;
+            #endif
             std::string warningMessage = "ShaderDumpEnable Warning! " + name.str() + "Vec[] has " + std::to_string(vec.size())
                 + " elements. Including first " + std::to_string(MAX_VECTOR_SIZE_TO_PRINT_IN_SHADER_DUMPS)
-                + " items in ShaderDumps. To print all elements set ShowFullVectorsInShaderDumps register flag to True. "
-                + "ShaderOverride flag may not work properly without ShowFullVectorsInShaderDumps enabled.";
+                + " items in ShaderDumps. To print all elements set " + flagName + " register flag to True. "
+                + "ShaderOverride flag may not work properly without " + flagName + " enabled.";
 
             //Print warning once in console, print every time in LLVM ShaderDump
             static bool printWarningFirstTime = true;
             if (printWarningFirstTime)
             {
-                printf("\n%s\n\n", warningMessage.c_str());
+                fprintf(stderr, "\n%s\n\n", warningMessage.c_str());
                 printWarningFirstTime = false;
             }
-            nodes.push_back(CreateNode(false, module, warningMessage + " ShowFullVectorsInShaderDumps currently equals"));
+            nodes.push_back(CreateNode(false, module, warningMessage + " " + flagName + " currently equals"));
             break;
         }
     }
@@ -465,3 +469,32 @@ void IGC::serialize(const IGC::ModuleMetaData &moduleMD, Module* module)
     LLVMMetadata->addOperand(node);
 }
 
+bool IGC::isBindless(const IGC::FunctionMetaData &funcMD)
+{
+    return funcMD.functionType == IGC::CallableShader;
+}
+
+bool IGC::isContinuation(const IGC::FunctionMetaData& funcMD)
+{
+    return funcMD.rtInfo.isContinuation;
+}
+
+bool IGC::isCallStackHandler(const IGC::FunctionMetaData &funcMD)
+{
+    return funcMD.rtInfo.callableShaderType == IGC::CallStackHandler;
+}
+
+unsigned IGC::extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD)
+{
+    unsigned numThreadsPerEU = 0;
+    for (std::string annotation : funcMD.UserAnnotations)
+    {
+        if (const char* op = strstr(annotation.c_str(), "num-thread-per-eu"))
+        {
+            numThreadsPerEU = atoi(op + strlen("num-thread-per-eu"));
+            break;
+        }
+    }
+
+    return numThreadsPerEU;
+}

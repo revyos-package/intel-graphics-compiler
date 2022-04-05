@@ -43,8 +43,8 @@ SPDX-License-Identifier: MIT
 #include "GenXLiveness.h"
 #include "GenXModule.h"
 
-#include "vc/GenXOpts/Utils/RegCategory.h"
 #include "vc/Support/BackendConfig.h"
+#include "vc/Utils/GenX/RegCategory.h"
 
 #include "Probe/Assertion.h"
 #include "visaBuilder_interface.h"
@@ -52,6 +52,7 @@ SPDX-License-Identifier: MIT
 #include <map>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace llvm {
 
@@ -61,25 +62,41 @@ namespace llvm {
   class Type;
   class Value;
 
-  FunctionGroupPass *createGenXGroupPrinterPass(raw_ostream &O, const std::string &Banner);
+  ModulePass *createGenXGroupPrinterPass(raw_ostream &O,
+                                         const std::string &Banner);
 
   // GenXVisaRegAlloc : vISA virtual register allocator pass
-  class GenXVisaRegAlloc : public FunctionGroupPass {
+  class GenXVisaRegAlloc : public FGPassImplInterface,
+                           public IDMixin<GenXVisaRegAlloc> {
   public:
+    inline static const char *Prefix[] = {"ERR", "V", "A", "P", "S", "T"};
+
+    static StringRef categoryToString(vc::RegCategory Category) {
+      if (static_cast<unsigned>(Category) >= array_lengthof(Prefix))
+        Category = vc::RegCategory::None;
+      return accessContainer(Prefix, Category);
+    }
+    static void getAnalysisUsage(AnalysisUsage &Info);
+    static StringRef getPassName() {
+      return "GenX vISA virtual register allocator Wrapper";
+    }
 
     // Reg : a virtual register
     class Reg {
     public:
-      unsigned short Category = genx::RegCategory::NONE;
+      vc::RegCategory Category = vc::RegCategory::None;
       // Register ID. First value of it depends on count of predefined
       // variablse in category. F.e. for general var it is 32.
-      unsigned short Num = 0;
+      unsigned Num = 0;
       // Pointer to register that is aliased by this register.
       Reg* AliasTo = nullptr;
       // Single linked list to store all aliases of real register.
-      std::map<const Function*, Reg*> NextAlias;
+      Reg *NextAlias = nullptr;
       genx::Signedness Signed = genx::DONTCARESIGNED;
       Type *Ty = nullptr;
+      // Template, as bfloat not llvm-10 type
+      bool IsBF = false;
+
       // log2 min alignment requested by user of register
       unsigned Alignment = 0;
       // String representation of register, mostly it is combination of
@@ -89,21 +106,16 @@ namespace llvm {
       std::vector<std::pair<unsigned, std::string>> Attributes;
       // Pointer to VISA variable. It is set by CisaBuilder when it creates
       // VISA variables for all registers in RegMap.
-      std::map<VISAKernel*, void*> GenVar;
+      std::unordered_map<VISAKernel*, void*> GenVar;
 
-      explicit Reg(
-          unsigned Category,
-          unsigned Num,
-          Type *Ty = 0,
+      Reg(vc::RegCategory Category, unsigned Num, Type *Ty = 0,
           genx::Signedness Signed = genx::DONTCARESIGNED,
-          unsigned LogAlignment = 0,
-          Reg* AliasTo = nullptr)
+          unsigned LogAlignment = 0, Reg *AliasTo = nullptr,
+          bool ArgIsBF = false)
           : Category(Category), Num(Num), AliasTo(AliasTo), Signed(Signed),
-            Ty(Ty), Alignment(LogAlignment) {
-        static const char* Prefix[] = { "ERR", "V", "A", "P", "S", "T" };
-        IGC_ASSERT(Category);
-        IGC_ASSERT(Category < genx::RegCategory::NUMREALCATEGORIES);
-        NameStr = Prefix[Category] + std::to_string(Num);
+            Ty(Ty), Alignment(LogAlignment), IsBF(ArgIsBF) {
+        IGC_ASSERT(vc::isRealCategory(Category));
+        NameStr = (Twine(categoryToString(Category)) + Twine(Num)).str();
       }
 
       // Get VISA variable assigned to register.
@@ -127,8 +139,11 @@ namespace llvm {
     };
 
     using RegPushHook = void(*)(void* Object, Reg&);
-    using KernRegMap_t = std::map<genx::SimpleValue, Reg*>;
-    using RegMap_t = std::map<const Function*, KernRegMap_t>;
+    using RegMap_t = std::map<genx::SimpleValue, Reg *>;
+    using LRPtrVect = std::vector<genx::LiveRange *>;
+    using LRCPtrVect = std::vector<const genx::LiveRange *>;
+    void print(raw_ostream &OS, const FunctionGroup *FG) const override;
+
   private:
     FunctionGroup *FG = nullptr;
     GenXLiveness *Liveness = nullptr;
@@ -136,6 +151,7 @@ namespace llvm {
     FunctionGroupAnalysis *FGA = nullptr;
     const GenXSubtarget *ST = nullptr;
     const GenXBackendConfig *BackendConfig = nullptr;
+    const DataLayout *DL = nullptr;
 
     // pushReg callback that will be called once new register is created
     RegPushHook TheRegPushHook = nullptr;
@@ -152,36 +168,41 @@ namespace llvm {
     std::vector<Reg*> PredefinedRegs;
 
     // Array of current indexes being assigned to new register.
-    unsigned CurrentRegId[genx::RegCategory::NUMREALCATEGORIES];
+    unsigned CurrentRegId[vc::numRegCategories()];
+
+    struct RegAllocStats {
+      const LRCPtrVect *getLRs(const FunctionGroup *FG) const;
+      void recordLRs(const FunctionGroup *FG, const LRPtrVect &LRs);
+
+    private:
+      std::map<const FunctionGroup *, LRCPtrVect> LRs;
+    } Stats;
 
   public:
-    static char ID;
-    explicit GenXVisaRegAlloc() : FunctionGroupPass(ID) { }
-    StringRef getPassName() const override {
-      return "GenX vISA virtual register allocator";
-    }
-    void getAnalysisUsage(AnalysisUsage &AU) const override;
+    explicit GenXVisaRegAlloc() {}
+    void releaseMemory() override;
     bool runOnFunctionGroup(FunctionGroup &FG) override;
 
     std::list<Reg>& getRegStorage() {
       return RegStorage;
     }
     // Get the vISA virtual register for a value (assertion failure if none).
-    Reg* getRegForValue(const Function *kernel, genx::SimpleValue V,
-        genx::Signedness Signed = genx::DONTCARESIGNED, Type *OverrideType = 0)
-    {
-      Reg* R = getRegForValueOrNull(kernel, V, Signed, OverrideType);
+    Reg *getRegForValue(genx::SimpleValue V,
+                        genx::Signedness Signed = genx::DONTCARESIGNED,
+                        Type *OverrideType = nullptr, bool IsBF = false) {
+      Reg *R = getRegForValueOrNull(V, Signed, OverrideType, IsBF);
       IGC_ASSERT_MESSAGE(R, "no register allocated for this value");
       return R;
     }
     // Get the vISA virtual register for a value or nullptr if there is no
     // register associated with given value.
-    Reg* getRegForValueOrNull(const Function *kernel, genx::SimpleValue V,
-      genx::Signedness Signed = genx::DONTCARESIGNED, Type *OverrideType = 0);
+    Reg *getRegForValueOrNull(genx::SimpleValue V,
+                              genx::Signedness Signed = genx::DONTCARESIGNED,
+                              Type *OverrideType = nullptr, bool IsBF = false);
 
     // Get the vISA virtual register for a value (0 if none), ignoring type
     // and signedness so it can be a const method usable from print().
-    Reg* getRegForValueUntyped(const Function* kernel, genx::SimpleValue V) const;
+    Reg *getRegForValueUntyped(genx::SimpleValue V) const;
 
     // Get the signedness of a register.
     genx::Signedness getSigned(Reg* R);
@@ -193,34 +214,41 @@ namespace llvm {
       TheRegPushHookObject = Object;
     }
 
+    void reportVisaVarableNumberLimitError(vc::RegCategory Category,
+                                           unsigned ID) const;
+
+    static unsigned getMaximumVariableIDForCategory(vc::RegCategory Category);
+
+    static bool isVisaVaribleLimitExceeded(vc::RegCategory Category,
+                                           unsigned CurrentID) {
+      const auto IDLimit = getMaximumVariableIDForCategory(Category);
+      return CurrentID > IDLimit;
+    }
+
     // Create new register and push it in storage.
     // If RegPushHook was specified it will be called with created register as
     // parameter. Thus, all needed register's variables must be specified
     // at this moment, for example AliasTo.
-    template<class ... Args>
-    Reg* createReg(unsigned Category, Args&& ... args) {
-      RegStorage.emplace_back(Category, CurrentRegId[Category]++,
-        std::forward<Args>(args) ...);
+    template <class... Args>
+    Reg *createReg(vc::RegCategory Category, Args &&... args) {
+      if (isVisaVaribleLimitExceeded(
+              Category, vc::accessContainer(CurrentRegId, Category))) {
+        reportVisaVarableNumberLimitError(
+            Category, vc::accessContainer(CurrentRegId, Category));
+      }
+      auto NewID = vc::accessContainer(CurrentRegId, Category)++;
+      IGC_ASSERT(vc::accessContainer(CurrentRegId, Category) != 0);
+      RegStorage.emplace_back(Category, NewID, std::forward<Args>(args)...);
       Reg& R = RegStorage.back();
       if (TheRegPushHook)
         TheRegPushHook(TheRegPushHookObject, R);
       return &R;
     }
 
-    // createPrinterPass : get a pass to print the IR, together with the GenX
-    // specific analyses
-    Pass *createPrinterPass(raw_ostream &O,
-                            const std::string &Banner) const override {
-      return createGenXGroupPrinterPass(O, Banner);
-    }
-    // print : dump the state of the pass. This is used by -genx-dump-regalloc
-    void print(raw_ostream &O, const Module *M) const override;
-
   private:
-    void getLiveRanges(std::vector<genx::LiveRange *> &LRs) const;
-    void getLiveRangesForValue(Value *V,
-                               std::vector<genx::LiveRange *> &LRs) const;
-    void localizeLiveRangesForAccUsage(std::vector<genx::LiveRange *> &LRs);
+    void getLiveRanges(LRPtrVect &LRs) const;
+    void getLiveRangesForValue(Value *V, LRPtrVect &LRs) const;
+    void localizeLiveRangesForAccUsage(LRPtrVect &LRs);
     void extraCoalescing();
     void allocReg(genx::LiveRange *LR);
   public:
@@ -231,6 +259,7 @@ namespace llvm {
     unsigned CoalescingCount = 0;
     Reg* RetIP = nullptr;
   };
+  using GenXVisaRegAllocWrapper = FunctionGroupWrapperPass<GenXVisaRegAlloc>;
 
   namespace visa {
     // Details of a type required for a vISA general register declaration
@@ -240,11 +269,12 @@ namespace llvm {
       unsigned NumElements;
       unsigned BytesPerElement;
       unsigned VisaType;
-      TypeDetails(const DataLayout &DL, Type *Ty, genx::Signedness Signed);
+      TypeDetails(const DataLayout &DL, Type *Ty, genx::Signedness Signed,
+                  bool IsBF = false);
     };
   } // end namespace visa
 
-  void initializeGenXVisaRegAllocPass(PassRegistry &);
+  void initializeGenXVisaRegAllocWrapperPass(PassRegistry &);
 
 } // end namespace llvm
 #endif //ndef GENXVISAREGALLOC_H

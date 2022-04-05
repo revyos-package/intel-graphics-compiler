@@ -43,19 +43,49 @@ using namespace IGC::IGCMD;
 namespace IGC
 {
 
-    COpenCLKernel::COpenCLKernel(const OpenCLProgramContext* ctx, Function* pFunc, CShaderProgram* pProgram) :
+    COpenCLKernel::COpenCLKernel(OpenCLProgramContext* ctx, Function* pFunc, CShaderProgram* pProgram) :
         CComputeShaderBase(pFunc, pProgram)
     {
         m_HasTID = false;
         m_HasGlobalSize = false;
         m_disableMidThreadPreemption = false;
         m_perWIStatelessPrivateMemSize = 0;
-        m_Context = const_cast<OpenCLProgramContext*>(ctx);
+        m_Context = ctx;
         m_localOffsetsMap.clear();
         m_pBtiLayout = &(ctx->btiLayout);
         m_Platform = &(ctx->platform);
         m_DriverInfo = &(ctx->m_DriverInfo);
 
+        m_annotatedNumThreads = 0;
+        if (m_Platform->supportsStaticRegSharing())
+        {
+            // Obtain number of threads from user annotations if it is set
+            auto& FuncInfo = m_Context->getModuleMetaData()->FuncMD[pFunc];
+            unsigned numThreads = extractAnnotatedNumThreads(FuncInfo);
+            if (numThreads > 0 && m_Platform->isValidNumThreads(numThreads))
+            {
+                m_annotatedNumThreads = numThreads;
+            }
+            else
+            {
+                auto FuncName = pFunc->getName().str();
+                //check if option is set to use large GRF
+                for (auto SubNameR : ctx->m_InternalOptions.RegularGRFKernels)
+                {
+                    if (FuncName.find(SubNameR) != std::string::npos)
+                    {
+                        m_annotatedNumThreads = 8;
+                    }
+                }
+                for (auto SubNameL : ctx->m_InternalOptions.LargeGRFKernels)
+                {
+                    if (FuncName.find(SubNameL) != std::string::npos)
+                    {
+                        m_annotatedNumThreads = 4;
+                    }
+                }
+            }
+        }
     }
 
     COpenCLKernel::~COpenCLKernel()
@@ -122,6 +152,41 @@ namespace IGC
                 m_localOffsetsMap[loHandle.m_Var] = loHandle.m_Offset;
             }
         }
+        if (m_Platform->supportHWGenerateTID() && m_DriverInfo->SupportHWGenerateTID())
+            tryHWGenerateLocalIDs();
+    }
+    void COpenCLKernel::tryHWGenerateLocalIDs()
+    {
+        if (hasWorkGroupWalkOrder())
+            return;
+
+        auto Dims = IGCMetaDataHelper::getThreadGroupDims(
+            *m_pMdUtils, entry);
+
+        if (!Dims)
+            return;
+
+        // OpenCL currently emits all local IDs even if only one dimension
+        // is requested. Let's mirror that for now.
+        ImplicitArgs implicitArgs(*entry, m_pMdUtils);
+        if (implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_ID_X) ||
+            implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_ID_Y) ||
+            implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_ID_Z))
+        {
+            setEmitLocalMask(THREAD_ID_IN_GROUP_Z);
+        }
+
+        selectWalkOrder(
+            false,
+            0,
+            0,
+            0, /* dummy 1D accesses */
+            0, /* dummy 2D accesses */
+            0, /* dummy SLM accessed */
+            (*Dims)[0],
+            (*Dims)[1],
+            (*Dims)[2]);
+        encoder.GetVISABuilder()->SetOption(vISA_autoLoadLocalID, m_enableHWGenerateLID);
     }
 
     bool COpenCLKernel::hasWorkGroupWalkOrder()
@@ -469,8 +534,7 @@ namespace IGC
 
     void COpenCLKernel::CreatePrintfStringAnnotations()
     {
-        std::vector<std::pair<unsigned int, std::string>> printfStrings;
-        GetPrintfStrings(printfStrings);
+        auto printfStrings = GetPrintfStrings(*entry->getParent());
 
         for (const auto& printfString : printfStrings)
         {
@@ -570,7 +634,7 @@ namespace IGC
             // creating non-bti payload arg
             /*
             bool is_bti_only =
-                IGC_IS_FLAG_ENABLED(EnableStatelessToStatefull) &&
+                IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
                 IGC_IS_FLAG_ENABLED(EnableStatefulToken) &&
                 m_DriverInfo->SupportStatefulToken() &&
                 kernelArg->getArg() &&
@@ -615,7 +679,7 @@ namespace IGC
         case KernelArg::ArgType::CONSTANT_REG:
             zebin::ZEInfoBuilder::addPayloadArgumentByValue(m_kernelInfo.m_zePayloadArgs,
                 payloadPosition, kernelArg->getAllocateSize(),
-                kernelArg->getAssociatedArgNo());
+                kernelArg->getAssociatedArgNo(), kernelArg->getStructArgOffset());
             break;
 
         // Local ids are supported in per-thread payload arguments
@@ -656,24 +720,14 @@ namespace IGC
         case KernelArg::ArgType::IMAGE_CUBE_DEPTH_ARRAY:
         case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_DEPTH_ARRAY:
         {
-            int arg_idx = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(arg_idx);
-
-            // check if the image is writeable
-            bool writeable = false;
-            if (resInfo.Type == SOpenCLKernelInfo::SResourceInfo::RES_UAV &&
-                kernelArg->getAccessQual() != IGC::KernelArg::AccessQual::READ_ONLY)
-                writeable = true;
-            IGC_ASSERT_MESSAGE(resInfo.Type == SOpenCLKernelInfo::SResourceInfo::RES_UAV ||
-                resInfo.Type == SOpenCLKernelInfo::SResourceInfo::RES_SRV, "Unknown resource type");
-
             // the image arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
-            // For statefull image argument, the arg has 0 offset and 0 size
+            // For stateful image argument, the arg has 0 offset and 0 size
             zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode =
                 zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
             uint arg_off = 0;
             uint arg_size = 0;
 
+            int arg_idx = kernelArg->getAssociatedArgNo();
             if (kernelArg->needsAllocation()) {
                 // set to bindless
                 arg_addrmode =
@@ -682,17 +736,24 @@ namespace IGC
                 arg_size = kernelArg->getAllocateSize();
             } else {
                 // add bti index for this arg if it's stateful
+                SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(arg_idx);
                 zebin::ZEInfoBuilder::addBindingTableIndex(m_kernelInfo.m_zeBTIArgs,
                     getBTI(resInfo), arg_idx);
             }
 
+            auto access_type = [](KernelArg::AccessQual qual) {
+                if (qual == KernelArg::AccessQual::READ_ONLY)
+                    return zebin::PreDefinedAttrGetter::ArgAccessType::readonly;
+                if (qual == KernelArg::AccessQual::WRITE_ONLY)
+                    return zebin::PreDefinedAttrGetter::ArgAccessType::writeonly;
+                return zebin::PreDefinedAttrGetter::ArgAccessType::readwrite;
+            } (kernelArg->getAccessQual());
+
             // add the payload argument
             zebin::ZEInfoBuilder::addPayloadArgumentByPointer(m_kernelInfo.m_zePayloadArgs,
                 arg_off, arg_size, arg_idx, arg_addrmode,
-                  zebin::PreDefinedAttrGetter::ArgAddrSpace::image,
-                writeable ?
-                  zebin::PreDefinedAttrGetter::ArgAccessType::readwrite :
-                  zebin::PreDefinedAttrGetter::ArgAccessType::readonly
+                zebin::PreDefinedAttrGetter::ArgAddrSpace::image,
+                access_type
             );
         }
         break;
@@ -702,8 +763,8 @@ namespace IGC
         case KernelArg::ArgType::BINDLESS_SAMPLER:
         {
             // the sampler arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
-            // For statefull image argument, the arg has 0 offset and 0 size
-            // NOTE: we only have statefull sampler now
+            // For stateful image argument, the arg has 0 offset and 0 size
+            // NOTE: we only have stateful sampler now
             zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode =
                 zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
             uint arg_off = 0;
@@ -737,6 +798,12 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
                 zebin::PreDefinedAttrGetter::ArgType::printf_buffer,
+                payloadPosition, kernelArg->getAllocateSize());
+            break;
+
+        case KernelArg::ArgType::IMPLICIT_ARG_BUFFER:
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::implicit_arg_buffer,
                 payloadPosition, kernelArg->getAllocateSize());
             break;
 
@@ -858,6 +925,7 @@ namespace IGC
                 int argNo = kernelArg->getAssociatedArgNo();
                 std::shared_ptr<iOpenCL::PointerArgumentAnnotation> ptrAnnotation = m_kernelInfo.m_argOffsetMap[argNo];
                 ptrAnnotation->BindingTableIndex = payloadPosition;
+                ptrAnnotation->SecondPayloadSizeInBytes = kernelArg->getAllocateSize();
             }
             break;
 
@@ -1023,6 +1091,24 @@ namespace IGC
             m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
         }
         break;
+
+        case KernelArg::ArgType::IMPLICIT_ARG_BUFFER:
+        {
+            constantType = kernelArg->getDataParamToken();
+            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
+
+            auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
+
+            DWORD sizeInBytes = kernelArg->getAllocateSize();
+            constInput->ConstantType = constantType;
+            constInput->Offset = sizeInBytes;
+            constInput->PayloadPosition = payloadPosition;
+            constInput->PayloadSizeInBytes = sizeInBytes;
+            constInput->ArgumentNumber = DEFAULT_ARG_NUM;
+            m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
+
+            break;
+        }
 
         case KernelArg::ArgType::IMPLICIT_NUM_GROUPS:
         case KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE:
@@ -1235,6 +1321,12 @@ namespace IGC
             }
         }
         break;
+        case KernelArg::ArgType::RT_STACK_ID:
+        {
+            m_kernelInfo.m_threadPayload.HasRTStackID = true;
+        }
+        break;
+
         case KernelArg::ArgType::R1:
             m_kernelInfo.m_threadPayload.UnusedPerThreadConstantPresent = true;
             break;
@@ -1254,6 +1346,21 @@ namespace IGC
             m_kernelInfo.m_syncBufferAnnotation = std::move(syncBuffer);
         }
         break;
+
+        case KernelArg::ArgType::IMPLICIT_RT_GLOBAL_BUFFER:
+        {
+            int argNo = kernelArg->getAssociatedArgNo();
+            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
+            m_kernelInfo.m_argIndexMap[argNo] = getBTI(resInfo);
+
+            auto rtGlobalBuffer = std::make_unique<iOpenCL::RTGlobalBufferAnnotation>();
+
+            rtGlobalBuffer->ArgumentNumber = argNo;
+            rtGlobalBuffer->PayloadPosition = payloadPosition;
+            rtGlobalBuffer->DataSize = kernelArg->getAllocateSize();
+
+            m_kernelInfo.m_rtGlobalBufferAnnotation = std::move(rtGlobalBuffer);
+        }
 
         case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
         {
@@ -1369,9 +1476,10 @@ namespace IGC
         //   converted to stateful (by StatelessToStateful optimization). Thus, the ptr itself
         //   is no longer referenced at all.
         //
-        if (IGC_IS_FLAG_ENABLED(EnableStatelessToStatefull) &&
+        if (IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
             IGC_IS_FLAG_ENABLED(EnableStatefulToken) &&
             m_DriverInfo->SupportStatefulToken() &&
+            !m_Context->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired &&
             arg &&
             ((type == KernelArg::ArgType::PTR_GLOBAL &&
             (arg->use_empty() || !GetHasGlobalStatelessAccess())) ||
@@ -1596,8 +1704,18 @@ namespace IGC
         m_kernelInfo.m_threadPayload.UnusedPerThreadConstantPresent = false;
         m_kernelInfo.m_printfBufferAnnotation = nullptr;
         m_kernelInfo.m_syncBufferAnnotation = nullptr;
+        m_kernelInfo.m_rtGlobalBufferAnnotation = nullptr;
         m_kernelInfo.m_threadPayload.HasStageInGridOrigin = false;
         m_kernelInfo.m_threadPayload.HasStageInGridSize = false;
+        m_kernelInfo.m_threadPayload.HasRTStackID = false;
+
+        if (m_enableHWGenerateLID)
+        {
+            m_kernelInfo.m_threadPayload.generateLocalID = true;
+            m_kernelInfo.m_threadPayload.emitLocalMask = m_emitMask;
+            m_kernelInfo.m_threadPayload.walkOrder = m_walkOrder;
+            m_kernelInfo.m_threadPayload.tileY = (m_ThreadIDLayout == ThreadIDLayout::TileY);
+        }
 
         // Set the amount of the private memory used by the kernel
         // Set only if the private memory metadata actually exists and we don't use
@@ -1634,6 +1752,11 @@ namespace IGC
             kernelArgs.checkForZeroPerThreadData();
         }
 
+        const bool useInlineData = passNOSInlineData();
+        const uint inlineDataSize = m_Platform->getInlineDataSize();
+        bool inlineDataProcessed = false;
+        uint offsetCorrection = 0;
+
         for (KernelArgs::const_iterator i = kernelArgs.begin(), e = kernelArgs.end(); i != e; ++i)
         {
             KernelArg arg = *i;
@@ -1662,6 +1785,10 @@ namespace IGC
             // Local IDs are non-uniform and may have two instances in SIMD32 mode
             int numAllocInstances = arg.getArgType() == KernelArg::ArgType::IMPLICIT_LOCAL_IDS ? m_numberInstance : 1;
 
+            if (arg.getArgType() == KernelArg::ArgType::RT_STACK_ID) {
+              numAllocInstances = m_numberInstance;
+            }
+
             auto allocSize = arg.getAllocateSize();
 
             if (!IsUnusedArg && !isRuntimeValue)
@@ -1670,6 +1797,23 @@ namespace IGC
                 {
                     // Align on the desired alignment for this argument
                     auto alignment = arg.getAlignment();
+
+                    // FIXME: move alignment checks to implicit arg creation
+                    if ((arg.getArgType() == KernelArg::ArgType::IMPLICIT_LOCAL_IDS ||
+                         arg.getArgType() == KernelArg::ArgType::RT_STACK_ID) &&
+                        m_Platform->getGRFSize() == 64)
+                    {
+                        alignment = 64;
+                        // generate a single SIMD32 variable in this case
+                        if (m_dispatchSize == SIMDMode::SIMD16 && m_Platform->getGRFSize() == 64)
+                        {
+                            allocSize = 64;
+                        }
+                        else
+                        {
+                            allocSize = PVCLSCEnabled() ? 64 : 32;
+                        }
+                    }
 
                     offset = iSTD::Align(offset, alignment);
 
@@ -1685,6 +1829,60 @@ namespace IGC
                     if (startGRF != endGRF)
                     {
                         offset = iSTD::Align(offset, getGRFSize());
+                    }
+
+                    // offsetCorrection should be set only when we are loading payload in kenrel prolog
+                    if (loadThreadPayload)
+                    {
+                        bool isFirstCrossThreadArgument = constantBufferStartSet && prevOffset == constantBufferStart;
+                        // if we don't use inline data and first argument does not start in first avaliable register
+                        // because of its alignment (which can be greater than GRF size), we correct the offset in payload,
+                        // so that it can be loaded properly in prolog, we want it to be on 0 offset in payload
+                        //
+                        // payload_position = offset - constant_buffer_start - correction
+                        //
+                        // examples:
+                        //  alignment   offset   constant_buffer_start  correction  payload_position
+                        //   128         128      32                     96          0
+                        //   8           32       32                     0           0
+                        if (!useInlineData && isFirstCrossThreadArgument)
+                        {
+                            offsetCorrection = offset - constantBufferStart;
+                        }
+
+                        if (useInlineData && !inlineDataProcessed &&
+                            arg.getArgType() != KernelArg::ArgType::IMPLICIT_LOCAL_IDS &&
+                            arg.getArgType() != KernelArg::ArgType::RT_STACK_ID &&
+                            arg.getArgType() != KernelArg::ArgType::IMPLICIT_R0)
+                        {
+                            // Calc if we can fit this arg in inlinedata:
+                            // We check if arg exceeds inline data boundaries,
+                            // if it does, we align it to next GRF.
+                            if (offset + allocSize - constantBufferStart > inlineDataSize)
+                            {
+                                inlineDataProcessed = true;
+                                if (getGRFSize() > inlineDataSize)
+                                {
+                                    // If inline data is used and a plaftorm has 64B GRFs,
+                                    // we must correct the offset of cross-thread arguments
+                                    // which are not loaded in inline data
+                                    // the reason behind this is that inline data has only 32B,
+                                    // so the position of next arg needs to be aligned to next GRF,
+                                    // because the input arguments are loaded with alignment of GRF
+                                    offset = iSTD::Align(offset, getGRFSize());
+                                }
+
+                                // numAllocInstances can be greater than 1, only when:
+                                // artype == IMPLICIT_LOCAL_IDS
+                                // or argtype == RT_STACK_ID,
+                                // so there is no need to handle it here
+
+                                // current arg is first to be loaded (it does not come in inlinedata)
+                                // so we want it to be at 32B offset in payload annotations
+                                // (first 32B are for inline data)
+                                offsetCorrection = offset - inlineDataSize - constantBufferStart;
+                            }
+                        }
                     }
 
                     // And now actually tell vISA we need this space.
@@ -1707,9 +1905,12 @@ namespace IGC
                     // or else we would just need to increase an offset
                 }
 
+                const uint offsetInPayload = offset - constantBufferStart - offsetCorrection;
+
                 // Create annotations for the kernel argument
                 // If an arg is unused, don't generate patch token for it.
-                CreateAnnotations(&arg, offset - constantBufferStart);
+                CreateAnnotations(&arg, offsetInPayload);
+
                 if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
                     m_Context->getCompilerOption().EnableZEBinary) {
                     // FIXME: once we transit to zebin completely, we don't need to do
@@ -1717,7 +1918,8 @@ namespace IGC
 
                     // During the transition, we disable ZEBinary if there are unsupported
                     // arguments
-                    bool success = CreateZEPayloadArguments(&arg, offset - constantBufferStart);
+                    bool success = CreateZEPayloadArguments(&arg, offsetInPayload);
+
                     if (!success) {
                         // assertion tests if we force to EnableZEBinary but encounter unsupported features
                         IGC_ASSERT_MESSAGE(!IGC_IS_FLAG_ENABLED(EnableZEBinary),
@@ -1734,6 +1936,11 @@ namespace IGC
                     {
                         offset += allocSize;
                     }
+                    // FIXME: Should we allocate R0 to be 64 byte for PVC?
+                    if (arg.getArgType() == KernelArg::ArgType::IMPLICIT_R0 && m_Platform->getGRFSize() == 64)
+                    {
+                        offset += 32;
+                    }
                 }
             }
 
@@ -1741,6 +1948,12 @@ namespace IGC
             {
                 m_ConstantBufferLength += offset - prevOffset;
             }
+        }
+
+        // Disable EU Fusion.
+        if (IGC_IS_FLAG_ENABLED(DisableEuFusion) || m_Context->m_InternalOptions.DisableEUFusion)
+        {
+            m_kernelInfo.m_executionEnivronment.RequireDisableEUFusion = true;
         }
 
         // ToDo: we should avoid passing all three dimensions of local id
@@ -1782,6 +1995,31 @@ namespace IGC
         CreatePrintfStringAnnotations();
     }
 
+    bool COpenCLKernel::passNOSInlineData()
+    {
+        bool passInlineData = false;
+        const bool loadThreadPayload = m_Platform->supportLoadThreadPayloadForCompute();
+        const bool inlineDataSupportEnabled =
+            (m_Platform->supportInlineDataOCL() &&
+            (m_DriverInfo->UseInlineData() || IGC_IS_FLAG_ENABLED(EnablePassInlineData)));
+        if (loadThreadPayload &&
+            inlineDataSupportEnabled)
+        {
+            passInlineData = true;
+            // FIXME: vISA assumes inline data size is 1 GRF, but it's 8 dword in HW.
+            // The generated cross-thread-load payload would be incorrect when inline data is enabled on
+            // platforms those GRF size are not 8 dword.
+            // Passed the value assumed by vISA for error detection at runtime side.
+            // vISA should be updated to use 8 dword.
+            m_kernelInfo.m_threadPayload.PassInlineDataSize = getGRFSize();
+        }
+        return passInlineData;
+    }
+
+    bool COpenCLKernel::loadThreadPayload()
+    {
+        return true;
+    }
 
     unsigned int COpenCLKernel::GetGlobalMappingValue(llvm::Value* c)
     {
@@ -1819,17 +2057,32 @@ namespace IGC
         return funcMD->second.localSize;
     }
 
-    void COpenCLKernel::FillKernel()
+    void COpenCLKernel::FillKernel(SIMDMode simdMode)
     {
-        m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace = ProgramOutput()->getScratchSpaceUsageInSlot0();
-        m_kernelInfo.m_executionEnivronment.PerThreadScratchSpaceSlot1 = ProgramOutput()->getScratchSpaceUsageInSlot1();
+        auto pOutput = ProgramOutput();
+        if (simdMode == SIMDMode::SIMD32)
+            m_kernelInfo.m_kernelProgram.simd32 = *pOutput;
+        else if (simdMode == SIMDMode::SIMD16)
+            m_kernelInfo.m_kernelProgram.simd16 = *pOutput;
+        else if (simdMode == SIMDMode::SIMD8)
+            m_kernelInfo.m_kernelProgram.simd8 = *pOutput;
+
+        m_Context->SetSIMDInfo(SIMD_SELECTED, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+
+        m_kernelInfo.m_executionEnivronment.CompiledSIMDSize = numLanes(simdMode);
+        m_kernelInfo.m_executionEnivronment.SIMDInfo = m_Context->GetSIMDInfo();
+
+        m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace = pOutput->getScratchSpaceUsageInSlot0();
+        m_kernelInfo.m_executionEnivronment.PerThreadScratchSpaceSlot1 = pOutput->getScratchSpaceUsageInSlot1();
         m_kernelInfo.m_executionEnivronment.PerThreadPrivateOnStatelessSize = m_perWIStatelessPrivateMemSize;
         m_kernelInfo.m_kernelProgram.NOSBufferSize = m_NOSBufferSize / getGRFSize(); // in 256 bits
         m_kernelInfo.m_kernelProgram.ConstantBufferLength = m_ConstantBufferLength / getGRFSize(); // in 256 bits
         m_kernelInfo.m_kernelProgram.MaxNumberOfThreads = m_Platform->getMaxGPGPUShaderThreads() / GetShaderThreadUsageRate();
 
         m_kernelInfo.m_executionEnivronment.SumFixedTGSMSizes = getSumFixedTGSMSizes(entry);
-        m_kernelInfo.m_executionEnivronment.HasBarriers = this->GetHasBarrier();
+
+        // TODO: need to change misleading HasBarriers to NumberofBarriers
+        m_kernelInfo.m_executionEnivronment.HasBarriers = this->GetBarrierNumber();
         m_kernelInfo.m_executionEnivronment.DisableMidThreadPreemption = GetDisableMidThreadPreemption();
         m_kernelInfo.m_executionEnivronment.SubgroupIndependentForwardProgressRequired =
             m_Context->getModuleMetaData()->compOpt.SubgroupIndependentForwardProgressRequired;
@@ -1881,6 +2134,7 @@ namespace IGC
 
             m_kernelInfo.m_executionEnivronment.CompiledSubGroupsNumber = funcMD.CompiledSubGroupsNumber;
 
+            m_kernelInfo.m_executionEnivronment.HasRTCalls = funcMD.hasSyncRTCalls;
         }
 
         m_kernelInfo.m_executionEnivronment.HasGlobalAtomics = GetHasGlobalAtomics();
@@ -1889,8 +2143,13 @@ namespace IGC
 
         m_kernelInfo.m_executionEnivronment.NumGRFRequired = ProgramOutput()->m_numGRFTotal;
 
+        m_kernelInfo.m_executionEnivronment.HasDPAS = GetHasDPAS();
+        m_kernelInfo.m_executionEnivronment.StatelessWritesCount = GetStatelessWritesCount();
+        m_kernelInfo.m_executionEnivronment.IndirectStatelessCount = GetIndirectStatelessCount();
+        m_kernelInfo.m_executionEnivronment.numThreads = ProgramOutput()->m_numThreads;
 
         m_kernelInfo.m_executionEnivronment.UseBindlessMode = m_Context->m_InternalOptions.UseBindlessMode;
+        m_kernelInfo.m_executionEnivronment.HasStackCalls = HasStackCalls();
     }
 
     void COpenCLKernel::RecomputeBTLayout()
@@ -1999,6 +2258,10 @@ namespace IGC
 
         if (!modMD->inlineConstantBuffers.empty())
         {
+            // For ZeBin, constants are mantained in two separate buffers
+            // the first is for general constants, and the second for string literals
+
+            // General constants
             auto ipsbMDHandle = modMD->inlineConstantBuffers[0];
             std::unique_ptr<iOpenCL::InitConstantAnnotation> initConstant(new iOpenCL::InitConstantAnnotation());
             initConstant->Alignment = ipsbMDHandle.alignment;
@@ -2009,6 +2272,22 @@ namespace IGC
             memcpy_s(initConstant->InlineData.data(), bufferSize, ipsbMDHandle.Buffer.data(), bufferSize);
 
             ctx->m_programInfo.m_initConstantAnnotation = std::move(initConstant);
+
+            if (IGC_IS_FLAG_ENABLED(EnableZEBinary) ||
+                modMD->compOpt.EnableZEBinary)
+            {
+                // String literals
+                auto ipsbStringMDHandle = modMD->inlineConstantBuffers[1];
+                std::unique_ptr<iOpenCL::InitConstantAnnotation> initStringConstant(new iOpenCL::InitConstantAnnotation());
+                initStringConstant->Alignment = ipsbStringMDHandle.alignment;
+                initStringConstant->AllocSize = ipsbStringMDHandle.allocSize;
+
+                bufferSize = (ipsbStringMDHandle.Buffer).size();
+                initStringConstant->InlineData.resize(bufferSize);
+                memcpy_s(initStringConstant->InlineData.data(), bufferSize, ipsbStringMDHandle.Buffer.data(), bufferSize);
+
+                ctx->m_programInfo.m_initConstantStringAnnotation = std::move(initStringConstant);
+            }
         }
 
         if (!modMD->inlineGlobalBuffers.empty())
@@ -2023,7 +2302,7 @@ namespace IGC
             initGlobal->InlineData.resize(bufferSize);
             memcpy_s(initGlobal->InlineData.data(), bufferSize, ipsbMDHandle.Buffer.data(), bufferSize);
 
-            ctx->m_programInfo.m_initGlobalAnnotation.push_back(std::move(initGlobal));
+            ctx->m_programInfo.m_initGlobalAnnotation = std::move(initGlobal);
         }
 
         {
@@ -2086,10 +2365,21 @@ namespace IGC
         }
     }
 
-    void GatherDataForDriver(OpenCLProgramContext* ctx, COpenCLKernel* pShader, CShaderProgram* pKernel, Function* pFunc, MetaDataUtils* pMdUtils)
+    bool COpenCLKernel::IsValidShader(COpenCLKernel* pShader)
+    {
+        return pShader && (pShader->ProgramOutput()->m_programSize > 0);
+    }
+
+    void GatherDataForDriver(
+        OpenCLProgramContext* ctx,
+        COpenCLKernel* pShader,
+        CShaderProgram* pKernel,
+        Function* pFunc,
+        MetaDataUtils* pMdUtils,
+        SIMDMode simdMode)
     {
         IGC_ASSERT(pShader != nullptr);
-        pShader->FillKernel();
+        pShader->FillKernel(simdMode);
         SProgramOutput* pOutput = pShader->ProgramOutput();
 
         //  Need a better heuristic for NoRetry
@@ -2123,36 +2413,6 @@ namespace IGC
         {
             ctx->m_retryManager.kernelSet.insert(pShader->m_kernelInfo.m_kernelName);
         }
-    }
-
-    static bool SetKernelProgram(OpenCLProgramContext* ctx, COpenCLKernel* shader, DWORD simdMode)
-    {
-        if (shader && shader->ProgramOutput()->m_programSize > 0)
-        {
-            if (simdMode == 32)
-            {
-                //why do we need this? we will get all output in GatherDataForDriver(...)
-                //remove it to avoid messy logics
-                //shader->m_kernelInfo.m_executionEnivronment.PerThreadSpillFillSize =
-                //    shader->ProgramOutput()->m_scratchSpaceUsedBySpills;
-                shader->m_kernelInfo.m_kernelProgram.simd32 = *shader->ProgramOutput();
-                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD32, ShaderDispatchMode::NOT_APPLICABLE);
-            }
-            else if (simdMode == 16)
-            {
-                shader->m_kernelInfo.m_kernelProgram.simd16 = *shader->ProgramOutput();
-                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD16, ShaderDispatchMode::NOT_APPLICABLE);
-            }
-            else if (simdMode == 8)
-            {
-                shader->m_kernelInfo.m_kernelProgram.simd8 = *shader->ProgramOutput();
-                ctx->SetSIMDInfo(SIMD_SELECTED, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
-            }
-            shader->m_kernelInfo.m_executionEnivronment.CompiledSIMDSize = simdMode;
-            shader->m_kernelInfo.m_executionEnivronment.SIMDInfo = ctx->GetSIMDInfo();
-            return true;
-        }
-        return false;
     }
 
     void CodeGen(OpenCLProgramContext* ctx)
@@ -2203,10 +2463,15 @@ namespace IGC
                     systemThreadMode |= USC::SYSTEM_THREAD_MODE_DEBUG_LOCAL;
                 }
 
-                SIP::CSystemThread::CreateSystemThreadKernel(
+                bool success = SIP::CSystemThread::CreateSystemThreadKernel(
                     ctx->platform,
                     (USC::SYSTEM_THREAD_MODE)systemThreadMode,
                     ctx->m_programOutput.m_pSystemThreadKernelOutput);
+
+                if (!success)
+                {
+                    ctx->EmitError("System thread kernel could not be created!", nullptr);
+                }
             }
         }
 
@@ -2225,22 +2490,22 @@ namespace IGC
                 && (ctx->getModuleMetaData()->csInfo.forcedSIMDSize == 0))
             {
                 //Gather the kernel binary for each compiled kernel
-                if (SetKernelProgram(ctx, simd32Shader, 32))
-                    GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils);
-                if (SetKernelProgram(ctx, simd16Shader, 16))
-                    GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils);
-                if (SetKernelProgram(ctx, simd8Shader, 8))
-                    GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils);
+                if (COpenCLKernel::IsValidShader(simd32Shader))
+                    GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD32);
+                if (COpenCLKernel::IsValidShader(simd16Shader))
+                    GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD16);
+                if (COpenCLKernel::IsValidShader(simd8Shader))
+                    GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD8);
             }
             else
             {
                 //Gather the kernel binary only for 1 SIMD mode of the kernel
-                if (SetKernelProgram(ctx, simd32Shader, 32))
-                    GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils);
-                else if (SetKernelProgram(ctx, simd16Shader, 16))
-                    GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils);
-                else if (SetKernelProgram(ctx, simd8Shader, 8))
-                    GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils);
+                if (COpenCLKernel::IsValidShader(simd32Shader))
+                    GatherDataForDriver(ctx, simd32Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD32);
+                else if (COpenCLKernel::IsValidShader(simd16Shader))
+                    GatherDataForDriver(ctx, simd16Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD16);
+                else if (COpenCLKernel::IsValidShader(simd8Shader))
+                    GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD8);
             }
         }
     }
@@ -2275,12 +2540,34 @@ namespace IGC
         if (!CompileSIMDSizeInCommon(simdMode))
             return false;
 
+        {
+            // If stack calls are present, disable simd32 in order to do wa in visa
+            bool needCallWA = (IGC_IS_FLAG_ENABLED(EnableCallWA) && m_Context->platform.hasFusedEU());
+            if (needCallWA && simdMode == SIMDMode::SIMD32  && HasStackCalls())
+            {
+                return false;
+            }
+        }
+
         if (!m_Context->m_retryManager.IsFirstTry())
         {
             m_Context->ClearSIMDInfo(simdMode, ShaderDispatchMode::NOT_APPLICABLE);
             m_Context->SetSIMDInfo(SIMD_RETRY, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
         }
 
+        // Currently the FunctionMetaData is being looked up solely in order to get the hasSyncRTCalls
+        // If we would need to get some non-raytracing related field out of the FunctionMetaData,
+        // then we can move the lookup out of the #if and just leave the bool hasSyncRTCalls inside.
+        auto& FuncMap = m_Context->getModuleMetaData()->FuncMD;
+        // we want to check the setting for the associated kernel
+        auto FuncIter = FuncMap.find(entry);
+        if (FuncIter == FuncMap.end()) {  // wasn't able to find the meta data for the passed in llvm::Function!
+            // All of the kernels should have an entry in the map.
+            IGC_ASSERT(0);
+            return false;
+        }
+        const FunctionMetaData& funcMD = FuncIter->second;
+        bool hasSyncRTCalls = funcMD.hasSyncRTCalls;  // if the function/kernel has sync raytracing calls
 
         //If forced SIMD Mode (by driver or regkey), then:
         // 1. Compile only that SIMD mode and nothing else
@@ -2294,12 +2581,17 @@ namespace IGC
                 // These statements are basically equivalent to (simdMode == forcedSIMDSize)
                 (simdMode == SIMDMode::SIMD8 && m_Context->getModuleMetaData()->csInfo.forcedSIMDSize == 8)   ||
                 (simdMode == SIMDMode::SIMD16 && m_Context->getModuleMetaData()->csInfo.forcedSIMDSize == 16) ||
-                (simdMode == SIMDMode::SIMD32 && m_Context->getModuleMetaData()->csInfo.forcedSIMDSize == 32)
+                // if we want to compile SIMD32, we need to be lacking any raytracing calls; raytracing doesn't support SIMD16
+                (simdMode == SIMDMode::SIMD32 && m_Context->getModuleMetaData()->csInfo.forcedSIMDSize == 32 && !hasSyncRTCalls)
             );
         }
 
-        SIMDStatus simdStatus = checkSIMDCompileConds(simdMode, EP, F);
+        SIMDStatus simdStatus = checkSIMDCompileConds(simdMode, EP, F, hasSyncRTCalls);
 
+        if (m_Context->platform.getMinDispatchMode() == SIMDMode::SIMD16)
+        {
+            simdStatus = checkSIMDCompileCondsPVC(simdMode, EP, F, hasSyncRTCalls);
+        }
 
         // Func and Perf checks pass, compile this SIMD
         if (simdStatus == SIMDStatus::SIMD_PASS)
@@ -2321,8 +2613,135 @@ namespace IGC
         return simdStatus == SIMDStatus::SIMD_PASS;
     }
 
+    SIMDStatus COpenCLKernel::checkSIMDCompileCondsPVC(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls)
+    {
+        if (simdMode == SIMDMode::SIMD8)
+        {
+            return SIMDStatus::SIMD_FUNC_FAIL;
+        }
 
-    SIMDStatus COpenCLKernel::checkSIMDCompileConds(SIMDMode simdMode, EmitPass& EP, llvm::Function& F)
+        EP.m_canAbortOnSpill = false; // spill is always allowed since we don't do SIMD size lowering
+        // Next we check if there is a required sub group size specified
+        CodeGenContext* pCtx = GetContext();
+        MetaDataUtils* pMdUtils = EP.getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+        FunctionInfoMetaDataHandle funcInfoMD = pMdUtils->getFunctionsInfoItem(&F);
+        int simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
+        bool hasSubGroupForce = hasSubGroupIntrinsicPVC(F);
+
+        // Finds the kernel and get the group simd size from the kernel
+        if (m_FGA)
+        {
+            llvm::Function* Kernel = &F;
+            auto FG = m_FGA->getGroup(&F);
+            Kernel = FG->getHead();
+            funcInfoMD = pMdUtils->getFunctionsInfoItem(Kernel);
+            simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
+        }
+
+        if (m_FGA && m_FGA->getGroup(&F) && (!m_FGA->getGroup(&F)->isSingle() || m_FGA->getGroup(&F)->hasStackCall()))
+        {
+            if (!PVCLSCEnabled())
+            {
+                // Only support simd32 for function calls if LSC is enabled
+                if (simdMode == SIMDMode::SIMD32)
+                {
+                    pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                    return SIMDStatus::SIMD_FUNC_FAIL;
+                }
+
+                // Must force simd16 with LSC disabled
+                pCtx->getModuleMetaData()->csInfo.forcedSIMDSize = (unsigned char)numLanes(SIMDMode::SIMD16);
+            }
+        }
+
+        bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
+
+        if (optDisable)
+        {
+            if (simdMode == SIMDMode::SIMD32)
+            {
+                pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+
+            // simd16 forced when all optimizations disabled due to compile time optimization
+            pCtx->getModuleMetaData()->csInfo.forcedSIMDSize = (unsigned char)numLanes(SIMDMode::SIMD16);
+        }
+
+        if (simdMode == SIMDMode::SIMD32 && hasSyncRTCalls) {
+            return SIMDStatus::SIMD_FUNC_FAIL;
+        }
+        else if (simdMode == SIMDMode::SIMD16 && hasSyncRTCalls) {
+            return SIMDStatus::SIMD_PASS;
+        }
+
+        if (simd_size)
+        {
+            if (simd_size != numLanes(simdMode))
+            {
+                if (simd_size == 8 && simdMode == SIMDMode::SIMD32)
+                {
+                    // allow for now to avoid NEO build failures
+                    // ToDo: remove once NEO removes all SIMD8 kernel ULTs from driver build
+                    return SIMDStatus::SIMD_PASS;
+                }
+                pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+            switch (simd_size)
+            {
+            case 8:
+                //IGC_ASSERT_MESSAGE(0, "Unsupported required sub group size for PVC");
+                break;
+            case 16:
+            case 32:
+                break;
+            default:
+                IGC_ASSERT_MESSAGE(0, "Unsupported required sub group size");
+                break;
+            }
+        }
+        else
+        {
+            // Checking registry/flag here. Note that if ForceOCLSIMDWidth is set to
+            // 8/16/32, only corresponding EnableOCLSIMD<N> is set to true. Therefore,
+            // if any of EnableOCLSIMD<N> is disabled, ForceOCLSIMDWidth must set to
+            // a value other than <N> if set. See igc_regkeys.cpp for detail.
+            if ((simdMode == SIMDMode::SIMD32 && IGC_IS_FLAG_DISABLED(EnableOCLSIMD32)) ||
+                (simdMode == SIMDMode::SIMD16 && IGC_IS_FLAG_DISABLED(EnableOCLSIMD16)))
+            {
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+
+            // Check if we force code generation for the current SIMD size.
+            // Note that for SIMD8, we always force it!
+            //ATTN: This check is redundant!
+            if (numLanes(simdMode) == pCtx->getModuleMetaData()->csInfo.forcedSIMDSize)
+            {
+                return SIMDStatus::SIMD_PASS;
+            }
+
+            if (simdMode == SIMDMode::SIMD16 && !hasSubGroupForce)
+            {
+                pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+
+            if (simdMode == SIMDMode::SIMD32 && hasSubGroupForce)
+            {
+                pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+                return SIMDStatus::SIMD_FUNC_FAIL;
+            }
+        }
+
+        return SIMDStatus::SIMD_PASS;
+    }
+
+    unsigned COpenCLKernel::getAnnotatedNumThreads() {
+        return m_annotatedNumThreads;
+    }
+
+    SIMDStatus COpenCLKernel::checkSIMDCompileConds(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls)
     {
         CShader* simd8Program = m_parent->GetShader(SIMDMode::SIMD8);
         CShader* simd16Program = m_parent->GetShader(SIMDMode::SIMD16);
@@ -2438,7 +2857,12 @@ namespace IGC
                     return SIMDStatus::SIMD_FUNC_FAIL;
                 }
                 else {
-                    EP.m_canAbortOnSpill = false;
+                    if (hasSyncRTCalls) {
+                        return SIMDStatus::SIMD_FUNC_FAIL;  // SIMD32 unsupported with raytracing calls
+                    }
+                    else {  // simdMode == SIMDMode::SIMD32 && !hasSyncRTCalls
+                        EP.m_canAbortOnSpill = false;
+                    }
                 }
                 break;
             default:
@@ -2467,6 +2891,12 @@ namespace IGC
                 return SIMDStatus::SIMD_PASS;
             }
 
+            if (hasSyncRTCalls) {
+                // If we get all the way to here, then set it to the preferred SIMD size for Ray Tracing.
+                SIMDMode mode = SIMDMode::UNKNOWN;
+                mode = m_Context->platform.getPreferredRayTracingSIMDSize();
+                return (mode == simdMode) ? SIMDStatus::SIMD_PASS : SIMDStatus::SIMD_FUNC_FAIL;
+            }
 
             if (groupSize != 0 && groupSize <= 16)
             {

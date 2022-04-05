@@ -369,6 +369,10 @@ void DebugPatchList(
                         ICBE_DPF_STR( output, GFXDBG_HARDWARE,
                             "\tType = LOCAL_ID\n" );
                         break;
+                    case iOpenCL::DATA_PARAMETER_RT_STACK_ID:
+                        ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                            "\tType = RT_STACK_ID\n");
+                        break;
                     case iOpenCL::DATA_PARAMETER_EXECUTION_MASK:
                         ICBE_DPF_STR( output, GFXDBG_HARDWARE,
                             "\tType = EXECUTION_MASK\n" );
@@ -520,6 +524,10 @@ void DebugPatchList(
                     case iOpenCL::DATA_PARAMETER_FLAT_IMAGE_PITCH:
                         ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                             "\tType = FLAT_IMAGE_PITCH\n");
+                        break;
+                    case iOpenCL::DATA_PARAMETER_IMPL_ARG_BUFFER:
+                        ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                            "\tType = IMPL_ARG_BUFFER\n");
                         break;
                     default:
                         ICBE_DPF_STR( output, GFXDBG_HARDWARE,
@@ -783,6 +791,9 @@ void DebugPatchList(
                 ICBE_DPF_STR( output, GFXDBG_HARDWARE,
                     "\tLocalIDZPresent = %s\n",
                     pPatchItem->LocalIDZPresent ? "true" : "false" );
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tRTStackIDPresent = %s\n",
+                    pPatchItem->RTStackIDPresent ? "true" : "false");
                 ICBE_DPF_STR( output, GFXDBG_HARDWARE,
                     "\tLocalIDFlattenedPresent = %s\n",
                     pPatchItem->LocalIDFlattenedPresent ? "true" : "false" );
@@ -816,6 +827,18 @@ void DebugPatchList(
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                     "\tPassInlineData = %s\n",
                     pPatchItem->PassInlineData ? "true" : "false");
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tgenerateLocalID = %s\n",
+                    pPatchItem->generateLocalID ? "true" : "false");
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\temitLocalMask = %d\n",
+                    pPatchItem->emitLocalMask);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\twalkOrder = %d\n",
+                    pPatchItem->walkOrder);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\ttileY = %s\n",
+                    pPatchItem->tileY ? "true" : "false");
             }
             break;
 
@@ -841,8 +864,8 @@ void DebugPatchList(
                     "\tLargestCompiledSIMDSize = %d\n",
                     pPatchItem->LargestCompiledSIMDSize );
                 ICBE_DPF_STR( output, GFXDBG_HARDWARE,
-                    "\tHasBarriers = %s\n",
-                    pPatchItem->HasBarriers ? "true" : "false" );
+                    "\tHasBarriers = %d\n",
+                    pPatchItem->HasBarriers);
                 ICBE_DPF_STR( output, GFXDBG_HARDWARE,
                     "\tDisableMidThreadPreemption = %s\n",
                     pPatchItem->DisableMidThreadPreemption ?
@@ -893,11 +916,29 @@ void DebugPatchList(
                     "\tHasDPAS = %s\n",
                     pPatchItem->HasDPAS ? "true" : "false");
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tHasRTCalls = %s\n",
+                    pPatchItem->HasRTCalls ? "true" : "false");
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tNumThreadsRequired = %d\n",
+                    pPatchItem->NumThreadsRequired);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tNumStatelessWrites = %d\n",
+                    pPatchItem->StatelessWritesCount);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tNumIndirectStateless = %d\n",
+                    pPatchItem->IndirectStatelessCount);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                     "\tUseBindlessMode = %d\n",
                     pPatchItem->UseBindlessMode);
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tHasStackCalls = %d\n",
+                    pPatchItem->HasStackCalls);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                     "\tSIMDInfo = %lld\n",
                     pPatchItem->SIMDInfo);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tRequireDisableEUFusion = %s\n",
+                    pPatchItem->RequireDisableEUFusion ? "true" : "false");
             }
             break;
 
@@ -1022,6 +1063,26 @@ void DebugPatchList(
 
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
                     "PATCH_TOKEN_ALLOCATE_SYNC_BUFFER (%08X) (size = %d)\n",
+                    pPatchItem->Token,
+                    pPatchItem->Size);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tSurfaceStateHeapOffset = %d\n",
+                    pPatchItem->SurfaceStateHeapOffset);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tDataParamOffset = %d\n",
+                    pPatchItem->DataParamOffset);
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tDataParamSize = %d\n",
+                    pPatchItem->DataParamSize);
+            }
+            break;
+        case iOpenCL::PATCH_TOKEN_ALLOCATE_RT_GLOBAL_BUFFER:
+            {
+                const iOpenCL::SPatchAllocateRTGlobalBuffer* pPatchItem =
+                    (const iOpenCL::SPatchAllocateRTGlobalBuffer*)pHeader;
+
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "PATCH_TOKEN_ALLOCATE_RT_GLOBAL_BUFFER (%08X) (size = %d)\n",
                     pPatchItem->Token,
                     pPatchItem->Size);
                 ICBE_DPF_STR(output, GFXDBG_HARDWARE,
@@ -1551,6 +1612,32 @@ void DebugPatchList(
                 }
             }
             break;
+        case iOpenCL::PATCH_TOKEN_GLOBAL_HOST_ACCESS_TABLE:
+        {
+            const iOpenCL::SPatchGlobalHostAccessTableInfo* pPatchItem =
+                (const iOpenCL::SPatchGlobalHostAccessTableInfo*)pHeader;
+
+            ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                "PATCH_TOKEN_GLOBAL_HOST_ACCESS_TABLE (%08X) (size = %d)\n",
+                pPatchItem->Token,
+                pPatchItem->Size);
+
+            ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                "\tNumEntries = %d\n",
+                pPatchItem->NumEntries);
+
+            const vISA::HostAccessEntry* entryPtr = (const vISA::HostAccessEntry*)(ptr + sizeof(iOpenCL::SPatchFunctionTableInfo));
+            for (unsigned i = 0; i < pPatchItem->NumEntries; i++)
+            {
+                ICBE_DPF_STR(output, GFXDBG_HARDWARE,
+                    "\tSymbol(Entry %02d): \n\t  DeviceName = %s\n\t  HostName = %s\n", i,
+                    entryPtr->device_name,
+                    entryPtr->host_name);
+
+                entryPtr++;
+            }
+        }
+        break;
 
         default:
             {

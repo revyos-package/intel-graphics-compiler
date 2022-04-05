@@ -101,6 +101,13 @@ int IR_Builder::translateVISAArithmeticInst(
     }
     else if (ISA_Inst_Table[opcode].n_srcs == 3)
     {
+        if (opcode == ISA_ADD3O)
+        {
+            assert(predOpnd != nullptr && "predicate operand couldn't be nullptr");
+            condMod = createCondMod(Mod_o, predOpnd->getBase(), 0);
+            predOpnd = nullptr;
+        }
+
         // do not check type of sources, float and integer are supported
         createInst(
             predOpnd,
@@ -173,19 +180,21 @@ int IR_Builder::translateVISADpasInst(
     G4_InstOpts instOpt = Get_Gen4_Emask(emask, exsize);
     if (hasBFDstforDPAS() && A == GenPrecision::BF16)
     {
+        // PVC allows BF dst and src0, and they are W/UW when coming into vISA,
+        // so we fix the type here
         if (dstOpnd->getType() == Type_W || dstOpnd->getType() == Type_UW)
         {
-            dstOpnd->setType(Type_BF);
+            dstOpnd->setType(*this, Type_BF);
         }
         if (src0Opnd->getType() == Type_W || src0Opnd->getType() == Type_UW)
         {
-            src0Opnd->setType(Type_BF);
+            src0Opnd->setType(*this, Type_BF);
         }
     }
 
     if (src0Opnd->isNullReg())
     {
-        src0Opnd->setType(dstOpnd->getType());
+        src0Opnd->setType(*this, dstOpnd->getType());
     }
 
     createDpasInst(
@@ -414,7 +423,7 @@ int IR_Builder::translateVISALogicInst(
         // split into
         // bfi1 tmp src0 src1
         // bfi2 dst tmp src2 src3
-        G4_Declare* tmpDcl = createTempVar(exsize, g4Srcs[0]->getType(), GRFALIGN);
+        G4_Declare* tmpDcl = createTempVar(exsize, g4Srcs[0]->getType(), getGRFAlign());
         G4_DstRegRegion* tmpDst = createDstRegRegion(tmpDcl, 1);
         createInst(
             predOpnd,
@@ -484,8 +493,8 @@ int IR_Builder::translateVISADataMovementInst(
     if (opcode == ISA_MOVS)
     {
         if (src0Opnd->isSrcRegRegion())
-            src0Opnd->asSrcRegRegion()->setType(Type_UD);
-        dstOpnd->setType(Type_UD);
+            src0Opnd->asSrcRegRegion()->setType(*this, Type_UD);
+        dstOpnd->setType(*this, Type_UD);
         MUST_BE_TRUE(saturate == g4::NOSAT,
             "saturation forbidden on this instruction");
         createInst(
@@ -525,14 +534,14 @@ int IR_Builder::translateVISADataMovementInst(
             {
                 G4_SrcRegRegion *region = src0Opnd->asSrcRegRegion();
                 if (!region->isScalar())
-                    region->setRegion(getRegionScalar());
+                    region->setRegion(*this, getRegionScalar());
             }
         }
 
         if (src0Opnd->isImm() || (src0Opnd->isSrcRegRegion() &&
             (src0Opnd->asSrcRegRegion()->isScalar())))
         {
-            dstOpnd->setType(exsize == 32 ? Type_UD: Type_UW);
+            dstOpnd->setType(*this, exsize == 32 ? Type_UD: Type_UW);
             if (emask == vISA_EMASK_M5_NM)
             {
                 // write to f0.1/f1.1 instead
@@ -582,17 +591,22 @@ int IR_Builder::translateVISADataMovementInst(
         if (dstOpnd->getType() == Type_UW ||
             dstOpnd->getType() == Type_HF)    // Temp compatibility (toBeRemovedSoon)
         {
-            dstOpnd->setType(Type_BF);
+            dstOpnd->setType(*this, Type_BF);
         }
         else
         {
             assert(src0Opnd->isSrcRegRegion() &&
                 (src0Opnd->getType() == Type_UW || src0Opnd->getType() == Type_HF) &&
                 "src0Opnd must be a src region with HF type");
-            src0Opnd->asSrcRegRegion()->setType(Type_BF);
+            src0Opnd->asSrcRegRegion()->setType(*this, Type_BF);
         }
 
         createMov(exsize, dstOpnd, src0Opnd, inst_opt, true);
+    }
+    else if (opcode == ISA_FCVT)
+    {
+        (void)createInst(nullptr, G4_fcvt, nullptr, g4::NOSAT, exsize,
+                         dstOpnd, src0Opnd, nullptr, inst_opt, true);
     }
     else
     {
@@ -609,7 +623,7 @@ int IR_Builder::translateVISADataMovementInst(
             // src0 is a flag
             // mov (1) dst src0<0;1:0>:uw (ud if flag has 32 elements)
             G4_Declare* flagDcl = src0Opnd->getTopDcl();
-            src0Opnd->asSrcRegRegion()->setType(flagDcl->getNumberFlagElements() > 16 ? Type_UD : Type_UW);
+            src0Opnd->asSrcRegRegion()->setType(*this, flagDcl->getNumberFlagElements() > 16 ? Type_UD : Type_UW);
         }
 
         createInst(

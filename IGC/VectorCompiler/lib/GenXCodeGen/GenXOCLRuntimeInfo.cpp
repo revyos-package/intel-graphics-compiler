@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -14,8 +14,12 @@ SPDX-License-Identifier: MIT
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 #include "GenXUtil.h"
+#include "OCLRuntimeInfoPrinter.h"
 
-#include "vc/GenXOpts/Utils/InternalMetadata.h"
+#include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/InternalMetadata.h"
+#include "vc/Utils/GenX/Printf.h"
+#include "vc/Utils/GenX/RegCategory.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 
@@ -27,7 +31,9 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
+#include <llvm/InitializePasses.h>
 
+#include <algorithm>
 #include <cctype>
 #include <functional>
 #include <iterator>
@@ -48,11 +54,201 @@ char GenXOCLRuntimeInfo::ID = 0;
 
 //===----------------------------------------------------------------------===//
 //
+// Kernel argument info implementation.
+//
+//===----------------------------------------------------------------------===//
+// Supported kernel argument attributes.
+struct OCLAttributes {
+  // Type qualifiers for resources.
+  static constexpr auto ReadOnly = "read_only";
+  static constexpr auto WriteOnly = "write_only";
+  static constexpr auto ReadWrite = "read_write";
+
+  // Buffer surface.
+  static constexpr auto Buffer = "buffer_t";
+  // SVM pointer to buffer.
+  static constexpr auto SVM = "svmptr_t";
+  // OpenCL-like types.
+  static constexpr auto Sampler = "sampler_t";
+  static constexpr auto Image1d = "image1d_t";
+  static constexpr auto Image1dArray = "image1d_array_t";
+  // Same as 1D image. Seems that there is no difference in runtime.
+  static constexpr auto Image1dBuffer = "image1d_buffer_t";
+  static constexpr auto Image2d = "image2d_t";
+  static constexpr auto Image2dArray = "image2d_array_t";
+  static constexpr auto Image2dMediaBlock = "image2d_media_block_t";
+  static constexpr auto Image3d = "image3d_t";
+};
+
+namespace llvm {
+class KernelArgBuilder final {
+  using ArgKindType = GenXOCLRuntimeInfo::KernelArgInfo::KindType;
+  using ArgAccessKindType = GenXOCLRuntimeInfo::KernelArgInfo::AccessKindType;
+
+  const vc::KernelMetadata &KM;
+  const DataLayout &DL;
+  const GenXSubtarget &ST;
+  const GenXBackendConfig &BC;
+
+public:
+  KernelArgBuilder(const vc::KernelMetadata &KMIn, const DataLayout &DLIn,
+                   const GenXSubtarget &STIn, const GenXBackendConfig &BCIn)
+      : KM(KMIn), DL(DLIn), ST(STIn), BC(BCIn) {}
+
+  GenXOCLRuntimeInfo::KernelArgInfo
+  translateArgument(const Argument &Arg) const;
+
+private:
+  static auto getStrPred(const char *Attr) {
+    return [Attr](StringRef Token) { return Token == Attr; };
+  }
+
+  ArgKindType getOCLArgKind(ArrayRef<StringRef> Tokens, unsigned ArgNo) const;
+  ArgAccessKindType getOCLArgAccessKind(ArrayRef<StringRef> Tokens,
+                                        ArgKindType Kind) const;
+  std::pair<ArgKindType, ArgAccessKindType>
+  translateArgDesc(unsigned ArgNo) const;
+  unsigned getArgSizeInBytes(const Argument &Arg) const;
+};
+} // namespace llvm
+
+KernelArgBuilder::ArgAccessKindType
+KernelArgBuilder::getOCLArgAccessKind(ArrayRef<StringRef> Tokens,
+                                      ArgKindType Kind) const {
+  switch (Kind) {
+  case ArgKindType::Buffer:
+  case ArgKindType::Image1D:
+  case ArgKindType::Image1DArray:
+  case ArgKindType::Image2D:
+  case ArgKindType::Image2DArray:
+  case ArgKindType::Image2DMediaBlock:
+  case ArgKindType::Image3D:
+  case ArgKindType::SVM:
+  case ArgKindType::BindlessBuffer:
+    if (any_of(Tokens, getStrPred(OCLAttributes::ReadOnly)))
+      return ArgAccessKindType::ReadOnly;
+    if (any_of(Tokens, getStrPred(OCLAttributes::WriteOnly)))
+      return ArgAccessKindType::WriteOnly;
+    return ArgAccessKindType::ReadWrite;
+  default:
+    return ArgAccessKindType::None;
+  }
+}
+
+KernelArgBuilder::ArgKindType
+KernelArgBuilder::getOCLArgKind(ArrayRef<StringRef> Tokens,
+                                unsigned ArgNo) const {
+  unsigned RawKind = KM.getArgKind(ArgNo);
+
+  // Implicit arguments.
+  vc::KernelArgInfo KAI{RawKind};
+  if (KAI.isLocalSize())
+    return ArgKindType::LocalSize;
+  if (KAI.isGroupCount())
+    return ArgKindType::GroupCount;
+  if (KAI.isPrintBuffer())
+    return ArgKindType::PrintBuffer;
+  if (KAI.isPrivateBase())
+    return ArgKindType::PrivateBase;
+  if (KAI.isByValSVM())
+    return ArgKindType::ByValSVM;
+
+  // Explicit arguments.
+  switch (KM.getArgCategory(ArgNo)) {
+  default:
+    return ArgKindType::General;
+  case vc::RegCategory::General:
+    if (any_of(Tokens, getStrPred(OCLAttributes::SVM)))
+      return ArgKindType::SVM;
+    // Bindless buffers have general category but buffer annotation.
+    if (any_of(Tokens, getStrPred(OCLAttributes::Buffer)))
+      return ArgKindType::BindlessBuffer;
+    return ArgKindType::General;
+  case vc::RegCategory::Surface:
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image1d)))
+      return ArgKindType::Image1D;
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image1dArray)))
+      return ArgKindType::Image1DArray;
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image1dBuffer)))
+      return ArgKindType::Image1D;
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image2d))) {
+      if (BC.usePlain2DImages())
+        return ArgKindType::Image2D;
+      // Legacy behavior to treat all 2d images as media block.
+      return ArgKindType::Image2DMediaBlock;
+    }
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image2dArray)))
+      return ArgKindType::Image2DArray;
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image2dMediaBlock))) {
+      if (ST.translateLegacyMessages())
+        return ArgKindType::Image2D;
+      return ArgKindType::Image2DMediaBlock;
+    }
+    if (any_of(Tokens, getStrPred(OCLAttributes::Image3d)))
+      return ArgKindType::Image3D;
+    return ArgKindType::Buffer;
+  case vc::RegCategory::Sampler:
+    return ArgKindType::Sampler;
+  }
+}
+
+// Retrieve Kind and AccessKind from given ArgTypeDesc in metadata.
+std::pair<KernelArgBuilder::ArgKindType, KernelArgBuilder::ArgAccessKindType>
+KernelArgBuilder::translateArgDesc(unsigned ArgNo) const {
+  std::string Translated{KM.getArgTypeDesc(ArgNo)};
+  // Transform each separator to space.
+  std::transform(Translated.begin(), Translated.end(), Translated.begin(),
+                 [](char C) {
+                   if (C != '-' && C != '_' && C != '=' && !std::isalnum(C))
+                     return ' ';
+                   return C;
+                 });
+
+  // Split and delete duplicates.
+  SmallVector<StringRef, 4> Tokens;
+  StringRef(Translated)
+      .split(Tokens, ' ', -1 /* MaxSplit */, false /* AllowEmpty */);
+  std::sort(Tokens.begin(), Tokens.end());
+  Tokens.erase(std::unique(Tokens.begin(), Tokens.end()), Tokens.end());
+
+  const ArgKindType Kind = getOCLArgKind(Tokens, ArgNo);
+  const ArgAccessKindType AccessKind = getOCLArgAccessKind(Tokens, Kind);
+  return {Kind, AccessKind};
+}
+
+unsigned KernelArgBuilder::getArgSizeInBytes(const Argument &Arg) const {
+  Type *ArgTy = Arg.getType();
+  if (ArgTy->isPointerTy())
+    return DL.getPointerTypeSize(ArgTy);
+  if (KM.isBufferType(Arg.getArgNo()))
+    return DL.getPointerSize();
+  return ArgTy->getPrimitiveSizeInBits() / genx::ByteBits;
+}
+
+GenXOCLRuntimeInfo::KernelArgInfo
+KernelArgBuilder::translateArgument(const Argument &Arg) const {
+  GenXOCLRuntimeInfo::KernelArgInfo Info;
+  const unsigned ArgNo = Arg.getArgNo();
+  std::tie(Info.Kind, Info.AccessKind) = translateArgDesc(ArgNo);
+  Info.Offset = KM.getArgOffset(ArgNo);
+  Info.SizeInBytes = getArgSizeInBytes(Arg);
+  Info.BTI = KM.getBTI(ArgNo);
+  // For implicit arguments that are byval argument linearization, index !=
+  // ArgNo in the IR function.
+  Info.Index = KM.getArgIndex(ArgNo);
+  // Linearization arguments have a non-zero offset in the original explicit
+  // byval arg.
+  Info.OffsetInArg = KM.getOffsetInArg(ArgNo);
+
+  return Info;
+}
+
+//===----------------------------------------------------------------------===//
+//
 // Kernel info implementation.
 //
 //===----------------------------------------------------------------------===//
 // Just perform linear instructions scan to find usage stats.
-// Intrinsic set copied from igcmc.
 void GenXOCLRuntimeInfo::KernelInfo::setInstructionUsageProperties(
     const FunctionGroup &FG, const GenXBackendConfig &BC) {
   for (Function *F : FG) {
@@ -68,7 +264,7 @@ void GenXOCLRuntimeInfo::KernelInfo::setInstructionUsageProperties(
           break;
         case GenXIntrinsic::genx_barrier:
         case GenXIntrinsic::genx_sbarrier:
-          UsesBarriers = true;
+          NumBarriers = 1;
           break;
         case GenXIntrinsic::genx_ssdp4a:
         case GenXIntrinsic::genx_sudp4a:
@@ -104,14 +300,17 @@ void GenXOCLRuntimeInfo::KernelInfo::setInstructionUsageProperties(
 }
 
 void GenXOCLRuntimeInfo::KernelInfo::setMetadataProperties(
-    genx::KernelMetadata &KM, const GenXSubtarget &ST) {
-  Name = KM.getName();
+    vc::KernelMetadata &KM, const GenXSubtarget &ST) {
+  Name = KM.getName().str();
   SLMSize = KM.getSLMSize();
 
+  if (ST.hasNBarrier())
+    NumBarriers = KM.getAlignedBarrierCnt(NumBarriers);
 }
 
 void GenXOCLRuntimeInfo::KernelInfo::setArgumentProperties(
-    const Function &Kernel, genx::KernelMetadata &KM) {
+    const Function &Kernel, const vc::KernelMetadata &KM,
+    const GenXSubtarget &ST, const GenXBackendConfig &BC) {
   IGC_ASSERT_MESSAGE(Kernel.arg_size() == KM.getNumArgs(),
     "Expected same number of arguments");
   // Some arguments are part of thread payload and do not require
@@ -119,14 +318,13 @@ void GenXOCLRuntimeInfo::KernelInfo::setArgumentProperties(
   auto NonPayloadArgs =
       make_filter_range(Kernel.args(), [&KM](const Argument &Arg) {
         uint32_t ArgKind = KM.getArgKind(Arg.getArgNo());
-        genx::KernelArgInfo KAI(ArgKind);
-        return !(KAI.isLocalIDX() || KAI.isLocalIDY() || KAI.isLocalIDZ() ||
-                 KAI.isGroupOrLocalSize() || KAI.isLocalIDs());
+        vc::KernelArgInfo KAI(ArgKind);
+        return !KAI.isLocalIDs();
       });
-  const DataLayout &DL = Kernel.getParent()->getDataLayout();
+  KernelArgBuilder ArgBuilder{KM, Kernel.getParent()->getDataLayout(), ST, BC};
   transform(NonPayloadArgs, std::back_inserter(ArgInfos),
-            [&KM, &DL](const Argument &Arg) {
-              return KernelArgInfo{Arg, KM, DL};
+            [&ArgBuilder](const Argument &Arg) {
+              return ArgBuilder.translateArgument(Arg);
             });
   UsesReadWriteImages = std::any_of(
       ArgInfos.begin(), ArgInfos.end(), [](const KernelArgInfo &AI) {
@@ -148,167 +346,28 @@ void GenXOCLRuntimeInfo::KernelInfo::setPrintStrings(
                  });
 }
 
+GenXOCLRuntimeInfo::KernelInfo::KernelInfo(const GenXSubtarget &ST)
+    : Name{"Intel_Symbol_Table_Void_Program"}, GRFSizeInBytes{
+                                                   ST.getGRFByteSize()} {}
+
 GenXOCLRuntimeInfo::KernelInfo::KernelInfo(const FunctionGroup &FG,
                                            const GenXSubtarget &ST,
                                            const GenXBackendConfig &BC) {
   setInstructionUsageProperties(FG, BC);
 
-  GRFSizeInBytes = ST.getGRFWidth();
+  GRFSizeInBytes = ST.getGRFByteSize();
 
-  int StackAmount = genx::getStackAmount(FG.getHead());
-  if (StackAmount == genx::VC_STACK_USAGE_UNKNOWN)
-    StackAmount = BC.getStatelessPrivateMemSize();
-  StatelessPrivateMemSize = StackAmount;
+  StatelessPrivateMemSize =
+      vc::getStackAmount(FG.getHead(), BC.getStatelessPrivateMemSize());
 
-  genx::KernelMetadata KM{FG.getHead()};
+  SupportsDebugging = BC.emitDebuggableKernels();
+  DisableEUFusion = BC.isDisableEUFusion();
+
+  vc::KernelMetadata KM{FG.getHead()};
   IGC_ASSERT_MESSAGE(KM.isKernel(), "Expected kernel as head of function group");
   setMetadataProperties(KM, ST);
-  setArgumentProperties(*FG.getHead(), KM);
+  setArgumentProperties(*FG.getHead(), KM, ST, BC);
   setPrintStrings(*FG.getHead()->getParent());
-}
-
-//===----------------------------------------------------------------------===//
-//
-// Kernel argument info implementation.
-//
-//===----------------------------------------------------------------------===//
-// Supported kernel argument attributes.
-// Copied from igcmc.h.
-struct OCLAttributes {
-  static constexpr auto ReadOnly =
-      "read_only"; // This resource is for read only.
-  static constexpr auto WriteOnly =
-      "write_only"; // This resource is for write only.
-  static constexpr auto ReadWrite =
-      "read_write"; // This resource is for read and write.
-  static constexpr auto Buffer = "buffer_t";   // This resource is a buffer.
-  static constexpr auto SVM = "svmptr_t";      // This resource is a SVM buffer.
-  static constexpr auto Sampler = "sampler_t"; // This resource is a sampler.
-  static constexpr auto Image1d = "image1d_t"; // This resource is a 1D surface.
-  static constexpr auto Image1d_buffer = "image1d_buffer_t"; // This resource is a 1D surface.
-  static constexpr auto Image2d = "image2d_t"; // This resource is a 2D surface.
-  static constexpr auto Image3d = "image3d_t"; // This resource is a 3D surface.
-};
-
-using ArgKindType = GenXOCLRuntimeInfo::KernelArgInfo::KindType;
-
-static auto GetStrPred = [](const char *Attr) {
-  return [Attr](StringRef Token) { return Token == Attr; };
-};
-
-static ArgKindType getOCLArgKind(const SmallVectorImpl<StringRef> &Tokens,
-                                 unsigned ArgNo, genx::KernelMetadata &KM) {
-  unsigned RawKind = KM.getArgKind(ArgNo);
-
-  // Implicit arguments.
-  genx::KernelArgInfo KAI{RawKind};
-  if (KAI.isLocalSize())
-    return ArgKindType::LocalSize;
-  if (KAI.isGroupCount())
-    return ArgKindType::GroupCount;
-  if (KAI.isPrintBuffer())
-    return ArgKindType::PrintBuffer;
-  if (KAI.isPrivateBase())
-    return ArgKindType::PrivateBase;
-  if (KAI.isByValSVM())
-    return ArgKindType::ByValSVM;
-
-  // Explicit arguments.
-  switch (KM.getArgCategory(ArgNo)) {
-  default:
-    return ArgKindType::General;
-  case genx::RegCategory::GENERAL:
-    if (any_of(Tokens, GetStrPred(OCLAttributes::SVM)))
-      return ArgKindType::SVM;
-    // Bindless buffers have general category but buffer annotation.
-    if (any_of(Tokens, GetStrPred(OCLAttributes::Buffer)))
-      return ArgKindType::BindlessBuffer;
-    return ArgKindType::General;
-  case genx::RegCategory::SURFACE:
-    if (any_of(Tokens, GetStrPred(OCLAttributes::Image1d)))
-      return ArgKindType::Image1D;
-    if (any_of(Tokens, GetStrPred(OCLAttributes::Image1d_buffer)))
-      return ArgKindType::Image1D;
-    if (any_of(Tokens, GetStrPred(OCLAttributes::Image2d)))
-      return ArgKindType::Image2D;
-    if (any_of(Tokens, GetStrPred(OCLAttributes::Image3d)))
-      return ArgKindType::Image3D;
-    return ArgKindType::Buffer;
-  case genx::RegCategory::SAMPLER:
-    return ArgKindType::Sampler;
-  }
-}
-
-using ArgAccessKindType = GenXOCLRuntimeInfo::KernelArgInfo::AccessKindType;
-
-static ArgAccessKindType
-getOCLArgAccessKind(const SmallVectorImpl<StringRef> &Tokens,
-                    ArgKindType Kind) {
-  // As in igcmc.cpp.
-  switch (Kind) {
-  case ArgKindType::Buffer:
-  case ArgKindType::Image1D:
-  case ArgKindType::Image2D:
-  case ArgKindType::Image3D:
-  case ArgKindType::SVM:
-  case ArgKindType::BindlessBuffer:
-    if (any_of(Tokens, GetStrPred(OCLAttributes::ReadOnly)))
-      return ArgAccessKindType::ReadOnly;
-    if (any_of(Tokens, GetStrPred(OCLAttributes::WriteOnly)))
-      return ArgAccessKindType::WriteOnly;
-    return ArgAccessKindType::ReadWrite;
-  default:
-    return ArgAccessKindType::None;
-  }
-}
-
-// Initialize Kind and AccessKind from given ArgTypeDesc in metadata.
-void GenXOCLRuntimeInfo::KernelArgInfo::translateArgDesc(
-    genx::KernelMetadata &KM, unsigned ArgNo) {
-  std::string Translated{KM.getArgTypeDesc(ArgNo)};
-  // Transform each separator to space.
-  std::transform(Translated.begin(), Translated.end(), Translated.begin(),
-                 [](char C) {
-                   if (C != '-' && C != '_' && C != '=' && !std::isalnum(C))
-                     return ' ';
-                   return C;
-                 });
-
-  // Split and delete duplicates.
-  SmallVector<StringRef, 4> Tokens;
-  StringRef(Translated)
-      .split(Tokens, ' ', -1 /* MaxSplit */, false /* AllowEmpty */);
-  std::sort(Tokens.begin(), Tokens.end());
-  Tokens.erase(std::unique(Tokens.begin(), Tokens.end()), Tokens.end());
-
-  Kind = getOCLArgKind(Tokens, ArgNo, KM);
-  AccessKind = getOCLArgAccessKind(Tokens, Kind);
-}
-
-static unsigned getArgSizeInBytes(const Argument &Arg, genx::KernelMetadata &KM,
-                                  const DataLayout &DL) {
-  Type *ArgTy = Arg.getType();
-  if (ArgTy->isPointerTy())
-    return DL.getPointerTypeSize(ArgTy);
-  if (KM.isBufferType(Arg.getArgNo()))
-    return DL.getPointerSize();
-  return ArgTy->getPrimitiveSizeInBits() / genx::ByteBits;
-}
-
-GenXOCLRuntimeInfo::KernelArgInfo::KernelArgInfo(const Argument &Arg,
-                                                 genx::KernelMetadata &KM,
-                                                 const DataLayout &DL) {
-  unsigned ArgNo = Arg.getArgNo();
-  translateArgDesc(KM, ArgNo);
-  Offset = KM.getArgOffset(ArgNo);
-  SizeInBytes = getArgSizeInBytes(Arg, KM, DL);
-  BTI = KM.getBTI(ArgNo);
-  // For implicit arguments that are byval argument linearization, index !=
-  // ArgNo in the IR function.
-  Index = KM.getArgIndex(ArgNo);
-  // Linearization arguments have a non-zero offset in the original explicit
-  // byval arg
-  OffsetInArg = KM.getOffsetInArg(ArgNo);
 }
 
 //===----------------------------------------------------------------------===//
@@ -319,11 +378,9 @@ GenXOCLRuntimeInfo::KernelArgInfo::KernelArgInfo(const Argument &Arg,
 GenXOCLRuntimeInfo::CompiledKernel::CompiledKernel(KernelInfo &&KI,
                                                    const FINALIZER_INFO &JI,
                                                    const GTPinInfo &GI,
-                                                   std::vector<char> GenBinIn,
                                                    std::vector<char> DbgInfoIn)
     : CompilerInfo(std::move(KI)), JitterInfo(JI),
       GtpinInfo(GI),
-      GenBinary{std::move(GenBinIn)},
       DebugInfo{std::move(DbgInfoIn)} {
 }
 
@@ -334,33 +391,28 @@ GenXOCLRuntimeInfo::CompiledKernel::CompiledKernel(KernelInfo &&KI,
 //===----------------------------------------------------------------------===//
 namespace {
 
-struct ModuleDataT {
-  genx::BinaryDataAccumulator<const GlobalVariable *> Constants;
-  genx::BinaryDataAccumulator<const GlobalVariable *> Globals;
+// Relates to GenXOCLRuntimeInfo::SectionInfo. GenXOCLRuntimeInfo::SectionInfo
+// can be created from this struct.
+struct RawSectionInfo {
+  genx::BinaryDataAccumulator<const GlobalValue *> Data;
+  GenXOCLRuntimeInfo::RelocationSeq Relocations;
 };
 
-// appendLegacySymbolTable: a helper function to append symbols to a legasy
-// symbol table.
-// Output iterator is represented by a pointer \p OutIt, so the table/array
-// it points to has to have enough space.
-// The range [\p First, \p Last) must consist of SybolSeq::value elements.
-template <typename InputIter>
-void appendLegacySymbolTable(InputIter First, InputIter Last,
-                             vISA::GenSymEntry *OutIt) {
-  std::transform(First, Last, OutIt, [](const auto &SI) -> vISA::GenSymEntry {
-    vISA::GenSymEntry Entry;
-    Entry.s_offset = SI.s_offset;
-    Entry.s_size = SI.s_size;
-    Entry.s_type = SI.s_type;
-    IGC_ASSERT_MESSAGE(SI.s_name.size() < vISA::MAX_SYMBOL_NAME_LENGTH,
-                       "no solution for long symbol names for legacy "
-                       "symbol info is yet provided");
-    std::copy(SI.s_name.begin(), SI.s_name.end(), Entry.s_name);
-    // Null-terminating the string.
-    Entry.s_name[SI.s_name.size()] = '\0';
-    return std::move(Entry);
-  });
-}
+struct GVEncodingInfo {
+  const GlobalVariable *GV;
+  // Alignment requirments of a global variable that will be encoded after
+  // the considered GV variable.
+  unsigned NextGVAlignment;
+};
+
+struct ModuleDataT {
+  RawSectionInfo Constant;
+  RawSectionInfo Global;
+  RawSectionInfo ConstString;
+
+  ModuleDataT() = default;
+  ModuleDataT(const Module &M);
+};
 
 template <vISA::GenSymType SymbolClass, typename InputIter, typename OutputIter>
 void constructSymbols(InputIter First, InputIter Last, OutputIter Out) {
@@ -371,153 +423,34 @@ void constructSymbols(InputIter First, InputIter Last, OutputIter Out) {
   });
 }
 
-// [Module/Kernel]SymbolTableBuilder: it's a helper class to generate symbol
-// table. Collecting/constructing symbols and emitting structures with collected
-// symbols are separated. Emitter part supports 2 formats: legacy (patch
-// tokens), zebin.
-class KernelSymbolTableBuilder final {
-  // Using ZE struct as it covers all that is required, e.g. uses std::string
-  // instead of C char array.
-  using SymbolsInfo = GenXOCLRuntimeInfo::ZEBinKernelInfo::SymbolsInfo;
-  using SymbolSeq = SymbolsInfo::ZESymEntrySeq;
-  using SymbolT = vISA::ZESymEntry;
-  using GenBinaryT = genx::BinaryDataAccumulator<const Function *>;
-
-  const GenBinaryT &GenBinary;
-  SymbolsInfo Symbols;
-
-public:
-  KernelSymbolTableBuilder(const GenBinaryT &GenBinaryIn)
-      : GenBinary{GenBinaryIn} {
-    validateInitialData();
+static GenXOCLRuntimeInfo::SymbolSeq constructFunctionSymbols(
+    genx::BinaryDataAccumulator<const GlobalValue *> &GenBinary,
+    bool HasKernel) {
+  GenXOCLRuntimeInfo::SymbolSeq Symbols;
+  if (GenBinary.begin() == GenBinary.end())
+    return Symbols;
+  Symbols.reserve(GenBinary.getNumSections());
+  if (HasKernel) {
+    auto &KernelSection = GenBinary.front();
+    Symbols.emplace_back(vISA::GenSymType::S_KERNEL, KernelSection.Info.Offset,
+                         KernelSection.Info.getSize(),
+                         KernelSection.Key->getName().str());
   }
 
-  void constructFunctionSymbols() {
-    // Skipping first section with the kernel.
-    constructSymbols<vISA::GenSymType::S_FUNC>(
-        std::next(GenBinary.begin()), GenBinary.end(),
-        std::back_inserter(Symbols.Functions));
-  }
+  // Skipping first section if binary has a kernel.
+  constructSymbols<vISA::GenSymType::S_FUNC>(
+      HasKernel ? std::next(GenBinary.begin()) : GenBinary.begin(),
+      GenBinary.end(), std::back_inserter(Symbols));
 
-  // EnableZEBinary: this is requred by ZEBinary
-  void constructLocalSymbols() {
-    auto &KernelSection = getKernelSection();
-    Symbols.Local.emplace_back(
-        vISA::GenSymType::S_KERNEL, KernelSection.Info.Offset,
-        KernelSection.Info.getSize(), KernelSection.Key->getName().str());
-    // for now only kernel symbol is required
-  }
-
-  void constructAllSymbols() {
-    constructFunctionSymbols();
-    constructLocalSymbols();
-  }
-
-  GenXOCLRuntimeInfo::TableInfo emitLegacySymbolTable() const {
-    GenXOCLRuntimeInfo::TableInfo TI;
-    // Local symbols are ZE binary only, thus it is not part of the sum.
-    TI.Entries = Symbols.Functions.size();
-    if (TI.Entries == 0) {
-      return {};
-    }
-    TI.Size = TI.Entries * sizeof(vISA::GenSymEntry);
-    // this will be eventually freed in AdaptorOCL
-    auto *SymbolStorage = new vISA::GenSymEntry[TI.Entries];
-    TI.Buffer = SymbolStorage;
-    auto *Inserter = SymbolStorage;
-    appendLegacySymbolTable(Symbols.Functions.begin(), Symbols.Functions.end(),
-                            Inserter);
-    return std::move(TI);
-  }
-
-  SymbolsInfo emitZESymbolTable() const & { return Symbols; }
-
-  SymbolsInfo emitZESymbolTable() && { return std::move(Symbols); }
-
-private:
-  GenBinaryT::const_reference getKernelSection() const {
-    return GenBinary.front();
-  }
-
-  void validateInitialData() const {
-    IGC_ASSERT_MESSAGE(!GenBinary.empty(),
-                       "The binary must contain a least the kernel");
-    auto &KernelSection = getKernelSection();
-    IGC_ASSERT_MESSAGE(
-        KernelSection.Info.Offset == 0,
-        "It's presumed that the kernel is at the front of the binary");
-  }
-};
-
-class ModuleSymbolTableBuilder final {
-  // Using ZE struct as it covers all that is required, e.g. uses std::string
-  // instead of C char array.
-  using SymbolsInfo = GenXOCLRuntimeInfo::ZEBinModuleInfo::SymbolsInfo;
-  using SymbolSeq = SymbolsInfo::ZESymEntrySeq;
-  using SymbolT = vISA::ZESymEntry;
-
-  const ModuleDataT &ModuleData;
-  SymbolsInfo Symbols;
-
-public:
-  ModuleSymbolTableBuilder(const ModuleDataT &ModuleDataIn)
-      : ModuleData{ModuleDataIn} {}
-
-  void constructConstantSymbols() {
-    constructSymbols<vISA::GenSymType::S_GLOBAL_VAR_CONST>(
-        ModuleData.Constants.begin(), ModuleData.Constants.end(),
-        std::back_inserter(Symbols.Constants));
-  }
-
-  void constructGlobalSymbols() {
-    constructSymbols<vISA::GenSymType::S_GLOBAL_VAR>(
-        ModuleData.Globals.begin(), ModuleData.Globals.end(),
-        std::back_inserter(Symbols.Globals));
-  }
-
-  void constructAllSymbols() {
-    constructConstantSymbols();
-    constructGlobalSymbols();
-  }
-
-  GenXOCLRuntimeInfo::TableInfo emitLegacySymbolTable() const {
-    GenXOCLRuntimeInfo::TableInfo TI;
-    // Local symbols are ZE binary only, thus it is not part of the sum.
-    TI.Entries = Symbols.Constants.size() + Symbols.Globals.size();
-    if (TI.Entries == 0) {
-      return {};
-    }
-    TI.Size = TI.Entries * sizeof(vISA::GenSymEntry);
-    // this will be eventually freed in AdaptorOCL
-    auto *SymbolStorage = new vISA::GenSymEntry[TI.Entries];
-    TI.Buffer = SymbolStorage;
-    auto *Inserter = SymbolStorage;
-    appendLegacySymbolTable(Symbols.Constants.begin(), Symbols.Constants.end(),
-                            Inserter);
-    Inserter += Symbols.Constants.size();
-    appendLegacySymbolTable(Symbols.Globals.begin(), Symbols.Globals.end(),
-                            Inserter);
-    return std::move(TI);
-  }
-
-  SymbolsInfo emitZESymbolTable() const & { return Symbols; }
-
-  SymbolsInfo emitZESymbolTable() && { return std::move(Symbols); }
-};
-
-struct GVEncodingInfo {
-  const GlobalVariable *GV;
-  // Alignment requirments of a global variable that will be encoded after
-  // the considered GV variable.
-  unsigned NextGVAlignment;
-};
+  return Symbols;
+}
 
 } // namespace
 
 // Appends the binary of function/kernel represented by \p Func and \p BuiltFunc
 // to \p GenBinary.
 static void
-appendFuncBinary(genx::BinaryDataAccumulator<const Function *> &GenBinary,
+appendFuncBinary(genx::BinaryDataAccumulator<const GlobalValue *> &GenBinary,
                  const Function &Func, const VISAKernel &BuiltFunc) {
   void *GenBin = nullptr;
   int GenBinSize = 0;
@@ -526,22 +459,21 @@ appendFuncBinary(genx::BinaryDataAccumulator<const Function *> &GenBinary,
       "Unexpected null buffer or zero-sized kernel (compilation failed?)");
   IGC_ASSERT_MESSAGE(GenBinSize,
       "Unexpected null buffer or zero-sized kernel (compilation failed?)");
-  GenBinary.append(&Func, ArrayRef<char>{reinterpret_cast<char *>(GenBin),
-                                         static_cast<size_t>(GenBinSize)});
+  GenBinary.append(&Func, ArrayRef<uint8_t>{static_cast<uint8_t *>(GenBin),
+                                            static_cast<size_t>(GenBinSize)});
   freeBlock(GenBin);
 }
 
 // Loads if it is possible external files.
 // Returns the success status of the loading.
-static bool
-loadGenBinaryFromFile(genx::BinaryDataAccumulator<const Function *> &GenBinary,
-                      const Function &Kernel, const Function &F,
-                      vc::ShaderOverrider const &Loader,
-                      vc::ShaderOverrider::Extensions Ext) {
+static bool loadGenBinaryFromFile(
+    genx::BinaryDataAccumulator<const GlobalValue *> &GenBinary,
+    const Function &F, vc::ShaderOverrider const &Loader,
+    vc::ShaderOverrider::Extensions Ext) {
   void *GenBin = nullptr;
   int GenBinSize = 0;
 
-  if (!Loader.override(GenBin, GenBinSize, Kernel.getName(), F.getName(), Ext))
+  if (!Loader.override(GenBin, GenBinSize, F.getName(), Ext))
     return false;
 
   if (!GenBin || !GenBinSize) {
@@ -550,8 +482,8 @@ loadGenBinaryFromFile(genx::BinaryDataAccumulator<const Function *> &GenBinary,
     return false;
   }
 
-  GenBinary.append(&F, ArrayRef<char>{reinterpret_cast<char *>(GenBin),
-                                      static_cast<size_t>(GenBinSize)});
+  GenBinary.append(&F, ArrayRef<uint8_t>{static_cast<uint8_t *>(GenBin),
+                                         static_cast<size_t>(GenBinSize)});
   freeBlock(GenBin);
   return true;
 }
@@ -559,37 +491,16 @@ loadGenBinaryFromFile(genx::BinaryDataAccumulator<const Function *> &GenBinary,
 // Constructs gen binary for Function but loading is from injected file.
 // Returns the success status of the overriding.
 static bool
-tryOverrideBinary(genx::BinaryDataAccumulator<const Function *> &GenBinary,
-                  const Function &Kernel, const Function &F,
-                  vc::ShaderOverrider const &Loader) {
+tryOverrideBinary(genx::BinaryDataAccumulator<const GlobalValue *> &GenBinary,
+                  const Function &F, vc::ShaderOverrider const &Loader) {
   using Extensions = vc::ShaderOverrider::Extensions;
 
   // Attempts to override .asm
-  if (loadGenBinaryFromFile(GenBinary, Kernel, F, Loader, Extensions::ASM))
+  if (loadGenBinaryFromFile(GenBinary, F, Loader, Extensions::ASM))
     return true;
 
   // If it has failed then attempts to override .dat file
-  return loadGenBinaryFromFile(GenBinary, Kernel, F, Loader, Extensions::DAT);
-}
-
-// Either loads binaries from VISABuilder or overrides from files.
-// \p Kernel should always be kernel function, meanwhile if \p F is actually a
-// kernel means we are loading kernel, and if \p F is a function means we are
-// loading function.
-static void
-loadBinaries(genx::BinaryDataAccumulator<const Function *> &GenBinary,
-             VISABuilder &VB, const Function &Kernel, const Function &F,
-             GenXBackendConfig const &BC) {
-  // Attempt to override
-  if (BC.hasShaderOverrider() &&
-      tryOverrideBinary(GenBinary, Kernel, F, BC.getShaderOverrider()))
-    return;
-
-  // If there is no overriding or attemp fails, then gets binary from compilation
-  VISAKernel *BuiltKernel = VB.GetVISAKernel(F.getName().str());
-  IGC_ASSERT_MESSAGE(BuiltKernel, "Kernel is null");
-  appendFuncBinary(GenBinary, F, *BuiltKernel);
-  
+  return loadGenBinaryFromFile(GenBinary, F, Loader, Extensions::DAT);
 }
 
 template <typename UnaryPred>
@@ -618,38 +529,62 @@ std::vector<const Function *> collectCalledFunctions(const FunctionGroup &FG,
   return Collected;
 }
 
-// Constructs gen binary for provided function group \p FG.
-static genx::BinaryDataAccumulator<const Function *>
-getGenBinary(const FunctionGroup &FG, VISABuilder &VB,
-             GenXBackendConfig const &BC) {
-  Function const *Kernel = FG.getHead();
-  genx::BinaryDataAccumulator<const Function *> GenBinary;
-  // load kernel
-  loadBinaries(GenBinary, VB, *Kernel, *Kernel, BC);
-
-  const auto IndirectFunctions = collectCalledFunctions(
-      FG, [](const Function *F) { return genx::isReferencedIndirectly(F); });
-  for (const Function *F : IndirectFunctions)
-    // load functions
-    loadBinaries(GenBinary, VB, *Kernel, *F, BC);
-
-  return std::move(GenBinary);
+// Returns vISA asm for function \p F.
+static std::string getVISAAsmForFunction(const Function &F, VISABuilder &VB) {
+  VISAKernel *VK = VB.GetVISAKernel(F.getName().str());
+  return VK->getVISAAsm();
 }
 
-static void appendGlobalVariableData(
-    genx::BinaryDataAccumulator<const GlobalVariable *> &Accumulator,
-    GVEncodingInfo GVInfo, const DataLayout &DL) {
-  std::vector<char> Data;
-  vc::encodeConstant(*GVInfo.GV->getInitializer(), DL, std::back_inserter(Data));
+// Returns vISA asm for the FG's head and its direct stack calls.
+static std::string getVISAAsm(const FunctionGroup &FG, VISABuilder &VB) {
+  std::string VISAAsm = getVISAAsmForFunction(*FG.getHead(), VB);
+  const auto StackCalls = collectCalledFunctions(FG, [](const Function *F) {
+    return vc::requiresStackCall(F) && !vc::isIndirect(F);
+  });
+  return std::accumulate(StackCalls.begin(), StackCalls.end(), VISAAsm,
+                         [&VB](std::string S, const Function *F) {
+                           return std::move(S += getVISAAsmForFunction(*F, VB));
+                         });
+}
 
-  // Pad before the next global.
-  auto UnalignedNextGVAddress = Accumulator.getFullSize() + Data.size();
-  auto AlignedNextGVAddress =
-      alignTo(UnalignedNextGVAddress, GVInfo.NextGVAlignment);
-  std::fill_n(std::back_inserter(Data),
-              AlignedNextGVAddress - UnalignedNextGVAddress, 0);
+// Appends relocations of \p Func to \p SectionRelocations. Added relocations
+// are shifted by \p Offset.
+static void
+appendTextRelocations(GenXOCLRuntimeInfo::RelocationSeq &SectionRelocations,
+                      VISAKernel &Func, std::size_t Offset) {
+  if (!Offset) {
+    CISA_CALL(Func.GetRelocations(SectionRelocations));
+    return;
+  }
+  GenXOCLRuntimeInfo::RelocationSeq FuncRelocations;
+  CISA_CALL(Func.GetRelocations(FuncRelocations));
+  vc::shiftRelocations(FuncRelocations.begin(), FuncRelocations.end(),
+                       std::back_inserter(SectionRelocations), Offset);
+}
 
-  Accumulator.append(GVInfo.GV, Data.begin(), Data.end());
+// Either loads binary from VISABuilder or overrides from file.
+// vISA assembly that corresponds to the obtained binary is appended to
+// \p VISAAsm when shader override is off.
+static void loadBinary(RawSectionInfo &TextSection, std::string &VISAAsm,
+                       VISABuilder &VB, const FunctionGroup &FG,
+                       const GenXBackendConfig &BC) {
+  const Function &F = *FG.getHead();
+
+  // Attempt to override
+  if (BC.hasShaderOverrider() &&
+      tryOverrideBinary(TextSection.Data, F, BC.getShaderOverrider()))
+    return;
+
+  // If there is no overriding or attemp fails, then gets binary from
+  // compilation
+  VISAKernel *BuiltKernel = VB.GetVISAKernel(F.getName().str());
+  IGC_ASSERT_MESSAGE(BuiltKernel, "Kernel is null");
+  appendTextRelocations(TextSection.Relocations, *BuiltKernel,
+                        TextSection.Data.getFullSize());
+  appendFuncBinary(TextSection.Data, F, *BuiltKernel);
+
+  if (BC.emitZebinVisaSections())
+    VISAAsm += getVISAAsm(FG, VB);
 }
 
 static unsigned getAlignment(const GlobalVariable &GV) {
@@ -659,57 +594,107 @@ static unsigned getAlignment(const GlobalVariable &GV) {
   return GV.getParent()->getDataLayout().getABITypeAlignment(GV.getValueType());
 }
 
-template <typename GlobalsRangeT>
-std::vector<GVEncodingInfo>
-prepareGlobalInfosForEncoding(GlobalsRangeT &&Globals) {
-  auto RealGlobals = make_filter_range(Globals, [](const GlobalVariable &GV) {
-    return genx::isRealGlobalVariable(GV);
-  });
-  if (RealGlobals.begin() == RealGlobals.end())
-    return {};
-  std::vector<GVEncodingInfo> Infos;
-  std::transform(RealGlobals.begin(), std::prev(RealGlobals.end()),
-                 std::next(RealGlobals.begin()), std::back_inserter(Infos),
-                 [](const GlobalVariable &GV, const GlobalVariable &NextGV) {
-                   return GVEncodingInfo{&GV, getAlignment(NextGV)};
-                 });
-  Infos.push_back({&*std::prev(RealGlobals.end()), 1u});
-  return std::move(Infos);
+static void appendGlobalVariableData(RawSectionInfo &Sect,
+                                     const GlobalVariable &GV,
+                                     const DataLayout &DL) {
+  std::vector<char> Data;
+  GenXOCLRuntimeInfo::RelocationSeq Relocations;
+  vc::encodeConstant(*GV.getInitializer(), DL, std::back_inserter(Data),
+                     std::back_inserter(Relocations));
+
+  Sect.Data.append(&GV, Data.begin(), Data.end(), getAlignment(GV));
+
+  // vc::encodeConstant calculates offsets relative to GV. Need to make it
+  // relative to section start.
+  vc::shiftRelocations(std::make_move_iterator(Relocations.begin()),
+                       std::make_move_iterator(Relocations.end()),
+                       std::back_inserter(Sect.Relocations),
+                       Sect.Data.back().Info.Offset);
 }
 
-static ModuleDataT getModuleData(const Module &M) {
-  genx::BinaryDataAccumulator<const GlobalVariable *> ConstantData;
-  genx::BinaryDataAccumulator<const GlobalVariable *> GlobalData;
-  std::vector<GVEncodingInfo> GVInfos =
-      prepareGlobalInfosForEncoding(M.globals());
-  for (auto GVInfo : GVInfos) {
-    if (GVInfo.GV->isConstant())
-      appendGlobalVariableData(ConstantData, GVInfo, M.getDataLayout());
-    else
-      appendGlobalVariableData(GlobalData, GVInfo, M.getDataLayout());
+// Fetches DWARF data associated with the specified function.
+// Empty vector is returned if none is found.
+static GenXDebugInfo::ElfBin getDebugInformation(const GenXDebugInfo &Dbg,
+                                                 const Function *F) {
+  const auto &DbgInfoStorage = Dbg.getModuleDebug();
+  auto DbgInfoIt = DbgInfoStorage.find(F);
+  if (DbgInfoIt == DbgInfoStorage.end())
+    return {};
+  const auto &ElfImage = DbgInfoIt->second;
+  return {ElfImage.begin(), ElfImage.end()};
+}
+
+static GenXDebugInfo::ElfBin getDebugInfoForIndirectFunctions(
+    const GenXDebugInfo &Dbg, const std::vector<FunctionGroup *> &Subgroups) {
+  if (Subgroups.empty())
+    return {};
+
+  // FIXME: current implementation does not properly handle debug information
+  // in the presence of indirect calls. Several indirect functions are
+  // embedded into one "section" - which means that the associated DWARF file
+  // should contain information about all of them. Currently, we provide DWARF
+  // info only about the first function.
+  return getDebugInformation(Dbg, Subgroups.front()->getHead());
+}
+
+ModuleDataT::ModuleDataT(const Module &M) {
+  auto RealGlobals =
+      make_filter_range(M.globals(), [](const GlobalVariable &GV) {
+        return vc::isRealGlobalVariable(GV);
+      });
+  for (auto &GV : RealGlobals) {
+    if (GV.isConstant()) {
+      if (GV.hasAttribute(vc::PrintfStringVariable))
+        // This section is always empty for oclbin flow. This happens because
+        // of printf legalization that separates globals that will be indexed
+        // and real globals. Only indexed globals are left marked as printf
+        // strings but indexed strings aren't real global variables so they're
+        // skipped here. Indexed strings are handled separately.
+        appendGlobalVariableData(ConstString, GV, M.getDataLayout());
+      else
+        appendGlobalVariableData(Constant, GV, M.getDataLayout());
+    } else {
+      IGC_ASSERT_MESSAGE(!GV.hasAttribute(vc::PrintfStringVariable),
+                         "non-const global variable cannot be a printf string");
+      appendGlobalVariableData(Global, GV, M.getDataLayout());
+    }
   }
-  return {std::move(ConstantData), std::move(GlobalData)};
 }
 
 static GenXOCLRuntimeInfo::ModuleInfoT getModuleInfo(const Module &M) {
-  auto ModuleData = getModuleData(M);
-  ModuleSymbolTableBuilder STBuilder{ModuleData};
+  ModuleDataT ModuleData{M};
   GenXOCLRuntimeInfo::ModuleInfoT ModuleInfo;
 
-  ModuleInfo.ConstantData.Buffer =
-      std::move(ModuleData.Constants).emitConsolidatedData();
+  constructSymbols<vISA::GenSymType::S_GLOBAL_VAR_CONST>(
+      ModuleData.Constant.Data.begin(), ModuleData.Constant.Data.end(),
+      std::back_inserter(ModuleInfo.Constant.Symbols));
+  constructSymbols<vISA::GenSymType::S_GLOBAL_VAR>(
+      ModuleData.Global.Data.begin(), ModuleData.Global.Data.end(),
+      std::back_inserter(ModuleInfo.Global.Symbols));
+  constructSymbols<vISA::GenSymType::S_GLOBAL_VAR_CONST>(
+      ModuleData.ConstString.Data.begin(), ModuleData.ConstString.Data.end(),
+      std::back_inserter(ModuleInfo.ConstString.Symbols));
+
+  ModuleInfo.Constant.Relocations = std::move(ModuleData.Constant.Relocations);
+  ModuleInfo.Global.Relocations = std::move(ModuleData.Global.Relocations);
+  ModuleInfo.ConstString.Relocations =
+      std::move(ModuleData.ConstString.Relocations);
+
+  ModuleInfo.Constant.Data.Buffer =
+      std::move(ModuleData.Constant.Data).emitConsolidatedData();
   // IGC always sets 0
-  ModuleInfo.ConstantData.Alignment = 0;
-  ModuleInfo.ConstantData.AdditionalZeroedSpace = 0;
+  ModuleInfo.Constant.Data.Alignment = 0;
+  ModuleInfo.Constant.Data.AdditionalZeroedSpace = 0;
 
-  ModuleInfo.GlobalData.Buffer =
-      std::move(ModuleData.Globals).emitConsolidatedData();
-  ModuleInfo.GlobalData.Alignment = 0;
-  ModuleInfo.GlobalData.AdditionalZeroedSpace = 0;
+  ModuleInfo.Global.Data.Buffer =
+      std::move(ModuleData.Global.Data).emitConsolidatedData();
+  ModuleInfo.Global.Data.Alignment = 0;
+  ModuleInfo.Global.Data.AdditionalZeroedSpace = 0;
 
-  STBuilder.constructAllSymbols();
-  ModuleInfo.SymbolTable = STBuilder.emitLegacySymbolTable();
-  ModuleInfo.ZEBinInfo.Symbols = std::move(STBuilder).emitZESymbolTable();
+  ModuleInfo.ConstString.Data.Buffer =
+      std::move(ModuleData.ConstString.Data).emitConsolidatedData();
+  ModuleInfo.ConstString.Data.Alignment = 0;
+  ModuleInfo.ConstString.Data.AdditionalZeroedSpace = 0;
 
   return std::move(ModuleInfo);
 }
@@ -740,6 +725,10 @@ public:
 
 private:
   CompiledKernel collectFunctionGroupInfo(const FunctionGroup &FG) const;
+  template <typename Range>
+  CompiledKernel
+  collectFunctionSubgroupsInfo(const std::vector<FunctionGroup *> &Subgroups,
+                               const Range &DeclsRange) const;
 };
 
 } // namespace
@@ -750,6 +739,23 @@ RuntimeInfoCollector::CompiledModuleT RuntimeInfoCollector::run() {
                  [this](const FunctionGroup *FG) {
                    return collectFunctionGroupInfo(*FG);
                  });
+  std::vector<FunctionGroup *> IndirectlyReferencedFuncs;
+  std::copy_if(FGA.subgroup_begin(), FGA.subgroup_end(),
+               std::back_inserter(IndirectlyReferencedFuncs),
+               [&BECfg = BC](const FunctionGroup *FG) {
+                 return vc::isIndirect(FG->getHead()) &&
+                        !BECfg.directCallsOnly();
+               });
+  auto &&DeclsRange =
+      llvm::make_filter_range(M.functions(), [](const Function &F) {
+        if (!F.isDeclaration())
+          return false;
+        return vc::isIndirect(F);
+      });
+  if (!IndirectlyReferencedFuncs.empty() ||
+      DeclsRange.begin() != DeclsRange.end())
+    Kernels.push_back(
+        collectFunctionSubgroupsInfo(IndirectlyReferencedFuncs, DeclsRange));
   return {getModuleInfo(M), std::move(Kernels),
           M.getDataLayout().getPointerSize()};
 }
@@ -759,7 +765,6 @@ RuntimeInfoCollector::collectFunctionGroupInfo(const FunctionGroup &FG) const {
   using KernelInfo = GenXOCLRuntimeInfo::KernelInfo;
   using GTPinInfo = GenXOCLRuntimeInfo::GTPinInfo;
   using CompiledKernel = GenXOCLRuntimeInfo::CompiledKernel;
-  using TableInfo = GenXOCLRuntimeInfo::TableInfo;
 
   // Compiler info.
   KernelInfo Info{FG, ST, BC};
@@ -775,7 +780,7 @@ RuntimeInfoCollector::collectFunctionGroupInfo(const FunctionGroup &FG) const {
   // calculation. This has to be redesign properly, maybe w/ multiple
   // KernelInfos or by introducing FunctionInfos
   const auto StackCalls = collectCalledFunctions(
-      FG, [](const Function *F) { return genx::requiresStackCall(F); });
+      FG, [](const Function *F) { return vc::requiresStackCall(F); });
   for (const Function *F : StackCalls) {
     const std::string FuncName = F->getName().str();
     VISAKernel *VF = VB.GetVISAKernel(FuncName);
@@ -788,36 +793,65 @@ RuntimeInfoCollector::collectFunctionGroupInfo(const FunctionGroup &FG) const {
     JitInfo->spillMemUsed += FuncJitInfo->spillMemUsed;
   }
 
-  genx::BinaryDataAccumulator<const Function *> GenBinary =
-      getGenBinary(FG, VB, BC);
+  RawSectionInfo TextSection;
+  loadBinary(TextSection, Info.VISAAsm, VB, FG, BC);
 
-  const auto& Dbg = DBG.getModuleDebug();
-  auto DbgIt = Dbg.find(KernelFunction);
-  std::vector<char> DebugData;
-  if (DbgIt != std::end(Dbg)) {
-    const auto &ElfImage = DbgIt->second;
-    DebugData = {ElfImage.begin(), ElfImage.end()};
-  }
-  TableInfo &RTable = Info.getRelocationTable();
-  CISA_CALL(
-      VK->GetGenRelocEntryBuffer(RTable.Buffer, RTable.Size, RTable.Entries));
-  // EnableZEBinary: this is requred by ZEBinary
-  CISA_CALL(VK->GetRelocations(Info.ZEBinInfo.Relocations));
-  KernelSymbolTableBuilder STBuilder{GenBinary};
-  STBuilder.constructAllSymbols();
-  Info.getSymbolTable() = STBuilder.emitLegacySymbolTable();
-  Info.ZEBinInfo.Symbols = std::move(STBuilder).emitZESymbolTable();
+  auto DebugData = getDebugInformation(DBG, KernelFunction);
+
+  Info.Func.Relocations = TextSection.Relocations;
+  // Still have to duplicate function relocations because they are constructed
+  // inside Finalizer.
+  CISA_CALL(VK->GetGenRelocEntryBuffer(Info.LegacyFuncRelocations.Buffer,
+                                       Info.LegacyFuncRelocations.Size,
+                                       Info.LegacyFuncRelocations.Entries));
+  Info.Func.Symbols =
+      constructFunctionSymbols(TextSection.Data, /*HasKernel=*/true);
 
   void *GTPinBuffer = nullptr;
   unsigned GTPinBufferSize = 0;
   CISA_CALL(VK->GetGTPinBuffer(GTPinBuffer, GTPinBufferSize));
 
   auto *GTPinBytes = static_cast<char *>(GTPinBuffer);
-  GTPinInfo gtpin{{GTPinBytes, GTPinBytes + GTPinBufferSize}};
+  GTPinInfo gtpin{GTPinBytes, GTPinBytes + GTPinBufferSize};
 
+  Info.Func.Data.Buffer = std::move(TextSection.Data).emitConsolidatedData();
   return CompiledKernel{std::move(Info), *JitInfo, std::move(gtpin),
-                        std::move(GenBinary).emitConsolidatedData(),
                         std::move(DebugData)};
+}
+
+template <typename Range>
+RuntimeInfoCollector::CompiledKernel
+RuntimeInfoCollector::collectFunctionSubgroupsInfo(
+    const std::vector<FunctionGroup *> &Subgroups,
+    const Range &DeclsRange) const {
+  using KernelInfo = GenXOCLRuntimeInfo::KernelInfo;
+  using CompiledKernel = GenXOCLRuntimeInfo::CompiledKernel;
+
+  IGC_ASSERT(!Subgroups.empty() || !(DeclsRange.begin() == DeclsRange.end()));
+  KernelInfo Info{ST};
+
+  RawSectionInfo TextSection;
+  for (auto *FG : Subgroups) {
+    auto *Func = FG->getHead();
+    IGC_ASSERT(genx::fg::isSubGroupHead(*Func));
+    loadBinary(TextSection, Info.VISAAsm, VB, *FG, BC);
+  }
+
+  auto DebugInfo = getDebugInfoForIndirectFunctions(DBG, Subgroups);
+
+  // FIXME: cannot initialize legacy relocations as the relocation structure is
+  // opaque and cannot be modified. But having multiple functions inside a
+  // section requires shifting (modifying) the relocations.
+  Info.Func.Relocations = TextSection.Relocations;
+  Info.Func.Symbols =
+      constructFunctionSymbols(TextSection.Data, /*HasKernel*/ false);
+  for (auto &&Decl : DeclsRange)
+    Info.Func.Symbols.emplace_back(vISA::GenSymType::S_UNDEF, 0, 0,
+                                   Decl.getName().str());
+  Info.Func.Data.Buffer = TextSection.Data.emitConsolidatedData();
+
+  return CompiledKernel{std::move(Info), FINALIZER_INFO{}, /*GtpinInfo*/ {},
+                        DebugInfo};
 }
 
 void GenXOCLRuntimeInfo::getAnalysisUsage(AnalysisUsage &AU) const {
@@ -846,7 +880,16 @@ bool GenXOCLRuntimeInfo::runOnModule(Module &M) {
   return false;
 }
 
+void GenXOCLRuntimeInfo::print(raw_ostream &OS, const Module *M) const {
+  vc::printOCLRuntimeInfo(OS, CompiledModule);
+}
+
 INITIALIZE_PASS_BEGIN(GenXOCLRuntimeInfo, "GenXOCLRuntimeInfo",
                       "GenXOCLRuntimeInfo", false, true)
+INITIALIZE_PASS_DEPENDENCY(FunctionGroupAnalysis);
+INITIALIZE_PASS_DEPENDENCY(GenXBackendConfig);
+INITIALIZE_PASS_DEPENDENCY(GenXModule);
+INITIALIZE_PASS_DEPENDENCY(GenXDebugInfo);
+INITIALIZE_PASS_DEPENDENCY(TargetPassConfig);
 INITIALIZE_PASS_END(GenXOCLRuntimeInfo, "GenXOCLRuntimeInfo",
                     "GenXOCLRuntimeInfo", false, true)

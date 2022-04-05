@@ -162,6 +162,7 @@ public:
     // Only remaining GEPs are for scratch in GFX path
     void emitGEP(llvm::Instruction* inst);
 
+
     // Emit lifetime start right before inst V. If ForAllInstance is true, emit lifestart
     // for both instances; otherwise, just the current instance set in the calling context.
     void emitLifetimeStart(CVariable* Var, llvm::BasicBlock* BB, llvm::Instruction* I, bool ForAllInstance);
@@ -216,6 +217,8 @@ public:
     void emitSimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
     void emitLegacySimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
     void emitLegacySimdBlockRead(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
+    void emitLSCSimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
+    void emitLSCSimdBlockRead(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
     void emitSimdMediaBlockRead(llvm::Instruction* inst);
     void emitSimdMediaBlockWrite(llvm::Instruction* inst);
     void emitMediaBlockIO(const llvm::GenIntrinsicInst* inst, bool isRead);
@@ -232,6 +235,9 @@ public:
     void emitTypedRead(llvm::Instruction* inst);
     void emitTypedWrite(llvm::Instruction* inst);
     void emitThreadGroupBarrier(llvm::Instruction* inst);
+    void emitThreadGroupNamedBarriersInit(llvm::Instruction* inst);
+    void emitThreadGroupNamedBarriersBarrier(llvm::Instruction* inst);
+    void emitCastSelect(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1);
     void emitMemoryFence(llvm::Instruction* inst);
     void emitMemoryFence(void);
     void emitTypedMemoryFence(llvm::Instruction* inst);
@@ -249,6 +255,9 @@ public:
         ResourceDescriptor& resource,
         AtomicOp atomic_op,
         CVariable* pDstAddr,
+        CVariable* pU,
+        CVariable* pV,
+        CVariable* pR,
         CVariable* pSrc,
         bool isA64,
         int bitSize);
@@ -257,6 +266,9 @@ public:
         llvm::Instruction* pInst,
         ResourceDescriptor& resource,
         CVariable* pDstAddr,
+        CVariable* pU,
+        CVariable* pV,
+        CVariable* pR,
         CVariable* pSrc,
         bool isA64,
         int bitSize);
@@ -312,6 +324,10 @@ public:
     void emitAtomicRaw(llvm::GenIntrinsicInst* pInst);
     void emitAtomicTyped(llvm::GenIntrinsicInst* pInst);
     void emitAtomicCounter(llvm::GenIntrinsicInst* pInst);
+    void emitFastClear(llvm::LoadInst* inst);
+    void emitFastClearSend(llvm::Instruction* pInst);
+    void setRovCacheCtrl(llvm::GenIntrinsicInst* inst);
+    bool useRasterizerOrderedByteAddressBuffer(llvm::GenIntrinsicInst* inst);
     void emitUniformAtomicCounter(llvm::GenIntrinsicInst* pInst);
     void emitRenderTargetRead(llvm::GenIntrinsicInst* inst);
 
@@ -358,6 +374,7 @@ public:
 
     void emitHSTessFactors(llvm::Instruction* pInst);
     void emitHSSGV(llvm::GenIntrinsicInst* inst);
+    void emitBindlessShaderSGV(llvm::GenIntrinsicInst* inst);
     void emitf32tof16_rtz(llvm::GenIntrinsicInst* inst);
     void emitfitof(llvm::GenIntrinsicInst* inst);
     void emitFPOrtz(llvm::GenIntrinsicInst* inst);
@@ -411,6 +428,12 @@ public:
     void emitVectorBitCast(llvm::BitCastInst* BCI);
     void emitVectorLoad(llvm::LoadInst* LI, llvm::Value* offset, llvm::ConstantInt* immOffset);
     void emitVectorStore(llvm::StoreInst* SI, llvm::Value* offset, llvm::ConstantInt* immOffset);
+    void emitLSCVectorLoad(
+        llvm::Value* Ptr, llvm::Value* offset, llvm::ConstantInt* immOffset,
+        llvm::Type* Ty, LSC_CACHE_OPTS cacheOpts, uint32_t align);
+    void emitLSCVectorStore(
+        llvm::Value* Ptr, llvm::Value* offset, llvm::ConstantInt* immOffset,
+        llvm::Value* storedVal, LSC_CACHE_OPTS cacheOpts, uint32_t align);
     void emitGenISACopy(llvm::GenIntrinsicInst* GenCopyInst);
     void emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0);
@@ -424,7 +447,7 @@ public:
     void emitAddPair(CVariable* Dst, CVariable* Src0, CVariable* Src1);
 
     void emitSqrt(llvm::Instruction* inst);
-    void emitCanonicalize(llvm::Instruction* inst);
+    void emitCanonicalize(llvm::Instruction* inst, const DstModifier& modifier);
     void emitRsq(llvm::Instruction* inst);
     void emitFrc(llvm::GenIntrinsicInst* inst);
 
@@ -437,10 +460,124 @@ public:
     void emitLLVMStackRestore(llvm::IntrinsicInst* inst);
 
     void emitUnmaskedRegionBoundary(bool start);
+    LSC_CACHE_OPTS getDefaultRaytracingCachePolicy(bool isLoad) const;
+    void emitAsyncStackID(llvm::GenIntrinsicInst* I);
+    void emitSyncStackID(llvm::GenIntrinsicInst* I);
+    void emitTraceRay(llvm::TraceRayIntrinsic *I, bool RayQueryEnable);
+    void emitReadTraceRaySync(llvm::GenIntrinsicInst* I);
+    void emitBTD(
+        CVariable* GlobalBufferPtr,
+        CVariable* StackID,
+        CVariable* ShaderRecord,
+        bool releaseStackID);
+    void emitBindlessThreadDispatch(llvm::BTDIntrinsic *I);
+    void emitStackIDRelease(llvm::StackIDReleaseIntrinsic *I);
+    void emitGetShaderRecordPtr(llvm::GetShaderRecordPtrIntrinsic *I);
+    void emitGlobalBufferPtr(llvm::GenIntrinsicInst *I);
+    void emitLocalBufferPtr(llvm::GenIntrinsicInst *I);
+    void emitInlinedDataValue(llvm::GenIntrinsicInst *I);
+    void emitTileXOffset(llvm::TileXIntrinsic *I);
+    void emitTileYOffset(llvm::TileYIntrinsic *I);
     void emitDpas(llvm::GenIntrinsicInst *GII,
                   const SSource* source,
                   const DstModifier& modifier);
     void emitfcvt(llvm::GenIntrinsicInst *GII);
+
+    void emitSystemMemoryFence(llvm::GenIntrinsicInst* I);
+    void emitUrbFence();
+    void emitHDCuncompressedwrite(llvm::GenIntrinsicInst* I);
+    ////////////////////////////////////////////////////////////////////
+    // LSC related functions
+    LSC_CACHE_OPTS translateLSCCacheControlsFromValue(
+        llvm::Value *value, bool isLoad) const;
+    LSC_CACHE_OPTS translateLSCCacheControlsFromMetadata(
+        llvm::Instruction* inst, bool isLoad) const;
+    struct LscMessageFragmentInfo {
+        LSC_DATA_ELEMS fragElem;
+        int            fragElemCount;
+        int            addrOffsetDelta;
+        int            grfOffsetDelta;
+        bool           lastIsV1; // e.g. splitting a V3 up is a V2 + V1
+    };
+    LscMessageFragmentInfo checkForLscMessageFragmentation(
+        LSC_DATA_SIZE size, LSC_DATA_ELEMS elems) const;
+
+    // (CVariable* gatherDst, int fragIx, LSC_DATA_ELEMS fragElems, int fragImmOffset)
+    using LscIntrinsicFragmentEmitter =
+        std::function<void(CVariable *, int, LSC_DATA_ELEMS, int)>;
+
+    void emitLscIntrinsicFragments(
+        CVariable* gatherDst,
+        LSC_DATA_SIZE dataSize,
+        LSC_DATA_ELEMS dataElems,
+        int immOffsetBytes,
+        const LscIntrinsicFragmentEmitter &emitter);
+
+    void emitLscIntrinsicLoad(llvm::GenIntrinsicInst* GII);
+    void emitLscIntrinsicPrefetch(llvm::GenIntrinsicInst* GII);
+    void emitLscIntrinsicStore(llvm::GenIntrinsicInst* GII);
+
+    void emitLSCFence(llvm::GenIntrinsicInst* inst);
+    void emitLSC2DBlockRead(llvm::GenIntrinsicInst* inst);
+    void emitLSCAtomic(llvm::GenIntrinsicInst* inst);
+    void emitLSCIntrinsic(llvm::GenIntrinsicInst* GII);
+    void emitLSCLoad(
+        llvm::Instruction* inst,
+        CVariable* dst,
+        CVariable* offset,
+        unsigned elemSize,
+        unsigned numElems,
+        unsigned blockOffset,
+        ResourceDescriptor* resource,
+        LSC_ADDR_SIZE addr_size,
+        LSC_DATA_ORDER data_order,
+        int immOffset);
+    void emitLSCLoad(
+        LSC_CACHE_OPTS cacheOpts,
+        CVariable* dst,
+        CVariable* offset,
+        unsigned elemSize,
+        unsigned numElems,
+        unsigned blockOffset,
+        ResourceDescriptor* resource,
+        LSC_ADDR_SIZE addr_size,
+        LSC_DATA_ORDER data_order,
+        int immOffset);
+    void emitLSCStore(
+        llvm::Instruction* inst,
+        CVariable* src,
+        CVariable* offset,
+        unsigned elemSize,
+        unsigned numElems,
+        unsigned blockOffset,
+        ResourceDescriptor* resource,
+        LSC_ADDR_SIZE addr_size,
+        LSC_DATA_ORDER data_order,
+        int immOffset);
+    void emitLSCStore(
+        LSC_CACHE_OPTS cacheOpts,
+        CVariable* src,
+        CVariable* offset,
+        unsigned elemSize,
+        unsigned numElems,
+        unsigned blockOffset,
+        ResourceDescriptor* resource,
+        LSC_ADDR_SIZE addr_size,
+        LSC_DATA_ORDER data_order,
+        int immOffset);
+    ////////////////////////////////////////////////////////////////////
+    // NOTE: for vector load/stores instructions pass the
+    // optional instruction argument checks additional constraints
+    static Tristate shouldGenerateLSCQuery(
+        const CodeGenContext& Ctx,
+        llvm::Instruction* vectorLdStInst = nullptr,
+        SIMDMode Mode = SIMDMode::UNKNOWN);
+    bool shouldGenerateLSC(llvm::Instruction* vectorLdStInst = nullptr);
+    bool forceCacheCtrl(llvm::Instruction* vectorLdStInst = nullptr);
+    uint32_t totalBytesToStoreOrLoad(llvm::Instruction* vectorLdStInst);
+    void emitsrnd(llvm::GenIntrinsicInst* GII);
+    void emitStaticConstantPatchValue(
+        llvm::StaticConstantPatchIntrinsic* staticConstantPatch32);
     // Debug Built-Ins
     void emitStateRegID(uint32_t BitStart, uint32_t BitEnd);
     void emitThreadPause(llvm::GenIntrinsicInst* inst);
@@ -452,6 +589,11 @@ public:
     void emitDebugPlaceholder(llvm::GenIntrinsicInst* I);
     void emitDummyInst(llvm::GenIntrinsicInst* GII);
     void emitImplicitArgIntrinsic(llvm::GenIntrinsicInst* I);
+    void emitStoreImplBufferPtr(llvm::GenIntrinsicInst* I);
+    void emitStoreLocalIdBufferPtr(llvm::GenIntrinsicInst* I);
+    void emitLoadImplBufferPtr(llvm::GenIntrinsicInst* I);
+    void emitLoadLocalIdBufferPtr(llvm::GenIntrinsicInst* I);
+
 
     std::pair<llvm::Value*, llvm::Value*> getPairOutput(llvm::Value*) const;
 
@@ -517,7 +659,7 @@ public:
     CVariable* GetExecutionMask(CVariable* &vecMaskVar);
     CVariable* GetHalfExecutionMask();
     CVariable* GetDispatchMask();
-    CVariable* UniformCopy(CVariable* var);
+    CVariable* UniformCopy(CVariable* var, bool doSub = false);
     CVariable* UniformCopy(CVariable* var, CVariable*& LaneOffset, CVariable* eMask = nullptr, bool doSub = false);
 
     // generate loop header to process sample instruction with varying resource/sampler
@@ -567,8 +709,8 @@ public:
     /// return true if succeeds, false otherwise.
     bool setCurrentShader(llvm::Function* F);
 
-    /// check if the dummy kernel requires compilation
-    bool compileSymbolTableKernel(llvm::Function* F);
+    /// check if symbol table is needed
+    bool isSymbolTableRequired(llvm::Function* F);
 
     // Arithmetic operations with constant folding
     // Src0 and Src1 are the input operands
@@ -617,8 +759,8 @@ public:
 
     llvm::DominatorTree* m_pDT = nullptr;
     static char ID;
-    inline void ContextSwitchPayloadSection();
-    inline void ContextSwitchShaderBody();
+    inline void ContextSwitchPayloadSection(bool first = true);
+    inline void ContextSwitchShaderBody(bool last = true);
 
 private:
     uint m_labelForDMaskJmp;
@@ -753,6 +895,24 @@ private:
     CVariable* prepareAddressForUniform(
         CVariable* AddrVar, uint32_t EltBytes, uint32_t NElts, uint32_t ExecSz, e_alignment Align);
     CVariable* prepareDataForUniform(CVariable* DataVar, uint32_t ExecSz, e_alignment Align);
+    // sub-function of vector load/store
+    void emitLSCVectorLoad_subDW(
+        LSC_CACHE_OPTS cacheOpts, bool UseA32,
+        ResourceDescriptor& Resource, CVariable* Dest, CVariable* Offset, int ImmOffset,
+        uint32_t NumElts, uint32_t EltBytes, int Align);
+    void emitLSCVectorLoad_uniform(
+        LSC_CACHE_OPTS cacheOpts, bool UseA32,
+        ResourceDescriptor& Resource, CVariable* Dest, CVariable* Offset, int ImmOffset,
+        uint32_t NumElts, uint32_t EltBytes, int Align, uint32_t Addrspace);
+    void emitLSCVectorStore_subDW(
+        LSC_CACHE_OPTS cacheOpts, bool UseA32,
+        ResourceDescriptor& Resource, CVariable* StoreVar, CVariable* Offset, int ImmOffset,
+        uint32_t NumElts, uint32_t EltBytes, int Align);
+    void emitLSCVectorStore_uniform(
+        LSC_CACHE_OPTS cacheOpts, bool UseA32,
+        ResourceDescriptor& Resource, CVariable* StoreVar, CVariable* Offset, int ImmOffset,
+        uint32_t NumElts, uint32_t EltBytes, int Align);
+    LSC_FENCE_OP getLSCMemoryFenceOp(bool IsGlobalMemFence, bool InvalidateL1) const;
     bool m_isDuplicate;
     CVariable* m_tmpDest = nullptr;
 

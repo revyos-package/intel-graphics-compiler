@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 #include "Timer.h"
 #include "G4_Opcode.h"          // temporarily add to support G4_MAX_SRCS == 3
 #include "DebugInfo.h"
+#include "PlatformInfo.h"
 #include "IGC/common/StringMacros.hpp"
 
 #include <cstring>
@@ -34,14 +35,15 @@ SPDX-License-Identifier: MIT
 static std::string makePlatformsString()
 {
     int n = 0;
-    auto platforms = getGenxAllPlatforms(&n);
+    auto platforms = vISA::PlatformInfo::getGenxAllPlatforms(&n);
     std::stringstream ss;
     for (int i = 0; i < n; i++) {
-        const char * const*names = getGenxPlatformStrings(platforms[i]);
         if (i > 0) {
             ss << ", ";
         }
-        ss << (names[0] ? names[0] : "???");
+        const char * name = vISA::PlatformInfo::getGenxPlatformString(platforms[i]);
+        assert(name);
+        ss << name;
     }
     return ss.str();
 }
@@ -73,7 +75,7 @@ bool Options::parseOptions(int argc, const char* argv[])
 
     for (int i = startPos; i < argc; i++)
     {
-        if (argv[i] == NULL)
+        if (argv[i] == nullptr)
         {
             std::cerr << "INTERNAL ERROR: nullptr argv element\n";
             return false;
@@ -284,16 +286,16 @@ bool Options::parseOptions(int argc, const char* argv[])
             return false;
         }
 
-        int status = SetVisaPlatform(platformStr);
-        if (status != VISA_SUCCESS) {
+        TARGET_PLATFORM platform = vISA::PlatformInfo::getVisaPlatformFromStr(platformStr);
+        if (platform == GENX_NONE) {
             std::cerr << platformStr << ": unrecognized platform string\n" <<
                 "supported platforms are: " << makePlatformsString() << "\n";
             return false;
         }
-        m_vISAOptions.setBool(vISA_PlatformIsSet, true);   //platformIsSet = true;
+        m_vISAOptions.setUint32(vISA_PlatformSet, platform);
         if (GetStepping() == Step_A)
         {
-            if (getGenxPlatform() == GENX_TGLLP)
+            if (platform == GENX_TGLLP)
             {
                 m_vISAOptions.setBool(vISA_HasEarlyGRFRead, true);
             }
@@ -325,43 +327,32 @@ bool Options::parseOptions(int argc, const char* argv[])
         m_vISAOptions.setUint32(vISA_SWSBTokenBarrier, 0);
     }
 
-#if (defined(_DEBUG) || defined(_INTERNAL))
-    // Dump all vISA options
     if (m_vISAOptions.getBool(vISA_dumpVISAOptionsAll)) {
         dump();
     }
-#endif
+
     return true;
 }
 
 void Options::showUsage(std::ostream& output)
 {
     output << "USAGE: GenX_IR <InputFilename.isa> {Option List}\n";
-    output << "Converts a CISA file into Gen binary or assembly\n";
+    output << "Converts a vISA assembly or binary file into Gen binary or assembly\n";
     output << "Options:\n";
 #ifndef DLL_MODE
-    output << std::setw(50) << std::left << "    -platform PLT"
-           << std::setw(60) << "- Gen platform to use (required)\n";
-    output << std::setw(64) << "supported platforms are: " << makePlatformsString() << "\n";
-
-    output << std::setw(50) << "    -binary"
-           << std::setw(60) << "- Emit the binary code (CISA binary .isa and GEN bits as .dat).\n";
+    output <<
+        "    -platform PLT                   - Gen platform to use (required)\n"
+        "        supported platforms are: " << makePlatformsString() << "\n"
+        "    -binary                         - Emit the binary code (CISA binary .isa and GEN bits as .dat).\n";
 #endif
-    output << std::setw(50) << "    -output"
-           << std::setw(60) << "- Emit GEN assembly code to a file (.asm).\n";
-    output << std::setw(50) << "    -dumpcommonisa"
-        << std::setw(60) << "- Emit CISA assembly (.visaasm).\n";
-    output << std::setw(50) << "    -noschedule"
-           << std::setw(60) << "- Turn off code scheduling.\n";
-    output << std::setw(50) << "    -nocompaction"
-           << std::setw(60) << "- Turn off binary compaction.\n";
-    output << "    -...\n";
-    output << "\n";
-    output << "USAGE: GenX_IR <InputFilename.visaasm> {Option List}\n";
-    output << "Converting a CISA assembly file into CISA binary file\n";
-    output << "Options:\n";
-    output << std::setw(50) << "    -outputCisaBinaryName <CISABinaryName>"
-           << std::setw(60) << "- name for the CISA binary file.\n";
+    output <<
+        "    -output                         - Emit GEN assembly code to a file (.asm).\n"
+        "    -dumpcommonisa                  - Emit CISA assembly (.visaasm).\n"
+        "    -noschedule                     - Turn off code scheduling.\n"
+        "    -nocompaction                   - Turn off binary compaction.\n"
+        "    -outputCisaBinaryName <PATH>    - name for the CISA binary file.\n"
+        "    -... many more; use -dumpVisaOptionsAll\n"
+        "\n";
 }
 
 // This converts enum vISA_option to "vISA_option" so we can print it.
@@ -538,7 +529,8 @@ std::string Options::getFullArgString() const
     // This is for igc. When igc invokes vISA, it sets options
     // via setOption() api instead of options string, thus leave
     // argString empty. Here, we re-generate this options strings
-    // (This is for debugging)
+    //
+    // If a flag has no name (it happens), skip it!
     for (int i = vISA_OPTIONS_UNINIT + 1; i < vISA_NUM_OPTIONS; ++i)
     {
         vISAOptions o = (vISAOptions)i;
@@ -551,30 +543,53 @@ std::string Options::getFullArgString() const
                 {
                     // Boolean option means the reverse of the default!
                     // (Probably should avoid such reverse handling)
-                    args << m_vISAOptions.getArgStr(o) << " ";
+                    const char* argName = m_vISAOptions.getArgStr(o);
+                    if (argName && argName[0] != 0)
+                    {
+                        args << argName << " ";
+                    }
                 }
                 break;
             case ET_INT32:
-                args << m_vISAOptions.getArgStr(o) << " "
-                    << m_vISAOptions.getUint32(o) << " ";
+            {
+                const char* argName = m_vISAOptions.getArgStr(o);
+                if (argName && argName[0] != 0)
+                {
+                    args << argName << " " << m_vISAOptions.getUint32(o) << " ";
+                }
                 break;
+            }
             case ET_INT64:
-                args << m_vISAOptions.getArgStr(o) << " "
-                    << m_vISAOptions.getUint64(o) << " ";
+            {
+                const char* argName = m_vISAOptions.getArgStr(o);
+                if (argName && argName[0] != 0)
+                {
+                    args << argName << " " << m_vISAOptions.getUint64(o) << " ";
+                }
                 break;
+            }
             case ET_2xINT32:
             {
                 uint32_t lo32, hi32;
                 uint64_t val = m_vISAOptions.getUint64(o);
                 lo32 = (uint32_t)val;
                 hi32 = (uint32_t)(val >> 32);
-                args << m_vISAOptions.getArgStr(o) << " "
-                    << hi32 << " " << lo32 << " ";
+
+                const char* argName = m_vISAOptions.getArgStr(o);
+                if (argName && argName[0] != 0)
+                {
+                    args << argName << " " << hi32 << " " << lo32 << " ";
+                }
             }
             break;
             case ET_CSTR:
             {
-                args << m_vISAOptions.getArgStr(o) << " ";
+                const char* argName = m_vISAOptions.getArgStr(o);
+                if (!argName || argName[0] == 0)
+                {
+                    break;
+                }
+                args << argName << " ";
                 const char *sval = m_vISAOptions.getCstr(o);
                 // Careful not to emit empty strings
                 // ... -string_opt   -next_opt

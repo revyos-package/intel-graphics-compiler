@@ -35,6 +35,10 @@ SPDX-License-Identifier: MIT
 
 #include "GenX.h"
 #include "GenXUtil.h"
+#include "GenXRegionUtils.h"
+
+#include "vc/Support/BackendConfig.h"
+#include "vc/Utils/GenX/GlobalVariable.h"
 
 #include "Probe/Assertion.h"
 
@@ -130,6 +134,7 @@ void initializeGenXGlobalValueLoweringPass(PassRegistry &);
 
 INITIALIZE_PASS_BEGIN(GenXGlobalValueLowering, "GenXGlobalValueLowering",
                       "GenXGlobalValueLowering", false, false)
+INITIALIZE_PASS_DEPENDENCY(GenXBackendConfig)
 INITIALIZE_PASS_END(GenXGlobalValueLowering, "GenXGlobalValueLowering",
                     "GenXGlobalValueLowering", false, false)
 
@@ -140,15 +145,17 @@ ModulePass *llvm::createGenXGlobalValueLoweringPass() {
 
 void GenXGlobalValueLowering::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
+  AU.addRequired<GenXBackendConfig>();
 }
 
 bool GenXGlobalValueLowering::runOnModule(Module &M) {
   DL = &M.getDataLayout();
+  auto &&BECfg = getAnalysis<GenXBackendConfig>();
   for (auto &GV : M.globals())
-    if (genx::isRealGlobalVariable(GV))
+    if (vc::isRealGlobalVariable(GV))
       fillWorkListForGV(GV);
   for (auto &F : M)
-    if (F.hasAddressTaken())
+    if (vc::isIndirect(F) && !BECfg.directCallsOnly())
       fillWorkListForGV(F);
 
   if (WorkList.empty())
@@ -197,7 +204,7 @@ static Instruction *buildGaddr(IRBuilder<> &Builder, GlobalValue &GV) {
 void GenXGlobalValueLowering::fillWorkListForGVInstUse(Use &GVUse) {
   auto *Usr = cast<Instruction>(GVUse.getUser());
   auto *ConstWithGV = cast<Constant>(GVUse.get());
-  IGC_ASSERT_MESSAGE(GenXIntrinsic::getAnyIntrinsicID(Usr) !=
+  IGC_ASSERT_MESSAGE(vc::getAnyIntrinsicID(Usr) !=
                          GenXIntrinsic::genx_gaddr,
                      "llvm.gaddr must be inserted by this pass, but someone "
                      "inserted it before");

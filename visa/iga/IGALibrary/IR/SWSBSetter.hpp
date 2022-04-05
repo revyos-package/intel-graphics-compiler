@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 #include "Operand.hpp"
 #include "../ErrorHandler.hpp"
 #include "RegDeps.hpp"
+#include <limits>
 
 namespace iga
 {
@@ -69,6 +70,10 @@ namespace iga
             else
                 m_swsbMode = k.getModel().getSWSBEncodeMode();
 
+            if (m_swsbMode == SWSB_ENCODE_MODE::FourDistPipeReduction
+                ) {
+                m_LatencyLong64Pipe = 12;
+            }
 
             m_DB = new DepSetBuilder(k.getModel());
             m_buckets = new Bucket[m_DB->getTOTAL_BUCKETS()];
@@ -88,6 +93,9 @@ namespace iga
         }
 
         void run();
+
+        // getNumOfDistPipe - get number of in-order distance pipes of the given mode
+        static uint32_t getNumOfDistPipe(SWSB_ENCODE_MODE mode);
 
     private:
         // postProcess - last step of "run"
@@ -138,12 +146,47 @@ namespace iga
         // get number of dist pipe according to SWSB_ENCODE_MODE
         uint32_t getNumOfDistPipe();
 
+        // addRMWDependencyIfReqruied - add read dependnecy to input DepSet if the instruction has RMW
+        // behavior, which is, has byte type dst
+        // XeHPC+ feature
+        void addRMWDependencyIfReqruied(DepSet& input, DepSet& output);
+
+        // add swsb into instruction, insert sync if the added swsb is not compatible
+        // with the existed swsb in the inst
+        void addSWSBToInst(Instruction& inst, const SWSB& swsb,
+                           Block& block, InstListIterator inst_it);
+
+        /// ------------ HW Workaround Information ------------ ///
+        // MathWAInfo: For a math instruction, when the following instruction has different
+        // predication to the math, should assume the math taking the entire GRF in it's
+        // dst no matter the access region and channels are.
+        struct MathWAInfo {
+            bool previous_is_math = false;
+            DepSet* dep_set = nullptr;
+            // a special id to identify this DepSet when trying to clean it from buckets
+            const InstIDs math_id = {std::numeric_limits<uint32_t>::max(), 0};
+            Instruction* math_inst = nullptr;
+            SBID math_sbid = {0, true, DEP_TYPE::NONE};
+
+            void reset() {
+                previous_is_math = false;
+                dep_set = nullptr;
+                math_inst = nullptr;
+                math_sbid = {0, true, DEP_TYPE::NONE};
+            }
+        } math_wa_info;
+
+        // When double precision or Math instructions write a register, and the same register is reused by
+        // following instructions going to any pipe, the instruction is considered to occupy the full register
+        // irrespective of sub register number
+        bool needDstReadSuppressionWA(const Instruction& inst);
 
     private:
         const uint32_t MAX_GRF_BUCKETS = 128;
         // Instruction having 64-bit type destination having 14 latency
         // All the other instructions having 10 latency
         int m_LatencyLong64Pipe = 14;
+        int m_LatencyInOrderMath = 18;
         int m_LatencyInOrderPipe = 10;
 
     private:

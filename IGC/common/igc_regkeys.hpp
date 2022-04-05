@@ -33,6 +33,11 @@ struct HashRange
 {
     unsigned long long start;
     unsigned long long end;
+    union
+    {
+        unsigned    m_Value;
+        debugString m_string;
+    };
 };
 
 struct SRegKeyVariableMetaData
@@ -44,6 +49,15 @@ struct SRegKeyVariableMetaData
     };
     std::vector<HashRange> hashes;
     bool m_isSetToNonDefaultValue;
+    bool m_isSet = false;
+    bool IsSet() const
+    {
+        return m_isSet;
+    }
+    void Set()
+    {
+        m_isSet = true;
+    }
     virtual const char* GetName() const = 0;
     virtual unsigned GetDefault() const = 0;
     virtual void SetToNonDefaultValue() = 0;
@@ -98,24 +112,30 @@ struct SRegKeysList
 #include "igc_regkeys.h"
 };
 #undef DECLARE_IGC_REGKEY
-bool CheckHashRange(const std::vector<HashRange>&);
+bool CheckHashRange(SRegKeyVariableMetaData& varname);
 extern SRegKeysList g_RegKeyList;
 #if defined(LINUX_RELEASE_MODE)
 #define IGC_GET_FLAG_VALUE(name)                 \
-  ((CheckHashRange(g_RegKeyList.name.hashes) && g_RegKeyList.name.IsReleaseMode()) ? g_RegKeyList.name.m_Value : g_RegKeyList.name.GetDefault())
+  ((CheckHashRange(g_RegKeyList.name) && g_RegKeyList.name.IsReleaseMode()) ? g_RegKeyList.name.m_Value : g_RegKeyList.name.GetDefault())
+#define IGC_IS_FLAG_SET(name)                    \
+  (CheckHashRange(g_RegKeyList.name) ? g_RegKeyList.name.IsSet() : false)
+#define IGC_GET_FLAG_DEFAULT_VALUE(name)         (g_RegKeyList.name.GetDefault())
 #define IGC_IS_FLAG_ENABLED(name)                (IGC_GET_FLAG_VALUE(name) != 0)
 #define IGC_IS_FLAG_DISABLED(name)               (!IGC_IS_FLAG_ENABLED(name))
 #define IGC_SET_FLAG_VALUE(name, regkeyValue)    (g_RegKeyList.name.m_Value = regkeyValue)
 #define IGC_GET_REGKEYSTRING(name)               \
-  ((CheckHashRange(g_RegKeyList.name.hashes) && g_RegKeyList.name.IsReleaseMode()) ? g_RegKeyList.name.m_string : "")
+  ((CheckHashRange(g_RegKeyList.name) && g_RegKeyList.name.IsReleaseMode()) ? g_RegKeyList.name.m_string : "")
 #else
 #define IGC_GET_FLAG_VALUE(name)                 \
-  (CheckHashRange(g_RegKeyList.name.hashes) ? g_RegKeyList.name.m_Value : g_RegKeyList.name.GetDefault())
+  (CheckHashRange(g_RegKeyList.name) ? g_RegKeyList.name.m_Value : g_RegKeyList.name.GetDefault())
+#define IGC_IS_FLAG_SET(name)                    \
+  (CheckHashRange(g_RegKeyList.name) ? g_RegKeyList.name.IsSet() : false)
+#define IGC_GET_FLAG_DEFAULT_VALUE(name)         (g_RegKeyList.name.GetDefault())
 #define IGC_IS_FLAG_ENABLED(name)                (IGC_GET_FLAG_VALUE(name) != 0)
 #define IGC_IS_FLAG_DISABLED(name)               (!IGC_IS_FLAG_ENABLED(name))
 #define IGC_SET_FLAG_VALUE(name, regkeyValue)    (g_RegKeyList.name.m_Value = regkeyValue)
 #define IGC_GET_REGKEYSTRING(name)               \
-  (CheckHashRange(g_RegKeyList.name.hashes) ? g_RegKeyList.name.m_string : "")
+  (CheckHashRange(g_RegKeyList.name) ? g_RegKeyList.name.m_string : "")
 #endif
 
 #define IGC_REGKEY_OR_FLAG_ENABLED(name, flag) (IGC_IS_FLAG_ENABLED(name) || IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::flag))
@@ -163,6 +183,8 @@ namespace IGC
 #define IGC_IS_FLAG_ENABLED(name)     (IGC::DebugVariable::name##default != 0)
 #define IGC_IS_FLAG_DISABLED(name)    (IGC::DebugVariable::name##default == 0)
 #define IGC_GET_FLAG_VALUE(name)      (IGC::DebugVariable::name##default)
+#define IGC_IS_FLAG_SET(name)         (false)
+#define IGC_GET_FLAG_DEFAULT_VALUE(name) IGC_GET_FLAG_VALUE(name)
 #define IGC_GET_REGKEYSTRING(name)    ("")
 #define IGC_REGKEY_OR_FLAG_ENABLED(name, flag) \
   (IGC_IS_FLAG_ENABLED(name) || IGC::Debug::GetDebugFlag(IGC::Debug::DebugFlag::flag))

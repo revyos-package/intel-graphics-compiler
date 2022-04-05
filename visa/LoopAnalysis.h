@@ -40,33 +40,6 @@ namespace vISA
         bool inProgress = false;
     };
 
-    class Dominator : public Analysis
-    {
-    public:
-        Dominator(G4_Kernel& k) : kernel(k)
-        {
-        }
-
-        ~Dominator()
-        {
-        }
-
-        std::unordered_set<G4_BB*>& getDom(G4_BB*);
-        void dumpDom(std::ostream& os = std::cerr);
-        bool dominates(G4_BB* bb1, G4_BB* bb2);
-
-    private:
-        G4_Kernel& kernel;
-        G4_BB* entryBB = nullptr;
-        std::vector<std::unordered_set<G4_BB*>> Doms;
-
-        void runDOM();
-
-        void reset() override;
-        void run() override;
-        void dump(std::ostream& os = std::cerr) override;
-    };
-
     class ImmDominator : public Analysis
     {
     public:
@@ -79,9 +52,7 @@ namespace vISA
 
         }
 
-        std::vector<G4_BB*>& getImmDom(G4_BB*);
-        G4_BB* getCommonImmDom(const std::unordered_set<G4_BB*>& bbs);
-        G4_BB* InterSect(G4_BB* bb, int i, int k);
+        bool dominates(G4_BB *bb1, G4_BB *bb2);
         void dumpImmDom(std::ostream& os = std::cerr);
         const std::vector<G4_BB*>& getIDoms();
 
@@ -89,10 +60,11 @@ namespace vISA
         G4_Kernel& kernel;
         G4_BB* entryBB = nullptr;
         std::vector<G4_BB*> iDoms;
+        // TODO: Internal data to be removed.
         std::vector<std::vector<G4_BB*>> immDoms;
 
         void runIDOM();
-        void updateImmDom();
+        G4_BB* InterSect(G4_BB* bb, int i, int k);
 
         void reset() override;
         void run() override;
@@ -124,7 +96,6 @@ namespace vISA
 
     // Computes and stores direct references of variables.
     // Indirects references are not computed here.
-    // Doesnt include predicates/condition modifiers.
     class VarReferences : public Analysis
     {
     public:
@@ -135,8 +106,9 @@ namespace vISA
         using Defs = std::vector<std::tuple<G4_INST*, G4_BB*, unsigned int, unsigned int>>;
         using Uses = std::vector<std::tuple<G4_INST*, G4_BB*>>;
 
-        bool isUniqueDef(G4_DstRegRegion* dst);
+        bool isUniqueDef(G4_Operand* dst);
         unsigned int getDefCount(G4_Declare* dcl);
+        unsigned int getUseCount(G4_Declare* dcl);
         const Defs* getDefs(G4_Declare* dcl);
         const Uses* getUses(G4_Declare* dcl);
 
@@ -161,6 +133,7 @@ namespace vISA
         Loop(BackEdge b) : be(b) {}
 
         Loop* parent = nullptr;
+        G4_BB* preHeader = nullptr;
         std::vector<Loop*> immNested;
 
         void addBBToLoopHierarchy(G4_BB* bb);
@@ -188,10 +161,15 @@ namespace vISA
 
         Loop* getInnerMostLoop(const G4_BB* bb);
 
+        std::vector<G4_BB*>& getLoopExits();
+
+        const std::vector<G4_BB*>& getBBs() { return BBs; }
+
     private:
         std::vector<G4_BB*> BBs;
         std::unordered_set<const G4_BB*> BBsLookup;
         BackEdge be;
+        std::vector<G4_BB*> loopExits;
     };
 
     class FuncInfo;
@@ -203,6 +181,7 @@ namespace vISA
 
         std::vector<Loop*> getTopLoops();
         Loop* getInnerMostLoop(const G4_BB*);
+        void computePreheaders();
 
     private:
         std::vector<Loop*> topLoops;
@@ -224,6 +203,7 @@ namespace vISA
         void populateLoop(BackEdge&);
         void computeLoopTree();
         void addLoop(Loop* newLoop, Loop* aParent);
+        G4_BB* getPreheader(Loop* loop);
     };
 }
 

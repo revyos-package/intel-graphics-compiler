@@ -34,6 +34,7 @@ namespace IGC {
         private:
             /// Helpers
             const char* getSuffix() const { return TL->getSuffix(Promote); }
+            Value* getSinglePromotedValueIfExist(Value* OriginalValue);
 
         private:
             // By default, capture all missing instructions!
@@ -55,12 +56,14 @@ namespace IGC {
             /// Memory operators
             ///
 
+            bool visitAllocaInst(AllocaInst& I);
             bool visitLoadInst(LoadInst& I);
             bool visitStoreInst(StoreInst& I);
 
             /// Cast operators
 
             bool visitTruncInst(TruncInst& I);
+            bool visitSExtInst(SExtInst& I);
             bool visitZExtInst(ZExtInst& I);
             bool visitBitCastInst(BitCastInst& I);
 
@@ -69,6 +72,7 @@ namespace IGC {
             bool visitExtractElementInst(ExtractElementInst& I);
             bool visitInsertElementInst(InsertElementInst& I);
             bool visitGenIntrinsicInst(GenIntrinsicInst& I);
+            bool visitLLVMIntrinsicInst(IntrinsicInst& I);
             bool visitCallInst(CallInst& I);
         };
 

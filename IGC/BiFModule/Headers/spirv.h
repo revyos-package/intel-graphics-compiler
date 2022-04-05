@@ -9,6 +9,9 @@ SPDX-License-Identifier: MIT
 #ifndef __SPIRV_H__
 #define __SPIRV_H__
 
+#include "spirv_macros.h"
+#include "spirv_types.h"
+
 /******
  *
  * Mangling Scheme:
@@ -44,29 +47,7 @@ typedef enum
     CmdExecTime = 0x1
 } KernelProfilingInfo_t;
 
-typedef enum
-{
-    CrossDevice = 0,
-    Device      = 1,
-    Workgroup   = 2,
-    Subgroup    = 3,
-    Invocation  = 4
-} Scope_t;
-
-typedef enum
-{
-    Relaxed                = 0x0,
-    Acquire                = 0x2,
-    Release                = 0x4,
-    AcquireRelease         = 0x8,
-    SequentiallyConsistent = 0x10,
-    UniformMemory          = 0x40,
-    SubgroupMemory         = 0x80,
-    WorkgroupMemory        = 0x100,
-    CrossWorkgroupMemory   = 0x200,
-    AtomicCounterMemory    = 0x400,
-    ImageMemory            = 0x800
-} MemorySemantics_t;
+#include "spirv_atomics_common.h"
 
 typedef enum
 {
@@ -164,90 +145,19 @@ typedef size_t uintptr_t;
 #define M_SQRT2       0x1.6a09e667f3bcdp+0
 #define M_SQRT1_2     0x1.6a09e667f3bcdp-1
 
-#if !defined(__USE_KHRONOS_SPIRV_TRANSLATOR__)
-#define SPIRV_OVERLOADABLE
-#define SPIRV_BUILTIN(opcode, old_mangling, new_mangling) \
-    __builtin_spirv_Op##opcode##old_mangling
-#define SPIRV_BUILTIN_NO_OP(opcode, old_mangling, new_mangling) \
-    __builtin_spirv_##opcode##old_mangling
-#define SPIRV_OCL_BUILTIN(func, old_mangling, new_mangling) \
-    __builtin_spirv_OpenCL_##func##old_mangling
-#else
-#define SPIRV_OVERLOADABLE __attribute__((overloadable))
-#define SPIRV_BUILTIN(opcode, old_mangling, new_mangling) \
-    __spirv_##opcode##new_mangling
-#define SPIRV_BUILTIN_NO_OP(opcode, old_mangling, new_mangling) \
-    __spirv_##opcode##new_mangling
-#define SPIRV_OCL_BUILTIN(func, old_mangling, new_mangling) \
-    __spirv_ocl_##func##new_mangling
-#endif
-
 
 #if defined(cl_khr_fp64)
 #define cl_fp64_basic_ops
 #endif // cl_fp64_basic_ops
 
-typedef uchar __bool2 __attribute__((ext_vector_type(2)));
-typedef uchar __bool3 __attribute__((ext_vector_type(3)));
-typedef uchar __bool4 __attribute__((ext_vector_type(4)));
-typedef uchar __bool8 __attribute__((ext_vector_type(8)));
-typedef uchar __bool16 __attribute__((ext_vector_type(16)));
-
-typedef ulong    ImageType_t;
-typedef ulong    Image_t;
-typedef ulong    Sampler_t;
-typedef ulong3   SampledImage_t;
-typedef event_t  Event_t;
-#if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-typedef queue_t Queue_t;
-typedef clk_event_t ClkEvent_t;
-typedef reserve_id_t ReserveId_t;
-typedef pipe int Pipe_t;
-typedef write_only pipe int Pipe_wo_t;
-
-#endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
+typedef char __bool2 __attribute__((ext_vector_type(2)));
+typedef char __bool3 __attribute__((ext_vector_type(3)));
+typedef char __bool4 __attribute__((ext_vector_type(4)));
+typedef char __bool8 __attribute__((ext_vector_type(8)));
+typedef char __bool16 __attribute__((ext_vector_type(16)));
 
 #define INTEL_PIPE_RESERVE_ID_VALID_BIT (1U << 30)
-#define CLK_NULL_RESERVE_ID (__builtin_astype(((void*)(~INTEL_PIPE_RESERVE_ID_VALID_BIT)), reserve_id_t))
-
-// ImageType_t Encoding
-//  Sampeled       & 0x3 << 62
-//      0 = Unknown at compile time
-//      1 = Will be sampled
-//      2 = Will not be sampled
-//  Dimension      & 0x7 << 59
-//      0 = 1D
-//      1 = 2D
-//      2 = 3D
-//      3 = Cube
-//      4 = Rect
-//      5 = Buffer
-//      6 = SubpassData
-//  Depth          & 0x1 << 58
-//      0 == Non-Depth
-//      1 == Depth
-//  Arrayed        & 0x1 << 57
-//      0 == Non-Arrayed
-//      1 == Arrayed
-//  MultiSampled  & 0x1 << 56
-//      0 == Non-Multisampled
-//      1 == Multisampled
-//  AccessQualifer & 0x3 << 54
-//      0 = Read Only
-//      1 = Write Only
-//      2 = Read/Write
-
-typedef enum
-{
-    Dim1D = 0,
-    Dim2D,
-    Dim3D,
-    DimCube,
-    DimRect,
-    DimBuffer,
-    DimSubpassData,
-    DimEnd
-} Dimensionality_t;
+#define CLK_NULL_RESERVE_ID (__builtin_astype(((void*)(~INTEL_PIPE_RESERVE_ID_VALID_BIT)), __spirv_ReserveId))
 
 #define IMAGETYPE_SAMPLED_SHIFT 62
 #define IMAGETYPE_DIM_SHIFT 59
@@ -255,24 +165,6 @@ typedef enum
 #define IMAGETYPE_ARRAYED_SHIFT 57
 #define IMAGETYPE_MULTISAMPLED_SHIFT 56
 #define IMAGETYPE_ACCESSQUALIFER_SHIFT 54
-
-#define DEF_IMAGE_TYPE(SPIRV_IMAGE_TYPE, SHORT_IMAGE_TYPE) \
-typedef struct  SPIRV_IMAGETYPE##_0 SHORT_IMAGE_TYPE##_ro; \
-typedef struct  SPIRV_IMAGETYPE##_1 SHORT_IMAGE_TYPE##_wo; \
-typedef struct  SPIRV_IMAGETYPE##_2 SHORT_IMAGE_TYPE##_rw;
-
-DEF_IMAGE_TYPE(__spirv_Image__void_0_0_0_0_0_0, Img1d)
-DEF_IMAGE_TYPE(__spirv_Image__void_5_0_0_0_0_0, Img1d_buffer)
-DEF_IMAGE_TYPE(__spirv_Image__void_0_0_0_0_0_0, Img1d_array)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_0_0_0_0_0, Img2d)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_0_1_0_0_0, Img2d_array)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_1_0_0_0_0, Img2d_depth)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_1_1_0_0_0, Img2d_array_depth)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_0_0_1_0_0, Img2d_msaa)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_0_1_1_0_0, Img2d_array_msaa)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_1_0_1_0_0, Img2d_msaa_depth)
-DEF_IMAGE_TYPE(__spirv_Image__void_1_1_1_1_0_0, Img2d_array_msaa_depth)
-DEF_IMAGE_TYPE(__spirv_Image__void_2_0_0_0_0_0, Img3d)
 
 // Keep track of SaturatedConversion
 
@@ -310,51 +202,381 @@ uint    SPIRV_OVERLOADABLE SPIRV_BUILTIN_NO_OP(BuiltInSubgroupLocalInvocationId,
 
 // Image Instructions
 //
-struct ImageDummy;
-#define INLINEWA global struct ImageDummy* __dummy
 
-SampledImage_t __builtin_spirv_OpSampledImage_i64_i64_i64(Image_t Image, ImageType_t ImageType, Sampler_t Sampler);
+__spirv_SampledImage_1D SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img1d_ro_i64, )(global Img1d_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_2D SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img2d_ro_i64, )(global Img2d_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_3D SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img3d_ro_i64, )(global Img3d_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_1D_array SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img1d_array_ro_i64, )(global Img1d_array_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_2D_array SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img2d_array_ro_i64, )(global Img2d_array_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_2D_depth SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img2d_depth_ro_i64, )(global Img2d_depth_ro* Image, __spirv_Sampler Sampler);
+__spirv_SampledImage_2D_array_depth SPIRV_OVERLOADABLE SPIRV_BUILTIN(SampledImage, _img2d_array_depth_ro_i64, )(global Img2d_array_depth_ro* Image, __spirv_Sampler Sampler);
 
-uint4  __builtin_spirv_OpImageSampleExplicitLod_v4i32_v3i64_v4i32_i32_f32_i64(SampledImage_t SampledImage, int4 Coordinate, uint ImageOperands, float Lod, INLINEWA);
-uint4  __builtin_spirv_OpImageSampleExplicitLod_v4i32_v3i64_v4f32_i32_f32_i64(SampledImage_t SampledImage, float4 Coordinate, uint ImageOperands, float Lod, INLINEWA);
-float4 __builtin_spirv_OpImageSampleExplicitLod_v4f32_v3i64_v4i32_i32_f32_i64(SampledImage_t SampledImage, int4 Coordinate, uint ImageOperands, float Lod, INLINEWA);
-float4 __builtin_spirv_OpImageSampleExplicitLod_v4f32_v3i64_v4f32_i32_f32_i64(SampledImage_t SampledImage, float4 Coordinate, uint ImageOperands, float Lod, INLINEWA);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_ro_v2f32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_ro_v2i32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_ro_v2f32_i32_f32, _Rint4)(__spirv_SampledImage_2D SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_ro_v2i32_i32_f32, _Rint4)(__spirv_SampledImage_2D SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img3d_ro_v4f32_i32_f32, _Rfloat4)(__spirv_SampledImage_3D SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img3d_ro_v4i32_i32_f32, _Rfloat4)(__spirv_SampledImage_3D SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img3d_ro_v4f32_i32_f32, _Rint4)(__spirv_SampledImage_3D SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img3d_ro_v4i32_i32_f32, _Rint4)(__spirv_SampledImage_3D SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_ro_v4f32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_array SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_ro_v4i32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_array SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_array_ro_v4f32_i32_f32, _Rint4)(__spirv_SampledImage_2D_array SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_array_ro_v4i32_i32_f32, _Rint4)(__spirv_SampledImage_2D_array SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_ro_f32_i32_f32, _Rfloat4)(__spirv_SampledImage_1D SampledImage, float Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_ro_i32_i32_f32, _Rfloat4)(__spirv_SampledImage_1D SampledImage, int Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_ro_f32_i32_f32, _Rint4)(__spirv_SampledImage_1D SampledImage, float Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_ro_i32_i32_f32, _Rint4)(__spirv_SampledImage_1D SampledImage, int Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_array_ro_v2f32_i32_f32, _Rfloat4)(__spirv_SampledImage_1D_array SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_array_ro_v2i32_i32_f32, _Rfloat4)(__spirv_SampledImage_1D_array SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_array_ro_v2f32_i32_f32, _Rint4)(__spirv_SampledImage_1D_array SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_array_ro_v2i32_i32_f32, _Rint4)(__spirv_SampledImage_1D_array SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_depth_ro_v2f32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_depth SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_depth_ro_v2i32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_depth SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_depth_ro_v4f32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_array_depth SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_depth_ro_v4i32_i32_f32, _Rfloat4)(__spirv_SampledImage_2D_array_depth SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_ro_v2f32_i32_v2f32_v2f32, _Rfloat4)(__spirv_SampledImage_2D SampledImage, float2 Coordinate, int ImageOperands, float2 dx, float2 dy);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_ro_v2f32_i32_v2f32_v2f32, _Rint4)(__spirv_SampledImage_2D SampledImage, float2 Coordinate, int ImageOperands, float2 dx, float2 dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img3d_ro_v4f32_i32_v4f32_v4f32, _Rfloat4)(__spirv_SampledImage_3D SampledImage, float4 Coordinate, int ImageOperands, float4 dx, float4 dy);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img3d_ro_v4f32_i32_v4f32_v4f32, _Rint4)(__spirv_SampledImage_3D SampledImage, float4 Coordinate, int ImageOperands, float4 dx, float4 dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_ro_v4f32_i32_v2f32_v2f32, _Rfloat4)(__spirv_SampledImage_2D SampledImage, float4 Coordinate, int ImageOperands, float2 dx, float2 dy);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img2d_array_ro_v4f32_i32_v2f32_v2f32, _Rint4)(__spirv_SampledImage_2D SampledImage, float4 Coordinate, int ImageOperands, float2 dx, float2 dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_ro_f32_i32_f32_f32, _Rfloat4)(__spirv_SampledImage_1D SampledImage, float Coordinate, int ImageOperands, float dx, float dy);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_ro_f32_i32_f32_f32, _Rint4)(__spirv_SampledImage_1D SampledImage, float Coordinate, int ImageOperands, float dx, float dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img1d_array_ro_v2f32_i32_f32_f32, _Rfloat4)(__spirv_SampledImage_1D_array SampledImage, float2 Coordinate, int ImageOperands, float dx, float dy);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4i32_img1d_array_ro_v2f32_i32_f32_f32, _Rint4)(__spirv_SampledImage_1D_array SampledImage, float2 Coordinate, int ImageOperands, float dx, float dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_depth_ro_v2f32_i32_v2f32_v2f32, _Rfloat4)(__spirv_SampledImage_2D_depth SampledImage, float2 Coordinate, int ImageOperands, float2 dx, float2 dy);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f32_img2d_array_depth_ro_v4f32_i32_v2f32_v2f32, _Rfloat4)(__spirv_SampledImage_2D_array_depth SampledImage, float4 Coordinate, int ImageOperands, float2 dx, float2 dy);
 
 #ifdef cl_khr_fp16
-half4 __builtin_spirv_OpImageSampleExplicitLod_v4f16_v3i64_v4i32_i32_f32_i64( SampledImage_t SampledImage, int4 Coordinate, uint ImageOperands, float Lod , INLINEWA);
-half4 __builtin_spirv_OpImageSampleExplicitLod_v4f16_v3i64_v4f32_i32_f32_i64( SampledImage_t SampledImage, float4 Coordinate, uint ImageOperands, float Lod , INLINEWA);
-void __builtin_spirv_OpImageWrite_i64_i64_v4i32_v4f16_i64(Image_t Image, ImageType_t ImageType, int4 Coordinate, half4 Texel, INLINEWA);
-half4 __builtin_spirv_OpImageRead_v4f16_i64_i64_v4i32_i64( Image_t Image, ImageType_t ImageType, int4 Coordinate , INLINEWA);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img2d_ro_v2f32_i32_f32, _Rhalf4)(__spirv_SampledImage_2D SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img2d_ro_v2i32_i32_f32, _Rhalf4)(__spirv_SampledImage_2D SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img3d_ro_v4f32_i32_f32, _Rhalf4)(__spirv_SampledImage_3D SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img3d_ro_v4i32_i32_f32, _Rhalf4)(__spirv_SampledImage_3D SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img2d_array_ro_v4f32_i32_f32, _Rhalf4)(__spirv_SampledImage_2D_array SampledImage, float4 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img2d_array_ro_v4i32_i32_f32, _Rhalf4)(__spirv_SampledImage_2D_array SampledImage, int4 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img1d_array_ro_v2f32_i32_f32, _Rhalf4)(__spirv_SampledImage_1D_array SampledImage, float2 Coordinate, int ImageOperands, float Lod);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageSampleExplicitLod, _v4f16_img1d_array_ro_v2i32_i32_f32, _Rhalf4)(__spirv_SampledImage_1D_array SampledImage, int2 Coordinate, int ImageOperands, float Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_wo_v2i32_v4f16, )(global Img2d_wo* Image, int2 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_rw_v2i32_v4f16, )(global Img2d_rw* Image, int2 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_wo_v4i32_v4f16, )(global Img3d_wo* Image, int4 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_rw_v4i32_v4f16, )(global Img3d_rw* Image, int4 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_wo_v4i32_v4f16, )(global Img2d_array_wo* Image, int4 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_rw_v4i32_v4f16, )(global Img2d_array_rw* Image, int4 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_wo_i32_v4f16, )(global Img1d_wo* Image, int Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_rw_i32_v4f16, )(global Img1d_rw* Image, int Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_wo_i32_v4f16, )(global Img1d_buffer_wo* Image, int Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_rw_i32_v4f16, )(global Img1d_buffer_rw* Image, int Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_wo_v2i32_v4f16, )(global Img1d_array_wo* Image, int2 Coordinate, half4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_rw_v2i32_v4f16, )(global Img1d_array_rw* Image, int2 Coordinate, half4 Texel);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img2d_ro_v2i32, _Rhalf4)(global Img2d_ro* Image, int2 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img2d_rw_v2i32, _Rhalf4)(global Img2d_rw* Image, int2 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img3d_ro_v4i32, _Rhalf4)(global Img3d_ro* Image, int4 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img3d_rw_v4i32, _Rhalf4)(global Img3d_rw* Image, int4 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img2d_array_ro_v4i32, _Rhalf4)(global Img2d_array_ro* Image, int4 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img2d_array_rw_v4i32, _Rhalf4)(global Img2d_array_rw* Image, int4 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_ro_i32, _Rhalf4)(global Img1d_ro* Image, int Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_rw_i32, _Rhalf4)(global Img1d_rw* Image, int Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_buffer_ro_i32, _Rhalf4)(global Img1d_buffer_ro* Image, int Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_buffer_rw_i32, _Rhalf4)(global Img1d_buffer_rw* Image, int Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_array_ro_v2i32, _Rhalf4)(global Img1d_array_ro* Image, int2 Coordinate);
+half4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f16_img1d_array_rw_v2i32, _Rhalf4)(global Img1d_array_rw* Image, int2 Coordinate);
 #endif // cl_khr_fp16
 
 // Pipe in image type information.
-uint4  __builtin_spirv_OpImageRead_v4i32_i64_i64_v4i32_i64(Image_t Image, ImageType_t ImageType, int4 Coordinate, INLINEWA);
-uint4  __builtin_spirv_OpImageRead_v4i32_i64_i64_v4f32_i64(Image_t Image, ImageType_t ImageType, float4 Coordinate, INLINEWA);
-float4 __builtin_spirv_OpImageRead_v4f32_i64_i64_v4i32_i64(Image_t Image, ImageType_t ImageType, int4 Coordinate, INLINEWA);
-float4 __builtin_spirv_OpImageRead_v4f32_i64_i64_v4f32_i64(Image_t Image, ImageType_t ImageType, float4 Coordinate, INLINEWA);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_ro_v2i32, _Rint4)(global Img2d_ro* Image, int2 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_ro_v2i32, _Rfloat4)(global Img2d_ro* Image, int2 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_rw_v2i32, _Rint4)(global Img2d_rw* Image, int2 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_rw_v2i32, _Rfloat4)(global Img2d_rw* Image, int2 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img3d_ro_v4i32, _Rint4)(global Img3d_ro* Image, int4 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img3d_ro_v4i32, _Rfloat4)(global Img3d_ro* Image, int4 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img3d_rw_v4i32, _Rint4)(global Img3d_rw* Image, int4 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img3d_rw_v4i32, _Rfloat4)(global Img3d_rw* Image, int4 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_array_ro_v4i32, _Rint4)(global Img2d_array_ro* Image, int4 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_array_ro_v4i32, _Rfloat4)(global Img2d_array_ro* Image, int4 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_array_rw_v4i32, _Rint4)(global Img2d_array_rw* Image, int4 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_array_rw_v4i32, _Rfloat4)(global Img2d_array_rw* Image, int4 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_ro_i32, _Rint4)(global Img1d_ro* Image, int Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_ro_i32, _Rfloat4)(global Img1d_ro* Image, int Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_rw_i32, _Rint4)(global Img1d_rw* Image, int Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_rw_i32, _Rfloat4)(global Img1d_rw* Image, int Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_buffer_ro_i32, _Rint4)(global Img1d_buffer_ro* Image, int Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_buffer_ro_i32, _Rfloat4)(global Img1d_buffer_ro* Image, int Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_buffer_rw_i32, _Rint4)(global Img1d_buffer_rw* Image, int Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_buffer_rw_i32, _Rfloat4)(global Img1d_buffer_rw* Image, int Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_array_ro_v2i32, _Rint4)(global Img1d_array_ro* Image, int2 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_array_ro_v2i32, _Rfloat4)(global Img1d_array_ro* Image, int2 Coordinate);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img1d_array_rw_v2i32, _Rint4)(global Img1d_array_rw* Image, int2 Coordinate);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img1d_array_rw_v2i32, _Rfloat4)(global Img1d_array_rw* Image, int2 Coordinate);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_depth_ro_v2i32, _Rfloat)(global Img2d_depth_ro* Image, int2 Coordinate);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_depth_rw_v2i32, _Rfloat)(global Img2d_depth_rw* Image, int2 Coordinate);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_array_depth_ro_v4i32, _Rfloat)(global Img2d_array_depth_ro* Image, int4 Coordinate);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_array_depth_rw_v4i32, _Rfloat)(global Img2d_array_depth_rw* Image, int4 Coordinate);
 
-float4 __builtin_spirv_OpImageRead_v4f32_i64_i64_v4i32_i32_i32_i64( Image_t Image, ImageType_t ImageType, int4 Coordinate, uint ImageOperands, uint Sample, INLINEWA);
-float __builtin_spirv_OpImageRead_f32_i64_i64_v4i32_i32_i32_i64( Image_t Image, ImageType_t ImageType, int4 Coordinate, uint ImageOperands, uint Sample, INLINEWA);
-uint4 __builtin_spirv_OpImageRead_v4i32_i64_i64_v4i32_i32_i32_i64( Image_t Image, ImageType_t ImageType, int4 Coordinate, uint ImageOperands, uint Sample, INLINEWA);
+// Image Read MSAA
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_msaa_ro_v2i32_i32_i32, _Rint4)(global Img2d_msaa_ro* Image, int2 Coordinate, int ImageOperands, int Sample);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_msaa_ro_v2i32_i32_i32, _Rfloat4)(global Img2d_msaa_ro* Image, int2 Coordinate, int ImageOperands, int Sample);
+int4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4i32_img2d_array_msaa_ro_v4i32_i32_i32, _Rint4)(global Img2d_array_msaa_ro* Image, int4 Coordinate, int ImageOperands, int Sample);
+float4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _v4f32_img2d_array_msaa_ro_v4i32_i32_i32, _Rfloat4)(global Img2d_array_msaa_ro* Image, int4 Coordinate, int ImageOperands, int Sample);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_msaa_depth_ro_v2i32_i32_i32, _Rfloat)(global Img2d_msaa_depth_ro* Image, int2 Coordinate, int ImageOperands, int Sample);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageRead, _f32_img2d_array_msaa_depth_ro_v4i32_i32_i32, _Rfloat)(global Img2d_array_msaa_depth_ro* Image, int4 Coordinate, int ImageOperands, int Sample);
 
-void __builtin_spirv_OpImageWrite_i64_i64_v4i32_v4i32_i64(Image_t Image, ImageType_t ImageType, int4 Coordinate, uint4 Texel, INLINEWA);
-void __builtin_spirv_OpImageWrite_i64_i64_v4i32_v4f32_i64(Image_t Image, ImageType_t ImageType, int4 Coordinate, float4 Texel, INLINEWA);
+// Image Write
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_wo_v2i32_v4i32, )(global Img2d_wo* Image, int2 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_wo_v2i32_v4f32, )(global Img2d_wo* Image, int2 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_rw_v2i32_v4i32, )(global Img2d_rw* Image, int2 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_rw_v2i32_v4f32, )(global Img2d_rw* Image, int2 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_wo_v4i32_v4i32, )(global Img2d_array_wo* Image, int4 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_wo_v4i32_v4f32, )(global Img2d_array_wo* Image, int4 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_rw_v4i32_v4i32, )(global Img2d_array_rw* Image, int4 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_rw_v4i32_v4f32, )(global Img2d_array_rw* Image, int4 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_wo_i32_v4i32, )(global Img1d_wo* Image, int Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_wo_i32_v4f32, )(global Img1d_wo* Image, int Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_rw_i32_v4i32, )(global Img1d_rw* Image, int Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_rw_i32_v4f32, )(global Img1d_rw* Image, int Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_wo_i32_v4i32, )(global Img1d_buffer_wo* Image, int Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_wo_i32_v4f32, )(global Img1d_buffer_wo* Image, int Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_rw_i32_v4i32, )(global Img1d_buffer_rw* Image, int Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_buffer_rw_i32_v4f32, )(global Img1d_buffer_rw* Image, int Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_wo_v2i32_v4i32, )(global Img1d_array_wo* Image, int2 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_wo_v2i32_v4f32, )(global Img1d_array_wo* Image, int2 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_rw_v2i32_v4i32, )(global Img1d_array_rw* Image, int2 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_rw_v2i32_v4f32, )(global Img1d_array_rw* Image, int2 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_depth_wo_v2i32_f32, )(global Img2d_depth_wo* Image, int2 Coordinate, float Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_depth_rw_v2i32_f32, )(global Img2d_depth_rw* Image, int2 Coordinate, float Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_depth_wo_v4i32_f32, )(global Img2d_array_depth_wo* Image, int4 Coordinate, float Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_depth_rw_v4i32_f32, )(global Img2d_array_depth_rw* Image, int4 Coordinate, float Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_wo_v4i32_v4i32, )(global Img3d_wo* Image, int4 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_wo_v4i32_v4f32, )(global Img3d_wo* Image, int4 Coordinate, float4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_rw_v4i32_v4i32, )(global Img3d_rw* Image, int4 Coordinate, int4 Texel);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_rw_v4i32_v4f32, )(global Img3d_rw* Image, int4 Coordinate, float4 Texel);
 
-uint  __builtin_spirv_OpImageQueryFormat_i64_i64(Image_t Image, INLINEWA);
-uint  __builtin_spirv_OpImageQueryOrder_i64_i64(Image_t Image, INLINEWA);
+// Image Write LoD
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_wo_v2i32_v4i32_i32_i32, )(global Img2d_wo* Image, int2 Coordinate, int4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_wo_v2i32_v4f32_i32_i32, )(global Img2d_wo* Image, int2 Coordinate, float4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_depth_wo_v2i32_f32_i32_i32, )(global Img2d_depth_wo* Image, int2 Coordinate, float Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_wo_i32_v4i32_i32_i32, )(global Img1d_wo* Image, int Coordinate, int4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_wo_i32_v4f32_i32_i32, )(global Img1d_wo* Image, int Coordinate, float4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_wo_v2i32_v4i32_i32_i32, )(global Img1d_array_wo* Image, int2 Coordinate, int4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img1d_array_wo_v2i32_v4f32_i32_i32, )(global Img1d_array_wo* Image, int2 Coordinate, float4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_wo_v4i32_v4i32_i32_i32, )(global Img2d_array_wo* Image, int4 Coordinate, int4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_wo_v4i32_v4f32_i32_i32, )(global Img2d_array_wo* Image, int4 Coordinate, float4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img2d_array_depth_wo_v4i32_f32_i32_i32, )(global Img2d_array_depth_wo* Image, int4 Coordinate, float Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_wo_v4i32_v4i32_i32_i32, )(global Img3d_wo* Image, int4 Coordinate, int4 Texel, int ImageOperands, int Lod);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageWrite, _img3d_wo_v4i32_v4f32_i32_i32, )(global Img3d_wo* Image, int4 Coordinate, float4 Texel, int ImageOperands, int Lod);
 
-uint  __builtin_spirv_OpImageQuerySizeLod_i32_i64_i64_i32_i64(Image_t Image, ImageType_t ImageType, int Lod, INLINEWA);
-uint2 __builtin_spirv_OpImageQuerySizeLod_v2i32_i64_i64_i32_i64(Image_t Image, ImageType_t ImageType, int Lod, INLINEWA);
-uint3 __builtin_spirv_OpImageQuerySizeLod_v3i32_i64_i64_i32_i64(Image_t Image, ImageType_t ImageType, int Lod, INLINEWA);
-uint4 __builtin_spirv_OpImageQuerySizeLod_v4i32_i64_i64_i32_i64(Image_t Image, ImageType_t ImageType, int Lod, INLINEWA);
+// Image Query Format
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_ro, )(global Img2d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_wo, )(global Img2d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_rw, )(global Img2d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img3d_ro, )(global Img3d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img3d_wo, )(global Img3d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img3d_rw, )(global Img3d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_ro, )(global Img1d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_wo, )(global Img1d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_rw, )(global Img1d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_buffer_ro, )(global Img1d_buffer_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_buffer_wo, )(global Img1d_buffer_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_buffer_rw, )(global Img1d_buffer_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_array_ro, )(global Img1d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_array_wo, )(global Img1d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img1d_array_rw, )(global Img1d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_ro, )(global Img2d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_wo, )(global Img2d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_rw, )(global Img2d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_depth_ro, )(global Img2d_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_depth_wo, )(global Img2d_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_depth_rw, )(global Img2d_depth_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_depth_ro, )(global Img2d_array_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_depth_wo, )(global Img2d_array_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_depth_rw, )(global Img2d_array_depth_rw* Image);
 
-uint  __builtin_spirv_OpImageQuerySize_i32_i64_i64_i64(Image_t Image, ImageType_t ImageType, INLINEWA);
-uint2 __builtin_spirv_OpImageQuerySize_v2i32_i64_i64_i64(Image_t Image, ImageType_t ImageType, INLINEWA);
-uint3 __builtin_spirv_OpImageQuerySize_v3i32_i64_i64_i64(Image_t Image, ImageType_t ImageType, INLINEWA);
-uint4  __builtin_spirv_OpImageQuerySize_v4i32_i64_i64_i64(Image_t Image, ImageType_t ImageType, INLINEWA);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_msaa_ro, )(global Img2d_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_msaa_ro, )(global Img2d_array_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_msaa_depth_ro, )(global Img2d_msaa_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryFormat, _img2d_array_msaa_depth_ro, )(global Img2d_array_msaa_depth_ro* Image);
 
-uint __builtin_spirv_OpImageQueryLevels_i64_i64(Image_t Image, INLINEWA);
-uint __builtin_spirv_OpImageQuerySamples_i64_i64(Image_t Image, INLINEWA);
+// Image Query Order
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_ro, )(global Img2d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_wo, )(global Img2d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_rw, )(global Img2d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img3d_ro, )(global Img3d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img3d_wo, )(global Img3d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img3d_rw, )(global Img3d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_ro, )(global Img1d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_wo, )(global Img1d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_rw, )(global Img1d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_buffer_ro, )(global Img1d_buffer_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_buffer_wo, )(global Img1d_buffer_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_buffer_rw, )(global Img1d_buffer_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_array_ro, )(global Img1d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_array_wo, )(global Img1d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img1d_array_rw, )(global Img1d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_ro, )(global Img2d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_wo, )(global Img2d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_rw, )(global Img2d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_depth_ro, )(global Img2d_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_depth_wo, )(global Img2d_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_depth_rw, )(global Img2d_depth_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_depth_ro, )(global Img2d_array_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_depth_wo, )(global Img2d_array_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_depth_rw, )(global Img2d_array_depth_rw* Image);
+
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_msaa_ro, )(global Img2d_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_msaa_ro, )(global Img2d_array_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_msaa_depth_ro, )(global Img2d_msaa_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryOrder, _img2d_array_msaa_depth_ro, )(global Img2d_array_msaa_depth_ro* Image);
+
+// Image Query Size
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_ro, _Rint)(global Img1d_ro* Image);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_wo, _Rint)(global Img1d_wo* Image);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_rw, _Rint)(global Img1d_rw* Image);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_buffer_ro, _Rint)(global Img1d_buffer_ro* Image);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_buffer_wo, _Rint)(global Img1d_buffer_wo* Image);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i32_img1d_buffer_rw, _Rint)(global Img1d_buffer_rw* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img1d_array_ro, _Rint2)(global Img1d_array_ro* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img1d_array_wo, _Rint2)(global Img1d_array_wo* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img1d_array_rw, _Rint2)(global Img1d_array_rw* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_ro, _Rint2)(global Img2d_ro* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_wo, _Rint2)(global Img2d_wo* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_rw, _Rint2)(global Img2d_rw* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_depth_ro, _Rint2)(global Img2d_depth_ro* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_depth_wo, _Rint2)(global Img2d_depth_wo* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_depth_rw, _Rint2)(global Img2d_depth_rw* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_ro, _Rint3)(global Img2d_array_ro* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_wo, _Rint3)(global Img2d_array_wo* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_rw, _Rint3)(global Img2d_array_rw* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_depth_ro, _Rint3)(global Img2d_array_depth_ro* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_depth_wo, _Rint3)(global Img2d_array_depth_wo* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_depth_rw, _Rint3)(global Img2d_array_depth_rw* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img3d_ro, _Rint3)(global Img3d_ro* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img3d_wo, _Rint3)(global Img3d_wo* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img3d_rw, _Rint3)(global Img3d_rw* Image);
+
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_msaa_ro, _Rint2)(global Img2d_msaa_ro* Image);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i32_img2d_msaa_depth_ro, _Rint2)(global Img2d_msaa_depth_ro* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_msaa_ro, _Rint3)(global Img2d_array_msaa_ro* Image);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i32_img2d_array_msaa_depth_ro, _Rint3)(global Img2d_array_msaa_depth_ro* Image);
+
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_ro, _Rlong)(global Img1d_ro* Image);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_wo, _Rlong)(global Img1d_wo* Image);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_rw, _Rlong)(global Img1d_rw* Image);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_buffer_ro, _Rlong)(global Img1d_buffer_ro* Image);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_buffer_wo, _Rlong)(global Img1d_buffer_wo* Image);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _i64_img1d_buffer_rw, _Rlong)(global Img1d_buffer_rw* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img1d_array_ro, _Rlong2)(global Img1d_array_ro* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img1d_array_wo, _Rlong2)(global Img1d_array_wo* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img1d_array_rw, _Rlong2)(global Img1d_array_rw* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_ro, _Rlong2)(global Img2d_ro* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_wo, _Rlong2)(global Img2d_wo* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_rw, _Rlong2)(global Img2d_rw* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_depth_ro, _Rlong2)(global Img2d_depth_ro* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_depth_wo, _Rlong2)(global Img2d_depth_wo* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_depth_rw, _Rlong2)(global Img2d_depth_rw* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_ro, _Rlong3)(global Img2d_array_ro* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_wo, _Rlong3)(global Img2d_array_wo* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_rw, _Rlong3)(global Img2d_array_rw* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_depth_ro, _Rlong3)(global Img2d_array_depth_ro* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_depth_wo, _Rlong3)(global Img2d_array_depth_wo* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_depth_rw, _Rlong3)(global Img2d_array_depth_rw* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img3d_ro, _Rlong3)(global Img3d_ro* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img3d_wo, _Rlong3)(global Img3d_wo* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img3d_rw, _Rlong3)(global Img3d_rw* Image);
+
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_msaa_ro, _Rlong2)(global Img2d_msaa_ro* Image);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v2i64_img2d_msaa_depth_ro, _Rlong2)(global Img2d_msaa_depth_ro* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_msaa_ro, _Rlong3)(global Img2d_array_msaa_ro* Image);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySize, _v3i64_img2d_array_msaa_depth_ro, _Rlong3)(global Img2d_array_msaa_depth_ro* Image);
+
+// Image Query Size Lod
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_ro_i32, _Rint)(global Img1d_ro* Image, int Lod);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_wo_i32, _Rint)(global Img1d_wo* Image, int Lod);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_rw_i32, _Rint)(global Img1d_rw* Image, int Lod);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_buffer_ro_i32, _Rint)(global Img1d_buffer_ro* Image, int Lod);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_buffer_wo_i32, _Rint)(global Img1d_buffer_wo* Image, int Lod);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i32_img1d_buffer_rw_i32, _Rint)(global Img1d_buffer_rw* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img1d_array_ro_i32, _Rint2)(global Img1d_array_ro* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img1d_array_wo_i32, _Rint2)(global Img1d_array_wo* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img1d_array_rw_i32, _Rint2)(global Img1d_array_rw* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_ro_i32, _Rint2)(global Img2d_ro* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_wo_i32, _Rint2)(global Img2d_wo* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_rw_i32, _Rint2)(global Img2d_rw* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_depth_ro_i32, _Rint2)(global Img2d_depth_ro* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_depth_wo_i32, _Rint2)(global Img2d_depth_wo* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_depth_rw_i32, _Rint2)(global Img2d_depth_rw* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_ro_i32, _Rint3)(global Img2d_array_ro* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_wo_i32, _Rint3)(global Img2d_array_wo* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_rw_i32, _Rint3)(global Img2d_array_rw* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_depth_ro_i32, _Rint3)(global Img2d_array_depth_ro* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_depth_wo_i32, _Rint3)(global Img2d_array_depth_wo* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_depth_rw_i32, _Rint3)(global Img2d_array_depth_rw* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img3d_ro_i32, _Rint3)(global Img3d_ro* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img3d_wo_i32, _Rint3)(global Img3d_wo* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img3d_rw_i32, _Rint3)(global Img3d_rw* Image, int Lod);
+
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_msaa_ro_i32, _Rint2)(global Img2d_msaa_ro* Image, int Lod);
+int2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i32_img2d_msaa_depth_ro_i32, _Rint2)(global Img2d_msaa_depth_ro* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_msaa_ro_i32, _Rint3)(global Img2d_array_msaa_ro* Image, int Lod);
+int3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i32_img2d_array_msaa_depth_ro_i32, _Rint3)(global Img2d_array_msaa_depth_ro* Image, int Lod);
+
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_ro_i32, _Rlong)(global Img1d_ro* Image, int Lod);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_wo_i32, _Rlong)(global Img1d_wo* Image, int Lod);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_rw_i32, _Rlong)(global Img1d_rw* Image, int Lod);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_buffer_ro_i32, _Rlong)(global Img1d_buffer_ro* Image, int Lod);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_buffer_wo_i32, _Rlong)(global Img1d_buffer_wo* Image, int Lod);
+long SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _i64_img1d_buffer_rw_i32, _Rlong)(global Img1d_buffer_rw* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img1d_array_ro_i32, _Rlong2)(global Img1d_array_ro* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img1d_array_wo_i32, _Rlong2)(global Img1d_array_wo* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img1d_array_rw_i32, _Rlong2)(global Img1d_array_rw* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_ro_i32, _Rlong2)(global Img2d_ro* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_wo_i32, _Rlong2)(global Img2d_wo* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_rw_i32, _Rlong2)(global Img2d_rw* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_depth_ro_i32, _Rlong2)(global Img2d_depth_ro* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_depth_wo_i32, _Rlong2)(global Img2d_depth_wo* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_depth_rw_i32, _Rlong2)(global Img2d_depth_rw* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_ro_i32, _Rlong3)(global Img2d_array_ro* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_wo_i32, _Rlong3)(global Img2d_array_wo* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_rw_i32, _Rlong3)(global Img2d_array_rw* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_depth_ro_i32, _Rlong3)(global Img2d_array_depth_ro* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_depth_wo_i32, _Rlong3)(global Img2d_array_depth_wo* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_depth_rw_i32, _Rlong3)(global Img2d_array_depth_rw* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img3d_ro_i32, _Rlong3)(global Img3d_ro* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img3d_wo_i32, _Rlong3)(global Img3d_wo* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img3d_rw_i32, _Rlong3)(global Img3d_rw* Image, int Lod);
+
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_msaa_ro_i32, _Rlong2)(global Img2d_msaa_ro* Image, int Lod);
+long2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v2i64_img2d_msaa_depth_ro_i32, _Rlong2)(global Img2d_msaa_depth_ro* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_msaa_ro_i32, _Rlong3)(global Img2d_array_msaa_ro* Image, int Lod);
+long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySizeLod, _v3i64_img2d_array_msaa_depth_ro_i32, _Rlong3)(global Img2d_array_msaa_depth_ro* Image, int Lod);
+
+// Image Query Levels
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_ro, )(global Img1d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_wo, )(global Img1d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_rw, )(global Img1d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_ro, )(global Img2d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_wo, )(global Img2d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_rw, )(global Img2d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img3d_ro, )(global Img3d_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img3d_wo, )(global Img3d_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img3d_rw, )(global Img3d_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_array_ro, )(global Img1d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_array_wo, )(global Img1d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img1d_array_rw, )(global Img1d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_ro, )(global Img2d_array_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_wo, )(global Img2d_array_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_rw, )(global Img2d_array_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_depth_ro, )(global Img2d_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_depth_wo, )(global Img2d_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_depth_rw, )(global Img2d_depth_rw* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_depth_ro, )(global Img2d_array_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_depth_wo, )(global Img2d_array_depth_wo* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQueryLevels, _img2d_array_depth_rw, )(global Img2d_array_depth_rw* Image);
+
+// Image Query Samples
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySamples, _img2d_msaa_ro, )(global Img2d_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySamples, _img2d_array_msaa_ro, )(global Img2d_array_msaa_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySamples, _img2d_msaa_depth_ro, )(global Img2d_msaa_depth_ro* Image);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(ImageQuerySamples, _img2d_array_msaa_depth_ro, )(global Img2d_array_msaa_depth_ro* Image);
 
 // Conversion Instructions
 
@@ -3406,12 +3628,24 @@ long3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertUToS, _v3i64_v3i64, _Rlong3)(ul
 long4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertUToS, _v4i64_v4i64, _Rlong4)(ulong4 x);
 long8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertUToS, _v8i64_v8i64, _Rlong8)(ulong8 x);
 long16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertUToS, _v16i64_v16i64, _Rlong16)(ulong16 x);
+short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _f32, _Rshort)(float x);
+short2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _v2f32, _Rshort2)(float2 x);
+short3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _v3f32, _Rshort3)(float3 x);
+short4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _v4f32, _Rshort4)(float4 x);
+short8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _v8f32, _Rshor8)(float8 x);
+short16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToBF16INTEL, _v16f32, _Rshort16)(float16 x);
+float SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertBF16ToFINTEL, _i16, _Rfloat)(short x);
+float2 SPIRV_OVERLOADABLE  SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v2i16, _Rfloat2)(short2 x);
+float3 SPIRV_OVERLOADABLE  SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v3i16, _Rfloat3)(short3 x);
+float4 SPIRV_OVERLOADABLE  SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v4i16, _Rfloat4)(short4 x);
+float8 SPIRV_OVERLOADABLE  SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v8i16, _Rfloat8)(short8 x);
+float16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v16i16, _Rfloat16)(short16 x);
 
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-private void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p0i8_p4i8_i32, _ToPrivate)(const generic void *Pointer, StorageClass_t Storage);
-local   void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(const generic void *Pointer, StorageClass_t Storage);
-global  void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p1i8_p4i8_i32, _ToGlobal)(const generic void *Pointer, StorageClass_t Storage);
-uint __builtin_spirv_OpGenericPtrMemSemantics_p4i8(const generic void *Pointer);
+private void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p0i8_p4i8_i32, _ToPrivate)(generic char *Pointer, int Storage);
+local   void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(generic char *Pointer, int Storage);
+global  void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p1i8_p4i8_i32, _ToGlobal)(generic char *Pointer, int Storage);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericPtrMemSemantics, _p4i8, )(generic char *Pointer);
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
 // Arithmetic Instructions
@@ -3458,55 +3692,55 @@ typedef struct { ulong4 a; ulong4 b; } TwoOp_v4i64;
 typedef struct { ulong8 a; ulong8 b; } TwoOp_v8i64;
 typedef struct { ulong16 a; ulong16 b; } TwoOp_v16i64;
 
-TwoOp_i8    __builtin_spirv_OpUMulExtended_i8_i8(uchar Operand1, uchar Operand2);
-TwoOp_v2i8  __builtin_spirv_OpUMulExtended_v2i8_v2i8(uchar2 Operand1, uchar2 Operand2);
-TwoOp_v3i8  __builtin_spirv_OpUMulExtended_v3i8_v3i8(uchar3 Operand1, uchar3 Operand2);
-TwoOp_v4i8  __builtin_spirv_OpUMulExtended_v4i8_v4i8(uchar4 Operand1, uchar4 Operand2);
-TwoOp_v8i8  __builtin_spirv_OpUMulExtended_v8i8_v8i8(uchar8 Operand1, uchar8 Operand2);
-TwoOp_v16i8 __builtin_spirv_OpUMulExtended_v16i8_v16i8(uchar16 Operand1, uchar16 Operand2);
-TwoOp_i16    __builtin_spirv_OpUMulExtended_i16_i16(ushort Operand1, ushort Operand2);
-TwoOp_v2i16  __builtin_spirv_OpUMulExtended_v2i16_v2i16(ushort2 Operand1, ushort2 Operand2);
-TwoOp_v3i16  __builtin_spirv_OpUMulExtended_v3i16_v3i16(ushort3 Operand1, ushort3 Operand2);
-TwoOp_v4i16  __builtin_spirv_OpUMulExtended_v4i16_v4i16(ushort4 Operand1, ushort4 Operand2);
-TwoOp_v8i16  __builtin_spirv_OpUMulExtended_v8i16_v8i16(ushort8 Operand1, ushort8 Operand2);
-TwoOp_v16i16 __builtin_spirv_OpUMulExtended_v16i16_v16i16(ushort16 Operand1, ushort16 Operand2);
-TwoOp_i32    __builtin_spirv_OpUMulExtended_i32_i32(uint Operand1, uint Operand2);
-TwoOp_v2i32  __builtin_spirv_OpUMulExtended_v2i32_v2i32(uint2 Operand1, uint2 Operand2);
-TwoOp_v3i32  __builtin_spirv_OpUMulExtended_v3i32_v3i32(uint3 Operand1, uint3 Operand2);
-TwoOp_v4i32  __builtin_spirv_OpUMulExtended_v4i32_v4i32(uint4 Operand1, uint4 Operand2);
-TwoOp_v8i32  __builtin_spirv_OpUMulExtended_v8i32_v8i32(uint8 Operand1, uint8 Operand2);
-TwoOp_v16i32 __builtin_spirv_OpUMulExtended_v16i32_v16i32(uint16 Operand1, uint16 Operand2);
-TwoOp_i64    __builtin_spirv_OpUMulExtended_i64_i64(ulong Operand1, ulong Operand2);
-TwoOp_v2i64  __builtin_spirv_OpUMulExtended_v2i64_v2i64(ulong2 Operand1, ulong2 Operand2);
-TwoOp_v3i64  __builtin_spirv_OpUMulExtended_v3i64_v3i64(ulong3 Operand1, ulong3 Operand2);
-TwoOp_v4i64  __builtin_spirv_OpUMulExtended_v4i64_v4i64(ulong4 Operand1, ulong4 Operand2);
-TwoOp_v8i64  __builtin_spirv_OpUMulExtended_v8i64_v8i64(ulong8 Operand1, ulong8 Operand2);
-TwoOp_v16i64 __builtin_spirv_OpUMulExtended_v16i64_v16i64(ulong16 Operand1, ulong16 Operand2);
+TwoOp_i8    SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _i8_i8, )(uchar Operand1, uchar Operand2);
+TwoOp_v2i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v2i8_v2i8, )(uchar2 Operand1, uchar2 Operand2);
+TwoOp_v3i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v3i8_v3i8, )(uchar3 Operand1, uchar3 Operand2);
+TwoOp_v4i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v4i8_v4i8, )(uchar4 Operand1, uchar4 Operand2);
+TwoOp_v8i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v8i8_v8i8, )(uchar8 Operand1, uchar8 Operand2);
+TwoOp_v16i8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v16i8_v16i8, )(uchar16 Operand1, uchar16 Operand2);
+TwoOp_i16    SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _i16_i16, )(ushort Operand1, ushort Operand2);
+TwoOp_v2i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v2i16_v2i16, )(ushort2 Operand1, ushort2 Operand2);
+TwoOp_v3i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v3i16_v3i16, )(ushort3 Operand1, ushort3 Operand2);
+TwoOp_v4i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v4i16_v4i16, )(ushort4 Operand1, ushort4 Operand2);
+TwoOp_v8i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v8i16_v8i16, )(ushort8 Operand1, ushort8 Operand2);
+TwoOp_v16i16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v16i16_v16i16, )(ushort16 Operand1, ushort16 Operand2);
+TwoOp_i32    SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _i32_i32, )(uint Operand1, uint Operand2);
+TwoOp_v2i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v2i32_v2i32, )(uint2 Operand1, uint2 Operand2);
+TwoOp_v3i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v3i32_v3i32, )(uint3 Operand1, uint3 Operand2);
+TwoOp_v4i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v4i32_v4i32, )(uint4 Operand1, uint4 Operand2);
+TwoOp_v8i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v8i32_v8i32, )(uint8 Operand1, uint8 Operand2);
+TwoOp_v16i32 SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v16i32_v16i32, )(uint16 Operand1, uint16 Operand2);
+TwoOp_i64    SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _i64_i64, )(ulong Operand1, ulong Operand2);
+TwoOp_v2i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v2i64_v2i64, )(ulong2 Operand1, ulong2 Operand2);
+TwoOp_v3i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v3i64_v3i64, )(ulong3 Operand1, ulong3 Operand2);
+TwoOp_v4i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v4i64_v4i64, )(ulong4 Operand1, ulong4 Operand2);
+TwoOp_v8i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v8i64_v8i64, )(ulong8 Operand1, ulong8 Operand2);
+TwoOp_v16i64 SPIRV_OVERLOADABLE SPIRV_BUILTIN(UMulExtended, _v16i64_v16i64, )(ulong16 Operand1, ulong16 Operand2);
 
-TwoOp_i8    __builtin_spirv_OpSMulExtended_i8_i8(char Operand1, char Operand2);
-TwoOp_v2i8  __builtin_spirv_OpSMulExtended_v2i8_v2i8(char2 Operand1, char2 Operand2);
-TwoOp_v3i8  __builtin_spirv_OpSMulExtended_v3i8_v3i8(char3 Operand1, char3 Operand2);
-TwoOp_v4i8  __builtin_spirv_OpSMulExtended_v4i8_v4i8(char4 Operand1, char4 Operand2);
-TwoOp_v8i8  __builtin_spirv_OpSMulExtended_v8i8_v8i8(char8 Operand1, char8 Operand2);
-TwoOp_v16i8 __builtin_spirv_OpSMulExtended_v16i8_v16i8(char16 Operand1, char16 Operand2);
-TwoOp_i16    __builtin_spirv_OpSMulExtended_i16_i16(short Operand1, short Operand2);
-TwoOp_v2i16  __builtin_spirv_OpSMulExtended_v2i16_v2i16(short2 Operand1, short2 Operand2);
-TwoOp_v3i16  __builtin_spirv_OpSMulExtended_v3i16_v3i16(short3 Operand1, short3 Operand2);
-TwoOp_v4i16  __builtin_spirv_OpSMulExtended_v4i16_v4i16(short4 Operand1, short4 Operand2);
-TwoOp_v8i16  __builtin_spirv_OpSMulExtended_v8i16_v8i16(short8 Operand1, short8 Operand2);
-TwoOp_v16i16 __builtin_spirv_OpSMulExtended_v16i16_v16i16(short16 Operand1, short16 Operand2);
-TwoOp_i32    __builtin_spirv_OpSMulExtended_i32_i32(int Operand1, int Operand2);
-TwoOp_v2i32  __builtin_spirv_OpSMulExtended_v2i32_v2i32(int2 Operand1, int2 Operand2);
-TwoOp_v3i32  __builtin_spirv_OpSMulExtended_v3i32_v3i32(int3 Operand1, int3 Operand2);
-TwoOp_v4i32  __builtin_spirv_OpSMulExtended_v4i32_v4i32(int4 Operand1, int4 Operand2);
-TwoOp_v8i32  __builtin_spirv_OpSMulExtended_v8i32_v8i32(int8 Operand1, int8 Operand2);
-TwoOp_v16i32 __builtin_spirv_OpSMulExtended_v16i32_v16i32(int16 Operand1, int16 Operand2);
-TwoOp_i64    __builtin_spirv_OpSMulExtended_i64_i64(long Operand1, long Operand2);
-TwoOp_v2i64  __builtin_spirv_OpSMulExtended_v2i64_v2i64(long2 Operand1, long2 Operand2);
-TwoOp_v3i64  __builtin_spirv_OpSMulExtended_v3i64_v3i64(long3 Operand1, long3 Operand2);
-TwoOp_v4i64  __builtin_spirv_OpSMulExtended_v4i64_v4i64(long4 Operand1, long4 Operand2);
-TwoOp_v8i64  __builtin_spirv_OpSMulExtended_v8i64_v8i64(long8 Operand1, long8 Operand2);
-TwoOp_v16i64 __builtin_spirv_OpSMulExtended_v16i64_v16i64(long16 Operand1, long16 Operand2);
+TwoOp_i8    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _i8_i8, )(char Operand1, char Operand2);
+TwoOp_v2i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v2i8_v2i8, )(char2 Operand1, char2 Operand2);
+TwoOp_v3i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v3i8_v3i8, )(char3 Operand1, char3 Operand2);
+TwoOp_v4i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v4i8_v4i8, )(char4 Operand1, char4 Operand2);
+TwoOp_v8i8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v8i8_v8i8, )(char8 Operand1, char8 Operand2);
+TwoOp_v16i8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v16i8_v16i8, )(char16 Operand1, char16 Operand2);
+TwoOp_i16    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _i16_i16, )(short Operand1, short Operand2);
+TwoOp_v2i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v2i16_v2i16, )(short2 Operand1, short2 Operand2);
+TwoOp_v3i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v3i16_v3i16, )(short3 Operand1, short3 Operand2);
+TwoOp_v4i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v4i16_v4i16, )(short4 Operand1, short4 Operand2);
+TwoOp_v8i16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v8i16_v8i16, )(short8 Operand1, short8 Operand2);
+TwoOp_v16i16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v16i16_v16i16, )(short16 Operand1, short16 Operand2);
+TwoOp_i32    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _i32_i32, )(int Operand1, int Operand2);
+TwoOp_v2i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v2i32_v2i32, )(int2 Operand1, int2 Operand2);
+TwoOp_v3i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v3i32_v3i32, )(int3 Operand1, int3 Operand2);
+TwoOp_v4i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v4i32_v4i32, )(int4 Operand1, int4 Operand2);
+TwoOp_v8i32  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v8i32_v8i32, )(int8 Operand1, int8 Operand2);
+TwoOp_v16i32 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v16i32_v16i32, )(int16 Operand1, int16 Operand2);
+TwoOp_i64    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _i64_i64, )(long Operand1, long Operand2);
+TwoOp_v2i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v2i64_v2i64, )(long2 Operand1, long2 Operand2);
+TwoOp_v3i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v3i64_v3i64, )(long3 Operand1, long3 Operand2);
+TwoOp_v4i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v4i64_v4i64, )(long4 Operand1, long4 Operand2);
+TwoOp_v8i64  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v8i64_v8i64, )(long8 Operand1, long8 Operand2);
+TwoOp_v16i64 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SMulExtended, _v16i64_v16i64, )(long16 Operand1, long16 Operand2);
 
 // Bit Instructions
 
@@ -3611,30 +3845,30 @@ ulong4 __builtin_spirv_OpBitReverse_v4i64(ulong4 Base);
 ulong8 __builtin_spirv_OpBitReverse_v8i64(ulong8 Base);
 ulong16 __builtin_spirv_OpBitReverse_v16i64(ulong16 Base);
 
-uchar __builtin_spirv_OpBitCount_i8(uchar Base);
-uchar2 __builtin_spirv_OpBitCount_v2i8(uchar2 Base);
-uchar3 __builtin_spirv_OpBitCount_v3i8(uchar3 Base);
-uchar4 __builtin_spirv_OpBitCount_v4i8(uchar4 Base);
-uchar8 __builtin_spirv_OpBitCount_v8i8(uchar8 Base);
-uchar16 __builtin_spirv_OpBitCount_v16i8(uchar16 Base);
-ushort __builtin_spirv_OpBitCount_i16(ushort Base);
-ushort2 __builtin_spirv_OpBitCount_v2i16(ushort2 Base);
-ushort3 __builtin_spirv_OpBitCount_v3i16(ushort3 Base);
-ushort4 __builtin_spirv_OpBitCount_v4i16(ushort4 Base);
-ushort8 __builtin_spirv_OpBitCount_v8i16(ushort8 Base);
-ushort16 __builtin_spirv_OpBitCount_v16i16(ushort16 Base);
-uint __builtin_spirv_OpBitCount_i32(uint Base);
-uint2 __builtin_spirv_OpBitCount_v2i32(uint2 Base);
-uint3 __builtin_spirv_OpBitCount_v3i32(uint3 Base);
-uint4 __builtin_spirv_OpBitCount_v4i32(uint4 Base);
-uint8 __builtin_spirv_OpBitCount_v8i32(uint8 Base);
-uint16 __builtin_spirv_OpBitCount_v16i32(uint16 Base);
-ulong __builtin_spirv_OpBitCount_i64(ulong Base);
-ulong2 __builtin_spirv_OpBitCount_v2i64(ulong2 Base);
-ulong3 __builtin_spirv_OpBitCount_v3i64(ulong3 Base);
-ulong4 __builtin_spirv_OpBitCount_v4i64(ulong4 Base);
-ulong8 __builtin_spirv_OpBitCount_v8i64(ulong8 Base);
-ulong16 __builtin_spirv_OpBitCount_v16i64(ulong16 Base);
+uchar SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _i8, )(char Base);
+uchar2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v2i8, )(char2 Base);
+uchar3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v3i8, )(char3 Base);
+uchar4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v4i8, )(char4 Base);
+uchar8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v8i8, )(char8 Base);
+uchar16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v16i8, )(char16 Base);
+ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _i16, )(short Base);
+ushort2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v2i16, )(short2 Base);
+ushort3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v3i16, )(short3 Base);
+ushort4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v4i16, )(short4 Base);
+ushort8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v8i16, )(short8 Base);
+ushort16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v16i16, )(short16 Base);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _i32, )(int Base);
+uint2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v2i32, )(int2 Base);
+uint3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v3i32, )(int3 Base);
+uint4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v4i32, )(int4 Base);
+uint8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v8i32, )(int8 Base);
+uint16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v16i32, )(int16 Base);
+ulong SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _i64, )(long Base);
+ulong2 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v2i64, )(long2 Base);
+ulong3 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v3i64, )(long3 Base);
+ulong4 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v4i64, )(long4 Base);
+ulong8 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v8i64, )(long8 Base);
+ulong16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(BitCount, _v16i64, )(long16 Base);
 
 // Relational and Logical Instructions
 
@@ -3856,6 +4090,15 @@ double SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicLoad, _p4f64_i32_i32, )(generic do
 #endif // defined(cl_khr_int64_base_atomics)
 #endif // defined(cl_khr_fp64)
 
+#if defined(cl_khr_fp16)
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicLoad, _p0f16_i32_i32, )(private half* Pointer, int Scope, int Semantics);
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicLoad, _p1f16_i32_i32, )(global half* Pointer, int Scope, int Semantics);
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicLoad, _p3f16_i32_i32, )(local half* Pointer, int Scope, int Semantics);
+#if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicLoad, _p4f16_i32_i32, )(generic half* Pointer, int Scope, int Semantics);
+#endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
+#endif // defined(cl_khr_fp16)
+
 void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p0i32_i32_i32_i32, )(private int *Pointer, int Scope, int Semantics, int Value);
 void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p1i32_i32_i32_i32, )(global int *Pointer, int Scope, int Semantics, int Value);
 void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p3i32_i32_i32_i32, )(local int *Pointer, int Scope, int Semantics, int Value);
@@ -3887,6 +4130,15 @@ void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p4f64_i32_i32_f64, )(generic
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 #endif // defined(cl_khr_int64_base_atomics) || defined(cl_khr_int64_extended_atomics)
 #endif // defined(cl_khr_fp64)
+
+#if defined(cl_khr_fp16)
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p0f16_i32_i32_f16, )(private half* Pointer, int Scope, int Semantics, half Value);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p1f16_i32_i32_f16, )(global half* Pointer, int Scope, int Semantics, half Value);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p3f16_i32_i32_f16, )(local half* Pointer, int Scope, int Semantics, half Value);
+#if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicStore, _p4f16_i32_i32_f16, )(generic half* Pointer, int Scope, int Semantics, half Value);
+#endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
+#endif // defined(cl_khr_fp16)
 
 int SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p0i32_i32_i32_i32, )(private int *Pointer, int Scope, int Semantics, int Value);
 int SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p1i32_i32_i32_i32, )(global int *Pointer, int Scope, int Semantics, int Value);
@@ -3920,6 +4172,15 @@ double SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p4f64_i32_i32_f64, )(ge
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 #endif // defined(cl_khr_int64_base_atomics)
 #endif // defined(cl_khr_fp64)
+
+#if defined(cl_khr_fp16)
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p0f16_i32_i32_f16, )(__private half* Pointer, int Scope, int Semantics, half Value);
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p1f16_i32_i32_f16, )(__global half* Pointer, int Scope, int Semantics, half Value);
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p3f16_i32_i32_f16, )(__local half* Pointer, int Scope, int Semantics, half Value);
+#if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
+half SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicExchange, _p4f16_i32_i32_f16, )(__generic half* Pointer, int Scope, int Semantics, half Value);
+#endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
+#endif // defined(cl_khr_fp16)
 
 int SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicCompareExchange, _p0i32_i32_i32_i32_i32_i32, )(private int *Pointer, int Scope, int Equal, int Unequal, int Value, int Comparator);
 int SPIRV_OVERLOADABLE SPIRV_BUILTIN(AtomicCompareExchange, _p1i32_i32_i32_i32_i32_i32, )(global int *Pointer, int Scope, int Equal, int Unequal, int Value, int Comparator);
@@ -4216,183 +4477,185 @@ typedef struct
 local __namedBarrier* __builtin_spirv_OpNamedBarrierInitialize_i32_p3__namedBarrier_p3i32(int Count, local __namedBarrier* nb_array, local uint* id);
 void __builtin_spirv_OpMemoryNamedBarrier_p3__namedBarrier_i32_i32(local __namedBarrier* NB, Scope_t Memory, uint Semantics);
 
+void __builtin_spirv_OpMemoryNamedBarrierWrapperOCL_p3__namedBarrier_i32(local __namedBarrier* barrier, cl_mem_fence_flags flags);
+void __builtin_spirv_OpMemoryNamedBarrierWrapperOCL_p3__namedBarrier_i32_i32(local __namedBarrier* barrier, cl_mem_fence_flags flags, memory_scope scope);
 // Group Instructions
 // TODO: Do we want to split out size_t into i64 and i32 as we've done here?
 
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i8_p3i8_i64_i64_i64, )(int Execution, global char *Destination, local char *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i8_p3i8_i32_i32_i64, )(int Execution, global char *Destination, local char *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i16_p3i16_i64_i64_i64, )(int Execution, global short *Destination, local short *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i16_p3i16_i32_i32_i64, )(int Execution, global short *Destination, local short *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i32_p3i32_i64_i64_i64, )(int Execution, global int *Destination, local int *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i32_p3i32_i32_i32_i64, )(int Execution, global int *Destination, local int *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i64_p3i64_i64_i64_i64, )(int Execution, global long *Destination, local long *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i64_p3i64_i32_i32_i64, )(int Execution, global long *Destination, local long *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f16_p3f16_i64_i64_i64, )(int Execution, global half *Destination, local half *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f16_p3f16_i32_i32_i64, )(int Execution, global half *Destination, local half *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f32_p3f32_i64_i64_i64, )(int Execution, global float *Destination, local float *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f32_p3f32_i32_i32_i64, )(int Execution, global float *Destination, local float *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i8_p3v2i8_i64_i64_i64, )(int Execution, global char2 *Destination, local char2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i8_p3v2i8_i32_i32_i64, )(int Execution, global char2 *Destination, local char2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i8_p3v3i8_i64_i64_i64, )(int Execution, global char3 *Destination, local char3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i8_p3v3i8_i32_i32_i64, )(int Execution, global char3 *Destination, local char3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i8_p3v4i8_i64_i64_i64, )(int Execution, global char4 *Destination, local char4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i8_p3v4i8_i32_i32_i64, )(int Execution, global char4 *Destination, local char4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i8_p3v8i8_i64_i64_i64, )(int Execution, global char8 *Destination, local char8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i8_p3v8i8_i32_i32_i64, )(int Execution, global char8 *Destination, local char8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i8_p3v16i8_i64_i64_i64, )(int Execution, global char16 *Destination, local char16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i8_p3v16i8_i32_i32_i64, )(int Execution, global char16 *Destination, local char16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i16_p3v2i16_i64_i64_i64, )(int Execution, global short2 *Destination, local short2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i16_p3v2i16_i32_i32_i64, )(int Execution, global short2 *Destination, local short2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i16_p3v3i16_i64_i64_i64, )(int Execution, global short3 *Destination, local short3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i16_p3v3i16_i32_i32_i64, )(int Execution, global short3 *Destination, local short3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i16_p3v4i16_i64_i64_i64, )(int Execution, global short4 *Destination, local short4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i16_p3v4i16_i32_i32_i64, )(int Execution, global short4 *Destination, local short4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i16_p3v8i16_i64_i64_i64, )(int Execution, global short8 *Destination, local short8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i16_p3v8i16_i32_i32_i64, )(int Execution, global short8 *Destination, local short8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i16_p3v16i16_i64_i64_i64, )(int Execution, global short16 *Destination, local short16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i16_p3v16i16_i32_i32_i64, )(int Execution, global short16 *Destination, local short16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i32_p3v2i32_i64_i64_i64, )(int Execution, global int2 *Destination, local int2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i32_p3v2i32_i32_i32_i64, )(int Execution, global int2 *Destination, local int2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i32_p3v3i32_i64_i64_i64, )(int Execution, global int3 *Destination, local int3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i32_p3v3i32_i32_i32_i64, )(int Execution, global int3 *Destination, local int3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i32_p3v4i32_i64_i64_i64, )(int Execution, global int4 *Destination, local int4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i32_p3v4i32_i32_i32_i64, )(int Execution, global int4 *Destination, local int4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i32_p3v8i32_i64_i64_i64, )(int Execution, global int8 *Destination, local int8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i32_p3v8i32_i32_i32_i64, )(int Execution, global int8 *Destination, local int8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i32_p3v16i32_i64_i64_i64, )(int Execution, global int16 *Destination, local int16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i32_p3v16i32_i32_i32_i64, )(int Execution, global int16 *Destination, local int16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i64_p3v2i64_i64_i64_i64, )(int Execution, global long2 *Destination, local long2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i64_p3v2i64_i32_i32_i64, )(int Execution, global long2 *Destination, local long2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i64_p3v3i64_i64_i64_i64, )(int Execution, global long3 *Destination, local long3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i64_p3v3i64_i32_i32_i64, )(int Execution, global long3 *Destination, local long3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i64_p3v4i64_i64_i64_i64, )(int Execution, global long4 *Destination, local long4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i64_p3v4i64_i32_i32_i64, )(int Execution, global long4 *Destination, local long4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i64_p3v8i64_i64_i64_i64, )(int Execution, global long8 *Destination, local long8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i64_p3v8i64_i32_i32_i64, )(int Execution, global long8 *Destination, local long8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i64_p3v16i64_i64_i64_i64, )(int Execution, global long16 *Destination, local long16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i64_p3v16i64_i32_i32_i64, )(int Execution, global long16 *Destination, local long16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f16_p3v2f16_i64_i64_i64, )(int Execution, global half2 *Destination, local half2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f16_p3v2f16_i32_i32_i64, )(int Execution, global half2 *Destination, local half2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f16_p3v3f16_i64_i64_i64, )(int Execution, global half3 *Destination, local half3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f16_p3v3f16_i32_i32_i64, )(int Execution, global half3 *Destination, local half3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f16_p3v4f16_i64_i64_i64, )(int Execution, global half4 *Destination, local half4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f16_p3v4f16_i32_i32_i64, )(int Execution, global half4 *Destination, local half4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f16_p3v8f16_i64_i64_i64, )(int Execution, global half8 *Destination, local half8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f16_p3v8f16_i32_i32_i64, )(int Execution, global half8 *Destination, local half8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f16_p3v16f16_i64_i64_i64, )(int Execution, global half16 *Destination, local half16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f16_p3v16f16_i32_i32_i64, )(int Execution, global half16 *Destination, local half16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f32_p3v2f32_i64_i64_i64, )(int Execution, global float2 *Destination, local float2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f32_p3v2f32_i32_i32_i64, )(int Execution, global float2 *Destination, local float2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f32_p3v3f32_i64_i64_i64, )(int Execution, global float3 *Destination, local float3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f32_p3v3f32_i32_i32_i64, )(int Execution, global float3 *Destination, local float3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f32_p3v4f32_i64_i64_i64, )(int Execution, global float4 *Destination, local float4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f32_p3v4f32_i32_i32_i64, )(int Execution, global float4 *Destination, local float4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f32_p3v8f32_i64_i64_i64, )(int Execution, global float8 *Destination, local float8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f32_p3v8f32_i32_i32_i64, )(int Execution, global float8 *Destination, local float8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f32_p3v16f32_i64_i64_i64, )(int Execution, global float16 *Destination, local float16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f32_p3v16f32_i32_i32_i64, )(int Execution, global float16 *Destination, local float16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i8_p1i8_i64_i64_i64, )(int Execution, local char *Destination, global char *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i8_p1i8_i32_i32_i64, )(int Execution, local char *Destination, global char *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i16_p1i16_i64_i64_i64, )(int Execution, local short *Destination, global short *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i16_p1i16_i32_i32_i64, )(int Execution, local short *Destination, global short *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i32_p1i32_i64_i64_i64, )(int Execution, local int *Destination, global int *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i32_p1i32_i32_i32_i64, )(int Execution, local int *Destination, global int *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i64_p1i64_i64_i64_i64, )(int Execution, local long *Destination, global long *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i64_p1i64_i32_i32_i64, )(int Execution, local long *Destination, global long *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f16_p1f16_i64_i64_i64, )(int Execution, local half *Destination, global half *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f16_p1f16_i32_i32_i64, )(int Execution, local half *Destination, global half *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f32_p1f32_i64_i64_i64, )(int Execution, local float *Destination, global float *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i8_p1v2i8_i64_i64_i64, )(int Execution, local char2 *Destination, global char2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i8_p1v2i8_i32_i32_i64, )(int Execution, local char2 *Destination, global char2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i8_p1v3i8_i64_i64_i64, )(int Execution, local char3 *Destination, global char3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i8_p1v3i8_i32_i32_i64, )(int Execution, local char3 *Destination, global char3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i8_p1v4i8_i64_i64_i64, )(int Execution, local char4 *Destination, global char4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i8_p1v4i8_i32_i32_i64, )(int Execution, local char4 *Destination, global char4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i8_p1v8i8_i64_i64_i64, )(int Execution, local char8 *Destination, global char8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i8_p1v8i8_i32_i32_i64, )(int Execution, local char8 *Destination, global char8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i8_p1v16i8_i64_i64_i64, )(int Execution, local char16 *Destination, global char16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i8_p1v16i8_i32_i32_i64, )(int Execution, local char16 *Destination, global char16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i16_p1v2i16_i64_i64_i64, )(int Execution, local short2 *Destination, global short2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i16_p1v2i16_i32_i32_i64, )(int Execution, local short2 *Destination, global short2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i16_p1v3i16_i64_i64_i64, )(int Execution, local short3 *Destination, global short3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i16_p1v3i16_i32_i32_i64, )(int Execution, local short3 *Destination, global short3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i16_p1v4i16_i64_i64_i64, )(int Execution, local short4 *Destination, global short4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i16_p1v4i16_i32_i32_i64, )(int Execution, local short4 *Destination, global short4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i16_p1v8i16_i64_i64_i64, )(int Execution, local short8 *Destination, global short8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i16_p1v8i16_i32_i32_i64, )(int Execution, local short8 *Destination, global short8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i16_p1v16i16_i64_i64_i64, )(int Execution, local short16 *Destination, global short16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i16_p1v16i16_i32_i32_i64, )(int Execution, local short16 *Destination, global short16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i32_p1v2i32_i64_i64_i64, )(int Execution, local int2 *Destination, global int2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i32_p1v2i32_i32_i32_i64, )(int Execution, local int2 *Destination, global int2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i32_p1v3i32_i64_i64_i64, )(int Execution, local int3 *Destination, global int3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i32_p1v3i32_i32_i32_i64, )(int Execution, local int3 *Destination, global int3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i32_p1v4i32_i64_i64_i64, )(int Execution, local int4 *Destination, global int4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i32_p1v4i32_i32_i32_i64, )(int Execution, local int4 *Destination, global int4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i32_p1v8i32_i64_i64_i64, )(int Execution, local int8 *Destination, global int8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i32_p1v8i32_i32_i32_i64, )(int Execution, local int8 *Destination, global int8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i32_p1v16i32_i64_i64_i64, )(int Execution, local int16 *Destination, global int16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i32_p1v16i32_i32_i32_i64, )(int Execution, local int16 *Destination, global int16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i64_p1v2i64_i64_i64_i64, )(int Execution, local long2 *Destination, global long2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i64_p1v2i64_i32_i32_i64, )(int Execution, local long2 *Destination, global long2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i64_p1v3i64_i64_i64_i64, )(int Execution, local long3 *Destination, global long3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i64_p1v3i64_i32_i32_i64, )(int Execution, local long3 *Destination, global long3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i64_p1v4i64_i64_i64_i64, )(int Execution, local long4 *Destination, global long4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i64_p1v4i64_i32_i32_i64, )(int Execution, local long4 *Destination, global long4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i64_p1v8i64_i64_i64_i64, )(int Execution, local long8 *Destination, global long8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i64_p1v8i64_i32_i32_i64, )(int Execution, local long8 *Destination, global long8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i64_p1v16i64_i64_i64_i64, )(int Execution, local long16 *Destination, global long16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i64_p1v16i64_i32_i32_i64, )(int Execution, local long16 *Destination, global long16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f16_p1v2f16_i64_i64_i64, )(int Execution, local half2 *Destination, global half2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f16_p1v2f16_i32_i32_i64, )(int Execution, local half2 *Destination, global half2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f16_p1v3f16_i64_i64_i64, )(int Execution, local half3 *Destination, global half3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f16_p1v3f16_i32_i32_i64, )(int Execution, local half3 *Destination, global half3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f16_p1v4f16_i64_i64_i64, )(int Execution, local half4 *Destination, global half4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f16_p1v4f16_i32_i32_i64, )(int Execution, local half4 *Destination, global half4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f16_p1v8f16_i64_i64_i64, )(int Execution, local half8 *Destination, global half8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f16_p1v8f16_i32_i32_i64, )(int Execution, local half8 *Destination, global half8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f16_p1v16f16_i64_i64_i64, )(int Execution, local half16 *Destination, global half16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f16_p1v16f16_i32_i32_i64, )(int Execution, local half16 *Destination, global half16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f32_p1v2f32_i64_i64_i64, )(int Execution, local float2 *Destination, global float2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f32_p1v2f32_i32_i32_i64, )(int Execution, local float2 *Destination, global float2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f32_p1v3f32_i64_i64_i64, )(int Execution, local float3 *Destination, global float3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f32_p1v3f32_i32_i32_i64, )(int Execution, local float3 *Destination, global float3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f32_p1v4f32_i64_i64_i64, )(int Execution, local float4 *Destination, global float4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f32_p1v4f32_i32_i32_i64, )(int Execution, local float4 *Destination, global float4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f32_p1v8f32_i64_i64_i64, )(int Execution, local float8 *Destination, global float8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f32_p1v8f32_i32_i32_i64, )(int Execution, local float8 *Destination, global float8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f32_p1v16f32_i64_i64_i64, )(int Execution, local float16 *Destination, global float16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f32_p1v16f32_i32_i32_i64, )(int Execution, local float16 *Destination, global float16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f32_p1f32_i32_i32_i64, )(int Execution, local float *Destination, global float *Source, int NumElements, int Stride, Event_t Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i8_p3i8_i64_i64_i64, )(int Execution, global char *Destination, local char *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i8_p3i8_i32_i32_i64, )(int Execution, global char *Destination, local char *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i16_p3i16_i64_i64_i64, )(int Execution, global short *Destination, local short *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i16_p3i16_i32_i32_i64, )(int Execution, global short *Destination, local short *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i32_p3i32_i64_i64_i64, )(int Execution, global int *Destination, local int *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i32_p3i32_i32_i32_i64, )(int Execution, global int *Destination, local int *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i64_p3i64_i64_i64_i64, )(int Execution, global long *Destination, local long *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1i64_p3i64_i32_i32_i64, )(int Execution, global long *Destination, local long *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f16_p3f16_i64_i64_i64, )(int Execution, global half *Destination, local half *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f16_p3f16_i32_i32_i64, )(int Execution, global half *Destination, local half *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f32_p3f32_i64_i64_i64, )(int Execution, global float *Destination, local float *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f32_p3f32_i32_i32_i64, )(int Execution, global float *Destination, local float *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i8_p3v2i8_i64_i64_i64, )(int Execution, global char2 *Destination, local char2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i8_p3v2i8_i32_i32_i64, )(int Execution, global char2 *Destination, local char2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i8_p3v3i8_i64_i64_i64, )(int Execution, global char3 *Destination, local char3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i8_p3v3i8_i32_i32_i64, )(int Execution, global char3 *Destination, local char3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i8_p3v4i8_i64_i64_i64, )(int Execution, global char4 *Destination, local char4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i8_p3v4i8_i32_i32_i64, )(int Execution, global char4 *Destination, local char4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i8_p3v8i8_i64_i64_i64, )(int Execution, global char8 *Destination, local char8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i8_p3v8i8_i32_i32_i64, )(int Execution, global char8 *Destination, local char8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i8_p3v16i8_i64_i64_i64, )(int Execution, global char16 *Destination, local char16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i8_p3v16i8_i32_i32_i64, )(int Execution, global char16 *Destination, local char16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i16_p3v2i16_i64_i64_i64, )(int Execution, global short2 *Destination, local short2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i16_p3v2i16_i32_i32_i64, )(int Execution, global short2 *Destination, local short2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i16_p3v3i16_i64_i64_i64, )(int Execution, global short3 *Destination, local short3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i16_p3v3i16_i32_i32_i64, )(int Execution, global short3 *Destination, local short3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i16_p3v4i16_i64_i64_i64, )(int Execution, global short4 *Destination, local short4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i16_p3v4i16_i32_i32_i64, )(int Execution, global short4 *Destination, local short4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i16_p3v8i16_i64_i64_i64, )(int Execution, global short8 *Destination, local short8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i16_p3v8i16_i32_i32_i64, )(int Execution, global short8 *Destination, local short8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i16_p3v16i16_i64_i64_i64, )(int Execution, global short16 *Destination, local short16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i16_p3v16i16_i32_i32_i64, )(int Execution, global short16 *Destination, local short16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i32_p3v2i32_i64_i64_i64, )(int Execution, global int2 *Destination, local int2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i32_p3v2i32_i32_i32_i64, )(int Execution, global int2 *Destination, local int2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i32_p3v3i32_i64_i64_i64, )(int Execution, global int3 *Destination, local int3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i32_p3v3i32_i32_i32_i64, )(int Execution, global int3 *Destination, local int3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i32_p3v4i32_i64_i64_i64, )(int Execution, global int4 *Destination, local int4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i32_p3v4i32_i32_i32_i64, )(int Execution, global int4 *Destination, local int4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i32_p3v8i32_i64_i64_i64, )(int Execution, global int8 *Destination, local int8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i32_p3v8i32_i32_i32_i64, )(int Execution, global int8 *Destination, local int8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i32_p3v16i32_i64_i64_i64, )(int Execution, global int16 *Destination, local int16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i32_p3v16i32_i32_i32_i64, )(int Execution, global int16 *Destination, local int16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i64_p3v2i64_i64_i64_i64, )(int Execution, global long2 *Destination, local long2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2i64_p3v2i64_i32_i32_i64, )(int Execution, global long2 *Destination, local long2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i64_p3v3i64_i64_i64_i64, )(int Execution, global long3 *Destination, local long3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3i64_p3v3i64_i32_i32_i64, )(int Execution, global long3 *Destination, local long3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i64_p3v4i64_i64_i64_i64, )(int Execution, global long4 *Destination, local long4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4i64_p3v4i64_i32_i32_i64, )(int Execution, global long4 *Destination, local long4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i64_p3v8i64_i64_i64_i64, )(int Execution, global long8 *Destination, local long8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8i64_p3v8i64_i32_i32_i64, )(int Execution, global long8 *Destination, local long8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i64_p3v16i64_i64_i64_i64, )(int Execution, global long16 *Destination, local long16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16i64_p3v16i64_i32_i32_i64, )(int Execution, global long16 *Destination, local long16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f16_p3v2f16_i64_i64_i64, )(int Execution, global half2 *Destination, local half2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f16_p3v2f16_i32_i32_i64, )(int Execution, global half2 *Destination, local half2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f16_p3v3f16_i64_i64_i64, )(int Execution, global half3 *Destination, local half3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f16_p3v3f16_i32_i32_i64, )(int Execution, global half3 *Destination, local half3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f16_p3v4f16_i64_i64_i64, )(int Execution, global half4 *Destination, local half4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f16_p3v4f16_i32_i32_i64, )(int Execution, global half4 *Destination, local half4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f16_p3v8f16_i64_i64_i64, )(int Execution, global half8 *Destination, local half8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f16_p3v8f16_i32_i32_i64, )(int Execution, global half8 *Destination, local half8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f16_p3v16f16_i64_i64_i64, )(int Execution, global half16 *Destination, local half16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f16_p3v16f16_i32_i32_i64, )(int Execution, global half16 *Destination, local half16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f32_p3v2f32_i64_i64_i64, )(int Execution, global float2 *Destination, local float2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f32_p3v2f32_i32_i32_i64, )(int Execution, global float2 *Destination, local float2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f32_p3v3f32_i64_i64_i64, )(int Execution, global float3 *Destination, local float3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f32_p3v3f32_i32_i32_i64, )(int Execution, global float3 *Destination, local float3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f32_p3v4f32_i64_i64_i64, )(int Execution, global float4 *Destination, local float4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f32_p3v4f32_i32_i32_i64, )(int Execution, global float4 *Destination, local float4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f32_p3v8f32_i64_i64_i64, )(int Execution, global float8 *Destination, local float8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f32_p3v8f32_i32_i32_i64, )(int Execution, global float8 *Destination, local float8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f32_p3v16f32_i64_i64_i64, )(int Execution, global float16 *Destination, local float16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f32_p3v16f32_i32_i32_i64, )(int Execution, global float16 *Destination, local float16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i8_p1i8_i64_i64_i64, )(int Execution, local char *Destination, global char *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i8_p1i8_i32_i32_i64, )(int Execution, local char *Destination, global char *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i16_p1i16_i64_i64_i64, )(int Execution, local short *Destination, global short *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i16_p1i16_i32_i32_i64, )(int Execution, local short *Destination, global short *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i32_p1i32_i64_i64_i64, )(int Execution, local int *Destination, global int *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i32_p1i32_i32_i32_i64, )(int Execution, local int *Destination, global int *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i64_p1i64_i64_i64_i64, )(int Execution, local long *Destination, global long *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3i64_p1i64_i32_i32_i64, )(int Execution, local long *Destination, global long *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f16_p1f16_i64_i64_i64, )(int Execution, local half *Destination, global half *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f16_p1f16_i32_i32_i64, )(int Execution, local half *Destination, global half *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f32_p1f32_i64_i64_i64, )(int Execution, local float *Destination, global float *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i8_p1v2i8_i64_i64_i64, )(int Execution, local char2 *Destination, global char2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i8_p1v2i8_i32_i32_i64, )(int Execution, local char2 *Destination, global char2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i8_p1v3i8_i64_i64_i64, )(int Execution, local char3 *Destination, global char3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i8_p1v3i8_i32_i32_i64, )(int Execution, local char3 *Destination, global char3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i8_p1v4i8_i64_i64_i64, )(int Execution, local char4 *Destination, global char4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i8_p1v4i8_i32_i32_i64, )(int Execution, local char4 *Destination, global char4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i8_p1v8i8_i64_i64_i64, )(int Execution, local char8 *Destination, global char8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i8_p1v8i8_i32_i32_i64, )(int Execution, local char8 *Destination, global char8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i8_p1v16i8_i64_i64_i64, )(int Execution, local char16 *Destination, global char16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i8_p1v16i8_i32_i32_i64, )(int Execution, local char16 *Destination, global char16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i16_p1v2i16_i64_i64_i64, )(int Execution, local short2 *Destination, global short2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i16_p1v2i16_i32_i32_i64, )(int Execution, local short2 *Destination, global short2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i16_p1v3i16_i64_i64_i64, )(int Execution, local short3 *Destination, global short3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i16_p1v3i16_i32_i32_i64, )(int Execution, local short3 *Destination, global short3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i16_p1v4i16_i64_i64_i64, )(int Execution, local short4 *Destination, global short4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i16_p1v4i16_i32_i32_i64, )(int Execution, local short4 *Destination, global short4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i16_p1v8i16_i64_i64_i64, )(int Execution, local short8 *Destination, global short8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i16_p1v8i16_i32_i32_i64, )(int Execution, local short8 *Destination, global short8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i16_p1v16i16_i64_i64_i64, )(int Execution, local short16 *Destination, global short16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i16_p1v16i16_i32_i32_i64, )(int Execution, local short16 *Destination, global short16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i32_p1v2i32_i64_i64_i64, )(int Execution, local int2 *Destination, global int2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i32_p1v2i32_i32_i32_i64, )(int Execution, local int2 *Destination, global int2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i32_p1v3i32_i64_i64_i64, )(int Execution, local int3 *Destination, global int3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i32_p1v3i32_i32_i32_i64, )(int Execution, local int3 *Destination, global int3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i32_p1v4i32_i64_i64_i64, )(int Execution, local int4 *Destination, global int4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i32_p1v4i32_i32_i32_i64, )(int Execution, local int4 *Destination, global int4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i32_p1v8i32_i64_i64_i64, )(int Execution, local int8 *Destination, global int8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i32_p1v8i32_i32_i32_i64, )(int Execution, local int8 *Destination, global int8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i32_p1v16i32_i64_i64_i64, )(int Execution, local int16 *Destination, global int16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i32_p1v16i32_i32_i32_i64, )(int Execution, local int16 *Destination, global int16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i64_p1v2i64_i64_i64_i64, )(int Execution, local long2 *Destination, global long2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2i64_p1v2i64_i32_i32_i64, )(int Execution, local long2 *Destination, global long2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i64_p1v3i64_i64_i64_i64, )(int Execution, local long3 *Destination, global long3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3i64_p1v3i64_i32_i32_i64, )(int Execution, local long3 *Destination, global long3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i64_p1v4i64_i64_i64_i64, )(int Execution, local long4 *Destination, global long4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4i64_p1v4i64_i32_i32_i64, )(int Execution, local long4 *Destination, global long4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i64_p1v8i64_i64_i64_i64, )(int Execution, local long8 *Destination, global long8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8i64_p1v8i64_i32_i32_i64, )(int Execution, local long8 *Destination, global long8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i64_p1v16i64_i64_i64_i64, )(int Execution, local long16 *Destination, global long16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16i64_p1v16i64_i32_i32_i64, )(int Execution, local long16 *Destination, global long16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f16_p1v2f16_i64_i64_i64, )(int Execution, local half2 *Destination, global half2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f16_p1v2f16_i32_i32_i64, )(int Execution, local half2 *Destination, global half2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f16_p1v3f16_i64_i64_i64, )(int Execution, local half3 *Destination, global half3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f16_p1v3f16_i32_i32_i64, )(int Execution, local half3 *Destination, global half3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f16_p1v4f16_i64_i64_i64, )(int Execution, local half4 *Destination, global half4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f16_p1v4f16_i32_i32_i64, )(int Execution, local half4 *Destination, global half4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f16_p1v8f16_i64_i64_i64, )(int Execution, local half8 *Destination, global half8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f16_p1v8f16_i32_i32_i64, )(int Execution, local half8 *Destination, global half8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f16_p1v16f16_i64_i64_i64, )(int Execution, local half16 *Destination, global half16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f16_p1v16f16_i32_i32_i64, )(int Execution, local half16 *Destination, global half16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f32_p1v2f32_i64_i64_i64, )(int Execution, local float2 *Destination, global float2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f32_p1v2f32_i32_i32_i64, )(int Execution, local float2 *Destination, global float2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f32_p1v3f32_i64_i64_i64, )(int Execution, local float3 *Destination, global float3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f32_p1v3f32_i32_i32_i64, )(int Execution, local float3 *Destination, global float3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f32_p1v4f32_i64_i64_i64, )(int Execution, local float4 *Destination, global float4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f32_p1v4f32_i32_i32_i64, )(int Execution, local float4 *Destination, global float4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f32_p1v8f32_i64_i64_i64, )(int Execution, local float8 *Destination, global float8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f32_p1v8f32_i32_i32_i64, )(int Execution, local float8 *Destination, global float8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f32_p1v16f32_i64_i64_i64, )(int Execution, local float16 *Destination, global float16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f32_p1v16f32_i32_i32_i64, )(int Execution, local float16 *Destination, global float16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f32_p1f32_i32_i32_i64, )(int Execution, local float *Destination, global float *Source, int NumElements, int Stride, __spirv_Event Event);
 #if defined(cl_khr_fp64)
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f64_p3f64_i64_i64_i64, )(int Execution, global double *Destination, local double *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f64_p3f64_i32_i32_i64, )(int Execution, global double *Destination, local double *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f64_p3v2f64_i64_i64_i64, )(int Execution, global double2 *Destination, local double2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f64_p3v2f64_i32_i32_i64, )(int Execution, global double2 *Destination, local double2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f64_p3v3f64_i64_i64_i64, )(int Execution, global double3 *Destination, local double3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f64_p3v3f64_i32_i32_i64, )(int Execution, global double3 *Destination, local double3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f64_p3v4f64_i64_i64_i64, )(int Execution, global double4 *Destination, local double4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f64_p3v4f64_i32_i32_i64, )(int Execution, global double4 *Destination, local double4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f64_p3v8f64_i64_i64_i64, )(int Execution, global double8 *Destination, local double8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f64_p3v8f64_i32_i32_i64, )(int Execution, global double8 *Destination, local double8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f64_p3v16f64_i64_i64_i64, )(int Execution, global double16 *Destination, local double16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f64_p3v16f64_i32_i32_i64, )(int Execution, global double16 *Destination, local double16 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f64_p1f64_i64_i64_i64, )(int Execution, local double *Destination, global double *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f64_p1f64_i32_i32_i64, )(int Execution, local double *Destination, global double *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f64_p1v2f64_i64_i64_i64, )(int Execution, local double2 *Destination, global double2 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f64_p1v2f64_i32_i32_i64, )(int Execution, local double2 *Destination, global double2 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f64_p1v3f64_i64_i64_i64, )(int Execution, local double3 *Destination, global double3 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f64_p1v3f64_i32_i32_i64, )(int Execution, local double3 *Destination, global double3 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f64_p1v4f64_i64_i64_i64, )(int Execution, local double4 *Destination, global double4 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f64_p1v4f64_i32_i32_i64, )(int Execution, local double4 *Destination, global double4 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f64_p1v8f64_i64_i64_i64, )(int Execution, local double8 *Destination, global double8 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f64_p1v8f64_i32_i32_i64, )(int Execution, local double8 *Destination, global double8 *Source, int NumElements, int Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f64_p1v16f64_i64_i64_i64, )(int Execution, local double16 *Destination, global double16 *Source, long NumElements, long Stride, Event_t Event);
-Event_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f64_p1v16f64_i32_i32_i64, )(int Execution, local double16 *Destination, global double16 *Source, int NumElements, int Stride, Event_t Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f64_p3f64_i64_i64_i64, )(int Execution, global double *Destination, local double *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1f64_p3f64_i32_i32_i64, )(int Execution, global double *Destination, local double *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f64_p3v2f64_i64_i64_i64, )(int Execution, global double2 *Destination, local double2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v2f64_p3v2f64_i32_i32_i64, )(int Execution, global double2 *Destination, local double2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f64_p3v3f64_i64_i64_i64, )(int Execution, global double3 *Destination, local double3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v3f64_p3v3f64_i32_i32_i64, )(int Execution, global double3 *Destination, local double3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f64_p3v4f64_i64_i64_i64, )(int Execution, global double4 *Destination, local double4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v4f64_p3v4f64_i32_i32_i64, )(int Execution, global double4 *Destination, local double4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f64_p3v8f64_i64_i64_i64, )(int Execution, global double8 *Destination, local double8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v8f64_p3v8f64_i32_i32_i64, )(int Execution, global double8 *Destination, local double8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f64_p3v16f64_i64_i64_i64, )(int Execution, global double16 *Destination, local double16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p1v16f64_p3v16f64_i32_i32_i64, )(int Execution, global double16 *Destination, local double16 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f64_p1f64_i64_i64_i64, )(int Execution, local double *Destination, global double *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3f64_p1f64_i32_i32_i64, )(int Execution, local double *Destination, global double *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f64_p1v2f64_i64_i64_i64, )(int Execution, local double2 *Destination, global double2 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v2f64_p1v2f64_i32_i32_i64, )(int Execution, local double2 *Destination, global double2 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f64_p1v3f64_i64_i64_i64, )(int Execution, local double3 *Destination, global double3 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v3f64_p1v3f64_i32_i32_i64, )(int Execution, local double3 *Destination, global double3 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f64_p1v4f64_i64_i64_i64, )(int Execution, local double4 *Destination, global double4 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v4f64_p1v4f64_i32_i32_i64, )(int Execution, local double4 *Destination, global double4 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f64_p1v8f64_i64_i64_i64, )(int Execution, local double8 *Destination, global double8 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v8f64_p1v8f64_i32_i32_i64, )(int Execution, local double8 *Destination, global double8 *Source, int NumElements, int Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f64_p1v16f64_i64_i64_i64, )(int Execution, local double16 *Destination, global double16 *Source, long NumElements, long Stride, __spirv_Event Event);
+__spirv_Event SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupAsyncCopy, _i32_p3v16f64_p1v16f64_i32_i32_i64, )(int Execution, local double16 *Destination, global double16 *Source, int NumElements, int Stride, __spirv_Event Event);
 #endif // defined(cl_khr_fp64)
 
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupWaitEvents, _i32_i32_p0i64, )(int Execution, int NumEvents, private Event_t *EventsList);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupWaitEvents, _i32_i32_p0i64, )(int Execution, int NumEvents, private __spirv_Event *EventsList);
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupWaitEvents, _i32_i32_p4i64, )(int Execution, int NumEvents, generic Event_t *EventsList);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupWaitEvents, _i32_i32_p4i64, )(int Execution, int NumEvents, generic __spirv_Event *EventsList);
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
 #if defined(cl_khr_subgroup_non_uniform_vote)
@@ -4422,77 +4685,77 @@ TYPE SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBroadcast, _i32_##TYPE_ABBR##_v2i64, 
 TYPE SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBroadcast, _i32_##TYPE_ABBR##_i32, )(int Execution, TYPE Value, int LocalId);      \
 TYPE SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBroadcast, _i32_##TYPE_ABBR##_i64, )(int Execution, TYPE Value, long LocalId);
 
-char   __builtin_spirv_OpSubgroupShuffleINTEL_i8_i32(char Data, int InvocationId);
-short  __builtin_spirv_OpSubgroupShuffleINTEL_i16_i32(short Data, int InvocationId);
-int    __builtin_spirv_OpSubgroupShuffleINTEL_i32_i32(int Data, int InvocationId);
-long   __builtin_spirv_OpSubgroupShuffleINTEL_i64_i32(long Data, int InvocationId);
+char   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _i8_i32, )(char Data, uint InvocationId);
+short  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _i16_i32, )(short Data, uint InvocationId);
+int    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _i32_i32, )(int Data, uint InvocationId);
+long   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _i64_i32, )(long Data, uint InvocationId);
 #if defined(cl_khr_fp16)
-half   __builtin_spirv_OpSubgroupShuffleINTEL_f16_i32(half Data, int InvocationId);
+half   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _f16_i32, )(half Data, uint InvocationId);
 #endif // defined(cl_khr_fp16)
-float  __builtin_spirv_OpSubgroupShuffleINTEL_f32_i32(float Data, int InvocationId);
+float  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _f32_i32, )(float Data, uint InvocationId);
 #if defined(cl_khr_fp64)
-double __builtin_spirv_OpSubgroupShuffleINTEL_f64_i32(double Data, int InvocationId);
+double SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleINTEL, _f64_i32, )(double Data, uint InvocationId);
 #endif // defined(cl_khr_fp64)
 
-char   __builtin_spirv_OpSubgroupShuffleDownINTEL_i8_i8_i32(char Current, char Next, int Delta);
-short  __builtin_spirv_OpSubgroupShuffleDownINTEL_i16_i16_i32(short Current, short Next, int Delta);
-int    __builtin_spirv_OpSubgroupShuffleDownINTEL_i32_i32_i32(int Current, int Next, int Delta);
-long   __builtin_spirv_OpSubgroupShuffleDownINTEL_i64_i64_i32(long Current, long Next, int Delta);
+char   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _i8_i8_i32, )(char Current, char Next, uint Delta);
+short  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _i16_i16_i32, )(short Current, short Next, uint Delta);
+int    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _i32_i32_i32, )(int Current, int Next, uint Delta);
+long   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _i64_i64_i32, )(long Current, long Next, uint Delta);
 #if defined(cl_khr_fp16)
-half   __builtin_spirv_OpSubgroupShuffleDownINTEL_f16_f16_i32(half Current, half Next, int Delta);
+half   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _f16_f16_i32, )(half Current, half Next, uint Delta);
 #endif // defined(cl_khr_fp16)
-float  __builtin_spirv_OpSubgroupShuffleDownINTEL_f32_f32_i32(float Current, float Next, int Delta);
+float  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _f32_f32_i32, )(float Current, float Next, uint Delta);
 #if defined(cl_khr_fp64)
-double __builtin_spirv_OpSubgroupShuffleDownINTEL_f64_f64_i32(double Current, double Next, int Delta);
+double SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleDownINTEL, _f64_f64_i32, )(double Current, double Next, uint Delta);
 #endif // defined(cl_khr_fp64)
 
-char   __builtin_spirv_OpSubgroupShuffleUpINTEL_i8_i8_i32(char Previous, char Current, int Delta);
-short  __builtin_spirv_OpSubgroupShuffleUpINTEL_i16_i16_i32(short Previous, short Current, int Delta);
-int    __builtin_spirv_OpSubgroupShuffleUpINTEL_i32_i32_i32(int Previous, int Current, int Delta);
-long   __builtin_spirv_OpSubgroupShuffleUpINTEL_i64_i64_i32(long Previous, long Current, int Delta);
+char   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _i8_i8_i32, )(char Previous, char Current, uint Delta);
+short  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _i16_i16_i32, )(short Previous, short Current, uint Delta);
+int    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _i32_i32_i32, )(int Previous, int Current, uint Delta);
+long   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _i64_i64_i32, )(long Previous, long Current, uint Delta);
 #if defined(cl_khr_fp16)
-half   __builtin_spirv_OpSubgroupShuffleUpINTEL_f16_f16_i32(half Previous, half Current, int Delta);
+half   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _f16_f16_i32, )(half Previous, half Current, uint Delta);
 #endif // defined(cl_khr_fp16)
-float  __builtin_spirv_OpSubgroupShuffleUpINTEL_f32_f32_i32(float Previous, float Current, int Delta);
+float  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _f32_f32_i32, )(float Previous, float Current, uint Delta);
 #if defined(cl_khr_fp64)
-double __builtin_spirv_OpSubgroupShuffleUpINTEL_f64_f64_i32(double Previous, double Current, int Delta);
+double SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleUpINTEL, _f64_f64_i32, )(double Previous, double Current, uint Delta);
 #endif // defined(cl_khr_fp64)
 
-char   __builtin_spirv_OpSubgroupShuffleXorINTEL_i8_i32(char Data, int Value);
-short  __builtin_spirv_OpSubgroupShuffleXorINTEL_i16_i32(short Data, int Value);
-int    __builtin_spirv_OpSubgroupShuffleXorINTEL_i32_i32(int Data, int Value);
-long   __builtin_spirv_OpSubgroupShuffleXorINTEL_i64_i32(long Data, int Value);
+char   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _i8_i32, )(char Data, uint Value);
+short  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _i16_i32, )(short Data, uint Value);
+int    SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _i32_i32, )(int Data, uint Value);
+long   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _i64_i32, )(long Data, uint Value);
 #if defined(cl_khr_fp16)
-half   __builtin_spirv_OpSubgroupShuffleXorINTEL_f16_i32(half Data, int Value);
+half   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _f16_i32, )(half Data, uint Value);
 #endif // defined(cl_khr_fp16)
-float  __builtin_spirv_OpSubgroupShuffleXorINTEL_f32_i32(float Data, int Value);
+float  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _f32_i32, )(float Data, uint Value);
 #if defined(cl_khr_fp64)
-double __builtin_spirv_OpSubgroupShuffleXorINTEL_f64_i32(double Data, int Value);
+double SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupShuffleXorINTEL, _f64_i32, )(double Data, uint Value);
 #endif // defined(cl_khr_fp64)
 
 #ifdef cl_intel_subgroups_char
-char   __builtin_spirv_OpSubgroupImageBlockReadINTEL_i8_img2d_ro_v2i32(global Img2d_ro * image, int2 coord);
-char2  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v2i8_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-char4  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v4i8_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-char8  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v8i8_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-char16 __builtin_spirv_OpSubgroupImageBlockReadINTEL_v16i8_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
+char   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _i8_img2d_ro_v2i32, _Rchar)(global Img2d_ro * image, int2 coord);
+char2  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v2i8_img2d_ro_v2i32, _Rchar2)(global Img2d_ro* image, int2 coord);
+char4  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v4i8_img2d_ro_v2i32, _Rchar4)(global Img2d_ro* image, int2 coord);
+char8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v8i8_img2d_ro_v2i32, _Rchar8)(global Img2d_ro* image, int2 coord);
+char16 SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v16i8_img2d_ro_v2i32, _Rchar16)(global Img2d_ro* image, int2 coord);
 #endif // cl_intel_subgroups_char
 
-short   __builtin_spirv_OpSubgroupImageBlockReadINTEL_i16_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-short2  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v2i16_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-short4  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v4i16_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-short8  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v8i16_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
+short   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _i16_img2d_ro_v2i32, _Rshort)(global Img2d_ro* image, int2 coord);
+short2  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v2i16_img2d_ro_v2i32, _Rshort2)(global Img2d_ro* image, int2 coord);
+short4  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v4i16_img2d_ro_v2i32, _Rshort4)(global Img2d_ro* image, int2 coord);
+short8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v8i16_img2d_ro_v2i32, _Rshort8)(global Img2d_ro* image, int2 coord);
 
-int   __builtin_spirv_OpSubgroupImageBlockReadINTEL_i32_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-int2  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v2i32_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-int4  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v4i32_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-int8  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v8i32_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
+int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _i32_img2d_ro_v2i32, _Rint)(global Img2d_ro* image, int2 coord);
+int2  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v2i32_img2d_ro_v2i32, _Rint2)(global Img2d_ro* image, int2 coord);
+int4  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v4i32_img2d_ro_v2i32, _Rint4)(global Img2d_ro* image, int2 coord);
+int8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v8i32_img2d_ro_v2i32, _Rint8)(global Img2d_ro* image, int2 coord);
 
 #ifdef cl_intel_subgroups_long
-long   __builtin_spirv_OpSubgroupImageBlockReadINTEL_i64_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-long2  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v2i64_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-long4  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v4i64_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
-long8  __builtin_spirv_OpSubgroupImageBlockReadINTEL_v8i64_img2d_ro_v2i32(global Img2d_ro* image, int2 coord);
+long   SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _i64_img2d_ro_v2i32, _Rlong)(global Img2d_ro* image, int2 coord);
+long2  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v2i64_img2d_ro_v2i32, _Rlong2)(global Img2d_ro* image, int2 coord);
+long4  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v4i64_img2d_ro_v2i32, _Rlong4)(global Img2d_ro* image, int2 coord);
+long8  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SubgroupImageBlockReadINTEL, _v8i64_img2d_ro_v2i32, _Rlong8)(global Img2d_ro* image, int2 coord);
 #endif // cl_intel_subgroups_long
 
 #define DECL_SUB_GROUP_BROADCAST(TYPE, TYPE_ABBR)       \
@@ -4723,11 +4986,44 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupSMax, _i32_i32_i16, )(int Execution,
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupSMax, _i32_i32_i32, )(int Execution, int Operation, int X);
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupSMax, _i32_i32_i64, )(int Execution, int Operation, long X);
 
+char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupIMul, _i32_i32_i8, )(int Execution, int Operation, char X);
+short SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupIMul, _i32_i32_i16, )(int Execution, int Operation, short X);
+int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupIMul, _i32_i32_i32, )(int Execution, int Operation, int X);
+long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupIMul, _i32_i32_i64, )(int Execution, int Operation, long X);
+
+half   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupFMul, _i32_i32_f16, )(int Execution, int Operation, half X);
+float  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupFMul, _i32_i32_f32, )(int Execution, int Operation, float X);
+#if defined(cl_khr_fp64)
+double SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupFMul, _i32_i32_f64, )(int Execution, int Operation, double X);
+#endif // defined(cl_khr_fp64)
+
+char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseAnd, _i32_i32_i8, )(int Execution, int Operation, char X);
+short SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseAnd, _i32_i32_i16, )(int Execution, int Operation, short X);
+int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseAnd, _i32_i32_i32, )(int Execution, int Operation, int X);
+long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseAnd, _i32_i32_i64, )(int Execution, int Operation, long X);
+
+char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseOr, _i32_i32_i8, )(int Execution, int Operation, char X);
+short SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseOr, _i32_i32_i16, )(int Execution, int Operation, short X);
+int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseOr, _i32_i32_i32, )(int Execution, int Operation, int X);
+long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseOr, _i32_i32_i64, )(int Execution, int Operation, long X);
+
+char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseXor, _i32_i32_i8, )(int Execution, int Operation, char X);
+short SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseXor, _i32_i32_i16, )(int Execution, int Operation, short X);
+int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseXor, _i32_i32_i32, )(int Execution, int Operation, int X);
+long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupBitwiseXor, _i32_i32_i64, )(int Execution, int Operation, long X);
+
+bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupLogicalAnd, _i32_i32_i1, )(int Execution, int Operation, bool X);
+bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupLogicalOr, _i32_i32_i1, )(int Execution, int Operation, bool X);
+bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupLogicalXor, _i32_i32_i1, )(int Execution, int Operation, bool X);
+
 // Device-Side Enqueue Instructions
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-uint __builtin_spirv_OpEnqueueMarker_i64_i32_p0i64_p0i64(Queue_t Queue, uint NumEvents, private ClkEvent_t *WaitEvents, private ClkEvent_t *RetEvent);
-uint __builtin_spirv_OpEnqueueMarker_i64_i32_p3i64_p3i64(Queue_t Queue, uint NumEvents, local ClkEvent_t *WaitEvents, local ClkEvent_t *RetEvent);
-uint __builtin_spirv_OpEnqueueMarker_i64_i32_p4i64_p4i64(Queue_t Queue, uint NumEvents, generic ClkEvent_t *WaitEvents, generic ClkEvent_t *RetEvent);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(EnqueueMarker, _i64_i32_p0i64_p0i64, )(
+    __spirv_Queue Queue, uint NumEvents, __spirv_DeviceEvent private* WaitEvents, __spirv_DeviceEvent private* RetEvent);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(EnqueueMarker, _i64_i32_p3i64_p3i64, )(
+    __spirv_Queue Queue, uint NumEvents, __spirv_DeviceEvent local* WaitEvents, __spirv_DeviceEvent local* RetEvent);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(EnqueueMarker, _i64_i32_p4i64_p4i64, )(
+    __spirv_Queue Queue, uint NumEvents, __spirv_DeviceEvent generic* WaitEvents, __spirv_DeviceEvent generic* RetEvent);
 
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
@@ -4745,521 +5041,440 @@ uint __builtin_spirv_OpGetKernelWorkGroupSize_fp0i32_p0i8_i32_i32(uchar* Invoke,
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(RetainEvent, _i64, )(ClkEvent_t Event);
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReleaseEvent, _i64, )(ClkEvent_t Event);
-ClkEvent_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(CreateUserEvent, , )(void);
-bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(IsValidEvent, _i64, )(ClkEvent_t Event);
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(SetUserEventStatus, _i64_i32, )(ClkEvent_t Event, int Status);
-void SPIRV_OVERLOADABLE SPIRV_BUILTIN(CaptureEventProfilingInfo, _i64_i32_p1i8, )(ClkEvent_t Event, int ProfilingInfo, global char *Value);
-Queue_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetDefaultQueue, , )(void);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(RetainEvent, _i64, )(__spirv_DeviceEvent Event);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReleaseEvent, _i64, )(__spirv_DeviceEvent Event);
+__spirv_DeviceEvent SPIRV_OVERLOADABLE SPIRV_BUILTIN(CreateUserEvent, , )(void);
+bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(IsValidEvent, _i64, )(__spirv_DeviceEvent Event);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(SetUserEventStatus, _i64_i32, )(__spirv_DeviceEvent Event, int Status);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(CaptureEventProfilingInfo, _i64_i32_p1i8, )(__spirv_DeviceEvent Event, int ProfilingInfo, global char *Value);
+__spirv_Queue SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetDefaultQueue, , )(void);
 
-Ndrange_t __builtin_spirv_OpBuildNDRange_i32_i32_i32(uint GlobalWorkSize, uint LocalWorkSize, uint GlobalWorkOffset);
-Ndrange_t __builtin_spirv_OpBuildNDRange_i64_i64_i64(ulong GlobalWorkSize, ulong LocalWorkSize, ulong GlobalWorkOffset);
-Ndrange_t __builtin_spirv_OpBuildNDRange_a2i32_a2i32_a2i32(uint GlobalWorkSize[2], uint LocalWorkSize[2], uint GlobalWorkOffset[2]);
-Ndrange_t __builtin_spirv_OpBuildNDRange_a2i64_a2i64_a2i64(ulong GlobalWorkSize[2], ulong LocalWorkSize[2], ulong GlobalWorkOffset[2]);
-Ndrange_t __builtin_spirv_OpBuildNDRange_a3i32_a3i32_a3i32(uint GlobalWorkSize[3], uint LocalWorkSize[3], uint GlobalWorkOffset[3]);
-Ndrange_t __builtin_spirv_OpBuildNDRange_a3i64_a3i64_a3i64(ulong GlobalWorkSize[3], ulong LocalWorkSize[3], ulong GlobalWorkOffset[3]);
+#define DECL_BUILD_NDRANGE(TYPE, TYPE_MANGLING) \
+Ndrange_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(BuildNDRange, _##TYPE_MANGLING##_##TYPE_MANGLING##_##TYPE_MANGLING, _1D)(TYPE GlobalWorkSize, TYPE LocalWorkSize, TYPE GlobalWorkOffset); \
+Ndrange_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(BuildNDRange, _a2##TYPE_MANGLING##_a2##TYPE_MANGLING##_a2##TYPE_MANGLING, _2D)(TYPE GlobalWorkSize[2], TYPE LocalWorkSize[2], TYPE GlobalWorkOffset[2]); \
+Ndrange_t SPIRV_OVERLOADABLE SPIRV_BUILTIN(BuildNDRange, _a3##TYPE_MANGLING##_a3##TYPE_MANGLING##_a3##TYPE_MANGLING, _3D)(TYPE GlobalWorkSize[3], TYPE LocalWorkSize[3], TYPE GlobalWorkOffset[3]);
+
+#if __32bit__ > 0
+DECL_BUILD_NDRANGE(int, i32)
+#else
+DECL_BUILD_NDRANGE(long, i64)
+#endif
+
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
 // Pipe Instructions
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReadPipe, _Pipe_ro_p4i8_i32, )(__spirv_Pipe_ro Pipe, generic char* Pointer, int PacketSize /*, int PacketAlignment*/);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(WritePipe, _Pipe_wo_p4i8_i32, )(__spirv_Pipe_wo Pipe, generic char* Pointer, int PacketSize/*, int PacketAlignment*/);
 
-int __builtin_spirv_OpReadPipe_i64_p4i8_i32(Pipe_t Pipe, generic void *Pointer, uint PacketSize/*, uint PacketAlignment*/);
-int __builtin_spirv_OpWritePipe_i64_p4i8_i32(Pipe_wo_t Pipe, const generic void *Pointer, uint PacketSize/*, uint PacketAlignment*/);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReservedReadPipe, _Pipe_ro_ReserveId_i32_p4i8_i32, )(__spirv_Pipe_ro Pipe, __spirv_ReserveId ReserveId, int Index, generic char* Pointer, int PacketSize/*, int PacketAlignment*/);
+int SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReservedWritePipe, _Pipe_wo_ReserveId_i32_p4i8_i32, )(__spirv_Pipe_wo Pipe, __spirv_ReserveId ReserveId, int Index, generic char* Pointer, int PacketSize/*, int PacketAlignment*/);
 
-int __builtin_spirv_OpReservedReadPipe_i64_i64_i32_p4i8_i32(Pipe_t Pipe, ReserveId_t ReserveId, uint Index, generic void *Pointer, uint PacketSize/*, uint PacketAlignment*/);
-int __builtin_spirv_OpReservedWritePipe_i64_i64_i32_p4i8_i32(Pipe_wo_t Pipe, ReserveId_t ReserveId, uint Index, generic const void *Pointer, uint PacketSize/*, uint PacketAlignment*/);
+__spirv_ReserveId SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReserveReadPipePackets, _Pipe_ro_i32_i32, )(__spirv_Pipe_ro Pipe, int NumPackets, int PacketSize/*, int PacketAlignment*/);
+__spirv_ReserveId SPIRV_OVERLOADABLE SPIRV_BUILTIN(ReserveWritePipePackets, _Pipe_wo_i32_i32, )(__spirv_Pipe_wo Pipe, int NumPackets, int PacketSize/*, int PacketAlignment*/);
 
-ReserveId_t __builtin_spirv_OpReserveReadPipePackets_i64_i32_i32(Pipe_t Pipe, uint NumPackets, uint PacketSize/*, uint PacketAlignment*/);
-ReserveId_t __builtin_spirv_OpReserveWritePipePackets_i64_i32_i32(Pipe_wo_t Pipe, uint NumPackets, uint PacketSize/*, uint PacketAlignment*/);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(CommitReadPipe, _Pipe_ro_ReserveId_i32, )(__spirv_Pipe_ro Pipe, __spirv_ReserveId ReserveId, int PacketSize/*, int PacketAlignment*/);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(CommitWritePipe, _Pipe_wo_ReserveId_i32, )(__spirv_Pipe_wo Pipe, __spirv_ReserveId ReserveId, int PacketSize/*, int PacketAlignment*/);
 
-void __builtin_spirv_OpCommitReadPipe_i64_i64_i32(Pipe_t Pipe, ReserveId_t ReserveId, uint PacketSize/*, uint PacketAlignment*/);
-void __builtin_spirv_OpCommitWritePipe_i64_i64_i32(Pipe_wo_t Pipe, ReserveId_t ReserveId, uint PacketSize/*, uint PacketAlignment*/);
+bool SPIRV_OVERLOADABLE SPIRV_BUILTIN(IsValidReserveId, _ReserveId, )(__spirv_ReserveId ReserveId);
 
-bool __builtin_spirv_OpIsValidReserveId_i64(ReserveId_t ReserveId);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetNumPipePackets, _Pipe_ro_i32, )(__spirv_Pipe_ro Pipe, int PacketSize/*, int PacketAlignment*/);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetNumPipePackets, _Pipe_wo_i32, )(__spirv_Pipe_wo Pipe, int PacketSize/*, int PacketAlignment*/);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetMaxPipePackets, _Pipe_ro_i32, )(__spirv_Pipe_ro Pipe, int PacketSize/*, int PacketAlignment*/);
+uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GetMaxPipePackets, _Pipe_wo_i32, )(__spirv_Pipe_wo Pipe, int PacketSize/*, int PacketAlignment*/);
 
-uint __builtin_spirv_OpGetNumPipePackets_i64_i32(Pipe_t Pipe, uint PacketSize/*, uint PacketAlignment*/);
-uint __builtin_spirv_OpGetMaxPipePackets_i64_i32(Pipe_t Pipe, uint PacketSize/*, uint PacketAlignment*/);
+__spirv_ReserveId SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupReserveReadPipePackets, _i32_Pipe_ro_i32_i32, )(int Execution, __spirv_Pipe_ro Pipe, int NumPackets, int PacketSize/*, int PacketAlignment*/);
+__spirv_ReserveId SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupReserveWritePipePackets, _i32_Pipe_wo_i32_i32, )(int Execution, __spirv_Pipe_wo Pipe, int NumPackets, int PacketSize/*, int PacketAlignment*/);
 
-ReserveId_t __builtin_spirv_OpGroupReserveReadPipePackets_i32_i64_i32_i32(uint Execution, Pipe_t Pipe, uint NumPackets, uint PacketSize/*, uint PacketAlignment*/);
-ReserveId_t __builtin_spirv_OpGroupReserveWritePipePackets_i32_i64_i32_i32(uint Execution, Pipe_wo_t Pipe, uint NumPackets, uint PacketSize/*, uint PacketAlignment*/);
-
-void __builtin_spirv_OpGroupCommitReadPipe_i32_i64_i64_i32(uint Execution, Pipe_t Pipe, ReserveId_t ReserveId, uint PacketSize/*, uint PacketAlignment*/);
-void __builtin_spirv_OpGroupCommitWritePipe_i32_i64_i64_i32(uint Execution, Pipe_wo_t Pipe, ReserveId_t ReserveId, uint PacketSize/*, uint PacketAlignment*/);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupCommitReadPipe, _i32_Pipe_ro_ReserveId_i32, )(int Execution, __spirv_Pipe_ro Pipe, __spirv_ReserveId ReserveId, int PacketSize/*, int PacketAlignment*/);
+void SPIRV_OVERLOADABLE SPIRV_BUILTIN(GroupCommitWritePipe, _i32_Pipe_wo_ReserveId_i32, )(int Execution, __spirv_Pipe_wo Pipe, __spirv_ReserveId ReserveId, int PacketSize/*, int PacketAlignment*/);
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 
 #include "spirv_math.h"
 
-uchar2 __builtin_spirv_OpenCL_shuffle_v2i8_v2i8(uchar2 v, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle_v4i8_v2i8(uchar4 v, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle_v8i8_v2i8(uchar8 v, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle_v16i8_v2i8(uchar16 v, uchar2 m);
-uchar4 __builtin_spirv_OpenCL_shuffle_v2i8_v4i8(uchar2 v, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle_v4i8_v4i8(uchar4 v, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle_v8i8_v4i8(uchar8 v, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle_v16i8_v4i8(uchar16 v, uchar4 m);
-uchar8 __builtin_spirv_OpenCL_shuffle_v2i8_v8i8(uchar2 v, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle_v4i8_v8i8(uchar4 v, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle_v8i8_v8i8(uchar8 v, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle_v16i8_v8i8(uchar16 v, uchar8 m);
-uchar16 __builtin_spirv_OpenCL_shuffle_v2i8_v16i8(uchar2 v, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle_v4i8_v16i8(uchar4 v, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle_v8i8_v16i8(uchar8 v, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle_v16i8_v16i8(uchar16 v, uchar16 m);
-ushort2 __builtin_spirv_OpenCL_shuffle_v2i16_v2i16(ushort2 v, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle_v4i16_v2i16(ushort4 v, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle_v8i16_v2i16(ushort8 v, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle_v16i16_v2i16(ushort16 v, ushort2 m);
-ushort4 __builtin_spirv_OpenCL_shuffle_v2i16_v4i16(ushort2 v, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle_v4i16_v4i16(ushort4 v, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle_v8i16_v4i16(ushort8 v, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle_v16i16_v4i16(ushort16 v, ushort4 m);
-ushort8 __builtin_spirv_OpenCL_shuffle_v2i16_v8i16(ushort2 v, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle_v4i16_v8i16(ushort4 v, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle_v8i16_v8i16(ushort8 v, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle_v16i16_v8i16(ushort16 v, ushort8 m);
-ushort16 __builtin_spirv_OpenCL_shuffle_v2i16_v16i16(ushort2 v, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle_v4i16_v16i16(ushort4 v, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle_v8i16_v16i16(ushort8 v, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle_v16i16_v16i16(ushort16 v, ushort16 m);
-uint2 __builtin_spirv_OpenCL_shuffle_v2i32_v2i32(uint2 v, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle_v4i32_v2i32(uint4 v, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle_v8i32_v2i32(uint8 v, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle_v16i32_v2i32(uint16 v, uint2 m);
-uint4 __builtin_spirv_OpenCL_shuffle_v2i32_v4i32(uint2 v, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle_v4i32_v4i32(uint4 v, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle_v8i32_v4i32(uint8 v, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle_v16i32_v4i32(uint16 v, uint4 m);
-uint8 __builtin_spirv_OpenCL_shuffle_v2i32_v8i32(uint2 v, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle_v4i32_v8i32(uint4 v, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle_v8i32_v8i32(uint8 v, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle_v16i32_v8i32(uint16 v, uint8 m);
-uint16 __builtin_spirv_OpenCL_shuffle_v2i32_v16i32(uint2 v, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle_v4i32_v16i32(uint4 v, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle_v8i32_v16i32(uint8 v, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle_v16i32_v16i32(uint16 v, uint16 m);
-ulong2 __builtin_spirv_OpenCL_shuffle_v2i64_v2i64(ulong2 v, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle_v4i64_v2i64(ulong4 v, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle_v8i64_v2i64(ulong8 v, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle_v16i64_v2i64(ulong16 v, ulong2 m);
-ulong4 __builtin_spirv_OpenCL_shuffle_v2i64_v4i64(ulong2 v, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle_v4i64_v4i64(ulong4 v, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle_v8i64_v4i64(ulong8 v, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle_v16i64_v4i64(ulong16 v, ulong4 m);
-ulong8 __builtin_spirv_OpenCL_shuffle_v2i64_v8i64(ulong2 v, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle_v4i64_v8i64(ulong4 v, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle_v8i64_v8i64(ulong8 v, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle_v16i64_v8i64(ulong16 v, ulong8 m);
-ulong16 __builtin_spirv_OpenCL_shuffle_v2i64_v16i64(ulong2 v, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle_v4i64_v16i64(ulong4 v, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle_v8i64_v16i64(ulong8 v, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle_v16i64_v16i64(ulong16 v, ulong16 m);
-float2 __builtin_spirv_OpenCL_shuffle_v2f32_v2i32(float2 v, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle_v4f32_v2i32(float4 v, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle_v8f32_v2i32(float8 v, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle_v16f32_v2i32(float16 v, uint2 m);
-float4 __builtin_spirv_OpenCL_shuffle_v2f32_v4i32(float2 v, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle_v4f32_v4i32(float4 v, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle_v8f32_v4i32(float8 v, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle_v16f32_v4i32(float16 v, uint4 m);
-float8 __builtin_spirv_OpenCL_shuffle_v2f32_v8i32(float2 v, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle_v4f32_v8i32(float4 v, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle_v8f32_v8i32(float8 v, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle_v16f32_v8i32(float16 v, uint8 m);
-float16 __builtin_spirv_OpenCL_shuffle_v2f32_v16i32(float2 v, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle_v4f32_v16i32(float4 v, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle_v8f32_v16i32(float8 v, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle_v16f32_v16i32(float16 v, uint16 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i8_v2i8, )(char2 v, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i8_v2i8, )(char4 v, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i8_v2i8, )(char8 v, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i8_v2i8, )(char16 v, char2 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i8_v4i8, )(char2 v, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i8_v4i8, )(char4 v, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i8_v4i8, )(char8 v, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i8_v4i8, )(char16 v, char4 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i8_v8i8, )(char2 v, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i8_v8i8, )(char4 v, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i8_v8i8, )(char8 v, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i8_v8i8, )(char16 v, char8 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i8_v16i8, )(char2 v, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i8_v16i8, )(char4 v, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i8_v16i8, )(char8 v, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i8_v16i8, )(char16 v, char16 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i16_v2i16, )(short2 v, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i16_v2i16, )(short4 v, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i16_v2i16, )(short8 v, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i16_v2i16, )(short16 v, short2 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i16_v4i16, )(short2 v, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i16_v4i16, )(short4 v, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i16_v4i16, )(short8 v, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i16_v4i16, )(short16 v, short4 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i16_v8i16, )(short2 v, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i16_v8i16, )(short4 v, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i16_v8i16, )(short8 v, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i16_v8i16, )(short16 v, short8 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i16_v16i16, )(short2 v, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i16_v16i16, )(short4 v, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i16_v16i16, )(short8 v, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i16_v16i16, )(short16 v, short16 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i32_v2i32, )(int2 v, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i32_v2i32, )(int4 v, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i32_v2i32, )(int8 v, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i32_v2i32, )(int16 v, int2 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i32_v4i32, )(int2 v, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i32_v4i32, )(int4 v, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i32_v4i32, )(int8 v, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i32_v4i32, )(int16 v, int4 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i32_v8i32, )(int2 v, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i32_v8i32, )(int4 v, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i32_v8i32, )(int8 v, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i32_v8i32, )(int16 v, int8 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i32_v16i32, )(int2 v, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i32_v16i32, )(int4 v, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i32_v16i32, )(int8 v, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i32_v16i32, )(int16 v, int16 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i64_v2i64, )(long2 v, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i64_v2i64, )(long4 v, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i64_v2i64, )(long8 v, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i64_v2i64, )(long16 v, long2 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i64_v4i64, )(long2 v, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i64_v4i64, )(long4 v, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i64_v4i64, )(long8 v, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i64_v4i64, )(long16 v, long4 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i64_v8i64, )(long2 v, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i64_v8i64, )(long4 v, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i64_v8i64, )(long8 v, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i64_v8i64, )(long16 v, long8 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2i64_v16i64, )(long2 v, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4i64_v16i64, )(long4 v, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8i64_v16i64, )(long8 v, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16i64_v16i64, )(long16 v, long16 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f32_v2i32, )(float2 v, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f32_v2i32, )(float4 v, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f32_v2i32, )(float8 v, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f32_v2i32, )(float16 v, int2 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f32_v4i32, )(float2 v, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f32_v4i32, )(float4 v, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f32_v4i32, )(float8 v, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f32_v4i32, )(float16 v, int4 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f32_v8i32, )(float2 v, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f32_v8i32, )(float4 v, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f32_v8i32, )(float8 v, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f32_v8i32, )(float16 v, int8 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f32_v16i32, )(float2 v, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f32_v16i32, )(float4 v, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f32_v16i32, )(float8 v, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f32_v16i32, )(float16 v, int16 m);
 
-uchar2 __builtin_spirv_OpenCL_shuffle2_v2i8_v2i8_v2i8(uchar2 v0, uchar2 v1, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle2_v4i8_v4i8_v2i8(uchar4 v0, uchar4 v1, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle2_v8i8_v8i8_v2i8(uchar8 v0, uchar8 v1, uchar2 m);
-uchar2 __builtin_spirv_OpenCL_shuffle2_v16i8_v16i8_v2i8(uchar16 v0, uchar16 v1, uchar2 m);
-uchar4 __builtin_spirv_OpenCL_shuffle2_v2i8_v2i8_v4i8(uchar2 v0, uchar2 v1, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle2_v4i8_v4i8_v4i8(uchar4 v0, uchar4 v1, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle2_v8i8_v8i8_v4i8(uchar8 v0, uchar8 v1, uchar4 m);
-uchar4 __builtin_spirv_OpenCL_shuffle2_v16i8_v16i8_v4i8(uchar16 v0, uchar16 v1, uchar4 m);
-uchar8 __builtin_spirv_OpenCL_shuffle2_v2i8_v2i8_v8i8(uchar2 v0, uchar2 v1, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle2_v4i8_v4i8_v8i8(uchar4 v0, uchar4 v1, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle2_v8i8_v8i8_v8i8(uchar8 v0, uchar8 v1, uchar8 m);
-uchar8 __builtin_spirv_OpenCL_shuffle2_v16i8_v16i8_v8i8(uchar16 v0, uchar16 v1, uchar8 m);
-uchar16 __builtin_spirv_OpenCL_shuffle2_v2i8_v2i8_v16i8(uchar2 v0, uchar2 v1, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle2_v4i8_v4i8_v16i8(uchar4 v0, uchar4 v1, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle2_v8i8_v8i8_v16i8(uchar8 v0, uchar8 v1, uchar16 m);
-uchar16 __builtin_spirv_OpenCL_shuffle2_v16i8_v16i8_v16i8(uchar16 v0, uchar16 v1, uchar16 m);
-ushort2 __builtin_spirv_OpenCL_shuffle2_v2i16_v2i16_v2i16(ushort2 v0, ushort2 v1, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle2_v4i16_v4i16_v2i16(ushort4 v0, ushort4 v1, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle2_v8i16_v8i16_v2i16(ushort8 v0, ushort8 v1, ushort2 m);
-ushort2 __builtin_spirv_OpenCL_shuffle2_v16i16_v16i16_v2i16(ushort16 v0, ushort16 v1, ushort2 m);
-ushort4 __builtin_spirv_OpenCL_shuffle2_v2i16_v2i16_v4i16(ushort2 v0, ushort2 v1, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle2_v4i16_v4i16_v4i16(ushort4 v0, ushort4 v1, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle2_v8i16_v8i16_v4i16(ushort8 v0, ushort8 v1, ushort4 m);
-ushort4 __builtin_spirv_OpenCL_shuffle2_v16i16_v16i16_v4i16(ushort16 v0, ushort16 v1, ushort4 m);
-ushort8 __builtin_spirv_OpenCL_shuffle2_v2i16_v2i16_v8i16(ushort2 v0, ushort2 v1, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle2_v4i16_v4i16_v8i16(ushort4 v0, ushort4 v1, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle2_v8i16_v8i16_v8i16(ushort8 v0, ushort8 v1, ushort8 m);
-ushort8 __builtin_spirv_OpenCL_shuffle2_v16i16_v16i16_v8i16(ushort16 v0, ushort16 v1, ushort8 m);
-ushort16 __builtin_spirv_OpenCL_shuffle2_v2i16_v2i16_v16i16(ushort2 v0, ushort2 v1, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle2_v4i16_v4i16_v16i16(ushort4 v0, ushort4 v1, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle2_v8i16_v8i16_v16i16(ushort8 v0, ushort8 v1, ushort16 m);
-ushort16 __builtin_spirv_OpenCL_shuffle2_v16i16_v16i16_v16i16(ushort16 v0, ushort16 v1, ushort16 m);
-uint2 __builtin_spirv_OpenCL_shuffle2_v2i32_v2i32_v2i32(uint2 v0, uint2 v1, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle2_v4i32_v4i32_v2i32(uint4 v0, uint4 v1, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle2_v8i32_v8i32_v2i32(uint8 v0, uint8 v1, uint2 m);
-uint2 __builtin_spirv_OpenCL_shuffle2_v16i32_v16i32_v2i32(uint16 v0, uint16 v1, uint2 m);
-uint4 __builtin_spirv_OpenCL_shuffle2_v2i32_v2i32_v4i32(uint2 v0, uint2 v1, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle2_v4i32_v4i32_v4i32(uint4 v0, uint4 v1, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle2_v8i32_v8i32_v4i32(uint8 v0, uint8 v1, uint4 m);
-uint4 __builtin_spirv_OpenCL_shuffle2_v16i32_v16i32_v4i32(uint16 v0, uint16 v1, uint4 m);
-uint8 __builtin_spirv_OpenCL_shuffle2_v2i32_v2i32_v8i32(uint2 v0, uint2 v1, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle2_v4i32_v4i32_v8i32(uint4 v0, uint4 v1, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle2_v8i32_v8i32_v8i32(uint8 v0, uint8 v1, uint8 m);
-uint8 __builtin_spirv_OpenCL_shuffle2_v16i32_v16i32_v8i32(uint16 v0, uint16 v1, uint8 m);
-uint16 __builtin_spirv_OpenCL_shuffle2_v2i32_v2i32_v16i32(uint2 v0, uint2 v1, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle2_v4i32_v4i32_v16i32(uint4 v0, uint4 v1, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle2_v8i32_v8i32_v16i32(uint8 v0, uint8 v1, uint16 m);
-uint16 __builtin_spirv_OpenCL_shuffle2_v16i32_v16i32_v16i32(uint16 v0, uint16 v1, uint16 m);
-ulong2 __builtin_spirv_OpenCL_shuffle2_v2i64_v2i64_v2i64(ulong2 v0, ulong2 v1, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle2_v4i64_v4i64_v2i64(ulong4 v0, ulong4 v1, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle2_v8i64_v8i64_v2i64(ulong8 v0, ulong8 v1, ulong2 m);
-ulong2 __builtin_spirv_OpenCL_shuffle2_v16i64_v16i64_v2i64(ulong16 v0, ulong16 v1, ulong2 m);
-ulong4 __builtin_spirv_OpenCL_shuffle2_v2i64_v2i64_v4i64(ulong2 v0, ulong2 v1, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle2_v4i64_v4i64_v4i64(ulong4 v0, ulong4 v1, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle2_v8i64_v8i64_v4i64(ulong8 v0, ulong8 v1, ulong4 m);
-ulong4 __builtin_spirv_OpenCL_shuffle2_v16i64_v16i64_v4i64(ulong16 v0, ulong16 v1, ulong4 m);
-ulong8 __builtin_spirv_OpenCL_shuffle2_v2i64_v2i64_v8i64(ulong2 v0, ulong2 v1, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle2_v4i64_v4i64_v8i64(ulong4 v0, ulong4 v1, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle2_v8i64_v8i64_v8i64(ulong8 v0, ulong8 v1, ulong8 m);
-ulong8 __builtin_spirv_OpenCL_shuffle2_v16i64_v16i64_v8i64(ulong16 v0, ulong16 v1, ulong8 m);
-ulong16 __builtin_spirv_OpenCL_shuffle2_v2i64_v2i64_v16i64(ulong2 v0, ulong2 v1, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle2_v4i64_v4i64_v16i64(ulong4 v0, ulong4 v1, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle2_v8i64_v8i64_v16i64(ulong8 v0, ulong8 v1, ulong16 m);
-ulong16 __builtin_spirv_OpenCL_shuffle2_v16i64_v16i64_v16i64(ulong16 v0, ulong16 v1, ulong16 m);
-float2 __builtin_spirv_OpenCL_shuffle2_v2f32_v2f32_v2i32(float2 v0, float2 v1, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle2_v4f32_v4f32_v2i32(float4 v0, float4 v1, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle2_v8f32_v8f32_v2i32(float8 v0, float8 v1, uint2 m);
-float2 __builtin_spirv_OpenCL_shuffle2_v16f32_v16f32_v2i32(float16 v0, float16 v1, uint2 m);
-float4 __builtin_spirv_OpenCL_shuffle2_v2f32_v2f32_v4i32(float2 v0, float2 v1, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle2_v4f32_v4f32_v4i32(float4 v0, float4 v1, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle2_v8f32_v8f32_v4i32(float8 v0, float8 v1, uint4 m);
-float4 __builtin_spirv_OpenCL_shuffle2_v16f32_v16f32_v4i32(float16 v0, float16 v1, uint4 m);
-float8 __builtin_spirv_OpenCL_shuffle2_v2f32_v2f32_v8i32(float2 v0, float2 v1, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle2_v4f32_v4f32_v8i32(float4 v0, float4 v1, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle2_v8f32_v8f32_v8i32(float8 v0, float8 v1, uint8 m);
-float8 __builtin_spirv_OpenCL_shuffle2_v16f32_v16f32_v8i32(float16 v0, float16 v1, uint8 m);
-float16 __builtin_spirv_OpenCL_shuffle2_v2f32_v2f32_v16i32(float2 v0, float2 v1, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle2_v4f32_v4f32_v16i32(float4 v0, float4 v1, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle2_v8f32_v8f32_v16i32(float8 v0, float8 v1, uint16 m);
-float16 __builtin_spirv_OpenCL_shuffle2_v16f32_v16f32_v16i32(float16 v0, float16 v1, uint16 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i8_v2i8_v2i8, )(char2 v0, char2 v1, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i8_v4i8_v2i8, )(char4 v0, char4 v1, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i8_v8i8_v2i8, )(char8 v0, char8 v1, char2 m);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i8_v16i8_v2i8, )(char16 v0, char16 v1, char2 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i8_v2i8_v4i8, )(char2 v0, char2 v1, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i8_v4i8_v4i8, )(char4 v0, char4 v1, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i8_v8i8_v4i8, )(char8 v0, char8 v1, char4 m);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i8_v16i8_v4i8, )(char16 v0, char16 v1, char4 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i8_v2i8_v8i8, )(char2 v0, char2 v1, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i8_v4i8_v8i8, )(char4 v0, char4 v1, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i8_v8i8_v8i8, )(char8 v0, char8 v1, char8 m);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i8_v16i8_v8i8, )(char16 v0, char16 v1, char8 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i8_v2i8_v16i8, )(char2 v0, char2 v1, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i8_v4i8_v16i8, )(char4 v0, char4 v1, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i8_v8i8_v16i8, )(char8 v0, char8 v1, char16 m);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i8_v16i8_v16i8, )(char16 v0, char16 v1, char16 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i16_v2i16_v2i16, )(short2 v0, short2 v1, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i16_v4i16_v2i16, )(short4 v0, short4 v1, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i16_v8i16_v2i16, )(short8 v0, short8 v1, short2 m);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i16_v16i16_v2i16, )(short16 v0, short16 v1, short2 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i16_v2i16_v4i16, )(short2 v0, short2 v1, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i16_v4i16_v4i16, )(short4 v0, short4 v1, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i16_v8i16_v4i16, )(short8 v0, short8 v1, short4 m);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i16_v16i16_v4i16, )(short16 v0, short16 v1, short4 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i16_v2i16_v8i16, )(short2 v0, short2 v1, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i16_v4i16_v8i16, )(short4 v0, short4 v1, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i16_v8i16_v8i16, )(short8 v0, short8 v1, short8 m);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i16_v16i16_v8i16, )(short16 v0, short16 v1, short8 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i16_v2i16_v16i16, )(short2 v0, short2 v1, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i16_v4i16_v16i16, )(short4 v0, short4 v1, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i16_v8i16_v16i16, )(short8 v0, short8 v1, short16 m);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i16_v16i16_v16i16, )(short16 v0, short16 v1, short16 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i32_v2i32_v2i32, )(int2 v0, int2 v1, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i32_v4i32_v2i32, )(int4 v0, int4 v1, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i32_v8i32_v2i32, )(int8 v0, int8 v1, int2 m);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i32_v16i32_v2i32, )(int16 v0, int16 v1, int2 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i32_v2i32_v4i32, )(int2 v0, int2 v1, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i32_v4i32_v4i32, )(int4 v0, int4 v1, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i32_v8i32_v4i32, )(int8 v0, int8 v1, int4 m);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i32_v16i32_v4i32, )(int16 v0, int16 v1, int4 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i32_v2i32_v8i32, )(int2 v0, int2 v1, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i32_v4i32_v8i32, )(int4 v0, int4 v1, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i32_v8i32_v8i32, )(int8 v0, int8 v1, int8 m);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i32_v16i32_v8i32, )(int16 v0, int16 v1, int8 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i32_v2i32_v16i32, )(int2 v0, int2 v1, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i32_v4i32_v16i32, )(int4 v0, int4 v1, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i32_v8i32_v16i32, )(int8 v0, int8 v1, int16 m);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i32_v16i32_v16i32, )(int16 v0, int16 v1, int16 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i64_v2i64_v2i64, )(long2 v0, long2 v1, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i64_v4i64_v2i64, )(long4 v0, long4 v1, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i64_v8i64_v2i64, )(long8 v0, long8 v1, long2 m);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i64_v16i64_v2i64, )(long16 v0, long16 v1, long2 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i64_v2i64_v4i64, )(long2 v0, long2 v1, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i64_v4i64_v4i64, )(long4 v0, long4 v1, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i64_v8i64_v4i64, )(long8 v0, long8 v1, long4 m);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i64_v16i64_v4i64, )(long16 v0, long16 v1, long4 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i64_v2i64_v8i64, )(long2 v0, long2 v1, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i64_v4i64_v8i64, )(long4 v0, long4 v1, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i64_v8i64_v8i64, )(long8 v0, long8 v1, long8 m);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i64_v16i64_v8i64, )(long16 v0, long16 v1, long8 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2i64_v2i64_v16i64, )(long2 v0, long2 v1, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4i64_v4i64_v16i64, )(long4 v0, long4 v1, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8i64_v8i64_v16i64, )(long8 v0, long8 v1, long16 m);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16i64_v16i64_v16i64, )(long16 v0, long16 v1, long16 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f32_v2f32_v2i32, )(float2 v0, float2 v1, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f32_v4f32_v2i32, )(float4 v0, float4 v1, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f32_v8f32_v2i32, )(float8 v0, float8 v1, int2 m);
+float2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f32_v16f32_v2i32, )(float16 v0, float16 v1, int2 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f32_v2f32_v4i32, )(float2 v0, float2 v1, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f32_v4f32_v4i32, )(float4 v0, float4 v1, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f32_v8f32_v4i32, )(float8 v0, float8 v1, int4 m);
+float4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f32_v16f32_v4i32, )(float16 v0, float16 v1, int4 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f32_v2f32_v8i32, )(float2 v0, float2 v1, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f32_v4f32_v8i32, )(float4 v0, float4 v1, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f32_v8f32_v8i32, )(float8 v0, float8 v1, int8 m);
+float8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f32_v16f32_v8i32, )(float16 v0, float16 v1, int8 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f32_v2f32_v16i32, )(float2 v0, float2 v1, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f32_v4f32_v16i32, )(float4 v0, float4 v1, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f32_v8f32_v16i32, )(float8 v0, float8 v1, int16 m);
+float16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f32_v16f32_v16i32, )(float16 v0, float16 v1, int16 m);
 
-half2 __builtin_spirv_OpenCL_shuffle_v2f16_v2i16(half2 v, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle_v4f16_v2i16(half4 v, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle_v8f16_v2i16(half8 v, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle_v16f16_v2i16(half16 v, ushort2 m);
-half4 __builtin_spirv_OpenCL_shuffle_v2f16_v4i16(half2 v, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle_v4f16_v4i16(half4 v, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle_v8f16_v4i16(half8 v, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle_v16f16_v4i16(half16 v, ushort4 m);
-half8 __builtin_spirv_OpenCL_shuffle_v2f16_v8i16(half2 v, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle_v4f16_v8i16(half4 v, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle_v8f16_v8i16(half8 v, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle_v16f16_v8i16(half16 v, ushort8 m);
-half16 __builtin_spirv_OpenCL_shuffle_v2f16_v16i16(half2 v, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle_v4f16_v16i16(half4 v, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle_v8f16_v16i16(half8 v, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle_v16f16_v16i16(half16 v, ushort16 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f16_v2i16, )(half2 v, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f16_v2i16, )(half4 v, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f16_v2i16, )(half8 v, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f16_v2i16, )(half16 v, short2 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f16_v4i16, )(half2 v, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f16_v4i16, )(half4 v, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f16_v4i16, )(half8 v, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f16_v4i16, )(half16 v, short4 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f16_v8i16, )(half2 v, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f16_v8i16, )(half4 v, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f16_v8i16, )(half8 v, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f16_v8i16, )(half16 v, short8 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f16_v16i16, )(half2 v, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f16_v16i16, )(half4 v, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f16_v16i16, )(half8 v, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f16_v16i16, )(half16 v, short16 m);
 
-half2 __builtin_spirv_OpenCL_shuffle2_v2f16_v2f16_v2i16(half2 v0, half2 v1, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle2_v4f16_v4f16_v2i16(half4 v0, half4 v1, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle2_v8f16_v8f16_v2i16(half8 v0, half8 v1, ushort2 m);
-half2 __builtin_spirv_OpenCL_shuffle2_v16f16_v16f16_v2i16(half16 v0, half16 v1, ushort2 m);
-half4 __builtin_spirv_OpenCL_shuffle2_v2f16_v2f16_v4i16(half2 v0, half2 v1, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle2_v4f16_v4f16_v4i16(half4 v0, half4 v1, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle2_v8f16_v8f16_v4i16(half8 v0, half8 v1, ushort4 m);
-half4 __builtin_spirv_OpenCL_shuffle2_v16f16_v16f16_v4i16(half16 v0, half16 v1, ushort4 m);
-half8 __builtin_spirv_OpenCL_shuffle2_v2f16_v2f16_v8i16(half2 v0, half2 v1, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle2_v4f16_v4f16_v8i16(half4 v0, half4 v1, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle2_v8f16_v8f16_v8i16(half8 v0, half8 v1, ushort8 m);
-half8 __builtin_spirv_OpenCL_shuffle2_v16f16_v16f16_v8i16(half16 v0, half16 v1, ushort8 m);
-half16 __builtin_spirv_OpenCL_shuffle2_v2f16_v2f16_v16i16(half2 v0, half2 v1, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle2_v4f16_v4f16_v16i16(half4 v0, half4 v1, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle2_v8f16_v8f16_v16i16(half8 v0, half8 v1, ushort16 m);
-half16 __builtin_spirv_OpenCL_shuffle2_v16f16_v16f16_v16i16(half16 v0, half16 v1, ushort16 m);
-
-#if defined(cl_khr_fp64)
-double2 __builtin_spirv_OpenCL_shuffle_v2f64_v2i64(double2 v, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle_v4f64_v2i64(double4 v, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle_v8f64_v2i64(double8 v, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle_v16f64_v2i64(double16 v, ulong2 m);
-double4 __builtin_spirv_OpenCL_shuffle_v2f64_v4i64(double2 v, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle_v4f64_v4i64(double4 v, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle_v8f64_v4i64(double8 v, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle_v16f64_v4i64(double16 v, ulong4 m);
-double8 __builtin_spirv_OpenCL_shuffle_v2f64_v8i64(double2 v, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle_v4f64_v8i64(double4 v, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle_v8f64_v8i64(double8 v, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle_v16f64_v8i64(double16 v, ulong8 m);
-double16 __builtin_spirv_OpenCL_shuffle_v2f64_v16i64(double2 v, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle_v4f64_v16i64(double4 v, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle_v8f64_v16i64(double8 v, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle_v16f64_v16i64(double16 v, ulong16 m);
-
-double2 __builtin_spirv_OpenCL_shuffle2_v2f64_v2f64_v2i64(double2 v0, double2 v1, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle2_v4f64_v4f64_v2i64(double4 v0, double4 v1, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle2_v8f64_v8f64_v2i64(double8 v0, double8 v1, ulong2 m);
-double2 __builtin_spirv_OpenCL_shuffle2_v16f64_v16f64_v2i64(double16 v0, double16 v1, ulong2 m);
-double4 __builtin_spirv_OpenCL_shuffle2_v2f64_v2f64_v4i64(double2 v0, double2 v1, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle2_v4f64_v4f64_v4i64(double4 v0, double4 v1, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle2_v8f64_v8f64_v4i64(double8 v0, double8 v1, ulong4 m);
-double4 __builtin_spirv_OpenCL_shuffle2_v16f64_v16f64_v4i64(double16 v0, double16 v1, ulong4 m);
-double8 __builtin_spirv_OpenCL_shuffle2_v2f64_v2f64_v8i64(double2 v0, double2 v1, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle2_v4f64_v4f64_v8i64(double4 v0, double4 v1, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle2_v8f64_v8f64_v8i64(double8 v0, double8 v1, ulong8 m);
-double8 __builtin_spirv_OpenCL_shuffle2_v16f64_v16f64_v8i64(double16 v0, double16 v1, ulong8 m);
-double16 __builtin_spirv_OpenCL_shuffle2_v2f64_v2f64_v16i64(double2 v0, double2 v1, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle2_v4f64_v4f64_v16i64(double4 v0, double4 v1, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle2_v8f64_v8f64_v16i64(double8 v0, double8 v1, ulong16 m);
-double16 __builtin_spirv_OpenCL_shuffle2_v16f64_v16f64_v16i64(double16 v0, double16 v1, ulong16 m);
-#endif // defined(cl_khr_fp64)
-
-
-
-uint __builtin_spirv_intel_sub_group_shuffle_i32_i32(uint x, uint c );
-uchar __builtin_spirv_intel_sub_group_shuffle_i8_i32(uchar x, uint c );
-ushort __builtin_spirv_intel_sub_group_shuffle_i16_i32(ushort x, uint c );
-float __builtin_spirv_intel_sub_group_shuffle_f32_i32(float x, uint c );
-float2 __builtin_spirv_intel_sub_group_shuffle_v2f32_i32(float2 x, uint y);
-float3 __builtin_spirv_intel_sub_group_shuffle_v3f32_i32(float3 x, uint y);
-float4 __builtin_spirv_intel_sub_group_shuffle_v4f32_i32(float4 x, uint y);
-float8 __builtin_spirv_intel_sub_group_shuffle_v8f32_i32(float8 x, uint y);
-float16 __builtin_spirv_intel_sub_group_shuffle_v16f32_i32(float16 x, uint y);
-uint2 __builtin_spirv_intel_sub_group_shuffle_v2i32_i32(uint2 x, uint y);
-uint3 __builtin_spirv_intel_sub_group_shuffle_v3i32_i32(uint3 x, uint y);
-uint4 __builtin_spirv_intel_sub_group_shuffle_v4i32_i32(uint4 x, uint y);
-uint8 __builtin_spirv_intel_sub_group_shuffle_v8i32_i32(uint8 x, uint y);
-uint16 __builtin_spirv_intel_sub_group_shuffle_v16i32_i32(uint16 x, uint y);
-ulong __builtin_spirv_intel_sub_group_shuffle_i64_i32(ulong x, uint c );
-
-uint __builtin_spirv_intel_sub_group_shuffle_down_i32_i32_i32(uint cur, uint next, uint c );
-uchar __builtin_spirv_intel_sub_group_shuffle_down_i8_i8_i32(uchar cur, uchar next, uint c );
-ushort __builtin_spirv_intel_sub_group_shuffle_down_i16_i16_i32(ushort cur, ushort next, uint c );
-float __builtin_spirv_intel_sub_group_shuffle_down_f32_f32_i32(float cur, float next, uint c );
-float2 __builtin_spirv_intel_sub_group_shuffle_down_v2f32_v2f32_i32(float2 x, float2 y, uint z);
-float3 __builtin_spirv_intel_sub_group_shuffle_down_v3f32_v3f32_i32(float3 x, float3 y, uint z);
-float4 __builtin_spirv_intel_sub_group_shuffle_down_v4f32_v4f32_i32(float4 x, float4 y, uint z);
-float8 __builtin_spirv_intel_sub_group_shuffle_down_v8f32_v8f32_i32(float8 x, float8 y, uint z);
-float16 __builtin_spirv_intel_sub_group_shuffle_down_v16f32_v16f32_i32(float16 x, float16 y, uint z);
-uint2 __builtin_spirv_intel_sub_group_shuffle_down_v2i32_v2i32_i32(uint2 x, uint2 y, uint z);
-uint3 __builtin_spirv_intel_sub_group_shuffle_down_v3i32_v3i32_i32(uint3 x, uint3 y, uint z);
-uint4 __builtin_spirv_intel_sub_group_shuffle_down_v4i32_v4i32_i32(uint4 x, uint4 y, uint z);
-uint8 __builtin_spirv_intel_sub_group_shuffle_down_v8i32_v8i32_i32(uint8 x, uint8 y, uint z);
-uint16 __builtin_spirv_intel_sub_group_shuffle_down_v16i32_v16i32_i32(uint16 x, uint16 y, uint z);
-ulong __builtin_spirv_intel_sub_group_shuffle_down_i64_i64_i32(ulong cur, ulong next, uint c );
-
-uchar __builtin_spirv_intel_sub_group_shuffle_up_i8_i8_i32(uchar prev, uchar cur, uint c );
-ushort __builtin_spirv_intel_sub_group_shuffle_up_i16_i16_i32(ushort prev, ushort cur, uint c );
-uint __builtin_spirv_intel_sub_group_shuffle_up_i32_i32_i32(uint prev, uint cur, uint c );
-float __builtin_spirv_intel_sub_group_shuffle_up_f32_f32_i32(float prev, float cur, uint c );
-ulong __builtin_spirv_intel_sub_group_shuffle_up_i64_i64_i32(ulong prev, ulong cur, uint c );
-uint2 __builtin_spirv_intel_sub_group_shuffle_up_v2i32_v2i32_i32(uint2 x, uint2 y, uint z);
-uint3 __builtin_spirv_intel_sub_group_shuffle_up_v3i32_v3i32_i32(uint3 x, uint3 y, uint z);
-uint4 __builtin_spirv_intel_sub_group_shuffle_up_v4i32_v4i32_i32(uint4 x, uint4 y, uint z);
-uint8 __builtin_spirv_intel_sub_group_shuffle_up_v8i32_v8i32_i32(uint8 x, uint8 y, uint z);
-uint16 __builtin_spirv_intel_sub_group_shuffle_up_v16i32_v16i32_i32(uint16 x, uint16 y, uint z);
-float2 __builtin_spirv_intel_sub_group_shuffle_up_v2f32_v2f32_i32(float2 x, float2 y, uint z);
-float3 __builtin_spirv_intel_sub_group_shuffle_up_v3f32_v3f32_i32(float3 x, float3 y, uint z);
-float4 __builtin_spirv_intel_sub_group_shuffle_up_v4f32_v4f32_i32(float4 x, float4 y, uint z);
-float8 __builtin_spirv_intel_sub_group_shuffle_up_v8f32_v8f32_i32(float8 x, float8 y, uint z);
-float16 __builtin_spirv_intel_sub_group_shuffle_up_v16f32_v16f32_i32(float16 x, float16 y, uint z);
-
-uchar __builtin_spirv_intel_sub_group_shuffle_xor_i8_i32(uchar x, uint c );
-ushort __builtin_spirv_intel_sub_group_shuffle_xor_i16_i32(ushort x, uint c );
-uint __builtin_spirv_intel_sub_group_shuffle_xor_i32_i32(uint x, uint c );
-float __builtin_spirv_intel_sub_group_shuffle_xor_f32_i32(float x, uint c );
-ulong __builtin_spirv_intel_sub_group_shuffle_xor_i64_i32(ulong x, uint c );
-uint2 __builtin_spirv_intel_sub_group_shuffle_xor_v2i32_i32(uint2 x, uint y);
-uint3 __builtin_spirv_intel_sub_group_shuffle_xor_v3i32_i32(uint3 x, uint y);
-uint4 __builtin_spirv_intel_sub_group_shuffle_xor_v4i32_i32(uint4 x, uint y);
-uint8 __builtin_spirv_intel_sub_group_shuffle_xor_v8i32_i32(uint8 x, uint y);
-uint16 __builtin_spirv_intel_sub_group_shuffle_xor_v16i32_i32(uint16 x, uint y);
-float2 __builtin_spirv_intel_sub_group_shuffle_xor_v2f32_i32(float2 x, uint y);
-float3 __builtin_spirv_intel_sub_group_shuffle_xor_v3f32_i32(float3 x, uint y);
-float4 __builtin_spirv_intel_sub_group_shuffle_xor_v4f32_i32(float4 x, uint y);
-float8 __builtin_spirv_intel_sub_group_shuffle_xor_v8f32_i32(float8 x, uint y);
-float16 __builtin_spirv_intel_sub_group_shuffle_xor_v16f32_i32(float16 x, uint y);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f16_v2f16_v2i16, )(half2 v0, half2 v1, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f16_v4f16_v2i16, )(half4 v0, half4 v1, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f16_v8f16_v2i16, )(half8 v0, half8 v1, short2 m);
+half2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f16_v16f16_v2i16, )(half16 v0, half16 v1, short2 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f16_v2f16_v4i16, )(half2 v0, half2 v1, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f16_v4f16_v4i16, )(half4 v0, half4 v1, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f16_v8f16_v4i16, )(half8 v0, half8 v1, short4 m);
+half4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f16_v16f16_v4i16, )(half16 v0, half16 v1, short4 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f16_v2f16_v8i16, )(half2 v0, half2 v1, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f16_v4f16_v8i16, )(half4 v0, half4 v1, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f16_v8f16_v8i16, )(half8 v0, half8 v1, short8 m);
+half8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f16_v16f16_v8i16, )(half16 v0, half16 v1, short8 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f16_v2f16_v16i16, )(half2 v0, half2 v1, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f16_v4f16_v16i16, )(half4 v0, half4 v1, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f16_v8f16_v16i16, )(half8 v0, half8 v1, short16 m);
+half16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f16_v16f16_v16i16, )(half16 v0, half16 v1, short16 m);
 
 #if defined(cl_khr_fp64)
-double __builtin_spirv_intel_sub_group_shuffle_f64_i32(double x, uint c );
-double __builtin_spirv_intel_sub_group_shuffle_down_f64_f64_i32(double cur, double next, uint c );
-double __builtin_spirv_intel_sub_group_shuffle_up_f64_f64_i32(double prev, double cur, uint c );
-double __builtin_spirv_intel_sub_group_shuffle_xor_f64_i32(double x, uint c );
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f64_v2i64, )(double2 v, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f64_v2i64, )(double4 v, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f64_v2i64, )(double8 v, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f64_v2i64, )(double16 v, long2 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f64_v4i64, )(double2 v, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f64_v4i64, )(double4 v, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f64_v4i64, )(double8 v, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f64_v4i64, )(double16 v, long4 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f64_v8i64, )(double2 v, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f64_v8i64, )(double4 v, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f64_v8i64, )(double8 v, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f64_v8i64, )(double16 v, long8 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v2f64_v16i64, )(double2 v, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v4f64_v16i64, )(double4 v, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v8f64_v16i64, )(double8 v, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle, _v16f64_v16i64, )(double16 v, long16 m);
+
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f64_v2f64_v2i64, )(double2 v0, double2 v1, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f64_v4f64_v2i64, )(double4 v0, double4 v1, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f64_v8f64_v2i64, )(double8 v0, double8 v1, long2 m);
+double2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f64_v16f64_v2i64, )(double16 v0, double16 v1, long2 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f64_v2f64_v4i64, )(double2 v0, double2 v1, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f64_v4f64_v4i64, )(double4 v0, double4 v1, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f64_v8f64_v4i64, )(double8 v0, double8 v1, long4 m);
+double4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f64_v16f64_v4i64, )(double16 v0, double16 v1, long4 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f64_v2f64_v8i64, )(double2 v0, double2 v1, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f64_v4f64_v8i64, )(double4 v0, double4 v1, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f64_v8f64_v8i64, )(double8 v0, double8 v1, long8 m);
+double8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f64_v16f64_v8i64, )(double16 v0, double16 v1, long8 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v2f64_v2f64_v16i64, )(double2 v0, double2 v1, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v4f64_v4f64_v16i64, )(double4 v0, double4 v1, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v8f64_v8f64_v16i64, )(double8 v0, double8 v1, long16 m);
+double16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(shuffle2, _v16f64_v16f64_v16i64, )(double16 v0, double16 v1, long16 m);
 #endif // defined(cl_khr_fp64)
 
-// TODO: how do we want to handle extensions?
-#if 0
-uint __builtin_spirv_intel_sub_group_half2_add_i32_i32(uint a, uint b );
-uint __builtin_spirv_intel_sub_group_half2_sub_i32_i32(uint a, uint b );
-uint __builtin_spirv_intel_sub_group_half2_mul_i32_i32(uint a, uint b );
-uint __builtin_spirv_intel_sub_group_half2_mad_i32_i32_i32(uint a, uint b, uint c );
-short2 __builtin_spirv_intel_sub_group_half2_isequal_i32_i32(uint a, uint b );
-short2 __builtin_spirv_intel_sub_group_half2_isnotequal_i32_i32(uint a, uint b );
-short2 __builtin_spirv_intel_sub_group_half2_isgreater_i32_i32(uint a, uint b );
-short2 __builtin_spirv_intel_sub_group_half2_isgreaterequal_i32_i32(uint a, uint b );
-short2 __builtin_spirv_intel_sub_group_half2_isless_i32_i32(uint a, uint b );
-short2 __builtin_spirv_intel_sub_group_half2_islessequal_i32_i32(uint a, uint b );
-#endif
-
-char __builtin_spirv_OpenCL_s_min_i8_i8(char x, char y);
-char2 __builtin_spirv_OpenCL_s_min_v2i8_v2i8(char2 x, char2 y);
-char3 __builtin_spirv_OpenCL_s_min_v3i8_v3i8(char3 x, char3 y);
-char4 __builtin_spirv_OpenCL_s_min_v4i8_v4i8(char4 x, char4 y);
-char8 __builtin_spirv_OpenCL_s_min_v8i8_v8i8(char8 x, char8 y);
-char16 __builtin_spirv_OpenCL_s_min_v16i8_v16i8(char16 x, char16 y);
-uchar __builtin_spirv_OpenCL_u_min_i8_i8(uchar x, uchar y);
-uchar2 __builtin_spirv_OpenCL_u_min_v2i8_v2i8(uchar2 x, uchar2 y);
-uchar3 __builtin_spirv_OpenCL_u_min_v3i8_v3i8(uchar3 x, uchar3 y);
-uchar4 __builtin_spirv_OpenCL_u_min_v4i8_v4i8(uchar4 x, uchar4 y);
-uchar8 __builtin_spirv_OpenCL_u_min_v8i8_v8i8(uchar8 x, uchar8 y);
-uchar16 __builtin_spirv_OpenCL_u_min_v16i8_v16i8(uchar16 x, uchar16 y);
-short __builtin_spirv_OpenCL_s_min_i16_i16(short x, short y);
-short2 __builtin_spirv_OpenCL_s_min_v2i16_v2i16(short2 x, short2 y);
-short3 __builtin_spirv_OpenCL_s_min_v3i16_v3i16(short3 x, short3 y);
-short4 __builtin_spirv_OpenCL_s_min_v4i16_v4i16(short4 x, short4 y);
-short8 __builtin_spirv_OpenCL_s_min_v8i16_v8i16(short8 x, short8 y);
-short16 __builtin_spirv_OpenCL_s_min_v16i16_v16i16(short16 x, short16 y);
-ushort __builtin_spirv_OpenCL_u_min_i16_i16(ushort x, ushort y);
-ushort2 __builtin_spirv_OpenCL_u_min_v2i16_v2i16(ushort2 x, ushort2 y);
-ushort3 __builtin_spirv_OpenCL_u_min_v3i16_v3i16(ushort3 x, ushort3 y);
-ushort4 __builtin_spirv_OpenCL_u_min_v4i16_v4i16(ushort4 x, ushort4 y);
-ushort8 __builtin_spirv_OpenCL_u_min_v8i16_v8i16(ushort8 x, ushort8 y);
-ushort16 __builtin_spirv_OpenCL_u_min_v16i16_v16i16(ushort16 x, ushort16 y);
-int __builtin_spirv_OpenCL_s_min_i32_i32(int x, int y);
-int2 __builtin_spirv_OpenCL_s_min_v2i32_v2i32(int2 x, int2 y);
-int3 __builtin_spirv_OpenCL_s_min_v3i32_v3i32(int3 x, int3 y);
-int4 __builtin_spirv_OpenCL_s_min_v4i32_v4i32(int4 x, int4 y);
-int8 __builtin_spirv_OpenCL_s_min_v8i32_v8i32(int8 x, int8 y);
-int16 __builtin_spirv_OpenCL_s_min_v16i32_v16i32(int16 x, int16 y);
-uint __builtin_spirv_OpenCL_u_min_i32_i32(uint x, uint y);
-uint2 __builtin_spirv_OpenCL_u_min_v2i32_v2i32(uint2 x, uint2 y);
-uint3 __builtin_spirv_OpenCL_u_min_v3i32_v3i32(uint3 x, uint3 y);
-uint4 __builtin_spirv_OpenCL_u_min_v4i32_v4i32(uint4 x, uint4 y);
-uint8 __builtin_spirv_OpenCL_u_min_v8i32_v8i32(uint8 x, uint8 y);
-uint16 __builtin_spirv_OpenCL_u_min_v16i32_v16i32(uint16 x, uint16 y);
-long __builtin_spirv_OpenCL_s_min_i64_i64(long x, long y);
-long2 __builtin_spirv_OpenCL_s_min_v2i64_v2i64(long2 x, long2 y);
-long3 __builtin_spirv_OpenCL_s_min_v3i64_v3i64(long3 x, long3 y);
-long4 __builtin_spirv_OpenCL_s_min_v4i64_v4i64(long4 x, long4 y);
-long8 __builtin_spirv_OpenCL_s_min_v8i64_v8i64(long8 x, long8 y);
-long16 __builtin_spirv_OpenCL_s_min_v16i64_v16i64(long16 x, long16 y);
-ulong __builtin_spirv_OpenCL_u_min_i64_i64(ulong x, ulong y);
-ulong2 __builtin_spirv_OpenCL_u_min_v2i64_v2i64(ulong2 x, ulong2 y);
-ulong3 __builtin_spirv_OpenCL_u_min_v3i64_v3i64(ulong3 x, ulong3 y);
-ulong4 __builtin_spirv_OpenCL_u_min_v4i64_v4i64(ulong4 x, ulong4 y);
-ulong8 __builtin_spirv_OpenCL_u_min_v8i64_v8i64(ulong8 x, ulong8 y);
-ulong16 __builtin_spirv_OpenCL_u_min_v16i64_v16i64(ulong16 x, ulong16 y);
+char SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _i8_i8, )(char x, char y);
+char2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v2i8_v2i8, )(char2 x, char2 y);
+char3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v3i8_v3i8, )(char3 x, char3 y);
+char4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v4i8_v4i8, )(char4 x, char4 y);
+char8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v8i8_v8i8, )(char8 x, char8 y);
+char16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v16i8_v16i8, )(char16 x, char16 y);
+uchar SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _i8_i8, )(uchar x, uchar y);
+uchar2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v2i8_v2i8, )(uchar2 x, uchar2 y);
+uchar3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v3i8_v3i8, )(uchar3 x, uchar3 y);
+uchar4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v4i8_v4i8, )(uchar4 x, uchar4 y);
+uchar8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v8i8_v8i8, )(uchar8 x, uchar8 y);
+uchar16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v16i8_v16i8, )(uchar16 x, uchar16 y);
+short SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _i16_i16, )(short x, short y);
+short2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v2i16_v2i16, )(short2 x, short2 y);
+short3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v3i16_v3i16, )(short3 x, short3 y);
+short4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v4i16_v4i16, )(short4 x, short4 y);
+short8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v8i16_v8i16, )(short8 x, short8 y);
+short16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v16i16_v16i16, )(short16 x, short16 y);
+ushort SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _i16_i16, )(ushort x, ushort y);
+ushort2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v2i16_v2i16, )(ushort2 x, ushort2 y);
+ushort3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v3i16_v3i16, )(ushort3 x, ushort3 y);
+ushort4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v4i16_v4i16, )(ushort4 x, ushort4 y);
+ushort8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v8i16_v8i16, )(ushort8 x, ushort8 y);
+ushort16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v16i16_v16i16, )(ushort16 x, ushort16 y);
+int SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _i32_i32, )(int x, int y);
+int2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v2i32_v2i32, )(int2 x, int2 y);
+int3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v3i32_v3i32, )(int3 x, int3 y);
+int4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v4i32_v4i32, )(int4 x, int4 y);
+int8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v8i32_v8i32, )(int8 x, int8 y);
+int16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v16i32_v16i32, )(int16 x, int16 y);
+uint SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _i32_i32, )(uint x, uint y);
+uint2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v2i32_v2i32, )(uint2 x, uint2 y);
+uint3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v3i32_v3i32, )(uint3 x, uint3 y);
+uint4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v4i32_v4i32, )(uint4 x, uint4 y);
+uint8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v8i32_v8i32, )(uint8 x, uint8 y);
+uint16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v16i32_v16i32, )(uint16 x, uint16 y);
+long SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _i64_i64, )(long x, long y);
+long2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v2i64_v2i64, )(long2 x, long2 y);
+long3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v3i64_v3i64, )(long3 x, long3 y);
+long4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v4i64_v4i64, )(long4 x, long4 y);
+long8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v8i64_v8i64, )(long8 x, long8 y);
+long16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(s_min, _v16i64_v16i64, )(long16 x, long16 y);
+ulong SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _i64_i64, )(ulong x, ulong y);
+ulong2 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v2i64_v2i64, )(ulong2 x, ulong2 y);
+ulong3 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v3i64_v3i64, )(ulong3 x, ulong3 y);
+ulong4 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v4i64_v4i64, )(ulong4 x, ulong4 y);
+ulong8 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v8i64_v8i64, )(ulong8 x, ulong8 y);
+ulong16 SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(u_min, _v16i64_v16i64, )(ulong16 x, ulong16 y);
 
 // Misc Instructions
 
-void __builtin_spirv_OpenCL_prefetch_p1i8_i32(const global uchar* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i8_i32(const global uchar2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i8_i32(const global uchar3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i8_i32(const global uchar4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i8_i32(const global uchar8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i8_i32(const global uchar16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i8_i32, )( global char* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i8_i32, )( global char2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i8_i32, )( global char3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i8_i32, )( global char4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i8_i32, )( global char8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i8_i32, )( global char16* p, int num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i16_i32(const global ushort* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i16_i32(const global ushort2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i16_i32(const global ushort3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i16_i32(const global ushort4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i16_i32(const global ushort8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i16_i32(const global ushort16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i16_i32, )( global short* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i16_i32, )( global short2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i16_i32, )( global short3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i16_i32, )( global short4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i16_i32, )( global short8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i16_i32, )( global short16* p, int num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i32_i32(const global uint* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i32_i32(const global uint2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i32_i32(const global uint3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i32_i32(const global uint4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i32_i32(const global uint8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i32_i32(const global uint16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i32_i32, )( global int* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i32_i32, )( global int2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i32_i32, )( global int3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i32_i32, )( global int4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i32_i32, )( global int8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i32_i32, )( global int16* p, int num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i64_i32(const global ulong* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i64_i32(const global ulong2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i64_i32(const global ulong3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i64_i32(const global ulong4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i64_i32(const global ulong8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i64_i32(const global ulong16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i64_i32, )( global long* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i64_i32, )( global long2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i64_i32, )( global long3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i64_i32, )( global long4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i64_i32, )( global long8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i64_i32, )( global long16* p, int num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1f32_i32(const global float* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f32_i32(const global float2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f32_i32(const global float3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f32_i32(const global float4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f32_i32(const global float8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f32_i32(const global float16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f32_i32, )( global float* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f32_i32, )( global float2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f32_i32, )( global float3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f32_i32, )( global float4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f32_i32, )( global float8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f32_i32, )( global float16* p, int num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1f16_i32(const global half* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f16_i32(const global half2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f16_i32(const global half3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f16_i32(const global half4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f16_i32(const global half8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f16_i32(const global half16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f16_i32, )( global half* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f16_i32, )( global half2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f16_i32, )( global half3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f16_i32, )( global half4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f16_i32, )( global half8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f16_i32, )( global half16* p, int num_elements);
 
 #if defined(cl_khr_fp64)
-void __builtin_spirv_OpenCL_prefetch_p1f64_i32(const global double* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f64_i32(const global double2* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f64_i32(const global double3* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f64_i32(const global double4* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f64_i32(const global double8* p, uint num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f64_i32(const global double16* p, uint num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f64_i32, )( global double* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f64_i32, )( global double2* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f64_i32, )( global double3* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f64_i32, )( global double4* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f64_i32, )( global double8* p, int num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f64_i32, )( global double16* p, int num_elements);
 #endif // defined(cl_khr_fp64)
 
-void __builtin_spirv_OpenCL_prefetch_p1i8_i64(const global uchar* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i8_i64(const global uchar2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i8_i64(const global uchar3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i8_i64(const global uchar4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i8_i64(const global uchar8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i8_i64(const global uchar16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i8_i64, )( global char* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i8_i64, )( global char2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i8_i64, )( global char3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i8_i64, )( global char4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i8_i64, )( global char8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i8_i64, )( global char16* p, long num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i16_i64(const global ushort* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i16_i64(const global ushort2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i16_i64(const global ushort3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i16_i64(const global ushort4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i16_i64(const global ushort8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i16_i64(const global ushort16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i16_i64, )( global short* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i16_i64, )( global short2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i16_i64, )( global short3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i16_i64, )( global short4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i16_i64, )( global short8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i16_i64, )( global short16* p, long num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i32_i64(const global uint* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i32_i64(const global uint2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i32_i64(const global uint3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i32_i64(const global uint4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i32_i64(const global uint8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i32_i64(const global uint16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i32_i64, )( global int* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i32_i64, )( global int2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i32_i64, )( global int3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i32_i64, )( global int4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i32_i64, )( global int8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i32_i64, )( global int16* p, long num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1i64_i64(const global ulong* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2i64_i64(const global ulong2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3i64_i64(const global ulong3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4i64_i64(const global ulong4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8i64_i64(const global ulong8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16i64_i64(const global ulong16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1i64_i64, )( global long* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2i64_i64, )( global long2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3i64_i64, )( global long3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4i64_i64, )( global long4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8i64_i64, )( global long8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16i64_i64, )( global long16* p, long num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1f32_i64(const global float* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f32_i64(const global float2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f32_i64(const global float3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f32_i64(const global float4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f32_i64(const global float8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f32_i64(const global float16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f32_i64, )( global float* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f32_i64, )( global float2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f32_i64, )( global float3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f32_i64, )( global float4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f32_i64, )( global float8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f32_i64, )( global float16* p, long num_elements);
 
-void __builtin_spirv_OpenCL_prefetch_p1f16_i64(const global half* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f16_i64(const global half2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f16_i64(const global half3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f16_i64(const global half4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f16_i64(const global half8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f16_i64(const global half16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f16_i64, )( global half* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f16_i64, )( global half2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f16_i64, )( global half3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f16_i64, )( global half4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f16_i64, )( global half8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f16_i64, )( global half16* p, long num_elements);
 
 #if defined(cl_khr_fp64)
-void __builtin_spirv_OpenCL_prefetch_p1f64_i64(const global double* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v2f64_i64(const global double2* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v3f64_i64(const global double3* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v4f64_i64(const global double4* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v8f64_i64(const global double8* p, ulong num_elements);
-void __builtin_spirv_OpenCL_prefetch_p1v16f64_i64(const global double16* p, ulong num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1f64_i64, )( global double* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v2f64_i64, )( global double2* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v3f64_i64, )( global double3* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v4f64_i64, )( global double4* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v8f64_i64, )( global double8* p, long num_elements);
+void SPIRV_OVERLOADABLE SPIRV_OCL_BUILTIN(prefetch, _p1v16f64_i64, )( global double16* p, long num_elements);
 #endif // defined(cl_khr_fp64)
 
 uint  __builtin_spirv_OpReadClockKHR_i32_i32(uint scope);

@@ -16,10 +16,10 @@ SPDX-License-Identifier: MIT
 #include "GenXSubtarget.h"
 #include "GenXTargetMachine.h"
 
-#include "vc/GenXOpts/Utils/InternalMetadata.h"
-#include "vc/GenXOpts/Utils/KernelInfo.h"
 #include "vc/Support/BackendConfig.h"
 #include "vc/Support/GenXDiagnostic.h"
+#include "vc/Utils/GenX/InternalMetadata.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 
 #include <llvm/Analysis/CallGraph.h>
 #include <llvm/CodeGen/TargetPassConfig.h>
@@ -103,7 +103,7 @@ class StackAnalysis : public InstVisitor<StackAnalysis> {
       NotStarted // function has not started processing but will start
     };
     uint64_t m_UsedSz{0};
-    unsigned m_RequiredAlign{visa::BytesPerSVMPtr};
+    unsigned m_RequiredAlign{0};
     bool m_HasIndirect{false};
     Function *m_pHeavyFunction{nullptr};
     ProcessingState m_ProcessingFlag{ProcessingState::NotStarted};
@@ -169,7 +169,7 @@ StackAnalysis::checkFunction(Function &F) {
     return None;
 
   // if function is stack call, we do not know stack usage
-  if (genx::requiresStackCall(&F))
+  if (vc::requiresStackCall(&F))
     return None;
 
   StateOfF.m_ProcessingFlag = FunctionState::ProcessingState::Started;
@@ -216,6 +216,9 @@ StackAnalysis::checkFunction(Function &F) {
 
   StateOfF.m_ProcessingFlag = FunctionState::ProcessingState::Finished;
   StateOfF.m_UsedSz += MostUsedStackSize;
+  // Add the max alignment of the function to the total size used because of
+  // run-time alignment that may vary from 0 to m_RequiredAlign - 1.
+  StateOfF.m_UsedSz += StateOfF.m_RequiredAlign;
 
   LLVM_DEBUG(dbgs() << F.getName() << " size: " << StateOfF.m_UsedSz
                     << " alignment: " << StateOfF.m_RequiredAlign << "\n");
@@ -249,6 +252,7 @@ void StackAnalysis::checkKernel(Function &Kernel) {
   }
   auto [KernelUsedStack, KernelAlignment] = *Res;
 
+  KernelAlignment = std::max(KernelAlignment, visa::BytesPerSVMPtr);
   // align stack size to kernel alignment requirement
   KernelUsedStack = llvm::alignTo(KernelUsedStack, KernelAlignment);
   if (KernelUsedStack > m_MaxStackSize) {
@@ -262,13 +266,13 @@ void StackAnalysis::checkKernel(Function &Kernel) {
     return;
   }
 
-  IGC_ASSERT(!Kernel.hasFnAttribute(genx::FunctionMD::VCStackAmount));
+  IGC_ASSERT(!Kernel.hasFnAttribute(vc::FunctionMD::VCStackAmount));
   LLVM_DEBUG(dbgs() << "Used stack: " << KernelUsedStack << " ("
                     << Kernel.getName() << ")\n");
 
   std::ostringstream Os;
   Os << KernelUsedStack;
-  Kernel.addFnAttr(genx::FunctionMD::VCStackAmount, Os.str());
+  Kernel.addFnAttr(vc::FunctionMD::VCStackAmount, Os.str());
 }
 
 void StackAnalysis::doAnalysis(Module &M) {
@@ -276,7 +280,7 @@ void StackAnalysis::doAnalysis(Module &M) {
   Kernels.reserve(M.size());
   for (auto &F : M) {
     visit(F);
-    if (genx::isKernel(&F))
+    if (vc::isKernel(&F))
       Kernels.push_back(&F);
   }
 

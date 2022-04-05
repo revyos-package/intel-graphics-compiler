@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "LocalRA.h"
 #include "LinearScanRA.h"
 #include "RegAlloc.h"
+#include "SCCAnalysis.h"
 
 #include <fstream>
 #include <tuple>
@@ -157,9 +158,9 @@ bool LinearScanRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegi
         G4_Declare* dstDcl = dst->getBase()->asRegVar()->getDeclare();
         if (dstDcl != nullptr)
         {
-            int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) / numEltPerGRF<Type_UB>();
+            int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) / builder.numEltPerGRF<Type_UB>();
             G4_DstRegRegion* dstRgn = dst;
-            dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + 1 > numEltPerGRF<Type_UB>();
+            dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart() + 1 > builder.numEltPerGRF<Type_UB>();
 
             if (src != NULL &&
                 src->isSrcRegRegion() &&
@@ -167,8 +168,8 @@ bool LinearScanRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegi
             {
                 G4_SrcRegRegion* srcRgn = src->asSrcRegRegion();
                 G4_Declare* srcDcl = src->getBase()->asRegVar()->getDeclare();
-                int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) / numEltPerGRF<Type_UB>();
-                bool srcOpndNumRows = srcRgn->getSubRegOff() + srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 > numEltPerGRF<Type_UB>();
+                int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) / builder.numEltPerGRF<Type_UB>();
+                bool srcOpndNumRows = srcRgn->getSubRegOff() + srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 > builder.numEltPerGRF<Type_UB>();
 
                 if (dstOpndNumRows || srcOpndNumRows)
                 {
@@ -186,27 +187,27 @@ bool LinearScanRA::hasDstSrcOverlapPotential(G4_DstRegRegion* dst, G4_SrcRegRegi
     return false;
 }
 
-void LinearScanRA::getRowInfo(int size, int& nrows, int& lastRowSize)
+void LinearScanRA::getRowInfo(int size, int& nrows, int& lastRowSize, const IR_Builder& builder)
 {
-    if (size <= (int)numEltPerGRF<Type_UW>())
+    if (size <= (int)builder.numEltPerGRF<Type_UW>())
     {
         nrows = 1;
     }
     else
     {
         // nrows is total number of rows, including last row even if it is partial
-        nrows = size / numEltPerGRF<Type_UW>();
+        nrows = size / builder.numEltPerGRF<Type_UW>();
         // lastrowsize is number of words actually used in last row
-        lastRowSize = size % numEltPerGRF<Type_UW>();
+        lastRowSize = size % builder.numEltPerGRF<Type_UW>();
 
-        if (size % numEltPerGRF<Type_UW>() != 0)
+        if (size % builder.numEltPerGRF<Type_UW>() != 0)
         {
             nrows++;
         }
 
         if (lastRowSize == 0)
         {
-            lastRowSize = numEltPerGRF<Type_UW>();
+            lastRowSize = builder.numEltPerGRF<Type_UW>();
         }
     }
 
@@ -259,7 +260,7 @@ bool LSLiveRange::isGRFRegAssigned()
     return isPhyRegAssigned;
 }
 
-unsigned int LSLiveRange::getSizeInWords()
+unsigned int LSLiveRange::getSizeInWords(const IR_Builder& builder)
 {
     int nrows = getTopDcl()->getNumRows();
     int elemsize = getTopDcl()->getElemSize();
@@ -274,7 +275,7 @@ unsigned int LSLiveRange::getSizeInWords()
         if (sizeInWords > 0)
             words = sizeInWords;
         else
-            words = nrows * numEltPerGRF<Type_UW>();
+            words = nrows * builder.numEltPerGRF<Type_UW>();
     }
     else if (nrows == 1)
     {
@@ -305,7 +306,7 @@ void globalLinearScan::freeAllocedRegs(LSLiveRange* lr, bool setInstID)
     {
         pregManager.freeRegs(preg->asGreg()->getRegNum(),
             sregnum,
-            lr->getSizeInWords(),
+            lr->getSizeInWords(builder),
             idx);
     }
 }
@@ -332,7 +333,7 @@ void globalLinearScan::printActives()
 
             if (lr->getTopDcl()->getWordSize() > 0)
             {
-                endsregnum = lr->getTopDcl()->getWordSize() % numEltPerGRF<Type_UW>() - 1;
+                endsregnum = lr->getTopDcl()->getWordSize() % builder.numEltPerGRF<Type_UW>() - 1;
                 if (endsregnum < 0) endsregnum = 15;
             }
             else
@@ -380,7 +381,7 @@ void globalLinearScan::printActives()
 
                     if (lr->getTopDcl()->getWordSize() > 0)
                     {
-                        endsregnum = lr->getTopDcl()->getWordSize() % numEltPerGRF<Type_UW>() - 1;
+                        endsregnum = lr->getTopDcl()->getWordSize() % builder.numEltPerGRF<Type_UW>() - 1;
                         if (endsregnum < 0) endsregnum = 15;
                     }
                     else
@@ -411,7 +412,7 @@ void globalLinearScan::printActives()
 
                     if (lr->getTopDcl()->getWordSize() > 0)
                     {
-                        endsregnum = lr->getTopDcl()->getWordSize() % numEltPerGRF<Type_UW>() - 1;
+                        endsregnum = lr->getTopDcl()->getWordSize() % builder.numEltPerGRF<Type_UW>() - 1;
                         if (endsregnum < 0) endsregnum = 15;
                     }
                     else
@@ -646,6 +647,65 @@ void LinearScanRA::markBackEdges()
             }
         }
     }
+
+    if (!kernel.fg.isReducible())
+    {
+        //Find exit BB of SCC and map it to the head BB of SCC
+        SCCAnalysis SCCFinder(kernel.fg);
+        SCCFinder.run();
+        for (auto iter = SCCFinder.SCC_begin(), iterEnd = SCCFinder.SCC_end(); iter != iterEnd; ++iter)
+        {
+            auto&& anSCC = *iter;
+            std::unordered_set<G4_BB*> SCCSucc; // any successor BB of the SCC
+            G4_BB* headBB = anSCC.getEarliestBB();
+            for (auto BI = anSCC.body_begin(), BIEnd = anSCC.body_end(); BI != BIEnd; ++BI)
+            {
+                G4_BB* bb = *BI;
+                for (auto succ : bb->Succs)
+                {
+                    if (!anSCC.isMember(succ))
+                    {
+                        SCCSucc.insert(succ);
+                    }
+                }
+            }
+            for (auto exitBB : SCCSucc) //map the exitBB to the head of the SCC
+            {
+                loopHeadExitMap[headBB].push_back(exitBB);
+            }
+        }
+    }
+    else
+    {
+        //Find exit BB of loop and map it to the head BB of loop
+        for (auto&& iter : kernel.fg.naturalLoops)
+        {
+            auto&& backEdge = iter.first;
+            G4_BB* headBB = backEdge.second;
+            const std::set<G4_BB*>& loopBody = iter.second;
+
+            for (auto block : loopBody)
+            {
+                for (auto succBB : block->Succs)
+                {
+                    if (loopBody.find(succBB) == loopBody.end())
+                    {
+                        G4_BB* exitBB = succBB;
+
+                        unsigned latchBBId = (backEdge.first)->getId();
+                        unsigned exitBBId = succBB->getId();
+                        if (exitBBId < latchBBId &&
+                            succBB->Succs.size() == 1)
+                        {
+                            exitBB = succBB->Succs.front();
+                        }
+
+                        loopHeadExitMap[headBB].push_back(exitBB); //map the exitBB to the head of the loop
+                    }
+                }
+            }
+        }
+    }
 }
 
 void LinearScanRA::createLiveIntervals()
@@ -844,15 +904,6 @@ void LinearScanRA::calculateFuncLastID()
 
 int LinearScanRA::linearScanRA()
 {
-    std::map<unsigned, std::list<vISA::G4_BB*>> regions;
-    std::map<unsigned, std::list<vISA::G4_BB*>>::iterator regionIt;
-
-    G4_BB* entryBB = kernel.fg.getEntryBB();
-    for (auto bb : kernel.fg)
-    {
-        regions[entryBB->getId()].push_back(bb);
-    }
-
     if (kernel.fg.getIsStackCallFunc())
     {
         // Allocate space to store Frame Descriptor
@@ -881,7 +932,7 @@ int LinearScanRA::linearScanRA()
 
         //Input
         PhyRegsLocalRA initPregs = (*pregs);
-        calculateInputIntervalsGlobal(initPregs, (*regions.begin()).second);
+        calculateInputIntervalsGlobal(initPregs);
 #ifdef DEBUG_VERBOSE_ON
         COUT_ERROR << "===== printInputLiveIntervalsGlobal============" << kernel.getName() << std::endl;
         printInputLiveIntervalsGlobal();
@@ -893,17 +944,12 @@ int LinearScanRA::linearScanRA()
         eotLiveIntervals.clear();
         unsigned latestLexID = 0;
 
-        for (regionIt = regions.begin(); regionIt != regions.end(); regionIt++)
+        //Some live through intervals are implicit
+        calculateLiveThroughIntervals();
+        for (auto bb : kernel.fg)
         {
-#ifdef DEBUG_VERBOSE_ON
-            COUT_ERROR << "===== REGION: " << (*regionIt).first << "============" << std::endl;
-#endif
-            regionID = (*regionIt).first;
-            for (auto bb : (*regionIt).second)
-            {
-                calculateLiveIntervalsGlobal(bb, globalLiveIntervals, eotLiveIntervals);
-                latestLexID = bb->back()->getLexicalId() * 2;
-            }
+            calculateLiveIntervalsGlobal(bb, globalLiveIntervals, eotLiveIntervals);
+            latestLexID = bb->back()->getLexicalId() * 2;
         }
 
         if (liveThroughIntervals.size())
@@ -931,11 +977,51 @@ int LinearScanRA::linearScanRA()
         COUT_ERROR << "===== preAssignedLiveIntervals============" << std::endl;
         printLiveIntervals(preAssignedLiveIntervals);
 #endif
-        PhyRegsManager pregManager(initPregs, doBCR);
+        // Copy over alignment for vars inserted by RA
+        gra.copyMissingAlignment();
+
+        PhyRegsManager pregManager(builder, initPregs, doBCR);
         globalLinearScan ra(gra, &l, globalLiveIntervals, &preAssignedLiveIntervals, inputIntervals, pregManager,
             mem, numRegLRA, numRowsEOT, latestLexID,
             doBCR, highInternalConflict);
-        if (!ra.runLinearScan(builder, globalLiveIntervals, spillLRs))
+
+        //Run linear scan RA
+        bool success = ra.runLinearScan(builder, globalLiveIntervals, spillLRs);
+
+        auto underSpillThreshold = [this](int numSpill, int asmCount)
+        {
+            int threshold = std::min(builder.getOptions()->getuInt32Option(vISA_AbortOnSpillThreshold), 200u);
+            return (numSpill * 200) < (threshold * asmCount);
+        };
+
+        for (auto lr : spillLRs)
+        {
+            GRFSpillFillCount += lr->getNumRefs();
+        }
+
+        int instNum = 0;
+        for (auto bb : kernel.fg)
+        {
+            instNum += (int)bb->size();
+        }
+        if (GRFSpillFillCount && builder.getOption(vISA_AbortOnSpill) && !underSpillThreshold(GRFSpillFillCount, instNum))
+        {
+            // update jit metadata information
+            if (auto jitInfo = builder.getJitInfo())
+            {
+                jitInfo->isSpill = true;
+                jitInfo->spillMemUsed = 0;
+                jitInfo->numAsmCount = instNum;
+                jitInfo->numGRFSpillFill = GRFSpillFillCount;
+            }
+
+            // Early exit when -abortonspill is passed, instead of
+            // spending time inserting spill code and then aborting.
+            return VISA_SPILL;
+        }
+
+        //Try other graphcoloring
+        if (!success)
         {
             undoLinearScanRAAssignments();
             return VISA_FAILURE;
@@ -975,10 +1061,29 @@ int LinearScanRA::linearScanRA()
             COUT_ERROR << "===== printSpillLiveIntervals============" << std::endl;
             printSpillLiveIntervals(spillLRs);
 #endif
-            for (auto lr : spillLRs)
+            if (builder.hasScratchSurface() && !hasStackCall &&
+                (nextSpillOffset + globalScratchOffset) > SCRATCH_MSG_LIMIT)
             {
-                GRFSpillFillCount += lr->getNumRefs();
+                // create temp variable to store old a0.2 - this is marked as live-in and live-out.
+                // because the variable is emitted only post RA to preserve old value of a0.2.
+                G4_Declare * a0Dcl = kernel.fg.builder->getOldA0Dot2Temp();
+                LSLiveRange* lr = gra.getLSLR(a0Dcl);
+                if (!lr)
+                {
+                    lr = CreateLocalLiveRange(a0Dcl);
+                    globalDeclares.push_back(a0Dcl);
+                }
             }
+            else if (gra.useLscForNonStackCallSpillFill) {
+                G4_Declare* a0Dcl = kernel.fg.builder->getOldA0Dot2Temp();
+                LSLiveRange* lr = gra.getLSLR(a0Dcl);
+                if (!lr)
+                {
+                    lr = CreateLocalLiveRange(a0Dcl);
+                    globalDeclares.push_back(a0Dcl);
+                }
+            }
+
 
             // update jit metadata information for spill
             if (auto jitInfo = builder.getJitInfo())
@@ -1022,32 +1127,7 @@ int LinearScanRA::linearScanRA()
             std::cout << "\t\tGRFSpillFillCount: " << GRFSpillFillCount << "\n";
         }
 
-        auto underSpillThreshold = [this](int numSpill, int asmCount)
-        {
-            int threshold = std::min(builder.getOptions()->getuInt32Option(vISA_AbortOnSpillThreshold), 200u);
-            return (numSpill * 200) < (threshold * asmCount);
-        };
-
-        int instNum = 0;
-        for (auto bb : kernel.fg)
-        {
-            instNum += (int)bb->size();
-        }
-        if (GRFSpillFillCount && builder.getOption(vISA_AbortOnSpill) && !underSpillThreshold(GRFSpillFillCount, instNum))
-        {
-            // update jit metadata information
-            if (auto jitInfo = builder.getJitInfo())
-            {
-                jitInfo->isSpill = true;
-                jitInfo->spillMemUsed = 0;
-                jitInfo->numAsmCount = instNum;
-                jitInfo->numGRFSpillFill = GRFSpillFillCount;
-            }
-
-            // Early exit when -abortonspill is passed, instead of
-            // spending time inserting spill code and then aborting.
-            return VISA_SPILL;
-        }
+       kernel.dumpToFile("after.Spill_GRF." + std::to_string(iterator));
 
         iterator++;
     } while (spillLRs.size() && iterator < MAXIMAL_ITERATIONS);
@@ -1095,7 +1175,7 @@ int LinearScanRA::doLinearScanRA()
         std::cout << "--Global linear Scan RA--\n";
     }
     //Initial pregs which will be used in the preRAAnalysis
-    PhyRegsLocalRA phyRegs(&builder, kernel.getNumRegTotal());
+    PhyRegsLocalRA phyRegs(builder, kernel.getNumRegTotal());
     pregs = &phyRegs;
     preRAAnalysis();
 
@@ -1132,7 +1212,13 @@ void LinearScanRA::undoLinearScanRAAssignments()
             lr->setFirstRef(NULL, 0);
             lr->setLastRef(NULL, 0);
             lr->clearForbiddenGRF(kernel.getNumRegTotal());
-            lr->setRegionID(-1);
+            lr->setPushed(false);
+            if (kernel.getOption(vISA_GenerateDebugInfo))
+            {
+                auto lrInfo = kernel.getKernelDebugInfo()->getLiveIntervalInfo(lr->getTopDcl(), false);
+                if (lrInfo)
+                    lrInfo->clearLiveIntervals();
+            }
         }
     }
 }
@@ -1175,14 +1261,13 @@ void LinearScanRA::setDstReferences(G4_BB* bb, INST_LIST_ITER inst_it, G4_Declar
         lr = CreateLocalLiveRange(dcl);
     }
 
-    if (dcl->isLiveIn() && dcl->isOutput() && !lr->isGRFRegAssigned())
+    if (dcl->isOutput() && !lr->isGRFRegAssigned())
     {
-        if (lr->getRegionID() != regionID)
+        lr->setLastRef(curInst, lastInstLexID * 2 + 1);
+        if (!lr->isPushedToIntervalList())
         {
-            lr->setFirstRef(curInst, 0);
-            lr->setLastRef(curInst, lastInstLexID * 2 + 1);
             liveThroughIntervals.push_back(lr);
-            lr->setRegionID(regionID);
+            lr->setPushed(true);
         }
         return;
     }
@@ -1225,10 +1310,10 @@ void LinearScanRA::setDstReferences(G4_BB* bb, INST_LIST_ITER inst_it, G4_Declar
     // Check whether local LR is a candidate
     if (lr->isGRFRegAssigned() == false)
     {
-        if (lr->getRegionID() != regionID)
+        if (!lr->isPushedToIntervalList())
         {
             liveIntervals.push_back(lr);
-            lr->setRegionID(regionID);
+            lr->setPushed(true);
         }
 
         unsigned int startIdx;
@@ -1241,13 +1326,13 @@ void LinearScanRA::setDstReferences(G4_BB* bb, INST_LIST_ITER inst_it, G4_Declar
     else if (dcl->getRegVar()->getPhyReg()->isGreg()) //Assigned already and is GRF
     { //Such as stack call varaibles
         unsigned int startIdx;
-        if (lr->getRegionID() != regionID)
+        if (!lr->isPushedToIntervalList())
         {
             if (!curInst->isFCall())
             {
                 liveIntervals.push_back(lr);
             }
-            lr->setRegionID(regionID);
+            lr->setPushed(true);
 
             //Mark live range as assigned
             setPreAssignedLR(lr, preAssignedLiveIntervals);
@@ -1278,14 +1363,13 @@ void LinearScanRA::setSrcReferences(G4_BB* bb, INST_LIST_ITER inst_it, int srcId
         lr = CreateLocalLiveRange(dcl);
     }
 
-    if (dcl->isLiveIn() && dcl->isOutput() && !lr->isGRFRegAssigned())
+    if (dcl->isOutput() && !lr->isGRFRegAssigned())
     {
-        if (lr->getRegionID() != regionID)
+        lr->setLastRef(curInst, lastInstLexID * 2 + 1);
+        if (!lr->isPushedToIntervalList())
         {
-            lr->setFirstRef(curInst, 0);
-            lr->setLastRef(curInst, lastInstLexID * 2 + 1);
             liveThroughIntervals.push_back(lr);
-            lr->setRegionID(regionID);
+            lr->setPushed(true);
         }
         return;
     }
@@ -1297,10 +1381,10 @@ void LinearScanRA::setSrcReferences(G4_BB* bb, INST_LIST_ITER inst_it, int srcId
         return;
     }
 
-    if (lr->getRegionID() != regionID)
+    if (!lr->isPushedToIntervalList())
     {
         liveIntervals.push_back(lr);
-        lr->setRegionID(regionID);
+        lr->setPushed(true);
         gra.addUndefinedDcl(dcl);
 
         unsigned int startIdx;
@@ -1345,14 +1429,14 @@ void LinearScanRA::generateInputIntervals(G4_Declare *topdcl, G4_INST* inst, std
     G4_RegVar* var = topdcl->getRegVar();
     unsigned int regNum = var->getPhyReg()->asGreg()->getRegNum();
     unsigned int regOff = var->getPhyRegOff();
-    unsigned int idx = regNum * numEltPerGRF<Type_UW>() +
+    unsigned int idx = regNum * builder.numEltPerGRF<Type_UW>() +
         (regOff * topdcl->getElemSize()) / G4_WSIZE + topdcl->getWordSize() - 1;
 
     unsigned int numWords = topdcl->getWordSize();
     for (int i = numWords - 1; i >= 0; --i, --idx)
     {
         if ((inputRegLastRef[idx] == UINT_MAX || inputRegLastRef[idx] < instID) &&
-            initPregs.isGRFAvailable(idx / numEltPerGRF<Type_UW>()))
+            initPregs.isGRFAvailable(idx / builder.numEltPerGRF<Type_UW>()))
         {
             inputRegLastRef[idx] = instID;
             if (avoidSameInstOverlap)
@@ -1379,13 +1463,13 @@ void LinearScanRA::generateInputIntervals(G4_Declare *topdcl, G4_INST* inst, std
 // Generate the input intervals for current BB.
 // The input live ranges either live through current BB or killed by current BB.
 // So, it's enough we check the live out of the BB and the BB it's self
-void LinearScanRA::calculateInputIntervalsGlobal(PhyRegsLocalRA &initPregs, std::list<vISA::G4_BB*> &bbList)
+void LinearScanRA::calculateInputIntervalsGlobal(PhyRegsLocalRA &initPregs)
 {
     int numGRF = kernel.getNumRegTotal();
-    std::vector<uint32_t> inputRegLastRef(numGRF * numEltPerGRF<Type_UW>(), UINT_MAX);
+    std::vector<uint32_t> inputRegLastRef(numGRF * builder.numEltPerGRF<Type_UW>(), UINT_MAX);
     G4_INST* lastInst = nullptr;
 
-    for (BB_LIST_RITER bb_it = bbList.rbegin(), bb_rend = bbList.rend();
+    for (BB_LIST_RITER bb_it = kernel.fg.rbegin(), bb_rend = kernel.fg.rend();
         bb_it != bb_rend;
         bb_it++)
     {
@@ -1523,9 +1607,9 @@ void LinearScanRA::calculateLiveInIntervals(G4_BB* bb, std::vector<LSLiveRange*>
         }
         LSLiveRange* lr = gra.getLSLR(dcl);
         if (lr && !l.isEmptyLiveness() &&
-            l.isLiveAtEntry(bb, dcl->getRegVar()->getId()))
+            l.isLiveAtEntry(bb, dcl->getRegVar()->getId()))  //Live in current BB
         {
-            if (lr->getRegionID() != regionID)
+            if (!lr->isPushedToIntervalList())
             {
                 if (lr->isGRFRegAssigned() && dcl->getRegVar()->isGreg())
                 {
@@ -1535,13 +1619,46 @@ void LinearScanRA::calculateLiveInIntervals(G4_BB* bb, std::vector<LSLiveRange*>
                 {
                     liveIntervals.push_back(lr);
                 }
-                lr->setRegionID(regionID);
+                lr->setPushed(true);
             }
 
             unsigned curIdx = 0;
             if (lr->getFirstRef(curIdx) == NULL && curIdx == 0) //not referenced before, assigned or not assigned?
             {
                 lr->setFirstRef((*bb->begin()), (*bb->begin())->getLexicalId() * 2);
+            }
+        }
+        else //Live in the exist BB of a loop
+        {
+            //Extend the live ranges of live in variable of exit BB of the loop to the head of loop.
+            std::map<G4_BB*, std::vector<G4_BB*>>::iterator loopHEIt = loopHeadExitMap.find(bb);
+            if (loopHEIt != loopHeadExitMap.end()) //If current BB is the head of a loop
+            {
+                for (auto exitBB : loopHeadExitMap[bb]) //for all exit BBs.
+                {
+                    if (lr && !l.isEmptyLiveness() &&
+                        l.isLiveAtEntry(exitBB, dcl->getRegVar()->getId()))
+                    {
+                        if (!lr->isPushedToIntervalList()) //Is the interval pushed or not
+                        {
+                            if (lr->isGRFRegAssigned() && dcl->getRegVar()->isGreg())
+                            {
+                                setPreAssignedLR(lr, preAssignedLiveIntervals);
+                            }
+                            else
+                            {
+                                liveIntervals.push_back(lr);
+                            }
+                            lr->setPushed(true);
+                        }
+
+                        unsigned curIdx = 0;
+                        if (lr->getFirstRef(curIdx) == NULL && curIdx == 0) //not referenced before
+                        {
+                            lr->setFirstRef((*bb->begin()), (*bb->begin())->getLexicalId() * 2);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1577,7 +1694,7 @@ void LinearScanRA::calculateCurrentBBLiveIntervals(G4_BB* bb, std::vector<LSLive
             LSLiveRange* lr = CreateLocalLiveRange(scallDcl);
 
             liveIntervals.push_back(lr);
-            lr->setRegionID(regionID);
+            lr->setPushed(true);
             lr->setFirstRef(curInst, curInst->getLexicalId() * 2);
 
             FuncInfo* callee = bb->getCalleeInfo();
@@ -1600,9 +1717,9 @@ void LinearScanRA::calculateCurrentBBLiveIntervals(G4_BB* bb, std::vector<LSLive
                 LSLiveRange* stackCallRetLR = new (mem)LSLiveRange();
                 stackCallRetLR->setTopDcl(ret);
                 allocForbiddenVector(stackCallRetLR);
-                stackCallRetLR->setRegionID(regionID);
                 stackCallRetLR->setFirstRef(curInst, curInst->getLexicalId() * 2);
                 liveIntervals.push_back(stackCallRetLR);
+                stackCallRetLR->setPushed(true);
             }
             if (arg && argSize > 0 && arg->getRegVar())
             {
@@ -1637,9 +1754,9 @@ void LinearScanRA::calculateCurrentBBLiveIntervals(G4_BB* bb, std::vector<LSLive
                 if (src->asSrcRegRegion()->isIndirect())
                 {
                     auto pointsToSet = l.getPointsToAnalysis().getAllInPointsTo(src->getBase()->asRegVar());
-                    for (auto var : *pointsToSet)
+                    for (auto pt : *pointsToSet)
                     {
-                        G4_Declare* dcl = var->getDeclare()->getRootDeclare();
+                        G4_Declare* dcl = pt.var->getDeclare()->getRootDeclare();
 
                         setSrcReferences(bb, inst_it, i, dcl, liveIntervals, eotLiveIntervals);
                     }
@@ -1663,9 +1780,9 @@ void LinearScanRA::calculateCurrentBBLiveIntervals(G4_BB* bb, std::vector<LSLive
             if (dst->isIndirect())
             {
                 auto pointsToSet = l.getPointsToAnalysis().getAllInPointsTo(dst->getBase()->asRegVar());
-                for (auto var : *pointsToSet)
+                for (auto pt : *pointsToSet)
                 {
-                    G4_Declare* dcl = var->getDeclare()->getRootDeclare();
+                    G4_Declare* dcl = pt.var->getDeclare()->getRootDeclare();
 
                     setDstReferences(bb, inst_it, dcl, liveIntervals, eotLiveIntervals);
                 }
@@ -1703,6 +1820,33 @@ void LinearScanRA::calculateLiveOutIntervals(G4_BB* bb, std::vector<LSLiveRange*
 
     return;
 }
+
+void LinearScanRA::calculateLiveThroughIntervals()
+{
+    for (auto dcl : globalDeclares)
+    {
+        if (dcl->getAliasDeclare() != NULL ||
+            dcl->getRegFile() == G4_INPUT ||
+            dcl->isSpilled())
+            continue;
+
+        LSLiveRange* lr = gra.getLSLR(dcl);
+        if (lr &&
+            dcl->isInput() && dcl->isOutput() && !lr->isGRFRegAssigned())
+        {
+            lr->setFirstRef(nullptr, 0);
+            lr->setLastRef(nullptr, lastInstLexID * 2 + 1);
+            if (!lr->isPushedToIntervalList())
+            {
+                liveThroughIntervals.push_back(lr);
+                lr->setPushed(true);
+            }
+        }
+    }
+
+    return;
+}
+
 
 //
 // Live intervals:
@@ -1781,8 +1925,8 @@ void LinearScanRA::printInputLiveIntervalsGlobal()
         LSInputLiveRange* lr = (*it);
 
         regWordIdx = lr->getRegWordIdx();
-        regNum = regWordIdx / numEltPerGRF<Type_UW>();
-        subRegInWord = regWordIdx % numEltPerGRF<Type_UW>();
+        regNum = regWordIdx / builder.numEltPerGRF<Type_UW>();
+        subRegInWord = regWordIdx % builder.numEltPerGRF<Type_UW>();
         lrEndIdx = lr->getLrEndIdx();
 
         COUT_ERROR << "r" << regNum << "." << subRegInWord << " " << lrEndIdx;
@@ -1792,7 +1936,7 @@ void LinearScanRA::printInputLiveIntervalsGlobal()
     COUT_ERROR << std::endl;
 }
 
-static inline void printLiveInterval(LSLiveRange* lr, bool assign)
+static inline void printLiveInterval(LSLiveRange* lr, bool assign, const IR_Builder& builder)
 {
     int startregnum, endregnum, startsregnum=0, endsregnum;
     G4_VarBase* op;
@@ -1806,7 +1950,7 @@ static inline void printLiveInterval(LSLiveRange* lr, bool assign)
 
         if (lr->getTopDcl()->getWordSize() > 0)
         {
-            endsregnum = lr->getTopDcl()->getWordSize() % numEltPerGRF<Type_UW>() - 1;
+            endsregnum = lr->getTopDcl()->getWordSize() % builder.numEltPerGRF<Type_UW>() - 1;
             if (endsregnum < 0) endsregnum = 15;
         }
         else
@@ -1849,7 +1993,7 @@ globalLinearScan::globalLinearScan(GlobalRA& g, LivenessAnalysis* l, std::vector
     activeGRF.resize(g.kernel.getNumRegTotal());
     for (auto lr : inputLivelIntervals)
     {
-        unsigned int regnum = lr->getRegWordIdx() / numEltPerGRF<Type_UW>();
+        unsigned int regnum = lr->getRegWordIdx() / builder.numEltPerGRF<Type_UW>();
         activeGRF[regnum].activeInput.push_back(lr);
     }
 }
@@ -1926,7 +2070,7 @@ void globalLinearScan::getCallerSaveGRF(
 
     for (auto inputlr : inputIntervals)
     {
-        unsigned int regnum = inputlr->getRegWordIdx() / numEltPerGRF<Type_UW>();
+        unsigned int regnum = inputlr->getRegWordIdx() / builder.numEltPerGRF<Type_UW>();
         std::vector<unsigned int>::iterator it = std::find(regNum.begin(), regNum.end(), regnum);
         if (it == regNum.end())
         {
@@ -1973,7 +2117,7 @@ bool LinearScanRA::assignEOTLiveRanges(IR_Builder& builder, std::vector<LSLiveRa
             assert(0);
         }
 #ifdef DEBUG_VERBOSE_ON
-        printLiveInterval(lr, true);
+        printLiveInterval(lr, true, builder);
 #endif
     }
 
@@ -2125,7 +2269,7 @@ bool globalLinearScan::runLinearScan(IR_Builder& builder, std::vector<LSLiveRang
 #ifdef DEBUG_VERBOSE_ON
             if (allocateRegResult)
             {
-                printLiveInterval(lr, true);
+                printLiveInterval(lr, true, builder);
             }
 #endif
         }
@@ -2140,26 +2284,26 @@ bool globalLinearScan::runLinearScan(IR_Builder& builder, std::vector<LSLiveRang
             endsregnum = subregnum + (lr->getTopDcl()->getNumElems() * lr->getTopDcl()->getElemSize() / 2) - 1;
             int nrows = 0;
             int lastRowSize = 0;
-            int size = lr->getSizeInWords();
-            LinearScanRA::getRowInfo(size, nrows, lastRowSize);
+            int size = lr->getSizeInWords(builder);
+            LinearScanRA::getRowInfo(size, nrows, lastRowSize, builder);
 
             if (!lr->isUseUnAvailableReg())
             {
-                if ((unsigned)size >= numEltPerGRF<Type_UW>())
+                if ((unsigned)size >= builder.numEltPerGRF<Type_UW>())
                 {
-                    if (size % numEltPerGRF<Type_UW>() == 0)
+                    if (size % builder.numEltPerGRF<Type_UW>() == 0)
                     {
-                        pregManager.getAvaialableRegs()->setGRFBusy(startregnum, lr->getTopDcl()->getNumRows());
+                        pregManager.getAvailableRegs()->setGRFBusy(startregnum, lr->getTopDcl()->getNumRows());
                     }
                     else
                     {
-                        pregManager.getAvaialableRegs()->setGRFBusy(startregnum, lr->getTopDcl()->getNumRows() - 1);
-                        pregManager.getAvaialableRegs()->setWordBusy(startregnum + lr->getTopDcl()->getNumRows() - 1, 0, lastRowSize);
+                        pregManager.getAvailableRegs()->setGRFBusy(startregnum, lr->getTopDcl()->getNumRows() - 1);
+                        pregManager.getAvailableRegs()->setWordBusy(startregnum + lr->getTopDcl()->getNumRows() - 1, 0, lastRowSize);
                     }
                 }
                 else
                 {
-                    pregManager.getAvaialableRegs()->setWordBusy(startregnum, subregnum, size);
+                    pregManager.getAvailableRegs()->setWordBusy(startregnum, subregnum, size);
                 }
             }
         }
@@ -2186,7 +2330,7 @@ bool globalLinearScan::runLinearScan(IR_Builder& builder, std::vector<LSLiveRang
                 {
                     updateGlobalActiveList(lr);
 #ifdef DEBUG_VERBOSE_ON
-                    printLiveInterval(lr, true);
+                    printLiveInterval(lr, true, builder);
 #endif
                 }
             }
@@ -2196,7 +2340,7 @@ bool globalLinearScan::runLinearScan(IR_Builder& builder, std::vector<LSLiveRang
                 COUT_ERROR << "Failed to spill registers for " << lr->getTopDcl()->getName() << ", rows :" << lr->getTopDcl()->getNumRows() << std::endl;
                 printActives();
 #endif
-                spillLRs.push_back(lr);
+                return false;
             }
         }
     }
@@ -2210,6 +2354,11 @@ bool globalLinearScan::runLinearScan(IR_Builder& builder, std::vector<LSLiveRang
 
     //Assign the registers for the live out ones
     expireAllActive();
+
+    if (builder.kernel.getOptions()->getOption(vISA_GenerateDebugInfo))
+    {
+        updateDebugInfo(builder.kernel, liveIntervals);
+    }
 
     return true;
 }
@@ -2360,7 +2509,7 @@ int globalLinearScan::findSpillCandidate(LSLiveRange* tlr)
         bool canBeFree = true;
         LSLiveRange* analyzedLV = nullptr;
 
-        pregManager.getAvaialableRegs()->findRegisterCandiateWithAlignForward(i, bankAlign, false);
+        pregManager.getAvailableRegs()->findRegisterCandiateWithAlignForward(i, bankAlign, false);
 
         // Check the following adjacent registers
         for (int k = i; k < i + requiredRows; k++)
@@ -2411,7 +2560,7 @@ int globalLinearScan::findSpillCandidate(LSLiveRange* tlr)
                     break;
                 }
             }
-            else if (pregManager.getAvaialableRegs()->isGRFAvailable(k) && !pregManager.getAvaialableRegs()->isGRFBusy(k))
+            else if (pregManager.getAvailableRegs()->isGRFAvailable(k) && !pregManager.getAvailableRegs()->isGRFBusy(k))
             {
                 lastIdxs += lastLexicalID - tStartIdx;
             }
@@ -2486,7 +2635,7 @@ void globalLinearScan::freeSelectedRegistsers(int startGRF, LSLiveRange* tlr, st
             }
 
 #ifdef DEBUG_VERBOSE_ON
-            printLiveInterval(lr, false);
+            printLiveInterval(lr, false, builder);
 #endif
 
             //Free the allocated register
@@ -2564,7 +2713,7 @@ void globalLinearScan::expireGlobalRanges(unsigned int idx)
             }
 
 #ifdef DEBUG_VERBOSE_ON
-            printLiveInterval(lr, false);
+            printLiveInterval(lr, false, builder);
 #endif
             if (preg)
             {
@@ -2627,8 +2776,8 @@ void globalLinearScan::expireInputRanges(unsigned int global_idx)
 
         if (endIdx <= global_idx)
         {
-            unsigned int regnum = lr->getRegWordIdx() / numEltPerGRF<Type_UW>();
-            unsigned int subRegInWord = lr->getRegWordIdx() % numEltPerGRF<Type_UW>();
+            unsigned int regnum = lr->getRegWordIdx() / builder.numEltPerGRF<Type_UW>();
+            unsigned int subRegInWord = lr->getRegWordIdx() % builder.numEltPerGRF<Type_UW>();
 
             // Free physical regs marked for this range
             pregManager.freeRegs(regnum, subRegInWord, 1, endIdx);
@@ -2676,7 +2825,7 @@ bool globalLinearScan::allocateRegsLinearScan(LSLiveRange* lr, IR_Builder& build
     // as it can make a better judgement by considering the
     // spill cost.
     int nrows = 0;
-    int size = lr->getSizeInWords();
+    int size = lr->getSizeInWords(builder);
     G4_Declare* dcl = lr->getTopDcl();
     G4_SubReg_Align subalign = gra.getSubRegAlign(dcl);
     localRABound = numRegLRA - 1;
@@ -2746,7 +2895,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
     int grfRows = 0;
     bool multiSteps = nrows > 1;
 
-    if (lastRowSize % numEltPerGRF<Type_UW>() == 0)
+    if (lastRowSize % builder.numEltPerGRF<Type_UW>() == 0)
     {
         grfRows = nrows;
     }
@@ -2776,7 +2925,7 @@ bool PhyRegsLocalRA::findFreeMultipleRegsForward(int regIdx, BankAlign align, in
 
         if (foundItem == grfRows)
         {
-            if (lastRowSize % numEltPerGRF<Type_UW>() == 0)
+            if (lastRowSize % builder.numEltPerGRF<Type_UW>() == 0)
             {
                 regnum = startReg;
                 return true;
@@ -2858,20 +3007,20 @@ int PhyRegsManager::findFreeRegs(int size, BankAlign align, G4_SubReg_Align suba
 {
     int nrows = 0;
     int lastRowSize = 0;
-    LocalRA::getRowInfo(size, nrows, lastRowSize);
+    LocalRA::getRowInfo(size, nrows, lastRowSize, builder);
 
     int startReg = startRegNum;
     int endReg = endRegNum - nrows + 1;
 
     bool found = false;
 
-    if (size >= (int)numEltPerGRF<Type_UW>())
+    if (size >= (int)builder.numEltPerGRF<Type_UW>())
     {
         found = availableRegs.findFreeMultipleRegsForward(startReg, align, regnum, nrows, lastRowSize, endReg, instID, forbidden);
         if (found)
         {
             subregnum = 0;
-            if (size % numEltPerGRF<Type_UW>() == 0)
+            if (size % builder.numEltPerGRF<Type_UW>() == 0)
             {
                 availableRegs.setGRFBusy(regnum, nrows);
             }

@@ -18,7 +18,7 @@ SPDX-License-Identifier: MIT
 #include <unordered_set>
 #include <optional>
 
-typedef struct{
+typedef struct _AddrSubReg_Node{
     short immAddrOff = 0;
     int subReg = 0;
     INST_LIST_ITER iter;
@@ -41,6 +41,23 @@ typedef enum _HEADER_ORDER_
 
 namespace vISA
 {
+class DPASSrc2RSCache
+{
+public:
+    std::vector<int> GRFCache;
+    unsigned latestID;
+    bool firstDpas;
+
+    DPASSrc2RSCache()
+    {
+        latestID = 0;
+        firstDpas = true;
+        GRFCache.resize(16, -1);
+    }
+    ~DPASSrc2RSCache()
+    {
+    }
+};
 class MSGTable
 {
 public:
@@ -81,7 +98,7 @@ typedef std::list<vISA::MSGTable*>::iterator MSGTable_ITER;
 
 #define MESSAGE_HEADER_THRESHOLD 1
 
-typedef struct
+typedef struct _DEFA0
 {
     vISA::G4_INST *pred = nullptr;
     vISA::G4_INST *curr = nullptr;
@@ -114,6 +131,7 @@ class Optimizer
     void renameRegister();
     void localDefHoisting();
     void reassociateConst();
+    void removePartialMovs();
     void localCopyPropagation();
     void localInstCombine();
     void optimizeLogicOperation();
@@ -134,6 +152,9 @@ class Optimizer
     bool foldCmpToCondMod(G4_BB* BB, INST_LIST_ITER& iter);
     void HWWorkaround();
     void preRA_HWWorkaround();
+    G4_INST* evenlySplitDPASInst(INST_LIST_ITER iter, G4_BB* bb);
+    bool hasDPASSourceTwoReuse(DPASSrc2RSCache* src2GRFCache, G4_INST* inst);
+    void DPASWA(G4_BB* bb, INST_LIST_ITER ii, DPASSrc2RSCache* src2GRFCache);
     void normalizeRegion();
     void initializePayload();
     void dumpPayload();
@@ -168,6 +189,9 @@ class Optimizer
 
     void adjustIndirectCallOffsetAfterSWSBSet();
 
+    // For HW debugging
+    void zeroSomeARF();
+
     void addSWSBInfo();
 
     void lowerMadSequence();
@@ -185,6 +209,7 @@ class Optimizer
     void accSubPostSchedule();
 
     void accSubBeforeRA();
+
 
     // return true if BuiltInR0 gets a different allocation than r0
     bool R0CopyNeeded();
@@ -223,6 +248,7 @@ private:
     bool chkBwdOutputHazard(G4_INST *, INST_LIST_ITER&);
     bool chkBwdOutputHazard(G4_INST *, INST_LIST_ITER&, G4_INST *);
     bool chkBwdWARdep(G4_INST*, INST_LIST_ITER);
+    bool chkBwdWAWdep(G4_INST*, INST_LIST_ITER);
 
     // various HW WA
     void addSwitchOptionToBB(G4_BB*, bool isSubroutine = false);
@@ -238,10 +264,17 @@ private:
     void setA0toTdrForSendc();
     void replaceRetWithJmpi();
     void doNoMaskWA();
+    void newDoNoMaskWA();
+    void applyFusedCallWA();
+    void setDMaskFusedCallWA();
+    void finishFusedCallWA();
     void doNoMaskWA_postRA();
+    void newDoNoMaskWA_postRA();
+    bool NoMaskWAUseRAList() const { return true; }
     void insertFenceAtEntry();
     void expandMulPostSchedule();
     void expandMadwPostSchedule();
+    void fixReadSuppressioninFPU0();
 
     typedef std::vector<vISA::G4_INST*> InstListType;
     // create instruction sequence to calculate call offset from ip
@@ -272,6 +305,10 @@ private:
     void mapOrphans();
     void varSplit();
     void cloneSampleInst();
+
+    // helper function to find the size of cross thread data which needs to be loaded
+    // loadStartOffset - in this parameter we put the offsset of first input which gets loaded.
+    uint32_t findLoadedInputSize(uint32_t& loadStartOffset);
 
     /// Each optimization should be a member function of this class.
     /// This defines a pass type as a pointer to member function.
@@ -313,6 +350,7 @@ public:
         PI_localDefHoisting,
         PI_localCopyPropagation,
         PI_localInstCombine,
+        PI_removePartialMovs,
         PI_cselPeepHoleOpt,
         PI_optimizeLogicOperation,
         PI_HWConformityChk,            // always
@@ -361,6 +399,7 @@ public:
         PI_analyzeMove,
         PI_removeInstrinsics,
         PI_expandMulPostSchedule,
+        PI_zeroSomeARF,
         PI_addSWSBInfo,
         PI_expandMadwPostSchedule,
         PI_NUM_PASSES

@@ -211,6 +211,7 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         case ShaderType::VERTEX_SHADER: ss << "VS"; break;
         case ShaderType::GEOMETRY_SHADER: ss << "GS"; break;
         case ShaderType::COMPUTE_SHADER: ss << "CS"; break;
+        case ShaderType::RAYTRACING_SHADER: ss << "RT"; break;
         case ShaderType::UNKNOWN:
         default: IGC_ASSERT_MESSAGE(0, "Unknown Shader Type"); break;
         }
@@ -386,10 +387,23 @@ std::string DumpName::AbsolutePath(OutputFolderName folder) const
         std::replace(s.begin(), s.end(), '>', '_');
         std::replace(s.begin(), s.end(), '|', '_');
 
+        // vISA does not support string of length >= 255. Truncate if this
+        // exceeds the limit. Note that vISA may append an extension, so relax
+        // it to a random number 240 here. And this assumes postfix string is
+        // the last chunk to compose the dump name before adding the extension.
+        // TODO: The existing WA does not guarantee the uniqueness of the
+        // filename when truncating the postfix. Will need to fix it.
+        const size_t MAX_VISA_STRING_LENGTH = 240;
+        const size_t curLen = static_cast<size_t>(ss.tellp());
+        const size_t extSize =
+            !m_extension.hasValue() ? 0 : 1 + m_extension.getValue().size();
+        if (curLen + 1 + s.size() + extSize > MAX_VISA_STRING_LENGTH)
+        {
+            s.resize(MAX_VISA_STRING_LENGTH - curLen - 1 - extSize);
+        }
         ss << "_"
             << s;
     }
-
 
     if(m_extension.hasValue())
     {
@@ -718,22 +732,30 @@ std::string GetDumpName(const IGC::CShader* pProgram, const char* ext)
 DumpName GetDumpNameObj(const IGC::CShader* pProgram, const char* ext)
 {
     IGC::CodeGenContext* context = pProgram->GetContext();
+
+    bool overrideHash = false;
+    if (context->type == ShaderType::RAYTRACING_SHADER && context->hash.asmHash == 0)
+    {
+        auto* RayCtx = static_cast<RayDispatchShaderContext*>(context);
+        if (QWORD Hash = RayCtx->getShaderHash(pProgram))
+        {
+            context->hash.asmHash = Hash;
+            overrideHash = true;
+        }
+    }
+
     DumpName dumpName =
         IGC::Debug::DumpName(IGC::Debug::GetShaderOutputName())
         .Type(context->type)
         .Hash(context->hash)
         .StagedInfo(context);
 
+    if (overrideHash)
+        context->hash.asmHash = 0;
+
     if(pProgram->entry->getName() != "entry")
     {
-        // TempWA, prevent dump size > 256, limit kernel name to 180 + path size
-        std::string progName = pProgram->entry->getName().str();
-        const int MAX_VISA_STRING_LENGTH = 180;
-        if (progName.size() >= MAX_VISA_STRING_LENGTH)
-        {
-            progName.resize(MAX_VISA_STRING_LENGTH);
-        }
-        dumpName = dumpName.PostFix(progName);
+        dumpName = dumpName.PostFix(pProgram->entry->getName().str());
     }
     if (pProgram->GetShaderType() == ShaderType::PIXEL_SHADER)
     {

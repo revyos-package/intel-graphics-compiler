@@ -261,7 +261,7 @@ namespace vISA
     {
     private:
         // pair of default mask, non-default mask
-        using MaskDeclares = std::pair<BitSet, BitSet>;
+        using MaskDeclares = std::pair<SparseBitSet, SparseBitSet>;
         G4_Kernel& kernel;
         Interference& intf;
         GlobalRA& gra;
@@ -277,9 +277,9 @@ namespace vISA
         std::unordered_map <G4_Declare*, MaskDeclares> retDeclares;
         Mem_Manager& m;
 
-        bool updateDstMaskForGather(G4_INST* inst, unsigned char* mask);
-        bool updateDstMaskForGatherRaw(G4_INST* inst, unsigned char* mask, const G4_SendDescRaw *raw);
-        bool updateDstMaskForGatherLdSt(G4_INST* inst, unsigned char* mask, const G4_SendDescLdSt *ldst);
+        bool updateDstMaskForGather(G4_INST* inst, std::vector<unsigned char>& mask);
+        bool updateDstMaskForGatherRaw(G4_INST* inst, std::vector<unsigned char>& mask, const G4_SendDescRaw* raw);
+        bool updateDstMaskForGatherLdSt(G4_INST* inst, std::vector<unsigned char>& mask, const G4_SendDescLdSt *ldst);
         void updateDstMask(G4_INST* inst, bool checkCmodOnly);
         static unsigned getByteSizeFromMask(AugmentationMasks type);
         bool isDefaultMaskDcl(G4_Declare* dcl, unsigned simdSize, AugmentationMasks type);
@@ -359,7 +359,7 @@ namespace vISA
         std::vector<std::unordered_set<uint32_t> > sparseMatrix;
         static const uint32_t denseMatrixLimit = 0x80000;
 
-        static void updateLiveness(BitSet& live, uint32_t id, bool val)
+        static void updateLiveness(SparseBitSet& live, uint32_t id, bool val)
         {
             live.set(id, val);
         }
@@ -416,17 +416,17 @@ namespace vISA
             return matrix[idx];
         }
 
-        void addCalleeSaveBias(const BitSet& live);
+        void addCalleeSaveBias(const SparseBitSet& live);
 
-        void buildInterferenceAtBBExit(const G4_BB* bb, BitSet& live);
-        void buildInterferenceWithinBB(G4_BB* bb, BitSet& live);
-        void buildInterferenceForDst(G4_BB* bb, BitSet& live, G4_INST* inst, std::list<G4_INST*>::reverse_iterator i, G4_DstRegRegion* dst);
-        void buildInterferenceForFcall(G4_BB* bb, BitSet& live, G4_INST* inst, std::list<G4_INST*>::reverse_iterator i, const G4_VarBase* regVar);
+        void buildInterferenceAtBBExit(const G4_BB* bb, SparseBitSet& live);
+        void buildInterferenceWithinBB(G4_BB* bb, SparseBitSet& live);
+        void buildInterferenceForDst(G4_BB* bb, SparseBitSet& live, G4_INST* inst, std::list<G4_INST*>::reverse_iterator i, G4_DstRegRegion* dst);
+        void buildInterferenceForFcall(G4_BB* bb, SparseBitSet& live, G4_INST* inst, std::list<G4_INST*>::reverse_iterator i, const G4_VarBase* regVar);
 
         inline void filterSplitDclares(unsigned startIdx, unsigned endIdx, unsigned n, unsigned col, unsigned &elt, bool is_split);
 
-        void buildInterferenceWithLive(const BitSet& live, unsigned i);
-        void buildInterferenceWithSubDcl(unsigned lr_id, G4_Operand *opnd, BitSet& live, bool setLive, bool setIntf);
+        void buildInterferenceWithLive(const SparseBitSet& live, unsigned i);
+        void buildInterferenceWithSubDcl(unsigned lr_id, G4_Operand *opnd, SparseBitSet& live, bool setLive, bool setIntf);
         void buildInterferenceWithAllSubDcl(unsigned v1, unsigned v2);
 
         void markInterferenceForSend(G4_BB* bb, G4_INST* inst, G4_DstRegRegion* dst);
@@ -577,6 +577,8 @@ namespace vISA
         bool redundantAddrFill(G4_DstRegRegion*, G4_SrcRegRegion*, unsigned execSize);
 
     public:
+        G4_Declare* findDeclare(char* name);
+        void getExtraInterferenceInfo();
         GraphColor(LivenessAnalysis& live, unsigned totalGRF, bool hybrid, bool forceSpill_);
 
         const Options * getOptions() const { return m_options; }
@@ -602,6 +604,7 @@ namespace vISA
         GlobalRA & getGRA() { return gra; }
         G4_SrcRegRegion* getScratchSurface() const;
         LiveRange** getLRs() const { return lrs; }
+        unsigned int getNumVars() const { return numVar; }
     };
 
     struct BundleConflict
@@ -622,7 +625,7 @@ namespace vISA
         BankConflict conflict = BANK_CONFLICT_NONE;      // used to indicate bank that should be assigned to dcl if possible
         G4_INST* startInterval = nullptr;
         G4_INST* endInterval = nullptr;
-        unsigned char* mask = nullptr;
+        std::vector<unsigned char> mask;
         std::vector<const G4_Declare*> subDclList;
         unsigned subOff = 0;
         std::vector<BundleConflict> bundleConflicts;
@@ -663,6 +666,7 @@ namespace vISA
         void populateBBLexId();
         bool interfereBetween(G4_Declare*, G4_Declare*);
         void verifyAlign(G4_Declare* dcl);
+        unsigned getGRFBaseOffset(const G4_Declare* dcl) const;
 
     public:
         void verify();
@@ -686,12 +690,25 @@ namespace vISA
 
     class GlobalRA
     {
+    private:
+        std::unordered_set<G4_INST*> EUFusionCallWAInsts;
+        bool m_EUFusionCallWANeeded;
+        std::unordered_set<G4_INST*> EUFusionNoMaskWAInsts;
+    public:
+        bool EUFusionCallWANeeded() const { return m_EUFusionCallWANeeded; }
+        void addEUFusionCallWAInst(G4_INST* inst);
+        void removeEUFusionCallWAInst(G4_INST* inst) { EUFusionCallWAInsts.erase(inst); }
+        const std::unordered_set<G4_INST*>& getEUFusionCallWAInsts() { return EUFusionCallWAInsts; }
+        bool EUFusionNoMaskWANeeded() const { return builder.hasFusedEUNoMaskWA(); }
+        void addEUFusionNoMaskWAInst(G4_BB* BB, G4_INST* Inst);
+        void removeEUFusionNoMaskWAInst(G4_INST* Inst);
+        const std::unordered_set<G4_INST*>& getEUFusionNoMaskWAInsts() { return EUFusionNoMaskWAInsts; }
     public:
         std::unique_ptr<VerifyAugmentation> verifyAugmentation;
         std::unique_ptr<RegChartDump> regChart;
-        static bool useGenericAugAlign()
+        std::unique_ptr<SpillAnalysis> spillAnalysis;
+        static bool useGenericAugAlign(PlatformGen gen)
         {
-            auto gen = getPlatformGeneration(getGenxPlatform());
             if (gen == PlatformGen::GEN9 ||
                 gen == PlatformGen::GEN8)
                 return false;
@@ -700,7 +717,7 @@ namespace vISA
         static const char StackCallStr[];
 
     private:
-        template <class REGION_TYPE> static unsigned getRegionDisp(REGION_TYPE * region);
+        template <class REGION_TYPE> static unsigned getRegionDisp(REGION_TYPE * region, const IR_Builder& irb);
         unsigned getRegionByteSize(G4_DstRegRegion * region, unsigned execSize);
         static bool owordAligned(unsigned offset) { return offset % 16 == 0; }
         template <class REGION_TYPE> bool isUnalignedRegion(REGION_TYPE * region, unsigned execSize);
@@ -774,6 +791,9 @@ namespace vISA
         uint32_t numGRFSpill = 0;
         uint32_t numGRFFill = 0;
 
+        bool spillFillIntrinUsesLSC(G4_INST* spillFillIntrin);
+        void expandFillLSC(G4_BB* bb, INST_LIST_ITER& instIt);
+        void expandSpillLSC(G4_BB* bb, INST_LIST_ITER& instIt);
         void expandFillNonStackcall(uint32_t numRows, uint32_t offset, short rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
         void expandSpillNonStackcall(uint32_t numRows, uint32_t offset, short rowOffset, G4_SrcRegRegion* header, G4_SrcRegRegion* payload, G4_BB* bb, INST_LIST_ITER& instIt);
         void expandFillStackcall(uint32_t numRows, uint32_t offset, short rowOffset, G4_SrcRegRegion* header, G4_DstRegRegion* resultRgn, G4_BB* bb, INST_LIST_ITER& instIt);
@@ -793,6 +813,8 @@ namespace vISA
         std::vector<bool> calleeSaveRegs;
         unsigned calleeSaveRegCount = 0;
 
+        std::unordered_map<G4_Declare*, SplitResults> splitResults;
+
     public:
         G4_Kernel& kernel;
         IR_Builder& builder;
@@ -800,6 +822,8 @@ namespace vISA
         PointsToAnalysis& pointsToAnalysis;
         FCALL_RET_MAP fcallRetMap;
 
+        bool useLscForSpillFill = false;
+        bool useLscForNonStackCallSpillFill = false;
 
         VarSplitPass* getVarSplitPass() const { return kernel.getVarSplitPass(); }
 
@@ -849,10 +873,10 @@ namespace vISA
         G4_INST* getBEFPSetupInst() { return setupBE_FP; }
         void setBEFPSetupInst(G4_INST* i) { setupBE_FP = i; }
 
-        static unsigned owordToGRFSize(unsigned numOwords);
-        static unsigned hwordToGRFSize(unsigned numHwords);
-        static unsigned GRFToHwordSize(unsigned numGRFs);
-        static unsigned GRFSizeToOwords(unsigned numGRFs);
+        static unsigned owordToGRFSize(unsigned numOwords, const IR_Builder& builder);
+        static unsigned hwordToGRFSize(unsigned numHwords, const IR_Builder& builder);
+        static unsigned GRFToHwordSize(unsigned numGRFs, const IR_Builder& builder);
+        static unsigned GRFSizeToOwords(unsigned numGRFs, const IR_Builder& builder);
         static unsigned getHWordByteSize();
 
         // RA specific fields
@@ -1020,12 +1044,12 @@ namespace vISA
             allocVar(dcl).endInterval = inst;
         }
 
-        unsigned char* getMask(const G4_Declare* dcl) const
+        const std::vector<unsigned char>& getMask(const G4_Declare* dcl) const
         {
             return getVar(dcl).mask;
         }
 
-        void setMask(const G4_Declare* dcl, unsigned char* m)
+        void setMask(const G4_Declare* dcl, std::vector<unsigned char> m)
         {
             allocVar(dcl).mask = m;
         }
@@ -1077,12 +1101,27 @@ namespace vISA
 
         unsigned get_bundle(unsigned baseReg, int offset) const
         {
+            if (builder.hasPartialInt64Support())
+            {
+                return (((baseReg + offset) % 32) / 2);
+            }
             return (((baseReg + offset) % 64) / 4);
         }
 
         unsigned get_bank(unsigned baseReg, int offset)
         {
             int bankID = (baseReg + offset) % 2;
+
+            if (builder.hasTwoGRFBank16Bundles())
+            {
+                bankID = ((baseReg + offset) % 4) / 2;
+            }
+
+
+            if (builder.hasOneGRFBank16Bundles())
+            {
+                bankID = (baseReg + offset) % 2;
+            }
 
             return bankID;
         }
@@ -1168,6 +1207,12 @@ namespace vISA
             {
                 verifyAugmentation = std::make_unique<VerifyAugmentation>();
             }
+
+            // Need call WA for EU Fusion for non-entry function
+            m_EUFusionCallWANeeded = builder.hasFusedEU()
+                && builder.getOption(vISA_fusedCallWA)
+                && (kernel.fg.getHasStackCalls() || kernel.hasIndirectCall());
+                //&& !builder.getIsKernel(); // if caller save tmp is forced w/ M16, caller save/restore must be forced with M16.
         }
 
         void emitFGWithLiveness(const LivenessAnalysis& liveAnalysis) const;
@@ -1195,8 +1240,8 @@ namespace vISA
         void assignRegForAliasDcl();
         void removeSplitDecl();
         int coloringRegAlloc();
-        void restoreRegs(unsigned startReg, unsigned owordSize, G4_Declare* scratchRegDcl, G4_Declare* framePtr, unsigned frameOwordOffset, G4_BB* bb, INST_LIST_ITER insertIt, std::unordered_set<G4_INST*>& group);
-        void restoreActiveRegs(std::vector<bool>& restoreRegs, unsigned startReg, unsigned frameOffset, G4_BB* bb, INST_LIST_ITER insertIt, std::unordered_set<G4_INST*>& group);
+        void restoreRegs(unsigned startReg, unsigned owordSize, G4_Declare* scratchRegDcl, G4_Declare* framePtr, unsigned frameOwordOffset, G4_BB* bb, INST_LIST_ITER insertIt, std::unordered_set<G4_INST*>& group, bool caller);
+        void restoreActiveRegs(std::vector<bool>& restoreRegs, unsigned startReg, unsigned frameOffset, G4_BB* bb, INST_LIST_ITER insertIt, std::unordered_set<G4_INST*>& group, bool caller);
         void OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs);
         void OptimizeActiveRegsFootprint(std::vector<bool>& saveRegs, std::vector<bool>& retRegs);
         void addCallerSaveRestoreCode();
@@ -1272,7 +1317,7 @@ namespace vISA
 
         VarRange* splitVarRange(VarRange *src1, VarRange *src2, std::stack<VarRange*> *toDelete);
         void rangeListSpliting(VAR_RANGE_LIST *rangeList, G4_Operand *opnd, std::stack<VarRange*> *toDelete);
-        static void getHeightWidth(G4_Type type, unsigned numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize);
+        void getHeightWidth(G4_Type type, unsigned numberElements, unsigned short &dclWidth, unsigned short &dclHeight, int &totalByteSize) const;
         void createSubDcls(G4_Kernel& kernel, G4_Declare* oldDcl, std::vector<G4_Declare*> &splitDclList);
         void insertMovesToTemp(IR_Builder& builder, G4_Declare* oldDcl, G4_Operand *dstOpnd, G4_BB* bb, INST_LIST_ITER instIter, std::vector<G4_Declare*> &splitDclList);
         void insertMovesFromTemp(G4_Kernel& kernel, G4_Declare* oldDcl, int index, G4_Operand *srcOpnd, int pos, G4_BB* bb, INST_LIST_ITER instIter, std::vector<G4_Declare*> &splitDclList);

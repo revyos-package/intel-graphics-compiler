@@ -748,7 +748,7 @@ namespace IGC
             return std::make_tuple(Val, isSignedDst, false);
 
         // Truncate from signed integer. Need to check further for lower bound.
-        Value* LHS, * RHS;
+        Value* LHS = nullptr, * RHS = nullptr;
         if (!match(Val, m_SMax(m_Value(LHS), m_Value(RHS))))
             return std::make_tuple(nullptr, false, false);
 
@@ -916,8 +916,8 @@ namespace IGC
         if (SI.getType()->isFloatingPointTy())
             return false;
 
-        bool isMin, isUnsigned;
-        llvm::Value* LHS, * RHS;
+        bool isMin = false, isUnsigned = false;
+        llvm::Value* LHS = nullptr, * RHS = nullptr;
 
         if (!isMinOrMax(&SI, LHS, RHS, isMin, isUnsigned))
             return false;
@@ -965,6 +965,7 @@ namespace IGC
             break;
         case Instruction::Sub:
             match = MatchMad(I) ||
+                MatchAdd3(I) ||
                 MatchAbsNeg(I) ||
                 MatchMulAdd16(I) ||
                 MatchModifier(I);
@@ -976,6 +977,7 @@ namespace IGC
             break;
         case Instruction::Add:
             match = MatchMad(I) ||
+                MatchAdd3(I) ||
                 MatchMulAdd16(I) ||
                 MatchModifier(I);
             break;
@@ -1009,16 +1011,19 @@ namespace IGC
             break;
         case Instruction::And:
             match =
+                MatchBfn(I) ||
                 MatchBoolOp(I) ||
                 MatchLogicAlu(I);
             break;
         case Instruction::Or:
             match =
+                MatchBfn(I) ||
                 MatchBoolOp(I) ||
                 MatchLogicAlu(I);
             break;
         case Instruction::Xor:
             match =
+                MatchBfn(I) ||
                 MatchLogicAlu(I);
             break;
         default:
@@ -1087,7 +1092,9 @@ namespace IGC
             case GenISAIntrinsic::GenISA_ldraw_indexed:
             case GenISAIntrinsic::GenISA_storerawvector_indexed:
             case GenISAIntrinsic::GenISA_storeraw_indexed:
-                match = MatchSingleInstruction(I);
+                match = m_Platform.matchImmOffsetsLSC() ?
+                    MatchImmOffsetLSC(I) || MatchSingleInstruction(I) :
+                    MatchSingleInstruction(I);
                 break;
             case GenISAIntrinsic::GenISA_GradientX:
             case GenISAIntrinsic::GenISA_GradientY:
@@ -1152,6 +1159,12 @@ namespace IGC
         {
             Function* Callee = I.getCalledFunction();
 
+            if (IGCMetrics::IGCMetric::isMetricFuncCall(&I))
+            {
+                // dont do anything with metrics calls
+                return;
+            }
+
             // Match inline asm
             if (I.isInlineAsm())
             {
@@ -1161,7 +1174,9 @@ namespace IGC
                 }
             }
             // Match indirect call, support declarations for indirect funcs
-            else if (!Callee || Callee->hasFnAttribute("referenced-indirectly"))
+            else if (!Callee ||
+                     Callee->hasFnAttribute("referenced-indirectly") ||
+                     Callee->hasFnAttribute("invoke_simd_target"))
             {
                 match = MatchSingleInstruction(I);
             }
@@ -1215,6 +1230,9 @@ namespace IGC
             match = MatchPow(I) ||
                 MatchModifier(I);
             break;
+#if LLVM_VERSION_MAJOR >= 12
+        case Intrinsic::abs:
+#endif
         case Intrinsic::fabs:
             match = MatchAbsNeg(I);
             break;
@@ -1230,6 +1248,9 @@ namespace IGC
         case Intrinsic::fshr:
             match = MatchFunnelShiftRotate(I);
             break;
+        case Intrinsic::canonicalize:
+            match = MatchCanonicalizeInstruction(I);
+            break;
         default:
             match = MatchSingleInstruction(I);
             // no pattern for the rest of the intrinsics
@@ -1240,13 +1261,17 @@ namespace IGC
 
     void CodeGenPatternMatch::visitStoreInst(StoreInst& I)
     {
-         bool match = MatchSingleInstruction(I);
+         bool match = m_Platform.matchImmOffsetsLSC() ?
+             MatchImmOffsetLSC(I) || MatchSingleInstruction(I) :
+             MatchSingleInstruction(I);
         IGC_ASSERT(match);
     }
 
     void CodeGenPatternMatch::visitLoadInst(LoadInst& I)
     {
-        bool match = MatchSingleInstruction(I);
+        bool match = m_Platform.matchImmOffsetsLSC() ?
+            MatchImmOffsetLSC(I) || MatchSingleInstruction(I) :
+            MatchSingleInstruction(I);
         IGC_ASSERT(match);
     }
 
@@ -1485,7 +1510,7 @@ namespace IGC
         };
 
         PairOutputMapTy::iterator MI;
-        bool New;
+        bool New = false;
         std::tie(MI, New) = PairOutputMap.insert(std::make_pair(GII, PairOutputTy()));
         if (New) {
             AddPairPattern* Pat = new (m_allocator) AddPairPattern();
@@ -1535,7 +1560,7 @@ namespace IGC
         };
 
         PairOutputMapTy::iterator MI;
-        bool New;
+        bool New = false;
         std::tie(MI, New) = PairOutputMap.insert(std::make_pair(GII, PairOutputTy()));
         if (New) {
             SubPairPattern* Pat = new (m_allocator) SubPairPattern();
@@ -1585,7 +1610,7 @@ namespace IGC
         };
 
         PairOutputMapTy::iterator MI;
-        bool New;
+        bool New = false;
         std::tie(MI, New) = PairOutputMap.insert(std::make_pair(GII, PairOutputTy()));
         if (New) {
             MulPairPattern* Pat = new (m_allocator) MulPairPattern();
@@ -1635,7 +1660,7 @@ namespace IGC
         };
 
         PairOutputMapTy::iterator MI;
-        bool New;
+        bool New = false;
         std::tie(MI, New) = PairOutputMap.insert(std::make_pair(GII, PairOutputTy()));
         if (New) {
             PtrToPairPattern* Pat = new (m_allocator) PtrToPairPattern();
@@ -1667,7 +1692,7 @@ namespace IGC
         };
         bool match = false;
         e_modifier mod;
-        Value* source;
+        Value* source = nullptr;
         if (GetModifier(I, mod, source))
         {
             MovModifierPattern* pattern = new (m_allocator) MovModifierPattern();
@@ -1688,10 +1713,12 @@ namespace IGC
         struct FrcPattern : public Pattern
         {
             SSource source;
-            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            void Emit(EmitPass* pass, const DstModifier& modifier) override
             {
                 pass->Frc(source, modifier);
             }
+
+            bool supportsSaturate() override { return false; }
         };
         IGC_ASSERT(I.getOpcode() == Instruction::FSub);
         llvm::Value* source0 = I.getOperand(0);
@@ -2121,13 +2148,16 @@ namespace IGC
             return false;
         }
 
+        bool allow = m_ctx->getModuleMetaData()->allowMatchMadOptimizationforVS || IGC_IS_FLAG_ENABLED(WaAllowMatchMadOptimizationforVS);
+
         using namespace llvm::PatternMatch;
         if (m_ctx->type == ShaderType::VERTEX_SHADER &&
-            m_ctx->m_DriverInfo.PreventZFighting())
+            m_ctx->m_DriverInfo.PreventZFighting() && !allow)
         {
             if (m_PosDep->PositionDependsOnInst(&I))
                 return false;
         }
+
         if (IGC_IS_FLAG_ENABLED(DisableMatchMad))
         {
             return false;
@@ -2407,6 +2437,155 @@ namespace IGC
         return false;
     }
 
+    // Pattern matching to detect and handle immediate offsets in load/store
+    // instructions.  It detects offsets of the form "add dst, var, imm"
+    // The add instruction is removed, and imm included in the LSC message descriptor.
+    //
+    // OpenCL Load/Store launder the address through an inttoptr....
+    //   %2 = add i32 %0, 64
+    //   %3 = inttoptr i32 %2 to i32 addrspace(131072)*
+    //   store i32 16, i32 addrspace(131072)* %3, align 8
+    // Fold to vISA lsc_store... [%0 + 64].
+    //
+    // Stuff like 3D GenISA_ldrawvector_indexed directly reference the add.
+    //   %723 = add i32 %713, 16
+    //   %724 = call <4 x i32> @llvm.genx.GenISA.ldrawvector.indexed.v4i32.p2621448v4f32(
+    //            <4 x float> addrspace(2621448)* %runtime_value_1, i32 %723, i32 4, i1 false)
+    // Fold to lsc_load [%713 + 16].
+    bool CodeGenPatternMatch::MatchImmOffsetLSC(llvm::Instruction& I)
+    {
+        struct LSCImmOffsetPattern : public Pattern
+        {
+            explicit LSCImmOffsetPattern(
+                Instruction* I,
+                llvm::Value* varOffset,
+                llvm::ConstantInt* immOffset)
+                : m_inst(I), m_varOff(varOffset), m_immOff(immOffset)
+            {
+            }
+
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                if (isa<LoadInst>(m_inst)) {
+                    pass->emitLoad(cast<LoadInst>(m_inst), m_varOff, m_immOff);
+                } else if (isa<StoreInst>(m_inst)) {
+                    pass->emitStore(cast<StoreInst>(m_inst), m_varOff, m_immOff);
+                } else if (isa<LdRawIntrinsic>(m_inst)) {
+                    pass->emitLoadRawIndexed(cast<LdRawIntrinsic>(m_inst), m_varOff, m_immOff);
+                } else if (isa<StoreRawIntrinsic>(m_inst)) {
+                    pass->emitStoreRawIndexed(cast<StoreRawIntrinsic>(m_inst), m_varOff, m_immOff);
+                } else {
+                    IGC_ASSERT_MESSAGE(false, "unmatched imm off pattern");
+                }
+            }
+
+        private:
+            llvm::Instruction* m_inst;
+            llvm::Value* m_varOff;
+            llvm::ConstantInt* m_immOff;
+        }; // LSCImmOffsetPattern
+
+        // match:
+        //   %addr = (add/sub %var, %imm) | (add %imm, %var)
+        //   [ %addr = inttoptr %addr, ... ]
+        //   load/store/whatever ... %addr
+        int addrOpnd = -1;
+        if (llvm::isa<LoadInst>(&I) || llvm::isa<StoreInst>(&I)) {
+            // buffer load/store instructions in compute languages are usually
+            // buried behind a inttoptr op
+            addrOpnd = llvm::isa<LoadInst>(&I) ? 0 : 1;
+        } else if (llvm::isa<llvm::GenIntrinsicInst>(I)) {
+            llvm::GenIntrinsicInst &GI = llvm::cast<llvm::GenIntrinsicInst>(I);
+            switch (GI.getIntrinsicID()) {
+            // TODO: incrementally enable others
+            //
+            // case GenISAIntrinsic::GenISA_intatomicraw:
+            // case GenISAIntrinsic::GenISA_floatatomicraw:
+            // case GenISAIntrinsic::GenISA_intatomicrawA64:
+            // case GenISAIntrinsic::GenISA_floatatomicrawA64:
+            // case GenISAIntrinsic::GenISA_icmpxchgatomicraw:
+            // case GenISAIntrinsic::GenISA_icmpxchgatomicrawA64:
+            // case GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64:
+            //  all these will target => emitAtomicRaw
+            //
+            case GenISAIntrinsic::GenISA_ldrawvector_indexed:
+            case GenISAIntrinsic::GenISA_ldraw_indexed:
+            case GenISAIntrinsic::GenISA_storerawvector_indexed:
+            case GenISAIntrinsic::GenISA_storeraw_indexed:
+                addrOpnd = 1;
+                break;
+                // return false;
+            // TODO: are these even reachable here???
+            // case GenISAIntrinsic::GenISA_ldstructured:
+            // case GenISAIntrinsic::GenISA_storestructured1:
+            // case GenISAIntrinsic::GenISA_storestructured2:
+            // case GenISAIntrinsic::GenISA_storestructured3:
+            // case GenISAIntrinsic::GenISA_storestructured4:
+            //    addrOpnd = 2;
+            //    break;
+            default:
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        if (addrOpnd < 0) {
+            return false;
+        }
+
+        llvm::Instruction *addSubInst =
+            llvm::dyn_cast<llvm::Instruction>(I.getOperand((unsigned)addrOpnd));
+        llvm::Instruction *intToPtrInst = nullptr;
+        if (!addSubInst) {
+            // e.g. the address is a constant
+            return false;
+        }
+        if (addSubInst->getOpcode() == llvm::Instruction::IntToPtr) {
+            intToPtrInst = addSubInst;
+            addSubInst = llvm::dyn_cast<llvm::Instruction>(addSubInst->getOperand(0));
+        }
+        if (!addSubInst) {
+            return false; // e.g. intToPtr of constant
+        } else if (
+            addSubInst->getOpcode() != llvm::Instruction::Add &&
+            addSubInst->getOpcode() != llvm::Instruction::Sub)
+        {
+            return false;
+        }
+
+        const bool isConstant0 = llvm::isa<llvm::ConstantInt>(addSubInst->getOperand(0));
+        const bool isConstant1 = llvm::isa<llvm::ConstantInt>(addSubInst->getOperand(1));
+        if (isConstant1 || (isConstant0 && addSubInst->getOpcode() == llvm::Instruction::Add))
+        {
+            // YES: var + imm
+            // YES: var - imm
+            // YES: imm + var
+            // NO:  imm - var  (IGC drops the negation otherwise)
+            IGC_ASSERT_MESSAGE(!isConstant0 || !isConstant1,
+                "Both operands are immediate - constants should be folded elsewhere.");
+
+            unsigned numSources = GetNbSources(I);
+            for (unsigned i = 0; i < numSources; i++) {
+                if (I.getOperand(i) != intToPtrInst && I.getOperand(i) != addSubInst) {
+                    MarkAsSource(I.getOperand(i));
+                }
+            }
+
+            llvm::Value* immOffset = isConstant0 ?
+                addSubInst->getOperand(0) : addSubInst->getOperand(1);
+            llvm::Value* varOffset = isConstant0 ?
+                addSubInst->getOperand(1) : addSubInst->getOperand(0);
+            MarkAsSource(varOffset);
+
+            LSCImmOffsetPattern* pattern = new (m_allocator)
+                LSCImmOffsetPattern(&I, varOffset, llvm::dyn_cast<llvm::ConstantInt>(immOffset));
+            AddPattern(pattern);
+            return true;
+        }
+
+        return false;
+    }
 
     bool CodeGenPatternMatch::MatchLoadStorePointer(llvm::Instruction& I, llvm::Value& ptrVal)
     {
@@ -2819,8 +2998,8 @@ namespace IGC
             std::swap(LHS, RHS);
 
         bool IsUnsigned = false;
-        llvm::Value* L = nullptr;
-        llvm::Value* R = nullptr;
+        llvm::Value* L;
+        llvm::Value* R;
 
         // Check LHS
         if (match(LHS, m_SExt(m_Value(L)))) {
@@ -2947,7 +3126,7 @@ namespace IGC
         for (int i = 0; i < 2; ++i)
         {
             Value* oprd = I.getOperand(i);
-            Value* L;
+            Value* L = nullptr;
 
             // oprdInfo[i].src == null --> no W operand replacement.
             oprdInfo[i].src = nullptr;
@@ -3187,43 +3366,120 @@ namespace IGC
     {
         struct CanonicalizeInstPattern : Pattern
         {
-            CanonicalizeInstPattern(llvm::Instruction* pInst, bool isNeeded) : m_pInst(pInst), m_IsNeeded(isNeeded) {}
+            CanonicalizeInstPattern(llvm::Instruction* pInst) : m_pInst(pInst) {}
 
             llvm::Instruction* m_pInst;
-            bool m_IsNeeded;
+            Pattern* m_pPattern = nullptr;
 
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                IGC_ASSERT(modifier.sat == false && modifier.flag == nullptr);
-                if (m_IsNeeded)
+                if (m_pPattern)
                 {
-                    pass->emitCanonicalize(m_pInst);
+                    m_pPattern->Emit(pass, modifier);
+                }
+                else
+                {
+                    pass->emitCanonicalize(m_pInst, modifier);
                 }
             }
         };
 
-        IGC_ASSERT(I.getNumOperands() == 1);
-        bool isNeeded = true;
 
         // FAdd, FSub, FMul, FDiv instructions flush subnormals to zero.
         // However, mix mode and math instructions preserve subnormals.
         // Other instructions also preserve subnormals.
-        if (llvm::BinaryOperator * pBianaryOperator = llvm::dyn_cast<llvm::BinaryOperator>(I.getOperand(0)))
+        // FSat intrinsic instruction can be emitted i.e. as FAdd so such an
+        // instruction should be inspected recursively.
+        std::function<bool(llvm::Value*)> DetermineIfMixMode;
+        DetermineIfMixMode = [&DetermineIfMixMode, this](llvm::Value* operand) -> bool
         {
-            switch (pBianaryOperator->getOpcode())
+            bool isMixModePossible = false;
+            if (m_Platform.supportMixMode())
             {
-            case llvm::BinaryOperator::BinaryOps::FAdd:
-            case llvm::BinaryOperator::BinaryOps::FMul:
-            case llvm::BinaryOperator::BinaryOps::FSub:
-            case llvm::BinaryOperator::BinaryOps::FDiv:
-                isNeeded = false;
-            default:
-                break;
+                if (llvm::BinaryOperator* pBianaryOperator = llvm::dyn_cast<llvm::BinaryOperator>(operand))
+                {
+                    // the switch instruction is executed to break the recursion if it is unneeded.
+                    // The cause for this recursion is a possibility of constructing mad instructions.
+                    switch (pBianaryOperator->getOpcode())
+                    {
+                    case llvm::BinaryOperator::BinaryOps::FAdd:
+                    case llvm::BinaryOperator::BinaryOps::FMul:
+                    case llvm::BinaryOperator::BinaryOps::FSub:
+                        isMixModePossible = pBianaryOperator->getType()->isDoubleTy() == false &&
+                            (DetermineIfMixMode(pBianaryOperator->getOperand(0)) || DetermineIfMixMode(pBianaryOperator->getOperand(1)));
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                else if (isa<FPTruncInst>(operand))
+                {
+                    FPTruncInst* fptruncInst = llvm::cast<FPTruncInst>(operand);
+                    isMixModePossible = fptruncInst->getSrcTy()->isDoubleTy() == false;
+                }
+                else if (isa<FPExtInst>(operand))
+                {
+                    FPExtInst* fpextInst = llvm::cast<FPExtInst>(operand);
+                    isMixModePossible = fpextInst->getDestTy()->isDoubleTy() == false;
+                }
             }
-        }
+            return isMixModePossible;
+        };
 
-        CanonicalizeInstPattern* pattern = new (m_allocator) CanonicalizeInstPattern(&I, isNeeded);
-        MarkAsSource(I.getOperand(0));
+        std::function<bool(llvm::Value*)> DetermineIfNeeded;
+        DetermineIfNeeded = [&DetermineIfNeeded, &DetermineIfMixMode](llvm::Value* operand) -> bool
+        {
+            bool isNeeded = true;
+            if (llvm::BinaryOperator* pBianaryOperator = llvm::dyn_cast<llvm::BinaryOperator>(operand))
+            {
+                // the switch instruction is to consider only the operations
+                // which support flushing denorms to zero.
+                switch (pBianaryOperator->getOpcode())
+                {
+                case llvm::BinaryOperator::BinaryOps::FAdd:
+                case llvm::BinaryOperator::BinaryOps::FMul:
+                case llvm::BinaryOperator::BinaryOps::FSub:
+                case llvm::BinaryOperator::BinaryOps::FDiv:
+                    isNeeded = DetermineIfMixMode(pBianaryOperator);
+                    break;
+                default:
+                    break;
+                }
+            }
+            else if(GenIntrinsicInst* intrin = dyn_cast<GenIntrinsicInst>(operand))
+            {
+                switch (intrin->getIntrinsicID())
+                {
+                case GenISAIntrinsic::GenISA_fsat:
+                    isNeeded = DetermineIfNeeded(intrin->getOperand(0));
+                    break;
+                default:
+                    break;
+                }
+            }
+            else if (IntrinsicInst* intrin = dyn_cast<IntrinsicInst>(operand))
+            {
+                switch (intrin->getIntrinsicID())
+                {
+                case Intrinsic::canonicalize:
+                    isNeeded = DetermineIfNeeded(intrin->getOperand(0));
+                    break;
+                default:
+                    break;
+                }
+            }
+            return isNeeded;
+        };
+
+        CanonicalizeInstPattern* pattern = new (m_allocator) CanonicalizeInstPattern(&I);
+        if (DetermineIfNeeded(I.getOperand(0)))
+        {
+            MarkAsSource(I.getOperand(0));
+        }
+        else
+        {
+            pattern->m_pPattern = Match(*llvm::cast<llvm::Instruction>(I.getOperand(0)));
+        }
 
         AddPattern(pattern);
         return true;
@@ -3300,9 +3556,16 @@ namespace IGC
                 // without improve code quality this may be refined in the future
                 if (inst->hasOneUse() && SupportsSaturate(inst))
                 {
-                    satPattern->pattern = Match(*inst);
-                    IGC_ASSERT_MESSAGE(satPattern->pattern, "Failed to match pattern");
-                    match = true;
+                    auto *pattern = Match(*inst);
+                    IGC_ASSERT_MESSAGE(pattern, "Failed to match pattern");
+                    // Even though the original `inst` may support saturate,
+                    // we need to know if the instruction(s) generated from
+                    // the pattern support it.
+                    if (pattern->supportsSaturate())
+                    {
+                        satPattern->pattern = pattern;
+                        match = true;
+                    }
                 }
             }
             if (!match)
@@ -3344,7 +3607,7 @@ namespace IGC
             {
                 DstModifier mod = modifier;
                 mod.sat = true;
-                pass->EmitUAdd(inst, modifier);
+                pass->EmitUAdd(inst, mod);
             }
         };
 
@@ -3743,6 +4006,10 @@ namespace IGC
         uint32_t typebits = I.getType()->getScalarSizeInBits();
         if (A != B ||
             (typebits != 16 && typebits != 32 && typebits != 64))
+        {
+            return false;
+        }
+        if (typebits == 64 && !m_Platform.supportQWRotateInstructions())
         {
             return false;
         }
@@ -4962,6 +5229,14 @@ namespace IGC
                 mod = EMOD_ABS;
                 return true;
             }
+#if LLVM_VERSION_MAJOR >= 12
+            if (intrinsicInst->getIntrinsicID() == Intrinsic::abs)
+            {
+                source = intrinsicInst->getOperand(0);
+                mod = EMOD_ABS;
+                return true;
+            }
+#endif
         }
 
         llvm::SelectInst* select = llvm::dyn_cast<llvm::SelectInst>(abs);

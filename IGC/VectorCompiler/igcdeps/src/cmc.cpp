@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2019-2021 Intel Corporation
+Copyright (C) 2019-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -11,12 +11,13 @@ SPDX-License-Identifier: MIT
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
 
-#include "vc/igcdeps/cmc.h"
-#include "RT_Jitter_Interface.h"
-#include "inc/common/igfxfmid.h"
 #include "AdaptorOCL/OCL/sp/spp_g8.h"
+#include "LegacyInfoGeneration.h"
+#include "RT_Jitter_Interface.h"
 #include "common/secure_mem.h"
 #include "common/secure_string.h"
+#include "inc/common/igfxfmid.h"
+#include "vc/igcdeps/cmc.h"
 
 #include <llvm/Support/raw_ostream.h>
 
@@ -123,7 +124,10 @@ class KernelArgInfoBuilder
                 case ArgKind::Buffer:
                 case ArgKind::SVM:
                 case ArgKind::Image1D:
+                case ArgKind::Image1DArray:
                 case ArgKind::Image2D:
+                case ArgKind::Image2DArray:
+                case ArgKind::Image2DMediaBlock:
                 case ArgKind::Image3D:
                 case ArgKind::BindlessBuffer:
                     return Global;
@@ -214,7 +218,7 @@ void CMKernel::createConstArgumentAnnotation(unsigned argNo,
 
     // EnableZEBinary: ZEBinary related code
     zebin::ZEInfoBuilder::addPayloadArgumentByValue(m_kernelInfo.m_zePayloadArgs,
-        payloadPosition, sizeInBytes, argNo);
+        payloadPosition, sizeInBytes, argNo, offsetInArg);
 }
 
 // TODO: this is incomplete. Media sampler types are not supported now.
@@ -246,25 +250,44 @@ void CMKernel::createSamplerAnnotation(unsigned argNo, unsigned BTI)
        PayloadPosition, ArgSize, argNo, BTI, ZeAddrMode, ZeAccessType);
 }
 
-void CMKernel::createImageAnnotation(unsigned argNo, unsigned BTI,
-                                     unsigned dim, ArgAccessKind Access)
+static iOpenCL::IMAGE_MEMORY_OBJECT_TYPE
+getOCLImageType(llvm::GenXOCLRuntimeInfo::KernelArgInfo::KindType Kind)
+{
+    using KindType = llvm::GenXOCLRuntimeInfo::KernelArgInfo::KindType;
+    switch (Kind)
+    {
+    case KindType::Image1D:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_1D;
+    case KindType::Image1DArray:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_1D_ARRAY;
+    case KindType::Image2D:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_2D;
+    case KindType::Image2DArray:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_2D_ARRAY;
+    case KindType::Image2DMediaBlock:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_2D_MEDIA_BLOCK;
+    case KindType::Image3D:
+        return iOpenCL::IMAGE_MEMORY_OBJECT_3D;
+    default:
+        IGC_ASSERT_MESSAGE(0, "Unexpected image kind");
+        return iOpenCL::IMAGE_MEMORY_OBJECT_INVALID;
+    }
+}
+
+void CMKernel::createImageAnnotation(
+    unsigned argNo, unsigned BTI,
+    llvm::GenXOCLRuntimeInfo::KernelArgInfo::KindType Kind,
+    ArgAccessKind Access)
 {
     auto imageInput = std::make_unique<iOpenCL::ImageArgumentAnnotation>();
-    // As VC uses only statefull addrmode.
+    // As VC uses only stateful addrmode.
     constexpr int PayloadPosition = 0;
     constexpr int ArgSize = 0;
 
     imageInput->ArgumentNumber = argNo;
     imageInput->IsFixedBindingTableIndex = true;
     imageInput->BindingTableIndex = BTI;
-    if (dim == 1)
-        imageInput->ImageType = iOpenCL::IMAGE_MEMORY_OBJECT_1D;
-    else if (dim == 2)
-        imageInput->ImageType = iOpenCL::IMAGE_MEMORY_OBJECT_2D_MEDIA_BLOCK;
-    else if (dim == 3)
-        imageInput->ImageType = iOpenCL::IMAGE_MEMORY_OBJECT_3D;
-    else
-        IGC_ASSERT_MESSAGE(0, "unsupported image dimension");
+    imageInput->ImageType = getOCLImageType(Kind);
     imageInput->LocationIndex = 0;
     imageInput->LocationCount = 0;
     imageInput->IsEmulationArgument = false;
@@ -458,25 +481,29 @@ void CMKernel::RecomputeBTLayout(int numUAVs, int numResources)
     layout->maxBTsize = index;
 }
 
-static void setSymbolsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
-                           IGC::SProgramOutput &KernelProgram) {
-  if (Info.getRelocationTable().Size > 0) {
-    KernelProgram.m_funcRelocationTable = Info.getRelocationTable().Buffer;
-    KernelProgram.m_funcRelocationTableSize = Info.getRelocationTable().Size;
-    KernelProgram.m_funcRelocationTableEntries =
-        Info.getRelocationTable().Entries;
-    // EnableZEBinary: ZEBinary related code
-    KernelProgram.m_relocs = Info.ZEBinInfo.Relocations;
-  }
-  if (Info.getSymbolTable().Size > 0) {
-    KernelProgram.m_funcSymbolTable = Info.getSymbolTable().Buffer;
-    KernelProgram.m_funcSymbolTableSize = Info.getSymbolTable().Size;
-    KernelProgram.m_funcSymbolTableEntries = Info.getSymbolTable().Entries;
-    // EnableZEBinary: ZEBinary related code
-    KernelProgram.m_symbols.function = Info.ZEBinInfo.Symbols.Functions;
-  }
+static void setFuncSectionInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
+                               IGC::SProgramOutput &KernelProgram) {
+  KernelProgram.m_funcRelocationTable = Info.LegacyFuncRelocations.Buffer;
+  KernelProgram.m_funcRelocationTableSize = Info.LegacyFuncRelocations.Size;
+  KernelProgram.m_funcRelocationTableEntries =
+      Info.LegacyFuncRelocations.Entries;
+  KernelProgram.m_relocs = Info.Func.Relocations;
+
+  vc::validateFunctionSymbolTable(Info.Func.Symbols);
+  std::tie(KernelProgram.m_funcSymbolTable, KernelProgram.m_funcSymbolTableSize,
+           KernelProgram.m_funcSymbolTableEntries) =
+      vc::emitLegacyFunctionSymbolTable(Info.Func.Symbols);
+  // Points to the first function symbol and also one past last kernel symbol.
+  const auto FirstFuncIt =
+      std::partition_point(Info.Func.Symbols.begin(), Info.Func.Symbols.end(),
+                           [](const vISA::ZESymEntry &Entry) {
+                             return Entry.s_type == vISA::GenSymType::S_KERNEL;
+                           });
+  KernelProgram.m_symbols.function =
+      IGC::SProgramOutput::SymbolListTy{FirstFuncIt, Info.Func.Symbols.end()};
   // EnableZEBinary: ZEBinary related code
-  KernelProgram.m_symbols.local = Info.ZEBinInfo.Symbols.Local;
+  KernelProgram.m_symbols.local =
+      IGC::SProgramOutput::SymbolListTy{Info.Func.Symbols.begin(), FirstFuncIt};
 }
 
 static void generateKernelArgInfo(
@@ -491,7 +518,10 @@ static void generateKernelArgInfo(
     case KindType::SVM:
     case KindType::Sampler:
     case KindType::Image1D:
+    case KindType::Image1DArray:
     case KindType::Image2D:
+    case KindType::Image2DArray:
+    case KindType::Image2DMediaBlock:
     case KindType::Image3D:
     case KindType::BindlessBuffer:
       ArgsAnnotationBuilder.insert(Arg.getIndex(), Arg.getKind(),
@@ -577,17 +607,12 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
     case ArgKind::Image1D:
-      Kernel.createImageAnnotation(Arg.getIndex(), Arg.getBTI(), /*dim=*/1,
-                                   Arg.getAccessKind());
-      Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
-      break;
+    case ArgKind::Image1DArray:
     case ArgKind::Image2D:
-      Kernel.createImageAnnotation(Arg.getIndex(), Arg.getBTI(), /*dim=*/2,
-                                   Arg.getAccessKind());
-      Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
-      break;
+    case ArgKind::Image2DArray:
+    case ArgKind::Image2DMediaBlock:
     case ArgKind::Image3D:
-      Kernel.createImageAnnotation(Arg.getIndex(), Arg.getBTI(), /*dim=*/3,
+      Kernel.createImageAnnotation(Arg.getIndex(), Arg.getBTI(), Arg.getKind(),
                                    Arg.getAccessKind());
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       break;
@@ -629,6 +654,7 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
 static void setExecutionInfo(const GenXOCLRuntimeInfo::KernelInfo &BackendInfo,
                              const FINALIZER_INFO &JitterInfo,
                              CMKernel &Kernel) {
+  Kernel.m_SupportsDebugging = BackendInfo.supportsDebugging();
   Kernel.m_GRFSizeInBytes = BackendInfo.getGRFSizeInBytes();
   Kernel.m_kernelInfo.m_kernelName = BackendInfo.getName();
 
@@ -637,11 +663,16 @@ static void setExecutionInfo(const GenXOCLRuntimeInfo::KernelInfo &BackendInfo,
   ExecEnv.CompiledSIMDSize = BackendInfo.getSIMDSize();
   // SLM size in bytes, align to 1KB.
   ExecEnv.SumFixedTGSMSizes = iSTD::Align(BackendInfo.getSLMSize(), 1024);
-  ExecEnv.HasBarriers = BackendInfo.usesBarriers();
+  ExecEnv.HasStackCalls = JitterInfo.hasStackcalls;
+  // HasBarriers isn't bool and preserves number of barriers for PVC+ targets
+  // dispite misleading naming.
+  ExecEnv.HasBarriers = BackendInfo.getNumBarriers();
   ExecEnv.HasDPAS = BackendInfo.usesDPAS();
+  ExecEnv.numThreads = BackendInfo.getNumThreads();
   ExecEnv.HasReadWriteImages = BackendInfo.usesReadWriteImages();
   ExecEnv.SubgroupIndependentForwardProgressRequired = true;
   ExecEnv.NumGRFRequired = JitterInfo.numGRFTotal;
+  ExecEnv.RequireDisableEUFusion = BackendInfo.requireDisableEUFusion();
 
   // Allocate spill-fill buffer
   if (JitterInfo.isSpill || JitterInfo.hasStackcalls)
@@ -687,7 +718,8 @@ static void setExecutionInfo(const GenXOCLRuntimeInfo::KernelInfo &BackendInfo,
 }
 
 static void setGenBinary(const FINALIZER_INFO &JitterInfo,
-                         const std::vector<char> &GenBinary, CMKernel &Kernel) {
+                         const std::vector<uint8_t> &GenBinary,
+                         CMKernel &Kernel) {
   // Kernel binary, padding is hard-coded.
   const size_t Size = GenBinary.size();
   const size_t Padding = iSTD::GetAlignmentOffset(Size, 64);
@@ -702,6 +734,10 @@ static void setGenBinary(const FINALIZER_INFO &JitterInfo,
   PO.m_programSize = Size + Padding;
   PO.m_unpaddedProgramSize = Size;
   PO.m_InstructionCount = JitterInfo.numAsmCount;
+}
+
+static void setVISAAsm(const std::string &VISAAsm, CMKernel &Kernel) {
+  Kernel.getProgramOutput().m_VISAAsm = VISAAsm;
 }
 
 static void setDebugInfo(const std::vector<char> &DebugInfo, CMKernel &Kernel) {
@@ -723,10 +759,10 @@ static void setGtpinInfo(const FINALIZER_INFO &JitterInfo,
   Kernel.m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace +=
       JitterInfo.numBytesScratchGtpin;
 
-  if (!GtpinInfo.getGTPinBuffer().empty()) {
-    const size_t BufSize = GtpinInfo.getGTPinBuffer().size();
+  if (!GtpinInfo.empty()) {
+    const size_t BufSize = GtpinInfo.size();
     void *GtpinBuffer = IGC::aligned_malloc(BufSize, 16);
-    memcpy_s(GtpinBuffer, BufSize, GtpinInfo.getGTPinBuffer().data(), BufSize);
+    memcpy_s(GtpinBuffer, BufSize, GtpinInfo.data(), BufSize);
     Kernel.getProgramOutput().m_gtpinBufferSize = BufSize;
     Kernel.getProgramOutput().m_gtpinBuffer = GtpinBuffer;
   }
@@ -739,10 +775,11 @@ static void fillKernelInfo(const GenXOCLRuntimeInfo::CompiledKernel &CompKernel,
   setExecutionInfo(CompKernel.getKernelInfo(), CompKernel.getJitterInfo(),
                    ResKernel);
   setArgumentsInfo(CompKernel.getKernelInfo(), ResKernel);
-  setSymbolsInfo(CompKernel.getKernelInfo(), ResKernel.getProgramOutput());
+  setFuncSectionInfo(CompKernel.getKernelInfo(), ResKernel.getProgramOutput());
 
   setGenBinary(CompKernel.getJitterInfo(), CompKernel.getGenBinary(),
                ResKernel);
+  setVISAAsm(CompKernel.getKernelInfo().VISAAsm, ResKernel);
   setDebugInfo(CompKernel.getDebugInfo(), ResKernel);
   setGtpinInfo(CompKernel.getJitterInfo(), CompKernel.getGTPinInfo(),
                ResKernel);
@@ -750,18 +787,18 @@ static void fillKernelInfo(const GenXOCLRuntimeInfo::CompiledKernel &CompKernel,
 
 template <typename AnnotationT>
 std::unique_ptr<AnnotationT>
-getDataAnnotation(const GenXOCLRuntimeInfo::DataInfoT &DataInfo) {
-  auto AllocSize = DataInfo.Buffer.size() + DataInfo.AdditionalZeroedSpace;
+getDataAnnotation(const GenXOCLRuntimeInfo::DataInfo &Data) {
+  auto AllocSize = Data.Buffer.size() + Data.AdditionalZeroedSpace;
   IGC_ASSERT_MESSAGE(AllocSize >= 0, "illegal allocation size");
   if (AllocSize == 0)
     return nullptr;
   auto InitConstant = std::make_unique<AnnotationT>();
-  InitConstant->Alignment = DataInfo.Alignment;
+  InitConstant->Alignment = Data.Alignment;
   InitConstant->AllocSize = AllocSize;
 
-  auto BufferSize = DataInfo.Buffer.size();
+  auto BufferSize = Data.Buffer.size();
   InitConstant->InlineData.resize(BufferSize);
-  memcpy_s(InitConstant->InlineData.data(), BufferSize, DataInfo.Buffer.data(),
+  memcpy_s(InitConstant->InlineData.data(), BufferSize, Data.Buffer.data(),
            BufferSize);
 
   return std::move(InitConstant);
@@ -771,35 +808,49 @@ static void
 fillOCLProgramInfo(IGC::SOpenCLProgramInfo &ProgramInfo,
                    const GenXOCLRuntimeInfo::ModuleInfoT &ModuleInfo) {
   auto ConstantAnnotation = getDataAnnotation<iOpenCL::InitConstantAnnotation>(
-      ModuleInfo.ConstantData);
+      ModuleInfo.Constant.Data);
   if (ConstantAnnotation)
     ProgramInfo.m_initConstantAnnotation = std::move(ConstantAnnotation);
   auto GlobalAnnotation =
-      getDataAnnotation<iOpenCL::InitGlobalAnnotation>(ModuleInfo.GlobalData);
+      getDataAnnotation<iOpenCL::InitGlobalAnnotation>(ModuleInfo.Global.Data);
   if (GlobalAnnotation)
-    ProgramInfo.m_initGlobalAnnotation.push_back(std::move(GlobalAnnotation));
+    ProgramInfo.m_initGlobalAnnotation = std::move(GlobalAnnotation);
+  auto ConstStringAnnotation =
+      getDataAnnotation<iOpenCL::InitConstantAnnotation>(
+          ModuleInfo.ConstString.Data);
+  if (ConstStringAnnotation)
+    ProgramInfo.m_initConstantStringAnnotation =
+        std::move(ConstStringAnnotation);
 
   // Symbols.
-  if (ModuleInfo.SymbolTable.Size != 0) {
-    ProgramInfo.m_legacySymbolTable.m_buffer = ModuleInfo.SymbolTable.Buffer;
-    ProgramInfo.m_legacySymbolTable.m_size = ModuleInfo.SymbolTable.Size;
-    ProgramInfo.m_legacySymbolTable.m_entries = ModuleInfo.SymbolTable.Entries;
-  }
-  ProgramInfo.m_zebinSymbolTable.global = ModuleInfo.ZEBinInfo.Symbols.Globals;
-  ProgramInfo.m_zebinSymbolTable.globalConst = ModuleInfo.ZEBinInfo.Symbols.Constants;
+  std::tie(ProgramInfo.m_legacySymbolTable.m_buffer,
+           ProgramInfo.m_legacySymbolTable.m_size,
+           ProgramInfo.m_legacySymbolTable.m_entries) =
+      vc::emitLegacyModuleSymbolTable(ModuleInfo.Constant.Symbols,
+                                      ModuleInfo.Global.Symbols);
+  ProgramInfo.m_zebinSymbolTable.global = ModuleInfo.Global.Symbols;
+  ProgramInfo.m_zebinSymbolTable.globalConst = ModuleInfo.Constant.Symbols;
+  ProgramInfo.m_zebinSymbolTable.globalStringConst =
+      ModuleInfo.ConstString.Symbols;
+
+  // Relocations.
+  ProgramInfo.m_GlobalPointerAddressRelocAnnotation.globalReloc =
+      ModuleInfo.Global.Relocations;
+  ProgramInfo.m_GlobalPointerAddressRelocAnnotation.globalConstReloc =
+      ModuleInfo.Constant.Relocations;
+  IGC_ASSERT_MESSAGE(
+      ModuleInfo.ConstString.Relocations.empty(),
+      "relocations inside constant string section are not supported");
 };
 
 void vc::createBinary(
     vc::CGen8CMProgram &CMProgram,
     const GenXOCLRuntimeInfo::CompiledModuleT &CompiledModule) {
-  bool ProgramIsDebuggable = false;
   fillOCLProgramInfo(*CMProgram.m_programInfo, CompiledModule.ModuleInfo);
   for (const GenXOCLRuntimeInfo::CompiledKernel &CompKernel :
        CompiledModule.Kernels) {
     auto K = std::make_unique<CMKernel>(CMProgram.getPlatform());
     fillKernelInfo(CompKernel, *K);
-    ProgramIsDebuggable |= !CompKernel.getDebugInfo().empty();
     CMProgram.m_kernels.push_back(std::move(K));
   }
-  CMProgram.m_ContextProvider.updateDebuggableStatus(ProgramIsDebuggable);
 }

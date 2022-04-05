@@ -57,6 +57,7 @@ namespace IGC
         DefaultIndirectIdx = 0,
     };
 
+#include "RaytracingShaderTypes.h"
 
     enum ResourceTypeEnum
     {
@@ -176,6 +177,115 @@ namespace IGC
         bool isEmulationArg = 0;
     };
 
+    enum StackEntryType
+    {
+        ENTRY_RETURN_IP,
+        ENTRY_ARGUMENT,
+        ENTRY_ALLOCA,
+        ENTRY_SPILL,
+        ENTRY_UNKNOWN,
+    };
+
+    struct StackFrameEntry
+    {
+        // Name of the value if it exists.
+        std::string Name;
+        // This is just a string representation of an LLVM type.
+        std::string TypeRepr;
+        // Helpful to get a rough idea of what the value is without a name.
+        StackEntryType EntryType = ENTRY_UNKNOWN;
+        // Size in bytes that this entry occupies on the stack.
+        uint32_t Size = 0;
+        // Offset from the base of the stack frame.
+        uint32_t Offset = 0;
+    };
+
+    // A raytracing shader may have an arbitrary number of TraceRay() calls
+    // within it.  Live values across the trace need to be spilled so they
+    // can be refilled in the corresponding continuation. The live values can
+    // be different at different TraceRay() calls so the spilled memory is
+    // interpreted different at each of those sites.
+    struct StackFrameSpillUnion
+    {
+        std::string ContinuationName;
+        std::vector<StackFrameEntry> Entries;
+    };
+
+    // We maintain a collection of named structs which is populated by passes
+    // when generating structured accesses to the Raytracing SW Stack.
+    struct RayTracingSWTypes
+    {
+        std::vector<llvm::StructType*> FrameStartTys;
+        std::vector<llvm::StructType*> ArgumentTys;
+        std::vector<llvm::StructType*> FullFrameTys;
+    };
+
+    // Info common to all shaders in the module
+    struct RayTraceModuleInfo
+    {
+        // The size of a single sync stack entry that the UMD must allocate
+        // for synchronous raytracing.
+        uint32_t RayQueryAllocSizeInBytes = 0;
+
+        // SplitAsyncPass sets the number of continuations that were generated.
+        // This is heuristically used to determine whether we should inline
+        // or indirectly BTD to the continuations.
+        uint32_t NumContinuations = UINT_MAX;
+
+        // Track the address spaces and SSH offsets for indirect stateful
+        // accesses.
+        uint32_t RTAsyncStackAddrspace = UINT_MAX;
+        std::optional<uint32_t> RTAsyncStackSurfaceStateOffset;
+
+        uint32_t SWHotZoneAddrspace = UINT_MAX;
+        std::optional<uint32_t> SWHotZoneSurfaceStateOffset;
+
+        uint32_t SWStackAddrspace = UINT_MAX;
+        std::optional<uint32_t> SWStackSurfaceStateOffset;
+
+        uint32_t RTSyncStackAddrspace = UINT_MAX;
+        std::optional<uint32_t> RTSyncStackSurfaceStateOffset;
+    };
+
+    // Info specific to each raytracing shader
+    struct RayTraceShaderInfo
+    {
+        CallableShaderTypeMD callableShaderType = NumberOfCallableShaderTypes;
+        bool isContinuation = false;
+        bool hasTraceRayPayload = false;
+        bool hasHitAttributes = false;
+        bool hasCallableData = false;
+        uint32_t ShaderStackSize = 0;
+        uint64_t ShaderHash = 0;
+        std::string ShaderName;
+        // if 'isContinuation' is true, this will contain the name of the
+        // original shader.
+        std::string ParentName;
+        // if 'isContinuation' is true, this may contain the slot num for
+        // the shader identifier it has been promoted to.
+        std::optional<uint32_t> SlotNum;
+        // Size in bytes of the cross-thread constant data. Each frontend
+        // (e.g., DX, Vulkan) will need to populate this according to its
+        // needs.  For DX, it is:
+        // Align(
+        //     Align(sizeof(RayDispatchGlobalData), 8) + GlobalRootSigSize, 32)
+        uint32_t NOSSize = 0;
+        // A given raytracing shader will have some amount of stack allocated
+        // for its arguments, allocas, and spilled values.  We collect
+        // information about those entries here for debugging purposes to
+        // read *output.yaml for more information or for external tools to
+        // consume and display.
+        std::vector<StackFrameEntry> Entries;
+        std::vector<StackFrameSpillUnion> SpillUnions;
+        // This will be set by an early processing pass and read out by
+        // StackFrameInfo to allocate enough space for whatever type the
+        // shader uses.
+        uint32_t CustomHitAttrSizeInBytes = 0;
+        RayTracingSWTypes Types;
+        // Shaders that satisfy `isPrimaryShaderIdentifier()` can also have
+        // a collection of other names that they go by.
+        std::vector<std::string> Aliases;
+    };
 
     struct ConstantAddress
     {
@@ -194,6 +304,7 @@ namespace IGC
         std::vector<FuncArgMD> funcArgs;
         FunctionTypeMD functionType = KernelFunction;
         std::map<ConstantAddress, uint32_t> inlineDynConstants;
+        RayTraceShaderInfo rtInfo;
         ResourceAllocMD resAllocMD;
         std::vector<unsigned> maxByteOffsets;
         bool IsInitializer = false;
@@ -205,7 +316,8 @@ namespace IGC
         bool groupIDPresent = false;
         int privateMemoryPerWI = 0;
         bool globalIDPresent = false;
-        bool isUniqueEntry = false;
+        // This is true if the function has any sync raytracing functionality
+        bool hasSyncRTCalls = false;
 
         // Analysis result of if there are non-kernel-argument ld/st in the kernel
         bool hasNonKernelArgLoad = false;
@@ -245,6 +357,8 @@ namespace IGC
         unsigned FloatRoundingMode                      = IGC::ROUND_TO_NEAREST_EVEN;
         unsigned FloatCvtIntRoundingMode                = IGC::ROUND_TO_ZERO;
 
+        unsigned VISAPreSchedRPThreshold           = 0;
+        unsigned SetLoopUnrollThreshold            = 0;
         bool UnsafeMathOptimizations                    = false;
         bool FiniteMathOnly                             = false;
         bool FastRelaxedMath                            = false;
@@ -272,6 +386,9 @@ namespace IGC
         bool UseBindlessMode                            = false;
         bool UseLegacyBindlessMode                      = true;
         bool disableMathRefactoring                     = false;
+        bool atomicBranch                               = false;
+        bool ForceMinSimdSizeForFastestCS               = false;
+        bool EnableFastestLinearScan                    = false;
         //if PTSS is enabled and if PrivateData is too large (>256k in XeHP_SDV+),
         //we might use stateless memory to hold privatedata instead of using PTSS.
         //this flag is for this scenario.
@@ -285,6 +402,12 @@ namespace IGC
         // patch-token based binary if the input contains features those
         // are not supported by ZEBinary
         bool EnableZEBinary                             = false;
+        bool ExcludeIRFromZEBinary                      = false;
+
+        //when true, compiler disables the Remat optimization for compute shaders
+        bool allowDisableRematforCS                     = false;
+
+        bool DisableIncSpillCostAllAddrTaken            = false;
     };
 
     enum class ThreadIDLayout
@@ -304,6 +427,8 @@ namespace IGC
         std::vector<ComputeShaderSecondCompileInputInfoMD> ComputeShaderSecondCompile;
         unsigned char forcedSIMDSize = 0;  // 0 means not forced
         unsigned int forceTotalGRFNum = 0; // 0 means not forced
+        unsigned int VISAPreSchedRPThreshold = 0; // 0 means use the default
+        unsigned int SetLoopUnrollThreshold = 0; // 0 means use the default
         bool forcedVISAPreRAScheduler = false;
         // disables dispatch along y and tiled order optimizations
         bool disableLocalIdOrderOptimizations = false;
@@ -311,6 +436,10 @@ namespace IGC
         bool disableDispatchAlongY = false;
         // If nullopt, then there is no requirement
         std::optional<ThreadIDLayout> neededThreadIdLayout;
+        // force enable tile y optimization
+        bool forceTileYWalk = false;
+        // enable atomic branch optimization
+        bool atomicBranch = false;
     };
 
 
@@ -326,6 +455,7 @@ namespace IGC
         bool blendToFillEnabled              = false;
         bool forceEarlyZ                     = false;   // force earlyz test
         bool hasVersionedLoop                = false;   // if versioned by customloopversioning
+        bool forceSingleSourceRTWAfterDualSourceRTW = false;
         // Number of samples for this pixel shader if known.
         // Valid values 0, 1, 2, 4, 8 and 16.
         // 0 means unknown or not set.
@@ -334,6 +464,26 @@ namespace IGC
         std::vector<int> colorOutputMask;
     };
 
+    struct MeshShaderInfo
+    {
+        unsigned int PrimitiveTopology            = 3; // IGC::GFX3DMESH_OUTPUT_TOPOLOGY::NUM_MAX
+        unsigned int MaxNumOfPrimitives           = 0;
+        unsigned int MaxNumOfVertices             = 0;
+        unsigned int MaxNumOfPerPrimitiveOutputs  = 0;
+        unsigned int MaxNumOfPerVertexOutputs     = 0;
+        unsigned int WorkGroupSize                = 0;
+        unsigned int WorkGroupMemorySizeInBytes   = 0;
+        unsigned int IndexFormat                  = 6; //  IGC::GFX3DMESH_INDEX_FORMAT::NUM_MAX
+        unsigned int SubgroupSize                 = 0; // force a wave size
+    };
+
+    struct TaskShaderInfo
+    {
+        unsigned int MaxNumOfOutputs = 0;
+        unsigned int WorkGroupSize = 0;
+        unsigned int WorkGroupMemorySizeInBytes = 0;
+        unsigned int SubgroupSize = 0; // force a wave size
+    };
 
     struct SInputDesc
     {
@@ -399,6 +549,10 @@ namespace IGC
         unsigned int simplePushBufferUsed = 0;
 
         std::vector<ArgDependencyInfoMD> pushAnalysisWIInfos;
+        //For non RayTracing shader using RayQuery opcodes
+        //it is RTGlobals PTR is passed as push constant
+        unsigned int inlineRTGlobalPtrOffset = 0;
+        unsigned int rtSyncSurfPtrOffset = 0;
     };
 
     struct InlineProgramScopeBuffer
@@ -440,6 +594,11 @@ namespace IGC
         bool hasVertexHeader = true;
     };
 
+    struct SPIRVCapabilities
+    {
+        bool globalVariableDecorationsINTEL = false;
+    };
+
     //metadata for the entire module
     struct ModuleMetaData
     {
@@ -449,6 +608,10 @@ namespace IGC
         PushInfo pushInfo;
         PixelShaderInfo psInfo;
         ComputeShaderInfo csInfo;
+        MeshShaderInfo msInfo;
+        TaskShaderInfo taskInfo;
+        uint32_t NBarrierCnt = 0;
+        RayTraceModuleInfo rtInfo;
         uint32_t CurUniqueIndirectIdx = DefaultIndirectIdx;
         std::map<uint32_t, std::array<uint32_t, 4>> inlineDynTextures;
         std::vector<InlineResInfo> inlineResInfoData;
@@ -459,6 +622,8 @@ namespace IGC
         std::vector<PointerProgramBinaryInfo> ConstantPointerProgramBinaryInfos;
         std::vector<PointerAddressRelocInfo> GlobalBufferAddressRelocInfo;
         std::vector<PointerAddressRelocInfo> ConstantBufferAddressRelocInfo;
+        std::map<uint32_t, uint32_t> forceLscCacheList;
+        std::vector<uint32_t> RasterizerOrderedByteAddressBuffer;
         unsigned int MinNOSPushConstantSize = 0;
         llvm::MapVector<llvm::GlobalVariable*, int> inlineProgramScopeOffsets;
         ShaderData shaderData;
@@ -466,14 +631,23 @@ namespace IGC
         bool UseBindlessImage = false;
         bool enableRangeReduce = false;
 
+        //when true, compiler enables MatchMad optimization for VS
+        bool allowMatchMadOptimizationforVS = false;
+
+        bool disableMemOptforNegativeOffsetLoads = false;
+
         // When true compiler can assume that resources bound to two different
         // bindings do not alias.
-        bool statefullResourcesNotAliased = false;
+        bool statefulResourcesNotAliased = false;
         bool disableMixMode = false;
 
         unsigned int privateMemoryPerWI = 0;
+
+        SPIRVCapabilities capabilities;
+
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};
         unsigned int computedDepthMode = 0; //Defaults to 0 meaning depth mode is off
+        bool isHDCFastClearShader = false;
         // set by LowerGPCallArg pass
         bool hasNoLocalToGenericCast = false;
         bool hasNoPrivateToGenericCast = false;
@@ -481,4 +655,11 @@ namespace IGC
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
     void deserialize(IGC::ModuleMetaData &deserializedMD, const llvm::Module* module);
 
+    // Raytracing query functions
+    bool isBindless(const IGC::FunctionMetaData &funcMD);
+    bool isContinuation(const IGC::FunctionMetaData& funcMD);
+    bool isCallStackHandler(const IGC::FunctionMetaData &funcMD);
+
+    // User annotations query functions
+    unsigned extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD);
 }

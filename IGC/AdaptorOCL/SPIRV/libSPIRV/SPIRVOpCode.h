@@ -122,8 +122,8 @@ inline bool isCvtFromUnsignedOpCode(Op OpCode) {
 }
 
 inline bool isOpaqueGenericTypeOpCode(Op OpCode) {
-  return (unsigned)OpCode >= OpTypeEvent &&
-      (unsigned)OpCode <= OpTypePipe;
+  return ((unsigned)OpCode >= OpTypeEvent &&
+      (unsigned)OpCode <= OpTypePipe) || OpCode == OpTypeSampler;
 }
 
 inline bool isGenericNegateOpCode(Op OpCode) {
@@ -149,7 +149,8 @@ inline bool hasGroupOperation(Op OpCode) {
   unsigned OC = OpCode;
   return (OpGroupIAdd <= OC && OC <= OpGroupSMax) ||
          (OpGroupNonUniformBallotBitCount == OC)  ||
-         (OpGroupNonUniformIAdd <= OC && OC <= OpGroupNonUniformLogicalXor);
+         (OpGroupNonUniformIAdd <= OC && OC <= OpGroupNonUniformLogicalXor) ||
+         (OpGroupIMul <= OC && OC <= OpGroupLogicalXor);
 }
 
 inline bool isSubgroupAvcINTELTypeOpCode(Op OpCode) {
@@ -194,7 +195,7 @@ inline bool isTypeOpCode(Op OpCode) {
   unsigned OC = OpCode;
   return (OpTypeVoid <= OC && OC <= OpTypePipe) ||
          isSubgroupAvcINTELTypeOpCode(OpCode) || OC == OpTypeVmeImageINTEL ||
-         OC == OpTypeMatrixINTEL ||
+         OC == OpTypeJointMatrixINTEL ||
          isVCOpCode(OpCode) || OC == OpTypeTokenINTEL;
 }
 

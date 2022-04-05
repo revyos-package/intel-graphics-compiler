@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <queue>
 
 using namespace vISA;
 
@@ -21,7 +22,7 @@ static const unsigned LARGE_BLOCK_SIZE = 20000;
 static const unsigned LARGE_BLOCK_SIZE_RPE = 32000;
 static const unsigned PRESSURE_REDUCTION_MIN_BENEFIT = 5;
 static const unsigned PRESSURE_REDUCTION_THRESHOLD = 110;
-static const unsigned PRESSURE_HIGH_THRESHOLD = 120;
+static const unsigned PRESSURE_HIGH_THRESHOLD = 128;
 static const unsigned PRESSURE_LOW_THRESHOLD = 60;
 static const unsigned PRESSURE_REDUCTION_THRESHOLD_SIMD32 = 120;
 static const unsigned LATENCY_PRESSURE_THRESHOLD = 100;
@@ -340,7 +341,7 @@ struct RegisterPressure
         gra = new GlobalRA(kernel, kernel.fg.builder->phyregpool, *p2a);
         // To properly track liveness for partially-written local variables.
         gra->markGraphBlockLocalVars();
-        liveness = new LivenessAnalysis(*gra, G4_GRF | G4_ADDRESS | G4_INPUT | G4_FLAG);
+        liveness = new LivenessAnalysis(*gra, G4_GRF | G4_ADDRESS | G4_INPUT | G4_FLAG | G4_SCALAR);
         liveness->computeLiveness();
         rpe = new RPE(*gra, liveness);
         rpe->run();
@@ -513,7 +514,7 @@ static unsigned getRPReductionThreshold(unsigned NumGrfs, unsigned simdSize)
 }
 
 // Register pressure threshold to move to a larger GRF mode
-static unsigned getRPThresholdHigh(unsigned NumGrfs, unsigned simdSize)
+static unsigned getRPThresholdHigh(unsigned NumGrfs)
 {
     float Ratio = NumGrfs / 128.0f;
 
@@ -657,10 +658,29 @@ bool preRA_Scheduler::run()
 }
 
 // Automatic selection of GRF mode
-GRFMode::GRFMode()
+GRFMode::GRFMode(TARGET_PLATFORM platform)
 {
-    switch (getGenxPlatform())
+    switch (platform)
     {
+    case Xe_DG2:
+        configurations.resize(2);
+        // Configurations for this platform <GRF, numThreads>
+        configurations[0] = std::make_pair(128, 8);
+        configurations[1] = std::make_pair(256, 4);
+        defaultMode = 0; // default GRF mode
+        break;
+    case Xe_PVC:
+    case Xe_PVCXT:
+        configurations.resize(6);
+        // Configurations for this platform <GRF, numThreads>
+        configurations[0] = std::make_pair(64, 12);
+        configurations[1] = std::make_pair(96, 10);
+        configurations[2] = std::make_pair(128, 8);
+        configurations[3] = std::make_pair(160, 6);
+        configurations[4] = std::make_pair(192, 5);
+        configurations[5] = std::make_pair(256, 4);
+        defaultMode = 2; // default GRF mode
+        break;
     default:
         configurations.resize(1);
         configurations[0] = std::make_pair(128, 8);
@@ -702,7 +722,7 @@ bool preRA_RegSharing::run()
     unsigned SchedCtrl = kernel.getOptions()->getuInt32Option(vISA_preRA_ScheduleCtrl);
     SchedConfig config(SchedCtrl);
 
-    GRFMode GrfMode;
+    GRFMode GrfMode(kernel.getPlatform());
     RegisterPressure rp(kernel, mem, rpe);
 
     std::unordered_map<G4_BB*, unsigned int> rpBB;
@@ -727,8 +747,11 @@ bool preRA_RegSharing::run()
         }
     }
 
+    // Obs: Heuristic considering PVC with 2 GRF modes as of 03/2020
+    // If maximum register pressure is higher than default GRF mode,
+    // assign the smallest number of threads to this kernel.
     if (!kernel.getOptions()->getuInt32Option(vISA_ForceHWThreadNumberPerEU) &&
-        (maxPressure > getRPThresholdHigh(kernel.getNumRegTotal() - kernel.getOptions()->getuInt32Option(vISA_ReservedGRFNum), kernel.getSimdSize())))
+        (maxPressure > getRPThresholdHigh(kernel.getNumRegTotal() - kernel.getOptions()->getuInt32Option(vISA_ReservedGRFNum))))
     {
         // Update number of threads, GRF, Acc and SWSB
         kernel.updateKernelByNumThreads(GrfMode.getMinNumThreads());
@@ -860,7 +883,7 @@ protected:
     // The data-dependency graph.
     preDDD& ddd;
 
-    // Registre pressure related data.
+    // Register pressure related data.
     RegisterPressure& rp;
 
     // Options to customize scheduler.
@@ -898,6 +921,8 @@ public:
         if (TheCurrTupleParts == 0)
             TheCurrTupleLead = nullptr;
     }
+    virtual void push(preNode* N) = 0;
+    virtual preNode* pop() = 0;
 
 protected:
     // The current (send) tuple lead.
@@ -925,7 +950,7 @@ public:
     }
 
     // Add a new ready node.
-    void push(preNode* N)
+    void push(preNode* N) override
     {
         // Clustering nodes have been added.
         if (N->isClustered && !N->isClusterLead)
@@ -940,7 +965,7 @@ public:
     }
 
     // Schedule the top node.
-    preNode* pop()
+    preNode* pop() override
     {
         return select();
     }
@@ -1301,29 +1326,33 @@ class LatencyQueue : public QueueBase {
     // group will be scheduled for latency.
     std::map<G4_INST *, unsigned> GroupInfo;
 
-    // Instrction latency information.
+    // Instruction latency information.
     const LatencyTable &LT;
+
+    // TODO: Try to apply priority queue to SethiUllmanQueue as well.
+    std::priority_queue<preNode*, std::vector<preNode*>, std::function<bool(preNode*, preNode*)>> ReadyList;
 
 public:
     LatencyQueue(preDDD& ddd, RegisterPressure& rp, SchedConfig config,
         const LatencyTable& LT)
         : QueueBase(ddd, rp, config)
         , LT(LT)
+        , ReadyList([this](preNode* a, preNode* b){ return compare(a, b);})
     {
         init();
     }
 
     // Add a new ready node.
-    void push(preNode* N)
+    void push(preNode* N) override
     {
         if (N->getInst() && N->getInst()->isPseudoKill())
             pseudoKills.push_back(N);
         else
-            Q.push_back(N);
+            ReadyList.push(N);
     }
 
     // Schedule the top node.
-    preNode* pop()
+    preNode* pop() override
     {
         // Pop all pseudo-kills if any.
         if (!pseudoKills.empty()) {
@@ -1331,19 +1360,20 @@ public:
             pseudoKills.pop_back();
             return N;
         }
-        return select();
+        assert(!ReadyList.empty());
+        preNode* N = ReadyList.top();
+        ReadyList.pop();
+        return N;
     }
 
     bool empty() const
     {
-        return pseudoKills.empty() && Q.empty();
+        return pseudoKills.empty() && ReadyList.empty();
     }
 
 private:
     void init();
     unsigned calculatePriority(preNode *N);
-
-    preNode* select();
 
     // Compare two ready nodes and decide which one should be scheduled first.
     // Return true if N2 has a higher priority than N1, false otherwise.
@@ -1612,22 +1642,6 @@ unsigned LatencyQueue::calculatePriority(preNode* N)
     }
 
     return std::max(1U, Priority);
-}
-
-preNode* LatencyQueue::select()
-{
-    assert(!Q.empty());
-    auto TopIter = Q.end();
-    for (auto I = Q.begin(), E = Q.end(); I != E; ++I) {
-        preNode* N = *I;
-        if (TopIter == Q.end() || compare(*TopIter, N))
-            TopIter = I;
-    }
-    assert(TopIter != Q.end());
-    preNode* Top = *TopIter;
-    std::swap(*TopIter, Q.back());
-    Q.pop_back();
-    return Top;
 }
 
 // Compare two ready nodes and decide which one should be scheduled first.
@@ -2043,56 +2057,69 @@ kill_if(bool pred, std::vector<T, AllocTy>& Elts,
 }
 
 // Compute {RAW,WAW,WAR,NODEP} for given operand to a live node.
-//
-static std::pair<DepType, G4_CmpRelation>
+static DepType
 getDep(G4_Operand* Opnd, const preDDD::LiveNode& LN)
 {
-    G4_CmpRelation Rel = G4_CmpRelation::Rel_undef;
-    G4_Operand *Other = LN.N->getInst()->getOperand(LN.OpNum);
-    if (Opnd->isDstRegRegion())
-        Rel = Opnd->asDstRegRegion()->compareOperand(Other);
-    else if (Opnd->isCondMod())
-        Rel = Opnd->asCondMod()->compareOperand(Other);
-    else if (Opnd->isSrcRegRegion())
-        Rel = Opnd->asSrcRegRegion()->compareOperand(Other);
-    else if (Opnd->isPredicate())
-        Rel = Opnd->asPredicate()->compareOperand(Other);
-    else
-        Rel = Opnd->compareOperand(Other);
-
-    if (Rel == G4_CmpRelation::Rel_disjoint) {
-        // Check if there is any acc dependency on acc registers.
-        G4_AccRegSel AccOpnd = Opnd->getAccRegSel();
-        G4_AccRegSel AccOther = Other->getAccRegSel();
-
-        // Normalize NOACC to ACC_UNDEFINED
-        if (AccOpnd == G4_AccRegSel::NOACC)
-            AccOpnd = G4_AccRegSel::ACC_UNDEFINED;
-        if (AccOther == G4_AccRegSel::NOACC)
-            AccOther = G4_AccRegSel::ACC_UNDEFINED;
-
-        if (AccOther == AccOpnd &&
-            AccOther != G4_AccRegSel::ACC_UNDEFINED) {
-            // While compairing V3:Acc2 to V4:Acc2, we cannot kill this live
-            // node, as there is no overlap on V3 and V4. So only returns
-            // Rel_interfere relation, not Rel_eq.
-            //
-            if (LN.isWrite() && Opnd->isDstRegRegion())
-                return std::make_pair(DepType::WAW, Rel_interfere);
-            if (LN.isWrite())
-                return std::make_pair(DepType::WAR, Rel_interfere);
-            if (Opnd->isDstRegRegion())
-                return std::make_pair(DepType::RAW, Rel_interfere);
-        }
-
-        // No dependency.
-        return std::make_pair(DepType::NODEP, Rel);
-    }
-
     DepType Deps[] = { DepType::NODEP, DepType::RAW, DepType::WAR, DepType::WAW };
     int i = int(LN.isWrite());
     int j = int(Opnd->isDstRegRegion() || Opnd->isCondMod());
-    return std::make_pair(Deps[i * 2 + j], Rel);
+    return Deps[i * 2 + j];
+}
+
+// Compute relation for given operand to a live node. This function may return
+// a different dependency when checking acc dependency.
+static std::pair<DepType, G4_CmpRelation>
+getDepAndRel(G4_Operand* Opnd, const preDDD::LiveNode& LN, DepType Dep)
+{
+    G4_CmpRelation Rel = G4_CmpRelation::Rel_undef;
+    G4_Operand *Other = LN.N->getInst()->getOperand(LN.OpNum);
+    assert(Other != nullptr);
+
+    if( Other )
+    {
+        if( Opnd->isDstRegRegion() )
+            Rel = Opnd->asDstRegRegion()->compareOperand( Other );
+        else if( Opnd->isCondMod() )
+            Rel = Opnd->asCondMod()->compareOperand( Other );
+        else if( Opnd->isSrcRegRegion() )
+            Rel = Opnd->asSrcRegRegion()->compareOperand( Other );
+        else if( Opnd->isPredicate() )
+            Rel = Opnd->asPredicate()->compareOperand( Other );
+        else
+            Rel = Opnd->compareOperand( Other );
+
+        if( Rel == G4_CmpRelation::Rel_disjoint )
+        {
+            // Check if there is any acc dependency on acc registers.
+            G4_AccRegSel AccOpnd = Opnd->getAccRegSel();
+            G4_AccRegSel AccOther = Other->getAccRegSel();
+
+            // Normalize NOACC to ACC_UNDEFINED
+            if( AccOpnd == G4_AccRegSel::NOACC )
+                AccOpnd = G4_AccRegSel::ACC_UNDEFINED;
+            if( AccOther == G4_AccRegSel::NOACC )
+                AccOther = G4_AccRegSel::ACC_UNDEFINED;
+
+            if( AccOther == AccOpnd &&
+                AccOther != G4_AccRegSel::ACC_UNDEFINED )
+            {
+                // While comparing V3:Acc2 to V4:Acc2, we cannot kill this live
+                // node, as there is no overlap on V3 and V4. So only returns
+                // Rel_interfere relation, not Rel_eq.
+                //
+                if( LN.isWrite() && Opnd->isDstRegRegion() )
+                    return std::make_pair( DepType::WAW, Rel_interfere );
+                if( LN.isWrite() )
+                    return std::make_pair( DepType::WAR, Rel_interfere );
+                if( Opnd->isDstRegRegion() )
+                    return std::make_pair( DepType::RAW, Rel_interfere );
+            }
+
+            // No dependency.
+            return std::make_pair( DepType::NODEP, Rel );
+        }
+    }
+    return std::make_pair(Dep, Rel);
 }
 
 // This is not a label nor a barrier and check the dependency
@@ -2111,15 +2138,20 @@ void preDDD::processReadWrite(preNode* curNode)
         // Iterate all live nodes associated to the same declaration.
         for (auto Iter = Nodes.begin(); Iter != Nodes.end(); /*empty*/) {
             LiveNode& liveNode = *Iter;
-            auto DepRel = getDep(opnd, liveNode);
-            if (DepRel.first != DepType::NODEP) {
-                addEdge(curNode, liveNode.N, DepRel.first);
-                // Check if this kills current live node. If yes, remove it.
-                bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
-                            DepRel.second == G4_CmpRelation::Rel_gt;
-                Iter = kill_if(pred, Nodes, Iter);
-            } else
+            DepType Dep = getDep(opnd, liveNode);
+            if (Dep == DepType::NODEP) {
                 ++Iter;
+            } else {
+                auto DepRel = getDepAndRel(opnd, liveNode, Dep);
+                if (DepRel.first != DepType::NODEP) {
+                    addEdge(curNode, liveNode.N, Dep);
+                    // Check if this kills current live node. If yes, remove it.
+                    bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
+                                DepRel.second == G4_CmpRelation::Rel_gt;
+                    Iter = kill_if(pred, Nodes, Iter);
+                } else
+                    ++Iter;
+            }
         }
 
         // If this is a physically allocated regvar, then check dependency on the
@@ -2127,15 +2159,20 @@ void preDDD::processReadWrite(preNode* curNode)
         if (isPhyicallyAllocatedRegVar(opnd)) {
             for (auto Iter = LivePhysicalNodes.begin(); Iter != LivePhysicalNodes.end(); /*empty*/) {
                 LiveNode& liveNode = *Iter;
-                auto DepRel = getDep(opnd, liveNode);
-                if (DepRel.first != DepType::NODEP) {
-                    addEdge(curNode, liveNode.N, DepRel.first);
-                    // Check if this kills current live node. If yes, remove it.
-                    bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
-                                DepRel.second == G4_CmpRelation::Rel_gt;
-                    Iter = kill_if(pred, LivePhysicalNodes, Iter);
-                } else
+                DepType Dep = getDep(opnd, liveNode);
+                if (Dep == DepType::NODEP) {
                     ++Iter;
+                } else {
+                    auto DepRel = getDepAndRel(opnd, liveNode, Dep);
+                    if (DepRel.first != DepType::NODEP) {
+                        addEdge(curNode, liveNode.N, Dep);
+                        // Check if this kills current live node. If yes, remove it.
+                        bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
+                                    DepRel.second == G4_CmpRelation::Rel_gt;
+                        Iter = kill_if(pred, LivePhysicalNodes, Iter);
+                    } else
+                        ++Iter;
+                }
             }
         }
 
@@ -2158,7 +2195,10 @@ void preDDD::processReadWrite(preNode* curNode)
             if (liveNode.isRead())
                 continue;
 
-            std::pair<DepType, G4_CmpRelation> DepRel = getDep(opnd, liveNode);
+            DepType Dep = getDep(opnd, liveNode);
+            if (Dep == DepType::NODEP)
+                continue;
+            std::pair<DepType, G4_CmpRelation> DepRel = getDepAndRel(opnd, liveNode, Dep);
             if (DepRel.first != DepType::NODEP)
                 addEdge(curNode, liveNode.N, DepRel.first);
         }
@@ -2170,7 +2210,10 @@ void preDDD::processReadWrite(preNode* curNode)
                 // Skip read live nodes.
                 if (liveNode.isRead())
                     continue;
-                std::pair<DepType, G4_CmpRelation> DepRel = getDep(opnd, liveNode);
+                DepType Dep = getDep(opnd, liveNode);
+                if (Dep == DepType::NODEP)
+                    continue;
+                std::pair<DepType, G4_CmpRelation> DepRel = getDepAndRel(opnd, liveNode, Dep);
                 if (DepRel.first != DepType::NODEP)
                     addEdge(curNode, liveNode.N, DepRel.first);
             }

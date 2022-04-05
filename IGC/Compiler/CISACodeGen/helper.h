@@ -24,6 +24,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/PassManager.h>
 #include <llvm/ADT/SmallSet.h>
 #include <llvm/ADT/DenseSet.h>
+#include <llvm/Analysis/PostDominators.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
@@ -108,6 +109,13 @@ namespace IGC
     BufferType GetBufferType(uint addrSpace);
 
     uint getImmValueU32(const llvm::Value* value);
+    bool getImmValueBool(const llvm::Value* value);
+
+    template <typename EnumT>
+    static inline EnumT getImmValueEnum(const llvm::Value* val)
+    {
+        return static_cast<EnumT>(getImmValueU32(val));
+    }
 
     void VectorToElement(
         llvm::Value* inst,
@@ -151,22 +159,24 @@ namespace IGC
     bool GetResourcePointerInfo(llvm::Value* srcPtr, unsigned& resID, IGC::BufferType& resTy, IGC::BufferAccessType& accessTy, bool& needBufferOffset);
     BufferAccessType getDefaultAccessType(BufferType bufTy);
     bool GetGRFOffsetFromRTV(llvm::Value* pointerSrc, unsigned& GRFOffset);
+    bool GetGRFOffsetFromGlobalRootSignatureValue(llvm::Value* pointerSrc, unsigned& GRFOffset);
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
     // try to evaluate the address if it is constant.
     bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
     bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf);
 
 
-    bool isSampleLoadGather4InfoInstruction(llvm::Instruction* inst);
-    bool isSampleInstruction(llvm::Instruction* inst);
-    bool isInfoInstruction(llvm::Instruction* inst);
-    bool isLdInstruction(llvm::Instruction* inst);
-    bool isGather4Instruction(llvm::Instruction* inst);
-    bool isVectorInputInstruction(llvm::Instruction* inst);
+    bool isSampleLoadGather4InfoInstruction(const llvm::Instruction* inst);
+    bool isSampleInstruction(const llvm::Instruction* inst);
+    bool isInfoInstruction(const llvm::Instruction* inst);
+    bool isLdInstruction(const llvm::Instruction* inst);
+    bool isGather4Instruction(const llvm::Instruction* inst);
 
-    bool IsMediaIOIntrinsic(llvm::Instruction* inst);
-    bool IsSIMDBlockIntrinsic(llvm::Instruction* inst);
+    bool IsMediaIOIntrinsic(const llvm::Instruction* inst);
+    bool IsSIMDBlockIntrinsic(const llvm::Instruction* inst);
     bool isSubGroupIntrinsic(const llvm::Instruction* I);
+    bool isSubGroupIntrinsicPVC(const llvm::Instruction* I);
+    bool hasSubGroupIntrinsicPVC(llvm::Function& F);
 
     bool IsStatelessMemLoadIntrinsic(llvm::GenISAIntrinsic::ID id);
     bool IsStatelessMemStoreIntrinsic(llvm::GenISAIntrinsic::ID id);
@@ -217,6 +227,14 @@ namespace IGC
     inline bool isIntelSymbolTableVoidProgram(llvm::Function* pF)
     {
         return (pF == getIntelSymbolTableVoidProgram(pF->getParent()));
+    }
+
+    inline bool ForceAlwaysInline()
+    {
+        // return true if FunctionControl is set to INLINE, and SelectiveFunctionControl does not force fcalls.
+        return IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_FORCE_INLINE &&
+            (IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == FLAG_FCALL_DEFAULT ||
+                IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == FLAG_FCALL_FORCE_INLINE);
     }
 
     /// Return true if F is an entry function of a kernel or a shader.
@@ -367,6 +385,7 @@ namespace IGC
         llvm::IRBuilder<>& builder, const llvm::Twine& name = "");
 
     unsigned int AppendConservativeRastWAHeader(IGC::SProgramOutput* program, SIMDMode simdmode);
+    unsigned int AppendConservativeRastWAHeader(void*& pBinary, unsigned int& binarySize, SIMDMode simdmode);
 
     bool DSDualPatchEnabled(class CodeGenContext* ctx);
 
@@ -475,6 +494,12 @@ namespace IGC
     llvm::Value* CreateMulhU64(llvm::IRBuilder<>& B, llvm::Value* const u, llvm::Value* const v);
     llvm::Value* CreateMulh(llvm::Function& F, llvm::IRBuilder<>& B, const bool isSigned, llvm::Value* const u, llvm::Value* const v);
 
+    // Ported from PostDominators.cpp of llvm10 or later
+    // replace this with PDT.dominates(I1, I2) once we upgrade
+    bool PDT_dominates(llvm::PostDominatorTree& PTD,
+        const llvm::Instruction* I1,
+        const llvm::Instruction* I2);
+
     // Returns true if a function has an inline asm call instruction
     bool hasInlineAsmInFunc(llvm::Function& F);
 
@@ -486,6 +511,13 @@ namespace IGC
     // Function modifies address space in selected uses of given input value
     void FixAddressSpaceInAllUses(llvm::Value* ptr, uint newAS, uint oldAS);
 
+    llvm::Value* CombineSampleOrGather4Params(
+        llvm::IRBuilder<>& builder,
+        llvm::Value* param1,
+        llvm::Value* param2,
+        uint numBits,
+        const std::string& param1Name,
+        const std::string& param2Name);
 
     // Returns the dynamic URB base offset and an immediate const offset
     // from the dynamic base. The function calculates the result by walking
@@ -494,4 +526,6 @@ namespace IGC
     // <nullptr, offset> is returned.
     // In all other cases <pUrbOffset, 0> is returned.
     std::pair<llvm::Value*, unsigned int> GetURBBaseAndOffset(llvm::Value* pUrbOffset);
+
+    std::vector<std::pair<unsigned int, std::string>> GetPrintfStrings(llvm::Module &M);
 } // namespace IGC

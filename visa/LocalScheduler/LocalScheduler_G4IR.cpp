@@ -22,6 +22,12 @@ using namespace vISA;
 /* Entry to the local scheduling. */
 void LocalScheduler::localScheduling()
 {
+    // This is controlled by options for debugging
+    if (!fg.getKernel()->isLocalSheduleable())
+    {
+        return;
+    }
+
     DEBUG_VERBOSE("[Scheduling]: Starting...");
     BB_LIST_ITER ib(fg.begin()), bend(fg.end());
     MUST_BE_TRUE(ib != bend, ERROR_SCHEDULER);
@@ -32,6 +38,9 @@ void LocalScheduler::localScheduling()
 
     const Options *m_options = fg.builder->getOptions();
     LatencyTable LT(fg.builder);
+
+    PointsToAnalysis p(fg.getKernel()->Declares, fg.size());
+    p.doPointsToAnalysis(fg);
 
     uint32_t totalCycles = 0;
     uint32_t scheduleStartBBId = m_options->getuInt32Option(vISA_LocalSchedulingStartBB);
@@ -72,7 +81,7 @@ void LocalScheduler::localScheduling()
                     sections.push_back(tempBB);
                     tempBB->splice(tempBB->begin(),
                         (*ib), (*ib)->begin(), inst_it);
-                    G4_BB_Schedule schedule(fg.getKernel(), bbMem, tempBB, LT);
+                    G4_BB_Schedule schedule(fg.getKernel(), bbMem, tempBB, LT, p);
                     count = 0;
                 }
                 count++;
@@ -90,7 +99,7 @@ void LocalScheduler::localScheduling()
         }
         else
         {
-            G4_BB_Schedule schedule(fg.getKernel(), bbMem, *ib, LT);
+            G4_BB_Schedule schedule(fg.getKernel(), bbMem, *ib, LT, p);
             bbInfo[i].id = (*ib)->getId();
             bbInfo[i].staticCycle = schedule.sequentialCycle;
             bbInfo[i].sendStallCycle = schedule.sendStallCycle;
@@ -192,16 +201,16 @@ void G4_BB_Schedule::dumpSchedule(G4_BB *bb)
 //      - creates a new instruction listing within a BBB
 //
 G4_BB_Schedule::G4_BB_Schedule(G4_Kernel* k, Mem_Manager& m, G4_BB* block,
-    const LatencyTable& LT)
+    const LatencyTable& LT, PointsToAnalysis &p)
     : mem(m)
     , bb(block)
     , kernel(k)
-
+    , pointsToAnalysis(p)
 {
     // we use local id in the scheduler for determining two instructions' original ordering
     bb->resetLocalIds();
 
-    DDD ddd(mem, bb, LT, k);
+    DDD ddd(mem, bb, LT, k, p);
     // Generate pairs of TypedWrites
     bool doMessageFuse =
         (k->fg.builder->fuseTypedWrites() && k->getSimdSize() >= g4::SIMD16) ||
@@ -212,7 +221,12 @@ G4_BB_Schedule::G4_BB_Schedule(G4_Kernel* k, Mem_Manager& m, G4_BB* block,
         ddd.pairTypedWriteOrURBWriteNodes(bb);
     }
 
-    if (getOptions()->getOption(vISA_ScheduleForReadSuppression) && ddd.getIsThreeSourceBlock())
+    if ((ddd.getIs2xFPBlock())&&
+        getOptions()->getOption(vISA_ScheduleFor2xSP))
+    {
+        lastCycle = ddd.listScheduleFor2xFP(this);
+    }
+    else if (getOptions()->getOption(vISA_ScheduleForReadSuppression) && ddd.getIsThreeSourceBlock())
     {
         lastCycle = ddd.listScheduleForSuppression(this);
     }
@@ -341,6 +355,57 @@ static Mask getMaskForOp(G4_Operand * opnd, Gen4_Operand_Number opnd_num,
     return Mask(LB, RB, nonContiguousStride, opnd->getAccRegSel());
 }
 
+void DDD::getBucketsForIndirectOperand(G4_INST* inst,
+    Gen4_Operand_Number opnd_num,
+    G4_Operand* opnd,
+    std::vector<BucketDescr>& BDvec)
+{
+    G4_Declare* addrdcl = nullptr;
+    if (opnd_num == Opnd_dst)
+    {
+        G4_DstRegRegion* dstrgn = opnd->asDstRegRegion();
+        addrdcl = GetTopDclFromRegRegion(dstrgn);
+    }
+    else if (opnd_num == Opnd_src0 ||
+        opnd_num == Opnd_src1 ||
+        opnd_num == Opnd_src2 ||
+        opnd_num == Opnd_src3)
+    {
+        G4_SrcRegRegion* srcrgn = opnd->asSrcRegRegion();
+        addrdcl = GetTopDclFromRegRegion(srcrgn);
+    }
+    MUST_BE_TRUE(addrdcl != nullptr, "address declare can not be nullptr");
+
+    G4_RegVar* ptvar = nullptr;
+    int vid = 0;
+    unsigned char offset = 0;
+    while ((ptvar = pointsToAnalysis.getPointsTo(addrdcl->getRegVar(), vid++, offset)) != nullptr)
+    {
+
+        uint32_t varID = ptvar->getId();
+        G4_Declare* dcl = ptvar->getDeclare()->getRootDeclare();
+        G4_RegVar* var = dcl->getRegVar();
+
+        MUST_BE_TRUE(var->getId() == varID, "RA verification error: Invalid regVar ID!");
+        MUST_BE_TRUE(var->getPhyReg()->isGreg(), "RA verification error: Invalid dst reg!");
+
+        uint32_t regNum = var->getPhyReg()->asGreg()->getRegNum();
+        uint32_t regOff = var->getPhyRegOff();
+        int linearizedStart = regNum * kernel->numEltPerGRF<Type_UB>() + regOff * TypeSize(dcl->getElemType());
+        int linearizedEnd = linearizedStart + dcl->getByteSize() - 1;
+
+        int startingBucket = linearizedStart / kernel->numEltPerGRF<Type_UB>();
+        int endingBucket = linearizedEnd / kernel->numEltPerGRF<Type_UB>();
+        Mask mask(linearizedStart, linearizedEnd, false, opnd->getAccRegSel());
+        int numBuckets = endingBucket - startingBucket + 1;
+        for (int j = startingBucket; j < (startingBucket + numBuckets); j++)
+        {
+            BDvec.push_back(BucketDescr(j, mask, opnd_num));
+        }
+    }
+    return;
+}
+
 void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
     G4_Operand* opnd,
     std::vector<BucketDescr>& BDvec)
@@ -359,7 +424,7 @@ void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
 
     switch (phyReg->getKind()) {
     case G4_VarBase::VK_phyGReg:
-        startingBucket = opnd->getLinearizedStart() / numEltPerGRF<Type_UB>();
+        startingBucket = opnd->getLinearizedStart() / kernel->numEltPerGRF<Type_UB>();
         canSpanMultipleBuckets = true;
         break;
     case G4_VarBase::VK_phyAReg: {
@@ -398,7 +463,7 @@ void DDD::getBucketsForOperand(G4_INST* inst, Gen4_Operand_Number opnd_num,
     if (startingBucket != UNINIT_BUCKET) {
         if (canSpanMultipleBuckets) {
             assert(base->isGreg());
-            unsigned divisor = numEltPerGRF<Type_UB>();
+            unsigned divisor = kernel->numEltPerGRF<Type_UB>();
             int baseBucket = GRF_BUCKET;
             int endingBucket = baseBucket + opnd->getLinearizedEnd() / divisor;
             MUST_BE_TRUE(endingBucket >= startingBucket, "Ending bucket less than starting bucket");
@@ -445,9 +510,8 @@ static inline bool hasIndirection(G4_Operand *opnd, Gen4_Operand_Number opndNum)
 // return all bucket descriptors that the physical register can map
 // to. This requires taking in to account exec size, data
 // type, and whether inst is a send
-bool DDD::getBucketDescrs(Node *node, std::vector<BucketDescr>& BDvec)
+void DDD::getBucketDescrs(Node *node, std::vector<BucketDescr>& BDvec)
 {
-    bool hasIndir = false;
     for (G4_INST *inst : node->instVec)
     {
         // Iterate over all operands and create buckets.
@@ -467,7 +531,10 @@ bool DDD::getBucketDescrs(Node *node, std::vector<BucketDescr>& BDvec)
                 getBucketsForOperand(inst, opndNum, opnd, BDvec);
             }
             // Check if this operand is an indirect access
-            hasIndir |= hasIndirection(opnd, opndNum);
+            if (hasIndirection(opnd, opndNum))
+            {
+                getBucketsForIndirectOperand(inst, opndNum, opnd, BDvec);
+            }
         }
 
         // Sends need an additional bucket
@@ -481,7 +548,7 @@ bool DDD::getBucketDescrs(Node *node, std::vector<BucketDescr>& BDvec)
         }
     }
 
-    return hasIndir;
+    return;
 }
 
 // This class hides the internals of dependence tracking using buckets
@@ -665,59 +732,6 @@ public:
     }
 };
 
-// Return the dependence type {RAW,WAW,WAR,NODEP} for given operand numbers
-static DepType getDepForOpnd(Gen4_Operand_Number cur,
-    Gen4_Operand_Number liv) {
-    switch (cur) {
-    case Opnd_dst:
-    case Opnd_implAccDst:
-    case Opnd_condMod: {
-        switch (liv) {
-        case Opnd_dst:
-        case Opnd_implAccDst:
-        case Opnd_condMod:
-            return WAW;
-        case Opnd_src0:
-        case Opnd_src1:
-        case Opnd_src2:
-        case Opnd_src3:
-        case Opnd_implAccSrc:
-        case Opnd_pred:
-            return RAW;
-        default:
-            assert(0 && "bad opnd numb");
-            return DEPTYPE_MAX; // Unreachable
-        }
-    }
-    case Opnd_src0:
-    case Opnd_src1:
-    case Opnd_src2:
-    case Opnd_src3:
-    case Opnd_implAccSrc:
-    case Opnd_pred: {
-        switch (liv) {
-        case Opnd_dst:
-        case Opnd_implAccDst:
-        case Opnd_condMod:
-            return WAR;
-        case Opnd_src0:
-        case Opnd_src1:
-        case Opnd_src2:
-        case Opnd_src3:
-        case Opnd_implAccSrc:
-        case Opnd_pred:
-            return NODEP;
-        default:
-            assert(0 && "bad opnd numb");
-            return DEPTYPE_MAX; // Unreachable
-        }
-    }
-    default:
-        assert(0 && "bad opnd numb");
-        return DEPTYPE_MAX; // Unreachable
-    }
-}
-
 /*
 Read suppression opportunity checking to group the three source instructions with read suppression into single node
 1. per-source slot
@@ -802,11 +816,11 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    currInstRegs[0][i] = byteAddress / kernel->numEltPerGRF<Type_UB>();
 
-                    if (opndSize > getGRFSize())
+                    if (opndSize > kernel->getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
                     {
@@ -835,13 +849,13 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    nextInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    nextInstRegs[0][i] = byteAddress / kernel->numEltPerGRF<Type_UB>();
 
                     liveSrc.set(nextInstRegs[0][i], true);  //Set live
 
-                    if (opndSize > getGRFSize())
+                    if (opndSize > kernel->getGRFSize())
                     {
-                        int reg = nextInstRegs[0][i] + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        int reg = nextInstRegs[0][i] + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
                         nextInstRegs[1][i] =  reg;
                         liveSrc.set(reg, true);  //Set live
                     }
@@ -870,15 +884,15 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
     {
         opndSize = nextDstOpnd->getLinearizedEnd() - nextDstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = nextDstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / numEltPerGRF<Type_UB>();
+        dstReg0 = byteAddress / kernel->numEltPerGRF<Type_UB>();
         liveDst.set(dstReg0, true);
-        if (opndSize <= getGRFSize())
+        if (opndSize <= kernel->getGRFSize())
         {
             nextInstSimd8 = true;
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstReg1 = dstReg0 + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
             liveDst.set(dstReg1, true);
         }
     }
@@ -894,20 +908,20 @@ bool DDD::hasReadSuppression(G4_INST *prevInst, G4_INST *nextInst, BitSet &liveD
     {
         opndSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / numEltPerGRF<Type_UB>();
+        dstReg0 = byteAddress / kernel->numEltPerGRF<Type_UB>();
         //If there is RAW and WAW dependence
         if (liveSrc.isSet(dstReg0) || liveDst.isSet(dstReg0))
         {
             return false;
         }
 
-        if (opndSize <= getGRFSize())
+        if (opndSize <= kernel->getGRFSize())
         {
             curInstSimd8 = true;
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstReg1 = dstReg0 + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
 
             //If there is RAW and WAW dependence
             if (liveSrc.isSet(dstReg1) || liveDst.isSet(dstReg1))
@@ -1030,11 +1044,11 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    currInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    currInstRegs[0][i] = byteAddress / kernel->numEltPerGRF<Type_UB>();
 
-                    if (opndSize > getGRFSize())
+                    if (opndSize > kernel->getGRFSize())
                     {
-                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        currInstRegs[1][i] = currInstRegs[0][i] + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
                     }
                     else if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
                     {
@@ -1063,11 +1077,11 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
                 opndSize = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    nextInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    nextInstRegs[0][i] = byteAddress / kernel->numEltPerGRF<Type_UB>();
 
-                    if (opndSize > getGRFSize())
+                    if (opndSize > kernel->getGRFSize())
                     {
-                        int reg = nextInstRegs[0][i] + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        int reg = nextInstRegs[0][i] + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
                         nextInstRegs[1][i] = reg;
                     }
                     if (srcOpnd->asSrcRegRegion()->isScalar()) //No Read suppression for SIMD 16/scalar src
@@ -1095,14 +1109,14 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
     {
         opndSize = nextDstOpnd->getLinearizedEnd() - nextDstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = nextDstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / numEltPerGRF<Type_UB>();
-        if (opndSize <= getGRFSize())
+        dstReg0 = byteAddress / kernel->numEltPerGRF<Type_UB>();
+        if (opndSize <= kernel->getGRFSize())
         {
             nextInstSimd8 = true;
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstReg1 = dstReg0 + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
         }
     }
 
@@ -1117,15 +1131,15 @@ bool DDD::hasReadSuppression(G4_INST* prevInst, G4_INST* nextInst, bool multiSup
     {
         opndSize = dstOpnd->getLinearizedEnd() - dstOpnd->getLinearizedStart() + 1;
         uint32_t byteAddress = dstOpnd->getLinearizedStart();
-        dstReg0 = byteAddress / numEltPerGRF<Type_UB>();
+        dstReg0 = byteAddress / kernel->numEltPerGRF<Type_UB>();
 
-        if (opndSize <= getGRFSize())
+        if (opndSize <= kernel->getGRFSize())
         {
             curInstSimd8 = true;
         }
         else
         {
-            dstReg1 = dstReg0 + (opndSize + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+            dstReg1 = dstReg0 + (opndSize + kernel->numEltPerGRF<Type_UB>() - 1) / kernel->numEltPerGRF<Type_UB>() - 1;
         }
     }
 
@@ -1234,11 +1248,11 @@ bool DDD::hasSameSourceOneDPAS(G4_INST *curInst, G4_INST *nextInst, BitSet &live
         unsigned short c_dstRB = c_dst->getLinearizedEnd();
         unsigned short n_dstLB = n_dst->getLinearizedStart();
         unsigned short n_dstRB = n_dst->getLinearizedEnd();
-        int c_dstReg = c_dstLB /numEltPerGRF<Type_UB>();
-        int n_dstReg = n_dstLB /numEltPerGRF<Type_UB>();
+        int c_dstReg = c_dstLB / kernel->numEltPerGRF<Type_UB>();
+        int n_dstReg = n_dstLB / kernel->numEltPerGRF<Type_UB>();
 
         //Set destination live for current instruction
-        while (c_dstReg * numEltPerGRF<Type_UB>() < c_dstRB)
+        while (c_dstReg * kernel->numEltPerGRF<Type_UB>() < c_dstRB)
         {
             liveDst.set(c_dstReg, true);
             c_dstReg++;
@@ -1253,8 +1267,8 @@ bool DDD::hasSameSourceOneDPAS(G4_INST *curInst, G4_INST *nextInst, BitSet &live
             unsigned short n_srcLB = n_src->getLinearizedStart();
 
             //Set source live for current instruction
-            int srcReg = c_srcLB / numEltPerGRF<Type_UB>();
-            while (srcReg * numEltPerGRF<Type_UB>() < c_srcRB)
+            int srcReg = c_srcLB / kernel->numEltPerGRF<Type_UB>();
+            while (srcReg * kernel->numEltPerGRF<Type_UB>() < c_srcRB)
             {
                 liveSrc.set(srcReg, true);
                 srcReg++;
@@ -1268,7 +1282,7 @@ bool DDD::hasSameSourceOneDPAS(G4_INST *curInst, G4_INST *nextInst, BitSet &live
         }
 
         //If there is RAW, WAW dependence
-        while (n_dstReg * numEltPerGRF<Type_UB>() < n_dstRB)
+        while (n_dstReg * kernel->numEltPerGRF<Type_UB>() < n_dstRB)
         {
             if (liveDst.isSet(n_dstReg) || liveSrc.isSet(n_dstReg))
             {
@@ -1294,8 +1308,8 @@ bool DDD::hasSameSourceOneDPAS(G4_INST *curInst, G4_INST *nextInst, BitSet &live
             }
 #endif
             //If there is WAR dependence
-            int srcReg = n_srcLB / numEltPerGRF<Type_UB>();
-            while (srcReg * numEltPerGRF<Type_UB>() < n_srcRB)
+            int srcReg = n_srcLB / kernel->numEltPerGRF<Type_UB>();
+            while (srcReg * kernel->numEltPerGRF<Type_UB>() < n_srcRB)
             {
                 if (liveDst.isSet(srcReg))
                 {
@@ -1319,16 +1333,18 @@ bool DDD::hasSameSourceOneDPAS(G4_INST *curInst, G4_INST *nextInst, BitSet &live
 // dependencies with all insts in live set. After analyzing
 // dependencies and creating necessary edges, current inst
 // is inserted in all buckets it touches.
-DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
+DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k, PointsToAnalysis& p)
     : mem(m)
     , LT(lt)
     , kernel(k)
+    , pointsToAnalysis(p)
 {
     Node* lastBarrier = nullptr;
     HWthreadsPerEU = k->getNumThreads();
     useMTLatencies = getBuilder()->useMultiThreadLatency();
     totalGRFNum = kernel->getNumRegTotal();
     isThreeSouceBlock = false;
+    is_2XFP_Block = false;
     bool BTIIsRestrict = getOptions()->getOption(vISA_ReorderDPSendToDifferentBti);
 
     GRF_BUCKET = 0;
@@ -1349,6 +1365,8 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
     std::vector<BucketDescr> BDvec;
 
     int threeSrcInstNUm = 0;
+    int FP_InstNum = 0;
+    int sendInstNum = 0;
     for (int nodeId = (int)(bb->size() - 1); iInst != iInstEnd; ++iInst, nodeId--)
     {
         Node *node = nullptr;
@@ -1356,12 +1374,25 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
         node = new (mem)Node(nodeId, *iInst, depEdgeAllocator, LT);
         allNodes.push_back(node);
         G4_INST *curInst = node->getInstructions()->front();
-        bool hasIndir = false;
         BDvec.clear();
 
         if (curInst->getNumSrc() == 3)
         {
             threeSrcInstNUm ++;
+        }
+        G4_DstRegRegion* dstOpnd = curInst->getDst();
+        sendInstNum += curInst->isSend() ? 1 : 0;
+        if (dstOpnd &&
+            dstOpnd->getTopDcl() &&
+            dstOpnd->getTopDcl()->getRegFile() == G4_GRF)
+        {
+            bool isCounted = false;
+            if (getBuilder()->has2xDP() && instCanUse2xDP(curInst))
+            {
+                FP_InstNum++;
+                isCounted = true;
+            }
+
         }
         if (getBuilder()->hasReadSuppression() &&
             getOptions()->getOption(vISA_EnableGroupScheduleForBC))
@@ -1426,10 +1457,9 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
              }
         }
         // Get buckets for all physical registers assigned in curInst
-        hasIndir = getBucketDescrs(node, BDvec);
-        if (hasIndir || (curInst->isSend() && curInst->asSendInst()->isFence()))
+        getBucketDescrs(node, BDvec);
+        if (curInst->isSend() && curInst->asSendInst()->isFence())
         {
-            // If inst has indirect src/dst then treat it as a barrier.
             node->MarkAsUnresolvedIndirAddressBarrier();
         }
 
@@ -1468,7 +1498,7 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
                 // Kill type 1: When the current destination region completely
                 //              covers the whole register from the first bit
                 //              to the last bit.
-                bool curKillsBucket = curMask.killsBucket(curBucket);
+                bool curKillsBucket = curMask.killsBucket(curBucket, *kernel->fg.builder);
 
                 // For each live curBucket node:
                 // i)  create edge if required
@@ -1496,7 +1526,8 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
                     if (curBucket < ACC_BUCKET) {
                         dep = getDepForOpnd(curOpnd, liveOpnd);
                     } else if (curBucket == ACC_BUCKET
-                        || curBucket == A0_BUCKET) {
+                        || curBucket == A0_BUCKET)
+                    {
                         dep = getDepForOpnd(curOpnd, liveOpnd);
                         curKillsBucket = false;
                     } else if (curBucket == SEND_BUCKET) {
@@ -1561,6 +1592,9 @@ DDD::DDD(Mem_Manager& m, G4_BB* bb, const LatencyTable& lt, G4_Kernel* k)
     if (Nodes.size())
     {
         isThreeSouceBlock = ((float)threeSrcInstNUm / Nodes.size()) > THREE_SOURCE_BLOCK_HERISTIC;
+        is_2XFP_Block = (FP_InstNum >= FP_MIN_INST_NUM) &&
+            (((float)FP_InstNum / Nodes.size()) > THREE_SOURCE_BLOCK_HERISTIC) &&
+            (((float)sendInstNum / FP_InstNum) < FP_BLOCK_SEND_HERISTIC);
     }
 }
 
@@ -2281,6 +2315,230 @@ uint32_t DDD::listScheduleForSuppression(G4_BB_Schedule* schedule)
     return currCycle;
 }
 
+//Scheduling for the 2xDP pipeline
+uint32_t DDD::listScheduleFor2xFP(G4_BB_Schedule* schedule)
+{
+    if (getOptions()->getOption(vISA_DumpDagDot))
+    {
+        dumpDagDot(schedule->getBB());
+        dumpNodes(schedule->getBB());
+    }
+
+    // All nodes in root set have no dependency
+    // so they can be immediately scheduled,
+    // and hence are added to readyList.
+    // 2xSP specific, the original order will be kept.
+    std::priority_queue<Node*, std::vector<Node*>, criticalCmpForMad> readyList;
+
+    // Nodes with their predecessors scheduled are pushed into the preReadyQueue
+    // They only get pushed into the real readyList if they are ready to issue,
+    // that is their earliest cycle is >= than the current schedule cycle.
+    std::priority_queue<Node*, std::vector<Node*>, earlyCmp> preReadyQueue;
+
+    auto updateForSucc = [&](Node* scheduled, std::priority_queue<Node*, std::vector<Node*>, earlyCmp>* preReadyQueue)
+    {
+        for (auto& curSucc : scheduled->succs)
+        {
+            Node* succ = curSucc.getNode();
+            // Recompute the earliest time for each successor.
+            if (scheduled->isLabel())
+            {
+                succ->earliest = 0;
+            }
+            else
+            {
+                // Update the earliest time of the successor and set its last scheduled
+                // predecessor with the largest latency to the currently scheduled node
+                // if the latency incurred by scheduling the successor right after the
+                // "scheduled" node is larger than successor's earliest time.
+                uint32_t latencyToAdd = curSucc.getLatency();
+                uint32_t earliestNew = 0;
+                latencyToAdd = latencyToAdd > scheduled->getOccupancy() ? latencyToAdd : scheduled->getOccupancy();
+                earliestNew = scheduled->schedTime + latencyToAdd;
+
+                if (succ->earliest <= earliestNew || !succ->lastSchedPred)
+                {
+                    succ->lastSchedPred = scheduled;
+                }
+                succ->earliest = (succ->earliest > earliestNew) ? succ->earliest : earliestNew;
+            }
+            // Decrease the number of predecessors not scheduled for the successor node.
+            if ((--(succ->predsNotScheduled)) == 0)
+            {
+                preReadyQueue->push(succ);
+            }
+        }
+    };
+
+    auto scheduleSingleInst = [&](window2xSP* curBlock, std::vector<Node*> &popped, uint32_t *currCycle)
+    {
+        // Push back the nodes in current block to ready list
+        for (auto node : curBlock->instList)
+        {
+            if (node != nullptr)
+            {
+                readyList.push(node);
+            }
+        }
+
+        // push back the nodes in popped list to ready list
+        for (auto node : popped)
+        {
+            readyList.push(node);
+        }
+
+        //Only schedule single instruction
+        Node* scheduled = readyList.top();
+        readyList.pop();
+        schedule->scheduledNodes.push_back(scheduled);
+        //Update succ
+        updateForSucc(scheduled, &preReadyQueue);
+        scheduled->schedTime = *currCycle;
+        *currCycle += scheduled->getOccupancy();
+    };
+
+    collectRoots();
+    for (auto N : Roots) {
+        preReadyQueue.push(N);
+    }
+
+    // The scheduler's clock.
+    // This counter is updated in each loop iteration and its
+    // final value represents number of cycles the kernel would
+    // take to execute on the GPU as per the model.
+    uint32_t currCycle = 0;
+
+    //The blocks are used for the 2xDP and 2xSP instruction block, which will be scheduled at the same time
+    //Since the atomic is set according to the dependence of two contigious blocks,
+    //we keep two blocks with two block pointers to use them alternatively.
+    window2xSP madBlock1(kernel);
+    window2xSP madBlock2(kernel);
+    window2xSP *curBlock = &madBlock1;
+    window2xSP *lastBlock = &madBlock2;
+
+    // Keep scheduling until both readyList or preReadyQueue contain instrs.
+    while (!(readyList.empty() && preReadyQueue.empty()))
+    {
+        Node* readyCandidate = preReadyQueue.empty() ? nullptr : preReadyQueue.top();
+        // While non empty, move nodes from preReadyQueue to readyList
+        while (readyCandidate)
+        {
+            readyList.push(readyCandidate);
+            preReadyQueue.pop();
+            readyCandidate = preReadyQueue.empty() ? nullptr : preReadyQueue.top();
+        }
+        // Nothing to issue at this cycle, increment scheduler clock :)
+        if (readyList.empty())
+        {
+            // readyCandidate is not nullptr. Proof: If it was nullptr, then both
+            // preReadyQueue and readyList would be empty. But this cannot
+            // happen because the while() loop will only enter if at least
+            // one of them is non-empty.
+            assert(readyCandidate && "Both readyList and preReadyQ empty!");
+            currCycle = readyCandidate->earliest;
+            continue;
+        }
+
+        // Store the node popped from readyList but not in block
+        std::vector<Node*> popped;
+
+        // Traverse the readyList to try to build the 2xDP/2xSP block
+        int searchSize = (int)readyList.size();
+        for (int i = 0; i < searchSize; ++i)
+        {
+            bool isAddedToBlock = false;  // Used to see if the node has been added into block
+            Node* curNode = readyList.top();
+
+            // On PVC_XT+ platforms, check if the instruction can be added into the block
+            if ((curNode->getInstructions()->size() == 1) && getBuilder()->has2xDP() && curBlock->canAddToBlock2xDP(curNode))
+            {
+                readyList.pop();
+                curBlock->push(curNode);
+                isAddedToBlock = true;
+
+                // Current block is full
+                if (curBlock->isBlockFull())
+                {
+                    break;
+                }
+            }
+
+
+            // Current instruction can't be added into current block, add it into the popped
+            if (!isAddedToBlock)
+            {
+                readyList.pop();
+                popped.push_back(curNode);
+            }
+        }
+
+        // Check if current block is a good block
+        if (curBlock->isGoodBlock())
+        {
+            // Try to see if we can schedule current block. If pre-ready queue updated by the block scheduling is empty, which means
+            // some instructions in popped list depeneded by next block should be scheduled firstly. Then schedule current block.
+            // Considering below case:
+            //    mad (16)             r5.0<1>:df  r92.0<1;0>:df  r45.0<1;0>:df  r84.0<0;0>:df
+            //    mad (16)             r7.0<1>:df  r96.0<1;0>:df  r45.0<1;0>:df  r84.1<0;0>:df
+            //    mov (32)             r86.0<1>:d  r17.0<1;1,0>:d
+            //    mad (16)             r9.0<1>:df  r100.0<1;0>:df  r45.0<1;0>:df  r84.2<0;0>:df
+            //    mad (16)             r11.0<1>:df  r104.0<1;0>:df  r45.0<1;0>:df  r84.3<0;0>:df
+            //
+            //    mad (16)             r5.0<1>:df  r5.0<1;0>:df  r108.0<1;0>:df  r86.0<0;0>:df
+            //    mad (16)             r7.0<1>:df  r7.0<1;0>:df  r108.0<1;0>:df  r86.1<0;0>:df
+            //    mad (16)             r9.0<1>:df  r9.0<1;0>:df  r108.0<1;0>:df  r86.2<0;0>:df
+            //    mad (16)             r11.0<1>:df  r11.0<1;0>:df  r108.0<1;0>:df  r86.3<0;0>:df
+            // The last 4 mad depends on previous 4 mad and mov. In current block, we have built the block successfully
+            // which includes the first 4 instructions, and the popped list has the mov instruction. If shcedule
+            // the block now, then the next sheduled instruction will be the mov as the last 4 mad wouldn't be
+            // sheduled before all the previous 5 instructions scheduled. So the group of blocks will be broken.
+            // Todo: Is there better solution here?
+
+            // Schedule instructions in popped list
+            for (auto node : popped)
+            {
+                schedule->scheduledNodes.push_back(node);
+                updateForSucc(node, &preReadyQueue);
+                node->schedTime = currCycle;
+                currCycle += node->getOccupancy();
+            }
+
+            // Schedule instructions in block together
+            for (auto node : curBlock->instList)
+            {
+                schedule->scheduledNodes.push_back(node);
+                updateForSucc(node, &preReadyQueue);
+                node->schedTime = currCycle;
+                currCycle += node->getOccupancy();
+            }
+
+            window2xSP* tmpBlock = lastBlock;
+            lastBlock = curBlock;
+            curBlock = tmpBlock;
+            curBlock->clean();
+            curBlock->setPreBlock(lastBlock);
+        }
+        else // Not good block
+        {
+            scheduleSingleInst(curBlock, popped, &currCycle);
+
+            // clean the blocks
+            lastBlock->clean();
+            curBlock->clean();
+        }
+    }
+
+
+    // Sanity check: Make sure all nodes are scheduled
+#if defined(_DEBUG)
+    for (auto node : allNodes)
+    {
+        assert(node->schedTime != UINT_MAX && "Node not scheduled!");
+    }
+#endif
+    return currCycle;
+}
+
 // Perform local list scheduling
 uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
 {
@@ -2299,6 +2557,41 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
     // They only get pushed into the real readyList if they are ready to issue,
     // that is their earliest cycle is >= than the current schedule cycle.
     std::priority_queue<Node *, std::vector<Node *>, earlyCmp> preReadyQueue;
+
+    auto updateForSucc = [&](Node* scheduled, std::priority_queue<Node*, std::vector<Node*>, earlyCmp>* preReadyQueue)
+    {
+        for (auto& curSucc : scheduled->succs)
+        {
+            Node* succ = curSucc.getNode();
+            // Recompute the earliest time for each successor.
+            if (scheduled->isLabel())
+            {
+                succ->earliest = 0;
+            }
+            else
+            {
+                // Update the earliest time of the successor and set its last scheduled
+                // predecessor with the largest latency to the currently scheduled node
+                // if the latency incurred by scheduling the successor right after the
+                // "scheduled" node is larger than successor's earliest time.
+                uint32_t latencyToAdd = curSucc.getLatency();
+                uint32_t earliestNew = 0;
+                latencyToAdd = latencyToAdd > scheduled->getOccupancy() ? latencyToAdd : scheduled->getOccupancy();
+                earliestNew = scheduled->schedTime + latencyToAdd;
+
+                if (succ->earliest <= earliestNew || !succ->lastSchedPred)
+                {
+                    succ->lastSchedPred = scheduled;
+                }
+                succ->earliest = (succ->earliest > earliestNew) ? succ->earliest : earliestNew;
+            }
+            // Decrease the number of predecessors not scheduled for the successor node.
+            if ((--(succ->predsNotScheduled)) == 0)
+            {
+                preReadyQueue->push(succ);
+            }
+        }
+    };
 
     collectRoots();
     for (auto N : Roots) {
@@ -2494,6 +2787,75 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
                 }
             }
         }
+        // For write combine feature
+        else if (kernel->fg.builder->hasWriteCombine() &&
+            getOptions()->getOption(vISA_writeCombine) == true &&
+            scheduled && scheduled->getInstructions()->front()->opcode() == G4_mov &&
+            readyList.size() > 0)
+        {
+            windowWriteCombine block;
+            if (block.isWriteCombineCandidate(scheduled, schedule->getBB()))
+            {
+                block.push(scheduled);
+
+                const int searchSize = (int)readyList.size();
+
+                // build the write combine block from other nodes of readyList
+                for (int i = 0; i < searchSize; i++)
+                {
+                    Node* next = readyList.top();
+                    if (next->getInstructions()->size() == 1 && block.isWriteCombineCandidate(next, schedule->getBB()))
+                    {
+                        readyList.pop();
+                        block.push(next);
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                bool isBlockScheduled = false;
+                while (block.getInstList().size() > 1)
+                {
+                    if (block.isGoodBlock())
+                    {
+                        // add atomic to the instructions except for the last one in the block
+                        std::vector<Node*> instList = block.getInstList();
+                        for (size_t index = 0; index < instList.size() - 1; index++)
+                        {
+                            instList[index]->getInstructions()->front()->setOptionOn(InstOpt_Atomic);
+                        }
+
+                        // schedule together
+                        for (auto node : instList)
+                        {
+                            schedule->scheduledNodes.push_back(node);
+                            updateForSucc(node, &preReadyQueue);
+                            scheduled = node;
+                            scheduled->schedTime = currCycle;
+                            currCycle += scheduled->getOccupancy();
+                            lastScheduled = scheduled;
+                        }
+                        isBlockScheduled = true;
+                        break;
+                    }
+                    else // not a good block
+                    {
+                        // pop up the last node from block, and try to see if it is a good block
+                        Node* tmpNode = block.getInstList().back();
+                        block.pop();
+                        readyList.push(tmpNode);
+                        continue;
+                    }
+                }
+
+                if (isBlockScheduled)
+                {
+                    continue;
+                }
+            }
+        }
 
         assert(scheduled && "Must have found an instruction to schedule by now");
 
@@ -2504,37 +2866,7 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule)
         // Set the cycle at which this node is scheduled.
         scheduled->schedTime = currCycle;
 
-        for (auto &curSucc : scheduled->succs)
-        {
-            Node *succ = curSucc.getNode();
-            // Recompute the earliest time for each successor.
-            if (scheduled->isLabel())
-            {
-                succ->earliest = 0;
-            }
-            else
-            {
-                // Update the earliest time of the successor and set its last scheduled
-                // predecessor with the largest latency to the currently scheduled node
-                // if the latency incurred by scheduling the successor right after the
-                // "scheduled" node is larger than successor's earliest time.
-                uint32_t latencyToAdd = 0;
-                uint32_t earliestNew = 0;
-                latencyToAdd = curSucc.getLatency() > scheduled->getOccupancy() ? curSucc.getLatency() : scheduled->getOccupancy();
-                earliestNew = scheduled->schedTime + latencyToAdd;
-
-                if (succ->earliest <= earliestNew || !succ->lastSchedPred)
-                {
-                    succ->lastSchedPred = scheduled;
-                }
-                succ->earliest = (succ->earliest > earliestNew) ? succ->earliest : earliestNew;
-            }
-            // Decrease the number of predecessors not scheduled for the successor node.
-            if ((--(succ->predsNotScheduled)) == 0)
-            {
-                preReadyQueue.push(succ);
-            }
-        }
+        updateForSucc(scheduled, &preReadyQueue);
 
         // Increment the scheduler's clock after each scheduled node
         currCycle += scheduled->getOccupancy();
@@ -2799,6 +3131,7 @@ bool Node::hasConflict(Node* node2)
 
     //Get the sources of current instruction
     bool instSplit = false;
+    const IR_Builder& irb = inst1->getBuilder();
     for (int i = 0; i < inst1->getNumSrc(); i++)
     {
         prevInstRegs[0][i] = -1;
@@ -2814,11 +3147,11 @@ bool Node::hasConflict(Node* node2)
                 prevInstExecSize[i] = srcOpnd->getLinearizedEnd() - srcOpnd->getLinearizedStart() + 1;
                 if (baseVar->isGreg()) {
                     uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                    prevInstRegs[0][i] = byteAddress / numEltPerGRF<Type_UB>();
+                    prevInstRegs[0][i] = byteAddress / irb.numEltPerGRF<Type_UB>();
 
                     if (prevInstExecSize[i] > 32)
                     {
-                        prevInstRegs[1][i] = prevInstRegs[0][i] + (prevInstExecSize[i] + numEltPerGRF<Type_UB>() - 1) / numEltPerGRF<Type_UB>() - 1;
+                        prevInstRegs[1][i] = prevInstRegs[0][i] + (prevInstExecSize[i] + irb.numEltPerGRF<Type_UB>() - 1) / irb.numEltPerGRF<Type_UB>() - 1;
                         instSplit = true;
                     }
                     else
@@ -2870,7 +3203,7 @@ bool Node::hasConflict(Node* node2)
             G4_RegVar* baseVar = static_cast<G4_RegVar*>(srcOpnd->asSrcRegRegion()->getBase());
             if (baseVar->isGreg()) {
                 uint32_t byteAddress = srcOpnd->getLinearizedStart();
-                firstRegCandidate[candidateNum] = byteAddress / numEltPerGRF<Type_UB>();
+                firstRegCandidate[candidateNum] = byteAddress / irb.numEltPerGRF<Type_UB>();
                 candidateNum++;
             }
         }

@@ -12,6 +12,8 @@ SPDX-License-Identifier: MIT
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace IGCLLVM
 {
@@ -33,8 +35,27 @@ namespace IGCLLVM
         {
             return llvm::Module::getOrInsertFunction(Name, Ty, attributeList).getCallee();
         }
+
+        inline llvm::StructType* getTypeByName(llvm::StringRef Name)
+        {
+#if LLVM_VERSION_MAJOR < 12
+            return llvm::Module::getTypeByName(Name);
+#else
+            return llvm::StructType::getTypeByName(llvm::Module::getContext(), Name);
+#endif
+        }
+
     };
 #endif
+
+    inline llvm::StructType *getTypeByName(llvm::Module &M, llvm::StringRef Name)
+    {
+#if LLVM_VERSION_MAJOR < 12
+        return M.getTypeByName(Name);
+#else
+        return llvm::StructType::getTypeByName(M.getContext(), Name);
+#endif
+    }
 }
 
 #endif

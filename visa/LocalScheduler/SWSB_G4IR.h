@@ -19,6 +19,7 @@ SPDX-License-Identifier: MIT
 #include <vector>
 #include "../BitSet.h"
 #include "LocalScheduler_G4IR.h"
+#include <utility>
 
 namespace vISA
 {
@@ -29,15 +30,15 @@ namespace vISA
     class SWSB;
 }
 
-//FIXME, build a table for different plaforms
+//FIXME, build a table for different platforms
 #define SWSB_MAX_ALU_DEPENDENCE_DISTANCE 11
 #define SWSB_MAX_ALU_DEPENDENCE_DISTANCE_64BIT 15
 #define SWSB_MAX_MATH_DEPENDENCE_DISTANCE 18
 #define SWSB_MAX_ALU_DEPENDENCE_DISTANCE_VALUE 7u
 
-#define TOKEN_AFTER_WRITE_DPAS_CYCLE 28
 #define TOKEN_AFTER_READ_DPAS_CYCLE 8
 #define SWSB_MAX_DPAS_DEPENDENCE_DISTANCE 4
+#define FOUR_THREAD_TOKEN_NUM  32
 
 #define DEPENCENCE_ATTR(DO) \
     DO(DEP_EXPLICT) \
@@ -111,7 +112,7 @@ namespace vISA
     {
         GRF_T = 1,
         ACC_T = 2,
-        FLAG_T = 4
+        FLAG_T = 4,
     } FOOTPRINT_TYPE;
 
     struct SBFootprint {
@@ -137,25 +138,15 @@ namespace vISA
 
         bool hasOverlap(const SBFootprint *liveFootprint, unsigned short &internalOffset) const
         {
-            for (const SBFootprint *curFootprint2Ptr = liveFootprint; curFootprint2Ptr; curFootprint2Ptr = curFootprint2Ptr->next)
+            for (const SBFootprint *curFootprintPtr = this; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
             {
-                // Negative of no overlap: !(LeftB > curFootprint2Ptr->RightB || RightB < curFootprint2Ptr->LeftB)
-                if (fType == curFootprint2Ptr->fType &&
-                    LeftB <= curFootprint2Ptr->RightB && RightB >= curFootprint2Ptr->LeftB)
-                {
-                    internalOffset = curFootprint2Ptr->offset;
-                    return true;
-                }
-            }
-
-            //Overlap with other ranges.
-
-            for (const SBFootprint *curFootprintPtr = next; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
-            {
+                FOOTPRINT_TYPE curFType = curFootprintPtr->fType;
                 for (const SBFootprint *curFootprint2Ptr = liveFootprint; curFootprint2Ptr; curFootprint2Ptr = curFootprint2Ptr->next)
                 {
-                    if (fType == curFootprint2Ptr->fType &&
-                           curFootprintPtr->LeftB <= curFootprint2Ptr->RightB && curFootprintPtr->RightB >= curFootprint2Ptr->LeftB)
+                    // Negative of no overlap: !(LeftB > curFootprint2Ptr->RightB || RightB < curFootprint2Ptr->LeftB)
+                    if (curFType == curFootprint2Ptr->fType &&
+                        curFootprintPtr->LeftB <= curFootprint2Ptr->RightB &&
+                        curFootprintPtr->RightB >= curFootprint2Ptr->LeftB)
                     {
                         internalOffset = curFootprint2Ptr->offset;
                         return true;
@@ -166,26 +157,59 @@ namespace vISA
             return false;
         }
 
-        bool hasGRFGrainOverlap(const SBFootprint *liveFootprint) const
+        bool hasOverlap(const SBFootprint *liveFootprint, bool &isRMWOverlap, unsigned short &internalOffset) const
         {
-            for (const SBFootprint *curFootprint2Ptr = liveFootprint; curFootprint2Ptr; curFootprint2Ptr = curFootprint2Ptr->next)
+            //Overlap with other ranges.
+            for (const SBFootprint *curFootprintPtr = this; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
             {
-                if (fType == curFootprint2Ptr->fType &&
-                    ((LeftB / numEltPerGRF<Type_UB>()) <= (curFootprint2Ptr->RightB / numEltPerGRF<Type_UB>())) &&
-                    ((RightB / numEltPerGRF<Type_UB>()) >= (curFootprint2Ptr->LeftB / numEltPerGRF<Type_UB>())))
+                FOOTPRINT_TYPE curFType = curFootprintPtr->fType;
+                G4_Type curType = curFootprintPtr->type;
+                for (const SBFootprint *curFootprint2Ptr = liveFootprint; curFootprint2Ptr; curFootprint2Ptr = curFootprint2Ptr->next)
                 {
-                    return true;
+                    // Negative of no overlap: !(LeftB > curFootprint2Ptr->RightB || RightB < curFootprint2Ptr->LeftB)
+                    if (curFType == curFootprint2Ptr->fType)
+                    {
+                        if (curFootprintPtr->LeftB <= curFootprint2Ptr->RightB && curFootprintPtr->RightB >= curFootprint2Ptr->LeftB)
+                        {
+                            internalOffset = curFootprint2Ptr->offset;
+                            if (curFType == GRF_T && IS_BTYPE(curType))
+                            {
+                                isRMWOverlap = true;
+                            }
+                            return true;
+                        }
+                        else if (curFType == GRF_T && IS_BTYPE(curType))
+                        {
+                            unsigned short w_LeftB = curFootprintPtr->LeftB / 2;
+                            unsigned short w_RightB = curFootprintPtr->RightB / 2;
+                            unsigned short w_curLeftB = curFootprint2Ptr->LeftB / 2;
+                            unsigned short w_curRightB = curFootprint2Ptr->RightB / 2;
+                            if (w_LeftB <= w_curRightB && w_RightB >= w_curLeftB)
+                            {
+                                isRMWOverlap = true;
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
 
-            //Overlap with other ranges.
-            for (const SBFootprint *curFootprintPtr = next; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
+            return false;
+        }
+
+        bool hasGRFGrainOverlap(const SBFootprint *liveFootprint) const
+        {
+            assert(inst != nullptr);
+            const IR_Builder& irb = inst->getBuilder();
+            for (const SBFootprint *curFootprintPtr = this; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
             {
+                FOOTPRINT_TYPE curFType = curFootprintPtr->fType;
+                assert(fType == curFType);
                 for (const SBFootprint *curFootprint2Ptr = liveFootprint; curFootprint2Ptr; curFootprint2Ptr = curFootprint2Ptr->next)
                 {
-                    if (fType == curFootprint2Ptr->fType &&
-                        ((curFootprintPtr->LeftB  / numEltPerGRF<Type_UB>()) <= (curFootprint2Ptr->RightB  / numEltPerGRF<Type_UB>())) &&
-                        ((curFootprintPtr->RightB  / numEltPerGRF<Type_UB>()) >= (curFootprint2Ptr->LeftB  / numEltPerGRF<Type_UB>())))
+                    if (curFType == curFootprint2Ptr->fType &&
+                        ((curFootprintPtr->LeftB  / irb.numEltPerGRF<Type_UB>()) <= (curFootprint2Ptr->RightB  / irb.numEltPerGRF<Type_UB>())) &&
+                        ((curFootprintPtr->RightB  / irb.numEltPerGRF<Type_UB>()) >= (curFootprint2Ptr->LeftB  / irb.numEltPerGRF<Type_UB>())))
                     {
                         return true;
                     }
@@ -214,7 +238,8 @@ namespace vISA
                 }
                 for (const SBFootprint *curFootprintPtr = next; curFootprintPtr; curFootprintPtr = curFootprintPtr->next)
                 {
-                    if (fType == footprint2Ptr->fType &&
+                    FOOTPRINT_TYPE curFType = curFootprintPtr->fType;
+                    if (curFType == footprint2Ptr->fType &&
                             curFootprintPtr->LeftB <= footprint2Ptr->LeftB && curFootprintPtr->RightB >= footprint2Ptr->RightB)
                     {
                         findOverlap = true;
@@ -234,8 +259,8 @@ namespace vISA
     };
 
     // Bit set which is used for global dependence analysis for SBID.
-    // Since dependencies may come from dst and src and there may be dependence kill between dst and src depencencies,
-    // we use internal bit set to track the live of dst and src seperately.
+    // Since dependencies may come from dst and src and there may be dependence kill between dst and src dependencies,
+    // we use internal bit set to track the live of dst and src separately.
     // Each bit map to one global SBID node according to the node's global ID.
     struct SBBitSets {
         BitSet dst;
@@ -353,6 +378,7 @@ namespace vISA
         bool          hasAR = false;      // Used for global analysis, if has AR (WAR) dependencies from the node
         bool          hasFollowDistOneAReg = false;
         bool          followDistOneAReg = false;
+        unsigned depDelay = 0;
 
         struct DepToken {
             unsigned short token;
@@ -427,6 +453,8 @@ namespace vISA
         G4_INST*  GetInstruction() const { return instVec.front(); }
         void addInstruction(G4_INST *i) { instVec.push_back(i); }
         G4_INST*  getLastInstruction() const { return instVec.back(); }
+        void setDepDelay(unsigned val) { depDelay = val; }
+        unsigned getDepDelay() const { return depDelay; }
 
         int getALUID() const { return ALUID; }
         unsigned getNodeID() const { return nodeID; };
@@ -451,7 +479,7 @@ namespace vISA
         unsigned getLiveStartBBID() const { return liveStartBBID; }
         unsigned getLiveEndBBID() const { return liveEndBBID; }
 
-        void setLiveEarliesID(unsigned id, unsigned startBBID)
+        void setLiveEarliestID(unsigned id, unsigned startBBID)
         {
             if (!liveStartID)
             {
@@ -478,7 +506,7 @@ namespace vISA
             }
         }
 
-        void setLiveEarliesID(unsigned id)
+        void setLiveEarliestID(unsigned id)
         {
             liveStartID = id;
         }
@@ -558,18 +586,6 @@ namespace vISA
             return footprints[opndNum];
         }
 
-        const SBFootprint *getFootprint(Gen4_Operand_Number opndNum, const G4_INST *inst) const
-        {
-            for (const SBFootprint *sbFp = footprints[opndNum]; ; sbFp = sbFp->next)
-            {
-                assert((sbFp != nullptr) && "footprint not found");
-                if (sbFp->inst == inst)
-                {
-                    return sbFp;
-                }
-            }
-        }
-
         void setDistance(unsigned distance)
         {
             distance = std::min(distance, SWSB_MAX_ALU_DEPENDENCE_DISTANCE_VALUE);
@@ -606,99 +622,8 @@ namespace vISA
             }
         }
 
-        //If depends on multiple different ALU pipelines
-        //    If all operands type matching the ALU pipelines --> regDist
-        //    otherwise --> regDistAll
-        //If depends on single different ALU pipeline and other same ALU pipelines.
-        //    If all operands type matching the ALU pipelines --> regDist
-        //    otherwise --> regDistAll
-        //If depends on multiple same ALU pipelines
-        //    If all operands type matching the ALU pipeline --> accurate/regDist
-        //    otherwise--> accurate
-        //If depends on single ALU pipeline
-        //    If operands type matching the ALU pipeline --> accurate/regDist
-        //    otherwise--> accurate
-        //
-        //Note that:
-        // 1. one instruction can have multiple operands.
-        // 2. instruction belongs to single pipeline
-        void finalizeDistanceType(IR_Builder& builder)
-        {
-            if (instVec.front()->getDistanceTypeXe() != G4_INST::DistanceType::DIST_NONE)
-            {  //Forced to a type already
-                return;
-            }
-
-            if (builder.loadThreadPayload() && nodeID <= 8 &&
-                  GetInstruction()->isSend() && distDep.size())
-            {
-                instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
-                return;
-            }
-            if (distDep.size())
-            {
-                 SB_INST_PIPE depPipe = PIPE_NONE;
-                 bool sameOperandType = true;
-                 int diffPipes = 0;
-
-                 //Check if there is type conversion
-                 for (const SBDISTDEP_ITEM& it : distDep)
-                 {
-                     if (it.operandType != it.liveNodePipe)
-                     {
-                         sameOperandType = false;
-                     }
-                     if (it.liveNodePipe != it.nodePipe) //different pipe instructions
-                     {
-                         diffPipes++;
-                         depPipe = it.liveNodePipe;
-                     }
-                 }
-
-                 instVec.front()->setOperandTypeIndicated(sameOperandType);
-
-                 if (distDep.size() > 1)
-                 {
-                     if (diffPipes) //has different dependent pipeline
-                     {
-                         if (sameOperandType)
-                         {
-                             assert(!GetInstruction()->isSend());
-                             if (GetInstruction()->isDpas())
-                             {
-                                 setAccurateDistType(depPipe);
-                                 instVec.front()->setOperandTypeIndicated(false); //DPAS distance will be in sync inst
-                             }
-                             else //For math and other ALU instructions
-                             {
-                                 instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
-                             }
-                         }
-                         else
-                         {
-                             instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
-                             instVec.front()->setOperandTypeIndicated(false);
-                         }
-                     }
-                     else
-                     {
-                         setAccurateDistType(ALUPipe);
-                     }
-                 }
-                 else
-                 {
-                     if (depPipe != PIPE_NONE)
-                     {
-                         setAccurateDistType(depPipe);
-                     }
-                     else
-                     {
-                         setAccurateDistType(ALUPipe);
-                     }
-                 }
-            }
-        }
-
+        //This is to reduce the sync instructions.
+        //When A@1 is used to replace I@1, make sure it will not cause the stall for float or long pipelines
         bool isClosedALUType(std::vector<unsigned>** latestInstID, unsigned distance, SB_INST_PIPE type)
         {
             int instDist = SWSB_MAX_MATH_DEPENDENCE_DISTANCE;
@@ -739,7 +664,7 @@ namespace vISA
             return type == curType;
         }
 
-        void finalizeDistanceType1(IR_Builder& builder, std::vector<unsigned> **latestInstID)
+        void finalizeDistanceType1(IR_Builder& builder, std::vector<unsigned>** latestInstID)
         {
             if (instVec.front()->getDistanceTypeXe() != G4_INST::DistanceType::DIST_NONE)
             {  //Forced to a type already
@@ -753,12 +678,27 @@ namespace vISA
                 return;
             }
 
+            if (builder.hasA0WARHWissue() && builder.hasFourALUPipes())
+            {
+                G4_INST* inst = GetInstruction();
+
+                if (inst->getDst() && inst->getDst()->isA0())
+                {
+                    instVec.front()->setDistance(1);
+                    instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
+
+                    return;
+                }
+            }
+
             unsigned curDistance = (unsigned)instVec.front()->getDistance();
             if (distDep.size())
             {
                 SB_INST_PIPE depPipe = PIPE_NONE;
+                SB_INST_PIPE sameOpndTypeDepPipe = PIPE_NONE;
                 bool sameOperandType = true;
                 int diffPipes = 0;
+                bool depLongPipe = false;
 
                 //Check if there is type conversion
                 for (int i = 0; i < (int)(distDep.size()); i++)
@@ -781,13 +721,48 @@ namespace vISA
                         diffPipes++;
                         depPipe = it.liveNodePipe;
                     }
+
+                    depLongPipe = it.liveNodePipe == PIPE_LONG;
                 }
 
+                //In some platforms, A@ need be used for following case when the regDist cannot be used (due to HW issue), and inst depends on different pipes
+                //mov(8 | M0)               r63.0 < 2 > :ud   r15.0 < 1; 1, 0 > : ud{ I@7 }
+                //...
+                //add(8 | M0)               r95.0 < 1 > : q    r87.0 < 1; 1, 0 > : q    r10.0 < 0; 1, 0 > : q{ I@7 }
+                //...
+                //add(8 | M0)               r55.0 < 2 > : d    r95.0 < 1; 1, 0 > : q    r63.0 < 2; 1, 0 > : ud{ A@4 }
+                //In some platforms I@ accurate dependence can used for following case when the regDist cannot be used (due to HW issue), because inst depends on same pipe
+                //The example code piece :
+                //mov(16 | M0) r88.0 < 2 > : d r84.0 < 1; 1, 0 > : d{ F@2 } // $79&103
+                //mov(16 | M16) r90.0 < 2 > : d r85.0 < 1; 1, 0 > : d // $80&104
+                //mov(16 | M0) r88.1 < 2 > : d r86.0 < 1; 1, 0 > : d{ F@1 } // $81&105
+                //mov(16 | M16) r90.1 < 2 > : d r87.0 < 1; 1, 0 > : d // $82&106
+                //mov(16 | M0) r32.0 < 1 > : df r88.0 < 1; 1, 0 > : q{ @2/I@2 } // $83&107
+                //Since:q and : d all go to integer pipeline in, @2 should work.However, due to HW bug, I@2 is good
+                bool mulitpleSamePipe = false;
+                if (distDep.size() > 1 && sameOperandType)
+                {
+                    sameOpndTypeDepPipe = distDep[0].liveNodePipe;
+                    for (int i = 1; i < (int)(distDep.size()); i++)
+                    {
+                        SBDISTDEP_ITEM& it = distDep[i];
+
+                        if (it.liveNodePipe != sameOpndTypeDepPipe)
+                        {
+                            mulitpleSamePipe = true;
+                        }
+                    }
+                }
+
+                if (builder.hasLongOperandTypeDepIssue() && depLongPipe)
+                {
+                    sameOperandType = false;
+                }
 
                 if (!builder.getOptions()->getOption(vISA_disableRegDistDep) &&
                     !builder.hasRegDistDepIssue())
                 {
-                instVec.front()->setOperandTypeIndicated(sameOperandType);
+                    instVec.front()->setOperandTypeIndicated(sameOperandType);
                 }
 
                 //Multiple dependences
@@ -798,16 +773,15 @@ namespace vISA
                         if (sameOperandType) //But the operand type is from same instruction pipeline.
                         {
                             assert(!GetInstruction()->isSend()); //Send operand has no type, sameOperandType is always false
-
-                            if (GetInstruction()->isDpas()) //For DPAS, we also put the distance dependence into a sync instruction.
-                            {
-                                setAccurateDistType(depPipe);
-                                instVec.front()->setOperandTypeIndicated(false); //DPAS distance will be in sync inst
-                            }
-                            else //For math and other ALU instructions
+                            if (mulitpleSamePipe)
                             {
                                 instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
                             }
+                            else
+                            {
+                                setAccurateDistType(depPipe);
+                            }
+                            instVec.front()->setOperandTypeIndicated(false); //DPAS distance will be in sync inst
                         }
                         else // For send, we will set it to DISTALL if there are multiple dependences. For non-send, DIST
                         {
@@ -819,6 +793,170 @@ namespace vISA
                     {
                         setAccurateDistType(ALUPipe);
                         instVec.front()->setIsClosestALUType(isClosedALUType(latestInstID, curDistance, ALUPipe));
+                    }
+                }
+                else //Only one dependency
+                {
+                    if (depPipe != PIPE_NONE) // From different pipeline
+                    {
+                        setAccurateDistType(depPipe);
+                        if (sameOperandType || GetInstruction()->isSend())
+                        {
+                            instVec.front()->setIsClosestALUType(isClosedALUType(latestInstID, curDistance, depPipe));
+                        }
+                    }
+                    else // From same pipeline
+                    {
+                        setAccurateDistType(ALUPipe);
+                        if (sameOperandType)
+                        {
+                            instVec.front()->setIsClosestALUType(isClosedALUType(latestInstID, curDistance, ALUPipe));
+                        }
+                    }
+                }
+            }
+        }
+
+        void finalizeDistanceType2(IR_Builder& builder, std::vector<unsigned> **latestInstID)
+        {
+            if (instVec.front()->getDistanceTypeXe() != G4_INST::DistanceType::DIST_NONE)
+            {  //Forced to a type already
+                return;
+            }
+
+            if (builder.loadThreadPayload() && nodeID <= 8 &&
+                GetInstruction()->isSend() && distDep.size())
+            {
+                instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
+                return;
+            }
+
+            if (builder.hasA0WARHWissue() && builder.hasFourALUPipes())
+            {
+                G4_INST* inst = GetInstruction();
+
+                if (inst->getDst() && inst->getDst()->isA0())
+                {
+                    instVec.front()->setDistance(1);
+                    instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
+
+                    return;
+                }
+            }
+
+            unsigned curDistance = (unsigned)instVec.front()->getDistance();
+            if (distDep.size())
+            {
+                SB_INST_PIPE depPipe = PIPE_NONE;
+                SB_INST_PIPE sameOpndTypeDepPipe = PIPE_NONE;
+                bool sameOperandType = true;
+                bool depSamePipe = true;
+                bool depLongPipe = false;
+
+                //Check the potential to use regDist
+                for (int i = 0; i < (int)(distDep.size()); i++)
+                {
+                    SBDISTDEP_ITEM& it = distDep[i];
+
+                    //For regDist, the operand type is same as pipeline type of dependent instruction
+                    if (it.operandType != it.liveNodePipe || it.dstDep)
+                    {
+                        sameOperandType = false;
+                    }
+                }
+
+                //If the dependent instructions belong to different pipelines
+                for (int i = 0; i < (int)(distDep.size()); i++)
+                {
+                    SBDISTDEP_ITEM& it = distDep[i];
+
+                    if (it.liveNodePipe != it.nodePipe)
+                    {
+                        depSamePipe = false; //Current instruction and dependence instruction belong to different pipeline
+                    }
+
+                    if (depPipe == PIPE_NONE)
+                    {
+                        depPipe = it.liveNodePipe;
+                    }
+
+                    depLongPipe = it.liveNodePipe == PIPE_LONG;
+                }
+
+                //In some platforms, A@ need be used for following case when the regDist cannot be used (due to HW issue), and inst depends on different pipes
+                //mov(8 | M0)               r63.0 < 2 > :ud   r15.0 < 1; 1, 0 > : ud{ I@7 }
+                //...
+                //add(8 | M0)               r95.0 < 1 > : q    r87.0 < 1; 1, 0 > : q    r10.0 < 0; 1, 0 > : q{ I@7 }
+                //...
+                //add(8 | M0)               r55.0 < 2 > : d    r95.0 < 1; 1, 0 > : q    r63.0 < 2; 1, 0 > : ud{ A@4 }
+                //In some platforms I@ accurate dependence can used for following case when the regDist cannot be used (due to HW issue), because inst depends on same pipe
+                //The example code piece :
+                //mov(16 | M0) r88.0 < 2 > : d r84.0 < 1; 1, 0 > : d{ F@2 } // $79&103
+                //mov(16 | M16) r90.0 < 2 > : d r85.0 < 1; 1, 0 > : d // $80&104
+                //mov(16 | M0) r88.1 < 2 > : d r86.0 < 1; 1, 0 > : d{ F@1 } // $81&105
+                //mov(16 | M16) r90.1 < 2 > : d r87.0 < 1; 1, 0 > : d // $82&106
+                //mov(16 | M0) r32.0 < 1 > : df r88.0 < 1; 1, 0 > : q{ @2/I@2 } // $83&107
+                //Since:q and : d all go to integer pipeline in, @2 should work.However, due to HW bug, we can only set to I@2
+                //Depends on multiple pipelines but same pipeline
+                bool mulitpleSamePipe = true;
+                if (distDep.size() > 1)
+                {
+                    sameOpndTypeDepPipe = distDep[0].liveNodePipe;
+                    for (int i = 1; i < (int)(distDep.size()); i++)
+                    {
+                        SBDISTDEP_ITEM& it = distDep[i];
+
+                        if (it.liveNodePipe != sameOpndTypeDepPipe)
+                        {
+                            mulitpleSamePipe = false;
+                        }
+                    }
+                }
+
+                if (builder.hasLongOperandTypeDepIssue() && depLongPipe)
+                {
+                    sameOperandType = false;
+                }
+
+                if (!builder.getOptions()->getOption(vISA_disableRegDistDep) &&
+                    !builder.hasRegDistDepIssue())
+                {
+                    instVec.front()->setOperandTypeIndicated(sameOperandType);
+                }
+
+                //Multiple dependences
+                if (distDep.size() > 1)
+                {
+                    if (!depSamePipe) //Dependent instruction and current instruction belong to different ALU pipelines.
+                    {
+                        if (sameOperandType) //But the operand type and dependence instruction are from same instruction pipeline.
+                        {
+                            assert(!GetInstruction()->isSend()); //Send operand has no type, sameOperandType is always false
+                            if (mulitpleSamePipe)
+                            {
+                                setAccurateDistType(depPipe);
+                            }
+                            else
+                            {
+                                instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
+                            }
+                            instVec.front()->setOperandTypeIndicated(false); //DPAS distance will be in sync inst
+                        }
+                        else if (mulitpleSamePipe)
+                        {
+                            setAccurateDistType(depPipe);
+                            instVec.front()->setOperandTypeIndicated(false);
+                        }
+                        else // set to DISTALL
+                        {
+                            instVec.front()->setDistanceTypeXe(G4_INST::DistanceType::DISTALL);
+                            instVec.front()->setOperandTypeIndicated(false);
+                        }
+                    }
+                    else //From same pipeline
+                    {
+                        setAccurateDistType(depPipe);
+                        instVec.front()->setIsClosestALUType(isClosedALUType(latestInstID, curDistance, depPipe));
                     }
                 }
                 else //Only one dependency
@@ -929,14 +1067,13 @@ typedef std::list<vISA::SBNode*>::iterator     SBNODE_LIST_ITER;
 namespace vISA
 {
     //Similar as SBBucketNode, but it's used for the bucket descriptions got from each operands.
-    struct SBBucketDescr {
+    struct SBBucketDesc {
         const int bucket;
         const Gen4_Operand_Number opndNum;
-        SBNode* const node;
-        G4_INST* const inst;
+        const SBFootprint* footprint;
 
-        SBBucketDescr(int Bucket, Gen4_Operand_Number opnd_num, SBNode *sNode, G4_INST *i)
-            : bucket(Bucket), opndNum(opnd_num), inst(i), node(sNode) {
+        SBBucketDesc(int Bucket, Gen4_Operand_Number opnd_num, const SBFootprint *f)
+            : bucket(Bucket), opndNum(opnd_num), footprint(f) {
             ;
         }
     };
@@ -947,10 +1084,10 @@ namespace vISA
         SBNode*             node;
         Gen4_Operand_Number opndNum;
         int                 sendID = -1;
-        G4_INST*            inst;
+        const SBFootprint*  footprint;
 
-        SBBucketNode(SBNode *node1, Gen4_Operand_Number opndNum1, G4_INST *i)
-            : node(node1), opndNum(opndNum1), inst(i)
+        SBBucketNode(SBNode *node1, Gen4_Operand_Number opndNum1, const SBFootprint *f)
+            : node(node1), opndNum(opndNum1), footprint(f)
         {
         }
 
@@ -981,13 +1118,12 @@ namespace vISA
     class LiveGRFBuckets
     {
         std::vector<SBBUCKET_VECTOR *> nodeBucketsArray;
-        G4_Kernel &k;
         vISA::Mem_Manager &mem;
         const int numOfBuckets;
 
     public:
-        LiveGRFBuckets(vISA::Mem_Manager& m, int TOTAL_BUCKETS, G4_Kernel& k)
-            : nodeBucketsArray(TOTAL_BUCKETS), k(k), mem(m), numOfBuckets(TOTAL_BUCKETS)
+        LiveGRFBuckets(vISA::Mem_Manager& m, int TOTAL_BUCKETS)
+            : nodeBucketsArray(TOTAL_BUCKETS), mem(m), numOfBuckets(TOTAL_BUCKETS)
         {
             // Initialize a vector for each bucket
             for (auto& bucket : nodeBucketsArray)
@@ -1088,8 +1224,8 @@ namespace vISA
             else
             {
                 //Current node is assigned with the last one
-                //For caller, same iterator postion need be handled again,
-                //Beause a new node is copied here
+                //For caller, same iterator position need be handled again,
+                //Because a new node is copied here
                 *node_it = vec.back();
                 vec.pop_back();
             }
@@ -1100,8 +1236,7 @@ namespace vISA
         {
             SBBUCKET_VECTOR &vec = *nodeBucketsArray[bn_it.bucket];
             SBBUCKET_VECTOR_ITER &node_it = bn_it.node_it;
-            SBBucketNode *bucketNode = *node_it; //Get the node before it is destroied
-            int aregOffset = k.getNumRegTotal();
+            SBBucketNode *bucketNode = *node_it; //Get the node before it is destroyed
 
             //Kill current node
             if (*node_it == vec.back())
@@ -1112,7 +1247,7 @@ namespace vISA
             else
             {
                 //Current node is assigned with the last one
-                //For caller, same iterator postion need be handled again,
+                //For caller, same iterator position need be handled again,
                 //Because a new node is copied here
                 *node_it = vec.back();
                 vec.pop_back();
@@ -1121,15 +1256,12 @@ namespace vISA
             //Kill the same node in other bucket.
             for (const SBFootprint *footprint = bucketNode->node->getFirstFootprint(bucketNode->opndNum); footprint; footprint = footprint->next)
             {
-                unsigned int startBucket = footprint->LeftB / numEltPerGRF<Type_UB>();
-                unsigned int endBucket = footprint->RightB / numEltPerGRF<Type_UB>();
-                if (footprint->fType == ACC_T)
-                {
-                    startBucket = startBucket + aregOffset;
-                    endBucket = endBucket + aregOffset;
-                }
+                assert(footprint->inst != nullptr);
+                const IR_Builder& irb = footprint->inst->getBuilder();
+                unsigned int startBucket = footprint->LeftB / irb.numEltPerGRF<Type_UB>();
+                unsigned int endBucket = footprint->RightB / irb.numEltPerGRF<Type_UB>();
 
-                if (footprint->inst == bucketNode->inst)
+                if (footprint->inst == bucketNode->footprint->inst)
                 {
                     for (unsigned int i = startBucket; (i < endBucket + 1) && (i < nodeBucketsArray.size()); i++)
                     {
@@ -1200,6 +1332,7 @@ namespace vISA
 
     class G4_BB_SB {
     private:
+        const SWSB& swsb;
         IR_Builder& builder;
         vISA::Mem_Manager &mem;
         G4_BB             *bb;
@@ -1218,6 +1351,7 @@ namespace vISA
         std::vector<unsigned> *latestInstID[PIPE_DPAS];
 
         int totalGRFNum;
+        int tokenAfterDPASCycle;
 
     public:
         LiveGRFBuckets *send_use_kills;
@@ -1264,10 +1398,10 @@ namespace vISA
         SBBitSets localReachingSends;
 
         //BB local data dependence analysis
-        G4_BB_SB(IR_Builder& b, Mem_Manager &m, G4_BB *block, SBNODE_VECT *SBNodes, SBNODE_VECT* SBSendNodes,
+        G4_BB_SB(const SWSB& sb, IR_Builder& b, Mem_Manager &m, G4_BB *block, SBNODE_VECT *SBNodes, SBNODE_VECT* SBSendNodes,
             SBBUCKET_VECTOR *globalSendOpndList,  SWSB_INDEXES *indexes, uint32_t &globalSendNum, LiveGRFBuckets *lb,
             LiveGRFBuckets *globalLB, PointsToAnalysis& p,
-            std::map<G4_Label*, G4_BB_SB*> *LabelToBlockMap) : builder(b), mem(m), bb(block)
+            std::map<G4_Label*, G4_BB_SB*> *LabelToBlockMap, const unsigned dpasLatency) : swsb(sb), builder(b), mem(m), bb(block), tokenAfterDPASCycle(dpasLatency)
         {
             for (int i = 0; i < PIPE_DPAS; i++)
             {
@@ -1290,7 +1424,6 @@ namespace vISA
         static bool isGRFEdgeAdded(const SBNode* pred, const SBNode* succ, DepType d, SBDependenceAttr a);
         void createAddGRFEdge(SBNode* pred, SBNode* succ, DepType d, SBDependenceAttr a);
 
-        SB_INST_PIPE getDataTypePipeXe(G4_Type type);
         //Bucket and range analysis
         SBFootprint* getFootprintForGRF(G4_Operand * opnd,
             Gen4_Operand_Number opnd_num,
@@ -1313,7 +1446,7 @@ namespace vISA
             G4_INST *inst,
             G4_Operand* opnd,
             Gen4_Operand_Number opnd_num);
-        void getGRFBuckets(SBNode* node, const SBFootprint* footprint, Gen4_Operand_Number opndNum, std::vector<SBBucketDescr>& BDvec, bool GRFOnly);
+        void getGRFBuckets(const SBFootprint* footprint, Gen4_Operand_Number opndNum, std::vector<SBBucketDesc>& BDvec, bool GRFOnly);
         bool getGRFFootPrintOperands(SBNode *node,
             G4_INST *inst,
             Gen4_Operand_Number first_opnd,
@@ -1326,16 +1459,19 @@ namespace vISA
         void getGRFBucketsForOperands(SBNode *node,
             Gen4_Operand_Number first_opnd,
             Gen4_Operand_Number last_opnd,
-            std::vector<SBBucketDescr>& BDvec,
+            std::vector<SBBucketDesc>& BDvec,
             bool GRFOnly);
+
+        bool hasIndirectSource(SBNode* node);
 
         bool getGRFFootPrint(SBNode *node,
             PointsToAnalysis &p);
 
-        void getGRFBucketDescrs(SBNode *node,
-            std::vector<SBBucketDescr>& BDvec,
+        void getGRFBucketDescs(SBNode *node,
+            std::vector<SBBucketDesc>& BDvec,
             bool GRFOnly);
 
+        void clearSLMWARWAissue(SBNode* curNode, LiveGRFBuckets* LB);
 
         void setDistance(const SBFootprint * footprint, SBNode *node, SBNode *liveNode, bool dstDep);
         void setSpecialDistance(SBNode* node);
@@ -1343,8 +1479,9 @@ namespace vISA
 
         void pushItemToQueue(std::vector<unsigned>* nodeIDQueue, unsigned nodeID);
 
-        bool isDummyCselInst(SBNode* node);
+        bool hasInternalDependence(SBNode* nodeFirst, SBNode* nodeNext);
 
+        bool is2xDPBlockCandidate(G4_INST* inst, bool accDST);
         //Local distance dependence analysis and assignment
         void SBDDD(G4_BB* bb,
             LiveGRFBuckets* &LB,
@@ -1364,9 +1501,11 @@ namespace vISA
         void addGlobalDependence(unsigned globalSendNum, SBBUCKET_VECTOR *globalSendOpndList, SBNODE_VECT *SBNodes, PointsToAnalysis &p, bool afterWrite);
         void clearKilledBucketNodeXeLP(LiveGRFBuckets * LB, int ALUID);
 
-        void clearKilledBucketNodeXeHP(LiveGRFBuckets *LB, int integerID, int floatID, int longID, int mathID);
+        void clearKilledBucketNodeXeHP(LiveGRFBuckets* LB, int integerID, int floatID, int longID, int mathID);
+
         bool hasInternalDependenceWithinDPAS(SBNode *node);
         bool hasDependenceBetweenDPASNodes(SBNode * node, SBNode * nextNode);
+        bool src2FootPrintCachePVC(SBNode* curNode, SBNode* nextNode) const;
         bool src2SameFootPrintDiffType(SBNode* curNode, SBNode* nextNode) const;
         bool isLastDpas(SBNode * curNode, SBNode * nextNode);
 
@@ -1484,6 +1623,7 @@ namespace vISA
         const unsigned tokenAfterWriteSendSlmCycle;
         const unsigned tokenAfterWriteSendMemoryCycle;
         const unsigned tokenAfterWriteSendSamplerCycle;
+        int tokenAfterDPASCycle;
 
         //For profiling
         uint32_t syncInstCount = 0;
@@ -1504,11 +1644,25 @@ namespace vISA
         std::vector<SBNODE_VECT *> reachUseArray;
         SBNODE_VECT localTokenUsage;
 
-        std::vector<const SBNode*> sameTokenNodes[32];
         int topIndex = -1;
 
         std::map<G4_Label*, G4_BB_SB*> labelToBlockMap;
-        std::vector<BitSet> allTokenNodesMap;
+
+        // TokenAllocation uses a BitSet to track nodes assigned by marking the
+        // send IDs of nodes, so that it's possible to get a SBNode using the
+        // send ID to index into SBSendNodes.
+        // Also add a filed to record the max send ID being assigned.
+        struct TokenAllocation
+        {
+            BitSet bitset;
+            int maxSendID = 0;
+            void set(int sendID)
+            {
+                bitset.set(sendID, true);
+                maxSendID = std::max(sendID, maxSendID);
+            }
+        };
+        std::vector<TokenAllocation> allTokenNodesMap;
         SWSB_TOKEN_PROFILE tokenProfile;
 
         //Global dependence analysis
@@ -1532,9 +1686,8 @@ namespace vISA
         void expireIntervals(unsigned startID);
         void addToLiveList(SBNode *node);
 
-        void examineNodeForTokenReuse(/* out */ int &reuseDelay, /* out */ int &curDistance, unsigned nodeID, unsigned nodeDelay, const SBNode *curNode, unsigned char nestLoopLevel, unsigned curLoopStartBB, unsigned curLoopEndBB) const;
+        std::pair<int /*reuseDelay*/, int /*curDistance*/> examineNodeForTokenReuse(unsigned nodeID, unsigned nodeDelay, const SBNode *curNode, unsigned char nestLoopLevel, unsigned curLoopStartBB, unsigned curLoopEndBB) const;
         SBNode * reuseTokenSelection(const SBNode * node) const;
-        unsigned getDepDelay(const SBNode *node) const;
         unsigned short reuseTokenSelectionGlobal(SBNode* node, G4_BB* bb, SBNode*& candidateNode, bool& fromUse);
         void addReachingDefineSet(SBNode* node, SBBitSets* globalLiveSet, SBBitSets* localLiveSet);
         void addReachingUseSet(SBNode* node, SBNode* use);
@@ -1557,6 +1710,8 @@ namespace vISA
         void assignToken(SBNode *node, unsigned short token, uint32_t &AWTokenReuseCount, uint32_t &ARTokenReuseCount, uint32_t &AATokenReuseCount);
         void assignDepToken(SBNode *node);
         void assignDepTokens();
+        bool insertSyncTokenPVC(G4_BB * bb, SBNode * node, G4_INST * inst, INST_LIST_ITER inst_it, int newInstID, BitSet * dstTokens, BitSet * srcTokens, bool removeAllToken);
+        bool insertSyncPVC(G4_BB * bb, SBNode * node, G4_INST * inst, INST_LIST_ITER inst_it, int newInstID, BitSet * dstTokens, BitSet * srcTokens);
         bool insertSyncXe(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens);
         void insertSync(G4_BB* bb, SBNode* node, G4_INST* inst, INST_LIST_ITER inst_it, int newInstID, BitSet* dstTokens, BitSet* srcTokens);
         void insertTest();
@@ -1622,7 +1777,8 @@ namespace vISA
             indexes.longIndex = 0;
             indexes.DPASIndex = 0;
             indexes.mathIndex = 0;
-
+            LatencyTable LT(k.fg.builder);
+            tokenAfterDPASCycle = LT.getDPAS8x8Latency();
         }
         ~SWSB()
         {
@@ -1643,6 +1799,7 @@ namespace vISA
             }
         }
         void SWSBGenerator();
+        unsigned calcDepDelayForNode(const SBNode *node) const;
     };
 }
 #endif // _SWSB_H_

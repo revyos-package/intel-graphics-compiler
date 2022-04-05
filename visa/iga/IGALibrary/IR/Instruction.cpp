@@ -104,13 +104,14 @@ void Instruction::setMacroSource(
 void Instruction::setInidirectSource(
     SourceIndex srcIx,
     SrcModifier srcMod,
+    RegName regName,
     RegRef reg,
     int16_t immediateOffset,
     Region rgn,
     Type type)
 {
     unsigned ix = static_cast<unsigned>(srcIx);
-    m_srcs[ix].setInidirectSource(srcMod, reg, immediateOffset, rgn, type);
+    m_srcs[ix].setInidirectSource(srcMod, regName, reg, immediateOffset, rgn, type);
 }
 
 
@@ -178,11 +179,27 @@ bool Instruction::isMacro() const {
     return is(Op::MADM) || (is(Op::MATH) && IsMacro(m_sf.math));
 }
 
+bool Instruction::isDF() const {
+    auto isDPType = [](Type ty) {
+        return TypeIs64b(ty) && TypeIsFloating(ty);
+    };
+    if (m_dst.getType() != Type::INVALID)
+        if (isDPType(m_dst.getType()))
+            return true;
+    for (size_t i = 0; i < getSourceCount(); ++i) {
+        if (m_srcs[i].getType() != Type::INVALID) {
+            if (isDPType(m_srcs[i].getType()))
+                return true;
+        }
+    }
+    return false;
+}
 
 bool Instruction::isMovWithLabel() const {
     return (getOp() == Op::MOV &&
         getSource(0).getKind() == Operand::Kind::LABEL);
 }
+
 
 void Instruction::validate() const
 {

@@ -37,6 +37,7 @@ SPDX-License-Identifier: MIT
 #include "vc/GenXOpts/GenXOpts.h"
 #include "vc/Utils/GenX/Printf.h"
 #include "vc/Utils/General/InstRebuilder.h"
+#include "vc/Utils/General/IRBuilder.h"
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/Support/Alignment.h"
@@ -175,6 +176,16 @@ static GlobalVariable &cloneString(GlobalVariable &OrigGV) {
   // Avoiding constants merging.
   OrigGV.setUnnamedAddr(GlobalValue::UnnamedAddr::None);
   ClonedGV->setAlignment(IGCLLVM::getAlign(OrigGV));
+
+  // Handle attributes.
+  IGC_ASSERT_MESSAGE(
+      OrigGV.hasAttribute(PrintfStringVariable),
+      "original GV must already have the attribute before the cloning");
+  auto OrigAttrs = OrigGV.getAttributes();
+  OrigAttrs =
+      OrigAttrs.removeAttribute(OrigGV.getContext(), PrintfStringVariable);
+  OrigGV.setAttributes(OrigAttrs);
+  ClonedGV->addAttribute(PrintfStringVariable);
   return *ClonedGV;
 }
 
@@ -184,10 +195,7 @@ static void handleGEP(const FormatIndexGEPInfo &GEPInfo,
   IGC_ASSERT_MESSAGE(GEP.getNumIndices() == 2 && GEP.hasAllZeroIndices(),
                      "format index GEP should just reach zero string element");
   IGC_ASSERT_MESSAGE(GEP.isInBounds(), "format index GEP should be in bounds");
-  IRBuilder<> IRB{GEP.getContext()};
-  std::vector<Constant *> Indices = {IRB.getInt32(0), IRB.getInt32(0)};
-  auto *NewGEP = ConstantExpr::getInBoundsGetElementPtr(
-      IndexedString.getValueType(), &IndexedString, Indices);
+  auto *NewGEP = &castArrayToFirstElemPtr(IndexedString);
   for (CallInst &FormatIndex : GEPInfo.FormatIndices)
     FormatIndex.setArgOperand(0, NewGEP);
 }
@@ -259,8 +267,7 @@ void recursivelyTraverseFormatIndexPreds(Value &Pred,
     return;
   Visited.insert(&Pred);
   if (!isa<SelectInst>(Pred))
-    report_fatal_error("Too entangled string access in printf, the compiler "
-                       "cannot resolve it");
+    report_fatal_error(PrintfStringAccessError);
   auto &Sel = cast<SelectInst>(Pred);
   std::array<OperandTreatment, 2> OperandInfos = {
       traverseSelectOperand(Sel, Sel.getOperandUse(1), ToRebuild, Visited),

@@ -85,6 +85,9 @@ namespace llvm {
     bool InlineAsm = false;
     bool CheckForInlineAsm(Module &M) const;
 
+    bool DisableFinalizerOpts = false;
+    bool EmitDebugInformation = false;
+    bool ImplicitArgsBufferIsUsed = false;
     // represents number of visa instructions in a *kernel*
     std::unordered_map<const Function *, unsigned> VisaCounter;
     // stores vISA mappings for each *function* (including kernel subroutines)
@@ -102,6 +105,13 @@ namespace llvm {
   public:
     static char ID;
 
+    // Additional info requred to create VISABuilder.
+    struct InfoForFinalizer final {
+      bool DisableFinalizerOpts = false;
+      bool EmitDebugInformation = false;
+      bool EmitCrossThreadOffsetRelocation = false;
+    };
+
     explicit GenXModule() : ModulePass(ID) {}
     ~GenXModule() { cleanup(); }
 
@@ -118,9 +128,15 @@ namespace llvm {
     void DestroyVISAAsmReader();
     LLVMContext &getContext();
 
+    bool emitDebugInformation() const { return EmitDebugInformation; }
     void updateVisaMapping(const Function *F, const Instruction *Inst,
                            unsigned VisaIndex, StringRef Reason);
+    void updateVisaCountMapping(const Function *F, const Instruction *Inst,
+                                unsigned VisaIndex, StringRef Reason);
     const genx::di::VisaMapping *getVisaMapping(const Function *F) const;
+    // Returns additional info requred to create VISABuilder.
+    // Subtarget must be already initialized before calling this method.
+    InfoForFinalizer getInfoForFinalizer() const;
   };
 
   void initializeGenXModulePass(PassRegistry &);

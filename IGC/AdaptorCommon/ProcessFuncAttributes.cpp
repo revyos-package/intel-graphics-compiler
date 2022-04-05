@@ -33,6 +33,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/ADT/SCCIterator.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "common/igc_regkeys.hpp"
+#include <fstream>
 #include <string>
 #include <set>
 
@@ -151,7 +152,9 @@ static bool containsImageType(llvm::Type *T)
             if (buf.size() < 2) return false;
             bool isOpenCLImage = buf[0].equals("opencl") && buf[1].startswith("image") && buf[1].endswith("_t");
             bool isSPIRVImage = buf[0].equals("spirv") && buf[1].startswith("Image");
-            return isOpenCLImage || isSPIRVImage;
+
+            if (isOpenCLImage || isSPIRVImage)
+                return true;
         }
     }
 
@@ -179,7 +182,7 @@ static bool convertRecursionToStackCall(CallGraph& CG)
             for (auto Node : SCCNodes)
             {
                 Node->getFunction()->addFnAttr("visaStackCall");
-                Node->getFunction()->addFnAttr("forceRecurse");
+                Node->getFunction()->addFnAttr("hasRecursion");
             }
         }
         else
@@ -192,7 +195,7 @@ static bool convertRecursionToStackCall(CallGraph& CG)
                 {
                     hasRecursion = true;
                     Node->getFunction()->addFnAttr("visaStackCall");
-                    Node->getFunction()->addFnAttr("forceRecurse");
+                    Node->getFunction()->addFnAttr("hasRecursion");
                     break;
                 }
             }
@@ -358,6 +361,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         }
         // Always inline for non-compute
         if (pCtx->type != ShaderType::OPENCL_SHADER &&
+            pCtx->type != ShaderType::RAYTRACING_SHADER &&
             pCtx->type != ShaderType::COMPUTE_SHADER)
         {
             SetAlwaysInline(F);
@@ -418,6 +422,12 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         }
 
         bool istrue = false;
+
+        auto funcIt = modMD->FuncMD.find(F);
+        if (funcIt != modMD->FuncMD.end())
+        {
+            istrue = IGC::isContinuation(funcIt->second);
+        }
 
         // set hasVLA function attribute
         {
@@ -641,6 +651,58 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         }
     }
 
+    // This selectively sets the FunctionControl mode for the list of line-separated
+    // functions existing in 'FunctionDebug.txt' in the default IGC output folder.
+    // This flag will override the default FunctionControl setting for these functions.
+    //
+    // For example:
+    // We can set FunctionControl=1 and SelectiveFuncionControl=3, such that all functions
+    // in the module are inlined, except those found in the 'FunctionDebug.txt' file, which
+    // are stack-called instead.
+    //
+    auto SelectFCtrl = IGC_GET_FLAG_VALUE(SelectiveFunctionControl);
+    if (SelectFCtrl != FLAG_FCALL_DEFAULT)
+    {
+        std::ifstream inputFile(IGC::Debug::GetFunctionDebugFile());
+        if (inputFile.is_open())
+        {
+            std::string line;
+            while (std::getline(inputFile, line))
+            {
+                if (Function* F = M.getFunction(line))
+                {
+                    if (SelectFCtrl == FLAG_FCALL_FORCE_INLINE)
+                    {
+                        F->removeFnAttr("referenced-indirectly");
+                        F->removeFnAttr("visaStackCall");
+                        SetAlwaysInline(F);
+                    }
+                    else if (SelectFCtrl == FLAG_FCALL_FORCE_SUBROUTINE)
+                    {
+                        F->removeFnAttr("referenced-indirectly");
+                        F->removeFnAttr("visaStackCall");
+                        SetNoInline(F);
+                    }
+                    else if (SelectFCtrl == FLAG_FCALL_FORCE_STACKCALL)
+                    {
+                        F->removeFnAttr("referenced-indirectly");
+                        F->addFnAttr("visaStackCall");
+                        SetNoInline(F);
+                    }
+                    else if (SelectFCtrl == FLAG_FCALL_FORCE_INDIRECTCALL)
+                    {
+                        pCtx->m_enableFunctionPointer = true;
+                        F->addFnAttr("referenced-indirectly");
+                        F->addFnAttr("visaStackCall");
+                        F->setLinkage(GlobalValue::ExternalLinkage);
+                        SetNoInline(F);
+                    }
+                }
+            }
+            inputFile.close();
+        }
+    }
+
     // Process through all functions and reset the *-fp-math attributes
     for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
         Function* F = &(*I);
@@ -663,7 +725,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         {
             IGC_ASSERT_MESSAGE(0, "Recursion detected but not enabled!");
         }
-        if (FCtrl == FLAG_FCALL_FORCE_INLINE)
+        if (IGC::ForceAlwaysInline())
         {
             IGC_ASSERT_MESSAGE(0, "Cannot have recursion when forcing inline!");
         }
@@ -734,7 +796,7 @@ ModulePass *createProcessBuiltinMetaDataPass()
 
 bool ProcessBuiltinMetaData::runOnModule(Module& M)
 {
-    if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_FORCE_INLINE)
+    if (IGC::ForceAlwaysInline())
     {
         return false;
     }

@@ -214,6 +214,11 @@ void CustomSafeOptPass::visitXor(Instruction& XorInstr) {
 void CustomSafeOptPass::visitAnd(BinaryOperator& I) {
     using namespace llvm::PatternMatch;
 
+    //searching another pattern for And instruction
+    if (lower64bto32b(I)) {
+        return;
+    }
+
     if (!I.hasOneUse() ||
         !isa<BranchInst>(*I.user_begin()) ||
         !I.getType()->isIntegerTy(1)) {
@@ -235,6 +240,78 @@ void CustomSafeOptPass::visitAnd(BinaryOperator& I) {
     BrInst->swapSuccessors();
 
     I.eraseFromParent();
+}
+
+// Check if Lower 64b to 32b transformation is applicable for binary operator
+// i.e. trunc(a op b) == trunc(a) op trunc(b)
+static bool isTruncInvariant(unsigned Opcode) {
+    switch (Opcode) {
+    case Instruction::Add:
+    case Instruction::Sub:
+    case Instruction::Mul:
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor:
+        return true;
+    default:
+        return false;
+    }
+}
+
+//  Searches for following pattern:
+//    %mul = mul i64 %conv, %conv2
+//    %conv3 = and i64 %mul, 0xFFFFFFFF
+//
+//  And changes it to:
+//    %conv3 = trunc i64 %conv to i32
+//    %conv4 = trunc i64 %conv2 to i32
+//    %mul = mul i32 %conv3, %conv4
+//    %conv5 = zext i32 %mul to i64
+bool CustomSafeOptPass::lower64bto32b(BinaryOperator& AndInst) {
+    using namespace llvm::PatternMatch;
+
+    auto& AndUse = AndInst.getOperandUse(0);
+    auto AndPattern = m_c_And(m_c_BinOp(m_Value(), m_Value()), m_SpecificInt(0xFFFFFFFF));
+
+    if (!match(&AndInst, AndPattern) || !AndInst.getType()->isIntegerTy(64) || !AndUse->hasOneUse()) {
+        return false;
+    }
+
+    auto BinOp = dyn_cast<BinaryOperator>(AndUse);
+    if (!BinOp || !isTruncInvariant(BinOp->getOpcode()))
+        return false;
+
+    SmallVector<BinaryOperator*, 8> OpsToDelete;
+    auto NewBinInst = analyzeTreeForTrunc64bto32b(AndUse, OpsToDelete);
+    IRBuilder<> Builder(&AndInst);
+
+    auto Zext = Builder.CreateZExt(NewBinInst, Builder.getInt64Ty());
+
+    AndInst.replaceAllUsesWith(Zext);
+    AndInst.eraseFromParent();
+
+    for (BinaryOperator* BinOp : OpsToDelete) {
+        BinOp->eraseFromParent();
+    }
+    return true;
+}
+
+Value* CustomSafeOptPass::analyzeTreeForTrunc64bto32b(const Use& OperandUse, SmallVector<BinaryOperator*, 8>& OpsToDelete) {
+    Value* Operand = OperandUse.get();
+    BinaryOperator* BinInst = dyn_cast<BinaryOperator>(Operand);
+    if (BinInst && Operand->hasOneUse() && isTruncInvariant(BinInst->getOpcode())) {
+        OpsToDelete.push_back(BinInst);
+
+        Value* NewBinArgValue1 = analyzeTreeForTrunc64bto32b(BinInst->getOperandUse(0), OpsToDelete);
+        Value* NewBinArgValue2 = analyzeTreeForTrunc64bto32b(BinInst->getOperandUse(1), OpsToDelete);
+
+        IRBuilder<> Builder(BinInst);
+        return Builder.CreateBinOp(BinInst->getOpcode(), NewBinArgValue1, NewBinArgValue2);
+    }
+
+    //add trunc for Inst
+    IRBuilder<> Builder(cast<Instruction>(OperandUse.getUser()));
+    return Builder.CreateTrunc(Operand, Builder.getInt32Ty());
 }
 
 /*
@@ -1100,6 +1177,8 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
     extractElementOrderOpt(ArrA);
     extractElementOrderOpt(ArrB);
 
+    Builder.SetInsertPoint(I.getNextNode());
+
     Value* VectorA = UndefValue::get(IGCLLVM::FixedVectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
     Value* VectorB = UndefValue::get(IGCLLVM::FixedVectorType::get(Builder.getInt8Ty(), NUM_DP4A_COMPONENTS));
     for (int i = 0; i < NUM_DP4A_COMPONENTS; ++i) {
@@ -1112,6 +1191,174 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
     Function* Dp4aFun = GenISAIntrinsic::getDeclaration(I.getModule(), IntrinsicID, Builder.getInt32Ty());
     Value* Res = Builder.CreateCall(Dp4aFun, { AccVal, ValA, ValB });
     I.replaceAllUsesWith(Res);
+}
+
+void CustomSafeOptPass::hoistDp3(BinaryOperator& I)
+{
+    if (I.getOpcode() != Instruction::BinaryOps::FAdd)
+    {
+        return;
+    }
+
+    using namespace PatternMatch;
+
+    Value* X1 = nullptr;
+    Value* Y1 = nullptr;
+    Value* Z1 = nullptr;
+    Value* X2 = nullptr;
+    Value* Y2 = nullptr;
+    Value* Z2 = nullptr;
+
+    // dp3
+    bool isdp3 = match(cast<Instruction>(&I),
+                        m_FAdd(
+                            m_FMul(m_Value(Z1), m_Value(Z2)),
+                            m_FAdd(
+                                m_FMul(m_Value(X1), m_Value(X2)),
+                                m_FMul(m_Value(Y1), m_Value(Y2)))));
+
+    // need to try matching for when fadd and fmul are switched
+    if (!isdp3)
+    {
+        isdp3 = match(cast<Instruction>(&I),
+                    m_FAdd(
+                        m_FAdd(
+                            m_FMul(m_Value(X1), m_Value(X2)),
+                            m_FMul(m_Value(Y1), m_Value(Y2))),
+                        m_FMul(m_Value(Z1), m_Value(Z2))));
+    }
+
+    if (isdp3)
+    {
+        // quick check to verify that all source instructions exist in the same basic block.
+        // that way we don't need to iterate through the basic block if we don't need to.
+        BasicBlock* currentBB = I.getParent();
+        unsigned numSourcesAreInst = 0;
+        if (auto I = dyn_cast<Instruction>(X1))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+        if (auto I = dyn_cast<Instruction>(X2))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+        if (auto I = dyn_cast<Instruction>(Y1))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+        if (auto I = dyn_cast<Instruction>(Y2))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+        if (auto I = dyn_cast<Instruction>(Z1))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+        if (auto I = dyn_cast<Instruction>(Z2))
+        {
+            if (I->getParent() == currentBB)
+                numSourcesAreInst++;
+            else
+                return;
+        }
+
+        // find the last source as it appears in the shader.
+        // needed for hoist location
+        Value* lastSource = nullptr;
+        unsigned char i = 0;
+        for (BasicBlock::iterator inst = I.getParent()->begin(); inst != I.getParent()->end(); inst++)
+        {
+            // break if we found the last source
+            // no need to iterate rest of BB
+            if (i == numSourcesAreInst)
+                break;
+            if (&(*inst) == X1)
+            {
+                lastSource = X1;
+                i++;
+            }
+            else if (&(*inst) == Y1)
+            {
+                lastSource = Y1;
+                i++;
+            }
+            else if (&(*inst) == Z1)
+            {
+                lastSource = Z1;
+                i++;
+            }
+            else if (&(*inst) == X2)
+            {
+                lastSource = X2;
+                i++;
+            }
+            else if (&(*inst) == Y2)
+            {
+                lastSource = Y2;
+                i++;
+            }
+            else if (&(*inst) == Z2)
+            {
+                lastSource = Z2;
+                i++;
+            }
+        }
+
+        // Obtain each instruction of dp3
+        Instruction* fmul_x = nullptr;
+        Instruction* fmul_y = nullptr;
+        Instruction* fadd_xy = nullptr;
+        Instruction* fmul_z = nullptr;
+
+        Instruction* t1 = cast<Instruction>(I.getOperand(0));
+        Instruction* t2 = cast<Instruction>(I.getOperand(1));
+
+        if (t1->getOperand(0) == Z1 || t1->getOperand(0) == Z2)
+        {
+            fmul_z = t1;
+            fadd_xy = t2;
+        }
+        else
+        {
+            fmul_z = t2;
+            fadd_xy = t1;
+        }
+
+        t1 = cast<Instruction>(fadd_xy->getOperand(0));
+        t2 = cast<Instruction>(fadd_xy->getOperand(1));
+
+        if (t1->getOperand(0) == X1 || t1->getOperand(0) == X2)
+        {
+            fmul_x = t1;
+            fmul_y = t2;
+        }
+        else
+        {
+            fmul_x = t2;
+            fmul_y = t1;
+        }
+
+        fmul_x->moveAfter(cast<Instruction>(lastSource));
+        fmul_y->moveAfter(fmul_x);
+        fadd_xy->moveAfter(fmul_y);
+        fmul_z->moveAfter(fadd_xy);
+        I.moveAfter(fmul_z);
+    }
 }
 
 bool CustomSafeOptPass::isEmulatedAdd(BinaryOperator& I)
@@ -1187,11 +1434,6 @@ bool CustomSafeOptPass::isEmulatedAdd(BinaryOperator& I)
 //  %281 = fadd fast float %280, %276
 void CustomSafeOptPass::removeHftoFCast(Instruction& I)
 {
-    // Skip if mix mode is supported
-    CodeGenContext* Ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    if (Ctx->platform.supportMixMode())
-        return;
-
     if (!I.getType()->isFloatingPointTy())
         return;
 
@@ -1369,6 +1611,9 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
                 llvm::Instruction* nextInst = llvm::dyn_cast<llvm::Instruction>(*(I.user_begin()));
                 if (nextInst && nextInst->getOpcode() == Instruction::Add)
                 {
+                    // do not apply if any add instruction has NSW flag since we can't save it
+                    if ((isa<OverflowingBinaryOperator>(I) && I.hasNoSignedWrap()) || nextInst->hasNoSignedWrap())
+                        return;
                     ConstantInt* secondSrc0imm = dyn_cast<ConstantInt>(nextInst->getOperand(0));
                     ConstantInt* secondSrc1imm = dyn_cast<ConstantInt>(nextInst->getOperand(1));
                     // found 2 add instructions to swap srcs
@@ -1379,6 +1624,14 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
                             if (nextInst->getOperand(i) == &I)
                             {
                                 Value* newAdd = BinaryOperator::CreateAdd(src0imm ? I.getOperand(1) : I.getOperand(0), nextInst->getOperand(1 - i), "", nextInst);
+
+                                // Conservatively clear the NSW NUW flags, since they may not be
+                                // preserved by the reassociation.
+                                bool IsNUW = isa<OverflowingBinaryOperator>(I) && I.hasNoUnsignedWrap() && nextInst->hasNoUnsignedWrap();
+                                cast<BinaryOperator>(newAdd)->setHasNoUnsignedWrap(IsNUW);
+                                nextInst->setHasNoUnsignedWrap(IsNUW);
+                                nextInst->setHasNoSignedWrap(false);
+
                                 nextInst->setOperand(0, newAdd);
                                 nextInst->setOperand(1, I.getOperand(src0imm ? 0 : 1));
                                 break;
@@ -1390,6 +1643,11 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
         }
     } else if (I.getType()->isFloatingPointTy()) {
         removeHftoFCast(I);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(ForceHoistDp3) || (!pContext->m_retryManager.IsFirstTry() && IGC_IS_FLAG_ENABLED(EnableHoistDp3)))
+    {
+        hoistDp3(I);
     }
 }
 
@@ -2233,7 +2491,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
             m_And(m_Value(AndOp1), m_SpecificInt(0xFFFFFFFF)),
             m_Shl(m_Value(EltOp1), m_SpecificInt(32)));
 #if LLVM_VERSION_MAJOR >= 7
-        Value * AndOp2 = nullptr, *EltOp2 = nullptr, *VecOp = nullptr;
+        Value* AndOp2 = nullptr, * EltOp2 = nullptr, * VecOp = nullptr;
         auto pattern2 = m_Or(
             m_And(m_Value(AndOp2), m_SpecificInt(0xFFFFFFFF)),
             m_BitCast(m_InsertElt(m_Value(VecOp), m_Value(EltOp2), m_SpecificInt(1))));
@@ -2328,18 +2586,18 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
     }
     else if (I.getOpcode() == Instruction::Shl)
     {
-    /*
-      From:
-          %5 = zext i32 %a to i64 <--- optional
-          %6 = shl i64 %5, 32
+        /*
+          From:
+              %5 = zext i32 %a to i64 <--- optional
+              %6 = shl i64 %5, 32
 
-      To:
-          %BC = bitcast i64 %5 to <2 x i32> <---- not needed when %5 is zext
-          %6 = extractelement <2 x i32> %BC, i32 0 <---- not needed when %5 is zext
-          %7 = insertelement <2 x i32> %vec, i32 0, i32 0
-          %8 = insertelement <2 x i32> %vec, %6, i32 1
-          %9 = bitcast <2 x i32> %8 to i64
-    */
+          To:
+              %BC = bitcast i64 %5 to <2 x i32> <---- not needed when %5 is zext
+              %6 = extractelement <2 x i32> %BC, i32 0 <---- not needed when %5 is zext
+              %7 = insertelement <2 x i32> %vec, i32 0, i32 0
+              %8 = insertelement <2 x i32> %vec, %6, i32 1
+              %9 = bitcast <2 x i32> %8 to i64
+        */
 
         using namespace llvm::PatternMatch;
         Instruction* inst = nullptr;
@@ -2384,7 +2642,7 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         /*  Get src of either 2 bitcast chain: double -> i64, i64 -> 2xi32
             or from single direct: double -> 2xi32
         */
-        auto getValidBitcastSrc = [](Instruction* op) -> llvm::Value *
+        auto getValidBitcastSrc = [](Instruction* op) -> llvm::Value*
         {
             if (!(isa<BitCastInst>(op)))
                 return nullptr;
@@ -2460,8 +2718,105 @@ void GenSpecificPattern::visitBinaryOperator(BinaryOperator& I)
         {
             createBitcastExtractInsertPattern(I, nullptr, I.getOperand(0), 0, 1);
         }
+        else
+        {
+
+            Instruction* AndSrc = nullptr;
+            ConstantInt* CI;
+
+            /*
+            From:
+              %28 = and i32 %24, 255
+              %29 = lshr i32 %24, 8
+              %30 = and i32 %29, 255
+              %31 = lshr i32 %24, 16
+              %32 = and i32 %31, 255
+            To:
+              %temp = bitcast i32 %24 to <4 x i8>
+              %ee1 = extractelement <4 x i8> %temp, i32 0
+              %ee2 = extractelement <4 x i8> %temp, i32 1
+              %ee3 = extractelement <4 x i8> %temp, i32 2
+              %28 = zext i8 %ee1 to i32
+              %30 = zext i8 %ee2 to i32
+              %32 = zext i8 %ee3 to i32
+            */
+            auto pattern_And_0xFF = m_And(m_Instruction(AndSrc), m_SpecificInt(0xFF));
+
+            if (match(&I, pattern_And_0xFF) && I.getType()->isIntegerTy(32) && AndSrc->getType()->isIntegerTy(32))
+            {
+                Instruction* LhsSrc = nullptr;
+
+                auto LShr_Pattern = m_LShr(m_Instruction(LhsSrc), m_ConstantInt(CI));
+                bool LShrMatch = match(AndSrc, LShr_Pattern) && LhsSrc->getType()->isIntegerTy(32) && (CI->getZExtValue() % 8 == 0);
+
+                // in case there's no shr, it will be 0
+                uint32_t newIndex = 0;
+
+                if (LShrMatch) // extract inner
+                {
+                    AndSrc = LhsSrc;
+                    newIndex = (uint32_t)CI->getZExtValue() / 8;
+                    llvm::IRBuilder<> builder(&I);
+                    VectorType* vec4 = VectorType::get(builder.getInt8Ty(), 4, false);
+                    Value* BC = builder.CreateBitCast(AndSrc, vec4);
+                    Value* EE = builder.CreateExtractElement(BC, builder.getInt32(newIndex));
+                    Value* Zext = builder.CreateZExt(EE, builder.getInt32Ty());
+                    I.replaceAllUsesWith(Zext);
+                    I.eraseFromParent();
+                }
+            }
+
+        }
+    }
+    else if (I.getOpcode() == Instruction::AShr)
+    {
+        /*
+            From:
+            %129 = i32...
+            %Temp = shl i32 %129, 16
+            %132 = ashr exact i32 %Temp, 16
+            %133 = ashr i32 %129, 16
+            To:
+            %129 = i32...
+            %temp = bitcast i32 %129 to <2 x i16>
+            %ee1 = extractelement <2 x i16> %temp, i32 0
+            %ee2 = extractelement <2 x i16> %temp, i32 1
+            %132 = sext i8 %ee1 to i32
+            %133 = sext i8 %ee2 to i32
+            Which will end up as regioning instead of 2 isntr.
+        */
+        using namespace llvm::PatternMatch;
+
+        Instruction* AShrSrc = nullptr;
+        auto pattern_1 = m_AShr(m_Instruction(AShrSrc), m_SpecificInt(16));
+
+        if (match(&I, pattern_1) && I.getType()->isIntegerTy(32) && AShrSrc->getType()->isIntegerTy(32))
+        {
+            Instruction* ShlSrc = nullptr;
+
+            auto Shl_Pattern = m_Shl(m_Instruction(ShlSrc), m_SpecificInt(16));
+            bool submatch = match(AShrSrc, Shl_Pattern) && ShlSrc->getType()->isIntegerTy(32);
+
+            // in case there's no shr, we take upper half
+            uint32_t newIndex = 1;
+
+            // if there was Shl, we take lower half
+            if (submatch)
+            {
+                AShrSrc = ShlSrc;
+                newIndex = 0;
+            }
+            llvm::IRBuilder<> builder(&I);
+            VectorType* vec2 = VectorType::get(builder.getInt16Ty(), 2, false);
+            Value* BC = builder.CreateBitCast(AShrSrc, vec2);
+            Value* EE = builder.CreateExtractElement(BC, builder.getInt32(newIndex));
+            Value* Sext = builder.CreateSExt(EE, builder.getInt32Ty());
+            I.replaceAllUsesWith(Sext);
+            I.eraseFromParent();
+        }
     }
 }
+
 
 void GenSpecificPattern::visitCmpInst(CmpInst& I)
 {
@@ -3210,7 +3565,10 @@ Constant* IGCConstProp::ConstantFoldCallInstruction(CallInst* inst)
         {
             if (C0)
             {
-                C = constantFolder.CreateFPTrunc(C0, inst->getType(), llvm::APFloatBase::rmTowardZero);
+                C = constantFolder.CreateFPTrunc(C0, Type::getHalfTy(inst->getContext()), llvm::APFloatBase::rmTowardZero);
+                C = constantFolder.CreateBitCast(C, Type::getInt16Ty(inst->getContext()));
+                C = constantFolder.CreateZExtOrBitCast(C, Type::getInt32Ty(inst->getContext()));
+                C = constantFolder.CreateBitCast(C, inst->getType());
             }
         }
         break;
@@ -3951,9 +4309,8 @@ void NanHandling::loopNanCases(Function& F)
     {
         FastMathFlags FMF;
         FMF.clear();
-        for (LoopInfo::iterator I = LI->begin(), E = LI->end(); I != E; ++I)
+        for (Loop* loop : *LI)
         {
-            Loop* loop = *I;
             BranchInst* br = cast<BranchInst>(loop->getLoopLatch()->getTerminator());
             BasicBlock* header = loop->getHeader();
             if (br && br->isConditional() && header)
@@ -4034,11 +4391,8 @@ void NanHandling::visitBranchInst(llvm::BranchInst& I)
         return;
 
     // if this branch is part of a loop, it is taken care of already in loopNanCases
-    for (auto iter = visitedInst.begin(); iter != visitedInst.end(); iter++)
-    {
-        if (&I == *iter)
-            return;
-    }
+    if (std::find(visitedInst.begin(), visitedInst.end(), &I) != visitedInst.end())
+        return;
 
     FCmpInst* brCmpInst = dyn_cast<FCmpInst>(I.getCondition());
     FCmpInst* src0 = nullptr;
@@ -4428,7 +4782,7 @@ IGC_INITIALIZE_PASS_BEGIN(GenStrengthReduction, "GenStrengthReduction",
 
     /*========================== FlattenSmallSwitch ==============================
 
-    This class flatten small switch. For example,
+    This class flattens small switch. For example,
 
     before optimization:
         then153:
@@ -4491,10 +4845,6 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
     const unsigned maxSwitchCases = 3;  // only apply to switch with 3 cases or less
     const unsigned maxCaseInsts = 3;    // only apply optimization when each case has 3 instructions or less.
 
-    BasicBlock* Default = SI->getDefaultDest();
-    Value* Val = SI->getCondition();  // The value we are switching on...
-    IRBuilder<> builder(SI);
-
     if (SI->getNumCases() > maxSwitchCases || SI->getNumCases() == 0)
     {
         return false;
@@ -4548,7 +4898,7 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
     // We can speculatively execute a basic block if it
     // is small, unconditionally branches to Dest, and doesn't
     // have high latency or unsafe to speculate instructions.
-    auto canSpeculateBlock = [&](BasicBlock* BB)
+    auto canSpeculateBlock = [&](const BasicBlock* BB)
     {
         if (BB->size() > maxCaseInsts)
             return false;
@@ -4587,12 +4937,7 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
         {
             if (BB == SI->getDefaultDest())
                 continue;
-            bool successorFound = false;
-            for (auto Case : SI->cases()) {
-                if (Case.getCaseSuccessor() == BB)
-                    successorFound = true;
-            }
-            if (successorFound)
+            if (std::any_of(SI->case_begin(), SI->case_end(), [BB](auto &Case) { return Case.getCaseSuccessor() == BB; }))
                 continue;
             return false;
         }
@@ -4609,6 +4954,7 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
 
     // Is the default case of the switch the block
     // where all other cases meet?
+    BasicBlock* Default = SI->getDefaultDest();
     const bool DefaultMergeBlock = (Dest == Default);
 
     // If we merge to the default block, there is no block
@@ -4634,6 +4980,9 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
 
     if (PhiNodes.empty())
         return false;
+
+    Value* Val = SI->getCondition();  // The value we are switching on...
+    IRBuilder<> builder(SI);
 
     // Move all instructions except the last (i.e., the branch)
     // from BB to the InsertPoint.
@@ -4679,7 +5028,7 @@ bool FlattenSmallSwitch::processSwitchInst(SwitchInst* SI)
         }
 
         Phi->replaceAllUsesWith(vTemp);
-        Phi->removeFromParent();
+        Phi->eraseFromParent();
     }
 
     // connect the original block and the phi node block with a pass through branch
@@ -5187,7 +5536,7 @@ bool LogicalAndToBranch::isSafeToConvert(
     iset.insert(cond1);
     for (auto i = ++is0; i != is1; ++i)
     {
-        if ((*i).mayHaveSideEffects())
+        if (i->mayHaveSideEffects())
         {
             isSafe = false;
             break;
@@ -5278,4 +5627,747 @@ bool LogicalAndToBranch::runOnFunction(Function& F)
     }
 
     return changed;
+}
+
+// clean PHINode does the following:
+//   given the following:
+//     a = phi (x, b0), (x, b1)
+//   this pass will replace 'a' with 'x', and as result, phi is removed.
+//
+// Special note:
+//   LCSSA PHINode has a single incoming value. Make sure it is not removed
+//   as WIA uses lcssa phi as a seperator between a uniform value inside loop
+//   and non-uniform value outside a loop.  For example:
+//      B0:
+//             i = 0;
+//      Loop:
+//             i_0 = phi (0, B0)  (t, Bn)
+//             .... <use i_0>
+//             if (divergent cond)
+//      Bi:
+//                goto out;
+//      Bn:
+//             t = i_0 + 1;
+//             if (t < N) goto Loop;
+//             goto output;
+//      out:
+//             i_1 = phi (i_0, Bi)    <-- lcssa phi node
+//      ....
+//      output:
+//   Here, i_0 is uniform within the loop,  but it is not outside loop as each WI will
+//   exit with different i, thus i_1 is non-uniform. (Note that removing lcssa might be
+//   bad in performance, but it should not cause any functional issue.)
+//
+// This is needed to avoid generating the following code for which vISA cannot generate
+// the correct code:
+//   i = 0;             // i is uniform
+//   Loop:
+//         x = i + 1      // x is uniform
+//     B0  if (divergent-condition)
+//            <code1>
+//     B1  else
+//            z = array[i]
+//     B2  endif
+//         i = phi (x, B0), (x, B1)
+//         ......
+//     if (i < n) goto Loop
+//
+// Generated code (visa) (phi becomes mov in its incoming BBs).
+//
+//   i = 0;             // i is uniform
+//   Loop:
+//         (W) x = i + 1      // x is uniform, NoMask
+//     B0  if (divergent-condition)
+//            <code1>
+//         (W) i = x         // noMask
+//     B1  else
+//            z = array[i]
+//         (W) i = x         // noMask
+//     B2  endif
+//         ......
+//         if (i < n) goto Loop
+//
+// In the 1st iteration, 'z' should be array[0].  Assume 'if' is divergent, thus both B0 and B1
+// blocks will be executed. As result, the value of 'i' after B0 will be x, which is 1. And 'z'
+// will take array[1], which is wrong (correct one is array[0]).
+//
+// This case happens if phi is uniform, which means all phis' incoming values are identical
+// and uniform (current hehavior of WIAnalysis). Note that the identical values means this phi
+// is no longer needed.  Once such a phi is removed,  we will never generate code like one shown
+// above and thus, no wrong code will be generated from visa.
+//
+// This pass will be invoked at place close to the Emit pass, where WIAnalysis will be invoked,
+// so that IR between this pass and WIAnalysis stays the same, at least no new PHINodes like this
+// will be generated.
+//
+namespace {
+    class CleanPHINode : public FunctionPass
+    {
+    public:
+        static char ID;
+        CleanPHINode();
+
+        StringRef getPassName() const override { return "CleanPhINode"; }
+
+        bool runOnFunction(Function& F) override;
+    };
+}
+
+#undef PASS_FLAG
+#undef PASS_DESCRIPTION
+#undef PASS_CFG_ONLY
+#undef PASS_ANALYSIS
+#define PASS_FLAG "igc-cleanphinode"
+#define PASS_DESCRIPTION "Clean up PHINode"
+#define PASS_CFG_ONLY false
+#define PASS_ANALYSIS false
+IGC_INITIALIZE_PASS_BEGIN(CleanPHINode, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_END(CleanPHINode,   PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+
+
+char CleanPHINode::ID = 0;
+FunctionPass* IGC::createCleanPHINodePass()
+{
+    return new CleanPHINode();
+}
+
+CleanPHINode::CleanPHINode() : FunctionPass(ID)
+{
+    initializeCleanPHINodePass(*PassRegistry::getPassRegistry());
+}
+
+bool CleanPHINode::runOnFunction(Function& F)
+{
+    bool changed = false;
+    for (BasicBlock& BB : F)
+    {
+        auto II = BB.begin();
+        auto IE = BB.end();
+        while (II != IE)
+        {
+            auto currII = II;
+            ++II;
+            PHINode* PHI = dyn_cast<PHINode>(currII);
+            if (PHI == nullptr)
+            {
+                // proceed to the next BB
+                break;
+            }
+            if (PHI->getNumIncomingValues() == 1)
+            {
+                // Keep LCSSA PHI as uniform analysis needs it.
+                continue;
+            }
+
+            if (PHI->getNumIncomingValues() > 0) // sanity
+            {
+                Value* sameVal = PHI->getIncomingValue(0);
+                bool isAllSame = true;
+                for (unsigned i = 1, sz = PHI->getNumIncomingValues(); i < sz; ++i)
+                {
+                    if (sameVal != PHI->getIncomingValue(i))
+                    {
+                        isAllSame = false;
+                        break;
+                    }
+                }
+                if (isAllSame)
+                {
+                    PHI->replaceAllUsesWith(sameVal);
+                    PHI->eraseFromParent();
+                    changed = true;
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+namespace {
+    class InsertBranchOpt : public FunctionPass
+    {
+    public:
+        static char ID;
+        InsertBranchOpt();
+
+        StringRef getPassName() const override { return "InsertBranchOpt"; }
+
+        bool runOnFunction(Function& F) override;
+        void atomicSpiltOpt(Function& F);
+        void ThreeWayLoadSpiltOpt(Function& F);
+        void findOptCases(SelectInst* I);
+        bool HasSrcFromEE(Instruction* I, uint selNum, Instruction*& loadInst);
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.setPreservesCFG();
+            AU.addRequired<CodeGenContextWrapper>();
+        }
+    private:
+        struct loadGroup {
+            CmpInst* cmpInst0, * cmpInst1;
+            SelectInst* selInst[2][4];
+            Instruction* toMovInst0[4], * toMovInst1[4], * toMovInst2[4];
+            PHINode* newPhi[3][4];
+            GenIntrinsicInst* dclInst0, * dclInst1;
+            uint num;
+        };
+
+        std::vector<loadGroup>SplitGroup;
+        CodeGenContext* pContext = nullptr;
+        void CreateBranchBlock(Function& F, Value* cmpI, loadGroup& lg, Instruction* inst[], int groupID);
+    };
+}
+
+namespace {
+    class MergeMemFromBranchOpt : public FunctionPass, public llvm::InstVisitor<MergeMemFromBranchOpt>
+    {
+    public:
+        static char ID;
+        MergeMemFromBranchOpt();
+
+        StringRef getPassName() const override { return "MergeMemFromBranchOpt"; }
+
+        bool runOnFunction(Function& F) override;
+        virtual void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.setPreservesCFG();
+        }
+
+        void visitCallInst(llvm::CallInst& C);
+        void visitTypedWrite(llvm::CallInst* inst);
+    private:
+        bool changed = false;
+    };
+}
+
+#undef PASS_FLAG
+#undef PASS_DESCRIPTION
+#undef PASS_CFG_ONLY
+#undef PASS_ANALYSIS
+#define PASS_FLAG "igc-MergeMemFromBranchOpt"
+#define PASS_DESCRIPTION "Merge Mem from Branch Opt"
+#define PASS_CFG_ONLY false
+#define PASS_ANALYSIS false
+IGC_INITIALIZE_PASS_BEGIN(MergeMemFromBranchOpt, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_END(MergeMemFromBranchOpt, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+
+/*
+This optimization merge the UAV writes from if/else branch to the common successor to avoid partial writes
+ex: Change
+    Label-1337.i:                                     ; preds = %Label-1339.i, %Label-1780.i
+      <skip instructions>
+      %494 = inttoptr i32 %0 to %__2D_DIM_Resource addrspace(2490368)*
+      call void @llvm.genx.GenISA.typedwrite.p2490368__2D_DIM_Resource(%__2D_DIM_Resource addrspace(2490368)* %494, i32 %17, i32 %18, i32 0, i32 0, float %491, float %492, float %493, float %Temp-2360.i163)
+      br label %Output
+    Label-1313.i:                                     ; preds = %Label-1577.i
+      %495 = inttoptr i32 %0 to %__2D_DIM_Resource addrspace(2490368)*
+      call void @llvm.genx.GenISA.typedwrite.p2490368__2D_DIM_Resource(%__2D_DIM_Resource addrspace(2490368)* %495, i32 %17, i32 %18, i32 0, i32 0, float %scalar39, float %scalar40, float %scalar41, float %scalar42)
+      br label %Output
+    Output:                                           ; preds = %Label-1313.i, %Label-1337.i
+      ret void
+                      to
+    Output:                                           ; preds = %Label-1313.i, %Label-1337.i
+      %494 = phi float [ %scalar39, %Label-1313.i ], [ %491, %Label-1337.i ]
+      %495 = phi float [ %scalar40, %Label-1313.i ], [ %492, %Label-1337.i ]
+      %496 = phi float [ %scalar41, %Label-1313.i ], [ %493, %Label-1337.i ]
+      %497 = phi float [ %scalar42, %Label-1313.i ], [ %Temp-2360.i163, %Label-1337.i ]
+      %498 = inttoptr i32 %0 to %__2D_DIM_Resource addrspace(2490368)*
+      call void @llvm.genx.GenISA.typedwrite.p2490368__2D_DIM_Resource(%__2D_DIM_Resource addrspace(2490368)* %498, i32 %17, i32 %18, i32 0, i32 0, float %494, float %495, float %496, float %497)
+      ret void
+    }
+*/
+
+char MergeMemFromBranchOpt::ID = 0;
+FunctionPass* IGC::createMergeMemFromBranchOptPass()
+{
+    return new MergeMemFromBranchOpt();
+}
+
+MergeMemFromBranchOpt::MergeMemFromBranchOpt() : FunctionPass(ID), changed(false)
+{
+    initializeMergeMemFromBranchOptPass(*PassRegistry::getPassRegistry());
+}
+
+void MergeMemFromBranchOpt::visitTypedWrite(llvm::CallInst* inst)
+{
+    std::vector<CallInst*> callSet;
+    // last instruction in the BB
+    if (dyn_cast<BranchInst>(inst->getNextNode()))
+    {
+        BasicBlock* BB = inst->getParent();
+        // the basicblock with inst has single successor BB
+        if (BasicBlock* succBB = BB->getSingleSuccessor())
+        {
+            callSet.push_back(inst);
+            // find the other BB with the same successor
+            for (auto* BB2 : predecessors(succBB))
+            {
+                if (BB2 != BB && BB2->getSingleSuccessor())
+                {
+                    Instruction* br = BB2->getTerminator();
+                    if (br && br->getPrevNode())
+                    {
+                        if (llvm::GenIntrinsicInst* giInst = llvm::dyn_cast<GenIntrinsicInst>(br->getPrevNode()))
+                        {
+                            if (giInst->getIntrinsicID() == GenISAIntrinsic::GenISA_typedwrite)
+                            {
+                                IntToPtrInst* itp0 = dyn_cast<IntToPtrInst>(inst->getOperand(0));
+                                IntToPtrInst* itp1 = dyn_cast<IntToPtrInst>(giInst->getOperand(0));
+
+                                if (itp0 && itp1 &&
+                                    (itp0->getType()->getPointerAddressSpace() ==
+                                        itp1->getType()->getPointerAddressSpace()) &&
+                                    (itp0->getOperand(0) == itp1->getOperand(0)) &&
+                                    (giInst->getOperand(1) == inst->getOperand(1)) &&
+                                    (giInst->getOperand(2) == inst->getOperand(2)) &&
+                                    (giInst->getOperand(3) == inst->getOperand(3)) &&
+                                    (giInst->getOperand(4) == inst->getOperand(4)))
+                                {
+                                    callSet.push_back(giInst);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // if there are more predecessor than the ones with urb partial write,
+            // skip the optimization as it might increase the number of times it needs to do the urb write.
+            if (!succBB->hasNPredecessors(callSet.size()) || callSet.size() < 2)
+                return;
+
+            // start the conversion
+            changed = 1;
+
+            // create phi nodes for the data used by typedwrite
+            PHINode* p8 = PHINode::Create(inst->getOperand(8)->getType(), callSet.size(), "", &(succBB->front()));
+            PHINode* p7 = PHINode::Create(inst->getOperand(7)->getType(), callSet.size(), "", &(succBB->front()));
+            PHINode* p6 = PHINode::Create(inst->getOperand(6)->getType(), callSet.size(), "", &(succBB->front()));
+            PHINode* p5 = PHINode::Create(inst->getOperand(5)->getType(), callSet.size(), "", &(succBB->front()));
+            PHINode* itp = PHINode::Create(inst->getOperand(0)->getType(), callSet.size(), "", &(succBB->front()));
+            for (unsigned int i = 0; i < callSet.size(); i++)
+            {
+                itp->addIncoming(callSet[i]->getOperand(0), callSet[i]->getParent());
+                p5->addIncoming(callSet[i]->getOperand(5), callSet[i]->getParent());
+                p6->addIncoming(callSet[i]->getOperand(6), callSet[i]->getParent());
+                p7->addIncoming(callSet[i]->getOperand(7), callSet[i]->getParent());
+                p8->addIncoming(callSet[i]->getOperand(8), callSet[i]->getParent());
+            }
+
+            // move the first typedwrite instruction into succBB
+            inst->removeFromParent();
+            inst->insertBefore(&*succBB->getFirstInsertionPt());
+
+            // set the inst srcs to results from phi nodes above
+            inst->setOperand(0, itp);
+            inst->setOperand(5, p5);
+            inst->setOperand(6, p6);
+            inst->setOperand(7, p7);
+            inst->setOperand(8, p8);
+
+            // erase the other typedwrite instructions
+            for (unsigned int i = 1; i < callSet.size(); i++)
+            {
+                callSet[i]->eraseFromParent();
+            }
+        }
+    }
+}
+
+void MergeMemFromBranchOpt::visitCallInst(CallInst& C)
+{
+    if (llvm::GenIntrinsicInst* inst = llvm::dyn_cast<GenIntrinsicInst>(&C))
+    {
+        if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_typedwrite)
+        {
+            visitTypedWrite(inst);
+        }
+    }
+}
+
+bool MergeMemFromBranchOpt::runOnFunction(Function& F)
+{
+    visit(F);
+    return changed;
+}
+
+#undef PASS_FLAG
+#undef PASS_DESCRIPTION
+#undef PASS_CFG_ONLY
+#undef PASS_ANALYSIS
+#define PASS_FLAG "igc-InsertBranchOpt"
+#define PASS_DESCRIPTION "Insert Branch Opt"
+#define PASS_CFG_ONLY false
+#define PASS_ANALYSIS false
+IGC_INITIALIZE_PASS_BEGIN(InsertBranchOpt, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_END(InsertBranchOpt, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+
+char InsertBranchOpt::ID = 0;
+FunctionPass* IGC::createInsertBranchOptPass()
+{
+    return new InsertBranchOpt();
+}
+
+InsertBranchOpt::InsertBranchOpt() : FunctionPass(ID)
+{
+    initializeInsertBranchOptPass(*PassRegistry::getPassRegistry());
+}
+
+bool InsertBranchOpt::HasSrcFromEE(Instruction* I, uint selNum, Instruction*& loadInst)
+{
+    std::vector<Instruction*> traceBackInst;
+    int itemID = 0;
+    uint maxSearchQueueSize = 10;
+    traceBackInst.push_back(I);
+    while (itemID != traceBackInst.size())
+    {
+        Instruction* tbInst = traceBackInst[itemID];
+        if (ExtractElementInst* eetemp = dyn_cast<ExtractElementInst>(tbInst))
+        {
+            Instruction* load = dyn_cast<Instruction>(eetemp->getOperand(0));
+            if (BitCastInst* BCinst = dyn_cast<BitCastInst>(load))
+            {
+                load = dyn_cast<Instruction>(BCinst->getOperand(0));
+            }
+            // load in the same BB as the extractElement
+            if (load->getParent() == I->getParent() &&
+                load->getNumUses() <= selNum &&
+                eetemp->hasOneUse())
+            {
+                loadInst = load;
+                return true;
+            }
+        }
+        else
+        {
+            for (uint srci = 0; srci < tbInst->getNumOperands(); srci++)
+            {
+                Instruction* temp = dyn_cast<Instruction>(tbInst->getOperand(srci));
+                if (temp && traceBackInst.size() < maxSearchQueueSize && temp->getParent() == I->getParent())
+                {
+                    traceBackInst.push_back(temp);
+                }
+            }
+        }
+        itemID++;
+    }
+    return false;
+}
+
+void InsertBranchOpt::findOptCases(SelectInst* I)
+{
+    loadGroup lg;
+    memset(&lg, 0, sizeof(loadGroup));
+    lg.selInst[1][0] = dyn_cast<SelectInst>(I);
+    if (lg.selInst[1][0])
+    {
+        // only start when this is the first select in the sequence
+        // skip over bitcast
+        Instruction* tempNode = lg.selInst[1][0]->getPrevNode();
+        if (!tempNode)
+            return;
+
+        if (dyn_cast<BitCastInst>(tempNode))
+            tempNode = tempNode->getPrevNode();
+
+        if (dyn_cast<SelectInst>(tempNode))
+            return;
+
+        // selInst[0][0] src 1 needs to come from another select inst
+        lg.selInst[0][0] = dyn_cast<SelectInst>(lg.selInst[1][0]->getOperand(1));
+        if (!lg.selInst[0][0])
+            return;
+
+        // record the select condition
+        lg.cmpInst0 = dyn_cast<CmpInst>(lg.selInst[0][0]->getOperand(0));
+        lg.cmpInst1 = dyn_cast<CmpInst>(lg.selInst[1][0]->getOperand(0));
+
+        if (!lg.cmpInst0 || !lg.cmpInst1)
+            return;
+
+        // cmpInst comes from inputVec and constant
+        lg.dclInst0 = dyn_cast<GenIntrinsicInst>(lg.cmpInst0->getOperand(0));
+        lg.dclInst1 = dyn_cast<GenIntrinsicInst>(lg.cmpInst1->getOperand(0));
+        if (!lg.dclInst0 || !lg.dclInst1)
+            return;
+
+        if (lg.dclInst0->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_inputVec ||
+            lg.dclInst1->getIntrinsicID() != GenISAIntrinsic::GenISA_DCL_inputVec ||
+            !dyn_cast<Constant>(lg.cmpInst0->getOperand(1)) ||
+            !dyn_cast<Constant>(lg.cmpInst1->getOperand(1)))
+            return;
+
+        // find the other select instructions in the sequence with the same select condition
+        uint numSel = 1;
+        for (int i = 1; i < 4; i++)
+        {
+            // selInst[1][*] src 1 need to come from another select inst
+            // selInst[1][*] needs to have the same cmp (sel condition)
+            // selInst[0][*] needs to have the same cmp (sel condition)
+            tempNode = dyn_cast<BitCastInst>(lg.selInst[1][i - 1]->getNextNode());
+            if (tempNode)
+            {
+                // skip over bitcast and find the next instruction
+                lg.selInst[1][i] = dyn_cast<SelectInst>(tempNode->getNextNode());
+            }
+            else
+            {
+                lg.selInst[1][i] = dyn_cast<SelectInst>(lg.selInst[1][i - 1]->getNextNode());
+            }
+
+            if (!lg.selInst[1][i] || lg.selInst[1][i]->getOperand(0) != lg.cmpInst1)
+                break;
+
+            lg.selInst[0][i] = dyn_cast<SelectInst>(lg.selInst[1][i]->getOperand(1));
+            if (!lg.selInst[0][i] || lg.selInst[0][i]->getOperand(0) != lg.cmpInst0)
+                break;
+
+            numSel++;
+        }
+
+        // only apply opt on 3 or 4 channel cases
+        if (numSel != 3 && numSel != 4)
+            return;
+
+        for (uint i = 0; i < numSel; i++)
+        {
+            Instruction* temp0 = dyn_cast<Instruction>(lg.selInst[0][i]->getOperand(1));
+            Instruction* temp1 = dyn_cast<Instruction>(lg.selInst[0][i]->getOperand(2));
+            Instruction* temp2 = dyn_cast<Instruction>(lg.selInst[1][i]->getOperand(2));
+            Instruction* load0 = nullptr;
+            Instruction* load1 = nullptr;
+            Instruction* load2 = nullptr;
+            if (temp0 && temp1 && temp2 &&
+                HasSrcFromEE(temp0, numSel, load0) && HasSrcFromEE(temp1, numSel, load1) && HasSrcFromEE(temp2, numSel, load2))
+            {
+                // three loads can't be the same. We won't be able to break each group into branches if the loads are the same
+                if (load0 != load1 && load0 != load2 && load1 != load2)
+                {
+                    lg.toMovInst0[i] = temp0;
+                    lg.toMovInst1[i] = temp1;
+                    lg.toMovInst2[i] = temp2;
+                }
+                else
+                    return;
+            }
+            else
+                return;
+        }
+
+        lg.num = numSel;
+        SplitGroup.push_back(lg);
+    }
+}
+
+void InsertBranchOpt::CreateBranchBlock(Function& F, Value* cmpI, loadGroup& lg, Instruction* inst[], int groupID)
+{
+    Instruction* termatorInst = SplitBlockAndInsertIfThen(cmpI, inst[0], false);
+
+    for (uint i = 0; i < lg.num; i++)
+    {
+        inst[i]->moveBefore(termatorInst);
+    }
+
+    Value* zeroF = ConstantFP::get(Type::getFloatTy(F.getContext()), 0.);
+    Value* zeroI = ConstantInt::get(Type::getInt32Ty(F.getContext()), 0);
+
+    // set up the new phi nodes
+    for (int i = (int)lg.num - 1; i >= 0; i--)
+    {
+        lg.newPhi[groupID][i] = PHINode::Create(inst[i]->getType(), 2, "", &(termatorInst->getSuccessor(0)->front()));
+    }
+
+    for (uint i = 0; i < lg.num; i++)
+    {
+        inst[i]->replaceUsesOutsideBlock(lg.newPhi[groupID][i], inst[i]->getParent());
+        lg.newPhi[groupID][i]->addIncoming(inst[i], inst[i]->getParent());
+        if (groupID == 0)
+            lg.newPhi[groupID][i]->addIncoming(inst[i]->getType()->isFloatingPointTy() ? zeroF : zeroI, termatorInst->getParent()->getSinglePredecessor());
+        else
+            lg.newPhi[groupID][i]->addIncoming(lg.newPhi[groupID - 1][i], termatorInst->getParent()->getSinglePredecessor());
+    }
+
+    // replace select with the phi node
+    if (groupID > 0)
+    {
+        for (uint i = 0; i < lg.num; i++)
+        {
+            lg.selInst[groupID - 1][i]->replaceAllUsesWith(lg.newPhi[groupID][i]);
+        }
+    }
+}
+
+void InsertBranchOpt::ThreeWayLoadSpiltOpt(Function& F)
+{
+    // For a pattern with 3 sample / load and only use one of them based on some
+    // condition, change it to use branches to only do the one sample / load that matters.
+
+    // For example:
+    // load1
+    // load2
+    // load3
+    // temp1 = select cond1, load1, load2
+    // temp2 = select cond2, temp1, load3
+    //      to
+    // if(cond1)
+    //      load1
+    // if(!cond1 && cond2)
+    //      load2
+    // if(!cond1 && !cond2)
+    //      load3
+
+    // find the cases to optimize and store info in SplitGroup
+    for (auto BI = F.begin(), BE = F.end(); BI != BE; BI++)
+    {
+        for (auto II = BI->begin(); II != BI->end(); II++)
+        {
+            if (SelectInst* inst = dyn_cast<SelectInst>(II))
+            {
+                findOptCases(inst);
+            }
+        }
+    }
+
+    // start making changes to the shader
+    // add branching for the load/sample instructions
+    std::vector<CmpInst*> movedCmpInst;
+    for (std::vector<loadGroup>::iterator iter = SplitGroup.begin(); iter != SplitGroup.end(); iter++)
+    {
+        loadGroup lg = *iter;
+        // move the cmp insts to the before the sequence
+        // if there are multiple sets to optimization and share the same cmp inst, only move the 1st set since
+        // it will be before all the other sets already
+        bool cmpInst0Moved = false;
+        bool cmpInst1Moved = false;
+        for (auto mi = movedCmpInst.begin(); mi != movedCmpInst.end(); mi++)
+        {
+            if (*mi == lg.cmpInst0)
+            {
+                cmpInst0Moved = true;
+            }
+            else if (*mi == lg.cmpInst1)
+            {
+                cmpInst1Moved = true;
+            }
+        }
+
+        if (!cmpInst0Moved)
+        {
+            lg.cmpInst0->moveAfter(lg.dclInst0);
+            movedCmpInst.push_back(lg.cmpInst0);
+        }
+        if (!cmpInst1Moved)
+        {
+            lg.cmpInst1->moveAfter(lg.dclInst1);
+            movedCmpInst.push_back(lg.cmpInst1);
+        }
+
+        // create branch for cmp0
+        CreateBranchBlock(F, lg.cmpInst0, lg, lg.toMovInst0, 0);
+
+        // create branch for !cmp0 && cmp1
+        IRBuilder<> builder(dyn_cast<Instruction>(lg.toMovInst1[0]));
+        Value* notCmp0 = builder.CreateNot(lg.cmpInst0);
+        Value* notCmp0_Cmp1 = builder.CreateAnd(notCmp0, lg.cmpInst1);
+        CreateBranchBlock(F, notCmp0_Cmp1, lg, lg.toMovInst1, 1);
+
+        // create branch for !cmp0 && !cmp1
+        builder.SetInsertPoint(lg.toMovInst2[0]);
+        Value* notCmp1 = builder.CreateNot(lg.cmpInst1);
+        Value* notCmp0_notCmp1 = builder.CreateAnd(notCmp0, notCmp1);
+        CreateBranchBlock(F, notCmp0_notCmp1, lg, lg.toMovInst2, 2);
+    }
+}
+
+void InsertBranchOpt::atomicSpiltOpt(Function& F)
+{
+    std::vector<GenIntrinsicInst*>atomicSplit;
+    for (auto BI = F.begin(), BE = F.end(); BI != BE; BI++)
+    {
+        for (auto II = BI->begin(); II != BI->end(); II++)
+        {
+            if (GenIntrinsicInst* inst = dyn_cast<GenIntrinsicInst>(II))
+            {
+                if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomictyped)
+                {
+                    Instruction* src = dyn_cast<Instruction>(inst->getOperand(4));
+                    ConstantInt* op = dyn_cast<ConstantInt>(inst->getOperand(5));
+
+                    if (!src || !op)
+                        continue;
+
+                    if (op->getZExtValue() == AtomicOp::EATOMIC_IADD ||
+                        op->getZExtValue() == AtomicOp::EATOMIC_SUB ||
+                        op->getZExtValue() == AtomicOp::EATOMIC_UMAX)
+                    {
+                        atomicSplit.push_back(inst);
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto iter : atomicSplit)
+    {
+        Instruction* inst = &(*iter);
+        // Create an if-then-else structure.
+        // if (cond!=0)
+        //    use the original atomic add inst
+        // else
+        //    use typedread
+        IRBuilder<> builder(inst);
+        Instruction* src = dyn_cast<Instruction>(inst->getOperand(4));
+        Instruction* condInst = dyn_cast<Instruction>(builder.CreateICmp(ICmpInst::ICMP_NE, src, builder.getInt32(0)));
+        Function* pLdIntrinsic = llvm::GenISAIntrinsic::getDeclaration(
+            inst->getModule(),
+            GenISAIntrinsic::GenISA_typedread,
+            inst->getOperand(0)->getType());
+
+        SmallVector<Value*, 5> ld_FunctionArgList(5);
+        ld_FunctionArgList[0] = inst->getOperand(0);
+        ld_FunctionArgList[1] = inst->getOperand(1);
+        ld_FunctionArgList[2] = inst->getOperand(2);
+        ld_FunctionArgList[3] = ConstantInt::get(inst->getType(), 0);
+        ld_FunctionArgList[4] = ConstantInt::get(inst->getType(), 0);
+
+        CallInst* NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
+        Value* ExtractE = builder.CreateExtractElement(NewInst, (uint64_t)0);
+        Value* castI = builder.CreateBitCast(ExtractE, inst->getType());
+
+        Instruction* ThenTerm = nullptr;
+        Instruction* ElseTerm = nullptr;
+        SplitBlockAndInsertIfThenElse(condInst, inst, &ThenTerm, &ElseTerm);
+        BasicBlock* ThenBlock = ThenTerm->getParent();
+        BasicBlock* ElseBlock = ElseTerm->getParent();
+        BasicBlock* MergeBlock = inst->getParent();
+
+        ThenBlock->setName("atomic.if.true");
+        ElseBlock->setName("atomic.if.false");
+        MergeBlock->setName("atomic.if.end");
+
+        inst->moveBefore(ThenTerm);
+        NewInst->moveBefore(ElseTerm);
+        dyn_cast<ExtractElementInst>(ExtractE)->moveBefore(ElseTerm);
+        dyn_cast<BitCastInst>(castI)->moveBefore(ElseTerm);
+
+        PHINode* newPhi = PHINode::Create(inst->getType(), 2, "", &MergeBlock->front());
+        inst->replaceUsesOutsideBlock(newPhi, ThenBlock);
+        newPhi->addIncoming(inst, ThenBlock);
+        newPhi->addIncoming(castI, ElseBlock);
+    }
+}
+
+bool InsertBranchOpt::runOnFunction(Function& F)
+{
+    pContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    if (IGC_IS_FLAG_ENABLED(EnableAtomicBranch) || pContext->getModuleMetaData()->csInfo.atomicBranch)
+    {
+        atomicSpiltOpt(F);
+    }
+
+    if (IGC_IS_FLAG_ENABLED(EnableThreeWayLoadSpiltOpt))
+    {
+        ThreeWayLoadSpiltOpt(F);
+    }
+    return false;
 }

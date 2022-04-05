@@ -74,7 +74,6 @@ public:
     {
         memset(&m_cisa_instruction, 0, sizeof(CISA_INST));
         m_size = 1; // opcode size
-        m_need_label_patch = false;
     }
 
     virtual ~CisaInst() { }
@@ -85,22 +84,6 @@ public:
     int createCisaInstruction(ISA_Opcode opcode, unsigned char exec_size, unsigned char modifier, PredicateOpnd pred, VISA_opnd **opnd, int numOpnds, const VISA_INST_Desc* inst_desc);
 
     int getSize() const {return m_size;}
-
-    void setLabelInfo(const std::string& label_name, bool is_func, bool needPatch)
-    {
-        m_label_name = label_name;
-        m_is_function = is_func;
-        m_need_label_patch = needPatch;
-    }
-
-    void setLabelIndex(int id)
-    {
-        m_cisa_instruction.opnd_array[0]->_opnd.other_opnd = id;
-    }
-
-    bool   needLabelPatch () const { return m_need_label_patch; }
-    bool   isFuncLabel    () const { return m_is_function;      }
-    std::string getLabelName   () const { return m_label_name;       }
 
     CISA_INST*      getCISAInst     () { return &m_cisa_instruction; }
     const VISA_INST_Desc* getCISAInstDesc () const { return m_inst_desc;}
@@ -123,11 +106,6 @@ private:
 
     vISA::Mem_Manager &m_mem;
     short m_size;
-
-    // during emition to determin what the labelID is.
-    std::string m_label_name;
-    bool m_is_function;
-    bool m_need_label_patch;
 };
 
 class CisaBinary
@@ -174,7 +152,10 @@ public:
 
     void *operator new(size_t sz, vISA::Mem_Manager& m) {return m.alloc(sz); }
 
-    int isaDump(std::list<VISAKernelImpl *>, Options *options);
+    const VISAKernelImpl* getFmtKernelForISADump(const VISAKernelImpl* kernel,
+                                                 const std::list<VISAKernelImpl *>& kernels) const;
+    std::string isaDump(const VISAKernelImpl* kernel, const VISAKernelImpl* fmtKernel) const;
+    int isaDump(const std::list<VISAKernelImpl *>&, const Options *options) const;
     void writeIsaAsmFile(std::string filename, std::string isaasmStr) const;
 
     unsigned long getKernelVisaBinarySize(int i) {return m_header.kernels[i].size; }

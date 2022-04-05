@@ -20,9 +20,8 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXBaling.h"
 #include "GenXModule.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
-#include "vc/Utils/General/BreakConst.h"
+#include "vc/Utils/GenX/BreakConst.h"
 
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -148,7 +147,7 @@ bool GenXIMadPostLegalization::runOnFunction(Function &F) {
   bool Changed = false;
 
   // After this point, we should not do constant folding.
-  Changed |= vc::breakConstantExprs(&F);
+  Changed |= vc::breakConstantExprs(&F, vc::LegalizationStage::Legalized);
 
   // The following alorithm runs very slowly on large blocks.
   if (skipOptWithLargeBlock(F))
@@ -226,7 +225,7 @@ bool GenXIMadPostLegalization::fixMadChain(BasicBlock *BB) {
     Instruction *In = nullptr;
     // Collect operand instructions not baled yet.
     for (auto I = B.begin(), E = B.end(); I != E; ++I) {
-      bool isFMA = GenXIntrinsic::getAnyIntrinsicID(I->Inst) == Intrinsic::fma;
+      bool isFMA = vc::getAnyIntrinsicID(I->Inst) == Intrinsic::fma;
       for (unsigned i = 0, e = I->Inst->getNumOperands(); i != e; ++i) {
         // Skip if that operand is baled.
         if (I->Info.isOperandBaled(i))
@@ -272,7 +271,7 @@ bool GenXIMadPostLegalization::fixMadChain(BasicBlock *BB) {
       continue;
     auto CandidateInsn = OutB.getMainInst()->Inst;
     IGC_ASSERT(CandidateInsn);
-    if (GenXIntrinsic::getAnyIntrinsicID(CandidateInsn) != Intrinsic::fma)
+    if (vc::getAnyIntrinsicID(CandidateInsn) != Intrinsic::fma)
       continue;
     // Skip if it's already handled.
     if (FMAs.count(CandidateInsn))
@@ -349,7 +348,7 @@ bool GenXIMadPostLegalization::fixMadChain(BasicBlock *BB) {
         break;
       auto CandidateInst = InB.getMainInst()->Inst;
       IGC_ASSERT(CandidateInst);
-      if (GenXIntrinsic::getAnyIntrinsicID(CandidateInst) != Intrinsic::fma)
+      if (vc::getAnyIntrinsicID(CandidateInst) != Intrinsic::fma)
         break;
       FMAs.insert(CandidateInst);
     } while (1);

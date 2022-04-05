@@ -29,7 +29,7 @@ INLINE float __intel_convert_float_rtp_rtn(double a, uint direction);
 // Helper function for conversions with saturation
 static ushort OVERLOADABLE sat_ushort(half _T, ushort _R)
 {
-  return __builtin_spirv_OpenCL_select_i16_i16_i16(
+  return SPIRV_OCL_BUILTIN(select, _i16_i16_i16, )(
     _R, (ushort)0,
     SPIRV_BUILTIN(ConvertFToU, _i16_f16, _Rushort)(
         (half)((_T < (half)0) | SPIRV_BUILTIN(IsNan, _f16, )(_T))));
@@ -40,18 +40,18 @@ static ushort OVERLOADABLE sat_ushort(half _T, ushort _R)
 // Helper function for conversions with saturation
 static uint OVERLOADABLE sat_uint(half _T, uint _R)
 {
-  return __builtin_spirv_OpenCL_select_i32_i32_i32(
-    _R, (uint)0,
-    SPIRV_BUILTIN(ConvertFToU, _i32_f16, _Ruint)(
+  return SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
+    as_int(_R), 0,
+    SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(
         (half)((_T < (half)0) | SPIRV_BUILTIN(IsNan, _f16, )(_T))));
 }
 #endif
 
 static ulong OVERLOADABLE sat_ulong(half _T, ulong _R)
 {
-  return __builtin_spirv_OpenCL_select_i64_i64_i64(
-    _R, (ulong)0,
-    SPIRV_BUILTIN(ConvertFToU, _i64_f16, _Rulong)(
+  return SPIRV_OCL_BUILTIN(select, _i64_i64_i64, )(
+    as_long(_R), (long)0,
+    SPIRV_BUILTIN(ConvertFToS, _i64_f16, _Rlong)(
         (half)((_T < (half)0) | SPIRV_BUILTIN(IsNan, _f16, )(_T))));
 }
 
@@ -59,15 +59,15 @@ static ulong OVERLOADABLE sat_ulong(half _T, ulong _R)
 // Helper function for conversions with saturation
 static uchar clamp_sat_uchar(half _T, uchar _R)
 {
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (uchar)0,
     SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(
       (half)(_T < (half)0)));
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (uchar)UCHAR_MAX,
     SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(
       (half)(_T > (half)UCHAR_MAX)));
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (uchar)0,
     SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(
       (half) SPIRV_BUILTIN(IsNan, _f16, )(_T)));
@@ -79,15 +79,15 @@ static uchar clamp_sat_uchar(half _T, uchar _R)
 // Helper function for conversions with saturation
 static char clamp_sat_char(half _T, char _R)
 {
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (char)CHAR_MIN,
     SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(
       (half)(_T < (half)CHAR_MIN)));
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (char)CHAR_MAX,
     SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(
       (half)(_T > (half)CHAR_MAX)));
-  _R = __builtin_spirv_OpenCL_select_i8_i8_i8(
+  _R = SPIRV_OCL_BUILTIN(select, _i8_i8_i8, )(
     _R, (char)0,
     SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(
       (half) SPIRV_BUILTIN(IsNan, _f16, )(_T)));
@@ -99,15 +99,15 @@ static char clamp_sat_char(half _T, char _R)
 // Helper function for conversions with saturation
 static short clamp_sat_short(half _T, short _R)
 {
-  _R = __builtin_spirv_OpenCL_select_i16_i16_i16(
+  _R = SPIRV_OCL_BUILTIN(select, _i16_i16_i16, )(
     _R, (short)SHRT_MIN,
     SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(
       (half)(_T < (half)SHRT_MIN)));
-  _R = __builtin_spirv_OpenCL_select_i16_i16_i16(
+  _R = SPIRV_OCL_BUILTIN(select, _i16_i16_i16, )(
     _R, (short)SHRT_MAX,
     SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(
       (half)(_T > (half)SHRT_MAX)));
-  _R = __builtin_spirv_OpenCL_select_i16_i16_i16(
+  _R = SPIRV_OCL_BUILTIN(select, _i16_i16_i16, )(
     _R, (short)0,
     SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(
       (half) SPIRV_BUILTIN(IsNan, _f16, )(_T)));
@@ -119,15 +119,15 @@ static short clamp_sat_short(half _T, short _R)
 // Helper function for conversions with saturation
 static int clamp_sat_int(half _T, int _R)
 {
-    _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
+    _R = SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
         _R, (int)INT_MIN,
         SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(
           (half)(_T < (half)INT_MIN)));
-    _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
+    _R = SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
         _R, (int)INT_MAX,
         SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(
           (half)(_T > (half)INT_MAX)));
-    _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
+    _R = SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
         _R, (int)0,
         SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(
           (half) SPIRV_BUILTIN(IsNan, _f16, )(_T)));
@@ -144,18 +144,18 @@ static int clamp_sat_int(half _T, int _R)
 #define SAT_CLAMP_HELPER_SIGN(TO, FROM, TONAME, TOA, INTTYPE, FROMA)        \
 static TO clamp_sat_##TO##_##FROM(TO _R, FROM _T)                           \
 {                                                                           \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)TONAME##_MIN, SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)(_T < (FROM)TONAME##_MIN)));  \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)TONAME##_MAX, SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)(_T > (FROM)TONAME##_MAX)));  \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)0,SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)SPIRV_BUILTIN(IsNan, _##TOA, )(_T)));     \
+  _R = SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)(_T < (FROM)TONAME##_MIN)) ? TONAME##_MIN : _R;  \
+  _R = SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)(_T > (FROM)TONAME##_MAX)) ? TONAME##_MAX : _R;  \
+  _R = SPIRV_BUILTIN(ConvertFToS, _##FROMA##_##TOA, _R##TO)((FROM)SPIRV_BUILTIN(IsNan, _##TOA, )(_T)) ? 0 : _R;    \
   return _R;                                                                \
 }
 
 #define SAT_CLAMP_HELPER_UNSIGNED(TO, FROM, TONAME, TOA, INTTYPE, FROMA)    \
 static TO clamp_sat_##TO##_##FROM(TO _R, FROM _T)                           \
 {                                                                           \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)TONAME##_MIN, SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)(_T < (FROM)TONAME##_MIN)));  \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)TONAME##_MAX, SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)(_T > (FROM)TONAME##_MAX)));  \
-  _R = __builtin_spirv_OpenCL_select_##TOA##_##TOA##_##INTTYPE(_R, (TO)0, SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)SPIRV_BUILTIN(IsNan, _##TOA, )(_T)));    \
+  _R = SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)(_T < (FROM)TONAME##_MIN)) ? TONAME##_MIN : _R;  \
+  _R = SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)(_T > (FROM)TONAME##_MAX)) ? TONAME##_MAX : _R;  \
+  _R = SPIRV_BUILTIN(ConvertFToU, _##FROMA##_##TOA, _R##TO)((FROM)SPIRV_BUILTIN(IsNan, _##TOA, )(_T)) ? 0 : _R;    \
   return _R;                                                                \
 }
 #if defined(cl_khr_fp64)
@@ -213,10 +213,10 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(float Flo
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _i64_f32, _Rulong)(float FloatValue)
 {
-    float FC0 = __builtin_spirv_OpenCL_ldexp_f32_i32(1.0f, -32);
-    float FC1 = __builtin_spirv_OpenCL_ldexp_f32_i32(-1.0f, 32);
-    float HiF = __builtin_spirv_OpenCL_trunc_f32(FloatValue * FC0);
-    float LoF = __builtin_spirv_OpenCL_fma_f32_f32_f32(HiF, FC1, FloatValue);
+    float FC0 = SPIRV_OCL_BUILTIN(ldexp, _f32_i32, )(1.0f, -32);
+    float FC1 = SPIRV_OCL_BUILTIN(ldexp, _f32_i32, )(-1.0f, 32);
+    float HiF = SPIRV_OCL_BUILTIN(trunc, _f32, )(FloatValue * FC0);
+    float LoF = SPIRV_OCL_BUILTIN(fma, _f32_f32_f32, )(HiF, FC1, FloatValue);
     ulong answer = 0;
     answer = (((uint)HiF | answer) << 32) | ((uint)LoF | answer);
     return answer;
@@ -283,16 +283,16 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(float Float
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _i64_f32, _Rlong)(float FloatValue)
 {
-    float abs_value = __builtin_spirv_OpenCL_fabs_f32(FloatValue);
+    float abs_value = SPIRV_OCL_BUILTIN(fabs, _f32, )(FloatValue);
     if (abs_value < 1.0f) //for small numbers and denormals
     {
         return (long)0;
     }
     uint sign = as_uint(as_int(FloatValue) >> 31);
-    float FC0 = __builtin_spirv_OpenCL_ldexp_f32_i32(1.0f, -32);
-    float FC1 = __builtin_spirv_OpenCL_ldexp_f32_i32(-1.0f, 32);
-    float HiF = __builtin_spirv_OpenCL_trunc_f32(abs_value * FC0);
-    float LoF = __builtin_spirv_OpenCL_fma_f32_f32_f32(HiF, FC1, abs_value);
+    float FC0 = SPIRV_OCL_BUILTIN(ldexp, _f32_i32, )(1.0f, -32);
+    float FC1 = SPIRV_OCL_BUILTIN(ldexp, _f32_i32, )(-1.0f, 32);
+    float HiF = SPIRV_OCL_BUILTIN(trunc, _f32, )(abs_value * FC0);
+    float LoF = SPIRV_OCL_BUILTIN(fma, _f32_f32_f32, )(HiF, FC1, abs_value);
     uint Hi = (uint)HiF ^ sign;
     uint Lo = (uint)LoF ^ sign;
     uint Lo_new = Lo - sign;
@@ -778,7 +778,7 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertSToU, _i8_i32, _Ruchar)(int Si
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(SatConvertSToU, _i16_i32, _Rushort)(int SignedValue)
 {
       //return __builtin_IB_itous_sat((int)SignedValue);
-      int res = __builtin_spirv_OpenCL_s_clamp_i32_i32_i32(SignedValue, 0, (int)USHRT_MAX);
+      int res = SPIRV_OCL_BUILTIN(s_clamp, _i32_i32_i32, )(SignedValue, 0, (int)USHRT_MAX);
       return (ushort)res;
 }
 
@@ -990,7 +990,7 @@ float16  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertBF16ToFINTEL, _v16i16, _Rfloat1
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i8_f16, _Ruchar_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(FloatValue);
 }
 
@@ -1001,13 +1001,13 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i8_f16, _Ruchar_rtz)(h
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i8_f16, _Ruchar_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i8_f16, _Ruchar_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f16, _Ruchar)(FloatValue);
 }
 
@@ -1019,7 +1019,7 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f16, _Ruchar_sat)(h
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i8_f16, _Ruchar_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f16, _Ruchar_sat)(FloatValue);
 }
 
@@ -1030,19 +1030,19 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i8_f16, _Ruchar_sa
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i8_f16, _Ruchar_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f16, _Ruchar_sat)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i8_f16, _Ruchar_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f16, _Ruchar_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i16_f16, _Rushort_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f16, _Rushort)(FloatValue);
 }
 
@@ -1053,13 +1053,13 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i16_f16, _Rushort_rtz)
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i16_f16, _Rushort_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f16, _Rushort)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i16_f16, _Rushort_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f16, _Rushort)(FloatValue);
 }
 
@@ -1071,7 +1071,7 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f16, _Rushort_sat)
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i16_f16, _Rushort_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f16, _Rushort_sat)(FloatValue);
 }
 
@@ -1082,19 +1082,19 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i16_f16, _Rushort_
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i16_f16, _Rushort_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f16, _Rushort_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i16_f16, _Rushort_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f16, _Rushort_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i32_f16, _Ruint_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f16, _Ruint)(FloatValue);
 }
 
@@ -1105,13 +1105,13 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i32_f16, _Ruint_rtz)(h
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i32_f16, _Ruint_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f16, _Ruint)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i32_f16, _Ruint_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f16, _Ruint)(FloatValue);
 }
 
@@ -1123,7 +1123,7 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f16, _Ruint_sat)(h
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i32_f16, _Ruint_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f16, _Ruint_sat)(FloatValue);
 }
 
@@ -1134,19 +1134,19 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i32_f16, _Ruint_sa
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i32_f16, _Ruint_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f16, _Ruint_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i32_f16, _Ruint_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f16, _Ruint_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i64_f16, _Rulong_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f16, _Rulong)(FloatValue);
 }
 
@@ -1157,13 +1157,13 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i64_f16, _Rulong_rtz)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i64_f16, _Rulong_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f16, _Rulong)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i64_f16, _Rulong_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f16, _Rulong)(FloatValue);
 }
 
@@ -1175,7 +1175,7 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f16, _Rulong_sat)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i64_f16, _Rulong_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f16, _Rulong_sat)(FloatValue);
 }
 
@@ -1186,19 +1186,19 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i64_f16, _Rulong_s
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i64_f16, _Rulong_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f16, _Rulong_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i64_f16, _Rulong_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f16, _Rulong_sat)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i8_f32, _Ruchar_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i8_f32, _Ruchar)(FloatValue);
 }
 
@@ -1217,26 +1217,26 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i8_f32, _Ruchar_rtz)(f
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i8_f32, _Ruchar_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i8_f32, _Ruchar)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i8_f32, _Ruchar_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i8_f32, _Ruchar)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f32, _Ruchar_sat)(float FloatValue)
 {
   //return __builtin_IB_ftouc_sat((float)FloatValue);
-  float res = __builtin_spirv_OpenCL_fclamp_f32_f32_f32(FloatValue, 0.0f, (float)UCHAR_MAX);
+  float res = SPIRV_OCL_BUILTIN(fclamp, _f32_f32_f32, )(FloatValue, 0.0f, (float)UCHAR_MAX);
   return (uchar)res;
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i8_f32, _Ruchar_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f32, _Ruchar_sat)(FloatValue);
 }
 
@@ -1247,19 +1247,19 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i8_f32, _Ruchar_sa
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i8_f32, _Ruchar_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f32, _Ruchar_sat)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i8_f32, _Ruchar_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f32, _Ruchar_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i16_f32, _Rushort_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f32, _Rushort)(FloatValue);
 }
 
@@ -1275,26 +1275,26 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i16_f32, _Rushort_rtz)
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i16_f32, _Rushort_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i16_f32, _Rushort)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i16_f32, _Rushort_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i16_f32, _Rushort)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f32, _Rushort_sat)(float FloatValue)
 {
   //return __builtin_IB_ftous_sat((float)FloatValue);
-  float res = __builtin_spirv_OpenCL_fclamp_f32_f32_f32(FloatValue, 0.0f, (float)USHRT_MAX);
+  float res = SPIRV_OCL_BUILTIN(fclamp, _f32_f32_f32, )(FloatValue, 0.0f, (float)USHRT_MAX);
   return (ushort)res;
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i16_f32, _Rushort_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f32, _Rushort_sat)(FloatValue);
 }
 
@@ -1305,19 +1305,19 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i16_f32, _Rushort_
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i16_f32, _Rushort_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f32, _Rushort_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i16_f32, _Rushort_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f32, _Rushort_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i32_f32, _Ruint_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(FloatValue);
 }
 
@@ -1328,13 +1328,13 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i32_f32, _Ruint_rtz)(f
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i32_f32, _Ruint_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i32_f32, _Ruint_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(FloatValue);
 }
 
@@ -1345,39 +1345,38 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f32, _Ruint_sat)(f
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i32_f32, _Ruint_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f32, _Ruint_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i32_f32, _Ruint_sat_rtz)(float FloatValue)
 {
   uint _R = SPIRV_BUILTIN(ConvertFToU, _RTZ_i32_f32, _Ruint_rtz)(FloatValue);
-  _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
-    _R, (uint)UINT_MAX,
-    SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(
-      (float)(FloatValue > (float)UINT_MAX)));
-  return __builtin_spirv_OpenCL_select_i32_i32_i32(
-    _R, (uint)0,
-    SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(
+  _R = SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(
+      (float)(FloatValue > (float)UINT_MAX)) ?
+      (uint)UINT_MAX : _R;
+
+  return SPIRV_BUILTIN(ConvertFToU, _i32_f32, _Ruint)(
       (float)((FloatValue < (float)0) |
-      SPIRV_BUILTIN(IsNan, _f32, )(FloatValue))));
+          SPIRV_BUILTIN(IsNan, _f32, )(FloatValue))) ?
+      (uint)0 : _R;
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i32_f32, _Ruint_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f32, _Ruint_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i32_f32, _Ruint_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f32, _Ruint_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i64_f32, _Rulong_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f32, _Rulong)(FloatValue);
 }
 
@@ -1388,13 +1387,13 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i64_f32, _Rulong_rtz)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i64_f32, _Rulong_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i64_f32, _Rulong)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i64_f32, _Rulong_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _i64_f32, _Rulong)(FloatValue);
 }
 
@@ -1410,7 +1409,7 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f32, _Rulong_sat)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i64_f32, _Rulong_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f32, _Rulong_sat)(FloatValue);
 }
 
@@ -1421,13 +1420,13 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i64_f32, _Rulong_s
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i64_f32, _Rulong_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f32, _Rulong_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i64_f32, _Rulong_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f32, _Rulong_sat)(FloatValue);
 }
 
@@ -1435,7 +1434,7 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i64_f32, _Rulong_s
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i8_f64, _Ruchar_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f64, _Ruchar)(FloatValue);
 }
 
@@ -1446,13 +1445,13 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i8_f64, _Ruchar_rtz)(d
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i8_f64, _Ruchar_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f64, _Ruchar)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i8_f64, _Ruchar_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i8_f64, _Ruchar)(FloatValue);
 }
 
@@ -1494,7 +1493,7 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f64, _Rint_sat)(dou
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i8_f64, _Ruchar_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f64, _Ruchar_sat)(FloatValue);
 }
 
@@ -1505,19 +1504,19 @@ uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i8_f64, _Ruchar_sa
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i8_f64, _Ruchar_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f64, _Ruchar_sat)(FloatValue);
 }
 
 uchar  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i8_f64, _Ruchar_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i8_f64, _Ruchar_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i16_f64, _Rushort_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f64, _Rushort)(FloatValue);
 }
 
@@ -1528,19 +1527,19 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i16_f64, _Rushort_rtz)
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i16_f64, _Rushort_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f64, _Rushort)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i16_f64, _Rushort_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i16_f64, _Rushort)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i16_f64, _Rushort_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f64, _Rushort_sat)(FloatValue);
 }
 
@@ -1551,19 +1550,19 @@ ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i16_f64, _Rushort_
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i16_f64, _Rushort_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f64, _Rushort_sat)(FloatValue);
 }
 
 ushort SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i16_f64, _Rushort_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i16_f64, _Rushort_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i32_f64, _Ruint_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f64, _Ruint)(FloatValue);
 }
 
@@ -1574,19 +1573,19 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i32_f64, _Ruint_rtz)(d
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i32_f64, _Ruint_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f64, _Ruint)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i32_f64, _Ruint_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i32_f64, _Ruint)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i32_f64, _Ruint_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f64, _Ruint_sat)(FloatValue);
 }
 
@@ -1597,19 +1596,19 @@ uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i32_f64, _Ruint_sa
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i32_f64, _Ruint_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f64, _Ruint_sat)(FloatValue);
 }
 
 uint   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i32_f64, _Ruint_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i32_f64, _Ruint_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTE_i64_f64, _Rulong_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f64, _Rulong)(FloatValue);
 }
 
@@ -1620,13 +1619,13 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTZ_i64_f64, _Rulong_rtz)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTP_i64_f64, _Rulong_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f64, _Rulong)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _RTN_i64_f64, _Rulong_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _i64_f64, _Rulong)(FloatValue);
 }
 
@@ -1642,7 +1641,7 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f64, _Rulong_sat)(
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTE_i64_f64, _Rulong_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f64, _Rulong_sat)(FloatValue);
 }
 
@@ -1653,13 +1652,13 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTZ_i64_f64, _Rulong_s
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTP_i64_f64, _Rulong_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f64, _Rulong_sat)(FloatValue);
 }
 
 ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i64_f64, _Rulong_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToU, _Sat_i64_f64, _Rulong_sat)(FloatValue);
 }
 
@@ -1667,7 +1666,7 @@ ulong  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToU, _Sat_RTN_i64_f64, _Rulong_s
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i8_f16, _Rchar_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(FloatValue);
 }
 
@@ -1678,13 +1677,13 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i8_f16, _Rchar_rtz)(hal
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i8_f16, _Rchar_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i8_f16, _Rchar_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f16, _Rchar)(FloatValue);
 }
 
@@ -1696,7 +1695,7 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f16, _Rchar_sat)(hal
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i8_f16, _Rchar_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f16, _Rchar_sat)(FloatValue);
 }
 
@@ -1707,19 +1706,19 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i8_f16, _Rchar_sat_
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i8_f16, _Rchar_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f16, _Rchar_sat)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i8_f16, _Rchar_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f16, _Rchar_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i16_f16, _Rshort_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(FloatValue);
 }
 
@@ -1730,13 +1729,13 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i16_f16, _Rshort_rtz)(h
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i16_f16, _Rshort_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i16_f16, _Rshort_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f16, _Rshort)(FloatValue);
 }
 
@@ -1748,7 +1747,7 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f16, _Rshort_sat)(h
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i16_f16, _Rshort_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f16, _Rshort_sat)(FloatValue);
 }
 
@@ -1759,19 +1758,19 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i16_f16, _Rshort_sa
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i16_f16, _Rshort_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f16, _Rshort_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i16_f16, _Rshort_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f16, _Rshort_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i32_f16, _Rint_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(FloatValue);
 }
 
@@ -1782,13 +1781,13 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i32_f16, _Rint_rtz)(hal
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i32_f16, _Rint_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i32_f16, _Rint_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f16, _Rint)(FloatValue);
 }
 
@@ -1800,7 +1799,7 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f16, _Rint_sat)(hal
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i32_f16, _Rint_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f16, _Rint_sat)(FloatValue);
 }
 
@@ -1811,19 +1810,19 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i32_f16, _Rint_sat_
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i32_f16, _Rint_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f16, _Rint_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i32_f16, _Rint_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f16, _Rint_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i64_f16, _Rlong_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f16, _Rlong)(FloatValue);
 }
 
@@ -1834,13 +1833,13 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i64_f16, _Rlong_rtz)(ha
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i64_f16, _Rlong_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f16, _Rlong)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i64_f16, _Rlong_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f16, _Rlong)(FloatValue);
 }
 
@@ -1856,7 +1855,7 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f16, _Rlong_sat)(ha
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i64_f16, _Rlong_sat_rte)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f16, _Rlong_sat)(FloatValue);
 }
 
@@ -1867,19 +1866,19 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i64_f16, _Rlong_sat
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i64_f16, _Rlong_sat_rtp)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f16, _Rlong_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i64_f16, _Rlong_sat_rtn)(half FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f16(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f16, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f16, _Rlong_sat)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i8_f32, _Rchar_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f32, _Rchar)(FloatValue);
 }
 
@@ -1898,26 +1897,26 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i8_f32, _Rchar_rtz)(flo
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i8_f32, _Rchar_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i8_f32, _Rchar)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i8_f32, _Rchar_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i8_f32, _Rchar)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f32, _Rchar_sat)(float FloatValue)
 {
-  float res = __builtin_spirv_OpenCL_fclamp_f32_f32_f32(FloatValue, (float)CHAR_MIN, (float)CHAR_MAX);
-  res = __builtin_spirv_OpenCL_select_f32_f32_i32(res, 0.0f , SPIRV_BUILTIN(IsNan, _f32, )(FloatValue));
+  float res = SPIRV_OCL_BUILTIN(fclamp, _f32_f32_f32, )(FloatValue, (float)CHAR_MIN, (float)CHAR_MAX);
+  res = SPIRV_OCL_BUILTIN(select, _f32_f32_i32, )(res, 0.0f , SPIRV_BUILTIN(IsNan, _f32, )(FloatValue));
   return (char)res;
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i8_f32, _Rchar_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f32, _Rchar_sat)(FloatValue);
 }
 
@@ -1928,19 +1927,19 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i8_f32, _Rchar_sat_
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i8_f32, _Rchar_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f32, _Rchar_sat)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i8_f32, _Rchar_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f32, _Rchar_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i16_f32, _Rshort_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f32, _Rshort)(FloatValue);
 }
 
@@ -1956,26 +1955,26 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i16_f32, _Rshort_rtz)(f
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i16_f32, _Rshort_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i16_f32, _Rshort)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i16_f32, _Rshort_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i16_f32, _Rshort)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f32, _Rshort_sat)(float FloatValue)
 {
-  float res = __builtin_spirv_OpenCL_fclamp_f32_f32_f32(FloatValue, (float)SHRT_MIN, (float)SHRT_MAX);
-  res = __builtin_spirv_OpenCL_select_f32_f32_i32(res, 0.0f , SPIRV_BUILTIN(IsNan, _f32, )(FloatValue));
+  float res = SPIRV_OCL_BUILTIN(fclamp, _f32_f32_f32, )(FloatValue, (float)SHRT_MIN, (float)SHRT_MAX);
+  res = SPIRV_OCL_BUILTIN(select, _f32_f32_i32, )(res, 0.0f , SPIRV_BUILTIN(IsNan, _f32, )(FloatValue));
   return (short)res;
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i16_f32, _Rshort_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f32, _Rshort_sat)(FloatValue);
 }
 
@@ -1986,19 +1985,19 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i16_f32, _Rshort_sa
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i16_f32, _Rshort_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f32, _Rshort_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i16_f32, _Rshort_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f32, _Rshort_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i32_f32, _Rint_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(FloatValue);
 }
 
@@ -2009,13 +2008,13 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i32_f32, _Rint_rtz)(flo
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i32_f32, _Rint_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i32_f32, _Rint_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(FloatValue);
 }
 
@@ -2026,22 +2025,22 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f32, _Rint_sat)(flo
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i32_f32, _Rint_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f32, _Rint_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i32_f32, _Rint_sat_rtz)(float FloatValue)
 {
   int _R = SPIRV_BUILTIN(ConvertFToS, _RTZ_i32_f32, _Rint_rtz)(FloatValue);
-  _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
+  _R = SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
     _R, (int)INT_MIN,
     SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(
       (float)(FloatValue < (float)INT_MIN)));
-  _R = __builtin_spirv_OpenCL_select_i32_i32_i32(
+  _R = SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
     _R, (int)INT_MAX,
     SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(
       (float)(FloatValue > (float)INT_MAX)));
-  return __builtin_spirv_OpenCL_select_i32_i32_i32(
+  return SPIRV_OCL_BUILTIN(select, _i32_i32_i32, )(
     _R, (int)0,
     SPIRV_BUILTIN(ConvertFToS, _i32_f32, _Rint)(
       (float) SPIRV_BUILTIN(IsNan, _f32, )(FloatValue)));
@@ -2049,19 +2048,19 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i32_f32, _Rint_sat_
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i32_f32, _Rint_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f32, _Rint_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i32_f32, _Rint_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f32, _Rint_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i64_f32, _Rlong_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f32, _Rlong)(FloatValue);
 }
 
@@ -2072,13 +2071,13 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i64_f32, _Rlong_rtz)(fl
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i64_f32, _Rlong_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i64_f32, _Rlong)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i64_f32, _Rlong_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _i64_f32, _Rlong)(FloatValue);
 }
 
@@ -2094,7 +2093,7 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f32, _Rlong_sat)(fl
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i64_f32, _Rlong_sat_rte)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f32(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f32, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f32, _Rlong_sat)(FloatValue);
 }
 
@@ -2105,13 +2104,13 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i64_f32, _Rlong_sat
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i64_f32, _Rlong_sat_rtp)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f32, _Rlong_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i64_f32, _Rlong_sat_rtn)(float FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f32( FloatValue );
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f32, )( FloatValue );
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f32, _Rlong_sat)(FloatValue);
 }
 
@@ -2119,7 +2118,7 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i64_f32, _Rlong_sat
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i8_f64, _Rchar_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f64, _Rchar)(FloatValue);
 }
 
@@ -2130,19 +2129,19 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i8_f64, _Rchar_rtz)(dou
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i8_f64, _Rchar_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f64, _Rchar)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i8_f64, _Rchar_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i8_f64, _Rchar)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i8_f64, _Rchar_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f64, _Rchar_sat)(FloatValue);
 }
 
@@ -2153,19 +2152,19 @@ char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i8_f64, _Rchar_sat_
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i8_f64, _Rchar_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f64, _Rchar_sat)(FloatValue);
 }
 
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i8_f64, _Rchar_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i8_f64, _Rchar_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i16_f64, _Rshort_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f64, _Rshort)(FloatValue);
 }
 
@@ -2176,19 +2175,19 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i16_f64, _Rshort_rtz)(d
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i16_f64, _Rshort_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f64, _Rshort)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i16_f64, _Rshort_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i16_f64, _Rshort)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i16_f64, _Rshort_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f64, _Rshort_sat)(FloatValue);
 }
 
@@ -2199,19 +2198,19 @@ short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i16_f64, _Rshort_sa
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i16_f64, _Rshort_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f64, _Rshort_sat)(FloatValue);
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i16_f64, _Rshort_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i16_f64, _Rshort_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i32_f64, _Rint_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f64, _Rint)(FloatValue);
 }
 
@@ -2222,19 +2221,19 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i32_f64, _Rint_rtz)(dou
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i32_f64, _Rint_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f64, _Rint)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i32_f64, _Rint_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i32_f64, _Rint)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i32_f64, _Rint_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f64, _Rint_sat)(FloatValue);
 }
 
@@ -2245,19 +2244,19 @@ int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i32_f64, _Rint_sat_
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i32_f64, _Rint_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f64, _Rint_sat)(FloatValue);
 }
 
 int   SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i32_f64, _Rint_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i32_f64, _Rint_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTE_i64_f64, _Rlong_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f64, _Rlong)(FloatValue);
 }
 
@@ -2268,13 +2267,13 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTZ_i64_f64, _Rlong_rtz)(do
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTP_i64_f64, _Rlong_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f64, _Rlong)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _RTN_i64_f64, _Rlong_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _i64_f64, _Rlong)(FloatValue);
 }
 
@@ -2290,7 +2289,7 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f64, _Rlong_sat)(do
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTE_i64_f64, _Rlong_sat_rte)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_rint_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(rint, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f64, _Rlong_sat)(FloatValue);
 }
 
@@ -2301,13 +2300,13 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTZ_i64_f64, _Rlong_sat
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTP_i64_f64, _Rlong_sat_rtp)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_ceil_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(ceil, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f64, _Rlong_sat)(FloatValue);
 }
 
 long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(ConvertFToS, _Sat_RTN_i64_f64, _Rlong_sat_rtn)(double FloatValue)
 {
-  FloatValue = __builtin_spirv_OpenCL_floor_f64(FloatValue);
+  FloatValue = SPIRV_OCL_BUILTIN(floor, _f64, )(FloatValue);
   return SPIRV_BUILTIN(ConvertFToS, _Sat_i64_f64, _Rlong_sat)(FloatValue);
 }
 
@@ -3049,7 +3048,7 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SConvert, _Sat_i64_i8, _Rlong_sat)(char S
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SConvert, _Sat_i8_i16, _Rchar_sat)(short SignedValue)
 {
       //return __builtin_IB_stoc_sat((short)SignedValue);
-      short res = __builtin_spirv_OpenCL_s_clamp_i16_i16_i16(SignedValue, (short)CHAR_MIN, (short)CHAR_MAX);
+      short res = SPIRV_OCL_BUILTIN(s_clamp, _i16_i16_i16, )(SignedValue, (short)CHAR_MIN, (short)CHAR_MAX);
       return (char)res;
 }
 
@@ -3071,14 +3070,14 @@ long  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SConvert, _Sat_i64_i16, _Rlong_sat)(short
 char  SPIRV_OVERLOADABLE SPIRV_BUILTIN(SConvert, _Sat_i8_i32, _Rchar_sat)(int SignedValue)
 {
       //return __builtin_IB_itoc_sat((int)SignedValue);
-      int res = __builtin_spirv_OpenCL_s_clamp_i32_i32_i32(SignedValue, (int)CHAR_MIN, (int)CHAR_MAX);
+      int res = SPIRV_OCL_BUILTIN(s_clamp, _i32_i32_i32, )(SignedValue, (int)CHAR_MIN, (int)CHAR_MAX);
       return (char)res;
 }
 
 short SPIRV_OVERLOADABLE SPIRV_BUILTIN(SConvert, _Sat_i16_i32, _Rshort_sat)(int SignedValue)
 {
       //return __builtin_IB_itos_sat((int)SignedValue);
-      int res = __builtin_spirv_OpenCL_s_clamp_i32_i32_i32(SignedValue, (int)SHRT_MIN, (int)SHRT_MAX);
+      int res = SPIRV_OCL_BUILTIN(s_clamp, _i32_i32_i32, )(SignedValue, (int)SHRT_MIN, (int)SHRT_MAX);
       return (short)res;
 }
 
@@ -3504,7 +3503,7 @@ float convertUItoFP32(ulong value, char roundingMode, bool s)
     uint Lo = (uint)(value & 0x00000000FFFFFFFF);
     float Res_Rounded;
     float NewValue;
-    uint ShiftAmount = __builtin_spirv_OpenCL_clz_i32(Hi);
+    uint ShiftAmount = SPIRV_OCL_BUILTIN(clz, _i32, )((int)Hi);
 
     //For rtn and rtp we need to switch the rounding mode if
     //the sign bit is negative in order get the correct magnitude
@@ -3595,17 +3594,17 @@ float convertSItoFP32(long value, char roundingMode)
 }
 
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-INLINE private void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p0i8_p4i8_i32, _ToPrivate)(const generic void *Pointer, StorageClass_t Storage)
+INLINE private void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p0i8_p4i8_i32, _ToPrivate)(generic char *Pointer, int Storage)
 {
     return __builtin_IB_to_private(Pointer);
 }
 
-INLINE local   void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(const generic void *Pointer, StorageClass_t Storage)
+INLINE local   void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(generic char *Pointer, int Storage)
 {
     return __builtin_IB_to_local(Pointer);
 }
 
-INLINE global  void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p1i8_p4i8_i32, _ToGlobal)(const generic void *Pointer, StorageClass_t Storage)
+INLINE global  void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, _p1i8_p4i8_i32, _ToGlobal)(generic char *Pointer, int Storage)
 {
     if((SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(Pointer, Storage) == NULL) &
        (SPIRV_BUILTIN(GenericCastToPtrExplicit, _p0i8_p4i8_i32, _ToPrivate)(Pointer, Storage) == NULL))
@@ -3616,14 +3615,14 @@ INLINE global  void* SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericCastToPtrExplicit, 
     return NULL;
 }
 
-INLINE uint __builtin_spirv_OpGenericPtrMemSemantics_p4i8(const generic void *Pointer)
+INLINE uint SPIRV_OVERLOADABLE SPIRV_BUILTIN(GenericPtrMemSemantics, _p4i8, )(generic char *Pointer)
 {
     if (SPIRV_BUILTIN(GenericCastToPtrExplicit, _p3i8_p4i8_i32, _ToLocal)(Pointer, StorageWorkgroup) != NULL)
     {
-        return WorkgroupMemory;
+        return (uint)WorkgroupMemory;
     }
 
-    return CrossWorkgroupMemory;
+    return (uint)CrossWorkgroupMemory;
 }
 
 #endif // (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)

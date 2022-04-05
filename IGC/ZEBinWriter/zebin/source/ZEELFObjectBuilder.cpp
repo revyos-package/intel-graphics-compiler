@@ -52,6 +52,7 @@ private:
     struct SectionHdrEntry {
         uint32_t name    = 0;
         unsigned type    = 0;
+        uint64_t flags   = 0;
         uint64_t offset  = 0;
         uint64_t size    = 0;
         uint32_t link    = 0;
@@ -59,6 +60,8 @@ private:
         uint32_t entsize = 0;
 
         const Section* section = nullptr;
+        // Cache the section name for writer's reference
+        llvm::StringRef sectName;
     };
     typedef std::vector<SectionHdrEntry> SectionHdrListTy;
 
@@ -104,7 +107,7 @@ private:
 
     // name is the string table index of the section name
     SectionHdrEntry& createSectionHdrEntry(
-        const std::string& name, unsigned type, const Section* sect = nullptr);
+        const std::string& name, unsigned type, unsigned flags = 0, const Section* sect = nullptr);
     SectionHdrEntry& createNullSectionHdrEntry();
 
     uint32_t getSymTabEntSize();
@@ -148,8 +151,8 @@ using namespace llvm;
 
 ZEELFObjectBuilder::Section&
 ZEELFObjectBuilder::addStandardSection(
-    std::string sectName, const uint8_t* data, uint64_t size,
-    unsigned type, uint32_t padding, uint32_t align, StandardSectionListTy& sections)
+    std::string sectName, const uint8_t* data, uint64_t size, unsigned type,
+    unsigned flags, uint32_t padding, uint32_t align, StandardSectionListTy& sections)
 {
     IGC_ASSERT(type != ELF::SHT_NULL);
     // calculate the required padding to satisfy alignment requirement
@@ -162,7 +165,7 @@ ZEELFObjectBuilder::addStandardSection(
     // total required padding is (padding + need_padding_for_align)
     sections.emplace_back(
         ZEELFObjectBuilder::StandardSection(sectName, data, size, type,
-            (need_padding_for_align + padding), m_sectionIdCount));
+            flags, (need_padding_for_align + padding), m_sectionIdCount));
     ++m_sectionIdCount;
     return sections.back();
 }
@@ -180,14 +183,14 @@ ZEELFObjectBuilder::addSectionText(
         sectName = m_TextName;
 
     Section& sect = addStandardSection(sectName, data, size, ELF::SHT_PROGBITS,
-        padding, align, m_textSections);
+        ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, padding, align, m_textSections);
 
     return sect.id();
 }
 
 ZEELFObjectBuilder::SectionID
 ZEELFObjectBuilder::addSectionData(
-    std::string name, const uint8_t* data, uint64_t size, uint32_t padding, uint32_t align)
+    std::string name, const uint8_t* data, uint64_t size, uint32_t padding, uint32_t align, bool rodata)
 {
     // adjust the section name to be .data.givenSectName
     std::string sectName;
@@ -196,8 +199,12 @@ ZEELFObjectBuilder::addSectionData(
     else
         sectName = m_DataName;
 
+    unsigned flags = ELF::SHF_ALLOC;
+    if (!rodata)
+        flags |= ELF::SHF_WRITE;
+
     Section& sect = addStandardSection(sectName, data, size, ELF::SHT_PROGBITS,
-        padding, align, m_dataAndbssSections);
+        flags, padding, align, m_dataAndbssSections);
     return sect.id();
 }
 
@@ -213,7 +220,7 @@ ZEELFObjectBuilder::addSectionBss(
         sectName = m_BssName;
 
     Section& sect = addStandardSection(sectName, nullptr, size, ELF::SHT_NOBITS,
-        padding, align, m_dataAndbssSections);
+        ELF::SHF_ALLOC | ELF::SHF_WRITE, padding, align, m_dataAndbssSections);
     return sect.id();
 }
 
@@ -228,7 +235,7 @@ ZEELFObjectBuilder::addSectionGTPinInfo(std::string name, const uint8_t* data, u
         sectName = m_GTPinInfoName;
 
     addStandardSection(sectName,
-        data, size, SHT_ZEBIN_GTPIN_INFO, 0, 0, m_otherStdSections);
+        data, size, SHT_ZEBIN_GTPIN_INFO, 0, 0, 0, m_otherStdSections);
 }
 
 void
@@ -242,7 +249,7 @@ ZEELFObjectBuilder::addSectionVISAAsm(std::string name, const uint8_t* data, uin
         sectName = m_VISAAsmName;
 
     addStandardSection(sectName,
-        data, size, SHT_ZEBIN_VISAASM, 0, 0, m_otherStdSections);
+        data, size, SHT_ZEBIN_VISAASM, 0, 0, 0, m_otherStdSections);
 }
 
 void
@@ -256,7 +263,7 @@ ZEELFObjectBuilder::addSectionMisc(std::string name, const uint8_t* data, uint64
         sectName = m_MiscName;
 
     addStandardSection(sectName,
-        data, size, SHT_ZEBIN_MISC, 0, 0, m_otherStdSections);
+        data, size, SHT_ZEBIN_MISC, 0, 0, 0, m_otherStdSections);
 }
 
 void
@@ -264,7 +271,7 @@ ZEELFObjectBuilder::addSectionSpirv(std::string name, const uint8_t* data, uint6
 {
     if (name.empty())
         name = m_SpvName;
-    addStandardSection(name, data, size, SHT_ZEBIN_SPIRV, 0, 0, m_otherStdSections);
+    addStandardSection(name, data, size, SHT_ZEBIN_SPIRV, 0, 0, 0, m_otherStdSections);
 }
 
 ZEELFObjectBuilder::SectionID
@@ -273,7 +280,7 @@ ZEELFObjectBuilder::addSectionDebug(std::string name, const uint8_t* data, uint6
     if (name.empty())
         name = m_DebugName;
     Section& sect =
-        addStandardSection(name, data, size, ELF::SHT_PROGBITS, 0, 0, m_otherStdSections);
+        addStandardSection(name, data, size, ELF::SHT_PROGBITS, 0, 0, 0, m_otherStdSections);
     return sect.id();
 }
 
@@ -515,6 +522,8 @@ uint64_t ELFWriter::writeSymTab()
             0, sect_idx);
         // global symbol name must be unique
         IGC_ASSERT(sym.binding() != llvm::ELF::STB_GLOBAL || m_SymNameIdxMap.find(sym.name()) == m_SymNameIdxMap.end());
+        // FIXME: This may not set the symidx correctly when there're multiple
+        // same-name local symbols.
         m_SymNameIdxMap.insert(std::make_pair(sym.name(), symidx));
         ++symidx;
     };
@@ -624,7 +633,7 @@ void ELFWriter::writeSectionHeader()
     // createSectionHdrEntries or writeSections
     for (SectionHdrEntry& entry : m_SectionHdrEntries) {
         writeSecHdrEntry(
-            entry.name, entry.type, 0, 0, entry.offset, entry.size, entry.link,
+            entry.name, entry.type, entry.flags, 0, entry.offset, entry.size, entry.link,
             entry.info, 0, entry.entsize);
     }
 }
@@ -635,7 +644,22 @@ void ELFWriter::writeSections()
         entry.offset = m_W.OS.tell();
 
         switch(entry.type) {
+        case SHT_ZEBIN_GTPIN_INFO: {
+            // Encode the sh_info field with the index of the corresponding
+            // kernel or function symbol in .symtab so that gtpin can do a fast
+            // lookup.
+            llvm::StringRef symName = entry.sectName;
+            auto res = symName.consume_front(m_ObjBuilder.m_GTPinInfoName);
+            IGC_ASSERT(res);
+            if (symName.consume_front(".")) {
+                auto it = m_SymNameIdxMap.find(symName.str());
+                IGC_ASSERT(it != m_SymNameIdxMap.end());
+                entry.info = it->second;
+            }
+            /* Fall-through */
+        }
         case ELF::SHT_PROGBITS:
+        case SHT_ZEBIN_VISAASM:
         case SHT_ZEBIN_SPIRV: {
             IGC_ASSERT(nullptr != entry.section);
             IGC_ASSERT(entry.section->getKind() == Section::STANDARD);
@@ -690,18 +714,9 @@ void ELFWriter::writeSections()
             break;
 
         case ELF::SHT_NOTE: {
-            // Currently we don't seem to reorder strings in the .strtab, and
-            // the offset returned by LLVM StringTableBuilder::add() will still
-            // be valid, so the section name can be checked in this way. Other
-            // possibilities are creating a new section kind and set the
-            // appropriate section pointer, or emitting .strtab before the note
-            // section.
-            auto strtabSize = m_StrTabBuilder.getSize();
-            if (entry.name == m_StrTabBuilder.add(m_ObjBuilder.m_CompatNoteName)) {
-                IGC_ASSERT(entry.name < strtabSize);
+            if (entry.sectName == m_ObjBuilder.m_CompatNoteName)
                 std::tie(entry.offset, entry.size) = writeCompatibilityNote();
-                break;
-            }
+            break;
         }
 
         default:
@@ -742,7 +757,7 @@ void ELFWriter::writeHeader()
     m_W.OS << char(ELF::ELFDATA2LSB);
 
     // e_ident[EI_VERSION]
-    m_W.OS << char(0);
+    m_W.OS << char(ELF::EV_CURRENT);
 
     // e_ident padding
     m_W.OS.write_zeros(ELF::EI_NIDENT - ELF::EI_OSABI);
@@ -754,7 +769,7 @@ void ELFWriter::writeHeader()
     m_W.write<uint16_t>(EM_INTELGT);
 
     // e_version
-    m_W.write<uint32_t>(0);
+    m_W.write<uint32_t>(ELF::EV_CURRENT);
 
     // e_entry, no entry point
     writeWord(0);
@@ -779,6 +794,10 @@ void ELFWriter::writeHeader()
     m_W.write<uint16_t>(is64Bit() ?
         sizeof(ELF::Elf64_Shdr) : sizeof(ELF::Elf32_Shdr));
 
+    // TODO: We do not support the case that the number of sections is greater
+    // than or equal to SHN_LORESERVE now.
+    IGC_ASSERT_MESSAGE(numOfSections() < ELF::SHN_LORESERVE,
+        "# of sections should be less than SHN_LORESERVE (oxff00)");
     // e_shnum
     m_W.write<uint16_t>(numOfSections());
 
@@ -820,12 +839,14 @@ ELFWriter::SectionHdrEntry& ELFWriter::createNullSectionHdrEntry()
 }
 
 ELFWriter::SectionHdrEntry& ELFWriter::createSectionHdrEntry(
-    const std::string& name, unsigned type, const Section* sect)
+    const std::string& name, unsigned type, unsigned flags, const Section* sect)
 {
     m_SectionHdrEntries.emplace_back(SectionHdrEntry());
     SectionHdrEntry& entry = m_SectionHdrEntries.back();
     entry.type = type;
+    entry.flags = flags;
     entry.section = sect;
+    entry.sectName = name;
     uint32_t nameoff = m_StrTabBuilder.add(StringRef(name));
     entry.name = nameoff;
     return entry;
@@ -852,14 +873,14 @@ void ELFWriter::createSectionHdrEntries()
     for (StandardSection& sect : m_ObjBuilder.m_textSections) {
         m_SectionIndex.insert(std::make_pair(sect.id(), index));
         ++index;
-        createSectionHdrEntry(sect.m_sectName, sect.m_type, &sect);
+        createSectionHdrEntry(sect.m_sectName, sect.m_type, sect.m_flags, &sect);
     }
 
     // .data
     for (StandardSection& sect : m_ObjBuilder.m_dataAndbssSections) {
         m_SectionIndex.insert(std::make_pair(sect.id(), index));
         ++index;
-        createSectionHdrEntry(sect.m_sectName, sect.m_type, &sect);
+        createSectionHdrEntry(sect.m_sectName, sect.m_type, sect.m_flags, &sect);
     }
 
     // .symtab
@@ -874,7 +895,7 @@ void ELFWriter::createSectionHdrEntries()
     for (StandardSection& sect : m_ObjBuilder.m_otherStdSections) {
         m_SectionIndex.insert(std::make_pair(sect.id(), index));
         ++index;
-        createSectionHdrEntry(sect.m_sectName, sect.m_type, &sect);
+        createSectionHdrEntry(sect.m_sectName, sect.m_type, sect.m_flags, &sect);
     }
 
     // .rel and .rela
@@ -883,8 +904,8 @@ void ELFWriter::createSectionHdrEntries()
         for (RelocSection& sect : m_ObjBuilder.m_relocSections) {
             SectionHdrEntry& entry =
                 sect.isRelFormat() ?
-                  createSectionHdrEntry(sect.m_sectName, ELF::SHT_REL, &sect) :
-                  createSectionHdrEntry(sect.m_sectName, ELF::SHT_RELA, &sect);
+                  createSectionHdrEntry(sect.m_sectName, ELF::SHT_REL, 0, &sect) :
+                  createSectionHdrEntry(sect.m_sectName, ELF::SHT_RELA, 0, &sect);
             // set apply target's section index
             // relocations could only apply to standard sections. At this point,
             // all standard section's section index should be adjusted
@@ -897,7 +918,7 @@ void ELFWriter::createSectionHdrEntries()
 
     // .ze_info
     if (m_ObjBuilder.m_zeInfoSection) {
-        createSectionHdrEntry(m_ObjBuilder.m_ZEInfoName, SHT_ZEBIN_ZEINFO,
+        createSectionHdrEntry(m_ObjBuilder.m_ZEInfoName, SHT_ZEBIN_ZEINFO, 0,
             m_ObjBuilder.m_zeInfoSection.get());
         ++index;
     }
@@ -973,14 +994,39 @@ zeInfoPayloadArgument& ZEInfoBuilder::addPayloadArgumentByValue(
     PayloadArgumentsTy& arg_list,
     int32_t offset,
     int32_t size,
-    int32_t arg_index)
+    int32_t arg_index,
+    int32_t source_offset)
 {
-    arg_list.emplace_back();
+    // Here we merge the specified payload argument from the flattened byval
+    // aggregate elements into the previous contiguous zeinfo payload argument
+    // when the host data layout is same as the payload layout, so that there
+    // will be less zeinfo payload arguments and it'll be easier for runtime to
+    // manage.
+    bool mergeable = false;
+    if (!arg_list.empty()) {
+        zeInfoPayloadArgument& prev = arg_list.back();
+        // merge-able elements must be contiguous in payload and in the host data layout
+        // FIXME: It's possible that an element is contiguous in host data but is not in
+        // the payload. Cases seen in by-val nested struct argument.
+        mergeable = prev.arg_index == arg_index &&
+                    (prev.source_offset + prev.size == source_offset) &&
+                    (prev.offset + prev.size == offset);
+    }
+
+    if (!mergeable)
+        arg_list.emplace_back();
+
     zeInfoPayloadArgument& arg = arg_list.back();
-    arg.arg_type = PreDefinedAttrGetter::get(PreDefinedAttrGetter::ArgType::arg_byvalue);
-    arg.offset = offset;
-    arg.size = size;
-    arg.arg_index = arg_index;
+
+    if (mergeable) {
+        arg.size += size;
+    } else  {
+        arg.arg_type = PreDefinedAttrGetter::get(PreDefinedAttrGetter::ArgType::arg_byvalue);
+        arg.offset = offset;
+        arg.size = size;
+        arg.arg_index = arg_index;
+        arg.source_offset = source_offset;
+    }
     return arg;
 }
 
@@ -1084,4 +1130,9 @@ void ZEInfoBuilder::addExpPropertiesHasNonKernelArgLdSt(zeInfoKernel& zekernel,
     ep.has_non_kernel_arg_load = hasNonKernelArgLoad;
     ep.has_non_kernel_arg_store = hasNonKernelArgStore;
     ep.has_non_kernel_arg_atomic = hasNonKernelArgAtomic;
+}
+
+void ZEInfoBuilder::addGlobalHostAccessSymbol(const std::string& device_name, const std::string& host_name)
+{
+    mContainer.global_host_access_table.push_back(zeInfoHostAccess{ device_name, host_name });
 }

@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ==========================-->
 
 # ZE Info
-Version 1.7
+Version 1.12
 
 ## Grammar
 
@@ -31,10 +31,11 @@ All **literals** have one of the following types:
 - str: typedef std::string zeinfo_str_t
 
 # Container
-| Attribute | Type | Description |
-| ----- | ----- | ----- |
-| version | str | ZE Info version number. See Version above. |
-| kernels | KernelsTy | vector |
+| Attribute | Type | Required/Optional | Description |
+| ----- | ----- | ----- | ----- |
+| version | str | Required | ZE Info version number. See Version above. |
+| kernels | KernelsTy | Required | vector |
+| global_host_access_table | HostAccessesTy | Optional | vector |
 <!--- Container --->
 
 # Kernel Attributes
@@ -98,6 +99,9 @@ If an attribute is **Required**, it must be present in exection_env. If it's **O
 | has_global_atomics | bool | Optional | false | |
 | has_multi_scratch_spaces | bool | Optional | false | |
 | has_no_stateless_write | bool | Optional | false | |
+| has_stack_calls | bool | Optional | false | When this value is true, it indicates that program uses stack calls |
+| require_disable_eufusion | bool | Optional | false | When this value is true, it indicates that program requires EU fusion disable |
+| inline_data_payload_size | int32 | Optional | 0 | Size of inline data in cross-thread-payload in byte. The value is 0 when inline data is disabled (default). |
 | offset_to_skip_per_thread_data_load | int32 | Optional | 0 | |
 | offset_to_skip_set_ffid_gp | int32 | Optional | 0 | |
 | required_sub_group_size | int32 | Optional | 0 | The value is given by users in kernel attributes "intel_reqd_sub_group_size" |
@@ -105,8 +109,19 @@ If an attribute is **Required**, it must be present in exection_env. If it's **O
 | simd_size | int32 | Required | | Valid value {1, 8, 16, 32} |
 | slm_size | int32 | Optional | 0 | SLM size in bytes |
 | subgroup_independent_forward_progress | bool | Optional | false | |
+| thread_scheduling_mode | <thread_scheduling_mode> | Optional | | Suggested thread arbitration policy. |
 | work_group_walk_order_dimensions | int32x3 | Optional | [0, 1, 2] | The value of this key is a sequence of three int32. Valid values are x: [0, 0, 0] , xy: [0, 1, 0], xyz: [0, 1, 2], yx: [1, 0, 0], zyx: [2, 1, 0] |
 <!--- ExecutionEnv -->
+
+### Supported thread scheduling mode:
+Supported <thread_scheduling_mode> of execution_env.
+
+| Thread Scheduling Mode | Description |
+| ----- | ----- |
+| age_based | |
+| round_robin | |
+| round_robin_stall | |
+<!--- <thread_scheduling_mode> ArgThreadSchedulingMode -->
 
 ## Payload Arguments
 This section defines payload_arguments attribute.
@@ -127,6 +142,7 @@ If an attribute is **Required**, it must be present in payload arguments. If it'
 | addrspace | <address_space> | Optional | | Present when arg_type is "arg_bypointer" |
 | access_type | <access_type> | Optional | | Present when arg_type is "arg_bypointer" |
 | sampler_index | int32 | Optional | -1 | Present when arg_type is "arg_bypointer" and address_space is "sampler" |
+| source_offset | int32 | Optional | -1 | Present when arg_type is "arg_byvalue" and the arg is a flattened aggregate element |
 <!--- PayloadArgument PayloadArguments -->
 
 ### Supported argument types:
@@ -145,6 +161,7 @@ Supported <argument_type> of payload_arguments or per_thread_payload_arguments.
 | private_base_stateless | int64 | The base address of private buffer specified at per_thread_memory_buffers |
 | buffer_offset | | The extra offset for buffer reference to satisfy the alignment requirement of stateful memory access. |
 | printf_buffer | | The address of printf_buffer which holds the printf strings information. |
+| implicit_arg_buffer | int64 | The base address of implicit arg buffer |
 | arg_byvalue | | Explicit kernel argument |
 | arg_bypointer | | Explicit kernel argument |
 <!--- <argument_type> ArgType -->
@@ -261,12 +278,26 @@ information. Currently only SIP surface information is provided.
 | sip_surface_offset | int32 | Optional | -1 | |
 <!--- DebugEnv -->
 
+## Host Access Attributes
+This section defines mapping between device and host name of a global variable.
+
+| Attribute | Type | Description |
+| ----- | ----- | ----- |
+| device_name | str | Mangled global variable name derived from Name parameter LinkageAttributes. |
+| host_name | str | User-specified global variable name derived from HostAccesINTEL decoration. Used to access global variable from host API calls. |
+<!--- HostAccess HostAccesses --->
+
 ## Versioning
 Format: \<_Major number_\>.\<_Minor number_\>
 - Major number: Increase when non-backward-compatible features are added. For example, rename attributes or remove attributes.
 - Minor number: Increase when backward-compatible features are added. For example, add new attributes.
 
 ## Change Note
+- **Version 1.12**: Add global_host_access_table to container.
+- **Version 1.11**: Add require_disable_eufusion attribute.
+- **Version 1.10**: Add thread_scheduling_mode to execution_env.
+- **Version 1.9**: Add source_offset to payload argument.
+- **Version 1.8**: Add inline_data_payload_size to execution_env.
 - **Version 1.7**: Add debug_env to kernel.
 - **Version 1.6**: Remove actual_kernel_start_offset from execution environment.
 - **Version 1.5**: Add payload_argument type work_dimensions.

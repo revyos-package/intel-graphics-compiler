@@ -14,6 +14,7 @@ SPDX-License-Identifier: MIT
 #include "visa_wa.h"
 #include "Mem_Manager.h"
 #include "JitterDataStruct.h"
+#include "KernelInfo.h"
 //#include "G4_IR.hpp"  // for PhyRegPool
 #include "Attributes.hpp"
 #include "CompilerStats.h"
@@ -79,8 +80,8 @@ public:
         m_type = type;
 
         memset(&m_cisa_kernel, 0, sizeof(kernel_format_t));
-        m_forward_label_count = 0;
         m_jitInfo = NULL;
+        m_kernelInfo = NULL;
         m_kernel = NULL;
         m_builder = NULL;
 
@@ -153,8 +154,13 @@ public:
     void addInstructionToEnd(CisaFramework::CisaInst * inst);
     int addFunctionDirective(char * func_name);
 
+    // The user of CreateVISALabelVar should be responsible for the management
+    // of the created labels. The following are the example APIs to manage vISA
+    // labels that assumes every block/subroutine/function in kernel has an
+    // unique name.
     VISA_LabelOpnd * getLabelOperandFromFunctionName(const std::string &name);
-    unsigned int getLabelIdFromFunctionName(const std::string &name);
+    VISA_LabelOpnd * getLabelOpndFromLabelName(const std::string &label_name);
+    bool setLabelOpndNameMap(const std::string &label_name, VISA_LabelOpnd * lbl, VISA_Label_Kind kind);
 
     void setGenxDebugInfoBuffer(char * buffer, unsigned long size);
     VISA_opnd* CreateOtherOpndHelper(int num_pred_desc_operands, int num_operands, VISA_INST_Desc *inst_desc, unsigned int value, bool hasSubOpcode = false, uint8_t subOpcode = 0);
@@ -165,6 +171,8 @@ public:
     /***************** END HELPER FUNCTIONS **********************/
     std::list<CisaFramework::CisaInst *>::iterator getInstructionListBegin() { return m_instruction_list.begin(); }
     std::list<CisaFramework::CisaInst *>::iterator getInstructionListEnd() { return m_instruction_list.end(); }
+    std::list<CisaFramework::CisaInst *>::const_iterator getInstructionListBegin() const { return m_instruction_list.cbegin(); }
+    std::list<CisaFramework::CisaInst *>::const_iterator getInstructionListEnd() const { return m_instruction_list.cend(); }
 
     unsigned long getGenxBinarySize() { return m_genx_binary_size; }
 
@@ -191,10 +199,6 @@ public:
     void pushIndexMapScopeLevel();
     void popIndexMapScopeLevel();
 
-    unsigned int getIndexFromLabelName(const std::string &label_name);
-    VISA_LabelOpnd * getLabelOpndFromLabelName(const std::string &label_name);
-    bool setLabelNameIndexMap(const std::string &label_name, VISA_LabelOpnd * lbl);
-    int patchLastInst(VISA_LabelOpnd *label);
     vISA::G4_Kernel* getKernel() const { return m_kernel; }
     vISA::IR_Builder* getIRBuilder() const { return m_builder; }
     CISA_IR_Builder* getCISABuilder() const { return m_CISABuilder; }
@@ -565,10 +569,165 @@ public:
         VISA_SVM_Block_Num numBlocks, VISA_StateOpndHandle *surface,
         VISA_RawOpnd* address, VISA_RawOpnd *dst) override;
 
+    VISA_BUILDER_API int AppendVISALscUntypedLoad(
+        LSC_OP                    op,
+        LSC_SFID                  sfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR                  addr,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dstData,
+        VISA_RawOpnd             *src0Addr
+    ) override;
+    VISA_BUILDER_API int AppendVISALscUntypedStore(
+        LSC_OP                    op,
+        LSC_SFID                  sfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR                  addr,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *src0Addr,
+        VISA_RawOpnd             *src1Data
+    ) override;
+    VISA_BUILDER_API int AppendVISALscUntypedAtomic(
+        LSC_OP                    op,
+        LSC_SFID                  sfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR                  addr,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dstReadBack,
+        VISA_RawOpnd             *src0Addr,
+        VISA_RawOpnd             *src1AtomOpnd1,
+        VISA_RawOpnd             *src2AtomOpnd2) override;
+    VISA_BUILDER_API int AppendVISALscUntypedInst(
+        LSC_OP                    op,
+        LSC_SFID                  sfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR                  addr,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dst,
+        VISA_RawOpnd             *src0,
+        VISA_RawOpnd             *src1,
+        VISA_RawOpnd             *src2) override;
+    VISA_BUILDER_API int AppendVISALscUntypedStridedInst(
+        LSC_OP                    subOpcode,
+        LSC_SFID                  sfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR                  addrInfo,
+        LSC_DATA_SHAPE            dataShape,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dstData,
+        VISA_RawOpnd             *src0AddrBase,
+        VISA_VectorOpnd          *src0AddrPitch,
+        VISA_RawOpnd             *src1Data) override;
+    VISA_BUILDER_API int AppendVISALscUntypedBlock2DInst(
+        LSC_OP                    op,
+        LSC_SFID                  lscSfid,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_DATA_SHAPE_BLOCK2D    dataShape,
+        VISA_RawOpnd             *dstData,
+        VISA_VectorOpnd          *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS],
+        VISA_RawOpnd             *src1Data) override;
+
+    VISA_BUILDER_API int AppendVISALscTypedLoad(
+        LSC_OP                    op,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR_TYPE             addrModel,
+        LSC_ADDR_SIZE             addrSize,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dstData,
+        VISA_RawOpnd             *Us,
+        VISA_RawOpnd             *Vs,
+        VISA_RawOpnd             *Rs,
+        VISA_RawOpnd             *LODs) override;
+    VISA_BUILDER_API int AppendVISALscTypedStore(
+        LSC_OP                    op,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR_TYPE             addrType,
+        LSC_ADDR_SIZE             addrSize,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *Us,
+        VISA_RawOpnd             *Vs,
+        VISA_RawOpnd             *Rs,
+        VISA_RawOpnd             *LODs,
+        VISA_RawOpnd             *src1Data) override;
+    VISA_BUILDER_API int AppendVISALscTypedAtomic(
+        LSC_OP                    op,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR_TYPE             addrType,
+        LSC_ADDR_SIZE             addrSize,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dst,
+        VISA_RawOpnd             *Us,
+        VISA_RawOpnd             *Vs,
+        VISA_RawOpnd             *Rs,
+        VISA_RawOpnd             *LODs,
+        VISA_RawOpnd             *src1AtomicOpnd1,
+        VISA_RawOpnd             *src2AtomicOpnd2) override;
+
+    VISA_BUILDER_API int AppendVISALscTypedInst(
+        LSC_OP                    op,
+        VISA_PredOpnd*            pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR_TYPE             addrType,
+        LSC_ADDR_SIZE             addrSize,
+        LSC_DATA_SHAPE            data,
+        VISA_VectorOpnd* surface,
+        VISA_RawOpnd* dst,
+        VISA_RawOpnd* Us,
+        VISA_RawOpnd* Vs,
+        VISA_RawOpnd* Rs,
+        VISA_RawOpnd* LODs,
+        VISA_RawOpnd* src1,
+        VISA_RawOpnd* src2) override;
+
+    VISA_BUILDER_API int AppendVISALscFence(
+        LSC_SFID                  lscSfid,
+        LSC_FENCE_OP              fenceOp,
+        LSC_SCOPE                 scope) override;
 
 
 
+    VISA_BUILDER_API int AppendVISANamedBarrierWait(
+        VISA_VectorOpnd* barrierId) override;
 
+    VISA_BUILDER_API int AppendVISANamedBarrierSignal(
+        VISA_VectorOpnd* barrierId,
+        VISA_VectorOpnd* barrierCount) override;
 
     /********** APPEND INSTRUCTION APIS END   ******************/
 
@@ -646,6 +805,7 @@ public:
     /********** MISC APIs START *************************/
     VISA_BUILDER_API int GetGenxBinary(void *&buffer, int &size) const override;
     VISA_BUILDER_API int GetJitInfo(FINALIZER_INFO *&jitInfo) const override;
+    VISA_BUILDER_API int GetKernelInfo(KERNEL_INFO*& kernelInfo) const override;
     VISA_BUILDER_API int GetCompilerStats(CompilerStats &compilerStats) override;
     VISA_BUILDER_API int GetErrorMessage(const char *&errorMsg) const override;
     VISA_BUILDER_API virtual int GetGenxDebugInfo(void *&buffer, unsigned int &size) const override;
@@ -689,6 +849,9 @@ public:
 
     /// Get global function name
     VISA_BUILDER_API const char* getFunctionName() const override;
+
+    /// Get vISA asm of the kernel function
+    VISA_BUILDER_API std::string getVISAAsm() const override;
 
     //Gets the VISA string format for the variable
     VISA_BUILDER_API std::string getVarName(VISA_GenVar* decl) const override;
@@ -753,8 +916,6 @@ public:
 
     int CreateVISAStateOperand(VISA_VectorOpnd *& opnd, CISA_GEN_VAR *decl, Common_ISA_State_Opnd_Class opnd_class, uint8_t size, unsigned char offset, bool useAsDst);
 
-    int CreateDummyLabelOperand(VISA_LabelOpnd *& opnd, char *name, VISA_Label_Kind kind);
-
     void setGenxBinaryBuffer(void *buffer, int size) { m_genx_binary_buffer = static_cast<char *>(buffer); m_genx_binary_size = size; }
     void setJitInfo(FINALIZER_INFO* jitInfo) { m_jitInfo = jitInfo; }
 
@@ -794,6 +955,8 @@ public:
 
     bool isFCComposableKernel() const { return mIsFCComposableKernel; }
     void setFCComposableKernel(bool value) { mIsFCComposableKernel = value; }
+
+    void setLocalSheduleable(bool value);
 
     unsigned int getGenVarCount() const
     {
@@ -860,7 +1023,7 @@ public:
         return m_GenVarToNameMap.find(decl)->second;
     }
 
-    Options * getOptions() { return m_options; }
+    const Options * getOptions() const { return m_options; }
 
     bool IsAsmWriterMode() const { return m_CISABuilder->getBuilderMode() == vISA_ASM_WRITER; }
 
@@ -877,7 +1040,6 @@ private:
     void generateVariableName(Common_ISA_Var_Class Ty, const char *&varName);
 
     void dumpDebugFormatFile(std::vector<vISA::DebugInfoFormat>& debugSymbols, std::string filename);
-    void patchLabels();
     int InitializeFastPath();
     void initCompilerStats();
     int predefinedVarRegAssignment();
@@ -933,6 +1095,7 @@ private:
     unsigned long m_genx_debug_info_size;
     char * m_genx_debug_info_buffer;
     FINALIZER_INFO* m_jitInfo;
+    KERNEL_INFO* m_kernelInfo;
     CompilerStats m_compilerStats;
 
     unsigned long m_cisa_binary_size;
@@ -945,7 +1108,6 @@ private:
     unsigned long m_input_offset;
 
     std::vector<std::string> m_string_pool;
-    CisaFramework::CisaInst * m_lastInst;
     enum VISA_BUILD_TYPE m_type;
     unsigned int m_resolvedIndex;
 
@@ -964,9 +1126,6 @@ private:
 
     unsigned int m_pred_info_count;
     std::vector<CISA_GEN_VAR *> m_pred_info_list;
-
-    unsigned int m_forward_label_count;
-    std::map<unsigned int, std::string> m_forward_label_pool;
 
     unsigned int m_sampler_count;
     std::vector<CISA_GEN_VAR*> m_sampler_info_list;

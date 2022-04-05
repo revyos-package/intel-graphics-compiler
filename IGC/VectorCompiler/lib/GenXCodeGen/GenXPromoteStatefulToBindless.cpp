@@ -38,9 +38,10 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXTargetMachine.h"
 
-#include "vc/GenXOpts/Utils/KernelInfo.h"
 #include "vc/Support/BackendConfig.h"
 #include "vc/Utils/GenX/Intrinsics.h"
+#include "vc/Utils/GenX/KernelInfo.h"
+#include "vc/Utils/GenX/PredefinedVariable.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
@@ -81,7 +82,6 @@ private:
   bool convertKernelArguments(Function &F);
   bool convertArguments();
 
-  GlobalVariable &createBSSVariable();
   GlobalVariable &getOrCreateBSSVariable();
 
   CallInst *createBindlessSurfaceDataportIntrinsicChain(CallInst &CI);
@@ -151,14 +151,14 @@ Optional<unsigned> PromoteToBindless::tryConvertBuffer(unsigned Kind,
   if (!BC.useBindlessBuffers())
     return None;
 
-  if (Kind != genx::KernelMetadata::AK_SURFACE)
+  if (Kind != vc::KernelMetadata::AK_SURFACE)
     return None;
 
-  if (!genx::isDescBufferType(Desc))
+  if (!vc::isDescBufferType(Desc))
     return None;
 
   // If this is a buffer, change argument kind to general value.
-  return genx::KernelMetadata::AK_NORMAL;
+  return vc::KernelMetadata::AK_NORMAL;
 }
 
 // Convert single stateful argument to bindless counterpart.
@@ -174,7 +174,7 @@ unsigned PromoteToBindless::convertSingleArg(unsigned Kind, StringRef Desc) {
 // Convert kernel arguments if there is any that need conversion.
 // Return true if metadata was modified.
 bool PromoteToBindless::convertKernelArguments(Function &F) {
-  genx::KernelMetadata KM{&F};
+  vc::KernelMetadata KM{&F};
 
   ArrayRef<unsigned> ArgKinds = KM.getArgKinds();
   ArrayRef<StringRef> ArgDescs = KM.getArgTypeDescs();
@@ -194,41 +194,20 @@ bool PromoteToBindless::convertKernelArguments(Function &F) {
 // First part of transformation: conversion of arguments to SSO.
 // Return true if IR was modified.
 bool PromoteToBindless::convertArguments() {
-  NamedMDNode *KernelsMD = M.getNamedMetadata(genx::FunctionMD::GenXKernels);
-  if (!KernelsMD)
-    return false;
-
   bool Changed = false;
-  for (MDNode *Kernel : KernelsMD->operands()) {
-    Metadata *FuncRef = Kernel->getOperand(genx::KernelMDOp::FunctionRef);
-    Function *F = cast<Function>(cast<ValueAsMetadata>(FuncRef)->getValue());
-    Changed |= convertKernelArguments(*F);
+  for (Function &Kernel : vc::kernels(M)) {
+    Changed |= convertKernelArguments(Kernel);
   }
 
   return Changed;
 }
 
-// BSS variable represented by global variable with reserved name and
-// special attribute. Create it here.
-GlobalVariable &PromoteToBindless::createBSSVariable() {
-  IGC_ASSERT_MESSAGE(M.getNamedGlobal(genx::BSSVariableName) == nullptr,
-                     "Unexpected BSS global already created");
-  LLVMContext &Ctx = M.getContext();
-  auto *I32Ty = Type::getInt32Ty(Ctx);
-  BSS = new GlobalVariable(M, I32Ty, /*isConstant=*/false,
-                           GlobalValue::ExternalLinkage,
-                           /*Initializer=*/nullptr, genx::BSSVariableName);
-  BSS->addAttribute(genx::VariableMD::VCPredefinedVariable);
-  return *BSS;
-}
-
 // Lazily get BSS variable if this is needed. Create if nothing
 // was here before.
 GlobalVariable &PromoteToBindless::getOrCreateBSSVariable() {
-  if (BSS)
-    return *BSS;
-
-  return createBSSVariable();
+  if (!BSS)
+    BSS = &vc::PredefVar::createBSS(M);
+  return *BSS;
 }
 
 // Get surface operand number for given intrinsic.
@@ -248,6 +227,8 @@ static unsigned getSurfaceOperandNo(GenXIntrinsic::ID Id) {
   case genx_dword_atomic2_imax:
   case genx_dword_atomic2_fmin:
   case genx_dword_atomic2_fmax:
+  case genx_dword_atomic2_fadd:
+  case genx_dword_atomic2_fsub:
   case genx_dword_atomic2_inc:
   case genx_dword_atomic2_dec:
   case genx_dword_atomic2_cmpxchg:
@@ -283,6 +264,15 @@ static bool isBufferIntrinsic(const Instruction &I) {
 
   const auto ID = getGenXIntrinsicID(&I);
   switch (ID) {
+  // LSC.
+  case genx_lsc_load_bti:
+  case genx_lsc_prefetch_bti:
+  case genx_lsc_load_quad_bti:
+  case genx_lsc_store_bti:
+  case genx_lsc_store_quad_bti:
+  case genx_lsc_xatomic_bti:
+    return true;
+
   // DWORD binary atomics.
   case genx_dword_atomic2_add:
   case genx_dword_atomic2_sub:
@@ -298,6 +288,8 @@ static bool isBufferIntrinsic(const Instruction &I) {
   // DWORD floating binary atomics
   case genx_dword_atomic2_fmin:
   case genx_dword_atomic2_fmax:
+  case genx_dword_atomic2_fadd:
+  case genx_dword_atomic2_fsub:
 
   // DWORD unary atomics.
   case genx_dword_atomic2_inc:
@@ -375,6 +367,8 @@ static GenXIntrinsic::ID getBindlessDataportIntrinsicID(GenXIntrinsic::ID Id) {
 
     MAP(genx_dword_atomic2_fmin);
     MAP(genx_dword_atomic2_fmax);
+    MAP(genx_dword_atomic2_fadd);
+    MAP(genx_dword_atomic2_fsub);
 
     MAP(genx_dword_atomic2_inc);
     MAP(genx_dword_atomic2_dec);
@@ -437,6 +431,47 @@ PromoteToBindless::createBindlessSurfaceDataportIntrinsicChain(CallInst &CI) {
                                                 SurfaceOpNo);
 }
 
+// Get bindless version of given bti lsc intrinsic.
+static GenXIntrinsic::ID getBindlessLscIntrinsicID(GenXIntrinsic::ID Id) {
+  using namespace GenXIntrinsic;
+
+#define MAP(intr)                                                              \
+  case intr##_bti:                                                             \
+    return intr##_bindless;
+
+  switch (Id) {
+    MAP(genx_lsc_load);
+    MAP(genx_lsc_prefetch);
+    MAP(genx_lsc_load_quad);
+    MAP(genx_lsc_store);
+    MAP(genx_lsc_store_quad);
+    MAP(genx_lsc_xatomic);
+  default:
+    reportUnhandledIntrinsic("getBindlessLscIntrinsicID", Id);
+  }
+#undef MAP
+
+  return not_genx_intrinsic;
+}
+
+// Create bindless version of lsc bti intrinsic.
+// Return newly created instruction.
+// Bindless lsc intrinsics representation differs from legacy dataport
+// intrinsics. Lsc intrinsics have special addressing mode operand so
+// there is no need to use %bss variable and SSO goes directly to lsc
+// instruction.
+static CallInst *createBindlessLscIntrinsic(CallInst &CI) {
+  const auto ID = GenXIntrinsic::getGenXIntrinsicID(&CI);
+  const auto NewId = getBindlessLscIntrinsicID(ID);
+
+  auto *Decl = vc::getGenXDeclarationForIdFromArgs(CI.getType(), CI.args(),
+                                                   NewId, *CI.getModule());
+
+  IRBuilder<> IRB{&CI};
+  SmallVector<Value *, 16> Args{CI.args()};
+  return IRB.CreateCall(Decl->getFunctionType(), Decl, Args, CI.getName());
+}
+
 void PromoteToBindless::rewriteBufferIntrinsic(CallInst &CI) {
   using namespace GenXIntrinsic;
 
@@ -458,6 +493,8 @@ void PromoteToBindless::rewriteBufferIntrinsic(CallInst &CI) {
   case genx_dword_atomic2_imax:
   case genx_dword_atomic2_fmin:
   case genx_dword_atomic2_fmax:
+  case genx_dword_atomic2_fadd:
+  case genx_dword_atomic2_fsub:
   case genx_dword_atomic2_inc:
   case genx_dword_atomic2_dec:
   case genx_dword_atomic2_cmpxchg:
@@ -470,6 +507,14 @@ void PromoteToBindless::rewriteBufferIntrinsic(CallInst &CI) {
   case genx_oword_ld_unaligned:
   case genx_oword_st:
     BindlessCI = createBindlessSurfaceDataportIntrinsicChain(CI);
+    break;
+  case genx_lsc_load_bti:
+  case genx_lsc_prefetch_bti:
+  case genx_lsc_load_quad_bti:
+  case genx_lsc_store_bti:
+  case genx_lsc_store_quad_bti:
+  case genx_lsc_xatomic_bti:
+    BindlessCI = createBindlessLscIntrinsic(CI);
     break;
   }
 

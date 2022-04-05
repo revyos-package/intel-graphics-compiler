@@ -150,6 +150,17 @@ namespace IGC
         void AtomicRawA64(AtomicOp atomic_op, const ResourceDescriptor& resource, CVariable* dst,
             CVariable* elem_offset, CVariable* src0, CVariable* src1,
             unsigned short bitwidth);
+        void TypedAtomic(
+            AtomicOp atomic_op,
+            CVariable* dst,
+            const ResourceDescriptor& resource,
+            CVariable* pU,
+            CVariable* pV,
+            CVariable* pR,
+            CVariable* src0,
+            CVariable* src1,
+            CVariable* lod,
+            bool is16Bit = false);
         void Cmp(e_predicate p, CVariable* dst, CVariable* src0, CVariable* src1);
         void Select(CVariable* flag, CVariable* dst, CVariable* src0, CVariable* src1);
         void GenericAlu(e_opcode opcode, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2 = nullptr);
@@ -238,6 +249,60 @@ namespace IGC
             unsigned char blockHeight,
             uint plane);
         void GatherA64(CVariable* dst, CVariable* offset, unsigned elementSize, unsigned numElems);
+        VISA_VectorOpnd* GetVISALSCSurfaceOpnd(e_predefSurface surfaceType, CVariable* bti);
+        static LSC_DATA_SIZE LSC_GetElementSize(unsigned eSize, bool is2DBlockMsg = false);
+        static LSC_DATA_ELEMS LSC_GetElementNum(unsigned eNum);
+        static LSC_ADDR_TYPE getLSCAddrType(const ResourceDescriptor * resource);
+        static LSC_ADDR_TYPE getLSCAddrType(e_predefSurface surfaceType);
+        void LSC_LoadGather(
+            LSC_OP subOp, CVariable* dst, CVariable* offset,
+            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
+            unsigned blockOffset, ResourceDescriptor* resource,
+            LSC_ADDR_SIZE addr_size, LSC_DATA_ORDER data_order,
+            int immOffset, LSC_CACHE_OPTS cacheOpts);
+        void LSC_StoreScatter(
+            LSC_OP subOp, CVariable * src, CVariable * offset,
+            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
+            unsigned blockOffset, ResourceDescriptor * resource,
+            LSC_ADDR_SIZE addr_size, LSC_DATA_ORDER data_order,
+            int immOffset, LSC_CACHE_OPTS cacheOpts);
+        void LSC_LoadBlock1D(
+            CVariable* dst, CVariable* offset,
+            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
+            ResourceDescriptor* resource,
+            LSC_ADDR_SIZE addrSize, int addrImmOffset,
+            LSC_CACHE_OPTS cacheOpts);
+        void LSC_StoreBlock1D(
+            CVariable * src, CVariable * offset,
+            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
+            ResourceDescriptor * resource,
+            LSC_ADDR_SIZE addrSize, int addrImmOffset,
+            LSC_CACHE_OPTS cacheOpts);
+        void LSC_AtomicRaw(
+            AtomicOp atomic_op, CVariable * dst, CVariable * offset,
+            CVariable * src0, CVariable * src1,
+            unsigned short bitwidth, ResourceDescriptor * resource,
+            LSC_ADDR_SIZE addr_size,
+            int immOff, LSC_CACHE_OPTS cacheOpts);
+        void LSC_Fence(LSC_SFID sfid, LSC_SCOPE scope, LSC_FENCE_OP op);
+        void LSC_2DBlockMessage(
+            LSC_OP subOp, ResourceDescriptor* resource,
+            CVariable* dst, CVariable* bufId,
+            CVariable* xOffset, CVariable* yOffset,
+            unsigned char blockWidth,
+            unsigned char blockHeight,
+            unsigned elemSize, unsigned numBlocks,
+            bool isTranspose, bool isVnni,
+            CVariable* flatImageBaseoffset, CVariable* flatImageWidth,
+            CVariable* flatImageHeight, CVariable* flatImagePitch);
+        void NamedBarrier(e_barrierKind BarrierKind, CVariable* src0, CVariable* src1);
+        void LSC_TypedReadWrite(
+            LSC_OP subOp, ResourceDescriptor* resource,
+            CVariable* pU, CVariable* pV, CVariable* pR, CVariable* pLOD,
+            CVariable* pSrcDst,
+            unsigned elemSize, unsigned numElems,
+            LSC_ADDR_SIZE addr_size, int chMask);
+
         void ScatterA64(CVariable* val, CVariable* offset, unsigned elementSize, unsigned numElems);
         void ByteGather(CVariable* dst, const ResourceDescriptor& resource, CVariable* offset, unsigned elementSize, unsigned numElems);
         void ByteScatter(CVariable* src, const ResourceDescriptor& resource, CVariable* offset, unsigned elementSize, unsigned numElems);
@@ -302,7 +367,7 @@ namespace IGC
         inline void SetP(CVariable* dst, CVariable* src);
         inline void Gather(CVariable* dst, CVariable* bufidx, CVariable* offset, CVariable* gOffset, e_predefSurface surface, int elementSize);
         inline void TypedRead4(const ResourceDescriptor& resource, CVariable* pU, CVariable* pV, CVariable* pR, CVariable* pLOD, CVariable* pDst, uint writeMask);
-        inline void TypedWrite4(const ResourceDescriptor& resource, CVariable* pU, CVariable* pV, CVariable* pR, CVariable* pLOD, CVariable* pSrc);
+        inline void TypedWrite4(const ResourceDescriptor& resource, CVariable* pU, CVariable* pV, CVariable* pR, CVariable* pLOD, CVariable* pSrc, uint writeMask);
         inline void Scatter(CVariable* val, CVariable* bufidx, CVariable* offset, CVariable* gOffset, e_predefSurface surface, int elementSize);
         inline void IShr(CVariable* dst, CVariable* src0, CVariable* src1);
         inline void Min(CVariable* dst, CVariable* src0, CVariable* src1);
@@ -318,8 +383,8 @@ namespace IGC
         void dpas(CVariable* dst, CVariable* input, CVariable* weight, PrecisionType weight_precision,
             CVariable* actication, PrecisionType activation_precision, uint8_t systolicDepth,
             uint8_t repeatCount, bool IsDpasw);
-        void bf_cvt(CVariable* dst, CVariable* src);
         void fcvt(CVariable* dst, CVariable* src);
+        void srnd(CVariable* D, CVariable* S0, CVariable* R);
         void Bfn(uint8_t booleanFuncCtrl, CVariable* dst, CVariable* src0, CVariable* src1, CVariable* src2);
         void QWGather(CVariable* dst, const ResourceDescriptor& resource, CVariable* offset, unsigned elementSize, unsigned numElems);
         void QWScatter(CVariable* src, const ResourceDescriptor& resource, CVariable* offset, unsigned elementSize, unsigned numElems);
@@ -538,28 +603,43 @@ namespace IGC
         // as ZE binary format
 
         // CreateSymbolTable
-        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
-        // input/output: symbols: for ZEBinary foramt
-        // FIXME: Currently we will fill both structures for patch-token-based and ZEBinary format. Can refactor the code
-        // to do only one based on produced binary format (regkey: EnableZEBinary)
         // Note that this function should be called only once even if there are multiple kernels in a program. Current IGC
         // flow will create all symbols in the first kernel and all the other kernels won't contain symbols
-        void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries,
-            SProgramOutput::ZEBinFuncSymbolTable& funcSyms, SOpenCLProgramInfo::ZEBinProgramSymbolTable& programSyms);
-        // Create function symbols for kernels. This is ZEBinary foramt only.
-        void CreateKernelSymbol(const std::string& kernelName, unsigned offset, unsigned size,
-            SProgramOutput::ZEBinFuncSymbolTable& symbols);
+        typedef std::vector<std::pair<llvm::Value*, vISA::GenSymEntry>> ValueToSymbolList;
+        void CreateSymbolTable(ValueToSymbolList& symbolTableList);
+        // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        void CreateSymbolTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+        // input/output: symbols: for ZEBinary foramt
+        void CreateSymbolTable(SProgramOutput::ZEBinFuncSymbolTable& funcSyms, SOpenCLProgramInfo::ZEBinProgramSymbolTable& programSyms);
+        // Create local symbols for kernels. This is ZEBinary format only.
+        void CreateLocalSymbol(const std::string& kernelName, vISA::GenSymType type,
+            unsigned offset, unsigned size, SProgramOutput::ZEBinFuncSymbolTable& symbols);
 
         // CreateRelocationTable
         // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
+        void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
         // input/output: relocations: for ZEBinary foramt
-        void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::RelocListTy& relocations);
+        void CreateRelocationTable(SProgramOutput::RelocListTy& relocations);
+
+        // CreateFuncAttributeTable
         void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs);
+
+        // CreateGlobalHostAccessTable
+        typedef std::vector<vISA::HostAccessEntry> HostAccessList;
+        void CreateGlobalHostAccessTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+        // input/output: hostAccessMap: for patch-token-based format.
+        void CreateGlobalHostAccessTable(HostAccessList& hostAccessMap);
+        // input/output: global host access names: for ZEBinary format
+        void CreateGlobalHostAccessTable(SOpenCLProgramInfo::ZEBinGlobalHostAccessTable& globalHostAccessTable);
 
         uint32_t getGRFSize() const;
 
         bool needsSplitting(VISA_Exec_Size ExecSize) const
         {
+            if (getGRFSize() == 64)
+            {
+                return ExecSize == EXEC_SIZE_32;
+            }
             return ExecSize == EXEC_SIZE_16;
         }
 
@@ -605,13 +685,13 @@ namespace IGC
 
     protected:
         // encoder states
-        SEncoderState m_encoderState;
+        SEncoderState m_encoderState = {};
 
         llvm::DenseMap<SAlias, CVariable*, SAliasMapInfo> m_aliasesMap;
 
         // vISA needs its own Wa-table as some of the W/A are applicable
         // only to certain APIs/shader types/reg key settings/etc.
-        WA_TABLE m_vISAWaTable;
+        WA_TABLE m_vISAWaTable = {};
 
         enum OpType
         {
@@ -649,8 +729,8 @@ namespace IGC
 
         int m_nestLevelForcedNoMaskRegion = 0;
 
-        bool m_enableVISAdump;
-        bool m_hasInlineAsm;
+        bool m_enableVISAdump = false;
+        bool m_hasInlineAsm = false;
 
         std::vector<VISA_LabelOpnd*> labelMap;
         std::vector<CName> labelNameMap; // parallel to labelMap
@@ -954,9 +1034,9 @@ namespace IGC
     }
 
     inline void CEncoder::TypedWrite4(const ResourceDescriptor& resource, CVariable* pU, CVariable* pV,
-        CVariable* pR, CVariable* pLOD, CVariable* pSrc)
+        CVariable* pR, CVariable* pLOD, CVariable* pSrc, uint writeMask)
     {
-        TypedReadWrite(ISA_SCATTER4_TYPED, resource, pU, pV, pR, pLOD, pSrc, 0);
+        TypedReadWrite(ISA_SCATTER4_TYPED, resource, pU, pV, pR, pLOD, pSrc, writeMask);
     }
 
     inline void CEncoder::Scatter(CVariable* val, CVariable* bufidx, CVariable* offset, CVariable* gOffset, e_predefSurface surface, int elementSize)

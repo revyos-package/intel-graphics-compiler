@@ -9,10 +9,6 @@
 
 
 # CMake Settings:
-# - SPIRV_PREBUILD_DIR
-# - SPIRVDLL_SRC
-# - SPIRV_SRC
-# - INSTALL_SPIRVDLL
 # - VC_INTRINSICS_SRC
 set(IGC_BUILD__PROJ__VectorCompiler "${IGC_BUILD__PROJ_NAME_PREFIX}VectorCompiler")
 set(IGC_BUILD__PROJ__VectorCompiler "${IGC_BUILD__PROJ__VectorCompiler}" PARENT_SCOPE)
@@ -24,6 +20,10 @@ set(IGC_BUILD__PROJ_LABEL__VectorCompiler "${IGC_BUILD__PROJ__VectorCompiler}")
 
 message(STATUS "+++ Source/IGC/VectorCompiler +++")
 message(STATUS "[VC] Build proj: ${IGC_BUILD__PROJ__VectorCompiler}")
+
+if(LLVM_VERSION_MAJOR LESS 9)
+  message(FATAL_ERROR "OpenCL C++ is available only since LLVM-9. Cannot build VC BiF without this feature.")
+endif()
 
 # --- Options ---
 
@@ -42,34 +42,11 @@ if(LLVM_ON_WIN32)
   add_compile_options(/wd4141)
 endif()
 
+# --- VC platforms ---
+include(cmake/supported_platforms_list.cmake)
+
 # --- VC Intrinsics ---
-
-if(DEFINED VC_INTRINSICS_SRC)
-  set(INTRSRC "${VC_INTRINSICS_SRC}/GenXIntrinsics")
-endif()
-
-if(NOT DEFINED INTRSRC)
-  set(INTRSRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../vc-intrinsics/GenXIntrinsics")
-endif()
-
-message(STATUS "[VC] Using vc-intrinsics source from: ${INTRSRC}")
-# Trick intrinsics.
-set(BUILD_EXTERNAL YES)
-# We are using prebuilt SPIRV and building intrinsics.
-set(INTRBUILD "${CMAKE_CURRENT_BINARY_DIR}/intrbuild")
-add_subdirectory(${INTRSRC} ${INTRBUILD} EXCLUDE_FROM_ALL)
-
-if(NOT IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_VC)
-  include(cmake/spirv.cmake)
-endif()
-
-set(IGC_OPTION__VC_DISABLE_BIF_DEFAULT OFF)
-if(LLVM_VERSION_MAJOR LESS 9)
-  set(IGC_OPTION__VC_DISABLE_BIF_DEFAULT ON)
-endif()
-option(IGC_OPTION__VC_DISABLE_BIF
-  "disable BiF generation for VC (disables some BE features)"
-  ${IGC_OPTION__VC_DISABLE_BIF_DEFAULT})
+include(cmake/handle_vc_intrinsics.cmake)
 
 # --- VC Opt ---
 
@@ -81,6 +58,8 @@ add_subdirectory(lib)
 # some components in IGC.
 add_subdirectory(igcdeps)
 
+
+add_subdirectory(utils)
 
 # --- CMCL  ---
 add_subdirectory(CMCL)

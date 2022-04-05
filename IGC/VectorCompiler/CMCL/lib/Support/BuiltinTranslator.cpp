@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "cmcl/Support/BuiltinTranslator.h"
+#include "cmcl/Support/AtomicsIface.h"
 
 #include <llvm/GenXIntrinsics/GenXIntrinsics.h>
 
@@ -22,6 +23,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/Support/ErrorHandling.h>
 
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/IRBuilder.h"
 
 #include <algorithm>
 #include <array>
@@ -71,10 +73,6 @@ constexpr const char BuiltinPrefix[] = "__cm_cl_";
 #include "TranslationInfo.inc"
 #undef CMCL_AUTOGEN_BUILTIN_DESCS
 
-static bool isOutputOperand(OperandKind::Enum OpKind) {
-  return OpKind == OperandKind::VectorInOut || OpKind == OperandKind::VectorOut;
-}
-
 template <BuiltinID::Enum BiID>
 static void handleBuiltinCall(CallInst &BiCall);
 
@@ -109,8 +107,12 @@ Function *getGenXDeclarationForIdFromArgs(Type &RetTy, Range &&Args,
   assert(GenXIntrinsic::isGenXIntrinsic(Id) && "Expected genx intrinsic id");
 
   SmallVector<Type *, 4> Types;
-  if (GenXIntrinsic::isOverloadedRet(Id))
-    Types.push_back(&RetTy);
+  if (GenXIntrinsic::isOverloadedRet(Id)) {
+    if (isa<StructType>(RetTy))
+      llvm::copy(cast<StructType>(RetTy).elements(), std::back_inserter(Types));
+    else
+      Types.push_back(&RetTy);
+  }
   for (auto &&EnumArg : llvm::enumerate(Args)) {
     if (GenXIntrinsic::isOverloadedArg(Id, EnumArg.index()))
       Types.push_back(EnumArg.value()->getType());
@@ -120,7 +122,7 @@ Function *getGenXDeclarationForIdFromArgs(Type &RetTy, Range &&Args,
 }
 
 static bool isCMCLBuiltin(const Function &F) {
-  return F.getName().startswith(BuiltinPrefix);
+  return F.getName().contains(BuiltinPrefix);
 }
 
 static BuiltinSeq collectBuiltins(Module &M) {
@@ -150,48 +152,12 @@ static void cleanUpBuiltins(iterator_range<BuiltinSeq::iterator> Builtins) {
 }
 
 static BuiltinID::Enum decodeBuiltin(StringRef BiName) {
-  auto BiIt =
-      std::find(std::begin(BuiltinNames), std::end(BuiltinNames), BiName);
+  auto BiIt = std::find_if(std::begin(BuiltinNames), std::end(BuiltinNames),
+                           [BiName](const char *NameFromTable) {
+                             return BiName.contains(NameFromTable);
+                           });
   assert(BiIt != std::end(BuiltinNames) && "unknown CM-CL builtin");
   return static_cast<BuiltinID::Enum>(BiIt - std::begin(BuiltinNames));
-}
-
-static bool isPointerToVector(Type &Ty) {
-  if (!Ty.isPointerTy())
-    return false;
-  auto *PointeeTy = Ty.getPointerElementType();
-  return PointeeTy->isVectorTy();
-}
-
-// Look for original vector pointer through series of bitcasts.
-// For example searchForVectorPointer will return %ptr with %ptr.void.gen
-// argument:
-//    %ptr = alloca <8 x i32>, align 32
-//    %ptr.void = bitcast <8 x i32>* %ptr to i8*
-//    %ptr.void.gen = addrspacecast i8* %ptr.void to i8 addrspace(4)*
-static Value &searchForVectorPointer(Value &V) {
-  assert(V.getType()->isPointerTy() &&
-         "wrong argument: the original value must be a pointer");
-  Value *CurV;
-  for (CurV = &V; !isPointerToVector(*CurV->getType());
-       CurV = cast<CastInst>(CurV)->getOperand(0))
-    ;
-  return *CurV;
-}
-
-// Vector operand is passed through void* so we need to look for the real
-// pointer to vector first and then load the vector.
-static Value &readVectorFromBuiltinOp(Value &BiOp, IRBuilder<> &IRB) {
-  auto &Ptr = searchForVectorPointer(BiOp);
-  Type *Ty = Ptr.getType()->getPointerElementType();
-  return *IRB.CreateLoad(Ty, &Ptr, Ptr.getName() + ".ld.arg");
-}
-
-// Output vector operands is also passed as void*.
-static void writeVectorFromBuiltinOp(Value &ToWrite, Value &BiOp,
-                                     IRBuilder<> &IRB) {
-  auto &Ptr = searchForVectorPointer(BiOp);
-  IRB.CreateStore(&ToWrite, &Ptr);
 }
 
 // Getting vc-intrinsic (or llvm instruction/intrinsic) operand based on cm-cl
@@ -201,24 +167,12 @@ Value &readValueFromBuiltinOp(CallInst &BiCall, int OpIdx, IRBuilder<> &IRB) {
   Value &BiOp = *BiCall.getArgOperand(OpIdx);
   assert(OpIdx < BuiltinOperandSize[BiID] && "operand index is illegal");
   switch (BuiltinOperandKind[BiID][OpIdx]) {
-  case OperandKind::VectorOut:
+  case OperandKind::Output:
     llvm_unreachable("cannot read value from an output operand");
-  case OperandKind::VectorIn:
-  case OperandKind::VectorInOut:
-    return readVectorFromBuiltinOp(BiOp, IRB);
-  case OperandKind::ScalarConst:
-    assert((BiOp.getType()->isIntegerTy() ||
-            BiOp.getType()->isFloatingPointTy()) &&
-           "scalar operand is expected");
+  case OperandKind::Constant:
     assert(isa<Constant>(BiOp) && "constant operand is expected");
     return BiOp;
-  case OperandKind::ScalarIn:
-    assert((BiOp.getType()->isIntegerTy() ||
-            BiOp.getType()->isFloatingPointTy()) &&
-           "scalar operand is expected");
-    return BiOp;
-  case OperandKind::PointerIn:
-    assert(BiOp.getType()->isPointerTy() && "pointer type is expected");
+  case OperandKind::Input:
     return BiOp;
   default:
     llvm_unreachable("Unexpected operand kind");
@@ -233,13 +187,10 @@ Type &getTypeFromBuiltinOperand(CallInst &BiCall, int OpIdx) {
   assert(OpIdx < BuiltinOperandSize[BiID] && "operand index is illegal");
   Value &BiOp = *BiCall.getArgOperand(OpIdx);
   switch (BuiltinOperandKind[BiID][OpIdx]) {
-  case OperandKind::VectorOut:
-  case OperandKind::VectorIn:
-  case OperandKind::VectorInOut:
-    return *searchForVectorPointer(BiOp).getType()->getPointerElementType();
-  case OperandKind::ScalarConst:
-  case OperandKind::ScalarIn:
-  case OperandKind::PointerIn:
+  case OperandKind::Output:
+    return *BiOp.getType()->getPointerElementType();
+  case OperandKind::Input:
+  case OperandKind::Constant:
     return *BiOp.getType();
   default:
     llvm_unreachable("Unexpected operand kind");
@@ -250,6 +201,11 @@ Type &getTypeFromBuiltinOperand(CallInst &BiCall, int OpIdx) {
 // \p Ty must be a fixed vector type.
 static int getVectorWidth(Type &Ty) {
   return cast<IGCLLVM::FixedVectorType>(Ty).getNumElements();
+}
+
+// A helper function to get structure type from its element types.
+template <typename... ArgTys> Type &getStructureOf(ArgTys &... ElementTys) {
+  return *StructType::create("", &ElementTys...);
 }
 
 // Returns the type wich instruction that a builtin is translated into will
@@ -289,34 +245,304 @@ std::vector<Value *> getTranslatedBuiltinOperands(CallInst &BiCall,
 // Args:
 //    RetTy - type of generated instruction
 template <BuiltinID::Enum BiID>
-std::vector<ValueRef> createMainInst(const std::vector<Value *> &Operands,
-                                     Type &RetTy, IRBuilder<> &IRB) {
+Value &createMainInst(const std::vector<Value *> &Operands, Type &RetTy,
+                      IRBuilder<> &IRB) {
   auto *Decl = getGenXDeclarationForIdFromArgs(
       RetTy, Operands,
       static_cast<GenXIntrinsic::ID>(IntrinsicForBuiltin[BiID]),
       *IRB.GetInsertBlock()->getModule());
   auto *CI =
       IRB.CreateCall(Decl, Operands, RetTy.isVoidTy() ? "" : "cmcl.builtin");
-  return {*CI};
+  return *CI;
+}
+
+// Works only for intrinsics which are overloaded by the return value type.
+template <BuiltinID::Enum BiID>
+static Value &createLLVMIntrinsic(const std::vector<Value *> &Operands,
+                                  Type &RetTy, IRBuilder<> &IRB) {
+  auto IID = static_cast<Intrinsic::ID>(IntrinsicForBuiltin[BiID]);
+  assert(IID != Intrinsic::not_intrinsic && "Expected LLVM intrinsic");
+  Module *M = IRB.GetInsertBlock()->getModule();
+  auto *Decl = Intrinsic::getDeclaration(M, IID, {&RetTy});
+  return *IRB.CreateCall(Decl, Operands);
 }
 
 template <>
-std::vector<ValueRef>
-createMainInst<BuiltinID::Select>(const std::vector<Value *> &Operands, Type &,
-                                  IRBuilder<> &IRB) {
-  // LLVM select instruction operand indices.
-  enum LLVMSelectOperand { Condition, TrueValue, FalseValue };
+Value &createMainInst<BuiltinID::AbsFloat>(const std::vector<Value *> &Operands,
+                                           Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == AbsFloatOperand::Size &&
+         "builtin operands should be trasformed into LLVM fabs "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::AbsFloat>(Operands, RetTy, IRB);
+}
+
+//----------------------- Rounding operations ----------------------------//
+template <>
+Value &createMainInst<BuiltinID::Ceil>(const std::vector<Value *> &Operands,
+                                           Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == CeilOperand::Size &&
+         "builtin operands should be trasformed into LLVM ceil "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::Ceil>(Operands, RetTy, IRB);
+}
+
+template <>
+Value &createMainInst<BuiltinID::Floor>(const std::vector<Value *> &Operands,
+                                            Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == FloorOperand::Size &&
+         "builtin operands should be trasformed into LLVM floor "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::Floor>(Operands, RetTy, IRB);
+}
+
+template <>
+Value &createMainInst<BuiltinID::Trunc>(const std::vector<Value *> &Operands,
+                                            Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == TruncOperand::Size &&
+         "builtin operands should be trasformed into LLVM trunc "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::Trunc>(Operands, RetTy, IRB);
+}
+//------------------------------------------------------------------------//
+
+template <>
+Value &createMainInst<BuiltinID::MinNum>(const std::vector<Value *> &Operands,
+                                         Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == MinNumOperand::Size &&
+         "builtin operands should be trasformed into LLVM minnum "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::MinNum>(Operands, RetTy, IRB);
+}
+
+template <>
+Value &createMainInst<BuiltinID::MaxNum>(const std::vector<Value *> &Operands,
+                                         Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == MaxNumOperand::Size &&
+         "builtin operands should be trasformed into LLVM maxnum "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::MaxNum>(Operands, RetTy, IRB);
+}
+
+template <>
+Value &createMainInst<BuiltinID::Select>(const std::vector<Value *> &Operands,
+                                         Type &, IRBuilder<> &IRB) {
+  assert(Operands.size() == SelectOperand::Size &&
+         "builtin operands should be trasformed into LLVM select instruction "
+         "operands without changes");
   // trunc <iW x N> to <i1 x N> for mask
-  auto &WrongTypeCond = *Operands[LLVMSelectOperand::Condition];
+  auto &WrongTypeCond = *Operands[SelectOperand::Condition];
   auto Width =
       cast<IGCLLVM::FixedVectorType>(WrongTypeCond.getType())->getNumElements();
   auto *CondTy = IGCLLVM::FixedVectorType::get(IRB.getInt1Ty(), Width);
   auto *RightTypeCond = IRB.CreateTrunc(&WrongTypeCond, CondTy,
                                         WrongTypeCond.getName() + ".trunc");
   auto *SelectResult =
-      IRB.CreateSelect(RightTypeCond, Operands[LLVMSelectOperand::TrueValue],
-                       Operands[LLVMSelectOperand::FalseValue], "cmcl.sel");
-  return {*SelectResult};
+      IRB.CreateSelect(RightTypeCond, Operands[SelectOperand::TrueValue],
+                       Operands[SelectOperand::FalseValue], "cmcl.sel");
+  return *SelectResult;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Fma>(const std::vector<Value *> &Operands,
+                                      Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == FmaOperand::Size &&
+         "builtin operands should be trasformed into LLVM fma "
+         "intrinsic operands without changes");
+  return createLLVMIntrinsic<BuiltinID::Fma>(Operands, RetTy, IRB);
+}
+
+template <>
+Value &createMainInst<BuiltinID::Sqrt>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == SqrtOperand::Size &&
+         "builtin operands should be trasformed into LLVM sqrt "
+         "intrinsic operands without changes");
+  auto *InstSqrt = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Sqrt>(
+      {Operands[SqrtOperand::Source]}, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[SqrtOperand::IsFast])->getSExtValue())
+    InstSqrt->setFast(true);
+  return *InstSqrt;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Log2>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == Log2Operand::Size &&
+         "builtin operands should be trasformed into LLVM log2 "
+         "intrinsic operands without changes");
+  auto *InstLog2 = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Log2>(
+      {Operands[Log2Operand::Source]}, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[Log2Operand::IsFast])->getSExtValue())
+    InstLog2->setFast(true);
+  return *InstLog2;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Exp2>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == Exp2Operand::Size &&
+         "builtin operands should be trasformed into LLVM exp2 "
+         "intrinsic operands without changes");
+  auto *InstExp2 = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Exp2>(
+      {Operands[Exp2Operand::Source]}, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[Exp2Operand::IsFast])->getSExtValue())
+    InstExp2->setFast(true);
+  return *InstExp2;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Powr>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == PowrOperand::Size &&
+         "builtin operands should be trasformed into LLVM pow "
+         "intrinsic operands without changes");
+  std::vector<Value*> Args{ Operands[PowrOperand::Base],
+                            Operands[PowrOperand::Exponent] };
+  auto *InstPow = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Powr>(
+      Args, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[PowrOperand::IsFast])->getSExtValue())
+    InstPow->setFast(true);
+  return *InstPow;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Sin>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == SinOperand::Size &&
+         "builtin operands should be trasformed into LLVM sin "
+         "intrinsic operands without changes");
+  auto *InstSin = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Sin>(
+      {Operands[SinOperand::Source]}, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[SinOperand::IsFast])->getSExtValue())
+    InstSin->setFast(true);
+  return *InstSin;
+}
+
+template <>
+Value &createMainInst<BuiltinID::Cos>(const std::vector<Value *> &Operands,
+                                       Type &RetTy, IRBuilder<> &IRB) {
+  assert(Operands.size() == CosOperand::Size &&
+         "builtin operands should be trasformed into LLVM cos "
+         "intrinsic operands without changes");
+  auto *InstCos = cast<Instruction>(&createLLVMIntrinsic<BuiltinID::Cos>(
+      {Operands[CosOperand::Source]}, RetTy, IRB));
+  if (cast<ConstantInt>(Operands[CosOperand::IsFast])->getSExtValue())
+    InstCos->setFast(true);
+  return *InstCos;
+}
+
+using CMCLSemantics = cmcl::atomic::MemorySemantics::Enum;
+using CMCLMemoryScope = cmcl::atomic::MemoryScope::Enum;
+using CMCLOperation = cmcl::atomic::Operation::Enum;
+
+static AtomicOrdering getLLVMAtomicOrderingFromCMCL(CMCLSemantics S) {
+  switch (S) {
+  case CMCLSemantics::Relaxed:
+    return AtomicOrdering::Monotonic;
+  case CMCLSemantics::Acquire:
+    return AtomicOrdering::Acquire;
+  case CMCLSemantics::Release:
+    return AtomicOrdering::Release;
+  case CMCLSemantics::AcquireRelease:
+    return AtomicOrdering::AcquireRelease;
+  case CMCLSemantics::SequentiallyConsistent:
+    return AtomicOrdering::SequentiallyConsistent;
+  }
+  llvm_unreachable("unhandled cmcl semantics");
+}
+
+static AtomicRMWInst::BinOp getLLVMAtomicBinOpFromCMCL(CMCLOperation Op) {
+  switch (Op) {
+  default:
+    llvm_unreachable("unexpected cmcl binary op");
+  case CMCLOperation::MinSInt:
+    return AtomicRMWInst::Min;
+  case CMCLOperation::Xchg:
+    return AtomicRMWInst::Xchg;
+  case CMCLOperation::MaxSInt:
+    return AtomicRMWInst::Max;
+  case CMCLOperation::Min:
+    return AtomicRMWInst::UMin;
+  case CMCLOperation::Max:
+    return AtomicRMWInst::UMax;
+  case CMCLOperation::Add:
+    return AtomicRMWInst::Add;
+  case CMCLOperation::Sub:
+    return AtomicRMWInst::Sub;
+  case CMCLOperation::Orl:
+    return AtomicRMWInst::Or;
+  case CMCLOperation::Xorl:
+    return AtomicRMWInst::Xor;
+  case CMCLOperation::Andl:
+    return AtomicRMWInst::And;
+  }
+}
+
+template <>
+Value &
+createMainInst<BuiltinID::AtomicRMW>(const std::vector<Value *> &Operands,
+                                     Type &, IRBuilder<> &IRB) {
+  assert(Operands.size() == AtomicRMWOperand::Size &&
+         "builtin operands should be trasformed into LLVM atomicrmw "
+         "instruction operands without changes");
+  auto &Ctx = IRB.getContext();
+  auto *Ptr = Operands[AtomicRMWOperand::Ptr];
+  auto Ordering = getLLVMAtomicOrderingFromCMCL(static_cast<CMCLSemantics>(
+      cast<ConstantInt>(Operands[AtomicRMWOperand::Semantics])
+          ->getZExtValue()));
+  auto ScopeName = cmcl::atomic::MemoryScope::getScopeNameFromCMCL(
+      static_cast<CMCLMemoryScope>(
+          cast<ConstantInt>(Operands[AtomicRMWOperand::Scope])
+              ->getZExtValue()));
+  auto BinOp = getLLVMAtomicBinOpFromCMCL(static_cast<CMCLOperation>(
+      cast<ConstantInt>(Operands[AtomicRMWOperand::Operation])
+          ->getSExtValue()));
+  return *IGCLLVM::createAtomicRMW(
+      IRB, BinOp, Ptr, Operands[AtomicRMWOperand::Operand], Ordering,
+      Ctx.getOrInsertSyncScopeID(ScopeName));
+}
+
+template <>
+Value &createMainInst<BuiltinID::CmpXchg>(const std::vector<Value *> &Operands,
+                                          Type &, IRBuilder<> &IRB) {
+  assert(Operands.size() == CmpXchgOperand::Size &&
+         "builtin operands should be trasformed into LLVM cmpxchg "
+         "instruction operands without changes");
+  auto *Ptr = Operands[CmpXchgOperand::Ptr];
+  auto &Ctx = IRB.getContext();
+  auto OrderingSuccess =
+      getLLVMAtomicOrderingFromCMCL(static_cast<CMCLSemantics>(
+          cast<ConstantInt>(Operands[CmpXchgOperand::SemanticsSuccess])
+              ->getZExtValue()));
+  auto OrderingFalilure =
+      getLLVMAtomicOrderingFromCMCL(static_cast<CMCLSemantics>(
+          cast<ConstantInt>(Operands[CmpXchgOperand::SemanticsFailure])
+              ->getZExtValue()));
+  auto ScopeName = cmcl::atomic::MemoryScope::getScopeNameFromCMCL(
+      static_cast<CMCLMemoryScope>(
+          cast<ConstantInt>(Operands[CmpXchgOperand::Scope])->getZExtValue()));
+  auto *CmpXchgInst = IGCLLVM::createAtomicCmpXchg(
+      IRB, Ptr, Operands[CmpXchgOperand::Operand0],
+      Operands[CmpXchgOperand::Operand1], OrderingSuccess, OrderingFalilure,
+      Ctx.getOrInsertSyncScopeID(ScopeName));
+  return *IRB.CreateExtractValue(CmpXchgInst, 0 /*CmpXchg result*/,
+                                 ".cmpxchg.res");
+}
+
+// Produces a vector of main inst results from its value.
+// For multiple output an intrinsic may return a structure. This function will
+// extract all structure elements and put them in index order into resulting
+// vector.
+static std::vector<ValueRef> splitMainInstResult(Value &CombinedResult,
+                                                 IRBuilder<> &IRB) {
+  if (!isa<StructType>(CombinedResult.getType()))
+    return {CombinedResult};
+  auto *ResTy = cast<StructType>(CombinedResult.getType());
+  std::vector<ValueRef> Results;
+  for (int Idx = 0; Idx != ResTy->getNumElements(); ++Idx)
+    Results.push_back(
+        *IRB.CreateExtractValue(&CombinedResult, Idx, "cmcl.extract.res"));
+  return Results;
 }
 
 // Writes output values of created "MainInst".
@@ -324,8 +550,9 @@ createMainInst<BuiltinID::Select>(const std::vector<Value *> &Operands, Type &,
 //    builtin return value if any, output operands in order of builtin
 //    arguments (VectorOut, VectorInOut, etc.) if any.
 template <BuiltinID::Enum BiID>
-void writeBuiltinResults(const std::vector<ValueRef> &Results, CallInst &BiCall,
+void writeBuiltinResults(Value &CombinedResult, CallInst &BiCall,
                          IRBuilder<> &IRB) {
+  auto Results = splitMainInstResult(CombinedResult, IRB);
   int ResultIdx = 0;
   // Handle return value.
   if (!BiCall.getType()->isVoidTy()) {
@@ -336,9 +563,9 @@ void writeBuiltinResults(const std::vector<ValueRef> &Results, CallInst &BiCall,
 
   // Handle output operands.
   for (int BiOpIdx = 0; BiOpIdx != BuiltinOperandSize[BiID]; ++BiOpIdx)
-    if (isOutputOperand(BuiltinOperandKind[BiID][BiOpIdx]))
-      writeVectorFromBuiltinOp(Results[ResultIdx++],
-                               *BiCall.getArgOperand(BiOpIdx), IRB);
+    if (BuiltinOperandKind[BiID][BiOpIdx] == OperandKind::Output)
+      IRB.CreateStore(&Results[ResultIdx++].get(),
+                      BiCall.getArgOperand(BiOpIdx));
 }
 
 template <BuiltinID::Enum BiID>
@@ -347,7 +574,7 @@ static void handleBuiltinCall(CallInst &BiCall) {
 
   auto Operands = getTranslatedBuiltinOperands<BiID>(BiCall, IRB);
   auto &RetTy = getTranslatedBuiltinType<BiID>(BiCall);
-  auto Result = createMainInst<BiID>(Operands, RetTy, IRB);
+  auto &Result = createMainInst<BiID>(Operands, RetTy, IRB);
   writeBuiltinResults<BiID>(Result, BiCall, IRB);
 }
 

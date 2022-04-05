@@ -76,7 +76,7 @@ public:
         const G4_INST *inst, const Model *m, bool allowUnknownOp, const IR_Builder& builder);
 private:
     static PredCtrl getIGAPredCtrl(G4_Predicate_Control g4PredCntrl);
-    static Predication getIGAPredication(G4_Predicate* predG4);
+    static Predication getIGAPredication(const G4_Predicate* predG4, G4_ExecSize execSize, const IR_Builder& builder);
     static BranchCntrl getIGABranchCntrl(bool isOn)
     {
         return isOn ? BranchCntrl::ON : BranchCntrl::OFF;
@@ -159,9 +159,9 @@ private:
         if (base->isGreg())
         {
             uint32_t byteAddress = opnd->getLinearizedStart();
-            regRef.regNum = byteAddress / numEltPerGRF<Type_UB>();
+            regRef.regNum = byteAddress / kernel.numEltPerGRF<Type_UB>();
             regRef.subRegNum =
-                (byteAddress % numEltPerGRF<Type_UB>()) / opnd->getTypeSize();
+                (byteAddress % kernel.numEltPerGRF<Type_UB>()) / opnd->getTypeSize();
         }
         else if (opnd->isSrcRegRegion())
         {
@@ -253,6 +253,7 @@ private:
         case GenPrecision::S8:   return Type::B;
         case GenPrecision::FP16: return Type::HF;
         case GenPrecision::BF16: return Type::BF;
+        case GenPrecision::TF32: return Type::TF32;
         default:
             assert(false && "illegal Operand Precision");
             return Type::INVALID;
@@ -340,8 +341,17 @@ Platform BinaryEncodingIGA::getIGAInternalPlatform(TARGET_PLATFORM genxPlatform)
     case GENX_TGLLP:
         platform = Platform::XE;
         break;
-    case XeHP_SDV:
+    case Xe_XeHPSDV:
         platform = Platform::XE_HP;
+        break;
+    case Xe_DG2:
+        platform = Platform::XE_HPG;
+        break;
+    case Xe_PVC:
+        platform = Platform::XE_HPC;
+        break;
+    case Xe_PVCXT:
+        platform = Platform::XE_HPC;
         break;
     default:
         break;
@@ -357,7 +367,7 @@ BinaryEncodingIGA::BinaryEncodingIGA(
     : mem(m), kernel(k), fileName(fname), m_kernelBuffer(nullptr),
     m_kernelBufferSize(0), platform(k.fg.builder->getPlatform())
 {
-    platformModel = Model::LookupModel(getIGAInternalPlatform(getGenxPlatform()));
+    platformModel = Model::LookupModel(getIGAInternalPlatform(platform));
     IGAKernel = new Kernel(*platformModel);
 }
 
@@ -471,6 +481,12 @@ iga::SFID BinaryEncodingIGA::getSFID(const G4_INST *inst)
     case vISA::SFID::DP_PI:     sfid = iga::SFID::PIXI; break;
     case vISA::SFID::DP_DC1:    sfid = iga::SFID::DC1; break;
     case vISA::SFID::CRE:       sfid = iga::SFID::CRE; break;
+    case vISA::SFID::SLM:       sfid = iga::SFID::SLM; break;
+    case vISA::SFID::UGM:       sfid = iga::SFID::UGM; break;
+    case vISA::SFID::BTD:       sfid = iga::SFID::BTD; break;
+    case vISA::SFID::RTHW:      sfid = iga::SFID::RTA; break;
+    case vISA::SFID::TGM:       sfid = iga::SFID::TGM; break;
+    case vISA::SFID::UGML:      sfid = iga::SFID::UGML; break;
     default:
         ASSERT_USER(false, "Unknow SFID generated from vISA");
         break;
@@ -618,6 +634,10 @@ std::pair<const OpSpec *,Subfunction> BinaryEncodingIGA::getIgaOpInfo(
     case G4_mac:     igaOp = Op::MAC; break;
     case G4_mach:
         igaOp = Op::MACH;
+        if (inst->getPlatform() >= Xe_PVC && !inst->isAccWrCtrlInst())
+        {
+            igaOp = Op::MACL;
+        }
         break;
     case G4_lzd:     igaOp = Op::LZD; break;
     case G4_fbh:     igaOp = Op::FBH; break;
@@ -686,6 +706,14 @@ std::pair<const OpSpec *,Subfunction> BinaryEncodingIGA::getIgaOpInfo(
         igaOp = Op::SYNC;
         sf = SyncFC::ALLWR;
         break;
+    case G4_sync_fence:
+        igaOp = Op::SYNC;
+        sf = SyncFC::FENCE;
+        break;
+    case G4_fcvt:
+        igaOp = Op::MOV;
+        break;
+    case G4_srnd:  igaOp = Op::SRND; break;
     case G4_NUM_OPCODE:
         assert(false);
         break;
@@ -713,6 +741,10 @@ void BinaryEncodingIGA::SetSWSB(G4_INST *inst, SWSB &sw)
         sw.sbid = inst->getToken();
     }
 
+    if (inst->opcode() == G4_mad && inst->hasNoACCSBSet())
+    {
+        sw.spToken = SWSB::SpecialToken::NOACCSBSET;
+    }
     // Set distance, e.g. A@1
     using DistanceType = vISA::G4_INST::DistanceType;
     if ((unsigned)inst->getDistance())
@@ -736,6 +768,9 @@ void BinaryEncodingIGA::SetSWSB(G4_INST *inst, SWSB &sw)
                 break;
             case DistanceType::DISTLONG:
                 sw.distType = SWSB::DistType::REG_DIST_LONG;
+                break;
+            case DistanceType::DISTMATH:
+                sw.distType = SWSB::DistType::REG_DIST_MATH;
                 break;
             default:
                 break;
@@ -783,7 +818,7 @@ void BinaryEncodingIGA::getIGAFlagInfo(
 
     if (opSpec->supportsPredication() && predG4 != nullptr)
     {
-        pred = getIGAPredication(predG4);
+        pred = getIGAPredication(predG4, inst->getExecSize(), *kernel.fg.builder);
         predFlag = getIGAFlagReg(predG4->getBase());
         flagReg = predFlag;
         hasPredFlag = true;
@@ -805,8 +840,35 @@ void BinaryEncodingIGA::getIGAFlagInfo(
     }
 }
 
+#if 0
+static void DebugCaching(G4_Kernel &kernel)
+{
+    std::map<uint32_t,std::pair<Caching,Caching>> descs;
+    for (auto bb : kernel.fg) {
+        for (auto inst : *bb)
+        {
+            if (inst->isSend()) {
+                G4_SendDescRaw *sd = inst->getMsgDescRaw();
+                if (sd) {
+                    descs[sd->getDesc()] = sd->getCaching();
+                }
+            }
+        }
+    }
+    for (const auto &p : descs) {
+        std::cerr << std::hex << "0x" << p.first <<
+            " ===>"
+            "  L1=" << std::dec << int(p.second.first) <<
+            "  L3=" << std::dec << int(p.second.second) <<
+            "\n";
+    }
+}
+#endif
+
 void BinaryEncodingIGA::Encode()
 {
+    // DebugCaching(this->kernel);
+
     FixInst();
     Block* currBB = nullptr;
 
@@ -853,6 +915,7 @@ void BinaryEncodingIGA::Encode()
         IGAKernel->appendBlock(currBB);
     }
 
+    auto platformGen = kernel.getPlatformGeneration();
     std::list<std::pair<Instruction*, G4_INST*>> encodedInsts;
     Block *bbNew = nullptr;
     for (auto bb : this->kernel.fg)
@@ -878,7 +941,7 @@ void BinaryEncodingIGA::Encode()
 
             igaInst->addInstOpts(getIGAInstOptSet(inst));
 
-            if (getPlatformGeneration(platform) >= PlatformGen::XE) {
+            if (platformGen >= PlatformGen::XE) {
                 SWSB sw;
                 SetSWSB(inst, sw);
 
@@ -931,6 +994,8 @@ void BinaryEncodingIGA::Encode()
     { // time the encoding
         TIME_SCOPE(IGA_ENCODER);
         bool autoCompact = kernel.getOption(vISA_Compaction);
+        if (platform == Xe_PVC)
+            autoCompact = false; // PVC-A0 compaction is off (IGA only does B0+)
 
         KernelEncoder encoder(IGAKernel, autoCompact);
         encoder.setSWSBEncodingMode(GetIGASWSBEncodeMode(*kernel.fg.builder));
@@ -1303,9 +1368,13 @@ void BinaryEncodingIGA::translateInstructionSrcs(
                 RegRef regRef {0, 0};
                 bool valid;
                 regRef.subRegNum = (uint8_t)srcRegion->ExIndSubRegNum(valid);
+                // set to GRF for indirect register access
+                iga::RegName regName = iga::RegName::GRF_R;
+
                 igaInst->setInidirectSource(
                     opIx,
                     srcMod,
+                    regName,
                     regRef,
                     srcRegion->getAddrImm(),
                     region,
@@ -1342,6 +1411,26 @@ SendDesc BinaryEncodingIGA::getIGASendDesc(G4_INST* sendInst) const
     {
         desc.type = SendDesc::Kind::IMM;
         desc.imm = (uint32_t)msgDesc->asImm()->getImm();
+        // This is a WA that needs to add fence.ugm before EOT
+        //     fence.ugm.invalidate.tile works, but performance for raytracing
+        //     might be affected. HW team came out a way to get around of it
+        //     by using reserved Flush TYPE = 6, with the following
+        //            DG2_Backup_Mode = 0
+        //            Flush_Range = 0
+        //     (So, it is fence.ugm.6.tile !)
+        auto msgDesc = sendInst->asSendInst()->getMsgDesc();
+        if (msgDesc->isLSC() && msgDesc->isFence())
+        {
+            // Flush Type : bit[14:12]
+            uint32_t flushTy = ((desc.imm >> 12) & 0x7);
+            if (flushTy == 6)
+            {
+                // DG2 fence desc
+                //   both backupMode(bit[18]) and flushRange(bit[15]) must be zero
+                constexpr uint32_t backupMode = (1 << 18), flushRange = (1 << 15);
+                desc.imm = desc.imm & ~(backupMode | flushRange);
+            }
+        }
     }
     else
     {
@@ -1370,7 +1459,7 @@ static SendDesc encodeExDescSendUnary(
     exDescIga.type = SendDesc::Kind::IMM;
     uint32_t tVal = descG4->getExtendedDesc();
 
-    if (getPlatformGeneration(sendInst->getPlatform()) >= PlatformGen::XE)
+    if (sendInst->getBuilder().getPlatformGeneration() >= PlatformGen::XE)
     {
         // We must clear the funcID in the extended message.
         // In Xe+ this is part of the EU encoding, not the descriptor.
@@ -1420,13 +1509,32 @@ SendDesc BinaryEncodingIGA::encodeExDescImm(
     //    uint32_t unnamed2 : 5;     // bit 11:15
     //    uint32_t extFuncCtrl : 16; // bit 16:31
     // };
-    if (getPlatformGeneration(sendInst->getPlatform()) >= PlatformGen::XE)
+    auto platformGen = sendInst->getBuilder().getPlatformGeneration();
+    if (platformGen >= PlatformGen::XE)
     {
         exDescIga.imm &= 0xFFFFFFC0;
     }
+    if (kernel.fg.builder->encodeSendSrc1Length())
+    {
+        // In DG2+ ExDesc[10:6] is no longer Src1.Length even for imm
+        // and the field is always part of the EU encoding
+        if (descG4->isCPSEnabled()) {
+            sdos.extraOpts.add(InstOpt::CPS);
+        }
+        // We must keep ExDesc[10:6] as Src1.Len until we fix the
+        // 100s of uses that assume this.
+        // IGA expects these bits to be 0's on this platform
+        //
+        // FIXME: remove the if guard once we enable DG2
+        // (i.e. once DG2 targets IGA DG2 and not XE_HP, we should clear
+        // the bottom 12b for DG2 too) and only use the IR fields above
+        // (exDescArg.{cps,src1Length})
+        exDescIga.imm &= 0xFFFFF000;
+    }
+    // Note: ExBSO is never permitted for imm descriptors
 
     // clear the EOT bit which is not part of exDesc on XE+
-    if (getPlatformGeneration(sendInst->getPlatform()) >= PlatformGen::XE)
+    if (platformGen >= PlatformGen::XE)
         exDescIga.imm &= ~(1 << 5);
 
     return exDescIga;
@@ -1455,6 +1563,13 @@ SendDesc BinaryEncodingIGA::encodeExDescRegA0(
     // By default all RegDesc in the new descriptor format will use
     // the ExBSO model if at all possible
     bool encodeExBso = kernel.fg.builder->useNewExtDescFormat();
+    // On DG2 LSC mustn't use ExBSO for BTI (hardware restriction).
+    // If this is an LSC descriptor, then dig out the LscAddrType field and
+    // compare to 3 (which means BTI).
+    const bool isLsc = descG4->isLscOp();
+    const bool isLscBti = isLsc && descG4->getLscAddrType() == LSC_ADDR_TYPE_BTI;
+    const bool isUgm = sendInst->getMsgDesc()->getSFID() == vISA::SFID::UGM;
+    encodeExBso &= !isLscBti;
     if (encodeExBso)
         sdos.extraOpts.add(InstOpt::EXBSO);
 
@@ -1571,6 +1686,8 @@ RegName BinaryEncodingIGA::getIGAARFName(G4_ArchRegKind areg)
     case AREG_IP:       return RegName::ARF_IP;
     case AREG_F0:
     case AREG_F1:
+    case AREG_F2:
+    case AREG_F3:
         return RegName::ARF_F;
     case AREG_TM0:      return RegName::ARF_TM;
     case AREG_TDR0:     return RegName::ARF_TDR;
@@ -1585,6 +1702,24 @@ Type BinaryEncodingIGA::getIGAType(const G4_INST* I, Gen4_Operand_Number O, TARG
 {
 
     G4_Type Ty = I->getOperand(O)->getType();
+    if (I->opcode() == G4_fcvt)
+    {
+        if (Ty == Type_UB)
+        {
+            return Type::BF8;
+        }
+        if (Ty == Type_UD)
+        {
+            return Type::TF32;
+        }
+    }
+    if (I->opcode() == G4_srnd)
+    {
+        if (O == Opnd_dst && Ty == Type_UB)
+        {
+            return Type::BF8;
+        }
+    }
     return getIGAType(Ty, P);
 }
 
@@ -1631,18 +1766,62 @@ PredCtrl BinaryEncodingIGA::getIGAPredCtrl(G4_Predicate_Control g4PrCtl)
     case PRED_ALL32H:       return PredCtrl::ALL32H;
     case PRED_ANYV:         return PredCtrl::ANYV;
     case PRED_ALLV:         return PredCtrl::ALLV;
+    case PRED_ANY_WHOLE:    return PredCtrl::ANY;
+    case PRED_ALL_WHOLE:    return PredCtrl::ALL;
     default:
         assert(false && "illegal predicate control");
         return PredCtrl::NONE;
     }
 }
 
-Predication BinaryEncodingIGA::getIGAPredication(G4_Predicate* predG4)
+Predication BinaryEncodingIGA::getIGAPredication(const G4_Predicate* predG4,
+    G4_ExecSize execSize, const IR_Builder& builder)
 {
+    // Xe_PVC+ has removed predCtrl width. Only .any, .all and .seq (default) are supported.
+    // Try to translate PredCtrl values to compatible ones on Xe_PVC+
+    // Return true on success, false on fail
+    auto translatePredCtrl = [&](G4_Predicate_Control& predCtrl) {
+        if (builder.predCtrlHasWidth())
+            return true;
+        if (predCtrl == PRED_ANY_WHOLE || predCtrl == PRED_ALL_WHOLE || predCtrl == PRED_DEFAULT)
+            return true;
+        // .any*h/.all*h (pre-pvc) is equal to .any/.all (pvc+) only when the instruction execSize
+        // match the predCtrl group size
+        if (execSize != predG4->getPredCtrlGroupSize())
+            return false;
+
+        // translate to equivalent .any or .all whenever possible
+        switch (predCtrl)
+        {
+        case PRED_ANY2H:
+        case PRED_ANY4H:
+        case PRED_ANY8H:
+        case PRED_ANY16H:
+        case PRED_ANY32H:
+            predCtrl = PRED_ANY_WHOLE;
+            break;
+        case PRED_ALL2H:
+        case PRED_ALL4H:
+        case PRED_ALL8H:
+        case PRED_ALL16H:
+        case PRED_ALL32H:
+            predCtrl = PRED_ALL_WHOLE;
+            break;
+        default:
+            // PRED_ANY_WHOLE, PRED_ALL_WHOLE, PRED_DEFAULT are handled above
+            // PRED_ANYV, PRED_ALLV are not supported
+            return false;
+        }
+        return true;
+    };
+
     Predication pred;
     if (predG4)
     {
-        pred.function = getIGAPredCtrl(predG4->getControl());
+        G4_Predicate_Control g4PrCtl = predG4->getControl();
+        ASSERT_USER(translatePredCtrl(g4PrCtl), "illegal predicate control");
+
+        pred.function = getIGAPredCtrl(g4PrCtl);
         pred.inverse = predG4->getState() != PredState_Plus;
     }
     return pred;
@@ -1759,9 +1938,17 @@ EncodeResult vISA::EncodeKernelIGA(
 }
 
 SWSB_ENCODE_MODE vISA::GetIGASWSBEncodeMode(const IR_Builder& builder) {
-    if (getPlatformGeneration(builder.getPlatform()) < PlatformGen::XE)
+    if (builder.getPlatformGeneration() < PlatformGen::XE)
         return SWSB_ENCODE_MODE::SWSBInvalidMode;
 
+    if (builder.hasThreeALUPipes()) {
+        return SWSB_ENCODE_MODE::ThreeDistPipe;
+    }
+    else if (builder.hasFourALUPipes()) {
+        if (builder.getPlatform() == Xe_PVC)
+            return SWSB_ENCODE_MODE::FourDistPipe;
+        return SWSB_ENCODE_MODE::FourDistPipeReduction;
+    }
 
     return SWSB_ENCODE_MODE::SingleDistPipe;
 }

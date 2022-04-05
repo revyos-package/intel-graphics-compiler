@@ -14,11 +14,17 @@ using namespace vISA;
 static const unsigned MESSAGE_PRECISION_SUBTYPE_OFFSET  = 30;
 static const unsigned SIMD_MODE_2_OFFSET  = 29;
 
-static uint32_t createSamplerMsgDesc(
+bool IR_Builder::isSamplerMsgWithPO(
+    VISASampler3DSubOpCode samplerOp) const {
+
+    return false;
+}
+
+uint32_t IR_Builder::createSamplerMsgDesc(
     VISASampler3DSubOpCode samplerOp,
     bool isNativeSIMDSize,
     bool isFP16Return,
-    bool isFP16Input)
+    bool isFP16Input) const
 {
     // Now create message descriptor
     // 7:0 - BTI
@@ -36,6 +42,7 @@ static uint32_t createSamplerMsgDesc(
     uint32_t fc = 0;
 
     fc |= ((uint32_t)samplerOp & 0x1f) << 12;
+
 
     if (isNativeSIMDSize)
     {
@@ -104,7 +111,7 @@ int IR_Builder::translateVISASampleInfoInst(
     else
     {
         useHeader = false;
-        msg = createTempVar(getNativeExecSize(), Type_UD, GRFALIGN);
+        msg = createTempVar(getNativeExecSize(), Type_UD, getGRFAlign());
         G4_DstRegRegion *dst = createDst(msg->getRegVar(), 0, 0, 1, Type_UD);
         G4_Imm* src0Imm = createImm(0, Type_UD);
         (void) createMov(getNativeExecSize(), dst, src0Imm, InstOpt_WriteEnable, true);
@@ -197,7 +204,7 @@ int IR_Builder::translateVISAResInfoInst(
     {
         unsigned int numElts = numRows * numEltPerGRF<Type_UB>()/TypeSize(Type_F);
         msg = createSendPayloadDcl(numElts, Type_UD);
-        payloadUD = createSendPayloadDcl(numElts - (useHeader ? GENX_SAMPLER_IO_SZ : 0), Type_UD);
+        payloadUD = createSendPayloadDcl(numElts - (useHeader ? getGenxSamplerIOSize() : 0), Type_UD);
         payloadUD->setAliasDeclare(msg, useHeader ? numEltPerGRF<Type_UB>() : 0);
 
         if (useHeader)
@@ -222,7 +229,7 @@ int IR_Builder::translateVISAResInfoInst(
     }
 
     // Copy over lod vector operand to payload's 1st row
-    Copy_SrcRegRegion_To_Payload(payloadUD, regOff, lod, execSize, instOpt);
+    Copy_SrcRegRegion_To_Payload(payloadUD, regOff, lod, execSize, instOpt | InstOpt_BreakPoint);
 
     // Now create message descriptor
     // 7:0 - BTI
@@ -355,7 +362,7 @@ int IR_Builder::translateVISAURBWrite3DInst(
         {
             unsigned int numElts = numRows * numEltPerGRF<Type_UB>()/TypeSize(Type_F);
             // we can use the urb handle directly since URB write will not modify its header
-            //msg = createSendPayloadDcl(GENX_SAMPLER_IO_SZ, Type_UD);
+            //msg = createSendPayloadDcl(getGenxSamplerIOSize(), Type_UD);
             payloadUD = createSendPayloadDcl(numElts, Type_UD);
             payloadF = createSendPayloadDcl(numElts, Type_F);
             payloadD = createSendPayloadDcl(numElts, Type_D);
@@ -369,9 +376,9 @@ int IR_Builder::translateVISAURBWrite3DInst(
         msg = createSendPayloadDcl(numElts, Type_UD);
         if (numRows > 1)
         {
-            payloadUD = createSendPayloadDcl(numElts - (useHeader ? GENX_SAMPLER_IO_SZ : 0), Type_UD);
-            payloadF = createSendPayloadDcl(numElts - (useHeader ? GENX_SAMPLER_IO_SZ : 0), Type_F);
-            payloadD = createSendPayloadDcl(numElts - (useHeader ? GENX_SAMPLER_IO_SZ : 0), Type_D);
+            payloadUD = createSendPayloadDcl(numElts - (useHeader ? getGenxSamplerIOSize() : 0), Type_UD);
+            payloadF = createSendPayloadDcl(numElts - (useHeader ? getGenxSamplerIOSize() : 0), Type_F);
+            payloadD = createSendPayloadDcl(numElts - (useHeader ? getGenxSamplerIOSize() : 0), Type_D);
             payloadUD->setAliasDeclare(msg, useHeader ? numEltPerGRF<Type_UB>() : 0);
             payloadF->setAliasDeclare(msg, useHeader ? numEltPerGRF<Type_UB>() : 0);
             payloadD->setAliasDeclare(msg, useHeader ? numEltPerGRF<Type_UB>() : 0);
@@ -411,7 +418,7 @@ int IR_Builder::translateVISAURBWrite3DInst(
 
         for (int i = 0; i < numOut; i++)
         {
-            G4_DstRegRegion payloadTypedRegRowi(Direct, payloadF->getRegVar(), regOff++, 0, 1, Type_F);
+            G4_DstRegRegion payloadTypedRegRowi(*this, Direct, payloadF->getRegVar(), regOff++, 0, 1, Type_F);
             G4_DstRegRegion* payloadTypedRegRowRgni = createDstRegRegion(payloadTypedRegRowi);
 
             G4_SrcRegRegion* vertexSrcRegRgnRowi = createSrc(vertexDataDcl->getRegVar(), startSrcRow++, 0, getRegionStride1(), Type_F);
@@ -638,7 +645,7 @@ int IR_Builder::translateVISARTWrite3DInst(
         unsigned int numElts = numRows * numEltPerGRF<Type_UB>()/TypeSize(Type_F);
         //creating enough space for header + payload
         msg = createSendPayloadDcl(numElts, Type_UD);
-        msgF = createSendPayloadDcl(GENX_SAMPLER_IO_SZ * 2, Type_F);
+        msgF = createSendPayloadDcl(getGenxSamplerIOSize() * 2, Type_F);
         msgF->setAliasDeclare(msg, 0);
 
         //creating payload declarations.
@@ -667,7 +674,7 @@ int IR_Builder::translateVISARTWrite3DInst(
         movInst->setOptionOn(InstOpt_WriteEnable);
 
         payloadRegRgn = createDst(msg->getRegVar(), 1, 0, 1, Type_UD);
-        r1HeaderOpnd->setType(Type_UD);
+        r1HeaderOpnd->setType(*this, Type_UD);
         movInst = createMov(g4::SIMD8, payloadRegRgn, r1HeaderOpnd, InstOpt_NoOpt, true);
         movInst->setOptionOn(InstOpt_WriteEnable);
 
@@ -1369,7 +1376,7 @@ int IR_Builder::splitSampleInst(
     G4_ExecSize execSize = getNativeExecSize();
     uint16_t numElts = numRows * numEltPerGRF<Type_F>();
     G4_Declare* payloadF = createSendPayloadDcl(numElts, Type_F);
-    G4_Declare* payloadUD = createTempVar(numElts, Type_UD, GRFALIGN);
+    G4_Declare* payloadUD = createTempVar(numElts, Type_UD, getGRFAlign());
     payloadUD->setAliasDeclare(payloadF, 0);
     G4_SrcRegRegion* srcToUse = createSrc(payloadUD->getRegVar(), 0, 0, getRegionStride1(), Type_UD);
 
@@ -1437,7 +1444,7 @@ int IR_Builder::splitSampleInst(
             // mov (8) dst<1>:hf src.0<8;8,1>:hf
             G4_DstRegRegion* dstHF = createDst(
                 payloadHF->getRegVar(), regOff++, 0, 1, temp->getType());
-            temp->setRegion(getRegionStride1());
+            temp->setRegion(*this, getRegionStride1());
             createMov(g4::SIMD8, dstHF, temp, MovInstOpt, true);
         }
         else
@@ -1509,15 +1516,15 @@ int IR_Builder::splitSampleInst(
         if (pixelNullMaskEnable)
         {
             unsigned int numElts = tempDstDcl->getNumElems() * tempDstDcl->getNumRows();
-            tempDstUD = createTempVar(numElts, Type_UD, GRFALIGN);
+            tempDstUD = createTempVar(numElts, Type_UD, getGRFAlign());
             tempDstUD->setAliasDeclare(tempDstDcl, 0);
 
             numElts = tempDstDcl2->getNumElems() * tempDstDcl2->getNumRows();
-            tempDst2UD = createTempVar(numElts, Type_UD, GRFALIGN);
+            tempDst2UD = createTempVar(numElts, Type_UD, getGRFAlign());
             tempDst2UD->setAliasDeclare(tempDstDcl2, 0);
 
             numElts = originalDstDcl->getNumElems() * originalDstDcl->getNumRows();
-            origDstUD = createTempVar(numElts, Type_UD, GRFALIGN);
+            origDstUD = createTempVar(numElts, Type_UD, getGRFAlign());
             origDstUD->setAliasDeclare(originalDstDcl, 0);
         }
 
@@ -1550,7 +1557,7 @@ int IR_Builder::splitSampleInst(
         /**************** SECOND HALF OF THE SEND *********************/
         // re-create payload declare so the two sends may be issued independently
         G4_Declare* payloadF = createSendPayloadDcl(numElts, Type_F);
-        G4_Declare* payloadUD = createTempVar(numElts, Type_UD, GRFALIGN);
+        G4_Declare* payloadUD = createTempVar(numElts, Type_UD, getGRFAlign());
         payloadUD->setAliasDeclare(payloadF, 0);
 
         // even though we only use lower half of the GRF, we have to allocate full GRF
@@ -1725,6 +1732,7 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler, bool samplerInd
 {
     G4_Declare* dcl = nullptr;
 
+    G4_InstOpts dbgOpt = m_options->getOption(vISA_markSamplerMoves) ? InstOpt_BreakPoint : InstOpt_NoOpt;
     if (m_options->getOption(vISA_cacheSamplerHeader) && !isBindlessSampler)
     {
         dcl = builtinSamplerHeader;
@@ -1743,7 +1751,7 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler, bool samplerInd
             G4_INST* r0Move = createMov(g4::SIMD8,
                 createDstRegRegion(dcl, 1),
                 createSrcRegRegion(builtinR0, getRegionStride1()),
-                InstOpt_WriteEnable, false);
+                InstOpt_WriteEnable | dbgOpt, false);
             instList.push_front(r0Move);
         }
         if (samplerIndexGE16)
@@ -1752,17 +1760,17 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler, bool samplerInd
             // createSamplerHeader() message overwrites the sampler states
             // pointer in the header -> cannot use the cached value in this
             // case.
-            dcl = createSendPayloadDcl(GENX_DATAPORT_IO_SZ, Type_UD);
+            dcl = createSendPayloadDcl(getGenxDataportIOSize(), Type_UD);
             dcl->setCapableOfReuse();
             G4_SrcRegRegion* src = createSrc(builtinSamplerHeader->getRegVar(), 0, 0, getRegionStride1(), Type_UD);
-            createMovInst(dcl, 0, 0, g4::SIMD8, NULL, NULL, src);
+            createMovInst(dcl, 0, 0, g4::SIMD8, NULL, NULL, src, false, dbgOpt);
         }
     }
     else
     {
-        dcl = createSendPayloadDcl(GENX_DATAPORT_IO_SZ, Type_UD);
+        dcl = createSendPayloadDcl(getGenxDataportIOSize(), Type_UD);
         dcl->setCapableOfReuse();
-        createMovR0Inst(dcl, 0, 0, true);
+        createMovR0Inst(dcl, 0, 0, true, dbgOpt);
         if (hasBindlessSampler() && !isBindlessSampler)
         {
             // make sure we set bit 0 of M0.3:ud to be 0
@@ -1777,10 +1785,10 @@ G4_Declare* IR_Builder::getSamplerHeader(bool isBindlessSampler, bool samplerInd
 }
 
 // get the number of GRFs occupied by a sampler message's operand
-static uint32_t getNumGRF(bool isFP16, int execSize)
+static uint32_t getNumGRF(unsigned grfSize, bool isFP16, int execSize)
 {
     int numBytes = (isFP16 ? 2 : 4) * execSize;
-    return (numBytes + getGRFSize() - 1) / getGRFSize();
+    return (numBytes + grfSize - 1) / grfSize;
 }
 
 uint32_t IR_Builder::getSamplerResponseLength(
@@ -1791,7 +1799,7 @@ uint32_t IR_Builder::getSamplerResponseLength(
         hasNullReturnSampler = true;
         return 0;
     }
-    uint32_t responseLength = numChannels * getNumGRF(isFP16, execSize);
+    uint32_t responseLength = numChannels * getNumGRF(getGRFSize(), isFP16, execSize);
 
     if (pixelNullMask)
     {
@@ -1843,7 +1851,7 @@ int IR_Builder::translateVISASampler3DInst(
 
     bool useHeader = false;
 
-    unsigned int numRows = numParms * getNumGRF(FP16Input, execSize);
+    unsigned int numRows = numParms * getNumGRF(getGRFSize(), FP16Input, execSize);
 
     VISAChannelMask channels = chMask.getAPI();
     // For SKL+ channel mask R, RG, RGB, and RGBA may be derived from response length
@@ -1891,6 +1899,7 @@ int IR_Builder::translateVISASampler3DInst(
             header = createSrcRegRegion(dcl, getRegionStride1());
         }
 
+    G4_InstOpts dbgOpt = m_options->getOption(vISA_markSamplerMoves) ? InstOpt_BreakPoint : InstOpt_NoOpt;
     // Collect payload sources.
     unsigned len = numParms + (header ? 1 : 0);
     std::vector<PayloadSource> sources(len);
@@ -1899,7 +1908,7 @@ int IR_Builder::translateVISASampler3DInst(
     if (header) {
         sources[i].opnd = header;
         sources[i].execSize = g4::SIMD8;
-        sources[i].instOpt = InstOpt_WriteEnable;
+        sources[i].instOpt = InstOpt_WriteEnable | dbgOpt;
         ++i;
     }
     // Collect all parameters.
@@ -1909,7 +1918,7 @@ int IR_Builder::translateVISASampler3DInst(
         sources[i].opnd = params[j];
         sources[i].execSize = execSize;
         sources[i].instOpt = (needNoMask && (uPos <= j && j < (uPos + 3))) ?
-            InstOpt_WriteEnable : instOpt;
+            InstOpt_WriteEnable | dbgOpt : instOpt | dbgOpt;
         ++i;
     }
     ASSERT_USER(i == len, "There's mismatching during payload source collecting!");
@@ -1973,7 +1982,7 @@ int IR_Builder::translateVISALoad3DInst(
     const bool halfReturn = dst->getTypeSize() == 2;
     const bool halfInput = opndArray[0]->getTypeSize() == 2;
 
-    unsigned int numRows = numParms * getNumGRF(halfInput, execSize);
+    unsigned int numRows = numParms * getNumGRF(getGRFSize(), halfInput, execSize);
 
     VISAChannelMask channels = channelMask.getAPI();
     // For SKL+ channel mask R, RG, RGB, and RGBA may be derived from response length
@@ -2099,7 +2108,7 @@ int IR_Builder::translateVISAGather3dInst(
     const bool FP16Return = dst->getTypeSize() == 2;
     const bool FP16Input = opndArray[0]->getType() == Type_HF;
 
-    unsigned int numRows = numOpnds * getNumGRF(FP16Input, execSize);
+    unsigned int numRows = numOpnds * getNumGRF(getGRFSize(), FP16Input, execSize);
 
     bool nonZeroAoffImmi = !(aoffimmi->isImm() && aoffimmi->asImm()->getInt() == 0);
     bool needHeaderForChannels = channelMask.getSingleChannel() != VISA_3D_GATHER4_CHANNEL_R;
@@ -2252,7 +2261,7 @@ int IR_Builder::translateVISASamplerNormInst(
 
     // mov (8)      VX(0,0)<1>,  r0:ud
     // add dcl for VX
-    G4_Declare *dcl = createSendPayloadDcl(2 * GENX_SAMPLER_IO_SZ, Type_UD);
+    G4_Declare *dcl = createSendPayloadDcl(2 * getGenxSamplerIOSize(), Type_UD);
 
     // mov  VX(0,0)<1>, r0
     createMovR0Inst(dcl, 0, 0);
@@ -2260,7 +2269,7 @@ int IR_Builder::translateVISASamplerNormInst(
     unsigned cmask = channel.getHWEncoding() << 12;
     createMovInst(dcl, 0, 2, g4::SIMD1, NULL, NULL, createImm(cmask, Type_UD));
 
-    G4_Declare *dcl1 = createSendPayloadDcl(GENX_DATAPORT_IO_SZ, Type_F);
+    G4_Declare *dcl1 = createSendPayloadDcl(getGenxDataportIOSize(), Type_F);
     dcl1->setAliasDeclare(dcl, numEltPerGRF<Type_UB>());
 
     // mov  (1)     VX(1,4)<1>,  deltaU
@@ -2279,9 +2288,9 @@ int IR_Builder::translateVISASamplerNormInst(
     G4_DstRegRegion* d = checkSendDst(dst_opnd->asDstRegRegion());
 
     // Set bit 12-17 for the message descriptor
-    unsigned temp = 0;
-    temp += 0xc << 12;   // Bit 16-12 = 1100 for Sampler Message Type
-    temp += 0x3 << 17;   // Bit 18-17 = 11 for SIMD32 mode
+    unsigned descFc = 0;
+    descFc |= 0xC << 12;   // Bit 16-12 = 1100 for Sampler Message Type
+    descFc |= 0x3 << 17;   // Bit 18-17 = 11 for SIMD32 mode
 
     createSendInst(
         NULL,
@@ -2290,7 +2299,7 @@ int IR_Builder::translateVISASamplerNormInst(
         2,
         32*numEnabledChannels*TypeSize(Type_UW)/numEltPerGRF<Type_UB>(),
         g4::SIMD32,
-        temp,
+        descFc,
         SFID::SAMPLER,
         1,
         SendAccess::READ_ONLY,
@@ -2351,7 +2360,7 @@ int IR_Builder::translateVISASamplerInst(
     // mov (8)      VX(0,0)<1>,  r0:ud
     // add dcl for VX
     unsigned num_payload_elt = simdMode/2 * numEltPerGRF<Type_UB>()/TypeSize(Type_UD);
-    G4_Declare *dcl = createSendPayloadDcl(num_payload_elt + GENX_SAMPLER_IO_SZ, Type_UD);
+    G4_Declare *dcl = createSendPayloadDcl(num_payload_elt + getGenxSamplerIOSize(), Type_UD);
 
     // mov  VX(0,0)<1>, r0
     createMovR0Inst(dcl, 0, 0);
@@ -2408,23 +2417,22 @@ int IR_Builder::translateVISASamplerInst(
     G4_DstRegRegion* d = checkSendDst(dstOpnd->asDstRegRegion());
 
     // Set bit 9-8 for the message descriptor
-    unsigned temp = 0;
+    unsigned descFc = 0;
 
-    //Bit 17-18 = 10 for SIMD mode
-    if (simdMode == 8)
-    {
-        temp += 0x1 << 17;
+    // Bit 17-18 = 10 for SIMD mode
+    if (simdMode == 8) {
+        descFc |= 0x1 << 17;
     }
     else
     {
-        temp += 0x2 << 17;
+        descFc |= 0x2 << 17;
     }
 
-    if (sampler == NULL)
+    if (sampler == nullptr)
     {
-#define SAMPLER_MESSAGE_TYPE_OFFSET    12
-        //LD message
-        temp += VISASampler3DSubOpCode::VISA_3D_LD << SAMPLER_MESSAGE_TYPE_OFFSET;
+        static const unsigned SAMPLER_MESSAGE_TYPE_OFFSET = 12;
+        // LD message
+        descFc += VISASampler3DSubOpCode::VISA_3D_LD << SAMPLER_MESSAGE_TYPE_OFFSET;
     }
 
     if (simdMode == 16) {
@@ -2436,6 +2444,7 @@ int IR_Builder::translateVISASamplerInst(
                 new_SubRegOff = (dstOpnd->asDstRegRegion()->getSubRegOff() * dstOpnd->getTypeSize()) / TypeSize(Type_W);
             }
             G4_DstRegRegion new_dst(
+                *this,
                 dstOpnd->getRegAccess(),
                 dstOpnd->asDstRegRegion()->getBase(),
                 dstOpnd->asDstRegRegion()->getRegOff(),
@@ -2453,7 +2462,7 @@ int IR_Builder::translateVISASamplerInst(
         1 + simdMode/2,
         ((simdMode == 8) ? 32 : (numEnabledChannels*16))*TypeSize(Type_F)/numEltPerGRF<Type_UB>(),
         G4_ExecSize(simdMode),
-        temp,
+        descFc,
         SFID::SAMPLER,
         1,
         SendAccess::READ_ONLY,

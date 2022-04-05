@@ -19,9 +19,10 @@ SPDX-License-Identifier: MIT
 #include <fstream>
 #include "Probe/Assertion.h"
 
-#include "lldWrapper/Common/Driver.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "lldWrapper/Common/Driver.h"
 #include "lld/Common/Driver.h"
+
 #include "llvm/Support/Path.h"
 #include "llvm/Support/FileSystem.h"
 
@@ -429,11 +430,6 @@ void CGen8OpenCLProgram::GetZEBinary(
     llvm::raw_pwrite_stream& programBinary, unsigned pointerSizeInBytes,
     const char* spv, uint32_t spvSize)
 {
-    auto isValidShader = [&](IGC::COpenCLKernel* shader)->bool
-    {
-        return (shader && shader->ProgramOutput()->m_programSize > 0);
-    };
-
     std::vector<std::unique_ptr<llvm::MemoryBuffer>> elfStorage;
 
     ZEBinaryBuilder zebuilder(m_Platform, pointerSizeInBytes == 8,
@@ -463,6 +459,7 @@ void CGen8OpenCLProgram::GetZEBinary(
     // If a single kernel in a program then neither temporary files are created nor the linker is in use,
     // hence ELF data is taken directly from the first found kernel's output (i.e. from m_debugData).
     IGC::SProgramOutput* pFirstKernelOutput = nullptr;
+    bool isDebugInfo = true;  // If a kernel does not contain debug info then this flag will be changed to false.
     IGC::CodeGenContext* ctx = nullptr;
 
     for (auto pKernel : m_ShaderProgramList)
@@ -479,11 +476,11 @@ void CGen8OpenCLProgram::GetZEBinary(
             && (m_Context.getModuleMetaData()->csInfo.forcedSIMDSize == 0))
         {
             // For multiple SIMD modes, send SIMD modes in descending order
-            if (isValidShader(simd32Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd32Shader))
                 kernelVec.push_back(simd32Shader);
-            if (isValidShader(simd16Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd16Shader))
                 kernelVec.push_back(simd16Shader);
-            if (isValidShader(simd8Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd8Shader))
                 kernelVec.push_back(simd8Shader);
 
             if (IGC_IS_FLAG_ENABLED(ZeBinCompatibleDebugging))
@@ -493,17 +490,17 @@ void CGen8OpenCLProgram::GetZEBinary(
         }
         else
         {
-            if (isValidShader(simd32Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd32Shader))
             {
                 kernelVec.push_back(simd32Shader);
                 simdMode = SIMDMode::SIMD32;
             }
-            else if (isValidShader(simd16Shader))
+            else if (IGC::COpenCLKernel::IsValidShader(simd16Shader))
             {
                 kernelVec.push_back(simd16Shader);
                 simdMode = SIMDMode::SIMD16;
             }
-            else if (isValidShader(simd8Shader))
+            else if (IGC::COpenCLKernel::IsValidShader(simd8Shader))
             {
                 kernelVec.push_back(simd8Shader);
                 simdMode = SIMDMode::SIMD8;
@@ -521,6 +518,7 @@ void CGen8OpenCLProgram::GetZEBinary(
                 kernel->m_kernelInfo,
                 kernel->getGRFSize(),
                 m_Context.btiLayout,
+                pOutput->m_VISAAsm,
                 m_ContextProvider.isProgramDebuggable());
 
             // FIXME: Handle IGC_IS_FLAG_ENABLED(ShaderDumpEnable) and
@@ -528,7 +526,9 @@ void CGen8OpenCLProgram::GetZEBinary(
 
             // ... Create the debug data binary streams
 
-            if (IGC_IS_FLAG_ENABLED(ZeBinCompatibleDebugging))
+            if (pOutput->m_debugDataSize == 0)
+                isDebugInfo = false;
+            if (IGC_IS_FLAG_ENABLED(ZeBinCompatibleDebugging) && isDebugInfo)
             {
                 const unsigned int rsrvdForAllButFullName = 64;  // characters will be used for temporary ELF file names.
                 unsigned int spaceAvailableForKernelName = maxElfFileNameLength - rsrvdForAllButFullName - tempDir.size();
@@ -605,15 +605,18 @@ void CGen8OpenCLProgram::GetZEBinary(
         }
     }
 
-    if (IGC_IS_FLAG_ENABLED(ZeBinCompatibleDebugging))
+    if (IGC_IS_FLAG_ENABLED(ZeBinCompatibleDebugging) && isDebugInfo)
     {
         if (!elfTmpFilesError)
         {
             if (elfVecNames.size() == 0)
             {
-                // Single kernel in a program, no ELF linking required
-                // Copy sections one by one from ELF file to zeBinary with relocations adjusted.
-                zebuilder.addElfSections(pFirstKernelOutput->m_debugData, pFirstKernelOutput->m_debugDataSize);
+                // if kernel was compiled only to visaasm, the output will be empty for gen binary.
+                if (pFirstKernelOutput) {
+                    // Single kernel in a program, no ELF linking required
+                    // Copy sections one by one from ELF file to zeBinary with relocations adjusted.
+                    zebuilder.addElfSections(pFirstKernelOutput->m_debugData, pFirstKernelOutput->m_debugDataSize);
+                }
             }
             else
             {
@@ -740,11 +743,6 @@ void CGen8OpenCLProgram::GetZEBinary(
 
 void CGen8OpenCLProgram::CreateKernelBinaries()
 {
-    auto isValidShader = [&](IGC::COpenCLKernel* shader)->bool
-    {
-        return (shader && shader->ProgramOutput()->m_programSize > 0);
-    };
-
     for (auto pKernel : m_ShaderProgramList)
     {
         IGC::COpenCLKernel* simd8Shader = static_cast<IGC::COpenCLKernel*>(pKernel->GetShader(SIMDMode::SIMD8));
@@ -757,20 +755,20 @@ void CGen8OpenCLProgram::CreateKernelBinaries()
             && (m_Context.getModuleMetaData()->csInfo.forcedSIMDSize == 0))
         {
             // For multiple SIMD modes, send SIMD modes in descending order
-            if (isValidShader(simd32Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd32Shader))
                 kernelVec.push_back(simd32Shader);
-            if (isValidShader(simd16Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd16Shader))
                 kernelVec.push_back(simd16Shader);
-            if (isValidShader(simd8Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd8Shader))
                 kernelVec.push_back(simd8Shader);
         }
         else
         {
-            if (isValidShader(simd32Shader))
+            if (IGC::COpenCLKernel::IsValidShader(simd32Shader))
                 kernelVec.push_back(simd32Shader);
-            else if (isValidShader(simd16Shader))
+            else if (IGC::COpenCLKernel::IsValidShader(simd16Shader))
                 kernelVec.push_back(simd16Shader);
-            else if (isValidShader(simd8Shader))
+            else if (IGC::COpenCLKernel::IsValidShader(simd8Shader))
                 kernelVec.push_back(simd8Shader);
         }
 

@@ -117,13 +117,19 @@ void Decoder::decodeSWSB(Instruction* inst)
 
         switch (status)
         {
-        case iga::SWSB_STATUS::ERROR_SET_ON_VARIABLE_LENGTH_ONLY:
+        case SWSB_STATUS::SUCCESS:
+            break;
+        case SWSB_STATUS::ERROR_SET_ON_VARIABLE_LENGTH_ONLY:
             errorT("SBID set is only allowed on variable latency ops");
             break;
-        case iga::SWSB_STATUS::ERROR_INVALID_SBID_VALUE:
+        case SWSB_STATUS::ERROR_INVALID_SBID_VALUE:
             errorT("invalid SBID value 0x%x", swsbBits);
             break;
+        case SWSB_STATUS::ERROR_ENCODE_MODE:
+            errorT("invalid encoding mode for platform");
+            break;
         default:
+            errorT("unknown error decoding SBID value 0x%x", swsbBits);
             break;
         }
         inst->setSWSB(sw);
@@ -999,8 +1005,7 @@ void Decoder::decodeTernarySourceAlign1(Instruction *inst)
 
         // only ARF_NULL is allowed at src0 if it's not GRF
         if (S == SourceIndex::SRC0 && regFile == GED_REG_FILE_ARF)
-            if (regName != RegName::ARF_NULL
-                )
+            if (regName != RegName::ARF_NULL)
                 fatalT("non grf src0 register file must be null for this op");
 
         Type ty = decodeSrcType<S>();
@@ -1169,6 +1174,17 @@ void Decoder::decodeSendInfoXeHP(SendDescodeInfo &sdi)
     }
 }
 
+void Decoder::decodeSendInfoXeHPG(SendDescodeInfo &sdi)
+{
+    // This is exactly the same as XeHP except that:
+    //  - all immediate descriptors encode Src1Len in the EU bits
+    decodeSendInfoXeHP(sdi);
+    if (sdi.exDesc.isImm()) {
+        // >=XeHPG all immediate descriptors also have Src1Length
+        //   clobber the value XeHP decoding set
+        GED_DECODE_RAW_TO(Src1Length, sdi.src1Len);
+    }
+}
 
 
 Instruction *Decoder::decodeSendInstruction(Kernel& kernel)
@@ -1182,6 +1198,10 @@ Instruction *Decoder::decodeSendInstruction(Kernel& kernel)
         decodeSendInfoXe(sdi);
     } else if (platform() == Platform::XE_HP) {
         decodeSendInfoXeHP(sdi);
+    } else if (platform() == Platform::XE_HPG ||
+        platform() == Platform::XE_HPC)
+    {
+        decodeSendInfoXeHPG(sdi);
     } else {
         IGA_ASSERT_FALSE("unsupported platform");
     }
@@ -1215,7 +1235,8 @@ Instruction *Decoder::decodeSendInstruction(Kernel& kernel)
         decodeSendSource0(inst);
     }
 
-    bool hasFusionCtrl = platform() >= Platform::XE;
+    // No fusion in XeHPC+
+    bool hasFusionCtrl = platform() >= Platform::XE && platform() < Platform::XE_HPC;
     if (hasFusionCtrl) {
         GED_FUSION_CTRL fusionCtrl = GED_FUSION_CTRL_Normal;
         GED_DECODE_RAW_TO(FusionCtrl, fusionCtrl);
@@ -1306,13 +1327,13 @@ void Decoder::decodeSendSource0(Instruction *inst)
             rgn = decodeSrcRegionVWH<SourceIndex::SRC0>();
         }
 
-        inst->setDirectSource(
-            SourceIndex::SRC0,
-            SrcModifier::NONE,
-            dri.regName,
-            dri.regRef,
-            rgn,
-            dri.type);
+            inst->setDirectSource(
+                SourceIndex::SRC0,
+                SrcModifier::NONE,
+                dri.regName,
+                dri.regRef,
+                rgn,
+                dri.type);
     }
 }
 
@@ -1562,7 +1583,12 @@ Instruction *Decoder::decodeSyncInstruction(Kernel &kernel)
         //   sync.nop     null
         //   sync.allrd   null
         //   ...
+        // Since XeHPC, sync.bar supports flag src0
+        if (platform() >= Platform::XE_HPC) {
+            decodeSourceBasic<SourceIndex::SRC0>(inst, GED_ACCESS_MODE_Align1);
+        } else {
             inst->setSource(SourceIndex::SRC0, Operand::SRC_REG_NULL_UB);
+        }
     } else {
         // e.g.
         //   sync.allrd   0x15
@@ -1611,8 +1637,17 @@ FlagRegInfo Decoder::decodeFlagRegInfo(bool imm64Src0Overlaps) {
         fri.modifier = FlagModifier::EO;
     }
 
-    if (m_opSpec->supportsPredication())
+    // For XeHPC PredIvn field only exists when
+    // PredCtrl or CondCtrl (flag modifier) exits
+    if (platform() >= Platform::XE_HPC) {
+        if (fri.pred.function != PredCtrl::NONE ||
+            fri.modifier != FlagModifier::NONE)
+            decodePredInv(fri.pred);
+    }
+    else if (m_opSpec->supportsPredication())
+    {
         decodePredInv(fri.pred);
+    }
 
     if (fri.pred.function != PredCtrl::NONE ||
         fri.modifier != FlagModifier::NONE)
@@ -1897,6 +1932,7 @@ void Decoder::decodeSourceBasicAlign1(
             inst->setInidirectSource(
                 toSrcIxE,
                 srcMod,
+                RegName::GRF_R, // set to GRF for indirect register access
                 a0,
                 addrImm,
                 decRgn,
@@ -1996,7 +2032,7 @@ void Decoder::decodeSourceBasicAlign16(
             int32_t addrImm = decodeSrcAddrImm<S>();
             RegRef indReg = {0, (uint8_t)subRegNum};
             inst->setInidirectSource(
-                toSrcIx, srcMod, indReg,
+                toSrcIx, srcMod, RegName::GRF_R, indReg,
                 (int16_t)addrImm, Region::SRC110, decodeSrcType<S>());
         } else {
              // == GED_ADDR_MODE_INVALID
@@ -2143,7 +2179,6 @@ void Decoder::decodeOptions(Instruction *inst)
     if (GED_IsCompact(&m_currGedInst)) {
         inst->addInstOpt(InstOpt::COMPACTED);
     }
-
 }
 
 

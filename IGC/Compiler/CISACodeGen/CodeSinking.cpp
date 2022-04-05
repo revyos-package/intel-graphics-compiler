@@ -57,7 +57,7 @@ using namespace IGC::Debug;
 namespace IGC {
 
     // Register pass to igc-opt
-#define PASS_FLAG "code sinking"
+#define PASS_FLAG "igc-code-sinking"
 #define PASS_DESCRIPTION "code sinking"
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS false
@@ -204,6 +204,7 @@ namespace IGC {
         if (CTX->type != ShaderType::PIXEL_SHADER &&
             CTX->type != ShaderType::DOMAIN_SHADER &&
             CTX->type != ShaderType::OPENCL_SHADER &&
+            CTX->type != ShaderType::RAYTRACING_SHADER &&
             CTX->type != ShaderType::COMPUTE_SHADER)
         {
             return false;
@@ -612,8 +613,8 @@ namespace IGC {
         bool ForceToReducePressure)
     {
         // Check if it's safe to move the instruction.
-        bool hasAliasConcern;
-        bool reducePressure;
+        bool hasAliasConcern =false;
+        bool reducePressure = false;
         if (!isSafeToMove(inst, reducePressure, hasAliasConcern, Stores/*, AA*/))
             return false;
         if (ForceToReducePressure) {
@@ -628,7 +629,7 @@ namespace IGC {
         {
             // find the lowest common dominator of all uses
             BasicBlock* tgtBlk = 0x0;
-            bool outerLoop;
+            bool outerLoop = false;
             if (FindLowestSinkTarget(inst, tgtBlk, usesInBlk, outerLoop, ForceToReducePressure))
             {
                 // heuristic, avoid code-motion that does not reduce execution frequency but may increase register usage
@@ -726,8 +727,11 @@ namespace IGC {
                     // which is not really a local-code-motion
                     if (def->getNextNode() != use && !isa<PHINode>(use))
                     {
-                        def->moveBefore(use);
-                        madeChange = true;
+                        if (!def->getMetadata("implicitGlobalID"))
+                        {
+                            def->moveBefore(use);
+                            madeChange = true;
+                        }
                     }
                     localInstSet.erase(def);
                 }
@@ -1057,8 +1061,8 @@ namespace IGC {
         // pressure can be reduced.
 
         // L0 is inner loop
-        Loop* L0 = LoopWithPressure;
-        assert(L0);
+        Loop* const L0 = LoopWithPressure;
+        IGC_ASSERT(L0);
 
         // L1 is parent loop
         Loop* L1 = nullptr;

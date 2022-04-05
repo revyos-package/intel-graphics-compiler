@@ -7,7 +7,9 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "vc/Utils/GenX/Printf.h"
+#include "vc/Utils/General/IRBuilder.h"
 #include "vc/Utils/General/RegexIterator.h"
+#include "vc/Utils/General/Types.h"
 
 #include <llvm/GenXIntrinsics/GenXIntrinsics.h>
 
@@ -28,6 +30,7 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/ADT/StringRef.h"
+#include "llvmWrapper/IR/Operator.h"
 #include "llvmWrapper/Support/Regex.h"
 
 using namespace llvm;
@@ -44,6 +47,8 @@ static StringRef extractCStr(const Constant &CStrConst) {
 bool vc::isConstantString(const GlobalVariable &GV) {
   if (!GV.isConstant())
     return false;
+  // FIXME: Check namespace, it should be constant or global. Though it is not
+  //        possible to check it right now (CM has no addrspaces).
   if (!GV.getValueType()->isArrayTy())
     return false;
   return GV.getValueType()->getArrayElementType()->isIntegerTy(8);
@@ -70,17 +75,50 @@ bool vc::isConstantStringFirstElementGEP(const Value &V) {
   return isConstantStringFirstElementGEP(cast<GEPOperator>(V));
 }
 
-Optional<StringRef> vc::getConstStringFromOperandOptional(const Value &Op) {
+static const Value &ignoreCastToGenericAS(const Value &Op) {
+  if (isCastToGenericAS(Op))
+    return *cast<IGCLLVM::AddrSpaceCastOperator>(Op).getPointerOperand();
+  return Op;
+}
+
+const GlobalVariable *vc::getConstStringGVFromOperandOptional(const Value &Op) {
   IGC_ASSERT_MESSAGE(Op.getType()->isPointerTy(),
                      "wrong argument: pointer was expected");
   IGC_ASSERT_MESSAGE(Op.getType()->getPointerElementType()->isIntegerTy(8),
                      "wrong argument: i8* value was expected");
-  if (!isa<GEPOperator>(Op))
+  auto &MaybeGEP = ignoreCastToGenericAS(Op);
+  if (!isa<GEPOperator>(MaybeGEP))
+    return nullptr;
+  auto &GEPPtrOp = *cast<GEPOperator>(MaybeGEP).getPointerOperand();
+  // FIXME: Check that indices are {0, 0}.
+  auto &MaybeGV = ignoreCastToGenericAS(GEPPtrOp);
+  if (!isConstantString(MaybeGV))
+    return nullptr;
+  return &cast<GlobalVariable>(MaybeGV);
+}
+
+GlobalVariable *vc::getConstStringGVFromOperandOptional(Value &Op) {
+  return const_cast<GlobalVariable *>(
+      getConstStringGVFromOperandOptional(static_cast<const Value &>(Op)));
+}
+
+const GlobalVariable &vc::getConstStringGVFromOperand(const Value &Op) {
+  auto *GV = getConstStringGVFromOperandOptional(Op);
+  IGC_ASSERT_MESSAGE(GV,
+                     "couldn't reach constexpr string through pointer operand");
+  return *GV;
+}
+
+GlobalVariable &vc::getConstStringGVFromOperand(Value &Op) {
+  return const_cast<GlobalVariable &>(
+      getConstStringGVFromOperand(static_cast<const Value &>(Op)));
+}
+
+Optional<StringRef> vc::getConstStringFromOperandOptional(const Value &Op) {
+  auto *GV = getConstStringGVFromOperandOptional(Op);
+  if (!GV)
     return {};
-  auto *StrConst = cast<GEPOperator>(Op).getPointerOperand();
-  if (!isConstantString(*StrConst))
-    return {};
-  return extractCStr(*cast<GlobalVariable>(StrConst)->getInitializer());
+  return extractCStr(*GV->getInitializer());
 }
 
 StringRef vc::getConstStringFromOperand(const Value &Op) {

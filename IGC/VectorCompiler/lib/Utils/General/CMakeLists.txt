@@ -9,9 +9,11 @@
 set(GENERAL_UTILS_SOURCES
   BiF.cpp
   InstRebuilder.cpp
-  BreakConst.cpp
   Types.cpp
   FunctionAttrs.cpp
+  DebugInfo.cpp
+  IRBuilder.cpp
+  IndexFlattener.cpp
   )
 
 add_library(VCGeneralUtils ${GENERAL_UTILS_SOURCES})

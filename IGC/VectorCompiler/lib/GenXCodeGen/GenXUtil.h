@@ -10,8 +10,9 @@ SPDX-License-Identifier: MIT
 #define GENX_UTIL_H
 
 #include "FunctionGroup.h"
-#include "GenXRegion.h"
+#include "GenXRegionUtils.h"
 #include "GenXSubtarget.h"
+
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/Twine.h"
@@ -29,6 +30,7 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <unordered_map>
 #include <vector>
@@ -65,26 +67,6 @@ template <typename T> inline T roundedVal(T Val, T RoundUp) {
   if (RoundedVal < RoundUp)
     RoundedVal = RoundUp;
   return RoundedVal;
-}
-
-// Utility function to get type size in diffrent units.
-template<unsigned UnitBitSize = 1>
-unsigned getTypeSize(Type *Ty, const DataLayout *DL = nullptr) {
-  IGC_ASSERT(Ty && Ty->isSized());
-  unsigned BitTypeSize = 0;
-  // FIXME: it's better to use DataLayout to get function pointers type size, so
-  // we should remove it when such pointers will be in separate address space.
-  // Size of function pointers is always 32 bit.
-  if (auto PT = dyn_cast<PointerType>(Ty->getScalarType());
-      PT && PT->getPointerElementType()->isFunctionTy()) {
-    // FIXME: wrong condition.
-    BitTypeSize = 32 * isa<IGCLLVM::FixedVectorType>(Ty)
-                      ? cast<IGCLLVM::FixedVectorType>(Ty)->getNumElements()
-                      : 1;
-  } else
-    BitTypeSize = DL ? DL->getTypeSizeInBits(Ty) : Ty->getPrimitiveSizeInBits();
-  IGC_ASSERT_MESSAGE(BitTypeSize, "Consider using DataLayout for retrieving this type size");
-  return 1 + (BitTypeSize - 1) / UnitBitSize;
 }
 
 // createConvert : create a genx_convert intrinsic call
@@ -140,6 +122,9 @@ Instruction *convertShlShr(Instruction *Inst);
 bool splitStructPhis(Function *F);
 bool splitStructPhi(PHINode *Phi);
 
+// Get original value before bit-casting chain.
+Value *getBitCastedValue(Value *V);
+
 // normalize g_load with bitcasts.
 //
 // When a single g_load is being bitcast'ed to different types, clone g_loads.
@@ -148,12 +133,6 @@ bool normalizeGloads(Instruction *Inst);
 // fold bitcast instruction to store/load pointer operand if possible.
 // Return this new instruction or nullptr.
 Instruction *foldBitCastInst(Instruction *Inst);
-
-// Return the underlying global variable. Return nullptr if it does not exist.
-GlobalVariable *getUnderlyingGlobalVariable(Value *V);
-const GlobalVariable *getUnderlyingGlobalVariable(const Value *V);
-GlobalVariable *getUnderlyingGlobalVariable(LoadInst *LI);
-const GlobalVariable *getUnderlyingGlobalVariable(const LoadInst *LI);
 
 class Bale;
 
@@ -202,6 +181,10 @@ bool skipOptWithLargeBlock(FunctionGroup &FG);
 // getTwoAddressOperandNum : get operand number of two address operand
 llvm::Optional<unsigned> getTwoAddressOperandNum(CallInst *II);
 
+// isPredicate : test whether an instruction has predicate (i1 or vector of i1)
+// type
+bool isPredicate(Instruction *Inst);
+
 // isNot : test whether an instruction is a "not" instruction (an xor with
 //    constant all ones)
 bool isNot(Instruction *Inst);
@@ -245,7 +228,6 @@ public:
   // getAsSlice : return start index of slice, or -1 if shufflevector is not
   //  slice
   int getAsSlice();
-
   // Replicated slice descriptor.
   // Replicated slice (e.g. 1 2 3 1 2 3) can be parametrized by
   // initial offset (1), slice size (3) and replication count (2).
@@ -491,6 +473,24 @@ unsigned getInlineAsmNumOutputs(CallInst *CI);
 
 Type *getCorrespondingVectorOrScalar(Type *Ty);
 
+// Get bitmap of instruction allowed execution sizes
+unsigned getExecSizeAllowedBits(const Instruction *Inst,
+                                const GenXSubtarget *ST);
+
+// VC backend natively supports half, float and double data types
+bool isSupportedFloatingPointType(const Type *Ty);
+
+// Get type that represents OldType as vector of NewScalarType, e.g.
+// <4 x i16> -> <2 x i32>, returns nullptr if it's inpossible.
+IGCLLVM::FixedVectorType *changeVectorType(Type *OldType,
+                                           Type *NewScalarType,
+                                           const DataLayout *DL);
+
+// Check if V is reading form predfined register.
+bool isPredefRegSource(const Value *V);
+// Check if V is writing to predefined register.
+bool isPredefRegDestination(const Value *V);
+
 /* scalarVectorizeIfNeeded: scalarize of vectorize \p Inst if it is required
  *
  * Result of some instructions can be both Ty and <1 x Ty> value e.g. rdregion.
@@ -582,7 +582,8 @@ bool isWrPredRegionLegalSetP(const CallInst &WrPredRegion);
 // another function, e.g. genx.faddr intrinsic.
 // Returns V casted to CallInst if the check is true,
 // nullptr otherwise.
-CallInst *checkFunctionCall(Value *V, Function *F);
+const CallInst *checkFunctionCall(const Value *V, const Function *F);
+CallInst *checkFunctionCall(Value *V, const Function *F);
 
 // Get possible number of GRFs for indirect region
 unsigned getNumGRFsPerIndirectForRegion(const genx::Region &R,
@@ -609,14 +610,14 @@ Instruction *emulateI64Operation(const GenXSubtarget *ST, Instruction *In,
 // Information about each stored section can be accessed via the key with
 // which it was stored. The key must be unique.
 // Accumulated/consolidated binary data can be accesed.
-template <typename KeyT> class BinaryDataAccumulator {
-public:
+template <typename KeyT, typename DataT = uint8_t, DataT Zero = 0u>
+struct BinaryDataAccumulator final {
   struct SectionInfoT {
     int Offset = 0;
-    ArrayRef<char> Data;
+    ArrayRef<DataT> Data;
 
     SectionInfoT() = default;
-    SectionInfoT(const char *BasePtr, int First, int Last)
+    SectionInfoT(const DataT *BasePtr, int First, int Last)
         : Offset{First}, Data{BasePtr + First, BasePtr + Last} {}
 
     int getSize() const { return Data.size(); }
@@ -628,7 +629,7 @@ public:
   };
 
 private:
-  std::vector<char> Data;
+  std::vector<DataT> Data;
   using SectionSeq = std::vector<SectionT>;
   SectionSeq Sections;
 
@@ -650,15 +651,37 @@ public:
   reference back() { return *std::prev(end()); }
   const_reference back() const { return *std::prev(end()); }
 
+  // Pad the end of the buffer with \p Size zeros.
+  void pad(int Size) {
+    IGC_ASSERT_MESSAGE(Size >= 0,
+                       "wrong argument: size must be a non-negative number");
+    std::fill_n(std::back_inserter(Data), Size, Zero);
+  }
+
+  // Align the end of the buffer to \p Alignment bytes.
+  void align(int Alignment) {
+    IGC_ASSERT_MESSAGE(Alignment > 0,
+                       "wrong argument: alignment must be a positive number");
+    if (Alignment == 1 || Data.size() == 0)
+      return;
+    pad(alignTo(Data.size(), Alignment) - Data.size());
+  }
+
   // Append the data that is referenced by a \p Key and represented
   // in range [\p First, \p Last), to the buffer.
-  // The range must consist of char elements.
+  // The range must consist of DataT elements.
+  // The data is placed with alignment \p Alignment.
   template <typename InputIter>
-  void append(KeyT Key, InputIter First, InputIter Last) {
+  void append(KeyT Key, InputIter First, InputIter Last, int Alignment = 1) {
     IGC_ASSERT_MESSAGE(
         std::none_of(Sections.begin(), Sections.end(),
                      [&Key](const SectionT &S) { return S.Key == Key; }),
         "There's already a section with such key");
+    IGC_ASSERT_MESSAGE(Alignment > 0,
+                       "wrong argument: alignment must be a positive number");
+
+    align(Alignment);
+
     SectionT Section;
     Section.Key = std::move(Key);
     int Offset = Data.size();
@@ -668,7 +691,7 @@ public:
     Sections.push_back(std::move(Section));
   }
 
-  void append(KeyT Key, ArrayRef<char> SectionBin) {
+  void append(KeyT Key, ArrayRef<DataT> SectionBin) {
     append(std::move(Key), SectionBin.begin(), SectionBin.end());
   }
 
@@ -690,20 +713,13 @@ public:
   int getSectionSize(const KeyT &Key) const { return getSectionInfo(Key).Size; }
   // Get size of the whole collected data.
   int getFullSize() const { return Data.size(); }
+  int getNumSections() const { return Sections.size(); }
   // Data buffer empty.
   bool empty() const { return Data.empty(); }
   // Emit the whole consolidated data.
-  std::vector<char> emitConsolidatedData() const & { return Data; }
-  std::vector<char> emitConsolidatedData() && { return std::move(Data); }
+  std::vector<DataT> emitConsolidatedData() const & { return Data; }
+  std::vector<DataT> emitConsolidatedData() && { return std::move(Data); }
 };
-
-// Not every global variable is a real global variable and should be eventually
-// encoded as a global variable.
-// GenX volatile and printf strings are exclusion for now.
-// Printf strings should be already legalized to make it possible to use this
-// function. Which should already be done in middle-end so no problem for
-// calling it in codegen.
-bool isRealGlobalVariable(const GlobalVariable &GV);
 
 // Get size of an struct field including the size of padding for the next field,
 // or the tailing padding.
@@ -723,7 +739,7 @@ std::size_t getStructElementPaddedSize(unsigned ElemIdx, unsigned NumOperands,
 // Determine if there is a store to global variable Addr in between of L1 and
 // L2. L1 and L2 can be either vloads or regular stores.
 bool hasMemoryDeps(Instruction *L1, Instruction *L2, Value *Addr,
-                   DominatorTree *DT);
+                   const DominatorTree *DT);
 
 // Return true if V is rdregion from a load result.
 bool isRdRFromGlobalLoad(Value *V);

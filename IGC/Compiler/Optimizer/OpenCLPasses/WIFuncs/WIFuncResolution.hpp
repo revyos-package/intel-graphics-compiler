@@ -10,6 +10,7 @@ SPDX-License-Identifier: MIT
 
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/MetaDataUtilsWrapper.h"
+#include "Compiler/CISACodeGen/GenCodeGenModule.h"
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Pass.h>
@@ -131,23 +132,52 @@ namespace IGC
         /// @return A value representing the sync buffer
         llvm::Value* getSyncBufferPtr(llvm::CallInst& CI);
 
-        /// @brief  get vector of work group size if reqd_work_group_size is set.
-        /// @param  F the function to check
-        /// @return A vector with work group size (e.g., <i32 16, i32 1, i32 1>)
-        ///         or nullptr if not known.
-        llvm::Constant* getKnownWorkGroupSize(
-            IGCMD::MetaDataUtils* MDUtils,
-            llvm::Function& F) const;
-
         /// @brief  The implicit arguments of the current function
         ImplicitArgs m_implicitArgs;
 
+        /// @brief  Emit intrinsics to store implicit buffer
+        ///         pointer and local id pointer.
+        /// @param  Function to add intrinsics to. This has to be
+        ///         an entry level, ie kernel function.
+        void storeImplicitBufferPtrs(llvm::Function& F);
+
     private:
         /// @brief  Indicates if the pass changed the processed function
-        bool m_changed;
-
-        IGC::CodeGenContext* m_pCtx;
+        bool m_changed = false;
+        IGCMD::MetaDataUtils* m_pMdUtils = nullptr;
     };
 
 } // namespace IGC
 
+namespace IGC
+{
+    class LowerImplicitArgIntrinsics : public llvm::FunctionPass, public llvm::InstVisitor<LowerImplicitArgIntrinsics>
+    {
+    public:
+        static char ID;
+
+        LowerImplicitArgIntrinsics();
+
+        ~LowerImplicitArgIntrinsics() {}
+
+        virtual llvm::StringRef getPassName() const override
+        {
+            return "LowerImplicitArgIntrinsics";
+        }
+
+        void getAnalysisUsage(llvm::AnalysisUsage& AU) const override
+        {
+            AU.addRequired<MetaDataUtilsWrapper>();
+            AU.addRequired<CodeGenContextWrapper>();
+        }
+
+        virtual bool runOnFunction(llvm::Function& F) override;
+
+        void visitCallInst(llvm::CallInst& CI);
+
+    private:
+        GenXFunctionGroupAnalysis* m_FGA = nullptr;
+        IGC::CodeGenContext* m_ctx = nullptr;
+        llvm::Value* BuildLoadInst(llvm::CallInst& CI, unsigned int Offset, llvm::Type* DataType);
+    };
+} // namespace IGC

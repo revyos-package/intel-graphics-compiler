@@ -21,7 +21,7 @@ namespace IGC
     {
     public:
         friend class CShaderProgram;
-        COpenCLKernel(const OpenCLProgramContext* ctx, llvm::Function*, CShaderProgram* pProgram);
+        COpenCLKernel(OpenCLProgramContext* ctx, llvm::Function*, CShaderProgram* pProgram);
         ~COpenCLKernel();
 
         void PreCompile() override;
@@ -31,9 +31,12 @@ namespace IGC
 
         bool        hasReadWriteImage(llvm::Function& F) override;
         bool        CompileSIMDSize(SIMDMode simdMode, EmitPass& EP, llvm::Function& F) override;
-        SIMDStatus  checkSIMDCompileConds(SIMDMode simdMode, EmitPass& EP, llvm::Function& F);
 
-        void        FillKernel();
+        SIMDStatus  checkSIMDCompileConds(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls);
+        SIMDStatus  checkSIMDCompileCondsPVC(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls);
+
+        unsigned getAnnotatedNumThreads() override;
+        void FillKernel(SIMDMode simdMode);
 
         // Recomputes the binding table layout according to the present kernel args
         void RecomputeBTLayout();
@@ -54,14 +57,18 @@ namespace IGC
 
         const SOpenCLKernelInfo& getKernelInfo() const { return m_kernelInfo; }
 
+        static bool IsValidShader(COpenCLKernel* shader);
+
     public:
         SOpenCLProgramInfo* m_programInfo;
         SOpenCLKernelInfo m_kernelInfo;
 
         unsigned int m_perWIStatelessPrivateMemSize;
 
-        bool        GetDisableMidThreadPreemption() const { return m_disableMidThreadPreemption; }
-        void        SetDisableMidthreadPreemption() { m_disableMidThreadPreemption = true; }
+        bool GetDisableMidThreadPreemption() const { return m_disableMidThreadPreemption; }
+        void SetDisableMidthreadPreemption() { m_disableMidThreadPreemption = true; }
+        bool passNOSInlineData() override;
+        bool loadThreadPayload() override;
 
     protected:
         // Creates appropriate annotation based on the kernel arg
@@ -105,6 +112,7 @@ namespace IGC
         bool m_HasTID;
         bool m_HasGlobalSize;
         bool m_disableMidThreadPreemption;
+        unsigned m_annotatedNumThreads;
 
         // Maps GlobalVariables representing local address-space pointers
         // to their offsets in SLM.
@@ -115,6 +123,7 @@ namespace IGC
         void ClearKernelInfo();
     private:
         bool hasWorkGroupWalkOrder();
+        void tryHWGenerateLocalIDs();
     };
 
 }

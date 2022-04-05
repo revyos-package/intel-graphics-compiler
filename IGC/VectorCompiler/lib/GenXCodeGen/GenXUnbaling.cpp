@@ -263,11 +263,12 @@ SPDX-License-Identifier: MIT
 #include "GenXIntrinsics.h"
 #include "GenXLiveness.h"
 #include "GenXNumbering.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
+
+#include "vc/Support/BackendConfig.h"
+
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/CFG.h"
-#include "vc/Support/BackendConfig.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -286,7 +287,7 @@ using namespace genx;
 
 namespace {
 
-class GenXUnbaling : public FunctionGroupPass {
+class GenXUnbaling : public FGPassImplInterface, public IDMixin<GenXUnbaling> {
   enum { UNKNOWN, BEFORE, AFTER, NOTREACHES, REACHES };
 
   const GenXBackendConfig *BackendConfig = nullptr;
@@ -310,15 +311,11 @@ class GenXUnbaling : public FunctionGroupPass {
   SmallVector<ToUnbaleEntry, 4> ToUnbale;
   std::map<Instruction *, Instruction *> CommonBaleMap;
 public:
-  static char ID;
-  explicit GenXUnbaling() : FunctionGroupPass(ID) {}
-  StringRef getPassName() const override { return "GenX unbaling"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  explicit GenXUnbaling() {}
+  static StringRef getPassName() { return "GenX unbaling"; }
+  static void getAnalysisUsage(AnalysisUsage &AU);
   bool runOnFunctionGroup(FunctionGroup &FG) override;
-  // createPrinterPass : get a pass to print the IR, together with the GenX
-  // specific analyses
-  Pass *createPrinterPass(raw_ostream &O, const std::string &Banner) const
-    override { return createGenXGroupPrinterPass(O, Banner); }
+
 private:
   void processFunc(Function *F);
   void shortenLiveRanges(Function *F);
@@ -331,23 +328,26 @@ private:
 
 } // end anonymous namespace
 
-namespace llvm { void initializeGenXUnbalingPass(PassRegistry &); }
-char GenXUnbaling::ID = 0;
-INITIALIZE_PASS_BEGIN(GenXUnbaling, "GenXUnbaling", "GenXUnbaling", false, false)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPass)
+namespace llvm {
+void initializeGenXUnbalingWrapperPass(PassRegistry &);
+using GenXUnbalingWrapper = FunctionGroupWrapperPass<GenXUnbaling>;
+} // namespace llvm
+INITIALIZE_PASS_BEGIN(GenXUnbalingWrapper, "GenXUnbalingWrapper",
+                      "GenXUnbalingWrapper", false, false)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeGroupWrapperPassWrapper)
 INITIALIZE_PASS_DEPENDENCY(GenXBackendConfig)
-INITIALIZE_PASS_DEPENDENCY(GenXGroupBaling)
-INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
-INITIALIZE_PASS_DEPENDENCY(GenXNumbering)
-INITIALIZE_PASS_END(GenXUnbaling, "GenXUnbaling", "GenXUnbaling", false, false)
+INITIALIZE_PASS_DEPENDENCY(GenXGroupBalingWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXLivenessWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXNumberingWrapper)
+INITIALIZE_PASS_END(GenXUnbalingWrapper, "GenXUnbalingWrapper",
+                    "GenXUnbalingWrapper", false, false)
 
-FunctionGroupPass *llvm::createGenXUnbalingPass() {
-  initializeGenXUnbalingPass(*PassRegistry::getPassRegistry());
-  return new GenXUnbaling();
+ModulePass *llvm::createGenXUnbalingWrapperPass() {
+  initializeGenXUnbalingWrapperPass(*PassRegistry::getPassRegistry());
+  return new GenXUnbalingWrapper();
 }
 
-void GenXUnbaling::getAnalysisUsage(AnalysisUsage &AU) const {
-  FunctionGroupPass::getAnalysisUsage(AU);
+void GenXUnbaling::getAnalysisUsage(AnalysisUsage &AU) {
   AU.addRequired<DominatorTreeGroupWrapperPass>();
   AU.addRequired<GenXBackendConfig>();
   AU.addRequired<GenXGroupBaling>();
@@ -1145,7 +1145,7 @@ void GenXUnbaling::processNonOverlappingRegion(CallInst *EndWr)
   for (auto ThisWr = StartWr;;) {
     // For elements overwritten by Wr, change corresponding elements in C to
     // undef.
-    Region R(ThisWr, BaleInfo());
+    Region R = makeRegionFromBaleInfo(ThisWr, BaleInfo());
     C = R.evaluateConstantWrRegion(C,
         Constant::getAllOnesValue(ThisWr->getOperand(1)->getType()));
     // Move on to next wrregion.
@@ -1163,7 +1163,7 @@ void GenXUnbaling::processNonOverlappingRegion(CallInst *EndWr)
       Instruction *Rd = bi->Inst;
       // See if the rdregion only reads a region that has not been overwritten
       // by any wrregion up to now.
-      Region RdR(Rd, BaleInfo());
+      Region RdR = makeRegionFromBaleInfo(Rd, BaleInfo());
       if (RdR.Indirect)
         return; // Fail if rdregion is indirect
       Constant *SubC = RdR.evaluateConstantRdRegion(C, /*AllowScalar=*/false);
@@ -1187,8 +1187,9 @@ void GenXUnbaling::processNonOverlappingRegion(CallInst *EndWr)
     // Check for the case that we have a rdregion-wrregion bale that is now
     // uesless because it reads and writes the same region.
     auto Wr = Baling->getBaleParent(Rd);
-    if (GenXIntrinsic::isWrRegion(Wr)
-        && Region(Wr, BaleInfo()) == Region(Rd, BaleInfo())) {
+    if (GenXIntrinsic::isWrRegion(Wr) &&
+        (makeRegionFromBaleInfo(Wr, BaleInfo()) ==
+         makeRegionFromBaleInfo(Rd, BaleInfo()))) {
       UselessWrRegions.push_back(Wr);
       continue;
     }

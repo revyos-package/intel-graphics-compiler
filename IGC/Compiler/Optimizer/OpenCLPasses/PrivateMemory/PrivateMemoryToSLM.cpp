@@ -6,6 +6,8 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include "Probe/Assertion.h"
+
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryToSLM.hpp"
 
 #include "AdaptorCommon/ImplicitArgs.hpp"
@@ -83,7 +85,7 @@ namespace IGC
 
     // TODO: Unify with the original predicate from InlineLocalsResolution.cpp
     static bool useAsPointerOnly(Value* V) {
-        assert(V->getType()->isPointerTy() && "Expect the input value is a pointer!");
+        IGC_ASSERT_MESSAGE(V->getType()->isPointerTy(), "Expect the input value is a pointer!");
 
         SmallSet<PHINode*, 8> VisitedPHIs;
         SmallVector<Value*, 16> WorkList;
@@ -310,21 +312,21 @@ namespace IGC
                     {
                         localIdX =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_X),
+                                implicitArgs.getImplicitArgValue(*F, ImplicitArg::LOCAL_ID_X, MD),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdX"),
                                 pEntryPoint);
                         localIdY =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_Y),
+                                implicitArgs.getImplicitArgValue(*F, ImplicitArg::LOCAL_ID_Y, MD),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdY"),
                                 pEntryPoint);
                         localIdZ =
                             ZExtInst::CreateIntegerCast(
-                                implicitArgs.getImplicitArg(*F, ImplicitArg::LOCAL_ID_Z),
+                                implicitArgs.getImplicitArgValue(*F, ImplicitArg::LOCAL_ID_Z, MD),
                                 typeInt32,
                                 false,
                                 VALUE_NAME("localIdZ"),
@@ -337,7 +339,7 @@ namespace IGC
                         //    R0.1  31:0    Thread Group ID X
                         //    R0.6  31:0    Thread Group ID Y
                         //    R0.7  31:0    Thread Group ID Z
-                        Value* r0Val = implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, CodeGenCtx);
+                        Value* r0Val = implicitArgs.getImplicitArgValue(*F, ImplicitArg::R0, MD);
                         localIdX =
                             builder.CreateExtractElement(
                                 r0Val,

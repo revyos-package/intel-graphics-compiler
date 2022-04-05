@@ -11,31 +11,37 @@ SPDX-License-Identifier: MIT
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef GENXDIAGNOSTIC_H
-#define GENXDIAGNOSTIC_H
+#ifndef VC_SUPPORT_GENXDIAGNOSTIC_H
+#define VC_SUPPORT_GENXDIAGNOSTIC_H
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/Value.h"
 
 #include <string>
 
 namespace vc {
 
+// Prints \p V to string \p Str.
+template <typename T> void printToString(std::string &Str, T &V) {
+#if LLVM_VERSION_MAJOR < 10
+  llvm::raw_string_ostream StrStream{Str};
+  StrStream << V;
+#else
+  llvm::raw_string_ostream{Str} << V;
+#endif
+}
+
 // Diagnostic information for errors/warnings
 class DiagnosticInfo : public llvm::DiagnosticInfo {
 private:
   std::string Description;
-  static int KindID;
+  static const int KindID;
 
-  static int getKindID() {
-    if (KindID == 0)
-      KindID = llvm::getNextAvailablePluginDiagnosticKind();
-    return KindID;
-  }
+  static int getKindID() { return KindID; }
 
 public:
   // Initialize from description
@@ -45,23 +51,23 @@ public:
         Description((Prefix + ": " + Desc).str()) {}
 
   // Initialize with Value
-  DiagnosticInfo(llvm::Value *Val, const llvm::Twine &Prefix,
+  DiagnosticInfo(const llvm::Value *Val, const llvm::Twine &Prefix,
                  const llvm::Twine &Desc,
                  llvm::DiagnosticSeverity Severity = llvm::DS_Error)
       : llvm::DiagnosticInfo(getKindID(), Severity) {
     std::string Str;
-    llvm::raw_string_ostream(Str) << *Val;
+    printToString(Str, *Val);
     Description =
         (Prefix + " failed for: <" + Str.c_str() + ">: " + Desc).str();
   }
 
   // Initialize with Type
-  DiagnosticInfo(llvm::Type *Ty, const llvm::Twine &Prefix,
+  DiagnosticInfo(const llvm::Type *Ty, const llvm::Twine &Prefix,
                  const llvm::Twine &Desc,
                  llvm::DiagnosticSeverity Severity = llvm::DS_Error)
       : llvm::DiagnosticInfo(getKindID(), Severity) {
     std::string Str;
-    llvm::raw_string_ostream(Str) << *Ty;
+    printToString(Str, *Ty);
     Description =
         (Prefix + " failed for: <" + Str.c_str() + ">: " + Desc).str();
   }
@@ -77,12 +83,24 @@ void diagnose(llvm::LLVMContext &Ctx, const llvm::Twine &Prefix,
               const llvm::Twine &Desc,
               llvm::DiagnosticSeverity Severity = llvm::DS_Error);
 void diagnose(llvm::LLVMContext &Ctx, const llvm::Twine &Prefix,
-              llvm::Value *Val, const llvm::Twine &Desc,
+              const llvm::Value *Val, const llvm::Twine &Desc,
               llvm::DiagnosticSeverity Severity = llvm::DS_Error);
-void diagnose(llvm::LLVMContext &Ctx, const llvm::Twine &Prefix, llvm::Type *Ty,
-              const llvm::Twine &Desc,
+void diagnose(llvm::LLVMContext &Ctx, const llvm::Twine &Prefix,
+              const llvm::Type *Ty, const llvm::Twine &Desc,
               llvm::DiagnosticSeverity Severity = llvm::DS_Error);
+
+template <typename Diag> struct IRChecker {
+  static void argOperandIsConstantInt(const llvm::CallInst &CI, unsigned Idx,
+                                      const llvm::Twine &ArgName) {
+    auto *Op = CI.getArgOperand(Idx);
+    if (llvm::isa<llvm::ConstantInt>(Op))
+      return;
+    Diag Err(&CI, "<" + ArgName + "> is expected to be constant",
+             llvm::DS_Error);
+    CI.getContext().diagnose(Err);
+  }
+};
 
 } // namespace vc
 
-#endif // GENXDIAGNOSTIC_H
+#endif // VC_SUPPORT_GENXDIAGNOSTIC_H

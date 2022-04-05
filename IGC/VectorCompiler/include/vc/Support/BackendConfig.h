@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -49,47 +49,65 @@ void initializeGenXBackendConfigPass(PassRegistry &PR);
 // Plain structure to be filled by users who want to create backend
 // configuration. Some values are default-initialized from cl options.
 struct GenXBackendOptions {
-  // EmitDebuggable Kernels (allocate SIP Surface and avoid using BTI=0)
-  bool EmitDebuggableKernels = false;
+  // EmitDebuggable Kernels (allocate SIP Surface)
+  bool DebuggabilityEmitDebuggableKernels = true;
+  // Legacy path requires kernel to reserve BTI=0
+  bool DebuggabilityForLegacyPath = false;
+  // Emit breakpoints at the start of each kernel
+  bool DebuggabilityEmitBreakpoints = false;
   // Enable emission of DWARF debug information
-  bool EmitDebugInformation = false;
+  bool DebuggabilityEmitDWARF = true;
   // Generate Debug Info in a format compatible with zebin
-  bool DebugInfoForZeBin = false;
+  bool DebuggabilityZeBinCompatibleDWARF = false;
   // Enable strict debug info validation
-  bool DebugInfoValidationEnable = false;
+  bool DebuggabilityValidateDWARF = false;
+
+  // Special mode of operation for emulation BiF precompilation.
+  // It is expected that this mode is set only by specialized tools and should
+  // not be touched during standard compilation flow.
+  bool BiFEmulationCompilation = false;
 
   // Enable/disable regalloc dump.
-  bool DumpRegAlloc;
+  bool DumpRegAlloc = false;
   // Maximum available memory for stack (in bytes).
-  unsigned StackSurfaceMaxSize;
+  unsigned StackSurfaceMaxSize = 8 * 1024;
 
   // Non-owning pointer to abstract shader dumper for debug dumps.
   vc::ShaderDumper *Dumper = nullptr;
   // Non-owning pointer to ShaderOverride interface
   vc::ShaderOverrider *ShaderOverrider = nullptr;
 
+  // Flag to turn off StructSpliter pass
+  bool DisableStructSplitting = false;
+
+  // Flag to disable EU fusion
+  bool DisableEUFusion = false;
+
   // Whether to enable finalizer dumps.
-  bool EnableAsmDumps;
+  bool EnableAsmDumps = false;
   // Whether to enable dumps of kernel debug information
-  bool EnableDebugInfoDumps;
+  bool EnableDebugInfoDumps = false;
   std::string DebugInfoDumpsNameOverride;
 
   bool ForceArrayPromotion = false;
 
   // Localize live ranges to reduce accumulator usage
-  bool LocalizeLRsForAccUsage;
+  bool LocalizeLRsForAccUsage = false;
+
+  // Disable LR coalescing
+  bool DisableLiveRangesCoalescing = false;
+
+  // Disable extra coalescing
+  bool DisableExtraCoalescing = false;
 
   // Disable non-overlapping region transformation (the case with undef
   // value in two-address operand)
-  bool DisableNonOverlappingRegionOpt;
-
-  // Force passing "-debug" option to finalizer
-  bool PassDebugToFinalizer = false;
+  bool DisableNonOverlappingRegionOpt = false;
 
   // use new Prolog/Epilog Insertion pass vs old CisaBuilder machinery
   bool UseNewStackBuilder = true;
 
-  FunctionControl FCtrl;
+  FunctionControl FCtrl = FunctionControl::Default;
 
   // Non-owning pointer to workaround table.
   const WA_TABLE *WATable = nullptr;
@@ -97,17 +115,52 @@ struct GenXBackendOptions {
   bool IsLargeGRFMode = false;
 
   // Use bindless mode for buffers.
-  bool UseBindlessBuffers;
+  bool UseBindlessBuffers = false;
+
+  // Add vISA asm as sections in ZeBin
+  bool EmitZebinVisaSections = false;
 
   // max private stateless memory size per thread
-  unsigned StatelessPrivateMemSize;
+  unsigned StatelessPrivateMemSize = 8192;
+
+  // Disable critical messages from CisaBuilder
+  bool DisableFinalizerMsg = false;
 
   // Historically stack calls linkage is changed to internal in CMABI. This
   // option allows saving the original linkage type for such functions. This is
   // required for linking (e.g. invoke_simd).
   bool SaveStackCallLinkage = false;
 
-  GenXBackendOptions();
+  // Treat "image2d_t" as non-media 2d images.
+  bool UsePlain2DImages = false;
+
+  // Enable/disable flushing L3 cache for globals.
+  bool L3FlushForGlobal = false;
+
+  // Allow the use of `GPU` fence scope on single-tile GPUs.
+  bool GPUFenceScopeOnSingleTileGPUs = false;
+
+  // Enable preemption (to be switched on by default)
+  bool EnablePreemption = false;
+
+  // Temporary solution. When is set, code is generated under the assumption all
+  // calls are direct. Extern call are still extern in LLVM IR.
+  bool DirectCallsOnly = false;
+
+  // Loop unroll threshold. Value 0 means to keep default threshold.
+  unsigned LoopUnrollThreshold = 0;
+
+  // Calling enforceLLVMOptions queries the state of LLVM options and
+  // updates BackendOptions accordingly.
+  // Note: current implementation allows backend options to be configured by
+  // both driver and LLVM command line. LLVM options take presedence over
+  // driver-derived values.
+  void enforceLLVMOptions();
+
+  struct InitFromLLVMOpts {};
+
+  GenXBackendOptions() = default;
+  GenXBackendOptions(InitFromLLVMOpts) { enforceLLVMOptions(); }
 };
 
 enum BiFKind {
@@ -157,6 +210,11 @@ public:
   // Return whether regalloc results should be printed.
   bool enableRegAllocDump() const { return Options.DumpRegAlloc; }
 
+  // Return whether emulation BiF compilation mode is enabled.
+  bool isBiFEmulationCompilation() const {
+    return Options.BiFEmulationCompilation;
+  }
+
   // Return maximum available space in bytes for stack purposes.
   unsigned getStackSurfaceMaxSize() const {
     return Options.StackSurfaceMaxSize;
@@ -166,10 +224,23 @@ public:
     return Data.BiFModule[Kind];
   }
 
-  bool emitDebugInformation() const { return Options.EmitDebugInformation; }
-  bool emitDebuggableKernels() const { return Options.EmitDebuggableKernels; }
-  bool emitDebugInfoForZeBin() const { return Options.DebugInfoForZeBin; }
-  bool enableDebugInfoValidation() const { return Options.DebugInfoValidationEnable; }
+  bool emitBreakpointAtKernelEntry() const {
+    return Options.DebuggabilityEmitBreakpoints;
+  }
+  bool emitDebuggableKernels() const {
+    return Options.DebuggabilityEmitDebuggableKernels;
+  }
+  bool emitDebuggableKernelsForLegacyPath() const {
+    return Options.DebuggabilityForLegacyPath && emitDebuggableKernels();
+  }
+  bool emitDWARFDebugInfo() const { return Options.DebuggabilityEmitDWARF; }
+  bool emitDWARFDebugInfoForZeBin() const {
+    return Options.DebuggabilityZeBinCompatibleDWARF && emitDWARFDebugInfo();
+  }
+  bool enableDebugInfoValidation() const {
+    return Options.DebuggabilityValidateDWARF;
+  }
+
   // Return whether shader dumper is installed.
   bool hasShaderDumper() const { return Options.Dumper; }
 
@@ -202,12 +273,16 @@ public:
     return Options.LocalizeLRsForAccUsage;
   }
 
-  bool disableNonOverlappingRegionOpt() const {
-    return Options.DisableNonOverlappingRegionOpt;
+  bool disableLiveRangesCoalescing() const {
+    return Options.DisableLiveRangesCoalescing;
   }
 
-  bool passDebugToFinalizer() const {
-    return Options.PassDebugToFinalizer;
+  bool disableExtraCoalescing() const {
+    return Options.DisableExtraCoalescing;
+  }
+
+  bool disableNonOverlappingRegionOpt() const {
+    return Options.DisableNonOverlappingRegionOpt;
   }
 
   bool useNewStackBuilder() const { return Options.UseNewStackBuilder; }
@@ -215,6 +290,12 @@ public:
   unsigned getStatelessPrivateMemSize() const {
     return Options.StatelessPrivateMemSize;
   }
+
+  bool isDisableFinalizerMsg() const {
+    return Options.DisableFinalizerMsg;
+  }
+
+  bool isDisableEUFusion() const { return Options.DisableEUFusion; }
 
   FunctionControl getFCtrl() const { return Options.FCtrl; }
 
@@ -225,9 +306,23 @@ public:
     return Options.WATable;
   }
 
+  bool doStructSplitting() const { return !Options.DisableStructSplitting; }
+
   bool useBindlessBuffers() const { return Options.UseBindlessBuffers; }
 
+  bool emitZebinVisaSections() const { return Options.EmitZebinVisaSections; }
+
   bool saveStackCallLinkage() const { return Options.SaveStackCallLinkage; }
+
+  bool usePlain2DImages() const { return Options.UsePlain2DImages; }
+
+  bool enablePreemption() const { return Options.EnablePreemption; }
+
+  bool directCallsOnly() const { return Options.DirectCallsOnly; }
+
+  unsigned getLoopUnrollThreshold() const {
+    return Options.LoopUnrollThreshold;
+  }
 };
 } // namespace llvm
 

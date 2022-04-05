@@ -196,19 +196,20 @@ public:
         unsigned numRows);
 
     void markBusyGRF(unsigned regNum,
-                  unsigned regOff,
-                  unsigned nunits,
-        unsigned numRows)
+        unsigned regOff,
+        unsigned nunits,
+        unsigned numRows,
+        bool isPreDefinedVar)
     {
         MUST_BE_TRUE(numRows > 0 && nunits > 0, ERROR_INTERNAL_ARGUMENT);
 
-        MUST_BE_TRUE(regNum + numRows <= maxGRFCanBeUsed,
+        MUST_BE_TRUE((regNum + numRows <= maxGRFCanBeUsed) || isPreDefinedVar,
             ERROR_UNKNOWN);
 
         //
         // sub reg allocation (allocation unit is word)
         //
-        if (numRows == 1 && regOff + nunits < numEltPerGRF<Type_UW>())
+        if (numRows == 1 && regOff + nunits < builder.numEltPerGRF<Type_UW>())
         {
             availableGregs[regNum] = false;
             auto subregMask = getSubregBitMask(regOff, nunits);
@@ -219,7 +220,10 @@ public:
             for (unsigned i = 0; i < numRows; i++)
             {
                 availableGregs[regNum + i] = false;
-                availableSubRegs[regNum + i] = 0xffff0000;
+                if (builder.getGRFSize() == 64)
+                    availableSubRegs[regNum + i] = 0;
+                else
+                    availableSubRegs[regNum + i] = 0xffff0000;
             }
         }
     }
@@ -267,7 +271,7 @@ public:
 
     uint32_t getSubregBitMask(uint32_t start, uint32_t num) const
     {
-        MUST_BE_TRUE(num > 0 && start+num <= numEltPerGRF<Type_UW>(), "illegal number of words");
+        MUST_BE_TRUE(num > 0 && start+num <= builder.numEltPerGRF<Type_UW>(), "illegal number of words");
         uint32_t mask = ((1 << num) - 1) << start;
 
         return (uint32_t) mask;

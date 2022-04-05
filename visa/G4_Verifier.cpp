@@ -8,6 +8,8 @@ SPDX-License-Identifier: MIT
 
 #include "G4_Verifier.hpp"
 
+#include <sstream>
+
 using namespace vISA;
 
 void verifyG4Kernel(
@@ -100,6 +102,13 @@ bool G4Verifier::verifyInst(G4_INST *inst)
         {
             // def-use chain should be valid after these passes
             return verifyDefUseChain(inst);
+        }
+
+        if (passIndex == Optimizer::PI_HWConformityChk
+            || passIndex == Optimizer::PI_addSWSBInfo)
+        {
+            // feature verification. Do it twice for now.
+            verifyBFMixedMode(inst);
         }
     }
     return true;
@@ -227,10 +236,10 @@ bool G4Verifier::dataHazardCheck(G4_Operand *dst, G4_Operand *src)
         return false;
     }
 
-    int dstReg = dstStart / numEltPerGRF<Type_UB>();
-    int dstRegNum = (dstEnd - dstStart + numEltPerGRF<Type_UB>()) / numEltPerGRF<Type_UB>();
-    int srcReg = srcStart / numEltPerGRF<Type_UB>();
-    int srcRegNum = (srcEnd - srcStart + numEltPerGRF<Type_UB>()) / numEltPerGRF<Type_UB>();
+    int dstReg = dstStart / kernel.numEltPerGRF<Type_UB>();
+    int dstRegNum = (dstEnd - dstStart + kernel.numEltPerGRF<Type_UB>()) / kernel.numEltPerGRF<Type_UB>();
+    int srcReg = srcStart / kernel.numEltPerGRF<Type_UB>();
+    int srcRegNum = (srcEnd - srcStart + kernel.numEltPerGRF<Type_UB>()) / kernel.numEltPerGRF<Type_UB>();
     int srcReg2 = -1;
 
     if (srcRegNum > 1)
@@ -267,8 +276,8 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             return;
         }
 
-        int dstStart = dst->getLinearizedStart() / numEltPerGRF<Type_UB>();
-        int dstEnd = dst->getLinearizedEnd() / numEltPerGRF<Type_UB>();
+        int dstStart = dst->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
+        int dstEnd = dst->getLinearizedEnd() / kernel.numEltPerGRF<Type_UB>();
 
         for (int i = 0; i < inst->getNumSrc(); i++)
         {
@@ -278,8 +287,8 @@ void G4Verifier::verifyDstSrcOverlap(G4_INST* inst)
             {
                 bool overlap = dataHazardCheck(dst, src);
 
-                int srcStart = src->getLinearizedStart() / numEltPerGRF<Type_UB>();
-                int srcEnd = src->getLinearizedEnd() / numEltPerGRF<Type_UB>();
+                int srcStart = src->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
+                int srcEnd = src->getLinearizedEnd() / kernel.numEltPerGRF<Type_UB>();
                 if (dstEnd != dstStart ||
                     srcStart != srcEnd)  //Any operand is more than 2 GRF
                 {
@@ -301,8 +310,8 @@ void G4Verifier::verifySend(G4_INST* inst)
 
         if (inst->isEOT() && kernel.fg.builder->hasEOTGRFBinding())
         {
-            auto checkEOTSrc = [](G4_SrcRegRegion* src) {
-                const unsigned int EOTStart = 112 * numEltPerGRF<Type_UB>();
+            auto checkEOTSrc = [this](G4_SrcRegRegion* src) {
+                const unsigned int EOTStart = 112 * kernel.numEltPerGRF<Type_UB>();
                 if (src->isNullReg())
                 {
                     return true;
@@ -322,11 +331,14 @@ void G4Verifier::verifySend(G4_INST* inst)
 
         if (inst->isSplitSend())
         {
-            if (src0->getBase()->isGreg() && src1 && src1->getBase()->isGreg())
+            // simd1 split send is allowed to have srcs overlap. When it's simd1, overlap for the rest
+            // of the payload shouldn't matter
+            bool allowSrcOverlap = inst->getExecSize() == g4::SIMD1;
+            if (!allowSrcOverlap && src0->getBase()->isGreg() && src1 && src1->getBase()->isGreg())
             {
-                int src0Start = src0->getLinearizedStart() / numEltPerGRF<Type_UB>();
+                int src0Start = src0->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
                 int src0End = src0Start + inst->getMsgDesc()->getSrc0LenRegs() - 1;
-                int src1Start = src1->getLinearizedStart() / numEltPerGRF<Type_UB>();
+                int src1Start = src1->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
                 int src1End = src1Start + inst->getMsgDesc()->getSrc1LenRegs() - 1;
                 bool noOverlap = src0End < src1Start ||
                     src1End < src0Start;
@@ -425,11 +437,11 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
             if (opnd->isRightBoundSet() && !opnd->isNullReg())
             {
                 unsigned int correctRB =
-                    ((inst->getMsgDesc()->getDstLenRegs() + opnd->asDstRegRegion()->getRegOff()) * numEltPerGRF<Type_UB>()) - 1;
+                    ((inst->getMsgDesc()->getDstLenRegs() + opnd->asDstRegRegion()->getRegOff()) * kernel.numEltPerGRF<Type_UB>()) - 1;
                 uint32_t dstLenBytes = inst->getMsgDesc()->getDstLenBytes();
-                if (dstLenBytes < getGRFSize()) {
+                if (dstLenBytes < kernel.getGRFSize()) {
                     correctRB = opnd->getLeftBound() + dstLenBytes - 1;
-                } else if (opnd->getTopDcl()->getByteSize() < numEltPerGRF<Type_UB>()) {
+                } else if (opnd->getTopDcl()->getByteSize() < kernel.numEltPerGRF<Type_UB>()) {
                     correctRB = opnd->getLeftBound() + opnd->getTopDcl()->getByteSize() - 1;
                 }
 
@@ -460,13 +472,13 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 int msgLength = (opnd == inst->getSrc(0)) ? inst->getMsgDesc()->getSrc0LenRegs() : inst->getMsgDesc()->getSrc1LenRegs();
                 unsigned int numBytes = opnd->getTopDcl()->getByteSize();
                 unsigned int correctRB = 0;
-                if (numBytes < numEltPerGRF<Type_UB>())
+                if (numBytes < kernel.numEltPerGRF<Type_UB>())
                 {
-                    correctRB = opnd->asSrcRegRegion()->getRegOff() * numEltPerGRF<Type_UB>() + numBytes - 1;
+                    correctRB = opnd->asSrcRegRegion()->getRegOff() * kernel.numEltPerGRF<Type_UB>() + numBytes - 1;
                 }
                 else
                 {
-                    correctRB = ((msgLength + opnd->asSrcRegRegion()->getRegOff()) * numEltPerGRF<Type_UB>()) - 1;
+                    correctRB = ((msgLength + opnd->asSrcRegRegion()->getRegOff()) * kernel.numEltPerGRF<Type_UB>()) - 1;
                 }
 
                 G4_Declare* parentDcl = opnd->getBase()->asRegVar()->getDeclare();
@@ -497,7 +509,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
             G4_SrcRegRegion newRgn(*(opnd->asSrcRegRegion()));
 
             newRgn.setInst(inst);
-            newRgn.computeLeftBound();
+            newRgn.computeLeftBound(*kernel.fg.builder);
             newRgn.computeRightBound(execSize);
 
             if (inst->isPseudoUse())
@@ -513,7 +525,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 newRgn.setRightBound(topdcl->getByteSize() - 1);
             }
 
-            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * numEltPerGRF<Type_UB>()) &&
+            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * kernel.numEltPerGRF<Type_UB>()) &&
                 (inst->isPseudoUse() == false))
             {
                 if (!(inst->opcode() == G4_pln && inst->getSrc(1) == opnd))
@@ -594,7 +606,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
         {
             G4_DstRegRegion newRgn(*(opnd->asDstRegRegion()));
             newRgn.setInst(inst);
-            newRgn.computeLeftBound();
+            newRgn.computeLeftBound(*kernel.fg.builder);
             newRgn.computeRightBound(execSize);
 
             if (inst->isPseudoKill())
@@ -610,7 +622,7 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
                 newRgn.setRightBound(topdcl->getByteSize() - 1);
             }
 
-            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * numEltPerGRF<Type_UB>()) &&
+            if ((opnd->getRightBound() - opnd->getLeftBound()) > (2u * kernel.numEltPerGRF<Type_UB>()) &&
                 (inst->isPseudoKill() == false) && (inst->opcode() != G4_madw))
             {
                 DEBUG_VERBOSE("Difference between left/right bound is greater than 2 GRF for dst region. Single non-send opnd cannot span 2 GRFs. lb = " <<
@@ -805,9 +817,9 @@ void G4Verifier::verifyOpnd(G4_Operand* opnd, G4_INST* inst)
             }
 
             // check if the oprands with mme are GRF-aligned.
-            if (opnd->getAccRegSel() != ACC_UNDEFINED)
+            if (opnd->isGreg() && opnd->getAccRegSel() != ACC_UNDEFINED)
             {
-                assert(opnd->getLinearizedStart() % numEltPerGRF<Type_UB>() == 0 && "operand with mme must be GRF-aligned");
+                assert(opnd->getLinearizedStart() % kernel.numEltPerGRF<Type_UB>() == 0 && "operand with mme must be GRF-aligned");
             }
         }
     }
@@ -1064,12 +1076,26 @@ void G4Verifier::verifyDpas(G4_INST* inst)
     else if (dpasInst->isFP16() || dpasInst->isBF16())
     {
         G4_Type prec = Type_UNDEF;
+        if (dpasInst->getPlatform() >= Xe_PVC)
+        {
+            prec = dpasInst->isBF16() ? Type_BF : Type_HF;
+        }
         if (!(dTy == Type_F || dTy == prec) || !(s0Ty == Type_F || s0Ty == prec))
         {
             DEBUG_VERBOSE("dpas: incorrect float type for dst or src0!");
             inst->emit(std::cerr);
             DEBUG_VERBOSE(std::endl);
             MUST_BE_TRUE(false, "dpas: wrong float type for dst or src0");
+        }
+    }
+    else if (dpasInst->isTF32())
+    {
+        if (dTy != Type_F || s0Ty != Type_F)
+        {
+            DEBUG_VERBOSE("dpas: incorrect TF32 type for dst or src0 (expected F)!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "dpas: should be float type for dst or src0");
         }
     }
     else
@@ -1129,7 +1155,7 @@ void G4Verifier::verifyDpas(G4_INST* inst)
             MUST_BE_TRUE(false, "dpas: dst/src0's size is wrong!");
         }
 
-        if ((src1->getLinearizedStart() % numEltPerGRF<Type_UB>()) != 0)
+        if ((src1->getLinearizedStart() % kernel.numEltPerGRF<Type_UB>()) != 0)
         {
             DEBUG_VERBOSE("dpas: src1's subreg offset should be 0!");
             inst->emit(std::cerr);
@@ -1196,4 +1222,217 @@ void G4Verifier::verifyAccMov(G4_INST* inst)
             MUST_BE_TRUE(false, "Invalid type combination during mov format conversion when accumulator is used as src or dst!");
         }
     }
+}
+
+//
+// Mixed mode instruction allows bfloat16 operands in the following cases:
+//   1. dst, src0, and src1 for 2 source instructions format not involving multiplier(mov, add, cmp, sel).
+//   2. dst and src0 for 2 source instructions format involving multiplier(mul, mac etc).
+//   3. dst, src0, and src1 for 3 source instructions format(mad).
+//   4. Broadcast of bfloat16 scalar is not supported.
+//   5. Unpacked bfloat16 destination with stride 2 when register offset is 0 or 1.
+//   6. Packed bfloat16 source and destination when register offset is 0 or 8.
+//   7. Execution size must not be greater than 8.
+//   8. Instructions with pure bfloat16 operands are not supported.
+//
+// **More examples**
+//   1. BF imm is not allowed
+//      mov  (1|M0)  r12.0<1>:f  0xffff:bf - ILLEGAL "Imm operand with BF type is not allowed"
+//   2. BF scalar operand can be used in SIMD1
+//      mul  (1|M0)  r14.0<1>:f  r11.0<0;1,0>:bf  r12.3<0;1,0>:f - OK
+//   3. For SIMD1, scalar operands (both dst/src) of F or BF can have any subreg!
+//      add  (1|M0)  r16.3<1>:bf  r11.0<0;1,0>:f  r12.3<0;1,0>:f - OK
+//   4. F Operand should have subreg = 0 if execSize > SIMD1
+//      add  (2|M0)  r10.4<1>:f  r11.0<1;1,0>:bf   0x12345:f
+//       ILLEGAL "Src0 regioning must be aligned to destination or scalar for Float/64bit pipes"
+//   5. Others
+//     add  (8|M0)  r16.0<2>:bf  r11.0<1;1,0>:f  r12.0<1;1,0>:f- OK
+//     add  (8|M0)  r16.1<2>:bf  r11.0<1;1,0>:f  r12.8<1;1,0>:f- OK
+//     add  (8|M0)  r16.0<1>:bf  r11.0<1;1,0>:f  r12.8<1;1,0>:f- OK
+//     add  (8|M0)  r16.8<1>:bf  r11.0<1;1,0>:f  r12.0<1;1,0>:f- OK
+//         Note that float source operands  can be scalar region <0;1,0>
+//
+//   For PVC, case 6 should be "Execution size must not be greater than 16."
+void G4Verifier::verifyBFMixedMode(G4_INST* inst)
+{
+    auto useGivenType = [](G4_INST* I, G4_Type GivenTy) -> bool
+    {
+        G4_Operand* dst = I->getDst();
+        if (I->isPseudoAddrMovIntrinsic())
+        {
+            return false;
+        }
+        // Skip compare's dst (?)
+        if (dst && !dst->isNullReg() && !I->isCompare())
+        {
+            if (dst->getType() == GivenTy)
+                return true;
+        }
+        for (int i = 0; i < I->getNumSrc(); ++i)
+        {
+            G4_Operand* src = I->getSrc(i);
+            if (src && !src->isNullReg())
+            {
+                if (src->getType() == GivenTy)
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    // Skip dpas/send as it has been verified separately
+    if (inst->isDpas() || inst->isSend())
+        return;
+
+    // Skip if no BF usage
+    if (!useGivenType(inst, Type_BF))
+        return;
+
+    if (!kernel.fg.builder->hasBFMixMode())
+    {
+        DEBUG_VERBOSE("BF type: BF mixed mode not supported!");
+        inst->emit(std::cerr);
+        DEBUG_VERBOSE(std::endl);
+        MUST_BE_TRUE(false, "BF type: BF mixed mode not supported!!");
+    }
+
+    // case 8, pure bf not supported
+    if (!useGivenType(inst, Type_F))
+    {
+        DEBUG_VERBOSE("Pure BF operands are not supported!");
+        inst->emit(std::cerr);
+        DEBUG_VERBOSE(std::endl);
+        MUST_BE_TRUE(false, "Pure BF operands are not supported!!");
+    }
+
+    switch (inst->opcode())
+    {
+    case G4_mul:
+    case G4_mac:
+    {
+        // case 2
+        G4_Operand* src1 = inst->getSrc(1);
+        if (src1->getType() != Type_F)
+        {
+            DEBUG_VERBOSE("Src1 in BF mixed mode must be F!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "Src1 in BF mixed mode must be F!");
+        }
+        break;
+    }
+    case G4_mad:
+    case G4_pseudo_mad:
+    {
+        // case 3
+        //    Note that G4_pseudo_mad : src0*src1 + src2
+        //                    gen mad : src0 + src1*src2
+        //    Need to switch 0 with 2 for pseudo_mad
+        G4_Operand* src2 = inst->getSrc(inst->opcode() == G4_pseudo_mad ? 0 : 2);
+        if (src2->getType() != Type_F)
+        {
+            DEBUG_VERBOSE("Src2 in BF mixed mode must be F!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "Src2 in BF mixed mode must be F!");
+        }
+        break;
+    }
+    case G4_mov:
+    {
+        if (inst->getSrc(0)->getType() == Type_BF)
+        {
+            // bf->f is just a left shift, bf mix restriction does not apply.
+            return;
+        }
+        // case 1
+        break;
+    }
+    case G4_add:
+    case G4_sel:
+    case G4_cmp:
+    {   // case 1
+        break;
+    }
+    default:
+        DEBUG_VERBOSE("Instruction does not support BF type!");
+        inst->emit(std::cerr);
+        DEBUG_VERBOSE(std::endl);
+        MUST_BE_TRUE(false, "Instruction does not support BF type!");
+        break;
+    }
+
+    uint32_t nativeES = kernel.fg.builder->getNativeExecSize();
+    // verify dst
+    G4_DstRegRegion* dreg = inst->getDst();
+    if (dreg && !dreg->isNullReg() && !inst->isCompare())
+    {
+        uint32_t hs = dreg->getHorzStride();
+        uint32_t so = dreg->getSubRegOff();
+        bool isLegitPackedBF = (dreg->getType() == Type_BF
+            && (hs == 1 && (so == 0 || so == nativeES)));
+        bool isLegitUnpackedBF = (dreg->getType() == Type_BF
+            && (hs == 2 && (so == 0 || so == 1)));
+        bool isLegitF = (dreg->getType() == Type_F && (hs == 1 && so == 0));
+        bool isLegitScalar = (inst->getExecSize() == g4::SIMD1 && hs == 1);
+        if (!(isLegitPackedBF || isLegitUnpackedBF || isLegitF || isLegitScalar))
+        {
+            // case 5 & 6
+            DEBUG_VERBOSE("BF/F Dst has illegal region and type combination!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "BF/F Dst has illegal region and type combination!");
+        }
+    }
+
+    // verify src
+    for (int i = 0, sz = (int)inst->getNumSrc(); i < sz; ++i)
+    {
+        G4_Operand* src = inst->getSrc(i);
+        if (!src || src->isNullReg()    // sanity
+            || (src->getType() == Type_F && src->isImm()))
+            continue;
+
+        G4_Type  srcTy = src->getType();
+        if (srcTy == Type_BF &&
+            (src->isImm() || (inst->getExecSize() != g4::SIMD1 && src->asSrcRegRegion()->getRegion()->isScalar())))
+        {
+            // case 4
+            DEBUG_VERBOSE(" Src: Imm BF/broadcast scalar BF are not supported!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "Src: Imm BF/broadcast scalar BF are not supported!");
+        }
+
+        G4_SrcRegRegion* sreg = src->asSrcRegRegion();
+        uint32_t so = sreg->getSubRegOff();
+        bool isLegitPackedBF = (srcTy == Type_BF
+            && !sreg->getRegion()->isScalar()
+            && sreg->getRegion()->isContiguous(inst->getExecSize()) && (so == 0 || so == nativeES));
+        bool isLegitF = (srcTy == Type_F
+            && !sreg->getRegion()->isScalar()
+            && sreg->getRegion()->isContiguous(inst->getExecSize()) && so == 0);
+        bool isLegitScalar = (sreg->getRegion()->isScalar()
+            && (srcTy == Type_F || (srcTy == Type_BF && inst->getExecSize() == g4::SIMD1)));
+        if (!(isLegitPackedBF || isLegitF || isLegitScalar))
+        {
+            // case 5 & 6
+            DEBUG_VERBOSE("Src has illegal region and type combination!");
+            inst->emit(std::cerr);
+            DEBUG_VERBOSE(std::endl);
+            MUST_BE_TRUE(false, "Src has illegal region and type combination!");
+        }
+    }
+
+    // case 7
+    if (inst->getExecSize() > nativeES)
+    {
+        std::stringstream ss;
+        ss << "Inst in BF mixed mode should have execsize <= " << nativeES << '\n';
+        DEBUG_VERBOSE(ss.str().c_str());
+        inst->emit(std::cerr);
+        DEBUG_VERBOSE(std::endl);
+        MUST_BE_TRUE(false, ss.str().c_str());
+    }
+    return;
 }

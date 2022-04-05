@@ -16,6 +16,7 @@ SPDX-License-Identifier: MIT
 #include "Common_ISA_util.h"
 #include "Common_ISA_framework.h"
 #include "JitterDataStruct.h"
+#include "KernelInfo.h"
 #include "VISAKernel.h"
 #include "Attributes.hpp"
 #include "Timer.h"
@@ -91,20 +92,21 @@ static void getHeightWidth(
     unsigned int numberElements,
     unsigned short& dclWidth,
     unsigned short& dclHeight,
-    int& totalByteSize)
+    int& totalByteSize,
+    const IR_Builder& irb)
 {
     dclWidth = 1, dclHeight = 1;
     totalByteSize = numberElements * TypeSize(type);
-    if (totalByteSize <= (int)numEltPerGRF<Type_UB>())
+    if (totalByteSize <= (int)irb.numEltPerGRF<Type_UB>())
     {
         dclWidth = (uint16_t)numberElements;
     }
     else {
         // here we assume that the start point of the var is the beginning of a GRF?
         // so subregister must be 0?
-        dclWidth = numEltPerGRF<Type_UB>() / TypeSize(type);
-        dclHeight = totalByteSize / numEltPerGRF<Type_UB>();
-        if (totalByteSize % numEltPerGRF<Type_UB>() != 0) {
+        dclWidth = irb.numEltPerGRF<Type_UB>() / TypeSize(type);
+        dclHeight = totalByteSize / irb.numEltPerGRF<Type_UB>();
+        if (totalByteSize % irb.numEltPerGRF<Type_UB>() != 0) {
             dclHeight++;
         }
     }
@@ -183,7 +185,7 @@ void replaceFCOpcodes(IR_Builder& builder)
     }
 }
 
-static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
+static void setDeclAlignment(G4_Declare* dcl, const IR_Builder& builder, VISA_Align align)
 {
     switch (align)
     {
@@ -193,19 +195,24 @@ static void setDeclAlignment(G4_Declare* dcl, VISA_Align align)
     case ALIGN_QWORD: dcl->setSubRegAlign(Four_Word); break;
     case ALIGN_OWORD: dcl->setSubRegAlign(Eight_Word); break;
     case ALIGN_GRF:
-        dcl->setSubRegAlign(GRFALIGN);
+        dcl->setSubRegAlign(builder.getGRFAlign());
         break;
     case ALIGN_2_GRF:
-        dcl->setSubRegAlign(GRFALIGN);
+        dcl->setSubRegAlign(builder.getGRFAlign());
         dcl->setEvenAlign();
         break;
     case ALIGN_HWORD: dcl->setSubRegAlign(Sixteen_Word); break;
     case ALIGN_32WORD:
-        dcl->setSubRegAlign(GRFALIGN);
-        if (getGRFSize() == 32)
+        dcl->setSubRegAlign(builder.getGRFAlign());
+        if (builder.getGRFSize() == 32)
         {
             dcl->setEvenAlign();
         }
+        break;
+    case ALIGN_64WORD:  //64bytes GRF aligned
+        assert(builder.getGRFSize() == 64);
+        dcl->setSubRegAlign(ThirtyTwo_Word);
+        dcl->setEvenAlign();
         break;
     default: assert(false && "Incorrect vISA alignment"); break;
     }
@@ -382,7 +389,7 @@ void* VISAKernelImpl::encodeAndEmit(unsigned int& binarySize)
     {
         BinaryEncodingBase* pBinaryEncoding = NULL;
 
-        if (getGenxPlatform() >= GENX_ICLLP && m_options->getOption(vISA_BXMLEncoder))
+        if (m_kernel->getPlatform() >= GENX_ICLLP && m_options->getOption(vISA_BXMLEncoder))
         {
             pBinaryEncoding = new BinaryEncodingCNL(*m_kernelMem, *m_kernel, m_asmName);
         }
@@ -490,6 +497,44 @@ void* VISAKernelImpl::encodeAndEmit(unsigned int& binarySize)
     }
 #endif
 
+    if (getOptions()->getOption(vISA_GenerateKernelInfo))
+    {
+        auto kernel = getKernel();
+        m_kernelInfo = new KERNEL_INFO();
+
+        //bool hasSpillFills = false;
+        //int wholeGRFbyteSize =
+        //    kernel->getGRFSize() * kernel->getNumRegTotal();
+
+        for (auto decl : kernel->Declares)
+        {
+            auto regVar = decl->getRegVar();
+            kernel->emitRegInfo();
+            if (regVar != nullptr)
+            {
+                if (regVar->isRegVar())
+                {
+                    m_kernelInfo->numReg++;
+                }
+                else if (regVar->isRegVarTmp())
+                {
+                    m_kernelInfo->numTmpReg++;
+                    m_kernelInfo->bytesOfTmpReg += decl->getByteSize();
+                }
+                else if (regVar->isRegVarSpill())
+                {
+                    //hasSpillFills = true;
+                    m_kernelInfo->numSpillReg++;
+                }
+                else if (regVar->isRegVarFill())
+                {
+                    //hasSpillFills = true;
+                    m_kernelInfo->numFillReg++;
+                }
+            }
+        }
+    }
+
     if (m_options->getOption(vISA_outputToFile))
     {
         std::stringstream ss;
@@ -527,6 +572,7 @@ int VISAKernelImpl::InitializeFastPath()
     m_kernelMem = new vISA::Mem_Manager(4096);
 
     m_kernel = new (m_mem) G4_Kernel(
+        *getCISABuilder()->getPlatformInfo(),
         m_instListNodeAllocator,
         *m_kernelMem,
         m_options,
@@ -547,7 +593,7 @@ int VISAKernelImpl::InitializeFastPath()
     m_jitInfo = (FINALIZER_INFO*)m_mem.alloc(sizeof(FINALIZER_INFO));
 
     void* addr = m_kernelMem->alloc(sizeof(class IR_Builder));
-    m_builder = new(addr)IR_Builder(getGenxPlatform(), m_instListNodeAllocator,
+    m_builder = new(addr)IR_Builder(m_instListNodeAllocator,
         *m_kernel,
         *m_kernelMem,
         m_options,
@@ -564,10 +610,7 @@ int VISAKernelImpl::InitializeFastPath()
 
 void VISAKernelImpl::CopyVars(VISAKernelImpl* from)
 {
-    m_builder->dclpool.getDeclareList().insert(
-            m_builder->dclpool.getDeclareList().end(),
-            from->m_builder->dclpool.getDeclareList().begin(),
-            from->m_builder->dclpool.getDeclareList().end());
+    m_builder->dclpool.getDeclareList() = from->m_builder->dclpool.getDeclareList();
 }
 
 int VISAKernelImpl::InitializeKernel(const char *kernel_name)
@@ -730,6 +773,11 @@ void VISAKernelImpl::createReservedKeywordSet() {
     // specification
     reservedNames.insert("FILE");
     reservedNames.insert("LOC");
+    reservedNames.insert("arg");
+    reservedNames.insert("bss");
+    reservedNames.insert("bti");
+    reservedNames.insert("flat");
+    reservedNames.insert("ss");
 }
 
 bool VISAKernelImpl::isReservedName(const std::string &nm) const {
@@ -924,7 +972,7 @@ int VISAKernelImpl::CreateVISAGenVar(
         G4_Type type = GetGenTypeFromVISAType(dataType);
         unsigned short dclWidth = 1, dclHeight = 1;
         int totalByteSize = 0;
-        getHeightWidth(type, numberElements, dclWidth, dclHeight, totalByteSize);
+        getHeightWidth(type, numberElements, dclWidth, dclHeight, totalByteSize, *m_builder);
 
         info->dcl = m_builder->createDeclareNoLookup(
             createStringCopy(varName, m_mem),
@@ -947,10 +995,11 @@ int VISAKernelImpl::CreateVISAGenVar(
         }
 
         // force subalign to be GRF if total size is larger than or equal to GRF
-        if ((info->dcl->getSubRegAlign() != GRFALIGN) ||
+        if ((info->dcl->getSubRegAlign() != getIRBuilder()->getGRFAlign()) ||
+            (varAlign == (m_builder->getGRFSize() == 64 ? ALIGN_64WORD : ALIGN_32WORD)) ||
             (varAlign == ALIGN_2_GRF))
         {
-            setDeclAlignment(info->dcl, varAlign);
+            setDeclAlignment(info->dcl, *m_builder, varAlign);
         }
 
         info->name_index = -1;
@@ -1166,30 +1215,6 @@ int VISAKernelImpl::CreateVISASurfaceVar(
     return CreateStateVar((CISA_GEN_VAR *&)decl, SURFACE_VAR, name, numberElements);
 }
 
-int VISAKernelImpl::CreateDummyLabelOperand(
-    VISA_LabelOpnd *& opnd, char * name, VISA_Label_Kind kind)
-{
-    TIME_SCOPE(VISA_BUILDER_CREATE_OPND);
-
-    VISA_INST_Desc *inst_desc = NULL;
-    ISA_Opcode opcode = ISA_LABEL;
-    if (kind == LABEL_SUBROUTINE)
-    {
-        opcode = ISA_SUBROUTINE;
-    }
-    inst_desc = &CISA_INST_table[opcode];
-    opnd = (VISA_LabelOpnd *)m_mem.alloc(sizeof(VISA_LabelOpnd));
-    opnd->_opnd.other_opnd = CISA_INVALID_VAR_ID;
-    opnd->opnd_type = CISA_OPND_OTHER;
-    opnd->size = (uint16_t)Get_VISA_Type_Size((VISA_Type)inst_desc->opnd_desc[0].data_type);
-    opnd->tag = opcode;
-
-    m_forward_label_pool[m_forward_label_count] = std::string(name);
-    opnd->index = m_forward_label_count++;
-
-    return VISA_SUCCESS;
-}
-
 int VISAKernelImpl::CreateVISALabelVar(VISA_LabelOpnd *& opnd, const char* name, VISA_Label_Kind kind)
 {
     TIME_SCOPE(VISA_BUILDER_CREATE_VAR);
@@ -1239,29 +1264,13 @@ int VISAKernelImpl::CreateVISALabelVar(VISA_LabelOpnd *& opnd, const char* name,
 
         if (kind == LABEL_BLOCK)
         {
-            if (!setLabelNameIndexMap(std::string(name), opnd))
-            {
-                assert(0);
-                return VISA_FAILURE;
-            }else
-            {
-                inst_desc = &CISA_INST_table[ISA_LABEL];
-                opnd->tag = ISA_LABEL;
-            }
+            inst_desc = &CISA_INST_table[ISA_LABEL];
+            opnd->tag = ISA_LABEL;
         }
         else
         {
-            if (getLabelOperandFromFunctionName(name) == NULL)
-            {
-                m_funcName_to_labelID_map[std::string(name)] = opnd;
-                inst_desc = &CISA_INST_table[ISA_SUBROUTINE];
-                opnd->tag = ISA_SUBROUTINE;
-            }
-            else
-            {
-                assert(0);
-                return VISA_FAILURE;
-            }
+            inst_desc = &CISA_INST_table[ISA_SUBROUTINE];
+            opnd->tag = ISA_SUBROUTINE;
         }
 
         opnd->opnd_type = CISA_OPND_OTHER;
@@ -1340,7 +1349,7 @@ int VISAKernelImpl::AddKernelAttribute(const char* attrName, int size, const voi
             ASSERT_USER(false, "Unsupported attribute size");
             break;
         }
-        m_kernelAttrs->setKernelAttr(attrID, attr->value.intVal);
+        m_kernelAttrs->setKernelAttr(attrID, attr->value.intVal, *getIRBuilder());
     }
     else if (Attributes::isBool(attrID))
     {
@@ -1760,7 +1769,7 @@ int VISAKernelImpl::CreateVISAInputVar(
     }
 
     // save the G4_declare of "R1" input in builder
-    if (offset == getGRFSize() && size == getGRFSize())
+    if (m_builder && offset == m_builder->getGRFSize() && size == m_builder->getGRFSize())
     {
         m_builder->setInputR1(input->dcl);
     }
@@ -1906,11 +1915,11 @@ int VISAKernelImpl::CreateVISAAddressOfOperandGeneric(
                 cisa_opnd->tag = OPERAND_GENERAL;
                 cisa_opnd->_opnd.v_opnd.tag = OPERAND_GENERAL;
                 cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.index = decl->index;
-                cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.row_offset = offset / numEltPerGRF<Type_UB>();
+                cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.row_offset = offset / m_builder->numEltPerGRF<Type_UB>();
                 VISA_Type type = decl->genVar.getType();
                 unsigned int typeSize = TypeSize(GetGenTypeFromVISAType(type));
                 assert((offset % typeSize) == 0);
-                cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.col_offset = (offset % numEltPerGRF<Type_UB>())/typeSize;
+                cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.col_offset = (offset % m_builder->numEltPerGRF<Type_UB>()) / typeSize;
 
 
                 cisa_opnd->_opnd.v_opnd.opnd_val.gen_opnd.region =
@@ -2351,7 +2360,7 @@ int VISAKernelImpl::CreateVISAStateOperand(VISA_VectorOpnd *&cisa_opnd, CISA_GEN
             if (opndClass == STATE_OPND_SURFACE &&
                 decl->index < Get_CISA_PreDefined_Surf_Count())
             {
-                int64_t immVal = Get_PreDefined_Surf_Index(decl->index);
+                int64_t immVal = Get_PreDefined_Surf_Index(decl->index, m_builder->getPlatform());
                 if (immVal == PREDEF_SURF_252)
                 {
                     // we have to keep it as a variable
@@ -2461,8 +2470,8 @@ int VISAKernelImpl::CreateGenRawSrcOperand(VISA_RawOpnd *& cisa_opnd)
 
     const RegionDesc *rd = m_builder->getRegionStride1();
     G4_Type type = dcl->getElemType();
-    short row_offset = offset / numEltPerGRF<Type_UB>();
-    short col_offset = (offset % numEltPerGRF<Type_UB>()) / TypeSize(type);
+    short row_offset = offset / m_builder->numEltPerGRF<Type_UB>();
+    short col_offset = (offset % m_builder->numEltPerGRF<Type_UB>()) / TypeSize(type);
 
     cisa_opnd->g4opnd = m_builder->createSrc(
         dcl->getRegVar(),
@@ -2489,8 +2498,8 @@ int VISAKernelImpl::CreateGenRawDstOperand(VISA_RawOpnd *& cisa_opnd)
         G4_Declare *dcl = cisa_opnd->decl->genVar.dcl;
 
         {
-            short row_offset = offset/numEltPerGRF<Type_UB>();
-            short col_offset = (offset%numEltPerGRF<Type_UB>())/dcl->getElemSize();
+            short row_offset = offset / m_builder->numEltPerGRF<Type_UB>();
+            short col_offset = (offset % m_builder->numEltPerGRF<Type_UB>()) / dcl->getElemSize();
 
             cisa_opnd->g4opnd = m_builder->createDst(
                 dcl->getRegVar(),
@@ -2553,7 +2562,7 @@ int VISAKernelImpl::CreateStateInstUseFastPath(VISA_StateOpndHandle *&cisa_opnd,
             }
             else
             {
-                int64_t immVal = Get_PreDefined_Surf_Index(decl->index);
+                int64_t immVal = Get_PreDefined_Surf_Index(decl->index, m_builder->getPlatform());
                 if (m_options->getOption(vISA_noncoherentStateless) && immVal == PREDEF_SURF_255)
                 {
                     immVal = PREDEF_SURF_253;
@@ -4900,7 +4909,7 @@ int VISAKernelImpl::AppendVISAMiscRawSend(
         CreateGenRawSrcOperand(src);
         CreateGenRawDstOperand(dst);
         G4_Predicate * g4Pred = (pred != NULL)? pred->g4opnd->asPredicate() : NULL;
-        dst->g4opnd->asDstRegRegion()->setType(executionSize == EXEC_SIZE_16 ? Type_UW : Type_UD);
+        dst->g4opnd->asDstRegRegion()->setType(*getIRBuilder(), executionSize == EXEC_SIZE_16 ? Type_UW : Type_UD);
 
         status = m_builder->translateVISARawSendInst(g4Pred, executionSize,
             emask, modifiers, exMsgDesc, srcSize, dstSize, desc->g4opnd,
@@ -4969,7 +4978,7 @@ int VISAKernelImpl::AppendVISAMiscRawSends(
         CreateGenRawSrcOperand(src1);
         CreateGenRawDstOperand(dst);
         G4_Predicate * g4Pred = (pred != NULL)? pred->g4opnd->asPredicate() : NULL;
-        dst->g4opnd->asDstRegRegion()->setType(Type_UD);
+        dst->g4opnd->asDstRegRegion()->setType(*getIRBuilder(), Type_UD);
 
         status = m_builder->translateVISARawSendsInst(g4Pred, executionSize,
             emask, modifiers, exMsgDesc->g4opnd,
@@ -5384,11 +5393,11 @@ int VISAKernelImpl::AppendVISA3dSamplerMsgGeneric(
         int num_operands = 0;
 
         // subOP, pixel null mask and CPS LOD compensation enable.
-        // Bit 0-4 : subOp
-        // Bit 5   : pixelNullMask
-        // Bit 6   : cpsEnable
-        int value = subOpcode + (pixelNullMask ? 1 << 5 : 0)
-                              + (cpsEnable ? 1 << 6 : 0);
+        // Bit 0-7 : subOp
+        // Bit 8   : pixelNullMask
+        // Bit 9   : cpsEnable
+        int value = subOpcode + (pixelNullMask ? 1 << 8 : 0)
+                              + (cpsEnable ? 1 << 9 : 0);
         ADD_OPND(num_operands, opnd, CreateOtherOpndHelper(num_pred_desc_operands, num_operands, inst_desc, value));
 
         num_pred_desc_operands = 2;
@@ -7361,9 +7370,10 @@ int VISAKernelImpl::AppendVISADpasInstCommon(
 
     int status = VISA_SUCCESS;
 
-    auto setAlignIfLarger = [](var_info_t* varinfo, VISA_Align A) {
+    auto setAlignIfLarger = [this](var_info_t* varinfo, VISA_Align A) {
         VISA_Align oldA = varinfo->getAlignment();
-        if (getAlignInBytes(A) > getAlignInBytes(oldA))
+        unsigned grfSize = getIRBuilder()->getGRFSize();
+        if (getAlignInBytes(A, grfSize) > getAlignInBytes(oldA, grfSize))
         {
             varinfo->bit_properties = ((varinfo->bit_properties & ~0xF0) | (A << 4));
         }
@@ -7385,12 +7395,14 @@ int VISAKernelImpl::AppendVISADpasInstCommon(
 
     // src1 : grf aligned
     dcl = &src1->decl->genVar;
-    setAlignIfLarger(dcl, getCISAAlign(getGRFSize()));
+    setAlignIfLarger(dcl, getCISAAlign(m_builder->getGRFSize()));
 
     if (IS_GEN_BOTH_PATH)
     {
-        MUST_BE_TRUE(Get_VISA_Exec_Size(executionSize) == m_builder->getNativeExecSize(),
-                     "execution size of DPAS must be equal to native execution size!");
+        {
+            MUST_BE_TRUE(Get_VISA_Exec_Size(executionSize) == m_builder->getNativeExecSize(),
+                "execution size of DPAS must be equal to native execution size!");
+        }
 
         // src2 : QW/OW/half-grf/GRF-aligned (vectorOpnd, g4opnd has been created)
         G4_RegVar* src2RegVar = src2->g4opnd->getTopDcl()->getRegVar();
@@ -7399,7 +7411,8 @@ int VISAKernelImpl::AppendVISADpasInstCommon(
         if (src2Precision == GenPrecision::FP16 || src2Precision == GenPrecision::BF16 ||
             src2Bits == 8 || (src1Bits <= 4 && src2Bits == 4))
         {
-            G4_SubReg_Align srAlign = GRFALIGN;
+            G4_SubReg_Align srAlign = getIRBuilder()->getGRFAlign();
+            if (Count != 8) srAlign = getIRBuilder()->getHalfGRFAlign();
             src2RegVar->getDeclare()->setSubRegAlign(srAlign);
         }
         else if ((src1Bits == 8 && src2Bits == 4) || (src1Bits <= 4 && src2Bits == 2))
@@ -7632,29 +7645,763 @@ int VISAKernelImpl::AppendVISAQwordScatterInst(
     return status;
 }
 
-
-
-
-int VISAKernelImpl::patchLastInst(VISA_LabelOpnd *label)
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedLoad(
+    LSC_OP                    subOpcode,
+    LSC_SFID                  sfid,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR                  addr,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *dstData,
+    VISA_RawOpnd             *src0Addr)
 {
-    if (label->_opnd.other_opnd == CISA_INVALID_VAR_ID)
-    {
-        std::map<unsigned int, std::string>::iterator iter = m_forward_label_pool.find(label->index);
+    return AppendVISALscUntypedInst(
+        subOpcode,
+        sfid,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addr,
+        data,
+        surface,
+        dstData,
+        src0Addr,
+        nullptr,
+        nullptr);
+}
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedStore(
+    LSC_OP                    subOpcode,
+    LSC_SFID                  sfid,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR                  addr,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *src0Addr,
+    VISA_RawOpnd             *src1Data)
+{
+    return AppendVISALscUntypedInst(
+        subOpcode,
+        sfid,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addr,
+        data,
+        surface,
+        nullptr,
+        src0Addr,
+        src1Data,
+        nullptr);
+}
 
-        if (iter == m_forward_label_pool.end())
-        {
-            assert(0);
-            return VISA_FAILURE;
-        }
-        if ((ISA_Opcode)label->tag == ISA_SUBROUTINE)
-        {
-            m_lastInst->setLabelInfo(iter->second, true, true);
-        }else
-        {
-            m_lastInst->setLabelInfo(iter->second, false, true);
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedAtomic(
+    LSC_OP                    subOpcode,
+    LSC_SFID                  sfid,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR                  addr,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *dstReadBack,
+    VISA_RawOpnd             *src0Addr,
+    VISA_RawOpnd             *src1AtomOpnd1,
+    VISA_RawOpnd             *src2AtomOpnd2)
+{
+    return AppendVISALscUntypedInst(
+        subOpcode,
+        sfid,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addr,
+        data,
+        surface,
+        dstReadBack,
+        src0Addr,
+        src1AtomOpnd1,
+        src2AtomOpnd2);
+}
+
+static const int LSC_ZERO = 0;
+
+#define LSC_CHECK_NULL_VECTOR_OPERAND(X) \
+  do {\
+      if ((X) == nullptr) {\
+          auto r = CreateVISAImmediate(X, &LSC_ZERO, ISA_TYPE_UD);\
+          if (r != VISA_SUCCESS)\
+              return r;\
+      }\
+  } while (0)
+#define LSC_CHECK_NULL_OPND(X,IS_DST)\
+  do {\
+      if ((X) == nullptr) {\
+          auto r = CreateVISANullRawOperand((X), IS_DST);\
+          if (r != VISA_SUCCESS)\
+              return r;\
+      }\
+  } while (0)
+#define LSC_CHECK_NULL_DST(X) LSC_CHECK_NULL_OPND(X,true)
+#define LSC_CHECK_NULL_SRC(X) LSC_CHECK_NULL_OPND(X,false)
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedInst(
+    LSC_OP                        subOpcode,
+    LSC_SFID                      lscSfid,
+    VISA_PredOpnd                *pred,
+    VISA_Exec_Size                execSize,
+    VISA_EMask_Ctrl               emask,
+    LSC_CACHE_OPTS                cacheOpts,
+    LSC_ADDR                      addr,
+    LSC_DATA_SHAPE                dataShape,
+    VISA_VectorOpnd              *surface,
+    VISA_RawOpnd                 *dstData,
+    VISA_RawOpnd                 *src0Addr,
+    VISA_RawOpnd                 *src1Data,
+    VISA_RawOpnd                 *src2Data)
+{
+    if (subOpcode == LSC_LOAD_STRIDED || subOpcode == LSC_STORE_STRIDED) {
+        return AppendVISALscUntypedStridedInst(
+            subOpcode, lscSfid, pred, execSize,
+            emask, cacheOpts, addr, dataShape, surface, dstData, src0Addr,
+            nullptr, src1Data);
+    }
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    MUST_BE_TRUE(lscSfid != LSC_TGM, "cannot use TGM on an untyped message");
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    LSC_CHECK_NULL_VECTOR_OPERAND(surface);
+    LSC_CHECK_NULL_DST(dstData);
+    LSC_CHECK_NULL_SRC(src0Addr);
+    LSC_CHECK_NULL_SRC(src1Data);
+    LSC_CHECK_NULL_SRC(src2Data);
+
+    if (IS_GEN_BOTH_PATH) {
+        CreateGenRawDstOperand(dstData);
+        CreateGenRawSrcOperand(src0Addr);
+        CreateGenRawSrcOperand(src1Data);
+        CreateGenRawSrcOperand(src2Data);
+        status = m_builder->translateLscUntypedInst(
+            subOpcode,
+            lscSfid,
+            pred ? pred->g4opnd->asPredicate() : nullptr,
+            execSize,
+            emask,
+            cacheOpts,
+            addr,
+            dataShape,
+            surface->g4opnd,
+            dstData->g4opnd->asDstRegRegion(),
+            src0Addr->g4opnd->asSrcRegRegion(),
+            nullptr,
+            src1Data->g4opnd->asSrcRegRegion(),
+            src2Data->g4opnd->asSrcRegRegion());
+    }
+
+    if (IS_VISA_BOTH_PATH) {
+        const VISA_INST_Desc *instDesc = &CISA_INST_table[ISA_LSC_UNTYPED];
+        VISA_opnd *opnds[MAX_OPNDS_PER_INST] {};
+        int numOpnds = 0;
+
+        // use same order for load, store, and atomic
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(subOpcode, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(lscSfid, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l1, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l3, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.type, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.immScale, ISA_TYPE_UW));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.immOffset, ISA_TYPE_D));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.size, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.size, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.order, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.elems, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.chmask, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, surface);
+        ADD_OPND(numOpnds, opnds, dstData);
+        ADD_OPND(numOpnds, opnds, src0Addr);
+        ADD_OPND(numOpnds, opnds, src1Data);
+        ADD_OPND(numOpnds, opnds, src2Data);
+
+        CisaFramework::CisaInst *inst
+            = new (m_mem) CisaFramework::CisaInst(m_mem);
+        PredicateOpnd predOpnd = pred ? pred->convertToPred() : PredicateOpnd::getNullPred();
+        // Pack execution size & mask
+        unsigned size = execSize;
+        PACK_EXEC_SIZE(size, emask);
+
+        inst->createCisaInstruction(
+            ISA_LSC_UNTYPED, (uint8_t)size, 0, predOpnd, opnds, numOpnds, instDesc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+// for a strided load, this is the "natural" stride to enable a
+// block (packed) load.
+//
+// TODO: move this to IsaDescription.cpp as a helper
+static int lscStridedOpBlockStride(LSC_DATA_SHAPE dataShape)
+{
+    // e.g. given :u32x4, we really want successive lanes to be a 4*32 apart
+    //       (this is like a float4 block load)
+    // but transposed :u32x4t, we want packed elements and the vector length
+    // is just the width of the block
+    int stride = 0;
+    switch (dataShape.size) {
+    case LSC_DATA_SIZE_8b:  stride = 1; break;
+    case LSC_DATA_SIZE_16b: stride = 2; break;
+    // case LSC_DATA_SIZE_32b:
+    // ... and all the DW conversion cases
+    default:                stride = 4; break;
+    case LSC_DATA_SIZE_64b: stride = 8; break;
+    }
+    if (dataShape.order == LSC_DATA_ORDER_NONTRANSPOSE) {
+        switch (dataShape.elems) {
+        case LSC_DATA_ELEMS_1: stride *= 1; break;
+        case LSC_DATA_ELEMS_2: stride *= 2; break;
+        case LSC_DATA_ELEMS_3: stride *= 3; break;
+        case LSC_DATA_ELEMS_4: stride *= 4; break;
+        case LSC_DATA_ELEMS_8: stride *= 8; break;
+        case LSC_DATA_ELEMS_16: stride *= 16; break;
+        case LSC_DATA_ELEMS_32: stride *= 32; break;
+        case LSC_DATA_ELEMS_64: stride *= 64; break;
+        default: MUST_BE_TRUE(false,"invalid vector size"); break;
         }
     }
-    return VISA_SUCCESS;
+    return stride;
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedStridedInst(
+    LSC_OP                    op,
+    LSC_SFID                  lscSfid,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR                  addrInfo,
+    LSC_DATA_SHAPE            dataShape,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *dstData,
+    VISA_RawOpnd             *src0AddrBase,
+    VISA_VectorOpnd          *src0AddrPitch,
+    VISA_RawOpnd             *src1Data)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    MUST_BE_TRUE(op == LSC_LOAD_STRIDED || op == LSC_STORE_STRIDED,
+        "must be a strided op");
+    MUST_BE_TRUE(lscSfid != LSC_TGM, "cannot use TGM on an untyped message");
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    LSC_CHECK_NULL_VECTOR_OPERAND(surface);
+    LSC_CHECK_NULL_DST(dstData);
+    if  (src0AddrPitch == nullptr) {
+        int defaultPitch = lscStridedOpBlockStride(dataShape);
+        status |= CreateVISAImmediate(src0AddrPitch, &defaultPitch, ISA_TYPE_UD);
+    }
+    LSC_CHECK_NULL_SRC(src1Data);
+
+    if (IS_GEN_BOTH_PATH) {
+        CreateGenRawDstOperand(dstData);
+        CreateGenRawSrcOperand(src0AddrBase);
+        CreateGenRawSrcOperand(src1Data);
+        status |= m_builder->translateLscUntypedInst(
+            op,
+            lscSfid,
+            pred ? pred->g4opnd->asPredicate() : nullptr,
+            execSize,
+            emask,
+            cacheOpts,
+            addrInfo,
+            dataShape,
+            surface->g4opnd,
+            dstData->g4opnd->asDstRegRegion(),
+            src0AddrBase->g4opnd->asSrcRegRegion(),
+            src0AddrPitch->g4opnd,
+            src1Data->g4opnd->asSrcRegRegion(),
+            nullptr);
+    }
+
+    if (IS_VISA_BOTH_PATH) {
+        const VISA_INST_Desc *instDesc = &CISA_INST_table[ISA_LSC_UNTYPED];
+        VISA_opnd *opnds[MAX_OPNDS_PER_INST] {};
+        int numOpnds = 0;
+
+        // use same order for load, store, and atomic
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(op, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(lscSfid, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l1, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l3, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrInfo.type, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrInfo.immScale, ISA_TYPE_UW));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrInfo.immOffset, ISA_TYPE_D));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrInfo.size, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.size, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.order, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.elems, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(0, ISA_TYPE_UB)); // chmask
+        //
+        ADD_OPND(numOpnds, opnds, surface);
+        ADD_OPND(numOpnds, opnds, dstData);
+        ADD_OPND(numOpnds, opnds, src0AddrBase);
+        ADD_OPND(numOpnds, opnds, src0AddrPitch);
+        ADD_OPND(numOpnds, opnds, src1Data);
+
+        CisaFramework::CisaInst *inst
+            = new (m_mem) CisaFramework::CisaInst(m_mem);
+        PredicateOpnd predOpnd = pred ? pred->convertToPred() : PredicateOpnd::getNullPred();
+        // Pack execution size & mask
+        unsigned size = execSize;
+        PACK_EXEC_SIZE(size, emask);
+
+        inst->createCisaInstruction(
+            ISA_LSC_UNTYPED, (uint8_t)size, 0, predOpnd, opnds, numOpnds, instDesc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedBlock2DInst(
+    LSC_OP                    op,
+    LSC_SFID                  lscSfid,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_DATA_SHAPE_BLOCK2D    dataShape2D,
+    VISA_RawOpnd             *dstData,
+    VISA_VectorOpnd          *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS],
+    VISA_RawOpnd             *src1Data)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    MUST_BE_TRUE(lscSfid != LSC_TGM, "cannot use TGM on an untyped message");
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    LSC_CHECK_NULL_DST(dstData);
+    LSC_CHECK_NULL_SRC(src1Data);
+
+    if (IS_GEN_BOTH_PATH) {
+        CreateGenRawDstOperand(dstData);
+        // CreateGenRawSrcOperand(src0Addrs*); created in parse
+        CreateGenRawSrcOperand(src1Data);
+
+        G4_Operand *src0AddrSrcRgns[LSC_BLOCK2D_ADDR_PARAMS];
+        for (size_t i = 0; i < LSC_BLOCK2D_ADDR_PARAMS; i++) {
+            src0AddrSrcRgns[i] = src0Addrs[i]->g4opnd;
+        }
+        status |= m_builder->translateLscUntypedBlock2DInst(
+            op,
+            lscSfid,
+            pred ? pred->g4opnd->asPredicate() : nullptr,
+            execSize,
+            emask,
+            cacheOpts,
+            dataShape2D,
+            dstData->g4opnd->asDstRegRegion(),
+            src0AddrSrcRgns,
+            src1Data->g4opnd->asSrcRegRegion());
+    }
+
+    if (IS_VISA_BOTH_PATH) {
+        const VISA_INST_Desc *instDesc = &CISA_INST_table[ISA_LSC_UNTYPED];
+        VISA_opnd *opnds[MAX_OPNDS_PER_INST] {};
+        int numOpnds = 0;
+
+        // use same order for load, store, and atomic
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(op, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(lscSfid, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l1, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l3, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.size, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.order, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.blocks, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.width, ISA_TYPE_UW));
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.height, ISA_TYPE_UW));
+        ADD_OPND(numOpnds, opnds,
+            CreateOtherOpnd(dataShape2D.vnni ? 1 : 0, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, dstData);
+        for (size_t i = 0; i < LSC_BLOCK2D_ADDR_PARAMS; i++) {
+            ADD_OPND(numOpnds, opnds, src0Addrs[i]);
+        }
+        ADD_OPND(numOpnds, opnds, src1Data);
+
+        CisaFramework::CisaInst *inst
+            = new (m_mem) CisaFramework::CisaInst(m_mem);
+        PredicateOpnd predOpnd = pred ? pred->convertToPred() : PredicateOpnd::getNullPred();
+        // Pack execution size & mask
+        unsigned size = execSize;
+        PACK_EXEC_SIZE(size, emask);
+
+        inst->createCisaInstruction(
+            ISA_LSC_UNTYPED, (uint8_t)size, 0, predOpnd, opnds, numOpnds, instDesc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscTypedLoad(
+    LSC_OP                    op,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR_TYPE             addrType,
+    LSC_ADDR_SIZE             addrSize,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *dstData,
+    VISA_RawOpnd             *Us,
+    VISA_RawOpnd             *Vs,
+    VISA_RawOpnd             *Rs,
+    VISA_RawOpnd             *LODs)
+{
+    return AppendVISALscTypedInst(
+        op,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addrType,
+        addrSize,
+        data,
+        surface,
+        dstData,
+        Us,
+        Vs,
+        Rs,
+        LODs,
+        nullptr,
+        nullptr);
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscTypedStore(
+    LSC_OP                    op,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR_TYPE             addrType,
+    LSC_ADDR_SIZE             addrSize,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *Us,
+    VISA_RawOpnd             *Vs,
+    VISA_RawOpnd             *Rs,
+    VISA_RawOpnd             *LODs,
+    VISA_RawOpnd             *src1Data)
+{
+    return AppendVISALscTypedInst(
+        op,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addrType,
+        addrSize,
+        data,
+        surface,
+        nullptr,
+        Us,
+        Vs,
+        Rs,
+        LODs,
+        src1Data,
+        nullptr);
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscTypedAtomic(
+    LSC_OP                    op,
+    VISA_PredOpnd            *pred,
+    VISA_Exec_Size            execSize,
+    VISA_EMask_Ctrl           emask,
+    LSC_CACHE_OPTS            cacheOpts,
+    LSC_ADDR_TYPE             addrType,
+    LSC_ADDR_SIZE             addrSize,
+    LSC_DATA_SHAPE            data,
+    VISA_VectorOpnd          *surface,
+    VISA_RawOpnd             *dstReadBack,
+    VISA_RawOpnd             *Us,
+    VISA_RawOpnd             *Vs,
+    VISA_RawOpnd             *Rs,
+    VISA_RawOpnd             *LODs,
+    VISA_RawOpnd             *src1AtomicOpnd1,
+    VISA_RawOpnd             *src2AtomicOpnd2)
+{
+    return AppendVISALscTypedInst(
+        op,
+        pred,
+        execSize,
+        emask,
+        cacheOpts,
+        addrType,
+        addrSize,
+        data,
+        surface,
+        dstReadBack,
+        Us,
+        Vs,
+        Rs,
+        LODs,
+        src1AtomicOpnd1,
+        src2AtomicOpnd2);
+}
+
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscTypedInst(
+        LSC_OP                    subOpcode,
+        VISA_PredOpnd            *pred,
+        VISA_Exec_Size            execSize,
+        VISA_EMask_Ctrl           emask,
+        LSC_CACHE_OPTS            cacheOpts,
+        LSC_ADDR_TYPE             addrType,
+        LSC_ADDR_SIZE             addrSize,
+        LSC_DATA_SHAPE            dataShape,
+        VISA_VectorOpnd          *surface,
+        VISA_RawOpnd             *dstData,
+        VISA_RawOpnd             *src0AddrUs,
+        VISA_RawOpnd             *src0AddrVs,
+        VISA_RawOpnd             *src0AddrRs,
+        VISA_RawOpnd             *src0AddrLODs,
+        VISA_RawOpnd             *src1Data,
+        VISA_RawOpnd             *src2Data)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    LSC_CHECK_NULL_VECTOR_OPERAND(surface);
+    LSC_CHECK_NULL_DST(dstData);
+    LSC_CHECK_NULL_SRC(src0AddrUs);
+    LSC_CHECK_NULL_SRC(src0AddrVs);
+    LSC_CHECK_NULL_SRC(src0AddrRs);
+    LSC_CHECK_NULL_SRC(src0AddrLODs);
+    LSC_CHECK_NULL_SRC(src1Data);
+    LSC_CHECK_NULL_SRC(src2Data);
+
+    if (IS_GEN_BOTH_PATH) {
+        CreateGenRawDstOperand(dstData);
+        CreateGenRawSrcOperand(src0AddrUs);
+        CreateGenRawSrcOperand(src0AddrVs);
+        CreateGenRawSrcOperand(src0AddrRs);
+        CreateGenRawSrcOperand(src0AddrLODs);
+        CreateGenRawSrcOperand(src1Data);
+        CreateGenRawSrcOperand(src2Data);
+
+        status = m_builder->translateLscTypedInst(
+            subOpcode,
+            pred ? pred->g4opnd->asPredicate() : nullptr,
+            execSize,
+            emask,
+            cacheOpts,
+            addrType,
+            addrSize,
+            dataShape,
+            surface->g4opnd,
+            dstData->g4opnd->asDstRegRegion(),
+            src0AddrUs->g4opnd->asSrcRegRegion(),
+            src0AddrVs->g4opnd->asSrcRegRegion(),
+            src0AddrRs->g4opnd->asSrcRegRegion(),
+            src0AddrLODs->g4opnd->asSrcRegRegion(),
+            src1Data->g4opnd->asSrcRegRegion(),
+            src2Data->g4opnd->asSrcRegRegion()
+         );
+    }
+
+    if (IS_VISA_BOTH_PATH) {
+        const VISA_INST_Desc *instDesc = &CISA_INST_table[ISA_LSC_TYPED];
+        VISA_opnd *opnds[MAX_OPNDS_PER_INST] { };
+        int numOpnds = 0;
+
+        // use same order for load, store, and atomic
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(subOpcode, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l1, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l3, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrType, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addrSize, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.size, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.order, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.elems, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(dataShape.chmask, ISA_TYPE_UB));
+        //
+        ADD_OPND(numOpnds, opnds, surface);
+        ADD_OPND(numOpnds, opnds, dstData);
+        ADD_OPND(numOpnds, opnds, src0AddrUs);
+        ADD_OPND(numOpnds, opnds, src0AddrVs);
+        ADD_OPND(numOpnds, opnds, src0AddrRs);
+        ADD_OPND(numOpnds, opnds, src0AddrLODs);
+        ADD_OPND(numOpnds, opnds, src1Data);
+        ADD_OPND(numOpnds, opnds, src2Data);
+
+        CisaFramework::CisaInst *inst
+            = new (m_mem) CisaFramework::CisaInst(m_mem);
+        PredicateOpnd predOpnd = pred ? pred->convertToPred() : PredicateOpnd::getNullPred();
+        // Pack execution size & mask
+        unsigned size = execSize;
+        PACK_EXEC_SIZE(size, emask);
+
+        inst->createCisaInstruction(
+            ISA_LSC_TYPED, (uint8_t)size, 0, predOpnd, opnds, numOpnds, instDesc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISALscFence(
+    LSC_SFID         lscSfid,
+    LSC_FENCE_OP     fenceOp,
+    LSC_SCOPE        scope)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    if (VISA_WA_CHECK(m_builder->getPWaTable(), Wa_14012437816) &&
+        lscSfid == LSC_UGM && scope > LSC_SCOPE_LOCAL &&
+        fenceOp == LSC_FENCE_OP_NONE)
+      fenceOp = LSC_FENCE_OP_TYPE6;
+
+    if (IS_GEN_BOTH_PATH) {
+        SFID sfid = LSC_SFID_To_SFID(lscSfid);
+        m_builder->translateLscFence(sfid, fenceOp, scope, status);
+    }
+
+    if (IS_VISA_BOTH_PATH) {
+        const VISA_INST_Desc *instDesc = &CISA_INST_table[ISA_LSC_FENCE];
+        VISA_opnd *opnds[MAX_OPNDS_PER_INST];
+        memset(opnds,0,sizeof(opnds));
+        int numOpnds = 0;
+        //
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(lscSfid, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(fenceOp, ISA_TYPE_UB));
+        ADD_OPND(numOpnds, opnds, CreateOtherOpnd(scope, ISA_TYPE_UB));
+
+        CisaFramework::CisaInst *inst
+            = new (m_mem) CisaFramework::CisaInst(m_mem);
+        // Pack execution size & mask
+        unsigned size = EXEC_SIZE_1;
+        PACK_EXEC_SIZE(size, vISA_EMASK_M1_NM);
+
+        inst->createCisaInstruction(
+            ISA_LSC_FENCE, (uint8_t)size, 0, PredicateOpnd::getNullPred(), opnds, numOpnds, instDesc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISANamedBarrierWait(
+    VISA_VectorOpnd* barrierId)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    if (IS_GEN_BOTH_PATH)
+    {
+        status = m_builder->translateVISANamedBarrierWait(barrierId->g4opnd);
+    }
+
+    if (IS_VISA_BOTH_PATH)
+    {
+        VISA_INST_Desc *inst_desc = &CISA_INST_table[ISA_NBARRIER];
+        VISA_opnd* opnd[3];
+        int num_operands = 0;
+
+        uint8_t mode = 0; //wait
+        ADD_OPND(num_operands, opnd, CreateOtherOpndHelper(0, num_operands, inst_desc, mode));
+        ADD_OPND(num_operands, opnd, barrierId);
+        // pad with dummy operand as NBarrier expects three operands in binary form. It'll be ignored
+        ADD_OPND(num_operands, opnd, barrierId);
+
+        CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
+
+        inst->createCisaInstruction(ISA_NBARRIER, EXEC_SIZE_1, 0, PredicateOpnd::getNullPred(), opnd, num_operands, inst_desc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
+}
+
+VISA_BUILDER_API int VISAKernelImpl::AppendVISANamedBarrierSignal(
+    VISA_VectorOpnd* barrierId,
+    VISA_VectorOpnd* barrierCount)
+{
+    TIME_SCOPE(VISA_BUILDER_APPEND_INST);
+
+    AppendVISAInstCommon();
+
+    int status = VISA_SUCCESS;
+
+    if (IS_GEN_BOTH_PATH)
+    {
+        status = m_builder->translateVISANamedBarrierSignal(barrierId->g4opnd, barrierCount->g4opnd);
+    }
+    if (IS_VISA_BOTH_PATH)
+    {
+        VISA_INST_Desc *inst_desc = &CISA_INST_table[ISA_NBARRIER];
+        VISA_opnd* opnd[3];
+        int num_operands = 0;
+
+        uint8_t mode = 1;   //signal
+        ADD_OPND(num_operands, opnd, CreateOtherOpndHelper(0, num_operands, inst_desc, mode));
+        ADD_OPND(num_operands, opnd, barrierId);
+        ADD_OPND(num_operands, opnd, barrierCount);
+
+        CisaFramework::CisaInst * inst = new(m_mem)CisaFramework::CisaInst(m_mem);
+
+        inst->createCisaInstruction(ISA_NBARRIER, EXEC_SIZE_1, 0, PredicateOpnd::getNullPred(), opnd, num_operands, inst_desc);
+        addInstructionToEnd(inst);
+    }
+
+    return status;
 }
 
 uint32_t VISAKernelImpl::addStringPool(std::string str)
@@ -7671,7 +8418,6 @@ uint32_t VISAKernelImpl::addStringPool(std::string str)
 void VISAKernelImpl::addInstructionToEnd(CisaInst * inst)
 {
     m_instruction_list.push_back(inst);
-    m_lastInst = inst;
     CISA_INST * cisaInst = inst->getCISAInst();
     cisaInst->id = getvIsaInstCount();
     m_instruction_size += inst->getSize();
@@ -7701,34 +8447,6 @@ void VISAKernelImpl::setGenxDebugInfoBuffer(char * buffer, unsigned long size)
     m_genx_debug_info_size = size;
 }
 
-void VISAKernelImpl::patchLabels()
-{
-    std::list<CisaInst *>::iterator iter =  m_instruction_list.begin();
-    for (; iter != m_instruction_list.end(); iter++)
-    {
-        CisaInst * inst = *iter;
-        if (inst->needLabelPatch())
-        {
-            if (inst->isFuncLabel())
-            {
-                int labelID = getLabelIdFromFunctionName(inst->getLabelName());
-                MUST_BE_TRUE(labelID != INVALID_LABEL_ID, "Invalid Function Name.");
-                inst->setLabelIndex(labelID);
-
-            }else
-            {
-                std::string label_name = inst->getLabelName();
-                MUST_BE_TRUE(label_name != "", "Invalid Label discovered during patching label process.");
-                unsigned int labelID = getIndexFromLabelName(label_name);
-                MUST_BE_TRUE(labelID != ((unsigned int) INVALID_LABEL_ID), "Invalid Label Name.");
-                inst->setLabelIndex(labelID);
-            }
-        }
-    }
-
-    return;
-}
-
 /**
 *  finalizeAttributes() sets attributes based on options, etc.
 *     This is a temporary solution to move some options to attributes.
@@ -7752,7 +8470,6 @@ void VISAKernelImpl::finalizeAttributes()
 void VISAKernelImpl::finalizeKernel()
 {
     finalizeAttributes();
-    patchLabels();
     m_cisa_kernel.string_count = (uint32_t)m_string_pool.size();
     m_cisa_kernel.strings = (const char **) m_mem.alloc(m_cisa_kernel.string_count * sizeof(char *));
     auto it_string = m_string_pool.begin(), et_string = m_string_pool.end();
@@ -7949,7 +8666,6 @@ void VISAKernelImpl::finalizeKernel()
 
     m_cisa_binary_size = m_instruction_size + m_kernel_data_size;
     m_cisa_binary_buffer = (char *) m_mem.alloc(m_cisa_binary_size);
-
 }
 
 unsigned long VISAKernelImpl::writeInToCisaBinaryBuffer(const void * value, int size)
@@ -7972,13 +8688,27 @@ VISA_LabelOpnd* VISAKernelImpl::getLabelOperandFromFunctionName(const std::strin
         return it->second;
     }
 }
-unsigned int VISAKernelImpl::getLabelIdFromFunctionName(const std::string &name)
+
+VISA_LabelOpnd* VISAKernelImpl::getLabelOpndFromLabelName(const std::string &name)
 {
-    auto it = m_funcName_to_labelID_map.find(name);
-    if (m_funcName_to_labelID_map.end() == it) {
-        return INVALID_LABEL_ID;
+    auto it = m_label_name_to_index_map.find(name);
+    if (m_label_name_to_index_map.end() == it) {
+        return nullptr;
     } else {
-        return it->second->_opnd.other_opnd;
+        return it->second;
+    }
+}
+
+bool VISAKernelImpl::setLabelOpndNameMap(const std::string &name, VISA_LabelOpnd *lbl, VISA_Label_Kind kind)
+{
+    // TODO: Is it possible to merge the 2 maps? Or a function label and
+    // a block label are allowed to have the same name?
+    if (kind == LABEL_BLOCK) {
+        auto Res = m_label_name_to_index_map.insert({name, lbl});
+        return Res.second;
+    } else {
+        auto Res = m_funcName_to_labelID_map.insert({name, lbl});
+        return Res.second;
     }
 }
 
@@ -8055,38 +8785,6 @@ void VISAKernelImpl::popIndexMapScopeLevel()
     m_GenNamedVarMap.pop_back();
 }
 
-unsigned int VISAKernelImpl::getIndexFromLabelName(const std::string &name)
-{
-    auto it = m_label_name_to_index_map.find(name);
-    if (m_label_name_to_index_map.end() == it) {
-        return CISA_INVALID_VAR_ID;
-    } else {
-        return it->second->_opnd.other_opnd;
-    }
-}
-
-VISA_LabelOpnd* VISAKernelImpl::getLabelOpndFromLabelName(const std::string &name)
-{
-    auto it = m_label_name_to_index_map.find(name);
-    if (m_label_name_to_index_map.end() == it) {
-        return nullptr;
-    } else {
-        return it->second;
-    }
-}
-
-bool VISAKernelImpl::setLabelNameIndexMap(const std::string &name, VISA_LabelOpnd *lbl)
-{
-    bool succeeded = true;
-
-    //make sure mapping doesn't already exist
-    if (getIndexFromLabelName(name) != CISA_INVALID_VAR_ID) {
-        return false;
-    }
-    m_label_name_to_index_map[name] = lbl;
-    return succeeded;
-}
-
 unsigned short VISAKernelImpl::get_hash_key(const char* str)
 {
     const char *str_pt = str;
@@ -8125,6 +8823,11 @@ VISAKernelImpl::~VISAKernelImpl()
         m_kernel->~G4_Kernel();
         m_builder->~IR_Builder();
         delete m_kernelMem;
+    }
+
+    if (m_kernelInfo != nullptr)
+    {
+        delete m_kernelInfo;
     }
 
     destroyKernelAttributes();
@@ -8195,6 +8898,12 @@ int VISAKernelImpl::GetGenxDebugInfo(void *&buffer, unsigned int &size) const
 int VISAKernelImpl::GetJitInfo(FINALIZER_INFO *&jitInfo) const
 {
     jitInfo = m_jitInfo;
+    return VISA_SUCCESS;
+}
+
+int VISAKernelImpl::GetKernelInfo(KERNEL_INFO*& kernelInfo) const
+{
+    kernelInfo = m_kernelInfo;
     return VISA_SUCCESS;
 }
 
@@ -8654,6 +9363,17 @@ const char* VISAKernelImpl::getFunctionName() const
     return m_kernel->getName();
 }
 
+std::string VISAKernelImpl::getVISAAsm() const
+{
+    // Return an empty string if the builder option is GEN only.
+    if (IS_GEN_PATH)
+        return std::string();
+
+    const VISAKernelImpl* fmtKernel =
+        m_CISABuilder->m_cisaBinary->getFmtKernelForISADump(this, m_CISABuilder->getKernels());
+    return m_CISABuilder->m_cisaBinary->isaDump(this, fmtKernel);
+}
+
 void VISAKernelImpl::computeAndEmitDebugInfo(VISAKernelImplListTy& functions)
 {
     std::list<VISAKernelImpl*> compilationUnitsForDebugInfo;
@@ -8713,4 +9433,9 @@ bool enableSrcLine(void* buf)
 
     auto gtpin_init_data = (gtpin::igc::igc_init_t*)buf;
     return gtpin_init_data->srcline_mapping != 0;
+}
+
+void VISAKernelImpl::setLocalSheduleable(bool value)
+{
+    m_kernel->setLocalSheduleable(value);
 }

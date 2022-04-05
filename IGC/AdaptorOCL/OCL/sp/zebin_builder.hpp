@@ -56,6 +56,7 @@ public:
         const IGC::SOpenCLKernelInfo& annotations,
         const uint32_t grfSize,
         const IGC::CBTILayout& layout,
+        const std::string& visaasm,
         bool isProgramDebuggable);
 
     // getElfSymbol - find a symbol name in ELF binary and return a symbol entry
@@ -94,6 +95,9 @@ private:
     /// add spir-v section
     void addSPIRV(const uint8_t* data, uint32_t size);
 
+    /// add runtime symbols
+    void addRuntimeSymbols();
+
     /// add program scope symbols (e.g. symbols defined in global/const buffer)
     void addProgramSymbols(const IGC::SOpenCLProgramInfo& annotations);
 
@@ -120,13 +124,13 @@ private:
         zebin::ZEELFObjectBuilder::SectionID kernelSectId,
         const IGC::SOpenCLKernelInfo& annotations);
 
-    /// get symbol type and binding
+    /// get symbol type
     /// FIXME: this should be decided when symbol being created
     uint8_t getSymbolElfType(const vISA::ZESymEntry& sym);
-    uint8_t getSymbolElfBinding(const vISA::ZESymEntry& sym);
 
     /// addSymbol - a helper function to add a symbol which is defined in targetSect
-    void addSymbol(const vISA::ZESymEntry& sym, zebin::ZEELFObjectBuilder::SectionID targetSect);
+    void addSymbol(const vISA::ZESymEntry& sym, uint8_t binding,
+        zebin::ZEELFObjectBuilder::SectionID targetSect);
 
     /// add relocations of this kernel corresponding to binary added by
     /// addKernelBinary.
@@ -172,6 +176,12 @@ private:
                            const IGC::CBTILayout& layout,
                            zebin::zeInfoKernel& zeinfoKernel);
 
+    /// add visasm of the kernel
+    void addKernelVISAAsm(const std::string& kernel, const std::string& visaasm);
+
+    /// add global_host_access_table section to .ze_info
+    void addGlobalHostAccessInfo(const IGC::SOpenCLProgramInfo& annotations);
+
 private:
     // mBuilder - Builder of a ZE ELF object
     zebin::ZEELFObjectBuilder mBuilder;
@@ -186,6 +196,7 @@ private:
     /// sectionID holder for program scope sections
     /// There should be only one global, global constant buffer per program
     zebin::ZEELFObjectBuilder::SectionID mGlobalConstSectID = -1;
+    zebin::ZEELFObjectBuilder::SectionID mConstStringSectID = -1;
     zebin::ZEELFObjectBuilder::SectionID mGlobalSectID = -1;
 };
 

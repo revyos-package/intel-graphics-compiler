@@ -11,9 +11,11 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXBaling.h"
 #include "GenXLiveness.h"
-#include "GenXRegion.h"
 #include "GenXUtil.h"
-#include "vc/GenXOpts/Utils/RegCategory.h"
+
+#include "vc/Utils/GenX/RegCategory.h"
+#include "vc/Utils/General/Types.h"
+
 #include "Probe/Assertion.h"
 
 using namespace llvm;
@@ -36,7 +38,7 @@ unsigned PressureTracker::getSizeInBytes(LiveRange *LR, bool AllowWidening) {
   SimpleValue SV = *LR->value_begin();
   Value *V = SV.getValue();
   Type *Ty = IndexFlattener::getElementType(V->getType(), SV.getIndex());
-  unsigned Bytes = getTypeSize<WordBits>(Ty, &DL) * WordBytes;
+  unsigned Bytes = vc::getTypeSize(Ty, &DL).inWordsCeil() * WordBytes;
   if (!AllowWidening)
     return Bytes;
 
@@ -61,7 +63,7 @@ unsigned PressureTracker::getSizeInBytes(LiveRange *LR, bool AllowWidening) {
         return false;
       for (auto UI : Inst->users()) {
         if (GenXIntrinsic::isRdRegion(UI) || GenXIntrinsic::isWrRegion(UI)) {
-          Region R(cast<Instruction>(UI), BaleInfo());
+          Region R = makeRegionFromBaleInfo(cast<Instruction>(UI), BaleInfo());
           if (R.Indirect)
             return false;
         }
@@ -81,7 +83,7 @@ unsigned PressureTracker::getSizeInBytes(LiveRange *LR, bool AllowWidening) {
 
 // Decrease pressure assuming no widening on variable for LR.
 void PressureTracker::decreasePressure(LiveRange *LR) {
-  if (!LR || LR->getCategory() != RegCategory::GENERAL)
+  if (!LR || LR->getCategory() != vc::RegCategory::General)
     return;
 
 #if _DEBUG
@@ -158,7 +160,7 @@ bool PressureTracker::intersectWithRedRegion(unsigned B, unsigned E) const {
 }
 
 bool PressureTracker::intersectWithRedRegion(LiveRange *LR) const {
-  if (!LR || LR->getCategory() == RegCategory::NONE)
+  if (!LR || LR->getCategory() == vc::RegCategory::None)
     return false;
   for (auto I = LR->begin(), E = LR->end(); I != E; ++I)
     if (intersectWithRedRegion(I->getStart(), I->getEnd()))
@@ -185,7 +187,7 @@ void PressureTracker::getLiveRangesForValue(
   for (unsigned i = 0, e = IndexFlattener::getNumElements(Ty); i != e; ++i) {
     SimpleValue SV(V, i);
     LiveRange *LR = Liveness->getLiveRangeOrNull(SV);
-    if (!LR || LR->getCategory() == RegCategory::NONE)
+    if (!LR || LR->getCategory() == vc::RegCategory::None)
       continue;
     // Only process an LR if the map iterator is on the value that appears
     // first in the LR. That avoids processing the same LR multiple times.

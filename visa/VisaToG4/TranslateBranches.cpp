@@ -162,8 +162,7 @@ int IR_Builder::translateVISACFFCallInst(
         InstOpt_NoOpt,
         true);
 
-    m_fcallInfo[fcall] = new (mem) G4_FCALL(argSize, returnSize);
-
+    addFcallInfo(fcall, argSize, returnSize);
     return VISA_SUCCESS;
 }
 
@@ -200,7 +199,7 @@ int IR_Builder::translateVISACFIFCallInst(
     auto fcall = createInst(predOpnd, G4_pseudo_fcall, nullptr, g4::NOSAT, exsize,
         nullptr, src0, nullptr, InstOpt_NoOpt, true);
 
-    m_fcallInfo[fcall] = new (mem) G4_FCALL(argSize, returnSize);
+    addFcallInfo(fcall, argSize, returnSize);
 
     return VISA_SUCCESS;
 }
@@ -214,9 +213,16 @@ int IR_Builder::translateVISACFSymbolInst(
     {
         // Relocation for runtime-calculated private memory size
         auto* privateMemPatch = createRelocImm(Type_UD);
-        dst->setType(Type_UD);
+        dst->setType(*this, Type_UD);
         G4_INST* mov = createMov(g4::SIMD1, dst, privateMemPatch, InstOpt_WriteEnable, true);
         RelocationEntry::createRelocation(kernel, *mov, 0, symbolName, GenRelocType::R_SYM_ADDR_32);
+    }
+    else if (Type_D == dst->getType())
+    {
+        auto patchImm = createRelocImm(dst->getType());
+        auto movInst = createMov(g4::SIMD1, dst, patchImm, InstOpt_WriteEnable, true);
+
+        RelocationEntry::createRelocation(kernel, *movInst, 0, symbolName, GenRelocType::R_GLOBAL_IMM_32);
     }
     else if (noInt64() || needSwap64ImmLoHi() || VISA_WA_CHECK(getPWaTable(), WaDisallow64BitImmMov))
     {

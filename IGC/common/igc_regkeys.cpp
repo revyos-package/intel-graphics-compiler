@@ -35,7 +35,9 @@ SPDX-License-Identifier: MIT
 #include <sstream>
 #include <iostream>
 #include <mutex>
+#include <algorithm>
 #include "Probe/Assertion.h"
+#include "common/Types.hpp"
 
 // path for IGC registry keys
 #define IGC_REGISTRY_KEY "SOFTWARE\\INTEL\\IGFX\\IGC"
@@ -333,12 +335,35 @@ static bool ReadIGCEnv(
             if( size >= sizeof( unsigned int ) )
             {
                 // Try integer conversion
-                char* pStopped = nullptr;
-                unsigned int *puVal = (unsigned int *)pValue;
-                *puVal = strtoul(envVal, &pStopped, 0);
-                if( pStopped == envVal + strlen(envVal) )
+                if (envVal[0] == '0' && std::tolower(envVal[1]) == 'b')
                 {
-                    return true;
+                    // Binary literals, like in C++14
+                    // Example: 0b0110'11'01
+                    std::string str(envVal + 2); // -> 0110'11'01
+                    // Remove optional C++14 digit separators and squeeze the result
+                    str.erase(std::remove(str.begin(), str.end(), '\''), str.end()); // -> 01101101
+                    std::size_t pos = 0;
+                    int val = std::stoi(str, &pos, 2);
+                    if (pos > 0 && pos == str.size())
+                    {
+                        *reinterpret_cast<unsigned int*>(pValue) = int_cast<unsigned int>(val);
+                        return true;
+                    }
+                    else
+                    {
+                        // Like "0b", "0b1EFF", "0b''"
+                        IGC_ASSERT_MESSAGE(0, "Invalid binary literal.");
+                    }
+                }
+                else
+                {
+                    char* pStopped = nullptr;
+                    unsigned int* puVal = (unsigned int*)pValue;
+                    *puVal = strtoul(envVal, &pStopped, 0);
+                    if (pStopped == envVal + std::strlen(envVal))
+                    {
+                        return true;
+                    }
                 }
             }
 
@@ -589,9 +614,9 @@ static void setRegkeyFromOption(
     {
         return;
     }
-    size_t pos = sPos + strlen(regkeyName);
+    size_t pos = sPos + std::strlen(regkeyName);
     pos = (pos < optionValue.size()) ? pos : std::string::npos;
-    std::string vstring;
+    std::string vstring, exactNameStr;
     if(pos != std::string::npos && optionValue.at(pos) == '=')
     {
         // Get value for this option, ',' is a value separator.
@@ -599,6 +624,13 @@ static void setRegkeyFromOption(
         pos = optionValue.find(',', sPos);
         size_t len = (pos == std::string::npos) ? pos : (pos - sPos);
         vstring = optionValue.substr(sPos, len);
+        exactNameStr = optionValue.substr(0, optionValue.find('='));
+    }
+    if (!exactNameStr.empty())
+    {
+        bool reqKeysNotEqual = (exactNameStr.compare(regkeyName) != 0) ? true : false;
+        if (reqKeysNotEqual)
+            return;
     }
 
     bool isBool = (strcmp(dataTypeName, "bool") == 0);
@@ -621,7 +653,11 @@ static void setRegkeyFromOption(
         if(!vstring.empty())
         {
             // assume vstring has the valid value!
-            int intval = atoi(vstring.c_str());
+            int intval;
+            if (vstring.find("0x", 0) == std::string::npos)
+                intval = stoi(vstring, nullptr, 10);
+            else
+                intval = stoi(vstring, nullptr, 16);
             *((int*)pRegkeyVar) = intval;
             isKeySet = true;
         }
@@ -632,19 +668,26 @@ static void setRegkeyFromOption(
         if(!vstring.empty())
         {
             char* s = (char*)pRegkeyVar;
-            strcpy_s(s, vstring.size(), vstring.c_str());
+            strcpy_s(s, sizeof(debugString), vstring.c_str());
             isKeySet = true;
         }
     }
 }
 
-static const char* GetOptionFile()
+
+static const std::string GetOptionFilePath()
 {
 #if defined(_WIN64) || defined(_WIN32)
-    return "c:\\Intel\\IGC\\debugFlags\\Options.txt";
+    return "c:\\Intel\\IGC\\debugFlags\\";
 #else
-    return "/tmp/IntelIGC/debugFlags/Options.txt";
+    return "/tmp/IntelIGC/debugFlags/";
 #endif
+}
+
+static const std::string GetOptionFile()
+{
+    std::string fname = "Options.txt";
+    return (GetOptionFilePath() + fname);
 }
 
 // parses this syntax:
@@ -689,9 +732,20 @@ static void declareIGCKey(std::string& line, const char* dataType, const char* r
     setRegkeyFromOption(line, dataType, regkeyName, &value, isSet);
     if (isSet)
     {
+        std::cout << std::endl << "** hashes ";
+        for (size_t i = 0; i < hashes.size(); i++) {
+            memcpy_s(hashes[i].m_string, sizeof(value), value, sizeof(value));
+            regKey->hashes.push_back(hashes[i]);
+            if (hashes[i].end == hashes[i].start)
+                std::cout << std::hex << std::showbase << hashes[i].start << ", ";
+            else
+                std::cout << std::hex << std::showbase << hashes[i].start << "-" << hashes[i].end << ", ";
+        }
+        std::cout << std::endl;
+
         std::cout << "** regkey " << line << std::endl;
+        regKey->Set();
         memcpy_s(regKey->m_string, sizeof(value), value, sizeof(value));
-        regKey->hashes = hashes;
     }
 }
 
@@ -705,7 +759,7 @@ static void LoadDebugFlagsFromFile()
         std::cout << std::endl << "** DebugFlags " << GetOptionFile() << " is opened" << std::endl;
 
     while (std::getline(input, line)) {
-        if (line.front() == '#')
+        if (line.empty() || line.front() == '#')
             continue;
         ParseHashRange(line, hashes);
 #define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode)         \
@@ -718,9 +772,26 @@ static void LoadDebugFlagsFromFile()
     }
 }
 
-thread_local unsigned long long g_CurrentShaderHash = 0;
-bool CheckHashRange(const std::vector<HashRange>& hashes)
+void appendToOptionsLogFile(std::string const &message)
 {
+    std::string logPath = GetOptionFilePath();
+    logPath.append("Options_log.txt");
+    std::ofstream os(logPath.c_str(), std::ios::app);
+    if (os.is_open())
+    {
+        auto now = std::chrono::system_clock::now();
+        auto now_time = std::chrono::system_clock::to_time_t(now);
+        std::string stime = ctime(&now_time);
+        std::replace(stime.begin(), stime.end(), '\n', '\t');
+        os << stime << message << std::endl;
+    }
+    os.close();
+}
+
+thread_local unsigned long long g_CurrentShaderHash = 0;
+bool CheckHashRange(SRegKeyVariableMetaData& varname)
+{
+    std::vector<HashRange>hashes = varname.hashes;
     if(hashes.empty())
     {
         return true;
@@ -729,16 +800,28 @@ bool CheckHashRange(const std::vector<HashRange>& hashes)
     {
         if(g_CurrentShaderHash >= it.start && g_CurrentShaderHash <= it.end)
         {
+            varname.m_Value = it.m_Value;
+            char msg[100];
+            int size = snprintf(msg, 100, "Shader %#0llx: %s=%d", g_CurrentShaderHash, varname.GetName(), it.m_Value);
+            if (size >=0 && size < 100)
+            {
+                appendToOptionsLogFile(msg);
+            }
+
             return true;
         }
     }
     return false;
 }
 
-static void LoadFromRegKeyOrEnvVarOrOptions(const std::string& options = "", bool* RegFlagNameError = nullptr, std::string registrykeypath = IGC_REGISTRY_KEY)
+static void LoadFromRegKeyOrEnvVarOrOptions(
+    const std::string& options = "",
+    bool* RegFlagNameError = nullptr,
+    const std::string& registrykeypath = IGC_REGISTRY_KEY)
 {
     SRegKeyVariableMetaData* pRegKeyVariable = (SRegKeyVariableMetaData*)&g_RegKeyList;
-    unsigned NUM_REGKEY_ENTRIES = sizeof(SRegKeysList) / sizeof(SRegKeyVariableMetaData);
+    constexpr unsigned NUM_REGKEY_ENTRIES =
+        sizeof(SRegKeysList) / sizeof(SRegKeyVariableMetaData);
     for (DWORD i = 0; i < NUM_REGKEY_ENTRIES; i++)
     {
         debugString value = { 0 };
@@ -755,6 +838,7 @@ static void LoadFromRegKeyOrEnvVarOrOptions(const std::string& options = "", boo
         {
             memcpy_s(pRegKeyVariable[i].m_string, sizeof(value), value, sizeof(value));
 
+            pRegKeyVariable[i].Set();
             checkAndSetIfKeyHasNoDefaultValue(&pRegKeyVariable[i]);
         }
 
@@ -782,7 +866,7 @@ static void LoadFromRegKeyOrEnvVarOrOptions(const std::string& options = "", boo
                             char* pStopped = nullptr;
                             unsigned int* puValFromOptions = (unsigned int*)pValueFromOptions;
                             *puValFromOptions = strtoul(envValFromOptions, &pStopped, 0);
-                            if (pStopped == envValFromOptions + strlen(envValFromOptions))
+                            if (pStopped == envValFromOptions + std::strlen(envValFromOptions))
                             {
                                 valueIsInt = true;
                             }
@@ -878,6 +962,31 @@ void LoadRegistryKeys(const std::string& options, bool *RegFlagNameError)
             IGC_SET_FLAG_VALUE(DisableScalarAtomics, true);
         }
 
+        if (IGC_IS_FLAG_ENABLED(DisableRayTracingOptimizations))
+        {
+            IGC_SET_FLAG_VALUE(DisablePayloadSinking, true);
+            IGC_SET_FLAG_VALUE(DisablePromoteToScratch, true);
+            IGC_SET_FLAG_VALUE(DisableEarlyRemat, true);
+            IGC_SET_FLAG_VALUE(DisableLateRemat, true);
+            IGC_SET_FLAG_VALUE(DisableRTGlobalsKnownValues, true);
+            IGC_SET_FLAG_VALUE(DisablePreSplitOpts, true);
+            IGC_SET_FLAG_VALUE(DisableInvariantLoad, true);
+            IGC_SET_FLAG_VALUE(DisableRTStackOpts, true);
+            IGC_SET_FLAG_VALUE(DisablePrepareLoadsStores, true);
+            IGC_SET_FLAG_VALUE(DisableRayTracingConstantCoalescing, true);
+            IGC_SET_FLAG_VALUE(DisableMatchRegisterRegion, true);
+            IGC_SET_FLAG_VALUE(DisableFuseContinuations, true);
+            IGC_SET_FLAG_VALUE(DisableRaytracingIntrinsicAttributes, true);
+            IGC_SET_FLAG_VALUE(DisableShaderFusion, true);
+            IGC_SET_FLAG_VALUE(DisableExamineRayFlag, true);
+            IGC_SET_FLAG_VALUE(DisableSpillReorder, true);
+            IGC_SET_FLAG_VALUE(DisablePromoteContinuation, true);
+            IGC_SET_FLAG_VALUE(DisableRTAliasAnalysis, true);
+            IGC_SET_FLAG_VALUE(DisableRTFenceElision, true);
+            IGC_SET_FLAG_VALUE(DisableRTMemDSE, true);
+            IGC_SET_FLAG_VALUE(RematThreshold, 0);
+            IGC_SET_FLAG_VALUE(DisableDPSE, true);
+        }
 
         if (IGC_IS_FLAG_ENABLED(ShaderDumpEnableAll))
         {
@@ -896,6 +1005,7 @@ void LoadRegistryKeys(const std::string& options, bool *RegFlagNameError)
             IGC_SET_FLAG_VALUE(EnableVISADumpCommonISA, true);
             IGC_SET_FLAG_VALUE(EnableCapsDump, true);
             IGC_SET_FLAG_VALUE(DumpPatchTokens, true);
+            IGC_SET_FLAG_VALUE(RayTracingDumpYaml, true);
         }
 
         if (IGC_IS_FLAG_ENABLED(DumpTimeStatsPerPass) ||

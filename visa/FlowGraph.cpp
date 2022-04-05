@@ -665,6 +665,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
         builder->initScratchSurfaceOffset();
     }
     if (builder->hasFusedEU() &&
+        !builder->getOption(vISA_KeepScalarJmp) &&
         getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
     {
         getKernel()->getOptions()->setOptionInternally(vISA_EnableScalarJmp, false);
@@ -999,7 +1000,7 @@ void FlowGraph::constructFlowGraph(INST_LIST& instlist)
 
     // For non-kernel function, always invoke markDivergentBBs to
     // conservatively assume divergence.
-    if ((hasSIMDCF || hasGoto || !builder->getIsKernel()) &&
+    if ((hasSIMDCF || hasGoto || builder->getIsFunction()) &&
         builder->getOption(vISA_divergentBB))
     {
         markDivergentBBs();
@@ -1030,7 +1031,7 @@ void FlowGraph::normalizeRegionDescriptors()
                 auto normDesc = builder->getNormalizedRegion(execSize, desc);
                 if (normDesc && normDesc != desc)
                 {
-                    srcRegion->setRegion(normDesc, /*invariant*/ true);
+                    srcRegion->setRegion(*builder, normDesc, /*invariant*/ true);
                 }
             }
         }
@@ -1931,6 +1932,18 @@ void FlowGraph::removeRedundantLabels()
             for (auto pred : bb->Preds)
             {
                 auto jt = std::find(pred->Succs.begin(), pred->Succs.end(), bb);
+                if (jt == pred->Succs.end())
+                {
+                    // Just skip!
+                    //
+                    // Each unique pred is processed just once.  If a pred appears
+                    // more than once in bb->Preds, it is only handled the first time
+                    // the pred is processed.
+                    //   Note that if jt == end(), it means that this pred appears
+                    //   more than once in the Preds list AND it has been handled
+                    //   before (see code at the end of this loop). So, it is safe to skip.
+                    continue;
+                }
 
                 G4_INST *i = pred->back();
                 // replace label in instructions
@@ -2241,6 +2254,10 @@ void FlowGraph::removeEmptyBlocks()
                     }
                 }
 
+                // remove redundant succs and preds for the empty block
+                bb->Succs.unique();
+                bb->Preds.unique();
+
                 for (auto predBB : bb->Preds)
                 {
                     //
@@ -2263,18 +2280,21 @@ void FlowGraph::removeEmptyBlocks()
                     //
                     BB_LIST_ITER kt = std::find(succBB->Preds.begin(), succBB->Preds.end(), bb);
 
-                    for (auto predBB : bb->Preds)
+                    if (kt != succBB->Preds.end())
                     {
-                        succBB->Preds.insert(kt, predBB);
+                        for (auto predBB : bb->Preds)
+                        {
+                            succBB->Preds.insert(kt, predBB);
+                        }
+
+                        succBB->Preds.erase(kt);
+                        succBB->Preds.unique();
+
+                        //
+                        // Propagate the removed block's type to its unique successor.
+                        //
+                        succBB->setBBType(bb->getBBType());
                     }
-
-                    succBB->Preds.erase(kt);
-                    succBB->Preds.unique();
-
-                    //
-                    // Propagate the removed block's type to its unique successor.
-                    //
-                    succBB->setBBType(bb->getBBType());
                 }
                 //
                 // Remove the block to be removed.
@@ -2609,7 +2629,7 @@ void FlowGraph::markDivergentBBs()
     // fcall'ed Function:  to be conservative and assume that any function
     // that is fcall'ed is divergent on entry
     // (Note that each function has its own CFG)
-    if (!builder->getIsKernel())
+    if (builder->getIsFunction())
     {
         for (G4_BB* BB : BBs)
         {
@@ -3048,7 +3068,7 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
     {
         // insert join at the end
         G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt);
-        bb->push_back(jInst);
+        bb->push_back(jInst, false);
     }
     else
     {
@@ -3064,7 +3084,7 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
         else
         {
             G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt);
-            bb->insertBefore(iter, jInst);
+            bb->insertBefore(iter, jInst, false);
         }
     }
 }
@@ -3580,20 +3600,23 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
     // For loop with backedge Tail->Head, if Tail is divergent, its divergence should be
     // propagated to the entire loop as Tail jumps to head, which could go all BBs in the loop.
     //
-    // In another word, the whole loop's divergence level is the same as Tail's. Once the
-    // entire loop has been handled and Tail's divergence is known, invoking this lambda func
-    // to carry out propagation.
+    // In another word, the whole loop's divergence level should be at least the same as Tail's.
+    // Once the entire loop has been handled and Tail's divergence is known, invoking this lambda
+    // function to carry out propagation.
     //
     // An example to show WA is needed (nested divergence for Tail):
-    //      Head:                   // initial fuseMask = 11;  2nd iter: fuseMask = 11 (should be 10)
+    //      Head:                   // initial fuseMask = 11;  2nd iter: fuseMask = 11 (should be 01)
+    //                              // Need to propagae nested divergence to the entire loop!
     //         if (...) goto Tail;  // fuseMask = 11
-    //                              // After if, fusedMask = 01 (bigEU is Off)
+    //                              // After if, fusedMask = 10 (bigEU is Off)
     //         ...
-    //         goto out             // fuseMask = 01 (BigEU off, SmallEU on)
-    //                              // after goto, fuseMask = 00, but HW remains 01
+    //         goto out             // fuseMask = 10 (BigEU off, SmallEU on)
+    //                              // after goto, fuseMask = 00, but HW remains 10
     //      Tail:
-    //           goto Head          // fuseMask should 10, but HW remains 11, and jump to Head at 2nd iter
+    //         join                 // after join, bigEU is on again.  fusedMask == 11. It should be 01
+    //         goto Head            // fuseMask should 01, but HW remains 11, and jump to Head at 2nd iter
     //      out:
+    //         join
     auto propLoopDivergence = [&](G4_BB* LoopTail)
     {
         // LoopTail must be divergent.
@@ -3662,6 +3685,18 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
         return;
     }
 
+    // If -noMaskWAOnStackCall is prsent, all BBs inside stack functions are
+    // assumed to need NoMaskWA.
+    if (builder->getOption(vISA_noMaskWAOnFuncEntry) && builder->getIsFunction())
+    {
+        for (auto bb : BBs)
+        {
+            nestedDivergentBBs[bb] = 2;
+            bb->setBBType(G4_BB_NM_WA_TYPE);
+        }
+        return;
+    }
+
     // Analyze subroutines in topological order. As there is no recursion
     // and no indirect call,  a subroutine will be analyzed only if all
     // its callers have been analyzed.
@@ -3711,9 +3746,9 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
     for (int i = 0; i < numFuncs; ++i)
     {
         // each function: [IT, IE)
-        BB_LIST_ITER& IT = allFuncs[i].StartI;
+        BB_LIST_ITER& IB = allFuncs[i].StartI;
         BB_LIST_ITER& IE = allFuncs[i].EndI;
-        if (IT == IE)
+        if (IB == IE)
         {
             // Sanity check
             continue;
@@ -3729,7 +3764,14 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
             cfs.pushJoin(EndBB);
         }
 
-        for (; IT != IE; ++IT)
+        // FusedMask does not correct itself. Once the fusedMask goes wrong, it stays
+        // wrong until the control-flow reaches non-divergent BB. Thus, some BBs, which
+        // are not nested-divergent, may need NoMask WA as they might inherit the wrong
+        // fusedMask from the previous nested-divergent BBs.
+        //
+        // Here, we make adjustment for this reason.
+        bool seenNestedDivergent = false;
+        for (BB_LIST_ITER IT = IB; IT != IE; ++IT)
         {
             G4_BB* BB = *IT;
 
@@ -3767,19 +3809,30 @@ void FlowGraph::findNestedDivergentBBs(std::unordered_map<G4_BB*, int>& nestedDi
             if (cfs.isInNestedDivergentBranch())
             {
                 nestedDivergentBBs[BB] = 2;
+                seenNestedDivergent = true;
             }
             else if (cfs.isInDivergentBranch())
             {
-                nestedDivergentBBs[BB] = 1;
+                if (seenNestedDivergent)
+                {
+                    // divergent and might inherit wrong fusedMask
+                    // set it to nested divergent so we can apply WA.
+                    nestedDivergentBBs[BB] = 2;
+                }
+                else
+                {
+                    nestedDivergentBBs[BB] = 1;
+                }
+            }
+            else
+            {
+                // Reach non-divergent BB
+                seenNestedDivergent = false;
             }
 
             G4_INST* lastInst = BB->back();
 
             // Need to check whether to propagate WA marking to entire loop!
-            //
-            // Do it for CM now, need to apply to all!
-            // if (nestedDivergentBBs.count(BB) > 0 && nestedDivergentBBs[BB] >= 2 &&
-            //    getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM)
             if (nestedDivergentBBs.count(BB) > 0 && nestedDivergentBBs[BB] >= 2)
             {
                 if (lastInst->opcode() == G4_while ||
@@ -3854,7 +3907,7 @@ void FlowGraph::addFrameSetupDeclares(IR_Builder& builder, PhyRegPool& regPool)
     }
     if (scratchRegDcl == NULL)
     {
-        scratchRegDcl = builder.createDeclareNoLookup("SR", G4_GRF, numEltPerGRF<Type_UD>(), 1, Type_UD);
+        scratchRegDcl = builder.createDeclareNoLookup("SR", G4_GRF, builder.numEltPerGRF<Type_UD>(), 1, Type_UD);
         scratchRegDcl->getRegVar()->setPhyReg(regPool.getGreg(builder.kernel.getSpillHeaderGRF()), 0);
     }
 }
@@ -3872,7 +3925,7 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
     if (pseudoVCEDcl == NULL)
     {
         unsigned numRowsVCE = getKernel()->getNumCalleeSaveRegs();
-        pseudoVCEDcl = builder.createDeclareNoLookup("VCE_SAVE", G4_GRF, numEltPerGRF<Type_UD>(), static_cast<unsigned short>(numRowsVCE), Type_UD);
+        pseudoVCEDcl = builder.createDeclareNoLookup("VCE_SAVE", G4_GRF, builder.numEltPerGRF<Type_UD>(), static_cast<unsigned short>(numRowsVCE), Type_UD);
     }
     else
     {
@@ -3899,7 +3952,7 @@ void FlowGraph::addSaveRestorePseudoDeclares(IR_Builder& builder)
         const char* nameBase = "VCA_SAVE";  // sizeof(nameBase) = 9, including ending 0
         const int maxIdLen = 3;
         const char* name = builder.getNameString(mem, sizeof(nameBase) + maxIdLen, "%s_%d", nameBase, i);
-        G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, numEltPerGRF<Type_UD>(), builder.kernel.getCallerSaveLastGRF(), Type_UD);
+        G4_Declare* VCA = builder.createDeclareNoLookup(name, G4_GRF, builder.numEltPerGRF<Type_UD>(), builder.kernel.getCallerSaveLastGRF(), Type_UD);
         name = builder.getNameString(mem, 50, "SA0_%d", i);
         G4_Declare* saveA0 = builder.createDeclareNoLookup(name, G4_ADDRESS, (uint16_t)getNumAddrRegisters(), 1, Type_UW);
         name = builder.getNameString(mem, 64, "SFLAG_%d", i);
@@ -4068,7 +4121,6 @@ void vISA::FlowGraph::markStale()
     // structural changes include addition/removal of BB or edge.
     // mark analysis passes as stale so getters lazily re-run
     // analysis when queried.
-    dom.setStale();
     immDom.setStale();
     pDom.setStale();
     loops.setStale();
@@ -4803,9 +4855,10 @@ uint32_t RelocationEntry::getTargetOffset(const IR_Builder& builder) const
         //   Src0.imm[63:32] mapped to Instruction [95:64]
         // When src0 type is 32 bits:
         //   Src0.imm[31:0] mapped to instruction [127:96]
-        assert((target_operand->getType() == Type_UD) || (target_operand->getType() == Type_UQ));
+        assert((target_operand->getType() == Type_UD) || (target_operand->getType() == Type_D) ||
+            (target_operand->getType() == Type_UQ) || (target_operand->getType() == Type_Q));
         assert(opndPos == 0);
-        return (target_operand->getType() == Type_UD) ? 12 : 8;
+        return (target_operand->getType() == Type_UD || target_operand->getType() == Type_D) ? 12 : 8;
 
     case G4_add:
         // add instruction cannot have 64-bit imm
@@ -4834,6 +4887,8 @@ const char * RelocationEntry::getTypeString() const
         return "R_SYM_ADDR_32_HI";
     case RelocationType::R_PER_THREAD_PAYLOAD_OFFSET_32:
         return "R_PER_THREAD_PAYLOAD_OFFSET_32";
+    case RelocationType::R_GLOBAL_IMM_32:
+        return "R_GLOBAL_IMM_32";
     default:
         assert(false && "unhandled relocation type");
         return "";
@@ -4861,6 +4916,9 @@ void RelocationEntry::dump(std::ostream &os) const
             break;
         case RelocationType::R_PER_THREAD_PAYLOAD_OFFSET_32:
             os << "R_PER_THREAD_PAYLOAD_OFFSET_32: symbol name = " << symName;
+            break;
+        case RelocationType::R_GLOBAL_IMM_32:
+            os << "R_GLOBAL_IMM_32: symbol name = " << symName;
             break;
     }
     os << "\n";

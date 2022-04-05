@@ -189,9 +189,13 @@ IGC_INITIALIZE_PASS_END(MemOpt2, PASS_FLAG, PASS_DESC, PASS_CFG_ONLY, PASS_ANALY
 
 bool MemOpt2::runOnFunction(Function& F) {
     // Skip non-kernel function.
-    MetaDataUtils* MDU = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    MetaDataUtils* MDU = nullptr;
+    MDU = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
     auto FII = MDU->findFunctionsInfoItem(&F);
     if (FII == MDU->end_FunctionsInfo())
+        return false;
+
+    if (F.hasFnAttribute(llvm::Attribute::OptimizeNone))
         return false;
 
     IGC::CodeGenContext* cgCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();

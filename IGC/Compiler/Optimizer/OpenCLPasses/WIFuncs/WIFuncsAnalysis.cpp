@@ -101,20 +101,18 @@ bool WIFuncsAnalysis::runOnFunction(Function& F)
         implicitArgs.push_back(ImplicitArg::R0);
         if (RequirePayloadHeader)
             implicitArgs.push_back(ImplicitArg::PAYLOAD_HEADER);
+
+        if (!m_ctx->platform.isProductChildOf(IGFX_XE_HP_SDV) &&
+            IGC_IS_FLAG_DISABLED(ForceInlineStackCallWithImplArg))
+        {
+            if (m_hasStackCalls)
+            {
+                implicitArgs.push_back(ImplicitArg::ArgType::IMPLICIT_ARG_BUFFER_PTR);
+            }
+        }
     }
     else
     {
-        // Skip functions called from function marked with IndirectlyCalled attribute
-        // and functions that are doing stack call.
-        if (F.hasFnAttribute("referenced-indirectly") ||
-            AddImplicitArgs::hasIndirectlyCalledParent(&F) ||
-            (F.hasFnAttribute("visaStackCall") &&
-                IGC_GET_FLAG_VALUE(FunctionControl) != FLAG_FCALL_FORCE_INLINE &&
-                IGC_IS_FLAG_DISABLED(ForceInlineStackCallWithImplArg)))
-        {
-            return false;
-        }
-
         if (m_hasGroupID)
         {
             implicitArgs.push_back(ImplicitArg::R0);
@@ -179,13 +177,20 @@ bool WIFuncsAnalysis::runOnFunction(Function& F)
 
 void WIFuncsAnalysis::visitCallInst(CallInst& CI)
 {
-    if (!CI.getCalledFunction())
+    Function* F = CI.getCalledFunction();
+
+    if (CI.isIndirectCall() || (F && F->hasFnAttribute("visaStackCall")))
+    {
+        m_hasStackCalls = true;
+        return;
+    }
+    if (F == nullptr)
     {
         return;
     }
 
     // Check for OpenCL WI function calls
-    StringRef funcName = CI.getCalledFunction()->getName();
+    StringRef funcName = F->getName();
     if (funcName.equals(GET_LOCAL_ID_X) ||
         funcName.equals(GET_LOCAL_ID_Y) ||
         funcName.equals(GET_LOCAL_ID_Z))
@@ -231,10 +236,5 @@ void WIFuncsAnalysis::visitCallInst(CallInst& CI)
     }
     else if (funcName.equals(GET_SYNC_BUFFER)) {
         m_hasSyncBuffer = true;
-    }
-
-    if (CI.getCalledFunction()->hasFnAttribute("visaStackCall"))
-    {
-        m_hasStackCalls = true;
     }
 }

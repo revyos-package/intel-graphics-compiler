@@ -24,11 +24,11 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Function.h"
 
-#include "vc/BiF/Tools.h"
-#include "vc/GenXOpts/Utils/InternalMetadata.h"
 #include "vc/Support/BackendConfig.h"
 #include "vc/Support/GenXDiagnostic.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 #include "vc/Utils/General/BiF.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
@@ -47,6 +47,7 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 
+#include <array>
 #include <string>
 
 using namespace llvm;
@@ -57,6 +58,26 @@ static constexpr const char *EmuLibSDivPrefix = "__cm_intrinsic_impl_sdiv";
 static constexpr const char *EmuLibSRemPrefix = "__cm_intrinsic_impl_srem";
 static constexpr const char *EmuLibUDivPrefix = "__cm_intrinsic_impl_udiv";
 static constexpr const char *EmuLibURemPrefix = "__cm_intrinsic_impl_urem";
+static constexpr const char *EmuLibFP2UIPrefix = "__cm_intrinsic_impl_fp2ui";
+static constexpr const char *EmuLibFP2SIPrefix = "__cm_intrinsic_impl_fp2si";
+static constexpr const char *EmuLibUI2FPPrefix = "__cm_intrinsic_impl_ui2fp";
+static constexpr const char *EmuLibSI2FPPrefix = "__cm_intrinsic_impl_si2fp";
+
+struct PrefixOpcode {
+  const char *Prefix;
+  const unsigned Opcode;
+};
+constexpr std::array<PrefixOpcode, 4> DivRemPrefixes = {
+    {{EmuLibSDivPrefix, BinaryOperator::SDiv},
+     {EmuLibSRemPrefix, BinaryOperator::SRem},
+     {EmuLibUDivPrefix, BinaryOperator::UDiv},
+     {EmuLibURemPrefix, BinaryOperator::URem}}};
+
+constexpr std::array<PrefixOpcode, 4> EmulationFPConvertsPrefixes = {
+    {{EmuLibFP2UIPrefix, Instruction::FPToUI},
+     {EmuLibFP2SIPrefix, Instruction::FPToSI},
+     {EmuLibUI2FPPrefix, Instruction::UIToFP},
+     {EmuLibSI2FPPrefix, Instruction::SIToFP}}};
 
 static constexpr const char *RoundingRtzSuffix = "__rtz_";
 static constexpr const char *RoundingRteSuffix = "__rte_";
@@ -71,6 +92,38 @@ static constexpr int VCRoundingRTZ = 3 << 4;
 
 namespace {
 
+// Currenly, we have no guarantee that each and every genx intrinsic
+// is emulated. Only the most frequently encounted are.
+// This flag is to help finding such undetected cases.
+static cl::opt<bool> OptStrictChecksEnable("vc-i64emu-strict-checks",
+                                           cl::init(false), cl::Hidden,
+                                           cl::desc("enables strict checks"));
+static cl::opt<bool>
+    OptStricterSVM("vc-i64emu-strict-report-svm", cl::init(false), cl::Hidden,
+                   cl::desc("strict check will break on svm* operations"));
+// NOTE: probably should be true by default
+static cl::opt<bool>
+    OptStricterAtomic("vc-i64emu-strict-report-atomic", cl::init(false),
+                      cl::Hidden,
+                      cl::desc("strict check will break on 64-bit atomics"));
+static cl::opt<bool> OptStricterOword(
+    "vc-i64emu-strict-report-oword", cl::init(false), cl::Hidden,
+    cl::desc("strict check will break on 64-bit oword reads/writes"));
+static cl::opt<bool> OptStricterAlloc(
+    "vc-i64emu-strict-report-alloc", cl::init(false), cl::Hidden,
+    cl::desc("strict check will break on 64-bit alloc"));
+static cl::opt<bool> OptStricterFaddr(
+    "vc-i64emu-strict-report-faddr", cl::init(false), cl::Hidden,
+    cl::desc("strict check will break on 64-bit faddr"));
+static cl::opt<bool>
+    OptStricterConst("vc-i64emu-strict-const", cl::init(false), cl::Hidden,
+                     cl::desc("strict check will break on 64-bit constanti"));
+static cl::opt<bool> OptStricterRegions(
+    "vc-i64emu-strict-regions", cl::init(false), cl::Hidden,
+    cl::desc("strict check will break on 64-bit rdregion/wrregion"));
+static cl::opt<bool> OptStricterConverts(
+    "vc-i64emu-strict-converts", cl::init(false), cl::Hidden,
+    cl::desc("strict check will break on 64-bit convers which are NOT noop"));
 // TODO: we expect this to be turned on by default
 static cl::opt<bool> OptStrictEmulationRequests(
     "vc-i64emu-strict-requests", cl::init(false),
@@ -87,6 +140,29 @@ static cl::opt<bool> OptConvertPartialPredicates(
     cl::desc("if \"partial predicates\" shall be converted to icmp"));
 
 using IRBuilder = IRBuilder<TargetFolder>;
+struct OpType {
+  unsigned Opcode;
+  Type *ResType;
+  Type *FirstArgType;
+};
+static std::function<bool(const OpType &, const OpType &)> OpTypeComparator =
+    [](const OpType &ot1, const OpType &ot2) -> bool {
+  if (ot1.Opcode < ot2.Opcode)
+    return true;
+  if (ot2.Opcode < ot1.Opcode)
+    return false;
+  if (ot1.ResType < ot2.ResType)
+    return true;
+  if (ot2.ResType < ot1.ResType)
+    return false;
+  return ot1.FirstArgType < ot2.FirstArgType;
+};
+
+template <typename T> static void processToEraseList(T &EraseList) {
+  std::for_each(EraseList.begin(), EraseList.end(),
+                [](auto *Item) { Item->eraseFromParent(); });
+  EraseList.clear();
+}
 
 class GenXEmulate : public ModulePass {
 
@@ -95,16 +171,21 @@ class GenXEmulate : public ModulePass {
                                                       EmulationFlag AuxAction);
   std::vector<Instruction *> DiscracedList;
   // Maps <opcode, type> to its corresponding emulation function.
-  using OpType = std::pair<unsigned, Type *>;
+  std::map<OpType, Function *, decltype(OpTypeComparator)> EmulationFuns{
+      OpTypeComparator};
+
   std::vector<Instruction *> ToErase;
-  std::map<OpType, Function *> EmulationFuns;
   const GenXSubtarget *ST = nullptr;
 
+  class LightEmu64Expander;
   class Emu64Expander : public InstVisitor<Emu64Expander, Value *> {
 
     friend InstVisitor<Emu64Expander, Value *>;
+    friend LightEmu64Expander;
 
     const GenXSubtarget &ST;
+    std::map<OpType, Function *, decltype(OpTypeComparator)> *EmulationFuns;
+
     IVSplitter SplitBuilder;
     Instruction &Inst;
 
@@ -124,14 +205,6 @@ class GenXEmulate : public ModulePass {
     Value *visitAShr(BinaryOperator &);
 
     Value *buildRightShift(IVSplitter &SplitBuilder, BinaryOperator &Op);
-
-    Value *visitFPToUI(FPToUIInst &);
-    Value *visitFPToSI(FPToSIInst &);
-    Value *visitUIToFP(UIToFPInst &);
-    Value *visitSIToFP(SIToFPInst &);
-    Value *buildUI64ToFloat(UIToFPInst &Op);
-    Value *buildSI64ToFloat(SIToFPInst &Op);
-    Value *buildI64ToHalf(CastInst &Op);
 
     Value *visitZExtInst(ZExtInst &I);
     Value *visitSExtInst(SExtInst &I);
@@ -163,6 +236,7 @@ class GenXEmulate : public ModulePass {
     static bool isConvertOfI64(const Instruction &I);
     static bool isI64ToFP(const Instruction &I);
     static bool isI64Cmp(const Instruction &I);
+    static bool isI64AddSat(const Instruction &I);
     static Value *detectBitwiseNot(BinaryOperator &);
     static Type *changeScalarType(Type *T, Type *NewTy);
 
@@ -187,7 +261,8 @@ class GenXEmulate : public ModulePass {
 
     bool needsEmulation() const {
       return (SplitBuilder.IsI64Operation() || isI64Cmp(Inst) ||
-              isConvertOfI64(Inst) || isI64PointerOp(Inst));
+              isConvertOfI64(Inst) || isI64PointerOp(Inst) ||
+              isI64AddSat(Inst));
     }
 
     IRBuilder getIRBuilder() {
@@ -217,9 +292,12 @@ class GenXEmulate : public ModulePass {
     };
 
   public:
-    Emu64Expander(const GenXSubtarget &ST, Instruction &I)
-        : ST(ST), SplitBuilder(I), Inst(I) {}
+    Emu64Expander(
+        const GenXSubtarget &ST, Instruction &I,
+        std::map<OpType, Function *, decltype(OpTypeComparator)> *EF = nullptr)
+        : ST(ST), SplitBuilder(I), Inst(I), EmulationFuns(EF) {}
 
+    const GenXSubtarget &getSubtarget() const { return ST; }
     Value *tryExpand() {
       if (!needsEmulation())
         return nullptr;
@@ -255,10 +333,6 @@ class GenXEmulate : public ModulePass {
     enum Rounding {
       // Not used currenly
     };
-    static Value *buildFPToI64(Module &M, IRBuilder &B,
-                               IVSplitter &SplitBuilder, Value *V,
-                               bool IsSigned, Rounding rnd = Rounding());
-
     struct ShiftInfo {
       ShiftInfo(Value *ShaIn, Value *Sh32In, Value *Mask1In, Value *Mask0In)
           : Sha{ShaIn}, Sh32{Sh32In}, Mask1{Mask1In}, Mask0{Mask0In} {}
@@ -275,8 +349,70 @@ class GenXEmulate : public ModulePass {
                                      const ShiftInfo &SI);
     static ShiftInfo constructShiftInfo(IRBuilder &B, Value *Base);
 
+    static bool hasStrictEmulationRequirement(Instruction *Inst);
   };
 
+  class LightEmu64Expander : public InstVisitor<LightEmu64Expander, Value *> {
+
+    friend InstVisitor<LightEmu64Expander, Value *>;
+    Emu64Expander E;
+
+    // TODO: figure out if we need to emulate genx_trunc and (Z|S)Ext
+    // There was no explicit requirement to emulate these for B-step emulation.
+    // No failures of the existing tests were observed.
+    // But it does not mean that situation won't be changed in future.
+    Value *visitAdd(BinaryOperator &Op) {
+      if (E.getSubtarget().hasAdd64())
+        return nullptr;
+      return E.visitAdd(Op);
+    }
+    Value *visitSub(BinaryOperator &Op) {
+      if (E.getSubtarget().hasAdd64())
+        return nullptr;
+      return E.visitSub(Op);
+    }
+    Value *visitAnd(BinaryOperator &Op) { return E.visitAnd(Op); }
+    Value *visitOr(BinaryOperator &Op) { return E.visitOr(Op); }
+    Value *visitXor(BinaryOperator &Op) { return E.visitXor(Op); }
+    Value *visitSelectInst(SelectInst &I) { return E.visitSelectInst(I); }
+    Value *visitICmp(ICmpInst &Cmp) { return E.visitICmp(Cmp); }
+    Value *visitInstruction(Instruction &I) { return nullptr; }
+    Value *visitCallInst(CallInst &CI) {
+      switch (vc::getAnyIntrinsicID(&CI)) {
+        // saturated add
+        case GenXIntrinsic::genx_suadd_sat:
+        case GenXIntrinsic::genx_usadd_sat:
+        case GenXIntrinsic::genx_uuadd_sat:
+        case GenXIntrinsic::genx_ssadd_sat:
+          if (E.getSubtarget().hasAdd64())
+            return nullptr;
+        // fall through is expected
+        case GenXIntrinsic::genx_umin:
+        case GenXIntrinsic::genx_umax:
+        case GenXIntrinsic::genx_smin:
+        case GenXIntrinsic::genx_smax:
+        case GenXIntrinsic::genx_absi:
+          return E.visitCallInst(CI);
+        default:
+          return nullptr;
+      }
+    }
+  public:
+    LightEmu64Expander(const GenXSubtarget &ST, Instruction &I) : E(ST, I) {}
+
+    Value *tryExpand() {
+      if (!E.needsEmulation())
+        return nullptr;
+
+      LLVM_DEBUG(dbgs() << "bstep-emu: trying " << E.Inst << "\n");
+      auto *Result = visit(E.Inst);
+
+      if (Result)
+        LLVM_DEBUG(dbgs() << "bstep-emu: succesfully replaced candidate\n");
+
+      return Result;
+    }
+  };
 public:
   static char ID;
   explicit GenXEmulate() : ModulePass(ID) {}
@@ -288,12 +424,7 @@ public:
 private:
   Value *emulateInst(Instruction *Inst);
   Function *getEmulationFunction(const Instruction *Inst) const;
-  void buildDivRemCache(Module &M);
-
-  // Check if a function is to emulate instructions.
-  static bool isEmulationFunction(const Function* F) {
-    return F->hasFnAttribute(genx::FunctionMD::VCEmulationRoutine);
-  }
+  void buildEmuFunCache(Module &M);
 };
 
 } // end namespace
@@ -326,7 +457,7 @@ bool GenXEmulate::Emu64Expander::isConvertOfI64(const Instruction &I) {
   if (GenXEmulate::Emu64Expander::isI64ToFP(I))
     return true;
 
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(&I);
+  auto IID = vc::getAnyIntrinsicID(&I);
   switch (IID) {
   case GenXIntrinsic::genx_uutrunc_sat:
   case GenXIntrinsic::genx_sstrunc_sat:
@@ -347,6 +478,24 @@ bool GenXEmulate::Emu64Expander::isI64Cmp(const Instruction &I) {
   if (Instruction::ICmp != I.getOpcode())
     return false;
   return I.getOperand(0)->getType()->getScalarType()->isIntegerTy(64);
+}
+bool GenXEmulate::Emu64Expander::isI64AddSat(const Instruction &I) {
+  if (auto *CI = dyn_cast<CallInst>(&I)) {
+    switch (vc::getAnyIntrinsicID(CI)) {
+    case GenXIntrinsic::genx_suadd_sat:
+    case GenXIntrinsic::genx_usadd_sat:
+    case GenXIntrinsic::genx_uuadd_sat:
+    case GenXIntrinsic::genx_ssadd_sat: {
+      Value *Arg0 = I.getOperand(0);
+      Value *Arg1 = I.getOperand(1);
+      return Arg0->getType()->isIntOrIntVectorTy(64) &&
+             Arg1->getType()->isIntOrIntVectorTy(64);
+    }
+    default:
+      return false;
+    }
+  }
+  return false;
 }
 
 Value *GenXEmulate::Emu64Expander::detectBitwiseNot(BinaryOperator &Op) {
@@ -602,7 +751,7 @@ Value *GenXEmulate::Emu64Expander::visitICmp(ICmpInst &Cmp) {
 
   const bool PartialPredicate =
       std::any_of(Cmp.user_begin(), Cmp.user_end(), [](const User *U) {
-        auto IID = GenXIntrinsic::getAnyIntrinsicID(U);
+        auto IID = vc::getAnyIntrinsicID(U);
         return IID == GenXIntrinsic::genx_wrpredregion ||
                IID == GenXIntrinsic::genx_wrpredpredregion;
       });
@@ -672,190 +821,7 @@ Value *GenXEmulate::Emu64Expander::visitLShr(BinaryOperator &Op) {
 Value *GenXEmulate::Emu64Expander::visitAShr(BinaryOperator &Op) {
   return buildRightShift(SplitBuilder, Op);
 }
-Value *GenXEmulate::Emu64Expander::visitFPToUI(FPToUIInst &Op) {
 
-  if (!(Op.getOperand(0)->getType()->getScalarType()->isFloatTy() &&
-        Op.getType()->getScalarType()->isIntegerTy(64)))
-    vc::diagnose(Op.getContext(), "GenXEmulate", &Op,
-                 "unsupported (floating point type) -> UI conversion. "
-                 "Only float->i64 is supported");
-
-  // TODO: try to detect the case where operand is a constant expression
-  // and do the covertion manually
-  auto Builder = getIRBuilder();
-  const bool IsSigned = false;
-  auto *V = buildFPToI64(*Op.getModule(), Builder, SplitBuilder,
-                         Op.getOperand(0), IsSigned);
-  return Builder.CreateBitCast(V, Op.getType(),
-                               Twine(Op.getOpcodeName()) + ".emu");
-}
-Value *GenXEmulate::Emu64Expander::visitFPToSI(FPToSIInst &Op) {
-
-  if (!(Op.getOperand(0)->getType()->getScalarType()->isFloatTy() &&
-        Op.getType()->getScalarType()->isIntegerTy(64)))
-    vc::diagnose(Op.getContext(), "GenXEmulate", &Op,
-                 "unsupported (floating point type) -> UI conversion. "
-                 "Only float->i64 is supported");
-
-  // TODO: try to detect the case where operand is a constant expression
-  // and do the covertion manually
-  auto Builder = getIRBuilder();
-  const bool IsSigned = true;
-  auto *V = buildFPToI64(*Op.getModule(), Builder, SplitBuilder,
-                         Op.getOperand(0), IsSigned);
-  return Builder.CreateBitCast(V, Op.getType(),
-                               Twine(Op.getOpcodeName()) + ".emu");
-}
-Value *GenXEmulate::Emu64Expander::visitUIToFP(UIToFPInst &Op) {
-  auto *STy = Op.getType()->getScalarType();
-
-  if (STy->isHalfTy())
-    return buildI64ToHalf(Op);
-  if (STy->isFloatTy())
-    return buildUI64ToFloat(Op);
-  vc::diagnose(Op.getContext(), "GenXEmulate", &Op,
-               "unsupported UI64 -> (floating point type) conversion. "
-               "Only UI64->float and UI64->half are supported");
-  return nullptr; // to suppress warnings
-}
-Value *GenXEmulate::Emu64Expander::visitSIToFP(SIToFPInst &Op) {
-  auto *STy = Op.getType()->getScalarType();
-
-  if (STy->isHalfTy())
-    return buildI64ToHalf(Op);
-  if (STy->isFloatTy())
-    return buildSI64ToFloat(Op);
-  vc::diagnose(Op.getContext(), "GenXEmulate", &Op,
-               "unsupported SI64 -> (floating point type) conversion. "
-               "Only SI64->float and SI64->half are supported");
-  return nullptr; // to suppress warnings
-}
-Value *GenXEmulate::Emu64Expander::buildUI64ToFloat(UIToFPInst &Op) {
-  IGC_ASSERT_MESSAGE(Op.getType()->getScalarType()->isFloatTy(),
-                     "UI64->fp32 conversion expected");
-
-  auto Builder = getIRBuilder();
-  auto UI64 = SplitBuilder.splitOperandLoHi(0);
-  ConstantEmitter K(UI64.Lo);
-
-  Function *LzdF = GenXIntrinsic::getAnyDeclaration(
-      Op.getModule(), GenXIntrinsic::genx_lzd, {UI64.Hi->getType()});
-  Value *Lz = Builder.CreateCall(LzdF, UI64.Hi, "int_emu.ui2fp.lzd.");
-  // sp: 1|8|23
-  // we need to get that nice first set bit into bit position 23.
-  // thus we shift our nice pair of values by 63 - 23 - clz,
-  // some bits will be dropped by shift thus we'll add 1 bits as R bit.
-  // uint8_t shift = 39 - lz;
-  const unsigned kMaxDroppedMantBits = 39;
-  Value *DroppedBits = Builder.CreateSub(K.getSplat(kMaxDroppedMantBits), Lz);
-  auto SI = constructShiftInfo(Builder, DroppedBits);
-  // mantissa = LoPartOf(shr64(data_h, data_l, shift))
-  Value *Mant = buildPartialRShift(Builder, UI64.Lo, UI64.Hi, SI);
-
-  // bool sticky_h = (data_h & ~mask) & ((1 << (shift - 32)) - 1);
-  auto *TmpShA = Builder.CreateShl(K.getSplat(1), Builder.CreateNeg(SI.Sh32));
-  auto *TmpMask = Builder.CreateSub(TmpShA, K.getSplat(1));
-  auto *StickyH = Builder.CreateAnd(UI64.Hi, Builder.CreateNot(SI.Mask1));
-  StickyH = Builder.CreateAnd(StickyH, TmpMask);
-
-  // bool sticky_l = (data_l & ~mask) || ((data_l & (mask >> shift));
-  auto *SL1 = Builder.CreateAnd(UI64.Lo, Builder.CreateNot(SI.Mask1));
-  auto *SL2 = Builder.CreateAnd(UI64.Lo, Builder.CreateLShr(SI.Mask1, SI.Sh32));
-  auto *StickyL = Builder.CreateOr(SL1, SL2);
-
-  // Calculate RS
-  // bool S = sticky_h | sticky_l;
-  auto *S = Builder.CreateOr(StickyH, StickyL);
-  S = Builder.CreateICmpEQ(S, K.getZero());
-
-  auto *notS = Builder.CreateSelect(S, K.getOnes(), K.getZero());
-
-  // R = Mant & 1
-  auto *R = Builder.CreateAnd(Mant, K.getSplat(1));
-  // mant = (mant + 0x1) >> 1;
-  Mant =
-      Builder.CreateLShr(Builder.CreateAdd(Mant, K.getSplat(1)), K.getSplat(1));
-  // mant &= ~(!S & R); // R is set but no S, round to even.
-  auto *RoundMask = Builder.CreateNot(Builder.CreateAnd(notS, R));
-  Mant = Builder.CreateAnd(Mant, RoundMask);
-  // 0xbd - Lz
-  const unsigned kMaxValueExp = 0xbd;
-  auto *Exp = Builder.CreateSub(K.getSplat(kMaxValueExp), Lz);
-  auto *ResultLarge = Builder.CreateShl(Exp, K.getSplat(23));
-  ResultLarge = Builder.CreateAdd(ResultLarge, Mant);
-
-  // NOTE: at this point ResultLarge is a integer vector
-  // Since we calculate "optimized" route through creating yes another
-  // UIToFP instrucion (on i32) and this shall be a vector operation,
-  // all further calculatoins assume that we always process vectors
-  // The cast to the final type (scalar or vector) shall be done at the end
-  auto *VFPTy = Op.getType();
-  if (!VFPTy->isVectorTy())
-    VFPTy = IGCLLVM::FixedVectorType::get(Builder.getFloatTy(), 1);
-
-  ResultLarge = Builder.CreateBitCast(
-      ResultLarge, VFPTy, Twine("int_emu.ui2f.l.") + Op.getOpcodeName());
-  auto *ResultSmall = Builder.CreateUIToFP(
-      UI64.Lo, VFPTy, Twine("int_emu.ui2f.s.") + Op.getOpcodeName());
-
-  auto *IsSmallPred = Builder.CreateICmpEQ(UI64.Hi, K.getZero());
-  auto *Result = Builder.CreateSelect(IsSmallPred, ResultSmall, ResultLarge);
-  // Final cast to the requested type (usually <1 x float> -> float)
-  if (Op.getType() != VFPTy)
-    Result = Builder.CreateBitCast(
-        Result, Op.getType(), Twine("int_emu.ui2fp.") + Op.getOpcodeName());
-  return Result;
-}
-Value *GenXEmulate::Emu64Expander::buildSI64ToFloat(SIToFPInst &Op) {
-  IGC_ASSERT_MESSAGE(Op.getType()->getScalarType()->isFloatTy(),
-                     "SI64->fp32 conversion expected");
-
-  // NOTE: SIToFP is special, since it does not do the convert by itself,
-  // Instead it just creates a sequence of 64.bit operations which
-  // are then expanded. As such some type convertion trickery is involved.
-  // Namely, we transform all operands to vector types type as early as possible
-  auto Builder = getIRBuilder();
-  auto UI64 = SplitBuilder.splitOperandLoHi(0);
-  ConstantEmitter K(UI64.Hi);
-
-  auto *SignVal = Builder.CreateAnd(UI64.Hi, K.getSplat(1 << 31));
-  auto *PredSigned = Builder.CreateICmpNE(SignVal, K.getZero());
-
-  auto *VOprnd = toVector(Builder, Op.getOperand(0)).V;
-  // This would be a 64-bit operation on a vector types
-  auto *NegatedOpnd = Builder.CreateNeg(VOprnd);
-  NegatedOpnd = ensureEmulated(NegatedOpnd);
-
-  auto *AbsVal = Builder.CreateSelect(PredSigned, NegatedOpnd, VOprnd);
-  AbsVal = ensureEmulated(AbsVal);
-
-  Type *CnvType = Op.getType();
-  if (!Op.getType()->isVectorTy()) {
-    CnvType = IGCLLVM::FixedVectorType::get(Builder.getFloatTy(), 1);
-  }
-  auto *Cnv = Builder.CreateUIToFP(AbsVal, CnvType);
-  Cnv = ensureEmulated(Cnv);
-
-  // we want to set a proper sign, so we cast it to <N x int>,
-  // set sign bit and cast-away to the final result
-  Value *AsInt = Builder.CreateBitCast(Cnv, K.getVTy());
-  auto *Result = Builder.CreateOr(AsInt, SignVal);
-  return Builder.CreateBitCast(Result, Op.getType());
-}
-// Expands both UI64->half and SI64->half
-Value *GenXEmulate::Emu64Expander::buildI64ToHalf(CastInst &Op) {
-  IGC_ASSERT_MESSAGE(Op.getType()->getScalarType()->isHalfTy(),
-                     "UI64->half or SI64->half conversion expected");
-
-  auto Builder = getIRBuilder();
-  auto *FloatTy = Type::getFloatTy(Op.getContext());
-  auto *Conv = cast<Instruction>(
-      Builder.CreateCast(Op.getOpcode(), Op.getOperand(0),
-                         changeScalarType(Op.getType(), FloatTy)));
-  auto *EmulatedConv = Emu64Expander{ST, *Conv}.tryExpand();
-  Conv->eraseFromParent();
-  return Builder.CreateFPTrunc(EmulatedConv, Op.getType(), "int_emu.truncate");
-}
 Value *GenXEmulate::Emu64Expander::visitZExtInst(ZExtInst &I) {
   auto Builder = getIRBuilder();
   auto VOp = toVector(Builder, I.getOperand(0));
@@ -976,7 +942,7 @@ Value *GenXEmulate::Emu64Expander::visitIntToPtr(IntToPtrInst &I) {
 }
 Value *GenXEmulate::Emu64Expander::visitGenxTrunc(CallInst &CI) {
 
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(&Inst);
+  auto IID = vc::getAnyIntrinsicID(&Inst);
   unsigned DstSize = CI.getType()->getScalarType()->getPrimitiveSizeInBits();
   IGC_ASSERT(DstSize == 8 || DstSize == 16 || DstSize == 32 || DstSize == 64);
 
@@ -1087,7 +1053,7 @@ Value *GenXEmulate::Emu64Expander::visitGenxMinMax(CallInst &CI) {
   // We create 2 64-bit operations:
   // compare and select.
   // Then we replace those with yet-another expander instance
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(&Inst);
+  auto IID = vc::getAnyIntrinsicID(&Inst);
   switch (IID) {
   case GenXIntrinsic::genx_umax:
     CondVal = Builder.CreateICmpUGT(Lhs, Rhs);
@@ -1136,24 +1102,38 @@ Value *GenXEmulate::Emu64Expander::visitGenxAddSat(CallInst &CI) {
   auto Builder = getIRBuilder();
   ConstantEmitter K(Src0.Lo);
 
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(&Inst);
+  Value *Result = nullptr;
+  auto IID = vc::getAnyIntrinsicID(&Inst);
   switch (IID) {
   case GenXIntrinsic::genx_uuadd_sat: {
-    auto LoAdd = buildAddc(M, Builder, *Src0.Lo, *Src1.Lo, "int_emu.uuadd.lo");
-    auto HiAdd1 =
-        buildAddc(M, Builder, *Src0.Hi, *Src1.Hi, "int_emu.uuadd.hi1.");
-    // add carry from low part
-    auto HiAdd2 =
-        buildAddc(M, Builder, *HiAdd1.Val, *LoAdd.CB, "int_emu.uuadd.h2.");
+    if (!SplitBuilder.IsI64Operation()) {
+      auto LoAdd =
+          buildAddc(M, Builder, *Src0.Lo, *Src1.Lo, "int_emu.uuadd.lo");
+      // if there are any non-zero byte in hi parts of srcs
+      // then positive saturation is produced
+      auto *PosSat =
+          Builder.CreateOr(Builder.CreateOr(Src0.Hi, Src1.Hi), LoAdd.CB);
+      auto *Saturated =
+          Builder.CreateICmpNE(PosSat, K.getZero(), "int_emu.uuadd.sat");
+      Result = Builder.CreateSelect(Saturated, K.getOnes(), LoAdd.Val);
+    } else {
+      auto LoAdd =
+          buildAddc(M, Builder, *Src0.Lo, *Src1.Lo, "int_emu.uuadd.lo");
+      auto HiAdd1 =
+          buildAddc(M, Builder, *Src0.Hi, *Src1.Hi, "int_emu.uuadd.hi1.");
+      // add carry from low part
+      auto HiAdd2 =
+          buildAddc(M, Builder, *HiAdd1.Val, *LoAdd.CB, "int_emu.uuadd.h2.");
 
-    auto *HiResult = HiAdd2.Val;
-    auto *Saturated =
-        Builder.CreateICmpNE(Builder.CreateOr(HiAdd1.CB, HiAdd2.CB),
-                             K.getZero(), "int_emu.uuadd.sat.");
-    auto *Lo = Builder.CreateSelect(Saturated, K.getOnes(), LoAdd.Val);
-    auto *Hi = Builder.CreateSelect(Saturated, K.getOnes(), HiResult);
-    return SplitBuilder.combineLoHiSplit({Lo, Hi}, "int_emu.uuadd.",
-                                         CI.getType()->isIntegerTy());
+      auto *HiResult = HiAdd2.Val;
+      auto *Saturated =
+          Builder.CreateICmpNE(Builder.CreateOr(HiAdd1.CB, HiAdd2.CB),
+                               K.getZero(), "int_emu.uuadd.sat.");
+      auto *Lo = Builder.CreateSelect(Saturated, K.getOnes(), LoAdd.Val);
+      auto *Hi = Builder.CreateSelect(Saturated, K.getOnes(), HiResult);
+      Result = SplitBuilder.combineLoHiSplit({Lo, Hi}, "int_emu.uuadd.",
+                                             CI.getType()->isIntegerTy());
+    }
   } break;
   case GenXIntrinsic::genx_ssadd_sat: {
     auto LoAdd = buildAddc(M, Builder, *Src0.Lo, *Src1.Lo, "int_emu.ssadd.lo");
@@ -1184,8 +1164,8 @@ Value *GenXEmulate::Emu64Expander::visitGenxAddSat(CallInst &CI) {
     Lo = Builder.CreateSelect(FlagNegativeSat, K.getZero(), Lo);
     Hi = Builder.CreateSelect(FlagNegativeSat, K.getSplat(1 << 31), Hi);
 
-    return SplitBuilder.combineLoHiSplit({Lo, Hi}, "int_emu.ssadd.",
-                                         CI.getType()->isIntegerTy());
+    Result = SplitBuilder.combineLoHiSplit({Lo, Hi}, "int_emu.ssadd.",
+                                           CI.getType()->isIntegerTy());
   } break;
   case GenXIntrinsic::genx_suadd_sat:
     report_fatal_error(
@@ -1198,7 +1178,18 @@ Value *GenXEmulate::Emu64Expander::visitGenxAddSat(CallInst &CI) {
   default:
     IGC_ASSERT_MESSAGE(0, "unknown intrinsic passed to saturation add emu");
   }
-  return nullptr;
+
+  if (Result->getType() != CI.getType()) {
+    auto TruncID = (IID == GenXIntrinsic::genx_uuadd_sat)
+                       ? GenXIntrinsic::genx_uutrunc_sat
+                       : GenXIntrinsic::genx_sstrunc_sat;
+    auto *TruncFunct = GenXIntrinsic::getGenXDeclaration(
+        M, TruncID, {CI.getType(), Result->getType()});
+    Result = Builder.CreateCall(TruncFunct, {Result}, "int_emu.trunc.sat");
+    Result = ensureEmulated(Result);
+  }
+
+  return Result;
 }
 
 Value *GenXEmulate::Emu64Expander::visitGenxFPToISat(CallInst &CI) {
@@ -1206,20 +1197,36 @@ Value *GenXEmulate::Emu64Expander::visitGenxFPToISat(CallInst &CI) {
     vc::diagnose(CI.getContext(), "GenXEmulate", &CI,
                  "double->UI conversions are not supported");
 
-  auto IID = GenXIntrinsic::getAnyIntrinsicID(&Inst);
+  auto IID = vc::getAnyIntrinsicID(&Inst);
   IGC_ASSERT_MESSAGE(IID == GenXIntrinsic::genx_fptosi_sat ||
                          IID == GenXIntrinsic::genx_fptoui_sat,
                      "unknown intrinsic passed to fptoi_sat emu");
   const bool IsSigned = (IID == GenXIntrinsic::genx_fptosi_sat) ? true : false;
 
   auto Builder = getIRBuilder();
-  auto *V = buildFPToI64(*CI.getModule(), Builder, SplitBuilder,
-                         CI.getOperand(0), IsSigned);
-  return Builder.CreateBitCast(V, CI.getType(), Twine(CI.getName()) + ".emu");
+  unsigned Opcode = IsSigned ? Instruction::FPToSI : Instruction::FPToSI;
+
+  Type *Ty = CI.getType();
+  auto *F = CI.getCalledFunction();
+  IGC_ASSERT(F);
+  Type *Ty2 = IGCLLVM::getArg(*F, 0)->getType();
+  OpType OpAndType{Opcode, Ty, Ty2};
+  if (!EmulationFuns)
+    vc::diagnose(CI.getContext(), "GenXEmulate", &CI,
+                 "Emulation was called without initialization");
+
+  auto Iter = EmulationFuns->find(OpAndType);
+  if (Iter == EmulationFuns->end())
+    vc::diagnose(CI.getContext(), "GenXEmulate", &CI,
+                 "Unsupported instruction for emulation");
+
+  SmallVector<Value *, 8> Args(CI.arg_operands());
+
+  return Builder.CreateCall(Iter->second, Args);
 }
 
 Value *GenXEmulate::Emu64Expander::visitCallInst(CallInst &CI) {
-  switch (GenXIntrinsic::getAnyIntrinsicID(&Inst)) {
+  switch (vc::getAnyIntrinsicID(&Inst)) {
   case GenXIntrinsic::genx_uutrunc_sat:
   case GenXIntrinsic::genx_sstrunc_sat:
   case GenXIntrinsic::genx_ustrunc_sat:
@@ -1247,14 +1254,19 @@ Value *GenXEmulate::Emu64Expander::ensureEmulated(Value *Val) {
   Instruction *Inst = dyn_cast<Instruction>(Val);
   if (!Inst)
     return Val;
-  auto *Emulated = Emu64Expander(ST, *Inst).tryExpand();
-  // we expect to always return an emulated sequence
-  IGC_ASSERT(Emulated);
+  auto *Emulated = Emu64Expander(ST, *Inst, EmulationFuns).tryExpand();
+  if (!Emulated)
+    return Val;
   Inst->eraseFromParent();
   return Emulated;
 }
 Value *GenXEmulate::Emu64Expander::buildTernaryAddition(
     IRBuilder &Builder, Value &A, Value &B, Value &C, const Twine &Name) const {
+  if (ST.hasAdd3Bfn()) {
+    auto *Add3Funct = GenXIntrinsic::getGenXDeclaration(
+        Inst.getModule(), GenXIntrinsic::genx_add3, {A.getType(), B.getType()});
+    return Builder.CreateCall(Add3Funct, {&A, &B, &C}, "add3." + Name);
+  }
   auto *SubH = Builder.CreateAdd(&A, &B, Name + ".part");
   return Builder.CreateAdd(SubH, &C, Name);
 }
@@ -1556,94 +1568,7 @@ Value *GenXEmulate::Emu64Expander::buildGenericRShift(IRBuilder &Builder,
       {Lo, Hi}, Twine("int_emu.") + Op.getOpcodeName() + ".",
       Op.getType()->isIntegerTy());
 }
-Value *GenXEmulate::Emu64Expander::buildFPToI64(Module &M, IRBuilder &Builder,
-                                                IVSplitter &SplitBuilder,
-                                                Value *V, bool IsSigned,
-                                                Rounding rnd) {
-  (void)rnd; // Currently, only round to zero is supported
 
-  // NOTE: we should factor-out this code to a dedicated function if
-  // we'll ever need to emulate custom rounding facilities.
-
-  auto VFOp = toVector(Builder, V);
-  Type *I32VTy = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(),
-                                               VFOp.VTy->getNumElements());
-  // vector of floats -> vector of ints
-  Value *Operand = Builder.CreateBitCast(VFOp.V, I32VTy);
-  ConstantEmitter K(Operand);
-
-  auto *Exp = Builder.CreateAnd(Builder.CreateLShr(Operand, K.getSplat(23)),
-                                K.getSplat(0xff));
-  // mantissa without hidden bit
-  auto *PMant = Builder.CreateAnd(Operand, K.getSplat((1u << 23) - 1));
-  auto *Shift = Builder.CreateSub(K.getSplat(0xbe), Exp);
-  // take hidden bit into account
-  auto *Mant = Builder.CreateOr(PMant, K.getSplat(1 << 23));
-
-  auto *DataH = Builder.CreateShl(Mant, K.getSplat(8));
-  auto *DataL = K.getZero();
-
-  // The following 3 statements do Logical Shift Right
-  auto SI = constructShiftInfo(Builder, Shift);
-  auto *Lo = buildPartialRShift(Builder, DataL, DataH, SI);
-  auto *Hi = Builder.CreateAnd(Builder.CreateLShr(DataH, SI.Sha), SI.Mask1);
-
-  // Discard results if shift is greater than 63
-  auto *MASK = Builder.CreateSelect(
-      Builder.CreateICmpUGT(Shift, K.getSplat(63)), K.getZero(), K.getOnes());
-  Lo = Builder.CreateAnd(Lo, MASK);
-  Hi = Builder.CreateAnd(Hi, MASK);
-
-  auto PredicatedUpdate = [&Builder](Value *Predicate,
-                                     const std::pair<Value *, Value *> &New,
-                                     const std::pair<Value *, Value *> &Old) {
-    Value *Lo = Builder.CreateSelect(Predicate, New.first, Old.first);
-    Value *Hi = Builder.CreateSelect(Predicate, New.second, Old.second);
-    return std::make_pair(Lo, Hi);
-  };
-
-  auto *SignedBit = Builder.CreateAnd(Operand, K.getSplat(1 << 31));
-  auto *FlagSignSet = Builder.CreateICmpNE(SignedBit, K.getZero());
-  auto *FlagNoSignSet = Builder.CreateNot(FlagSignSet);
-  // check for Exponent overflow (when sign bit set)
-  auto *FlagExpO = Builder.CreateICmpUGT(Exp, K.getSplat(0xbe));
-  auto *FlagExpUO = Builder.CreateAnd(FlagNoSignSet, FlagExpO);
-  // signed bit alterations
-  if (IsSigned) {
-    // calculate (NOT[Lo, Hi] + 1) (integer sign negation)
-    auto *NegLo = Builder.CreateNot(Lo);
-    auto *NegHi = Builder.CreateNot(Hi);
-    auto AddcRes = buildAddc(&M, Builder, *NegLo, *K.getSplat(1),
-                             "int_emu.fp2ui.arg_negate.");
-    NegHi = Builder.CreateAdd(NegHi, AddcRes.CB);
-    // if sign bit is set, alter the result with negated value
-    std::tie(Lo, Hi) =
-        PredicatedUpdate(FlagSignSet, {AddcRes.Val, NegHi}, {Lo, Hi});
-    // Here we process oveflows
-    auto K_SOverflow = std::make_pair(K.getZero(), K.getSplat(1u << 31));
-    auto K_UOverflow = std::make_pair(K.getOnes(), K.getSplat((1u << 31) - 1));
-
-    // Overflow processing...
-    auto *NZ = Builder.CreateICmpNE(Builder.CreateOr(Lo, Hi), K.getZero());
-    // (sign ^ ((result_h  >> 31) & 1)))
-    auto *SS = Builder.CreateXor(SignedBit,
-                                 Builder.CreateAnd(Hi, K.getSplat(1 << 31)));
-    auto *NZ2 = Builder.CreateICmpNE(SS, K.getZero());
-    auto *Ovrfl = Builder.CreateAnd(NZ, NZ2);
-    // In case of overflow, HW response is : 7fffffffffffffff
-    std::tie(Lo, Hi) = PredicatedUpdate(Ovrfl, K_UOverflow, {Lo, Hi});
-    std::tie(Lo, Hi) = PredicatedUpdate(FlagExpO, K_SOverflow, {Lo, Hi});
-    std::tie(Lo, Hi) = PredicatedUpdate(FlagExpUO, K_UOverflow, {Lo, Hi});
-  } else {
-    auto *Zero = K.getZero();
-    auto *Ones = K.getOnes();
-    std::tie(Lo, Hi) = PredicatedUpdate(FlagSignSet, {Zero, Zero}, {Lo, Hi});
-    std::tie(Lo, Hi) = PredicatedUpdate(FlagExpUO, {Ones, Ones}, {Lo, Hi});
-  }
-
-  return SplitBuilder.combineLoHiSplit({Lo, Hi}, "int_emu.fp2i.combine.",
-                                       V->getType()->isIntegerTy());
-}
 Value *GenXEmulate::Emu64Expander::buildPartialRShift(IRBuilder &B,
                                                       Value *SrcLo,
                                                       Value *SrcHi,
@@ -1675,6 +1600,93 @@ GenXEmulate::Emu64Expander::constructShiftInfo(IRBuilder &B, Value *RawSha) {
 
   return ShiftInfo{Sha, Sh32, Mask1, Mask0};
 }
+bool GenXEmulate::Emu64Expander::hasStrictEmulationRequirement(
+    Instruction *Inst) {
+  auto isI64Type = [](Type *T) {
+    if (T->isVectorTy())
+      T = cast<VectorType>(T)->getElementType();
+    return T->isIntegerTy(64) == true;
+  };
+  bool ret64 = isI64Type(Inst->getType());
+  bool uses64 = false;
+  for (unsigned i = 0; i < Inst->getNumOperands(); ++i) {
+    uses64 |= isI64Type(Inst->getOperand(i)->getType());
+  }
+  // if instruction does not touch i64 - it is free to go
+  if (!ret64 && !uses64 && !isI64PointerOp(*Inst))
+    return false;
+
+  // now things become (a little) complicated. Currently, we ignore some
+  // instructions/intrinsic types, since they are acceptable by finalizer.
+  // More specifically - everything which is lowered to a plain mov
+  // (non-coverting) is fine.
+  // It seems that sends with i64 addresses are fine too
+
+  // skip moves
+  if (GenXIntrinsic::isWrRegion(Inst) || GenXIntrinsic::isRdRegion(Inst)) {
+    return OptStricterRegions;
+  }
+
+  // skip constants
+  if (vc::getAnyIntrinsicID(Inst) == GenXIntrinsic::genx_constanti)
+    return OptStricterConst;
+
+  switch (vc::getAnyIntrinsicID(Inst)) {
+  case GenXIntrinsic::genx_svm_scatter:
+  case GenXIntrinsic::genx_svm_gather:
+  case GenXIntrinsic::genx_svm_scatter4_scaled:
+  case GenXIntrinsic::genx_svm_gather4_scaled:
+  case GenXIntrinsic::genx_svm_block_st:
+  case GenXIntrinsic::genx_svm_block_ld:
+  case GenXIntrinsic::genx_svm_block_ld_unaligned:
+    return OptStricterSVM;
+
+  // TODO: not every atomic is covered here, we need to add more
+  case GenXIntrinsic::genx_svm_atomic_add:
+  case GenXIntrinsic::genx_svm_atomic_and:
+  case GenXIntrinsic::genx_svm_atomic_cmpxchg:
+  case GenXIntrinsic::genx_svm_atomic_dec:
+  case GenXIntrinsic::genx_svm_atomic_fcmpwr:
+  case GenXIntrinsic::genx_svm_atomic_fmax:
+  case GenXIntrinsic::genx_svm_atomic_fmin:
+  case GenXIntrinsic::genx_svm_atomic_imax:
+  case GenXIntrinsic::genx_svm_atomic_imin:
+  case GenXIntrinsic::genx_svm_atomic_inc:
+  case GenXIntrinsic::genx_svm_atomic_max:
+  case GenXIntrinsic::genx_svm_atomic_min:
+  case GenXIntrinsic::genx_svm_atomic_or:
+  case GenXIntrinsic::genx_svm_atomic_sub:
+  case GenXIntrinsic::genx_svm_atomic_xchg:
+  case GenXIntrinsic::genx_svm_atomic_xor:
+    return OptStricterAtomic;
+
+  case GenXIntrinsic::genx_oword_st:
+  case GenXIntrinsic::genx_oword_ld:
+  case GenXIntrinsic::genx_oword_ld_unaligned:
+    return OptStricterOword;
+  case GenXIntrinsic::genx_alloca:
+    return OptStricterAlloc;
+  case GenXIntrinsic::genx_faddr:
+    return OptStricterFaddr;
+  }
+
+  switch (Inst->getOpcode()) {
+  case Instruction::PtrToInt:
+  case Instruction::IntToPtr: {
+    const DataLayout &DL = Inst->getModule()->getDataLayout();
+    if (!cast<CastInst>(Inst)->isNoopCast(DL))
+      return OptStricterConverts;
+    return false;
+  }
+  case Instruction::ICmp:
+    return OptStrictChecksEnable;
+  // skip bitcast and phi
+  case Instruction::BitCast:
+  case Instruction::PHI:
+    return false;
+  }
+  return true;
+}
 
 void GenXEmulate::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<TargetPassConfig>();
@@ -1686,15 +1698,13 @@ bool GenXEmulate::runOnModule(Module &M) {
   ST = &getAnalysis<TargetPassConfig>()
             .getTM<GenXTargetMachine>()
             .getGenXSubtarget();
-  buildDivRemCache(M);
+  buildEmuFunCache(M);
 
   for (auto &F : M.getFunctionList())
     runOnFunction(F);
 
   Changed |= !ToErase.empty();
-  for (auto *I : ToErase)
-    I->eraseFromParent();
-  ToErase.clear();
+  processToEraseList(ToErase);
 
   auto IsOldEmulationFunction = [](const Function *F) {
     return F->getName().contains("__cm_intrinsic_impl_");
@@ -1702,7 +1712,7 @@ bool GenXEmulate::runOnModule(Module &M) {
   // Delete unused builtins, make used ones internal.
   for (auto I = M.begin(); I != M.end();) {
     Function &F = *I++;
-    if (isEmulationFunction(&F) || IsOldEmulationFunction(&F)) {
+    if (vc::isEmulationFunction(F) || IsOldEmulationFunction(&F)) {
       Changed = true;
       if (F.use_empty())
         F.eraseFromParent();
@@ -1739,7 +1749,11 @@ Function *GenXEmulate::getEmulationFunction(const Instruction *Inst) const {
 
   unsigned Opcode = Inst->getOpcode();
   Type *Ty = Inst->getType();
-  OpType OpAndType = std::make_pair(Opcode, Ty);
+
+  Type *Ty2 = nullptr;
+  if (Inst->getNumOperands() > 0)
+    Ty2 = Inst->getOperand(0)->getType();
+  OpType OpAndType{Opcode, Ty, Ty2};
 
   auto Iter = EmulationFuns.find(OpAndType);
   if (Iter != EmulationFuns.end()) {
@@ -1751,7 +1765,7 @@ Function *GenXEmulate::getEmulationFunction(const Instruction *Inst) const {
   return nullptr;
 }
 
-void GenXEmulate::buildDivRemCache(Module &M) {
+void GenXEmulate::buildEmuFunCache(Module &M) {
   EmulationFuns.clear();
 
   auto UpdateCacheIfMatch = [this](Function &F, StringRef PrefixToMatch,
@@ -1761,28 +1775,30 @@ void GenXEmulate::buildDivRemCache(Module &M) {
       return false;
 
     Type *Ty = F.getReturnType();
-    EmulationFuns.insert({{OpCode, Ty}, &F});
+    Type *Ty2 = nullptr;
+    if (F.arg_size() > 0)
+      Ty2 = IGCLLVM::getArg(F, 0)->getType();
+    IGC_ASSERT(EmulationFuns.find({OpCode, Ty, Ty2}) == EmulationFuns.end());
+    EmulationFuns.insert({{OpCode, Ty, Ty2}, &F});
     return true;
   };
 
   for (Function &F : M.getFunctionList()) {
-    if (!isEmulationFunction(&F))
+    if (!vc::isEmulationFunction(F))
       continue;
-    if (UpdateCacheIfMatch(F, EmuLibSDivPrefix, BinaryOperator::SDiv))
-      continue;
-    if (UpdateCacheIfMatch(F, EmuLibSRemPrefix, BinaryOperator::SRem))
-      continue;
-    if (UpdateCacheIfMatch(F, EmuLibUDivPrefix, BinaryOperator::UDiv))
-      continue;
-    if (UpdateCacheIfMatch(F, EmuLibURemPrefix, BinaryOperator::URem))
-      continue;
+    for (auto &PrOp : DivRemPrefixes)
+      UpdateCacheIfMatch(F, PrOp.Prefix, PrOp.Opcode);
+    if (ST->emulateLongLong()) {
+      for (auto &PrOp : EmulationFPConvertsPrefixes)
+        UpdateCacheIfMatch(F, PrOp.Prefix, PrOp.Opcode);
+    }
   }
 }
 
 Value *GenXEmulate::emulateInst(Instruction *Inst) {
   Function *EmuFn = getEmulationFunction(Inst);
   if (EmuFn) {
-    IGC_ASSERT(isEmulationFunction(EmuFn));
+    IGC_ASSERT(vc::isEmulationFunction(*EmuFn));
     IGC_ASSERT_MESSAGE(!isa<CallInst>(Inst), "call emulation not supported yet");
     llvm::IRBuilder<> Builder(Inst);
     SmallVector<Value *, 8> Args(Inst->operands());
@@ -1790,12 +1806,24 @@ Value *GenXEmulate::emulateInst(Instruction *Inst) {
   }
   IGC_ASSERT(ST);
   if (ST->emulateLongLong()) {
-    Value *NewInst = Emu64Expander(*ST, *Inst).tryExpand();
+    Value *NewInst = Emu64Expander(*ST, *Inst, &EmulationFuns).tryExpand();
     if (!NewInst) {
+#ifndef NDEBUG
+      if (Emu64Expander::hasStrictEmulationRequirement(Inst)) {
+        LLVM_DEBUG(dbgs() << "i64-emu::WARNING: instruction may require "
+                          << "emulation: " << *Inst << "\n");
+      }
+#endif // NDEBUG
+      if (OptStrictChecksEnable &&
+          Emu64Expander::hasStrictEmulationRequirement(Inst)) {
+        DiscracedList.push_back(Inst);
+      }
     }
 
     return NewInst;
   }
+  if (ST->partialI64Emulation())
+    return LightEmu64Expander(*ST, *Inst).tryExpand();
   return nullptr;
 }
 
@@ -1805,6 +1833,7 @@ Instruction *llvm::genx::emulateI64Operation(const GenXSubtarget *ST,
   LLVM_DEBUG(dbgs() << "i64-emu::WARNING: direct emulation routine was "
                     << "called for " << *Inst << "\n");
   Instruction *NewInst = nullptr;
+
   if (!ST->hasLongLong()) {
     Value *EmulatedResult = GenXEmulate::Emu64Expander(*ST, *Inst).tryExpand();
     NewInst = cast_or_null<Instruction>(EmulatedResult);
@@ -1813,6 +1842,11 @@ Instruction *llvm::genx::emulateI64Operation(const GenXSubtarget *ST,
     if (NewInst && !ST->emulateLongLong() && OptStrictEmulationRequests) {
       report_fatal_error("int_emu: target does not suport i64 types", false);
     }
+  }
+  else if (ST->partialI64Emulation()) {
+    Value *EmulatedResult =
+        GenXEmulate::LightEmu64Expander(*ST, *Inst).tryExpand();
+    NewInst = cast_or_null<Instruction>(EmulatedResult);
   }
 
   // NewInst can be nullptr if the instruction does not need emulation,
@@ -1853,32 +1887,43 @@ ModulePass *llvm::createGenXEmulatePass() {
 }
 
 namespace {
-class GenXEmulationImport : public ModulePass {
+
+// The purpose of GenXEmulationModulePrepare is to process an input
+// module that is expected to represent the emulation library in the following
+// manner:
+// 1. Identify primary functions (the ones that are directly used for
+// emulation) and mark those with vc::FunctionMD::VCEmulationRoutine and
+// appropriate rounding attributes (derived from the name of such functions)
+// 2. Purge those functions that are not required for the current Subtarget.
+// This pass is expected to be run only in a special "BiFEmulationCompilation"
+// mode (that is during BiF precompilation process).
+class GenXEmulationModulePrepare : public ModulePass {
 public:
   static char ID;
 
-  explicit GenXEmulationImport() : ModulePass(ID) {}
-  StringRef getPassName() const override { return "GenX Emulation BiF Import"; }
+  GenXEmulationModulePrepare() : ModulePass(ID) {}
+  StringRef getPassName() const override {
+    return "GenX Emulation Module Prepare";
+  }
+
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<TargetPassConfig>();
     AU.addRequired<GenXBackendConfig>();
   }
+
   bool runOnModule(Module &M) override {
     const GenXSubtarget &ST = getAnalysis<TargetPassConfig>()
                                   .getTM<GenXTargetMachine>()
                                   .getGenXSubtarget();
+    for (Function &F : M) {
+      if (!IsLibraryFunction(F)) {
+        continue;
+      }
+      F.addFnAttr(vc::FunctionMD::VCEmulationRoutine);
+      DeriveRoundingAttributes(F);
+    }
 
-    auto ModDivRem =
-        LoadDivRemLib(M.getContext(), M.getDataLayout(), M.getTargetTriple());
-    if (!ModDivRem)
-      return false;
-
-    if (ST.hasIntDivRem32())
-      Purge32BitFunctions(*ModDivRem);
-
-    if (Linker::linkModules(M, std::move(ModDivRem)))
-      report_fatal_error("Error linking emulation routines");
-
+    PurgeUnneededEmulationFunctions(M, ST);
     return true;
   }
 
@@ -1888,14 +1933,73 @@ private:
     return Name.startswith(LibraryFunctionPrefix);
   }
 
-  static void Purge32BitFunctions(Module &M) {
-    // We should remove 32-bit emulation routines if they are not used
-    for (auto I = M.begin(), E = M.end(); I != E;) {
-      Function &F = *I++;
-      if (IsLibraryFunction(F))
-        if (!F.getReturnType()->getScalarType()->isIntegerTy(64))
-          F.eraseFromParent();
-    }
+  template <typename FilterFunction>
+  static std::vector<Function *> selectEmulationFunctions(Module &M,
+                                                          FilterFunction Flt) {
+    std::vector<Function *> Result;
+    auto &&Selected = make_filter_range(M.functions(), [&Flt](Function &F) {
+      if (!IsLibraryFunction(F))
+        return false;
+      return Flt(F);
+    });
+    llvm::transform(Selected, std::back_inserter(Result),
+                    [](Function &Fn) { return &Fn; });
+    return Result;
+  }
+
+  static void PurgeNon64BitDivRemFunctions(Module &M) {
+    auto ToErase = selectEmulationFunctions(M, [](Function &F) {
+      if (F.getReturnType()->getScalarType()->isIntegerTy(64))
+        return false;
+      return std::any_of(DivRemPrefixes.begin(), DivRemPrefixes.end(),
+                         [&F](const auto &PrOp) {
+                           return F.getName().startswith(PrOp.Prefix);
+                         });
+    });
+    processToEraseList(ToErase);
+  }
+
+  static void PurgeFPConversionFunctions(Module &M, bool TargetHasFP64,
+                                         bool TargetHasI64) {
+    auto ToErase = selectEmulationFunctions(M, [=](Function &F) {
+      // Skip non-converts
+      if (std::none_of(EmulationFPConvertsPrefixes.begin(),
+                       EmulationFPConvertsPrefixes.end(),
+                       [&F](const auto &PrOp) {
+                         return F.getName().startswith(PrOp.Prefix);
+                       }))
+        return false;
+
+      bool IsFP64Operation =
+          std::any_of(F.arg_begin(), F.arg_end(),
+                      [](const auto &Arg) {
+                        return Arg.getType()->getScalarType()->isDoubleTy();
+                      }) ||
+          F.getReturnType()->getScalarType()->isDoubleTy();
+
+      // if target does not have support for I64 but does have FP64 - then
+      // fp64 converts should be preserved
+      if (!TargetHasI64 && TargetHasFP64 && IsFP64Operation) {
+        return false;
+      }
+
+      // If target does not have support for I64 and FP64 - then
+      // fp64 converts should be removed
+      if (!TargetHasI64 && !TargetHasFP64 && IsFP64Operation) {
+        return true;
+      }
+
+      return TargetHasI64;
+    });
+    processToEraseList(ToErase);
+  }
+
+  static void PurgeUnneededEmulationFunctions(Module &ModEmuFun,
+                                             const GenXSubtarget &ST) {
+    if (ST.hasIntDivRem32())
+      PurgeNon64BitDivRemFunctions(ModEmuFun);
+
+    PurgeFPConversionFunctions(ModEmuFun, ST.hasFP64(), !ST.emulateLongLong());
   }
 
   static void DeriveRoundingAttributes(Function &F) {
@@ -1924,8 +2028,34 @@ private:
       return;
     }
   }
+};
 
-  std::unique_ptr<Module> LoadDivRemLib(LLVMContext &Ctx, const DataLayout &DL,
+// The purpose of GenXEmulationImport is just to load platform-specific
+// emulation library and link it into the currently processed module
+class GenXEmulationImport : public ModulePass {
+public:
+  static char ID;
+
+  explicit GenXEmulationImport() : ModulePass(ID) {}
+  StringRef getPassName() const override { return "GenX Emulation BiF Import"; }
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<TargetPassConfig>();
+    AU.addRequired<GenXBackendConfig>();
+  }
+  bool runOnModule(Module &M) override {
+    auto ModEmuFun =
+        LoadEmuFunLib(M.getContext(), M.getDataLayout(), M.getTargetTriple());
+    if (!ModEmuFun)
+      return false;
+
+    if (Linker::linkModules(M, std::move(ModEmuFun)))
+      report_fatal_error("Error linking emulation routines");
+
+    return true;
+  }
+
+private:
+  std::unique_ptr<Module> LoadEmuFunLib(LLVMContext &Ctx, const DataLayout &DL,
                                         const std::string &Triple) {
 
     MemoryBufferRef EmulationBiFBuffer =
@@ -1940,22 +2070,16 @@ private:
     BiFModule->setDataLayout(DL);
     BiFModule->setTargetTriple(Triple);
 
-    for (Function &F : *BiFModule) {
-      if (!IsLibraryFunction(F))
-        continue;
-
-      F.addFnAttr(genx::FunctionMD::VCEmulationRoutine);
-      DeriveRoundingAttributes(F);
-    }
-
     return BiFModule;
   }
 };
 } // namespace
 
+char GenXEmulationModulePrepare::ID = 0;
 char GenXEmulationImport::ID = 0;
 
 namespace llvm {
+void initializeGenXEmulationModulePreparePass(PassRegistry &);
 void initializeGenXEmulationImportPass(PassRegistry &);
 }
 INITIALIZE_PASS_BEGIN(GenXEmulationImport, "GenXEmulationImport",
@@ -1965,4 +2089,13 @@ INITIALIZE_PASS_END(GenXEmulationImport, "GenXEmulationImport",
 ModulePass *llvm::createGenXEmulationImportPass() {
   initializeGenXEmulationImportPass(*PassRegistry::getPassRegistry());
   return new GenXEmulationImport;
+}
+
+INITIALIZE_PASS_BEGIN(GenXEmulationModulePrepare, "GenXEmulationModulePrepare",
+                      "GenXEmulationModulePrepare", false, false)
+INITIALIZE_PASS_END(GenXEmulationModulePrepare, "GenXEmulationModulePrepare",
+                    "GenXEmulationModulePrepare", false, false)
+ModulePass *llvm::createGenXEmulationModulePreparePass() {
+  initializeGenXEmulationModulePreparePass(*PassRegistry::getPassRegistry());
+  return new GenXEmulationModulePrepare;
 }

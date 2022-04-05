@@ -13,16 +13,13 @@ namespace IGC
 {
   struct DebugEmitterOpts {
     bool DebugEnabled = false;
-    bool EnableSIMDLaneDebugging = true;
     bool EnableGTLocationDebugging = false;
     bool UseOffsetInLocation = false;
-    bool EmitDebugRanges = false;
     bool EmitDebugLoc = false;
     bool EmitOffsetInDbgLoc = false;
     bool EnableRelocation = false;
     bool ZeBinCompatible = false;
     bool EnforceAMD64Machine = false;
-    bool EmitPrologueEnd = true;
     bool ScratchOffsetInOW = true;
     bool EmitATLinkageName = true;
     bool EnableDebugInfoValidation = false;

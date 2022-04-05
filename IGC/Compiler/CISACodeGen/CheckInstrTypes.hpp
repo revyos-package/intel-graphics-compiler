@@ -28,10 +28,10 @@ namespace IGC
 
     public:
         static char ID;
-        CheckInstrTypes() : FunctionPass(ID), g_InstrTypes(nullptr), LI(nullptr)
+        CheckInstrTypes() : FunctionPass(ID), g_InstrTypes(nullptr), g_metrics(nullptr), LI(nullptr)
         {
         };
-        CheckInstrTypes(IGC::SInstrTypes* instrList);
+        CheckInstrTypes(IGC::SInstrTypes* instrList, IGCMetrics::IGCMetric* metrics);
 
         virtual bool runOnFunction(llvm::Function& F) override;
 
@@ -66,6 +66,7 @@ namespace IGC
 
     private:
         IGC::SInstrTypes* g_InstrTypes;
+        IGCMetrics::IGCMetric* g_metrics;
 
     };
 

@@ -141,12 +141,12 @@ SPDX-License-Identifier: MIT
 #include "GenXLiveness.h"
 #include "GenXModule.h"
 #include "GenXNumbering.h"
-#include "GenXRegion.h"
 #include "GenXSubtarget.h"
 #include "GenXUtil.h"
 
-#include "vc/GenXOpts/Utils/KernelInfo.h"
-#include "vc/GenXOpts/Utils/RegCategory.h"
+#include "vc/Utils/GenX/KernelInfo.h"
+#include "vc/Utils/GenX/RegCategory.h"
+#include "vc/Utils/General/FunctionAttrs.h"
 
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
@@ -183,12 +183,11 @@ private:
   StringRef Filename;
   unsigned Line;
   unsigned Col;
-  static int KindID;
-  static int getKindID() {
-    if (KindID == 0)
-      KindID = llvm::getNextAvailablePluginDiagnosticKind();
-    return KindID;
-  }
+
+  static const int KindID;
+
+  static int getKindID() { return KindID; }
+
 public:
   // Initialize from an Instruction and an Argument.
   DiagnosticInfoArgIndirection(Instruction *Inst, Argument *Arg,
@@ -199,7 +198,9 @@ public:
     return DI->getKind() == getKindID();
   }
 };
-int DiagnosticInfoArgIndirection::KindID = 0;
+
+const int DiagnosticInfoArgIndirection::KindID =
+    llvm::getNextAvailablePluginDiagnosticKind();
 
 // processArgLR relies on these being in this order.
 // checkIndirectability relies on these being powers of 2 (except
@@ -213,17 +214,17 @@ enum Indirectability {
 };
 
 // A call site and the action that we want to take when indirecting the arg.
-// This is then subclassed by the *CallSite classes below.
-class CallSite {
+// This is then subclassed by the *ArgCallSite classes below.
+class ArgIndCallSite {
 public:
   CallInst *CI;
 protected:
   Indirectability State;
   Value *Index;
 public:
-  CallSite(CallInst *CI, Indirectability State, Value *Index)
+  ArgIndCallSite(CallInst *CI, Indirectability State, Value *Index)
       : CI(CI), State(State), Index(Index) {}
-  virtual ~CallSite() {}
+  virtual ~ArgIndCallSite() {}
   Indirectability getState() const { return State; }
   Value *getIndex() const { return Index; }
   virtual Value *process(GenXArgIndirection *Pass, SubroutineArg *SubrArg) = 0;
@@ -231,16 +232,16 @@ public:
   void print(raw_ostream &OS) const { printImpl(OS); }
 };
 
-raw_ostream &operator<<(raw_ostream &OS, const CallSite &CS) {
+raw_ostream &operator<<(raw_ostream &OS, const ArgIndCallSite &CS) {
   CS.print(OS); return OS;
 }
 
 // A call site in a subroutine that is itself indirecting the arg.
-class CallerIndirectingCallSite : public CallSite {
+class CallerIndirectingCallSite : public ArgIndCallSite {
   SubroutineArg *CallerSubrArg;
 public:
   CallerIndirectingCallSite(CallInst *CI, SubroutineArg *CallerSubrArg)
-      : CallSite(CI, Indirectability::CALLER_INDIRECTING, nullptr),
+      : ArgIndCallSite(CI, Indirectability::CALLER_INDIRECTING, nullptr),
         CallerSubrArg(CallerSubrArg) {}
   virtual Value *process(GenXArgIndirection *Pass, SubroutineArg *SubrArg);
   virtual void printImpl(raw_ostream &OS) const {
@@ -251,10 +252,10 @@ public:
 // A call site where indirecting the arg does not give any optimization because
 // we did not find copies or rd/wr regions that we can get rid of. We can still
 // indirect it though if other call sites do get an optimization.
-class NoOptCallSite : public CallSite {
+class NoOptCallSite : public ArgIndCallSite {
 public:
   NoOptCallSite(CallInst *CI)
-      : CallSite(CI, Indirectability::NO_OPTIMIZATION, nullptr) {}
+      : ArgIndCallSite(CI, Indirectability::NO_OPTIMIZATION, nullptr) {}
   virtual Value *process(GenXArgIndirection *Pass, SubroutineArg *SubrArg);
   virtual void printImpl(raw_ostream &OS) const {
     OS << "NoOptCallSite " << *CI;
@@ -264,13 +265,13 @@ public:
 // A call site where the arg is constant (including undef) and the arg is
 // coalesced with a retval that is used only in a legalized wrregion
 // whose "old value" input is constant.
-class ConstArgRetCallSite : public CallSite {
+class ConstArgRetCallSite : public ArgIndCallSite {
   Constant *LdConst; // the constant that needs to be loaded
   AssertingVH<Instruction> RetEndWr; // the last wrregion in the sequence for the retval
 public:
   ConstArgRetCallSite(CallInst *CI, Constant *LdConst, Instruction *RetEndWr,
                       Value *Index)
-      : CallSite(CI, Indirectability::WANT_INDIRECTION, Index),
+      : ArgIndCallSite(CI, Indirectability::WANT_INDIRECTION, Index),
         LdConst(LdConst), RetEndWr(RetEndWr) {}
   virtual Value *process(GenXArgIndirection *Pass, SubroutineArg *SubrArg);
   virtual void printImpl(raw_ostream &OS) const {
@@ -281,7 +282,7 @@ public:
 
 // A call site where the arg is a legalized rdregion or copy, and there is no
 // retval coalesced with it.
-class IndirectArgCallSite : public CallSite {
+class IndirectArgCallSite : public ArgIndCallSite {
 protected:
   // Some use of input (arg or inst) in legalized rdregion or copy. This is
   // kept as a Use * rather than the value it actually uses to allow for the
@@ -290,7 +291,7 @@ protected:
   Use *InputUse;
 public:
   IndirectArgCallSite(CallInst *CI, Use *InputUse, Value *Index)
-      : CallSite(CI, Indirectability::WANT_INDIRECTION, Index),
+      : ArgIndCallSite(CI, Indirectability::WANT_INDIRECTION, Index),
         InputUse(InputUse) {}
   virtual Value *process(GenXArgIndirection *Pass, SubroutineArg *SubrArg);
   virtual void printImpl(raw_ostream &OS) const {
@@ -326,7 +327,7 @@ public:
 private:
   int CoalescedRetIdx = -1;
   bool CanCoalesceWithoutKill = false;
-  SmallVector<CallSite *, 4> CallSites;
+  SmallVector<ArgIndCallSite *, 4> CallSites;
   Alignment Align;
   Function *F = nullptr;
   Function *NewFunc = nullptr;
@@ -339,7 +340,7 @@ public:
       delete *i;
   }
   Indirectability checkIndirectability();
-  CallSite *createCallSite(CallInst *CI);
+  ArgIndCallSite *createCallSite(CallInst *CI);
   Alignment getIndirectAlignment(unsigned GRFWidth) const;
   void gatherBalesToModify(Alignment Align);
   std::pair<Value *, Value *> addAddressArg();
@@ -351,8 +352,9 @@ private:
 };
 
 // GenX arg indirection pass
-class GenXArgIndirection : public FunctionGroupPass {
-  friend CallSite;
+class GenXArgIndirection : public FGPassImplInterface,
+                           public IDMixin<GenXArgIndirection> {
+  friend ArgIndCallSite;
   friend SubroutineArg;
   friend NoOptCallSite;
   friend ConstArgRetCallSite;
@@ -379,11 +381,9 @@ private:
   // List of LRs that we need to recalculate.
   SmallVector<LiveRange *, 4> LRsToCalculate;
 public:
-  static char ID;
-  explicit GenXArgIndirection() : FunctionGroupPass(ID) { }
-  StringRef getPassName() const override { return "GenX arg indirection"; }
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    FunctionGroupPass::getAnalysisUsage(AU);
+  explicit GenXArgIndirection() {}
+  static StringRef getPassName() { return "GenX arg indirection"; }
+  static void getAnalysisUsage(AnalysisUsage &AU) {
     AU.addRequired<FunctionGroupAnalysis>();
     AU.addRequired<GenXNumbering>();
     AU.addRequired<GenXLiveness>();
@@ -396,12 +396,6 @@ public:
     AU.addPreserved<FunctionGroupAnalysis>();
   }
   bool runOnFunctionGroup(FunctionGroup &FG) override;
-  // createPrinterPass : get a pass to print the IR, together with the GenX
-  // specific analyses
-  Pass *createPrinterPass(raw_ostream &O,
-                          const std::string &Banner) const override {
-    return createGenXGroupPrinterPass(O, Banner);
-  }
 
 private:
   void gatherArgLRs();
@@ -422,18 +416,21 @@ private:
 
 } // end anonymous namespace
 
-char GenXArgIndirection::ID = 0;
-namespace llvm { void initializeGenXArgIndirectionPass(PassRegistry &); }
-INITIALIZE_PASS_BEGIN(GenXArgIndirection, "GenXArgIndirection", "GenXArgIndirection", false, false)
-INITIALIZE_PASS_DEPENDENCY(GenXGroupBaling)
-INITIALIZE_PASS_DEPENDENCY(GenXNumbering)
-INITIALIZE_PASS_DEPENDENCY(GenXLiveness)
-INITIALIZE_PASS_END(GenXArgIndirection, "GenXArgIndirection", "GenXArgIndirection", false, false)
+namespace llvm {
+void initializeGenXArgIndirectionWrapperPass(PassRegistry &);
+using GenXArgIndirectionWrapper = FunctionGroupWrapperPass<GenXArgIndirection>;
+} // namespace llvm
+INITIALIZE_PASS_BEGIN(GenXArgIndirectionWrapper, "GenXArgIndirectionWrapper",
+                      "GenXArgIndirectionWrapper", false, false)
+INITIALIZE_PASS_DEPENDENCY(GenXGroupBalingWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXNumberingWrapper)
+INITIALIZE_PASS_DEPENDENCY(GenXLivenessWrapper)
+INITIALIZE_PASS_END(GenXArgIndirectionWrapper, "GenXArgIndirectionWrapper",
+                    "GenXArgIndirectionWrapper", false, false)
 
-FunctionGroupPass *llvm::createGenXArgIndirectionPass()
-{
-  initializeGenXArgIndirectionPass(*PassRegistry::getPassRegistry());
-  return new GenXArgIndirection();
+ModulePass *llvm::createGenXArgIndirectionWrapperPass() {
+  initializeGenXArgIndirectionWrapperPass(*PassRegistry::getPassRegistry());
+  return new GenXArgIndirectionWrapper();
 }
 
 /***********************************************************************
@@ -487,12 +484,12 @@ void GenXArgIndirection::gatherArgLRs()
     Seen.insert(Liveness->getLiveRange(&*ai));
   // For a subroutine arg, add its LR to the list if it is not already in Seen.
   for (auto fgi = FG->begin() + 1, fge = FG->end(); fgi != fge; ++fgi) {
-    if (genx::requiresStackCall(*fgi))
+    if (vc::requiresStackCall(*fgi))
       continue;
     for (auto ai = (*fgi)->arg_begin(), ae = (*fgi)->arg_end(); ai != ae; ++ai) {
       Argument *Arg = &*ai;
       // Only process an arg that is bigger than 2 GRFs.
-      if (Arg->getType()->getPrimitiveSizeInBits() <= ST->getGRFWidth() * 16)
+      if (Arg->getType()->getPrimitiveSizeInBits() <= ST->getGRFByteSize() * 16)
         continue;
       LiveRange *LR = Liveness->getLiveRange(Arg);
       if (Seen.insert(LR).second)
@@ -595,10 +592,10 @@ bool GenXArgIndirection::processArgLR(LiveRange *ArgLR)
   }
   // Get the worst case alignment of the indices from the call sites if we
   // indirect this arg.
-  Alignment Align = Alignment(genx::log2(ST->getGRFWidth()), 0);
+  Alignment Align = Alignment(genx::log2(ST->getGRFByteSize()), 0);
   for (auto SubrArg = SubrArgs.begin(), e = SubrArgs.end();
       SubrArg != e; ++SubrArg) {
-    auto ThisAlign = SubrArg->getIndirectAlignment(ST->getGRFWidth());
+    auto ThisAlign = SubrArg->getIndirectAlignment(ST->getGRFByteSize());
     Align = Align.merge(ThisAlign);
   }
   // Gather the bales that need indirecting, and check whether indirection is
@@ -658,7 +655,7 @@ bool GenXArgIndirection::processArgLR(LiveRange *ArgLR)
   //  - other values inside the subroutines that we are indirecting
   // We do not want it to get a register allocated, since those values will be
   // indirected. We achieve that by setting ArgLR's category to NONE.
-  ArgLR->setCategory(RegCategory::NONE);
+  ArgLR->setCategory(vc::RegCategory::None);
   LLVM_DEBUG(dbgs() << " Not allocating register for arg's LR\n");
   // Arg to indirected arg map.
   std::map<Value *, Value *> ArgToAddressArg;
@@ -737,7 +734,7 @@ bool GenXArgIndirection::processArgLR(LiveRange *ArgLR)
  */
 Indirectability SubroutineArg::checkIndirectability()
 {
-  if (genx::requiresStackCall(F))
+  if (vc::requiresStackCall(F))
     return CANNOT_INDIRECT;
   // See if there is a return value that is coalesced with the arg.
   CoalescedRetIdx = -1;
@@ -784,22 +781,22 @@ Indirectability SubroutineArg::checkIndirectability()
     }
   }
 
-  // Create an object of some subclass of CallSite for each call site.
+  // Create an object of some subclass of ArgIndCallSite for each call site.
   for (auto &U: F->uses()) {
     if (auto *CI = checkFunctionCall(U.getUser(), F)) {
       IGC_ASSERT(U.getOperandNo() == CI->getNumArgOperands());
-      auto CallSite = createCallSite(CI);
-      if (!CallSite)
+      auto CS = createCallSite(CI);
+      if (!CS)
         return Indirectability::CANNOT_INDIRECT;
-      CallSites.push_back(CallSite);
-      LLVM_DEBUG(dbgs() << "  " << *CallSite << "\n");
+      CallSites.push_back(CS);
+      LLVM_DEBUG(dbgs() << "  " << *CS << "\n");
     }
   }
   // Check indirection state for each call site.
   unsigned States = 0;
   for (auto csi = CallSites.begin(), cse = CallSites.end(); csi != cse; ++csi) {
-    auto CallSite = *csi;
-    States |= CallSite->getState();
+    auto CS = *csi;
+    States |= CS->getState();
   }
   switch (States & (Indirectability::NO_OPTIMIZATION | Indirectability::WANT_INDIRECTION)) {
   case Indirectability::NO_OPTIMIZATION | Indirectability::WANT_INDIRECTION:
@@ -811,18 +808,19 @@ Indirectability SubroutineArg::checkIndirectability()
 }
 
 /***********************************************************************
- * createCallSite : create a CallSite object for this call
+ * createCallSite : create a ArgIndCallSite object for this call
  *
  * Enter:   CI = CallInst
  *          this->Arg = the Argument to look at
  *          this->ArgLR = its LiveRange
- *          this->CoalescedRetIdx = -1 else struct index of coalesced return value
+ *          this->CoalescedRetIdx = -1 else struct index of coalesced return
+ * value
  *
  * Return:  0 if this call stops arg indirection happening for this arg
  *          otherwise object of some subclass of CallSite
  */
-CallSite *SubroutineArg::createCallSite(CallInst *CI)
-{
+ArgIndCallSite *SubroutineArg::createCallSite(CallInst *CI) {
+  const DataLayout &DL = CI->getModule()->getDataLayout();
   // Check if this call site is in a function that is itself indirecting the
   // arg.
   if (auto SubrArg = Pass->FuncMap[CI->getParent()->getParent()])
@@ -839,9 +837,9 @@ CallSite *SubroutineArg::createCallSite(CallInst *CI)
   // is the only use, try and parse it as a rd-wr sequence that reads a
   // contiguous region and writes the whole of Arg.
   RdWrRegionSequence ArgRWS;
-  if (!V->hasOneUse() || !GenXIntrinsic::isWrRegion(V)
-      || !ArgRWS.buildFromWr(cast<Instruction>(V), Pass->Baling)
-      || !ArgRWS.RdR.isContiguous() || !ArgRWS.WrR.isWhole(Arg->getType())) {
+  if (!V->hasOneUse() || !GenXIntrinsic::isWrRegion(V) ||
+      !ArgRWS.buildFromWr(cast<Instruction>(V), Pass->Baling) ||
+      !ArgRWS.RdR.isContiguous() || !ArgRWS.WrR.isWhole(Arg->getType(), &DL)) {
     // Failed to find such a rd-wr sequence. Set ArgRWS to null.
     ArgRWS = RdWrRegionSequence();
   }
@@ -874,13 +872,13 @@ CallSite *SubroutineArg::createCallSite(CallInst *CI)
         // Attempt to parse as a rd-wr sequence that reads the whole of RetVal
         // and writes a contiguous region, so it is either a legalized copy, or
         // a legalized contiguous wrregion, and it is the only use of the input.
-        if (!GenXIntrinsic::isRdRegion(User)
-            || RetVal->use_begin()->getOperandNo()
-              != GenXIntrinsic::GenXRegion::OldValueOperandNum
-            || !RetRWS.buildFromRd(User, Pass->Baling)
-            || !RetRWS.WrR.isContiguous()
-            || !RetRWS.RdR.isWhole(RetVal->getType())
-            || !RetRWS.isOnlyUseOfInput()) {
+        if (!GenXIntrinsic::isRdRegion(User) ||
+            RetVal->use_begin()->getOperandNo() !=
+                GenXIntrinsic::GenXRegion::OldValueOperandNum ||
+            !RetRWS.buildFromRd(User, Pass->Baling) ||
+            !RetRWS.WrR.isContiguous() ||
+            !RetRWS.RdR.isWhole(RetVal->getType(), &DL) ||
+            !RetRWS.isOnlyUseOfInput()) {
           // That failed, so make RetRWS null.
           RetRWS = RdWrRegionSequence();
         }
@@ -890,7 +888,7 @@ CallSite *SubroutineArg::createCallSite(CallInst *CI)
   }
 
   // Now check the various cases. This results in the creation of an object of
-  // some subclass of CallSite.
+  // some subclass of ArgIndCallSite.
 
   // Check that the regions are contiguous, and report if they are not.
   if (ArgRWS.isNull() && !ArgRWS.RdR.isContiguous()) {
@@ -1012,8 +1010,8 @@ Alignment SubroutineArg::getIndirectAlignment(unsigned GRFWidth) const {
   Alignment Align(genx::log2(GRFWidth), 0); // best case is GRF aligned
   for (auto csi = CallSites.begin(), cse = CallSites.end();
       csi != cse; ++csi) {
-    auto CallSite = *csi;
-    Value *Index = CallSite->getIndex();
+    auto CS = *csi;
+    Value *Index = CS->getIndex();
     if (!Index)
       continue;
     Align = Align.merge(Pass->AI->get(Index));
@@ -1099,7 +1097,7 @@ void SubroutineArg::gatherBalesToModify(Alignment Align)
       if (auto CI = dyn_cast<CallInst>(User)) {
         Function *CF = CI->getCalledFunction();
         if (!GenXIntrinsic::isAnyNonTrivialIntrinsic(CF) &&
-            !genx::requiresStackCall(CF)) {
+            !vc::requiresStackCall(CF)) {
           // Non-intrinsic call. Ignore. (A call site using an arg being
           // indirected gets handled differently.)
           // Cannot indirect if there is a stack call. Do not ignore stack
@@ -1146,14 +1144,14 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
     // Check for things about the main instruction that stop us indexing
     // operand(s) or result in this bale.
     if (MainInst->Inst->getType()->getPrimitiveSizeInBits() / genx::ByteBits >
-            ST->getGRFWidth() &&
+            ST->getGRFByteSize() &&
         !ST->hasIndirectGRFCrossing()) {
       // An execution size bigger than 1 GRF disqualifies the main
       // instruction on <= BDW.
       LLVM_DEBUG(dbgs() << "execution size bigger than GRF\n");
       return false;
     }
-    unsigned IID = GenXIntrinsic::getAnyIntrinsicID(MainInst->Inst);
+    unsigned IID = vc::getAnyIntrinsicID(MainInst->Inst);
     if (GenXIntrinsic::isAnyNonTrivialIntrinsic(IID)) {
       auto IntrInfo = GenXIntrinsicInfo(IID);
       // Cannot indirect a raw or direct only operand.
@@ -1175,7 +1173,7 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
       }
     } else if (auto *CI = dyn_cast<CallInst>(MainInst->Inst)) {
       auto *Callee = CI->getCalledFunction();
-      IGC_ASSERT_MESSAGE(genx::requiresStackCall(Callee),
+      IGC_ASSERT_MESSAGE(vc::requiresStackCall(Callee),
                          "Expect a stack call to stop indirection. See "
                          "SubroutineArg::gatherBalesToModify");
       LLVM_DEBUG(dbgs() << *CI << "\n\tcalls stack call function\n");
@@ -1188,15 +1186,19 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
       case BaleInfo::WRREGION:
         // Check wrregion if its result is coalesced with arg.
         if (Liveness->getLiveRange(bi->Inst) == ArgLR) {
-          Region R(bi->Inst, bi->Info);
+          Region R = makeRegionFromBaleInfo(bi->Inst, bi->Info);
           if (R.Indirect)
             break; // already indirect
-          // Fake up scalar indirect index for the benefit of getLegalSize.
-          // It doesn't matter what the value is, as long as it is scalar.
+          // Fake up scalar indirect index for the benefit of
+          // getLegalRegionSizeForTarget. It doesn't matter what the value is,
+          // as long as it is scalar.
           R.Indirect = bi->Inst->getOperand(
               GenXIntrinsic::GenXRegion::WrIndexOperandNum);
-          if (R.NumElements != R.getLegalSize(0, /*Allow2D=*/false,
-                /*InputNumElements=*/UINT_MAX, ST, Align)) {
+          if (R.NumElements != getLegalRegionSizeForTarget(
+                                   *ST, R,
+                                   /*Idx*/ 0,
+                                   /*Allow2D=*/false,
+                                   /*InputNumElements=*/UINT_MAX, Align)) {
             LLVM_DEBUG(dbgs() << "wrregion cannot be indirected: " << R << "\n");
             return false;
           }
@@ -1205,18 +1207,25 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
       case BaleInfo::RDREGION:
         // Check rdregion if its input is coalesced with arg.
         if (Liveness->getLiveRange(bi->Inst->getOperand(0)) == ArgLR) {
-          Region R(bi->Inst, bi->Info);
+          Region R = makeRegionFromBaleInfo(bi->Inst, bi->Info);
           if (R.Indirect)
             break; // already indirect
-          // Fake up scalar indirect index for the benefit of getLegalSize.
-          // It doesn't matter what the value is, as long as it is scalar.
+          // Fake up scalar indirect index for the benefit of
+          // getLegalRegionSizeForTarget. It doesn't matter what the value is,
+          // as long as it is scalar.
           R.Indirect = bi->Inst->getOperand(
               GenXIntrinsic::GenXRegion::RdIndexOperandNum);
-          if (R.NumElements != R.getLegalSize(0, /*Allow2D=*/true,
-                /*InputNumElements=*/UINT_MAX, ST, Align)) {
+          if (R.NumElements != getLegalRegionSizeForTarget(
+                                   *ST, R,
+                                   /*Idx*/ 0,
+                                   /*Allow2D=*/true,
+                                   /*InputNumElements=*/UINT_MAX, Align)) {
             LLVM_DEBUG(dbgs() << "rdregion cannot be indirected: " << R << "\n";
-              dbgs() << R.getLegalSize(0, /*Allow2D=*/true,
-                  /*InputNumElements=*/UINT_MAX, ST, Align) << "\n");
+                       dbgs() << getLegalRegionSizeForTarget(
+                                     *ST, R, /*Idx*/ 0,
+                                     /*Allow2D=*/true,
+                                     /*InputNumElements=*/UINT_MAX, Align)
+                              << "\n");
             return false;
           }
         }
@@ -1246,9 +1255,9 @@ std::pair<Value *, Value *> SubroutineArg::addAddressArg() {
   ArgTys.push_back(Type::getInt16Ty(F->getContext()));
   FTy = FunctionType::get(FTy->getReturnType(), ArgTys, false);
   // Create the new function.
-  NewFunc = Function::Create(FTy, F->getLinkage(), "");
-  NewFunc->takeName(F);
-  NewFunc->copyAttributesFrom(F);
+  NewFunc = Function::Create(FTy, F->getLinkage(), F->getName());
+  vc::transferNameAndCCWithNewAttr(F->getAttributes(), *F, *NewFunc);
+  vc::transferDISubprogram(*F, *NewFunc);
   F->getParent()->getFunctionList().insert(F->getIterator(), NewFunc);
   // Set the new function's number to the same as the old function.
   Pass->Numbering->setNumber(NewFunc, Pass->Numbering->getNumber(F));
@@ -1279,7 +1288,7 @@ std::pair<Value *, Value *> SubroutineArg::addAddressArg() {
   AddressArgument = NewArgs.back();
   // Give the address arg a live range, and mark that it needs calculating.
   auto LR = Pass->Liveness->getOrCreateLiveRange(AddressArgument);
-  LR->setCategory(RegCategory::ADDRESS);
+  LR->setCategory(vc::RegCategory::Address);
   Pass->LRsToCalculate.push_back(LR);
   // Set the name of the new address arg.
   NewArgs[OldArgs.size()]->setName(Arg->getName() + ".addr");
@@ -1294,50 +1303,50 @@ std::pair<Value *, Value *> SubroutineArg::addAddressArg() {
  *    function instead and passes the extra address arg
  *
  * For each call site, this calls the process() method on the object of a
- * subclass of CallSite set up by createCallSite(). That returns the extra
+ * subclass of ArgIndCallSite set up by createCallSite(). That returns the extra
  * address arg, which this function then uses to create a replacement call
  * instruction.
  */
 void SubroutineArg::fixCallSites()
 {
   for (auto csi = CallSites.begin(), cse = CallSites.end(); csi != cse; ++csi) {
-    auto CallSite = *csi;
-    LLVM_DEBUG(dbgs() << "  fixCallSites: [" << Pass->Numbering->getNumber(CallSite->CI)
-        << "] " << *CallSite << "\n");
+    auto CS = *csi;
+    LLVM_DEBUG(dbgs() << "  fixCallSites: ["
+                      << Pass->Numbering->getNumber(CS->CI) << "] " << *CS
+                      << "\n");
     // Process the call site.
     // Create the replacement call instruction, with an added address arg that
     // for now we set to undef. We do this first so that process() called below
     // can modify the arg being indirected such that the eraseUnusedTree erases
     // the rd-wr sequence that sets up the arg in the old call.
     SmallVector<Value *, 4> Args;
-    for (unsigned oi = 0, oe = CallSite->CI->getNumArgOperands();
-        oi != oe; ++oi)
-      Args.push_back(CallSite->CI->getArgOperand(oi));
-    Args.push_back(UndefValue::get(Type::getInt16Ty(CallSite->CI->getContext())));
-    CallInst *OldCI = CallSite->CI;
-    CallSite->CI = CallInst::Create(NewFunc, Args, "", OldCI);
-    CallSite->CI->takeName(OldCI);
-    CallSite->CI->setDebugLoc(OldCI->getDebugLoc());
-    Pass->Numbering->setNumber(CallSite->CI, Pass->Numbering->getNumber(OldCI));
-    Pass->Numbering->setStartNumber(CallSite->CI,
-          Pass->Numbering->getStartNumber(OldCI));
-    // Get the subclass of CallSite to do its processing, returning the extra
-    // address arg for the call.
-    Value *AddressArg = CallSite->process(Pass, this);
+    for (unsigned oi = 0, oe = CS->CI->getNumArgOperands(); oi != oe; ++oi)
+      Args.push_back(CS->CI->getArgOperand(oi));
+    Args.push_back(UndefValue::get(Type::getInt16Ty(CS->CI->getContext())));
+    CallInst *OldCI = CS->CI;
+    CS->CI = CallInst::Create(NewFunc, Args, "", OldCI);
+    CS->CI->takeName(OldCI);
+    CS->CI->setDebugLoc(OldCI->getDebugLoc());
+    Pass->Numbering->setNumber(CS->CI, Pass->Numbering->getNumber(OldCI));
+    Pass->Numbering->setStartNumber(CS->CI,
+                                    Pass->Numbering->getStartNumber(OldCI));
+    // Get the subclass of ArgIndCallSite to do its processing, returning the
+    // extra address arg for the call.
+    Value *AddressArg = CS->process(Pass, this);
     LLVM_DEBUG(dbgs() << "    AddressArg is " << AddressArg->getName() << "\n");
     if (!isa<UndefValue>(AddressArg)) {
       // Create a live range for the address arg, and ensure it is recalculated.
       LiveRange *AddressArgLR = Pass->Liveness->getOrCreateLiveRange(AddressArg);
-      AddressArgLR->setCategory(RegCategory::ADDRESS);
+      AddressArgLR->setCategory(vc::RegCategory::Address);
       Pass->LRsToCalculate.push_back(AddressArgLR);
     }
     // Use the address arg in the new call.
-    CallSite->CI->setOperand(Args.size() - 1, AddressArg);
+    CS->CI->setOperand(Args.size() - 1, AddressArg);
     // Replace the old call with the new one, and erase the old one. We use
     // eraseUnusedTree so that any rd-wr sequence for the indirected arg is also
     // erased.
-    OldCI->replaceAllUsesWith(CallSite->CI);
-    Pass->Liveness->replaceValue(OldCI, CallSite->CI);
+    OldCI->replaceAllUsesWith(CS->CI);
+    Pass->Liveness->replaceValue(OldCI, CS->CI);
     Pass->Liveness->eraseUnusedTree(OldCI);
   }
 }
@@ -1470,7 +1479,7 @@ Value *ConstArgRetCallSite::process(GenXArgIndirection *Pass,
     }
     if (!LR) {
       LR = Pass->Liveness->getOrCreateLiveRange(Inst);
-      LR->setCategory(RegCategory::GENERAL);
+      LR->setCategory(vc::RegCategory::General);
     }
     Pass->LRsToCalculate.push_back(LR);
   }
@@ -1617,8 +1626,8 @@ void SubroutineArg::coalesceAddressArgs()
   LiveRange *AddressLR = Pass->Liveness->getLiveRange(AddressArgument);
   unsigned ArgNum = AddressArgument->getArgNo();
   for (unsigned csi = 0, cse = CallSites.size(); csi != cse; ++csi) {
-    auto CallSite = CallSites[csi];
-    Value *CallArg = CallSite->CI->getArgOperand(ArgNum);
+    auto CS = CallSites[csi];
+    Value *CallArg = CS->CI->getArgOperand(ArgNum);
     if (isa<UndefValue>(CallArg))
       continue;
     LiveRange *CallArgLR = Pass->Liveness->getLiveRange(CallArg);
@@ -1634,19 +1643,19 @@ void SubroutineArg::coalesceAddressArgs()
     // subroutine where we are indirecting the arg -- the new address args
     // for each subroutine should coalesce together.
     LLVM_DEBUG(dbgs() << "Failed to coalesce:\n " << *AddressLR << "\n " << *CallArgLR << "\n");
-    IGC_ASSERT_MESSAGE(!Pass->FuncMap[CallSite->CI->getParent()->getParent()],
-      "new address args should coalesce together");
+    IGC_ASSERT_MESSAGE(!Pass->FuncMap[CS->CI->getParent()->getParent()],
+                       "new address args should coalesce together");
     // We need to insert a copy, in the address arg's pre-copy slot. An address
     // copy is done with a genx.convert, even though it is not actually doing a
     // conversion.
-    auto Copy = createConvert(CallArg, CallArg->getName() + ".coalescefail",
-        CallSite->CI);
-    Copy->setDebugLoc(CallSite->CI->getDebugLoc());
-    Pass->Numbering->setNumber(Copy, Pass->Numbering->getArgPreCopyNumber(
-          CallSite->CI, ArgNum, 0));
+    auto Copy =
+        createConvert(CallArg, CallArg->getName() + ".coalescefail", CS->CI);
+    Copy->setDebugLoc(CS->CI->getDebugLoc());
+    Pass->Numbering->setNumber(
+        Copy, Pass->Numbering->getArgPreCopyNumber(CS->CI, ArgNum, 0));
     // Add the new value in to AddressLR.
     Pass->Liveness->setLiveRange(Copy, AddressLR);
-    CallSite->CI->setOperand(ArgNum, Copy);
+    CS->CI->setOperand(ArgNum, Copy);
   }
 }
 
@@ -1772,7 +1781,7 @@ void GenXArgIndirection::indirectRegion(Use *U, Value *AddressArg,
     } else {
       // Otherwise, give it a live range, and mark it as needing calculating.
       auto LR = Liveness->getOrCreateLiveRange(NewAdd);
-      LR->setCategory(RegCategory::ADDRESS);
+      LR->setCategory(vc::RegCategory::Address);
       LRsToCalculate.push_back(LR);
     }
     return;
@@ -1817,11 +1826,11 @@ void GenXArgIndirection::indirectRegion(Use *U, Value *AddressArg,
   Numbering->setNumber(NewAddAddr, Numbering->getNumber(AddrInst) - 1);
   AddrInst->replaceAllUsesWith(NewAddAddr);
   LiveRange *LR = Liveness->getOrCreateLiveRange(NewAddAddr);
-  LR->setCategory(RegCategory::ADDRESS);
+  LR->setCategory(vc::RegCategory::Address);
   LRsToCalculate.push_back(LR);
   // AddrSrc (source of convert_addr) should get a live range as well
   LiveRange *SrcLR = Liveness->getOrCreateLiveRange(AddrSrc);
-  SrcLR->setCategory(RegCategory::GENERAL);
+  SrcLR->setCategory(vc::RegCategory::General);
   LRsToCalculate.push_back(SrcLR);
   // remove the old convert_addr
   Liveness->eraseLiveRange(AddrInst);
