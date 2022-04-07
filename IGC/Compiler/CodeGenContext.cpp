@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 #include "AdaptorCommon/RayTracing/RayTracingConstantsEnums.h"
 #include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
+#include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
 #include "Compiler/CodeGenPublic.h"
 #include "Probe/Assertion.h"
 
@@ -39,7 +40,7 @@ namespace IGC
         { false, true, true, true, false, false, false, false, false, 500 }
     };
 
-    RetryManager::RetryManager() : enabled(false)
+    RetryManager::RetryManager() : enabled(false), perKernel(false)
     {
         memset(m_simdEntries, 0, sizeof(m_simdEntries));
         firstStateId = IGC_GET_FLAG_VALUE(RetryManagerFirstStateId);
@@ -107,7 +108,11 @@ namespace IGC
     unsigned RetryManager::GetRetryId() const { return stateId; }
 
     void RetryManager::Enable() { enabled = true; }
-    void RetryManager::Disable() { enabled = false; }
+    void RetryManager::Disable() {
+        if (!perKernel) {
+            enabled = false;
+        }
+    }
 
     void RetryManager::SetSpillSize(unsigned int spillSize) { lastSpillSize = spillSize; }
     unsigned int RetryManager::GetLastSpillSize() { return lastSpillSize; }
@@ -606,6 +611,33 @@ namespace IGC
         return val;
     }
 
+    void OpenCLProgramContext::failOnSpills()
+    {
+        if (!m_InternalOptions.FailOnSpill)
+        {
+            return;
+        }
+        auto& programList = m_programOutput.m_ShaderProgramList;
+        for (auto& kernel : programList)
+        {
+            for (auto mode : { SIMDMode::SIMD8, SIMDMode::SIMD16, SIMDMode::SIMD32 })
+            {
+                COpenCLKernel* shader = static_cast<COpenCLKernel*>(kernel->GetShader(mode));
+                if (shader)
+                {
+                    auto output = shader->ProgramOutput();
+                    if (output->m_scratchSpaceUsedBySpills > 0)
+                    {
+                        std::string msg =
+                            "Spills detected in kernel: "
+                            + shader->m_kernelInfo.m_kernelName;
+                        EmitError(msg.c_str(), nullptr);
+                    }
+                }
+            }
+        }
+    }
+
     void OpenCLProgramContext::InternalOptions::parseOptions(const char* IntOptStr)
     {
         // Assume flags is in the form: <f0>[=<v0>] <f1>[=<v1>] ...
@@ -918,6 +950,10 @@ namespace IGC
             {
                 DisableEUFusion = true;
             }
+            else if (suffix.equals("-fail-on-spill"))
+            {
+                FailOnSpill = true;
+            }
 
             // advance to the next flag
             Pos = opts.find_first_of(' ', Pos);
@@ -948,7 +984,7 @@ namespace IGC
 
     static void initCompOptionFromRegkey(CodeGenContext* ctx)
     {
-        SetCurrentDebugHash(ctx->hash.asmHash);
+        SetCurrentDebugHash(ctx->hash);
 
         CompOptions& opt = ctx->getModuleMetaData()->compOpt;
 

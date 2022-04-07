@@ -926,23 +926,23 @@ public:
   static constexpr unsigned RdNumOp =
       GenXIntrinsic::GenXRegion::OldValueOperandNum;
 
-  static const Value *
-  CalculateBaledLocation(const CallInst *UseInst,
-                         llvm::SmallVector<unsigned, 0> *Offsets,
-                         const GenXBaling &BA, const DataLayout &DL) {
+  using OffsetsVector = llvm::SmallVector<unsigned, 0>;
+
+  std::tuple<const Value *, OffsetsVector>
+  calculateBaledLocation(const CallInst *UseInst, const GenXBaling &BA,
+                         const DataLayout &DL) const {
     IGC_ASSERT(UseInst);
-    IGC_ASSERT(Offsets);
     if (!GenXIntrinsic::isRdRegion(UseInst))
-      return UseInst;
+      return std::make_tuple(UseInst, OffsetsVector());
     auto BI = BA.getBaleInfo(UseInst);
 
     if (BI.Type != genx::BaleInfo::RDREGION ||
         !dyn_cast<ConstantInt>(UseInst->getOperand(RdIndex)) ||
         BI.isOperandBaled(RdNumOp) || !BA.isBaled(UseInst))
-      return UseInst;
+      return std::make_tuple(UseInst, OffsetsVector());
 
-    auto getSignConstant = [](Value *operand) {
-      auto *CI = cast<ConstantInt>(operand);
+    auto GetSignConstant = [](Value *Operand) {
+      auto *CI = cast<ConstantInt>(Operand);
       return CI->getSExtValue();
     };
 
@@ -953,25 +953,34 @@ public:
     auto *VTy = dyn_cast<IGCLLVM::FixedVectorType>(UseInst->getType());
     // TODO: Investigate scalar
     if (!VTy)
-      return UseInst;
-    auto Vstride = getSignConstant(UseInst->getOperand(RdVstride));
-    auto Width = getSignConstant(UseInst->getOperand(RdWidth));
-    auto Stride = getSignConstant(UseInst->getOperand(RdStride));
-    auto StartIdx = getSignConstant(UseInst->getOperand(RdIndex));
-    auto ElSize = vc::getTypeSize(VTy->getElementType(), &DL).inBits();
+      return std::make_tuple(UseInst, OffsetsVector());
+    auto Vstride = GetSignConstant(UseInst->getOperand(RdVstride));
+    auto Width = GetSignConstant(UseInst->getOperand(RdWidth));
+    auto Stride = GetSignConstant(UseInst->getOperand(RdStride));
+    // Convert start index from bytes to bits
+    auto StartIdx =
+        GetSignConstant(UseInst->getOperand(RdIndex)) * vc::ByteBits;
+    auto ElSizeInBits = vc::getTypeSize(VTy->getElementType(), &DL).inBits();
     IGC_ASSERT(Width);
     unsigned NumElements = VTy->getNumElements() / Width;
+    OffsetsVector Offsets;
 
-    for (unsigned i = 0; i < NumElements; ++i) {
-      for (unsigned j = 0; j < Width; ++j) {
-        auto CurrOffset = StartIdx + i * Vstride * ElSize + j * Stride * ElSize;
+    for (unsigned I = 0; I < NumElements; ++I) {
+      for (unsigned J = 0; J < Width; ++J) {
+        auto CurrOffset = StartIdx + ElSizeInBits * (I * Vstride + J * Stride);
         // Check type overflow
         IGC_ASSERT(CurrOffset <= std::numeric_limits<unsigned>::max());
-        Offsets->push_back(CurrOffset);
+        if ((CurrOffset % getGRFSizeInBits()) + ElSizeInBits >
+            getGRFSizeInBits()) {
+          LLVM_DEBUG(dbgs() << "  Fail to generate Bale location element has "
+                               "crossGRF access\n");
+          return std::make_tuple(UseInst, OffsetsVector());
+        }
+        Offsets.push_back(CurrOffset);
       }
     }
     // Replace value to source of rdregion
-    return UseInst->getOperand(RdNumOp);
+    return std::make_tuple(UseInst->getOperand(RdNumOp), std::move(Offsets));
   }
 
   IGC::VISAVariableLocation
@@ -987,25 +996,20 @@ public:
 
     LLVM_DEBUG(dbgs() << " >>>\n  GetVariableLocation for " << *DbgInst << "\n");
     const DIVariable *VarDescr = nullptr;
-    if (const auto *pDbgAddrInst = dyn_cast<DbgDeclareInst>(DbgInst)) {
-      VarDescr = pDbgAddrInst->getVariable();
-    } else if (const auto *pDbgValInst = dyn_cast<DbgValueInst>(DbgInst)) {
-      VarDescr = pDbgValInst->getVariable();
+    if (const auto *PDbgAddrInst = dyn_cast<DbgDeclareInst>(DbgInst)) {
+      VarDescr = PDbgAddrInst->getVariable();
+    } else if (const auto *PDbgValInst = dyn_cast<DbgValueInst>(DbgInst)) {
+      VarDescr = PDbgValInst->getVariable();
     } else {
       return EmptyLoc("unsupported Debug Intrinsic");
     }
     const Value *DbgValue =
         IGCLLVM::getVariableLocation(cast<DbgVariableIntrinsic>(DbgInst));
 
-    llvm::SmallVector<unsigned, 0> Offsets;
+    OffsetsVector Offsets;
     if (auto *UseInst = dyn_cast_or_null<CallInst>(DbgValue)) {
-      DbgValue = CalculateBaledLocation(UseInst, &Offsets, BA,
-                                        F.getParent()->getDataLayout());
-      if (!Offsets.empty() &&
-          !std::any_of(Offsets.begin(), Offsets.end(),
-                       [&](auto off) { return off < getGRFSizeInBits(); })) {
-        return EmptyLoc("Unsupported cross-GRF offset\n");
-      }
+      std::tie(DbgValue, Offsets) =
+          calculateBaledLocation(UseInst, BA, F.getParent()->getDataLayout());
     }
 
     IGC_ASSERT(VarDescr);
@@ -1052,7 +1056,7 @@ public:
   uint64_t getFPOffset() const override { return 16; }
 
   const GenXVisaRegAlloc::Reg *getRegisterForValue(const Value *V) const {
-    return RA.getRegForValueUntyped(const_cast<Value *>(V));
+    return RA.getRegForValueOrNull(const_cast<Value *>(V));
   }
 
   void printVisaMapping(raw_ostream &OS, unsigned Level = 0) const {

@@ -976,8 +976,17 @@ namespace IGC
         void SetSpillSize(unsigned int spillSize);
         unsigned int GetLastSpillSize();
         unsigned int numInstructions = 0;
+        // For OCL the retry manager will work on per-kernel basis, that means
+        // Disable() will disable only specific kernel. Other kernels still can
+        // be retried. To keep the old behavior for other shader types, Disable()
+        // will check the field and keep the old behavior. If other shader
+        // types want to follow OCL this has to be set, see CodeGenContext
+        // constructor.
+        bool perKernel;
         /// the set of OCL kernels that need to recompile
         std::set<std::string> kernelSet;
+        /// the set of OCL kernels that need to skip recompilation
+        std::set<std::string> kernelSkip;
 
         void ClearSpillParams();
         // save entry for given SIMD mode, to avoid recompile for next retry.
@@ -1142,7 +1151,6 @@ namespace IGC
         std::vector<int> m_dsNonDefaultIdxMap;
         std::vector<int> m_gsNonDefaultIdxMap;
         std::vector<int> m_psIdxMap;
-        DWORD dsInSize = 0;
         DWORD LtoUsedMask = 0;
         uint64_t m_SIMDInfo;
         uint32_t HdcEnableIndexSize = 0;
@@ -1201,6 +1209,9 @@ namespace IGC
 
             // Per context flag adjustment
             setFlagsPerCtx();
+
+            // Set retry behavor for Disable()
+            m_retryManager.perKernel = (type == ShaderType::OPENCL_SHADER);
         }
 
         CodeGenContext(CodeGenContext&) = delete;
@@ -1742,6 +1753,8 @@ namespace IGC
             bool Intel256GRFPerThread = false;
             bool IntelNumThreadPerEU = false;
             uint32_t numThreadsPerEU = 0;
+            std::vector<std::string> LargeGRFKernels;
+            std::vector<std::string> RegularGRFKernels;
             // IntelForceInt32DivRemEmu is used only if fp64 is supported natively.
             // IntelForceInt32DivRemEmu wins if both are set and can be applied.
             bool IntelForceInt32DivRemEmu = false;
@@ -1749,9 +1762,8 @@ namespace IGC
             bool IntelForceDisable4GBBuffer = false;
             // user-controled option to disable EU Fusion
             bool DisableEUFusion = false;
-
-            std::vector<std::string> LargeGRFKernels;
-            std::vector<std::string> RegularGRFKernels;
+            // Fail comilation if spills are present in compiled kernel
+            bool FailOnSpill = false;
 
             bool AllowRelocAdd = true;
 
@@ -1869,6 +1881,7 @@ namespace IGC
         bool hasNoPrivateToGenericCast() const override;
         bool enableTakeGlobalAddress() const override;
         int16_t getVectorCoalescingControl() const override;
+        void failOnSpills();
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;
     };

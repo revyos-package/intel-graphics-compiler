@@ -56,6 +56,8 @@ namespace IGC
         m_Platform = &(ctx->platform);
         m_DriverInfo = &(ctx->m_DriverInfo);
 
+        m_regularGRFRequested = false;
+        m_largeGRFRequested = false;
         m_annotatedNumThreads = 0;
         if (m_Platform->supportsStaticRegSharing())
         {
@@ -66,23 +68,23 @@ namespace IGC
             {
                 m_annotatedNumThreads = numThreads;
             }
-            else
+
+            //check if option is set to use certain GRF size
+            auto FuncName = pFunc->getName().str();
+            for (auto SubNameR : ctx->m_InternalOptions.RegularGRFKernels)
             {
-                auto FuncName = pFunc->getName().str();
-                //check if option is set to use large GRF
-                for (auto SubNameR : ctx->m_InternalOptions.RegularGRFKernels)
+                if (FuncName.find(SubNameR) != std::string::npos)
                 {
-                    if (FuncName.find(SubNameR) != std::string::npos)
-                    {
-                        m_annotatedNumThreads = 8;
-                    }
+                    m_regularGRFRequested = true;
+                    break;
                 }
-                for (auto SubNameL : ctx->m_InternalOptions.LargeGRFKernels)
+            }
+            for (auto SubNameL : ctx->m_InternalOptions.LargeGRFKernels)
+            {
+                if (FuncName.find(SubNameL) != std::string::npos)
                 {
-                    if (FuncName.find(SubNameL) != std::string::npos)
-                    {
-                        m_annotatedNumThreads = 4;
-                    }
+                    m_largeGRFRequested = true;
+                    break;
                 }
             }
         }
@@ -157,14 +159,33 @@ namespace IGC
     }
     void COpenCLKernel::tryHWGenerateLocalIDs()
     {
-        if (hasWorkGroupWalkOrder())
-            return;
-
         auto Dims = IGCMetaDataHelper::getThreadGroupDims(
             *m_pMdUtils, entry);
 
         if (!Dims)
             return;
+
+        auto WO = getWorkGroupWalkOrder();
+        bool ForcedWalkOrder = false;
+        if (WO.dim0 != 0 || WO.dim1 != 0 || WO.dim2 != 0)
+        {
+            if (auto Order = checkLegalWalkOrder(*Dims, WO))
+            {
+                ForcedWalkOrder = true;
+                // Don't do TileY if forced in this way.
+                m_ThreadIDLayout = ThreadIDLayout::X;
+                m_walkOrder = *Order;
+            }
+            else
+            {
+                auto WalkOrder = getWalkOrder(WO.dim0, WO.dim1);
+                if (WalkOrder != WO_XYZ)
+                {
+                    IGC_ASSERT_MESSAGE(0, "unhandled walk order!");
+                }
+                return;
+            }
+        }
 
         // OpenCL currently emits all local IDs even if only one dimension
         // is requested. Let's mirror that for now.
@@ -173,23 +194,28 @@ namespace IGC
             implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_ID_Y) ||
             implicitArgs.isImplicitArgExist(ImplicitArg::LOCAL_ID_Z))
         {
+            if (ForcedWalkOrder)
+                m_enableHWGenerateLID = true;
             setEmitLocalMask(THREAD_ID_IN_GROUP_Z);
         }
 
-        selectWalkOrder(
-            false,
-            0,
-            0,
-            0, /* dummy 1D accesses */
-            0, /* dummy 2D accesses */
-            0, /* dummy SLM accessed */
-            (*Dims)[0],
-            (*Dims)[1],
-            (*Dims)[2]);
+        if (!ForcedWalkOrder)
+        {
+            selectWalkOrder(
+                false,
+                0,
+                0,
+                0, /* dummy 1D accesses */
+                0, /* dummy 2D accesses */
+                0, /* dummy SLM accessed */
+                (*Dims)[0],
+                (*Dims)[1],
+                (*Dims)[2]);
+        }
         encoder.GetVISABuilder()->SetOption(vISA_autoLoadLocalID, m_enableHWGenerateLID);
     }
 
-    bool COpenCLKernel::hasWorkGroupWalkOrder()
+    WorkGroupWalkOrderMD COpenCLKernel::getWorkGroupWalkOrder()
     {
         const CodeGenContext* pCtx = GetContext();
         const ModuleMetaData* MMD = pCtx->getModuleMetaData();
@@ -197,11 +223,10 @@ namespace IGC
         {
             auto& FMD = I->second;
             auto& Order = FMD.workGroupWalkOrder;
-            if (Order.dim0 != 0 || Order.dim1 != 0 || Order.dim2 != 0)
-                return true;
+            return Order;
         }
 
-        return false;
+        return {};
     }
 
     SOpenCLKernelInfo::SResourceInfo COpenCLKernel::getResourceInfo(int argNo)
@@ -2397,6 +2422,8 @@ namespace IGC
         if (pOutput->m_scratchSpaceUsedBySpills == 0 ||
             noRetry ||
             ctx->m_retryManager.IsLastTry() ||
+            (!ctx->m_retryManager.kernelSkip.empty() &&
+             ctx->m_retryManager.kernelSkip.count(pFunc->getName().str())) ||
             optDisable)
         {
             // Save the shader program to the state processor to be handled later
@@ -2475,6 +2502,7 @@ namespace IGC
             }
         }
 
+        // Clear the retry set and collect kernels for retry in the loop below.
         ctx->m_retryManager.kernelSet.clear();
 
         // gather data to send back to the driver
@@ -2508,6 +2536,10 @@ namespace IGC
                     GatherDataForDriver(ctx, simd8Shader, pKernel, pFunc, pMdUtils, SIMDMode::SIMD8);
             }
         }
+
+        // The skip set to avoid retry is not needed. Clear it and collect a new set
+        // during retry compilation.
+        ctx->m_retryManager.kernelSkip.clear();
     }
 
     bool COpenCLKernel::hasReadWriteImage(llvm::Function& F)
@@ -2739,6 +2771,16 @@ namespace IGC
 
     unsigned COpenCLKernel::getAnnotatedNumThreads() {
         return m_annotatedNumThreads;
+    }
+
+    bool COpenCLKernel::IsRegularGRFRequested()
+    {
+        return m_regularGRFRequested;
+    }
+
+    bool COpenCLKernel::IsLargeGRFRequested()
+    {
+        return m_largeGRFRequested;
     }
 
     SIMDStatus COpenCLKernel::checkSIMDCompileConds(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls)
