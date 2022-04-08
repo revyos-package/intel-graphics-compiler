@@ -1,10 +1,10 @@
-intel-graphics-compiler (1.0.10840-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.10840-1) experimental; urgency=medium
 
   * New upstream release.
   * control: Build-depend on non-virtual intel-vc-intrinsics-dev, bump
     the version.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Thu, 07 Apr 2022 16:54:04 +0300
+ -- Timo Aaltonen <tjaalton@debian.org>  Fri, 08 Apr 2022 10:43:32 +0300
 
 intel-graphics-compiler (1.0.10778-1) experimental; urgency=medium
 
