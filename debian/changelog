@@ -1,6 +1,7 @@
 intel-graphics-compiler (1.0.8744-4) UNRELEASED; urgency=medium
 
   * control: Switch back to llvm 11.
+  * Enable all hardening flags.
   * control: Bump policy to 4.6.1.
 
  -- Andreas Beckmann <anbe@debian.org>  Mon, 16 May 2022 11:29:17 +0200
