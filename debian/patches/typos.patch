@@ -1,0 +1,1377 @@
+Author: Andreas Beckmann <anbe@debian.org>
+Description: fix typos found by Lintian
+Forwarded: https://github.com/intel/intel-graphics-compiler/issues/229
+
+--- a/3d/common/iStdLib/CpuUtil.h
++++ b/3d/common/iStdLib/CpuUtil.h
+@@ -36,7 +36,7 @@ Inline Function:
+     GetCpuInstructionLevel
+ 
+ Description:
+-    Returns the highest level of IA32 intruction extensions supported by the CPU
++    Returns the highest level of IA32 instruction extensions supported by the CPU
+     ( i.e. SSE, SSE2, SSE4, etc )
+ 
+ Output:
+--- a/IGC/BiFModule/Implementation/barrier.cl
++++ b/IGC/BiFModule/Implementation/barrier.cl
+@@ -119,7 +119,7 @@ void SPIRV_OVERLOADABLE SPIRV_BUILTIN(Co
+     }
+     else  if( Execution == Subgroup )
+     {
+-        // nothing will be emited but we need to prevent optimization spliting control flow
++        // nothing will be emited but we need to prevent optimization splitting control flow
+         __builtin_IB_sub_group_barrier();
+     }
+ }
+--- a/IGC/BiFModule/Languages/OpenCL/opencl_cth_released.h
++++ b/IGC/BiFModule/Languages/OpenCL/opencl_cth_released.h
+@@ -3233,7 +3233,7 @@ void __attribute__((overloadable)) write
+   uint4 __attribute__((overloadable)) read_imageui(read_only image3d_t image, sampler_t sampler, float4 coord, float lod);
+ 
+ 
+-  // Write Image Funtions
++  // Write Image Functions
+ 
+   // 1D writes with mipmap support
+   /**
+--- a/IGC/Compiler/CISACodeGen/CISABuilder.cpp
++++ b/IGC/Compiler/CISACodeGen/CISABuilder.cpp
+@@ -6241,7 +6241,7 @@ namespace IGC
+             else
+             {
+                 // Unpacking is needed from the original SIMD16 data payload to form
+-                // two SIMD8 data payload by spliting the original simd16 data payload.
++                // two SIMD8 data payload by splitting the original simd16 data payload.
+                 CVariable* V0, * V1;
+                 uint16_t newNumElems = (uint16_t)8 * nd;
+                 V0 = m_program->GetNewVariable(
+--- a/IGC/Compiler/CISACodeGen/DebugInfoData.hpp
++++ b/IGC/Compiler/CISACodeGen/DebugInfoData.hpp
+@@ -64,7 +64,7 @@ namespace IGC
+             auto it = CVarToVISADclId.find(CVar);
+             if (it == CVarToVISADclId.end())
+             {
+-                IGC_ASSERT_MESSAGE(false, "Didnt find VISA dcl id");
++                IGC_ASSERT_MESSAGE(false, "Didn't find VISA dcl id");
+                 return 0;
+             }
+             if (index == 0)
+--- a/IGC/Compiler/CISACodeGen/EmitVISAPass.cpp
++++ b/IGC/Compiler/CISACodeGen/EmitVISAPass.cpp
+@@ -14366,7 +14366,7 @@ void EmitPass::emitMemoryFence(llvm::Ins
+     L3_Flush_RW_Data = false;
+     if (L3_Flush_RW_Data)
+     {
+-        // dont flush L1 if L3 is also being flushed
++        // don't flush L1 if L3 is also being flushed
+         L1_Invalidate = false;
+     }
+ 
+@@ -15494,7 +15494,7 @@ void EmitPass::emitVectorBitCast(llvm::B
+     if (srcEltBytes == dstEltBytes)
+     {
+         // This should not happen now, but generate code anyway.
+-        // CISABuilder does split if there is any spliting.
++        // CISABuilder does split if there is any splitting.
+ 
+         // Special case for: 1 element vectors to scalars
+         //    %15 = bitcast <1 x i64> %4 to i64
+@@ -15532,7 +15532,7 @@ void EmitPass::emitVectorBitCast(llvm::B
+         IGC_ASSERT_MESSAGE((dstEltBytes % srcEltBytes) == 0, "Basic types should be power of 2");
+         // Since srcEltBytes can be the second largest element type (32bit)
+         // and region hstride == 1, Src will not need splitting!
+-        // Only dst might need spliting.
++        // Only dst might need splitting.
+         bool splitDst = (!dstUniform && (dstEltBytes * width > m_currShader->getGRFSize() * 2));
+         IGC_ASSERT_MESSAGE((!splitDst || (width == 16) || (width == 32)),
+             "Internal Error: Dst needs splitting only under SIMD16!");
+@@ -15704,7 +15704,7 @@ void EmitPass::emitVectorBitCast(llvm::B
+         CVariable* aliasSrc = m_currShader->GetNewAlias(src, m_destination->GetType(), 0, 0);
+         uint32_t N = srcEltBytes / dstEltBytes;
+         // Similar to dstEltBytes > srcEltBytes, dstEltBytes can be 32bit
+-        // at most and dst's stride == 1, so it will not need spliting.
++        // at most and dst's stride == 1, so it will not need splitting.
+         bool splitSrc = (!srcUniform && (srcEltBytes * width > m_currShader->getGRFSize() * 2));
+         IGC_ASSERT_MESSAGE((!splitSrc || (width == 16) || (width == 32)),
+             "Internal Error: Src needs splitting only under SIMD16!");
+--- a/IGC/Compiler/LegalizationPass.cpp
++++ b/IGC/Compiler/LegalizationPass.cpp
+@@ -612,7 +612,7 @@ LegalizeGVNBitCastPattern(IRBuilder<>* B
+ void Legalization::visitBitCastInst(llvm::BitCastInst& I)
+ {
+     m_ctx->m_instrTypes.numInsts++;
+-    // This is the pass that folds 2x Float into a Double replacing the bitcast intruction
++    // This is the pass that folds 2x Float into a Double replacing the bitcast instruction
+     if (ConstantDataVector * vec = dyn_cast<ConstantDataVector>(I.getOperand(0)))
+     {
+         unsigned int nbElement = vec->getNumElements();
+--- a/IGC/Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionArgAnalysis.cpp
++++ b/IGC/Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionArgAnalysis.cpp
+@@ -19,7 +19,7 @@ using namespace IGC;
+ 
+ // Register pass to igc-opt
+ #define PASS_FLAG "igc-extension-arg-analysis"
+-#define PASS_DESCRIPTION "Analyzes extenstion functions arguments"
++#define PASS_DESCRIPTION "Analyzes extension functions arguments"
+ #define PASS_CFG_ONLY false
+ #define PASS_ANALYSIS true
+ IGC_INITIALIZE_PASS_BEGIN(ExtensionArgAnalysis, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+--- a/IGC/Compiler/Optimizer/PreCompiledFuncImport.cpp
++++ b/IGC/Compiler/Optimizer/PreCompiledFuncImport.cpp
+@@ -168,7 +168,7 @@ void PreCompiledFuncImport::eraseCallIns
+     }
+ }
+ 
+-// This function scans intructions before emulation. It converts double-related
++// This function scans instructions before emulation. It converts double-related
+ // operations (intrinsics, instructions) into ones that can be emulated. It has:
+ //   1. Intrinsics
+ //      Replaced some intrinsics of double operands with a known sequence that can be emulated.
+--- a/IGC/Compiler/Optimizer/RectListOptimizationPass.cpp
++++ b/IGC/Compiler/Optimizer/RectListOptimizationPass.cpp
+@@ -56,7 +56,7 @@ class RectListOptimizationPass : public
+     typedef std::unordered_map<attribute_idx, ATTRIB_SOURCELIST_ST> atrribRectListMap;
+     atrribRectListMap m_rectListPerAttrib; //rectlist info per attribute
+ 
+-    //GS ouput instructions grouped together by all attributes
++    //GS output instructions grouped together by all attributes
+     //Map => Vertex Idx ---> <attribute_idx, output_gs instruction>
+     typedef std::unordered_map<attribute_idx, Instruction*> attributeInstMap;
+     typedef std::vector<attributeInstMap> vetexAttribVec;
+--- a/IGC/VectorCompiler/igcdeps/src/PatchTokens.cpp
++++ b/IGC/VectorCompiler/igcdeps/src/PatchTokens.cpp
+@@ -112,7 +112,7 @@ buildZeDebugInfo(const CGen8CMProgram::C
+   llvm::raw_string_ostream OutStream(DummyOutput);
+   constexpr bool CanExitEarly = false;
+   if (!IGCLLD::elf::link(LldArgs, CanExitEarly, OutStream, ErrStream)) {
+-    ErrStream << "could not link debug infomation file\n";
++    ErrStream << "could not link debug information file\n";
+     return {};
+   }
+   llvm::FileRemover Remover{OutputPath};
+--- a/IGC/VectorCompiler/include/vc/GenXOpts/GenXAnalysis.h
++++ b/IGC/VectorCompiler/include/vc/GenXOpts/GenXAnalysis.h
+@@ -52,7 +52,7 @@ Constant *ConstantFoldGenX(Instruction *
+ Value *SimplifyGenXIntrinsic(unsigned IID, Type *RetTy, Use *ArgBegin,
+                              Use *ArgEnd, const DataLayout &DL);
+ 
+-/// Given a GenX related intruction, see if we can fold the
++/// Given a GenX related instruction, see if we can fold the
+ /// result. This function tries simplification and then constant folding.
+ ///
+ /// If this instruction could not be simplified returns null.
+--- a/IGC/VectorCompiler/lib/GenXCodeGen/GenX.td
++++ b/IGC/VectorCompiler/lib/GenXCodeGen/GenX.td
+@@ -66,7 +66,7 @@ def FeatureIntDivRem32: SubtargetFeature
+ def FeatureInstrAdd64: SubtargetFeature<"add64",
+                                        "HasAdd64",
+                                        "true",
+-                                       "enable support for native add64 intruction">;
++                                       "enable support for native add64 instruction">;
+ 
+ def FeatureInstrBitRotate: SubtargetFeature<"bitrotate",
+                                            "HasBitRotate",
+--- a/IGC/VectorCompiler/lib/GenXCodeGen/GenXDepressurizer.cpp
++++ b/IGC/VectorCompiler/lib/GenXCodeGen/GenXDepressurizer.cpp
+@@ -852,7 +852,7 @@ void GenXDepressurizer::attemptSinking(I
+     //
+     // ... := use(v0); // SB.Head
+     //
+-    // v1  := twoaddr(v0); // two-addr intruction.
++    // v1  := twoaddr(v0); // two-addr instruction.
+     //
+     // x <--- here this SB could be sunk to.
+     //
+--- a/IGC/VectorCompiler/lib/GenXCodeGen/GenXEmulate.cpp
++++ b/IGC/VectorCompiler/lib/GenXCodeGen/GenXEmulate.cpp
+@@ -1811,7 +1811,7 @@ Instruction *llvm::genx::emulateI64Opera
+     // If there is no explicit request to enable i64 emulation - report
+     // an error
+     if (NewInst && !ST->emulateLongLong() && OptStrictEmulationRequests) {
+-      report_fatal_error("int_emu: target does not suport i64 types", false);
++      report_fatal_error("int_emu: target does not support i64 types", false);
+     }
+   }
+ 
+--- a/IGC/VectorCompiler/lib/GenXOpts/CMAnalysis/ConstantFoldingGenX.cpp
++++ b/IGC/VectorCompiler/lib/GenXOpts/CMAnalysis/ConstantFoldingGenX.cpp
+@@ -269,7 +269,7 @@ Constant *llvm::ConstantFoldGenX(Instruc
+   Constant *Folded = ConstantFoldGenXIntrinsic(
+       IID, CS.getFunctionType()->getReturnType(), ConstantArgs, I, DL);
+   if (Folded)
+-    LLVM_DEBUG(dbgs() << "Successfully constant folded intruction to "
++    LLVM_DEBUG(dbgs() << "Successfully constant folded instruction to "
+                       << *Folded << "\n");
+   else
+     LLVM_DEBUG(dbgs() << "Failed to constant fold instruction\n");
+--- a/IGC/common/IntrinsicAnnotator.cpp
++++ b/IGC/common/IntrinsicAnnotator.cpp
+@@ -25,7 +25,7 @@ void IntrinsicAnnotator::emitFunctionAnn
+         OS << "; Function Desc: " << comments.funcDescription << "\n";
+         for (auto out : comments.outputs)
+         {
+-            OS << "; Ouput: " << out << "\n";
++            OS << "; Output: " << out << "\n";
+         }
+         for (std::vector<int>::size_type i = 0; i != comments.inputs.size(); i++)
+         {
+--- a/IGC/common/igc_flags.h
++++ b/IGC/common/igc_flags.h
+@@ -51,7 +51,7 @@ DECLARE_IGC_REGKEY(DWORD,disableIGASynta
+ DECLARE_IGC_REGKEY(DWORD,disableCompaction,             false, "Disables compaction.", true)
+ DECLARE_IGC_REGKEY(DWORD,TotalGRFNum,                   0,     "Total GRF used for register allocation.", false)
+ DECLARE_IGC_REGKEY(DWORD,TotalGRFNum4CS,                0,     "Total GRF used for register allocation. ComputeShader only.", false)
+-DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve regsiter number for spill cost testing.", false)
++DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve register number for spill cost testing.", false)
+ DECLARE_IGC_REGKEY(DWORD, GRFNumToUse,                  0,     "Set the number of general registers to use (64 to totalGRFNum)", false)
+ DECLARE_IGC_REGKEY(bool, ExpandPlane,                   false, "Enable pln to mad macro expansion.", false)
+ DECLARE_IGC_REGKEY(bool, EnableBCR,                     false, "Enable bank conflict reduction.", true)
+@@ -276,7 +276,7 @@ DECLARE_IGC_REGKEY(bool, DumpOCLProgramI
+ DECLARE_IGC_REGKEY(bool, DumpPatchTokens,               false, "Enable dumping of patch tokens.", true)
+ DECLARE_IGC_REGKEY(bool, DumpVariableAlias,             false, "Dump variable alias info, valid if EnableVariableAlias is on)", true)
+ DECLARE_IGC_REGKEY(bool, DumpDeSSA,                     false, "dump DeSSA info into file.", true)
+-DECLARE_IGC_REGKEY(bool, DumpWIA,                       false, "dump WI (uniform) infomation into files in dump directory if set to true", false)
++DECLARE_IGC_REGKEY(bool, DumpWIA,                       false, "dump WI (uniform) information into files in dump directory if set to true", false)
+ DECLARE_IGC_REGKEY(bool, EnableScalarizerDebugLog,      false, "print step by step scalarizer debug info.", true)
+ DECLARE_IGC_REGKEY(bool, DumpTimeStats,                 false, "Timing of translation, code generation, finalizer, etc", true)
+ DECLARE_IGC_REGKEY(bool, DumpTimeStatsCoarse,           false, "Only collect/dump coarse level time stats, i.e. skip opt detail timer for now", true)
+@@ -293,7 +293,7 @@ DECLARE_IGC_REGKEY(bool, UseOffsetInLoca
+ DECLARE_IGC_REGKEY(bool, EnableRelocations,             false, "Setting this to 1 (true) makes IGC emit relocatable ELF with debug info", true)
+ DECLARE_IGC_REGKEY(bool, EnableWriteOldFPToStack,       true,  "Setting this to 1 (true) writes the caller frame's frame-pointer to the start of callee's frame on stack, to support stack walk", false)
+ DECLARE_IGC_REGKEY(bool, ZeBinCompatibleDebugging,      true,  "Setting this to 1 (true) enables embed debug info in zeBinary", true)
+-DECLARE_IGC_REGKEY(bool, DebugInfoEnforceAmd64EM,       false, "Enforces elf file with the debug infomation to have eMachine set to AMD64", false)
++DECLARE_IGC_REGKEY(bool, DebugInfoEnforceAmd64EM,       false, "Enforces elf file with the debug information to have eMachine set to AMD64", false)
+ DECLARE_IGC_REGKEY(bool, DebugInfoValidation,           false, "Enable optional (strict) checks to detect debug information inconsistencies", false)
+ DECLARE_IGC_REGKEY(debugString, ExtraOCLOptions,        0,     "Extra options for OpenCL", true)
+ DECLARE_IGC_REGKEY(debugString, ExtraOCLInternalOptions, 0,    "Extra internal options for OpenCL", true)
+--- a/visa/BinaryEncodingIGA.cpp
++++ b/visa/BinaryEncodingIGA.cpp
+@@ -472,7 +472,7 @@ iga::SFID BinaryEncodingIGA::getSFID(con
+     case vISA::SFID::DP_DC1:    sfid = iga::SFID::DC1; break;
+     case vISA::SFID::CRE:       sfid = iga::SFID::CRE; break;
+     default:
+-        ASSERT_USER(false, "Unknow SFID generated from vISA");
++        ASSERT_USER(false, "Unknown SFID generated from vISA");
+         break;
+     }
+ 
+--- a/visa/BuildCISAIRImpl.cpp
++++ b/visa/BuildCISAIRImpl.cpp
+@@ -748,7 +748,7 @@ static void Stitch_Compiled_Units(
+             }
+             else
+             {
+-                // src0 is dont care for indirect call as long it's not a label
++                // src0 is don't care for indirect call as long it's not a label
+                 auto callInst = builder->createInternalInst(
+                     fcall->getPredicate(), G4_call, nullptr, g4::NOSAT, fcall->getExecSize(),
+                     fcall->getDst(), fcall->getSrc(0), fcall->getSrc(0), fcall->getOption());
+@@ -1327,7 +1327,7 @@ int CISA_IR_Builder::Compile(const char*
+ #ifndef DLL_MODE
+     if (criticalMsg.str().length() > 0)
+     {
+-        std::cerr << "[vISA Finalizer Messsages]\n" << criticalMsg.str();
++        std::cerr << "[vISA Finalizer Messages]\n" << criticalMsg.str();
+     }
+ #endif //DLL_MODE
+ 
+--- a/visa/BuildIRImpl.cpp
++++ b/visa/BuildIRImpl.cpp
+@@ -140,7 +140,7 @@ void IR_Builder::bindInputDecl(G4_Declar
+     dcl->setRegFile(G4_INPUT);
+     unsigned int reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
+     if (regNum + dcl->getNumRows() > kernel.getNumRegTotal() - reservedGRFNum) {
+-        MUST_BE_TRUE(false, "INPUT payload execeeds the regsiter number");
++        MUST_BE_TRUE(false, "INPUT payload execeeds the register number");
+     }
+ }
+ 
+--- a/visa/FlowGraph.cpp
++++ b/visa/FlowGraph.cpp
+@@ -1222,7 +1222,7 @@ void FlowGraph::handleExit(G4_BB* firstS
+         if (!(builder->getFCPatchInfo() &&
+             builder->getFCPatchInfo()->getFCComposableKernel()))
+         {
+-            // Dont insert EOT send for FC composable kernels
++            // Don't insert EOT send for FC composable kernels
+             exitBB->addEOTSend();
+         }
+ 
+@@ -1243,7 +1243,7 @@ void FlowGraph::handleExit(G4_BB* firstS
+                 if ((*lastBBIt) == retBB)
+                 {
+                     // This condition is BB layout dependent.
+-                    // However, we dont change BB layout in JIT
++                    // However, we don't change BB layout in JIT
+                     // and in case we do it in future, we
+                     // will need to insert correct jumps
+                     // there to preserve correctness.
+--- a/visa/G4_IR.cpp
++++ b/visa/G4_IR.cpp
+@@ -315,7 +315,7 @@ void G4_INST::setOpcode(G4_opcode opcd)
+         G4_Inst_Table[opcd].instType == InstTypeVector)
+        ) ||
+         opcd == G4_label),
+-        "setOpcode would change the intruction class, which is illegal.");
++        "setOpcode would change the instruction class, which is illegal.");
+ 
+     bool resetBounds = false;
+ 
+@@ -823,7 +823,7 @@ void G4_INST::removeUseOfInst()
+     }
+ }
+ 
+-// remove the faked def-instructions in def list, which is resulted from instruction spliting
++// remove the faked def-instructions in def list, which is resulted from instruction splitting
+ void G4_INST::trimDefInstList()
+ {
+     // trim def list
+@@ -1579,7 +1579,7 @@ static G4_INST::MovType getMovType(
+     // the source type only.
+     if (TypeSize(srcTy) < TypeSize(dstTy)) {
+         if (IS_SIGNED_INT(srcTy)) {
+-            // Treat ABS as zero-extenstion.
++            // Treat ABS as zero-extension.
+             if (srcMod == Mod_Abs)
+                 return G4_INST::ZExt;
+             // If the sign bit is 0, then zext is the same as sext.
+@@ -1598,7 +1598,7 @@ static G4_INST::MovType getMovType(
+     }
+ 
+     // Otherwise, treat it as COPY they are the same in bit size.
+-    // Treat ABS as zero-extenstion.
++    // Treat ABS as zero-extension.
+     if (IS_SIGNED_INT(srcTy) && srcMod == Mod_Abs)
+         return G4_INST::ZExt;
+     return G4_INST::Copy;
+@@ -2751,7 +2751,7 @@ bool G4_INST::canHoistTo(const G4_INST *
+         return false;
+     }
+ 
+-    // dont hoist stack calls related variables (Arg, Retval, SP, FP)
++    // don't hoist stack calls related variables (Arg, Retval, SP, FP)
+     if (defInst->getDst() && defInst->getDst()->getTopDcl())
+     {
+         G4_Declare* defDstDcl = defInst->getDst()->getTopDcl()->getRootDeclare();
+@@ -3532,7 +3532,7 @@ void G4_INST::emitInstIds(std::ostream&
+ 
+ //
+ // Here we add a parameter symbolreg instead of use global option Options::symbolReg,
+-// because we should ouput non-symbolic register when dumping dot files
++// because we should output non-symbolic register when dumping dot files
+ //
+ void G4_INST::emit(std::ostream& output, bool symbolreg, bool dotStyle)
+ {
+@@ -4776,7 +4776,7 @@ unsigned G4_DstRegRegion::computeRightBo
+         else
+         {
+             /*
+-                we need to set leftBound for pseudo intruction
++                we need to set leftBound for pseudo instruction
+                 so that it creates use/def links correctly in the control flow graph between
+                 cmp instruction and pseudo instruction.
+                 This matters when we break up SIMD32 instruction in to two SIMD16 with H1/H2 masks.
+@@ -6070,7 +6070,7 @@ int64_t G4_Imm::typecastVals(int64_t val
+     }
+     default:
+     {
+-        // Dont do float conversions
++        // Don't do float conversions
+         retVal = value;
+     }
+     }
+@@ -6318,7 +6318,7 @@ unsigned G4_SrcRegRegion::computeRightBo
+         else
+         {
+             /*
+-                we need to set leftBound for pseudo intruction
++                we need to set leftBound for pseudo instruction
+                 so that it creates use/def links correctly in the control flow graph between
+                 cmp instruction and pseudo instruction.
+                 This matters when we break up SIMD32 instruction in to two SIMD16 with H1/H2 masks.
+@@ -7029,7 +7029,7 @@ void G4_INST::setSrc(G4_Operand* opnd, u
+             (srcs[3] == srcs[i] && i != 3))
+         {
+             // opnd is present in some other
+-            // index of srcs so dont set its
++            // index of srcs so don't set its
+             // inst to NULL
+         }
+         else
+--- a/visa/GraphColor.cpp
++++ b/visa/GraphColor.cpp
+@@ -321,7 +321,7 @@ void BankConflictPass::setupBankConflict
+         }
+     }
+ 
+-    //In case src1 and src2 share same declare, i.e. use same regsiter
++    //In case src1 and src2 share same declare, i.e. use same register
+     if (bank_num == 0 &&
+         dcls[1] == dcls[2])
+     {
+@@ -686,7 +686,7 @@ void BankConflictPass::setupBankConflict
+         }
+     }
+ 
+-    //In case (src0) src1 and src2 use same declare, i.e. use same regsiter
++    //In case (src0) src1 and src2 use same declare, i.e. use same register
+     if ((dcls[0] == dcls[1]) && (dcls[1] == dcls[2]))
+     {
+         return;
+@@ -837,7 +837,7 @@ void BankConflictPass::setupBankConflict
+     }
+ #endif
+ 
+-    //In case (src0) src1 and src2 use same declare, i.e. use same regsiter
++    //In case (src0) src1 and src2 use same declare, i.e. use same register
+     if (dcls[0] == dcls[2] ||
+         !dcls[0] || !dcls[2])
+     {
+@@ -3529,7 +3529,7 @@ void Augmentation::markNonDefaultDstRgn(
+     }
+     else
+     {
+-        MUST_BE_TRUE(false, "Dont know how to handle this type of operand");
++        MUST_BE_TRUE(false, "Don't know how to handle this type of operand");
+     }
+ 
+     // Handle condMod
+@@ -4414,7 +4414,7 @@ void Augmentation::buildLiveIntervals()
+ void Augmentation::clearIntervalInfo()
+ {
+     // Clear out calculated information so that subsequent RA
+-    // iterations dont have stale information
++    // iterations don't have stale information
+     for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin(), end = kernel.Declares.end();
+         dcl_it != end;
+         dcl_it++)
+@@ -4521,7 +4521,7 @@ void Augmentation::handleSIMDIntf(G4_Dec
+         //
+         // V33 will interfere with VCA_SAVE pseudo node.
+         // It also needs to interfere with retval to
+-        // ensure V33 and retval dont get same allocation.
++        // ensure V33 and retval don't get same allocation.
+         // Note that if V33 is actually live after fcall
+         // then graph coloring will do this for us. In this
+         // case however we need to rely on augmentation.
+@@ -5343,7 +5343,7 @@ void Interference::buildInterferenceWith
+ #endif
+                     }
+ 
+-                    // Build interference only for point ranges, ideally which shouldnt exist
++                    // Build interference only for point ranges, ideally which shouldn't exist
+                     // These are ranges that have a def, but no use
+                     if (localLR->getFirstRef(t) == localLR->getLastRef(t))
+                     {
+@@ -6235,7 +6235,7 @@ bool GraphColor::assignColors(ColorHeuri
+     // try re-allocation of a child/parent dcl when split is enabled.
+     // ignoreChildrenIntf is set to true when all children are assigned to consecutive ranges
+     // and we want to get fully coalesceable assignment for parent. In such circumstance, we
+-    // dont want to account for interference between parent/child since doing so cannot result
++    // don't want to account for interference between parent/child since doing so cannot result
+     // in a coalesceable assignment.
+     auto assignColor = [&](LiveRange* lr, bool ignoreChildrenIntf = false, bool spillAllowed = true, bool returnFalseOnFail = false)
+     {
+@@ -6428,7 +6428,7 @@ bool GraphColor::assignColors(ColorHeuri
+                     // for first-fit register assignment track spilled live ranges
+                     if (spillAllowed)
+                     {
+-                        // When retrying a coalesceable assignment, dont spill
++                        // When retrying a coalesceable assignment, don't spill
+                         // if there is no GRF available.
+                         spilledLRs.push_back(lr);
+                         lr->setSpilled(true);
+@@ -6462,7 +6462,7 @@ bool GraphColor::assignColors(ColorHeuri
+     {
+         auto lr = (*iter);
+ 
+-        // in case child/parent was already spilled earlier, dont recolor
++        // in case child/parent was already spilled earlier, don't recolor
+         if (lr->isSpilled())
+             continue;
+ 
+@@ -8382,8 +8382,8 @@ void GlobalRA::reportUndefinedUses(
+ 
+     if (referencedDcl->getAddressed() == true)
+     {
+-        // Dont run analysis for addressed opnds.
+-        // Specifically, we dont analyze following,
++        // Don't run analysis for addressed opnds.
++        // Specifically, we don't analyze following,
+         //
+         // A0 = &V1
+         // r[A0] = 0 <-- V1 indirectly defined
+@@ -8760,8 +8760,8 @@ void VarSplit::rangeListSpliting(VAR_RAN
+         if ((*it)->leftBound > range->rightBound)
+         {
+             //The range item in the list is on the right of current range, insert it before the postion.
+-            //Since the whole range is inserted first, all the ranges should be continous.
+-            ASSERT_USER((*it)->leftBound - range->rightBound == 1, "none continous spliting happened\n");
++            //Since the whole range is inserted first, all the ranges should be continuous.
++            ASSERT_USER((*it)->leftBound - range->rightBound == 1, "none continuous splitting happened\n");
+             rangeList->insert(it, range);
+             return;
+         }
+@@ -10030,7 +10030,7 @@ int GlobalRA::coloringRegAlloc()
+             {
+                 if (isReRAPass())
+                 {
+-                    // Dont modify program if reRA pass spills
++                    // Don't modify program if reRA pass spills
+                     return VISA_SPILL;
+                 }
+ 
+@@ -11733,7 +11733,7 @@ void GraphColor::dumpRegisterPressure()
+ void GlobalRA::fixAlignment()
+ {
+     // Copy over alignment from G4_RegVar to GlobalRA instance
+-    // Rest of RA shouldnt have to read/modify alignment of G4_RegVar
++    // Rest of RA shouldn't have to read/modify alignment of G4_RegVar
+     copyAlignment();
+ 
+     if (kernel.getSimdSize() == g4::SIMD32)
+--- a/visa/GraphColor.h
++++ b/visa/GraphColor.h
+@@ -1332,8 +1332,8 @@ namespace vISA
+         vISA::G4_Operand*    flagOpnd;
+         INST_LIST_ITER inst_it;
+ 
+-        unsigned   linearizedStart; //linearized start regsiter address
+-        unsigned   linearizedEnd;   //linearized end regsiter address
++        unsigned   linearizedStart; //linearized start register address
++        unsigned   linearizedEnd;   //linearized end register address
+         unsigned   leftOff;         //left offset in scratch space
+         unsigned   rightOff;        //right offset in the scratch space
+         unsigned   useCount;
+--- a/visa/HWConformity.cpp
++++ b/visa/HWConformity.cpp
+@@ -6012,7 +6012,7 @@ bool HWConformity::splitInstListForByteD
+             MUST_BE_TRUE(new_iter != bb->end(), "Cannot find predicate definition function in BB.");
+             new_iter++;
+             G4_INST* secondHalfOp = splitInstWithByteDst(expand_op);
+-            MUST_BE_TRUE(secondHalfOp, "Error in spliting instruction.");
++            MUST_BE_TRUE(secondHalfOp, "Error in splitting instruction.");
+             bb->insertBefore(new_iter, secondHalfOp);
+         }
+     }
+@@ -6351,7 +6351,7 @@ bool HWConformity::markPackedByteReferen
+         }
+ 
+         if (opnd->isDstRegRegion() &&
+-            // check if the opnd has pre-assigned physical regsiter
++            // check if the opnd has pre-assigned physical register
+             !(topdcl->getRegVar()->isPhyRegAssigned()) &&
+             // check if the opnd is global
+             !(kernel.fg.globalOpndHT.isOpndGlobal(opnd)) &&
+@@ -6384,7 +6384,7 @@ bool HWConformity::markPackedByteReferen
+             }
+         }
+         else if (opnd->isSrcRegRegion() &&
+-            // check if the opnd has pre-assigned physical regsiter
++            // check if the opnd has pre-assigned physical register
+             !(opnd->asSrcRegRegion()->getBase()->asRegVar()->isPhyRegAssigned()) &&
+             // check if the opnd is global
+             !(kernel.fg.globalOpndHT.isOpndGlobal(opnd)) &&
+--- a/visa/IsaVerification.cpp
++++ b/visa/IsaVerification.cpp
+@@ -1558,7 +1558,7 @@ void vISAVerifier::verifyInstructionArit
+     case ISA_ADD3:
+         REPORT_INSTRUCTION(options, dstType == ISA_TYPE_UD || dstType == ISA_TYPE_D ||
+             dstType == ISA_TYPE_UW || dstType == ISA_TYPE_W,
+-            "%s only supports interger D/W type", ISA_Inst_Table[opcode].str);
++            "%s only supports integer D/W type", ISA_Inst_Table[opcode].str);
+         break;
+     default:
+         REPORT_INSTRUCTION(options, dstType == ISA_TYPE_F || dstType == ISA_TYPE_DF || dstType == ISA_TYPE_HF || IsIntType(dstType), "%s has illegal dst type", ISA_Inst_Table[opcode].str);
+@@ -1767,7 +1767,7 @@ void vISAVerifier::verifyInstructionLogi
+             default:
+             {
+                 REPORT_INSTRUCTION(options,false,
+-                         "All operands of logic instructions must be of integral type! opnd %d has unknow type %d",
++                         "All operands of logic instructions must be of integral type! opnd %d has unknown type %d",
+                          i, (int)(opnd_type));
+             }
+         }
+@@ -2071,7 +2071,7 @@ void vISAVerifier::verifyInstructionSamp
+                 case 1:
+                 case 2:
+                 case 3: break;
+-                default: REPORT_INSTRUCTION(options,false, "cntrl for CISA SAMPLER AVS intruction should be a "
++                default: REPORT_INSTRUCTION(options,false, "cntrl for CISA SAMPLER AVS instruction should be a "
+                                                   "value 0-3 (8/16bit full/chrominance down sample).");
+             }
+ 
+@@ -2090,7 +2090,7 @@ void vISAVerifier::verifyInstructionSamp
+                 case 1:
+                 case 2:
+                 case 3: break;
+-                default: REPORT_INSTRUCTION(options,false, "execMode for CISA SAMPLER AVS intruction should "
++                default: REPORT_INSTRUCTION(options,false, "execMode for CISA SAMPLER AVS instruction should "
+                                                   "be a value 0-3 (16x4, 8x4, 16x8, or 4x4).");
+             }
+ 
+@@ -3005,7 +3005,7 @@ void vISAVerifier::verifyKernelHeader()
+         REPORT_HEADER(options,header->getSampler(i)->name_index < header->getStringCount(),
+             "S%d's name index(%d) is not valid", i, header->getSampler(i)->name_index);
+         REPORT_HEADER(options,header->getSampler(i)->num_elements <= COMMON_ISA_MAX_SAMPLER_SIZE,
+-            "S%d's number of elements(%d) is not vaild", i, header->getSampler(i)->num_elements);
++            "S%d's number of elements(%d) is not valid", i, header->getSampler(i)->num_elements);
+     }
+ 
+     /// Verify surface.
+--- a/visa/LocalScheduler/LocalScheduler_G4IR.cpp
++++ b/visa/LocalScheduler/LocalScheduler_G4IR.cpp
+@@ -2823,7 +2823,7 @@ bool Node::hasConflict(Node* node2)
+                     }
+                     else
+                     {
+-                        //The same regsiter is reused in both SIMD8 instructions
++                        //The same register is reused in both SIMD8 instructions
+                         prevInstRegs[1][i] = prevInstRegs[0][i];
+                     }
+                 }
+@@ -2844,7 +2844,7 @@ bool Node::hasConflict(Node* node2)
+             candidateNum++;
+         }
+     }
+-    else    //For SIMD16 and SIMD32, if the GRF1 of src1 or src2 of inst 1 is GRF regsiter
++    else    //For SIMD16 and SIMD32, if the GRF1 of src1 or src2 of inst 1 is GRF register
+     {
+         if (prevInstRegs[1][1] != -1)
+         {
+--- a/visa/Optimizer.cpp
++++ b/visa/Optimizer.cpp
+@@ -1690,7 +1690,7 @@ int Optimizer::optimization()
+ //  converted to an if. Instead of creating a BB for each of the endif, we associate each endif with a label
+ //  and emit them only at the very end.
+ //
+-//  For break and continue, UIP must be the lable directly attached to the while
++//  For break and continue, UIP must be the label directly attached to the while
+ //  op. If not, create such a label
+ //
+ //  DO
+@@ -7882,7 +7882,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* b
+ 
+         if (!kernel.fg.builder->getIsKernel())
+         {
+-            // we dont allow a function to exit
++            // we don't allow a function to exit
+             return;
+         }
+ 
+@@ -8173,7 +8173,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* b
+         //  _label_ip_wa:
+         //    add    dst     dst     32            // adjust dst to the next 2 instruction's ip
+         //    ret    dst                           // jump to the next instruction
+-        //    add    dst     -dst    call_target   // at this intruction dst is the ip value
++        //    add    dst     -dst    call_target   // at this instruction dst is the ip value
+ 
+         uint32_t reg_num = add_with_ip->getDst()->getLinearizedStart() / numEltPerGRF<Type_UB>();
+         uint32_t reg_off = add_with_ip->getDst()->getLinearizedStart() % numEltPerGRF<Type_UB>()
+--- a/visa/Passes/LVN.cpp
++++ b/visa/Passes/LVN.cpp
+@@ -400,7 +400,7 @@ bool LVN::canReplaceUses(INST_LIST_ITER
+             // mov (8) V1<2>:d    V3
+             // add (8) V2<1>:q    V2    V1<16;8,2>
+             //
+-            // => Dont replace V1<16;8,2> with V0<8;8,1> because it would make
++            // => Don't replace V1<16;8,2> with V0<8;8,1> because it would make
+             // code HW non-conformant.
+             canReplace = false;
+         }
+@@ -1068,7 +1068,7 @@ bool LVN::opndsMatch(T* opnd1, K* opnd2)
+     }
+     else
+     {
+-        // Not in SIMD CF so dont care
++        // Not in SIMD CF so don't care
+     }
+ 
+     if (match)
+@@ -1363,7 +1363,7 @@ bool LVN::computeValue(G4_INST* inst, bo
+     if (inst->getDst() && inst->getDst()->getTopDcl())
+     {
+         // Compute value for globals so we can insert it in LVN table.
+-        // But we dont want to apply optimization on such instructions.
++        // But we don't want to apply optimization on such instructions.
+         isGlobal = fg.globalOpndHT.isOpndGlobal(inst->getDst());
+         isGlobal |= inst->getDst()->getTopDcl()->isOutput();
+         isGlobal |= inst->getDst()->getTopDcl()->isInput();
+@@ -1867,7 +1867,7 @@ void LVN::doLVN()
+ 
+             // Compute value of current instruction
+             // success is false when there is a float type-conversion mov
+-            // that we dont implement, eg :hf->:f interpretation.
++            // that we don't implement, eg :hf->:f interpretation.
+             success = computeValue(inst, false, canNegate, isGlobal, posVal, false, value);
+             value.inst = inst;
+             oldValue = value;
+--- a/visa/Passes/MergeScalars.cpp
++++ b/visa/Passes/MergeScalars.cpp
+@@ -43,7 +43,7 @@ static G4_Declare* getInputDeclare(
+     // multiple of elementType, here just add additional checks to make sure this is the case.
+     uint32_t offset = input->getRegVar()->getPhyRegOff() * input->getElemSize() + firstEltOffset;
+     uint32_t eltBytes = TypeSize(eltType);
+-    MUST_BE_TRUE((offset % eltBytes) == 0, "Offset shoule be mutiple of element size");
++    MUST_BE_TRUE((offset % eltBytes) == 0, "Offset should be multiple of element size");
+     offset = offset / eltBytes;
+     const char* name = builder.getNameString(builder.mem, 16, "InputR%d.%d", input->getRegVar()->getPhyReg()->asGreg()->getRegNum(), offset);
+     G4_Declare* newInputDcl = builder.createDeclareNoLookup(name, G4_INPUT, (uint16_t)bundleSize, 1,
+--- a/visa/ReduceExecSize.cpp
++++ b/visa/ReduceExecSize.cpp
+@@ -132,7 +132,7 @@ HWConformity::fixDstAlignmentWithVectorI
+ }
+ 
+ // Do basic HW conformity check related to operand type and dst alignment before resucing execution size
+-// to avoid spliting of the MOV inserted in this stage.
++// to avoid splitting of the MOV inserted in this stage.
+ // This function is called for some instructions generated in later stages.
+ bool HWConformity::fixInstOpndTypeAlign(INST_LIST_ITER i, G4_BB* bb)
+ {
+@@ -693,16 +693,16 @@ bool HWConformity::reduceExecSize(INST_L
+     }
+ 
+     // For inst with pred, condMod, or with mask in SIMDCF BB, we insert MOVs with nomask for src/dst
+-    // to avoid instruction spliting. inserted MOVs may be split into multiple instructions.
++    // to avoid instruction splitting. inserted MOVs may be split into multiple instructions.
+     // ATTN: We do not include sel here because the condMod generated by sel is never used.
+     if (useFlag &&
+         !(inst->opcode() == G4_sel && !(inst->getPredicate()) && inst->getCondMod()))
+     {
+         // if there is predicate or cond modifier, we keep the original instruction and
+-        // perform spliting on new MOV instructions.
++        // perform splitting on new MOV instructions.
+         if (!nullDst && !crossGRFDst && !goodOneGRFDst)
+         {
+-            // try to move 2-GRF src into 1GRF tmp to avoid spliting.
++            // try to move 2-GRF src into 1GRF tmp to avoid splitting.
+             // this is unnecessary in non-SIMDCF/nonPred/nonCondMod cases because we can do compensation.
+             for (int i = 0; i < inst->getNumSrc(); i++)
+             {
+@@ -822,7 +822,7 @@ bool HWConformity::reduceExecSize(INST_L
+         // ==>
+         // add (8) r6.0<1>:w r2.0<8;8,1>:d 0x1:w
+         // mov (8) r5.3<1>:b r6.0<8;8,1>:w
+-        // In some cases spliting the instruction generates the same number of instruction
++        // In some cases splitting the instruction generates the same number of instruction
+         // without dependency, but needs more analysis.
+         inst->setDest(insertMovAfter(iter, dst, dst->getType(), bb));
+         if (builder.getOption(vISA_OptReport))
+@@ -839,9 +839,9 @@ bool HWConformity::reduceExecSize(INST_L
+ 
+     // only two kinds of instruction use ACC operands:
+     // 1. instructions generated in ARCTAN intrinsic translation.
+-    // they do not need spliting
++    // they do not need splitting
+     // 2. instructions generated in MAC opt. there is a check to make
+-    // sure only evenly spliting will happen to them.
++    // sure only evenly splitting will happen to them.
+     if (useAcc)
+     {
+         evenlySplitInst(iter, bb);
+--- a/visa/Rematerialization.cpp
++++ b/visa/Rematerialization.cpp
+@@ -628,7 +628,7 @@ namespace vISA
+                 float loopInstToTotalInstRatio = (float)getNumRematsInLoop() / (float)loopInstsBeforeRemat*100.0f;
+                 if (rpe.getMaxRP() < rematRegPressure * 1.4f)
+                 {
+-                    // If max RPE is not very high, dont sink too many instructions in loop
++                    // If max RPE is not very high, don't sink too many instructions in loop
+                     if(loopInstToTotalInstRatio > 1.75f)
+                         return false;
+                 }
+@@ -683,7 +683,7 @@ namespace vISA
+             if (srcOpnd->isSrcRegRegion())
+             {
+                 // If src operand base is non-regvar (eg, architecture
+-                // register) then dont remat. Moving around such
++                // register) then don't remat. Moving around such
+                 // registers could be dangerous.
+                 if (!srcOpnd->getBase()->isRegVar())
+                     return false;
+@@ -711,7 +711,7 @@ namespace vISA
+                     return false;
+ 
+                 // If an instruction has physical registers allocated then
+-                // dont optimize it.
++                // don't optimize it.
+                 if (srcOpndRgn->getBase()->asRegVar()->getPhyReg() &&
+                     !srcOpndTopDcl->isInput())
+                     return false;
+@@ -762,7 +762,7 @@ namespace vISA
+                     auto extMsgOpnd = uniqueDefInst->getSrc(1);
+                     MUST_BE_TRUE(extMsgOpnd->isSrcRegRegion() == true, "Unexpected src opnd for sampler");
+ 
+-                    // Dont remat if sampler def is outside loop and use inside loop
++                    // Don't remat if sampler def is outside loop and use inside loop
+                     if (onlyUseInLoop)
+                         return false;
+ 
+@@ -993,7 +993,7 @@ namespace vISA
+                 auto src0Rgn = uniqueDef->first->getSrc(0)->asSrcRegRegion();
+                 auto src0TopDcl = src0Rgn->getTopDcl();
+                 auto ops = operations.find(src0TopDcl);
+-                MUST_BE_TRUE(ops != operations.end(), "Didnt find record in map");
++                MUST_BE_TRUE(ops != operations.end(), "Didn't find record in map");
+                 MUST_BE_TRUE((*ops).second.numUses == 1, "Expecting src0 to be used only in sampler");
+ 
+                 G4_Declare* newSrc0Dcl = nullptr;
+@@ -1013,7 +1013,7 @@ namespace vISA
+ 
+                         auto dupOp = headerDefInst->cloneInst();
+                         auto headerDefDst = headerDefInst->getDst();
+-                        assert(!headerDefDst->isIndirect()); // we dont allow send header to be defined indirectly
++                        assert(!headerDefDst->isIndirect()); // we don't allow send header to be defined indirectly
+                         dupOp->setDest(kernel.fg.builder->createDst(
+                             newSrc0Dcl->getRegVar(), headerDefDst->getRegOff(), headerDefDst->getSubRegOff(),
+                             headerDefDst->getHorzStride(), headerDefDst->getType()));
+--- a/visa/SpillCleanup.cpp
++++ b/visa/SpillCleanup.cpp
+@@ -76,7 +76,7 @@ void CoalesceSpillFills::copyToOldFills(
+     INST_LIST_ITER f, G4_BB* bb, int srcCISAOff)
+ {
+     // Copy data from coalesced fill in to older fills.
+-    // This way we dont carry entire coalesced payload
++    // This way we don't carry entire coalesced payload
+     // till last fill.
+     for (auto oldFill : indFills)
+     {
+@@ -315,7 +315,7 @@ bool CoalesceSpillFills::fillHeuristic(s
+     }
+ 
+     // Iterate over coalescable fills and ensure all rows of a variable
+-    // are fill candidates. If not, then dont fill. This helps cases like,
++    // are fill candidates. If not, then don't fill. This helps cases like,
+     // #1 FILL_V10(0,0) <-- load 0x10 ... (4 GRFs)
+     // #2 FILL_V10(4,0) <-- load 0x14 ... (1 GRF)
+     // #3 send ... FILL_V10(0,0)   ... (use 3 GRFs of FILL_V10)
+@@ -387,7 +387,7 @@ bool CoalesceSpillFills::fillHeuristic(s
+         if (bits[0] != bits[1] &&
+             bits[2] != bits[3])
+         {
+-            // Dont coalesce patterns like
++            // Don't coalesce patterns like
+             // 1010, 0101
+             return false;
+         }
+@@ -610,7 +610,7 @@ void CoalesceSpillFills::keepConsecutive
+                     auto curInstDstTopDcl = (*(*spillIt))->getSrc(1)->getTopDcl();
+                     // Check whether current inst's topdcl was spilled in a send.
+                     // If it was and first instruction in instList wasnt then
+-                    // dont consider current instruction as coalescing candidate.
++                    // don't consider current instruction as coalescing candidate.
+                     if (!firstSpillFromSend &&
+                         sendDstDcl.find(curInstDstTopDcl) != sendDstDcl.end())
+                     {
+@@ -816,7 +816,7 @@ INST_LIST_ITER CoalesceSpillFills::analy
+         instList = origInstList;
+         instList.pop_front();
+ #if 0
+-        printf("Fill heuristic didnt agree to coalescing\n");
++        printf("Fill heuristic didn't agree to coalescing\n");
+ #endif
+     }
+ 
+@@ -1706,7 +1706,7 @@ void CoalesceSpillFills::spillFillCleanu
+                         unsigned int pRowStart, pNumRows;
+                         getScratchMsgInfo(pInst, pRowStart, pNumRows);
+ 
+-                        // If any def of src1 dcl is found then dont
++                        // If any def of src1 dcl is found then don't
+                         // consider this write for optimization. Its
+                         // value in memory could be different than
+                         // one held in variable.
+--- a/visa/SpillManagerGMRF.cpp
++++ b/visa/SpillManagerGMRF.cpp
+@@ -1626,7 +1626,7 @@ SpillManagerGRF::createMRangeDeclare(
+     if (useScratchMsg_)
+     {
+         assert(payloadHeaderHeight != DWORD_PAYLOAD_HEADER_MAX_HEIGHT);
+-        // When using scratch msg descriptor we dont need to use a
++        // When using scratch msg descriptor we don't need to use a
+         // separate GRF for payload. Source operand of send can directly
+         // use r0.0.
+         return builder_->getBuiltinR0();
+@@ -2914,7 +2914,7 @@ bool SpillManagerGRF::checkUniqueDefAlig
+ }
+ 
+ // This function checks whether each spill dst region requires a read-modify-write operation
+-// when inserting spill code. Dominator/unique defs dont require redundant read operation.
++// when inserting spill code. Dominator/unique defs don't require redundant read operation.
+ // Dst regions that do not need RMW are added to a set. This functionality isnt needed for
+ // functional correctness. This function is executed before inserting spill code because
+ // we need all dst regions of dcl available to decide whether read is redundant. If this is
+@@ -3592,7 +3592,7 @@ void SpillManagerGRF::insertAddrTakenSpi
+                 // however, this sets a bit in liveness bit-vector that
+                 // causes the temp variable to be marked as live-out from
+                 // that BB. A general fix should treat address taken variables
+-                // more accurately wrt liveness so they dont escape via
++                // more accurately wrt liveness so they don't escape via
+                 // unfeasible paths.
+                 //pointsToAnalysis.addFillToPointsTo(bbid, var, temp->getRegVar());
+             }
+@@ -3791,7 +3791,7 @@ void SpillManagerGRF::insertAddrTakenLSS
+                 // however, this sets a bit in liveness bit-vector that
+                 // causes the temp variable to be marked as live-out from
+                 // that BB. A general fix should treat address taken variables
+-                // more accurately wrt liveness so they dont escape via
++                // more accurately wrt liveness so they don't escape via
+                 // unfeasible paths.
+                 //pointsToAnalysis.addFillToPointsTo(bbid, var, temp->getRegVar());
+             }
+@@ -4604,7 +4604,7 @@ void GlobalRA::saveRestoreA0(G4_BB * bb)
+ 
+     auto isPrologOrEpilog = [this](G4_INST* inst)
+     {
+-        // a0 is a caller save register. Dont save/restore it if it is used in callee save/restore sequence or
++        // a0 is a caller save register. Don't save/restore it if it is used in callee save/restore sequence or
+         // for frame descriptor spill instruction.
+         if (inst == kernel.fg.builder->getFDSpillInst())
+             return false;
+--- a/visa/VarSplit.cpp
++++ b/visa/VarSplit.cpp
+@@ -66,7 +66,7 @@ void VarSplitPass::verify()
+             }
+         }
+ 
+-        MUST_BE_TRUE(found, "Didnt find child dcl");
++        MUST_BE_TRUE(found, "Didn't find child dcl");
+         return childLbRb;
+     };
+ 
+@@ -78,12 +78,12 @@ void VarSplitPass::verify()
+             if (inst->isSplitIntrinsic())
+             {
+                 // ensure this is split mov instruction
+-                MUST_BE_TRUE(inst->isSplitIntrinsic(), "Didnt expect new non-split intrinsic instruction");
++                MUST_BE_TRUE(inst->isSplitIntrinsic(), "Didn't expect new non-split intrinsic instruction");
+ 
+                 // verify that split instruction's dst, src(0) is correct
+                 splitDcls.insert(inst->getDst()->getTopDcl());
+ 
+-                MUST_BE_TRUE(!inst->getSrc(0)->getTopDcl()->getAddressed(), "Shouldnt split indirectly addressed variable");
++                MUST_BE_TRUE(!inst->getSrc(0)->getTopDcl()->getAddressed(), "Shouldn't split indirectly addressed variable");
+ 
+                 auto origSrc0 = inst->getSrc(0)->asSrcRegRegion();
+                 auto origLb = origSrc0->getLeftBound();
+@@ -395,7 +395,7 @@ void VarSplitPass::findSplitCandidates()
+ 
+         if (item.second.srcs.size() > 0)
+         {
+-            // Dont emit split if all uses are closeby
++            // Don't emit split if all uses are closeby
+             unsigned int idx = instId[item.second.srcs.front().first->getInst()];
+             bool split = true;
+             if (item.second.srcs.size() > 1)
+@@ -422,7 +422,7 @@ void VarSplitPass::findSplitCandidates()
+                 }
+             }
+ 
+-            // dont split if def-last first use distance <= 8
++            // don't split if def-last first use distance <= 8
+             if (split &&
+                 (instId[item.second.srcs.back().first->getInst()] - instId[item.second.def.first->getInst()]) <= 8)
+                 split = false;
+@@ -494,7 +494,7 @@ void VarSplitPass::split()
+             splitParentDcl.insert(std::make_pair(splitDcl, dstDcl));
+             splitChildren[dstDcl].push_back(splitDcl);
+ 
+-            // If this part of dcl is never used in code, then dont create split intrinsic inst for it
++            // If this part of dcl is never used in code, then don't create split intrinsic inst for it
+             if (!item.second.isPartDclUsed(lb, rb))
+             {
+                 unusedDcls.insert(splitDcl);
+@@ -553,7 +553,7 @@ void VarSplitPass::split()
+             auto item = getSplitDcl(lb, rb);
+             auto item_lb = std::get<0>(item);
+             auto dcl = std::get<2>(item);
+-            MUST_BE_TRUE(dcl, "Didnt find split dcl");
++            MUST_BE_TRUE(dcl, "Didn't find split dcl");
+ 
+             unsigned int regNum = (lb - item_lb)/numEltPerGRF<Type_UB>();
+ 
+--- a/visa/iga/IGAExe/iga_main.cpp
++++ b/visa/iga/IGAExe/iga_main.cpp
+@@ -488,7 +488,7 @@ extern "C" int iga_main(int argc, const
+     xGrp.defineFlag(
+         "print-ldst",
+         nullptr,
+-        "enables load/store pseudo intructions where possible",
++        "enables load/store pseudo instructions where possible",
+         "Send instructions are emitted as load/store instructions",
+         opts::OptAttrs::ALLOW_UNSET,
+         baseOpts.printLdSt);
+--- a/visa/iga/IGALibrary/Backend/Messages/MessageDecoderOther.cpp
++++ b/visa/iga/IGALibrary/Backend/Messages/MessageDecoderOther.cpp
+@@ -589,7 +589,7 @@ static void decodeSendMessage(
+             break;
+         case 0x1D:
+             symbol = "sample_ld_mcs";
+-            desc = "sample load mcs auxilary data";
++            desc = "sample load mcs auxiliary data";
+             params = 4;
+             break;
+         case 0x1E:
+--- a/visa/iga/IGALibrary/api/kv.h
++++ b/visa/iga/IGALibrary/api/kv.h
+@@ -366,7 +366,7 @@ IGA_API uint32_t kv_get_opcode(const kv_
+ IGA_API kv_status_t kv_get_subfunction(const kv_t *kv, int32_t pc, uint32_t* subfunc);
+ 
+ /*
+- * This function returns if intruction has destination.
++ * This function returns if instruction has destination.
+  */
+ IGA_API int32_t kv_get_has_destination(const kv_t *kv, int32_t pc);
+ 
+--- a/IGC/AdaptorOCL/OCL/sp/sp_g8.cpp
++++ b/IGC/AdaptorOCL/OCL/sp/sp_g8.cpp
+@@ -1922,7 +1922,7 @@ RETVAL CGen8OpenCLStateProcessor::Create
+ 
+     }
+ 
+-    // Patch for Execution Enivronment
++    // Patch for Execution Environment
+     if( retValue.Success )
+     {
+         iOpenCL::SPatchExecutionEnvironment patch;
+--- a/3d/common/iStdLib/FastMask.h
++++ b/3d/common/iStdLib/FastMask.h
+@@ -375,7 +375,7 @@ void CFastMaskSetType::ClearBits( void )
+         index = m_SetList[i];
+ 
+         // the user can un-set bits prior to calling clear and we need to ensure
+-        //  that we dont try to change those entries as they dont matter and could
++        //  that we don't try to change those entries as they don't matter and could
+         //  corrupt the heap
+         if( index != m_Key )
+         {
+--- a/IGC/AdaptorOCL/SPIRV/SPIRVReader.cpp
++++ b/IGC/AdaptorOCL/SPIRV/SPIRVReader.cpp
+@@ -2452,7 +2452,7 @@ SPIRVToLLVM::transCmpInst(SPIRVValue* BV
+ 
+ bool
+ SPIRVToLLVM::postProcessOCL() {
+-  // I think we dont need it
++  // I think we don't need it
+   std::vector <Function*> structFuncs;
+   for (auto& F : M->functions())
+   {
+--- a/IGC/BiFModule/Implementation/atomics.cl
++++ b/IGC/BiFModule/Implementation/atomics.cl
+@@ -124,7 +124,7 @@ extern __constant int __UseNativeFP16Ato
+ // will still go down the coherant pipeline.  The 2 L3$ pipes do not guarentee order of operations between
+ // themselves.
+ 
+-// Since we dont have specialized atomic load/store HDC message we're using atomic_or( a, 0x0 ) to emulate
++// Since we don't have specialized atomic load/store HDC message we're using atomic_or( a, 0x0 ) to emulate
+ // an atomic load since it does not modify the in memory value and returns the 'old' value. atomic store
+ // can be implemented with an atomic_exchance with the return value ignored.
+ 
+--- a/IGC/Compiler/CISACodeGen/CShader.cpp
++++ b/IGC/Compiler/CISACodeGen/CShader.cpp
+@@ -2645,7 +2645,7 @@ unsigned int CShader::EvaluateSIMDConstE
+     {
+         return (unsigned int)constValue->getZExtValue();
+     }
+-    IGC_ASSERT_MESSAGE(0, "unknow SIMD constant expression");
++    IGC_ASSERT_MESSAGE(0, "unknown SIMD constant expression");
+     return 0;
+ }
+ 
+--- a/IGC/Compiler/CISACodeGen/DebugInfo.cpp
++++ b/IGC/Compiler/CISACodeGen/DebugInfo.cpp
+@@ -315,7 +315,7 @@ void DebugInfoData::markOutputVar(CShade
+         // So that finalizer can extend their liveness to end of the program.
+         // This will help debugger examine their values anywhere in the code till they
+         // are in scope. However, emit "Output" attribute when -g and -cl-opt-disable
+-        // are both passed -g by itself shouldnt alter generated code.
++        // are both passed -g by itself shouldn't alter generated code.
+         if (pShader->GetContext()->getModuleMetaData()->compOpt.OptDisable)
+         {
+             // If "Output" attribute is emitted for perThreadOffset variable(s)
+@@ -462,7 +462,7 @@ void DebugInfoData::markOutputVars(const
+             if (m_pShader->GetContext()->getModuleMetaData()->compOpt.OptDisable)
+             {
+                 // Emit "Output" attribute only when -g and -cl-opt-disable are both passed
+-                // -g by itself shouldnt alter generated code
++                // -g by itself shouldn't alter generated code
+                 m_pShader->GetEncoder().GetVISAKernel()->AddAttributeToVar(pVar->visaGenVariable[0], "Output", 0, nullptr);
+                 if (m_pShader->m_dispatchSize == SIMDMode::SIMD32 && pVar->visaGenVariable[1])
+                 {
+--- a/IGC/Compiler/CISACodeGen/MemOpt.cpp
++++ b/IGC/Compiler/CISACodeGen/MemOpt.cpp
+@@ -601,7 +601,7 @@ bool MemOpt::mergeLoad(LoadInst* Leading
+         if (!NextLoad->isSimple())
+             break;
+ 
+-        // If we get an ordered load (such as a cst_seq atomic load/store) dont
++        // If we get an ordered load (such as a cst_seq atomic load/store) don't
+         // merge.
+         if (!NextLoad->isUnordered())
+             break;
+@@ -1073,7 +1073,7 @@ bool MemOpt::mergeStore(StoreInst* Leadi
+         if (!NextStore->isSimple())
+             break;
+ 
+-        // If we get an ordered store (such as a cst_seq atomic load/store) dont
++        // If we get an ordered store (such as a cst_seq atomic load/store) don't
+         // merge.
+         if (!NextStore->isUnordered())
+             break;
+--- a/IGC/Compiler/CISACodeGen/PatternMatchPass.cpp
++++ b/IGC/Compiler/CISACodeGen/PatternMatchPass.cpp
+@@ -4738,7 +4738,7 @@ namespace IGC
+                 if (llvm::ConstantInt * simDOffSetInst = llvm::dyn_cast<llvm::ConstantInt>(binaryInst->getOperand(1)))
+                 {
+                     uint shiftFactor = int_cast<uint>(simDOffSetInst->getZExtValue());
+-                    //Check to make sure we dont end up with an invalid Vertical Stride.
++                    //Check to make sure we don't end up with an invalid Vertical Stride.
+                     //Only 1, 2, 4, 8, 16 are supported.
+                     if (shiftFactor <= 4)
+                         verticalStride = (1U << shiftFactor);
+--- a/IGC/Compiler/CISACodeGen/VertexShaderLowering.cpp
++++ b/IGC/Compiler/CISACodeGen/VertexShaderLowering.cpp
+@@ -50,7 +50,7 @@ namespace IGC
+ 
+     bool VertexShaderLowering::runOnFunction(llvm::Function& F)
+     {
+-        // VS lowering only applies to entry function. Non-entry funtions
++        // VS lowering only applies to entry function. Non-entry functions
+         // are emulation functions that do not need to be lowered!
+         MetaDataUtils* pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+         if (!isEntryFunc(pMdUtils, &F))
+@@ -282,7 +282,7 @@ namespace IGC
+                             {
+                                 auto useIterBegin = inst->user_begin(), useIterEnd = inst->user_end();
+ 
+-                                // if one use of instance_id with constant buffer is found we dont need to look for more
++                                // if one use of instance_id with constant buffer is found we don't need to look for more
+                                 bool foundConstantBufferAccessedWithInstanceID = false;
+                                 while ((useIterBegin != useIterEnd) &&
+                                     !foundConstantBufferAccessedWithInstanceID)
+--- a/IGC/Compiler/CISACodeGen/helper.cpp
++++ b/IGC/Compiler/CISACodeGen/helper.cpp
+@@ -1242,7 +1242,7 @@ namespace IGC
+                 bufType = DecodeAS4GFXResource(as, directIndexing, textureIdx);
+                 if (bufType == UAV)
+                 {
+-                    // dont do any clustering on read/write images
++                    // don't do any clustering on read/write images
+                     textureIdx = -1;
+                 }
+             }
+--- a/IGC/Compiler/CodeGenPublicEnums.h
++++ b/IGC/Compiler/CodeGenPublicEnums.h
+@@ -249,7 +249,7 @@ namespace IGC
+         ROUND_TO_NEGATIVE,
+         ROUND_TO_ZERO,
+ 
+-        ROUND_TO_ANY   // dont care
++        ROUND_TO_ANY   // don't care
+     };
+ 
+ 
+--- a/IGC/Compiler/CustomLoopOpt.hpp
++++ b/IGC/Compiler/CustomLoopOpt.hpp
+@@ -27,7 +27,7 @@ namespace IGC
+     ///////////////////////////////////////////////////////////////////////////
+     /// Enforce a single latch for every loop header. This needs to be ran before
+     /// LLVM Loop canonicalization pass as LLVM loop simplification pass sometimes
+-    /// decides to spilt the loop. Spliting the loop may cause functional issues
++    /// decides to split the loop. Splitting the loop may cause functional issues
+     /// in case of barriers being used and it may cause extra SIMD divergence causing
+     /// performance degradation
+     llvm::FunctionPass* createLoopCanonicalization();
+--- a/IGC/Compiler/Optimizer/OpenCLPasses/AggregateArguments/AggregateArguments.cpp
++++ b/IGC/Compiler/Optimizer/OpenCLPasses/AggregateArguments/AggregateArguments.cpp
+@@ -233,7 +233,7 @@ bool ResolveAggregateArguments::runOnFun
+         StructType* structType = cast<StructType>(arg->getType()->getPointerElementType());
+ 
+         // LLVM assumes the caller has create an alloca and pushed the contents
+-        // of the struct on the stack.  Since we dont have a caller, create
++        // of the struct on the stack.  Since we don't have a caller, create
+         // the alloca here.
+         std::string allocaName = std::string(arg->getName()) + "_alloca";
+         llvm::AllocaInst* base = irBuilder.CreateAlloca(structType, 0, allocaName);
+--- a/IGC/Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.cpp
++++ b/IGC/Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.cpp
+@@ -148,7 +148,7 @@ bool ProgramScopeConstantAnalysis::runOn
+ 
+         if (initializer->isZeroValue())
+         {
+-            // For zero initialized values, we dont need to copy the data, just tell driver how much to allocate
++            // For zero initialized values, we don't need to copy the data, just tell driver how much to allocate
+             // However, if it's used as a pointer value, we need to do patching and therefore cannot defer the offset calculation
+             bool hasPointerUser = false;
+             for (auto UI : globalVar->users())
+--- a/IGC/Compiler/PromoteResourceToDirectAS.cpp
++++ b/IGC/Compiler/PromoteResourceToDirectAS.cpp
+@@ -530,7 +530,7 @@ void PromoteResourceToDirectAS::PromoteB
+ 
+     // Vulkan encodes address space differently, with the reserve bits set.
+     // TODO: Investigate how addrspace is encoded in Vulkan,
+-    // for now skip promoting if it's an address space we dont recognize.
++    // for now skip promoting if it's an address space we don't recognize.
+     if ((addrSpace & 0xFFC00000) != 0x0)
+     {
+         return;
+--- a/IGC/DebugInfo/DwarfDebug.cpp
++++ b/IGC/DebugInfo/DwarfDebug.cpp
+@@ -1756,7 +1756,7 @@ void DwarfDebug::collectVariableInfo(con
+                 RegVar = prevRegVar;
+ 
+             // Conditions below decide whether we want to emit location to debug_loc or inline it
+-            // in the DIE. To inline in DIE, we simply dont emit anything here and continue the loop.
++            // in the DIE. To inline in DIE, we simply don't emit anything here and continue the loop.
+             bool needsCallerSave = m_pModule->getCompileUnit(*decodedDbg)->cfi.numCallerSaveEntries > 0;
+             if (!EmitSettings.EmitDebugLoc && !needsCallerSave)
+             {
+--- a/IGC/DebugInfo/VISAModule.cpp
++++ b/IGC/DebugInfo/VISAModule.cpp
+@@ -326,7 +326,7 @@ const std::string& VISAModule::GetTarget
+ bool VISAModule::IsExecutableInst(const llvm::Instruction& inst)
+ {
+     // Return false if inst is dbg info intrinsic or if it is
+-    // catch all intrinsic. In both of these cases, we dont want
++    // catch all intrinsic. In both of these cases, we don't want
+     // to emit associated debug loc since there is no machine
+     // code generated for them.
+     if (IsCatchAllIntrinsic(&inst))
+--- a/IGC/VectorCompiler/lib/GenXCodeGen/GenXCategory.cpp
++++ b/IGC/VectorCompiler/lib/GenXCodeGen/GenXCategory.cpp
+@@ -730,7 +730,7 @@ Instruction *GenXCategory::createConvers
+   // and this isn't an address conversion, use the operand for that
+   // intrinsic call directly rather than using the result of the intrinsic.
+   // This helps the jitter to generate better code when surface constants
+-  // are used in send intructions.
++  // are used in send instructions.
+   if (Cat != RegCategory::ADDRESS) {
+     if (GenXIntrinsic::getGenXIntrinsicID(V) == GenXIntrinsic::genx_constanti)
+       V = cast<CallInst>(V)->getArgOperand(0);
+--- a/IGC/VectorCompiler/lib/GenXCodeGen/GenXCisaBuilder.cpp
++++ b/IGC/VectorCompiler/lib/GenXCodeGen/GenXCisaBuilder.cpp
+@@ -154,7 +154,7 @@ public:
+     std::string Str;
+     llvm::raw_string_ostream(Str) << *Inst;
+     Description =
+-        (Twine("CISA builder failed for intruction <") + Str + ">: " + Desc)
++        (Twine("CISA builder failed for instruction <") + Str + ">: " + Desc)
+             .str();
+   }
+ 
+--- a/visa/DebugInfo.cpp
++++ b/visa/DebugInfo.cpp
+@@ -895,7 +895,7 @@ unsigned int populateMapDclName(VISAKern
+     for (uint32_t ctr = 0; ctr < kernel->getGenVarCount(); ctr++)
+     {
+         // Pre-defined gen vars are included in this list,
+-        // but we dont want to emit them to debug info.
++        // but we don't want to emit them to debug info.
+         if (kernel->getGenVar((unsigned int)ctr)->index >= kernel->getNumPredVars())
+         {
+             dclList.push_back(kernel->getGenVar((unsigned int)ctr));
+@@ -1515,7 +1515,7 @@ void emitDataCallFrameInfo(VISAKernelImp
+ }
+ 
+ // compilationUnits has 1 kernel and stack call functions
+-// referenced by it. In case stack call functions dont
++// referenced by it. In case stack call functions don't
+ // exist in input, it only has a kernel.
+ template<class T>
+ void emitData(std::list<VISAKernelImpl*>& compilationUnits, T t)
+--- a/visa/G4Instruction.h
++++ b/visa/G4Instruction.h
+@@ -135,7 +135,7 @@ HANDLE_INST(pseudo_exit,  0, 0, InstType
+ HANDLE_INST(pseudo_fc_call, 1, 1, InstTypeFlow, GENX_BDW, ATTR_NONE)
+   // pseudo_fc_ret are generated for return statements from callable kernels.
+   // This has to be done because for kernels, we convert VISA ret instruction
+-  // to EOT. But for callable kernels, we dont want to emit EOT because they
++  // to EOT. But for callable kernels, we don't want to emit EOT because they
+   // may have to return to a top-level kernel. Only top-level kernel will
+   // have VISA ret lowered to EOT.
+ HANDLE_INST(pseudo_fc_ret, 1, 0, InstTypeFlow, GENX_BDW, ATTR_NONE)
+--- a/visa/LocalRA.cpp
++++ b/visa/LocalRA.cpp
+@@ -3186,7 +3186,7 @@ void LinearScan::coalesceSplit(LocalLive
+         }
+     }
+ 
+-    // now free phy regs of split that dont have an intrinsic split emitted, ie unused
++    // now free phy regs of split that don't have an intrinsic split emitted, ie unused
+     // rows of parent dcl.
+     unsigned int idx;
+     lr->getFirstRef(idx);
+--- a/visa/LocalScheduler/SWSB_G4IR.cpp
++++ b/visa/LocalScheduler/SWSB_G4IR.cpp
+@@ -4228,7 +4228,7 @@ void G4_BB_SB::setSendOpndMayKilled(Live
+                 const SBFootprint* liveFootprint = curLiveNode->getFootprint(liveBN->opndNum,liveInst);
+ 
+                 //Send operands are all GRF aligned, there is no overlap checking required.
+-                //Fix me, this is not right, for math intruction, less than 1 GRF may happen.
++                //Fix me, this is not right, for math instruction, less than 1 GRF may happen.
+                 //Find DEP type
+                 unsigned short internalOffset = 0;
+                 bool hasOverlap = curFootprint->hasOverlap(liveFootprint, internalOffset);
+--- a/visa/PhyRegUsage.cpp
++++ b/visa/PhyRegUsage.cpp
+@@ -933,7 +933,7 @@ PhyRegUsage::PhyReg PhyRegUsage::findGRF
+             {
+                 if (phyReg.reg == -1)
+                 {
+-                    // favor partially allocated GRF first so dont
++                    // favor partially allocated GRF first so don't
+                     // return this assignment yet
+                     phyReg.reg = idx;
+                     phyReg.subreg = 0;
+--- a/visa/RegAlloc.cpp
++++ b/visa/RegAlloc.cpp
+@@ -1949,7 +1949,7 @@ void LivenessAnalysis::computeGenKilland
+                     while ((grf = pointsToAnalysis.getPointsTo(topdcl->getRegVar(), idx++)) != NULL)
+                     {
+                         // grf is a variable that src potentially points to
+-                        // since we dont know exactly which part of grf is sourced
++                        // since we don't know exactly which part of grf is sourced
+                         // assume entire grf is sourced
+                         // Also add grf to the gen set as it may be potentially used
+                         unsigned int id = grf->getId();
+@@ -2099,7 +2099,7 @@ void LivenessAnalysis::computeGenKilland
+                     topdclLR->isLiveRangeLocal() &&
+                     (!topdcl->isInput()) &&
+                     topdclLR->getFirstRef(first) == i)) &&
+-                    // If single inst writes whole region then dont insert pseudo_kill
++                    // If single inst writes whole region then don't insert pseudo_kill
+                     writeWholeRegion(bb, i, dst, fg.builder->getOptions()) == false)
+                 {
+                     bool foundKill = false;
+@@ -2163,7 +2163,7 @@ void LivenessAnalysis::computeGenKilland
+                     (topdclLR = gra.getLocalLR(topdcl)) &&
+                         topdclLR->isLiveRangeLocal() &&
+                         topdclLR->getFirstRef(first) == i)) &&
+-                        // If single inst writes whole region then dont insert pseudo_kill
++                        // If single inst writes whole region then don't insert pseudo_kill
+                         writeWholeRegion(bb, i, flagReg) == false)
+                 {
+                     // All bytes of dst written at this point, so this is a good place to insert
+--- a/visa/SplitAlignedScalars.cpp
++++ b/visa/SplitAlignedScalars.cpp
+@@ -339,7 +339,7 @@ void SplitAlignedScalars::run()
+                         inst->setSrc(newAlignedSrc, i);
+                         bb->insertBefore(instIt, copy);
+ 
+-                        // this copy shouldnt be rematerialized
++                        // this copy shouldn't be rematerialized
+                         gra.addNoRemat(copy);
+ 
+                         numMovsAdded++;
+--- a/visa/VisaToG4/TranslateMisc.cpp
++++ b/visa/VisaToG4/TranslateMisc.cpp
+@@ -513,7 +513,7 @@ int IR_Builder::translateVISALifetimeIns
+             nullptr, nullptr, InstOpt_WriteEnable, true);
+     }
+ 
+-    // We dont treat lifetime.end specially for now because lifetime.start
++    // We don't treat lifetime.end specially for now because lifetime.start
+     // is expected to halt propagation of liveness upwards. lifetime.start
+     // would prevent loop local variables/sub-rooutine local variables
+     // from being live across entire loop/sub-routine.
