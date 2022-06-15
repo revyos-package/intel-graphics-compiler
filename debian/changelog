@@ -2,6 +2,7 @@ intel-graphics-compiler (1.0.10840-2) UNRELEASED; urgency=medium
 
   * Merge changes from 1.0.8744-4.
   * Refresh typos.patch.
+  * Switch back to the virtual llvm-versioned intel-vc-intrinsics-NN-dev.
 
  -- Andreas Beckmann <anbe@debian.org>  Wed, 15 Jun 2022 15:17:48 +0200
 
